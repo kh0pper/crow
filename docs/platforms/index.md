@@ -15,6 +15,7 @@ Crow uses the open [Model Context Protocol (MCP)](https://modelcontextprotocol.i
 | [Cursor](./cursor) | stdio / HTTP | Varies | Easy | Compatible |
 | [Windsurf](./windsurf) | stdio / HTTP | Varies | Easy | Compatible |
 | [Cline](./cline) | stdio / HTTP | Varies | Easy | Compatible |
+| [OpenClaw](./openclaw) | stdio / HTTP | OAuth 2.1 / N/A | Easy | Compatible |
 
 ## Transport Types
 
@@ -35,7 +36,7 @@ Crow's gateway supports two MCP transport protocols:
 ### stdio (Local Only)
 
 - Direct process communication, no network
-- Used by: Claude Desktop, Claude Code (local), Cursor (local), Windsurf (local), Cline (local)
+- Used by: Claude Desktop, Claude Code (local), Cursor (local), Windsurf (local), Cline (local), OpenClaw (local)
 
 ## Authentication
 
