@@ -30,8 +30,10 @@ This is the master routing skill. Consult this **before every task** to determin
 | "file", "download", "document", "folder" | filesystem | filesystem |
 | "citation", "zotero", "library", "reference" | research-pipeline | zotero |
 | "create a skill", "make a workflow", "automate", "every time I..." | skill-writing | filesystem, crow-memory |
-| Session start | session-context | crow-memory |
-| End of session / high friction detected | reflection | crow-memory |
+| Session start | session-context, skill-writing (deferred gap check) | crow-memory |
+| End of session / high friction detected | reflection → skill-writing (handoff) | crow-memory, filesystem |
+| Reflection identifies skill gap | reflection Phase 7 → skill-writing | crow-memory, filesystem |
+| Skill activated during session | skill-writing (usage logging) | crow-memory |
 
 ---
 
@@ -99,3 +101,17 @@ Track these signals during the session:
 - User explicitly expressing frustration
 
 When 2+ friction signals accumulate, suggest running the reflection skill before the session ends.
+
+### Skill Improvement Cycle
+The reflection and skill-writing skills form a continuous improvement loop:
+```
+Session work → Reflection (friction analysis) →
+  Skill-writing (propose/apply fixes) →
+    Metrics (track effectiveness) →
+      Reflection (evaluate if fix worked) →
+        Skill-writing (refine further) → ...
+```
+- **Reflection** detects problems and classifies skill fixes as minor or major
+- **Skill-writing** applies minor fixes automatically, asks for major ones
+- **Metrics** (stored in memory with `skill-metrics` tag) track usage counts, friction rates, and refinement history
+- **Watch items** (`skill-watch` tag) monitor newly created/modified skills for early feedback
