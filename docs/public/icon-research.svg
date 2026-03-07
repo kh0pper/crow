@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <!-- Grackle with magnifying glass — research icon -->
+  <defs>
+    <linearGradient id="resGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#8b5cf6"/>
+      <stop offset="100%" style="stop-color:#a78bfa"/>
+    </linearGradient>
+  </defs>
+  <!-- Small grackle silhouette -->
+  <path d="M10 32 Q6 26 8 20 Q10 14 16 12 Q22 10 26 14 Q28 18 26 24 Q24 30 18 34 Z" fill="url(#resGrad)" opacity="0.85"/>
+  <!-- Grackle beak -->
+  <path d="M12 18 L4 20 L6 22 L12 20 Z" fill="#7c3aed"/>
+  <!-- Eye -->
+  <circle cx="17" cy="17" r="2" fill="#0f0f17"/>
+  <circle cx="17.5" cy="16.5" r="0.6" fill="#fff"/>
+  <!-- Iridescent neck sheen -->
+  <path d="M14 22 Q18 20 24 22 Q22 26 16 28 Z" fill="#06b6d4" opacity="0.25"/>
+  <!-- Magnifying glass -->
+  <circle cx="35" cy="22" r="8" fill="none" stroke="#c4b5fd" stroke-width="2"/>
+  <circle cx="35" cy="22" r="5" fill="#6366f1" opacity="0.15"/>
+  <line x1="41" y1="28" x2="46" y2="34" stroke="#c4b5fd" stroke-width="2.5" stroke-linecap="round"/>
+  <!-- Long elegant tail -->
+  <path d="M22 30 Q28 36 26 44" fill="none" stroke="#7c3aed" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M20 32 Q24 38 21 45" fill="none" stroke="#6d28d9" stroke-width="1.2" stroke-linecap="round"/>
+</svg>

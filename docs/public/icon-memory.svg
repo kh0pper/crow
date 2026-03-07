@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <!-- Crow brain/memory icon — crow head with neural sparkles -->
+  <defs>
+    <linearGradient id="memGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#818cf8"/>
+    </linearGradient>
+  </defs>
+  <!-- Simplified crow head silhouette -->
+  <path d="M18 35 Q12 28 12 22 Q12 14 18 10 Q24 6 30 10 Q36 14 36 22 Q36 28 30 35 Z" fill="url(#memGrad)" opacity="0.9"/>
+  <!-- Beak -->
+  <path d="M16 20 L6 23 L8 26 L16 24 Z" fill="#4f46e5"/>
+  <!-- Eye -->
+  <circle cx="24" cy="18" r="2.5" fill="#0f0f17"/>
+  <circle cx="24.5" cy="17.5" r="0.8" fill="#fff"/>
+  <!-- Neural network dots -->
+  <circle cx="28" cy="12" r="1" fill="#c4b5fd"/>
+  <circle cx="32" cy="16" r="1" fill="#c4b5fd"/>
+  <circle cx="22" cy="28" r="1" fill="#c4b5fd"/>
+  <circle cx="28" cy="30" r="1" fill="#c4b5fd"/>
+  <line x1="28" y1="12" x2="32" y2="16" stroke="#c4b5fd" stroke-width="0.5" opacity="0.6"/>
+  <line x1="22" y1="28" x2="28" y2="30" stroke="#c4b5fd" stroke-width="0.5" opacity="0.6"/>
+  <!-- Sparkle -->
+  <path d="M40 8 L41 12 L42 8 L41 4 Z" fill="#fbbf24" opacity="0.7"/>
+  <path d="M39 8 L41 9 L43 8 L41 7 Z" fill="#fbbf24" opacity="0.7"/>
+</svg>

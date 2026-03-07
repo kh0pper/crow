@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <!-- Stylized crow silhouette -->
+  <defs>
+    <linearGradient id="bodyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#2d2d3d"/>
+      <stop offset="100%" style="stop-color:#1a1a2e"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#4a4a6a;stop-opacity:0.6"/>
+      <stop offset="50%" style="stop-color:#6366f1;stop-opacity:0.3"/>
+      <stop offset="100%" style="stop-color:#4a4a6a;stop-opacity:0"/>
+    </linearGradient>
+  </defs>
+  <!-- Background circle -->
+  <circle cx="100" cy="100" r="95" fill="#0f0f17" opacity="0.5"/>
+  <circle cx="100" cy="100" r="90" fill="none" stroke="#6366f1" stroke-width="0.5" opacity="0.4"/>
+  <!-- Body -->
+  <path d="M75 155 Q60 130 55 110 Q50 90 60 75 Q70 60 85 55 Q95 52 105 55 Q115 58 120 65 Q130 50 145 55 Q155 60 150 72 Q145 80 135 78 Q140 85 140 95 Q140 110 130 130 Q125 140 115 150 Q105 158 90 158 Z" fill="url(#bodyGrad)"/>
+  <!-- Iridescent sheen on wing -->
+  <path d="M70 100 Q65 85 72 72 Q80 62 90 58 Q100 55 108 58 Q115 62 118 70 Q125 55 140 58 Q148 62 145 72 Q142 78 135 78 Q138 85 137 95 Q135 110 125 125 Q115 138 100 140 Z" fill="url(#sheen)"/>
+  <!-- Wing detail lines -->
+  <path d="M75 95 Q90 88 110 92" fill="none" stroke="#6366f1" stroke-width="0.8" opacity="0.4"/>
+  <path d="M78 105 Q93 98 112 102" fill="none" stroke="#6366f1" stroke-width="0.8" opacity="0.3"/>
+  <path d="M80 115 Q95 108 110 112" fill="none" stroke="#6366f1" stroke-width="0.8" opacity="0.2"/>
+  <!-- Eye -->
+  <circle cx="92" cy="70" r="5" fill="#1a1a2e"/>
+  <circle cx="92" cy="70" r="4" fill="#e0e0e0"/>
+  <circle cx="93" cy="69" r="2" fill="#1a1a2e"/>
+  <circle cx="94" cy="68" r="0.8" fill="#ffffff"/>
+  <!-- Beak -->
+  <path d="M78 72 L58 78 L62 82 L78 76 Z" fill="#3d3d4d"/>
+  <path d="M78 74 L60 80 L62 82 L78 76 Z" fill="#2d2d3d"/>
+  <!-- Tail feathers -->
+  <path d="M120 140 Q135 145 145 155" fill="none" stroke="#2d2d3d" stroke-width="3" stroke-linecap="round"/>
+  <path d="M118 142 Q130 150 138 162" fill="none" stroke="#2d2d3d" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M115 145 Q125 155 130 168" fill="none" stroke="#1a1a2e" stroke-width="2" stroke-linecap="round"/>
+  <!-- Feet -->
+  <path d="M95 155 L90 175 L82 180 M90 175 L90 182 M90 175 L97 180" fill="none" stroke="#3d3d4d" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M110 152 L108 172 L100 177 M108 172 L108 179 M108 172 L115 177" fill="none" stroke="#3d3d4d" stroke-width="1.5" stroke-linecap="round"/>
+  <!-- Sparkle accents -->
+  <circle cx="150" cy="45" r="1.5" fill="#6366f1" opacity="0.6"/>
+  <circle cx="45" cy="55" r="1" fill="#818cf8" opacity="0.4"/>
+  <circle cx="160" cy="90" r="1.2" fill="#818cf8" opacity="0.5"/>
+  <circle cx="40" cy="140" r="1" fill="#6366f1" opacity="0.3"/>
+</svg>
