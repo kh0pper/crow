@@ -116,7 +116,7 @@ Access your Crow memory and research tools from the Claude mobile app.
 7. Repeat for `https://your-url/research/mcp`
 8. Open Claude on your phone — your tools are there!
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/kh0pper/crow)
 
 ### Self-Hosted (Docker)
 
