@@ -5,15 +5,58 @@
 services:
   - type: web
     name: crow-gateway
-    runtime: node
+    runtime: docker
     plan: free
-    buildCommand: npm install --production && node scripts/init-db.js
-    startCommand: node servers/gateway/index.js
     healthCheckPath: /health
     envVars:
-      - key: CROW_TRANSPORT
-        value: http
+      # === Required: Database ===
       - key: TURSO_DATABASE_URL
         sync: false
       - key: TURSO_AUTH_TOKEN
+        sync: false
+
+      # === Optional: External Integrations ===
+      # Only fill in the ones you want to use. Leave the rest blank.
+
+      # GitHub — repos, issues, pull requests
+      - key: GITHUB_PERSONAL_ACCESS_TOKEN
+        sync: false
+      # Brave Search — web search
+      - key: BRAVE_API_KEY
+        sync: false
+      # Slack — team messaging
+      - key: SLACK_BOT_TOKEN
+        sync: false
+      # Notion — wiki and databases
+      - key: NOTION_TOKEN
+        sync: false
+      # Trello — boards and cards
+      - key: TRELLO_API_KEY
+        sync: false
+      - key: TRELLO_TOKEN
+        sync: false
+      # Discord — community servers
+      - key: DISCORD_BOT_TOKEN
+        sync: false
+      # Canvas LMS — courses and assignments
+      - key: CANVAS_API_TOKEN
+        sync: false
+      - key: CANVAS_BASE_URL
+        sync: false
+      # Google Workspace — Gmail, Calendar, Docs, Sheets
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      # Zotero — citation management
+      - key: ZOTERO_API_KEY
+        sync: false
+      - key: ZOTERO_USER_ID
+        sync: false
+      # Microsoft Teams — team messaging (experimental)
+      - key: TEAMS_CLIENT_ID
+        sync: false
+      - key: TEAMS_CLIENT_SECRET
+        sync: false
+      - key: TEAMS_TENANT_ID
         sync: false

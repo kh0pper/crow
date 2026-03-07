@@ -10,7 +10,9 @@
  * Routes:
  *   POST|GET|DELETE /memory/mcp   — crow-memory MCP endpoint
  *   POST|GET|DELETE /research/mcp — crow-research MCP endpoint
+ *   POST|GET|DELETE /tools/mcp    — proxy for external MCP servers
  *   GET /health                   — health check
+ *   GET /setup                    — integration status page
  *   OAuth routes (/.well-known/*, /authorize, /token, /register)
  *
  * Usage:
@@ -61,6 +63,8 @@ import express from "express";
 import { createMemoryServer } from "../memory/server.js";
 import { createResearchServer } from "../research/server.js";
 import { createOAuthProvider, initOAuthTables } from "./auth.js";
+import { initProxyServers, createProxyServer, getProxyStatus } from "./proxy.js";
+import { setupPageHandler } from "./setup-page.js";
 
 const PORT = parseInt(process.env.PORT || process.env.CROW_GATEWAY_PORT || "3001", 10);
 const noAuth = process.argv.includes("--no-auth");
@@ -68,9 +72,15 @@ const noAuth = process.argv.includes("--no-auth");
 // Initialize OAuth tables
 await initOAuthTables();
 
+// Initialize external server proxy (non-blocking — failures don't stop the gateway)
+await initProxyServers().catch((err) => {
+  console.error("[proxy] Failed to initialize:", err.message);
+});
+
 // Session storage: Map<sessionId, { transport, server }>
 const memorySessions = new Map();
 const researchSessions = new Map();
+const toolsSessions = new Map();
 
 // Create Express app
 const app = express();
@@ -78,8 +88,18 @@ app.use(express.json());
 
 // --- Health Check ---
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", servers: ["crow-memory", "crow-research"], auth: !noAuth });
+  const proxyStatus = getProxyStatus();
+  const connectedTools = proxyStatus.filter((s) => s.status === "connected");
+  res.json({
+    status: "ok",
+    servers: ["crow-memory", "crow-research"],
+    externalServers: connectedTools.map((s) => ({ id: s.id, name: s.name, tools: s.toolCount })),
+    auth: !noAuth,
+  });
 });
+
+// --- Setup Page (no auth) ---
+app.get("/setup", setupPageHandler);
 
 // --- OAuth Setup ---
 let authMiddleware = null;
@@ -229,6 +249,7 @@ function createMcpHandler(sessions, createServer) {
 
 const memoryHandlers = createMcpHandler(memorySessions, createMemoryServer);
 const researchHandlers = createMcpHandler(researchSessions, createResearchServer);
+const toolsHandlers = createMcpHandler(toolsSessions, createProxyServer);
 
 function mountEndpoint(path, handlers) {
   if (authMiddleware) {
@@ -244,6 +265,7 @@ function mountEndpoint(path, handlers) {
 
 mountEndpoint("/memory/mcp", memoryHandlers);
 mountEndpoint("/research/mcp", researchHandlers);
+mountEndpoint("/tools/mcp", toolsHandlers);
 
 // Also mount at /mcp for single-server compatibility (uses memory)
 mountEndpoint("/mcp", memoryHandlers);
@@ -258,6 +280,8 @@ app.listen(PORT, "0.0.0.0", (error) => {
   console.log(`Crow Gateway listening on http://0.0.0.0:${PORT}`);
   console.log(`  Memory:   POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/memory/mcp`);
   console.log(`  Research: POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/research/mcp`);
+  console.log(`  Tools:    POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/tools/mcp`);
+  console.log(`  Setup:    GET  http://localhost:${PORT}/setup`);
   console.log(`  Health:   GET  http://localhost:${PORT}/health`);
 });
 
@@ -265,12 +289,13 @@ app.listen(PORT, "0.0.0.0", (error) => {
 
 process.on("SIGINT", async () => {
   console.log("\nShutting down gateway...");
-  for (const [sid, session] of [...memorySessions, ...researchSessions]) {
+  for (const [sid, session] of [...memorySessions, ...researchSessions, ...toolsSessions]) {
     try {
       await session.transport.close();
     } catch {}
   }
   memorySessions.clear();
   researchSessions.clear();
+  toolsSessions.clear();
   process.exit(0);
 });

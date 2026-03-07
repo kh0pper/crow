@@ -5,29 +5,26 @@ An AI-enabled project management and research platform powered by Claude. Crow c
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                     Claude Code (AI)                      │
-│                                                           │
-│  CLAUDE.md (system prompt) + skills/*.md (15 workflows)   │
-│  superpowers.md (auto-routing) + reflection.md (meta)     │
-└─────────┬──────────────────────────────────┬──────────────┘
-          │           MCP Protocol           │
-    ┌─────┴─────┐                    ┌───────┴────────┐
-    │  Custom    │                   │  External       │
-    │  Servers   │                   │  Servers (13)   │
-    ├───────────┤                   ├─────────────────┤
-    │ Memory    │                   │ Trello          │
-    │ Research  │                   │ Canvas LMS      │
-    └─────┬─────┘                   │ Google Workspace│
-          │                         │ Notion          │
-    ┌─────┴─────┐                   │ Slack / Discord │
-    │  SQLite   │                   │ MS Teams        │
-    │  Database │                   │ GitHub          │
-    └───────────┘                   │ Brave Search    │
-                                    │ MCP Research    │
-                                    │ Zotero          │
-                                    │ Filesystem      │
-                                    └─────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                 Claude (Web / Mobile / Desktop)                     │
+└─────────┬────────────────────┬────────────────────┬────────────────┘
+          │                    │                    │
+    /memory/mcp          /research/mcp        /tools/mcp
+          │                    │                    │
+┌─────────┴────────────────────┴────────────────────┴────────────────┐
+│  Crow Gateway (Render)                                              │
+│  ├── crow-memory server (persistent memory + search)                │
+│  ├── crow-research server (research pipeline + APA citations)       │
+│  └── proxy server → spawns external tools on demand                 │
+│       ├── GitHub, Brave Search, Slack, Notion, Trello               │
+│       ├── Discord, Canvas LMS, Microsoft Teams                      │
+│       └── Google Workspace, Zotero, MCP Research                    │
+└─────────────────────────────┬──────────────────────────────────────┘
+                              │
+                        ┌─────┴─────┐
+                        │  SQLite   │
+                        │ (Turso)   │
+                        └───────────┘
 ```
 
 ## Components
@@ -54,7 +51,7 @@ An AI-enabled project management and research platform powered by Claude. Crow c
 | **Microsoft Teams** | Teams chats and channels (experimental) | Azure AD credentials |
 | **GitHub** | Repos, issues, pull requests, code | Personal access token |
 | **Brave Search** | Web search for research | API key |
-| **Filesystem** | Local file system access | None |
+| **Filesystem** | Local file system access (Desktop only) | None |
 
 ### AI Skills (17 total)
 
@@ -105,16 +102,17 @@ Click this button to deploy Crow to the cloud for free:
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/kh0pper/crow)
 
 1. If you don't have a Render account, sign up at [render.com](https://render.com) (free — no credit card needed)
-2. After clicking the Deploy button above, Render shows a form with two fields to fill in:
+2. After clicking the Deploy button above, Render shows a form. Fill in the first two fields:
    - **TURSO_DATABASE_URL** — paste the database URL you copied from Turso (starts with `libsql://`)
    - **TURSO_AUTH_TOKEN** — paste the auth token you copied from Turso
-3. Click **Apply** at the bottom and wait ~3 minutes for the build to finish
-4. Once the build is done, Render shows your service page. Your URL is at the top of the page — it looks like `https://crow-gateway-xxxx.onrender.com`. **Copy this URL.**
-5. Open a new browser tab and go to `https://your-url/health` (replace `your-url` with your actual Render URL). You should see `{"status":"ok"}` — this means Crow is running!
+3. You'll also see fields for GitHub, Slack, Notion, etc. — **you can skip these for now** and add them later (see Step 4). Just fill in Turso and leave the rest blank.
+4. Click **Apply** at the bottom and wait ~3 minutes for the build to finish
+5. Once the build is done, Render shows your service page. Your URL is at the top of the page — it looks like `https://crow-gateway-xxxx.onrender.com`. **Copy this URL.**
+6. Open a new browser tab and go to `https://your-url/health` (replace `your-url` with your actual Render URL). You should see `{"status":"ok"}` — this means Crow is running!
 
 ### Step 3: Connect Crow to Claude
 
-This step connects Crow's tools to your Claude account. You'll add two integrations — one for memory, one for research. Works on both [claude.ai](https://claude.ai) in the browser and the Claude mobile app.
+This step connects Crow's tools to your Claude account. You'll add three integrations — one for memory, one for research, and one for external tools. Works on both [claude.ai](https://claude.ai) in the browser and the Claude mobile app.
 
 1. Go to [claude.ai/settings](https://claude.ai/settings)
 2. Click **Integrations** in the left sidebar (on mobile, it may be called **Connectors**)
@@ -128,19 +126,58 @@ This step connects Crow's tools to your Claude account. You'll add two integrati
    - **Name:** `Crow Research`
    - **URL:** `https://your-url/research/mcp` (same Render URL, but `/research/mcp` this time)
    - Click **Add** → **Connect** → **Allow**
-6. You're done! Start a new chat on [claude.ai](https://claude.ai) or the Claude mobile app.
+6. **Add external tools (GitHub, Slack, etc.):**
+   - Click **Add Custom Integration** again
+   - **Name:** `Crow Tools`
+   - **URL:** `https://your-url/tools/mcp` (same Render URL, but `/tools/mcp` this time)
+   - Click **Add** → **Connect** → **Allow**
+7. You're done! Start a new chat on [claude.ai](https://claude.ai) or the Claude mobile app.
 
 > **Try it out!** Say: *"Use crow_store_memory to remember that my favorite color is blue"* — then open a **new chat** and ask *"What's my favorite color?"* (Claude will use crow_recall_by_context to find it.)
+
+### Step 4: Add your other integrations (optional)
+
+Crow can connect to GitHub, Slack, Notion, and more — right from your phone or browser. Each integration needs an API key from that service. You paste the key into Render, and Crow handles the rest.
+
+**How to add an integration:**
+
+1. **Get your API key** from the service (see the table below for links and instructions)
+2. **Go to your Render dashboard** → click on your `crow-gateway` service → click **Environment** in the left sidebar
+3. **Click "Add Environment Variable"** → type the variable name exactly as shown in the table below → paste your API key as the value → click **Save Changes**
+4. Render will automatically restart your service (takes about 1 minute)
+5. Start a new chat in Claude — your new tools are available!
+
+> **You only need to add the `/tools/mcp` connector once** (you did this in Step 3). After that, any time you add a new API key in Render, the new tools automatically appear — no need to add another connector.
+
+> **Check your setup anytime:** Visit `https://your-url/setup` in your browser to see which integrations are connected (green) and which still need API keys.
+
+**Available integrations:**
+
+| Integration | What it does | Variable(s) to add in Render | Where to get your key |
+|-------------|-------------|------------------------------|----------------------|
+| **GitHub** | Manage repos, issues, pull requests | `GITHUB_PERSONAL_ACCESS_TOKEN` | [github.com/settings/tokens](https://github.com/settings/tokens) — Generate new token (classic) with `repo`, `read:org`, `read:user` scopes |
+| **Brave Search** | Search the web | `BRAVE_API_KEY` | [brave.com/search/api](https://brave.com/search/api/) — sign up, copy key from dashboard |
+| **Slack** | Read and send messages | `SLACK_BOT_TOKEN` | [api.slack.com/apps](https://api.slack.com/apps) — Create app, add scopes, install, copy Bot Token (`xoxb-...`) |
+| **Notion** | Manage wiki pages and databases | `NOTION_TOKEN` | [notion.so/my-integrations](https://www.notion.so/my-integrations) — Create integration, copy secret (`ntn_...`), share pages with it |
+| **Trello** | Manage boards and cards | `TRELLO_API_KEY` and `TRELLO_TOKEN` | [trello.com/power-ups/admin](https://trello.com/power-ups/admin) — copy API key, then generate token |
+| **Discord** | Read and send messages | `DISCORD_BOT_TOKEN` | [discord.com/developers](https://discord.com/developers/applications) — New Application, Bot tab, copy token |
+| **Canvas LMS** | Course and assignment management | `CANVAS_API_TOKEN` and `CANVAS_BASE_URL` | Canvas — Account → Settings → New Access Token |
+| **Google Workspace** | Gmail, Calendar, Docs, Sheets | `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` | [console.cloud.google.com](https://console.cloud.google.com) — Create OAuth Client ID (Desktop App type) |
+| **Zotero** | Citation management | `ZOTERO_API_KEY` and `ZOTERO_USER_ID` | [zotero.org/settings/keys](https://www.zotero.org/settings/keys) — Create private key, note user ID |
+| **MCP Research** | Academic search (arXiv, Semantic Scholar) | *(none — works automatically)* | No setup needed |
+| **Microsoft Teams** | Team messaging (experimental) | `TEAMS_CLIENT_ID`, `TEAMS_CLIENT_SECRET`, `TEAMS_TENANT_ID` | [Azure Portal](https://portal.azure.com) — App registrations |
 
 ### Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
-| **"Connection failed" when adding integration** | Double-check your URL — it should start with `https://` and end with `/memory/mcp` or `/research/mcp`. Make sure there's no trailing slash. |
+| **"Connection failed" when adding integration** | Double-check your URL — it should start with `https://` and end with `/memory/mcp`, `/research/mcp`, or `/tools/mcp`. Make sure there's no trailing slash. |
 | **Health check shows an error page** | Go to your Render dashboard, click on your service, and check the **Logs** tab for error messages. Make sure your Turso URL and token are correct. |
 | **Tools work but are slow the first time** | Render's free tier puts your service to sleep after 15 minutes of inactivity. The first request after it sleeps takes ~30 seconds to wake up. This is normal — subsequent requests are fast. |
 | **Claude doesn't seem to use Crow tools** | Start a **new chat** (existing chats don't pick up new integrations). You can also try saying the tool name directly, e.g., *"Use crow_memory_stats to check my memory count."* |
 | **"Not authorized" error** | Crow's gateway uses OAuth for security. When you click **Connect** in Claude's settings, you should see an authorization page — click **Allow**. If you skipped this, remove the integration and add it again. |
+| **Not sure which integrations are connected** | Visit `https://your-url/setup` — it shows which are active (green) and which need API keys (with links to get them). |
+| **Added an API key but tools didn't appear** | After adding an env var in Render, wait ~1 minute for the service to restart. Then start a **new chat** in Claude. |
 
 ---
 
@@ -192,9 +229,9 @@ docker compose --profile local up --build
 - **research_sources** — Every source with full metadata, APA citation, verification status
 - **research_notes** — Quotes, summaries, analysis, questions, and insights linked to sources
 
-## Adding External Integrations (API Keys)
+## Adding External Integrations — Desktop Users
 
-The external servers (Trello, Slack, GitHub, etc.) are only available through **Claude Desktop** — they run locally on your computer and connect via the `.mcp.json` config file. They are **not** available through the cloud gateway (Render deployment).
+If you're using **Claude Desktop** (not the web/mobile setup above), external integrations are configured locally through API keys stored in a `.env` file on your computer.
 
 > **Important**: You only need to set up the integrations you actually use. Everything is optional. Crow's memory and research tools work without any of these.
 
