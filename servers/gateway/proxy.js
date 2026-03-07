@@ -79,6 +79,9 @@ async function connectToServer(integration) {
     ...getSpawnEnv(integration),
   };
 
+  // Timeout: npx/uvx may need to download packages on first run
+  const CONNECT_TIMEOUT_MS = 60_000;
+
   try {
     const transport = new StdioClientTransport({
       command: integration.command,
@@ -91,7 +94,13 @@ async function connectToServer(integration) {
       version: "0.1.0",
     });
 
-    await client.connect(transport);
+    // Race the connection against a timeout
+    await Promise.race([
+      client.connect(transport),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Connection timed out (60s)")), CONNECT_TIMEOUT_MS)
+      ),
+    ]);
 
     // Discover tools
     const { tools } = await client.listTools();
