@@ -5,35 +5,39 @@ This is the master routing skill. Consult this **before every task** to determin
 
 ## Always-On Rules
 1. **Memory first**: Before any task, check `recall_by_context` for relevant prior context
-2. **Multi-tool by default**: Most tasks benefit from combining 2-3 tools
-3. **Document as you go**: Important findings → `store_memory`; external sources → `add_source`
-4. **Reflect when needed**: If friction accumulates, trigger the reflection skill
+2. **Language adaptation**: Check stored language preference (see `skills/i18n.md`). All user-facing output in user's language.
+3. **Multi-tool by default**: Most tasks benefit from combining 2-3 tools
+4. **Document as you go**: Important findings → `store_memory`; external sources → `add_source`
+5. **Reflect when needed**: If friction accumulates, trigger the reflection skill
 
 ---
 
 ## Trigger Table
 
-| User Intent / Keywords | Activate Skills | Primary Tools |
-|---|---|---|
-| "remember", "store", "recall", "what did we..." | memory-management | crow-memory |
-| "research", "find papers", "cite", "bibliography" | research-pipeline, web-search | crow-research, brave-search, mcp-research |
-| "email", "calendar", "schedule", "meeting", "gmail" | google-workspace | google-workspace |
-| "google chat", "chat space", "send chat" | google-chat | google-workspace (chat tools) |
-| "task", "board", "card", "sprint", "trello" | project-management | trello |
-| "assignment", "grade", "course", "canvas" | project-management | canvas-lms |
-| "wiki", "notion", "page", "database" | notion | notion |
-| "slack", "slack message", "slack channel" | slack | slack |
-| "discord", "server", "guild" | discord | discord |
-| "teams", "microsoft teams" | microsoft-teams | microsoft-teams |
-| "repo", "issue", "PR", "commit", "github" | github | github |
-| "search", "look up", "find out", "what is" | web-search | brave-search |
-| "file", "download", "document", "folder" | filesystem | filesystem |
-| "citation", "zotero", "library", "reference" | research-pipeline | zotero |
-| "create a skill", "make a workflow", "automate", "every time I..." | skill-writing | filesystem, crow-memory |
-| Session start | session-context, skill-writing (deferred gap check) | crow-memory |
-| End of session / high friction detected | reflection → skill-writing (handoff) | crow-memory, filesystem |
-| Reflection identifies skill gap | reflection Phase 7 → skill-writing | crow-memory, filesystem |
-| Skill activated during session | skill-writing (usage logging) | crow-memory |
+**Multilingual matching**: The trigger phrases below are examples in English and Spanish. Match user intent in **ANY language** — these are illustrative, not exhaustive. See `skills/i18n.md` for the full language protocol.
+
+| User Intent (EN) | User Intent (ES) | Activate Skills | Primary Tools |
+|---|---|---|---|
+| "remember", "store", "recall", "what did we..." | "recordar", "guardar", "recuperar", "qué hicimos..." | memory-management | crow-memory |
+| "research", "find papers", "cite", "bibliography" | "investigar", "buscar artículos", "citar", "bibliografía" | research-pipeline, web-search | crow-research, brave-search, mcp-research |
+| "email", "calendar", "schedule", "meeting", "gmail" | "correo", "calendario", "agendar", "reunión" | google-workspace | google-workspace |
+| "google chat", "chat space", "send chat" | "google chat", "espacio de chat", "enviar chat" | google-chat | google-workspace (chat tools) |
+| "task", "board", "card", "sprint", "trello" | "tarea", "tablero", "tarjeta", "sprint" | project-management | trello |
+| "assignment", "grade", "course", "canvas" | "tarea", "calificación", "curso", "canvas" | project-management | canvas-lms |
+| "wiki", "notion", "page", "database" | "wiki", "notion", "página", "base de datos" | notion | notion |
+| "slack", "slack message", "slack channel" | "slack", "mensaje de slack", "canal de slack" | slack | slack |
+| "discord", "server", "guild" | "discord", "servidor" | discord | discord |
+| "teams", "microsoft teams" | "teams", "microsoft teams" | microsoft-teams | microsoft-teams |
+| "repo", "issue", "PR", "commit", "github" | "repositorio", "issue", "PR", "commit" | github | github |
+| "search", "look up", "find out", "what is" | "buscar", "averiguar", "qué es" | web-search | brave-search |
+| "file", "download", "document", "folder" | "archivo", "descargar", "documento", "carpeta" | filesystem | filesystem |
+| "citation", "zotero", "library", "reference" | "cita", "zotero", "biblioteca", "referencia" | research-pipeline | zotero |
+| "create a skill", "automate", "every time I..." | "crear una habilidad", "automatizar", "cada vez que..." | skill-writing | filesystem, crow-memory |
+| "change language", "speak in..." | "cambiar idioma", "háblame en..." | i18n | crow-memory |
+| Session start / Inicio de sesión | — | session-context, i18n, skill-writing (deferred gap check) | crow-memory |
+| High friction detected / Fricción detectada | — | reflection → skill-writing (handoff) | crow-memory, filesystem |
+| Reflection identifies skill gap | — | reflection Phase 7 → skill-writing | crow-memory, filesystem |
+| Skill activated during session | — | skill-writing (usage logging) | crow-memory |
 
 ---
 
@@ -91,6 +95,7 @@ This is the master routing skill. Consult this **before every task** to determin
 - If the user mentions a source/paper → check research pipeline and Zotero
 - If the user mentions a project name → check memory, Trello, GitHub, and Notion
 - If the user seems frustrated or corrects approach → note friction for reflection
+- If the user switches languages mid-session (2+ messages) → ask if they want to update their language preference
 
 ### Friction Detection (feeds into reflection skill)
 Track these signals during the session:

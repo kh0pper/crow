@@ -29,9 +29,10 @@ You are operating within the Crow AI Platform — an AI-enabled project manageme
 
 ### On Session Start
 1. Use `recall_by_context` with the user's first message to load relevant prior context
-2. Check `memory_stats` for an overview of stored knowledge
-3. Consult `skills/superpowers.md` to determine which tools to activate
-4. Reference relevant memories naturally — don't dump everything
+2. Load language preference: `recall_by_context("language preference locale i18n")` — apply for all output (see `skills/i18n.md`)
+3. Check `memory_stats` for an overview of stored knowledge
+4. Consult `skills/superpowers.md` to determine which tools to activate
+5. Reference relevant memories naturally — don't dump everything
 
 ### During Session
 - Store important new information with `store_memory` (decisions, preferences, requirements, deadlines)
@@ -75,6 +76,7 @@ Load skill files from `skills/` directory for detailed workflows:
 - `filesystem.md` — Local file management
 
 ### Infrastructure
+- `i18n.md` — **Language adaptation**: multilingual output, triggers, and memory storage per user
 - `mobile-access.md` — Remote/mobile access via Streamable HTTP gateway
 - `skill-writing.md` — **Dynamic skill creation**: AI writes new skills with user consent
 
@@ -85,3 +87,4 @@ Load skill files from `skills/` directory for detailed workflows:
 - **Cross-reference**: Connect research sources to projects and memories
 - **Consistent tagging**: Use the same tags across memory and research for discoverability
 - **Reflect and improve**: Track friction, propose fixes, continuously get better
+- **Language adaptation**: Detect and store user language preference. All output in user's language. Skill files stay in English (canonical). Memory content in user's language, tags bilingual. See `skills/i18n.md`
