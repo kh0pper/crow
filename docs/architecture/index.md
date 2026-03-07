@@ -11,6 +11,7 @@ Crow is an MCP (Model Context Protocol) platform — not a traditional web app. 
          │                      │                      │
    /memory/mcp            /research/mcp          /tools/mcp
    /memory/sse            /research/sse          /tools/sse
+   /sharing/mcp           /sharing/sse           /relay/*
          │                      │                      │
 ┌────────┴──────────────────────┴──────────────────────┴───────────────┐
 │  Crow Gateway (Express + OAuth 2.1)                                  │
@@ -18,6 +19,8 @@ Crow is an MCP (Model Context Protocol) platform — not a traditional web app. 
 │  ├── SSE transport (2024-11-05, legacy)                              │
 │  ├── crow-memory server (persistent memory + FTS5 search)            │
 │  ├── crow-research server (research pipeline + APA citations)        │
+│  ├── crow-sharing server (P2P sharing, Hyperswarm, Nostr messaging)  │
+│  │    └── peer relay endpoints (/relay/store, /relay/fetch)          │
 │  └── proxy server → spawns external MCP servers on demand            │
 │       ├── GitHub, Brave Search, Slack, Notion, Trello                │
 │       ├── Discord, Canvas LMS, Microsoft Teams                       │
@@ -34,14 +37,15 @@ Crow is an MCP (Model Context Protocol) platform — not a traditional web app. 
 
 ### 1. Custom MCP Servers (`servers/`)
 
-Two Node.js servers exposing tools over MCP. Both share a single SQLite database.
+Three Node.js servers exposing tools over MCP. All share a single SQLite database.
 
 - **[Memory Server](./memory-server)** — Persistent memory with full-text search (FTS5), categories, importance scoring, and tags
 - **[Research Server](./research-server)** — Research pipeline with projects, sources (auto-APA citation), notes, verification tracking, and bibliography generation
+- **[Sharing Server](./sharing-server)** — P2P sharing protocol with Hyperswarm discovery, Hypercore data sync, Nostr messaging, and peer relay support
 
 ### 2. HTTP Gateway (`servers/gateway/`)
 
-Express server that wraps both MCP servers with HTTP transports + OAuth 2.1. Supports:
+Express server that wraps all three MCP servers with HTTP transports + OAuth 2.1. Supports:
 
 - **Streamable HTTP** — Modern transport for Claude, Gemini, Grok, Cursor, etc.
 - **SSE** — Legacy transport for ChatGPT compatibility
@@ -52,7 +56,7 @@ See [Gateway](./gateway) for details.
 
 ### 3. Skills (`skills/`)
 
-17 markdown files that serve as behavioral prompts. Not code — they define workflows, trigger patterns, and integration logic. Loaded by Claude on demand.
+24 markdown files that serve as behavioral prompts. Not code — they define workflows, trigger patterns, and integration logic. Loaded by Claude on demand.
 
 See [Skills](../skills/) for the full list.
 
@@ -61,11 +65,13 @@ See [Skills](../skills/) for the full list.
 Each custom server has a **factory function** in `server.js` that returns a configured `McpServer` instance. The `index.js` files wire these to stdio transport. The gateway imports the same factories and wires them to HTTP transport.
 
 ```
-servers/memory/server.js   → createMemoryServer()  → McpServer
+servers/memory/server.js   → createMemoryServer()   → McpServer
 servers/memory/index.js    → stdio transport
-servers/research/server.js → createResearchServer() → McpServer
+servers/research/server.js → createResearchServer()  → McpServer
 servers/research/index.js  → stdio transport
-servers/gateway/index.js   → Express + HTTP/SSE transports (both servers)
+servers/sharing/server.js  → createSharingServer()   → McpServer
+servers/sharing/index.js   → stdio transport
+servers/gateway/index.js   → Express + HTTP/SSE transports (all three servers)
 ```
 
 ## Database
@@ -80,6 +86,10 @@ Key tables:
 - `research_projects` → `research_sources` → `research_notes` — Foreign keys with cascade
 - `crow_context` — Behavioral context sections (used to generate crow.md)
 - `oauth_clients` / `oauth_tokens` — Gateway auth persistence
+- `contacts` — Peer identities, public keys, relay status, last seen
+- `shared_items` — Tracking of sent/received shares with permissions
+- `messages` — Local cache of Nostr messages with read status
+- `relay_config` — Configured Nostr relays and peer relays
 
 ## Behavioral Context (crow.md)
 

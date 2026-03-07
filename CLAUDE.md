@@ -10,8 +10,12 @@ npm run init-db          # Re-initialize database schema only
 npm run wizard           # Open browser-based setup wizard for API keys
 npm run memory-server    # Start crow-memory MCP server (stdio)
 npm run research-server  # Start crow-research MCP server (stdio)
+npm run sharing-server   # Start crow-sharing MCP server (stdio)
 npm run gateway          # Start HTTP gateway (Express, port 3001)
 npm run desktop-config   # Generate Claude Desktop config JSON
+npm run identity         # Display your Crow ID and public keys
+npm run identity:export  # Export encrypted identity for device migration
+npm run identity:import  # Import identity on a new device
 ```
 
 ### Docker (gateway only)
@@ -27,6 +31,7 @@ No test framework is configured. To verify servers work:
 ```bash
 node servers/memory/index.js    # Should start without errors (ctrl-C to stop)
 node servers/research/index.js  # Same
+node servers/sharing/index.js   # Same (P2P sharing server)
 node servers/gateway/index.js --no-auth  # HTTP gateway without OAuth (blocked in production), check http://localhost:3001/health
 ```
 
@@ -36,17 +41,18 @@ This is an MCP (Model Context Protocol) platform — not a traditional web app. 
 
 ### Three layers
 
-1. **Custom MCP Servers** (`servers/`) — Two Node.js servers exposing tools over MCP's stdio transport. Both share a single SQLite database (local file or Turso cloud).
+1. **Custom MCP Servers** (`servers/`) — Three Node.js servers exposing tools over MCP's stdio transport. All share a single SQLite database (local file or Turso cloud).
    - `servers/memory/` — Persistent memory: store, search (FTS5), recall, list, update, delete, stats
    - `servers/research/` — Research pipeline: projects, sources (with auto-APA citation), notes, bibliography, verification
+   - `servers/sharing/` — P2P sharing: Hyperswarm discovery, Hypercore data sync, Nostr messaging, peer relay, identity management
 
-2. **HTTP Gateway** (`servers/gateway/`) — Express server that wraps both MCP servers with Streamable HTTP + SSE transports + OAuth 2.1. Includes a proxy layer for external MCP servers, setup page, and integrations registry. Used for mobile/remote access via Claude Connectors.
+2. **HTTP Gateway** (`servers/gateway/`) — Express server that wraps all three MCP servers with Streamable HTTP + SSE transports + OAuth 2.1. Includes a proxy layer for external MCP servers, setup page, integrations registry, and peer relay endpoints (`/relay/store`, `/relay/fetch`). Used for mobile/remote access via Claude Connectors.
 
-3. **Skills** (`skills/`) — 20 markdown files that serve as behavioral prompts loaded by Claude. Not code — they define workflows, trigger patterns, and integration logic.
+3. **Skills** (`skills/`) — 24 markdown files that serve as behavioral prompts loaded by Claude. Not code — they define workflows, trigger patterns, and integration logic.
 
 ### Server factory pattern
 
-Each custom server has a **factory function** (`createMemoryServer`, `createResearchServer`) in `server.js` that returns a configured `McpServer` instance. The `index.js` files wire these to stdio transport. The gateway imports the same factories and wires them to HTTP transport. This means all tool logic lives in `server.js` — the transport layer is separate.
+Each custom server has a **factory function** (`createMemoryServer`, `createResearchServer`, `createSharingServer`) in `server.js` that returns a configured `McpServer` instance. The `index.js` files wire these to stdio transport. The gateway imports the same factories and wires them to HTTP transport. This means all tool logic lives in `server.js` — the transport layer is separate.
 
 ```
 servers/memory/server.js       → createMemoryServer(dbPath?)  → McpServer
@@ -54,7 +60,14 @@ servers/memory/crow-context.js → Shared crow.md context logic (used by both me
 servers/memory/index.js        → stdio transport (used by .mcp.json)
 servers/research/server.js     → createResearchServer(dbPath?) → McpServer
 servers/research/index.js      → stdio transport (used by .mcp.json)
-servers/gateway/index.js       → Express + Streamable HTTP & SSE transports (both servers)
+servers/sharing/server.js      → createSharingServer(dbPath?) → McpServer
+servers/sharing/index.js       → stdio transport (used by .mcp.json)
+servers/sharing/identity.js    → Key generation, Crow ID, invite codes, encryption
+servers/sharing/peer-manager.js → Hyperswarm discovery, connection management
+servers/sharing/sync.js        → Hypercore feed management, replication
+servers/sharing/nostr.js       → Nostr events, NIP-44 encryption, relay comms
+servers/sharing/relay.js       → Peer relay opt-in, store-and-forward
+servers/gateway/index.js       → Express + Streamable HTTP & SSE transports (all three servers)
 servers/gateway/auth.js        → OAuth 2.1 provider (CrowOAuthProvider, SQLite-backed)
 servers/gateway/proxy.js       → Proxy layer for external MCP servers
 servers/gateway/setup-page.js  → Browser-based setup/configuration page
@@ -69,6 +82,10 @@ Uses `@libsql/client` which supports both local SQLite files (`data/crow.db`, gi
 - **research_projects** → **research_sources** → **research_notes** — Foreign keys with `ON DELETE SET NULL`
 - **sources_fts** — FTS5 index over sources
 - **oauth_clients** / **oauth_tokens** — Gateway auth persistence
+- **contacts** — Peer identities, public keys (Ed25519 + secp256k1), relay status, last seen
+- **shared_items** — Tracking of sent/received shares with permissions and delivery status
+- **messages** — Local cache of Nostr messages with read status and threading
+- **relay_config** — Configured Nostr relays and peer relays
 
 All FTS sync is handled by SQLite triggers defined in `init-db.js`. If you change the memories or sources schema, you must also update the corresponding FTS virtual table and triggers.
 
@@ -81,6 +98,10 @@ All FTS sync is handled by SQLite triggers defined in `init-db.js`. If you chang
 - `@modelcontextprotocol/sdk` — MCP server SDK (stdio + HTTP transports, auth)
 - `@libsql/client` — SQLite/Turso client (supports local files and remote Turso databases)
 - `zod` — Schema validation for MCP tool parameters
+- `hyperswarm` — DHT-based P2P peer discovery with NAT holepunching
+- `hypercore` — Append-only replicated feeds for data sync
+- `nostr-tools` — Nostr protocol: events, NIP-44 encryption, relay communication
+- `@noble/hashes`, `@noble/ed25519`, `@noble/secp256k1` — Cryptographic primitives for identity
 
 Node.js >= 18 required. ESM modules (`"type": "module"` in package.json).
 
@@ -139,6 +160,10 @@ Consult `skills/superpowers.md` first — it routes user intent to the right ski
 - `plan-review.md` — Checkpoint-based planning for multi-step tasks
 - `skill-writing.md` — Dynamic skill creation with user consent
 - `i18n.md` — Multilingual output adaptation
+- `sharing.md` — P2P sharing workflows (invite, share, inbox, revoke)
+- `social.md` — Messaging and social interactions (Nostr)
+- `peer-network.md` — Peer management, relay config, identity, blocking
+- `onboarding.md` — First-run sharing setup and device migration
 
 ## Documentation Site
 
@@ -148,6 +173,7 @@ The `docs/` directory contains a VitePress documentation site. Key paths:
 - `docs/index.md` — Landing page
 - `docs/getting-started/` — Setup and deployment guides
 - `docs/platforms/` — Per-platform integration guides (Claude, ChatGPT, Gemini, Cursor, OpenClaw, etc.)
-- `docs/guide/` — Conceptual guides (cross-platform, memory, research)
+- `docs/guide/` — Conceptual guides (cross-platform, sharing, social)
+- `docs/architecture/sharing-server.md` — P2P sharing server architecture (5-layer design)
 
 To run locally: `cd docs && npm run dev`
