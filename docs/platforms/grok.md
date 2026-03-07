@@ -47,6 +47,16 @@ If your Grok client doesn't support OAuth discovery, you can:
 2. Complete the OAuth flow to get an access token
 3. Pass the token as a `Bearer` header in requests
 
+## Cross-Platform Context
+
+Load Crow's shared behavioral context on Grok:
+
+> "Use the crow_get_context tool with platform set to grok"
+
+Or fetch via HTTP: `GET https://your-gateway.onrender.com/crow.md?platform=grok`
+
+Memories and research stored from any platform are shared. See the [Cross-Platform Guide](/guide/cross-platform).
+
 ## Verification
 
 Use Grok's tool calling to test:

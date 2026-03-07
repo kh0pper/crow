@@ -67,6 +67,14 @@ Connect Crow to [Cline](https://github.com/cline/cline), the AI coding assistant
 - **Local**: stdio
 - **Remote**: Streamable HTTP with OAuth 2.1
 
+## Cross-Platform Context
+
+Load Crow's shared behavioral context in Cline:
+
+> "Use the crow_get_context tool with platform set to cline"
+
+IDE platforms get minimal transparency output. Memories stored from Cline are shared with all other connected platforms. See the [Cross-Platform Guide](/guide/cross-platform).
+
 ## Verification
 
 In Cline's chat, try:

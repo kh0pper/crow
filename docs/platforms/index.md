@@ -49,3 +49,11 @@ The gateway uses **OAuth 2.1 with Dynamic Client Registration**. When you connec
 This is the same standard flow used by most OAuth providers. No manual token management needed for platforms that support OAuth discovery.
 
 For platforms that don't support OAuth discovery (like Grok), you can use the `/introspect` endpoint or configure bearer tokens manually.
+
+## Cross-Platform Context (crow.md)
+
+Crow goes beyond shared data — it also shares **behavioral context** across platforms. The `crow.md` document defines how Crow behaves: identity, memory protocols, transparency rules, and your customizations. Every connected platform can load this same context, ensuring a consistent experience whether you're in Claude, ChatGPT, Gemini, or an IDE.
+
+**Access:** Use the `crow_get_context` tool (any MCP platform) or `GET /crow.md` (HTTP endpoint).
+
+See the [Cross-Platform Guide](/guide/cross-platform) for a complete walkthrough.

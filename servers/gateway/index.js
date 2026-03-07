@@ -70,6 +70,8 @@ import { getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/
 import express from "express";
 import { createMemoryServer } from "../memory/server.js";
 import { createResearchServer } from "../research/server.js";
+import { generateCrowContext } from "../memory/crow-context.js";
+import { createDbClient } from "../db.js";
 import { createOAuthProvider, initOAuthTables } from "./auth.js";
 import { initProxyServers, createProxyServer, getProxyStatus } from "./proxy.js";
 import { setupPageHandler } from "./setup-page.js";
@@ -108,6 +110,22 @@ app.get("/health", (req, res) => {
 
 // --- Setup Page (no auth) ---
 app.get("/setup", setupPageHandler);
+
+// --- crow.md Endpoint ---
+app.get("/crow.md", async (req, res) => {
+  const db = createDbClient();
+  const platform = req.query.platform || "generic";
+  const includeDynamic = req.query.dynamic !== "false";
+  try {
+    const markdown = await generateCrowContext(db, { includeDynamic, platform });
+    res.type("text/markdown").send(markdown);
+  } catch (err) {
+    console.error("Error generating crow.md:", err);
+    res.status(500).send("Error generating crow.md");
+  } finally {
+    db.close();
+  }
+});
 
 // --- OAuth Setup ---
 let authMiddleware = null;

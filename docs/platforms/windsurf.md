@@ -67,6 +67,14 @@ Connect Crow to [Windsurf](https://codeium.com/windsurf), the AI-powered IDE by 
 - **Local**: stdio
 - **Remote**: Streamable HTTP with OAuth 2.1
 
+## Cross-Platform Context
+
+Load Crow's shared behavioral context in Windsurf:
+
+> "Use the crow_get_context tool with platform set to windsurf"
+
+IDE platforms get minimal transparency output. Memories stored from Windsurf are shared with all other connected platforms. See the [Cross-Platform Guide](/guide/cross-platform).
+
 ## Verification
 
 In Windsurf's Cascade chat, try:

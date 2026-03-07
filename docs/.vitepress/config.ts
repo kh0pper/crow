@@ -22,6 +22,7 @@ export default defineConfig({
         text: 'Getting Started',
         items: [
           { text: 'Overview', link: '/getting-started/' },
+          { text: 'Cross-Platform Guide', link: '/guide/cross-platform' },
           { text: 'Cloud Deploy (Render)', link: '/getting-started/cloud-deploy' },
           { text: 'Desktop Setup', link: '/getting-started/desktop-setup' },
           { text: 'Docker', link: '/getting-started/docker' },

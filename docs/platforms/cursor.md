@@ -71,6 +71,14 @@ Connect to a deployed Crow gateway.
 - **Local**: stdio
 - **Remote**: Streamable HTTP with OAuth 2.1
 
+## Cross-Platform Context
+
+Load Crow's shared behavioral context in Cursor:
+
+> "Use the crow_get_context tool with platform set to cursor"
+
+IDE platforms get minimal transparency output — only Tier 2 checkpoints. Memories and research stored from Cursor are shared with all other connected platforms. See the [Cross-Platform Guide](/guide/cross-platform).
+
 ## Verification
 
 In Cursor's AI chat, try:

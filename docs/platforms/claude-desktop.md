@@ -55,6 +55,14 @@ After restarting Claude Desktop, look for the MCP server icons (hammer icon) in 
 
 Try: "Store a memory that Crow Desktop is connected."
 
+## Cross-Platform Context
+
+Crow's shared behavioral context (`crow.md`) is available through the `crow_get_context` tool or `crow://context` resource. Load it at session start:
+
+> "Load your crow.md context"
+
+Memories stored in Claude Desktop are shared with all other connected platforms (Claude Web, ChatGPT, Gemini, etc.) when using the same database. See the [Cross-Platform Guide](/guide/cross-platform).
+
 ## Adding External Integrations
 
 To use external integrations (GitHub, Slack, etc.) with Claude Desktop, add them directly to the Desktop config. The `.mcp.json` file in the Crow repo has all the configurations — merge them into your Desktop config file.

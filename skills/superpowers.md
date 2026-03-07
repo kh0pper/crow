@@ -35,6 +35,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | "search", "look up", "find out", "what is" | "buscar", "averiguar", "qué es" | web-search | brave-search |
 | "file", "download", "document", "folder" | "archivo", "descargar", "documento", "carpeta" | filesystem | filesystem |
 | "citation", "zotero", "library", "reference" | "cita", "zotero", "biblioteca", "referencia" | research-pipeline | zotero |
+| "who are you", "crow.md", "customize behavior", "set up platform" | "quién eres", "crow.md", "personalizar", "configurar plataforma" | crow-context | crow-memory |
 | "plan", "outline", "how would you", "what's your approach" | "planear", "esquematizar", "cómo lo harías", "cuál es tu enfoque" | plan-review | (depends on task) |
 | "create a skill", "automate", "every time I..." | "crear una habilidad", "automatizar", "cada vez que..." | skill-writing | filesystem, crow-memory |
 | "change language", "speak in..." | "cambiar idioma", "háblame en..." | i18n | crow-memory |

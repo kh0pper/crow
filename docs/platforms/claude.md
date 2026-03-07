@@ -43,8 +43,19 @@ If it works, you'll see Crow's memory tools in action. You can verify stored mem
 
 > "What do you remember?"
 
+## Cross-Platform Context
+
+Crow provides a shared behavioral context document (`crow.md`) that ensures consistent behavior across platforms. On Claude, the context is automatically available through the `crow_get_context` tool or the `crow://context` MCP resource.
+
+To load Crow's full context at the start of a session:
+
+> "Load your crow.md context"
+
+This gives Claude all of Crow's behavioral instructions — memory protocols, transparency rules, and any custom sections you've configured. See the [Cross-Platform Guide](/guide/cross-platform) for more details.
+
 ## Tips
 
 - You can connect all three servers (memory, research, tools) simultaneously
 - The mobile app uses the same Custom Integrations as the web
 - Tools from external integrations (GitHub, Slack, etc.) appear through the `/tools/mcp` endpoint
+- Memories stored here are instantly accessible from ChatGPT, Gemini, or any other connected platform
