@@ -1,0 +1,47 @@
+# Docker Setup
+
+Run the Crow gateway in Docker for self-hosted deployments.
+
+## Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) and Docker Compose installed
+- A Turso database (or use local SQLite)
+
+## Cloud Profile
+
+Exposes the gateway on port 3001:
+
+```bash
+docker compose --profile cloud up --build
+```
+
+Set environment variables in a `.env` file or pass them directly:
+
+```env
+TURSO_DATABASE_URL=libsql://your-db.turso.io
+TURSO_AUTH_TOKEN=your-token
+```
+
+## Local Profile
+
+Runs the gateway with a Cloudflare Tunnel for remote access:
+
+```bash
+docker compose --profile local up --build
+```
+
+This creates a public URL via Cloudflare that you can use to connect from mobile/web AI clients.
+
+## Environment Variables
+
+The gateway reads all integration API keys from environment variables. See the [Integrations](../integrations/) page for the full list.
+
+## Health Check
+
+Verify the gateway is running:
+
+```bash
+curl http://localhost:3001/health
+```
+
+Visit `http://localhost:3001/setup` to see integration status and endpoint URLs.

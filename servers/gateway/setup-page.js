@@ -195,15 +195,39 @@ export function setupPageHandler(req, res) {
 
   ${renderUrl ? `
   <div class="section">
-    <div class="section-title">Claude Connector URLs</div>
+    <div class="section-title">MCP Endpoint URLs</div>
     <div class="instructions">
-      <p style="margin-bottom:8px">Add these as Custom Integrations in <a href="https://claude.ai/settings" target="_blank">Claude Settings</a>:</p>
-      <p style="font-weight:600;font-size:13px;margin-top:12px">Memory:</p>
+      <p style="margin-bottom:8px">Use these URLs to connect from any MCP-compatible AI platform:</p>
+
+      <p style="font-weight:600;font-size:15px;margin-top:16px">Memory</p>
+      <p style="font-size:12px;color:#86868b;margin-top:2px">Streamable HTTP (Claude, Gemini, Grok, Cursor, Windsurf, Cline, Claude Code)</p>
       <div class="connector-url">${renderUrl}/memory/mcp</div>
-      <p style="font-weight:600;font-size:13px;margin-top:12px">Research:</p>
+      <p style="font-size:12px;color:#86868b;margin-top:8px">SSE (ChatGPT)</p>
+      <div class="connector-url">${renderUrl}/memory/sse</div>
+
+      <p style="font-weight:600;font-size:15px;margin-top:16px">Research</p>
+      <p style="font-size:12px;color:#86868b;margin-top:2px">Streamable HTTP</p>
       <div class="connector-url">${renderUrl}/research/mcp</div>
-      <p style="font-weight:600;font-size:13px;margin-top:12px">External Tools (GitHub, Slack, etc.):</p>
+      <p style="font-size:12px;color:#86868b;margin-top:8px">SSE (ChatGPT)</p>
+      <div class="connector-url">${renderUrl}/research/sse</div>
+
+      <p style="font-weight:600;font-size:15px;margin-top:16px">External Tools (GitHub, Slack, etc.)</p>
+      <p style="font-size:12px;color:#86868b;margin-top:2px">Streamable HTTP</p>
       <div class="connector-url">${renderUrl}/tools/mcp</div>
+      <p style="font-size:12px;color:#86868b;margin-top:8px">SSE (ChatGPT)</p>
+      <div class="connector-url">${renderUrl}/tools/sse</div>
+
+      <p style="font-weight:600;font-size:13px;margin-top:20px;margin-bottom:8px">Quick Setup by Platform:</p>
+      <ul style="font-size:13px;padding-left:18px;list-style:disc">
+        <li><strong>Claude Web/Mobile</strong> — Settings &rarr; Integrations &rarr; Add Custom &rarr; paste <code>/mcp</code> URL</li>
+        <li><strong>Claude Desktop</strong> — Use stdio transport (see docs)</li>
+        <li><strong>ChatGPT</strong> — Settings &rarr; Apps &rarr; Create &rarr; paste <code>/sse</code> URL</li>
+        <li><strong>Gemini CLI</strong> — Add to <code>~/.gemini/settings.json</code> with <code>url</code> property</li>
+        <li><strong>Cursor</strong> — Add to <code>.cursor/mcp.json</code> with <code>url</code> property</li>
+        <li><strong>Windsurf</strong> — Add to <code>~/.codeium/windsurf/mcp_config.json</code></li>
+        <li><strong>Cline</strong> — VS Code MCP settings &rarr; add server URL</li>
+        <li><strong>Claude Code</strong> — Add to <code>.mcp.json</code> or <code>~/.claude/mcp.json</code></li>
+      </ul>
     </div>
   </div>` : ""}
 

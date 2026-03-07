@@ -1,0 +1,104 @@
+# Gateway
+
+The gateway (`servers/gateway/`) is an Express server that makes Crow's MCP servers accessible over HTTP with OAuth 2.1 authentication.
+
+## Transports
+
+### Streamable HTTP (Primary)
+
+Modern MCP transport used by most clients.
+
+| Endpoint | Server |
+|---|---|
+| `POST\|GET\|DELETE /memory/mcp` | crow-memory |
+| `POST\|GET\|DELETE /research/mcp` | crow-research |
+| `POST\|GET\|DELETE /tools/mcp` | External tool proxy |
+| `POST\|GET\|DELETE /mcp` | crow-memory (compatibility alias) |
+
+Sessions are managed via the `mcp-session-id` header. New sessions are created on `initialize` requests.
+
+### SSE (Legacy)
+
+Legacy transport for ChatGPT and older clients.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /memory/sse` | Open SSE stream + create session |
+| `POST /memory/messages` | Send messages to session |
+| `GET /research/sse` | Open SSE stream |
+| `POST /research/messages` | Send messages |
+| `GET /tools/sse` | Open SSE stream |
+| `POST /tools/messages` | Send messages |
+
+Sessions are identified by `sessionId` query parameter on message endpoints.
+
+## OAuth 2.1
+
+The gateway implements OAuth 2.1 with Dynamic Client Registration:
+
+| Route | Purpose |
+|---|---|
+| `GET /.well-known/oauth-authorization-server` | OAuth metadata discovery |
+| `GET /.well-known/oauth-protected-resource` | Protected resource metadata |
+| `POST /register` | Dynamic client registration |
+| `GET /authorize` | Authorization endpoint |
+| `POST /token` | Token endpoint |
+| `POST /introspect` | Token introspection |
+
+OAuth is backed by SQLite tables (`oauth_clients`, `oauth_tokens`) for persistence across restarts.
+
+Run without auth for development:
+```bash
+node servers/gateway/index.js --no-auth
+```
+
+## Integration Proxy
+
+The proxy system (`proxy.js` + `integrations.js`) aggregates external MCP servers into the `/tools/mcp` endpoint:
+
+1. On startup, reads which API keys are present in environment variables
+2. For each configured integration, spawns the MCP server as a child process
+3. Connects via stdio transport and discovers available tools
+4. Prefixes tool names with the integration ID (e.g., `github_create_issue`)
+5. Exposes all tools through a single MCP endpoint
+
+### Adding a New Integration
+
+Edit `servers/gateway/integrations.js`:
+
+```js
+{
+  id: "my-service",
+  name: "My Service",
+  description: "What it does",
+  command: "npx",
+  args: ["-y", "mcp-server-my-service"],
+  envVars: ["MY_SERVICE_API_KEY"],
+  keyUrl: "https://example.com/api-keys",
+  keyInstructions: "How to get the key.",
+}
+```
+
+## Setup Page
+
+`GET /setup` serves a mobile-friendly HTML page showing:
+
+- Connected integrations (green) with tool counts
+- Available integrations (gray) with setup links
+- MCP endpoint URLs for all supported transports
+- Quick setup instructions for each AI platform
+
+No authentication required — doesn't expose secrets.
+
+## Health Check
+
+`GET /health` returns JSON status:
+
+```json
+{
+  "status": "ok",
+  "servers": ["crow-memory", "crow-research"],
+  "externalServers": [{"id": "github", "name": "GitHub", "tools": 15}],
+  "auth": true
+}
+```
