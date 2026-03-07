@@ -72,11 +72,6 @@ const noAuth = process.argv.includes("--no-auth");
 // Initialize OAuth tables
 await initOAuthTables();
 
-// Initialize external server proxy (non-blocking — failures don't stop the gateway)
-await initProxyServers().catch((err) => {
-  console.error("[proxy] Failed to initialize:", err.message);
-});
-
 // Session storage: Map<sessionId, { transport, server }>
 const memorySessions = new Map();
 const researchSessions = new Map();
@@ -283,6 +278,12 @@ app.listen(PORT, "0.0.0.0", (error) => {
   console.log(`  Tools:    POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/tools/mcp`);
   console.log(`  Setup:    GET  http://localhost:${PORT}/setup`);
   console.log(`  Health:   GET  http://localhost:${PORT}/health`);
+
+  // Initialize external server proxy AFTER listening (so health checks pass during startup).
+  // Runs in background — failures don't stop the gateway.
+  initProxyServers().catch((err) => {
+    console.error("[proxy] Failed to initialize:", err.message);
+  });
 });
 
 // --- Graceful Shutdown ---

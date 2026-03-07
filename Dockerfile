@@ -1,10 +1,14 @@
 FROM node:20-slim
 
 # Install Python 3 + uv (for uvx-based MCP servers like Google Workspace, Zotero, MCP Research)
+# Also install curl for uv installer and git which some npx packages need
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-venv \
+    python3 python3-venv curl git \
     && rm -rf /var/lib/apt/lists/* \
-    && pip3 install --break-system-packages uv
+    && curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Add uv/uvx to PATH
+ENV PATH="/root/.local/bin:${PATH}"
 
 WORKDIR /app
 
@@ -15,9 +19,6 @@ RUN npm ci --omit=dev
 # Copy server code
 COPY servers/ servers/
 COPY scripts/init-db.js scripts/
-
-# Copy MCP config (used by proxy to discover external servers)
-COPY .mcp.json ./
 
 # Initialize database
 RUN mkdir -p data && node scripts/init-db.js
