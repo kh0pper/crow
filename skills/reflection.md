@@ -6,11 +6,35 @@ A combined session-summary and reflection meta-skill. Summarizes what was accomp
 Can be invoked as `/reflection` or auto-triggered by the superpowers skill when friction accumulates or context is filling up.
 
 ## When to Use
-- **Auto-trigger**: When superpowers.md detects 2+ friction signals
+- **Auto-trigger**: When superpowers.md detects 2+ friction signals (always via checkpoint — see Transparency below)
 - **Auto-trigger**: When context window is approaching capacity (~80% full)
 - **Manual**: User types `/reflection` or asks to reflect
 - **End of session**: As part of the session-end protocol for non-trivial sessions
 - **NOT needed**: For routine, smooth, short sessions — just use session-context.md end protocol
+
+## Transparency
+
+Reflection involves multiple phases of autonomous analysis. Surface progress to the user so they can see what's happening.
+
+### Phase Progress FYI
+Show a brief FYI as each phase begins:
+*[crow: reflection phase 1 — summarizing session accomplishments]*
+*[crow: reflection phase 2 — cataloging friction points]*
+*[crow: reflection phase 4 — analyzing root causes]*
+*[crow: reflection phase 5 — storing reflection in memory]*
+*[crow: reflection phase 7 — evaluating skill-writing handoff]*
+
+### Auto-Fix Undo
+When auto-applying a minor fix (Phase 7), show:
+*[crow: auto-applied minor fix to \<skill\>.md — \<what changed\>. Say "undo that" to revert.]*
+
+Track the previous file state so "undo that" can restore it within the session.
+
+### Deferred Gap FYI
+When storing a skill gap for next session:
+*[crow: stored skill gap for next session — "\<gap description\>"]*
+
+---
 
 ## Workflow
 

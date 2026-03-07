@@ -170,11 +170,12 @@ After auto-applying, inform the user **in their preferred language**:
 
 At session start, after loading context and language preference:
 1. Search memory for entries tagged `skill-gap` or `skill-writing-queue` (search in both English and user's language)
-2. For each unresolved gap:
-   - Classify as minor or major
-   - Minor: auto-apply and mark the memory entry as resolved
-   - Major: propose the change to the user
-3. After processing, store a summary: "Processed N deferred skill gaps from reflection. Applied: X. Proposed: Y."
+2. Show what was found: *[crow: found \<N\> deferred skill gaps from previous sessions]*
+3. For each unresolved gap, show its classification:
+   *[crow: processing gap — "\<description\>". Classification: \<minor/major\>.]*
+   - Minor: auto-apply, show FYI with what changed and "say 'undo that' to revert"
+   - Major: propose the change to the user via consent protocol
+4. After processing, store a summary: "Processed N deferred skill gaps from reflection. Applied: X. Proposed: Y."
 
 ---
 
@@ -223,6 +224,15 @@ When reflection encounters a `skill-watch` entry:
 3. If unused: are the trigger conditions too narrow? → propose trigger expansion
 4. After 3+ successful friction-free uses → remove the watch item (the skill is stable)
 
+### Transparency for Metrics & Watch Items
+Surface watch item evaluations to the user:
+*[crow: watch item evaluated — \<skill\>.md has \<N\> uses, \<N\> friction. Status: \<stable/needs attention\>.]*
+
+When removing a watch item:
+*[crow: watch item removed — \<skill\>.md is stable after N friction-free uses]*
+
+Usage logging (each skill activation) stays silent — too frequent and low-value for FYI lines.
+
 ---
 
 ## Compound Skill Detection
@@ -248,6 +258,12 @@ store_memory({
 })
 ```
 Reflection can revisit this — if the workflow causes friction in future sessions, re-propose with updated reasoning.
+
+### Transparency for Re-proposals
+When re-proposing a previously declined skill, always use a checkpoint:
+**[crow checkpoint: Re-proposing skill "\<name\>" (previously declined on \<date\>). New reasoning: \<brief\>. Say "no" to decline again.]**
+
+This ensures the user knows they already said no once and can quickly decline again if they still don't want it.
 
 ---
 
