@@ -9,7 +9,8 @@
     "research-server": "node servers/research/index.js",
     "init-db": "node scripts/init-db.js",
     "wizard": "node scripts/wizard.js",
-    "desktop-config": "node scripts/generate-desktop-config.js"
+    "desktop-config": "node scripts/generate-desktop-config.js",
+    "gateway": "node servers/gateway/index.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

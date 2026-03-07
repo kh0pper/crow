@@ -29,6 +29,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | "search", "look up", "find out", "what is" | web-search | brave-search |
 | "file", "download", "document", "folder" | filesystem | filesystem |
 | "citation", "zotero", "library", "reference" | research-pipeline | zotero |
+| "create a skill", "make a workflow", "automate", "every time I..." | skill-writing | filesystem, crow-memory |
 | Session start | session-context | crow-memory |
 | End of session / high friction detected | reflection | crow-memory |
 

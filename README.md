@@ -56,7 +56,7 @@ An AI-enabled project management and research platform powered by Claude. Crow c
 | **Brave Search** | Web search for research | API key |
 | **Filesystem** | Local file system access | None |
 
-### AI Skills (15 total)
+### AI Skills (17 total)
 
 | Skill | Description |
 |-------|-------------|
@@ -75,55 +75,63 @@ An AI-enabled project management and research platform powered by Claude. Crow c
 | `notion.md` | Notion wiki and database management |
 | `web-search.md` | Brave Search for research and fact-checking |
 | `filesystem.md` | Local file management |
+| `mobile-access.md` | Remote/mobile access via HTTP gateway |
+| **`skill-writing.md`** | **Dynamic skill creation** — AI writes new skills with user consent |
 
-## Quick Start
+## Quick Start (No Terminal Needed)
 
-### For Developers (Claude Code)
+1. Download this repository as a ZIP (green "Code" button → "Download ZIP")
+2. Unzip it anywhere on your computer
+3. **macOS**: Double-click `start.command`
+   **Windows**: Double-click `start.bat`
+   **Linux**: Double-click `start.sh` (or run `./start.sh`)
+4. The setup wizard opens in your browser — follow the step-by-step instructions
+5. Open Claude Desktop — all tools are ready
+
+> **Need Node.js?** The launcher will detect if it's missing and open the download page for you.
+
+## Quick Start (Developer)
 
 ```bash
-# 1. Clone and enter the directory
 cd crow
-
-# 2. Run setup (installs deps, initializes DB)
-npm run setup
-
-# 3. Edit .env with your API keys (see .env.example)
-#    Or run the interactive wizard:
-node scripts/wizard.js
-
-# 4. Start Claude Code
-claude
+npm run setup          # Install deps, init database
+npm run wizard         # Open web wizard for API keys
+claude                 # Start Claude Code
 ```
 
 Claude automatically loads `CLAUDE.md` (system context) and `.mcp.json` (MCP server configs).
 
-### For Claude Desktop Users
+## Mobile Access (Android / iOS)
+
+Access your Crow memory and research tools from the Claude mobile app.
+
+### One-Click Cloud Deploy (Recommended)
+
+1. Click the **Deploy to Render** button below
+2. Sign up for a free Render account
+3. Wait ~3 minutes for the build
+4. Copy your service URL (e.g., `https://crow-gateway-xxxx.onrender.com`)
+5. Go to [claude.ai/settings](https://claude.ai/settings) → **Connectors** → **Add Custom Connector**
+6. Paste: `https://your-url/memory/mcp` → Click **Connect**
+7. Repeat for `https://your-url/research/mcp`
+8. Open Claude on your phone — your tools are there!
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
+
+### Self-Hosted (Docker)
 
 ```bash
-# Option A: Web-based setup wizard (recommended — opens in browser)
-cd crow
-npm run wizard
+# Cloud VPS
+docker compose --profile cloud up --build
 
-# Option B: One-line installer (does everything for you)
-curl -fsSL https://raw.githubusercontent.com/YOUR_USER/crow/main/scripts/install.sh | bash
-
-# Option C: Terminal-only wizard (no browser needed)
-npm run wizard -- --terminal
+# Local with Cloudflare Tunnel
+docker compose --profile local up --build
 ```
 
-The web wizard opens at `http://localhost:3456` with:
-- A card for each integration with step-by-step instructions
-- Direct "Get Key" links that open the provider's setup page
-- Paste fields for API keys with show/hide toggle
-- One-click "Save & Configure" that writes `.env` and generates Claude Desktop config
-- Google Workspace uses OAuth auto sign-in — no key needed
+### Desktop Extension Bundles
 
-### For Non-Technical Users
-
-1. Download and install [Claude Desktop](https://claude.ai/download)
-2. Download the `.mcpb` extension files from the `dist/` folder
-3. Double-click each `.mcpb` file to install in Claude Desktop
-4. Restart Claude Desktop — the integrations appear automatically
+1. Download `.mcpb` files from the `dist/` folder
+2. Double-click each to install in Claude Desktop
 
 ## Database Schema
 
