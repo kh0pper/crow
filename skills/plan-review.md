@@ -47,6 +47,7 @@ The plan body should include:
 
 For plans involving risk or significant changes, also include:
 - **Files affected**: List of files that will be created or modified
+- **crow.md sections affected**: List any crow.md sections that will be modified (if applicable)
 - **Risks**: Anything that could go wrong or is hard to reverse
 - **Rollback**: How to undo if needed
 

@@ -7,16 +7,17 @@ Automatically load and save context at the beginning and end of sessions. Ensure
 At the beginning of every session, perform these steps:
 
 1. **Load context**: Use `crow_recall_by_context` with any available task description
-2. **Load language preference**: `crow_recall_by_context("language preference locale i18n")`
+2. **Load crow.md behavioral context**: Use `crow_get_context` with appropriate `platform` param. This loads cross-platform behavioral instructions (identity, memory protocols, transparency rules, etc.). crow.md is the authoritative source for how Crow should behave — apply its instructions for the session.
+3. **Load language preference**: `crow_recall_by_context("language preference locale i18n")`
    - If found → apply for all session output
    - If not found → detect from user's first message language, confirm with user, then store (see `skills/i18n.md`)
-3. **Check stats**: Use `crow_memory_stats` to understand what's stored
-4. **Check active projects**: Use `crow_list_projects` to see active research
-5. **Surface what was loaded** (Transparency): Show one consolidated FYI after steps 1-4:
-   *[crow: session start — loaded N memories, N active projects. Language: \<lang\>.]*
+4. **Check stats**: Use `crow_memory_stats` to understand what's stored
+5. **Check active projects**: Use `crow_list_projects` to see active research
+6. **Surface what was loaded** (Transparency): Show one consolidated FYI after steps 1-5:
+   *[crow: session start — loaded crow.md context, N memories, N active projects. Language: \<lang\>.]*
    If specific memories are particularly relevant, name them briefly:
    *[crow: key context — "Project X deadline March 15", "Prefers TypeScript"]*
-6. **Greet with context**: Reference relevant prior context — **in the user's preferred language**
+7. **Greet with context**: Reference relevant prior context — **in the user's preferred language**
 
 ## Session End Protocol
 Before the session ends:
@@ -42,7 +43,8 @@ Before the session ends:
 6. **Store any additional items**, showing a FYI for each:
    *[crow: stored memory — "\<content summary\>" (category, importance N)]*
 7. **Update project status**: If research projects were worked on, update their status
-8. **Reflect if needed**: If the session had notable friction (2+ friction signals), show a checkpoint before running reflection:
+8. **Cross-platform sync**: Memories stored during this session are automatically visible in crow.md's dynamic section on all connected platforms — no explicit sync step needed. The shared database handles it.
+9. **Reflect if needed**: If the session had notable friction (2+ friction signals), show a checkpoint before running reflection:
    **[crow checkpoint: Session had N friction signals. Will run reflection. Say "skip" to cancel.]**
    For smooth sessions, skip reflection.
 

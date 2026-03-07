@@ -27,6 +27,7 @@ Use `crow_store_memory` with appropriate categorization:
 ### Importance Guidelines
 - **9-10**: Critical project requirements, deadlines, key contacts
 - **7-8**: Important preferences, recurring processes, project milestones
+  - **Note:** Preferences stored with importance >= 8 automatically appear in crow.md's dynamic "Key Preferences" section, visible across all connected platforms.
 - **5-6**: General context, background information
 - **3-4**: Nice-to-know details, minor preferences
 - **1-2**: Ephemeral notes, temporary context
