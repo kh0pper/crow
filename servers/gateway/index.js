@@ -1,16 +1,23 @@
 #!/usr/bin/env node
 
 /**
- * Crow Gateway — Streamable HTTP Server
+ * Crow Gateway — Streamable HTTP + SSE Server
  *
- * Exposes crow-memory and crow-research as HTTP endpoints for remote access
- * (Claude mobile apps, Claude.ai Connectors). Supports OAuth 2.1 with
- * Dynamic Client Registration.
+ * Exposes crow-memory and crow-research as HTTP endpoints for remote access.
+ * Supports both Streamable HTTP (2025-03-26) and legacy SSE (2024-11-05)
+ * transports for maximum platform compatibility. OAuth 2.1 with Dynamic
+ * Client Registration.
  *
  * Routes:
- *   POST|GET|DELETE /memory/mcp   — crow-memory MCP endpoint
- *   POST|GET|DELETE /research/mcp — crow-research MCP endpoint
- *   POST|GET|DELETE /tools/mcp    — proxy for external MCP servers
+ *   POST|GET|DELETE /memory/mcp   — crow-memory (Streamable HTTP)
+ *   POST|GET|DELETE /research/mcp — crow-research (Streamable HTTP)
+ *   POST|GET|DELETE /tools/mcp    — proxy for external MCP servers (Streamable HTTP)
+ *   GET  /memory/sse              — crow-memory (SSE transport init)
+ *   POST /memory/messages         — crow-memory (SSE message handling)
+ *   GET  /research/sse            — crow-research (SSE transport init)
+ *   POST /research/messages       — crow-research (SSE message handling)
+ *   GET  /tools/sse               — proxy (SSE transport init)
+ *   POST /tools/messages          — proxy (SSE message handling)
  *   GET /health                   — health check
  *   GET /setup                    — integration status page
  *   OAuth routes (/.well-known/*, /authorize, /token, /register)
@@ -22,6 +29,7 @@
 
 import { randomUUID } from "node:crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
 /**
@@ -73,9 +81,14 @@ const noAuth = process.argv.includes("--no-auth");
 await initOAuthTables();
 
 // Session storage: Map<sessionId, { transport, server }>
+// Streamable HTTP sessions
 const memorySessions = new Map();
 const researchSessions = new Map();
 const toolsSessions = new Map();
+// SSE sessions
+const memorySseSessions = new Map();
+const researchSseSessions = new Map();
+const toolsSseSessions = new Map();
 
 // Create Express app
 const app = express();
@@ -240,7 +253,51 @@ function createMcpHandler(sessions, createServer) {
   return { postHandler, getHandler, deleteHandler };
 }
 
-// --- Mount MCP Endpoints ---
+// --- SSE Handler Factory (legacy transport for ChatGPT compatibility) ---
+
+function createSseHandler(sessions, createServer, messagesPath) {
+  const sseHandler = async (req, res) => {
+    try {
+      const transport = new SSEServerTransport(messagesPath, res);
+      const sessionId = transport.sessionId;
+      sessions.set(sessionId, { transport, server: null });
+
+      res.on("close", () => {
+        sessions.delete(sessionId);
+      });
+
+      const server = createServer();
+      sessions.get(sessionId).server = server;
+      await server.connect(transport);
+    } catch (error) {
+      console.error("Error creating SSE session:", error);
+      if (!res.headersSent) {
+        res.status(500).send("Failed to create SSE session");
+      }
+    }
+  };
+
+  const messagesHandler = async (req, res) => {
+    const sessionId = req.query.sessionId;
+    if (!sessionId || !sessions.has(sessionId)) {
+      res.status(400).send("Invalid or missing sessionId query parameter");
+      return;
+    }
+    try {
+      const session = sessions.get(sessionId);
+      await session.transport.handlePostMessage(req, res, req.body);
+    } catch (error) {
+      console.error("Error handling SSE message:", error);
+      if (!res.headersSent) {
+        res.status(500).send("Error handling message");
+      }
+    }
+  };
+
+  return { sseHandler, messagesHandler };
+}
+
+// --- Mount MCP Endpoints (Streamable HTTP) ---
 
 const memoryHandlers = createMcpHandler(memorySessions, createMemoryServer);
 const researchHandlers = createMcpHandler(researchSessions, createResearchServer);
@@ -265,6 +322,26 @@ mountEndpoint("/tools/mcp", toolsHandlers);
 // Also mount at /mcp for single-server compatibility (uses memory)
 mountEndpoint("/mcp", memoryHandlers);
 
+// --- Mount SSE Endpoints (legacy transport) ---
+
+const memorySseHandlers = createSseHandler(memorySseSessions, createMemoryServer, "/memory/messages");
+const researchSseHandlers = createSseHandler(researchSseSessions, createResearchServer, "/research/messages");
+const toolsSseHandlers = createSseHandler(toolsSseSessions, createProxyServer, "/tools/messages");
+
+function mountSseEndpoint(ssePath, messagesPath, handlers) {
+  if (authMiddleware) {
+    app.get(ssePath, authMiddleware, handlers.sseHandler);
+    app.post(messagesPath, authMiddleware, handlers.messagesHandler);
+  } else {
+    app.get(ssePath, handlers.sseHandler);
+    app.post(messagesPath, handlers.messagesHandler);
+  }
+}
+
+mountSseEndpoint("/memory/sse", "/memory/messages", memorySseHandlers);
+mountSseEndpoint("/research/sse", "/research/messages", researchSseHandlers);
+mountSseEndpoint("/tools/sse", "/tools/messages", toolsSseHandlers);
+
 // --- Start Server ---
 
 app.listen(PORT, "0.0.0.0", (error) => {
@@ -273,9 +350,14 @@ app.listen(PORT, "0.0.0.0", (error) => {
     process.exit(1);
   }
   console.log(`Crow Gateway listening on http://0.0.0.0:${PORT}`);
-  console.log(`  Memory:   POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/memory/mcp`);
-  console.log(`  Research: POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/research/mcp`);
-  console.log(`  Tools:    POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/tools/mcp`);
+  console.log(`  Streamable HTTP (2025-03-26):`);
+  console.log(`    Memory:   POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/memory/mcp`);
+  console.log(`    Research: POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/research/mcp`);
+  console.log(`    Tools:    POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/tools/mcp`);
+  console.log(`  SSE (2024-11-05):`);
+  console.log(`    Memory:   GET  ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/memory/sse`);
+  console.log(`    Research: GET  ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/research/sse`);
+  console.log(`    Tools:    GET  ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/tools/sse`);
   console.log(`  Setup:    GET  http://localhost:${PORT}/setup`);
   console.log(`  Health:   GET  http://localhost:${PORT}/health`);
 
@@ -290,7 +372,11 @@ app.listen(PORT, "0.0.0.0", (error) => {
 
 process.on("SIGINT", async () => {
   console.log("\nShutting down gateway...");
-  for (const [sid, session] of [...memorySessions, ...researchSessions, ...toolsSessions]) {
+  const allSessions = [
+    ...memorySessions, ...researchSessions, ...toolsSessions,
+    ...memorySseSessions, ...researchSseSessions, ...toolsSseSessions,
+  ];
+  for (const [sid, session] of allSessions) {
     try {
       await session.transport.close();
     } catch {}
@@ -298,5 +384,8 @@ process.on("SIGINT", async () => {
   memorySessions.clear();
   researchSessions.clear();
   toolsSessions.clear();
+  memorySseSessions.clear();
+  researchSseSessions.clear();
+  toolsSseSessions.clear();
   process.exit(0);
 });
