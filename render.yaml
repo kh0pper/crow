@@ -7,7 +7,7 @@ services:
     name: crow-gateway
     runtime: node
     plan: free
-    buildCommand: npm ci --omit=dev && node scripts/init-db.js
+    buildCommand: npm install --production && node scripts/init-db.js
     startCommand: node servers/gateway/index.js
     healthCheckPath: /health
     envVars:
