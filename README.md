@@ -100,28 +100,30 @@ Claude automatically loads `CLAUDE.md` (system context) and `.mcp.json` (MCP ser
 ### For Claude Desktop Users
 
 ```bash
-# Option A: Interactive wizard (recommended)
+# Option A: Web-based setup wizard (recommended — opens in browser)
 cd crow
-node scripts/wizard.js
+npm run wizard
 
-# Option B: One-line installer
+# Option B: One-line installer (does everything for you)
 curl -fsSL https://raw.githubusercontent.com/YOUR_USER/crow/main/scripts/install.sh | bash
 
-# Option C: Manual config generation
-node scripts/generate-desktop-config.js
+# Option C: Terminal-only wizard (no browser needed)
+npm run wizard -- --terminal
 ```
 
-The wizard will:
-1. Ask which integrations you want to enable
-2. Walk you through getting API keys (with links)
-3. Generate and install `claude_desktop_config.json` automatically
+The web wizard opens at `http://localhost:3456` with:
+- A card for each integration with step-by-step instructions
+- Direct "Get Key" links that open the provider's setup page
+- Paste fields for API keys with show/hide toggle
+- One-click "Save & Configure" that writes `.env` and generates Claude Desktop config
+- Google Workspace uses OAuth auto sign-in — no key needed
 
 ### For Non-Technical Users
 
 1. Download and install [Claude Desktop](https://claude.ai/download)
 2. Download the `.mcpb` extension files from the `dist/` folder
 3. Double-click each `.mcpb` file to install in Claude Desktop
-4. Restart Claude Desktop
+4. Restart Claude Desktop — the integrations appear automatically
 
 ## Database Schema
 
