@@ -528,6 +528,88 @@ function buildHTML(env) {
       <div class="status" id="status"></div>
     </form>
 
+    <!-- Mobile Access Section -->
+    <div style="margin-top: 2.5rem; padding-top: 1.5rem; border-top: 1px solid #2d333b;">
+      <h2 style="color: #f0f6fc; font-size: 1.3rem; margin-bottom: 0.5rem;">
+        Mobile Access (Android / iOS)
+      </h2>
+      <p style="color: #8b949e; font-size: 0.9rem; margin-bottom: 1rem;">
+        Access your Crow memory and research tools from the Claude mobile app.
+      </p>
+
+      <div class="card">
+        <div class="card-header" onclick="toggleCard('mobile-cloud')">
+          <div class="card-title">
+            <h3>One-Click Cloud Deploy (Recommended)</h3>
+            <p>Deploy to Render.com — free tier, takes 5 minutes</p>
+          </div>
+          <div class="card-badges">
+            <span class="badge oauth">Easiest</span>
+            <span class="chevron" id="chevron-mobile-cloud">&#9660;</span>
+          </div>
+        </div>
+        <div class="card-body" id="body-mobile-cloud" style="display:none;">
+          <div class="steps">
+            <h4>How to set up:</h4>
+            <ol>
+              <li>Click the <strong>Deploy to Render</strong> button below (opens in new tab)</li>
+              <li>Sign up for a free Render account if you don't have one</li>
+              <li>Click <strong>"Create Web Service"</strong> — Render will build and deploy automatically</li>
+              <li>Wait ~3 minutes for the build to complete</li>
+              <li>Copy your service URL (e.g., <code>https://crow-gateway-xxxx.onrender.com</code>)</li>
+              <li>Go to <a href="https://claude.ai/settings" target="_blank">claude.ai/settings</a> → <strong>Connectors</strong></li>
+              <li>Click <strong>"Add Custom Connector"</strong></li>
+              <li>Paste your URL + <code>/memory/mcp</code> (e.g., <code>https://crow-gateway-xxxx.onrender.com/memory/mcp</code>)</li>
+              <li>Click <strong>Connect</strong> → complete the authorization</li>
+              <li>Repeat step 7-9 for <code>/research/mcp</code> if you want research tools on mobile too</li>
+              <li>Open the Claude app on your phone — your tools are there!</li>
+            </ol>
+            <p style="margin-top: 0.75rem;">
+              <a href="https://render.com/deploy" target="_blank" style="display: inline-block; background: #238636; color: white; padding: 0.5rem 1.25rem; border-radius: 6px; text-decoration: none; font-weight: 600;">
+                Deploy to Render
+              </a>
+            </p>
+          </div>
+          <div class="key-field" style="margin-top: 1rem;">
+            <label>Your Gateway URL (after deploying)</label>
+            <div class="input-row">
+              <input type="text" id="CROW_GATEWAY_URL" name="CROW_GATEWAY_URL"
+                     value="${env.CROW_GATEWAY_URL || ""}"
+                     placeholder="https://crow-gateway-xxxx.onrender.com"
+                     autocomplete="off">
+              <button type="button" class="toggle-btn" onclick="testGateway()">Test</button>
+            </div>
+            <small id="gateway-test-result" style="display:block; margin-top: 0.25rem; color: #484f58;"></small>
+          </div>
+        </div>
+      </div>
+
+      <div class="card advanced-card">
+        <div class="card-header" onclick="toggleCard('mobile-local')">
+          <div class="card-title">
+            <h3>Local Network (Advanced)</h3>
+            <p>Run on your own computer with Docker + tunnel</p>
+          </div>
+          <div class="card-badges">
+            <span class="badge advanced">Docker Required</span>
+            <span class="chevron" id="chevron-mobile-local">&#9660;</span>
+          </div>
+        </div>
+        <div class="card-body" id="body-mobile-local" style="display:none;">
+          <div class="steps">
+            <h4>How to set up:</h4>
+            <ol>
+              <li>Install <a href="https://www.docker.com/products/docker-desktop/" target="_blank">Docker Desktop</a> if you don't have it</li>
+              <li>Open a terminal in the Crow directory</li>
+              <li>Run: <code>docker compose --profile local up --build</code></li>
+              <li>For internet access, set up a <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/" target="_blank">Cloudflare Tunnel</a> (free) or use <a href="https://ngrok.com" target="_blank">ngrok</a></li>
+              <li>Add the tunnel URL as a connector at <a href="https://claude.ai/settings" target="_blank">claude.ai/settings</a></li>
+            </ol>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="footer">
       After saving, restart Claude Code or Claude Desktop to use your new integrations.
     </div>
@@ -551,6 +633,27 @@ function buildHTML(env) {
       } else {
         input.type = 'password';
         btn.textContent = 'Show';
+      }
+    }
+
+    async function testGateway() {
+      const url = document.getElementById('CROW_GATEWAY_URL').value.trim();
+      const result = document.getElementById('gateway-test-result');
+      if (!url) { result.textContent = 'Enter a URL first'; result.style.color = '#d29922'; return; }
+      result.textContent = 'Testing...'; result.style.color = '#58a6ff';
+      try {
+        const resp = await fetch(url.replace(/\\/$/, '') + '/health', { mode: 'cors' });
+        const data = await resp.json();
+        if (data.status === 'ok') {
+          result.textContent = 'Connected! Servers: ' + data.servers.join(', ');
+          result.style.color = '#3fb950';
+        } else {
+          result.textContent = 'Unexpected response from server';
+          result.style.color = '#d29922';
+        }
+      } catch (err) {
+        result.textContent = 'Could not connect — check the URL and try again';
+        result.style.color = '#f85149';
       }
     }
 

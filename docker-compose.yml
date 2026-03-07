@@ -1,0 +1,42 @@
+## Crow AI Platform — Docker Compose
+##
+## Cloud deployment:
+##   docker compose --profile cloud up --build
+##
+## Local with Cloudflare Tunnel:
+##   docker compose --profile local up --build
+
+services:
+  crow-gateway:
+    build: .
+    ports:
+      - "${CROW_GATEWAY_PORT:-3001}:3001"
+    volumes:
+      - crow-data:/app/data
+    env_file: .env
+    environment:
+      - CROW_TRANSPORT=http
+      - CROW_GATEWAY_PORT=3001
+      - CROW_DB_PATH=/app/data/crow.db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/health').then(r => r.ok ? process.exit(0) : process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    profiles: [cloud, local]
+
+  # Optional: Cloudflare Tunnel for home network access
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      crow-gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles: [local]
+
+volumes:
+  crow-data:

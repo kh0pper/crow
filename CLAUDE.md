@@ -9,6 +9,7 @@ You are operating within the Crow AI Platform — an AI-enabled project manageme
 ### Custom (built-in)
 - **crow-memory**: Persistent memory with full-text search (SQLite). Store and recall information across sessions.
 - **crow-research**: Research pipeline with source tracking, APA citations, verification, and bibliography generation.
+- **crow-gateway**: HTTP gateway for remote/mobile access (Streamable HTTP + OAuth 2.1). Exposes memory and research over HTTPS.
 
 ### External Integrations
 - **trello**: Trello board/card management
@@ -72,6 +73,10 @@ Load skill files from `skills/` directory for detailed workflows:
 - `notion.md` — Notion wiki and database management
 - `web-search.md` — Brave Search for research and fact-checking
 - `filesystem.md` — Local file management
+
+### Infrastructure
+- `mobile-access.md` — Remote/mobile access via Streamable HTTP gateway
+- `skill-writing.md` — **Dynamic skill creation**: AI writes new skills with user consent
 
 ## Key Principles
 - **Always cite sources**: Every piece of external information gets an APA citation

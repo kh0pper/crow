@@ -143,5 +143,28 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_notes_source ON research_notes(source_id);
 `);
 
+// --- OAuth Tables (for mobile gateway) ---
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS oauth_clients (
+    client_id TEXT PRIMARY KEY,
+    metadata TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS oauth_tokens (
+    token TEXT PRIMARY KEY,
+    token_type TEXT NOT NULL CHECK(token_type IN ('access', 'refresh')),
+    client_id TEXT NOT NULL,
+    scopes TEXT DEFAULT '',
+    resource TEXT,
+    expires_at TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_tokens_client ON oauth_tokens(client_id);
+  CREATE INDEX IF NOT EXISTS idx_tokens_type ON oauth_tokens(token_type);
+`);
+
 console.log("Database initialized successfully at:", DB_PATH);
 db.close();
