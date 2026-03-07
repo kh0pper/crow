@@ -3,7 +3,7 @@ layout: home
 
 hero:
   name: Crow AI Platform
-  text: One memory, every AI platform — now with P2P sharing
+  text: Memory, research, and encrypted sharing across every AI platform
   tagline: Start in Claude, continue in ChatGPT, pick up in Gemini. Share memories, research, and messages directly with other Crow users — end-to-end encrypted, no central server.
   image:
     src: /crow-hero.svg
