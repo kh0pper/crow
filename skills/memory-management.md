@@ -47,6 +47,36 @@ Use `store_memory` with appropriate categorization:
 2. Choose the right category and importance level
 3. Add descriptive tags for future retrieval
 4. Note the source (conversation, document, API, etc.)
+5. **Show the FYI line** immediately after storing (see Transparency section below)
+
+## Transparency: Surfacing Memory Operations
+
+Follow the Transparency Protocol defined in `CLAUDE.md`. Memory operations are the most common autonomous actions, so consistent surfacing is critical.
+
+### On Every Store
+After calling `store_memory`, immediately show a FYI line:
+
+*[crow: stored memory — "\<first ~60 chars of content\>" (\<category\>, importance \<N\>, tags: \<tags\>)]*
+
+### On Every Recall
+After `recall_by_context` or `search_memories` returns results, show:
+
+*[crow: recalled \<N\> memories matching "\<query summary\>"]*
+
+Only show the count — don't dump memory contents into FYI lines. Reference the relevant memories naturally in your response.
+
+### Undo Mechanism
+If the user says "undo that" or "don't store that" after a memory FYI:
+1. Use `delete_memory` with the ID of the most recently stored memory
+2. Confirm: *[crow: memory deleted — "\<content summary\>"]*
+
+### Session Memory Ledger
+Track all memory stores made during the session. If the user says "show me what you stored", list them all:
+
+*[crow: memories stored this session:]*
+1. *"\<content\>" (category, importance N)*
+2. *"\<content\>" (category, importance N)*
+...
 
 ## Examples
 

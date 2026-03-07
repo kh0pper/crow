@@ -9,6 +9,9 @@ This is the master routing skill. Consult this **before every task** to determin
 3. **Multi-tool by default**: Most tasks benefit from combining 2-3 tools
 4. **Document as you go**: Important findings → `store_memory`; external sources → `add_source`
 5. **Reflect when needed**: If friction accumulates, trigger the reflection skill
+6. **Surface skill activation**: When a skill activates from the trigger table, show: *[crow: activated skill — \<skill-name\>.md]*
+7. **Surface friction signals**: When noting a friction signal, show: *[crow: friction signal — \<description\> (\<N\> of 2 threshold)]*
+8. **Transparency protocol**: Follow the Transparency Protocol in `CLAUDE.md` for all autonomous actions
 
 ---
 
@@ -42,6 +45,17 @@ This is the master routing skill. Consult this **before every task** to determin
 ---
 
 ## Compound Workflows
+
+### Transparency for Compound Workflows
+Before running any compound workflow, show a checkpoint listing the steps:
+
+**[crow checkpoint: Running "\<workflow name\>". Steps: 1) Gmail 2) Calendar 3) Trello 4) Memory. Say "skip" to cancel or "skip step N" to omit a step.]**
+
+Then show FYI lines as each step completes:
+*[crow: step 1/N — checked Gmail, 3 unread]*
+*[crow: step 2/N — checked Calendar, 2 events today]*
+
+This lets the user see progress and customize which steps run.
 
 ### "Daily briefing" / "What's going on?"
 1. **Gmail** — Check for important/unread emails
@@ -105,7 +119,11 @@ Track these signals during the session:
 - Long chains of tool calls without producing results
 - User explicitly expressing frustration
 
-When 2+ friction signals accumulate, suggest running the reflection skill before the session ends.
+**Friction Visibility**: Every friction signal is surfaced to the user immediately:
+*[crow: friction signal — \<what happened\> (\<current count\> of 2 threshold)]*
+
+When 2+ friction signals accumulate, show a checkpoint before triggering reflection:
+**[crow checkpoint: 2+ friction signals accumulated. Will run reflection skill to analyze. Say "skip reflection" to cancel.]**
 
 ### Skill Improvement Cycle
 The reflection and skill-writing skills form a continuous improvement loop:
