@@ -8,6 +8,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createDbClient } from "../db.js";
+import { generateCrowContext, PROTECTED_SECTIONS } from "./crow-context.js";
 
 export function createMemoryServer(dbPath) {
   const db = createDbClient(dbPath);
@@ -271,7 +272,156 @@ export function createMemoryServer(dbPath) {
     }
   );
 
+  // --- Cross-Platform Context (crow.md) Tools ---
+
+  server.tool(
+    "crow_get_context",
+    "Generate and return the full crow.md cross-platform behavioral context document. This document defines how Crow behaves across all AI platforms — personality, memory protocols, transparency rules, and more. Includes optional dynamic data (memory stats, active projects, preferences).",
+    {
+      include_dynamic: z.boolean().default(true).describe("Include dynamic sections (memory stats, active projects, preferences)"),
+      platform: z.string().default("generic").describe("Target platform hint: claude, chatgpt, gemini, grok, cursor, windsurf, cline, generic"),
+    },
+    async ({ include_dynamic, platform }) => {
+      const markdown = await generateCrowContext(db, { includeDynamic: include_dynamic, platform });
+      return { content: [{ type: "text", text: markdown }] };
+    }
+  );
+
+  server.tool(
+    "crow_update_context_section",
+    "Update an existing crow.md section's content, title, enabled status, or sort order. Works on both protected and custom sections.",
+    {
+      section_key: z.string().describe("The section key to update (e.g. 'identity', 'memory_protocol')"),
+      content: z.string().optional().describe("New content for the section"),
+      section_title: z.string().optional().describe("New title for the section"),
+      enabled: z.boolean().optional().describe("Enable or disable this section"),
+      sort_order: z.number().optional().describe("New sort order (lower = earlier)"),
+    },
+    async ({ section_key, content, section_title, enabled, sort_order }) => {
+      const { rows } = await db.execute({
+        sql: "SELECT * FROM crow_context WHERE section_key = ?",
+        args: [section_key],
+      });
+      if (rows.length === 0) {
+        return { content: [{ type: "text", text: `Section "${section_key}" not found.` }] };
+      }
+
+      const updates = [];
+      const params = [];
+      if (content !== undefined) { updates.push("content = ?"); params.push(content); }
+      if (section_title !== undefined) { updates.push("section_title = ?"); params.push(section_title); }
+      if (enabled !== undefined) { updates.push("enabled = ?"); params.push(enabled ? 1 : 0); }
+      if (sort_order !== undefined) { updates.push("sort_order = ?"); params.push(sort_order); }
+
+      if (updates.length === 0) {
+        return { content: [{ type: "text", text: "No updates provided." }] };
+      }
+
+      updates.push("updated_at = datetime('now')");
+      params.push(section_key);
+
+      await db.execute({
+        sql: `UPDATE crow_context SET ${updates.join(", ")} WHERE section_key = ?`,
+        args: params,
+      });
+
+      return { content: [{ type: "text", text: `Section "${section_key}" updated.` }] };
+    }
+  );
+
+  server.tool(
+    "crow_add_context_section",
+    "Add a new custom section to crow.md. Custom sections can be used to extend Crow's behavioral context with project-specific or user-specific instructions.",
+    {
+      section_key: z.string().describe("Unique key for the section (e.g. 'project_guidelines', 'coding_style')"),
+      section_title: z.string().describe("Display title for the section"),
+      content: z.string().describe("Markdown content for the section"),
+      sort_order: z.number().default(100).describe("Sort order (lower = earlier, default 100)"),
+    },
+    async ({ section_key, section_title, content, sort_order }) => {
+      if (PROTECTED_SECTIONS.includes(section_key)) {
+        return { content: [{ type: "text", text: `Cannot create section with protected key "${section_key}". Use crow_update_context_section to modify it.` }] };
+      }
+
+      try {
+        await db.execute({
+          sql: "INSERT INTO crow_context (section_key, section_title, content, sort_order) VALUES (?, ?, ?, ?)",
+          args: [section_key, section_title, content, sort_order],
+        });
+        return { content: [{ type: "text", text: `Section "${section_key}" added to crow.md.` }] };
+      } catch (err) {
+        if (err.message?.includes("UNIQUE")) {
+          return { content: [{ type: "text", text: `Section "${section_key}" already exists. Use crow_update_context_section to modify it.` }] };
+        }
+        throw err;
+      }
+    }
+  );
+
+  server.tool(
+    "crow_list_context_sections",
+    "List all crow.md sections with their metadata (key, title, sort order, enabled status). Does not return full content — use crow_get_context for that.",
+    {},
+    async () => {
+      const { rows } = await db.execute(
+        "SELECT section_key, section_title, sort_order, enabled, updated_at FROM crow_context ORDER BY sort_order ASC, id ASC"
+      );
+
+      if (rows.length === 0) {
+        return { content: [{ type: "text", text: "No crow.md sections found. Run `npm run init-db` to seed defaults." }] };
+      }
+
+      const formatted = rows
+        .map((r) => {
+          const status = r.enabled ? "enabled" : "disabled";
+          const prot = PROTECTED_SECTIONS.includes(r.section_key) ? " [protected]" : "";
+          return `- ${r.section_key}${prot}: "${r.section_title}" (order: ${r.sort_order}, ${status}, updated: ${r.updated_at})`;
+        })
+        .join("\n");
+
+      return { content: [{ type: "text", text: `crow.md sections:\n\n${formatted}` }] };
+    }
+  );
+
+  server.tool(
+    "crow_delete_context_section",
+    "Delete a custom crow.md section. Protected sections (identity, memory_protocol, research_protocol, session_protocol, transparency_rules, skills_reference, key_principles) cannot be deleted — only disabled.",
+    {
+      section_key: z.string().describe("The section key to delete"),
+    },
+    async ({ section_key }) => {
+      if (PROTECTED_SECTIONS.includes(section_key)) {
+        return {
+          content: [{ type: "text", text: `Cannot delete protected section "${section_key}". Use crow_update_context_section with enabled=false to disable it instead.` }],
+        };
+      }
+
+      const result = await db.execute({
+        sql: "DELETE FROM crow_context WHERE section_key = ?",
+        args: [section_key],
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: result.rowsAffected > 0
+              ? `Section "${section_key}" deleted.`
+              : `Section "${section_key}" not found.`,
+          },
+        ],
+      };
+    }
+  );
+
   // --- Resources ---
+
+  server.resource("crow-context", "crow://context", async (uri) => {
+    const markdown = await generateCrowContext(db, { includeDynamic: true, platform: "generic" });
+    return {
+      contents: [{ uri: uri.href, mimeType: "text/markdown", text: markdown }],
+    };
+  });
 
   server.resource("memory-categories", "memory://categories", async (uri) => {
     const { rows: categories } = await db.execute(

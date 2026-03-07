@@ -46,6 +46,20 @@ Then verify:
 
 > "Search my memories for 'ChatGPT'."
 
+## Cross-Platform Context
+
+Crow shares behavioral context via `crow.md`. On ChatGPT, you can load it by asking:
+
+> "Use the crow_get_context tool with platform set to chatgpt"
+
+This gives ChatGPT all of Crow's instructions with ChatGPT-specific formatting (bracketed markers instead of italic/bold). Alternatively, fetch it via HTTP:
+
+```
+GET https://your-gateway.onrender.com/crow.md?platform=chatgpt
+```
+
+Any memories you store in ChatGPT are instantly available from Claude, Gemini, or any other connected platform. See the [Cross-Platform Guide](/guide/cross-platform) for more details.
+
 ## Limitations
 
 - ChatGPT's MCP support may vary by plan and region

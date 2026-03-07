@@ -103,31 +103,32 @@ Skills are markdown files in `skills/`. They are loaded by Claude on demand — 
 
 This section guides Claude's behavior when operating as the Crow AI assistant (not when developing the codebase).
 
-### Session Protocol
+### Cross-Platform Behavioral Context (crow.md)
 
-- **On start**: `crow_recall_by_context` with user's first message, check `crow_memory_stats`, load language preference, consult `skills/superpowers.md`
-- **During**: Store important info with `crow_store_memory`, document sources with `crow_add_source`, monitor friction signals
-- **On end**: Store unfinished work, run reflection if friction occurred
+Crow's core behavioral instructions — identity, memory protocols, research protocols, session management, transparency rules, and key principles — are stored in the `crow_context` database table and served dynamically as **crow.md**. This makes the same behavioral context available across all platforms (Claude, ChatGPT, Gemini, Grok, Cursor, etc.).
 
-### Transparency Protocol
+**Access methods:**
+- MCP tool: `crow_get_context` (with optional `platform` and `include_dynamic` params)
+- MCP resource: `crow://context`
+- HTTP endpoint: `GET /crow.md` (supports `?platform=` and `?dynamic=false`)
 
-Surface all autonomous actions inline:
-- **Tier 1 (FYI)**: Italic one-liners for routine actions — `*[crow: stored memory — "..." (preference, importance 8)]*`
-- **Tier 2 (Checkpoint)**: Bold lines before significant decisions, wait for user — `**[crow checkpoint: ...]**`
+**Management tools:** `crow_list_context_sections`, `crow_update_context_section`, `crow_add_context_section`, `crow_delete_context_section`
 
-### Key Principles
+See `skills/crow-context.md` for the full workflow.
 
-- Always cite sources with APA citations
-- When in doubt, store it in memory
-- Verify sources before marking verified
-- Consistent tagging across memory and research
-- Detect and adapt to user's language (see `skills/i18n.md`)
-- All output in user's preferred language; skill files stay in English
+### Claude-Specific Supplements
+
+These apply only when running on Claude (in addition to crow.md):
+
+- **Transparency formatting**: Use *italic* for Tier 1 FYI lines, **bold** for Tier 2 checkpoints
+- **Skill file access**: Load skill files from `skills/` directory on demand — they are markdown behavioral prompts, not code
+- **CLAUDE.md**: This file itself provides developer context (build commands, architecture) that other platforms don't need
 
 ### Skills Reference
 
 Consult `skills/superpowers.md` first — it routes user intent to the right skills and tools. Core skills:
 - `superpowers.md` — Auto-activation routing
+- `crow-context.md` — Cross-platform behavioral context management
 - `reflection.md` — Session friction analysis + improvement proposals
 - `plan-review.md` — Checkpoint-based planning for multi-step tasks
 - `skill-writing.md` — Dynamic skill creation with user consent

@@ -93,6 +93,14 @@ Check it worked:
 > What do you remember?
 ```
 
+## Cross-Platform Context
+
+Load Crow's shared behavioral context:
+
+> "Load your crow.md context"
+
+Or use `crow_get_context` with `platform: "claude"`. Memories stored via Claude Code are shared with all other connected platforms. See the [Cross-Platform Guide](/guide/cross-platform).
+
 ## Tips
 
 - Use the project-level `.mcp.json` to share Crow config with your team
