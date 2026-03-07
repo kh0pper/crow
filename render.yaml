@@ -13,8 +13,6 @@ services:
     envVars:
       - key: CROW_TRANSPORT
         value: http
-      - key: CROW_GATEWAY_PORT
-        value: "3001"
       - key: TURSO_DATABASE_URL
         sync: false
       - key: TURSO_AUTH_TOKEN
