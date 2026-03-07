@@ -78,7 +78,61 @@ An AI-enabled project management and research platform powered by Claude. Crow c
 | `mobile-access.md` | Remote/mobile access via HTTP gateway |
 | **`skill-writing.md`** | **Dynamic skill creation** — AI writes new skills with user consent |
 
-## Quick Start (No Terminal Needed)
+---
+
+## Use Crow from Claude.ai (Web & Mobile)
+
+**This is the easiest way to use Crow.** No coding required. Works from any browser or the Claude mobile app.
+
+You'll set up two free accounts (Render + Turso), click a few buttons, and you're done. Takes about 10 minutes.
+
+### Step 1: Create a free database
+
+Crow needs a place to store your memories and research. Turso gives you a free cloud database.
+
+1. Go to [turso.tech](https://turso.tech) and sign up (free)
+2. Once logged in, click **Create Database**
+3. Name it `crow` and pick any region close to you
+4. After it's created, click on your `crow` database
+5. You'll need two things from Turso (keep this tab open):
+   - **Database URL** — looks like `libsql://crow-yourname.turso.io`
+   - **Auth Token** — click **Generate Token** to create one, then copy it
+
+### Step 2: Deploy to Render (one click)
+
+Click this button to deploy Crow to the cloud for free:
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/kh0pper/crow)
+
+1. Sign up for [Render](https://render.com) if you don't have an account (free)
+2. After clicking the button, Render will ask you to fill in two values:
+   - **TURSO_DATABASE_URL** — paste the database URL from Step 1
+   - **TURSO_AUTH_TOKEN** — paste the auth token from Step 1
+3. Click **Apply** and wait ~3 minutes for the build to finish
+4. When it's done, copy your service URL — it looks like `https://crow-gateway-xxxx.onrender.com`
+5. Visit `https://your-url/health` in your browser to confirm it says `{"status":"ok"}`
+
+### Step 3: Connect to Claude
+
+1. Go to [claude.ai/settings](https://claude.ai/settings) → **Integrations** (or **Connectors**)
+2. Click **Add Custom Integration** (or **Add Custom Connector**)
+3. Add your **memory** tools:
+   - Name: `Crow Memory`
+   - URL: `https://your-url/memory/mcp`
+   - Click **Connect** → **Allow**
+4. Add your **research** tools:
+   - Name: `Crow Research`
+   - URL: `https://your-url/research/mcp`
+   - Click **Connect** → **Allow**
+5. Start a new chat on [claude.ai](https://claude.ai) or the Claude mobile app — your memory and research tools are now available!
+
+> **That's it!** Try saying: *"Store a memory that my favorite color is blue"* — then in a new chat, say *"What's my favorite color?"*
+
+---
+
+## Quick Start — Desktop App (Claude Desktop)
+
+If you want to run Crow locally with the Claude Desktop app:
 
 1. Download this repository as a ZIP (green "Code" button → "Download ZIP")
 2. Unzip it anywhere on your computer
@@ -90,7 +144,7 @@ An AI-enabled project management and research platform powered by Claude. Crow c
 
 > **Need Node.js?** The launcher will detect if it's missing and open the download page for you.
 
-## Quick Start (Developer)
+## Quick Start — Developer
 
 ```bash
 cd crow
@@ -101,24 +155,9 @@ claude                 # Start Claude Code
 
 Claude automatically loads `CLAUDE.md` (system context) and `.mcp.json` (MCP server configs).
 
-## Mobile Access (Android / iOS)
+## Self-Hosted Gateway (Docker)
 
-Access your Crow memory and research tools from the Claude mobile app.
-
-### One-Click Cloud Deploy (Recommended)
-
-1. Click the **Deploy to Render** button below
-2. Sign up for a free Render account
-3. Wait ~3 minutes for the build
-4. Copy your service URL (e.g., `https://crow-gateway-xxxx.onrender.com`)
-5. Go to [claude.ai/settings](https://claude.ai/settings) → **Connectors** → **Add Custom Connector**
-6. Paste: `https://your-url/memory/mcp` → Click **Connect**
-7. Repeat for `https://your-url/research/mcp`
-8. Open Claude on your phone — your tools are there!
-
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/kh0pper/crow)
-
-### Self-Hosted (Docker)
+For advanced users who want to host the gateway themselves:
 
 ```bash
 # Cloud VPS
@@ -127,11 +166,6 @@ docker compose --profile cloud up --build
 # Local with Cloudflare Tunnel
 docker compose --profile local up --build
 ```
-
-### Desktop Extension Bundles
-
-1. Download `.mcpb` files from the `dist/` folder
-2. Double-click each to install in Claude Desktop
 
 ## Database Schema
 
