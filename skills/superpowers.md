@@ -35,11 +35,13 @@ This is the master routing skill. Consult this **before every task** to determin
 | "search", "look up", "find out", "what is" | "buscar", "averiguar", "qué es" | web-search | brave-search |
 | "file", "download", "document", "folder" | "archivo", "descargar", "documento", "carpeta" | filesystem | filesystem |
 | "citation", "zotero", "library", "reference" | "cita", "zotero", "biblioteca", "referencia" | research-pipeline | zotero |
+| "plan", "outline", "how would you", "what's your approach" | "planear", "esquematizar", "cómo lo harías", "cuál es tu enfoque" | plan-review | (depends on task) |
 | "create a skill", "automate", "every time I..." | "crear una habilidad", "automatizar", "cada vez que..." | skill-writing | filesystem, crow-memory |
 | "change language", "speak in..." | "cambiar idioma", "háblame en..." | i18n | crow-memory |
 | Session start / Inicio de sesión | — | session-context, i18n, skill-writing (deferred gap check) | crow-memory |
 | High friction detected / Fricción detectada | — | reflection → skill-writing (handoff) | crow-memory, filesystem |
 | Reflection identifies skill gap | — | reflection Phase 7 → skill-writing | crow-memory, filesystem |
+| Multi-step task (3+ steps or 2+ files) | — | plan-review (auto-activate) | (depends on task) |
 | Skill activated during session | — | skill-writing (usage logging) | crow-memory |
 
 ---
