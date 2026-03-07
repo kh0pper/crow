@@ -98,6 +98,13 @@
     "filesystem": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "${CROW_FILES_PATH:-/home}"]
+    },
+    "render": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://mcp.render.com/mcp", "--header", "Authorization: Bearer ${RENDER_API_KEY}"],
+      "env": {
+        "RENDER_API_KEY": "${RENDER_API_KEY}"
+      }
     }
   }
 }
