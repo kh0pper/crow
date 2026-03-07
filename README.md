@@ -164,7 +164,6 @@ Crow can connect to GitHub, Slack, Notion, and more — right from your phone or
 | **Canvas LMS** | Course and assignment management | `CANVAS_API_TOKEN` and `CANVAS_BASE_URL` | Canvas — Account → Settings → New Access Token |
 | **Google Workspace** | Gmail, Calendar, Docs, Sheets | `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` | [console.cloud.google.com](https://console.cloud.google.com) — Create OAuth Client ID (Desktop App type) |
 | **Zotero** | Citation management | `ZOTERO_API_KEY` and `ZOTERO_USER_ID` | [zotero.org/settings/keys](https://www.zotero.org/settings/keys) — Create private key, note user ID |
-| **MCP Research** | Academic search (arXiv, Semantic Scholar) | *(none — works automatically)* | No setup needed |
 | **Microsoft Teams** | Team messaging (experimental) | `TEAMS_CLIENT_ID`, `TEAMS_CLIENT_SECRET`, `TEAMS_TENANT_ID` | [Azure Portal](https://portal.azure.com) — App registrations |
 
 ### Troubleshooting
