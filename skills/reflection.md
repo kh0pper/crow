@@ -75,6 +75,7 @@ Review the session for friction points:
 For each friction point, determine the root cause:
 - **Code/tool bug** — The tool should work but doesn't → needs a code fix
 - **Missing/incomplete skill** — The workflow isn't documented → needs skill refinement
+- **Behavioral context issue** — crow.md instructions are missing, unclear, or wrong → needs crow.md section update (see Phase 7b)
 - **Missing memory** — Context should have been stored earlier → needs memory update
 - **External issue** — API down, rate limited, etc. → note for awareness
 
@@ -87,6 +88,16 @@ crow_store_memory({
   content: "Skill friction: <skill-name>.md — <description in user's language>. Incident date: <date>. Severity: <HIGH/MEDIUM/LOW>.",
   category: "learning",
   tags: "skill-metrics, <localized:métricas-de-habilidad>, skill-friction, <localized:fricción-de-habilidad>, <skill-name>",
+  importance: 6
+})
+```
+
+When crow.md behavioral context is identified as a friction root cause, log with crow-specific tags:
+```
+crow_store_memory({
+  content: "Behavioral context friction: crow.md section '<section_key>' — <description in user's language>. Incident date: <date>. Severity: <HIGH/MEDIUM/LOW>.",
+  category: "learning",
+  tags: "skill-metrics, <localized>, crow-context-friction, <localized>, <section_key>",
   importance: 6
 })
 ```
@@ -108,8 +119,9 @@ crow_store_memory({
 Present a clear list of proposed changes:
 1. **Code fixes** — Specific file paths and changes
 2. **Skill refinements** — Which skill files need updates
-3. **Memory updates** — What should be stored for next time
-4. **Verification steps** — How to confirm each fix works
+3. **crow.md section updates** — Which crow.md sections need content changes (use `crow_update_context_section` or `crow_add_context_section`)
+4. **Memory updates** — What should be stored for next time
+5. **Verification steps** — How to confirm each fix works
 
 If approved by the user, implement the changes in the current session.
 
@@ -132,6 +144,54 @@ crow_store_memory({
 })
 ```
 2. Skill-writing will pick this up at the next session start
+
+### Phase 7b: crow.md Update Handoff
+When Phase 4 identifies a root cause of **"Behavioral context issue"**, update the crow.md behavioral context:
+
+**If the user is still engaged (mid-session or has time):**
+1. Classify the needed change as **minor** or **major** (see crow.md classification below)
+2. **Minor fixes** (add a tip, fix inaccurate instruction, add edge case): Apply via `crow_update_context_section` directly, log in memory, inform the user
+3. **Major changes** (restructure section, add new section, change core protocol logic, disable/rewrite protected section): Propose via checkpoint — describe the change and wait for approval
+
+**If the session is ending or user is wrapping up:**
+1. Store a structured crow.md gap entry in memory for deferred pickup (content in user's language, tags bilingual):
+```
+crow_store_memory({
+  content: "crow.md context gap: <description in user's language>. Affected section: <section_key>. Suggested fix: <specific change in user's language>. Source: reflection on <date>.",
+  category: "learning",
+  tags: "crow-context-friction, <localized>, skill-writing-queue, <localized>, <section_key>",
+  importance: 8
+})
+```
+2. Skill-writing will pick this up at the next session start (it searches for `crow-context-friction` tags)
+
+#### crow.md Minor vs Major Classification
+
+| Change Type | Classification | Action |
+|---|---|---|
+| Add/edit a tip or clarification in a section | Minor | Auto-apply via `crow_update_context_section` |
+| Fix inaccurate or outdated instruction | Minor | Auto-apply |
+| Add an edge case or caveat | Minor | Auto-apply |
+| Reorder or restructure a section | Major | Ask first |
+| Add a new custom section | Major | Ask first |
+| Change core protocol logic (memory, research, session) | Major | Ask first |
+| Disable or significantly rewrite a protected section | Major | Ask first |
+
+#### crow.md Auto-Fix Transparency
+When auto-applying a minor crow.md fix, show:
+*[crow: auto-updated crow.md section "\<section_key\>" — \<what changed\>. Say "undo that" to revert.]*
+
+Track the previous section content so "undo that" can restore it within the session.
+
+After any crow.md update (minor or major), store a record:
+```
+crow_store_memory({
+  content: "crow.md updated: section '<section_key>' — <what changed, in user's language>. Source: reflection on <date>.",
+  category: "learning",
+  tags: "crow-context-update, <localized>, reflection, <date>",
+  importance: 7
+})
+```
 
 #### Minor vs Major Classification
 
@@ -194,5 +254,7 @@ All reflection output must follow `skills/i18n.md`:
 - `skill-friction` / `fricción-de-habilidad` — Specific friction incidents tied to a skill
 - `skill-gap` / `brecha-de-habilidad` — Identified skill gaps queued for skill-writing pickup
 - `skill-writing-queue` / `cola-de-escritura` — Deferred skill changes awaiting next session
+- `crow-context-friction` / `fricción-de-contexto-crow` — Friction caused by crow.md behavioral instructions
+- `crow-context-update` / `actualización-de-contexto-crow` — crow.md section changes applied from reflection
 
 *Note: Spanish translations shown as examples. For other languages, generate localized tags on the fly per `skills/i18n.md`.*

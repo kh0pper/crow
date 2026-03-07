@@ -5,13 +5,14 @@ This is the master routing skill. Consult this **before every task** to determin
 
 ## Always-On Rules
 1. **Memory first**: Before any task, check `crow_recall_by_context` for relevant prior context
-2. **Language adaptation**: Check stored language preference (see `skills/i18n.md`). All user-facing output in user's language.
-3. **Multi-tool by default**: Most tasks benefit from combining 2-3 tools
-4. **Document as you go**: Important findings → `crow_store_memory`; external sources → `crow_add_source`
-5. **Reflect when needed**: If friction accumulates, trigger the reflection skill
-6. **Surface skill activation**: When a skill activates from the trigger table, show: *[crow: activated skill — \<skill-name\>.md]*
-7. **Surface friction signals**: When noting a friction signal, show: *[crow: friction signal — \<description\> (\<N\> of 2 threshold)]*
-8. **Transparency protocol**: Follow the Transparency Protocol in `CLAUDE.md` for all autonomous actions
+2. **Behavioral context**: crow.md defines cross-platform behavioral instructions. Skills that modify behavior should check if crow.md sections need updating too (via `crow_update_context_section`)
+3. **Language adaptation**: Check stored language preference (see `skills/i18n.md`). All user-facing output in user's language.
+4. **Multi-tool by default**: Most tasks benefit from combining 2-3 tools
+5. **Document as you go**: Important findings → `crow_store_memory`; external sources → `crow_add_source`
+6. **Reflect when needed**: If friction accumulates, trigger the reflection skill
+7. **Surface skill activation**: When a skill activates from the trigger table, show: *[crow: activated skill — \<skill-name\>.md]*
+8. **Surface friction signals**: When noting a friction signal, show: *[crow: friction signal — \<description\> (\<N\> of 2 threshold)]*
+9. **Transparency protocol**: Follow the Transparency Protocol in `CLAUDE.md` for all autonomous actions
 
 ---
 
@@ -129,15 +130,16 @@ When 2+ friction signals accumulate, show a checkpoint before triggering reflect
 **[crow checkpoint: 2+ friction signals accumulated. Will run reflection skill to analyze. Say "skip reflection" to cancel.]**
 
 ### Skill Improvement Cycle
-The reflection and skill-writing skills form a continuous improvement loop:
+The reflection, crow.md, and skill-writing skills form a continuous improvement loop:
 ```
 Session work → Reflection (friction analysis) →
-  Skill-writing (propose/apply fixes) →
+  crow.md updates (behavioral context fixes) →
+  Skill-writing (propose/apply skill fixes) →
     Metrics (track effectiveness) →
-      Reflection (evaluate if fix worked) →
-        Skill-writing (refine further) → ...
+      Reflection (evaluate if fix worked) → ...
 ```
-- **Reflection** detects problems and classifies skill fixes as minor or major
-- **Skill-writing** applies minor fixes automatically, asks for major ones
+- **Reflection** detects problems and classifies fixes as minor or major, distinguishing between skill issues and behavioral context issues
+- **crow.md updates** (via `crow_update_context_section`) fix behavioral instructions that caused friction across platforms — see reflection Phase 7b
+- **Skill-writing** applies minor skill fixes automatically, asks for major ones
 - **Metrics** (stored in memory with `skill-metrics` tag) track usage counts, friction rates, and refinement history
 - **Watch items** (`skill-watch` tag) monitor newly created/modified skills for early feedback

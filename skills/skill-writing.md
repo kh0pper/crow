@@ -133,6 +133,7 @@ crow_store_memory({
   importance: 6
 })
 ```
+7. **Check crow.md relevance**: If the new skill introduces capabilities that should be referenced in crow.md's `skills_reference` section (e.g., new trigger patterns, new compound workflows), update it via `crow_update_context_section({ section_key: "skills_reference", ... })`. This ensures all connected platforms know about the new skill.
 
 ---
 
@@ -166,10 +167,13 @@ After auto-applying, inform the user **in their preferred language**:
 - New workflow steps, trigger conditions, structural rewrites, new skills, merges/splits, tool changes
 - Follow the standard consent flow (propose → get approval → implement)
 
+**crow.md-targeted fixes:**
+When reflection identifies a `crow-context-friction` tagged issue, the fix target is a crow.md section (via `crow_update_context_section`), not a skill file. Follow the same minor/major classification from reflection Phase 7b. The deferred gap pickup below also searches for these tags.
+
 ### Deferred Gap Pickup (Session Start)
 
 At session start, after loading context and language preference:
-1. Search memory for entries tagged `skill-gap` or `skill-writing-queue` (search in both English and user's language)
+1. Search memory for entries tagged `skill-gap`, `skill-writing-queue`, or `crow-context-friction` (search in both English and user's language)
 2. Show what was found: *[crow: found \<N\> deferred skill gaps from previous sessions]*
 3. For each unresolved gap, show its classification:
    *[crow: processing gap — "\<description\>". Classification: \<minor/major\>.]*
