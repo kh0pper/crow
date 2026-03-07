@@ -192,47 +192,132 @@ docker compose --profile local up --build
 - **research_sources** — Every source with full metadata, APA citation, verification status
 - **research_notes** — Quotes, summaries, analysis, questions, and insights linked to sources
 
-## API Keys Setup
+## Adding External Integrations (API Keys)
 
-### Trello
-1. Get API key: https://trello.com/power-ups/admin
-2. Generate token: https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&key=YOUR_KEY
+The external servers (Trello, Slack, GitHub, etc.) are only available through **Claude Desktop** — they run locally on your computer and connect via the `.mcp.json` config file. They are **not** available through the cloud gateway (Render deployment).
 
-### Canvas LMS
-1. Go to Canvas → Account → Settings → New Access Token
+> **Important**: You only need to set up the integrations you actually use. Everything is optional. Crow's memory and research tools work without any of these.
 
-### Google Workspace (includes Google Chat)
-1. Create project: https://console.cloud.google.com
-2. Enable APIs: Gmail, Calendar, Sheets, Docs, Slides
-3. Create OAuth 2.0 credentials
+### How it works
 
-### Notion
-1. Create an integration: https://www.notion.so/my-integrations
-2. Share your pages/databases with the integration
+Each integration needs an API key or token. Here's what happens:
 
-### Slack
-1. Create an app: https://api.slack.com/apps
-2. Add scopes: channels:history, channels:read, chat:write, users:read
-3. Install to workspace, copy Bot Token
+1. You get an API key from the service's website (instructions below)
+2. You paste it into Crow's setup wizard or `.env` file
+3. Claude Desktop reads the key and connects to the service
 
-### Discord (optional)
-1. Create a bot: https://discord.com/developers/applications
-2. Enable Message Content Intent
-3. Add bot to your server
+### The easy way: Setup Wizard
 
-### Microsoft Teams (optional, experimental)
-1. Register app: https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps
-2. Add Graph permissions: Chat.Read, ChannelMessage.Read.All, ChannelMessage.Send
+The setup wizard gives you a visual form where you paste each API key — no file editing required.
 
-### GitHub
-1. Generate token: https://github.com/settings/tokens
-2. Recommended scopes: repo, read:org, read:user
+```bash
+npm run wizard    # Opens a browser page with fields for each integration
+```
 
-### Brave Search
-1. Get API key: https://brave.com/search/api/
+The wizard saves everything to a `.env` file in the project folder. Done!
 
-### Zotero (optional)
-1. Get API key: https://www.zotero.org/settings/keys
+### The manual way: Edit the `.env` file
+
+If you prefer, copy `.env.example` to `.env` and fill in the values:
+
+```bash
+cp .env.example .env
+```
+
+Then open `.env` in any text editor and paste your keys next to the matching variable names. For example, if you have a GitHub token, find the `GITHUB_PERSONAL_ACCESS_TOKEN=` line and paste your token after the `=`:
+
+```
+GITHUB_PERSONAL_ACCESS_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+```
+
+Save the file. Next time you open Claude Desktop, the integration will be active.
+
+---
+
+### Where to get each API key
+
+Every integration below tells you: (1) where to get the key, (2) what to copy, and (3) which `.env` variable to paste it into.
+
+#### Trello
+1. Go to https://trello.com/power-ups/admin → copy your **API Key**
+2. Then visit: `https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&key=YOUR_API_KEY` (replace `YOUR_API_KEY` with the key you just copied) → copy the **Token** shown on the page
+3. Paste into `.env`:
+   - `TRELLO_API_KEY=your-api-key`
+   - `TRELLO_TOKEN=your-token`
+
+#### Canvas LMS
+1. In Canvas, go to **Account** → **Settings** → scroll down → **New Access Token** → copy the token
+2. Also note your Canvas URL (e.g., `https://your-school.instructure.com`)
+3. Paste into `.env`:
+   - `CANVAS_API_TOKEN=your-token`
+   - `CANVAS_BASE_URL=https://your-school.instructure.com`
+
+#### Google Workspace (Gmail, Calendar, Sheets, Docs, Slides, Chat)
+1. Go to https://console.cloud.google.com → create a project (or select existing)
+2. Go to **APIs & Services** → **Library** → enable: Gmail API, Google Calendar API, Google Sheets API, Google Docs API, Google Slides API
+3. Go to **APIs & Services** → **Credentials** → **Create Credentials** → **OAuth Client ID**
+4. Set application type to **Desktop App**, click **Create**
+5. Copy the **Client ID** and **Client Secret**
+6. Paste into `.env`:
+   - `GOOGLE_CLIENT_ID=your-client-id`
+   - `GOOGLE_CLIENT_SECRET=your-client-secret`
+
+#### Notion
+1. Go to https://www.notion.so/my-integrations → **Create new integration**
+2. Give it a name (e.g., "Crow"), select your workspace, click **Submit**
+3. Copy the **Internal Integration Secret** (starts with `ntn_`)
+4. **Important**: Go to each Notion page/database you want Crow to access → click `...` → **Connections** → add your integration
+5. Paste into `.env`:
+   - `NOTION_TOKEN=ntn_your-token`
+
+#### Slack
+1. Go to https://api.slack.com/apps → **Create New App** → **From Scratch**
+2. Go to **OAuth & Permissions** → scroll to **Bot Token Scopes** → add: `channels:history`, `channels:read`, `chat:write`, `users:read`
+3. Click **Install to Workspace** at the top → **Allow**
+4. Copy the **Bot User OAuth Token** (starts with `xoxb-`)
+5. Paste into `.env`:
+   - `SLACK_BOT_TOKEN=xoxb-your-token`
+
+#### Discord (optional)
+1. Go to https://discord.com/developers/applications → **New Application**
+2. Go to **Bot** tab → click **Reset Token** → copy the token
+3. Under **Privileged Gateway Intents**, enable **Message Content Intent**
+4. To add the bot to your server: go to **OAuth2** → **URL Generator** → check `bot` scope → check needed permissions → open the generated URL
+5. Paste into `.env`:
+   - `DISCORD_BOT_TOKEN=your-token`
+
+#### GitHub
+1. Go to https://github.com/settings/tokens → **Generate new token (classic)**
+2. Select scopes: `repo`, `read:org`, `read:user`
+3. Click **Generate token** → copy it immediately (you can't see it again)
+4. Paste into `.env`:
+   - `GITHUB_PERSONAL_ACCESS_TOKEN=ghp_your-token`
+
+#### Brave Search
+1. Go to https://brave.com/search/api/ → sign up for a free API key
+2. Copy your API key from the dashboard
+3. Paste into `.env`:
+   - `BRAVE_API_KEY=your-api-key`
+
+#### Zotero (optional)
+1. Go to https://www.zotero.org/settings/keys → **Create new private key**
+2. Check "Allow library access"
+3. Copy the **API key** and note your **User ID** (shown at the top of the page)
+4. Paste into `.env`:
+   - `ZOTERO_API_KEY=your-key`
+   - `ZOTERO_USER_ID=your-user-id`
+
+#### Microsoft Teams (optional, experimental)
+1. Go to https://portal.azure.com → **Azure Active Directory** → **App registrations** → **New registration**
+2. Add API permissions: `Chat.Read`, `ChannelMessage.Read.All`, `ChannelMessage.Send`
+3. Go to **Certificates & secrets** → **New client secret** → copy the value
+4. Paste into `.env`:
+   - `TEAMS_CLIENT_ID=your-app-client-id`
+   - `TEAMS_CLIENT_SECRET=your-client-secret`
+   - `TEAMS_TENANT_ID=your-tenant-id`
+
+#### MCP Research & Filesystem
+These two require **no setup** — they work out of the box with no API keys.
 
 ## Extending
 
