@@ -56,7 +56,16 @@ export default defineConfig({
           { text: 'System Design', link: '/architecture/' },
           { text: 'Memory Server', link: '/architecture/memory-server' },
           { text: 'Research Server', link: '/architecture/research-server' },
+          { text: 'Sharing Server', link: '/architecture/sharing-server' },
           { text: 'Gateway', link: '/architecture/gateway' },
+        ],
+      },
+      {
+        text: 'Guides',
+        items: [
+          { text: 'Cross-Platform', link: '/guide/cross-platform' },
+          { text: 'Sharing', link: '/guide/sharing' },
+          { text: 'Social & Messaging', link: '/guide/social' },
         ],
       },
       {
