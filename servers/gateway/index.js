@@ -20,8 +20,39 @@
 
 import { randomUUID } from "node:crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { InMemoryEventStore } from "@modelcontextprotocol/sdk/inMemory.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+
+/**
+ * Simple in-memory EventStore for StreamableHTTPServerTransport resumability.
+ * Inlined here because the SDK doesn't publicly export this class.
+ */
+class InMemoryEventStore {
+  constructor() { this.events = new Map(); }
+  generateEventId(streamId) {
+    return `${streamId}_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+  }
+  getStreamIdFromEventId(eventId) {
+    return eventId.split("_")[0] || "";
+  }
+  async storeEvent(streamId, message) {
+    const eventId = this.generateEventId(streamId);
+    this.events.set(eventId, { streamId, message });
+    return eventId;
+  }
+  async replayEventsAfter(lastEventId, { send }) {
+    if (!lastEventId || !this.events.has(lastEventId)) return "";
+    const streamId = this.getStreamIdFromEventId(lastEventId);
+    if (!streamId) return "";
+    let found = false;
+    const sorted = [...this.events.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    for (const [eventId, { streamId: sid, message }] of sorted) {
+      if (sid !== streamId) continue;
+      if (eventId === lastEventId) { found = true; continue; }
+      if (found) await send(eventId, message);
+    }
+    return streamId;
+  }
+}
 import { mcpAuthRouter, createOAuthMetadata } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { mcpAuthMetadataRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
