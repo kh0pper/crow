@@ -69,6 +69,7 @@ header("External Tool Status");
 const tools = [
   { name: "Python (uvx)", cmd: "uvx --version", required: false, note: "Needed for google-workspace and mcp-research" },
   { name: "Git", cmd: "git --version", required: false },
+  { name: "Docker", cmd: "docker --version", required: false, note: "Optional — needed only if using Docker-based MCP servers" },
 ];
 
 for (const tool of tools) {
@@ -81,19 +82,42 @@ for (const tool of tools) {
   }
 }
 
+// Step 6: Offer to run the interactive wizard
+log("");
+log("Want a guided setup? Run: node scripts/wizard.js");
+log("Want to generate Claude Desktop config? Run: node scripts/generate-desktop-config.js");
+
 header("Setup Complete");
 console.log(`
 Next steps:
   1. Edit .env with your API keys (see .env.example for details)
+     Or run 'node scripts/wizard.js' for guided setup
   2. Run 'claude' in this directory to start using the platform
   3. The AI will automatically load CLAUDE.md and .mcp.json
 
-MCP servers configured:
-  - crow-memory     (built-in)  Persistent memory
-  - crow-research   (built-in)  Research pipeline
-  - trello          (external)  Requires TRELLO_API_KEY + TRELLO_TOKEN
-  - canvas-lms      (external)  Requires CANVAS_API_TOKEN + CANVAS_BASE_URL
-  - google-workspace(external)  Requires Google OAuth credentials
-  - mcp-research    (external)  Academic search (no keys needed)
-  - zotero          (external)  Requires ZOTERO_API_KEY + ZOTERO_USER_ID
+For Claude Desktop users:
+  Run 'node scripts/generate-desktop-config.js' to auto-configure
+
+MCP servers configured (15 total):
+  Built-in:
+  - crow-memory      Persistent memory
+  - crow-research    Research pipeline
+
+  External (productivity):
+  - trello           Requires TRELLO_API_KEY + TRELLO_TOKEN
+  - canvas-lms       Requires CANVAS_API_TOKEN + CANVAS_BASE_URL
+  - google-workspace Requires Google OAuth credentials (includes Google Chat)
+  - notion           Requires NOTION_TOKEN
+  - mcp-research     Academic search (no keys needed)
+  - zotero           Requires ZOTERO_API_KEY + ZOTERO_USER_ID
+
+  External (communication):
+  - slack            Requires SLACK_BOT_TOKEN
+  - discord          Requires DISCORD_BOT_TOKEN
+  - microsoft-teams  Requires Azure AD credentials (experimental)
+
+  External (development & search):
+  - github           Requires GITHUB_PERSONAL_ACCESS_TOKEN
+  - brave-search     Requires BRAVE_API_KEY
+  - filesystem       Local file access (no keys needed)
 `);
