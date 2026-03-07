@@ -86,9 +86,11 @@ let authMiddleware = null;
 
 if (!noAuth) {
   const provider = createOAuthProvider();
-  // Use the public HTTPS URL when deployed (e.g. on Render), fall back to local HTTP
-  const serverUrl = process.env.CROW_GATEWAY_URL
-    ? new URL(process.env.CROW_GATEWAY_URL)
+  // Use the public HTTPS URL when deployed, fall back to local HTTP.
+  // RENDER_EXTERNAL_URL is auto-provided by Render (e.g. https://crow-gateway.onrender.com)
+  const publicUrl = process.env.CROW_GATEWAY_URL || process.env.RENDER_EXTERNAL_URL;
+  const serverUrl = publicUrl
+    ? new URL(publicUrl)
     : new URL(`http://0.0.0.0:${PORT}`);
 
   // Auth routes (register, authorize, token)
