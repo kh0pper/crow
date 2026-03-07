@@ -9,6 +9,7 @@ This skill enables the AI to create, modify, and propose new skill files (`skill
 - User says "make a skill for...", "automate...", "create a workflow for..."
 - A compound workflow is repeated 2+ times and could be codified
 - User wants to customize or extend an existing skill
+- **Session start**: Check memory for `skill-gap` or `skill-writing-queue` entries logged by the reflection skill — propose deferred fixes
 
 ## Consent Protocol
 
@@ -106,6 +107,24 @@ After writing a new skill file:
 2. **Update `superpowers.md`**: Add trigger keywords to the Trigger Table
 3. **Store in memory**: Use `store_memory` to record that a new skill was created, what it does, and why
 4. **Inform the user**: Confirm the skill is active and explain how to trigger it
+5. **Create a watch item**: Store a monitoring entry so reflection can evaluate the new skill:
+```
+store_memory({
+  content: "Skill watch: <skill-name>.md created on <date>. Purpose: <what it does>. Monitor for: does it activate correctly? Does the workflow complete without friction? Are the trigger conditions accurate?",
+  category: "learning",
+  tags: "skill-watch, skill-metrics, <skill-name>",
+  importance: 7
+})
+```
+6. **Log skill creation in metrics**:
+```
+store_memory({
+  content: "Skill metrics: <skill-name>.md — Created: <date>. Usage count: 0. Friction incidents: 0. Refinements: 0.",
+  category: "learning",
+  tags: "skill-metrics, <skill-name>",
+  importance: 6
+})
+```
 
 ---
 
@@ -115,10 +134,37 @@ When a user wants to change an existing skill:
 
 1. Read the current skill file
 2. Propose the specific changes
-3. Get user consent
+3. Get user consent (unless it's a minor auto-fix from reflection — see below)
 4. Edit the file (don't rewrite from scratch unless necessary)
 5. Update trigger table if triggers changed
 6. Store the change in memory
+7. Update skill metrics with the refinement
+
+### Reflection-Sourced Modifications (Auto-Fix Protocol)
+
+When changes originate from the reflection skill's Phase 7 handoff:
+
+**Minor fixes — auto-apply without asking:**
+- Add/edit a tip or best practice
+- Reorder steps for clarity
+- Fix a tool name or reference
+- Add an edge case or caveat
+
+After auto-applying, inform the user: "Auto-applied a minor fix to `<skill>.md`: <what changed>. This was identified during reflection."
+
+**Major changes — full consent protocol:**
+- New workflow steps, trigger conditions, structural rewrites, new skills, merges/splits, tool changes
+- Follow the standard consent flow (propose → get approval → implement)
+
+### Deferred Gap Pickup (Session Start)
+
+At session start, after loading context:
+1. Search memory for entries tagged `skill-gap` or `skill-writing-queue`
+2. For each unresolved gap:
+   - Classify as minor or major
+   - Minor: auto-apply and mark the memory entry as resolved
+   - Major: propose the change to the user
+3. After processing, store a summary: "Processed N deferred skill gaps from reflection. Applied: X. Proposed: Y."
 
 ---
 
@@ -141,6 +187,34 @@ Want me to create this as `skills/weekly-review.md`?"
 
 ---
 
+## Skill Effectiveness Tracking
+
+### Usage Logging
+Each time a skill is activated during a session, increment its usage count:
+```
+store_memory({
+  content: "Skill usage: <skill-name>.md activated on <date>. Context: <brief description of what triggered it>.",
+  category: "learning",
+  tags: "skill-metrics, skill-usage, <skill-name>",
+  importance: 4
+})
+```
+
+### Metric Queries
+Before proposing changes to a skill, check its history:
+1. `recall_by_context("skill-metrics <skill-name>")` — Get usage count, friction incidents, refinement history
+2. If friction rate is high (friction in 40%+ of uses) → recommend a structural rewrite rather than patches
+3. If a skill has 0 usage after 5+ sessions → consider whether it's discoverable enough or should be removed
+
+### Watch Item Evaluation
+When reflection encounters a `skill-watch` entry:
+1. Check if the skill has been used since creation
+2. If used: did it cause friction? → update metrics accordingly
+3. If unused: are the trigger conditions too narrow? → propose trigger expansion
+4. After 3+ successful friction-free uses → remove the watch item (the skill is stable)
+
+---
+
 ## Compound Skill Detection
 
 Watch for these patterns that suggest a new skill would help:
@@ -152,3 +226,15 @@ Watch for these patterns that suggest a new skill would help:
 - **Domain-specific workflows**: Academic writing, sprint planning, content creation, etc.
 
 When detected, suggest: "I notice you do [X] regularly. Want me to create a skill for that so it's faster next time?"
+
+### Declined Skill Proposals
+If a user declines a skill creation proposal, store the observation for reflection:
+```
+store_memory({
+  content: "Skill proposal declined: <what was proposed>. User reason: <if given>. Monitor whether this workflow causes friction without a dedicated skill.",
+  category: "learning",
+  tags: "skill-declined, skill-metrics",
+  importance: 5
+})
+```
+Reflection can revisit this — if the workflow causes friction in future sessions, re-propose with updated reasoning.

@@ -56,6 +56,18 @@ For each friction point, determine the root cause:
 
 **Prefer code fixes over skill workarounds.** If a tool should work but doesn't, the right fix is in the code, not adding a "remember to work around this" note to a skill.
 
+#### Skill Metrics Update
+When a skill is identified as a friction root cause, log a friction incident:
+```
+store_memory({
+  content: "Skill friction: <skill-name>.md — <brief description of what went wrong>. Incident date: <date>. Severity: <HIGH/MEDIUM/LOW>.",
+  category: "learning",
+  tags: "skill-metrics, skill-friction, <skill-name>",
+  importance: 6
+})
+```
+This builds a per-skill friction history that skill-writing can query to identify chronically problematic skills.
+
 ### Phase 5: Store Reflection
 Store the reflection in crow-memory:
 
@@ -76,6 +88,41 @@ Present a clear list of proposed changes:
 4. **Verification steps** — How to confirm each fix works
 
 If approved by the user, implement the changes in the current session.
+
+### Phase 7: Skill-Writing Handoff
+When Phase 4 identifies a root cause of **"Missing/incomplete skill"**, hand off to the skill-writing workflow:
+
+**If the user is still engaged (mid-session or has time):**
+1. Classify the needed change as **minor** or **major** (see classification below)
+2. **Minor fixes** (add a tip, reorder steps, fix a tool reference, add an edge case): Apply the edit directly, log it in memory, and inform the user it was auto-applied
+3. **Major changes** (new skill, structural rewrite, new triggers, merge/split skills): Propose via the skill-writing consent protocol — describe the change and wait for approval
+
+**If the session is ending or user is wrapping up:**
+1. Store a structured skill gap entry in memory for deferred pickup:
+```
+store_memory({
+  content: "Skill gap identified: <description of what's missing or broken>. Affected skill: <skill-name or 'new skill needed'>. Suggested fix: <specific change>. Source: reflection on <date>.",
+  category: "learning",
+  tags: "skill-gap, skill-writing-queue, <skill-name>",
+  importance: 8
+})
+```
+2. Skill-writing will pick this up at the next session start
+
+#### Minor vs Major Classification
+
+| Change Type | Classification | Action |
+|---|---|---|
+| Add/edit a tip or best practice | Minor | Auto-apply |
+| Reorder steps for clarity | Minor | Auto-apply |
+| Fix a tool name or reference | Minor | Auto-apply |
+| Add an edge case or caveat | Minor | Auto-apply |
+| Add a new workflow step | Major | Ask first |
+| Add/change trigger conditions | Major | Ask first |
+| Create an entirely new skill | Major | Ask first |
+| Rewrite a section structurally | Major | Ask first |
+| Merge or split skills | Major | Ask first |
+| Change which tools a skill uses | Major | Ask first |
 
 ---
 
@@ -100,3 +147,7 @@ In `session-context.md`, the end-of-session protocol should:
 - `reflection` — Friction analysis and improvement proposals
 - `session-review` — Combined tag for searching all session meta-notes
 - `learning` — Category for insights that improve future sessions
+- `skill-metrics` — Skill usage and friction tracking data
+- `skill-friction` — Specific friction incidents tied to a skill
+- `skill-gap` — Identified skill gaps queued for skill-writing pickup
+- `skill-writing-queue` — Deferred skill changes awaiting next session
