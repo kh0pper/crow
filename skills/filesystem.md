@@ -24,7 +24,7 @@ When the user wants to incorporate local files into research:
 1. List the directory to find the file
 2. Read the file contents
 3. Extract key information
-4. Add as a research source with `add_source` (use file path as URL)
+4. Add as a research source with `crow_add_source` (use file path as URL)
 5. Create research notes from the content
 6. Store reference in memory
 

@@ -20,7 +20,7 @@ export function createMemoryServer(dbPath) {
   // --- Tools ---
 
   server.tool(
-    "store_memory",
+    "crow_store_memory",
     "Store a new piece of information in persistent memory. Use this whenever you learn something important about the user, their projects, preferences, or any context that should persist across sessions.",
     {
       content: z.string().describe("The information to remember"),
@@ -47,7 +47,7 @@ export function createMemoryServer(dbPath) {
   );
 
   server.tool(
-    "search_memories",
+    "crow_search_memories",
     "Search persistent memory using full-text search. Returns memories ranked by relevance. Use this to recall information from previous sessions.",
     {
       query: z.string().describe("Search query (supports FTS5 syntax: AND, OR, NOT, phrases)"),
@@ -101,7 +101,7 @@ export function createMemoryServer(dbPath) {
   );
 
   server.tool(
-    "recall_by_context",
+    "crow_recall_by_context",
     "Retrieve memories relevant to a given context. Uses full-text search across content, context, and tags to find the most relevant stored information.",
     {
       context: z.string().describe("Describe the current context or topic to find relevant memories"),
@@ -145,7 +145,7 @@ export function createMemoryServer(dbPath) {
   );
 
   server.tool(
-    "list_memories",
+    "crow_list_memories",
     "List memories with optional filtering by category, tags, or importance. Good for browsing what's stored.",
     {
       category: z.string().optional().describe("Filter by category"),
@@ -197,7 +197,7 @@ export function createMemoryServer(dbPath) {
   );
 
   server.tool(
-    "update_memory",
+    "crow_update_memory",
     "Update an existing memory's content, category, tags, or importance.",
     {
       id: z.number().describe("Memory ID to update"),
@@ -235,7 +235,7 @@ export function createMemoryServer(dbPath) {
   );
 
   server.tool(
-    "delete_memory",
+    "crow_delete_memory",
     "Delete a memory by ID.",
     { id: z.number().describe("Memory ID to delete") },
     async ({ id }) => {
@@ -252,7 +252,7 @@ export function createMemoryServer(dbPath) {
   );
 
   server.tool(
-    "memory_stats",
+    "crow_memory_stats",
     "Get statistics about stored memories - counts by category, total count, importance distribution.",
     {},
     async () => {

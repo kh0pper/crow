@@ -54,7 +54,7 @@ export function createResearchServer(dbPath) {
   // --- Project Tools ---
 
   server.tool(
-    "create_project",
+    "crow_create_project",
     "Create a new research project to organize sources and notes under.",
     {
       name: z.string().describe("Project name"),
@@ -73,7 +73,7 @@ export function createResearchServer(dbPath) {
   );
 
   server.tool(
-    "list_projects",
+    "crow_list_projects",
     "List all research projects with their status and source counts.",
     {
       status: z.enum(["active", "paused", "completed", "archived"]).optional().describe("Filter by status"),
@@ -109,7 +109,7 @@ export function createResearchServer(dbPath) {
   );
 
   server.tool(
-    "update_project",
+    "crow_update_project",
     "Update a research project's name, description, status, or tags.",
     {
       id: z.number().describe("Project ID"),
@@ -140,7 +140,7 @@ export function createResearchServer(dbPath) {
   // --- Source Tools ---
 
   server.tool(
-    "add_source",
+    "crow_add_source",
     "Add a research source with full metadata and automatic APA citation generation.",
     {
       title: z.string().describe("Title of the source"),
@@ -192,7 +192,7 @@ export function createResearchServer(dbPath) {
   );
 
   server.tool(
-    "search_sources",
+    "crow_search_sources",
     "Full-text search across all research sources.",
     {
       query: z.string().describe("Search query (FTS5 syntax supported)"),
@@ -234,7 +234,7 @@ export function createResearchServer(dbPath) {
   );
 
   server.tool(
-    "get_source",
+    "crow_get_source",
     "Get full details of a specific source by ID.",
     { id: z.number().describe("Source ID") },
     async ({ id }) => {
@@ -274,7 +274,7 @@ export function createResearchServer(dbPath) {
   );
 
   server.tool(
-    "verify_source",
+    "crow_verify_source",
     "Mark a source as verified or unverified.",
     {
       id: z.number().describe("Source ID"),
@@ -291,7 +291,7 @@ export function createResearchServer(dbPath) {
   );
 
   server.tool(
-    "list_sources",
+    "crow_list_sources",
     "List sources with filtering options.",
     {
       project_id: z.number().optional().describe("Filter by project"),
@@ -335,7 +335,7 @@ export function createResearchServer(dbPath) {
   // --- Notes Tools ---
 
   server.tool(
-    "add_note",
+    "crow_add_note",
     "Add a research note - can be attached to a project, a source, or both.",
     {
       content: z.string().describe("Note content"),
@@ -357,7 +357,7 @@ export function createResearchServer(dbPath) {
   );
 
   server.tool(
-    "search_notes",
+    "crow_search_notes",
     "Search research notes by content.",
     {
       query: z.string().describe("Search terms"),
@@ -390,7 +390,7 @@ export function createResearchServer(dbPath) {
   // --- Bibliography Tool ---
 
   server.tool(
-    "generate_bibliography",
+    "crow_generate_bibliography",
     "Generate a formatted APA bibliography for a project or for all sources matching a filter.",
     {
       project_id: z.number().optional().describe("Generate bibliography for this project"),
@@ -421,7 +421,7 @@ export function createResearchServer(dbPath) {
   // --- Stats Tool ---
 
   server.tool(
-    "research_stats",
+    "crow_research_stats",
     "Get statistics about the research database.",
     {},
     async () => {

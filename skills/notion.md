@@ -22,14 +22,14 @@ The Notion MCP server provides access to the Notion API including:
 When important information exists in Notion:
 1. Search or read the relevant Notion page
 2. Extract key facts, decisions, or requirements
-3. Store in crow-memory with `store_memory` using category "project" or "decision"
+3. Store in crow-memory with `crow_store_memory` using category "project" or "decision"
 4. Tag with "notion" plus relevant project tags
 5. Include the Notion page URL in the memory content for reference
 
 ## Workflow: Research to Notion
 When research should be documented in Notion:
 1. Gather sources and notes from crow-research
-2. Generate bibliography with `generate_bibliography`
+2. Generate bibliography with `crow_generate_bibliography`
 3. Create a Notion page with structured content
 4. Add sections for sources, key findings, and analysis
 5. Store the Notion page link back in memory

@@ -20,7 +20,7 @@ The Slack MCP server provides:
 ## Workflow: Check for Updates
 1. List recent messages in relevant project channels
 2. Identify action items, questions, or decisions
-3. Store important items in memory with `store_memory`
+3. Store important items in memory with `crow_store_memory`
 4. Tag with "slack" and relevant project names
 
 ## Workflow: Send Project Update

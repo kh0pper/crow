@@ -4,10 +4,10 @@
 This is the master routing skill. Consult this **before every task** to determine which skills and tools to activate. It maps user intent to the right combination of MCP servers, skills, and workflows.
 
 ## Always-On Rules
-1. **Memory first**: Before any task, check `recall_by_context` for relevant prior context
+1. **Memory first**: Before any task, check `crow_recall_by_context` for relevant prior context
 2. **Language adaptation**: Check stored language preference (see `skills/i18n.md`). All user-facing output in user's language.
 3. **Multi-tool by default**: Most tasks benefit from combining 2-3 tools
-4. **Document as you go**: Important findings → `store_memory`; external sources → `add_source`
+4. **Document as you go**: Important findings → `crow_store_memory`; external sources → `crow_add_source`
 5. **Reflect when needed**: If friction accumulates, trigger the reflection skill
 6. **Surface skill activation**: When a skill activates from the trigger table, show: *[crow: activated skill — \<skill-name\>.md]*
 7. **Surface friction signals**: When noting a friction signal, show: *[crow: friction signal — \<description\> (\<N\> of 2 threshold)]*
@@ -78,11 +78,11 @@ This lets the user see progress and customize which steps run.
 
 ### "Start research on X"
 1. **Memory** — Check for any existing context on X
-2. **Research** — Create a research project with `create_project`
+2. **Research** — Create a research project with `crow_create_project`
 3. **Brave Search** — Initial web search for overview
 4. **MCP Research** — Search arXiv and Semantic Scholar for papers
 5. **Zotero** — Check if user already has relevant references
-6. For each valuable source → `add_source` with APA citation
+6. For each valuable source → `crow_add_source` with APA citation
 7. Store initial findings in memory
 
 ### "Send update to the team about X"

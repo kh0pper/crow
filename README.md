@@ -36,8 +36,8 @@ An AI-enabled project management and research platform powered by Claude. Crow c
 
 | Server | Purpose | Tools |
 |--------|---------|-------|
-| **crow-memory** | Persistent, searchable memory across sessions | store, search, recall, list, update, delete, stats |
-| **crow-research** | Research pipeline with APA citations | projects, sources, notes, search, verify, bibliography |
+| **crow-memory** | Persistent, searchable memory across sessions | `crow_store_memory`, `crow_search_memories`, `crow_recall_by_context`, `crow_list_memories`, `crow_update_memory`, `crow_delete_memory`, `crow_memory_stats` |
+| **crow-research** | Research pipeline with APA citations | `crow_create_project`, `crow_add_source`, `crow_add_note`, `crow_search_sources`, `crow_verify_source`, `crow_generate_bibliography`, `crow_research_stats` |
 
 ### External MCP Servers (pre-configured)
 
@@ -90,13 +90,13 @@ You'll set up two free accounts (Render + Turso), click a few buttons, and you'r
 
 Crow needs a place to store your memories and research. Turso gives you a free cloud database.
 
-1. Go to [turso.tech](https://turso.tech) and sign up (free)
+1. Go to [turso.tech](https://turso.tech) and sign up for a free account
 2. Once logged in, click **Create Database**
 3. Name it `crow` and pick any region close to you
 4. After it's created, click on your `crow` database
-5. You'll need two things from Turso (keep this tab open):
-   - **Database URL** — looks like `libsql://crow-yourname.turso.io`
-   - **Auth Token** — click **Generate Token** to create one, then copy it
+5. You'll need two things from Turso — **keep this tab open**, you'll paste these in the next step:
+   - **Database URL** — shown at the top of the database page. It looks like `libsql://crow-yourname.turso.io`
+   - **Auth Token** — click **Generate Token**, then click the copy button next to it
 
 ### Step 2: Deploy to Render (one click)
 
@@ -104,29 +104,43 @@ Click this button to deploy Crow to the cloud for free:
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/kh0pper/crow)
 
-1. Sign up for [Render](https://render.com) if you don't have an account (free)
-2. After clicking the button, Render will ask you to fill in two values:
-   - **TURSO_DATABASE_URL** — paste the database URL from Step 1
-   - **TURSO_AUTH_TOKEN** — paste the auth token from Step 1
-3. Click **Apply** and wait ~3 minutes for the build to finish
-4. When it's done, copy your service URL — it looks like `https://crow-gateway-xxxx.onrender.com`
-5. Visit `https://your-url/health` in your browser to confirm it says `{"status":"ok"}`
+1. If you don't have a Render account, sign up at [render.com](https://render.com) (free — no credit card needed)
+2. After clicking the Deploy button above, Render shows a form with two fields to fill in:
+   - **TURSO_DATABASE_URL** — paste the database URL you copied from Turso (starts with `libsql://`)
+   - **TURSO_AUTH_TOKEN** — paste the auth token you copied from Turso
+3. Click **Apply** at the bottom and wait ~3 minutes for the build to finish
+4. Once the build is done, Render shows your service page. Your URL is at the top of the page — it looks like `https://crow-gateway-xxxx.onrender.com`. **Copy this URL.**
+5. Open a new browser tab and go to `https://your-url/health` (replace `your-url` with your actual Render URL). You should see `{"status":"ok"}` — this means Crow is running!
 
-### Step 3: Connect to Claude
+### Step 3: Connect Crow to Claude
 
-1. Go to [claude.ai/settings](https://claude.ai/settings) → **Integrations** (or **Connectors**)
-2. Click **Add Custom Integration** (or **Add Custom Connector**)
-3. Add your **memory** tools:
-   - Name: `Crow Memory`
-   - URL: `https://your-url/memory/mcp`
-   - Click **Connect** → **Allow**
-4. Add your **research** tools:
-   - Name: `Crow Research`
-   - URL: `https://your-url/research/mcp`
-   - Click **Connect** → **Allow**
-5. Start a new chat on [claude.ai](https://claude.ai) or the Claude mobile app — your memory and research tools are now available!
+This step connects Crow's tools to your Claude account. You'll add two integrations — one for memory, one for research. Works on both [claude.ai](https://claude.ai) in the browser and the Claude mobile app.
 
-> **That's it!** Try saying: *"Store a memory that my favorite color is blue"* — then in a new chat, say *"What's my favorite color?"*
+1. Go to [claude.ai/settings](https://claude.ai/settings)
+2. Click **Integrations** in the left sidebar (on mobile, it may be called **Connectors**)
+3. Click **Add Custom Integration** (or **Add Custom Connector** on mobile)
+4. **Add your memory tools:**
+   - **Name:** `Crow Memory`
+   - **URL:** `https://your-url/memory/mcp` (replace `your-url` with your Render URL from Step 2)
+   - Click **Add** → then click **Connect** → then click **Allow**
+5. **Go back and add your research tools the same way:**
+   - Click **Add Custom Integration** again
+   - **Name:** `Crow Research`
+   - **URL:** `https://your-url/research/mcp` (same Render URL, but `/research/mcp` this time)
+   - Click **Add** → **Connect** → **Allow**
+6. You're done! Start a new chat on [claude.ai](https://claude.ai) or the Claude mobile app.
+
+> **Try it out!** Say: *"Use crow_store_memory to remember that my favorite color is blue"* — then open a **new chat** and ask *"What's my favorite color?"* (Claude will use crow_recall_by_context to find it.)
+
+### Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| **"Connection failed" when adding integration** | Double-check your URL — it should start with `https://` and end with `/memory/mcp` or `/research/mcp`. Make sure there's no trailing slash. |
+| **Health check shows an error page** | Go to your Render dashboard, click on your service, and check the **Logs** tab for error messages. Make sure your Turso URL and token are correct. |
+| **Tools work but are slow the first time** | Render's free tier puts your service to sleep after 15 minutes of inactivity. The first request after it sleeps takes ~30 seconds to wake up. This is normal — subsequent requests are fast. |
+| **Claude doesn't seem to use Crow tools** | Start a **new chat** (existing chats don't pick up new integrations). You can also try saying the tool name directly, e.g., *"Use crow_memory_stats to check my memory count."* |
+| **"Not authorized" error** | Crow's gateway uses OAuth for security. When you click **Connect** in Claude's settings, you should see an authorization page — click **Allow**. If you skipped this, remove the integration and add it again. |
 
 ---
 

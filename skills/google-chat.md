@@ -21,7 +21,7 @@ Interact with Google Chat — spaces, messages, threads — through the Google W
 1. Use `list_spaces` to find relevant spaces
 2. Use `get_messages` for recent messages in key spaces
 3. Identify action items and decisions
-4. Store important items in memory with `store_memory`
+4. Store important items in memory with `crow_store_memory`
 5. Tag with "google-chat" and relevant project names
 
 ## Workflow: Send Team Update

@@ -14,7 +14,7 @@ Store, search, and retrieve persistent memories across sessions. Use this skill 
 Use the `crow-memory` MCP server tools:
 
 ### Storing Memories
-Use `store_memory` with appropriate categorization:
+Use `crow_store_memory` with appropriate categorization:
 - **general**: Miscellaneous facts and information
 - **project**: Project-specific details, requirements, milestones
 - **preference**: User preferences for tools, formatting, communication style
@@ -32,13 +32,13 @@ Use `store_memory` with appropriate categorization:
 - **1-2**: Ephemeral notes, temporary context
 
 ### Searching and Recall
-- Use `search_memories` for specific keyword searches
-- Use `recall_by_context` at the start of tasks to find relevant prior context
-- Use `list_memories` to browse by category or importance
-- Use `memory_stats` to understand what's stored
+- Use `crow_search_memories` for specific keyword searches
+- Use `crow_recall_by_context` at the start of tasks to find relevant prior context
+- Use `crow_list_memories` to browse by category or importance
+- Use `crow_memory_stats` to understand what's stored
 
 ## Workflow: Session Start
-1. Use `recall_by_context` with the current task description
+1. Use `crow_recall_by_context` with the current task description
 2. Review returned memories for relevant context
 3. Proceed with the task, informed by prior context
 
@@ -54,12 +54,12 @@ Use `store_memory` with appropriate categorization:
 Follow the Transparency Protocol defined in `CLAUDE.md`. Memory operations are the most common autonomous actions, so consistent surfacing is critical.
 
 ### On Every Store
-After calling `store_memory`, immediately show a FYI line:
+After calling `crow_store_memory`, immediately show a FYI line:
 
 *[crow: stored memory — "\<first ~60 chars of content\>" (\<category\>, importance \<N\>, tags: \<tags\>)]*
 
 ### On Every Recall
-After `recall_by_context` or `search_memories` returns results, show:
+After `crow_recall_by_context` or `crow_search_memories` returns results, show:
 
 *[crow: recalled \<N\> memories matching "\<query summary\>"]*
 
@@ -67,7 +67,7 @@ Only show the count — don't dump memory contents into FYI lines. Reference the
 
 ### Undo Mechanism
 If the user says "undo that" or "don't store that" after a memory FYI:
-1. Use `delete_memory` with the ID of the most recently stored memory
+1. Use `crow_delete_memory` with the ID of the most recently stored memory
 2. Confirm: *[crow: memory deleted — "\<content summary\>"]*
 
 ### Session Memory Ledger
@@ -82,7 +82,7 @@ Track all memory stores made during the session. If the user says "show me what 
 
 ### Store a project preference
 ```
-store_memory({
+crow_store_memory({
   content: "User prefers TypeScript over JavaScript for all new code",
   category: "preference",
   tags: "coding, language, typescript",
@@ -92,7 +92,7 @@ store_memory({
 
 ### Search for project context
 ```
-search_memories({
+crow_search_memories({
   query: "authentication requirements",
   category: "project",
   min_importance: 5
@@ -101,7 +101,7 @@ search_memories({
 
 ### Context-based recall
 ```
-recall_by_context({
+crow_recall_by_context({
   context: "Setting up the API endpoints for the user dashboard"
 })
 ```
@@ -114,7 +114,7 @@ Follow `skills/i18n.md` for the full language protocol. Key rules:
 
 ### Content Language
 - Store memory content in the **user's preferred language**
-- This ensures `search_memories` and `recall_by_context` return results immediately readable without translation
+- This ensures `crow_search_memories` and `crow_recall_by_context` return results immediately readable without translation
 - Exception: Direct quotes from English sources → store original with a translated note
 
 ### Tag Strategy — Bilingual Format
@@ -134,5 +134,5 @@ tags: "project, proyecto, deadline, fecha-límite, decision, decisión"
 ### Cross-Language Search
 - FTS5 supports any language — searches work in whatever language content was stored in
 - When searching by tags, try both English and user's language
-- Example: `search_memories({ query: "proyecto" })` will find memories stored in Spanish
-- Example: `search_memories({ query: "project" })` will find the same memories via bilingual tags
+- Example: `crow_search_memories({ query: "proyecto" })` will find memories stored in Spanish
+- Example: `crow_search_memories({ query: "project" })` will find the same memories via bilingual tags

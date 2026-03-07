@@ -62,7 +62,7 @@ When an email contains important project information:
 ## Workflow: Document Creation
 When creating Google Docs from research:
 1. Search research sources and notes for the topic
-2. Generate bibliography using `generate_bibliography`
+2. Generate bibliography using `crow_generate_bibliography`
 3. Create the document with proper citations
 4. Store the document link in memory for future reference
 

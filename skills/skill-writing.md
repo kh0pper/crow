@@ -113,11 +113,11 @@ After writing a new skill file:
 
 1. **Update `CLAUDE.md`**: Add the skill to the appropriate category in the Skills section
 2. **Update `superpowers.md`**: Add trigger keywords to the Trigger Table (include both English and user's preferred language columns)
-3. **Store in memory**: Use `store_memory` to record that a new skill was created, what it does, and why
+3. **Store in memory**: Use `crow_store_memory` to record that a new skill was created, what it does, and why
 4. **Inform the user**: Confirm the skill is active and explain how to trigger it
 5. **Create a watch item** (content in user's language, tags bilingual per `skills/i18n.md`):
 ```
-store_memory({
+crow_store_memory({
   content: "<in user's language: Skill watch: skill-name.md created on date. Purpose: what it does. Monitor for: activation, friction, trigger accuracy.>",
   category: "learning",
   tags: "skill-watch, <localized:vigilancia-de-habilidad>, skill-metrics, <localized:métricas-de-habilidad>, <skill-name>",
@@ -126,7 +126,7 @@ store_memory({
 ```
 6. **Log skill creation in metrics** (content in user's language, tags bilingual):
 ```
-store_memory({
+crow_store_memory({
   content: "<in user's language: Skill metrics: skill-name.md — Created: date. Usage count: 0. Friction incidents: 0. Refinements: 0.>",
   category: "learning",
   tags: "skill-metrics, <localized:métricas-de-habilidad>, <skill-name>",
@@ -203,7 +203,7 @@ Want me to create this as `skills/weekly-review.md`?"
 ### Usage Logging
 Each time a skill is activated during a session, increment its usage count:
 ```
-store_memory({
+crow_store_memory({
   content: "Skill usage: <skill-name>.md activated on <date>. Context: <brief description of what triggered it>.",
   category: "learning",
   tags: "skill-metrics, skill-usage, <skill-name>",
@@ -213,7 +213,7 @@ store_memory({
 
 ### Metric Queries
 Before proposing changes to a skill, check its history:
-1. `recall_by_context("skill-metrics <skill-name>")` — Get usage count, friction incidents, refinement history
+1. `crow_recall_by_context("skill-metrics <skill-name>")` — Get usage count, friction incidents, refinement history
 2. If friction rate is high (friction in 40%+ of uses) → recommend a structural rewrite rather than patches
 3. If a skill has 0 usage after 5+ sessions → consider whether it's discoverable enough or should be removed
 
@@ -250,7 +250,7 @@ When detected, suggest: "I notice you do [X] regularly. Want me to create a skil
 ### Declined Skill Proposals
 If a user declines a skill creation proposal, store the observation for reflection:
 ```
-store_memory({
+crow_store_memory({
   content: "Skill proposal declined: <what was proposed>. User reason: <if given>. Monitor whether this workflow causes friction without a dedicated skill.",
   category: "learning",
   tags: "skill-declined, skill-metrics",
@@ -287,7 +287,7 @@ When creating a new skill's "When to Activate" section, include trigger phrases 
 - The gap was stored in user's language, so it should be naturally readable
 
 ### Metrics and Watch Items
-- All `store_memory` calls for metrics use bilingual tags (English + user's language)
+- All `crow_store_memory` calls for metrics use bilingual tags (English + user's language)
 - Content written in user's preferred language
 
 ### Compound Skill Detection
