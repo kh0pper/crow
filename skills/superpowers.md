@@ -22,7 +22,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | User Intent (EN) | User Intent (ES) | Activate Skills | Primary Tools |
 |---|---|---|---|
 | "remember", "store", "recall", "what did we..." | "recordar", "guardar", "recuperar", "qué hicimos..." | memory-management | crow-memory |
-| "research", "find papers", "cite", "bibliography" | "investigar", "buscar artículos", "citar", "bibliografía" | research-pipeline, web-search | crow-research, brave-search, mcp-research |
+| "research", "find papers", "cite", "bibliography" | "investigar", "buscar artículos", "citar", "bibliografía" | research-pipeline, web-search | crow-research, brave-search, paper-search |
 | "email", "calendar", "schedule", "meeting", "gmail" | "correo", "calendario", "agendar", "reunión" | google-workspace | google-workspace |
 | "google chat", "chat space", "send chat" | "google chat", "espacio de chat", "enviar chat" | google-chat | google-workspace (chat tools) |
 | "task", "board", "card", "sprint", "trello" | "tarea", "tablero", "tarjeta", "sprint" | project-management | trello |
@@ -80,7 +80,7 @@ This lets the user see progress and customize which steps run.
 1. **Memory** — Check for any existing context on X
 2. **Research** — Create a research project with `crow_create_project`
 3. **Brave Search** — Initial web search for overview
-4. **MCP Research** — Search arXiv and Semantic Scholar for papers
+4. **Paper Search** — Search arXiv, PubMed, bioRxiv, and Semantic Scholar for papers
 5. **Zotero** — Check if user already has relevant references
 6. For each valuable source → `crow_add_source` with APA citation
 7. Store initial findings in memory

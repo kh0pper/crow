@@ -37,7 +37,7 @@ For simple factual queries that don't need full documentation:
 ## Workflow: Literature Discovery
 When searching for academic or technical content:
 1. Search via Brave for initial discovery
-2. Cross-reference with mcp-research (arXiv, Semantic Scholar) for academic papers
+2. Cross-reference with paper-search (arXiv, PubMed, bioRxiv, Semantic Scholar) for academic papers
 3. Check Zotero for items already in the user's library
 4. Add new valuable sources to both research pipeline and Zotero
 

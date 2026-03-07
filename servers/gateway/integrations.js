@@ -112,6 +112,16 @@ export const INTEGRATIONS = [
     keyUrl: "https://www.zotero.org/settings/keys",
     keyInstructions: "Create new private key → check 'Allow library access' → copy the API key and your User ID (shown at top of page).",
   },
+  {
+    id: "paper-search",
+    name: "Paper Search",
+    description: "Academic paper search (arXiv, PubMed, bioRxiv, Semantic Scholar)",
+    command: "uvx",
+    args: ["paper-search-mcp"],
+    envVars: [], // No API key needed
+    keyUrl: null,
+    keyInstructions: "No setup required — works out of the box.",
+  },
 ];
 
 /**
