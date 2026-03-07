@@ -21,12 +21,12 @@ Capture what was accomplished:
 3. List research conducted and sources added
 4. Note any unfinished work or next steps
 
-Store as memory:
+Store as memory (write content in user's preferred language; use bilingual tags per `skills/i18n.md`):
 ```
 store_memory({
-  content: "<structured summary>",
+  content: "<structured summary — in user's preferred language>",
   category: "project",
-  tags: "session-summary, <date>, <project-names>",
+  tags: "session-summary, <localized:resumen-de-sesión>, <date>, <project-names>",
   importance: 7
 })
 ```
@@ -57,25 +57,25 @@ For each friction point, determine the root cause:
 **Prefer code fixes over skill workarounds.** If a tool should work but doesn't, the right fix is in the code, not adding a "remember to work around this" note to a skill.
 
 #### Skill Metrics Update
-When a skill is identified as a friction root cause, log a friction incident:
+When a skill is identified as a friction root cause, log a friction incident (content in user's language, tags bilingual):
 ```
 store_memory({
-  content: "Skill friction: <skill-name>.md — <brief description of what went wrong>. Incident date: <date>. Severity: <HIGH/MEDIUM/LOW>.",
+  content: "Skill friction: <skill-name>.md — <description in user's language>. Incident date: <date>. Severity: <HIGH/MEDIUM/LOW>.",
   category: "learning",
-  tags: "skill-metrics, skill-friction, <skill-name>",
+  tags: "skill-metrics, <localized:métricas-de-habilidad>, skill-friction, <localized:fricción-de-habilidad>, <skill-name>",
   importance: 6
 })
 ```
 This builds a per-skill friction history that skill-writing can query to identify chronically problematic skills.
 
 ### Phase 5: Store Reflection
-Store the reflection in crow-memory:
+Store the reflection in crow-memory (content in user's preferred language, tags bilingual):
 
 ```
 store_memory({
-  content: "# Reflection: <date>\n\n## Session Topic: <topic>\n\n## Friction Points\n### 1. <point> (HIGH/MEDIUM/LOW)\n- What happened: <description>\n- Root cause: <code bug / skill gap / missing memory>\n- Proposed fix: <specific change>\n\n## Changes Proposed\n- <file>: <what should change>\n\n## Open Issues\n- <anything unresolved>",
+  content: "# Reflection / <localized>: <date>\n\n## Session Topic / <localized>: <topic>\n\n## Friction Points / <localized>\n### 1. <point> (HIGH/MEDIUM/LOW)\n- What happened: <description in user's language>\n- Root cause: <code bug / skill gap / missing memory>\n- Proposed fix: <specific change in user's language>\n\n## Changes Proposed / <localized>\n- <file>: <what should change>\n\n## Open Issues / <localized>\n- <anything unresolved>",
   category: "learning",
-  tags: "reflection, session-review, <date>, <project-names>",
+  tags: "reflection, <localized:reflexión>, session-review, <localized:revisión-de-sesión>, <date>, <project-names>",
   importance: 8
 })
 ```
@@ -98,12 +98,12 @@ When Phase 4 identifies a root cause of **"Missing/incomplete skill"**, hand off
 3. **Major changes** (new skill, structural rewrite, new triggers, merge/split skills): Propose via the skill-writing consent protocol — describe the change and wait for approval
 
 **If the session is ending or user is wrapping up:**
-1. Store a structured skill gap entry in memory for deferred pickup:
+1. Store a structured skill gap entry in memory for deferred pickup (content in user's language, tags bilingual):
 ```
 store_memory({
-  content: "Skill gap identified: <description of what's missing or broken>. Affected skill: <skill-name or 'new skill needed'>. Suggested fix: <specific change>. Source: reflection on <date>.",
+  content: "Skill gap identified: <description in user's language>. Affected skill: <skill-name or 'new skill needed'>. Suggested fix: <specific change in user's language>. Source: reflection on <date>.",
   category: "learning",
-  tags: "skill-gap, skill-writing-queue, <skill-name>",
+  tags: "skill-gap, <localized:brecha-de-habilidad>, skill-writing-queue, <localized:cola-de-escritura>, <skill-name>",
   importance: 8
 })
 ```
@@ -142,12 +142,33 @@ In `session-context.md`, the end-of-session protocol should:
 
 ---
 
+## Language Adaptation
+
+All reflection output must follow `skills/i18n.md`:
+
+### Output Language
+- All user-facing reflection output (friction catalog, proposals, summaries) → user's stored language preference
+- Phase names appear bilingual: "Phase 1: Session Summary / Fase 1: Resumen de Sesión"
+- Technical identifiers (tag names, tool names, file paths) stay in English
+
+### Memory Entries
+- All `store_memory` calls in this skill write content in user's preferred language
+- Tags use bilingual format: English canonical + localized (see tag templates above)
+
+### Auto-Fix Notifications
+- When auto-applying minor fixes (Phase 7), inform the user in their preferred language
+- Example (Spanish): "Se aplicó automáticamente una corrección menor a `reflection.md`: se agregó un caso extremo."
+
+---
+
 ## Memory Tags Reference
-- `session-summary` — What was accomplished
-- `reflection` — Friction analysis and improvement proposals
-- `session-review` — Combined tag for searching all session meta-notes
-- `learning` — Category for insights that improve future sessions
-- `skill-metrics` — Skill usage and friction tracking data
-- `skill-friction` — Specific friction incidents tied to a skill
-- `skill-gap` — Identified skill gaps queued for skill-writing pickup
-- `skill-writing-queue` — Deferred skill changes awaiting next session
+- `session-summary` / `resumen-de-sesión` — What was accomplished
+- `reflection` / `reflexión` — Friction analysis and improvement proposals
+- `session-review` / `revisión-de-sesión` — Combined tag for searching all session meta-notes
+- `learning` / `aprendizaje` — Category for insights that improve future sessions
+- `skill-metrics` / `métricas-de-habilidad` — Skill usage and friction tracking data
+- `skill-friction` / `fricción-de-habilidad` — Specific friction incidents tied to a skill
+- `skill-gap` / `brecha-de-habilidad` — Identified skill gaps queued for skill-writing pickup
+- `skill-writing-queue` / `cola-de-escritura` — Deferred skill changes awaiting next session
+
+*Note: Spanish translations shown as examples. For other languages, generate localized tags on the fly per `skills/i18n.md`.*

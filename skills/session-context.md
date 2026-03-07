@@ -7,9 +7,12 @@ Automatically load and save context at the beginning and end of sessions. Ensure
 At the beginning of every session, perform these steps:
 
 1. **Load context**: Use `recall_by_context` with any available task description
-2. **Check stats**: Use `memory_stats` to understand what's stored
-3. **Check active projects**: Use `list_projects` to see active research
-4. **Greet with context**: Reference relevant prior context in your greeting
+2. **Load language preference**: `recall_by_context("language preference locale i18n")`
+   - If found → apply for all session output
+   - If not found → detect from user's first message language, confirm with user, then store (see `skills/i18n.md`)
+3. **Check stats**: Use `memory_stats` to understand what's stored
+4. **Check active projects**: Use `list_projects` to see active research
+5. **Greet with context**: Reference relevant prior context — **in the user's preferred language**
 
 ## Session End Protocol
 Before the session ends:
@@ -26,8 +29,10 @@ Store information automatically when:
 - A key decision is made
 - New project requirements are discussed
 - Deadlines or milestones are mentioned
-- User preferences are expressed
+- User preferences are expressed (including language preference)
 - Research sources are discussed but not yet formally added
+
+**Memory language rules**: Content in user's preferred language, tags bilingual (English + user's language), categories in English. See `skills/i18n.md` for full protocol.
 
 ## Context Categories Quick Reference
 | Category | Use For |

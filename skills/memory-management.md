@@ -75,3 +75,34 @@ recall_by_context({
   context: "Setting up the API endpoints for the user dashboard"
 })
 ```
+
+---
+
+## Multilingual Memory Storage
+
+Follow `skills/i18n.md` for the full language protocol. Key rules:
+
+### Content Language
+- Store memory content in the **user's preferred language**
+- This ensures `search_memories` and `recall_by_context` return results immediately readable without translation
+- Exception: Direct quotes from English sources → store original with a translated note
+
+### Tag Strategy — Bilingual Format
+Tags use both English canonical and localized forms:
+```
+tags: "english-tag, localized-tag, english-tag-2, localized-tag-2"
+```
+Example (Spanish user):
+```
+tags: "project, proyecto, deadline, fecha-límite, decision, decisión"
+```
+
+### Category Names
+- **Always in English** — categories are system-level identifiers
+- `general`, `project`, `preference`, `person`, `process`, `decision`, `learning`, `goal`
+
+### Cross-Language Search
+- FTS5 supports any language — searches work in whatever language content was stored in
+- When searching by tags, try both English and user's language
+- Example: `search_memories({ query: "proyecto" })` will find memories stored in Spanish
+- Example: `search_memories({ query: "project" })` will find the same memories via bilingual tags

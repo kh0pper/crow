@@ -6,10 +6,12 @@ This skill enables the AI to create, modify, and propose new skill files (`skill
 ## When to Activate
 - User describes a recurring workflow that no existing skill covers
 - User explicitly asks for a new skill or automation
-- User says "make a skill for...", "automate...", "create a workflow for..."
+- User says "make a skill for..." / "crear una habilidad para...", "automate..." / "automatizar...", "create a workflow for..." / "crear un flujo de trabajo para..."
 - A compound workflow is repeated 2+ times and could be codified
 - User wants to customize or extend an existing skill
 - **Session start**: Check memory for `skill-gap` or `skill-writing-queue` entries logged by the reflection skill — propose deferred fixes
+
+*Match intent in any language — the above phrases are English/Spanish examples. See `skills/i18n.md`.*
 
 ## Consent Protocol
 
@@ -23,13 +25,15 @@ This skill enables the AI to create, modify, and propose new skill files (`skill
 6. **Register the skill**: Update `CLAUDE.md` skill list and `superpowers.md` trigger table
 
 ### Consent phrases (user must say something like):
-- "Yes, create that skill"
-- "Go ahead and make it"
-- "That sounds good, write it"
-- "Sure, add that"
+- "Yes, create that skill" / "Sí, crea esa habilidad"
+- "Go ahead and make it" / "Adelante, hazlo"
+- "That sounds good, write it" / "Suena bien, escríbelo"
+- "Sure, add that" / "Claro, agrégalo"
+
+Match consent intent in **any language** — these are examples, not an exhaustive list.
 
 ### Do NOT proceed if:
-- User says "maybe later" or "not now"
+- User says "maybe later" / "quizás después" or "not now" / "ahora no"
 - User hasn't explicitly confirmed
 - The skill would override or conflict with an existing one (warn first)
 
@@ -37,7 +41,7 @@ This skill enables the AI to create, modify, and propose new skill files (`skill
 
 ## Skill File Structure
 
-Every skill file in `skills/` should follow this template:
+Every skill file in `skills/` should follow this template. **Skill files are always written in English** (canonical source). Claude translates on the fly when communicating with the user.
 
 ```markdown
 # Skill Name — Short Description
@@ -46,9 +50,9 @@ Every skill file in `skills/` should follow this template:
 One paragraph explaining what this skill does and when it's useful.
 
 ## When to Activate
-- Trigger condition 1
-- Trigger condition 2
-- Keywords or phrases that should activate this skill
+- Trigger condition 1 (EN) / Trigger condition 1 (user's language)
+- Trigger condition 2 (EN) / Trigger condition 2 (user's language)
+- Include trigger phrases in English + user's preferred language + any other languages used in past sessions
 
 ## Workflow
 
@@ -63,6 +67,10 @@ One paragraph explaining what this skill does and when it's useful.
 ## Tools Used
 - **tool-name**: How it's used in this workflow
 - **tool-name**: How it's used in this workflow
+
+## Language Adaptation
+- Note any language-specific considerations for this skill
+- Reference `skills/i18n.md` for the full protocol
 
 ## Tips
 - Best practices specific to this skill
@@ -104,24 +112,24 @@ When the user gives a vague request like "help me manage my mornings" or "I want
 After writing a new skill file:
 
 1. **Update `CLAUDE.md`**: Add the skill to the appropriate category in the Skills section
-2. **Update `superpowers.md`**: Add trigger keywords to the Trigger Table
+2. **Update `superpowers.md`**: Add trigger keywords to the Trigger Table (include both English and user's preferred language columns)
 3. **Store in memory**: Use `store_memory` to record that a new skill was created, what it does, and why
 4. **Inform the user**: Confirm the skill is active and explain how to trigger it
-5. **Create a watch item**: Store a monitoring entry so reflection can evaluate the new skill:
+5. **Create a watch item** (content in user's language, tags bilingual per `skills/i18n.md`):
 ```
 store_memory({
-  content: "Skill watch: <skill-name>.md created on <date>. Purpose: <what it does>. Monitor for: does it activate correctly? Does the workflow complete without friction? Are the trigger conditions accurate?",
+  content: "<in user's language: Skill watch: skill-name.md created on date. Purpose: what it does. Monitor for: activation, friction, trigger accuracy.>",
   category: "learning",
-  tags: "skill-watch, skill-metrics, <skill-name>",
+  tags: "skill-watch, <localized:vigilancia-de-habilidad>, skill-metrics, <localized:métricas-de-habilidad>, <skill-name>",
   importance: 7
 })
 ```
-6. **Log skill creation in metrics**:
+6. **Log skill creation in metrics** (content in user's language, tags bilingual):
 ```
 store_memory({
-  content: "Skill metrics: <skill-name>.md — Created: <date>. Usage count: 0. Friction incidents: 0. Refinements: 0.",
+  content: "<in user's language: Skill metrics: skill-name.md — Created: date. Usage count: 0. Friction incidents: 0. Refinements: 0.>",
   category: "learning",
-  tags: "skill-metrics, <skill-name>",
+  tags: "skill-metrics, <localized:métricas-de-habilidad>, <skill-name>",
   importance: 6
 })
 ```
@@ -150,7 +158,9 @@ When changes originate from the reflection skill's Phase 7 handoff:
 - Fix a tool name or reference
 - Add an edge case or caveat
 
-After auto-applying, inform the user: "Auto-applied a minor fix to `<skill>.md`: <what changed>. This was identified during reflection."
+After auto-applying, inform the user **in their preferred language**:
+- EN: "Auto-applied a minor fix to `<skill>.md`: <what changed>. This was identified during reflection."
+- ES: "Se aplicó automáticamente una corrección menor a `<skill>.md`: <qué cambió>. Esto se identificó durante la reflexión."
 
 **Major changes — full consent protocol:**
 - New workflow steps, trigger conditions, structural rewrites, new skills, merges/splits, tool changes
@@ -158,8 +168,8 @@ After auto-applying, inform the user: "Auto-applied a minor fix to `<skill>.md`:
 
 ### Deferred Gap Pickup (Session Start)
 
-At session start, after loading context:
-1. Search memory for entries tagged `skill-gap` or `skill-writing-queue`
+At session start, after loading context and language preference:
+1. Search memory for entries tagged `skill-gap` or `skill-writing-queue` (search in both English and user's language)
 2. For each unresolved gap:
    - Classify as minor or major
    - Minor: auto-apply and mark the memory entry as resolved
@@ -238,3 +248,32 @@ store_memory({
 })
 ```
 Reflection can revisit this — if the workflow causes friction in future sessions, re-propose with updated reasoning.
+
+---
+
+## Language Adaptation
+
+All skill-writing interactions must follow `skills/i18n.md`:
+
+### Skill Proposals
+- Present proposals in the user's preferred language (description, rationale, consent question)
+- The skill **file itself** is always written in English (canonical source)
+- Example: A Spanish-speaking user sees the proposal in Spanish, but the generated `.md` file is in English
+
+### New Skill Trigger Phrases
+When creating a new skill's "When to Activate" section, include trigger phrases in:
+1. English (always — canonical)
+2. User's preferred language (always)
+3. Other languages the user has used in past sessions (check memory for language history)
+
+### Deferred Gap Presentation
+- When presenting deferred skill gaps at session start, translate the description into user's preferred language
+- The gap was stored in user's language, so it should be naturally readable
+
+### Metrics and Watch Items
+- All `store_memory` calls for metrics use bilingual tags (English + user's language)
+- Content written in user's preferred language
+
+### Compound Skill Detection
+- "I notice you do [X] regularly. Want me to create a skill for that?" → say this in user's language
+- Example (ES): "Noto que haces [X] regularmente. ¿Quieres que cree una habilidad para eso?"
