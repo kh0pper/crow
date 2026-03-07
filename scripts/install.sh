@@ -67,11 +67,25 @@ npm install --silent
 echo "  Initializing database..."
 node scripts/init-db.js
 
-# Step 5: Run the interactive wizard
+# Step 5: Launch the setup wizard
 echo ""
-echo "  Now let's configure your integrations."
+echo "  Opening the setup wizard in your browser..."
+echo "  (If it doesn't open, go to http://localhost:3456)"
 echo ""
-node scripts/wizard.js
+
+# Use web wizard if we have a display, terminal fallback otherwise
+if [ -n "$DISPLAY" ] || [ "$(uname)" = "Darwin" ] || [ -n "$BROWSER" ]; then
+  node scripts/wizard-web.js &
+  WIZARD_PID=$!
+  echo ""
+  echo "  The setup wizard is running at http://localhost:3456"
+  echo "  Configure your integrations in the browser, then press Ctrl+C here when done."
+  echo ""
+  wait $WIZARD_PID 2>/dev/null || true
+else
+  echo "  No display detected — using terminal wizard."
+  node scripts/wizard.js --terminal
+fi
 
 echo ""
 echo "  Installation complete!"
