@@ -6,7 +6,7 @@ services:
   - type: web
     name: crow-gateway
     runtime: node
-    plan: free
+    plan: starter
     buildCommand: npm ci --omit=dev && node scripts/init-db.js
     startCommand: node servers/gateway/index.js
     healthCheckPath: /health
@@ -16,4 +16,8 @@ services:
       - key: CROW_GATEWAY_PORT
         value: "3001"
       - key: CROW_DB_PATH
-        value: ./data/crow.db
+        value: /opt/render/project/data/crow.db
+    disk:
+      name: crow-data
+      mountPath: /opt/render/project/data
+      sizeGB: 1
