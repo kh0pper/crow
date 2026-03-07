@@ -28,6 +28,8 @@ cp .env.example .env
 
 Edit `.env` and add keys for the services you want. Only `crow-memory` and `crow-research` work without any keys — external integrations need their own API keys.
 
+> **Security note**: Your `.env` file contains API keys that act like passwords. Never share it, commit it to GitHub, or post its contents anywhere. The file is already listed in `.gitignore` so git won't track it, but always double-check before pushing code. See the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md) for more about keeping your keys safe.
+
 ## Step 3: Generate Claude Desktop Config
 
 ```bash

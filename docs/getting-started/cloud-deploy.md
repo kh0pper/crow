@@ -9,6 +9,8 @@ Deploy Crow to Render so it's accessible from any device and any AI platform.
 3. Copy your **Database URL** (starts with `libsql://`)
 4. Create an auth token and copy it
 
+> **Security note**: Your Turso credentials (database URL and auth token) grant full access to your Crow database. Treat them like passwords — never share them publicly or commit them to code. See the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md) for more details.
+
 ## Step 2: Deploy to Render
 
 1. Fork the [Crow repository](https://github.com/kh0pper/crow) on GitHub
@@ -49,6 +51,8 @@ Then follow the platform-specific guide:
 - [Claude Code](../platforms/claude-code)
 
 ## Step 5: Add Integrations (Optional)
+
+> **Security note**: API keys are like passwords — each one grants access to a service on your behalf. Only add keys for services you actually need, and never share them. If a key is ever exposed, revoke it immediately at the service's website and create a new one. See the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md) for step-by-step instructions.
 
 Add API keys for external services in your Render dashboard under **Environment**:
 

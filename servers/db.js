@@ -14,6 +14,40 @@ import { fileURLToPath } from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+/**
+ * Sanitize user input for use in SQLite FTS5 MATCH queries.
+ * Strips FTS5 operators and wraps individual terms in double quotes
+ * for safe literal matching. Returns null if no valid terms remain.
+ */
+export function sanitizeFtsQuery(input) {
+  if (!input || typeof input !== "string") return null;
+  // Remove FTS5 operators and special syntax
+  const cleaned = input
+    .replace(/\b(AND|OR|NOT|NEAR)\b/gi, "")
+    .replace(/[*"(){}[\]^~:]/g, "")
+    .trim();
+  if (!cleaned) return null;
+  // Split into words, quote each for literal matching
+  const terms = cleaned
+    .split(/\s+/)
+    .filter((w) => w.length > 0)
+    .map((w) => `"${w}"`)
+    .join(" ");
+  return terms || null;
+}
+
+/**
+ * Escape SQL LIKE wildcard characters in user input.
+ * Use with `LIKE ? ESCAPE '\'` in queries.
+ */
+export function escapeLikePattern(input) {
+  if (!input || typeof input !== "string") return input;
+  return input
+    .replace(/\\/g, "\\\\")
+    .replace(/%/g, "\\%")
+    .replace(/_/g, "\\_");
+}
+
 export function createDbClient(dbPath) {
   const tursoUrl = process.env.TURSO_DATABASE_URL;
   const tursoToken = process.env.TURSO_AUTH_TOKEN;

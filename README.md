@@ -68,6 +68,7 @@ Full documentation at **[kh0pper.github.io/crow](https://kh0pper.github.io/crow/
 - [Integrations](https://kh0pper.github.io/crow/integrations/) — All 15+ services with API key setup instructions
 - [Architecture](https://kh0pper.github.io/crow/architecture/) — System design, server APIs, gateway details
 - [Skills](https://kh0pper.github.io/crow/skills/) — 17 behavioral prompts for AI workflows
+- [Security](SECURITY.md) — API key safety, deployment security, and what to do if a key leaks
 - [Troubleshooting](https://kh0pper.github.io/crow/troubleshooting)
 
 ## License

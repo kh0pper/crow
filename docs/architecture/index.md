@@ -78,4 +78,40 @@ Uses `@libsql/client` which supports both:
 Key tables:
 - `memories` — Full-text searchable via FTS5 virtual table with sync triggers
 - `research_projects` → `research_sources` → `research_notes` — Foreign keys with cascade
+- `crow_context` — Behavioral context sections (used to generate crow.md)
 - `oauth_clients` / `oauth_tokens` — Gateway auth persistence
+
+## Behavioral Context (crow.md)
+
+Crow's behavioral instructions — identity, memory protocols, research protocols, session management, and key principles — are stored in the `crow_context` database table and served dynamically as **crow.md**. This makes the same behavioral context available across all platforms (Claude, ChatGPT, Gemini, Grok, Cursor, etc.).
+
+### What it is
+
+A dynamically generated markdown document assembled from rows in the `crow_context` table. Each row is a named section (e.g., `identity`, `memory-protocols`, `research-protocols`) with content and ordering. The document is rebuilt on every request, so changes take effect immediately.
+
+### How it's served
+
+| Method | Endpoint / Tool | Auth |
+|---|---|---|
+| MCP tool | `crow_get_context` (with optional `platform` and `include_dynamic` params) | Via MCP session |
+| MCP resource | `crow://context` | Via MCP session |
+| HTTP endpoint | `GET /crow.md` (supports `?platform=` and `?dynamic=false`) | OAuth (when enabled) |
+
+### Management tools
+
+| Tool | Purpose |
+|---|---|
+| `crow_list_context_sections` | List all sections with keys, titles, and protection status |
+| `crow_update_context_section` | Update an existing section's content or title |
+| `crow_add_context_section` | Add a new custom section |
+| `crow_delete_context_section` | Remove a custom section (protected sections cannot be deleted) |
+
+### Protected vs custom sections
+
+Some sections (like `identity` and `memory-protocols`) are marked as **protected** — they can be updated but not deleted. Custom sections added by the user can be freely modified or removed.
+
+### Cross-platform consistency
+
+Because crow.md is generated from the database, any platform that loads it gets the same behavioral instructions. Platform-specific supplements (like CLAUDE.md for Claude Code) add to this shared foundation but don't replace it.
+
+For the full workflow, see the [Cross-Platform Guide](../guide/cross-platform).
