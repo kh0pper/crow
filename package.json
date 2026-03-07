@@ -1,0 +1,21 @@
+{
+  "name": "crow-ai-platform",
+  "version": "0.1.0",
+  "description": "AI-enabled project management and research platform powered by Claude - a collection of MCP servers, skills, and persistent memory",
+  "type": "module",
+  "scripts": {
+    "setup": "node scripts/setup.js",
+    "memory-server": "node servers/memory/index.js",
+    "research-server": "node servers/research/index.js",
+    "init-db": "node scripts/init-db.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "better-sqlite3": "^11.7.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
