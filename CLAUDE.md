@@ -27,7 +27,7 @@ No test framework is configured. To verify servers work:
 ```bash
 node servers/memory/index.js    # Should start without errors (ctrl-C to stop)
 node servers/research/index.js  # Same
-node servers/gateway/index.js --no-auth  # HTTP gateway without OAuth, check http://localhost:3001/health
+node servers/gateway/index.js --no-auth  # HTTP gateway without OAuth (blocked in production), check http://localhost:3001/health
 ```
 
 ## Architecture
@@ -40,26 +40,30 @@ This is an MCP (Model Context Protocol) platform — not a traditional web app. 
    - `servers/memory/` — Persistent memory: store, search (FTS5), recall, list, update, delete, stats
    - `servers/research/` — Research pipeline: projects, sources (with auto-APA citation), notes, bibliography, verification
 
-2. **HTTP Gateway** (`servers/gateway/`) — Express server that wraps both MCP servers with Streamable HTTP transport + OAuth 2.1. Used for mobile/remote access via Claude Connectors.
+2. **HTTP Gateway** (`servers/gateway/`) — Express server that wraps both MCP servers with Streamable HTTP + SSE transports + OAuth 2.1. Includes a proxy layer for external MCP servers, setup page, and integrations registry. Used for mobile/remote access via Claude Connectors.
 
-3. **Skills** (`skills/`) — 17 markdown files that serve as behavioral prompts loaded by Claude. Not code — they define workflows, trigger patterns, and integration logic.
+3. **Skills** (`skills/`) — 20 markdown files that serve as behavioral prompts loaded by Claude. Not code — they define workflows, trigger patterns, and integration logic.
 
 ### Server factory pattern
 
 Each custom server has a **factory function** (`createMemoryServer`, `createResearchServer`) in `server.js` that returns a configured `McpServer` instance. The `index.js` files wire these to stdio transport. The gateway imports the same factories and wires them to HTTP transport. This means all tool logic lives in `server.js` — the transport layer is separate.
 
 ```
-servers/memory/server.js   → createMemoryServer(dbPath?)  → McpServer
-servers/memory/index.js    → stdio transport (used by .mcp.json)
-servers/research/server.js → createResearchServer(dbPath?) → McpServer
-servers/research/index.js  → stdio transport (used by .mcp.json)
-servers/gateway/index.js   → Express + StreamableHTTPServerTransport (both servers)
-servers/gateway/auth.js    → OAuth 2.1 provider (CrowOAuthProvider, SQLite-backed)
+servers/memory/server.js       → createMemoryServer(dbPath?)  → McpServer
+servers/memory/crow-context.js → Shared crow.md context logic (used by both memory server and gateway)
+servers/memory/index.js        → stdio transport (used by .mcp.json)
+servers/research/server.js     → createResearchServer(dbPath?) → McpServer
+servers/research/index.js      → stdio transport (used by .mcp.json)
+servers/gateway/index.js       → Express + Streamable HTTP & SSE transports (both servers)
+servers/gateway/auth.js        → OAuth 2.1 provider (CrowOAuthProvider, SQLite-backed)
+servers/gateway/proxy.js       → Proxy layer for external MCP servers
+servers/gateway/setup-page.js  → Browser-based setup/configuration page
+servers/gateway/integrations.js → Registry of available integrations
 ```
 
 ### Database
 
-Uses `@libsql/client` which supports both local SQLite files (`data/crow.db`, gitignored) and remote Turso databases. Set `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` for cloud; otherwise falls back to local file. Client factory in `servers/db.js`. Schema defined in `scripts/init-db.js`. Key tables:
+Uses `@libsql/client` which supports both local SQLite files (`data/crow.db`, gitignored) and remote Turso databases. Set `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` for cloud; otherwise falls back to local file. Client factory in `servers/db.js` (also exports `sanitizeFtsQuery()` and `escapeLikePattern()` utility functions for safe query handling). Schema defined in `scripts/init-db.js`. Key tables:
 
 - **memories** — Full-text searchable (FTS5 virtual table `memories_fts`), with triggers to keep FTS in sync on insert/update/delete
 - **research_projects** → **research_sources** → **research_notes** — Foreign keys with `ON DELETE SET NULL`
@@ -85,8 +89,10 @@ Node.js >= 18 required. ESM modules (`"type": "module"` in package.json).
 ### Adding a new MCP tool to an existing server
 
 1. Add `server.tool(name, description, zodSchema, handler)` in the relevant `server.js`
-2. If the tool needs new DB columns/tables, update `scripts/init-db.js` and re-run `npm run init-db`
-3. If new FTS columns are needed, update the virtual table definition AND the insert/update/delete triggers
+2. All Zod string schemas should include `.max()` constraints to prevent abuse (existing tools use `.max(50000)` for content, `.max(500)` for short fields)
+3. If the tool needs new DB columns/tables, update `scripts/init-db.js` and re-run `npm run init-db`
+4. If new FTS columns are needed, update the virtual table definition AND the insert/update/delete triggers
+5. Use `sanitizeFtsQuery()` from `servers/db.js` for any FTS5 MATCH queries and `escapeLikePattern()` for LIKE queries
 
 ### Adding a new external MCP server
 
@@ -110,7 +116,7 @@ Crow's core behavioral instructions — identity, memory protocols, research pro
 **Access methods:**
 - MCP tool: `crow_get_context` (with optional `platform` and `include_dynamic` params)
 - MCP resource: `crow://context`
-- HTTP endpoint: `GET /crow.md` (supports `?platform=` and `?dynamic=false`)
+- HTTP endpoint: `GET /crow.md` (supports `?platform=` and `?dynamic=false`) — protected by auth middleware when OAuth is enabled
 
 **Management tools:** `crow_list_context_sections`, `crow_update_context_section`, `crow_add_context_section`, `crow_delete_context_section`
 
@@ -133,3 +139,15 @@ Consult `skills/superpowers.md` first — it routes user intent to the right ski
 - `plan-review.md` — Checkpoint-based planning for multi-step tasks
 - `skill-writing.md` — Dynamic skill creation with user consent
 - `i18n.md` — Multilingual output adaptation
+
+## Documentation Site
+
+The `docs/` directory contains a VitePress documentation site. Key paths:
+
+- `docs/.vitepress/config.ts` — Site config, sidebar, and nav
+- `docs/index.md` — Landing page
+- `docs/getting-started/` — Setup and deployment guides
+- `docs/platforms/` — Per-platform integration guides (Claude, ChatGPT, Gemini, Cursor, OpenClaw, etc.)
+- `docs/guide/` — Conceptual guides (cross-platform, memory, research)
+
+To run locally: `cd docs && npm run dev`
