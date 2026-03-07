@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: Crow AI Platform
-  text: One memory, every AI platform
-  tagline: Start in Claude, continue in ChatGPT, pick up in Gemini — your memory, research, and context follow you everywhere.
+  text: One memory, every AI platform — now with P2P sharing
+  tagline: Start in Claude, continue in ChatGPT, pick up in Gemini. Share memories, research, and messages directly with other Crow users — end-to-end encrypted, no central server.
   image:
     src: /crow-hero.svg
     alt: Crow AI Platform
@@ -13,8 +13,8 @@ hero:
       text: Get Started
       link: /getting-started/
     - theme: alt
-      text: Cross-Platform Guide
-      link: /guide/cross-platform
+      text: P2P Sharing Guide
+      link: /guide/sharing
 
 features:
   - icon:
@@ -29,6 +29,10 @@ features:
       src: /icon-research.svg
     title: Research Pipeline
     details: Manage research projects with auto-generated APA citations, source verification, notes, and bibliography generation — accessible from any platform.
+  - icon:
+      src: /icon-sharing.svg
+    title: Encrypted P2P Sharing
+    details: Share memories, research projects, and messages directly with other Crow users. End-to-end encrypted via Hypercore and Nostr — no central server, no accounts, no metadata leaks.
   - icon:
       src: /icon-integrations.svg
     title: 15+ Integrations
