@@ -50,6 +50,54 @@
         "ZOTERO_API_KEY": "${ZOTERO_API_KEY}",
         "ZOTERO_USER_ID": "${ZOTERO_USER_ID}"
       }
+    },
+    "notion": {
+      "command": "npx",
+      "args": ["-y", "@notionhq/notion-mcp-server"],
+      "env": {
+        "OPENAPI_MCP_HEADERS": "{\"Authorization\": \"Bearer ${NOTION_TOKEN}\", \"Notion-Version\": \"2022-06-28\"}"
+      }
+    },
+    "slack": {
+      "command": "npx",
+      "args": ["-y", "@anthropic/mcp-server-slack"],
+      "env": {
+        "SLACK_BOT_TOKEN": "${SLACK_BOT_TOKEN}"
+      }
+    },
+    "discord": {
+      "command": "npx",
+      "args": ["-y", "mcp-discord"],
+      "env": {
+        "DISCORD_BOT_TOKEN": "${DISCORD_BOT_TOKEN}"
+      }
+    },
+    "microsoft-teams": {
+      "command": "npx",
+      "args": ["-y", "mcp-server-microsoft-teams"],
+      "env": {
+        "TEAMS_CLIENT_ID": "${TEAMS_CLIENT_ID}",
+        "TEAMS_CLIENT_SECRET": "${TEAMS_CLIENT_SECRET}",
+        "TEAMS_TENANT_ID": "${TEAMS_TENANT_ID}"
+      }
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN}"
+      }
+    },
+    "brave-search": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": {
+        "BRAVE_API_KEY": "${BRAVE_API_KEY}"
+      }
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "${CROW_FILES_PATH:-/home}"]
     }
   }
 }

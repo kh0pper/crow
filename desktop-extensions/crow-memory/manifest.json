@@ -1,0 +1,21 @@
+{
+  "name": "crow-memory",
+  "version": "0.1.0",
+  "description": "Persistent memory with full-text search for Claude — part of the Crow AI Platform",
+  "server": {
+    "command": "node",
+    "args": ["servers/memory/index.js"],
+    "env": {
+      "CROW_DB_PATH": {
+        "description": "Path to the SQLite database file",
+        "required": true,
+        "default": "./data/crow.db"
+      }
+    }
+  },
+  "dependencies": {
+    "node": ">=18.0.0"
+  },
+  "repository": "https://github.com/YOUR_USER/crow",
+  "license": "MIT"
+}

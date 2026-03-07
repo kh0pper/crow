@@ -18,6 +18,7 @@ Before the session ends:
 2. **Update project status**: If research projects were worked on, update their status
 3. **Note unfinished work**: Store what was in progress with category "project" and high importance
 4. **Store decisions**: Record any decisions made and their rationale
+5. **Reflect if needed**: If the session had notable friction (failed tools, user corrections, wasted effort), run the reflection skill (`skills/reflection.md`). For smooth sessions, skip this step.
 
 ## Automatic Memory Triggers
 Store information automatically when:
