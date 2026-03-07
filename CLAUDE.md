@@ -1,140 +1,134 @@
-# Crow AI Platform
+# CLAUDE.md
 
-You are operating within the Crow AI Platform — an AI-enabled project management and research system. You have access to persistent memory, a research pipeline, project management tools, communication platforms, and Google Workspace integration.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**First**: Consult `skills/superpowers.md` to determine which skills and tools to activate for any task.
+## Build & Run Commands
 
-## Available MCP Servers
+```bash
+npm run setup            # Install deps + initialize SQLite database
+npm run init-db          # Re-initialize database schema only
+npm run wizard           # Open browser-based setup wizard for API keys
+npm run memory-server    # Start crow-memory MCP server (stdio)
+npm run research-server  # Start crow-research MCP server (stdio)
+npm run gateway          # Start HTTP gateway (Express, port 3001)
+npm run desktop-config   # Generate Claude Desktop config JSON
+```
 
-### Custom (built-in)
-- **crow-memory**: Persistent memory with full-text search (SQLite). Store and recall information across sessions.
-- **crow-research**: Research pipeline with source tracking, APA citations, verification, and bibliography generation.
-- **crow-gateway**: HTTP gateway for remote/mobile access (Streamable HTTP + OAuth 2.1). Exposes memory and research over HTTPS.
+### Docker (gateway only)
 
-### External Integrations
-- **trello**: Trello board/card management
-- **canvas-lms**: Canvas LMS courses, assignments, grades (54+ tools)
-- **google-workspace**: Gmail, Calendar, Sheets, Docs, Slides, Google Chat
-- **mcp-research**: Academic search (arXiv, Semantic Scholar, Google Scholar)
-- **zotero**: Citation management with Zotero
-- **notion**: Notion pages, databases, and wiki content
-- **slack**: Slack workspace messages and channels
-- **discord**: Discord server messages and channels
-- **microsoft-teams**: Microsoft Teams chats and channels (experimental)
-- **github**: GitHub repos, issues, pull requests, and code
-- **brave-search**: Web search via Brave Search API
-- **filesystem**: Local file system access (read, write, organize)
+```bash
+docker compose --profile cloud up --build   # Cloud deployment
+docker compose --profile local up --build   # Local + Cloudflare Tunnel
+```
 
-## Session Protocol
+### Testing
 
-### On Session Start
-1. Use `recall_by_context` with the user's first message to load relevant prior context
-2. Load language preference: `recall_by_context("language preference locale i18n")` — apply for all output (see `skills/i18n.md`)
-3. Check `memory_stats` for an overview of stored knowledge
-4. Consult `skills/superpowers.md` to determine which tools to activate
-5. Reference relevant memories naturally — don't dump everything
+No test framework is configured. To verify servers work:
+```bash
+node servers/memory/index.js    # Should start without errors (ctrl-C to stop)
+node servers/research/index.js  # Same
+node servers/gateway/index.js --no-auth  # HTTP gateway without OAuth, check http://localhost:3001/health
+```
 
-### During Session
-- Store important new information with `store_memory` (decisions, preferences, requirements, deadlines)
-- Document any research sources encountered with `add_source`
-- Keep research notes organized with `add_note`
-- Monitor for friction signals (see superpowers.md) — if 2+ accumulate, suggest reflection
-- **Surface all autonomous actions** per the Transparency Protocol (see below)
+## Architecture
 
-### On Session End
-- Store unfinished work context with high importance
-- Update research project status if applicable
-- Save any decisions or learnings from the session
-- If the session had notable friction: run the reflection skill (`skills/reflection.md`)
-- If smooth session: just store a brief session summary in memory
+This is an MCP (Model Context Protocol) platform — not a traditional web app. There is no frontend. The "UI" is Claude itself, guided by CLAUDE.md and skill files.
 
-## Skills
-Load skill files from `skills/` directory for detailed workflows:
+### Three layers
 
-### Core (consult first)
-- `superpowers.md` — **Auto-activation routing**: maps user intent to the right skills and tools
-- `reflection.md` — **Session summary + self-evaluation**: friction analysis and improvement proposals
-- `plan-review.md` — **Checkpoint-based planning**: outlines approach before multi-step tasks, waits for approval
+1. **Custom MCP Servers** (`servers/`) — Two Node.js servers exposing tools over MCP's stdio transport. Both share a single SQLite database (`data/crow.db`).
+   - `servers/memory/` — Persistent memory: store, search (FTS5), recall, list, update, delete, stats
+   - `servers/research/` — Research pipeline: projects, sources (with auto-APA citation), notes, bibliography, verification
 
-### Memory & Research
-- `memory-management.md` — How to store, search, and recall memories
-- `research-pipeline.md` — Research documentation and citation workflow
-- `session-context.md` — Session start/end protocols
+2. **HTTP Gateway** (`servers/gateway/`) — Express server that wraps both MCP servers with Streamable HTTP transport + OAuth 2.1. Used for mobile/remote access via Claude Connectors.
 
-### Productivity
-- `project-management.md` — Trello and Canvas integration patterns
-- `google-workspace.md` — Gmail, Calendar, Docs integration patterns
-- `google-chat.md` — Google Chat spaces and messaging (via google-workspace)
+3. **Skills** (`skills/`) — 17 markdown files that serve as behavioral prompts loaded by Claude. Not code — they define workflows, trigger patterns, and integration logic.
 
-### Communication
-- `slack.md` — Slack messaging workflows
-- `discord.md` — Discord server messaging
-- `microsoft-teams.md` — Microsoft Teams (experimental)
+### Server factory pattern
 
-### Development & Knowledge
-- `github.md` — GitHub repos, issues, PRs
-- `notion.md` — Notion wiki and database management
-- `web-search.md` — Brave Search for research and fact-checking
-- `filesystem.md` — Local file management
+Each custom server has a **factory function** (`createMemoryServer`, `createResearchServer`) in `server.js` that returns a configured `McpServer` instance. The `index.js` files wire these to stdio transport. The gateway imports the same factories and wires them to HTTP transport. This means all tool logic lives in `server.js` — the transport layer is separate.
 
-### Infrastructure
-- `i18n.md` — **Language adaptation**: multilingual output, triggers, and memory storage per user
-- `mobile-access.md` — Remote/mobile access via Streamable HTTP gateway
-- `skill-writing.md` — **Dynamic skill creation**: AI writes new skills with user consent
+```
+servers/memory/server.js   → createMemoryServer(dbPath?)  → McpServer
+servers/memory/index.js    → stdio transport (used by .mcp.json)
+servers/research/server.js → createResearchServer(dbPath?) → McpServer
+servers/research/index.js  → stdio transport (used by .mcp.json)
+servers/gateway/index.js   → Express + StreamableHTTPServerTransport (both servers)
+servers/gateway/auth.js    → OAuth 2.1 provider (CrowOAuthProvider, SQLite-backed)
+```
 
-## Key Principles
-- **Always cite sources**: Every piece of external information gets an APA citation
-- **Memory is cheap, forgetting is expensive**: When in doubt, store it
-- **Verify before citing**: Mark sources as verified only after checking
-- **Cross-reference**: Connect research sources to projects and memories
-- **Consistent tagging**: Use the same tags across memory and research for discoverability
-- **Reflect and improve**: Track friction, propose fixes, continuously get better
-- **Language adaptation**: Detect and store user language preference. All output in user's language. Skill files stay in English (canonical). Memory content in user's language, tags bilingual. See `skills/i18n.md`
-- **Transparency over control**: Surface every autonomous action to the user. They should always see what's happening and be able to intervene. See Transparency Protocol below.
+### Database
 
-## Transparency Protocol
+Single SQLite file at `data/crow.db` (gitignored). Schema defined in `scripts/init-db.js`. Key tables:
 
-All autonomous actions are surfaced to the user using two tiers of inline notation. The user should always know what the AI is doing on their behalf and be able to intervene at any point.
+- **memories** — Full-text searchable (FTS5 virtual table `memories_fts`), with triggers to keep FTS in sync on insert/update/delete
+- **research_projects** → **research_sources** → **research_notes** — Foreign keys with `ON DELETE SET NULL`
+- **sources_fts** — FTS5 index over sources
+- **oauth_clients** / **oauth_tokens** — Gateway auth persistence
 
-### Tier 1: FYI Lines
-For routine autonomous actions. One italic line immediately after the action:
+All FTS sync is handled by SQLite triggers defined in `init-db.js`. If you change the memories or sources schema, you must also update the corresponding FTS virtual table and triggers.
 
-*[crow: stored memory — "User prefers TypeScript" (preference, importance 8)]*
-*[crow: activated skill — research-pipeline.md]*
-*[crow: friction signal — tool call failure (1 of 2 threshold)]*
-*[crow: recalled 3 memories for context]*
+### MCP configuration
 
-FYI lines are:
-- Always italic, always prefixed with `[crow: ...]`
-- One line, never multi-line
-- Placed immediately after the autonomous action, not batched
-- Never ask a question or expect a response
+`.mcp.json` at project root configures all MCP servers Claude can use. Custom servers use `node` command; external ones use `npx`/`uvx`. Environment variables are referenced with `${VAR_NAME}` syntax and loaded from `.env`.
 
-### Tier 2: Checkpoint Lines
-For significant decision moments. One bold line, then wait for the user's next message:
+### Key dependencies
 
-**[crow checkpoint: About to run reflection — 3 friction signals this session. Say "skip" to cancel.]**
-**[crow checkpoint: Session ending. Will store 2 memories (listed below). Say "don't store" + number to cancel any.]**
-**[crow checkpoint: Running "daily briefing". Steps: 1) Gmail 2) Calendar 3) Trello. Say "skip" to cancel or "skip step N" to omit.]**
+- `@modelcontextprotocol/sdk` — MCP server SDK (stdio + HTTP transports, auth)
+- `better-sqlite3` — Synchronous SQLite driver
+- `zod` — Schema validation for MCP tool parameters
 
-Checkpoints are used only for:
-1. **Plan review**: Presenting a multi-step plan before execution (see `skills/plan-review.md`)
-2. Running a compound workflow (daily briefing, meeting prep, etc.)
-3. Triggering reflection from accumulated friction
-4. Session-end batch stores (list what will be stored)
-5. Re-proposing a previously declined skill
+Node.js >= 18 required. ESM modules (`"type": "module"` in package.json).
 
-### Intervention Commands
-The user can say these at any time during a session:
-- **"stop"** / **"wait"** — Halt the current autonomous workflow
-- **"undo that"** / **"don't store that"** — Reverse the most recent autonomous action (delete memory, revert file)
-- **"show me what you stored"** — List all memory stores from this session
-- **"show friction count"** — Display current friction signal tally and details
-- **"skip reflection"** — Cancel a pending or in-progress reflection
+## Extending the Platform
 
-### Principles
-- **FYI lines are brief**: One line, no questions, no blocking
-- **Checkpoints are rare**: 2-3 per session at most
-- **Never omit**: Every autonomous action gets at least a Tier 1 line (except skill usage metric logging — too granular)
-- **Undoable**: Memory stores and skill auto-fixes can be reversed on request within the session
-- **i18n**: FYI/checkpoint bracket prefix (`[crow: ...]`) stays in English; description text follows the user's language preference
+### Adding a new MCP tool to an existing server
+
+1. Add `server.tool(name, description, zodSchema, handler)` in the relevant `server.js`
+2. If the tool needs new DB columns/tables, update `scripts/init-db.js` and re-run `npm run init-db`
+3. If new FTS columns are needed, update the virtual table definition AND the insert/update/delete triggers
+
+### Adding a new external MCP server
+
+1. Add config to `.mcp.json` with env var references
+2. Add env vars to `.env.example`
+3. Create a skill file in `skills/` describing the workflow
+4. Add trigger patterns to `skills/superpowers.md` trigger table
+
+### Adding a new skill
+
+Skills are markdown files in `skills/`. They are loaded by Claude on demand — no build step. Add a trigger row in `superpowers.md` so it auto-activates.
+
+## AI Operational Context
+
+This section guides Claude's behavior when operating as the Crow AI assistant (not when developing the codebase).
+
+### Session Protocol
+
+- **On start**: `recall_by_context` with user's first message, check `memory_stats`, load language preference, consult `skills/superpowers.md`
+- **During**: Store important info with `store_memory`, document sources with `add_source`, monitor friction signals
+- **On end**: Store unfinished work, run reflection if friction occurred
+
+### Transparency Protocol
+
+Surface all autonomous actions inline:
+- **Tier 1 (FYI)**: Italic one-liners for routine actions — `*[crow: stored memory — "..." (preference, importance 8)]*`
+- **Tier 2 (Checkpoint)**: Bold lines before significant decisions, wait for user — `**[crow checkpoint: ...]**`
+
+### Key Principles
+
+- Always cite sources with APA citations
+- When in doubt, store it in memory
+- Verify sources before marking verified
+- Consistent tagging across memory and research
+- Detect and adapt to user's language (see `skills/i18n.md`)
+- All output in user's preferred language; skill files stay in English
+
+### Skills Reference
+
+Consult `skills/superpowers.md` first — it routes user intent to the right skills and tools. Core skills:
+- `superpowers.md` — Auto-activation routing
+- `reflection.md` — Session friction analysis + improvement proposals
+- `plan-review.md` — Checkpoint-based planning for multi-step tasks
+- `skill-writing.md` — Dynamic skill creation with user consent
+- `i18n.md` — Multilingual output adaptation
