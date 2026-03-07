@@ -43,7 +43,7 @@ An AI-enabled project management and research platform powered by Claude. Crow c
 | **Trello** | Board/card management | API key + token |
 | **Canvas LMS** | Course/assignment management | API token + base URL |
 | **Google Workspace** | Gmail, Calendar, Sheets, Docs, Slides, Chat | OAuth credentials |
-| **MCP Research** | Academic search (arXiv, Semantic Scholar) | None |
+| **Paper Search** | Academic paper search (arXiv, PubMed, bioRxiv, Semantic Scholar) | None |
 | **Zotero** | Citation management | API key + user ID |
 | **Notion** | Wiki pages, databases, knowledge base | Integration token |
 | **Slack** | Team messaging and channels | Bot token |
@@ -164,6 +164,7 @@ Crow can connect to GitHub, Slack, Notion, and more — right from your phone or
 | **Canvas LMS** | Course and assignment management | `CANVAS_API_TOKEN` and `CANVAS_BASE_URL` | Canvas — Account → Settings → New Access Token |
 | **Google Workspace** | Gmail, Calendar, Docs, Sheets | `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` | [console.cloud.google.com](https://console.cloud.google.com) — Create OAuth Client ID (Desktop App type) |
 | **Zotero** | Citation management | `ZOTERO_API_KEY` and `ZOTERO_USER_ID` | [zotero.org/settings/keys](https://www.zotero.org/settings/keys) — Create private key, note user ID |
+| **Paper Search** | Academic papers (arXiv, PubMed, bioRxiv) | *(none — works automatically)* | No setup needed |
 | **Microsoft Teams** | Team messaging (experimental) | `TEAMS_CLIENT_ID`, `TEAMS_CLIENT_SECRET`, `TEAMS_TENANT_ID` | [Azure Portal](https://portal.azure.com) — App registrations |
 
 ### Troubleshooting
