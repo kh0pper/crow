@@ -14,7 +14,7 @@ Manage academic and professional research with full source tracking, APA citatio
 Use the `crow-research` MCP server tools.
 
 ## Workflow: Starting a Research Project
-1. Use `create_project` with a clear name and description
+1. Use `crow_create_project` with a clear name and description
 2. Define tags for the project's key themes
 3. Begin gathering sources
 
@@ -23,9 +23,9 @@ Every time you encounter useful information, document it:
 
 1. **Identify the source type**: web_article, academic_paper, book, interview, web_search, web_scrape, api_data, document, video, podcast, social_media, government_doc, dataset, other
 2. **Gather metadata**: title, authors, URL, publication date, publisher
-3. **Use `add_source`** with all available metadata
+3. **Use `crow_add_source`** with all available metadata
 4. **APA citation**: Provide manually if you know the exact format, otherwise the system auto-generates one
-5. **Add notes**: Use `add_note` for key quotes, summaries, analysis, questions, or insights
+5. **Add notes**: Use `crow_add_note` for key quotes, summaries, analysis, questions, or insights
 
 ## APA Citation Format Reference
 
@@ -48,10 +48,10 @@ Interviewee, A. B. (Year, Month Day). Title/description [Interview].
 1. Check if the URL is still accessible
 2. Verify author and publication information
 3. Cross-reference claims with other sources
-4. Use `verify_source` to mark as verified with notes
+4. Use `crow_verify_source` to mark as verified with notes
 
 ## Workflow: Generating a Bibliography
-Use `generate_bibliography` with:
+Use `crow_generate_bibliography` with:
 - `project_id` for project-specific bibliographies
 - `tag` to filter by topic
 - `verified_only: true` for verified-only bibliographies

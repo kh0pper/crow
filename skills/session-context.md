@@ -6,12 +6,12 @@ Automatically load and save context at the beginning and end of sessions. Ensure
 ## Session Start Protocol
 At the beginning of every session, perform these steps:
 
-1. **Load context**: Use `recall_by_context` with any available task description
-2. **Load language preference**: `recall_by_context("language preference locale i18n")`
+1. **Load context**: Use `crow_recall_by_context` with any available task description
+2. **Load language preference**: `crow_recall_by_context("language preference locale i18n")`
    - If found → apply for all session output
    - If not found → detect from user's first message language, confirm with user, then store (see `skills/i18n.md`)
-3. **Check stats**: Use `memory_stats` to understand what's stored
-4. **Check active projects**: Use `list_projects` to see active research
+3. **Check stats**: Use `crow_memory_stats` to understand what's stored
+4. **Check active projects**: Use `crow_list_projects` to see active research
 5. **Surface what was loaded** (Transparency): Show one consolidated FYI after steps 1-4:
    *[crow: session start — loaded N memories, N active projects. Language: \<lang\>.]*
    If specific memories are particularly relevant, name them briefly:
@@ -31,7 +31,7 @@ Before the session ends:
 4. **Wait for user's next message**, then proceed
 5. **Store the session summary** using the structured template:
    ```
-   store_memory({
+   crow_store_memory({
      content: "<use Session Summary Template below — in user's preferred language>",
      category: "learning",
      tags: "session-summary, <localized>, <date>, <project-names-if-any>",

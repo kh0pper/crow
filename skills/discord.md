@@ -20,7 +20,7 @@ The Discord MCP server provides:
 ## Workflow: Community Monitoring
 1. Check recent messages in key Discord channels
 2. Identify important announcements, questions, or discussions
-3. Store relevant information in memory with `store_memory`
+3. Store relevant information in memory with `crow_store_memory`
 4. Tag with "discord" and relevant topic tags
 
 ## Workflow: Cross-Platform Updates

@@ -47,7 +47,7 @@ Capture what was accomplished:
 
 Store as memory (write content in user's preferred language; use bilingual tags per `skills/i18n.md`):
 ```
-store_memory({
+crow_store_memory({
   content: "<structured summary — in user's preferred language>",
   category: "project",
   tags: "session-summary, <localized:resumen-de-sesión>, <date>, <project-names>",
@@ -83,7 +83,7 @@ For each friction point, determine the root cause:
 #### Skill Metrics Update
 When a skill is identified as a friction root cause, log a friction incident (content in user's language, tags bilingual):
 ```
-store_memory({
+crow_store_memory({
   content: "Skill friction: <skill-name>.md — <description in user's language>. Incident date: <date>. Severity: <HIGH/MEDIUM/LOW>.",
   category: "learning",
   tags: "skill-metrics, <localized:métricas-de-habilidad>, skill-friction, <localized:fricción-de-habilidad>, <skill-name>",
@@ -96,7 +96,7 @@ This builds a per-skill friction history that skill-writing can query to identif
 Store the reflection in crow-memory (content in user's preferred language, tags bilingual):
 
 ```
-store_memory({
+crow_store_memory({
   content: "# Reflection / <localized>: <date>\n\n## Session Topic / <localized>: <topic>\n\n## Friction Points / <localized>\n### 1. <point> (HIGH/MEDIUM/LOW)\n- What happened: <description in user's language>\n- Root cause: <code bug / skill gap / missing memory>\n- Proposed fix: <specific change in user's language>\n\n## Changes Proposed / <localized>\n- <file>: <what should change>\n\n## Open Issues / <localized>\n- <anything unresolved>",
   category: "learning",
   tags: "reflection, <localized:reflexión>, session-review, <localized:revisión-de-sesión>, <date>, <project-names>",
@@ -124,7 +124,7 @@ When Phase 4 identifies a root cause of **"Missing/incomplete skill"**, hand off
 **If the session is ending or user is wrapping up:**
 1. Store a structured skill gap entry in memory for deferred pickup (content in user's language, tags bilingual):
 ```
-store_memory({
+crow_store_memory({
   content: "Skill gap identified: <description in user's language>. Affected skill: <skill-name or 'new skill needed'>. Suggested fix: <specific change in user's language>. Source: reflection on <date>.",
   category: "learning",
   tags: "skill-gap, <localized:brecha-de-habilidad>, skill-writing-queue, <localized:cola-de-escritura>, <skill-name>",
@@ -176,7 +176,7 @@ All reflection output must follow `skills/i18n.md`:
 - Technical identifiers (tag names, tool names, file paths) stay in English
 
 ### Memory Entries
-- All `store_memory` calls in this skill write content in user's preferred language
+- All `crow_store_memory` calls in this skill write content in user's preferred language
 - Tags use bilingual format: English canonical + localized (see tag templates above)
 
 ### Auto-Fix Notifications

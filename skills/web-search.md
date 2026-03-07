@@ -21,10 +21,10 @@ The primary search workflow — always document findings:
 2. Execute the search via Brave Search
 3. Evaluate results for relevance and credibility
 4. For each valuable result:
-   a. Add to research pipeline with `add_source` (include URL, title, authors if available)
+   a. Add to research pipeline with `crow_add_source` (include URL, title, authors if available)
    b. Generate an APA citation
    c. Mark verification status appropriately
-5. Store key findings in memory with `store_memory`
+5. Store key findings in memory with `crow_store_memory`
 6. Tag with relevant research project names
 
 ## Workflow: Quick Lookup
@@ -46,4 +46,4 @@ When searching for academic or technical content:
 - Use specific, well-formed queries for better results
 - Cross-reference with academic search for scholarly topics
 - Store search strategies that work well in memory for reuse
-- When a search reveals important new information, always `store_memory`
+- When a search reveals important new information, always `crow_store_memory`

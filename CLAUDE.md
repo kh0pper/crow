@@ -105,8 +105,8 @@ This section guides Claude's behavior when operating as the Crow AI assistant (n
 
 ### Session Protocol
 
-- **On start**: `recall_by_context` with user's first message, check `memory_stats`, load language preference, consult `skills/superpowers.md`
-- **During**: Store important info with `store_memory`, document sources with `add_source`, monitor friction signals
+- **On start**: `crow_recall_by_context` with user's first message, check `crow_memory_stats`, load language preference, consult `skills/superpowers.md`
+- **During**: Store important info with `crow_store_memory`, document sources with `crow_add_source`, monitor friction signals
 - **On end**: Store unfinished work, run reflection if friction occurred
 
 ### Transparency Protocol

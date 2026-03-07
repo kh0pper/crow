@@ -24,7 +24,7 @@ Requires Azure AD app registration with Microsoft Graph API permissions:
 ## Workflow: Check Teams Updates
 1. List recent messages in relevant Teams channels
 2. Identify action items and decisions
-3. Store important items in memory with `store_memory`
+3. Store important items in memory with `crow_store_memory`
 4. Tag with "teams" and relevant project names
 
 ## Best Practices
