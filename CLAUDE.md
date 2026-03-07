@@ -54,6 +54,7 @@ Load skill files from `skills/` directory for detailed workflows:
 ### Core (consult first)
 - `superpowers.md` — **Auto-activation routing**: maps user intent to the right skills and tools
 - `reflection.md` — **Session summary + self-evaluation**: friction analysis and improvement proposals
+- `plan-review.md` — **Checkpoint-based planning**: outlines approach before multi-step tasks, waits for approval
 
 ### Memory & Research
 - `memory-management.md` — How to store, search, and recall memories
@@ -117,10 +118,11 @@ For significant decision moments. One bold line, then wait for the user's next m
 **[crow checkpoint: Running "daily briefing". Steps: 1) Gmail 2) Calendar 3) Trello. Say "skip" to cancel or "skip step N" to omit.]**
 
 Checkpoints are used only for:
-1. Running a compound workflow (daily briefing, meeting prep, etc.)
-2. Triggering reflection from accumulated friction
-3. Session-end batch stores (list what will be stored)
-4. Re-proposing a previously declined skill
+1. **Plan review**: Presenting a multi-step plan before execution (see `skills/plan-review.md`)
+2. Running a compound workflow (daily briefing, meeting prep, etc.)
+3. Triggering reflection from accumulated friction
+4. Session-end batch stores (list what will be stored)
+5. Re-proposing a previously declined skill
 
 ### Intervention Commands
 The user can say these at any time during a session:
