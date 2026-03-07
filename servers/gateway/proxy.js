@@ -74,10 +74,16 @@ function jsonSchemaPropertiesToZod(schema) {
  * Returns { client, childProcess, tools } or null on failure.
  */
 async function connectToServer(integration) {
+  const spawnEnv = getSpawnEnv(integration);
   const env = {
     ...process.env,
-    ...getSpawnEnv(integration),
+    ...spawnEnv,
   };
+
+  // Support argsTransform for servers that need env values in args (e.g., Render bearer token)
+  const args = integration.argsTransform
+    ? integration.argsTransform(spawnEnv)
+    : integration.args;
 
   // Timeout: npx/uvx may need to download packages on first run
   const CONNECT_TIMEOUT_MS = 60_000;
@@ -85,7 +91,7 @@ async function connectToServer(integration) {
   try {
     const transport = new StdioClientTransport({
       command: integration.command,
-      args: integration.args,
+      args,
       env,
     });
 

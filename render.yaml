@@ -60,3 +60,6 @@ services:
         sync: false
       - key: TEAMS_TENANT_ID
         sync: false
+      # Render — manage your deployment from Claude
+      - key: RENDER_API_KEY
+        sync: false
