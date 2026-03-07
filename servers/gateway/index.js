@@ -26,13 +26,12 @@ import { mcpAuthRouter, createOAuthMetadata } from "@modelcontextprotocol/sdk/se
 import { mcpAuthMetadataRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
-import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import express from "express";
 import { createMemoryServer } from "../memory/server.js";
 import { createResearchServer } from "../research/server.js";
 import { createOAuthProvider, initOAuthTables } from "./auth.js";
 
-const PORT = parseInt(process.env.CROW_GATEWAY_PORT || "3001", 10);
+const PORT = parseInt(process.env.PORT || process.env.CROW_GATEWAY_PORT || "3001", 10);
 const noAuth = process.argv.includes("--no-auth");
 
 // Initialize OAuth tables
