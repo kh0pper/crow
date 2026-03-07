@@ -2,17 +2,12 @@
  * Crow Gateway — OAuth 2.1 Provider
  *
  * Implements OAuth 2.1 with Dynamic Client Registration for Claude Connectors.
- * Stores clients and tokens in SQLite for persistence across restarts.
+ * Stores clients and tokens in the database for persistence across restarts.
  * Based on the MCP SDK's DemoInMemoryOAuthProvider pattern but production-ready.
  */
 
 import { randomUUID } from "node:crypto";
-import Database from "better-sqlite3";
-import { resolve, dirname } from "path";
-import { fileURLToPath } from "url";
-import { mkdirSync } from "fs";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { createDbClient } from "../db.js";
 
 export class CrowOAuthClientsStore {
   constructor(db) {
@@ -20,15 +15,19 @@ export class CrowOAuthClientsStore {
   }
 
   async getClient(clientId) {
-    const row = this.db.prepare("SELECT * FROM oauth_clients WHERE client_id = ?").get(clientId);
-    if (!row) return undefined;
-    return JSON.parse(row.metadata);
+    const { rows } = await this.db.execute({
+      sql: "SELECT * FROM oauth_clients WHERE client_id = ?",
+      args: [clientId],
+    });
+    if (rows.length === 0) return undefined;
+    return JSON.parse(rows[0].metadata);
   }
 
   async registerClient(clientMetadata) {
-    this.db.prepare(
-      "INSERT OR REPLACE INTO oauth_clients (client_id, metadata, created_at) VALUES (?, ?, datetime('now'))"
-    ).run(clientMetadata.client_id, JSON.stringify(clientMetadata));
+    await this.db.execute({
+      sql: "INSERT OR REPLACE INTO oauth_clients (client_id, metadata, created_at) VALUES (?, ?, datetime('now'))",
+      args: [clientMetadata.client_id, JSON.stringify(clientMetadata)],
+    });
     return clientMetadata;
   }
 }
@@ -84,25 +83,28 @@ export class CrowOAuthProvider {
     const expiresIn = 86400; // 24 hours
 
     // Store tokens in DB
-    this.db.prepare(`
-      INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at, resource)
-      VALUES (?, 'access', ?, ?, datetime('now', '+${expiresIn} seconds'), ?)
-    `).run(
-      accessToken,
-      client.client_id,
-      (codeData.params.scopes || []).join(" "),
-      codeData.params.resource || null
-    );
+    await this.db.execute({
+      sql: `INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at, resource)
+            VALUES (?, 'access', ?, ?, datetime('now', '+' || ? || ' seconds'), ?)`,
+      args: [
+        accessToken,
+        client.client_id,
+        (codeData.params.scopes || []).join(" "),
+        expiresIn,
+        codeData.params.resource || null,
+      ],
+    });
 
-    this.db.prepare(`
-      INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at, resource)
-      VALUES (?, 'refresh', ?, ?, datetime('now', '+30 days'), ?)
-    `).run(
-      refreshToken,
-      client.client_id,
-      (codeData.params.scopes || []).join(" "),
-      codeData.params.resource || null
-    );
+    await this.db.execute({
+      sql: `INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at, resource)
+            VALUES (?, 'refresh', ?, ?, datetime('now', '+30 days'), ?)`,
+      args: [
+        refreshToken,
+        client.client_id,
+        (codeData.params.scopes || []).join(" "),
+        codeData.params.resource || null,
+      ],
+    });
 
     return {
       access_token: accessToken,
@@ -114,13 +116,15 @@ export class CrowOAuthProvider {
   }
 
   async exchangeRefreshToken(client, refreshToken, scopes, resource) {
-    const row = this.db.prepare(
-      "SELECT * FROM oauth_tokens WHERE token = ? AND token_type = 'refresh' AND client_id = ?"
-    ).get(refreshToken, client.client_id);
+    const { rows } = await this.db.execute({
+      sql: "SELECT * FROM oauth_tokens WHERE token = ? AND token_type = 'refresh' AND client_id = ?",
+      args: [refreshToken, client.client_id],
+    });
 
-    if (!row) throw new Error("Invalid refresh token");
+    if (rows.length === 0) throw new Error("Invalid refresh token");
+    const row = rows[0];
     if (new Date(row.expires_at) < new Date()) {
-      this.db.prepare("DELETE FROM oauth_tokens WHERE token = ?").run(refreshToken);
+      await this.db.execute({ sql: "DELETE FROM oauth_tokens WHERE token = ?", args: [refreshToken] });
       throw new Error("Refresh token expired");
     }
 
@@ -128,15 +132,17 @@ export class CrowOAuthProvider {
     const newAccessToken = randomUUID();
     const expiresIn = 86400;
 
-    this.db.prepare(`
-      INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at, resource)
-      VALUES (?, 'access', ?, ?, datetime('now', '+${expiresIn} seconds'), ?)
-    `).run(
-      newAccessToken,
-      client.client_id,
-      row.scopes,
-      resource || row.resource
-    );
+    await this.db.execute({
+      sql: `INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at, resource)
+            VALUES (?, 'access', ?, ?, datetime('now', '+' || ? || ' seconds'), ?)`,
+      args: [
+        newAccessToken,
+        client.client_id,
+        row.scopes,
+        expiresIn,
+        resource || row.resource,
+      ],
+    });
 
     return {
       access_token: newAccessToken,
@@ -148,13 +154,15 @@ export class CrowOAuthProvider {
   }
 
   async verifyAccessToken(token) {
-    const row = this.db.prepare(
-      "SELECT * FROM oauth_tokens WHERE token = ? AND token_type = 'access'"
-    ).get(token);
+    const { rows } = await this.db.execute({
+      sql: "SELECT * FROM oauth_tokens WHERE token = ? AND token_type = 'access'",
+      args: [token],
+    });
 
-    if (!row) throw new Error("Invalid token");
+    if (rows.length === 0) throw new Error("Invalid token");
+    const row = rows[0];
     if (new Date(row.expires_at) < new Date()) {
-      this.db.prepare("DELETE FROM oauth_tokens WHERE token = ?").run(token);
+      await this.db.execute({ sql: "DELETE FROM oauth_tokens WHERE token = ?", args: [token] });
       throw new Error("Token expired");
     }
 
@@ -171,14 +179,10 @@ export class CrowOAuthProvider {
 /**
  * Initialize OAuth tables in the database.
  */
-export function initOAuthTables(dbPath) {
-  const DB_PATH = dbPath || process.env.CROW_DB_PATH || resolve(__dirname, "../../data/crow.db");
-  mkdirSync(dirname(DB_PATH), { recursive: true });
+export async function initOAuthTables(dbPath) {
+  const db = createDbClient(dbPath);
 
-  const db = new Database(DB_PATH);
-  db.pragma("journal_mode = WAL");
-
-  db.exec(`
+  await db.executeMultiple(`
     CREATE TABLE IF NOT EXISTS oauth_clients (
       client_id TEXT PRIMARY KEY,
       metadata TEXT NOT NULL,
@@ -200,7 +204,7 @@ export function initOAuthTables(dbPath) {
   `);
 
   // Clean up expired tokens on startup
-  db.prepare("DELETE FROM oauth_tokens WHERE expires_at < datetime('now')").run();
+  await db.execute("DELETE FROM oauth_tokens WHERE expires_at < datetime('now')");
 
   db.close();
 }
@@ -209,8 +213,6 @@ export function initOAuthTables(dbPath) {
  * Create an OAuth provider backed by the given database.
  */
 export function createOAuthProvider(dbPath) {
-  const DB_PATH = dbPath || process.env.CROW_DB_PATH || resolve(__dirname, "../../data/crow.db");
-  const db = new Database(DB_PATH);
-  db.pragma("journal_mode = WAL");
+  const db = createDbClient(dbPath);
   return new CrowOAuthProvider(db);
 }

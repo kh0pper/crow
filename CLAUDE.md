@@ -36,7 +36,7 @@ This is an MCP (Model Context Protocol) platform — not a traditional web app. 
 
 ### Three layers
 
-1. **Custom MCP Servers** (`servers/`) — Two Node.js servers exposing tools over MCP's stdio transport. Both share a single SQLite database (`data/crow.db`).
+1. **Custom MCP Servers** (`servers/`) — Two Node.js servers exposing tools over MCP's stdio transport. Both share a single SQLite database (local file or Turso cloud).
    - `servers/memory/` — Persistent memory: store, search (FTS5), recall, list, update, delete, stats
    - `servers/research/` — Research pipeline: projects, sources (with auto-APA citation), notes, bibliography, verification
 
@@ -59,7 +59,7 @@ servers/gateway/auth.js    → OAuth 2.1 provider (CrowOAuthProvider, SQLite-bac
 
 ### Database
 
-Single SQLite file at `data/crow.db` (gitignored). Schema defined in `scripts/init-db.js`. Key tables:
+Uses `@libsql/client` which supports both local SQLite files (`data/crow.db`, gitignored) and remote Turso databases. Set `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` for cloud; otherwise falls back to local file. Client factory in `servers/db.js`. Schema defined in `scripts/init-db.js`. Key tables:
 
 - **memories** — Full-text searchable (FTS5 virtual table `memories_fts`), with triggers to keep FTS in sync on insert/update/delete
 - **research_projects** → **research_sources** → **research_notes** — Foreign keys with `ON DELETE SET NULL`
@@ -75,7 +75,7 @@ All FTS sync is handled by SQLite triggers defined in `init-db.js`. If you chang
 ### Key dependencies
 
 - `@modelcontextprotocol/sdk` — MCP server SDK (stdio + HTTP transports, auth)
-- `better-sqlite3` — Synchronous SQLite driver
+- `@libsql/client` — SQLite/Turso client (supports local files and remote Turso databases)
 - `zod` — Schema validation for MCP tool parameters
 
 Node.js >= 18 required. ESM modules (`"type": "module"` in package.json).

@@ -36,7 +36,7 @@ const PORT = parseInt(process.env.CROW_GATEWAY_PORT || "3001", 10);
 const noAuth = process.argv.includes("--no-auth");
 
 // Initialize OAuth tables
-initOAuthTables();
+await initOAuthTables();
 
 // Session storage: Map<sessionId, { transport, server }>
 const memorySessions = new Map();

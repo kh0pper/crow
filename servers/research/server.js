@@ -6,13 +6,8 @@
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import Database from "better-sqlite3";
 import { z } from "zod";
-import { resolve, dirname } from "path";
-import { fileURLToPath } from "url";
-import { existsSync } from "fs";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { createDbClient } from "../db.js";
 
 const SOURCE_TYPES = [
   "web_article", "academic_paper", "book", "interview",
@@ -49,15 +44,7 @@ function generateAPA({ authors, title, publication_date, publisher, url, source_
 }
 
 export function createResearchServer(dbPath) {
-  const DB_PATH = dbPath || process.env.CROW_DB_PATH || resolve(__dirname, "../../data/crow.db");
-
-  if (!existsSync(DB_PATH)) {
-    throw new Error(`Database not found at ${DB_PATH}. Run 'npm run init-db' first.`);
-  }
-
-  const db = new Database(DB_PATH);
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
+  const db = createDbClient(dbPath);
 
   const server = new McpServer({
     name: "crow-research",
@@ -75,11 +62,12 @@ export function createResearchServer(dbPath) {
       tags: z.string().optional().describe("Comma-separated tags"),
     },
     async ({ name, description, tags }) => {
-      const result = db
-        .prepare("INSERT INTO research_projects (name, description, tags) VALUES (?, ?, ?)")
-        .run(name, description, tags);
+      const result = await db.execute({
+        sql: "INSERT INTO research_projects (name, description, tags) VALUES (?, ?, ?)",
+        args: [name, description ?? null, tags ?? null],
+      });
       return {
-        content: [{ type: "text", text: `Project created: "${name}" (id: ${result.lastInsertRowid})` }],
+        content: [{ type: "text", text: `Project created: "${name}" (id: ${Number(result.lastInsertRowid)})` }],
       };
     }
   );
@@ -104,7 +92,7 @@ export function createResearchServer(dbPath) {
       }
       sql += " GROUP BY p.id ORDER BY p.updated_at DESC";
 
-      const rows = db.prepare(sql).all(...params);
+      const { rows } = await db.execute({ sql, args: params });
       if (rows.length === 0) {
         return { content: [{ type: "text", text: "No projects found." }] };
       }
@@ -144,7 +132,7 @@ export function createResearchServer(dbPath) {
 
       updates.push("updated_at = datetime('now')");
       params.push(id);
-      db.prepare(`UPDATE research_projects SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+      await db.execute({ sql: `UPDATE research_projects SET ${updates.join(", ")} WHERE id = ?`, args: params });
       return { content: [{ type: "text", text: `Project #${id} updated.` }] };
     }
   );
@@ -175,27 +163,28 @@ export function createResearchServer(dbPath) {
     async (params) => {
       const apa = params.citation_apa || generateAPA(params);
 
-      const stmt = db.prepare(`
-        INSERT INTO research_sources
-          (title, source_type, project_id, url, authors, publication_date, publisher,
-           doi, isbn, abstract, content_summary, full_text, citation_apa,
-           retrieval_method, tags, relevance_score)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-
-      const result = stmt.run(
-        params.title, params.source_type, params.project_id, params.url,
-        params.authors, params.publication_date, params.publisher,
-        params.doi, params.isbn, params.abstract, params.content_summary,
-        params.full_text, apa, params.retrieval_method, params.tags,
-        params.relevance_score
-      );
+      const result = await db.execute({
+        sql: `
+          INSERT INTO research_sources
+            (title, source_type, project_id, url, authors, publication_date, publisher,
+             doi, isbn, abstract, content_summary, full_text, citation_apa,
+             retrieval_method, tags, relevance_score)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        args: [
+          params.title, params.source_type, params.project_id ?? null, params.url ?? null,
+          params.authors ?? null, params.publication_date ?? null, params.publisher ?? null,
+          params.doi ?? null, params.isbn ?? null, params.abstract ?? null, params.content_summary ?? null,
+          params.full_text ?? null, apa, params.retrieval_method ?? null, params.tags ?? null,
+          params.relevance_score,
+        ],
+      });
 
       return {
         content: [
           {
             type: "text",
-            text: `Source added (id: ${result.lastInsertRowid}):\n  Title: ${params.title}\n  Type: ${params.source_type}\n  APA: ${apa}`,
+            text: `Source added (id: ${Number(result.lastInsertRowid)}):\n  Title: ${params.title}\n  Type: ${params.source_type}\n  APA: ${apa}`,
           },
         ],
       };
@@ -227,7 +216,7 @@ export function createResearchServer(dbPath) {
       sql += " ORDER BY rank LIMIT ?";
       params.push(limit);
 
-      const rows = db.prepare(sql).all(...params);
+      const { rows } = await db.execute({ sql, args: params });
 
       if (rows.length === 0) {
         return { content: [{ type: "text", text: "No sources found." }] };
@@ -249,12 +238,16 @@ export function createResearchServer(dbPath) {
     "Get full details of a specific source by ID.",
     { id: z.number().describe("Source ID") },
     async ({ id }) => {
-      const source = db.prepare("SELECT * FROM research_sources WHERE id = ?").get(id);
-      if (!source) {
+      const { rows: sourceRows } = await db.execute({ sql: "SELECT * FROM research_sources WHERE id = ?", args: [id] });
+      if (sourceRows.length === 0) {
         return { content: [{ type: "text", text: `Source #${id} not found.` }] };
       }
+      const source = sourceRows[0];
 
-      const notes = db.prepare("SELECT * FROM research_notes WHERE source_id = ? ORDER BY created_at DESC").all(id);
+      const { rows: notes } = await db.execute({
+        sql: "SELECT * FROM research_notes WHERE source_id = ? ORDER BY created_at DESC",
+        args: [id],
+      });
 
       let text = `Source #${source.id}: ${source.title}\n`;
       text += `${"─".repeat(60)}\n`;
@@ -289,8 +282,10 @@ export function createResearchServer(dbPath) {
       notes: z.string().optional().describe("Verification notes"),
     },
     async ({ id, verified, notes }) => {
-      db.prepare("UPDATE research_sources SET verified = ?, verification_notes = ? WHERE id = ?")
-        .run(verified ? 1 : 0, notes, id);
+      await db.execute({
+        sql: "UPDATE research_sources SET verified = ?, verification_notes = ? WHERE id = ?",
+        args: [verified ? 1 : 0, notes ?? null, id],
+      });
       return { content: [{ type: "text", text: `Source #${id} marked as ${verified ? "verified" : "unverified"}.` }] };
     }
   );
@@ -321,7 +316,7 @@ export function createResearchServer(dbPath) {
       sql += ` ORDER BY ${sortMap[sort_by]} LIMIT ?`;
       params.push(limit);
 
-      const rows = db.prepare(sql).all(...params);
+      const { rows } = await db.execute({ sql, args: params });
       if (rows.length === 0) {
         return { content: [{ type: "text", text: "No sources found." }] };
       }
@@ -351,11 +346,12 @@ export function createResearchServer(dbPath) {
       tags: z.string().optional().describe("Comma-separated tags"),
     },
     async ({ content, note_type, project_id, source_id, title, tags }) => {
-      const result = db
-        .prepare("INSERT INTO research_notes (content, note_type, project_id, source_id, title, tags) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(content, note_type, project_id, source_id, title, tags);
+      const result = await db.execute({
+        sql: "INSERT INTO research_notes (content, note_type, project_id, source_id, title, tags) VALUES (?, ?, ?, ?, ?, ?)",
+        args: [content, note_type, project_id ?? null, source_id ?? null, title ?? null, tags ?? null],
+      });
       return {
-        content: [{ type: "text", text: `Note added (id: ${result.lastInsertRowid}, type: ${note_type})` }],
+        content: [{ type: "text", text: `Note added (id: ${Number(result.lastInsertRowid)}, type: ${note_type})` }],
       };
     }
   );
@@ -378,7 +374,7 @@ export function createResearchServer(dbPath) {
       sql += " ORDER BY created_at DESC LIMIT ?";
       params.push(limit);
 
-      const rows = db.prepare(sql).all(...params);
+      const { rows } = await db.execute({ sql, args: params });
       if (rows.length === 0) {
         return { content: [{ type: "text", text: "No notes found." }] };
       }
@@ -410,7 +406,7 @@ export function createResearchServer(dbPath) {
       if (verified_only) { sql += " AND verified = 1"; }
       sql += " ORDER BY citation_apa ASC";
 
-      const rows = db.prepare(sql).all(...params);
+      const { rows } = await db.execute({ sql, args: params });
       if (rows.length === 0) {
         return { content: [{ type: "text", text: "No sources found for bibliography." }] };
       }
@@ -429,12 +425,12 @@ export function createResearchServer(dbPath) {
     "Get statistics about the research database.",
     {},
     async () => {
-      const projects = db.prepare("SELECT COUNT(*) as count FROM research_projects").get();
-      const sources = db.prepare("SELECT COUNT(*) as count FROM research_sources").get();
-      const verified = db.prepare("SELECT COUNT(*) as count FROM research_sources WHERE verified = 1").get();
-      const byType = db.prepare("SELECT source_type, COUNT(*) as count FROM research_sources GROUP BY source_type ORDER BY count DESC").all();
-      const notes = db.prepare("SELECT COUNT(*) as count FROM research_notes").get();
-      const byNoteType = db.prepare("SELECT note_type, COUNT(*) as count FROM research_notes GROUP BY note_type ORDER BY count DESC").all();
+      const projects = (await db.execute("SELECT COUNT(*) as count FROM research_projects")).rows[0];
+      const sources = (await db.execute("SELECT COUNT(*) as count FROM research_sources")).rows[0];
+      const verified = (await db.execute("SELECT COUNT(*) as count FROM research_sources WHERE verified = 1")).rows[0];
+      const byType = (await db.execute("SELECT source_type, COUNT(*) as count FROM research_sources GROUP BY source_type ORDER BY count DESC")).rows;
+      const notes = (await db.execute("SELECT COUNT(*) as count FROM research_notes")).rows[0];
+      const byNoteType = (await db.execute("SELECT note_type, COUNT(*) as count FROM research_notes GROUP BY note_type ORDER BY count DESC")).rows;
 
       let text = `Research Database Statistics:\n`;
       text += `  Projects: ${projects.count}\n`;
@@ -450,9 +446,9 @@ export function createResearchServer(dbPath) {
   // --- Resources ---
 
   server.resource("research-projects", "research://projects", async (uri) => {
-    const projects = db
-      .prepare("SELECT id, name, status, description FROM research_projects ORDER BY updated_at DESC")
-      .all();
+    const { rows: projects } = await db.execute(
+      "SELECT id, name, status, description FROM research_projects ORDER BY updated_at DESC"
+    );
     return {
       contents: [
         {
