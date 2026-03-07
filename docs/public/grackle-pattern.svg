@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 60" width="60" height="60">
+  <!-- Repeatable grackle feather pattern tile -->
+  <defs>
+    <linearGradient id="featherSheen" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:0.15"/>
+      <stop offset="50%" style="stop-color:#8b5cf6;stop-opacity:0.1"/>
+      <stop offset="100%" style="stop-color:#06b6d4;stop-opacity:0.05"/>
+    </linearGradient>
+  </defs>
+  <path d="M10 5 Q20 15 15 30 Q12 20 10 5" fill="url(#featherSheen)" opacity="0.6"/>
+  <path d="M40 25 Q50 35 45 50 Q42 40 40 25" fill="url(#featherSheen)" opacity="0.4"/>
+  <path d="M25 40 Q35 50 30 58 Q28 50 25 40" fill="url(#featherSheen)" opacity="0.3"/>
+</svg>

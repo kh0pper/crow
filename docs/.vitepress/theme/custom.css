@@ -1,0 +1,96 @@
+/* Crow AI — iridescent corvid color palette */
+
+:root {
+  /* Brand colors inspired by crow/grackle iridescence */
+  --vp-c-brand-1: #6366f1;  /* indigo — primary feather sheen */
+  --vp-c-brand-2: #818cf8;  /* lighter indigo */
+  --vp-c-brand-3: #4f46e5;  /* deeper indigo */
+  --vp-c-brand-soft: rgba(99, 102, 241, 0.14);
+
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: -webkit-linear-gradient(
+    120deg,
+    #6366f1 30%,
+    #8b5cf6 50%,
+    #06b6d4 70%
+  );
+
+  --vp-home-hero-image-background-image: linear-gradient(
+    -45deg,
+    #6366f1 30%,
+    #8b5cf6 60%,
+    #06b6d4 90%
+  );
+  --vp-home-hero-image-filter: blur(44px);
+}
+
+.dark {
+  --vp-c-brand-1: #818cf8;
+  --vp-c-brand-2: #a5b4fc;
+  --vp-c-brand-3: #6366f1;
+  --vp-c-brand-soft: rgba(129, 140, 248, 0.14);
+
+  --vp-home-hero-image-background-image: linear-gradient(
+    -45deg,
+    #6366f1 20%,
+    #7c3aed 50%,
+    #0891b2 80%
+  );
+  --vp-home-hero-image-filter: blur(56px);
+}
+
+/* Hero image glow effect */
+.VPHero .image-container {
+  position: relative;
+}
+
+.VPHero .image-container::before {
+  content: '';
+  position: absolute;
+  inset: -20px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(99, 102, 241, 0.15) 0%,
+    rgba(139, 92, 246, 0.08) 40%,
+    transparent 70%
+  );
+  z-index: -1;
+  animation: shimmer 8s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0%, 100% { opacity: 0.6; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.05); }
+}
+
+/* Feature card icons — give them breathing room */
+.VPFeature .VPImage {
+  width: 48px;
+  height: 48px;
+}
+
+/* Subtle iridescent border on feature cards in dark mode */
+.dark .VPFeature {
+  border: 1px solid rgba(99, 102, 241, 0.1);
+  transition: border-color 0.3s ease;
+}
+
+.dark .VPFeature:hover {
+  border-color: rgba(99, 102, 241, 0.25);
+}
+
+/* Sidebar active item — crow purple */
+.VPSidebarItem.is-active > .item .link > .text {
+  color: var(--vp-c-brand-1);
+}
+
+/* Custom scrollbar in dark mode (crow dark theme) */
+.dark ::-webkit-scrollbar-thumb {
+  background-color: rgba(99, 102, 241, 0.3);
+  border-radius: 4px;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(99, 102, 241, 0.5);
+}

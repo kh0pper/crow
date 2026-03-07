@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <!-- Crow taking flight — deploy icon -->
+  <defs>
+    <linearGradient id="depGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#34d399"/>
+    </linearGradient>
+  </defs>
+  <!-- Crow in flight -->
+  <path d="M24 22 Q18 16 8 12 Q16 18 24 22 Q32 18 40 12 Q30 16 24 22 Z" fill="#2d2d3d"/>
+  <!-- Body -->
+  <ellipse cx="24" cy="24" rx="6" ry="4" fill="#1a1a2e"/>
+  <!-- Head -->
+  <circle cx="24" cy="20" r="3.5" fill="#2d2d3d"/>
+  <!-- Eye -->
+  <circle cx="22.5" cy="19.5" r="1" fill="#10b981"/>
+  <circle cx="22.5" cy="19.5" r="0.4" fill="#0f0f17"/>
+  <!-- Beak -->
+  <path d="M21 20 L16 21.5 L17 22.5 L21 21.5 Z" fill="#3d3d4d"/>
+  <!-- Tail -->
+  <path d="M30 24 Q36 26 38 30" fill="none" stroke="#2d2d3d" stroke-width="2" stroke-linecap="round"/>
+  <!-- Upload arrow -->
+  <path d="M24 32 L24 42" stroke="url(#depGrad)" stroke-width="2" stroke-linecap="round"/>
+  <path d="M20 36 L24 32 L28 36" fill="none" stroke="url(#depGrad)" stroke-width="2" stroke-linecap="round"/>
+  <!-- Cloud wisps -->
+  <ellipse cx="10" cy="38" rx="5" ry="2" fill="#6366f1" opacity="0.15"/>
+  <ellipse cx="38" cy="36" rx="4" ry="1.5" fill="#6366f1" opacity="0.1"/>
+</svg>

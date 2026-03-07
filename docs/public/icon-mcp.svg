@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <!-- Open standard / MCP protocol icon — crow feather quill -->
+  <defs>
+    <linearGradient id="mcpGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ec4899"/>
+      <stop offset="100%" style="stop-color:#f472b6"/>
+    </linearGradient>
+  </defs>
+  <!-- Feather quill -->
+  <path d="M36 6 Q28 14 20 26 Q16 32 14 38 L16 38 Q18 34 22 28 Q30 16 38 8 Z" fill="#2d2d3d"/>
+  <!-- Feather barbs -->
+  <path d="M34 10 Q38 8 42 10" fill="none" stroke="#6366f1" stroke-width="0.6" opacity="0.5"/>
+  <path d="M30 16 Q36 13 40 14" fill="none" stroke="#6366f1" stroke-width="0.6" opacity="0.4"/>
+  <path d="M26 22 Q32 19 36 20" fill="none" stroke="#6366f1" stroke-width="0.6" opacity="0.3"/>
+  <path d="M32 12 Q26 12 22 16" fill="none" stroke="#818cf8" stroke-width="0.6" opacity="0.4"/>
+  <path d="M28 18 Q22 18 18 22" fill="none" stroke="#818cf8" stroke-width="0.6" opacity="0.3"/>
+  <!-- Iridescent sheen on feather -->
+  <path d="M34 8 Q30 14 24 24 Q28 18 34 8 Z" fill="#8b5cf6" opacity="0.2"/>
+  <!-- Ink tip -->
+  <circle cx="14" cy="39" r="1.5" fill="url(#mcpGrad)" opacity="0.8"/>
+  <!-- Written protocol lines -->
+  <line x1="6" y1="42" x2="18" y2="42" stroke="#ec4899" stroke-width="1" opacity="0.4" stroke-linecap="round"/>
+  <line x1="8" y1="45" x2="16" y2="45" stroke="#ec4899" stroke-width="1" opacity="0.3" stroke-linecap="round"/>
+</svg>

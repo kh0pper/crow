@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <!-- Flock of birds — integrations icon -->
+  <defs>
+    <linearGradient id="intGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#06b6d4"/>
+      <stop offset="100%" style="stop-color:#22d3ee"/>
+    </linearGradient>
+  </defs>
+  <!-- Flying bird silhouettes in formation -->
+  <!-- Lead bird (larger) -->
+  <path d="M24 18 Q20 12 14 14 Q20 14 24 18 Q28 14 34 14 Q28 12 24 18 Z" fill="url(#intGrad)" opacity="0.9"/>
+  <!-- Left wing birds -->
+  <path d="M14 24 Q11 19 6 20 Q11 21 14 24 Q17 21 22 20 Q17 19 14 24 Z" fill="#6366f1" opacity="0.7"/>
+  <path d="M10 30 Q7 26 3 27 Q7 27 10 30 Q13 27 17 27 Q13 26 10 30 Z" fill="#818cf8" opacity="0.5"/>
+  <!-- Right wing birds -->
+  <path d="M34 24 Q31 19 26 20 Q31 21 34 24 Q37 21 42 20 Q37 19 34 24 Z" fill="#6366f1" opacity="0.7"/>
+  <path d="M38 30 Q35 26 31 27 Q35 27 38 30 Q41 27 45 27 Q41 26 38 30 Z" fill="#818cf8" opacity="0.5"/>
+  <!-- Connection lines (network) -->
+  <line x1="24" y1="20" x2="14" y2="24" stroke="#6366f1" stroke-width="0.4" opacity="0.4" stroke-dasharray="2,2"/>
+  <line x1="24" y1="20" x2="34" y2="24" stroke="#6366f1" stroke-width="0.4" opacity="0.4" stroke-dasharray="2,2"/>
+  <line x1="14" y1="26" x2="10" y2="30" stroke="#818cf8" stroke-width="0.3" opacity="0.3" stroke-dasharray="2,2"/>
+  <line x1="34" y1="26" x2="38" y2="30" stroke="#818cf8" stroke-width="0.3" opacity="0.3" stroke-dasharray="2,2"/>
+  <!-- Hub dot -->
+  <circle cx="24" cy="36" r="3" fill="none" stroke="#22d3ee" stroke-width="1" opacity="0.5"/>
+  <circle cx="24" cy="36" r="1" fill="#22d3ee" opacity="0.7"/>
+  <line x1="24" y1="20" x2="24" y2="33" stroke="#22d3ee" stroke-width="0.4" opacity="0.3" stroke-dasharray="2,2"/>
+</svg>
