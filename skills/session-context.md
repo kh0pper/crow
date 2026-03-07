@@ -1,0 +1,41 @@
+# Session Context Skill
+
+## Description
+Automatically load and save context at the beginning and end of sessions. Ensures continuity across conversations.
+
+## Session Start Protocol
+At the beginning of every session, perform these steps:
+
+1. **Load context**: Use `recall_by_context` with any available task description
+2. **Check stats**: Use `memory_stats` to understand what's stored
+3. **Check active projects**: Use `list_projects` to see active research
+4. **Greet with context**: Reference relevant prior context in your greeting
+
+## Session End Protocol
+Before the session ends:
+
+1. **Store new learnings**: Save any important new information to memory
+2. **Update project status**: If research projects were worked on, update their status
+3. **Note unfinished work**: Store what was in progress with category "project" and high importance
+4. **Store decisions**: Record any decisions made and their rationale
+
+## Automatic Memory Triggers
+Store information automatically when:
+- User explicitly asks you to remember something
+- A key decision is made
+- New project requirements are discussed
+- Deadlines or milestones are mentioned
+- User preferences are expressed
+- Research sources are discussed but not yet formally added
+
+## Context Categories Quick Reference
+| Category | Use For |
+|----------|---------|
+| general | Miscellaneous facts |
+| project | Project details, requirements |
+| preference | User preferences, settings |
+| person | People, contacts, stakeholders |
+| process | Workflows, procedures |
+| decision | Decisions and rationale |
+| learning | Skills, insights, lessons |
+| goal | Objectives, targets, aspirations |

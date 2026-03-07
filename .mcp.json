@@ -1,0 +1,55 @@
+{
+  "mcpServers": {
+    "crow-memory": {
+      "command": "node",
+      "args": ["servers/memory/index.js"],
+      "env": {
+        "CROW_DB_PATH": "./data/crow.db"
+      }
+    },
+    "crow-research": {
+      "command": "node",
+      "args": ["servers/research/index.js"],
+      "env": {
+        "CROW_DB_PATH": "./data/crow.db"
+      }
+    },
+    "trello": {
+      "command": "npx",
+      "args": ["-y", "mcp-server-trello"],
+      "env": {
+        "TRELLO_API_KEY": "${TRELLO_API_KEY}",
+        "TRELLO_TOKEN": "${TRELLO_TOKEN}"
+      }
+    },
+    "canvas-lms": {
+      "command": "npx",
+      "args": ["-y", "mcp-canvas-lms"],
+      "env": {
+        "CANVAS_API_TOKEN": "${CANVAS_API_TOKEN}",
+        "CANVAS_BASE_URL": "${CANVAS_BASE_URL}"
+      }
+    },
+    "google-workspace": {
+      "command": "uvx",
+      "args": ["workspace-mcp"],
+      "env": {
+        "GOOGLE_CLIENT_ID": "${GOOGLE_CLIENT_ID}",
+        "GOOGLE_CLIENT_SECRET": "${GOOGLE_CLIENT_SECRET}"
+      }
+    },
+    "mcp-research": {
+      "command": "uvx",
+      "args": ["mcp-research"],
+      "env": {}
+    },
+    "zotero": {
+      "command": "uvx",
+      "args": ["zotero-mcp"],
+      "env": {
+        "ZOTERO_API_KEY": "${ZOTERO_API_KEY}",
+        "ZOTERO_USER_ID": "${ZOTERO_USER_ID}"
+      }
+    }
+  }
+}
