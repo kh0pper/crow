@@ -113,14 +113,25 @@ export const INTEGRATIONS = [
     keyInstructions: "Create new private key → check 'Allow library access' → copy the API key and your User ID (shown at top of page).",
   },
   {
-    id: "paper-search",
-    name: "Paper Search",
-    description: "Academic paper search (arXiv, PubMed, bioRxiv, Semantic Scholar)",
+    id: "arxiv",
+    name: "arXiv",
+    description: "Academic paper search and full-text retrieval",
     command: "uvx",
-    args: ["paper-search-mcp"],
+    args: ["arxiv-mcp-server"],
     envVars: [], // No API key needed
     keyUrl: null,
     keyInstructions: "No setup required — works out of the box.",
+  },
+  {
+    id: "render",
+    name: "Render",
+    description: "Manage your Render deployment, services, and environment",
+    command: "npx",
+    args: ["-y", "mcp-remote", "https://mcp.render.com/mcp"],
+    argsTransform: (env) => ["-y", "mcp-remote", "https://mcp.render.com/mcp", "--header", `Authorization: Bearer ${env.RENDER_API_KEY}`],
+    envVars: ["RENDER_API_KEY"],
+    keyUrl: "https://dashboard.render.com/account/api-keys",
+    keyInstructions: "Go to Account Settings → API Keys → Create API Key → copy it.",
   },
 ];
 

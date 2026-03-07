@@ -38,9 +38,9 @@
         "GOOGLE_CLIENT_SECRET": "${GOOGLE_CLIENT_SECRET}"
       }
     },
-    "paper-search": {
+    "arxiv": {
       "command": "uvx",
-      "args": ["paper-search-mcp"],
+      "args": ["arxiv-mcp-server"],
       "env": {}
     },
     "zotero": {
