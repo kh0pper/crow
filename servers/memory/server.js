@@ -6,24 +6,11 @@
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import Database from "better-sqlite3";
 import { z } from "zod";
-import { resolve, dirname } from "path";
-import { fileURLToPath } from "url";
-import { existsSync } from "fs";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { createDbClient } from "../db.js";
 
 export function createMemoryServer(dbPath) {
-  const DB_PATH = dbPath || process.env.CROW_DB_PATH || resolve(__dirname, "../../data/crow.db");
-
-  if (!existsSync(DB_PATH)) {
-    throw new Error(`Database not found at ${DB_PATH}. Run 'npm run init-db' first.`);
-  }
-
-  const db = new Database(DB_PATH);
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
+  const db = createDbClient(dbPath);
 
   const server = new McpServer({
     name: "crow-memory",
@@ -44,16 +31,15 @@ export function createMemoryServer(dbPath) {
       importance: z.number().min(1).max(10).default(5).describe("1-10 importance rating"),
     },
     async ({ content, category, context, tags, source, importance }) => {
-      const stmt = db.prepare(`
-        INSERT INTO memories (content, category, context, tags, source, importance)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `);
-      const result = stmt.run(content, category, context, tags, source, importance);
+      const result = await db.execute({
+        sql: "INSERT INTO memories (content, category, context, tags, source, importance) VALUES (?, ?, ?, ?, ?, ?)",
+        args: [content, category, context ?? null, tags ?? null, source ?? null, importance],
+      });
       return {
         content: [
           {
             type: "text",
-            text: `Memory stored (id: ${result.lastInsertRowid}, category: ${category}, importance: ${importance})`,
+            text: `Memory stored (id: ${Number(result.lastInsertRowid)}, category: ${category}, importance: ${importance})`,
           },
         ],
       };
@@ -90,13 +76,13 @@ export function createMemoryServer(dbPath) {
       sql += " ORDER BY rank LIMIT ?";
       params.push(limit);
 
-      const rows = db.prepare(sql).all(...params);
+      const { rows } = await db.execute({ sql, args: params });
 
-      const updateStmt = db.prepare(`
-        UPDATE memories SET accessed_at = datetime('now'), access_count = access_count + 1 WHERE id = ?
-      `);
       for (const row of rows) {
-        updateStmt.run(row.id);
+        await db.execute({
+          sql: "UPDATE memories SET accessed_at = datetime('now'), access_count = access_count + 1 WHERE id = ?",
+          args: [row.id],
+        });
       }
 
       if (rows.length === 0) {
@@ -133,17 +119,16 @@ export function createMemoryServer(dbPath) {
         return { content: [{ type: "text", text: "Context too short to search." }] };
       }
 
-      const rows = db
-        .prepare(
-          `
-        SELECT m.*, rank FROM memories_fts fts
-        JOIN memories m ON m.id = fts.rowid
-        WHERE memories_fts MATCH ?
-        ORDER BY rank
-        LIMIT ?
-      `
-        )
-        .all(words, limit);
+      const { rows } = await db.execute({
+        sql: `
+          SELECT m.*, rank FROM memories_fts fts
+          JOIN memories m ON m.id = fts.rowid
+          WHERE memories_fts MATCH ?
+          ORDER BY rank
+          LIMIT ?
+        `,
+        args: [words, limit],
+      });
 
       if (rows.length === 0) {
         return { content: [{ type: "text", text: "No relevant memories found for this context." }] };
@@ -194,7 +179,7 @@ export function createMemoryServer(dbPath) {
       sql += ` ORDER BY ${sortMap[sort_by]} LIMIT ?`;
       params.push(limit);
 
-      const rows = db.prepare(sql).all(...params);
+      const { rows } = await db.execute({ sql, args: params });
 
       if (rows.length === 0) {
         return { content: [{ type: "text", text: "No memories found with those filters." }] };
@@ -223,8 +208,8 @@ export function createMemoryServer(dbPath) {
       context: z.string().optional().describe("Updated context"),
     },
     async ({ id, content, category, tags, importance, context }) => {
-      const existing = db.prepare("SELECT * FROM memories WHERE id = ?").get(id);
-      if (!existing) {
+      const { rows } = await db.execute({ sql: "SELECT * FROM memories WHERE id = ?", args: [id] });
+      if (rows.length === 0) {
         return { content: [{ type: "text", text: `Memory #${id} not found.` }] };
       }
 
@@ -243,7 +228,7 @@ export function createMemoryServer(dbPath) {
       updates.push("updated_at = datetime('now')");
       params.push(id);
 
-      db.prepare(`UPDATE memories SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+      await db.execute({ sql: `UPDATE memories SET ${updates.join(", ")} WHERE id = ?`, args: params });
 
       return { content: [{ type: "text", text: `Memory #${id} updated.` }] };
     }
@@ -254,12 +239,12 @@ export function createMemoryServer(dbPath) {
     "Delete a memory by ID.",
     { id: z.number().describe("Memory ID to delete") },
     async ({ id }) => {
-      const result = db.prepare("DELETE FROM memories WHERE id = ?").run(id);
+      const result = await db.execute({ sql: "DELETE FROM memories WHERE id = ?", args: [id] });
       return {
         content: [
           {
             type: "text",
-            text: result.changes > 0 ? `Memory #${id} deleted.` : `Memory #${id} not found.`,
+            text: result.rowsAffected > 0 ? `Memory #${id} deleted.` : `Memory #${id} not found.`,
           },
         ],
       };
@@ -271,10 +256,10 @@ export function createMemoryServer(dbPath) {
     "Get statistics about stored memories - counts by category, total count, importance distribution.",
     {},
     async () => {
-      const total = db.prepare("SELECT COUNT(*) as count FROM memories").get();
-      const byCategory = db.prepare("SELECT category, COUNT(*) as count FROM memories GROUP BY category ORDER BY count DESC").all();
-      const byImportance = db.prepare("SELECT importance, COUNT(*) as count FROM memories GROUP BY importance ORDER BY importance DESC").all();
-      const recent = db.prepare("SELECT id, category, substr(content, 1, 80) as preview, created_at FROM memories ORDER BY created_at DESC LIMIT 5").all();
+      const total = (await db.execute("SELECT COUNT(*) as count FROM memories")).rows[0];
+      const byCategory = (await db.execute("SELECT category, COUNT(*) as count FROM memories GROUP BY category ORDER BY count DESC")).rows;
+      const byImportance = (await db.execute("SELECT importance, COUNT(*) as count FROM memories GROUP BY importance ORDER BY importance DESC")).rows;
+      const recent = (await db.execute("SELECT id, category, substr(content, 1, 80) as preview, created_at FROM memories ORDER BY created_at DESC LIMIT 5")).rows;
 
       let text = `Memory Statistics:\n`;
       text += `  Total memories: ${total.count}\n\n`;
@@ -289,9 +274,9 @@ export function createMemoryServer(dbPath) {
   // --- Resources ---
 
   server.resource("memory-categories", "memory://categories", async (uri) => {
-    const categories = db
-      .prepare("SELECT DISTINCT category, COUNT(*) as count FROM memories GROUP BY category ORDER BY count DESC")
-      .all();
+    const { rows: categories } = await db.execute(
+      "SELECT DISTINCT category, COUNT(*) as count FROM memories GROUP BY category ORDER BY count DESC"
+    );
     return {
       contents: [
         {

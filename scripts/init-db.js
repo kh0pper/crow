@@ -1,19 +1,21 @@
-import Database from "better-sqlite3";
-import { resolve, dirname } from "path";
-import { fileURLToPath } from "url";
+import { createDbClient } from "../servers/db.js";
 import { mkdirSync } from "fs";
+import { dirname, resolve } from "path";
+import { fileURLToPath } from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DB_PATH = process.env.CROW_DB_PATH || resolve(__dirname, "../data/crow.db");
 
-mkdirSync(dirname(DB_PATH), { recursive: true });
-const db = new Database(DB_PATH);
-db.pragma("journal_mode = WAL");
-db.pragma("foreign_keys = ON");
+// Ensure data directory exists for local file mode
+if (!process.env.TURSO_DATABASE_URL) {
+  const dbPath = process.env.CROW_DB_PATH || resolve(__dirname, "../data/crow.db");
+  mkdirSync(dirname(dbPath), { recursive: true });
+}
+
+const db = createDbClient();
 
 // --- Persistent Memory Tables ---
 
-db.exec(`
+await db.executeMultiple(`
   CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     category TEXT NOT NULL DEFAULT 'general',
@@ -31,13 +33,17 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
   CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
   CREATE INDEX IF NOT EXISTS idx_memories_tags ON memories(tags);
+`);
 
+await db.executeMultiple(`
   CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content, context, tags, source, category,
     content=memories,
     content_rowid=id
   );
+`);
 
+await db.executeMultiple(`
   CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
     INSERT INTO memories_fts(rowid, content, context, tags, source, category)
     VALUES (new.id, new.content, new.context, new.tags, new.source, new.category);
@@ -58,7 +64,7 @@ db.exec(`
 
 // --- Research Pipeline Tables ---
 
-db.exec(`
+await db.executeMultiple(`
   CREATE TABLE IF NOT EXISTS research_projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -102,13 +108,17 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_sources_project ON research_sources(project_id);
   CREATE INDEX IF NOT EXISTS idx_sources_type ON research_sources(source_type);
   CREATE INDEX IF NOT EXISTS idx_sources_verified ON research_sources(verified);
+`);
 
+await db.executeMultiple(`
   CREATE VIRTUAL TABLE IF NOT EXISTS sources_fts USING fts5(
     title, authors, abstract, content_summary, full_text, tags, citation_apa,
     content=research_sources,
     content_rowid=id
   );
+`);
 
+await db.executeMultiple(`
   CREATE TRIGGER IF NOT EXISTS sources_ai AFTER INSERT ON research_sources BEGIN
     INSERT INTO sources_fts(rowid, title, authors, abstract, content_summary, full_text, tags, citation_apa)
     VALUES (new.id, new.title, new.authors, new.abstract, new.content_summary, new.full_text, new.tags, new.citation_apa);
@@ -145,7 +155,7 @@ db.exec(`
 
 // --- OAuth Tables (for mobile gateway) ---
 
-db.exec(`
+await db.executeMultiple(`
   CREATE TABLE IF NOT EXISTS oauth_clients (
     client_id TEXT PRIMARY KEY,
     metadata TEXT NOT NULL,
@@ -166,5 +176,6 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_tokens_type ON oauth_tokens(token_type);
 `);
 
-console.log("Database initialized successfully at:", DB_PATH);
+const tursoMode = process.env.TURSO_DATABASE_URL ? "Turso" : "local file";
+console.log(`Database initialized successfully (${tursoMode})`);
 db.close();
