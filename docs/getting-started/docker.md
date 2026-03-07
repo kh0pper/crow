@@ -36,6 +36,8 @@ This creates a public URL via Cloudflare that you can use to connect from mobile
 
 The gateway reads all integration API keys from environment variables. See the [Integrations](../integrations/) page for the full list.
 
+> **Security note**: If you're exposing the gateway to the internet, always use a reverse proxy (nginx, Caddy, or Cloudflare Tunnel) with HTTPS. Never expose port 3001 directly to the public internet without TLS encryption. The `--no-auth` flag should never be used in internet-facing deployments.
+
 ## Health Check
 
 Verify the gateway is running:

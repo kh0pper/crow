@@ -90,6 +90,15 @@ Edit `servers/gateway/integrations.js`:
 
 No authentication required — doesn't expose secrets.
 
+## Security Considerations
+
+- **Never use `--no-auth` in production** — it disables all authentication. The gateway will refuse to start with `--no-auth` when `NODE_ENV=production`
+- **Always deploy behind HTTPS** — Render and Railway provide this automatically. If self-hosting, use a reverse proxy (nginx, Caddy) with TLS
+- The **`/setup` page** is unauthenticated by design — it shows which integrations are connected and endpoint URLs, but never exposes API keys or secrets
+- **OAuth tokens** are stored in the SQLite database and persist across restarts
+- **Rate limiting** is not built into the gateway — rely on your hosting provider or a reverse proxy for rate limiting in production
+- The **`/crow.md` endpoint** is protected by OAuth when auth is enabled, since it exposes behavioral context
+
 ## Health Check
 
 `GET /health` returns JSON status:

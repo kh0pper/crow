@@ -11,6 +11,16 @@ These are always available — no API keys needed:
 | **crow-memory** | 7 tools | Persistent memory: store, search, recall, list, update, delete, stats |
 | **crow-research** | 12 tools | Research pipeline: projects, sources, notes, citations, bibliography |
 
+## Keeping Your Keys Safe
+
+Each API key only grants access to that one service — a leaked GitHub key can't access your Gmail, for example. But you should still treat every key with care:
+
+- **Only add keys for services you actually use** — fewer keys means less to manage and less risk
+- **Never share keys** in screenshots, messages, or public repositories
+- **If a key leaks**, revoke it immediately at the service's website and create a new one
+
+For a complete, beginner-friendly security guide, see [SECURITY.md](https://github.com/kh0pper/crow/blob/main/SECURITY.md).
+
 ## External Integrations
 
 Add API keys to enable these. For cloud deployments, add keys in your [Render dashboard](https://dashboard.render.com) under Environment.

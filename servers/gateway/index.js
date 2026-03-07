@@ -79,6 +79,14 @@ import { setupPageHandler } from "./setup-page.js";
 const PORT = parseInt(process.env.PORT || process.env.CROW_GATEWAY_PORT || "3001", 10);
 const noAuth = process.argv.includes("--no-auth");
 
+if (noAuth && process.env.NODE_ENV === "production") {
+  console.error("ERROR: --no-auth cannot be used when NODE_ENV=production. Exiting.");
+  process.exit(1);
+}
+if (noAuth) {
+  console.warn("⚠️  WARNING: Running without authentication. Do NOT use in production.");
+}
+
 // Initialize OAuth tables
 await initOAuthTables();
 
@@ -111,8 +119,8 @@ app.get("/health", (req, res) => {
 // --- Setup Page (no auth) ---
 app.get("/setup", setupPageHandler);
 
-// --- crow.md Endpoint ---
-app.get("/crow.md", async (req, res) => {
+// --- crow.md Endpoint (protected when auth is enabled) ---
+const crowMdHandler = async (req, res) => {
   const db = createDbClient();
   const platform = req.query.platform || "generic";
   const includeDynamic = req.query.dynamic !== "false";
@@ -125,7 +133,7 @@ app.get("/crow.md", async (req, res) => {
   } finally {
     db.close();
   }
-});
+};
 
 // --- OAuth Setup ---
 let authMiddleware = null;
@@ -197,6 +205,13 @@ if (!noAuth) {
   console.log("OAuth 2.1 enabled — Dynamic Client Registration available");
 } else {
   console.log("WARNING: Running without authentication (--no-auth). For development only.");
+}
+
+// --- Mount crow.md (with auth if enabled) ---
+if (authMiddleware) {
+  app.get("/crow.md", authMiddleware, crowMdHandler);
+} else {
+  app.get("/crow.md", crowMdHandler);
 }
 
 // --- MCP Request Handler Factory ---

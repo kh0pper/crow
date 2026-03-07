@@ -7,7 +7,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { createDbClient } from "../db.js";
+import { createDbClient, sanitizeFtsQuery, escapeLikePattern } from "../db.js";
 import { generateCrowContext, PROTECTED_SECTIONS } from "./crow-context.js";
 
 export function createMemoryServer(dbPath) {
@@ -24,11 +24,11 @@ export function createMemoryServer(dbPath) {
     "crow_store_memory",
     "Store a new piece of information in persistent memory. Use this whenever you learn something important about the user, their projects, preferences, or any context that should persist across sessions.",
     {
-      content: z.string().describe("The information to remember"),
-      category: z.string().default("general").describe("Category: general, project, preference, person, process, decision, learning, goal"),
-      context: z.string().optional().describe("Additional context about when/why this was stored"),
-      tags: z.string().optional().describe("Comma-separated tags for filtering"),
-      source: z.string().optional().describe("Where this information came from"),
+      content: z.string().max(50000).describe("The information to remember"),
+      category: z.string().max(500).default("general").describe("Category: general, project, preference, person, process, decision, learning, goal"),
+      context: z.string().max(50000).optional().describe("Additional context about when/why this was stored"),
+      tags: z.string().max(500).optional().describe("Comma-separated tags for filtering"),
+      source: z.string().max(500).optional().describe("Where this information came from"),
       importance: z.number().min(1).max(10).default(5).describe("1-10 importance rating"),
     },
     async ({ content, category, context, tags, source, importance }) => {
@@ -51,19 +51,24 @@ export function createMemoryServer(dbPath) {
     "crow_search_memories",
     "Search persistent memory using full-text search. Returns memories ranked by relevance. Use this to recall information from previous sessions.",
     {
-      query: z.string().describe("Search query (supports FTS5 syntax: AND, OR, NOT, phrases)"),
-      category: z.string().optional().describe("Filter by category"),
+      query: z.string().max(500).describe("Search query"),
+      category: z.string().max(500).optional().describe("Filter by category"),
       min_importance: z.number().min(1).max(10).optional().describe("Minimum importance threshold"),
-      limit: z.number().default(10).describe("Maximum results to return"),
+      limit: z.number().max(100).default(10).describe("Maximum results to return"),
     },
     async ({ query, category, min_importance, limit }) => {
+      const safeQuery = sanitizeFtsQuery(query);
+      if (!safeQuery) {
+        return { content: [{ type: "text", text: "Search query is empty or contains only special characters." }] };
+      }
+
       let sql = `
         SELECT m.*, rank
         FROM memories_fts fts
         JOIN memories m ON m.id = fts.rowid
         WHERE memories_fts MATCH ?
       `;
-      const params = [query];
+      const params = [safeQuery];
 
       if (category) {
         sql += " AND m.category = ?";
@@ -105,8 +110,8 @@ export function createMemoryServer(dbPath) {
     "crow_recall_by_context",
     "Retrieve memories relevant to a given context. Uses full-text search across content, context, and tags to find the most relevant stored information.",
     {
-      context: z.string().describe("Describe the current context or topic to find relevant memories"),
-      limit: z.number().default(5).describe("Maximum results"),
+      context: z.string().max(2000).describe("Describe the current context or topic to find relevant memories"),
+      limit: z.number().max(100).default(5).describe("Maximum results"),
     },
     async ({ context, limit }) => {
       const words = context
@@ -149,11 +154,11 @@ export function createMemoryServer(dbPath) {
     "crow_list_memories",
     "List memories with optional filtering by category, tags, or importance. Good for browsing what's stored.",
     {
-      category: z.string().optional().describe("Filter by category"),
-      tag: z.string().optional().describe("Filter by tag (partial match)"),
+      category: z.string().max(500).optional().describe("Filter by category"),
+      tag: z.string().max(500).optional().describe("Filter by tag (partial match)"),
       min_importance: z.number().min(1).max(10).optional().describe("Minimum importance"),
       sort_by: z.enum(["recent", "importance", "accessed"]).default("recent").describe("Sort order"),
-      limit: z.number().default(20).describe("Max results"),
+      limit: z.number().max(100).default(20).describe("Max results"),
     },
     async ({ category, tag, min_importance, sort_by, limit }) => {
       let sql = "SELECT * FROM memories WHERE 1=1";
@@ -164,8 +169,8 @@ export function createMemoryServer(dbPath) {
         params.push(category);
       }
       if (tag) {
-        sql += " AND tags LIKE ?";
-        params.push(`%${tag}%`);
+        sql += " AND tags LIKE ? ESCAPE '\\'";
+        params.push(`%${escapeLikePattern(tag)}%`);
       }
       if (min_importance) {
         sql += " AND importance >= ?";
@@ -202,11 +207,11 @@ export function createMemoryServer(dbPath) {
     "Update an existing memory's content, category, tags, or importance.",
     {
       id: z.number().describe("Memory ID to update"),
-      content: z.string().optional().describe("New content"),
-      category: z.string().optional().describe("New category"),
-      tags: z.string().optional().describe("New tags (replaces existing)"),
+      content: z.string().max(50000).optional().describe("New content"),
+      category: z.string().max(500).optional().describe("New category"),
+      tags: z.string().max(500).optional().describe("New tags (replaces existing)"),
       importance: z.number().min(1).max(10).optional().describe("New importance"),
-      context: z.string().optional().describe("Updated context"),
+      context: z.string().max(50000).optional().describe("Updated context"),
     },
     async ({ id, content, category, tags, importance, context }) => {
       const { rows } = await db.execute({ sql: "SELECT * FROM memories WHERE id = ?", args: [id] });
@@ -291,9 +296,9 @@ export function createMemoryServer(dbPath) {
     "crow_update_context_section",
     "Update an existing crow.md section's content, title, enabled status, or sort order. Works on both protected and custom sections.",
     {
-      section_key: z.string().describe("The section key to update (e.g. 'identity', 'memory_protocol')"),
-      content: z.string().optional().describe("New content for the section"),
-      section_title: z.string().optional().describe("New title for the section"),
+      section_key: z.string().max(500).describe("The section key to update (e.g. 'identity', 'memory_protocol')"),
+      content: z.string().max(50000).optional().describe("New content for the section"),
+      section_title: z.string().max(500).optional().describe("New title for the section"),
       enabled: z.boolean().optional().describe("Enable or disable this section"),
       sort_order: z.number().optional().describe("New sort order (lower = earlier)"),
     },
@@ -333,9 +338,9 @@ export function createMemoryServer(dbPath) {
     "crow_add_context_section",
     "Add a new custom section to crow.md. Custom sections can be used to extend Crow's behavioral context with project-specific or user-specific instructions.",
     {
-      section_key: z.string().describe("Unique key for the section (e.g. 'project_guidelines', 'coding_style')"),
-      section_title: z.string().describe("Display title for the section"),
-      content: z.string().describe("Markdown content for the section"),
+      section_key: z.string().max(500).describe("Unique key for the section (e.g. 'project_guidelines', 'coding_style')"),
+      section_title: z.string().max(500).describe("Display title for the section"),
+      content: z.string().max(50000).describe("Markdown content for the section"),
       sort_order: z.number().default(100).describe("Sort order (lower = earlier, default 100)"),
     },
     async ({ section_key, section_title, content, sort_order }) => {
@@ -387,7 +392,7 @@ export function createMemoryServer(dbPath) {
     "crow_delete_context_section",
     "Delete a custom crow.md section. Protected sections (identity, memory_protocol, research_protocol, session_protocol, transparency_rules, skills_reference, key_principles) cannot be deleted — only disabled.",
     {
-      section_key: z.string().describe("The section key to delete"),
+      section_key: z.string().max(500).describe("The section key to delete"),
     },
     async ({ section_key }) => {
       if (PROTECTED_SECTIONS.includes(section_key)) {

@@ -24,7 +24,7 @@ COPY scripts/init-db.js scripts/
 RUN mkdir -p data && node scripts/init-db.js
 
 # Ensure npm/npx cache is writable for runtime package downloads
-RUN mkdir -p /root/.npm && chmod -R 777 /root/.npm
+RUN mkdir -p /root/.npm && chmod -R 755 /root/.npm
 
 # Expose gateway port
 EXPOSE 3001

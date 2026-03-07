@@ -7,7 +7,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { createDbClient } from "../db.js";
+import { createDbClient, sanitizeFtsQuery, escapeLikePattern } from "../db.js";
 
 const SOURCE_TYPES = [
   "web_article", "academic_paper", "book", "interview",
@@ -57,9 +57,9 @@ export function createResearchServer(dbPath) {
     "crow_create_project",
     "Create a new research project to organize sources and notes under.",
     {
-      name: z.string().describe("Project name"),
-      description: z.string().optional().describe("Project description and goals"),
-      tags: z.string().optional().describe("Comma-separated tags"),
+      name: z.string().max(500).describe("Project name"),
+      description: z.string().max(50000).optional().describe("Project description and goals"),
+      tags: z.string().max(500).optional().describe("Comma-separated tags"),
     },
     async ({ name, description, tags }) => {
       const result = await db.execute({
@@ -77,8 +77,10 @@ export function createResearchServer(dbPath) {
     "List all research projects with their status and source counts.",
     {
       status: z.enum(["active", "paused", "completed", "archived"]).optional().describe("Filter by status"),
+      limit: z.number().max(100).default(20).describe("Maximum results to return"),
+      offset: z.number().default(0).describe("Number of results to skip"),
     },
-    async ({ status }) => {
+    async ({ status, limit, offset }) => {
       let sql = `
         SELECT p.*, COUNT(s.id) as source_count,
                (SELECT COUNT(*) FROM research_notes n WHERE n.project_id = p.id) as note_count
@@ -90,7 +92,8 @@ export function createResearchServer(dbPath) {
         sql += " WHERE p.status = ?";
         params.push(status);
       }
-      sql += " GROUP BY p.id ORDER BY p.updated_at DESC";
+      sql += " GROUP BY p.id ORDER BY p.updated_at DESC LIMIT ? OFFSET ?";
+      params.push(limit, offset);
 
       const { rows } = await db.execute({ sql, args: params });
       if (rows.length === 0) {
@@ -113,10 +116,10 @@ export function createResearchServer(dbPath) {
     "Update a research project's name, description, status, or tags.",
     {
       id: z.number().describe("Project ID"),
-      name: z.string().optional(),
-      description: z.string().optional(),
+      name: z.string().max(500).optional(),
+      description: z.string().max(50000).optional(),
       status: z.enum(["active", "paused", "completed", "archived"]).optional(),
-      tags: z.string().optional(),
+      tags: z.string().max(500).optional(),
     },
     async ({ id, name, description, status, tags }) => {
       const updates = [];
@@ -143,21 +146,21 @@ export function createResearchServer(dbPath) {
     "crow_add_source",
     "Add a research source with full metadata and automatic APA citation generation.",
     {
-      title: z.string().describe("Title of the source"),
+      title: z.string().max(500).describe("Title of the source"),
       source_type: z.enum(SOURCE_TYPES).describe("Type of source"),
       project_id: z.number().optional().describe("Associate with a research project"),
-      url: z.string().optional().describe("URL where the source was found"),
-      authors: z.string().optional().describe("Author(s) - 'Last, F. M.' format, separate multiple with '&'"),
-      publication_date: z.string().optional().describe("Publication date (YYYY-MM-DD or YYYY)"),
-      publisher: z.string().optional().describe("Publisher or website name"),
-      doi: z.string().optional().describe("DOI (for academic papers)"),
-      isbn: z.string().optional().describe("ISBN (for books)"),
-      abstract: z.string().optional().describe("Abstract or brief description"),
-      content_summary: z.string().optional().describe("Summary of key points and findings"),
-      full_text: z.string().optional().describe("Full text content if available"),
-      citation_apa: z.string().optional().describe("Manual APA citation (auto-generated if not provided)"),
-      retrieval_method: z.string().optional().describe("How the source was obtained"),
-      tags: z.string().optional().describe("Comma-separated tags"),
+      url: z.string().max(2000).optional().describe("URL where the source was found"),
+      authors: z.string().max(1000).optional().describe("Author(s) - 'Last, F. M.' format, separate multiple with '&'"),
+      publication_date: z.string().max(20).optional().describe("Publication date (YYYY-MM-DD or YYYY)"),
+      publisher: z.string().max(1000).optional().describe("Publisher or website name"),
+      doi: z.string().max(500).optional().describe("DOI (for academic papers)"),
+      isbn: z.string().max(500).optional().describe("ISBN (for books)"),
+      abstract: z.string().max(50000).optional().describe("Abstract or brief description"),
+      content_summary: z.string().max(50000).optional().describe("Summary of key points and findings"),
+      full_text: z.string().max(50000).optional().describe("Full text content if available"),
+      citation_apa: z.string().max(1000).optional().describe("Manual APA citation (auto-generated if not provided)"),
+      retrieval_method: z.string().max(500).optional().describe("How the source was obtained"),
+      tags: z.string().max(500).optional().describe("Comma-separated tags"),
       relevance_score: z.number().min(1).max(10).default(5).describe("How relevant to the project (1-10)"),
     },
     async (params) => {
@@ -195,19 +198,24 @@ export function createResearchServer(dbPath) {
     "crow_search_sources",
     "Full-text search across all research sources.",
     {
-      query: z.string().describe("Search query (FTS5 syntax supported)"),
+      query: z.string().max(500).describe("Search query"),
       project_id: z.number().optional().describe("Filter to specific project"),
       source_type: z.enum(SOURCE_TYPES).optional().describe("Filter by source type"),
       verified_only: z.boolean().default(false).describe("Only return verified sources"),
-      limit: z.number().default(10).describe("Max results"),
+      limit: z.number().max(100).default(10).describe("Max results"),
     },
     async ({ query, project_id, source_type, verified_only, limit }) => {
+      const sanitized = sanitizeFtsQuery(query);
+      if (!sanitized) {
+        return { content: [{ type: "text", text: "No sources found." }] };
+      }
+
       let sql = `
         SELECT s.*, rank FROM sources_fts fts
         JOIN research_sources s ON s.id = fts.rowid
         WHERE sources_fts MATCH ?
       `;
-      const params = [query];
+      const params = [sanitized];
 
       if (project_id) { sql += " AND s.project_id = ?"; params.push(project_id); }
       if (source_type) { sql += " AND s.source_type = ?"; params.push(source_type); }
@@ -279,7 +287,7 @@ export function createResearchServer(dbPath) {
     {
       id: z.number().describe("Source ID"),
       verified: z.boolean().describe("Whether the source is verified"),
-      notes: z.string().optional().describe("Verification notes"),
+      notes: z.string().max(50000).optional().describe("Verification notes"),
     },
     async ({ id, verified, notes }) => {
       await db.execute({
@@ -298,7 +306,7 @@ export function createResearchServer(dbPath) {
       source_type: z.enum(SOURCE_TYPES).optional(),
       verified_only: z.boolean().default(false),
       sort_by: z.enum(["recent", "relevance", "title"]).default("recent"),
-      limit: z.number().default(20),
+      limit: z.number().max(100).default(20),
     },
     async ({ project_id, source_type, verified_only, sort_by, limit }) => {
       let sql = "SELECT * FROM research_sources WHERE 1=1";
@@ -338,12 +346,12 @@ export function createResearchServer(dbPath) {
     "crow_add_note",
     "Add a research note - can be attached to a project, a source, or both.",
     {
-      content: z.string().describe("Note content"),
+      content: z.string().max(50000).describe("Note content"),
       note_type: z.enum(["note", "quote", "summary", "analysis", "question", "insight"]).default("note"),
       project_id: z.number().optional().describe("Associated project"),
       source_id: z.number().optional().describe("Associated source"),
-      title: z.string().optional().describe("Note title"),
-      tags: z.string().optional().describe("Comma-separated tags"),
+      title: z.string().max(500).optional().describe("Note title"),
+      tags: z.string().max(500).optional().describe("Comma-separated tags"),
     },
     async ({ content, note_type, project_id, source_id, title, tags }) => {
       const result = await db.execute({
@@ -360,14 +368,15 @@ export function createResearchServer(dbPath) {
     "crow_search_notes",
     "Search research notes by content.",
     {
-      query: z.string().describe("Search terms"),
+      query: z.string().max(500).describe("Search terms"),
       project_id: z.number().optional(),
       note_type: z.enum(["note", "quote", "summary", "analysis", "question", "insight"]).optional(),
-      limit: z.number().default(10),
+      limit: z.number().max(100).default(10),
     },
     async ({ query, project_id, note_type, limit }) => {
-      let sql = "SELECT * FROM research_notes WHERE content LIKE ?";
-      const params = [`%${query}%`];
+      const escaped = escapeLikePattern(query);
+      let sql = "SELECT * FROM research_notes WHERE content LIKE ? ESCAPE '\\'";
+      const params = [`%${escaped}%`];
 
       if (project_id) { sql += " AND project_id = ?"; params.push(project_id); }
       if (note_type) { sql += " AND note_type = ?"; params.push(note_type); }
@@ -394,7 +403,7 @@ export function createResearchServer(dbPath) {
     "Generate a formatted APA bibliography for a project or for all sources matching a filter.",
     {
       project_id: z.number().optional().describe("Generate bibliography for this project"),
-      tag: z.string().optional().describe("Filter by tag"),
+      tag: z.string().max(500).optional().describe("Filter by tag"),
       verified_only: z.boolean().default(false),
     },
     async ({ project_id, tag, verified_only }) => {
@@ -402,7 +411,7 @@ export function createResearchServer(dbPath) {
       const params = [];
 
       if (project_id) { sql += " AND project_id = ?"; params.push(project_id); }
-      if (tag) { sql += " AND tags LIKE ?"; params.push(`%${tag}%`); }
+      if (tag) { sql += " AND tags LIKE ? ESCAPE '\\'"; params.push(`%${escapeLikePattern(tag)}%`); }
       if (verified_only) { sql += " AND verified = 1"; }
       sql += " ORDER BY citation_apa ASC";
 
