@@ -86,7 +86,10 @@ let authMiddleware = null;
 
 if (!noAuth) {
   const provider = createOAuthProvider();
-  const serverUrl = new URL(`http://0.0.0.0:${PORT}`);
+  // Use the public HTTPS URL when deployed (e.g. on Render), fall back to local HTTP
+  const serverUrl = process.env.CROW_GATEWAY_URL
+    ? new URL(process.env.CROW_GATEWAY_URL)
+    : new URL(`http://0.0.0.0:${PORT}`);
 
   // Auth routes (register, authorize, token)
   app.use(mcpAuthRouter({
