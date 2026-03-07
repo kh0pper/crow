@@ -1,6 +1,8 @@
 # Crow AI Platform
 
-Persistent memory, research pipeline, and 15+ integrations for your AI assistant. Built on the open [Model Context Protocol](https://modelcontextprotocol.io) standard.
+Persistent memory, research pipeline, encrypted P2P sharing, and 15+ integrations for your AI assistant. Built on the open [Model Context Protocol](https://modelcontextprotocol.io) standard.
+
+**Share memories, research, and messages directly between Crow users** — end-to-end encrypted, no central server, no accounts. The first AI platform where your assistant can securely collaborate with other people's assistants.
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
@@ -8,11 +10,13 @@ Persistent memory, research pipeline, and 15+ integrations for your AI assistant
 └────────┬──────────────────────┬──────────────────────┬───────────────┘
          │                      │                      │
    /memory/mcp            /research/mcp          /tools/mcp
+   /sharing/mcp           /sharing/sse           /relay/*
          │                      │                      │
 ┌────────┴──────────────────────┴──────────────────────┴───────────────┐
 │  Crow Gateway (Express + OAuth 2.1)                                  │
 │  ├── crow-memory (persistent memory + full-text search)              │
 │  ├── crow-research (research pipeline + APA citations)               │
+│  ├── crow-sharing (P2P encrypted sharing + Nostr messaging)          │
 │  └── proxy → GitHub, Slack, Notion, Gmail, Trello, Discord, etc.     │
 └──────────────────────────────┬───────────────────────────────────────┘
                                │
@@ -20,7 +24,20 @@ Persistent memory, research pipeline, and 15+ integrations for your AI assistant
                          │  SQLite   │
                          │ (Turso)   │
                          └───────────┘
-```
+
+## P2P Sharing — A First for AI Platforms
+
+Crow is the first AI platform with built-in encrypted peer-to-peer sharing. No cloud middleman, no accounts to create — just your Crow ID.
+
+- **Share memories and research** — Send a memory or an entire research project to a friend's Crow, encrypted end-to-end
+- **Collaborate on projects** — Grant read or read-write access to research projects that stay in sync automatically
+- **Encrypted messaging** — Send messages between Crow users via the Nostr protocol with full sender anonymity
+- **Works offline** — Shares queue up and deliver when both peers are online. Peer relays handle async delivery.
+- **Zero trust** — No central server sees your data. Invite codes, safety numbers, and NaCl encryption throughout.
+
+> *"Share my thesis project with Alice, read-write"* — that's it. Crow handles the cryptography, discovery, and sync.
+
+Learn more: **[Sharing Guide](https://kh0pper.github.io/crow/guide/sharing)** · **[Architecture](https://kh0pper.github.io/crow/architecture/sharing-server)**
 
 ## Works With
 
@@ -66,8 +83,9 @@ Full documentation at **[kh0pper.github.io/crow](https://kh0pper.github.io/crow/
 
 - [Platform Guides](https://kh0pper.github.io/crow/platforms/) — Setup for Claude, ChatGPT, Gemini, Grok, Cursor, Windsurf, Cline
 - [Integrations](https://kh0pper.github.io/crow/integrations/) — All 15+ services with API key setup instructions
+- [Sharing & Social](https://kh0pper.github.io/crow/guide/sharing) — P2P encrypted sharing, messaging, and collaboration
 - [Architecture](https://kh0pper.github.io/crow/architecture/) — System design, server APIs, gateway details
-- [Skills](https://kh0pper.github.io/crow/skills/) — 17 behavioral prompts for AI workflows
+- [Skills](https://kh0pper.github.io/crow/skills/) — 24 behavioral prompts for AI workflows
 - [Security](SECURITY.md) — API key safety, deployment security, and what to do if a key leaks
 - [Troubleshooting](https://kh0pper.github.io/crow/troubleshooting)
 
