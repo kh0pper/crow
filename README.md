@@ -2,6 +2,8 @@
 
 Persistent memory, research pipeline, encrypted P2P sharing, and 15+ integrations for your AI assistant. Built on the open [Model Context Protocol](https://modelcontextprotocol.io) standard.
 
+Published by [Maestro Press](https://maestro.press) | [Product Page](https://maestro.press/software/crow/)
+
 **Share memories, research, and messages directly between Crow users** — end-to-end encrypted, no central server, no accounts. The first AI platform where your assistant can securely collaborate with other people's assistants.
 
 ```
@@ -92,6 +94,7 @@ Crow is open to contributions! Build integrations, skills, tools, and deployment
 
 Full documentation at **[kh0pper.github.io/crow](https://kh0pper.github.io/crow/)**
 
+- [Maestro Press Product Page](https://maestro.press/software/crow/) — Overview, vision, and quick start
 - [Platform Guides](https://kh0pper.github.io/crow/platforms/) — Setup for Claude, ChatGPT, Gemini, Grok, Cursor, Windsurf, Cline
 - [Integrations](https://kh0pper.github.io/crow/integrations/) — All 15+ services with API key setup instructions
 - [Sharing & Social](https://kh0pper.github.io/crow/guide/sharing) — P2P encrypted sharing, messaging, and collaboration
