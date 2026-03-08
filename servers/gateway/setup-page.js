@@ -38,7 +38,9 @@ export async function setupPageHandler(req, res) {
     (i) => i.configured && i.status !== "connected" && i.status !== "error"
   );
 
-  const renderUrl = process.env.RENDER_EXTERNAL_URL || process.env.CROW_GATEWAY_URL || "";
+  const gatewayUrl = process.env.RENDER_EXTERNAL_URL || process.env.CROW_GATEWAY_URL || "";
+  const isRender = !!process.env.RENDER_EXTERNAL_URL || !!process.env.RENDER_SERVICE_ID;
+  const isHosted = !!process.env.CROW_HOSTED;
   const renderServiceId = process.env.RENDER_SERVICE_ID || "";
   const renderDashboardUrl = renderServiceId
     ? `https://dashboard.render.com/web/${renderServiceId}/env`
@@ -227,7 +229,7 @@ export async function setupPageHandler(req, res) {
         </div>
       </div>
       <div class="card-env">
-        Add in Render: ${i.envVars.map((v) => `<span class="env-var">${v}</span>`).join(" + ")}
+        ${isRender ? "Add in Render" : "Environment variable"}: ${i.envVars.map((v) => `<span class="env-var">${v}</span>`).join(" + ")}
         <br>
         ${i.keyUrl ? `<a href="${i.keyUrl}" target="_blank" class="key-link">Get your API key &rarr;</a>` : ""}
         ${i.keyInstructions ? `<br><span style="color:#86868b;font-size:12px">${i.keyInstructions}</span>` : ""}
@@ -238,6 +240,14 @@ export async function setupPageHandler(req, res) {
   <div class="section">
     <div class="section-title">How to Add an Integration</div>
     <div class="instructions">
+      ${isHosted ? `
+      <ol>
+        <li><strong>Get your API key</strong> from the service (click the "Get your API key" link above)</li>
+        <li>Go to your <strong>Dashboard</strong> &rarr; <strong>Settings</strong> panel</li>
+        <li>Add the environment variable name and your API key</li>
+        <li>Your instance will restart automatically (~10 seconds)</li>
+        <li>Refresh this page to see the integration turn green</li>
+      </ol>` : isRender ? `
       <ol>
         <li><strong>Get your API key</strong> from the service (click the "Get your API key" link above)</li>
         <li><strong>Go to your Render dashboard</strong> &rarr; your crow-gateway service &rarr; <strong>Environment</strong></li>
@@ -245,7 +255,13 @@ export async function setupPageHandler(req, res) {
         <li>Render will <strong>automatically restart</strong> your service (~1 minute)</li>
         <li>Refresh this page to see the integration turn green</li>
       </ol>
-      <a href="${renderDashboardUrl}" target="_blank" class="render-link">Open Render Dashboard</a>
+      <a href="${renderDashboardUrl}" target="_blank" class="render-link">Open Render Dashboard</a>` : `
+      <ol>
+        <li><strong>Get your API key</strong> from the service (click the "Get your API key" link above)</li>
+        <li>Add the environment variable to your <code>.env</code> file or hosting environment</li>
+        <li>Restart the Crow gateway</li>
+        <li>Refresh this page to see the integration turn green</li>
+      </ol>`}
     </div>
   </div>
 
@@ -257,21 +273,21 @@ export async function setupPageHandler(req, res) {
 
       <p style="font-weight:600;font-size:15px;margin-top:16px">Memory</p>
       <p style="font-size:12px;color:#86868b;margin-top:2px">Streamable HTTP (Claude, Gemini, Grok, Cursor, Windsurf, Cline, Claude Code)</p>
-      <div class="connector-url">${renderUrl}/memory/mcp</div>
+      <div class="connector-url">${gatewayUrl}/memory/mcp</div>
       <p style="font-size:12px;color:#86868b;margin-top:8px">SSE (ChatGPT)</p>
-      <div class="connector-url">${renderUrl}/memory/sse</div>
+      <div class="connector-url">${gatewayUrl}/memory/sse</div>
 
       <p style="font-weight:600;font-size:15px;margin-top:16px">Research</p>
       <p style="font-size:12px;color:#86868b;margin-top:2px">Streamable HTTP</p>
-      <div class="connector-url">${renderUrl}/research/mcp</div>
+      <div class="connector-url">${gatewayUrl}/research/mcp</div>
       <p style="font-size:12px;color:#86868b;margin-top:8px">SSE (ChatGPT)</p>
-      <div class="connector-url">${renderUrl}/research/sse</div>
+      <div class="connector-url">${gatewayUrl}/research/sse</div>
 
       <p style="font-weight:600;font-size:15px;margin-top:16px">External Tools (GitHub, Slack, etc.)</p>
       <p style="font-size:12px;color:#86868b;margin-top:2px">Streamable HTTP</p>
-      <div class="connector-url">${renderUrl}/tools/mcp</div>
+      <div class="connector-url">${gatewayUrl}/tools/mcp</div>
       <p style="font-size:12px;color:#86868b;margin-top:8px">SSE (ChatGPT)</p>
-      <div class="connector-url">${renderUrl}/tools/sse</div>
+      <div class="connector-url">${gatewayUrl}/tools/sse</div>
 
       <p style="font-weight:600;font-size:13px;margin-top:20px;margin-bottom:8px">Quick Setup by Platform:</p>
       <ul style="font-size:13px;padding-left:18px;list-style:disc">
