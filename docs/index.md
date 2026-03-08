@@ -35,8 +35,12 @@ features:
     details: Share memories, research projects, and messages directly with other Crow users. End-to-end encrypted via Hypercore and Nostr — no central server, no accounts, no metadata leaks.
   - icon:
       src: /icon-integrations.svg
-    title: 15+ Integrations
-    details: Gmail, Calendar, GitHub, Slack, Discord, Notion, Trello, Canvas LMS, arXiv, Zotero, Brave Search, and more — all through one gateway.
+    title: Extensible with Add-ons
+    details: 15+ integrations out of the box (Gmail, GitHub, Slack, and more). Install new features by asking your AI — dashboard panels, MCP servers, and skills from the add-on registry.
+  - icon:
+      src: /icon-deploy.svg
+    title: Dashboard & Blog
+    details: A premium visual dashboard for managing messages, blog posts, files, and settings. Built-in blogging platform with Markdown, RSS feeds, and themes — publish by telling your AI.
   - icon:
       src: /icon-deploy.svg
     title: One-Click Deploy

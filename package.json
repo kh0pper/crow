@@ -8,6 +8,8 @@
     "memory-server": "node servers/memory/index.js",
     "research-server": "node servers/research/index.js",
     "sharing-server": "node servers/sharing/index.js",
+    "storage-server": "node servers/storage/index.js",
+    "blog-server": "node servers/blog/index.js",
     "init-db": "node scripts/init-db.js",
     "wizard": "node scripts/wizard.js",
     "desktop-config": "node scripts/generate-desktop-config.js",
@@ -29,7 +31,11 @@
     "express-rate-limit": "^8.3.0",
     "hypercore": "^11.4.0",
     "hyperswarm": "^4.9.0",
+    "marked": "^17.0.4",
+    "minio": "^8.0.7",
+    "multer": "^2.1.1",
     "nostr-tools": "^2.10.0",
+    "sanitize-html": "^2.17.1",
     "zod": "^3.24.0"
   },
   "engines": {

@@ -4,26 +4,34 @@ Thank you for your interest in contributing to the Crow AI Platform! This guide 
 
 ## Ways to Contribute
 
-### 1. MCP Integrations
-Add support for new external services (e.g., Linear, Jira, Todoist). Each integration needs:
-- An entry in `servers/gateway/integrations.js`
-- Environment variables in `.env.example`
-- A skill file in `skills/`
-- A trigger row in `skills/superpowers.md`
+### 1. Add-ons (Easiest way to extend Crow)
+Create dashboard panels, MCP server integrations, or skill files that users install with one command: "install the X add-on." Add-ons are the primary way to extend Crow.
 
-**Guide:** [Building Integrations](https://kh0pper.github.io/crow/developers/integrations)
+**Types:** Dashboard panels, MCP servers, skill files, Docker bundles.
 
-### 2. Skills
+**Guide:** [Creating Add-ons](https://kh0pper.github.io/crow/developers/creating-addons) | [Add-on Registry](https://kh0pper.github.io/crow/developers/addon-registry)
+
+### 2. Skills (No code required)
 Create new behavioral prompts that teach the AI workflows. Skills are markdown files — no code required.
 
 **Guide:** [Writing Skills](https://kh0pper.github.io/crow/developers/skills)
 
-### 3. Core Server Tools
-Add new MCP tools to crow-memory, crow-research, or crow-sharing servers.
+### 3. MCP Integrations (Core registry)
+Add support for new external services (e.g., Linear, Jira, Todoist) to the core server registry.
+
+**Guide:** [Building Integrations](https://kh0pper.github.io/crow/developers/integrations)
+
+### 4. Core Server Tools
+Add new MCP tools to crow-memory, crow-research, crow-sharing, crow-storage, or crow-blog servers.
 
 **Guide:** [Core Tools](https://kh0pper.github.io/crow/developers/core-tools)
 
-### 4. Self-Hosted Bundles
+### 5. Dashboard Panels
+Build custom panels for the Crow dashboard. See the panel template in `templates/dashboard-panel.js`.
+
+**Guide:** [Creating Panels](https://kh0pper.github.io/crow/developers/creating-panels)
+
+### 6. Self-Hosted Bundles
 Create Docker Compose configurations with curated integration sets for specific use cases.
 
 **Guide:** [Bundles](https://kh0pper.github.io/crow/developers/bundles)
@@ -73,6 +81,7 @@ npm run init-db
 ## Submitting Ideas
 
 Not ready to code? Open an issue:
+- [Add-on Submission](https://github.com/kh0pper/crow/issues/new?template=addon-submission.md)
 - [Integration Request](https://github.com/kh0pper/crow/issues/new?template=integration-request.md)
 - [Skill Proposal](https://github.com/kh0pper/crow/issues/new?template=skill-proposal.md)
 - [Bug Report](https://github.com/kh0pper/crow/issues/new?template=bug-report.md)

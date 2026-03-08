@@ -15,7 +15,7 @@
 import { writeFileSync, existsSync, copyFileSync, mkdirSync } from "fs";
 import { resolve, dirname, join } from "path";
 import { homedir, platform } from "os";
-import { CORE_SERVERS, EXTERNAL_SERVERS, ROOT, loadEnv } from "./server-registry.js";
+import { CORE_SERVERS, CONDITIONAL_SERVERS, EXTERNAL_SERVERS, ROOT, loadEnv } from "./server-registry.js";
 
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes("--dry-run");
@@ -53,8 +53,8 @@ function buildConfig(env) {
     };
   }
 
-  // External servers
-  for (const server of EXTERNAL_SERVERS) {
+  // Conditional core + external servers
+  for (const server of [...CONDITIONAL_SERVERS, ...EXTERNAL_SERVERS]) {
     const serverEnv = {};
     const missingKeys = [];
 

@@ -14,7 +14,7 @@
 
 import { writeFileSync } from "fs";
 import { resolve } from "path";
-import { CORE_SERVERS, EXTERNAL_SERVERS, ROOT, loadEnv } from "./server-registry.js";
+import { CORE_SERVERS, CONDITIONAL_SERVERS, EXTERNAL_SERVERS, ROOT, loadEnv } from "./server-registry.js";
 
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes("--dry-run");
@@ -40,8 +40,8 @@ function generate() {
     included.push(server.name);
   }
 
-  // External servers — include only if all envKeys are present
-  for (const server of EXTERNAL_SERVERS) {
+  // Conditional core servers + external servers — include only if all envKeys are present
+  for (const server of [...CONDITIONAL_SERVERS, ...EXTERNAL_SERVERS]) {
     const missingKeys = server.envKeys.filter((key) => !env[key]);
 
     if (missingKeys.length > 0) {

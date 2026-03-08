@@ -204,11 +204,47 @@ await initTable("contacts table", `
   CREATE INDEX IF NOT EXISTS idx_contacts_blocked ON contacts(is_blocked);
 `);
 
+// Migrate shared_items: remove CHECK constraint on share_type for extensibility (blog_post, file, etc.)
+await (async () => {
+  try {
+    // Check if old CHECK constraint exists by trying to read table schema
+    const tableInfo = await db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='shared_items'");
+    const sql = tableInfo.rows[0]?.sql || "";
+    if (sql.includes("CHECK(share_type IN")) {
+      console.log("Migrating shared_items table (removing share_type CHECK constraint)...");
+      await db.executeMultiple(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE shared_items_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          contact_id INTEGER NOT NULL,
+          share_type TEXT NOT NULL,
+          item_id INTEGER NOT NULL,
+          permissions TEXT DEFAULT 'read' CHECK(permissions IN ('read', 'read-write', 'one-time')),
+          direction TEXT NOT NULL CHECK(direction IN ('sent', 'received')),
+          delivery_status TEXT DEFAULT 'pending' CHECK(delivery_status IN ('pending', 'delivered', 'failed')),
+          created_at TEXT DEFAULT (datetime('now')),
+          FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+        );
+        INSERT INTO shared_items_new SELECT * FROM shared_items;
+        DROP TABLE shared_items;
+        ALTER TABLE shared_items_new RENAME TO shared_items;
+        CREATE INDEX IF NOT EXISTS idx_shared_items_contact ON shared_items(contact_id);
+        CREATE INDEX IF NOT EXISTS idx_shared_items_type ON shared_items(share_type);
+        CREATE INDEX IF NOT EXISTS idx_shared_items_direction ON shared_items(direction);
+        COMMIT;
+      `);
+      console.log("shared_items migration complete.");
+    }
+  } catch {
+    // Table doesn't exist yet — will be created below
+  }
+})();
+
 await initTable("shared_items table", `
   CREATE TABLE IF NOT EXISTS shared_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     contact_id INTEGER NOT NULL,
-    share_type TEXT NOT NULL CHECK(share_type IN ('memory', 'project', 'source', 'note')),
+    share_type TEXT NOT NULL,
     item_id INTEGER NOT NULL,
     permissions TEXT DEFAULT 'read' CHECK(permissions IN ('read', 'read-write', 'one-time')),
     direction TEXT NOT NULL CHECK(direction IN ('sent', 'received')),
@@ -266,6 +302,83 @@ await initTable("crow_context table", `
   );
 
   CREATE INDEX IF NOT EXISTS idx_crow_context_order ON crow_context(sort_order);
+`);
+
+// --- Storage Tables ---
+
+await initTable("storage_files table", `
+  CREATE TABLE IF NOT EXISTS storage_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    s3_key TEXT NOT NULL UNIQUE,
+    original_name TEXT NOT NULL,
+    mime_type TEXT,
+    size_bytes INTEGER,
+    bucket TEXT DEFAULT 'crow-files',
+    uploaded_by TEXT,
+    reference_type TEXT,
+    reference_id INTEGER,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_storage_files_ref ON storage_files(reference_type, reference_id);
+`);
+
+// --- Blog Tables ---
+
+await initTable("blog_posts table", `
+  CREATE TABLE IF NOT EXISTS blog_posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    excerpt TEXT,
+    author TEXT,
+    status TEXT DEFAULT 'draft' CHECK(status IN ('draft', 'published', 'archived')),
+    visibility TEXT DEFAULT 'private' CHECK(visibility IN ('private', 'public', 'peers')),
+    cover_image_key TEXT,
+    tags TEXT,
+    nostr_event_id TEXT,
+    published_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+await initTable("blog_posts FTS index", `
+  CREATE VIRTUAL TABLE IF NOT EXISTS blog_posts_fts USING fts5(
+    title, content, excerpt, tags,
+    content=blog_posts,
+    content_rowid=id
+  );
+`);
+
+await initTable("blog_posts FTS triggers", `
+  CREATE TRIGGER IF NOT EXISTS blog_posts_ai AFTER INSERT ON blog_posts BEGIN
+    INSERT INTO blog_posts_fts(rowid, title, content, excerpt, tags)
+    VALUES (new.id, new.title, new.content, new.excerpt, new.tags);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS blog_posts_ad AFTER DELETE ON blog_posts BEGIN
+    INSERT INTO blog_posts_fts(blog_posts_fts, rowid, title, content, excerpt, tags)
+    VALUES ('delete', old.id, old.title, old.content, old.excerpt, old.tags);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS blog_posts_au AFTER UPDATE ON blog_posts BEGIN
+    INSERT INTO blog_posts_fts(blog_posts_fts, rowid, title, content, excerpt, tags)
+    VALUES ('delete', old.id, old.title, old.content, old.excerpt, old.tags);
+    INSERT INTO blog_posts_fts(rowid, title, content, excerpt, tags)
+    VALUES (new.id, new.title, new.content, new.excerpt, new.tags);
+  END;
+`);
+
+// --- Dashboard Settings ---
+
+await initTable("dashboard_settings table", `
+  CREATE TABLE IF NOT EXISTS dashboard_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
 `);
 
 // Seed 7 protected default sections (safe to re-run)

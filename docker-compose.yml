@@ -26,6 +26,28 @@ services:
       retries: 3
     profiles: [cloud, local]
 
+  # Optional: MinIO S3-compatible storage
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-crowadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9001:9001"   # Console (not exposed in production)
+    # API port 9000 is internal-only (accessible to crow-gateway via Docker network)
+    expose:
+      - "9000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    profiles: [storage, full]
+
   # Optional: Cloudflare Tunnel for home network access
   tunnel:
     image: cloudflare/cloudflared:latest
@@ -40,3 +62,4 @@ services:
 
 volumes:
   crow-data:
+  minio-data:
