@@ -7,7 +7,9 @@
  */
 
 import { randomUUID, createHash } from "node:crypto";
-import { createDbClient } from "../db.js";
+import { createDbClient, auditLog } from "../db.js";
+
+function hashToken(t) { return createHash('sha256').update(t).digest('hex'); }
 
 export class CrowOAuthClientsStore {
   constructor(db) {
@@ -97,12 +99,12 @@ export class CrowOAuthProvider {
     const refreshToken = randomUUID();
     const expiresIn = 86400; // 24 hours
 
-    // Store tokens in DB
+    // Store hashed tokens in DB
     await this.db.execute({
       sql: `INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at, resource)
             VALUES (?, 'access', ?, ?, datetime('now', '+' || ? || ' seconds'), ?)`,
       args: [
-        accessToken,
+        hashToken(accessToken),
         client.client_id,
         (codeData.params.scopes || []).join(" "),
         expiresIn,
@@ -114,12 +116,14 @@ export class CrowOAuthProvider {
       sql: `INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at, resource)
             VALUES (?, 'refresh', ?, ?, datetime('now', '+30 days'), ?)`,
       args: [
-        refreshToken,
+        hashToken(refreshToken),
         client.client_id,
         (codeData.params.scopes || []).join(" "),
         codeData.params.resource || null,
       ],
     });
+
+    await auditLog(this.db, 'oauth_token_issued', { actor: client.client_id });
 
     return {
       access_token: accessToken,
@@ -131,15 +135,16 @@ export class CrowOAuthProvider {
   }
 
   async exchangeRefreshToken(client, refreshToken, scopes, resource) {
+    const hashedRefresh = hashToken(refreshToken);
     const { rows } = await this.db.execute({
       sql: "SELECT * FROM oauth_tokens WHERE token = ? AND token_type = 'refresh' AND client_id = ?",
-      args: [refreshToken, client.client_id],
+      args: [hashedRefresh, client.client_id],
     });
 
     if (rows.length === 0) throw new Error("Invalid refresh token");
     const row = rows[0];
     if (new Date(row.expires_at) < new Date()) {
-      await this.db.execute({ sql: "DELETE FROM oauth_tokens WHERE token = ?", args: [refreshToken] });
+      await this.db.execute({ sql: "DELETE FROM oauth_tokens WHERE token = ?", args: [hashedRefresh] });
       throw new Error("Refresh token expired");
     }
 
@@ -148,7 +153,7 @@ export class CrowOAuthProvider {
       const createdAt = new Date(row.created_at);
       const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
       if (Date.now() - createdAt.getTime() > thirtyDaysMs) {
-        await this.db.execute({ sql: "DELETE FROM oauth_tokens WHERE token = ?", args: [refreshToken] });
+        await this.db.execute({ sql: "DELETE FROM oauth_tokens WHERE token = ?", args: [hashedRefresh] });
         throw new Error("Session expired — please re-authenticate");
       }
     }
@@ -161,13 +166,15 @@ export class CrowOAuthProvider {
       sql: `INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at, resource)
             VALUES (?, 'access', ?, ?, datetime('now', '+' || ? || ' seconds'), ?)`,
       args: [
-        newAccessToken,
+        hashToken(newAccessToken),
         client.client_id,
         row.scopes,
         expiresIn,
         resource || row.resource,
       ],
     });
+
+    await auditLog(this.db, 'oauth_token_refreshed', { actor: client.client_id });
 
     return {
       access_token: newAccessToken,
@@ -179,15 +186,16 @@ export class CrowOAuthProvider {
   }
 
   async verifyAccessToken(token) {
+    const hashedToken = hashToken(token);
     const { rows } = await this.db.execute({
       sql: "SELECT * FROM oauth_tokens WHERE token = ? AND token_type = 'access'",
-      args: [token],
+      args: [hashedToken],
     });
 
     if (rows.length === 0) throw new Error("Invalid token");
     const row = rows[0];
     if (new Date(row.expires_at) < new Date()) {
-      await this.db.execute({ sql: "DELETE FROM oauth_tokens WHERE token = ?", args: [token] });
+      await this.db.execute({ sql: "DELETE FROM oauth_tokens WHERE token = ?", args: [hashedToken] });
       throw new Error("Token expired");
     }
 

@@ -380,6 +380,21 @@ await initTable("dashboard_settings table", `
   );
 `);
 
+// --- Audit Log ---
+
+await initTable("audit_log table", `
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    actor TEXT,
+    ip_address TEXT,
+    details TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_audit_log_event_created ON audit_log(event_type, created_at);
+`);
+
 // Seed 7 protected default sections (safe to re-run)
 const seedSections = [
   {

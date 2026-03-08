@@ -69,6 +69,36 @@ If you accidentally shared an API key (posted it publicly, committed it to GitHu
 
 You don't need to set up every integration. Each API key you add is one more thing to keep safe. Start with just the services you actually use, and add more later if you need them.
 
+## Managed Hosting Security
+
+If you use [managed hosting](https://maestro.press/hosting/) ($5/mo), these additional protections apply:
+
+- **Instance isolation** — Each customer gets a separate Docker container and separate database. Up to 5 instances per shared server, with no cross-instance access.
+- **OAuth tokens hashed** — All OAuth access and refresh tokens are SHA-256 hashed before storage. If the database were compromised, tokens cannot be reused.
+- **Dashboard passwords hashed** — Passwords are hashed with scrypt (N=16384, r=8, p=1) using a unique random salt.
+- **24-hour session duration** — Dashboard sessions expire after 24 hours in hosted mode (vs. 7 days for self-hosted).
+- **Secure cookies** — Session cookies are set with `HttpOnly`, `SameSite=Strict`, and `Secure` flags in production.
+- **Audit logging** — Authentication events (login success/failure, lockout, token issuance, password changes) are logged with 90-day retention.
+- **API keys as env vars only** — Your API keys are stored only as environment variables, never in the database.
+- **No data access** — Maestro Press does not access customer data except for maintenance, support, or legal obligation.
+
+## How Crow Protects Your Data
+
+A summary of the technical measures protecting your data across all deployment modes:
+
+| Layer | Protection |
+|---|---|
+| API keys | Stored as environment variables only, never in the database or logs |
+| OAuth tokens | SHA-256 hashed before database storage |
+| Dashboard password | scrypt-hashed with unique random salt |
+| Session cookies | `HttpOnly`, `SameSite=Strict`, `Secure` (production) |
+| Auth endpoints | Rate-limited (20 requests per 15 minutes) |
+| Account lockout | 5 failed attempts triggers 15-minute lockout |
+| Security headers | `X-Content-Type-Options`, `X-Frame-Options`, HSTS |
+| CORS | Restricted to configured origins only |
+| Audit log | Auth events logged, 90-day retention, auto-cleaned at startup |
+| P2P encryption | Ed25519 + NIP-44 encrypted messaging between peers |
+
 ## Reporting Security Issues
 
 If you find a security vulnerability in Crow:
