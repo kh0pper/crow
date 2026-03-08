@@ -78,6 +78,10 @@ The FTS5 virtual tables and sync triggers are created by `init-db`. If search re
 - For remote HTTP: ensure the gateway URL is correct and accessible
 - Check the IDE's output/log panel for MCP-related errors
 
+## Still Stuck?
+
+If you're spending more time on infrastructure than on your actual work, consider [managed hosting](./getting-started/managed-hosting) — a pre-configured Crow instance with zero setup for $5/mo.
+
 ## Getting Help
 
 - Check the [GitHub Issues](https://github.com/kh0pper/crow/issues) for known problems

@@ -42,19 +42,19 @@ Crow is the first AI platform with built-in encrypted peer-to-peer sharing. No c
 
 > *"Share my thesis project with Alice, read-write"* — that's it. Crow handles the cryptography, discovery, and sync.
 
-Learn more: **[Sharing Guide](https://kh0pper.github.io/crow/guide/sharing)** · **[Architecture](https://kh0pper.github.io/crow/architecture/sharing-server)**
+Learn more: **[Sharing Guide](https://maestro.press/software/crow/guide/sharing)** · **[Architecture](https://maestro.press/software/crow/architecture/sharing-server)**
 
 ## Dashboard
 
 Server-rendered web UI with Dark Editorial design. Password-protected, session-based auth. Built-in panels for Messages, Blog, Files, Extensions, and Settings. Third-party panels can be installed from `~/.crow/panels/`.
 
-> **[Dashboard Guide](https://kh0pper.github.io/crow/guide/dashboard)** · **[Architecture](https://kh0pper.github.io/crow/architecture/dashboard)**
+> **[Dashboard Guide](https://maestro.press/software/crow/guide/dashboard)** · **[Architecture](https://maestro.press/software/crow/architecture/dashboard)**
 
 ## Blog Platform
 
 Create, edit, and publish blog posts through your AI assistant. Markdown rendering, customizable themes, RSS/Atom feeds, and shareable public URLs via the gateway.
 
-> **[Blog Guide](https://kh0pper.github.io/crow/guide/blog)** · **[Architecture](https://kh0pper.github.io/crow/architecture/blog-server)**
+> **[Blog Guide](https://maestro.press/software/crow/guide/blog)** · **[Architecture](https://maestro.press/software/crow/architecture/blog-server)**
 
 ## Works With
 
@@ -64,6 +64,12 @@ Create, edit, and publish blog posts through your AI assistant. Markdown renderi
 
 ## Quick Start
 
+### Managed Hosting (Easiest)
+
+Pre-configured Crow instance at `username.crow.maestro.press` — no setup, no maintenance. $5/mo or $48/yr.
+
+> **[Get managed hosting →](https://maestro.press/hosting/)**
+
 ### Cloud Deploy (any platform)
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/kh0pper/crow)
@@ -72,7 +78,7 @@ Create, edit, and publish blog posts through your AI assistant. Markdown renderi
 2. Click the Deploy button → paste your Turso credentials
 3. Connect from your AI platform using the endpoint URLs shown at `/setup`
 
-→ **[Full cloud deploy guide](https://kh0pper.github.io/crow/getting-started/cloud-deploy)**
+→ **[Full cloud deploy guide](https://maestro.press/software/crow/getting-started/cloud-deploy)**
 
 ### Desktop (Claude Desktop)
 
@@ -82,7 +88,7 @@ npm run setup
 npm run desktop-config  # Copy output to Claude Desktop config
 ```
 
-→ **[Desktop setup guide](https://kh0pper.github.io/crow/getting-started/desktop-setup)**
+→ **[Desktop setup guide](https://maestro.press/software/crow/getting-started/desktop-setup)**
 
 ### Developer (Claude Code)
 
@@ -92,7 +98,7 @@ npm run setup
 claude  # Loads .mcp.json + CLAUDE.md automatically
 ```
 
-→ **[Claude Code guide](https://kh0pper.github.io/crow/platforms/claude-code)**
+→ **[Claude Code guide](https://maestro.press/software/crow/platforms/claude-code)**
 
 ### Raspberry Pi / Self-Hosted (Crow OS)
 
@@ -103,7 +109,7 @@ crow status
 
 Installs Crow as a persistent service with the `crow` CLI for managing bundles and updates. Supports Raspberry Pi, Debian, and Ubuntu.
 
-→ **[Full setup guide](https://kh0pper.github.io/crow/getting-started/full-setup)**
+→ **[Full setup guide](https://maestro.press/software/crow/getting-started/full-setup)**
 
 ## Crow OS & Self-Hosting
 
@@ -126,23 +132,24 @@ Crow is open to contributions! Build integrations, skills, tools, and deployment
 - **Core Tools** — Add MCP tools to crow-memory, crow-research, crow-sharing, crow-storage, or crow-blog
 - **Self-Hosted Bundles** — Create Docker Compose configs for specific use cases
 
-→ **[Developer Docs](https://kh0pper.github.io/crow/developers/)** · **[Community Directory](https://kh0pper.github.io/crow/developers/directory)** · **[CONTRIBUTING.md](CONTRIBUTING.md)**
+→ **[Developer Docs](https://maestro.press/software/crow/developers/)** · **[Community Directory](https://maestro.press/software/crow/developers/directory)** · **[CONTRIBUTING.md](CONTRIBUTING.md)**
 
 ## Documentation
 
-Full documentation at **[kh0pper.github.io/crow](https://kh0pper.github.io/crow/)**
+Full documentation at **[maestro.press/software/crow](https://maestro.press/software/crow/)**
 
+- [Managed Hosting](https://maestro.press/hosting/) — Pre-configured Crow instance, no setup required
 - [Maestro Press Product Page](https://maestro.press/software/crow/) — Overview, vision, and quick start
-- [Platform Guides](https://kh0pper.github.io/crow/platforms/) — Setup for Claude, ChatGPT, Gemini, Grok, Cursor, Windsurf, Cline
-- [Integrations](https://kh0pper.github.io/crow/integrations/) — All 20+ services with API key setup instructions
-- [Sharing & Social](https://kh0pper.github.io/crow/guide/sharing) — P2P encrypted sharing, messaging, and collaboration
-- [Storage](https://kh0pper.github.io/crow/guide/storage) — S3-compatible file storage with quotas and presigned URLs
-- [Blog](https://kh0pper.github.io/crow/guide/blog) — AI-driven publishing with themes, RSS, and public sharing
-- [Dashboard](https://kh0pper.github.io/crow/guide/dashboard) — Web UI with panels for messages, files, blog, and extensions
-- [Architecture](https://kh0pper.github.io/crow/architecture/) — System design, server APIs, gateway details
-- [Skills](https://kh0pper.github.io/crow/skills/) — 30 behavioral prompts for AI workflows
+- [Platform Guides](https://maestro.press/software/crow/platforms/) — Setup for Claude, ChatGPT, Gemini, Grok, Cursor, Windsurf, Cline
+- [Integrations](https://maestro.press/software/crow/integrations/) — All 20+ services with API key setup instructions
+- [Sharing & Social](https://maestro.press/software/crow/guide/sharing) — P2P encrypted sharing, messaging, and collaboration
+- [Storage](https://maestro.press/software/crow/guide/storage) — S3-compatible file storage with quotas and presigned URLs
+- [Blog](https://maestro.press/software/crow/guide/blog) — AI-driven publishing with themes, RSS, and public sharing
+- [Dashboard](https://maestro.press/software/crow/guide/dashboard) — Web UI with panels for messages, files, blog, and extensions
+- [Architecture](https://maestro.press/software/crow/architecture/) — System design, server APIs, gateway details
+- [Skills](https://maestro.press/software/crow/skills/) — 30 behavioral prompts for AI workflows
 - [Security](SECURITY.md) — API key safety, deployment security, and what to do if a key leaks
-- [Troubleshooting](https://kh0pper.github.io/crow/troubleshooting)
+- [Troubleshooting](https://maestro.press/software/crow/troubleshooting)
 
 ## License
 

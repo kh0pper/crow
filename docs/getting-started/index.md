@@ -4,6 +4,12 @@ Crow can be set up in several ways depending on your use case:
 
 ## Choose Your Path
 
+### Managed Hosting (Easiest)
+
+Pre-configured Crow instance — no setup, no maintenance. Your own subdomain at `username.crow.maestro.press` with dashboard, blog, AI integrations, daily backups, and SSL included.
+
+> [Managed Hosting Guide](./managed-hosting)
+
 ### Cloud Deploy (Quickest)
 
 Deploy Crow to [Render](https://render.com) for access from any device — web, mobile, or desktop. Free tier available.

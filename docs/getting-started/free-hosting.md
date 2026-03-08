@@ -201,6 +201,10 @@ Visit `https://crow.yourdomain.com/setup` to see your integration status.
 
 For a dedicated home appliance, see the [Raspberry Pi Setup Guide](./raspberry-pi).
 
+## Paid Alternative
+
+If you'd rather skip infrastructure management entirely, [managed hosting](./managed-hosting) gives you a pre-configured Crow instance for $5/mo (or $48/yr). No setup, no maintenance — just pick a username and connect your AI.
+
 ## Which Should I Choose?
 
 - **Just trying Crow out?** → Render + Turso. Deploy in 5 minutes, sleep behavior is fine for testing.
