@@ -1,14 +1,13 @@
-import { createDbClient } from "../servers/db.js";
+import { createDbClient, resolveDataDir } from "../servers/db.js";
 import { mkdirSync } from "fs";
-import { dirname, resolve } from "path";
-import { fileURLToPath } from "url";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { resolve } from "path";
 
 // Ensure data directory exists for local file mode
 if (!process.env.TURSO_DATABASE_URL) {
-  const dbPath = process.env.CROW_DB_PATH || resolve(__dirname, "../data/crow.db");
-  mkdirSync(dirname(dbPath), { recursive: true });
+  const dataDir = process.env.CROW_DB_PATH
+    ? resolve(process.env.CROW_DB_PATH, "..")
+    : resolveDataDir();
+  mkdirSync(dataDir, { recursive: true });
 }
 
 const db = createDbClient();

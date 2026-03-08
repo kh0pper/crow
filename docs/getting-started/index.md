@@ -1,14 +1,26 @@
 # Getting Started
 
-Crow can be set up in three ways depending on your use case:
+Crow can be set up in several ways depending on your use case:
 
 ## Choose Your Path
 
-### Cloud Deploy (Recommended)
+### Cloud Deploy (Quickest)
 
-Deploy Crow to [Render](https://render.com) for access from any device — web, mobile, or desktop. Best for most users.
+Deploy Crow to [Render](https://render.com) for access from any device — web, mobile, or desktop. Free tier available.
 
 → [Cloud Deploy Guide](./cloud-deploy)
+
+### Raspberry Pi (Crow OS)
+
+Turn a Raspberry Pi into a dedicated Crow appliance with one command. No SSH required after setup.
+
+→ [Raspberry Pi Guide](./raspberry-pi)
+
+### Free Hosting Options
+
+Compare free hosting providers — Render, Oracle Cloud Always Free, and Raspberry Pi.
+
+→ [Free Hosting Guide](./free-hosting)
 
 ### Desktop Only
 
@@ -36,4 +48,5 @@ After setup, your AI assistant will have:
 - A free [Render](https://render.com) account (for cloud deploy)
 - A free [Turso](https://turso.tech) database (for cloud deploy)
 - Node.js 18+ (for desktop/local setup)
+- Raspberry Pi 4+ with 4 GB RAM (for Crow OS)
 - An account on at least one AI platform (Claude, ChatGPT, Gemini, etc.)

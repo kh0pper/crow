@@ -28,6 +28,8 @@ export default defineConfig({
           { text: 'Desktop Setup', link: '/getting-started/desktop-setup' },
           { text: 'Docker', link: '/getting-started/docker' },
           { text: 'Full Setup (MinIO + Gateway)', link: '/getting-started/full-setup' },
+          { text: 'Free Hosting Options', link: '/getting-started/free-hosting' },
+          { text: 'Raspberry Pi (Crow OS)', link: '/getting-started/raspberry-pi' },
           { text: 'Tailscale Remote Access', link: '/getting-started/tailscale-setup' },
         ],
       },
@@ -64,6 +66,8 @@ export default defineConfig({
           { text: 'Blog Server', link: '/architecture/blog-server' },
           { text: 'Dashboard', link: '/architecture/dashboard' },
           { text: 'Gateway', link: '/architecture/gateway' },
+          { text: 'Crow OS', link: '/architecture/crow-os' },
+          { text: 'Portable Identity', link: '/architecture/portable-identity' },
         ],
       },
       {

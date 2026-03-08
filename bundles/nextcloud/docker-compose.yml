@@ -1,0 +1,51 @@
+## Nextcloud — Self-hosted file sync and collaboration
+##
+## This deploys a Nextcloud instance with MariaDB.
+## Files are accessible to Crow via WebDAV mount at NEXTCLOUD_MOUNT_PATH.
+##
+## Usage:
+##   cp .env.example .env
+##   # Edit .env
+##   docker compose up -d
+##
+## If connecting to an EXISTING Nextcloud instance, skip this compose file
+## and just set the env vars to point at your server.
+
+services:
+  nextcloud:
+    image: nextcloud:stable
+    ports:
+      - "8080:80"
+    environment:
+      MYSQL_HOST: nextcloud-db
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+      MYSQL_PASSWORD: ${NEXTCLOUD_DB_PASSWORD:-changeme}
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_USER:-admin}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_PASSWORD:?Set NEXTCLOUD_PASSWORD in .env}
+    volumes:
+      - nextcloud-data:/var/www/html
+    depends_on:
+      nextcloud-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  nextcloud-db:
+    image: mariadb:11
+    environment:
+      MYSQL_ROOT_PASSWORD: ${NEXTCLOUD_DB_ROOT_PASSWORD:-rootchangeme}
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+      MYSQL_PASSWORD: ${NEXTCLOUD_DB_PASSWORD:-changeme}
+    volumes:
+      - nextcloud-db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  nextcloud-data:
+  nextcloud-db:

@@ -24,7 +24,23 @@ import * as secp from "@noble/secp256k1";
 ed.etc.sha512Sync = (...m) => sha512(ed.etc.concatBytes(...m));
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = resolve(__dirname, "../../data");
+
+/**
+ * Resolve data directory. Priority: CROW_DATA_DIR env → ~/.crow/data/ → ./data/
+ */
+function resolveDataDir() {
+  if (process.env.CROW_DATA_DIR) {
+    return resolve(process.env.CROW_DATA_DIR);
+  }
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  const crowHome = resolve(home, ".crow", "data");
+  if (home && existsSync(crowHome)) {
+    return crowHome;
+  }
+  return resolve(__dirname, "../../data");
+}
+
+const DATA_DIR = resolveDataDir();
 const IDENTITY_PATH = resolve(DATA_DIR, "identity.json");
 
 /**

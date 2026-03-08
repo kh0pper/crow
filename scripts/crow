@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+
+# Crow CLI — Platform management utility
+#
+# Usage:
+#   crow status              Show running services and resource usage
+#   crow bundle status       List running bundles with container status
+#   crow bundle install <id> Install a bundle add-on
+#   crow bundle stop <id>    Stop a bundle's containers
+#   crow bundle start <id>   Start a bundle's containers
+#   crow bundle remove <id>  Stop and remove a bundle
+
+set -euo pipefail
+
+CROW_HOME="${CROW_DATA_DIR:-$HOME/.crow}"
+CROW_APP="${CROW_HOME}/app"
+BUNDLES_DIR="${CROW_HOME}/bundles"
+
+# Fall back to repo directory if not installed to ~/.crow/app
+if [ ! -d "$CROW_APP" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  CROW_APP="$(dirname "$SCRIPT_DIR")"
+fi
+
+REGISTRY="${CROW_APP}/registry/add-ons.json"
+
+usage() {
+  echo "Crow CLI — Platform management"
+  echo ""
+  echo "Usage:"
+  echo "  crow status              Show running services and identity"
+  echo "  crow bundle status       List installed bundles and their status"
+  echo "  crow bundle install <id> Install a bundle add-on"
+  echo "  crow bundle stop <id>    Stop a bundle's containers"
+  echo "  crow bundle start <id>   Start a bundle's containers"
+  echo "  crow bundle remove <id>  Remove a bundle (stops containers, cleans files)"
+  echo ""
+  echo "Available bundles:"
+  if [ -f "$REGISTRY" ]; then
+    node -e "
+      const r = JSON.parse(require('fs').readFileSync('$REGISTRY','utf8'));
+      r['add-ons'].filter(a => a.type === 'bundle').forEach(a =>
+        console.log('  ' + a.id.padEnd(20) + a.description)
+      );
+    " 2>/dev/null || echo "  (could not read registry)"
+  fi
+}
+
+cmd_status() {
+  echo ""
+  echo "  Crow Platform Status"
+  echo "  ════════════════════"
+
+  # Identity
+  if [ -f "${CROW_HOME}/data/identity.json" ]; then
+    CROW_ID=$(node -e "console.log(JSON.parse(require('fs').readFileSync('${CROW_HOME}/data/identity.json','utf8')).crowId)" 2>/dev/null || echo "unknown")
+    echo "  Crow ID:     ${CROW_ID}"
+  elif [ -f "${CROW_APP}/data/identity.json" ]; then
+    CROW_ID=$(node -e "console.log(JSON.parse(require('fs').readFileSync('${CROW_APP}/data/identity.json','utf8')).crowId)" 2>/dev/null || echo "unknown")
+    echo "  Crow ID:     ${CROW_ID}"
+  else
+    echo "  Crow ID:     Not generated yet"
+  fi
+
+  # Database
+  if [ -f "${CROW_HOME}/data/crow.db" ]; then
+    DB_SIZE=$(du -h "${CROW_HOME}/data/crow.db" 2>/dev/null | cut -f1)
+    echo "  Database:    ${CROW_HOME}/data/crow.db (${DB_SIZE})"
+  elif [ -f "${CROW_APP}/data/crow.db" ]; then
+    DB_SIZE=$(du -h "${CROW_APP}/data/crow.db" 2>/dev/null | cut -f1)
+    echo "  Database:    ${CROW_APP}/data/crow.db (${DB_SIZE})"
+  fi
+
+  # Gateway service
+  echo ""
+  if systemctl is-active --quiet crow-gateway 2>/dev/null; then
+    echo "  Gateway:     running (systemd)"
+  elif pgrep -f "servers/gateway/index.js" >/dev/null 2>&1; then
+    echo "  Gateway:     running (manual)"
+  else
+    echo "  Gateway:     stopped"
+  fi
+
+  # Docker
+  if command -v docker >/dev/null 2>&1; then
+    CONTAINERS=$(docker ps --filter "label=com.docker.compose.project" --format "{{.Names}}" 2>/dev/null | wc -l)
+    echo "  Docker:      ${CONTAINERS} container(s) running"
+  fi
+
+  # Resource usage
+  echo ""
+  echo "  Resources:"
+  echo "    Memory:    $(free -h 2>/dev/null | awk '/^Mem:/ {print $3 "/" $2}' || echo 'N/A')"
+  echo "    Disk:      $(df -h "${CROW_HOME}" 2>/dev/null | awk 'NR==2 {print $3 "/" $2 " (" $5 " used)"}' || echo 'N/A')"
+  echo ""
+}
+
+cmd_bundle_status() {
+  echo ""
+  echo "  Installed Bundles"
+  echo "  ═════════════════"
+
+  if [ ! -d "$BUNDLES_DIR" ] || [ -z "$(ls -A "$BUNDLES_DIR" 2>/dev/null)" ]; then
+    echo "  No bundles installed."
+    echo ""
+    echo "  Install one with: crow bundle install <id>"
+    echo ""
+    return
+  fi
+
+  for bundle_dir in "$BUNDLES_DIR"/*/; do
+    [ -d "$bundle_dir" ] || continue
+    bundle_id=$(basename "$bundle_dir")
+
+    if [ -f "${bundle_dir}docker-compose.yml" ]; then
+      status=$(cd "$bundle_dir" && docker compose ps --format "{{.Status}}" 2>/dev/null | head -1 || echo "unknown")
+      if [ -z "$status" ]; then
+        status="stopped"
+      fi
+    else
+      status="configured (no Docker)"
+    fi
+
+    echo "  ${bundle_id}: ${status}"
+  done
+  echo ""
+}
+
+cmd_bundle_install() {
+  local bundle_id="$1"
+
+  if [ -z "$bundle_id" ]; then
+    echo "Usage: crow bundle install <id>"
+    exit 1
+  fi
+
+  # Check if bundle exists in repo
+  local source_dir="${CROW_APP}/bundles/${bundle_id}"
+  if [ ! -d "$source_dir" ]; then
+    echo "Bundle '${bundle_id}' not found in ${CROW_APP}/bundles/"
+    echo "Available bundles:"
+    ls "${CROW_APP}/bundles/" 2>/dev/null || echo "  (none)"
+    exit 1
+  fi
+
+  # Create destination
+  local dest_dir="${BUNDLES_DIR}/${bundle_id}"
+  mkdir -p "$dest_dir"
+
+  # Copy bundle files
+  cp -r "${source_dir}/"* "$dest_dir/"
+  echo "Copied bundle files to ${dest_dir}"
+
+  # Copy .env.example if it exists and .env doesn't
+  if [ -f "${dest_dir}/.env.example" ] && [ ! -f "${dest_dir}/.env" ]; then
+    cp "${dest_dir}/.env.example" "${dest_dir}/.env"
+    echo "Created .env from .env.example — edit ${dest_dir}/.env with your settings"
+  fi
+
+  # Pull Docker images if docker-compose.yml exists
+  if [ -f "${dest_dir}/docker-compose.yml" ]; then
+    echo "Pulling Docker images..."
+    (cd "$dest_dir" && docker compose pull 2>&1) || echo "Warning: Could not pull images. Run 'docker compose pull' manually in ${dest_dir}"
+
+    echo ""
+    echo "To start: crow bundle start ${bundle_id}"
+    echo "Edit settings first: ${dest_dir}/.env"
+  fi
+
+  # Copy skills to ~/.crow/ if present
+  if [ -d "${dest_dir}/skills" ]; then
+    echo "Skills installed. They will activate when the add-on's trigger phrases are used."
+  fi
+
+  # Track installation
+  local installed_file="${CROW_HOME}/installed.json"
+  if [ ! -f "$installed_file" ]; then
+    echo '[]' > "$installed_file"
+  fi
+  node -e "
+    const fs = require('fs');
+    const installed = JSON.parse(fs.readFileSync('${installed_file}', 'utf8'));
+    if (!installed.find(i => i.id === '${bundle_id}')) {
+      installed.push({ id: '${bundle_id}', type: 'bundle', installedAt: new Date().toISOString() });
+      fs.writeFileSync('${installed_file}', JSON.stringify(installed, null, 2));
+    }
+  " 2>/dev/null || true
+
+  echo ""
+  echo "Bundle '${bundle_id}' installed."
+}
+
+cmd_bundle_stop() {
+  local bundle_id="$1"
+  local bundle_dir="${BUNDLES_DIR}/${bundle_id}"
+
+  if [ ! -d "$bundle_dir" ]; then
+    echo "Bundle '${bundle_id}' is not installed."
+    exit 1
+  fi
+
+  if [ -f "${bundle_dir}/docker-compose.yml" ]; then
+    (cd "$bundle_dir" && docker compose stop)
+    echo "Bundle '${bundle_id}' stopped."
+  else
+    echo "Bundle '${bundle_id}' has no Docker containers to stop."
+  fi
+}
+
+cmd_bundle_start() {
+  local bundle_id="$1"
+  local bundle_dir="${BUNDLES_DIR}/${bundle_id}"
+
+  if [ ! -d "$bundle_dir" ]; then
+    echo "Bundle '${bundle_id}' is not installed. Run: crow bundle install ${bundle_id}"
+    exit 1
+  fi
+
+  if [ -f "${bundle_dir}/docker-compose.yml" ]; then
+    (cd "$bundle_dir" && docker compose up -d)
+    echo "Bundle '${bundle_id}' started."
+  else
+    echo "Bundle '${bundle_id}' has no Docker containers to start."
+  fi
+}
+
+cmd_bundle_remove() {
+  local bundle_id="$1"
+  local bundle_dir="${BUNDLES_DIR}/${bundle_id}"
+
+  if [ ! -d "$bundle_dir" ]; then
+    echo "Bundle '${bundle_id}' is not installed."
+    exit 1
+  fi
+
+  # Stop containers
+  if [ -f "${bundle_dir}/docker-compose.yml" ]; then
+    echo "Stopping containers..."
+    (cd "$bundle_dir" && docker compose down --remove-orphans 2>/dev/null) || true
+  fi
+
+  # Remove files
+  rm -rf "$bundle_dir"
+  echo "Removed bundle files."
+
+  # Update installed.json
+  local installed_file="${CROW_HOME}/installed.json"
+  if [ -f "$installed_file" ]; then
+    node -e "
+      const fs = require('fs');
+      const installed = JSON.parse(fs.readFileSync('${installed_file}', 'utf8'));
+      const filtered = installed.filter(i => i.id !== '${bundle_id}');
+      fs.writeFileSync('${installed_file}', JSON.stringify(filtered, null, 2));
+    " 2>/dev/null || true
+  fi
+
+  echo "Bundle '${bundle_id}' removed."
+}
+
+# Main dispatch
+case "${1:-}" in
+  status)
+    cmd_status
+    ;;
+  bundle)
+    case "${2:-}" in
+      status)
+        cmd_bundle_status
+        ;;
+      install)
+        cmd_bundle_install "${3:-}"
+        ;;
+      stop)
+        cmd_bundle_stop "${3:-}"
+        ;;
+      start)
+        cmd_bundle_start "${3:-}"
+        ;;
+      remove)
+        cmd_bundle_remove "${3:-}"
+        ;;
+      *)
+        echo "Usage: crow bundle {status|install|stop|start|remove} [id]"
+        exit 1
+        ;;
+    esac
+    ;;
+  -h|--help|help|"")
+    usage
+    ;;
+  *)
+    echo "Unknown command: $1"
+    usage
+    exit 1
+    ;;
+esac

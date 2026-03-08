@@ -50,6 +50,12 @@ This is the master routing skill. Consult this **before every task** to determin
 | "add-on", "extension", "install plugin", "browse extensions" | "complemento", "extensión", "instalar plugin" | add-ons | crow-memory, filesystem |
 | "what can you do", "getting started", "new to crow" | "qué puedes hacer", "cómo empezar", "nuevo en crow" | onboarding-tour | crow-memory |
 | "tailscale", "remote access", "network setup" | "tailscale", "acceso remoto", "configurar red" | network-setup | (documentation) |
+| "report bug", "file issue", "feature request", "found a bug" | "reportar bug", "crear issue", "solicitar función" | bug-report | crow-memory, github |
+| "obsidian", "vault", "daily note", "sync to obsidian" | "obsidian", "bóveda", "nota diaria" | obsidian | obsidian, crow-research |
+| "lights", "temperature", "smart home", "turn on/off" | "luces", "temperatura", "hogar inteligente" | home-assistant | home-assistant |
+| "ollama", "local model", "run locally", "embeddings" | "ollama", "modelo local", "ejecutar local" | ollama | crow-memory |
+| "nextcloud", "nextcloud files" | "nextcloud", "archivos nextcloud" | nextcloud | filesystem |
+| "photos", "pictures", "album", "immich" | "fotos", "imágenes", "álbum" | immich | immich |
 | "change language", "speak in..." | "cambiar idioma", "háblame en..." | i18n | crow-memory |
 | Session start / Inicio de sesión | — | session-context, i18n, skill-writing (deferred gap check) | crow-memory |
 | High friction detected / Fricción detectada | — | reflection → skill-writing (handoff) | crow-memory, filesystem |

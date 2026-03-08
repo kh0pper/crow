@@ -36,15 +36,15 @@ features:
   - icon:
       src: /icon-integrations.svg
     title: Extensible with Add-ons
-    details: 15+ integrations out of the box (Gmail, GitHub, Slack, and more). Install new features by asking your AI — dashboard panels, MCP servers, and skills from the add-on registry.
+    details: 15+ integrations out of the box (Gmail, GitHub, Slack, and more) plus self-hosting add-ons (Obsidian, Home Assistant, Ollama, Nextcloud, Immich). Install by asking your AI.
   - icon:
       src: /icon-deploy.svg
     title: Dashboard & Blog
     details: A premium visual dashboard for managing messages, blog posts, files, and settings. Built-in blogging platform with Markdown, RSS feeds, and themes — publish by telling your AI.
   - icon:
       src: /icon-deploy.svg
-    title: One-Click Deploy
-    details: Deploy to Render in minutes with the included render.yaml. Or run locally with Docker or stdio. Connect any platform in seconds.
+    title: Self-Host or Cloud
+    details: Deploy to Render in minutes, run on Oracle Cloud for free, or turn a Raspberry Pi into a dedicated Crow appliance with one command. Your data stays yours.
   - icon:
       src: /icon-mcp.svg
     title: Open Standard

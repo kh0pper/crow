@@ -6,6 +6,20 @@ Bundles are pre-configured Docker Compose setups that package Crow with a curate
 
 A bundle is a `docker-compose.yml` file plus configuration that makes it easy to deploy Crow with specific integrations enabled. Instead of configuring each service individually, users deploy a bundle and get a working setup immediately.
 
+## Built-in Bundles
+
+Crow ships with several self-hosting add-on bundles in `bundles/`:
+
+| Bundle | Type | Description |
+|---|---|---|
+| `obsidian` | MCP server | Connect Obsidian vault via `mcp-obsidian` npm package |
+| `home-assistant` | MCP server | Smart home control via `hass-mcp` npm package |
+| `ollama` | Docker + skill | Local AI models for embeddings and summarization |
+| `nextcloud` | Docker + skill | File sync via WebDAV mount (v1: files only) |
+| `immich` | Docker + custom MCP | Photo library with custom `createImmichServer()` |
+
+Install with: `crow bundle install <id>`
+
 ## Example Use Cases
 
 - **Academic Bundle** — Crow + arXiv + Zotero + Google Workspace + Canvas LMS
@@ -66,13 +80,34 @@ Include:
 - Step-by-step setup instructions
 - Which integrations are included and what they enable
 
-### 5. Structure
+### 5. Add a manifest.json
+
+```json
+{
+  "id": "your-bundle",
+  "name": "Your Bundle Name",
+  "version": "1.0.0",
+  "description": "What it does",
+  "type": "bundle",
+  "author": "Your Name",
+  "docker": { "composefile": "docker-compose.yml" },
+  "skills": ["skills/your-skill.md"],
+  "requires": { "env": ["REQUIRED_VAR"] }
+}
+```
+
+### 6. Structure
 
 ```
 bundles/your-bundle/
+├── manifest.json
 ├── docker-compose.yml
 ├── .env.example
-└── README.md
+├── skills/
+│   └── your-skill.md
+└── server/              (optional — for custom MCP servers)
+    ├── server.js
+    └── index.js
 ```
 
 ## Publishing

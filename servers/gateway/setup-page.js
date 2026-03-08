@@ -10,12 +10,27 @@
  */
 
 import { getProxyStatus } from "./proxy.js";
+import { isPasswordSet } from "./dashboard/auth.js";
 
 /**
  * Express handler for GET /setup
  */
-export function setupPageHandler(req, res) {
+export async function setupPageHandler(req, res) {
   const integrations = getProxyStatus();
+  const passwordConfigured = await isPasswordSet().catch(() => false);
+
+  // Detect Crow OS mode (installed to ~/.crow/app)
+  const isCrowOS = process.env.CROW_DATA_DIR || process.cwd().includes(".crow/app");
+
+  // Try to read Crow ID
+  let crowId = null;
+  try {
+    const { loadOrCreateIdentity } = await import("../../servers/sharing/identity.js");
+    const identity = loadOrCreateIdentity();
+    crowId = identity.crowId;
+  } catch {
+    // Identity not available
+  }
   const connected = integrations.filter((i) => i.status === "connected");
   const errored = integrations.filter((i) => i.status === "error");
   const notConfigured = integrations.filter((i) => !i.configured);
@@ -125,6 +140,47 @@ export function setupPageHandler(req, res) {
       <div class="stat-label">Available</div>
     </div>
   </div>
+
+  ${isCrowOS && !passwordConfigured ? `
+  <div class="section">
+    <div class="section-title">Step 1: Set Dashboard Password</div>
+    <div class="instructions">
+      <p style="margin-bottom:12px">Protect your Crow dashboard with a password. This is required before you can access the dashboard.</p>
+      <form method="POST" action="/dashboard/setup-password" style="display:flex;gap:8px;flex-wrap:wrap">
+        <input type="password" name="password" placeholder="Choose a password" required minlength="8"
+          style="flex:1;min-width:200px;padding:10px 14px;border:1px solid #d2d2d7;border-radius:8px;font-size:14px">
+        <button type="submit" style="padding:10px 20px;background:#007aff;color:white;border:none;border-radius:8px;font-weight:500;font-size:14px;cursor:pointer">Set Password</button>
+      </form>
+    </div>
+  </div>` : ""}
+
+  ${passwordConfigured ? `
+  <div class="section">
+    <div class="section-title">${isCrowOS ? "Step 1: Dashboard Password" : "Dashboard"}</div>
+    <div class="card">
+      <div class="card-header">
+        <span class="status-dot green"></span>
+        <div>
+          <div class="card-name">Password configured</div>
+          <div class="card-desc">Dashboard is protected</div>
+        </div>
+      </div>
+    </div>
+  </div>` : ""}
+
+  ${crowId ? `
+  <div class="section">
+    <div class="section-title">${isCrowOS ? "Step 2: Your Identity" : "Identity"}</div>
+    <div class="card">
+      <div class="card-header">
+        <span class="status-dot green"></span>
+        <div>
+          <div class="card-name">${crowId}</div>
+          <div class="card-desc">Your Crow ID — share this with peers to connect</div>
+        </div>
+      </div>
+    </div>
+  </div>` : ""}
 
   ${connected.length > 0 ? `
   <div class="section">

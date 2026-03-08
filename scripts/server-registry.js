@@ -56,7 +56,7 @@ export const CORE_SERVERS = [
     args: ["servers/memory/index.js"],
     description: "Persistent memory",
     envKeys: [],
-    mcpEnv: { CROW_DB_PATH: "./data/crow.db" },
+    mcpEnv: { CROW_DB_PATH: "${CROW_DB_PATH:-./data/crow.db}" },
   },
   {
     name: "crow-research",
@@ -64,7 +64,7 @@ export const CORE_SERVERS = [
     args: ["servers/research/index.js"],
     description: "Research pipeline",
     envKeys: [],
-    mcpEnv: { CROW_DB_PATH: "./data/crow.db" },
+    mcpEnv: { CROW_DB_PATH: "${CROW_DB_PATH:-./data/crow.db}" },
   },
   {
     name: "crow-sharing",
@@ -72,7 +72,7 @@ export const CORE_SERVERS = [
     args: ["servers/sharing/index.js"],
     description: "P2P sharing",
     envKeys: [],
-    mcpEnv: { CROW_DB_PATH: "./data/crow.db" },
+    mcpEnv: { CROW_DB_PATH: "${CROW_DB_PATH:-./data/crow.db}" },
   },
   {
     name: "crow-blog",
@@ -80,7 +80,7 @@ export const CORE_SERVERS = [
     args: ["servers/blog/index.js"],
     description: "Blogging platform",
     envKeys: [],
-    mcpEnv: { CROW_DB_PATH: "./data/crow.db" },
+    mcpEnv: { CROW_DB_PATH: "${CROW_DB_PATH:-./data/crow.db}" },
   },
 ];
 
@@ -96,7 +96,7 @@ export const CONDITIONAL_SERVERS = [
     description: "S3-compatible file storage (requires MinIO)",
     envKeys: ["MINIO_ENDPOINT"],
     mcpEnv: {
-      CROW_DB_PATH: "./data/crow.db",
+      CROW_DB_PATH: "${CROW_DB_PATH:-./data/crow.db}",
       MINIO_ENDPOINT: "${MINIO_ENDPOINT}",
       MINIO_PORT: "${MINIO_PORT:-9000}",
       MINIO_ROOT_USER: "${MINIO_ROOT_USER:-crowadmin}",
@@ -259,6 +259,26 @@ export const EXTERNAL_SERVERS = [
     mcpArgs: ["-y", "@modelcontextprotocol/server-filesystem", "${CROW_FILES_PATH:-/home}"],
     description: "Local file access (no keys needed)",
     category: "development",
+  },
+  {
+    name: "home-assistant",
+    command: "npx",
+    args: ["-y", "hass-mcp"],
+    envKeys: ["HA_URL", "HA_TOKEN"],
+    envMap: { HA_URL: "HA_URL", HA_TOKEN: "HA_TOKEN" },
+    mcpEnv: { HA_URL: "${HA_URL}", HA_TOKEN: "${HA_TOKEN}" },
+    description: "Requires HA_URL + HA_TOKEN",
+    category: "productivity",
+  },
+  {
+    name: "obsidian",
+    command: "npx",
+    args: ["-y", "mcp-obsidian"],
+    envKeys: ["OBSIDIAN_VAULT_PATH"],
+    envMap: { OBSIDIAN_VAULT_PATH: "OBSIDIAN_VAULT_PATH" },
+    mcpEnv: { OBSIDIAN_VAULT_PATH: "${OBSIDIAN_VAULT_PATH}" },
+    description: "Requires OBSIDIAN_VAULT_PATH",
+    category: "productivity",
   },
   {
     name: "render",

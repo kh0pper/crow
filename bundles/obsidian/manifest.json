@@ -1,0 +1,17 @@
+{
+  "id": "obsidian",
+  "name": "Obsidian Vault",
+  "version": "1.0.0",
+  "description": "Connect your Obsidian vault to Crow for reading, searching, and syncing notes",
+  "type": "mcp-server",
+  "author": "Crow",
+  "server": {
+    "command": "npx",
+    "args": ["-y", "mcp-obsidian"],
+    "envKeys": ["OBSIDIAN_VAULT_PATH"]
+  },
+  "skills": ["skills/obsidian.md"],
+  "requires": {
+    "env": ["OBSIDIAN_VAULT_PATH"]
+  }
+}
