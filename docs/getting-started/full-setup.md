@@ -134,6 +134,21 @@ This deletes all data. Use with caution.
 
 For secure remote access, install Tailscale on the host machine (not inside Docker). See the [Tailscale Setup guide](/getting-started/tailscale-setup).
 
+## Dashboard Password
+
+The first time you visit `/dashboard`, you'll be prompted to set a password. You can also set it from the `/setup` page or by asking your AI: "Set my dashboard password."
+
+## Connect Your AI
+
+Visit `http://localhost:3001/setup` to see integration status and endpoint URLs.
+
+[Claude](/platforms/claude) · [ChatGPT](/platforms/chatgpt) · [All platforms](/platforms/)
+
+**Try it out** — after connecting your AI platform, say:
+
+> "Remember that today is my first day using Crow"
+> "What do you remember?"
+
 ## Next Steps
 
 - [Storage guide](/guide/storage) — Learn how to upload and manage files

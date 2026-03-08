@@ -49,3 +49,18 @@ curl http://localhost:3001/health
 ```
 
 Visit `http://localhost:3001/setup` to see integration status and endpoint URLs.
+
+## Dashboard Password
+
+The first time you visit `/dashboard`, you'll be prompted to set a password. You can also set it from the `/setup` page or by asking your AI: "Set my dashboard password."
+
+## Connect Your AI
+
+Once the gateway is running, connect your AI platform:
+
+[Claude](/platforms/claude) · [ChatGPT](/platforms/chatgpt) · [All platforms](/platforms/)
+
+**Try it out** — after connecting, say:
+
+> "Remember that today is my first day using Crow"
+> "What do you remember?"

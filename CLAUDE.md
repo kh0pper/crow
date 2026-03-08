@@ -14,6 +14,7 @@ npm run sharing-server   # Start crow-sharing MCP server (stdio)
 npm run storage-server   # Start crow-storage MCP server (stdio, requires MinIO)
 npm run blog-server      # Start crow-blog MCP server (stdio)
 npm run gateway          # Start HTTP gateway (Express, port 3001)
+npm run check            # Verify database, config, and integration status
 npm run mcp-config       # Generate .mcp.json from .env (only configured servers)
 npm run desktop-config   # Generate Claude Desktop config JSON
 npm run identity         # Display your Crow ID and public keys

@@ -321,6 +321,7 @@ app.listen(PORT, "0.0.0.0", (error) => {
   console.log(`    Fetch:  GET  ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/relay/fetch`);
   console.log(`  Setup:    GET  http://localhost:${PORT}/setup`);
   console.log(`  Health:   GET  http://localhost:${PORT}/health`);
+  console.log(`\n  First time? Visit http://localhost:${PORT}/setup for integration status and next steps.`);
 
   // Initialize external server proxy AFTER listening (so health checks pass during startup).
   initProxyServers().catch((err) => {

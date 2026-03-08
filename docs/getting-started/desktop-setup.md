@@ -46,6 +46,19 @@ This outputs a JSON block for your Claude Desktop configuration. Copy it and add
 
 Quit and reopen Claude Desktop. You should see the MCP server icons in the input area, indicating Crow is connected.
 
+## Verify and Connect Your AI
+
+Check that everything is working:
+
+```bash
+npm run check
+```
+
+**Try it out** — in Claude Desktop, say:
+
+> "Remember that today is my first day using Crow"
+> "What do you remember?"
+
 ## Limitations
 
 - Only works with Claude Desktop (stdio transport)

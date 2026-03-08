@@ -66,6 +66,24 @@ export function resolveDataDir() {
   return resolve(__dirname, "../data");
 }
 
+/**
+ * Verify database is accessible and schema is initialized.
+ * Eagerly probes the DB (libsql connections are lazy).
+ * Throws descriptive errors on failure.
+ */
+export async function verifyDb(db) {
+  try {
+    await db.execute("SELECT 1 FROM memories LIMIT 0");
+  } catch (err) {
+    if (/SQLITE_CANTOPEN|unable to open database/i.test(err.message)) {
+      throw new Error("Database not found. Run 'npm run setup' in the crow directory first.");
+    } else if (/no such table/i.test(err.message)) {
+      throw new Error("Database not initialized. Run 'npm run init-db' first.");
+    }
+    throw err;
+  }
+}
+
 export function createDbClient(dbPath) {
   const tursoUrl = process.env.TURSO_DATABASE_URL;
   const tursoToken = process.env.TURSO_AUTH_TOKEN;
