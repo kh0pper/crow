@@ -233,7 +233,7 @@ export function createResearchServer(dbPath) {
       const formatted = rows
         .map(
           (r) =>
-            `[#${r.id}] ${r.verified ? "[VERIFIED] " : ""}${r.title}\n  Type: ${r.source_type} | Relevance: ${r.relevance_score}/10\n  APA: ${r.citation_apa}${r.url ? `\n  URL: ${r.url}` : ""}${r.content_summary ? `\n  Summary: ${r.content_summary.substring(0, 200)}...` : ""}`
+            `[#${r.id}] ${r.verified ? "[VERIFIED] " : ""}${r.title}\n  Type: ${r.source_type} | Relevance: ${r.relevance_score}/10\n  APA: ${r.citation_apa}${r.url ? `\n  URL: ${r.url}` : ""}${r.content_summary ? `\n  --- stored content ---\n  ${r.content_summary.substring(0, 200)}...\n  --- end stored content ---` : ""}`
         )
         .join("\n\n");
 
@@ -270,11 +270,11 @@ export function createResearchServer(dbPath) {
       text += `Relevance: ${source.relevance_score}/10\n`;
       text += `Tags: ${source.tags || "none"}\n`;
       text += `\nAPA Citation:\n  ${source.citation_apa}\n`;
-      if (source.abstract) text += `\nAbstract:\n  ${source.abstract}\n`;
-      if (source.content_summary) text += `\nSummary:\n  ${source.content_summary}\n`;
+      if (source.abstract) text += `\nAbstract:\n--- stored content ---\n${source.abstract}\n--- end stored content ---\n`;
+      if (source.content_summary) text += `\nSummary:\n--- stored content ---\n${source.content_summary}\n--- end stored content ---\n`;
       if (notes.length > 0) {
         text += `\nNotes (${notes.length}):\n`;
-        text += notes.map((n) => `  [${n.note_type}] ${n.content.substring(0, 150)}`).join("\n");
+        text += notes.map((n) => `  [${n.note_type}]\n  --- stored content ---\n  ${n.content.substring(0, 150)}\n  --- end stored content ---`).join("\n");
       }
 
       return { content: [{ type: "text", text }] };

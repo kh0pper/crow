@@ -13,9 +13,18 @@ if (!process.env.TURSO_DATABASE_URL) {
 
 const db = createDbClient();
 
+async function initTable(label, sql) {
+  try {
+    await db.executeMultiple(sql);
+  } catch (err) {
+    console.error(`Failed to initialize ${label}:`, err.message);
+    process.exit(1);
+  }
+}
+
 // --- Persistent Memory Tables ---
 
-await db.executeMultiple(`
+await initTable("memories table", `
   CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     category TEXT NOT NULL DEFAULT 'general',
@@ -35,7 +44,7 @@ await db.executeMultiple(`
   CREATE INDEX IF NOT EXISTS idx_memories_tags ON memories(tags);
 `);
 
-await db.executeMultiple(`
+await initTable("memories FTS index", `
   CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content, context, tags, source, category,
     content=memories,
@@ -43,7 +52,7 @@ await db.executeMultiple(`
   );
 `);
 
-await db.executeMultiple(`
+await initTable("memories FTS triggers", `
   CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
     INSERT INTO memories_fts(rowid, content, context, tags, source, category)
     VALUES (new.id, new.content, new.context, new.tags, new.source, new.category);
@@ -64,7 +73,7 @@ await db.executeMultiple(`
 
 // --- Research Pipeline Tables ---
 
-await db.executeMultiple(`
+await initTable("research tables", `
   CREATE TABLE IF NOT EXISTS research_projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -110,7 +119,7 @@ await db.executeMultiple(`
   CREATE INDEX IF NOT EXISTS idx_sources_verified ON research_sources(verified);
 `);
 
-await db.executeMultiple(`
+await initTable("sources FTS index", `
   CREATE VIRTUAL TABLE IF NOT EXISTS sources_fts USING fts5(
     title, authors, abstract, content_summary, full_text, tags, citation_apa,
     content=research_sources,
@@ -118,7 +127,7 @@ await db.executeMultiple(`
   );
 `);
 
-await db.executeMultiple(`
+await initTable("sources FTS triggers and notes table", `
   CREATE TRIGGER IF NOT EXISTS sources_ai AFTER INSERT ON research_sources BEGIN
     INSERT INTO sources_fts(rowid, title, authors, abstract, content_summary, full_text, tags, citation_apa)
     VALUES (new.id, new.title, new.authors, new.abstract, new.content_summary, new.full_text, new.tags, new.citation_apa);
@@ -155,7 +164,7 @@ await db.executeMultiple(`
 
 // --- OAuth Tables (for mobile gateway) ---
 
-await db.executeMultiple(`
+await initTable("OAuth tables", `
   CREATE TABLE IF NOT EXISTS oauth_clients (
     client_id TEXT PRIMARY KEY,
     metadata TEXT NOT NULL,
@@ -178,7 +187,7 @@ await db.executeMultiple(`
 
 // --- Cross-Platform Behavioral Context (crow.md) ---
 
-await db.executeMultiple(`
+await initTable("crow_context table", `
   CREATE TABLE IF NOT EXISTS crow_context (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     section_key TEXT NOT NULL UNIQUE,

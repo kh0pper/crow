@@ -98,7 +98,7 @@ export function createMemoryServer(dbPath) {
       const formatted = rows
         .map(
           (r) =>
-            `[#${r.id}] (${r.category}, importance: ${r.importance}) ${r.content}${r.context ? `\n  Context: ${r.context}` : ""}${r.tags ? `\n  Tags: ${r.tags}` : ""}${r.source ? `\n  Source: ${r.source}` : ""}`
+            `[#${r.id}] (${r.category}, importance: ${r.importance})\n--- stored content ---\n${r.content}\n--- end stored content ---${r.context ? `\n  Context: ${r.context}` : ""}${r.tags ? `\n  Tags: ${r.tags}` : ""}${r.source ? `\n  Source: ${r.source}` : ""}`
         )
         .join("\n\n");
 
@@ -114,14 +114,10 @@ export function createMemoryServer(dbPath) {
       limit: z.number().max(100).default(5).describe("Maximum results"),
     },
     async ({ context, limit }) => {
-      const words = context
-        .split(/\s+/)
-        .filter((w) => w.length > 2)
-        .slice(0, 10)
-        .map((w) => `"${w.replace(/"/g, "")}"`)
-        .join(" OR ");
+      const contextWords = context.split(/\s+/).filter((w) => w.length > 2).slice(0, 10).join(" ");
+      const safeQuery = sanitizeFtsQuery(contextWords);
 
-      if (!words) {
+      if (!safeQuery) {
         return { content: [{ type: "text", text: "Context too short to search." }] };
       }
 
@@ -133,7 +129,7 @@ export function createMemoryServer(dbPath) {
           ORDER BY rank
           LIMIT ?
         `,
-        args: [words, limit],
+        args: [safeQuery, limit],
       });
 
       if (rows.length === 0) {
@@ -141,7 +137,7 @@ export function createMemoryServer(dbPath) {
       }
 
       const formatted = rows
-        .map((r) => `[#${r.id}] (${r.category}) ${r.content}`)
+        .map((r) => `[#${r.id}] (${r.category})\n--- stored content ---\n${r.content}\n--- end stored content ---`)
         .join("\n\n");
 
       return {
