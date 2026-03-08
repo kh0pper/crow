@@ -36,7 +36,7 @@ features:
   - icon:
       src: /icon-integrations.svg
     title: Extensible with Add-ons
-    details: 15+ integrations out of the box (Gmail, GitHub, Slack, and more) plus self-hosting add-ons (Obsidian, Home Assistant, Ollama, Nextcloud, Immich). Install by asking your AI.
+    details: 20+ integrations out of the box (Gmail, GitHub, Slack, and more) plus self-hosting add-ons (Obsidian, Home Assistant, Ollama, Nextcloud, Immich). Install by asking your AI.
   - icon:
       src: /icon-deploy.svg
     title: Dashboard & Blog

@@ -18,12 +18,12 @@ The registry is a JSON file hosted in the Crow repository that lists available a
 
 ## Registry Format
 
-The registry is a JSON file at `registry/addons.json`:
+The registry is a JSON file at `registry/add-ons.json`:
 
 ```json
 {
   "version": 1,
-  "addons": [
+  "add-ons": [
     {
       "name": "crow-weather-panel",
       "description": "Weather dashboard panel showing local forecast",
@@ -108,7 +108,7 @@ A maintainer reviews your submission for:
 
 ### 6. Listing
 
-Once approved, the maintainer adds your add-on to `registry/addons.json` and merges. Your add-on is now discoverable by all Crow users.
+Once approved, the maintainer adds your add-on to `registry/add-ons.json` and merges. Your add-on is now discoverable by all Crow users.
 
 ## Turnaround
 

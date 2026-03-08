@@ -37,23 +37,17 @@ Open `.env` and set the required values:
 
 ```bash
 # MinIO (file storage)
-MINIO_ENDPOINT=minio
+MINIO_ENDPOINT=minio          # Use "minio" for Docker, "localhost" for local
 MINIO_PORT=9000
-MINIO_ACCESS_KEY=crowadmin
-MINIO_SECRET_KEY=change-this-to-a-secure-password
-MINIO_BUCKET=crow-storage
+MINIO_ROOT_USER=crowadmin
+MINIO_ROOT_PASSWORD=change-this-to-a-secure-password
 MINIO_USE_SSL=false
 
-# Blog
-CROW_BLOG_TITLE=My Blog
-CROW_BLOG_DESCRIPTION=A personal blog
-CROW_BLOG_AUTHOR=Your Name
-
 # Storage quota (in MB)
-CROW_STORAGE_QUOTA_MB=1024
+STORAGE_QUOTA_MB=1024
 ```
 
-When running inside Docker Compose, set `MINIO_ENDPOINT=minio` (the Docker service name), not `localhost`.
+When running inside Docker Compose, set `MINIO_ENDPOINT=minio` (the Docker service name). For local (non-Docker) setups, use `MINIO_ENDPOINT=localhost` instead. Blog settings are managed via the `crow_blog_settings` MCP tool or dashboard — no env vars needed.
 
 ## Step 3: Start Everything
 
@@ -88,7 +82,7 @@ This creates the SQLite database with all required tables.
 | Blog | `http://localhost:3001/blog` |
 | MinIO Console | `http://localhost:9001` |
 
-The MinIO console lets you browse stored files directly. Log in with your `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY`.
+The MinIO console lets you browse stored files directly. Log in with your `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`.
 
 ## Step 6: Generate MCP Config
 

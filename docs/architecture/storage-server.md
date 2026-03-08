@@ -71,57 +71,65 @@ Presigned URLs default to 1-hour expiry. The expiry is configurable per request.
 ```sql
 CREATE TABLE storage_files (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  key TEXT UNIQUE NOT NULL,          -- S3 object key (e.g., "images/photo.jpg")
+  s3_key TEXT NOT NULL UNIQUE,       -- S3 object key (e.g., "1234567890-photo.jpg")
   original_name TEXT NOT NULL,       -- Original filename at upload
-  mime_type TEXT NOT NULL,           -- Validated MIME type
-  size_bytes INTEGER NOT NULL,       -- File size
-  bucket TEXT NOT NULL,              -- S3 bucket name
-  uploaded_at TEXT DEFAULT (datetime('now')),
-  metadata TEXT                      -- JSON blob for extra fields
+  mime_type TEXT,                    -- Validated MIME type
+  size_bytes INTEGER,               -- File size
+  bucket TEXT DEFAULT 'crow-files',  -- S3 bucket name
+  uploaded_by TEXT,                  -- Who uploaded (optional)
+  reference_type TEXT,              -- What this file is attached to (e.g., blog_post)
+  reference_id INTEGER,             -- ID of the referenced item
+  created_at TEXT DEFAULT (datetime('now'))
 );
 ```
 
-The `key` column is the canonical identifier used across MCP tools and HTTP endpoints.
+The `s3_key` column is the canonical identifier used across MCP tools and HTTP endpoints.
 
 ## MCP Tools
 
 ### crow_upload_file
 
-Accepts a file path or base64 content, validates the MIME type, checks quota, uploads to MinIO, and inserts a metadata row.
+Uploads a small file via base64 (under 1MB) or generates a presigned upload URL for larger files. Validates the MIME type, checks quota, uploads to MinIO, and inserts a metadata row.
 
 **Parameters:**
-- `file_path` (string, max 500) — Absolute path to file, or
-- `content` (string, max 50000) — Base64-encoded file content
-- `filename` (string, max 255) — Target filename
-- `folder` (string, max 255, optional) — Subfolder in the bucket
+- `file_name` (string, max 500) — Original file name
+- `mime_type` (string, max 200, optional) — MIME type (e.g., `image/png`)
+- `data_base64` (string, max 1500000, optional) — Base64-encoded file data (for files under 1MB)
+- `bucket` (string, max 100, optional) — Target bucket (default: `crow-files`)
+- `reference_type` (string, max 100, optional) — What this file is attached to (e.g., `blog_post`, `research_source`)
+- `reference_id` (number, optional) — ID of the referenced item
 
 ### crow_list_files
 
-Lists files with optional filtering by folder or MIME type prefix.
+Lists files with optional filtering by bucket, MIME type prefix, or reference.
 
 **Parameters:**
-- `folder` (string, max 255, optional)
-- `mime_type` (string, max 100, optional) — Filter prefix (e.g., `image/`)
-- `limit` (number, default 50)
+- `bucket` (string, max 100, optional) — Filter by bucket
+- `mime_type` (string, max 200, optional) — Filter by MIME type prefix (e.g., `image/`)
+- `reference_type` (string, max 100, optional) — Filter by reference type
+- `reference_id` (number, optional) — Filter by reference ID
+- `limit` (number, min 1, max 100, optional, default 50)
 
 ### crow_get_file_url
 
-Generates a presigned URL for temporary access to a file.
+Generates a presigned download URL for temporary access to a file.
 
 **Parameters:**
-- `key` (string, max 500) — The file's S3 object key
-- `expiry_seconds` (number, default 3600) — URL validity period
+- `s3_key` (string, max 500) — S3 object key
+- `expiry` (number, min 60, max 86400, optional, default 3600) — URL expiry in seconds
+- `bucket` (string, max 100, optional) — Bucket name (default: `crow-files`)
 
 ### crow_delete_file
 
 Removes a file from both MinIO and the database.
 
 **Parameters:**
-- `key` (string, max 500)
+- `s3_key` (string, max 500) — S3 object key to delete
+- `bucket` (string, max 100, optional) — Bucket name (default: `crow-files`)
 
 ### crow_storage_stats
 
-Returns storage usage summary: total files, total size, quota remaining, breakdown by MIME type.
+Returns storage usage summary: total files, total size, quota remaining. No parameters.
 
 ## Gateway HTTP Routes
 

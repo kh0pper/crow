@@ -93,11 +93,9 @@ You should see a health check response from the gateway.
 
 ### Dashboard returns 403
 
-The dashboard IP allowlist includes Tailscale's CGNAT range (`100.64.0.0/10`) by default. If you've customized `DASHBOARD_ALLOWED_IPS`, make sure this range is included:
+The dashboard network check automatically allows localhost, RFC 1918 private ranges, and Tailscale's CGNAT range (`100.64.0.0/10`). There is no configurable IP allowlist — these ranges are hardcoded.
 
-```bash
-DASHBOARD_ALLOWED_IPS=10.0.0.0/8,100.64.0.0/10
-```
+If you need to allow access from outside these ranges, set `CROW_DASHBOARD_PUBLIC=true` in your `.env` file. This disables the network check entirely, so only use it if you have other access controls in place (e.g., a reverse proxy with authentication).
 
 ### Tailscale not starting on boot
 

@@ -15,6 +15,22 @@ Skills are markdown files in `skills/` that define behavioral prompts for the AI
 | **Skill Writing** | `skill-writing.md` | Dynamic skill creation and improvement |
 | **i18n** | `i18n.md` | Multilingual output adaptation |
 
+## Platform Skills
+
+| Skill | File | Purpose |
+|---|---|---|
+| **Crow Context** | `crow-context.md` | Cross-platform behavioral context (crow.md) management |
+| **Blog** | `blog.md` | Blog creation, publishing, theming, and export |
+| **Storage** | `storage.md` | File storage management and quota tracking |
+| **Sharing** | `sharing.md` | P2P encrypted sharing workflows (invite, share, inbox) |
+| **Social** | `social.md` | Messaging and social interactions via Nostr |
+| **Peer Network** | `peer-network.md` | Peer management, relay config, identity, blocking |
+| **Onboarding** | `onboarding.md` | First-run sharing setup and device migration |
+| **Onboarding Tour** | `onboarding-tour.md` | First-run platform tour for new users |
+| **Add-ons** | `add-ons.md` | Add-on browsing, installation, and removal |
+| **Network Setup** | `network-setup.md` | Tailscale remote access guidance |
+| **Bug Report** | `bug-report.md` | Bug and feature reporting |
+
 ## Integration Skills
 
 | Skill | File | Purpose |
@@ -45,6 +61,8 @@ Skills can combine to handle complex requests:
 - **"Daily briefing"** → Gmail + Calendar + Slack + Trello + Memory
 - **"Start research on X"** → Memory + Research + Brave Search + arXiv + Zotero
 - **"Prepare for meeting"** → Calendar + Gmail + Memory + Research + Slack
+- **"Publish my research"** → Research + Blog + Storage (upload images)
+- **"Set up file sharing"** → Storage + Sharing + Peer Network
 
 ## Creating New Skills
 
