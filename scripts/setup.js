@@ -55,7 +55,15 @@ if (!existsSync(envPath) && existsSync(envExamplePath)) {
   log(".env file exists - OK");
 }
 
-// Step 4: Initialize database
+// Step 4: Migrate data directory to ~/.crow/data/
+log("Checking data directory...");
+try {
+  execSync("node scripts/migrate-data-dir.js", { cwd: ROOT, stdio: "inherit" });
+} catch {
+  log("Warning: Data directory migration skipped. Run 'npm run migrate-data' manually.");
+}
+
+// Step 5: Initialize database
 log("Initializing database...");
 try {
   execSync("node scripts/init-db.js", { cwd: ROOT, stdio: "inherit" });

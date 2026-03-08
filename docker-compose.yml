@@ -12,7 +12,7 @@ services:
     ports:
       - "${CROW_GATEWAY_PORT:-3001}:3001"
     volumes:
-      - crow-data:/app/data
+      - ${CROW_DATA_DIR:-./data}:/app/data
     env_file: .env
     environment:
       - CROW_TRANSPORT=http
@@ -61,5 +61,4 @@ services:
     profiles: [local]
 
 volumes:
-  crow-data:
   minio-data:

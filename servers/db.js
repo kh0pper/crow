@@ -9,6 +9,7 @@
  */
 
 import { createClient } from "@libsql/client";
+import { existsSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -48,6 +49,23 @@ export function escapeLikePattern(input) {
     .replace(/_/g, "\\_");
 }
 
+/**
+ * Resolve the Crow data directory path.
+ * Priority: CROW_DATA_DIR env → ~/.crow/data/ → ./data/ (fallback)
+ */
+export function resolveDataDir() {
+  if (process.env.CROW_DATA_DIR) {
+    return resolve(process.env.CROW_DATA_DIR);
+  }
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  const crowHome = resolve(home, ".crow", "data");
+  // Use ~/.crow/data/ if it exists, otherwise fall back to repo-local ./data/
+  if (home && existsSync(crowHome)) {
+    return crowHome;
+  }
+  return resolve(__dirname, "../data");
+}
+
 export function createDbClient(dbPath) {
   const tursoUrl = process.env.TURSO_DATABASE_URL;
   const tursoToken = process.env.TURSO_AUTH_TOKEN;
@@ -57,6 +75,6 @@ export function createDbClient(dbPath) {
   }
 
   // Local file-based SQLite
-  const filePath = dbPath || process.env.CROW_DB_PATH || resolve(__dirname, "../data/crow.db");
+  const filePath = dbPath || process.env.CROW_DB_PATH || resolve(resolveDataDir(), "crow.db");
   return createClient({ url: `file:${filePath}` });
 }

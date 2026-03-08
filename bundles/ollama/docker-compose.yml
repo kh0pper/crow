@@ -1,0 +1,28 @@
+## Ollama — Local AI Model Server
+##
+## Usage:
+##   docker compose up -d
+##   docker compose exec ollama ollama pull llama3.2    # Download a model
+##
+## GPU passthrough (NVIDIA):
+##   Uncomment the deploy section below and install nvidia-container-toolkit
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    restart: unless-stopped
+    # Uncomment for NVIDIA GPU passthrough:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  ollama-models:

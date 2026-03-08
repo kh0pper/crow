@@ -1,0 +1,15 @@
+{
+  "id": "ollama",
+  "name": "Ollama (Local AI)",
+  "version": "1.0.0",
+  "description": "Run local AI models for embeddings, summarization, and content classification via Ollama",
+  "type": "bundle",
+  "author": "Crow",
+  "docker": {
+    "composefile": "docker-compose.yml"
+  },
+  "skills": ["skills/ollama.md"],
+  "requires": {
+    "env": ["OLLAMA_HOST"]
+  }
+}

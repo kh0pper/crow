@@ -1,0 +1,17 @@
+{
+  "id": "home-assistant",
+  "name": "Home Assistant",
+  "version": "1.0.0",
+  "description": "Control your smart home through Home Assistant — lights, temperature, switches, and more",
+  "type": "mcp-server",
+  "author": "Crow",
+  "server": {
+    "command": "npx",
+    "args": ["-y", "hass-mcp"],
+    "envKeys": ["HA_URL", "HA_TOKEN"]
+  },
+  "skills": ["skills/home-assistant.md"],
+  "requires": {
+    "env": ["HA_URL", "HA_TOKEN"]
+  }
+}

@@ -1,6 +1,6 @@
 # Integrations
 
-Crow connects to 15+ external services through MCP servers. The two built-in servers (Memory and Research) work out of the box. External integrations need API keys added to your environment.
+Crow connects to 20+ external services through MCP servers. The built-in servers (Memory, Research, Sharing, Blog, Storage) work out of the box. External integrations need API keys added to your environment.
 
 ## Built-in Servers
 
@@ -38,7 +38,19 @@ Add API keys to enable these. For cloud deployments, add keys in your [Render da
 | **Microsoft Teams** | `TEAMS_CLIENT_ID`, `TEAMS_CLIENT_SECRET`, `TEAMS_TENANT_ID` | Messages, channels, teams | [Azure Portal](https://portal.azure.com) |
 | **Zotero** | `ZOTERO_API_KEY`, `ZOTERO_USER_ID` | Citations, library management | [Zotero Settings](https://www.zotero.org/settings/keys) |
 | **arXiv** | *(none)* | Academic paper search, full text | Works out of the box |
+| **Obsidian** | `OBSIDIAN_VAULT_PATH` | Vault search, note sync | Local path to vault |
+| **Home Assistant** | `HA_URL`, `HA_TOKEN` | Smart home device control | [HA Long-Lived Tokens](https://www.home-assistant.io/docs/authentication/) |
 | **Render** | `RENDER_API_KEY` | Deployment management | [Render API Keys](https://dashboard.render.com/account/api-keys) |
+
+## Self-Hosting Add-ons (Bundles)
+
+These are installable add-ons with Docker Compose configurations. Install with `crow bundle install <id>` or ask your AI.
+
+| Add-on | Type | Description |
+|---|---|---|
+| **Ollama** | Bundle (Docker) | Local AI models for embeddings, summarization, classification |
+| **Nextcloud** | Bundle (Docker) | File sync via WebDAV mount (v1: files only) |
+| **Immich** | Bundle (Docker + custom MCP) | Photo library search, album management |
 
 ## How Integration Proxy Works
 

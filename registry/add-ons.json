@@ -1,4 +1,55 @@
 {
   "version": 1,
-  "add-ons": []
+  "add-ons": [
+    {
+      "id": "obsidian",
+      "name": "Obsidian Vault",
+      "description": "Connect your Obsidian vault to Crow for reading, searching, and syncing notes",
+      "type": "mcp-server",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": ["notes", "knowledge-base", "markdown"]
+    },
+    {
+      "id": "home-assistant",
+      "name": "Home Assistant",
+      "description": "Control your smart home through Home Assistant — lights, temperature, switches, and more",
+      "type": "mcp-server",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": ["smart-home", "iot", "automation"]
+    },
+    {
+      "id": "ollama",
+      "name": "Ollama (Local AI)",
+      "description": "Run local AI models for embeddings, summarization, and content classification",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "development",
+      "tags": ["ai", "local", "embeddings", "privacy"]
+    },
+    {
+      "id": "nextcloud",
+      "name": "Nextcloud",
+      "description": "Access Nextcloud files via WebDAV mount — sync documents, browse folders",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": ["files", "sync", "self-hosted"]
+    },
+    {
+      "id": "immich",
+      "name": "Immich Photos",
+      "description": "Search photos, browse albums, and manage your Immich photo library",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": ["photos", "albums", "self-hosted"]
+    }
+  ]
 }

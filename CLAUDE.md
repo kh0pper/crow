@@ -19,6 +19,18 @@ npm run desktop-config   # Generate Claude Desktop config JSON
 npm run identity         # Display your Crow ID and public keys
 npm run identity:export  # Export encrypted identity for device migration
 npm run identity:import  # Import identity on a new device
+npm run migrate-data     # Migrate data from ./data/ to ~/.crow/data/
+```
+
+### Crow CLI (Crow OS / self-hosted)
+
+```bash
+crow status              # Platform status, identity, resource usage
+crow bundle status       # List installed bundles
+crow bundle install <id> # Install a bundle add-on (ollama, nextcloud, immich)
+crow bundle start <id>   # Start bundle containers
+crow bundle stop <id>    # Stop bundle containers
+crow bundle remove <id>  # Remove a bundle
 ```
 
 ### Docker (gateway only)
@@ -93,13 +105,26 @@ servers/gateway/routes/storage-http.js → File upload/download routes
 servers/gateway/dashboard/     → Dashboard UI (auth, layout, panels)
 servers/gateway/auth.js        → OAuth 2.1 provider (CrowOAuthProvider, SQLite-backed)
 servers/gateway/proxy.js       → Proxy layer for external MCP servers
-servers/gateway/setup-page.js  → Browser-based setup/configuration page
+servers/gateway/setup-page.js  → Browser-based setup/configuration page (first-run wizard for Crow OS)
 servers/gateway/integrations.js → Registry of available integrations
+bundles/obsidian/              → Obsidian vault add-on (external mcp-obsidian server)
+bundles/home-assistant/        → Home Assistant add-on (external hass-mcp server)
+bundles/ollama/                → Ollama local AI add-on (Docker + skill)
+bundles/nextcloud/             → Nextcloud files add-on (Docker + WebDAV)
+bundles/immich/                → Immich photos add-on (custom MCP server + Docker)
+scripts/crow                   → CLI entry point (status, bundle management)
+scripts/crow-install.sh        → Raspberry Pi / Debian installer script
+scripts/crow-update.sh         → Safe update with rollback
+scripts/migrate-data-dir.js    → Data directory migration (./data/ → ~/.crow/data/)
 ```
+
+### Data Directory
+
+Data lives in `~/.crow/data/` (preferred) or `./data/` (fallback). Resolution order: `CROW_DATA_DIR` env → `~/.crow/data/` (if exists) → `./data/`. The `resolveDataDir()` function in `servers/db.js` handles this. Migration script (`scripts/migrate-data-dir.js`) moves data from `./data/` to `~/.crow/data/` and creates a symlink for backward compatibility.
 
 ### Database
 
-Uses `@libsql/client` which supports both local SQLite files (`data/crow.db`, gitignored) and remote Turso databases. Set `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` for cloud; otherwise falls back to local file. Client factory in `servers/db.js` (also exports `sanitizeFtsQuery()` and `escapeLikePattern()` utility functions for safe query handling). Schema defined in `scripts/init-db.js`. Key tables:
+Uses `@libsql/client` which supports both local SQLite files (default: `~/.crow/data/crow.db`, gitignored) and remote Turso databases. Set `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` for cloud; otherwise falls back to local file. Client factory in `servers/db.js` (also exports `resolveDataDir()`, `sanitizeFtsQuery()`, and `escapeLikePattern()` utility functions). Schema defined in `scripts/init-db.js`. Key tables:
 
 - **memories** — Full-text searchable (FTS5 virtual table `memories_fts`), with triggers to keep FTS in sync on insert/update/delete
 - **research_projects** → **research_sources** → **research_notes** — Foreign keys with `ON DELETE SET NULL`
@@ -221,7 +246,15 @@ Consult `skills/superpowers.md` first — it routes user intent to the right ski
 - `blog.md` — Blog creation, publishing, theming, export
 - `network-setup.md` — Tailscale remote access guidance
 - `add-ons.md` — Add-on browsing, installation, removal
+- `bug-report.md` — Bug/feature reporting (GitHub or memory fallback)
 - `onboarding-tour.md` — First-run platform tour for new users
+
+Add-on skills (activated when corresponding add-on is installed):
+- `obsidian.md` — Obsidian vault search and research sync
+- `home-assistant.md` — Smart home control with safety checkpoints
+- `ollama.md` — Local AI model management via HTTP API
+- `nextcloud.md` — Nextcloud file access via WebDAV
+- `immich.md` — Photo library search and album management
 
 ## Documentation Site
 

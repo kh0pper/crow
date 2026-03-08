@@ -1,0 +1,17 @@
+{
+  "id": "immich",
+  "name": "Immich Photos",
+  "version": "1.0.0",
+  "description": "Search photos, browse albums, and manage your Immich photo library",
+  "type": "bundle",
+  "author": "Crow",
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "envKeys": ["IMMICH_URL", "IMMICH_API_KEY"]
+  },
+  "skills": ["skills/immich.md"],
+  "requires": {
+    "env": ["IMMICH_URL", "IMMICH_API_KEY"]
+  }
+}

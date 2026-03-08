@@ -18,7 +18,8 @@
     "identity:export": "node -e \"import('./servers/sharing/identity.js').then(m => m.exportIdentity())\"",
     "identity:import": "node -e \"import('./servers/sharing/identity.js').then(m => m.importIdentity())\"",
     "create-integration": "node scripts/create-integration.js",
-    "mcp-config": "node scripts/generate-mcp-config.js"
+    "mcp-config": "node scripts/generate-mcp-config.js",
+    "migrate-data": "node scripts/migrate-data-dir.js"
   },
   "dependencies": {
     "@libsql/client": "^0.14.0",

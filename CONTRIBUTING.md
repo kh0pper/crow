@@ -32,7 +32,7 @@ Build custom panels for the Crow dashboard. See the panel template in `templates
 **Guide:** [Creating Panels](https://kh0pper.github.io/crow/developers/creating-panels)
 
 ### 6. Self-Hosted Bundles
-Create Docker Compose configurations with curated integration sets for specific use cases.
+Create Docker Compose configurations with curated integration sets or self-hosting add-ons (Ollama, Nextcloud, Immich, etc.). See `bundles/` for examples.
 
 **Guide:** [Bundles](https://kh0pper.github.io/crow/developers/bundles)
 
