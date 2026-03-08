@@ -18,6 +18,9 @@ hero:
     - theme: alt
       text: P2P Sharing Guide
       link: /guide/sharing
+    - theme: alt
+      text: View on GitHub
+      link: https://github.com/kh0pper/crow
 
 features:
   - icon:
