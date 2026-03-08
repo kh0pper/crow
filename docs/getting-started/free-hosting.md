@@ -7,7 +7,7 @@ Crow can be deployed for free on several platforms. Here's how they compare:
 | Provider | Compute | RAM | Storage | Bandwidth | Sleep? | Best For |
 |---|---|---|---|---|---|---|
 | **Render** (free tier) | Shared CPU | 512 MB | Ephemeral | 750 hrs/mo | Yes (15 min) | Trying Crow out |
-| **Oracle Cloud** (Always Free) | 4 ARM OCPUs | 24 GB | 240 GB | 10 TB/mo | No | Permanent self-hosting |
+| **Oracle Cloud** (Always Free) | 1 OCPU (x86) | 1 GB | 47 GB | 10 TB/mo | No | Permanent self-hosting |
 | **Raspberry Pi** | 4 cores | 4-8 GB | SD/SSD | LAN only* | No | Home lab / Crow OS |
 
 \* Raspberry Pi can be exposed to the internet via Tailscale or Cloudflare Tunnel.
@@ -32,7 +32,11 @@ This is more than enough for personal use. A typical Crow installation uses <100
 
 ## Oracle Cloud Always Free (Recommended for Permanent Hosting)
 
-Oracle's Always Free tier includes an ARM A1 instance with 4 OCPUs and 24 GB RAM — significantly more powerful than most free tiers. It never sleeps and never expires.
+Oracle's Always Free tier includes a VM.Standard.E2.1.Micro instance — 1 OCPU and 1 GB RAM. It's modest but sufficient for a personal Crow gateway. It never sleeps and never expires.
+
+::: tip
+Oracle also advertises an ARM A1 instance (4 OCPUs, 24 GB RAM) on the Always Free tier, but capacity is extremely limited — most regions are permanently full. The x86 Micro instance described here is reliably available.
+:::
 
 ### Step 1: Create an Oracle Cloud Account
 
@@ -40,18 +44,14 @@ Oracle's Always Free tier includes an ARM A1 instance with 4 OCPUs and 24 GB RAM
 2. You'll need a credit card for verification, but the Always Free tier is genuinely free — you won't be charged
 3. Select your home region (closest to you for lowest latency)
 
-### Step 2: Provision an ARM A1 Instance
+### Step 2: Provision a Micro Instance
 
 1. Go to **Compute > Instances > Create Instance**
 2. **Image:** Oracle Linux 9 or Ubuntu 22.04 (Minimal)
-3. **Shape:** VM.Standard.A1.Flex — set to **4 OCPUs, 24 GB RAM** (maximum Always Free allocation)
+3. **Shape:** VM.Standard.E2.1.Micro (1 OCPU, 1 GB RAM) — this is the Always Free x86 shape
 4. **Networking:** Create a VCN with a public subnet
 5. **SSH key:** Upload your public key or let Oracle generate one
 6. Click **Create**
-
-::: tip
-ARM A1 instances can be hard to provision due to capacity limits. If you get a "capacity" error, try a different availability domain or try again later. Some users set up a script to retry automatically.
-:::
 
 ### Step 3: Connect and Install Prerequisites
 
@@ -85,7 +85,7 @@ npm run setup
 nano .env
 ```
 
-No Turso needed — Oracle's 240 GB of local storage means you can use local SQLite directly.
+No Turso needed — local SQLite works directly on Oracle's boot volume.
 
 ### Step 5: Set Up HTTPS
 
@@ -117,7 +117,7 @@ Caddy automatically provisions Let's Encrypt certificates. Point your domain's D
 
 ```bash
 # Install cloudflared
-curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64.deb
+curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
 sudo dpkg -i cloudflared.deb
 
 # Authenticate and create tunnel
@@ -204,6 +204,6 @@ For a dedicated home appliance, see the [Raspberry Pi Setup Guide](./raspberry-p
 ## Which Should I Choose?
 
 - **Just trying Crow out?** → Render + Turso. Deploy in 5 minutes, sleep behavior is fine for testing.
-- **Want a permanent free server?** → Oracle Cloud. 24 GB RAM, never sleeps, never expires.
+- **Want a permanent free server?** → Oracle Cloud. 1 GB RAM micro instance, never sleeps, never expires.
 - **Want a home appliance?** → Raspberry Pi with [Crow OS](./raspberry-pi). Physical device on your network.
 - **Already have a server?** → Follow the Oracle Cloud steps on any Linux VPS (skip steps 1-2).
