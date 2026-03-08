@@ -13,6 +13,9 @@ hero:
       text: Get Started
       link: /getting-started/
     - theme: alt
+      text: Managed Hosting
+      link: https://maestro.press/hosting/
+    - theme: alt
       text: P2P Sharing Guide
       link: /guide/sharing
 
@@ -47,8 +50,8 @@ features:
     details: A premium visual dashboard for managing messages, blog posts, files, and settings. Built-in blogging platform with Markdown, RSS feeds, and themes — publish by telling your AI.
   - icon:
       src: /icon-deploy.svg
-    title: Self-Host or Cloud
-    details: Deploy to Render in minutes, run on Oracle Cloud for free, or turn a Raspberry Pi into a dedicated Crow appliance with one command. Your data stays yours.
+    title: Managed, Cloud, or Self-Host
+    details: Managed hosting from $5/mo, self-host on Render for free, or run on a Raspberry Pi. Your data stays yours.
   - icon:
       src: /icon-mcp.svg
     title: Open Standard
