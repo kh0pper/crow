@@ -1,0 +1,147 @@
+---
+title: Full Setup
+---
+
+# Full Setup
+
+Run the complete Crow platform — gateway, MinIO storage, blog, and dashboard — with a single Docker Compose command.
+
+## What is this?
+
+The full setup profile starts all Crow services together: the MCP gateway, MinIO for file storage, and the dashboard. This is the recommended way to run Crow if you want every feature available.
+
+## Why would I want this?
+
+- **Everything at once** — One command to start the full platform
+- **File storage included** — MinIO runs alongside the gateway, no separate setup needed
+- **Blog ready** — Start publishing immediately after setup
+- **Dashboard access** — Visual management from your browser
+
+## Prerequisites
+
+- Docker and Docker Compose installed
+- Git (to clone the repository)
+- A machine with at least 1 GB of RAM
+
+## Step 1: Clone and Configure
+
+```bash
+git clone https://github.com/kh0pper/crow.git
+cd crow
+cp .env.example .env
+```
+
+## Step 2: Edit Environment Variables
+
+Open `.env` and set the required values:
+
+```bash
+# MinIO (file storage)
+MINIO_ENDPOINT=minio
+MINIO_PORT=9000
+MINIO_ACCESS_KEY=crowadmin
+MINIO_SECRET_KEY=change-this-to-a-secure-password
+MINIO_BUCKET=crow-storage
+MINIO_USE_SSL=false
+
+# Blog
+CROW_BLOG_TITLE=My Blog
+CROW_BLOG_DESCRIPTION=A personal blog
+CROW_BLOG_AUTHOR=Your Name
+
+# Storage quota (in MB)
+CROW_STORAGE_QUOTA_MB=1024
+```
+
+When running inside Docker Compose, set `MINIO_ENDPOINT=minio` (the Docker service name), not `localhost`.
+
+## Step 3: Start Everything
+
+```bash
+docker compose --profile full up --build
+```
+
+This starts:
+
+- **Gateway** on port `3001` — MCP server, blog, and API
+- **MinIO** on port `9000` (API) and `9001` (console) — file storage
+- **Dashboard** at `/dashboard` on the gateway
+
+On first run, Docker downloads images and builds the gateway. Subsequent starts are faster.
+
+## Step 4: Initialize the Database
+
+In a separate terminal:
+
+```bash
+docker compose exec gateway npm run init-db
+```
+
+This creates the SQLite database with all required tables.
+
+## Step 5: Access Your Services
+
+| Service | URL |
+|---|---|
+| Gateway health check | `http://localhost:3001/health` |
+| Dashboard | `http://localhost:3001/dashboard` |
+| Blog | `http://localhost:3001/blog` |
+| MinIO Console | `http://localhost:9001` |
+
+The MinIO console lets you browse stored files directly. Log in with your `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY`.
+
+## Step 6: Generate MCP Config
+
+To use the storage server with Claude or other AI platforms:
+
+```bash
+npm run mcp-config
+```
+
+This regenerates `.mcp.json` with the storage server included (only if MinIO env vars are set).
+
+## Running in the Background
+
+To keep services running after you close the terminal:
+
+```bash
+docker compose --profile full up --build -d
+```
+
+View logs:
+
+```bash
+docker compose logs -f gateway
+docker compose logs -f minio
+```
+
+Stop everything:
+
+```bash
+docker compose --profile full down
+```
+
+## Persisted Data
+
+Data is stored in Docker volumes:
+
+- **crow-data** — SQLite database, identity files
+- **minio-data** — All uploaded files
+
+These persist across container restarts. To fully reset:
+
+```bash
+docker compose --profile full down -v
+```
+
+This deletes all data. Use with caution.
+
+## Adding Tailscale
+
+For secure remote access, install Tailscale on the host machine (not inside Docker). See the [Tailscale Setup guide](/getting-started/tailscale-setup).
+
+## Next Steps
+
+- [Storage guide](/guide/storage) — Learn how to upload and manage files
+- [Blog guide](/guide/blog) — Start writing and publishing posts
+- [Dashboard guide](/guide/dashboard) — Explore the visual control panel

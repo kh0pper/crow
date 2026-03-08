@@ -27,6 +27,8 @@ export default defineConfig({
           { text: 'Cloud Deploy (Render)', link: '/getting-started/cloud-deploy' },
           { text: 'Desktop Setup', link: '/getting-started/desktop-setup' },
           { text: 'Docker', link: '/getting-started/docker' },
+          { text: 'Full Setup (MinIO + Gateway)', link: '/getting-started/full-setup' },
+          { text: 'Tailscale Remote Access', link: '/getting-started/tailscale-setup' },
         ],
       },
       {
@@ -58,6 +60,9 @@ export default defineConfig({
           { text: 'Memory Server', link: '/architecture/memory-server' },
           { text: 'Research Server', link: '/architecture/research-server' },
           { text: 'Sharing Server', link: '/architecture/sharing-server' },
+          { text: 'Storage Server', link: '/architecture/storage-server' },
+          { text: 'Blog Server', link: '/architecture/blog-server' },
+          { text: 'Dashboard', link: '/architecture/dashboard' },
           { text: 'Gateway', link: '/architecture/gateway' },
         ],
       },
@@ -65,6 +70,9 @@ export default defineConfig({
         text: 'Guides',
         items: [
           { text: 'Cross-Platform', link: '/guide/cross-platform' },
+          { text: 'Storage', link: '/guide/storage' },
+          { text: 'Blog', link: '/guide/blog' },
+          { text: 'Dashboard', link: '/guide/dashboard' },
           { text: 'Sharing', link: '/guide/sharing' },
           { text: 'Social & Messaging', link: '/guide/social' },
         ],
@@ -73,7 +81,12 @@ export default defineConfig({
         text: 'Developers',
         items: [
           { text: 'Developer Program', link: '/developers/' },
+          { text: 'Creating Add-ons', link: '/developers/creating-addons' },
+          { text: 'Add-on Registry', link: '/developers/addon-registry' },
+          { text: 'Creating Panels', link: '/developers/creating-panels' },
+          { text: 'Creating Servers', link: '/developers/creating-servers' },
           { text: 'Building Integrations', link: '/developers/integrations' },
+          { text: 'Storage API', link: '/developers/storage-api' },
           { text: 'Writing Skills', link: '/developers/skills' },
           { text: 'Core Tools', link: '/developers/core-tools' },
           { text: 'Self-Hosted Bundles', link: '/developers/bundles' },
@@ -84,6 +97,12 @@ export default defineConfig({
         text: 'Skills',
         items: [
           { text: 'Overview', link: '/skills/' },
+        ],
+      },
+      {
+        text: 'Showcase',
+        items: [
+          { text: 'Showcase', link: '/showcase' },
         ],
       },
       {

@@ -11,6 +11,8 @@ npm run wizard           # Open browser-based setup wizard for API keys
 npm run memory-server    # Start crow-memory MCP server (stdio)
 npm run research-server  # Start crow-research MCP server (stdio)
 npm run sharing-server   # Start crow-sharing MCP server (stdio)
+npm run storage-server   # Start crow-storage MCP server (stdio, requires MinIO)
+npm run blog-server      # Start crow-blog MCP server (stdio)
 npm run gateway          # Start HTTP gateway (Express, port 3001)
 npm run mcp-config       # Generate .mcp.json from .env (only configured servers)
 npm run desktop-config   # Generate Claude Desktop config JSON
@@ -24,6 +26,8 @@ npm run identity:import  # Import identity on a new device
 ```bash
 docker compose --profile cloud up --build   # Cloud deployment
 docker compose --profile local up --build   # Local + Cloudflare Tunnel
+docker compose --profile storage up --build # MinIO storage only
+docker compose --profile full up --build    # Everything (gateway + MinIO)
 ```
 
 ### Testing
@@ -33,27 +37,33 @@ No test framework is configured. To verify servers work:
 node servers/memory/index.js    # Should start without errors (ctrl-C to stop)
 node servers/research/index.js  # Same
 node servers/sharing/index.js   # Same (P2P sharing server)
+node servers/storage/index.js   # Same (requires MinIO for tools to work, but starts without)
+node servers/blog/index.js      # Same (blog server)
 node servers/gateway/index.js --no-auth  # HTTP gateway without OAuth (blocked in production), check http://localhost:3001/health
 ```
 
 ## Architecture
 
-This is an MCP (Model Context Protocol) platform — not a traditional web app. There is no frontend. The "UI" is Claude itself, guided by CLAUDE.md and skill files.
+This is an MCP (Model Context Protocol) platform. The AI is the primary interface, guided by CLAUDE.md and skill files. The dashboard provides a secondary visual UI.
 
-### Three layers
+### Core layers
 
-1. **Custom MCP Servers** (`servers/`) — Three Node.js servers exposing tools over MCP's stdio transport. All share a single SQLite database (local file or Turso cloud).
+1. **Custom MCP Servers** (`servers/`) — Five Node.js servers exposing tools over MCP's stdio transport. All share a single SQLite database (local file or Turso cloud).
    - `servers/memory/` — Persistent memory: store, search (FTS5), recall, list, update, delete, stats
    - `servers/research/` — Research pipeline: projects, sources (with auto-APA citation), notes, bibliography, verification
    - `servers/sharing/` — P2P sharing: Hyperswarm discovery, Hypercore data sync, Nostr messaging, peer relay, identity management
+   - `servers/storage/` — S3-compatible file storage: upload, list, presigned URLs, delete, quota management (requires MinIO)
+   - `servers/blog/` — Blogging platform: create, edit, publish, themes, RSS/Atom, export, share posts
 
-2. **HTTP Gateway** (`servers/gateway/`) — Express server that wraps all three MCP servers with Streamable HTTP + SSE transports + OAuth 2.1. Includes a proxy layer for external MCP servers, setup page, integrations registry, and peer relay endpoints (`/relay/store`, `/relay/fetch`). Used for mobile/remote access via Claude Connectors.
+2. **HTTP Gateway** (`servers/gateway/`) — Express server that wraps all MCP servers with Streamable HTTP + SSE transports + OAuth 2.1. Includes proxy layer for external MCP servers, public blog routes, dashboard UI, peer relay, and setup page. Modularized into Express routers (`routes/mcp.js`, `routes/blog-public.js`, `routes/storage-http.js`, `dashboard/`).
 
-3. **Skills** (`skills/`) — 24 markdown files that serve as behavioral prompts loaded by Claude. Not code — they define workflows, trigger patterns, and integration logic.
+3. **Dashboard** (`servers/gateway/dashboard/`) — Server-side rendered HTML dashboard with Dark Editorial design. Password auth, session cookies, panel registry. Built-in panels: Messages, Blog, Files, Extensions, Settings. Third-party panels via `~/.crow/panels/`.
+
+4. **Skills** (`skills/`) — 29 markdown files that serve as behavioral prompts loaded by Claude. Not code — they define workflows, trigger patterns, and integration logic.
 
 ### Server factory pattern
 
-Each custom server has a **factory function** (`createMemoryServer`, `createResearchServer`, `createSharingServer`) in `server.js` that returns a configured `McpServer` instance. The `index.js` files wire these to stdio transport. The gateway imports the same factories and wires them to HTTP transport. This means all tool logic lives in `server.js` — the transport layer is separate.
+Each custom server has a **factory function** in `server.js` that returns a configured `McpServer` instance. The `index.js` files wire these to stdio transport. The gateway imports the same factories and wires them to HTTP transport via `routes/mcp.js`. This means all tool logic lives in `server.js` — the transport layer is separate.
 
 ```
 servers/memory/server.js       → createMemoryServer(dbPath?)  → McpServer
@@ -68,7 +78,19 @@ servers/sharing/peer-manager.js → Hyperswarm discovery, connection management
 servers/sharing/sync.js        → Hypercore feed management, replication
 servers/sharing/nostr.js       → Nostr events, NIP-44 encryption, relay comms
 servers/sharing/relay.js       → Peer relay opt-in, store-and-forward
-servers/gateway/index.js       → Express + Streamable HTTP & SSE transports (all three servers)
+servers/storage/server.js      → createStorageServer(dbPath?) → McpServer
+servers/storage/index.js       → stdio transport
+servers/storage/s3-client.js   → MinIO/S3 connection, bucket init, presigned URLs
+servers/blog/server.js         → createBlogServer(dbPath?) → McpServer
+servers/blog/index.js          → stdio transport
+servers/blog/renderer.js       → Markdown→HTML (marked + sanitize-html)
+servers/blog/rss.js            → RSS 2.0 + Atom feed generation
+servers/gateway/index.js       → Express + MCP transports (all servers)
+servers/gateway/session-manager.js → Consolidated session storage
+servers/gateway/routes/mcp.js  → Streamable HTTP + SSE transport mounting
+servers/gateway/routes/blog-public.js → Public blog routes (/blog/*)
+servers/gateway/routes/storage-http.js → File upload/download routes
+servers/gateway/dashboard/     → Dashboard UI (auth, layout, panels)
 servers/gateway/auth.js        → OAuth 2.1 provider (CrowOAuthProvider, SQLite-backed)
 servers/gateway/proxy.js       → Proxy layer for external MCP servers
 servers/gateway/setup-page.js  → Browser-based setup/configuration page
@@ -84,11 +106,15 @@ Uses `@libsql/client` which supports both local SQLite files (`data/crow.db`, gi
 - **sources_fts** — FTS5 index over sources
 - **oauth_clients** / **oauth_tokens** — Gateway auth persistence
 - **contacts** — Peer identities, public keys (Ed25519 + secp256k1), relay status, last seen
-- **shared_items** — Tracking of sent/received shares with permissions and delivery status
+- **shared_items** — Tracking of sent/received shares with permissions and delivery status (share_type is NOT CHECK-constrained — validated in app code for extensibility)
 - **messages** — Local cache of Nostr messages with read status and threading
 - **relay_config** — Configured Nostr relays and peer relays
+- **storage_files** — S3 object metadata (key, name, MIME, size, bucket, reference to other items)
+- **blog_posts** — Blog content with slug, status, visibility, tags, cover image
+- **blog_posts_fts** — FTS5 index over blog posts (title, content, excerpt, tags) with triggers
+- **dashboard_settings** — Key-value store for dashboard config (blog settings, theme, password hash)
 
-All FTS sync is handled by SQLite triggers defined in `init-db.js`. If you change the memories or sources schema, you must also update the corresponding FTS virtual table and triggers.
+All FTS sync is handled by SQLite triggers defined in `init-db.js`. If you change the memories, sources, or blog_posts schema, you must also update the corresponding FTS virtual table and triggers.
 
 ### MCP configuration
 
@@ -103,6 +129,10 @@ All FTS sync is handled by SQLite triggers defined in `init-db.js`. If you chang
 - `hypercore` — Append-only replicated feeds for data sync
 - `nostr-tools` — Nostr protocol: events, NIP-44 encryption, relay communication
 - `@noble/hashes`, `@noble/ed25519`, `@noble/secp256k1` — Cryptographic primitives for identity
+- `minio` — S3-compatible object storage client
+- `multer` — Multipart file upload handling
+- `marked` — Markdown to HTML rendering
+- `sanitize-html` — HTML sanitization (XSS prevention, no jsdom dependency)
 
 Node.js >= 18 required. ESM modules (`"type": "module"` in package.json).
 
@@ -127,6 +157,18 @@ Node.js >= 18 required. ESM modules (`"type": "module"` in package.json).
 ### Adding a new skill
 
 Skills are markdown files in `skills/`. They are loaded by Claude on demand — no build step. Add a trigger row in `superpowers.md` so it auto-activates.
+
+### Adding a dashboard panel
+
+1. Create a JS module exporting `{ id, name, icon, route, navOrder, handler }` (see `templates/dashboard-panel.js`)
+2. For built-in panels: add to `servers/gateway/dashboard/panels/` and register in `servers/gateway/dashboard/index.js`
+3. For third-party panels: place in `~/.crow/panels/` and add the panel ID to `~/.crow/panels.json`
+4. Use shared components from `servers/gateway/dashboard/shared/components.js`
+5. Handler receives `(req, res, { db, layout })` — return `layout({ title, content })` for consistent styling
+
+### Add-on system
+
+Crow supports installable add-ons (panels, MCP servers, skills, bundles). The registry lives in `registry/add-ons.json`. Users install add-ons by asking their AI ("install the todo add-on") or via the Extensions dashboard panel. Installed add-ons are tracked in `~/.crow/installed.json`.
 
 ### Developer Program
 
@@ -175,6 +217,11 @@ Consult `skills/superpowers.md` first — it routes user intent to the right ski
 - `social.md` — Messaging and social interactions (Nostr)
 - `peer-network.md` — Peer management, relay config, identity, blocking
 - `onboarding.md` — First-run sharing setup and device migration
+- `storage.md` — File storage management workflow
+- `blog.md` — Blog creation, publishing, theming, export
+- `network-setup.md` — Tailscale remote access guidance
+- `add-ons.md` — Add-on browsing, installation, removal
+- `onboarding-tour.md` — First-run platform tour for new users
 
 ## Documentation Site
 
@@ -184,7 +231,9 @@ The `docs/` directory contains a VitePress documentation site. Key paths:
 - `docs/index.md` — Landing page
 - `docs/getting-started/` — Setup and deployment guides
 - `docs/platforms/` — Per-platform integration guides (Claude, ChatGPT, Gemini, Cursor, OpenClaw, etc.)
-- `docs/guide/` — Conceptual guides (cross-platform, sharing, social)
-- `docs/architecture/sharing-server.md` — P2P sharing server architecture (5-layer design)
+- `docs/guide/` — Conceptual guides (cross-platform, storage, blog, dashboard, sharing, social)
+- `docs/architecture/` — Server architecture docs (memory, research, sharing, storage, blog, dashboard, gateway)
+- `docs/developers/` — Developer program, creating add-ons/panels/servers, storage API, add-on registry
+- `docs/showcase.md` — Community showcase
 
 To run locally: `cd docs && npm run dev`

@@ -1,0 +1,157 @@
+---
+title: Storage Server
+---
+
+# Storage Server
+
+The storage server (`servers/storage/`) provides S3-compatible file storage through MCP tools and HTTP endpoints. It connects to MinIO (or any S3-compatible service) for object storage and tracks file metadata in SQLite.
+
+## Architecture
+
+```
+┌──────────────────────────────────────┐
+│           MCP Tools Layer            │
+│  crow_upload_file  crow_list_files   │
+│  crow_get_file_url crow_delete_file  │
+│  crow_storage_stats                  │
+├──────────────────────────────────────┤
+│          Gateway HTTP Layer          │
+│  POST /storage/upload (multipart)    │
+│  GET  /storage/file/:key (presigned) │
+├──────────────────────────────────────┤
+│           s3-client.js               │
+│  MinIO SDK wrapper, presigned URLs   │
+├──────────────────────────────────────┤
+│  SQLite (storage_files)  │  MinIO    │
+│  Metadata + index        │  Blobs    │
+└──────────────────────────────────────┘
+```
+
+## Factory Pattern
+
+Like all Crow servers, the storage server uses a factory function:
+
+```js
+// servers/storage/server.js
+export function createStorageServer(dbPath) {
+  const server = new McpServer({ name: "crow-storage", version: "1.0.0" });
+  // ... tool registrations
+  return server;
+}
+```
+
+- `server.js` — Factory function with all tool definitions
+- `index.js` — Wires the factory to stdio transport
+- `s3-client.js` — MinIO/S3 client wrapper
+
+The gateway imports `createStorageServer()` and wires it to HTTP transport alongside the other servers.
+
+## s3-client.js
+
+Wraps the MinIO SDK with Crow-specific defaults:
+
+```js
+import { Client } from 'minio';
+
+export function createS3Client(config) {
+  // Returns configured MinIO client
+}
+
+export async function uploadObject(client, bucket, key, buffer, metadata) { }
+export async function getPresignedUrl(client, bucket, key, expiry) { }
+export async function deleteObject(client, bucket, key) { }
+export async function listObjects(client, bucket, prefix) { }
+export async function getBucketSize(client, bucket) { }
+```
+
+Presigned URLs default to 1-hour expiry. The expiry is configurable per request.
+
+## Database Table
+
+```sql
+CREATE TABLE storage_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key TEXT UNIQUE NOT NULL,          -- S3 object key (e.g., "images/photo.jpg")
+  original_name TEXT NOT NULL,       -- Original filename at upload
+  mime_type TEXT NOT NULL,           -- Validated MIME type
+  size_bytes INTEGER NOT NULL,       -- File size
+  bucket TEXT NOT NULL,              -- S3 bucket name
+  uploaded_at TEXT DEFAULT (datetime('now')),
+  metadata TEXT                      -- JSON blob for extra fields
+);
+```
+
+The `key` column is the canonical identifier used across MCP tools and HTTP endpoints.
+
+## MCP Tools
+
+### crow_upload_file
+
+Accepts a file path or base64 content, validates the MIME type, checks quota, uploads to MinIO, and inserts a metadata row.
+
+**Parameters:**
+- `file_path` (string, max 500) — Absolute path to file, or
+- `content` (string, max 50000) — Base64-encoded file content
+- `filename` (string, max 255) — Target filename
+- `folder` (string, max 255, optional) — Subfolder in the bucket
+
+### crow_list_files
+
+Lists files with optional filtering by folder or MIME type prefix.
+
+**Parameters:**
+- `folder` (string, max 255, optional)
+- `mime_type` (string, max 100, optional) — Filter prefix (e.g., `image/`)
+- `limit` (number, default 50)
+
+### crow_get_file_url
+
+Generates a presigned URL for temporary access to a file.
+
+**Parameters:**
+- `key` (string, max 500) — The file's S3 object key
+- `expiry_seconds` (number, default 3600) — URL validity period
+
+### crow_delete_file
+
+Removes a file from both MinIO and the database.
+
+**Parameters:**
+- `key` (string, max 500)
+
+### crow_storage_stats
+
+Returns storage usage summary: total files, total size, quota remaining, breakdown by MIME type.
+
+## Gateway HTTP Routes
+
+### POST /storage/upload
+
+Multipart file upload. Accepts `file` field and optional `folder` field. Returns the file key and metadata. Protected by OAuth when enabled.
+
+### GET /storage/file/:key
+
+Redirects to a presigned MinIO URL for the requested file. The key is URL-encoded in the path. Returns 404 if the file doesn't exist in the database.
+
+## Quota Enforcement
+
+Before every upload, the server queries total storage usage:
+
+```sql
+SELECT COALESCE(SUM(size_bytes), 0) as total FROM storage_files;
+```
+
+If `total + new_file_size > CROW_STORAGE_QUOTA_MB * 1024 * 1024`, the upload is rejected with a clear error message showing current usage and quota.
+
+## MIME Validation
+
+Uploads are validated against an allowlist of MIME types. The server checks both the file extension and the detected MIME type (using magic bytes when available). Mismatches are rejected.
+
+Allowed categories:
+- `image/*` — JPEG, PNG, GIF, WebP, SVG
+- `application/pdf`
+- `text/*` — Plain text, Markdown, HTML, CSV
+- `application/json`, `application/xml`
+- `audio/*` — MP3, WAV, OGG
+
+Executables, scripts, and archive formats are rejected by default.

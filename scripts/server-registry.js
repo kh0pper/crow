@@ -74,6 +74,37 @@ export const CORE_SERVERS = [
     envKeys: [],
     mcpEnv: { CROW_DB_PATH: "./data/crow.db" },
   },
+  {
+    name: "crow-blog",
+    command: "node",
+    args: ["servers/blog/index.js"],
+    description: "Blogging platform",
+    envKeys: [],
+    mcpEnv: { CROW_DB_PATH: "./data/crow.db" },
+  },
+];
+
+/**
+ * Conditional core servers — included only when their env vars are set.
+ * These are Crow's own servers that require external services.
+ */
+export const CONDITIONAL_SERVERS = [
+  {
+    name: "crow-storage",
+    command: "node",
+    args: ["servers/storage/index.js"],
+    description: "S3-compatible file storage (requires MinIO)",
+    envKeys: ["MINIO_ENDPOINT"],
+    mcpEnv: {
+      CROW_DB_PATH: "./data/crow.db",
+      MINIO_ENDPOINT: "${MINIO_ENDPOINT}",
+      MINIO_PORT: "${MINIO_PORT:-9000}",
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-crowadmin}",
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD}",
+      MINIO_USE_SSL: "${MINIO_USE_SSL:-false}",
+    },
+    category: "storage",
+  },
 ];
 
 /**
