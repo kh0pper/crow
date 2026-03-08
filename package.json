@@ -13,12 +13,13 @@
     "gateway": "node servers/gateway/index.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0",
     "@libsql/client": "^0.14.0",
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "cors": "^2.8.6",
     "express": "^4.21.0",
+    "express-rate-limit": "^8.3.0",
     "zod": "^3.24.0"
   },
-  "devDependencies": {},
   "engines": {
     "node": ">=18.0.0"
   }

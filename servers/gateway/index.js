@@ -68,6 +68,8 @@ import { mcpAuthMetadataRouter } from "@modelcontextprotocol/sdk/server/auth/rou
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import express from "express";
+import rateLimit from "express-rate-limit";
+import cors from "cors";
 import { createMemoryServer } from "../memory/server.js";
 import { createResearchServer } from "../research/server.js";
 import { generateCrowContext } from "../memory/crow-context.js";
@@ -102,7 +104,55 @@ const toolsSseSessions = new Map();
 
 // Create Express app
 const app = express();
-app.use(express.json());
+
+// --- Security Middleware ---
+
+// Security headers
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("X-XSS-Protection", "0");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  if (req.secure || req.headers["x-forwarded-proto"] === "https") {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  }
+  next();
+});
+
+// CORS
+const corsOrigins = process.env.CORS_ALLOWED_ORIGINS
+  ? process.env.CORS_ALLOWED_ORIGINS.split(",").map((o) => o.trim())
+  : false;
+app.use(cors({
+  origin: corsOrigins,
+  methods: ["GET", "POST", "DELETE"],
+  allowedHeaders: ["Content-Type", "Authorization", "mcp-session-id"],
+  credentials: true,
+}));
+
+// Rate limiting — general
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests, please try again later" },
+}));
+
+// Rate limiting — auth endpoints (stricter)
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many authentication attempts, please try again later" },
+});
+app.use("/authorize", authLimiter);
+app.use("/token", authLimiter);
+app.use("/register", authLimiter);
+
+// Body parsing with size limit
+app.use(express.json({ limit: "1mb" }));
 
 // --- Health Check ---
 app.get("/health", (req, res) => {

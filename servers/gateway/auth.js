@@ -6,7 +6,7 @@
  * Based on the MCP SDK's DemoInMemoryOAuthProvider pattern but production-ready.
  */
 
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { createDbClient } from "../db.js";
 
 export class CrowOAuthClientsStore {
@@ -65,7 +65,7 @@ export class CrowOAuthProvider {
     return codeData.params.codeChallenge;
   }
 
-  async exchangeAuthorizationCode(client, authorizationCode, _codeVerifier) {
+  async exchangeAuthorizationCode(client, authorizationCode, codeVerifier) {
     const codeData = this.codes.get(authorizationCode);
     if (!codeData) throw new Error("Invalid authorization code");
     if (codeData.expiresAt < Date.now()) {
@@ -74,6 +74,21 @@ export class CrowOAuthProvider {
     }
     if (codeData.client.client_id !== client.client_id) {
       throw new Error("Authorization code was not issued to this client");
+    }
+
+    // PKCE validation
+    if (codeData.params.codeChallenge) {
+      if (!codeVerifier) {
+        throw new Error("Code verifier required");
+      }
+      if (codeData.params.codeChallengeMethod === "S256") {
+        const hash = createHash("sha256").update(codeVerifier).digest("base64url");
+        if (hash !== codeData.params.codeChallenge) {
+          throw new Error("Invalid code verifier");
+        }
+      } else if (codeVerifier !== codeData.params.codeChallenge) {
+        throw new Error("Invalid code verifier");
+      }
     }
 
     this.codes.delete(authorizationCode);
@@ -126,6 +141,16 @@ export class CrowOAuthProvider {
     if (new Date(row.expires_at) < new Date()) {
       await this.db.execute({ sql: "DELETE FROM oauth_tokens WHERE token = ?", args: [refreshToken] });
       throw new Error("Refresh token expired");
+    }
+
+    // Absolute session expiration — reject if token was created more than 30 days ago
+    if (row.created_at) {
+      const createdAt = new Date(row.created_at);
+      const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+      if (Date.now() - createdAt.getTime() > thirtyDaysMs) {
+        await this.db.execute({ sql: "DELETE FROM oauth_tokens WHERE token = ?", args: [refreshToken] });
+        throw new Error("Session expired — please re-authenticate");
+      }
     }
 
     // Issue new access token
