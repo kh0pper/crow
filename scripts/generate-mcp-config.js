@@ -14,7 +14,7 @@
 
 import { writeFileSync } from "fs";
 import { resolve } from "path";
-import { CORE_SERVERS, CONDITIONAL_SERVERS, EXTERNAL_SERVERS, ROOT, loadEnv } from "./server-registry.js";
+import { CORE_SERVERS, CONDITIONAL_SERVERS, EXTERNAL_SERVERS, ROOT, loadEnv, resolveEnvValue } from "./server-registry.js";
 
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes("--dry-run");
@@ -30,12 +30,25 @@ function generate() {
   const included = [];
   const skipped = [];
 
+  // Resolve ${VAR} templates in env objects and args arrays
+  function resolveEnvObj(envObj) {
+    const resolved = {};
+    for (const [k, v] of Object.entries(envObj)) {
+      resolved[k] = resolveEnvValue(v, env);
+    }
+    return resolved;
+  }
+  function resolveArgs(args) {
+    return args.map((a) => resolveEnvValue(a, env));
+  }
+
   // Core servers — always included
   for (const server of CORE_SERVERS) {
+    const resolvedEnv = server.mcpEnv ? resolveEnvObj(server.mcpEnv) : {};
     config.mcpServers[server.name] = {
       command: server.command,
-      args: server.args,
-      ...(server.mcpEnv && Object.keys(server.mcpEnv).length > 0 ? { env: server.mcpEnv } : {}),
+      args: resolveArgs(server.args),
+      ...(Object.keys(resolvedEnv).length > 0 ? { env: resolvedEnv } : {}),
     };
     included.push(server.name);
   }
@@ -54,8 +67,8 @@ function generate() {
 
     config.mcpServers[server.name] = {
       command: server.command,
-      args: serverArgs,
-      ...(Object.keys(serverEnv).length > 0 ? { env: serverEnv } : {}),
+      args: resolveArgs(serverArgs),
+      ...(Object.keys(serverEnv).length > 0 ? { env: resolveEnvObj(serverEnv) } : {}),
     };
     included.push(server.name);
   }
