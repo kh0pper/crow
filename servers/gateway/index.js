@@ -61,6 +61,15 @@ if (noAuth) {
 // Initialize OAuth tables
 await initOAuthTables();
 
+// Clean up old audit log entries (90-day retention)
+try {
+  const _cleanupDb = createDbClient();
+  await _cleanupDb.execute("DELETE FROM audit_log WHERE created_at < datetime('now', '-90 days')");
+  _cleanupDb.close();
+} catch (e) {
+  // audit_log table may not exist yet (first run before init-db)
+}
+
 // Consolidated session manager
 const sessionManager = new SessionManager();
 

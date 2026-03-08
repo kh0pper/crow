@@ -55,3 +55,6 @@ Custom domains are on the roadmap. For now, you get `username.crow.maestro.press
 
 **Is my data private?**
 Yes. Each managed instance has its own isolated database. Maestro Press does not access your data. See the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md) for details.
+
+**What are the terms of service?**
+See the [Managed Hosting Terms of Service](/legal/managed-hosting-terms).

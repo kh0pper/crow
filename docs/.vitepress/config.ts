@@ -111,6 +111,12 @@ export default defineConfig({
         ],
       },
       {
+        text: 'Legal',
+        items: [
+          { text: 'Managed Hosting Terms', link: '/legal/managed-hosting-terms' },
+        ],
+      },
+      {
         text: 'Help',
         items: [
           { text: 'Troubleshooting', link: '/troubleshooting' },

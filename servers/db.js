@@ -84,6 +84,21 @@ export async function verifyDb(db) {
   }
 }
 
+/**
+ * Log an audit event to the audit_log table.
+ * Errors are logged to stderr rather than thrown.
+ */
+export async function auditLog(db, eventType, { actor, ip, details } = {}) {
+  try {
+    await db.execute({
+      sql: "INSERT INTO audit_log (event_type, actor, ip_address, details) VALUES (?, ?, ?, ?)",
+      args: [eventType, actor || null, ip || null, details ? JSON.stringify(details) : null],
+    });
+  } catch (e) {
+    console.error('audit log failed:', e.message);
+  }
+}
+
 export function createDbClient(dbPath) {
   const tursoUrl = process.env.TURSO_DATABASE_URL;
   const tursoToken = process.env.TURSO_AUTH_TOKEN;

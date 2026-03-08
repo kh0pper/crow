@@ -8,12 +8,15 @@
  * - Account lockout: 5 failed attempts → 15 min lock
  */
 
-import { scrypt, randomBytes, timingSafeEqual } from "node:crypto";
-import { createDbClient } from "../../db.js";
+import { scrypt, randomBytes, timingSafeEqual, createHash } from "node:crypto";
+import { createDbClient, auditLog } from "../../db.js";
+
+function hashToken(t) { return createHash('sha256').update(t).digest('hex'); }
 
 const SESSION_COOKIE = "crow_session";
 const CSRF_COOKIE = "crow_csrf";
-const SESSION_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
+const isHosted = !!process.env.CROW_HOSTED;
+const SESSION_MAX_AGE = isHosted ? 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
 const LOCKOUT_THRESHOLD = 5;
 const LOCKOUT_DURATION = 15 * 60 * 1000; // 15 min
 
@@ -86,6 +89,7 @@ export async function setPassword(password) {
       sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('password_hash', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
       args: [hash, hash],
     });
+    await auditLog(db, 'password_changed', {});
   } finally {
     db.close();
   }
@@ -117,20 +121,23 @@ export async function attemptLogin(password, ip) {
       a.count++;
       if (a.count >= LOCKOUT_THRESHOLD) {
         a.lockedUntil = Date.now() + LOCKOUT_DURATION;
+        await auditLog(db, 'auth_lockout', { ip });
       }
       loginAttempts.set(ip, a);
+      await auditLog(db, 'auth_login_failure', { ip });
       return { error: "Invalid password." };
     }
 
     // Reset attempts on success
     loginAttempts.delete(ip);
+    await auditLog(db, 'auth_login_success', { ip });
 
     // Create session token
     const token = randomBytes(32).toString("hex");
     const expiresAt = new Date(Date.now() + SESSION_MAX_AGE).toISOString();
     await db.execute({
       sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard', ?)",
-      args: [token, expiresAt],
+      args: [hashToken(token), expiresAt],
     });
 
     return { token };
@@ -148,7 +155,7 @@ export async function verifySession(token) {
   try {
     const result = await db.execute({
       sql: "SELECT token FROM oauth_tokens WHERE token = ? AND client_id = 'dashboard' AND expires_at > datetime('now')",
-      args: [token],
+      args: [hashToken(token)],
     });
     return result.rows.length > 0;
   } finally {
@@ -163,7 +170,8 @@ export async function destroySession(token) {
   if (!token) return;
   const db = createDbClient();
   try {
-    await db.execute({ sql: "DELETE FROM oauth_tokens WHERE token = ?", args: [token] });
+    await db.execute({ sql: "DELETE FROM oauth_tokens WHERE token = ?", args: [hashToken(token)] });
+    await auditLog(db, 'session_destroyed', {});
   } finally {
     db.close();
   }
@@ -229,9 +237,11 @@ export function dashboardAuth(req, res, next) {
  */
 export function setSessionCookie(res, token) {
   const maxAge = SESSION_MAX_AGE / 1000;
+  const secure = process.env.CROW_HOSTED || process.env.NODE_ENV === 'production';
+  const secureSuffix = secure ? '; Secure' : '';
   res.setHeader("Set-Cookie", [
-    `${SESSION_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}`,
-    `${CSRF_COOKIE}=${randomBytes(16).toString("hex")}; SameSite=Strict; Path=/; Max-Age=${maxAge}`,
+    `${SESSION_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${secureSuffix}`,
+    `${CSRF_COOKIE}=${randomBytes(16).toString("hex")}; SameSite=Strict; Path=/; Max-Age=${maxAge}${secureSuffix}`,
   ]);
 }
 
