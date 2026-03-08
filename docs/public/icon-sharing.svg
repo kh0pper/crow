@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <!-- Crow with connected nodes — P2P sharing icon -->
+  <defs>
+    <linearGradient id="shareGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#7c3aed"/>
+      <stop offset="100%" style="stop-color:#a78bfa"/>
+    </linearGradient>
+  </defs>
+  <!-- Small crow silhouette -->
+  <path d="M8 30 Q4 24 6 18 Q8 12 14 10 Q20 8 24 12 Q26 16 24 22 Q22 28 16 32 Z" fill="url(#shareGrad)" opacity="0.85"/>
+  <!-- Beak -->
+  <path d="M10 16 L2 18 L4 20 L10 18 Z" fill="#6d28d9"/>
+  <!-- Eye -->
+  <circle cx="15" cy="15" r="2" fill="#0f0f17"/>
+  <circle cx="15.5" cy="14.5" r="0.6" fill="#fff"/>
+  <!-- Tail -->
+  <path d="M20 28 Q24 34 22 42" fill="none" stroke="#7c3aed" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M18 30 Q20 36 17 43" fill="none" stroke="#6d28d9" stroke-width="1.2" stroke-linecap="round"/>
+  <!-- P2P connection nodes -->
+  <circle cx="34" cy="12" r="3.5" fill="#6366f1" opacity="0.3"/>
+  <circle cx="34" cy="12" r="2" fill="#c4b5fd"/>
+  <circle cx="42" cy="28" r="3.5" fill="#6366f1" opacity="0.3"/>
+  <circle cx="42" cy="28" r="2" fill="#c4b5fd"/>
+  <circle cx="30" cy="36" r="3.5" fill="#6366f1" opacity="0.3"/>
+  <circle cx="30" cy="36" r="2" fill="#c4b5fd"/>
+  <!-- Connection lines between nodes -->
+  <line x1="34" y1="12" x2="42" y2="28" stroke="#c4b5fd" stroke-width="1" opacity="0.6"/>
+  <line x1="42" y1="28" x2="30" y2="36" stroke="#c4b5fd" stroke-width="1" opacity="0.6"/>
+  <line x1="30" y1="36" x2="34" y2="12" stroke="#c4b5fd" stroke-width="1" opacity="0.6"/>
+  <!-- Lock/shield on center node -->
+  <rect x="39.5" cy="26" y="26" width="5" height="4" rx="0.5" fill="#fbbf24" opacity="0.7"/>
+  <path d="M40.5 26 L40.5 24.5 Q42 22.5 43.5 24.5 L43.5 26" fill="none" stroke="#fbbf24" stroke-width="0.8" opacity="0.7"/>
+</svg>
