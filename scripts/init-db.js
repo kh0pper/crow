@@ -185,6 +185,73 @@ await initTable("OAuth tables", `
   CREATE INDEX IF NOT EXISTS idx_tokens_type ON oauth_tokens(token_type);
 `);
 
+// --- P2P Sharing Tables ---
+
+await initTable("contacts table", `
+  CREATE TABLE IF NOT EXISTS contacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    crow_id TEXT NOT NULL UNIQUE,
+    display_name TEXT,
+    ed25519_pubkey TEXT NOT NULL,
+    secp256k1_pubkey TEXT NOT NULL,
+    relay_url TEXT,
+    is_blocked INTEGER DEFAULT 0,
+    last_seen TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_contacts_crow_id ON contacts(crow_id);
+  CREATE INDEX IF NOT EXISTS idx_contacts_blocked ON contacts(is_blocked);
+`);
+
+await initTable("shared_items table", `
+  CREATE TABLE IF NOT EXISTS shared_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    contact_id INTEGER NOT NULL,
+    share_type TEXT NOT NULL CHECK(share_type IN ('memory', 'project', 'source', 'note')),
+    item_id INTEGER NOT NULL,
+    permissions TEXT DEFAULT 'read' CHECK(permissions IN ('read', 'read-write', 'one-time')),
+    direction TEXT NOT NULL CHECK(direction IN ('sent', 'received')),
+    delivery_status TEXT DEFAULT 'pending' CHECK(delivery_status IN ('pending', 'delivered', 'failed')),
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_shared_items_contact ON shared_items(contact_id);
+  CREATE INDEX IF NOT EXISTS idx_shared_items_type ON shared_items(share_type);
+  CREATE INDEX IF NOT EXISTS idx_shared_items_direction ON shared_items(direction);
+`);
+
+await initTable("messages table", `
+  CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    contact_id INTEGER NOT NULL,
+    nostr_event_id TEXT UNIQUE,
+    content TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK(direction IN ('sent', 'received')),
+    is_read INTEGER DEFAULT 0,
+    thread_id TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_messages_contact ON messages(contact_id);
+  CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
+  CREATE INDEX IF NOT EXISTS idx_messages_read ON messages(is_read);
+`);
+
+await initTable("relay_config table", `
+  CREATE TABLE IF NOT EXISTS relay_config (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    relay_url TEXT NOT NULL UNIQUE,
+    relay_type TEXT NOT NULL CHECK(relay_type IN ('nostr', 'peer')),
+    enabled INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_relay_config_type ON relay_config(relay_type);
+`);
+
 // --- Cross-Platform Behavioral Context (crow.md) ---
 
 await initTable("crow_context table", `

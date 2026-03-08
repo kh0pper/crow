@@ -39,6 +39,11 @@ This is the master routing skill. Consult this **before every task** to determin
 | "who are you", "crow.md", "customize behavior", "set up platform" | "quién eres", "crow.md", "personalizar", "configurar plataforma" | crow-context | crow-memory |
 | "plan", "outline", "how would you", "what's your approach" | "planear", "esquematizar", "cómo lo harías", "cuál es tu enfoque" | plan-review | (depends on task) |
 | "create a skill", "automate", "every time I..." | "crear una habilidad", "automatizar", "cada vez que..." | skill-writing | filesystem, crow-memory |
+| "share with", "send to", "invite", "add contact" | "compartir con", "enviar a", "invitar", "agregar contacto" | sharing, onboarding | crow-sharing |
+| "message", "chat", "DM", "send message to" | "mensaje", "chat", "DM", "enviar mensaje a" | social | crow-sharing |
+| "my Crow ID", "network status", "block", "contacts" | "mi Crow ID", "estado de red", "bloquear", "contactos" | peer-network | crow-sharing |
+| "inbox", "what did they share", "new shares" | "bandeja", "qué compartieron", "nuevos compartidos" | sharing, social | crow-sharing |
+| "set up sharing", "export identity", "new device" | "configurar sharing", "exportar identidad", "nuevo dispositivo" | onboarding, peer-network | crow-sharing |
 | "change language", "speak in..." | "cambiar idioma", "háblame en..." | i18n | crow-memory |
 | Session start / Inicio de sesión | — | session-context, i18n, skill-writing (deferred gap check) | crow-memory |
 | High friction detected / Fricción detectada | — | reflection → skill-writing (handoff) | crow-memory, filesystem |

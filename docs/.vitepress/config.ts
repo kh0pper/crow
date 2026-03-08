@@ -15,6 +15,7 @@ export default defineConfig({
       { text: 'Platforms', link: '/platforms/' },
       { text: 'Integrations', link: '/integrations/' },
       { text: 'Architecture', link: '/architecture/' },
+      { text: 'Developers', link: '/developers/' },
     ],
 
     sidebar: [
@@ -66,6 +67,17 @@ export default defineConfig({
           { text: 'Cross-Platform', link: '/guide/cross-platform' },
           { text: 'Sharing', link: '/guide/sharing' },
           { text: 'Social & Messaging', link: '/guide/social' },
+        ],
+      },
+      {
+        text: 'Developers',
+        items: [
+          { text: 'Developer Program', link: '/developers/' },
+          { text: 'Building Integrations', link: '/developers/integrations' },
+          { text: 'Writing Skills', link: '/developers/skills' },
+          { text: 'Core Tools', link: '/developers/core-tools' },
+          { text: 'Self-Hosted Bundles', link: '/developers/bundles' },
+          { text: 'Community Directory', link: '/developers/directory' },
         ],
       },
       {

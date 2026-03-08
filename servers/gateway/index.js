@@ -3,21 +3,26 @@
 /**
  * Crow Gateway — Streamable HTTP + SSE Server
  *
- * Exposes crow-memory and crow-research as HTTP endpoints for remote access.
- * Supports both Streamable HTTP (2025-03-26) and legacy SSE (2024-11-05)
- * transports for maximum platform compatibility. OAuth 2.1 with Dynamic
- * Client Registration.
+ * Exposes crow-memory, crow-research, and crow-sharing as HTTP endpoints
+ * for remote access. Supports both Streamable HTTP (2025-03-26) and legacy
+ * SSE (2024-11-05) transports for maximum platform compatibility.
+ * OAuth 2.1 with Dynamic Client Registration.
  *
  * Routes:
  *   POST|GET|DELETE /memory/mcp   — crow-memory (Streamable HTTP)
  *   POST|GET|DELETE /research/mcp — crow-research (Streamable HTTP)
+ *   POST|GET|DELETE /sharing/mcp  — crow-sharing (Streamable HTTP)
  *   POST|GET|DELETE /tools/mcp    — proxy for external MCP servers (Streamable HTTP)
  *   GET  /memory/sse              — crow-memory (SSE transport init)
  *   POST /memory/messages         — crow-memory (SSE message handling)
  *   GET  /research/sse            — crow-research (SSE transport init)
  *   POST /research/messages       — crow-research (SSE message handling)
+ *   GET  /sharing/sse             — crow-sharing (SSE transport init)
+ *   POST /sharing/messages        — crow-sharing (SSE message handling)
  *   GET  /tools/sse               — proxy (SSE transport init)
  *   POST /tools/messages          — proxy (SSE message handling)
+ *   POST /relay/store             — peer relay store-and-forward
+ *   GET  /relay/fetch             — peer relay fetch pending blobs
  *   GET /health                   — health check
  *   GET /setup                    — integration status page
  *   OAuth routes (/.well-known/*, /authorize, /token, /register)
@@ -72,6 +77,8 @@ import rateLimit from "express-rate-limit";
 import cors from "cors";
 import { createMemoryServer } from "../memory/server.js";
 import { createResearchServer } from "../research/server.js";
+import { createSharingServer } from "../sharing/server.js";
+import { createRelayHandlers } from "../sharing/relay.js";
 import { generateCrowContext } from "../memory/crow-context.js";
 import { createDbClient } from "../db.js";
 import { createOAuthProvider, initOAuthTables } from "./auth.js";
@@ -97,10 +104,12 @@ await initOAuthTables();
 const memorySessions = new Map();
 const researchSessions = new Map();
 const toolsSessions = new Map();
+const sharingSessions = new Map();
 // SSE sessions
 const memorySseSessions = new Map();
 const researchSseSessions = new Map();
 const toolsSseSessions = new Map();
+const sharingSseSessions = new Map();
 
 // Create Express app
 const app = express();
@@ -160,7 +169,7 @@ app.get("/health", (req, res) => {
   const connectedTools = proxyStatus.filter((s) => s.status === "connected");
   res.json({
     status: "ok",
-    servers: ["crow-memory", "crow-research"],
+    servers: ["crow-memory", "crow-research", "crow-sharing"],
     externalServers: connectedTools.map((s) => ({ id: s.id, name: s.name, tools: s.toolCount })),
     auth: !noAuth,
   });
@@ -384,6 +393,7 @@ function createSseHandler(sessions, createServer, messagesPath) {
 
 const memoryHandlers = createMcpHandler(memorySessions, createMemoryServer);
 const researchHandlers = createMcpHandler(researchSessions, createResearchServer);
+const sharingHandlers = createMcpHandler(sharingSessions, createSharingServer);
 const toolsHandlers = createMcpHandler(toolsSessions, createProxyServer);
 
 function mountEndpoint(path, handlers) {
@@ -400,6 +410,7 @@ function mountEndpoint(path, handlers) {
 
 mountEndpoint("/memory/mcp", memoryHandlers);
 mountEndpoint("/research/mcp", researchHandlers);
+mountEndpoint("/sharing/mcp", sharingHandlers);
 mountEndpoint("/tools/mcp", toolsHandlers);
 
 // Also mount at /mcp for single-server compatibility (uses memory)
@@ -409,6 +420,7 @@ mountEndpoint("/mcp", memoryHandlers);
 
 const memorySseHandlers = createSseHandler(memorySseSessions, createMemoryServer, "/memory/messages");
 const researchSseHandlers = createSseHandler(researchSseSessions, createResearchServer, "/research/messages");
+const sharingSseHandlers = createSseHandler(sharingSseSessions, createSharingServer, "/sharing/messages");
 const toolsSseHandlers = createSseHandler(toolsSseSessions, createProxyServer, "/tools/messages");
 
 function mountSseEndpoint(ssePath, messagesPath, handlers) {
@@ -423,7 +435,19 @@ function mountSseEndpoint(ssePath, messagesPath, handlers) {
 
 mountSseEndpoint("/memory/sse", "/memory/messages", memorySseHandlers);
 mountSseEndpoint("/research/sse", "/research/messages", researchSseHandlers);
+mountSseEndpoint("/sharing/sse", "/sharing/messages", sharingSseHandlers);
 mountSseEndpoint("/tools/sse", "/tools/messages", toolsSseHandlers);
+
+// --- Peer Relay Endpoints ---
+const relayHandlers = createRelayHandlers();
+
+if (authMiddleware) {
+  app.post("/relay/store", authMiddleware, relayHandlers.store);
+  app.get("/relay/fetch", authMiddleware, relayHandlers.fetch);
+} else {
+  app.post("/relay/store", relayHandlers.store);
+  app.get("/relay/fetch", relayHandlers.fetch);
+}
 
 // --- Start Server ---
 
@@ -436,11 +460,16 @@ app.listen(PORT, "0.0.0.0", (error) => {
   console.log(`  Streamable HTTP (2025-03-26):`);
   console.log(`    Memory:   POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/memory/mcp`);
   console.log(`    Research: POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/research/mcp`);
+  console.log(`    Sharing:  POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/sharing/mcp`);
   console.log(`    Tools:    POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/tools/mcp`);
   console.log(`  SSE (2024-11-05):`);
   console.log(`    Memory:   GET  ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/memory/sse`);
   console.log(`    Research: GET  ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/research/sse`);
+  console.log(`    Sharing:  GET  ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/sharing/sse`);
   console.log(`    Tools:    GET  ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/tools/sse`);
+  console.log(`  Relay:`);
+  console.log(`    Store:  POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/relay/store`);
+  console.log(`    Fetch:  GET  ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/relay/fetch`);
   console.log(`  Setup:    GET  http://localhost:${PORT}/setup`);
   console.log(`  Health:   GET  http://localhost:${PORT}/health`);
 
@@ -456,8 +485,8 @@ app.listen(PORT, "0.0.0.0", (error) => {
 process.on("SIGINT", async () => {
   console.log("\nShutting down gateway...");
   const allSessions = [
-    ...memorySessions, ...researchSessions, ...toolsSessions,
-    ...memorySseSessions, ...researchSseSessions, ...toolsSseSessions,
+    ...memorySessions, ...researchSessions, ...sharingSessions, ...toolsSessions,
+    ...memorySseSessions, ...researchSseSessions, ...sharingSseSessions, ...toolsSseSessions,
   ];
   for (const [sid, session] of allSessions) {
     try {
@@ -466,9 +495,11 @@ process.on("SIGINT", async () => {
   }
   memorySessions.clear();
   researchSessions.clear();
+  sharingSessions.clear();
   toolsSessions.clear();
   memorySseSessions.clear();
   researchSseSessions.clear();
+  sharingSseSessions.clear();
   toolsSseSessions.clear();
   process.exit(0);
 });
