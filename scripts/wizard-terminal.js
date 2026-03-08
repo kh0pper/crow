@@ -158,6 +158,13 @@ async function main() {
   saveEnv(env);
   console.log("  Saved configuration to .env\n");
 
+  // Always regenerate .mcp.json
+  try {
+    execSync("node scripts/generate-mcp-config.js", { cwd: ROOT, stdio: "inherit" });
+  } catch {
+    console.log("  Warning: Could not generate .mcp.json.");
+  }
+
   const genDesktop = await ask("  Generate Claude Desktop config? [Y/n] ");
   if (genDesktop.toLowerCase() !== "n" && genDesktop.toLowerCase() !== "no") {
     try {

@@ -11,6 +11,7 @@ import { execSync } from "child_process";
 import { existsSync, copyFileSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
+import { CORE_SERVERS, EXTERNAL_SERVERS } from "./server-registry.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -63,7 +64,15 @@ try {
   process.exit(1);
 }
 
-// Step 5: Check external tools
+// Step 5: Generate .mcp.json
+log("Generating .mcp.json...");
+try {
+  execSync("node scripts/generate-mcp-config.js", { cwd: ROOT, stdio: "inherit" });
+} catch {
+  log("Warning: Could not generate .mcp.json. Run 'npm run mcp-config' manually.");
+}
+
+// Step 6: Check external tools
 header("External Tool Status");
 
 const tools = [
@@ -88,36 +97,39 @@ log("Want a guided setup? Run: node scripts/wizard.js");
 log("Want to generate Claude Desktop config? Run: node scripts/generate-desktop-config.js");
 
 header("Setup Complete");
+
+// Build dynamic server list from registry
+const totalServers = CORE_SERVERS.length + EXTERNAL_SERVERS.length;
+const coreList = CORE_SERVERS.map(s => `  - ${s.name.padEnd(18)} ${s.description}`).join("\n");
+const categories = { productivity: [], communication: [], development: [] };
+for (const s of EXTERNAL_SERVERS) {
+  const cat = s.category || "development";
+  if (categories[cat]) categories[cat].push(s);
+}
+const extSections = [
+  ["productivity", "External (productivity)"],
+  ["communication", "External (communication)"],
+  ["development", "External (development & search)"],
+].map(([key, label]) => {
+  const items = categories[key];
+  if (!items || items.length === 0) return "";
+  return `  ${label}:\n` + items.map(s => `  - ${s.name.padEnd(18)} ${s.description}`).join("\n");
+}).filter(Boolean).join("\n\n");
+
 console.log(`
 Next steps:
   1. Edit .env with your API keys (see .env.example for details)
      Or run 'node scripts/wizard.js' for guided setup
-  2. Run 'claude' in this directory to start using the platform
-  3. The AI will automatically load CLAUDE.md and .mcp.json
+  2. Run 'npm run mcp-config' to regenerate .mcp.json after editing .env
+  3. Run 'claude' in this directory to start using the platform
+  4. The AI will automatically load CLAUDE.md and .mcp.json
 
 For Claude Desktop users:
   Run 'node scripts/generate-desktop-config.js' to auto-configure
 
-MCP servers configured (15 total):
+Available MCP servers (${totalServers} total):
   Built-in:
-  - crow-memory      Persistent memory
-  - crow-research    Research pipeline
+${coreList}
 
-  External (productivity):
-  - trello           Requires TRELLO_API_KEY + TRELLO_TOKEN
-  - canvas-lms       Requires CANVAS_API_TOKEN + CANVAS_BASE_URL
-  - google-workspace Requires Google OAuth credentials (includes Google Chat)
-  - notion           Requires NOTION_TOKEN
-  - mcp-research     Academic search (no keys needed)
-  - zotero           Requires ZOTERO_API_KEY + ZOTERO_USER_ID
-
-  External (communication):
-  - slack            Requires SLACK_BOT_TOKEN
-  - discord          Requires DISCORD_BOT_TOKEN
-  - microsoft-teams  Requires Azure AD credentials (experimental)
-
-  External (development & search):
-  - github           Requires GITHUB_PERSONAL_ACCESS_TOKEN
-  - brave-search     Requires BRAVE_API_KEY
-  - filesystem       Local file access (no keys needed)
+${extSections}
 `);

@@ -12,13 +12,11 @@
  *   node scripts/generate-desktop-config.js --stdout    # Output JSON to stdout
  */
 
-import { readFileSync, writeFileSync, existsSync, copyFileSync, mkdirSync } from "fs";
+import { writeFileSync, existsSync, copyFileSync, mkdirSync } from "fs";
 import { resolve, dirname, join } from "path";
-import { fileURLToPath } from "url";
 import { homedir, platform } from "os";
+import { CORE_SERVERS, EXTERNAL_SERVERS, ROOT, loadEnv } from "./server-registry.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const ROOT = resolve(__dirname, "..");
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes("--dry-run");
 const STDOUT = args.includes("--stdout");
@@ -39,133 +37,34 @@ function getConfigPath() {
   }
 }
 
-function loadEnv() {
-  const envPath = resolve(ROOT, ".env");
-  const env = {};
-  if (existsSync(envPath)) {
-    const lines = readFileSync(envPath, "utf8").split("\n");
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const eqIndex = trimmed.indexOf("=");
-      if (eqIndex === -1) continue;
-      const key = trimmed.slice(0, eqIndex).trim();
-      const value = trimmed.slice(eqIndex + 1).trim();
-      if (value) env[key] = value;
-    }
-  }
-  return env;
-}
-
-function resolveEnvValue(template, env) {
-  return template.replace(/\$\{(\w+)(?::-(.*?))?\}/g, (_, key, fallback) => {
-    return env[key] || fallback || "";
-  });
-}
-
 function buildConfig(env) {
-  const crowRoot = ROOT;
-  const dbPath = resolve(crowRoot, env.CROW_DB_PATH || "./data/crow.db");
+  const dbPath = resolve(ROOT, env.CROW_DB_PATH || "./data/crow.db");
   const filesPath = env.CROW_FILES_PATH || "/home";
 
   const config = { mcpServers: {} };
   const missing = [];
 
-  // Custom servers (always included)
-  config.mcpServers["crow-memory"] = {
-    command: "node",
-    args: [resolve(crowRoot, "servers/memory/index.js")],
-    env: { CROW_DB_PATH: dbPath }
-  };
-
-  config.mcpServers["crow-research"] = {
-    command: "node",
-    args: [resolve(crowRoot, "servers/research/index.js")],
-    env: { CROW_DB_PATH: dbPath }
-  };
+  // Core servers (always included, with absolute paths for desktop)
+  for (const server of CORE_SERVERS) {
+    config.mcpServers[server.name] = {
+      command: server.command,
+      args: [resolve(ROOT, server.args[0])],
+      env: { CROW_DB_PATH: dbPath },
+    };
+  }
 
   // External servers
-  const servers = [
-    {
-      name: "trello",
-      command: "npx", args: ["-y", "mcp-server-trello"],
-      envKeys: ["TRELLO_API_KEY", "TRELLO_TOKEN"],
-      envMap: { TRELLO_API_KEY: "TRELLO_API_KEY", TRELLO_TOKEN: "TRELLO_TOKEN" }
-    },
-    {
-      name: "canvas-lms",
-      command: "npx", args: ["-y", "mcp-canvas-lms"],
-      envKeys: ["CANVAS_API_TOKEN", "CANVAS_BASE_URL"],
-      envMap: { CANVAS_API_TOKEN: "CANVAS_API_TOKEN", CANVAS_BASE_URL: "CANVAS_BASE_URL" }
-    },
-    {
-      name: "google-workspace",
-      command: "uvx", args: ["workspace-mcp"],
-      envKeys: ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"],
-      envMap: { GOOGLE_CLIENT_ID: "GOOGLE_CLIENT_ID", GOOGLE_CLIENT_SECRET: "GOOGLE_CLIENT_SECRET" }
-    },
-    {
-      name: "mcp-research",
-      command: "uvx", args: ["mcp-research"],
-      envKeys: [], envMap: {}
-    },
-    {
-      name: "zotero",
-      command: "uvx", args: ["zotero-mcp"],
-      envKeys: ["ZOTERO_API_KEY", "ZOTERO_USER_ID"],
-      envMap: { ZOTERO_API_KEY: "ZOTERO_API_KEY", ZOTERO_USER_ID: "ZOTERO_USER_ID" }
-    },
-    {
-      name: "notion",
-      command: "npx", args: ["-y", "@notionhq/notion-mcp-server"],
-      envKeys: ["NOTION_TOKEN"],
-      buildEnv: (e) => ({
-        OPENAPI_MCP_HEADERS: JSON.stringify({
-          Authorization: `Bearer ${e.NOTION_TOKEN || ""}`,
-          "Notion-Version": "2022-06-28"
-        })
-      })
-    },
-    {
-      name: "slack",
-      command: "npx", args: ["-y", "@anthropic/mcp-server-slack"],
-      envKeys: ["SLACK_BOT_TOKEN"],
-      envMap: { SLACK_BOT_TOKEN: "SLACK_BOT_TOKEN" }
-    },
-    {
-      name: "discord",
-      command: "npx", args: ["-y", "mcp-discord"],
-      envKeys: ["DISCORD_BOT_TOKEN"],
-      envMap: { DISCORD_BOT_TOKEN: "DISCORD_BOT_TOKEN" }
-    },
-    {
-      name: "microsoft-teams",
-      command: "npx", args: ["-y", "mcp-server-microsoft-teams"],
-      envKeys: ["TEAMS_CLIENT_ID", "TEAMS_CLIENT_SECRET", "TEAMS_TENANT_ID"],
-      envMap: { TEAMS_CLIENT_ID: "TEAMS_CLIENT_ID", TEAMS_CLIENT_SECRET: "TEAMS_CLIENT_SECRET", TEAMS_TENANT_ID: "TEAMS_TENANT_ID" }
-    },
-    {
-      name: "github",
-      command: "npx", args: ["-y", "@modelcontextprotocol/server-github"],
-      envKeys: ["GITHUB_PERSONAL_ACCESS_TOKEN"],
-      envMap: { GITHUB_PERSONAL_ACCESS_TOKEN: "GITHUB_PERSONAL_ACCESS_TOKEN" }
-    },
-    {
-      name: "brave-search",
-      command: "npx", args: ["-y", "@modelcontextprotocol/server-brave-search"],
-      envKeys: ["BRAVE_API_KEY"],
-      envMap: { BRAVE_API_KEY: "BRAVE_API_KEY" }
-    },
-    {
-      name: "filesystem",
-      command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", filesPath],
-      envKeys: [], envMap: {}
-    }
-  ];
-
-  for (const server of servers) {
+  for (const server of EXTERNAL_SERVERS) {
     const serverEnv = {};
     const missingKeys = [];
+
+    // Build desktop args — handle filesystem path injection
+    let desktopArgs = [...server.args];
+    if (server.name === "filesystem") {
+      desktopArgs.push(filesPath);
+    } else if (server.name === "render" && env.RENDER_API_KEY) {
+      desktopArgs.push("--header", `Authorization: Bearer ${env.RENDER_API_KEY}`);
+    }
 
     if (server.buildEnv) {
       Object.assign(serverEnv, server.buildEnv(env));
@@ -185,8 +84,8 @@ function buildConfig(env) {
 
     config.mcpServers[server.name] = {
       command: server.command,
-      args: server.args,
-      ...(Object.keys(serverEnv).length > 0 ? { env: serverEnv } : {})
+      args: desktopArgs,
+      ...(Object.keys(serverEnv).length > 0 ? { env: serverEnv } : {}),
     };
   }
 

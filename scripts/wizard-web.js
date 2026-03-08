@@ -724,7 +724,18 @@ const server = createServer((req, res) => {
 
         saveEnv(env);
 
-        // Generate desktop config
+        // Generate .mcp.json and desktop config
+        let configMsg = "";
+        try {
+          execSync("node scripts/generate-mcp-config.js", {
+            cwd: ROOT,
+            stdio: "pipe",
+          });
+          configMsg = " .mcp.json updated.";
+        } catch {
+          configMsg = " (.mcp.json generation skipped.)";
+        }
+
         let desktopMsg = "";
         try {
           execSync("node scripts/generate-desktop-config.js", {
@@ -739,7 +750,7 @@ const server = createServer((req, res) => {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
           ok: true,
-          message: `${Object.keys(data).length} keys saved to .env.${desktopMsg} Restart Claude to apply.`,
+          message: `${Object.keys(data).length} keys saved to .env.${configMsg}${desktopMsg} Restart Claude to apply.`,
         }));
       } catch (err) {
         res.writeHead(400, { "Content-Type": "application/json" });
