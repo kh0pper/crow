@@ -77,6 +77,17 @@ claude  # Loads .mcp.json + CLAUDE.md automatically
 
 → **[Claude Code guide](https://kh0pper.github.io/crow/platforms/claude-code)**
 
+## Developer Program
+
+Crow is open to contributions! Build integrations, skills, tools, and deployment bundles for the ecosystem.
+
+- **MCP Integrations** — Connect new services (Linear, Jira, Todoist, etc.)
+- **Skills** — Write behavioral prompts that teach the AI new workflows (no code required)
+- **Core Tools** — Add MCP tools to crow-memory, crow-research, or crow-sharing
+- **Self-Hosted Bundles** — Create Docker Compose configs for specific use cases
+
+→ **[Developer Docs](https://kh0pper.github.io/crow/developers/)** · **[Community Directory](https://kh0pper.github.io/crow/developers/directory)** · **[CONTRIBUTING.md](CONTRIBUTING.md)**
+
 ## Documentation
 
 Full documentation at **[kh0pper.github.io/crow](https://kh0pper.github.io/crow/)**

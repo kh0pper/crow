@@ -7,17 +7,28 @@
     "setup": "node scripts/setup.js",
     "memory-server": "node servers/memory/index.js",
     "research-server": "node servers/research/index.js",
+    "sharing-server": "node servers/sharing/index.js",
     "init-db": "node scripts/init-db.js",
     "wizard": "node scripts/wizard.js",
     "desktop-config": "node scripts/generate-desktop-config.js",
-    "gateway": "node servers/gateway/index.js"
+    "gateway": "node servers/gateway/index.js",
+    "identity": "node -e \"import('./servers/sharing/identity.js').then(m => m.displayIdentity())\"",
+    "identity:export": "node -e \"import('./servers/sharing/identity.js').then(m => m.exportIdentity())\"",
+    "identity:import": "node -e \"import('./servers/sharing/identity.js').then(m => m.importIdentity())\"",
+    "create-integration": "node scripts/create-integration.js"
   },
   "dependencies": {
     "@libsql/client": "^0.14.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "@noble/ed25519": "^2.2.0",
+    "@noble/hashes": "^1.7.0",
+    "@noble/secp256k1": "^2.2.0",
     "cors": "^2.8.6",
     "express": "^4.21.0",
     "express-rate-limit": "^8.3.0",
+    "hypercore": "^11.4.0",
+    "hyperswarm": "^4.9.0",
+    "nostr-tools": "^2.10.0",
     "zod": "^3.24.0"
   },
   "engines": {

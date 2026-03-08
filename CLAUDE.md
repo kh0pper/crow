@@ -126,6 +126,15 @@ Node.js >= 18 required. ESM modules (`"type": "module"` in package.json).
 
 Skills are markdown files in `skills/`. They are loaded by Claude on demand — no build step. Add a trigger row in `superpowers.md` so it auto-activates.
 
+### Developer Program
+
+Crow has an open developer program for community contributions. Full developer documentation lives in `docs/developers/` (VitePress site). Key resources:
+- `CONTRIBUTING.md` — Contributor guidelines and code conventions
+- `scripts/create-integration.js` — Interactive scaffolding CLI (`npm run create-integration`)
+- `templates/` — Starter templates for integration skills and workflow skills
+- `.github/ISSUE_TEMPLATE/` — Issue templates for integration requests, skill proposals, bug reports
+- `.github/PULL_REQUEST_TEMPLATE.md` — PR checklist
+
 ## AI Operational Context
 
 This section guides Claude's behavior when operating as the Crow AI assistant (not when developing the codebase).

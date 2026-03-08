@@ -14,6 +14,13 @@
         "CROW_DB_PATH": "./data/crow.db"
       }
     },
+    "crow-sharing": {
+      "command": "node",
+      "args": ["servers/sharing/index.js"],
+      "env": {
+        "CROW_DB_PATH": "./data/crow.db"
+      }
+    },
     "trello": {
       "command": "npx",
       "args": ["-y", "mcp-server-trello"],
