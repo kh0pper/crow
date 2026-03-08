@@ -65,7 +65,7 @@ export const INTEGRATIONS = [
     envVars: ["NOTION_TOKEN"],
     envTransform: (env) => ({
       OPENAPI_MCP_HEADERS: JSON.stringify({
-        Authorization: `Bearer ${env.NOTION_TOKEN}`,
+        Authorization: `Bearer ${(env.NOTION_TOKEN || "").replace(/[\r\n\0]/g, "")}`,
         "Notion-Version": "2022-06-28",
       }),
     }),
@@ -128,7 +128,7 @@ export const INTEGRATIONS = [
     description: "Manage your Render deployment, services, and environment",
     command: "npx",
     args: ["-y", "mcp-remote", "https://mcp.render.com/mcp"],
-    argsTransform: (env) => ["-y", "mcp-remote", "https://mcp.render.com/mcp", "--header", `Authorization: Bearer ${env.RENDER_API_KEY}`],
+    argsTransform: (env) => ["-y", "mcp-remote", "https://mcp.render.com/mcp", "--header", `Authorization: Bearer ${(env.RENDER_API_KEY || "").replace(/[\r\n\0]/g, "")}`],
     envVars: ["RENDER_API_KEY"],
     keyUrl: "https://dashboard.render.com/account/api-keys",
     keyInstructions: "Go to Account Settings → API Keys → Create API Key → copy it.",
