@@ -1,6 +1,6 @@
 # Integrations
 
-Crow connects to 20+ external services through MCP servers. The built-in servers (Memory, Research, Sharing, Blog, Storage) work out of the box. External integrations need API keys added to your environment.
+Crow connects to 20+ external services through MCP servers. The five built-in servers (Memory, Research, Sharing, Storage, and Blog) work out of the box. External integrations need API keys added to your environment.
 
 ## Built-in Servers
 
@@ -8,8 +8,11 @@ These are always available — no API keys needed:
 
 | Server | Tools | Description |
 |---|---|---|
-| **crow-memory** | 7 tools | Persistent memory: store, search, recall, list, update, delete, stats |
+| **crow-memory** | 12 tools | Persistent memory (7 tools) + cross-platform context management (5 tools) |
 | **crow-research** | 12 tools | Research pipeline: projects, sources, notes, citations, bibliography |
+| **crow-sharing** | 8 tools | P2P sharing: invite codes, contacts, encrypted sharing, Nostr messaging, inbox |
+| **crow-storage** | 5 tools | S3-compatible file storage: upload, list, download (presigned URLs), delete, stats |
+| **crow-blog** | 12 tools | Blogging platform: posts, publishing, themes, RSS/Atom feeds, export to Hugo/Jekyll |
 
 ## Keeping Your Keys Safe
 

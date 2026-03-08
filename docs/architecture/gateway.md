@@ -2,7 +2,23 @@
 
 The gateway (`servers/gateway/`) is an Express server that makes Crow's MCP servers accessible over HTTP with OAuth 2.1 authentication.
 
+## Modular Route Structure
+
+The gateway uses a modular route architecture. Core MCP transport logic is in `routes/mcp.js`, which exports the `mountMcpServer()` helper. Other route modules handle specific concerns:
+
+| Module | Purpose |
+|---|---|
+| `routes/mcp.js` | `mountMcpServer()` — mounts Streamable HTTP + SSE transports for any MCP server |
+| `routes/storage-http.js` | File upload (multipart) and download (presigned redirect) HTTP routes |
+| `routes/blog-public.js` | Public blog pages, tag pages, RSS and Atom feeds (no auth) |
+| `dashboard/` | Dashboard UI panels and auth system |
+| `session-manager.js` | Consolidated session storage for all MCP servers (replaces per-server Maps) |
+
 ## Transports
+
+### mountMcpServer() Helper
+
+All MCP servers are mounted via the `mountMcpServer(router, prefix, createServer, sessionManager, authMiddleware)` function from `routes/mcp.js`. It registers both Streamable HTTP and SSE endpoints for a given server factory, using the consolidated `SessionManager` for session tracking.
 
 ### Streamable HTTP (Primary)
 
@@ -12,10 +28,13 @@ Modern MCP transport used by most clients.
 |---|---|
 | `POST\|GET\|DELETE /memory/mcp` | crow-memory |
 | `POST\|GET\|DELETE /research/mcp` | crow-research |
+| `POST\|GET\|DELETE /sharing/mcp` | crow-sharing |
+| `POST\|GET\|DELETE /storage/mcp` | crow-storage (conditional, requires MinIO) |
+| `POST\|GET\|DELETE /blog-mcp/mcp` | crow-blog |
 | `POST\|GET\|DELETE /tools/mcp` | External tool proxy |
 | `POST\|GET\|DELETE /mcp` | crow-memory (compatibility alias) |
 
-Sessions are managed via the `mcp-session-id` header. New sessions are created on `initialize` requests.
+Sessions are managed via the `mcp-session-id` header. New sessions are created on `initialize` requests. Each transport gets an in-memory `EventStore` for resumability.
 
 ### SSE (Legacy)
 
@@ -27,6 +46,12 @@ Legacy transport for ChatGPT and older clients.
 | `POST /memory/messages` | Send messages to session |
 | `GET /research/sse` | Open SSE stream |
 | `POST /research/messages` | Send messages |
+| `GET /sharing/sse` | Open SSE stream |
+| `POST /sharing/messages` | Send messages |
+| `GET /storage/sse` | Open SSE stream (conditional) |
+| `POST /storage/messages` | Send messages (conditional) |
+| `GET /blog-mcp/sse` | Open SSE stream |
+| `POST /blog-mcp/messages` | Send messages |
 | `GET /tools/sse` | Open SSE stream |
 | `POST /tools/messages` | Send messages |
 
@@ -106,7 +131,7 @@ No authentication required — doesn't expose secrets.
 ```json
 {
   "status": "ok",
-  "servers": ["crow-memory", "crow-research"],
+  "servers": ["crow-memory", "crow-research", "crow-sharing", "crow-storage", "crow-blog"],
   "externalServers": [{"id": "github", "name": "GitHub", "tools": 15}],
   "auth": true
 }

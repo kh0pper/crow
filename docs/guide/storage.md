@@ -99,7 +99,7 @@ Crow generates a presigned URL that expires after a configurable period (default
 
 ## Storage Quotas
 
-Crow enforces a configurable storage quota (default: 1 GB). Check your usage:
+Crow enforces a configurable storage quota (default: 5 GB / 5120 MB). Check your usage:
 
 > "How much storage am I using?"
 

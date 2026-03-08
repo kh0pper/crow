@@ -29,7 +29,7 @@ Crow sits between you and your AI platforms as a shared layer:
        └────────────────┬──────────────────────────┘
                         │
        ┌────────────────▼──────────────────────────┐
-       │          Shared SQLite / Turso             │
+       │          Shared SQLite             │
        │  Memories · Research · Context · crow.md   │
        └───────────────────────────────────────────┘
 ```

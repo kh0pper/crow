@@ -40,13 +40,17 @@ After setup, your AI assistant will have:
 
 - **Persistent memory** — remembers across conversations
 - **Research pipeline** — manages sources, generates APA citations
-- **15+ integrations** — Gmail, GitHub, Slack, Notion, Trello, and more
+- **20+ integrations** — Gmail, GitHub, Slack, Notion, Trello, and more
 - **Full-text search** — find anything stored in memory or research
+- **Encrypted P2P sharing** — share memories and research with other Crow users
+- **File storage** — upload and manage files with S3-compatible storage
+- **Blog platform** — publish posts with Markdown, RSS feeds, and themes
+- **Dashboard** — visual web interface for managing your Crow instance
 
 ## Requirements
 
 - A free [Render](https://render.com) account (for cloud deploy)
-- A free [Turso](https://turso.tech) database (for cloud deploy)
+- A free [Turso](https://turso.tech) database (only needed for Render cloud deploy)
 - Node.js 18+ (for desktop/local setup)
 - Raspberry Pi 4+ with 4 GB RAM (for Crow OS)
 - An account on at least one AI platform (Claude, ChatGPT, Gemini, etc.)

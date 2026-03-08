@@ -45,8 +45,6 @@ services:
       - "3001:3001"
     environment:
       - NODE_ENV=production
-      - TURSO_DATABASE_URL=${TURSO_DATABASE_URL}
-      - TURSO_AUTH_TOKEN=${TURSO_AUTH_TOKEN}
       # Bundle-specific integrations
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
@@ -59,9 +57,7 @@ services:
 List all required environment variables with comments:
 
 ```env
-# Required — Database
-TURSO_DATABASE_URL=
-TURSO_AUTH_TOKEN=
+# Database: Local SQLite is used automatically — no config needed.
 
 # Google Workspace
 GOOGLE_CLIENT_ID=         # From https://console.cloud.google.com

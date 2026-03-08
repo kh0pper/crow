@@ -43,7 +43,7 @@ export default {
       <h1>Weather Panel</h1>
       <p>Your custom content here.</p>
     `;
-    res.send(layout('Weather', content, { activePanel: 'weather' }));
+    return layout({ title: 'Weather', content });
   }
 };
 ```
@@ -82,15 +82,19 @@ All standard `@libsql/client` methods are available (`execute`, `batch`, etc.).
 The layout function wraps your content in the dashboard shell (navigation, theme, footer):
 
 ```js
-res.send(layout(pageTitle, htmlContent, options));
+return layout({ title: pageTitle, content: htmlContent });
 ```
 
 Options:
 
 | Option | Type | Description |
 |---|---|---|
+| `title` | string | Page title displayed in the header and browser tab. |
+| `content` | string | Main HTML content for the page body. |
 | `activePanel` | string | Panel ID to highlight in the nav. |
+| `panels` | Array | Array of panel objects for the nav sidebar. |
 | `theme` | string | Force `'dark'` or `'light'`. Usually omitted (uses user preference). |
+| `scripts` | string | Additional inline JS to include on the page. |
 
 ## Example: Memory Stats Panel
 
@@ -138,7 +142,7 @@ export default {
       </style>
     `;
 
-    res.send(layout('Memory Stats', content, { activePanel: 'memory-stats' }));
+    return layout({ title: 'Memory Stats', content });
   }
 };
 ```
@@ -176,7 +180,7 @@ export default {
       </form>
     `;
 
-    res.send(layout('Quick Note', content, { activePanel: 'quick-note' }));
+    return layout({ title: 'Quick Note', content });
   }
 };
 ```

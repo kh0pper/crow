@@ -48,14 +48,15 @@ Panels are modular sections of the dashboard. Each panel registers itself with:
 }
 ```
 
-Built-in panels:
+Built-in panels live in `servers/gateway/dashboard/panels/`:
 
-| Panel | Route | Purpose |
-|---|---|---|
-| Messages | `/dashboard/messages` | View peer messages, threads, read status |
-| Blog | `/dashboard/blog` | Manage posts, publish/unpublish, edit |
-| Files | `/dashboard/files` | Browse storage, upload, delete, preview |
-| Settings | `/dashboard/settings` | Configuration, quotas, network rules |
+| Panel | File | Route | Purpose |
+|---|---|---|---|
+| Messages | `panels/messages.js` | `/dashboard/messages` | View peer messages, threads, read status |
+| Blog | `panels/blog.js` | `/dashboard/blog` | Manage posts, publish/unpublish, edit |
+| Files | `panels/files.js` | `/dashboard/files` | Browse storage, upload, delete, preview |
+| Extensions | `panels/extensions.js` | `/dashboard/extensions` | Manage integrations and MCP server connections |
+| Settings | `panels/settings.js` | `/dashboard/settings` | Configuration, quotas, network rules |
 
 ## Auth System
 
@@ -128,7 +129,7 @@ const ALLOWED_RANGES = [
 ];
 ```
 
-Requests from outside these ranges receive a `403 Forbidden` response. The allowlist is configurable via the `DASHBOARD_ALLOWED_IPS` environment variable.
+Requests from outside these ranges receive a `403 Forbidden` response. To allow access from any IP (e.g., behind a reverse proxy), set `CROW_DASHBOARD_PUBLIC=true`.
 
 The middleware reads `X-Forwarded-For` when the gateway is behind a reverse proxy, but only trusts it if the immediate connection comes from a known proxy IP.
 

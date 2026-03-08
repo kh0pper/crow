@@ -50,6 +50,10 @@ Manage your blog posts. View drafts and published posts, edit content, publish o
 
 Browse your stored files with a visual file browser. Upload new files via drag-and-drop, preview images, copy file URLs, and delete files. Shows storage quota usage.
 
+### Extensions
+
+Browse and install community add-ons. Manage installed extensions, enable or disable them, and check for updates.
+
 ### Settings
 
 Configure your Crow instance:
@@ -73,11 +77,13 @@ The dashboard is **not** intended for public internet exposure. By default, it o
 
 If a request comes from an IP outside these ranges, the dashboard returns a 403 response.
 
-To customize allowed IPs, set the `DASHBOARD_ALLOWED_IPS` environment variable:
+To allow access from any IP (e.g., when behind a reverse proxy with its own access controls), set:
 
 ```bash
-DASHBOARD_ALLOWED_IPS=10.0.0.0/8,100.64.0.0/10
+CROW_DASHBOARD_PUBLIC=true
 ```
+
+There is no custom IP allowlist — the built-in ranges cover standard local network and Tailscale setups. For remote access without opening the dashboard publicly, use [Tailscale](/getting-started/tailscale-setup).
 
 ## Remote Access via Tailscale
 

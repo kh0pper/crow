@@ -12,15 +12,18 @@ The blog server (`servers/blog/`) provides a publishing platform through MCP too
 ┌──────────────────────────────────────┐
 │           MCP Tools Layer            │
 │  crow_create_post   crow_list_posts  │
-│  crow_update_post   crow_get_post    │
-│  crow_publish_post  crow_delete_post │
-│  crow_search_posts  crow_export_blog │
+│  crow_edit_post     crow_get_post    │
+│  crow_publish_post  crow_unpublish   │
+│  crow_delete_post   crow_share_post  │
+│  crow_export_blog   crow_blog_stats  │
+│  crow_blog_settings                  │
+│  crow_blog_customize_theme           │
 ├──────────────────────────────────────┤
 │         Public HTTP Routes           │
 │  GET /blog              (post list)  │
 │  GET /blog/:slug        (single)     │
-│  GET /blog/rss.xml      (RSS 2.0)    │
-│  GET /blog/atom.xml     (Atom)       │
+│  GET /blog/feed.xml     (RSS 2.0)    │
+│  GET /blog/feed.atom    (Atom)       │
 ├──────────────────────────────────────┤
 │  renderer.js         │  rss.js       │
 │  Markdown → HTML     │  Feed gen     │
@@ -83,12 +86,16 @@ Feeds include the 20 most recent published posts with full rendered HTML content
 ```sql
 CREATE TABLE blog_posts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  slug TEXT NOT NULL UNIQUE,
   title TEXT NOT NULL,
-  slug TEXT UNIQUE NOT NULL,
   content TEXT NOT NULL,            -- Raw Markdown
-  rendered_html TEXT,               -- Cached rendered HTML
-  status TEXT DEFAULT 'draft',      -- 'draft' or 'published'
-  tags TEXT,                        -- JSON array of tag strings
+  excerpt TEXT,                     -- Short excerpt (auto-generated or manual)
+  author TEXT,                      -- Author name
+  status TEXT DEFAULT 'draft',      -- 'draft', 'published', or 'archived'
+  visibility TEXT DEFAULT 'private', -- 'private', 'public', or 'peers'
+  cover_image_key TEXT,             -- S3 key for cover image
+  tags TEXT,                        -- Comma-separated tags
+  nostr_event_id TEXT,              -- For P2P sharing
   published_at TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
@@ -99,9 +106,9 @@ CREATE TABLE blog_posts (
 
 ```sql
 CREATE VIRTUAL TABLE blog_posts_fts USING fts5(
-  title, content, tags,
-  content='blog_posts',
-  content_rowid='id'
+  title, content, excerpt, tags,
+  content=blog_posts,
+  content_rowid=id
 );
 ```
 
@@ -135,13 +142,17 @@ Renders a single post as a full HTML page with:
 - Structured data (JSON-LD) for search engines
 - Navigation links to previous/next posts
 
-### GET /blog/rss.xml
+### GET /blog/tag/:tag
 
-RSS 2.0 feed of published posts.
+Posts filtered by a specific tag.
 
-### GET /blog/atom.xml
+### GET /blog/feed.xml
 
-Atom feed of published posts.
+RSS 2.0 feed of published public posts.
+
+### GET /blog/feed.atom
+
+Atom feed of published public posts.
 
 ## Dark Editorial Theme
 

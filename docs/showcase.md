@@ -32,7 +32,7 @@ Share research projects and memories with collaborators using P2P sharing. No ce
 
 **Typical setup:** Two or more Crow users connected via invite codes. Shared research projects with read-write access. Nostr messaging for coordination.
 
-**Key tools:** `crow_share_item`, `crow_check_inbox`, `crow_send_message`
+**Key tools:** `crow_share`, `crow_inbox`, `crow_send_message`
 
 ---
 

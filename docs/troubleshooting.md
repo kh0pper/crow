@@ -8,7 +8,7 @@ Common issues and solutions when setting up or using Crow.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `TURSO_DATABASE_URL not set` | Missing database config | Set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in environment |
+| `TURSO_DATABASE_URL not set` | Missing database config (Render cloud deploys only) | Only needed for Render cloud deploys. Set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`. For local/Docker/Pi setups, this error shouldn't appear — Crow uses local SQLite automatically. |
 | `Port already in use` | Another process on port 3001 | Set `PORT` env var to a different port |
 | `Module not found` | Dependencies not installed | Run `npm install` in the project root |
 

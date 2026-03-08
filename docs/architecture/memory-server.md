@@ -23,9 +23,9 @@ Search memories using full-text search (FTS5).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `query` | string | Yes | Search query (supports FTS5 syntax) |
+| `query` | string | Yes | Search query |
 | `category` | string | No | Filter by category |
-| `tags` | string | No | Filter by tags (comma-separated) |
+| `min_importance` | number | No | Minimum importance threshold (1-10) |
 | `limit` | number | No | Max results (default: 10) |
 
 ### crow_recall_by_context
@@ -44,10 +44,10 @@ List memories with optional filtering and sorting.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `category` | string | No | Filter by category |
-| `tags` | string | No | Filter by tags |
+| `tag` | string | No | Filter by tag (partial match) |
+| `min_importance` | number | No | Minimum importance threshold (1-10) |
+| `sort_by` | string | No | Sort order: recent, importance, accessed (default: recent) |
 | `limit` | number | No | Max results (default: 20) |
-| `offset` | number | No | Pagination offset |
-| `sort` | string | No | Sort by: created_at, updated_at, importance |
 
 ### crow_update_memory
 

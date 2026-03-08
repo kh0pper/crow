@@ -25,7 +25,12 @@ Repeat for each server you want to connect:
 |---|---|
 | Memory | `https://your-gateway.onrender.com/memory/mcp` |
 | Research | `https://your-gateway.onrender.com/research/mcp` |
+| Sharing | `https://your-gateway.onrender.com/sharing/mcp` |
+| Storage | `https://your-gateway.onrender.com/storage/mcp` |
+| Blog | `https://your-gateway.onrender.com/blog-mcp/mcp` |
 | External Tools | `https://your-gateway.onrender.com/tools/mcp` |
+
+> **Note:** The storage endpoint requires MinIO to be configured. See the [Storage Guide](/guide/storage) for setup.
 
 ## Transport
 
@@ -55,7 +60,7 @@ This gives Claude all of Crow's behavioral instructions — memory protocols, tr
 
 ## Tips
 
-- You can connect all three servers (memory, research, tools) simultaneously
+- You can connect all five servers (memory, research, sharing, storage, blog) plus external tools simultaneously
 - The mobile app uses the same Custom Integrations as the web
 - Tools from external integrations (GitHub, Slack, etc.) appear through the `/tools/mcp` endpoint
 - Memories stored here are instantly accessible from ChatGPT, Gemini, or any other connected platform

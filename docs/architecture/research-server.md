@@ -11,8 +11,8 @@ Create a new research project.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `name` | string | Yes | Project name |
-| `description` | string | No | Project description |
-| `status` | string | No | active, paused, completed, archived (default: active) |
+| `description` | string | No | Project description and goals |
+| `tags` | string | No | Comma-separated tags |
 
 ### crow_list_projects
 
@@ -24,32 +24,38 @@ List all research projects with optional status filter.
 
 ### crow_update_project
 
-Update a research project.
+Update a research project's name, description, status, or tags.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `project_id` | number | Yes | Project ID |
+| `id` | number | Yes | Project ID |
 | `name` | string | No | New name |
 | `description` | string | No | New description |
-| `status` | string | No | New status |
+| `status` | string | No | New status (active, paused, completed, archived) |
+| `tags` | string | No | New tags |
 
 ### crow_add_source
 
-Add a source to the research pipeline. Automatically generates an APA citation.
+Add a source to the research pipeline. Automatically generates an APA citation if none is provided.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `title` | string | Yes | Source title |
-| `url` | string | No | Source URL |
-| `source_type` | string | No | Type (see list below) |
-| `authors` | string | No | Author name(s) |
-| `publication_date` | string | No | Publication date |
-| `publisher` | string | No | Publisher name |
-| `doi` | string | No | DOI identifier |
-| `abstract` | string | No | Source abstract/summary |
+| `source_type` | string | Yes | Type (see list below) |
+| `project_id` | number | No | Associate with a research project |
+| `url` | string | No | URL where the source was found |
+| `authors` | string | No | Author(s) in "Last, F. M." format |
+| `publication_date` | string | No | Publication date (YYYY-MM-DD or YYYY) |
+| `publisher` | string | No | Publisher or website name |
+| `doi` | string | No | DOI (for academic papers) |
+| `isbn` | string | No | ISBN (for books) |
+| `abstract` | string | No | Abstract or brief description |
+| `content_summary` | string | No | Summary of key points and findings |
+| `full_text` | string | No | Full text content if available |
+| `citation_apa` | string | No | Manual APA citation (auto-generated if omitted) |
+| `retrieval_method` | string | No | How the source was obtained |
 | `tags` | string | No | Comma-separated tags |
-| `project_id` | number | No | Link to a project |
-| `notes` | string | No | Initial notes |
+| `relevance_score` | number | No | How relevant to the project, 1-10 (default: 5) |
 
 **Source types**: `web_article`, `academic_paper`, `book`, `interview`, `web_search`, `web_scrape`, `api_data`, `document`, `video`, `podcast`, `social_media`, `government_doc`, `dataset`, `other`
 
@@ -95,31 +101,37 @@ List sources with optional filtering.
 
 ### crow_add_note
 
-Add a research note linked to a source.
+Add a research note, optionally linked to a project or source.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `source_id` | number | Yes | Source to link note to |
 | `content` | string | Yes | Note content |
-| `note_type` | string | No | Type: summary, quote, analysis, question, methodology |
+| `note_type` | string | No | Type: note, quote, summary, analysis, question, insight (default: note) |
+| `project_id` | number | No | Associated project |
+| `source_id` | number | No | Associated source |
+| `title` | string | No | Note title |
+| `tags` | string | No | Comma-separated tags |
 
 ### crow_search_notes
 
-Search research notes.
+Search research notes by content.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `query` | string | Yes | Search query |
-| `source_id` | number | No | Filter by source |
+| `query` | string | Yes | Search terms |
+| `project_id` | number | No | Filter by project |
+| `note_type` | string | No | Filter by type (note, quote, summary, analysis, question, insight) |
+| `limit` | number | No | Max results (default: 10) |
 
 ### crow_generate_bibliography
 
-Generate a formatted bibliography for a project.
+Generate a formatted APA bibliography for a project or filtered set of sources.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `project_id` | number | Yes | Project ID |
-| `format` | string | No | Citation format (default: APA) |
+| `project_id` | number | No | Generate bibliography for this project |
+| `tag` | string | No | Filter by tag |
+| `verified_only` | boolean | No | Only include verified sources (default: false) |
 
 ### crow_research_stats
 

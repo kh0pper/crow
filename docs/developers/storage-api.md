@@ -10,107 +10,114 @@ Complete reference for the Crow Storage API — MCP tools, HTTP endpoints, and t
 
 ### crow_upload_file
 
-Upload a file to storage.
+Upload a small file (base64, <1MB) or get an HTTP upload URL for larger files.
 
 **Parameters:**
 
 | Name | Type | Required | Max Length | Description |
 |---|---|---|---|---|
-| `file_path` | string | One of `file_path` or `content` | 500 | Absolute path to the file on disk |
-| `content` | string | One of `file_path` or `content` | 50000 | Base64-encoded file content |
-| `filename` | string | Yes | 255 | Target filename (e.g., `photo.jpg`) |
-| `folder` | string | No | 255 | Subfolder path (e.g., `images/blog`) |
+| `file_name` | string | Yes | 500 | Original file name |
+| `mime_type` | string | No | 200 | MIME type (e.g., `image/png`) |
+| `data_base64` | string | No | 1500000 | Base64-encoded file data (for files <1MB) |
+| `bucket` | string | No | 100 | Target bucket (default: `crow-files`) |
+| `reference_type` | string | No | 100 | What this file is attached to (e.g., `blog_post`, `research_source`) |
+| `reference_id` | number | No | — | ID of the referenced item |
 
-**Returns:**
+When `data_base64` is provided, the file is uploaded directly. When omitted, a presigned upload URL is returned for larger files.
 
-```json
-{
-  "key": "images/blog/photo.jpg",
-  "original_name": "photo.jpg",
-  "mime_type": "image/jpeg",
-  "size_bytes": 245760,
-  "uploaded_at": "2026-03-08T12:00:00Z"
-}
+**Returns (direct upload):**
+
+```
+Uploaded "photo.jpg" (240.0KB)
+Key: 1709900000000-photo.jpg
+Download URL (1hr): https://...
+```
+
+**Returns (presigned URL):**
+
+```
+Upload URL generated for "photo.jpg":
+
+PUT https://...presigned-url...
+
+Content-Type: image/jpeg
+Max size: 100MB
+Expires in 1 hour.
 ```
 
 **Errors:**
-- Quota exceeded — returns current usage and limit
-- Invalid MIME type — lists allowed types
-- File not found (when using `file_path`)
+- Quota exceeded — returns quota limit
+- Blocked MIME type — executable types are rejected
+- File too large for base64 upload — suggests HTTP upload endpoint
 
 ---
 
 ### crow_list_files
 
-List files in storage with optional filtering.
+List stored files with optional filtering.
 
 **Parameters:**
 
 | Name | Type | Required | Max Length | Description |
 |---|---|---|---|---|
-| `folder` | string | No | 255 | Filter by folder prefix |
-| `mime_type` | string | No | 100 | Filter by MIME type prefix (e.g., `image/`) |
-| `limit` | number | No | — | Max results (default: 50, max: 200) |
-| `offset` | number | No | — | Skip first N results |
+| `bucket` | string | No | 100 | Filter by bucket |
+| `mime_type` | string | No | 200 | Filter by MIME type prefix (e.g., `image/`) |
+| `reference_type` | string | No | 100 | Filter by reference type |
+| `reference_id` | number | No | — | Filter by reference ID |
+| `limit` | number | No | — | Max results (default: 50, max: 100) |
 
 **Returns:**
 
-```json
-{
-  "files": [
-    {
-      "key": "images/photo.jpg",
-      "original_name": "photo.jpg",
-      "mime_type": "image/jpeg",
-      "size_bytes": 245760,
-      "uploaded_at": "2026-03-08T12:00:00Z"
-    }
-  ],
-  "total": 42
-}
+```
+3 file(s):
+
+- photo.jpg (240.0KB, image/jpeg)
+  Key: 1709900000000-photo.jpg | 2026-03-08T12:00:00Z
+- doc.pdf (1024.0KB, application/pdf) [blog_post:5]
+  Key: 1709900000001-doc.pdf | 2026-03-08T11:00:00Z
+```
 ```
 
 ---
 
 ### crow_get_file_url
 
-Generate a temporary presigned URL for accessing a file.
+Get a presigned download URL for a file.
 
 **Parameters:**
 
 | Name | Type | Required | Max Length | Description |
 |---|---|---|---|---|
-| `key` | string | Yes | 500 | The file's storage key |
-| `expiry_seconds` | number | No | — | URL validity (default: 3600, max: 86400) |
+| `s3_key` | string | Yes | 500 | S3 object key |
+| `expiry` | number | No | — | URL expiry in seconds (default: 3600, min: 60, max: 86400) |
+| `bucket` | string | No | 100 | Bucket name (default: `crow-files`) |
 
 **Returns:**
 
-```json
-{
-  "url": "http://minio:9000/crow-storage/images/photo.jpg?X-Amz-...",
-  "expires_at": "2026-03-08T13:00:00Z"
-}
+```
+Download URL (expires in 60 min):
+http://minio:9000/crow-files/1709900000000-photo.jpg?X-Amz-...
+```
 ```
 
 ---
 
 ### crow_delete_file
 
-Permanently delete a file from storage and the database.
+Delete a file from storage and the database.
 
 **Parameters:**
 
 | Name | Type | Required | Max Length | Description |
 |---|---|---|---|---|
-| `key` | string | Yes | 500 | The file's storage key |
+| `s3_key` | string | Yes | 500 | S3 object key to delete |
+| `bucket` | string | No | 100 | Bucket name (default: `crow-files`) |
 
 **Returns:**
 
-```json
-{
-  "deleted": true,
-  "key": "images/photo.jpg"
-}
+```
+Deleted: 1709900000000-photo.jpg
+```
 ```
 
 ---
@@ -201,40 +208,44 @@ curl -L http://localhost:3001/storage/file/images%2Fphoto.jpg
 
 ## s3-client.js Exports
 
-The `servers/storage/s3-client.js` module wraps the MinIO SDK for use by the storage server and gateway.
+The `servers/storage/s3-client.js` module wraps the MinIO SDK for use by the storage server and gateway. It uses a singleton client configured via environment variables (`S3_ENDPOINT` / `MINIO_ENDPOINT`, `MINIO_PORT`, `MINIO_USE_SSL`, `S3_ACCESS_KEY` / `MINIO_ROOT_USER`, `S3_SECRET_KEY` / `MINIO_ROOT_PASSWORD`).
 
-### createS3Client(config)
+### getClient()
 
-Create a configured MinIO client.
+Get or create the MinIO/S3 client singleton. Returns `null` if not configured (missing endpoint or secret key).
 
-```js
-import { createS3Client } from '../storage/s3-client.js';
+### isAvailable()
 
-const client = createS3Client({
-  endPoint: process.env.MINIO_ENDPOINT,
-  port: parseInt(process.env.MINIO_PORT),
-  accessKey: process.env.MINIO_ACCESS_KEY,
-  secretKey: process.env.MINIO_SECRET_KEY,
-  useSSL: process.env.MINIO_USE_SSL === 'true',
-});
-```
+Check if the S3/MinIO backend is available and responding. Returns `boolean`.
 
-### uploadObject(client, bucket, key, buffer, metadata)
+### ensureBucket(bucket?)
 
-Upload a buffer to S3. `metadata` is an object with `Content-Type` and any custom headers.
+Ensure a bucket exists, creating it if missing. Defaults to `"crow-files"`.
 
-### getPresignedUrl(client, bucket, key, expiry)
+### uploadObject(key, data, opts?)
 
-Generate a presigned GET URL. `expiry` is in seconds (default: 3600).
+Upload a Buffer to S3. `opts` may include `bucket` (string) and `contentType` (string).
 
-### deleteObject(client, bucket, key)
+### getPresignedUrl(key, opts?)
 
-Delete an object from S3.
+Generate a presigned GET (download) URL. `opts` may include `bucket` and `expiry` (seconds, default: 3600).
 
-### listObjects(client, bucket, prefix)
+### getPresignedUploadUrl(key, opts?)
 
-List objects matching a prefix. Returns an array of `{ name, size, lastModified }`.
+Generate a presigned PUT (upload) URL for direct browser uploads. `opts` may include `bucket` and `expiry` (seconds, default: 3600).
 
-### getBucketSize(client, bucket)
+### deleteObject(key, bucket?)
 
-Calculate total size of all objects in a bucket. Returns `{ totalSize, objectCount }`.
+Delete an object from S3. `bucket` defaults to `"crow-files"`.
+
+### listObjects(opts?)
+
+List objects in a bucket. `opts` may include `bucket` and `prefix`. Returns an array of `{ name, size, lastModified }`.
+
+### getBucketStats(bucket?)
+
+Get bucket statistics. Returns `{ fileCount, totalSizeBytes }`.
+
+### isAllowedMimeType(mimeType)
+
+Validate that a MIME type is allowed for upload (blocks executable types). Returns `boolean`.

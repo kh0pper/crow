@@ -37,6 +37,10 @@ Each post has:
 - **Content** — Markdown body, rendered to HTML on publish
 - **Tags** — Optional categories for organization
 - **Status** — `draft` or `published`
+- **Visibility** — Controls who can see the post:
+  - `private` — Only you (default)
+  - `public` — Anyone with the URL
+  - `peers` — Only connected Crow peers
 
 ## Publishing
 

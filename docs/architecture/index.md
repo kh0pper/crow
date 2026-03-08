@@ -11,7 +11,9 @@ Crow is an MCP (Model Context Protocol) platform — not a traditional web app. 
          │                      │                      │
    /memory/mcp            /research/mcp          /tools/mcp
    /memory/sse            /research/sse          /tools/sse
-   /sharing/mcp           /sharing/sse           /relay/*
+   /sharing/mcp           /storage/mcp           /blog-mcp/mcp
+   /sharing/sse           /storage/sse           /blog-mcp/sse
+                          /relay/*
          │                      │                      │
 ┌────────┴──────────────────────┴──────────────────────┴───────────────┐
 │  Crow Gateway (Express + OAuth 2.1)                                  │
@@ -21,42 +23,48 @@ Crow is an MCP (Model Context Protocol) platform — not a traditional web app. 
 │  ├── crow-research server (research pipeline + APA citations)        │
 │  ├── crow-sharing server (P2P sharing, Hyperswarm, Nostr messaging)  │
 │  │    └── peer relay endpoints (/relay/store, /relay/fetch)          │
+│  ├── crow-storage server (S3-compatible file storage via MinIO)      │
+│  ├── crow-blog server (blogging platform, Markdown, RSS/Atom)        │
 │  └── proxy server → spawns external MCP servers on demand            │
 │       ├── GitHub, Brave Search, Slack, Notion, Trello                │
 │       ├── Discord, Canvas LMS, Microsoft Teams                       │
 │       └── Google Workspace, Zotero, arXiv, Render                    │
 └──────────────────────────────┬───────────────────────────────────────┘
                                │
-                         ┌─────┴─────┐
-                         │  SQLite   │
-                         │ (Turso)   │
-                         └───────────┘
+                        ┌──────┴───────┐
+                        │    SQLite    │
+                        │ (local file  │
+                        │  or Turso)   │
+                        └──────────────┘
 ```
 
 ## Three Layers
 
 ### 1. Custom MCP Servers (`servers/`)
 
-Three Node.js servers exposing tools over MCP. All share a single SQLite database.
+Five Node.js servers exposing tools over MCP. All share a single SQLite database.
 
 - **[Memory Server](./memory-server)** — Persistent memory with full-text search (FTS5), categories, importance scoring, and tags
 - **[Research Server](./research-server)** — Research pipeline with projects, sources (auto-APA citation), notes, verification tracking, and bibliography generation
 - **[Sharing Server](./sharing-server)** — P2P sharing protocol with Hyperswarm discovery, Hypercore data sync, Nostr messaging, and peer relay support
+- **[Storage Server](./storage-server)** — S3-compatible file storage with MinIO, upload, presigned URLs, quota management
+- **[Blog Server](./blog-server)** — Blogging platform with Markdown rendering, RSS/Atom feeds, themes, and export
 
 ### 2. HTTP Gateway (`servers/gateway/`)
 
-Express server that wraps all three MCP servers with HTTP transports + OAuth 2.1. Supports:
+Express server that wraps all five MCP servers with HTTP transports + OAuth 2.1. Supports:
 
 - **Streamable HTTP** — Modern transport for Claude, Gemini, Grok, Cursor, etc.
 - **SSE** — Legacy transport for ChatGPT compatibility
 - **OAuth 2.1** — Dynamic Client Registration for secure access
 - **Proxy** — Spawns and aggregates external MCP servers
+- **Dashboard** — Server-rendered HTML UI at `/dashboard` with password auth, session cookies, and panel registry
 
 See [Gateway](./gateway) for details.
 
 ### 3. Skills (`skills/`)
 
-24 markdown files that serve as behavioral prompts. Not code — they define workflows, trigger patterns, and integration logic. Loaded by Claude on demand.
+30 markdown files that serve as behavioral prompts. Not code — they define workflows, trigger patterns, and integration logic. Loaded by Claude on demand.
 
 See [Skills](../skills/) for the full list.
 
@@ -71,14 +79,18 @@ servers/research/server.js → createResearchServer()  → McpServer
 servers/research/index.js  → stdio transport
 servers/sharing/server.js  → createSharingServer()   → McpServer
 servers/sharing/index.js   → stdio transport
-servers/gateway/index.js   → Express + HTTP/SSE transports (all three servers)
+servers/storage/server.js  → createStorageServer()   → McpServer
+servers/storage/index.js   → stdio transport
+servers/blog/server.js     → createBlogServer()      → McpServer
+servers/blog/index.js      → stdio transport
+servers/gateway/index.js   → Express + HTTP/SSE transports (all five servers)
 ```
 
 ## Database
 
 Uses `@libsql/client` which supports both:
 
-- **Local**: SQLite file at `data/crow.db`
+- **Local**: SQLite file at `~/.crow/data/crow.db`
 - **Cloud**: [Turso](https://turso.tech) with `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN`
 
 Key tables:
@@ -90,6 +102,10 @@ Key tables:
 - `shared_items` — Tracking of sent/received shares with permissions
 - `messages` — Local cache of Nostr messages with read status
 - `relay_config` — Configured Nostr relays and peer relays
+- `storage_files` — S3 object metadata (key, name, MIME, size, bucket)
+- `blog_posts` — Blog content with slug, status, visibility, tags, cover image
+- `blog_posts_fts` — FTS5 index over blog posts with sync triggers
+- `dashboard_settings` — Key-value store for dashboard config
 
 ## Behavioral Context (crow.md)
 

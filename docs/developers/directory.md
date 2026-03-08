@@ -6,19 +6,25 @@ Community-contributed integrations, skills, and bundles for the Crow AI Platform
 
 | Name | Author | Description | Install | Status |
 |------|--------|-------------|---------|--------|
-| *Be the first contributor!* | — | [Submit an integration →](https://github.com/kh0pper/crow/issues/new?template=integration-request.md) | — | — |
+| **Obsidian** | Crow | Obsidian vault search, note reading, research sync | `OBSIDIAN_VAULT_PATH` in `.env` | Official |
+| **Home Assistant** | Crow | Smart home device control with safety checkpoints | `HA_URL` + `HA_TOKEN` in `.env` | Official |
+| *Your integration here* | — | [Submit an integration →](https://github.com/kh0pper/crow/issues/new?template=integration-request.md) | — | — |
 
 ## Skills
 
 | Name | Author | Description | Triggers | Status |
 |------|--------|-------------|----------|--------|
-| *Be the first contributor!* | — | [Propose a skill →](https://github.com/kh0pper/crow/issues/new?template=skill-proposal.md) | — | — |
+| **bug-report** | Crow | Bug/feature reporting — works with or without GitHub | "report bug", "feature request", "found a bug" | Official |
+| *Your skill here* | — | [Propose a skill →](https://github.com/kh0pper/crow/issues/new?template=skill-proposal.md) | — | — |
 
 ## Bundles
 
-| Name | Author | Description | Integrations | Status |
-|------|--------|-------------|--------------|--------|
-| *Be the first contributor!* | — | [Create a bundle →](./bundles) | — | — |
+| Name | Author | Description | Type | Status |
+|------|--------|-------------|------|--------|
+| **Ollama** | Crow | Local AI models for embeddings, summarization, classification | Docker | Official |
+| **Nextcloud** | Crow | File sync via WebDAV mount (v1: files only) | Docker | Official |
+| **Immich** | Crow | Photo library search, album management (custom MCP server) | Docker + MCP | Official |
+| *Your bundle here* | — | [Create a bundle →](./bundles) | — | — |
 
 ---
 
