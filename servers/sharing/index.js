@@ -10,6 +10,14 @@
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createSharingServer } from "./server.js";
+import { createDbClient, verifyDb } from "../db.js";
+
+try {
+  await verifyDb(createDbClient());
+} catch (err) {
+  console.error(`Error: ${err.message}`);
+  process.exit(1);
+}
 
 const server = createSharingServer();
 const transport = new StdioServerTransport();

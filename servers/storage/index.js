@@ -9,6 +9,14 @@
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createStorageServer } from "./server.js";
+import { createDbClient, verifyDb } from "../db.js";
+
+try {
+  await verifyDb(createDbClient());
+} catch (err) {
+  console.error(`Error: ${err.message}`);
+  process.exit(1);
+}
 
 const server = createStorageServer();
 const transport = new StdioServerTransport();

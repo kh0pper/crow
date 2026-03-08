@@ -4,7 +4,7 @@ layout: home
 hero:
   name: Crow AI Platform
   text: Memory, research, and encrypted sharing across every AI platform
-  tagline: Start in Claude, continue in ChatGPT, pick up in Gemini. Share memories, research, and messages directly with other Crow users — end-to-end encrypted, no central server.
+  tagline: Give your AI a permanent memory, research tools, and a blog — works with Claude, ChatGPT, Gemini, Cursor, and more.
   image:
     src: /crow-hero.svg
     alt: Crow AI Platform
@@ -17,6 +17,10 @@ hero:
       link: /guide/sharing
 
 features:
+  - icon:
+      src: /icon-platforms.svg
+    title: What is Crow?
+    details: A server that gives your AI assistant superpowers — persistent memory, research tools, a blog, and file storage. It speaks a standard protocol (MCP) that all major AI platforms understand, so you're never locked in.
   - icon:
       src: /icon-platforms.svg
     title: Hop Between Platforms

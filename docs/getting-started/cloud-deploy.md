@@ -68,3 +68,20 @@ Add API keys for external services in your Render dashboard under **Environment*
 See the full list on the [Integrations](../integrations/) page.
 
 After adding keys, Render restarts automatically. Refresh your `/setup` page to confirm they're connected.
+
+## Verify and Connect Your AI
+
+Check that everything is working:
+
+```bash
+curl https://your-service.onrender.com/health
+```
+
+Visit `/setup` on your deployed URL to see integration status and endpoint URLs.
+
+**Try it out** — after connecting your AI platform, say:
+
+> "Remember that today is my first day using Crow"
+> "What do you remember?"
+
+Now connect your AI: [Claude](/platforms/claude) · [ChatGPT](/platforms/chatgpt) · [All platforms](/platforms/)

@@ -106,6 +106,12 @@ log("Want to generate Claude Desktop config? Run: node scripts/generate-desktop-
 
 header("Setup Complete");
 
+// Detect deployment type
+const isTurso = !!process.env.TURSO_DATABASE_URL;
+const home = process.env.HOME || process.env.USERPROFILE || "";
+const isCrowOS = home && existsSync(resolve(home, ".crow", "app", "package.json"));
+const isGateway = isTurso || isCrowOS;
+
 // Build dynamic server list from registry
 const totalServers = CORE_SERVERS.length + EXTERNAL_SERVERS.length;
 const coreList = CORE_SERVERS.map(s => `  - ${s.name.padEnd(18)} ${s.description}`).join("\n");
@@ -124,20 +130,35 @@ const extSections = [
   return `  ${label}:\n` + items.map(s => `  - ${s.name.padEnd(18)} ${s.description}`).join("\n");
 }).filter(Boolean).join("\n\n");
 
-console.log(`
-Next steps:
-  1. Edit .env with your API keys (see .env.example for details)
-     Or run 'node scripts/wizard.js' for guided setup
-  2. Run 'npm run mcp-config' to regenerate .mcp.json after editing .env
-  3. Run 'claude' in this directory to start using the platform
-  4. The AI will automatically load CLAUDE.md and .mcp.json
+if (isGateway) {
+  console.log(`
+What to do next:
+  1. Start the gateway:        npm run gateway
+  2. View integration status:  http://localhost:3001/setup
+  3. Verify everything works:  npm run check
 
-For Claude Desktop users:
-  Run 'node scripts/generate-desktop-config.js' to auto-configure
+Core servers (memory, research, sharing, blog) are ready — no API keys needed.
+Add integrations later by editing .env, then run: npm run mcp-config
+`);
+} else {
+  console.log(`
+What to do next:
+  1. Start Claude Code:        claude
+  2. Or Claude Desktop:        npm run desktop-config
+  3. Verify everything works:  npm run check
 
-Available MCP servers (${totalServers} total):
+Core servers (memory, research, sharing, blog) are ready — no API keys needed.
+Add integrations later by editing .env, then run: npm run mcp-config
+`);
+}
+
+console.log(`Available MCP servers (${totalServers} total):
   Built-in:
 ${coreList}
 
 ${extSections}
+
+First thing to try after connecting your AI:
+  "Remember that today is my first day using Crow"
+  "What do you remember?"
 `);
