@@ -12,6 +12,7 @@ npm run memory-server    # Start crow-memory MCP server (stdio)
 npm run research-server  # Start crow-research MCP server (stdio)
 npm run sharing-server   # Start crow-sharing MCP server (stdio)
 npm run gateway          # Start HTTP gateway (Express, port 3001)
+npm run mcp-config       # Generate .mcp.json from .env (only configured servers)
 npm run desktop-config   # Generate Claude Desktop config JSON
 npm run identity         # Display your Crow ID and public keys
 npm run identity:export  # Export encrypted identity for device migration
@@ -91,7 +92,7 @@ All FTS sync is handled by SQLite triggers defined in `init-db.js`. If you chang
 
 ### MCP configuration
 
-`.mcp.json` at project root configures all MCP servers Claude can use. Custom servers use `node` command; external ones use `npx`/`uvx`. Environment variables are referenced with `${VAR_NAME}` syntax and loaded from `.env`.
+`.mcp.json` is **generated** — run `npm run mcp-config` after editing `.env`. It only includes servers whose required env vars are set. The server registry lives in `scripts/server-registry.js`. See `.mcp.json.example` for the full reference with all servers.
 
 ### Key dependencies
 
@@ -117,10 +118,11 @@ Node.js >= 18 required. ESM modules (`"type": "module"` in package.json).
 
 ### Adding a new external MCP server
 
-1. Add config to `.mcp.json` with env var references
+1. Add server definition to `scripts/server-registry.js` (`EXTERNAL_SERVERS` array)
 2. Add env vars to `.env.example`
-3. Create a skill file in `skills/` describing the workflow
-4. Add trigger patterns to `skills/superpowers.md` trigger table
+3. Run `npm run mcp-config` to regenerate `.mcp.json`
+4. Create a skill file in `skills/` describing the workflow
+5. Add trigger patterns to `skills/superpowers.md` trigger table
 
 ### Adding a new skill
 

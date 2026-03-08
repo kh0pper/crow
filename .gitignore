@@ -3,4 +3,5 @@ data/*.db
 data/*.db-wal
 data/*.db-shm
 .env
+.mcp.json
 *.log

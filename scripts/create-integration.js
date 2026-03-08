@@ -51,15 +51,19 @@ async function main() {
   args: ["-y", "${npmPackage}"],
 }`);
 
-  // 2. .mcp.json entry
-  console.log("\n--- 2. Add to .mcp.json ---\n");
-  console.log(`"${serviceId}": {
-  "command": "npx",
-  "args": ["-y", "${npmPackage}"],
-  "env": {
-    "${envVarName}": "\${${envVarName}}"
-  }
+  // 2. Add to server registry
+  console.log("\n--- 2. Add to scripts/server-registry.js EXTERNAL_SERVERS ---\n");
+  console.log(`{
+  name: "${serviceId}",
+  command: "npx",
+  args: ["-y", "${npmPackage}"],
+  envKeys: ["${envVarName}"],
+  envMap: { ${envVarName}: "${envVarName}" },
+  mcpEnv: { ${envVarName}: "\${${envVarName}}" },
+  description: "Requires ${envVarName}",
+  category: "productivity",
 }`);
+  console.log("\nThen run 'npm run mcp-config' to regenerate .mcp.json.");
 
   // 3. .env.example
   console.log("\n--- 3. Add to .env.example ---\n");
