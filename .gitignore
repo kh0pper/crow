@@ -5,3 +5,4 @@ data/*.db-shm
 .env
 .mcp.json
 *.log
+.worktrees/
