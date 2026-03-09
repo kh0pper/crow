@@ -88,4 +88,8 @@ Visit `/setup` on your deployed URL to see integration status and endpoint URLs.
 > "Remember that today is my first day using Crow"
 > "What do you remember?"
 
+::: tip Many integrations?
+If you have several integrations enabled, use the `/router/mcp` endpoint instead of connecting each server individually. It consolidates all tools into 7 category tools, reducing context window usage by ~75%. See the [Context & Performance guide](/guide/context-performance).
+:::
+
 Now connect your AI: [Claude](/platforms/claude) · [ChatGPT](/platforms/chatgpt) · [All platforms](/platforms/)

@@ -10,6 +10,7 @@
  */
 
 import { getProxyStatus } from "./proxy.js";
+import { connectedServers } from "./proxy.js";
 import { isPasswordSet } from "./dashboard/auth.js";
 
 /**
@@ -143,6 +144,36 @@ export async function setupPageHandler(req, res) {
     </div>
   </div>
 
+  ${(() => {
+    const coreTools = 49;
+    let externalTools = 0;
+    for (const [, entry] of connectedServers) {
+      if (entry.status === "connected") externalTools += entry.tools.length;
+    }
+    const totalTools = coreTools + externalTools;
+    const estimatedTokens = totalTools * 200;
+    const routerDisabled = process.env.CROW_DISABLE_ROUTER === "1";
+    const showWarning = totalTools > 30;
+    return `
+  <div class="section">
+    <div class="section-title">Context Usage</div>
+    <div class="card" style="border-left: 3px solid ${showWarning ? "#ff9f0a" : "#34c759"}">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+        <div>
+          <div class="card-name">${totalTools} tools loaded</div>
+          <div class="card-desc">${coreTools} core + ${externalTools} external &mdash; ~${(estimatedTokens / 1000).toFixed(1)}K tokens of context</div>
+        </div>
+        ${!routerDisabled ? `<div style="font-size:12px;background:#e8f5e9;color:#2e7d32;padding:4px 10px;border-radius:6px">Router available</div>` : ""}
+      </div>
+      ${showWarning ? `
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid #f0f0f0;font-size:13px;color:#86868b">
+        <strong style="color:#ff9f0a">Tip:</strong> With ${totalTools} tools, consider using the <strong>Router endpoint</strong>
+        (<code>/router/mcp</code>) to reduce context usage to just 7 tools (~2.5K tokens).
+      </div>` : ""}
+    </div>
+  </div>`;
+  })()}
+
   ${isCrowOS && !passwordConfigured ? `
   <div class="section">
     <div class="section-title">Step 1: Set Dashboard Password</div>
@@ -265,11 +296,19 @@ export async function setupPageHandler(req, res) {
     </div>
   </div>
 
-  ${renderUrl ? `
+  ${gatewayUrl ? `
   <div class="section">
     <div class="section-title">MCP Endpoint URLs</div>
     <div class="instructions">
       <p style="margin-bottom:8px">Use these URLs to connect from any MCP-compatible AI platform:</p>
+
+      ${process.env.CROW_DISABLE_ROUTER !== "1" ? `
+      <p style="font-weight:600;font-size:15px;margin-top:16px">Router (Recommended &mdash; 7 tools instead of 49+)</p>
+      <p style="font-size:12px;color:#86868b;margin-top:2px">Streamable HTTP (Claude, Gemini, Grok, Cursor, Windsurf, Cline, Claude Code)</p>
+      <div class="connector-url">${gatewayUrl}/router/mcp</div>
+      <p style="font-size:12px;color:#86868b;margin-top:8px">SSE (ChatGPT)</p>
+      <div class="connector-url">${gatewayUrl}/router/sse</div>
+      ` : ""}
 
       <p style="font-weight:600;font-size:15px;margin-top:16px">Memory</p>
       <p style="font-size:12px;color:#86868b;margin-top:2px">Streamable HTTP (Claude, Gemini, Grok, Cursor, Windsurf, Cline, Claude Code)</p>

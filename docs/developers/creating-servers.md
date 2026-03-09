@@ -239,3 +239,13 @@ node servers/your-server/index.js
 ```
 
 Run `npm run mcp-config` and check `.mcp.json` to confirm your server appears.
+
+## Router Compatibility
+
+Custom servers are automatically discoverable through the router's `crow_tools` category when added to the gateway. The router consolidates all tools into category-based dispatch, so your server's tools will be accessible without any additional configuration.
+
+Best practices for router compatibility:
+
+- **Keep tool descriptions concise** — they appear in compressed manifests returned by `crow_discover`, so shorter descriptions reduce context usage
+- **Test with both direct and router modes** — verify your tools work when called directly via `/your-server/mcp` and when dispatched through `/router/mcp`
+- **Use clear tool names** — prefix with `crow_` followed by a descriptive name, since the router groups tools by category

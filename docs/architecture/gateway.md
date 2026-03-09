@@ -124,6 +124,18 @@ No authentication required — doesn't expose secrets.
 - **Rate limiting** is not built into the gateway — rely on your hosting provider or a reverse proxy for rate limiting in production
 - The **`/crow.md` endpoint** is protected by OAuth when auth is enabled, since it exposes behavioral context
 
+## Router Mode
+
+The `/router/mcp` endpoint exposes 7 consolidated category tools instead of the full 49+ tools from all servers. This reduces context window usage by approximately 75%.
+
+Each category tool (`crow_memory`, `crow_research`, `crow_sharing`, `crow_storage`, `crow_blog`, `crow_tools`, `crow_discover`) dispatches to the underlying server via an in-process MCP Client. The `crow_discover` tool returns full schemas on demand, so clients can inspect available actions without loading all tool definitions upfront.
+
+Router mode is backward compatible — existing per-server endpoints (`/memory/mcp`, `/research/mcp`, etc.) remain unchanged and continue to work as before. The router is an additional endpoint, not a replacement.
+
+To disable router mode, set the environment variable `CROW_DISABLE_ROUTER=1`.
+
+For the full reference, see [Context Management](/architecture/context-management).
+
 ## Health Check
 
 `GET /health` returns JSON status:

@@ -10,6 +10,7 @@
  *
  * Routes:
  *   POST|GET|DELETE /{server}/mcp  — Streamable HTTP (memory, research, sharing, storage, blog, tools)
+ *   POST|GET|DELETE /router/mcp   — Consolidated router (7 tools instead of 49+, ~75% context reduction)
  *   GET  /{server}/sse             — SSE transport init
  *   POST /{server}/messages        — SSE message handling
  *   POST /storage/upload           — Multipart file upload
@@ -43,6 +44,7 @@ import { generateCrowContext } from "../memory/crow-context.js";
 import { createDbClient } from "../db.js";
 import { createOAuthProvider, initOAuthTables } from "./auth.js";
 import { initProxyServers, createProxyServer, getProxyStatus } from "./proxy.js";
+import { createRouterServer } from "./router.js";
 import { setupPageHandler } from "./setup-page.js";
 import { SessionManager } from "./session-manager.js";
 import { mountMcpServer } from "./routes/mcp.js";
@@ -138,10 +140,20 @@ app.get("/health", async (req, res) => {
   } catch {}
   servers.push("crow-blog");
 
+  const externalToolCount = connectedTools.reduce((sum, s) => sum + s.toolCount, 0);
+  const coreToolCount = 49; // 12 memory + 12 research + 8 sharing + 5 storage + 12 blog
+  const routerDisabled = process.env.CROW_DISABLE_ROUTER === "1";
+
   res.json({
     status: "ok",
     servers,
     externalServers: connectedTools.map((s) => ({ id: s.id, name: s.name, tools: s.toolCount })),
+    toolCounts: {
+      core: coreToolCount,
+      external: externalToolCount,
+      total: coreToolCount + externalToolCount,
+      routerMode: routerDisabled ? null : 7,
+    },
     auth: !noAuth,
   });
 });
@@ -252,6 +264,12 @@ mountMcpServer(app, "/tools", createProxyServer, sessionManager, authMiddleware)
 // Also mount at /mcp for single-server compatibility (uses memory)
 mountMcpServer(app, "", createMemoryServer, sessionManager, authMiddleware);
 
+// --- Mount Router (consolidated endpoint, ~75% context reduction) ---
+if (process.env.CROW_DISABLE_ROUTER !== "1") {
+  mountMcpServer(app, "/router", createRouterServer, sessionManager, authMiddleware);
+  console.log("Router server mounted (7 tools instead of 49+)");
+}
+
 // --- Mount Storage Server (conditional) ---
 try {
   const { createStorageServer } = await import("../storage/server.js");
@@ -320,6 +338,9 @@ app.listen(PORT, "0.0.0.0", (error) => {
   console.log(`    Research: POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/research/mcp`);
   console.log(`    Sharing:  POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/sharing/mcp`);
   console.log(`    Tools:    POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/tools/mcp`);
+  if (process.env.CROW_DISABLE_ROUTER !== "1") {
+    console.log(`    Router:   POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/router/mcp  (7 tools, recommended)`);
+  }
   console.log(`  SSE (2024-11-05):`);
   console.log(`    Memory:   GET  ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/memory/sse`);
   console.log(`    Research: GET  ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/research/sse`);

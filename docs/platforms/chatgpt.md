@@ -60,6 +60,16 @@ GET https://your-gateway.onrender.com/crow.md?platform=chatgpt
 
 Any memories you store in ChatGPT are instantly available from Claude, Gemini, or any other connected platform. See the [Cross-Platform Guide](/guide/cross-platform) for more details.
 
+## Context Optimization
+
+ChatGPT connects via the gateway. If you have many integrations enabled, consider using the `/router/mcp` endpoint instead of connecting each server individually. The router consolidates 49+ tools into 7 category tools, reducing context window usage:
+
+```
+https://your-gateway.onrender.com/router/sse
+```
+
+See the [Context & Performance guide](/guide/context-performance) for more details.
+
 ## Limitations
 
 - ChatGPT's MCP support may vary by plan and region

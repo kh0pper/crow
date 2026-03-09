@@ -16,6 +16,7 @@ npm run blog-server      # Start crow-blog MCP server (stdio)
 npm run gateway          # Start HTTP gateway (Express, port 3001)
 npm run check            # Verify database, config, and integration status
 npm run mcp-config       # Generate .mcp.json from .env (only configured servers)
+npm run mcp-config -- --combined  # Generate with single crow-core server instead of 4 individual
 npm run desktop-config   # Generate Claude Desktop config JSON
 npm run identity         # Display your Crow ID and public keys
 npm run identity:export  # Export encrypted identity for device migration
@@ -52,6 +53,7 @@ node servers/research/index.js  # Same
 node servers/sharing/index.js   # Same (P2P sharing server)
 node servers/storage/index.js   # Same (requires MinIO for tools to work, but starts without)
 node servers/blog/index.js      # Same (blog server)
+node servers/core/index.js      # Same (combined server with on-demand activation)
 node servers/gateway/index.js --no-auth  # HTTP gateway without OAuth (blocked in production), check http://localhost:3001/health
 ```
 
@@ -68,7 +70,7 @@ This is an MCP (Model Context Protocol) platform. The AI is the primary interfac
    - `servers/storage/` — S3-compatible file storage: upload, list, presigned URLs, delete, quota management (requires MinIO)
    - `servers/blog/` — Blogging platform: create, edit, publish, themes, RSS/Atom, export, share posts
 
-2. **HTTP Gateway** (`servers/gateway/`) — Express server that wraps all MCP servers with Streamable HTTP + SSE transports + OAuth 2.1. Includes proxy layer for external MCP servers, public blog routes, dashboard UI, peer relay, and setup page. Modularized into Express routers (`routes/mcp.js`, `routes/blog-public.js`, `routes/storage-http.js`, `dashboard/`).
+2. **HTTP Gateway** (`servers/gateway/`) — Express server that wraps all MCP servers with Streamable HTTP + SSE transports + OAuth 2.1. Includes proxy layer for external MCP servers, **tool router** (`/router/mcp` — 7 tools instead of 49+), public blog routes, dashboard UI, peer relay, and setup page. Modularized into Express routers (`routes/mcp.js`, `routes/blog-public.js`, `routes/storage-http.js`, `dashboard/`).
 
 3. **Dashboard** (`servers/gateway/dashboard/`) — Server-side rendered HTML dashboard with Dark Editorial design. Password auth, session cookies, panel registry. Built-in panels: Messages, Blog, Files, Extensions, Settings. Third-party panels via `~/.crow/panels/`.
 
@@ -106,8 +108,12 @@ servers/gateway/routes/storage-http.js → File upload/download routes
 servers/gateway/dashboard/     → Dashboard UI (auth, layout, panels)
 servers/gateway/auth.js        → OAuth 2.1 provider (CrowOAuthProvider, SQLite-backed)
 servers/gateway/proxy.js       → Proxy layer for external MCP servers
+servers/gateway/router.js      → Tool router (7 category tools, ~75% context reduction)
+servers/gateway/tool-manifests.js → Static tool manifests for router descriptions
 servers/gateway/setup-page.js  → Browser-based setup/configuration page (first-run wizard for Crow OS)
 servers/gateway/integrations.js → Registry of available integrations
+servers/core/server.js         → Combined on-demand server (createCoreServer, 15 startup tools)
+servers/core/index.js          → stdio transport for crow-core
 bundles/obsidian/              → Obsidian vault add-on (external mcp-obsidian server)
 bundles/home-assistant/        → Home Assistant add-on (external hass-mcp server)
 bundles/ollama/                → Ollama local AI add-on (Docker + skill)
@@ -144,7 +150,13 @@ All FTS sync is handled by SQLite triggers defined in `init-db.js`. If you chang
 
 ### MCP configuration
 
-`.mcp.json` is **generated** — run `npm run mcp-config` after editing `.env`. It only includes servers whose required env vars are set. The server registry lives in `scripts/server-registry.js`. See `.mcp.json.example` for the full reference with all servers.
+`.mcp.json` is **generated** — run `npm run mcp-config` after editing `.env`. It only includes servers whose required env vars are set. The server registry lives in `scripts/server-registry.js`. See `.mcp.json.example` for the full reference with all servers. Use `npm run mcp-config -- --combined` to generate a single `crow-core` entry instead of 4 individual core servers.
+
+### Context management
+
+The gateway includes a **tool router** at `/router/mcp` that exposes 7 category tools instead of 49+ individual tools (~75% context reduction). Each category tool dispatches to the underlying server via an in-process MCP Client + `InMemoryTransport`. The `crow_discover` tool returns full schemas on demand. Disable with `CROW_DISABLE_ROUTER=1`.
+
+For stdio deployments, **`crow-core`** (`servers/core/index.js`) starts with memory tools + 3 management tools (15 total). Other servers activate on demand via `crow_activate_server` / `crow_deactivate_server`, which toggles tool `enabled` state and sends `toolListChanged`. Default server configurable via `CROW_DEFAULT_SERVER` env var.
 
 ### Key dependencies
 
@@ -249,6 +261,7 @@ Consult `skills/superpowers.md` first — it routes user intent to the right ski
 - `add-ons.md` — Add-on browsing, installation, removal
 - `bug-report.md` — Bug/feature reporting (GitHub or memory fallback)
 - `onboarding-tour.md` — First-run platform tour for new users
+- `context-management.md` — Self-monitor context usage and suggest optimization
 
 Add-on skills (activated when corresponding add-on is installed):
 - `obsidian.md` — Obsidian vault search and research sync

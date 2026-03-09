@@ -85,6 +85,20 @@ export const CORE_SERVERS = [
 ];
 
 /**
+ * Combined core server — alternative to individual core servers.
+ * Uses on-demand activation to reduce context window usage.
+ * Generated when --combined flag is passed to generate-mcp-config.js.
+ */
+export const COMBINED_SERVER = {
+  name: "crow-core",
+  command: "node",
+  args: ["servers/core/index.js"],
+  description: "Combined server with on-demand activation (15 startup tools vs 49+)",
+  envKeys: [],
+  mcpEnv: { CROW_DB_PATH: "${CROW_DB_PATH:-./data/crow.db}" },
+};
+
+/**
  * Conditional core servers — included only when their env vars are set.
  * These are Crow's own servers that require external services.
  */

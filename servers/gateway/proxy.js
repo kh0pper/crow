@@ -13,8 +13,9 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { z } from "zod";
 import { INTEGRATIONS, isIntegrationConfigured, getSpawnEnv } from "./integrations.js";
 
-// Track connected servers for health checks
+// Track connected servers for health checks and router access
 const connectedServers = new Map(); // id → { client, process, tools }
+export { connectedServers };
 
 /**
  * Convert a JSON Schema property definition to a Zod schema.

@@ -141,3 +141,7 @@ Some sections (like `identity` and `memory-protocols`) are marked as **protected
 Because crow.md is generated from the database, any platform that loads it gets the same behavioral instructions. Platform-specific supplements (like CLAUDE.md for Claude Code) add to this shared foundation but don't replace it.
 
 For the full workflow, see the [Cross-Platform Guide](../guide/cross-platform).
+
+## Context Management
+
+Crow includes a smart tool loading system to reduce context window usage. The gateway router (`/router/mcp`) consolidates 49+ tools into 7 category tools (~75% context reduction). For stdio deployments, `crow-core` provides on-demand server activation. See the [Context Management architecture reference](/architecture/context-management) for details.
