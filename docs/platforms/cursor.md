@@ -79,6 +79,16 @@ Load Crow's shared behavioral context in Cursor:
 
 IDE platforms get minimal transparency output — only Tier 2 checkpoints. Memories and research stored from Cursor are shared with all other connected platforms. See the [Cross-Platform Guide](/guide/cross-platform).
 
+## Context Optimization
+
+Cursor uses stdio transport locally. For a lighter setup, `crow-core` provides a single combined entry point that activates servers on demand instead of running all of them simultaneously. Generate a combined config with:
+
+```bash
+npm run mcp-config -- --combined
+```
+
+This creates a single `crow-core` entry in `.mcp.json` instead of separate entries for each server. For remote deployments, the `/router/mcp` endpoint offers similar consolidation. See the [Context & Performance guide](/guide/context-performance) for details.
+
 ## Verification
 
 In Cursor's AI chat, try:

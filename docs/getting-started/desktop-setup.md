@@ -59,6 +59,10 @@ npm run check
 > "Remember that today is my first day using Crow"
 > "What do you remember?"
 
+## Reducing Context Usage
+
+By default, each Crow server is a separate entry in your Claude Desktop config. For fewer context tokens, use `npm run mcp-config -- --combined` to generate a single `crow-core` entry that activates servers on demand. See the [Context & Performance guide](/guide/context-performance) for details.
+
 ## Limitations
 
 - Only works with Claude Desktop (stdio transport)

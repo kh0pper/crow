@@ -69,6 +69,7 @@ export default defineConfig({
           { text: 'Gateway', link: '/architecture/gateway' },
           { text: 'Crow OS', link: '/architecture/crow-os' },
           { text: 'Portable Identity', link: '/architecture/portable-identity' },
+          { text: 'Context Management', link: '/architecture/context-management' },
         ],
       },
       {
@@ -80,6 +81,7 @@ export default defineConfig({
           { text: 'Dashboard', link: '/guide/dashboard' },
           { text: 'Sharing', link: '/guide/sharing' },
           { text: 'Social & Messaging', link: '/guide/social' },
+          { text: 'Context & Performance', link: '/guide/context-performance' },
         ],
       },
       {

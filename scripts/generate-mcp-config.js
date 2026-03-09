@@ -14,11 +14,12 @@
 
 import { writeFileSync } from "fs";
 import { resolve } from "path";
-import { CORE_SERVERS, CONDITIONAL_SERVERS, EXTERNAL_SERVERS, ROOT, loadEnv, resolveEnvValue } from "./server-registry.js";
+import { CORE_SERVERS, CONDITIONAL_SERVERS, EXTERNAL_SERVERS, COMBINED_SERVER, ROOT, loadEnv, resolveEnvValue } from "./server-registry.js";
 
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes("--dry-run");
 const STDOUT = args.includes("--stdout");
+const COMBINED = args.includes("--combined");
 
 function log(msg) {
   if (!STDOUT) console.log(`  ${msg}`);
@@ -42,15 +43,26 @@ function generate() {
     return args.map((a) => resolveEnvValue(a, env));
   }
 
-  // Core servers — always included
-  for (const server of CORE_SERVERS) {
-    const resolvedEnv = server.mcpEnv ? resolveEnvObj(server.mcpEnv) : {};
-    config.mcpServers[server.name] = {
-      command: server.command,
-      args: resolveArgs(server.args),
+  // Core servers — combined or individual
+  if (COMBINED) {
+    // Single crow-core server replaces all individual core servers
+    const resolvedEnv = COMBINED_SERVER.mcpEnv ? resolveEnvObj(COMBINED_SERVER.mcpEnv) : {};
+    config.mcpServers[COMBINED_SERVER.name] = {
+      command: COMBINED_SERVER.command,
+      args: resolveArgs(COMBINED_SERVER.args),
       ...(Object.keys(resolvedEnv).length > 0 ? { env: resolvedEnv } : {}),
     };
-    included.push(server.name);
+    included.push(`${COMBINED_SERVER.name} (combined)`);
+  } else {
+    for (const server of CORE_SERVERS) {
+      const resolvedEnv = server.mcpEnv ? resolveEnvObj(server.mcpEnv) : {};
+      config.mcpServers[server.name] = {
+        command: server.command,
+        args: resolveArgs(server.args),
+        ...(Object.keys(resolvedEnv).length > 0 ? { env: resolvedEnv } : {}),
+      };
+      included.push(server.name);
+    }
   }
 
   // Conditional core servers + external servers — include only if all envKeys are present

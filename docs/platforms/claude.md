@@ -58,6 +58,18 @@ To load Crow's full context at the start of a session:
 
 This gives Claude all of Crow's behavioral instructions — memory protocols, transparency rules, and any custom sections you've configured. See the [Cross-Platform Guide](/guide/cross-platform) for more details.
 
+## Context Optimization
+
+Claude Code supports `toolListChanged` notifications, making `crow-core` a good fit for local use — it activates servers on demand rather than loading all tools upfront.
+
+For Claude via the gateway, the `/router/mcp` endpoint reduces the tool count from 49+ to 7 consolidated category tools, significantly reducing context window usage. Instead of connecting each server individually, you can connect a single router endpoint:
+
+```
+https://your-gateway.onrender.com/router/mcp
+```
+
+See the [Context & Performance guide](/guide/context-performance) for more details.
+
 ## Tips
 
 - You can connect all five servers (memory, research, sharing, storage, blog) plus external tools simultaneously

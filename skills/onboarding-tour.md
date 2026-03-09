@@ -69,6 +69,16 @@ crow_store_memory({
 })
 ```
 
+### 5. Performance Tips
+
+If the user has multiple integrations or asks about performance:
+
+- Each integration adds tools that use AI context space — like papers on a desk
+- Start with the core servers, add integrations as you need them
+- If responses feel slow with many integrations, try the **router endpoint** (`/router/mcp`) — it consolidates all tools into 7 categories
+- For local/stdio setups, `crow-core` starts with just memory tools and activates others on demand
+- Check `/health` to see how many tools are loaded
+
 ## Don't
 
 - Don't overwhelm with every feature — keep it high-level

@@ -78,6 +78,14 @@ The FTS5 virtual tables and sync triggers are created by `init-db`. If search re
 - For remote HTTP: ensure the gateway URL is correct and accessible
 - Check the IDE's output/log panel for MCP-related errors
 
+## Context & Performance Issues
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Responses seem slow or low quality | Too many tools loaded, consuming context window | Check tool count via `/health`. Switch to the `/router/mcp` endpoint or `crow-core` to consolidate tools. |
+| Too many tools loaded | Each server exposes its full tool set | Use `/router/mcp` (gateway) or `crow-core` (stdio) to reduce from 49+ tools to 7 category tools. See the [Context & Performance guide](/guide/context-performance). |
+| Tool not found in router mode | The router uses category tools that dispatch to underlying servers | Use `crow_discover` to check available actions within a category. The tool may be accessible via a different category name. |
+
 ## Still Stuck?
 
 If you're spending more time on infrastructure than on your actual work, consider [managed hosting](./getting-started/managed-hosting) — a pre-configured Crow instance with zero setup for $5/mo.

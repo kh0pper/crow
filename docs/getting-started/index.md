@@ -53,6 +53,10 @@ After setup, your AI assistant will have:
 - **Blog platform** — publish posts with Markdown, RSS feeds, and themes
 - **Dashboard** — visual web interface for managing your Crow instance
 
+::: tip Running many integrations?
+See the [Context & Performance guide](/guide/context-performance) for ways to optimize tool loading and reduce context window usage.
+:::
+
 ## Requirements
 
 - A free [Render](https://render.com) account (for cloud deploy)

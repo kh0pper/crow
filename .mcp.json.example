@@ -1,4 +1,5 @@
 {
+  "_comment": "Individual core servers (default). For combined mode with on-demand activation, replace these 4 with crow-core below.",
   "mcpServers": {
     "crow-memory": {
       "command": "node",
@@ -21,6 +22,23 @@
         "CROW_DB_PATH": "./data/crow.db"
       }
     },
+    "crow-blog": {
+      "command": "node",
+      "args": ["servers/blog/index.js"],
+      "env": {
+        "CROW_DB_PATH": "./data/crow.db"
+      }
+    },
+
+    "_comment_combined": "Alternative: single combined server (generates with: npm run mcp-config -- --combined)",
+    "_crow-core": {
+      "command": "node",
+      "args": ["servers/core/index.js"],
+      "env": {
+        "CROW_DB_PATH": "./data/crow.db"
+      }
+    },
+
     "trello": {
       "command": "npx",
       "args": ["-y", "mcp-server-trello"],
