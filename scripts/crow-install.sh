@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Crow AI Platform — Installer Script
+# Crow — Installer Script
 #
 # Transforms a stock Raspberry Pi OS (or any Debian/Ubuntu) into a Crow appliance.
 #
@@ -48,14 +48,14 @@ if ! command -v sudo >/dev/null 2>&1; then
   exit 1
 fi
 
-header "Crow AI Platform Installer"
+header "Crow Installer"
 
 echo ""
 echo "  This script will install:"
 echo "    - Node.js ${NODE_MAJOR}"
 echo "    - Docker + Docker Compose"
 echo "    - Caddy (reverse proxy)"
-echo "    - Crow AI Platform"
+echo "    - Crow"
 echo "    - Security hardening (UFW + fail2ban)"
 echo ""
 read -p "  Continue? [Y/n] " -n 1 -r
@@ -191,7 +191,7 @@ header "Step 7/8: System Services"
 # Crow Gateway systemd service
 sudo tee /etc/systemd/system/crow-gateway.service > /dev/null << EOF
 [Unit]
-Description=Crow AI Platform Gateway
+Description=Crow Gateway
 After=network.target
 
 [Service]

@@ -81,22 +81,23 @@ This is an MCP (Model Context Protocol) platform. The AI is the primary interfac
 Each custom server has a **factory function** in `server.js` that returns a configured `McpServer` instance. The `index.js` files wire these to stdio transport. The gateway imports the same factories and wires them to HTTP transport via `routes/mcp.js`. This means all tool logic lives in `server.js` — the transport layer is separate.
 
 ```
-servers/memory/server.js       → createMemoryServer(dbPath?)  → McpServer
-servers/memory/crow-context.js → Shared crow.md context logic (used by both memory server and gateway)
+servers/memory/server.js       → createMemoryServer(dbPath?, options?) → McpServer
+servers/memory/crow-context.js → Shared crow.md context logic + condensed context for MCP instructions
 servers/memory/index.js        → stdio transport (used by .mcp.json)
-servers/research/server.js     → createResearchServer(dbPath?) → McpServer
+servers/shared/instructions.js → generateInstructions() — MCP instructions field generator
+servers/research/server.js     → createResearchServer(dbPath?, options?) → McpServer
 servers/research/index.js      → stdio transport (used by .mcp.json)
-servers/sharing/server.js      → createSharingServer(dbPath?) → McpServer
+servers/sharing/server.js      → createSharingServer(dbPath?, options?) → McpServer
 servers/sharing/index.js       → stdio transport (used by .mcp.json)
 servers/sharing/identity.js    → Key generation, Crow ID, invite codes, encryption
 servers/sharing/peer-manager.js → Hyperswarm discovery, connection management
 servers/sharing/sync.js        → Hypercore feed management, replication
 servers/sharing/nostr.js       → Nostr events, NIP-44 encryption, relay comms
 servers/sharing/relay.js       → Peer relay opt-in, store-and-forward
-servers/storage/server.js      → createStorageServer(dbPath?) → McpServer
+servers/storage/server.js      → createStorageServer(dbPath?, options?) → McpServer
 servers/storage/index.js       → stdio transport
 servers/storage/s3-client.js   → MinIO/S3 connection, bucket init, presigned URLs
-servers/blog/server.js         → createBlogServer(dbPath?) → McpServer
+servers/blog/server.js         → createBlogServer(dbPath?, options?) → McpServer
 servers/blog/index.js          → stdio transport
 servers/blog/renderer.js       → Markdown→HTML (marked + sanitize-html)
 servers/blog/rss.js            → RSS 2.0 + Atom feed generation
@@ -157,6 +158,30 @@ All FTS sync is handled by SQLite triggers defined in `init-db.js`. If you chang
 The gateway includes a **tool router** at `/router/mcp` that exposes 7 category tools instead of 49+ individual tools (~75% context reduction). Each category tool dispatches to the underlying server via an in-process MCP Client + `InMemoryTransport`. The `crow_discover` tool returns full schemas on demand. Disable with `CROW_DISABLE_ROUTER=1`.
 
 For stdio deployments, **`crow-core`** (`servers/core/index.js`) starts with memory tools + 3 management tools (15 total). Other servers activate on demand via `crow_activate_server` / `crow_deactivate_server`, which toggles tool `enabled` state and sends `toolListChanged`. Default server configurable via `CROW_DEFAULT_SERVER` env var.
+
+### Automatic behavioral context (MCP instructions)
+
+All servers deliver a condensed crow.md (~1KB) via the MCP `instructions` field during the connection handshake. This gives remote AI clients (Claude.ai, ChatGPT, etc.) behavioral guidance before any tool calls — no user action required.
+
+**How it works:** `generateInstructions()` in `servers/shared/instructions.js` queries 5 essential `crow_context` sections (identity, memory_protocol, session_protocol, transparency_rules, skills_reference), condenses them via `generateCondensedContext()` in `servers/memory/crow-context.js`, and returns a string. This is generated **once at startup** (gateway or stdio) and passed to factories via `options.instructions`. Falls back to a static ~500-byte string if the DB is unavailable.
+
+**Factory signature:** All server factories accept `(dbPath?, options?)` where `options.instructions` is passed to `new McpServer({...}, { instructions })`.
+
+**Router variant:** `generateInstructions({ routerStyle: true })` produces category-style tool names (`crow_memory action: "store_memory"`) instead of direct names.
+
+### MCP Prompts
+
+Servers register MCP prompts as on-demand skill equivalents for non-Claude-Code platforms:
+
+| Prompt | Registered On | Content |
+|--------|--------------|---------|
+| `session-start` | memory, router | Session start/end protocol from crow_context DB |
+| `crow-guide` | memory, router | Full crow.md (accepts `platform` arg) |
+| `research-guide` | research, router | Static research workflow text |
+| `blog-guide` | blog, router | Static blog publishing text |
+| `sharing-guide` | sharing, router | Static P2P sharing text |
+
+The router registers all 5 so clients at `/router/mcp` see everything.
 
 ### Key dependencies
 
@@ -219,13 +244,16 @@ Crow has an open developer program for community contributions. Full developer d
 
 ## AI Operational Context
 
-This section guides Claude's behavior when operating as the Crow AI assistant (not when developing the codebase).
+This section guides Claude's behavior when operating as the Crow assistant (not when developing the codebase).
 
 ### Cross-Platform Behavioral Context (crow.md)
 
 Crow's core behavioral instructions — identity, memory protocols, research protocols, session management, transparency rules, and key principles — are stored in the `crow_context` database table and served dynamically as **crow.md**. This makes the same behavioral context available across all platforms (Claude, ChatGPT, Gemini, Grok, Cursor, etc.).
 
-**Access methods:**
+**Automatic delivery:** A condensed version (~1KB) is sent via MCP `instructions` field during connection handshake. See "Automatic behavioral context" above.
+
+**On-demand access:**
+- MCP prompts: `session-start`, `crow-guide` (with `platform` arg), `research-guide`, `blog-guide`, `sharing-guide`
 - MCP tool: `crow_get_context` (with optional `platform` and `include_dynamic` params)
 - MCP resource: `crow://context`
 - HTTP endpoint: `GET /crow.md` (supports `?platform=` and `?dynamic=false`) — protected by auth middleware when OAuth is enabled

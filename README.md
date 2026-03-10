@@ -1,4 +1,4 @@
-# Crow AI Platform
+# Crow
 
 Persistent memory, research pipeline, encrypted P2P sharing, and 20+ integrations for your AI assistant. Built on the open [Model Context Protocol](https://modelcontextprotocol.io) standard.
 

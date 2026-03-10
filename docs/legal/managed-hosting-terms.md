@@ -6,7 +6,7 @@
 
 ## 1. Service Description
 
-Maestro Press provides managed hosting of the Crow AI Platform. Each customer receives an isolated Crow instance accessible at `username.crow.maestro.press`, running in a dedicated Docker container with a separate database. Up to 5 instances share a single server; capacity upgrades occur as demand grows.
+Maestro Press provides managed hosting of Crow. Each customer receives an isolated Crow instance accessible at `username.crow.maestro.press`, running in a dedicated Docker container with a separate database. Up to 5 instances share a single server; capacity upgrades occur as demand grows.
 
 ## 2. Account & Access
 
@@ -53,7 +53,7 @@ You may not use the service for:
 
 ## 8. Intellectual Property
 
-- **Crow is open source** — The Crow AI Platform is released under the MIT License. You may self-host it at any time.
+- **Crow is open source** — Crow is released under the MIT License. You may self-host it at any time.
 - **Your data is yours** — Maestro Press claims no ownership of your memories, research, blog posts, files, or any other data stored in your instance.
 
 ## 9. Limitation of Liability

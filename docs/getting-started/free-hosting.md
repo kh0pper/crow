@@ -162,7 +162,7 @@ sudo systemctl enable --now fail2ban
 ```bash
 sudo tee /etc/systemd/system/crow-gateway.service > /dev/null << EOF
 [Unit]
-Description=Crow AI Platform Gateway
+Description=Crow Gateway
 After=network.target
 
 [Service]

@@ -2,12 +2,12 @@
 layout: home
 
 hero:
-  name: Crow AI Platform
+  name: Crow
   text: Memory, research, and encrypted sharing across every AI platform
   tagline: Give your AI a permanent memory, research tools, and a blog — works with Claude, ChatGPT, Gemini, Cursor, and more.
   image:
     src: /crow-hero.svg
-    alt: Crow AI Platform
+    alt: Crow
   actions:
     - theme: brand
       text: Get Started

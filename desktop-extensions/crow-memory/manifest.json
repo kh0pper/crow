@@ -1,7 +1,7 @@
 {
   "name": "crow-memory",
   "version": "0.1.0",
-  "description": "Persistent memory with full-text search for Claude — part of the Crow AI Platform",
+  "description": "Persistent memory with full-text search for Claude — part of Crow",
   "server": {
     "command": "node",
     "args": ["servers/memory/index.js"],

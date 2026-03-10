@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Crow AI Platform — .mcp.json Generator
+ * Crow — .mcp.json Generator
  *
  * Generates .mcp.json dynamically from .env, including only servers
  * whose required env vars are set. Core servers are always included.

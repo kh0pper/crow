@@ -1,6 +1,6 @@
 # Contributing to Crow
 
-Thank you for your interest in contributing to the Crow AI Platform! This guide covers everything you need to get started.
+Thank you for your interest in contributing to Crow! This guide covers everything you need to get started.
 
 ## Ways to Contribute
 

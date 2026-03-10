@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Crow AI Platform — One-Line Installer
+# Crow — One-Line Installer
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/YOUR_USER/crow/main/scripts/install.sh | bash
@@ -15,7 +15,7 @@ INSTALL_DIR="${CROW_INSTALL_DIR:-$HOME/crow}"
 
 echo ""
 echo "================================================="
-echo "   Crow AI Platform — Installer"
+echo "   Crow — Installer"
 echo "================================================="
 echo ""
 
@@ -47,11 +47,11 @@ if [ -d "$INSTALL_DIR/.git" ]; then
   cd "$INSTALL_DIR"
   git pull --ff-only origin main 2>/dev/null || echo "  (using existing version)"
 else
-  if [ -f "package.json" ] && grep -q "crow-ai-platform" package.json 2>/dev/null; then
+  if [ -f "package.json" ] && grep -qE "crow-ai-platform|crow-platform" package.json 2>/dev/null; then
     echo "  Running from existing crow directory"
     INSTALL_DIR="$(pwd)"
   else
-    echo "  Cloning Crow AI Platform to $INSTALL_DIR..."
+    echo "  Cloning Crow to $INSTALL_DIR..."
     git clone "$REPO_URL" "$INSTALL_DIR"
     cd "$INSTALL_DIR"
   fi

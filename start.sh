@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Crow AI Platform — Linux Launcher
+# Crow — Linux Launcher
 # Make executable: chmod +x start.sh
 # Then double-click or run: ./start.sh
 
@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 
 echo ""
 echo "================================================="
-echo "   Crow AI Platform"
+echo "   Crow"
 echo "================================================="
 echo ""
 

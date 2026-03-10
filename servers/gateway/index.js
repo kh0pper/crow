@@ -206,7 +206,7 @@ if (!noAuth) {
     oauthMetadata,
     resourceServerUrl: serverUrl,
     scopesSupported: ["mcp:tools"],
-    resourceName: "Crow AI Platform",
+    resourceName: "Crow",
   }));
 
   // Introspection endpoint for token verification

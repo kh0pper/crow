@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Crow AI Platform — Build Desktop Extension Bundles (.mcpb)
+# Crow — Build Desktop Extension Bundles (.mcpb)
 #
 # Packages crow-memory and crow-research as .mcpb files
 # for one-click installation in Claude Desktop.

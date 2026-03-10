@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Crow AI Platform — Shared Server Registry
+ * Crow — Shared Server Registry
  *
  * Single source of truth for all MCP server definitions.
  * Used by generate-mcp-config.js, generate-desktop-config.js, and setup.js.

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Crow AI Platform — Web-Based Setup Wizard
+ * Crow — Web-Based Setup Wizard
  *
  * Launches a local web server with a friendly UI for configuring
  * integrations. No terminal prompts — everything happens in the browser.
@@ -41,7 +41,7 @@ function loadEnv() {
 
 function saveEnv(env) {
   const lines = [
-    "# Crow AI Platform - Environment Variables",
+    "# Crow - Environment Variables",
     "# Saved by setup wizard",
     "",
     `CROW_DB_PATH=${env.CROW_DB_PATH || "./data/crow.db"}`,
@@ -84,7 +84,7 @@ function buildHTML(env) {
       steps: [
         'Go to <a href="https://www.notion.so/my-integrations" target="_blank">notion.so/my-integrations</a>',
         'Click <strong>"+ New integration"</strong>',
-        "Give it a name (e.g., \"Crow AI\") and select your workspace",
+        "Give it a name (e.g., \"Crow Memory\") and select your workspace",
         'Click <strong>"Submit"</strong> → copy the <strong>Internal Integration Secret</strong>',
         "Paste it below",
         '<em>Important:</em> Open any Notion page you want Crow to access → click <strong>"..."</strong> → <strong>"Connect to"</strong> → select your integration',
@@ -98,7 +98,7 @@ function buildHTML(env) {
       steps: [
         'Go to <a href="https://api.slack.com/apps" target="_blank">api.slack.com/apps</a>',
         'Click <strong>"Create New App"</strong> → <strong>"From scratch"</strong>',
-        "Name it (e.g., \"Crow AI\") and pick your workspace",
+        "Name it (e.g., \"Crow Memory\") and pick your workspace",
         'Go to <strong>"OAuth & Permissions"</strong> in the sidebar',
         'Under <strong>"Bot Token Scopes"</strong>, add: <code>channels:history</code>, <code>channels:read</code>, <code>chat:write</code>, <code>users:read</code>',
         'Click <strong>"Install to Workspace"</strong> at the top → <strong>"Allow"</strong>',
@@ -129,7 +129,7 @@ function buildHTML(env) {
       steps: [
         'Go to <a href="https://github.com/settings/tokens?type=beta" target="_blank">github.com/settings/tokens</a>',
         'Click <strong>"Generate new token"</strong> (Fine-grained recommended)',
-        "Give it a name (e.g., \"Crow AI\") and set expiration",
+        "Give it a name (e.g., \"Crow Memory\") and set expiration",
         "Select which repositories to grant access to",
         'Under permissions, enable: <code>Issues</code> (Read/Write), <code>Pull requests</code> (Read/Write), <code>Contents</code> (Read)',
         'Click <strong>"Generate token"</strong> → copy it immediately',
@@ -177,7 +177,7 @@ function buildHTML(env) {
         "Log into your Canvas account",
         'Go to <strong>Account</strong> (left sidebar) → <strong>Settings</strong>',
         'Scroll to <strong>"Approved Integrations"</strong> → click <strong>"+ New Access Token"</strong>',
-        "Give it a purpose (e.g., \"Crow AI\") → Generate Token",
+        "Give it a purpose (e.g., \"Crow Memory\") → Generate Token",
         "Copy the token immediately (you won't see it again!)",
         "Paste both the token and your Canvas URL below",
       ],
@@ -284,7 +284,7 @@ function buildHTML(env) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Crow AI Platform — Setup</title>
+  <title>Crow — Setup</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -766,7 +766,7 @@ const server = createServer((req, res) => {
 
 server.listen(PORT, () => {
   const url = `http://localhost:${PORT}`;
-  console.log(`\n  Crow AI Setup Wizard running at: ${url}\n`);
+  console.log(`\n  Crow Setup Wizard running at: ${url}\n`);
 
   // Auto-open browser
   try {
