@@ -69,11 +69,9 @@ Connect Crow to [Windsurf](https://codeium.com/windsurf), the AI-powered IDE by 
 
 ## Cross-Platform Context
 
-Load Crow's shared behavioral context in Windsurf:
+Crow automatically delivers behavioral context when Windsurf connects — memory protocols and session management are active from the first message.
 
-> "Use the crow_get_context tool with platform set to windsurf"
-
-IDE platforms get minimal transparency output. Memories stored from Windsurf are shared with all other connected platforms. See the [Cross-Platform Guide](/guide/cross-platform).
+IDE platforms get minimal transparency output. MCP prompts (`session-start`, `crow-guide`, etc.) are available for deeper guidance. Memories stored from Windsurf are shared with all other connected platforms. See the [Cross-Platform Guide](/guide/cross-platform).
 
 ## Verification
 

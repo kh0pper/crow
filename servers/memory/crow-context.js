@@ -153,6 +153,97 @@ function getPlatformHint(platform) {
 }
 
 /**
+ * Generate a condensed version of crow.md for MCP instructions field.
+ *
+ * Extracts the 5 most critical sections (identity, memory_protocol,
+ * session_protocol, transparency_rules, skills_reference), condenses
+ * each to essential content, and returns a ~1.5KB string with generic
+ * [bracket] formatting suitable for any platform.
+ *
+ * @param {import("@libsql/client").Client} db
+ * @param {object} [options]
+ * @param {boolean} [options.routerStyle=false] - Use category tool names for router endpoint
+ * @returns {Promise<string|null>} Condensed context or null if unavailable
+ */
+export async function generateCondensedContext(db, { routerStyle = false } = {}) {
+  const essentialKeys = [
+    "identity",
+    "memory_protocol",
+    "session_protocol",
+    "transparency_rules",
+    "skills_reference",
+  ];
+
+  let sections;
+  try {
+    const result = await db.execute({
+      sql: "SELECT section_key, section_title, content FROM crow_context WHERE enabled = 1 AND section_key IN (?, ?, ?, ?, ?) ORDER BY sort_order ASC",
+      args: essentialKeys,
+    });
+    sections = result.rows;
+  } catch {
+    return null;
+  }
+
+  if (!sections || sections.length === 0) {
+    return null;
+  }
+
+  const parts = ["Crow — Behavioral Context\n"];
+
+  for (const section of sections) {
+    // Condense each section to its most essential content
+    const condensed = condenseSection(section.section_key, section.content, { routerStyle });
+    if (condensed) {
+      parts.push(condensed);
+    }
+  }
+
+  parts.push("\nUse the session-start or crow-guide prompts for full guidance.");
+
+  return parts.join("\n");
+}
+
+/**
+ * Condense a section to its essential content for the instructions field.
+ */
+function condenseSection(key, content, { routerStyle = false } = {}) {
+  if (!content) return null;
+
+  // Extract first meaningful paragraph or key lines
+  const lines = content.split("\n").filter((l) => l.trim());
+
+  switch (key) {
+    case "identity":
+      // First 2 sentences
+      return lines.slice(0, 2).join(" ").slice(0, 200);
+
+    case "session_protocol":
+      // Extract the session-start action items
+      return "Session protocol: On session start, call crow_recall_by_context with the user's first message. On session end, store important learnings with crow_store_memory.";
+
+    case "memory_protocol":
+      // Core memory rules
+      return "Memory: Categories: general, project, preference, person, process, decision, learning, goal. Importance 1-10 (8+ = high priority). Search before storing duplicates. Update existing memories when information changes.";
+
+    case "transparency_rules":
+      // Generic bracket format (works on all platforms)
+      return "Transparency: Show [crow: action] notes for autonomous actions (Tier 1). Ask before high-impact actions like deleting memories or sharing data (Tier 2).";
+
+    case "skills_reference": {
+      // Condensed intent-to-tool routing
+      if (routerStyle) {
+        return "Capabilities: crow_memory (store/search/recall memories), crow_research (projects/sources/citations), crow_blog (create/publish posts), crow_sharing (P2P sharing/messaging), crow_storage (file upload/download), crow_tools (external integrations). Use crow_discover for full action schemas.";
+      }
+      return "Capabilities: Memory (crow_store_memory, crow_search_memories, crow_recall_by_context), Research (crow_create_project, crow_add_source, crow_generate_bibliography), Blog (crow_create_post, crow_publish_post), Sharing (crow_generate_invite, crow_share, crow_send_message), Storage (crow_upload_file, crow_list_files).";
+    }
+
+    default:
+      return lines.slice(0, 2).join(" ").slice(0, 150);
+  }
+}
+
+/**
  * Static fallback when crow_context table doesn't exist.
  */
 function getFallbackDocument() {

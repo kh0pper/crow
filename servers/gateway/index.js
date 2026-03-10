@@ -48,6 +48,7 @@ import { createRouterServer } from "./router.js";
 import { setupPageHandler } from "./setup-page.js";
 import { SessionManager } from "./session-manager.js";
 import { mountMcpServer } from "./routes/mcp.js";
+import { generateInstructions } from "../shared/instructions.js";
 
 const PORT = parseInt(process.env.PORT || process.env.CROW_GATEWAY_PORT || "3001", 10);
 const noAuth = process.argv.includes("--no-auth");
@@ -254,26 +255,31 @@ if (authMiddleware) {
   app.get("/crow.md", crowMdHandler);
 }
 
+// --- Generate MCP Instructions (pre-computed, reused across all sessions) ---
+
+const instructions = await generateInstructions();
+const routerInstructions = await generateInstructions({ routerStyle: true });
+
 // --- Mount Core MCP Servers ---
 
-mountMcpServer(app, "/memory", createMemoryServer, sessionManager, authMiddleware);
-mountMcpServer(app, "/research", createResearchServer, sessionManager, authMiddleware);
-mountMcpServer(app, "/sharing", createSharingServer, sessionManager, authMiddleware);
+mountMcpServer(app, "/memory", () => createMemoryServer(undefined, { instructions }), sessionManager, authMiddleware);
+mountMcpServer(app, "/research", () => createResearchServer(undefined, { instructions }), sessionManager, authMiddleware);
+mountMcpServer(app, "/sharing", () => createSharingServer(undefined, { instructions }), sessionManager, authMiddleware);
 mountMcpServer(app, "/tools", createProxyServer, sessionManager, authMiddleware);
 
 // Also mount at /mcp for single-server compatibility (uses memory)
-mountMcpServer(app, "", createMemoryServer, sessionManager, authMiddleware);
+mountMcpServer(app, "", () => createMemoryServer(undefined, { instructions }), sessionManager, authMiddleware);
 
 // --- Mount Router (consolidated endpoint, ~75% context reduction) ---
 if (process.env.CROW_DISABLE_ROUTER !== "1") {
-  mountMcpServer(app, "/router", createRouterServer, sessionManager, authMiddleware);
+  mountMcpServer(app, "/router", () => createRouterServer({ instructions: routerInstructions }), sessionManager, authMiddleware);
   console.log("Router server mounted (7 tools instead of 49+)");
 }
 
 // --- Mount Storage Server (conditional) ---
 try {
   const { createStorageServer } = await import("../storage/server.js");
-  mountMcpServer(app, "/storage", createStorageServer, sessionManager, authMiddleware);
+  mountMcpServer(app, "/storage", () => createStorageServer(undefined, { instructions }), sessionManager, authMiddleware);
 
   // Storage HTTP routes (upload/download)
   const { default: storageHttpRouter } = await import("./routes/storage-http.js");
@@ -290,7 +296,7 @@ try {
 // --- Mount Blog Server ---
 try {
   const { createBlogServer } = await import("../blog/server.js");
-  mountMcpServer(app, "/blog-mcp", createBlogServer, sessionManager, authMiddleware);
+  mountMcpServer(app, "/blog-mcp", () => createBlogServer(undefined, { instructions }), sessionManager, authMiddleware);
 
   // Public blog routes (no auth)
   const { default: blogPublicRouter } = await import("./routes/blog-public.js");

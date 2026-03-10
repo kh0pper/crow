@@ -50,13 +50,23 @@ If it works, you'll see Crow's memory tools in action. You can verify stored mem
 
 ## Cross-Platform Context
 
-Crow provides a shared behavioral context document (`crow.md`) that ensures consistent behavior across platforms. On Claude, the context is automatically available through the `crow_get_context` tool or the `crow://context` MCP resource.
+Crow automatically delivers behavioral context during the MCP connection handshake. When Claude connects to any Crow server, it receives Crow's identity, memory protocols, session protocol, transparency rules, and capability reference — no user action required.
 
-To load Crow's full context at the start of a session:
+This means Claude knows to recall relevant memories at the start of each conversation, store important information, and follow transparency rules from the very first message.
+
+For deeper guidance, Claude can request MCP prompts:
+
+- **session-start** — Detailed session start/end protocol
+- **crow-guide** — Full crow.md document with all behavioral sections
+- **research-guide** / **blog-guide** / **sharing-guide** — Workflow guidance for specific features
+
+These prompts serve as skill equivalents, giving Claude detailed workflow instructions on demand without consuming context window space upfront.
+
+You can also manually load the full context:
 
 > "Load your crow.md context"
 
-This gives Claude all of Crow's behavioral instructions — memory protocols, transparency rules, and any custom sections you've configured. See the [Cross-Platform Guide](/guide/cross-platform) for more details.
+See the [Cross-Platform Guide](/guide/cross-platform) for more details.
 
 ## Context Optimization
 

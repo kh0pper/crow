@@ -28,6 +28,8 @@ import { createSharingServer } from "../sharing/server.js";
 import { createBlogServer } from "../blog/server.js";
 import { TOOL_MANIFESTS, buildCompressedDescription } from "./tool-manifests.js";
 import { connectedServers } from "./proxy.js";
+import { createDbClient } from "../db.js";
+import { generateCrowContext } from "../memory/crow-context.js";
 
 /**
  * Server factory map — maps category names to their factory functions.
@@ -62,11 +64,11 @@ async function createInProcessClient(name, serverFactory) {
  * mountMcpServer). In-process clients to underlying servers are created
  * lazily on first use within the session.
  */
-export function createRouterServer() {
-  const routerServer = new McpServer({
-    name: "crow-router",
-    version: "0.1.0",
-  });
+export function createRouterServer(options = {}) {
+  const routerServer = new McpServer(
+    { name: "crow-router", version: "0.1.0" },
+    options.instructions ? { instructions: options.instructions } : undefined
+  );
 
   // Lazy-initialized in-process clients (per-session)
   const clients = new Map(); // category → Client
@@ -332,6 +334,120 @@ export function createRouterServer() {
       lines.push(`\nUse crow_discover with category="${category}" and action="<name>" for full schema.`);
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
+  );
+
+  // --- Prompts (skill equivalents for non-Claude-Code platforms) ---
+
+  const promptDb = createDbClient();
+
+  routerServer.prompt(
+    "session-start",
+    "Session start/end protocol — how to begin and end conversations with Crow",
+    async () => {
+      let text;
+      try {
+        const result = await promptDb.execute({
+          sql: "SELECT content FROM crow_context WHERE enabled = 1 AND section_key IN ('memory_protocol', 'session_protocol')",
+          args: [],
+        });
+        if (result.rows.length > 0) {
+          text = result.rows.map((r) => r.content).join("\n\n");
+        }
+      } catch {
+        // Fallback below
+      }
+
+      if (!text) {
+        text = `Session Start Protocol:
+1. Call crow_recall_by_context with the user's first message to load relevant memories
+2. Use recalled memories to personalize your response
+3. Throughout the conversation, store important new information with crow_store_memory
+
+Session End Protocol:
+- Before ending, store any important learnings, decisions, or preferences
+- Use appropriate categories: general, project, preference, person, process, decision, learning, goal
+- Set importance 8-10 for critical information the user would expect you to remember`;
+      }
+
+      return { messages: [{ role: "user", content: { type: "text", text } }] };
+    }
+  );
+
+  routerServer.prompt(
+    "crow-guide",
+    "Full Crow behavioral context (crow.md) — identity, memory protocols, transparency rules, and more",
+    { platform: z.string().default("generic").describe("Target platform: claude, chatgpt, gemini, grok, cursor, generic") },
+    async ({ platform }) => {
+      let text;
+      try {
+        text = await generateCrowContext(promptDb, { includeDynamic: false, platform });
+      } catch {
+        text = "Unable to load crow.md context. Use crow_memory with action 'get_context' as an alternative.";
+      }
+      return { messages: [{ role: "user", content: { type: "text", text } }] };
+    }
+  );
+
+  routerServer.prompt(
+    "research-guide",
+    "Research workflow guidance — project creation, source management, citations, and bibliography",
+    async () => ({
+      messages: [{
+        role: "user",
+        content: {
+          type: "text",
+          text: `Crow Research Workflow Guide
+
+1. Project Creation — Use crow_research action: "create_project" with name and description
+2. Source Management — Add sources with action: "add_source" (URL, title, authors, date, type). Auto-generates APA citations.
+3. Notes — Attach with action: "add_note". Types: summary, quote, analysis, methodology, finding, question.
+4. Bibliography — Generate with action: "generate_bibliography" (APA format, filterable by project).
+5. Search — Use action: "search_sources" or "search_notes" for full-text search across all research data.`,
+        },
+      }],
+    })
+  );
+
+  routerServer.prompt(
+    "blog-guide",
+    "Blog publishing workflow — creating posts, themes, RSS feeds, and export",
+    async () => ({
+      messages: [{
+        role: "user",
+        content: {
+          type: "text",
+          text: `Crow Blog Publishing Guide
+
+1. Create — crow_blog action: "create_post" with title and markdown content (starts as draft)
+2. Edit — action: "edit_post" to update content, title, tags, excerpt
+3. Publish — action: "publish_post" to make visible at /blog/:slug
+4. Themes — action: "customize_theme" for colors, fonts, layout; "blog_settings" for name and tagline
+5. Feeds — RSS at /blog/feed.xml, Atom at /blog/feed.atom
+6. Export — action: "export_blog" for markdown or HTML export`,
+        },
+      }],
+    })
+  );
+
+  routerServer.prompt(
+    "sharing-guide",
+    "P2P sharing and messaging workflow — invites, contacts, sharing data, and Nostr messaging",
+    async () => ({
+      messages: [{
+        role: "user",
+        content: {
+          type: "text",
+          text: `Crow P2P Sharing Guide
+
+1. Identity — Each Crow has a unique ID. Check with crow_sharing action: "sharing_status"
+2. Connect — Generate invite (action: "generate_invite"), share code, peer accepts (action: "accept_invite")
+3. Share Data — action: "share" with contact, item type (memory/project/source/note), and item ID
+4. Messages — action: "send_message" for encrypted Nostr messaging
+5. Inbox — action: "inbox" to see received shares and messages
+6. Security — End-to-end encrypted, peer-to-peer via Hyperswarm with NAT holepunching`,
+        },
+      }],
+    })
   );
 
   return routerServer;

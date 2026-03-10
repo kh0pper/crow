@@ -34,11 +34,11 @@ function notConfiguredError() {
   };
 }
 
-export function createStorageServer(dbPath) {
-  const server = new McpServer({
-    name: "crow-storage",
-    version: "0.1.0",
-  });
+export function createStorageServer(dbPath, options = {}) {
+  const server = new McpServer(
+    { name: "crow-storage", version: "0.1.0" },
+    options.instructions ? { instructions: options.instructions } : undefined
+  );
 
   const db = createDbClient(dbPath);
 

@@ -12,11 +12,11 @@ import { z } from "zod";
 import { createDbClient, sanitizeFtsQuery, escapeLikePattern } from "../db.js";
 import { generateSlug, generateExcerpt } from "./renderer.js";
 
-export function createBlogServer(dbPath) {
-  const server = new McpServer({
-    name: "crow-blog",
-    version: "0.1.0",
-  });
+export function createBlogServer(dbPath, options = {}) {
+  const server = new McpServer(
+    { name: "crow-blog", version: "0.1.0" },
+    options.instructions ? { instructions: options.instructions } : undefined
+  );
 
   const db = createDbClient(dbPath);
 
@@ -450,6 +450,46 @@ export function createBlogServer(dbPath) {
           text: `Blog Statistics:\n  Total posts: ${total.rows[0].c}\n  Published: ${published.rows[0].c}\n  Drafts: ${drafts.rows[0].c}\n  Top tags: ${topTags || "none"}`,
         }],
       };
+    }
+  );
+
+  // --- Prompts ---
+
+  server.prompt(
+    "blog-guide",
+    "Blog publishing workflow — creating posts, themes, RSS feeds, and export",
+    async () => {
+      const text = `Crow Blog Publishing Guide
+
+1. Creating Posts
+   - Use crow_create_post with title and markdown content
+   - Posts start as drafts — they won't appear publicly until published
+   - Slugs are auto-generated from titles (or specify a custom slug)
+   - Add tags, excerpt, and cover_image_url for richer metadata
+
+2. Editing & Publishing
+   - Edit drafts with crow_edit_post (update content, title, tags, etc.)
+   - Publish with crow_publish_post — makes the post visible at /blog/:slug
+   - Unpublish with crow_unpublish_post to revert to draft
+   - Set visibility: "public" (anyone), "unlisted" (link only), or "private"
+
+3. Themes & Customization
+   - Use crow_blog_customize_theme to set colors, fonts, and layout
+   - Configure blog name, tagline, and author via crow_blog_settings
+   - Themes are applied globally to all published posts
+
+4. Feeds & Sharing
+   - RSS 2.0 feed at /blog/feed.xml, Atom feed at /blog/feed.atom
+   - Share individual posts with crow_share_post to get shareable URLs
+   - Export entire blog with crow_export_blog (markdown or HTML format)
+
+5. Best Practices
+   - Write in Markdown — it's rendered to clean HTML automatically
+   - Use tags consistently for navigation and discovery
+   - Set excerpts for better feed and listing appearances
+   - Preview posts before publishing by checking them as drafts`;
+
+      return { messages: [{ role: "user", content: { type: "text", text } }] };
     }
   );
 

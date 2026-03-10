@@ -69,11 +69,9 @@ Connect Crow to [Cline](https://github.com/cline/cline), the AI coding assistant
 
 ## Cross-Platform Context
 
-Load Crow's shared behavioral context in Cline:
+Crow automatically delivers behavioral context when Cline connects — memory protocols and session management are active from the first message.
 
-> "Use the crow_get_context tool with platform set to cline"
-
-IDE platforms get minimal transparency output. Memories stored from Cline are shared with all other connected platforms. See the [Cross-Platform Guide](/guide/cross-platform).
+IDE platforms get minimal transparency output. MCP prompts (`session-start`, `crow-guide`, etc.) are available for deeper guidance. Memories stored from Cline are shared with all other connected platforms. See the [Cross-Platform Guide](/guide/cross-platform).
 
 ## Verification
 

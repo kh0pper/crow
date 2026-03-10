@@ -10,13 +10,13 @@ import { z } from "zod";
 import { createDbClient, sanitizeFtsQuery, escapeLikePattern } from "../db.js";
 import { generateCrowContext, PROTECTED_SECTIONS } from "./crow-context.js";
 
-export function createMemoryServer(dbPath) {
+export function createMemoryServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
 
-  const server = new McpServer({
-    name: "crow-memory",
-    version: "0.1.0",
-  });
+  const server = new McpServer(
+    { name: "crow-memory", version: "0.1.0" },
+    options.instructions ? { instructions: options.instructions } : undefined
+  );
 
   // --- Tools ---
 
@@ -438,6 +438,56 @@ export function createMemoryServer(dbPath) {
       ],
     };
   });
+
+  // --- Prompts ---
+
+  server.prompt(
+    "session-start",
+    "Session start/end protocol — how to begin and end conversations with Crow",
+    async () => {
+      let text;
+      try {
+        const result = await db.execute({
+          sql: "SELECT content FROM crow_context WHERE enabled = 1 AND section_key IN ('memory_protocol', 'session_protocol')",
+          args: [],
+        });
+        if (result.rows.length > 0) {
+          text = result.rows.map((r) => r.content).join("\n\n");
+        }
+      } catch {
+        // Fallback
+      }
+
+      if (!text) {
+        text = `Session Start Protocol:
+1. Call crow_recall_by_context with the user's first message to load relevant memories
+2. Use recalled memories to personalize your response
+3. Throughout the conversation, store important new information with crow_store_memory
+
+Session End Protocol:
+- Before ending, store any important learnings, decisions, or preferences
+- Use appropriate categories: general, project, preference, person, process, decision, learning, goal
+- Set importance 8-10 for critical information the user would expect you to remember`;
+      }
+
+      return { messages: [{ role: "user", content: { type: "text", text } }] };
+    }
+  );
+
+  server.prompt(
+    "crow-guide",
+    "Full Crow behavioral context (crow.md) — identity, memory protocols, transparency rules, and more",
+    { platform: z.string().default("generic").describe("Target platform: claude, chatgpt, gemini, grok, cursor, generic") },
+    async ({ platform }) => {
+      let text;
+      try {
+        text = await generateCrowContext(db, { includeDynamic: false, platform });
+      } catch {
+        text = "Unable to load crow.md context. Use crow_get_context tool as an alternative.";
+      }
+      return { messages: [{ role: "user", content: { type: "text", text } }] };
+    }
+  );
 
   return server;
 }

@@ -43,13 +43,13 @@ function generateAPA({ authors, title, publication_date, publisher, url, source_
   }
 }
 
-export function createResearchServer(dbPath) {
+export function createResearchServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
 
-  const server = new McpServer({
-    name: "crow-research",
-    version: "0.1.0",
-  });
+  const server = new McpServer(
+    { name: "crow-research", version: "0.1.0" },
+    options.instructions ? { instructions: options.instructions } : undefined
+  );
 
   // --- Project Tools ---
 
@@ -468,6 +468,45 @@ export function createResearchServer(dbPath) {
       ],
     };
   });
+
+  // --- Prompts ---
+
+  server.prompt(
+    "research-guide",
+    "Research workflow guidance — project creation, source management, citations, and bibliography",
+    async () => {
+      const text = `Crow Research Workflow Guide
+
+1. Project Creation
+   - Use crow_create_project to start a new research project with a name and description
+   - Projects organize sources and notes under a single topic
+
+2. Source Management
+   - Add sources with crow_add_source — provide URL, title, authors, publication date, source type
+   - Crow auto-generates APA citations from source metadata
+   - Source types: web_article, academic_paper, book, interview, document, dataset, government_doc, video, podcast, social_media, other
+   - Use crow_verify_source to check URL accessibility and update verification status
+   - Search across sources with crow_search_sources (full-text search)
+
+3. Notes
+   - Attach notes to sources or projects with crow_add_note
+   - Notes support content, tags, and note_type (summary, quote, analysis, methodology, finding, question)
+   - Search notes with crow_search_notes
+
+4. Citations & Bibliography
+   - crow_generate_bibliography produces formatted reference lists
+   - Supports APA format with proper author, date, title, publisher, URL formatting
+   - Filter by project to generate project-specific bibliographies
+
+5. Best Practices
+   - Always attach sources to a project for organization
+   - Include DOI when available for academic papers
+   - Verify sources after adding them to confirm accessibility
+   - Use descriptive tags on notes for easier retrieval later`;
+
+      return { messages: [{ role: "user", content: { type: "text", text } }] };
+    }
+  );
 
   return server;
 }

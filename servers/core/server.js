@@ -24,6 +24,7 @@ import { createResearchServer } from "../research/server.js";
 import { createSharingServer } from "../sharing/server.js";
 import { createBlogServer } from "../blog/server.js";
 import { TOOL_MANIFESTS, getToolNames } from "../gateway/tool-manifests.js";
+import { generateInstructions } from "../shared/instructions.js";
 
 const SERVER_FACTORIES = {
   memory: createMemoryServer,
@@ -49,10 +50,12 @@ async function getStorageFactory() {
  * Other servers' tools are registered as disabled and activated on demand.
  */
 export async function createCoreServer(dbPath) {
-  const server = new McpServer({
-    name: "crow-core",
-    version: "0.1.0",
-  });
+  const instructions = await generateInstructions({ dbPath });
+
+  const server = new McpServer(
+    { name: "crow-core", version: "0.1.0" },
+    instructions ? { instructions } : undefined
+  );
 
   const defaultServer = process.env.CROW_DEFAULT_SERVER || "memory";
   const activeServers = new Set([defaultServer]);

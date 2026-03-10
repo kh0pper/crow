@@ -28,7 +28,7 @@ import { PeerManager } from "./peer-manager.js";
 import { SyncManager } from "./sync.js";
 import { NostrManager } from "./nostr.js";
 
-export function createSharingServer(dbPath) {
+export function createSharingServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
   const identity = loadOrCreateIdentity();
   const peerManager = new PeerManager(identity);
@@ -73,10 +73,10 @@ export function createSharingServer(dbPath) {
     }
   };
 
-  const server = new McpServer({
-    name: "crow-sharing",
-    version: "0.1.0",
-  });
+  const server = new McpServer(
+    { name: "crow-sharing", version: "0.1.0" },
+    options.instructions ? { instructions: options.instructions } : undefined
+  );
 
   // --- Tool: crow_generate_invite ---
 
@@ -571,6 +571,45 @@ export function createSharingServer(dbPath) {
       return {
         content: [{ type: "text", text: parts.join("\n") }],
       };
+    }
+  );
+
+  // --- Prompts ---
+
+  server.prompt(
+    "sharing-guide",
+    "P2P sharing and messaging workflow — invites, contacts, sharing data, and Nostr messaging",
+    async () => {
+      const text = `Crow P2P Sharing Guide
+
+1. Getting Started
+   - Each Crow instance has a unique Crow ID (Ed25519 + secp256k1 key pair)
+   - Check your identity with crow_sharing_status
+   - Sharing uses end-to-end encryption — no data passes through central servers
+
+2. Connecting with Peers
+   - Generate an invite code with crow_generate_invite (expires in 24 hours)
+   - Share the invite code with the other person (via any channel)
+   - They accept with crow_accept_invite — both sides see a safety number to verify
+   - Verify safety numbers match out-of-band for maximum security
+
+3. Sharing Data
+   - Share memories, research projects, sources, or notes with crow_share
+   - Specify the contact, item type, and item ID
+   - Set permissions: "read" (view only) or "read-write" (can modify)
+   - Check incoming shares with crow_inbox
+
+4. Messaging
+   - Send encrypted messages with crow_send_message
+   - Messages use Nostr protocol with NIP-44 encryption
+   - View received messages in crow_inbox
+
+5. Managing Access
+   - List all contacts with crow_list_contacts (shows online/offline status)
+   - Revoke shared access with crow_revoke_access
+   - Sharing is peer-to-peer via Hyperswarm (NAT holepunching for direct connections)`;
+
+      return { messages: [{ role: "user", content: { type: "text", text } }] };
     }
   );
 
