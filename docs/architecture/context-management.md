@@ -149,6 +149,92 @@ The default server is configurable:
 CROW_DEFAULT_SERVER=research node servers/core/index.js
 ```
 
+## Automatic Behavioral Context (MCP Instructions)
+
+The MCP protocol supports an `instructions` field in the `InitializeResult` — a string sent during the connection handshake before any tool calls. Per the spec, this "can be used by clients to improve the LLM's understanding of available tools" and "MAY be added to the system prompt."
+
+Crow uses this to deliver behavioral context automatically to every connected AI client, eliminating the need for users to manually ask the AI to load crow.md.
+
+### How It Works
+
+```
+  Gateway startup
+       |
+       v
+  generateInstructions() ──> queries crow_context table
+       |                     extracts 5 essential sections
+       v                     condenses to ~1KB string
+  instructions string (pre-computed)
+       |
+       +──> createMemoryServer(undefined, { instructions })
+       +──> createResearchServer(undefined, { instructions })
+       +──> createRouterServer({ instructions: routerInstructions })
+       +──> ...
+       |
+       v
+  McpServer({ name, version }, { instructions })
+       |
+       v
+  Client connects ──> InitializeResult includes instructions
+       |
+       v
+  AI sees behavioral context before any tool calls
+```
+
+The instructions string is generated **once at gateway startup** and passed to all server factories as a pre-computed string. This avoids per-session database queries and keeps factories synchronous.
+
+### Content
+
+The condensed instructions (~1KB) include:
+
+| Section | Content |
+|---|---|
+| Identity | Who Crow is (1-2 sentences) |
+| Session Protocol | "Call crow_recall_by_context on session start" |
+| Memory Protocol | Categories, importance levels, deduplication rules |
+| Transparency Rules | [crow: action] notation for autonomous actions |
+| Capabilities | Tool routing table (direct names or category names for router) |
+
+Two variants are generated:
+- **Direct style**: Uses tool names like `crow_store_memory` (for individual server endpoints)
+- **Router style**: Uses category names like `crow_memory action: "store_memory"` (for `/router/mcp`)
+
+### Fallback
+
+If the `crow_context` table doesn't exist or the database is unavailable, a static ~500-byte fallback is used that provides minimal behavioral guidance.
+
+### stdio Servers
+
+stdio entry points (`servers/*/index.js`) generate instructions at startup using top-level `await`, then pass the string to the factory. crow-core does the same inside its async `createCoreServer()` function.
+
+## MCP Prompts (Skill Equivalents)
+
+MCP prompts are first-class prompt templates that clients can list and request on demand. Crow registers prompts as **skill equivalents for non-Claude-Code platforms**, giving the AI access to detailed workflow guidance without consuming context window space upfront.
+
+### Available Prompts
+
+| Prompt | Server(s) | Description |
+|---|---|---|
+| `session-start` | Memory, Router | Session start/end protocol from crow.md |
+| `crow-guide` | Memory, Router | Full crow.md document (accepts `platform` argument) |
+| `research-guide` | Research, Router | Research workflow: projects, sources, citations, bibliography |
+| `blog-guide` | Blog, Router | Blog publishing: posts, themes, RSS, export |
+| `sharing-guide` | Sharing, Router | P2P sharing: invites, contacts, messaging |
+
+The router registers all 5 prompts so clients connected to `/router/mcp` have access to everything. Individual servers register only their own relevant prompts.
+
+### How Clients Use Prompts
+
+```
+Client: prompts/list
+Server: [{ name: "session-start", description: "..." }, ...]
+
+Client: prompts/get { name: "crow-guide", arguments: { platform: "chatgpt" } }
+Server: { messages: [{ role: "user", content: { type: "text", text: "# crow.md — ..." } }] }
+```
+
+The AI can request a prompt when it needs detailed guidance for a specific workflow, keeping the initial context footprint small while making comprehensive instructions available on demand.
+
 ## Server Factory Integration
 
 Both the router and crow-core reuse the same factory functions (`createMemoryServer`, `createResearchServer`, etc.) and the same `InMemoryTransport` + `Client` pattern. The factory creates a standalone `McpServer`; the caller wires it to whatever transport the deployment needs:

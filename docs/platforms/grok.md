@@ -49,7 +49,11 @@ If your Grok client doesn't support OAuth discovery, you can:
 
 ## Cross-Platform Context
 
-Load Crow's shared behavioral context on Grok:
+Crow automatically delivers behavioral context when Grok connects — memory protocols, session management, and transparency rules are active from the first message.
+
+For detailed guidance, Grok can request MCP prompts like `session-start`, `crow-guide` (with `platform: "grok"`), or feature-specific guides.
+
+You can also manually load the full context:
 
 > "Use the crow_get_context tool with platform set to grok"
 

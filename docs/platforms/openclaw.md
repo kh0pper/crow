@@ -160,9 +160,11 @@ Use these categories when storing to Crow:
 
 ## Cross-Platform Context
 
-Crow provides a shared behavioral context document (`crow.md`) that ensures consistent behavior across platforms.
+Crow automatically delivers behavioral context when OpenClaw connects via MCP — memory protocols, session management, and transparency rules are active from the first message. No manual loading required.
 
-**Via MCP tool** (when Crow is connected):
+For deeper guidance, MCP prompts are available: `session-start`, `crow-guide`, `research-guide`, `blog-guide`, `sharing-guide`.
+
+**Manual access via MCP tool:**
 > "Use the crow_get_context tool"
 
 **Via HTTP** (if gateway is deployed):

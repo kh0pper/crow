@@ -92,11 +92,27 @@ Beyond data, Crow shares **behavioral instructions** across platforms through `c
 - **Skills reference**: Capability routing table
 - **Key principles**: Core behavioral rules
 
-### Accessing crow.md
+### Automatic Delivery
+
+When any AI connects to Crow via MCP, it automatically receives a condensed version of crow.md during the connection handshake. This includes your identity, session protocol, memory rules, transparency guidelines, and capability reference — all before any tool calls happen. No user action required.
+
+### On-Demand Prompts
+
+For detailed workflow guidance, the AI can request MCP prompts:
+
+| Prompt | Description |
+|---|---|
+| `session-start` | Session start/end protocol |
+| `crow-guide` | Full crow.md (accepts `platform` argument) |
+| `research-guide` | Research workflow guidance |
+| `blog-guide` | Blog publishing workflow |
+| `sharing-guide` | P2P sharing workflow |
+
+### Manual Access
 
 | Method | When to Use |
 |---|---|
-| `crow_get_context` tool | From any MCP-connected platform |
+| `crow_get_context` tool | Full document with dynamic data from any MCP platform |
 | `crow://context` resource | MCP resource read |
 | `GET /crow.md` | HTTP endpoint (for non-MCP platforms) |
 | `GET /crow.md?platform=chatgpt` | Platform-specific formatting |

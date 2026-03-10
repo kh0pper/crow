@@ -95,11 +95,11 @@ Check it worked:
 
 ## Cross-Platform Context
 
-Load Crow's shared behavioral context:
+Crow automatically delivers behavioral context when Claude Code connects via MCP — memory protocols, session management, and transparency rules are active from the first message.
 
-> "Load your crow.md context"
+Claude Code users also have access to skill files in `skills/` and the project-level `CLAUDE.md`, which provide additional platform-specific guidance beyond what MCP instructions deliver.
 
-Or use `crow_get_context` with `platform: "claude"`. Memories stored via Claude Code are shared with all other connected platforms. See the [Cross-Platform Guide](/guide/cross-platform).
+For detailed guidance via MCP, use prompts: `session-start`, `crow-guide`, `research-guide`, `blog-guide`, `sharing-guide`. Or use `crow_get_context` with `platform: "claude"`. Memories stored via Claude Code are shared with all other connected platforms. See the [Cross-Platform Guide](/guide/cross-platform).
 
 ## Tips
 

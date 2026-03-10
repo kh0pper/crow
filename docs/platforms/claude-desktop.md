@@ -57,7 +57,11 @@ Try: "Store a memory that Crow Desktop is connected."
 
 ## Cross-Platform Context
 
-Crow's shared behavioral context (`crow.md`) is available through the `crow_get_context` tool or `crow://context` resource. Load it at session start:
+Crow automatically delivers behavioral context when Claude Desktop connects via MCP — memory protocols, session management, and transparency rules are active from the first message. No manual loading required.
+
+For deeper guidance, Claude Desktop can use MCP prompts: `session-start`, `crow-guide`, `research-guide`, `blog-guide`, `sharing-guide`.
+
+You can also manually load the full context:
 
 > "Load your crow.md context"
 

@@ -73,11 +73,9 @@ Connect to a deployed Crow gateway.
 
 ## Cross-Platform Context
 
-Load Crow's shared behavioral context in Cursor:
+Crow automatically delivers behavioral context when Cursor connects — memory protocols and session management are active from the first message.
 
-> "Use the crow_get_context tool with platform set to cursor"
-
-IDE platforms get minimal transparency output — only Tier 2 checkpoints. Memories and research stored from Cursor are shared with all other connected platforms. See the [Cross-Platform Guide](/guide/cross-platform).
+IDE platforms get minimal transparency output — only Tier 2 checkpoints. MCP prompts (`session-start`, `crow-guide`, etc.) are available for deeper guidance. Memories and research stored from Cursor are shared with all other connected platforms. See the [Cross-Platform Guide](/guide/cross-platform).
 
 ## Context Optimization
 

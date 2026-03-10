@@ -11,6 +11,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createSharingServer } from "./server.js";
 import { createDbClient, verifyDb } from "../db.js";
+import { generateInstructions } from "../shared/instructions.js";
 
 try {
   await verifyDb(createDbClient());
@@ -19,6 +20,7 @@ try {
   process.exit(1);
 }
 
-const server = createSharingServer();
+const instructions = await generateInstructions();
+const server = createSharingServer(undefined, { instructions });
 const transport = new StdioServerTransport();
 await server.connect(transport);

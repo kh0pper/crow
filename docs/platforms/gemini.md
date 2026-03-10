@@ -54,11 +54,13 @@ Google AI Studio supports MCP servers for tool use in chat. Configuration is ava
 
 ## Cross-Platform Context
 
-Load Crow's shared behavioral context on Gemini:
+Crow automatically delivers behavioral context when Gemini connects — memory protocols, session management, and transparency rules are active from the first message. No manual loading required.
+
+For detailed guidance, Gemini can request MCP prompts like `session-start`, `crow-guide` (with `platform: "gemini"`), or feature-specific guides (`research-guide`, `blog-guide`, `sharing-guide`).
+
+You can also manually load the full context:
 
 > "Use the crow_get_context tool with platform set to gemini"
-
-Or fetch via HTTP: `GET https://your-gateway.onrender.com/crow.md?platform=gemini`
 
 Memories and research stored from any platform are shared. See the [Cross-Platform Guide](/guide/cross-platform).
 

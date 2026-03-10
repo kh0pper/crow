@@ -53,8 +53,12 @@ For platforms that don't support OAuth discovery (like Grok), you can use the `/
 
 ## Cross-Platform Context (crow.md)
 
-Crow goes beyond shared data — it also shares **behavioral context** across platforms. The `crow.md` document defines how Crow behaves: identity, memory protocols, transparency rules, and your customizations. Every connected platform can load this same context, ensuring a consistent experience whether you're in Claude, ChatGPT, Gemini, or an IDE.
+Crow goes beyond shared data — it also shares **behavioral context** across platforms. The `crow.md` document defines how Crow behaves: identity, memory protocols, transparency rules, and your customizations.
 
-**Access:** Use the `crow_get_context` tool (any MCP platform) or `GET /crow.md` (HTTP endpoint).
+**Automatic delivery:** When any AI connects to Crow, it receives a condensed version of your behavioral context during the MCP handshake — before any tool calls happen. The AI immediately knows how to use memory, follow session protocols, and respect transparency rules. No user action required.
+
+**On-demand guidance:** For detailed workflow instructions, the AI can request MCP prompts like `session-start`, `crow-guide`, `research-guide`, `blog-guide`, or `sharing-guide`. These provide comprehensive guidance without consuming context window space upfront.
+
+**Manual access:** Use the `crow_get_context` tool (any MCP platform) or `GET /crow.md` (HTTP endpoint) for the full document.
 
 See the [Cross-Platform Guide](/guide/cross-platform) for a complete walkthrough.

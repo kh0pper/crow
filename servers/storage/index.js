@@ -10,6 +10,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createStorageServer } from "./server.js";
 import { createDbClient, verifyDb } from "../db.js";
+import { generateInstructions } from "../shared/instructions.js";
 
 try {
   await verifyDb(createDbClient());
@@ -18,6 +19,7 @@ try {
   process.exit(1);
 }
 
-const server = createStorageServer();
+const instructions = await generateInstructions();
+const server = createStorageServer(undefined, { instructions });
 const transport = new StdioServerTransport();
 await server.connect(transport);
