@@ -1,4 +1,4 @@
-## Crow AI Platform — Docker Compose
+## Crow — Docker Compose
 ##
 ## Cloud deployment:
 ##   docker compose --profile cloud up --build

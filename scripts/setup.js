@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Crow AI Platform Setup Script
+ * Crow Setup Script
  *
  * Initializes the database, checks for required dependencies,
  * and validates the configuration.
@@ -26,7 +26,7 @@ function header(msg) {
   console.log(`${"═".repeat(50)}`);
 }
 
-header("Crow AI Platform Setup");
+header("Crow Setup");
 
 // Step 1: Check Node.js version
 const nodeVersion = parseInt(process.version.slice(1));

@@ -1,5 +1,5 @@
 {
-  "name": "crow-ai-platform",
+  "name": "crow-platform",
   "version": "0.1.0",
   "description": "AI-enabled project management and research platform powered by Claude - a collection of MCP servers, skills, and persistent memory",
   "type": "module",

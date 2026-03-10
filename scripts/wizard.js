@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Crow AI Platform — Setup Wizard Launcher
+ * Crow — Setup Wizard Launcher
  *
  * Launches the web-based wizard by default (opens in browser).
  * Falls back to terminal mode with --terminal flag.

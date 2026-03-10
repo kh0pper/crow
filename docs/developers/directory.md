@@ -1,6 +1,6 @@
 # Community Directory
 
-Community-contributed integrations, skills, and bundles for the Crow AI Platform.
+Community-contributed integrations, skills, and bundles for Crow.
 
 ## Integrations
 

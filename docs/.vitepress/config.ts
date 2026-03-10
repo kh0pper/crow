@@ -1,7 +1,7 @@
 import { defineConfig } from 'vitepress'
 
 export default defineConfig({
-  title: 'Crow AI Platform',
+  title: 'Crow',
   description: 'AI-powered research and project management platform — works with Claude, ChatGPT, Gemini, Grok, Cursor, and more',
   base: '/software/crow/',
 

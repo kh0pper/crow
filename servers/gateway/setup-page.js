@@ -131,7 +131,7 @@ export async function setupPageHandler(req, res) {
 </head>
 <body>
   <h1>Crow Setup</h1>
-  <p class="subtitle">Integration status for your Crow AI Platform</p>
+  <p class="subtitle">Integration status for your Crow instance</p>
 
   <div class="stats">
     <div class="stat">

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Crow AI Platform — Claude Desktop Config Generator
+ * Crow — Claude Desktop Config Generator
  *
  * Generates a claude_desktop_config.json file with all Crow MCP servers
  * configured for Claude Desktop. Detects OS and installs to the correct path.
@@ -95,7 +95,7 @@ function buildConfig(env) {
 // Main
 if (!STDOUT) {
   console.log("\n" + "=".repeat(50));
-  console.log("  Crow AI Platform — Desktop Config Generator");
+  console.log("  Crow — Desktop Config Generator");
   console.log("=".repeat(50));
 }
 
