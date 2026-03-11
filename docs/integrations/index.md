@@ -9,7 +9,7 @@ These are always available — no API keys needed:
 | Server | Tools | Description |
 |---|---|---|
 | **crow-memory** | 12 tools | Persistent memory (7 tools) + cross-platform context management (5 tools) |
-| **crow-research** | 12 tools | Research pipeline: projects, sources, notes, citations, bibliography |
+| **crow-projects** | 12 tools | Project pipeline: projects, sources, notes, citations, bibliography, data backends |
 | **crow-sharing** | 8 tools | P2P sharing: invite codes, contacts, encrypted sharing, Nostr messaging, inbox |
 | **crow-storage** | 5 tools | S3-compatible file storage: upload, list, download (presigned URLs), delete, stats |
 | **crow-blog** | 12 tools | Blogging platform: posts, publishing, themes, RSS/Atom feeds, export to Hugo/Jekyll |

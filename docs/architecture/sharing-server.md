@@ -219,4 +219,4 @@ servers/sharing/
 └── relay.js           → Peer relay opt-in, store-and-forward
 ```
 
-The gateway imports `createSharingServer()` and wires it to HTTP transport at `/sharing/mcp` and `/sharing/sse`, following the same pattern as the memory and research servers.
+The gateway imports `createSharingServer()` and wires it to HTTP transport at `/sharing/mcp` and `/sharing/sse`, following the same pattern as the memory and project servers.
