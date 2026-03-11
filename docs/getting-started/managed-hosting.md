@@ -1,6 +1,6 @@
 # Managed Hosting
 
-Skip the setup entirely. Get a fully configured Crow instance hosted by [Maestro Press](https://maestro.press) — $5/mo or $48/yr.
+Skip the setup entirely. Get a fully configured Crow instance hosted by [Maestro Press](https://maestro.press) — $15/mo or $120/yr.
 
 ## What's Included
 
@@ -14,7 +14,7 @@ Skip the setup entirely. Get a fully configured Crow instance hosted by [Maestro
 ## How It Works
 
 1. **Pick a username** — Choose your subdomain (e.g., `alice.crow.maestro.press`)
-2. **Check out** — $5/mo or $48/yr (2 months free with annual)
+2. **Check out** — $15/mo or $120/yr (4 months free with annual)
 3. **Visit your instance** — Your Crow dashboard is live immediately
 4. **Connect your AI** — Use the `/setup` page to connect Claude, ChatGPT, or any supported platform
 
@@ -38,7 +38,7 @@ Everything a self-hosted Crow instance can do:
 |---|---|---|
 | **Setup** | None — live in minutes | You deploy and configure |
 | **Maintenance** | Automatic updates and backups | You manage updates |
-| **Cost** | $5/mo or $48/yr | Free (Render, Oracle Cloud, Pi) |
+| **Cost** | $15/mo or $120/yr | Free (Render, Oracle Cloud, Pi) |
 | **Control** | Hosted by Maestro Press | Full control over your server |
 | **Data** | Stored on Maestro Press infrastructure | Stored wherever you choose |
 | **Best for** | Users who want Crow without the ops work | Developers and tinkerers |

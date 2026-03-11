@@ -88,7 +88,7 @@ The FTS5 virtual tables and sync triggers are created by `init-db`. If search re
 
 ## Still Stuck?
 
-If you're spending more time on infrastructure than on your actual work, consider [managed hosting](./getting-started/managed-hosting) — a pre-configured Crow instance with zero setup for $5/mo.
+If you're spending more time on infrastructure than on your actual work, consider [managed hosting](./getting-started/managed-hosting) — a pre-configured Crow instance with zero setup for $15/mo.
 
 ## Getting Help
 

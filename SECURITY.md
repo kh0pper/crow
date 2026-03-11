@@ -71,7 +71,7 @@ You don't need to set up every integration. Each API key you add is one more thi
 
 ## Managed Hosting Security
 
-If you use [managed hosting](https://maestro.press/hosting/) ($5/mo), these additional protections apply:
+If you use [managed hosting](https://maestro.press/hosting/) ($15/mo), these additional protections apply:
 
 - **Instance isolation** — Each customer gets a separate Docker container and separate database. Up to 5 instances per shared server, with no cross-instance access.
 - **OAuth tokens hashed** — All OAuth access and refresh tokens are SHA-256 hashed before storage. If the database were compromised, tokens cannot be reused.
