@@ -6,7 +6,7 @@ Community-contributed integrations, skills, and bundles for Crow.
 
 | Name | Author | Description | Install | Status |
 |------|--------|-------------|---------|--------|
-| **Obsidian** | Crow | Obsidian vault search, note reading, research sync | `OBSIDIAN_VAULT_PATH` in `.env` | Official |
+| **Obsidian** | Crow | Obsidian vault search, note reading, project sync | `OBSIDIAN_VAULT_PATH` in `.env` | Official |
 | **Home Assistant** | Crow | Smart home device control with safety checkpoints | `HA_URL` + `HA_TOKEN` in `.env` | Official |
 | *Your integration here* | — | [Submit an integration →](https://github.com/kh0pper/crow/issues/new?template=integration-request.md) | — | — |
 

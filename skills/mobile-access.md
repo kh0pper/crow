@@ -17,7 +17,7 @@ Claude Mobile App / claude.ai
         ▼ (HTTPS + OAuth 2.1)
   Crow Gateway (servers/gateway/index.js)
    ├── /memory/mcp   → crow-memory (Streamable HTTP)
-   ├── /research/mcp  → crow-research (Streamable HTTP)
+   ├── /projects/mcp  → crow-projects (Streamable HTTP)
    ├── /health         → health check
    └── OAuth routes    → Dynamic Client Registration
         │

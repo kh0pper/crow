@@ -14,7 +14,7 @@ Files are organized by type — images, documents, audio, attachments — and ac
 
 ## Why would I want this?
 
-- **Research attachments** — Save PDFs, datasets, and images alongside your research projects
+- **Project attachments** — Save PDFs, datasets, and images alongside your projects
 - **Blog assets** — Upload images for blog posts without needing a separate hosting service
 - **File sharing** — Share files with connected peers through the existing P2P sharing system
 - **Backup** — Keep important files in a self-hosted storage layer you control

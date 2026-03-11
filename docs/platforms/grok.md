@@ -20,8 +20,8 @@ Grok supports remote MCP servers through its API. Configure Crow as a remote too
          "name": "crow-memory"
        },
        {
-         "url": "https://your-gateway.onrender.com/research/mcp",
-         "name": "crow-research"
+         "url": "https://your-gateway.onrender.com/projects/mcp",
+         "name": "crow-projects"
        },
        {
          "url": "https://your-gateway.onrender.com/tools/mcp",
@@ -59,7 +59,7 @@ You can also manually load the full context:
 
 Or fetch via HTTP: `GET https://your-gateway.onrender.com/crow.md?platform=grok`
 
-Memories and research stored from any platform are shared. See the [Cross-Platform Guide](/guide/cross-platform).
+Memories and projects stored from any platform are shared. See the [Cross-Platform Guide](/guide/cross-platform).
 
 ## Verification
 

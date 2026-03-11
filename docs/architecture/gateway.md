@@ -27,7 +27,8 @@ Modern MCP transport used by most clients.
 | Endpoint | Server |
 |---|---|
 | `POST\|GET\|DELETE /memory/mcp` | crow-memory |
-| `POST\|GET\|DELETE /research/mcp` | crow-research |
+| `POST\|GET\|DELETE /projects/mcp` | crow-projects |
+| `POST\|GET\|DELETE /research/mcp` | crow-projects (legacy alias) |
 | `POST\|GET\|DELETE /sharing/mcp` | crow-sharing |
 | `POST\|GET\|DELETE /storage/mcp` | crow-storage (conditional, requires MinIO) |
 | `POST\|GET\|DELETE /blog-mcp/mcp` | crow-blog |
@@ -44,8 +45,10 @@ Legacy transport for ChatGPT and older clients.
 |---|---|
 | `GET /memory/sse` | Open SSE stream + create session |
 | `POST /memory/messages` | Send messages to session |
-| `GET /research/sse` | Open SSE stream |
-| `POST /research/messages` | Send messages |
+| `GET /projects/sse` | Open SSE stream |
+| `POST /projects/messages` | Send messages |
+| `GET /research/sse` | Open SSE stream (legacy alias) |
+| `POST /research/messages` | Send messages (legacy alias) |
 | `GET /sharing/sse` | Open SSE stream |
 | `POST /sharing/messages` | Send messages |
 | `GET /storage/sse` | Open SSE stream (conditional) |
@@ -128,7 +131,7 @@ No authentication required — doesn't expose secrets.
 
 The `/router/mcp` endpoint exposes 7 consolidated category tools instead of the full 49+ tools from all servers. This reduces context window usage by approximately 75%.
 
-Each category tool (`crow_memory`, `crow_research`, `crow_sharing`, `crow_storage`, `crow_blog`, `crow_tools`, `crow_discover`) dispatches to the underlying server via an in-process MCP Client. The `crow_discover` tool returns full schemas on demand, so clients can inspect available actions without loading all tool definitions upfront.
+Each category tool (`crow_memory`, `crow_projects`, `crow_sharing`, `crow_storage`, `crow_blog`, `crow_tools`, `crow_discover`) dispatches to the underlying server via an in-process MCP Client. The `crow_discover` tool returns full schemas on demand, so clients can inspect available actions without loading all tool definitions upfront. The `crow_research` name is accepted as a backward-compatible alias for `crow_projects`.
 
 Router mode is backward compatible — existing per-server endpoints (`/memory/mcp`, `/research/mcp`, etc.) remain unchanged and continue to work as before. The router is an additional endpoint, not a replacement.
 
@@ -143,7 +146,7 @@ For the full reference, see [Context Management](/architecture/context-managemen
 ```json
 {
   "status": "ok",
-  "servers": ["crow-memory", "crow-research", "crow-sharing", "crow-storage", "crow-blog"],
+  "servers": ["crow-memory", "crow-projects", "crow-sharing", "crow-storage", "crow-blog"],
   "externalServers": [{"id": "github", "name": "GitHub", "tools": 15}],
   "auth": true
 }

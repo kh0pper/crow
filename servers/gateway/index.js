@@ -3,13 +3,13 @@
 /**
  * Crow Gateway — Streamable HTTP + SSE Server
  *
- * Exposes crow-memory, crow-research, crow-sharing, crow-storage, and crow-blog
+ * Exposes crow-memory, crow-projects, crow-sharing, crow-storage, and crow-blog
  * as HTTP endpoints for remote access. Supports both Streamable HTTP (2025-03-26)
  * and legacy SSE (2024-11-05) transports for maximum platform compatibility.
  * OAuth 2.1 with Dynamic Client Registration.
  *
  * Routes:
- *   POST|GET|DELETE /{server}/mcp  — Streamable HTTP (memory, research, sharing, storage, blog, tools)
+ *   POST|GET|DELETE /{server}/mcp  — Streamable HTTP (memory, projects, sharing, storage, blog, tools)
  *   POST|GET|DELETE /router/mcp   — Consolidated router (7 tools instead of 49+, ~75% context reduction)
  *   GET  /{server}/sse             — SSE transport init
  *   POST /{server}/messages        — SSE message handling
@@ -37,13 +37,13 @@ import rateLimit from "express-rate-limit";
 import cors from "cors";
 
 import { createMemoryServer } from "../memory/server.js";
-import { createResearchServer } from "../research/server.js";
+import { createProjectServer } from "../research/server.js";
 import { createSharingServer } from "../sharing/server.js";
 import { createRelayHandlers } from "../sharing/relay.js";
 import { generateCrowContext } from "../memory/crow-context.js";
 import { createDbClient } from "../db.js";
 import { createOAuthProvider, initOAuthTables } from "./auth.js";
-import { initProxyServers, createProxyServer, getProxyStatus } from "./proxy.js";
+import { initProxyServers, createProxyServer, getProxyStatus, loadDynamicBackends } from "./proxy.js";
 import { createRouterServer } from "./router.js";
 import { setupPageHandler } from "./setup-page.js";
 import { SessionManager } from "./session-manager.js";
@@ -132,7 +132,7 @@ app.use(express.json({ limit: "1mb" }));
 app.get("/health", async (req, res) => {
   const proxyStatus = getProxyStatus();
   const connectedTools = proxyStatus.filter((s) => s.status === "connected");
-  const servers = ["crow-memory", "crow-research", "crow-sharing"];
+  const servers = ["crow-memory", "crow-projects", "crow-sharing"];
 
   // Conditionally include storage/blog based on availability
   try {
@@ -263,7 +263,10 @@ const routerInstructions = await generateInstructions({ routerStyle: true });
 // --- Mount Core MCP Servers ---
 
 mountMcpServer(app, "/memory", () => createMemoryServer(undefined, { instructions }), sessionManager, authMiddleware);
-mountMcpServer(app, "/research", () => createResearchServer(undefined, { instructions }), sessionManager, authMiddleware);
+const projectServerFactory = () => createProjectServer(undefined, { instructions });
+mountMcpServer(app, "/projects", projectServerFactory, sessionManager, authMiddleware);
+// Legacy alias — existing remote clients use /research/mcp
+mountMcpServer(app, "/research", projectServerFactory, sessionManager, authMiddleware);
 mountMcpServer(app, "/sharing", () => createSharingServer(undefined, { instructions }), sessionManager, authMiddleware);
 mountMcpServer(app, "/tools", createProxyServer, sessionManager, authMiddleware);
 
@@ -320,6 +323,22 @@ try {
   }
 }
 
+// --- Backend Reload Endpoint (admin-only) ---
+const reloadHandler = async (req, res) => {
+  try {
+    await loadDynamicBackends();
+    res.json({ status: "ok", message: "Dynamic backends reloaded" });
+  } catch (err) {
+    res.status(500).json({ status: "error", message: err.message });
+  }
+};
+
+if (authMiddleware) {
+  app.post("/api/reload-backends", authMiddleware, reloadHandler);
+} else {
+  app.post("/api/reload-backends", reloadHandler);
+}
+
 // --- Peer Relay Endpoints ---
 const relayHandlers = createRelayHandlers();
 
@@ -341,7 +360,7 @@ app.listen(PORT, "0.0.0.0", (error) => {
   console.log(`Crow Gateway listening on http://0.0.0.0:${PORT}`);
   console.log(`  Streamable HTTP (2025-03-26):`);
   console.log(`    Memory:   POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/memory/mcp`);
-  console.log(`    Research: POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/research/mcp`);
+  console.log(`    Projects: POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/projects/mcp`);
   console.log(`    Sharing:  POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/sharing/mcp`);
   console.log(`    Tools:    POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/tools/mcp`);
   if (process.env.CROW_DISABLE_ROUTER !== "1") {
@@ -349,7 +368,7 @@ app.listen(PORT, "0.0.0.0", (error) => {
   }
   console.log(`  SSE (2024-11-05):`);
   console.log(`    Memory:   GET  ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/memory/sse`);
-  console.log(`    Research: GET  ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/research/sse`);
+  console.log(`    Projects: GET  ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/projects/sse`);
   console.log(`    Sharing:  GET  ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/sharing/sse`);
   console.log(`    Tools:    GET  ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/tools/sse`);
   console.log(`  Relay:`);

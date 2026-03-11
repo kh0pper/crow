@@ -19,8 +19,8 @@ The [Gemini CLI](https://github.com/google-gemini/gemini-cli) supports remote MC
        "crow-memory": {
          "url": "https://your-gateway.onrender.com/memory/mcp"
        },
-       "crow-research": {
-         "url": "https://your-gateway.onrender.com/research/mcp"
+       "crow-projects": {
+         "url": "https://your-gateway.onrender.com/projects/mcp"
        },
        "crow-tools": {
          "url": "https://your-gateway.onrender.com/tools/mcp"
@@ -62,7 +62,7 @@ You can also manually load the full context:
 
 > "Use the crow_get_context tool with platform set to gemini"
 
-Memories and research stored from any platform are shared. See the [Cross-Platform Guide](/guide/cross-platform).
+Memories and projects stored from any platform are shared. See the [Cross-Platform Guide](/guide/cross-platform).
 
 ## Verification
 

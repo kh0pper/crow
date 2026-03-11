@@ -515,7 +515,7 @@ function buildHTML(env) {
     </header>
 
     <div class="auto-note">
-      <strong>Already included (no setup needed):</strong> Persistent Memory, Research Pipeline, Academic Search (arXiv & Semantic Scholar), and Local File Access.
+      <strong>Already included (no setup needed):</strong> Persistent Memory, Project Management & Research, Academic Search (arXiv & Semantic Scholar), and Local File Access.
       <br>Just enable the integrations below that you actually use.
     </div>
 
@@ -534,7 +534,7 @@ function buildHTML(env) {
         Mobile Access (Android / iOS)
       </h2>
       <p style="color: #8b949e; font-size: 0.9rem; margin-bottom: 1rem;">
-        Access your Crow memory and research tools from the Claude mobile app.
+        Access your Crow memory and project tools from the Claude mobile app.
       </p>
 
       <div class="card">
@@ -561,7 +561,7 @@ function buildHTML(env) {
               <li>Click <strong>"Add Custom Connector"</strong></li>
               <li>Paste your URL + <code>/memory/mcp</code> (e.g., <code>https://crow-gateway-xxxx.onrender.com/memory/mcp</code>)</li>
               <li>Click <strong>Connect</strong> → complete the authorization</li>
-              <li>Repeat step 7-9 for <code>/research/mcp</code> if you want research tools on mobile too</li>
+              <li>Repeat step 7-9 for <code>/projects/mcp</code> if you want project tools on mobile too</li>
               <li>Open the Claude app on your phone — your tools are there!</li>
             </ol>
             <p style="margin-top: 0.75rem;">

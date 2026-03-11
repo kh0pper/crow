@@ -1,7 +1,7 @@
 {
-  "name": "crow-research",
+  "name": "crow-projects",
   "version": "0.1.0",
-  "description": "Research pipeline with APA citations, source tracking, and verification for Claude — part of Crow",
+  "description": "Project management with APA citations, source tracking, data backends, and verification for Claude — part of Crow",
   "server": {
     "command": "node",
     "args": ["servers/research/index.js"],

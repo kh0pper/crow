@@ -24,7 +24,7 @@ Connect Crow to [Windsurf](https://codeium.com/windsurf), the AI-powered IDE by 
            "CROW_DB_PATH": "/path/to/crow/data/crow.db"
          }
        },
-       "crow-research": {
+       "crow-projects": {
          "command": "node",
          "args": ["/path/to/crow/servers/research/index.js"],
          "env": {
@@ -50,8 +50,8 @@ Connect Crow to [Windsurf](https://codeium.com/windsurf), the AI-powered IDE by 
        "crow-memory": {
          "url": "https://your-gateway.onrender.com/memory/mcp"
        },
-       "crow-research": {
-         "url": "https://your-gateway.onrender.com/research/mcp"
+       "crow-projects": {
+         "url": "https://your-gateway.onrender.com/projects/mcp"
        },
        "crow-tools": {
          "url": "https://your-gateway.onrender.com/tools/mcp"

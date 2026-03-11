@@ -11,7 +11,7 @@ Manage academic and professional research with full source tracking, APA citatio
 - When organizing findings into a research project
 
 ## Tools Available
-Use the `crow-research` MCP server tools.
+Use the `crow-projects` MCP server tools.
 
 ## Workflow: Starting a Research Project
 1. Use `crow_create_project` with a clear name and description

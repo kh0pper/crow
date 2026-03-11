@@ -137,7 +137,7 @@ What to do next:
   2. View integration status:  http://localhost:3001/setup
   3. Verify everything works:  npm run check
 
-Core servers (memory, research, sharing, blog) are ready — no API keys needed.
+Core servers (memory, projects, sharing, blog) are ready — no API keys needed.
 Add integrations later by editing .env, then run: npm run mcp-config
 `);
 } else {
@@ -147,7 +147,7 @@ What to do next:
   2. Or Claude Desktop:        npm run desktop-config
   3. Verify everything works:  npm run check
 
-Core servers (memory, research, sharing, blog) are ready — no API keys needed.
+Core servers (memory, projects, sharing, blog) are ready — no API keys needed.
 Add integrations later by editing .env, then run: npm run mcp-config
 `);
 }

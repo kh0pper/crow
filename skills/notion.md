@@ -28,7 +28,7 @@ When important information exists in Notion:
 
 ## Workflow: Research to Notion
 When research should be documented in Notion:
-1. Gather sources and notes from crow-research
+1. Gather sources and notes from crow-projects
 2. Generate bibliography with `crow_generate_bibliography`
 3. Create a Notion page with structured content
 4. Add sections for sources, key findings, and analysis

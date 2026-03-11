@@ -59,10 +59,10 @@ export const CORE_SERVERS = [
     mcpEnv: { CROW_DB_PATH: "${CROW_DB_PATH:-./data/crow.db}" },
   },
   {
-    name: "crow-research",
+    name: "crow-projects",
     command: "node",
     args: ["servers/research/index.js"],
-    description: "Research pipeline",
+    description: "Project management & research pipeline",
     envKeys: [],
     mcpEnv: { CROW_DB_PATH: "${CROW_DB_PATH:-./data/crow.db}" },
   },

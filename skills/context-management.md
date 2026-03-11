@@ -33,7 +33,7 @@ When you notice conversation quality degrading or context getting tight:
 ### Gateway users (HTTP)
 Suggest switching to the **router endpoint** (`/router/mcp`):
 - Reduces ~49 core tools to 7 category tools
-- Each category tool (crow_memory, crow_research, etc.) accepts an `action` parameter
+- Each category tool (crow_memory, crow_projects, etc.) accepts an `action` parameter
 - Use `crow_discover` to look up full parameter schemas when needed
 - External tools route through `crow_tools`
 

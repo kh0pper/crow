@@ -22,7 +22,7 @@ Add support for new external services (e.g., Linear, Jira, Todoist) to the core 
 **Guide:** [Building Integrations](https://kh0pper.github.io/crow/developers/integrations)
 
 ### 4. Core Server Tools
-Add new MCP tools to crow-memory, crow-research, crow-sharing, crow-storage, or crow-blog servers.
+Add new MCP tools to crow-memory, crow-projects, crow-sharing, crow-storage, or crow-blog servers.
 
 **Guide:** [Core Tools](https://kh0pper.github.io/crow/developers/core-tools)
 
@@ -48,7 +48,7 @@ npm run setup          # Install dependencies + initialize database
 
 ```bash
 node servers/memory/index.js    # crow-memory (stdio)
-node servers/research/index.js  # crow-research (stdio)
+node servers/research/index.js  # crow-projects (stdio)
 node servers/sharing/index.js   # crow-sharing (stdio)
 node servers/gateway/index.js --no-auth  # HTTP gateway (dev mode)
 ```

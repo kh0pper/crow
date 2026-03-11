@@ -7,7 +7,7 @@
  *
  * Tools:
  *   crow_memory    — Routes to memory server (12 actions)
- *   crow_research  — Routes to research server (12 actions)
+ *   crow_projects  — Routes to project server (16 actions)
  *   crow_blog      — Routes to blog server (12 actions)
  *   crow_sharing   — Routes to sharing server (8 actions)
  *   crow_storage   — Routes to storage server (5 actions)
@@ -23,7 +23,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
 
 import { createMemoryServer } from "../memory/server.js";
-import { createResearchServer } from "../research/server.js";
+import { createProjectServer } from "../research/server.js";
 import { createSharingServer } from "../sharing/server.js";
 import { createBlogServer } from "../blog/server.js";
 import { TOOL_MANIFESTS, buildCompressedDescription } from "./tool-manifests.js";
@@ -37,10 +37,15 @@ import { generateCrowContext } from "../memory/crow-context.js";
  */
 const SERVER_FACTORIES = {
   memory: createMemoryServer,
-  research: createResearchServer,
+  projects: createProjectServer,
   sharing: createSharingServer,
   blog: createBlogServer,
   // storage added dynamically in createRouterServer
+};
+
+/** Backward-compat aliases for category names */
+const CATEGORY_ALIASES = {
+  research: "projects",
 };
 
 /**
@@ -211,10 +216,15 @@ export function createRouterServer(options = {}) {
     "crow_discover",
     "Discover available actions and their full parameter schemas. Use without arguments to list all categories. Specify a category to list its actions. Specify category + action to get the full JSON Schema for that action.",
     {
-      category: z.string().optional().describe("Server category: memory, research, blog, sharing, storage, tools"),
+      category: z.string().optional().describe("Server category: memory, projects, blog, sharing, storage, tools"),
       action: z.string().optional().describe("Specific action name to get full schema for"),
     },
     async ({ category, action }) => {
+      // Resolve category aliases (e.g. "research" → "projects")
+      if (category && CATEGORY_ALIASES[category]) {
+        category = CATEGORY_ALIASES[category];
+      }
+
       // No category: list all categories with action counts
       if (!category) {
         const lines = ["Available categories:"];
@@ -389,20 +399,21 @@ Session End Protocol:
   );
 
   routerServer.prompt(
-    "research-guide",
-    "Research workflow guidance — project creation, source management, citations, and bibliography",
+    "project-guide",
+    "Project workflow guidance — project creation, data backends, source management, citations, and bibliography",
     async () => ({
       messages: [{
         role: "user",
         content: {
           type: "text",
-          text: `Crow Research Workflow Guide
+          text: `Crow Project Workflow Guide
 
-1. Project Creation — Use crow_research action: "create_project" with name and description
-2. Source Management — Add sources with action: "add_source" (URL, title, authors, date, type). Auto-generates APA citations.
-3. Notes — Attach with action: "add_note". Types: summary, quote, analysis, methodology, finding, question.
-4. Bibliography — Generate with action: "generate_bibliography" (APA format, filterable by project).
-5. Search — Use action: "search_sources" or "search_notes" for full-text search across all research data.`,
+1. Project Creation — Use crow_projects action: "create_project" with name, description, and type ('research' or 'data_connector')
+2. Data Backends — Register external MCP servers with action: "register_backend". List with "list_backends", inspect with "backend_schema".
+3. Source Management — Add sources with action: "add_source" (URL, title, authors, date, type). Auto-generates APA citations. Link to backends with backend_id.
+4. Notes — Attach with action: "add_note". Types: summary, quote, analysis, methodology, finding, question.
+5. Bibliography — Generate with action: "generate_bibliography" (APA format, filterable by project).
+6. Search — Use action: "search_sources" or "search_notes" for full-text search across all project data.`,
         },
       }],
     })

@@ -2,7 +2,7 @@
 
 # Crow — Build Desktop Extension Bundles (.mcpb)
 #
-# Packages crow-memory and crow-research as .mcpb files
+# Packages crow-memory and crow-projects as .mcpb files
 # for one-click installation in Claude Desktop.
 #
 # Usage: bash scripts/build-extensions.sh

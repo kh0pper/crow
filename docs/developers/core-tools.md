@@ -1,6 +1,6 @@
 # Adding Core Server Tools
 
-This guide explains how to add new MCP tools to Crow's core servers: crow-memory, crow-research, or crow-sharing.
+This guide explains how to add new MCP tools to Crow's core servers: crow-memory, crow-projects, or crow-sharing.
 
 ## Server Factory Pattern
 
@@ -8,7 +8,7 @@ Each server has a factory function in `server.js` that returns a configured `Mcp
 
 ```
 servers/memory/server.js    → createMemoryServer()
-servers/research/server.js  → createResearchServer()
+servers/research/server.js  → createProjectServer()
 servers/sharing/server.js   → createSharingServer()
 ```
 
@@ -103,7 +103,7 @@ If your tool needs new DB tables or columns:
 
 ```bash
 # Verify the server starts
-node servers/memory/index.js   # (or research/sharing)
+node servers/memory/index.js   # (or research/sharing/storage/blog)
 
 # Verify the gateway starts
 node servers/gateway/index.js --no-auth

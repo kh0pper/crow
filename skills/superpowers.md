@@ -12,7 +12,7 @@ This is the master routing skill. Consult this **before every task** to determin
 6. **Reflect when needed**: If friction accumulates, trigger the reflection skill
 7. **Surface skill activation**: When a skill activates from the trigger table, show: *[crow: activated skill — \<skill-name\>.md]*
 8. **Surface friction signals**: When noting a friction signal, show: *[crow: friction signal — \<description\> (\<N\> of 2 threshold)]*
-9. **Transparency protocol**: Follow the Transparency Protocol in `CLAUDE.md` for all autonomous actions
+9. **Transparency protocol**: Follow the Transparency Rules in crow.md (`transparency_rules` section) for all autonomous actions
 
 ---
 
@@ -23,7 +23,10 @@ This is the master routing skill. Consult this **before every task** to determin
 | User Intent (EN) | User Intent (ES) | Activate Skills | Primary Tools |
 |---|---|---|---|
 | "remember", "store", "recall", "what did we..." | "recordar", "guardar", "recuperar", "qué hicimos..." | memory-management | crow-memory |
-| "research", "find papers", "cite", "bibliography" | "investigar", "buscar artículos", "citar", "bibliografía" | research-pipeline, web-search | crow-research, brave-search, arxiv |
+| "research", "find papers", "cite", "bibliography" | "investigar", "buscar artículos", "citar", "bibliografía" | research-pipeline, web-search | crow-projects, brave-search, arxiv |
+| "connect to database", "data backend", "register backend" | "conectar base de datos", "backend de datos", "registrar backend" | data-backends | crow-projects |
+| "show my backends", "list backends" | "mostrar backends", "listar backends" | data-backends | crow-projects |
+| "query [backend name]", "data from [source]" | "consultar [backend]", "datos de [fuente]" | data-backends | crow-projects, crow-tools |
 | "email", "calendar", "schedule", "meeting", "gmail" | "correo", "calendario", "agendar", "reunión" | google-workspace | google-workspace |
 | "google chat", "chat space", "send chat" | "google chat", "espacio de chat", "enviar chat" | google-chat | google-workspace (chat tools) |
 | "task", "board", "card", "sprint", "trello" | "tarea", "tablero", "tarjeta", "sprint" | project-management | trello |
@@ -51,7 +54,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | "what can you do", "getting started", "new to crow" | "qué puedes hacer", "cómo empezar", "nuevo en crow" | onboarding-tour | crow-memory |
 | "tailscale", "remote access", "network setup" | "tailscale", "acceso remoto", "configurar red" | network-setup | (documentation) |
 | "report bug", "file issue", "feature request", "found a bug" | "reportar bug", "crear issue", "solicitar función" | bug-report | crow-memory, github |
-| "obsidian", "vault", "daily note", "sync to obsidian" | "obsidian", "bóveda", "nota diaria" | obsidian | obsidian, crow-research |
+| "obsidian", "vault", "daily note", "sync to obsidian" | "obsidian", "bóveda", "nota diaria" | obsidian | obsidian, crow-projects |
 | "lights", "temperature", "smart home", "turn on/off" | "luces", "temperatura", "hogar inteligente" | home-assistant | home-assistant |
 | "ollama", "local model", "run locally", "embeddings" | "ollama", "modelo local", "ejecutar local" | ollama | crow-memory |
 | "nextcloud", "nextcloud files" | "nextcloud", "archivos nextcloud" | nextcloud | filesystem |

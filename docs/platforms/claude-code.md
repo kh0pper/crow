@@ -26,7 +26,7 @@ Best for development — runs Crow servers directly on your machine.
            "CROW_DB_PATH": "/path/to/crow/data/crow.db"
          }
        },
-       "crow-research": {
+       "crow-projects": {
          "command": "node",
          "args": ["/path/to/crow/servers/research/index.js"],
          "env": {
@@ -60,9 +60,9 @@ Connect to a deployed Crow gateway for access to the full platform including ext
          "type": "url",
          "url": "https://your-gateway.onrender.com/memory/mcp"
        },
-       "crow-research": {
+       "crow-projects": {
          "type": "url",
-         "url": "https://your-gateway.onrender.com/research/mcp"
+         "url": "https://your-gateway.onrender.com/projects/mcp"
        },
        "crow-tools": {
          "type": "url",

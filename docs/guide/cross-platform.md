@@ -1,6 +1,6 @@
 # Cross-Platform Guide
 
-Crow lets you use **any AI platform** — Claude, ChatGPT, Gemini, Grok, Cursor, and more — while keeping the same persistent memory, research projects, and behavioral context across all of them.
+Crow lets you use **any AI platform** — Claude, ChatGPT, Gemini, Grok, Cursor, and more — while keeping the same persistent memory, projects, and behavioral context across all of them.
 
 ## The Problem
 
@@ -30,7 +30,7 @@ Crow sits between you and your AI platforms as a shared layer:
                         │
        ┌────────────────▼──────────────────────────┐
        │          Shared SQLite             │
-       │  Memories · Research · Context · crow.md   │
+       │  Memories · Projects · Context · crow.md    │
        └───────────────────────────────────────────┘
 ```
 
@@ -38,7 +38,7 @@ Crow sits between you and your AI platforms as a shared layer:
 
 1. **Memories** — Everything you tell any AI to remember is stored in one database. Ask from any platform, get the same answer.
 
-2. **Research projects** — Sources, notes, citations, and bibliographies are shared. Start research in Claude, continue in ChatGPT.
+2. **Projects** — Sources, notes, citations, and bibliographies are shared. Start a research project in Claude, continue in ChatGPT.
 
 3. **Behavioral context (crow.md)** — A dynamically-generated document that tells each AI platform how to behave as Crow: identity, memory protocols, transparency rules, and your customizations.
 
@@ -86,7 +86,7 @@ Beyond data, Crow shares **behavioral instructions** across platforms through `c
 
 - **Identity**: Who Crow is, what it does
 - **Memory protocol**: When and how to store/recall memories
-- **Research protocol**: Citation rules, project management
+- **Project protocol**: Citation rules, project management
 - **Session protocol**: What to do at start/during/end of sessions
 - **Transparency rules**: How to surface autonomous actions
 - **Skills reference**: Capability routing table
@@ -149,7 +149,7 @@ Crow will store this as a new section, and it will appear in the context documen
 ### Any Platform → Any Platform
 - All platforms share the same database
 - Memories stored on one are immediately available on another
-- Research projects, sources, and notes work the same everywhere
+- Projects, sources, and notes work the same everywhere
 - crow.md ensures consistent behavior across platforms
 
 ## Security

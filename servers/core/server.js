@@ -20,7 +20,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
 
 import { createMemoryServer } from "../memory/server.js";
-import { createResearchServer } from "../research/server.js";
+import { createProjectServer } from "../research/server.js";
 import { createSharingServer } from "../sharing/server.js";
 import { createBlogServer } from "../blog/server.js";
 import { TOOL_MANIFESTS, getToolNames } from "../gateway/tool-manifests.js";
@@ -28,7 +28,7 @@ import { generateInstructions } from "../shared/instructions.js";
 
 const SERVER_FACTORIES = {
   memory: createMemoryServer,
-  research: createResearchServer,
+  projects: createProjectServer,
   sharing: createSharingServer,
   blog: createBlogServer,
 };
@@ -132,9 +132,9 @@ export async function createCoreServer(dbPath) {
 
   server.tool(
     "crow_activate_server",
-    "Activate a server's tools, making them available for use. Servers: memory, research, sharing, storage, blog.",
+    "Activate a server's tools, making them available for use. Servers: memory, projects, sharing, storage, blog.",
     {
-      server: z.string().describe("Server name to activate: memory, research, sharing, storage, blog"),
+      server: z.string().describe("Server name to activate: memory, projects, sharing, storage, blog"),
     },
     async ({ server: serverName }) => {
       const available = Object.keys(TOOL_MANIFESTS);

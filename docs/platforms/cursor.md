@@ -26,7 +26,7 @@ Run Crow servers locally for direct integration.
            "CROW_DB_PATH": "/path/to/crow/data/crow.db"
          }
        },
-       "crow-research": {
+       "crow-projects": {
          "command": "node",
          "args": ["/path/to/crow/servers/research/index.js"],
          "env": {
@@ -54,8 +54,8 @@ Connect to a deployed Crow gateway.
        "crow-memory": {
          "url": "https://your-gateway.onrender.com/memory/mcp"
        },
-       "crow-research": {
-         "url": "https://your-gateway.onrender.com/research/mcp"
+       "crow-projects": {
+         "url": "https://your-gateway.onrender.com/projects/mcp"
        },
        "crow-tools": {
          "url": "https://your-gateway.onrender.com/tools/mcp"
@@ -75,7 +75,7 @@ Connect to a deployed Crow gateway.
 
 Crow automatically delivers behavioral context when Cursor connects — memory protocols and session management are active from the first message.
 
-IDE platforms get minimal transparency output — only Tier 2 checkpoints. MCP prompts (`session-start`, `crow-guide`, etc.) are available for deeper guidance. Memories and research stored from Cursor are shared with all other connected platforms. See the [Cross-Platform Guide](/guide/cross-platform).
+IDE platforms get minimal transparency output — only Tier 2 checkpoints. MCP prompts (`session-start`, `crow-guide`, etc.) are available for deeper guidance. Memories and projects stored from Cursor are shared with all other connected platforms. See the [Cross-Platform Guide](/guide/cross-platform).
 
 ## Context Optimization
 

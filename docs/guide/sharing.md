@@ -1,6 +1,6 @@
 # Sharing
 
-Share memories, research projects, and notes securely with other Crow users. Everything is end-to-end encrypted — no central server sees your data.
+Share memories, projects, and notes securely with other Crow users. Everything is end-to-end encrypted — no central server sees your data.
 
 ## Prerequisites
 
@@ -70,8 +70,8 @@ Crow looks up the memory, encrypts it for Alice's public key, and queues it for 
 | What you say | What happens |
 |---|---|
 | "Share my sourdough memory with Alice" | Sends a single memory |
-| "Share my thesis project with Bob, read-only" | Grants ongoing read access to a research project |
-| "Share source 3 from my thesis with Alice" | Sends a single research source |
+| "Share my thesis project with Bob, read-only" | Grants ongoing read access to a project |
+| "Share source 3 from my thesis with Alice" | Sends a single project source |
 | "Share the meeting notes with Bob" | Sends a single note |
 
 ### Permission levels
@@ -80,7 +80,7 @@ Crow looks up the memory, encrypts it for Alice's public key, and queues it for 
 - **Read-write** — Recipient can add to a shared project (sources, notes)
 - **One-time** — Data delivered once, then removed from the sync feed
 
-## Sharing Research Projects
+## Sharing Projects
 
 Project sharing is more powerful than single-item sharing. When you share a project:
 

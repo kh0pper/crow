@@ -4,11 +4,11 @@ Connect Crow to [OpenClaw](https://openclaw.ai), the open-source personal AI ass
 
 ## Why Use Crow with OpenClaw?
 
-OpenClaw handles the conversational front-end across chat platforms. Crow adds persistent cross-platform memory and structured research that survive OpenClaw's daily session resets and context compaction.
+OpenClaw handles the conversational front-end across chat platforms. Crow adds persistent cross-platform memory and structured project management that survive OpenClaw's daily session resets and context compaction.
 
 - **Persistent memory**: OpenClaw's markdown-based memory is session-scoped and lossy — context compaction summarizes or drops older information. Crow's SQLite/FTS5 memory is structured, searchable, and permanent.
 - **Cross-platform access**: Memories stored from OpenClaw are instantly available from Claude, ChatGPT, Gemini, Cursor, or any other connected platform.
-- **Research pipeline**: Crow adds capabilities OpenClaw doesn't have natively — research projects, sources with auto-APA citations, notes, and bibliography generation.
+- **Project pipeline**: Crow adds capabilities OpenClaw doesn't have natively — typed projects (research, data connectors), sources with auto-APA citations, notes, data backends, and bibliography generation.
 
 ## Prerequisites
 
@@ -40,7 +40,7 @@ Run both Crow and OpenClaw on the same machine. No network or auth needed.
            "CROW_DB_PATH": "/path/to/crow/data/crow.db"
          }
        },
-       "crow-research": {
+       "crow-projects": {
          "command": "node",
          "args": ["/path/to/crow/servers/research/index.js"],
          "env": {
@@ -70,8 +70,8 @@ Connect a local OpenClaw instance to a cloud-deployed Crow gateway. Useful when 
        "crow-memory": {
          "url": "https://your-gateway.onrender.com/memory/mcp"
        },
-       "crow-research": {
-         "url": "https://your-gateway.onrender.com/research/mcp"
+       "crow-projects": {
+         "url": "https://your-gateway.onrender.com/projects/mcp"
        },
        "crow-tools": {
          "url": "https://your-gateway.onrender.com/tools/mcp"
@@ -174,14 +174,15 @@ GET https://your-gateway.onrender.com/crow.md
 
 The context includes Crow's identity, memory protocols, transparency rules, and any custom sections you've configured. See the [Cross-Platform Guide](/guide/cross-platform) for details.
 
-## Using Research Tools
+## Using Project Tools
 
-With Crow connected, OpenClaw gains access to a full research pipeline:
+With Crow connected, OpenClaw gains access to a full project pipeline:
 
-- **Projects**: Create and manage research projects (`crow_create_project`, `crow_list_projects`)
+- **Projects**: Create and manage projects (`crow_create_project`, `crow_list_projects`) with typed workflows (research, data connectors)
 - **Sources**: Add sources with auto-generated APA citations (`crow_add_source`, `crow_search_sources`)
 - **Notes**: Take notes linked to sources and projects (`crow_add_note`, `crow_search_notes`)
 - **Bibliography**: Generate formatted bibliographies (`crow_generate_bibliography`)
+- **Data backends**: Register external MCP servers as data sources (`crow_register_backend`, `crow_list_backends`)
 
 Example workflow through any OpenClaw-connected chat:
 
@@ -204,8 +205,8 @@ After connecting, test through any OpenClaw-connected chat platform:
 3. **Cross-platform test** (if Crow is also connected to Claude, ChatGPT, etc.):
    Ask the other platform: "Search my memories for 'OpenClaw'" — the memory should appear.
 
-4. **Research tools**:
-   > "List my research projects"
+4. **Project tools**:
+   > "List my projects"
 
 ## Tips
 
@@ -213,5 +214,5 @@ After connecting, test through any OpenClaw-connected chat platform:
 - OpenClaw's pre-compaction memory flush is a natural trigger for saving important context to Crow
 - Use Crow's importance scoring (1–10) to prioritize what matters — high-importance memories surface first in searches
 - `crow_memory_stats` gives a quick overview of your memory database from any platform
-- If using Option B (HTTP), ensure your gateway stays healthy — OpenClaw loses memory/research access if the gateway goes down
+- If using Option B (HTTP), ensure your gateway stays healthy — OpenClaw loses memory/project access if the gateway goes down
 - Both systems can coexist — let each do what it's best at rather than trying to replace one with the other

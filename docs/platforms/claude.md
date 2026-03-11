@@ -24,7 +24,7 @@ Repeat for each server you want to connect:
 | Server | URL |
 |---|---|
 | Memory | `https://your-gateway.onrender.com/memory/mcp` |
-| Research | `https://your-gateway.onrender.com/research/mcp` |
+| Projects | `https://your-gateway.onrender.com/projects/mcp` |
 | Sharing | `https://your-gateway.onrender.com/sharing/mcp` |
 | Storage | `https://your-gateway.onrender.com/storage/mcp` |
 | Blog | `https://your-gateway.onrender.com/blog-mcp/mcp` |
@@ -82,7 +82,7 @@ See the [Context & Performance guide](/guide/context-performance) for more detai
 
 ## Tips
 
-- You can connect all five servers (memory, research, sharing, storage, blog) plus external tools simultaneously
+- You can connect all five servers (memory, projects, sharing, storage, blog) plus external tools simultaneously
 - The mobile app uses the same Custom Integrations as the web
 - Tools from external integrations (GitHub, Slack, etc.) appear through the `/tools/mcp` endpoint
 - Memories stored here are instantly accessible from ChatGPT, Gemini, or any other connected platform

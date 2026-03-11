@@ -25,7 +25,7 @@ Install with: `crow bundle install <id>`
 - **Academic Bundle** — Crow + arXiv + Zotero + Google Workspace + Canvas LMS
 - **Business Bundle** — Crow + Gmail + Calendar + Slack + Trello + Notion
 - **Creative Bundle** — Crow + Notion + filesystem + GitHub
-- **Minimal Bundle** — Crow core only (memory + research + sharing)
+- **Minimal Bundle** — Crow core only (memory + projects + sharing)
 
 ## Creating a Bundle
 

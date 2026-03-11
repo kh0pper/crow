@@ -18,7 +18,7 @@ Published by [Maestro Press](https://maestro.press) | [Product Page](https://mae
 ┌────────┴──────────────────────┴──────────────────────┴───────────────┐
 │  Crow Gateway (Express + OAuth 2.1)                                  │
 │  ├── crow-memory (persistent memory + full-text search)              │
-│  ├── crow-research (research pipeline + APA citations)               │
+│  ├── crow-projects (project management + APA citations + data backends) │
 │  ├── crow-sharing (P2P encrypted sharing + Nostr messaging)          │
 │  ├── crow-storage (S3-compatible file storage + quotas)              │
 │  ├── crow-blog (publishing platform + RSS/Atom feeds)                │
@@ -129,7 +129,7 @@ Crow is open to contributions! Build integrations, skills, tools, and deployment
 
 - **MCP Integrations** — Connect new services (Linear, Jira, Todoist, etc.)
 - **Skills** — Write behavioral prompts that teach the AI new workflows (no code required)
-- **Core Tools** — Add MCP tools to crow-memory, crow-research, crow-sharing, crow-storage, or crow-blog
+- **Core Tools** — Add MCP tools to crow-memory, crow-projects, crow-sharing, crow-storage, or crow-blog
 - **Self-Hosted Bundles** — Create Docker Compose configs for specific use cases
 
 → **[Developer Docs](https://maestro.press/software/crow/developers/)** · **[Community Directory](https://maestro.press/software/crow/developers/directory)** · **[CONTRIBUTING.md](CONTRIBUTING.md)**
