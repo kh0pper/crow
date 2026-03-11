@@ -39,7 +39,7 @@ You may not use the service for:
 
 ## 6. Billing & Payment
 
-- **Pricing** — $5/month or $48/year (annual plan saves 2 months).
+- **Pricing** — $15/month or $120/year (annual plan saves 4 months).
 - **Payment** — Processed via Stripe. By completing checkout, you agree to these terms.
 - **Monthly plans** — No partial-month refunds upon cancellation.
 - **Annual plans** — Pro-rata refund available if cancelled within 30 days of purchase.

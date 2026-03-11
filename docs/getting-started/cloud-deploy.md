@@ -1,7 +1,7 @@
 # Cloud Deploy (Render)
 
 ::: tip Don't want to manage infrastructure?
-Try [managed hosting](./managed-hosting) — $5/mo, no setup required.
+Try [managed hosting](./managed-hosting) — $15/mo, no setup required.
 :::
 
 Deploy Crow to Render so it's accessible from any device and any AI platform.

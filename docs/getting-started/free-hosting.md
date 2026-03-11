@@ -203,7 +203,7 @@ For a dedicated home appliance, see the [Raspberry Pi Setup Guide](./raspberry-p
 
 ## Paid Alternative
 
-If you'd rather skip infrastructure management entirely, [managed hosting](./managed-hosting) gives you a pre-configured Crow instance for $5/mo (or $48/yr). No setup, no maintenance — just pick a username and connect your AI.
+If you'd rather skip infrastructure management entirely, [managed hosting](./managed-hosting) gives you a pre-configured Crow instance for $15/mo (or $120/yr). No setup, no maintenance — just pick a username and connect your AI.
 
 ## Which Should I Choose?
 

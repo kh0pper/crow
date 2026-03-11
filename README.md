@@ -1,17 +1,17 @@
 # Crow
 
-Persistent memory, research pipeline, encrypted P2P sharing, and 20+ integrations for your AI assistant. Built on the open [Model Context Protocol](https://modelcontextprotocol.io) standard.
+AI-powered project management, persistent memory, encrypted P2P sharing, and 20+ integrations for your AI assistant. Built on the open [Model Context Protocol](https://modelcontextprotocol.io) standard.
 
 Published by [Maestro Press](https://maestro.press) | [Product Page](https://maestro.press/software/crow/)
 
-**Share memories, research, and messages directly between Crow users** — end-to-end encrypted, no central server, no accounts. The first AI platform where your assistant can securely collaborate with other people's assistants.
+**Share memories, projects, and messages directly between Crow users** — end-to-end encrypted, no central server, no accounts. The first AI platform where your assistant can securely collaborate with other people's assistants.
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
 │       AI Client (Claude, ChatGPT, Gemini, Grok, Cursor, etc.)       │
 └────────┬──────────────────────┬──────────────────────┬───────────────┘
          │                      │                      │
-   /memory/mcp            /research/mcp          /tools/mcp
+   /memory/mcp            /projects/mcp          /tools/mcp
    /sharing/mcp           /storage/mcp           /blog-mcp/mcp
    /sharing/sse           /relay/*
          │                      │                      │
@@ -34,13 +34,13 @@ Published by [Maestro Press](https://maestro.press) | [Product Page](https://mae
 
 Crow is the first AI platform with built-in encrypted peer-to-peer sharing. No cloud middleman, no accounts to create — just your Crow ID.
 
-- **Share memories and research** — Send a memory or an entire research project to a friend's Crow, encrypted end-to-end
-- **Collaborate on projects** — Grant read or read-write access to research projects that stay in sync automatically
+- **Share memories and projects** — Send a memory or an entire project to a friend's Crow, encrypted end-to-end
+- **Collaborate on projects** — Grant read or read-write access to projects that stay in sync automatically
 - **Encrypted messaging** — Send messages between Crow users via the Nostr protocol with full sender anonymity
 - **Works offline** — Shares queue up and deliver when both peers are online. Peer relays handle async delivery.
 - **Zero trust** — No central server sees your data. Invite codes, safety numbers, and NaCl encryption throughout.
 
-> *"Share my thesis project with Alice, read-write"* — that's it. Crow handles the cryptography, discovery, and sync.
+> *"Share my project with Alice, read-write"* — that's it. Crow handles the cryptography, discovery, and sync.
 
 Learn more: **[Sharing Guide](https://maestro.press/software/crow/guide/sharing)** · **[Architecture](https://maestro.press/software/crow/architecture/sharing-server)**
 
@@ -66,7 +66,7 @@ Create, edit, and publish blog posts through your AI assistant. Markdown renderi
 
 ### Managed Hosting (Easiest)
 
-Pre-configured Crow instance at `username.crow.maestro.press` — no setup, no maintenance. $5/mo or $48/yr.
+Pre-configured Crow instance at `username.crow.maestro.press` — no setup, no maintenance. $15/mo or $120/yr.
 
 > **[Get managed hosting →](https://maestro.press/hosting/)**
 
