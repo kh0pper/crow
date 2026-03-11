@@ -1,9 +1,10 @@
 FROM node:20-slim
 
 # Install Python 3 + uv (for uvx-based MCP servers like Google Workspace, Zotero, MCP Research)
-# Also install curl for uv installer and git which some npx packages need
+# Also install curl for uv installer, git which some npx packages need,
+# and libatomic1 which rocksdb-native's prebuild links against
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-venv curl git \
+    python3 python3-venv curl git libatomic1 \
     && rm -rf /var/lib/apt/lists/* \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
