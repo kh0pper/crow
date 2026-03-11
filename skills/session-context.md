@@ -85,7 +85,7 @@ Store information automatically when:
 - User preferences are expressed (including language preference)
 - Research sources are discussed but not yet formally added
 
-**Transparency**: Every automatic store must show a FYI line per the Transparency Protocol in `CLAUDE.md`. The user can say "undo that" or "don't store that" at any time to reverse the most recent store.
+**Transparency**: Every automatic store must show a FYI line per the Transparency Rules in crow.md. The user can say "undo that" or "don't store that" at any time to reverse the most recent store.
 
 **Memory language rules**: Content in user's preferred language, tags bilingual (English + user's language), categories in English. See `skills/i18n.md` for full protocol.
 

@@ -52,7 +52,7 @@ Use `crow_store_memory` with appropriate categorization:
 
 ## Transparency: Surfacing Memory Operations
 
-Follow the Transparency Protocol defined in `CLAUDE.md`. Memory operations are the most common autonomous actions, so consistent surfacing is critical.
+Follow the Transparency Rules in crow.md (`transparency_rules` section). Memory operations are the most common autonomous actions, so consistent surfacing is critical.
 
 ### On Every Store
 After calling `crow_store_memory`, immediately show a FYI line:
