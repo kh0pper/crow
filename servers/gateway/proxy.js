@@ -12,6 +12,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { z } from "zod";
 import { INTEGRATIONS, isIntegrationConfigured, getSpawnEnv } from "./integrations.js";
+import { createDbClient } from "../db.js";
 
 // Track connected servers for health checks and router access
 const connectedServers = new Map(); // id → { client, process, tools }
@@ -164,6 +165,94 @@ export async function initProxyServers() {
   ).length;
 
   console.log(`[proxy] ${successCount}/${configured.length} server(s) connected.`);
+
+  // Load dynamic backends from data_backends table
+  await loadDynamicBackends();
+}
+
+/**
+ * Load data backends from the database and connect them as integrations.
+ * Called on startup and can be called again to reload without full restart.
+ */
+export async function loadDynamicBackends() {
+  let db;
+  try {
+    db = createDbClient();
+    const { rows } = await db.execute(
+      "SELECT * FROM data_backends WHERE backend_type = 'mcp_server'"
+    );
+
+    if (rows.length === 0) return;
+
+    console.log(`[proxy] Loading ${rows.length} dynamic backend(s) from database...`);
+
+    for (const row of rows) {
+      const backendKey = `backend-${row.id}`;
+
+      // Skip if already connected
+      const existing = connectedServers.get(backendKey);
+      if (existing && existing.status === "connected") continue;
+
+      let connRef;
+      try {
+        connRef = JSON.parse(row.connection_ref);
+      } catch {
+        console.error(`  [proxy] Backend #${row.id} "${row.name}": invalid connection_ref JSON`);
+        await db.execute({
+          sql: "UPDATE data_backends SET status = 'error', last_error = ?, updated_at = datetime('now') WHERE id = ?",
+          args: ["Invalid connection_ref JSON", row.id],
+        });
+        continue;
+      }
+
+      // Check that required env vars are set
+      const missingVars = (connRef.envVars || []).filter((v) => !process.env[v]);
+      if (missingVars.length > 0) {
+        console.warn(`  [proxy] Backend #${row.id} "${row.name}": missing env vars: ${missingVars.join(", ")}`);
+        await db.execute({
+          sql: "UPDATE data_backends SET status = 'error', last_error = ?, updated_at = datetime('now') WHERE id = ?",
+          args: [`Missing env vars: ${missingVars.join(", ")}`, row.id],
+        });
+        continue;
+      }
+
+      // Build integration-shaped object for connectToServer
+      const integration = {
+        id: backendKey,
+        name: row.name,
+        command: connRef.command,
+        args: connRef.args || [],
+        envVars: connRef.envVars || [],
+      };
+
+      try {
+        const result = await connectToServer(integration);
+        if (result) {
+          await db.execute({
+            sql: "UPDATE data_backends SET status = 'connected', last_connected_at = datetime('now'), last_error = NULL, schema_info = ?, updated_at = datetime('now') WHERE id = ?",
+            args: [JSON.stringify(result.tools.map((t) => ({ name: t.name, description: t.description }))), row.id],
+          });
+        } else {
+          await db.execute({
+            sql: "UPDATE data_backends SET status = 'error', last_error = 'Connection failed', updated_at = datetime('now') WHERE id = ?",
+            args: [row.id],
+          });
+        }
+      } catch (error) {
+        await db.execute({
+          sql: "UPDATE data_backends SET status = 'error', last_error = ?, updated_at = datetime('now') WHERE id = ?",
+          args: [error.message, row.id],
+        });
+      }
+    }
+  } catch (error) {
+    // data_backends table may not exist yet (first run before init-db)
+    if (!error.message?.includes("no such table")) {
+      console.warn(`[proxy] Failed to load dynamic backends: ${error.message}`);
+    }
+  } finally {
+    if (db) db.close();
+  }
 }
 
 /**

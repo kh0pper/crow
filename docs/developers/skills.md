@@ -54,7 +54,7 @@ Skills can combine multiple tools across different servers:
 ```markdown
 ## Workflow: Research Summary Email
 1. Search memories with `crow_search_memories` for the topic
-2. List research sources with `crow_list_sources`
+2. List project sources with `crow_list_sources`
 3. Compose a summary
 4. Send via `send_gmail_message`
 5. Store the action in memory with `crow_store_memory`

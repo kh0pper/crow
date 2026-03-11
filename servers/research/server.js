@@ -1,7 +1,8 @@
 /**
- * Crow Research Pipeline — Server Factory
+ * Crow Project Server — Server Factory
  *
- * Creates a configured McpServer with all research tools registered.
+ * Creates a configured McpServer with all project management tools registered.
+ * Supports research projects (default), data connector projects, and extensible types.
  * Transport-agnostic: used by both stdio (index.js) and HTTP (gateway).
  */
 
@@ -43,11 +44,11 @@ function generateAPA({ authors, title, publication_date, publisher, url, source_
   }
 }
 
-export function createResearchServer(dbPath, options = {}) {
+export function createProjectServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
 
   const server = new McpServer(
-    { name: "crow-research", version: "0.1.0" },
+    { name: "crow-projects", version: "0.1.0" },
     options.instructions ? { instructions: options.instructions } : undefined
   );
 
@@ -55,32 +56,39 @@ export function createResearchServer(dbPath, options = {}) {
 
   server.tool(
     "crow_create_project",
-    "Create a new research project to organize sources and notes under.",
+    "Create a new project to organize sources, notes, and data backends under.",
     {
       name: z.string().max(500).describe("Project name"),
       description: z.string().max(50000).optional().describe("Project description and goals"),
+      type: z.string().max(100).default("research").describe("Project type: 'research' (default), 'data_connector', or custom"),
       tags: z.string().max(500).optional().describe("Comma-separated tags"),
     },
-    async ({ name, description, tags }) => {
+    async ({ name, description, type, tags }) => {
       const result = await db.execute({
-        sql: "INSERT INTO research_projects (name, description, tags) VALUES (?, ?, ?)",
-        args: [name, description ?? null, tags ?? null],
+        sql: "INSERT INTO research_projects (name, description, type, tags) VALUES (?, ?, ?, ?)",
+        args: [name, description ?? null, type, tags ?? null],
       });
+      const projectId = Number(result.lastInsertRowid);
+      let text = `Project created: "${name}" (id: ${projectId}, type: ${type})`;
+      if (type === "data_connector") {
+        text += `\n\nNext step: Use crow_register_backend to connect an external MCP server to this project.`;
+      }
       return {
-        content: [{ type: "text", text: `Project created: "${name}" (id: ${Number(result.lastInsertRowid)})` }],
+        content: [{ type: "text", text }],
       };
     }
   );
 
   server.tool(
     "crow_list_projects",
-    "List all research projects with their status and source counts.",
+    "List all projects with their status, type, and source counts.",
     {
       status: z.enum(["active", "paused", "completed", "archived"]).optional().describe("Filter by status"),
+      type: z.string().max(100).optional().describe("Filter by project type (research, data_connector, etc.)"),
       limit: z.number().max(100).default(20).describe("Maximum results to return"),
       offset: z.number().default(0).describe("Number of results to skip"),
     },
-    async ({ status, limit, offset }) => {
+    async ({ status, type, limit, offset }) => {
       let sql = `
         SELECT p.*, COUNT(s.id) as source_count,
                (SELECT COUNT(*) FROM research_notes n WHERE n.project_id = p.id) as note_count
@@ -88,9 +96,17 @@ export function createResearchServer(dbPath, options = {}) {
         LEFT JOIN research_sources s ON s.project_id = p.id
       `;
       const params = [];
+      const conditions = [];
       if (status) {
-        sql += " WHERE p.status = ?";
+        conditions.push("p.status = ?");
         params.push(status);
+      }
+      if (type) {
+        conditions.push("p.type = ?");
+        params.push(type);
+      }
+      if (conditions.length > 0) {
+        sql += " WHERE " + conditions.join(" AND ");
       }
       sql += " GROUP BY p.id ORDER BY p.updated_at DESC LIMIT ? OFFSET ?";
       params.push(limit, offset);
@@ -103,7 +119,7 @@ export function createResearchServer(dbPath, options = {}) {
       const formatted = rows
         .map(
           (r) =>
-            `[#${r.id}] ${r.name} (${r.status}) - ${r.source_count} sources, ${r.note_count} notes\n  ${r.description || "No description"}${r.tags ? `\n  Tags: ${r.tags}` : ""}`
+            `[#${r.id}] ${r.name} (${r.type || "research"}, ${r.status}) - ${r.source_count} sources, ${r.note_count} notes\n  ${r.description || "No description"}${r.tags ? `\n  Tags: ${r.tags}` : ""}`
         )
         .join("\n\n");
 
@@ -113,20 +129,22 @@ export function createResearchServer(dbPath, options = {}) {
 
   server.tool(
     "crow_update_project",
-    "Update a research project's name, description, status, or tags.",
+    "Update a project's name, description, status, type, or tags.",
     {
       id: z.number().describe("Project ID"),
       name: z.string().max(500).optional(),
       description: z.string().max(50000).optional(),
       status: z.enum(["active", "paused", "completed", "archived"]).optional(),
+      type: z.string().max(100).optional().describe("Project type"),
       tags: z.string().max(500).optional(),
     },
-    async ({ id, name, description, status, tags }) => {
+    async ({ id, name, description, status, type, tags }) => {
       const updates = [];
       const params = [];
       if (name !== undefined) { updates.push("name = ?"); params.push(name); }
       if (description !== undefined) { updates.push("description = ?"); params.push(description); }
       if (status !== undefined) { updates.push("status = ?"); params.push(status); }
+      if (type !== undefined) { updates.push("type = ?"); params.push(type); }
       if (tags !== undefined) { updates.push("tags = ?"); params.push(tags); }
 
       if (updates.length === 0) {
@@ -144,11 +162,12 @@ export function createResearchServer(dbPath, options = {}) {
 
   server.tool(
     "crow_add_source",
-    "Add a research source with full metadata and automatic APA citation generation.",
+    "Add a source with full metadata and automatic APA citation generation.",
     {
       title: z.string().max(500).describe("Title of the source"),
       source_type: z.enum(SOURCE_TYPES).describe("Type of source"),
-      project_id: z.number().optional().describe("Associate with a research project"),
+      project_id: z.number().optional().describe("Associate with a project"),
+      backend_id: z.number().optional().describe("Associate with a data backend"),
       url: z.string().max(2000).optional().describe("URL where the source was found"),
       authors: z.string().max(1000).optional().describe("Author(s) - 'Last, F. M.' format, separate multiple with '&'"),
       publication_date: z.string().max(20).optional().describe("Publication date (YYYY-MM-DD or YYYY)"),
@@ -169,14 +188,14 @@ export function createResearchServer(dbPath, options = {}) {
       const result = await db.execute({
         sql: `
           INSERT INTO research_sources
-            (title, source_type, project_id, url, authors, publication_date, publisher,
+            (title, source_type, project_id, backend_id, url, authors, publication_date, publisher,
              doi, isbn, abstract, content_summary, full_text, citation_apa,
              retrieval_method, tags, relevance_score)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
         args: [
-          params.title, params.source_type, params.project_id ?? null, params.url ?? null,
-          params.authors ?? null, params.publication_date ?? null, params.publisher ?? null,
+          params.title, params.source_type, params.project_id ?? null, params.backend_id ?? null,
+          params.url ?? null, params.authors ?? null, params.publication_date ?? null, params.publisher ?? null,
           params.doi ?? null, params.isbn ?? null, params.abstract ?? null, params.content_summary ?? null,
           params.full_text ?? null, apa, params.retrieval_method ?? null, params.tags ?? null,
           params.relevance_score,
@@ -196,7 +215,7 @@ export function createResearchServer(dbPath, options = {}) {
 
   server.tool(
     "crow_search_sources",
-    "Full-text search across all research sources.",
+    "Full-text search across all sources.",
     {
       query: z.string().max(500).describe("Search query"),
       project_id: z.number().optional().describe("Filter to specific project"),
@@ -269,6 +288,7 @@ export function createResearchServer(dbPath, options = {}) {
       text += `Verified: ${source.verified ? "Yes" : "No"}${source.verification_notes ? ` - ${source.verification_notes}` : ""}\n`;
       text += `Relevance: ${source.relevance_score}/10\n`;
       text += `Tags: ${source.tags || "none"}\n`;
+      if (source.backend_id) text += `Backend: #${source.backend_id}\n`;
       text += `\nAPA Citation:\n  ${source.citation_apa}\n`;
       if (source.abstract) text += `\nAbstract:\n--- stored content ---\n${source.abstract}\n--- end stored content ---\n`;
       if (source.content_summary) text += `\nSummary:\n--- stored content ---\n${source.content_summary}\n--- end stored content ---\n`;
@@ -303,16 +323,18 @@ export function createResearchServer(dbPath, options = {}) {
     "List sources with filtering options.",
     {
       project_id: z.number().optional().describe("Filter by project"),
+      backend_id: z.number().optional().describe("Filter by data backend"),
       source_type: z.enum(SOURCE_TYPES).optional(),
       verified_only: z.boolean().default(false),
       sort_by: z.enum(["recent", "relevance", "title"]).default("recent"),
       limit: z.number().max(100).default(20),
     },
-    async ({ project_id, source_type, verified_only, sort_by, limit }) => {
+    async ({ project_id, backend_id, source_type, verified_only, sort_by, limit }) => {
       let sql = "SELECT * FROM research_sources WHERE 1=1";
       const params = [];
 
       if (project_id) { sql += " AND project_id = ?"; params.push(project_id); }
+      if (backend_id) { sql += " AND backend_id = ?"; params.push(backend_id); }
       if (source_type) { sql += " AND source_type = ?"; params.push(source_type); }
       if (verified_only) { sql += " AND verified = 1"; }
 
@@ -344,7 +366,7 @@ export function createResearchServer(dbPath, options = {}) {
 
   server.tool(
     "crow_add_note",
-    "Add a research note - can be attached to a project, a source, or both.",
+    "Add a note - can be attached to a project, a source, or both.",
     {
       content: z.string().max(50000).describe("Note content"),
       note_type: z.enum(["note", "quote", "summary", "analysis", "question", "insight"]).default("note"),
@@ -366,7 +388,7 @@ export function createResearchServer(dbPath, options = {}) {
 
   server.tool(
     "crow_search_notes",
-    "Search research notes by content.",
+    "Search notes by content.",
     {
       query: z.string().max(500).describe("Search terms"),
       project_id: z.number().optional(),
@@ -430,8 +452,8 @@ export function createResearchServer(dbPath, options = {}) {
   // --- Stats Tool ---
 
   server.tool(
-    "crow_research_stats",
-    "Get statistics about the research database.",
+    "crow_project_stats",
+    "Get statistics about the project database.",
     {},
     async () => {
       const projects = (await db.execute("SELECT COUNT(*) as count FROM research_projects")).rows[0];
@@ -440,11 +462,23 @@ export function createResearchServer(dbPath, options = {}) {
       const byType = (await db.execute("SELECT source_type, COUNT(*) as count FROM research_sources GROUP BY source_type ORDER BY count DESC")).rows;
       const notes = (await db.execute("SELECT COUNT(*) as count FROM research_notes")).rows[0];
       const byNoteType = (await db.execute("SELECT note_type, COUNT(*) as count FROM research_notes GROUP BY note_type ORDER BY count DESC")).rows;
+      const byProjectType = (await db.execute("SELECT COALESCE(type, 'research') as type, COUNT(*) as count FROM research_projects GROUP BY type ORDER BY count DESC")).rows;
 
-      let text = `Research Database Statistics:\n`;
+      let backends = { count: 0 };
+      let connectedBackends = { count: 0 };
+      try {
+        backends = (await db.execute("SELECT COUNT(*) as count FROM data_backends")).rows[0];
+        connectedBackends = (await db.execute("SELECT COUNT(*) as count FROM data_backends WHERE status = 'connected'")).rows[0];
+      } catch {
+        // data_backends table may not exist yet
+      }
+
+      let text = `Project Database Statistics:\n`;
       text += `  Projects: ${projects.count}\n`;
       text += `  Sources: ${sources.count} (${verified.count} verified)\n`;
-      text += `  Notes: ${notes.count}\n\n`;
+      text += `  Notes: ${notes.count}\n`;
+      text += `  Data Backends: ${backends.count} (${connectedBackends.count} connected)\n\n`;
+      text += `Projects by Type:\n${byProjectType.map((r) => `  ${r.type}: ${r.count}`).join("\n")}\n\n`;
       text += `Sources by Type:\n${byType.map((r) => `  ${r.source_type}: ${r.count}`).join("\n")}\n\n`;
       text += `Notes by Type:\n${byNoteType.map((r) => `  ${r.note_type}: ${r.count}`).join("\n")}`;
 
@@ -452,11 +486,155 @@ export function createResearchServer(dbPath, options = {}) {
     }
   );
 
+  // --- Data Backend Tools ---
+
+  server.tool(
+    "crow_register_backend",
+    "Register an external MCP server as a data backend. Creates a data_connector project if project_id is not provided. Credentials are never stored — only env var names are saved.",
+    {
+      name: z.string().max(500).describe("Display name for this backend (e.g., 'Production Postgres')"),
+      backend_type: z.string().max(100).default("mcp_server").describe("Backend type (currently only 'mcp_server')"),
+      project_id: z.number().optional().describe("Existing project to attach to (auto-creates if not provided)"),
+      connection_ref: z.string().max(5000).describe("JSON connection reference: {\"command\":\"npx\",\"args\":[\"-y\",\"mcp-server-postgres\"],\"envVars\":[\"POSTGRES_URL\"]}"),
+      tags: z.string().max(500).optional().describe("Comma-separated tags"),
+    },
+    async ({ name, backend_type, project_id, connection_ref, tags }) => {
+      // Validate connection_ref is valid JSON
+      let connRef;
+      try {
+        connRef = JSON.parse(connection_ref);
+      } catch {
+        return {
+          content: [{ type: "text", text: "Error: connection_ref must be valid JSON. Example: {\"command\":\"npx\",\"args\":[\"-y\",\"mcp-server-postgres\"],\"envVars\":[\"POSTGRES_URL\"]}" }],
+          isError: true,
+        };
+      }
+
+      // Validate required fields in connection_ref
+      if (!connRef.command) {
+        return {
+          content: [{ type: "text", text: "Error: connection_ref must include a 'command' field (e.g., 'npx', 'uvx', 'node')." }],
+          isError: true,
+        };
+      }
+
+      // Auto-create project if not provided
+      let actualProjectId = project_id;
+      if (!actualProjectId) {
+        const projectResult = await db.execute({
+          sql: "INSERT INTO research_projects (name, description, type, tags) VALUES (?, ?, 'data_connector', ?)",
+          args: [name, `Data backend: ${name}`, tags ?? null],
+        });
+        actualProjectId = Number(projectResult.lastInsertRowid);
+      }
+
+      const result = await db.execute({
+        sql: `INSERT INTO data_backends (project_id, name, backend_type, connection_ref, tags) VALUES (?, ?, ?, ?, ?)`,
+        args: [actualProjectId, name, backend_type, connection_ref, tags ?? null],
+      });
+
+      const backendId = Number(result.lastInsertRowid);
+      let text = `Backend registered: "${name}" (id: ${backendId}, project: #${actualProjectId})\n`;
+      text += `Type: ${backend_type}\n`;
+      text += `Status: disconnected (restart gateway or call reload to connect)\n`;
+      if (connRef.envVars && connRef.envVars.length > 0) {
+        text += `\nRequired env vars (must be set in .env): ${connRef.envVars.join(", ")}`;
+      }
+
+      return { content: [{ type: "text", text }] };
+    }
+  );
+
+  server.tool(
+    "crow_list_backends",
+    "List registered data backends with their connection status.",
+    {
+      project_id: z.number().optional().describe("Filter by project"),
+      status: z.string().max(100).optional().describe("Filter by status: connected, disconnected, error"),
+    },
+    async ({ project_id, status }) => {
+      let sql = `
+        SELECT b.*, p.name as project_name
+        FROM data_backends b
+        JOIN research_projects p ON p.id = b.project_id
+        WHERE 1=1
+      `;
+      const params = [];
+      if (project_id) { sql += " AND b.project_id = ?"; params.push(project_id); }
+      if (status) { sql += " AND b.status = ?"; params.push(status); }
+      sql += " ORDER BY b.updated_at DESC";
+
+      const { rows } = await db.execute({ sql, args: params });
+      if (rows.length === 0) {
+        return { content: [{ type: "text", text: "No data backends registered." }] };
+      }
+
+      const formatted = rows.map((r) => {
+        let connRef;
+        try { connRef = JSON.parse(r.connection_ref); } catch { connRef = {}; }
+        return `[#${r.id}] ${r.name} (${r.status})\n  Project: ${r.project_name} (#${r.project_id})\n  Type: ${r.backend_type}\n  Command: ${connRef.command || "N/A"} ${(connRef.args || []).join(" ")}\n  Env vars: ${(connRef.envVars || []).join(", ") || "none"}${r.last_error ? `\n  Last error: ${r.last_error}` : ""}${r.last_connected_at ? `\n  Last connected: ${r.last_connected_at}` : ""}`;
+      }).join("\n\n");
+
+      return { content: [{ type: "text", text: `${rows.length} data backend(s):\n\n${formatted}` }] };
+    }
+  );
+
+  server.tool(
+    "crow_remove_backend",
+    "Remove a data backend registration.",
+    {
+      id: z.number().describe("Backend ID to remove"),
+    },
+    async ({ id }) => {
+      const { rows } = await db.execute({ sql: "SELECT name FROM data_backends WHERE id = ?", args: [id] });
+      if (rows.length === 0) {
+        return { content: [{ type: "text", text: `Backend #${id} not found.` }] };
+      }
+      await db.execute({ sql: "DELETE FROM data_backends WHERE id = ?", args: [id] });
+      return { content: [{ type: "text", text: `Backend "${rows[0].name}" (#${id}) removed.` }] };
+    }
+  );
+
+  server.tool(
+    "crow_backend_schema",
+    "Show discovered tools and schema for a data backend.",
+    {
+      id: z.number().describe("Backend ID"),
+    },
+    async ({ id }) => {
+      const { rows } = await db.execute({ sql: "SELECT * FROM data_backends WHERE id = ?", args: [id] });
+      if (rows.length === 0) {
+        return { content: [{ type: "text", text: `Backend #${id} not found.` }] };
+      }
+
+      const backend = rows[0];
+      let text = `Backend #${id}: ${backend.name} (${backend.status})\n`;
+
+      if (backend.schema_info) {
+        try {
+          const schema = JSON.parse(backend.schema_info);
+          if (Array.isArray(schema) && schema.length > 0) {
+            text += `\nDiscovered tools (${schema.length}):\n`;
+            text += schema.map((t) => `  - ${t.name}: ${t.description || "No description"}`).join("\n");
+          } else {
+            text += "\nNo tools discovered yet. Backend may need to be connected first.";
+          }
+        } catch {
+          text += "\nSchema info is corrupted.";
+        }
+      } else {
+        text += "\nNo schema info available. Connect the backend first (restart gateway or call reload).";
+      }
+
+      return { content: [{ type: "text", text }] };
+    }
+  );
+
   // --- Resources ---
 
-  server.resource("research-projects", "research://projects", async (uri) => {
+  server.resource("projects", "projects://list", async (uri) => {
     const { rows: projects } = await db.execute(
-      "SELECT id, name, status, description FROM research_projects ORDER BY updated_at DESC"
+      "SELECT id, name, type, status, description FROM research_projects ORDER BY updated_at DESC"
     );
     return {
       contents: [
@@ -472,37 +650,46 @@ export function createResearchServer(dbPath, options = {}) {
   // --- Prompts ---
 
   server.prompt(
-    "research-guide",
-    "Research workflow guidance — project creation, source management, citations, and bibliography",
+    "project-guide",
+    "Project workflow guidance — project creation, source management, data backends, citations, and bibliography",
     async () => {
-      const text = `Crow Research Workflow Guide
+      const text = `Crow Project Workflow Guide
 
 1. Project Creation
-   - Use crow_create_project to start a new research project with a name and description
-   - Projects organize sources and notes under a single topic
+   - Use crow_create_project to start a new project with a name, description, and type
+   - Project types: 'research' (default — sources, notes, bibliography), 'data_connector' (external data backends)
+   - Projects organize sources, notes, and data backends under a single topic
 
-2. Source Management
+2. Data Backends
+   - Use crow_register_backend to connect external MCP servers (Postgres, APIs, etc.)
+   - Backends store env var NAMES (not secrets) — credentials stay in .env
+   - Use crow_list_backends and crow_backend_schema to inspect connected backends
+   - Query data through crow_tools (router) or the external server's tools directly
+
+3. Source Management
    - Add sources with crow_add_source — provide URL, title, authors, publication date, source type
    - Crow auto-generates APA citations from source metadata
    - Source types: web_article, academic_paper, book, interview, document, dataset, government_doc, video, podcast, social_media, other
    - Use crow_verify_source to check URL accessibility and update verification status
    - Search across sources with crow_search_sources (full-text search)
+   - Link sources to backends with backend_id to track data provenance
 
-3. Notes
+4. Notes
    - Attach notes to sources or projects with crow_add_note
    - Notes support content, tags, and note_type (summary, quote, analysis, methodology, finding, question)
    - Search notes with crow_search_notes
 
-4. Citations & Bibliography
+5. Citations & Bibliography
    - crow_generate_bibliography produces formatted reference lists
    - Supports APA format with proper author, date, title, publisher, URL formatting
    - Filter by project to generate project-specific bibliographies
 
-5. Best Practices
+6. Best Practices
    - Always attach sources to a project for organization
    - Include DOI when available for academic papers
-   - Verify sources after adding them to confirm accessibility
-   - Use descriptive tags on notes for easier retrieval later`;
+   - Verify sources before marking as verified
+   - Use descriptive tags on notes for easier retrieval later
+   - When querying external data backends, capture significant results as sources for the knowledge graph`;
 
       return { messages: [{ role: "user", content: { type: "text", text } }] };
     }
@@ -510,3 +697,6 @@ export function createResearchServer(dbPath, options = {}) {
 
   return server;
 }
+
+// Backward compatibility alias
+export { createProjectServer as createResearchServer };

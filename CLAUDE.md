@@ -9,7 +9,7 @@ npm run setup            # Install deps + initialize SQLite database
 npm run init-db          # Re-initialize database schema only
 npm run wizard           # Open browser-based setup wizard for API keys
 npm run memory-server    # Start crow-memory MCP server (stdio)
-npm run research-server  # Start crow-research MCP server (stdio)
+npm run research-server  # Start crow-projects MCP server (stdio)
 npm run sharing-server   # Start crow-sharing MCP server (stdio)
 npm run storage-server   # Start crow-storage MCP server (stdio, requires MinIO)
 npm run blog-server      # Start crow-blog MCP server (stdio)
@@ -49,7 +49,7 @@ docker compose --profile full up --build    # Everything (gateway + MinIO)
 No test framework is configured. To verify servers work:
 ```bash
 node servers/memory/index.js    # Should start without errors (ctrl-C to stop)
-node servers/research/index.js  # Same
+node servers/research/index.js  # Same (project server)
 node servers/sharing/index.js   # Same (P2P sharing server)
 node servers/storage/index.js   # Same (requires MinIO for tools to work, but starts without)
 node servers/blog/index.js      # Same (blog server)
@@ -65,7 +65,7 @@ This is an MCP (Model Context Protocol) platform. The AI is the primary interfac
 
 1. **Custom MCP Servers** (`servers/`) — Five Node.js servers exposing tools over MCP's stdio transport. All share a single SQLite database (local file or Turso cloud).
    - `servers/memory/` — Persistent memory: store, search (FTS5), recall, list, update, delete, stats
-   - `servers/research/` — Research pipeline: projects, sources (with auto-APA citation), notes, bibliography, verification
+   - `servers/research/` — Project management: projects (research, data_connector, extensible types), sources (with auto-APA citation), notes, bibliography, data backend registration and management
    - `servers/sharing/` — P2P sharing: Hyperswarm discovery, Hypercore data sync, Nostr messaging, peer relay, identity management
    - `servers/storage/` — S3-compatible file storage: upload, list, presigned URLs, delete, quota management (requires MinIO)
    - `servers/blog/` — Blogging platform: create, edit, publish, themes, RSS/Atom, export, share posts
@@ -74,7 +74,7 @@ This is an MCP (Model Context Protocol) platform. The AI is the primary interfac
 
 3. **Dashboard** (`servers/gateway/dashboard/`) — Server-side rendered HTML dashboard with Dark Editorial design. Password auth, session cookies, panel registry. Built-in panels: Messages, Blog, Files, Extensions, Settings. Third-party panels via `~/.crow/panels/`.
 
-4. **Skills** (`skills/`) — 29 markdown files that serve as behavioral prompts loaded by Claude. Not code — they define workflows, trigger patterns, and integration logic.
+4. **Skills** (`skills/`) — 30 markdown files that serve as behavioral prompts loaded by Claude. Not code — they define workflows, trigger patterns, and integration logic.
 
 ### Server factory pattern
 
@@ -85,7 +85,7 @@ servers/memory/server.js       → createMemoryServer(dbPath?, options?) → Mcp
 servers/memory/crow-context.js → Shared crow.md context logic + condensed context for MCP instructions
 servers/memory/index.js        → stdio transport (used by .mcp.json)
 servers/shared/instructions.js → generateInstructions() — MCP instructions field generator
-servers/research/server.js     → createResearchServer(dbPath?, options?) → McpServer
+servers/research/server.js     → createProjectServer(dbPath?, options?) → McpServer (alias: createResearchServer for backward compat)
 servers/research/index.js      → stdio transport (used by .mcp.json)
 servers/sharing/server.js      → createSharingServer(dbPath?, options?) → McpServer
 servers/sharing/index.js       → stdio transport (used by .mcp.json)
@@ -135,7 +135,8 @@ Data lives in `~/.crow/data/` (preferred) or `./data/` (fallback). Resolution or
 Uses `@libsql/client` which supports both local SQLite files (default: `~/.crow/data/crow.db`, gitignored) and remote Turso databases. Set `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` for cloud; otherwise falls back to local file. Client factory in `servers/db.js` (also exports `resolveDataDir()`, `sanitizeFtsQuery()`, and `escapeLikePattern()` utility functions). Schema defined in `scripts/init-db.js`. Key tables:
 
 - **memories** — Full-text searchable (FTS5 virtual table `memories_fts`), with triggers to keep FTS in sync on insert/update/delete
-- **research_projects** → **research_sources** → **research_notes** — Foreign keys with `ON DELETE SET NULL`
+- **research_projects** — Projects with `type` column (research, data_connector, extensible). → **research_sources** → **research_notes** — Foreign keys with `ON DELETE SET NULL`
+- **data_backends** — External MCP server registrations linked to projects. Stores connection references (env var names, not secrets). Status tracked by gateway proxy.
 - **sources_fts** — FTS5 index over sources
 - **oauth_clients** / **oauth_tokens** — Gateway auth persistence
 - **contacts** — Peer identities, public keys (Ed25519 + secp256k1), relay status, last seen
@@ -177,7 +178,7 @@ Servers register MCP prompts as on-demand skill equivalents for non-Claude-Code 
 |--------|--------------|---------|
 | `session-start` | memory, router | Session start/end protocol from crow_context DB |
 | `crow-guide` | memory, router | Full crow.md (accepts `platform` arg) |
-| `research-guide` | research, router | Static research workflow text |
+| `project-guide` | projects, router | Static project/research workflow text |
 | `blog-guide` | blog, router | Static blog publishing text |
 | `sharing-guide` | sharing, router | Static P2P sharing text |
 
@@ -242,34 +243,6 @@ Crow has an open developer program for community contributions. Full developer d
 - `.github/ISSUE_TEMPLATE/` — Issue templates for integration requests, skill proposals, bug reports
 - `.github/PULL_REQUEST_TEMPLATE.md` — PR checklist
 
-## AI Operational Context
-
-This section guides Claude's behavior when operating as the Crow assistant (not when developing the codebase).
-
-### Cross-Platform Behavioral Context (crow.md)
-
-Crow's core behavioral instructions — identity, memory protocols, research protocols, session management, transparency rules, and key principles — are stored in the `crow_context` database table and served dynamically as **crow.md**. This makes the same behavioral context available across all platforms (Claude, ChatGPT, Gemini, Grok, Cursor, etc.).
-
-**Automatic delivery:** A condensed version (~1KB) is sent via MCP `instructions` field during connection handshake. See "Automatic behavioral context" above.
-
-**On-demand access:**
-- MCP prompts: `session-start`, `crow-guide` (with `platform` arg), `research-guide`, `blog-guide`, `sharing-guide`
-- MCP tool: `crow_get_context` (with optional `platform` and `include_dynamic` params)
-- MCP resource: `crow://context`
-- HTTP endpoint: `GET /crow.md` (supports `?platform=` and `?dynamic=false`) — protected by auth middleware when OAuth is enabled
-
-**Management tools:** `crow_list_context_sections`, `crow_update_context_section`, `crow_add_context_section`, `crow_delete_context_section`
-
-See `skills/crow-context.md` for the full workflow.
-
-### Claude-Specific Supplements
-
-These apply only when running on Claude (in addition to crow.md):
-
-- **Transparency formatting**: Use *italic* for Tier 1 FYI lines, **bold** for Tier 2 checkpoints
-- **Skill file access**: Load skill files from `skills/` directory on demand — they are markdown behavioral prompts, not code
-- **CLAUDE.md**: This file itself provides developer context (build commands, architecture) that other platforms don't need
-
 ### Skills Reference
 
 Consult `skills/superpowers.md` first — it routes user intent to the right skills and tools. Core skills:
@@ -285,6 +258,7 @@ Consult `skills/superpowers.md` first — it routes user intent to the right ski
 - `onboarding.md` — First-run sharing setup and device migration
 - `storage.md` — File storage management workflow
 - `blog.md` — Blog creation, publishing, theming, export
+- `data-backends.md` — External data backend registration and knowledge capture workflow
 - `network-setup.md` — Tailscale remote access guidance
 - `add-ons.md` — Add-on browsing, installation, removal
 - `bug-report.md` — Bug/feature reporting (GitHub or memory fallback)
@@ -298,6 +272,26 @@ Add-on skills (activated when corresponding add-on is installed):
 - `nextcloud.md` — Nextcloud file access via WebDAV
 - `immich.md` — Photo library search and album management
 
+### Maintaining CLAUDE.md vs crow.md
+
+These two files serve different audiences — keep them separate:
+
+| | CLAUDE.md | crow.md |
+|---|---|---|
+| **Audience** | Developers building/extending Crow | The AI assistant operating as Crow |
+| **Lives in** | Git (this file) | `crow_context` DB table |
+| **Updated by** | Editing the file directly | `crow_update_context_section` MCP tool |
+| **Contains** | Build commands, architecture, DB schema, extension guides | Identity, memory protocol, session protocol, transparency rules |
+
+**When to update which:**
+
+- New npm script, DB table, server, or extension point → **CLAUDE.md**
+- New skill file → **CLAUDE.md** (Skills Reference) + **crow.md** (`skills_reference` section)
+- Changed AI behavior (how Crow responds, formats, or routes) → **crow.md** only
+- New integration that the AI should know about → **crow.md** (custom section via `crow_add_context_section`)
+
+crow.md seed data (7 protected sections) is defined in `scripts/init-db.js` in the `contextSections` array. Changes there affect new installs only — existing instances update via the MCP tools.
+
 ## Documentation Site
 
 The `docs/` directory contains a VitePress documentation site. Key paths:
@@ -307,7 +301,7 @@ The `docs/` directory contains a VitePress documentation site. Key paths:
 - `docs/getting-started/` — Setup and deployment guides
 - `docs/platforms/` — Per-platform integration guides (Claude, ChatGPT, Gemini, Cursor, OpenClaw, etc.)
 - `docs/guide/` — Conceptual guides (cross-platform, storage, blog, dashboard, sharing, social)
-- `docs/architecture/` — Server architecture docs (memory, research, sharing, storage, blog, dashboard, gateway)
+- `docs/architecture/` — Server architecture docs (memory, projects, sharing, storage, blog, dashboard, gateway)
 - `docs/developers/` — Developer program, creating add-ons/panels/servers, storage API, add-on registry
 - `docs/showcase.md` — Community showcase
 

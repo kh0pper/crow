@@ -4,11 +4,11 @@ title: Creating MCP Servers
 
 # Creating MCP Servers
 
-Add a new MCP server to the Crow platform, following the same patterns used by the built-in memory, research, sharing, storage, and blog servers.
+Add a new MCP server to the Crow platform, following the same patterns used by the built-in memory, projects, sharing, storage, and blog servers.
 
 ## What is this?
 
-An MCP server exposes tools that AI assistants can call. Crow's built-in servers handle memory, research, sharing, storage, and blogging. You can add your own server for any domain — task management, analytics, home automation, or anything else.
+An MCP server exposes tools that AI assistants can call. Crow's built-in servers handle memory, projects, sharing, storage, and blogging. You can add your own server for any domain — task management, analytics, home automation, or anything else.
 
 ## Why would I want this?
 

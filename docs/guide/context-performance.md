@@ -25,7 +25,7 @@ Crow's five core servers expose 49 tools total:
 | Server | Tools | Examples |
 |--------|-------|---------|
 | Memory | 12 | `crow_store_memory`, `crow_search_memories`, `crow_recall_by_context` |
-| Research | 12 | `crow_create_project`, `crow_add_source`, `crow_generate_bibliography` |
+| Projects | 12 | `crow_create_project`, `crow_add_source`, `crow_generate_bibliography` |
 | Blog | 12 | `crow_create_post`, `crow_publish_post`, `crow_blog_settings` |
 | Sharing | 8 | `crow_add_peer`, `crow_share_item`, `crow_check_inbox` |
 | Storage | 5 | `crow_upload_file`, `crow_list_files`, `crow_delete_file` |

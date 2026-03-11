@@ -21,7 +21,7 @@ const MAX_INSTRUCTIONS_LENGTH = 2048;
  * Static fallback when DB is unavailable or crow_context table doesn't exist.
  * ~500 bytes — provides minimal behavioral guidance.
  */
-export const STATIC_INSTRUCTIONS = `You are connected to Crow, a persistent AI memory and research platform.
+export const STATIC_INSTRUCTIONS = `You are connected to Crow, a persistent AI memory and project management platform.
 On session start: call crow_recall_by_context with the user's first message to load relevant memories.
 Store important information with crow_store_memory during conversations.
 Call crow_get_context for full behavioral guidance and capability reference.

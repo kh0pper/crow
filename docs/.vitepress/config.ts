@@ -61,7 +61,7 @@ export default defineConfig({
         items: [
           { text: 'System Design', link: '/architecture/' },
           { text: 'Memory Server', link: '/architecture/memory-server' },
-          { text: 'Research Server', link: '/architecture/research-server' },
+          { text: 'Project Server', link: '/architecture/project-server' },
           { text: 'Sharing Server', link: '/architecture/sharing-server' },
           { text: 'Storage Server', link: '/architecture/storage-server' },
           { text: 'Blog Server', link: '/architecture/blog-server' },
@@ -82,6 +82,7 @@ export default defineConfig({
           { text: 'Sharing', link: '/guide/sharing' },
           { text: 'Social & Messaging', link: '/guide/social' },
           { text: 'Context & Performance', link: '/guide/context-performance' },
+          { text: 'Data Backends', link: '/guide/data-backends' },
         ],
       },
       {
@@ -104,6 +105,12 @@ export default defineConfig({
         text: 'Skills',
         items: [
           { text: 'Overview', link: '/skills/' },
+        ],
+      },
+      {
+        text: 'Roadmap',
+        items: [
+          { text: 'Roadmap', link: '/roadmap' },
         ],
       },
       {

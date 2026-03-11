@@ -31,7 +31,7 @@ Describe the step-by-step workflow:
 
 Which MCP tools does this skill rely on?
 - [ ] crow-memory tools
-- [ ] crow-research tools
+- [ ] crow-projects tools
 - [ ] crow-sharing tools
 - [ ] External integration: ___
 

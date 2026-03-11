@@ -233,9 +233,9 @@ function condenseSection(key, content, { routerStyle = false } = {}) {
     case "skills_reference": {
       // Condensed intent-to-tool routing
       if (routerStyle) {
-        return "Capabilities: crow_memory (store/search/recall memories), crow_research (projects/sources/citations), crow_blog (create/publish posts), crow_sharing (P2P sharing/messaging), crow_storage (file upload/download), crow_tools (external integrations). Use crow_discover for full action schemas.";
+        return "Capabilities: crow_memory (store/search/recall memories), crow_projects (projects/sources/citations/data backends), crow_blog (create/publish posts), crow_sharing (P2P sharing/messaging), crow_storage (file upload/download), crow_tools (external integrations). Use crow_discover for full action schemas.";
       }
-      return "Capabilities: Memory (crow_store_memory, crow_search_memories, crow_recall_by_context), Research (crow_create_project, crow_add_source, crow_generate_bibliography), Blog (crow_create_post, crow_publish_post), Sharing (crow_generate_invite, crow_share, crow_send_message), Storage (crow_upload_file, crow_list_files).";
+      return "Capabilities: Memory (crow_store_memory, crow_search_memories, crow_recall_by_context), Projects (crow_create_project, crow_add_source, crow_generate_bibliography, crow_register_backend), Blog (crow_create_post, crow_publish_post), Sharing (crow_generate_invite, crow_share, crow_send_message), Storage (crow_upload_file, crow_list_files).";
     }
 
     default:

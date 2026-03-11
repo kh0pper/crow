@@ -24,13 +24,13 @@ Crow's gateway supports two MCP transport protocols:
 ### Streamable HTTP (Recommended)
 
 - Protocol version: `2025-03-26`
-- Endpoints: `/memory/mcp`, `/research/mcp`, `/sharing/mcp`, `/storage/mcp`, `/blog-mcp/mcp`, `/tools/mcp`
+- Endpoints: `/memory/mcp`, `/projects/mcp`, `/sharing/mcp`, `/storage/mcp`, `/blog-mcp/mcp`, `/tools/mcp`
 - Used by: Claude, Gemini, Grok, Cursor, Windsurf, Cline, Claude Code
 
 ### SSE (Legacy)
 
 - Protocol version: `2024-11-05`
-- Endpoints: `/memory/sse`, `/research/sse`, `/sharing/sse`, `/storage/sse`, `/blog-mcp/sse`, `/tools/sse`
+- Endpoints: `/memory/sse`, `/projects/sse`, `/sharing/sse`, `/storage/sse`, `/blog-mcp/sse`, `/tools/sse`
 - Used by: ChatGPT
 
 ### stdio (Local Only)

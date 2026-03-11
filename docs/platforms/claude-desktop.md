@@ -33,7 +33,7 @@ The config will look something like:
         "CROW_DB_PATH": "/path/to/crow/data/crow.db"
       }
     },
-    "crow-research": {
+    "crow-projects": {
       "command": "node",
       "args": ["/path/to/crow/servers/research/index.js"],
       "env": {

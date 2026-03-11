@@ -77,6 +77,7 @@ await initTable("research tables", `
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     description TEXT,
+    type TEXT DEFAULT 'research',
     status TEXT DEFAULT 'active' CHECK(status IN ('active', 'paused', 'completed', 'archived')),
     tags TEXT,
     created_at TEXT DEFAULT (datetime('now')),
@@ -117,6 +118,47 @@ await initTable("research tables", `
   CREATE INDEX IF NOT EXISTS idx_sources_type ON research_sources(source_type);
   CREATE INDEX IF NOT EXISTS idx_sources_verified ON research_sources(verified);
 `);
+
+// --- Data Backends Table ---
+
+await initTable("data_backends table", `
+  CREATE TABLE IF NOT EXISTS data_backends (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    backend_type TEXT DEFAULT 'mcp_server',
+    connection_ref TEXT NOT NULL,
+    schema_info TEXT,
+    status TEXT DEFAULT 'disconnected',
+    last_connected_at TEXT,
+    last_error TEXT,
+    tags TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (project_id) REFERENCES research_projects(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_backends_project ON data_backends(project_id);
+  CREATE INDEX IF NOT EXISTS idx_backends_status ON data_backends(status);
+`);
+
+// --- Migrate existing tables: add new columns if missing ---
+
+async function addColumnIfMissing(table, column, definition) {
+  try {
+    const cols = await db.execute({ sql: `PRAGMA table_info(${table})` });
+    const exists = cols.rows.some(r => r.name === column);
+    if (!exists) {
+      await db.execute({ sql: `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}` });
+      console.log(`Added column ${table}.${column}`);
+    }
+  } catch (err) {
+    console.warn(`Warning: could not check/add ${table}.${column}: ${err.message}`);
+  }
+}
+
+await addColumnIfMissing("research_projects", "type", "TEXT DEFAULT 'research'");
+await addColumnIfMissing("research_sources", "backend_id", "INTEGER REFERENCES data_backends(id) ON DELETE SET NULL");
 
 await initTable("sources FTS index", `
   CREATE VIRTUAL TABLE IF NOT EXISTS sources_fts USING fts5(

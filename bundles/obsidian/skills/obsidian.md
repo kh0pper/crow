@@ -9,7 +9,7 @@ triggers:
   - sync to obsidian
 tools:
   - obsidian
-  - crow-research
+  - crow-projects
   - crow-memory
 ---
 

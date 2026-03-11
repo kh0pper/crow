@@ -9,8 +9,8 @@ Crow is an MCP (Model Context Protocol) platform — not a traditional web app. 
 │       AI Client (Claude, ChatGPT, Gemini, Grok, Cursor, etc.)       │
 └────────┬──────────────────────┬──────────────────────┬───────────────┘
          │                      │                      │
-   /memory/mcp            /research/mcp          /tools/mcp
-   /memory/sse            /research/sse          /tools/sse
+   /memory/mcp            /projects/mcp          /tools/mcp
+   /memory/sse            /projects/sse          /tools/sse
    /sharing/mcp           /storage/mcp           /blog-mcp/mcp
    /sharing/sse           /storage/sse           /blog-mcp/sse
                           /relay/*
@@ -20,7 +20,7 @@ Crow is an MCP (Model Context Protocol) platform — not a traditional web app. 
 │  ├── Streamable HTTP transport (2025-03-26)                          │
 │  ├── SSE transport (2024-11-05, legacy)                              │
 │  ├── crow-memory server (persistent memory + FTS5 search)            │
-│  ├── crow-research server (research pipeline + APA citations)        │
+│  ├── crow-projects server (project management + APA citations)       │
 │  ├── crow-sharing server (P2P sharing, Hyperswarm, Nostr messaging)  │
 │  │    └── peer relay endpoints (/relay/store, /relay/fetch)          │
 │  ├── crow-storage server (S3-compatible file storage via MinIO)      │
@@ -45,7 +45,7 @@ Crow is an MCP (Model Context Protocol) platform — not a traditional web app. 
 Five Node.js servers exposing tools over MCP. All share a single SQLite database.
 
 - **[Memory Server](./memory-server)** — Persistent memory with full-text search (FTS5), categories, importance scoring, and tags
-- **[Research Server](./research-server)** — Research pipeline with projects, sources (auto-APA citation), notes, verification tracking, and bibliography generation
+- **[Project Server](./project-server)** — Project management with typed projects (research, data connectors), sources (auto-APA citation), notes, data backends, and bibliography generation
 - **[Sharing Server](./sharing-server)** — P2P sharing protocol with Hyperswarm discovery, Hypercore data sync, Nostr messaging, and peer relay support
 - **[Storage Server](./storage-server)** — S3-compatible file storage with MinIO, upload, presigned URLs, quota management
 - **[Blog Server](./blog-server)** — Blogging platform with Markdown rendering, RSS/Atom feeds, themes, and export
@@ -75,7 +75,7 @@ Each custom server has a **factory function** in `server.js` that returns a conf
 ```
 servers/memory/server.js   → createMemoryServer()   → McpServer
 servers/memory/index.js    → stdio transport
-servers/research/server.js → createResearchServer()  → McpServer
+servers/research/server.js → createProjectServer()   → McpServer
 servers/research/index.js  → stdio transport
 servers/sharing/server.js  → createSharingServer()   → McpServer
 servers/sharing/index.js   → stdio transport

@@ -23,7 +23,7 @@ Repeat for additional servers:
 | Server | SSE URL |
 |---|---|
 | Memory | `https://your-gateway.onrender.com/memory/sse` |
-| Research | `https://your-gateway.onrender.com/research/sse` |
+| Projects | `https://your-gateway.onrender.com/projects/sse` |
 | External Tools | `https://your-gateway.onrender.com/tools/sse` |
 
 ## Transport

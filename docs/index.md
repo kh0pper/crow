@@ -37,8 +37,8 @@ features:
     details: Store and search memories across sessions and platforms. Full-text search, categories, importance scoring, and automatic context recall.
   - icon:
       src: /icon-research.svg
-    title: Research Pipeline
-    details: Manage research projects with auto-generated APA citations, source verification, notes, and bibliography generation — accessible from any platform.
+    title: Project & Research Pipeline
+    details: Manage projects with typed workflows — research projects with auto-generated APA citations and bibliographies, or data connector projects that bridge external databases and APIs. Connect data backends and capture knowledge from any platform.
   - icon:
       src: /icon-sharing.svg
     title: Encrypted P2P Sharing
