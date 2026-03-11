@@ -112,7 +112,7 @@ CREATE VIRTUAL TABLE blog_posts_fts USING fts5(
 );
 ```
 
-Triggers keep the FTS index in sync on insert, update, and delete — the same pattern used by the memory and research servers.
+Triggers keep the FTS index in sync on insert, update, and delete — the same pattern used by the memory and project servers.
 
 ## Slug Generation
 

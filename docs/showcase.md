@@ -10,7 +10,7 @@ Real-world Crow deployments and use cases from the community.
 
 Use Crow as your research assistant. Create projects, collect sources with auto-generated APA citations, take notes linked to sources, and generate bibliographies — all through conversation.
 
-**Typical setup:** Crow memory + research servers on a home server, accessed via Claude Code or Claude Desktop. Sources are verified against DOIs and URLs. Notes are searchable with full-text search.
+**Typical setup:** Crow memory + project servers on a home server, accessed via Claude Code or Claude Desktop. Sources are verified against DOIs and URLs. Notes are searchable with full-text search.
 
 **Key tools:** `crow_create_project`, `crow_add_source`, `crow_add_note`, `crow_generate_bibliography`, `crow_search_sources`
 

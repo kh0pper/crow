@@ -20,12 +20,12 @@ The router (`servers/gateway/router.js`) consolidates all core and external tool
                                     |
             +-----------+-----------+-----------+-----------+
             |           |           |           |           |
-     crow_memory  crow_research  crow_blog  crow_sharing  crow_storage
+     crow_memory  crow_projects  crow_blog  crow_sharing  crow_storage
             |           |           |           |           |
      [InMemory   [InMemory   [InMemory   [InMemory   [InMemory
       Transport]  Transport]  Transport]  Transport]  Transport]
             |           |           |           |           |
-     [Memory     [Research   [Blog       [Sharing   [Storage
+     [Memory     [Projects   [Blog       [Sharing   [Storage
       McpServer]  McpServer]  McpServer]  McpServer]  McpServer]
 
   crow_tools -----> connectedServers (from proxy.js)
@@ -39,7 +39,7 @@ Each category tool creates an in-process `Client` connected to the underlying `M
 | Tool | Dispatches To | Actions |
 |---|---|---|
 | `crow_memory` | Memory server | 12 (store, search, recall, list, update, delete, stats, context ops) |
-| `crow_research` | Research server | 12 (projects, sources, notes, bibliography, stats) |
+| `crow_projects` | Project server | 12 (projects, sources, notes, bibliography, stats) |
 | `crow_blog` | Blog server | 12 (create, edit, publish, list, delete, export, themes, stats) |
 | `crow_sharing` | Sharing server | 8 (invite, contacts, share, inbox, messaging, revoke) |
 | `crow_storage` | Storage server | 5 (upload, list, download URL, delete, stats) |
@@ -118,20 +118,20 @@ For stdio deployments, `servers/core/` provides a single MCP server that starts 
                                    crow_deactivate_server
                                    crow_server_status
 
-  crow_activate_server("research")
+  crow_activate_server("projects")
         |
         v
   [registeredTool.enable()] --> toolListChanged notification
         |
         v
-  [AI re-fetches tool list] --> research tools now visible
+  [AI re-fetches tool list] --> project tools now visible
 ```
 
 ### Management Tools
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `crow_activate_server` | `server: string` | Enable a server's tools (memory, research, sharing, storage, blog) |
+| `crow_activate_server` | `server: string` | Enable a server's tools (memory, projects, sharing, storage, blog) |
 | `crow_deactivate_server` | `server: string` | Disable a server's tools (default server cannot be deactivated) |
 | `crow_server_status` | none | Show active/inactive servers with tool counts |
 
@@ -140,13 +140,13 @@ For stdio deployments, `servers/core/` provides a single MCP server that starts 
 1. All servers are connected via `InMemoryTransport` and their tools registered on the core `McpServer`
 2. Only the default server's tools are enabled; all others are registered but disabled
 3. The AI sees 15 tools at startup: 12 memory tools + 3 management tools
-4. Calling `crow_activate_server("research")` flips the registered tools to enabled and triggers a `toolListChanged` notification
+4. Calling `crow_activate_server("projects")` flips the registered tools to enabled and triggers a `toolListChanged` notification
 5. The AI client re-fetches the tool list and sees the newly available tools
 
 The default server is configurable:
 
 ```bash
-CROW_DEFAULT_SERVER=research node servers/core/index.js
+CROW_DEFAULT_SERVER=projects node servers/core/index.js
 ```
 
 ## Automatic Behavioral Context (MCP Instructions)
@@ -167,7 +167,7 @@ Crow uses this to deliver behavioral context automatically to every connected AI
   instructions string (pre-computed)
        |
        +──> createMemoryServer(undefined, { instructions })
-       +──> createResearchServer(undefined, { instructions })
+       +──> createProjectServer(undefined, { instructions })
        +──> createRouterServer({ instructions: routerInstructions })
        +──> ...
        |
@@ -217,7 +217,7 @@ MCP prompts are first-class prompt templates that clients can list and request o
 |---|---|---|
 | `session-start` | Memory, Router | Session start/end protocol from crow.md |
 | `crow-guide` | Memory, Router | Full crow.md document (accepts `platform` argument) |
-| `research-guide` | Research, Router | Research workflow: projects, sources, citations, bibliography |
+| `research-guide` | Projects, Router | Research workflow: projects, sources, citations, bibliography |
 | `blog-guide` | Blog, Router | Blog publishing: posts, themes, RSS, export |
 | `sharing-guide` | Sharing, Router | P2P sharing: invites, contacts, messaging |
 
@@ -237,7 +237,7 @@ The AI can request a prompt when it needs detailed guidance for a specific workf
 
 ## Server Factory Integration
 
-Both the router and crow-core reuse the same factory functions (`createMemoryServer`, `createResearchServer`, etc.) and the same `InMemoryTransport` + `Client` pattern. The factory creates a standalone `McpServer`; the caller wires it to whatever transport the deployment needs:
+Both the router and crow-core reuse the same factory functions (`createMemoryServer`, `createProjectServer`, etc.) and the same `InMemoryTransport` + `Client` pattern. The factory creates a standalone `McpServer`; the caller wires it to whatever transport the deployment needs:
 
 ```js
 // stdio (individual server)
@@ -275,7 +275,7 @@ The gateway `/health` response includes tool count telemetry:
 ```json
 {
   "status": "ok",
-  "servers": ["crow-memory", "crow-research", "crow-sharing", "crow-storage", "crow-blog"],
+  "servers": ["crow-memory", "crow-projects", "crow-sharing", "crow-storage", "crow-blog"],
   "externalServers": [{ "id": "github", "name": "GitHub", "tools": 15 }],
   "toolCounts": {
     "core": 49,
