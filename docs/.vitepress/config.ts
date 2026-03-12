@@ -95,6 +95,7 @@ export default defineConfig({
           { text: 'Developer Program', link: '/developers/' },
           { text: 'Creating Add-ons', link: '/developers/creating-addons' },
           { text: 'Add-on Registry', link: '/developers/addon-registry' },
+          { text: 'Community Stores', link: '/developers/community-stores' },
           { text: 'Creating Panels', link: '/developers/creating-panels' },
           { text: 'Creating Servers', link: '/developers/creating-servers' },
           { text: 'Building Integrations', link: '/developers/integrations' },
