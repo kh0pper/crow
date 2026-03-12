@@ -1,12 +1,18 @@
 /**
- * Bundles API Routes — Install, uninstall, start, stop, status
+ * Add-on API Routes — Install, uninstall, start, stop, status
  *
- * POST /bundles/api/install   — Install a bundle add-on
- * POST /bundles/api/uninstall — Remove a bundle add-on
- * POST /bundles/api/start     — Start bundle containers
- * POST /bundles/api/stop      — Stop bundle containers
- * GET  /bundles/api/status    — Get status of all installed bundles
- * POST /bundles/api/env       — Save env vars for a bundle
+ * Supports all add-on types:
+ *   - bundle:     Docker Compose services (pull images, start/stop containers)
+ *   - mcp-server: External MCP servers (register in ~/.crow/mcp-addons.json)
+ *   - skill:      Markdown skill files (copy to ~/.crow/skills/)
+ *   - panel:      Dashboard panels (copy to ~/.crow/panels/, register in panels.json)
+ *
+ * POST /bundles/api/install   — Install an add-on
+ * POST /bundles/api/uninstall — Remove an add-on
+ * POST /bundles/api/start     — Start bundle containers (Docker only)
+ * POST /bundles/api/stop      — Stop bundle containers (Docker only)
+ * GET  /bundles/api/status    — Get status of all installed add-ons
+ * POST /bundles/api/env       — Save env vars for an add-on
  * GET  /bundles/api/jobs/:id  — Poll install job progress
  */
 
@@ -20,6 +26,10 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CROW_HOME = process.env.CROW_DATA_DIR || join(homedir(), ".crow");
 const BUNDLES_DIR = join(CROW_HOME, "bundles");
+const SKILLS_DIR = join(CROW_HOME, "skills");
+const PANELS_DIR = join(CROW_HOME, "panels");
+const MCP_ADDONS_PATH = join(CROW_HOME, "mcp-addons.json");
+const PANELS_CONFIG_PATH = join(CROW_HOME, "panels.json");
 const INSTALLED_PATH = join(CROW_HOME, "installed.json");
 const APP_BUNDLES = resolve(__dirname, "../../../bundles");
 
@@ -91,6 +101,20 @@ function run(cmd, args, opts = {}) {
       }
     });
   });
+}
+
+/** Read JSON file with fallback */
+function readJsonSafe(path, fallback) {
+  try {
+    if (existsSync(path)) return JSON.parse(readFileSync(path, "utf8"));
+  } catch { /* ignore */ }
+  return fallback;
+}
+
+/** Write JSON file (creates parent dirs) */
+function writeJsonSafe(path, data) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(data, null, 2));
 }
 
 /** Validate bundle ID format (alphanumeric + hyphens only) */
@@ -170,7 +194,10 @@ export default function bundlesRouter() {
     // Run install async (don't block the response)
     (async () => {
       try {
-        // 1. Copy files
+        const manifest = getManifest(bundle_id);
+        const addonType = manifest?.type || "bundle";
+
+        // 1. Copy bundle files to ~/.crow/bundles/<id>
         const destDir = join(BUNDLES_DIR, bundle_id);
         mkdirSync(destDir, { recursive: true });
         cpSync(sourceDir, destDir, { recursive: true });
@@ -186,28 +213,90 @@ export default function bundlesRouter() {
             appendLog(job, `Wrote ${envLines.length} env vars`);
           }
         } else if (existsSync(join(destDir, ".env.example")) && !existsSync(join(destDir, ".env"))) {
-          // Copy .env.example as starting point
           cpSync(join(destDir, ".env.example"), join(destDir, ".env"));
           appendLog(job, "Created .env from .env.example");
         }
 
-        // 3. Pull Docker images (if Docker bundle)
-        const composePath = join(destDir, "docker-compose.yml");
-        if (existsSync(composePath)) {
-          appendLog(job, "Pulling Docker images...");
-          try {
-            await run("docker", ["compose", "pull"], { cwd: destDir });
-            appendLog(job, "Docker images pulled");
-          } catch (err) {
-            appendLog(job, `Warning: docker compose pull failed: ${err.message}`);
+        // 3. Type-specific install steps
+        if (addonType === "bundle") {
+          // Docker bundle — pull images
+          const composePath = join(destDir, "docker-compose.yml");
+          if (existsSync(composePath)) {
+            appendLog(job, "Pulling Docker images...");
+            try {
+              await run("docker", ["compose", "pull"], { cwd: destDir });
+              appendLog(job, "Docker images pulled");
+            } catch (err) {
+              appendLog(job, `Warning: docker compose pull failed: ${err.message}`);
+            }
+          }
+        } else if (addonType === "mcp-server") {
+          // MCP server — register in mcp-addons.json
+          if (manifest?.server) {
+            const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
+            const env = {};
+            if (manifest.server.envKeys && env_vars) {
+              for (const key of manifest.server.envKeys) {
+                if (env_vars[key]) env[key] = env_vars[key];
+              }
+            }
+            mcpAddons[bundle_id] = {
+              command: manifest.server.command,
+              args: manifest.server.args || [],
+              ...(Object.keys(env).length > 0 ? { env } : {}),
+            };
+            writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
+            appendLog(job, `Registered MCP server '${bundle_id}'`);
+          }
+        } else if (addonType === "skill") {
+          // Skill — copy skill files to ~/.crow/skills/
+          mkdirSync(SKILLS_DIR, { recursive: true });
+          if (manifest?.skills) {
+            for (const skillPath of manifest.skills) {
+              const src = join(destDir, skillPath);
+              const dest = join(SKILLS_DIR, skillPath.split("/").pop());
+              if (existsSync(src)) {
+                cpSync(src, dest);
+                appendLog(job, `Installed skill: ${skillPath.split("/").pop()}`);
+              }
+            }
+          }
+        } else if (addonType === "panel") {
+          // Panel — copy panel file to ~/.crow/panels/ and register
+          mkdirSync(PANELS_DIR, { recursive: true });
+          if (manifest?.panel) {
+            const src = join(destDir, manifest.panel);
+            const dest = join(PANELS_DIR, manifest.panel.split("/").pop());
+            if (existsSync(src)) {
+              cpSync(src, dest);
+              const panelsCfg = readJsonSafe(PANELS_CONFIG_PATH, []);
+              if (!panelsCfg.includes(bundle_id)) {
+                panelsCfg.push(bundle_id);
+                writeJsonSafe(PANELS_CONFIG_PATH, panelsCfg);
+              }
+              appendLog(job, `Installed panel: ${manifest.panel.split("/").pop()}`);
+            }
           }
         }
 
-        // 4. Track installation
+        // 4. Copy any associated skills (bundles and mcp-servers can have skills too)
+        if (addonType !== "skill" && manifest?.skills) {
+          mkdirSync(SKILLS_DIR, { recursive: true });
+          for (const skillPath of manifest.skills) {
+            const src = join(destDir, skillPath);
+            const dest = join(SKILLS_DIR, skillPath.split("/").pop());
+            if (existsSync(src)) {
+              cpSync(src, dest);
+              appendLog(job, `Installed skill: ${skillPath.split("/").pop()}`);
+            }
+          }
+        }
+
+        // 5. Track installation
         installed.push({
           id: bundle_id,
-          type: getManifest(bundle_id)?.type || "bundle",
-          version: getManifest(bundle_id)?.version || "1.0.0",
+          type: addonType,
+          version: manifest?.version || "1.0.0",
           installedAt: new Date().toISOString(),
         });
         saveInstalled(installed);
@@ -239,25 +328,62 @@ export default function bundlesRouter() {
 
     (async () => {
       try {
-        // 1. Stop containers
-        const composePath = join(bundleDir, "docker-compose.yml");
-        if (existsSync(composePath)) {
-          appendLog(job, "Stopping containers...");
-          const downArgs = ["compose", "down", "--remove-orphans"];
-          if (delete_data) downArgs.push("-v"); // Remove volumes too
-          try {
-            await run("docker", downArgs, { cwd: bundleDir });
-            appendLog(job, delete_data ? "Containers stopped, volumes removed" : "Containers stopped (data preserved)");
-          } catch (err) {
-            appendLog(job, `Warning: docker compose down: ${err.message}`);
+        const manifest = getManifest(bundle_id);
+        const addonType = manifest?.type || "bundle";
+
+        // 1. Type-specific cleanup
+        if (addonType === "bundle") {
+          const composePath = join(bundleDir, "docker-compose.yml");
+          if (existsSync(composePath)) {
+            appendLog(job, "Stopping containers...");
+            const downArgs = ["compose", "down", "--remove-orphans"];
+            if (delete_data) downArgs.push("-v");
+            try {
+              await run("docker", downArgs, { cwd: bundleDir });
+              appendLog(job, delete_data ? "Containers stopped, volumes removed" : "Containers stopped (data preserved)");
+            } catch (err) {
+              appendLog(job, `Warning: docker compose down: ${err.message}`);
+            }
+          }
+        } else if (addonType === "mcp-server") {
+          // Remove from mcp-addons.json
+          const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
+          if (mcpAddons[bundle_id]) {
+            delete mcpAddons[bundle_id];
+            writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
+            appendLog(job, "Removed MCP server registration");
+          }
+        } else if (addonType === "panel") {
+          // Remove from panels.json and delete panel file
+          const panelsCfg = readJsonSafe(PANELS_CONFIG_PATH, []);
+          const idx = panelsCfg.indexOf(bundle_id);
+          if (idx !== -1) {
+            panelsCfg.splice(idx, 1);
+            writeJsonSafe(PANELS_CONFIG_PATH, panelsCfg);
+          }
+          if (manifest?.panel) {
+            const panelFile = join(PANELS_DIR, manifest.panel.split("/").pop());
+            if (existsSync(panelFile)) rmSync(panelFile);
+            appendLog(job, "Removed panel file and registration");
           }
         }
 
-        // 2. Remove files
+        // 2. Remove associated skills (all types can have skills)
+        if (manifest?.skills) {
+          for (const skillPath of manifest.skills) {
+            const skillFile = join(SKILLS_DIR, skillPath.split("/").pop());
+            if (existsSync(skillFile)) {
+              rmSync(skillFile);
+              appendLog(job, `Removed skill: ${skillPath.split("/").pop()}`);
+            }
+          }
+        }
+
+        // 3. Remove bundle files
         rmSync(bundleDir, { recursive: true, force: true });
         appendLog(job, "Bundle files removed");
 
-        // 3. Update installed.json
+        // 4. Update installed.json
         const installed = getInstalled().filter((i) => i.id !== bundle_id);
         saveInstalled(installed);
         appendLog(job, "Installation record removed");
