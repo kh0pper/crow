@@ -21,7 +21,7 @@ Data backends are useful when:
 
 Use the `crow_register_backend` tool to connect an MCP server as a data backend:
 
-> "Register my Postgres MCP server at http://localhost:5433/mcp as a data backend called 'course-database'"
+> "Register my Postgres MCP server at `http://localhost:5433/mcp` as a data backend called 'course-database'"
 
 This stores the backend's name, URL, and description in the `data_backends` table. You can then associate it with a `data_connector` type project.
 
@@ -79,7 +79,7 @@ Suppose you have a Postgres MCP server running locally that exposes `query` and 
 
 **1. Register it:**
 
-> "Register a data backend called 'enrollment-db' at http://localhost:5433/mcp -- it has student enrollment data"
+> "Register a data backend called 'enrollment-db' at `http://localhost:5433/mcp` -- it has student enrollment data"
 
 **2. Create a project:**
 
