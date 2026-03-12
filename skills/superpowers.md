@@ -62,6 +62,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | "photos", "pictures", "album", "immich" | "fotos", "imágenes", "álbum" | immich | immich |
 | "back up", "backup", "restore data", "export data" | "respaldar", "backup", "restaurar datos", "exportar datos" | backup | filesystem |
 | "schedule", "remind me", "every day at", "recurring" | "programar", "recuérdame", "cada día a las" | scheduling | crow-memory |
+| "tutor me", "teach me", "quiz me", "help me understand" | "enséñame", "explícame", "evalúame" | tutoring | crow-memory |
 | "wrap up", "summarize session", "what did we do" | "resumir sesión", "qué hicimos" | session-summary | crow-memory |
 | "change language", "speak in..." | "cambiar idioma", "háblame en..." | i18n | crow-memory |
 | Session start / Inicio de sesión | — | session-context, i18n, skill-writing (deferred gap check) | crow-memory |

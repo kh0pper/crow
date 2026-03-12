@@ -265,6 +265,7 @@ Consult `skills/superpowers.md` first — it routes user intent to the right ski
 - `network-setup.md` — Tailscale remote access guidance
 - `add-ons.md` — Add-on browsing, installation, removal
 - `scheduling.md` — Scheduled and recurring task management
+- `tutoring.md` — Socratic tutoring with progress tracking
 - `bug-report.md` — Bug/feature reporting (GitHub or memory fallback)
 - `backup.md` — Database backup and restore workflows
 - `session-summary.md` — Quick session wrap-up (deliverables, decisions, next steps)
