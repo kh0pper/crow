@@ -211,7 +211,9 @@ export default {
           installButton = badge("Installed", "published");
         } else {
           const envVarsAttr = escapeHtml(JSON.stringify(addon.env_vars || []));
-          installButton = `<button class="btn btn-sm btn-primary bundle-install" data-id="${escapeHtml(addon.id)}" data-name="${escapeHtml(addon.name)}" data-envvars="${envVarsAttr}">Install</button>`;
+          const minRam = addon.requires?.min_ram_mb || 0;
+          const minDisk = addon.requires?.min_disk_mb || 0;
+          installButton = `<button class="btn btn-sm btn-primary bundle-install" data-id="${escapeHtml(addon.id)}" data-name="${escapeHtml(addon.name)}" data-envvars="${envVarsAttr}" data-minram="${minRam}" data-mindisk="${minDisk}">Install</button>`;
         }
 
         return `<div class="card" style="animation-delay:${(i + installedCount) * 50}ms">
@@ -307,6 +309,8 @@ export default {
             var id = this.dataset.id;
             var name = this.dataset.name;
             var envVars = JSON.parse(this.dataset.envvars || "[]");
+            var minRam = parseInt(this.dataset.minram || "0", 10);
+            var minDisk = parseInt(this.dataset.mindisk || "0", 10);
 
             var frag = document.createElement("div");
 
@@ -319,6 +323,33 @@ export default {
             desc.style.cssText = "color:var(--crow-text-secondary);font-size:0.9rem;margin-bottom:1rem";
             desc.textContent = "This will download and configure the add-on. You can update settings later.";
             frag.appendChild(desc);
+
+            // Resource warning (check server health)
+            if (minRam > 0 || minDisk > 0) {
+              var warnDiv = document.createElement("div");
+              warnDiv.id = "resource-warning";
+              warnDiv.style.cssText = "font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.75rem";
+              warnDiv.textContent = "Checking system resources...";
+              frag.appendChild(warnDiv);
+              fetch(API + "/status").then(function(r) { return r.json(); }).catch(function() { return null; }).then(function() {
+                // Use /dashboard/health API for resource data
+                fetch("/api/health").then(function(r) { return r.json(); }).then(function(h) {
+                  var warnings = [];
+                  if (minRam > 0 && h && h.ram_free_mb && h.ram_free_mb < minRam) {
+                    warnings.push("This add-on needs ~" + minRam + "MB RAM. Your server has " + h.ram_free_mb + "MB free.");
+                  }
+                  if (minDisk > 0 && h && h.disk_free_mb && h.disk_free_mb < minDisk) {
+                    warnings.push("This add-on needs ~" + minDisk + "MB disk. Your server has " + h.disk_free_mb + "MB free.");
+                  }
+                  if (warnings.length > 0) {
+                    warnDiv.style.cssText = "font-size:0.8rem;color:var(--crow-warning, #f0ad4e);background:rgba(240,173,78,0.1);padding:0.75rem;border-radius:4px;margin-bottom:0.75rem;border:1px solid rgba(240,173,78,0.3)";
+                    warnDiv.textContent = warnings.join(" ") + " Installing may cause instability.";
+                  } else {
+                    warnDiv.style.display = "none";
+                  }
+                }).catch(function() { warnDiv.style.display = "none"; });
+              });
+            }
 
             // Env var fields
             var envNames = [];
