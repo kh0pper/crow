@@ -57,6 +57,7 @@ echo "    - Docker + Docker Compose"
 echo "    - Caddy (reverse proxy)"
 echo "    - Crow"
 echo "    - Security hardening (UFW + fail2ban)"
+echo "    - Tailscale hostname setup (if Tailscale is installed)"
 echo ""
 read -p "  Continue? [Y/n] " -n 1 -r
 echo
@@ -67,7 +68,7 @@ fi
 
 # ─── Step 1: System updates ──────────────────────────────
 
-header "Step 1/8: System Updates"
+header "Step 1/9: System Updates"
 
 sudo apt update
 sudo apt upgrade -y
@@ -75,7 +76,7 @@ log "System updated"
 
 # ─── Step 2: Install Node.js ─────────────────────────────
 
-header "Step 2/8: Node.js ${NODE_MAJOR}"
+header "Step 2/9: Node.js ${NODE_MAJOR}"
 
 if command -v node >/dev/null 2>&1; then
   CURRENT_NODE=$(node --version | cut -d'v' -f2 | cut -d'.' -f1)
@@ -95,7 +96,7 @@ fi
 
 # ─── Step 3: Install Docker ──────────────────────────────
 
-header "Step 3/8: Docker"
+header "Step 3/9: Docker"
 
 if command -v docker >/dev/null 2>&1; then
   log "Docker already installed: $(docker --version)"
@@ -108,7 +109,7 @@ fi
 
 # ─── Step 4: Install Caddy ───────────────────────────────
 
-header "Step 4/8: Caddy"
+header "Step 4/9: Caddy"
 
 if command -v caddy >/dev/null 2>&1; then
   log "Caddy already installed: $(caddy version)"
@@ -123,7 +124,7 @@ fi
 
 # ─── Step 5: Install Avahi (mDNS for crow.local) ─────────
 
-header "Step 5/8: mDNS (crow.local)"
+header "Step 5/9: mDNS (crow.local)"
 
 if dpkg -l avahi-daemon >/dev/null 2>&1; then
   log "Avahi already installed"
@@ -145,7 +146,7 @@ fi
 
 # ─── Step 6: Clone and Setup Crow ────────────────────────
 
-header "Step 6/8: Crow Platform"
+header "Step 6/9: Crow Platform"
 
 mkdir -p "$CROW_HOME"
 
@@ -186,7 +187,7 @@ fi
 
 # ─── Step 7: Configure Services ──────────────────────────
 
-header "Step 7/8: System Services"
+header "Step 7/9: System Services"
 
 # Crow Gateway systemd service
 sudo tee /etc/systemd/system/crow-gateway.service > /dev/null << EOF
@@ -225,7 +226,7 @@ log "Caddy configured for https://crow.local"
 
 # ─── Step 8: Security Hardening ──────────────────────────
 
-header "Step 8/8: Security"
+header "Step 8/9: Security"
 
 # UFW firewall
 if command -v ufw >/dev/null 2>&1; then
@@ -258,6 +259,71 @@ else
   sudo apt install -y fail2ban
   sudo systemctl enable --now fail2ban
   log "fail2ban installed and enabled"
+fi
+
+# ─── Step 9: Tailscale Hostname ──────────────────────────
+
+header "Step 9/9: Tailscale (Remote Access)"
+
+if command -v tailscale &>/dev/null; then
+  log "Tailscale is installed"
+
+  if tailscale status &>/dev/null; then
+    log "Tailscale is authenticated"
+
+    # Check if 'crow' hostname is already taken on the tailnet
+    CROW_HOSTNAME_TAKEN=false
+    CURRENT_TS_HOSTNAME=$(tailscale status --json 2>/dev/null | grep -o '"HostName":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+    if [ "$CURRENT_TS_HOSTNAME" = "crow" ]; then
+      log "Tailscale hostname is already set to 'crow'"
+    else
+      # Check if another device on the tailnet is using 'crow'
+      if tailscale status --json 2>/dev/null | grep -q '"HostName":"crow"'; then
+        CROW_HOSTNAME_TAKEN=true
+      fi
+
+      if [ "$CROW_HOSTNAME_TAKEN" = true ]; then
+        warn "Tailscale hostname 'crow' is already taken by another device on your tailnet."
+        SUGGESTED="crow-$(hostname)"
+        echo ""
+        echo "  Suggested alternatives:"
+        echo "    - crow-2"
+        echo "    - $SUGGESTED"
+        echo ""
+        read -p "  Enter a Tailscale hostname (or press Enter to skip): " TS_HOSTNAME
+        echo
+        if [ -n "$TS_HOSTNAME" ]; then
+          sudo tailscale set --hostname="$TS_HOSTNAME"
+          log "Tailscale hostname set to '$TS_HOSTNAME' — access Crow at http://$TS_HOSTNAME/"
+        else
+          warn "Skipped Tailscale hostname setup"
+        fi
+      else
+        echo ""
+        echo "  Would you like to set this machine's Tailscale hostname to 'crow'?"
+        echo "  This lets you access Crow at http://crow/ from any device on your Tailnet."
+        echo ""
+        read -p "  Set Tailscale hostname to 'crow'? [Y/n] " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+          sudo tailscale set --hostname=crow
+          log "Tailscale hostname set to 'crow' — access Crow at http://crow/ from your Tailnet"
+        else
+          warn "Skipped Tailscale hostname setup"
+        fi
+      fi
+    fi
+  else
+    warn "Tailscale is installed but not authenticated"
+    warn "Run 'sudo tailscale up' to log in, then re-run this step"
+  fi
+else
+  echo ""
+  warn "Tailscale is not installed"
+  echo "  Tip: Install Tailscale for secure remote access."
+  echo "  See docs/getting-started/tailscale-setup.md"
+  echo ""
 fi
 
 # ─── Done ─────────────────────────────────────────────────

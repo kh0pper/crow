@@ -415,6 +415,105 @@ export function createMemoryServer(dbPath, options = {}) {
     }
   );
 
+  // --- Schedule Tools ---
+
+  server.tool(
+    "crow_create_schedule",
+    "Create a scheduled or recurring task. Uses cron expressions for timing (e.g. '0 9 * * *' for daily at 9am, '0 */6 * * *' for every 6 hours).",
+    {
+      task: z.string().max(1000).describe("The task to schedule"),
+      cron_expression: z.string().max(50).describe("Cron expression for scheduling (e.g. '0 9 * * *' for daily at 9am)"),
+      description: z.string().max(500).optional().describe("Optional description of the schedule"),
+    },
+    async ({ task, cron_expression, description }) => {
+      const result = await db.execute({
+        sql: "INSERT INTO schedules (task, cron_expression, description) VALUES (?, ?, ?)",
+        args: [task, cron_expression, description ?? null],
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Schedule created (id: ${Number(result.lastInsertRowid)}, task: ${task}, cron: ${cron_expression})`,
+          },
+        ],
+      };
+    }
+  );
+
+  server.tool(
+    "crow_list_schedules",
+    "List all scheduled tasks, optionally filtering to only enabled schedules.",
+    {
+      enabled_only: z.boolean().optional().describe("If true, only return enabled schedules"),
+    },
+    async ({ enabled_only }) => {
+      let sql = "SELECT * FROM schedules";
+      const params = [];
+
+      if (enabled_only) {
+        sql += " WHERE enabled = 1";
+      }
+
+      sql += " ORDER BY created_at DESC";
+
+      const { rows } = await db.execute({ sql, args: params });
+
+      if (rows.length === 0) {
+        return { content: [{ type: "text", text: "No schedules found." }] };
+      }
+
+      const formatted = rows
+        .map(
+          (r) =>
+            `[#${r.id}] ${r.enabled ? "enabled" : "disabled"} | ${r.cron_expression}\n  Task: ${r.task}${r.description ? `\n  Description: ${r.description}` : ""}${r.last_run ? `\n  Last run: ${r.last_run}` : ""}${r.next_run ? `\n  Next run: ${r.next_run}` : ""}\n  Created: ${r.created_at}`
+        )
+        .join("\n\n");
+
+      return { content: [{ type: "text", text: `${rows.length} schedules:\n\n${formatted}` }] };
+    }
+  );
+
+  server.tool(
+    "crow_update_schedule",
+    "Update or delete a scheduled task by ID. Provide only the fields you want to change, or set delete=true to remove it.",
+    {
+      id: z.number().describe("Schedule ID to update or delete"),
+      enabled: z.boolean().optional().describe("Enable or disable the schedule"),
+      task: z.string().max(1000).optional().describe("New task description"),
+      cron_expression: z.string().max(50).optional().describe("New cron expression"),
+      delete: z.boolean().optional().describe("If true, delete the schedule entirely"),
+    },
+    async ({ id, enabled, task, cron_expression, delete: doDelete }) => {
+      const { rows } = await db.execute({ sql: "SELECT * FROM schedules WHERE id = ?", args: [id] });
+      if (rows.length === 0) {
+        return { content: [{ type: "text", text: `Schedule #${id} not found.` }] };
+      }
+
+      if (doDelete) {
+        await db.execute({ sql: "DELETE FROM schedules WHERE id = ?", args: [id] });
+        return { content: [{ type: "text", text: `Schedule #${id} deleted.` }] };
+      }
+
+      const updates = [];
+      const params = [];
+      if (task !== undefined) { updates.push("task = ?"); params.push(task); }
+      if (cron_expression !== undefined) { updates.push("cron_expression = ?"); params.push(cron_expression); }
+      if (enabled !== undefined) { updates.push("enabled = ?"); params.push(enabled ? 1 : 0); }
+
+      if (updates.length === 0) {
+        return { content: [{ type: "text", text: "No updates provided." }] };
+      }
+
+      updates.push("updated_at = datetime('now')");
+      params.push(id);
+
+      await db.execute({ sql: `UPDATE schedules SET ${updates.join(", ")} WHERE id = ?`, args: params });
+
+      return { content: [{ type: "text", text: `Schedule #${id} updated.` }] };
+    }
+  );
+
   // --- Resources ---
 
   server.resource("crow-context", "crow://context", async (uri) => {
