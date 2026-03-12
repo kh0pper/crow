@@ -10,11 +10,12 @@ Crow uses the open [Model Context Protocol (MCP)](https://modelcontextprotocol.i
 | [Claude Desktop](./claude-desktop) | stdio | N/A (local) | Easy | Fully tested |
 | [Claude Code (CLI)](./claude-code) | stdio / HTTP | OAuth 2.1 | Easy | Fully tested |
 | [ChatGPT](./chatgpt) | SSE | OAuth 2.1 | Easy | Compatible |
-| [Gemini](./gemini) | Streamable HTTP | OAuth 2.1 | Medium | Compatible |
+| [Gemini](./gemini) | stdio / HTTP | OAuth 2.1 | Easy | Compatible |
 | [Grok (xAI)](./grok) | Streamable HTTP | Bearer token | Medium | Compatible |
 | [Cursor](./cursor) | stdio / HTTP | Varies | Easy | Compatible |
 | [Windsurf](./windsurf) | stdio / HTTP | Varies | Easy | Compatible |
 | [Cline](./cline) | stdio / HTTP | Varies | Easy | Compatible |
+| [Qwen Coder CLI](./qwen-coder) | stdio / HTTP | OAuth 2.1 | Easy | Compatible |
 | [OpenClaw](./openclaw) | stdio / HTTP | OAuth 2.1 / N/A | Easy | Compatible |
 
 ## Transport Types
@@ -36,7 +37,7 @@ Crow's gateway supports two MCP transport protocols:
 ### stdio (Local Only)
 
 - Direct process communication, no network
-- Used by: Claude Desktop, Claude Code (local), Cursor (local), Windsurf (local), Cline (local), OpenClaw (local)
+- Used by: Claude Desktop, Claude Code (local), Gemini CLI (local), Qwen Coder CLI (local), Cursor (local), Windsurf (local), Cline (local), OpenClaw (local)
 
 ## Authentication
 

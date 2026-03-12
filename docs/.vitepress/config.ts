@@ -47,6 +47,7 @@ export default defineConfig({
           { text: 'Cursor', link: '/platforms/cursor' },
           { text: 'Windsurf', link: '/platforms/windsurf' },
           { text: 'Cline', link: '/platforms/cline' },
+          { text: 'Qwen Coder CLI', link: '/platforms/qwen-coder' },
           { text: 'OpenClaw', link: '/platforms/openclaw' },
         ],
       },

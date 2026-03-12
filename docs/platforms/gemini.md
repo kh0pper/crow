@@ -2,13 +2,54 @@
 
 Connect Crow to Google's Gemini — both the Gemini CLI and Gemini in Google AI Studio/Enterprise.
 
-## Prerequisites
+## Gemini CLI — Local (stdio)
+
+Best for development — runs Crow servers directly on your machine. No gateway required.
+
+### Setup Steps
+
+1. Clone and set up Crow locally:
+   ```bash
+   git clone https://github.com/kh0pper/crow.git
+   cd crow
+   npm run setup
+   ```
+
+2. Edit `~/.gemini/settings.json`:
+   ```json
+   {
+     "mcpServers": {
+       "crow-memory": {
+         "command": "node",
+         "args": ["/path/to/crow/servers/memory/index.js"],
+         "env": {
+           "CROW_DB_PATH": "/path/to/crow/data/crow.db"
+         }
+       },
+       "crow-projects": {
+         "command": "node",
+         "args": ["/path/to/crow/servers/research/index.js"],
+         "env": {
+           "CROW_DB_PATH": "/path/to/crow/data/crow.db"
+         }
+       }
+     }
+   }
+   ```
+
+3. Restart Gemini CLI — it will detect the MCP servers automatically.
+
+::: tip
+Run `npm run mcp-config` in the Crow directory to generate a complete MCP config, then copy the relevant entries to your Gemini settings.
+:::
+
+## Gemini CLI — Remote (HTTP)
+
+Connect to a deployed Crow gateway for the full platform including external integrations.
+
+### Prerequisites
 
 - Crow gateway deployed and healthy ([Cloud Deploy Guide](../getting-started/cloud-deploy))
-
-## Gemini CLI
-
-The [Gemini CLI](https://github.com/google-gemini/gemini-cli) supports remote MCP servers via configuration.
 
 ### Setup Steps
 
