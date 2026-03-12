@@ -22,21 +22,33 @@ The registry is a JSON file at `registry/add-ons.json`:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "add-ons": [
     {
-      "name": "crow-weather-panel",
-      "description": "Weather dashboard panel showing local forecast",
-      "type": "panel",
-      "author": "contributor-handle",
-      "license": "MIT",
-      "repository": "https://github.com/contributor/crow-weather-panel",
+      "id": "my-addon",
+      "name": "My Add-on",
+      "description": "What this add-on does",
+      "type": "bundle",
       "version": "1.0.0",
-      "commit": "a1b2c3d4e5f6789012345678901234567890abcd",
-      "download_url": "https://github.com/contributor/crow-weather-panel/archive/a1b2c3d.tar.gz",
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "crow_min_version": "1.0.0",
-      "added": "2026-03-01"
+      "author": "contributor-handle",
+      "category": "productivity",
+      "tags": ["keyword1", "keyword2"],
+      "icon": "book",
+      "requires": {
+        "env": ["API_KEY"],
+        "min_ram_mb": 256,
+        "min_disk_mb": 100
+      },
+      "env_vars": [
+        {
+          "name": "API_KEY",
+          "description": "Your API key for the service",
+          "required": true,
+          "secret": true
+        }
+      ],
+      "ports": [8080],
+      "notes": "Optional notes shown in the Extensions panel"
     }
   ]
 }
@@ -44,20 +56,23 @@ The registry is a JSON file at `registry/add-ons.json`:
 
 ### Entry Fields
 
-| Field | Description |
-|---|---|
-| `name` | Package name (must match manifest) |
-| `description` | Short description |
-| `type` | `panel`, `mcp-server`, `skill`, or `bundle` |
-| `author` | GitHub username or handle |
-| `license` | SPDX license identifier |
-| `repository` | Public Git repository URL |
-| `version` | Semver version (must match manifest and Git tag) |
-| `commit` | Full SHA of the pinned commit |
-| `download_url` | Direct download link for the pinned commit |
-| `sha256` | SHA-256 hash of the downloaded archive |
-| `crow_min_version` | Minimum Crow version required |
-| `added` | Date the add-on was listed |
+| Field | Required | Description |
+|---|---|---|
+| `id` | Yes | Unique identifier (lowercase, hyphens only) |
+| `name` | Yes | Human-readable name |
+| `description` | Yes | One-line description |
+| `type` | Yes | `panel`, `mcp-server`, `skill`, or `bundle` |
+| `version` | Yes | Semver version |
+| `author` | Yes | GitHub username or handle |
+| `category` | Yes | Category: `productivity`, `ai`, `media`, `smart-home`, `data` |
+| `tags` | No | Array of searchable tags (max 10) |
+| `icon` | No | Icon key: `brain`, `cloud`, `image`, `book`, `home` |
+| `requires.env` | No | Required environment variable names |
+| `requires.min_ram_mb` | No | Minimum RAM in MB |
+| `requires.min_disk_mb` | No | Minimum disk space in MB |
+| `env_vars` | No | Detailed env var descriptions (name, description, required, secret, default) |
+| `ports` | No | Ports used by the add-on |
+| `notes` | No | Additional notes (shown in italics on the Extensions card) |
 
 ## Submission Process
 
