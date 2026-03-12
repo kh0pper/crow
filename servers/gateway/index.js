@@ -20,6 +20,7 @@
  *   GET  /blog/feed.xml            — RSS 2.0 feed
  *   GET  /blog/feed.atom           — Atom feed
  *   GET  /dashboard/*              — Dashboard UI
+ *   POST /dashboard/bundles/api/*  — Bundle lifecycle API (install, uninstall, start, stop)
  *   POST /relay/store              — Peer relay store-and-forward
  *   GET  /relay/fetch              — Peer relay fetch pending blobs
  *   GET  /crow.md                  — Cross-platform behavioral context

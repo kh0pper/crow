@@ -24,6 +24,7 @@ import blogPanel from "./panels/blog.js";
 import filesPanel from "./panels/files.js";
 import extensionsPanel from "./panels/extensions.js";
 import settingsPanel from "./panels/settings.js";
+import bundlesRouterFactory from "../routes/bundles.js";
 
 /**
  * @param {Function|null} mcpAuthMiddleware - OAuth auth middleware (for unified auth)
@@ -92,6 +93,9 @@ export default function dashboardRouter(mcpAuthMiddleware) {
 
   // Auth middleware for all other dashboard routes
   router.use("/dashboard", dashboardAuth);
+
+  // Mount bundles API (protected by dashboard auth above)
+  router.use("/dashboard", bundlesRouterFactory());
 
   // Dashboard home — redirect to first panel
   router.get("/dashboard", (req, res) => {
