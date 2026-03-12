@@ -235,7 +235,11 @@ Skills are markdown files in `skills/`. They are loaded by Claude on demand — 
 
 ### Add-on system
 
-Crow supports installable add-ons (panels, MCP servers, skills, bundles). The registry lives in `registry/add-ons.json`. Users install add-ons by asking their AI ("install the todo add-on") or via the Extensions dashboard panel. Installed add-ons are tracked in `~/.crow/installed.json`.
+Crow supports installable add-ons (panels, MCP servers, skills, bundles). The registry lives in `registry/add-ons.json`. Users install add-ons by asking their AI ("install the todo add-on") or via the Extensions dashboard panel. Installed add-ons are tracked in `~/.crow/installed.json`. Type-specific artifacts:
+- **bundle**: Docker Compose files in `~/.crow/bundles/<id>/`
+- **mcp-server**: Registered in `~/.crow/mcp-addons.json` (command, args, env)
+- **skill**: Copied to `~/.crow/skills/` (takes precedence over repo `skills/`)
+- **panel**: Copied to `~/.crow/panels/`, registered in `~/.crow/panels.json`
 
 ### Developer Program
 
