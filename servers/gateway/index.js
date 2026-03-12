@@ -173,6 +173,28 @@ app.get("/health", async (req, res) => {
   });
 });
 
+// --- System Health API (for resource checks) ---
+app.get("/api/health", async (req, res) => {
+  const os = await import("node:os");
+  const { execFileSync } = await import("node:child_process");
+  const totalMem = Math.round(os.totalmem() / 1048576);
+  const freeMem = Math.round(os.freemem() / 1048576);
+  let diskFreeMb = null;
+  try {
+    const df = execFileSync("df", ["-BM", "--output=avail", "/"], { timeout: 5000 }).toString();
+    const lines = df.trim().split("\n");
+    if (lines.length > 1) diskFreeMb = parseInt(lines[1], 10) || null;
+  } catch {}
+  res.json({
+    ram_total_mb: totalMem,
+    ram_free_mb: freeMem,
+    ram_used_mb: totalMem - freeMem,
+    disk_free_mb: diskFreeMb,
+    uptime_seconds: Math.round(os.uptime()),
+    cpus: os.cpus().length,
+  });
+});
+
 // --- Setup Page (no auth) ---
 app.get("/setup", setupPageHandler);
 
