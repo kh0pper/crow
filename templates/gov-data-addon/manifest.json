@@ -1,0 +1,25 @@
+{
+  "id": "{{STATE_OR_FED}}-gov-data",
+  "name": "{{NAME}} Government Data",
+  "version": "1.0.0",
+  "description": "Access {{NAME}} government datasets — {{DATASETS_SUMMARY}}",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "data",
+  "tags": ["government", "data", "open-data", "{{STATE_OR_FED}}"],
+  "icon": "book",
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "envKeys": []
+  },
+  "skills": ["skills/{{STATE_OR_FED}}-gov-data.md"],
+  "requires": {
+    "env": [],
+    "min_ram_mb": 128,
+    "min_disk_mb": 50
+  },
+  "env_vars": [],
+  "ports": [],
+  "notes": "Connects to public government APIs. No API key required for most datasets."
+}
