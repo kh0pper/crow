@@ -41,6 +41,21 @@ export default {
         return;
       }
 
+      if (action === "update_discovery") {
+        const fields = ["discovery_enabled", "discovery_name"];
+        for (const key of fields) {
+          const value = req.body[key];
+          if (value !== undefined) {
+            await db.execute({
+              sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
+              args: [key, value, value],
+            });
+          }
+        }
+        res.redirect("/dashboard/settings");
+        return;
+      }
+
       if (action === "change_password") {
         const { scrypt, randomBytes, timingSafeEqual } = await import("node:crypto");
         const { setPassword } = await import("../auth.js");
@@ -129,6 +144,18 @@ export default {
       <button type="submit" class="btn btn-primary">Save Blog Settings</button>
     </form>`;
 
+    // Contact discovery
+    const discoveryForm = `<form method="POST">
+      <input type="hidden" name="action" value="update_discovery">
+      ${formField("Contact Discovery", "discovery_enabled", { type: "select", value: bs.discovery_enabled || "false", options: [
+        { value: "false", label: "Disabled" },
+        { value: "true", label: "Enabled — findable by other Crow users" },
+      ]})}
+      <p style="color:var(--crow-text-muted);font-size:0.85rem;margin:-0.5rem 0 1rem">When enabled, your Crow ID and display name are visible at /discover/profile. Other Crow users can find you and send invite requests.</p>
+      ${formField("Display Name", "discovery_name", { type: "text", value: bs.discovery_name || "", placeholder: "Name shown to other Crow users" })}
+      <button type="submit" class="btn btn-primary">Save Discovery Settings</button>
+    </form>`;
+
     // Password change
     const passwordForm = `<form method="POST">
       <input type="hidden" name="action" value="change_password">
@@ -156,7 +183,8 @@ export default {
       ${section("Integrations", integrationsHtml, { delay: 200 })}
       ${section("Identity", identityHtml, { delay: 250 })}
       ${section("Blog Settings", blogForm, { delay: 300 })}
-      ${section("Change Password", passwordForm, { delay: 350 })}
+      ${section("Contact Discovery", discoveryForm, { delay: 350 })}
+      ${section("Change Password", passwordForm, { delay: 400 })}
     `;
 
     return layout({ title: "Settings", content });

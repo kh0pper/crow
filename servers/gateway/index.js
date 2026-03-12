@@ -21,6 +21,7 @@
  *   GET  /blog/feed.atom           — Atom feed
  *   GET  /dashboard/*              — Dashboard UI
  *   POST /dashboard/bundles/api/*  — Bundle lifecycle API (install, uninstall, start, stop)
+ *   GET  /discover/profile          — Contact discovery (opt-in public profile)
  *   POST /relay/store              — Peer relay store-and-forward
  *   GET  /relay/fetch              — Peer relay fetch pending blobs
  *   GET  /crow.md                  — Cross-platform behavioral context
@@ -362,6 +363,34 @@ if (authMiddleware) {
   app.post("/relay/store", relayHandlers.store);
   app.get("/relay/fetch", relayHandlers.fetch);
 }
+
+// --- Contact Discovery Endpoint (public, opt-in) ---
+app.get("/discover/profile", async (req, res) => {
+  try {
+    const setting = await db.execute({
+      sql: "SELECT value FROM dashboard_settings WHERE key = 'discovery_enabled'",
+      args: [],
+    });
+    if (!setting.rows.length || setting.rows[0].value !== "true") {
+      return res.status(404).json({ error: "Discovery not enabled" });
+    }
+    const { loadOrCreateIdentity } = await import("../sharing/identity.js");
+    const identity = loadOrCreateIdentity();
+    const nameSetting = await db.execute({
+      sql: "SELECT value FROM dashboard_settings WHERE key = 'discovery_name'",
+      args: [],
+    });
+    res.json({
+      crow_discovery: true,
+      crow_id: identity.crowId,
+      display_name: nameSetting.rows[0]?.value || null,
+      ed25519_pubkey: identity.ed25519Public,
+      secp256k1_pubkey: identity.secp256k1Public,
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Discovery unavailable" });
+  }
+});
 
 // --- Start Server ---
 
