@@ -50,9 +50,34 @@ Install Tailscale on the device you want to access Crow from:
 
 Log in with the same account you used on your server.
 
-## Step 4: Access Crow Remotely
+## Step 4: Set Up MagicDNS (Optional but Recommended)
 
-Once both devices are on your tailnet, access the dashboard at:
+Instead of remembering IP addresses, set a friendly hostname so you can access Crow at `http://crow/` from any device on your Tailnet.
+
+```bash
+sudo tailscale set --hostname=crow
+```
+
+::: tip MagicDNS
+MagicDNS is enabled by default on new Tailnets. If `http://crow/` doesn't resolve, check your [Tailscale admin console](https://login.tailscale.com/admin/dns) and enable MagicDNS.
+:::
+
+If `crow` is already taken on your Tailnet, use an alternative:
+
+```bash
+sudo tailscale set --hostname=crow-home
+# Then access at http://crow-home/
+```
+
+## Step 5: Access Crow Remotely
+
+Once both devices are on your tailnet, access the Crow's Nest at:
+
+```
+http://crow:3001/dashboard
+```
+
+Or using the Tailscale IP:
 
 ```
 http://100.x.x.x:3001/dashboard
@@ -60,22 +85,45 @@ http://100.x.x.x:3001/dashboard
 
 Replace `100.x.x.x` with your server's Tailscale IP from Step 2.
 
-The gateway API is available at:
-
-```
-http://100.x.x.x:3001
-```
-
-## Step 5: Verify the Connection
+## Step 6: Verify the Connection
 
 From your device, test the connection:
 
 ```bash
-ping 100.x.x.x
-curl http://100.x.x.x:3001/health
+tailscale ping crow
+curl http://crow:3001/health
 ```
 
 You should see a health check response from the gateway.
+
+## Making Your Blog Public
+
+Your blog is public at your gateway URL, but the Crow's Nest stays private. To make the blog accessible outside your Tailnet:
+
+### Option A: Tailscale Funnel
+
+The simplest approach — expose port 3001 publicly:
+
+```bash
+sudo tailscale funnel 3001
+```
+
+The gateway's built-in network restrictions ensure `/dashboard/*` routes are only accessible from local/Tailscale IPs, so the Crow's Nest remains protected even with Funnel enabled. Only the blog, health check, and MCP endpoints (which require OAuth) are accessible publicly.
+
+### Option B: Caddy Reverse Proxy
+
+For more control, use Caddy to expose only blog routes:
+
+```
+# /etc/caddy/Caddyfile
+yourdomain.com {
+    reverse_proxy /blog/* localhost:3001
+    reverse_proxy /blog localhost:3001
+    respond 404
+}
+```
+
+Then set `CROW_GATEWAY_URL=https://yourdomain.com` in your `.env` so RSS feeds and sitemaps use the correct domain.
 
 ## Troubleshooting
 
