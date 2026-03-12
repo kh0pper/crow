@@ -45,13 +45,16 @@ Self-host the gateway with Docker Compose. Best for developers who want full con
 After setup, your AI assistant will have:
 
 - **Persistent memory** — remembers across conversations
-- **Research pipeline** — manages sources, generates APA citations
+- **Project management** — organize research, data connectors, sources, and auto-generated APA citations
 - **20+ integrations** — Gmail, GitHub, Slack, Notion, Trello, and more
-- **Full-text search** — find anything stored in memory or research
-- **Encrypted P2P sharing** — share memories and research with other Crow users
+- **Full-text search** — find anything stored in memory or projects
+- **Encrypted P2P sharing** — share memories and projects with other Crow users
 - **File storage** — upload and manage files with S3-compatible storage
 - **Blog platform** — publish posts with Markdown, RSS feeds, and themes
-- **Dashboard** — visual web interface for managing your Crow instance
+- **Crow's Nest** — visual web interface for managing your Crow instance
+- **Self-hosting add-ons** — install Ollama, Nextcloud, Immich, Obsidian, and Home Assistant from the Extensions panel
+
+**What's public?** Your blog is the only thing visible to the outside world, and only posts you explicitly publish with `public` visibility appear there. Your dashboard, data, and MCP endpoints are private by default. See the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md#whats-public-by-default) for the full breakdown.
 
 ::: tip Running many integrations?
 See the [Context & Performance guide](/guide/context-performance) for ways to optimize tool loading and reduce context window usage.

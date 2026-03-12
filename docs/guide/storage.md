@@ -111,14 +111,26 @@ CROW_STORAGE_QUOTA_MB=2048
 
 ## Supported File Types
 
-Storage validates MIME types before accepting uploads. Allowed types include:
+Storage uses a blocklist approach — most file types are accepted, and only executable types are blocked. This means you can upload virtually any file format, including:
 
-- **Images**: JPEG, PNG, GIF, WebP, SVG
-- **Documents**: PDF, plain text, Markdown, HTML
-- **Data**: JSON, CSV, XML
-- **Audio**: MP3, WAV, OGG
+- **Images**: JPEG, PNG, GIF, WebP, SVG, TIFF, BMP, ICO
+- **Documents**: PDF, plain text, Markdown, HTML, Office documents (DOCX, PPTX, XLSX)
+- **Data**: JSON, CSV, XML, YAML
+- **Audio**: MP3, WAV, OGG, FLAC, AAC
+- **Video**: MP4, WebM, AVI, MKV
+- **Archives**: ZIP, TAR, GZ, 7z, RAR
 
-Unrecognized or potentially dangerous file types (executables, scripts) are rejected.
+Files with unknown or unrecognized MIME types are also allowed.
+
+The following executable MIME types are blocked:
+
+- `application/x-executable`
+- `application/x-msdos-program`
+- `application/x-msdownload`
+- `application/x-sh`
+- `application/x-shellscript`
+- `application/x-bat`
+- `application/x-msi`
 
 ## Deleting Files
 

@@ -157,4 +157,4 @@ Visit `http://localhost:3001/setup` to see integration status and endpoint URLs.
 
 - [Storage guide](/guide/storage) — Learn how to upload and manage files
 - [Blog guide](/guide/blog) — Start writing and publishing posts
-- [Dashboard guide](/guide/dashboard) — Explore the visual control panel
+- [Crow's Nest guide](/guide/crows-nest) — Explore the visual control panel

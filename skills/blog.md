@@ -78,6 +78,8 @@ tools:
 - `crow_blog_stats` shows post counts and tag distribution
 - Open Graph meta tags are automatically generated for public posts
 
+Posts default to `private`. Nothing appears on your public blog at `/blog` until you explicitly publish a post with `public` visibility. This is by design — your blog stays empty until you're ready.
+
 ## Post Visibility Guide
 
 | Visibility | Who can see it | URL accessible? |

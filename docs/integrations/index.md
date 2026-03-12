@@ -1,6 +1,6 @@
 # Integrations
 
-Crow connects to 20+ external services through MCP servers. The five built-in servers (Memory, Research, Sharing, Storage, and Blog) work out of the box. External integrations need API keys added to your environment.
+Crow connects to 20+ external services through MCP servers. The five built-in servers (Memory, Projects, Sharing, Storage, and Blog) work out of the box. External integrations need API keys added to your environment.
 
 ## Built-in Servers
 
@@ -51,6 +51,8 @@ These are installable add-ons with Docker Compose configurations. Install with `
 
 | Add-on | Type | Description |
 |---|---|---|
+| **Obsidian** | MCP Server | Vault search, note sync, and knowledge base integration |
+| **Home Assistant** | MCP Server | Smart home device control with safety checkpoints |
 | **Ollama** | Bundle (Docker) | Local AI models for embeddings, summarization, classification |
 | **Nextcloud** | Bundle (Docker) | File sync via WebDAV mount (v1: files only) |
 | **Immich** | Bundle (Docker + custom MCP) | Photo library search, album management |

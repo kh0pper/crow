@@ -8,9 +8,10 @@ Skills are markdown files in `skills/` that define behavioral prompts for the AI
 |---|---|---|
 | **Superpowers** | `superpowers.md` | Master routing — maps user intent to skills and tools |
 | **Memory Management** | `memory-management.md` | When and how to store/recall memories |
-| **Research Pipeline** | `research-pipeline.md` | Research workflow with citations and verification |
+| **Research Pipeline** | `research-pipeline.md` | Project and research workflow with citations and verification |
 | **Session Context** | `session-context.md` | Session start/end protocols |
 | **Plan & Review** | `plan-review.md` | Checkpoint-based planning for multi-step tasks |
+| **Session Summary** | `session-summary.md` | Quick session wrap-up: deliverables, decisions, next steps |
 | **Reflection** | `reflection.md` | Session friction analysis and improvement proposals |
 | **Skill Writing** | `skill-writing.md` | Dynamic skill creation and improvement |
 | **i18n** | `i18n.md` | Multilingual output adaptation |
@@ -29,6 +30,7 @@ Skills are markdown files in `skills/` that define behavioral prompts for the AI
 | **Onboarding Tour** | `onboarding-tour.md` | First-run platform tour for new users |
 | **Add-ons** | `add-ons.md` | Add-on browsing, installation, and removal |
 | **Network Setup** | `network-setup.md` | Tailscale remote access guidance |
+| **Backup** | `backup.md` | Database backup and restore workflows |
 | **Bug Report** | `bug-report.md` | Bug and feature reporting |
 
 ## Integration Skills
@@ -59,9 +61,9 @@ Skills are markdown files in `skills/` that define behavioral prompts for the AI
 Skills can combine to handle complex requests:
 
 - **"Daily briefing"** → Gmail + Calendar + Slack + Trello + Memory
-- **"Start research on X"** → Memory + Research + Brave Search + arXiv + Zotero
+- **"Start research on X"** → Memory + Projects + Brave Search + arXiv + Zotero
 - **"Prepare for meeting"** → Calendar + Gmail + Memory + Research + Slack
-- **"Publish my research"** → Research + Blog + Storage (upload images)
+- **"Publish my research"** → Projects + Blog + Storage (upload images)
 - **"Set up file sharing"** → Storage + Sharing + Peer Network
 
 ## Creating New Skills

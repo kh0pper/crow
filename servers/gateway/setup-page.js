@@ -176,9 +176,9 @@ export async function setupPageHandler(req, res) {
 
   ${isCrowOS && !passwordConfigured ? `
   <div class="section">
-    <div class="section-title">Step 1: Set Dashboard Password</div>
+    <div class="section-title">Step 1: Set Crow's Nest Password</div>
     <div class="instructions">
-      <p style="margin-bottom:12px">Protect your Crow dashboard with a password. This is required before you can access the dashboard.</p>
+      <p style="margin-bottom:12px">Protect your Crow's Nest with a password. This is required before you can access the control panel.</p>
       <form method="POST" action="/dashboard/setup-password" style="display:flex;gap:8px;flex-wrap:wrap">
         <input type="password" name="password" placeholder="Choose a password" required minlength="8"
           style="flex:1;min-width:200px;padding:10px 14px;border:1px solid #d2d2d7;border-radius:8px;font-size:14px">
@@ -189,13 +189,13 @@ export async function setupPageHandler(req, res) {
 
   ${passwordConfigured ? `
   <div class="section">
-    <div class="section-title">${isCrowOS ? "Step 1: Dashboard Password" : "Dashboard"}</div>
+    <div class="section-title">${isCrowOS ? "Step 1: Crow's Nest Password" : "Crow's Nest"}</div>
     <div class="card">
       <div class="card-header">
         <span class="status-dot green"></span>
         <div>
           <div class="card-name">Password configured</div>
-          <div class="card-desc">Dashboard is protected</div>
+          <div class="card-desc">Crow's Nest is protected</div>
         </div>
       </div>
     </div>
@@ -274,7 +274,7 @@ export async function setupPageHandler(req, res) {
       ${isHosted ? `
       <ol>
         <li><strong>Get your API key</strong> from the service (click the "Get your API key" link above)</li>
-        <li>Go to your <strong>Dashboard</strong> &rarr; <strong>Settings</strong> panel</li>
+        <li>Go to your <strong>Crow's Nest</strong> &rarr; <strong>Settings</strong> panel</li>
         <li>Add the environment variable name and your API key</li>
         <li>Your instance will restart automatically (~10 seconds)</li>
         <li>Refresh this page to see the integration turn green</li>

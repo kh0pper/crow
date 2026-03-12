@@ -13,6 +13,7 @@ This is the master routing skill. Consult this **before every task** to determin
 7. **Surface skill activation**: When a skill activates from the trigger table, show: *[crow: activated skill — \<skill-name\>.md]*
 8. **Surface friction signals**: When noting a friction signal, show: *[crow: friction signal — \<description\> (\<N\> of 2 threshold)]*
 9. **Transparency protocol**: Follow the Transparency Rules in crow.md (`transparency_rules` section) for all autonomous actions
+10. **Skill loading**: When loading a skill, check `~/.crow/skills/` first — user overrides take precedence over repo `skills/`
 
 ---
 
@@ -59,6 +60,8 @@ This is the master routing skill. Consult this **before every task** to determin
 | "ollama", "local model", "run locally", "embeddings" | "ollama", "modelo local", "ejecutar local" | ollama | crow-memory |
 | "nextcloud", "nextcloud files" | "nextcloud", "archivos nextcloud" | nextcloud | filesystem |
 | "photos", "pictures", "album", "immich" | "fotos", "imágenes", "álbum" | immich | immich |
+| "back up", "backup", "restore data", "export data" | "respaldar", "backup", "restaurar datos", "exportar datos" | backup | filesystem |
+| "wrap up", "summarize session", "what did we do" | "resumir sesión", "qué hicimos" | session-summary | crow-memory |
 | "change language", "speak in..." | "cambiar idioma", "háblame en..." | i18n | crow-memory |
 | Session start / Inicio de sesión | — | session-context, i18n, skill-writing (deferred gap check) | crow-memory |
 | High friction detected / Fricción detectada | — | reflection → skill-writing (handoff) | crow-memory, filesystem |

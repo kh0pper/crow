@@ -69,10 +69,29 @@ Skills should include transparency lines so users can see what's happening:
 *[crow: step 2/3 — composed summary from 3 sources]*
 ```
 
+## User Skills Directory
+
+Skills in `skills/` are part of the repo and get overwritten on `git pull` or updates. To protect your customizations:
+
+- **User override directory**: `~/.crow/skills/` — Skills here take precedence over repo `skills/`. If both `~/.crow/skills/sharing.md` and `skills/sharing.md` exist, the user version wins.
+- **Marketplace-installed skills**: Skills installed from the Extensions panel are automatically placed in `~/.crow/skills/`, so they're safe from updates.
+- **Custom skills**: Place any custom skills you write in `~/.crow/skills/` to keep them across updates.
+
+The AI checks `~/.crow/skills/` first when loading a skill. If a skill isn't found there, it falls back to the repo `skills/` directory.
+
+::: tip
+To customize a built-in skill without losing your changes on update, copy it to `~/.crow/skills/` and edit the copy:
+```bash
+mkdir -p ~/.crow/skills
+cp skills/sharing.md ~/.crow/skills/sharing.md
+# Edit ~/.crow/skills/sharing.md as needed
+```
+:::
+
 ## Testing
 
 Skills are markdown — there's no build step. To test:
-1. Place the file in `skills/`
+1. Place the file in `skills/` or `~/.crow/skills/`
 2. Add the trigger row to `skills/superpowers.md`
 3. Start a conversation and use one of the trigger phrases
 4. Verify the AI follows the workflow correctly
