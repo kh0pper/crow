@@ -74,7 +74,7 @@ This is an MCP (Model Context Protocol) platform. The AI is the primary interfac
 
 2. **HTTP Gateway** (`servers/gateway/`) — Express server that wraps all MCP servers with Streamable HTTP + SSE transports + OAuth 2.1. Includes proxy layer for external MCP servers, **tool router** (`/router/mcp` — 7 tools instead of 49+), public blog routes, dashboard UI, peer relay, and setup page. Modularized into Express routers (`routes/mcp.js`, `routes/blog-public.js`, `routes/storage-http.js`, `dashboard/`).
 
-3. **Crow's Nest** (`servers/gateway/dashboard/`) — Server-side rendered HTML control panel (the "Crow's Nest") with Dark Editorial design. Password auth, session cookies, panel registry. Built-in panels: Messages, Blog, Files, Extensions, Settings. Third-party panels via `~/.crow/panels/`.
+3. **Crow's Nest** (`servers/gateway/dashboard/`) — Server-side rendered HTML control panel (the "Crow's Nest") with Dark Editorial design. Password auth, session cookies, panel registry. Built-in panels: Health, Messages, Memory, Blog, Files, Extensions, Settings. Third-party panels via `~/.crow/panels/`.
 
 4. **Skills** (`skills/`) — 30 markdown files that serve as behavioral prompts loaded by Claude. Not code — they define workflows, trigger patterns, and integration logic.
 
@@ -264,6 +264,7 @@ Consult `skills/superpowers.md` first — it routes user intent to the right ski
 - `data-backends.md` — External data backend registration and knowledge capture workflow
 - `network-setup.md` — Tailscale remote access guidance
 - `add-ons.md` — Add-on browsing, installation, removal
+- `scheduling.md` — Scheduled and recurring task management
 - `bug-report.md` — Bug/feature reporting (GitHub or memory fallback)
 - `backup.md` — Database backup and restore workflows
 - `session-summary.md` — Quick session wrap-up (deliverables, decisions, next steps)

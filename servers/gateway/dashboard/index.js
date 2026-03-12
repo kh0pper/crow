@@ -22,6 +22,8 @@ import { createDbClient } from "../../db.js";
 import messagesPanel from "./panels/messages.js";
 import blogPanel from "./panels/blog.js";
 import filesPanel from "./panels/files.js";
+import healthPanel from "./panels/health.js";
+import memoryPanel from "./panels/memory.js";
 import extensionsPanel from "./panels/extensions.js";
 import settingsPanel from "./panels/settings.js";
 import bundlesRouterFactory from "../routes/bundles.js";
@@ -37,7 +39,9 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   router.use("/dashboard", express.urlencoded({ extended: false }));
 
   // Register built-in panels
+  registerPanel(healthPanel);
   registerPanel(messagesPanel);
+  registerPanel(memoryPanel);
   registerPanel(blogPanel);
   registerPanel(filesPanel);
   registerPanel(extensionsPanel);
