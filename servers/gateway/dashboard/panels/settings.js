@@ -27,7 +27,7 @@ export default {
       }
 
       if (action === "update_blog") {
-        const fields = ["blog_title", "blog_tagline", "blog_author", "blog_theme"];
+        const fields = ["blog_title", "blog_tagline", "blog_author", "blog_theme", "blog_listed"];
         for (const key of fields) {
           const value = req.body[key];
           if (value !== undefined) {
@@ -121,6 +121,11 @@ export default {
         { value: "light", label: "Light" },
         { value: "serif", label: "Serif" },
       ]})}
+      ${formField("Blog Discovery", "blog_listed", { type: "select", value: bs.blog_listed || "false", options: [
+        { value: "false", label: "Not listed" },
+        { value: "true", label: "Listed in Crow Blog Registry" },
+      ]})}
+      <p style="color:var(--crow-text-muted);font-size:0.85rem;margin:-0.5rem 0 1rem">When listed, your blog appears in the Crow Blog Registry so other Crow users can discover it.</p>
       <button type="submit" class="btn btn-primary">Save Blog Settings</button>
     </form>`;
 
