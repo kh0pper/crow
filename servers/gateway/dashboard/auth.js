@@ -199,6 +199,24 @@ export function isAllowedNetwork(req) {
   const parts = addr.split(".").map(Number);
   if (parts.length === 4 && parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127) return true;
 
+  // Custom IP allowlist (comma-separated IPs or CIDR ranges)
+  const custom = process.env.CROW_ALLOWED_IPS;
+  if (custom) {
+    for (const entry of custom.split(",").map((s) => s.trim()).filter(Boolean)) {
+      if (entry.includes("/")) {
+        // CIDR check
+        const [net, bits] = entry.split("/");
+        const netParts = net.split(".").map(Number);
+        const mask = ~((1 << (32 - Number(bits))) - 1) >>> 0;
+        const netNum = ((netParts[0] << 24) | (netParts[1] << 16) | (netParts[2] << 8) | netParts[3]) >>> 0;
+        const addrNum = ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+        if ((addrNum & mask) === (netNum & mask)) return true;
+      } else if (entry === addr) {
+        return true;
+      }
+    }
+  }
+
   return false;
 }
 
