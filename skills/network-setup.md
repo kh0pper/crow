@@ -73,6 +73,16 @@ The dashboard accepts connections from:
 - `192.168.0.0/16` — private network (Class C)
 - `100.64.0.0/10` — Tailscale CGNAT range
 
+### Making Your Blog Public (Tailscale Funnel)
+
+If the user wants their blog accessible from the public internet (not just their Tailscale network), Tailscale Funnel exposes the gateway publicly while the dashboard stays private:
+
+```bash
+tailscale funnel --bg --https=443 http://localhost:3001
+```
+
+The blog becomes available at `https://<hostname>.your-tailnet.ts.net/blog`. The dashboard still returns 403 to non-local IPs, so only the blog and other unauthenticated routes (`/health`, `/setup`) are effectively public. Funnel must be enabled in the Tailscale admin console first.
+
 ## Troubleshooting
 
 - **403 Forbidden**: Your IP is not on the allowlist. Use Tailscale or set `CROW_DASHBOARD_PUBLIC=true`.

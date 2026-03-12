@@ -73,6 +73,16 @@ See the full list on the [Integrations](../integrations/) page.
 
 After adding keys, Render restarts automatically. Refresh your `/setup` page to confirm they're connected.
 
+::: warning What's publicly accessible after deployment?
+When deployed to Render, your instance is on the public internet. Here's what that means:
+- **Blog** (`/blog`) — Public, but only posts you explicitly publish with `public` visibility appear
+- **Dashboard** (`/dashboard`) — Blocked from public IPs (returns 403). Only accessible from your Tailscale network or localhost
+- **MCP endpoints** — Protected by OAuth 2.1. Only authorized AI clients can access your tools
+- **Setup page** (`/setup`) — Shows connection status but never exposes API keys
+
+Nothing personal is visible unless you publish it. See the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md#whats-public-by-default) for details.
+:::
+
 ## Verify and Connect Your AI
 
 Check that everything is working:

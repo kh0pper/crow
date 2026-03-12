@@ -80,6 +80,10 @@ The setup wizard walks you through:
 2. **View your Crow ID** — your cryptographic identity for P2P sharing
 3. **Configure integrations** — add API keys for GitHub, Gmail, etc.
 
+::: tip Want your blog accessible from the internet?
+Your blog is available on your local network at `https://crow.local/blog`. To make it publicly accessible, see [Making Your Blog Public](#making-your-blog-public) in the Tailscale section below.
+:::
+
 ## Step 5: Connect Your AI Platform
 
 Your Crow instance is now running. Connect it from any AI platform:
@@ -164,6 +168,27 @@ sudo systemctl restart caddy
 ```
 
 See the [Tailscale Setup Guide](/getting-started/tailscale-setup) for detailed instructions.
+
+### Making Your Blog Public
+
+Once Tailscale is installed, you can use [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) to make your blog accessible from the public internet — no port forwarding or domain registration needed.
+
+```bash
+# Enable Funnel in your Tailscale admin console first:
+# https://login.tailscale.com/admin/dns → Enable Funnel
+
+# Expose your gateway publicly
+tailscale funnel --bg --https=443 http://localhost:3001
+```
+
+Your blog is now at `https://<hostname>.your-tailnet.ts.net/blog`. The dashboard remains private — public IPs get a 403 response, so only the blog is effectively visible.
+
+To set the public URL for correct RSS/social preview links:
+
+```bash
+# Add to your .env
+CROW_GATEWAY_URL=https://<hostname>.your-tailnet.ts.net
+```
 
 ## Optional: Custom Domain
 

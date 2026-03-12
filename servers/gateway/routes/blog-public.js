@@ -417,6 +417,40 @@ export default function blogPublicRouter() {
     }
   });
 
+  // GET /blog/sitemap.xml — XML Sitemap
+  router.get("/blog/sitemap.xml", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const posts = await db.execute({
+        sql: "SELECT slug, updated_at, published_at FROM blog_posts WHERE status = 'published' AND visibility = 'public' ORDER BY published_at DESC",
+        args: [],
+      });
+      const siteUrl = process.env.CROW_GATEWAY_URL || `http://localhost:${process.env.PORT || process.env.CROW_GATEWAY_PORT || 3001}`;
+
+      let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
+      xml += `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n`;
+      xml += `  <url>\n    <loc>${escapeHtml(siteUrl)}/blog</loc>\n  </url>\n`;
+      for (const post of posts.rows) {
+        const lastmod = post.updated_at || post.published_at;
+        xml += `  <url>\n`;
+        xml += `    <loc>${escapeHtml(siteUrl)}/blog/${escapeHtml(post.slug)}</loc>\n`;
+        if (lastmod) {
+          xml += `    <lastmod>${new Date(lastmod).toISOString().split("T")[0]}</lastmod>\n`;
+        }
+        xml += `  </url>\n`;
+      }
+      xml += `</urlset>\n`;
+
+      res.set("Cache-Control", "public, max-age=3600");
+      res.type("application/xml").send(xml);
+    } catch (err) {
+      console.error("[blog] Sitemap error:", err);
+      res.status(500).send("Error generating sitemap");
+    } finally {
+      db.close();
+    }
+  });
+
   // GET /blog/tag/:tag — Posts by tag
   router.get("/blog/tag/:tag", async (req, res) => {
     const db = createDbClient();

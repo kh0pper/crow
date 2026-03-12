@@ -5,6 +5,9 @@
   "description": "Search photos, browse albums, and manage your Immich photo library",
   "type": "bundle",
   "author": "Crow",
+  "category": "media",
+  "tags": ["photos", "albums", "self-hosted", "backup", "search"],
+  "icon": "image",
   "server": {
     "command": "node",
     "args": ["server/index.js"],
@@ -12,6 +15,23 @@
   },
   "skills": ["skills/immich.md"],
   "requires": {
-    "env": ["IMMICH_URL", "IMMICH_API_KEY"]
-  }
+    "env": ["IMMICH_URL", "IMMICH_API_KEY"],
+    "min_ram_mb": 2048,
+    "min_disk_mb": 5000
+  },
+  "env_vars": [
+    {
+      "name": "IMMICH_URL",
+      "description": "Immich server URL (e.g., http://localhost:2283)",
+      "required": true
+    },
+    {
+      "name": "IMMICH_API_KEY",
+      "description": "Immich API key (from Immich admin panel)",
+      "required": true,
+      "secret": true
+    }
+  ],
+  "ports": [],
+  "notes": "Connects to an existing Immich instance. Does not run Immich itself — install Immich separately. Limited ARM64 support."
 }

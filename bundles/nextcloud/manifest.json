@@ -5,11 +5,37 @@
   "description": "Access Nextcloud files via WebDAV mount — sync documents, browse folders",
   "type": "bundle",
   "author": "Crow",
+  "category": "productivity",
+  "tags": ["files", "sync", "self-hosted", "webdav", "documents"],
+  "icon": "cloud",
   "docker": {
     "composefile": "docker-compose.yml"
   },
   "skills": ["skills/nextcloud.md"],
   "requires": {
-    "env": ["NEXTCLOUD_URL", "NEXTCLOUD_USER", "NEXTCLOUD_PASSWORD"]
-  }
+    "env": ["NEXTCLOUD_URL", "NEXTCLOUD_USER", "NEXTCLOUD_PASSWORD"],
+    "min_ram_mb": 512,
+    "min_disk_mb": 1024
+  },
+  "env_vars": [
+    {
+      "name": "NEXTCLOUD_URL",
+      "description": "Nextcloud server URL (e.g., http://localhost:8080)",
+      "required": true
+    },
+    {
+      "name": "NEXTCLOUD_USER",
+      "description": "Nextcloud admin username",
+      "default": "admin",
+      "required": true
+    },
+    {
+      "name": "NEXTCLOUD_PASSWORD",
+      "description": "Nextcloud admin password",
+      "required": true,
+      "secret": true
+    }
+  ],
+  "ports": [8080],
+  "notes": "Disk usage depends on files stored. Includes MariaDB for metadata."
 }

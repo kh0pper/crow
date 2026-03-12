@@ -15,7 +15,7 @@ services:
   nextcloud:
     image: nextcloud:stable
     ports:
-      - "8080:80"
+      - "127.0.0.1:8080:80"
     environment:
       MYSQL_HOST: nextcloud-db
       MYSQL_DATABASE: nextcloud

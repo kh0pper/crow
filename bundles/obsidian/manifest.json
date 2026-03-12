@@ -5,6 +5,9 @@
   "description": "Connect your Obsidian vault to Crow for reading, searching, and syncing notes",
   "type": "mcp-server",
   "author": "Crow",
+  "category": "productivity",
+  "tags": ["notes", "knowledge-base", "markdown", "vault", "research"],
+  "icon": "book",
   "server": {
     "command": "npx",
     "args": ["-y", "mcp-obsidian"],
@@ -12,6 +15,17 @@
   },
   "skills": ["skills/obsidian.md"],
   "requires": {
-    "env": ["OBSIDIAN_VAULT_PATH"]
-  }
+    "env": ["OBSIDIAN_VAULT_PATH"],
+    "min_ram_mb": 128,
+    "min_disk_mb": 50
+  },
+  "env_vars": [
+    {
+      "name": "OBSIDIAN_VAULT_PATH",
+      "description": "Absolute path to your Obsidian vault directory",
+      "required": true
+    }
+  ],
+  "ports": [],
+  "notes": "MCP server only — reads your local vault. No Docker required."
 }

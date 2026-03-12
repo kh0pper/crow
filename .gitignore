@@ -6,3 +6,4 @@ data/*.db-shm
 .mcp.json
 *.log
 .worktrees/
+.claude/skills/

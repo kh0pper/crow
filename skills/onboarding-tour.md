@@ -37,7 +37,7 @@ Walk through the main features:
 
 **Research** — I manage structured research projects with proper citations, source tracking, and bibliography generation.
 
-**Blog** — You have a built-in blogging platform. Tell me to write a post and I'll create, publish, and manage it for you. Your blog is available at `/blog`.
+**Blog** — You have a built-in blogging platform. Tell me to write a post and I'll create, publish, and manage it for you. Your blog is available at `/blog`. Published posts are publicly visible at `/blog`, while your dashboard and data stay private.
 
 **Files** — Upload and manage files with S3-compatible storage. Images for blog posts, documents for research, anything you need to keep.
 

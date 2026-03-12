@@ -124,8 +124,10 @@ No authentication required — doesn't expose secrets.
 - **Always deploy behind HTTPS** — Render and Railway provide this automatically. If self-hosting, use a reverse proxy (nginx, Caddy) with TLS
 - The **`/setup` page** is unauthenticated by design — it shows which integrations are connected and endpoint URLs, but never exposes API keys or secrets
 - **OAuth tokens** are stored in the SQLite database and persist across restarts
-- **Rate limiting** is not built into the gateway — rely on your hosting provider or a reverse proxy for rate limiting in production
+- **Rate limiting** is built in — 200 requests per 15 minutes (general) and 20 requests per 15 minutes (auth endpoints: `/authorize`, `/token`, `/register`). For high-traffic deployments, add additional rate limiting via your reverse proxy or hosting provider
 - The **`/crow.md` endpoint** is protected by OAuth when auth is enabled, since it exposes behavioral context
+
+For the full public/private access model, see the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md#whats-public-by-default).
 
 ## Router Mode
 

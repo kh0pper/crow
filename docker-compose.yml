@@ -10,7 +10,7 @@ services:
   crow-gateway:
     build: .
     ports:
-      - "${CROW_GATEWAY_PORT:-3001}:3001"
+      - "127.0.0.1:${CROW_GATEWAY_PORT:-3001}:3001"
     volumes:
       - ${CROW_DATA_DIR:-./data}:/app/data
     env_file: .env
@@ -36,7 +36,7 @@ services:
     volumes:
       - minio-data:/data
     ports:
-      - "9001:9001"   # Console (not exposed in production)
+      - "127.0.0.1:9001:9001"   # Console (not exposed in production)
     # API port 9000 is internal-only (accessible to crow-gateway via Docker network)
     expose:
       - "9000"
