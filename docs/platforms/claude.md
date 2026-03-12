@@ -80,6 +80,10 @@ https://your-gateway.onrender.com/router/mcp
 
 See the [Context & Performance guide](/guide/context-performance) for more details.
 
+::: tip Shared with Claude Code CLI
+Custom Integrations you add here are also available in Claude Code CLI sessions — they share the same connector configuration within Anthropic's ecosystem. If you set up Crow on claude.ai, it works in Claude Code without additional setup. This cross-platform sharing is specific to Claude; other platforms (ChatGPT, Gemini) manage their MCP connections independently.
+:::
+
 ## Tips
 
 - You can connect all five servers (memory, projects, sharing, storage, blog) plus external tools simultaneously

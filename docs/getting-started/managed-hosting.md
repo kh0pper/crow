@@ -5,7 +5,7 @@ Skip the setup entirely. Get a fully configured Crow instance hosted by [Maestro
 ## What's Included
 
 - **Your own subdomain** — `username.crow.maestro.press`
-- **Dashboard & blog** — Visual management UI and publishing platform, ready to go
+- **Crow's Nest & blog** — Visual control panel and publishing platform, ready to go
 - **All AI integrations** — Connect Claude, ChatGPT, Gemini, Grok, Cursor, and more
 - **Daily backups** — Automatic daily backups of your data
 - **SSL included** — HTTPS enabled by default
@@ -25,12 +25,12 @@ Skip the setup entirely. Get a fully configured Crow instance hosted by [Maestro
 Everything a self-hosted Crow instance can do:
 
 - **Persistent memory** — Your AI remembers across conversations and platforms
-- **Research pipeline** — Manage sources, generate citations, organize notes
+- **Project management** — Organize projects, manage sources, generate APA citations, connect data backends
 - **Blog** — Publish posts with Markdown, RSS feeds, and custom themes
 - **File storage** — Upload and manage files with presigned URLs
 - **20+ integrations** — Gmail, GitHub, Slack, Notion, and more
 - **Encrypted P2P sharing** — Share memories and research with other Crow users
-- **Dashboard** — Visual interface for messages, blog, files, and settings
+- **Crow's Nest** — Visual control panel for messages, blog, files, and settings
 
 ## Managed vs. Self-Hosted
 

@@ -49,8 +49,8 @@ features:
     details: 20+ integrations out of the box (Gmail, GitHub, Slack, and more) plus self-hosting add-ons (Obsidian, Home Assistant, Ollama, Nextcloud, Immich). Install by asking your AI.
   - icon:
       src: /icon-deploy.svg
-    title: Dashboard & Blog
-    details: A premium visual dashboard for managing messages, blog posts, files, and settings. Built-in blogging platform with Markdown, RSS feeds, and themes — publish by telling your AI.
+    title: Crow's Nest & Blog
+    details: A premium visual control panel (the Crow's Nest) for managing messages, blog posts, files, and settings. Built-in blogging platform with Markdown, RSS feeds, and themes — publish by telling your AI.
   - icon:
       src: /icon-deploy.svg
     title: Managed, Cloud, or Self-Host

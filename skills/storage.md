@@ -50,6 +50,10 @@ tools:
 - MIME type validation blocks executables for security
 - The dashboard Files panel provides a visual file browser at `/dashboard/files`
 
+## Safety Confirmations
+
+- Before calling `crow_delete_file`: Always tell the user the file name, size, and that deletion is permanent. Ask for explicit confirmation before proceeding. Never batch-delete without confirming each file or the full list.
+
 ## Error Handling
 
 - If storage is not configured, tools return setup instructions — relay these to the user

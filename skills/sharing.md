@@ -56,6 +56,11 @@ The crow-sharing MCP server provides:
 - **read-write** — Contact can view and modify
 - **one-time** — Content is viewable once, then auto-revoked
 
+## Safety Confirmations
+
+- Before calling `crow_share`: Preview what will be shared — show the item title/name, permission level (read/read-write/one-time), and recipient name. For read-write permissions, explicitly warn that the recipient will be able to modify the shared content.
+- Before calling `crow_revoke_access`: Confirm the contact name and what access is being revoked. Warn that the peer's local copy won't be deleted but sync will stop.
+
 ## Best Practices
 - Always verify the safety number when connecting with a new contact
 - Use "one-time" permissions for sensitive content

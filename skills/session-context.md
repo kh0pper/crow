@@ -22,7 +22,7 @@ At the beginning of every session, perform these steps:
 ## Session End Protocol
 Before the session ends:
 
-1. **Build the session summary**: Review the session and compile a structured summary using the template below. This runs **every session**, not just friction sessions.
+1. **Build the session summary**: Use the `session-summary.md` skill to compile a structured summary. This runs **every session**, not just friction sessions.
 2. **Prepare the store list**: The session summary + any additional items (project status updates, new preferences, unfinished work pointers)
 3. **Show the checkpoint** (Transparency):
    **[crow checkpoint: Session ending. Will store the following. Say "don't store" + number to cancel any.]**

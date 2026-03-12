@@ -30,7 +30,7 @@ export function renderLayout({ title, content, activePanel, panels, theme, scrip
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${escapeHtml(title)} — Crow Dashboard</title>
+  <title>${escapeHtml(title)} — Crow's Nest</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400;0,500;0,700;1,400&family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,700;1,9..144,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -94,7 +94,7 @@ export function renderLogin({ error, isSetup } = {}) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${isSetup ? "Setup" : "Login"} — Crow Dashboard</title>
+  <title>${isSetup ? "Setup" : "Login"} — Crow's Nest</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
@@ -104,7 +104,7 @@ export function renderLogin({ error, isSetup } = {}) {
   <div class="login-page">
     <div class="login-card">
       <h1 class="login-logo">Crow</h1>
-      <p class="login-subtitle">${isSetup ? "Set your dashboard password" : "Dashboard Login"}</p>
+      <p class="login-subtitle">${isSetup ? "Set your Crow's Nest password" : "Crow's Nest Login"}</p>
       ${error ? `<div class="login-error">${escapeHtml(error)}</div>` : ""}
       <form method="POST" action="/dashboard/login">
         ${isSetup ? `<input type="password" name="password" placeholder="Choose a password" required minlength="6" autofocus>

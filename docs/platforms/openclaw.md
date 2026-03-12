@@ -192,6 +192,90 @@ Example workflow through any OpenClaw-connected chat:
 >
 > "Generate a bibliography for the renewable energy project"
 
+## P2P Sharing & Collaboration
+
+One of the most powerful capabilities unlocked by pairing OpenClaw with Crow is decentralized, privacy-first collaboration. Crow's sharing layer enables direct peer-to-peer connections between users — no central server required. Combined with OpenClaw's multi-platform chat interface, this means you can share data, collaborate on projects, and message contacts directly from WhatsApp, Telegram, Discord, or any other connected platform.
+
+### Why This Matters
+
+Traditional collaboration tools route everything through a central service. Crow takes a different approach: peers discover each other directly and sync data over encrypted channels. OpenClaw makes this accessible from everyday chat platforms, so you get the convenience of messaging apps with the privacy guarantees of P2P infrastructure.
+
+### Key Capabilities
+
+**Hyperswarm discovery** — Crow instances find each other on the network using DHT-based peer discovery with NAT holepunching. No static IPs, no port forwarding, no coordination server. When you add a contact, Crow handles discovery automatically.
+
+**Encrypted data sync** — Data replicates between peers over Hypercore append-only feeds. These feeds are encrypted and append-only, meaning data can be securely shared without risk of tampering. Sync happens directly between peers whenever both are online.
+
+**Nostr messaging** — Crow supports NIP-44 encrypted messaging between users via Nostr relays. Through OpenClaw, you can send and receive encrypted messages from any chat platform — WhatsApp, Discord, Signal, or wherever your OpenClaw bot lives.
+
+**P2P sharing workflows** — Share memories, projects, sources, and notes with contacts using invite codes. Permissions are granular: `read`, `read-write`, or `one-time` access. Revoke access at any time.
+
+### Getting Started with Sharing
+
+To use P2P sharing through OpenClaw, connect the `crow-sharing` server alongside memory and projects.
+
+**Local (stdio)** — add to your `~/.openclaw/openclaw.json`:
+```json
+{
+  "mcpServers": {
+    "crow-sharing": {
+      "command": "node",
+      "args": ["/path/to/crow/servers/sharing/index.js"],
+      "env": {
+        "CROW_DB_PATH": "/path/to/crow/data/crow.db"
+      }
+    }
+  }
+}
+```
+
+**Remote (HTTP)** — add the sharing endpoint:
+```json
+{
+  "mcpServers": {
+    "crow-sharing": {
+      "url": "https://your-gateway.onrender.com/sharing/mcp"
+    }
+  }
+}
+```
+
+### Example Workflows
+
+Through any OpenClaw-connected chat:
+
+> "Generate an invite code for sharing"
+>
+> "Share my renewable energy project with Alex as read-only"
+>
+> "Check my inbox for shared items"
+>
+> "Send a message to Alex: the solar report is updated"
+>
+> "Revoke Alex's access to the renewable energy project"
+
+### Sharing Tools Reference
+
+| Tool | Purpose |
+|---|---|
+| `crow_generate_invite` | Create an invite code for a new contact |
+| `crow_accept_invite` | Accept an invite code from another user |
+| `crow_share` | Share a memory, project, source, or note with a contact |
+| `crow_inbox` | View received shares and messages |
+| `crow_send_message` | Send an encrypted Nostr message to a contact |
+| `crow_list_contacts` | List your connected peers |
+| `crow_revoke_access` | Remove a contact's access to shared items |
+| `crow_sharing_status` | View sharing status and peer connectivity |
+
+### Privacy Model
+
+All sharing is opt-in and user-initiated. Crow never shares data without explicit action. The architecture ensures:
+
+- **No central server** — Peers connect directly via Hyperswarm. Nostr relays carry encrypted messages but cannot read them.
+- **End-to-end encryption** — Messages use NIP-44 encryption. Data sync uses Hypercore's built-in encryption.
+- **Granular permissions** — You control exactly what is shared, with whom, and at what access level.
+- **Revocable access** — Remove a contact's access at any time.
+
 ## Verification
 
 After connecting, test through any OpenClaw-connected chat platform:

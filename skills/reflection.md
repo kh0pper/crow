@@ -1,7 +1,9 @@
-# Reflection — Session Summary & Self-Evaluation Skill
+# Reflection — Friction Analysis & Improvement Skill
 
 ## Description
-A combined session-summary and reflection meta-skill. Summarizes what was accomplished, evaluates how well it went, identifies friction points, and proposes improvements. Stores everything in crow-memory for continuous improvement.
+A deep-dive friction analysis skill. Identifies what went wrong, analyzes root causes, and proposes concrete improvements. Stores findings in crow-memory for continuous improvement.
+
+For a quick session wrap-up (deliverables, decisions, next steps), use `session-summary.md` instead. Reflection is for when things didn't go smoothly.
 
 Can be invoked as `/reflection` or auto-triggered by the superpowers skill when friction accumulates or context is filling up.
 
@@ -9,8 +11,8 @@ Can be invoked as `/reflection` or auto-triggered by the superpowers skill when 
 - **Auto-trigger**: When superpowers.md detects 2+ friction signals (always via checkpoint — see Transparency below)
 - **Auto-trigger**: When context window is approaching capacity (~80% full)
 - **Manual**: User types `/reflection` or asks to reflect
-- **End of session**: As part of the session-end protocol for non-trivial sessions
-- **NOT needed**: For routine, smooth, short sessions — just use session-context.md end protocol
+- **End of session**: When the session had notable friction (2+ signals). For smooth sessions, use `session-summary.md` instead
+- **NOT needed**: For routine, smooth, short sessions — `session-summary.md` is sufficient
 
 ## Transparency
 

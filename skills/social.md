@@ -42,6 +42,10 @@ Messages are sent through Nostr relays. Default relays:
 
 Custom relays can be configured via `crow_sharing_status`.
 
+## Safety Confirmations
+
+- Before calling `crow_send_message`: Show the full message content and recipient name for confirmation. Messages sent via Nostr cannot be unsent or deleted from relay servers.
+
 ## Best Practices
 - Messages are cached locally for offline access
 - Nostr uses secp256k1 keys (separate from Ed25519 sharing keys)

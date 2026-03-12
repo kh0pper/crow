@@ -22,6 +22,8 @@ npm run identity         # Display your Crow ID and public keys
 npm run identity:export  # Export encrypted identity for device migration
 npm run identity:import  # Import identity on a new device
 npm run migrate-data     # Migrate data from ./data/ to ~/.crow/data/
+npm run backup           # Back up database (SQL dump + binary copy)
+npm run restore          # Restore database from backup file
 ```
 
 ### Crow CLI (Crow OS / self-hosted)
@@ -72,7 +74,7 @@ This is an MCP (Model Context Protocol) platform. The AI is the primary interfac
 
 2. **HTTP Gateway** (`servers/gateway/`) — Express server that wraps all MCP servers with Streamable HTTP + SSE transports + OAuth 2.1. Includes proxy layer for external MCP servers, **tool router** (`/router/mcp` — 7 tools instead of 49+), public blog routes, dashboard UI, peer relay, and setup page. Modularized into Express routers (`routes/mcp.js`, `routes/blog-public.js`, `routes/storage-http.js`, `dashboard/`).
 
-3. **Dashboard** (`servers/gateway/dashboard/`) — Server-side rendered HTML dashboard with Dark Editorial design. Password auth, session cookies, panel registry. Built-in panels: Messages, Blog, Files, Extensions, Settings. Third-party panels via `~/.crow/panels/`.
+3. **Crow's Nest** (`servers/gateway/dashboard/`) — Server-side rendered HTML control panel (the "Crow's Nest") with Dark Editorial design. Password auth, session cookies, panel registry. Built-in panels: Messages, Blog, Files, Extensions, Settings. Third-party panels via `~/.crow/panels/`.
 
 4. **Skills** (`skills/`) — 30 markdown files that serve as behavioral prompts loaded by Claude. Not code — they define workflows, trigger patterns, and integration logic.
 
@@ -106,7 +108,7 @@ servers/gateway/session-manager.js → Consolidated session storage
 servers/gateway/routes/mcp.js  → Streamable HTTP + SSE transport mounting
 servers/gateway/routes/blog-public.js → Public blog routes (/blog/*)
 servers/gateway/routes/storage-http.js → File upload/download routes
-servers/gateway/dashboard/     → Dashboard UI (auth, layout, panels)
+servers/gateway/dashboard/     → Crow's Nest UI (auth, layout, panels)
 servers/gateway/auth.js        → OAuth 2.1 provider (CrowOAuthProvider, SQLite-backed)
 servers/gateway/proxy.js       → Proxy layer for external MCP servers
 servers/gateway/router.js      → Tool router (7 category tools, ~75% context reduction)
@@ -262,6 +264,8 @@ Consult `skills/superpowers.md` first — it routes user intent to the right ski
 - `network-setup.md` — Tailscale remote access guidance
 - `add-ons.md` — Add-on browsing, installation, removal
 - `bug-report.md` — Bug/feature reporting (GitHub or memory fallback)
+- `backup.md` — Database backup and restore workflows
+- `session-summary.md` — Quick session wrap-up (deliverables, decisions, next steps)
 - `onboarding-tour.md` — First-run platform tour for new users
 - `context-management.md` — Self-monitor context usage and suggest optimization
 

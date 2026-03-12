@@ -101,6 +101,10 @@ Claude Code users also have access to skill files in `skills/` and the project-l
 
 For detailed guidance via MCP, use prompts: `session-start`, `crow-guide`, `research-guide`, `blog-guide`, `sharing-guide`. Or use `crow_get_context` with `platform: "claude"`. Memories stored via Claude Code are shared with all other connected platforms. See the [Cross-Platform Guide](/guide/cross-platform).
 
+::: tip Already set up on claude.ai?
+If you've added Crow as a Custom Integration on claude.ai, those MCP servers are also available in Claude Code CLI without additional configuration — Anthropic's ecosystem shares connector settings across Claude products. No need to duplicate setup in `.mcp.json`. This sharing behavior is specific to Claude; other platforms (ChatGPT, Gemini) manage their MCP connections independently.
+:::
+
 ## Tips
 
 - Use the project-level `.mcp.json` to share Crow config with your team

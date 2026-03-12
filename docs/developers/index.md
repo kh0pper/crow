@@ -4,7 +4,7 @@ Crow is an open-source AI platform built on the [Model Context Protocol](https:/
 
 ## What is Crow?
 
-Crow gives AI assistants persistent memory, a project and research pipeline, encrypted P2P sharing, and 20+ service integrations. It works with Claude, ChatGPT, Gemini, Grok, Cursor, and more. Everything runs on open standards — no vendor lock-in.
+Crow gives AI assistants persistent memory, project management with data backends, encrypted P2P sharing, and 20+ service integrations. It works with Claude, ChatGPT, Gemini, Grok, Cursor, and more. Everything runs on open standards — no vendor lock-in.
 
 ## How to Contribute
 
