@@ -85,6 +85,7 @@ export default defineConfig({
           { text: 'Context & Performance', link: '/guide/context-performance' },
           { text: 'Data Backends', link: '/guide/data-backends' },
           { text: 'Deployment Tiers', link: '/guide/deployment-tiers' },
+          { text: 'AI Providers (BYOAI)', link: '/guide/ai-providers' },
           { text: 'Customization', link: '/guide/customization' },
         ],
       },
