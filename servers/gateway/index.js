@@ -128,6 +128,18 @@ app.use("/register", authLimiter);
 // Body parsing with size limit
 app.use(express.json({ limit: "1mb" }));
 
+// --- robots.txt (site-wide, before any router mounts) ---
+app.get("/robots.txt", (req, res) => {
+  const gatewayUrl = process.env.CROW_GATEWAY_URL || process.env.RENDER_EXTERNAL_URL;
+  let body = `User-agent: *\nDisallow: /\nAllow: /blog/\n`;
+  if (gatewayUrl) {
+    body += `Sitemap: ${gatewayUrl}/blog/sitemap.xml\n`;
+  }
+  res.set("Content-Type", "text/plain");
+  res.set("Cache-Control", "public, max-age=3600");
+  res.send(body);
+});
+
 // --- Health Check ---
 app.get("/health", async (req, res) => {
   const proxyStatus = getProxyStatus();

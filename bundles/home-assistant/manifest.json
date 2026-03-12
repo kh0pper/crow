@@ -5,6 +5,9 @@
   "description": "Control your smart home through Home Assistant — lights, temperature, switches, and more",
   "type": "mcp-server",
   "author": "Crow",
+  "category": "smart-home",
+  "tags": ["smart-home", "iot", "automation", "devices", "sensors"],
+  "icon": "home",
   "server": {
     "command": "npx",
     "args": ["-y", "hass-mcp"],
@@ -12,6 +15,23 @@
   },
   "skills": ["skills/home-assistant.md"],
   "requires": {
-    "env": ["HA_URL", "HA_TOKEN"]
-  }
+    "env": ["HA_URL", "HA_TOKEN"],
+    "min_ram_mb": 256,
+    "min_disk_mb": 100
+  },
+  "env_vars": [
+    {
+      "name": "HA_URL",
+      "description": "Home Assistant URL (e.g., http://homeassistant.local:8123)",
+      "required": true
+    },
+    {
+      "name": "HA_TOKEN",
+      "description": "Home Assistant long-lived access token",
+      "required": true,
+      "secret": true
+    }
+  ],
+  "ports": [],
+  "notes": "Connects to an existing Home Assistant instance. Includes safety checkpoints for physical device control."
 }

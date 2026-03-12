@@ -5,11 +5,26 @@
   "description": "Run local AI models for embeddings, summarization, and content classification via Ollama",
   "type": "bundle",
   "author": "Crow",
+  "category": "ai",
+  "tags": ["ai", "local", "embeddings", "privacy", "llm"],
+  "icon": "brain",
   "docker": {
     "composefile": "docker-compose.yml"
   },
   "skills": ["skills/ollama.md"],
   "requires": {
-    "env": ["OLLAMA_HOST"]
-  }
+    "env": ["OLLAMA_HOST"],
+    "min_ram_mb": 2048,
+    "min_disk_mb": 5000
+  },
+  "env_vars": [
+    {
+      "name": "OLLAMA_HOST",
+      "description": "Ollama API endpoint",
+      "default": "http://localhost:11434",
+      "required": true
+    }
+  ],
+  "ports": [11434],
+  "notes": "RAM and disk depend on model size. Small models (tinyllama) need ~2GB RAM. Large models (llama3) need 8GB+. Each model uses 2-50GB disk."
 }

@@ -42,6 +42,22 @@ If you deploy Crow to the cloud (Render, Railway, etc.):
 - **OAuth 2.1** protects your MCP endpoints — only authorized AI clients can access your tools
 - The **`/setup` page** is safe to visit — it shows connection status but never displays secrets
 
+## What's Public by Default
+
+Crow follows a simple principle: **your blog is the storefront, your dashboard is the locked back office**. Here's what's accessible at each level:
+
+| Component | Default Access | Why |
+|---|---|---|
+| Blog (`/blog/*`) | Public — anyone with the URL | Publishing is the whole point. Only posts you explicitly publish with `public` visibility appear here. |
+| Dashboard (`/dashboard`) | Private — local network + Tailscale only | Full control over your data — messages, files, settings. |
+| MCP endpoints (`/memory/mcp`, etc.) | Private — requires OAuth 2.1 | AI tool access needs authentication to prevent unauthorized use. |
+| Setup page (`/setup`) | Accessible but safe | Shows which integrations are connected, never shows API keys or secrets. |
+| Health check (`/health`) | Accessible | Returns server status — no sensitive data. |
+
+Think of it like a store: customers can see the front window (blog), but only you can get into the back office (dashboard). If you never publish a blog post, nothing personal is visible to the outside world.
+
+For details on network restrictions and allowed IP ranges, see the [Dashboard guide](docs/guide/dashboard.md#network-security).
+
 ## What to Do if a Key Leaks
 
 If you accidentally shared an API key (posted it publicly, committed it to GitHub, etc.):
