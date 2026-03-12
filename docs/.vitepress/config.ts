@@ -85,6 +85,7 @@ export default defineConfig({
           { text: 'Sharing', link: '/guide/sharing' },
           { text: 'Relays', link: '/guide/relays' },
           { text: 'Social & Messaging', link: '/guide/social' },
+          { text: 'OpenClaw Bridge', link: '/guide/openclaw-bridge' },
           { text: 'Context & Performance', link: '/guide/context-performance' },
           { text: 'Data Backends', link: '/guide/data-backends' },
           { text: 'Deployment Tiers', link: '/guide/deployment-tiers' },
