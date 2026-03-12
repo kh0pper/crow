@@ -108,6 +108,7 @@ servers/gateway/session-manager.js → Consolidated session storage
 servers/gateway/routes/mcp.js  → Streamable HTTP + SSE transport mounting
 servers/gateway/routes/blog-public.js → Public blog routes (/blog/*)
 servers/gateway/routes/storage-http.js → File upload/download routes
+servers/gateway/routes/bundles.js → Bundle lifecycle API (install, uninstall, start, stop, status, env config)
 servers/gateway/dashboard/     → Crow's Nest UI (auth, layout, panels)
 servers/gateway/auth.js        → OAuth 2.1 provider (CrowOAuthProvider, SQLite-backed)
 servers/gateway/proxy.js       → Proxy layer for external MCP servers
