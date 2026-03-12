@@ -1,0 +1,17 @@
+{
+  "id": "podcast",
+  "name": "Podcast Publisher",
+  "version": "1.0.0",
+  "description": "Publish podcast episodes with iTunes-compatible RSS feeds",
+  "type": "skill",
+  "author": "Crow",
+  "category": "media",
+  "tags": ["podcast", "audio", "rss", "itunes"],
+  "icon": "mic",
+  "skills": ["skills/podcast.md"],
+  "requires": {
+    "min_ram_mb": 64,
+    "min_disk_mb": 100
+  },
+  "notes": "Extends the blog server — podcast episodes are blog posts tagged 'podcast' with audio metadata. No additional server required."
+}

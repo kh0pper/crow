@@ -50,6 +50,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | "set up sharing", "export identity", "new device" | "configurar sharing", "exportar identidad", "nuevo dispositivo" | onboarding, peer-network | crow-sharing |
 | "upload file", "store file", "storage", "download file" | "subir archivo", "almacenar", "descargar archivo" | storage | crow-storage |
 | "blog post", "write a post", "publish", "blog settings" | "publicar", "escribir un post", "blog", "configuración del blog" | blog | crow-blog, crow-storage |
+| "podcast", "episode", "audio content", "record" | "podcast", "episodio", "contenido de audio", "grabar" | podcast | crow-blog, crow-storage |
 | "dashboard", "settings", "control panel" | "panel", "configuración", "panel de control" | network-setup | (dashboard routes) |
 | "add-on", "extension", "install plugin", "browse extensions" | "complemento", "extensión", "instalar plugin" | add-ons | crow-memory, filesystem |
 | "what can you do", "getting started", "new to crow" | "qué puedes hacer", "cómo empezar", "nuevo en crow" | onboarding-tour | crow-memory |

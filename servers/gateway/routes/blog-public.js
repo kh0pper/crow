@@ -1,17 +1,21 @@
 /**
  * Public Blog Routes
  *
- * GET /blog          — Index page (published public posts)
- * GET /blog/:slug    — Individual post
- * GET /blog/tag/:tag — Posts filtered by tag
- * GET /blog/feed.xml — RSS 2.0
- * GET /blog/feed.atom — Atom
+ * GET /blog              — Index page (published public posts)
+ * GET /blog/:slug        — Individual post
+ * GET /blog/tag/:tag     — Posts filtered by tag
+ * GET /blog/feed.xml     — RSS 2.0
+ * GET /blog/feed.atom    — Atom
+ * GET /blog/podcast.xml  — iTunes-compatible podcast RSS
+ * GET /blog/registry.json — Registry metadata (gated by blog_listed setting)
+ * GET /blog/discover.json — Lightweight discovery payload (always available)
  */
 
 import { Router } from "express";
 import { createDbClient, escapeLikePattern } from "../../db.js";
 import { renderMarkdown } from "../../blog/renderer.js";
 import { generateRss, generateAtom } from "../../blog/rss.js";
+import { generatePodcastFeed } from "../../blog/podcast-rss.js";
 
 /**
  * Get blog settings from dashboard_settings table.
@@ -417,6 +421,37 @@ export default function blogPublicRouter() {
     }
   });
 
+  // GET /blog/podcast.xml — iTunes-compatible podcast RSS feed
+  router.get("/blog/podcast.xml", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const settings = await getBlogSettings(db);
+      const posts = await db.execute({
+        sql: "SELECT slug, title, excerpt, content, author, published_at, tags FROM blog_posts WHERE status = 'published' AND visibility = 'public' AND tags LIKE '%podcast%' ORDER BY published_at DESC LIMIT 200",
+        args: [],
+      });
+
+      if (posts.rows.length === 0) {
+        res.type("application/xml").send(`<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0"><channel><title>${escapeHtml(settings.title)}</title><description>No episodes yet.</description></channel></rss>`);
+        return;
+      }
+
+      const siteUrl = process.env.CROW_GATEWAY_URL || `http://localhost:${process.env.PORT || process.env.CROW_GATEWAY_PORT || 3001}`;
+      const xml = generatePodcastFeed(posts.rows, {
+        title: settings.title,
+        tagline: settings.tagline,
+        author: settings.author,
+        siteUrl,
+      });
+      res.type("application/xml").send(xml);
+    } catch (err) {
+      console.error("[blog] Podcast feed error:", err);
+      res.status(500).send("Error generating podcast feed");
+    } finally {
+      db.close();
+    }
+  });
+
   // GET /blog/sitemap.xml — XML Sitemap
   router.get("/blog/sitemap.xml", async (req, res) => {
     const db = createDbClient();
@@ -446,6 +481,82 @@ export default function blogPublicRouter() {
     } catch (err) {
       console.error("[blog] Sitemap error:", err);
       res.status(500).send("Error generating sitemap");
+    } finally {
+      db.close();
+    }
+  });
+
+  // GET /blog/registry.json — Registry payload (gated by blog_listed setting)
+  router.get("/blog/registry.json", async (req, res) => {
+    const db = createDbClient();
+    try {
+      // Check if blog owner has opted into registry listing
+      const listedResult = await db.execute({
+        sql: "SELECT value FROM dashboard_settings WHERE key = 'blog_listed'",
+        args: [],
+      });
+      const listed = listedResult.rows.length > 0 && listedResult.rows[0].value === "true";
+      if (!listed) {
+        res.status(404).json({ error: "not_listed" });
+        return;
+      }
+
+      const settings = await getBlogSettings(db);
+      const siteUrl = process.env.CROW_GATEWAY_URL || `http://localhost:${process.env.PORT || process.env.CROW_GATEWAY_PORT || 3001}`;
+
+      const countResult = await db.execute({
+        sql: "SELECT COUNT(*) as cnt FROM blog_posts WHERE status = 'published' AND visibility = 'public'",
+        args: [],
+      });
+      const postCount = Number(countResult.rows[0].cnt);
+
+      const lastResult = await db.execute({
+        sql: "SELECT published_at FROM blog_posts WHERE status = 'published' AND visibility = 'public' ORDER BY published_at DESC LIMIT 1",
+        args: [],
+      });
+      const lastPublished = lastResult.rows.length > 0 ? lastResult.rows[0].published_at : null;
+
+      res.set("Cache-Control", "public, max-age=3600");
+      res.json({
+        title: settings.title,
+        tagline: settings.tagline || null,
+        author: settings.author || null,
+        url: `${siteUrl}/blog`,
+        post_count: postCount,
+        last_published: lastPublished,
+      });
+    } catch (err) {
+      console.error("[blog] Registry endpoint error:", err);
+      res.status(500).json({ error: "internal" });
+    } finally {
+      db.close();
+    }
+  });
+
+  // GET /blog/discover.json — Lightweight discovery payload (always available)
+  router.get("/blog/discover.json", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const settings = await getBlogSettings(db);
+      const siteUrl = process.env.CROW_GATEWAY_URL || `http://localhost:${process.env.PORT || process.env.CROW_GATEWAY_PORT || 3001}`;
+
+      const countResult = await db.execute({
+        sql: "SELECT COUNT(*) as cnt FROM blog_posts WHERE status = 'published' AND visibility = 'public'",
+        args: [],
+      });
+      const postCount = Number(countResult.rows[0].cnt);
+
+      res.set("Cache-Control", "public, max-age=3600");
+      res.json({
+        crow_blog: true,
+        title: settings.title,
+        rss_url: `${siteUrl}/blog/feed.xml`,
+        atom_url: `${siteUrl}/blog/feed.atom`,
+        post_count: postCount,
+      });
+    } catch (err) {
+      console.error("[blog] Discover endpoint error:", err);
+      res.status(500).json({ error: "internal" });
     } finally {
       db.close();
     }
