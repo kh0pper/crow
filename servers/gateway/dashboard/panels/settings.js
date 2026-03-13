@@ -523,8 +523,19 @@ function pollHealth(attempts) {
           const data = await res.json();
           if (data.updated) {
             msg.style.color = 'var(--crow-success)';
-            msg.textContent = 'Updated ' + (data.from || '?') + ' → ' + (data.to || '?') + '. Restarting...';
-            setTimeout(() => { location.reload(); }, 3000);
+            msg.textContent = 'Updated ' + (data.from || '?') + ' → ' + (data.to || '?') + '. Restarting gateway...';
+            btn.textContent = 'Restarting...';
+            // Poll until the server comes back
+            setTimeout(function pollRestart() {
+              fetch('/health').then(function(r) {
+                if (r.ok) location.reload();
+                else setTimeout(pollRestart, 2000);
+              }).catch(function() {
+                msg.textContent = 'Gateway restarting... waiting for it to come back up.';
+                setTimeout(pollRestart, 2000);
+              });
+            }, 3000);
+            return;
           } else if (data.error) {
             msg.style.color = 'var(--crow-error)';
             msg.textContent = data.error;
@@ -533,8 +544,18 @@ function pollHealth(attempts) {
             msg.textContent = 'Already up to date.';
           }
         } catch (e) {
-          msg.style.color = 'var(--crow-error)';
-          msg.textContent = 'Network error';
+          // Server may have already started restarting
+          msg.style.display = 'block';
+          msg.style.color = 'var(--crow-accent)';
+          msg.textContent = 'Gateway restarting... waiting for it to come back up.';
+          btn.textContent = 'Restarting...';
+          setTimeout(function pollRestart() {
+            fetch('/health').then(function(r) {
+              if (r.ok) location.reload();
+              else setTimeout(pollRestart, 2000);
+            }).catch(function() { setTimeout(pollRestart, 2000); });
+          }, 3000);
+          return;
         }
         btn.disabled = false;
         btn.textContent = 'Check Now';

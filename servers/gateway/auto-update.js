@@ -156,7 +156,9 @@ export async function checkForUpdates() {
     // Restart if running as systemd service
     if (process.env.INVOCATION_ID) {
       log("Restarting gateway via systemd...");
-      setTimeout(() => process.exit(0), 500);
+      // Exit with code 1 so Restart=on-failure brings the service back up
+      // Delay to allow the HTTP response to complete first
+      setTimeout(() => process.exit(1), 1500);
     }
 
     return { updated: true, from: currentVersion, to: newVersion };
