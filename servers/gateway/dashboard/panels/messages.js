@@ -3,6 +3,7 @@
  */
 
 import { escapeHtml, statCard, statGrid, dataTable, section, formatDate, badge } from "../shared/components.js";
+import { ICON_SHARING } from "../shared/empty-state-icons.js";
 
 export default {
   id: "messages",
@@ -42,7 +43,7 @@ export default {
     let messageList;
     if (messages.rows.length === 0) {
       messageList = `<div class="empty-state">
-        <img src="https://maestro.press/software/crow/icon-sharing.svg" alt="" width="48" height="48">
+        <div style="margin-bottom:1rem">${ICON_SHARING}</div>
         <h3>Your inbox is empty</h3>
         <p>Messages from friends and shared items will appear here.</p>
       </div>`;

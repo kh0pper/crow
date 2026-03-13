@@ -212,7 +212,7 @@ export default {
     } else {
       const cards = available.map((addon, i) => {
         const isInstalled = installed[addon.id];
-        const typeBadge = badge(addon.type, "connected");
+        const typeBadge = badge(addon.type, "draft");
         const icon = ICON_MAP[addon.icon] || "";
         const tags = (addon.tags || []).slice(0, 4).map((t) =>
           `<span style="font-size:0.7rem;color:var(--crow-accent);background:var(--crow-accent-muted);padding:0.1rem 0.4rem;border-radius:4px;margin-right:0.25rem">${escapeHtml(t)}</span>`

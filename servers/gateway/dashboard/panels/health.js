@@ -212,12 +212,11 @@ function formatUptime(seconds) {
 function colorForPercent(pct) {
   if (pct >= 90) return "#e74c3c";
   if (pct >= 70) return "#f39c12";
-  return "#2ecc71";
+  return "linear-gradient(90deg, #10b981, #22c55e)";
 }
 
 function progressBar(percent, color) {
-  const bg = color === "#2ecc71" ? "linear-gradient(90deg, #10b981, #22c55e)" : color;
   return `<div style="background:var(--crow-border);border-radius:4px;height:8px;overflow:hidden">
-    <div style="width:${Math.min(percent, 100)}%;height:100%;background:${bg};border-radius:4px;transition:width 0.3s"></div>
+    <div style="width:${Math.min(percent, 100)}%;height:100%;background:${color};border-radius:4px;transition:width 0.3s"></div>
   </div>`;
 }

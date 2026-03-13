@@ -4,6 +4,7 @@
 
 import { escapeHtml, statCard, statGrid, section, badge, formatDate, dataTable } from "../shared/components.js";
 import { sanitizeFtsQuery } from "../../../db.js";
+import { ICON_MEMORY } from "../shared/empty-state-icons.js";
 
 const PAGE_SIZE = 20;
 
@@ -88,7 +89,7 @@ export default {
         memoryList = `<div class="empty-state"><h3>No memories matching "${escapeHtml(query)}".</h3></div>`;
       } else {
         memoryList = `<div class="empty-state">
-          <img src="https://maestro.press/software/crow/icon-memory.svg" alt="" width="48" height="48">
+          <div style="margin-bottom:1rem">${ICON_MEMORY}</div>
           <h3>No memories yet</h3>
           <p>Ask your AI to remember something to get started.</p>
         </div>`;
