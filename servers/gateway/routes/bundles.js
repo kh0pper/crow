@@ -24,7 +24,7 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const CROW_HOME = process.env.CROW_DATA_DIR || join(homedir(), ".crow");
+const CROW_HOME = join(homedir(), ".crow");
 const BUNDLES_DIR = join(CROW_HOME, "bundles");
 const SKILLS_DIR = join(CROW_HOME, "skills");
 const PANELS_DIR = join(CROW_HOME, "panels");
