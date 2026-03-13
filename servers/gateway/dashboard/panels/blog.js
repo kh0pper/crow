@@ -3,6 +3,7 @@
  */
 
 import { escapeHtml, statCard, statGrid, dataTable, section, formField, badge, actionBar, formatDate } from "../shared/components.js";
+import { ICON_DEPLOY } from "../shared/empty-state-icons.js";
 
 export default {
   id: "blog",
@@ -78,7 +79,7 @@ export default {
     let postTable;
     if (posts.rows.length === 0) {
       postTable = `<div class="empty-state">
-        <img src="https://maestro.press/software/crow/icon-deploy.svg" alt="" width="48" height="48">
+        <div style="margin-bottom:1rem">${ICON_DEPLOY}</div>
         <h3>No posts yet</h3>
         <p>Create your first post below.</p>
       </div>`;
