@@ -140,9 +140,9 @@ export const INTEGRATIONS = [
     description: "Academic paper search and full-text retrieval",
     command: "uvx",
     args: ["arxiv-mcp-server"],
-    envVars: [], // No API key needed
+    envVars: ["CROW_ENABLE_ARXIV"], // No API key needed, but requires explicit opt-in
     keyUrl: null,
-    keyInstructions: "No setup required — works out of the box.",
+    keyInstructions: "No API key required. Set CROW_ENABLE_ARXIV=1 to enable.",
     docsUrl: "https://kh0pper.github.io/software/crow/integrations/arxiv",
     category: "productivity",
     requires: ["uvx"],
@@ -166,10 +166,10 @@ export const INTEGRATIONS = [
     description: "Academic search and research tools",
     command: "uvx",
     args: ["mcp-research"],
-    envVars: [],
+    envVars: ["CROW_ENABLE_MCP_RESEARCH"], // No API key needed, but requires explicit opt-in
     requires: ["uvx"],
     keyUrl: null,
-    keyInstructions: "No setup required — works out of the box.",
+    keyInstructions: "No API key required. Set CROW_ENABLE_MCP_RESEARCH=1 to enable.",
     docsUrl: null,
     category: "productivity",
   },

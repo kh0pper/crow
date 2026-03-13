@@ -17,9 +17,11 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 
-# Copy server code
+# Copy server code and scripts needed at runtime
 COPY servers/ servers/
-COPY scripts/init-db.js scripts/
+COPY scripts/init-db.js scripts/init-db.js
+COPY scripts/server-registry.js scripts/server-registry.js
+COPY scripts/generate-mcp-config.js scripts/generate-mcp-config.js
 
 # Initialize database
 RUN mkdir -p data && node scripts/init-db.js
