@@ -427,13 +427,7 @@ export default function bundlesRouter() {
         saveInstalled(installed);
         appendLog(job, "Installation tracked");
 
-        finishJob(job, "complete");
-
-        // 6. Restart gateway if bundle env vars were propagated
-        if (needsRestart) {
-          appendLog(job, "Restarting gateway to apply configuration...");
-          scheduleGatewayRestart(2000);
-        }
+        finishJob(job, needsRestart ? "complete_restart" : "complete");
       } catch (err) {
         appendLog(job, `Error: ${err.message}`);
         finishJob(job, "failed");
@@ -528,13 +522,7 @@ export default function bundlesRouter() {
         saveInstalled(installed);
         appendLog(job, "Installation record removed");
 
-        finishJob(job, "complete");
-
-        // 6. Restart gateway if env vars were reverted
-        if (needsRestart) {
-          appendLog(job, "Restarting gateway to apply changes...");
-          scheduleGatewayRestart(2000);
-        }
+        finishJob(job, needsRestart ? "complete_restart" : "complete");
       } catch (err) {
         appendLog(job, `Error: ${err.message}`);
         finishJob(job, "failed");
@@ -630,6 +618,13 @@ export default function bundlesRouter() {
       return res.status(404).json({ error: "Job not found" });
     }
     res.json(job);
+  });
+
+  // POST /bundles/api/restart — Client-triggered gateway restart
+  // Called by the client after it confirms the job is done and is ready for the restart.
+  router.post("/bundles/api/restart", (req, res) => {
+    res.json({ ok: true, message: "Restarting..." });
+    scheduleGatewayRestart(1000);
   });
 
   return router;

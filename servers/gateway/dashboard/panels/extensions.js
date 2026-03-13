@@ -583,6 +583,12 @@ export default {
               statusEl.style.color = "var(--crow-accent)";
               statusEl.textContent = "Done!";
               setTimeout(function() { location.reload(); }, 1500);
+            } else if (job.status === "complete_restart") {
+              statusEl.style.color = "var(--crow-accent)";
+              statusEl.textContent = "Restarting gateway to apply changes...";
+              // Tell the server to restart, then wait for it to come back
+              fetch(API + "/restart", { method: "POST", headers: { "Content-Type": "application/json" } }).catch(function() {});
+              waitForRestart(statusEl);
             } else if (job.status === "failed") {
               statusEl.style.color = "var(--crow-error, #e74c3c)";
               statusEl.textContent = "Failed: " + (job.log[job.log.length - 1] || "Unknown error");
