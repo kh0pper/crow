@@ -70,6 +70,16 @@ export default {
       statCard("Drafts", draftResult.rows[0]?.c || 0, { delay: 100 }),
     ]);
 
+    // Live blog link
+    const publicUrl = process.env.CROW_GATEWAY_URL || "";
+    const blogBaseUrl = publicUrl ? `${publicUrl}/blog/` : `/blog/`;
+    const blogLink = `<div style="background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px;padding:1rem;margin-bottom:1.5rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
+      <span style="font-weight:600;color:var(--crow-text)">Live Blog</span>
+      <a href="${escapeHtml(blogBaseUrl)}" target="_blank" style="flex:1;min-width:200px;font-size:0.85rem;word-break:break-all">${escapeHtml(blogBaseUrl)}</a>
+      <a href="${escapeHtml(blogBaseUrl)}feed.xml" target="_blank" class="btn btn-sm btn-secondary">RSS</a>
+      <a href="${escapeHtml(blogBaseUrl)}feed.atom" target="_blank" class="btn btn-sm btn-secondary">Atom</a>
+    </div>`;
+
     // Post list
     const posts = await db.execute({
       sql: "SELECT id, slug, title, status, visibility, tags, published_at, created_at, cover_image_key FROM blog_posts ORDER BY created_at DESC LIMIT 50",
@@ -132,6 +142,7 @@ export default {
 
     const content = `
       ${stats}
+      ${blogLink}
       ${section("Posts", postTable, { delay: 150 })}
       ${section("New Post", createForm, { delay: 200 })}
       <script>
