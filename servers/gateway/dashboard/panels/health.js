@@ -35,10 +35,10 @@ function getBundleDockerStatus(bundleId) {
 }
 
 export default {
-  id: "health",
+  id: "nest",
   name: "Crow's Nest",
   icon: "health",
-  route: "/dashboard/health",
+  route: "/dashboard/nest",
   navOrder: 5,
 
   async handler(req, res, { db, layout }) {

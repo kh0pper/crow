@@ -106,7 +106,7 @@ Built-in panels live in `servers/gateway/dashboard/panels/`:
 
 | Panel | File | Route | Purpose |
 |---|---|---|---|
-| Crow's Nest | `panels/health.js` | `/dashboard/health` | App launcher tiles, CPU, RAM, disk usage, Docker containers, DB metrics |
+| Crow's Nest | `panels/health.js` | `/dashboard/nest` | App launcher tiles, CPU, RAM, disk usage, Docker containers, DB metrics |
 | Messages | `panels/messages.js` | `/dashboard/messages` | View peer messages, threads, read status |
 | Memory | `panels/memory.js` | `/dashboard/memory` | Browse, search, and manage persistent memories |
 | Blog | `panels/blog.js` | `/dashboard/blog` | Manage posts, publish/unpublish, edit |
