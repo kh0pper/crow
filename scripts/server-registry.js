@@ -7,6 +7,7 @@
  * Used by generate-mcp-config.js, generate-desktop-config.js, and setup.js.
  */
 
+import { execFileSync } from "child_process";
 import { readFileSync, existsSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -42,6 +43,22 @@ export function loadEnv() {
 export function resolveEnvValue(template, env) {
   return template.replace(/\$\{(\w+)(?::-(.*?))?\}/g, (_, key, fallback) => {
     return env[key] || fallback || "";
+  });
+}
+
+/**
+ * Check if a server's required binaries are available.
+ * Returns true if all binaries are found, false otherwise.
+ */
+export function checkRequires(server) {
+  if (!server.requires || server.requires.length === 0) return true;
+  return server.requires.every((bin) => {
+    try {
+      execFileSync(bin, ["--version"], { stdio: "pipe", timeout: 5000 });
+      return true;
+    } catch {
+      return false;
+    }
   });
 }
 
@@ -162,6 +179,7 @@ export const EXTERNAL_SERVERS = [
     command: "uvx",
     args: ["workspace-mcp"],
     envKeys: ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"],
+    requires: ["uvx"],
     envMap: { GOOGLE_CLIENT_ID: "GOOGLE_CLIENT_ID", GOOGLE_CLIENT_SECRET: "GOOGLE_CLIENT_SECRET" },
     mcpEnv: { GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID}", GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET}" },
     description: "Requires Google OAuth credentials (includes Google Chat)",
@@ -172,6 +190,7 @@ export const EXTERNAL_SERVERS = [
     command: "uvx",
     args: ["arxiv-mcp-server"],
     envKeys: [],
+    requires: ["uvx"],
     envMap: {},
     mcpEnv: {},
     description: "Academic paper search (no keys needed)",
@@ -182,6 +201,7 @@ export const EXTERNAL_SERVERS = [
     command: "uvx",
     args: ["mcp-research"],
     envKeys: [],
+    requires: ["uvx"],
     envMap: {},
     mcpEnv: {},
     description: "Academic search (no keys needed)",
@@ -192,6 +212,7 @@ export const EXTERNAL_SERVERS = [
     command: "uvx",
     args: ["zotero-mcp"],
     envKeys: ["ZOTERO_API_KEY", "ZOTERO_USER_ID"],
+    requires: ["uvx"],
     envMap: { ZOTERO_API_KEY: "ZOTERO_API_KEY", ZOTERO_USER_ID: "ZOTERO_USER_ID" },
     mcpEnv: { ZOTERO_API_KEY: "${ZOTERO_API_KEY}", ZOTERO_USER_ID: "${ZOTERO_USER_ID}" },
     description: "Requires ZOTERO_API_KEY + ZOTERO_USER_ID",
