@@ -493,20 +493,29 @@ export default {
 
             var checkId = null;
             if (isDocker) {
+              var dataBox = document.createElement("div");
+              dataBox.style.cssText = "background:rgba(240,173,78,0.08);border:1px solid rgba(240,173,78,0.25);border-radius:6px;padding:0.75rem 1rem;margin-bottom:0.75rem;box-sizing:border-box";
+
               var label = document.createElement("label");
-              label.style.cssText = "display:flex;align-items:start;gap:0.5rem;font-size:0.85rem;color:var(--crow-text-secondary);cursor:pointer;margin:0.75rem 0";
+              label.style.cssText = "display:flex;align-items:center;gap:0.5rem;font-size:0.85rem;color:var(--crow-text-secondary);cursor:pointer;margin:0";
               var check = document.createElement("input");
               check.type = "checkbox";
               check.id = "delete-data-check";
-              check.style.cssText = "margin-top:0.15rem;flex-shrink:0";
+              check.style.cssText = "flex-shrink:0";
               checkId = check.id;
               label.appendChild(check);
 
               var labelText = document.createElement("span");
-              labelText.style.cssText = "min-width:0";
-              labelText.textContent = "Also delete all stored data (cannot be undone)";
+              labelText.textContent = "Also delete all stored data";
               label.appendChild(labelText);
-              frag.appendChild(label);
+              dataBox.appendChild(label);
+
+              var hint = document.createElement("div");
+              hint.style.cssText = "font-size:0.78rem;color:var(--crow-text-muted);margin-top:0.4rem;padding-left:1.5rem";
+              hint.textContent = "Permanently removes all files stored by this service. Leave unchecked to keep data for a future reinstall.";
+              dataBox.appendChild(hint);
+
+              frag.appendChild(dataBox);
             }
 
             var statusDiv = document.createElement("div");
