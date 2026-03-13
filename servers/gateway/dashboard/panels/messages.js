@@ -42,8 +42,9 @@ export default {
     let messageList;
     if (messages.rows.length === 0) {
       messageList = `<div class="empty-state">
-        <h3>No messages yet</h3>
-        <p>Use <code>crow_send_message</code> to message your Crow contacts.</p>
+        <img src="https://maestro.press/software/crow/icon-sharing.svg" alt="" width="48" height="48">
+        <h3>Your inbox is empty</h3>
+        <p>Messages from friends and shared items will appear here.</p>
       </div>`;
     } else {
       const rows = messages.rows.map((m) => {

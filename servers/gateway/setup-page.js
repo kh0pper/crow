@@ -15,6 +15,7 @@ import { connectedServers } from "./proxy.js";
 import { isPasswordSet, parseCookies } from "./dashboard/auth.js";
 import { INTEGRATIONS } from "./integrations.js";
 import { APP_ROOT, resolveEnvPath, writeEnvVar, removeEnvVar, sanitizeEnvValue } from "./env-manager.js";
+import { CROW_HERO_SVG } from "./dashboard/shared/crow-hero.js";
 
 /**
  * Detect Tailscale hostname and IP if available.
@@ -140,13 +141,13 @@ export async function setupPageHandler(req, res) {
     .status-dot {
       width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
     }
-    .status-dot.green { background: #34c759; }
+    .status-dot.green { background: #22c55e; }
     .status-dot.red { background: #ff3b30; }
     .status-dot.gray { background: #c7c7cc; }
     .status-dot.yellow { background: #ff9f0a; }
     .card-name { font-weight: 600; font-size: 16px; }
     .card-desc { color: #86868b; font-size: 13px; margin-top: 2px; }
-    .card-tools { color: #34c759; font-size: 13px; font-weight: 500; }
+    .card-tools { color: #22c55e; font-size: 13px; font-weight: 500; }
     .card-error { color: #ff3b30; font-size: 13px; margin-top: 4px; }
     .card-env {
       margin-top: 8px; padding-top: 8px; border-top: 1px solid #f0f0f0;
@@ -157,7 +158,7 @@ export async function setupPageHandler(req, res) {
       padding: 2px 6px; border-radius: 4px; font-size: 12px;
     }
     .key-link {
-      display: inline-block; margin-top: 6px; color: #007aff;
+      display: inline-block; margin-top: 6px; color: #6366f1;
       text-decoration: none; font-size: 13px;
     }
     .key-link:hover { text-decoration: underline; }
@@ -169,10 +170,10 @@ export async function setupPageHandler(req, res) {
     .instructions li { margin-bottom: 8px; }
     .render-link {
       display: inline-block; margin-top: 12px; padding: 10px 20px;
-      background: #007aff; color: white; border-radius: 8px;
+      background: #6366f1; color: white; border-radius: 8px;
       text-decoration: none; font-weight: 500; font-size: 14px;
     }
-    .render-link:hover { background: #0056b3; }
+    .render-link:hover { background: #4f46e5; }
     .connector-url {
       background: #f5f5f7; padding: 10px 14px; border-radius: 8px;
       font-family: 'SF Mono', Menlo, monospace; font-size: 13px;
@@ -188,7 +189,7 @@ export async function setupPageHandler(req, res) {
     }
     .stat-number { font-size: 28px; font-weight: 700; }
     .stat-label { font-size: 12px; color: #86868b; margin-top: 2px; }
-    .stat-number.green { color: #34c759; }
+    .stat-number.green { color: #22c55e; }
     .stat-number.gray { color: #86868b; }
     .integration-card .card-header { cursor: pointer; user-select: none; }
     .integration-card .chevron { margin-left: auto; transition: transform 0.2s; font-size: 18px; color: #86868b; }
@@ -198,17 +199,17 @@ export async function setupPageHandler(req, res) {
     .field label { display: block; font-size: 12px; font-weight: 600; color: #86868b; margin-bottom: 4px; font-family: 'SF Mono', Menlo, monospace; }
     .field input { width: 100%; padding: 8px 12px; border: 1px solid #d2d2d7; border-radius: 8px; font-size: 14px; }
     .card-links { font-size: 13px; margin-bottom: 12px; }
-    .card-links a { color: #007aff; text-decoration: none; }
+    .card-links a { color: #6366f1; text-decoration: none; }
     .card-links a:hover { text-decoration: underline; }
     .card-actions { display: flex; gap: 8px; }
     .card-actions button { padding: 8px 16px; border: none; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; }
-    .card-actions .btn-save { background: #007aff; color: white; }
-    .card-actions .btn-save:hover { background: #0056b3; }
+    .card-actions .btn-save { background: #6366f1; color: white; }
+    .card-actions .btn-save:hover { background: #4f46e5; }
     .card-actions .btn-remove { background: #f5f5f7; color: #ff3b30; }
     .card-actions .btn-remove:hover { background: #fee; }
     .category-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #86868b; margin: 16px 0 8px; }
     .requires-note { color: #ff9f0a; font-size: 13px; padding: 8px 0; }
-    #restart-banner { position: fixed; top: 0; left: 0; right: 0; background: #34c759; color: white; padding: 12px; text-align: center; font-weight: 500; z-index: 1000; }
+    #restart-banner { position: fixed; top: 0; left: 0; right: 0; background: #22c55e; color: white; padding: 12px; text-align: center; font-weight: 500; z-index: 1000; }
   </style>
 </head>
 <body>
@@ -216,6 +217,7 @@ export async function setupPageHandler(req, res) {
     Keys saved! Restarting gateway...
     <span id="restart-status">Waiting for restart...</span>
   </div>
+  <div style="text-align:center;margin-bottom:8px"><div style="width:80px;height:80px;margin:0 auto">${CROW_HERO_SVG}</div></div>
   <h1>Crow Setup</h1>
   <p class="subtitle">Integration status for your Crow instance</p>
 
@@ -243,7 +245,7 @@ export async function setupPageHandler(req, res) {
     return `
   <div class="section">
     <div class="section-title">Context Usage</div>
-    <div class="card" style="border-left: 3px solid ${showWarning ? "#ff9f0a" : "#34c759"}">
+    <div class="card" style="border-left: 3px solid ${showWarning ? "#ff9f0a" : "#22c55e"}">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
         <div>
           <div class="card-name">${totalTools} tools loaded</div>
@@ -270,7 +272,7 @@ export async function setupPageHandler(req, res) {
           style="flex:1;min-width:160px;padding:10px 14px;border:1px solid #d2d2d7;border-radius:8px;font-size:14px">
         <input type="password" name="confirm" placeholder="Confirm password" required minlength="6"
           style="flex:1;min-width:160px;padding:10px 14px;border:1px solid #d2d2d7;border-radius:8px;font-size:14px">
-        <button type="submit" style="padding:10px 20px;background:#007aff;color:white;border:none;border-radius:8px;font-weight:500;font-size:14px;cursor:pointer">Set Password</button>
+        <button type="submit" style="padding:10px 20px;background:#6366f1;color:white;border:none;border-radius:8px;font-weight:500;font-size:14px;cursor:pointer">Set Password</button>
       </form>
     </div>
   </div>` : ""}
@@ -309,7 +311,7 @@ export async function setupPageHandler(req, res) {
       // State 1: Tailscale connected, hostname is "crow" — ideal
       if (tailscale?.ip && tailscale.hostname === "crow") {
         return `
-    <div class="card" style="border-left: 3px solid #34c759">
+    <div class="card" style="border-left: 3px solid #22c55e">
       <div class="card-header">
         <span class="status-dot green"></span>
         <div>
@@ -389,14 +391,14 @@ export async function setupPageHandler(req, res) {
       </div>
       <div style="margin-top:12px;padding-top:12px;border-top:1px solid #f0f0f0">
         <p style="font-size:13px;margin-bottom:12px">
-          <a href="https://tailscale.com" target="_blank" style="color:#007aff;text-decoration:none;font-weight:500">Tailscale</a>
+          <a href="https://tailscale.com" target="_blank" style="color:#6366f1;text-decoration:none;font-weight:500">Tailscale</a>
           creates a private network between your devices. Once set up, you can reach Crow at
           <strong>http://crow/</strong> from any device &mdash; no port forwarding, no public exposure.
         </p>
 
         <div style="font-size:14px;font-weight:600;margin-bottom:8px">1. Create a free account</div>
         <p style="font-size:13px;color:#86868b;margin-bottom:12px">
-          Sign up at <a href="https://tailscale.com" target="_blank" style="color:#007aff;text-decoration:none">tailscale.com</a> (free for up to 100 devices).
+          Sign up at <a href="https://tailscale.com" target="_blank" style="color:#6366f1;text-decoration:none">tailscale.com</a> (free for up to 100 devices).
         </p>
 
         <div style="font-size:14px;font-weight:600;margin-bottom:8px">2. Install on this server</div>
@@ -411,7 +413,7 @@ export async function setupPageHandler(req, res) {
         <div style="font-size:14px;font-weight:600;margin-bottom:8px">4. Install on your other devices</div>
         <p style="font-size:13px;color:#86868b;margin-bottom:4px">
           Install Tailscale on your phone, laptop, or tablet from
-          <a href="https://tailscale.com/download" target="_blank" style="color:#007aff;text-decoration:none">tailscale.com/download</a>
+          <a href="https://tailscale.com/download" target="_blank" style="color:#6366f1;text-decoration:none">tailscale.com/download</a>
           and sign in with the same account.
         </p>
         <p style="font-size:13px;margin-top:12px">
