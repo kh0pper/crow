@@ -128,7 +128,6 @@ header("Setup Complete");
 
 // Detect deployment type
 const isTurso = !!process.env.TURSO_DATABASE_URL;
-const home = process.env.HOME || process.env.USERPROFILE || "";
 const isCrowOS = home && existsSync(resolve(home, ".crow", "app", "package.json"));
 const isGateway = isTurso || isCrowOS;
 
