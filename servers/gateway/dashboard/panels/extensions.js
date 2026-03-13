@@ -7,6 +7,7 @@
  */
 
 import { escapeHtml, statCard, statGrid, section, badge, formatDate } from "../shared/components.js";
+import { getAddonLogo } from "../shared/logos.js";
 import { existsSync, readFileSync } from "fs";
 import { execFileSync } from "child_process";
 import { join, dirname } from "path";
@@ -165,7 +166,7 @@ export default {
       const cards = Object.entries(installed).map(([id, info], i) => {
         const registryEntry = available.find((a) => a.id === id);
         const name = registryEntry?.name || id;
-        const icon = ICON_MAP[registryEntry?.icon] || "";
+        const logoHtml = getAddonLogo(id, 32) || `<span style="font-size:1.5rem">${ICON_MAP[registryEntry?.icon] || ""}</span>`;
         const status = bundleStatus[id];
         const isDocker = !!status;
         const isRunning = status?.running;
@@ -188,14 +189,15 @@ export default {
         actions += `<button class="btn btn-sm bundle-uninstall" style="color:var(--crow-text-muted);border-color:var(--crow-border)" data-id="${escapeHtml(id)}" data-name="${escapeHtml(name)}" data-docker="${isDocker}">Remove</button>`;
 
         return `<div class="card" style="animation-delay:${i * 50}ms;margin-bottom:0.75rem">
-          <div style="display:flex;justify-content:space-between;align-items:start">
-            <div>
-              <h4 style="font-family:'Fraunces',serif;font-size:1rem;margin-bottom:0.25rem">${icon ? icon + " " : ""}${escapeHtml(name)}</h4>
+          <div style="display:flex;align-items:flex-start;gap:1rem">
+            <div style="flex-shrink:0">${logoHtml}</div>
+            <div style="flex:1;min-width:0">
+              <h4 style="font-family:'Fraunces',serif;font-size:1rem;margin-bottom:0.25rem">${escapeHtml(name)}</h4>
               <div style="font-size:0.8rem;color:var(--crow-text-muted);font-family:'JetBrains Mono',monospace">
                 ${statusBadge} v${escapeHtml(info.version || registryEntry?.version || "?")} · installed ${formatDate(info.installed_at || info.installedAt)}
               </div>
             </div>
-            <div style="display:flex;gap:0.5rem;align-items:center">
+            <div style="display:flex;gap:0.5rem;align-items:center;flex-shrink:0">
               ${actions}
             </div>
           </div>
@@ -213,7 +215,7 @@ export default {
       const cards = available.map((addon, i) => {
         const isInstalled = installed[addon.id];
         const typeBadge = badge(addon.type, "draft");
-        const icon = ICON_MAP[addon.icon] || "";
+        const logoHtml = getAddonLogo(addon.id, 32) || `<span style="font-size:1.5rem">${ICON_MAP[addon.icon] || ""}</span>`;
         const tags = (addon.tags || []).slice(0, 4).map((t) =>
           `<span style="font-size:0.7rem;color:var(--crow-accent);background:var(--crow-accent-muted);padding:0.1rem 0.4rem;border-radius:4px;margin-right:0.25rem">${escapeHtml(t)}</span>`
         ).join("");
@@ -237,26 +239,28 @@ export default {
           installButton = `<button class="btn btn-sm btn-primary bundle-install" data-id="${escapeHtml(addon.id)}" data-name="${escapeHtml(addon.name)}" data-envvars="${envVarsAttr}" data-minram="${minRam}" data-mindisk="${minDisk}">Install</button>`;
         }
 
-        return `<div class="card" style="animation-delay:${(i + installedCount) * 50}ms">
-          <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:0.5rem">
-            <h4 style="font-family:'Fraunces',serif;font-size:1rem">${icon ? icon + " " : ""}${escapeHtml(addon.name)}</h4>
-            <div style="display:flex;gap:0.25rem;align-items:center">${installButton} ${typeBadge}</div>
-          </div>
-          <p style="color:var(--crow-text-secondary);font-size:0.9rem;margin-bottom:0.5rem">${escapeHtml(addon.description)}</p>
-          <div style="display:flex;flex-wrap:wrap;gap:0.25rem;margin-bottom:0.4rem">${tags}</div>
-          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem">
-            <div style="display:flex;gap:0.75rem;align-items:center">
-              ${resources}
-              ${envNote}
+        return `<div class="card addon-card" style="animation-delay:${(i + installedCount) * 50}ms;transition:transform 0.15s,border-color 0.15s">
+          <div style="display:flex;align-items:flex-start;gap:1rem">
+            <div style="flex-shrink:0">${logoHtml}</div>
+            <div style="flex:1;min-width:0">
+              <h4 style="font-family:'Fraunces',serif;font-size:1rem;margin-bottom:0.25rem">${escapeHtml(addon.name)}</h4>
+              <p style="color:var(--crow-text-secondary);font-size:0.9rem;margin-bottom:0.4rem">${escapeHtml(addon.description)}</p>
+              <div style="display:flex;flex-wrap:wrap;gap:0.25rem;align-items:center">
+                ${typeBadge}
+                ${tags}
+              </div>
+              <div style="display:flex;gap:0.75rem;align-items:center;margin-top:0.4rem;flex-wrap:wrap">
+                ${resources}
+                ${envNote}
+                <span style="font-size:0.75rem;color:var(--crow-text-muted);font-family:'JetBrains Mono',monospace">v${escapeHtml(addon.version || "1.0.0")} · ${escapeHtml(addon.author || "community")}</span>
+              </div>
+              ${notes}
             </div>
-            <div style="font-size:0.75rem;color:var(--crow-text-muted);font-family:'JetBrains Mono',monospace">
-              v${escapeHtml(addon.version || "1.0.0")} · ${escapeHtml(addon.author || "community")}
-            </div>
+            <div style="flex-shrink:0">${installButton}</div>
           </div>
-          ${notes}
         </div>`;
       }).join("");
-      availableHtml = `<div class="card-grid">${cards}</div>`;
+      availableHtml = `<style>.addon-card:hover { transform: translateY(-2px); border-color: var(--crow-accent); }</style><div class="card-grid">${cards}</div>`;
     }
 
     const sourceNote = registrySource === "local"
