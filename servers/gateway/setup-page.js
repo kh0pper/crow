@@ -265,9 +265,11 @@ export async function setupPageHandler(req, res) {
     <div class="section-title">Step 1: Set Crow's Nest Password</div>
     <div class="instructions">
       <p style="margin-bottom:12px">Protect your Crow's Nest with a password. This is required before you can access the control panel.</p>
-      <form method="POST" action="/dashboard/setup-password" style="display:flex;gap:8px;flex-wrap:wrap">
-        <input type="password" name="password" placeholder="Choose a password" required minlength="8"
-          style="flex:1;min-width:200px;padding:10px 14px;border:1px solid #d2d2d7;border-radius:8px;font-size:14px">
+      <form method="POST" action="/dashboard/login" style="display:flex;gap:8px;flex-wrap:wrap;align-items:start">
+        <input type="password" name="password" placeholder="Choose a password" required minlength="6"
+          style="flex:1;min-width:160px;padding:10px 14px;border:1px solid #d2d2d7;border-radius:8px;font-size:14px">
+        <input type="password" name="confirm" placeholder="Confirm password" required minlength="6"
+          style="flex:1;min-width:160px;padding:10px 14px;border:1px solid #d2d2d7;border-radius:8px;font-size:14px">
         <button type="submit" style="padding:10px 20px;background:#007aff;color:white;border:none;border-radius:8px;font-weight:500;font-size:14px;cursor:pointer">Set Password</button>
       </form>
     </div>
