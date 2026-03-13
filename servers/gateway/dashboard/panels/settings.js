@@ -575,9 +575,45 @@ function pollHealth(attempts) {
       statCard("Posts", postCount.rows[0]?.c || 0, { delay: 150 }),
     ]);
 
+    // Connection URLs
+    const gatewayUrl = process.env.CROW_GATEWAY_URL || "";
+    const tailscaleIp = process.env.TAILSCALE_IP || "";
+    const localUrl = `http://localhost:${process.env.PORT || process.env.CROW_GATEWAY_PORT || 3001}`;
+    const requestUrl = `${req.protocol}://${req.get("host")}`;
+
+    let urlRows = [];
+    urlRows.push([
+      "Local",
+      `<code style="font-size:0.85rem;word-break:break-all">${escapeHtml(localUrl)}</code>`,
+      badge("always", "connected"),
+    ]);
+    if (requestUrl !== localUrl) {
+      urlRows.push([
+        "Tailnet / LAN",
+        `<code style="font-size:0.85rem;word-break:break-all">${escapeHtml(requestUrl)}</code>`,
+        badge("active", "connected"),
+      ]);
+    }
+    if (gatewayUrl) {
+      urlRows.push([
+        "Public (blog only)",
+        `<a href="${escapeHtml(gatewayUrl)}/blog/" target="_blank" style="font-size:0.85rem;word-break:break-all">${escapeHtml(gatewayUrl)}/blog/</a>`,
+        badge("live", "published"),
+      ]);
+    }
+    urlRows.push([
+      "Setup Page",
+      `<a href="/setup" target="_blank" style="font-size:0.85rem">/setup</a>`,
+      `<span style="color:var(--crow-text-muted);font-size:0.85rem">MCP endpoints &amp; API keys</span>`,
+    ]);
+
+    const connectionHtml = dataTable(["Context", "URL", "Status"], urlRows)
+      + `<p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.75rem">The Crow's Nest is private (local/Tailscale only). Set <code>CROW_GATEWAY_URL</code> in .env for public blog/podcast URLs.</p>`;
+
     const content = `
       ${successMsg}${errorMsg}
       ${stats}
+      ${section("Connection URLs", connectionHtml, { delay: 25 })}
       ${section("Updates", updateHtml, { delay: 50 })}
       ${section("Integrations", integrationsHtml, { delay: 100 })}
       ${section("Identity", identityHtml, { delay: 200 })}
