@@ -17,7 +17,7 @@ export default {
       const { action } = req.body;
 
       if (action === "create") {
-        const { title, content, tags, visibility } = req.body;
+        const { title, content, tags, visibility, cover_image_key } = req.body;
         if (!title || !content) {
           return layout({
             title: "Blog",
@@ -26,8 +26,8 @@ export default {
         }
         const slug = title.toLowerCase().replace(/[^a-z0-9\s-]/g, "").replace(/\s+/g, "-").slice(0, 80);
         await db.execute({
-          sql: "INSERT INTO blog_posts (slug, title, content, visibility, tags) VALUES (?, ?, ?, ?, ?)",
-          args: [slug, title, content, visibility || "private", tags || null],
+          sql: "INSERT INTO blog_posts (slug, title, content, visibility, tags, cover_image_key) VALUES (?, ?, ?, ?, ?, ?)",
+          args: [slug, title, content, visibility || "private", tags || null, cover_image_key || null],
         });
         res.redirect("/dashboard/blog");
         return;
@@ -71,7 +71,7 @@ export default {
 
     // Post list
     const posts = await db.execute({
-      sql: "SELECT id, slug, title, status, visibility, tags, published_at, created_at FROM blog_posts ORDER BY created_at DESC LIMIT 50",
+      sql: "SELECT id, slug, title, status, visibility, tags, published_at, created_at, cover_image_key FROM blog_posts ORDER BY created_at DESC LIMIT 50",
       args: [],
     });
 
@@ -87,8 +87,11 @@ export default {
           : `<form method="POST" style="display:inline"><input type="hidden" name="action" value="publish"><input type="hidden" name="id" value="${p.id}"><button class="btn btn-sm btn-primary" type="submit">Publish</button></form>`;
         const deleteBtn = `<form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('Delete this post?')"><input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="${p.id}"><button class="btn btn-sm btn-danger" type="submit">Delete</button></form>`;
 
+        const thumb = p.cover_image_key
+          ? `<img src="/blog/media/${escapeHtml(p.cover_image_key)}" style="width:40px;height:40px;object-fit:cover;border-radius:4px;vertical-align:middle;margin-right:0.5rem">`
+          : "";
         return [
-          `${escapeHtml(p.title)}`,
+          `${thumb}${escapeHtml(p.title)}`,
           `${statusBadge}${visBadge}`,
           `<span class="mono">${escapeHtml(p.slug)}</span>`,
           `<span class="mono">${formatDate(p.published_at || p.created_at)}</span>`,
@@ -99,8 +102,9 @@ export default {
     }
 
     // Create form
-    const createForm = `<form method="POST">
+    const createForm = `<form method="POST" id="create-post-form">
       <input type="hidden" name="action" value="create">
+      <input type="hidden" name="cover_image_key" id="cover-image-key">
       ${formField("Title", "title", { required: true, placeholder: "Post title" })}
       ${formField("Content", "content", { type: "textarea", required: true, placeholder: "Write in Markdown...", rows: 8 })}
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
@@ -111,6 +115,13 @@ export default {
           { value: "peers", label: "Peers Only" },
         ]})}
       </div>
+      <div style="margin-top:1rem">
+        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.05em">Cover Image</label>
+        <input type="file" name="cover_image" accept="image/*" id="cover-image-input" style="padding:0.4rem">
+        <div id="cover-preview" style="margin-top:0.5rem;display:none">
+          <img id="cover-preview-img" style="max-height:150px;border-radius:8px;border:1px solid var(--crow-border)">
+        </div>
+      </div>
       <button type="submit" class="btn btn-primary">Create Draft</button>
     </form>`;
 
@@ -118,6 +129,71 @@ export default {
       ${stats}
       ${section("Posts", postTable, { delay: 150 })}
       ${section("New Post", createForm, { delay: 200 })}
+      <script>
+      (function() {
+        var fileInput = document.getElementById('cover-image-input');
+        var preview = document.getElementById('cover-preview');
+        var previewImg = document.getElementById('cover-preview-img');
+        var keyInput = document.getElementById('cover-image-key');
+        var form = document.getElementById('create-post-form');
+
+        if (fileInput) {
+          fileInput.addEventListener('change', function() {
+            if (this.files && this.files[0]) {
+              var reader = new FileReader();
+              reader.onload = function(e) {
+                previewImg.src = e.target.result;
+                preview.style.display = 'block';
+              };
+              reader.readAsDataURL(this.files[0]);
+            } else {
+              preview.style.display = 'none';
+            }
+          });
+        }
+
+        if (form) {
+          form.addEventListener('submit', async function(e) {
+            if (!fileInput || !fileInput.files || !fileInput.files[0]) return;
+
+            e.preventDefault();
+            var submitBtn = form.querySelector('button[type="submit"]');
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Uploading image...';
+
+            try {
+              var formData = new FormData();
+              formData.append('file', fileInput.files[0]);
+              formData.append('reference_type', 'blog_post');
+
+              var res = await fetch('/storage/upload', {
+                method: 'POST',
+                body: formData,
+              });
+
+              if (!res.ok) {
+                var err = await res.json().catch(function() { return {}; });
+                alert('Image upload failed: ' + (err.error || 'Unknown error'));
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Create Draft';
+                return;
+              }
+
+              var data = await res.json();
+              keyInput.value = data.key;
+
+              fileInput.disabled = true;
+              submitBtn.textContent = 'Creating post...';
+              form.submit();
+            } catch (err) {
+              alert('Upload error: ' + err.message);
+              submitBtn.disabled = false;
+              submitBtn.textContent = 'Create Draft';
+            }
+          });
+        }
+      })();
+      <\/script>
     `;
 
     return layout({ title: "Blog", content });

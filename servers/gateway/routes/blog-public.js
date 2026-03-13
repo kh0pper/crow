@@ -16,6 +16,7 @@ import { createDbClient, escapeLikePattern } from "../../db.js";
 import { renderMarkdown } from "../../blog/renderer.js";
 import { generateRss, generateAtom } from "../../blog/rss.js";
 import { generatePodcastFeed } from "../../blog/podcast-rss.js";
+import { isAvailable, getObject } from "../../storage/s3-client.js";
 
 /**
  * Get blog settings from dashboard_settings table.
@@ -359,7 +360,11 @@ export default function blogPublicRouter() {
           const tagsHtml = tags.length > 0
             ? `<div class="tags">${tags.map((t) => `<a href="/blog/tag/${encodeURIComponent(t)}">${escapeHtml(t)}</a>`).join("")}</div>`
             : "";
+          const coverHtml = p.cover_image_key
+            ? `<img src="/blog/media/${encodeURIComponent(p.cover_image_key)}" alt="" loading="lazy" style="width:100%;height:200px;object-fit:cover;border-radius:8px 8px 0 0;margin:-1.5rem -1.5rem 1rem;width:calc(100% + 3rem)">`
+            : "";
           return `<article class="post-card" style="animation-delay: ${i * 50}ms">
+  ${coverHtml}
   <h2><a href="/blog/${escapeHtml(p.slug)}">${escapeHtml(p.title)}</a></h2>
   <div class="meta"><span class="date">${formatDate(p.published_at)}</span>${p.author ? ` · ${escapeHtml(p.author)}` : ""}</div>
   <p class="excerpt">${escapeHtml(p.excerpt || "")}</p>
@@ -606,6 +611,46 @@ export default function blogPublicRouter() {
     }
   });
 
+  // GET /blog/media/:key — Public media files linked to blog posts
+  router.get("/blog/media/:key(*)", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const s3Key = req.params.key;
+
+      // Security: only serve files linked to published public blog posts
+      const allowed = await db.execute({
+        sql: `SELECT sf.mime_type FROM storage_files sf
+              WHERE sf.s3_key = ? AND sf.reference_type = 'blog_post'
+              UNION
+              SELECT sf2.mime_type FROM blog_posts bp
+              JOIN storage_files sf2 ON sf2.s3_key = bp.cover_image_key
+              WHERE bp.cover_image_key = ? AND bp.status = 'published' AND bp.visibility = 'public'`,
+        args: [s3Key, s3Key],
+      });
+
+      if (allowed.rows.length === 0) {
+        return res.status(404).send("Not found");
+      }
+
+      if (!(await isAvailable())) {
+        return res.status(503).send("Storage unavailable");
+      }
+
+      const { stream, stat } = await getObject(s3Key);
+      const contentType = allowed.rows[0].mime_type || stat.metaData?.["content-type"] || "application/octet-stream";
+
+      res.set("Content-Type", contentType);
+      res.set("Content-Length", String(stat.size));
+      res.set("Cache-Control", "public, max-age=86400");
+      stream.pipe(res);
+    } catch (err) {
+      console.error("[blog] Media error:", err);
+      res.status(404).send("Not found");
+    } finally {
+      db.close();
+    }
+  });
+
   // GET /blog/:slug — Single post (must be last to avoid matching feed/tag routes)
   router.get("/blog/:slug", async (req, res) => {
     const db = createDbClient();
@@ -633,16 +678,24 @@ export default function blogPublicRouter() {
         ? `<div class="tags" style="margin-top:0.5rem">${tags.map((t) => `<a href="/blog/tag/${encodeURIComponent(t)}">${escapeHtml(t)}</a>`).join(" ")}</div>`
         : "";
 
+      const coverHtml = post.cover_image_key
+        ? `<figure style="margin:-0.5rem 0 2rem"><img src="/blog/media/${encodeURIComponent(post.cover_image_key)}" alt="${escapeHtml(post.title)}" style="width:100%;border-radius:12px;max-height:400px;object-fit:cover"></figure>`
+        : "";
+
       const siteUrl = process.env.CROW_GATEWAY_URL || "";
+      const ogImage = post.cover_image_key
+        ? `\n  <meta property="og:image" content="${siteUrl}/blog/media/${encodeURIComponent(post.cover_image_key)}">`
+        : "";
       const ogMeta = `
   <meta property="og:title" content="${escapeHtml(post.title)}">
   <meta property="og:description" content="${escapeHtml(post.excerpt || "")}">
   <meta property="og:type" content="article">
   <meta property="og:url" content="${siteUrl}/blog/${escapeHtml(post.slug)}">
-  <meta name="author" content="${escapeHtml(post.author || settings.author || "")}">`;
+  <meta name="author" content="${escapeHtml(post.author || settings.author || "")}">${ogImage}`;
 
       const content = `<article class="post-single">
   <h1>${escapeHtml(post.title)}</h1>
+  ${coverHtml}
   <div class="meta">
     <span class="date">${formatDate(post.published_at)}</span>${post.author ? ` · ${escapeHtml(post.author)}` : ""}
     ${tagsHtml}

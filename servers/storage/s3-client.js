@@ -116,6 +116,22 @@ export async function getPresignedUploadUrl(key, opts = {}) {
 }
 
 /**
+ * Get an object as a readable stream.
+ * @param {string} key
+ * @param {object} [opts]
+ * @param {string} [opts.bucket]
+ * @returns {Promise<{stream: ReadableStream, stat: {size: number, metaData: object}}>}
+ */
+export async function getObject(key, opts = {}) {
+  const client = getClient();
+  if (!client) throw new Error("Storage not configured");
+  const bucket = opts.bucket || DEFAULT_BUCKET;
+  const stat = await client.statObject(bucket, key);
+  const stream = await client.getObject(bucket, key);
+  return { stream, stat };
+}
+
+/**
  * Delete an object from S3.
  * @param {string} key
  * @param {string} [bucket]
