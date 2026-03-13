@@ -31,7 +31,9 @@ const PANELS_DIR = join(CROW_HOME, "panels");
 const MCP_ADDONS_PATH = join(CROW_HOME, "mcp-addons.json");
 const PANELS_CONFIG_PATH = join(CROW_HOME, "panels.json");
 const INSTALLED_PATH = join(CROW_HOME, "installed.json");
-const APP_BUNDLES = resolve(__dirname, "../../../bundles");
+const APP_ROOT = resolve(__dirname, "../../..");
+const APP_BUNDLES = join(APP_ROOT, "bundles");
+const APP_ENV_PATH = join(APP_ROOT, ".env");
 
 // In-memory job tracking (simple — no DB table needed for MVP)
 const jobs = new Map();
@@ -120,6 +122,57 @@ function writeJsonSafe(path, data) {
 /** Validate bundle ID format (alphanumeric + hyphens only) */
 function isValidBundleId(id) {
   return /^[a-z0-9][a-z0-9-]*$/.test(id) && id.length <= 64;
+}
+
+/**
+ * Propagate env vars from a bundle install to the gateway's .env file.
+ * Uncomments and sets values for vars that are already present as comments,
+ * or appends them if not found.
+ */
+function propagateEnvToGateway(envVars) {
+  if (!envVars || typeof envVars !== "object" || Object.keys(envVars).length === 0) return;
+  if (!existsSync(APP_ENV_PATH)) return;
+
+  let content = readFileSync(APP_ENV_PATH, "utf8");
+
+  for (const [key, value] of Object.entries(envVars)) {
+    if (value === undefined || value === "") continue;
+    // Match commented-out or existing lines like: # KEY=value or KEY=value
+    const pattern = new RegExp(`^(#\\s*)?${key}=.*$`, "m");
+    if (pattern.test(content)) {
+      content = content.replace(pattern, `${key}=${value}`);
+    } else {
+      // Append if not found at all
+      content = content.trimEnd() + `\n${key}=${value}\n`;
+    }
+  }
+
+  writeFileSync(APP_ENV_PATH, content);
+}
+
+/**
+ * Schedule a graceful gateway restart so new env vars take effect.
+ * Uses the same pattern as auto-update: exit with code 1 so systemd restarts.
+ * For non-systemd, just sets process.env so the storage server can reinitialize.
+ */
+function scheduleGatewayRestart(delayMs = 2000) {
+  if (process.env.INVOCATION_ID) {
+    // Running as systemd service — exit to trigger restart
+    console.log("[bundles] Restarting gateway to apply new configuration...");
+    setTimeout(() => process.exit(1), delayMs);
+  } else {
+    // Not systemd — reload env vars into current process
+    try {
+      const envContent = readFileSync(APP_ENV_PATH, "utf8");
+      for (const line of envContent.split("\n")) {
+        const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+        if (match && !match[1].startsWith("#")) {
+          process.env[match[1]] = match[2];
+        }
+      }
+      console.log("[bundles] Reloaded env vars into current process");
+    } catch {}
+  }
 }
 
 /**
@@ -218,8 +271,9 @@ export default function bundlesRouter() {
         }
 
         // 3. Type-specific install steps
+        let needsRestart = false;
         if (addonType === "bundle") {
-          // Docker bundle — pull images
+          // Docker bundle — pull images and start containers
           const composePath = join(destDir, "docker-compose.yml");
           if (existsSync(composePath)) {
             appendLog(job, "Pulling Docker images...");
@@ -229,6 +283,22 @@ export default function bundlesRouter() {
             } catch (err) {
               appendLog(job, `Warning: docker compose pull failed: ${err.message}`);
             }
+
+            // Start containers
+            appendLog(job, "Starting containers...");
+            try {
+              await run("docker", ["compose", "up", "-d"], { cwd: destDir });
+              appendLog(job, "Containers started");
+            } catch (err) {
+              appendLog(job, `Warning: docker compose up failed: ${err.message}`);
+            }
+          }
+
+          // Propagate env vars to gateway .env so dependent services connect
+          if (env_vars && Object.keys(env_vars).length > 0) {
+            propagateEnvToGateway(env_vars);
+            appendLog(job, "Configuration applied to gateway");
+            needsRestart = true;
           }
         } else if (addonType === "mcp-server") {
           // MCP server — register in mcp-addons.json
@@ -303,6 +373,12 @@ export default function bundlesRouter() {
         appendLog(job, "Installation tracked");
 
         finishJob(job, "complete");
+
+        // 6. Restart gateway if bundle env vars were propagated
+        if (needsRestart) {
+          appendLog(job, "Restarting gateway to apply configuration...");
+          scheduleGatewayRestart(2000);
+        }
       } catch (err) {
         appendLog(job, `Error: ${err.message}`);
         finishJob(job, "failed");
