@@ -146,9 +146,9 @@ function dashboardCss() {
     --crow-text-primary: #fafaf9;
     --crow-text-secondary: #a8a29e;
     --crow-text-muted: #78716c;
-    --crow-accent: #f59e0b;
-    --crow-accent-hover: #fbbf24;
-    --crow-accent-muted: #92400e;
+    --crow-accent: #94a3b8;
+    --crow-accent-hover: #cbd5e1;
+    --crow-accent-muted: #334155;
     --crow-success: #22c55e;
     --crow-error: #ef4444;
     --crow-info: #38bdf8;
@@ -162,9 +162,9 @@ function dashboardCss() {
     --crow-text-primary: #1c1917;
     --crow-text-secondary: #57534e;
     --crow-text-muted: #a8a29e;
-    --crow-accent: #b45309;
-    --crow-accent-hover: #92400e;
-    --crow-accent-muted: #fef3c7;
+    --crow-accent: #475569;
+    --crow-accent-hover: #334155;
+    --crow-accent-muted: #e2e8f0;
   }
 
   body {
