@@ -9,9 +9,33 @@
  * No auth required — doesn't expose secrets, just shows which vars are set.
  */
 
+import { execFileSync } from "node:child_process";
 import { getProxyStatus } from "./proxy.js";
 import { connectedServers } from "./proxy.js";
 import { isPasswordSet } from "./dashboard/auth.js";
+
+/**
+ * Detect Tailscale hostname and IP if available.
+ * Returns { hostname, ip } or null if Tailscale is not running.
+ */
+function detectTailscale() {
+  try {
+    const json = execFileSync("tailscale", ["status", "--json"], {
+      timeout: 3000,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const status = JSON.parse(json);
+    const self = status.Self;
+    if (!self) return null;
+
+    const hostname = self.HostName || null;
+    const ip = self.TailscaleIPs?.[0] || null;
+    return { hostname, ip };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Express handler for GET /setup
@@ -38,6 +62,9 @@ export async function setupPageHandler(req, res) {
   const pending = integrations.filter(
     (i) => i.configured && i.status !== "connected" && i.status !== "error"
   );
+
+  // Detect Tailscale for access URL display
+  const tailscale = detectTailscale();
 
   const gatewayUrl = process.env.RENDER_EXTERNAL_URL || process.env.CROW_GATEWAY_URL || "";
   const isRender = !!process.env.RENDER_EXTERNAL_URL || !!process.env.RENDER_SERVICE_ID;
@@ -211,6 +238,25 @@ export async function setupPageHandler(req, res) {
           <div class="card-name">${crowId}</div>
           <div class="card-desc">Your Crow ID — share this with peers to connect</div>
         </div>
+      </div>
+    </div>
+  </div>` : ""}
+
+  ${tailscale ? `
+  <div class="section">
+    <div class="section-title">${isCrowOS ? "Step 3: Network Access" : "Network Access"}</div>
+    <div class="card">
+      <div class="card-header">
+        <span class="status-dot green"></span>
+        <div>
+          <div class="card-name">Tailscale Connected</div>
+          <div class="card-desc">Access your Crow's Nest from any device on your Tailnet</div>
+        </div>
+      </div>
+      <div class="card-env">
+        ${tailscale.hostname ? `<strong>Crow's Nest:</strong> <span class="env-var">http://${tailscale.hostname}:3001/dashboard</span><br>` : ""}
+        ${tailscale.ip ? `<strong>Tailscale IP:</strong> <span class="env-var">http://${tailscale.ip}:3001/dashboard</span><br>` : ""}
+        ${tailscale.hostname ? `<strong>Blog:</strong> <span class="env-var">http://${tailscale.hostname}:3001/blog</span>` : ""}
       </div>
     </div>
   </div>` : ""}
