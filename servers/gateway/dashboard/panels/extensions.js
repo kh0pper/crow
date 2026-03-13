@@ -357,7 +357,7 @@ export default {
               warnDiv.textContent = "Checking system resources...";
               frag.appendChild(warnDiv);
               fetch(API + "/status").then(function(r) { return r.json(); }).catch(function() { return null; }).then(function() {
-                // Use /dashboard/health API for resource data
+                // Use /dashboard/nest API for resource data
                 fetch("/api/health").then(function(r) { return r.json(); }).then(function(h) {
                   var warnings = [];
                   if (minRam > 0 && h && h.ram_free_mb && h.ram_free_mb < minRam) {
