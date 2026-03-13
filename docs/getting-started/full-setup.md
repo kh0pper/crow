@@ -8,18 +8,18 @@ title: Full Setup
 Try [managed hosting](./managed-hosting) — $15/mo, no setup required.
 :::
 
-Run the complete Crow platform — gateway, MinIO storage, blog, and dashboard — with a single Docker Compose command.
+Run the complete Crow platform — gateway, MinIO storage, blog, and Crow's Nest — with a single Docker Compose command.
 
 ## What is this?
 
-The full setup profile starts all Crow services together: the MCP gateway, MinIO for file storage, and the dashboard. This is the recommended way to run Crow if you want every feature available.
+The full setup profile starts all Crow services together: the MCP gateway, MinIO for file storage, and the Crow's Nest. This is the recommended way to run Crow if you want every feature available.
 
 ## Why would I want this?
 
 - **Everything at once** — One command to start the full platform
 - **File storage included** — MinIO runs alongside the gateway, no separate setup needed
 - **Blog ready** — Start publishing immediately after setup
-- **Dashboard access** — Visual management from your browser
+- **Crow's Nest access** — Visual management from your browser
 
 ## Prerequisites
 
@@ -51,7 +51,7 @@ MINIO_USE_SSL=false
 STORAGE_QUOTA_MB=1024
 ```
 
-When running inside Docker Compose, set `MINIO_ENDPOINT=minio` (the Docker service name). For local (non-Docker) setups, use `MINIO_ENDPOINT=localhost` instead. Blog settings are managed via the `crow_blog_settings` MCP tool or dashboard — no env vars needed.
+When running inside Docker Compose, set `MINIO_ENDPOINT=minio` (the Docker service name). For local (non-Docker) setups, use `MINIO_ENDPOINT=localhost` instead. Blog settings are managed via the `crow_blog_settings` MCP tool or the Crow's Nest — no env vars needed.
 
 ## Step 3: Start Everything
 
@@ -63,7 +63,7 @@ This starts:
 
 - **Gateway** on port `3001` — MCP server, blog, and API
 - **MinIO** on port `9000` (API) and `9001` (console) — file storage
-- **Dashboard** at `/dashboard` on the gateway
+- **Crow's Nest** at `/dashboard` on the gateway
 
 On first run, Docker downloads images and builds the gateway. Subsequent starts are faster.
 
@@ -82,7 +82,7 @@ This creates the SQLite database with all required tables.
 | Service | URL |
 |---|---|
 | Gateway health check | `http://localhost:3001/health` |
-| Dashboard | `http://localhost:3001/dashboard` |
+| Crow's Nest | `http://localhost:3001/dashboard` |
 | Blog | `http://localhost:3001/blog` |
 | MinIO Console | `http://localhost:9001` |
 
@@ -138,9 +138,9 @@ This deletes all data. Use with caution.
 
 For secure remote access, install Tailscale on the host machine (not inside Docker). See the [Tailscale Setup guide](/getting-started/tailscale-setup).
 
-## Dashboard Password
+## Crow's Nest Password
 
-The first time you visit `/dashboard`, you'll be prompted to set a password. You can also set it from the `/setup` page or by asking your AI: "Set my dashboard password."
+The first time you visit the Crow's Nest (`/dashboard`), you'll be prompted to set a password. You can also set it from the `/setup` page or by asking your AI: "Set my Crow's Nest password."
 
 ## Connect Your AI
 

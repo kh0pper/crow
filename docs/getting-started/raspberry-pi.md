@@ -76,7 +76,7 @@ You'll see a certificate warning because the self-signed cert isn't trusted by b
 :::
 
 The setup wizard walks you through:
-1. **Set dashboard password** — required before accessing the dashboard
+1. **Set Crow's Nest password** — required before accessing the Crow's Nest
 2. **View your Crow ID** — your cryptographic identity for P2P sharing
 3. **Configure integrations** — add API keys for GitHub, Gmail, etc.
 
@@ -127,9 +127,9 @@ crow bundle start ollama
 bash ~/.crow/app/scripts/crow-update.sh
 ```
 
-### Dashboard
+### Crow's Nest
 
-Access the visual dashboard at `https://crow.local/dashboard` — manage messages, blog posts, files, and settings from your browser.
+Access the Crow's Nest at `https://crow.local/dashboard` — manage messages, blog posts, files, and settings from your browser.
 
 ### Installing Add-ons
 
@@ -181,7 +181,7 @@ Once Tailscale is installed, you can use [Tailscale Funnel](https://tailscale.co
 tailscale funnel --bg --https=443 http://localhost:3001
 ```
 
-Your blog is now at `https://<hostname>.your-tailnet.ts.net/blog`. The dashboard remains private — public IPs get a 403 response, so only the blog is effectively visible.
+Your blog is now at `https://<hostname>.your-tailnet.ts.net/blog`. The Crow's Nest remains private — public IPs get a 403 response, so only the blog is effectively visible.
 
 To set the public URL for correct RSS/social preview links:
 

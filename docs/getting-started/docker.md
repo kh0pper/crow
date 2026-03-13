@@ -54,9 +54,9 @@ curl http://localhost:3001/health
 
 Visit `http://localhost:3001/setup` to see integration status and endpoint URLs.
 
-## Dashboard Password
+## Crow's Nest Password
 
-The first time you visit `/dashboard`, you'll be prompted to set a password. You can also set it from the `/setup` page or by asking your AI: "Set my dashboard password."
+The first time you visit `/dashboard`, you'll be prompted to set a password. You can also set it from the `/setup` page or by asking your AI: "Set my Crow's Nest password."
 
 ## Connect Your AI
 

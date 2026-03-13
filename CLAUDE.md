@@ -61,7 +61,7 @@ node servers/gateway/index.js --no-auth  # HTTP gateway without OAuth (blocked i
 
 ## Architecture
 
-This is an MCP (Model Context Protocol) platform. The AI is the primary interface, guided by CLAUDE.md and skill files. The dashboard provides a secondary visual UI.
+This is an MCP (Model Context Protocol) platform. The AI is the primary interface, guided by CLAUDE.md and skill files. The Crow's Nest provides a secondary visual UI.
 
 ### Core layers
 
@@ -72,7 +72,7 @@ This is an MCP (Model Context Protocol) platform. The AI is the primary interfac
    - `servers/storage/` — S3-compatible file storage: upload, list, presigned URLs, delete, quota management (requires MinIO)
    - `servers/blog/` — Blogging platform: create, edit, publish, themes, RSS/Atom, export, share posts
 
-2. **HTTP Gateway** (`servers/gateway/`) — Express server that wraps all MCP servers with Streamable HTTP + SSE transports + OAuth 2.1. Includes proxy layer for external MCP servers, **tool router** (`/router/mcp` — 7 tools instead of 49+), public blog routes, dashboard UI, peer relay, and setup page. Modularized into Express routers (`routes/mcp.js`, `routes/blog-public.js`, `routes/storage-http.js`, `dashboard/`).
+2. **HTTP Gateway** (`servers/gateway/`) — Express server that wraps all MCP servers with Streamable HTTP + SSE transports + OAuth 2.1. Includes proxy layer for external MCP servers, **tool router** (`/router/mcp` — 7 tools instead of 49+), public blog routes, Crow's Nest UI, peer relay, and setup page. Modularized into Express routers (`routes/mcp.js`, `routes/blog-public.js`, `routes/storage-http.js`, `dashboard/`).
 
 3. **Crow's Nest** (`servers/gateway/dashboard/`) — Server-side rendered HTML control panel (the "Crow's Nest") with Dark Editorial design. Password auth, session cookies, panel registry. Built-in panels: Health, Messages, Memory, Blog, Files, Extensions, Settings. Third-party panels via `~/.crow/panels/`.
 
@@ -225,7 +225,7 @@ Node.js >= 18 required. ESM modules (`"type": "module"` in package.json).
 
 Skills are markdown files in `skills/`. They are loaded by Claude on demand — no build step. Add a trigger row in `superpowers.md` so it auto-activates.
 
-### Adding a dashboard panel
+### Adding a Crow's Nest panel
 
 1. Create a JS module exporting `{ id, name, icon, route, navOrder, handler }` (see `templates/dashboard-panel.js`)
 2. For built-in panels: add to `servers/gateway/dashboard/panels/` and register in `servers/gateway/dashboard/index.js`
@@ -235,7 +235,7 @@ Skills are markdown files in `skills/`. They are loaded by Claude on demand — 
 
 ### Add-on system
 
-Crow supports installable add-ons (panels, MCP servers, skills, bundles). The registry lives in `registry/add-ons.json`. Users install add-ons by asking their AI ("install the todo add-on") or via the Extensions dashboard panel. Installed add-ons are tracked in `~/.crow/installed.json`. Type-specific artifacts:
+Crow supports installable add-ons (panels, MCP servers, skills, bundles). The registry lives in `registry/add-ons.json`. Users install add-ons by asking their AI ("install the todo add-on") or via the Extensions panel in the Crow's Nest. Installed add-ons are tracked in `~/.crow/installed.json`. Type-specific artifacts:
 - **bundle**: Docker Compose files in `~/.crow/bundles/<id>/`
 - **mcp-server**: Registered in `~/.crow/mcp-addons.json` (command, args, env)
 - **skill**: Copied to `~/.crow/skills/` (takes precedence over repo `skills/`)
@@ -311,8 +311,8 @@ The `docs/` directory contains a VitePress documentation site. Key paths:
 - `docs/index.md` — Landing page
 - `docs/getting-started/` — Setup and deployment guides
 - `docs/platforms/` — Per-platform integration guides (Claude, ChatGPT, Gemini, Cursor, OpenClaw, etc.)
-- `docs/guide/` — Conceptual guides (cross-platform, storage, blog, dashboard, sharing, social)
-- `docs/architecture/` — Server architecture docs (memory, projects, sharing, storage, blog, dashboard, gateway)
+- `docs/guide/` — Conceptual guides (cross-platform, storage, blog, Crow's Nest, sharing, social)
+- `docs/architecture/` — Server architecture docs (memory, projects, sharing, storage, blog, Crow's Nest, gateway)
 - `docs/developers/` — Developer program, creating add-ons/panels/servers, storage API, add-on registry
 - `docs/showcase.md` — Community showcase
 

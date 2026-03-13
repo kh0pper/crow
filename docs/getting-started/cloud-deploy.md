@@ -76,7 +76,7 @@ After adding keys, Render restarts automatically. Refresh your `/setup` page to 
 ::: warning What's publicly accessible after deployment?
 When deployed to Render, your instance is on the public internet. Here's what that means:
 - **Blog** (`/blog`) — Public, but only posts you explicitly publish with `public` visibility appear
-- **Dashboard** (`/dashboard`) — Blocked from public IPs (returns 403). Only accessible from your Tailscale network or localhost
+- **Crow's Nest** (`/dashboard`) — Blocked from public IPs (returns 403). Only accessible from your Tailscale network or localhost
 - **MCP endpoints** — Protected by OAuth 2.1. Only authorized AI clients can access your tools
 - **Setup page** (`/setup`) — Shows connection status but never exposes API keys
 

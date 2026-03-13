@@ -4,7 +4,7 @@ title: Tailscale Setup
 
 # Tailscale Setup
 
-Access your Crow dashboard and gateway securely from anywhere, without exposing them to the public internet.
+Access your Crow's Nest and gateway securely from anywhere, without exposing them to the public internet.
 
 ## What is this?
 
@@ -12,7 +12,7 @@ Tailscale creates a private network (called a tailnet) between your devices. Onc
 
 ## Why would I want this?
 
-- **Secure remote access** — Reach your dashboard from your phone or laptop anywhere
+- **Secure remote access** — Reach the Crow's Nest from your phone or laptop anywhere
 - **No port forwarding** — Works through NAT and firewalls without router configuration
 - **No public exposure** — Your Crow gateway stays invisible to the internet
 - **Easy setup** — Install, log in, done
@@ -98,7 +98,7 @@ You should see a health check response from the gateway.
 
 ## Making Your Blog Public
 
-Your blog is public at your gateway URL, but the Crow's Nest stays private. To make the blog accessible outside your Tailnet:
+Your blog is public at your gateway URL, but the Crow's Nest stays private. To make the blog accessible outside your tailnet:
 
 ### Option A: Tailscale Funnel
 
@@ -139,9 +139,9 @@ Then set `CROW_GATEWAY_URL=https://yourdomain.com` in your `.env` so RSS feeds a
 - Tailscale needs an initial connection to a coordination server. If your server is behind a strict firewall, it may need outbound access to `login.tailscale.com` on port 443.
 - Some corporate networks block UDP traffic that Tailscale uses for direct connections. Tailscale will fall back to relay servers (DERP), which may be slower but still work.
 
-### Dashboard returns 403
+### Crow's Nest returns 403
 
-The dashboard network check automatically allows localhost, RFC 1918 private ranges, and Tailscale's CGNAT range (`100.64.0.0/10`). There is no configurable IP allowlist — these ranges are hardcoded.
+The Crow's Nest network check automatically allows localhost, RFC 1918 private ranges, and Tailscale's CGNAT range (`100.64.0.0/10`). There is no configurable IP allowlist — these ranges are hardcoded.
 
 If you need to allow access from outside these ranges, set `CROW_DASHBOARD_PUBLIC=true` in your `.env` file. This disables the network check entirely, so only use it if you have other access controls in place (e.g., a reverse proxy with authentication).
 

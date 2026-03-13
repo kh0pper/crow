@@ -58,7 +58,7 @@ Express server that wraps all five MCP servers with HTTP transports + OAuth 2.1.
 - **SSE** — Legacy transport for ChatGPT compatibility
 - **OAuth 2.1** — Dynamic Client Registration for secure access
 - **Proxy** — Spawns and aggregates external MCP servers
-- **Dashboard** — Server-rendered HTML UI at `/dashboard` with password auth, session cookies, and panel registry
+- **Crow's Nest** — Server-rendered HTML UI at `/dashboard` with password auth, session cookies, and panel registry
 
 See [Gateway](./gateway) for details.
 
@@ -105,7 +105,7 @@ Key tables:
 - `storage_files` — S3 object metadata (key, name, MIME, size, bucket)
 - `blog_posts` — Blog content with slug, status, visibility, tags, cover image
 - `blog_posts_fts` — FTS5 index over blog posts with sync triggers
-- `dashboard_settings` — Key-value store for dashboard config
+- `dashboard_settings` — Key-value store for Crow's Nest config
 
 ## Behavioral Context (crow.md)
 

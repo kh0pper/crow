@@ -3,7 +3,7 @@
  *
  * Security note: All dynamic content is server-side escaped via escapeHtml().
  * Client-side modal content uses DOM manipulation with textContent for user data.
- * The dashboard is auth-protected and only accessible on local/Tailscale networks.
+ * The Crow's Nest is auth-protected and only accessible on local/Tailscale networks.
  */
 
 import { escapeHtml, statCard, statGrid, section, badge, formatDate } from "../shared/components.js";

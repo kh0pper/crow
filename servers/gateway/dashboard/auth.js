@@ -229,7 +229,7 @@ export function dashboardAuth(req, res, next) {
   if (!isAllowedNetwork(req)) {
     res.status(403).type("html").send(`<!DOCTYPE html><html><head><title>Access Denied</title></head><body style="font-family:sans-serif;padding:3rem;text-align:center">
       <h1>Access Denied</h1>
-      <p>The Crow Dashboard is only accessible from local network or Tailscale.</p>
+      <p>Crow's Nest is only accessible from local network or Tailscale.</p>
       <p>Set up <a href="https://tailscale.com">Tailscale</a> for secure remote access,<br>or set <code>CROW_DASHBOARD_PUBLIC=true</code> in your <code>.env</code> to allow public access.</p>
     </body></html>`);
     return;

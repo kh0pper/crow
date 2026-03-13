@@ -10,7 +10,7 @@ Maestro Press provides managed hosting of Crow. Each customer receives an isolat
 
 ## 2. Account & Access
 
-One account per person. You are responsible for keeping your login credentials secure. Do not share your dashboard password or session tokens with others.
+One account per person. You are responsible for keeping your login credentials secure. Do not share your Crow's Nest password or session tokens with others.
 
 ## 3. Data Handling & Privacy
 
@@ -23,7 +23,7 @@ One account per person. You are responsible for keeping your login credentials s
 
 ## 4. Your Responsibilities
 
-- Keep your dashboard password and API keys secure.
+- Keep your Crow's Nest password and API keys secure.
 - Comply with the terms of service of any third-party services whose API keys you configure in your Crow instance (e.g., Google, GitHub, Slack, Notion).
 - Notify Maestro Press promptly if you believe your account has been compromised.
 
@@ -49,7 +49,7 @@ You may not use the service for:
 
 - **Best-effort availability** — Maestro Press strives to keep your instance running, but does not guarantee a specific uptime percentage (no SLA).
 - **Not liable for downtime** caused by third-party services, network outages, or force majeure events (natural disasters, government actions, etc.).
-- **Planned maintenance** — Advance notice will be provided when possible, typically via email or dashboard notification.
+- **Planned maintenance** — Advance notice will be provided when possible, typically via email or Crow's Nest notification.
 
 ## 8. Intellectual Property
 
@@ -81,7 +81,7 @@ You agree to indemnify and hold harmless Maestro Press from any claims, damages,
 
 ## 12. Changes to Terms
 
-- Maestro Press may update these terms with **30 days advance notice** via email or dashboard notification.
+- Maestro Press may update these terms with **30 days advance notice** via email or Crow's Nest notification.
 - Continued use of the service after the notice period constitutes acceptance of the updated terms.
 - If you do not agree with the changes, you may cancel your subscription before they take effect.
 

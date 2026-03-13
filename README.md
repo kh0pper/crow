@@ -44,11 +44,11 @@ Crow is the first AI platform with built-in encrypted peer-to-peer sharing. No c
 
 Learn more: **[Sharing Guide](https://maestro.press/software/crow/guide/sharing)** · **[Architecture](https://maestro.press/software/crow/architecture/sharing-server)**
 
-## Dashboard
+## Crow's Nest
 
 Server-rendered web UI with Dark Editorial design. Password-protected, session-based auth. Built-in panels for Messages, Blog, Files, Extensions, and Settings. Third-party panels can be installed from `~/.crow/panels/`.
 
-> **[Dashboard Guide](https://maestro.press/software/crow/guide/dashboard)** · **[Architecture](https://maestro.press/software/crow/architecture/dashboard)**
+> **[Crow's Nest Guide](https://maestro.press/software/crow/guide/crows-nest)** · **[Architecture](https://maestro.press/software/crow/architecture/dashboard)**
 
 ## Blog Platform
 
@@ -145,7 +145,7 @@ Full documentation at **[maestro.press/software/crow](https://maestro.press/soft
 - [Sharing & Social](https://maestro.press/software/crow/guide/sharing) — P2P encrypted sharing, messaging, and collaboration
 - [Storage](https://maestro.press/software/crow/guide/storage) — S3-compatible file storage with quotas and presigned URLs
 - [Blog](https://maestro.press/software/crow/guide/blog) — AI-driven publishing with themes, RSS, and public sharing
-- [Dashboard](https://maestro.press/software/crow/guide/dashboard) — Web UI with panels for messages, files, blog, and extensions
+- [Crow's Nest](https://maestro.press/software/crow/guide/crows-nest) — Web UI with panels for messages, files, blog, and extensions
 - [Architecture](https://maestro.press/software/crow/architecture/) — System design, server APIs, gateway details
 - [Skills](https://maestro.press/software/crow/skills/) — 30 behavioral prompts for AI workflows
 - [Security](SECURITY.md) — API key safety, deployment security, and what to do if a key leaks

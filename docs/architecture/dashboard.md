@@ -33,7 +33,7 @@ The Crow's Nest (`servers/gateway/dashboard/`) is a server-rendered web interfac
 
 ## Panel Registry
 
-Panels are modular sections of the dashboard. Each panel registers itself with:
+Panels are modular sections of the Crow's Nest. Each panel registers itself with:
 
 ```js
 {
@@ -60,7 +60,7 @@ Built-in panels live in `servers/gateway/dashboard/panels/`:
 
 ## Auth System
 
-The dashboard uses its own authentication layer, separate from the gateway's OAuth system.
+The Crow's Nest uses its own authentication layer, separate from the gateway's OAuth system.
 
 ### Password Hashing
 
@@ -89,7 +89,7 @@ All state-changing requests (POST, PUT, DELETE) require a CSRF token. The token 
 
 ### Account Lockout
 
-After 5 failed login attempts within 15 minutes, the account is locked for 30 minutes. This prevents brute-force attacks on the dashboard password.
+After 5 failed login attempts within 15 minutes, the account is locked for 30 minutes. This prevents brute-force attacks on the Crow's Nest password.
 
 ## Layout System
 
@@ -100,7 +100,7 @@ function layout(title, content, options = {}) {
   return `<!DOCTYPE html>
   <html data-theme="${options.theme || 'dark'}">
   <head>
-    <title>${title} — Crow Dashboard</title>
+    <title>${title} — Crow's Nest</title>
     ${styles}
   </head>
   <body>
@@ -116,7 +116,7 @@ Everything is a template literal — no template engine dependency. CSS is inlin
 
 ## Network Security
 
-Before any dashboard route executes, middleware checks the request's source IP:
+Before any Crow's Nest route executes, middleware checks the request's source IP:
 
 ```js
 const ALLOWED_RANGES = [
@@ -144,7 +144,7 @@ Community-created panels live in `~/.crow/panels/`. Each panel is a directory co
     assets/         # Optional static assets
 ```
 
-The dashboard scans this directory on startup and registers any valid panels. Third-party panels receive the same `{ db, layout }` context as built-in panels.
+The Crow's Nest scans this directory on startup and registers any valid panels. Third-party panels receive the same `{ db, layout }` context as built-in panels.
 
 Enable or disable panels in `~/.crow/panels.json`:
 
@@ -159,7 +159,7 @@ See [Creating Panels](/developers/creating-panels) for a development tutorial.
 
 ## No Build Step
 
-The dashboard has no build step, no bundler, and no node_modules of its own. All HTML, CSS, and minimal JavaScript are generated inline by the server. This keeps the dashboard lightweight and avoids frontend toolchain complexity.
+The Crow's Nest has no build step, no bundler, and no node_modules of its own. All HTML, CSS, and minimal JavaScript are generated inline by the server. This keeps the UI lightweight and avoids frontend toolchain complexity.
 
 CSS uses custom properties (variables) for theming:
 

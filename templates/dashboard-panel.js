@@ -1,12 +1,12 @@
 /**
- * Example Dashboard Panel — Starter template for add-on panels
+ * Example Crow's Nest Panel — Starter template for add-on panels
  *
  * Place this file in ~/.crow/panels/ and add the panel ID to ~/.crow/panels.json
  * to enable it. See docs/developers/creating-panels.md for the full guide.
  *
  * Panel manifest fields:
  *   id        — Unique panel identifier (used in URL: /dashboard/:id)
- *   name      — Display name in sidebar navigation
+ *   name      — Display name in Crow's Nest sidebar navigation
  *   icon      — Icon key: messages, edit, files, settings, extensions, or default
  *   route     — Full route path (must match /dashboard/:id)
  *   navOrder  — Sort order in sidebar (lower = higher)
@@ -56,7 +56,7 @@ export default {
       ${section("Data", tableContent, { delay: 100 })}
     `;
 
-    // Return the HTML wrapped in the dashboard layout
+    // Return the HTML wrapped in the Crow's Nest layout
     return layout({ title: "My Panel", content });
   },
 };

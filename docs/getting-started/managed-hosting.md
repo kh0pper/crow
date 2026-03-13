@@ -15,7 +15,7 @@ Skip the setup entirely. Get a fully configured Crow instance hosted by [Maestro
 
 1. **Pick a username** — Choose your subdomain (e.g., `alice.crow.maestro.press`)
 2. **Check out** — $15/mo or $120/yr (4 months free with annual)
-3. **Visit your instance** — Your Crow dashboard is live immediately
+3. **Visit your instance** — Your Crow's Nest is live immediately
 4. **Connect your AI** — Use the `/setup` page to connect Claude, ChatGPT, or any supported platform
 
 > **[Get started at maestro.press/hosting →](https://maestro.press/hosting/)**

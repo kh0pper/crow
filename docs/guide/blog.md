@@ -60,7 +60,7 @@ The gateway listens on `localhost:3001` by default. To make your blog reachable 
 
 - **Tailscale Funnel** — Easiest option for Tailscale users. No port forwarding or domain registration needed. See [details below](#tailscale-funnel-recommended-for-self-hosted).
 - **Caddy or nginx reverse proxy** — Use a reverse proxy with automatic Let's Encrypt certificates for a custom domain. See [Caddy example below](#custom-domain-with-caddy).
-- **Direct port forwarding** — Forward port 3001 on your router. Not recommended: exposes the full gateway (dashboard, MCP endpoints) without TLS.
+- **Direct port forwarding** — Forward port 3001 on your router. Not recommended: exposes the full gateway (Crow's Nest, MCP endpoints) without TLS.
 
 For a full deployment comparison, see the [Making Your Blog Public](#making-your-blog-public) section further down.
 
@@ -195,14 +195,14 @@ tailscale funnel --bg --https=443 http://localhost:3001
 
 Your blog is now publicly accessible at `https://<hostname>.your-tailnet.ts.net/blog`.
 
-The dashboard remains private — requests from public IPs get a 403 response because they don't fall within the allowed network ranges. Only the blog (and other unauthenticated routes like `/health` and `/setup`) are effectively visible to the public.
+The Crow's Nest remains private — requests from public IPs get a 403 response because they don't fall within the allowed network ranges. Only the blog (and other unauthenticated routes like `/health` and `/setup`) are effectively visible to the public.
 
 ### Custom Domain with Caddy
 
 If you want a custom domain that only serves your blog (not the full gateway), you can configure Caddy as a reverse proxy with path restrictions.
 
 ::: warning
-This Caddyfile replaces the default full-gateway proxy. If you're using Caddy to serve the dashboard over Tailscale, you'll need separate Caddy configurations or a combined Caddyfile.
+This Caddyfile replaces the default full-gateway proxy. If you're using Caddy to serve the Crow's Nest over Tailscale, you'll need separate Caddy configurations or a combined Caddyfile.
 :::
 
 ```

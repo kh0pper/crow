@@ -11,7 +11,7 @@ The gateway uses a modular route architecture. Core MCP transport logic is in `r
 | `routes/mcp.js` | `mountMcpServer()` — mounts Streamable HTTP + SSE transports for any MCP server |
 | `routes/storage-http.js` | File upload (multipart) and download (presigned redirect) HTTP routes |
 | `routes/blog-public.js` | Public blog pages, tag pages, RSS and Atom feeds (no auth) |
-| `dashboard/` | Dashboard UI panels and auth system |
+| `dashboard/` | Crow's Nest UI panels and auth system |
 | `session-manager.js` | Consolidated session storage for all MCP servers (replaces per-server Maps) |
 
 ## Transports

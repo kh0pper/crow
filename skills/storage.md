@@ -48,7 +48,7 @@ tools:
 - Use descriptive file names — they're preserved in the database
 - Presigned URLs expire (default 1 hour) — generate fresh ones when needed
 - MIME type validation blocks executables for security
-- The dashboard Files panel provides a visual file browser at `/dashboard/files`
+- The Files panel in the Crow's Nest provides a visual file browser at `/dashboard/files`
 
 ## Safety Confirmations
 

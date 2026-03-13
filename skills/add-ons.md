@@ -24,10 +24,10 @@ tools:
 
 ## How Add-ons Work
 
-Add-ons extend Crow with new dashboard panels, MCP servers, or skill files. They are listed in the official registry hosted on GitHub and can be installed with a single command.
+Add-ons extend Crow with new Crow's Nest panels, MCP servers, or skill files. They are listed in the official registry hosted on GitHub and can be installed with a single command.
 
 **Add-on types:**
-- `panel` — Dashboard panel (JS module + optional skill)
+- `panel` — Crow's Nest panel (JS module + optional skill)
 - `mcp-server` — External MCP server integration
 - `skill` — Skill file only (behavioral prompt, no code)
 - `bundle` — Multi-service bundle (Docker Compose)
@@ -80,10 +80,10 @@ Add-ons extend Crow with new dashboard panels, MCP servers, or skill files. They
 ```
 ~/.crow/
   installed.json     — Track installed add-ons (version, date, type)
-  panels/            — Third-party dashboard panels
+  panels/            — Third-party Crow's Nest panels
   panels.json        — List of enabled panel IDs
 ```
 
-## Dashboard Alternative
+## Crow's Nest Alternative
 
-Non-technical users can browse and install add-ons from the Extensions panel in the dashboard at `/dashboard/extensions`.
+Non-technical users can browse and install add-ons from the Extensions panel in the Crow's Nest at `/dashboard/extensions`.

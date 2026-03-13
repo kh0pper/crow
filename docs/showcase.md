@@ -30,7 +30,7 @@ Use Crow as your research assistant. Create research projects with auto-generate
 
 Publish a personal blog by talking to your AI. Draft posts, edit them in conversation, publish when ready. Posts are served as clean HTML with RSS feeds, and you can export to Hugo or Jekyll at any time.
 
-**Typical setup:** Full Docker profile with gateway and MinIO. Blog images uploaded to storage, referenced in Markdown posts. Dashboard for quick edits.
+**Typical setup:** Full Docker profile with gateway and MinIO. Blog images uploaded to storage, referenced in Markdown posts. Crow's Nest for quick edits.
 
 **Key tools:** `crow_create_post`, `crow_publish_post`, `crow_upload_file`, `crow_export_blog`
 

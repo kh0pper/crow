@@ -6,7 +6,7 @@ Crow can be set up in several ways depending on your use case:
 
 ### Managed Hosting (Easiest)
 
-Pre-configured Crow instance — no setup, no maintenance. Your own subdomain at `username.crow.maestro.press` with dashboard, blog, AI integrations, daily backups, and SSL included.
+Pre-configured Crow instance — no setup, no maintenance. Your own subdomain at `username.crow.maestro.press` with Crow's Nest, blog, AI integrations, daily backups, and SSL included.
 
 > [Managed Hosting Guide](./managed-hosting)
 
@@ -54,7 +54,7 @@ After setup, your AI assistant will have:
 - **Crow's Nest** — visual web interface for managing your Crow instance
 - **Self-hosting add-ons** — install Ollama, Nextcloud, Immich, Obsidian, and Home Assistant from the Extensions panel
 
-**What's public?** Your blog is the only thing visible to the outside world, and only posts you explicitly publish with `public` visibility appear there. Your dashboard, data, and MCP endpoints are private by default. See the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md#whats-public-by-default) for the full breakdown.
+**What's public?** Your blog is the only thing visible to the outside world, and only posts you explicitly publish with `public` visibility appear there. Your Crow's Nest, data, and MCP endpoints are private by default. See the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md#whats-public-by-default) for the full breakdown.
 
 ::: tip Running many integrations?
 See the [Context & Performance guide](/guide/context-performance) for ways to optimize tool loading and reduce context window usage.
