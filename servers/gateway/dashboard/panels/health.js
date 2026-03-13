@@ -1,15 +1,42 @@
 /**
- * Health Panel — System stats, Docker containers, DB metrics
+ * Crow's Nest Panel — App launcher tiles, system stats, Docker containers, DB metrics
  */
 
 import os from "node:os";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { escapeHtml, statCard, statGrid, section, badge } from "../shared/components.js";
 import { CROW_HERO_SVG } from "../shared/crow-hero.js";
+import { getAddonLogo } from "../shared/logos.js";
+
+// Cache for Docker status checks (bundle-id -> { status, timestamp })
+const _dockerStatusCache = new Map();
+const DOCKER_CACHE_TTL = 30_000; // 30 seconds
+
+function getBundleDockerStatus(bundleId) {
+  const cached = _dockerStatusCache.get(bundleId);
+  if (cached && Date.now() - cached.timestamp < DOCKER_CACHE_TTL) {
+    return cached.status;
+  }
+  let status = null;
+  try {
+    const out = execFileSync("docker", ["ps", "--filter", `name=${bundleId}`, "--format", "{{.Status}}"], {
+      encoding: "utf-8",
+      timeout: 5000,
+    }).trim();
+    status = out || null;
+  } catch {
+    // Docker not available or command failed
+  }
+  _dockerStatusCache.set(bundleId, { status, timestamp: Date.now() });
+  return status;
+}
 
 export default {
   id: "health",
-  name: "Health",
+  name: "Crow's Nest",
   icon: "health",
   route: "/dashboard/health",
   navOrder: 5,
@@ -178,16 +205,79 @@ export default {
       </div>
     </div>`;
 
+    // --- Launcher tiles for installed apps ---
+    let launcherHtml = "";
+    const installedPath = join(homedir(), ".crow", "installed.json");
+    if (existsSync(installedPath)) {
+      try {
+        const installed = JSON.parse(readFileSync(installedPath, "utf-8"));
+        const appEntries = Object.entries(installed).filter(
+          ([, meta]) => meta.type === "bundle" || meta.type === "mcp-server"
+        );
+
+        if (appEntries.length > 0) {
+          const tiles = appEntries.map(([id, meta]) => {
+            // Try to load manifest for name and webUI info
+            let name = id;
+            let webUI = null;
+            const manifestPath = join(import.meta.dirname, "../../../../bundles", id, "manifest.json");
+            if (existsSync(manifestPath)) {
+              try {
+                const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+                name = manifest.name || id;
+                webUI = manifest.webUI || null;
+              } catch {
+                // skip malformed manifest
+              }
+            }
+
+            // Logo or fallback letter circle
+            const logo = getAddonLogo(id, 48);
+            const logoHtml = logo || `<div style="width:48px;height:48px;border-radius:50%;background:var(--crow-accent-muted);color:var(--crow-accent);display:flex;align-items:center;justify-content:center;font-family:'Fraunces',serif;font-size:1.25rem;font-weight:600">${escapeHtml(name.charAt(0).toUpperCase())}</div>`;
+
+            // Docker status for bundles
+            let isRunning = false;
+            if (meta.type === "bundle") {
+              const status = getBundleDockerStatus(id);
+              isRunning = status !== null && status.toLowerCase().startsWith("up");
+            }
+            const statusDot = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${isRunning ? "var(--crow-success)" : "var(--crow-text-muted)"};margin-left:0.35rem;vertical-align:middle" title="${isRunning ? "Running" : "Stopped"}"></span>`;
+
+            // Open link if webUI is set
+            const openLink = webUI
+              ? `<a href="http://localhost:${webUI.port}${webUI.path || "/"}" target="_blank" class="btn btn-sm btn-secondary" style="margin-top:0.5rem;font-size:0.75rem">Open</a>`
+              : "";
+
+            return `<div class="card app-tile" style="display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:1.25rem 0.75rem;cursor:default">
+              ${logoHtml}
+              <div style="margin-top:0.5rem;font-size:0.85rem;font-weight:500">${escapeHtml(name)}${statusDot}</div>
+              ${openLink}
+            </div>`;
+          }).join("\n");
+
+          launcherHtml = section("Your Apps", `
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:1rem">
+              ${tiles}
+            </div>
+            <style>.app-tile:hover{transform:translateY(-2px);border-color:var(--crow-accent) !important;transition:transform 0.15s,border-color 0.15s}</style>
+          `, { delay: 175 });
+        }
+      } catch {
+        // installed.json malformed — skip launcher
+      }
+    }
+
     const content = `
       ${heroHtml}
       ${systemStats}
+      ${launcherHtml}
       ${section("System Resources", systemDetailsHtml, { delay: 200 })}
       ${section("Docker", dockerHtml, { delay: 250 })}
       ${section("Database", dbHtml, { delay: 300 })}
       ${refreshHint}
     `;
 
-    return layout({ title: "Health", content });
+    return layout({ title: "Crow's Nest", content });
   },
 };
 
