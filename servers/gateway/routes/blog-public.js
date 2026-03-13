@@ -49,16 +49,16 @@ function designCss(settings) {
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
-    --crow-bg-deep: #0c0a09;
-    --crow-bg-surface: #1c1917;
-    --crow-bg-elevated: #292524;
-    --crow-border: #44403c;
+    --crow-bg-deep: #0f0f17;
+    --crow-bg-surface: #1a1a2e;
+    --crow-bg-elevated: #2d2d3d;
+    --crow-border: #3d3d4d;
     --crow-text-primary: #fafaf9;
     --crow-text-secondary: #a8a29e;
     --crow-text-muted: #78716c;
-    --crow-accent: #94a3b8;
-    --crow-accent-hover: #cbd5e1;
-    --crow-accent-muted: #334155;
+    --crow-accent: #6366f1;
+    --crow-accent-hover: #818cf8;
+    --crow-accent-muted: #2d2854;
     --crow-success: #22c55e;
     --crow-error: #ef4444;
     --crow-info: #38bdf8;
@@ -72,9 +72,9 @@ function designCss(settings) {
     --crow-text-primary: #1c1917;
     --crow-text-secondary: #57534e;
     --crow-text-muted: #a8a29e;
-    --crow-accent: #475569;
-    --crow-accent-hover: #334155;
-    --crow-accent-muted: #e2e8f0;
+    --crow-accent: #4f46e5;
+    --crow-accent-hover: #6366f1;
+    --crow-accent-muted: #e0e7ff;
   }
 
   .theme-serif { --crow-body-font: 'Fraunces', serif; }
