@@ -4,6 +4,7 @@
 
 import { escapeHtml, statCard, statGrid, section, formField, badge, dataTable } from "../shared/components.js";
 import { getProxyStatus } from "../../proxy.js";
+import { getUpdateStatus, checkForUpdates } from "../../auto-update.js";
 
 export default {
   id: "settings",
@@ -71,6 +72,27 @@ export default {
         }
         await setPassword(password);
         res.redirect("/dashboard/settings?success=password");
+        return;
+      }
+
+      if (action === "save_update_settings") {
+        const enabled = req.body.auto_update_enabled || "true";
+        const interval = req.body.auto_update_interval_hours || "6";
+        await db.execute({
+          sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('auto_update_enabled', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
+          args: [enabled, enabled],
+        });
+        await db.execute({
+          sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('auto_update_interval_hours', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
+          args: [interval, interval],
+        });
+        res.json({ ok: true, message: "Update settings saved. Restart gateway to apply new interval." });
+        return;
+      }
+
+      if (action === "check_updates_now") {
+        const result = await checkForUpdates();
+        res.json({ ok: true, ...result });
         return;
       }
 
@@ -411,6 +433,114 @@ function pollHealth(attempts) {
       <button type="submit" class="btn btn-secondary">Change Password</button>
     </form>`;
 
+    // Auto-update status
+    const updateStatus = await getUpdateStatus();
+    const lastCheckDisplay = updateStatus.lastCheck
+      ? new Date(updateStatus.lastCheck).toLocaleString()
+      : "Never";
+    const versionDisplay = updateStatus.currentVersion || "unknown";
+
+    const updateHtml = `
+      <div style="display:flex;flex-wrap:wrap;gap:1rem;margin-bottom:1rem">
+        <div style="flex:1;min-width:200px">
+          <div style="font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.25rem">Current Version</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:0.95rem">${escapeHtml(versionDisplay)}</div>
+        </div>
+        <div style="flex:1;min-width:200px">
+          <div style="font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.25rem">Last Checked</div>
+          <div style="font-size:0.9rem">${escapeHtml(lastCheckDisplay)}</div>
+        </div>
+        <div style="flex:1;min-width:200px">
+          <div style="font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.25rem">Status</div>
+          <div style="font-size:0.9rem">${escapeHtml(updateStatus.lastResult || "Waiting for first check")}</div>
+        </div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:0.75rem;align-items:end;margin-bottom:1rem">
+        <div>
+          <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.25rem">Auto-Update</label>
+          <select id="update-enabled" style="padding:0.5rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg);color:var(--crow-text);font-size:0.85rem">
+            <option value="true"${updateStatus.enabled ? " selected" : ""}>Enabled</option>
+            <option value="false"${!updateStatus.enabled ? " selected" : ""}>Disabled</option>
+          </select>
+        </div>
+        <div>
+          <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.25rem">Check Interval</label>
+          <select id="update-interval" style="padding:0.5rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg);color:var(--crow-text);font-size:0.85rem">
+            <option value="1"${updateStatus.intervalHours === 1 ? " selected" : ""}>Every hour</option>
+            <option value="6"${updateStatus.intervalHours === 6 ? " selected" : ""}>Every 6 hours</option>
+            <option value="12"${updateStatus.intervalHours === 12 ? " selected" : ""}>Every 12 hours</option>
+            <option value="24"${updateStatus.intervalHours === 24 ? " selected" : ""}>Daily</option>
+          </select>
+        </div>
+        <button class="btn btn-secondary btn-sm" id="save-update-settings">Save</button>
+        <button class="btn btn-primary btn-sm" id="check-updates-now">Check Now</button>
+      </div>
+      <div id="update-status-msg" style="font-size:0.85rem;display:none"></div>
+      <p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.5rem">
+        Auto-updates pull the latest code from GitHub and restart the gateway. You can also disable with <code>CROW_AUTO_UPDATE=0</code> in your .env file.
+      </p>
+      <script>
+      document.getElementById('save-update-settings').addEventListener('click', async function() {
+        const btn = this;
+        btn.disabled = true;
+        btn.textContent = 'Saving...';
+        const params = new URLSearchParams();
+        params.set('action', 'save_update_settings');
+        params.set('auto_update_enabled', document.getElementById('update-enabled').value);
+        params.set('auto_update_interval_hours', document.getElementById('update-interval').value);
+        try {
+          const res = await fetch('/dashboard/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: params.toString(),
+          });
+          const data = await res.json();
+          const msg = document.getElementById('update-status-msg');
+          msg.style.display = 'block';
+          msg.style.color = data.ok ? 'var(--crow-success)' : 'var(--crow-error)';
+          msg.textContent = data.message || (data.ok ? 'Saved' : 'Failed');
+        } catch (e) { console.error(e); }
+        btn.disabled = false;
+        btn.textContent = 'Save';
+      });
+
+      document.getElementById('check-updates-now').addEventListener('click', async function() {
+        const btn = this;
+        btn.disabled = true;
+        btn.textContent = 'Checking...';
+        const msg = document.getElementById('update-status-msg');
+        msg.style.display = 'block';
+        msg.style.color = 'var(--crow-accent)';
+        msg.textContent = 'Checking for updates...';
+        try {
+          const params = new URLSearchParams();
+          params.set('action', 'check_updates_now');
+          const res = await fetch('/dashboard/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: params.toString(),
+          });
+          const data = await res.json();
+          if (data.updated) {
+            msg.style.color = 'var(--crow-success)';
+            msg.textContent = 'Updated ' + (data.from || '?') + ' → ' + (data.to || '?') + '. Restarting...';
+            setTimeout(() => { location.reload(); }, 3000);
+          } else if (data.error) {
+            msg.style.color = 'var(--crow-error)';
+            msg.textContent = data.error;
+          } else {
+            msg.style.color = 'var(--crow-text-muted)';
+            msg.textContent = 'Already up to date.';
+          }
+        } catch (e) {
+          msg.style.color = 'var(--crow-error)';
+          msg.textContent = 'Network error';
+        }
+        btn.disabled = false;
+        btn.textContent = 'Check Now';
+      });
+      <\/script>`;
+
     // Core server stats
     const memoryCount = await db.execute("SELECT COUNT(*) as c FROM memories");
     const sourceCount = await db.execute("SELECT COUNT(*) as c FROM research_sources");
@@ -427,6 +557,7 @@ function pollHealth(attempts) {
     const content = `
       ${successMsg}${errorMsg}
       ${stats}
+      ${section("Updates", updateHtml, { delay: 50 })}
       ${section("Integrations", integrationsHtml, { delay: 100 })}
       ${section("Identity", identityHtml, { delay: 200 })}
       ${section("Blog Settings", blogForm, { delay: 250 })}

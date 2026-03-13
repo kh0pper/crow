@@ -26,6 +26,8 @@ const ICON_MAP = {
   image: "\u{1F5BC}\uFE0F",
   book: "\u{1F4D6}",
   home: "\u{1F3E0}",
+  archive: "\u{1F4E6}",
+  mic: "\u{1F3A4}",
 };
 
 function getInstalled() {
