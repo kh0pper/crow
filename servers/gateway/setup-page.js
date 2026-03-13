@@ -18,9 +18,17 @@ import { APP_ROOT, resolveEnvPath, writeEnvVar, removeEnvVar, sanitizeEnvValue }
 
 /**
  * Detect Tailscale hostname and IP if available.
- * Returns { hostname, ip } or null if Tailscale is not running.
+ * Returns { hostname, ip, installed } or { installed: false } if not installed,
+ * or null if installed but not running/authenticated.
  */
 function detectTailscale() {
+  // Check if tailscale binary exists
+  try {
+    execFileSync("which", ["tailscale"], { stdio: "pipe", timeout: 2000 });
+  } catch {
+    return { installed: false };
+  }
+
   try {
     const json = execFileSync("tailscale", ["status", "--json"], {
       timeout: 3000,
@@ -29,13 +37,30 @@ function detectTailscale() {
     });
     const status = JSON.parse(json);
     const self = status.Self;
-    if (!self) return null;
+    if (!self) return { installed: true, hostname: null, ip: null };
 
     const hostname = self.HostName || null;
     const ip = self.TailscaleIPs?.[0] || null;
-    return { hostname, ip };
+    return { installed: true, hostname, ip };
   } catch {
-    return null;
+    return { installed: true, hostname: null, ip: null };
+  }
+}
+
+/**
+ * Detect if Caddy is running as a reverse proxy.
+ * When Caddy proxies the gateway, users can access without the port number.
+ */
+function detectCaddy() {
+  try {
+    const result = execFileSync("systemctl", ["is-active", "caddy"], {
+      timeout: 2000,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return result.trim() === "active";
+  } catch {
+    return false;
   }
 }
 
@@ -65,8 +90,11 @@ export async function setupPageHandler(req, res) {
     (i) => i.configured && i.status !== "connected" && i.status !== "error"
   );
 
-  // Detect Tailscale for access URL display
+  // Detect Tailscale and Caddy for access URL display
   const tailscale = detectTailscale();
+  const hasCaddy = detectCaddy();
+  const port = parseInt(process.env.PORT || process.env.CROW_GATEWAY_PORT || "3001", 10);
+  const portSuffix = hasCaddy ? "" : (port === 80 ? "" : `:${port}`);
 
   const gatewayUrl = process.env.RENDER_EXTERNAL_URL || process.env.CROW_GATEWAY_URL || "";
   const isRender = !!process.env.RENDER_EXTERNAL_URL || !!process.env.RENDER_SERVICE_ID;
@@ -273,24 +301,124 @@ export async function setupPageHandler(req, res) {
     </div>
   </div>` : ""}
 
-  ${tailscale ? `
   <div class="section">
     <div class="section-title">${isCrowOS ? "Step 3: Network Access" : "Network Access"}</div>
-    <div class="card">
+    ${(() => {
+      // State 1: Tailscale connected, hostname is "crow" — ideal
+      if (tailscale?.ip && tailscale.hostname === "crow") {
+        return `
+    <div class="card" style="border-left: 3px solid #34c759">
       <div class="card-header">
         <span class="status-dot green"></span>
         <div>
-          <div class="card-name">Tailscale Connected</div>
-          <div class="card-desc">Access your Crow's Nest from any device on your Tailnet</div>
+          <div class="card-name">Ready &mdash; access Crow from any device</div>
+          <div class="card-desc">Tailscale is connected with hostname <strong>crow</strong></div>
         </div>
       </div>
-      <div class="card-env">
-        ${tailscale.hostname ? `<strong>Crow's Nest:</strong> <span class="env-var">http://${tailscale.hostname}:3001/dashboard</span><br>` : ""}
-        ${tailscale.ip ? `<strong>Tailscale IP:</strong> <span class="env-var">http://${tailscale.ip}:3001/dashboard</span><br>` : ""}
-        ${tailscale.hostname ? `<strong>Blog:</strong> <span class="env-var">http://${tailscale.hostname}:3001/blog</span>` : ""}
+      <div class="card-env" style="line-height: 2">
+        <strong>Crow's Nest:</strong> <span class="env-var">http://crow${portSuffix}/dashboard</span><br>
+        <strong>Blog:</strong> <span class="env-var">http://crow${portSuffix}/blog</span><br>
+        <strong>Tailscale IP:</strong> <span class="env-var">http://${tailscale.ip}${portSuffix}/dashboard</span>
       </div>
-    </div>
-  </div>` : ""}
+      ${hasCaddy ? `<div style="margin-top:8px;font-size:12px;color:#86868b">Caddy reverse proxy detected &mdash; port-free URLs available</div>` : ""}
+    </div>`;
+      }
+
+      // State 2: Tailscale connected, hostname is NOT "crow"
+      if (tailscale?.ip && tailscale.hostname) {
+        return `
+    <div class="card" style="border-left: 3px solid #ff9f0a">
+      <div class="card-header">
+        <span class="status-dot yellow"></span>
+        <div>
+          <div class="card-name">Tailscale Connected</div>
+          <div class="card-desc">Hostname is <strong>${tailscale.hostname}</strong> &mdash; consider changing to <strong>crow</strong> for easier access</div>
+        </div>
+      </div>
+      <div class="card-env" style="line-height: 2">
+        <strong>Current URL:</strong> <span class="env-var">http://${tailscale.hostname}${portSuffix}/dashboard</span><br>
+        <strong>Tailscale IP:</strong> <span class="env-var">http://${tailscale.ip}${portSuffix}/dashboard</span>
+      </div>
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid #f0f0f0">
+        <div style="font-size:14px;font-weight:600;margin-bottom:8px">Recommended: Set hostname to &ldquo;crow&rdquo;</div>
+        <p style="font-size:13px;color:#86868b;margin-bottom:8px">
+          This lets you access Crow at <strong>http://crow/</strong> from any device on your Tailnet &mdash; phone, laptop, or tablet.
+        </p>
+        <div class="connector-url">sudo tailscale set --hostname=crow</div>
+        <p style="font-size:12px;color:#86868b;margin-top:8px">
+          If &ldquo;crow&rdquo; is already taken on your Tailnet, try <code>crow-2</code> or <code>crow-home</code>.
+        </p>
+      </div>
+    </div>`;
+      }
+
+      // State 3a: Tailscale installed but not connected/authenticated
+      if (tailscale?.installed && !tailscale?.ip) {
+        return `
+    <div class="card" style="border-left: 3px solid #ff9f0a">
+      <div class="card-header">
+        <span class="status-dot yellow"></span>
+        <div>
+          <div class="card-name">Tailscale Installed</div>
+          <div class="card-desc">Not connected &mdash; authenticate to enable remote access</div>
+        </div>
+      </div>
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid #f0f0f0">
+        <p style="font-size:13px;color:#86868b;margin-bottom:10px">Run these commands on your server to connect:</p>
+        <div class="connector-url" style="margin-bottom:6px">sudo tailscale up</div>
+        <p style="font-size:12px;color:#86868b;margin-bottom:10px">Follow the login URL to authorize this device. Then set the hostname:</p>
+        <div class="connector-url">sudo tailscale set --hostname=crow</div>
+        <p style="font-size:12px;color:#86868b;margin-top:10px">
+          After that, open <strong>http://crow/dashboard</strong> from any device on your Tailnet.
+        </p>
+      </div>
+    </div>`;
+      }
+
+      // State 3b: Tailscale not installed
+      return `
+    <div class="card" style="border-left: 3px solid #86868b">
+      <div class="card-header">
+        <span class="status-dot gray"></span>
+        <div>
+          <div class="card-name">Set Up Remote Access</div>
+          <div class="card-desc">Access Crow from your phone, laptop, or anywhere &mdash; securely and privately</div>
+        </div>
+      </div>
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid #f0f0f0">
+        <p style="font-size:13px;margin-bottom:12px">
+          <a href="https://tailscale.com" target="_blank" style="color:#007aff;text-decoration:none;font-weight:500">Tailscale</a>
+          creates a private network between your devices. Once set up, you can reach Crow at
+          <strong>http://crow/</strong> from any device &mdash; no port forwarding, no public exposure.
+        </p>
+
+        <div style="font-size:14px;font-weight:600;margin-bottom:8px">1. Create a free account</div>
+        <p style="font-size:13px;color:#86868b;margin-bottom:12px">
+          Sign up at <a href="https://tailscale.com" target="_blank" style="color:#007aff;text-decoration:none">tailscale.com</a> (free for up to 100 devices).
+        </p>
+
+        <div style="font-size:14px;font-weight:600;margin-bottom:8px">2. Install on this server</div>
+        <div class="connector-url" style="margin-bottom:4px">curl -fsSL https://tailscale.com/install.sh | sh</div>
+        <div class="connector-url" style="margin-bottom:4px">sudo tailscale up</div>
+        <p style="font-size:12px;color:#86868b;margin-bottom:12px">Follow the login URL printed in the terminal.</p>
+
+        <div style="font-size:14px;font-weight:600;margin-bottom:8px">3. Set your hostname</div>
+        <div class="connector-url" style="margin-bottom:4px">sudo tailscale set --hostname=crow</div>
+        <p style="font-size:12px;color:#86868b;margin-bottom:12px">This makes Crow accessible at <strong>http://crow/</strong> on your Tailnet.</p>
+
+        <div style="font-size:14px;font-weight:600;margin-bottom:8px">4. Install on your other devices</div>
+        <p style="font-size:13px;color:#86868b;margin-bottom:4px">
+          Install Tailscale on your phone, laptop, or tablet from
+          <a href="https://tailscale.com/download" target="_blank" style="color:#007aff;text-decoration:none">tailscale.com/download</a>
+          and sign in with the same account.
+        </p>
+        <p style="font-size:13px;margin-top:12px">
+          Then open <strong>http://crow/dashboard</strong> in any browser.
+        </p>
+      </div>
+    </div>`;
+    })()}
+  </div>
 
   ${connected.length > 0 ? `
   <div class="section">
