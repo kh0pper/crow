@@ -134,7 +134,7 @@ After setting your password, you'll see the Crow's Nest with its panel layout.
 
 ## Panels
 
-The Crow's Nest is organized into panels:
+The Crow's Nest is organized into panels. The landing page — labeled **Crow's Nest** in the navigation — shows system health stats (CPU, RAM, disk, Docker containers, DB metrics) along with the [App Launcher](#app-launcher) grid.
 
 ### Messages
 
@@ -150,7 +150,18 @@ Browse your stored files with a visual file browser. Upload new files via drag-a
 
 ### Extensions
 
-Browse and install community add-ons. Manage installed extensions, enable or disable them, and check for updates.
+Browse and install community add-ons. Each add-on displays an SVG logo (with emoji fallback for unknown add-ons), description, and action buttons in a card layout. Before installing resource-heavy add-ons, the Extensions page shows a warning with estimated RAM and disk requirements from the add-on manifest.
+
+### Podcast
+
+The Podcast panel appears after you install the **podcast** add-on. It provides a dashboard for managing podcast episodes:
+
+- **Stats grid** — Total episodes, published count, total duration
+- **RSS feed link** — Copy your podcast RSS URL for distribution to iTunes, Spotify, etc.
+- **Episode table** — List of episodes with audio preview (inline `<audio>` player), status, and actions
+- **Create form** — Add new episodes with title, audio URL or file upload, duration, episode/season numbers, and show notes
+
+This is a third-party panel installed automatically when the podcast add-on is installed. It is removed when the add-on is uninstalled.
 
 ### Settings
 
@@ -187,6 +198,19 @@ For remote access without opening the Crow's Nest publicly, use [Tailscale](/get
 
 For the full picture of what's public and what's private across Crow, see the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md#whats-public-by-default).
 
+## App Launcher
+
+The Crow's Nest landing page includes a **Your Apps** section that shows launcher tiles for your installed add-ons. Each tile displays:
+
+- **SVG logo** (48px) — Provided by the add-on, or a fallback initial letter
+- **Name** — The add-on's display name
+- **Status indicator** — A green dot for running containers or a gray dot for stopped ones (Docker-based add-ons only)
+- **Open button** — For add-ons with a web UI (e.g., Nextcloud, Immich), a button that opens the app in a new tab
+
+The launcher reads `~/.crow/installed.json` and filters for `bundle` and `mcp-server` type add-ons. Docker container status is checked via `docker ps --filter` with a 30-second cache to avoid repeated shell commands on page load.
+
+Add-ons that declare a `webUI` field in their manifest (with `port`, `path`, and `label`) get an "Open" button that links to the local web interface.
+
 ## Third-Party Panels
 
-The Crow's Nest supports add-on panels created by the community. Panels are placed in `~/.crow/panels/` and enabled through a configuration file. See [Creating Panels](/developers/creating-panels) for details.
+The Crow's Nest supports add-on panels created by the community. Panels are placed in `~/.crow/panels/` and enabled through a configuration file. Add-ons that include a `panel` field in their manifest get their panel automatically installed and registered when the add-on is installed, and removed when uninstalled. See [Creating Panels](/developers/creating-panels) for details.
