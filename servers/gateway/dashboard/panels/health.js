@@ -5,13 +5,14 @@
 import os from "node:os";
 import { execFileSync } from "node:child_process";
 import { escapeHtml, statCard, statGrid, section, badge } from "../shared/components.js";
+import { CROW_HERO_SVG } from "../shared/crow-hero.js";
 
 export default {
   id: "health",
   name: "Health",
   icon: "health",
   route: "/dashboard/health",
-  navOrder: 10,
+  navOrder: 5,
 
   async handler(req, res, { db, layout }) {
     // --- CPU usage (average across cores, sampled over ~100ms) ---
@@ -169,7 +170,16 @@ export default {
     // --- Auto-refresh hint ---
     const refreshHint = `<p style="color:var(--crow-text-muted);font-size:0.8rem;text-align:center;margin-top:1rem">Reload the page to refresh stats.</p>`;
 
+    const heroHtml = `<div style="display:flex;align-items:center;gap:1rem;margin-bottom:1.5rem">
+      <div style="width:80px;height:80px;flex-shrink:0">${CROW_HERO_SVG}</div>
+      <div>
+        <div style="font-family:'Fraunces',serif;font-size:1.25rem;font-weight:600;color:var(--crow-text-primary)">Welcome to the Crow's Nest</div>
+        <div style="color:var(--crow-text-muted);font-size:0.9rem">System health at a glance</div>
+      </div>
+    </div>`;
+
     const content = `
+      ${heroHtml}
       ${systemStats}
       ${section("System Resources", systemDetailsHtml, { delay: 200 })}
       ${section("Docker", dockerHtml, { delay: 250 })}
@@ -206,7 +216,8 @@ function colorForPercent(pct) {
 }
 
 function progressBar(percent, color) {
+  const bg = color === "#2ecc71" ? "linear-gradient(90deg, #10b981, #22c55e)" : color;
   return `<div style="background:var(--crow-border);border-radius:4px;height:8px;overflow:hidden">
-    <div style="width:${Math.min(percent, 100)}%;height:100%;background:${color};border-radius:4px;transition:width 0.3s"></div>
+    <div style="width:${Math.min(percent, 100)}%;height:100%;background:${bg};border-radius:4px;transition:width 0.3s"></div>
   </div>`;
 }

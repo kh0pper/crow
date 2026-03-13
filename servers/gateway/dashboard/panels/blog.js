@@ -77,7 +77,11 @@ export default {
 
     let postTable;
     if (posts.rows.length === 0) {
-      postTable = `<div class="empty-state"><h3>No posts yet</h3><p>Create your first post below.</p></div>`;
+      postTable = `<div class="empty-state">
+        <img src="https://maestro.press/software/crow/icon-deploy.svg" alt="" width="48" height="48">
+        <h3>No posts yet</h3>
+        <p>Create your first post below.</p>
+      </div>`;
     } else {
       const rows = posts.rows.map((p) => {
         const statusBadge = badge(p.status, p.status === "published" ? "published" : "draft");

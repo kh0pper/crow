@@ -114,10 +114,19 @@ export default {
     // File grid
     let fileGrid;
     if (files.rows.length === 0) {
-      const msg = storageOnline
-        ? "No files uploaded yet. Use <code>crow_upload_file</code> or drag files into the upload zone above."
-        : "Storage is not configured. Set <code>MINIO_ENDPOINT</code> in your <code>.env</code> to enable file storage.";
-      fileGrid = `<div class="empty-state"><h3>No files</h3><p>${msg}</p></div>`;
+      if (storageOnline) {
+        fileGrid = `<div class="empty-state">
+          <img src="https://maestro.press/software/crow/icon-integrations.svg" alt="" width="48" height="48">
+          <h3>No files yet</h3>
+          <p>Upload files by dragging them into the zone above, or ask your AI to upload something.</p>
+        </div>`;
+      } else {
+        fileGrid = `<div class="empty-state">
+          <img src="https://maestro.press/software/crow/icon-integrations.svg" alt="" width="48" height="48">
+          <h3>Storage not configured</h3>
+          <p>Set up MinIO to start storing files. Add <code>MINIO_ENDPOINT</code> to your <code>.env</code> to get started.</p>
+        </div>`;
+      }
     } else {
       const cards = files.rows.map((f) => {
         const url = fileUrl(f);

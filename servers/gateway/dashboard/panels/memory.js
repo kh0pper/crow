@@ -84,10 +84,15 @@ export default {
     // Render memory cards
     let memoryList;
     if (memories.length === 0) {
-      const msg = query
-        ? `No memories matching "${escapeHtml(query)}".`
-        : "No memories stored yet.";
-      memoryList = `<div class="empty-state"><h3>${msg}</h3></div>`;
+      if (query) {
+        memoryList = `<div class="empty-state"><h3>No memories matching "${escapeHtml(query)}".</h3></div>`;
+      } else {
+        memoryList = `<div class="empty-state">
+          <img src="https://maestro.press/software/crow/icon-memory.svg" alt="" width="48" height="48">
+          <h3>No memories yet</h3>
+          <p>Ask your AI to remember something to get started.</p>
+        </div>`;
+      }
     } else {
       const rows = memories.map((m) => {
         const content = String(m.content || "");

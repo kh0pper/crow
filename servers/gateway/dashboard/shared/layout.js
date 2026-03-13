@@ -5,6 +5,8 @@
  * Google Fonts, and CSS custom properties.
  */
 
+import { CROW_HERO_SVG } from "./crow-hero.js";
+
 /**
  * Render the full dashboard HTML page.
  * @param {object} opts
@@ -103,6 +105,7 @@ export function renderLogin({ error, isSetup } = {}) {
 <body>
   <div class="login-page">
     <div class="login-card">
+      <div style="width:120px;height:120px;margin:0 auto 1rem">${CROW_HERO_SVG}</div>
       <h1 class="login-logo">Crow</h1>
       <p class="login-subtitle">${isSetup ? "Set your Crow's Nest password" : "Crow's Nest Login"}</p>
       ${error ? `<div class="login-error">${escapeHtml(error)}</div>` : ""}
@@ -139,16 +142,17 @@ function dashboardCss() {
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
-    --crow-bg-deep: #0c0a09;
-    --crow-bg-surface: #1c1917;
-    --crow-bg-elevated: #292524;
-    --crow-border: #44403c;
+    --crow-bg-deep: #0f0f17;
+    --crow-bg-surface: #1a1a2e;
+    --crow-bg-elevated: #2d2d3d;
+    --crow-border: #3d3d4d;
     --crow-text-primary: #fafaf9;
     --crow-text-secondary: #a8a29e;
     --crow-text-muted: #78716c;
-    --crow-accent: #94a3b8;
-    --crow-accent-hover: #cbd5e1;
-    --crow-accent-muted: #334155;
+    --crow-accent: #6366f1;
+    --crow-accent-hover: #818cf8;
+    --crow-accent-muted: #2d2854;
+    --crow-brand-gold: #fbbf24;
     --crow-success: #22c55e;
     --crow-error: #ef4444;
     --crow-info: #38bdf8;
@@ -162,9 +166,9 @@ function dashboardCss() {
     --crow-text-primary: #1c1917;
     --crow-text-secondary: #57534e;
     --crow-text-muted: #a8a29e;
-    --crow-accent: #475569;
-    --crow-accent-hover: #334155;
-    --crow-accent-muted: #e2e8f0;
+    --crow-accent: #4f46e5;
+    --crow-accent-hover: #6366f1;
+    --crow-accent-muted: #e0e7ff;
   }
 
   body {
@@ -228,9 +232,9 @@ function dashboardCss() {
     color: var(--crow-text-primary);
   }
   .nav-item.active {
-    background: var(--crow-bg-elevated);
+    background: rgba(99,102,241,0.08);
     color: var(--crow-accent);
-    border-left: 3px solid var(--crow-accent);
+    border-left: 3px solid var(--crow-brand-gold);
     padding-left: calc(0.75rem - 3px);
   }
   .nav-item svg { flex-shrink: 0; }
@@ -290,6 +294,11 @@ function dashboardCss() {
     border-radius: 12px;
     padding: 1.25rem;
     animation: fadeInUp 0.4s ease-out both;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2), 0 0 0 1px rgba(99,102,241,0.05);
+    transition: box-shadow 0.15s;
+  }
+  .card:hover {
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3), 0 0 0 1px rgba(99,102,241,0.1);
   }
   .card-grid {
     display: grid;
@@ -301,6 +310,7 @@ function dashboardCss() {
     border: 1px solid var(--crow-border);
     border-radius: 12px;
     padding: 1.25rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2), 0 0 0 1px rgba(99,102,241,0.05);
   }
   .stat-card .label {
     font-size: 0.8rem;
@@ -373,7 +383,7 @@ function dashboardCss() {
   }
   .btn-primary {
     background: var(--crow-accent);
-    color: #0c0a09;
+    color: #ffffff;
   }
   .btn-primary:hover { background: var(--crow-accent-hover); }
   .btn-secondary {
@@ -402,9 +412,9 @@ function dashboardCss() {
     font-weight: 500;
     text-transform: uppercase;
   }
-  .badge-published { background: var(--crow-success); color: #0c0a09; }
+  .badge-published { background: var(--crow-success); color: #ffffff; }
   .badge-draft { background: var(--crow-bg-elevated); color: var(--crow-text-muted); }
-  .badge-connected { background: var(--crow-success); color: #0c0a09; }
+  .badge-connected { background: var(--crow-success); color: #ffffff; }
   .badge-error { background: var(--crow-error); color: white; }
 
   /* Empty state */
@@ -412,6 +422,12 @@ function dashboardCss() {
     text-align: center;
     padding: 3rem 1rem;
     color: var(--crow-text-muted);
+  }
+  .empty-state img {
+    width: 48px;
+    height: 48px;
+    margin-bottom: 1rem;
+    opacity: 0.6;
   }
   .empty-state h3 {
     font-family: 'Fraunces', serif;
@@ -471,7 +487,7 @@ function dashboardCss() {
   .login-card form { display: flex; flex-direction: column; gap: 0.75rem; }
   .login-card button {
     background: var(--crow-accent);
-    color: #0c0a09;
+    color: #ffffff;
     border: none;
     border-radius: 8px;
     padding: 0.65rem;
