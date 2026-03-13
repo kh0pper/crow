@@ -80,7 +80,7 @@ export default defineConfig({
           { text: 'Relay Protocol', link: '/architecture/relay-protocol' },
           { text: 'Storage Server', link: '/architecture/storage-server' },
           { text: 'Blog Server', link: '/architecture/blog-server' },
-          { text: "Crow's Nest (Dashboard)", link: '/architecture/dashboard' },
+          { text: "Crow's Nest", link: '/architecture/dashboard' },
           { text: 'Gateway', link: '/architecture/gateway' },
           { text: 'Crow OS', link: '/architecture/crow-os' },
           { text: 'Portable Identity', link: '/architecture/portable-identity' },

@@ -2,6 +2,6 @@
 redirect: /guide/crows-nest
 ---
 
-# Dashboard (Moved)
+# Crow's Nest (Moved)
 
-This page has been renamed. The dashboard is now the **[Crow's Nest](./crows-nest)**.
+This page has been renamed. See **[Crow's Nest](./crows-nest)**.
