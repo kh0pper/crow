@@ -215,7 +215,8 @@
       "requires": {
         "min_ram_mb": 64,
         "min_disk_mb": 100
-      }
+      },
+      "notes": "Extends the blog server — podcast episodes are blog posts tagged 'podcast' with audio metadata. Includes a Podcast panel for the Crow's Nest dashboard. No additional server required."
     }
   ]
 }

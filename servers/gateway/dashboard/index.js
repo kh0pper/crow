@@ -15,6 +15,7 @@ import {
   clearSessionCookie,
   parseCookies,
 } from "./auth.js";
+import { resolve } from "node:path";
 import { registerPanel, loadExternalPanels, getAllPanels, getPanel } from "./panel-registry.js";
 import { createDbClient } from "../../db.js";
 
@@ -134,6 +135,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
 
       const result = await panel.handler(req, res, {
         db,
+        appRoot: resolve(import.meta.dirname, "../../.."),
         layout: (opts) => renderLayout({
           ...opts,
           activePanel: panelId,

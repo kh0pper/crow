@@ -30,7 +30,7 @@ function escapeXml(str) {
  * @param {string} content - Post markdown content
  * @returns {{ audioUrl: string|null, duration: string|null, episodeNumber: number|null, season: number|null }}
  */
-function parsePodcastMeta(content) {
+export function parsePodcastMeta(content) {
   if (!content) return { audioUrl: null, duration: null, episodeNumber: null, season: null };
 
   const audioMatch = content.match(/\*\*Audio:\*\*\s*(.+)/i);
