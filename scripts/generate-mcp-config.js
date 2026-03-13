@@ -14,7 +14,7 @@
 
 import { writeFileSync } from "fs";
 import { resolve } from "path";
-import { CORE_SERVERS, CONDITIONAL_SERVERS, EXTERNAL_SERVERS, COMBINED_SERVER, ROOT, loadEnv, resolveEnvValue } from "./server-registry.js";
+import { CORE_SERVERS, CONDITIONAL_SERVERS, EXTERNAL_SERVERS, COMBINED_SERVER, ROOT, loadEnv, resolveEnvValue, checkRequires } from "./server-registry.js";
 
 const args = process.argv.slice(2);
 const DRY_RUN = args.includes("--dry-run");
@@ -71,6 +71,13 @@ function generate() {
 
     if (missingKeys.length > 0) {
       skipped.push({ name: server.name, missing: missingKeys });
+      continue;
+    }
+
+    // Check binary dependencies
+    if (!checkRequires(server)) {
+      const bins = server.requires.join(", ");
+      skipped.push({ name: server.name, missing: [`binary: ${bins}`] });
       continue;
     }
 
