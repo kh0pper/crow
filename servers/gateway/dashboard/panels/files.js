@@ -1,8 +1,34 @@
 /**
- * Files Panel — File browser, upload, delete, copy URL
+ * Files Panel — Card-based file manager with drag-and-drop upload
  */
 
-import { escapeHtml, statCard, statGrid, dataTable, section, formatDate, formatBytes, badge, actionBar } from "../shared/components.js";
+import { escapeHtml, statCard, statGrid, section, formatDate, formatBytes, badge } from "../shared/components.js";
+
+function mimeIcon(mime) {
+  if (!mime) return "📁";
+  if (mime.startsWith("image/")) return "🖼️";
+  if (mime === "application/pdf") return "📄";
+  if (mime.startsWith("video/")) return "🎬";
+  if (mime.startsWith("audio/")) return "🎵";
+  return "📁";
+}
+
+function mimeCategory(mime) {
+  if (!mime) return "other";
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("video/")) return "document";
+  if (mime.startsWith("audio/")) return "document";
+  if (mime === "application/pdf") return "document";
+  if (mime.startsWith("text/")) return "document";
+  if (mime.includes("spreadsheet") || mime.includes("document") || mime.includes("presentation")) return "document";
+  return "other";
+}
+
+function fileUrl(file) {
+  return file.reference_type === "blog_post"
+    ? `/blog/media/${file.s3_key}`
+    : `/storage/file/${file.s3_key}`;
+}
 
 export default {
   id: "files",
@@ -36,6 +62,9 @@ export default {
     const total = totalResult.rows[0]?.c || 0;
     const totalSize = totalResult.rows[0]?.total_size || 0;
 
+    const imageResult = await db.execute("SELECT COUNT(*) as c FROM storage_files WHERE mime_type LIKE 'image/%'");
+    const imageCount = imageResult.rows[0]?.c || 0;
+
     // Check S3 availability
     let storageOnline = false;
     try {
@@ -48,64 +77,180 @@ export default {
 
     const stats = statGrid([
       statCard("Files", total, { delay: 0 }),
-      statCard("Used", formatBytes(totalSize), { delay: 50 }),
-      statCard("Quota", `${usedPct}%`, { delay: 100 }),
-      statCard("Storage", storageOnline ? "Online" : "Offline", { delay: 150 }),
+      statCard("Images", imageCount, { delay: 50 }),
+      statCard("Used", formatBytes(totalSize), { delay: 100 }),
+      statCard("Quota", `${usedPct}%`, { delay: 150 }),
+      statCard("Storage", storageOnline ? "Online" : "Offline", { delay: 200 }),
     ]);
 
-    // File list
+    // Filter by type
+    const typeFilter = req.query?.type || "";
+    let whereClause = "";
+    if (typeFilter === "image") {
+      whereClause = "WHERE mime_type LIKE 'image/%'";
+    } else if (typeFilter === "document") {
+      whereClause = "WHERE (mime_type LIKE 'text/%' OR mime_type LIKE 'application/pdf' OR mime_type LIKE '%document%' OR mime_type LIKE '%spreadsheet%' OR mime_type LIKE '%presentation%' OR mime_type LIKE 'video/%' OR mime_type LIKE 'audio/%')";
+    } else if (typeFilter === "other") {
+      whereClause = "WHERE mime_type NOT LIKE 'image/%' AND mime_type NOT LIKE 'text/%' AND mime_type NOT LIKE 'application/pdf' AND mime_type NOT LIKE '%document%' AND mime_type NOT LIKE '%spreadsheet%' AND mime_type NOT LIKE '%presentation%' AND mime_type NOT LIKE 'video/%' AND mime_type NOT LIKE 'audio/%'";
+    }
+
     const files = await db.execute({
-      sql: "SELECT s3_key, original_name, mime_type, size_bytes, bucket, reference_type, created_at FROM storage_files ORDER BY created_at DESC LIMIT 100",
+      sql: `SELECT s3_key, original_name, mime_type, size_bytes, bucket, reference_type, created_at FROM storage_files ${whereClause} ORDER BY created_at DESC LIMIT 100`,
       args: [],
     });
 
-    let fileTable;
+    // Filter tabs
+    const filterStyle = (active) => active
+      ? "color:var(--crow-accent);font-weight:600;text-decoration:none;padding:0.25rem 0.5rem;border-bottom:2px solid var(--crow-accent)"
+      : "color:var(--crow-text-muted);text-decoration:none;padding:0.25rem 0.5rem;border-bottom:2px solid transparent";
+
+    const filterTabs = `<div style="display:flex;gap:1rem;margin-bottom:1rem;font-size:0.85rem;border-bottom:1px solid var(--crow-border);padding-bottom:0">
+      <a href="/dashboard/files" style="${filterStyle(typeFilter === "")}">All</a>
+      <a href="/dashboard/files?type=image" style="${filterStyle(typeFilter === "image")}">Images</a>
+      <a href="/dashboard/files?type=document" style="${filterStyle(typeFilter === "document")}">Documents</a>
+      <a href="/dashboard/files?type=other" style="${filterStyle(typeFilter === "other")}">Other</a>
+    </div>`;
+
+    // File grid
+    let fileGrid;
     if (files.rows.length === 0) {
       const msg = storageOnline
-        ? "No files uploaded yet. Use <code>crow_upload_file</code> or <code>POST /storage/upload</code>."
+        ? "No files uploaded yet. Use <code>crow_upload_file</code> or drag files into the upload zone above."
         : "Storage is not configured. Set <code>MINIO_ENDPOINT</code> in your <code>.env</code> to enable file storage.";
-      fileTable = `<div class="empty-state"><h3>No files</h3><p>${msg}</p></div>`;
+      fileGrid = `<div class="empty-state"><h3>No files</h3><p>${msg}</p></div>`;
     } else {
-      const rows = files.rows.map((f) => {
+      const cards = files.rows.map((f) => {
+        const url = fileUrl(f);
+        const isImage = f.mime_type && f.mime_type.startsWith("image/");
+        const icon = mimeIcon(f.mime_type);
         const size = formatBytes(f.size_bytes);
-        const ref = f.reference_type ? badge(f.reference_type, "connected") : "";
-        const deleteBtn = `<form method="POST" style="display:inline" onsubmit="return confirm('Delete ${escapeHtml(f.original_name)}?')">
-          <input type="hidden" name="action" value="delete">
-          <input type="hidden" name="s3_key" value="${escapeHtml(f.s3_key)}">
-          <button class="btn btn-sm btn-danger" type="submit">Delete</button>
-        </form>`;
-        const copyBtn = `<button class="btn btn-sm btn-secondary" onclick="navigator.clipboard.writeText('/storage/file/${escapeHtml(f.s3_key)}').then(()=>this.textContent='Copied!')">Copy URL</button>`;
+        const cat = mimeCategory(f.mime_type);
+        const catLabel = cat === "image" ? "Image" : cat === "document" ? "Doc" : "File";
 
-        return [
-          escapeHtml(f.original_name),
-          `<span class="mono">${escapeHtml(f.mime_type || "unknown")}</span>`,
-          `<span class="mono">${size}</span>`,
-          ref,
-          `<span class="mono">${formatDate(f.created_at)}</span>`,
-          `${copyBtn} ${deleteBtn}`,
-        ];
-      });
-      fileTable = dataTable(["Name", "Type", "Size", "Ref", "Date", "Actions"], rows);
-    }
+        const thumb = isImage
+          ? `<img src="${escapeHtml(url)}" alt="${escapeHtml(f.original_name)}" loading="lazy">`
+          : `<span class="icon">${icon}</span>`;
 
-    // Upload form (only if storage is online)
-    let uploadForm = "";
-    if (storageOnline) {
-      uploadForm = `<form method="POST" action="/storage/upload" enctype="multipart/form-data">
-        <div style="display:flex;gap:1rem;align-items:end">
-          <div style="flex:1">
-            <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.05em">File</label>
-            <input type="file" name="file" required style="padding:0.4rem">
+        const refBadge = f.reference_type === "blog_post"
+          ? `<span style="display:inline-block;font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:4px;background:var(--crow-accent);color:#fff;margin-left:0.25rem">Blog</span>`
+          : f.reference_type === "shared"
+            ? `<span style="display:inline-block;font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:4px;background:#6366f1;color:#fff;margin-left:0.25rem">Shared</span>`
+            : f.reference_type
+              ? `<span style="display:inline-block;font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:4px;background:var(--crow-text-muted);color:#fff;margin-left:0.25rem">${escapeHtml(f.reference_type)}</span>`
+              : "";
+
+        const typeBadge = `<span style="display:inline-block;font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:4px;background:var(--crow-border);color:var(--crow-text-muted)">${escapeHtml(catLabel)}</span>`;
+
+        const escapedUrl = escapeHtml(url);
+        const escapedName = escapeHtml(f.original_name || f.s3_key);
+        const escapedKey = escapeHtml(f.s3_key);
+
+        return `<div class="file-card">
+          <div class="file-thumb">${thumb}</div>
+          <div class="file-info">
+            <div class="file-name" title="${escapedName}">${escapedName}</div>
+            <div class="file-meta">
+              ${typeBadge}${refBadge}
+              <span style="margin-left:0.25rem">${escapeHtml(size)}</span>
+            </div>
+            <div class="file-meta" style="margin-top:0.25rem">${escapeHtml(formatDate(f.created_at))}</div>
           </div>
-          <button type="submit" class="btn btn-primary">Upload</button>
-        </div>
-      </form>`;
+          <div class="file-actions">
+            <button class="btn btn-sm btn-secondary" onclick="navigator.clipboard.writeText('${escapedUrl}').then(function(){this.textContent='Copied!'}.bind(this))" title="Copy URL">Copy URL</button>
+            <form method="POST" style="display:inline" onsubmit="return confirm('Delete ${escapedName}?')">
+              <input type="hidden" name="action" value="delete">
+              <input type="hidden" name="s3_key" value="${escapedKey}">
+              <button class="btn btn-sm btn-danger" type="submit">Delete</button>
+            </form>
+          </div>
+        </div>`;
+      });
+
+      fileGrid = `<div class="file-grid">${cards.join("")}</div>`;
     }
+
+    // Upload zone (only if storage is online)
+    let uploadZone = "";
+    if (storageOnline) {
+      uploadZone = `<div id="upload-zone" style="border:2px dashed var(--crow-border);border-radius:12px;padding:2rem;text-align:center;cursor:pointer;transition:border-color 0.2s,background 0.2s">
+  <div style="font-size:1.5rem;margin-bottom:0.5rem">Drop files here</div>
+  <div style="color:var(--crow-text-muted);font-size:0.9rem;margin-bottom:1rem">or click to browse</div>
+  <input type="file" id="file-input" multiple style="display:none">
+  <div style="display:flex;gap:0.75rem;justify-content:center;align-items:center;flex-wrap:wrap">
+    <select id="upload-ref-type" style="padding:0.4rem 0.75rem;border:1px solid var(--crow-border);border-radius:6px;background:var(--crow-bg);color:var(--crow-text);font-size:0.85rem">
+      <option value="">General</option>
+      <option value="blog_post">Blog Media</option>
+      <option value="shared">Shared File</option>
+    </select>
+  </div>
+  <div id="upload-progress" style="margin-top:1rem;display:none"></div>
+</div>`;
+    }
+
+    const gridStyles = `<style>
+.file-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:1rem; }
+.file-card { background:var(--crow-bg-card,var(--crow-surface)); border:1px solid var(--crow-border); border-radius:8px; overflow:hidden; transition:transform 0.15s; }
+.file-card:hover { transform:translateY(-2px); }
+.file-thumb { height:120px; background:var(--crow-bg-elevated,#1a1a2e); display:flex; align-items:center; justify-content:center; overflow:hidden; }
+.file-thumb img { width:100%; height:100%; object-fit:cover; }
+.file-thumb .icon { font-size:2.5rem; opacity:0.4; }
+.file-info { padding:0.75rem; }
+.file-name { font-size:0.85rem; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-bottom:0.25rem; }
+.file-meta { font-size:0.75rem; color:var(--crow-text-muted); font-family:'JetBrains Mono',monospace; }
+.file-actions { display:flex; gap:0.25rem; padding:0 0.75rem 0.75rem; }
+</style>`;
+
+    const uploadScript = storageOnline ? `<script>
+(function() {
+  var zone = document.getElementById('upload-zone');
+  var input = document.getElementById('file-input');
+  var progress = document.getElementById('upload-progress');
+  var refType = document.getElementById('upload-ref-type');
+
+  zone.addEventListener('click', function(e) { if (e.target.tagName !== 'SELECT' && e.target.tagName !== 'OPTION') input.click(); });
+  zone.addEventListener('dragover', function(e) { e.preventDefault(); zone.style.borderColor = 'var(--crow-accent)'; zone.style.background = 'var(--crow-accent-muted,rgba(255,255,255,0.03))'; });
+  zone.addEventListener('dragleave', function() { zone.style.borderColor = ''; zone.style.background = ''; });
+  zone.addEventListener('drop', function(e) {
+    e.preventDefault();
+    zone.style.borderColor = '';
+    zone.style.background = '';
+    uploadFiles(e.dataTransfer.files);
+  });
+  input.addEventListener('change', function() { uploadFiles(this.files); });
+
+  function uploadFiles(files) {
+    if (!files || files.length === 0) return;
+    progress.style.display = 'block';
+    progress.style.color = '';
+    progress.textContent = 'Uploading ' + files.length + ' file(s)...';
+
+    var promises = Array.from(files).map(function(file) {
+      var fd = new FormData();
+      fd.append('file', file);
+      if (refType.value) fd.append('reference_type', refType.value);
+      return fetch('/storage/upload', { method: 'POST', body: fd })
+        .then(function(r) { return r.json(); })
+        .then(function(d) { return d.error ? Promise.reject(d.error) : d; });
+    });
+
+    Promise.all(promises).then(function() {
+      progress.style.color = 'var(--crow-success,#22c55e)';
+      progress.textContent = 'Uploaded! Refreshing...';
+      setTimeout(function() { location.reload(); }, 1000);
+    }).catch(function(err) {
+      progress.style.color = 'var(--crow-error,#ef4444)';
+      progress.textContent = 'Upload failed: ' + (err.message || err);
+    });
+  }
+})();
+<\/script>` : "";
 
     const content = `
+      ${gridStyles}
       ${stats}
-      ${uploadForm ? section("Upload", uploadForm, { delay: 150 }) : ""}
-      ${section("Files", fileTable, { delay: 200 })}
+      ${uploadZone ? section("Upload", uploadZone, { delay: 150 }) : ""}
+      ${section("Files", filterTabs + fileGrid, { delay: 200 })}
+      ${uploadScript}
     `;
 
     return layout({ title: "Files", content });

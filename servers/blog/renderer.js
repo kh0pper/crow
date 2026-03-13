@@ -18,7 +18,12 @@ marked.setOptions({ gfm: true, breaks: true });
 export function renderMarkdown(markdown) {
   if (!markdown) return "";
   const raw = marked.parse(markdown);
-  return sanitizeHtml(raw, {
+  // Rewrite storage: URLs to public blog media route
+  const processed = raw.replace(
+    /(<img\s[^>]*src=")storage:([^"]+)(")/g,
+    '$1/blog/media/$2$3'
+  );
+  return sanitizeHtml(processed, {
     allowedTags: sanitizeHtml.defaults.allowedTags.concat([
       "img", "h1", "h2", "h3", "h4", "h5", "h6",
       "details", "summary", "figure", "figcaption",
