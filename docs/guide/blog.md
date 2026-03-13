@@ -120,7 +120,7 @@ Blog posts are indexed with FTS5 full-text search, so keyword searches are fast 
 
 ## Themes
 
-The blog uses the **Dark Editorial** theme by default — a clean, reading-focused design with dark and light mode support.
+The blog uses the **Dark Editorial** theme by default — a clean, reading-focused design with dark and light mode support. The blog's color palette follows the Crow brand identity: indigo accents, deep blue-black backgrounds in dark mode, and warm stone tones in light mode. This ensures visual consistency between your blog and the Crow's Nest dashboard.
 
 The theme controls:
 

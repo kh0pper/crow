@@ -75,6 +75,48 @@ Every add-on has a `manifest.json` at its root:
 | `dependencies` | No | npm dependencies (installed automatically) |
 | `envVars` | No | Required environment variables |
 
+### `webUI` Field
+
+Add-ons that provide a browser-accessible interface should declare a `webUI` object:
+
+```json
+{
+  "webUI": {
+    "port": 8080,
+    "path": "/",
+    "label": "Open App"
+  }
+}
+```
+
+| Field | Description |
+|---|---|
+| `port` | The local port the web UI listens on |
+| `path` | URL path to append after the port (e.g., `/` or `/admin`) |
+| `label` | Button text shown on launcher tiles and the Extensions page |
+
+Set `webUI` to `null` for headless add-ons (no web interface). When `webUI` is present, the Crow's Nest launcher shows an "Open" button linking to `http://localhost:<port><path>`.
+
+### `panel` Field
+
+Add-ons can include a Crow's Nest panel that gets automatically installed and registered:
+
+```json
+{
+  "panel": "panels/my-panel.js"
+}
+```
+
+The path is relative to the add-on's root directory. During installation, the panel file is copied to `~/.crow/panels/` and its ID is added to `~/.crow/panels.json`. On uninstall, the panel is removed. This works for any add-on type, not just `panel`-type add-ons.
+
+### SVG Logos
+
+Official add-ons have inline SVG logos defined in `servers/gateway/dashboard/shared/logos.js`. These appear on the Extensions page and the launcher tiles. Community add-ons that are not in the built-in logo set fall back to an emoji icon (Extensions page) or an initial-letter circle (launcher tiles).
+
+::: tip
+If you are submitting an add-on to the registry, you can propose an SVG logo to be included in `logos.js`. Use a 24x24 viewBox, `stroke="currentColor"`, and no fills so the icon adapts to both dark and light themes.
+:::
+
 ## File Structure
 
 ### Panel add-on

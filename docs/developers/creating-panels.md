@@ -77,6 +77,19 @@ const memories = await db.execute('SELECT * FROM memories ORDER BY created_at DE
 
 All standard `@libsql/client` methods are available (`execute`, `batch`, etc.).
 
+### context.appRoot
+
+The absolute path to the Crow source root directory. Use this to dynamically import shared modules like SVG logos or UI components:
+
+```js
+const { getAddonLogo } = await import(
+  join(appRoot, 'servers/gateway/dashboard/shared/logos.js')
+);
+const logo = getAddonLogo('ollama', 32);
+```
+
+This is especially useful for third-party panels that need access to built-in shared components without hardcoding paths.
+
 ### context.layout
 
 The layout function wraps your content in the Crow's Nest shell (navigation, theme, footer):
@@ -203,12 +216,14 @@ Restart the gateway to pick up new panels.
 
 Use the Crow's Nest CSS custom properties for consistent theming:
 
-- `--bg-primary` / `--bg-secondary` — Background colors
-- `--text-primary` / `--text-secondary` — Text colors
-- `--accent` — Accent/highlight color
-- `--border` — Border color
+- `--crow-bg-deep` / `--crow-bg-surface` / `--crow-bg-elevated` — Background layers (page, card, raised)
+- `--crow-text-primary` / `--crow-text-secondary` / `--crow-text-muted` — Text hierarchy
+- `--crow-accent` / `--crow-accent-hover` / `--crow-accent-muted` — Indigo accent and variants
+- `--crow-brand-gold` — Gold accent for branding highlights
+- `--crow-border` — Border color
+- `--crow-success` / `--crow-error` / `--crow-info` — Semantic colors
 
-These automatically adapt to dark and light modes.
+These automatically adapt to dark and light modes. See the [Brand Identity](/architecture/dashboard#brand-identity) section for the full token table.
 
 ## Testing Locally
 
