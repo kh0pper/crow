@@ -185,6 +185,27 @@ function propagateEnvToGateway(envVars) {
 }
 
 /**
+ * Re-comment env vars in the gateway's .env file during uninstall.
+ * Turns `KEY=value` back into `# KEY=value`.
+ */
+function revertEnvInGateway(envKeys) {
+  if (!envKeys || envKeys.length === 0) return;
+  if (!existsSync(APP_ENV_PATH)) return;
+
+  let content = readFileSync(APP_ENV_PATH, "utf8");
+
+  for (const key of envKeys) {
+    // Match uncommented lines like KEY=value
+    const pattern = new RegExp(`^(${key}=.*)$`, "m");
+    if (pattern.test(content)) {
+      content = content.replace(pattern, "# $1");
+    }
+  }
+
+  writeFileSync(APP_ENV_PATH, content);
+}
+
+/**
  * Schedule a graceful gateway restart so new env vars take effect.
  * Uses the same pattern as auto-update: exit with code 1 so systemd restarts.
  * For non-systemd, just sets process.env so the storage server can reinitialize.
@@ -489,16 +510,31 @@ export default function bundlesRouter() {
           }
         }
 
-        // 3. Remove bundle files
+        // 3. Re-comment env vars in gateway .env
+        let needsRestart = false;
+        if (addonType === "bundle" && manifest?.env_vars) {
+          const envKeys = manifest.env_vars.map((v) => v.name);
+          revertEnvInGateway(envKeys);
+          appendLog(job, "Reverted gateway configuration");
+          needsRestart = true;
+        }
+
+        // 4. Remove bundle files
         rmSync(bundleDir, { recursive: true, force: true });
         appendLog(job, "Bundle files removed");
 
-        // 4. Update installed.json
+        // 5. Update installed.json
         const installed = getInstalled().filter((i) => i.id !== bundle_id);
         saveInstalled(installed);
         appendLog(job, "Installation record removed");
 
         finishJob(job, "complete");
+
+        // 6. Restart gateway if env vars were reverted
+        if (needsRestart) {
+          appendLog(job, "Restarting gateway to apply changes...");
+          scheduleGatewayRestart(2000);
+        }
       } catch (err) {
         appendLog(job, `Error: ${err.message}`);
         finishJob(job, "failed");
