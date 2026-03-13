@@ -67,7 +67,7 @@ if (noAuth) {
 // Initialize OAuth tables
 await initOAuthTables();
 
-// Verify core schema exists — fail fast with clear message if init-db hasn't run
+// Verify core schema exists — auto-initialize if missing (Turso/Docker first run)
 try {
   const _schemaDb = createDbClient();
   const { rows } = await _schemaDb.execute(
@@ -75,10 +75,20 @@ try {
   );
   _schemaDb.close();
   if (rows.length < 3) {
-    console.error("ERROR: Database schema is incomplete. Run 'npm run init-db' first.");
-    console.error("  Found tables: " + (rows.map(r => r.name).join(", ") || "none"));
-    console.error("  Expected: memories, dashboard_settings, crow_context (and others)");
-    process.exit(1);
+    console.log("Database schema incomplete — running init-db...");
+    const { execFileSync } = await import("node:child_process");
+    const { dirname } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const gatewayDir = dirname(fileURLToPath(import.meta.url));
+    const appRoot = dirname(dirname(gatewayDir));
+    try {
+      execFileSync("node", ["scripts/init-db.js"], { cwd: appRoot, stdio: "inherit" });
+      console.log("Database schema initialized successfully.");
+    } catch (initErr) {
+      console.error("ERROR: Failed to auto-initialize database schema:", initErr.message);
+      console.error("  Run 'npm run init-db' manually.");
+      process.exit(1);
+    }
   }
 } catch (e) {
   console.error("ERROR: Could not verify database schema:", e.message);

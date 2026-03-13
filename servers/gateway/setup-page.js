@@ -564,6 +564,11 @@ function pollHealth() {
  * set on the session cookie (see dashboard/auth.js setSessionCookie()).
  */
 export async function setupIntegrationsHandler(req, res) {
+  // Key management is disabled on cloud/hosted deployments
+  if (process.env.RENDER_EXTERNAL_URL || process.env.RENDER_SERVICE_ID || process.env.CROW_HOSTED) {
+    return res.status(403).json({ error: "Key management is not available on hosted deployments. Use your platform's environment variable settings." });
+  }
+
   // SameSite=Strict on the session cookie is the primary CSRF protection.
   // This check confirms the csrf cookie was set (defense-in-depth).
   const cookies = parseCookies(req);
