@@ -12,7 +12,7 @@ import { join, dirname } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
 
-const REGISTRY_URL = "https://raw.githubusercontent.com/kh0pper/crow-addons/main/registry/add-ons.json";
+const REGISTRY_URL = "https://raw.githubusercontent.com/kh0pper/crow-addons/main/registry.json";
 const CROW_DIR = join(homedir(), ".crow");
 const INSTALLED_PATH = join(CROW_DIR, "installed.json");
 
