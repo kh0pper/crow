@@ -59,7 +59,7 @@ export async function setupPageHandler(req, res) {
     // Identity not available
   }
   const connected = integrations.filter((i) => i.status === "connected");
-  const errored = integrations.filter((i) => i.status === "error");
+  const errored = integrations.filter((i) => i.status === "error" && !i.requiresMissing);
   const notConfigured = integrations.filter((i) => !i.configured);
   const pending = integrations.filter(
     (i) => i.configured && i.status !== "connected" && i.status !== "error"
@@ -75,6 +75,12 @@ export async function setupPageHandler(req, res) {
   const renderDashboardUrl = renderServiceId
     ? `https://dashboard.render.com/web/${renderServiceId}/env`
     : "https://dashboard.render.com";
+
+  // Build category map from INTEGRATIONS registry
+  const categoryMap = {};
+  for (const integ of INTEGRATIONS) {
+    categoryMap[integ.id] = integ.category || "development";
+  }
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -156,9 +162,32 @@ export async function setupPageHandler(req, res) {
     .stat-label { font-size: 12px; color: #86868b; margin-top: 2px; }
     .stat-number.green { color: #34c759; }
     .stat-number.gray { color: #86868b; }
+    .integration-card .card-header { cursor: pointer; user-select: none; }
+    .integration-card .chevron { margin-left: auto; transition: transform 0.2s; font-size: 18px; color: #86868b; }
+    .integration-card .chevron.open { transform: rotate(90deg); }
+    .card-body { padding: 12px 16px 16px; border-top: 1px solid #f0f0f0; }
+    .field { margin-bottom: 12px; }
+    .field label { display: block; font-size: 12px; font-weight: 600; color: #86868b; margin-bottom: 4px; font-family: 'SF Mono', Menlo, monospace; }
+    .field input { width: 100%; padding: 8px 12px; border: 1px solid #d2d2d7; border-radius: 8px; font-size: 14px; }
+    .card-links { font-size: 13px; margin-bottom: 12px; }
+    .card-links a { color: #007aff; text-decoration: none; }
+    .card-links a:hover { text-decoration: underline; }
+    .card-actions { display: flex; gap: 8px; }
+    .card-actions button { padding: 8px 16px; border: none; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; }
+    .card-actions .btn-save { background: #007aff; color: white; }
+    .card-actions .btn-save:hover { background: #0056b3; }
+    .card-actions .btn-remove { background: #f5f5f7; color: #ff3b30; }
+    .card-actions .btn-remove:hover { background: #fee; }
+    .category-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #86868b; margin: 16px 0 8px; }
+    .requires-note { color: #ff9f0a; font-size: 13px; padding: 8px 0; }
+    #restart-banner { position: fixed; top: 0; left: 0; right: 0; background: #34c759; color: white; padding: 12px; text-align: center; font-weight: 500; z-index: 1000; }
   </style>
 </head>
 <body>
+  <div id="restart-banner" style="display:none">
+    Keys saved! Restarting gateway...
+    <span id="restart-status">Waiting for restart...</span>
+  </div>
   <h1>Crow Setup</h1>
   <p class="subtitle">Integration status for your Crow instance</p>
 
@@ -267,15 +296,22 @@ export async function setupPageHandler(req, res) {
   <div class="section">
     <div class="section-title">Connected</div>
     ${connected.map((i) => `
-    <div class="card">
-      <div class="card-header">
+    <div class="card integration-card">
+      <div class="card-header" onclick="toggleCard(this)">
         <span class="status-dot green"></span>
         <div>
           <div class="card-name">${i.name}</div>
           <div class="card-desc">${i.description}</div>
         </div>
+        <span class="chevron">&#9656;</span>
       </div>
-      <div class="card-tools">${i.toolCount} tool${i.toolCount !== 1 ? "s" : ""} available</div>
+      <div class="card-body" style="display:none">
+        <div class="card-tools" style="margin-bottom:12px">${i.toolCount} tool${i.toolCount !== 1 ? "s" : ""} available</div>
+        ${!isRender && !isHosted ? `
+        <div class="card-actions">
+          <button class="btn-remove" onclick="removeIntegration('${i.id}')">Remove</button>
+        </div>` : ""}
+      </div>
     </div>`).join("")}
   </div>` : ""}
 
@@ -295,9 +331,58 @@ export async function setupPageHandler(req, res) {
     </div>`).join("")}
   </div>` : ""}
 
-  ${notConfigured.length > 0 ? `
+  ${!isRender && !isHosted && notConfigured.length > 0 ? `
   <div class="section">
-    <div class="section-title">Available — Add API Keys to Enable</div>
+    <div class="section-title">Available Integrations</div>
+    ${["productivity", "communication", "development"].map(cat => {
+      const items = notConfigured.filter(i => (categoryMap[i.id] || "development") === cat);
+      if (items.length === 0) return "";
+      const label = { productivity: "Productivity", communication: "Communication", development: "Development & Search" }[cat];
+      return `
+        <div class="category-title">${label}</div>
+        ${items.map(i => `
+        <div class="card integration-card">
+          <div class="card-header" onclick="toggleCard(this)">
+            <span class="status-dot ${i.requiresMissing ? 'yellow' : 'gray'}"></span>
+            <div>
+              <div class="card-name">${i.name}</div>
+              <div class="card-desc">${i.description}</div>
+            </div>
+            <span class="chevron">&#9656;</span>
+          </div>
+          <div class="card-body" style="display:none">
+            ${i.requiresMissing ? `
+              <div class="requires-note">Requires Python (uvx) &mdash; install Python to enable this integration</div>
+            ` : i.envVars.length > 0 ? `
+              <form class="integration-form">
+                <input type="hidden" name="integration_id" value="${i.id}">
+                <input type="hidden" name="action" value="save">
+                ${i.envVars.map(v => `
+                <div class="field">
+                  <label>${v}</label>
+                  <input type="password" name="${v}" placeholder="${v.toLowerCase().includes('url') || v.toLowerCase().includes('path') ? 'https://...' : '...'}" autocomplete="off">
+                </div>`).join("")}
+                <div class="card-links">
+                  ${i.keyUrl ? `<a href="${i.keyUrl}" target="_blank">Get your API key</a>` : ""}
+                  ${i.keyUrl && i.docsUrl ? ` <span style="color:#86868b">&middot;</span> ` : ""}
+                  ${i.docsUrl ? `<a href="${i.docsUrl}" target="_blank">Setup guide</a>` : ""}
+                </div>
+                ${i.keyInstructions ? `<div style="color:#86868b;font-size:12px;margin-bottom:12px">${i.keyInstructions}</div>` : ""}
+                <div class="card-actions">
+                  <button type="submit" class="btn-save">Save</button>
+                </div>
+              </form>
+            ` : `
+              <div style="color:#86868b;font-size:13px">No configuration needed &mdash; works out of the box.</div>
+            `}
+          </div>
+        </div>`).join("")}`;
+    }).join("")}
+  </div>` : ""}
+
+  ${(isRender || isHosted) && notConfigured.length > 0 ? `
+  <div class="section">
+    <div class="section-title">Available &mdash; Add API Keys to Enable</div>
     ${notConfigured.map((i) => `
     <div class="card">
       <div class="card-header">
@@ -316,33 +401,28 @@ export async function setupPageHandler(req, res) {
     </div>`).join("")}
   </div>` : ""}
 
+  ${isRender || isHosted ? `
   <div class="section">
     <div class="section-title">How to Add an Integration</div>
     <div class="instructions">
       ${isHosted ? `
       <ol>
-        <li><strong>Get your API key</strong> from the service (click the "Get your API key" link above)</li>
+        <li><strong>Get your API key</strong> from the service</li>
         <li>Go to your <strong>Crow's Nest</strong> &rarr; <strong>Settings</strong> panel</li>
         <li>Add the environment variable name and your API key</li>
         <li>Your instance will restart automatically (~10 seconds)</li>
         <li>Refresh this page to see the integration turn green</li>
-      </ol>` : isRender ? `
+      </ol>` : `
       <ol>
-        <li><strong>Get your API key</strong> from the service (click the "Get your API key" link above)</li>
+        <li><strong>Get your API key</strong> from the service</li>
         <li><strong>Go to your Render dashboard</strong> &rarr; your crow-gateway service &rarr; <strong>Environment</strong></li>
-        <li><strong>Click "Add Environment Variable"</strong> &rarr; type the variable name exactly as shown above &rarr; paste your key &rarr; <strong>Save Changes</strong></li>
+        <li><strong>Click "Add Environment Variable"</strong> &rarr; type the variable name &rarr; paste your key &rarr; <strong>Save Changes</strong></li>
         <li>Render will <strong>automatically restart</strong> your service (~1 minute)</li>
         <li>Refresh this page to see the integration turn green</li>
       </ol>
-      <a href="${renderDashboardUrl}" target="_blank" class="render-link">Open Render Dashboard</a>` : `
-      <ol>
-        <li><strong>Get your API key</strong> from the service (click the "Get your API key" link above)</li>
-        <li>Add the environment variable to your <code>.env</code> file or hosting environment</li>
-        <li>Restart the Crow gateway</li>
-        <li>Refresh this page to see the integration turn green</li>
-      </ol>`}
+      <a href="${renderDashboardUrl}" target="_blank" class="render-link">Open Render Dashboard</a>`}
     </div>
-  </div>
+  </div>` : ""}
 
   ${gatewayUrl ? `
   <div class="section">
@@ -390,6 +470,86 @@ export async function setupPageHandler(req, res) {
     </div>
   </div>` : ""}
 
+<script>
+function toggleCard(header) {
+  var body = header.nextElementSibling;
+  var chevron = header.querySelector('.chevron');
+  if (body.style.display === 'none' || !body.style.display) {
+    body.style.display = 'block';
+    if (chevron) chevron.classList.add('open');
+  } else {
+    body.style.display = 'none';
+    if (chevron) chevron.classList.remove('open');
+  }
+}
+
+document.querySelectorAll('.integration-form').forEach(function(form) {
+  form.addEventListener('submit', async function(e) {
+    e.preventDefault();
+    var btn = form.querySelector('button[type=submit]');
+    var origText = btn.textContent;
+    btn.textContent = 'Saving...';
+    btn.disabled = true;
+    try {
+      var resp = await fetch('/setup/integrations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(new FormData(form)),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        if (data.restarting) {
+          document.getElementById('restart-banner').style.display = 'block';
+          pollHealth();
+        } else {
+          btn.textContent = 'Saved! Restart gateway to apply.';
+          setTimeout(function() { btn.textContent = origText; btn.disabled = false; }, 3000);
+        }
+      } else {
+        btn.textContent = data.error || 'Error';
+        setTimeout(function() { btn.textContent = origText; btn.disabled = false; }, 3000);
+      }
+    } catch (err) {
+      btn.textContent = 'Error';
+      setTimeout(function() { btn.textContent = origText; btn.disabled = false; }, 3000);
+    }
+  });
+});
+
+function removeIntegration(id) {
+  if (!confirm('Remove this integration\\'s API keys?')) return;
+  fetch('/setup/integrations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ integration_id: id, action: 'remove' }),
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    if (data.ok && data.restarting) {
+      document.getElementById('restart-banner').style.display = 'block';
+      pollHealth();
+    } else if (data.ok) {
+      location.reload();
+    }
+  });
+}
+
+function pollHealth() {
+  var status = document.getElementById('restart-status');
+  var attempts = 0;
+  var interval = setInterval(async function() {
+    attempts++;
+    try {
+      var resp = await fetch('/health', { signal: AbortSignal.timeout(2000) });
+      if (resp.ok) { clearInterval(interval); location.reload(); }
+    } catch(e) {
+      if (status) status.textContent = 'Waiting for restart... (' + (attempts * 2) + 's)';
+    }
+    if (attempts > 30) {
+      clearInterval(interval);
+      if (status) status.textContent = 'Gateway may need manual restart.';
+    }
+  }, 2000);
+}
+</script>
 </body>
 </html>`;
 
