@@ -7,9 +7,11 @@ Skip the setup entirely. Get a fully configured Crow instance hosted by [Maestro
 - **Your own subdomain** — `username.crow.maestro.press`
 - **Crow's Nest & blog** — Visual control panel and publishing platform, ready to go
 - **All AI integrations** — Connect Claude, ChatGPT, Gemini, Grok, Cursor, and more
+- **Public blog & podcast** — Your blog and podcast RSS feeds are publicly accessible with HTTPS — ready for monetization, podcast directories (Apple Podcasts, Spotify), and subscribers
 - **Daily backups** — Automatic daily backups of your data
 - **SSL included** — HTTPS enabled by default
 - **Automatic updates** — Always running the latest version of Crow
+- **No bandwidth limits** — No throttling or fair-use caps on your public content
 
 ## How It Works
 
@@ -41,6 +43,7 @@ Everything a self-hosted Crow instance can do:
 | **Cost** | $15/mo or $120/yr | Free (Render, Oracle Cloud, Pi) |
 | **Control** | Hosted by Maestro Press | Full control over your server |
 | **Data** | Stored on Maestro Press infrastructure | Stored wherever you choose |
+| **Public blog/podcast** | Ready to go, no extra setup | Requires reverse proxy + domain |
 | **Best for** | Users who want Crow without the ops work | Developers and tinkerers |
 
 Both options give you the same Crow features. Self-hosting is free and gives you full control. Managed hosting trades a small monthly cost for zero maintenance.
@@ -55,6 +58,9 @@ Custom domains are on the roadmap. For now, you get `username.crow.maestro.press
 
 **Is my data private?**
 Yes. Each managed instance has its own isolated database. Maestro Press does not access your data. See the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md) for details.
+
+**Can I monetize my blog or podcast?**
+Yes. Managed hosting includes public HTTPS URLs for your blog and podcast feeds — suitable for ad-supported content, paid subscriptions, and podcast directory submission. Self-hosted users can do this too, but need to set up a reverse proxy and custom domain (Tailscale Funnel is for personal/hobby use only).
 
 **What are the terms of service?**
 See the [Managed Hosting Terms of Service](/legal/managed-hosting-terms).

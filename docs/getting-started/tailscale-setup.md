@@ -100,7 +100,7 @@ You should see a health check response from the gateway.
 
 Your blog is public at your gateway URL, but the Crow's Nest stays private. To make the blog accessible outside your tailnet:
 
-### Option A: Tailscale Funnel
+### Option A: Tailscale Funnel (Personal/Hobby Use)
 
 The simplest approach — expose port 3001 publicly:
 
@@ -110,20 +110,57 @@ sudo tailscale funnel 3001
 
 The gateway's built-in network restrictions ensure `/dashboard/*` routes are only accessible from local/Tailscale IPs, so the Crow's Nest remains protected even with Funnel enabled. Only the blog, health check, and MCP endpoints (which require OAuth) are accessible publicly.
 
-### Option B: Caddy Reverse Proxy
+::: warning Tailscale Funnel Limitations
+Tailscale Funnel is designed for **personal and hobby use**. It has bandwidth limits and is not intended as a production hosting solution. If you plan to monetize your blog or podcast (ads, subscriptions, paid content), use a proper reverse proxy with a custom domain instead (Option B below) or consider [managed hosting](./managed-hosting).
+:::
 
-For more control, use Caddy to expose only blog routes:
+### Option B: Caddy Reverse Proxy (Recommended for Production)
+
+For production use, monetized content, or higher traffic, use Caddy with a custom domain. Caddy provides automatic HTTPS via Let's Encrypt with no bandwidth limits:
+
+Install Caddy:
+
+```bash
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update && sudo apt install -y caddy
+```
+
+Configure `/etc/caddy/Caddyfile` to expose only blog routes:
 
 ```
-# /etc/caddy/Caddyfile
 yourdomain.com {
-    reverse_proxy /blog/* localhost:3001
-    reverse_proxy /blog localhost:3001
-    respond 404
+    # Blog pages, posts, feeds, and sitemap
+    handle /blog* {
+        reverse_proxy localhost:3001
+    }
+
+    # Block everything else (Crow's Nest, MCP, API)
+    handle {
+        respond "Not Found" 404
+    }
 }
 ```
 
-Then set `CROW_GATEWAY_URL=https://yourdomain.com` in your `.env` so RSS feeds and sitemaps use the correct domain.
+Then set `CROW_GATEWAY_URL` in your `.env` so RSS feeds, podcast URLs, and sitemaps use the public domain:
+
+```bash
+CROW_GATEWAY_URL=https://yourdomain.com
+```
+
+Restart both services:
+
+```bash
+sudo systemctl restart crow-gateway
+sudo systemctl restart caddy
+```
+
+Caddy automatically obtains and renews Let's Encrypt certificates. Make sure your domain's DNS A record points to your server's public IP, and that ports 80 and 443 are open in your firewall.
+
+::: tip Oracle Cloud Free Tier
+If you're running on Oracle Cloud, you also need to add ingress rules for TCP ports 80 and 443 in your VCN's security list. See the [Oracle Cloud section](/getting-started/cloud-deploy#oracle-cloud-free-tier) for details.
+:::
 
 ## Troubleshooting
 
