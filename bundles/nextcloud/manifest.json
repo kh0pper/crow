@@ -37,5 +37,6 @@
     }
   ],
   "ports": [8080],
+  "webUI": { "port": 8080, "path": "/", "label": "Nextcloud" },
   "notes": "Disk usage depends on files stored. Includes MariaDB for metadata."
 }

@@ -13,5 +13,6 @@
     "min_ram_mb": 64,
     "min_disk_mb": 100
   },
+  "webUI": null,
   "notes": "Extends the blog server — podcast episodes are blog posts tagged 'podcast' with audio metadata. No additional server required."
 }

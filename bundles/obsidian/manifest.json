@@ -27,5 +27,6 @@
     }
   ],
   "ports": [],
+  "webUI": null,
   "notes": "MCP server only — reads your local vault. No Docker required."
 }

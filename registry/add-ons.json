@@ -11,6 +11,7 @@
       "category": "productivity",
       "tags": ["notes", "knowledge-base", "markdown", "vault", "research"],
       "icon": "book",
+      "webUI": null,
       "requires": {
         "env": ["OBSIDIAN_VAULT_PATH"],
         "min_ram_mb": 128,
@@ -34,6 +35,7 @@
       "category": "smart-home",
       "tags": ["smart-home", "iot", "automation", "devices", "sensors"],
       "icon": "home",
+      "webUI": null,
       "requires": {
         "env": ["HA_URL", "HA_TOKEN"],
         "min_ram_mb": 256,
@@ -63,6 +65,7 @@
       "category": "ai",
       "tags": ["ai", "local", "embeddings", "privacy", "llm"],
       "icon": "brain",
+      "webUI": null,
       "requires": {
         "env": ["OLLAMA_HOST"],
         "min_ram_mb": 2048,
@@ -89,6 +92,7 @@
       "category": "productivity",
       "tags": ["files", "sync", "self-hosted", "webdav", "documents"],
       "icon": "cloud",
+      "webUI": { "port": 8080, "path": "/", "label": "Nextcloud" },
       "requires": {
         "env": ["NEXTCLOUD_URL", "NEXTCLOUD_USER", "NEXTCLOUD_PASSWORD"],
         "min_ram_mb": 512,
@@ -125,6 +129,7 @@
       "category": "media",
       "tags": ["photos", "albums", "self-hosted", "backup", "search"],
       "icon": "image",
+      "webUI": { "port": 2283, "path": "/", "label": "Immich" },
       "requires": {
         "env": ["IMMICH_URL", "IMMICH_API_KEY"],
         "min_ram_mb": 2048,
@@ -155,6 +160,7 @@
       "category": "storage",
       "tags": ["storage", "files", "s3", "upload", "self-hosted"],
       "icon": "archive",
+      "webUI": { "port": 9001, "path": "/", "label": "Console" },
       "requires": {
         "env": ["MINIO_ROOT_PASSWORD"],
         "min_ram_mb": 256,
@@ -205,6 +211,7 @@
       "category": "media",
       "tags": ["podcast", "audio", "rss", "itunes"],
       "icon": "mic",
+      "webUI": null,
       "requires": {
         "min_ram_mb": 64,
         "min_disk_mb": 100
