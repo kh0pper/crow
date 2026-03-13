@@ -26,5 +26,6 @@
     }
   ],
   "ports": [11434],
+  "webUI": null,
   "notes": "RAM and disk depend on model size. Small models (tinyllama) need ~2GB RAM. Large models (llama3) need 8GB+. Each model uses 2-50GB disk."
 }

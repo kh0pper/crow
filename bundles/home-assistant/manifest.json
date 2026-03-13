@@ -33,5 +33,6 @@
     }
   ],
   "ports": [],
+  "webUI": null,
   "notes": "Connects to an existing Home Assistant instance. Includes safety checkpoints for physical device control."
 }
