@@ -208,7 +208,7 @@ export default {
       integrationsHtml += `<div class="int-cat-label">${categoryLabels[catKey]}</div><div class="int-cards">`;
       for (const item of items) {
         const isConnected = item.proxyStatus?.status === "connected";
-        const requiresMissing = item.requires && item.requires.length > 0;
+        const requiresMissing = item.proxyStatus?.requiresMissing || false;
         const hasEnvVars = item.envVars.length > 0;
         const dotClass = isConnected ? "int-dot-green" : (requiresMissing && !isConnected ? "int-dot-yellow" : "int-dot-gray");
         const connectedBadge = isConnected ? ` ${badge("Connected", "connected")}` : "";
@@ -275,9 +275,11 @@ function toggleIntCard(header) {
 async function saveIntegration(id, btn) {
   const card = btn.closest('.int-card');
   const inputs = card.querySelectorAll('input[name]');
-  const body = { action: 'save_integration', integration_id: id };
+  const params = new URLSearchParams();
+  params.set('action', 'save_integration');
+  params.set('integration_id', id);
   let hasValue = false;
-  inputs.forEach(inp => { if (inp.value) { body[inp.name] = inp.value; hasValue = true; } });
+  inputs.forEach(inp => { if (inp.value) { params.set(inp.name, inp.value); hasValue = true; } });
   if (!hasValue) return;
 
   btn.disabled = true;
@@ -285,8 +287,8 @@ async function saveIntegration(id, btn) {
   try {
     const res = await fetch('/dashboard/settings', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
     });
     const data = await res.json();
     const msg = document.createElement('div');
@@ -318,10 +320,13 @@ async function removeIntegration(id, btn) {
   btn.disabled = true;
   btn.textContent = 'Removing...';
   try {
+    const params = new URLSearchParams();
+    params.set('action', 'remove_integration');
+    params.set('integration_id', id);
     const res = await fetch('/dashboard/settings', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'remove_integration', integration_id: id }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
     });
     const data = await res.json();
     if (data.ok) {
