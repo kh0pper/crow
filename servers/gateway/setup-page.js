@@ -12,7 +12,9 @@
 import { execFileSync } from "node:child_process";
 import { getProxyStatus } from "./proxy.js";
 import { connectedServers } from "./proxy.js";
-import { isPasswordSet } from "./dashboard/auth.js";
+import { isPasswordSet, parseCookies } from "./dashboard/auth.js";
+import { INTEGRATIONS } from "./integrations.js";
+import { APP_ROOT, resolveEnvPath, writeEnvVar, removeEnvVar, sanitizeEnvValue } from "./env-manager.js";
 
 /**
  * Detect Tailscale hostname and IP if available.
@@ -393,4 +395,66 @@ export async function setupPageHandler(req, res) {
 
   res.setHeader("Content-Type", "text/html");
   res.send(html);
+}
+
+/**
+ * Express handler for POST /setup/integrations
+ * Requires dashboard authentication.
+ * CSRF protection is provided by the SameSite=Strict cookie attribute
+ * set on the session cookie (see dashboard/auth.js setSessionCookie()).
+ */
+export async function setupIntegrationsHandler(req, res) {
+  // SameSite=Strict on the session cookie is the primary CSRF protection.
+  // This check confirms the csrf cookie was set (defense-in-depth).
+  const cookies = parseCookies(req);
+  const csrfCookie = cookies.crow_csrf;
+  if (!csrfCookie) {
+    return res.status(403).json({ error: "Missing session context" });
+  }
+
+  const { integration_id, action } = req.body;
+
+  // Validate integration exists
+  const integration = INTEGRATIONS.find((i) => i.id === integration_id);
+  if (!integration) {
+    return res.status(400).json({ error: "Unknown integration" });
+  }
+
+  const envPath = resolveEnvPath();
+
+  if (action === "remove") {
+    for (const envVar of integration.envVars) {
+      removeEnvVar(envPath, envVar);
+    }
+  } else {
+    // Save — only accept whitelisted env var names
+    for (const envVar of integration.envVars) {
+      const value = req.body[envVar];
+      if (value !== undefined && value !== "") {
+        const sanitized = sanitizeEnvValue(value);
+        writeEnvVar(envPath, envVar, sanitized);
+      }
+    }
+  }
+
+  // Regenerate .mcp.json
+  try {
+    execFileSync("node", ["scripts/generate-mcp-config.js"], {
+      cwd: APP_ROOT,
+      stdio: "pipe",
+      timeout: 10000,
+    });
+  } catch (e) {
+    console.warn("[setup] Failed to regenerate .mcp.json:", e.message);
+  }
+
+  // Detect systemd
+  const isSystemd = !!process.env.INVOCATION_ID;
+
+  res.json({ ok: true, restarting: isSystemd });
+
+  // If systemd, exit after response flushes
+  if (isSystemd) {
+    setTimeout(() => process.exit(0), 500);
+  }
 }

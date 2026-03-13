@@ -47,7 +47,8 @@ import { createDbClient } from "../db.js";
 import { createOAuthProvider, initOAuthTables } from "./auth.js";
 import { initProxyServers, createProxyServer, getProxyStatus, loadDynamicBackends } from "./proxy.js";
 import { createRouterServer } from "./router.js";
-import { setupPageHandler } from "./setup-page.js";
+import { setupPageHandler, setupIntegrationsHandler } from "./setup-page.js";
+import { dashboardAuth } from "./dashboard/auth.js";
 import { SessionManager } from "./session-manager.js";
 import { mountMcpServer } from "./routes/mcp.js";
 import { generateInstructions } from "../shared/instructions.js";
@@ -216,6 +217,7 @@ app.get("/api/health", async (req, res) => {
 
 // --- Setup Page (no auth) ---
 app.get("/setup", setupPageHandler);
+app.post("/setup/integrations", express.urlencoded({ extended: false }), dashboardAuth, setupIntegrationsHandler);
 
 // --- crow.md Endpoint (protected when auth is enabled) ---
 const crowMdHandler = async (req, res) => {
