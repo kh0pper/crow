@@ -89,8 +89,9 @@ async function handler(req, res, { db, layout, appRoot }) {
     statCard("Drafts", draftCount, { delay: 100 }),
   ]);
 
-  // RSS feed URL
-  const feedUrl = `${req.protocol}://${req.get("host")}/blog/podcast.xml`;
+  // RSS feed URL — prefer public URL for podcast directories
+  const siteUrl = process.env.CROW_GATEWAY_URL || `${req.protocol}://${req.get("host")}`;
+  const feedUrl = `${siteUrl}/blog/podcast.xml`;
   const feedSection = `<div style="background:var(--crow-surface);border:1px solid var(--crow-border);border-radius:8px;padding:1rem;margin-bottom:1.5rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
     <span style="font-weight:600;color:var(--crow-text)">RSS Feed</span>
     <code id="podcast-feed-url" style="flex:1;min-width:200px;padding:0.4rem 0.6rem;background:var(--crow-bg);border-radius:4px;font-size:0.85rem;word-break:break-all">${escapeHtml(feedUrl)}</code>
