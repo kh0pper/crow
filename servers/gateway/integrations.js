@@ -15,6 +15,8 @@ export const INTEGRATIONS = [
     envVars: ["TRELLO_API_KEY", "TRELLO_TOKEN"],
     keyUrl: "https://trello.com/power-ups/admin",
     keyInstructions: "Copy your API Key, then visit the authorization link on that page to generate a Token.",
+    docsUrl: "https://kh0pper.github.io/software/crow/integrations/trello",
+    category: "productivity",
   },
   {
     id: "canvas-lms",
@@ -25,6 +27,8 @@ export const INTEGRATIONS = [
     envVars: ["CANVAS_API_TOKEN", "CANVAS_BASE_URL"],
     keyUrl: "https://community.canvaslms.com/t5/Admin-Guide/How-do-I-manage-API-access-tokens/ta-p/89",
     keyInstructions: "In Canvas: Account → Settings → New Access Token. Also set your Canvas URL (e.g. https://your-school.instructure.com).",
+    docsUrl: "https://kh0pper.github.io/software/crow/integrations/canvas-lms",
+    category: "productivity",
   },
   {
     id: "github",
@@ -35,6 +39,8 @@ export const INTEGRATIONS = [
     envVars: ["GITHUB_PERSONAL_ACCESS_TOKEN"],
     keyUrl: "https://github.com/settings/tokens",
     keyInstructions: "Generate new token (classic) → select scopes: repo, read:org, read:user → copy the token.",
+    docsUrl: "https://kh0pper.github.io/software/crow/integrations/github",
+    category: "development",
   },
   {
     id: "brave-search",
@@ -45,6 +51,8 @@ export const INTEGRATIONS = [
     envVars: ["BRAVE_API_KEY"],
     keyUrl: "https://brave.com/search/api/",
     keyInstructions: "Sign up for a free API key and copy it from the Brave developer dashboard.",
+    docsUrl: "https://kh0pper.github.io/software/crow/integrations/brave-search",
+    category: "development",
   },
   {
     id: "slack",
@@ -55,6 +63,8 @@ export const INTEGRATIONS = [
     envVars: ["SLACK_BOT_TOKEN"],
     keyUrl: "https://api.slack.com/apps",
     keyInstructions: "Create New App → OAuth & Permissions → add scopes (channels:history, channels:read, chat:write, users:read) → Install to Workspace → copy Bot Token (xoxb-...).",
+    docsUrl: "https://kh0pper.github.io/software/crow/integrations/slack",
+    category: "communication",
   },
   {
     id: "notion",
@@ -71,6 +81,8 @@ export const INTEGRATIONS = [
     }),
     keyUrl: "https://www.notion.so/my-integrations",
     keyInstructions: "Create new integration → copy the Internal Integration Secret (ntn_...) → then share your Notion pages with the integration.",
+    docsUrl: "https://kh0pper.github.io/software/crow/integrations/notion",
+    category: "productivity",
   },
   {
     id: "discord",
@@ -81,6 +93,8 @@ export const INTEGRATIONS = [
     envVars: ["DISCORD_BOT_TOKEN"],
     keyUrl: "https://discord.com/developers/applications",
     keyInstructions: "New Application → Bot tab → Reset Token → copy it. Enable Message Content Intent under Bot settings.",
+    docsUrl: "https://kh0pper.github.io/software/crow/integrations/discord",
+    category: "communication",
   },
   {
     id: "microsoft-teams",
@@ -91,6 +105,8 @@ export const INTEGRATIONS = [
     envVars: ["TEAMS_CLIENT_ID", "TEAMS_CLIENT_SECRET", "TEAMS_TENANT_ID"],
     keyUrl: "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps",
     keyInstructions: "Register an app in Azure AD → add Graph permissions (Chat.Read, ChannelMessage.Read.All, ChannelMessage.Send) → create a client secret.",
+    docsUrl: "https://kh0pper.github.io/software/crow/integrations/microsoft-teams",
+    category: "communication",
   },
   {
     id: "google-workspace",
@@ -101,6 +117,9 @@ export const INTEGRATIONS = [
     envVars: ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"],
     keyUrl: "https://console.cloud.google.com/apis/credentials",
     keyInstructions: "Create OAuth 2.0 Client ID (Desktop App type). Enable Gmail, Calendar, Sheets, Docs, and Slides APIs.",
+    docsUrl: "https://kh0pper.github.io/software/crow/integrations/google-workspace",
+    category: "productivity",
+    requires: ["uvx"],
   },
   {
     id: "zotero",
@@ -111,6 +130,9 @@ export const INTEGRATIONS = [
     envVars: ["ZOTERO_API_KEY", "ZOTERO_USER_ID"],
     keyUrl: "https://www.zotero.org/settings/keys",
     keyInstructions: "Create new private key → check 'Allow library access' → copy the API key and your User ID (shown at top of page).",
+    docsUrl: "https://kh0pper.github.io/software/crow/integrations/zotero",
+    category: "productivity",
+    requires: ["uvx"],
   },
   {
     id: "arxiv",
@@ -121,6 +143,9 @@ export const INTEGRATIONS = [
     envVars: [], // No API key needed
     keyUrl: null,
     keyInstructions: "No setup required — works out of the box.",
+    docsUrl: "https://kh0pper.github.io/software/crow/integrations/arxiv",
+    category: "productivity",
+    requires: ["uvx"],
   },
   {
     id: "render",
@@ -132,6 +157,45 @@ export const INTEGRATIONS = [
     envVars: ["RENDER_API_KEY"],
     keyUrl: "https://dashboard.render.com/account/api-keys",
     keyInstructions: "Go to Account Settings → API Keys → Create API Key → copy it.",
+    docsUrl: "https://kh0pper.github.io/software/crow/integrations/render",
+    category: "development",
+  },
+  {
+    id: "mcp-research",
+    name: "MCP Research",
+    description: "Academic search and research tools",
+    command: "uvx",
+    args: ["mcp-research"],
+    envVars: [],
+    requires: ["uvx"],
+    keyUrl: null,
+    keyInstructions: "No setup required — works out of the box.",
+    docsUrl: null,
+    category: "productivity",
+  },
+  {
+    id: "home-assistant",
+    name: "Home Assistant",
+    description: "Smart home device control",
+    command: "npx",
+    args: ["-y", "hass-mcp"],
+    envVars: ["HA_URL", "HA_TOKEN"],
+    keyUrl: "https://www.home-assistant.io/docs/authentication/",
+    keyInstructions: "Profile → Security → Long-lived access tokens → Create Token. Also set your Home Assistant URL.",
+    docsUrl: "https://kh0pper.github.io/software/crow/integrations/home-assistant",
+    category: "productivity",
+  },
+  {
+    id: "obsidian",
+    name: "Obsidian",
+    description: "Vault search and knowledge base sync",
+    command: "npx",
+    args: ["-y", "mcp-obsidian"],
+    envVars: ["OBSIDIAN_VAULT_PATH"],
+    keyUrl: null,
+    keyInstructions: "Set the path to your Obsidian vault directory.",
+    docsUrl: "https://kh0pper.github.io/software/crow/integrations/obsidian",
+    category: "productivity",
   },
 ];
 
