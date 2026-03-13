@@ -30,6 +30,24 @@
  *   OAuth routes (/.well-known/*, /authorize, /token, /register)
  */
 
+// Load .env file if present (for systemd and other environments without dotenv)
+import { readFileSync, existsSync } from "node:fs";
+import { resolve as resolvePath, dirname as dirnamePath } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __gatewayDir = dirnamePath(fileURLToPath(import.meta.url));
+const __appRoot = resolvePath(__gatewayDir, "../..");
+const envPath = resolvePath(__appRoot, ".env");
+if (existsSync(envPath)) {
+  for (const line of readFileSync(envPath, "utf8").split("\n")) {
+    const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+    if (match && !(match[1] in process.env)) {
+      // Only set if not already in environment (env vars take precedence over .env)
+      process.env[match[1]] = match[2];
+    }
+  }
+}
+
 import { mcpAuthRouter, createOAuthMetadata } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { mcpAuthMetadataRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
