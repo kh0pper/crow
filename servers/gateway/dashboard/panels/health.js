@@ -210,7 +210,13 @@ export default {
     const installedPath = join(homedir(), ".crow", "installed.json");
     if (existsSync(installedPath)) {
       try {
-        const installed = JSON.parse(readFileSync(installedPath, "utf-8"));
+        let installed = JSON.parse(readFileSync(installedPath, "utf-8"));
+        // Normalize array format to object (bundles.js writes arrays)
+        if (Array.isArray(installed)) {
+          const obj = {};
+          for (const item of installed) if (item.id) obj[item.id] = item;
+          installed = obj;
+        }
         const appEntries = Object.entries(installed).filter(
           ([, meta]) => meta.type === "bundle" || meta.type === "mcp-server"
         );
