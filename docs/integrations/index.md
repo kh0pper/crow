@@ -45,6 +45,24 @@ Add API keys to enable these. For cloud deployments, add keys in your [Render da
 | **Home Assistant** | `HA_URL`, `HA_TOKEN` | Smart home device control | [HA Long-Lived Tokens](https://www.home-assistant.io/docs/authentication/) |
 | **Render** | `RENDER_API_KEY` | Deployment management | [Render API Keys](https://dashboard.render.com/account/api-keys) |
 
+## Setup Guides
+
+Detailed step-by-step setup instructions for each integration:
+
+- [GitHub](./github) — Personal access tokens, required scopes
+- [Brave Search](./brave-search) — Free API key signup
+- [Slack](./slack) — Bot token, OAuth scopes, workspace installation
+- [Notion](./notion) — Internal integration setup, page sharing
+- [Trello](./trello) — Power-Up API key and token
+- [Discord](./discord) — Bot token, message content intent
+- [Google Workspace](./google-workspace) — OAuth credentials, API enablement
+- [Canvas LMS](./canvas-lms) — Access token, institution URL
+- [Microsoft Teams](./microsoft-teams) — Azure AD app registration
+- [Zotero](./zotero) — API key and user ID
+- [Home Assistant](./home-assistant) — Long-lived access token
+- [Obsidian](./obsidian) — Vault path configuration
+- [Render](./render) — API key for deployment management
+
 ## Self-Hosting Add-ons (Bundles)
 
 These are installable add-ons with Docker Compose configurations. Install with `crow bundle install <id>` or ask your AI.
