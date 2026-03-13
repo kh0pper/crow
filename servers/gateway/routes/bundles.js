@@ -18,7 +18,7 @@
 
 import { Router } from "express";
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, copyFileSync, unlinkSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -404,6 +404,31 @@ export default function bundlesRouter() {
           }
         }
 
+        // 3b. Handle panel field on any add-on type
+        if (manifest.panel && addonType !== "panel") {
+          const panelSourceDir = join(APP_BUNDLES, bundle_id, manifest.panel.replace(/[^a-zA-Z0-9_\-\/\.]/g, ""));
+          if (existsSync(panelSourceDir)) {
+            const panelFilename = manifest.panel.split("/").pop();
+            const panelDest = join(CROW_HOME, "panels", panelFilename);
+            // Ensure panels directory exists
+            mkdirSync(join(CROW_HOME, "panels"), { recursive: true });
+            copyFileSync(panelSourceDir, panelDest);
+            // Register in panels.json
+            const panelsJsonPath = join(CROW_HOME, "panels.json");
+            let panelsList = [];
+            if (existsSync(panelsJsonPath)) {
+              try { panelsList = JSON.parse(readFileSync(panelsJsonPath, "utf8")); } catch {}
+            }
+            const panelId = panelFilename.replace(/\.js$/, "");
+            if (!panelsList.includes(panelId)) {
+              panelsList.push(panelId);
+              writeFileSync(panelsJsonPath, JSON.stringify(panelsList, null, 2));
+            }
+            needsRestart = true;
+            appendLog(job, `Installed panel: ${panelFilename}`);
+          }
+        }
+
         // 4. Copy any associated skills (bundles and mcp-servers can have skills too)
         if (addonType !== "skill" && manifest?.skills) {
           mkdirSync(SKILLS_DIR, { recursive: true });
@@ -491,6 +516,28 @@ export default function bundlesRouter() {
             if (existsSync(panelFile)) rmSync(panelFile);
             appendLog(job, "Removed panel file and registration");
           }
+        }
+
+        // 1b. Handle panel cleanup for any add-on type
+        if (manifest && manifest.panel && addonType !== "panel") {
+          const panelFilename = manifest.panel.split("/").pop();
+          const panelDest = join(CROW_HOME, "panels", panelFilename);
+          const panelId = panelFilename.replace(/\.js$/, "");
+          // Remove panel file
+          if (existsSync(panelDest)) {
+            unlinkSync(panelDest);
+          }
+          // Remove from panels.json
+          const panelsJsonPath = join(CROW_HOME, "panels.json");
+          if (existsSync(panelsJsonPath)) {
+            try {
+              let panelsList = JSON.parse(readFileSync(panelsJsonPath, "utf8"));
+              panelsList = panelsList.filter(p => p !== panelId);
+              writeFileSync(panelsJsonPath, JSON.stringify(panelsList, null, 2));
+            } catch {}
+          }
+          needsRestart = true;
+          appendLog(job, `Removed panel: ${panelFilename}`);
         }
 
         // 2. Remove associated skills (all types can have skills)

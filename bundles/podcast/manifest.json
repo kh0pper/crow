@@ -9,6 +9,7 @@
   "tags": ["podcast", "audio", "rss", "itunes"],
   "icon": "mic",
   "skills": ["skills/podcast.md"],
+  "panel": "panels/podcast.js",
   "requires": {
     "min_ram_mb": 64,
     "min_disk_mb": 100
