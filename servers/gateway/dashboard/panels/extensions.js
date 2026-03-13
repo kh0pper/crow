@@ -493,30 +493,19 @@ export default {
 
             var checkId = null;
             if (isDocker) {
-              var dataBox = document.createElement("div");
-              dataBox.style.cssText = "background:var(--crow-bg-card, #1d1d1f);border:1px solid var(--crow-border);border-radius:6px;padding:0.75rem 1rem;margin-bottom:0.75rem";
-
               var label = document.createElement("label");
-              label.style.cssText = "display:flex;align-items:start;gap:0.5rem;font-size:0.85rem;color:var(--crow-text-secondary);cursor:pointer";
+              label.style.cssText = "display:flex;align-items:start;gap:0.5rem;font-size:0.85rem;color:var(--crow-text-secondary);cursor:pointer;margin:0.75rem 0";
               var check = document.createElement("input");
               check.type = "checkbox";
               check.id = "delete-data-check";
-              check.style.cssText = "margin-top:0.2rem;flex-shrink:0";
+              check.style.cssText = "margin-top:0.15rem;flex-shrink:0";
               checkId = check.id;
               label.appendChild(check);
 
-              var labelWrap = document.createElement("div");
-              var labelMain = document.createElement("div");
-              labelMain.style.fontWeight = "500";
-              labelMain.textContent = "Also delete all stored data";
-              labelWrap.appendChild(labelMain);
-              var labelHint = document.createElement("div");
-              labelHint.style.cssText = "font-size:0.78rem;color:var(--crow-text-muted);margin-top:0.2rem";
-              labelHint.textContent = "Permanently removes all files and data stored by this service. Leave unchecked to keep data for a future reinstall.";
-              labelWrap.appendChild(labelHint);
-              label.appendChild(labelWrap);
-              dataBox.appendChild(label);
-              frag.appendChild(dataBox);
+              var labelText = document.createElement("span");
+              labelText.textContent = "Also delete all stored data (cannot be undone)";
+              label.appendChild(labelText);
+              frag.appendChild(label);
             }
 
             var statusDiv = document.createElement("div");
