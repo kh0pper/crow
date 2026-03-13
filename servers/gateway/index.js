@@ -66,6 +66,25 @@ if (noAuth) {
 // Initialize OAuth tables
 await initOAuthTables();
 
+// Verify core schema exists — fail fast with clear message if init-db hasn't run
+try {
+  const _schemaDb = createDbClient();
+  const { rows } = await _schemaDb.execute(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('memories', 'dashboard_settings', 'crow_context')"
+  );
+  _schemaDb.close();
+  if (rows.length < 3) {
+    console.error("ERROR: Database schema is incomplete. Run 'npm run init-db' first.");
+    console.error("  Found tables: " + (rows.map(r => r.name).join(", ") || "none"));
+    console.error("  Expected: memories, dashboard_settings, crow_context (and others)");
+    process.exit(1);
+  }
+} catch (e) {
+  console.error("ERROR: Could not verify database schema:", e.message);
+  console.error("  Run 'npm run init-db' first.");
+  process.exit(1);
+}
+
 // Clean up old audit log entries (90-day retention)
 try {
   const _cleanupDb = createDbClient();

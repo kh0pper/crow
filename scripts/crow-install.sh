@@ -161,13 +161,13 @@ else
 fi
 
 # Set environment for ~/.crow/data
+mkdir -p "$CROW_DATA"
 export CROW_DATA_DIR="$CROW_DATA"
 
 npm run setup
 log "Crow setup complete"
 
 # Generate identity
-mkdir -p "$CROW_DATA"
 npm run identity 2>/dev/null || true
 log "Identity generated"
 
