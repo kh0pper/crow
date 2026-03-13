@@ -472,25 +472,51 @@ export default {
 
             var h3 = document.createElement("h3");
             h3.style.cssText = "font-family:Fraunces,serif;margin-bottom:0.75rem";
-            h3.textContent = "Remove " + name + "?";
+            h3.textContent = "Uninstall " + name + "?";
             frag.appendChild(h3);
 
-            var desc = document.createElement("p");
-            desc.style.cssText = "color:var(--crow-text-secondary);font-size:0.9rem";
-            desc.textContent = "This will stop containers and remove the add-on files.";
-            frag.appendChild(desc);
+            var warnBox = document.createElement("div");
+            warnBox.style.cssText = "background:rgba(231,76,60,0.08);border:1px solid rgba(231,76,60,0.25);border-radius:6px;padding:0.75rem 1rem;margin-bottom:1rem";
+
+            var warnTitle = document.createElement("div");
+            warnTitle.style.cssText = "font-weight:600;color:var(--crow-error, #e74c3c);margin-bottom:0.35rem;font-size:0.9rem";
+            warnTitle.textContent = "This action cannot be undone";
+            warnBox.appendChild(warnTitle);
+
+            var warnText = document.createElement("div");
+            warnText.style.cssText = "color:var(--crow-text-secondary);font-size:0.85rem;line-height:1.5";
+            warnText.textContent = isDocker
+              ? "This will stop all " + name + " containers and remove the add-on. The gateway will restart to apply changes."
+              : "This will remove " + name + " and its configuration.";
+            warnBox.appendChild(warnText);
+            frag.appendChild(warnBox);
 
             var checkId = null;
             if (isDocker) {
+              var dataBox = document.createElement("div");
+              dataBox.style.cssText = "background:var(--crow-bg-card, #1d1d1f);border:1px solid var(--crow-border);border-radius:6px;padding:0.75rem 1rem;margin-bottom:0.75rem";
+
               var label = document.createElement("label");
-              label.style.cssText = "display:flex;align-items:center;gap:0.5rem;font-size:0.85rem;color:var(--crow-text-secondary);margin:0.75rem 0;cursor:pointer";
+              label.style.cssText = "display:flex;align-items:start;gap:0.5rem;font-size:0.85rem;color:var(--crow-text-secondary);cursor:pointer";
               var check = document.createElement("input");
               check.type = "checkbox";
               check.id = "delete-data-check";
+              check.style.cssText = "margin-top:0.2rem;flex-shrink:0";
               checkId = check.id;
               label.appendChild(check);
-              label.appendChild(document.createTextNode("Also delete data volumes (cannot be undone)"));
-              frag.appendChild(label);
+
+              var labelWrap = document.createElement("div");
+              var labelMain = document.createElement("div");
+              labelMain.style.fontWeight = "500";
+              labelMain.textContent = "Also delete all stored data";
+              labelWrap.appendChild(labelMain);
+              var labelHint = document.createElement("div");
+              labelHint.style.cssText = "font-size:0.78rem;color:var(--crow-text-muted);margin-top:0.2rem";
+              labelHint.textContent = "Permanently removes all files and data stored by this service. Leave unchecked to keep data for a future reinstall.";
+              labelWrap.appendChild(labelHint);
+              label.appendChild(labelWrap);
+              dataBox.appendChild(label);
+              frag.appendChild(dataBox);
             }
 
             var statusDiv = document.createElement("div");
