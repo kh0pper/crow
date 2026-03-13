@@ -103,3 +103,96 @@ If you have several integrations enabled, use the `/router/mcp` endpoint instead
 :::
 
 Now connect your AI: [Claude](/platforms/claude) · [ChatGPT](/platforms/chatgpt) · [All platforms](/platforms/)
+
+---
+
+## Oracle Cloud Free Tier {#oracle-cloud-free-tier}
+
+Oracle Cloud offers an Always Free tier with up to 24GB RAM and 200GB storage — enough to run Crow with all add-ons. Unlike Render's free tier, Oracle instances are persistent (no sleep, no ephemeral storage).
+
+### Setting Up Crow on Oracle Cloud
+
+1. **Create a free Oracle Cloud account** at [cloud.oracle.com](https://cloud.oracle.com)
+2. **Launch a compute instance** — Choose "Always Free Eligible" shape (VM.Standard.A1.Flex with 1-4 OCPUs / 6-24GB RAM, ARM architecture)
+3. **SSH into your instance** and run the Crow installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | bash
+```
+
+4. **Set up Tailscale** for private access to the Crow's Nest:
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+```
+
+### Making Your Blog/Podcast Public
+
+To serve your blog or podcast publicly (required for podcast directories, monetization, etc.), set up a Caddy reverse proxy with a custom domain.
+
+#### 1. Open Firewall Ports
+
+**Oracle Cloud Security List** (cloud-level firewall):
+
+1. Go to the [Oracle Cloud Console](https://cloud.oracle.com) → **Networking** → **Virtual Cloud Networks**
+2. Click your VCN → click your **Subnet** → click the **Security List**
+3. Click **Add Ingress Rules** and add:
+
+| Source CIDR | Protocol | Dest Port Range | Description |
+|---|---|---|---|
+| `0.0.0.0/0` | TCP | `80` | HTTP |
+| `0.0.0.0/0` | TCP | `443` | HTTPS |
+
+**UFW** (on-box firewall):
+
+```bash
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+```
+
+#### 2. Point Your Domain
+
+Add an A record for your domain pointing to your Oracle instance's public IP:
+
+```
+blog.yourdomain.com → <oracle-public-ip>
+```
+
+#### 3. Install and Configure Caddy
+
+```bash
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update && sudo apt install -y caddy
+```
+
+Configure `/etc/caddy/Caddyfile`:
+
+```
+blog.yourdomain.com {
+    handle /blog* {
+        reverse_proxy localhost:3001
+    }
+    handle {
+        respond "Not Found" 404
+    }
+}
+```
+
+Set the public URL and restart:
+
+```bash
+# Add to your .env file
+echo 'CROW_GATEWAY_URL=https://blog.yourdomain.com' >> ~/.crow/app/.env
+
+sudo systemctl restart crow-gateway
+sudo systemctl restart caddy
+```
+
+Caddy will automatically obtain a Let's Encrypt certificate. Your blog and podcast RSS feeds will now be publicly accessible at `https://blog.yourdomain.com/blog/`.
+
+::: tip Monetization-Ready
+This setup is suitable for monetized content (paid blogs, podcast sponsorships, subscriptions). Oracle's free tier includes 10TB/month outbound bandwidth — more than enough for most blogs and podcasts. For an even simpler setup, consider [managed hosting](./managed-hosting).
+:::
