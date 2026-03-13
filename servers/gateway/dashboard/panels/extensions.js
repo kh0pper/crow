@@ -523,6 +523,18 @@ export default {
           });
         });
 
+        // --- Wait for gateway restart ---
+        function waitForRestart(statusEl) {
+          statusEl.style.color = "var(--crow-accent)";
+          statusEl.textContent = "Gateway restarting to apply configuration...";
+          setTimeout(function pollRestart() {
+            fetch("/health").then(function(r) {
+              if (r.ok) location.reload();
+              else setTimeout(pollRestart, 2000);
+            }).catch(function() { setTimeout(pollRestart, 2000); });
+          }, 3000);
+        }
+
         // --- Job polling ---
         function pollJob(jobId, statusEl, btn) {
           fetch(API + "/jobs/" + jobId).then(function(r) { return r.json(); }).then(function(job) {
@@ -540,7 +552,8 @@ export default {
               setTimeout(function() { pollJob(jobId, statusEl, btn); }, 1000);
             }
           }).catch(function() {
-            setTimeout(function() { pollJob(jobId, statusEl, btn); }, 2000);
+            // Network error likely means gateway is restarting
+            waitForRestart(statusEl);
           });
         }
       })();
