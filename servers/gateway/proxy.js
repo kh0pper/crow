@@ -7,6 +7,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -146,7 +147,21 @@ async function connectToServer(integration) {
  * Call this once at gateway startup; it spawns all configured servers.
  */
 export async function initProxyServers() {
-  const configured = INTEGRATIONS.filter(isIntegrationConfigured);
+  const configured = INTEGRATIONS.filter((i) => {
+    if (!isIntegrationConfigured(i)) return false;
+    if (i.requires && i.requires.length > 0) {
+      const hasBins = i.requires.every((bin) => {
+        try {
+          execFileSync(bin, ["--version"], { stdio: "pipe", timeout: 5000 });
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      if (!hasBins) return false;
+    }
+    return true;
+  });
 
   if (configured.length === 0) {
     console.log("[proxy] No external integrations configured — /tools/mcp will have no tools.");
@@ -308,6 +323,19 @@ export function createProxyServer() {
 export function getProxyStatus() {
   return INTEGRATIONS.map((integration) => {
     const configured = isIntegrationConfigured(integration);
+
+    let requiresMissing = false;
+    if (integration.requires && integration.requires.length > 0) {
+      requiresMissing = !integration.requires.every((bin) => {
+        try {
+          execFileSync(bin, ["--version"], { stdio: "pipe", timeout: 5000 });
+          return true;
+        } catch {
+          return false;
+        }
+      });
+    }
+
     const entry = connectedServers.get(integration.id);
 
     return {
@@ -321,6 +349,9 @@ export function getProxyStatus() {
       envVars: integration.envVars,
       keyUrl: integration.keyUrl,
       keyInstructions: integration.keyInstructions,
+      requiresMissing,
+      requires: integration.requires || [],
+      docsUrl: integration.docsUrl || null,
     };
   });
 }
