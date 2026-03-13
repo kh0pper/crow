@@ -96,7 +96,7 @@ Uses `@libsql/client` which supports both:
 Key tables:
 - `memories` — Full-text searchable via FTS5 virtual table with sync triggers
 - `research_projects` → `research_sources` → `research_notes` — Foreign keys with cascade
-- `crow_context` — Behavioral context sections (used to generate crow.md)
+- `crow_context` — Behavioral context sections (used to generate crow.md), supports per-device overrides via `device_id` column
 - `oauth_clients` / `oauth_tokens` — Gateway auth persistence
 - `contacts` — Peer identities, public keys, relay status, last seen
 - `shared_items` — Tracking of sent/received shares with permissions
@@ -113,7 +113,7 @@ Crow's behavioral instructions — identity, memory protocols, research protocol
 
 ### What it is
 
-A dynamically generated markdown document assembled from rows in the `crow_context` table. Each row is a named section (e.g., `identity`, `memory-protocols`, `research-protocols`) with content and ordering. The document is rebuilt on every request, so changes take effect immediately.
+A dynamically generated markdown document assembled from rows in the `crow_context` table. Each row is a named section (e.g., `identity`, `memory-protocols`, `research-protocols`) with content and ordering. The document is rebuilt on every request, so changes take effect immediately. Sections support per-device overrides via the `device_id` column — device-specific sections override globals with the same key, allowing different behavioral preferences per device.
 
 ### How it's served
 

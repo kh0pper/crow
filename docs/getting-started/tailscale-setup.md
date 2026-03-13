@@ -141,9 +141,19 @@ Then set `CROW_GATEWAY_URL=https://yourdomain.com` in your `.env` so RSS feeds a
 
 ### Crow's Nest returns 403
 
-The Crow's Nest network check automatically allows localhost, RFC 1918 private ranges, and Tailscale's CGNAT range (`100.64.0.0/10`). There is no configurable IP allowlist — these ranges are hardcoded.
+The Crow's Nest network check automatically allows localhost, RFC 1918 private ranges, and Tailscale's CGNAT range (`100.64.0.0/10`).
 
-If you need to allow access from outside these ranges, set `CROW_DASHBOARD_PUBLIC=true` in your `.env` file. This disables the network check entirely, so only use it if you have other access controls in place (e.g., a reverse proxy with authentication).
+If you need to allow additional IP addresses or ranges, set the `CROW_ALLOWED_IPS` environment variable in your `.env` file:
+
+```bash
+# Single IP
+CROW_ALLOWED_IPS=203.0.113.50
+
+# Multiple IPs and CIDR ranges, comma-separated
+CROW_ALLOWED_IPS=203.0.113.50,198.51.100.0/24
+```
+
+Alternatively, set `CROW_DASHBOARD_PUBLIC=true` to disable the network check entirely. Only use this if you have other access controls in place (e.g., a reverse proxy with authentication).
 
 ### Tailscale not starting on boot
 

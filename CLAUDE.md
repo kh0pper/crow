@@ -173,6 +173,16 @@ All servers deliver a condensed crow.md (~1KB) via the MCP `instructions` field 
 
 **Router variant:** `generateInstructions({ routerStyle: true })` produces category-style tool names (`crow_memory action: "store_memory"`) instead of direct names.
 
+### Per-device context overrides
+
+The `crow_context` table supports per-device behavioral customization via the `device_id` column. Global sections have `device_id = NULL`; device-specific overrides have a non-null `device_id` string (e.g., `"grackle"`, `"phone"`, `"work-laptop"`).
+
+**How merging works:** When `deviceId` is passed to `generateCrowContext()`, `generateCondensedContext()`, or `generateInstructions()`, the system merges global + device-specific sections. Device-specific sections override globals with the same `section_key`. Device-only sections (no global counterpart) are appended.
+
+**Tool support:** All context tools (`crow_get_context`, `crow_update_context_section`, `crow_add_context_section`, `crow_list_context_sections`, `crow_delete_context_section`) accept an optional `device_id` parameter. Protected sections can have device overrides created via `crow_add_context_section` with a `device_id`; deleting a device override restores the global version.
+
+**Schema:** Two partial unique indexes enforce uniqueness — `idx_crow_context_global` (on `section_key WHERE device_id IS NULL`) and `idx_crow_context_device` (on `section_key, device_id WHERE device_id IS NOT NULL`).
+
 ### MCP Prompts
 
 Servers register MCP prompts as on-demand skill equivalents for non-Claude-Code platforms:

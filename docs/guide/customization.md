@@ -96,6 +96,43 @@ There is no limit to how many custom sections you can add.
 
 ## Per-device context
 
-::: info Coming soon
-A future update will support per-device overrides, so you can have different preferences depending on where you are using Crow. For example, you might want verbose responses on your desktop but short answers on your phone. For now, crow.md applies uniformly across all platforms and devices.
-:::
+Crow supports **per-device overrides** so you can have different preferences depending on where you're using it. For example, verbose responses on your desktop but short answers on your phone, or Spanish on one device and English on another.
+
+### How it works
+
+Each device can have its own version of any crow.md section. When Crow connects from a specific device, it merges:
+
+1. **Global sections** — your base configuration (applies everywhere)
+2. **Device-specific overrides** — replacements for specific sections on a particular device
+
+If a section has a device-specific version, that version is used instead of the global one. Sections without device overrides use the global version as usual.
+
+### Setting device preferences
+
+Just tell Crow what device you're on and what you want:
+
+> "Crow, on my phone, I prefer short responses. Add a device override for 'phone'."
+
+> "Crow, when I'm on my work laptop (device: 'work-laptop'), respond in a more formal tone."
+
+> "Crow, on the Raspberry Pi (device: 'colibri'), skip the dynamic context sections to save bandwidth."
+
+Under the hood, this creates a device-specific section using the `crow_add_context_section` tool with a `device_id` parameter.
+
+### Managing device overrides
+
+You can view which device overrides exist:
+
+> "List my crow.md sections and show which ones have device overrides"
+
+Remove a device override to restore the global version for that device:
+
+> "Remove the identity override for my phone"
+
+### Technical details
+
+- **Device IDs** are free-form strings you choose (e.g., `"phone"`, `"grackle"`, `"work-laptop"`)
+- Global sections have `device_id = NULL`; device sections have a non-null `device_id`
+- Protected sections (identity, memory_protocol, etc.) can have device overrides, but the global version cannot be deleted
+- Deleting a device override restores the global version — it does not delete the section entirely
+- The MCP `instructions` field (auto-injected context) also supports `deviceId` for per-device condensed context
