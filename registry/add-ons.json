@@ -146,6 +146,56 @@
       "notes": "Connects to an existing Immich instance. Limited ARM64 support."
     },
     {
+      "id": "minio",
+      "name": "File Storage (MinIO)",
+      "description": "S3-compatible file storage — upload, organize, and share files through Crow",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "storage",
+      "tags": ["storage", "files", "s3", "upload", "self-hosted"],
+      "icon": "archive",
+      "requires": {
+        "env": ["MINIO_ROOT_PASSWORD"],
+        "min_ram_mb": 256,
+        "min_disk_mb": 500
+      },
+      "env_vars": [
+        {
+          "name": "MINIO_ENDPOINT",
+          "description": "MinIO API host",
+          "default": "localhost",
+          "required": true
+        },
+        {
+          "name": "MINIO_PORT",
+          "description": "MinIO API port",
+          "default": "9000",
+          "required": true
+        },
+        {
+          "name": "MINIO_ROOT_USER",
+          "description": "MinIO admin username",
+          "default": "crowadmin",
+          "required": true
+        },
+        {
+          "name": "MINIO_ROOT_PASSWORD",
+          "description": "MinIO admin password (choose a strong password)",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "MINIO_USE_SSL",
+          "description": "Use SSL for MinIO connection",
+          "default": "false",
+          "required": false
+        }
+      ],
+      "ports": [9000, 9001],
+      "notes": "After installation, Crow's storage tools (upload, list, delete files) are available automatically. MinIO console at http://localhost:9001."
+    },
+    {
       "id": "podcast",
       "name": "Podcast Publisher",
       "description": "Publish podcast episodes with iTunes-compatible RSS feeds",
