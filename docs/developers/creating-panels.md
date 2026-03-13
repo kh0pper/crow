@@ -149,9 +149,9 @@ export default {
       </div>
       <style>
         .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
-        .stat-card { background: var(--bg-secondary); padding: 1.5rem; border-radius: 8px; text-align: center; }
-        .stat-value { display: block; font-size: 2rem; font-weight: bold; color: var(--accent); }
-        .stat-label { display: block; margin-top: 0.5rem; color: var(--text-secondary); }
+        .stat-card { background: var(--crow-bg-elevated); padding: 1.5rem; border-radius: 8px; text-align: center; }
+        .stat-value { display: block; font-size: 2rem; font-weight: bold; color: var(--crow-accent); }
+        .stat-label { display: block; margin-top: 0.5rem; color: var(--crow-text-secondary); }
       </style>
     `;
 
@@ -202,12 +202,10 @@ Note the `_csrf` hidden field — all POST requests require a valid CSRF token.
 
 ## Enabling Your Panel
 
-After placing your panel in `~/.crow/panels/`, add it to `~/.crow/panels.json`:
+After placing your panel in `~/.crow/panels/`, add it to `~/.crow/panels.json` (a JSON array of panel IDs):
 
 ```json
-{
-  "enabled": ["memory-stats", "quick-note"]
-}
+["memory-stats", "quick-note"]
 ```
 
 Restart the gateway to pick up new panels.
