@@ -105,6 +105,40 @@ function run(cmd, args, opts = {}) {
   });
 }
 
+/**
+ * Detect available Docker Compose command.
+ * Returns { cmd, args } for either `docker compose` (v2) or `python3 -m compose` (v1 fallback).
+ */
+let _composeCmd = null;
+async function getComposeCmd() {
+  if (_composeCmd) return _composeCmd;
+  // Try docker compose v2 first
+  try {
+    await run("docker", ["compose", "version"]);
+    _composeCmd = { cmd: "docker", prefix: ["compose"] };
+    return _composeCmd;
+  } catch {}
+  // Try python3 -m compose (docker-compose v1 via python package)
+  try {
+    await run("python3", ["-m", "compose", "version"]);
+    _composeCmd = { cmd: "python3", prefix: ["-m", "compose"] };
+    return _composeCmd;
+  } catch {}
+  // Try docker-compose binary directly
+  try {
+    await run("docker-compose", ["version"]);
+    _composeCmd = { cmd: "docker-compose", prefix: [] };
+    return _composeCmd;
+  } catch {}
+  throw new Error("No docker compose command found. Install docker-compose-plugin or docker-compose.");
+}
+
+/** Run a docker compose command with the detected compose variant */
+async function runCompose(composeArgs, opts = {}) {
+  const compose = await getComposeCmd();
+  return run(compose.cmd, [...compose.prefix, ...composeArgs], opts);
+}
+
 /** Read JSON file with fallback */
 function readJsonSafe(path, fallback) {
   try {
@@ -194,7 +228,7 @@ export default function bundlesRouter() {
 
       if (existsSync(composePath)) {
         try {
-          const { stdout } = await run("docker", ["compose", "ps", "--format", "json"], { cwd: bundleDir });
+          const { stdout } = await runCompose(["ps", "--format", "json"], { cwd: bundleDir });
           const containers = stdout.trim().split("\n").filter(Boolean).map((line) => {
             try { return JSON.parse(line); } catch { return null; }
           }).filter(Boolean);
@@ -278,7 +312,7 @@ export default function bundlesRouter() {
           if (existsSync(composePath)) {
             appendLog(job, "Pulling Docker images...");
             try {
-              await run("docker", ["compose", "pull"], { cwd: destDir });
+              await runCompose(["pull"], { cwd: destDir });
               appendLog(job, "Docker images pulled");
             } catch (err) {
               appendLog(job, `Warning: docker compose pull failed: ${err.message}`);
@@ -287,7 +321,7 @@ export default function bundlesRouter() {
             // Start containers
             appendLog(job, "Starting containers...");
             try {
-              await run("docker", ["compose", "up", "-d"], { cwd: destDir });
+              await runCompose(["up", "-d"], { cwd: destDir });
               appendLog(job, "Containers started");
             } catch (err) {
               appendLog(job, `Warning: docker compose up failed: ${err.message}`);
@@ -412,10 +446,10 @@ export default function bundlesRouter() {
           const composePath = join(bundleDir, "docker-compose.yml");
           if (existsSync(composePath)) {
             appendLog(job, "Stopping containers...");
-            const downArgs = ["compose", "down", "--remove-orphans"];
+            const downArgs = ["down", "--remove-orphans"];
             if (delete_data) downArgs.push("-v");
             try {
-              await run("docker", downArgs, { cwd: bundleDir });
+              await runCompose(downArgs, { cwd: bundleDir });
               appendLog(job, delete_data ? "Containers stopped, volumes removed" : "Containers stopped (data preserved)");
             } catch (err) {
               appendLog(job, `Warning: docker compose down: ${err.message}`);
@@ -487,7 +521,7 @@ export default function bundlesRouter() {
     }
 
     try {
-      await run("docker", ["compose", "up", "-d"], { cwd: bundleDir });
+      await runCompose(["up", "-d"], { cwd: bundleDir });
       res.json({ ok: true, message: `Bundle '${bundle_id}' started` });
     } catch (err) {
       res.status(500).json({ error: `Failed to start: ${err.stderr || err.message}` });
@@ -509,7 +543,7 @@ export default function bundlesRouter() {
     }
 
     try {
-      await run("docker", ["compose", "stop"], { cwd: bundleDir });
+      await runCompose(["stop"], { cwd: bundleDir });
       res.json({ ok: true, message: `Bundle '${bundle_id}' stopped` });
     } catch (err) {
       res.status(500).json({ error: `Failed to stop: ${err.stderr || err.message}` });

@@ -8,6 +8,7 @@
 
 import { escapeHtml, statCard, statGrid, section, badge, formatDate } from "../shared/components.js";
 import { existsSync, readFileSync } from "fs";
+import { execFileSync } from "child_process";
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
@@ -103,32 +104,50 @@ export default {
 
     const available = registry["add-ons"] || [];
 
+    // Detect docker compose command variant
+    let composeCmd = null;
+    try {
+      execFileSync("docker", ["compose", "version"], { timeout: 3000 });
+      composeCmd = { cmd: "docker", prefix: ["compose"] };
+    } catch {
+      try {
+        execFileSync("python3", ["-m", "compose", "version"], { timeout: 3000 });
+        composeCmd = { cmd: "python3", prefix: ["-m", "compose"] };
+      } catch {
+        try {
+          execFileSync("docker-compose", ["version"], { timeout: 3000 });
+          composeCmd = { cmd: "docker-compose", prefix: [] };
+        } catch {}
+      }
+    }
+
     // Fetch live container status for installed Docker bundles
     let bundleStatus = {};
-    try {
-      const bundlesDir = join(CROW_DIR, "bundles");
-      for (const [id] of Object.entries(installed)) {
-        const composePath = join(bundlesDir, id, "docker-compose.yml");
-        if (existsSync(composePath)) {
-          try {
-            const { execFileSync } = await import("child_process");
-            const out = execFileSync("docker", ["compose", "ps", "--format", "json"], {
-              cwd: join(bundlesDir, id),
-              timeout: 5000,
-            }).toString().trim();
-            const containers = out.split("\n").filter(Boolean).map((line) => {
-              try { return JSON.parse(line); } catch { return null; }
-            }).filter(Boolean);
-            bundleStatus[id] = {
-              running: containers.some((c) => c.State === "running"),
-              containers: containers.length,
-            };
-          } catch {
-            bundleStatus[id] = { running: false, containers: 0 };
+    if (composeCmd) {
+      try {
+        const bundlesDir = join(CROW_DIR, "bundles");
+        for (const [id] of Object.entries(installed)) {
+          const composePath = join(bundlesDir, id, "docker-compose.yml");
+          if (existsSync(composePath)) {
+            try {
+              const out = execFileSync(composeCmd.cmd, [...composeCmd.prefix, "ps", "--format", "json"], {
+                cwd: join(bundlesDir, id),
+                timeout: 5000,
+              }).toString().trim();
+              const containers = out.split("\n").filter(Boolean).map((line) => {
+                try { return JSON.parse(line); } catch { return null; }
+              }).filter(Boolean);
+              bundleStatus[id] = {
+                running: containers.some((c) => c.State === "running"),
+                containers: containers.length,
+              };
+            } catch {
+              bundleStatus[id] = { running: false, containers: 0 };
+            }
           }
         }
-      }
-    } catch {}
+      } catch {}
+    }
 
     const runningCount = Object.values(bundleStatus).filter((s) => s.running).length;
 
