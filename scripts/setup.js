@@ -55,24 +55,44 @@ if (!existsSync(envPath) && existsSync(envExamplePath)) {
   log(".env file exists - OK");
 }
 
-// Step 4: Migrate data directory to ~/.crow/data/
+// Step 4: Ensure ~/.crow/data/ exists and set CROW_DATA_DIR
+// This guarantees the database is created in the canonical location,
+// not in the repo-local ./data/ directory.
+const home = process.env.HOME || process.env.USERPROFILE || "";
+const crowDataDir = resolve(home, ".crow", "data");
+if (home && !process.env.CROW_DATA_DIR) {
+  try {
+    const { mkdirSync: mkdir } = await import("fs");
+    mkdir(crowDataDir, { recursive: true });
+    process.env.CROW_DATA_DIR = crowDataDir;
+    log(`Data directory: ${crowDataDir}`);
+  } catch {
+    log("Warning: Could not create ~/.crow/data/ — using default location.");
+  }
+}
+
+// Step 5: Migrate data from ./data/ to ~/.crow/data/ (if applicable)
 log("Checking data directory...");
 try {
-  execSync("node scripts/migrate-data-dir.js", { cwd: ROOT, stdio: "inherit" });
+  execSync("node scripts/migrate-data-dir.js", {
+    cwd: ROOT, stdio: "inherit", env: { ...process.env },
+  });
 } catch {
   log("Warning: Data directory migration skipped. Run 'npm run migrate-data' manually.");
 }
 
-// Step 5: Initialize database
+// Step 6: Initialize database
 log("Initializing database...");
 try {
-  execSync("node scripts/init-db.js", { cwd: ROOT, stdio: "inherit" });
+  execSync("node scripts/init-db.js", {
+    cwd: ROOT, stdio: "inherit", env: { ...process.env },
+  });
 } catch {
   console.error("Failed to initialize database.");
   process.exit(1);
 }
 
-// Step 5: Generate .mcp.json
+// Step 7: Generate .mcp.json
 log("Generating .mcp.json...");
 try {
   execSync("node scripts/generate-mcp-config.js", { cwd: ROOT, stdio: "inherit" });
@@ -80,7 +100,7 @@ try {
   log("Warning: Could not generate .mcp.json. Run 'npm run mcp-config' manually.");
 }
 
-// Step 6: Check external tools
+// Step 8: Check external tools
 header("External Tool Status");
 
 const tools = [

@@ -9,7 +9,7 @@
  * Safe to run multiple times — skips if already migrated.
  */
 
-import { existsSync, mkdirSync, copyFileSync, symlinkSync, lstatSync, readdirSync } from "fs";
+import { existsSync, mkdirSync, copyFileSync, symlinkSync, lstatSync, readdirSync, rmSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -72,7 +72,6 @@ function migrate() {
     }
 
     // Remove old directory and create symlink
-    const { rmSync } = await import("fs");
     try {
       rmSync(OLD_DATA_DIR, { recursive: true });
     } catch (err) {
