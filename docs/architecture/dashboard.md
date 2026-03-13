@@ -239,14 +239,13 @@ The Podcast panel (`bundles/podcast/panels/podcast.js`) is an example: it is ins
 
 Community-created panels live in `~/.crow/panels/`. Each panel is a directory or JS file. The Crow's Nest scans this directory on startup and registers any valid panels. Third-party panels receive the same `{ db, layout, appRoot }` context as built-in panels. The `appRoot` path points to the Crow source root, which panels can use for dynamic imports of shared components (e.g., `logos.js`, `components.js`).
 
-Enable or disable panels in `~/.crow/panels.json`:
+Enable panels in `~/.crow/panels.json` (a JSON array of panel IDs):
 
 ```json
-{
-  "enabled": ["my-panel"],
-  "disabled": []
-}
+["my-panel", "weather"]
 ```
+
+An object format with an `"enabled"` key is also accepted for backward compatibility.
 
 See [Creating Panels](/developers/creating-panels) for a development tutorial.
 
