@@ -1,5 +1,5 @@
 ---
-title: Crow's Nest (Dashboard)
+title: Crow's Nest
 ---
 
 # Crow's Nest

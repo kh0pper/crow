@@ -194,7 +194,7 @@ If a request comes from an IP outside these ranges, the Crow's Nest returns a **
 Only set `CROW_DASHBOARD_PUBLIC=true` if the gateway is behind another authentication layer (e.g., a reverse proxy with HTTP basic auth, Cloudflare Access, or a VPN). Without an additional auth layer, anyone on the internet could access the Crow's Nest with only a password between them and your data.
 :::
 
-For remote access without opening the Crow's Nest publicly, use [Tailscale](/getting-started/tailscale-setup). Tailscale IPs fall within the `100.64.0.0/10` range that the dashboard already trusts.
+For remote access without opening the Crow's Nest publicly, use [Tailscale](/getting-started/tailscale-setup). Tailscale IPs fall within the `100.64.0.0/10` range that the Crow's Nest already trusts.
 
 For the full picture of what's public and what's private across Crow, see the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md#whats-public-by-default).
 
