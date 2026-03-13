@@ -44,19 +44,19 @@ If you deploy Crow to the cloud (Render, Railway, etc.):
 
 ## What's Public by Default
 
-Crow follows a simple principle: **your blog is the storefront, your dashboard is the locked back office**. Here's what's accessible at each level:
+Crow follows a simple principle: **your blog is the storefront, the Crow's Nest is the locked back office**. Here's what's accessible at each level:
 
 | Component | Default Access | Why |
 |---|---|---|
 | Blog (`/blog/*`) | Public — anyone with the URL | Publishing is the whole point. Only posts you explicitly publish with `public` visibility appear here. |
-| Dashboard (`/dashboard`) | Private — local network + Tailscale only | Full control over your data — messages, files, settings. |
+| Crow's Nest (`/dashboard`) | Private — local network + Tailscale only | Full control over your data — messages, files, settings. |
 | MCP endpoints (`/memory/mcp`, etc.) | Private — requires OAuth 2.1 | AI tool access needs authentication to prevent unauthorized use. |
 | Setup page (`/setup`) | Accessible but safe | Shows which integrations are connected, never shows API keys or secrets. |
 | Health check (`/health`) | Accessible | Returns server status — no sensitive data. |
 
-Think of it like a store: customers can see the front window (blog), but only you can get into the back office (dashboard). If you never publish a blog post, nothing personal is visible to the outside world.
+Think of it like a store: customers can see the front window (blog), but only you can get into the back office (Crow's Nest). If you never publish a blog post, nothing personal is visible to the outside world.
 
-For details on network restrictions and allowed IP ranges, see the [Dashboard guide](docs/guide/dashboard.md#network-security).
+For details on network restrictions and allowed IP ranges, see the [Crow's Nest guide](docs/guide/crows-nest.md#network-security).
 
 ## What to Do if a Key Leaks
 
@@ -91,8 +91,8 @@ If you use [managed hosting](https://maestro.press/hosting/) ($15/mo), these add
 
 - **Instance isolation** — Each customer gets a separate Docker container and separate database. Up to 5 instances per shared server, with no cross-instance access.
 - **OAuth tokens hashed** — All OAuth access and refresh tokens are SHA-256 hashed before storage. If the database were compromised, tokens cannot be reused.
-- **Dashboard passwords hashed** — Passwords are hashed with scrypt (N=16384, r=8, p=1) using a unique random salt.
-- **24-hour session duration** — Dashboard sessions expire after 24 hours in hosted mode (vs. 7 days for self-hosted).
+- **Crow's Nest passwords hashed** — Passwords are hashed with scrypt (N=16384, r=8, p=1) using a unique random salt.
+- **24-hour session duration** — Crow's Nest sessions expire after 24 hours in hosted mode (vs. 7 days for self-hosted).
 - **Secure cookies** — Session cookies are set with `HttpOnly`, `SameSite=Strict`, and `Secure` flags in production.
 - **Audit logging** — Authentication events (login success/failure, lockout, token issuance, password changes) are logged with 90-day retention.
 - **API keys as env vars only** — Your API keys are stored only as environment variables, never in the database.
@@ -106,7 +106,7 @@ A summary of the technical measures protecting your data across all deployment m
 |---|---|
 | API keys | Stored as environment variables only, never in the database or logs |
 | OAuth tokens | SHA-256 hashed before database storage |
-| Dashboard password | scrypt-hashed with unique random salt |
+| Crow's Nest password | scrypt-hashed with unique random salt |
 | Session cookies | `HttpOnly`, `SameSite=Strict`, `Secure` (production) |
 | Auth endpoints | Rate-limited (20 requests per 15 minutes) |
 | Account lockout | 5 failed attempts triggers 15-minute lockout |

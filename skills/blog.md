@@ -74,7 +74,7 @@ tools:
 
 - Use tags consistently for cross-referencing (same tags across blog and research)
 - Cover images: upload with `crow_upload_file` (reference_type: `blog_post`), then set the `cover_image_key`
-- The dashboard Blog panel at `/dashboard/blog` provides a visual editor
+- The Blog panel in the Crow's Nest at `/dashboard/blog` provides a visual editor
 - `crow_blog_stats` shows post counts and tag distribution
 - Open Graph meta tags are automatically generated for public posts
 
@@ -84,6 +84,6 @@ Posts default to `private`. Nothing appears on your public blog at `/blog` until
 
 | Visibility | Who can see it | URL accessible? |
 |-----------|----------------|-----------------|
-| `private` | MCP tools + dashboard only | No |
+| `private` | MCP tools + Crow's Nest only | No |
 | `public` | Anyone with the URL | Yes, at `/blog/:slug` |
 | `peers` | Crow contacts only | Requires auth |

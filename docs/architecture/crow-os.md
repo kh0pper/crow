@@ -32,7 +32,7 @@ Crow OS transforms a stock Raspberry Pi OS into a dedicated Crow appliance. It's
 │  └────┬────┘ └─────┬────┘ └──────┬───────┘  │
 │       │            │             │           │
 │  ┌────▼────┐ ┌─────▼────┐ ┌─────▼───────┐  │
-│  │  Blog   │ │ Storage  │ │  Dashboard  │  │
+│  │  Blog   │ │ Storage  │ │ Crow's Nest │  │
 │  │ Server  │ │  Server  │ │     UI      │  │
 │  └────┬────┘ └─────┬────┘ └─────────────┘  │
 │       │            │                         │
@@ -62,7 +62,7 @@ All Crow data lives in `~/.crow/`, making the entire installation portable:
 │   ├── crow.db             # SQLite database (all memories, research, blog, etc.)
 │   └── identity.json       # Cryptographic identity (Ed25519 + secp256k1)
 ├── .env                    # API keys and configuration (permissions 600)
-├── panels/                 # Installed dashboard panels
+├── panels/                 # Installed Crow's Nest panels
 ├── panels.json             # Enabled panels
 ├── installed.json          # Installed add-ons tracking
 ├── bundles/                # Installed bundle add-on files
@@ -95,7 +95,7 @@ All Crow data lives in `~/.crow/`, making the entire installation portable:
 |---|---|
 | **Network** | UFW deny-by-default, only ports 22 (SSH) and 443 (HTTPS) |
 | **Docker** | `ufw-docker` utility resolves Docker/UFW conflict without breaking inter-container networking |
-| **Authentication** | Gateway OAuth enabled by default, dashboard password required |
+| **Authentication** | Gateway OAuth enabled by default, Crow's Nest password required |
 | **Secrets** | `~/.crow/.env` with permissions 600 |
 | **SSH** | fail2ban monitors and blocks brute-force attempts |
 | **TLS** | Self-signed by default, upgradeable to Tailscale or Let's Encrypt |

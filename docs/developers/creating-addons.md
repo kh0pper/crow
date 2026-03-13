@@ -20,7 +20,7 @@ A Crow add-on is a packaged extension that other users can install. It follows a
 
 | Type | What it contains | Installed to |
 |---|---|---|
-| `panel` | Dashboard panel | `~/.crow/panels/` |
+| `panel` | Crow's Nest panel | `~/.crow/panels/` |
 | `mcp-server` | MCP server (factory + stdio) | `~/.crow/servers/` |
 | `skill` | Skill markdown file | `~/.crow/skills/` |
 | `bundle` | Multiple components | Each to its respective location |
@@ -34,7 +34,7 @@ Every add-on has a `manifest.json` at its root:
   "name": "crow-weather-panel",
   "version": "1.0.0",
   "type": "panel",
-  "description": "Weather dashboard panel showing local forecast",
+  "description": "Weather panel showing local forecast",
   "author": "Your Name",
   "license": "MIT",
   "crow": {
@@ -157,4 +157,4 @@ See the [Registry documentation](/developers/addon-registry) for the full submis
 - Follow the Zod `.max()` constraint pattern for any MCP tool parameters
 - Use `sanitizeFtsQuery()` for any FTS5 queries
 - Include a `LICENSE` file
-- Test with both dark and light dashboard themes if you're building a panel
+- Test with both dark and light Crow's Nest themes if you're building a panel

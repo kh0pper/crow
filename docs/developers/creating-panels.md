@@ -2,13 +2,13 @@
 title: Creating Panels
 ---
 
-# Creating Dashboard Panels
+# Creating Crow's Nest Panels
 
-Build custom panels that appear in the Crow dashboard alongside the built-in Messages, Blog, Files, and Settings panels.
+Build custom panels that appear in the Crow's Nest alongside the built-in Messages, Blog, Files, and Settings panels.
 
 ## What is this?
 
-A dashboard panel is a small add-on that adds a new page to the Crow dashboard. Panels are server-rendered HTML — you write a handler function that receives the database and layout system, and returns HTML content.
+A Crow's Nest panel is a small add-on that adds a new page to the Crow's Nest. Panels are server-rendered HTML — you write a handler function that receives the database and layout system, and returns HTML content.
 
 ## Why would I want this?
 
@@ -79,7 +79,7 @@ All standard `@libsql/client` methods are available (`execute`, `batch`, etc.).
 
 ### context.layout
 
-The layout function wraps your content in the dashboard shell (navigation, theme, footer):
+The layout function wraps your content in the Crow's Nest shell (navigation, theme, footer):
 
 ```js
 return layout({ title: pageTitle, content: htmlContent });
@@ -201,7 +201,7 @@ Restart the gateway to pick up new panels.
 
 ## Styling
 
-Use the dashboard's CSS custom properties for consistent theming:
+Use the Crow's Nest CSS custom properties for consistent theming:
 
 - `--bg-primary` / `--bg-secondary` — Background colors
 - `--text-primary` / `--text-secondary` — Text colors

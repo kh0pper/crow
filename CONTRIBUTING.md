@@ -5,9 +5,9 @@ Thank you for your interest in contributing to Crow! This guide covers everythin
 ## Ways to Contribute
 
 ### 1. Add-ons (Easiest way to extend Crow)
-Create dashboard panels, MCP server integrations, or skill files that users install with one command: "install the X add-on." Add-ons are the primary way to extend Crow.
+Create Crow's Nest panels, MCP server integrations, or skill files that users install with one command: "install the X add-on." Add-ons are the primary way to extend Crow.
 
-**Types:** Dashboard panels, MCP servers, skill files, Docker bundles.
+**Types:** Crow's Nest panels, MCP servers, skill files, Docker bundles.
 
 **Guide:** [Creating Add-ons](https://kh0pper.github.io/crow/developers/creating-addons) | [Add-on Registry](https://kh0pper.github.io/crow/developers/addon-registry)
 
@@ -26,8 +26,8 @@ Add new MCP tools to crow-memory, crow-projects, crow-sharing, crow-storage, or 
 
 **Guide:** [Core Tools](https://kh0pper.github.io/crow/developers/core-tools)
 
-### 5. Dashboard Panels
-Build custom panels for the Crow dashboard. See the panel template in `templates/dashboard-panel.js`.
+### 5. Crow's Nest Panels
+Build custom panels for the Crow's Nest. See the panel template in `templates/dashboard-panel.js`.
 
 **Guide:** [Creating Panels](https://kh0pper.github.io/crow/developers/creating-panels)
 

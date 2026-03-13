@@ -37,11 +37,11 @@ Walk through the main features:
 
 **Research** — I manage structured research projects with proper citations, source tracking, and bibliography generation.
 
-**Blog** — You have a built-in blogging platform. Tell me to write a post and I'll create, publish, and manage it for you. Your blog is available at `/blog`. Published posts are publicly visible at `/blog`, while your dashboard and data stay private.
+**Blog** — You have a built-in blogging platform. Tell me to write a post and I'll create, publish, and manage it for you. Your blog is available at `/blog`. Published posts are publicly visible at `/blog`, while the Crow's Nest and your data stay private.
 
 **Files** — Upload and manage files with S3-compatible storage. Images for blog posts, documents for research, anything you need to keep.
 
-**Dashboard** — A visual control panel at `/dashboard` for managing messages, blog posts, files, and settings.
+**Crow's Nest** — A visual control panel at `/dashboard` for managing messages, blog posts, files, and settings.
 
 **Integrations** — Connect to GitHub, Google Workspace, Slack, Discord, Trello, Notion, Canvas LMS, and more.
 
@@ -54,7 +54,7 @@ Suggest immediate actions:
 - "Tell me your name and I'll remember it"
 - "What are you working on? I can set up a research project"
 - "Want to write your first blog post?"
-- "Check out your dashboard at `/dashboard`"
+- "Check out the Crow's Nest at `/dashboard`"
 
 ### 4. Store First Memory
 

@@ -19,7 +19,7 @@
  *   GET  /blog/:slug               — Public blog post
  *   GET  /blog/feed.xml            — RSS 2.0 feed
  *   GET  /blog/feed.atom           — Atom feed
- *   GET  /dashboard/*              — Dashboard UI
+ *   GET  /dashboard/*              — Crow's Nest UI
  *   POST /dashboard/bundles/api/*  — Bundle lifecycle API (install, uninstall, start, stop)
  *   GET  /discover/profile          — Contact discovery (opt-in public profile)
  *   POST /relay/store              — Peer relay store-and-forward
@@ -348,11 +348,11 @@ try {
   }
 }
 
-// --- Mount Dashboard (conditional) ---
+// --- Mount Crow's Nest (conditional) ---
 try {
   const { default: dashboardRouter } = await import("./dashboard/index.js");
   app.use(dashboardRouter(authMiddleware));
-  console.log("Dashboard mounted at /dashboard");
+  console.log("Crow's Nest mounted at /dashboard");
 } catch (err) {
   if (err.code !== "ERR_MODULE_NOT_FOUND") {
     console.warn("[dashboard] Failed to mount:", err.message);

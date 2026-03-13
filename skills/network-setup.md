@@ -1,10 +1,10 @@
 ---
 name: network-setup
-description: Tailscale setup guidance for secure remote dashboard access
+description: Tailscale setup guidance for secure remote Crow's Nest access
 triggers:
   - tailscale
   - remote access
-  - dashboard access
+  - crow's nest access
   - network setup
   - VPN setup
 tools: []
@@ -14,14 +14,14 @@ tools: []
 
 ## When to Activate
 
-- User gets a 403 error accessing the dashboard from a non-local IP
+- User gets a 403 error accessing the Crow's Nest from a non-local IP
 - User asks about setting up remote access to Crow
 - User mentions Tailscale or VPN for their Crow instance
-- User wants to access the dashboard from outside their home network
+- User wants to access the Crow's Nest from outside their home network
 
 ## Why Tailscale?
 
-The Crow Dashboard is restricted to local network (LAN) and Tailscale IPs by default. This is a security measure — the dashboard has full control over your Crow instance. Tailscale creates an encrypted mesh VPN that makes your devices appear on the same network, without exposing ports to the internet.
+The Crow's Nest is restricted to local network (LAN) and Tailscale IPs by default. This is a security measure — the Crow's Nest has full control over your Crow instance. Tailscale creates an encrypted mesh VPN that makes your devices appear on the same network, without exposing ports to the internet.
 
 ## Setup Guide
 
@@ -41,7 +41,7 @@ sudo tailscale up
 - **iOS/Android**: Install from App Store or Google Play
 - Sign in with the same account
 
-### Step 3: Access the Dashboard
+### Step 3: Access the Crow's Nest
 
 Once both devices are on Tailscale:
 
@@ -49,7 +49,7 @@ Once both devices are on Tailscale:
 # Find your Crow server's Tailscale IP
 tailscale ip -4
 
-# Access the dashboard using the Tailscale IP
+# Access the Crow's Nest using the Tailscale IP
 http://100.x.x.x:3001/dashboard
 ```
 
@@ -62,11 +62,11 @@ If you understand the risks and want to allow access from any IP:
 CROW_DASHBOARD_PUBLIC=true
 ```
 
-This bypasses the network allowlist. Ensure you have a strong dashboard password set.
+This bypasses the network allowlist. Ensure you have a strong Crow's Nest password set.
 
 ## Allowed Networks (Default)
 
-The dashboard accepts connections from:
+The Crow's Nest accepts connections from:
 - `127.0.0.1` / `::1` — localhost
 - `10.0.0.0/8` — private network (Class A)
 - `172.16.0.0/12` — private network (Class B)
@@ -75,16 +75,16 @@ The dashboard accepts connections from:
 
 ### Making Your Blog Public (Tailscale Funnel)
 
-If the user wants their blog accessible from the public internet (not just their Tailscale network), Tailscale Funnel exposes the gateway publicly while the dashboard stays private:
+If the user wants their blog accessible from the public internet (not just their Tailscale network), Tailscale Funnel exposes the gateway publicly while the Crow's Nest stays private:
 
 ```bash
 tailscale funnel --bg --https=443 http://localhost:3001
 ```
 
-The blog becomes available at `https://<hostname>.your-tailnet.ts.net/blog`. The dashboard still returns 403 to non-local IPs, so only the blog and other unauthenticated routes (`/health`, `/setup`) are effectively public. Funnel must be enabled in the Tailscale admin console first.
+The blog becomes available at `https://<hostname>.your-tailnet.ts.net/blog`. The Crow's Nest still returns 403 to non-local IPs, so only the blog and other unauthenticated routes (`/health`, `/setup`) are effectively public. Funnel must be enabled in the Tailscale admin console first.
 
 ## Troubleshooting
 
-- **403 Forbidden**: Your IP is not on the allowlist. Use Tailscale or set `CROW_DASHBOARD_PUBLIC=true`.
+- **403 Forbidden**: Your IP is not on the allowlist. Use Tailscale or set `CROW_DASHBOARD_PUBLIC=true` (env var name unchanged).
 - **Can't connect at all**: Check that the gateway is running (`npm run gateway`) and the port is correct.
 - **Tailscale connected but still 403**: The gateway might not see the Tailscale IP. Check if you're behind a reverse proxy that masks the client IP. Set `trust proxy` in Express if needed.

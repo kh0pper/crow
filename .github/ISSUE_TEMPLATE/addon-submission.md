@@ -28,7 +28,7 @@ labels: addon-submission
 
 ## Screenshots / Demo
 
-(If this is a dashboard panel, include screenshots showing it in action)
+(If this is a Crow's Nest panel, include screenshots showing it in action)
 
 ## Additional Context
 

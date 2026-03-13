@@ -44,7 +44,7 @@ export const INTEGRATIONS = [
     args: ["-y", "@modelcontextprotocol/server-brave-search"],
     envVars: ["BRAVE_API_KEY"],
     keyUrl: "https://brave.com/search/api/",
-    keyInstructions: "Sign up for a free API key and copy it from the dashboard.",
+    keyInstructions: "Sign up for a free API key and copy it from the Brave developer dashboard.",
   },
   {
     id: "slack",

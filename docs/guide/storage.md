@@ -10,7 +10,7 @@ Store files, images, and attachments alongside your Crow data. Storage uses S3-c
 
 Crow Storage gives your AI assistant the ability to save and retrieve files. It connects to a MinIO instance (or any S3-compatible service) running alongside your Crow server.
 
-Files are organized by type — images, documents, audio, attachments — and accessible through MCP tools, HTTP endpoints, or the dashboard file browser.
+Files are organized by type — images, documents, audio, attachments — and accessible through MCP tools, HTTP endpoints, or the Crow's Nest file browser.
 
 ## Why would I want this?
 
@@ -75,9 +75,9 @@ curl -X POST http://localhost:3001/storage/upload \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
-### Through the dashboard
+### Through the Crow's Nest
 
-Open the **Files** panel in the dashboard and use the upload button. You can drag and drop files directly.
+Open the **Files** panel in the Crow's Nest and use the upload button. You can drag and drop files directly.
 
 ## Browsing Files
 
@@ -87,7 +87,7 @@ Ask Crow to list your files:
 
 > "List all images in storage"
 
-Or browse them visually in the dashboard's Files panel.
+Or browse them visually in the Crow's Nest Files panel.
 
 ## Getting File URLs
 

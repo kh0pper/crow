@@ -39,7 +39,7 @@ Use cases:
 
 ### `/blog/registry.json`
 
-Only returns data if the blog owner has opted in by setting `blog_listed` to `"true"` in dashboard settings. Returns 404 otherwise.
+Only returns data if the blog owner has opted in by setting `blog_listed` to `"true"` in the Crow's Nest settings. Returns 404 otherwise.
 
 ```json
 {
@@ -58,7 +58,7 @@ This is the endpoint that the central Crow Blog Registry polls.
 
 To list your blog in the central registry:
 
-1. Open the dashboard (Crow's Nest) and go to **Settings**
+1. Open the Crow's Nest and go to **Settings**
 2. Set `blog_listed` to `true`
 3. That's it -- the registry will pick up your blog on its next poll cycle
 
@@ -66,7 +66,7 @@ Or ask your AI:
 
 > "List my blog in the Crow Blog Registry"
 
-The AI will set the `blog_listed` dashboard setting for you.
+The AI will set the `blog_listed` setting for you.
 
 To opt out later, set `blog_listed` to `false` (or delete the setting). The `/blog/registry.json` endpoint will immediately return 404, and the registry will remove your blog on its next poll.
 
@@ -127,7 +127,7 @@ Crow's sharing server already uses Hyperswarm for peer discovery. A future enhan
 1. When `blog_listed` is enabled and the sharing server is running, Crow joins a Hyperswarm topic for blog discovery
 2. Connected peers exchange `/blog/discover.json` payloads over the Hyperswarm connection
 3. Each instance maintains a local directory of discovered blogs
-4. The directory is available through MCP tools and the dashboard
+4. The directory is available through MCP tools and the Crow's Nest
 
 This complements the central registry -- users who prefer fully decentralized discovery can use Hyperswarm alone, while the central registry provides a curated directory for broader visibility.
 
