@@ -267,7 +267,7 @@ export default {
     // Uses data attributes and DOM APIs (textContent) instead of innerHTML with user data
     const interactiveScript = `
     <div id="modal-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:1000;align-items:center;justify-content:center">
-      <div id="modal-content" style="background:var(--crow-bg-card, #1d1d1f);border:1px solid var(--crow-border);border-radius:8px;padding:1.5rem;max-width:500px;width:90%;max-height:80vh;overflow-y:auto">
+      <div id="modal-content" style="background:var(--crow-bg-card, #1d1d1f);border:1px solid var(--crow-border);border-radius:8px;padding:1.5rem;max-width:500px;width:90%;max-height:80vh;overflow-y:auto;overflow-x:hidden;box-sizing:border-box;word-wrap:break-word">
       </div>
     </div>
 
@@ -476,7 +476,7 @@ export default {
             frag.appendChild(h3);
 
             var warnBox = document.createElement("div");
-            warnBox.style.cssText = "background:rgba(231,76,60,0.08);border:1px solid rgba(231,76,60,0.25);border-radius:6px;padding:0.75rem 1rem;margin-bottom:1rem";
+            warnBox.style.cssText = "background:rgba(231,76,60,0.08);border:1px solid rgba(231,76,60,0.25);border-radius:6px;padding:0.75rem 1rem;margin-bottom:1rem;box-sizing:border-box";
 
             var warnTitle = document.createElement("div");
             warnTitle.style.cssText = "font-weight:600;color:var(--crow-error, #e74c3c);margin-bottom:0.35rem;font-size:0.9rem";
@@ -503,6 +503,7 @@ export default {
               label.appendChild(check);
 
               var labelText = document.createElement("span");
+              labelText.style.cssText = "min-width:0";
               labelText.textContent = "Also delete all stored data (cannot be undone)";
               label.appendChild(labelText);
               frag.appendChild(label);
