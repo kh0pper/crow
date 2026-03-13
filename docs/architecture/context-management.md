@@ -203,6 +203,12 @@ Two variants are generated:
 
 If the `crow_context` table doesn't exist or the database is unavailable, a static ~500-byte fallback is used that provides minimal behavioral guidance.
 
+### Per-Device Overrides
+
+All context generation functions (`generateCrowContext`, `generateCondensedContext`, `generateInstructions`) accept an optional `deviceId` parameter. When provided, the system queries all `crow_context` rows and merges global sections (`device_id IS NULL`) with device-specific sections (`device_id = ?`). Device-specific sections override globals with the same `section_key`; device-only sections are appended.
+
+The `crow_context` table uses two partial unique indexes to enforce uniqueness: one for global sections (`WHERE device_id IS NULL`) and one for device-specific sections (`WHERE device_id IS NOT NULL`).
+
 ### stdio Servers
 
 stdio entry points (`servers/*/index.js`) generate instructions at startup using top-level `await`, then pass the string to the factory. crow-core does the same inside its async `createCoreServer()` function.

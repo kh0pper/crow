@@ -277,34 +277,43 @@ export function createMemoryServer(dbPath, options = {}) {
 
   server.tool(
     "crow_get_context",
-    "Generate and return the full crow.md cross-platform behavioral context document. This document defines how Crow behaves across all AI platforms — personality, memory protocols, transparency rules, and more. Includes optional dynamic data (memory stats, active projects, preferences).",
+    "Generate and return the full crow.md cross-platform behavioral context document. This document defines how Crow behaves across all AI platforms — personality, memory protocols, transparency rules, and more. Includes optional dynamic data (memory stats, active projects, preferences). Use device_id to get device-specific overrides merged with global context.",
     {
       include_dynamic: z.boolean().default(true).describe("Include dynamic sections (memory stats, active projects, preferences)"),
       platform: z.string().default("generic").describe("Target platform hint: claude, chatgpt, gemini, grok, cursor, windsurf, cline, generic"),
+      device_id: z.string().max(200).optional().describe("Device ID to merge device-specific overrides with global context"),
     },
-    async ({ include_dynamic, platform }) => {
-      const markdown = await generateCrowContext(db, { includeDynamic: include_dynamic, platform });
+    async ({ include_dynamic, platform, device_id }) => {
+      const markdown = await generateCrowContext(db, { includeDynamic: include_dynamic, platform, deviceId: device_id ?? null });
       return { content: [{ type: "text", text: markdown }] };
     }
   );
 
   server.tool(
     "crow_update_context_section",
-    "Update an existing crow.md section's content, title, enabled status, or sort order. Works on both protected and custom sections.",
+    "Update an existing crow.md section's content, title, enabled status, or sort order. Works on both protected and custom sections. Use device_id to update a device-specific override instead of the global section.",
     {
       section_key: z.string().max(500).describe("The section key to update (e.g. 'identity', 'memory_protocol')"),
       content: z.string().max(50000).optional().describe("New content for the section"),
       section_title: z.string().max(500).optional().describe("New title for the section"),
       enabled: z.boolean().optional().describe("Enable or disable this section"),
       sort_order: z.number().optional().describe("New sort order (lower = earlier)"),
+      device_id: z.string().max(200).optional().describe("Device ID to update a device-specific override. Omit for global section."),
     },
-    async ({ section_key, content, section_title, enabled, sort_order }) => {
+    async ({ section_key, content, section_title, enabled, sort_order, device_id }) => {
+      // Build WHERE clause based on device_id
+      const whereClause = device_id
+        ? "section_key = ? AND device_id = ?"
+        : "section_key = ? AND device_id IS NULL";
+      const whereArgs = device_id ? [section_key, device_id] : [section_key];
+
       const { rows } = await db.execute({
-        sql: "SELECT * FROM crow_context WHERE section_key = ?",
-        args: [section_key],
+        sql: `SELECT * FROM crow_context WHERE ${whereClause}`,
+        args: whereArgs,
       });
       if (rows.length === 0) {
-        return { content: [{ type: "text", text: `Section "${section_key}" not found.` }] };
+        const target = device_id ? ` (device: ${device_id})` : "";
+        return { content: [{ type: "text", text: `Section "${section_key}"${target} not found.` }] };
       }
 
       const updates = [];
@@ -319,40 +328,45 @@ export function createMemoryServer(dbPath, options = {}) {
       }
 
       updates.push("updated_at = datetime('now')");
-      params.push(section_key);
+      params.push(...whereArgs);
 
       await db.execute({
-        sql: `UPDATE crow_context SET ${updates.join(", ")} WHERE section_key = ?`,
+        sql: `UPDATE crow_context SET ${updates.join(", ")} WHERE ${whereClause}`,
         args: params,
       });
 
-      return { content: [{ type: "text", text: `Section "${section_key}" updated.` }] };
+      const target = device_id ? ` (device: ${device_id})` : "";
+      return { content: [{ type: "text", text: `Section "${section_key}"${target} updated.` }] };
     }
   );
 
   server.tool(
     "crow_add_context_section",
-    "Add a new custom section to crow.md. Custom sections can be used to extend Crow's behavioral context with project-specific or user-specific instructions.",
+    "Add a new custom section to crow.md. Custom sections can be used to extend Crow's behavioral context with project-specific or user-specific instructions. Use device_id to create a device-specific override that takes precedence over the global section on that device.",
     {
       section_key: z.string().max(500).describe("Unique key for the section (e.g. 'project_guidelines', 'coding_style')"),
       section_title: z.string().max(500).describe("Display title for the section"),
       content: z.string().max(50000).describe("Markdown content for the section"),
       sort_order: z.number().default(100).describe("Sort order (lower = earlier, default 100)"),
+      device_id: z.string().max(200).optional().describe("Device ID to create a device-specific override. Omit for global section."),
     },
-    async ({ section_key, section_title, content, sort_order }) => {
-      if (PROTECTED_SECTIONS.includes(section_key)) {
+    async ({ section_key, section_title, content, sort_order, device_id }) => {
+      // Protected sections can have device overrides but not new global entries
+      if (PROTECTED_SECTIONS.includes(section_key) && !device_id) {
         return { content: [{ type: "text", text: `Cannot create section with protected key "${section_key}". Use crow_update_context_section to modify it.` }] };
       }
 
       try {
         await db.execute({
-          sql: "INSERT INTO crow_context (section_key, section_title, content, sort_order) VALUES (?, ?, ?, ?)",
-          args: [section_key, section_title, content, sort_order],
+          sql: "INSERT INTO crow_context (section_key, section_title, content, sort_order, device_id) VALUES (?, ?, ?, ?, ?)",
+          args: [section_key, section_title, content, sort_order, device_id ?? null],
         });
-        return { content: [{ type: "text", text: `Section "${section_key}" added to crow.md.` }] };
+        const target = device_id ? ` (device: ${device_id})` : "";
+        return { content: [{ type: "text", text: `Section "${section_key}"${target} added to crow.md.` }] };
       } catch (err) {
         if (err.message?.includes("UNIQUE")) {
-          return { content: [{ type: "text", text: `Section "${section_key}" already exists. Use crow_update_context_section to modify it.` }] };
+          const target = device_id ? ` for device "${device_id}"` : "";
+          return { content: [{ type: "text", text: `Section "${section_key}"${target} already exists. Use crow_update_context_section to modify it.` }] };
         }
         throw err;
       }
@@ -361,22 +375,30 @@ export function createMemoryServer(dbPath, options = {}) {
 
   server.tool(
     "crow_list_context_sections",
-    "List all crow.md sections with their metadata (key, title, sort order, enabled status). Does not return full content — use crow_get_context for that.",
-    {},
-    async () => {
+    "List all crow.md sections with their metadata (key, title, sort order, enabled status, device ID). Does not return full content — use crow_get_context for that. Use device_id to filter sections for a specific device.",
+    {
+      device_id: z.string().max(200).optional().describe("Filter to sections for this device (also shows global sections). Omit to show all sections."),
+    },
+    async ({ device_id } = {}) => {
       const { rows } = await db.execute(
-        "SELECT section_key, section_title, sort_order, enabled, updated_at FROM crow_context ORDER BY sort_order ASC, id ASC"
+        "SELECT section_key, section_title, sort_order, enabled, updated_at, device_id FROM crow_context ORDER BY sort_order ASC, id ASC"
       );
 
       if (rows.length === 0) {
         return { content: [{ type: "text", text: "No crow.md sections found. Run `npm run init-db` to seed defaults." }] };
       }
 
-      const formatted = rows
+      // If device_id filter is set, show global + that device's sections
+      const filtered = device_id
+        ? rows.filter((r) => !r.device_id || r.device_id === device_id)
+        : rows;
+
+      const formatted = filtered
         .map((r) => {
           const status = r.enabled ? "enabled" : "disabled";
           const prot = PROTECTED_SECTIONS.includes(r.section_key) ? " [protected]" : "";
-          return `- ${r.section_key}${prot}: "${r.section_title}" (order: ${r.sort_order}, ${status}, updated: ${r.updated_at})`;
+          const device = r.device_id ? ` [device: ${r.device_id}]` : "";
+          return `- ${r.section_key}${prot}${device}: "${r.section_title}" (order: ${r.sort_order}, ${status}, updated: ${r.updated_at})`;
         })
         .join("\n");
 
@@ -386,29 +408,37 @@ export function createMemoryServer(dbPath, options = {}) {
 
   server.tool(
     "crow_delete_context_section",
-    "Delete a custom crow.md section. Protected sections (identity, memory_protocol, research_protocol, session_protocol, transparency_rules, skills_reference, key_principles) cannot be deleted — only disabled.",
+    "Delete a custom crow.md section. Protected sections (identity, memory_protocol, research_protocol, session_protocol, transparency_rules, skills_reference, key_principles) cannot be deleted — only disabled. Device-specific overrides of protected sections CAN be deleted (restores the global version for that device).",
     {
       section_key: z.string().max(500).describe("The section key to delete"),
+      device_id: z.string().max(200).optional().describe("Device ID to delete only the device-specific override. Omit to delete the global section."),
     },
-    async ({ section_key }) => {
-      if (PROTECTED_SECTIONS.includes(section_key)) {
+    async ({ section_key, device_id }) => {
+      // Protected global sections cannot be deleted, but device overrides can
+      if (PROTECTED_SECTIONS.includes(section_key) && !device_id) {
         return {
           content: [{ type: "text", text: `Cannot delete protected section "${section_key}". Use crow_update_context_section with enabled=false to disable it instead.` }],
         };
       }
 
+      const whereClause = device_id
+        ? "section_key = ? AND device_id = ?"
+        : "section_key = ? AND device_id IS NULL";
+      const whereArgs = device_id ? [section_key, device_id] : [section_key];
+
       const result = await db.execute({
-        sql: "DELETE FROM crow_context WHERE section_key = ?",
-        args: [section_key],
+        sql: `DELETE FROM crow_context WHERE ${whereClause}`,
+        args: whereArgs,
       });
 
+      const target = device_id ? ` (device: ${device_id})` : "";
       return {
         content: [
           {
             type: "text",
             text: result.rowsAffected > 0
-              ? `Section "${section_key}" deleted.`
-              : `Section "${section_key}" not found.`,
+              ? `Section "${section_key}"${target} deleted.`
+              : `Section "${section_key}"${target} not found.`,
           },
         ],
       };

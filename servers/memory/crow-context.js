@@ -28,9 +28,10 @@ export const PROTECTED_SECTIONS = [
  * @param {object} options
  * @param {boolean} [options.includeDynamic=true] - Include dynamic data sections
  * @param {string} [options.platform="generic"] - Target platform hint
+ * @param {string} [options.deviceId=null] - Device ID for per-device overrides (null = global only)
  * @returns {Promise<string>} Assembled markdown document
  */
-export async function generateCrowContext(db, { includeDynamic = true, platform = "generic" } = {}) {
+export async function generateCrowContext(db, { includeDynamic = true, platform = "generic", deviceId = null } = {}) {
   let sections;
 
   try {
@@ -46,6 +47,9 @@ export async function generateCrowContext(db, { includeDynamic = true, platform 
   if (!sections || sections.length === 0) {
     return getFallbackDocument();
   }
+
+  // Merge global + device-specific sections (device overrides global for same section_key)
+  sections = mergeDeviceSections(sections, deviceId);
 
   // Assemble static sections
   const parts = ["# crow.md — Cross-Platform Behavioral Context\n"];
@@ -137,6 +141,51 @@ async function generateDynamicSections(db) {
 }
 
 /**
+ * Merge global and device-specific context sections.
+ *
+ * Global sections have device_id = NULL. Device-specific sections override
+ * global sections with the same section_key. Device-only sections (no global
+ * counterpart) are appended at the end.
+ *
+ * @param {Array} sections - All sections (global + device-specific)
+ * @param {string|null} deviceId - Target device ID, or null for global only
+ * @returns {Array} Merged sections
+ */
+function mergeDeviceSections(sections, deviceId) {
+  if (!deviceId) {
+    // No device specified — return only global sections
+    return sections.filter((s) => !s.device_id);
+  }
+
+  const globalSections = new Map();
+  const deviceSections = new Map();
+
+  for (const section of sections) {
+    if (!section.device_id) {
+      globalSections.set(section.section_key, section);
+    } else if (section.device_id === deviceId) {
+      deviceSections.set(section.section_key, section);
+    }
+    // Sections for other devices are ignored
+  }
+
+  // Start with global sections, override with device-specific
+  const merged = [];
+  for (const [key, section] of globalSections) {
+    merged.push(deviceSections.has(key) ? deviceSections.get(key) : section);
+  }
+
+  // Append device-only sections (no global counterpart)
+  for (const [key, section] of deviceSections) {
+    if (!globalSections.has(key)) {
+      merged.push(section);
+    }
+  }
+
+  return merged;
+}
+
+/**
  * Platform-specific transparency formatting hints.
  */
 function getPlatformHint(platform) {
@@ -163,9 +212,10 @@ function getPlatformHint(platform) {
  * @param {import("@libsql/client").Client} db
  * @param {object} [options]
  * @param {boolean} [options.routerStyle=false] - Use category tool names for router endpoint
+ * @param {string} [options.deviceId=null] - Device ID for per-device overrides
  * @returns {Promise<string|null>} Condensed context or null if unavailable
  */
-export async function generateCondensedContext(db, { routerStyle = false } = {}) {
+export async function generateCondensedContext(db, { routerStyle = false, deviceId = null } = {}) {
   const essentialKeys = [
     "identity",
     "memory_protocol",
@@ -177,7 +227,7 @@ export async function generateCondensedContext(db, { routerStyle = false } = {})
   let sections;
   try {
     const result = await db.execute({
-      sql: "SELECT section_key, section_title, content FROM crow_context WHERE enabled = 1 AND section_key IN (?, ?, ?, ?, ?) ORDER BY sort_order ASC",
+      sql: "SELECT section_key, section_title, content, device_id FROM crow_context WHERE enabled = 1 AND section_key IN (?, ?, ?, ?, ?) ORDER BY sort_order ASC",
       args: essentialKeys,
     });
     sections = result.rows;
@@ -188,6 +238,9 @@ export async function generateCondensedContext(db, { routerStyle = false } = {})
   if (!sections || sections.length === 0) {
     return null;
   }
+
+  // Merge global + device-specific sections
+  sections = mergeDeviceSections(sections, deviceId);
 
   const parts = ["Crow — Behavioral Context\n"];
 

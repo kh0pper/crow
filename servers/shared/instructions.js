@@ -38,14 +38,15 @@ Use the session-start or crow-guide prompts for detailed workflow guidance.`;
  * @param {object} [options]
  * @param {string} [options.dbPath] - Database path override
  * @param {boolean} [options.routerStyle=false] - Use category tool names (crow_memory action: "store_memory") instead of direct names
+ * @param {string} [options.deviceId=null] - Device ID for per-device context overrides
  * @returns {Promise<string>}
  */
 export async function generateInstructions(options = {}) {
-  const { dbPath, routerStyle = false } = options;
+  const { dbPath, routerStyle = false, deviceId = null } = options;
 
   try {
     const db = createDbClient(dbPath);
-    const condensed = await generateCondensedContext(db, { routerStyle });
+    const condensed = await generateCondensedContext(db, { routerStyle, deviceId });
 
     if (!condensed) {
       return STATIC_INSTRUCTIONS;

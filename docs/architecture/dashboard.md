@@ -11,7 +11,8 @@ The Crow's Nest (`servers/gateway/dashboard/`) is a server-rendered web interfac
 ```
 ┌────────────────────────────────────────┐
 │           Panel Registry               │
-│  messages │ blog │ files │ settings    │
+│  health │ messages │ memory │ blog    │
+│  files │ extensions │ settings         │
 │  + third-party panels from ~/.crow/    │
 ├────────────────────────────────────────┤
 │           Layout System                │
@@ -52,11 +53,13 @@ Built-in panels live in `servers/gateway/dashboard/panels/`:
 
 | Panel | File | Route | Purpose |
 |---|---|---|---|
+| Health | `panels/health.js` | `/dashboard/health` | CPU, RAM, disk usage, Docker containers, DB metrics |
 | Messages | `panels/messages.js` | `/dashboard/messages` | View peer messages, threads, read status |
+| Memory | `panels/memory.js` | `/dashboard/memory` | Browse, search, and manage persistent memories |
 | Blog | `panels/blog.js` | `/dashboard/blog` | Manage posts, publish/unpublish, edit |
 | Files | `panels/files.js` | `/dashboard/files` | Browse storage, upload, delete, preview |
-| Extensions | `panels/extensions.js` | `/dashboard/extensions` | Manage integrations and MCP server connections |
-| Settings | `panels/settings.js` | `/dashboard/settings` | Configuration, quotas, network rules |
+| Extensions | `panels/extensions.js` | `/dashboard/extensions` | Browse marketplace, install/uninstall add-ons, resource warnings |
+| Settings | `panels/settings.js` | `/dashboard/settings` | Configuration, quotas, network rules, contact discovery |
 
 ## Auth System
 

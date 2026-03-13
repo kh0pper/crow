@@ -334,12 +334,13 @@ await initTable("relay_config table", `
 await initTable("crow_context table", `
   CREATE TABLE IF NOT EXISTS crow_context (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    section_key TEXT NOT NULL UNIQUE,
+    section_key TEXT NOT NULL,
     section_title TEXT NOT NULL,
     content TEXT NOT NULL,
     sort_order INTEGER DEFAULT 0,
     enabled INTEGER DEFAULT 1,
-    updated_at TEXT DEFAULT (datetime('now'))
+    updated_at TEXT DEFAULT (datetime('now')),
+    device_id TEXT DEFAULT NULL
   );
 
   CREATE INDEX IF NOT EXISTS idx_crow_context_order ON crow_context(sort_order);
@@ -436,6 +437,66 @@ await initTable("audit_log table", `
 
   CREATE INDEX IF NOT EXISTS idx_audit_log_event_created ON audit_log(event_type, created_at);
 `);
+
+// --- Per-Device Context Support ---
+// Existing installs have section_key UNIQUE constraint that blocks device overrides.
+// Migration: add device_id column, drop the old UNIQUE constraint, add partial indexes.
+
+await addColumnIfMissing("crow_context", "device_id", "TEXT DEFAULT NULL");
+
+// Check if the old autoindex (from section_key UNIQUE) exists and drop it by
+// recreating the table without the column-level UNIQUE constraint.
+try {
+  const { rows: autoIdx } = await db.execute(
+    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='crow_context' AND name LIKE 'sqlite_autoindex%'"
+  );
+  if (autoIdx.length > 0) {
+    // Recreate table without the column-level UNIQUE on section_key
+    await db.executeMultiple(`
+      CREATE TABLE IF NOT EXISTS crow_context_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        section_key TEXT NOT NULL,
+        section_title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        sort_order INTEGER DEFAULT 0,
+        enabled INTEGER DEFAULT 1,
+        updated_at TEXT DEFAULT (datetime('now')),
+        device_id TEXT DEFAULT NULL
+      );
+      INSERT OR IGNORE INTO crow_context_new (id, section_key, section_title, content, sort_order, enabled, updated_at, device_id)
+        SELECT id, section_key, section_title, content, sort_order, enabled, updated_at, device_id FROM crow_context;
+      DROP TABLE crow_context;
+      ALTER TABLE crow_context_new RENAME TO crow_context;
+      CREATE INDEX IF NOT EXISTS idx_crow_context_order ON crow_context(sort_order);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_crow_context_global
+        ON crow_context(section_key)
+        WHERE device_id IS NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_crow_context_device
+        ON crow_context(section_key, device_id)
+        WHERE device_id IS NOT NULL;
+    `);
+    console.log("  Migrated crow_context: removed column-level UNIQUE, added partial indexes");
+  }
+} catch (err) {
+  // If migration fails, create the indexes anyway (may already exist)
+  console.warn("  crow_context migration note:", err.message);
+}
+
+// Ensure partial indexes exist (for both new and migrated installs)
+try {
+  await db.execute(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_crow_context_global
+      ON crow_context(section_key)
+      WHERE device_id IS NULL
+  `);
+  await db.execute(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_crow_context_device
+      ON crow_context(section_key, device_id)
+      WHERE device_id IS NOT NULL
+  `);
+} catch {
+  // Indexes already exist
+}
 
 // --- Scheduled Tasks ---
 
