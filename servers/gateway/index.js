@@ -480,7 +480,7 @@ app.listen(PORT, "0.0.0.0", (error) => {
   });
 
   // Start auto-update checker
-  startAutoUpdate(db).catch((err) => {
+  startAutoUpdate(createDbClient()).catch((err) => {
     console.error("[auto-update] Failed to start:", err.message);
   });
 });
