@@ -519,6 +519,7 @@ export default function bundlesRouter() {
         }
 
         // 1b. Handle panel cleanup for any add-on type
+        let needsRestart = false;
         if (manifest && manifest.panel && addonType !== "panel") {
           const panelFilename = manifest.panel.split("/").pop();
           const panelDest = join(CROW_HOME, "panels", panelFilename);
@@ -552,7 +553,6 @@ export default function bundlesRouter() {
         }
 
         // 3. Re-comment env vars in gateway .env
-        let needsRestart = false;
         if (addonType === "bundle" && manifest?.env_vars) {
           const envKeys = manifest.env_vars.map((v) => v.name);
           revertEnvInGateway(envKeys);

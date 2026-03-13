@@ -70,14 +70,18 @@ async function handler(req, res, { db, layout, appRoot }) {
   }
 
   // GET — show episode list
+  const countResult = await db.execute({
+    sql: "SELECT COUNT(*) as total, SUM(CASE WHEN status='published' THEN 1 ELSE 0 END) as published FROM blog_posts WHERE tags LIKE ?",
+    args: ["%podcast%"],
+  });
+  const totalCount = countResult.rows[0]?.total || 0;
+  const publishedCount = countResult.rows[0]?.published || 0;
+  const draftCount = totalCount - publishedCount;
+
   const episodes = await db.execute({
     sql: "SELECT * FROM blog_posts WHERE tags LIKE ? ORDER BY created_at DESC LIMIT 50",
     args: ["%podcast%"],
   });
-
-  const totalCount = episodes.rows.length;
-  const publishedCount = episodes.rows.filter((r) => r.status === "published").length;
-  const draftCount = episodes.rows.filter((r) => r.status === "draft").length;
 
   const stats = statGrid([
     statCard("Episodes", totalCount, { delay: 0 }),
