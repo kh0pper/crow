@@ -15,12 +15,19 @@ async function handler(req, res, { db, layout, appRoot }) {
   const podcastRssPath = join(appRoot, "servers/blog/podcast-rss.js");
   const { parsePodcastMeta } = await import(pathToFileURL(podcastRssPath).href);
 
+  // Check if storage is available for file uploads
+  let storageOnline = false;
+  try {
+    const { isAvailable } = await import(pathToFileURL(join(appRoot, "servers/storage/s3-client.js")).href);
+    storageOnline = await isAvailable();
+  } catch { /* storage not configured */ }
+
   // Handle POST actions
   if (req.method === "POST") {
     const { action } = req.body;
 
     if (action === "create") {
-      const { title, audio_url, duration, episode_number, season_number, show_notes, visibility } = req.body;
+      const { title, audio_url, duration, episode_number, season_number, show_notes, visibility, artwork_url } = req.body;
       if (!title || !audio_url) {
         return layout({
           title: "Podcast",
@@ -34,6 +41,7 @@ async function handler(req, res, { db, layout, appRoot }) {
       if (duration) content += `**Duration:** ${duration}\n`;
       if (episode_number) content += `**Episode:** ${episode_number}\n`;
       if (season_number) content += `**Season:** ${season_number}\n`;
+      if (artwork_url) content += `**Artwork:** ${artwork_url}\n`;
       content += `\n${show_notes || ""}`;
 
       await db.execute({
@@ -138,11 +146,47 @@ async function handler(req, res, { db, layout, appRoot }) {
     episodeTable = dataTable(["Ep#", "Title", "Duration", "Status", "Date", "Audio Preview", "Actions"], rows);
   }
 
+  // Audio upload section — file upload when storage is online, URL fallback otherwise
+  const audioField = storageOnline
+    ? `<div class="form-group" style="margin-bottom:1rem">
+        <label style="display:block;font-weight:500;margin-bottom:0.5rem">Audio File</label>
+        <div id="audio-upload-zone" style="border:2px dashed var(--crow-border);border-radius:8px;padding:1.25rem;text-align:center;cursor:pointer;transition:border-color 0.2s,background 0.2s">
+          <div style="margin-bottom:0.5rem">Drop audio file here or click to browse</div>
+          <div style="color:var(--crow-text-muted);font-size:0.85rem">MP3, M4A, OGG, WAV</div>
+          <input type="file" id="audio-file-input" accept="audio/*" style="display:none">
+          <div id="audio-upload-status" style="margin-top:0.75rem;display:none"></div>
+        </div>
+        <input type="hidden" name="audio_url" id="audio-url-hidden">
+        <div style="margin-top:0.5rem;font-size:0.85rem;color:var(--crow-text-muted)">
+          Or enter a URL directly: <input type="text" id="audio-url-manual" placeholder="https://example.com/episode.mp3" style="margin-left:0.25rem;padding:0.3rem 0.5rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg);color:var(--crow-text);font-size:0.85rem;width:60%">
+        </div>
+      </div>`
+    : formField("Audio URL", "audio_url", { required: true, placeholder: "https://example.com/episode.mp3" });
+
+  // Artwork upload — only when storage is online
+  const artworkField = storageOnline
+    ? `<div class="form-group" style="margin-bottom:1rem">
+        <label style="display:block;font-weight:500;margin-bottom:0.5rem">Episode Artwork <span style="color:var(--crow-text-muted);font-weight:400">(optional)</span></label>
+        <div style="display:flex;align-items:center;gap:1rem">
+          <div id="artwork-preview" style="width:64px;height:64px;border-radius:6px;background:var(--crow-bg-elevated,#1a1a2e);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0">
+            <span style="opacity:0.3;font-size:1.5rem">&#127912;</span>
+          </div>
+          <div style="flex:1">
+            <button type="button" id="artwork-upload-btn" class="btn btn-sm btn-secondary">Upload Image</button>
+            <input type="file" id="artwork-file-input" accept="image/jpeg,image/png" style="display:none">
+            <span id="artwork-upload-status" style="margin-left:0.5rem;font-size:0.85rem"></span>
+          </div>
+        </div>
+        <input type="hidden" name="artwork_url" id="artwork-url-hidden">
+      </div>`
+    : "";
+
   // Create form
-  const createForm = `<form method="POST">
+  const createForm = `<form method="POST" id="create-episode-form">
     <input type="hidden" name="action" value="create">
     ${formField("Title", "title", { required: true, placeholder: "Episode title" })}
-    ${formField("Audio URL", "audio_url", { required: true, placeholder: "https://example.com/episode.mp3" })}
+    ${audioField}
+    ${artworkField}
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:1rem">
       ${formField("Duration", "duration", { placeholder: "45:32" })}
       ${formField("Episode #", "episode_number", { placeholder: "1" })}
@@ -154,14 +198,131 @@ async function handler(req, res, { db, layout, appRoot }) {
       { value: "private", label: "Private" },
       { value: "peers", label: "Peers Only" },
     ]})}
-    <button type="submit" class="btn btn-primary">Create Episode</button>
+    <button type="submit" class="btn btn-primary" id="create-episode-btn">Create Episode</button>
   </form>`;
+
+  // Upload scripts — only when storage is online
+  const uploadScript = storageOnline ? `<script>
+(function() {
+  // --- Audio upload ---
+  var audioZone = document.getElementById('audio-upload-zone');
+  var audioInput = document.getElementById('audio-file-input');
+  var audioStatus = document.getElementById('audio-upload-status');
+  var audioUrlHidden = document.getElementById('audio-url-hidden');
+  var audioUrlManual = document.getElementById('audio-url-manual');
+
+  audioZone.addEventListener('click', function(e) { if (e.target.tagName !== 'INPUT') audioInput.click(); });
+  audioZone.addEventListener('dragover', function(e) { e.preventDefault(); audioZone.style.borderColor = 'var(--crow-accent)'; audioZone.style.background = 'var(--crow-accent-muted,rgba(99,102,241,0.08))'; });
+  audioZone.addEventListener('dragleave', function() { audioZone.style.borderColor = ''; audioZone.style.background = ''; });
+  audioZone.addEventListener('drop', function(e) {
+    e.preventDefault();
+    audioZone.style.borderColor = '';
+    audioZone.style.background = '';
+    if (e.dataTransfer.files.length > 0) uploadAudio(e.dataTransfer.files[0]);
+  });
+  audioInput.addEventListener('change', function() { if (this.files.length > 0) uploadAudio(this.files[0]); });
+
+  // Manual URL overrides uploaded file
+  audioUrlManual.addEventListener('input', function() { audioUrlHidden.value = this.value; });
+
+  function uploadAudio(file) {
+    if (!file.type.startsWith('audio/')) {
+      audioStatus.style.display = 'block';
+      audioStatus.style.color = 'var(--crow-error,#ef4444)';
+      audioStatus.textContent = 'Please select an audio file';
+      return;
+    }
+    audioStatus.style.display = 'block';
+    audioStatus.style.color = '';
+    audioStatus.textContent = 'Uploading ' + file.name + '...';
+
+    var fd = new FormData();
+    fd.append('file', file);
+    fd.append('reference_type', 'podcast_episode');
+
+    fetch('/storage/upload', { method: 'POST', body: fd })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.error) throw new Error(d.error);
+        var fileUrl = location.origin + '/storage/file/' + encodeURIComponent(d.key);
+        audioUrlHidden.value = fileUrl;
+        audioUrlManual.value = '';
+        audioStatus.style.color = 'var(--crow-success,#22c55e)';
+        audioStatus.textContent = '\\u2713 ' + d.name + ' (' + (d.size / 1024 / 1024).toFixed(1) + ' MB)';
+        audioZone.style.borderColor = 'var(--crow-success,#22c55e)';
+      })
+      .catch(function(err) {
+        audioStatus.style.color = 'var(--crow-error,#ef4444)';
+        audioStatus.textContent = 'Upload failed: ' + (err.message || err);
+      });
+  }
+
+  // --- Artwork upload ---
+  var artworkBtn = document.getElementById('artwork-upload-btn');
+  var artworkInput = document.getElementById('artwork-file-input');
+  var artworkStatus = document.getElementById('artwork-upload-status');
+  var artworkUrlHidden = document.getElementById('artwork-url-hidden');
+  var artworkPreview = document.getElementById('artwork-preview');
+
+  if (artworkBtn) {
+    artworkBtn.addEventListener('click', function() { artworkInput.click(); });
+    artworkInput.addEventListener('change', function() { if (this.files.length > 0) uploadArtwork(this.files[0]); });
+  }
+
+  function uploadArtwork(file) {
+    if (!file.type.startsWith('image/')) {
+      artworkStatus.style.color = 'var(--crow-error,#ef4444)';
+      artworkStatus.textContent = 'Please select a JPEG or PNG image';
+      return;
+    }
+    artworkStatus.style.color = '';
+    artworkStatus.textContent = 'Uploading...';
+
+    var fd = new FormData();
+    fd.append('file', file);
+    fd.append('reference_type', 'podcast_artwork');
+
+    fetch('/storage/upload', { method: 'POST', body: fd })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.error) throw new Error(d.error);
+        var fileUrl = location.origin + '/storage/file/' + encodeURIComponent(d.key);
+        artworkUrlHidden.value = fileUrl;
+        artworkPreview.textContent = '';
+        var img = document.createElement('img');
+        img.src = fileUrl;
+        img.style.cssText = 'width:100%;height:100%;object-fit:cover';
+        artworkPreview.appendChild(img);
+        artworkStatus.style.color = 'var(--crow-success,#22c55e)';
+        artworkStatus.textContent = '\\u2713 Uploaded';
+      })
+      .catch(function(err) {
+        artworkStatus.style.color = 'var(--crow-error,#ef4444)';
+        artworkStatus.textContent = 'Failed: ' + (err.message || err);
+      });
+  }
+
+  // --- Form validation ---
+  document.getElementById('create-episode-form').addEventListener('submit', function(e) {
+    if (!audioUrlHidden.value && !audioUrlManual.value) {
+      e.preventDefault();
+      audioStatus.style.display = 'block';
+      audioStatus.style.color = 'var(--crow-error,#ef4444)';
+      audioStatus.textContent = 'Please upload an audio file or enter a URL';
+      audioZone.style.borderColor = 'var(--crow-error,#ef4444)';
+    } else if (audioUrlManual.value && !audioUrlHidden.value) {
+      audioUrlHidden.value = audioUrlManual.value;
+    }
+  });
+})();
+<\\/script>` : "";
 
   const content = `
     ${stats}
     ${feedSection}
     ${section("Episodes", episodeTable, { delay: 150 })}
     ${section("New Episode", createForm, { delay: 200 })}
+    ${uploadScript}
   `;
 
   return layout({ title: "Podcast", content });
