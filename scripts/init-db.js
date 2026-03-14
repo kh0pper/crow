@@ -350,6 +350,10 @@ await initTable("relay_blobs table", `
 
 await addColumnIfMissing("contacts", "email_hash", "TEXT");
 
+// --- Messages: attachments and threading ---
+await addColumnIfMissing("messages", "attachments", "TEXT");
+await addColumnIfMissing("chat_messages", "thread_id", "INTEGER");
+
 // --- Cross-Platform Behavioral Context (crow.md) ---
 
 await initTable("crow_context table", `
