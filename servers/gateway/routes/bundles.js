@@ -159,6 +159,46 @@ function isValidBundleId(id) {
 }
 
 /**
+ * Validate a docker-compose.yml for security issues.
+ * Rejects: sensitive host mounts, privileged mode, dangerous capabilities.
+ * Returns { valid: true } or { valid: false, reason: string }.
+ */
+function validateComposeFile(composePath, bundleId) {
+  try {
+    const content = readFileSync(composePath, "utf8");
+
+    // Sensitive host paths that should never be mounted
+    const sensitivePatterns = [
+      /^\s*-\s+["']?\/:/m,                    // root mount /
+      /^\s*-\s+["']?\/etc[/:]/m,              // /etc
+      /^\s*-\s+["']?~?\/?\.ssh[/:]/m,         // ~/.ssh
+      /^\s*-\s+["']?~?\/?\.crow\/data[/:]/m,  // ~/.crow/data
+      /^\s*-\s+["']?\/var\/run\/docker/m,      // Docker socket
+    ];
+
+    for (const pattern of sensitivePatterns) {
+      if (pattern.test(content)) {
+        return { valid: false, reason: `Compose file mounts a sensitive host path (matched: ${pattern.source})` };
+      }
+    }
+
+    // Check for privileged mode
+    if (/^\s*privileged:\s*true/m.test(content)) {
+      return { valid: false, reason: "Compose file uses privileged mode" };
+    }
+
+    // Check for dangerous capabilities
+    if (/NET_ADMIN|SYS_ADMIN|SYS_PTRACE|SYS_RAWIO/m.test(content)) {
+      return { valid: false, reason: "Compose file requests dangerous capabilities (NET_ADMIN, SYS_ADMIN, etc.)" };
+    }
+
+    return { valid: true };
+  } catch (err) {
+    return { valid: false, reason: `Could not read compose file: ${err.message}` };
+  }
+}
+
+/**
  * Propagate env vars from a bundle install to the gateway's .env file.
  * Uncomments and sets values for vars that are already present as comments,
  * or appends them if not found.
@@ -331,6 +371,20 @@ export default function bundlesRouter() {
           // Docker bundle — pull images and start containers
           const composePath = join(destDir, "docker-compose.yml");
           if (existsSync(composePath)) {
+            // Validate compose file for community add-ons (official ones from APP_BUNDLES are trusted)
+            const isCommunity = !existsSync(join(APP_BUNDLES, bundle_id, "docker-compose.yml"));
+            if (isCommunity) {
+              const validation = validateComposeFile(composePath, bundle_id);
+              if (!validation.valid) {
+                appendLog(job, `Security check failed: ${validation.reason}`);
+                // Clean up copied files
+                rmSync(destDir, { recursive: true, force: true });
+                finishJob(job, "failed");
+                return;
+              }
+              appendLog(job, "Security check passed");
+            }
+
             appendLog(job, "Pulling Docker images...");
             try {
               await runCompose(["pull"], { cwd: destDir });
