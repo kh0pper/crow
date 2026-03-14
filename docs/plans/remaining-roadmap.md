@@ -58,9 +58,9 @@
 - [ ] **Per-device crow.md** — Add `device_id` column to `crow_context` table (or separate `device_context` table). `generateInstructions()` merges base + device-specific context. Requires `ALTER TABLE` logic in `init-db.js`
 - [ ] **Lay user crow.md guide** — `docs/guide/customization.md` exists but may need expanding with examples like "Crow, update my context to prefer Spanish responses"
 
-#### 2B: Crow's Nest as Primary Entry Point
-- [ ] **Enabled by default** — Gateway should start with Crow's Nest enabled out of the box. Password setup still required on first visit. Currently requires explicit enable step
-- [ ] **Memory browser panel** — `servers/gateway/dashboard/panels/memory.js` exists but verify it has browse/search/edit/delete capabilities
+#### 2B: Crow's Nest as Primary Entry Point (Complete)
+- [x] **Enabled by default** — Gateway mounts Crow's Nest unconditionally, password required on first visit
+- [x] **Memory browser panel** — Browse, search (FTS5), paginate, edit, delete all working
 
 #### 2C: Zero-Config Network Access
 - [ ] **Tailscale MagicDNS** — During `crow-install.sh`, detect Tailscale and offer to set hostname to `crow`. Gateway detects and displays `http://crow/` URL on setup page. Handle hostname collisions

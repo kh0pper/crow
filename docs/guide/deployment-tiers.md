@@ -4,96 +4,112 @@ title: Deployment Tiers
 
 # Deployment Tiers
 
-Choosing the right hardware for your Crow deployment. This guide helps you understand what you need based on what you want to run.
+Crow runs on everything from a $15 Raspberry Pi to a cloud server. This guide helps you choose the right hardware and understand what each option can handle.
 
-## What deployment fits me?
-
-Not every Crow setup needs a beefy server. The core platform (memory, projects, blog) runs comfortably on minimal hardware. Add-ons like Ollama and Immich are where resource needs go up.
-
-Here's an overview of common deployment options:
+## Comparison
 
 | Deployment | RAM | Disk | Good For | Limitations |
 |---|---|---|---|---|
-| **Raspberry Pi Zero/3** | 512MB–1GB | 16–32GB SD | Memory + blog, 1–2 light bundles | No Immich, no Ollama, limited storage |
-| **Raspberry Pi 4/5** | 2–8GB | 32GB+ SD/SSD | Most bundles, moderate storage | Ollama only with small models, SSD recommended |
-| **Free cloud (Render)** | 512MB | Ephemeral | Memory + blog, remote access | No Docker bundles, storage resets on deploy, sleeps after inactivity |
-| **Oracle Free Tier** | 1–24GB | 50–200GB | Full platform with bundles | Network egress limits, ARM architecture |
-| **Home server** | 4–32GB | 500GB+ | Everything | Power/network dependent |
+| Raspberry Pi Zero/3 | 512MB–1GB | 16–32GB SD | Memory + blog, 1–2 light add-ons | No Immich, no Ollama, limited storage |
+| Raspberry Pi 4/5 | 2–8GB | 32GB+ SD/SSD | Most add-ons, moderate storage | Ollama only with small models, SSD recommended |
+| Free cloud (Render) | 512MB | Ephemeral | Memory + blog, remote access | No Docker add-ons, storage resets on deploy, sleeps after inactivity |
+| Oracle Cloud Free Tier | 1–24GB | 50–200GB | Full platform with add-ons | Network egress limits, ARM architecture |
+| Home server | 4–32GB | 500GB+ | Everything | Power/network dependent |
 
-## Recommendations
+---
 
-**Starting small?** A Raspberry Pi Zero or free Render instance is enough for memory and blog. You can always scale up later — Crow's SQLite database and file storage are portable.
+## Raspberry Pi Zero / Pi 3
 
-**Want the full experience?** A Raspberry Pi 4 with 4GB+ RAM or a modest home server gives you room to run all the core features plus several add-ons. Pair it with Tailscale for remote access and you have a capable self-hosted setup.
+**Best for:** Basic memory and blogging, running on minimal power.
 
-Here are some rules of thumb:
+These boards have 512MB–1GB of RAM, which is enough to run the core Crow servers but not much else simultaneously. Stick to memory, projects, blog, and sharing — they're lightweight.
 
-- **If you're on a Pi Zero or Pi 3**, skip Immich and Ollama entirely. Stick with memory, blog, and lightweight bundles like Obsidian or Home Assistant.
-- **If you're on free Render**, use memory and blog only. Storage resets on every deploy, and there's no Docker for running bundles.
-- **If you want Ollama**, you need at least 4GB RAM — and that's for small models only. Larger models (13B+) need 8GB or more.
-- **If you want Immich**, plan for at least 2GB RAM dedicated to it, plus whatever disk space your photo library needs.
-- **SSD strongly recommended** over SD cards for any deployment running storage, Immich, or Nextcloud. SD cards wear out under sustained write loads and are significantly slower for database operations.
+**Add-ons to install:** memory, blog, sharing
+**Add-ons to skip:** Immich (requires 2GB+ RAM), Ollama (too slow/large), Nextcloud (heavy)
+
+**Storage:** Use a Class 10 or A1-rated SD card and mount the data directory (`~/.crow/data/`) on an external USB drive if you plan to accumulate files. SD cards wear out under constant database writes — an SSD via USB adapter is strongly preferred for anything beyond light use.
+
+**Network:** Tailscale is the easiest way to access your Pi remotely without opening firewall ports. For a public blog, pair Crow with Caddy as a reverse proxy and a custom domain. If you're monetizing a blog or podcast, use Caddy + a custom domain — Tailscale Funnel is intended for personal/hobby use and is not appropriate for commercial traffic.
+
+---
+
+## Raspberry Pi 4 / Pi 5
+
+**Best for:** Running most of the Crow platform at home, including heavier add-ons.
+
+The Pi 4 and Pi 5 are capable machines. With 4–8GB RAM you can run Immich, Nextcloud, and even Ollama with small models (7B parameter range). The Pi 5 is noticeably faster for on-device AI inference.
+
+**Add-ons to install:** All core add-ons. Ollama works with 7B models on 4GB RAM, larger models on 8GB.
+**Add-ons to limit:** Immich works fine but needs dedicated disk space for photos. Don't run multiple heavy add-ons simultaneously on a 2GB model.
+
+**Storage:** An SSD connected via USB 3.0 (or the Pi 5's PCIe slot with an M.2 hat) is strongly recommended over SD. SQLite performs much better on SSD, and the reliability difference for a home server is significant.
+
+**Network:** Same as Pi Zero/3 — Tailscale for remote access, Caddy for a public-facing blog or podcast. Monetized content requires a proper domain and reverse proxy, not Tailscale Funnel.
+
+---
+
+## Free Cloud (Render)
+
+**Best for:** Getting Crow accessible from anywhere without managing hardware.
+
+Render's free tier gives you a persistent web service with 512MB RAM. Crow's memory and blog servers run fine within this budget. The catch: the disk is ephemeral — any files uploaded via the storage server are lost when the instance redeploys. Use an external database (Turso) and external object storage (Backblaze B2 or similar) if you want persistence.
+
+**Add-ons to install:** None — Docker-based add-ons are not available on Render's free tier.
+
+**Storage:** Don't rely on local disk. Set `TURSO_DATABASE_URL` for the database and configure an S3-compatible bucket for file storage.
+
+**Inactivity:** Free Render services sleep after 15 minutes of no requests, adding a cold-start delay. Upgrade to a paid plan to keep it always-on.
+
+**Network:** Render provides a public HTTPS URL out of the box. No Tailscale or Caddy needed for the gateway itself. For a monetized blog, point a custom domain at your Render service.
+
+---
+
+## Oracle Cloud Free Tier
+
+**Best for:** A full Crow deployment with storage and add-ons, at no cost.
+
+Oracle's Always Free tier offers up to 4 ARM cores and 24GB RAM across Ampere instances, plus 50–200GB of block storage. This is the most capable free option. You can run the full platform including Immich, Nextcloud, and Ollama with mid-size models.
+
+**Add-ons to install:** All add-ons are viable. Ollama with 13B models works well on 16GB+ configurations.
+
+**Limitations:** ARM architecture — most Docker images support ARM64, but verify before installing anything unusual. Oracle's network egress is free within the cloud network but charged for outbound internet traffic beyond the free allowance (currently 10TB/month, but verify current limits in your Oracle dashboard).
+
+**Storage:** Block volumes persist across reboots. Attach a volume to `~/.crow/data/` for your database and files.
+
+**Network:** Assign an always-free public IP. Use Caddy as a reverse proxy for HTTPS and custom domains. For monetized blogs or podcasts, configure a proper domain — Tailscale Funnel is not appropriate for this use case.
+
+---
+
+## Home Server
+
+**Best for:** Running everything without cloud dependency, maximum storage and performance.
+
+A home server with 8–32GB RAM can run the full Crow platform plus multiple heavy add-ons simultaneously. This is the best option if you have the hardware and want full control.
+
+**Add-ons to install:** All of them. Ollama with large models (30B+) is viable on 16GB+ machines.
+
+**Storage:** No SD card concerns. Use whatever local drives you have. Consider a separate volume for Immich photos if you plan to use it as a primary photo library.
+
+**Network:** Your home internet upload bandwidth is the limiting factor for external visitors. Use Tailscale for secure remote access from your own devices. For a public blog or podcast with a custom domain, run Caddy on the server and configure port forwarding (or use Cloudflare Tunnel to avoid exposing ports directly). Monetized content requires a stable public URL — Tailscale Funnel is not appropriate for this use case.
+
+**Power and uptime:** Home servers go down with power outages and internet disruptions. Consider a UPS if uptime matters. Crow's data lives in SQLite and survives clean shutdowns gracefully.
+
+---
 
 ## Add-on Resource Requirements
 
-Each add-on has its own resource footprint on top of the base Crow platform. Use this table to plan what your hardware can support:
-
 | Add-on | Min RAM | Min Disk | Notes |
 |---|---|---|---|
-| **Ollama** | 2GB+ | 5–50GB | Depends on model size. Small models (3B) fit in 2GB; 7B models need 4GB+; 13B+ models need 8GB+ |
-| **Nextcloud** | 512MB | 1GB+ | Plus storage space for your files. MariaDB recommended for larger installs |
-| **Immich** | 2GB+ | 5GB+ | Plus space for your photo library. Machine learning features need additional RAM |
-| **Home Assistant** | 256MB | 500MB | Lightweight. Resource use grows with the number of integrations and automations |
-| **Obsidian** | 128MB | Minimal | MCP server only — the vault itself lives on disk. Negligible overhead |
+| Ollama | 2GB+ | 5–50GB | Small models (3B) fit in 2GB; 7B models need 4GB+; 13B+ models need 8GB+ |
+| Nextcloud | 512MB | 1GB+ | Plus storage space for your files |
+| Immich | 2GB+ | 5GB+ | Plus space for your photo library; ML features need additional RAM |
+| Home Assistant | 256MB | 500MB | Lightweight; grows with number of integrations |
+| Obsidian | 128MB | Minimal | MCP server only — vault lives on disk |
 
 ::: tip
 The base Crow platform (memory, projects, sharing, blog, gateway) uses roughly 100–200MB of RAM and minimal disk space beyond your data. Most of your resource budget goes to add-ons.
 :::
 
-## Checking Your System Resources
+## Migrating Between Tiers
 
-Before installing add-ons, check what you have available.
-
-**On Linux or Raspberry Pi:**
-
-```bash
-# Available memory
-free -h
-
-# Disk space
-df -h
-
-# CPU info
-lscpu | head -15
-```
-
-**On macOS:**
-
-```bash
-# Available memory
-vm_stat | head -5
-
-# Disk space
-df -h /
-```
-
-## Warning Signs
-
-If your deployment is struggling, you'll see some common symptoms:
-
-- **Slow AI responses** — The gateway or MCP servers are starved for memory. Check if swap usage is high with `free -h`.
-- **OOM kills** — The kernel is terminating processes to free memory. Check with `dmesg | grep -i oom`. This means you're running more than your hardware can support.
-- **Database errors or corruption** — Often caused by SD card wear or running out of disk space. Check disk usage and consider migrating to an SSD.
-- **Docker containers restarting** — A container hit its memory limit or the system ran out of resources. Check with `docker stats`.
-
-## When to Upgrade
-
-Consider scaling up your deployment if:
-
-- You're consistently using more than 80% of your RAM
-- Swap usage is high (more than a few hundred MB)
-- You want to add Ollama or Immich but don't have the headroom
-- Your SD card is showing signs of wear (filesystem errors, slow writes)
-- You've outgrown free-tier cloud limits (sleep timeouts, ephemeral storage)
-
-The migration path is straightforward: back up your `~/.crow/data/` directory, set up Crow on the new hardware, and restore your data. Your database, files, and identity all travel with you.
+The migration path is straightforward: back up your `~/.crow/data/` directory using `npm run backup`, set up Crow on the new hardware, and restore your data with `npm run restore`. Your database, files, and identity all travel with you.
