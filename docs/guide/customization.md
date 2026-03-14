@@ -141,6 +141,10 @@ Browse community skills in the **Extensions** panel. Installed skills are placed
 
 Crow supports **per-device overrides** so you can have different preferences depending on where you're using it. For example, verbose responses on your desktop but short answers on your phone, or Spanish on one device and English on another.
 
+::: info PARTIALLY IMPLEMENTED
+The database schema and MCP tools for per-device context are built and working. You can create, update, and delete device-specific context overrides via the AI tools. However, the gateway does not yet automatically apply `CROW_DEVICE_ID` to merge device-specific context into the MCP instructions — that wiring is still in progress. The Crow's Nest Settings panel does not yet have a "Device Context" UI section.
+:::
+
 ### How it works
 
 Each device can have its own version of any crow.md section. When Crow connects from a specific device, it merges:
@@ -189,7 +193,7 @@ To enable per-device context, set the `CROW_DEVICE_ID` environment variable befo
 CROW_DEVICE_ID=grackle
 ```
 
-This tells Crow which device it's running on, so it can apply the right overrides. You can see the current device ID and override status in the **Settings** panel of the Crow's Nest under "Device Context."
+This tells Crow which device it's running on. Once the gateway wiring is complete, it will automatically apply the right device overrides to the MCP instructions.
 
 ---
 

@@ -120,7 +120,7 @@ Each relay entry includes:
 
 ### Default relay
 
-New installations are pre-configured with `relay.crow.maestro.press` (planned). Users can remove it or add additional relays.
+A default relay service is planned but not yet deployed. Currently, users must configure their own relays — either a friend's gateway with relay mode enabled, or a self-hosted cloud gateway.
 
 ### Future: automatic discovery via DHT
 

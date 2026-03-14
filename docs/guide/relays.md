@@ -11,17 +11,6 @@ Crow's sharing system uses two transport layers:
 
 A **peer relay** bridges the gap for Hypercore data. It accepts encrypted blobs from a sender, stores them temporarily, and delivers them when the recipient connects. Think of it as a mailbox for your encrypted data.
 
-## Default relay
-
-Crow provides a default relay at `relay.crow.maestro.press` (planned). This relay is available to all Crow users and requires no configuration — new installations will connect to it automatically.
-
-The default relay:
-
-- Stores encrypted blobs for up to 30 days
-- Enforces per-contact storage quotas (100 pending blobs, 1MB each)
-- Cannot read your data — it only sees encrypted blobs
-- Is optional — you can remove it and use only your own relays
-
 ## How peer relays work
 
 Any cloud-deployed Crow gateway can act as a relay for its contacts. This is opt-in and mutual — you help your friends, and they help you.
@@ -52,15 +41,18 @@ Relays only accept requests from known contacts:
 
 Unknown or blocked contacts are rejected.
 
-## Finding public relays
+## Finding relays
 
-Currently, relay discovery is manual. You can find relays through:
+Currently, relay discovery is manual:
 
-- **The default relay** at `relay.crow.maestro.press` (available to all users)
 - **Friends with cloud-deployed gateways** — Ask your contacts if they run a relay
 - **Community lists** — Check the Crow community channels for shared relay addresses
 
-Future versions will support automatic relay discovery via the DHT, allowing Crow to find nearby relays without manual configuration.
+::: info DEFAULT RELAY PLANNED
+A default relay service is on the [roadmap](/roadmap) but has not been deployed yet. For now, you need to use a friend's gateway as a relay or deploy your own cloud gateway with relay mode enabled.
+:::
+
+Future versions may support automatic relay discovery via the DHT, allowing Crow to find nearby relays without manual configuration.
 
 ## Privacy model
 
@@ -130,8 +122,8 @@ Crow uses two different relay systems for different purposes:
 | **Used for** | Heavy data (projects, memories, files) | Lightweight messages and reactions |
 | **Protocol** | HTTP REST (Ed25519 auth) | WebSocket (Nostr protocol) |
 | **Encryption** | NaCl box (Curve25519) | NIP-44 (ChaCha20-Poly1305) |
-| **Discovery** | Manual configuration (future: DHT) | Public relay lists |
-| **Default relays** | `relay.crow.maestro.press` | `relay.damus.io`, `nos.lol`, `relay.nostr.band` |
+| **Discovery** | Manual configuration | Public relay lists |
+| **Default relays** | None yet (planned) | `relay.damus.io`, `nos.lol`, `relay.nostr.band` |
 | **Who runs them** | Crow users with cloud gateways | Nostr community |
 
 Both systems share the same Crow identity. You do not need separate accounts or keys.
