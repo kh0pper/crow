@@ -73,11 +73,11 @@
 - [ ] **Memory entry count** — Show memory stats in Crow's Nest, warn on constrained devices
 - [x] **Deployment tier docs** — `docs/guide/deployment-tiers.md` complete with resource tables and recommendations
 
-#### 2E: Skill Protection (Partially Done)
+#### 2E: Skill Protection (Complete)
 - [x] **Skills Manager panel** — Crow's Nest panel for browsing, viewing, editing, creating, and deleting AI skill files. Shows repo skills (read-only) and user skills (`~/.crow/skills/`) with override badges
 - [x] **User skills directory** — `~/.crow/skills/` override system works in Skills Manager panel. Users can override built-in skills with custom copies
-- [ ] **Superpowers routing precedence** — Update `superpowers.md` to tell AI to check `~/.crow/skills/` first when loading skills
-- [ ] **Marketplace-installed skills** — Go to `~/.crow/skills/` automatically
+- [x] **Superpowers routing precedence** — `superpowers.md` rule 10 has explicit resolution order (`~/.crow/skills/` → `skills/`). `skill-writing.md` directs new user skills to `~/.crow/skills/` by default
+- [x] **Marketplace-installed skills** — `bundles.js` install handler copies skills to `~/.crow/skills/` automatically
 
 ### Phase 4: Platform Expansion (Medium-High Effort)
 
@@ -162,7 +162,7 @@ Pick from these based on available time:
 
 | Priority | Task | Effort | Impact |
 |----------|------|--------|--------|
-| 1 | **Superpowers routing** — User skills precedence in `superpowers.md` | 30 min | Medium — completes skill protection |
+| 1 | ~~Superpowers routing~~ — **Done** | — | — |
 | 2 | **Phase 8** — Sharing tests on lab machines | 1-2 sessions | High — validates P2P |
 | 3 | **Marketplace B** — One-click install from UI | 2-3 sessions | Very high — core UX |
 | 4 | **Phase 2C** — Tailscale MagicDNS integration in installer | 1 session | High — zero-config access |
