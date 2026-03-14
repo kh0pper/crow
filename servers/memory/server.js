@@ -456,15 +456,25 @@ export function createMemoryServer(dbPath, options = {}) {
       description: z.string().max(500).optional().describe("Optional description of the schedule"),
     },
     async ({ task, cron_expression, description }) => {
+      // Validate and compute next_run
+      let nextRun = null;
+      try {
+        const { CronExpressionParser } = await import("cron-parser");
+        const interval = CronExpressionParser.parse(cron_expression);
+        nextRun = interval.next().toISOString();
+      } catch {
+        return { content: [{ type: "text", text: `Invalid cron expression: "${cron_expression}". Use standard 5-field format (e.g. "0 9 * * *" for daily at 9am).` }] };
+      }
+
       const result = await db.execute({
-        sql: "INSERT INTO schedules (task, cron_expression, description) VALUES (?, ?, ?)",
-        args: [task, cron_expression, description ?? null],
+        sql: "INSERT INTO schedules (task, cron_expression, description, next_run) VALUES (?, ?, ?, ?)",
+        args: [task, cron_expression, description ?? null, nextRun],
       });
       return {
         content: [
           {
             type: "text",
-            text: `Schedule created (id: ${Number(result.lastInsertRowid)}, task: ${task}, cron: ${cron_expression})`,
+            text: `Schedule created (id: ${Number(result.lastInsertRowid)}, task: ${task}, cron: ${cron_expression}, next run: ${nextRun})`,
           },
         ],
       };
@@ -528,8 +538,30 @@ export function createMemoryServer(dbPath, options = {}) {
       const updates = [];
       const params = [];
       if (task !== undefined) { updates.push("task = ?"); params.push(task); }
-      if (cron_expression !== undefined) { updates.push("cron_expression = ?"); params.push(cron_expression); }
-      if (enabled !== undefined) { updates.push("enabled = ?"); params.push(enabled ? 1 : 0); }
+      if (cron_expression !== undefined) {
+        // Validate and recompute next_run
+        try {
+          const { CronExpressionParser } = await import("cron-parser");
+          const interval = CronExpressionParser.parse(cron_expression);
+          const nextRun = interval.next().toISOString();
+          updates.push("cron_expression = ?"); params.push(cron_expression);
+          updates.push("next_run = ?"); params.push(nextRun);
+        } catch {
+          return { content: [{ type: "text", text: `Invalid cron expression: "${cron_expression}". Use standard 5-field format.` }] };
+        }
+      }
+      if (enabled !== undefined) {
+        updates.push("enabled = ?"); params.push(enabled ? 1 : 0);
+        // Recompute next_run when re-enabling
+        if (enabled && cron_expression === undefined) {
+          try {
+            const { CronExpressionParser } = await import("cron-parser");
+            const existingCron = rows[0].cron_expression;
+            const interval = CronExpressionParser.parse(existingCron);
+            updates.push("next_run = ?"); params.push(interval.next().toISOString());
+          } catch {}
+        }
+      }
 
       if (updates.length === 0) {
         return { content: [{ type: "text", text: "No updates provided." }] };

@@ -71,6 +71,7 @@ import { SessionManager } from "./session-manager.js";
 import { mountMcpServer } from "./routes/mcp.js";
 import { generateInstructions } from "../shared/instructions.js";
 import { startAutoUpdate } from "./auto-update.js";
+import { startScheduler } from "./scheduler.js";
 
 const PORT = parseInt(process.env.PORT || process.env.CROW_GATEWAY_PORT || "3001", 10);
 const noAuth = process.argv.includes("--no-auth");
@@ -518,6 +519,11 @@ app.listen(PORT, "0.0.0.0", (error) => {
   // Start auto-update checker
   startAutoUpdate(createDbClient()).catch((err) => {
     console.error("[auto-update] Failed to start:", err.message);
+  });
+
+  // Start schedule executor
+  startScheduler(createDbClient()).catch((err) => {
+    console.error("[scheduler] Failed to start:", err.message);
   });
 });
 
