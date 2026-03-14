@@ -218,7 +218,6 @@ export function createSharingServer(dbPath, options = {}) {
             crowId: identity.crowId,
             ed25519Pub: identity.ed25519Pubkey,
             secp256k1Pub: identity.secp256k1Pubkey,
-            displayName: display_name || null,
           });
           await nostrManager.sendMessage(
             { secp256k1_pubkey: peer.secp256k1Pubkey },
