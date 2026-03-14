@@ -492,21 +492,22 @@ app.listen(PORT, "0.0.0.0", (error) => {
   console.log(`  Setup:    GET  http://localhost:${PORT}/setup`);
   console.log(`  Health:   GET  http://localhost:${PORT}/health`);
   // Detect Tailscale hostname for convenience logging
-  try {
-    const { execFileSync } = await import("child_process");
-    const tsJson = execFileSync("tailscale", ["status", "--json"], { timeout: 3000, stdio: "pipe" });
-    const tsStatus = JSON.parse(tsJson);
-    const tsHostname = tsStatus.Self?.HostName;
-    const tsIp = tsStatus.Self?.TailscaleIPs?.[0];
-    if (tsHostname) {
-      console.log(`  Tailscale:  http://${tsHostname}:${PORT}${tsHostname === "crow" ? `  (or http://crow/)` : ""}`);
+  import("child_process").then(({ execFileSync }) => {
+    try {
+      const tsJson = execFileSync("tailscale", ["status", "--json"], { timeout: 3000, stdio: "pipe" });
+      const tsStatus = JSON.parse(tsJson);
+      const tsHostname = tsStatus.Self?.HostName;
+      const tsIp = tsStatus.Self?.TailscaleIPs?.[0];
+      if (tsHostname) {
+        console.log(`  Tailscale:  http://${tsHostname}:${PORT}${tsHostname === "crow" ? `  (or http://crow/)` : ""}`);
+      }
+      if (tsIp) {
+        console.log(`  Tailnet IP: http://${tsIp}:${PORT}`);
+      }
+    } catch {
+      // Tailscale not installed or not authenticated — skip
     }
-    if (tsIp) {
-      console.log(`  Tailnet IP: http://${tsIp}:${PORT}`);
-    }
-  } catch {
-    // Tailscale not installed or not authenticated — skip
-  }
+  }).catch(() => {});
   console.log(`\n  First time? Visit http://localhost:${PORT}/setup for integration status and next steps.`);
 
   // Initialize external server proxy AFTER listening (so health checks pass during startup).
