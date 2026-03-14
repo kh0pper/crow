@@ -234,6 +234,63 @@ export class NostrManager {
   }
 
   /**
+   * Subscribe to all incoming DMs directed at us (for invite acceptance auto-add).
+   * Calls onInviteAccepted(payload) when an invite_accepted message is received.
+   */
+  async subscribeToIncoming(onInviteAccepted) {
+    if (this.relays.size === 0) {
+      await this.connectRelays();
+    }
+
+    const ownPubkey = this.pubkey?.length === 66 ? this.pubkey.slice(2) : this.pubkey;
+
+    for (const [url, relay] of this.relays) {
+      try {
+        const sub = relay.subscribe(
+          [
+            {
+              kinds: [4],
+              "#p": [ownPubkey],
+              since: Math.floor(Date.now() / 1000) - 86400, // Last 24h only
+            },
+          ],
+          {
+            onevent: async (event) => {
+              try {
+                // Derive sender pubkey from event
+                let senderPubkey = event.pubkey;
+
+                const conversationKey = nip44.v2.utils.getConversationKey(
+                  this.identity.secp256k1Priv,
+                  senderPubkey
+                );
+                const decrypted = nip44.v2.decrypt(event.content, conversationKey);
+
+                // Check if it's an invite_accepted message
+                if (decrypted.startsWith("{") && decrypted.includes("invite_accepted")) {
+                  try {
+                    const payload = JSON.parse(decrypted);
+                    if (payload.type === "invite_accepted" && onInviteAccepted) {
+                      await onInviteAccepted(payload);
+                    }
+                  } catch {
+                    // Not valid JSON or not our message type
+                  }
+                }
+              } catch {
+                // Decryption failed — not for us
+              }
+            },
+          }
+        );
+        this.subscriptions.set(`incoming:${url}`, sub);
+      } catch {
+        // Subscription failed for this relay
+      }
+    }
+  }
+
+  /**
    * Get configured relays from DB.
    */
   async getConfiguredRelays() {
