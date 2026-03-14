@@ -13,9 +13,9 @@ import { mkdirSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sign, encryptForPeer, decryptFromPeer } from "./identity.js";
+import { resolveDataDir } from "../db.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PEERS_DIR = resolve(__dirname, "../../data/peers");
+const PEERS_DIR = resolve(resolveDataDir(), "peers");
 
 /**
  * Get the storage path for a contact's feeds.
