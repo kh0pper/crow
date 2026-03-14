@@ -163,13 +163,14 @@ export function createSharingServer(dbPath, options = {}) {
 
         if (payload.share_type === "memory") {
           const result = await db.execute({
-            sql: `INSERT INTO memories (content, category, importance, metadata, tags)
-                  VALUES (?, ?, ?, ?, ?)`,
+            sql: `INSERT INTO memories (content, category, importance, context, source, tags)
+                  VALUES (?, ?, ?, ?, ?, ?)`,
             args: [
               payload.payload.content || "",
               payload.payload.category || "general",
               payload.payload.importance || 5,
-              payload.payload.metadata || "",
+              payload.payload.context || "",
+              payload.payload.source || "",
               payload.payload.tags || "",
             ],
           });
