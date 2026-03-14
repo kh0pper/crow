@@ -70,15 +70,16 @@ Pre-configured Crow instance at `username.crow.maestro.press` — no setup, no m
 
 > **[Get managed hosting →](https://maestro.press/hosting/)**
 
-### Cloud Deploy (any platform)
+### Oracle Cloud Free Tier (Recommended Free)
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/kh0pper/crow)
+A permanent free server that never sleeps — local SQLite, no external database needed.
 
-1. Create a free [Turso](https://turso.tech) database
-2. Click the Deploy button → paste your Turso credentials
-3. Connect from your AI platform using the endpoint URLs shown at `/setup`
+1. Create a free [Oracle Cloud](https://cloud.oracle.com) account
+2. Launch an Always Free VM.Standard.E2.1.Micro instance (Ubuntu 22.04)
+3. Install Crow + Tailscale, create a systemd service
+4. Connect from any AI platform
 
-→ **[Full cloud deploy guide](https://maestro.press/software/crow/getting-started/cloud-deploy)**
+→ **[Full Oracle Cloud guide](https://maestro.press/software/crow/getting-started/oracle-cloud)**
 
 ### Desktop (Claude Desktop)
 

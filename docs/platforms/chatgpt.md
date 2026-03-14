@@ -13,7 +13,7 @@ Connect Crow to ChatGPT using the SSE transport. ChatGPT supports MCP through it
 2. Click **Create** or **Add MCP Server**
 3. Enter your Crow SSE endpoint URL:
    ```
-   https://your-gateway.onrender.com/memory/sse
+   https://your-crow-server/memory/sse
    ```
 4. ChatGPT will discover the OAuth metadata and initiate authorization
 5. Authorize the connection when prompted
@@ -22,9 +22,9 @@ Repeat for additional servers:
 
 | Server | SSE URL |
 |---|---|
-| Memory | `https://your-gateway.onrender.com/memory/sse` |
-| Projects | `https://your-gateway.onrender.com/projects/sse` |
-| External Tools | `https://your-gateway.onrender.com/tools/sse` |
+| Memory | `https://your-crow-server/memory/sse` |
+| Projects | `https://your-crow-server/projects/sse` |
+| External Tools | `https://your-crow-server/tools/sse` |
 
 ## Transport
 
@@ -65,7 +65,7 @@ You can also manually load the full context:
 Or fetch it via HTTP:
 
 ```
-GET https://your-gateway.onrender.com/crow.md?platform=chatgpt
+GET https://your-crow-server/crow.md?platform=chatgpt
 ```
 
 Any memories you store in ChatGPT are instantly available from Claude, Gemini, or any other connected platform. See the [Cross-Platform Guide](/guide/cross-platform) for more details.
@@ -75,7 +75,7 @@ Any memories you store in ChatGPT are instantly available from Claude, Gemini, o
 ChatGPT connects via the gateway. If you have many integrations enabled, consider using the `/router/mcp` endpoint instead of connecting each server individually. The router consolidates 49+ tools into 7 category tools, reducing context window usage:
 
 ```
-https://your-gateway.onrender.com/router/sse
+https://your-crow-server/router/sse
 ```
 
 See the [Context & Performance guide](/guide/context-performance) for more details.

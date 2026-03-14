@@ -48,13 +48,13 @@ Connect Crow to [Cline](https://github.com/cline/cline), the AI coding assistant
    {
      "mcpServers": {
        "crow-memory": {
-         "url": "https://your-gateway.onrender.com/memory/mcp"
+         "url": "https://your-crow-server/memory/mcp"
        },
        "crow-projects": {
-         "url": "https://your-gateway.onrender.com/projects/mcp"
+         "url": "https://your-crow-server/projects/mcp"
        },
        "crow-tools": {
-         "url": "https://your-gateway.onrender.com/tools/mcp"
+         "url": "https://your-crow-server/tools/mcp"
        }
      }
    }

@@ -64,15 +64,15 @@ Connect to a deployed Crow gateway for access to the full platform.
      "mcpServers": {
        "crow-memory": {
          "type": "url",
-         "url": "https://your-gateway.onrender.com/memory/mcp"
+         "url": "https://your-crow-server/memory/mcp"
        },
        "crow-projects": {
          "type": "url",
-         "url": "https://your-gateway.onrender.com/projects/mcp"
+         "url": "https://your-crow-server/projects/mcp"
        },
        "crow-tools": {
          "type": "url",
-         "url": "https://your-gateway.onrender.com/tools/mcp"
+         "url": "https://your-crow-server/tools/mcp"
        }
      }
    }
