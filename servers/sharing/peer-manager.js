@@ -186,7 +186,10 @@ export class PeerManager {
 
       case "data": {
         if (state.authenticated && state.remoteCrowId && this.onPeerData) {
+          console.log(`[peer] Received data from ${state.remoteCrowId}:`, msg.payload?.type || "unknown");
           this.onPeerData(state.remoteCrowId, msg.payload);
+        } else {
+          console.warn(`[peer] Dropped data message: auth=${state.authenticated}, remote=${state.remoteCrowId}, handler=${!!this.onPeerData}`);
         }
         break;
       }
