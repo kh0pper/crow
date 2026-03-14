@@ -4,7 +4,7 @@ title: Blog Discovery
 
 # Blog Discovery
 
-Crow blogs can be discovered by other Crow instances and by a central registry. This enables a network of independent, self-hosted blogs that are findable without relying on a single platform.
+Crow blogs can be discovered by other Crow instances through lightweight JSON endpoints. This enables a network of independent, self-hosted blogs that are findable without relying on a single platform.
 
 ## How It Works
 
@@ -13,7 +13,7 @@ Every Crow gateway exposes two JSON endpoints on the public blog:
 | Endpoint | Gated? | Purpose |
 |---|---|---|
 | `/blog/discover.json` | No | Lightweight discovery for manual peer-to-peer lookup |
-| `/blog/registry.json` | Yes (`blog_listed` setting) | Full metadata for the central Crow Blog Registry |
+| `/blog/registry.json` | Yes (`blog_listed` setting) | Full metadata for future registry integration |
 
 Both endpoints are read-only and cache responses for one hour.
 
@@ -52,15 +52,15 @@ Only returns data if the blog owner has opted in by setting `blog_listed` to `"t
 }
 ```
 
-This is the endpoint that the central Crow Blog Registry polls.
+This endpoint is designed to be polled by a future central registry service.
 
-## Opting Into the Crow Blog Registry
+## Opting Into Discovery
 
-To list your blog in the central registry:
+To make your blog's full metadata available:
 
 1. Open the Crow's Nest and go to **Settings**
 2. Set `blog_listed` to `true`
-3. That's it -- the registry will pick up your blog on its next poll cycle
+3. The `/blog/registry.json` endpoint will start returning data
 
 Or ask your AI:
 
@@ -68,77 +68,46 @@ Or ask your AI:
 
 The AI will set the `blog_listed` setting for you.
 
-To opt out later, set `blog_listed` to `false` (or delete the setting). The `/blog/registry.json` endpoint will immediately return 404, and the registry will remove your blog on its next poll.
+To opt out later, set `blog_listed` to `false` (or delete the setting). The `/blog/registry.json` endpoint will immediately return 404.
 
 ### What gets shared
 
-When you opt in, the registry stores only what `/blog/registry.json` returns:
+When you opt in, the endpoint returns only:
 
 - Blog title and tagline
 - Author name
 - Blog URL
 - Post count and date of last publication
 
-No post content, email addresses, or other private data is shared with the registry.
+No post content, email addresses, or other private data is shared.
 
-## The Crow Blog Registry
+## Future: Central Blog Registry
 
-The central registry at `registry.crow.maestro.press` aggregates metadata from opted-in Crow blogs. It works as follows:
+::: info PLANNED
+A central Crow Blog Registry is on the [roadmap](/roadmap) but has not been built yet. The discovery endpoints above are available now and work independently of any registry.
+:::
 
-1. **Blog owners opt in** by setting `blog_listed` to `true`
-2. **The registry polls** each known blog's `/blog/registry.json` endpoint periodically
-3. **New blogs register** by submitting their gateway URL to the registry API
-4. **The registry serves** a public directory of active Crow blogs with title, author, URL, and last-published date
+The planned registry would aggregate metadata from opted-in Crow blogs into a browsable directory. It would:
 
-### Registry API (planned)
+1. Poll each known blog's `/blog/registry.json` endpoint periodically
+2. Serve a public directory of active Crow blogs
+3. Support search by title, author, or tag
+4. Automatically delist blogs that return 404 for consecutive polls
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/api/blogs` | GET | List all registered blogs (paginated) |
-| `/api/blogs` | POST | Submit a new blog URL for inclusion |
-| `/api/blogs/search` | GET | Search blogs by title, author, or tag |
-| `/api/blogs/:url/refresh` | POST | Request an immediate re-poll of a blog |
+## Future: Peer-to-Peer Discovery
 
-The registry is a lightweight service -- it stores only the metadata returned by `/blog/registry.json` and re-polls blogs to keep the directory current. Blogs that return 404 for three consecutive polls are delisted automatically.
+::: info PLANNED
+Hyperswarm-based blog discovery is a future enhancement and has not been implemented.
+:::
 
-### Self-registration
+A future enhancement would allow blogs to announce themselves via Hyperswarm, enabling discovery without any central server. Crow instances listening on a well-known topic would discover new blogs over the P2P network.
 
-When a blog owner opts in, their Crow instance can automatically submit their gateway URL to the registry:
+## Discovery Methods Summary
 
-```
-POST https://registry.crow.maestro.press/api/blogs
-Content-Type: application/json
-
-{ "url": "https://example.com" }
-```
-
-The registry then polls `/blog/registry.json` at that URL to verify the blog exists and is opted in before adding it to the directory.
-
-## Peer-to-Peer Discovery (Future)
-
-Beyond the central registry, Crow blogs can be discovered through the existing P2P infrastructure:
-
-### Hyperswarm announcements
-
-Crow's sharing server already uses Hyperswarm for peer discovery. A future enhancement would allow blogs to announce themselves on a well-known topic hash derived from a Crow Blog discovery key. Other Crow instances listening on that topic would discover new blogs without any central server.
-
-### How it would work
-
-1. When `blog_listed` is enabled and the sharing server is running, Crow joins a Hyperswarm topic for blog discovery
-2. Connected peers exchange `/blog/discover.json` payloads over the Hyperswarm connection
-3. Each instance maintains a local directory of discovered blogs
-4. The directory is available through MCP tools and the Crow's Nest
-
-This complements the central registry -- users who prefer fully decentralized discovery can use Hyperswarm alone, while the central registry provides a curated directory for broader visibility.
-
-## Combining Discovery Methods
-
-The discovery system is designed to be layered:
-
-| Method | Requires internet? | Requires registry? | Decentralized? |
+| Method | Status | Requires internet? | Decentralized? |
 |---|---|---|---|
-| Direct URL (`/blog/discover.json`) | Yes | No | Yes |
-| Central registry (`registry.crow.maestro.press`) | Yes | Yes | No |
-| Hyperswarm P2P (future) | Tailscale or LAN | No | Yes |
+| Direct URL (`/blog/discover.json`) | **Available now** | Yes | Yes |
+| Central registry | Planned | Yes | No |
+| Hyperswarm P2P | Planned | Tailscale or LAN | Yes |
 
-Users can participate in any combination. A blog that opts into the registry is also always discoverable via its direct URL and (in the future) via Hyperswarm.
+The direct URL discovery works today. A blog that opts into registry discovery in the future will also always be discoverable via its direct URL.
