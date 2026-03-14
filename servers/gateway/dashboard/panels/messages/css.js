@@ -12,10 +12,12 @@ export function messagesCSS() {
     display: flex;
     height: calc(100vh - 140px);
     min-height: 480px;
+    max-width: 100%;
     border: 1px solid var(--crow-border);
     border-radius: 10px;
     overflow: hidden;
     background: var(--crow-bg-surface, #1a1a2e);
+    box-sizing: border-box;
   }
 
   /* === Avatar Strip (left) === */
@@ -191,6 +193,7 @@ export function messagesCSS() {
   .msg-chat-viewport {
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;
     padding: 1rem;
     display: flex;
     flex-direction: column;
@@ -205,6 +208,8 @@ export function messagesCSS() {
     padding: 0.6rem 0.9rem;
     border-radius: 14px;
     font-size: 0.9rem;
+    overflow-wrap: break-word;
+    word-break: break-word;
     line-height: 1.5;
     word-wrap: break-word;
     white-space: pre-wrap;
