@@ -57,6 +57,20 @@ export default {
         res.redirect("/dashboard/blog");
         return;
       }
+
+      if (action === "edit") {
+        const { id, title, content, tags, visibility, cover_image_key } = req.body;
+        if (!id || !title || !content) {
+          return res.redirect("/dashboard/blog");
+        }
+        const slug = title.toLowerCase().replace(/[^a-z0-9\s-]/g, "").replace(/\s+/g, "-").slice(0, 80);
+        await db.execute({
+          sql: "UPDATE blog_posts SET title = ?, slug = ?, content = ?, tags = ?, visibility = ?, cover_image_key = ?, updated_at = datetime('now') WHERE id = ?",
+          args: [title, slug, content, tags || null, visibility || "private", cover_image_key || null, id],
+        });
+        res.redirect("/dashboard/blog");
+        return;
+      }
     }
 
     // GET — show post list
@@ -69,6 +83,17 @@ export default {
       statCard("Published", publishedResult.rows[0]?.c || 0, { delay: 50 }),
       statCard("Drafts", draftResult.rows[0]?.c || 0, { delay: 100 }),
     ]);
+
+    // Check if editing a post
+    let editPost = null;
+    const editId = req.query.edit;
+    if (editId) {
+      const { rows } = await db.execute({
+        sql: "SELECT * FROM blog_posts WHERE id = ?",
+        args: [parseInt(editId, 10)],
+      });
+      editPost = rows[0] || null;
+    }
 
     // Live blog link
     const publicUrl = process.env.CROW_GATEWAY_URL || "";
@@ -100,36 +125,68 @@ export default {
         const actions = p.status === "published"
           ? `<form method="POST" style="display:inline"><input type="hidden" name="action" value="unpublish"><input type="hidden" name="id" value="${p.id}"><button class="btn btn-sm btn-secondary" type="submit">Unpublish</button></form>`
           : `<form method="POST" style="display:inline"><input type="hidden" name="action" value="publish"><input type="hidden" name="id" value="${p.id}"><button class="btn btn-sm btn-primary" type="submit">Publish</button></form>`;
+        const editBtn = `<a href="?edit=${p.id}" class="btn btn-sm btn-secondary">Edit</a>`;
         const deleteBtn = `<form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('Delete this post?')"><input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="${p.id}"><button class="btn btn-sm btn-danger" type="submit">Delete</button></form>`;
 
         const thumb = p.cover_image_key
           ? `<img src="/blog/media/${escapeHtml(p.cover_image_key)}" style="width:40px;height:40px;object-fit:cover;border-radius:4px;vertical-align:middle;margin-right:0.5rem">`
           : "";
         return [
-          `${thumb}${escapeHtml(p.title)}`,
+          `${thumb}<a href="?edit=${p.id}" style="color:var(--crow-text-primary);text-decoration:none">${escapeHtml(p.title)}</a>`,
           `${statusBadge}${visBadge}`,
           `<span class="mono">${escapeHtml(p.slug)}</span>`,
           `<span class="mono">${formatDate(p.published_at || p.created_at)}</span>`,
-          `${actions} ${deleteBtn}`,
+          `${editBtn} ${actions} ${deleteBtn}`,
         ];
       });
       postTable = dataTable(["Title", "Status", "Slug", "Date", "Actions"], rows);
     }
 
-    // Create form
-    const createForm = `<form method="POST" id="create-post-form">
-      <input type="hidden" name="action" value="create">
-      <input type="hidden" name="cover_image_key" id="cover-image-key">
-      ${formField("Title", "title", { required: true, placeholder: "Post title" })}
-      ${formField("Content", "content", { type: "textarea", required: true, placeholder: "Write in Markdown...", rows: 8 })}
+    // Post form (create or edit)
+    const isEdit = !!editPost;
+    const formTitle = isEdit ? `Edit: ${escapeHtml(editPost.title)}` : "New Post";
+    const formAction = isEdit ? "edit" : "create";
+    const submitLabel = isEdit ? "Save Changes" : "Create Draft";
+    const cancelLink = isEdit ? ` <a href="/dashboard/blog" class="btn btn-secondary" style="margin-left:0.5rem">Cancel</a>` : "";
+
+    const postForm = `<form method="POST" id="create-post-form">
+      <input type="hidden" name="action" value="${formAction}">
+      ${isEdit ? `<input type="hidden" name="id" value="${editPost.id}">` : ""}
+      <input type="hidden" name="cover_image_key" id="cover-image-key" value="${isEdit && editPost.cover_image_key ? escapeHtml(editPost.cover_image_key) : ""}">
+      ${formField("Title", "title", { required: true, placeholder: "Post title", value: isEdit ? editPost.title : "" })}
+      <style>
+        .md-toolbar { display:flex;gap:2px;padding:4px;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-bottom:none;border-radius:8px 8px 0 0;flex-wrap:wrap; }
+        .md-btn { background:transparent;border:1px solid transparent;color:var(--crow-text-secondary);padding:4px 8px;border-radius:4px;cursor:pointer;font-size:0.85rem;font-family:'DM Sans',sans-serif; }
+        .md-btn:hover { background:var(--crow-bg-surface);border-color:var(--crow-border);color:var(--crow-text-primary); }
+        .md-sep { width:1px;background:var(--crow-border);margin:2px 4px; }
+        #create-post-form textarea[name="content"] { border-radius:0 0 8px 8px !important; }
+      </style>
+      <div class="md-toolbar">
+        <button type="button" onclick="mdWrap('**','**')" title="Bold" class="md-btn"><b>B</b></button>
+        <button type="button" onclick="mdWrap('*','*')" title="Italic" class="md-btn"><i>I</i></button>
+        <button type="button" onclick="mdPrefix('## ')" title="Heading 2" class="md-btn">H2</button>
+        <button type="button" onclick="mdPrefix('### ')" title="Heading 3" class="md-btn">H3</button>
+        <span class="md-sep"></span>
+        <button type="button" onclick="mdLink()" title="Link" class="md-btn">Link</button>
+        <button type="button" onclick="mdImage()" title="Image" class="md-btn">Img</button>
+        <span class="md-sep"></span>
+        <button type="button" onclick="mdPrefix('- ')" title="Bullet List" class="md-btn">UL</button>
+        <button type="button" onclick="mdPrefix('1. ')" title="Numbered List" class="md-btn">OL</button>
+        <button type="button" onclick="mdPrefix('> ')" title="Quote" class="md-btn">&gt;</button>
+        <span class="md-sep"></span>
+        <button type="button" onclick="mdWrap('\\\`','\\\`')" title="Inline Code" class="md-btn">&lt;/&gt;</button>
+        <button type="button" onclick="mdCodeBlock()" title="Code Block" class="md-btn">\`\`\`</button>
+        <button type="button" onclick="mdInsert('\\n---\\n')" title="Horizontal Rule" class="md-btn">HR</button>
+      </div>
+      ${formField("Content", "content", { type: "textarea", required: true, placeholder: "Write in Markdown...", rows: 10, value: isEdit ? editPost.content : "" })}
       <div style="margin:-0.5rem 0 0.75rem;display:flex;gap:0.5rem;align-items:center">
         <button type="button" class="btn btn-sm btn-secondary" onclick="togglePreview()">Toggle Preview</button>
         <span id="preview-label" style="font-size:0.8rem;color:var(--crow-text-muted);display:none">Preview:</span>
       </div>
       <div id="markdown-preview" style="display:none;border:1px solid var(--crow-border);border-radius:8px;padding:1rem;margin-bottom:1rem;background:var(--crow-bg-elevated);min-height:100px;max-height:400px;overflow:auto"></div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
-        ${formField("Tags", "tags", { placeholder: "tag1, tag2, tag3" })}
-        ${formField("Visibility", "visibility", { type: "select", options: [
+        ${formField("Tags", "tags", { placeholder: "tag1, tag2, tag3", value: isEdit ? (editPost.tags || "") : "" })}
+        ${formField("Visibility", "visibility", { type: "select", value: isEdit ? editPost.visibility : "private", options: [
           { value: "private", label: "Private" },
           { value: "public", label: "Public" },
           { value: "peers", label: "Peers Only" },
@@ -142,14 +199,16 @@ export default {
           <img id="cover-preview-img" style="max-height:150px;border-radius:8px;border:1px solid var(--crow-border)">
         </div>
       </div>
-      <button type="submit" class="btn btn-primary">Create Draft</button>
+      <div style="margin-top:1rem">
+        <button type="submit" class="btn btn-primary">${submitLabel}</button>${cancelLink}
+      </div>
     </form>`;
 
     const content = `
       ${stats}
       ${blogLink}
       ${section("Posts", postTable, { delay: 150 })}
-      ${section("New Post", createForm, { delay: 200 })}
+      ${section(formTitle, postForm, { delay: 200 })}
       <script>
       (function() {
         var fileInput = document.getElementById('cover-image-input');
@@ -259,6 +318,54 @@ export default {
         } catch (e) {
           previewEl.textContent = 'Preview error: ' + e.message;
         }
+      }
+
+      // Markdown toolbar helpers
+      function _ta() { return document.querySelector('textarea[name="content"]'); }
+
+      function mdWrap(before, after) {
+        var ta = _ta(); if (!ta) return;
+        var start = ta.selectionStart, end = ta.selectionEnd;
+        var selected = ta.value.substring(start, end);
+        var replacement = before + (selected || 'text') + after;
+        ta.setRangeText(replacement, start, end, 'end');
+        if (!selected) { ta.selectionStart = start + before.length; ta.selectionEnd = start + before.length + 4; }
+        ta.focus();
+      }
+
+      function mdPrefix(prefix) {
+        var ta = _ta(); if (!ta) return;
+        var start = ta.selectionStart;
+        var lineStart = ta.value.lastIndexOf('\\n', start - 1) + 1;
+        ta.setRangeText(prefix, lineStart, lineStart, 'end');
+        ta.focus();
+      }
+
+      function mdInsert(text) {
+        var ta = _ta(); if (!ta) return;
+        ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, 'end');
+        ta.focus();
+      }
+
+      function mdLink() {
+        var ta = _ta(); if (!ta) return;
+        var selected = ta.value.substring(ta.selectionStart, ta.selectionEnd);
+        var text = selected || 'link text';
+        ta.setRangeText('[' + text + '](url)', ta.selectionStart, ta.selectionEnd, 'end');
+        ta.focus();
+      }
+
+      function mdImage() {
+        var ta = _ta(); if (!ta) return;
+        ta.setRangeText('![alt](url)', ta.selectionStart, ta.selectionEnd, 'end');
+        ta.focus();
+      }
+
+      function mdCodeBlock() {
+        var ta = _ta(); if (!ta) return;
+        var selected = ta.value.substring(ta.selectionStart, ta.selectionEnd);
+        ta.setRangeText('\\n\`\`\`\\n' + (selected || 'code') + '\\n\`\`\`\\n', ta.selectionStart, ta.selectionEnd, 'end');
+        ta.focus();
       }
       <\/script>
     `;
