@@ -1,0 +1,60 @@
+{
+  "id": "romm",
+  "name": "RoMM",
+  "description": "Retro game library and emulator — browse, organize, and play retro games in the browser",
+  "version": "1.0.0",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "gaming",
+  "tags": ["gaming", "retro", "emulator", "roms", "library"],
+  "icon": "gamepad",
+  "docker": {
+    "composefile": "docker-compose.yml"
+  },
+  "skills": ["skills/romm.md"],
+  "requires": {
+    "env": ["ROMM_LIBRARY_PATH", "ROMM_DB_PASSWORD", "ROMM_AUTH_SECRET_KEY"],
+    "min_ram_mb": 512,
+    "min_disk_mb": 2000
+  },
+  "env_vars": [
+    {
+      "name": "ROMM_LIBRARY_PATH",
+      "description": "Host path containing your ROM files (organized by system)",
+      "required": true,
+      "example": "/home/user/roms"
+    },
+    {
+      "name": "ROMM_DB_PASSWORD",
+      "description": "MariaDB password for RoMM database",
+      "default": "romm_password",
+      "required": true,
+      "secret": true
+    },
+    {
+      "name": "ROMM_AUTH_SECRET_KEY",
+      "description": "Session secret key for RoMM authentication",
+      "default": "change_me_to_random_string",
+      "required": true,
+      "secret": true
+    },
+    {
+      "name": "IGDB_CLIENT_ID",
+      "description": "IGDB API client ID for game metadata enrichment (optional)",
+      "required": false
+    },
+    {
+      "name": "IGDB_CLIENT_SECRET",
+      "description": "IGDB API client secret for game metadata enrichment (optional)",
+      "required": false,
+      "secret": true
+    }
+  ],
+  "ports": [3080],
+  "webUI": {
+    "port": 3080,
+    "path": "/",
+    "label": "RoMM"
+  },
+  "notes": "Organize ROM files into system subdirectories (e.g., roms/gba/, roms/snes/, roms/n64/). IGDB credentials enable automatic cover art and metadata. Get them free at https://api-docs.igdb.com/"
+}

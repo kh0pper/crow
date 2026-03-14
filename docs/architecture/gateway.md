@@ -141,6 +141,63 @@ To disable router mode, set the environment variable `CROW_DISABLE_ROUTER=1`.
 
 For the full reference, see [Context Management](/architecture/context-management).
 
+## Chat API
+
+The gateway includes a built-in AI Chat system (`/api/chat/*`) that turns Crow into an AI client. This powers the BYOAI Chat feature in the Crow's Nest. All chat routes are protected by dashboard session auth (cookie-based).
+
+### Routes
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/api/chat/conversations` | Create a new conversation |
+| `GET` | `/api/chat/conversations` | List conversations (paginated) |
+| `GET` | `/api/chat/conversations/:id` | Get conversation with all messages |
+| `DELETE` | `/api/chat/conversations/:id` | Delete conversation (cascades to messages) |
+| `POST` | `/api/chat/conversations/:id/messages` | Send message, receive SSE stream |
+| `POST` | `/api/chat/conversations/:id/cancel` | Cancel in-progress generation |
+| `GET` | `/api/chat/providers` | List available providers and current config |
+| `POST` | `/api/chat/providers/test` | Test provider connection |
+
+### Provider Adapter Pattern
+
+The AI provider layer (`ai/provider.js`) uses a registry of lazy-loaded adapters:
+
+| Provider | Adapter | API Format |
+|---|---|---|
+| `openai` | `ai/adapters/openai.js` | OpenAI Chat Completions (also OpenRouter, vLLM, LM Studio) |
+| `anthropic` | `ai/adapters/anthropic.js` | Anthropic Messages API |
+| `google` | `ai/adapters/google.js` | Google Gemini REST API |
+| `ollama` | `ai/adapters/ollama.js` | Ollama native `/api/chat` |
+
+Each adapter implements a `chatStream(messages, tools, options)` method that returns an async iterator yielding events: `content_delta` (text chunks), `tool_call` (function calls), and `done` (usage stats). Provider config is hot-reloaded from `.env` with a 5-second cache.
+
+### Tool Executor Pattern
+
+When the AI responds with tool calls, the tool executor (`ai/tool-executor.js`) dispatches them to Crow's MCP servers:
+
+1. The executor maintains a pool of lazy in-process MCP Clients, one per server category
+2. Each client connects to its server factory via `InMemoryTransport` (same pattern as the tool router)
+3. Tool calls are resolved by category — `crow_memory` routes to the memory server, `crow_projects` to the project server, etc.
+4. The AI sees the 7 category tools from the router pattern, plus `crow_discover` for schema lookup
+5. Results are truncated to 2000 characters to prevent context overflow
+6. Up to 10 tool call rounds per message turn (the AI can call tools, get results, and call more tools)
+
+```
+User Message
+  → AI Provider API (streaming)
+    → content_delta events → SSE to browser
+    → tool_call events → Tool Executor
+      → InMemoryTransport → MCP Server → Database
+      → result → back to AI for next round
+  → done event → SSE to browser
+```
+
+Tool results and assistant messages are persisted to `chat_messages` with token counts. Conversations track total tokens for usage monitoring.
+
+### Rate Limiting
+
+Chat messages are rate-limited to 10 messages per minute per session (separate from the gateway's general rate limiter). Active generations can be cancelled via the cancel endpoint or by the client disconnecting.
+
 ## Health Check
 
 `GET /health` returns JSON status:

@@ -143,3 +143,15 @@ Skills are plain markdown. To add a new one:
 writeFileSync(DOCS_FILE, output);
 console.log(`Synced ${skills.length} skills to ${DOCS_FILE}`);
 console.log(`  Core: ${core.length}, Platform: ${platform.length}, Integration: ${integration.length}, Developer: ${developer.length}`);
+
+// Generate condensed trigger table for crow_context skills_reference section
+console.log(`\n--- Condensed Trigger Table (for crow_context skills_reference) ---`);
+console.log(`Copy-paste this into the skills_reference section via crow_update_context_section:\n`);
+const allSkills = [...core, ...platform, ...developer].sort((a, b) => a.displayName.localeCompare(b.displayName));
+const triggerLines = allSkills
+  .filter((s) => s.description)
+  .map((s) => `| "${s.description.slice(0, 40)}" | ${s.fileName} | crow-${s.fileName.includes("memory") ? "memory" : s.fileName.includes("research") ? "projects" : s.fileName.includes("blog") ? "blog" : s.fileName.includes("shar") ? "sharing" : s.fileName.includes("stor") ? "storage" : "memory"} |`);
+console.log(`| User Intent | Skill | Tools |`);
+console.log(`|---|---|---|`);
+triggerLines.forEach((l) => console.log(l));
+console.log(`\n--- End Trigger Table ---`);

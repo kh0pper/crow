@@ -244,6 +244,102 @@
         "min_disk_mb": 100
       },
       "notes": "Extends the blog server — podcast episodes are blog posts tagged 'podcast' with audio metadata. Includes a Podcast panel for the Crow's Nest dashboard. No additional server required."
+    },
+    {
+      "id": "openclaw",
+      "name": "OpenClaw",
+      "description": "Run OpenClaw, the open-source personal AI assistant, with Crow as its persistent memory and project backend",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "ai",
+      "tags": ["ai", "bot", "discord", "telegram", "whatsapp", "assistant", "chat"],
+      "icon": "message-circle",
+      "webUI": { "port": 18789, "path": "/", "label": "OpenClaw Control" },
+      "requires": {
+        "env": ["OPENCLAW_GATEWAY_TOKEN"],
+        "min_ram_mb": 2048,
+        "min_disk_mb": 1000
+      },
+      "env_vars": [
+        {
+          "name": "OPENCLAW_GATEWAY_TOKEN",
+          "description": "Token for accessing the OpenClaw Control UI",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "OPENCLAW_AI_PROVIDER",
+          "description": "AI provider to use (anthropic, openai, google, ollama)",
+          "default": "anthropic",
+          "required": true
+        },
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "description": "Anthropic API key (if using Claude)",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "OPENCLAW_DISCORD_TOKEN",
+          "description": "Discord bot token (from Discord Developer Portal)",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "OPENCLAW_TELEGRAM_TOKEN",
+          "description": "Telegram bot token (from @BotFather)",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "CROW_GATEWAY_URL",
+          "description": "Crow gateway URL for MCP integration (e.g., http://host.docker.internal:3001)",
+          "required": false
+        }
+      ],
+      "ports": [18789],
+      "notes": "Connects to Discord, Telegram, WhatsApp, Slack, Signal, iMessage, and more. Configure chat platform tokens after install. Set CROW_GATEWAY_URL to connect Crow tools."
+    },
+    {
+      "id": "romm",
+      "name": "RoMM",
+      "description": "Retro game library and emulator — browse, organize, and play retro games in the browser",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "gaming",
+      "tags": ["gaming", "retro", "emulator", "roms", "library"],
+      "icon": "gamepad",
+      "webUI": { "port": 3080, "path": "/", "label": "RoMM" },
+      "requires": {
+        "env": ["ROMM_LIBRARY_PATH", "ROMM_DB_PASSWORD", "ROMM_AUTH_SECRET_KEY"],
+        "min_ram_mb": 512,
+        "min_disk_mb": 2000
+      },
+      "env_vars": [
+        {
+          "name": "ROMM_LIBRARY_PATH",
+          "description": "Host path containing your ROM files (organized by system)",
+          "required": true
+        },
+        {
+          "name": "ROMM_DB_PASSWORD",
+          "description": "MariaDB password for RoMM database",
+          "default": "romm_password",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "ROMM_AUTH_SECRET_KEY",
+          "description": "Session secret key for RoMM authentication",
+          "default": "change_me_to_random_string",
+          "required": true,
+          "secret": true
+        }
+      ],
+      "ports": [3080],
+      "notes": "Organize ROMs into system subdirectories (gba/, snes/, n64/, etc.). IGDB credentials (free) enable automatic cover art and metadata."
     }
   ]
 }

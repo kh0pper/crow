@@ -138,7 +138,10 @@ The Crow's Nest is organized into panels. The landing page — labeled **Crow's 
 
 ### Messages
 
-View and manage your peer messages. Incoming messages from connected Crow users appear here with read/unread status. You can read threads, mark messages as read, and see message history. The Messages panel also includes an **AI Chat** tab for conversations with your configured AI provider.
+Two tabs: **AI Chat** and **Peer Messages**.
+
+- **AI Chat** — Conversations with your configured AI provider (BYOAI). Supports streaming responses, tool calling, and conversation management.
+- **Peer Messages** — Interactive messaging with connected Crow users via Nostr. Click any message to expand its full content, reply inline, or compose new messages to any contact. Unread messages are highlighted with a badge. Messages are end-to-end encrypted and delivered through Nostr relays.
 
 ### Contacts
 

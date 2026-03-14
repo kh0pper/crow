@@ -87,6 +87,18 @@ Google AI Studio supports MCP servers for tool use in chat. Configuration is ava
    ```
 5. Complete the OAuth authorization flow
 
+## Self-Hosted / Local Setup
+
+If you're running the Crow gateway on your own machine, you can expose it to Gemini using [Tailscale Funnel](../getting-started/tailscale-setup#option-a-tailscale-funnel-personal-hobby-use). Once Funnel is enabled on the machine running the gateway, your MCP endpoint URL will be:
+
+```
+https://<hostname>.<tailnet>.ts.net/memory/mcp
+```
+
+Replace `<hostname>` and `<tailnet>` with your Tailscale machine name and tailnet domain. Use the same URL pattern for other servers (`/projects/mcp`, `/router/mcp`, etc.). The setup steps are identical to the remote instructions above — just substitute your Funnel URL for `your-crow-server` in the Gemini settings.
+
+See the [Tailscale Setup guide](../getting-started/tailscale-setup) for full configuration details.
+
 ## Transport
 
 - **Type**: Streamable HTTP
