@@ -402,6 +402,15 @@ try {
   }
 }
 
+// --- Mount AI Chat Routes ---
+try {
+  const { default: chatRouter } = await import("./routes/chat.js");
+  app.use(chatRouter(dashboardAuth));
+  console.log("AI Chat routes mounted at /api/chat");
+} catch (err) {
+  console.warn("[chat] Failed to mount:", err.message);
+}
+
 // --- Mount Crow's Nest (conditional) ---
 try {
   const { default: dashboardRouter } = await import("./dashboard/index.js");
