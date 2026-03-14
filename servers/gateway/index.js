@@ -255,7 +255,7 @@ const crowMdHandler = async (req, res) => {
   const platform = req.query.platform || "generic";
   const includeDynamic = req.query.dynamic !== "false";
   try {
-    const markdown = await generateCrowContext(db, { includeDynamic, platform });
+    const markdown = await generateCrowContext(db, { includeDynamic, platform, deviceId: process.env.CROW_DEVICE_ID || null });
     res.type("text/markdown").send(markdown);
   } catch (err) {
     console.error("Error generating crow.md:", err);
