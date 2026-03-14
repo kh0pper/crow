@@ -35,17 +35,21 @@ Pre-configured Crow instance — no setup, no maintenance. Your own subdomain at
 
 ## What You'll Get
 
-After setup, your AI assistant will have:
+Crow is modular — start with memory and the dashboard, then add features as you need them:
 
-- **Persistent memory** — remembers across conversations
-- **Project management** — organize research, data connectors, sources, and auto-generated APA citations
-- **20+ integrations** — Gmail, GitHub, Slack, Notion, Trello, and more
+**Core (always included):**
+- **Persistent memory** — remembers across conversations and platforms
+- **Project management** — organize research, data connectors, sources, and multi-format citations (APA, MLA, Chicago)
 - **Full-text search** — find anything stored in memory or projects
-- **Encrypted P2P sharing** — share memories and projects with other Crow users
-- **File storage** — upload and manage files with S3-compatible storage
-- **Blog platform** — publish posts with Markdown, RSS feeds, and themes
 - **Crow's Nest** — visual web interface for managing your Crow instance
+
+**Optional layers (add when ready):**
+- **20+ integrations** — Gmail, GitHub, Slack, Notion, Trello, and more
+- **Encrypted P2P sharing** — share memories and projects with other Crow users
+- **File storage** — upload and manage files with S3-compatible storage (requires MinIO)
+- **Blog platform** — publish posts with Markdown, RSS feeds, and themes
 - **Self-hosting add-ons** — install Ollama, Nextcloud, Immich, Obsidian, and Home Assistant from the Extensions panel
+- **Auto-updates** — opt-in automatic updates from GitHub
 
 **What's public?** Your blog is the only thing visible to the outside world, and only posts you explicitly publish with `public` visibility appear there. Your Crow's Nest, data, and MCP endpoints are private by default. See the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md#whats-public-by-default) for the full breakdown.
 

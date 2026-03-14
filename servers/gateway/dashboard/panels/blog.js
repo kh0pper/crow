@@ -122,6 +122,11 @@ export default {
       <input type="hidden" name="cover_image_key" id="cover-image-key">
       ${formField("Title", "title", { required: true, placeholder: "Post title" })}
       ${formField("Content", "content", { type: "textarea", required: true, placeholder: "Write in Markdown...", rows: 8 })}
+      <div style="margin:-0.5rem 0 0.75rem;display:flex;gap:0.5rem;align-items:center">
+        <button type="button" class="btn btn-sm btn-secondary" onclick="togglePreview()">Toggle Preview</button>
+        <span id="preview-label" style="font-size:0.8rem;color:var(--crow-text-muted);display:none">Preview:</span>
+      </div>
+      <div id="markdown-preview" style="display:none;border:1px solid var(--crow-border);border-radius:8px;padding:1rem;margin-bottom:1rem;background:var(--crow-bg-elevated);min-height:100px;max-height:400px;overflow:auto"></div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
         ${formField("Tags", "tags", { placeholder: "tag1, tag2, tag3" })}
         ${formField("Visibility", "visibility", { type: "select", options: [
@@ -209,6 +214,52 @@ export default {
           });
         }
       })();
+
+      // Markdown preview toggle — server renders and sanitizes HTML via sanitize-html
+      var _previewVisible = false;
+      var _previewTimer = null;
+      function togglePreview() {
+        var previewEl = document.getElementById('markdown-preview');
+        var label = document.getElementById('preview-label');
+        _previewVisible = !_previewVisible;
+        previewEl.style.display = _previewVisible ? 'block' : 'none';
+        label.style.display = _previewVisible ? 'inline' : 'none';
+        if (_previewVisible) {
+          updatePreview();
+          var textarea = document.querySelector('textarea[name="content"]');
+          if (textarea) textarea.addEventListener('input', debouncePreview);
+        }
+      }
+      function debouncePreview() {
+        clearTimeout(_previewTimer);
+        _previewTimer = setTimeout(updatePreview, 500);
+      }
+      async function updatePreview() {
+        var textarea = document.querySelector('textarea[name="content"]');
+        var previewEl = document.getElementById('markdown-preview');
+        if (!textarea || !previewEl) return;
+        var md = textarea.value;
+        if (!md.trim()) { previewEl.textContent = 'Start typing to see preview...'; return; }
+        try {
+          var res = await fetch('/blog/preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ markdown: md }),
+          });
+          var data = await res.json();
+          if (data.html) {
+            // Safe: HTML is sanitized server-side by sanitize-html in renderer.js
+            previewEl.replaceChildren();
+            var wrapper = document.createElement('div');
+            wrapper.insertAdjacentHTML('afterbegin', data.html);
+            previewEl.appendChild(wrapper);
+          } else {
+            previewEl.textContent = data.error || 'Preview failed';
+          }
+        } catch (e) {
+          previewEl.textContent = 'Preview error: ' + e.message;
+        }
+      }
       <\/script>
     `;
 

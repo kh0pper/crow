@@ -98,9 +98,33 @@ Podcast-level metadata comes from blog settings:
 - Each episode's `<enclosure>` tag points to the audio file
 - Submit `/blog/podcast.xml` to Apple Podcasts, Spotify, etc.
 
+## Subscriber Workflows
+
+### Subscribe to a Podcast
+
+The Podcasts panel in the Crow's Nest (`/dashboard/podcast`) lets users subscribe to RSS feeds:
+
+1. User provides an RSS feed URL
+2. Crow fetches the feed, parses channel info and episodes
+3. Episodes are cached in the `podcast_episodes` table
+4. The panel shows an audio player for each episode
+
+Use these AI triggers:
+- "subscribe to [podcast name/URL]" → direct user to the Podcasts panel
+- "what's new in my podcasts" → check for new episodes by directing to the panel
+- "create a playlist" → future feature, tracked via `podcast_playlists` table
+
+### AI Digest
+
+Combine with the scheduling skill to create a recurring podcast digest:
+
+> "Every Monday, check my podcast subscriptions and summarize new episodes"
+
+This creates a scheduled task that reviews new (unlistened) episodes and presents a summary.
+
 ## Tips
 
-- Always include the `podcast` tag — this is how episodes are identified
+- Always include the `podcast` tag — this is how published episodes are identified
 - Use consistent tag naming: `podcast, topic-name, season-N`
 - Audio files should be MP3 for maximum compatibility (M4A/AAC also work)
 - Keep episode numbers sequential for proper feed ordering

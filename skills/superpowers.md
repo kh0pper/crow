@@ -14,6 +14,7 @@ This is the master routing skill. Consult this **before every task** to determin
 8. **Surface friction signals**: When noting a friction signal, show: *[crow: friction signal — \<description\> (\<N\> of 2 threshold)]*
 9. **Transparency protocol**: Follow the Transparency Rules in crow.md (`transparency_rules` section) for all autonomous actions
 10. **Skill loading**: When loading a skill, resolve it in this order: (1) `~/.crow/skills/<name>.md` — user overrides and marketplace-installed skills, (2) `skills/<name>.md` — built-in repo skills. If a user override exists, use it exclusively (do not merge with the repo version). This applies to all skill references in the trigger table below.
+11. **Safety guardrails**: Before destructive, resource-intensive, or network-altering operations, follow the checkpoint protocol in `skills/safety-guardrails.md`. This applies to all tools across all skills.
 
 ---
 
@@ -62,6 +63,8 @@ This is the master routing skill. Consult this **before every task** to determin
 | "nextcloud", "nextcloud files" | "nextcloud", "archivos nextcloud" | nextcloud | filesystem |
 | "photos", "pictures", "album", "immich" | "fotos", "imágenes", "álbum" | immich | immich |
 | "back up", "backup", "restore data", "export data" | "respaldar", "backup", "restaurar datos", "exportar datos" | backup | filesystem |
+| "delete", "remove", "bulk delete", "is this safe" | "eliminar", "borrar", "eliminar en masa", "es seguro" | safety-guardrails | (depends on action) |
+| "organize notes", "brain dump", "sort these ideas", "help me plan from these" | "organizar notas", "ideas sueltas", "ordenar estas ideas", "aquí están mis notas" | ideation | crow-memory, crow-projects |
 | "schedule", "remind me", "every day at", "recurring" | "programar", "recuérdame", "cada día a las" | scheduling | crow-memory |
 | "tutor me", "teach me", "quiz me", "help me understand" | "enséñame", "explícame", "evalúame" | tutoring | crow-memory |
 | "wrap up", "summarize session", "what did we do" | "resumir sesión", "qué hicimos" | session-summary | crow-memory |

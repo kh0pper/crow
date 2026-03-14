@@ -21,6 +21,7 @@
     "mcp-config": "node scripts/generate-mcp-config.js",
     "migrate-data": "node scripts/migrate-data-dir.js",
     "check": "node scripts/check.js",
+    "sync-skills": "node scripts/sync-skills.js",
     "backup": "bash scripts/backup.sh",
     "restore": "bash scripts/restore.sh"
   },

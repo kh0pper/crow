@@ -6,48 +6,61 @@ Skills are markdown files in `skills/` that define behavioral prompts for the AI
 
 | Skill | File | Purpose |
 |---|---|---|
-| **Superpowers** | `superpowers.md` | Master routing — maps user intent to skills and tools |
-| **Memory Management** | `memory-management.md` | When and how to store/recall memories |
-| **Research Pipeline** | `research-pipeline.md` | Project and research workflow with citations and verification |
-| **Session Context** | `session-context.md` | Session start/end protocols |
-| **Plan & Review** | `plan-review.md` | Checkpoint-based planning for multi-step tasks |
-| **Session Summary** | `session-summary.md` | Quick session wrap-up: deliverables, decisions, next steps |
-| **Reflection** | `reflection.md` | Session friction analysis and improvement proposals |
-| **Skill Writing** | `skill-writing.md` | Dynamic skill creation and improvement |
-| **i18n** | `i18n.md` | Multilingual output adaptation |
+| **I18n** | `i18n.md` | Defines how Crow adapts to each user's preferred language. All user-facing output is delivered in the user's language. S |
+| **Memory Management** | `memory-management.md` | Store, search, and retrieve persistent memories across sessions. Use this skill to maintain context about the user, thei |
+| **Plan Review** | `plan-review.md` | Before executing multi-step or significant tasks, Crow outlines its approach as an inline plan and waits for user approv |
+| **Reflection** | `reflection.md` | A deep-dive friction analysis skill. Identifies what went wrong, analyzes root causes, and proposes concrete improvement |
+| **Research Pipeline** | `research-pipeline.md` | Manage academic and professional research with full source tracking, APA citations, and verification. Every piece of inf |
+| **Session Context** | `session-context.md` | Automatically load and save context at the beginning and end of sessions. Ensures continuity across conversations. |
+| **Session Summary** | `session-summary.md` | Quick session summary — records deliverables, decisions, and next steps |
+| **Skill Writing** | `skill-writing.md` | This skill enables the AI to create, modify, and propose new skill files (`skills/*.md`) when existing skills don't cove |
+| **Superpowers** | `superpowers.md` | This is the master routing skill. Consult this **before every task** to determine which skills and tools to activate. It |
 
 ## Platform Skills
 
 | Skill | File | Purpose |
 |---|---|---|
-| **Crow Context** | `crow-context.md` | Cross-platform behavioral context (crow.md) management |
-| **Blog** | `blog.md` | Blog creation, publishing, theming, and export |
-| **Storage** | `storage.md` | File storage management and quota tracking |
-| **Sharing** | `sharing.md` | P2P encrypted sharing workflows (invite, share, inbox) |
-| **Social** | `social.md` | Messaging and social interactions via Nostr |
-| **Peer Network** | `peer-network.md` | Peer management, relay config, identity, blocking |
-| **Onboarding** | `onboarding.md` | First-run sharing setup and device migration |
-| **Onboarding Tour** | `onboarding-tour.md` | First-run platform tour for new users |
-| **Add-ons** | `add-ons.md` | Add-on browsing, installation, and removal |
-| **Network Setup** | `network-setup.md` | Tailscale remote access guidance |
-| **Backup** | `backup.md` | Database backup and restore workflows |
-| **Bug Report** | `bug-report.md` | Bug and feature reporting |
+| **Add Ons** | `add-ons.md` | Browse, install, update, and remove Crow add-ons |
+| **Backup** | `backup.md` | Database backup and restore — SQL dumps, binary copies, S3 upload, git archival |
+| **Blog** | `blog.md` | Blog management — create, edit, publish, theme, RSS, export, share |
+| **Bug Report** | `bug-report.md` | Report bugs and request features — works with or without GitHub configured |
+| **Context Management** | `context-management.md` | Self-monitor context usage and suggest optimization when many tools are active |
+| **Crow Context** | `crow-context.md` | Manages the crow.md cross-platform behavioral context document. This document defines how Crow behaves across all AI pla |
+| **Data Backends** | `data-backends.md` | Guides connecting external data systems (Postgres, APIs, SaaS) through MCP servers and capturing query results into Crow |
+| **Ideation** | `ideation.md` | Universal notes-to-plans — organize raw notes, brain dumps, and scattered ideas into structured plans |
+| **Network Setup** | `network-setup.md` | Tailscale setup guidance for secure remote Crow's Nest access |
+| **Onboarding** | `onboarding.md` | Guide new users through setting up Crow's P2P sharing layer for the first time. Handles identity generation, first conta |
+| **Onboarding Tour** | `onboarding-tour.md` | First-run tour showing new users what Crow can do |
+| **Peer Network** | `peer-network.md` | Manage your Crow peer network: view and manage contacts, configure relays, check identity information, block/unblock pee |
+| **Podcast** | `podcast.md` | Podcast publishing — upload audio, create episodes, iTunes-compatible RSS |
+| **Safety Guardrails** | `safety-guardrails.md` | Universal safety checkpoints — confirm before destructive, resource-heavy, or network-altering actions |
+| **Scheduling** | `scheduling.md` | Manage scheduled and recurring tasks for the user. |
+| **Sharing** | `sharing.md` | Share memories, research projects, sources, and notes with trusted contacts via Crow's peer-to-peer sharing layer. All d |
+| **Social** | `social.md` | Send and receive encrypted messages with Crow contacts via the Nostr protocol. All messages use NIP-44 encryption (ChaCh |
+| **Storage** | `storage.md` | File storage management — upload, organize, retrieve, quota monitoring |
+| **Tutoring** | `tutoring.md` | Socratic tutoring with progress tracking via persistent memory. |
 
 ## Integration Skills
 
 | Skill | File | Purpose |
 |---|---|---|
-| **Web Search** | `web-search.md` | Brave Search workflows with citation |
-| **Google Workspace** | `google-workspace.md` | Gmail, Calendar, Drive, Docs, Sheets |
-| **Google Chat** | `google-chat.md` | Google Chat spaces and messages |
-| **GitHub** | `github.md` | Repos, issues, PRs, code search |
-| **Slack** | `slack.md` | Team messaging workflows |
-| **Discord** | `discord.md` | Server and channel management |
-| **Microsoft Teams** | `microsoft-teams.md` | Teams messaging workflows |
-| **Notion** | `notion.md` | Wiki pages and databases |
-| **Project Management** | `project-management.md` | Trello and Canvas LMS workflows |
-| **Filesystem** | `filesystem.md` | File management operations |
-| **Mobile Access** | `mobile-access.md` | Gateway and remote access workflows |
+| **Discord** | `discord.md` | Interact with Discord servers — channels, messages, threads — through the Discord MCP server. Monitor community discussi |
+| **Filesystem** | `filesystem.md` | Access and manage local files and directories through the Filesystem MCP server. Read documents, organize research mater |
+| **Github** | `github.md` | Interact with GitHub — repositories, issues, pull requests, code — through the GitHub MCP server. Track development work |
+| **Google Chat** | `google-chat.md` | Interact with Google Chat — spaces, messages, threads — through the Google Workspace MCP server. Google Chat is already  |
+| **Google Workspace** | `google-workspace.md` | Interact with Google Workspace apps — Gmail, Calendar, Sheets, Docs, Slides — through the Google Workspace MCP server. S |
+| **Microsoft Teams** | `microsoft-teams.md` | Interact with Microsoft Teams — chats, channels, meetings — through the Teams MCP server. This integration is experiment |
+| **Mobile Access** | `mobile-access.md` | Guides setup and troubleshooting of remote access to Crow's memory and research tools from Claude mobile apps (Android/i |
+| **Notion** | `notion.md` | Interact with Notion workspaces — pages, databases, wiki content — through the Notion MCP server. Use Notion as a struct |
+| **Project Management** | `project-management.md` | Interact with Trello boards and Canvas LMS to retrieve and manage project/learning data. Syncs important information to  |
+| **Slack** | `slack.md` | Interact with Slack workspaces — channels, messages, threads — through the Slack MCP server. Monitor conversations, send |
+| **Web Search** | `web-search.md` | Search the web using Brave Search for research, fact-checking, current events, and general information gathering. Every  |
+
+## Developer Skills
+
+| Skill | File | Purpose |
+|---|---|---|
+| **Crow Developer** | `crow-developer.md` | Developer workflow for working on the Crow platform — doc updates, skill sync, quality checklist |
 
 ## How Skills Work
 
@@ -72,4 +85,5 @@ Skills are plain markdown. To add a new one:
 
 1. Create `skills/your-skill.md` with description, triggers, and workflow
 2. Add a row to the trigger table in `skills/superpowers.md`
-3. The skill will be available immediately — no build step needed
+3. Run `npm run sync-skills` to update this page
+4. The skill will be available immediately — no build step needed

@@ -44,6 +44,86 @@ function generateAPA({ authors, title, publication_date, publisher, url, source_
   }
 }
 
+function generateMLA({ authors, title, publication_date, publisher, url, source_type }) {
+  const authorStr = authors || "Unknown Author";
+  const titleStr = title || "Untitled";
+  const pubDate = publication_date
+    ? new Date(publication_date).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })
+    : "n.d.";
+
+  switch (source_type) {
+    case "book":
+      return `${authorStr}. *${titleStr}*.${publisher ? ` ${publisher},` : ""} ${pubDate}.`;
+    case "academic_paper":
+      return `${authorStr}. "${titleStr}."${publisher ? ` *${publisher}*,` : ""} ${pubDate}.${url ? ` ${url}.` : ""}`;
+    case "web_article":
+    case "web_search":
+    case "web_scrape":
+      return `${authorStr}. "${titleStr}."${publisher ? ` *${publisher}*,` : ""} ${pubDate}.${url ? ` ${url}.` : ""}`;
+    case "video":
+      return `"${titleStr}." Online video.${publisher ? ` ${publisher},` : ""} ${pubDate}.${url ? ` ${url}.` : ""}`;
+    case "podcast":
+      return `"${titleStr}." Audio podcast episode.${publisher ? ` ${publisher},` : ""} ${pubDate}.${url ? ` ${url}.` : ""}`;
+    case "interview":
+      return `${authorStr}. Personal interview. ${pubDate}.`;
+    default:
+      return `${authorStr}. "${titleStr}."${publisher ? ` ${publisher},` : ""} ${pubDate}.${url ? ` ${url}.` : ""}`;
+  }
+}
+
+function generateChicago({ authors, title, publication_date, publisher, url, source_type, doi }) {
+  const authorStr = authors || "Unknown Author";
+  const titleStr = title || "Untitled";
+  const pubDate = publication_date
+    ? new Date(publication_date).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })
+    : "n.d.";
+  const year = publication_date
+    ? new Date(publication_date).getFullYear()
+    : "n.d.";
+
+  switch (source_type) {
+    case "book":
+      return `${authorStr}. *${titleStr}*.${publisher ? ` ${publisher},` : ""} ${year}.`;
+    case "academic_paper":
+      return `${authorStr}. "${titleStr}."${publisher ? ` ${publisher}` : ""} (${year}).${doi ? ` https://doi.org/${doi}.` : url ? ` ${url}.` : ""}`;
+    case "web_article":
+    case "web_search":
+    case "web_scrape":
+      return `${authorStr}. "${titleStr}."${publisher ? ` ${publisher}.` : ""} ${pubDate}.${url ? ` ${url}.` : ""}`;
+    case "video":
+      return `${authorStr}. "${titleStr}." Video.${publisher ? ` ${publisher},` : ""} ${pubDate}.${url ? ` ${url}.` : ""}`;
+    case "podcast":
+      return `${authorStr}. "${titleStr}." Podcast audio.${publisher ? ` ${publisher},` : ""} ${pubDate}.${url ? ` ${url}.` : ""}`;
+    case "interview":
+      return `${authorStr}. Interview by author. ${pubDate}.`;
+    default:
+      return `${authorStr}. "${titleStr}."${publisher ? ` ${publisher},` : ""} ${pubDate}.${url ? ` ${url}.` : ""}`;
+  }
+}
+
+function generateWebCitation({ title, url, publication_date, retrieval_method }) {
+  const titleStr = title || "Untitled";
+  const accessDate = new Date().toISOString().split("T")[0];
+  const aiNote = retrieval_method ? ` [Found via ${retrieval_method}]` : "";
+  return `${titleStr}. ${url || "No URL"}. Accessed ${accessDate}.${aiNote}`;
+}
+
+const CITATION_GENERATORS = {
+  apa: generateAPA,
+  mla: generateMLA,
+  chicago: generateChicago,
+  web: generateWebCitation,
+};
+
+function generateAllCitations(source) {
+  return {
+    apa: generateAPA(source),
+    mla: generateMLA(source),
+    chicago: generateChicago(source),
+    web: generateWebCitation(source),
+  };
+}
+
 export function createProjectServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
 
@@ -162,7 +242,7 @@ export function createProjectServer(dbPath, options = {}) {
 
   server.tool(
     "crow_add_source",
-    "Add a source with full metadata and automatic APA citation generation.",
+    "Add a source with full metadata and automatic citation generation (APA, MLA, Chicago, web).",
     {
       title: z.string().max(500).describe("Title of the source"),
       source_type: z.enum(SOURCE_TYPES).describe("Type of source"),
@@ -178,12 +258,14 @@ export function createProjectServer(dbPath, options = {}) {
       content_summary: z.string().max(50000).optional().describe("Summary of key points and findings"),
       full_text: z.string().max(50000).optional().describe("Full text content if available"),
       citation_apa: z.string().max(1000).optional().describe("Manual APA citation (auto-generated if not provided)"),
-      retrieval_method: z.string().max(500).optional().describe("How the source was obtained"),
+      citation_format: z.enum(["apa", "mla", "chicago", "web"]).default("apa").describe("Primary citation format to store (all formats available at query time)"),
+      retrieval_method: z.string().max(500).optional().describe("How the source was obtained (e.g., 'AI search via Claude', 'direct URL', 'library database')"),
       tags: z.string().max(500).optional().describe("Comma-separated tags"),
       relevance_score: z.number().min(1).max(10).default(5).describe("How relevant to the project (1-10)"),
     },
     async (params) => {
-      const apa = params.citation_apa || generateAPA(params);
+      const generator = CITATION_GENERATORS[params.citation_format] || generateAPA;
+      const primaryCitation = params.citation_apa || generator(params);
 
       const result = await db.execute({
         sql: `
@@ -197,7 +279,7 @@ export function createProjectServer(dbPath, options = {}) {
           params.title, params.source_type, params.project_id ?? null, params.backend_id ?? null,
           params.url ?? null, params.authors ?? null, params.publication_date ?? null, params.publisher ?? null,
           params.doi ?? null, params.isbn ?? null, params.abstract ?? null, params.content_summary ?? null,
-          params.full_text ?? null, apa, params.retrieval_method ?? null, params.tags ?? null,
+          params.full_text ?? null, primaryCitation, params.retrieval_method ?? null, params.tags ?? null,
           params.relevance_score,
         ],
       });
@@ -206,7 +288,7 @@ export function createProjectServer(dbPath, options = {}) {
         content: [
           {
             type: "text",
-            text: `Source added (id: ${Number(result.lastInsertRowid)}):\n  Title: ${params.title}\n  Type: ${params.source_type}\n  APA: ${apa}`,
+            text: `Source added (id: ${Number(result.lastInsertRowid)}):\n  Title: ${params.title}\n  Type: ${params.source_type}\n  Citation (${params.citation_format}): ${primaryCitation}`,
           },
         ],
       };
@@ -289,7 +371,8 @@ export function createProjectServer(dbPath, options = {}) {
       text += `Relevance: ${source.relevance_score}/10\n`;
       text += `Tags: ${source.tags || "none"}\n`;
       if (source.backend_id) text += `Backend: #${source.backend_id}\n`;
-      text += `\nAPA Citation:\n  ${source.citation_apa}\n`;
+      const citations = generateAllCitations(source);
+      text += `\nCitations:\n  APA:     ${citations.apa}\n  MLA:     ${citations.mla}\n  Chicago: ${citations.chicago}\n  Web:     ${citations.web}\n`;
       if (source.abstract) text += `\nAbstract:\n--- stored content ---\n${source.abstract}\n--- end stored content ---\n`;
       if (source.content_summary) text += `\nSummary:\n--- stored content ---\n${source.content_summary}\n--- end stored content ---\n`;
       if (notes.length > 0) {
@@ -422,29 +505,43 @@ export function createProjectServer(dbPath, options = {}) {
 
   server.tool(
     "crow_generate_bibliography",
-    "Generate a formatted APA bibliography for a project or for all sources matching a filter.",
+    "Generate a formatted bibliography in APA, MLA, Chicago, or web citation format.",
     {
       project_id: z.number().optional().describe("Generate bibliography for this project"),
       tag: z.string().max(500).optional().describe("Filter by tag"),
       verified_only: z.boolean().default(false),
+      format: z.enum(["apa", "mla", "chicago", "web", "all"]).default("apa").describe("Citation format (or 'all' for every format)"),
     },
-    async ({ project_id, tag, verified_only }) => {
-      let sql = "SELECT citation_apa FROM research_sources WHERE 1=1";
+    async ({ project_id, tag, verified_only, format }) => {
+      let sql = "SELECT * FROM research_sources WHERE 1=1";
       const params = [];
 
       if (project_id) { sql += " AND project_id = ?"; params.push(project_id); }
       if (tag) { sql += " AND tags LIKE ? ESCAPE '\\'"; params.push(`%${escapeLikePattern(tag)}%`); }
       if (verified_only) { sql += " AND verified = 1"; }
-      sql += " ORDER BY citation_apa ASC";
+      sql += " ORDER BY authors ASC, title ASC";
 
       const { rows } = await db.execute({ sql, args: params });
       if (rows.length === 0) {
         return { content: [{ type: "text", text: "No sources found for bibliography." }] };
       }
 
-      const bib = rows.map((r) => r.citation_apa).join("\n\n");
+      if (format === "all") {
+        const sections = ["apa", "mla", "chicago", "web"].map((fmt) => {
+          const generator = CITATION_GENERATORS[fmt];
+          const entries = rows.map((r) => generator(r)).join("\n\n");
+          return `## ${fmt.toUpperCase()} Format\n\n${entries}`;
+        });
+        return {
+          content: [{ type: "text", text: `References (${rows.length} sources):\n\n${sections.join("\n\n---\n\n")}` }],
+        };
+      }
+
+      const generator = CITATION_GENERATORS[format] || generateAPA;
+      const bib = rows.map((r) => generator(r)).join("\n\n");
+      const label = format.toUpperCase();
       return {
-        content: [{ type: "text", text: `References (${rows.length} sources):\n\n${bib}` }],
+        content: [{ type: "text", text: `References — ${label} (${rows.length} sources):\n\n${bib}` }],
       };
     }
   );
@@ -680,8 +777,10 @@ export function createProjectServer(dbPath, options = {}) {
    - Search notes with crow_search_notes
 
 5. Citations & Bibliography
-   - crow_generate_bibliography produces formatted reference lists
-   - Supports APA format with proper author, date, title, publisher, URL formatting
+   - crow_generate_bibliography produces formatted reference lists in APA, MLA, Chicago, or web citation format
+   - Use format parameter: 'apa' (default), 'mla', 'chicago', 'web', or 'all' for every format
+   - Web citation includes access date and AI retrieval method note
+   - crow_get_source shows all citation formats for any source
    - Filter by project to generate project-specific bibliographies
 
 6. Best Practices

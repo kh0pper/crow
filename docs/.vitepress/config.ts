@@ -123,6 +123,7 @@ export default defineConfig({
       {
         text: 'Guides',
         items: [
+          { text: 'Using Skills', link: '/guide/skills' },
           { text: 'Cross-Platform', link: '/guide/cross-platform' },
           { text: 'Storage', link: '/guide/storage' },
           { text: 'Blog', link: '/guide/blog' },
@@ -138,6 +139,8 @@ export default defineConfig({
           { text: 'Data Backends', link: '/guide/data-backends' },
           { text: 'Deployment Tiers', link: '/guide/deployment-tiers' },
           { text: 'AI Providers (BYOAI)', link: '/guide/ai-providers' },
+          { text: 'Citations & Verification', link: '/guide/citations' },
+          { text: 'Ideation', link: '/guide/ideation' },
           { text: 'Customization', link: '/guide/customization' },
           { text: 'Scheduling', link: '/guide/scheduling' },
         ],

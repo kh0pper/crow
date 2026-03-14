@@ -339,6 +339,24 @@ function formatDate(dateStr) {
 export default function blogPublicRouter() {
   const router = Router();
 
+  // POST /blog/preview — Render markdown to HTML (auth-required via dashboard auth)
+  router.post("/blog/preview", async (req, res) => {
+    // Only allow authenticated requests (dashboard session)
+    if (!req.headers.cookie?.includes("crow_session")) {
+      return res.status(401).json({ error: "Authentication required" });
+    }
+    const { markdown } = req.body;
+    if (!markdown) {
+      return res.status(400).json({ error: "Missing markdown field" });
+    }
+    try {
+      const html = renderMarkdown(markdown);
+      res.json({ html });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // GET /blog — Index
   router.get("/blog", async (req, res) => {
     const db = createDbClient();

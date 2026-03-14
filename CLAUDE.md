@@ -22,6 +22,7 @@ npm run identity         # Display your Crow ID and public keys
 npm run identity:export  # Export encrypted identity for device migration
 npm run identity:import  # Import identity on a new device
 npm run migrate-data     # Migrate data from ./data/ to ~/.crow/data/
+npm run sync-skills      # Regenerate docs/skills/index.md from skills/*.md
 npm run backup           # Back up database (SQL dump + binary copy)
 npm run restore          # Restore database from backup file
 ```
@@ -66,15 +67,15 @@ This is an MCP (Model Context Protocol) platform. The AI is the primary interfac
 ### Core layers
 
 1. **Custom MCP Servers** (`servers/`) — Five Node.js servers exposing tools over MCP's stdio transport. All share a single SQLite database (local file or Turso cloud).
-   - `servers/memory/` — Persistent memory: store, search (FTS5), recall, list, update, delete, stats
-   - `servers/research/` — Project management: projects (research, data_connector, extensible types), sources (with auto-APA citation), notes, bibliography, data backend registration and management
+   - `servers/memory/` — Persistent memory: store, search (FTS5 + optional semantic search via sqlite-vec), recall, list, update, delete, stats
+   - `servers/research/` — Project management: projects (research, data_connector, extensible types), sources (with multi-format citations: APA, MLA, Chicago, web), notes, bibliography, data backend registration and management
    - `servers/sharing/` — P2P sharing: Hyperswarm discovery, Hypercore data sync, Nostr messaging, peer relay, identity management
    - `servers/storage/` — S3-compatible file storage: upload, list, presigned URLs, delete, quota management (requires MinIO)
    - `servers/blog/` — Blogging platform: create, edit, publish, themes, RSS/Atom, export, share posts
 
 2. **HTTP Gateway** (`servers/gateway/`) — Express server that wraps all MCP servers with Streamable HTTP + SSE transports + OAuth 2.1. Includes proxy layer for external MCP servers, **tool router** (`/router/mcp` — 7 tools instead of 49+), **AI chat gateway** (`/api/chat/*` — BYOAI with tool calling), public blog routes, Crow's Nest UI, peer relay, and setup page. Modularized into Express routers (`routes/mcp.js`, `routes/chat.js`, `routes/blog-public.js`, `routes/storage-http.js`, `dashboard/`).
 
-3. **Crow's Nest** (`servers/gateway/dashboard/`) — Server-side rendered HTML control panel (the "Crow's Nest") with Dark Editorial design. Password auth, session cookies, panel registry. Built-in panels: Health, Messages (AI Chat + Peer Messages tabs), Memory, Blog, Files, Extensions, Settings. Third-party panels via `~/.crow/panels/`.
+3. **Crow's Nest** (`servers/gateway/dashboard/`) — Server-side rendered HTML control panel (the "Crow's Nest") with Dark Editorial design. Password auth, session cookies, panel registry. Built-in panels: Health, Messages (AI Chat + Peer Messages tabs), Contacts, Memory, Blog (with markdown preview), Podcasts (subscriber + player), Files, Extensions, Skills, Settings. Third-party panels via `~/.crow/panels/`.
 
 4. **Skills** (`skills/`) — 30 markdown files that serve as behavioral prompts loaded by Claude. Not code — they define workflows, trigger patterns, and integration logic.
 
@@ -129,6 +130,7 @@ servers/core/index.js          → stdio transport for crow-core
 bundles/obsidian/              → Obsidian vault add-on (external mcp-obsidian server)
 bundles/home-assistant/        → Home Assistant add-on (external hass-mcp server)
 bundles/ollama/                → Ollama local AI add-on (Docker + skill)
+bundles/localai/               → LocalAI OpenAI-compatible local AI add-on (Docker + skill)
 bundles/nextcloud/             → Nextcloud files add-on (Docker + WebDAV)
 bundles/immich/                → Immich photos add-on (custom MCP server + Docker)
 scripts/crow                   → CLI entry point (status, bundle management)
@@ -243,7 +245,13 @@ Node.js >= 18 required. ESM modules (`"type": "module"` in package.json).
 
 ### Adding a new skill
 
-Skills are markdown files in `skills/`. They are loaded by Claude on demand — no build step. Add a trigger row in `superpowers.md` so it auto-activates.
+Skills are markdown files in `skills/`. They are loaded by Claude on demand — no build step. Checklist:
+
+1. Create `skills/your-skill.md` with YAML frontmatter (name, description, triggers, tools)
+2. Add a trigger row in `superpowers.md` with EN and ES intent phrases
+3. Add to the Skills Reference section in this file (CLAUDE.md)
+4. Run `npm run sync-skills` to update `docs/skills/index.md`
+5. Add to VitePress sidebar if creating a new guide page
 
 ### Adding a Crow's Nest panel
 
@@ -274,6 +282,7 @@ Crow has an open developer program for community contributions. Full developer d
 
 Consult `skills/superpowers.md` first — it routes user intent to the right skills and tools. Core skills:
 - `superpowers.md` — Auto-activation routing
+- `safety-guardrails.md` — Universal safety checkpoints (destructive, resource, network actions)
 - `crow-context.md` — Cross-platform behavioral context management
 - `reflection.md` — Session friction analysis + improvement proposals
 - `plan-review.md` — Checkpoint-based planning for multi-step tasks
@@ -295,6 +304,8 @@ Consult `skills/superpowers.md` first — it routes user intent to the right ski
 - `session-summary.md` — Quick session wrap-up (deliverables, decisions, next steps)
 - `onboarding-tour.md` — First-run platform tour for new users
 - `context-management.md` — Self-monitor context usage and suggest optimization
+- `ideation.md` — Universal notes-to-plans organization
+- `crow-developer.md` — Developer workflow for working on the Crow codebase
 
 Add-on skills (activated when corresponding add-on is installed):
 - `obsidian.md` — Obsidian vault search and research sync

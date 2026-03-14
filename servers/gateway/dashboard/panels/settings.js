@@ -645,14 +645,26 @@ function pollHealth(attempts) {
         badge("live", "published"),
       ]);
     }
-    urlRows.push([
-      "Setup Page",
-      `<a href="/setup" target="_blank" style="font-size:0.85rem">/setup</a>`,
-      `<span style="color:var(--crow-text-muted);font-size:0.85rem">MCP endpoints &amp; API keys</span>`,
+    // MCP endpoint URLs (from setup page content)
+    const baseUrl = requestUrl;
+    const mcpEndpoints = [
+      ["Router (recommended)", `${baseUrl}/router/mcp`, "7 category tools"],
+      ["Memory", `${baseUrl}/memory/mcp`, "All memory tools"],
+      ["Projects", `${baseUrl}/research/mcp`, "All research tools"],
+      ["Sharing", `${baseUrl}/sharing/mcp`, "All sharing tools"],
+    ];
+
+    const mcpRows = mcpEndpoints.map(([name, url, desc]) => [
+      name,
+      `<code style="font-size:0.8rem;word-break:break-all">${escapeHtml(url)}</code>`,
+      `<span style="color:var(--crow-text-muted);font-size:0.85rem">${desc}</span>`,
     ]);
 
     const connectionHtml = dataTable(["Context", "URL", "Status"], urlRows)
-      + `<p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.75rem">The Crow's Nest is private (local/Tailscale only). Set <code>CROW_GATEWAY_URL</code> in .env for public blog/podcast URLs.</p>`;
+      + `<p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.75rem">The Crow's Nest is private (local/Tailscale only). Set <code>CROW_GATEWAY_URL</code> in .env for public blog/podcast URLs.</p>`
+      + `<div style="margin-top:1rem"><h4 style="font-size:0.9rem;color:var(--crow-text-muted);margin-bottom:0.5rem">MCP Endpoints (for AI clients)</h4>`
+      + dataTable(["Server", "Endpoint URL", "Scope"], mcpRows)
+      + `<p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.5rem">Use these Streamable HTTP endpoints to connect Claude.ai, ChatGPT, Gemini, Cursor, or other MCP clients. See <a href="/setup" style="color:var(--crow-accent)">/setup</a> for platform-specific instructions.</p></div>`;
 
     // AI Provider config
     let aiProviderConfig = null;

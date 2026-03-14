@@ -144,6 +144,73 @@ export function listProviders() {
 }
 
 /**
+ * Get an embedding vector for a text string.
+ * Returns Float32Array or null if no embedding provider is available.
+ * Supported: OpenAI (text-embedding-3-small), Ollama, Google.
+ */
+export async function getEmbedding(text) {
+  const config = getProviderConfig();
+  if (!config) return null;
+
+  const { provider, apiKey, baseUrl } = config;
+
+  try {
+    if (provider === "openai" || provider === "openrouter") {
+      const url = baseUrl || "https://api.openai.com/v1";
+      const res = await fetch(`${url}/embeddings`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: "text-embedding-3-small",
+          input: text,
+        }),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return new Float32Array(data.data?.[0]?.embedding || []);
+    }
+
+    if (provider === "ollama") {
+      const url = baseUrl || "http://localhost:11434";
+      const res = await fetch(`${url}/api/embed`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "nomic-embed-text",
+          input: text,
+        }),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return new Float32Array(data.embeddings?.[0] || []);
+    }
+
+    if (provider === "google") {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content: { parts: [{ text }] },
+          }),
+        }
+      );
+      if (!res.ok) return null;
+      const data = await res.json();
+      return new Float32Array(data.embedding?.values || []);
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Test provider connection by sending a minimal request.
  */
 export async function testProviderConnection(providerOverride) {

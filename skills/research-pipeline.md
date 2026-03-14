@@ -27,22 +27,24 @@ Every time you encounter useful information, document it:
 4. **APA citation**: Provide manually if you know the exact format, otherwise the system auto-generates one
 5. **Add notes**: Use `crow_add_note` for key quotes, summaries, analysis, questions, or insights
 
-## APA Citation Format Reference
+## Citation Formats
 
-### Web Article
-Author, A. B. (Year, Month Day). Title of article. *Website Name*. URL
+Crow generates citations in four formats from source metadata — no extra columns needed:
 
-### Academic Paper
-Author, A. B., & Author, C. D. (Year). Title of article. *Journal Name, Volume*(Issue), Pages. https://doi.org/xxxxx
+- **APA** (default) — `Author (Year). Title. Publisher. URL`
+- **MLA** — `Author. "Title." *Publisher*, Date. URL.`
+- **Chicago** — `Author. "Title." Publisher. Date. URL.`
+- **Web** — `Title. URL. Accessed DATE. [Found via METHOD]`
 
-### Book
-Author, A. B. (Year). *Title of book*. Publisher.
+Use `citation_format` on `crow_add_source` to set the primary stored format. Use `crow_get_source` to see all formats. Use `crow_generate_bibliography` with `format: "mla"` (or `apa`, `chicago`, `web`, `all`) to generate bibliographies in any format.
 
-### Video
-Author, A. B. [Username]. (Year, Month Day). *Title of video* [Video]. Platform. URL
+## Source Verification Rules
 
-### Interview
-Interviewee, A. B. (Year, Month Day). Title/description [Interview].
+1. **Record retrieval method**: Always set `retrieval_method` — note whether the source was found via AI search, direct URL, library database, or user-provided link
+2. **Prefer primary sources**: When AI search returns a summary, trace back to the original source and store that instead
+3. **Verify before storing**: When AI search surfaces a URL, verify it is real and accessible before calling `crow_add_source`
+4. **Link claims to sources**: All factual claims in research output must reference a stored, cited source — no unverified assertions
+5. **Mark AI-discovered sources**: Use `retrieval_method: "AI search via [model name]"` so users can distinguish AI-found from user-provided sources
 
 ## Workflow: Verifying Sources
 1. Check if the URL is still accessible
@@ -55,6 +57,7 @@ Use `crow_generate_bibliography` with:
 - `project_id` for project-specific bibliographies
 - `tag` to filter by topic
 - `verified_only: true` for verified-only bibliographies
+- `format` for citation style: `apa` (default), `mla`, `chicago`, `web`, or `all`
 
 ## Note Types
 - **note**: General observation or comment
