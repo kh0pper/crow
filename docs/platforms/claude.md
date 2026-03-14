@@ -14,7 +14,7 @@ Connect Crow to Claude on the web (claude.ai) or the Claude mobile app using Cus
 3. Enter a name (e.g., "Crow Memory")
 4. Paste your gateway URL:
    ```
-   https://your-gateway.onrender.com/memory/mcp
+   https://your-crow-server/memory/mcp
    ```
 5. Click **Save** — Claude will initiate the OAuth flow
 6. Authorize the connection when prompted
@@ -23,12 +23,12 @@ Repeat for each server you want to connect:
 
 | Server | URL |
 |---|---|
-| Memory | `https://your-gateway.onrender.com/memory/mcp` |
-| Projects | `https://your-gateway.onrender.com/projects/mcp` |
-| Sharing | `https://your-gateway.onrender.com/sharing/mcp` |
-| Storage | `https://your-gateway.onrender.com/storage/mcp` |
-| Blog | `https://your-gateway.onrender.com/blog-mcp/mcp` |
-| External Tools | `https://your-gateway.onrender.com/tools/mcp` |
+| Memory | `https://your-crow-server/memory/mcp` |
+| Projects | `https://your-crow-server/projects/mcp` |
+| Sharing | `https://your-crow-server/sharing/mcp` |
+| Storage | `https://your-crow-server/storage/mcp` |
+| Blog | `https://your-crow-server/blog-mcp/mcp` |
+| External Tools | `https://your-crow-server/tools/mcp` |
 
 > **Note:** The storage endpoint requires MinIO to be configured. See the [Storage Guide](/guide/storage) for setup.
 
@@ -75,7 +75,7 @@ Claude Code supports `toolListChanged` notifications, making `crow-core` a good 
 For Claude via the gateway, the `/router/mcp` endpoint reduces the tool count from 49+ to 7 consolidated category tools, significantly reducing context window usage. Instead of connecting each server individually, you can connect a single router endpoint:
 
 ```
-https://your-gateway.onrender.com/router/mcp
+https://your-crow-server/router/mcp
 ```
 
 See the [Context & Performance guide](/guide/context-performance) for more details.

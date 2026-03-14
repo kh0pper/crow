@@ -95,7 +95,7 @@ Ask Crow to add a relay:
 
 Or add a friend's gateway as a trusted relay:
 
-> "Add Alice's gateway as a trusted relay: https://alice-crow.onrender.com"
+> "Add Alice's gateway as a trusted relay: https://alice-crow-server"
 
 ### Removing a relay
 

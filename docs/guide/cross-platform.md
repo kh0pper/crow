@@ -48,7 +48,7 @@ Crow sits between you and your AI platforms as a shared layer:
 
 Follow the [Cloud Deploy Guide](/getting-started/cloud-deploy) to get your gateway running. You'll get a URL like:
 ```
-https://your-crow.onrender.com
+https://your-crow-server
 ```
 
 ### Step 2: Connect Your First Platform
@@ -56,7 +56,7 @@ https://your-crow.onrender.com
 Pick any platform from the [Platforms page](/platforms/) and connect it. For example, [Claude Web](/platforms/claude):
 
 1. Go to claude.ai → Settings → Integrations → Add Custom Integration
-2. Paste: `https://your-crow.onrender.com/memory/mcp`
+2. Paste: `https://your-crow-server/memory/mcp`
 3. Authorize and done.
 
 ### Step 3: Store Something
@@ -70,7 +70,7 @@ Crow stores this in the shared database.
 
 Connect [ChatGPT](/platforms/chatgpt) using the SSE endpoint:
 ```
-https://your-crow.onrender.com/memory/sse
+https://your-crow-server/memory/sse
 ```
 
 ### Step 5: Recall From the Other Platform
