@@ -108,13 +108,12 @@ export class PeerManager {
         if (!line.trim()) continue;
         try {
           const msg = JSON.parse(line);
-          console.log(`[peer] MSG type=${msg.type} auth=${authenticated} remote=${remoteCrowId || "?"}`);
           this._handleMessage(conn, msg, challenge, { authenticated, remoteCrowId }, (state) => {
             authenticated = state.authenticated;
             remoteCrowId = state.remoteCrowId;
           });
         } catch (err) {
-          console.warn(`[peer] JSON parse error:`, err.message, "line:", line.substring(0, 80));
+          // Ignore parse errors
         }
       }
     });
@@ -187,10 +186,7 @@ export class PeerManager {
 
       case "data": {
         if (state.authenticated && state.remoteCrowId && this.onPeerData) {
-          console.log(`[peer] Received data from ${state.remoteCrowId}:`, msg.payload?.type || "unknown");
           this.onPeerData(state.remoteCrowId, msg.payload);
-        } else {
-          console.warn(`[peer] Dropped data message: auth=${state.authenticated}, remote=${state.remoteCrowId}, handler=${!!this.onPeerData}`);
         }
         break;
       }
