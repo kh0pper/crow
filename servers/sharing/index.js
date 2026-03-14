@@ -20,7 +20,7 @@ try {
   process.exit(1);
 }
 
-const instructions = await generateInstructions();
+const instructions = await generateInstructions({ deviceId: process.env.CROW_DEVICE_ID });
 const server = createSharingServer(undefined, { instructions });
 const transport = new StdioServerTransport();
 await server.connect(transport);
