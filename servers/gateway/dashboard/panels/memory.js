@@ -2,7 +2,7 @@
  * Memory Panel — Browse, search, and view stored memories
  */
 
-import { escapeHtml, statCard, statGrid, section, badge, formatDate, dataTable } from "../shared/components.js";
+import { escapeHtml, statCard, statGrid, section, badge, formatDate, dataTable, formField } from "../shared/components.js";
 import { sanitizeFtsQuery } from "../../../db.js";
 import { ICON_MEMORY } from "../shared/empty-state-icons.js";
 
@@ -16,6 +16,66 @@ export default {
   navOrder: 15,
 
   async handler(req, res, { db, layout }) {
+    // Handle POST actions (edit, delete)
+    if (req.method === "POST") {
+      const { action } = req.body;
+
+      if (action === "delete") {
+        await db.execute({ sql: "DELETE FROM memories WHERE id = ?", args: [req.body.id] });
+        res.redirect("/dashboard/memory");
+        return;
+      }
+
+      if (action === "edit") {
+        const { id, content, category, importance } = req.body;
+        if (id && content) {
+          await db.execute({
+            sql: "UPDATE memories SET content = ?, category = ?, importance = ?, updated_at = datetime('now') WHERE id = ?",
+            args: [content, category || "general", parseInt(importance, 10) || 5, id],
+          });
+        }
+        res.redirect("/dashboard/memory");
+        return;
+      }
+    }
+
+    // Handle single memory view/edit
+    const editId = req.query.edit;
+    if (editId) {
+      const result = await db.execute({ sql: "SELECT * FROM memories WHERE id = ?", args: [editId] });
+      const mem = result.rows[0];
+      if (!mem) {
+        res.redirect("/dashboard/memory");
+        return;
+      }
+
+      const editForm = `<form method="POST">
+        <input type="hidden" name="action" value="edit">
+        <input type="hidden" name="id" value="${escapeHtml(String(mem.id))}">
+        ${formField("Category", "category", { value: mem.category || "general", placeholder: "general" })}
+        ${formField("Importance", "importance", { type: "select", value: String(mem.importance || 5), options: [
+          { value: "1", label: "1 — Low" },
+          { value: "2", label: "2" },
+          { value: "3", label: "3" },
+          { value: "4", label: "4" },
+          { value: "5", label: "5 — Normal" },
+          { value: "6", label: "6" },
+          { value: "7", label: "7" },
+          { value: "8", label: "8 — High" },
+          { value: "9", label: "9" },
+          { value: "10", label: "10 — Critical" },
+        ]})}
+        ${formField("Content", "content", { type: "textarea", value: mem.content || "", rows: 10, required: true })}
+        <div style="display:flex;gap:0.5rem;margin-top:1rem">
+          <button type="submit" class="btn btn-primary">Save</button>
+          <a href="/dashboard/memory" class="btn btn-secondary">Cancel</a>
+        </div>
+      </form>`;
+
+      const content = section(`Edit Memory #${escapeHtml(String(mem.id))}`, editForm);
+      return layout({ title: "Edit Memory", content });
+    }
+
     const query = req.query.q || "";
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const offset = (page - 1) * PAGE_SIZE;
@@ -100,15 +160,17 @@ export default {
         const preview = content.length > 200 ? escapeHtml(content.slice(0, 200)) + "..." : escapeHtml(content);
         const categoryBadge = badge(m.category || "general", "draft");
         const importanceIndicator = renderImportance(m.importance);
+        const editBtn = `<a href="/dashboard/memory?edit=${m.id}" class="btn btn-sm btn-secondary">Edit</a>`;
+        const deleteBtn = `<form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('Delete this memory?')"><input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="${m.id}"><button class="btn btn-sm btn-danger" type="submit">Delete</button></form>`;
         return [
           categoryBadge,
           importanceIndicator,
           `<span style="font-size:0.9rem">${preview}</span>`,
-          `<span class="mono">${formatDate(m.created_at)}</span>`,
           `<span class="mono">${formatDate(m.updated_at)}</span>`,
+          `${editBtn} ${deleteBtn}`,
         ];
       });
-      memoryList = dataTable(["Category", "Importance", "Content", "Created", "Updated"], rows);
+      memoryList = dataTable(["Category", "Importance", "Content", "Updated", "Actions"], rows);
     }
 
     // Pagination

@@ -47,9 +47,10 @@
 
 ## What Remains
 
-### Phase 1A: Documentation Gaps (Low Effort)
-- [ ] **Project management docs** — Reflect the research→projects rename and data backend capabilities more prominently. The Reddit feedback suggested enterprise pipeline use cases aren't visible enough
-- [ ] **Self-hosted bundles inventory** — Ensure all 5 add-ons (Ollama, Nextcloud, Immich, Obsidian, Home Assistant) are documented consistently in docs. Registry has them but docs coverage is uneven
+### Phase 1A: Documentation Gaps (Complete)
+- [x] **Project management docs** — Landing page prominently features project management, data backends, typed projects
+- [x] **Self-hosted bundles inventory** — All 7 add-ons in crow-addons registry
+- [x] **Deployment tiers doc** — `docs/guide/deployment-tiers.md` with resource requirements per tier
 
 ### Phase 2: User Experience & Customization (Medium Effort)
 
@@ -69,7 +70,7 @@
 #### 2D: Resource Awareness (Partially Done)
 - [ ] **Storage quota warnings** — Dashboard shows quota usage bar, warnings at 80%/95%
 - [ ] **Memory entry count** — Show memory stats in Crow's Nest, warn on constrained devices
-- [ ] **Deployment tier docs** — `docs/guide/deployment-tiers.md` explaining resource requirements for Pi Zero vs Pi 4 vs free cloud vs home server
+- [x] **Deployment tier docs** — `docs/guide/deployment-tiers.md` complete with resource tables and recommendations
 
 #### 2E: Skill Protection
 - [ ] **User skills directory** — `~/.crow/skills/` takes precedence over repo `skills/`. Superpowers routing checks user dir first. Already partially referenced in CLAUDE.md
@@ -130,10 +131,10 @@
 
 ### Crow Marketplace (Multi-phase)
 
-#### Phase A: Foundation
-- [ ] **Create `kh0pper/crow-addons` GitHub repo** — Official add-on registry with crow-addon.yml manifests
-- [ ] **Populate all 5 add-ons** — Move Docker Compose files, create proper manifests
-- [ ] **Fix Extensions panel** — Currently shows "Registry unavailable" because repo doesn't exist
+#### Phase A: Foundation (Complete)
+- [x] **Create `kh0pper/crow-addons` GitHub repo** — Done, 7 add-ons in registry.json
+- [x] **Populate add-ons** — All 7 add-ons have manifests (ollama, nextcloud, immich, obsidian, home-assistant, podcast, minio)
+- [x] **Fix Extensions panel** — Points to `registry.json`, fetches successfully
 
 #### Phase B: Install from UI
 - [ ] **One-click install/uninstall** from Crow's Nest — resource checks, Docker image pull, container management
@@ -158,12 +159,9 @@ Pick from these based on available time:
 
 | Priority | Task | Effort | Impact |
 |----------|------|--------|--------|
-| 1 | **Marketplace A** — Create crow-addons repo, fix "Registry unavailable" | 1 session | High — unblocks ecosystem |
-| 2 | **Phase 2B** — Verify memory panel capabilities | 30 min | Medium — UX completeness |
-| 3 | **Phase 4B** — Gemini/Qwen CLI docs | 1 session | Medium — platform reach |
-| 4 | **Phase 8** — Sharing tests on lab machines | 1-2 sessions | High — validates P2P |
-| 5 | **Phase 2D** — Deployment tiers doc | 30 min | Medium — helps new users |
-| 6 | **Marketplace B** — One-click install from UI | 2-3 sessions | Very high — core UX |
+| 1 | **Phase 4B** — Gemini/Qwen CLI docs | 1 session | Medium — platform reach |
+| 2 | **Phase 8** — Sharing tests on lab machines | 1-2 sessions | High — validates P2P |
+| 3 | **Marketplace B** — One-click install from UI | 2-3 sessions | Very high — core UX |
 
 ## Key Architectural Decisions (Settled)
 
