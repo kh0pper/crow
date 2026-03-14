@@ -28,7 +28,6 @@ import memoryPanel from "./panels/memory.js";
 import extensionsPanel from "./panels/extensions.js";
 import podcastPanel from "./panels/podcast.js";
 import skillsPanel from "./panels/skills.js";
-import contactsPanel from "./panels/contacts.js";
 import settingsPanel from "./panels/settings.js";
 import bundlesRouterFactory from "../routes/bundles.js";
 
@@ -45,7 +44,6 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // Register built-in panels
   registerPanel(healthPanel);
   registerPanel(messagesPanel);
-  registerPanel(contactsPanel);
   registerPanel(memoryPanel);
   registerPanel(blogPanel);
   registerPanel(filesPanel);
@@ -107,6 +105,11 @@ export default function dashboardRouter(mcpAuthMiddleware) {
 
   // Mount bundles API (protected by dashboard auth above)
   router.use("/dashboard", bundlesRouterFactory());
+
+  // Contacts redirect — absorbed into Messages panel
+  router.get("/dashboard/contacts", (req, res) => {
+    res.redirect("/dashboard/messages");
+  });
 
   // Dashboard home — redirect to first panel
   router.get("/dashboard", (req, res) => {

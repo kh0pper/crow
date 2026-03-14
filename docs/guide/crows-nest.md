@@ -138,14 +138,19 @@ The Crow's Nest is organized into panels. The landing page — labeled **Crow's 
 
 ### Messages
 
-Two tabs: **AI Chat** and **Peer Messages**.
+A unified three-panel messaging hub inspired by WhatsApp/Signal/Telegram.
 
-- **AI Chat** — Conversations with your configured AI provider (BYOAI). Supports streaming responses, tool calling, and conversation management.
-- **Peer Messages** — Interactive messaging with connected Crow users via Nostr. Click any message to expand its full content, reply inline, or compose new messages to any contact. Unread messages are highlighted with a badge. Messages are end-to-end encrypted and delivered through Nostr relays.
+- **Avatar strip** (left) — Shows all conversations (AI chats and peer contacts) as squircle avatars with unread badges. Click any avatar to load the conversation. The "+" button opens a popover to start a new AI chat, generate an invite code, or accept an invite from a contact.
+- **Chat area** (center) — Full chat view with message bubbles, timestamps, reply previews, and file attachments. AI conversations use SSE streaming with tool call display. Peer messages use Nostr E2E encryption. Type a message and press Enter or click Send.
+- **Info sidebar** (right) — Contact profile (avatar, Crow ID, online status, encryption info) or AI conversation details (provider, model, token count). Block/unblock contacts, delete conversations, and copy Crow IDs. Collapsible via the "Info" button.
 
-### Contacts
+**File attachments:** If MinIO storage is configured, a paperclip button lets you attach files to peer messages. Images render inline; other files show as download cards.
 
-Manage your Crow contacts. View all connected contacts with their Crow IDs, online status, and last-seen timestamps. Block or unblock contacts directly from the panel. The Contacts panel also explains how to generate and accept invite codes through your AI.
+**Message threading:** Click "Reply" on any received peer message to quote it. The reply appears with a highlighted preview of the original message.
+
+**Real-time updates:** The panel polls for new messages every 7 seconds, updating unread badges and appending new messages to the active conversation without page reloads.
+
+**Contact management:** All contact functionality (invite, block/unblock, profile) is integrated into the Messages panel. The old `/dashboard/contacts` URL redirects here automatically.
 
 ### Memory
 

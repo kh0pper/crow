@@ -411,6 +411,15 @@ try {
   console.warn("[chat] Failed to mount:", err.message);
 }
 
+// --- Mount Peer Messages API ---
+try {
+  const { default: peerMessagesRouter } = await import("./routes/peer-messages.js");
+  app.use(peerMessagesRouter(dashboardAuth));
+  console.log("Peer Messages API mounted at /api/messages");
+} catch (err) {
+  console.warn("[peer-messages] Failed to mount:", err.message);
+}
+
 // --- Mount Crow's Nest (conditional) ---
 try {
   const { default: dashboardRouter } = await import("./dashboard/index.js");
