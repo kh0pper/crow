@@ -26,6 +26,7 @@ import filesPanel from "./panels/files.js";
 import healthPanel from "./panels/health.js";
 import memoryPanel from "./panels/memory.js";
 import extensionsPanel from "./panels/extensions.js";
+import skillsPanel from "./panels/skills.js";
 import settingsPanel from "./panels/settings.js";
 import bundlesRouterFactory from "../routes/bundles.js";
 
@@ -46,6 +47,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   registerPanel(blogPanel);
   registerPanel(filesPanel);
   registerPanel(extensionsPanel);
+  registerPanel(skillsPanel);
   registerPanel(settingsPanel);
 
   // Load third-party panels (async, non-blocking)
