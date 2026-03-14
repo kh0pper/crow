@@ -50,7 +50,7 @@ async function getStorageFactory() {
  * Other servers' tools are registered as disabled and activated on demand.
  */
 export async function createCoreServer(dbPath) {
-  const instructions = await generateInstructions({ dbPath });
+  const instructions = await generateInstructions({ dbPath, deviceId: process.env.CROW_DEVICE_ID });
 
   const server = new McpServer(
     { name: "crow-core", version: "0.1.0" },
