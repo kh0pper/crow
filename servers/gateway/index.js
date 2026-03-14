@@ -343,8 +343,9 @@ if (authMiddleware) {
 
 // --- Generate MCP Instructions (pre-computed, reused across all sessions) ---
 
-const instructions = await generateInstructions();
-const routerInstructions = await generateInstructions({ routerStyle: true });
+const deviceId = process.env.CROW_DEVICE_ID || null;
+const instructions = await generateInstructions({ deviceId });
+const routerInstructions = await generateInstructions({ routerStyle: true, deviceId });
 
 // --- Mount Core MCP Servers ---
 
