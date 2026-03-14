@@ -9,6 +9,16 @@
  * - Local caching in messages table
  */
 
+// Polyfill WebSocket for Node < 22 (nostr-tools requires it)
+if (typeof globalThis.WebSocket === "undefined") {
+  try {
+    const ws = await import("ws");
+    globalThis.WebSocket = ws.default || ws.WebSocket;
+  } catch {
+    // ws not available — Nostr messaging will fail gracefully
+  }
+}
+
 import {
   finalizeEvent,
   getPublicKey,
