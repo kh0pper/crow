@@ -74,7 +74,25 @@ export default {
     } catch {}
 
     const quotaMb = parseInt(process.env.STORAGE_QUOTA_MB || "5120", 10);
-    const usedPct = quotaMb > 0 ? ((totalSize / (quotaMb * 1024 * 1024)) * 100).toFixed(1) : 0;
+    const usedPct = quotaMb > 0 ? parseFloat(((totalSize / (quotaMb * 1024 * 1024)) * 100).toFixed(1)) : 0;
+
+    // Color-coded quota bar
+    const quotaColor = usedPct >= 95 ? "#e74c3c" : usedPct >= 80 ? "#f39c12" : "linear-gradient(90deg, #10b981, #22c55e)";
+    const quotaWarning = usedPct >= 95
+      ? `<div style="color:#e74c3c;font-size:0.85rem;margin-top:0.5rem;font-weight:500">Storage critically full — free space or increase quota</div>`
+      : usedPct >= 80
+        ? `<div style="color:#f39c12;font-size:0.85rem;margin-top:0.5rem">Storage usage is high — consider freeing space</div>`
+        : "";
+    const quotaBar = quotaMb > 0 ? `<div style="margin-top:0.75rem">
+      <div style="display:flex;justify-content:space-between;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.35rem">
+        <span>Storage Quota</span>
+        <span>${formatBytes(totalSize)} / ${quotaMb >= 1024 ? (quotaMb / 1024).toFixed(1) + " GB" : quotaMb + " MB"} (${usedPct}%)</span>
+      </div>
+      <div style="background:var(--crow-border);border-radius:4px;height:8px;overflow:hidden">
+        <div style="width:${Math.min(usedPct, 100)}%;height:100%;background:${quotaColor};border-radius:4px;transition:width 0.3s"></div>
+      </div>
+      ${quotaWarning}
+    </div>` : "";
 
     const stats = statGrid([
       statCard("Files", total, { delay: 0 }),
@@ -258,6 +276,7 @@ export default {
     const content = `
       ${gridStyles}
       ${stats}
+      ${quotaBar}
       ${uploadZone ? section("Upload", uploadZone, { delay: 150 }) : ""}
       ${section("Files", filterTabs + fileGrid, { delay: 200 })}
       ${uploadScript}
