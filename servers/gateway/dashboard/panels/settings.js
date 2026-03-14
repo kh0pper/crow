@@ -610,10 +610,51 @@ function pollHealth(attempts) {
     const connectionHtml = dataTable(["Context", "URL", "Status"], urlRows)
       + `<p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.75rem">The Crow's Nest is private (local/Tailscale only). Set <code>CROW_GATEWAY_URL</code> in .env for public blog/podcast URLs.</p>`;
 
+    // Device context
+    const currentDeviceId = process.env.CROW_DEVICE_ID || "";
+    const contextSections = await db.execute({
+      sql: "SELECT section_key, section_title, device_id, enabled FROM crow_context ORDER BY sort_order, section_key",
+      args: [],
+    });
+
+    const globalSections = contextSections.rows.filter((r) => !r.device_id);
+    const deviceSections = currentDeviceId
+      ? contextSections.rows.filter((r) => r.device_id === currentDeviceId)
+      : [];
+    const overriddenKeys = new Set(deviceSections.map((r) => r.section_key));
+
+    let contextRows = globalSections.map((s) => {
+      const hasOverride = overriddenKeys.has(s.section_key);
+      const statusBadge = hasOverride
+        ? `${badge("overridden", "connected")}`
+        : badge(s.enabled ? "active" : "disabled", s.enabled ? "published" : "draft");
+      return [
+        escapeHtml(s.section_title),
+        `<span class="mono" style="font-size:0.8rem">${escapeHtml(s.section_key)}</span>`,
+        statusBadge,
+      ];
+    });
+
+    const deviceLabel = currentDeviceId
+      ? `<span class="mono" style="font-size:0.85rem">${escapeHtml(currentDeviceId)}</span>`
+      : `<span style="color:var(--crow-text-muted)">Not set</span>`;
+
+    const deviceContextHtml = `
+      <div style="margin-bottom:1rem">
+        <span style="color:var(--crow-text-muted);font-size:0.85rem">Device ID:</span> ${deviceLabel}
+      </div>
+      ${dataTable(["Section", "Key", "Status"], contextRows)}
+      <p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.75rem">
+        Set <code>CROW_DEVICE_ID</code> in .env to enable per-device context overrides.
+        ${currentDeviceId ? `This device has ${deviceSections.length} override(s). ` : ""}
+        Manage context via your AI: <em>"Crow, update my context to prefer Spanish responses"</em> or use the <code>crow_add_context_section</code> / <code>crow_update_context_section</code> tools with a <code>device_id</code>.
+      </p>`;
+
     const content = `
       ${successMsg}${errorMsg}
       ${stats}
       ${section("Connection URLs", connectionHtml, { delay: 25 })}
+      ${section("Device Context", deviceContextHtml, { delay: 40 })}
       ${section("Updates", updateHtml, { delay: 50 })}
       ${section("Integrations", integrationsHtml, { delay: 100 })}
       ${section("Identity", identityHtml, { delay: 200 })}
