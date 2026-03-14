@@ -271,6 +271,25 @@ function scheduleGatewayRestart(delayMs = 2000) {
 }
 
 /**
+ * Map AI bundle IDs to AI Provider settings for auto-configuration.
+ * When a local AI bundle is installed, these settings are written to .env
+ * so the BYOAI Chat in the Messages panel works immediately.
+ */
+function getAiProviderConfig(bundleId, envVars) {
+  const configs = {
+    ollama: {
+      provider: "ollama",
+      baseUrl: envVars?.OLLAMA_HOST || "http://localhost:11434",
+    },
+    localai: {
+      provider: "openai",
+      baseUrl: (envVars?.LOCALAI_HOST || "http://localhost:8080") + "/v1",
+    },
+  };
+  return configs[bundleId] || null;
+}
+
+/**
  * @returns {Router}
  */
 export default function bundlesRouter() {
@@ -496,7 +515,30 @@ export default function bundlesRouter() {
           }
         }
 
-        // 5. Track installation
+        // 5. Auto-configure AI Provider when installing local AI bundles
+        if (manifest?.category === "ai" && addonType === "bundle") {
+          const aiConfig = getAiProviderConfig(bundle_id, env_vars);
+          if (aiConfig) {
+            try {
+              const { resolveEnvPath, writeEnvVar, sanitizeEnvValue } = await import("../env-manager.js");
+              const envPath = resolveEnvPath();
+              writeEnvVar(envPath, "AI_PROVIDER", sanitizeEnvValue(aiConfig.provider));
+              writeEnvVar(envPath, "AI_BASE_URL", sanitizeEnvValue(aiConfig.baseUrl));
+              // Invalidate cached provider config
+              try {
+                const { invalidateConfigCache } = await import("../ai/provider.js");
+                invalidateConfigCache();
+              } catch {}
+              appendLog(job, `AI Chat configured — provider: ${aiConfig.provider}, endpoint: ${aiConfig.baseUrl}`);
+              appendLog(job, "Open Messages → AI Chat to start chatting with your local AI");
+              needsRestart = true;
+            } catch (err) {
+              appendLog(job, `Note: Could not auto-configure AI Chat: ${err.message}. Set it manually in Settings.`);
+            }
+          }
+        }
+
+        // 6. Track installation
         installed.push({
           id: bundle_id,
           type: addonType,

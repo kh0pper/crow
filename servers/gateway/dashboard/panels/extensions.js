@@ -726,7 +726,14 @@ export default {
               setTimeout(function() { location.reload(); }, 1500);
             } else if (job.status === "complete_restart") {
               statusEl.style.color = "var(--crow-accent)";
-              statusEl.textContent = "Restarting gateway to apply changes...";
+              // Show last log entry (may include AI Chat setup info) before restart message
+              var lastLog = job.log[job.log.length - 1] || "";
+              var aiChatMsg = job.log.find(function(l) { return l.indexOf("AI Chat") !== -1; });
+              if (aiChatMsg) {
+                statusEl.textContent = aiChatMsg + " — Restarting gateway...";
+              } else {
+                statusEl.textContent = "Restarting gateway to apply changes...";
+              }
               // Tell the server to restart, then wait for it to come back
               fetch(API + "/restart", { method: "POST", headers: { "Content-Type": "application/json" } }).catch(function() {});
               waitForRestart(statusEl);
