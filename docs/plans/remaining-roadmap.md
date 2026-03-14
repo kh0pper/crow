@@ -92,10 +92,10 @@
 #### 4C: Cron Job Service
 - [ ] **Scheduled tasks** — `crow_create_schedule` tool, `schedules` DB table, `skills/scheduling.md` (already exists). Needs actual cron execution via gateway
 
-#### 4D: Podcasting Enhancements (Mostly Done)
+#### 4D: Podcasting Enhancements (Complete)
 - [x] **iTunes-compatible RSS** — Full iTunes namespace: `itunes:owner` (email+name), `itunes:type` (episodic/serial), configurable `itunes:category` with subcategories, per-episode `itunes:image` artwork, `content:encoded` show notes, enclosure file size via HEAD request, configurable language
 - [x] **Podcast settings** — `crow_blog_settings` now accepts podcast_category, podcast_type, podcast_owner_email, podcast_cover_url, podcast_language
-- [ ] **Audio file hosting** — Integration with storage server for episode audio upload from podcast panel
+- [x] **Audio file hosting** — Podcast panel has drag-and-drop upload for audio files and episode artwork via storage server. Falls back to manual URL when storage is not configured
 
 ### Phase 5: Social & Community (High Effort)
 
