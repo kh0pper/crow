@@ -7,7 +7,7 @@
 
 ## 1. Seed Data Update (grackle)
 
-Push updated `research_protocol` crow.md section to grackle's running database via `crow_update_context_section`. Content matches `scripts/init-db.js` lines 616-633 — adds source verification rules and multi-format citation guidance. No code changes.
+Push updated `research_protocol` crow.md section to grackle's running database via `crow_update_context_section`. Content matches `scripts/init-db.js` (the `research_protocol` contextSection entry, approximately lines 670-694) — adds source verification rules and multi-format citation guidance. No code changes.
 
 ## 2. MinIO Cleanup (grackle)
 
@@ -49,6 +49,10 @@ New file: `servers/gateway/dashboard/shared/design-tokens.js`
 
 Exports CSS custom property definitions as a string function. Both `layout.js` and `blog-public.js` import from it instead of defining their own copies. Single source of truth.
 
+**Token scope:** Union of all tokens from both files. `layout.js` has `--crow-brand-gold` (nav active state); `blog-public.js` has `.theme-serif`. The shared file includes both — unused tokens in a given consumer are harmless CSS custom properties.
+
+**Verification:** After extraction, values must be exact copies. Spot-check the dashboard and blog visually to confirm no styling regressions.
+
 Tokens include: colors (dark/light/serif themes), typography families, spacing scale, border radius, shadows, transitions.
 
 ### 4b. Brand guide doc
@@ -87,9 +91,9 @@ Behavior: If text is selected, wrap it. If no selection, insert template at curs
 
 ### 5b. Edit form
 
-New POST action `action: "edit"` in blog panel handler. Updates existing post via `UPDATE blog_posts SET ... WHERE id = ?`.
+New POST action `action: "edit"` in blog panel handler. Updates existing post via `UPDATE blog_posts SET ... WHERE id = ?`. If the post doesn't exist (deleted between load and submit), redirect to `/dashboard/blog` with no error — silent no-op is acceptable here since the user will see the post is gone.
 
-New GET parameter: `/dashboard/blog?edit=<id>` loads the post data and renders the create form pre-populated with title, content, tags, visibility, cover image key.
+New GET parameter: `/dashboard/blog?edit=<id>` loads the post data and renders the form pre-populated with title, content, tags, visibility, cover image key. When `?edit=<id>` is present, the edit form **replaces** the create form in the "New Post" section (not both visible at once). A "Cancel" link returns to the normal view.
 
 ### 5c. Post table edit button
 
