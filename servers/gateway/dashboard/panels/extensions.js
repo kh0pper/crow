@@ -17,6 +17,7 @@ import { fileURLToPath } from "url";
 const REGISTRY_URL = "https://raw.githubusercontent.com/kh0pper/crow-addons/main/registry.json";
 const CROW_DIR = join(homedir(), ".crow");
 const INSTALLED_PATH = join(CROW_DIR, "installed.json");
+const STORES_PATH = join(CROW_DIR, "stores.json");
 
 // Local fallback registry path
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -47,6 +48,55 @@ function getInstalled() {
   return {};
 }
 
+function getStores() {
+  try {
+    if (existsSync(STORES_PATH)) {
+      return JSON.parse(readFileSync(STORES_PATH, "utf8"));
+    }
+  } catch {}
+  return [];
+}
+
+function saveStores(stores) {
+  writeFileSync(STORES_PATH, JSON.stringify(stores, null, 2));
+}
+
+/** Fetch add-ons from a community store GitHub repo */
+async function fetchCommunityStore(storeUrl) {
+  try {
+    // Convert GitHub repo URL to raw registry.json URL
+    const match = storeUrl.match(/github\.com\/([^/]+)\/([^/]+)/);
+    if (!match) return { addons: [], store: null };
+
+    const rawUrl = `https://raw.githubusercontent.com/${match[1]}/${match[2]}/main/registry.json`;
+    const storeMetaUrl = `https://raw.githubusercontent.com/${match[1]}/${match[2]}/main/crow-store.json`;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+
+    let store = null;
+    try {
+      const metaResp = await fetch(storeMetaUrl, { signal: controller.signal });
+      if (metaResp.ok) store = await metaResp.json();
+    } catch {}
+
+    const resp = await fetch(rawUrl, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!resp.ok) return { addons: [], store };
+
+    const data = await resp.json();
+    const addons = (data["add-ons"] || []).map((a) => ({
+      ...a,
+      _community: true,
+      _storeName: store?.name || match[1],
+      _storeUrl: storeUrl,
+    }));
+    return { addons, store };
+  } catch {
+    return { addons: [], store: null };
+  }
+}
+
 function formatResources(requires) {
   if (!requires) return "";
   const parts = [];
@@ -75,6 +125,24 @@ export default {
   navOrder: 80,
 
   async handler(req, res, { db, layout }) {
+    // Handle POST for store management
+    if (req.method === "POST" && req.body) {
+      const { action, store_url } = req.body;
+      if (action === "add_store" && store_url) {
+        const stores = getStores();
+        if (!stores.find((s) => s.url === store_url)) {
+          stores.push({ url: store_url, addedAt: new Date().toISOString() });
+          saveStores(stores);
+        }
+        return res.redirect("/dashboard/extensions");
+      }
+      if (action === "remove_store" && store_url) {
+        const stores = getStores().filter((s) => s.url !== store_url);
+        saveStores(stores);
+        return res.redirect("/dashboard/extensions");
+      }
+    }
+
     const installed = getInstalled();
     const installedCount = Object.keys(installed).length;
 
@@ -103,7 +171,16 @@ export default {
       } catch {}
     }
 
-    const available = registry["add-ons"] || [];
+    // Merge official add-ons with community store add-ons
+    const officialAddons = (registry["add-ons"] || []).map((a) => ({ ...a, _community: false }));
+    const communityStores = getStores();
+    const communityResults = await Promise.all(communityStores.map((s) => fetchCommunityStore(s.url)));
+    const communityAddons = communityResults.flatMap((r) => r.addons);
+
+    // Deduplicate by ID (official takes precedence)
+    const officialIds = new Set(officialAddons.map((a) => a.id));
+    const dedupedCommunity = communityAddons.filter((a) => !officialIds.has(a.id));
+    const available = [...officialAddons, ...dedupedCommunity];
 
     // Detect docker compose command variant
     let composeCmd = null;
@@ -208,13 +285,30 @@ export default {
     }
 
     // Available add-ons with install buttons
+    // Collect unique types for filter tabs
+    const addonTypes = [...new Set(available.map((a) => a.type))].sort();
+
     let availableHtml;
     if (available.length === 0) {
       availableHtml = `<div class="empty-state"><h3>Registry unavailable</h3><p>Could not reach the add-on registry. Check your internet connection.</p></div>`;
     } else {
+      // Filter tabs
+      const filterTabs = `
+        <div style="display:flex;gap:0.25rem;margin-bottom:1rem;flex-wrap:wrap" id="type-filters">
+          <button class="btn btn-sm type-filter active" data-type="all" style="font-size:0.8rem">All (${available.length})</button>
+          ${addonTypes.map((t) => {
+            const count = available.filter((a) => a.type === t).length;
+            const label = t === "mcp-server" ? "MCP Servers" : t === "bundle" ? "Bundles" : t.charAt(0).toUpperCase() + t.slice(1) + "s";
+            return `<button class="btn btn-sm type-filter" data-type="${escapeHtml(t)}" style="font-size:0.8rem">${escapeHtml(label)} (${count})</button>`;
+          }).join("")}
+        </div>`;
+
       const cards = available.map((addon, i) => {
         const isInstalled = installed[addon.id];
         const typeBadge = badge(addon.type, "draft");
+        const communityBadge = addon._community
+          ? `<span style="font-size:0.65rem;color:#f0ad4e;background:rgba(240,173,78,0.15);padding:0.1rem 0.4rem;border-radius:4px;border:1px solid rgba(240,173,78,0.3);margin-right:0.25rem" title="Not verified by Crow">Community</span>`
+          : `<span style="font-size:0.65rem;color:var(--crow-accent);background:var(--crow-accent-muted);padding:0.1rem 0.4rem;border-radius:4px;margin-right:0.25rem">Official</span>`;
         const logoHtml = getAddonLogo(addon.id, 32) || `<span style="font-size:1.5rem">${ICON_MAP[addon.icon] || ""}</span>`;
         const tags = (addon.tags || []).slice(0, 4).map((t) =>
           `<span style="font-size:0.7rem;color:var(--crow-accent);background:var(--crow-accent-muted);padding:0.1rem 0.4rem;border-radius:4px;margin-right:0.25rem">${escapeHtml(t)}</span>`
@@ -236,16 +330,17 @@ export default {
           const envVarsAttr = escapeHtml(JSON.stringify(addon.env_vars || []));
           const minRam = addon.requires?.min_ram_mb || 0;
           const minDisk = addon.requires?.min_disk_mb || 0;
-          installButton = `<button class="btn btn-sm btn-primary bundle-install" data-id="${escapeHtml(addon.id)}" data-name="${escapeHtml(addon.name)}" data-envvars="${envVarsAttr}" data-minram="${minRam}" data-mindisk="${minDisk}">Install</button>`;
+          installButton = `<button class="btn btn-sm btn-primary bundle-install" data-id="${escapeHtml(addon.id)}" data-name="${escapeHtml(addon.name)}" data-envvars="${envVarsAttr}" data-minram="${minRam}" data-mindisk="${minDisk}" data-community="${addon._community ? "true" : "false"}">Install</button>`;
         }
 
-        return `<div class="card addon-card" style="animation-delay:${(i + installedCount) * 50}ms;transition:transform 0.15s,border-color 0.15s">
+        return `<div class="card addon-card" data-addon-type="${escapeHtml(addon.type)}" style="animation-delay:${(i + installedCount) * 50}ms;transition:transform 0.15s,border-color 0.15s">
           <div style="display:flex;align-items:flex-start;gap:1rem">
             <div style="flex-shrink:0">${logoHtml}</div>
             <div style="flex:1;min-width:0">
               <h4 style="font-family:'Fraunces',serif;font-size:1rem;margin-bottom:0.25rem">${escapeHtml(addon.name)}</h4>
               <p style="color:var(--crow-text-secondary);font-size:0.9rem;margin-bottom:0.4rem">${escapeHtml(addon.description)}</p>
               <div style="display:flex;flex-wrap:wrap;gap:0.25rem;align-items:center">
+                ${communityBadge}
                 ${typeBadge}
                 ${tags}
               </div>
@@ -260,12 +355,38 @@ export default {
           </div>
         </div>`;
       }).join("");
-      availableHtml = `<style>.addon-card:hover { transform: translateY(-2px); border-color: var(--crow-accent); }</style><div class="card-grid">${cards}</div>`;
+      availableHtml = `<style>
+        .addon-card:hover { transform: translateY(-2px); border-color: var(--crow-accent); }
+        .type-filter { background: transparent; border: 1px solid var(--crow-border); color: var(--crow-text-secondary); cursor: pointer; }
+        .type-filter.active { background: var(--crow-accent-muted); color: var(--crow-accent); border-color: var(--crow-accent); }
+        .type-filter:hover { border-color: var(--crow-accent); }
+      </style>${filterTabs}<div class="card-grid" id="addon-grid">${cards}</div>`;
     }
 
     const sourceNote = registrySource === "local"
       ? `<div style="font-size:0.75rem;color:var(--crow-text-muted);margin-bottom:0.5rem">Showing local registry (remote unavailable)</div>`
       : "";
+
+    // Community stores management section
+    const storesHtml = `
+      <div class="card" style="animation-delay:200ms">
+        <h4 style="font-family:'Fraunces',serif;font-size:0.95rem;margin-bottom:0.75rem">Community Stores</h4>
+        ${communityStores.length > 0 ? communityStores.map((s) => `
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:0.4rem 0;border-bottom:1px solid var(--crow-border)">
+            <span style="font-size:0.85rem;color:var(--crow-text-secondary);font-family:'JetBrains Mono',monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%">${escapeHtml(s.url)}</span>
+            <form method="POST" style="margin:0">
+              <input type="hidden" name="action" value="remove_store">
+              <input type="hidden" name="store_url" value="${escapeHtml(s.url)}">
+              <button type="submit" class="btn btn-sm" style="color:var(--crow-text-muted);border-color:var(--crow-border);font-size:0.75rem">Remove</button>
+            </form>
+          </div>
+        `).join("") : `<p style="font-size:0.85rem;color:var(--crow-text-muted);margin-bottom:0.75rem">No community stores configured.</p>`}
+        <form method="POST" style="display:flex;gap:0.5rem;margin-top:0.75rem">
+          <input type="hidden" name="action" value="add_store">
+          <input type="text" name="store_url" placeholder="https://github.com/user/crow-store" style="flex:1;padding:0.4rem 0.6rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg);color:var(--crow-text);font-size:0.85rem;font-family:'JetBrains Mono',monospace">
+          <button type="submit" class="btn btn-sm btn-primary">Add Store</button>
+        </form>
+      </div>`;
 
     // Modal container and client-side JavaScript
     // Uses data attributes and DOM APIs (textContent) instead of innerHTML with user data
@@ -336,6 +457,7 @@ export default {
             var envVars = JSON.parse(this.dataset.envvars || "[]");
             var minRam = parseInt(this.dataset.minram || "0", 10);
             var minDisk = parseInt(this.dataset.mindisk || "0", 10);
+            var isCommunity = this.dataset.community === "true";
 
             var frag = document.createElement("div");
 
@@ -343,6 +465,21 @@ export default {
             h3.style.cssText = "font-family:Fraunces,serif;margin-bottom:0.75rem";
             h3.textContent = "Install " + name;
             frag.appendChild(h3);
+
+            // Community warning banner
+            if (isCommunity) {
+              var communityWarn = document.createElement("div");
+              communityWarn.style.cssText = "background:rgba(240,173,78,0.1);border:1px solid rgba(240,173,78,0.3);border-radius:6px;padding:0.75rem 1rem;margin-bottom:1rem";
+              var cwTitle = document.createElement("div");
+              cwTitle.style.cssText = "font-weight:600;color:#f0ad4e;margin-bottom:0.25rem;font-size:0.85rem";
+              cwTitle.textContent = "Community add-on \u2014 not verified by Crow";
+              communityWarn.appendChild(cwTitle);
+              var cwText = document.createElement("div");
+              cwText.style.cssText = "color:var(--crow-text-secondary);font-size:0.8rem";
+              cwText.textContent = "This add-on comes from a community store. Review its source before installing.";
+              communityWarn.appendChild(cwText);
+              frag.appendChild(communityWarn);
+            }
 
             var desc = document.createElement("p");
             desc.style.cssText = "color:var(--crow-text-secondary);font-size:0.9rem;margin-bottom:1rem";
@@ -606,6 +743,21 @@ export default {
             waitForRestart(statusEl);
           });
         }
+        // --- Type filter tabs ---
+        document.querySelectorAll(".type-filter").forEach(function(btn) {
+          btn.addEventListener("click", function() {
+            var type = this.dataset.type;
+            document.querySelectorAll(".type-filter").forEach(function(b) { b.classList.remove("active"); });
+            this.classList.add("active");
+            document.querySelectorAll(".addon-card").forEach(function(card) {
+              if (type === "all" || card.dataset.addonType === type) {
+                card.style.display = "";
+              } else {
+                card.style.display = "none";
+              }
+            });
+          });
+        });
       })();
     <\/script>`;
 
@@ -614,6 +766,7 @@ export default {
       ${section("Installed", installedHtml, { delay: 100 })}
       ${sourceNote}
       ${section("Available Add-ons", availableHtml, { delay: 150 })}
+      ${storesHtml}
       <div class="card" style="animation-delay:250ms">
         <p style="color:var(--crow-text-muted);font-size:0.85rem">
           Or ask your AI: <code>"install the [name] add-on"</code><br>

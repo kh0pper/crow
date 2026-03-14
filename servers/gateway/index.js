@@ -430,7 +430,8 @@ if (authMiddleware) {
 }
 
 // --- Peer Relay Endpoints ---
-const relayHandlers = createRelayHandlers();
+const relayDb = createDbClient();
+const relayHandlers = createRelayHandlers(relayDb);
 
 if (authMiddleware) {
   app.post("/relay/store", authMiddleware, relayHandlers.store);
@@ -440,10 +441,10 @@ if (authMiddleware) {
   app.get("/relay/fetch", relayHandlers.fetch);
 }
 
-// --- Contact Discovery Endpoint (public, opt-in) ---
+// --- Contact Discovery Endpoints (public, opt-in) ---
 app.get("/discover/profile", async (req, res) => {
   try {
-    const setting = await db.execute({
+    const setting = await relayDb.execute({
       sql: "SELECT value FROM dashboard_settings WHERE key = 'discovery_enabled'",
       args: [],
     });
@@ -452,7 +453,7 @@ app.get("/discover/profile", async (req, res) => {
     }
     const { loadOrCreateIdentity } = await import("../sharing/identity.js");
     const identity = loadOrCreateIdentity();
-    const nameSetting = await db.execute({
+    const nameSetting = await relayDb.execute({
       sql: "SELECT value FROM dashboard_settings WHERE key = 'discovery_name'",
       args: [],
     });
@@ -462,6 +463,41 @@ app.get("/discover/profile", async (req, res) => {
       display_name: nameSetting.rows[0]?.value || null,
       ed25519_pubkey: identity.ed25519Public,
       secp256k1_pubkey: identity.secp256k1Public,
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Discovery unavailable" });
+  }
+});
+
+// Find a user by email hash (privacy-preserving contact discovery)
+app.get("/discover/find", async (req, res) => {
+  try {
+    const { hash } = req.query;
+    if (!hash || hash.length !== 64) {
+      return res.status(400).json({ error: "Missing or invalid hash parameter (expected SHA-256 hex)" });
+    }
+
+    // Check if this instance has opted into discovery with a matching email hash
+    const emailHash = await relayDb.execute({
+      sql: "SELECT value FROM dashboard_settings WHERE key = 'discovery_email_hash'",
+      args: [],
+    });
+
+    if (!emailHash.rows.length || emailHash.rows[0].value !== hash) {
+      return res.json({ found: false });
+    }
+
+    const { loadOrCreateIdentity } = await import("../sharing/identity.js");
+    const identity = loadOrCreateIdentity();
+    const nameSetting = await relayDb.execute({
+      sql: "SELECT value FROM dashboard_settings WHERE key = 'discovery_name'",
+      args: [],
+    });
+
+    res.json({
+      found: true,
+      crow_id: identity.crowId,
+      display_name: nameSetting.rows[0]?.value || null,
     });
   } catch (err) {
     res.status(500).json({ error: "Discovery unavailable" });

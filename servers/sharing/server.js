@@ -4,19 +4,24 @@
  * Creates a configured McpServer with P2P sharing tools.
  * Transport-agnostic: used by both stdio (index.js) and HTTP (gateway).
  *
- * 8 MCP tools:
- *   crow_generate_invite  — Create invite code with 24h expiry
- *   crow_accept_invite    — Accept invite, handshake, show safety number
- *   crow_list_contacts    — List peers with online/offline status
- *   crow_share            — Share memory/project/source/note to a contact
- *   crow_inbox            — List received shares and messages
- *   crow_send_message     — Send encrypted Nostr message
- *   crow_revoke_access    — Revoke shared project access
- *   crow_sharing_status   — Show Crow ID, peer count, relay status
+ * 12 MCP tools:
+ *   crow_generate_invite    — Create invite code with 24h expiry
+ *   crow_accept_invite      — Accept invite, handshake, show safety number
+ *   crow_list_contacts      — List peers with online/offline status
+ *   crow_share              — Share memory/project/source/note to a contact
+ *   crow_inbox              — List received shares and messages
+ *   crow_send_message       — Send encrypted Nostr message
+ *   crow_revoke_access      — Revoke shared project access
+ *   crow_sharing_status     — Show Crow ID, peer count, relay status
+ *   crow_find_contacts      — Find Crow users by email hash (privacy-preserving)
+ *   crow_set_discoverable   — Opt in/out of contact discovery
+ *   crow_discover_relays    — List configured relays
+ *   crow_add_relay          — Add a Nostr or peer relay
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { createHash } from "node:crypto";
 import { createDbClient } from "../db.js";
 import {
   loadOrCreateIdentity,
@@ -786,6 +791,218 @@ export function createSharingServer(dbPath, options = {}) {
 
       return {
         content: [{ type: "text", text: parts.join("\n") }],
+      };
+    }
+  );
+
+  // --- Tool: crow_find_contacts ---
+
+  server.tool(
+    "crow_find_contacts",
+    "Search for Crow users by email hash. Privacy-preserving: only SHA-256 hashes are compared, never plain text emails. Users must opt in to discovery by setting their email hash.",
+    {
+      email: z.string().max(500).describe("Email address to search for (will be hashed locally, never sent in plain text)"),
+    },
+    async ({ email }) => {
+      // Hash the email locally
+      const normalized = email.trim().toLowerCase();
+      const emailHash = createHash("sha256").update(normalized).digest("hex");
+
+      // Check local contacts first
+      const localMatch = await db.execute({
+        sql: "SELECT crow_id, display_name, email_hash FROM contacts WHERE email_hash = ? AND is_blocked = 0",
+        args: [emailHash],
+      });
+
+      if (localMatch.rows.length > 0) {
+        const c = localMatch.rows[0];
+        return {
+          content: [{
+            type: "text",
+            text: `Found existing contact: ${c.display_name || c.crow_id} (${c.crow_id})`,
+          }],
+        };
+      }
+
+      // Check configured peer relays for discovery
+      const relays = await db.execute({
+        sql: "SELECT relay_url FROM relay_config WHERE relay_type = 'peer' AND enabled = 1",
+        args: [],
+      });
+
+      const found = [];
+      for (const relay of relays.rows) {
+        try {
+          const url = new URL("/discover/find", relay.relay_url);
+          url.searchParams.set("hash", emailHash);
+          const resp = await fetch(url.toString(), { signal: AbortSignal.timeout(5000) });
+          if (resp.ok) {
+            const data = await resp.json();
+            if (data.found && data.crow_id) {
+              found.push({
+                crowId: data.crow_id,
+                displayName: data.display_name,
+                relay: relay.relay_url,
+              });
+            }
+          }
+        } catch {
+          // Relay unreachable, skip
+        }
+      }
+
+      if (found.length > 0) {
+        const lines = found.map((f) =>
+          `  ${f.displayName || f.crowId} (${f.crowId}) — via ${f.relay}`
+        );
+        return {
+          content: [{
+            type: "text",
+            text: `Found ${found.length} Crow user(s):\n${lines.join("\n")}\n\nUse crow_accept_invite with their invite code to connect.`,
+          }],
+        };
+      }
+
+      return {
+        content: [{
+          type: "text",
+          text: `No Crow users found for that email. They may not have opted into discovery. You can still connect by exchanging invite codes directly.`,
+        }],
+      };
+    }
+  );
+
+  // --- Tool: crow_set_discoverable ---
+
+  server.tool(
+    "crow_set_discoverable",
+    "Opt in or out of contact discovery by setting your email hash. Other Crow users can then find you by email without revealing your actual address.",
+    {
+      email: z.string().max(500).describe("Your email address (hashed locally, only the hash is stored)"),
+      enabled: z.boolean().default(true).describe("Enable or disable discoverability"),
+    },
+    async ({ email, enabled }) => {
+      const normalized = email.trim().toLowerCase();
+      const emailHash = createHash("sha256").update(normalized).digest("hex");
+
+      // Store the hash in dashboard_settings for the discovery endpoint
+      if (enabled) {
+        await db.execute({
+          sql: `INSERT OR REPLACE INTO dashboard_settings (key, value, updated_at)
+                VALUES ('discovery_email_hash', ?, datetime('now'))`,
+          args: [emailHash],
+        });
+      } else {
+        await db.execute({
+          sql: "DELETE FROM dashboard_settings WHERE key = 'discovery_email_hash'",
+          args: [],
+        });
+      }
+
+      return {
+        content: [{
+          type: "text",
+          text: enabled
+            ? `Discovery enabled. Other Crow users can now find you by email (only your hash is stored: ${emailHash.slice(0, 12)}...).`
+            : `Discovery disabled. You are no longer findable by email.`,
+        }],
+      };
+    }
+  );
+
+  // --- Tool: crow_discover_relays ---
+
+  server.tool(
+    "crow_discover_relays",
+    "List configured relays and discover new ones. Relays enable offline message delivery and contact discovery.",
+    {},
+    async () => {
+      const relays = await db.execute({
+        sql: "SELECT * FROM relay_config ORDER BY relay_type, relay_url",
+        args: [],
+      });
+
+      if (relays.rows.length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: [
+              "No relays configured.",
+              "",
+              "Add a relay with crow_add_relay:",
+              '  Nostr relay: crow_add_relay({ url: "wss://relay.damus.io", type: "nostr" })',
+              '  Peer relay:  crow_add_relay({ url: "https://friend.example.com", type: "peer" })',
+              "",
+              "Nostr relays enable encrypted messaging between Crow users.",
+              "Peer relays enable offline share delivery (store-and-forward).",
+            ].join("\n"),
+          }],
+        };
+      }
+
+      const lines = relays.rows.map((r) => {
+        const status = r.enabled ? "enabled" : "disabled";
+        return `  ${r.relay_url} (${r.relay_type}, ${status})`;
+      });
+
+      return {
+        content: [{
+          type: "text",
+          text: `Configured relays (${relays.rows.length}):\n${lines.join("\n")}`,
+        }],
+      };
+    }
+  );
+
+  // --- Tool: crow_add_relay ---
+
+  server.tool(
+    "crow_add_relay",
+    "Add a Nostr or peer relay to your configuration. Nostr relays handle encrypted messaging. Peer relays handle offline share delivery.",
+    {
+      url: z.string().max(500).describe("Relay URL (wss:// for Nostr, https:// for peer relay)"),
+      type: z.enum(["nostr", "peer"]).describe("Relay type"),
+    },
+    async ({ url, type }) => {
+      // Basic URL validation
+      try {
+        new URL(url);
+      } catch {
+        return {
+          content: [{ type: "text", text: `Invalid URL: ${url}` }],
+          isError: true,
+        };
+      }
+
+      try {
+        await db.execute({
+          sql: `INSERT INTO relay_config (relay_url, relay_type, enabled)
+                VALUES (?, ?, 1)`,
+          args: [url, type],
+        });
+      } catch (err) {
+        if (err.message?.includes("UNIQUE")) {
+          return {
+            content: [{ type: "text", text: `Relay already configured: ${url}` }],
+          };
+        }
+        throw err;
+      }
+
+      // If it's a Nostr relay, connect immediately
+      if (type === "nostr") {
+        try {
+          await nostrManager.connectRelays();
+        } catch {
+          // Non-fatal — will connect on next message send
+        }
+      }
+
+      return {
+        content: [{
+          type: "text",
+          text: `Added ${type} relay: ${url}`,
+        }],
       };
     }
   );
