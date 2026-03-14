@@ -3,7 +3,7 @@
  *
  * Two-tab layout:
  * - AI Chat: conversations with AI providers (BYOAI), tool calling, streaming
- * - Peer Messages: existing Nostr P2P messaging (unchanged)
+ * - Peer Messages: interactive Nostr P2P messaging (expand, reply, compose, mark read)
  *
  * Security: All user-visible text is escaped via escapeH() before DOM insertion.
  * Chat content from AI providers is treated as untrusted and escaped.
@@ -11,7 +11,7 @@
  * (the server-side layout) and for escaped content via escapeH().
  */
 
-import { escapeHtml, statCard, statGrid, dataTable, section, formatDate, badge } from "../shared/components.js";
+import { escapeHtml, statCard, statGrid, section, formatDate, badge } from "../shared/components.js";
 import { ICON_SHARING } from "../shared/empty-state-icons.js";
 
 export default {
@@ -22,6 +22,44 @@ export default {
   navOrder: 10,
 
   async handler(req, res, { db, layout }) {
+    // --- Handle POST actions for peer messages ---
+    if (req.method === "POST") {
+      const { action } = req.body;
+
+      if (action === "send" && req.body.contact && req.body.message) {
+        // Send a peer message via the sharing server's Nostr transport
+        try {
+          const { createSharingServer } = await import("../../sharing/server.js");
+          const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+          const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+
+          const server = createSharingServer();
+          const client = new Client({ name: "dashboard-peer-send", version: "0.1.0" });
+          const [ct, st] = InMemoryTransport.createLinkedPair();
+          await server.connect(st);
+          await client.connect(ct);
+
+          await client.callTool({
+            name: "crow_send_message",
+            arguments: { contact: req.body.contact, message: req.body.message },
+          });
+
+          await client.close();
+        } catch (err) {
+          console.error("[messages] Failed to send peer message:", err.message);
+        }
+        return res.redirect("/dashboard/messages?tab=peer");
+      }
+
+      if (action === "mark_read" && req.body.id) {
+        await db.execute({
+          sql: "UPDATE messages SET is_read = 1 WHERE id = ?",
+          args: [parseInt(req.body.id, 10)],
+        });
+        return res.redirect("/dashboard/messages?tab=peer");
+      }
+    }
+
     // Check if AI provider is configured
     let aiConfigured = false;
     try {
@@ -32,11 +70,11 @@ export default {
     // Peer message stats
     const totalResult = await db.execute("SELECT COUNT(*) as c FROM messages");
     const unreadResult = await db.execute("SELECT COUNT(*) as c FROM messages WHERE is_read = 0 AND direction = 'received'");
-    const contactsResult = await db.execute("SELECT COUNT(*) as c FROM contacts WHERE is_blocked = 0");
+    const contactsCountResult = await db.execute("SELECT COUNT(*) as c FROM contacts WHERE is_blocked = 0");
 
     const total = totalResult.rows[0]?.c || 0;
     const unread = unreadResult.rows[0]?.c || 0;
-    const contacts = contactsResult.rows[0]?.c || 0;
+    const contactCount = contactsCountResult.rows[0]?.c || 0;
 
     // Chat conversation count
     let chatCount = 0;
@@ -48,14 +86,19 @@ export default {
     // Peer messages data
     const messages = await db.execute({
       sql: `SELECT m.id, m.content, m.direction, m.is_read, m.created_at, m.thread_id,
-                   c.display_name, c.crow_id
+                   m.contact_id, c.display_name, c.crow_id
             FROM messages m
             LEFT JOIN contacts c ON m.contact_id = c.id
             ORDER BY m.created_at DESC LIMIT 50`,
       args: [],
     });
 
-    // Build peer messages table
+    // Fetch contacts for compose dropdown
+    const contactsList = await db.execute(
+      "SELECT id, crow_id, display_name FROM contacts WHERE is_blocked = 0 ORDER BY display_name ASC, crow_id ASC"
+    );
+
+    // Build peer messages as interactive list (not a flat table)
     let peerMessageList;
     if (messages.rows.length === 0) {
       peerMessageList = `<div class="empty-state">
@@ -64,22 +107,83 @@ export default {
         <p>Messages from friends and shared items will appear here.</p>
       </div>`;
     } else {
-      const rows = messages.rows.map((m) => {
-        const dir = m.direction === "sent" ? "\u2192" : "\u2190";
-        const readBadge = m.direction === "received" && !m.is_read ? badge("new", "published") : "";
-        const name = escapeHtml(m.display_name || m.crow_id || "Unknown");
-        const content = escapeHtml((m.content || "").slice(0, 100));
-        return [
-          `<span class="mono">${dir}</span> ${name} ${readBadge}`,
-          content,
-          `<span class="mono">${formatDate(m.created_at)}</span>`,
-        ];
+      const msgRows = messages.rows.map((m) => {
+        const dir = m.direction === "sent" ? "\u2192 Sent" : "\u2190 Received";
+        const isUnread = m.direction === "received" && !m.is_read;
+        const unreadClass = isUnread ? " peer-msg-unread" : "";
+        const name = escapeHtml(m.display_name || (m.crow_id ? m.crow_id.substring(0, 16) + "..." : "Unknown"));
+        const preview = escapeHtml((m.content || "").slice(0, 80));
+        const fullContent = escapeHtml(m.content || "");
+        const dateStr = formatDate(m.created_at);
+        const contactIdentifier = escapeHtml(m.display_name || m.crow_id || "");
+
+        return `<div class="peer-msg-row${unreadClass}" data-msg-id="${m.id}">
+          <div class="peer-msg-header" onclick="togglePeerMsg(this)">
+            <div class="peer-msg-from">
+              <span class="mono" style="font-size:0.75rem;opacity:0.6">${dir}</span>
+              <strong>${name}</strong>
+              ${isUnread ? badge("new", "published") : ""}
+            </div>
+            <div class="peer-msg-preview">${preview}${(m.content || "").length > 80 ? "..." : ""}</div>
+            <div class="peer-msg-date mono">${dateStr}</div>
+          </div>
+          <div class="peer-msg-body" style="display:none">
+            <div class="peer-msg-full">${fullContent}</div>
+            ${isUnread ? `<form method="POST" style="display:inline">
+              <input type="hidden" name="action" value="mark_read">
+              <input type="hidden" name="id" value="${m.id}">
+              <button type="submit" class="btn btn-sm btn-secondary" style="margin-top:0.5rem">Mark as read</button>
+            </form>` : ""}
+            ${m.crow_id ? `<div class="peer-msg-reply" style="margin-top:0.75rem">
+              <form method="POST" style="display:flex;gap:0.5rem;align-items:flex-end">
+                <input type="hidden" name="action" value="send">
+                <input type="hidden" name="contact" value="${contactIdentifier}">
+                <textarea name="message" placeholder="Reply to ${name}..." rows="2"
+                  style="flex:1;resize:none;border:1px solid var(--crow-border);border-radius:6px;padding:0.5rem;
+                         background:var(--crow-bg-deep,#0f0f17);color:var(--crow-text);font-size:0.85rem;font-family:inherit"
+                  required maxlength="10000"></textarea>
+                <button type="submit" class="btn btn-primary btn-sm">Reply</button>
+              </form>
+            </div>` : ""}
+          </div>
+        </div>`;
       });
-      peerMessageList = dataTable(["Contact", "Message", "Date"], rows);
+      peerMessageList = msgRows.join("");
     }
 
-    // Default to AI Chat tab if provider is configured
-    const defaultTab = aiConfigured ? "ai-chat" : "peer";
+    // Compose form (contact selector + message)
+    let composeForm = "";
+    if (contactsList.rows.length > 0) {
+      const optionRows = contactsList.rows.map((c) => {
+        const label = escapeHtml(c.display_name || c.crow_id.substring(0, 24) + "...");
+        const val = escapeHtml(c.display_name || c.crow_id);
+        return `<option value="${val}">${label}</option>`;
+      }).join("");
+
+      composeForm = `<div class="peer-compose">
+        <form method="POST" style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:flex-end">
+          <input type="hidden" name="action" value="send">
+          <div style="flex:0 0 200px">
+            <label style="font-size:0.8rem;color:var(--crow-text-muted);display:block;margin-bottom:0.25rem">To</label>
+            <select name="contact" required style="width:100%;border:1px solid var(--crow-border);border-radius:6px;
+                    padding:0.5rem;background:var(--crow-bg-deep,#0f0f17);color:var(--crow-text);font-size:0.85rem">
+              ${optionRows}
+            </select>
+          </div>
+          <div style="flex:1;min-width:200px">
+            <label style="font-size:0.8rem;color:var(--crow-text-muted);display:block;margin-bottom:0.25rem">Message</label>
+            <textarea name="message" placeholder="Write a message..." rows="2" required maxlength="10000"
+              style="width:100%;resize:none;border:1px solid var(--crow-border);border-radius:6px;padding:0.5rem;
+                     background:var(--crow-bg-deep,#0f0f17);color:var(--crow-text);font-size:0.85rem;font-family:inherit"></textarea>
+          </div>
+          <button type="submit" class="btn btn-primary btn-sm" style="flex-shrink:0">Send</button>
+        </form>
+      </div>`;
+    }
+
+    // Determine default tab (respect ?tab= query param for redirects after POST)
+    const tabParam = req.query?.tab;
+    const defaultTab = tabParam === "peer" ? "peer" : (tabParam === "ai-chat" ? "ai-chat" : (aiConfigured ? "ai-chat" : "peer"));
 
     const content = `
       <style>
@@ -133,13 +237,31 @@ export default {
         .chat-delete-btn { font-size:0.75rem; background:none; border:none; color:var(--crow-text-muted); cursor:pointer; padding:0.25rem; }
         .chat-delete-btn:hover { color:var(--crow-error,#ef4444); }
 
+        /* Peer Messages interactive rows */
+        .peer-msg-row { border-bottom:1px solid var(--crow-border); transition:background 0.1s; }
+        .peer-msg-row:last-child { border-bottom:none; }
+        .peer-msg-unread { background:color-mix(in srgb, var(--crow-accent) 5%, transparent); }
+        .peer-msg-header { display:flex; align-items:center; gap:0.75rem; padding:0.75rem; cursor:pointer; transition:background 0.1s; }
+        .peer-msg-header:hover { background:color-mix(in srgb, var(--crow-accent) 8%, transparent); }
+        .peer-msg-from { flex:0 0 180px; display:flex; align-items:center; gap:0.5rem; font-size:0.85rem; }
+        .peer-msg-preview { flex:1; font-size:0.85rem; color:var(--crow-text-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .peer-msg-date { flex:0 0 auto; font-size:0.75rem; color:var(--crow-text-muted); }
+        .peer-msg-body { padding:0 0.75rem 0.75rem 0.75rem; }
+        .peer-msg-full { background:var(--crow-bg-deep,#0f0f17); border-radius:6px; padding:0.75rem; font-size:0.85rem;
+                         line-height:1.5; white-space:pre-wrap; word-wrap:break-word; }
+        .peer-compose { padding:0.5rem 0; }
+
         @media (max-width: 768px) {
           .chat-sidebar { width:200px; }
           .chat-msg { max-width:90%; }
+          .peer-msg-from { flex:0 0 120px; }
         }
         @media (max-width: 600px) {
           .chat-layout { flex-direction:column; height:auto; }
           .chat-sidebar { width:100%; max-height:200px; border-right:none; border-bottom:1px solid var(--crow-border); }
+          .peer-msg-header { flex-wrap:wrap; }
+          .peer-msg-from { flex:1 1 100%; }
+          .peer-msg-preview { flex:1 1 100%; }
         }
       </style>
 
@@ -188,9 +310,10 @@ export default {
         ${statGrid([
           statCard("Total Messages", total, { delay: 0 }),
           statCard("Unread", unread, { delay: 50 }),
-          statCard("Contacts", contacts, { delay: 100 }),
+          statCard("Contacts", contactCount, { delay: 100 }),
         ])}
-        ${section("Recent Messages", peerMessageList, { delay: 150 })}
+        ${composeForm ? section("New Message", composeForm, { delay: 100 }) : ""}
+        ${section("Messages", peerMessageList, { delay: 150 })}
       </div>
 
       <script>
@@ -200,6 +323,18 @@ export default {
         var d = document.createElement('div');
         d.textContent = s;
         return d.innerHTML;
+      }
+
+      function togglePeerMsg(headerEl) {
+        var body = headerEl.nextElementSibling;
+        if (!body) return;
+        var isHidden = body.style.display === 'none';
+        body.style.display = isHidden ? 'block' : 'none';
+        // Mark as read visually when expanding an unread message
+        if (isHidden) {
+          var row = headerEl.parentElement;
+          if (row) row.classList.remove('peer-msg-unread');
+        }
       }
 
       function switchMsgTab(tab) {

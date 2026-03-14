@@ -1,0 +1,59 @@
+## RoMM — Retro ROM Manager
+##
+## Usage:
+##   1. Set ROMM_LIBRARY_PATH to your ROM directory (organized by system: roms/gba/, roms/snes/, etc.)
+##   2. docker compose up -d
+##   3. Open http://localhost:3080 in your browser
+##
+## Optional: Set IGDB_CLIENT_ID and IGDB_CLIENT_SECRET for automatic game metadata/cover art
+
+services:
+  romm:
+    image: rommapp/romm:latest
+    ports:
+      - "127.0.0.1:3080:8080"
+    depends_on:
+      romm-db:
+        condition: service_healthy
+    volumes:
+      - ${ROMM_LIBRARY_PATH}:/romm/library
+      - romm-resources:/romm/resources
+      - romm-redis:/redis-data
+    environment:
+      - DB_HOST=romm-db
+      - DB_PORT=3306
+      - DB_NAME=romm
+      - DB_USER=romm
+      - DB_PASSWD=${ROMM_DB_PASSWORD}
+      - ROMM_AUTH_SECRET_KEY=${ROMM_AUTH_SECRET_KEY}
+      - IGDB_CLIENT_ID=${IGDB_CLIENT_ID:-}
+      - IGDB_CLIENT_SECRET=${IGDB_CLIENT_SECRET:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  romm-db:
+    image: mariadb:latest
+    volumes:
+      - romm-db-data:/var/lib/mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=${ROMM_DB_PASSWORD}
+      - MYSQL_DATABASE=romm
+      - MYSQL_USER=romm
+      - MYSQL_PASSWORD=${ROMM_DB_PASSWORD}
+    healthcheck:
+      test: ["CMD", "healthcheck", "--connect", "--silent"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  romm-resources:
+  romm-redis:
+  romm-db-data:

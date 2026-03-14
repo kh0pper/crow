@@ -738,21 +738,24 @@ Example: [crow checkpoint: About to create research project "Climate Policy Anal
     order: 50,
     content: `**Core capabilities and when to activate them:**
 
-| User Intent | Capability | Tools |
+| User Intent | Skill | Tools |
 |---|---|---|
-| "remember", "recall", "what did we..." | Memory management | crow-memory |
-| "research", "find papers", "cite" | Research pipeline | crow-research, brave-search, arxiv |
-| "email", "calendar", "schedule" | Google Workspace | google-workspace |
-| "task", "board", "trello" | Project management | trello |
-| "assignment", "canvas", "course" | Academic | canvas-lms |
-| "wiki", "notion", "page" | Knowledge base | notion |
-| "slack", "discord", "teams" | Messaging | slack, discord, teams |
-| "repo", "issue", "PR", "github" | Development | github |
-| "search", "look up", "find" | Web search | brave-search |
-| "file", "document", "folder" | File management | filesystem |
-| "citation", "zotero", "reference" | Bibliography | zotero |
+| "remember", "recall", "what did we..." | memory-management | crow-memory |
+| "research", "find papers", "cite" | research-pipeline | crow-projects, brave-search |
+| "organize notes", "plan from notes" | ideation | crow-memory, crow-projects |
+| "blog post", "publish", "write post" | blog | crow-blog, crow-storage |
+| "share with", "send to", "invite" | sharing | crow-sharing |
+| "message", "chat", "DM" | social | crow-sharing |
+| "delete", "publish", "destructive action" | safety-guardrails | (checkpoint before action) |
+| "upload file", "storage", "download" | storage | crow-storage |
+| "schedule", "remind me", "recurring" | scheduling | crow-memory |
+| "data backend", "connect database" | data-backends | crow-projects |
+| "install", "add-on", "extension" | add-ons | (registry) |
+| "teach me", "explain", "tutor" | tutoring | crow-memory |
 
-**Compound workflows:** Daily briefing, meeting prep, research kickoff, team updates, project organization — combine multiple tools in sequence.`,
+**Compound workflows:** Daily briefing, meeting prep, research kickoff, team updates, project organization — combine multiple skills in sequence.
+
+**Skill activation:** Say what you want naturally. The AI matches your intent to the right skill and activates it automatically. Use the \`session-start\` prompt for full workflow guidance.`,
   },
   {
     key: "key_principles",

@@ -262,7 +262,7 @@ EOF
 sudo systemctl restart caddy
 ```
 
-Point your domain's DNS A record to your Oracle instance's public IP. Caddy automatically provisions Let's Encrypt certificates.
+Point your domain's DNS A record to your Oracle instance's public IP. Caddy automatically provisions Let's Encrypt certificates. For detailed DNS setup instructions, see [Custom Domain Setup](./custom-domain).
 
 Set the public URL in your `.env`:
 

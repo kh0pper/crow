@@ -40,6 +40,14 @@ export default defineConfig({
               { text: 'Blog', link: '/es/guide/blog' },
             ],
           },
+          {
+            text: 'Plataformas',
+            items: [
+              { text: 'Claude Web y Móvil', link: '/es/platforms/claude' },
+              { text: 'ChatGPT', link: '/es/platforms/chatgpt' },
+              { text: 'Claude Code (CLI)', link: '/es/platforms/claude-code' },
+            ],
+          },
         ],
       },
     },
@@ -64,6 +72,7 @@ export default defineConfig({
           { text: 'Desktop Install', link: '/getting-started/desktop-install' },
           { text: 'Managed Hosting', link: '/getting-started/managed-hosting' },
           { text: 'Tailscale Remote Access', link: '/getting-started/tailscale-setup' },
+          { text: 'Custom Domain', link: '/getting-started/custom-domain' },
           { text: 'Docker', link: '/getting-started/docker' },
           { text: 'Free Hosting Comparison', link: '/getting-started/free-hosting' },
           { text: 'Cloud Deploy (Legacy)', link: '/getting-started/cloud-deploy' },
@@ -133,6 +142,7 @@ export default defineConfig({
         items: [
           { text: 'Using Skills', link: '/guide/skills' },
           { text: 'Cross-Platform', link: '/guide/cross-platform' },
+          { text: 'Integration Overview', link: '/guide/integration-overview' },
           { text: 'Storage', link: '/guide/storage' },
           { text: 'Blog', link: '/guide/blog' },
           { text: 'Podcast', link: '/guide/podcast' },

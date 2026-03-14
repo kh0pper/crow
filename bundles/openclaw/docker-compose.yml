@@ -1,0 +1,50 @@
+## OpenClaw — Personal AI Assistant Gateway
+##
+## Runs OpenClaw with Crow MCP servers pre-configured.
+## The gateway UI is available at http://localhost:18789
+##
+## Usage:
+##   cp .env.example .env
+##   # Edit .env with your AI provider key and chat platform tokens
+##   docker compose up --build -d
+##
+## To configure Crow MCP servers, mount your Crow installation
+## and set CROW_PATH to point to it inside the container.
+
+services:
+  openclaw:
+    build:
+      context: .
+      args:
+        OPENCLAW_VERSION: ${OPENCLAW_VERSION:-main}
+    ports:
+      - "127.0.0.1:18789:18789"
+    environment:
+      # Gateway
+      OPENCLAW_GATEWAY_PORT: "18789"
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?Set OPENCLAW_GATEWAY_TOKEN in .env}
+      OPENCLAW_TZ: ${OPENCLAW_TZ:-UTC}
+
+      # AI provider (pick one)
+      OPENCLAW_AI_PROVIDER: ${OPENCLAW_AI_PROVIDER:-anthropic}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+
+      # Chat platform tokens (configure the ones you use)
+      OPENCLAW_DISCORD_TOKEN: ${OPENCLAW_DISCORD_TOKEN:-}
+      OPENCLAW_DISCORD_SERVER_ID: ${OPENCLAW_DISCORD_SERVER_ID:-}
+      OPENCLAW_DISCORD_USER_ID: ${OPENCLAW_DISCORD_USER_ID:-}
+      OPENCLAW_TELEGRAM_TOKEN: ${OPENCLAW_TELEGRAM_TOKEN:-}
+
+      # Crow integration — gateway URL for HTTP transport
+      CROW_GATEWAY_URL: ${CROW_GATEWAY_URL:-}
+    volumes:
+      - openclaw-config:/root/.openclaw
+      - openclaw-workspace:/workspace
+    restart: unless-stopped
+    init: true
+    mem_limit: 2g
+
+volumes:
+  openclaw-config:
+  openclaw-workspace:

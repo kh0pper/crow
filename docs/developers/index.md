@@ -42,6 +42,12 @@ npm run setup
 
 Then pick a contribution type above and follow the guide.
 
+## Developer Environment (upcoming)
+
+Crow includes a Developer Environment mode that can be enabled in the Settings panel. When active, it surfaces a dedicated Developer panel in the Crow's Nest with hot-reload for panels and skills, an MCP server test harness, manifest validation, bundle log viewing, and smoke tests for all add-on types. It also provides a packaging CLI (`npm run package-addon`) for creating distributable tarballs ready for registry submission.
+
+The Developer Environment is designed to streamline the full add-on lifecycle: scaffold, develop with live feedback, test, package, and publish — all without leaving the Crow platform.
+
 ## Community Directory
 
 Browse existing community contributions and submit your own.

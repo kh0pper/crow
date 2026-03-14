@@ -36,6 +36,18 @@ Repeat for additional servers:
 ChatGPT uses the **SSE** transport, not Streamable HTTP. Use the `/sse` endpoints, not the `/mcp` endpoints.
 :::
 
+## Self-Hosted / Local Setup
+
+If you're running the Crow gateway on your own machine, you can expose it to ChatGPT using [Tailscale Funnel](../getting-started/tailscale-setup#option-a-tailscale-funnel-personal-hobby-use). Once Funnel is enabled on the machine running the gateway, your SSE endpoint URL will be:
+
+```
+https://<hostname>.<tailnet>.ts.net/memory/sse
+```
+
+Replace `<hostname>` and `<tailnet>` with your Tailscale machine name and tailnet domain. Use the same URL pattern for other servers (`/projects/sse`, `/router/sse`, etc.). The OAuth flow and setup steps are identical to the cloud instructions above — just substitute your Funnel URL for `your-crow-server`.
+
+See the [Tailscale Setup guide](../getting-started/tailscale-setup) for full configuration details.
+
 ## Verification
 
 After connecting, try asking ChatGPT:

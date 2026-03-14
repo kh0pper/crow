@@ -258,6 +258,38 @@ export async function generateCondensedContext(db, { routerStyle = false, device
 }
 
 /**
+ * Extract a condensed skill routing table from the skills_reference content.
+ * Parses the markdown table in the DB content and produces a compact string.
+ */
+function extractSkillRouting(content) {
+  if (!content) return "";
+
+  // Try to extract rows from a markdown table (| intent | capability | tools |)
+  const tableRows = content
+    .split("\n")
+    .filter((l) => l.startsWith("|") && !l.startsWith("|---") && !l.startsWith("| User"))
+    .map((l) =>
+      l
+        .split("|")
+        .map((c) => c.trim())
+        .filter(Boolean)
+    )
+    .filter((cols) => cols.length >= 2);
+
+  if (tableRows.length > 0) {
+    // Condense to: Skills: "intent" → capability, ...
+    const pairs = tableRows
+      .slice(0, 12) // cap at 12 rows to stay within budget
+      .map((cols) => `${cols[0]} → ${cols[1]}`)
+      .join(", ");
+    return `Skills: ${pairs}`;
+  }
+
+  // Fallback: return first 200 chars of content
+  return content.slice(0, 200);
+}
+
+/**
  * Condense a section to its essential content for the instructions field.
  */
 function condenseSection(key, content, { routerStyle = false } = {}) {
@@ -284,11 +316,13 @@ function condenseSection(key, content, { routerStyle = false } = {}) {
       return "Transparency: Show [crow: action] notes for autonomous actions (Tier 1). Ask before high-impact actions like deleting memories or sharing data (Tier 2).";
 
     case "skills_reference": {
-      // Condensed intent-to-tool routing
+      // Condensed intent-to-skill routing + tool capabilities
+      // Extract trigger table from DB content if available, otherwise use defaults
+      const skillRouting = extractSkillRouting(content);
       if (routerStyle) {
-        return "Capabilities: crow_memory (store/search/recall memories), crow_projects (projects/sources/citations/data backends), crow_blog (create/publish posts), crow_sharing (P2P sharing/messaging), crow_storage (file upload/download), crow_tools (external integrations). Use crow_discover for full action schemas.";
+        return `Capabilities: crow_memory (store/search/recall memories), crow_projects (projects/sources/citations/data backends), crow_blog (create/publish posts), crow_sharing (P2P sharing/messaging), crow_storage (file upload/download), crow_tools (external integrations). Use crow_discover for full action schemas.\n${skillRouting}`;
       }
-      return "Capabilities: Memory (crow_store_memory, crow_search_memories, crow_recall_by_context), Projects (crow_create_project, crow_add_source, crow_generate_bibliography, crow_register_backend), Blog (crow_create_post, crow_publish_post), Sharing (crow_generate_invite, crow_share, crow_send_message), Storage (crow_upload_file, crow_list_files).";
+      return `Capabilities: Memory (crow_store_memory, crow_search_memories, crow_recall_by_context), Projects (crow_create_project, crow_add_source, crow_generate_bibliography, crow_register_backend), Blog (crow_create_post, crow_publish_post), Sharing (crow_generate_invite, crow_share, crow_send_message), Storage (crow_upload_file, crow_list_files).\n${skillRouting}`;
     }
 
     default:
