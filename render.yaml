@@ -1,6 +1,9 @@
-## Crow — Render.com One-Click Deploy
+## Crow — Render.com One-Click Deploy (Legacy)
+## Note: Oracle Cloud Free Tier is now the recommended free deployment option.
+## See docs/getting-started/oracle-cloud.md for the recommended setup.
+##
+## This file is maintained for existing Render users.
 ## Click "New" → "Blueprint" on Render and point to this repo.
-## Or use the Deploy to Render button in the README.
 
 services:
   - type: web

@@ -58,13 +58,13 @@ Connect to a deployed Crow gateway for the full platform including external inte
    {
      "mcpServers": {
        "crow-memory": {
-         "url": "https://your-gateway.onrender.com/memory/mcp"
+         "url": "https://your-crow-server/memory/mcp"
        },
        "crow-projects": {
-         "url": "https://your-gateway.onrender.com/projects/mcp"
+         "url": "https://your-crow-server/projects/mcp"
        },
        "crow-tools": {
-         "url": "https://your-gateway.onrender.com/tools/mcp"
+         "url": "https://your-crow-server/tools/mcp"
        }
      }
    }
@@ -83,7 +83,7 @@ Google AI Studio supports MCP servers for tool use in chat. Configuration is ava
 3. In the tools section, add an MCP server
 4. Enter the Streamable HTTP URL:
    ```
-   https://your-gateway.onrender.com/memory/mcp
+   https://your-crow-server/memory/mcp
    ```
 5. Complete the OAuth authorization flow
 

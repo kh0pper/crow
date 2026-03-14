@@ -9,6 +9,34 @@ export default defineConfig({
     ['meta', { name: 'theme-color', content: '#1d1d1f' }],
   ],
 
+  locales: {
+    root: {
+      label: 'English',
+      lang: 'en',
+    },
+    es: {
+      label: 'Español',
+      lang: 'es',
+      themeConfig: {
+        nav: [
+          { text: 'Primeros Pasos', link: '/es/getting-started/' },
+        ],
+        sidebar: [
+          {
+            text: 'Primeros Pasos',
+            items: [
+              { text: 'Descripción General', link: '/es/getting-started/' },
+              { text: 'Oracle Cloud Nivel Gratuito', link: '/es/getting-started/oracle-cloud' },
+              { text: 'Servidor en Casa', link: '/es/getting-started/home-server' },
+              { text: 'Instalación de Escritorio', link: '/es/getting-started/desktop-install' },
+              { text: 'Hosting Administrado', link: '/es/getting-started/managed-hosting' },
+            ],
+          },
+        ],
+      },
+    },
+  },
+
   themeConfig: {
     nav: [
       { text: 'Getting Started', link: '/getting-started/' },
@@ -23,15 +51,18 @@ export default defineConfig({
         text: 'Getting Started',
         items: [
           { text: 'Overview', link: '/getting-started/' },
+          { text: 'Oracle Cloud Free Tier', link: '/getting-started/oracle-cloud' },
+          { text: 'Home Server', link: '/getting-started/home-server' },
+          { text: 'Desktop Install', link: '/getting-started/desktop-install' },
           { text: 'Managed Hosting', link: '/getting-started/managed-hosting' },
-          { text: 'Cross-Platform Guide', link: '/guide/cross-platform' },
-          { text: 'Cloud Deploy (Render)', link: '/getting-started/cloud-deploy' },
-          { text: 'Desktop Setup', link: '/getting-started/desktop-setup' },
-          { text: 'Docker', link: '/getting-started/docker' },
-          { text: 'Full Setup (MinIO + Gateway)', link: '/getting-started/full-setup' },
-          { text: 'Free Hosting Options', link: '/getting-started/free-hosting' },
-          { text: 'Raspberry Pi (Crow OS)', link: '/getting-started/raspberry-pi' },
           { text: 'Tailscale Remote Access', link: '/getting-started/tailscale-setup' },
+          { text: 'Docker', link: '/getting-started/docker' },
+          { text: 'Free Hosting Comparison', link: '/getting-started/free-hosting' },
+          { text: 'Cloud Deploy (Legacy)', link: '/getting-started/cloud-deploy' },
+          { text: 'Cross-Platform Guide', link: '/guide/cross-platform' },
+          { text: 'Desktop Setup (Claude Desktop)', link: '/getting-started/desktop-setup' },
+          { text: 'Full Setup (MinIO + Gateway)', link: '/getting-started/full-setup' },
+          { text: 'Raspberry Pi (Crow OS)', link: '/getting-started/raspberry-pi' },
         ],
       },
       {

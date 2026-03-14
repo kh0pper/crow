@@ -68,13 +68,13 @@ Connect a local OpenClaw instance to a cloud-deployed Crow gateway. Useful when 
    {
      "mcpServers": {
        "crow-memory": {
-         "url": "https://your-gateway.onrender.com/memory/mcp"
+         "url": "https://your-crow-server/memory/mcp"
        },
        "crow-projects": {
-         "url": "https://your-gateway.onrender.com/projects/mcp"
+         "url": "https://your-crow-server/projects/mcp"
        },
        "crow-tools": {
-         "url": "https://your-gateway.onrender.com/tools/mcp"
+         "url": "https://your-crow-server/tools/mcp"
        }
      }
    }
@@ -169,7 +169,7 @@ For deeper guidance, MCP prompts are available: `session-start`, `crow-guide`, `
 
 **Via HTTP** (if gateway is deployed):
 ```
-GET https://your-gateway.onrender.com/crow.md
+GET https://your-crow-server/crow.md
 ```
 
 The context includes Crow's identity, memory protocols, transparency rules, and any custom sections you've configured. See the [Cross-Platform Guide](/guide/cross-platform) for details.
@@ -234,7 +234,7 @@ To use P2P sharing through OpenClaw, connect the `crow-sharing` server alongside
 {
   "mcpServers": {
     "crow-sharing": {
-      "url": "https://your-gateway.onrender.com/sharing/mcp"
+      "url": "https://your-crow-server/sharing/mcp"
     }
   }
 }
