@@ -66,7 +66,13 @@ export class NostrManager {
       await this.connectRelays();
     }
 
-    const recipientPubkey = contact.secp256k1_pubkey || contact.secp256k1Pubkey;
+    let recipientPubkey = contact.secp256k1_pubkey || contact.secp256k1Pubkey;
+
+    // Nostr uses 32-byte x-only pubkeys (64 hex chars).
+    // Stored keys may be 33-byte compressed (66 hex chars with 02/03 prefix) — strip prefix.
+    if (recipientPubkey && recipientPubkey.length === 66) {
+      recipientPubkey = recipientPubkey.slice(2);
+    }
 
     // NIP-44 encrypt the message
     const conversationKey = nip44.v2.utils.getConversationKey(
@@ -118,9 +124,15 @@ export class NostrManager {
       await this.connectRelays();
     }
 
-    const contactPubkey = contact.secp256k1_pubkey || contact.secp256k1Pubkey;
+    let contactPubkey = contact.secp256k1_pubkey || contact.secp256k1Pubkey;
+    // Strip compressed key prefix for Nostr (32-byte x-only)
+    if (contactPubkey && contactPubkey.length === 66) {
+      contactPubkey = contactPubkey.slice(2);
+    }
     const contactId = contact.id || contact.contact_id;
     const crowId = contact.crow_id || contact.crowId;
+    // Own pubkey also needs x-only format
+    const ownPubkey = this.pubkey?.length === 66 ? this.pubkey.slice(2) : this.pubkey;
 
     for (const [url, relay] of this.relays) {
       try {
@@ -129,7 +141,7 @@ export class NostrManager {
             {
               kinds: [4],
               authors: [contactPubkey],
-              "#p": [this.pubkey],
+              "#p": [ownPubkey],
             },
           ],
           {
