@@ -14,7 +14,7 @@ Common issues and solutions when setting up or using Crow.
 
 ### Health check fails
 
-Visit `https://your-gateway.onrender.com/health` — if it returns JSON with `"status": "ok"`, the gateway is running. If not:
+Visit `https://your-crow-server/health` — if it returns JSON with `"status": "ok"`, the gateway is running. If not:
 
 - Check Render logs for startup errors
 - Verify environment variables are set correctly
@@ -70,7 +70,7 @@ The FTS5 virtual tables and sync triggers are created by `init-db`. If search re
 ### ChatGPT: Connection fails
 
 - ChatGPT uses **SSE** transport — make sure you're using the `/sse` endpoint, not `/mcp`
-- Example: `https://your-gateway.onrender.com/memory/sse`
+- Example: `https://your-crow-server/memory/sse`
 
 ### Cursor/Windsurf/Cline: MCP server offline
 

@@ -27,15 +27,15 @@ Claude Mobile App / claude.ai
 
 ## Deployment Options
 
-### Option 1: One-Click Cloud (Render.com)
-- Use the "Deploy to Render" button or `render.yaml` blueprint
-- Free tier includes HTTPS, persistent disk for SQLite
-- URL format: `https://crow-gateway-xxxx.onrender.com`
-- Add as connector: `https://.../memory/mcp` and `https://.../research/mcp`
+### Option 1: Oracle Cloud Free Tier (Recommended)
+- Free VM that never sleeps, local SQLite, no external DB needed
+- Set up Tailscale for private access, or Caddy for public HTTPS
+- Add as connector: `https://your-crow-server/memory/mcp` and `https://your-crow-server/projects/mcp`
 
-### Option 2: Railway.app
-- Alternative cloud platform with `railway.json` config
-- Similar free tier with automatic HTTPS
+### Option 2: Render.com (Legacy)
+- Use the "Deploy to Render" button or `render.yaml` blueprint
+- Free tier sleeps after 15 min, requires Turso for persistence
+- URL format: `https://crow-gateway-xxxx.onrender.com`
 
 ### Option 3: Self-Hosted Docker
 - `docker compose --profile cloud up --build` for VPS deployment

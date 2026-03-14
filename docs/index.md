@@ -54,7 +54,7 @@ features:
   - icon:
       src: /icon-deploy.svg
     title: Managed, Cloud, or Self-Host
-    details: Managed hosting from $15/mo, self-host on Render for free, or run on a Raspberry Pi. Your data stays yours.
+    details: Managed hosting from $15/mo, self-host on Oracle Cloud for free, or run on a Raspberry Pi. Your data stays yours.
   - icon:
       src: /icon-mcp.svg
     title: Open Standard

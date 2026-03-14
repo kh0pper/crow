@@ -131,7 +131,7 @@ If you and a contact are rarely online at the same time, data sharing can be slo
 
 If a friend runs a cloud-deployed Crow gateway, they can act as a relay:
 
-> "Add Alice's gateway as a trusted relay: https://alice-crow.onrender.com"
+> "Add Alice's gateway as a trusted relay: https://alice-crow-server"
 
 The relay stores encrypted data (it can't read your content) and forwards it when your contact connects.
 

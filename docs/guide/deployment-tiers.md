@@ -50,7 +50,7 @@ The Pi 4 and Pi 5 are capable machines. With 4–8GB RAM you can run Immich, Nex
 
 ## Free Cloud (Render)
 
-**Best for:** Getting Crow accessible from anywhere without managing hardware.
+**Best for:** Testing Crow without managing hardware (legacy — see Oracle Cloud for a better free option).
 
 Render's free tier gives you a persistent web service with 512MB RAM. Crow's memory and blog servers run fine within this budget. The catch: the disk is ephemeral — any files uploaded via the storage server are lost when the instance redeploys. Use an external database (Turso) and external object storage (Backblaze B2 or similar) if you want persistence.
 

@@ -176,7 +176,7 @@ Your blog has no web presence without the gateway running. How your blog becomes
 |---|---|---|
 | **Desktop (stdio)** | No | Gateway not running — no web blog |
 | **Self-hosted (Pi/server)** | LAN only by default | Available at `http://<server-ip>:3001/blog` on your local network |
-| **Cloud (Render/Oracle)** | Yes — public internet | Blog at `https://your-service.onrender.com/blog` |
+| **Cloud (Render/Oracle)** | Yes — public internet | Blog at `https://your-crow-server/blog` |
 | **Managed hosting** | Yes — public internet | Blog at `username.crow.maestro.press/blog` |
 
 For self-hosted setups, see the sections below to make your blog accessible from the internet.
