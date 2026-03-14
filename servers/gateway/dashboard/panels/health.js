@@ -123,11 +123,31 @@ export default {
       dockerAvailable = false;
     }
 
-    // --- Memory entries from DB ---
+    // --- Database stats ---
     let memoryCount = 0;
+    let sourcesCount = 0;
+    let projectsCount = 0;
+    let contactsCount = 0;
+    let blogCount = 0;
+    let dbSizeBytes = 0;
     try {
-      const result = await db.execute("SELECT COUNT(*) as c FROM memories");
-      memoryCount = result.rows[0]?.c || 0;
+      const [memR, srcR, projR, conR, blogR, pageCntR, pageSzR] = await Promise.all([
+        db.execute("SELECT COUNT(*) as c FROM memories"),
+        db.execute("SELECT COUNT(*) as c FROM research_sources"),
+        db.execute("SELECT COUNT(*) as c FROM research_projects"),
+        db.execute("SELECT COUNT(*) as c FROM contacts"),
+        db.execute("SELECT COUNT(*) as c FROM blog_posts"),
+        db.execute("PRAGMA page_count"),
+        db.execute("PRAGMA page_size"),
+      ]);
+      memoryCount = memR.rows[0]?.c || 0;
+      sourcesCount = srcR.rows[0]?.c || 0;
+      projectsCount = projR.rows[0]?.c || 0;
+      contactsCount = conR.rows[0]?.c || 0;
+      blogCount = blogR.rows[0]?.c || 0;
+      const pageCount = pageCntR.rows[0]?.page_count || 0;
+      const pageSize = pageSzR.rows[0]?.page_size || 4096;
+      dbSizeBytes = pageCount * pageSize;
     } catch {
       // DB not available
     }
@@ -188,10 +208,33 @@ export default {
     }
 
     // --- Database section ---
+    const dbSizeStr = dbSizeBytes > 0 ? formatSize(dbSizeBytes) : "—";
     const dbHtml = `
-      <div style="display:flex;align-items:center;gap:1rem">
-        <div style="font-size:1.8rem;font-family:'Fraunces',serif">${escapeHtml(String(memoryCount))}</div>
-        <div style="font-size:0.85rem;color:var(--crow-text-muted)">memory entries stored</div>
+      <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem">
+        <div style="font-size:1.8rem;font-family:'Fraunces',serif">${escapeHtml(dbSizeStr)}</div>
+        <div style="font-size:0.85rem;color:var(--crow-text-muted)">database size</div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:0.75rem">
+        <div style="text-align:center;padding:0.5rem;background:var(--crow-bg);border-radius:6px">
+          <div style="font-size:1.2rem;font-family:'JetBrains Mono',monospace">${escapeHtml(String(memoryCount))}</div>
+          <div style="font-size:0.75rem;color:var(--crow-text-muted)">memories</div>
+        </div>
+        <div style="text-align:center;padding:0.5rem;background:var(--crow-bg);border-radius:6px">
+          <div style="font-size:1.2rem;font-family:'JetBrains Mono',monospace">${escapeHtml(String(projectsCount))}</div>
+          <div style="font-size:0.75rem;color:var(--crow-text-muted)">projects</div>
+        </div>
+        <div style="text-align:center;padding:0.5rem;background:var(--crow-bg);border-radius:6px">
+          <div style="font-size:1.2rem;font-family:'JetBrains Mono',monospace">${escapeHtml(String(sourcesCount))}</div>
+          <div style="font-size:0.75rem;color:var(--crow-text-muted)">sources</div>
+        </div>
+        <div style="text-align:center;padding:0.5rem;background:var(--crow-bg);border-radius:6px">
+          <div style="font-size:1.2rem;font-family:'JetBrains Mono',monospace">${escapeHtml(String(blogCount))}</div>
+          <div style="font-size:0.75rem;color:var(--crow-text-muted)">posts</div>
+        </div>
+        <div style="text-align:center;padding:0.5rem;background:var(--crow-bg);border-radius:6px">
+          <div style="font-size:1.2rem;font-family:'JetBrains Mono',monospace">${escapeHtml(String(contactsCount))}</div>
+          <div style="font-size:0.75rem;color:var(--crow-text-muted)">contacts</div>
+        </div>
       </div>`;
 
     // --- Auto-refresh hint ---
