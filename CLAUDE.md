@@ -72,9 +72,9 @@ This is an MCP (Model Context Protocol) platform. The AI is the primary interfac
    - `servers/storage/` — S3-compatible file storage: upload, list, presigned URLs, delete, quota management (requires MinIO)
    - `servers/blog/` — Blogging platform: create, edit, publish, themes, RSS/Atom, export, share posts
 
-2. **HTTP Gateway** (`servers/gateway/`) — Express server that wraps all MCP servers with Streamable HTTP + SSE transports + OAuth 2.1. Includes proxy layer for external MCP servers, **tool router** (`/router/mcp` — 7 tools instead of 49+), public blog routes, Crow's Nest UI, peer relay, and setup page. Modularized into Express routers (`routes/mcp.js`, `routes/blog-public.js`, `routes/storage-http.js`, `dashboard/`).
+2. **HTTP Gateway** (`servers/gateway/`) — Express server that wraps all MCP servers with Streamable HTTP + SSE transports + OAuth 2.1. Includes proxy layer for external MCP servers, **tool router** (`/router/mcp` — 7 tools instead of 49+), **AI chat gateway** (`/api/chat/*` — BYOAI with tool calling), public blog routes, Crow's Nest UI, peer relay, and setup page. Modularized into Express routers (`routes/mcp.js`, `routes/chat.js`, `routes/blog-public.js`, `routes/storage-http.js`, `dashboard/`).
 
-3. **Crow's Nest** (`servers/gateway/dashboard/`) — Server-side rendered HTML control panel (the "Crow's Nest") with Dark Editorial design. Password auth, session cookies, panel registry. Built-in panels: Health, Messages, Memory, Blog, Files, Extensions, Settings. Third-party panels via `~/.crow/panels/`.
+3. **Crow's Nest** (`servers/gateway/dashboard/`) — Server-side rendered HTML control panel (the "Crow's Nest") with Dark Editorial design. Password auth, session cookies, panel registry. Built-in panels: Health, Messages (AI Chat + Peer Messages tabs), Memory, Blog, Files, Extensions, Settings. Third-party panels via `~/.crow/panels/`.
 
 4. **Skills** (`skills/`) — 30 markdown files that serve as behavioral prompts loaded by Claude. Not code — they define workflows, trigger patterns, and integration logic.
 
@@ -113,6 +113,14 @@ servers/gateway/dashboard/     → Crow's Nest UI (auth, layout, panels)
 servers/gateway/auth.js        → OAuth 2.1 provider (CrowOAuthProvider, SQLite-backed)
 servers/gateway/proxy.js       → Proxy layer for external MCP servers
 servers/gateway/router.js      → Tool router (7 category tools, ~75% context reduction)
+servers/gateway/ai/provider.js → AI provider registry, adapter factory, hot-reload from .env
+servers/gateway/ai/adapters/openai.js    → OpenAI/OpenRouter/OpenAI-compat adapter
+servers/gateway/ai/adapters/anthropic.js → Anthropic Messages API adapter
+servers/gateway/ai/adapters/google.js    → Google Gemini API adapter
+servers/gateway/ai/adapters/ollama.js    → Ollama native /api/chat adapter
+servers/gateway/ai/tool-executor.js → MCP tool dispatch for AI chat (reuses router pattern)
+servers/gateway/ai/system-prompt.js → System prompt generator (reuses generateInstructions())
+servers/gateway/routes/chat.js → AI chat REST + SSE endpoints (conversations, messages, streaming)
 servers/gateway/tool-manifests.js → Static tool manifests for router descriptions
 servers/gateway/setup-page.js  → Browser-based setup/configuration page (first-run wizard for Crow OS)
 servers/gateway/integrations.js → Registry of available integrations
@@ -150,6 +158,8 @@ Uses `@libsql/client` which supports both local SQLite files (default: `~/.crow/
 - **blog_posts** — Blog content with slug, status, visibility, tags, cover image
 - **blog_posts_fts** — FTS5 index over blog posts (title, content, excerpt, tags) with triggers
 - **dashboard_settings** — Key-value store for dashboard config (blog settings, theme, password hash)
+- **chat_conversations** — AI chat conversations (provider, model, system prompt, token tracking)
+- **chat_messages** — AI chat messages (role: user/assistant/system/tool, tool_calls JSON, token counts). FK to chat_conversations with CASCADE delete
 
 All FTS sync is handled by SQLite triggers defined in `init-db.js`. If you change the memories, sources, or blog_posts schema, you must also update the corresponding FTS virtual table and triggers.
 

@@ -96,6 +96,50 @@ export default {
         return;
       }
 
+      if (action === "save_ai_provider") {
+        const { resolveEnvPath, writeEnvVar, removeEnvVar, sanitizeEnvValue } = await import("../../env-manager.js");
+        const envPath = resolveEnvPath();
+        const { provider, api_key, model, base_url } = req.body;
+        if (provider) writeEnvVar(envPath, "AI_PROVIDER", sanitizeEnvValue(provider));
+        if (api_key) writeEnvVar(envPath, "AI_API_KEY", sanitizeEnvValue(api_key));
+        if (model) writeEnvVar(envPath, "AI_MODEL", sanitizeEnvValue(model));
+        if (base_url) writeEnvVar(envPath, "AI_BASE_URL", sanitizeEnvValue(base_url));
+        else removeEnvVar(envPath, "AI_BASE_URL");
+        // Invalidate provider config cache
+        try {
+          const { invalidateConfigCache } = await import("../../ai/provider.js");
+          invalidateConfigCache();
+        } catch {}
+        res.json({ ok: true });
+        return;
+      }
+
+      if (action === "remove_ai_provider") {
+        const { resolveEnvPath, removeEnvVar } = await import("../../env-manager.js");
+        const envPath = resolveEnvPath();
+        removeEnvVar(envPath, "AI_PROVIDER");
+        removeEnvVar(envPath, "AI_API_KEY");
+        removeEnvVar(envPath, "AI_MODEL");
+        removeEnvVar(envPath, "AI_BASE_URL");
+        try {
+          const { invalidateConfigCache } = await import("../../ai/provider.js");
+          invalidateConfigCache();
+        } catch {}
+        res.json({ ok: true });
+        return;
+      }
+
+      if (action === "test_ai_provider") {
+        try {
+          const { testProviderConnection } = await import("../../ai/provider.js");
+          const result = await testProviderConnection();
+          res.json(result);
+        } catch (err) {
+          res.json({ ok: false, error: err.message });
+        }
+        return;
+      }
+
       if (action === "save_integration") {
         const { integration_id } = req.body;
         const { INTEGRATIONS } = await import("../../integrations.js");
@@ -610,6 +654,117 @@ function pollHealth(attempts) {
     const connectionHtml = dataTable(["Context", "URL", "Status"], urlRows)
       + `<p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.75rem">The Crow's Nest is private (local/Tailscale only). Set <code>CROW_GATEWAY_URL</code> in .env for public blog/podcast URLs.</p>`;
 
+    // AI Provider config
+    let aiProviderConfig = null;
+    try {
+      const { getProviderConfig, PROVIDER_INFO } = await import("../../ai/provider.js");
+      aiProviderConfig = getProviderConfig();
+    } catch {}
+
+    const aiProviders = [
+      { id: "openai", name: "OpenAI", defaultModel: "gpt-4o" },
+      { id: "anthropic", name: "Anthropic", defaultModel: "claude-sonnet-4-20250514" },
+      { id: "google", name: "Google Gemini", defaultModel: "gemini-2.5-flash" },
+      { id: "ollama", name: "Ollama (local)", defaultModel: "llama3.1" },
+      { id: "openrouter", name: "OpenRouter", defaultModel: "openai/gpt-4o" },
+    ];
+
+    const currentProvider = aiProviderConfig?.provider || "";
+    const currentModel = aiProviderConfig?.model || "";
+    const currentBaseUrl = aiProviderConfig?.baseUrl || "";
+    const hasKey = aiProviderConfig?.apiKey ? true : false;
+
+    const providerOptions = aiProviders.map(p =>
+      `<option value="${p.id}"${currentProvider === p.id ? " selected" : ""}>${escapeHtml(p.name)}</option>`
+    ).join("");
+
+    const aiProviderHtml = `<style>
+      .ai-field { margin-bottom:0.75rem; }
+      .ai-field label { display:block; font-size:0.8rem; color:var(--crow-text-muted); margin-bottom:4px; }
+      .ai-field input, .ai-field select { width:100%; padding:0.5rem; background:var(--crow-bg-deep); border:1px solid var(--crow-border); border-radius:4px; color:var(--crow-text); font-family:'JetBrains Mono',monospace; font-size:0.85rem; box-sizing:border-box; }
+      .ai-actions { display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap; margin-top:1rem; }
+      #ai-status { font-size:0.85rem; margin-top:0.75rem; }
+    </style>
+    <div class="ai-field">
+      <label>Provider</label>
+      <select id="ai-provider" onchange="aiProviderChanged()">
+        <option value="">— Not configured —</option>
+        ${providerOptions}
+      </select>
+    </div>
+    <div class="ai-field">
+      <label>API Key</label>
+      <input type="password" id="ai-api-key" placeholder="${hasKey ? "••••••••" : "Not set"}" autocomplete="off">
+    </div>
+    <div class="ai-field">
+      <label>Model <span style="color:var(--crow-text-muted);font-weight:normal">(optional — uses provider default if blank)</span></label>
+      <input type="text" id="ai-model" value="${escapeHtml(currentModel)}" placeholder="e.g. gpt-4o, claude-sonnet-4-20250514, gemini-2.5-flash">
+    </div>
+    <div class="ai-field" id="ai-base-url-field" style="display:${["ollama", "openrouter", ""].includes(currentProvider) || currentBaseUrl ? "block" : "none"}">
+      <label>Base URL <span style="color:var(--crow-text-muted);font-weight:normal">(Ollama, OpenRouter, or custom endpoint)</span></label>
+      <input type="text" id="ai-base-url" value="${escapeHtml(currentBaseUrl)}" placeholder="http://localhost:11434">
+    </div>
+    <div class="ai-actions">
+      <button class="btn btn-primary btn-sm" onclick="saveAiProvider()">Save</button>
+      <button class="btn btn-secondary btn-sm" onclick="testAiProvider()">Test Connection</button>
+      ${currentProvider ? `<button class="btn btn-secondary btn-sm" onclick="removeAiProvider()">Remove</button>` : ""}
+    </div>
+    <div id="ai-status"></div>
+    <p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.75rem">
+      Configure an AI provider to enable the AI Chat feature in Messages. API keys are stored on this device only. <a href="/dashboard/messages" style="color:var(--crow-accent)">Open Chat</a>
+    </p>
+    <script>
+    function aiProviderChanged() {
+      var p = document.getElementById('ai-provider').value;
+      var urlField = document.getElementById('ai-base-url-field');
+      urlField.style.display = (p === 'ollama' || p === 'openrouter' || p === '') ? 'block' : 'none';
+      var defaults = {openai:'gpt-4o',anthropic:'claude-sonnet-4-20250514',google:'gemini-2.5-flash',ollama:'llama3.1',openrouter:'openai/gpt-4o'};
+      document.getElementById('ai-model').placeholder = defaults[p] || 'Model name';
+    }
+    async function saveAiProvider() {
+      var params = new URLSearchParams();
+      params.set('action', 'save_ai_provider');
+      var provider = document.getElementById('ai-provider').value;
+      if (provider) params.set('provider', provider);
+      var key = document.getElementById('ai-api-key').value;
+      if (key) params.set('api_key', key);
+      var model = document.getElementById('ai-model').value;
+      if (model) params.set('model', model);
+      var baseUrl = document.getElementById('ai-base-url').value;
+      if (baseUrl) params.set('base_url', baseUrl);
+      var el = document.getElementById('ai-status');
+      try {
+        var res = await fetch('/dashboard/settings', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:params.toString() });
+        var data = await res.json();
+        el.style.color = data.ok ? 'var(--crow-success)' : 'var(--crow-error)';
+        el.textContent = data.ok ? 'Saved. AI Chat is ready.' : (data.error || 'Save failed.');
+        if (key) { document.getElementById('ai-api-key').value = ''; document.getElementById('ai-api-key').placeholder = '••••••••'; }
+      } catch(e) { el.style.color='var(--crow-error)'; el.textContent='Save failed: '+e.message; }
+    }
+    async function testAiProvider() {
+      var el = document.getElementById('ai-status');
+      el.style.color = 'var(--crow-accent)';
+      el.textContent = 'Testing connection...';
+      try {
+        var params = new URLSearchParams();
+        params.set('action', 'test_ai_provider');
+        var res = await fetch('/dashboard/settings', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:params.toString() });
+        var data = await res.json();
+        el.style.color = data.ok ? 'var(--crow-success)' : 'var(--crow-error)';
+        el.textContent = data.ok ? 'Connection successful! Provider: ' + (data.provider || 'unknown') : 'Failed: ' + (data.error || 'Unknown error');
+      } catch(e) { el.style.color='var(--crow-error)'; el.textContent='Test failed: '+e.message; }
+    }
+    async function removeAiProvider() {
+      if (!confirm('Remove AI provider configuration?')) return;
+      var params = new URLSearchParams();
+      params.set('action', 'remove_ai_provider');
+      try {
+        await fetch('/dashboard/settings', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:params.toString() });
+        location.reload();
+      } catch(e) { console.error(e); }
+    }
+    <\/script>`;
+
     // Device context
     const currentDeviceId = process.env.CROW_DEVICE_ID || "";
     const contextSections = await db.execute({
@@ -653,6 +808,7 @@ function pollHealth(attempts) {
     const content = `
       ${successMsg}${errorMsg}
       ${stats}
+      ${section("AI Provider", aiProviderHtml, { delay: 20 })}
       ${section("Connection URLs", connectionHtml, { delay: 25 })}
       ${section("Device Context", deviceContextHtml, { delay: 40 })}
       ${section("Updates", updateHtml, { delay: 50 })}

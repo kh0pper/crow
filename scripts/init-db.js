@@ -330,6 +330,26 @@ await initTable("relay_config table", `
   CREATE INDEX IF NOT EXISTS idx_relay_config_type ON relay_config(relay_type);
 `);
 
+// --- Relay Store-and-Forward Blobs ---
+
+await initTable("relay_blobs table", `
+  CREATE TABLE IF NOT EXISTS relay_blobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recipient_pubkey TEXT NOT NULL,
+    blob TEXT NOT NULL,
+    sender_pubkey TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_relay_blobs_recipient ON relay_blobs(recipient_pubkey);
+  CREATE INDEX IF NOT EXISTS idx_relay_blobs_expires ON relay_blobs(expires_at);
+`);
+
+// --- Contact Discovery ---
+
+await addColumnIfMissing("contacts", "email_hash", "TEXT");
+
 // --- Cross-Platform Behavioral Context (crow.md) ---
 
 await initTable("crow_context table", `
@@ -513,6 +533,41 @@ await initTable("schedules table", `
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
   );
+`);
+
+// --- AI Chat Tables ---
+
+await initTable("chat_conversations table", `
+  CREATE TABLE IF NOT EXISTS chat_conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    system_prompt TEXT,
+    total_tokens INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_chat_conversations_updated ON chat_conversations(updated_at DESC);
+`);
+
+await initTable("chat_messages table", `
+  CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system', 'tool')),
+    content TEXT,
+    tool_calls TEXT,
+    tool_call_id TEXT,
+    tool_name TEXT,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (conversation_id) REFERENCES chat_conversations(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_chat_messages_conv ON chat_messages(conversation_id);
 `);
 
 // Seed 7 protected default sections (safe to re-run)
