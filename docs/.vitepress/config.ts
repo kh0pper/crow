@@ -95,6 +95,7 @@ export default defineConfig({
           { text: 'Cross-Platform', link: '/guide/cross-platform' },
           { text: 'Storage', link: '/guide/storage' },
           { text: 'Blog', link: '/guide/blog' },
+          { text: 'Podcast', link: '/guide/podcast' },
           { text: 'Blog Discovery', link: '/guide/blog-discovery' },
           { text: "Crow's Nest", link: '/guide/crows-nest' },
           { text: 'Sharing', link: '/guide/sharing' },
