@@ -150,6 +150,7 @@ export default defineConfig({
           { text: 'Citations & Verification', link: '/guide/citations' },
           { text: 'Ideation', link: '/guide/ideation' },
           { text: 'Customization', link: '/guide/customization' },
+          { text: 'Brand & Design', link: '/guide/brand' },
           { text: 'Scheduling', link: '/guide/scheduling' },
         ],
       },

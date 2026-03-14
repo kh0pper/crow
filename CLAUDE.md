@@ -259,6 +259,7 @@ Skills are markdown files in `skills/`. They are loaded by Claude on demand — 
 2. For built-in panels: add to `servers/gateway/dashboard/panels/` and register in `servers/gateway/dashboard/index.js`
 3. For third-party panels: place in `~/.crow/panels/` and add the panel ID to `~/.crow/panels.json`
 4. Use shared components from `servers/gateway/dashboard/shared/components.js`
+5. Use design tokens from `servers/gateway/dashboard/shared/design-tokens.js` (single source of truth for CSS variables)
 5. Handler receives `(req, res, { db, layout })` — return `layout({ title, content })` for consistent styling
 
 ### Add-on system
