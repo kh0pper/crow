@@ -32,9 +32,11 @@ You do not need to open any files or write any code. Just talk to your AI. Crow 
 
 ### Setting a language preference
 
-> "Crow, always respond to me in Spanish"
+> "Crow, update my context to prefer Spanish responses"
 
-Crow updates your context so that every future session — on any platform — defaults to Spanish.
+Crow updates your context so that every future session — on any platform — defaults to Spanish. You can also be more specific:
+
+> "Crow, respond in Spanish but keep technical terms in English"
 
 ### Adding context about your work
 
