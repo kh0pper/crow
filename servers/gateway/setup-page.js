@@ -72,6 +72,14 @@ export async function setupPageHandler(req, res) {
   const integrations = getProxyStatus();
   const passwordConfigured = await isPasswordSet().catch(() => false);
 
+  // If password is set and user is authenticated, redirect to settings
+  if (passwordConfigured && !req.query.standalone) {
+    const cookies = parseCookies(req);
+    if (cookies.crow_session) {
+      return res.redirect("/dashboard/settings#setup");
+    }
+  }
+
   // Detect Crow OS mode (installed to ~/.crow/app)
   const isCrowOS = process.env.CROW_DATA_DIR || process.cwd().includes(".crow/app");
 

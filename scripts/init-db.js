@@ -1,4 +1,4 @@
-import { createDbClient, resolveDataDir } from "../servers/db.js";
+import { createDbClient, resolveDataDir, isSqliteVecAvailable } from "../servers/db.js";
 import { mkdirSync } from "fs";
 import { resolve } from "path";
 
@@ -570,6 +570,63 @@ await initTable("chat_messages table", `
   CREATE INDEX IF NOT EXISTS idx_chat_messages_conv ON chat_messages(conversation_id);
 `);
 
+// --- Podcast tables ---
+await initTable("podcast_subscriptions table", `
+  CREATE TABLE IF NOT EXISTS podcast_subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    feed_url TEXT NOT NULL UNIQUE,
+    title TEXT,
+    description TEXT,
+    image_url TEXT,
+    last_fetched TEXT,
+    fetch_interval_min INTEGER DEFAULT 60,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+await initTable("podcast_episodes table", `
+  CREATE TABLE IF NOT EXISTS podcast_episodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subscription_id INTEGER NOT NULL,
+    guid TEXT,
+    title TEXT NOT NULL,
+    description TEXT,
+    audio_url TEXT,
+    duration TEXT,
+    pub_date TEXT,
+    listened INTEGER DEFAULT 0,
+    playlist_id INTEGER,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (subscription_id) REFERENCES podcast_subscriptions(id) ON DELETE CASCADE,
+    FOREIGN KEY (playlist_id) REFERENCES podcast_playlists(id) ON DELETE SET NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_podcast_episodes_sub ON podcast_episodes(subscription_id);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_podcast_episodes_guid ON podcast_episodes(subscription_id, guid);
+`);
+
+await initTable("podcast_playlists table", `
+  CREATE TABLE IF NOT EXISTS podcast_playlists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+// --- Optional: sqlite-vec virtual table for semantic search ---
+const hasVec = await isSqliteVecAvailable(db);
+if (hasVec) {
+  await initTable("memory_embeddings virtual table (sqlite-vec)", `
+    CREATE VIRTUAL TABLE IF NOT EXISTS memory_embeddings USING vec0(
+      memory_id INTEGER PRIMARY KEY,
+      embedding FLOAT[1536]
+    );
+  `);
+  console.log("  ✓ sqlite-vec available — semantic search enabled");
+} else {
+  console.log("  ℹ sqlite-vec not available — using FTS5 only (semantic search disabled)");
+}
+
 // Seed 7 protected default sections (safe to re-run)
 const seedSections = [
   {
@@ -620,10 +677,19 @@ You are platform-agnostic. The user's data, memories, and research belong to *th
 - Generate bibliographies with \`crow_generate_bibliography\`
 
 **Citation rules:**
-- Every external source gets an APA citation — no exceptions
+- Every external source gets a citation — no exceptions
+- Supported formats: APA (default), MLA, Chicago, web citation
+- Use \`citation_format\` parameter on \`crow_add_source\` to select primary format
+- \`crow_get_source\` shows all citation formats; \`crow_generate_bibliography\` accepts a \`format\` parameter
 - Use retrieval dates for web sources
 - Verify sources before marking as verified
 - Cross-reference with Zotero when available
+
+**Source verification:**
+- Always record \`retrieval_method\` — note whether a source was found via AI search, direct URL, library database, or user-provided
+- Prefer primary sources over AI-generated summaries
+- All factual claims in research output must link to a stored, cited source
+- When AI search surfaces a source, verify the URL is real before storing
 
 **Source types:** web_article, academic_paper, book, interview, web_search, web_scrape, api_data, document, video, podcast, social_media, government_doc, dataset, other`,
   },

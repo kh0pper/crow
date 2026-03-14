@@ -50,9 +50,9 @@ tools:
 - MIME type validation blocks executables for security
 - The Files panel in the Crow's Nest provides a visual file browser at `/dashboard/files`
 
-## Safety Confirmations
+## Safety
 
-- Before calling `crow_delete_file`: Always tell the user the file name, size, and that deletion is permanent. Ask for explicit confirmation before proceeding. Never batch-delete without confirming each file or the full list.
+Destructive actions (file deletion, bulk operations) require user confirmation. See `skills/safety-guardrails.md` for the full checkpoint protocol.
 
 ## Error Handling
 

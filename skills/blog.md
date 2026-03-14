@@ -80,6 +80,10 @@ tools:
 
 Posts default to `private`. Nothing appears on your public blog at `/blog` until you explicitly publish a post with `public` visibility. This is by design — your blog stays empty until you're ready.
 
+## Safety
+
+Publishing and deleting posts require user confirmation. See `skills/safety-guardrails.md` Tier 1 for the checkpoint protocol.
+
 ## Post Visibility Guide
 
 | Visibility | Who can see it | URL accessible? |

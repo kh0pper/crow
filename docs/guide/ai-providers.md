@@ -168,6 +168,52 @@ You don't have to choose — they work together:
 - Messages are sent to your chosen AI provider's API — they leave your machine
 - For fully local operation, use Ollama — nothing leaves your network
 
+## Semantic Search (Opt-in)
+
+When an AI provider with embedding support is configured, Crow can enhance memory search with **semantic search** — finding memories based on meaning, not just keywords.
+
+### Requirements
+
+- An AI provider that supports embeddings (OpenAI, Ollama with nomic-embed-text, or Google)
+- The `sqlite-vec` SQLite extension installed on your system
+- Both are optional — Crow falls back to full-text search (FTS5) when either is missing
+
+### How it works
+
+1. When you store a memory, Crow generates an embedding vector from the content
+2. The vector is stored in a `memory_embeddings` virtual table (powered by `sqlite-vec`)
+3. When you search with `semantic: true`, Crow compares your query's embedding against stored vectors
+4. Results from semantic and keyword search are merged for the best of both approaches
+
+### Installing sqlite-vec
+
+On Debian/Ubuntu:
+```bash
+sudo apt install sqlite3-vec
+```
+
+Or install from source: [sqlite-vec on GitHub](https://github.com/asg017/sqlite-vec)
+
+After installing, run `npm run init-db` to create the vector table.
+
+## LocalAI Bundle
+
+For fully local AI (including embeddings), install the **LocalAI** bundle:
+
+```
+crow bundle install localai
+crow bundle start localai
+```
+
+Then configure Crow to use it:
+```env
+AI_PROVIDER=openai
+AI_BASE_URL=http://localhost:8080/v1
+AI_MODEL=gpt-3.5-turbo
+```
+
+LocalAI provides an OpenAI-compatible API running entirely on your hardware — no data leaves your network.
+
 ## Troubleshooting
 
 ### "No AI provider configured"

@@ -138,7 +138,15 @@ The Crow's Nest is organized into panels. The landing page — labeled **Crow's 
 
 ### Messages
 
-View and manage your peer messages. Incoming messages from connected Crow users appear here with read/unread status. You can read threads, mark messages as read, and see message history.
+View and manage your peer messages. Incoming messages from connected Crow users appear here with read/unread status. You can read threads, mark messages as read, and see message history. The Messages panel also includes an **AI Chat** tab for conversations with your configured AI provider.
+
+### Contacts
+
+Manage your Crow contacts. View all connected contacts with their Crow IDs, online status, and last-seen timestamps. Block or unblock contacts directly from the panel. The Contacts panel also explains how to generate and accept invite codes through your AI.
+
+### Memory
+
+Browse and search your stored memories. View memory counts by category, search by content, and see recent memories.
 
 ### Blog
 
@@ -152,16 +160,15 @@ Browse your stored files with a visual file browser. Upload new files via drag-a
 
 Browse and install community add-ons. Each add-on displays an SVG logo (with emoji fallback for unknown add-ons), description, and action buttons in a card layout. Before installing resource-heavy add-ons, the Extensions page shows a warning with estimated RAM and disk requirements from the add-on manifest.
 
-### Podcast
+### Podcasts
 
-The Podcast panel appears after you install the **podcast** add-on. It provides a dashboard for managing podcast episodes:
+Subscribe to and listen to podcasts directly in the Crow's Nest:
 
-- **Stats grid** — Total episodes, published count, total duration
-- **RSS feed link** — Copy your podcast RSS URL for distribution to iTunes, Spotify, etc.
-- **Episode table** — List of episodes with audio preview (inline `<audio>` player), status, and actions
-- **Create form** — Add new episodes with title, audio URL or file upload, duration, episode/season numbers, and show notes
-
-This is a third-party panel installed automatically when the podcast add-on is installed. It is removed when the add-on is uninstalled.
+- **Subscribe** — Enter an RSS feed URL to add a podcast
+- **Episode browser** — Browse recent episodes across all subscriptions with HTML5 audio player
+- **Playback tracking** — Mark episodes as played/unplayed
+- **Playlist support** — Organize episodes into playlists (via the database — UI coming)
+- **Feed caching** — Episodes are cached locally; feeds refresh on demand or at configurable intervals
 
 ### Settings
 

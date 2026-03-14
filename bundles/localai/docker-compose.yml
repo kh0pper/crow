@@ -1,0 +1,33 @@
+## LocalAI — OpenAI-compatible local AI server
+##
+## Usage:
+##   docker compose up -d
+##   # Models are downloaded on first use via the API
+##   # Or pre-download: docker compose exec localai local-ai models install llama3.2
+##
+## GPU passthrough (NVIDIA):
+##   Uncomment the deploy section below and install nvidia-container-toolkit
+
+services:
+  localai:
+    image: localai/localai:latest-cpu
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - localai-models:/build/models
+    environment:
+      - THREADS=4
+      - CONTEXT_SIZE=2048
+    restart: unless-stopped
+    # For NVIDIA GPU support, change image to localai/localai:latest-gpu-nvidia-cuda-12
+    # and uncomment:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  localai-models:

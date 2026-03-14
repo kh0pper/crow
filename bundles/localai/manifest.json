@@ -1,0 +1,34 @@
+{
+  "id": "localai",
+  "name": "LocalAI",
+  "version": "1.0.0",
+  "description": "Run local AI models with an OpenAI-compatible API. Supports chat, embeddings, and text-to-speech.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "ai",
+  "tags": ["ai", "local", "embeddings", "privacy", "llm", "openai-compatible"],
+  "icon": "brain",
+  "docker": {
+    "composefile": "docker-compose.yml"
+  },
+  "skills": ["skills/localai.md"],
+  "requires": {
+    "env": ["LOCALAI_HOST"],
+    "min_ram_mb": 4096,
+    "min_disk_mb": 10000
+  },
+  "env_vars": [
+    {
+      "name": "LOCALAI_HOST",
+      "description": "LocalAI API endpoint",
+      "default": "http://localhost:8080",
+      "required": true
+    }
+  ],
+  "ports": [8080],
+  "webUI": {
+    "port": 8080,
+    "path": "/"
+  },
+  "notes": "LocalAI is OpenAI-compatible. Configure AI_PROVIDER=openai and AI_BASE_URL=http://localhost:8080/v1 in .env to use with Crow's AI Chat."
+}

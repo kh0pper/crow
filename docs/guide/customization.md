@@ -197,6 +197,40 @@ This tells Crow which device it's running on. Once the gateway wiring is complet
 
 ---
 
+## Safety checkpoints
+
+Crow uses a tiered safety system that asks for confirmation before taking risky actions. This happens automatically — you don't need to enable it.
+
+### Tier 1 — Destructive actions
+
+Crow will confirm before publishing, deleting, or sending anything irreversible. You'll see what's about to happen and can cancel:
+
+- Deleting files, posts, or memories
+- Publishing or unpublishing blog posts
+- Sending messages (cannot be unsent from Nostr relays)
+- Sharing items with contacts
+- Bulk operations affecting 3+ items
+
+### Tier 2 — Resource-intensive operations
+
+Before installing heavy add-ons or bundles, Crow checks whether your device can handle them. On resource-constrained devices (like a Raspberry Pi), you'll get a warning about expected resource usage.
+
+### Tier 3 — Network and security changes
+
+Any change to relay configuration, firewall rules, discoverability, or VPN settings requires explicit approval. Crow will show exactly what would change and wait for a clear "yes."
+
+### Customizing safety behavior
+
+You can adjust these checkpoints to match your preferences:
+
+> "Crow, skip confirmation when deleting draft posts"
+
+> "Crow, always confirm before any publish action"
+
+Safety customizations are stored in your crow.md and apply across all platforms.
+
+---
+
 ## Common customization examples
 
 Here are some more ideas for what you can do:

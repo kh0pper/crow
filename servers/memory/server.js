@@ -7,11 +7,40 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { createDbClient, sanitizeFtsQuery, escapeLikePattern } from "../db.js";
+import { createDbClient, sanitizeFtsQuery, escapeLikePattern, isSqliteVecAvailable } from "../db.js";
 import { generateCrowContext, PROTECTED_SECTIONS } from "./crow-context.js";
 
 export function createMemoryServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
+
+  // Optional embedding function: (text) => Float32Array | null
+  // Passed via options by the gateway when an AI provider with embeddings is configured.
+  const getEmbedding = options.getEmbedding || null;
+
+  // Cache sqlite-vec availability (checked once on first use)
+  let _vecAvailable = null;
+  async function hasVec() {
+    if (_vecAvailable === null) {
+      _vecAvailable = await isSqliteVecAvailable(db);
+    }
+    return _vecAvailable;
+  }
+
+  // Store embedding for a memory (fire-and-forget, errors don't block)
+  async function storeEmbedding(memoryId, content) {
+    if (!getEmbedding || !(await hasVec())) return;
+    try {
+      const vec = await getEmbedding(content);
+      if (!vec || vec.length === 0) return;
+      const blob = Buffer.from(vec.buffer);
+      await db.execute({
+        sql: "INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding) VALUES (?, ?)",
+        args: [memoryId, blob],
+      });
+    } catch {
+      // Silently ignore embedding failures
+    }
+  }
 
   const server = new McpServer(
     { name: "crow-memory", version: "0.1.0" },
@@ -36,11 +65,16 @@ export function createMemoryServer(dbPath, options = {}) {
         sql: "INSERT INTO memories (content, category, context, tags, source, importance) VALUES (?, ?, ?, ?, ?, ?)",
         args: [content, category, context ?? null, tags ?? null, source ?? null, importance],
       });
+      const memoryId = Number(result.lastInsertRowid);
+
+      // Store embedding asynchronously (non-blocking)
+      storeEmbedding(memoryId, content);
+
       return {
         content: [
           {
             type: "text",
-            text: `Memory stored (id: ${Number(result.lastInsertRowid)}, category: ${category}, importance: ${importance})`,
+            text: `Memory stored (id: ${memoryId}, category: ${category}, importance: ${importance})`,
           },
         ],
       };
@@ -49,40 +83,82 @@ export function createMemoryServer(dbPath, options = {}) {
 
   server.tool(
     "crow_search_memories",
-    "Search persistent memory using full-text search. Returns memories ranked by relevance. Use this to recall information from previous sessions.",
+    "Search persistent memory using full-text search (and semantic search when available). Returns memories ranked by relevance. Use this to recall information from previous sessions.",
     {
       query: z.string().max(500).describe("Search query"),
       category: z.string().max(500).optional().describe("Filter by category"),
       min_importance: z.number().min(1).max(10).optional().describe("Minimum importance threshold"),
       limit: z.number().max(100).default(10).describe("Maximum results to return"),
+      semantic: z.boolean().default(false).describe("Enable semantic search (requires embedding provider + sqlite-vec)"),
     },
-    async ({ query, category, min_importance, limit }) => {
+    async ({ query, category, min_importance, limit, semantic }) => {
+      // Try semantic search first if requested and available
+      let semanticRows = [];
+      if (semantic && getEmbedding && await hasVec()) {
+        try {
+          const queryVec = await getEmbedding(query);
+          if (queryVec && queryVec.length > 0) {
+            const blob = Buffer.from(queryVec.buffer);
+            let vecSql = `
+              SELECT m.*, e.distance
+              FROM memory_embeddings e
+              JOIN memories m ON m.id = e.memory_id
+              WHERE e.embedding MATCH ?
+            `;
+            const vecParams = [blob];
+
+            if (category) { vecSql += " AND m.category = ?"; vecParams.push(category); }
+            if (min_importance) { vecSql += " AND m.importance >= ?"; vecParams.push(min_importance); }
+
+            vecSql += ` ORDER BY e.distance LIMIT ?`;
+            vecParams.push(limit);
+
+            const { rows: vRows } = await db.execute({ sql: vecSql, args: vecParams });
+            semanticRows = vRows;
+          }
+        } catch {
+          // Semantic search failed — fall through to FTS5
+        }
+      }
+
+      // FTS5 search (always runs as primary or fallback)
       const safeQuery = sanitizeFtsQuery(query);
-      if (!safeQuery) {
+      if (!safeQuery && semanticRows.length === 0) {
         return { content: [{ type: "text", text: "Search query is empty or contains only special characters." }] };
       }
 
-      let sql = `
-        SELECT m.*, rank
-        FROM memories_fts fts
-        JOIN memories m ON m.id = fts.rowid
-        WHERE memories_fts MATCH ?
-      `;
-      const params = [safeQuery];
+      let rows = [];
+      if (safeQuery) {
+        let sql = `
+          SELECT m.*, rank
+          FROM memories_fts fts
+          JOIN memories m ON m.id = fts.rowid
+          WHERE memories_fts MATCH ?
+        `;
+        const params = [safeQuery];
 
-      if (category) {
-        sql += " AND m.category = ?";
-        params.push(category);
+        if (category) {
+          sql += " AND m.category = ?";
+          params.push(category);
+        }
+        if (min_importance) {
+          sql += " AND m.importance >= ?";
+          params.push(min_importance);
+        }
+
+        sql += " ORDER BY rank LIMIT ?";
+        params.push(limit);
+
+        const result = await db.execute({ sql, args: params });
+        rows = result.rows;
       }
-      if (min_importance) {
-        sql += " AND m.importance >= ?";
-        params.push(min_importance);
+
+      // Merge: semantic results first, then FTS results (deduplicated)
+      if (semanticRows.length > 0) {
+        const seenIds = new Set(semanticRows.map((r) => r.id));
+        const merged = [...semanticRows, ...rows.filter((r) => !seenIds.has(r.id))];
+        rows = merged.slice(0, limit);
       }
-
-      sql += " ORDER BY rank LIMIT ?";
-      params.push(limit);
-
-      const { rows } = await db.execute({ sql, args: params });
 
       for (const row of rows) {
         await db.execute({

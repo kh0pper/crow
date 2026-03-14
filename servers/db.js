@@ -99,6 +99,33 @@ export async function auditLog(db, eventType, { actor, ip, details } = {}) {
   }
 }
 
+/**
+ * Check if sqlite-vec extension is available and loaded.
+ * Returns true if vec0 virtual tables can be created.
+ */
+export async function isSqliteVecAvailable(db) {
+  try {
+    await db.execute("SELECT vec_version()");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Safely add a column to an existing table if it doesn't exist.
+ * SQLite doesn't support IF NOT EXISTS for ALTER TABLE ADD COLUMN,
+ * so we catch the "duplicate column" error.
+ */
+export async function ensureColumn(db, table, column, type) {
+  try {
+    await db.execute({ sql: `ALTER TABLE ${table} ADD COLUMN ${column} ${type}`, args: [] });
+  } catch (err) {
+    // Column already exists — safe to ignore
+    if (!err.message?.includes("duplicate column")) throw err;
+  }
+}
+
 export function createDbClient(dbPath) {
   const tursoUrl = process.env.TURSO_DATABASE_URL;
   const tursoToken = process.env.TURSO_AUTH_TOKEN;

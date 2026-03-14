@@ -42,9 +42,9 @@ Messages are sent through Nostr relays. Default relays:
 
 Custom relays can be configured via `crow_sharing_status`.
 
-## Safety Confirmations
+## Safety
 
-- Before calling `crow_send_message`: Show the full message content and recipient name for confirmation. Messages sent via Nostr cannot be unsent or deleted from relay servers.
+Sending messages is irreversible (Nostr relays cannot unsend). See `skills/safety-guardrails.md` Tier 1 for the confirmation protocol.
 
 ## Best Practices
 - Messages are cached locally for offline access

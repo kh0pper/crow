@@ -4,7 +4,7 @@ layout: home
 hero:
   name: Crow
   text: Project management, memory, and encrypted sharing across every AI platform
-  tagline: Give your AI project management, persistent memory, and a blog — works with Claude, ChatGPT, Gemini, Cursor, and more.
+  tagline: Give your AI project management tools, persistent memory, and a blog — works with Claude, ChatGPT, Gemini, Cursor, and more.
   image:
     src: /crow-hero.svg
     alt: Crow
@@ -38,7 +38,7 @@ features:
   - icon:
       src: /icon-research.svg
     title: Project Management & Research
-    details: Organize work with typed project workflows — research projects with auto-generated APA citations and bibliographies, data connector projects that bridge external databases and APIs, or define your own project types. Connect data backends and capture knowledge from any platform.
+    details: Organize work with typed project workflows — research projects with multi-format citations (APA, MLA, Chicago) and bibliographies, source verification tracking, data connector projects that bridge external databases and APIs. Every claim links to a stored, verified source.
   - icon:
       src: /icon-sharing.svg
     title: Encrypted P2P Sharing

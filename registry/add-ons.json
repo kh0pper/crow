@@ -83,6 +83,33 @@
       "notes": "RAM and disk depend on model size. Small models need ~2GB, large models need 8GB+."
     },
     {
+      "id": "localai",
+      "name": "LocalAI",
+      "description": "OpenAI-compatible local AI server — chat, embeddings, and TTS without a cloud API",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "ai",
+      "tags": ["ai", "local", "embeddings", "privacy", "llm", "openai-compatible"],
+      "icon": "brain",
+      "webUI": { "port": 8080, "path": "/", "label": "LocalAI" },
+      "requires": {
+        "env": ["LOCALAI_HOST"],
+        "min_ram_mb": 4096,
+        "min_disk_mb": 10000
+      },
+      "env_vars": [
+        {
+          "name": "LOCALAI_HOST",
+          "description": "LocalAI API endpoint",
+          "default": "http://localhost:8080",
+          "required": true
+        }
+      ],
+      "ports": [8080],
+      "notes": "OpenAI-compatible API. Set AI_PROVIDER=openai and AI_BASE_URL=http://localhost:8080/v1 to use with Crow AI Chat."
+    },
+    {
       "id": "nextcloud",
       "name": "Nextcloud",
       "description": "Access Nextcloud files via WebDAV mount — sync documents, browse folders",
