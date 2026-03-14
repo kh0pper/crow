@@ -21,8 +21,8 @@ This skill enables the AI to create, modify, and propose new skill files (`skill
 2. **Propose the skill**: Describe what the skill would do, which tools it would use, and what triggers it
 3. **Get explicit consent**: Wait for user approval before writing anything
 4. **Draft and present**: Show the skill content to the user for review
-5. **Write on approval**: Create the file in `skills/` only after the user confirms
-6. **Register the skill**: Update `CLAUDE.md` skill list and `superpowers.md` trigger table
+5. **Write on approval**: Create the file in `~/.crow/skills/` (user directory) after the user confirms — this protects custom skills from being overwritten by repo updates. Only write to `skills/` (repo directory) if the user explicitly asks or if contributing upstream
+6. **Register the skill**: Update `superpowers.md` trigger table. Update `CLAUDE.md` skill list if the skill is intended for the repo
 
 ### Consent phrases (user must say something like):
 - "Yes, create that skill" / "Sí, crea esa habilidad"
@@ -101,7 +101,7 @@ When the user gives a vague request like "help me manage my mornings" or "I want
 - Consider memory integration — what should be stored/recalled automatically?
 
 ### Naming
-- Filename: `skills/kebab-case-name.md`
+- Filename: `kebab-case-name.md` (placed in `~/.crow/skills/` for user skills or `skills/` for repo contributions)
 - Title: `# Title Case Name — Short Description`
 - Keep names descriptive but concise
 
@@ -111,8 +111,8 @@ When the user gives a vague request like "help me manage my mornings" or "I want
 
 After writing a new skill file:
 
-1. **Update `CLAUDE.md`**: Add the skill to the appropriate category in the Skills section
-2. **Update `superpowers.md`**: Add trigger keywords to the Trigger Table (include both English and user's preferred language columns)
+1. **Update `superpowers.md`**: Add trigger keywords to the Trigger Table (include both English and user's preferred language columns)
+2. **Update `CLAUDE.md`**: Add the skill to the Skills Reference section (only if the skill is in the repo `skills/` directory — user skills in `~/.crow/skills/` don't need CLAUDE.md entries)
 3. **Store in memory**: Use `crow_store_memory` to record that a new skill was created, what it does, and why
 4. **Inform the user**: Confirm the skill is active and explain how to trigger it
 5. **Create a watch item** (content in user's language, tags bilingual per `skills/i18n.md`):

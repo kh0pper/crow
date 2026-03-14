@@ -94,6 +94,47 @@ The five default sections listed above are **protected**. You can edit their con
 
 There is no limit to how many custom sections you can add.
 
+## Custom skills
+
+Crow's behavior is driven by **skills** — markdown files that define workflows for specific tasks. You can customize skills or create new ones without writing any code.
+
+### Viewing skills
+
+From the **Crow's Nest**, open the **Skills** panel to browse all available skills. You'll see two types:
+
+- **Built-in skills** — Ship with Crow and get updated when you update Crow. These are read-only in the Skills panel.
+- **User skills** — Your custom or overridden skills, stored in `~/.crow/skills/`. These take precedence over built-in skills and are never overwritten by updates.
+
+### Customizing a built-in skill
+
+If a built-in skill doesn't quite work for you, override it:
+
+> "Crow, I want to customize the sharing skill to skip the confirmation step when sharing with my contacts"
+
+Crow will copy the built-in skill to your user directory (`~/.crow/skills/sharing.md`) and apply your changes. Your version takes priority from then on.
+
+You can also do this manually from the Skills panel — click a built-in skill, then click **Override with Custom Copy**.
+
+### Creating a new skill
+
+Describe what you want automated:
+
+> "Crow, create a skill for my morning routine. Check my email, summarize today's calendar, and list any Trello cards due this week."
+
+Crow will propose the skill, ask for your approval, then save it to `~/.crow/skills/`. The skill activates automatically when you say something like "morning routine" or "daily briefing."
+
+### Removing a custom skill
+
+> "Crow, remove my custom sharing skill"
+
+This deletes the override from `~/.crow/skills/`, restoring the built-in version. You can also delete skills from the Skills panel in the Crow's Nest.
+
+### Installing community skills
+
+Browse community skills in the **Extensions** panel. Installed skills are placed in `~/.crow/skills/` automatically, so they're safe from updates.
+
+---
+
 ## Per-device context
 
 Crow supports **per-device overrides** so you can have different preferences depending on where you're using it. For example, verbose responses on your desktop but short answers on your phone, or Spanish on one device and English on another.
@@ -136,3 +177,64 @@ Remove a device override to restore the global version for that device:
 - Protected sections (identity, memory_protocol, etc.) can have device overrides, but the global version cannot be deleted
 - Deleting a device override restores the global version — it does not delete the section entirely
 - The MCP `instructions` field (auto-injected context) also supports `deviceId` for per-device condensed context
+
+### Setting up a device ID
+
+To enable per-device context, set the `CROW_DEVICE_ID` environment variable before starting the gateway:
+
+```bash
+# In your .env file
+CROW_DEVICE_ID=grackle
+```
+
+This tells Crow which device it's running on, so it can apply the right overrides. You can see the current device ID and override status in the **Settings** panel of the Crow's Nest under "Device Context."
+
+---
+
+## Common customization examples
+
+Here are some more ideas for what you can do:
+
+### Academic use
+
+> "Crow, add a context section for my research. I'm a PhD student in computational linguistics. When I add sources, always include DOI links. Prefer APA 7th edition citations."
+
+### Family shared instance
+
+> "Crow, update the identity section. We're the Garcia family. We use Crow for meal planning, grocery lists, and tracking school events."
+
+### Bilingual home
+
+> "Crow, on the kitchen tablet (device: 'kitchen'), always respond in Spanish. On my laptop, keep English."
+
+### Privacy-focused
+
+> "Crow, update the memory protocol. Never store personal financial information or passwords. Always ask before storing health-related data."
+
+### Developer workflow
+
+> "Crow, add a context section for my dev setup. I use VS Code, prefer TypeScript, and deploy to Vercel. When I ask about code, assume Node.js 20+ unless I say otherwise."
+
+---
+
+## Frequently asked questions
+
+### Does customization sync across platforms?
+
+Yes. Because crow.md lives in your database (not in a file on one device), your customizations apply whether you're using Claude, ChatGPT, Gemini, or any other MCP-compatible platform.
+
+### Can I break something by customizing?
+
+The five protected sections (identity, memory_protocol, session_protocol, transparency_rules, skills_reference) cannot be deleted, only edited. Even if you edit them with something unhelpful, you can always reset them:
+
+> "Crow, reset the memory_protocol section to its default"
+
+### How is this different from CLAUDE.md?
+
+**CLAUDE.md** is a file in the Crow repo that tells developers how to build and extend Crow. **crow.md** is your personal behavioral configuration stored in the database. They serve completely different audiences — CLAUDE.md is for builders, crow.md is for users.
+
+### Can I export my customizations?
+
+Your crow.md is part of your Crow database. When you back up your database (`npm run backup`), all customizations are included. You can also view your full context anytime:
+
+> "Show me my complete crow.md"
