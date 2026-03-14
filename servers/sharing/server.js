@@ -73,6 +73,46 @@ export function createSharingServer(dbPath, options = {}) {
     }
   };
 
+  // Listen for invite acceptance messages (auto-add contacts)
+  nostrManager.subscribeToIncoming(async (payload) => {
+    if (!payload.crowId || !payload.ed25519Pub || !payload.secp256k1Pub) return;
+
+    // Check if already a contact
+    const existing = await db.execute({
+      sql: "SELECT id FROM contacts WHERE crow_id = ?",
+      args: [payload.crowId],
+    });
+    if (existing.rows.length > 0) return;
+
+    // Auto-add the contact
+    const result = await db.execute({
+      sql: `INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey)
+            VALUES (?, ?, ?, ?)`,
+      args: [
+        payload.crowId,
+        payload.displayName || payload.crowId,
+        payload.ed25519Pub,
+        payload.secp256k1Pub,
+      ],
+    });
+
+    const contactId = Number(result.lastInsertRowid);
+    await syncManager.initContact(contactId, null);
+    await peerManager.joinContact({
+      crowId: payload.crowId,
+      ed25519Pubkey: payload.ed25519Pub,
+    });
+    await nostrManager.subscribeToContact({
+      id: contactId,
+      crowId: payload.crowId,
+      secp256k1_pubkey: payload.secp256k1Pub,
+    });
+
+    console.log(`[sharing] Auto-added contact from invite acceptance: ${payload.displayName || payload.crowId}`);
+  }).catch((err) => {
+    console.warn("[sharing] Failed to subscribe to incoming messages:", err.message);
+  });
+
   const server = new McpServer(
     { name: "crow-sharing", version: "0.1.0" },
     options.instructions ? { instructions: options.instructions } : undefined
@@ -167,6 +207,26 @@ export function createSharingServer(dbPath, options = {}) {
           identity.ed25519Pubkey,
           peer.ed25519Pubkey
         );
+
+        // Send acceptance back to inviter so they auto-add us
+        try {
+          if (nostrManager.relays.size === 0) {
+            await nostrManager.connectRelays();
+          }
+          const acceptancePayload = JSON.stringify({
+            type: "invite_accepted",
+            crowId: identity.crowId,
+            ed25519Pub: identity.ed25519Pubkey,
+            secp256k1Pub: identity.secp256k1Pubkey,
+            displayName: display_name || null,
+          });
+          await nostrManager.sendMessage(
+            { secp256k1_pubkey: peer.secp256k1Pubkey },
+            acceptancePayload
+          );
+        } catch {
+          // Non-fatal — inviter can still add us manually
+        }
 
         return {
           content: [
