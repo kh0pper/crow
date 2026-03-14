@@ -54,8 +54,9 @@
 
 ### Phase 2: User Experience & Customization (Medium Effort)
 
-#### 2A: Per-Device Customization
-- [ ] **Per-device crow.md** — Add `device_id` column to `crow_context` table (or separate `device_context` table). `generateInstructions()` merges base + device-specific context. Requires `ALTER TABLE` logic in `init-db.js`
+#### 2A: Per-Device Customization (Complete)
+- [x] **Per-device crow.md** — DB schema already had `device_id` column + partial unique indexes. `CROW_DEVICE_ID` env var now wired to `generateInstructions()` at gateway startup. Settings panel shows Device Context section with override status
+- [x] **MCP tools** — All context tools already accept `device_id` parameter
 - [ ] **Lay user crow.md guide** — `docs/guide/customization.md` exists but may need expanding with examples like "Crow, update my context to prefer Spanish responses"
 
 #### 2B: Crow's Nest as Primary Entry Point (Complete)
@@ -72,8 +73,10 @@
 - [ ] **Memory entry count** — Show memory stats in Crow's Nest, warn on constrained devices
 - [x] **Deployment tier docs** — `docs/guide/deployment-tiers.md` complete with resource tables and recommendations
 
-#### 2E: Skill Protection
-- [ ] **User skills directory** — `~/.crow/skills/` takes precedence over repo `skills/`. Superpowers routing checks user dir first. Already partially referenced in CLAUDE.md
+#### 2E: Skill Protection (Partially Done)
+- [x] **Skills Manager panel** — Crow's Nest panel for browsing, viewing, editing, creating, and deleting AI skill files. Shows repo skills (read-only) and user skills (`~/.crow/skills/`) with override badges
+- [x] **User skills directory** — `~/.crow/skills/` override system works in Skills Manager panel. Users can override built-in skills with custom copies
+- [ ] **Superpowers routing precedence** — Update `superpowers.md` to tell AI to check `~/.crow/skills/` first when loading skills
 - [ ] **Marketplace-installed skills** — Go to `~/.crow/skills/` automatically
 
 ### Phase 4: Platform Expansion (Medium-High Effort)
@@ -81,9 +84,9 @@
 #### 4A: Bring Your Own AI Provider
 - [ ] **BYOAI design spec** — Define provider adapter interface (`AI_PROVIDER`, `AI_API_KEY`, `AI_MODEL` env vars). Defer implementation until a feature needs it
 
-#### 4B: CLI Platform Integrations
-- [ ] **Gemini CLI docs** — `docs/platforms/gemini-cli.md` with MCP setup instructions
-- [ ] **Qwen Coder CLI docs** — `docs/platforms/qwen-cli.md`
+#### 4B: CLI Platform Integrations (Partially Done)
+- [x] **Gemini CLI docs** — `docs/platforms/gemini-cli.md` with MCP setup instructions
+- [x] **Qwen Coder CLI docs** — `docs/platforms/qwen-cli.md`
 - [ ] **CLI-to-Crow-Chat bridge** — Explore unified Crow Chat powered by preferred LLM
 
 #### 4C: Cron Job Service
@@ -159,9 +162,10 @@ Pick from these based on available time:
 
 | Priority | Task | Effort | Impact |
 |----------|------|--------|--------|
-| 1 | **Phase 4B** — Gemini/Qwen CLI docs | 1 session | Medium — platform reach |
+| 1 | **Superpowers routing** — User skills precedence in `superpowers.md` | 30 min | Medium — completes skill protection |
 | 2 | **Phase 8** — Sharing tests on lab machines | 1-2 sessions | High — validates P2P |
 | 3 | **Marketplace B** — One-click install from UI | 2-3 sessions | Very high — core UX |
+| 4 | **Phase 2C** — Tailscale MagicDNS integration in installer | 1 session | High — zero-config access |
 
 ## Key Architectural Decisions (Settled)
 
