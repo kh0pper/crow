@@ -35,8 +35,31 @@ export function createSharingServer(dbPath, options = {}) {
   const syncManager = new SyncManager(identity);
   const nostrManager = new NostrManager(identity, db);
 
-  // Start peer manager (non-blocking)
-  peerManager.start().catch((err) => {
+  // Start peer manager and join DHT topics for existing contacts
+  peerManager.start().then(async () => {
+    try {
+      const contacts = await db.execute({
+        sql: "SELECT id, crow_id, ed25519_pubkey, secp256k1_pubkey FROM contacts WHERE is_blocked = 0",
+        args: [],
+      });
+      for (const c of contacts.rows) {
+        try {
+          await syncManager.initContact(c.id, null);
+          await peerManager.joinContact({
+            crowId: c.crow_id,
+            ed25519Pubkey: c.ed25519_pubkey,
+          });
+        } catch (err) {
+          console.warn(`[sharing] Failed to join topic for ${c.crow_id}:`, err.message);
+        }
+      }
+      if (contacts.rows.length > 0) {
+        console.log(`[sharing] Joined DHT topics for ${contacts.rows.length} contact(s)`);
+      }
+    } catch (err) {
+      console.warn("[sharing] Failed to load contacts on startup:", err.message);
+    }
+  }).catch((err) => {
     console.warn("[sharing] PeerManager start failed:", err.message);
   });
 
