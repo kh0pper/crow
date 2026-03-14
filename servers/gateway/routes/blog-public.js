@@ -34,6 +34,11 @@ async function getBlogSettings(db) {
     author: s.author || "",
     theme: s.theme || "dark",
     customCss: s.custom_css || "",
+    podcastCategory: s.podcast_category || "Society & Culture",
+    podcastType: s.podcast_type || "episodic",
+    podcastOwnerEmail: s.podcast_owner_email || "",
+    podcastCoverUrl: s.podcast_cover_url || "",
+    podcastLanguage: s.podcast_language || "en",
   };
 }
 
@@ -432,7 +437,7 @@ export default function blogPublicRouter() {
     try {
       const settings = await getBlogSettings(db);
       const posts = await db.execute({
-        sql: "SELECT slug, title, excerpt, content, author, published_at, tags FROM blog_posts WHERE status = 'published' AND visibility = 'public' AND tags LIKE '%podcast%' ORDER BY published_at DESC LIMIT 200",
+        sql: "SELECT slug, title, excerpt, content, author, published_at, tags, cover_image_key FROM blog_posts WHERE status = 'published' AND visibility = 'public' AND tags LIKE '%podcast%' ORDER BY published_at DESC LIMIT 200",
         args: [],
       });
 
@@ -442,11 +447,16 @@ export default function blogPublicRouter() {
       }
 
       const siteUrl = process.env.CROW_GATEWAY_URL || `http://localhost:${process.env.PORT || process.env.CROW_GATEWAY_PORT || 3001}`;
-      const xml = generatePodcastFeed(posts.rows, {
+      const xml = await generatePodcastFeed(posts.rows, {
         title: settings.title,
         tagline: settings.tagline,
         author: settings.author,
         siteUrl,
+        coverImageUrl: settings.podcastCoverUrl,
+        ownerEmail: settings.podcastOwnerEmail,
+        category: settings.podcastCategory,
+        showType: settings.podcastType,
+        language: settings.podcastLanguage,
       });
       res.type("application/xml").send(xml);
     } catch (err) {
