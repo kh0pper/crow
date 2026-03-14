@@ -32,6 +32,14 @@ export default defineConfig({
               { text: 'Hosting Administrado', link: '/es/getting-started/managed-hosting' },
             ],
           },
+          {
+            text: 'Guías',
+            items: [
+              { text: 'Uso de Skills', link: '/es/guide/skills' },
+              { text: 'Compartir', link: '/es/guide/sharing' },
+              { text: 'Blog', link: '/es/guide/blog' },
+            ],
+          },
         ],
       },
     },
