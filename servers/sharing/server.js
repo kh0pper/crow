@@ -28,40 +28,58 @@ import { PeerManager } from "./peer-manager.js";
 import { SyncManager } from "./sync.js";
 import { NostrManager } from "./nostr.js";
 
-export function createSharingServer(dbPath, options = {}) {
+// Singleton sharing managers — Hyperswarm and Nostr connections are shared across
+// all McpServer instances (stdio, gateway per-session, router dispatch).
+let _sharedManagers = null;
+
+function getSharedManagers(dbPath) {
+  if (_sharedManagers) return _sharedManagers;
+
   const db = createDbClient(dbPath);
   const identity = loadOrCreateIdentity();
   const peerManager = new PeerManager(identity);
   const syncManager = new SyncManager(identity);
   const nostrManager = new NostrManager(identity, db);
 
-  // Start peer manager and join DHT topics for existing contacts
-  peerManager.start().then(async () => {
-    try {
-      const contacts = await db.execute({
-        sql: "SELECT id, crow_id, ed25519_pubkey, secp256k1_pubkey FROM contacts WHERE is_blocked = 0",
-        args: [],
-      });
-      for (const c of contacts.rows) {
-        try {
-          await syncManager.initContact(c.id, null);
-          await peerManager.joinContact({
-            crowId: c.crow_id,
-            ed25519Pubkey: c.ed25519_pubkey,
-          });
-        } catch (err) {
-          console.warn(`[sharing] Failed to join topic for ${c.crow_id}:`, err.message);
+  _sharedManagers = { db, identity, peerManager, syncManager, nostrManager, initialized: false };
+  return _sharedManagers;
+}
+
+export function createSharingServer(dbPath, options = {}) {
+  const managers = getSharedManagers(dbPath);
+  const { db, identity, peerManager, syncManager, nostrManager } = managers;
+
+  // One-time initialization: start Hyperswarm, join contacts, wire callbacks
+  if (!managers.initialized) {
+    managers.initialized = true;
+
+    // Start peer manager and join DHT topics for existing contacts
+    peerManager.start().then(async () => {
+      try {
+        const contacts = await db.execute({
+          sql: "SELECT id, crow_id, ed25519_pubkey, secp256k1_pubkey FROM contacts WHERE is_blocked = 0",
+          args: [],
+        });
+        for (const c of contacts.rows) {
+          try {
+            await syncManager.initContact(c.id, null);
+            await peerManager.joinContact({
+              crowId: c.crow_id,
+              ed25519Pubkey: c.ed25519_pubkey,
+            });
+          } catch (err) {
+            console.warn(`[sharing] Failed to join topic for ${c.crow_id}:`, err.message);
+          }
         }
+        if (contacts.rows.length > 0) {
+          console.log(`[sharing] Joined DHT topics for ${contacts.rows.length} contact(s)`);
+        }
+      } catch (err) {
+        console.warn("[sharing] Failed to load contacts on startup:", err.message);
       }
-      if (contacts.rows.length > 0) {
-        console.log(`[sharing] Joined DHT topics for ${contacts.rows.length} contact(s)`);
-      }
-    } catch (err) {
-      console.warn("[sharing] Failed to load contacts on startup:", err.message);
-    }
-  }).catch((err) => {
-    console.warn("[sharing] PeerManager start failed:", err.message);
-  });
+    }).catch((err) => {
+      console.warn("[sharing] PeerManager start failed:", err.message);
+    });
 
   // Wire peer connections — update last_seen and deliver pending shares
   peerManager.onPeerConnected = async (crowId, conn) => {
@@ -238,6 +256,8 @@ export function createSharingServer(dbPath, options = {}) {
   }).catch((err) => {
     console.warn("[sharing] Failed to subscribe to incoming messages:", err.message);
   });
+
+  } // end one-time initialization
 
   const server = new McpServer(
     { name: "crow-sharing", version: "0.1.0" },

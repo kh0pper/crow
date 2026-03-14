@@ -355,6 +355,8 @@ const projectServerFactory = () => createProjectServer(undefined, { instructions
 mountMcpServer(app, "/projects", projectServerFactory, sessionManager, authMiddleware);
 // Legacy alias — existing remote clients use /research/mcp
 mountMcpServer(app, "/research", projectServerFactory, sessionManager, authMiddleware);
+// Initialize sharing managers eagerly (starts Hyperswarm + Nostr on boot, not on first request)
+createSharingServer(undefined, { instructions });
 mountMcpServer(app, "/sharing", () => createSharingServer(undefined, { instructions }), sessionManager, authMiddleware);
 mountMcpServer(app, "/tools", createProxyServer, sessionManager, authMiddleware);
 
