@@ -57,7 +57,7 @@
 #### 2A: Per-Device Customization (Complete)
 - [x] **Per-device crow.md** — DB schema already had `device_id` column + partial unique indexes. `CROW_DEVICE_ID` env var now wired to `generateInstructions()` at gateway startup. Settings panel shows Device Context section with override status
 - [x] **MCP tools** — All context tools already accept `device_id` parameter
-- [ ] **Lay user crow.md guide** — `docs/guide/customization.md` exists but may need expanding with examples like "Crow, update my context to prefer Spanish responses"
+- [x] **Lay user crow.md guide** — `docs/guide/customization.md` expanded with Spanish preference example, custom skills section, device ID setup, practical examples (academic, family, bilingual, developer), FAQ
 
 #### 2B: Crow's Nest as Primary Entry Point (Complete)
 - [x] **Enabled by default** — Gateway mounts Crow's Nest unconditionally, password required on first visit
@@ -92,9 +92,10 @@
 #### 4C: Cron Job Service
 - [ ] **Scheduled tasks** — `crow_create_schedule` tool, `schedules` DB table, `skills/scheduling.md` (already exists). Needs actual cron execution via gateway
 
-#### 4D: Podcasting Enhancements
-- [ ] **iTunes-compatible RSS** — Extend podcast RSS with full iTunes tags for directory submission
-- [ ] **Audio file hosting** — Integration with storage server for episode audio
+#### 4D: Podcasting Enhancements (Mostly Done)
+- [x] **iTunes-compatible RSS** — Full iTunes namespace: `itunes:owner` (email+name), `itunes:type` (episodic/serial), configurable `itunes:category` with subcategories, per-episode `itunes:image` artwork, `content:encoded` show notes, enclosure file size via HEAD request, configurable language
+- [x] **Podcast settings** — `crow_blog_settings` now accepts podcast_category, podcast_type, podcast_owner_email, podcast_cover_url, podcast_language
+- [ ] **Audio file hosting** — Integration with storage server for episode audio upload from podcast panel
 
 ### Phase 5: Social & Community (High Effort)
 
