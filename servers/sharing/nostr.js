@@ -164,6 +164,11 @@ export class NostrManager {
                 );
                 const decrypted = nip44.v2.decrypt(event.content, conversationKey);
 
+                // Skip system messages (invite_accepted, etc.) — don't store as regular messages
+                if (decrypted.startsWith("{") && decrypted.includes('"invite_accepted"')) {
+                  return;
+                }
+
                 // Cache locally
                 if (contactId && this.db) {
                   try {

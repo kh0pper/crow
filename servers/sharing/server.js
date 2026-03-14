@@ -40,37 +40,140 @@ export function createSharingServer(dbPath, options = {}) {
     console.warn("[sharing] PeerManager start failed:", err.message);
   });
 
-  // Wire peer connections to sync
+  // Wire peer connections — update last_seen and deliver pending shares
   peerManager.onPeerConnected = async (crowId, conn) => {
-    // Find contact and start replication
     const contact = await db.execute({
       sql: "SELECT * FROM contacts WHERE crow_id = ? AND is_blocked = 0",
       args: [crowId],
     });
-    if (contact.rows.length > 0) {
-      const c = contact.rows[0];
-      await syncManager.replicate(c.id, conn);
-      // Update last_seen
-      await db.execute({
-        sql: "UPDATE contacts SET last_seen = datetime('now') WHERE id = ?",
-        args: [c.id],
-      });
+    if (contact.rows.length === 0) return;
+
+    const c = contact.rows[0];
+    console.log(`[sharing] Peer connected: ${crowId}`);
+
+    // Update last_seen
+    await db.execute({
+      sql: "UPDATE contacts SET last_seen = datetime('now') WHERE id = ?",
+      args: [c.id],
+    });
+
+    // Deliver any pending shares
+    const pending = await db.execute({
+      sql: `SELECT si.*, '${c.crow_id}' as crow_id FROM shared_items si
+            WHERE si.contact_id = ? AND si.direction = 'sent' AND si.delivery_status = 'pending'`,
+      args: [c.id],
+    });
+
+    for (const share of pending.rows) {
+      try {
+        const tableMap = {
+          memory: "memories",
+          project: "research_projects",
+          source: "research_sources",
+          note: "research_notes",
+        };
+        const table = tableMap[share.share_type];
+        if (!table) continue;
+
+        const itemData = await db.execute({
+          sql: `SELECT * FROM ${table} WHERE id = ?`,
+          args: [share.item_id],
+        });
+        if (itemData.rows.length === 0) continue;
+
+        peerManager.send(crowId, {
+          type: "share",
+          share_type: share.share_type,
+          payload: itemData.rows[0],
+          permissions: share.permissions,
+          sender: identity.crowId,
+          timestamp: new Date().toISOString(),
+        });
+
+        await db.execute({
+          sql: "UPDATE shared_items SET delivery_status = 'delivered' WHERE id = ?",
+          args: [share.id],
+        });
+      } catch (err) {
+        // Delivery failed — will retry next connection
+      }
+    }
+
+    if (pending.rows.length > 0) {
+      console.log(`[sharing] Delivered ${pending.rows.length} pending share(s) to ${crowId}`);
     }
   };
 
-  // Wire incoming sync entries to DB
-  syncManager.onEntry = async (contactId, entry) => {
-    try {
-      if (entry.type === "memory" || entry.type === "source" || entry.type === "note" || entry.type === "project") {
+  // Handle data from connected peers (shares, revokes, etc.)
+  peerManager.onPeerData = async (crowId, payload) => {
+    if (!payload?.type) return;
+
+    const contact = await db.execute({
+      sql: "SELECT * FROM contacts WHERE crow_id = ? AND is_blocked = 0",
+      args: [crowId],
+    });
+    if (contact.rows.length === 0) return;
+    const c = contact.rows[0];
+
+    if (payload.type === "share" && payload.share_type && payload.payload) {
+      // Incoming share — import the data and record it
+      try {
+        let importedItemId = 0;
+
+        if (payload.share_type === "memory") {
+          const result = await db.execute({
+            sql: `INSERT INTO memories (content, category, importance, metadata, tags)
+                  VALUES (?, ?, ?, ?, ?)`,
+            args: [
+              payload.payload.content || "",
+              payload.payload.category || "general",
+              payload.payload.importance || 5,
+              payload.payload.metadata || "",
+              payload.payload.tags || "",
+            ],
+          });
+          importedItemId = Number(result.lastInsertRowid);
+        } else if (payload.share_type === "source") {
+          const result = await db.execute({
+            sql: `INSERT INTO research_sources (project_id, title, url, source_type, citation, notes)
+                  VALUES (NULL, ?, ?, ?, ?, ?)`,
+            args: [
+              payload.payload.title || "Shared source",
+              payload.payload.url || "",
+              payload.payload.source_type || "other",
+              payload.payload.citation || "",
+              payload.payload.notes || "",
+            ],
+          });
+          importedItemId = Number(result.lastInsertRowid);
+        } else if (payload.share_type === "note") {
+          const result = await db.execute({
+            sql: `INSERT INTO research_notes (project_id, content)
+                  VALUES (NULL, ?)`,
+            args: [payload.payload.content || ""],
+          });
+          importedItemId = Number(result.lastInsertRowid);
+        }
+
         await db.execute({
-          sql: `INSERT OR IGNORE INTO shared_items (contact_id, share_type, item_id, permissions, direction, delivery_status)
+          sql: `INSERT INTO shared_items (contact_id, share_type, item_id, permissions, direction, delivery_status)
                 VALUES (?, ?, ?, ?, 'received', 'delivered')`,
-          args: [contactId, entry.type, 0, entry.permissions || "read"],
+          args: [c.id, payload.share_type, importedItemId, payload.permissions || "read"],
         });
+
+        console.log(`[sharing] Received ${payload.share_type} from ${crowId} → imported as #${importedItemId}`);
+      } catch (err) {
+        console.warn(`[sharing] Failed to import share from ${crowId}:`, err.message);
       }
-    } catch (err) {
-      // Skip insertion errors
+    } else if (payload.type === "revoke" && payload.share_type) {
+      // Handle revocation
+      console.log(`[sharing] Received revoke for ${payload.share_type} from ${crowId}`);
     }
+  };
+
+  // Hypercore feed entries (legacy — shares now go via onPeerData)
+  syncManager.onEntry = async (contactId, entry) => {
+    console.log(`[sharing] Received Hypercore entry for contact ${contactId}:`, entry.type);
   };
 
   // Listen for invite acceptance messages (auto-add contacts)
@@ -364,7 +467,7 @@ export function createSharingServer(dbPath, options = {}) {
         ],
       });
 
-      // If peer is online, send via Hypercore
+      // If peer is online, send directly via Hyperswarm data channel
       if (peerManager.isConnected(contactRow.crow_id)) {
         try {
           // Get the actual item data
@@ -373,15 +476,20 @@ export function createSharingServer(dbPath, options = {}) {
             args: [item_id],
           });
 
-          const entry = syncManager.createShareEntry(
+          peerManager.send(contactRow.crow_id, {
+            type: "share",
             share_type,
-            "share",
-            itemData.rows[0],
-            permissions
-          );
-          await syncManager.appendEntry(contactRow.id, entry);
+            payload: itemData.rows[0],
+            permissions,
+            sender: identity.crowId,
+            timestamp: new Date().toISOString(),
+          });
         } catch (err) {
-          // Sync append failed — still recorded in shared_items
+          // Send failed — still recorded in shared_items as pending
+          await db.execute({
+            sql: "UPDATE shared_items SET delivery_status = 'pending' WHERE contact_id = ? AND item_id = ? AND share_type = ? AND direction = 'sent' ORDER BY created_at DESC LIMIT 1",
+            args: [contactRow.id, item_id, share_type],
+          });
         }
       }
 
@@ -547,11 +655,16 @@ export function createSharingServer(dbPath, options = {}) {
         };
       }
 
-      // Send revocation notice via sync
+      // Send revocation notice via data channel
       if (peerManager.isConnected(contactRow.crow_id)) {
         try {
-          const entry = syncManager.createShareEntry(share_type, "revoke", { item_id }, "read");
-          await syncManager.appendEntry(contactRow.id, entry);
+          peerManager.send(contactRow.crow_id, {
+            type: "revoke",
+            share_type,
+            item_id,
+            sender: identity.crowId,
+            timestamp: new Date().toISOString(),
+          });
         } catch {
           // Best effort
         }
