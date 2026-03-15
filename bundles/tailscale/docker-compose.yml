@@ -1,0 +1,27 @@
+## Tailscale — Private Network Access
+##
+## Creates a Tailscale tunnel so you can access Crow from any device
+## on your Tailnet without port forwarding or public exposure.
+##
+## Usage:
+##   Set TS_AUTHKEY in .env (reusable auth key from Tailscale admin)
+##   docker compose up -d
+
+services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    hostname: ${TS_HOSTNAME:-crow}
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_STATE_DIR=/var/lib/tailscale
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    network_mode: host
+    restart: unless-stopped
+
+volumes:
+  tailscale-state:

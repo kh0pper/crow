@@ -314,6 +314,7 @@ Add-on skills (activated when corresponding add-on is installed):
 - `ollama.md` — Local AI model management via HTTP API
 - `nextcloud.md` — Nextcloud file access via WebDAV
 - `immich.md` — Photo library search and album management
+- `tailscale.md` — Private network access setup via Tailscale bundle
 
 ### Maintaining CLAUDE.md vs crow.md
 

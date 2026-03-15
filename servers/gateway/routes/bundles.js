@@ -354,6 +354,17 @@ export default function bundlesRouter() {
       return res.status(409).json({ error: `Bundle '${bundle_id}' is already installed` });
     }
 
+    // Block bundles with network_mode: host on managed hosting (security risk on shared infrastructure)
+    if (process.env.CROW_HOSTED) {
+      const composePath = join(sourceDir, "docker-compose.yml");
+      if (existsSync(composePath)) {
+        const composeContent = readFileSync(composePath, "utf8");
+        if (/network_mode:\s*host/i.test(composeContent)) {
+          return res.status(403).json({ ok: false, error: "This bundle requires host networking and is not available on managed hosting." });
+        }
+      }
+    }
+
     // Create job for async tracking
     const job = createJob(bundle_id, "install");
     res.json({ ok: true, job_id: job.id, message: `Installing ${bundle_id}...` });
