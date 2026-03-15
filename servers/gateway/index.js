@@ -131,6 +131,9 @@ const sessionManager = new SessionManager();
 // Create Express app
 const app = express();
 
+// Trust reverse proxies (Tailscale Funnel, Cloudflare Tunnel, etc.)
+app.set("trust proxy", 1);
+
 // --- Security Middleware ---
 
 // Security headers
@@ -204,9 +207,10 @@ app.get("/health", async (req, res) => {
     if (await isAvailable()) servers.push("crow-storage");
   } catch {}
   servers.push("crow-blog");
+  servers.push("crow-media");
 
   const externalToolCount = connectedTools.reduce((sum, s) => sum + s.toolCount, 0);
-  const coreToolCount = 49; // 12 memory + 12 research + 8 sharing + 5 storage + 12 blog
+  const coreToolCount = 58; // 12 memory + 12 research + 8 sharing + 5 storage + 12 blog + 9 media
   const routerDisabled = process.env.CROW_DISABLE_ROUTER === "1";
 
   res.json({
@@ -366,7 +370,7 @@ mountMcpServer(app, "", () => createMemoryServer(undefined, { instructions }), s
 // --- Mount Router (consolidated endpoint, ~75% context reduction) ---
 if (process.env.CROW_DISABLE_ROUTER !== "1") {
   mountMcpServer(app, "/router", () => createRouterServer({ instructions: routerInstructions }), sessionManager, authMiddleware);
-  console.log("Router server mounted (7 tools instead of 49+)");
+  console.log("Router server mounted (8 tools instead of 58+)");
 }
 
 // --- Mount Storage Server (conditional) ---
@@ -399,6 +403,33 @@ try {
 } catch (err) {
   if (err.code !== "ERR_MODULE_NOT_FOUND") {
     console.warn("[blog] Failed to mount:", err.message);
+  }
+}
+
+// --- Mount Media Server ---
+try {
+  const { createMediaServer } = await import("../media/server.js");
+  mountMcpServer(app, "/media", () => createMediaServer(undefined, { instructions }), sessionManager, authMiddleware);
+
+  // Media API routes (dashboard)
+  const { default: mediaApiRouter } = await import("./routes/media.js");
+  app.use(mediaApiRouter(dashboardAuth));
+
+  // Start background tasks (feed fetching) — only in gateway mode
+  import("../media/tasks.js").then(async ({ createTaskRunner, registerMediaTasks }) => {
+    const mediaDb = createDbClient();
+    const runner = createTaskRunner(mediaDb);
+    registerMediaTasks(runner, mediaDb);
+    runner.start();
+    console.log("Media background tasks started (feed fetch every 30 min)");
+  }).catch((err) => {
+    console.warn("[media] Background tasks failed to start:", err.message);
+  });
+
+  console.log("Media server mounted");
+} catch (err) {
+  if (err.code !== "ERR_MODULE_NOT_FOUND") {
+    console.warn("[media] Failed to mount:", err.message);
   }
 }
 

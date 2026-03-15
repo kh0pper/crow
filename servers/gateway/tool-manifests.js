@@ -85,6 +85,22 @@ export const TOOL_MANIFESTS = {
     },
   },
 
+  media: {
+    displayName: "Media",
+    description: "News aggregation: subscribe to RSS feeds, browse articles, full-text search, star/save/feedback, source management",
+    tools: {
+      crow_media_add_source: { params: "url, name?, category?, fetch_interval_min?", desc: "Subscribe to RSS feed" },
+      crow_media_list_sources: { params: "enabled_only?, category?", desc: "List sources with status" },
+      crow_media_remove_source: { params: "id, delete_articles?, confirm_token", desc: "Remove source (cannot be undone). Returns preview + token on first call; pass token back to execute." },
+      crow_media_feed: { params: "limit?, offset?, category?, source_id?, unread_only?, starred_only?", desc: "Browse article feed" },
+      crow_media_get_article: { params: "id", desc: "Get full article content" },
+      crow_media_search: { params: "query, category?, date_from?, limit?", desc: "Full-text search articles" },
+      crow_media_article_action: { params: "article_id, action", desc: "Star/save/read/feedback on article" },
+      crow_media_refresh: { params: "source_id?", desc: "Trigger immediate feed refresh" },
+      crow_media_stats: { params: "", desc: "Media statistics" },
+    },
+  },
+
   storage: {
     displayName: "Storage",
     description: "S3-compatible file storage: upload (base64 or presigned URL), list, download URLs, delete, quota management",

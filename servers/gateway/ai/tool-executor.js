@@ -15,6 +15,7 @@ import { createMemoryServer } from "../../memory/server.js";
 import { createProjectServer } from "../../research/server.js";
 import { createSharingServer } from "../../sharing/server.js";
 import { createBlogServer } from "../../blog/server.js";
+import { createMediaServer } from "../../media/server.js";
 import { TOOL_MANIFESTS } from "../tool-manifests.js";
 import { connectedServers } from "../proxy.js";
 
@@ -32,6 +33,7 @@ const SERVER_FACTORIES = {
   projects: createProjectServer,
   sharing: createSharingServer,
   blog: createBlogServer,
+  media: createMediaServer,
 };
 
 /**
@@ -99,7 +101,7 @@ export function createToolExecutor() {
   async function executeTool(name, args) {
     try {
       // Check if it's a category-level tool (crow_memory, crow_projects, etc.)
-      const categoryMatch = name.match(/^crow_(memory|projects|blog|sharing|storage)$/);
+      const categoryMatch = name.match(/^crow_(memory|projects|blog|sharing|storage|media)$/);
       if (categoryMatch) {
         const category = categoryMatch[1];
         const action = args.action;
