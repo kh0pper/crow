@@ -60,13 +60,14 @@ export async function fetchAndParseFeed(url) {
  * @returns {string|null}
  */
 function extractItemImage(itemXml) {
-  // 1. <media:content url="..."> (possibly nested)
-  const mediaContent = itemXml.match(/<media:content[^>]+url="([^"]+)"/);
-  if (mediaContent) return mediaContent[1];
-
-  // 2. <media:thumbnail url="...">
+  // 1. <media:thumbnail url="..."> (always an image — check first)
   const mediaThumbnail = itemXml.match(/<media:thumbnail[^>]+url="([^"]+)"/);
   if (mediaThumbnail) return mediaThumbnail[1];
+
+  // 2. <media:content> with image type only (YouTube uses type="application/x-shockwave-flash" here)
+  const mediaContent = itemXml.match(/<media:content[^>]+type="image\/[^"]*"[^>]+url="([^"]+)"/) ||
+                       itemXml.match(/<media:content[^>]+url="([^"]+)"[^>]+type="image\/[^"]*"/);
+  if (mediaContent) return mediaContent[1];
 
   // 3. <enclosure> with type="image/..."
   const enclosure = itemXml.match(/<enclosure[^>]+type="image\/[^"]*"[^>]+url="([^"]+)"/);
