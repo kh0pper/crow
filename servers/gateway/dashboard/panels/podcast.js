@@ -63,7 +63,7 @@ export default {
   name: "Podcasts",
   icon: "mic",
   route: "/dashboard/podcast",
-  navOrder: 22,
+  navOrder: null,
 
   async handler(req, res, { db, layout }) {
     // --- POST actions ---

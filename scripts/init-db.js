@@ -721,6 +721,110 @@ await initTable("media_feedback table", `
   CREATE INDEX IF NOT EXISTS idx_media_feedback_article ON media_feedback(article_id);
 `);
 
+await addColumnIfMissing("media_articles", "image_url", "TEXT");
+await addColumnIfMissing("media_articles", "audio_url", "TEXT");
+
+// --- Media Audio Cache ---
+
+await initTable("media_audio_cache table", `
+  CREATE TABLE IF NOT EXISTS media_audio_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    article_id INTEGER NOT NULL UNIQUE,
+    content_hash TEXT NOT NULL,
+    audio_path TEXT NOT NULL,
+    voice TEXT DEFAULT 'en-US-AriaNeural',
+    duration_sec REAL,
+    file_size INTEGER,
+    created_at TEXT DEFAULT (datetime('now')),
+    last_accessed TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (article_id) REFERENCES media_articles(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_media_audio_cache_accessed ON media_audio_cache(last_accessed);
+`);
+
+// --- Media Briefings ---
+
+await initTable("media_briefings table", `
+  CREATE TABLE IF NOT EXISTS media_briefings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT,
+    script TEXT,
+    audio_path TEXT,
+    article_ids TEXT,
+    duration_sec REAL,
+    voice TEXT DEFAULT 'en-US-AriaNeural',
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+// --- Media Playlists ---
+
+await initTable("media_playlists table", `
+  CREATE TABLE IF NOT EXISTS media_playlists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    auto_generated INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+await initTable("media_playlist_items table", `
+  CREATE TABLE IF NOT EXISTS media_playlist_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    playlist_id INTEGER NOT NULL,
+    item_type TEXT NOT NULL,
+    item_id INTEGER NOT NULL,
+    position INTEGER DEFAULT 0,
+    FOREIGN KEY (playlist_id) REFERENCES media_playlists(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_media_playlist_items_playlist ON media_playlist_items(playlist_id);
+`);
+
+// --- Media Smart Folders ---
+
+await initTable("media_smart_folders table", `
+  CREATE TABLE IF NOT EXISTS media_smart_folders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    query_json TEXT NOT NULL,
+    auto_generated INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+// --- Media Digest Preferences ---
+
+await initTable("media_digest_preferences table", `
+  CREATE TABLE IF NOT EXISTS media_digest_preferences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    schedule TEXT DEFAULT 'daily_morning',
+    email TEXT,
+    custom_instructions TEXT,
+    enabled INTEGER DEFAULT 0,
+    last_sent TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+await initTable("media_interest_profiles table", `
+  CREATE TABLE IF NOT EXISTS media_interest_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_type TEXT NOT NULL,
+    profile_key TEXT NOT NULL,
+    affinity REAL DEFAULT 0.5,
+    interaction_count INTEGER DEFAULT 0,
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(profile_type, profile_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_interest_profiles_type ON media_interest_profiles(profile_type);
+`);
+
 // --- Optional: sqlite-vec virtual table for semantic search ---
 const hasVec = await isSqliteVecAvailable(db);
 if (hasVec) {

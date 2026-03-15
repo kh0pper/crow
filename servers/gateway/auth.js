@@ -78,11 +78,9 @@ export class CrowOAuthProvider {
       throw new Error("Authorization code was not issued to this client");
     }
 
-    // PKCE validation
-    if (codeData.params.codeChallenge) {
-      if (!codeVerifier) {
-        throw new Error("Code verifier required");
-      }
+    // PKCE validation — only if the SDK hasn't already validated (codeVerifier is
+    // undefined when the SDK performs local PKCE validation before calling us)
+    if (codeVerifier && codeData.params.codeChallenge) {
       if (codeData.params.codeChallengeMethod === "S256") {
         const hash = createHash("sha256").update(codeVerifier).digest("base64url");
         if (hash !== codeData.params.codeChallenge) {
@@ -108,7 +106,7 @@ export class CrowOAuthProvider {
         client.client_id,
         (codeData.params.scopes || []).join(" "),
         expiresIn,
-        codeData.params.resource || null,
+        codeData.params.resource?.toString() || null,
       ],
     });
 
@@ -119,7 +117,7 @@ export class CrowOAuthProvider {
         hashToken(refreshToken),
         client.client_id,
         (codeData.params.scopes || []).join(" "),
-        codeData.params.resource || null,
+        codeData.params.resource?.toString() || null,
       ],
     });
 

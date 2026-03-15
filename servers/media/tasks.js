@@ -11,7 +11,7 @@
  *   runner.stop();
  */
 
-import { fetchAndParseFeed } from "./feed-fetcher.js";
+import { fetchAndParseFeed, postProcessGoogleNewsItems } from "./feed-fetcher.js";
 
 const CHECK_INTERVAL = 60_000; // Check for due tasks every 60s
 const MAX_CONCURRENT_FETCHES = parseInt(process.env.CROW_MEDIA_MAX_FETCHES || "3", 10);
@@ -87,8 +87,8 @@ export function createTaskRunner(db) {
  */
 export async function fetchAllFeeds(db) {
   const { rows: sources } = await db.execute({
-    sql: `SELECT id, url, fetch_interval_min, last_fetched FROM media_sources
-          WHERE enabled = 1 AND source_type = 'rss'`,
+    sql: `SELECT id, url, source_type, fetch_interval_min, last_fetched FROM media_sources
+          WHERE enabled = 1 AND source_type IN ('rss', 'google_news', 'youtube', 'podcast')`,
     args: [],
   });
 
@@ -110,7 +110,12 @@ export async function fetchAllFeeds(db) {
 
 async function fetchSingleSource(db, source) {
   try {
-    const { feed, items } = await fetchAndParseFeed(source.url);
+    let { feed, items } = await fetchAndParseFeed(source.url);
+
+    // Post-process Google News titles
+    if (source.source_type === 'google_news') {
+      postProcessGoogleNewsItems(items);
+    }
 
     // Update source metadata
     await db.execute({
@@ -127,8 +132,8 @@ async function fetchSingleSource(db, source) {
         await db.execute({
           sql: `INSERT OR IGNORE INTO media_articles
                 (source_id, guid, url, title, author, pub_date, content_raw, summary,
-                 content_fetch_status, ai_analysis_status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', datetime('now'))`,
+                 image_url, audio_url, content_fetch_status, ai_analysis_status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', datetime('now'))`,
           args: [
             source.id,
             guid,
@@ -138,6 +143,8 @@ async function fetchSingleSource(db, source) {
             item.pub_date ? normalizeDate(item.pub_date) : null,
             item.content || null,
             item.summary ? item.summary.slice(0, 2000) : null,
+            item.image || null,
+            item.enclosureAudio || null,
           ],
         });
       } catch {
@@ -174,5 +181,105 @@ export function registerMediaTasks(runner, db) {
   runner.registerTask("feed-fetch", fetchAllFeeds, {
     intervalMs: 30 * 60_000, // 30 minutes
     priority: 1,
+  });
+
+  // Content extraction (readability + linkedom)
+  runner.registerTask("content-extract", async (db) => {
+    const { extractContentBatch } = await import("./content-extractor.js");
+    await extractContentBatch(db, 5);
+  }, {
+    intervalMs: 15 * 60_000, // 15 minutes
+    priority: 2,
+  });
+
+  // AI analysis (BYOAI — skips if no provider configured or LITE mode)
+  runner.registerTask("ai-analysis", async (db) => {
+    const { analyzeArticleBatch } = await import("./ai-analyzer.js");
+    await analyzeArticleBatch(db, 5);
+  }, {
+    intervalMs: 30 * 60_000, // 30 minutes
+    priority: 3,
+  });
+
+  // Interest profile decay (daily)
+  runner.registerTask("interest-decay", async (db) => {
+    const { decayAllProfiles } = await import("./scorer.js");
+    await decayAllProfiles(db);
+  }, {
+    intervalMs: 24 * 60 * 60_000, // 24 hours
+    priority: 5,
+  });
+
+  // Article cleanup — delete old non-saved/non-starred articles (daily)
+  runner.registerTask("article-cleanup", async (db) => {
+    await db.execute({
+      sql: `DELETE FROM media_articles WHERE id NOT IN (
+        SELECT article_id FROM media_article_states WHERE is_saved = 1 OR is_starred = 1
+      ) AND created_at < datetime('now', '-30 days')`,
+      args: [],
+    });
+  }, {
+    intervalMs: 24 * 60 * 60_000, // 24 hours
+    priority: 6,
+  });
+
+  // Audio cache cleanup — evict LRU entries when over size limit (daily)
+  runner.registerTask("audio-cache-cleanup", async (db) => {
+    try {
+      const { cleanupAudioCache } = await import("./tts.js");
+      await cleanupAudioCache(db);
+    } catch {}
+  }, {
+    intervalMs: 24 * 60 * 60_000, // 24 hours
+    priority: 7,
+  });
+
+  // Daily Mix playlist — auto-generate from top scored unread articles (daily)
+  runner.registerTask("daily-mix", async (db) => {
+    try {
+      const { buildScoredFeedSql } = await import("./scorer.js");
+      const scored = buildScoredFeedSql({ limit: 10, offset: 0, unreadOnly: true });
+      const { rows: articles } = await db.execute({ sql: scored.sql, args: scored.args });
+      if (articles.length < 3) return; // Not enough for a mix
+
+      // Create or replace today's daily mix
+      const today = new Date().toISOString().slice(0, 10);
+      const mixName = `Daily Mix — ${today}`;
+
+      // Check if already exists
+      const existing = await db.execute({
+        sql: "SELECT id FROM media_playlists WHERE name = ? AND auto_generated = 1",
+        args: [mixName],
+      });
+      if (existing.rows.length > 0) return;
+
+      const result = await db.execute({
+        sql: "INSERT INTO media_playlists (name, description, auto_generated) VALUES (?, ?, 1)",
+        args: [mixName, `Auto-generated daily mix with ${articles.length} top articles`],
+      });
+      const playlistId = result.lastInsertRowid;
+
+      for (let i = 0; i < articles.length; i++) {
+        await db.execute({
+          sql: "INSERT INTO media_playlist_items (playlist_id, item_type, item_id, position) VALUES (?, 'article', ?, ?)",
+          args: [playlistId, articles[i].id, i + 1],
+        });
+      }
+    } catch {}
+  }, {
+    intervalMs: 24 * 60 * 60_000, // 24 hours
+    priority: 4,
+  });
+
+  // Email digest sender — check schedule and send if due (30 min)
+  runner.registerTask("digest-sender", async (db) => {
+    if (process.env.CROW_MEDIA_LITE === "1") return;
+    try {
+      const { checkAndSendDigests } = await import("./digest.js");
+      await checkAndSendDigests(db);
+    } catch {}
+  }, {
+    intervalMs: 30 * 60_000, // 30 minutes
+    priority: 8,
   });
 }

@@ -26,8 +26,24 @@ export default function mediaRouter(authMiddleware) {
       const sourceId = req.query.source_id ? parseInt(req.query.source_id, 10) : null;
       const unreadOnly = req.query.unread_only === "true";
       const starredOnly = req.query.starred_only === "true";
+      const sort = req.query.sort || "chronological";
 
-      let sql = `SELECT a.id, a.title, a.author, a.pub_date, a.url, a.summary,
+      // For You — use scored query
+      if (sort === "for_you") {
+        try {
+          const { buildScoredFeedSql } = await import("../../media/scorer.js");
+          const scored = buildScoredFeedSql({
+            limit, offset, category, sourceId,
+            unreadOnly, starredOnly,
+          });
+          const result = await db.execute({ sql: scored.sql, args: scored.args });
+          return res.json({ articles: result.rows, limit, offset, sort });
+        } catch {
+          // Fall through to chronological
+        }
+      }
+
+      let sql = `SELECT a.id, a.title, a.author, a.pub_date, a.url, a.summary, a.image_url,
                         s.name as source_name, s.category as source_category,
                         COALESCE(st.is_read, 0) as is_read,
                         COALESCE(st.is_starred, 0) as is_starred,
@@ -129,6 +145,12 @@ export default function mediaRouter(authMiddleware) {
         return res.status(400).json({ error: "Invalid action" });
       }
 
+      // Update interest profiles for personalization
+      try {
+        const { updateInterestProfile } = await import("../../media/scorer.js");
+        await updateInterestProfile(db, id, action);
+      } catch {}
+
       res.json({ ok: true });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -150,7 +172,7 @@ export default function mediaRouter(authMiddleware) {
       const limit = Math.min(parseInt(req.query.limit || "20", 10), 50);
 
       const result = await db.execute({
-        sql: `SELECT a.id, a.title, a.author, a.pub_date, a.url, a.summary,
+        sql: `SELECT a.id, a.title, a.author, a.pub_date, a.url, a.summary, a.image_url,
                      s.name as source_name, s.category as source_category
               FROM media_articles a
               JOIN media_articles_fts fts ON a.id = fts.rowid
@@ -205,11 +227,12 @@ export default function mediaRouter(authMiddleware) {
         try {
           const ins = await db.execute({
             sql: `INSERT OR IGNORE INTO media_articles
-                  (source_id, guid, url, title, author, pub_date, content_raw, summary,
+                  (source_id, guid, url, title, author, pub_date, content_raw, summary, image_url,
                    content_fetch_status, ai_analysis_status, created_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', datetime('now'))`,
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', datetime('now'))`,
             args: [sourceId, guid, item.link || null, item.title, item.author || null,
-                   item.pub_date || null, item.content || null, item.summary?.slice(0, 2000) || null],
+                   item.pub_date || null, item.content || null, item.summary?.slice(0, 2000) || null,
+                   item.image || null],
           });
           if (ins.rowsAffected > 0) imported++;
         } catch {}
@@ -263,17 +286,192 @@ export default function mediaRouter(authMiddleware) {
         try {
           const ins = await db.execute({
             sql: `INSERT OR IGNORE INTO media_articles
-                  (source_id, guid, url, title, author, pub_date, content_raw, summary,
+                  (source_id, guid, url, title, author, pub_date, content_raw, summary, image_url,
                    content_fetch_status, ai_analysis_status, created_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', datetime('now'))`,
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', datetime('now'))`,
             args: [id, guid, item.link || null, item.title, item.author || null,
-                   item.pub_date || null, item.content || null, item.summary?.slice(0, 2000) || null],
+                   item.pub_date || null, item.content || null, item.summary?.slice(0, 2000) || null,
+                   item.image || null],
           });
           if (ins.rowsAffected > 0) newCount++;
         } catch {}
       }
 
       res.json({ ok: true, new_articles: newCount });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
+  // --- Article audio (TTS) ---
+  router.get("/api/media/articles/:id/audio", authMiddleware, async (req, res) => {
+    const db = createDbClient();
+    try {
+      const id = parseInt(req.params.id, 10);
+      const cached = await db.execute({
+        sql: "SELECT audio_path FROM media_audio_cache WHERE article_id = ?",
+        args: [id],
+      });
+
+      if (cached.rows.length === 0) {
+        return res.status(404).json({ error: "No audio generated for this article. Use crow_media_listen first." });
+      }
+
+      const audioPath = cached.rows[0].audio_path;
+      const { existsSync, statSync, createReadStream } = await import("node:fs");
+      if (!existsSync(audioPath)) {
+        return res.status(404).json({ error: "Audio file not found." });
+      }
+
+      // Update last accessed
+      await db.execute({
+        sql: "UPDATE media_audio_cache SET last_accessed = datetime('now') WHERE article_id = ?",
+        args: [id],
+      });
+
+      const stat = statSync(audioPath);
+      const range = req.headers.range;
+
+      if (range) {
+        const parts = range.replace(/bytes=/, "").split("-");
+        const start = parseInt(parts[0], 10);
+        const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+        res.writeHead(206, {
+          "Content-Range": `bytes ${start}-${end}/${stat.size}`,
+          "Accept-Ranges": "bytes",
+          "Content-Length": end - start + 1,
+          "Content-Type": "audio/mpeg",
+        });
+        createReadStream(audioPath, { start, end }).pipe(res);
+      } else {
+        res.writeHead(200, {
+          "Content-Length": stat.size,
+          "Content-Type": "audio/mpeg",
+          "Accept-Ranges": "bytes",
+        });
+        createReadStream(audioPath).pipe(res);
+      }
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
+  // --- Briefing audio ---
+  router.get("/api/media/briefings/:id/audio", authMiddleware, async (req, res) => {
+    const db = createDbClient();
+    try {
+      const id = parseInt(req.params.id, 10);
+      const result = await db.execute({
+        sql: "SELECT audio_path FROM media_briefings WHERE id = ?",
+        args: [id],
+      });
+
+      if (result.rows.length === 0 || !result.rows[0].audio_path) {
+        return res.status(404).json({ error: "Briefing audio not found." });
+      }
+
+      const audioPath = result.rows[0].audio_path;
+      const { existsSync, statSync, createReadStream } = await import("node:fs");
+      if (!existsSync(audioPath)) {
+        return res.status(404).json({ error: "Audio file not found." });
+      }
+
+      const stat = statSync(audioPath);
+      res.writeHead(200, {
+        "Content-Length": stat.size,
+        "Content-Type": "audio/mpeg",
+      });
+      createReadStream(audioPath).pipe(res);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
+  // --- Playlists ---
+  router.get("/api/media/playlists", authMiddleware, async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { rows } = await db.execute(
+        "SELECT p.*, (SELECT COUNT(*) FROM media_playlist_items pi WHERE pi.playlist_id = p.id) as item_count FROM media_playlists p ORDER BY p.updated_at DESC"
+      );
+      res.json({ playlists: rows });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
+  router.get("/api/media/playlists/:id", authMiddleware, async (req, res) => {
+    const db = createDbClient();
+    try {
+      const id = parseInt(req.params.id, 10);
+      const playlist = await db.execute({ sql: "SELECT * FROM media_playlists WHERE id = ?", args: [id] });
+      if (playlist.rows.length === 0) return res.status(404).json({ error: "Not found" });
+
+      const { rows: items } = await db.execute({
+        sql: `SELECT pi.*,
+                CASE pi.item_type
+                  WHEN 'article' THEN (SELECT title FROM media_articles WHERE id = pi.item_id)
+                  WHEN 'briefing' THEN (SELECT title FROM media_briefings WHERE id = pi.item_id)
+                  ELSE NULL
+                END as item_title
+              FROM media_playlist_items pi
+              WHERE pi.playlist_id = ?
+              ORDER BY pi.position ASC`,
+        args: [id],
+      });
+
+      res.json({ playlist: playlist.rows[0], items });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
+  router.post("/api/media/playlists", authMiddleware, async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { name, description } = req.body;
+      if (!name) return res.status(400).json({ error: "Name required" });
+      const result = await db.execute({
+        sql: "INSERT INTO media_playlists (name, description) VALUES (?, ?)",
+        args: [name, description || null],
+      });
+      res.json({ id: result.lastInsertRowid, name });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
+  router.delete("/api/media/playlists/:id", authMiddleware, async (req, res) => {
+    const db = createDbClient();
+    try {
+      const id = parseInt(req.params.id, 10);
+      await db.execute({ sql: "DELETE FROM media_playlists WHERE id = ?", args: [id] });
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
+  // --- Briefings ---
+  router.get("/api/media/briefings", authMiddleware, async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { rows } = await db.execute("SELECT * FROM media_briefings ORDER BY created_at DESC LIMIT 20");
+      res.json({ briefings: rows });
     } catch (err) {
       res.status(500).json({ error: err.message });
     } finally {

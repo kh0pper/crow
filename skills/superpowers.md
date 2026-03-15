@@ -51,7 +51,9 @@ This is the master routing skill. Consult this **before every task** to determin
 | "set up sharing", "export identity", "new device" | "configurar sharing", "exportar identidad", "nuevo dispositivo" | onboarding, peer-network | crow-sharing |
 | "upload file", "store file", "storage", "download file" | "subir archivo", "almacenar", "descargar archivo" | storage | crow-storage |
 | "blog post", "write a post", "publish", "blog settings" | "publicar", "escribir un post", "blog", "configuración del blog" | blog | crow-blog, crow-storage |
-| "podcast", "episode", "audio content", "record" | "podcast", "episodio", "contenido de audio", "grabar" | podcast | crow-blog, crow-storage |
+| "news", "articles", "feed", "RSS", "subscribe to", "briefing", "digest", "media" | "noticias", "artículos", "suscribir", "resumen", "medios" | media | crow-media |
+| "podcast", "episode", "audio content", "listen to" | "podcast", "episodio", "contenido de audio", "escuchar" | media | crow-media |
+| "youtube", "channel", "video", "subscribe youtube" | "youtube", "canal", "video", "suscribir youtube" | media | crow-media |
 | "crow's nest", "dashboard", "settings", "control panel" | "panel", "configuración", "panel de control" | network-setup | (dashboard routes) |
 | "add-on", "extension", "install plugin", "browse extensions" | "complemento", "extensión", "instalar plugin" | add-ons | crow-memory, filesystem |
 | "what can you do", "getting started", "new to crow" | "qué puedes hacer", "cómo empezar", "nuevo en crow" | onboarding-tour | crow-memory |
@@ -64,6 +66,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | "photos", "pictures", "album", "immich" | "fotos", "imágenes", "álbum" | immich | immich |
 | "back up", "backup", "restore data", "export data" | "respaldar", "backup", "restaurar datos", "exportar datos" | backup | filesystem |
 | "delete", "remove", "bulk delete", "is this safe" | "eliminar", "borrar", "eliminar en masa", "es seguro" | safety-guardrails | (depends on action) |
+| "test round", "run tests on", "test on claude.ai", "iterative testing" | "ronda de pruebas", "probar en claude.ai", "pruebas iterativas" | iterative-testing | crow-memory |
 | "organize notes", "brain dump", "sort these ideas", "help me plan from these" | "organizar notas", "ideas sueltas", "ordenar estas ideas", "aquí están mis notas" | ideation | crow-memory, crow-projects |
 | "schedule", "remind me", "every day at", "recurring" | "programar", "recuérdame", "cada día a las" | scheduling | crow-memory |
 | "tutor me", "teach me", "quiz me", "help me understand" | "enséñame", "explícame", "evalúame" | tutoring | crow-memory |

@@ -210,7 +210,7 @@ app.get("/health", async (req, res) => {
   servers.push("crow-media");
 
   const externalToolCount = connectedTools.reduce((sum, s) => sum + s.toolCount, 0);
-  const coreToolCount = 58; // 12 memory + 12 research + 8 sharing + 5 storage + 12 blog + 9 media
+  const coreToolCount = 65; // 12 memory + 12 research + 8 sharing + 5 storage + 12 blog + 16 media
   const routerDisabled = process.env.CROW_DISABLE_ROUTER === "1";
 
   res.json({

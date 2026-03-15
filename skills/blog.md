@@ -83,7 +83,9 @@ Posts default to `private`. Nothing appears on your public blog at `/blog` until
 
 ## Safety
 
-Publishing and deleting posts require user confirmation. See `skills/safety-guardrails.md` Tier 1 for the checkpoint protocol.
+Publishing and deleting posts have server-side confirmation gates. Tools return a preview and confirmation token on first call; the token must be passed back to execute. This enforces a two-step flow at the protocol level. See `skills/safety-guardrails.md` Tier 1 for the full checkpoint protocol.
+
+Set `CROW_SKIP_CONFIRM_GATES=1` to bypass gates (for Claude Code users where behavioral guardrails already work).
 
 ## Post Visibility Guide
 

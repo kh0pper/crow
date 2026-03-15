@@ -19,7 +19,7 @@ tools:
 
 This skill defines safety checkpoints that apply across all Crow tools and workflows. It standardizes when and how to ask for user confirmation before taking actions that are destructive, resource-intensive, or affect network configuration.
 
-**Important:** These are behavioral guardrails — AI prompt guidance that shapes how the assistant interacts with the user. They are not server-side enforcement. For critical actions, future versions may add server-side confirmation gates in tool handlers.
+**Important:** Server-side confirmation gates are now enforced for Tier 1 destructive actions. Tools return a preview and confirmation token on first call; the token must be passed back to execute. This ensures a two-step flow at the protocol level, regardless of the AI client's instruction-following behavior. Set `CROW_SKIP_CONFIRM_GATES=1` to bypass (for Claude Code users where these behavioral guardrails already work).
 
 ## When to Activate
 

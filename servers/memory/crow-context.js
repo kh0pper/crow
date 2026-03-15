@@ -313,7 +313,7 @@ function condenseSection(key, content, { routerStyle = false } = {}) {
 
     case "transparency_rules":
       // Generic bracket format (works on all platforms)
-      return "Transparency: Show [crow: action] notes for autonomous actions (Tier 1). Ask before high-impact actions like deleting memories or sharing data (Tier 2).";
+      return "Transparency: Show [crow: action] notes for autonomous actions. Always confirm with the user before destructive actions (deleting posts, memories, files, or revoking access) — these are permanent and cannot be undone.";
 
     case "skills_reference": {
       // Condensed intent-to-skill routing + tool capabilities
