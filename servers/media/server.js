@@ -11,7 +11,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createDbClient, sanitizeFtsQuery, escapeLikePattern } from "../db.js";
 import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
-import { fetchAndParseFeed } from "./feed-fetcher.js";
+import { fetchAndParseFeed, buildGoogleNewsUrl, postProcessGoogleNewsItems } from "./feed-fetcher.js";
 
 export function createMediaServer(dbPath, options = {}) {
   const server = new McpServer(
@@ -24,14 +24,51 @@ export function createMediaServer(dbPath, options = {}) {
   // --- crow_media_add_source ---
   server.tool(
     "crow_media_add_source",
-    "Subscribe to an RSS news source. Fetches the feed immediately and imports articles.",
+    "Subscribe to an RSS/Atom feed, Google News search, or YouTube channel.",
     {
-      url: z.string().max(2000).describe("RSS/Atom feed URL"),
+      url: z.string().max(2000).optional().describe("RSS/Atom feed URL"),
+      query: z.string().max(500).optional().describe("Google News search query"),
+      youtube_channel: z.string().max(500).optional().describe("YouTube channel URL or ID (e.g. '@mkbhd', 'UCBcRF18a7Qf58cCRy5xuWwQ')"),
       name: z.string().max(500).optional().describe("Display name (auto-detected from feed if omitted)"),
       category: z.string().max(200).optional().describe("Category label (e.g. 'tech', 'politics')"),
       fetch_interval_min: z.number().min(5).max(1440).optional().describe("Fetch interval in minutes (default 30)"),
     },
-    async ({ url, name, category, fetch_interval_min }) => {
+    async ({ url, query, youtube_channel, name, category, fetch_interval_min }) => {
+      // Validate: exactly one of url, query, or youtube_channel
+      const provided = [url, query, youtube_channel].filter(Boolean).length;
+      if (provided > 1) {
+        return {
+          content: [{ type: "text", text: "Provide only one of: url, query, or youtube_channel." }],
+          isError: true,
+        };
+      }
+      if (provided === 0) {
+        return {
+          content: [{ type: "text", text: "Provide url (RSS/Atom feed), query (Google News), or youtube_channel (YouTube channel URL/ID)." }],
+          isError: true,
+        };
+      }
+
+      // YouTube channel handling
+      const isYouTube = !!youtube_channel;
+      if (isYouTube) {
+        try {
+          const { extractYoutubeChannelId, buildYoutubeRssUrl } = await import("./feed-fetcher.js");
+          const channelId = await extractYoutubeChannelId(youtube_channel);
+          url = buildYoutubeRssUrl(channelId);
+        } catch (err) {
+          return {
+            content: [{ type: "text", text: `Failed to resolve YouTube channel: ${err.message}` }],
+            isError: true,
+          };
+        }
+      }
+
+      // If query provided, build Google News URL
+      const isGoogleNews = !!query;
+      if (isGoogleNews) {
+        url = buildGoogleNewsUrl(query);
+      }
       // Check for duplicate
       const existing = await db.execute({
         sql: "SELECT id, name FROM media_sources WHERE url = ?",
@@ -55,16 +92,42 @@ export function createMediaServer(dbPath, options = {}) {
         };
       }
 
-      const sourceName = name || feed.title || url;
+      // Post-process Google News items
+      if (isGoogleNews) {
+        postProcessGoogleNewsItems(items);
+      }
+
+      const sourceName = name || (isGoogleNews ? `Google News: ${query}` : isYouTube ? feed.title || youtube_channel : feed.title) || url;
       const interval = fetch_interval_min || 30;
+      const sourceType = isYouTube ? 'youtube' : isGoogleNews ? 'google_news' : (feed.isPodcast ? 'podcast' : 'rss');
+      const configObj = { image: feed.image, link: feed.link };
+      if (isGoogleNews) configObj.query = query;
+      if (isYouTube) {
+        try {
+          const { extractYoutubeChannelId } = await import("./feed-fetcher.js");
+          configObj.channel_id = await extractYoutubeChannelId(youtube_channel);
+          configObj.channel_url = youtube_channel;
+        } catch {}
+      }
 
       const result = await db.execute({
         sql: `INSERT INTO media_sources (source_type, name, url, category, fetch_interval_min, last_fetched, config)
-              VALUES ('rss', ?, ?, ?, ?, datetime('now'), ?)`,
-        args: [sourceName, url, category || null, interval, JSON.stringify({ image: feed.image, link: feed.link })],
+              VALUES (?, ?, ?, ?, ?, datetime('now'), ?)`,
+        args: [sourceType, sourceName, url, category || null, interval, JSON.stringify(configObj)],
       });
 
       const sourceId = result.lastInsertRowid;
+
+      // Also write to podcast tables for backward compat if detected as podcast
+      if (sourceType === 'podcast') {
+        try {
+          await db.execute({
+            sql: `INSERT OR IGNORE INTO podcast_subscriptions (feed_url, title, description, image_url, last_fetched)
+                  VALUES (?, ?, ?, ?, datetime('now'))`,
+            args: [url, sourceName, feed.description || null, feed.image || null],
+          });
+        } catch {}
+      }
 
       // Import articles
       let imported = 0;
@@ -74,13 +137,14 @@ export function createMediaServer(dbPath, options = {}) {
         try {
           await db.execute({
             sql: `INSERT OR IGNORE INTO media_articles
-                  (source_id, guid, url, title, author, pub_date, content_raw, summary,
+                  (source_id, guid, url, title, author, pub_date, content_raw, summary, image_url, audio_url,
                    content_fetch_status, ai_analysis_status, created_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', datetime('now'))`,
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', datetime('now'))`,
             args: [
               sourceId, guid, item.link || null, item.title,
               item.author || null, item.pub_date ? normalizeDate(item.pub_date) : null,
               item.content || null, item.summary ? item.summary.slice(0, 2000) : null,
+              item.image || null, item.enclosureAudio || null,
             ],
           });
           imported++;
@@ -189,7 +253,7 @@ export function createMediaServer(dbPath, options = {}) {
   // --- crow_media_feed ---
   server.tool(
     "crow_media_feed",
-    "Browse articles from your news feed. Returns a chronological list with optional filters.",
+    "Browse articles from your news feed. Supports chronological or personalized 'for_you' sorting.",
     {
       limit: z.number().min(1).max(50).optional().describe("Max results (default 20)"),
       offset: z.number().min(0).optional().describe("Pagination offset (default 0)"),
@@ -197,9 +261,42 @@ export function createMediaServer(dbPath, options = {}) {
       source_id: z.number().optional().describe("Filter by source ID"),
       unread_only: z.boolean().optional().describe("Only unread articles"),
       starred_only: z.boolean().optional().describe("Only starred articles"),
+      sort: z.enum(["chronological", "for_you"]).optional().describe("Sort order (default chronological)"),
     },
-    async ({ limit, offset, category, source_id, unread_only, starred_only }) => {
-      let sql = `SELECT a.id, a.title, a.author, a.pub_date, a.url, a.summary,
+    async ({ limit, offset, category, source_id, unread_only, starred_only, sort }) => {
+      // Use personalized scoring if sort === "for_you"
+      if (sort === "for_you") {
+        try {
+          const { buildScoredFeedSql } = await import("./scorer.js");
+          const scored = buildScoredFeedSql({
+            limit: limit || 20, offset: offset || 0,
+            category, sourceId: source_id, unreadOnly: unread_only, starredOnly: starred_only,
+          });
+          const result = await db.execute({ sql: scored.sql, args: scored.args });
+
+          if (result.rows.length === 0) {
+            return { content: [{ type: "text", text: "No articles found for your personalized feed. Add sources and interact with articles to build your profile." }] };
+          }
+
+          const lines = result.rows.map((a) => {
+            const flags = [];
+            if (a.is_starred) flags.push("★");
+            if (a.is_saved) flags.push("saved");
+            if (a.is_read) flags.push("read");
+            const flagStr = flags.length > 0 ? ` [${flags.join(", ")}]` : "";
+            const date = a.pub_date ? formatShortDate(a.pub_date) : "";
+            const summaryLine = a.summary ? `\n  ${a.summary.slice(0, 150)}${a.summary.length > 150 ? "..." : ""}` : "";
+            const scoreStr = a.score !== undefined ? ` (score: ${a.score.toFixed(2)})` : "";
+            return `- #${a.id}${flagStr} ${a.title}${scoreStr}\n  ${a.source_name}${a.source_category ? ` (${a.source_category})` : ""} · ${date}${summaryLine}`;
+          });
+
+          return { content: [{ type: "text", text: `${result.rows.length} article(s) — For You:\n\n${lines.join("\n\n")}` }] };
+        } catch (err) {
+          // Fall through to chronological if scorer fails
+        }
+      }
+
+      let sql = `SELECT a.id, a.title, a.author, a.pub_date, a.url, a.summary, a.image_url,
                         s.name as source_name, s.category as source_category,
                         COALESCE(st.is_read, 0) as is_read,
                         COALESCE(st.is_starred, 0) as is_starred,
@@ -321,7 +418,7 @@ export function createMediaServer(dbPath, options = {}) {
         return { content: [{ type: "text", text: "Invalid search query." }], isError: true };
       }
 
-      let sql = `SELECT a.id, a.title, a.author, a.pub_date, a.url, a.summary,
+      let sql = `SELECT a.id, a.title, a.author, a.pub_date, a.url, a.summary, a.image_url,
                         s.name as source_name, s.category as source_category
                  FROM media_articles a
                  JOIN media_articles_fts fts ON a.id = fts.rowid
@@ -393,11 +490,23 @@ export function createMediaServer(dbPath, options = {}) {
           sql: "INSERT INTO media_feedback (article_id, feedback) VALUES (?, ?)",
           args: [article_id, action === "thumbs_up" ? "up" : "down"],
         });
+        // Update interest profiles
+        try {
+          const { updateInterestProfile } = await import("./scorer.js");
+          await updateInterestProfile(db, article_id, action);
+        } catch {}
         return { content: [{ type: "text", text: `Feedback recorded: ${action === "thumbs_up" ? "👍" : "👎"}` }] };
       }
 
       const entry = actionMap[action];
       await db.execute({ sql: entry.sql, args: [article_id] });
+
+      // Update interest profiles for scoring
+      try {
+        const { updateInterestProfile } = await import("./scorer.js");
+        await updateInterestProfile(db, article_id, action);
+      } catch {}
+
       return { content: [{ type: "text", text: `${entry.msg} article ${article_id}.` }] };
     }
   );
@@ -445,13 +554,14 @@ export function createMediaServer(dbPath, options = {}) {
             try {
               const ins = await db.execute({
                 sql: `INSERT OR IGNORE INTO media_articles
-                      (source_id, guid, url, title, author, pub_date, content_raw, summary,
+                      (source_id, guid, url, title, author, pub_date, content_raw, summary, image_url,
                        content_fetch_status, ai_analysis_status, created_at)
-                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', datetime('now'))`,
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', datetime('now'))`,
                 args: [
                   source.id, guid, item.link || null, item.title,
                   item.author || null, item.pub_date ? normalizeDate(item.pub_date) : null,
                   item.content || null, item.summary ? item.summary.slice(0, 2000) : null,
+                  item.image || null,
                 ],
               });
               if (ins.rowsAffected > 0) newCount++;
@@ -507,6 +617,469 @@ export function createMediaServer(dbPath, options = {}) {
     }
   );
 
+  // --- crow_media_listen ---
+  server.tool(
+    "crow_media_listen",
+    "Generate or retrieve TTS audio for an article. Requires edge-tts package (npm install edge-tts).",
+    {
+      article_id: z.number().describe("Article ID"),
+      voice: z.string().max(100).optional().describe("Edge TTS voice (default: en-US-AriaNeural)"),
+    },
+    async ({ article_id, voice }) => {
+      try {
+        const { isEdgeTtsAvailable, getOrGenerateAudio } = await import("./tts.js");
+        if (!(await isEdgeTtsAvailable())) {
+          return {
+            content: [{ type: "text", text: "edge-tts is not installed. Run: npm install edge-tts" }],
+            isError: true,
+          };
+        }
+        const result = await getOrGenerateAudio(db, article_id, voice || "en-US-AriaNeural");
+        const durationMin = result.duration ? `${Math.floor(result.duration / 60)}:${String(Math.round(result.duration % 60)).padStart(2, "0")}` : "unknown";
+        return {
+          content: [{
+            type: "text",
+            text: `Audio ${result.cached ? "retrieved from cache" : "generated"}.\nDuration: ~${durationMin}\nURL: /api/media/articles/${article_id}/audio`,
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text", text: `TTS error: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // --- crow_media_briefing ---
+  server.tool(
+    "crow_media_briefing",
+    "Generate a news briefing: AI narration script from top articles, optionally with TTS audio.",
+    {
+      topic: z.string().max(500).optional().describe("Topic filter (matches categories or search)"),
+      max_articles: z.number().min(1).max(20).optional().describe("Max articles to include (default 5)"),
+      voice: z.string().max(100).optional().describe("TTS voice (omit to skip audio generation)"),
+    },
+    async ({ topic, max_articles, voice }) => {
+      const limit = max_articles || 5;
+
+      // Get top unread articles
+      let sql = `SELECT a.id, a.title, a.url, a.pub_date, a.summary,
+                        s.name as source_name, s.category as source_category
+                 FROM media_articles a
+                 JOIN media_sources s ON s.id = a.source_id
+                 LEFT JOIN media_article_states st ON st.article_id = a.id
+                 WHERE COALESCE(st.is_read, 0) = 0 AND s.enabled = 1`;
+      const args = [];
+      if (topic) {
+        const escaped = escapeLikePattern(topic);
+        sql += " AND (s.category LIKE ? ESCAPE '\\' OR a.title LIKE ? ESCAPE '\\')";
+        args.push(`%${escaped}%`, `%${escaped}%`);
+      }
+      sql += " ORDER BY a.pub_date DESC NULLS LAST LIMIT ?";
+      args.push(limit);
+
+      const { rows: articles } = await db.execute({ sql, args });
+      if (articles.length === 0) {
+        return { content: [{ type: "text", text: "No unread articles found for briefing." }] };
+      }
+
+      // Build narration script
+      const lines = [`Here's your ${topic ? `${topic} ` : ""}news briefing with ${articles.length} stories.\n`];
+      for (let i = 0; i < articles.length; i++) {
+        const a = articles[i];
+        lines.push(`Story ${i + 1}: ${a.title}.`);
+        if (a.summary) lines.push(a.summary.slice(0, 300));
+        lines.push(`From ${a.source_name}.\n`);
+      }
+      const script = lines.join("\n");
+
+      // Store briefing
+      const articleIds = articles.map(a => a.id);
+      let audioPath = null;
+      let duration = null;
+
+      if (voice) {
+        try {
+          const { isEdgeTtsAvailable, generateAudio, resolveAudioDir } = await import("./tts.js");
+          if (await isEdgeTtsAvailable()) {
+            const { join } = await import("node:path");
+            const audioDir = resolveAudioDir();
+            const ts = Date.now();
+            audioPath = join(audioDir, `briefing-${ts}.mp3`);
+            const result = await generateAudio(script, voice, audioPath);
+            duration = result.duration;
+          }
+        } catch {}
+      }
+
+      const insertResult = await db.execute({
+        sql: `INSERT INTO media_briefings (title, script, audio_path, article_ids, duration_sec, voice)
+              VALUES (?, ?, ?, ?, ?, ?)`,
+        args: [
+          topic ? `${topic} Briefing` : "News Briefing",
+          script, audioPath, JSON.stringify(articleIds), duration, voice || null,
+        ],
+      });
+
+      let text = `Briefing generated (ID: ${insertResult.lastInsertRowid})\n${articles.length} article(s) included.\n\n${script}`;
+      if (audioPath) {
+        text += `\nAudio: /api/media/briefings/${insertResult.lastInsertRowid}/audio`;
+      }
+
+      return { content: [{ type: "text", text }] };
+    }
+  );
+
+  // --- crow_media_playlist ---
+  server.tool(
+    "crow_media_playlist",
+    "Manage playlists: create, list, rename, or delete.",
+    {
+      action: z.enum(["create", "list", "rename", "delete"]).describe("Action"),
+      id: z.number().optional().describe("Playlist ID (for rename/delete)"),
+      name: z.string().max(500).optional().describe("Playlist name (for create/rename)"),
+      description: z.string().max(2000).optional().describe("Playlist description"),
+      confirm_token: z.string().max(100).optional().describe("Confirmation token for delete"),
+    },
+    async ({ action, id, name, description, confirm_token }) => {
+      if (action === "create") {
+        if (!name) return { content: [{ type: "text", text: "Name is required for creating a playlist." }], isError: true };
+        const result = await db.execute({
+          sql: "INSERT INTO media_playlists (name, description) VALUES (?, ?)",
+          args: [name, description || null],
+        });
+        return { content: [{ type: "text", text: `Playlist created: "${name}" (ID: ${result.lastInsertRowid})` }] };
+      }
+
+      if (action === "list") {
+        const { rows } = await db.execute(
+          "SELECT p.*, (SELECT COUNT(*) FROM media_playlist_items pi WHERE pi.playlist_id = p.id) as item_count FROM media_playlists p ORDER BY p.updated_at DESC"
+        );
+        if (rows.length === 0) return { content: [{ type: "text", text: "No playlists yet." }] };
+        const lines = rows.map(p => `- #${p.id} "${p.name}" (${p.item_count} items)${p.auto_generated ? " [auto]" : ""}`);
+        return { content: [{ type: "text", text: `${rows.length} playlist(s):\n\n${lines.join("\n")}` }] };
+      }
+
+      if (action === "rename") {
+        if (!id || !name) return { content: [{ type: "text", text: "id and name are required for rename." }], isError: true };
+        await db.execute({
+          sql: "UPDATE media_playlists SET name = ?, updated_at = datetime('now') WHERE id = ?",
+          args: [name, id],
+        });
+        return { content: [{ type: "text", text: `Playlist ${id} renamed to "${name}".` }] };
+      }
+
+      if (action === "delete") {
+        if (!id) return { content: [{ type: "text", text: "id is required for delete." }], isError: true };
+        const existing = await db.execute({ sql: "SELECT * FROM media_playlists WHERE id = ?", args: [id] });
+        if (existing.rows.length === 0) return { content: [{ type: "text", text: `Playlist ${id} not found.` }], isError: true };
+
+        if (!shouldSkipGates()) {
+          if (confirm_token) {
+            if (!validateToken(confirm_token, "delete_playlist", id)) {
+              return { content: [{ type: "text", text: "Invalid or expired token." }], isError: true };
+            }
+          } else {
+            const token = generateToken("delete_playlist", id);
+            return { content: [{ type: "text", text: `Delete playlist "${existing.rows[0].name}"?\nConfirm with token: "${token}"` }] };
+          }
+        }
+
+        await db.execute({ sql: "DELETE FROM media_playlists WHERE id = ?", args: [id] });
+        return { content: [{ type: "text", text: `Deleted playlist "${existing.rows[0].name}".` }] };
+      }
+
+      return { content: [{ type: "text", text: "Unknown action." }], isError: true };
+    }
+  );
+
+  // --- crow_media_playlist_items ---
+  server.tool(
+    "crow_media_playlist_items",
+    "Manage playlist items: add, remove, reorder, or list.",
+    {
+      action: z.enum(["add", "remove", "reorder", "list"]).describe("Action"),
+      playlist_id: z.number().describe("Playlist ID"),
+      item_type: z.string().max(50).optional().describe("Item type: article, briefing, episode"),
+      item_id: z.number().optional().describe("Item ID to add/remove"),
+      item_ids: z.array(z.number()).optional().describe("Ordered item IDs for reorder"),
+    },
+    async ({ action, playlist_id, item_type, item_id, item_ids }) => {
+      // Verify playlist exists
+      const pl = await db.execute({ sql: "SELECT id FROM media_playlists WHERE id = ?", args: [playlist_id] });
+      if (pl.rows.length === 0) return { content: [{ type: "text", text: `Playlist ${playlist_id} not found.` }], isError: true };
+
+      if (action === "add") {
+        if (!item_type || !item_id) return { content: [{ type: "text", text: "item_type and item_id required." }], isError: true };
+        const maxPos = await db.execute({
+          sql: "SELECT COALESCE(MAX(position), 0) as m FROM media_playlist_items WHERE playlist_id = ?",
+          args: [playlist_id],
+        });
+        await db.execute({
+          sql: "INSERT INTO media_playlist_items (playlist_id, item_type, item_id, position) VALUES (?, ?, ?, ?)",
+          args: [playlist_id, item_type, item_id, (maxPos.rows[0]?.m || 0) + 1],
+        });
+        await db.execute({ sql: "UPDATE media_playlists SET updated_at = datetime('now') WHERE id = ?", args: [playlist_id] });
+        return { content: [{ type: "text", text: `Added ${item_type} #${item_id} to playlist.` }] };
+      }
+
+      if (action === "remove") {
+        if (!item_id) return { content: [{ type: "text", text: "item_id required." }], isError: true };
+        await db.execute({
+          sql: "DELETE FROM media_playlist_items WHERE playlist_id = ? AND item_id = ?",
+          args: [playlist_id, item_id],
+        });
+        return { content: [{ type: "text", text: `Removed item #${item_id} from playlist.` }] };
+      }
+
+      if (action === "reorder") {
+        if (!item_ids || item_ids.length === 0) return { content: [{ type: "text", text: "item_ids array required." }], isError: true };
+        for (let i = 0; i < item_ids.length; i++) {
+          await db.execute({
+            sql: "UPDATE media_playlist_items SET position = ? WHERE playlist_id = ? AND item_id = ?",
+            args: [i + 1, playlist_id, item_ids[i]],
+          });
+        }
+        return { content: [{ type: "text", text: `Reordered ${item_ids.length} items.` }] };
+      }
+
+      if (action === "list") {
+        const { rows } = await db.execute({
+          sql: `SELECT pi.*,
+                  CASE pi.item_type
+                    WHEN 'article' THEN (SELECT title FROM media_articles WHERE id = pi.item_id)
+                    WHEN 'briefing' THEN (SELECT title FROM media_briefings WHERE id = pi.item_id)
+                    ELSE 'Unknown'
+                  END as item_title
+                FROM media_playlist_items pi
+                WHERE pi.playlist_id = ?
+                ORDER BY pi.position ASC`,
+          args: [playlist_id],
+        });
+        if (rows.length === 0) return { content: [{ type: "text", text: "Playlist is empty." }] };
+        const lines = rows.map(r => `${r.position}. [${r.item_type}] ${r.item_title || `#${r.item_id}`}`);
+        return { content: [{ type: "text", text: `${rows.length} item(s):\n\n${lines.join("\n")}` }] };
+      }
+
+      return { content: [{ type: "text", text: "Unknown action." }], isError: true };
+    }
+  );
+
+  // --- crow_media_smart_folders ---
+  server.tool(
+    "crow_media_smart_folders",
+    "Manage smart folders: saved filter presets that auto-populate with matching articles.",
+    {
+      action: z.enum(["create", "list", "view", "update", "delete"]).describe("Action"),
+      id: z.number().optional().describe("Folder ID (for view/update/delete)"),
+      name: z.string().max(500).optional().describe("Folder name"),
+      description: z.string().max(2000).optional().describe("Folder description"),
+      query: z.object({
+        category: z.string().optional(),
+        source_id: z.number().optional(),
+        topics: z.array(z.string()).optional(),
+        unread_only: z.boolean().optional(),
+        fts_query: z.string().optional(),
+      }).optional().describe("Filter query object"),
+      limit: z.number().min(1).max(50).optional().describe("Max articles for view (default 20)"),
+      offset: z.number().min(0).optional().describe("Pagination offset for view"),
+      confirm_token: z.string().max(100).optional().describe("Confirmation token for delete"),
+    },
+    async ({ action, id, name, description, query, limit, offset, confirm_token }) => {
+      if (action === "create") {
+        if (!name || !query) return { content: [{ type: "text", text: "name and query required." }], isError: true };
+        const result = await db.execute({
+          sql: "INSERT INTO media_smart_folders (name, description, query_json) VALUES (?, ?, ?)",
+          args: [name, description || null, JSON.stringify(query)],
+        });
+        return { content: [{ type: "text", text: `Smart folder created: "${name}" (ID: ${result.lastInsertRowid})` }] };
+      }
+
+      if (action === "list") {
+        const { rows } = await db.execute("SELECT * FROM media_smart_folders ORDER BY name ASC");
+        if (rows.length === 0) return { content: [{ type: "text", text: "No smart folders. Create one with action: 'create'." }] };
+        const lines = rows.map(f => {
+          const q = JSON.parse(f.query_json || "{}");
+          const filters = [];
+          if (q.category) filters.push(`category: ${q.category}`);
+          if (q.fts_query) filters.push(`search: "${q.fts_query}"`);
+          if (q.unread_only) filters.push("unread");
+          return `- #${f.id} "${f.name}" [${filters.join(", ") || "all"}]`;
+        });
+        return { content: [{ type: "text", text: `${rows.length} folder(s):\n\n${lines.join("\n")}` }] };
+      }
+
+      if (action === "view") {
+        if (!id) return { content: [{ type: "text", text: "id required for view." }], isError: true };
+        const folder = await db.execute({ sql: "SELECT * FROM media_smart_folders WHERE id = ?", args: [id] });
+        if (folder.rows.length === 0) return { content: [{ type: "text", text: `Folder ${id} not found.` }], isError: true };
+
+        const q = JSON.parse(folder.rows[0].query_json || "{}");
+        const maxResults = limit || 20;
+        const offsetVal = offset || 0;
+
+        // Build query from filter
+        let sql = `SELECT a.id, a.title, a.pub_date, a.url, a.summary,
+                          s.name as source_name, s.category as source_category,
+                          COALESCE(st.is_read, 0) as is_read
+                   FROM media_articles a
+                   JOIN media_sources s ON s.id = a.source_id
+                   LEFT JOIN media_article_states st ON st.article_id = a.id
+                   WHERE s.enabled = 1`;
+        const args = [];
+
+        if (q.category) { sql += " AND s.category = ?"; args.push(q.category); }
+        if (q.source_id) { sql += " AND a.source_id = ?"; args.push(q.source_id); }
+        if (q.unread_only) sql += " AND COALESCE(st.is_read, 0) = 0";
+        if (q.fts_query) {
+          const safe = sanitizeFtsQuery(q.fts_query);
+          if (safe) {
+            sql = sql.replace("FROM media_articles a", "FROM media_articles a JOIN media_articles_fts fts ON a.id = fts.rowid");
+            sql += " AND fts.media_articles_fts MATCH ?";
+            args.push(safe);
+          }
+        }
+
+        sql += " ORDER BY a.pub_date DESC NULLS LAST LIMIT ? OFFSET ?";
+        args.push(maxResults, offsetVal);
+
+        const { rows: articles } = await db.execute({ sql, args });
+        if (articles.length === 0) return { content: [{ type: "text", text: `Folder "${folder.rows[0].name}": no matching articles.` }] };
+
+        const lines = articles.map(a => {
+          const date = a.pub_date ? formatShortDate(a.pub_date) : "";
+          return `- #${a.id} ${a.title}\n  ${a.source_name} · ${date}`;
+        });
+
+        return { content: [{ type: "text", text: `Folder "${folder.rows[0].name}" — ${articles.length} article(s):\n\n${lines.join("\n\n")}` }] };
+      }
+
+      if (action === "update") {
+        if (!id) return { content: [{ type: "text", text: "id required." }], isError: true };
+        const updates = [];
+        const args = [];
+        if (name) { updates.push("name = ?"); args.push(name); }
+        if (description !== undefined) { updates.push("description = ?"); args.push(description); }
+        if (query) { updates.push("query_json = ?"); args.push(JSON.stringify(query)); }
+        if (updates.length === 0) return { content: [{ type: "text", text: "Nothing to update." }] };
+        updates.push("updated_at = datetime('now')");
+        args.push(id);
+        await db.execute({ sql: `UPDATE media_smart_folders SET ${updates.join(", ")} WHERE id = ?`, args });
+        return { content: [{ type: "text", text: `Folder ${id} updated.` }] };
+      }
+
+      if (action === "delete") {
+        if (!id) return { content: [{ type: "text", text: "id required." }], isError: true };
+        const existing = await db.execute({ sql: "SELECT name FROM media_smart_folders WHERE id = ?", args: [id] });
+        if (existing.rows.length === 0) return { content: [{ type: "text", text: `Folder ${id} not found.` }], isError: true };
+
+        if (!shouldSkipGates()) {
+          if (confirm_token) {
+            if (!validateToken(confirm_token, "delete_smart_folder", id)) {
+              return { content: [{ type: "text", text: "Invalid or expired token." }], isError: true };
+            }
+          } else {
+            const token = generateToken("delete_smart_folder", id);
+            return { content: [{ type: "text", text: `Delete folder "${existing.rows[0].name}"?\nConfirm with token: "${token}"` }] };
+          }
+        }
+
+        await db.execute({ sql: "DELETE FROM media_smart_folders WHERE id = ?", args: [id] });
+        return { content: [{ type: "text", text: `Deleted folder "${existing.rows[0].name}".` }] };
+      }
+
+      return { content: [{ type: "text", text: "Unknown action." }], isError: true };
+    }
+  );
+
+  // --- crow_media_digest_preview ---
+  server.tool(
+    "crow_media_digest_preview",
+    "Preview what a digest email would contain (top unread articles).",
+    {
+      smart_folder_id: z.number().optional().describe("Limit to articles matching a smart folder"),
+      limit: z.number().min(1).max(30).optional().describe("Max articles (default 15)"),
+    },
+    async ({ smart_folder_id, limit }) => {
+      const maxResults = limit || 15;
+      let filterSql = "";
+      const args = [];
+
+      if (smart_folder_id) {
+        const folder = await db.execute({ sql: "SELECT query_json FROM media_smart_folders WHERE id = ?", args: [smart_folder_id] });
+        if (folder.rows.length > 0) {
+          const q = JSON.parse(folder.rows[0].query_json || "{}");
+          if (q.category) { filterSql += " AND s.category = ?"; args.push(q.category); }
+          if (q.source_id) { filterSql += " AND a.source_id = ?"; args.push(q.source_id); }
+        }
+      }
+
+      const { rows: articles } = await db.execute({
+        sql: `SELECT a.id, a.title, a.url, a.pub_date, a.summary,
+                     s.name as source_name
+              FROM media_articles a
+              JOIN media_sources s ON s.id = a.source_id
+              LEFT JOIN media_article_states st ON st.article_id = a.id
+              WHERE COALESCE(st.is_read, 0) = 0 AND s.enabled = 1 ${filterSql}
+              ORDER BY a.pub_date DESC NULLS LAST LIMIT ?`,
+        args: [...args, maxResults],
+      });
+
+      if (articles.length === 0) {
+        return { content: [{ type: "text", text: "No unread articles for digest." }] };
+      }
+
+      const lines = articles.map((a, i) => {
+        const date = a.pub_date ? formatShortDate(a.pub_date) : "";
+        return `${i + 1}. ${a.title}\n   ${a.source_name} · ${date}\n   ${a.summary ? a.summary.slice(0, 120) + "..." : ""}`;
+      });
+
+      return { content: [{ type: "text", text: `Digest preview (${articles.length} articles):\n\n${lines.join("\n\n")}` }] };
+    }
+  );
+
+  // --- crow_media_digest_settings ---
+  server.tool(
+    "crow_media_digest_settings",
+    "Configure email digest delivery settings.",
+    {
+      schedule: z.enum(["daily_morning", "daily_evening", "weekly"]).optional().describe("Delivery schedule"),
+      email: z.string().max(500).optional().describe("Recipient email address"),
+      custom_instructions: z.string().max(2000).optional().describe("Custom instructions for digest content"),
+      enabled: z.boolean().optional().describe("Enable/disable digest delivery"),
+    },
+    async ({ schedule, email, custom_instructions, enabled }) => {
+      // Get or create preferences row
+      let { rows } = await db.execute("SELECT * FROM media_digest_preferences LIMIT 1");
+
+      if (rows.length === 0) {
+        await db.execute({
+          sql: "INSERT INTO media_digest_preferences (schedule, email, custom_instructions, enabled) VALUES (?, ?, ?, ?)",
+          args: [schedule || "daily_morning", email || null, custom_instructions || null, enabled ? 1 : 0],
+        });
+        rows = (await db.execute("SELECT * FROM media_digest_preferences LIMIT 1")).rows;
+      } else {
+        const updates = [];
+        const args = [];
+        if (schedule !== undefined) { updates.push("schedule = ?"); args.push(schedule); }
+        if (email !== undefined) { updates.push("email = ?"); args.push(email); }
+        if (custom_instructions !== undefined) { updates.push("custom_instructions = ?"); args.push(custom_instructions); }
+        if (enabled !== undefined) { updates.push("enabled = ?"); args.push(enabled ? 1 : 0); }
+        if (updates.length > 0) {
+          args.push(rows[0].id);
+          await db.execute({ sql: `UPDATE media_digest_preferences SET ${updates.join(", ")} WHERE id = ?`, args });
+          rows = (await db.execute("SELECT * FROM media_digest_preferences LIMIT 1")).rows;
+        }
+      }
+
+      const pref = rows[0];
+      return {
+        content: [{
+          type: "text",
+          text: `Digest settings:\n  Schedule: ${pref.schedule}\n  Email: ${pref.email || "(not set)"}\n  Enabled: ${pref.enabled ? "yes" : "no"}\n  Custom instructions: ${pref.custom_instructions || "(none)"}\n  Last sent: ${pref.last_sent || "never"}\n\nRequires SMTP configured in .env (CROW_SMTP_HOST, etc.) and nodemailer installed.`,
+        }],
+      };
+    }
+  );
+
   // --- Prompt ---
   server.prompt(
     "media-guide",
@@ -518,13 +1091,18 @@ export function createMediaServer(dbPath, options = {}) {
           type: "text",
           text: `Crow Media Guide
 
-1. Subscribe — Use crow_media_add_source with an RSS/Atom feed URL
+1. Subscribe — Use crow_media_add_source with RSS/Atom URL, Google News query, or YouTube channel
 2. Browse — crow_media_feed to see your personalized news feed
 3. Read — crow_media_get_article for full article content
 4. Search — crow_media_search for full-text search across all articles
 5. Interact — crow_media_article_action to star, save, or give feedback
-6. Refresh — crow_media_refresh to trigger immediate feed updates
-7. Stats — crow_media_stats for an overview of your media library`,
+6. Listen — crow_media_listen to generate TTS audio for an article
+7. Briefings — crow_media_briefing to generate an AI-narrated news briefing
+8. Playlists — crow_media_playlist and crow_media_playlist_items to organize content
+9. Smart Folders — crow_media_smart_folders to create saved filter presets
+10. Digest — crow_media_digest_settings + crow_media_digest_preview for email digests
+11. Refresh — crow_media_refresh to trigger immediate feed updates
+12. Stats — crow_media_stats for an overview of your media library`,
         },
       }],
     })

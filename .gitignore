@@ -7,3 +7,5 @@ data/*.db-shm
 *.log
 .worktrees/
 .claude/skills/
+tests/claude-ai/results/*.json
+tests/claude-ai/screenshots/

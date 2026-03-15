@@ -51,6 +51,138 @@ export async function fetchAndParseFeed(url) {
   return parseFeed(xml);
 }
 
+// --- Image extraction ---
+
+/**
+ * Extract the best image URL from an RSS/Atom item's raw XML.
+ * Priority: media:content → media:thumbnail → enclosure (image/*) → itunes:image
+ * @param {string} itemXml - Raw XML of a single <item> or <entry>
+ * @returns {string|null}
+ */
+function extractItemImage(itemXml) {
+  // 1. <media:content url="..."> (possibly nested)
+  const mediaContent = itemXml.match(/<media:content[^>]+url="([^"]+)"/);
+  if (mediaContent) return mediaContent[1];
+
+  // 2. <media:thumbnail url="...">
+  const mediaThumbnail = itemXml.match(/<media:thumbnail[^>]+url="([^"]+)"/);
+  if (mediaThumbnail) return mediaThumbnail[1];
+
+  // 3. <enclosure> with type="image/..."
+  const enclosure = itemXml.match(/<enclosure[^>]+type="image\/[^"]*"[^>]+url="([^"]+)"/);
+  if (enclosure) return enclosure[1];
+  // Also check reversed attribute order
+  const enclosure2 = itemXml.match(/<enclosure[^>]+url="([^"]+)"[^>]+type="image\/[^"]*"/);
+  if (enclosure2) return enclosure2[1];
+
+  // 4. <itunes:image href="...">
+  const itunesImage = itemXml.match(/<itunes:image[^>]+href="([^"]+)"/);
+  if (itunesImage) return itunesImage[1];
+
+  return null;
+}
+
+// --- YouTube ---
+
+/**
+ * Extract a YouTube channel ID from various URL formats.
+ * Supports: /channel/UCxxx, /@handle, /c/name, /user/name, raw channel ID.
+ * For @handle formats, fetches the page HTML to extract channelId.
+ * @param {string} input - Channel URL, handle, or ID
+ * @returns {Promise<string>} Channel ID (UC...)
+ */
+export async function extractYoutubeChannelId(input) {
+  if (!input) throw new Error("No YouTube channel provided.");
+
+  const trimmed = input.trim();
+
+  // Raw channel ID
+  if (/^UC[\w-]{22}$/.test(trimmed)) return trimmed;
+
+  // URL parsing
+  let url;
+  try {
+    url = new URL(trimmed.startsWith("http") ? trimmed : `https://www.youtube.com/${trimmed.startsWith("@") ? trimmed : `@${trimmed}`}`);
+  } catch {
+    throw new Error(`Invalid YouTube channel: "${input}"`);
+  }
+
+  const path = url.pathname;
+
+  // /channel/UCxxx
+  const channelMatch = path.match(/\/channel\/(UC[\w-]{22})/);
+  if (channelMatch) return channelMatch[1];
+
+  // /@handle, /c/name, /user/name — need to fetch page to get channel ID
+  if (path.match(/^\/@[\w.-]+/) || path.match(/^\/c\//) || path.match(/^\/user\//)) {
+    const pageUrl = `https://www.youtube.com${path}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+    try {
+      const res = await fetch(pageUrl, {
+        signal: controller.signal,
+        headers: { "User-Agent": USER_AGENT },
+      });
+      if (!res.ok) throw new Error(`YouTube returned HTTP ${res.status}`);
+      const html = await res.text();
+
+      // Look for channel ID in meta tags or page data
+      const metaMatch = html.match(/(?:<meta[^>]+content="https:\/\/www\.youtube\.com\/channel\/(UC[\w-]{22})")|(?:"channelId":"(UC[\w-]{22})")/);
+      if (metaMatch) return metaMatch[1] || metaMatch[2];
+
+      // Try externalId pattern
+      const extMatch = html.match(/"externalId":"(UC[\w-]{22})"/);
+      if (extMatch) return extMatch[1];
+
+      throw new Error("Could not find channel ID on page.");
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  throw new Error(`Could not parse YouTube channel from: "${input}"`);
+}
+
+/**
+ * Build a YouTube RSS feed URL from a channel ID.
+ * @param {string} channelId - YouTube channel ID (UC...)
+ * @returns {string} RSS feed URL
+ */
+export function buildYoutubeRssUrl(channelId) {
+  return `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`;
+}
+
+// --- Google News ---
+
+/**
+ * Build a Google News RSS search URL.
+ * @param {string} query - Search query
+ * @param {object} [opts] - Options: hl, gl, ceid
+ * @returns {string}
+ */
+export function buildGoogleNewsUrl(query, { hl = "en-US", gl = "US", ceid = "US:en" } = {}) {
+  return `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=${hl}&gl=${gl}&ceid=${ceid}`;
+}
+
+/**
+ * Post-process Google News items: strip source name suffix from titles.
+ * @param {Array} items - Parsed feed items
+ * @returns {Array} Same items array, mutated
+ */
+export function postProcessGoogleNewsItems(items) {
+  for (const item of items) {
+    if (item.title && item.title.includes(' - ')) {
+      const lastDash = item.title.lastIndexOf(' - ');
+      if (lastDash > 0) {
+        const sourceName = item.title.slice(lastDash + 3).trim();
+        item.title = item.title.slice(0, lastDash).trim();
+        if (!item.author) item.author = sourceName;
+      }
+    }
+  }
+  return items;
+}
+
 // --- Internal parsers ---
 
 function getTag(str, tag) {
@@ -81,6 +213,7 @@ function parseRss(xml) {
     description: getCDATA(getTag(preItems, "description") || ""),
     link: getTag(preItems, "link") || "",
     image: null,
+    isPodcast: false,
   };
 
   // Image: itunes:image or <image><url>
@@ -93,11 +226,17 @@ function parseRss(xml) {
   }
 
   const items = [];
+  let hasAudioEnclosures = false;
   const itemMatches = xml.matchAll(/<item>([\s\S]*?)<\/item>/g);
   for (const m of itemMatches) {
     const item = m[1];
     const guid = getTag(item, "guid");
     const link = getTag(item, "link");
+
+    // Detect audio enclosures for podcast detection
+    const audioEnclosure = item.match(/<enclosure[^>]+type="audio\/[^"]*"[^>]+url="([^"]+)"/) ||
+                           item.match(/<enclosure[^>]+url="([^"]+)"[^>]+type="audio\/[^"]*"/);
+    if (audioEnclosure) hasAudioEnclosures = true;
 
     items.push({
       guid: guid ? getCDATA(guid) : link || null,
@@ -107,7 +246,15 @@ function parseRss(xml) {
       pub_date: getTag(item, "pubDate") || getTag(item, "dc:date") || null,
       content: getCDATA(getTag(item, "content:encoded") || ""),
       summary: stripHtml(getCDATA(getTag(item, "description") || "")),
+      image: extractItemImage(item),
+      enclosureAudio: audioEnclosure ? audioEnclosure[1] : null,
     });
+  }
+
+  // If most items have audio enclosures, mark as podcast
+  if (hasAudioEnclosures && items.length > 0) {
+    const audioCount = items.filter(i => i.enclosureAudio).length;
+    feed.isPodcast = audioCount / items.length >= 0.5;
   }
 
   return { feed, items };
@@ -151,6 +298,7 @@ function parseAtom(xml) {
       pub_date: getTag(entry, "published") || getTag(entry, "updated") || null,
       content,
       summary: summary || stripHtml(content).slice(0, 500),
+      image: extractItemImage(entry),
     });
   }
 
