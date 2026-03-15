@@ -25,6 +25,37 @@ export function messagesClientJS(opts) {
     return d.innerHTML;
   }
 
+  // Lightweight markdown → safe HTML (escapes first via escapeH, then applies formatting)
+  function renderMd(text) {
+    if (!text) return '';
+    var s = escapeH(text);
+    var BT = '\\x60'; // backtick (escaped for template literal)
+    // Code blocks
+    s = s.replace(new RegExp(BT+BT+BT+'(\\\\w*)\\\\n([\\\\s\\\\S]*?)'+BT+BT+BT, 'g'), function(_, lang, code) {
+      return '<pre style="background:var(--crow-bg-deep,#111);padding:0.5rem;border-radius:4px;overflow-x:auto;font-size:0.85rem;margin:0.5rem 0"><code>' + code.trim() + '</code></pre>';
+    });
+    // Inline code
+    s = s.replace(new RegExp(BT+'([^'+BT+']+)'+BT, 'g'), '<code style="background:var(--crow-bg-deep,#111);padding:1px 4px;border-radius:3px;font-size:0.9em">$1</code>');
+    // Headers
+    s = s.replace(/^### (.+)$/gm, '<strong style="font-size:1rem;display:block;margin:0.75rem 0 0.25rem">$1</strong>');
+    s = s.replace(/^## (.+)$/gm, '<strong style="font-size:1.05rem;display:block;margin:0.75rem 0 0.25rem">$1</strong>');
+    s = s.replace(/^# (.+)$/gm, '<strong style="font-size:1.1rem;display:block;margin:0.75rem 0 0.25rem">$1</strong>');
+    // Bold + italic
+    s = s.replace(/\\*\\*\\*(.+?)\\*\\*\\*/g, '<strong><em>$1</em></strong>');
+    s = s.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
+    s = s.replace(/\\*(.+?)\\*/g, '<em>$1</em>');
+    // Horizontal rule
+    s = s.replace(/^---$/gm, '<hr style="border:none;border-top:1px solid var(--crow-border);margin:0.75rem 0">');
+    // Unordered lists
+    s = s.replace(/^- (.+)$/gm, '<li style="margin-left:1.2rem;list-style:disc">$1</li>');
+    // Ordered lists
+    s = s.replace(/^\\d+\\. (.+)$/gm, '<li style="margin-left:1.2rem;list-style:decimal">$1</li>');
+    // Line breaks
+    s = s.replace(/\\n\\n/g, '<br><br>');
+    s = s.replace(/\\n/g, '<br>');
+    return s;
+  }
+
   function el(tag, attrs, children) {
     var e = document.createElement(tag);
     if (attrs) {
@@ -292,7 +323,7 @@ export function messagesClientJS(opts) {
               viewport.appendChild(assistantDiv);
             }
             assistantContent += eventData.delta || '';
-            assistantDiv.textContent = assistantContent;
+            assistantDiv.innerHTML = renderMd(assistantContent);
             viewport.scrollTop = viewport.scrollHeight;
           }
 
@@ -590,9 +621,15 @@ export function messagesClientJS(opts) {
       }
     }
 
-    // Content
+    // Content (render markdown for assistant messages, plain text for user)
     if (msg.content) {
-      div.appendChild(el('span', { text: msg.content }));
+      if (!isSent && msg.role === 'assistant') {
+        var contentSpan = document.createElement('span');
+        contentSpan.innerHTML = renderMd(msg.content);
+        div.appendChild(contentSpan);
+      } else {
+        div.appendChild(el('span', { text: msg.content }));
+      }
     }
 
     // Attachments
