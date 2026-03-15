@@ -17,7 +17,7 @@
 
 import { Router } from "express";
 import { createDbClient } from "../../db.js";
-import { createProviderAdapter, getProviderConfig, listProviders, testProviderConnection } from "../ai/provider.js";
+import { createProviderAdapter, createAdapterFromProfile, getProviderConfig, getAiProfiles, listProviders, testProviderConnection, testProfileConnection } from "../ai/provider.js";
 import { createToolExecutor, getChatTools, MAX_TOOL_ROUNDS } from "../ai/tool-executor.js";
 import { generateSystemPrompt } from "../ai/system-prompt.js";
 
@@ -69,33 +69,84 @@ export default function chatRouter(dashboardAuth) {
     res.json(result);
   });
 
+  // --- AI Profiles ---
+
+  router.get("/api/chat/profiles", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const profiles = await getAiProfiles(db);
+      const envConfig = getProviderConfig();
+      res.json({
+        profiles,
+        envConfig: envConfig ? { provider: envConfig.provider, model: envConfig.model, baseUrl: envConfig.baseUrl } : null,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
+  router.post("/api/chat/profiles/test", async (req, res) => {
+    const { profile_id } = req.body || {};
+    if (!profile_id) return res.status(400).json({ error: "profile_id required" });
+    const db = createDbClient();
+    try {
+      const profiles = await getAiProfiles(db, { includeKeys: true });
+      const profile = profiles.find(p => p.id === profile_id);
+      if (!profile) return res.status(404).json({ error: "Profile not found" });
+      const result = await testProfileConnection(profile);
+      res.json(result);
+    } finally {
+      db.close();
+    }
+  });
+
   // --- Conversations CRUD ---
 
   router.post("/api/chat/conversations", async (req, res) => {
     const db = createDbClient();
     try {
-      const config = getProviderConfig();
-      if (!config) {
-        return res.status(400).json({ error: "No AI provider configured" });
+      const { title, system_prompt, profile_id, model } = req.body || {};
+
+      let provider, convModel, profileId = null;
+
+      if (profile_id) {
+        // Profile-based conversation
+        const profiles = await getAiProfiles(db);
+        const profile = profiles.find(p => p.id === profile_id);
+        if (!profile) return res.status(400).json({ error: "Unknown profile" });
+        provider = profile.provider;
+        convModel = model || profile.defaultModel || "";
+        profileId = profile_id;
+      } else {
+        // Env-based fallback
+        const config = getProviderConfig();
+        if (!config) {
+          return res.status(400).json({ error: "No AI provider configured. Add an AI Profile in Settings." });
+        }
+        provider = config.provider;
+        convModel = model || config.model || "";
       }
 
-      const { title, system_prompt } = req.body || {};
       const result = await db.execute({
-        sql: `INSERT INTO chat_conversations (title, provider, model, system_prompt)
-              VALUES (?, ?, ?, ?)`,
+        sql: `INSERT INTO chat_conversations (title, provider, model, system_prompt, profile_id)
+              VALUES (?, ?, ?, ?, ?)`,
         args: [
           title || "New conversation",
-          config.provider,
-          config.model || "",
+          provider,
+          convModel,
           system_prompt || null,
+          profileId,
         ],
       });
 
       res.status(201).json({
         id: Number(result.lastInsertRowid),
         title: title || "New conversation",
-        provider: config.provider,
-        model: config.model || "",
+        provider,
+        model: convModel,
+        profile_id: profileId,
       });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -111,7 +162,7 @@ export default function chatRouter(dashboardAuth) {
       const offset = parseInt(req.query.offset) || 0;
 
       const { rows } = await db.execute({
-        sql: `SELECT id, title, provider, model, total_tokens, created_at, updated_at
+        sql: `SELECT id, title, provider, model, profile_id, total_tokens, created_at, updated_at
               FROM chat_conversations
               ORDER BY updated_at DESC
               LIMIT ? OFFSET ?`,
@@ -183,6 +234,43 @@ export default function chatRouter(dashboardAuth) {
     }
   });
 
+  // --- Update Conversation (model switch) ---
+
+  router.patch("/api/chat/conversations/:id", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const id = parseInt(req.params.id);
+      if (!id) return res.status(400).json({ error: "Invalid conversation ID" });
+
+      const { model } = req.body || {};
+      if (!model || typeof model !== "string" || model.length > 100) {
+        return res.status(400).json({ error: "Valid model name required" });
+      }
+
+      // Validate model against profile's model list (if profile-based)
+      const conv = await db.execute({ sql: "SELECT profile_id FROM chat_conversations WHERE id = ?", args: [id] });
+      if (!conv.rows[0]) return res.status(404).json({ error: "Conversation not found" });
+
+      if (conv.rows[0].profile_id) {
+        const profiles = await getAiProfiles(db);
+        const profile = profiles.find(p => p.id === conv.rows[0].profile_id);
+        if (profile?.models && !profile.models.includes(model)) {
+          return res.status(400).json({ error: "Model not available in this profile" });
+        }
+      }
+
+      await db.execute({
+        sql: "UPDATE chat_conversations SET model = ?, updated_at = datetime('now') WHERE id = ?",
+        args: [model, id],
+      });
+      res.json({ ok: true, model });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
   // --- Send Message (SSE stream) ---
 
   router.post("/api/chat/conversations/:id/messages", async (req, res) => {
@@ -246,11 +334,24 @@ export default function chatRouter(dashboardAuth) {
         args: [convId, content.trim()],
       });
 
-      // Get provider adapter
+      // Get provider adapter (profile-aware)
       let adapter;
       try {
-        const result = await createProviderAdapter();
-        adapter = result.adapter;
+        if (conversation.profile_id) {
+          const profiles = await getAiProfiles(db, { includeKeys: true });
+          const profile = profiles.find(p => p.id === conversation.profile_id);
+          if (!profile) {
+            // Profile deleted — fall back to env config
+            const result = await createProviderAdapter();
+            adapter = result.adapter;
+          } else {
+            const result = await createAdapterFromProfile(profile, conversation.model);
+            adapter = result.adapter;
+          }
+        } else {
+          const result = await createProviderAdapter();
+          adapter = result.adapter;
+        }
       } catch (err) {
         sendEvent("error", { message: err.message, code: err.code || "provider_error" });
         res.end();

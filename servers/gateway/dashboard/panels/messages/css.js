@@ -164,6 +164,21 @@ export function messagesCSS() {
     font-size: 0.7rem;
     color: var(--crow-text-muted);
   }
+  .msg-model-select {
+    background: var(--crow-surface);
+    border: 1px solid var(--crow-border);
+    border-radius: 4px;
+    color: var(--crow-text-muted);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    padding: 2px 6px;
+    max-width: 200px;
+    cursor: pointer;
+  }
+  .msg-model-select:focus {
+    outline: 1px solid var(--crow-accent);
+    border-color: var(--crow-accent);
+  }
   .msg-chat-header-status {
     width: 8px;
     height: 8px;

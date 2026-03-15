@@ -153,6 +153,95 @@ export default {
         return;
       }
 
+      if (action === "save_ai_profile") {
+        const { profile_id, profile_name, profile_provider, profile_api_key, profile_base_url, profile_models, profile_default_model } = req.body;
+        if (!profile_name || !profile_provider) {
+          res.json({ ok: false, error: "Name and provider are required" });
+          return;
+        }
+
+        // Parse models from comma-separated string
+        const models = (profile_models || "").split(",").map(m => m.trim()).filter(Boolean);
+        const defaultModel = profile_default_model || models[0] || "";
+
+        // Read existing profiles
+        const existing = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'ai_profiles'", args: [] });
+        let profiles = [];
+        try { profiles = JSON.parse(existing.rows[0]?.value || "[]"); } catch {}
+
+        if (profile_id) {
+          // Update existing profile
+          const idx = profiles.findIndex(p => p.id === profile_id);
+          if (idx === -1) { res.json({ ok: false, error: "Profile not found" }); return; }
+          profiles[idx].name = profile_name;
+          profiles[idx].provider = profile_provider;
+          if (profile_api_key) profiles[idx].apiKey = profile_api_key; // blank = keep existing
+          profiles[idx].baseUrl = profile_base_url || "";
+          profiles[idx].models = models;
+          profiles[idx].defaultModel = defaultModel;
+        } else {
+          // Create new profile
+          const { randomBytes } = await import("node:crypto");
+          const id = randomBytes(4).toString("hex");
+          profiles.push({
+            id,
+            name: profile_name,
+            provider: profile_provider,
+            apiKey: profile_api_key || "",
+            baseUrl: profile_base_url || "",
+            models,
+            defaultModel,
+          });
+        }
+
+        await db.execute({
+          sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('ai_profiles', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
+          args: [JSON.stringify(profiles), JSON.stringify(profiles)],
+        });
+
+        res.json({ ok: true });
+        return;
+      }
+
+      if (action === "delete_ai_profile") {
+        const { profile_id } = req.body;
+        if (!profile_id) { res.json({ ok: false, error: "profile_id required" }); return; }
+
+        const existing = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'ai_profiles'", args: [] });
+        let profiles = [];
+        try { profiles = JSON.parse(existing.rows[0]?.value || "[]"); } catch {}
+
+        profiles = profiles.filter(p => p.id !== profile_id);
+
+        await db.execute({
+          sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('ai_profiles', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
+          args: [JSON.stringify(profiles), JSON.stringify(profiles)],
+        });
+
+        res.json({ ok: true });
+        return;
+      }
+
+      if (action === "test_ai_profile") {
+        const { profile_id } = req.body;
+        if (!profile_id) { res.json({ ok: false, error: "profile_id required" }); return; }
+
+        const existing = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'ai_profiles'", args: [] });
+        let profiles = [];
+        try { profiles = JSON.parse(existing.rows[0]?.value || "[]"); } catch {}
+        const profile = profiles.find(p => p.id === profile_id);
+        if (!profile) { res.json({ ok: false, error: "Profile not found" }); return; }
+
+        try {
+          const { testProfileConnection } = await import("../../ai/provider.js");
+          const result = await testProfileConnection(profile);
+          res.json(result);
+        } catch (err) {
+          res.json({ ok: false, error: err.message });
+        }
+        return;
+      }
+
       if (action === "save_integration") {
         const { integration_id } = req.body;
         const { INTEGRATIONS } = await import("../../integrations.js");
@@ -922,9 +1011,165 @@ function pollHealth(attempts) {
       </div>
       <p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.5rem">${ht.contextDoc}</p>`;
 
+    // AI Profiles
+    const profilesResult = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'ai_profiles'", args: [] });
+    let aiProfiles = [];
+    try { aiProfiles = JSON.parse(profilesResult.rows[0]?.value || "[]"); } catch {}
+
+    let profilesHtml = `<style>
+      .profile-card { border:1px solid var(--crow-border); border-radius:8px; padding:0.75rem 1rem; margin-bottom:0.5rem; background:var(--crow-surface); }
+      .profile-card-header { display:flex; align-items:center; justify-content:space-between; gap:0.5rem; }
+      .profile-card-name { font-weight:600; font-size:0.95rem; }
+      .profile-card-meta { font-size:0.8rem; color:var(--crow-text-muted); }
+      .profile-card-actions { display:flex; gap:0.5rem; margin-top:0.5rem; }
+      .profile-form { border:1px solid var(--crow-border); border-radius:8px; padding:1rem; margin-top:0.75rem; background:var(--crow-surface); }
+    </style>`;
+
+    // List existing profiles
+    for (const p of aiProfiles) {
+      const maskedKey = p.apiKey ? "••••" + p.apiKey.slice(-4) : "Not set";
+      profilesHtml += `<div class="profile-card" data-profile-id="${escapeHtml(p.id)}">
+        <div class="profile-card-header">
+          <div>
+            <div class="profile-card-name">${escapeHtml(p.name)}</div>
+            <div class="profile-card-meta">${escapeHtml(p.provider)} &middot; ${p.models?.length || 0} models &middot; Key: ${maskedKey}</div>
+          </div>
+        </div>
+        <div class="profile-card-actions">
+          <button class="btn btn-secondary btn-sm" onclick="editProfile('${escapeHtml(p.id)}')">Edit</button>
+          <button class="btn btn-secondary btn-sm" onclick="testProfile('${escapeHtml(p.id)}',this)">Test</button>
+          <button class="btn btn-secondary btn-sm" style="color:var(--crow-error)" onclick="deleteProfile('${escapeHtml(p.id)}',this)">Delete</button>
+        </div>
+      </div>`;
+    }
+
+    // Add profile form (hidden by default, toggled by button)
+    profilesHtml += `
+    <button class="btn btn-primary btn-sm" id="add-profile-btn" onclick="document.getElementById('profile-form').style.display='block';this.style.display='none'">+ Add Profile</button>
+    <div class="profile-form" id="profile-form" style="display:none">
+      <input type="hidden" id="pf-id" value="">
+      <div style="margin-bottom:0.75rem">
+        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">Profile Name</label>
+        <input type="text" id="pf-name" placeholder="e.g. DashScope, Z.AI" style="width:100%;padding:0.5rem;background:var(--crow-bg-deep,#111);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.85rem;box-sizing:border-box">
+      </div>
+      <div style="margin-bottom:0.75rem">
+        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">Provider</label>
+        <select id="pf-provider" style="width:100%;padding:0.5rem;background:var(--crow-bg-deep,#111);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.85rem;box-sizing:border-box">
+          <option value="openai">OpenAI / Compatible</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="google">Google Gemini</option>
+          <option value="ollama">Ollama</option>
+        </select>
+      </div>
+      <div style="margin-bottom:0.75rem">
+        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">API Key</label>
+        <input type="password" id="pf-key" placeholder="Leave blank to keep existing" autocomplete="off" style="width:100%;padding:0.5rem;background:var(--crow-bg-deep,#111);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-family:'JetBrains Mono',monospace;font-size:0.85rem;box-sizing:border-box">
+      </div>
+      <div style="margin-bottom:0.75rem">
+        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">Base URL</label>
+        <input type="text" id="pf-url" placeholder="e.g. https://coding-intl.dashscope.aliyuncs.com/v1" style="width:100%;padding:0.5rem;background:var(--crow-bg-deep,#111);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-family:'JetBrains Mono',monospace;font-size:0.85rem;box-sizing:border-box">
+      </div>
+      <div style="margin-bottom:0.75rem">
+        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">Models <span style="font-weight:normal">(comma-separated)</span></label>
+        <textarea id="pf-models" rows="3" placeholder="qwen3.5-plus, glm-5, kimi-k2.5" style="width:100%;padding:0.5rem;background:var(--crow-bg-deep,#111);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-family:'JetBrains Mono',monospace;font-size:0.85rem;box-sizing:border-box;resize:vertical"></textarea>
+      </div>
+      <div style="margin-bottom:0.75rem">
+        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">Default Model</label>
+        <input type="text" id="pf-default" placeholder="e.g. qwen3.5-plus" style="width:100%;padding:0.5rem;background:var(--crow-bg-deep,#111);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-family:'JetBrains Mono',monospace;font-size:0.85rem;box-sizing:border-box">
+      </div>
+      <div style="display:flex;gap:0.5rem">
+        <button class="btn btn-primary btn-sm" onclick="saveProfile()">Save Profile</button>
+        <button class="btn btn-secondary btn-sm" onclick="cancelProfileForm()">Cancel</button>
+      </div>
+      <div id="pf-status" style="font-size:0.85rem;margin-top:0.5rem"></div>
+    </div>
+
+    <script>
+    var _profileData = ${JSON.stringify(aiProfiles.map(p => ({ ...p, apiKey: undefined })))};
+
+    function editProfile(id) {
+      var p = _profileData.find(function(x){return x.id===id});
+      if (!p) return;
+      document.getElementById('pf-id').value = p.id;
+      document.getElementById('pf-name').value = p.name;
+      document.getElementById('pf-provider').value = p.provider;
+      document.getElementById('pf-key').value = '';
+      document.getElementById('pf-key').placeholder = 'Leave blank to keep existing';
+      document.getElementById('pf-url').value = p.baseUrl || '';
+      document.getElementById('pf-models').value = (p.models||[]).join(', ');
+      document.getElementById('pf-default').value = p.defaultModel || '';
+      document.getElementById('profile-form').style.display = 'block';
+      document.getElementById('add-profile-btn').style.display = 'none';
+    }
+
+    function cancelProfileForm() {
+      document.getElementById('profile-form').style.display = 'none';
+      document.getElementById('add-profile-btn').style.display = '';
+      document.getElementById('pf-id').value = '';
+      document.getElementById('pf-name').value = '';
+      document.getElementById('pf-key').value = '';
+      document.getElementById('pf-url').value = '';
+      document.getElementById('pf-models').value = '';
+      document.getElementById('pf-default').value = '';
+    }
+
+    async function saveProfile() {
+      var params = new URLSearchParams();
+      params.set('action', 'save_ai_profile');
+      var id = document.getElementById('pf-id').value;
+      if (id) params.set('profile_id', id);
+      params.set('profile_name', document.getElementById('pf-name').value);
+      params.set('profile_provider', document.getElementById('pf-provider').value);
+      var key = document.getElementById('pf-key').value;
+      if (key) params.set('profile_api_key', key);
+      params.set('profile_base_url', document.getElementById('pf-url').value);
+      params.set('profile_models', document.getElementById('pf-models').value);
+      params.set('profile_default_model', document.getElementById('pf-default').value);
+      var el = document.getElementById('pf-status');
+      try {
+        var res = await fetch('/dashboard/settings', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:params.toString() });
+        var data = await res.json();
+        el.style.color = data.ok ? 'var(--crow-success)' : 'var(--crow-error)';
+        el.textContent = data.ok ? 'Saved! Reloading...' : (data.error || 'Save failed');
+        if (data.ok) setTimeout(function(){ location.reload(); }, 500);
+      } catch(e) { el.style.color='var(--crow-error)'; el.textContent='Save failed: '+e.message; }
+    }
+
+    async function deleteProfile(id, btn) {
+      if (!confirm('Delete this AI profile?')) return;
+      btn.disabled = true;
+      var params = new URLSearchParams();
+      params.set('action', 'delete_ai_profile');
+      params.set('profile_id', id);
+      try {
+        await fetch('/dashboard/settings', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:params.toString() });
+        location.reload();
+      } catch(e) { btn.disabled = false; }
+    }
+
+    async function testProfile(id, btn) {
+      btn.disabled = true;
+      btn.textContent = 'Testing...';
+      var params = new URLSearchParams();
+      params.set('action', 'test_ai_profile');
+      params.set('profile_id', id);
+      try {
+        var res = await fetch('/dashboard/settings', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:params.toString() });
+        var data = await res.json();
+        btn.textContent = data.ok ? 'Connected!' : 'Failed';
+        btn.style.color = data.ok ? 'var(--crow-success)' : 'var(--crow-error)';
+        setTimeout(function(){ btn.textContent='Test'; btn.style.color=''; btn.disabled=false; }, 3000);
+      } catch(e) { btn.textContent='Error'; btn.disabled=false; }
+    }
+    <\/script>
+    <p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.75rem">
+      AI Profiles let you configure multiple providers and switch between them in the Messages panel. Each profile has its own API key, endpoint, and model list.
+    </p>`;
+
     const content = `
       ${successMsg}${errorMsg}
       ${stats}
+      ${section("AI Profiles", profilesHtml, { delay: 18 })}
       ${section("AI Provider", aiProviderHtml, { delay: 20 })}
       ${section("Connection URLs", connectionHtml, { delay: 25 })}
       ${section("Help & Setup", helpHtml, { delay: 28 })}
