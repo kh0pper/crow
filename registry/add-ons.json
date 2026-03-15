@@ -360,6 +360,17 @@
       ],
       "ports": [3080],
       "notes": "Organize ROMs into system subdirectories (gba/, snes/, n64/, etc.). IGDB credentials (free) enable automatic cover art and metadata."
+    },
+    {
+      "id": "tailscale",
+      "name": "Tailscale",
+      "description": "Private network access — reach Crow from any device on your Tailnet",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "networking",
+      "official": true,
+      "tags": ["networking", "vpn", "remote-access"]
     }
   ]
 }

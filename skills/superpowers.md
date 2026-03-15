@@ -55,7 +55,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | "crow's nest", "dashboard", "settings", "control panel" | "panel", "configuración", "panel de control" | network-setup | (dashboard routes) |
 | "add-on", "extension", "install plugin", "browse extensions" | "complemento", "extensión", "instalar plugin" | add-ons | crow-memory, filesystem |
 | "what can you do", "getting started", "new to crow" | "qué puedes hacer", "cómo empezar", "nuevo en crow" | onboarding-tour | crow-memory |
-| "tailscale", "remote access", "network setup" | "tailscale", "acceso remoto", "configurar red" | network-setup | (documentation) |
+| "tailscale", "remote access", "network setup", "private access", "VPN" | "tailscale", "acceso remoto", "configurar red", "acceso privado", "red privada" | network-setup, tailscale | (documentation) |
 | "report bug", "file issue", "feature request", "found a bug" | "reportar bug", "crear issue", "solicitar función" | bug-report | crow-memory, github |
 | "obsidian", "vault", "daily note", "sync to obsidian" | "obsidian", "bóveda", "nota diaria" | obsidian | obsidian, crow-projects |
 | "lights", "temperature", "smart home", "turn on/off" | "luces", "temperatura", "hogar inteligente" | home-assistant | home-assistant |

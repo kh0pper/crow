@@ -1,0 +1,38 @@
+{
+  "id": "tailscale",
+  "name": "Tailscale",
+  "version": "1.0.0",
+  "description": "Private network access — reach your Crow from any device without exposing it to the public internet",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "networking",
+  "tags": ["networking", "vpn", "remote-access", "tailscale", "private"],
+  "icon": "network",
+  "docker": {
+    "composefile": "docker-compose.yml"
+  },
+  "skills": ["skills/tailscale.md"],
+  "requires": {
+    "env": ["TS_AUTHKEY"],
+    "min_ram_mb": 64,
+    "min_disk_mb": 50
+  },
+  "env_vars": [
+    {
+      "name": "TS_AUTHKEY",
+      "description": "Tailscale reusable auth key — generate at https://login.tailscale.com/admin/settings/keys (select 'Reusable')",
+      "required": true,
+      "secret": true
+    },
+    {
+      "name": "TS_HOSTNAME",
+      "description": "Hostname on your Tailnet (e.g. 'crow', 'crow-home')",
+      "default": "crow",
+      "required": false,
+      "secret": false
+    }
+  ],
+  "ports": [],
+  "webUI": null,
+  "notes": "Creates a private Tailscale tunnel so you can access your Crow at http://crow/ from any device on your Tailnet. Requires a free Tailscale account. Self-hosted only — not available on managed hosting."
+}

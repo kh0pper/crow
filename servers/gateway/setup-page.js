@@ -5,6 +5,8 @@
  * - Connected integrations (green) with tool counts
  * - Missing integrations (gray) with links to get API keys
  * - Instructions for adding env vars in Render
+ * - Collapsible sections for cleaner UX
+ * - EN/ES i18n with browser auto-detect + toggle
  *
  * No auth required — doesn't expose secrets, just shows which vars are set.
  */
@@ -16,6 +18,272 @@ import { isPasswordSet, parseCookies } from "./dashboard/auth.js";
 import { INTEGRATIONS } from "./integrations.js";
 import { APP_ROOT, resolveEnvPath, writeEnvVar, removeEnvVar, sanitizeEnvValue } from "./env-manager.js";
 import { CROW_HERO_SVG } from "./dashboard/shared/crow-hero.js";
+
+// --- i18n translations ---
+const translations = {
+  en: {
+    title: "Crow Setup",
+    subtitle: "Integration status for your Crow instance",
+    connected: "Connected",
+    available: "Available",
+    contextUsage: "Context Usage",
+    toolsLoaded: "tools loaded",
+    core: "core",
+    external: "external",
+    tokensOfContext: "tokens of context",
+    routerAvailable: "Router available",
+    tip: "Tip:",
+    routerTip: "consider using the <strong>Router endpoint</strong> (<code>/router/mcp</code>) to reduce context usage to just 7 tools (~2.5K tokens).",
+    step1Password: "Set Crow's Nest Password",
+    crowsNest: "Crow's Nest",
+    useInviteLink: "Use the link you were sent.",
+    setupTokenRequired: "This instance requires a setup token. Check your invite email for the correct link.",
+    protectPassword: "Protect your Crow's Nest with a password. This is required before you can access the control panel.",
+    choosePassword: "Choose a password (12+ characters)",
+    confirmPassword: "Confirm password",
+    setPassword: "Set Password",
+    passwordConfigured: "Password configured",
+    nestProtected: "Crow's Nest is protected",
+    step2Identity: "Your Identity",
+    identity: "Identity",
+    crowIdDesc: "Your Crow ID &mdash; share this with peers to connect",
+    step3Network: "Network Access",
+    networkAccess: "Network Access",
+    // Hosted network access
+    yourInstance: "Your Instance",
+    instanceOnline: "Online",
+    dashboard: "Dashboard",
+    blog: "Blog",
+    tailscaleGuideNote: 'For additional private access via Tailscale, see the <a href="https://maestro.press/software/crow/guide/tailscale" target="_blank" rel="noopener" style="color:#6366f1;text-decoration:none">setup guide</a>.',
+    // Self-hosted network states
+    readyAccess: "Ready &mdash; access Crow from any device",
+    tsConnectedHostname: "Tailscale is connected with hostname",
+    crowsNestLabel: "Crow's Nest:",
+    blogLabel: "Blog:",
+    tailscaleIpLabel: "Tailscale IP:",
+    caddyDetected: "Caddy reverse proxy detected &mdash; port-free URLs available",
+    tsConnected: "Tailscale Connected",
+    hostnameIs: "Hostname is",
+    considerChanging: "consider changing to <strong>crow</strong> for easier access",
+    currentUrl: "Current URL:",
+    recommendHostname: 'Recommended: Set hostname to &ldquo;crow&rdquo;',
+    hostnameExplanation: "This lets you access Crow at <strong>http://crow/</strong> from any device on your Tailnet &mdash; phone, laptop, or tablet.",
+    hostnameAlternatives: 'If &ldquo;crow&rdquo; is already taken on your Tailnet, try <code>crow-2</code> or <code>crow-home</code>.',
+    tsInstalled: "Tailscale Installed",
+    tsNotConnected: "Not connected &mdash; authenticate to enable remote access",
+    runCommands: "Run these commands on your server to connect:",
+    followLogin: "Follow the login URL to authorize this device. Then set the hostname:",
+    afterThat: "After that, open <strong>http://crow/dashboard</strong> from any device on your Tailnet.",
+    setupRemoteAccess: "Set Up Remote Access",
+    remoteAccessDesc: "Access Crow from your phone, laptop, or anywhere &mdash; securely and privately",
+    tsIntro: 'creates a private network between your devices. Once set up, you can reach Crow at <strong>http://crow/</strong> from any device &mdash; no port forwarding, no public exposure.',
+    step1Account: "1. Create a free account",
+    signUpAt: 'Sign up at <a href="https://tailscale.com" target="_blank" style="color:#6366f1;text-decoration:none">tailscale.com</a> (free for up to 100 devices).',
+    step2Install: "2. Install on this server",
+    followLoginTerminal: "Follow the login URL printed in the terminal.",
+    step3Hostname: "3. Set your hostname",
+    hostnameAccessible: "This makes Crow accessible at <strong>http://crow/</strong> on your Tailnet.",
+    step4Devices: "4. Install on your other devices",
+    installOtherDevices: 'Install Tailscale on your phone, laptop, or tablet from <a href="https://tailscale.com/download" target="_blank" style="color:#6366f1;text-decoration:none">tailscale.com/download</a> and sign in with the same account.',
+    thenOpen: "Then open <strong>http://crow/dashboard</strong> in any browser.",
+    tailscaleAddonNote: "You can also install Tailscale as an add-on from the Extensions panel.",
+    // Connected integrations
+    connectedSection: "Connected",
+    toolAvailable: "tool available",
+    toolsAvailable: "tools available",
+    remove: "Remove",
+    // Errors
+    errors: "Errors",
+    failedToConnect: "Failed to connect",
+    // Available integrations
+    availableIntegrations: "Available Integrations",
+    productivity: "Productivity",
+    communication: "Communication",
+    developmentSearch: "Development & Search",
+    requiresPython: "Requires Python (uvx) &mdash; install Python to enable this integration",
+    getApiKey: "Get your API key",
+    setupGuide: "Setup guide",
+    noConfigNeeded: "No configuration needed &mdash; works out of the box.",
+    save: "Save",
+    // Hosted integrations
+    availableAddKeys: "Available &mdash; Add API Keys to Enable",
+    addInRender: "Add in Render",
+    envVariable: "Environment variable",
+    getApiKeyArrow: "Get your API key &rarr;",
+    // How to add
+    howToAdd: "How to Add an Integration",
+    hostedStep1: "<strong>Get your API key</strong> from the service",
+    hostedStep2: "Go to your <strong>Crow's Nest</strong> &rarr; <strong>Settings</strong> panel",
+    hostedStep3: "Add the environment variable name and your API key",
+    hostedStep4: "Your instance will restart automatically (~10 seconds)",
+    hostedStep5: "Refresh this page to see the integration turn green",
+    renderStep1: "<strong>Get your API key</strong> from the service",
+    renderStep2: "<strong>Go to your Render dashboard</strong> &rarr; your crow-gateway service &rarr; <strong>Environment</strong>",
+    renderStep3: '<strong>Click "Add Environment Variable"</strong> &rarr; type the variable name &rarr; paste your key &rarr; <strong>Save Changes</strong>',
+    renderStep4: "Render will <strong>automatically restart</strong> your service (~1 minute)",
+    renderStep5: "Refresh this page to see the integration turn green",
+    openRenderDashboard: "Open Render Dashboard",
+    // MCP Endpoints
+    mcpEndpoints: "MCP Endpoint URLs",
+    mcpIntro: "Use these URLs to connect from any MCP-compatible AI platform:",
+    routerRecommended: "Router (Recommended &mdash; 7 tools instead of 49+)",
+    streamableHttp: "Streamable HTTP (Claude, Gemini, Grok, Cursor, Windsurf, Cline, Claude Code)",
+    sseChatgpt: "SSE (ChatGPT)",
+    memory: "Memory",
+    research: "Research",
+    streamableHttpShort: "Streamable HTTP",
+    externalTools: "External Tools (GitHub, Slack, etc.)",
+    quickSetup: "Quick Setup by Platform:",
+    // Platform instructions with doc links
+    claudeWebInstr: 'Settings &rarr; Integrations &rarr; Add Custom &rarr; paste <code>/mcp</code> URL',
+    claudeDesktopInstr: "Use stdio transport (see docs)",
+    chatgptInstr: 'Settings &rarr; Apps &rarr; Create &rarr; paste <code>/sse</code> URL',
+    geminiInstr: 'Add to <code>~/.gemini/settings.json</code> with <code>url</code> property',
+    cursorInstr: 'Add to <code>.cursor/mcp.json</code> with <code>url</code> property',
+    windsurfInstr: 'Add to <code>~/.codeium/windsurf/mcp_config.json</code>',
+    clineInstr: "VS Code MCP settings &rarr; add server URL",
+    claudeCodeInstr: 'Add to <code>.mcp.json</code> or <code>~/.claude/mcp.json</code>',
+    // Restart banner
+    keysSaved: "Keys saved! Restarting gateway...",
+    waitingRestart: "Waiting for restart...",
+    removeConfirm: "Remove this integration's API keys?",
+    savedRestart: "Saved! Restart gateway to apply.",
+    error: "Error",
+    gatewayManualRestart: "Gateway may need manual restart.",
+  },
+  es: {
+    title: "Configuración de Crow",
+    subtitle: "Estado de integraciones de tu instancia Crow",
+    connected: "Conectadas",
+    available: "Disponibles",
+    contextUsage: "Uso de Contexto",
+    toolsLoaded: "herramientas cargadas",
+    core: "base",
+    external: "externas",
+    tokensOfContext: "tokens de contexto",
+    routerAvailable: "Router disponible",
+    tip: "Consejo:",
+    routerTip: "considera usar el <strong>endpoint del Router</strong> (<code>/router/mcp</code>) para reducir el uso de contexto a solo 7 herramientas (~2.5K tokens).",
+    step1Password: "Establecer Contraseña del Nido",
+    crowsNest: "Nido de Crow",
+    useInviteLink: "Usa el enlace que te enviaron.",
+    setupTokenRequired: "Esta instancia requiere un token de configuración. Revisa tu correo de invitación para el enlace correcto.",
+    protectPassword: "Protege tu Nido de Crow con una contraseña. Esto es necesario antes de poder acceder al panel de control.",
+    choosePassword: "Elige una contraseña (12+ caracteres)",
+    confirmPassword: "Confirmar contraseña",
+    setPassword: "Establecer Contraseña",
+    passwordConfigured: "Contraseña configurada",
+    nestProtected: "El Nido de Crow está protegido",
+    step2Identity: "Tu Identidad",
+    identity: "Identidad",
+    crowIdDesc: "Tu Crow ID &mdash; compártelo con otros para conectar",
+    step3Network: "Acceso a la Red",
+    networkAccess: "Acceso a la Red",
+    yourInstance: "Tu Instancia",
+    instanceOnline: "En línea",
+    dashboard: "Panel de control",
+    blog: "Blog",
+    tailscaleGuideNote: 'Para acceso privado adicional mediante Tailscale, consulta la <a href="https://maestro.press/software/crow/guide/tailscale" target="_blank" rel="noopener" style="color:#6366f1;text-decoration:none">guía de configuración</a>.',
+    readyAccess: "Listo &mdash; accede a Crow desde cualquier dispositivo",
+    tsConnectedHostname: "Tailscale está conectado con el hostname",
+    crowsNestLabel: "Nido de Crow:",
+    blogLabel: "Blog:",
+    tailscaleIpLabel: "IP de Tailscale:",
+    caddyDetected: "Proxy reverso Caddy detectado &mdash; URLs sin puerto disponibles",
+    tsConnected: "Tailscale Conectado",
+    hostnameIs: "El hostname es",
+    considerChanging: "considera cambiarlo a <strong>crow</strong> para acceso más fácil",
+    currentUrl: "URL actual:",
+    recommendHostname: 'Recomendado: Cambiar hostname a &ldquo;crow&rdquo;',
+    hostnameExplanation: "Esto te permite acceder a Crow en <strong>http://crow/</strong> desde cualquier dispositivo en tu Tailnet &mdash; teléfono, laptop o tablet.",
+    hostnameAlternatives: 'Si &ldquo;crow&rdquo; ya está en uso en tu Tailnet, prueba <code>crow-2</code> o <code>crow-home</code>.',
+    tsInstalled: "Tailscale Instalado",
+    tsNotConnected: "No conectado &mdash; autentícate para habilitar el acceso remoto",
+    runCommands: "Ejecuta estos comandos en tu servidor para conectar:",
+    followLogin: "Sigue la URL de inicio de sesión para autorizar este dispositivo. Luego establece el hostname:",
+    afterThat: "Después de eso, abre <strong>http://crow/dashboard</strong> desde cualquier dispositivo en tu Tailnet.",
+    setupRemoteAccess: "Configurar Acceso Remoto",
+    remoteAccessDesc: "Accede a Crow desde tu teléfono, laptop o cualquier lugar &mdash; de forma segura y privada",
+    tsIntro: 'crea una red privada entre tus dispositivos. Una vez configurado, puedes acceder a Crow en <strong>http://crow/</strong> desde cualquier dispositivo &mdash; sin reenvío de puertos, sin exposición pública.',
+    step1Account: "1. Crear una cuenta gratuita",
+    signUpAt: 'Regístrate en <a href="https://tailscale.com" target="_blank" style="color:#6366f1;text-decoration:none">tailscale.com</a> (gratis para hasta 100 dispositivos).',
+    step2Install: "2. Instalar en este servidor",
+    followLoginTerminal: "Sigue la URL de inicio de sesión impresa en la terminal.",
+    step3Hostname: "3. Establecer tu hostname",
+    hostnameAccessible: "Esto hace que Crow sea accesible en <strong>http://crow/</strong> en tu Tailnet.",
+    step4Devices: "4. Instalar en tus otros dispositivos",
+    installOtherDevices: 'Instala Tailscale en tu teléfono, laptop o tablet desde <a href="https://tailscale.com/download" target="_blank" style="color:#6366f1;text-decoration:none">tailscale.com/download</a> e inicia sesión con la misma cuenta.',
+    thenOpen: "Luego abre <strong>http://crow/dashboard</strong> en cualquier navegador.",
+    tailscaleAddonNote: "También puedes instalar Tailscale como complemento desde el panel de Extensiones.",
+    connectedSection: "Conectadas",
+    toolAvailable: "herramienta disponible",
+    toolsAvailable: "herramientas disponibles",
+    remove: "Eliminar",
+    errors: "Errores",
+    failedToConnect: "Error al conectar",
+    availableIntegrations: "Integraciones Disponibles",
+    productivity: "Productividad",
+    communication: "Comunicación",
+    developmentSearch: "Desarrollo y Búsqueda",
+    requiresPython: "Requiere Python (uvx) &mdash; instala Python para habilitar esta integración",
+    getApiKey: "Obtener tu API key",
+    setupGuide: "Guía de configuración",
+    noConfigNeeded: "No necesita configuración &mdash; funciona de inmediato.",
+    save: "Guardar",
+    availableAddKeys: "Disponibles &mdash; Agrega API Keys para Habilitar",
+    addInRender: "Agregar en Render",
+    envVariable: "Variable de entorno",
+    getApiKeyArrow: "Obtener tu API key &rarr;",
+    howToAdd: "Cómo Agregar una Integración",
+    hostedStep1: "<strong>Obtén tu API key</strong> del servicio",
+    hostedStep2: "Ve a tu <strong>Nido de Crow</strong> &rarr; panel de <strong>Configuración</strong>",
+    hostedStep3: "Agrega el nombre de la variable de entorno y tu API key",
+    hostedStep4: "Tu instancia se reiniciará automáticamente (~10 segundos)",
+    hostedStep5: "Recarga esta página para ver la integración en verde",
+    renderStep1: "<strong>Obtén tu API key</strong> del servicio",
+    renderStep2: "<strong>Ve a tu panel de Render</strong> &rarr; tu servicio crow-gateway &rarr; <strong>Environment</strong>",
+    renderStep3: '<strong>Haz clic en "Add Environment Variable"</strong> &rarr; escribe el nombre de la variable &rarr; pega tu key &rarr; <strong>Save Changes</strong>',
+    renderStep4: "Render <strong>reiniciará automáticamente</strong> tu servicio (~1 minuto)",
+    renderStep5: "Recarga esta página para ver la integración en verde",
+    openRenderDashboard: "Abrir Panel de Render",
+    mcpEndpoints: "URLs de Endpoints MCP",
+    mcpIntro: "Usa estas URLs para conectar desde cualquier plataforma AI compatible con MCP:",
+    routerRecommended: "Router (Recomendado &mdash; 7 herramientas en vez de 49+)",
+    streamableHttp: "Streamable HTTP (Claude, Gemini, Grok, Cursor, Windsurf, Cline, Claude Code)",
+    sseChatgpt: "SSE (ChatGPT)",
+    memory: "Memoria",
+    research: "Investigación",
+    streamableHttpShort: "Streamable HTTP",
+    externalTools: "Herramientas Externas (GitHub, Slack, etc.)",
+    quickSetup: "Configuración Rápida por Plataforma:",
+    claudeWebInstr: 'Settings &rarr; Integrations &rarr; Add Custom &rarr; pega la URL <code>/mcp</code>',
+    claudeDesktopInstr: "Usa transporte stdio (ver docs)",
+    chatgptInstr: 'Settings &rarr; Apps &rarr; Create &rarr; pega la URL <code>/sse</code>',
+    geminiInstr: 'Agrega a <code>~/.gemini/settings.json</code> con la propiedad <code>url</code>',
+    cursorInstr: 'Agrega a <code>.cursor/mcp.json</code> con la propiedad <code>url</code>',
+    windsurfInstr: 'Agrega a <code>~/.codeium/windsurf/mcp_config.json</code>',
+    clineInstr: "VS Code MCP settings &rarr; agrega la URL del servidor",
+    claudeCodeInstr: 'Agrega a <code>.mcp.json</code> o <code>~/.claude/mcp.json</code>',
+    keysSaved: "¡Keys guardadas! Reiniciando gateway...",
+    waitingRestart: "Esperando reinicio...",
+    removeConfirm: "¿Eliminar las API keys de esta integración?",
+    savedRestart: "¡Guardado! Reinicia el gateway para aplicar.",
+    error: "Error",
+    gatewayManualRestart: "El gateway podría necesitar reinicio manual.",
+  },
+};
+
+// Validate translation completeness at startup
+const enKeys = Object.keys(translations.en);
+const esKeys = Object.keys(translations.es);
+const missingInEs = enKeys.filter((k) => !esKeys.includes(k));
+const missingInEn = esKeys.filter((k) => !enKeys.includes(k));
+if (missingInEs.length > 0) {
+  console.warn(`[setup-page] Missing ES translations: ${missingInEs.join(", ")}`);
+}
+if (missingInEn.length > 0) {
+  console.warn(`[setup-page] Extra ES keys not in EN: ${missingInEn.join(", ")}`);
+}
 
 /**
  * Detect Tailscale hostname and IP if available.
@@ -65,6 +333,9 @@ function detectCaddy() {
   }
 }
 
+/** Platform doc link base URL */
+const DOCS_BASE = "https://maestro.press/software/crow/platforms";
+
 /**
  * Express handler for GET /setup
  */
@@ -79,6 +350,25 @@ export async function setupPageHandler(req, res) {
       return res.redirect("/dashboard/settings#setup");
     }
   }
+
+  // --- Language detection ---
+  // Priority: query param > cookie > DB setting > browser Accept-Language > 'en'
+  const langParam = req.query.lang;
+  const cookies = parseCookies(req);
+  const langCookie = cookies.crow_lang;
+  let dbLang = null;
+  try {
+    const { createDbClient } = await import("../db.js");
+    const db = createDbClient();
+    const r = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'language'", args: [] });
+    dbLang = r.rows[0]?.value || null;
+    db.close();
+  } catch { /* DB not available — use other sources */ }
+  const acceptLang = req.headers["accept-language"] || "";
+  const browserLang = acceptLang.startsWith("es") ? "es" : "en";
+  const lang = ["en", "es"].includes(langParam) ? langParam
+    : (langCookie || dbLang || browserLang);
+  const t = translations[lang] || translations.en;
 
   // Detect Crow OS mode (installed to ~/.crow/app)
   const isCrowOS = process.env.CROW_DATA_DIR || process.cwd().includes(".crow/app");
@@ -119,12 +409,204 @@ export async function setupPageHandler(req, res) {
     categoryMap[integ.id] = integ.category || "development";
   }
 
+  // Category labels for i18n
+  const catLabels = {
+    productivity: t.productivity,
+    communication: t.communication,
+    development: t.developmentSearch,
+  };
+
+  // --- Helper: collapsible section wrapper ---
+  function sec(title, body, { open = false } = {}) {
+    const collapsedClass = open ? "" : " sec-collapsed";
+    return `
+    <div class="section">
+      <div class="section-header${collapsedClass}" onclick="toggleSection(this)">
+        <div class="section-title" style="margin-bottom:0">${title}</div>
+        <span class="sec-chevron">&#9656;</span>
+      </div>
+      <div class="section-body${collapsedClass}">
+        ${body}
+      </div>
+    </div>`;
+  }
+
+  // --- Build Network Access section content ---
+  function buildNetworkAccess() {
+    // Hosted mode: show "Your Instance" card
+    if (isHosted) {
+      return `
+    <div class="card" style="border-left: 3px solid #22c55e">
+      <div class="card-header">
+        <span class="status-dot green"></span>
+        <div>
+          <div class="card-name">${t.yourInstance}</div>
+          <div class="card-desc">${t.instanceOnline}</div>
+        </div>
+      </div>
+      <div class="card-env" style="line-height: 2">
+        ${gatewayUrl ? `<strong>${t.dashboard}:</strong> <a href="${gatewayUrl}/dashboard" style="color:#6366f1;text-decoration:none">${gatewayUrl}/dashboard</a><br>` : ""}
+        ${gatewayUrl ? `<strong>${t.blog}:</strong> <a href="${gatewayUrl}/blog" style="color:#6366f1;text-decoration:none">${gatewayUrl}/blog</a>` : ""}
+      </div>
+      <div style="margin-top:10px;font-size:13px;color:#86868b">${t.tailscaleGuideNote}</div>
+    </div>`;
+    }
+
+    // Self-hosted: existing 4-state Tailscale logic
+
+    // State 1: Tailscale connected, hostname is "crow" — ideal
+    if (tailscale?.ip && tailscale.hostname === "crow") {
+      return `
+    <div class="card" style="border-left: 3px solid #22c55e">
+      <div class="card-header">
+        <span class="status-dot green"></span>
+        <div>
+          <div class="card-name">${t.readyAccess}</div>
+          <div class="card-desc">${t.tsConnectedHostname} <strong>crow</strong></div>
+        </div>
+      </div>
+      <div class="card-env" style="line-height: 2">
+        <strong>${t.crowsNestLabel}</strong> <span class="env-var">http://crow${portSuffix}/dashboard</span><br>
+        <strong>${t.blogLabel}</strong> <span class="env-var">http://crow${portSuffix}/blog</span><br>
+        <strong>${t.tailscaleIpLabel}</strong> <span class="env-var">http://${tailscale.ip}${portSuffix}/dashboard</span>
+      </div>
+      ${hasCaddy ? `<div style="margin-top:8px;font-size:12px;color:#86868b">${t.caddyDetected}</div>` : ""}
+    </div>
+    <div style="margin-top:8px;font-size:13px;color:#86868b">${t.tailscaleAddonNote}</div>`;
+    }
+
+    // State 2: Tailscale connected, hostname is NOT "crow"
+    if (tailscale?.ip && tailscale.hostname) {
+      return `
+    <div class="card" style="border-left: 3px solid #ff9f0a">
+      <div class="card-header">
+        <span class="status-dot yellow"></span>
+        <div>
+          <div class="card-name">${t.tsConnected}</div>
+          <div class="card-desc">${t.hostnameIs} <strong>${tailscale.hostname}</strong> &mdash; ${t.considerChanging}</div>
+        </div>
+      </div>
+      <div class="card-env" style="line-height: 2">
+        <strong>${t.currentUrl}</strong> <span class="env-var">http://${tailscale.hostname}${portSuffix}/dashboard</span><br>
+        <strong>${t.tailscaleIpLabel}</strong> <span class="env-var">http://${tailscale.ip}${portSuffix}/dashboard</span>
+      </div>
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid #f0f0f0">
+        <div style="font-size:14px;font-weight:600;margin-bottom:8px">${t.recommendHostname}</div>
+        <p style="font-size:13px;color:#86868b;margin-bottom:8px">${t.hostnameExplanation}</p>
+        <div class="connector-url">sudo tailscale set --hostname=crow</div>
+        <p style="font-size:12px;color:#86868b;margin-top:8px">${t.hostnameAlternatives}</p>
+      </div>
+    </div>
+    <div style="margin-top:8px;font-size:13px;color:#86868b">${t.tailscaleAddonNote}</div>`;
+    }
+
+    // State 3a: Tailscale installed but not connected/authenticated
+    if (tailscale?.installed && !tailscale?.ip) {
+      return `
+    <div class="card" style="border-left: 3px solid #ff9f0a">
+      <div class="card-header">
+        <span class="status-dot yellow"></span>
+        <div>
+          <div class="card-name">${t.tsInstalled}</div>
+          <div class="card-desc">${t.tsNotConnected}</div>
+        </div>
+      </div>
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid #f0f0f0">
+        <p style="font-size:13px;color:#86868b;margin-bottom:10px">${t.runCommands}</p>
+        <div class="connector-url" style="margin-bottom:6px">sudo tailscale up</div>
+        <p style="font-size:12px;color:#86868b;margin-bottom:10px">${t.followLogin}</p>
+        <div class="connector-url">sudo tailscale set --hostname=crow</div>
+        <p style="font-size:12px;color:#86868b;margin-top:10px">${t.afterThat}</p>
+      </div>
+    </div>
+    <div style="margin-top:8px;font-size:13px;color:#86868b">${t.tailscaleAddonNote}</div>`;
+    }
+
+    // State 3b: Tailscale not installed
+    return `
+    <div class="card" style="border-left: 3px solid #86868b">
+      <div class="card-header">
+        <span class="status-dot gray"></span>
+        <div>
+          <div class="card-name">${t.setupRemoteAccess}</div>
+          <div class="card-desc">${t.remoteAccessDesc}</div>
+        </div>
+      </div>
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid #f0f0f0">
+        <p style="font-size:13px;margin-bottom:12px">
+          <a href="https://tailscale.com" target="_blank" style="color:#6366f1;text-decoration:none;font-weight:500">Tailscale</a>
+          ${t.tsIntro}
+        </p>
+        <div style="font-size:14px;font-weight:600;margin-bottom:8px">${t.step1Account}</div>
+        <p style="font-size:13px;color:#86868b;margin-bottom:12px">${t.signUpAt}</p>
+        <div style="font-size:14px;font-weight:600;margin-bottom:8px">${t.step2Install}</div>
+        <div class="connector-url" style="margin-bottom:4px">curl -fsSL https://tailscale.com/install.sh | sh</div>
+        <div class="connector-url" style="margin-bottom:4px">sudo tailscale up</div>
+        <p style="font-size:12px;color:#86868b;margin-bottom:12px">${t.followLoginTerminal}</p>
+        <div style="font-size:14px;font-weight:600;margin-bottom:8px">${t.step3Hostname}</div>
+        <div class="connector-url" style="margin-bottom:4px">sudo tailscale set --hostname=crow</div>
+        <p style="font-size:12px;color:#86868b;margin-bottom:12px">${t.hostnameAccessible}</p>
+        <div style="font-size:14px;font-weight:600;margin-bottom:8px">${t.step4Devices}</div>
+        <p style="font-size:13px;color:#86868b;margin-bottom:4px">${t.installOtherDevices}</p>
+        <p style="font-size:13px;margin-top:12px">${t.thenOpen}</p>
+      </div>
+    </div>
+    <div style="margin-top:8px;font-size:13px;color:#86868b">${t.tailscaleAddonNote}</div>`;
+  }
+
+  // --- Build hosted integrations (grouped by category, collapsible) ---
+  function buildHostedIntegrations() {
+    return ["productivity", "communication", "development"].map(cat => {
+      const items = notConfigured.filter(i => (categoryMap[i.id] || "development") === cat);
+      if (items.length === 0) return "";
+      const label = catLabels[cat];
+      return `
+        <div class="category-title" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;user-select:none" onclick="toggleSection(this)">
+          <span>${label}</span>
+          <span class="sec-chevron sec-collapsed" style="font-size:14px;color:#86868b">&#9656;</span>
+        </div>
+        <div class="section-body sec-collapsed">
+        ${items.map((i) => `
+        <div class="card">
+          <div class="card-header">
+            <span class="status-dot gray"></span>
+            <div>
+              <div class="card-name">${i.name}</div>
+              <div class="card-desc">${i.description}</div>
+            </div>
+          </div>
+          <div class="card-env">
+            ${isRender ? t.addInRender : t.envVariable}: ${i.envVars.map((v) => `<span class="env-var">${v}</span>`).join(" + ")}
+            <br>
+            ${i.keyUrl ? `<a href="${i.keyUrl}" target="_blank" class="key-link">${t.getApiKeyArrow}</a>` : ""}
+            ${i.keyInstructions ? `<br><span style="color:#86868b;font-size:12px">${i.keyInstructions}</span>` : ""}
+          </div>
+        </div>`).join("")}
+        </div>`;
+    }).join("");
+  }
+
+  // --- Platform setup list with doc links ---
+  const platforms = [
+    { name: "Claude Web/Mobile", href: `${DOCS_BASE}/claude`, instr: t.claudeWebInstr },
+    { name: "Claude Desktop", href: `${DOCS_BASE}/claude-desktop`, instr: t.claudeDesktopInstr },
+    { name: "ChatGPT", href: `${DOCS_BASE}/chatgpt`, instr: t.chatgptInstr },
+    { name: "Gemini CLI", href: `${DOCS_BASE}/gemini-cli`, instr: t.geminiInstr },
+    { name: "Cursor", href: `${DOCS_BASE}/cursor`, instr: t.cursorInstr },
+    { name: "Windsurf", href: `${DOCS_BASE}/windsurf`, instr: t.windsurfInstr },
+    { name: "Cline", href: `${DOCS_BASE}/cline`, instr: t.clineInstr },
+    { name: "Claude Code", href: `${DOCS_BASE}/claude-code`, instr: t.claudeCodeInstr },
+  ];
+  const platformListHtml = platforms.map(p =>
+    `<li><a href="${p.href}" target="_blank" rel="noopener" style="color:#6366f1;text-decoration:none;font-weight:600">${p.name}</a> &mdash; ${p.instr}</li>`
+  ).join("\n        ");
+
   const html = `<!DOCTYPE html>
-<html lang="en">
+<html lang="${lang}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Crow Setup</title>
+  <title>${t.title}</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -139,6 +621,16 @@ export async function setupPageHandler(req, res) {
       font-size: 13px; font-weight: 600; text-transform: uppercase;
       letter-spacing: 0.5px; color: #86868b; margin-bottom: 8px;
     }
+    .section-header {
+      cursor: pointer; display: flex; align-items: center;
+      justify-content: space-between; user-select: none; margin-bottom: 8px;
+    }
+    .section-header .sec-chevron { transition: transform 0.2s; font-size: 18px; color: #86868b; }
+    .section-header.sec-collapsed .sec-chevron { transform: rotate(0deg); }
+    .section-header:not(.sec-collapsed) .sec-chevron { transform: rotate(90deg); }
+    .section-body.sec-collapsed { display: none; }
+    .sec-chevron { transition: transform 0.2s; }
+    .sec-collapsed > .sec-chevron { transform: rotate(0deg) !important; }
     .card {
       background: white; border-radius: 12px; padding: 16px;
       margin-bottom: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08);
@@ -218,25 +710,38 @@ export async function setupPageHandler(req, res) {
     .category-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #86868b; margin: 16px 0 8px; }
     .requires-note { color: #ff9f0a; font-size: 13px; padding: 8px 0; }
     #restart-banner { position: fixed; top: 0; left: 0; right: 0; background: #22c55e; color: white; padding: 12px; text-align: center; font-weight: 500; z-index: 1000; }
+    .lang-toggle { position: absolute; top: 20px; right: 20px; display: flex; gap: 4px; }
+    .lang-btn {
+      padding: 4px 10px; border: 1px solid #d2d2d7; border-radius: 6px;
+      background: white; color: #86868b; font-size: 12px; font-weight: 600;
+      cursor: pointer; text-decoration: none;
+    }
+    .lang-btn.active { background: #6366f1; color: white; border-color: #6366f1; }
   </style>
 </head>
 <body>
   <div id="restart-banner" style="display:none">
-    Keys saved! Restarting gateway...
-    <span id="restart-status">Waiting for restart...</span>
+    ${t.keysSaved}
+    <span id="restart-status">${t.waitingRestart}</span>
   </div>
+
+  <div class="lang-toggle">
+    <a href="?lang=en" class="lang-btn${lang === "en" ? " active" : ""}" onclick="setLang('en');return false;">EN</a>
+    <a href="?lang=es" class="lang-btn${lang === "es" ? " active" : ""}" onclick="setLang('es');return false;">ES</a>
+  </div>
+
   <div style="text-align:center;margin-bottom:8px"><div style="width:80px;height:80px;margin:0 auto">${CROW_HERO_SVG}</div></div>
-  <h1>Crow Setup</h1>
-  <p class="subtitle">Integration status for your Crow instance</p>
+  <h1>${t.title}</h1>
+  <p class="subtitle">${t.subtitle}</p>
 
   <div class="stats">
     <div class="stat">
       <div class="stat-number green">${connected.length}</div>
-      <div class="stat-label">Connected</div>
+      <div class="stat-label">${t.connected}</div>
     </div>
     <div class="stat">
       <div class="stat-number gray">${notConfigured.length}</div>
-      <div class="stat-label">Available</div>
+      <div class="stat-label">${t.available}</div>
     </div>
   </div>
 
@@ -250,24 +755,21 @@ export async function setupPageHandler(req, res) {
     const estimatedTokens = totalTools * 200;
     const routerDisabled = process.env.CROW_DISABLE_ROUTER === "1";
     const showWarning = totalTools > 30;
-    return `
-  <div class="section">
-    <div class="section-title">Context Usage</div>
+    const body = `
     <div class="card" style="border-left: 3px solid ${showWarning ? "#ff9f0a" : "#22c55e"}">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
         <div>
-          <div class="card-name">${totalTools} tools loaded</div>
-          <div class="card-desc">${coreTools} core + ${externalTools} external &mdash; ~${(estimatedTokens / 1000).toFixed(1)}K tokens of context</div>
+          <div class="card-name">${totalTools} ${t.toolsLoaded}</div>
+          <div class="card-desc">${coreTools} ${t.core} + ${externalTools} ${t.external} &mdash; ~${(estimatedTokens / 1000).toFixed(1)}K ${t.tokensOfContext}</div>
         </div>
-        ${!routerDisabled ? `<div style="font-size:12px;background:#e8f5e9;color:#2e7d32;padding:4px 10px;border-radius:6px">Router available</div>` : ""}
+        ${!routerDisabled ? `<div style="font-size:12px;background:#e8f5e9;color:#2e7d32;padding:4px 10px;border-radius:6px">${t.routerAvailable}</div>` : ""}
       </div>
       ${showWarning ? `
       <div style="margin-top:10px;padding-top:10px;border-top:1px solid #f0f0f0;font-size:13px;color:#86868b">
-        <strong style="color:#ff9f0a">Tip:</strong> With ${totalTools} tools, consider using the <strong>Router endpoint</strong>
-        (<code>/router/mcp</code>) to reduce context usage to just 7 tools (~2.5K tokens).
+        <strong style="color:#ff9f0a">${t.tip}</strong> ${t.routerTip}
       </div>` : ""}
-    </div>
-  </div>`;
+    </div>`;
+    return sec(t.contextUsage, body);
   })()}
 
   ${isCrowOS && !passwordConfigured ? (() => {
@@ -275,183 +777,59 @@ export async function setupPageHandler(req, res) {
     const setupToken = process.env.CROW_SETUP_TOKEN;
     const queryToken = req.query.token;
     if (setupToken && queryToken !== setupToken) {
-      return `
-  <div class="section">
-    <div class="section-title">Step 1: Set Crow's Nest Password</div>
+      const body = `
     <div class="instructions">
-      <p style="margin-bottom:12px;color:#ff3b30"><strong>Use the link you were sent.</strong></p>
-      <p style="color:#86868b">This instance requires a setup token. Check your invite email for the correct link.</p>
-    </div>
-  </div>`;
+      <p style="margin-bottom:12px;color:#ff3b30"><strong>${t.useInviteLink}</strong></p>
+      <p style="color:#86868b">${t.setupTokenRequired}</p>
+    </div>`;
+      return sec(isCrowOS ? `Step 1: ${t.step1Password}` : t.step1Password, body, { open: true });
     }
-    return `
-  <div class="section">
-    <div class="section-title">Step 1: Set Crow's Nest Password</div>
+    const body = `
     <div class="instructions">
-      <p style="margin-bottom:12px">Protect your Crow's Nest with a password. This is required before you can access the control panel.</p>
+      <p style="margin-bottom:12px">${t.protectPassword}</p>
       <form method="POST" action="/dashboard/login" style="display:flex;gap:8px;flex-wrap:wrap;align-items:start">
         ${setupToken ? `<input type="hidden" name="setup_token" value="${setupToken}">` : ""}
-        <input type="password" name="password" placeholder="Choose a password (12+ characters)" required minlength="12"
+        <input type="password" name="password" placeholder="${t.choosePassword}" required minlength="12"
           style="flex:1;min-width:160px;padding:10px 14px;border:1px solid #d2d2d7;border-radius:8px;font-size:14px">
-        <input type="password" name="confirm" placeholder="Confirm password" required minlength="12"
+        <input type="password" name="confirm" placeholder="${t.confirmPassword}" required minlength="12"
           style="flex:1;min-width:160px;padding:10px 14px;border:1px solid #d2d2d7;border-radius:8px;font-size:14px">
-        <button type="submit" style="padding:10px 20px;background:#6366f1;color:white;border:none;border-radius:8px;font-weight:500;font-size:14px;cursor:pointer">Set Password</button>
+        <button type="submit" style="padding:10px 20px;background:#6366f1;color:white;border:none;border-radius:8px;font-weight:500;font-size:14px;cursor:pointer">${t.setPassword}</button>
       </form>
-    </div>
-  </div>`;
+    </div>`;
+    return sec(isCrowOS ? `Step 1: ${t.step1Password}` : t.step1Password, body, { open: true });
   })() : ""}
 
-  ${passwordConfigured ? `
-  <div class="section">
-    <div class="section-title">${isCrowOS ? "Step 1: Crow's Nest Password" : "Crow's Nest"}</div>
+  ${passwordConfigured ? (() => {
+    const body = `
     <div class="card">
       <div class="card-header">
         <span class="status-dot green"></span>
         <div>
-          <div class="card-name">Password configured</div>
-          <div class="card-desc">Crow's Nest is protected</div>
+          <div class="card-name">${t.passwordConfigured}</div>
+          <div class="card-desc">${t.nestProtected}</div>
         </div>
       </div>
-    </div>
-  </div>` : ""}
+    </div>`;
+    return sec(isCrowOS ? `Step 1: ${t.crowsNest}` : t.crowsNest, body, { open: true });
+  })() : ""}
 
-  ${crowId ? `
-  <div class="section">
-    <div class="section-title">${isCrowOS ? "Step 2: Your Identity" : "Identity"}</div>
+  ${crowId ? (() => {
+    const body = `
     <div class="card">
       <div class="card-header">
         <span class="status-dot green"></span>
         <div>
           <div class="card-name">${crowId}</div>
-          <div class="card-desc">Your Crow ID — share this with peers to connect</div>
+          <div class="card-desc">${t.crowIdDesc}</div>
         </div>
-      </div>
-    </div>
-  </div>` : ""}
-
-  <div class="section">
-    <div class="section-title">${isCrowOS ? "Step 3: Network Access" : "Network Access"}</div>
-    ${(() => {
-      // State 1: Tailscale connected, hostname is "crow" — ideal
-      if (tailscale?.ip && tailscale.hostname === "crow") {
-        return `
-    <div class="card" style="border-left: 3px solid #22c55e">
-      <div class="card-header">
-        <span class="status-dot green"></span>
-        <div>
-          <div class="card-name">Ready &mdash; access Crow from any device</div>
-          <div class="card-desc">Tailscale is connected with hostname <strong>crow</strong></div>
-        </div>
-      </div>
-      <div class="card-env" style="line-height: 2">
-        <strong>Crow's Nest:</strong> <span class="env-var">http://crow${portSuffix}/dashboard</span><br>
-        <strong>Blog:</strong> <span class="env-var">http://crow${portSuffix}/blog</span><br>
-        <strong>Tailscale IP:</strong> <span class="env-var">http://${tailscale.ip}${portSuffix}/dashboard</span>
-      </div>
-      ${hasCaddy ? `<div style="margin-top:8px;font-size:12px;color:#86868b">Caddy reverse proxy detected &mdash; port-free URLs available</div>` : ""}
-    </div>`;
-      }
-
-      // State 2: Tailscale connected, hostname is NOT "crow"
-      if (tailscale?.ip && tailscale.hostname) {
-        return `
-    <div class="card" style="border-left: 3px solid #ff9f0a">
-      <div class="card-header">
-        <span class="status-dot yellow"></span>
-        <div>
-          <div class="card-name">Tailscale Connected</div>
-          <div class="card-desc">Hostname is <strong>${tailscale.hostname}</strong> &mdash; consider changing to <strong>crow</strong> for easier access</div>
-        </div>
-      </div>
-      <div class="card-env" style="line-height: 2">
-        <strong>Current URL:</strong> <span class="env-var">http://${tailscale.hostname}${portSuffix}/dashboard</span><br>
-        <strong>Tailscale IP:</strong> <span class="env-var">http://${tailscale.ip}${portSuffix}/dashboard</span>
-      </div>
-      <div style="margin-top:12px;padding-top:12px;border-top:1px solid #f0f0f0">
-        <div style="font-size:14px;font-weight:600;margin-bottom:8px">Recommended: Set hostname to &ldquo;crow&rdquo;</div>
-        <p style="font-size:13px;color:#86868b;margin-bottom:8px">
-          This lets you access Crow at <strong>http://crow/</strong> from any device on your Tailnet &mdash; phone, laptop, or tablet.
-        </p>
-        <div class="connector-url">sudo tailscale set --hostname=crow</div>
-        <p style="font-size:12px;color:#86868b;margin-top:8px">
-          If &ldquo;crow&rdquo; is already taken on your Tailnet, try <code>crow-2</code> or <code>crow-home</code>.
-        </p>
       </div>
     </div>`;
-      }
+    return sec(isCrowOS ? `Step 2: ${t.step2Identity}` : t.identity, body);
+  })() : ""}
 
-      // State 3a: Tailscale installed but not connected/authenticated
-      if (tailscale?.installed && !tailscale?.ip) {
-        return `
-    <div class="card" style="border-left: 3px solid #ff9f0a">
-      <div class="card-header">
-        <span class="status-dot yellow"></span>
-        <div>
-          <div class="card-name">Tailscale Installed</div>
-          <div class="card-desc">Not connected &mdash; authenticate to enable remote access</div>
-        </div>
-      </div>
-      <div style="margin-top:12px;padding-top:12px;border-top:1px solid #f0f0f0">
-        <p style="font-size:13px;color:#86868b;margin-bottom:10px">Run these commands on your server to connect:</p>
-        <div class="connector-url" style="margin-bottom:6px">sudo tailscale up</div>
-        <p style="font-size:12px;color:#86868b;margin-bottom:10px">Follow the login URL to authorize this device. Then set the hostname:</p>
-        <div class="connector-url">sudo tailscale set --hostname=crow</div>
-        <p style="font-size:12px;color:#86868b;margin-top:10px">
-          After that, open <strong>http://crow/dashboard</strong> from any device on your Tailnet.
-        </p>
-      </div>
-    </div>`;
-      }
+  ${sec(isCrowOS ? `Step 3: ${t.step3Network}` : t.networkAccess, buildNetworkAccess())}
 
-      // State 3b: Tailscale not installed
-      return `
-    <div class="card" style="border-left: 3px solid #86868b">
-      <div class="card-header">
-        <span class="status-dot gray"></span>
-        <div>
-          <div class="card-name">Set Up Remote Access</div>
-          <div class="card-desc">Access Crow from your phone, laptop, or anywhere &mdash; securely and privately</div>
-        </div>
-      </div>
-      <div style="margin-top:12px;padding-top:12px;border-top:1px solid #f0f0f0">
-        <p style="font-size:13px;margin-bottom:12px">
-          <a href="https://tailscale.com" target="_blank" style="color:#6366f1;text-decoration:none;font-weight:500">Tailscale</a>
-          creates a private network between your devices. Once set up, you can reach Crow at
-          <strong>http://crow/</strong> from any device &mdash; no port forwarding, no public exposure.
-        </p>
-
-        <div style="font-size:14px;font-weight:600;margin-bottom:8px">1. Create a free account</div>
-        <p style="font-size:13px;color:#86868b;margin-bottom:12px">
-          Sign up at <a href="https://tailscale.com" target="_blank" style="color:#6366f1;text-decoration:none">tailscale.com</a> (free for up to 100 devices).
-        </p>
-
-        <div style="font-size:14px;font-weight:600;margin-bottom:8px">2. Install on this server</div>
-        <div class="connector-url" style="margin-bottom:4px">curl -fsSL https://tailscale.com/install.sh | sh</div>
-        <div class="connector-url" style="margin-bottom:4px">sudo tailscale up</div>
-        <p style="font-size:12px;color:#86868b;margin-bottom:12px">Follow the login URL printed in the terminal.</p>
-
-        <div style="font-size:14px;font-weight:600;margin-bottom:8px">3. Set your hostname</div>
-        <div class="connector-url" style="margin-bottom:4px">sudo tailscale set --hostname=crow</div>
-        <p style="font-size:12px;color:#86868b;margin-bottom:12px">This makes Crow accessible at <strong>http://crow/</strong> on your Tailnet.</p>
-
-        <div style="font-size:14px;font-weight:600;margin-bottom:8px">4. Install on your other devices</div>
-        <p style="font-size:13px;color:#86868b;margin-bottom:4px">
-          Install Tailscale on your phone, laptop, or tablet from
-          <a href="https://tailscale.com/download" target="_blank" style="color:#6366f1;text-decoration:none">tailscale.com/download</a>
-          and sign in with the same account.
-        </p>
-        <p style="font-size:13px;margin-top:12px">
-          Then open <strong>http://crow/dashboard</strong> in any browser.
-        </p>
-      </div>
-    </div>`;
-    })()}
-  </div>
-
-  ${connected.length > 0 ? `
-  <div class="section">
-    <div class="section-title">Connected</div>
-    ${connected.map((i) => `
+  ${connected.length > 0 ? sec(t.connectedSection, connected.map((i) => `
     <div class="card integration-card">
       <div class="card-header" onclick="toggleCard(this)">
         <span class="status-dot green"></span>
@@ -462,19 +840,15 @@ export async function setupPageHandler(req, res) {
         <span class="chevron">&#9656;</span>
       </div>
       <div class="card-body" style="display:none">
-        <div class="card-tools" style="margin-bottom:12px">${i.toolCount} tool${i.toolCount !== 1 ? "s" : ""} available</div>
+        <div class="card-tools" style="margin-bottom:12px">${i.toolCount} ${i.toolCount !== 1 ? t.toolsAvailable : t.toolAvailable}</div>
         ${!isRender && !isHosted ? `
         <div class="card-actions">
-          <button class="btn-remove" onclick="removeIntegration('${i.id}')">Remove</button>
+          <button class="btn-remove" onclick="removeIntegration('${i.id}')">${t.remove}</button>
         </div>` : ""}
       </div>
-    </div>`).join("")}
-  </div>` : ""}
+    </div>`).join("")) : ""}
 
-  ${errored.length > 0 ? `
-  <div class="section">
-    <div class="section-title">Errors</div>
-    ${errored.map((i) => `
+  ${errored.length > 0 ? sec(t.errors, errored.map((i) => `
     <div class="card">
       <div class="card-header">
         <span class="status-dot red"></span>
@@ -483,17 +857,13 @@ export async function setupPageHandler(req, res) {
           <div class="card-desc">${i.description}</div>
         </div>
       </div>
-      <div class="card-error">${i.error || "Failed to connect"}</div>
-    </div>`).join("")}
-  </div>` : ""}
+      <div class="card-error">${i.error || t.failedToConnect}</div>
+    </div>`).join("")) : ""}
 
-  ${!isRender && !isHosted && notConfigured.length > 0 ? `
-  <div class="section">
-    <div class="section-title">Available Integrations</div>
-    ${["productivity", "communication", "development"].map(cat => {
+  ${!isRender && !isHosted && notConfigured.length > 0 ? sec(t.availableIntegrations, ["productivity", "communication", "development"].map(cat => {
       const items = notConfigured.filter(i => (categoryMap[i.id] || "development") === cat);
       if (items.length === 0) return "";
-      const label = { productivity: "Productivity", communication: "Communication", development: "Development & Search" }[cat];
+      const label = catLabels[cat];
       return `
         <div class="category-title">${label}</div>
         ${items.map(i => `
@@ -508,7 +878,7 @@ export async function setupPageHandler(req, res) {
           </div>
           <div class="card-body" style="display:none">
             ${i.requiresMissing ? `
-              <div class="requires-note">Requires Python (uvx) &mdash; install Python to enable this integration</div>
+              <div class="requires-note">${t.requiresPython}</div>
             ` : i.envVars.length > 0 ? `
               <form class="integration-form">
                 <input type="hidden" name="integration_id" value="${i.id}">
@@ -519,114 +889,87 @@ export async function setupPageHandler(req, res) {
                   <input type="password" name="${v}" placeholder="${v.toLowerCase().includes('url') || v.toLowerCase().includes('path') ? 'https://...' : '...'}" autocomplete="off">
                 </div>`).join("")}
                 <div class="card-links">
-                  ${i.keyUrl ? `<a href="${i.keyUrl}" target="_blank">Get your API key</a>` : ""}
+                  ${i.keyUrl ? `<a href="${i.keyUrl}" target="_blank">${t.getApiKey}</a>` : ""}
                   ${i.keyUrl && i.docsUrl ? ` <span style="color:#86868b">&middot;</span> ` : ""}
-                  ${i.docsUrl ? `<a href="${i.docsUrl}" target="_blank">Setup guide</a>` : ""}
+                  ${i.docsUrl ? `<a href="${i.docsUrl}" target="_blank">${t.setupGuide}</a>` : ""}
                 </div>
                 ${i.keyInstructions ? `<div style="color:#86868b;font-size:12px;margin-bottom:12px">${i.keyInstructions}</div>` : ""}
                 <div class="card-actions">
-                  <button type="submit" class="btn-save">Save</button>
+                  <button type="submit" class="btn-save">${t.save}</button>
                 </div>
               </form>
             ` : `
-              <div style="color:#86868b;font-size:13px">No configuration needed &mdash; works out of the box.</div>
+              <div style="color:#86868b;font-size:13px">${t.noConfigNeeded}</div>
             `}
           </div>
         </div>`).join("")}`;
-    }).join("")}
-  </div>` : ""}
+    }).join("")) : ""}
 
-  ${(isRender || isHosted) && notConfigured.length > 0 ? `
-  <div class="section">
-    <div class="section-title">Available &mdash; Add API Keys to Enable</div>
-    ${notConfigured.map((i) => `
-    <div class="card">
-      <div class="card-header">
-        <span class="status-dot gray"></span>
-        <div>
-          <div class="card-name">${i.name}</div>
-          <div class="card-desc">${i.description}</div>
-        </div>
-      </div>
-      <div class="card-env">
-        ${isRender ? "Add in Render" : "Environment variable"}: ${i.envVars.map((v) => `<span class="env-var">${v}</span>`).join(" + ")}
-        <br>
-        ${i.keyUrl ? `<a href="${i.keyUrl}" target="_blank" class="key-link">Get your API key &rarr;</a>` : ""}
-        ${i.keyInstructions ? `<br><span style="color:#86868b;font-size:12px">${i.keyInstructions}</span>` : ""}
-      </div>
-    </div>`).join("")}
-  </div>` : ""}
+  ${(isRender || isHosted) && notConfigured.length > 0 ? sec(t.availableAddKeys, buildHostedIntegrations()) : ""}
 
-  ${isRender || isHosted ? `
-  <div class="section">
-    <div class="section-title">How to Add an Integration</div>
+  ${isRender || isHosted ? sec(t.howToAdd, `
     <div class="instructions">
       ${isHosted ? `
       <ol>
-        <li><strong>Get your API key</strong> from the service</li>
-        <li>Go to your <strong>Crow's Nest</strong> &rarr; <strong>Settings</strong> panel</li>
-        <li>Add the environment variable name and your API key</li>
-        <li>Your instance will restart automatically (~10 seconds)</li>
-        <li>Refresh this page to see the integration turn green</li>
+        <li>${t.hostedStep1}</li>
+        <li>${t.hostedStep2}</li>
+        <li>${t.hostedStep3}</li>
+        <li>${t.hostedStep4}</li>
+        <li>${t.hostedStep5}</li>
       </ol>` : `
       <ol>
-        <li><strong>Get your API key</strong> from the service</li>
-        <li><strong>Go to your Render dashboard</strong> &rarr; your crow-gateway service &rarr; <strong>Environment</strong></li>
-        <li><strong>Click "Add Environment Variable"</strong> &rarr; type the variable name &rarr; paste your key &rarr; <strong>Save Changes</strong></li>
-        <li>Render will <strong>automatically restart</strong> your service (~1 minute)</li>
-        <li>Refresh this page to see the integration turn green</li>
+        <li>${t.renderStep1}</li>
+        <li>${t.renderStep2}</li>
+        <li>${t.renderStep3}</li>
+        <li>${t.renderStep4}</li>
+        <li>${t.renderStep5}</li>
       </ol>
-      <a href="${renderDashboardUrl}" target="_blank" class="render-link">Open Render Dashboard</a>`}
-    </div>
-  </div>` : ""}
+      <a href="${renderDashboardUrl}" target="_blank" class="render-link">${t.openRenderDashboard}</a>`}
+    </div>`) : ""}
 
-  ${gatewayUrl ? `
-  <div class="section">
-    <div class="section-title">MCP Endpoint URLs</div>
+  ${gatewayUrl ? sec(t.mcpEndpoints, `
     <div class="instructions">
-      <p style="margin-bottom:8px">Use these URLs to connect from any MCP-compatible AI platform:</p>
+      <p style="margin-bottom:8px">${t.mcpIntro}</p>
 
       ${process.env.CROW_DISABLE_ROUTER !== "1" ? `
-      <p style="font-weight:600;font-size:15px;margin-top:16px">Router (Recommended &mdash; 7 tools instead of 49+)</p>
-      <p style="font-size:12px;color:#86868b;margin-top:2px">Streamable HTTP (Claude, Gemini, Grok, Cursor, Windsurf, Cline, Claude Code)</p>
+      <p style="font-weight:600;font-size:15px;margin-top:16px">${t.routerRecommended}</p>
+      <p style="font-size:12px;color:#86868b;margin-top:2px">${t.streamableHttp}</p>
       <div class="connector-url">${gatewayUrl}/router/mcp</div>
-      <p style="font-size:12px;color:#86868b;margin-top:8px">SSE (ChatGPT)</p>
+      <p style="font-size:12px;color:#86868b;margin-top:8px">${t.sseChatgpt}</p>
       <div class="connector-url">${gatewayUrl}/router/sse</div>
       ` : ""}
 
-      <p style="font-weight:600;font-size:15px;margin-top:16px">Memory</p>
-      <p style="font-size:12px;color:#86868b;margin-top:2px">Streamable HTTP (Claude, Gemini, Grok, Cursor, Windsurf, Cline, Claude Code)</p>
+      <p style="font-weight:600;font-size:15px;margin-top:16px">${t.memory}</p>
+      <p style="font-size:12px;color:#86868b;margin-top:2px">${t.streamableHttp}</p>
       <div class="connector-url">${gatewayUrl}/memory/mcp</div>
-      <p style="font-size:12px;color:#86868b;margin-top:8px">SSE (ChatGPT)</p>
+      <p style="font-size:12px;color:#86868b;margin-top:8px">${t.sseChatgpt}</p>
       <div class="connector-url">${gatewayUrl}/memory/sse</div>
 
-      <p style="font-weight:600;font-size:15px;margin-top:16px">Research</p>
-      <p style="font-size:12px;color:#86868b;margin-top:2px">Streamable HTTP</p>
+      <p style="font-weight:600;font-size:15px;margin-top:16px">${t.research}</p>
+      <p style="font-size:12px;color:#86868b;margin-top:2px">${t.streamableHttpShort}</p>
       <div class="connector-url">${gatewayUrl}/research/mcp</div>
-      <p style="font-size:12px;color:#86868b;margin-top:8px">SSE (ChatGPT)</p>
+      <p style="font-size:12px;color:#86868b;margin-top:8px">${t.sseChatgpt}</p>
       <div class="connector-url">${gatewayUrl}/research/sse</div>
 
-      <p style="font-weight:600;font-size:15px;margin-top:16px">External Tools (GitHub, Slack, etc.)</p>
-      <p style="font-size:12px;color:#86868b;margin-top:2px">Streamable HTTP</p>
+      <p style="font-weight:600;font-size:15px;margin-top:16px">${t.externalTools}</p>
+      <p style="font-size:12px;color:#86868b;margin-top:2px">${t.streamableHttpShort}</p>
       <div class="connector-url">${gatewayUrl}/tools/mcp</div>
-      <p style="font-size:12px;color:#86868b;margin-top:8px">SSE (ChatGPT)</p>
+      <p style="font-size:12px;color:#86868b;margin-top:8px">${t.sseChatgpt}</p>
       <div class="connector-url">${gatewayUrl}/tools/sse</div>
 
-      <p style="font-weight:600;font-size:13px;margin-top:20px;margin-bottom:8px">Quick Setup by Platform:</p>
+      <p style="font-weight:600;font-size:13px;margin-top:20px;margin-bottom:8px">${t.quickSetup}</p>
       <ul style="font-size:13px;padding-left:18px;list-style:disc">
-        <li><strong>Claude Web/Mobile</strong> — Settings &rarr; Integrations &rarr; Add Custom &rarr; paste <code>/mcp</code> URL</li>
-        <li><strong>Claude Desktop</strong> — Use stdio transport (see docs)</li>
-        <li><strong>ChatGPT</strong> — Settings &rarr; Apps &rarr; Create &rarr; paste <code>/sse</code> URL</li>
-        <li><strong>Gemini CLI</strong> — Add to <code>~/.gemini/settings.json</code> with <code>url</code> property</li>
-        <li><strong>Cursor</strong> — Add to <code>.cursor/mcp.json</code> with <code>url</code> property</li>
-        <li><strong>Windsurf</strong> — Add to <code>~/.codeium/windsurf/mcp_config.json</code></li>
-        <li><strong>Cline</strong> — VS Code MCP settings &rarr; add server URL</li>
-        <li><strong>Claude Code</strong> — Add to <code>.mcp.json</code> or <code>~/.claude/mcp.json</code></li>
+        ${platformListHtml}
       </ul>
-    </div>
-  </div>` : ""}
+    </div>`, { open: true }) : ""}
 
 <script>
+function toggleSection(header) {
+  header.classList.toggle('sec-collapsed');
+  var body = header.nextElementSibling;
+  if (body) body.classList.toggle('sec-collapsed');
+}
+
 function toggleCard(header) {
   var body = header.nextElementSibling;
   var chevron = header.querySelector('.chevron');
@@ -637,6 +980,13 @@ function toggleCard(header) {
     body.style.display = 'none';
     if (chevron) chevron.classList.remove('open');
   }
+}
+
+function setLang(l) {
+  document.cookie = 'crow_lang=' + l + ';path=/;max-age=' + (30*24*60*60) + ';SameSite=Strict';
+  var url = new URL(window.location);
+  url.searchParams.set('lang', l);
+  window.location = url.toString();
 }
 
 document.querySelectorAll('.integration-form').forEach(function(form) {
@@ -658,22 +1008,22 @@ document.querySelectorAll('.integration-form').forEach(function(form) {
           document.getElementById('restart-banner').style.display = 'block';
           pollHealth();
         } else {
-          btn.textContent = 'Saved! Restart gateway to apply.';
+          btn.textContent = '${t.savedRestart}';
           setTimeout(function() { btn.textContent = origText; btn.disabled = false; }, 3000);
         }
       } else {
-        btn.textContent = data.error || 'Error';
+        btn.textContent = data.error || '${t.error}';
         setTimeout(function() { btn.textContent = origText; btn.disabled = false; }, 3000);
       }
     } catch (err) {
-      btn.textContent = 'Error';
+      btn.textContent = '${t.error}';
       setTimeout(function() { btn.textContent = origText; btn.disabled = false; }, 3000);
     }
   });
 });
 
 function removeIntegration(id) {
-  if (!confirm('Remove this integration\\'s API keys?')) return;
+  if (!confirm('${t.removeConfirm}')) return;
   fetch('/setup/integrations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -697,11 +1047,11 @@ function pollHealth() {
       var resp = await fetch('/health', { signal: AbortSignal.timeout(2000) });
       if (resp.ok) { clearInterval(interval); location.reload(); }
     } catch(e) {
-      if (status) status.textContent = 'Waiting for restart... (' + (attempts * 2) + 's)';
+      if (status) status.textContent = '${t.waitingRestart} (' + (attempts * 2) + 's)';
     }
     if (attempts > 30) {
       clearInterval(interval);
-      if (status) status.textContent = 'Gateway may need manual restart.';
+      if (status) status.textContent = '${t.gatewayManualRestart}';
     }
   }, 2000);
 }

@@ -74,6 +74,20 @@ export default {
         return;
       }
 
+      if (action === "set_language") {
+        const validLangs = ['en', 'es'];
+        const newLang = validLangs.includes(req.body.language) ? req.body.language : 'en';
+        await db.execute({
+          sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('language', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
+          args: [newLang, newLang],
+        });
+        // Set cookie for setup page sync
+        const secure = process.env.CROW_HOSTED || process.env.NODE_ENV === 'production' ? '; Secure' : '';
+        res.setHeader('Set-Cookie', `crow_lang=${newLang}; Path=/; Max-Age=${30*24*60*60}; SameSite=Strict${secure}`);
+        res.redirect("/dashboard/settings");
+        return;
+      }
+
       if (action === "save_update_settings") {
         const enabled = req.body.auto_update_enabled || "true";
         const interval = req.body.auto_update_interval_hours || "6";
@@ -476,6 +490,22 @@ function pollHealth(attempts) {
       <button type="submit" class="btn btn-secondary">Change Password</button>
     </form>`;
 
+    // Language preference
+    const langResult = await db.execute({
+      sql: "SELECT value FROM dashboard_settings WHERE key = 'language'", args: []
+    });
+    const { parseCookies } = await import("../auth.js");
+    const currentLang = langResult.rows[0]?.value || parseCookies(req).crow_lang || "en";
+
+    const langForm = `<form method="POST">
+      <input type="hidden" name="action" value="set_language">
+      ${formField("Language", "language", { type: "select", value: currentLang, options: [
+        { value: "en", label: "English" },
+        { value: "es", label: "Español" },
+      ]})}
+      <button type="submit" class="btn btn-secondary">Save Language</button>
+    </form>`;
+
     // Auto-update status
     const updateStatus = await getUpdateStatus();
     const lastCheckDisplay = updateStatus.lastCheck
@@ -828,6 +858,7 @@ function pollHealth(attempts) {
       ${section("Blog Settings", blogForm, { delay: 250 })}
       ${section("Contact Discovery", discoveryForm, { delay: 300 })}
       ${section("Change Password", passwordForm, { delay: 350 })}
+      ${section("Language", langForm, { delay: 375 })}
     `;
 
     return layout({ title: "Settings", content });
