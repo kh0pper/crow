@@ -128,6 +128,75 @@ export async function createProviderAdapter() {
 }
 
 /**
+ * Read AI profiles from dashboard_settings.
+ * Returns array of profiles. Use includeKeys: true only for adapter creation.
+ */
+export async function getAiProfiles(db, { includeKeys = false } = {}) {
+  const result = await db.execute({
+    sql: "SELECT value FROM dashboard_settings WHERE key = 'ai_profiles'",
+    args: [],
+  });
+  if (!result.rows[0]?.value) return [];
+  try {
+    const profiles = JSON.parse(result.rows[0].value);
+    if (!includeKeys) {
+      return profiles.map(({ apiKey, ...rest }) => rest);
+    }
+    return profiles;
+  } catch { return []; }
+}
+
+/**
+ * Create a provider adapter from a profile config (bypasses .env).
+ * Returns { adapter, config } — same shape as createProviderAdapter().
+ */
+export async function createAdapterFromProfile(profile, model) {
+  const adapterKey = profile.provider === "openrouter" ? "openai" : profile.provider;
+  const loader = ADAPTER_LOADERS[adapterKey];
+  if (!loader) {
+    throw Object.assign(new Error(`Unknown provider: ${profile.provider}`), { code: "invalid_provider" });
+  }
+
+  const info = PROVIDER_INFO[adapterKey];
+  if (info?.requiresKey && !profile.apiKey) {
+    throw Object.assign(new Error("API key required"), { code: "missing_key" });
+  }
+
+  const mod = await loader();
+  const resolvedModel = model || profile.defaultModel || info?.defaultModel || "";
+  const adapterConfig = {
+    apiKey: profile.apiKey,
+    model: resolvedModel,
+    baseUrl: profile.baseUrl || undefined,
+  };
+  // OpenRouter default base URL (mirrors createProviderAdapter logic)
+  if (profile.provider === "openrouter" && !profile.baseUrl) {
+    adapterConfig.baseUrl = "https://openrouter.ai/api/v1";
+  }
+
+  const adapter = mod.default(adapterConfig);
+  return { adapter, config: { provider: profile.provider, model: resolvedModel, baseUrl: profile.baseUrl } };
+}
+
+/**
+ * Test a specific AI profile by sending a minimal request.
+ */
+export async function testProfileConnection(profile) {
+  try {
+    const { adapter } = await createAdapterFromProfile(profile, profile.defaultModel);
+    const messages = [{ role: "user", content: "Say 'ok'" }];
+    let gotContent = false;
+    for await (const event of adapter.chatStream(messages, [], { maxTokens: 10, temperature: 0 })) {
+      if (event.type === "content_delta") gotContent = true;
+      if (event.type === "done") break;
+    }
+    return { ok: true, provider: adapter.name, gotContent };
+  } catch (err) {
+    return { ok: false, error: err.message, code: err.code || "unknown" };
+  }
+}
+
+/**
  * List available providers with their configuration status.
  */
 export function listProviders() {

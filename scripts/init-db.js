@@ -547,6 +547,7 @@ await initTable("chat_conversations table", `
     title TEXT,
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
+    profile_id TEXT DEFAULT NULL,
     system_prompt TEXT,
     total_tokens INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
@@ -555,6 +556,15 @@ await initTable("chat_conversations table", `
 
   CREATE INDEX IF NOT EXISTS idx_chat_conversations_updated ON chat_conversations(updated_at DESC);
 `);
+
+// Migration: add profile_id to existing chat_conversations tables
+try {
+  const cols = await db.execute("PRAGMA table_info(chat_conversations)");
+  if (!cols.rows.some(r => r.name === "profile_id")) {
+    await db.execute("ALTER TABLE chat_conversations ADD COLUMN profile_id TEXT DEFAULT NULL");
+    console.log("  ✓ Added profile_id column to chat_conversations");
+  }
+} catch { /* table may not exist yet on first run */ }
 
 await initTable("chat_messages table", `
   CREATE TABLE IF NOT EXISTS chat_messages (

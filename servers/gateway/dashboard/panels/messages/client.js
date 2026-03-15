@@ -118,17 +118,77 @@ export function messagesClientJS(opts) {
 
   // === AI Chat ===
   ${aiConfigured ? `
+  var _profilesCache = null;
+
+  async function getProfiles() {
+    if (_profilesCache) return _profilesCache;
+    try {
+      var r = await fetch('/api/chat/profiles');
+      _profilesCache = await r.json();
+    } catch(e) { _profilesCache = { profiles: [], envConfig: null }; }
+    return _profilesCache;
+  }
+
   async function msgNewAiChat() {
     try {
-      var r = await fetch('/api/chat/conversations', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: 'New conversation' }),
-      });
-      var data = await r.json();
-      if (data.id) {
-        window.location.href = '/dashboard/messages';
+      var pdata = await getProfiles();
+      var profiles = pdata.profiles || [];
+
+      if (profiles.length === 0) {
+        // No profiles — use env config (original behavior)
+        var r = await fetch('/api/chat/conversations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: 'New conversation' }),
+        });
+        var data = await r.json();
+        if (data.id) window.location.href = '/dashboard/messages';
+        return;
       }
+
+      // Show profile/model picker popover
+      var popover = document.getElementById('msg-popover');
+      popover.textContent = '';
+      popover.classList.add('visible');
+
+      var title = el('div', { css: 'font-size:0.85rem;font-weight:600;padding:0.5rem 0.75rem;color:var(--crow-text-muted)' }, ['New AI Chat']);
+      popover.appendChild(title);
+
+      var profileSelect = el('select', { className: 'msg-model-select', css: 'margin:0 0.75rem 0.5rem;width:calc(100% - 1.5rem)' });
+      profiles.forEach(function(p) {
+        profileSelect.appendChild(el('option', { value: p.id, text: p.name }));
+      });
+      popover.appendChild(profileSelect);
+
+      var modelSelect = el('select', { className: 'msg-model-select', css: 'margin:0 0.75rem 0.5rem;width:calc(100% - 1.5rem)' });
+      function updateModels() {
+        modelSelect.textContent = '';
+        var pid = profileSelect.value;
+        var p = profiles.find(function(x){return x.id===pid});
+        if (p && p.models) {
+          p.models.forEach(function(m) {
+            var opt = el('option', { value: m, text: m });
+            if (m === p.defaultModel) opt.selected = true;
+            modelSelect.appendChild(opt);
+          });
+        }
+      }
+      profileSelect.addEventListener('change', updateModels);
+      updateModels();
+      popover.appendChild(modelSelect);
+
+      var createBtn = el('button', { className: 'msg-popover-item', css: 'text-align:center;font-weight:600;color:var(--crow-accent)', text: 'Create Chat', onclick: async function() {
+        popover.classList.remove('visible');
+        var r = await fetch('/api/chat/conversations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: 'New conversation', profile_id: profileSelect.value, model: modelSelect.value }),
+        });
+        var data = await r.json();
+        if (data.id) window.location.href = '/dashboard/messages';
+      }});
+      popover.appendChild(createBtn);
+
     } catch(e) { console.error(e); }
   }
 
@@ -143,11 +203,22 @@ export function messagesClientJS(opts) {
       var msgs = data.messages || [];
       _messages = msgs;
 
+      // Get model list from profile (if profile-based conversation)
+      var models = [];
+      var currentModel = conv.model || '';
+      if (conv.profile_id) {
+        var pdata = await getProfiles();
+        var profile = (pdata.profiles || []).find(function(p){return p.id === conv.profile_id});
+        if (profile && profile.models) models = profile.models;
+      }
+
       renderChatUI(chat, {
         name: conv.title || 'Chat',
         meta: (conv.provider || '') + (conv.model ? ' / ' + conv.model : ''),
         type: 'ai',
         id: id,
+        models: models,
+        currentModel: currentModel,
       }, msgs);
 
       showAiInfo(conv);
@@ -378,7 +449,26 @@ export function messagesClientJS(opts) {
     }
 
     header.appendChild(el('div', { className: 'msg-chat-header-name', text: headerData.name }));
-    header.appendChild(el('div', { className: 'msg-chat-header-meta', text: headerData.meta }));
+
+    // Model selector (for profile-based AI conversations) or static meta
+    if (headerData.type === 'ai' && headerData.models && headerData.models.length > 0) {
+      var modelSelect = el('select', { className: 'msg-model-select', onchange: function() {
+        fetch('/api/chat/conversations/' + encodeURIComponent(headerData.id), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: this.value }),
+        });
+      }});
+      headerData.models.forEach(function(m) {
+        var opt = el('option', { text: m, value: m });
+        if (m === headerData.currentModel) opt.selected = true;
+        modelSelect.appendChild(opt);
+      });
+      header.appendChild(modelSelect);
+    } else {
+      header.appendChild(el('div', { className: 'msg-chat-header-meta', text: headerData.meta }));
+    }
+
     header.appendChild(el('button', { className: 'msg-info-toggle', text: 'Info', onclick: function() {
       document.getElementById('msg-info').classList.toggle('hidden');
     }}));
