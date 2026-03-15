@@ -11,6 +11,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createDbClient, sanitizeFtsQuery, escapeLikePattern } from "../db.js";
 import { generateSlug, generateExcerpt } from "./renderer.js";
+import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
 
 export function createBlogServer(dbPath, options = {}) {
   const server = new McpServer(
@@ -157,24 +158,41 @@ export function createBlogServer(dbPath, options = {}) {
   // --- crow_publish_post ---
   server.tool(
     "crow_publish_post",
-    "Publish a blog post (sets status to published and records timestamp)",
+    "Publish a blog post (sets status to published and records timestamp). Returns a preview and confirmation token on first call; pass the token back to execute.",
     {
       id: z.number().describe("Post ID"),
+      confirm_token: z.string().max(100).describe('Confirmation token — pass "" on first call to get a preview, then pass the returned token to execute'),
     },
-    async ({ id }) => {
-      const result = await db.execute({
+    async ({ id, confirm_token }) => {
+      const existing = await db.execute({ sql: "SELECT * FROM blog_posts WHERE id = ?", args: [id] });
+      if (existing.rows.length === 0) {
+        return { content: [{ type: "text", text: `Post ${id} not found. Use crow_list_posts to see available posts.` }], isError: true };
+      }
+      const post = existing.rows[0];
+
+      if (!shouldSkipGates()) {
+        if (confirm_token) {
+          if (!validateToken(confirm_token, "publish_post", id)) {
+            return { content: [{ type: "text", text: "Invalid or expired confirmation token. Pass confirm_token: \"\" to get a new preview." }], isError: true };
+          }
+        } else {
+          const token = generateToken("publish_post", id);
+          return {
+            content: [{
+              type: "text",
+              text: `⚠️ This will publish:\n  Post #${post.id}: "${post.title}" (${post.visibility})\n\nThis will make the post ${post.visibility === "public" ? `publicly accessible at /blog/${post.slug}` : `visible to ${post.visibility} audience`}.\nTo proceed, call again with confirm_token: "${token}"`,
+            }],
+          };
+        }
+      }
+
+      await db.execute({
         sql: "UPDATE blog_posts SET status = 'published', published_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
         args: [id],
       });
-      if (result.rowsAffected === 0) {
-        return { content: [{ type: "text", text: `Post ${id} not found. Use crow_list_posts to see available posts.` }], isError: true };
-      }
 
-      const post = await db.execute({ sql: "SELECT slug, visibility FROM blog_posts WHERE id = ?", args: [id] });
-      const slug = post.rows[0]?.slug;
-      const vis = post.rows[0]?.visibility;
       return {
-        content: [{ type: "text", text: `Published! ${vis === "public" ? `View at /blog/${slug}` : `Visibility: ${vis} (change to "public" to make it accessible at /blog/${slug})`}` }],
+        content: [{ type: "text", text: `Published! ${post.visibility === "public" ? `View at /blog/${post.slug}` : `Visibility: ${post.visibility} (change to "public" to make it accessible at /blog/${post.slug})`}` }],
       };
     }
   );
@@ -288,15 +306,35 @@ export function createBlogServer(dbPath, options = {}) {
   // --- crow_delete_post ---
   server.tool(
     "crow_delete_post",
-    "Delete a blog post",
+    "Permanently delete a blog post. This cannot be undone — use crow_unpublish_post to revert to draft instead. Returns a preview and confirmation token on first call; pass the token back to execute.",
     {
       id: z.number().describe("Post ID"),
+      confirm_token: z.string().max(100).describe('Confirmation token — pass "" on first call to get a preview, then pass the returned token to execute'),
     },
-    async ({ id }) => {
-      const result = await db.execute({ sql: "DELETE FROM blog_posts WHERE id = ?", args: [id] });
-      if (result.rowsAffected === 0) {
+    async ({ id, confirm_token }) => {
+      const existing = await db.execute({ sql: "SELECT * FROM blog_posts WHERE id = ?", args: [id] });
+      if (existing.rows.length === 0) {
         return { content: [{ type: "text", text: `Post ${id} not found. Use crow_list_posts to see available posts.` }], isError: true };
       }
+      const post = existing.rows[0];
+
+      if (!shouldSkipGates()) {
+        if (confirm_token) {
+          if (!validateToken(confirm_token, "delete_post", id)) {
+            return { content: [{ type: "text", text: "Invalid or expired confirmation token. Pass confirm_token: \"\" to get a new preview." }], isError: true };
+          }
+        } else {
+          const token = generateToken("delete_post", id);
+          return {
+            content: [{
+              type: "text",
+              text: `⚠️ This will permanently delete:\n  Post #${post.id}: "${post.title}" (${post.status}, ${post.visibility})\n\nThis cannot be undone. Use crow_unpublish_post to revert to draft instead.\nTo proceed, call again with confirm_token: "${token}"`,
+            }],
+          };
+        }
+      }
+
+      await db.execute({ sql: "DELETE FROM blog_posts WHERE id = ?", args: [id] });
       return { content: [{ type: "text", text: `Deleted post ${id}.` }] };
     }
   );

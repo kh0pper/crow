@@ -10,6 +10,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createDbClient } from "../db.js";
+import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
 import {
   isAvailable,
   uploadObject,
@@ -182,13 +183,40 @@ export function createStorageServer(dbPath, options = {}) {
   // --- crow_delete_file ---
   server.tool(
     "crow_delete_file",
-    "Delete a file from storage",
+    "Permanently delete a file from storage. This cannot be undone. Returns a preview and confirmation token on first call; pass the token back to execute.",
     {
       s3_key: z.string().max(500).describe("S3 object key to delete"),
       bucket: z.string().max(100).optional().describe("Bucket name (default: crow-files)"),
+      confirm_token: z.string().max(100).describe('Confirmation token — pass "" on first call to get a preview, then pass the returned token to execute'),
     },
-    async ({ s3_key, bucket }) => {
+    async ({ s3_key, bucket, confirm_token }) => {
       if (!(await isAvailable())) return notConfiguredError();
+
+      if (!shouldSkipGates()) {
+        if (confirm_token) {
+          if (!validateToken(confirm_token, "delete_file", s3_key)) {
+            return { content: [{ type: "text", text: "Invalid or expired confirmation token. Pass confirm_token: \"\" to get a new preview." }], isError: true };
+          }
+        } else {
+          // Try to get metadata from DB
+          const meta = await db.execute({ sql: "SELECT original_name, mime_type, size_bytes FROM storage_files WHERE s3_key = ?", args: [s3_key] });
+          const token = generateToken("delete_file", s3_key);
+          let preview;
+          if (meta.rows.length > 0) {
+            const f = meta.rows[0];
+            const size = f.size_bytes ? `${(f.size_bytes / 1024).toFixed(1)}KB` : "unknown size";
+            preview = `⚠️ This will permanently delete:\n  ${f.original_name} (${f.mime_type || "unknown type"}, ${size})\n  Key: ${s3_key}`;
+          } else {
+            preview = `⚠️ This will permanently delete:\n  Key: ${s3_key}\n  (No metadata available for this key)`;
+          }
+          return {
+            content: [{
+              type: "text",
+              text: `${preview}\n\nThis cannot be undone.\nTo proceed, call again with confirm_token: "${token}"`,
+            }],
+          };
+        }
+      }
 
       await deleteObject(s3_key, bucket || "crow-files");
       await db.execute({ sql: "DELETE FROM storage_files WHERE s3_key = ?", args: [s3_key] });

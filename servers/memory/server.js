@@ -9,6 +9,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createDbClient, sanitizeFtsQuery, escapeLikePattern, isSqliteVecAvailable } from "../db.js";
 import { generateCrowContext, PROTECTED_SECTIONS } from "./crow-context.js";
+import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
 
 export function createMemoryServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
@@ -314,18 +315,37 @@ export function createMemoryServer(dbPath, options = {}) {
 
   server.tool(
     "crow_delete_memory",
-    "Delete a memory by ID.",
-    { id: z.number().describe("Memory ID to delete") },
-    async ({ id }) => {
-      const result = await db.execute({ sql: "DELETE FROM memories WHERE id = ?", args: [id] });
-      return {
-        content: [
-          {
-            type: "text",
-            text: result.rowsAffected > 0 ? `Memory #${id} deleted.` : `Memory #${id} not found.`,
-          },
-        ],
-      };
+    "Permanently delete a memory. This cannot be undone. Returns a preview and confirmation token on first call; pass the token back to execute.",
+    {
+      id: z.number().describe("Memory ID to delete"),
+      confirm_token: z.string().max(100).describe('Confirmation token — pass "" on first call to get a preview, then pass the returned token to execute'),
+    },
+    async ({ id, confirm_token }) => {
+      const existing = await db.execute({ sql: "SELECT * FROM memories WHERE id = ?", args: [id] });
+      if (existing.rows.length === 0) {
+        return { content: [{ type: "text", text: `Memory #${id} not found.` }] };
+      }
+      const memory = existing.rows[0];
+
+      if (!shouldSkipGates()) {
+        if (confirm_token) {
+          if (!validateToken(confirm_token, "delete_memory", id)) {
+            return { content: [{ type: "text", text: "Invalid or expired confirmation token. Pass confirm_token: \"\" to get a new preview." }], isError: true };
+          }
+        } else {
+          const preview = memory.content.length > 100 ? memory.content.substring(0, 100) + "..." : memory.content;
+          const token = generateToken("delete_memory", id);
+          return {
+            content: [{
+              type: "text",
+              text: `⚠️ This will permanently delete:\n  Memory #${id} (${memory.category}, importance: ${memory.importance})\n  "${preview}"\n\nThis cannot be undone.\nTo proceed, call again with confirm_token: "${token}"`,
+            }],
+          };
+        }
+      }
+
+      await db.execute({ sql: "DELETE FROM memories WHERE id = ?", args: [id] });
+      return { content: [{ type: "text", text: `Memory #${id} deleted.` }] };
     }
   );
 
