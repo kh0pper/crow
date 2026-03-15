@@ -693,7 +693,7 @@ function pollHealth(attempts) {
       + `<p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.75rem">The Crow's Nest is private (local/Tailscale only). Set <code>CROW_GATEWAY_URL</code> in .env for public blog/podcast URLs.</p>`
       + `<div style="margin-top:1rem"><h4 style="font-size:0.9rem;color:var(--crow-text-muted);margin-bottom:0.5rem">MCP Endpoints (for AI clients)</h4>`
       + dataTable(["Server", "Endpoint URL", "Scope"], mcpRows)
-      + `<p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.5rem">Use these Streamable HTTP endpoints to connect Claude.ai, ChatGPT, Gemini, Cursor, or other MCP clients. See <a href="/setup" style="color:var(--crow-accent)">/setup</a> for platform-specific instructions.</p></div>`;
+      + `<p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.5rem">Use these Streamable HTTP endpoints to connect Claude.ai, ChatGPT, Gemini, Cursor, or other MCP clients. See the Help &amp; Setup section below for platform-specific instructions.</p></div>`;
 
     // AI Provider config
     let aiProviderConfig = null;
@@ -846,11 +846,88 @@ function pollHealth(attempts) {
         Manage context via your AI: <em>"Crow, update my context to prefer Spanish responses"</em> or use the <code>crow_add_context_section</code> / <code>crow_update_context_section</code> tools with a <code>device_id</code>.
       </p>`;
 
+    // Help & Setup section — platform guides + context usage
+    const helpT = {
+      en: {
+        platformSetup: "Quick Setup by Platform",
+        contextUsage: "Context Usage",
+        toolsLoaded: "tools loaded",
+        core: "core", external: "external",
+        tokensOfContext: "tokens of context",
+        routerAvailable: "Router available",
+        contextDoc: 'Learn more about <a href="https://maestro.press/software/crow/guide/cross-platform" style="color:var(--crow-accent);text-decoration:none">context management and the router</a>.',
+        claudeWebInstr: "Settings &rarr; Integrations &rarr; Add Custom &rarr; paste <code>/mcp</code> URL",
+        claudeDesktopInstr: "Use stdio transport (see docs)",
+        chatgptInstr: "Settings &rarr; Apps &rarr; Create &rarr; paste <code>/sse</code> URL",
+        geminiInstr: "Add to <code>~/.gemini/settings.json</code> with <code>url</code> property",
+        cursorInstr: "Add to <code>.cursor/mcp.json</code> with <code>url</code> property",
+        windsurfInstr: "Add to <code>~/.codeium/windsurf/mcp_config.json</code>",
+        clineInstr: "VS Code MCP settings &rarr; add server URL",
+        claudeCodeInstr: "Add to <code>.mcp.json</code> or <code>~/.claude/mcp.json</code>",
+      },
+      es: {
+        platformSetup: "Configuración Rápida por Plataforma",
+        contextUsage: "Uso de Contexto",
+        toolsLoaded: "herramientas cargadas",
+        core: "base", external: "externas",
+        tokensOfContext: "tokens de contexto",
+        routerAvailable: "Router disponible",
+        contextDoc: 'Aprende más sobre <a href="https://maestro.press/software/crow/guide/cross-platform" style="color:var(--crow-accent);text-decoration:none">gestión de contexto y el router</a>.',
+        claudeWebInstr: "Settings &rarr; Integrations &rarr; Add Custom &rarr; pega la URL <code>/mcp</code>",
+        claudeDesktopInstr: "Usa transporte stdio (ver docs)",
+        chatgptInstr: "Settings &rarr; Apps &rarr; Create &rarr; pega la URL <code>/sse</code>",
+        geminiInstr: "Agrega a <code>~/.gemini/settings.json</code> con la propiedad <code>url</code>",
+        cursorInstr: "Agrega a <code>.cursor/mcp.json</code> con la propiedad <code>url</code>",
+        windsurfInstr: "Agrega a <code>~/.codeium/windsurf/mcp_config.json</code>",
+        clineInstr: "VS Code MCP settings &rarr; agrega la URL del servidor",
+        claudeCodeInstr: "Agrega a <code>.mcp.json</code> o <code>~/.claude/mcp.json</code>",
+      },
+    };
+    const ht = helpT[currentLang] || helpT.en;
+    const docsBase = "https://maestro.press/software/crow/platforms";
+    const platforms = [
+      { name: "Claude Web/Mobile", slug: "claude", instr: ht.claudeWebInstr },
+      { name: "Claude Desktop", slug: "claude-desktop", instr: ht.claudeDesktopInstr },
+      { name: "ChatGPT", slug: "chatgpt", instr: ht.chatgptInstr },
+      { name: "Gemini CLI", slug: "gemini-cli", instr: ht.geminiInstr },
+      { name: "Cursor", slug: "cursor", instr: ht.cursorInstr },
+      { name: "Windsurf", slug: "windsurf", instr: ht.windsurfInstr },
+      { name: "Cline", slug: "cline", instr: ht.clineInstr },
+      { name: "Claude Code", slug: "claude-code", instr: ht.claudeCodeInstr },
+    ];
+    const platformListHtml = platforms.map(p =>
+      `<li><a href="${docsBase}/${p.slug}" target="_blank" rel="noopener" style="color:var(--crow-accent);text-decoration:none;font-weight:600">${escapeHtml(p.name)}</a> &mdash; ${p.instr}</li>`
+    ).join("\n");
+
+    // Context usage from proxy status
+    const coreTools = 49;
+    let externalToolCount = 0;
+    for (const s of proxyStatus) {
+      if (s.status === "connected") externalToolCount += (s.toolCount || 0);
+    }
+    const totalTools = coreTools + externalToolCount;
+    const estimatedTokens = totalTools * 200;
+    const routerDisabled = process.env.CROW_DISABLE_ROUTER === "1";
+
+    const helpHtml = `
+      <h4 style="font-size:0.9rem;color:var(--crow-text-muted);margin-bottom:0.5rem">${ht.platformSetup}</h4>
+      <ul style="font-size:0.85rem;padding-left:1.2rem;list-style:disc;line-height:1.8">
+        ${platformListHtml}
+      </ul>
+      <h4 style="font-size:0.9rem;color:var(--crow-text-muted);margin:1.25rem 0 0.5rem">${ht.contextUsage}</h4>
+      <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
+        <span style="font-size:0.95rem;font-weight:600">${totalTools} ${ht.toolsLoaded}</span>
+        <span style="font-size:0.8rem;color:var(--crow-text-muted)">${coreTools} ${ht.core} + ${externalToolCount} ${ht.external} &mdash; ~${(estimatedTokens / 1000).toFixed(1)}K ${ht.tokensOfContext}</span>
+        ${!routerDisabled ? `<span style="font-size:0.75rem;background:color-mix(in srgb, var(--crow-success) 15%, transparent);color:var(--crow-success);padding:2px 8px;border-radius:4px">${ht.routerAvailable}</span>` : ""}
+      </div>
+      <p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.5rem">${ht.contextDoc}</p>`;
+
     const content = `
       ${successMsg}${errorMsg}
       ${stats}
       ${section("AI Provider", aiProviderHtml, { delay: 20 })}
       ${section("Connection URLs", connectionHtml, { delay: 25 })}
+      ${section("Help & Setup", helpHtml, { delay: 28 })}
       ${section("Device Context", deviceContextHtml, { delay: 40 })}
       ${section("Updates", updateHtml, { delay: 50 })}
       ${section("Integrations", integrationsHtml, { delay: 100 })}
