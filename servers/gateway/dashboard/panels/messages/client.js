@@ -309,7 +309,11 @@ export function messagesClientJS(opts) {
             details.appendChild(el('summary', { text: eventData.name || 'tool' }));
             details.appendChild(el('pre', { text: (eventData.result || '').slice(0, 300) }));
             toolDiv.appendChild(details);
-            viewport.insertBefore(toolDiv, typing);
+            if (typing.parentNode) {
+              viewport.insertBefore(toolDiv, typing);
+            } else {
+              viewport.appendChild(toolDiv);
+            }
             viewport.scrollTop = viewport.scrollHeight;
 
             if (assistantDiv) { assistantDiv = null; assistantContent = ''; }
