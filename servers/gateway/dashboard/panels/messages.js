@@ -32,11 +32,15 @@ export default {
       // result === false means action was generate_invite (no redirect, re-render with result)
     }
 
-    // --- Check AI provider ---
+    // --- Check AI provider (env config OR profiles) ---
     let aiConfigured = false;
     try {
-      const { getProviderConfig } = await import("../../ai/provider.js");
+      const { getProviderConfig, getAiProfiles } = await import("../../ai/provider.js");
       aiConfigured = !!getProviderConfig();
+      if (!aiConfigured) {
+        const profiles = await getAiProfiles(db);
+        aiConfigured = profiles.length > 0;
+      }
     } catch {}
 
     // --- Check storage availability ---
