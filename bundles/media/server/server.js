@@ -9,8 +9,8 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { createDbClient, sanitizeFtsQuery, escapeLikePattern } from "../db.js";
-import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
+import { createDbClient, sanitizeFtsQuery, escapeLikePattern } from "./db.js";
+import { generateToken, validateToken, shouldSkipGates } from "./confirm.js";
 import { fetchAndParseFeed, buildGoogleNewsUrl, postProcessGoogleNewsItems } from "./feed-fetcher.js";
 
 export function createMediaServer(dbPath, options = {}) {

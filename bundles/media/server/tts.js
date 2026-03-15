@@ -9,7 +9,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { resolveDataDir } from "../db.js";
+import { resolveDataDir } from "./db.js";
 
 const DAILY_LIMIT = parseInt(process.env.CROW_MEDIA_TTS_DAILY_LIMIT || "50", 10);
 const MAX_CACHE_MB = parseInt(process.env.CROW_MEDIA_AUDIO_MAX_MB || "500", 10);

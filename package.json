@@ -10,7 +10,6 @@
     "sharing-server": "node servers/sharing/index.js",
     "storage-server": "node servers/storage/index.js",
     "blog-server": "node servers/blog/index.js",
-    "media-server": "node servers/media/index.js",
     "init-db": "node scripts/init-db.js",
     "wizard": "node scripts/wizard.js",
     "desktop-config": "node scripts/generate-desktop-config.js",

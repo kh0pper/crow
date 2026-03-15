@@ -99,14 +99,7 @@ export const CORE_SERVERS = [
     envKeys: [],
     mcpEnv: { CROW_DB_PATH: "${CROW_DB_PATH:-./data/crow.db}" },
   },
-  {
-    name: "crow-media",
-    command: "node",
-    args: ["servers/media/index.js"],
-    description: "News aggregation & media hub",
-    envKeys: [],
-    mcpEnv: { CROW_DB_PATH: "${CROW_DB_PATH:-./data/crow.db}" },
-  },
+  // crow-media is now a bundle add-on (bundles/media/)
 ];
 
 /**

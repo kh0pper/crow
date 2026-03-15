@@ -1,13 +1,44 @@
 /**
  * Media API Routes — Express router for Crow's Nest media panel
  *
+ * Bundle-compatible version: uses dynamic imports with path resolution
+ * so this routes file works both from the repo and when installed
+ * to ~/.crow/bundles/media/.
+ *
  * Protected by dashboardAuth. Provides feed, article, and source
  * endpoints consumed by the media dashboard panel.
  */
 
 import { Router } from "express";
-import { createDbClient, sanitizeFtsQuery, escapeLikePattern } from "../../db.js";
-import { fetchAndParseFeed } from "../../media/feed-fetcher.js";
+import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+import { homedir } from "node:os";
+
+// Resolve bundle server directory (installed vs repo)
+function resolveBundleServer() {
+  const installed = join(homedir(), ".crow", "bundles", "media", "server");
+  if (existsSync(installed)) return installed;
+  // Fallback: panel is in bundles/media/panel/, server is in bundles/media/server/
+  return join(import.meta.dirname, "..", "server");
+}
+
+// Resolve the main crow db.js (for createDbClient, sanitizeFtsQuery, escapeLikePattern)
+function resolveDbModule() {
+  // When running from the repo, db.js is at servers/db.js relative to repo root
+  // The panel lives at bundles/media/panel/, so repo root is ../../../
+  const repoPath = join(import.meta.dirname, "..", "..", "..", "servers", "db.js");
+  if (existsSync(repoPath)) return repoPath;
+  // Fallback: try the installed bundle's copy if it ships one
+  const bundlePath = join(resolveBundleServer(), "db.js");
+  if (existsSync(bundlePath)) return bundlePath;
+  return repoPath; // let it fail with a clear path
+}
+
+const serverDir = resolveBundleServer();
+const dbModulePath = resolveDbModule();
+
+const { createDbClient, sanitizeFtsQuery, escapeLikePattern } = await import(pathToFileURL(dbModulePath).href);
 
 /**
  * @param {Function} authMiddleware - Dashboard auth middleware
@@ -15,6 +46,11 @@ import { fetchAndParseFeed } from "../../media/feed-fetcher.js";
  */
 export default function mediaRouter(authMiddleware) {
   const router = Router();
+
+  /** Dynamically import a module from the bundle's server directory */
+  async function importBundleModule(name) {
+    return import(pathToFileURL(join(serverDir, name)).href);
+  }
 
   // --- Feed (paginated) ---
   router.get("/api/media/feed", authMiddleware, async (req, res) => {
@@ -31,7 +67,7 @@ export default function mediaRouter(authMiddleware) {
       // For You — use scored query
       if (sort === "for_you") {
         try {
-          const { buildScoredFeedSql } = await import("../../media/scorer.js");
+          const { buildScoredFeedSql } = await importBundleModule("scorer.js");
           const scored = buildScoredFeedSql({
             limit, offset, category, sourceId,
             unreadOnly, starredOnly,
@@ -147,7 +183,7 @@ export default function mediaRouter(authMiddleware) {
 
       // Update interest profiles for personalization
       try {
-        const { updateInterestProfile } = await import("../../media/scorer.js");
+        const { updateInterestProfile } = await importBundleModule("scorer.js");
         await updateInterestProfile(db, id, action);
       } catch {}
 
@@ -209,6 +245,7 @@ export default function mediaRouter(authMiddleware) {
       const { url, name, category } = req.body;
       if (!url) return res.status(400).json({ error: "URL is required" });
 
+      const { fetchAndParseFeed } = await importBundleModule("feed-fetcher.js");
       const { feed, items } = await fetchAndParseFeed(url);
       const sourceName = name || feed.title || url;
 
@@ -272,6 +309,7 @@ export default function mediaRouter(authMiddleware) {
       const source = await db.execute({ sql: "SELECT * FROM media_sources WHERE id = ?", args: [id] });
       if (source.rows.length === 0) return res.status(404).json({ error: "Not found" });
 
+      const { fetchAndParseFeed } = await importBundleModule("feed-fetcher.js");
       const { items } = await fetchAndParseFeed(source.rows[0].url);
 
       await db.execute({

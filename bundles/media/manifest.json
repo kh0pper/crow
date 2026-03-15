@@ -1,0 +1,33 @@
+{
+  "id": "media",
+  "name": "Media Hub",
+  "version": "1.0.0",
+  "description": "News aggregation, RSS feeds, YouTube channels, podcasts, TTS audio, briefings, playlists, smart folders, email digests",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "media",
+  "tags": ["news", "rss", "youtube", "podcast", "feed", "tts", "digest"],
+  "icon": "rss",
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "envKeys": ["CROW_MEDIA_TASKS"]
+  },
+  "panel": "panel/media.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/media.md"],
+  "requires": { "min_ram_mb": 256, "min_disk_mb": 200 },
+  "env_vars": [
+    { "name": "CROW_MEDIA_TASKS", "description": "Enable background tasks (feed fetch, cleanup)", "default": "1" },
+    { "name": "CROW_MEDIA_MAX_FETCHES", "description": "Max concurrent feed fetches", "default": "3" },
+    { "name": "CROW_MEDIA_LITE", "description": "Set 1 to skip AI/TTS on low-resource devices", "default": "0" },
+    { "name": "CROW_MEDIA_AI_DAILY_TOKEN_BUDGET", "description": "Daily AI token cap", "default": "50000" },
+    { "name": "CROW_MEDIA_AUDIO_MAX_MB", "description": "TTS cache size limit (MB)", "default": "500" },
+    { "name": "CROW_MEDIA_TTS_DAILY_LIMIT", "description": "Daily TTS generation limit", "default": "50" },
+    { "name": "CROW_SMTP_HOST", "description": "SMTP host for digest emails", "required": false },
+    { "name": "CROW_SMTP_PORT", "description": "SMTP port", "default": "587", "required": false },
+    { "name": "CROW_SMTP_USER", "description": "SMTP username", "required": false },
+    { "name": "CROW_SMTP_PASS", "description": "SMTP password", "required": false, "secret": true },
+    { "name": "CROW_SMTP_FROM", "description": "Sender email", "required": false }
+  ]
+}

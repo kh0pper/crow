@@ -1,73 +1,104 @@
 /**
  * Crow's Nest Panel — Media: news feed, For You, article cards with images, source management
+ *
+ * Bundle-compatible version: uses dynamic imports with appRoot instead of
+ * static ESM imports, so this panel works both from the repo and when
+ * installed to ~/.crow/panels/.
  */
-
-import { escapeHtml, statCard, statGrid, badge, formatDate } from "../shared/components.js";
 
 const ARTICLES_PER_PAGE = 24;
 
-/** Build a query string preserving existing params */
-function buildQs(base, overrides) {
-  const params = new URLSearchParams();
-  for (const [k, v] of Object.entries({ ...base, ...overrides })) {
-    if (v !== undefined && v !== null && v !== "" && v !== "false") params.set(k, v);
-  }
-  const qs = params.toString();
-  return qs ? `?${qs}` : "";
-}
+export default {
+  id: "media",
+  name: "Media",
+  icon: "newspaper",
+  route: "/dashboard/media",
+  navOrder: 15,
 
-/** Render a single article card */
-function renderArticleCard(a, returnTab) {
-  const starIcon = a.is_starred ? "★" : "☆";
-  const starColor = a.is_starred ? "color:#fbbf24" : "";
-  const pubDate = a.pub_date ? formatDate(a.pub_date) : "";
-  const readOpacity = a.is_read ? "opacity:0.7;" : "";
-  const summary = a.summary ? escapeHtml(a.summary.slice(0, 180)) + (a.summary.length > 180 ? "..." : "") : "";
-  const readTime = a.estimated_read_time ? `${a.estimated_read_time} min` : "";
+  async handler(req, res, { db, layout, appRoot }) {
+    // --- Dynamic imports (replaces static ESM import) ---
+    const { pathToFileURL } = await import("node:url");
+    const { join } = await import("node:path");
+    const { existsSync } = await import("node:fs");
 
-  // Topics pills
-  let topicsHtml = "";
-  if (a.topics) {
-    try {
-      const topics = typeof a.topics === "string" ? JSON.parse(a.topics) : a.topics;
-      if (Array.isArray(topics) && topics.length > 0) {
-        topicsHtml = `<div style="display:flex;gap:0.25rem;flex-wrap:wrap;margin-top:0.4rem">${
-          topics.slice(0, 3).map(t =>
-            `<span style="font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:9px;background:var(--crow-accent-muted);color:var(--crow-accent)">${escapeHtml(t)}</span>`
-          ).join("")
-        }</div>`;
+    const componentsPath = join(appRoot, "servers/gateway/dashboard/shared/components.js");
+    const { escapeHtml, statCard, statGrid, badge, formatDate } = await import(pathToFileURL(componentsPath).href);
+
+    // Resolve bundle server directory (installed vs repo)
+    const installedServerDir = join(process.env.HOME || "", ".crow", "bundles", "media", "server");
+    const repoServerDir = join(appRoot, "bundles", "media", "server");
+    const bundleServerDir = existsSync(installedServerDir) ? installedServerDir : repoServerDir;
+
+    // Resolve shared db.js (for sanitizeFtsQuery)
+    const dbModulePath = join(appRoot, "servers", "db.js");
+
+    /** Helper to import a module from the bundle's server directory */
+    async function importBundleModule(name) {
+      return import(pathToFileURL(join(bundleServerDir, name)).href);
+    }
+
+    /** Build a query string preserving existing params */
+    function buildQs(base, overrides) {
+      const params = new URLSearchParams();
+      for (const [k, v] of Object.entries({ ...base, ...overrides })) {
+        if (v !== undefined && v !== null && v !== "" && v !== "false") params.set(k, v);
       }
-    } catch {}
-  }
+      const qs = params.toString();
+      return qs ? `?${qs}` : "";
+    }
 
-  // Detect YouTube source
-  const isYouTube = a.source_type === "youtube" || (a.url && a.url.includes("youtube.com/watch"));
-  const youtubeOverlay = isYouTube
-    ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:48px;height:48px;background:rgba(255,0,0,0.85);border-radius:12px;display:flex;align-items:center;justify-content:center"><span style="color:white;font-size:1.4rem;margin-left:3px">&#9654;</span></a>`
-    : "";
+    /** Render a single article card */
+    function renderArticleCard(a, returnTab) {
+      const starIcon = a.is_starred ? "\u2605" : "\u2606";
+      const starColor = a.is_starred ? "color:#fbbf24" : "";
+      const pubDate = a.pub_date ? formatDate(a.pub_date) : "";
+      const readOpacity = a.is_read ? "opacity:0.7;" : "";
+      const summary = a.summary ? escapeHtml(a.summary.slice(0, 180)) + (a.summary.length > 180 ? "..." : "") : "";
+      const readTime = a.estimated_read_time ? `${a.estimated_read_time} min` : "";
 
-  // Image section
-  let imageHtml;
-  if (a.image_url) {
-    imageHtml = `<div style="position:relative;padding-top:56.25%;background:var(--crow-bg-deep);border-radius:6px 6px 0 0;overflow:hidden">
+      // Topics pills
+      let topicsHtml = "";
+      if (a.topics) {
+        try {
+          const topics = typeof a.topics === "string" ? JSON.parse(a.topics) : a.topics;
+          if (Array.isArray(topics) && topics.length > 0) {
+            topicsHtml = `<div style="display:flex;gap:0.25rem;flex-wrap:wrap;margin-top:0.4rem">${
+              topics.slice(0, 3).map(t =>
+                `<span style="font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:9px;background:var(--crow-accent-muted);color:var(--crow-accent)">${escapeHtml(t)}</span>`
+              ).join("")
+            }</div>`;
+          }
+        } catch {}
+      }
+
+      // Detect YouTube source
+      const isYouTube = a.source_type === "youtube" || (a.url && a.url.includes("youtube.com/watch"));
+      const youtubeOverlay = isYouTube
+        ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:48px;height:48px;background:rgba(255,0,0,0.85);border-radius:12px;display:flex;align-items:center;justify-content:center"><span style="color:white;font-size:1.4rem;margin-left:3px">&#9654;</span></a>`
+        : "";
+
+      // Image section
+      let imageHtml;
+      if (a.image_url) {
+        imageHtml = `<div style="position:relative;padding-top:56.25%;background:var(--crow-bg-deep);border-radius:6px 6px 0 0;overflow:hidden">
       <img src="${escapeHtml(a.image_url)}" alt="" loading="lazy" style="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover">
       ${youtubeOverlay}
     </div>`;
-  } else {
-    // Gradient fallback with source initial
-    const initial = (a.source_name || "?").charAt(0).toUpperCase();
-    const hue = Math.abs(hashCode(a.source_name || "")) % 360;
-    imageHtml = `<div style="position:relative;padding-top:56.25%;background:linear-gradient(135deg, hsl(${hue},40%,20%), hsl(${hue + 40},30%,15%));border-radius:6px 6px 0 0;overflow:hidden">
+      } else {
+        // Gradient fallback with source initial
+        const initial = (a.source_name || "?").charAt(0).toUpperCase();
+        const hue = Math.abs(hashCode(a.source_name || "")) % 360;
+        imageHtml = `<div style="position:relative;padding-top:56.25%;background:linear-gradient(135deg, hsl(${hue},40%,20%), hsl(${hue + 40},30%,15%));border-radius:6px 6px 0 0;overflow:hidden">
       <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-family:'Fraunces',serif;font-size:2rem;color:hsla(${hue},60%,70%,0.4)">${escapeHtml(initial)}</div>
     </div>`;
-  }
+      }
 
-  return `<div class="media-card" style="background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:6px;overflow:hidden;display:flex;flex-direction:column;${readOpacity}">
+      return `<div class="media-card" style="background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:6px;overflow:hidden;display:flex;flex-direction:column;${readOpacity}">
     ${imageHtml}
     <div style="padding:0.75rem;flex:1;display:flex;flex-direction:column">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.35rem">
         <span style="font-size:0.7rem;color:var(--crow-accent);font-weight:500;text-transform:uppercase;letter-spacing:0.03em">${escapeHtml(a.source_name)}</span>
-        <span style="font-size:0.7rem;color:var(--crow-text-muted)">${escapeHtml(pubDate)}${readTime ? ` · ${readTime}` : ""}</span>
+        <span style="font-size:0.7rem;color:var(--crow-text-muted)">${escapeHtml(pubDate)}${readTime ? ` \u00b7 ${readTime}` : ""}</span>
       </div>
       <h4 style="margin:0 0 0.3rem;font-size:0.9rem;font-weight:600;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">
         ${a.url ? `<a href="${escapeHtml(a.url)}" target="_blank" rel="noopener" style="color:var(--crow-text-primary);text-decoration:none">${escapeHtml(a.title)}</a>` : escapeHtml(a.title)}
@@ -92,25 +123,40 @@ function renderArticleCard(a, returnTab) {
       </div>
     </div>
   </div>`;
-}
+    }
 
-function hashCode(str) {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    hash = ((hash << 5) - hash) + str.charCodeAt(i);
-    hash |= 0;
-  }
-  return hash;
-}
+    function hashCode(str) {
+      let hash = 0;
+      for (let i = 0; i < str.length; i++) {
+        hash = ((hash << 5) - hash) + str.charCodeAt(i);
+        hash |= 0;
+      }
+      return hash;
+    }
 
-export default {
-  id: "media",
-  name: "Media",
-  icon: "newspaper",
-  route: "/dashboard/media",
-  navOrder: 15,
+    /** Standard chronological feed query with filters */
+    async function buildChronologicalQuery(db, { filterCategory, filterSource, filterUnread, filterStarred, pageOffset }) {
+      let sql = `SELECT a.id, a.title, a.author, a.pub_date, a.url, a.summary, a.image_url,
+                        a.topics, a.estimated_read_time,
+                        s.name as source_name, s.category as source_category,
+                        COALESCE(st.is_read, 0) as is_read,
+                        COALESCE(st.is_starred, 0) as is_starred
+                 FROM media_articles a
+                 JOIN media_sources s ON s.id = a.source_id
+                 LEFT JOIN media_article_states st ON st.article_id = a.id
+                 WHERE s.enabled = 1`;
+      const args = [];
 
-  async handler(req, res, { db, layout }) {
+      if (filterCategory) { sql += " AND s.category = ?"; args.push(filterCategory); }
+      if (filterSource) { sql += " AND a.source_id = ?"; args.push(parseInt(filterSource, 10)); }
+      if (filterUnread) sql += " AND COALESCE(st.is_read, 0) = 0";
+      if (filterStarred) sql += " AND COALESCE(st.is_starred, 0) = 1";
+
+      sql += ` ORDER BY a.pub_date DESC NULLS LAST, a.created_at DESC LIMIT ${ARTICLES_PER_PAGE} OFFSET ${pageOffset}`;
+
+      return db.execute({ sql, args });
+    }
+
     // --- POST actions ---
     if (req.method === "POST") {
       const { action } = req.body;
@@ -122,7 +168,7 @@ export default {
         if (!url) return res.redirect("/dashboard/media?tab=sources&error=URL+required");
 
         try {
-          const { fetchAndParseFeed } = await import("../../../media/feed-fetcher.js");
+          const { fetchAndParseFeed } = await importBundleModule("feed-fetcher.js");
           const { feed, items } = await fetchAndParseFeed(url);
           const sourceName = name || feed.title || url;
 
@@ -160,7 +206,7 @@ export default {
         if (!query) return res.redirect("/dashboard/media?tab=sources&error=Query+required");
 
         try {
-          const { fetchAndParseFeed, buildGoogleNewsUrl, postProcessGoogleNewsItems } = await import("../../../media/feed-fetcher.js");
+          const { fetchAndParseFeed, buildGoogleNewsUrl, postProcessGoogleNewsItems } = await importBundleModule("feed-fetcher.js");
           const url = buildGoogleNewsUrl(query);
           const { feed, items } = await fetchAndParseFeed(url);
           postProcessGoogleNewsItems(items);
@@ -199,7 +245,7 @@ export default {
         if (!ytChannel) return res.redirect("/dashboard/media?tab=sources&error=Channel+required");
 
         try {
-          const { fetchAndParseFeed, extractYoutubeChannelId, buildYoutubeRssUrl } = await import("../../../media/feed-fetcher.js");
+          const { fetchAndParseFeed, extractYoutubeChannelId, buildYoutubeRssUrl } = await importBundleModule("feed-fetcher.js");
           const channelId = await extractYoutubeChannelId(ytChannel);
           const url = buildYoutubeRssUrl(channelId);
           const { feed, items } = await fetchAndParseFeed(url);
@@ -251,7 +297,7 @@ export default {
           try {
             const { rows } = await db.execute({ sql: "SELECT url, source_type FROM media_sources WHERE id = ?", args: [id] });
             if (rows[0]) {
-              const { fetchAndParseFeed, postProcessGoogleNewsItems } = await import("../../../media/feed-fetcher.js");
+              const { fetchAndParseFeed, postProcessGoogleNewsItems } = await importBundleModule("feed-fetcher.js");
               let { items } = await fetchAndParseFeed(rows[0].url);
               if (rows[0].source_type === "google_news") postProcessGoogleNewsItems(items);
               await db.execute({
@@ -442,7 +488,7 @@ export default {
 
       if (searchQuery) {
         // FTS search
-        const { sanitizeFtsQuery } = await import("../../../db.js");
+        const { sanitizeFtsQuery } = await import(pathToFileURL(dbModulePath).href);
         const safeQ = sanitizeFtsQuery(searchQuery);
         if (safeQ) {
           let sql = `SELECT a.id, a.title, a.author, a.pub_date, a.url, a.summary, a.image_url,
@@ -469,7 +515,7 @@ export default {
       } else if (isForyou) {
         // For You — scored query
         try {
-          const { buildScoredFeedSql } = await import("../../../media/scorer.js");
+          const { buildScoredFeedSql } = await importBundleModule("scorer.js");
           const scored = buildScoredFeedSql({
             limit: ARTICLES_PER_PAGE, offset: pageOffset,
             category: filterCategory || undefined,
@@ -578,7 +624,7 @@ export default {
           const typeBadge = s.source_type === "google_news" ? badge("Google News", "info") : badge("RSS", "draft");
           const statusBadge = s.last_error ? badge("Error", "error") : badge("Active", "connected");
           const lastFetched = s.last_fetched ? formatDate(s.last_fetched) : "Never";
-          const cat = s.category ? ` · ${escapeHtml(s.category)}` : "";
+          const cat = s.category ? ` \u00b7 ${escapeHtml(s.category)}` : "";
 
           return `<div class="card" style="display:flex;gap:0.75rem;align-items:center;padding:0.75rem">
             ${img}
@@ -587,8 +633,8 @@ export default {
               <div style="font-size:0.8rem;color:var(--crow-text-muted)">Last fetched: ${escapeHtml(lastFetched)}${cat} ${typeBadge} ${statusBadge}</div>
             </div>
             <div style="display:flex;gap:0.25rem">
-              <form method="POST" style="display:inline"><input type="hidden" name="action" value="refresh_source"><input type="hidden" name="source_id" value="${s.id}"><button type="submit" class="btn btn-sm btn-secondary" title="Refresh">↻</button></form>
-              <form method="POST" style="display:inline" onsubmit="return confirm('Remove this source and all its articles?')"><input type="hidden" name="action" value="remove_source"><input type="hidden" name="source_id" value="${s.id}"><button type="submit" class="btn btn-sm btn-secondary" style="color:var(--crow-error)" title="Remove">✕</button></form>
+              <form method="POST" style="display:inline"><input type="hidden" name="action" value="refresh_source"><input type="hidden" name="source_id" value="${s.id}"><button type="submit" class="btn btn-sm btn-secondary" title="Refresh">\u21bb</button></form>
+              <form method="POST" style="display:inline" onsubmit="return confirm('Remove this source and all its articles?')"><input type="hidden" name="action" value="remove_source"><input type="hidden" name="source_id" value="${s.id}"><button type="submit" class="btn btn-sm btn-secondary" style="color:var(--crow-error)" title="Remove">\u2715</button></form>
             </div>
           </div>`;
         }).join("\n")}</div>`;
@@ -644,7 +690,7 @@ export default {
             <div style="width:40px;height:40px;border-radius:6px;background:var(--crow-accent-muted);display:flex;align-items:center;justify-content:center;color:var(--crow-accent);font-size:1.2rem;flex-shrink:0">&#9835;</div>
             <div style="flex:1;min-width:0">
               <div style="font-weight:500">${escapeHtml(p.name)}${autoLabel}</div>
-              <div style="font-size:0.8rem;color:var(--crow-text-muted)">${p.item_count} item(s) · ${formatDate(p.updated_at)}</div>
+              <div style="font-size:0.8rem;color:var(--crow-text-muted)">${p.item_count} item(s) \u00b7 ${formatDate(p.updated_at)}</div>
             </div>
             <form method="POST" style="display:inline" onsubmit="return confirm('Delete this playlist?')">
               <input type="hidden" name="action" value="delete_playlist">
@@ -674,7 +720,7 @@ export default {
             <div style="display:flex;justify-content:space-between;align-items:start;gap:0.5rem">
               <div>
                 <div style="font-weight:500">${escapeHtml(b.title || "Untitled Briefing")}</div>
-                <div style="font-size:0.8rem;color:var(--crow-text-muted)">${articleCount} articles${durationStr ? ` · ${durationStr}` : ""} · ${formatDate(b.created_at)}</div>
+                <div style="font-size:0.8rem;color:var(--crow-text-muted)">${articleCount} articles${durationStr ? ` \u00b7 ${durationStr}` : ""} \u00b7 ${formatDate(b.created_at)}</div>
               </div>
               ${hasAudio ? `<button onclick="document.getElementById('briefing-audio-${b.id}').play()" class="btn btn-sm btn-primary" style="font-size:0.8rem">&#9654; Play</button>` : ""}
             </div>
@@ -708,7 +754,7 @@ export default {
 
       let subsHtml;
       if (podcastSources.length === 0 && legacySubs.length === 0) {
-        subsHtml = `<p style="color:var(--crow-text-muted);text-align:center;padding:1rem">No podcast subscriptions. Add a podcast RSS feed in the Sources tab — it will be auto-detected.</p>`;
+        subsHtml = `<p style="color:var(--crow-text-muted);text-align:center;padding:1rem">No podcast subscriptions. Add a podcast RSS feed in the Sources tab \u2014 it will be auto-detected.</p>`;
       } else {
         const allSubs = [
           ...podcastSources.map(s => ({ name: s.name, image: JSON.parse(s.config || "{}").image })),
@@ -730,7 +776,7 @@ export default {
           const pubDate = ep.pub_date ? formatDate(ep.pub_date) : "";
           return `<div class="card" style="padding:0.75rem;margin-bottom:0.5rem">
             <div style="font-weight:500">${escapeHtml(ep.title)}</div>
-            <div style="font-size:0.8rem;color:var(--crow-text-muted)">${escapeHtml(ep.source_name)} · ${escapeHtml(pubDate)}</div>
+            <div style="font-size:0.8rem;color:var(--crow-text-muted)">${escapeHtml(ep.source_name)} \u00b7 ${escapeHtml(pubDate)}</div>
             <audio controls preload="none" style="width:100%;height:32px;margin-top:0.5rem"><source src="${escapeHtml(ep.audio_url)}" type="audio/mpeg"></audio>
           </div>`;
         }).join("\n");
@@ -792,7 +838,7 @@ export default {
             <div style="width:40px;height:40px;border-radius:6px;background:var(--crow-accent-muted);display:flex;align-items:center;justify-content:center;color:var(--crow-accent);font-size:1.2rem;flex-shrink:0">&#128193;</div>
             <a href="/dashboard/media?tab=feed&${q.category ? `category=${encodeURIComponent(q.category)}&` : ""}${q.unread_only ? "unread_only=true&" : ""}" style="flex:1;text-decoration:none;color:inherit">
               <div style="font-weight:500">${escapeHtml(f.name)}</div>
-              <div style="font-size:0.8rem;color:var(--crow-text-muted)">${filters.join(" · ") || "all"} · ${count} article(s)</div>
+              <div style="font-size:0.8rem;color:var(--crow-text-muted)">${filters.join(" \u00b7 ") || "all"} \u00b7 ${count} article(s)</div>
             </a>
             <form method="POST" style="display:inline" onsubmit="return confirm('Delete this folder?')">
               <input type="hidden" name="action" value="delete_smart_folder">
@@ -876,26 +922,3 @@ export default {
     return layout({ title: "Media", content });
   },
 };
-
-/** Standard chronological feed query with filters */
-async function buildChronologicalQuery(db, { filterCategory, filterSource, filterUnread, filterStarred, pageOffset }) {
-  let sql = `SELECT a.id, a.title, a.author, a.pub_date, a.url, a.summary, a.image_url,
-                    a.topics, a.estimated_read_time,
-                    s.name as source_name, s.category as source_category,
-                    COALESCE(st.is_read, 0) as is_read,
-                    COALESCE(st.is_starred, 0) as is_starred
-             FROM media_articles a
-             JOIN media_sources s ON s.id = a.source_id
-             LEFT JOIN media_article_states st ON st.article_id = a.id
-             WHERE s.enabled = 1`;
-  const args = [];
-
-  if (filterCategory) { sql += " AND s.category = ?"; args.push(filterCategory); }
-  if (filterSource) { sql += " AND a.source_id = ?"; args.push(parseInt(filterSource, 10)); }
-  if (filterUnread) sql += " AND COALESCE(st.is_read, 0) = 0";
-  if (filterStarred) sql += " AND COALESCE(st.is_starred, 0) = 1";
-
-  sql += ` ORDER BY a.pub_date DESC NULLS LAST, a.created_at DESC LIMIT ${ARTICLES_PER_PAGE} OFFSET ${pageOffset}`;
-
-  return db.execute({ sql, args });
-}

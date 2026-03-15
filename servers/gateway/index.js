@@ -207,10 +207,10 @@ app.get("/health", async (req, res) => {
     if (await isAvailable()) servers.push("crow-storage");
   } catch {}
   servers.push("crow-blog");
-  servers.push("crow-media");
+  // crow-media is now a bundle add-on — its tools appear via proxy when installed
 
   const externalToolCount = connectedTools.reduce((sum, s) => sum + s.toolCount, 0);
-  const coreToolCount = 65; // 12 memory + 12 research + 8 sharing + 5 storage + 12 blog + 16 media
+  const coreToolCount = 49; // 12 memory + 12 research + 8 sharing + 5 storage + 12 blog
   const routerDisabled = process.env.CROW_DISABLE_ROUTER === "1";
 
   res.json({
@@ -406,32 +406,7 @@ try {
   }
 }
 
-// --- Mount Media Server ---
-try {
-  const { createMediaServer } = await import("../media/server.js");
-  mountMcpServer(app, "/media", () => createMediaServer(undefined, { instructions }), sessionManager, authMiddleware);
-
-  // Media API routes (dashboard)
-  const { default: mediaApiRouter } = await import("./routes/media.js");
-  app.use(mediaApiRouter(dashboardAuth));
-
-  // Start background tasks (feed fetching) — only in gateway mode
-  import("../media/tasks.js").then(async ({ createTaskRunner, registerMediaTasks }) => {
-    const mediaDb = createDbClient();
-    const runner = createTaskRunner(mediaDb);
-    registerMediaTasks(runner, mediaDb);
-    runner.start();
-    console.log("Media background tasks started (feed fetch every 30 min)");
-  }).catch((err) => {
-    console.warn("[media] Background tasks failed to start:", err.message);
-  });
-
-  console.log("Media server mounted");
-} catch (err) {
-  if (err.code !== "ERR_MODULE_NOT_FOUND") {
-    console.warn("[media] Failed to mount:", err.message);
-  }
-}
+// Media is now a bundle add-on (bundles/media/). Install via Extensions panel or: crow bundle install media
 
 // --- Mount AI Chat Routes ---
 try {
@@ -456,6 +431,18 @@ try {
   const { default: dashboardRouter } = await import("./dashboard/index.js");
   app.use(dashboardRouter(authMiddleware));
   console.log("Crow's Nest mounted at /dashboard");
+
+  // Mount external panel routes at app root (preserves /api/* paths)
+  try {
+    const { loadExternalPanels, getPanelRoutes } = await import("./dashboard/panel-registry.js");
+    await loadExternalPanels();
+    for (const [id, routerFn] of getPanelRoutes()) {
+      app.use(routerFn(dashboardAuth));
+      console.log(`  [panel] ${id} routes mounted`);
+    }
+  } catch (err) {
+    console.warn("[panel-routes] Failed to load:", err.message);
+  }
 } catch (err) {
   if (err.code !== "ERR_MODULE_NOT_FOUND") {
     console.warn("[dashboard] Failed to mount:", err.message);

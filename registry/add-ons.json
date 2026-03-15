@@ -229,21 +229,41 @@
       "notes": "After installation, Crow's storage tools (upload, list, delete files) are available automatically. MinIO console at http://localhost:9001."
     },
     {
-      "id": "podcast",
-      "name": "Podcast Publisher",
-      "description": "Publish podcast episodes with iTunes-compatible RSS feeds",
-      "type": "skill",
+      "id": "media",
+      "name": "Media Hub",
+      "description": "News aggregation, RSS feeds, YouTube channels, podcasts, TTS audio, briefings, playlists, smart folders, email digests",
+      "type": "mcp-server",
       "version": "1.0.0",
       "author": "Crow",
       "category": "media",
-      "tags": ["podcast", "audio", "rss", "itunes"],
+      "tags": ["news", "rss", "youtube", "podcast", "feed", "tts", "digest"],
+      "icon": "rss",
+      "webUI": null,
+      "requires": {
+        "min_ram_mb": 256,
+        "min_disk_mb": 200
+      },
+      "env_vars": [
+        { "name": "CROW_MEDIA_TASKS", "description": "Enable background tasks", "default": "1" }
+      ],
+      "notes": "16 MCP tools for news and media management. No external services required. AI analysis uses your configured AI provider. TTS requires edge-tts (npm install edge-tts). Email digests require SMTP + nodemailer."
+    },
+    {
+      "id": "podcast",
+      "name": "Podcasts",
+      "description": "Subscribe to and play podcasts, plus publish your own podcast episodes as blog posts with iTunes-compatible RSS",
+      "type": "skill",
+      "version": "1.1.0",
+      "author": "Crow",
+      "category": "media",
+      "tags": ["podcast", "audio", "rss", "itunes", "subscribe", "listen"],
       "icon": "mic",
       "webUI": null,
       "requires": {
         "min_ram_mb": 64,
         "min_disk_mb": 100
       },
-      "notes": "Extends the blog server — podcast episodes are blog posts tagged 'podcast' with audio metadata. Includes a Podcast panel for the Crow's Nest dashboard. No additional server required."
+      "notes": "Includes both a podcast player (subscribe and listen) and a podcast publisher (create episodes as blog posts). Tables are self-initialized on first use."
     },
     {
       "id": "openclaw",
