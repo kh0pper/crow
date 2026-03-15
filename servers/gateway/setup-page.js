@@ -34,6 +34,7 @@ const translations = {
     routerAvailable: "Router available",
     tip: "Tip:",
     routerTip: "consider using the <strong>Router endpoint</strong> (<code>/router/mcp</code>) to reduce context usage to just 7 tools (~2.5K tokens).",
+    contextLearnMore: 'Learn more about <a href="https://maestro.press/software/crow/guide/cross-platform" target="_blank" rel="noopener" style="color:#6366f1;text-decoration:none">context management and the router</a>.',
     step1Password: "Set Crow's Nest Password",
     crowsNest: "Crow's Nest",
     useInviteLink: "Use the link you were sent.",
@@ -46,7 +47,7 @@ const translations = {
     nestProtected: "Crow's Nest is protected",
     step2Identity: "Your Identity",
     identity: "Identity",
-    crowIdDesc: "Your Crow ID &mdash; share this with peers to connect",
+    crowIdDesc: 'Your Crow ID &mdash; share this with peers to connect. <a href="https://maestro.press/software/crow/guide/sharing" target="_blank" rel="noopener" style="color:#6366f1;text-decoration:none;font-weight:400">Learn about sharing &amp; messaging</a>',
     step3Network: "Network Access",
     networkAccess: "Network Access",
     // Hosted network access
@@ -164,6 +165,7 @@ const translations = {
     routerAvailable: "Router disponible",
     tip: "Consejo:",
     routerTip: "considera usar el <strong>endpoint del Router</strong> (<code>/router/mcp</code>) para reducir el uso de contexto a solo 7 herramientas (~2.5K tokens).",
+    contextLearnMore: 'Aprende más sobre <a href="https://maestro.press/software/crow/guide/cross-platform" target="_blank" rel="noopener" style="color:#6366f1;text-decoration:none">gestión de contexto y el router</a>.',
     step1Password: "Establecer Contraseña del Nido",
     crowsNest: "Nido de Crow",
     useInviteLink: "Usa el enlace que te enviaron.",
@@ -176,7 +178,7 @@ const translations = {
     nestProtected: "El Nido de Crow está protegido",
     step2Identity: "Tu Identidad",
     identity: "Identidad",
-    crowIdDesc: "Tu Crow ID &mdash; compártelo con otros para conectar",
+    crowIdDesc: 'Tu Crow ID &mdash; compártelo con otros para conectar. <a href="https://maestro.press/software/crow/guide/sharing" target="_blank" rel="noopener" style="color:#6366f1;text-decoration:none;font-weight:400">Sobre compartir y mensajes</a>',
     step3Network: "Acceso a la Red",
     networkAccess: "Acceso a la Red",
     yourInstance: "Tu Instancia",
@@ -768,11 +770,12 @@ export async function setupPageHandler(req, res) {
       <div style="margin-top:10px;padding-top:10px;border-top:1px solid #f0f0f0;font-size:13px;color:#86868b">
         <strong style="color:#ff9f0a">${t.tip}</strong> ${t.routerTip}
       </div>` : ""}
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid #f0f0f0;font-size:13px;color:#86868b">${t.contextLearnMore}</div>
     </div>`;
     return sec(t.contextUsage, body);
   })()}
 
-  ${isCrowOS && !passwordConfigured ? (() => {
+  ${(isCrowOS || isHosted) && !passwordConfigured ? (() => {
     // Setup token gating: if CROW_SETUP_TOKEN is set, require valid token in query string
     const setupToken = process.env.CROW_SETUP_TOKEN;
     const queryToken = req.query.token;
