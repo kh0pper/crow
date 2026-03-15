@@ -249,10 +249,11 @@ export default function mediaRouter(authMiddleware) {
       const { feed, items } = await fetchAndParseFeed(url);
       const sourceName = name || feed.title || url;
 
+      const sourceType = feed.isPodcast ? 'podcast' : 'rss';
       const result = await db.execute({
         sql: `INSERT INTO media_sources (source_type, name, url, category, last_fetched, config)
-              VALUES ('rss', ?, ?, ?, datetime('now'), ?)`,
-        args: [sourceName, url, category || null, JSON.stringify({ image: feed.image })],
+              VALUES (?, ?, ?, ?, datetime('now'), ?)`,
+        args: [sourceType, sourceName, url, category || null, JSON.stringify({ image: feed.image })],
       });
 
       const sourceId = result.lastInsertRowid;
@@ -265,11 +266,11 @@ export default function mediaRouter(authMiddleware) {
           const ins = await db.execute({
             sql: `INSERT OR IGNORE INTO media_articles
                   (source_id, guid, url, title, author, pub_date, content_raw, summary, image_url,
-                   content_fetch_status, ai_analysis_status, created_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', datetime('now'))`,
+                   audio_url, content_fetch_status, ai_analysis_status, created_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', datetime('now'))`,
             args: [sourceId, guid, item.link || null, item.title, item.author || null,
                    item.pub_date || null, item.content || null, item.summary?.slice(0, 2000) || null,
-                   item.image || null],
+                   item.image || null, item.enclosureAudio || null],
           });
           if (ins.rowsAffected > 0) imported++;
         } catch {}
@@ -325,11 +326,11 @@ export default function mediaRouter(authMiddleware) {
           const ins = await db.execute({
             sql: `INSERT OR IGNORE INTO media_articles
                   (source_id, guid, url, title, author, pub_date, content_raw, summary, image_url,
-                   content_fetch_status, ai_analysis_status, created_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', datetime('now'))`,
+                   audio_url, content_fetch_status, ai_analysis_status, created_at)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', datetime('now'))`,
             args: [id, guid, item.link || null, item.title, item.author || null,
                    item.pub_date || null, item.content || null, item.summary?.slice(0, 2000) || null,
-                   item.image || null],
+                   item.image || null, item.enclosureAudio || null],
           });
           if (ins.rowsAffected > 0) newCount++;
         } catch {}
