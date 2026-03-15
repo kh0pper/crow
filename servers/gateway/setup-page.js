@@ -146,7 +146,7 @@ const translations = {
     // Restart banner
     keysSaved: "Keys saved! Restarting gateway...",
     waitingRestart: "Waiting for restart...",
-    removeConfirm: "Remove this integration's API keys?",
+    removeConfirm: "Remove this integration\u2019s API keys?",
     savedRestart: "Saved! Restart gateway to apply.",
     error: "Error",
     gatewayManualRestart: "Gateway may need manual restart.",
