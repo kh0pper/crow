@@ -408,21 +408,6 @@ export default {
       ? `<div class="alert alert-error" style="margin-bottom:1rem">${escapeHtml(req.query.error)}</div>`
       : "";
 
-    // --- Stats (clickable) ---
-    const [sourcesCount, articlesCount, unreadCount, starredCount] = await Promise.all([
-      db.execute("SELECT COUNT(*) as c FROM media_sources WHERE enabled = 1"),
-      db.execute("SELECT COUNT(*) as c FROM media_articles"),
-      db.execute("SELECT COUNT(*) as c FROM media_articles a LEFT JOIN media_article_states st ON st.article_id = a.id WHERE COALESCE(st.is_read, 0) = 0"),
-      db.execute("SELECT COUNT(*) as c FROM media_article_states WHERE is_starred = 1"),
-    ]);
-
-    const statsHtml = `<div class="card-grid" style="margin-bottom:1.5rem">
-      ${statCard("Sources", String(sourcesCount.rows[0]?.c || 0), { delay: 0 })}
-      ${statCard("Articles", String(articlesCount.rows[0]?.c || 0), { delay: 50 })}
-      <a href="/dashboard/media?tab=feed&unread_only=true" style="text-decoration:none">${statCard("Unread", String(unreadCount.rows[0]?.c || 0), { delay: 100 })}</a>
-      <a href="/dashboard/media?tab=feed&starred_only=true" style="text-decoration:none">${statCard("Starred", String(starredCount.rows[0]?.c || 0), { delay: 150 })}</a>
-    </div>`;
-
     // --- Tab navigation ---
     const tabs = [
       { id: "feed", label: "Feed" },
@@ -621,7 +606,7 @@ export default {
             ? `<img src="${escapeHtml(config.image)}" alt="" style="width:40px;height:40px;border-radius:6px;object-fit:cover;flex-shrink:0">`
             : `<div style="width:40px;height:40px;border-radius:6px;background:var(--crow-accent-muted);display:flex;align-items:center;justify-content:center;color:var(--crow-accent);font-family:'Fraunces',serif;font-size:1rem;flex-shrink:0">${escapeHtml((s.name || "?").charAt(0))}</div>`;
 
-          const typeBadge = s.source_type === "google_news" ? badge("Google News", "info") : badge("RSS", "draft");
+          const typeBadge = { google_news: badge("Google News", "draft"), youtube: badge("YouTube", "published"), podcast: badge("Podcast", "connected") }[s.source_type] || badge("RSS", "draft");
           const statusBadge = s.last_error ? badge("Error", "error") : badge("Active", "connected");
           const lastFetched = s.last_fetched ? formatDate(s.last_fetched) : "Never";
           const cat = s.category ? ` \u00b7 ${escapeHtml(s.category)}` : "";
@@ -659,7 +644,21 @@ export default {
           </form>
         </div>`;
 
-      tabContent = addRssForm + addGoogleNewsForm + addYoutubeForm + sourcesList;
+      // --- Stats (clickable, Sources tab only) ---
+      const [sourcesCount, articlesCount, unreadCount, starredCount] = await Promise.all([
+        db.execute("SELECT COUNT(*) as c FROM media_sources WHERE enabled = 1"),
+        db.execute("SELECT COUNT(*) as c FROM media_articles"),
+        db.execute("SELECT COUNT(*) as c FROM media_articles a LEFT JOIN media_article_states st ON st.article_id = a.id WHERE COALESCE(st.is_read, 0) = 0"),
+        db.execute("SELECT COUNT(*) as c FROM media_article_states WHERE is_starred = 1"),
+      ]);
+      const statsHtml = `<div class="card-grid" style="margin-bottom:1.5rem">
+        ${statCard("Sources", String(sourcesCount.rows[0]?.c || 0), { delay: 0 })}
+        ${statCard("Articles", String(articlesCount.rows[0]?.c || 0), { delay: 50 })}
+        <a href="/dashboard/media?tab=feed&unread_only=true" style="text-decoration:none">${statCard("Unread", String(unreadCount.rows[0]?.c || 0), { delay: 100 })}</a>
+        <a href="/dashboard/media?tab=feed&starred_only=true" style="text-decoration:none">${statCard("Starred", String(starredCount.rows[0]?.c || 0), { delay: 150 })}</a>
+      </div>`;
+
+      tabContent = statsHtml + addRssForm + addGoogleNewsForm + addYoutubeForm + sourcesList;
     }
 
     // --- Playlists tab ---
@@ -913,7 +912,6 @@ export default {
     const content = `
       ${errorMsg}
       ${gridCss}
-      ${statsHtml}
       ${tabNav}
       ${tabContent}
       ${playerBar}
