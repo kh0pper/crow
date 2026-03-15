@@ -88,9 +88,13 @@ export async function extractContentBatch(db, limit = 5) {
         });
         processed++;
       } else {
+        // Text extraction failed but we may still have an og:image — save it
         await db.execute({
-          sql: "UPDATE media_articles SET content_fetch_status = 'skipped' WHERE id = ?",
-          args: [article.id],
+          sql: `UPDATE media_articles SET
+                  image_url = COALESCE(image_url, ?),
+                  content_fetch_status = 'skipped'
+                WHERE id = ?`,
+          args: [result.image || null, article.id],
         });
       }
     } catch (err) {
