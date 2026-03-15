@@ -433,9 +433,16 @@ export default function bundlesRouter() {
           if (manifest?.server) {
             const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
             const env = {};
+            // Collect user-provided env vars
             if (manifest.server.envKeys && env_vars) {
               for (const key of manifest.server.envKeys) {
                 if (env_vars[key]) env[key] = env_vars[key];
+              }
+            }
+            // Also include default values from manifest.env_vars
+            if (manifest.env_vars) {
+              for (const v of manifest.env_vars) {
+                if (v.default && !env[v.name]) env[v.name] = v.default;
               }
             }
             mcpAddons[bundle_id] = {
@@ -445,6 +452,46 @@ export default function bundlesRouter() {
             };
             writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
             appendLog(job, `Registered MCP server '${bundle_id}'`);
+          }
+
+          // Install npm dependencies if package.json exists
+          const pkgJson = join(destDir, "package.json");
+          if (existsSync(pkgJson)) {
+            appendLog(job, "Installing dependencies...");
+            try {
+              const { execFileSync } = await import("node:child_process");
+              execFileSync("npm", ["install", "--prefix", destDir, "--omit=dev"], {
+                stdio: "pipe",
+                timeout: 120_000,
+              });
+              appendLog(job, "Dependencies installed");
+            } catch (npmErr) {
+              appendLog(job, `Warning: npm install failed — ${npmErr.message}`);
+            }
+          }
+
+          // Install panel + routes if present in manifest
+          if (manifest?.panel) {
+            mkdirSync(PANELS_DIR, { recursive: true });
+            const panelSrc = join(destDir, manifest.panel);
+            if (existsSync(panelSrc)) {
+              cpSync(panelSrc, join(PANELS_DIR, `${bundle_id}.js`));
+              appendLog(job, `Installed panel: ${bundle_id}`);
+            }
+            if (manifest.panelRoutes) {
+              const routesSrc = join(destDir, manifest.panelRoutes);
+              if (existsSync(routesSrc)) {
+                cpSync(routesSrc, join(PANELS_DIR, `${bundle_id}-routes.js`));
+                appendLog(job, `Installed panel routes: ${bundle_id}-routes`);
+              }
+            }
+            // Register in panels.json
+            const panelsConfig = readJsonSafe(PANELS_CONFIG_PATH, []);
+            if (!panelsConfig.includes(bundle_id)) {
+              panelsConfig.push(bundle_id);
+              writeJsonSafe(PANELS_CONFIG_PATH, panelsConfig);
+            }
+            needsRestart = true;
           }
         } else if (addonType === "skill") {
           // Skill — copy skill files to ~/.crow/skills/
@@ -598,6 +645,24 @@ export default function bundlesRouter() {
             delete mcpAddons[bundle_id];
             writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
             appendLog(job, "Removed MCP server registration");
+          }
+          // Disconnect the live proxy connection
+          try {
+            const { disconnectAddonServer } = await import("../proxy.js");
+            await disconnectAddonServer(bundle_id);
+            appendLog(job, "Disconnected addon server");
+          } catch {}
+          // Remove panel + routes files
+          const panelFile = join(PANELS_DIR, `${bundle_id}.js`);
+          const routesFile = join(PANELS_DIR, `${bundle_id}-routes.js`);
+          if (existsSync(panelFile)) { rmSync(panelFile); appendLog(job, "Removed panel"); }
+          if (existsSync(routesFile)) { rmSync(routesFile); appendLog(job, "Removed panel routes"); }
+          // Remove from panels.json
+          const panelsCfg2 = readJsonSafe(PANELS_CONFIG_PATH, []);
+          const idx2 = panelsCfg2.indexOf(bundle_id);
+          if (idx2 !== -1) {
+            panelsCfg2.splice(idx2, 1);
+            writeJsonSafe(PANELS_CONFIG_PATH, panelsCfg2);
           }
         } else if (addonType === "panel") {
           // Remove from panels.json and delete panel file

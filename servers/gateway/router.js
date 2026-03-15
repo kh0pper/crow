@@ -26,7 +26,6 @@ import { createMemoryServer } from "../memory/server.js";
 import { createProjectServer } from "../research/server.js";
 import { createSharingServer } from "../sharing/server.js";
 import { createBlogServer } from "../blog/server.js";
-import { createMediaServer } from "../media/server.js";
 import { TOOL_MANIFESTS, buildCompressedDescription } from "./tool-manifests.js";
 import { connectedServers } from "./proxy.js";
 import { createDbClient } from "../db.js";
@@ -35,13 +34,13 @@ import { generateCrowContext } from "../memory/crow-context.js";
 /**
  * Server factory map — maps category names to their factory functions.
  * Storage is loaded dynamically since it may not be available.
+ * Media is available as a bundle add-on (bundles/media/).
  */
 const SERVER_FACTORIES = {
   memory: createMemoryServer,
   projects: createProjectServer,
   sharing: createSharingServer,
   blog: createBlogServer,
-  media: createMediaServer,
   // storage added dynamically in createRouterServer
 };
 

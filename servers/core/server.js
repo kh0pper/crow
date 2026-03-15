@@ -23,7 +23,6 @@ import { createMemoryServer } from "../memory/server.js";
 import { createProjectServer } from "../research/server.js";
 import { createSharingServer } from "../sharing/server.js";
 import { createBlogServer } from "../blog/server.js";
-import { createMediaServer } from "../media/server.js";
 import { TOOL_MANIFESTS, getToolNames } from "../gateway/tool-manifests.js";
 import { generateInstructions } from "../shared/instructions.js";
 
@@ -32,7 +31,6 @@ const SERVER_FACTORIES = {
   projects: createProjectServer,
   sharing: createSharingServer,
   blog: createBlogServer,
-  media: createMediaServer,
 };
 
 // Storage loaded dynamically (may not be available)

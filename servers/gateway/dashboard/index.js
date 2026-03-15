@@ -26,8 +26,6 @@ import filesPanel from "./panels/files.js";
 import healthPanel from "./panels/health.js";
 import memoryPanel from "./panels/memory.js";
 import extensionsPanel from "./panels/extensions.js";
-import mediaPanel from "./panels/media.js";
-import podcastPanel from "./panels/podcast.js";
 import skillsPanel from "./panels/skills.js";
 import settingsPanel from "./panels/settings.js";
 import bundlesRouterFactory from "../routes/bundles.js";
@@ -49,8 +47,6 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   registerPanel(blogPanel);
   registerPanel(filesPanel);
   registerPanel(extensionsPanel);
-  registerPanel(mediaPanel);
-  registerPanel(podcastPanel);
   registerPanel(skillsPanel);
   registerPanel(settingsPanel);
 

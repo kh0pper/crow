@@ -1,12 +1,12 @@
 {
   "id": "podcast",
-  "name": "Podcast Publisher",
-  "version": "1.0.0",
-  "description": "Publish podcast episodes with iTunes-compatible RSS feeds",
+  "name": "Podcasts",
+  "version": "1.1.0",
+  "description": "Subscribe to and play podcasts, plus publish your own podcast episodes as blog posts with iTunes-compatible RSS",
   "type": "skill",
   "author": "Crow",
   "category": "media",
-  "tags": ["podcast", "audio", "rss", "itunes"],
+  "tags": ["podcast", "audio", "rss", "itunes", "subscribe", "listen"],
   "icon": "mic",
   "skills": ["skills/podcast.md"],
   "panel": "panels/podcast.js",
@@ -15,5 +15,5 @@
     "min_disk_mb": 100
   },
   "webUI": null,
-  "notes": "Extends the blog server — podcast episodes are blog posts tagged 'podcast' with audio metadata. No additional server required."
+  "notes": "Includes both a podcast player (subscribe and listen) and a podcast publisher (create episodes as blog posts). Tables are self-initialized on first use."
 }

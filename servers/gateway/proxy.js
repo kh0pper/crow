@@ -8,6 +8,9 @@
 
 import { spawn } from "node:child_process";
 import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -143,6 +146,78 @@ async function connectToServer(integration) {
 }
 
 /**
+ * Connect to an MCP server installed as a bundle addon (from ~/.crow/mcp-addons.json).
+ * Unlike connectToServer(), this takes a flat env dict instead of using getSpawnEnv().
+ */
+async function connectAddonServer(id, config) {
+  const cwd = config.cwd || join(homedir(), ".crow", "bundles", id);
+  const env = { ...process.env, ...(config.env || {}) };
+
+  const CONNECT_TIMEOUT_MS = 60_000;
+
+  try {
+    const transport = new StdioClientTransport({
+      command: config.command,
+      args: config.args || [],
+      env,
+      cwd,
+    });
+
+    const client = new Client({
+      name: `crow-addon-${id}`,
+      version: "0.1.0",
+    });
+
+    await Promise.race([
+      client.connect(transport),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Connection timed out (60s)")), CONNECT_TIMEOUT_MS)
+      ),
+    ]);
+
+    const { tools } = await client.listTools();
+
+    console.log(`  [proxy] addon ${id}: connected, ${tools.length} tools discovered`);
+
+    connectedServers.set(id, {
+      client,
+      tools,
+      status: "connected",
+      isAddon: true,
+    });
+
+    transport.onclose = () => {
+      console.warn(`  [proxy] addon ${id}: disconnected`);
+      const entry = connectedServers.get(id);
+      if (entry) entry.status = "disconnected";
+    };
+
+    return { client, tools };
+  } catch (error) {
+    console.error(`  [proxy] addon ${id}: failed to connect — ${error.message}`);
+    connectedServers.set(id, {
+      client: null,
+      tools: [],
+      status: "error",
+      error: error.message,
+      isAddon: true,
+    });
+    return null;
+  }
+}
+
+/**
+ * Disconnect an addon server (for clean uninstall).
+ */
+export async function disconnectAddonServer(id) {
+  const entry = connectedServers.get(id);
+  if (entry && entry.client) {
+    try { await entry.client.close(); } catch {}
+  }
+  connectedServers.delete(id);
+}
+
+/**
  * Create a combined McpServer that proxies tools from all connected external servers.
  * Call this once at gateway startup; it spawns all configured servers.
  */
@@ -183,6 +258,38 @@ export async function initProxyServers() {
 
   // Load dynamic backends from data_backends table
   await loadDynamicBackends();
+
+  // Load bundle-installed MCP servers from ~/.crow/mcp-addons.json
+  await loadAddonServers();
+}
+
+/**
+ * Load MCP servers registered by bundle installs (from ~/.crow/mcp-addons.json).
+ */
+async function loadAddonServers() {
+  const mcpAddonsPath = join(homedir(), ".crow", "mcp-addons.json");
+  if (!existsSync(mcpAddonsPath)) return;
+
+  let addons;
+  try {
+    addons = JSON.parse(readFileSync(mcpAddonsPath, "utf8"));
+  } catch {
+    return;
+  }
+
+  const entries = Object.entries(addons);
+  if (entries.length === 0) return;
+
+  console.log(`[proxy] Loading ${entries.length} addon server(s) from mcp-addons.json...`);
+
+  for (const [id, config] of entries) {
+    if (connectedServers.has(id)) continue;
+    try {
+      await connectAddonServer(id, config);
+    } catch (err) {
+      console.warn(`  [proxy] addon ${id}: ${err.message}`);
+    }
+  }
 }
 
 /**
@@ -321,7 +428,7 @@ export function createProxyServer() {
  * Get status of all integrations for the /health and /setup endpoints.
  */
 export function getProxyStatus() {
-  return INTEGRATIONS.map((integration) => {
+  const integrationStatus = INTEGRATIONS.map((integration) => {
     const configured = isIntegrationConfigured(integration);
 
     let requiresMissing = false;
@@ -354,4 +461,21 @@ export function getProxyStatus() {
       docsUrl: integration.docsUrl || null,
     };
   });
+
+  // Include addon servers (from mcp-addons.json)
+  for (const [id, entry] of connectedServers) {
+    if (!entry.isAddon) continue;
+    integrationStatus.push({
+      id,
+      name: id,
+      description: `Bundle add-on: ${id}`,
+      configured: true,
+      status: entry.status,
+      toolCount: entry.tools?.length || 0,
+      error: entry.error || null,
+      isAddon: true,
+    });
+  }
+
+  return integrationStatus;
 }

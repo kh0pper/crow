@@ -12,6 +12,9 @@ import { homedir } from "os";
 /** @type {Map<string, object>} */
 const panels = new Map();
 
+/** @type {Map<string, Function>} Panel routes: id → (authMiddleware) => Router */
+const panelRoutes = new Map();
+
 /**
  * Register a built-in panel.
  * @param {object} manifest - { id, name, icon, route, navOrder, handler }
@@ -51,6 +54,20 @@ export async function loadExternalPanels() {
     } catch (err) {
       console.warn(`[dashboard] Failed to load panel ${id}:`, err.message);
     }
+
+    // Check for companion routes file ({id}-routes.js)
+    const routesPath = join(panelsDir, `${id}-routes.js`);
+    if (existsSync(routesPath)) {
+      try {
+        const routesMod = await import(routesPath);
+        const routerFn = routesMod.default || routesMod.createRouter;
+        if (typeof routerFn === "function") {
+          panelRoutes.set(id, routerFn);
+        }
+      } catch (err) {
+        console.warn(`[dashboard] Failed to load panel routes ${id}:`, err.message);
+      }
+    }
   }
 }
 
@@ -66,4 +83,12 @@ export function getAllPanels() {
  */
 export function getPanel(id) {
   return panels.get(id);
+}
+
+/**
+ * Get all registered panel routes.
+ * @returns {Map<string, Function>} id → (authMiddleware) => Router
+ */
+export function getPanelRoutes() {
+  return panelRoutes;
 }

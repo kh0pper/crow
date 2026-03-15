@@ -85,28 +85,8 @@ export const TOOL_MANIFESTS = {
     },
   },
 
-  media: {
-    displayName: "Media",
-    description: "News & podcast hub: RSS feeds, YouTube channels, Google News, article feed, TTS audio, briefings, playlists, smart folders, email digests, full-text search",
-    tools: {
-      crow_media_add_source: { params: "url?, query?, youtube_channel?, name?, category?, fetch_interval_min?", desc: "Subscribe to RSS feed, Google News search, or YouTube channel" },
-      crow_media_list_sources: { params: "enabled_only?, category?", desc: "List sources with status" },
-      crow_media_remove_source: { params: "id, delete_articles?, confirm_token", desc: "Remove source (cannot be undone). Returns preview + token on first call; pass token back to execute." },
-      crow_media_feed: { params: "limit?, offset?, category?, source_id?, unread_only?, starred_only?, sort?", desc: "Browse article feed (sort: chronological or for_you)" },
-      crow_media_get_article: { params: "id", desc: "Get full article content" },
-      crow_media_search: { params: "query, category?, date_from?, limit?", desc: "Full-text search articles" },
-      crow_media_article_action: { params: "article_id, action", desc: "Star/save/read/feedback on article" },
-      crow_media_refresh: { params: "source_id?", desc: "Trigger immediate feed refresh" },
-      crow_media_stats: { params: "", desc: "Media statistics" },
-      crow_media_listen: { params: "article_id, voice?", desc: "Generate TTS audio for article (requires edge-tts)" },
-      crow_media_briefing: { params: "topic?, max_articles?, voice?", desc: "Generate AI-narrated news briefing" },
-      crow_media_playlist: { params: "action, id?, name?, description?, confirm_token?", desc: "Manage playlists (create/list/rename/delete)" },
-      crow_media_playlist_items: { params: "action, playlist_id, item_type?, item_id?, item_ids?", desc: "Manage playlist items (add/remove/reorder/list)" },
-      crow_media_smart_folders: { params: "action, id?, name?, description?, query?, limit?, offset?, confirm_token?", desc: "Manage smart folders (create/list/view/update/delete)" },
-      crow_media_digest_preview: { params: "smart_folder_id?, limit?", desc: "Preview digest email content" },
-      crow_media_digest_settings: { params: "schedule?, email?, custom_instructions?, enabled?", desc: "Configure email digest delivery" },
-    },
-  },
+  // Media is available as a bundle add-on (bundles/media/).
+  // When installed, its 16 tools are discovered via the proxy system.
 
   storage: {
     displayName: "Storage",

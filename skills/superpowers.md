@@ -51,9 +51,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | "set up sharing", "export identity", "new device" | "configurar sharing", "exportar identidad", "nuevo dispositivo" | onboarding, peer-network | crow-sharing |
 | "upload file", "store file", "storage", "download file" | "subir archivo", "almacenar", "descargar archivo" | storage | crow-storage |
 | "blog post", "write a post", "publish", "blog settings" | "publicar", "escribir un post", "blog", "configuración del blog" | blog | crow-blog, crow-storage |
-| "news", "articles", "feed", "RSS", "subscribe to", "briefing", "digest", "media" | "noticias", "artículos", "suscribir", "resumen", "medios" | media | crow-media |
-| "podcast", "episode", "audio content", "listen to" | "podcast", "episodio", "contenido de audio", "escuchar" | media | crow-media |
-| "youtube", "channel", "video", "subscribe youtube" | "youtube", "canal", "video", "suscribir youtube" | media | crow-media |
+| "news", "articles", "feed", "RSS", "briefing", "podcast", "youtube" | "noticias", "artículos", "podcast", "youtube" | media (add-on) | crow-media |
 | "crow's nest", "dashboard", "settings", "control panel" | "panel", "configuración", "panel de control" | network-setup | (dashboard routes) |
 | "add-on", "extension", "install plugin", "browse extensions" | "complemento", "extensión", "instalar plugin" | add-ons | crow-memory, filesystem |
 | "what can you do", "getting started", "new to crow" | "qué puedes hacer", "cómo empezar", "nuevo en crow" | onboarding-tour | crow-memory |

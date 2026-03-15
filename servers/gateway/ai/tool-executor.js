@@ -15,7 +15,6 @@ import { createMemoryServer } from "../../memory/server.js";
 import { createProjectServer } from "../../research/server.js";
 import { createSharingServer } from "../../sharing/server.js";
 import { createBlogServer } from "../../blog/server.js";
-import { createMediaServer } from "../../media/server.js";
 import { TOOL_MANIFESTS } from "../tool-manifests.js";
 import { connectedServers } from "../proxy.js";
 
@@ -27,13 +26,13 @@ export const MAX_TOOL_ROUNDS = 10;
 
 /**
  * Server factory map — mirrors router.js.
+ * Media is available as a bundle add-on (accessed via crow_tools proxy).
  */
 const SERVER_FACTORIES = {
   memory: createMemoryServer,
   projects: createProjectServer,
   sharing: createSharingServer,
   blog: createBlogServer,
-  media: createMediaServer,
 };
 
 /**
