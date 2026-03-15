@@ -32,6 +32,7 @@ tools:
    - Slug auto-generated from title (or provide custom slug)
    - Excerpt auto-generated from content (or provide custom excerpt)
    - Set visibility: `private` (default), `public`, or `peers`
+   - Set a default author via `crow_blog_settings` — it will be used automatically for new posts when no author is explicitly provided
 2. Review with `crow_get_post` — check content renders correctly
 3. `crow_publish_post` — make it live
 4. If public: accessible at `/blog/:slug`
