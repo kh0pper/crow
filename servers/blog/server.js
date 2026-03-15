@@ -57,10 +57,22 @@ export function createBlogServer(dbPath, options = {}) {
       const finalSlug = await uniqueSlug(baseSlug);
       const finalExcerpt = excerpt || generateExcerpt(content);
 
+      // Author fallback: explicit param > blog_author setting > null
+      let finalAuthor = author || null;
+      if (!finalAuthor) {
+        const authorSetting = await db.execute({
+          sql: "SELECT value FROM dashboard_settings WHERE key = 'blog_author'",
+          args: [],
+        });
+        if (authorSetting.rows.length > 0 && authorSetting.rows[0].value) {
+          finalAuthor = authorSetting.rows[0].value;
+        }
+      }
+
       const result = await db.execute({
         sql: `INSERT INTO blog_posts (slug, title, content, excerpt, author, tags, cover_image_key, visibility)
               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        args: [finalSlug, title, content, finalExcerpt, author || null, tags || null, cover_image_key || null, visibility || "private"],
+        args: [finalSlug, title, content, finalExcerpt, finalAuthor, tags || null, cover_image_key || null, visibility || "private"],
       });
 
       return {
@@ -90,7 +102,7 @@ export function createBlogServer(dbPath, options = {}) {
     async ({ id, title, content, slug, excerpt, author, tags, cover_image_key, visibility }) => {
       const existing = await db.execute({ sql: "SELECT * FROM blog_posts WHERE id = ?", args: [id] });
       if (existing.rows.length === 0) {
-        return { content: [{ type: "text", text: `Post ${id} not found.` }], isError: true };
+        return { content: [{ type: "text", text: `Post ${id} not found. Use crow_list_posts to see available posts.` }], isError: true };
       }
 
       const updates = [];
@@ -117,7 +129,7 @@ export function createBlogServer(dbPath, options = {}) {
       if (visibility !== undefined) { updates.push("visibility = ?"); args.push(visibility); }
 
       if (updates.length === 0) {
-        return { content: [{ type: "text", text: "No changes provided." }] };
+        return { content: [{ type: "text", text: "No changes provided. Pass at least one field to update (title, content, tags, slug, excerpt, author, visibility, cover_image_key)." }] };
       }
 
       updates.push("updated_at = datetime('now')");
@@ -128,7 +140,17 @@ export function createBlogServer(dbPath, options = {}) {
         args,
       });
 
-      return { content: [{ type: "text", text: `Updated post ${id}.` }] };
+      const changedFields = [];
+      if (title !== undefined) changedFields.push("title");
+      if (content !== undefined) changedFields.push("content");
+      if (slug !== undefined) changedFields.push("slug");
+      if (excerpt !== undefined) changedFields.push("excerpt");
+      if (author !== undefined) changedFields.push("author");
+      if (tags !== undefined) changedFields.push("tags");
+      if (cover_image_key !== undefined) changedFields.push("cover_image_key");
+      if (visibility !== undefined) changedFields.push("visibility");
+
+      return { content: [{ type: "text", text: `Updated post ${id}: ${changedFields.join(", ")}.` }] };
     }
   );
 
@@ -145,7 +167,7 @@ export function createBlogServer(dbPath, options = {}) {
         args: [id],
       });
       if (result.rowsAffected === 0) {
-        return { content: [{ type: "text", text: `Post ${id} not found.` }], isError: true };
+        return { content: [{ type: "text", text: `Post ${id} not found. Use crow_list_posts to see available posts.` }], isError: true };
       }
 
       const post = await db.execute({ sql: "SELECT slug, visibility FROM blog_posts WHERE id = ?", args: [id] });
@@ -170,7 +192,7 @@ export function createBlogServer(dbPath, options = {}) {
         args: [id],
       });
       if (result.rowsAffected === 0) {
-        return { content: [{ type: "text", text: `Post ${id} not found.` }], isError: true };
+        return { content: [{ type: "text", text: `Post ${id} not found. Use crow_list_posts to see available posts.` }], isError: true };
       }
       return { content: [{ type: "text", text: `Post ${id} reverted to draft.` }] };
     }
@@ -250,7 +272,7 @@ export function createBlogServer(dbPath, options = {}) {
       });
 
       if (result.rows.length === 0) {
-        return { content: [{ type: "text", text: "Post not found." }], isError: true };
+        return { content: [{ type: "text", text: `Post not found. Use crow_list_posts to see available posts.` }], isError: true };
       }
 
       const p = result.rows[0];
@@ -273,7 +295,7 @@ export function createBlogServer(dbPath, options = {}) {
     async ({ id }) => {
       const result = await db.execute({ sql: "DELETE FROM blog_posts WHERE id = ?", args: [id] });
       if (result.rowsAffected === 0) {
-        return { content: [{ type: "text", text: `Post ${id} not found.` }], isError: true };
+        return { content: [{ type: "text", text: `Post ${id} not found. Use crow_list_posts to see available posts.` }], isError: true };
       }
       return { content: [{ type: "text", text: `Deleted post ${id}.` }] };
     }
@@ -290,7 +312,7 @@ export function createBlogServer(dbPath, options = {}) {
     async ({ id, contact }) => {
       const post = await db.execute({ sql: "SELECT id, title FROM blog_posts WHERE id = ?", args: [id] });
       if (post.rows.length === 0) {
-        return { content: [{ type: "text", text: `Post ${id} not found.` }], isError: true };
+        return { content: [{ type: "text", text: `Post ${id} not found. Use crow_list_posts to see available posts.` }], isError: true };
       }
 
       // Look up contact
@@ -299,7 +321,7 @@ export function createBlogServer(dbPath, options = {}) {
         args: [contact, contact],
       });
       if (contactResult.rows.length === 0) {
-        return { content: [{ type: "text", text: `Contact "${contact}" not found.` }], isError: true };
+        return { content: [{ type: "text", text: `Contact "${contact}" not found. Use crow_list_contacts to see available peers.` }], isError: true };
       }
 
       const contactId = contactResult.rows[0].id;
@@ -333,15 +355,26 @@ export function createBlogServer(dbPath, options = {}) {
         return { content: [{ type: "text", text: "No published posts to export." }] };
       }
 
+      // Look up default author for posts without an explicit author
+      let defaultAuthor = "";
+      const authorSetting = await db.execute({
+        sql: "SELECT value FROM dashboard_settings WHERE key = 'blog_author'",
+        args: [],
+      });
+      if (authorSetting.rows.length > 0 && authorSetting.rows[0].value) {
+        defaultAuthor = authorSetting.rows[0].value;
+      }
+
       const files = posts.rows.map((p) => {
         const date = (p.published_at || p.created_at).split(" ")[0];
         const tags = (p.tags || "").split(",").map((t) => t.trim()).filter(Boolean);
+        const exportAuthor = p.author || defaultAuthor;
 
         let frontmatter;
         if (fmt === "hugo") {
-          frontmatter = `---\ntitle: "${p.title}"\ndate: ${p.published_at || p.created_at}\nslug: "${p.slug}"\ntags: [${tags.map(t => `"${t}"`).join(", ")}]\nauthor: "${p.author || ""}"\ndraft: false\n---\n\n`;
+          frontmatter = `---\ntitle: "${p.title}"\ndate: ${p.published_at || p.created_at}\nslug: "${p.slug}"\ntags: [${tags.map(t => `"${t}"`).join(", ")}]\nauthor: "${exportAuthor}"\ndraft: false\n---\n\n`;
         } else {
-          frontmatter = `---\nlayout: post\ntitle: "${p.title}"\ndate: ${p.published_at || p.created_at}\ntags: [${tags.map(t => `"${t}"`).join(", ")}]\nauthor: "${p.author || ""}"\n---\n\n`;
+          frontmatter = `---\nlayout: post\ntitle: "${p.title}"\ndate: ${p.published_at || p.created_at}\ntags: [${tags.map(t => `"${t}"`).join(", ")}]\nauthor: "${exportAuthor}"\n---\n\n`;
         }
 
         const filename = fmt === "jekyll" ? `${date}-${p.slug}.md` : `${p.slug}.md`;
