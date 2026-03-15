@@ -20,8 +20,19 @@ const SESSION_MAX_AGE = isHosted ? 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000
 const LOCKOUT_THRESHOLD = 5;
 const LOCKOUT_DURATION = 15 * 60 * 1000; // 15 min
 
-// In-memory lockout tracking
-const loginAttempts = new Map(); // ip → { count, lockedUntil }
+/**
+ * Validate password strength (for set/change only, not login).
+ * @returns {{ valid: boolean, message: string, strength: string }}
+ */
+export function validatePasswordStrength(password) {
+  if (!password || password.length < 12) {
+    return { valid: false, message: "Password must be at least 12 characters.", strength: "weak" };
+  }
+  if (password.length < 16) {
+    return { valid: true, message: "Fair password.", strength: "fair" };
+  }
+  return { valid: true, message: "Strong password.", strength: "strong" };
+}
 
 /**
  * Hash a password with scrypt.
@@ -96,18 +107,61 @@ export async function setPassword(password) {
 }
 
 /**
+ * Read lockout state from DB for an IP.
+ */
+async function getLockout(db, ip) {
+  const key = `lockout:${ip}`;
+  const result = await db.execute({
+    sql: "SELECT value FROM dashboard_settings WHERE key = ?",
+    args: [key],
+  });
+  if (result.rows.length === 0) return null;
+  try {
+    return JSON.parse(result.rows[0].value);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write lockout state to DB for an IP.
+ */
+async function setLockout(db, ip, state) {
+  const key = `lockout:${ip}`;
+  const value = JSON.stringify(state);
+  await db.execute({
+    sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
+    args: [key, value, value],
+  });
+}
+
+/**
+ * Clear lockout for an IP and clean up expired lockouts.
+ */
+async function clearLockout(db, ip) {
+  const key = `lockout:${ip}`;
+  await db.execute({ sql: "DELETE FROM dashboard_settings WHERE key = ?", args: [key] });
+  // Clean up expired lockouts
+  const now = Date.now();
+  await db.execute({
+    sql: "DELETE FROM dashboard_settings WHERE key LIKE 'lockout:%' AND json_extract(value, '$.lockedUntil') < ?",
+    args: [now],
+  });
+}
+
+/**
  * Attempt login. Returns session token on success, null on failure.
  */
 export async function attemptLogin(password, ip) {
-  // Check lockout
-  const attempts = loginAttempts.get(ip);
-  if (attempts && attempts.lockedUntil && Date.now() < attempts.lockedUntil) {
-    const remaining = Math.ceil((attempts.lockedUntil - Date.now()) / 60000);
-    return { error: `Account locked. Try again in ${remaining} minute(s).` };
-  }
-
   const db = createDbClient();
   try {
+    // Check lockout (persistent in DB)
+    const lockout = await getLockout(db, ip);
+    if (lockout && lockout.lockedUntil && Date.now() < lockout.lockedUntil) {
+      const remaining = Math.ceil((lockout.lockedUntil - Date.now()) / 60000);
+      return { error: `Account locked. Try again in ${remaining} minute(s).` };
+    }
+
     const result = await db.execute({
       sql: "SELECT value FROM dashboard_settings WHERE key = 'password_hash'",
       args: [],
@@ -116,20 +170,20 @@ export async function attemptLogin(password, ip) {
 
     const valid = await verifyPassword(password, result.rows[0].value);
     if (!valid) {
-      // Track failed attempt
-      const a = loginAttempts.get(ip) || { count: 0, lockedUntil: null };
+      // Track failed attempt in DB
+      const a = lockout || { count: 0, lockedUntil: null };
       a.count++;
       if (a.count >= LOCKOUT_THRESHOLD) {
         a.lockedUntil = Date.now() + LOCKOUT_DURATION;
         await auditLog(db, 'auth_lockout', { ip });
       }
-      loginAttempts.set(ip, a);
+      await setLockout(db, ip, a);
       await auditLog(db, 'auth_login_failure', { ip });
       return { error: "Invalid password." };
     }
 
-    // Reset attempts on success
-    loginAttempts.delete(ip);
+    // Reset attempts on success + clean expired lockouts
+    await clearLockout(db, ip);
     await auditLog(db, 'auth_login_success', { ip });
 
     // Create session token

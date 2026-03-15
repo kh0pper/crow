@@ -14,6 +14,7 @@ import {
   setSessionCookie,
   clearSessionCookie,
   parseCookies,
+  validatePasswordStrength,
 } from "./auth.js";
 import { resolve } from "node:path";
 import { registerPanel, loadExternalPanels, getAllPanels, getPanel } from "./panel-registry.js";
@@ -60,7 +61,12 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // Login page
   router.get("/dashboard/login", async (req, res) => {
     const hasPassword = await isPasswordSet();
-    res.type("html").send(renderLogin({ isSetup: !hasPassword }));
+    const setupToken = process.env.CROW_SETUP_TOKEN;
+    if (!hasPassword && setupToken && req.query.token !== setupToken) {
+      // Setup token required but not provided — show gated message
+      return res.type("html").send(renderLogin({ isSetup: true, error: "Use the link you were sent to set up your password." }));
+    }
+    res.type("html").send(renderLogin({ isSetup: !hasPassword, setupToken: !hasPassword ? setupToken : undefined }));
   });
 
   // Login handler
@@ -70,11 +76,17 @@ export default function dashboardRouter(mcpAuthMiddleware) {
 
     if (!hasPassword) {
       // First-time setup
-      if (!password || password.length < 6) {
-        return res.type("html").send(renderLogin({ isSetup: true, error: "Password must be at least 6 characters." }));
+      const strength = validatePasswordStrength(password);
+      if (!strength.valid) {
+        return res.type("html").send(renderLogin({ isSetup: true, error: strength.message }));
       }
       if (password !== confirm) {
         return res.type("html").send(renderLogin({ isSetup: true, error: "Passwords don't match." }));
+      }
+      // Setup token gating: if CROW_SETUP_TOKEN is set and no password exists, require it
+      const setupToken = process.env.CROW_SETUP_TOKEN;
+      if (setupToken && req.body.setup_token !== setupToken) {
+        return res.type("html").send(renderLogin({ isSetup: true, error: "Invalid setup token. Use the link you were sent." }));
       }
       await setPassword(password);
     }

@@ -58,11 +58,10 @@ export default {
       }
 
       if (action === "change_password") {
-        const { scrypt, randomBytes, timingSafeEqual } = await import("node:crypto");
-        const { setPassword } = await import("../auth.js");
+        const { setPassword, validatePasswordStrength } = await import("../auth.js");
         const { password, confirm } = req.body;
-        if (!password || password.length < 6) {
-          // Re-render with error (simplified — redirect back)
+        const strength = validatePasswordStrength(password);
+        if (!strength.valid) {
           res.redirect("/dashboard/settings?error=short");
           return;
         }
@@ -222,7 +221,7 @@ export default {
     const successMsg = req.query.success === "password"
       ? `<div class="alert alert-success">Password updated.</div>` : "";
     const errorMsg = req.query.error === "short"
-      ? `<div class="alert alert-error">Password must be at least 6 characters.</div>`
+      ? `<div class="alert alert-error">Password must be at least 12 characters.</div>`
       : req.query.error === "mismatch"
       ? `<div class="alert alert-error">Passwords don't match.</div>` : "";
 
@@ -472,7 +471,7 @@ function pollHealth(attempts) {
     // Password change
     const passwordForm = `<form method="POST">
       <input type="hidden" name="action" value="change_password">
-      ${formField("New Password", "password", { type: "password", required: true, placeholder: "At least 6 characters" })}
+      ${formField("New Password", "password", { type: "password", required: true, placeholder: "At least 12 characters" })}
       ${formField("Confirm Password", "confirm", { type: "password", required: true })}
       <button type="submit" class="btn btn-secondary">Change Password</button>
     </form>`;
