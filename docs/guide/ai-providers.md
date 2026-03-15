@@ -50,6 +50,8 @@ No gateway restart needed — the config is hot-reloaded.
 | Google Gemini | `google` | `gemini-2.5-flash` | Yes | [Get key](https://aistudio.google.com/app/apikey) |
 | Ollama | `ollama` | `llama3.1` | No | Fully local, no API key needed |
 | OpenRouter | `openrouter` | `openai/gpt-4o` | Yes | [Get key](https://openrouter.ai/keys) — access 100+ models |
+| DashScope Coding | `openai` | `qwen3.5-plus` | Yes | [Get key](https://dashscope.console.aliyun.com/apiKey) — Qwen, GLM, Kimi, MiniMax ([guide](/guide/dashscope-coding)) |
+| Z.AI Coding | `openai` | `glm-5` | Yes | [Get key](https://z.ai) — GLM models ([guide](/guide/zai-coding)) |
 
 ### OpenAI
 
@@ -104,6 +106,28 @@ AI_MODEL=openai/gpt-4o
 ```
 
 OpenRouter gives you access to 100+ models from multiple providers through a single API key. Great for trying different models without signing up for each provider separately. Many models have free tiers.
+
+### DashScope Coding Plan (Alibaba Cloud)
+
+```env
+AI_PROVIDER=openai
+AI_API_KEY=sk-sp-...
+AI_MODEL=qwen3.5-plus
+AI_BASE_URL=https://coding-intl.dashscope.aliyuncs.com/v1
+```
+
+The DashScope Coding Plan gives you access to models from Qwen, GLM, Kimi, and MiniMax through a single subscription. All models use the same API key and base URL — just change the model name. See the [DashScope Coding Plan guide](/guide/dashscope-coding) for full setup instructions and available models.
+
+### Z.AI Coding Plan (Zhipu AI)
+
+```env
+AI_PROVIDER=openai
+AI_API_KEY=your-zai-key
+AI_MODEL=glm-5
+AI_BASE_URL=https://api.z.ai/api/coding/paas/v4
+```
+
+The Z.AI Coding Plan provides access to the GLM model family (GLM-5, GLM-4.7, and more) through a monthly subscription. See the [Z.AI Coding Plan guide](/guide/zai-coding) for full setup instructions and available models.
 
 ### Custom OpenAI-Compatible Endpoint
 

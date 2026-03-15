@@ -157,6 +157,8 @@ export default defineConfig({
           { text: 'Data Backends', link: '/guide/data-backends' },
           { text: 'Deployment Tiers', link: '/guide/deployment-tiers' },
           { text: 'AI Providers (BYOAI)', link: '/guide/ai-providers' },
+          { text: 'DashScope Coding Plan', link: '/guide/dashscope-coding' },
+          { text: 'Z.AI Coding Plan', link: '/guide/zai-coding' },
           { text: 'Citations & Verification', link: '/guide/citations' },
           { text: 'Ideation', link: '/guide/ideation' },
           { text: 'Customization', link: '/guide/customization' },
