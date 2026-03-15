@@ -91,7 +91,7 @@ export function renderLayout({ title, content, activePanel, panels, theme, scrip
  * @param {string} [opts.error] - Error message to display
  * @param {boolean} [opts.isSetup] - True if setting password for first time
  */
-export function renderLogin({ error, isSetup } = {}) {
+export function renderLogin({ error, isSetup, setupToken } = {}) {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -111,8 +111,9 @@ export function renderLogin({ error, isSetup } = {}) {
       <p class="login-subtitle">${isSetup ? "Set your Crow's Nest password" : "Crow's Nest Login"}</p>
       ${error ? `<div class="login-error">${escapeHtml(error)}</div>` : ""}
       <form method="POST" action="/dashboard/login">
-        ${isSetup ? `<input type="password" name="password" placeholder="Choose a password" required minlength="6" autofocus>
-        <input type="password" name="confirm" placeholder="Confirm password" required minlength="6">` :
+        ${isSetup ? `${setupToken ? `<input type="hidden" name="setup_token" value="${setupToken}">` : ""}
+        <input type="password" name="password" placeholder="Choose a password (12+ characters)" required minlength="12" autofocus>
+        <input type="password" name="confirm" placeholder="Confirm password" required minlength="12">` :
         `<input type="password" name="password" placeholder="Password" required autofocus>`}
         <button type="submit">${isSetup ? "Set Password" : "Login"}</button>
       </form>
