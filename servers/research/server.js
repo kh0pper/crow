@@ -9,6 +9,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createDbClient, sanitizeFtsQuery, escapeLikePattern } from "../db.js";
+import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
 
 const SOURCE_TYPES = [
   "web_article", "academic_paper", "book", "interview",
@@ -678,17 +679,42 @@ export function createProjectServer(dbPath, options = {}) {
 
   server.tool(
     "crow_remove_backend",
-    "Remove a data backend registration.",
+    "Remove a data backend registration. This cannot be undone. Returns a preview and confirmation token on first call; pass the token back to execute.",
     {
       id: z.number().describe("Backend ID to remove"),
+      confirm_token: z.string().max(100).describe('Confirmation token — pass "" on first call to get a preview, then pass the returned token to execute'),
     },
-    async ({ id }) => {
-      const { rows } = await db.execute({ sql: "SELECT name FROM data_backends WHERE id = ?", args: [id] });
+    async ({ id, confirm_token }) => {
+      const { rows } = await db.execute({
+        sql: `SELECT b.name, b.status, p.name as project_name
+              FROM data_backends b
+              JOIN research_projects p ON p.id = b.project_id
+              WHERE b.id = ?`,
+        args: [id],
+      });
       if (rows.length === 0) {
         return { content: [{ type: "text", text: `Backend #${id} not found.` }] };
       }
+      const backend = rows[0];
+
+      if (!shouldSkipGates()) {
+        if (confirm_token) {
+          if (!validateToken(confirm_token, "remove_backend", id)) {
+            return { content: [{ type: "text", text: "Invalid or expired confirmation token. Pass confirm_token: \"\" to get a new preview." }], isError: true };
+          }
+        } else {
+          const token = generateToken("remove_backend", id);
+          return {
+            content: [{
+              type: "text",
+              text: `⚠️ This will permanently remove:\n  Backend #${id}: "${backend.name}" (${backend.status})\n  Project: ${backend.project_name}\n\nThis cannot be undone.\nTo proceed, call again with confirm_token: "${token}"`,
+            }],
+          };
+        }
+      }
+
       await db.execute({ sql: "DELETE FROM data_backends WHERE id = ?", args: [id] });
-      return { content: [{ type: "text", text: `Backend "${rows[0].name}" (#${id}) removed.` }] };
+      return { content: [{ type: "text", text: `Backend "${backend.name}" (#${id}) removed.` }] };
     }
   );
 

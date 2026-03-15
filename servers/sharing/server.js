@@ -23,6 +23,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createHash } from "node:crypto";
 import { createDbClient } from "../db.js";
+import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
 import {
   loadOrCreateIdentity,
   generateInviteCode,
@@ -460,14 +461,15 @@ export function createSharingServer(dbPath, options = {}) {
 
   server.tool(
     "crow_share",
-    "Share a memory, research project, source, or note with a connected contact. The data is encrypted end-to-end.",
+    "Share a memory, research project, source, or note with a connected contact. The data is encrypted end-to-end. Returns a preview and confirmation token on first call; pass the token back to execute.",
     {
       contact: z.string().max(500).describe("Crow ID or display name of the contact"),
       share_type: z.enum(["memory", "project", "source", "note"]).describe("Type of item to share"),
       item_id: z.number().describe("ID of the item to share"),
       permissions: z.enum(["read", "read-write", "one-time"]).default("read").describe("Permission level"),
+      confirm_token: z.string().max(100).describe('Confirmation token — pass "" on first call to get a preview, then pass the returned token to execute'),
     },
-    async ({ contact, share_type, item_id, permissions }) => {
+    async ({ contact, share_type, item_id, permissions, confirm_token }) => {
       // Find contact
       const result = await db.execute({
         sql: "SELECT * FROM contacts WHERE (crow_id = ? OR display_name = ?) AND is_blocked = 0",
@@ -492,7 +494,7 @@ export function createSharingServer(dbPath, options = {}) {
       };
       const table = tableMap[share_type];
       const item = await db.execute({
-        sql: `SELECT id FROM ${table} WHERE id = ?`,
+        sql: `SELECT * FROM ${table} WHERE id = ?`,
         args: [item_id],
       });
 
@@ -501,6 +503,26 @@ export function createSharingServer(dbPath, options = {}) {
           content: [{ type: "text", text: `${share_type} #${item_id} not found` }],
           isError: true,
         };
+      }
+
+      // Confirmation gate
+      const tokenKey = `share_${share_type}_${item_id}_${contactRow.id}`;
+      if (!shouldSkipGates()) {
+        if (confirm_token) {
+          if (!validateToken(confirm_token, "share", tokenKey)) {
+            return { content: [{ type: "text", text: "Invalid or expired confirmation token. Pass confirm_token: \"\" to get a new preview." }], isError: true };
+          }
+        } else {
+          const itemRow = item.rows[0];
+          const itemDesc = itemRow.title || itemRow.name || itemRow.content?.substring(0, 100) || `#${item_id}`;
+          const token = generateToken("share", tokenKey);
+          return {
+            content: [{
+              type: "text",
+              text: `⚠️ This will share:\n  ${share_type} #${item_id}: "${itemDesc}"\n  With: ${contactRow.display_name || contactRow.crow_id}\n  Permissions: ${permissions}\n\nTo proceed, call again with confirm_token: "${token}"`,
+            }],
+          };
+        }
       }
 
       // Record the share
@@ -519,16 +541,10 @@ export function createSharingServer(dbPath, options = {}) {
       // If peer is online, send directly via Hyperswarm data channel
       if (peerManager.isConnected(contactRow.crow_id)) {
         try {
-          // Get the actual item data
-          const itemData = await db.execute({
-            sql: `SELECT * FROM ${table} WHERE id = ?`,
-            args: [item_id],
-          });
-
           peerManager.send(contactRow.crow_id, {
             type: "share",
             share_type,
-            payload: itemData.rows[0],
+            payload: item.rows[0],
             permissions,
             sender: identity.crowId,
             timestamp: new Date().toISOString(),
@@ -627,7 +643,7 @@ export function createSharingServer(dbPath, options = {}) {
 
   server.tool(
     "crow_send_message",
-    "Send an encrypted message to a contact via the Nostr network. Messages are end-to-end encrypted and delivered through public Nostr relays.",
+    "Send an encrypted message via the Nostr network. Messages cannot be retracted once sent.",
     {
       contact: z.string().max(500).describe("Crow ID or display name of the contact"),
       message: z.string().max(10000).describe("Message text to send"),
@@ -671,13 +687,14 @@ export function createSharingServer(dbPath, options = {}) {
 
   server.tool(
     "crow_revoke_access",
-    "Revoke a previously shared item or project from a contact. Stops ongoing sync for shared projects.",
+    "Revoke a previously shared item or project from a contact. Stops ongoing sync for shared projects. Returns a preview and confirmation token on first call; pass the token back to execute.",
     {
       contact: z.string().max(500).describe("Crow ID or display name of the contact"),
       share_type: z.enum(["memory", "project", "source", "note"]).describe("Type of shared item"),
       item_id: z.number().describe("ID of the shared item to revoke"),
+      confirm_token: z.string().max(100).describe('Confirmation token — pass "" on first call to get a preview, then pass the returned token to execute'),
     },
-    async ({ contact, share_type, item_id }) => {
+    async ({ contact, share_type, item_id, confirm_token }) => {
       const result = await db.execute({
         sql: "SELECT * FROM contacts WHERE crow_id = ? OR display_name = ?",
         args: [contact, contact],
@@ -692,17 +709,42 @@ export function createSharingServer(dbPath, options = {}) {
 
       const contactRow = result.rows[0];
 
-      const deleted = await db.execute({
-        sql: `DELETE FROM shared_items
+      // Check if a matching share exists
+      const shareCheck = await db.execute({
+        sql: `SELECT id FROM shared_items
               WHERE contact_id = ? AND share_type = ? AND item_id = ? AND direction = 'sent'`,
         args: [contactRow.id, share_type, item_id],
       });
 
-      if (deleted.rowsAffected === 0) {
+      if (shareCheck.rows.length === 0) {
         return {
           content: [{ type: "text", text: `No matching share found to revoke.` }],
         };
       }
+
+      // Confirmation gate
+      const tokenKey = `revoke_${share_type}_${item_id}_${contactRow.id}`;
+      if (!shouldSkipGates()) {
+        if (confirm_token) {
+          if (!validateToken(confirm_token, "revoke_access", tokenKey)) {
+            return { content: [{ type: "text", text: "Invalid or expired confirmation token. Pass confirm_token: \"\" to get a new preview." }], isError: true };
+          }
+        } else {
+          const token = generateToken("revoke_access", tokenKey);
+          return {
+            content: [{
+              type: "text",
+              text: `⚠️ This will revoke access:\n  ${share_type} #${item_id}\n  From: ${contactRow.display_name || contactRow.crow_id}\n\nTo proceed, call again with confirm_token: "${token}"`,
+            }],
+          };
+        }
+      }
+
+      await db.execute({
+        sql: `DELETE FROM shared_items
+              WHERE contact_id = ? AND share_type = ? AND item_id = ? AND direction = 'sent'`,
+        args: [contactRow.id, share_type, item_id],
+      });
 
       // Send revocation notice via data channel
       if (peerManager.isConnected(contactRow.crow_id)) {
