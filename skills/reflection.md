@@ -23,11 +23,14 @@ Show a brief FYI as each phase begins:
 *[crow: reflection phase 1 — summarizing session accomplishments]*
 *[crow: reflection phase 2 — cataloging friction points]*
 *[crow: reflection phase 4 — analyzing root causes]*
-*[crow: reflection phase 5 — storing reflection in memory]*
-*[crow: reflection phase 7 — evaluating skill-writing handoff]*
+*[crow: reflection phase 5 — reading relevant files]*
+*[crow: reflection phase 6 — entering plan mode for user review]*
+*[crow: reflection phase 7 — implementing approved changes]*
+*[crow: reflection phase 8 — storing reflection in memory]*
+*[crow: reflection phase 9 — evaluating skill-writing handoff]*
 
 ### Auto-Fix Undo
-When auto-applying a minor fix (Phase 7), show:
+When auto-applying a minor fix (Phase 9), show:
 *[crow: auto-applied minor fix to \<skill\>.md — \<what changed\>. Say "undo that" to revert.]*
 
 Track the previous file state so "undo that" can restore it within the session.
@@ -105,29 +108,45 @@ crow_store_memory({
 ```
 This builds a per-skill friction history that skill-writing can query to identify chronically problematic skills.
 
-### Phase 5: Store Reflection
+### Phase 5: Read Relevant Files
+
+Load each skill file or code file that needs changes to understand the current state. Don't propose changes to files you haven't read. This grounds the plan in real code, not assumptions.
+
+### Phase 6: Enter Plan Mode
+
+**This is the critical step.** Call `EnterPlanMode` and write a plan covering:
+
+1. Each friction point with severity and root cause classification
+2. **Code fixes** — Specific file paths and the exact changes needed
+3. **Skill refinements** — Which skill files need updates and what to add/change
+4. **crow.md section updates** — Which crow.md sections need content changes (use `crow_update_context_section` or `crow_add_context_section`)
+5. **Memory updates** — What should be stored for next time
+6. **Verification steps** — How to confirm each fix works (run tests, check behavior, etc.)
+
+The user reviews and approves/revises before any changes are implemented. This lets the user redirect — e.g., from a skill workaround to a proper code fix, or to deprioritize a low-severity issue.
+
+**Do NOT implement changes before the plan is approved.** The plan is the gate.
+
+### Phase 7: Implement Approved Changes
+
+After user approval, exit plan mode and:
+1. Make the approved changes (code fixes, skill edits, crow.md updates)
+2. Run any verification steps (tests, linting, manual checks)
+3. Commit changes if appropriate
+
+### Phase 8: Store Reflection
 Store the reflection in crow-memory (content in user's preferred language, tags bilingual):
 
 ```
 crow_store_memory({
-  content: "# Reflection / <localized>: <date>\n\n## Session Topic / <localized>: <topic>\n\n## Friction Points / <localized>\n### 1. <point> (HIGH/MEDIUM/LOW)\n- What happened: <description in user's language>\n- Root cause: <code bug / skill gap / missing memory>\n- Proposed fix: <specific change in user's language>\n\n## Changes Proposed / <localized>\n- <file>: <what should change>\n\n## Open Issues / <localized>\n- <anything unresolved>",
+  content: "# Reflection / <localized>: <date>\n\n## Session Topic / <localized>: <topic>\n\n## Friction Points / <localized>\n### 1. <point> (HIGH/MEDIUM/LOW)\n- What happened: <description in user's language>\n- Root cause: <code bug / skill gap / missing memory>\n- Fix applied: <what was changed, in user's language>\n\n## Changes Made / <localized>\n- <file>: <what changed>\n\n## Open Issues / <localized>\n- <anything unresolved>",
   category: "learning",
   tags: "reflection, <localized:reflexión>, session-review, <localized:revisión-de-sesión>, <date>, <project-names>",
   importance: 8
 })
 ```
 
-### Phase 6: Propose Improvements
-Present a clear list of proposed changes:
-1. **Code fixes** — Specific file paths and changes
-2. **Skill refinements** — Which skill files need updates
-3. **crow.md section updates** — Which crow.md sections need content changes (use `crow_update_context_section` or `crow_add_context_section`)
-4. **Memory updates** — What should be stored for next time
-5. **Verification steps** — How to confirm each fix works
-
-If approved by the user, implement the changes in the current session.
-
-### Phase 7: Skill-Writing Handoff
+### Phase 9: Skill-Writing Handoff
 When Phase 4 identifies a root cause of **"Missing/incomplete skill"**, hand off to the skill-writing workflow:
 
 **If the user is still engaged (mid-session or has time):**
@@ -147,7 +166,7 @@ crow_store_memory({
 ```
 2. Skill-writing will pick this up at the next session start
 
-### Phase 7b: crow.md Update Handoff
+### Phase 9b: crow.md Update Handoff
 When Phase 4 identifies a root cause of **"Behavioral context issue"**, update the crow.md behavioral context:
 
 **If the user is still engaged (mid-session or has time):**
@@ -215,7 +234,7 @@ crow_store_memory({
 ## Standalone Mode (`/reflection`)
 When invoked standalone (not as part of session end):
 - Skip Phase 1 (session summary)
-- Focus on Phases 2-6 (friction analysis and improvement)
+- Focus on Phases 2-8 (friction analysis, plan mode review, implementation)
 - Useful for deep-diving into a specific problem mid-session
 
 ---
