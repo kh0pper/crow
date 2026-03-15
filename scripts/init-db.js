@@ -617,6 +617,110 @@ await initTable("podcast_playlists table", `
   );
 `);
 
+// --- Media Tables ---
+
+await initTable("media_sources table", `
+  CREATE TABLE IF NOT EXISTS media_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_type TEXT NOT NULL DEFAULT 'rss',
+    name TEXT NOT NULL,
+    url TEXT NOT NULL UNIQUE,
+    category TEXT,
+    fetch_interval_min INTEGER DEFAULT 30,
+    last_fetched TEXT,
+    last_error TEXT,
+    enabled INTEGER DEFAULT 1,
+    config TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_media_sources_type ON media_sources(source_type);
+  CREATE INDEX IF NOT EXISTS idx_media_sources_enabled ON media_sources(enabled);
+  CREATE INDEX IF NOT EXISTS idx_media_sources_category ON media_sources(category);
+`);
+
+await initTable("media_articles table", `
+  CREATE TABLE IF NOT EXISTS media_articles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER NOT NULL,
+    guid TEXT,
+    url TEXT,
+    title TEXT NOT NULL,
+    author TEXT,
+    pub_date TEXT,
+    content_raw TEXT,
+    content_full TEXT,
+    content_fetch_status TEXT DEFAULT 'pending',
+    summary TEXT,
+    topics TEXT,
+    categories TEXT,
+    sentiment_score REAL,
+    key_entities TEXT,
+    ai_analysis_status TEXT DEFAULT 'pending',
+    estimated_read_time INTEGER,
+    popularity_score INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(source_id, guid),
+    FOREIGN KEY (source_id) REFERENCES media_sources(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_media_articles_source ON media_articles(source_id);
+  CREATE INDEX IF NOT EXISTS idx_media_articles_pub_date ON media_articles(pub_date DESC);
+  CREATE INDEX IF NOT EXISTS idx_media_articles_status ON media_articles(content_fetch_status);
+`);
+
+await initTable("media_articles FTS index", `
+  CREATE VIRTUAL TABLE IF NOT EXISTS media_articles_fts USING fts5(
+    title, content_full, summary, topics, categories, key_entities,
+    content=media_articles,
+    content_rowid=id
+  );
+`);
+
+await initTable("media_articles FTS triggers", `
+  CREATE TRIGGER IF NOT EXISTS media_articles_ai AFTER INSERT ON media_articles BEGIN
+    INSERT INTO media_articles_fts(rowid, title, content_full, summary, topics, categories, key_entities)
+    VALUES (new.id, new.title, new.content_full, new.summary, new.topics, new.categories, new.key_entities);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS media_articles_ad AFTER DELETE ON media_articles BEGIN
+    INSERT INTO media_articles_fts(media_articles_fts, rowid, title, content_full, summary, topics, categories, key_entities)
+    VALUES ('delete', old.id, old.title, old.content_full, old.summary, old.topics, old.categories, old.key_entities);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS media_articles_au AFTER UPDATE ON media_articles BEGIN
+    INSERT INTO media_articles_fts(media_articles_fts, rowid, title, content_full, summary, topics, categories, key_entities)
+    VALUES ('delete', old.id, old.title, old.content_full, old.summary, old.topics, old.categories, old.key_entities);
+    INSERT INTO media_articles_fts(rowid, title, content_full, summary, topics, categories, key_entities)
+    VALUES (new.id, new.title, new.content_full, new.summary, new.topics, new.categories, new.key_entities);
+  END;
+`);
+
+await initTable("media_article_states table", `
+  CREATE TABLE IF NOT EXISTS media_article_states (
+    article_id INTEGER PRIMARY KEY,
+    is_read INTEGER DEFAULT 0,
+    is_saved INTEGER DEFAULT 0,
+    is_starred INTEGER DEFAULT 0,
+    listen_progress REAL,
+    dwell_time_sec INTEGER,
+    read_at TEXT,
+    FOREIGN KEY (article_id) REFERENCES media_articles(id) ON DELETE CASCADE
+  );
+`);
+
+await initTable("media_feedback table", `
+  CREATE TABLE IF NOT EXISTS media_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    article_id INTEGER NOT NULL,
+    feedback TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (article_id) REFERENCES media_articles(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_media_feedback_article ON media_feedback(article_id);
+`);
+
 // --- Optional: sqlite-vec virtual table for semantic search ---
 const hasVec = await isSqliteVecAvailable(db);
 if (hasVec) {

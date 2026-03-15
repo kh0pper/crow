@@ -26,6 +26,7 @@ import { createMemoryServer } from "../memory/server.js";
 import { createProjectServer } from "../research/server.js";
 import { createSharingServer } from "../sharing/server.js";
 import { createBlogServer } from "../blog/server.js";
+import { createMediaServer } from "../media/server.js";
 import { TOOL_MANIFESTS, buildCompressedDescription } from "./tool-manifests.js";
 import { connectedServers } from "./proxy.js";
 import { createDbClient } from "../db.js";
@@ -40,6 +41,7 @@ const SERVER_FACTORIES = {
   projects: createProjectServer,
   sharing: createSharingServer,
   blog: createBlogServer,
+  media: createMediaServer,
   // storage added dynamically in createRouterServer
 };
 
@@ -216,7 +218,7 @@ export function createRouterServer(options = {}) {
     "crow_discover",
     "Discover available actions and their full parameter schemas. Use without arguments to list all categories. Specify a category to list its actions. Specify category + action to get the full JSON Schema for that action.",
     {
-      category: z.string().optional().describe("Server category: memory, projects, blog, sharing, storage, tools"),
+      category: z.string().optional().describe("Server category: memory, projects, blog, sharing, storage, media, tools"),
       action: z.string().optional().describe("Specific action name to get full schema for"),
     },
     async ({ category, action }) => {
@@ -435,6 +437,28 @@ Session End Protocol:
 4. Themes — action: "customize_theme" for colors, fonts, layout; "blog_settings" for name and tagline
 5. Feeds — RSS at /blog/feed.xml, Atom at /blog/feed.atom
 6. Export — action: "export_blog" for markdown or HTML export`,
+        },
+      }],
+    })
+  );
+
+  routerServer.prompt(
+    "media-guide",
+    "Media workflow — subscribing to feeds, browsing articles, and managing your news",
+    async () => ({
+      messages: [{
+        role: "user",
+        content: {
+          type: "text",
+          text: `Crow Media Guide
+
+1. Subscribe — crow_media action: "add_source" with an RSS/Atom feed URL
+2. Browse — action: "feed" for your news feed (filter by category, unread, starred)
+3. Read — action: "get_article" for full article content
+4. Search — action: "search" for full-text search across all articles
+5. Interact — action: "article_action" to star, save, or give feedback
+6. Refresh — action: "refresh" to trigger immediate feed updates
+7. Stats — action: "stats" for an overview of your media library`,
         },
       }],
     })
