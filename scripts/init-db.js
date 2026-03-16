@@ -448,6 +448,26 @@ await initTable("dashboard_settings table", `
   );
 `);
 
+// --- MCP Session Log ---
+
+await initTable("mcp_sessions table", `
+  CREATE TABLE IF NOT EXISTS mcp_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    transport TEXT NOT NULL,
+    server_name TEXT NOT NULL,
+    client_info TEXT,
+    tool_calls_summary TEXT,
+    tool_call_count INTEGER DEFAULT 0,
+    started_at TEXT DEFAULT (datetime('now')),
+    ended_at TEXT,
+    last_activity_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_mcp_sessions_started ON mcp_sessions(started_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_mcp_sessions_server ON mcp_sessions(server_name);
+`);
+
 // --- Audit Log ---
 
 await initTable("audit_log table", `

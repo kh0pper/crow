@@ -110,6 +110,14 @@ const translations = {
   "health.runningStatus": { en: "Running", es: "En ejecución" },
   "health.stoppedStatus": { en: "Stopped", es: "Detenido" },
 
+  // ─── Nest Panel ───
+  "nest.recentActivity": { en: "Recent Activity", es: "Actividad reciente" },
+  "nest.aiChats": { en: "AI Chats", es: "Chats de IA" },
+  "nest.mcpSessions": { en: "MCP Sessions", es: "Sesiones MCP" },
+  "nest.noSessionsYet": { en: "No sessions yet", es: "Sin sesiones todav\u00EDa" },
+  "nest.active": { en: "active", es: "activa" },
+  "nest.tools": { en: "tools", es: "herramientas" },
+
   // ─── Messages Panel ───
   "messages.pageTitle": { en: "Messages", es: "Mensajes" },
   "messages.noChats": { en: "No chats", es: "Sin chats" },
