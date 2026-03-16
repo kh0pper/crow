@@ -260,7 +260,8 @@ Skills are markdown files in `skills/`. They are loaded by Claude on demand — 
 3. For third-party panels: place in `~/.crow/panels/` and add the panel ID to `~/.crow/panels.json`
 4. Use shared components from `servers/gateway/dashboard/shared/components.js`
 5. Use design tokens from `servers/gateway/dashboard/shared/design-tokens.js` (single source of truth for CSS variables)
-5. Handler receives `(req, res, { db, layout })` — return `layout({ title, content })` for consistent styling
+6. Handler receives `(req, res, { db, layout })` — return `layout({ title, content })` for consistent styling
+7. **Home screen tiles**: Built-in panels automatically appear as tiles on the Nest home screen. Set `hidden: true` in the manifest to hide from both the sidebar and home screen.
 
 ### Add-on system
 
@@ -269,6 +270,8 @@ Crow supports installable add-ons (panels, MCP servers, skills, bundles). The re
 - **mcp-server**: Registered in `~/.crow/mcp-addons.json` (command, args, env)
 - **skill**: Copied to `~/.crow/skills/` (takes precedence over repo `skills/`)
 - **panel**: Copied to `~/.crow/panels/`, registered in `~/.crow/panels.json`
+
+**Home screen tiles**: When a bundle-type add-on is installed, it automatically gets a tile on the Nest home screen. The tile uses the manifest's `icon` field for its icon (falling back to a branded logo or first-letter circle). When uninstalled, the tile disappears. MCP servers and skills do not get home screen tiles (no UI surface).
 
 ### Developer Program
 

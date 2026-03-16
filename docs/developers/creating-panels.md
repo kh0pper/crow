@@ -59,6 +59,21 @@ export default {
 | `navOrder` | number | Position in the nav bar. Built-in panels use 1-10; use 50+ for add-ons. |
 | `handler` | function | Express route handler. Receives `(req, res, context)`. |
 
+### Home Screen Visibility
+
+Panels automatically appear as tiles on the Crow's Nest home screen AND in the sidebar navigation. To hide a panel from both, set `hidden: true` in the manifest:
+
+```js
+export default {
+  id: "my-panel",
+  name: "My Panel",
+  hidden: true, // Hidden from sidebar and home screen
+  // ...
+};
+```
+
+The panel route still works for direct URL access — `hidden` only affects navigation visibility.
+
 ## Handler Context
 
 The `handler` function receives three arguments:
