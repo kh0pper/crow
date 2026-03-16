@@ -33,6 +33,7 @@ import {
 import { PeerManager } from "./peer-manager.js";
 import { SyncManager } from "./sync.js";
 import { NostrManager } from "./nostr.js";
+import { createNotification } from "../shared/notifications.js";
 
 // Singleton sharing managers — Hyperswarm and Nostr connections are shared across
 // all McpServer instances (stdio, gateway per-session, router dispatch).
@@ -210,6 +211,15 @@ export function createSharingServer(dbPath, options = {}) {
         });
 
         console.log(`[sharing] Received ${payload.share_type} from ${crowId} → imported as #${importedItemId}`);
+
+        try {
+          await createNotification(db, {
+            title: `Received ${payload.share_type} from ${c.display_name || crowId}`,
+            type: "peer",
+            source: "sharing:share",
+            action_url: "/dashboard/messages",
+          });
+        } catch {}
       } catch (err) {
         console.warn(`[sharing] Failed to import share from ${crowId}:`, err.message);
       }

@@ -282,6 +282,21 @@ export default {
         return;
       }
 
+      if (action === "save_notification_prefs") {
+        const typesEnabled = [];
+        if (req.body.type_reminder) typesEnabled.push("reminder");
+        if (req.body.type_media) typesEnabled.push("media");
+        if (req.body.type_peer) typesEnabled.push("peer");
+        if (req.body.type_system) typesEnabled.push("system");
+        const prefs = JSON.stringify({ types_enabled: typesEnabled });
+        await db.execute({
+          sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('notification_prefs', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
+          args: [prefs, prefs],
+        });
+        res.redirect("/dashboard/settings");
+        return;
+      }
+
       if (action === "remove_integration") {
         const { integration_id } = req.body;
         const { INTEGRATIONS } = await import("../../integrations.js");
@@ -1167,6 +1182,36 @@ function pollHealth(attempts) {
       AI Profiles let you configure multiple providers and switch between them in the Messages panel. Each profile has its own API key, endpoint, and model list.
     </p>`;
 
+    // Notification preferences
+    let notifPrefs = { types_enabled: ["reminder", "media", "peer", "system"] };
+    try {
+      const { rows: notifRows } = await db.execute({
+        sql: "SELECT value FROM dashboard_settings WHERE key = 'notification_prefs'",
+        args: [],
+      });
+      if (notifRows.length > 0) notifPrefs = JSON.parse(notifRows[0].value);
+    } catch {}
+    const notifTypes = [
+      { key: "reminder", label: t("settings.notifReminder", lang) },
+      { key: "media", label: t("settings.notifMedia", lang) },
+      { key: "peer", label: t("settings.notifPeer", lang) },
+      { key: "system", label: t("settings.notifSystem", lang) },
+    ];
+    const notifCheckboxes = notifTypes.map(({ key, label }) => {
+      const checked = notifPrefs.types_enabled?.includes(key) ? "checked" : "";
+      return `<label style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;cursor:pointer">
+        <input type="checkbox" name="type_${key}" value="1" ${checked} style="accent-color:var(--crow-accent)"> ${escapeHtml(label)}
+      </label>`;
+    }).join("");
+    const notifForm = `
+      <form method="POST" action="/dashboard/settings">
+        <input type="hidden" name="_csrf" value="${req.csrfToken}" />
+        <input type="hidden" name="action" value="save_notification_prefs" />
+        <p style="color:var(--crow-text-muted);font-size:0.85rem;margin-bottom:0.75rem">${t("settings.notifTypes", lang)}</p>
+        ${notifCheckboxes}
+        <button type="submit" class="btn btn-primary" style="margin-top:0.5rem">${t("common.save", lang)}</button>
+      </form>`;
+
     const content = `
       ${successMsg}${errorMsg}
       ${stats}
@@ -1180,6 +1225,7 @@ function pollHealth(attempts) {
       ${section(t("settings.identitySection", lang), identityHtml, { delay: 200 })}
       ${section(t("settings.blogSettingsSection", lang), blogForm, { delay: 250 })}
       ${section(t("settings.contactDiscoverySection", lang), discoveryForm, { delay: 300 })}
+      ${section(t("settings.notifications", lang), notifForm, { delay: 325 })}
       ${section(t("settings.changePasswordSection", lang), passwordForm, { delay: 350 })}
       ${section(t("settings.languageSection", lang), langForm, { delay: 375 })}
     `;

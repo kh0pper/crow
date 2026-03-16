@@ -233,6 +233,24 @@ export default {
 
 Note the `_csrf` hidden field — all POST requests require a valid CSRF token.
 
+## Creating Notifications
+
+Panels can create notifications via the shared helper. This is useful for confirming user actions or alerting about background events:
+
+```js
+import { createNotification } from "../../shared/notifications.js";
+
+// Inside your handler:
+await createNotification(db, {
+  title: "Report generated",
+  type: "system",
+  source: "my-panel",
+  action_url: "/dashboard/my-panel",
+});
+```
+
+The helper respects user notification preferences set in Settings.
+
 ## Enabling Your Panel
 
 After placing your panel in `~/.crow/panels/`, add it to `~/.crow/panels.json` (a JSON array of panel IDs):

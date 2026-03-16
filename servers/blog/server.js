@@ -12,6 +12,7 @@ import { z } from "zod";
 import { createDbClient, sanitizeFtsQuery, escapeLikePattern } from "../db.js";
 import { generateSlug, generateExcerpt } from "./renderer.js";
 import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
+import { createNotification } from "../shared/notifications.js";
 
 export function createBlogServer(dbPath, options = {}) {
   const server = new McpServer(
@@ -190,6 +191,15 @@ export function createBlogServer(dbPath, options = {}) {
         sql: "UPDATE blog_posts SET status = 'published', published_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
         args: [id],
       });
+
+      try {
+        await createNotification(db, {
+          title: `Published: ${post.title}`,
+          type: "media",
+          source: "blog",
+          action_url: `/blog/${post.slug}`,
+        });
+      } catch {}
 
       return {
         content: [{ type: "text", text: `Published! ${post.visibility === "public" ? `View at /blog/${post.slug}` : `Visibility: ${post.visibility} (change to "public" to make it accessible at /blog/${post.slug})`}` }],
