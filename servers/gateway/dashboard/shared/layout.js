@@ -7,6 +7,7 @@
 
 import { CROW_HERO_SVG } from "./crow-hero.js";
 import { FONT_IMPORT, designTokensCss } from "./design-tokens.js";
+import { headerIconsCss } from "./notifications.js";
 
 /**
  * Render the full dashboard HTML page.
@@ -18,8 +19,9 @@ import { FONT_IMPORT, designTokensCss } from "./design-tokens.js";
  * @param {string} [opts.theme] - "dark" or "light" (default: dark)
  * @param {string} [opts.scripts] - Additional inline JS
  * @param {string} [opts.afterContent] - HTML rendered after </main> inside .dashboard (e.g. persistent player bar)
+ * @param {string} [opts.headerIcons] - HTML rendered inside .content-header, right of title (e.g. notification bell, health icon)
  */
-export function renderLayout({ title, content, activePanel, panels, theme, scripts, afterContent }) {
+export function renderLayout({ title, content, activePanel, panels, theme, scripts, afterContent, headerIcons }) {
   const themeClass = theme === "light" ? "theme-light" : "";
   const sortedPanels = [...panels].sort((a, b) => (a.navOrder || 0) - (b.navOrder || 0));
 
@@ -62,6 +64,7 @@ export function renderLayout({ title, content, activePanel, panels, theme, scrip
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
         </button>
         <h2>${escapeHtml(title)}</h2>
+        ${headerIcons ? `<div class="header-icons">${headerIcons}</div>` : ""}
       </header>
       <div class="content-body">
         ${content}
@@ -254,6 +257,13 @@ function dashboardCss() {
     font-family: 'Fraunces', serif;
     font-size: 1.25rem;
     font-weight: 600;
+    flex: 1;
+  }
+  .header-icons {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-left: auto;
   }
   .hamburger {
     display: none;
@@ -484,6 +494,9 @@ function dashboardCss() {
     from { opacity: 0; transform: translateY(8px); }
     to { opacity: 1; transform: translateY(0); }
   }
+
+  /* Header icons (notifications, health) */
+  ${headerIconsCss}
 
   /* Responsive */
   @media (max-width: 768px) {

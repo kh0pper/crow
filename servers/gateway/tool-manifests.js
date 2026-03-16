@@ -11,7 +11,7 @@
 export const TOOL_MANIFESTS = {
   memory: {
     displayName: "Memory",
-    description: "Persistent memory: store, search, recall, list, update, delete memories and manage cross-platform context (crow.md)",
+    description: "Persistent memory: store, search, recall, list, update, delete memories, manage cross-platform context (crow.md), schedules, and notifications",
     tools: {
       crow_store_memory: { params: "content, category?, context?, tags?, source?, importance?", desc: "Store a memory" },
       crow_search_memories: { params: "query, category?, min_importance?, limit?", desc: "Search memories (FTS5)" },
@@ -25,6 +25,14 @@ export const TOOL_MANIFESTS = {
       crow_add_context_section: { params: "section_key, section_title, content, sort_order?, device_id?", desc: "Add crow.md section (device_id for per-device override)" },
       crow_list_context_sections: { params: "device_id?", desc: "List crow.md sections (device_id to filter)" },
       crow_delete_context_section: { params: "section_key, device_id?", desc: "Delete crow.md section (device_id for per-device override)" },
+      crow_create_schedule: { params: "task, cron_expression, description?", desc: "Create scheduled/recurring task" },
+      crow_list_schedules: { params: "enabled_only?", desc: "List scheduled tasks" },
+      crow_update_schedule: { params: "id, enabled?, task?, cron_expression?, delete?", desc: "Update or delete schedule" },
+      crow_check_notifications: { params: "unread_only?, type?, limit?", desc: "Check pending notifications" },
+      crow_create_notification: { params: "title, body?, type?, priority?, action_url?, metadata?, expires_in_minutes?", desc: "Create a notification" },
+      crow_dismiss_notification: { params: "id, snooze_minutes?", desc: "Dismiss or snooze notification" },
+      crow_dismiss_all_notifications: { params: "type?, before?", desc: "Bulk dismiss notifications" },
+      crow_notification_settings: { params: "action, types_enabled?", desc: "Get/set notification preferences" },
     },
   },
 

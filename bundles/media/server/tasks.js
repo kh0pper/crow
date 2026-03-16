@@ -13,6 +13,21 @@
 
 import { fetchAndParseFeed, postProcessGoogleNewsItems, buildAuthHeaders } from "./feed-fetcher.js";
 
+// Lazy-loaded notification helper (may not exist in standalone mode)
+let _createNotification = null;
+async function notifyIfAvailable(db, opts) {
+  if (_createNotification === undefined) return;
+  try {
+    if (!_createNotification) {
+      const mod = await import("../../../servers/shared/notifications.js");
+      _createNotification = mod.createNotification;
+    }
+    await _createNotification(db, opts);
+  } catch {
+    _createNotification = undefined; // Don't retry on failure
+  }
+}
+
 const CHECK_INTERVAL = 60_000; // Check for due tasks every 60s
 const MAX_CONCURRENT_FETCHES = parseInt(process.env.CROW_MEDIA_MAX_FETCHES || "3", 10);
 
@@ -158,6 +173,15 @@ async function fetchSingleSource(db, source) {
     await db.execute({
       sql: `UPDATE media_sources SET last_error = ?, last_fetched = datetime('now') WHERE id = ?`,
       args: [err.message.slice(0, 500), source.id],
+    }).catch(() => {});
+    // Notify on fetch error
+    await notifyIfAvailable(db, {
+      title: `Feed error: ${source.name || source.url}`,
+      body: err.message.slice(0, 200),
+      type: "system",
+      source: "media:feed-error",
+      priority: "high",
+      expires_in_minutes: 1440, // auto-dismiss after 24h
     }).catch(() => {});
   }
 }
@@ -366,6 +390,13 @@ export function registerMediaTasks(runner, db) {
           });
 
           console.log(`[media] Generated scheduled briefing: ${title} (${articles.length} articles)`);
+          await notifyIfAvailable(db, {
+            title: `Briefing ready: ${title}`,
+            body: `${articles.length} article(s) summarized`,
+            type: "media",
+            source: "media:briefing",
+            action_url: "/dashboard/media",
+          });
         } catch (err) {
           console.warn(`[media] Scheduled briefing failed:`, err.message);
         }

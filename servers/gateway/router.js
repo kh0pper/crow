@@ -6,7 +6,7 @@
  * underlying server via an in-process MCP Client + InMemoryTransport pair.
  *
  * Tools:
- *   crow_memory    — Routes to memory server (12 actions)
+ *   crow_memory    — Routes to memory server (20 actions)
  *   crow_projects  — Routes to project server (16 actions)
  *   crow_blog      — Routes to blog server (12 actions)
  *   crow_sharing   — Routes to sharing server (8 actions)

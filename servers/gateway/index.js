@@ -444,6 +444,15 @@ try {
   console.warn("[peer-messages] Failed to mount:", err.message);
 }
 
+// --- Mount Notifications API ---
+try {
+  const { default: notificationsRouter } = await import("./routes/notifications.js");
+  app.use(notificationsRouter(dashboardAuth));
+  console.log("Notifications API mounted at /api/notifications");
+} catch (err) {
+  console.warn("[notifications] Failed to mount:", err.message);
+}
+
 // --- Mount Crow's Nest (conditional) ---
 try {
   const { default: dashboardRouter } = await import("./dashboard/index.js");

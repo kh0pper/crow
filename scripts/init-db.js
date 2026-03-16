@@ -523,6 +523,34 @@ try {
   // Indexes already exist
 }
 
+// --- Notifications ---
+
+await initTable("notifications table", `
+  CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL DEFAULT 'system',
+    source TEXT,
+    title TEXT NOT NULL,
+    body TEXT,
+    priority TEXT DEFAULT 'normal',
+    action_url TEXT,
+    metadata TEXT,
+    is_read INTEGER DEFAULT 0,
+    is_dismissed INTEGER DEFAULT 0,
+    snoozed_until TEXT,
+    schedule_id INTEGER,
+    expires_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (schedule_id) REFERENCES schedules(id) ON DELETE SET NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(is_read, is_dismissed);
+  CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_notifications_snoozed ON notifications(snoozed_until);
+  CREATE INDEX IF NOT EXISTS idx_notifications_expires ON notifications(expires_at);
+`);
+
 // --- Scheduled Tasks ---
 
 await initTable("schedules table", `
@@ -682,9 +710,10 @@ You are platform-agnostic. The user's data, memories, and research belong to *th
     order: 30,
     content: `**On session start:**
 1. Recall relevant context with \`crow_recall_by_context\` using the user's first message
-2. Check \`crow_memory_stats\` for an overview of stored knowledge
-3. Load language preference from memory
-4. Consult the skills reference for routing
+2. Check \`crow_check_notifications\` for pending reminders and alerts — mention any unread notifications to the user
+3. Check \`crow_memory_stats\` for an overview of stored knowledge
+4. Load language preference from memory
+5. Consult the skills reference for routing
 
 **During the session:**
 - Store important information as it emerges
