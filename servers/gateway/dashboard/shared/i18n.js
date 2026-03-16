@@ -335,6 +335,13 @@ const translations = {
   "extensions.uninstallDesc": { en: "This will remove the add-on and its configuration.", es: "Esto eliminará el complemento y su configuración." },
   "extensions.dataDeleteHint": { en: "Optionally delete all files stored by this service. Leave unchecked to keep data for a future reinstall.", es: "Opcionalmente elimina todos los archivos almacenados por este servicio. Deja sin marcar para conservar los datos para una futura reinstalación." },
   "extensions.restartingGatewayChanges": { en: "Restarting gateway...", es: "Reiniciando la puerta de enlace..." },
+  "extensions.installedDate": { en: "installed", es: "instalado" },
+  "extensions.needsRam": { en: "This add-on needs ~", es: "Este complemento necesita ~" },
+  "extensions.ramFree": { en: "MB RAM. Your server has", es: "MB RAM. Tu servidor tiene" },
+  "extensions.mbFree": { en: "MB free.", es: "MB libres." },
+  "extensions.needsDisk": { en: "This add-on needs ~", es: "Este complemento necesita ~" },
+  "extensions.diskFree": { en: "MB disk. Your server has", es: "MB disco. Tu servidor tiene" },
+  "extensions.installMayCauseInstability": { en: "Installing may cause instability.", es: "La instalación puede causar inestabilidad." },
 
   // ─── Skills Panel ───
   "skills.pageTitle": { en: "Skills", es: "Habilidades" },

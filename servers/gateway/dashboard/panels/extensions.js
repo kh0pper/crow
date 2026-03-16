@@ -272,7 +272,7 @@ export default {
             <div style="flex:1;min-width:0">
               <h4 style="font-family:'Fraunces',serif;font-size:1rem;margin-bottom:0.25rem">${escapeHtml(name)}</h4>
               <div style="font-size:0.8rem;color:var(--crow-text-muted);font-family:'JetBrains Mono',monospace">
-                ${statusBadge} v${escapeHtml(info.version || registryEntry?.version || "?")} · installed ${formatDate(info.installed_at || info.installedAt)}
+                ${statusBadge} v${escapeHtml(info.version || registryEntry?.version || "?")} · ${t("extensions.installedDate", lang)} ${formatDate(info.installed_at || info.installedAt)}
               </div>
             </div>
             <div style="display:flex;gap:0.5rem;align-items:center;flex-shrink:0">
@@ -311,8 +311,8 @@ export default {
           ? `<span style="font-size:0.65rem;color:#f0ad4e;background:rgba(240,173,78,0.15);padding:0.1rem 0.4rem;border-radius:4px;border:1px solid rgba(240,173,78,0.3);margin-right:0.25rem" title="${t("extensions.communityNotVerified", lang)}">${t("extensions.community", lang)}</span>`
           : `<span style="font-size:0.65rem;color:var(--crow-accent);background:var(--crow-accent-muted);padding:0.1rem 0.4rem;border-radius:4px;margin-right:0.25rem">${t("extensions.official", lang)}</span>`;
         const logoHtml = getAddonLogo(addon.id, 32) || `<span style="font-size:1.5rem">${ICON_MAP[addon.icon] || ""}</span>`;
-        const tags = (addon.tags || []).slice(0, 4).map((t) =>
-          `<span style="font-size:0.7rem;color:var(--crow-accent);background:var(--crow-accent-muted);padding:0.1rem 0.4rem;border-radius:4px;margin-right:0.25rem">${escapeHtml(t)}</span>`
+        const tags = (addon.tags || []).slice(0, 4).map((tag) =>
+          `<span style="font-size:0.7rem;color:var(--crow-accent);background:var(--crow-accent-muted);padding:0.1rem 0.4rem;border-radius:4px;margin-right:0.25rem">${escapeHtml(tag)}</span>`
         ).join("");
         const resources = formatResources(addon.requires);
         const envCount = (addon.env_vars || addon.requires?.env || []).length;
@@ -499,14 +499,14 @@ export default {
                 fetch("/api/health").then(function(r) { return r.json(); }).then(function(h) {
                   var warnings = [];
                   if (minRam > 0 && h && h.ram_free_mb && h.ram_free_mb < minRam) {
-                    warnings.push("This add-on needs ~" + minRam + "MB RAM. Your server has " + h.ram_free_mb + "MB free.");
+                    warnings.push('${tJs("extensions.needsRam", lang)}' + minRam + '${tJs("extensions.ramFree", lang)}' + " " + h.ram_free_mb + '${tJs("extensions.mbFree", lang)}');
                   }
                   if (minDisk > 0 && h && h.disk_free_mb && h.disk_free_mb < minDisk) {
-                    warnings.push("This add-on needs ~" + minDisk + "MB disk. Your server has " + h.disk_free_mb + "MB free.");
+                    warnings.push('${tJs("extensions.needsDisk", lang)}' + minDisk + '${tJs("extensions.diskFree", lang)}' + " " + h.disk_free_mb + '${tJs("extensions.mbFree", lang)}');
                   }
                   if (warnings.length > 0) {
                     warnDiv.style.cssText = "font-size:0.8rem;color:var(--crow-warning, #f0ad4e);background:rgba(240,173,78,0.1);padding:0.75rem;border-radius:4px;margin-bottom:0.75rem;border:1px solid rgba(240,173,78,0.3)";
-                    warnDiv.textContent = warnings.join(" ") + " Installing may cause instability.";
+                    warnDiv.textContent = warnings.join(" ") + " " + '${tJs("extensions.installMayCauseInstability", lang)}';
                   } else {
                     warnDiv.style.display = "none";
                   }
@@ -640,7 +640,7 @@ export default {
 
               var hint = document.createElement("div");
               hint.style.cssText = "font-size:0.8rem;color:var(--crow-text-secondary);margin-bottom:0.5rem";
-              hint.textContent = "Optionally delete all files stored by this service. Leave unchecked to keep data for a future reinstall.";
+              hint.textContent = '${tJs("extensions.dataDeleteHint", lang)}';
               dataBox.appendChild(hint);
 
               var label = document.createElement("label");
@@ -731,7 +731,7 @@ export default {
               var lastLog = job.log[job.log.length - 1] || "";
               var aiChatMsg = job.log.find(function(l) { return l.indexOf("AI Chat") !== -1; });
               if (aiChatMsg) {
-                statusEl.textContent = aiChatMsg + " — Restarting gateway...";
+                statusEl.textContent = aiChatMsg + " — " + '${tJs("extensions.restartingGatewayChanges", lang)}';
               } else {
                 statusEl.textContent = '${tJs("extensions.gatewayRestarting", lang)}';
               }
