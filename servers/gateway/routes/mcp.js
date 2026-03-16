@@ -11,6 +11,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { Router } from "express";
+import { recordSessionStart, recordToolCall, recordSessionEnd } from "../session-logger.js";
 
 /**
  * Simple in-memory EventStore for StreamableHTTPServerTransport resumability.
@@ -48,7 +49,7 @@ class InMemoryEventStore {
  * @param {Map} sessions - Session store from SessionManager
  * @param {Function} createServer - Factory function returning McpServer
  */
-function createMcpHandler(sessions, createServer) {
+function createMcpHandler(sessions, createServer, serverName) {
   const postHandler = async (req, res) => {
     const sessionId = req.headers["mcp-session-id"];
     try {
@@ -62,11 +63,17 @@ function createMcpHandler(sessions, createServer) {
           eventStore,
           onsessioninitialized: (sid) => {
             sessions.set(sid, { transport, server });
+            // Log session start
+            const clientInfo = req.body?.params?.clientInfo || null;
+            recordSessionStart({ sessionId: sid, serverName, transport: "streamable", clientInfo });
           },
         });
         transport.onclose = () => {
           const sid = transport.sessionId;
-          if (sid) sessions.delete(sid);
+          if (sid) {
+            sessions.delete(sid);
+            recordSessionEnd(sid);
+          }
         };
         const server = createServer();
         await server.connect(transport);
@@ -119,13 +126,17 @@ function createMcpHandler(sessions, createServer) {
  * @param {Function} createServer - Factory function returning McpServer
  * @param {string} messagesPath - The POST path for SSE messages
  */
-function createSseHandler(sessions, createServer, messagesPath) {
+function createSseHandler(sessions, createServer, messagesPath, serverName) {
   const sseHandler = async (req, res) => {
     try {
       const transport = new SSEServerTransport(messagesPath, res);
       const sessionId = transport.sessionId;
       sessions.set(sessionId, { transport, server: null });
-      res.on("close", () => { sessions.delete(sessionId); });
+      recordSessionStart({ sessionId, serverName, transport: "sse", clientInfo: null });
+      res.on("close", () => {
+        sessions.delete(sessionId);
+        recordSessionEnd(sessionId);
+      });
       const server = createServer();
       sessions.get(sessionId).server = server;
       await server.connect(transport);
@@ -142,6 +153,11 @@ function createSseHandler(sessions, createServer, messagesPath) {
     if (!sessionId || !sessions.has(sessionId)) {
       res.status(400).send("Invalid or missing sessionId query parameter");
       return;
+    }
+    // Track tool calls on SSE messages
+    if (sessionId && req.body?.method === "tools/call") {
+      const toolName = req.body?.params?.name;
+      if (toolName) recordToolCall(sessionId, toolName);
     }
     try {
       const session = sessions.get(sessionId);
@@ -167,24 +183,37 @@ function createSseHandler(sessions, createServer, messagesPath) {
  * @param {Function|null} authMiddleware - Optional auth middleware
  */
 export function mountMcpServer(router, prefix, createServer, sessionManager, authMiddleware) {
-  const streamableSessions = sessionManager.getStore(prefix.replace("/", ""), "streamable");
-  const sseSessions = sessionManager.getStore(prefix.replace("/", ""), "sse");
+  const serverName = prefix.replace("/", "");
+  const streamableSessions = sessionManager.getStore(serverName, "streamable");
+  const sseSessions = sessionManager.getStore(serverName, "sse");
 
-  const handlers = createMcpHandler(streamableSessions, createServer);
-  const sseHandlers = createSseHandler(sseSessions, createServer, `${prefix}/messages`);
+  const handlers = createMcpHandler(streamableSessions, createServer, serverName);
+  const sseHandlers = createSseHandler(sseSessions, createServer, `${prefix}/messages`, serverName);
 
   const mcpPath = `${prefix}/mcp`;
   const ssePath = `${prefix}/sse`;
   const messagesPath = `${prefix}/messages`;
 
+  // Tool call tracking middleware for Streamable HTTP
+  const toolTrackMiddleware = (req, res, next) => {
+    if (req.method === "POST" && req.body?.method === "tools/call") {
+      const sessionId = req.headers["mcp-session-id"];
+      const toolName = req.body?.params?.name;
+      if (sessionId && toolName) {
+        recordToolCall(sessionId, toolName);
+      }
+    }
+    next();
+  };
+
   if (authMiddleware) {
-    router.post(mcpPath, authMiddleware, handlers.postHandler);
+    router.post(mcpPath, authMiddleware, toolTrackMiddleware, handlers.postHandler);
     router.get(mcpPath, authMiddleware, handlers.getHandler);
     router.delete(mcpPath, authMiddleware, handlers.deleteHandler);
     router.get(ssePath, authMiddleware, sseHandlers.sseHandler);
     router.post(messagesPath, authMiddleware, sseHandlers.messagesHandler);
   } else {
-    router.post(mcpPath, handlers.postHandler);
+    router.post(mcpPath, toolTrackMiddleware, handlers.postHandler);
     router.get(mcpPath, handlers.getHandler);
     router.delete(mcpPath, handlers.deleteHandler);
     router.get(ssePath, sseHandlers.sseHandler);
