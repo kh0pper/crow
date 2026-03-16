@@ -123,7 +123,22 @@ export default {
           ${a.audio_url ? `<button onclick="window.crowPlayer&&window.crowPlayer.load('${escapeHtml(a.audio_url)}','${escapeHtml(a.title.replace(/'/g, ""))}')" class="btn btn-sm btn-secondary" title="Play audio" style="font-size:0.8rem;padding:0.1rem 0.3rem">&#9654;</button>` : ""}
         </div>
         <div style="display:flex;gap:0.2rem">
-          <button onclick="window.crowPlayer&&window.crowPlayer.load('/api/media/articles/${a.id}/audio','${escapeHtml(a.title.replace(/'/g, ""))}')" class="btn btn-sm btn-secondary" title="Listen (TTS)" style="font-size:0.8rem;padding:0.1rem 0.3rem">&#127911;</button>
+          <button onclick="crowListenTts(this,${a.id},'${escapeHtml(a.title.replace(/'/g, "").replace(/\\/g, ""))}')" class="btn btn-sm btn-secondary" title="Listen (TTS)" style="font-size:0.8rem;padding:0.1rem 0.3rem">&#127911;</button>
+          <form method="POST" style="display:inline">
+            <input type="hidden" name="action" value="thumbs_up">
+            <input type="hidden" name="article_id" value="${a.id}">
+            <input type="hidden" name="return_tab" value="${returnTab}">
+            <button type="submit" class="btn btn-sm btn-secondary" title="More like this" style="font-size:0.85rem;padding:0.1rem 0.3rem">&#128077;</button>
+          </form>
+          <form method="POST" style="display:inline">
+            <input type="hidden" name="action" value="thumbs_down">
+            <input type="hidden" name="article_id" value="${a.id}">
+            <input type="hidden" name="return_tab" value="${returnTab}">
+            <button type="submit" class="btn btn-sm btn-secondary" title="Less like this" style="font-size:0.85rem;padding:0.1rem 0.3rem">&#128078;</button>
+          </form>
+          <div style="position:relative;display:inline">
+            <button onclick="crowShowPlaylistMenu(this,${a.id})" class="btn btn-sm btn-secondary" title="Add to playlist" style="font-size:0.85rem;padding:0.1rem 0.3rem">+</button>
+          </div>
           <form method="POST" style="display:inline">
             <input type="hidden" name="action" value="toggle_star">
             <input type="hidden" name="article_id" value="${a.id}">
@@ -176,17 +191,33 @@ export default {
         const url = (req.body.url || "").trim();
         const name = (req.body.name || "").trim();
         const category = (req.body.category || "").trim();
+        const authType = (req.body.auth_type || "").trim();
+        const authToken = (req.body.auth_token || "").trim();
         if (!url) return res.redirect("/dashboard/media?tab=sources&error=URL+required");
 
+        // Build auth_config from form fields
+        let authConfig = null;
+        if (authType && authToken) {
+          if (authType === "basic" && authToken.includes(":")) {
+            const [username, ...rest] = authToken.split(":");
+            authConfig = JSON.stringify({ type: "basic", username, password: rest.join(":") });
+          } else if (authType === "cookie") {
+            authConfig = JSON.stringify({ type: "cookie", cookies: authToken });
+          } else {
+            authConfig = JSON.stringify({ type: authType, token: authToken });
+          }
+        }
+
         try {
-          const { fetchAndParseFeed } = await importBundleModule("feed-fetcher.js");
-          const { feed, items } = await fetchAndParseFeed(url);
+          const { fetchAndParseFeed, buildAuthHeaders } = await importBundleModule("feed-fetcher.js");
+          const authHeaders = buildAuthHeaders ? buildAuthHeaders(authConfig) : null;
+          const { feed, items } = await fetchAndParseFeed(url, authHeaders);
           const sourceName = name || feed.title || url;
 
           const result = await db.execute({
-            sql: `INSERT INTO media_sources (source_type, name, url, category, last_fetched, config)
-                  VALUES ('rss', ?, ?, ?, datetime('now'), ?)`,
-            args: [sourceName, url, category || null, JSON.stringify({ image: feed.image })],
+            sql: `INSERT INTO media_sources (source_type, name, url, category, last_fetched, config, auth_config)
+                  VALUES ('rss', ?, ?, ?, datetime('now'), ?, ?)`,
+            args: [sourceName, url, category || null, JSON.stringify({ image: feed.image }), authConfig],
           });
 
           const sourceId = result.lastInsertRowid;
@@ -403,6 +434,22 @@ export default {
         const returnTab = req.body.return_tab || "feed";
         return res.redirect(`/dashboard/media?tab=${returnTab}`);
       }
+
+      if (action === "thumbs_up" || action === "thumbs_down") {
+        const id = parseInt(req.body.article_id, 10);
+        if (id) {
+          await db.execute({
+            sql: "INSERT INTO media_feedback (article_id, feedback) VALUES (?, ?)",
+            args: [id, action === "thumbs_up" ? "up" : "down"],
+          });
+          try {
+            const { updateInterestProfile } = await importBundleModule("scorer.js");
+            await updateInterestProfile(db, id, action);
+          } catch {}
+        }
+        const returnTab = req.body.return_tab || "feed";
+        return res.redirect(`/dashboard/media?tab=${returnTab}`);
+      }
     }
 
     // --- GET: Parse query params ---
@@ -584,6 +631,20 @@ export default {
             </div>
             <button type="submit" class="btn btn-primary">Add</button>
           </form>
+          <details style="margin-top:0.5rem">
+            <summary style="font-size:0.75rem;color:var(--crow-text-muted);cursor:pointer">Authentication (for paywalled feeds)</summary>
+            <div style="display:flex;gap:0.5rem;margin-top:0.4rem;flex-wrap:wrap" id="auth-fields">
+              <select name="auth_type" form="rss-form-auth" style="padding:0.35rem;background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.75rem">
+                <option value="">None</option>
+                <option value="bearer">Bearer Token</option>
+                <option value="basic">Basic Auth</option>
+                <option value="api_key">API Key</option>
+                <option value="cookie">Cookie</option>
+              </select>
+              <input type="text" name="auth_token" placeholder="Token / key / username:password / cookie string"
+                     style="flex:1;min-width:180px;padding:0.35rem;background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.75rem;box-sizing:border-box">
+            </div>
+          </details>
         </div>`;
 
       const addGoogleNewsForm = `
@@ -674,53 +735,141 @@ export default {
 
     // --- Playlists tab ---
     if (tab === "playlists") {
-      const { rows: playlists } = await db.execute(
-        "SELECT p.*, (SELECT COUNT(*) FROM media_playlist_items pi WHERE pi.playlist_id = p.id) as item_count FROM media_playlists p ORDER BY p.updated_at DESC"
-      );
+      const playlistId = req.query.playlist_id ? parseInt(req.query.playlist_id, 10) : null;
 
-      const createForm = `<div class="card" style="padding:1rem;margin-bottom:1rem">
-        <h4 style="margin:0 0 0.75rem;font-family:'Fraunces',serif;font-size:0.95rem">Create Playlist</h4>
-        <form method="POST" style="display:flex;gap:0.5rem;align-items:end;flex-wrap:wrap">
-          <input type="hidden" name="action" value="create_playlist">
-          <div style="flex:2;min-width:200px">
-            <input type="text" name="playlist_name" placeholder="Playlist name" required
-                   style="width:100%;padding:0.45rem;background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.8rem;box-sizing:border-box">
-          </div>
-          <button type="submit" class="btn btn-primary">Create</button>
-        </form>
-      </div>`;
+      // Playlist detail view
+      if (playlistId) {
+        const plResult = await db.execute({ sql: "SELECT * FROM media_playlists WHERE id = ?", args: [playlistId] });
+        if (plResult.rows.length === 0) {
+          tabContent = `<p style="color:var(--crow-error)">Playlist not found.</p>`;
+        } else {
+          const playlist = plResult.rows[0];
+          const { rows: items } = await db.execute({
+            sql: `SELECT pi.id as item_row_id, pi.item_type, pi.item_id, pi.position,
+                    CASE pi.item_type
+                      WHEN 'article' THEN (SELECT title FROM media_articles WHERE id = pi.item_id)
+                      WHEN 'briefing' THEN (SELECT title FROM media_briefings WHERE id = pi.item_id)
+                      ELSE NULL
+                    END as item_title,
+                    CASE pi.item_type
+                      WHEN 'article' THEN (SELECT s.name FROM media_articles a JOIN media_sources s ON s.id = a.source_id WHERE a.id = pi.item_id)
+                      ELSE NULL
+                    END as source_name,
+                    CASE pi.item_type
+                      WHEN 'article' THEN (SELECT audio_url FROM media_articles WHERE id = pi.item_id)
+                      ELSE NULL
+                    END as audio_url
+                  FROM media_playlist_items pi
+                  WHERE pi.playlist_id = ?
+                  ORDER BY pi.position ASC`,
+            args: [playlistId],
+          });
 
-      let listHtml;
-      if (playlists.length === 0) {
-        listHtml = `<p style="color:var(--crow-text-muted);text-align:center;padding:1rem">No playlists yet.</p>`;
-      } else {
-        listHtml = `<div style="display:flex;flex-direction:column;gap:0.5rem">${playlists.map(p => {
-          const autoLabel = p.auto_generated ? ' <span style="font-size:0.65rem;padding:0.1rem 0.3rem;border-radius:4px;background:var(--crow-accent-muted);color:var(--crow-accent)">auto</span>' : "";
-          return `<div class="card" style="display:flex;gap:0.75rem;align-items:center;padding:0.75rem">
-            <div style="width:40px;height:40px;border-radius:6px;background:var(--crow-accent-muted);display:flex;align-items:center;justify-content:center;color:var(--crow-accent);font-size:1.2rem;flex-shrink:0">&#9835;</div>
-            <div style="flex:1;min-width:0">
-              <div style="font-weight:500">${escapeHtml(p.name)}${autoLabel}</div>
-              <div style="font-size:0.8rem;color:var(--crow-text-muted)">${p.item_count} item(s) \u00b7 ${formatDate(p.updated_at)}</div>
+          const itemsHtml = items.length === 0
+            ? `<p style="color:var(--crow-text-muted);text-align:center;padding:1rem">No items in this playlist yet. Add articles from the feed.</p>`
+            : items.map((item, idx) => `<div class="card" style="display:flex;gap:0.75rem;align-items:center;padding:0.6rem 0.75rem;margin-bottom:0.35rem">
+                <span style="font-size:0.75rem;color:var(--crow-text-muted);width:20px;text-align:center">${idx + 1}</span>
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:0.85rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(item.item_title || "Unknown")}</div>
+                  ${item.source_name ? `<div style="font-size:0.7rem;color:var(--crow-text-muted)">${escapeHtml(item.source_name)}</div>` : ""}
+                </div>
+                <button onclick="crowListenTts(this,${item.item_id},'${escapeHtml((item.item_title || "").replace(/'/g, "").replace(/\\/g, ""))}')" class="btn btn-sm btn-secondary" title="Listen" style="font-size:0.8rem;padding:0.1rem 0.3rem">&#127911;</button>
+                <button onclick="crowRemovePlaylistItem(${playlistId},${item.item_row_id},this)" class="btn btn-sm btn-secondary" title="Remove" style="color:var(--crow-error);font-size:0.8rem;padding:0.1rem 0.3rem">&#10005;</button>
+              </div>`).join("\n");
+
+          const currentVisibility = playlist.visibility || "private";
+          const isShareable = currentVisibility === "public" || currentVisibility === "unlisted";
+          const shareUrl = isShareable && playlist.slug ? `/media/playlists/${playlist.slug}` : null;
+
+          tabContent = `<div style="margin-bottom:1rem">
+            <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem">
+              <a href="/dashboard/media?tab=playlists" class="btn btn-sm btn-secondary">&larr; Back</a>
+              <h3 style="margin:0;font-family:'Fraunces',serif;font-size:1.1rem;flex:1">${escapeHtml(playlist.name)}</h3>
+              <select onchange="crowSetPlaylistVisibility(${playlistId},this.value)" style="padding:0.3rem;background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.75rem">
+                <option value="private" ${currentVisibility === "private" ? "selected" : ""}>Private</option>
+                <option value="unlisted" ${currentVisibility === "unlisted" ? "selected" : ""}>Unlisted</option>
+                <option value="public" ${currentVisibility === "public" ? "selected" : ""}>Public</option>
+              </select>
+              ${shareUrl ? `<button onclick="navigator.clipboard.writeText(location.origin+'${shareUrl}');this.textContent='Copied!';setTimeout(()=>{this.textContent='Copy Link'},1500)" class="btn btn-sm btn-secondary" title="Copy public link">Copy Link</button>` : ""}
+              ${items.length > 0 ? `<button onclick="crowPlayAll(${playlistId})" class="btn btn-primary btn-sm">&#9654; Play All</button>` : ""}
             </div>
-            <form method="POST" style="display:inline" onsubmit="return confirm('Delete this playlist?')">
-              <input type="hidden" name="action" value="delete_playlist">
-              <input type="hidden" name="playlist_id" value="${p.id}">
-              <button type="submit" class="btn btn-sm btn-secondary" style="color:var(--crow-error)">&#10005;</button>
-            </form>
+            ${playlist.description ? `<p style="font-size:0.85rem;color:var(--crow-text-secondary);margin-bottom:1rem">${escapeHtml(playlist.description)}</p>` : ""}
+            ${itemsHtml}
           </div>`;
-        }).join("\n")}</div>`;
-      }
+        }
+      } else {
+        // Playlist list view
+        const { rows: playlists } = await db.execute(
+          "SELECT p.*, (SELECT COUNT(*) FROM media_playlist_items pi WHERE pi.playlist_id = p.id) as item_count FROM media_playlists p ORDER BY p.updated_at DESC"
+        );
 
-      tabContent = createForm + listHtml;
+        const createForm = `<div class="card" style="padding:1rem;margin-bottom:1rem">
+          <h4 style="margin:0 0 0.75rem;font-family:'Fraunces',serif;font-size:0.95rem">Create Playlist</h4>
+          <form method="POST" style="display:flex;gap:0.5rem;align-items:end;flex-wrap:wrap">
+            <input type="hidden" name="action" value="create_playlist">
+            <div style="flex:2;min-width:200px">
+              <input type="text" name="playlist_name" placeholder="Playlist name" required
+                     style="width:100%;padding:0.45rem;background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.8rem;box-sizing:border-box">
+            </div>
+            <button type="submit" class="btn btn-primary">Create</button>
+          </form>
+        </div>`;
+
+        let listHtml;
+        if (playlists.length === 0) {
+          listHtml = `<p style="color:var(--crow-text-muted);text-align:center;padding:1rem">No playlists yet.</p>`;
+        } else {
+          listHtml = `<div style="display:flex;flex-direction:column;gap:0.5rem">${playlists.map(p => {
+            const autoLabel = p.auto_generated ? ' <span style="font-size:0.65rem;padding:0.1rem 0.3rem;border-radius:4px;background:var(--crow-accent-muted);color:var(--crow-accent)">auto</span>' : "";
+            return `<a href="/dashboard/media?tab=playlists&playlist_id=${p.id}" style="text-decoration:none;color:inherit">
+              <div class="card" style="display:flex;gap:0.75rem;align-items:center;padding:0.75rem">
+                <div style="width:40px;height:40px;border-radius:6px;background:var(--crow-accent-muted);display:flex;align-items:center;justify-content:center;color:var(--crow-accent);font-size:1.2rem;flex-shrink:0">&#9835;</div>
+                <div style="flex:1;min-width:0">
+                  <div style="font-weight:500">${escapeHtml(p.name)}${autoLabel}</div>
+                  <div style="font-size:0.8rem;color:var(--crow-text-muted)">${p.item_count} item(s) \u00b7 ${formatDate(p.updated_at)}</div>
+                </div>
+                <form method="POST" style="display:inline" onclick="event.stopPropagation();event.preventDefault()" onsubmit="event.stopPropagation();return confirm('Delete this playlist?')">
+                  <input type="hidden" name="action" value="delete_playlist">
+                  <input type="hidden" name="playlist_id" value="${p.id}">
+                  <button type="submit" class="btn btn-sm btn-secondary" style="color:var(--crow-error)">&#10005;</button>
+                </form>
+              </div>
+            </a>`;
+          }).join("\n")}</div>`;
+        }
+
+        tabContent = createForm + listHtml;
+      }
     }
 
     // --- Briefings tab ---
     if (tab === "briefings") {
       const { rows: briefings } = await db.execute("SELECT * FROM media_briefings ORDER BY created_at DESC LIMIT 20");
 
+      const generateForm = `<div class="card" style="padding:1rem;margin-bottom:1rem">
+        <h4 style="margin:0 0 0.75rem;font-family:'Fraunces',serif;font-size:0.95rem">Generate Briefing</h4>
+        <div id="briefing-form" style="display:flex;gap:0.5rem;align-items:end;flex-wrap:wrap">
+          <div style="flex:2;min-width:150px">
+            <label style="display:block;font-size:0.75rem;color:var(--crow-text-muted);margin-bottom:4px">Topic (optional)</label>
+            <input type="text" id="briefing-topic" placeholder="e.g. technology, politics"
+                   style="width:100%;padding:0.45rem;background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.8rem;box-sizing:border-box">
+          </div>
+          <div>
+            <label style="display:block;font-size:0.75rem;color:var(--crow-text-muted);margin-bottom:4px">Articles</label>
+            <select id="briefing-count" style="padding:0.45rem;background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.8rem">
+              <option value="5">5</option><option value="10">10</option><option value="15">15</option>
+            </select>
+          </div>
+          <label style="display:flex;align-items:center;gap:0.3rem;font-size:0.8rem;color:var(--crow-text-secondary)">
+            <input type="checkbox" id="briefing-voice" value="1"> Voice
+          </label>
+          <button onclick="crowGenerateBriefing(this)" class="btn btn-primary">Generate</button>
+        </div>
+      </div>`;
+
       let listHtml;
       if (briefings.length === 0) {
-        listHtml = `<p style="color:var(--crow-text-muted);text-align:center;padding:1rem">No briefings yet. Use crow_media_briefing via AI to generate one.</p>`;
+        listHtml = `<p style="color:var(--crow-text-muted);text-align:center;padding:1rem">No briefings yet. Generate one above or use crow_media_briefing via AI.</p>`;
       } else {
         listHtml = `<div style="display:flex;flex-direction:column;gap:0.5rem">${briefings.map(b => {
           const articleCount = b.article_ids ? JSON.parse(b.article_ids).length : 0;
@@ -732,14 +881,13 @@ export default {
                 <div style="font-weight:500">${escapeHtml(b.title || "Untitled Briefing")}</div>
                 <div style="font-size:0.8rem;color:var(--crow-text-muted)">${articleCount} articles${durationStr ? ` \u00b7 ${durationStr}` : ""} \u00b7 ${formatDate(b.created_at)}</div>
               </div>
-              ${hasAudio ? `<button onclick="document.getElementById('briefing-audio-${b.id}').play()" class="btn btn-sm btn-primary" style="font-size:0.8rem">&#9654; Play</button>` : ""}
+              ${hasAudio ? `<button onclick="if(window.crowPlayer)window.crowPlayer.load('/api/media/briefings/${b.id}/audio','${escapeHtml((b.title || "Briefing").replace(/'/g, ""))}')" class="btn btn-sm btn-primary" style="font-size:0.8rem">&#9654; Play</button>` : ""}
             </div>
-            ${hasAudio ? `<audio id="briefing-audio-${b.id}" controls preload="none" style="width:100%;height:32px;margin-top:0.5rem"><source src="/api/media/briefings/${b.id}/audio" type="audio/mpeg"></audio>` : ""}
           </div>`;
         }).join("\n")}</div>`;
       }
 
-      tabContent = listHtml;
+      tabContent = generateForm + listHtml;
     }
 
     // --- Podcasts tab ---
@@ -888,46 +1036,154 @@ export default {
       tabContent = createForm + listHtml + digestForm;
     }
 
-    // Persistent audio player bar
-    const playerBar = `<div id="crow-player-bar" style="display:none;position:fixed;bottom:0;left:0;right:0;background:var(--crow-bg-surface);border-top:2px solid var(--crow-accent);padding:0.5rem 1rem;z-index:1000;align-items:center;gap:0.75rem">
-      <button onclick="window.crowPlayer.toggle()" id="crow-play-btn" style="background:var(--crow-accent);color:white;border:none;border-radius:50%;width:32px;height:32px;cursor:pointer;font-size:1rem;display:flex;align-items:center;justify-content:center">&#9654;</button>
-      <div style="flex:1;min-width:0">
-        <div id="crow-player-title" style="font-size:0.8rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
-        <audio id="crow-audio" preload="none" style="width:100%;height:28px;margin-top:2px" controls></audio>
-      </div>
-      <button onclick="window.crowPlayer.close()" style="background:none;border:none;color:var(--crow-text-muted);cursor:pointer;font-size:1.2rem">&times;</button>
-    </div>
-    <script>
-      window.crowPlayer = {
-        load: function(src, title) {
-          var bar = document.getElementById('crow-player-bar');
-          var audio = document.getElementById('crow-audio');
-          var titleEl = document.getElementById('crow-player-title');
-          bar.style.display = 'flex';
-          titleEl.textContent = title || 'Playing...';
-          audio.src = src;
-          audio.play().catch(function() {});
-        },
-        toggle: function() {
-          var audio = document.getElementById('crow-audio');
-          if (audio.paused) audio.play(); else audio.pause();
-        },
-        close: function() {
-          var audio = document.getElementById('crow-audio');
-          audio.pause(); audio.src = '';
-          document.getElementById('crow-player-bar').style.display = 'none';
-        }
-      };
-    </script>`;
-
     const content = `
       ${errorMsg}
       ${gridCss}
       ${tabNav}
       ${tabContent}
-      ${playerBar}
     `;
 
-    return layout({ title: "Media", content });
+    const mediaScripts = `
+      function crowListenTts(btn, articleId, title) {
+        var orig = btn.textContent;
+        btn.textContent = '...';
+        btn.disabled = true;
+        fetch('/api/media/articles/' + articleId + '/listen', { method: 'POST' })
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (data.error) { alert(data.error); return; }
+            if (window.crowPlayer) window.crowPlayer.load(data.audio_url, title);
+          })
+          .catch(function(e) { alert('TTS error: ' + e.message); })
+          .finally(function() { btn.textContent = orig; btn.disabled = false; });
+      }
+
+      var _playlistCache = null;
+      function crowShowPlaylistMenu(btn, articleId) {
+        // Close any existing menu
+        var old = document.getElementById('crow-playlist-menu');
+        if (old) old.remove();
+
+        var wrap = btn.parentElement;
+        var menu = document.createElement('div');
+        menu.id = 'crow-playlist-menu';
+        menu.style.cssText = 'position:absolute;right:0;bottom:100%;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:6px;padding:0.3rem;min-width:160px;z-index:500;box-shadow:0 4px 12px rgba(0,0,0,0.3)';
+        menu.textContent = 'Loading...';
+        wrap.appendChild(menu);
+
+        // Close on outside click
+        setTimeout(function() {
+          document.addEventListener('click', function closer(e) {
+            if (!menu.contains(e.target) && e.target !== btn) {
+              menu.remove();
+              document.removeEventListener('click', closer);
+            }
+          });
+        }, 0);
+
+        var loadPlaylists = _playlistCache
+          ? Promise.resolve(_playlistCache)
+          : fetch('/api/media/playlists').then(function(r) { return r.json(); }).then(function(d) { _playlistCache = d.playlists; return d.playlists; });
+
+        loadPlaylists.then(function(playlists) {
+          menu.textContent = '';
+          if (playlists.length === 0) {
+            menu.textContent = 'No playlists. Create one first.';
+            menu.style.fontSize = '0.8rem';
+            menu.style.color = 'var(--crow-text-muted)';
+            return;
+          }
+          playlists.forEach(function(p) {
+            var item = document.createElement('button');
+            item.textContent = p.name;
+            item.style.cssText = 'display:block;width:100%;text-align:left;padding:0.35rem 0.5rem;background:none;border:none;color:var(--crow-text-primary);cursor:pointer;font-size:0.8rem;border-radius:4px;font-family:inherit';
+            item.onmouseover = function() { item.style.background = 'var(--crow-bg-elevated)'; };
+            item.onmouseout = function() { item.style.background = 'none'; };
+            item.onclick = function() {
+              fetch('/api/media/playlists/' + p.id + '/items', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ item_type: 'article', item_id: articleId })
+              }).then(function(r) { return r.json(); }).then(function(d) {
+                if (d.error) alert(d.error);
+                else { btn.textContent = '\\u2713'; setTimeout(function() { btn.textContent = '+'; }, 1500); }
+                menu.remove();
+                _playlistCache = null;
+              });
+            };
+            menu.appendChild(item);
+          });
+        });
+      }
+
+      function crowSetPlaylistVisibility(playlistId, visibility) {
+        fetch('/api/media/playlists/' + playlistId, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ visibility: visibility })
+        }).then(function(r) { return r.json(); }).then(function(d) {
+          if (d.error) { alert(d.error); return; }
+          location.reload();
+        });
+      }
+
+      function crowRemovePlaylistItem(playlistId, itemRowId, btn) {
+        fetch('/api/media/playlists/' + playlistId + '/items/' + itemRowId, { method: 'DELETE' })
+          .then(function(r) { return r.json(); })
+          .then(function(d) {
+            if (d.ok) btn.closest('.card').remove();
+            else alert(d.error || 'Failed to remove');
+          });
+      }
+
+      function crowGenerateBriefing(btn) {
+        var topic = document.getElementById('briefing-topic').value;
+        var count = document.getElementById('briefing-count').value;
+        var voice = document.getElementById('briefing-voice').checked ? '1' : '0';
+        btn.textContent = 'Generating...';
+        btn.disabled = true;
+        fetch('/api/media/briefings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ topic: topic, count: count, voice: voice })
+        })
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (data.error) { alert(data.error); btn.textContent = 'Generate'; btn.disabled = false; return; }
+            location.reload();
+          })
+          .catch(function(e) { alert('Error: ' + e.message); btn.textContent = 'Generate'; btn.disabled = false; });
+      }
+
+      function crowPlayAll(playlistId) {
+        fetch('/api/media/playlists/' + playlistId)
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            var items = data.items || [];
+            if (items.length === 0) { alert('Playlist is empty'); return; }
+            // Build queue: use audio_url if available, otherwise generate TTS
+            var firstItem = items[0];
+            var queueItems = items.map(function(i) {
+              return { src: '/api/media/articles/' + i.item_id + '/audio', title: i.item_title || 'Track', subtitle: 'Playlist' };
+            });
+
+            // Generate TTS for first item, then start playing
+            fetch('/api/media/articles/' + firstItem.item_id + '/listen', { method: 'POST' })
+              .then(function(r) { return r.json(); })
+              .then(function(d) {
+                if (d.error) { alert('Could not generate audio: ' + d.error); return; }
+                if (window.crowPlayer) {
+                  window.crowPlayer.queue(queueItems);
+                  // Pre-generate next track in background
+                  if (items.length > 1) {
+                    fetch('/api/media/articles/' + items[1].item_id + '/listen', { method: 'POST' }).catch(function(){});
+                  }
+                }
+              });
+          });
+      }
+    `;
+
+    return layout({ title: "Media", content, scripts: mediaScripts });
   },
 };

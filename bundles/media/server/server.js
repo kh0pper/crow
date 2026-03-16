@@ -405,14 +405,15 @@ export function createMediaServer(dbPath, options = {}) {
   // --- crow_media_search ---
   server.tool(
     "crow_media_search",
-    "Full-text search across articles",
+    "Full-text search across articles. Set discover_sources=true to also search the web for new RSS feeds when local results are thin.",
     {
       query: z.string().max(500).describe("Search query"),
       category: z.string().max(200).optional().describe("Filter by source category"),
       date_from: z.string().max(50).optional().describe("ISO date to filter from (e.g. '2025-01-01')"),
       limit: z.number().min(1).max(50).optional().describe("Max results (default 20)"),
+      discover_sources: z.boolean().optional().describe("Search web for RSS feeds if local results < 5 (requires BRAVE_API_KEY)"),
     },
-    async ({ query, category, date_from, limit }) => {
+    async ({ query, category, date_from, limit, discover_sources }) => {
       const safeQuery = sanitizeFtsQuery(query);
       if (!safeQuery) {
         return { content: [{ type: "text", text: "Invalid search query." }], isError: true };
@@ -441,17 +442,51 @@ export function createMediaServer(dbPath, options = {}) {
 
       const result = await db.execute({ sql, args });
 
-      if (result.rows.length === 0) {
-        return { content: [{ type: "text", text: `No articles found matching "${query}".` }] };
-      }
-
       const lines = result.rows.map((a) => {
         const date = a.pub_date ? formatShortDate(a.pub_date) : "";
         const snippet = a.summary ? a.summary.slice(0, 120) + "..." : "";
         return `- #${a.id} ${a.title}\n  ${a.source_name} · ${date}\n  ${snippet}`;
       });
 
-      return { content: [{ type: "text", text: `${result.rows.length} result(s) for "${query}":\n\n${lines.join("\n\n")}` }] };
+      let output = result.rows.length > 0
+        ? `${result.rows.length} result(s) for "${query}":\n\n${lines.join("\n\n")}`
+        : `No articles found matching "${query}".`;
+
+      // Web discovery via Brave Search if enabled and few local results
+      if (discover_sources && result.rows.length < 5) {
+        const braveKey = process.env.BRAVE_API_KEY;
+        if (braveKey) {
+          try {
+            const searchUrl = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query + " RSS feed")}&count=10`;
+            const braveRes = await fetch(searchUrl, {
+              headers: { "X-Subscription-Token": braveKey, Accept: "application/json" },
+            });
+            if (braveRes.ok) {
+              const data = await braveRes.json();
+              const feedUrls = [];
+              for (const r of (data.web?.results || [])) {
+                const url = r.url || "";
+                if (/\.(xml|rss|atom)$/i.test(url) || /\/feed\/?$/i.test(url) || /\/rss\/?$/i.test(url)) {
+                  feedUrls.push({ title: r.title, url });
+                }
+              }
+              if (feedUrls.length > 0) {
+                output += `\n\nDiscovered ${feedUrls.length} potential RSS feed(s):\n`;
+                output += feedUrls.map(f => `  - ${f.title}: ${f.url}`).join("\n");
+                output += `\n\nUse crow_media_add_source to subscribe to any of these feeds.`;
+              } else {
+                output += `\n\nNo RSS feeds discovered via web search.`;
+              }
+            }
+          } catch (err) {
+            output += `\n\nWeb discovery failed: ${err.message}`;
+          }
+        } else {
+          output += `\n\nSet BRAVE_API_KEY in .env to enable web source discovery.`;
+        }
+      }
+
+      return { content: [{ type: "text", text: output }] };
     }
   );
 
@@ -1076,6 +1111,52 @@ export function createMediaServer(dbPath, options = {}) {
           type: "text",
           text: `Digest settings:\n  Schedule: ${pref.schedule}\n  Email: ${pref.email || "(not set)"}\n  Enabled: ${pref.enabled ? "yes" : "no"}\n  Custom instructions: ${pref.custom_instructions || "(none)"}\n  Last sent: ${pref.last_sent || "never"}\n\nRequires SMTP configured in .env (CROW_SMTP_HOST, etc.) and nodemailer installed.`,
         }],
+      };
+    }
+  );
+
+  // --- crow_media_schedule_briefing ---
+  server.tool(
+    "crow_media_schedule_briefing",
+    "Schedule automatic briefing generation using Crow's scheduling system.",
+    {
+      cron: z.string().max(100).describe("Cron expression (e.g. '0 8 * * 1-5' for weekday mornings at 8am)"),
+      topic: z.string().max(500).optional().describe("Topic filter for briefing articles"),
+      max_articles: z.number().min(1).max(20).optional().describe("Max articles (default 5)"),
+      voice: z.string().max(100).optional().describe("TTS voice (omit to skip audio)"),
+      enabled: z.boolean().optional().describe("Enable or disable (default true)"),
+    },
+    async ({ cron, topic, max_articles, voice, enabled }) => {
+      const config = JSON.stringify({
+        topic: topic || null,
+        max_articles: max_articles || 5,
+        voice: voice || null,
+      });
+
+      // Check for existing schedule
+      const existing = await db.execute({
+        sql: "SELECT id FROM schedules WHERE task = 'media:briefing'",
+        args: [],
+      });
+
+      if (existing.rows.length > 0) {
+        // Update existing
+        await db.execute({
+          sql: "UPDATE schedules SET cron = ?, config = ?, enabled = ? WHERE id = ?",
+          args: [cron, config, enabled !== false ? 1 : 0, existing.rows[0].id],
+        });
+        return {
+          content: [{ type: "text", text: `Updated briefing schedule: ${cron}\nTopic: ${topic || "all"}\nArticles: ${max_articles || 5}\nVoice: ${voice || "none"}` }],
+        };
+      }
+
+      // Create new
+      await db.execute({
+        sql: "INSERT INTO schedules (task, cron, config, enabled, created_at) VALUES (?, ?, ?, ?, datetime('now'))",
+        args: ["media:briefing", cron, config, enabled !== false ? 1 : 0],
+      });
+      return {
+        content: [{ type: "text", text: `Scheduled briefing: ${cron}\nTopic: ${topic || "all"}\nArticles: ${max_articles || 5}\nVoice: ${voice || "none"}\n\nThe media task runner checks for due schedules every 30 minutes.` }],
       };
     }
   );

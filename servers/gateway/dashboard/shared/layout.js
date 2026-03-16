@@ -17,8 +17,9 @@ import { FONT_IMPORT, designTokensCss } from "./design-tokens.js";
  * @param {Array} opts.panels - Array of { id, name, icon, route, navOrder }
  * @param {string} [opts.theme] - "dark" or "light" (default: dark)
  * @param {string} [opts.scripts] - Additional inline JS
+ * @param {string} [opts.afterContent] - HTML rendered after </main> inside .dashboard (e.g. persistent player bar)
  */
-export function renderLayout({ title, content, activePanel, panels, theme, scripts }) {
+export function renderLayout({ title, content, activePanel, panels, theme, scripts, afterContent }) {
   const themeClass = theme === "light" ? "theme-light" : "";
   const sortedPanels = [...panels].sort((a, b) => (a.navOrder || 0) - (b.navOrder || 0));
 
@@ -66,6 +67,7 @@ export function renderLayout({ title, content, activePanel, panels, theme, scrip
         ${content}
       </div>
     </main>
+    ${afterContent || ""}
   </div>
   <script>
     function toggleTheme() {

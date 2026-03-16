@@ -22,16 +22,20 @@ function isGenericLogo(imageUrl) {
 
 /**
  * Extract full content from an article URL.
+ * @param {string} url - Article URL
+ * @param {object} [authHeaders] - Optional auth headers for paywalled content
  * @returns {{ text, html, image, wordCount, readTime }}
  */
-export async function extractContent(url) {
+export async function extractContent(url, authHeaders) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
   let rawHtml;
   try {
+    const fetchHeaders = { "User-Agent": USER_AGENT, Accept: "text/html, */*" };
+    if (authHeaders) Object.assign(fetchHeaders, authHeaders);
     const res = await fetch(url, {
       signal: controller.signal,
-      headers: { "User-Agent": USER_AGENT, Accept: "text/html, */*" },
+      headers: fetchHeaders,
       redirect: "follow",
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -76,7 +80,7 @@ export async function extractContent(url) {
  */
 export async function extractContentBatch(db, limit = 5) {
   const { rows } = await db.execute({
-    sql: `SELECT a.id, a.url AS url, a.image_url
+    sql: `SELECT a.id, a.url AS url, a.image_url, s.auth_config
           FROM media_articles a
           JOIN media_sources s ON s.id = a.source_id
           WHERE a.content_fetch_status = 'pending' AND a.url IS NOT NULL
@@ -96,9 +100,16 @@ export async function extractContentBatch(db, limit = 5) {
   let processed = 0;
   let errors = 0;
 
+  // Import buildAuthHeaders if available (feed-fetcher may have it)
+  let buildAuthHeaders;
+  try {
+    ({ buildAuthHeaders } = await import("./feed-fetcher.js"));
+  } catch {}
+
   for (const article of rows) {
     try {
-      const result = await extractContent(article.url);
+      const authHeaders = buildAuthHeaders ? buildAuthHeaders(article.auth_config) : null;
+      const result = await extractContent(article.url, authHeaders);
 
       if (result.text) {
         await db.execute({
