@@ -23,7 +23,7 @@ export default {
   route: "/dashboard/messages",
   navOrder: 10,
 
-  async handler(req, res, { db, layout }) {
+  async handler(req, res, { db, lang, layout }) {
     // --- Handle POST actions ---
     if (req.method === "POST") {
       const result = await handlePostAction(req, res, { db });
@@ -62,11 +62,13 @@ export default {
       storageAvailable,
       inviteResult: req._inviteResult || null,
       inviteError: req._inviteError || null,
+      lang,
     });
-    const js = messagesClientJS({ aiConfigured, storageAvailable });
+    const js = messagesClientJS({ aiConfigured, storageAvailable, lang });
 
     const content = css + html + js;
 
-    return layout({ title: "Messages", content });
+    const { t } = await import("../shared/i18n.js");
+    return layout({ title: t("messages.pageTitle", lang), content });
   },
 };

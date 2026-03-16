@@ -6,15 +6,18 @@
  * use `window.crowPlayer` to play audio.
  *
  * Exports:
- *   playerBarHtml  — HTML string for the bar (hidden by default)
- *   playerBarJs    — Inline JS string for the crowPlayer API
+ *   playerBarHtml(lang)  — HTML string for the bar (hidden by default)
+ *   playerBarJs(lang)    — Inline JS string for the crowPlayer API
  */
 
-export const playerBarHtml = `<div id="crow-player-bar" style="display:none;position:fixed;bottom:0;left:240px;right:0;background:var(--crow-bg-surface);border-top:2px solid var(--crow-accent);z-index:1000;padding:0;transition:left 0.2s">
+import { t, tJs } from "./i18n.js";
+
+export function playerBarHtml(lang) {
+  return `<div id="crow-player-bar" style="display:none;position:fixed;bottom:0;left:240px;right:0;background:var(--crow-bg-surface);border-top:2px solid var(--crow-accent);z-index:1000;padding:0;transition:left 0.2s">
   <div style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 1rem">
-    <button id="crow-player-prev" onclick="window.crowPlayer.prev()" title="Previous" style="background:none;border:none;color:var(--crow-text-muted);cursor:pointer;font-size:0.9rem;padding:0.2rem;display:none">&#9198;</button>
-    <button id="crow-player-toggle" onclick="window.crowPlayer.toggle()" title="Play/Pause" style="background:var(--crow-accent);color:white;border:none;border-radius:50%;width:32px;height:32px;cursor:pointer;font-size:1rem;display:flex;align-items:center;justify-content:center;flex-shrink:0">&#9654;</button>
-    <button id="crow-player-next" onclick="window.crowPlayer.next()" title="Next" style="background:none;border:none;color:var(--crow-text-muted);cursor:pointer;font-size:0.9rem;padding:0.2rem;display:none">&#9197;</button>
+    <button id="crow-player-prev" onclick="window.crowPlayer.prev()" title="${t("player.previous", lang)}" style="background:none;border:none;color:var(--crow-text-muted);cursor:pointer;font-size:0.9rem;padding:0.2rem;display:none">&#9198;</button>
+    <button id="crow-player-toggle" onclick="window.crowPlayer.toggle()" title="${t("player.playPause", lang)}" style="background:var(--crow-accent);color:white;border:none;border-radius:50%;width:32px;height:32px;cursor:pointer;font-size:1rem;display:flex;align-items:center;justify-content:center;flex-shrink:0">&#9654;</button>
+    <button id="crow-player-next" onclick="window.crowPlayer.next()" title="${t("player.next", lang)}" style="background:none;border:none;color:var(--crow-text-muted);cursor:pointer;font-size:0.9rem;padding:0.2rem;display:none">&#9197;</button>
     <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
       <div style="display:flex;align-items:center;gap:0.5rem">
         <div id="crow-player-title" style="font-size:0.8rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0"></div>
@@ -25,12 +28,14 @@ export const playerBarHtml = `<div id="crow-player-bar" style="display:none;posi
         <div id="crow-player-progress" style="height:100%;background:var(--crow-accent);border-radius:3px;width:0%;transition:width 0.1s linear"></div>
       </div>
     </div>
-    <button onclick="window.crowPlayer.close()" title="Close" style="background:none;border:none;color:var(--crow-text-muted);cursor:pointer;font-size:1.2rem;flex-shrink:0;padding:0.2rem">&times;</button>
+    <button onclick="window.crowPlayer.close()" title="${t("player.close", lang)}" style="background:none;border:none;color:var(--crow-text-muted);cursor:pointer;font-size:1.2rem;flex-shrink:0;padding:0.2rem">&times;</button>
   </div>
   <audio id="crow-audio" preload="none"></audio>
 </div>`;
+}
 
-export const playerBarJs = `
+export function playerBarJs(lang) {
+  return `
 (function() {
   var audio = document.getElementById('crow-audio');
   var bar = document.getElementById('crow-player-bar');
@@ -45,6 +50,8 @@ export const playerBarJs = `
 
   var PLAY_ICON = '\\u25B6';
   var PAUSE_ICON = '\\u23F8';
+  var PLAYING_LABEL = '${tJs("player.playing", lang)}';
+  var PAUSED_LABEL = '${tJs("player.paused", lang)}';
 
   var queue = [];
   var queueIndex = -1;
@@ -111,7 +118,7 @@ export const playerBarJs = `
   function playItem(item) {
     bar.style.display = 'block';
     adjustPosition();
-    titleEl.textContent = item.title || 'Playing...';
+    titleEl.textContent = item.title || PLAYING_LABEL;
     if (item.subtitle) {
       subtitleEl.textContent = item.subtitle;
       subtitleEl.style.display = 'block';
@@ -128,7 +135,6 @@ export const playerBarJs = `
   window.crowPlayer = {
     load: function(src, title, subtitle) {
       var item = { src: src, title: title, subtitle: subtitle };
-      // If not part of current queue, create a single-item queue
       if (queue.length === 0 || !queue[queueIndex] || queue[queueIndex].src !== src) {
         queue = [item];
         queueIndex = 0;
@@ -203,7 +209,7 @@ export const playerBarJs = `
     if (saved && saved.src) {
       bar.style.display = 'block';
       adjustPosition();
-      titleEl.textContent = saved.title || 'Paused';
+      titleEl.textContent = saved.title || PAUSED_LABEL;
       if (saved.subtitle) {
         subtitleEl.textContent = saved.subtitle;
         subtitleEl.style.display = 'block';
@@ -221,3 +227,4 @@ export const playerBarJs = `
   } catch(e) {}
 })();
 `;
+}

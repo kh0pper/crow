@@ -13,8 +13,10 @@
  * @param {boolean} opts.storageAvailable
  * @returns {string} — <script> block
  */
+import { tJs } from "../../shared/i18n.js";
+
 export function messagesClientJS(opts) {
-  const { aiConfigured, storageAvailable } = opts;
+  const { aiConfigured, storageAvailable, lang } = opts;
 
   return `<script>
   // === Utility ===
@@ -87,9 +89,9 @@ export function messagesClientJS(opts) {
     if (!dateStr) return '';
     var d = new Date(dateStr);
     var diff = Date.now() - d.getTime();
-    if (diff < 60000) return 'just now';
-    if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
-    if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
+    if (diff < 60000) return '${tJs("time.justNow", lang)}';
+    if (diff < 3600000) return Math.floor(diff / 60000) + '${tJs("time.mAgo", lang)}';
+    if (diff < 86400000) return Math.floor(diff / 3600000) + '${tJs("time.hAgo", lang)}';
     return d.toLocaleDateString();
   }
 
@@ -170,7 +172,7 @@ export function messagesClientJS(opts) {
         var r = await fetch('/api/chat/conversations', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: 'New conversation' }),
+          body: JSON.stringify({ title: '${tJs("messages.newConversationTitle", lang)}' }),
         });
         var data = await r.json();
         if (data.id) window.location.href = '/dashboard/messages';
@@ -182,7 +184,7 @@ export function messagesClientJS(opts) {
       popover.textContent = '';
       popover.classList.add('visible');
 
-      var title = el('div', { css: 'font-size:0.85rem;font-weight:600;padding:0.5rem 0.75rem;color:var(--crow-text-muted)' }, ['New AI Chat']);
+      var title = el('div', { css: 'font-size:0.85rem;font-weight:600;padding:0.5rem 0.75rem;color:var(--crow-text-muted)' }, ['${tJs("messages.newAiChat", lang)}']);
       popover.appendChild(title);
 
       var profileSelect = el('select', { className: 'msg-model-select', css: 'margin:0 0.75rem 0.5rem;width:calc(100% - 1.5rem)' });
@@ -208,12 +210,12 @@ export function messagesClientJS(opts) {
       updateModels();
       popover.appendChild(modelSelect);
 
-      var createBtn = el('button', { className: 'msg-popover-item', css: 'text-align:center;font-weight:600;color:var(--crow-accent)', text: 'Create Chat', onclick: async function() {
+      var createBtn = el('button', { className: 'msg-popover-item', css: 'text-align:center;font-weight:600;color:var(--crow-accent)', text: '${tJs("messages.createChat", lang)}', onclick: async function() {
         popover.classList.remove('visible');
         var r = await fetch('/api/chat/conversations', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: 'New conversation', profile_id: profileSelect.value, model: modelSelect.value }),
+          body: JSON.stringify({ title: '${tJs("messages.newConversationTitle", lang)}', profile_id: profileSelect.value, model: modelSelect.value }),
         });
         var data = await r.json();
         if (data.id) window.location.href = '/dashboard/messages';
@@ -274,8 +276,8 @@ export function messagesClientJS(opts) {
     viewport.scrollTop = viewport.scrollHeight;
 
     // Typing indicator
-    var typing = el('div', { className: 'msg-typing', text: 'Thinking... ' });
-    var cancelBtn = el('button', { className: 'msg-cancel-btn', text: 'Cancel', onclick: function() {
+    var typing = el('div', { className: 'msg-typing', text: '${tJs("messages.thinking", lang)} ' });
+    var cancelBtn = el('button', { className: 'msg-cancel-btn', text: '${tJs("common.cancel", lang)}', onclick: function() {
       fetch('/api/chat/conversations/' + encodeURIComponent(_activeItem.id) + '/cancel', { method: 'POST' });
     }});
     typing.appendChild(cancelBtn);
@@ -329,7 +331,7 @@ export function messagesClientJS(opts) {
 
           if (currentEventType === 'tool_call_start') {
             if (typing.parentNode) {
-              typing.textContent = 'Using ' + (eventData.name || 'tool') + '... ';
+              typing.textContent = '${tJs("messages.using", lang)} ' + (eventData.name || 'tool') + '... ';
               typing.appendChild(cancelBtn);
             }
           }
@@ -349,7 +351,7 @@ export function messagesClientJS(opts) {
 
             if (assistantDiv) { assistantDiv = null; assistantContent = ''; }
             if (typing.parentNode) {
-              typing.textContent = 'Thinking... ';
+              typing.textContent = '${tJs("messages.thinking", lang)} ';
               typing.appendChild(cancelBtn);
             }
           }
@@ -357,7 +359,7 @@ export function messagesClientJS(opts) {
           if (currentEventType === 'error') {
             if (typing.parentNode) typing.remove();
             var errDiv = el('div', { className: 'msg-bubble tool', css: 'border-color:var(--crow-error,#ef4444)' });
-            errDiv.textContent = 'Error: ' + (eventData.message || 'Unknown');
+            errDiv.textContent = '${tJs("messages.error", lang)} ' + (eventData.message || '${tJs("messages.unknown", lang)}');
             viewport.appendChild(errDiv);
           }
 
@@ -373,7 +375,7 @@ export function messagesClientJS(opts) {
     } catch(e) {
       if (typing.parentNode) typing.remove();
       var errDiv2 = el('div', { className: 'msg-bubble tool', css: 'border-color:var(--crow-error)' });
-      errDiv2.textContent = 'Connection error: ' + e.message;
+      errDiv2.textContent = '${tJs("messages.connectionError", lang)} ' + e.message;
       viewport.appendChild(errDiv2);
     }
 
@@ -383,7 +385,7 @@ export function messagesClientJS(opts) {
   }
   ` : `
   function msgNewAiChat() {
-    alert('AI provider not configured. Set one up in Settings first.');
+    alert('${tJs("messages.aiNotConfigured", lang)}');
   }
   function loadAiConversation() {}
   function sendAiMessage() {}
@@ -403,7 +405,7 @@ export function messagesClientJS(opts) {
 
       if (!contact) {
         chat.appendChild(el('div', { className: 'msg-empty' }, [
-          el('div', {}, [el('h3', { text: 'Contact not found' })])
+          el('div', {}, [el('h3', { text: '${tJs("messages.contactNotFound", lang)}' })])
         ]));
         return;
       }
@@ -504,7 +506,7 @@ export function messagesClientJS(opts) {
       header.appendChild(el('div', { className: 'msg-chat-header-meta', text: headerData.meta }));
     }
 
-    header.appendChild(el('button', { className: 'msg-info-toggle', text: 'Info', onclick: function() {
+    header.appendChild(el('button', { className: 'msg-info-toggle', text: '${tJs("messages.info", lang)}', onclick: function() {
       document.getElementById('msg-info').classList.toggle('hidden');
     }}));
 
@@ -512,9 +514,9 @@ export function messagesClientJS(opts) {
       header.appendChild(el('button', {
         className: 'msg-info-toggle',
         css: 'color:var(--crow-error)',
-        text: 'Delete',
+        text: '${tJs("messages.deleteConversation", lang)}',
         onclick: function() {
-          if (confirm('Delete this conversation?')) {
+          if (confirm('${tJs("messages.deleteConfirm", lang)}')) {
             fetch('/api/chat/conversations/' + encodeURIComponent(headerData.id), { method: 'DELETE' })
               .then(function() { window.location.href = '/dashboard/messages'; });
           }
@@ -546,7 +548,7 @@ export function messagesClientJS(opts) {
     ${storageAvailable ? `
     inputArea.appendChild(el('button', {
       className: 'msg-attach-btn',
-      title: 'Attach file',
+      title: '${tJs("messages.attachFile", lang)}',
       text: '\\ud83d\\udcce',
       onclick: function() { document.getElementById('msg-file-input').click(); },
     }));
@@ -555,7 +557,7 @@ export function messagesClientJS(opts) {
     var textarea = el('textarea', {
       className: 'msg-textarea',
       id: 'msg-input',
-      placeholder: 'Type a message...',
+      placeholder: '${tJs("messages.typeMessage", lang)}',
       rows: '1',
     });
     textarea.addEventListener('keydown', function(e) {
@@ -570,7 +572,7 @@ export function messagesClientJS(opts) {
     inputArea.appendChild(el('button', {
       className: 'msg-send-btn',
       id: 'msg-send-btn',
-      text: 'Send',
+      text: '${tJs("messages.send", lang)}',
       onclick: sendCurrentMessage,
     }));
 
@@ -611,7 +613,7 @@ export function messagesClientJS(opts) {
       var parent = _messages.find(function(m) { return m.id == threadId || m.nostr_event_id == threadId; });
       if (parent) {
         var preview = el('div', { className: 'msg-bubble-reply-preview' });
-        var parentSender = (parent.direction === 'sent' || parent.role === 'user') ? 'You' : (parent.display_name || 'Them');
+        var parentSender = (parent.direction === 'sent' || parent.role === 'user') ? '${tJs("messages.you", lang)}' : (parent.display_name || '${tJs("messages.them", lang)}');
         preview.appendChild(el('strong', { text: parentSender }));
         preview.appendChild(document.createTextNode(' '));
         var parentText = (parent.content || '').substring(0, 60);
@@ -652,7 +654,7 @@ export function messagesClientJS(opts) {
           attDiv.appendChild(audio);
         } else {
           var card = el('div', { className: 'msg-attachment-card' });
-          card.appendChild(el('a', { href: '/storage/file/' + encodeURIComponent(att.s3_key), target: '_blank', text: att.name || 'File' }));
+          card.appendChild(el('a', { href: '/storage/file/' + encodeURIComponent(att.s3_key), target: '_blank', text: att.name || '${tJs("messages.file", lang)}' }));
           card.appendChild(el('span', { className: 'msg-attachment-size', text: formatBytes(att.size) }));
           attDiv.appendChild(card);
         }
@@ -670,10 +672,10 @@ export function messagesClientJS(opts) {
     if (!isSent && msgId && _activeItem && _activeItem.type === 'peer') {
       div.appendChild(el('button', {
         css: 'background:none;border:none;color:var(--crow-text-muted);cursor:pointer;font-size:0.7rem;margin-top:2px;padding:0;',
-        text: 'Reply',
+        text: '${tJs("messages.reply", lang)}',
         onclick: (function(m) {
           return function() {
-            _replyingTo = { id: m.id || m.nostr_event_id, content: m.content, senderName: m.display_name || 'Them' };
+            _replyingTo = { id: m.id || m.nostr_event_id, content: m.content, senderName: m.display_name || '${tJs("messages.them", lang)}' };
             showReplyBar();
           };
         })(msg),
@@ -689,7 +691,7 @@ export function messagesClientJS(opts) {
     var bar = document.getElementById('msg-reply-bar');
     var text = document.getElementById('msg-reply-text');
     if (bar && text) {
-      text.textContent = 'Replying to ' + _replyingTo.senderName + ': ' + (_replyingTo.content || '').substring(0, 60);
+      text.textContent = '${tJs("messages.replyingTo", lang)} ' + _replyingTo.senderName + ': ' + (_replyingTo.content || '').substring(0, 60);
       bar.classList.add('visible');
     }
   }
@@ -721,7 +723,7 @@ export function messagesClientJS(opts) {
             size: file.size,
           });
           var input = document.getElementById('msg-input');
-          if (input) input.placeholder = _pendingAttachments.length + ' file(s) attached. Type a message...';
+          if (input) input.placeholder = _pendingAttachments.length + ' file(s). ${tJs("messages.typeMessage", lang)}';
         }
       } catch(err) { console.error('Upload failed:', err); }
     }
@@ -747,9 +749,9 @@ export function messagesClientJS(opts) {
     var details = document.getElementById('msg-info-details');
     details.textContent = '';
     var sec = el('div', { className: 'msg-info-section' });
-    sec.appendChild(el('div', { className: 'msg-info-section-title', text: 'Details' }));
-    sec.appendChild(el('div', { className: 'msg-info-row', text: 'Created: ' + new Date(conv.created_at).toLocaleDateString() }));
-    sec.appendChild(el('div', { className: 'msg-info-row', text: 'Tokens: ' + String(conv.total_tokens || 0) }));
+    sec.appendChild(el('div', { className: 'msg-info-section-title', text: '${tJs("messages.details", lang)}' }));
+    sec.appendChild(el('div', { className: 'msg-info-row', text: '${tJs("messages.created", lang)} ' + new Date(conv.created_at).toLocaleDateString() }));
+    sec.appendChild(el('div', { className: 'msg-info-row', text: '${tJs("messages.tokens", lang)} ' + String(conv.total_tokens || 0) }));
     details.appendChild(sec);
 
     // Actions
@@ -757,9 +759,9 @@ export function messagesClientJS(opts) {
     actions.textContent = '';
     actions.appendChild(el('button', {
       className: 'msg-info-action-btn danger',
-      text: 'Delete Conversation',
+      text: '${tJs("messages.deleteConversationAction", lang)}',
       onclick: function() {
-        if (confirm('Delete this conversation?')) {
+        if (confirm('${tJs("messages.deleteConfirm", lang)}')) {
           fetch('/api/chat/conversations/' + encodeURIComponent(conv.id), { method: 'DELETE' })
             .then(function() { window.location.href = '/dashboard/messages'; });
         }
@@ -783,10 +785,10 @@ export function messagesClientJS(opts) {
     profile.appendChild(avatar);
     profile.appendChild(el('div', { className: 'msg-info-name', text: displayName }));
 
-    var idEl = el('div', { className: 'msg-info-id', text: contact.crow_id || '', title: 'Click to copy' });
+    var idEl = el('div', { className: 'msg-info-id', text: contact.crow_id || '', title: '${tJs("messages.clickToCopy", lang)}' });
     idEl.addEventListener('click', function() {
       navigator.clipboard.writeText(contact.crow_id || '').then(function() {
-        idEl.textContent = 'Copied!';
+        idEl.textContent = '${tJs("messages.copied", lang)}';
         setTimeout(function() { idEl.textContent = contact.crow_id || ''; }, 1500);
       });
     });
@@ -799,18 +801,18 @@ export function messagesClientJS(opts) {
     // Status
     var isOnline = contact.last_seen && (Date.now() - new Date(contact.last_seen).getTime()) < 300000;
     var statusSec = el('div', { className: 'msg-info-section' });
-    statusSec.appendChild(el('div', { className: 'msg-info-section-title', text: 'Status' }));
+    statusSec.appendChild(el('div', { className: 'msg-info-section-title', text: '${tJs("messages.status", lang)}' }));
     var statusRow = el('div', { className: 'msg-info-row' });
     statusRow.appendChild(el('span', { className: 'msg-chat-header-status ' + (isOnline ? 'online' : 'offline'), css: 'display:inline-block' }));
-    statusRow.appendChild(document.createTextNode(' ' + (isOnline ? 'Online' : 'Last seen ' + relativeTime(contact.last_seen))));
+    statusRow.appendChild(document.createTextNode(' ' + (isOnline ? '${tJs("messages.onlineStatus", lang)}' : '${tJs("messages.lastSeen", lang)} ' + relativeTime(contact.last_seen))));
     statusSec.appendChild(statusRow);
     details.appendChild(statusSec);
 
     // Security
     var secSec = el('div', { className: 'msg-info-section' });
-    secSec.appendChild(el('div', { className: 'msg-info-section-title', text: 'Security' }));
+    secSec.appendChild(el('div', { className: 'msg-info-section-title', text: '${tJs("messages.security", lang)}' }));
     var encRow = el('div', { className: 'msg-info-row', css: 'color:var(--crow-success)' });
-    encRow.textContent = '\\ud83d\\udd12 End-to-end encrypted';
+    encRow.textContent = '\\ud83d\\udd12 ${tJs("messages.e2eEncrypted", lang)}';
     secSec.appendChild(encRow);
     if (contact.ed25519_pubkey) {
       secSec.appendChild(el('div', {
@@ -827,10 +829,10 @@ export function messagesClientJS(opts) {
 
     actions.appendChild(el('button', {
       className: 'msg-info-action-btn danger',
-      text: contact.is_blocked ? 'Unblock Contact' : 'Block Contact',
+      text: contact.is_blocked ? '${tJs("messages.unblockContact", lang)}' : '${tJs("messages.blockContact", lang)}',
       onclick: function() {
         var action = contact.is_blocked ? 'unblock' : 'block';
-        if (action === 'block' && !confirm('Block this contact? They won\\'t be able to message you.')) return;
+        if (action === 'block' && !confirm('${tJs("messages.blockConfirm", lang)}')) return;
         var form = document.createElement('form');
         form.method = 'POST';
         form.style.display = 'none';

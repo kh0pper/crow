@@ -4,14 +4,15 @@
 
 import { escapeHtml, statCard, statGrid, section, formatDate, formatBytes, badge } from "../shared/components.js";
 import { ICON_INTEGRATIONS } from "../shared/empty-state-icons.js";
+import { t, tJs } from "../shared/i18n.js";
 
 function mimeIcon(mime) {
-  if (!mime) return "📁";
-  if (mime.startsWith("image/")) return "🖼️";
-  if (mime === "application/pdf") return "📄";
-  if (mime.startsWith("video/")) return "🎬";
-  if (mime.startsWith("audio/")) return "🎵";
-  return "📁";
+  if (!mime) return "\u{1F4C1}";
+  if (mime.startsWith("image/")) return "\u{1F5BC}\uFE0F";
+  if (mime === "application/pdf") return "\u{1F4C4}";
+  if (mime.startsWith("video/")) return "\u{1F3AC}";
+  if (mime.startsWith("audio/")) return "\u{1F3B5}";
+  return "\u{1F4C1}";
 }
 
 function mimeCategory(mime) {
@@ -38,7 +39,7 @@ export default {
   route: "/dashboard/files",
   navOrder: 30,
 
-  async handler(req, res, { db, layout }) {
+  async handler(req, res, { db, layout, lang }) {
     // Handle POST actions
     if (req.method === "POST") {
       const { action } = req.body;
@@ -79,13 +80,13 @@ export default {
     // Color-coded quota bar
     const quotaColor = usedPct >= 95 ? "#e74c3c" : usedPct >= 80 ? "#f39c12" : "linear-gradient(90deg, #10b981, #22c55e)";
     const quotaWarning = usedPct >= 95
-      ? `<div style="color:#e74c3c;font-size:0.85rem;margin-top:0.5rem;font-weight:500">Storage critically full — free space or increase quota</div>`
+      ? `<div style="color:#e74c3c;font-size:0.85rem;margin-top:0.5rem;font-weight:500">${t("files.storageCriticallyFull", lang)}</div>`
       : usedPct >= 80
-        ? `<div style="color:#f39c12;font-size:0.85rem;margin-top:0.5rem">Storage usage is high — consider freeing space</div>`
+        ? `<div style="color:#f39c12;font-size:0.85rem;margin-top:0.5rem">${t("files.storageUsageHigh", lang)}</div>`
         : "";
     const quotaBar = quotaMb > 0 ? `<div style="margin-top:0.75rem">
       <div style="display:flex;justify-content:space-between;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.35rem">
-        <span>Storage Quota</span>
+        <span>${t("files.storageQuota", lang)}</span>
         <span>${formatBytes(totalSize)} / ${quotaMb >= 1024 ? (quotaMb / 1024).toFixed(1) + " GB" : quotaMb + " MB"} (${usedPct}%)</span>
       </div>
       <div style="background:var(--crow-border);border-radius:4px;height:8px;overflow:hidden">
@@ -95,11 +96,11 @@ export default {
     </div>` : "";
 
     const stats = statGrid([
-      statCard("Files", total, { delay: 0 }),
-      statCard("Images", imageCount, { delay: 50 }),
-      statCard("Used", formatBytes(totalSize), { delay: 100 }),
-      statCard("Quota", `${usedPct}%`, { delay: 150 }),
-      statCard("Storage", storageOnline ? "Online" : "Offline", { delay: 200 }),
+      statCard(t("files.filesCount", lang), total, { delay: 0 }),
+      statCard(t("files.images", lang), imageCount, { delay: 50 }),
+      statCard(t("files.used", lang), formatBytes(totalSize), { delay: 100 }),
+      statCard(t("files.quota", lang), `${usedPct}%`, { delay: 150 }),
+      statCard(t("files.storage", lang), storageOnline ? t("files.online", lang) : t("files.offline", lang), { delay: 200 }),
     ]);
 
     // Filter by type
@@ -124,10 +125,10 @@ export default {
       : "color:var(--crow-text-muted);text-decoration:none;padding:0.25rem 0.5rem;border-bottom:2px solid transparent";
 
     const filterTabs = `<div style="display:flex;gap:1rem;margin-bottom:1rem;font-size:0.85rem;border-bottom:1px solid var(--crow-border);padding-bottom:0">
-      <a href="/dashboard/files" style="${filterStyle(typeFilter === "")}">All</a>
-      <a href="/dashboard/files?type=image" style="${filterStyle(typeFilter === "image")}">Images</a>
-      <a href="/dashboard/files?type=document" style="${filterStyle(typeFilter === "document")}">Documents</a>
-      <a href="/dashboard/files?type=other" style="${filterStyle(typeFilter === "other")}">Other</a>
+      <a href="/dashboard/files" style="${filterStyle(typeFilter === "")}">${t("files.all", lang)}</a>
+      <a href="/dashboard/files?type=image" style="${filterStyle(typeFilter === "image")}">${t("files.images", lang)}</a>
+      <a href="/dashboard/files?type=document" style="${filterStyle(typeFilter === "document")}">${t("files.documents", lang)}</a>
+      <a href="/dashboard/files?type=other" style="${filterStyle(typeFilter === "other")}">${t("files.other", lang)}</a>
     </div>`;
 
     // File grid
@@ -136,13 +137,13 @@ export default {
       if (storageOnline) {
         fileGrid = `<div class="empty-state">
           <div style="margin-bottom:1rem">${ICON_INTEGRATIONS}</div>
-          <h3>No files yet</h3>
-          <p>Upload files by dragging them into the zone above, or ask your AI to upload something.</p>
+          <h3>${t("files.noFilesYet", lang)}</h3>
+          <p>${t("files.uploadHint", lang)}</p>
         </div>`;
       } else {
         fileGrid = `<div class="empty-state">
           <div style="margin-bottom:1rem">${ICON_INTEGRATIONS}</div>
-          <h3>Storage not configured</h3>
+          <h3>${t("files.storageNotConfigured", lang)}</h3>
           <p>Set up MinIO to start storing files. Add <code>MINIO_ENDPOINT</code> to your <code>.env</code> to get started.</p>
         </div>`;
       }
@@ -153,16 +154,16 @@ export default {
         const icon = mimeIcon(f.mime_type);
         const size = formatBytes(f.size_bytes);
         const cat = mimeCategory(f.mime_type);
-        const catLabel = cat === "image" ? "Image" : cat === "document" ? "Doc" : "File";
+        const catLabel = cat === "image" ? t("files.imageCategory", lang) : cat === "document" ? t("files.docCategory", lang) : t("files.fileCategory", lang);
 
         const thumb = isImage
           ? `<img src="${escapeHtml(url)}" alt="${escapeHtml(f.original_name)}" loading="lazy">`
           : `<span class="icon">${icon}</span>`;
 
         const refBadge = f.reference_type === "blog_post"
-          ? `<span style="display:inline-block;font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:4px;background:var(--crow-accent);color:#fff;margin-left:0.25rem">Blog</span>`
+          ? `<span style="display:inline-block;font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:4px;background:var(--crow-accent);color:#fff;margin-left:0.25rem">${t("files.blogBadge", lang)}</span>`
           : f.reference_type === "shared"
-            ? `<span style="display:inline-block;font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:4px;background:#6366f1;color:#fff;margin-left:0.25rem">Shared</span>`
+            ? `<span style="display:inline-block;font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:4px;background:#6366f1;color:#fff;margin-left:0.25rem">${t("files.sharedBadge", lang)}</span>`
             : f.reference_type
               ? `<span style="display:inline-block;font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:4px;background:var(--crow-text-muted);color:#fff;margin-left:0.25rem">${escapeHtml(f.reference_type)}</span>`
               : "";
@@ -181,14 +182,14 @@ export default {
               ${typeBadge}${refBadge}
               <span style="margin-left:0.25rem">${escapeHtml(size)}</span>
             </div>
-            <div class="file-meta" style="margin-top:0.25rem">${escapeHtml(formatDate(f.created_at))}</div>
+            <div class="file-meta" style="margin-top:0.25rem">${escapeHtml(formatDate(f.created_at, lang))}</div>
           </div>
           <div class="file-actions">
-            <button class="btn btn-sm btn-secondary" onclick="navigator.clipboard.writeText('${escapedUrl}').then(function(){this.textContent='Copied!'}.bind(this))" title="Copy URL">Copy URL</button>
-            <form method="POST" style="display:inline" onsubmit="return confirm('Delete ${escapedName}?')">
+            <button class="btn btn-sm btn-secondary" onclick="navigator.clipboard.writeText('${escapedUrl}').then(function(){this.textContent='${tJs("files.copied", lang)}'}.bind(this))" title="${t("files.copyUrl", lang)}">${t("files.copyUrl", lang)}</button>
+            <form method="POST" style="display:inline" onsubmit="return confirm('${tJs("common.delete", lang)} ${escapedName}?')">
               <input type="hidden" name="action" value="delete">
               <input type="hidden" name="s3_key" value="${escapedKey}">
-              <button class="btn btn-sm btn-danger" type="submit">Delete</button>
+              <button class="btn btn-sm btn-danger" type="submit">${t("files.deleteFile", lang)}</button>
             </form>
           </div>
         </div>`;
@@ -201,14 +202,14 @@ export default {
     let uploadZone = "";
     if (storageOnline) {
       uploadZone = `<div id="upload-zone" style="border:2px dashed var(--crow-border);border-radius:12px;padding:2rem;text-align:center;cursor:pointer;transition:border-color 0.2s,background 0.2s">
-  <div style="font-size:1.5rem;margin-bottom:0.5rem">Drop files here</div>
-  <div style="color:var(--crow-text-muted);font-size:0.9rem;margin-bottom:1rem">or click to browse</div>
+  <div style="font-size:1.5rem;margin-bottom:0.5rem">${t("files.dropFilesHere", lang)}</div>
+  <div style="color:var(--crow-text-muted);font-size:0.9rem;margin-bottom:1rem">${t("files.orClickBrowse", lang)}</div>
   <input type="file" id="file-input" multiple style="display:none">
   <div style="display:flex;gap:0.75rem;justify-content:center;align-items:center;flex-wrap:wrap">
     <select id="upload-ref-type" style="padding:0.4rem 0.75rem;border:1px solid var(--crow-border);border-radius:6px;background:var(--crow-bg);color:var(--crow-text);font-size:0.85rem">
-      <option value="">General</option>
-      <option value="blog_post">Blog Media</option>
-      <option value="shared">Shared File</option>
+      <option value="">${t("files.general", lang)}</option>
+      <option value="blog_post">${t("files.blogMedia", lang)}</option>
+      <option value="shared">${t("files.sharedFile", lang)}</option>
     </select>
   </div>
   <div id="upload-progress" style="margin-top:1rem;display:none"></div>
@@ -277,11 +278,11 @@ export default {
       ${gridStyles}
       ${stats}
       ${quotaBar}
-      ${uploadZone ? section("Upload", uploadZone, { delay: 150 }) : ""}
-      ${section("Files", filterTabs + fileGrid, { delay: 200 })}
+      ${uploadZone ? section(t("files.upload", lang), uploadZone, { delay: 150 }) : ""}
+      ${section(t("files.filesSection", lang), filterTabs + fileGrid, { delay: 200 })}
       ${uploadScript}
     `;
 
-    return layout({ title: "Files", content });
+    return layout({ title: t("files.pageTitle", lang), content });
   },
 };

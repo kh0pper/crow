@@ -11,9 +11,12 @@
  * via escapeNotifHtml() before DOM insertion. Health data is numeric only.
  */
 
+import { t, tJs } from "./i18n.js";
+
 // ─── Shared notification JS (used by both classic and tamagotchi modes) ───
 
-export const sharedNotifJs = `
+export function sharedNotifJs(lang) {
+  return `
   let _notifPollTimer = null;
   let _tabVisible = true;
 
@@ -39,25 +42,25 @@ export const sharedNotifJs = `
   function formatTimeAgo(iso) {
     var diff = Date.now() - new Date(iso + 'Z').getTime();
     var mins = Math.floor(diff / 60000);
-    if (mins < 1) return 'just now';
-    if (mins < 60) return mins + 'm ago';
+    if (mins < 1) return '${tJs("time.justNow", lang)}';
+    if (mins < 60) return mins + '${tJs("time.mAgo", lang)}';
     var hrs = Math.floor(mins / 60);
-    if (hrs < 24) return hrs + 'h ago';
-    return Math.floor(hrs / 24) + 'd ago';
+    if (hrs < 24) return hrs + '${tJs("time.hAgo", lang)}';
+    return Math.floor(hrs / 24) + '${tJs("time.dAgo", lang)}';
   }
 
   async function loadNotifications() {
     var list = document.getElementById('notif-list');
     try {
       var resp = await fetch('/api/notifications?unread_only=true&limit=20');
-      if (!resp.ok) { list.textContent = 'Error loading'; return; }
+      if (!resp.ok) { list.textContent = '${tJs("notif.errorLoading", lang)}'; return; }
       var data = await resp.json();
 
       if (!data.notifications || data.notifications.length === 0) {
         list.textContent = '';
         var empty = document.createElement('div');
         empty.style.cssText = 'color:var(--crow-text-muted);text-align:center;padding:1rem';
-        empty.textContent = 'No notifications';
+        empty.textContent = '${tJs("notif.noNotifications", lang)}';
         list.appendChild(empty);
         return;
       }
@@ -100,7 +103,7 @@ export const sharedNotifJs = `
 
         var dismiss = document.createElement('button');
         dismiss.className = 'notif-item-dismiss';
-        dismiss.title = 'Dismiss';
+        dismiss.title = '${tJs("notif.dismiss", lang)}';
         dismiss.textContent = '\\u00D7';
         dismiss.onclick = function(e) { dismissNotification(e, n.id); };
         item.appendChild(dismiss);
@@ -108,7 +111,7 @@ export const sharedNotifJs = `
         list.appendChild(item);
       });
     } catch(e) {
-      list.textContent = 'Failed to load';
+      list.textContent = '${tJs("notif.failedToLoad", lang)}';
     }
   }
 
@@ -140,32 +143,35 @@ export const sharedNotifJs = `
     } catch(e) {}
   }
 `;
+}
 
 // ─── Classic mode: bell icon + health pulse ───
 
-export const headerIconsHtml = `
-<div class="header-icon-btn" id="health-icon-btn" onclick="toggleHealthDropdown(event)" title="System health">
+export function headerIconsHtml(lang) {
+  return `
+<div class="header-icon-btn" id="health-icon-btn" onclick="toggleHealthDropdown(event)" title="${t("notif.systemHealth", lang)}">
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
     <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
   </svg>
   <span id="health-label" class="health-label">--</span>
   <div id="health-dropdown" class="header-dropdown" style="display:none">
-    <div class="dropdown-title">System Health</div>
-    <div id="health-stats" class="dropdown-body">Loading...</div>
+    <div class="dropdown-title">${t("notif.systemHealth", lang)}</div>
+    <div id="health-stats" class="dropdown-body">${t("common.loading", lang)}</div>
   </div>
 </div>
-<div class="header-icon-btn" id="notif-icon-btn" onclick="toggleNotifDropdown(event)" title="Notifications">
+<div class="header-icon-btn" id="notif-icon-btn" onclick="toggleNotifDropdown(event)" title="${t("notif.notifications", lang)}">
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
     <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
     <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
   </svg>
   <span id="notif-badge" class="notif-badge" style="display:none">0</span>
   <div id="notif-dropdown" class="header-dropdown notif-dropdown" style="display:none">
-    <div class="dropdown-title">Notifications <button class="btn btn-sm btn-secondary" onclick="dismissAllNotifications(event)">Clear all</button></div>
-    <div id="notif-list" class="dropdown-body">Loading...</div>
+    <div class="dropdown-title">${t("notif.notifications", lang)} <button class="btn btn-sm btn-secondary" onclick="dismissAllNotifications(event)">${t("notif.clearAll", lang)}</button></div>
+    <div id="notif-list" class="dropdown-body">${t("common.loading", lang)}</div>
   </div>
 </div>
 `;
+}
 
 export const headerIconsCss = `
   .header-icon-btn {
@@ -317,8 +323,9 @@ export const headerIconsCss = `
   }
 `;
 
-export const headerIconsJs = `
-  ${sharedNotifJs}
+export function headerIconsJs(lang) {
+  return `
+  ${sharedNotifJs(lang)}
 
   function toggleHealthDropdown(e) {
     e.stopPropagation();
@@ -370,9 +377,9 @@ export const headerIconsJs = `
         var stats = document.getElementById('health-stats');
         stats.textContent = '';
         var rows = [
-          ['RAM', data.health.ram_used_mb + ' / ' + data.health.ram_total_mb + ' MB (' + pct + '%)'],
-          ['CPUs', '' + data.health.cpus],
-          ['Uptime', formatUptime(data.health.uptime_seconds)]
+          ['${tJs("notif.ram", lang)}', data.health.ram_used_mb + ' / ' + data.health.ram_total_mb + ' MB (' + pct + '%)'],
+          ['${tJs("notif.cpus", lang)}', '' + data.health.cpus],
+          ['${tJs("notif.uptime", lang)}', formatUptime(data.health.uptime_seconds)]
         ];
         rows.forEach(function(r) {
           var row = document.createElement('div');
@@ -394,10 +401,12 @@ export const headerIconsJs = `
   pollNotifications();
   _notifPollTimer = setInterval(pollNotifications, 60000);
 `;
+}
 
 // ─── Tamagotchi mode: animated pixel crow with combined dropdown ───
 
-export const tamagotchiHtml = `
+export function tamagotchiHtml(lang) {
+  return `
 <div class="crow-tama-wrap" id="crow-tama-wrap">
   <svg class="crow-tama crow-happy" id="crow-tama" viewBox="0 0 48 56" width="42" height="49" onclick="toggleCrowDropdown(event)">
     <g class="crow-body-group">
@@ -431,22 +440,23 @@ export const tamagotchiHtml = `
   <!-- Combined dropdown -->
   <div id="crow-dropdown" class="crow-dropdown" style="display:none" onclick="event.stopPropagation()">
     <div class="dropdown-title">
-      <span>Status</span>
-      <button class="btn btn-sm btn-secondary" onclick="dismissAllNotifications(event)">Clear all</button>
+      <span>${t("notif.status", lang)}</span>
+      <button class="btn btn-sm btn-secondary" onclick="dismissAllNotifications(event)">${t("notif.clearAll", lang)}</button>
     </div>
     <div class="crow-health-bar" id="crow-health-bar">
       <span class="crow-health-metric">CPU <span id="crow-cpu">--</span></span>
       <span class="crow-health-sep">&middot;</span>
       <span class="crow-health-metric">RAM <span id="crow-ram">--</span></span>
       <span class="crow-health-sep">&middot;</span>
-      <span class="crow-health-metric">Disk <span id="crow-disk">--</span></span>
+      <span class="crow-health-metric">${t("health.disk", lang)} <span id="crow-disk">--</span></span>
       <span class="crow-health-sep">&middot;</span>
       <span class="crow-health-metric" id="crow-uptime">--</span>
     </div>
-    <div id="notif-list" class="dropdown-body">Loading...</div>
+    <div id="notif-list" class="dropdown-body">${t("common.loading", lang)}</div>
   </div>
 </div>
 `;
+}
 
 export const tamagotchiCss = `
   /* ─── Tamagotchi Crow ─── */
@@ -578,8 +588,9 @@ export const tamagotchiCss = `
   }
 `;
 
-export const tamagotchiJs = `
-  ${sharedNotifJs}
+export function tamagotchiJs(lang) {
+  return `
+  ${sharedNotifJs(lang)}
 
   function toggleCrowDropdown(e) {
     e.stopPropagation();
@@ -674,3 +685,4 @@ export const tamagotchiJs = `
   pollNotifications();
   _notifPollTimer = setInterval(pollNotifications, 60000);
 `;
+}

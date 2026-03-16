@@ -18,6 +18,7 @@ import {
   parseCookies,
   validatePasswordStrength,
 } from "./auth.js";
+import { SUPPORTED_LANGS } from "./shared/i18n.js";
 import { resolve } from "node:path";
 import { registerPanel, loadExternalPanels, getAllPanels, getVisiblePanels, getPanel } from "./panel-registry.js";
 import { createDbClient } from "../../db.js";
@@ -62,17 +63,21 @@ export default function dashboardRouter(mcpAuthMiddleware) {
 
   // Login page
   router.get("/dashboard/login", async (req, res) => {
+    const cookies = parseCookies(req);
+    const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
     const hasPassword = await isPasswordSet();
     const setupToken = process.env.CROW_SETUP_TOKEN;
     if (!hasPassword && setupToken && req.query.token !== setupToken) {
       // Setup token required but not provided — show gated message
-      return res.type("html").send(renderLogin({ isSetup: true, error: "Use the link you were sent to set up your password." }));
+      return res.type("html").send(renderLogin({ isSetup: true, error: "Use the link you were sent to set up your password.", lang }));
     }
-    res.type("html").send(renderLogin({ isSetup: !hasPassword, setupToken: !hasPassword ? setupToken : undefined }));
+    res.type("html").send(renderLogin({ isSetup: !hasPassword, setupToken: !hasPassword ? setupToken : undefined, lang }));
   });
 
   // Login handler
   router.post("/dashboard/login", async (req, res) => {
+    const cookies = parseCookies(req);
+    const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
     const { password, confirm } = req.body;
     const hasPassword = await isPasswordSet();
 
@@ -80,22 +85,22 @@ export default function dashboardRouter(mcpAuthMiddleware) {
       // First-time setup
       const strength = validatePasswordStrength(password);
       if (!strength.valid) {
-        return res.type("html").send(renderLogin({ isSetup: true, error: strength.message }));
+        return res.type("html").send(renderLogin({ isSetup: true, error: strength.message, lang }));
       }
       if (password !== confirm) {
-        return res.type("html").send(renderLogin({ isSetup: true, error: "Passwords don't match." }));
+        return res.type("html").send(renderLogin({ isSetup: true, error: "Passwords don't match.", lang }));
       }
       // Setup token gating: if CROW_SETUP_TOKEN is set and no password exists, require it
       const setupToken = process.env.CROW_SETUP_TOKEN;
       if (setupToken && req.body.setup_token !== setupToken) {
-        return res.type("html").send(renderLogin({ isSetup: true, error: "Invalid setup token. Use the link you were sent." }));
+        return res.type("html").send(renderLogin({ isSetup: true, error: "Invalid setup token. Use the link you were sent.", lang }));
       }
       await setPassword(password);
     }
 
     const result = await attemptLogin(password, req.ip);
     if (result.error) {
-      return res.type("html").send(renderLogin({ isSetup: false, error: result.error }));
+      return res.type("html").send(renderLogin({ isSetup: false, error: result.error, lang }));
     }
 
     setSessionCookie(res, result.token);
@@ -144,32 +149,37 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     if (!panel) return next();
 
     const db = createDbClient();
+    let lang = "en";
     try {
       const visiblePanels = getVisiblePanels();
 
-      // Get theme + tamagotchi preferences
-      const [themeResult, tamaResult] = await Promise.all([
+      // Get theme + tamagotchi + language preferences
+      const [themeResult, tamaResult, langResult] = await Promise.all([
         db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'dashboard_theme'", args: [] }),
         db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'tamagotchi_enabled'", args: [] }),
+        db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'language'", args: [] }),
       ]);
       const theme = themeResult.rows[0]?.value || "dark";
       // Missing key = true (tamagotchi on by default)
       const tamaEnabled = tamaResult.rows[0]?.value !== "false";
+      lang = langResult.rows[0]?.value || "en";
 
-      const activeHeaderHtml = tamaEnabled ? tamagotchiHtml : headerIconsHtml;
-      const activeHeaderJs = tamaEnabled ? tamagotchiJs : headerIconsJs;
+      const activeHeaderHtml = tamaEnabled ? tamagotchiHtml(lang) : headerIconsHtml(lang);
+      const activeHeaderJs = tamaEnabled ? tamagotchiJs(lang) : headerIconsJs(lang);
 
       const result = await panel.handler(req, res, {
         db,
         appRoot: resolve(import.meta.dirname, "../../.."),
+        lang,
         layout: (opts) => renderLayout({
           ...opts,
           activePanel: panelId,
           panels: visiblePanels,
           theme,
+          lang,
           headerIcons: activeHeaderHtml,
-          afterContent: playerBarHtml,
-          scripts: (opts.scripts || "") + playerBarJs + activeHeaderJs,
+          afterContent: playerBarHtml(lang),
+          scripts: (opts.scripts || "") + playerBarJs(lang) + activeHeaderJs,
         }),
       });
 
@@ -186,6 +196,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
           activePanel: panelId,
           panels: getVisiblePanels(),
           theme: "dark",
+          lang,
         }));
       }
     } finally {

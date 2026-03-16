@@ -8,6 +8,7 @@
  */
 
 import { escapeHtml, statCard, statGrid, section, formField, badge, dataTable } from "../shared/components.js";
+import { t, tJs } from "../shared/i18n.js";
 import { existsSync, readFileSync, writeFileSync, unlinkSync, readdirSync, mkdirSync } from "fs";
 import { join, basename, dirname } from "path";
 import { homedir } from "os";
@@ -54,7 +55,7 @@ export default {
   route: "/dashboard/skills",
   navOrder: 35,
 
-  async handler(req, res, { db, layout }) {
+  async handler(req, res, { db, layout, lang }) {
     // Handle POST actions
     if (req.method === "POST") {
       const { action } = req.body;
@@ -118,7 +119,7 @@ export default {
       }
 
       const readOnly = !isUserSkill;
-      const sourceLabel = isUserSkill ? "User Skill (editable)" : "Built-in Skill (read-only)";
+      const sourceLabel = isUserSkill ? t("skills.userSkillEditable", lang) : t("skills.builtInReadOnly", lang);
 
       let editForm;
       if (readOnly) {
@@ -133,9 +134,9 @@ export default {
               <input type="hidden" name="action" value="save">
               <input type="hidden" name="filename" value="${escapeHtml(safeName)}">
               <input type="hidden" name="content" value="${escapeHtml(content)}">
-              <button type="submit" class="btn btn-primary" onclick="return confirm('This will copy the built-in skill to your user skills directory (~/.crow/skills/) where you can customize it. The user version will take precedence over the built-in one. Continue?')">Override with Custom Copy</button>
+              <button type="submit" class="btn btn-primary" onclick="return confirm('${tJs("skills.overrideConfirm", lang)}')">${t("skills.overrideButton", lang)}</button>
             </form>
-            <a href="/dashboard/skills" class="btn btn-secondary">Back</a>
+            <a href="/dashboard/skills" class="btn btn-secondary">${t("skills.back", lang)}</a>
           </div>`;
       } else {
         // Editable form for user skills
