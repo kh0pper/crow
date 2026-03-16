@@ -21,65 +21,6 @@ function isGenericLogo(imageUrl) {
 }
 
 /**
- * Resolve a Google News redirect URL to the real publisher article URL.
- * Google News encrypts article URLs in JS-only redirects, so we search the
- * publisher's site (from `source_url`) for the article by title.
- * @param {string} title - Article title
- * @param {string} sourceUrl - Publisher domain URL (e.g. "https://apnews.com")
- * @returns {Promise<string|null>} Resolved article URL, or null
- */
-async function resolveGoogleNewsArticle(title, sourceUrl) {
-  if (!title || !sourceUrl) return null;
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
-  try {
-    // Fetch the publisher's homepage and search for a link matching the title
-    const res = await fetch(sourceUrl, {
-      signal: controller.signal,
-      headers: { "User-Agent": USER_AGENT, Accept: "text/html, */*" },
-      redirect: "follow",
-    });
-    if (!res.ok) return null;
-    const html = await res.text();
-
-    // Build keyword search — use first few significant words from the title
-    const keywords = title.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter(w => w.length > 3).slice(0, 5);
-    if (keywords.length < 2) return null;
-
-    // Find all links and score them by keyword overlap with the title
-    const linkPattern = /href="(https?:\/\/[^"]+)"/g;
-    let bestUrl = null;
-    let bestScore = 0;
-
-    for (const match of html.matchAll(linkPattern)) {
-      const href = match[1];
-      // Only consider links on the same domain
-      try {
-        const linkHost = new URL(href).hostname;
-        const sourceHost = new URL(sourceUrl).hostname;
-        if (!linkHost.endsWith(sourceHost.replace(/^www\./, "")) &&
-            !sourceHost.endsWith(linkHost.replace(/^www\./, ""))) continue;
-      } catch { continue; }
-
-      // Score by how many title keywords appear in the URL slug
-      const hrefLower = href.toLowerCase();
-      const score = keywords.filter(kw => hrefLower.includes(kw)).length;
-      if (score > bestScore && score >= 2) {
-        bestScore = score;
-        bestUrl = href;
-      }
-    }
-
-    return bestUrl;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/**
  * Extract full content from an article URL.
  * @returns {{ text, html, image, wordCount, readTime }}
  */
@@ -135,35 +76,29 @@ export async function extractContent(url) {
  */
 export async function extractContentBatch(db, limit = 5) {
   const { rows } = await db.execute({
-    sql: `SELECT a.id, a.url AS url, a.image_url, a.title, a.source_url, s.source_type
+    sql: `SELECT a.id, a.url AS url, a.image_url
           FROM media_articles a
           JOIN media_sources s ON s.id = a.source_id
           WHERE a.content_fetch_status = 'pending' AND a.url IS NOT NULL
+            AND s.source_type != 'google_news'
           LIMIT ?`,
     args: [limit],
   });
+
+  // Skip Google News articles entirely — their redirect URLs are unresolvable
+  // server-side (encrypted JS-only redirects). Mark them as skipped in bulk.
+  await db.execute(
+    `UPDATE media_articles SET content_fetch_status = 'skipped'
+     WHERE content_fetch_status = 'pending'
+       AND source_id IN (SELECT id FROM media_sources WHERE source_type = 'google_news')`
+  );
 
   let processed = 0;
   let errors = 0;
 
   for (const article of rows) {
     try {
-      let fetchUrl = article.url;
-
-      // Google News articles have unresolvable redirect URLs — resolve via publisher site
-      if (article.source_type === "google_news" && article.source_url) {
-        const resolved = await resolveGoogleNewsArticle(article.title, article.source_url);
-        if (resolved) {
-          // Update the article's URL to the real one
-          await db.execute({
-            sql: "UPDATE media_articles SET url = ? WHERE id = ?",
-            args: [resolved, article.id],
-          });
-          fetchUrl = resolved;
-        }
-      }
-
-      const result = await extractContent(fetchUrl);
+      const result = await extractContent(article.url);
 
       if (result.text) {
         await db.execute({
