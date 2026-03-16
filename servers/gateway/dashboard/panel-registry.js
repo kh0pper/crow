@@ -79,6 +79,16 @@ export function getAllPanels() {
 }
 
 /**
+ * Get visible panels (excludes hidden panels) sorted by navOrder.
+ * Used for sidebar nav and dashboard home redirect.
+ */
+export function getVisiblePanels() {
+  return [...panels.values()]
+    .filter((p) => !p.hidden)
+    .sort((a, b) => (a.navOrder || 0) - (b.navOrder || 0));
+}
+
+/**
  * Get a panel by ID.
  */
 export function getPanel(id) {

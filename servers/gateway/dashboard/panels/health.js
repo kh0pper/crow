@@ -40,6 +40,7 @@ export default {
   icon: "health",
   route: "/dashboard/nest",
   navOrder: 5,
+  hidden: true,
 
   async handler(req, res, { db, layout }) {
     // --- CPU usage (average across cores, sampled over ~100ms) ---
