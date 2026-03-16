@@ -150,6 +150,7 @@ export async function initMediaTables(db) {
 
   await addColumnIfMissing(db, "media_articles", "image_url", "TEXT");
   await addColumnIfMissing(db, "media_articles", "audio_url", "TEXT");
+  await addColumnIfMissing(db, "media_articles", "source_url", "TEXT");
 
   // --- Audio Cache ---
 

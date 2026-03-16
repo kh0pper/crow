@@ -239,6 +239,9 @@ function parseRss(xml) {
                            item.match(/<enclosure[^>]+url="([^"]+)"[^>]+type="audio\/[^"]*"/);
     if (audioEnclosure) hasAudioEnclosures = true;
 
+    // <source url="https://apnews.com">AP News</source> (Google News provides this)
+    const sourceUrlMatch = item.match(/<source\s+url="([^"]+)"/);
+
     items.push({
       guid: guid ? getCDATA(guid) : link || null,
       title: getCDATA(getTag(item, "title") || "Untitled"),
@@ -249,6 +252,7 @@ function parseRss(xml) {
       summary: stripHtml(getCDATA(getTag(item, "description") || "")),
       image: extractItemImage(item),
       enclosureAudio: audioEnclosure ? audioEnclosure[1] : null,
+      sourceUrl: sourceUrlMatch ? sourceUrlMatch[1] : null,
     });
   }
 

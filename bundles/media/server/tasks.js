@@ -132,8 +132,8 @@ async function fetchSingleSource(db, source) {
         await db.execute({
           sql: `INSERT OR IGNORE INTO media_articles
                 (source_id, guid, url, title, author, pub_date, content_raw, summary,
-                 image_url, audio_url, content_fetch_status, ai_analysis_status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', datetime('now'))`,
+                 image_url, audio_url, source_url, content_fetch_status, ai_analysis_status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'pending', datetime('now'))`,
           args: [
             source.id,
             guid,
@@ -145,6 +145,7 @@ async function fetchSingleSource(db, source) {
             item.summary ? item.summary.slice(0, 2000) : null,
             item.image || null,
             item.enclosureAudio || null,
+            item.sourceUrl || null,
           ],
         });
       } catch {
