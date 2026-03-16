@@ -218,6 +218,30 @@ Once your add-on is tested:
 
 See the [Registry documentation](/developers/addon-registry) for the full submission process.
 
+## Notifications
+
+Add-ons can create notifications that appear in the Crow's Nest bell icon and tamagotchi dropdown. Import the shared helper:
+
+```js
+import { createNotification } from "../../shared/notifications.js";
+// or adjust the relative path based on your add-on's location
+```
+
+Create a notification after user-visible actions:
+
+```js
+try {
+  await createNotification(db, {
+    title: "Task completed: Build report",
+    type: "system",       // "reminder", "media", "peer", or "system"
+    source: "my-addon",   // identifies the origin
+    action_url: "/dashboard/my-panel",  // optional click target
+  });
+} catch {}
+```
+
+Always wrap in `try/catch` so notification failure never breaks the primary action. The helper respects user preferences — if a user disables the notification type in Settings, the call returns `null` silently.
+
 ## Guidelines
 
 - Keep add-ons focused — one purpose per add-on

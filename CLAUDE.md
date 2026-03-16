@@ -88,6 +88,7 @@ servers/memory/server.js       → createMemoryServer(dbPath?, options?) → Mcp
 servers/memory/crow-context.js → Shared crow.md context logic + condensed context for MCP instructions
 servers/memory/index.js        → stdio transport (used by .mcp.json)
 servers/shared/instructions.js → generateInstructions() — MCP instructions field generator
+servers/shared/notifications.js → createNotification(db, opts), cleanupNotifications(db) — preference-aware notification helper
 servers/research/server.js     → createProjectServer(dbPath?, options?) → McpServer (alias: createResearchServer for backward compat)
 servers/research/index.js      → stdio transport (used by .mcp.json)
 servers/sharing/server.js      → createSharingServer(dbPath?, options?) → McpServer
@@ -159,7 +160,8 @@ Uses `@libsql/client` which supports both local SQLite files (default: `~/.crow/
 - **storage_files** — S3 object metadata (key, name, MIME, size, bucket, reference to other items)
 - **blog_posts** — Blog content with slug, status, visibility, tags, cover image
 - **blog_posts_fts** — FTS5 index over blog posts (title, content, excerpt, tags) with triggers
-- **dashboard_settings** — Key-value store for dashboard config (blog settings, theme, password hash)
+- **dashboard_settings** — Key-value store for dashboard config (blog settings, theme, password hash, notification prefs)
+- **notifications** — User notifications with type filtering (reminder, media, peer, system), priority, expiry, action URLs. Max 500 retention enforced by `cleanupNotifications()`
 - **chat_conversations** — AI chat conversations (provider, model, system prompt, token tracking)
 - **chat_messages** — AI chat messages (role: user/assistant/system/tool, tool_calls JSON, token counts). FK to chat_conversations with CASCADE delete
 
@@ -234,6 +236,7 @@ Node.js >= 18 required. ESM modules (`"type": "module"` in package.json).
 3. If the tool needs new DB columns/tables, update `scripts/init-db.js` and re-run `npm run init-db`
 4. If new FTS columns are needed, update the virtual table definition AND the insert/update/delete triggers
 5. Use `sanitizeFtsQuery()` from `servers/db.js` for any FTS5 MATCH queries and `escapeLikePattern()` for LIKE queries
+6. For user-visible actions (publish, share, install), create a notification via `createNotification(db, { title, type, source, action_url })` from `servers/shared/notifications.js`. Types: `reminder`, `media`, `peer`, `system`. Wrap in `try/catch` so notification failure never breaks the primary action.
 
 ### Adding a new external MCP server
 

@@ -23,6 +23,7 @@ import {
   finalizeEvent,
   getPublicKey,
 } from "nostr-tools/pure";
+import { createNotification } from "../shared/notifications.js";
 import * as nip44 from "nostr-tools/nip44";
 import * as nip19 from "nostr-tools/nip19";
 import { Relay } from "nostr-tools/relay";
@@ -172,11 +173,22 @@ export class NostrManager {
                 // Cache locally
                 if (contactId && this.db) {
                   try {
-                    await this.db.execute({
+                    const result = await this.db.execute({
                       sql: `INSERT OR IGNORE INTO messages (contact_id, nostr_event_id, content, direction, is_read, created_at)
                             VALUES (?, ?, ?, 'received', 0, datetime(?, 'unixepoch'))`,
                       args: [contactId, event.id, decrypted, event.created_at],
                     });
+                    // Only notify for genuinely new messages, not replays
+                    if (result.rowsAffected > 0) {
+                      try {
+                        await createNotification(this.db, {
+                          title: `Message from ${contact.display_name || crowId}`,
+                          type: "peer",
+                          source: "sharing:message",
+                          action_url: "/dashboard/messages",
+                        });
+                      } catch {}
+                    }
                   } catch {
                     // Duplicate event, ignore
                   }

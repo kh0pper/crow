@@ -267,6 +267,58 @@ An object format with an `"enabled"` key is also accepted for backward compatibi
 
 See [Creating Panels](/developers/creating-panels) for a development tutorial.
 
+## Notification System
+
+The Crow's Nest includes a notification system with a bell icon and tamagotchi-style dropdown in the top bar.
+
+### Schema
+
+The `notifications` table stores all notifications:
+
+| Column | Type | Description |
+|---|---|---|
+| `type` | text | `reminder`, `media`, `peer`, or `system` |
+| `source` | text | Origin identifier (e.g., `blog`, `sharing:message`, `bundle-installer`) |
+| `title` | text | Short headline |
+| `body` | text | Optional longer description |
+| `priority` | text | `low`, `normal`, or `high` |
+| `action_url` | text | Dashboard link for click-through |
+| `is_read` | integer | Read status |
+| `is_dismissed` | integer | Dismissed status |
+| `expires_at` | text | Auto-expiry timestamp |
+
+### Shared Helper
+
+`servers/shared/notifications.js` exports two functions:
+
+- **`createNotification(db, opts)`** — Creates a notification after checking user preferences. Returns `{ id }` or `null` if the type is disabled. Always wrap calls in `try/catch` to prevent notification failures from breaking primary actions.
+- **`cleanupNotifications(db)`** — Removes expired notifications and enforces a 500-notification retention limit. Called by the scheduler tick and the REST GET endpoint.
+
+### User Preferences
+
+Users configure which notification types are enabled in Settings → Notifications. Preferences are stored as a JSON object in `dashboard_settings` under the key `notification_prefs`:
+
+```json
+{ "types_enabled": ["reminder", "media", "peer", "system"] }
+```
+
+All types are enabled by default. The `createNotification` helper checks this before inserting.
+
+### Event Sources
+
+| Event | Type | Source |
+|---|---|---|
+| Blog post published | `media` | `blog` |
+| Incoming P2P share | `peer` | `sharing:share` |
+| Incoming Nostr message | `peer` | `sharing:message` |
+| Bundle installed | `system` | `bundle-installer` |
+| Bundle uninstalled | `system` | `bundle-installer` |
+| Scheduled reminder | `reminder` | `scheduler` |
+
+### UI
+
+The notification bell in the top bar shows an unread count badge. Clicking it opens a dropdown with recent notifications, each showing title, time, and source. Notifications can be dismissed individually or cleared in bulk. The REST API at `/api/notifications` provides JSON access for the dropdown's fetch calls.
+
 ## No Build Step
 
 The Crow's Nest has no build step, no bundler, and no node_modules of its own. All HTML, CSS, and minimal JavaScript are generated inline by the server. This keeps the UI lightweight and avoids frontend toolchain complexity.

@@ -17,6 +17,8 @@
  */
 
 import { Router } from "express";
+import { createNotification } from "../../shared/notifications.js";
+import { createDbClient } from "../../db.js";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, copyFileSync, unlinkSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
@@ -606,6 +608,19 @@ export default function bundlesRouter() {
         saveInstalled(installed);
         appendLog(job, "Installation tracked");
 
+        let notifDb;
+        try {
+          notifDb = createDbClient();
+          await createNotification(notifDb, {
+            title: `Installed: ${manifest?.name || bundle_id}`,
+            type: "system",
+            source: "bundle-installer",
+            action_url: "/dashboard/extensions",
+          });
+        } catch {} finally {
+          notifDb?.close();
+        }
+
         finishJob(job, needsRestart ? "complete_restart" : "complete");
       } catch (err) {
         appendLog(job, `Error: ${err.message}`);
@@ -740,6 +755,19 @@ export default function bundlesRouter() {
         const installed = getInstalled().filter((i) => i.id !== bundle_id);
         saveInstalled(installed);
         appendLog(job, "Installation record removed");
+
+        let notifDb;
+        try {
+          notifDb = createDbClient();
+          await createNotification(notifDb, {
+            title: `Removed: ${manifest?.name || bundle_id}`,
+            type: "system",
+            source: "bundle-installer",
+            action_url: "/dashboard/extensions",
+          });
+        } catch {} finally {
+          notifDb?.close();
+        }
 
         finishJob(job, needsRestart ? "complete_restart" : "complete");
       } catch (err) {

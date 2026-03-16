@@ -524,6 +524,12 @@ const translations = {
   "settings.checking": { en: "Checking...", es: "Verificando..." },
   "settings.alreadyUpToDate": { en: "Already up to date.", es: "Ya está actualizado." },
   "settings.helpSetupSection": { en: "Help & Setup", es: "Ayuda y configuración" },
+  "settings.notifications": { en: "Notifications", es: "Notificaciones" },
+  "settings.notifTypes": { en: "Enabled notification types", es: "Tipos de notificación habilitados" },
+  "settings.notifReminder": { en: "Reminders", es: "Recordatorios" },
+  "settings.notifMedia": { en: "Media", es: "Medios" },
+  "settings.notifPeer": { en: "Peer Messages", es: "Mensajes de pares" },
+  "settings.notifSystem": { en: "System", es: "Sistema" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
