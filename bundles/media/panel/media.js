@@ -84,8 +84,19 @@ export default {
       <img src="${escapeHtml(a.image_url)}" alt="" loading="lazy" style="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover">
       ${youtubeOverlay}
     </div>`;
+      } else if (a.source_type === "google_news" && a.author) {
+        // Google News: publisher masthead template
+        const publisher = a.author;
+        const hue = Math.abs(hashCode(publisher)) % 360;
+        imageHtml = `<div style="position:relative;padding-top:56.25%;background:linear-gradient(160deg, hsl(${hue},25%,14%), hsl(${hue + 30},20%,10%));border-radius:6px 6px 0 0;overflow:hidden">
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:start;justify-content:end;padding:0.75rem 1rem">
+        <div style="font-size:0.6rem;letter-spacing:0.08em;text-transform:uppercase;color:hsl(${hue},50%,65%);margin-bottom:0.25rem">via</div>
+        <div style="font-family:'Fraunces',serif;font-size:1.15rem;font-weight:600;color:hsl(${hue},40%,80%);line-height:1.2;text-shadow:0 1px 3px rgba(0,0,0,0.4)">${escapeHtml(publisher)}</div>
+      </div>
+      <div style="position:absolute;top:0.6rem;right:0.75rem;font-size:0.55rem;letter-spacing:0.06em;text-transform:uppercase;color:hsl(${hue},30%,45%);border:1px solid hsl(${hue},20%,25%);padding:0.15rem 0.4rem;border-radius:3px">news</div>
+    </div>`;
       } else {
-        // Gradient fallback with source initial
+        // Generic fallback with source initial
         const initial = (a.source_name || "?").charAt(0).toUpperCase();
         const hue = Math.abs(hashCode(a.source_name || "")) % 360;
         imageHtml = `<div style="position:relative;padding-top:56.25%;background:linear-gradient(135deg, hsl(${hue},40%,20%), hsl(${hue + 40},30%,15%));border-radius:6px 6px 0 0;overflow:hidden">
@@ -137,8 +148,8 @@ export default {
     /** Standard chronological feed query with filters */
     async function buildChronologicalQuery(db, { filterCategory, filterSource, filterUnread, filterStarred, pageOffset }) {
       let sql = `SELECT a.id, a.title, a.author, a.pub_date, a.url, a.summary, a.image_url,
-                        a.topics, a.estimated_read_time,
-                        s.name as source_name, s.category as source_category,
+                        a.topics, a.estimated_read_time, a.audio_url,
+                        s.name as source_name, s.category as source_category, s.source_type,
                         COALESCE(st.is_read, 0) as is_read,
                         COALESCE(st.is_starred, 0) as is_starred
                  FROM media_articles a
@@ -477,8 +488,8 @@ export default {
         const safeQ = sanitizeFtsQuery(searchQuery);
         if (safeQ) {
           let sql = `SELECT a.id, a.title, a.author, a.pub_date, a.url, a.summary, a.image_url,
-                            a.topics, a.estimated_read_time,
-                            s.name as source_name, s.category as source_category,
+                            a.topics, a.estimated_read_time, a.audio_url,
+                            s.name as source_name, s.category as source_category, s.source_type,
                             COALESCE(st.is_read, 0) as is_read,
                             COALESCE(st.is_starred, 0) as is_starred
                      FROM media_articles a
