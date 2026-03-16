@@ -148,6 +148,7 @@ export default defineConfig({
           { text: 'Podcast', link: '/guide/podcast' },
           { text: 'Blog Discovery', link: '/guide/blog-discovery' },
           { text: "Crow's Nest", link: '/guide/crows-nest' },
+          { text: 'Home Screen', link: '/guide/home-screen' },
           { text: 'Sharing', link: '/guide/sharing' },
           { text: 'Relays', link: '/guide/relays' },
           { text: 'Social & Messaging', link: '/guide/social' },

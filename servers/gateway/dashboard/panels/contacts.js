@@ -10,6 +10,7 @@ export default {
   icon: "contacts",
   route: "/dashboard/contacts",
   navOrder: 12,
+  hidden: true,
 
   async handler(req, res, { db, layout }) {
     // --- Handle POST actions ---

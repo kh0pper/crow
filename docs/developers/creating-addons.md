@@ -182,6 +182,32 @@ Test the manifest:
 node -e "const m = JSON.parse(require('fs').readFileSync('manifest.json')); console.log(m.name, m.version, m.type);"
 ```
 
+## Home Screen Tiles
+
+When a bundle add-on is installed, it automatically appears as a tile on the Crow's Nest home screen. No extra configuration required.
+
+### How it works
+
+- Tiles appear after install, disappear after uninstall
+- Tile label comes from `name` in your manifest
+- Tile icon resolves in order: branded logo (for official add-ons) → `icon` field SVG → first-letter fallback
+- Bundles with `webUI` configured open the web interface on click
+- Bundles without `webUI` link to the Extensions panel
+
+### Supported icon keys
+
+The `icon` field in your manifest should be one of these feather-style icon names:
+
+`brain`, `cloud`, `image`, `home`, `book`, `rss`, `mic`, `message-circle`, `gamepad`, `archive`
+
+Unknown icon keys fall back to a first-letter circle.
+
+### What doesn't get tiles
+
+- **MCP servers** — headless, no click target
+- **Skills** — pure markdown, no UI surface
+- **Panels** — already appear via the panel registry (see [Creating Panels](/developers/creating-panels))
+
 ## Publishing
 
 Once your add-on is tested:

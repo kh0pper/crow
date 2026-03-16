@@ -201,6 +201,24 @@ The Crow's Nest landing page (the "Crow's Nest" panel, `navOrder: 5`) includes a
 4. For Docker-based add-ons, checks container status via `docker ps --filter name=<id>` with a **30-second module-level cache** (`_dockerStatusCache` Map) to avoid excessive shell commands
 5. Renders a status dot (green = running, gray = stopped) and an "Open" button for add-ons with a `webUI` manifest field
 
+### Home Screen Tile Pipeline
+
+The Nest home screen renders tiles from two sources:
+
+1. **Panel Registry** — `getVisiblePanels()` returns non-hidden panels sorted by `navOrder`
+2. **Installed bundles** — `getNestData()` reads `~/.crow/installed.json`, loads manifests, checks Docker status
+
+Data flow:
+```
+Panel Registry ──→ getVisiblePanels() ──┐
+                                        ├──→ buildNestHTML() ──→ Grid
+~/.crow/installed.json ──→ getNestData() ──┘
+```
+
+**Tile ordering**: Built-in panels first (by `navOrder`), then bundles (by `installedAt` from installed.json).
+
+**Icon resolution** (bundles): Branded SVG logo → manifest `icon` field → first-letter circle fallback.
+
 ### `webUI` manifest field
 
 Add-on manifests can declare a `webUI` object to indicate the add-on has a browser-accessible interface:

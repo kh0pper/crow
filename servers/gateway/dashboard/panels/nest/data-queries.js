@@ -49,9 +49,12 @@ export async function getNestData(db, lang) {
         installed = obj;
       }
       for (const [id, meta] of Object.entries(installed)) {
-        if (meta.type !== "bundle" && meta.type !== "mcp-server") continue;
+        if (meta.type !== "bundle") continue;
         let name = id;
         let webUI = null;
+        let icon = null;
+        let category = null;
+        const installedAt = meta.installedAt || null;
         // Try to load manifest from ~/.crow/bundles/ or repo bundles/
         const manifestPaths = [
           join(homedir(), ".crow", "bundles", id, "manifest.json"),
@@ -63,17 +66,17 @@ export async function getNestData(db, lang) {
               const manifest = JSON.parse(readFileSync(mp, "utf-8"));
               name = manifest.name || id;
               webUI = manifest.webUI || null;
+              icon = manifest.icon || null;
+              category = manifest.category || null;
             } catch {}
             break;
           }
         }
-        let isRunning = false;
-        if (meta.type === "bundle") {
-          const status = getBundleDockerStatus(id);
-          isRunning = status !== null && status.toLowerCase().startsWith("up");
-        }
-        bundles.push({ id, name, type: meta.type, isRunning, webUI });
+        const status = getBundleDockerStatus(id);
+        const isRunning = status !== null && status.toLowerCase().startsWith("up");
+        bundles.push({ id, name, type: meta.type, isRunning, webUI, icon, category, installedAt });
       }
+      bundles.sort((a, b) => new Date(a.installedAt || 0) - new Date(b.installedAt || 0));
     } catch {}
   }
 
