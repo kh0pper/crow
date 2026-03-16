@@ -97,10 +97,11 @@ export function section(title, content, opts = {}) {
 /**
  * Format a date string for display.
  */
-export function formatDate(dateStr) {
+export function formatDate(dateStr, lang = "en") {
   if (!dateStr) return "";
   try {
-    return new Date(dateStr).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+    const locale = lang === "es" ? "es-ES" : "en-US";
+    return new Date(dateStr).toLocaleDateString(locale, { year: "numeric", month: "short", day: "numeric" });
   } catch {
     return dateStr;
   }

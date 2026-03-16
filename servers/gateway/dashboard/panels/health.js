@@ -10,6 +10,7 @@ import { execFileSync } from "node:child_process";
 import { escapeHtml, statCard, statGrid, section, badge } from "../shared/components.js";
 import { CROW_HERO_SVG } from "../shared/crow-hero.js";
 import { getAddonLogo } from "../shared/logos.js";
+import { t } from "../shared/i18n.js";
 
 // Cache for Docker status checks (bundle-id -> { status, timestamp })
 const _dockerStatusCache = new Map();
@@ -42,7 +43,7 @@ export default {
   navOrder: 5,
   hidden: true,
 
-  async handler(req, res, { db, layout }) {
+  async handler(req, res, { db, layout, lang }) {
     // --- CPU usage (average across cores, sampled over ~100ms) ---
     const cpus1 = os.cpus();
     await new Promise((r) => setTimeout(r, 100));
@@ -160,32 +161,32 @@ export default {
 
     // --- Build stat cards ---
     const systemStats = statGrid([
-      statCard("CPU", `${cpuPercent}%`, { delay: 0 }),
-      statCard("RAM", `${ramPercent}%`, { delay: 50 }),
-      statCard("Disk", `${diskPercent}%`, { delay: 100 }),
-      statCard("Uptime", uptimeStr, { delay: 150 }),
+      statCard(t("health.cpu", lang), `${cpuPercent}%`, { delay: 0 }),
+      statCard(t("health.ram", lang), `${ramPercent}%`, { delay: 50 }),
+      statCard(t("health.disk", lang), `${diskPercent}%`, { delay: 100 }),
+      statCard(t("health.uptime", lang), uptimeStr, { delay: 150 }),
     ]);
 
     // --- System details section ---
     const systemDetailsHtml = `
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
         <div>
-          <div style="font-size:0.8rem;color:var(--crow-text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.35rem">CPU Usage</div>
+          <div style="font-size:0.8rem;color:var(--crow-text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.35rem">${t("health.cpuUsage", lang)}</div>
           ${progressBar(cpuPercent, cpuColor)}
           <div style="font-size:0.85rem;margin-top:0.25rem">${cpuPercent}% across ${os.cpus().length} cores</div>
         </div>
         <div>
-          <div style="font-size:0.8rem;color:var(--crow-text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.35rem">Memory</div>
+          <div style="font-size:0.8rem;color:var(--crow-text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.35rem">${t("health.memory", lang)}</div>
           ${progressBar(ramPercent, ramColor)}
           <div style="font-size:0.85rem;margin-top:0.25rem">${formatSize(usedMem)} / ${formatSize(totalMem)}</div>
         </div>
         <div>
-          <div style="font-size:0.8rem;color:var(--crow-text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.35rem">Disk</div>
+          <div style="font-size:0.8rem;color:var(--crow-text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.35rem">${t("health.disk", lang)}</div>
           ${progressBar(diskPercent, diskColor)}
           <div style="font-size:0.85rem;margin-top:0.25rem">${escapeHtml(diskUsed)} / ${escapeHtml(diskTotal)}</div>
         </div>
         <div>
-          <div style="font-size:0.8rem;color:var(--crow-text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.35rem">System Uptime</div>
+          <div style="font-size:0.8rem;color:var(--crow-text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.35rem">${t("health.systemUptime", lang)}</div>
           <div style="font-size:1.1rem;font-family:'JetBrains Mono',monospace;margin-top:0.5rem">${escapeHtml(uptimeStr)}</div>
         </div>
       </div>`;
@@ -193,16 +194,16 @@ export default {
     // --- Docker section ---
     let dockerHtml;
     if (!dockerAvailable) {
-      dockerHtml = `<p style="color:var(--crow-text-muted)">Docker is not available or not running.</p>`;
+      dockerHtml = `<p style="color:var(--crow-text-muted)">${t("health.dockerNotAvailable", lang)}</p>`;
     } else {
       const statusBadge = containerStopped > 0
-        ? badge(`${containerRunning} running, ${containerStopped} stopped`, containerRunning > 0 ? "published" : "error")
-        : badge(`${containerRunning} running`, "connected");
+        ? badge(`${containerRunning} ${t("health.running", lang)}, ${containerStopped} ${t("health.stopped", lang)}`, containerRunning > 0 ? "published" : "error")
+        : badge(`${containerRunning} ${t("health.running", lang)}`, "connected");
       dockerHtml = `
         <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
           <div style="font-size:1.8rem;font-family:'Fraunces',serif">${containerCount}</div>
           <div>
-            <div style="font-size:0.85rem;color:var(--crow-text-muted)">containers total</div>
+            <div style="font-size:0.85rem;color:var(--crow-text-muted)">${t("health.containersTotal", lang)}</div>
             <div style="margin-top:0.25rem">${statusBadge}</div>
           </div>
         </div>`;
@@ -213,39 +214,39 @@ export default {
     const dbHtml = `
       <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem">
         <div style="font-size:1.8rem;font-family:'Fraunces',serif">${escapeHtml(dbSizeStr)}</div>
-        <div style="font-size:0.85rem;color:var(--crow-text-muted)">database size</div>
+        <div style="font-size:0.85rem;color:var(--crow-text-muted)">${t("health.databaseSize", lang)}</div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:0.75rem">
         <div style="text-align:center;padding:0.5rem;background:var(--crow-bg);border-radius:6px">
           <div style="font-size:1.2rem;font-family:'JetBrains Mono',monospace">${escapeHtml(String(memoryCount))}</div>
-          <div style="font-size:0.75rem;color:var(--crow-text-muted)">memories</div>
+          <div style="font-size:0.75rem;color:var(--crow-text-muted)">${t("health.memories", lang)}</div>
         </div>
         <div style="text-align:center;padding:0.5rem;background:var(--crow-bg);border-radius:6px">
           <div style="font-size:1.2rem;font-family:'JetBrains Mono',monospace">${escapeHtml(String(projectsCount))}</div>
-          <div style="font-size:0.75rem;color:var(--crow-text-muted)">projects</div>
+          <div style="font-size:0.75rem;color:var(--crow-text-muted)">${t("health.projects", lang)}</div>
         </div>
         <div style="text-align:center;padding:0.5rem;background:var(--crow-bg);border-radius:6px">
           <div style="font-size:1.2rem;font-family:'JetBrains Mono',monospace">${escapeHtml(String(sourcesCount))}</div>
-          <div style="font-size:0.75rem;color:var(--crow-text-muted)">sources</div>
+          <div style="font-size:0.75rem;color:var(--crow-text-muted)">${t("health.sources", lang)}</div>
         </div>
         <div style="text-align:center;padding:0.5rem;background:var(--crow-bg);border-radius:6px">
           <div style="font-size:1.2rem;font-family:'JetBrains Mono',monospace">${escapeHtml(String(blogCount))}</div>
-          <div style="font-size:0.75rem;color:var(--crow-text-muted)">posts</div>
+          <div style="font-size:0.75rem;color:var(--crow-text-muted)">${t("health.posts", lang)}</div>
         </div>
         <div style="text-align:center;padding:0.5rem;background:var(--crow-bg);border-radius:6px">
           <div style="font-size:1.2rem;font-family:'JetBrains Mono',monospace">${escapeHtml(String(contactsCount))}</div>
-          <div style="font-size:0.75rem;color:var(--crow-text-muted)">contacts</div>
+          <div style="font-size:0.75rem;color:var(--crow-text-muted)">${t("health.contacts", lang)}</div>
         </div>
       </div>`;
 
     // --- Auto-refresh hint ---
-    const refreshHint = `<p style="color:var(--crow-text-muted);font-size:0.8rem;text-align:center;margin-top:1rem">Reload the page to refresh stats.</p>`;
+    const refreshHint = `<p style="color:var(--crow-text-muted);font-size:0.8rem;text-align:center;margin-top:1rem">${t("health.refreshHint", lang)}</p>`;
 
     const heroHtml = `<div style="display:flex;align-items:center;gap:1rem;margin-bottom:1.5rem">
       <div style="width:80px;height:80px;flex-shrink:0">${CROW_HERO_SVG}</div>
       <div>
-        <div style="font-family:'Fraunces',serif;font-size:1.25rem;font-weight:600;color:var(--crow-text-primary)">Welcome to the Crow's Nest</div>
-        <div style="color:var(--crow-text-muted);font-size:0.9rem">System health at a glance</div>
+        <div style="font-family:'Fraunces',serif;font-size:1.25rem;font-weight:600;color:var(--crow-text-primary)">${t("health.welcome", lang)}</div>
+        <div style="color:var(--crow-text-muted);font-size:0.9rem">${t("health.subtitle", lang)}</div>
       </div>
     </div>`;
 
@@ -291,11 +292,11 @@ export default {
               const status = getBundleDockerStatus(id);
               isRunning = status !== null && status.toLowerCase().startsWith("up");
             }
-            const statusDot = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${isRunning ? "var(--crow-success)" : "var(--crow-text-muted)"};margin-left:0.35rem;vertical-align:middle" title="${isRunning ? "Running" : "Stopped"}"></span>`;
+            const statusDot = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${isRunning ? "var(--crow-success)" : "var(--crow-text-muted)"};margin-left:0.35rem;vertical-align:middle" title="${isRunning ? t("health.runningStatus", lang) : t("health.stoppedStatus", lang)}"></span>`;
 
             // Open link if webUI is set
             const openLink = webUI
-              ? `<a href="http://localhost:${webUI.port}${webUI.path || "/"}" target="_blank" class="btn btn-sm btn-secondary" style="margin-top:0.5rem;font-size:0.75rem">Open</a>`
+              ? `<a href="http://localhost:${webUI.port}${webUI.path || "/"}" target="_blank" class="btn btn-sm btn-secondary" style="margin-top:0.5rem;font-size:0.75rem">${t("health.open", lang)}</a>`
               : "";
 
             return `<div class="card app-tile" style="display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:1.25rem 0.75rem;cursor:default">
@@ -305,7 +306,7 @@ export default {
             </div>`;
           }).join("\n");
 
-          launcherHtml = section("Your Apps", `
+          launcherHtml = section(t("health.yourApps", lang), `
             <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:1rem">
               ${tiles}
             </div>
@@ -321,13 +322,13 @@ export default {
       ${heroHtml}
       ${systemStats}
       ${launcherHtml}
-      ${section("System Resources", systemDetailsHtml, { delay: 200 })}
-      ${section("Docker", dockerHtml, { delay: 250 })}
-      ${section("Database", dbHtml, { delay: 300 })}
+      ${section(t("health.systemResources", lang), systemDetailsHtml, { delay: 200 })}
+      ${section(t("health.docker", lang), dockerHtml, { delay: 250 })}
+      ${section(t("health.database", lang), dbHtml, { delay: 300 })}
       ${refreshHint}
     `;
 
-    return layout({ title: "Crow's Nest", content });
+    return layout({ title: t("health.pageTitle", lang), content });
   },
 };
 

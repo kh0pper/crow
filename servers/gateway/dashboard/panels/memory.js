@@ -5,6 +5,7 @@
 import { escapeHtml, statCard, statGrid, section, badge, formatDate, dataTable, formField } from "../shared/components.js";
 import { sanitizeFtsQuery } from "../../../db.js";
 import { ICON_MEMORY } from "../shared/empty-state-icons.js";
+import { t, tJs } from "../shared/i18n.js";
 
 const PAGE_SIZE = 20;
 
@@ -15,7 +16,7 @@ export default {
   route: "/dashboard/memory",
   navOrder: 15,
 
-  async handler(req, res, { db, layout }) {
+  async handler(req, res, { db, layout, lang }) {
     // Handle POST actions (edit, delete)
     if (req.method === "POST") {
       const { action } = req.body;
@@ -52,8 +53,8 @@ export default {
       const editForm = `<form method="POST">
         <input type="hidden" name="action" value="edit">
         <input type="hidden" name="id" value="${escapeHtml(String(mem.id))}">
-        ${formField("Category", "category", { value: mem.category || "general", placeholder: "general" })}
-        ${formField("Importance", "importance", { type: "select", value: String(mem.importance || 5), options: [
+        ${formField(t("memory.categoryLabel", lang), "category", { value: mem.category || "general", placeholder: "general" })}
+        ${formField(t("memory.importanceLabel", lang), "importance", { type: "select", value: String(mem.importance || 5), options: [
           { value: "1", label: "1 — Low" },
           { value: "2", label: "2" },
           { value: "3", label: "3" },
@@ -65,15 +66,15 @@ export default {
           { value: "9", label: "9" },
           { value: "10", label: "10 — Critical" },
         ]})}
-        ${formField("Content", "content", { type: "textarea", value: mem.content || "", rows: 10, required: true })}
+        ${formField(t("memory.contentLabel", lang), "content", { type: "textarea", value: mem.content || "", rows: 10, required: true })}
         <div style="display:flex;gap:0.5rem;margin-top:1rem">
-          <button type="submit" class="btn btn-primary">Save</button>
-          <a href="/dashboard/memory" class="btn btn-secondary">Cancel</a>
+          <button type="submit" class="btn btn-primary">${t("memory.save", lang)}</button>
+          <a href="/dashboard/memory" class="btn btn-secondary">${t("memory.cancel", lang)}</a>
         </div>
       </form>`;
 
-      const content = section(`Edit Memory #${escapeHtml(String(mem.id))}`, editForm);
-      return layout({ title: "Edit Memory", content });
+      const content = section(`${t("memory.editPageTitle", lang)} #${escapeHtml(String(mem.id))}`, editForm);
+      return layout({ title: t("memory.editPageTitle", lang), content });
     }
 
     const query = req.query.q || "";
@@ -93,15 +94,15 @@ export default {
     );
 
     const stats = statGrid([
-      statCard("Total Memories", totalCount, { delay: 0 }),
+      statCard(t("memory.totalMemories", lang), totalCount, { delay: 0 }),
       ...categoryCards,
     ]);
 
     // Search form
     const searchForm = `<form method="GET" action="/dashboard/memory" style="display:flex;gap:0.5rem;margin-bottom:1.5rem">
-      <input type="text" name="q" value="${escapeHtml(query)}" placeholder="Search memories..." style="flex:1">
-      <button type="submit" class="btn btn-primary">Search</button>
-      ${query ? `<a href="/dashboard/memory" class="btn btn-secondary">Clear</a>` : ""}
+      <input type="text" name="q" value="${escapeHtml(query)}" placeholder="${t("memory.searchPlaceholder", lang)}" style="flex:1">
+      <button type="submit" class="btn btn-primary">${t("memory.search", lang)}</button>
+      ${query ? `<a href="/dashboard/memory" class="btn btn-secondary">${t("memory.clear", lang)}</a>` : ""}
     </form>`;
 
     // Fetch memories
@@ -146,12 +147,12 @@ export default {
     let memoryList;
     if (memories.length === 0) {
       if (query) {
-        memoryList = `<div class="empty-state"><h3>No memories matching "${escapeHtml(query)}".</h3></div>`;
+        memoryList = `<div class="empty-state"><h3>0 ${t("memory.matches", lang)}: "${escapeHtml(query)}"</h3></div>`;
       } else {
         memoryList = `<div class="empty-state">
           <div style="margin-bottom:1rem">${ICON_MEMORY}</div>
-          <h3>No memories yet</h3>
-          <p>Ask your AI to remember something to get started.</p>
+          <h3>${t("memory.noMemoriesYet", lang)}</h3>
+          <p>${t("memory.askAiToRemember", lang)}</p>
         </div>`;
       }
     } else {
@@ -160,17 +161,17 @@ export default {
         const preview = content.length > 200 ? escapeHtml(content.slice(0, 200)) + "..." : escapeHtml(content);
         const categoryBadge = badge(m.category || "general", "draft");
         const importanceIndicator = renderImportance(m.importance);
-        const editBtn = `<a href="/dashboard/memory?edit=${m.id}" class="btn btn-sm btn-secondary">Edit</a>`;
-        const deleteBtn = `<form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('Delete this memory?')"><input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="${m.id}"><button class="btn btn-sm btn-danger" type="submit">Delete</button></form>`;
+        const editBtn = `<a href="/dashboard/memory?edit=${m.id}" class="btn btn-sm btn-secondary">${t("memory.edit", lang)}</a>`;
+        const deleteBtn = `<form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('${tJs("memory.deleteConfirm", lang)}')"><input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="${m.id}"><button class="btn btn-sm btn-danger" type="submit">${t("memory.delete", lang)}</button></form>`;
         return [
           categoryBadge,
           importanceIndicator,
           `<span style="font-size:0.9rem">${preview}</span>`,
-          `<span class="mono">${formatDate(m.updated_at)}</span>`,
+          `<span class="mono">${formatDate(m.updated_at, lang)}</span>`,
           `${editBtn} ${deleteBtn}`,
         ];
       });
-      memoryList = dataTable(["Category", "Importance", "Content", "Updated", "Actions"], rows);
+      memoryList = dataTable([t("memory.categoryLabel", lang), t("memory.importanceLabel", lang), t("memory.contentLabel", lang), t("memory.updatedLabel", lang), t("memory.actionsLabel", lang)], rows);
     }
 
     // Pagination
@@ -181,11 +182,11 @@ export default {
       const sep = query ? "&" : "";
       const links = [];
       if (page > 1) {
-        links.push(`<a href="${baseUrl}${sep}page=${page - 1}" class="btn btn-sm btn-secondary">Previous</a>`);
+        links.push(`<a href="${baseUrl}${sep}page=${page - 1}" class="btn btn-sm btn-secondary">${t("memory.previous", lang)}</a>`);
       }
-      links.push(`<span style="color:var(--crow-text-muted);font-size:0.85rem">Page ${page} of ${totalPages} (${matchCount} ${query ? "matches" : "memories"})</span>`);
+      links.push(`<span style="color:var(--crow-text-muted);font-size:0.85rem">${page} / ${totalPages} (${matchCount} ${query ? t("memory.matches", lang) : t("memory.memoriesCount", lang)})</span>`);
       if (page < totalPages) {
-        links.push(`<a href="${baseUrl}${sep}page=${page + 1}" class="btn btn-sm btn-secondary">Next</a>`);
+        links.push(`<a href="${baseUrl}${sep}page=${page + 1}" class="btn btn-sm btn-secondary">${t("memory.next", lang)}</a>`);
       }
       pagination = `<div style="display:flex;align-items:center;justify-content:center;gap:1rem;margin-top:1rem">${links.join("")}</div>`;
     }
@@ -193,10 +194,10 @@ export default {
     const content = `
       ${stats}
       ${searchForm}
-      ${section(query ? `Search Results` : "Recent Memories", memoryList + pagination, { delay: 150 })}
+      ${section(query ? t("memory.searchResults", lang) : t("memory.recentMemories", lang), memoryList + pagination, { delay: 150 })}
     `;
 
-    return layout({ title: "Memory", content });
+    return layout({ title: t("memory.pageTitle", lang), content });
   },
 };
 

@@ -8,6 +8,7 @@
 import { CROW_HERO_SVG } from "./crow-hero.js";
 import { FONT_IMPORT, designTokensCss } from "./design-tokens.js";
 import { headerIconsCss, tamagotchiCss } from "./notifications.js";
+import { t, SUPPORTED_LANGS } from "./i18n.js";
 
 /**
  * Render the full dashboard HTML page.
@@ -21,18 +22,19 @@ import { headerIconsCss, tamagotchiCss } from "./notifications.js";
  * @param {string} [opts.afterContent] - HTML rendered after </main> inside .dashboard (e.g. persistent player bar)
  * @param {string} [opts.headerIcons] - HTML rendered inside .content-header, right of title (e.g. notification bell, health icon)
  */
-export function renderLayout({ title, content, activePanel, panels, theme, scripts, afterContent, headerIcons }) {
+export function renderLayout({ title, content, activePanel, panels, theme, scripts, afterContent, headerIcons, lang }) {
   const themeClass = theme === "light" ? "theme-light" : "";
   const sortedPanels = [...panels].sort((a, b) => (a.navOrder || 0) - (b.navOrder || 0));
 
   const navItems = sortedPanels.map((p) => {
     const active = p.id === activePanel ? "active" : "";
     const icon = NAV_ICONS[p.icon] || NAV_ICONS.default;
-    return `<a href="${p.route}" class="nav-item ${active}">${icon}<span>${escapeHtml(p.name)}</span></a>`;
+    const label = t("nav." + p.id, lang) !== "nav." + p.id ? t("nav." + p.id, lang) : p.name;
+    return `<a href="${p.route}" class="nav-item ${active}">${icon}<span>${escapeHtml(label)}</span></a>`;
   }).join("\n        ");
 
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -52,10 +54,10 @@ export function renderLayout({ title, content, activePanel, panels, theme, scrip
         ${navItems}
       </nav>
       <div class="sidebar-footer">
-        <button onclick="toggleTheme()" class="theme-toggle" title="Toggle theme">
+        <button onclick="toggleTheme()" class="theme-toggle" title="${escapeHtml(t("nav.toggleTheme", lang))}">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
         </button>
-        <a href="/dashboard/logout" class="nav-item logout">Logout</a>
+        <a href="/dashboard/logout" class="nav-item logout">${escapeHtml(t("nav.logout", lang))}</a>
       </div>
     </aside>
     <main class="main-content">
@@ -96,13 +98,13 @@ export function renderLayout({ title, content, activePanel, panels, theme, scrip
  * @param {string} [opts.error] - Error message to display
  * @param {boolean} [opts.isSetup] - True if setting password for first time
  */
-export function renderLogin({ error, isSetup, setupToken } = {}) {
+export function renderLogin({ error, isSetup, setupToken, lang } = {}) {
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${isSetup ? "Setup" : "Login"} — Crow's Nest</title>
+  <title>${isSetup ? escapeHtml(t("login.setupTitle", lang)) : escapeHtml(t("login.title", lang))} — Crow's Nest</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
@@ -113,14 +115,14 @@ export function renderLogin({ error, isSetup, setupToken } = {}) {
     <div class="login-card">
       <div style="width:120px;height:120px;margin:0 auto 1rem">${CROW_HERO_SVG}</div>
       <h1 class="login-logo">Crow</h1>
-      <p class="login-subtitle">${isSetup ? "Set your Crow's Nest password" : "Crow's Nest Login"}</p>
+      <p class="login-subtitle">${isSetup ? escapeHtml(t("login.setupSubtitle", lang)) : escapeHtml(t("login.subtitle", lang))}</p>
       ${error ? `<div class="login-error">${escapeHtml(error)}</div>` : ""}
       <form method="POST" action="/dashboard/login">
         ${isSetup ? `${setupToken ? `<input type="hidden" name="setup_token" value="${setupToken}">` : ""}
-        <input type="password" name="password" placeholder="Choose a password (12+ characters)" required minlength="12" autofocus>
-        <input type="password" name="confirm" placeholder="Confirm password" required minlength="12">` :
-        `<input type="password" name="password" placeholder="Password" required autofocus>`}
-        <button type="submit">${isSetup ? "Set Password" : "Login"}</button>
+        <input type="password" name="password" placeholder="${escapeHtml(t("login.choosePasswordPlaceholder", lang))}" required minlength="12" autofocus>
+        <input type="password" name="confirm" placeholder="${escapeHtml(t("login.confirmPlaceholder", lang))}" required minlength="12">` :
+        `<input type="password" name="password" placeholder="${escapeHtml(t("login.passwordPlaceholder", lang))}" required autofocus>`}
+        <button type="submit">${isSetup ? escapeHtml(t("login.setPasswordButton", lang)) : escapeHtml(t("login.loginButton", lang))}</button>
       </form>
     </div>
   </div>

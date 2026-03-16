@@ -6,6 +6,7 @@
  */
 
 import { escapeHtml } from "../../shared/components.js";
+import { t } from "../../shared/i18n.js";
 
 /** Color palette for peer avatars (deterministic by contact ID) */
 const PEER_COLORS = [
@@ -26,16 +27,9 @@ function initials(name) {
 
 /**
  * Build the full messages panel HTML.
- * @param {object} data
- * @param {Array} data.items — unified conversation list
- * @param {number} data.totalUnread — total peer unread count
- * @param {boolean} data.aiConfigured — whether AI provider is set up
- * @param {boolean} data.storageAvailable — whether MinIO is configured
- * @param {string|null} data.inviteResult — result from generate_invite action
- * @param {string|null} data.inviteError — error from invite action
  */
 export function buildMessagesHTML(data) {
-  const { items, totalUnread, aiConfigured, storageAvailable, inviteResult, inviteError } = data;
+  const { items, totalUnread, aiConfigured, storageAvailable, inviteResult, inviteError, lang } = data;
 
   // Build avatar strip items
   const avatarItems = items.map((item) => {
@@ -60,26 +54,28 @@ export function buildMessagesHTML(data) {
   let inviteBanner = "";
   if (inviteResult) {
     inviteBanner = `<div style="position:absolute;top:0;left:0;right:0;z-index:50;padding:12px;background:var(--crow-bg-elevated);border-bottom:1px solid var(--crow-border)">
-      <div style="font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">Invite generated:</div>
+      <div style="font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">${t("messages.inviteGenerated", lang)}</div>
       <pre style="font-size:0.75rem;white-space:pre-wrap;word-break:break-all;background:var(--crow-bg-deep);padding:8px;border-radius:6px;max-height:120px;overflow-y:auto">${escapeHtml(inviteResult)}</pre>
-      <button onclick="this.parentElement.remove()" style="margin-top:6px;font-size:0.75rem;background:none;border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text-muted);cursor:pointer;padding:3px 8px">Dismiss</button>
+      <button onclick="this.parentElement.remove()" style="margin-top:6px;font-size:0.75rem;background:none;border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text-muted);cursor:pointer;padding:3px 8px">${t("messages.dismiss", lang)}</button>
     </div>`;
   }
   if (inviteError) {
     inviteBanner = `<div style="position:absolute;top:0;left:0;right:0;z-index:50;padding:12px;background:var(--crow-bg-elevated);border-bottom:1px solid var(--crow-border)">
-      <div style="font-size:0.8rem;color:var(--crow-error)">Invite error: ${escapeHtml(inviteError)}</div>
-      <button onclick="this.parentElement.remove()" style="margin-top:6px;font-size:0.75rem;background:none;border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text-muted);cursor:pointer;padding:3px 8px">Dismiss</button>
+      <div style="font-size:0.8rem;color:var(--crow-error)">${t("messages.inviteError", lang)} ${escapeHtml(inviteError)}</div>
+      <button onclick="this.parentElement.remove()" style="margin-top:6px;font-size:0.75rem;background:none;border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text-muted);cursor:pointer;padding:3px 8px">${t("messages.dismiss", lang)}</button>
     </div>`;
   }
+
+  const noChatsLabel = escapeHtml(t("messages.noChats", lang));
 
   return `
     <div class="msg-hub" style="position:relative">
       ${inviteBanner}
       <!-- Avatar Strip -->
       <div class="msg-strip">
-        <button class="msg-strip-new" onclick="msgTogglePopover()" title="New conversation or contact">+</button>
+        <button class="msg-strip-new" onclick="msgTogglePopover()" title="${t("messages.newConversation", lang)}">+</button>
         <div class="msg-strip-list">
-          ${avatarItems || '<div style="color:var(--crow-text-muted);font-size:0.65rem;text-align:center;padding:8px">No chats</div>'}
+          ${avatarItems || `<div style="color:var(--crow-text-muted);font-size:0.65rem;text-align:center;padding:8px">${noChatsLabel}</div>`}
         </div>
       </div>
 
@@ -87,30 +83,30 @@ export function buildMessagesHTML(data) {
       <div class="msg-popover" id="msg-popover">
         ${aiConfigured ? `
           <div class="msg-popover-item" onclick="msgNewAiChat()">
-            <div class="msg-popover-item-title">New AI Chat</div>
-            <div class="msg-popover-item-desc">Start a conversation with your AI provider</div>
+            <div class="msg-popover-item-title">${t("messages.newAiChat", lang)}</div>
+            <div class="msg-popover-item-desc">${t("messages.aiChatDesc", lang)}</div>
           </div>
           <div class="msg-popover-divider"></div>
         ` : ""}
         <div class="msg-popover-item" onclick="msgShowInviteDialog('generate')">
-          <div class="msg-popover-item-title">Generate Invite</div>
-          <div class="msg-popover-item-desc">Create code to share with a friend</div>
+          <div class="msg-popover-item-title">${t("messages.generateInvite", lang)}</div>
+          <div class="msg-popover-item-desc">${t("messages.generateInviteDesc", lang)}</div>
         </div>
         <div class="msg-popover-item" onclick="msgShowInviteDialog('accept')">
-          <div class="msg-popover-item-title">Accept Invite</div>
-          <div class="msg-popover-item-desc">Paste an invite code from a contact</div>
+          <div class="msg-popover-item-title">${t("messages.acceptInvite", lang)}</div>
+          <div class="msg-popover-item-desc">${t("messages.acceptInviteDesc", lang)}</div>
         </div>
         <div class="msg-invite-dialog" id="invite-generate">
           <form method="POST">
             <input type="hidden" name="action" value="generate_invite">
-            <button type="submit" class="msg-send-btn" style="width:100%;font-size:0.8rem;padding:6px">Generate Invite Code</button>
+            <button type="submit" class="msg-send-btn" style="width:100%;font-size:0.8rem;padding:6px">${t("messages.generateInviteCode", lang)}</button>
           </form>
         </div>
         <div class="msg-invite-dialog" id="invite-accept">
           <form method="POST">
             <input type="hidden" name="action" value="accept_invite">
-            <textarea name="invite_code" placeholder="Paste invite code..." rows="3" required></textarea>
-            <button type="submit" class="msg-send-btn" style="width:100%;font-size:0.8rem;padding:6px">Accept Invite</button>
+            <textarea name="invite_code" placeholder="${t("messages.pasteInvitePlaceholder", lang)}" rows="3" required></textarea>
+            <button type="submit" class="msg-send-btn" style="width:100%;font-size:0.8rem;padding:6px">${t("messages.acceptInviteButton", lang)}</button>
           </form>
         </div>
       </div>
@@ -119,9 +115,9 @@ export function buildMessagesHTML(data) {
       <div class="msg-chat" id="msg-chat">
         <div class="msg-empty" id="msg-empty-state">
           <div>
-            <h3>Messages</h3>
-            <p>Select a conversation or click <strong>+</strong> to start.</p>
-            ${totalUnread > 0 ? `<p style="margin-top:0.5rem;color:var(--crow-accent)">${totalUnread} unread message${totalUnread !== 1 ? "s" : ""}</p>` : ""}
+            <h3>${t("messages.emptyTitle", lang)}</h3>
+            <p>${t("messages.emptyDesc", lang)}</p>
+            ${totalUnread > 0 ? `<p style="margin-top:0.5rem;color:var(--crow-accent)">${totalUnread} ${totalUnread !== 1 ? t("messages.emptyDesc", lang).includes("unread") ? "" : "" : ""}unread</p>` : ""}
           </div>
         </div>
       </div>

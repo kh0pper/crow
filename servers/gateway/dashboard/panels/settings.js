@@ -5,6 +5,7 @@
 import { escapeHtml, statCard, statGrid, section, formField, badge, dataTable } from "../shared/components.js";
 import { getProxyStatus } from "../../proxy.js";
 import { getUpdateStatus, checkForUpdates } from "../../auto-update.js";
+import { t, SUPPORTED_LANGS } from "../shared/i18n.js";
 
 export default {
   id: "settings",
@@ -13,7 +14,7 @@ export default {
   route: "/dashboard/settings",
   navOrder: 90,
 
-  async handler(req, res, { db, layout }) {
+  async handler(req, res, { db, layout, lang }) {
     // Handle POST actions
     if (req.method === "POST") {
       const { action } = req.body;
@@ -75,8 +76,7 @@ export default {
       }
 
       if (action === "set_language") {
-        const validLangs = ['en', 'es'];
-        const newLang = validLangs.includes(req.body.language) ? req.body.language : 'en';
+        const newLang = SUPPORTED_LANGS.includes(req.body.language) ? req.body.language : 'en';
         await db.execute({
           sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('language', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
           args: [newLang, newLang],
@@ -322,11 +322,11 @@ export default {
 
     // Build settings page
     const successMsg = req.query.success === "password"
-      ? `<div class="alert alert-success">Password updated.</div>` : "";
+      ? `<div class="alert alert-success">${t("settings.passwordUpdated", lang)}</div>` : "";
     const errorMsg = req.query.error === "short"
-      ? `<div class="alert alert-error">Password must be at least 12 characters.</div>`
+      ? `<div class="alert alert-error">${t("settings.passwordTooShort", lang)}</div>`
       : req.query.error === "mismatch"
-      ? `<div class="alert alert-error">Passwords don't match.</div>` : "";
+      ? `<div class="alert alert-error">${t("settings.passwordMismatch", lang)}</div>` : "";
 
     // Integration status — collapsible cards grouped by category
     const proxyStatus = getProxyStatus();
@@ -341,7 +341,7 @@ export default {
       }
     }
 
-    const categoryLabels = { productivity: "Productivity", communication: "Communication", development: "Development" };
+    const categoryLabels = { productivity: t("settings.productivity", lang), communication: t("settings.communication", lang), development: t("settings.development", lang) };
 
     let integrationsHtml = `<style>
       .int-cards { display:flex; flex-direction:column; gap:0.5rem; }
@@ -379,8 +379,8 @@ export default {
         const requiresMissing = item.proxyStatus?.requiresMissing || false;
         const hasEnvVars = item.envVars.length > 0;
         const dotClass = isConnected ? "int-dot-green" : (requiresMissing && !isConnected ? "int-dot-yellow" : "int-dot-gray");
-        const connectedBadge = isConnected ? ` ${badge("Connected", "connected")}` : "";
-        const toolCount = item.proxyStatus?.toolCount ? ` <span class="mono" style="font-size:0.8rem;color:var(--crow-text-muted)">${item.proxyStatus.toolCount} tools</span>` : "";
+        const connectedBadge = isConnected ? ` ${badge(t("settings.connected", lang), "connected")}` : "";
+        const toolCount = item.proxyStatus?.toolCount ? ` <span class="mono" style="font-size:0.8rem;color:var(--crow-text-muted)">${item.proxyStatus.toolCount} ${t("settings.tools", lang)}</span>` : "";
 
         let bodyContent = "";
 
@@ -389,27 +389,27 @@ export default {
             const currentVal = process.env[envVar] ? "••••••••" : "";
             bodyContent += `<div class="int-field">
               <label>${escapeHtml(envVar)}</label>
-              <input type="password" name="${escapeHtml(envVar)}" placeholder="${currentVal || "Not set"}" autocomplete="off">
+              <input type="password" name="${escapeHtml(envVar)}" placeholder="${currentVal || t("settings.notSet", lang)}" autocomplete="off">
             </div>`;
           }
         } else {
-          bodyContent += `<p class="int-note">No configuration needed — works out of the box.</p>`;
+          bodyContent += `<p class="int-note">${t("settings.noConfigNeeded", lang)}</p>`;
         }
 
         if (requiresMissing) {
-          bodyContent += `<p class="int-note">Requires ${item.requires.map((r) => `<code>${escapeHtml(r)}</code>`).join(", ")} (Python)</p>`;
+          bodyContent += `<p class="int-note">${t("settings.requires", lang)} ${item.requires.map((r) => `<code>${escapeHtml(r)}</code>`).join(", ")} (Python)</p>`;
         }
 
         let links = "";
         if (item.keyUrl) {
-          links += `<a href="${escapeHtml(item.keyUrl)}" target="_blank" rel="noopener" class="int-link">Get API Key</a>`;
+          links += `<a href="${escapeHtml(item.keyUrl)}" target="_blank" rel="noopener" class="int-link">${t("settings.getApiKey", lang)}</a>`;
         }
         if (item.docsUrl) {
-          links += `<a href="${escapeHtml(item.docsUrl)}" target="_blank" rel="noopener" class="int-link">Docs</a>`;
+          links += `<a href="${escapeHtml(item.docsUrl)}" target="_blank" rel="noopener" class="int-link">${t("settings.docs", lang)}</a>`;
         }
 
-        const saveBtn = hasEnvVars ? `<button class="btn btn-primary btn-sm" onclick="saveIntegration('${escapeHtml(item.id)}',this)">Save</button>` : "";
-        const removeBtn = isConnected ? `<button class="btn btn-secondary btn-sm" onclick="removeIntegration('${escapeHtml(item.id)}',this)">Remove</button>` : "";
+        const saveBtn = hasEnvVars ? `<button class="btn btn-primary btn-sm" onclick="saveIntegration('${escapeHtml(item.id)}',this)">${t("settings.save", lang)}</button>` : "";
+        const removeBtn = isConnected ? `<button class="btn btn-secondary btn-sm" onclick="removeIntegration('${escapeHtml(item.id)}',this)">${t("settings.removeIntegration", lang)}</button>` : "";
 
         bodyContent += `<div class="int-actions">${saveBtn}${removeBtn}${links}</div>`;
 
@@ -451,7 +451,7 @@ async function saveIntegration(id, btn) {
   if (!hasValue) return;
 
   btn.disabled = true;
-  btn.textContent = 'Saving...';
+  btn.textContent = '${t("settings.saving", lang)}';
   try {
     const res = await fetch('/dashboard/settings', {
       method: 'POST',
@@ -463,13 +463,13 @@ async function saveIntegration(id, btn) {
     msg.className = 'int-status-msg';
     if (data.ok) {
       msg.style.color = 'var(--crow-success)';
-      msg.textContent = data.restarting ? 'Saved. Gateway restarting...' : 'Saved. Restart gateway to activate.';
+      msg.textContent = data.restarting ? '${t("settings.savedRestarting", lang)}' : '${t("settings.savedRestartNeeded", lang)}';
       if (data.restarting) {
         setTimeout(() => { pollHealth(); }, 2000);
       }
     } else {
       msg.style.color = 'var(--crow-error)';
-      msg.textContent = data.error || 'Save failed.';
+      msg.textContent = data.error || '${t("settings.saveFailed", lang)}';
     }
     const actions = card.querySelector('.int-actions');
     const oldMsg = card.querySelector('.int-status-msg');
@@ -480,13 +480,13 @@ async function saveIntegration(id, btn) {
     console.error(e);
   }
   btn.disabled = false;
-  btn.textContent = 'Save';
+  btn.textContent = '${t("settings.save", lang)}';
 }
 
 async function removeIntegration(id, btn) {
-  if (!confirm('Remove this integration? Its API keys will be commented out in .env.')) return;
+  if (!confirm('${t("settings.removeConfirm", lang)}')) return;
   btn.disabled = true;
-  btn.textContent = 'Removing...';
+  btn.textContent = '${t("settings.removing", lang)}';
   try {
     const params = new URLSearchParams();
     params.set('action', 'remove_integration');
@@ -508,7 +508,7 @@ async function removeIntegration(id, btn) {
     console.error(e);
   }
   btn.disabled = false;
-  btn.textContent = 'Remove';
+  btn.textContent = '${t("settings.removeIntegration", lang)}';
 }
 
 function pollHealth(attempts) {
@@ -526,11 +526,11 @@ function pollHealth(attempts) {
       const { getOrCreateIdentity } = await import("../../../sharing/identity.js");
       const identity = await getOrCreateIdentity();
       identityHtml = `<div style="font-family:'JetBrains Mono',monospace;font-size:0.85rem">
-        <div style="margin-bottom:0.5rem"><span style="color:var(--crow-text-muted)">Crow ID:</span> ${escapeHtml(identity.crowId)}</div>
-        <div><span style="color:var(--crow-text-muted)">Ed25519:</span> ${escapeHtml(identity.ed25519Public?.slice(0, 16))}...</div>
+        <div style="margin-bottom:0.5rem"><span style="color:var(--crow-text-muted)">${t("settings.crowId", lang)}</span> ${escapeHtml(identity.crowId)}</div>
+        <div><span style="color:var(--crow-text-muted)">${t("settings.ed25519", lang)}</span> ${escapeHtml(identity.ed25519Public?.slice(0, 16))}...</div>
       </div>`;
     } catch {
-      identityHtml = `<p style="color:var(--crow-text-muted)">Identity not available.</p>`;
+      identityHtml = `<p style="color:var(--crow-text-muted)">${t("settings.identityNotAvailable", lang)}</p>`;
     }
 
     // Blog settings
@@ -543,40 +543,40 @@ function pollHealth(attempts) {
 
     const blogForm = `<form method="POST">
       <input type="hidden" name="action" value="update_blog">
-      ${formField("Blog Title", "blog_title", { value: bs.blog_title || "Crow Blog", placeholder: "My Blog" })}
-      ${formField("Tagline", "blog_tagline", { value: bs.blog_tagline || "", placeholder: "A short description" })}
-      ${formField("Default Author", "blog_author", { value: bs.blog_author || "" })}
-      ${formField("Theme", "blog_theme", { type: "select", value: bs.blog_theme || "dark", options: [
-        { value: "dark", label: "Dark (default)" },
-        { value: "light", label: "Light" },
-        { value: "serif", label: "Serif" },
+      ${formField(t("settings.blogTitle", lang), "blog_title", { value: bs.blog_title || "Crow Blog", placeholder: "My Blog" })}
+      ${formField(t("settings.tagline", lang), "blog_tagline", { value: bs.blog_tagline || "", placeholder: t("settings.taglinePlaceholder", lang) })}
+      ${formField(t("settings.defaultAuthor", lang), "blog_author", { value: bs.blog_author || "" })}
+      ${formField(t("settings.themeLabel", lang), "blog_theme", { type: "select", value: bs.blog_theme || "dark", options: [
+        { value: "dark", label: t("settings.darkDefault", lang) },
+        { value: "light", label: t("settings.light", lang) },
+        { value: "serif", label: t("settings.serif", lang) },
       ]})}
-      ${formField("Blog Discovery", "blog_listed", { type: "select", value: bs.blog_listed || "false", options: [
-        { value: "false", label: "Not listed" },
-        { value: "true", label: "Listed in Crow Blog Registry" },
+      ${formField(t("settings.blogDiscovery", lang), "blog_listed", { type: "select", value: bs.blog_listed || "false", options: [
+        { value: "false", label: t("settings.notListed", lang) },
+        { value: "true", label: t("settings.listedInRegistry", lang) },
       ]})}
       <p style="color:var(--crow-text-muted);font-size:0.85rem;margin:-0.5rem 0 1rem">When listed, your blog appears in the Crow Blog Registry so other Crow users can discover it.</p>
-      <button type="submit" class="btn btn-primary">Save Blog Settings</button>
+      <button type="submit" class="btn btn-primary">${t("settings.saveBlogSettings", lang)}</button>
     </form>`;
 
     // Contact discovery
     const discoveryForm = `<form method="POST">
       <input type="hidden" name="action" value="update_discovery">
-      ${formField("Contact Discovery", "discovery_enabled", { type: "select", value: bs.discovery_enabled || "false", options: [
-        { value: "false", label: "Disabled" },
-        { value: "true", label: "Enabled — findable by other Crow users" },
+      ${formField(t("settings.contactDiscoveryLabel", lang), "discovery_enabled", { type: "select", value: bs.discovery_enabled || "false", options: [
+        { value: "false", label: t("settings.disabled", lang) },
+        { value: "true", label: t("settings.enabled", lang) },
       ]})}
       <p style="color:var(--crow-text-muted);font-size:0.85rem;margin:-0.5rem 0 1rem">When enabled, your Crow ID and display name are visible at /discover/profile. Other Crow users can find you and send invite requests.</p>
-      ${formField("Display Name", "discovery_name", { type: "text", value: bs.discovery_name || "", placeholder: "Name shown to other Crow users" })}
-      <button type="submit" class="btn btn-primary">Save Discovery Settings</button>
+      ${formField(t("settings.displayName", lang), "discovery_name", { type: "text", value: bs.discovery_name || "", placeholder: t("settings.displayNamePlaceholder", lang) })}
+      <button type="submit" class="btn btn-primary">${t("settings.saveDiscoverySettings", lang)}</button>
     </form>`;
 
     // Password change
     const passwordForm = `<form method="POST">
       <input type="hidden" name="action" value="change_password">
-      ${formField("New Password", "password", { type: "password", required: true, placeholder: "At least 12 characters" })}
-      ${formField("Confirm Password", "confirm", { type: "password", required: true })}
-      <button type="submit" class="btn btn-secondary">Change Password</button>
+      ${formField(t("settings.newPassword", lang), "password", { type: "password", required: true, placeholder: t("settings.newPasswordPlaceholder", lang) })}
+      ${formField(t("settings.confirmPassword", lang), "confirm", { type: "password", required: true })}
+      <button type="submit" class="btn btn-secondary">${t("settings.changePasswordButton", lang)}</button>
     </form>`;
 
     // Language preference
@@ -586,56 +586,57 @@ function pollHealth(attempts) {
     const { parseCookies } = await import("../auth.js");
     const currentLang = langResult.rows[0]?.value || parseCookies(req).crow_lang || "en";
 
+    const langOptions = SUPPORTED_LANGS.map(code => {
+      const labels = { en: "English", es: "Español" };
+      return { value: code, label: labels[code] || code };
+    });
     const langForm = `<form method="POST">
       <input type="hidden" name="action" value="set_language">
-      ${formField("Language", "language", { type: "select", value: currentLang, options: [
-        { value: "en", label: "English" },
-        { value: "es", label: "Español" },
-      ]})}
-      <button type="submit" class="btn btn-secondary">Save Language</button>
+      ${formField(t("settings.languageLabel", lang), "language", { type: "select", value: currentLang, options: langOptions })}
+      <button type="submit" class="btn btn-secondary">${t("settings.saveLanguage", lang)}</button>
     </form>`;
 
     // Auto-update status
     const updateStatus = await getUpdateStatus();
     const lastCheckDisplay = updateStatus.lastCheck
       ? new Date(updateStatus.lastCheck).toLocaleString()
-      : "Never";
+      : t("settings.never", lang);
     const versionDisplay = updateStatus.currentVersion || "unknown";
 
     const updateHtml = `
       <div style="display:flex;flex-wrap:wrap;gap:1rem;margin-bottom:1rem">
         <div style="flex:1;min-width:200px">
-          <div style="font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.25rem">Current Version</div>
+          <div style="font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.25rem">${t("settings.currentVersion", lang)}</div>
           <div style="font-family:'JetBrains Mono',monospace;font-size:0.95rem">${escapeHtml(versionDisplay)}</div>
         </div>
         <div style="flex:1;min-width:200px">
-          <div style="font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.25rem">Last Checked</div>
+          <div style="font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.25rem">${t("settings.lastChecked", lang)}</div>
           <div style="font-size:0.9rem">${escapeHtml(lastCheckDisplay)}</div>
         </div>
         <div style="flex:1;min-width:200px">
-          <div style="font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.25rem">Status</div>
-          <div style="font-size:0.9rem">${escapeHtml(updateStatus.lastResult || "Waiting for first check")}</div>
+          <div style="font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.25rem">${t("settings.statusLabel", lang)}</div>
+          <div style="font-size:0.9rem">${escapeHtml(updateStatus.lastResult || t("settings.waitingFirstCheck", lang))}</div>
         </div>
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:0.75rem;align-items:end;margin-bottom:1rem">
         <div>
-          <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.25rem">Auto-Update</label>
+          <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.25rem">${t("settings.autoUpdate", lang)}</label>
           <select id="update-enabled" style="padding:0.5rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg);color:var(--crow-text);font-size:0.85rem">
-            <option value="true"${updateStatus.enabled ? " selected" : ""}>Enabled</option>
-            <option value="false"${!updateStatus.enabled ? " selected" : ""}>Disabled</option>
+            <option value="true"${updateStatus.enabled ? " selected" : ""}>${t("settings.enabledOption", lang)}</option>
+            <option value="false"${!updateStatus.enabled ? " selected" : ""}>${t("settings.disabledOption", lang)}</option>
           </select>
         </div>
         <div>
-          <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.25rem">Check Interval</label>
+          <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.25rem">${t("settings.checkInterval", lang)}</label>
           <select id="update-interval" style="padding:0.5rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg);color:var(--crow-text);font-size:0.85rem">
-            <option value="1"${updateStatus.intervalHours === 1 ? " selected" : ""}>Every hour</option>
-            <option value="6"${updateStatus.intervalHours === 6 ? " selected" : ""}>Every 6 hours</option>
-            <option value="12"${updateStatus.intervalHours === 12 ? " selected" : ""}>Every 12 hours</option>
-            <option value="24"${updateStatus.intervalHours === 24 ? " selected" : ""}>Daily</option>
+            <option value="1"${updateStatus.intervalHours === 1 ? " selected" : ""}>${t("settings.everyHour", lang)}</option>
+            <option value="6"${updateStatus.intervalHours === 6 ? " selected" : ""}>${t("settings.every6Hours", lang)}</option>
+            <option value="12"${updateStatus.intervalHours === 12 ? " selected" : ""}>${t("settings.every12Hours", lang)}</option>
+            <option value="24"${updateStatus.intervalHours === 24 ? " selected" : ""}>${t("settings.daily", lang)}</option>
           </select>
         </div>
-        <button class="btn btn-secondary btn-sm" id="save-update-settings">Save</button>
-        <button class="btn btn-primary btn-sm" id="check-updates-now">Check Now</button>
+        <button class="btn btn-secondary btn-sm" id="save-update-settings">${t("settings.save", lang)}</button>
+        <button class="btn btn-primary btn-sm" id="check-updates-now">${t("settings.checkNow", lang)}</button>
       </div>
       <div id="update-status-msg" style="font-size:0.85rem;display:none"></div>
       <p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.5rem">
@@ -645,7 +646,7 @@ function pollHealth(attempts) {
       document.getElementById('save-update-settings').addEventListener('click', async function() {
         const btn = this;
         btn.disabled = true;
-        btn.textContent = 'Saving...';
+        btn.textContent = '${t("settings.saving", lang)}';
         const params = new URLSearchParams();
         params.set('action', 'save_update_settings');
         params.set('auto_update_enabled', document.getElementById('update-enabled').value);
@@ -663,13 +664,13 @@ function pollHealth(attempts) {
           msg.textContent = data.message || (data.ok ? 'Saved' : 'Failed');
         } catch (e) { console.error(e); }
         btn.disabled = false;
-        btn.textContent = 'Save';
+        btn.textContent = '${t("settings.save", lang)}';
       });
 
       document.getElementById('check-updates-now').addEventListener('click', async function() {
         const btn = this;
         btn.disabled = true;
-        btn.textContent = 'Checking...';
+        btn.textContent = '${t("settings.checking", lang)}';
         const msg = document.getElementById('update-status-msg');
         msg.style.display = 'block';
         msg.style.color = 'var(--crow-accent)';
@@ -703,7 +704,7 @@ function pollHealth(attempts) {
             msg.textContent = data.error;
           } else {
             msg.style.color = 'var(--crow-text-muted)';
-            msg.textContent = 'Already up to date.';
+            msg.textContent = '${t("settings.alreadyUpToDate", lang)}';
           }
         } catch (e) {
           // Server may have already started restarting
@@ -720,7 +721,7 @@ function pollHealth(attempts) {
           return;
         }
         btn.disabled = false;
-        btn.textContent = 'Check Now';
+        btn.textContent = '${t("settings.checkNow", lang)}';
       });
       <\/script>`;
 
@@ -731,10 +732,10 @@ function pollHealth(attempts) {
     const postCount = await db.execute("SELECT COUNT(*) as c FROM blog_posts");
 
     const stats = statGrid([
-      statCard("Memories", memoryCount.rows[0]?.c || 0, { delay: 0 }),
-      statCard("Sources", sourceCount.rows[0]?.c || 0, { delay: 50 }),
-      statCard("Contacts", contactCount.rows[0]?.c || 0, { delay: 100 }),
-      statCard("Posts", postCount.rows[0]?.c || 0, { delay: 150 }),
+      statCard(t("settings.memories", lang), memoryCount.rows[0]?.c || 0, { delay: 0 }),
+      statCard(t("settings.sourcesLabel", lang), sourceCount.rows[0]?.c || 0, { delay: 50 }),
+      statCard(t("settings.contactsLabel", lang), contactCount.rows[0]?.c || 0, { delay: 100 }),
+      statCard(t("settings.postsLabel", lang), postCount.rows[0]?.c || 0, { delay: 150 }),
     ]);
 
     // Connection URLs
@@ -745,31 +746,31 @@ function pollHealth(attempts) {
 
     let urlRows = [];
     urlRows.push([
-      "Local",
+      t("settings.local", lang),
       `<code style="font-size:0.85rem;word-break:break-all">${escapeHtml(localUrl)}</code>`,
-      badge("always", "connected"),
+      badge(t("settings.always", lang), "connected"),
     ]);
     if (requestUrl !== localUrl) {
       urlRows.push([
-        "Tailnet / LAN",
+        t("settings.tailnetLan", lang),
         `<code style="font-size:0.85rem;word-break:break-all">${escapeHtml(requestUrl)}</code>`,
-        badge("active", "connected"),
+        badge(t("settings.active", lang), "connected"),
       ]);
     }
     if (gatewayUrl) {
       urlRows.push([
-        "Public (blog only)",
+        t("settings.publicBlogOnly", lang),
         `<a href="${escapeHtml(gatewayUrl)}/blog/" target="_blank" style="font-size:0.85rem;word-break:break-all">${escapeHtml(gatewayUrl)}/blog/</a>`,
-        badge("live", "published"),
+        badge(t("settings.live", lang), "published"),
       ]);
     }
     // MCP endpoint URLs (from setup page content)
     const baseUrl = requestUrl;
     const mcpEndpoints = [
-      ["Router (recommended)", `${baseUrl}/router/mcp`, "7 category tools"],
-      ["Memory", `${baseUrl}/memory/mcp`, "All memory tools"],
-      ["Projects", `${baseUrl}/research/mcp`, "All research tools"],
-      ["Sharing", `${baseUrl}/sharing/mcp`, "All sharing tools"],
+      [t("settings.routerRecommended", lang), `${baseUrl}/router/mcp`, t("settings.categoryTools", lang)],
+      ["Memory", `${baseUrl}/memory/mcp`, t("settings.allMemoryTools", lang)],
+      ["Projects", `${baseUrl}/research/mcp`, t("settings.allResearchTools", lang)],
+      ["Sharing", `${baseUrl}/sharing/mcp`, t("settings.allSharingTools", lang)],
     ];
 
     const mcpRows = mcpEndpoints.map(([name, url, desc]) => [
