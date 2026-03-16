@@ -59,9 +59,99 @@ export default {
 };
 ```
 
+## Notifications
+
+Crow includes a notification system for surfacing reminders, media events, peer messages, and system alerts. Notifications appear in the header bell icon in the Crow's Nest and are queryable via MCP tools.
+
+### REST API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/notifications` | GET | List notifications (query: `unread_only`, `type`, `limit`, `offset`) |
+| `/api/notifications/count` | GET | Lightweight count + health data (for polling) |
+| `/api/notifications/:id/dismiss` | POST | Dismiss or snooze (body: `snooze_minutes?`) |
+| `/api/notifications/:id/read` | POST | Mark as read |
+| `/api/notifications/dismiss-all` | POST | Bulk dismiss (body: `type?`) |
+
+All endpoints require dashboard session authentication.
+
+### MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `crow_check_notifications` | Query pending notifications (unread_only, type, limit) |
+| `crow_create_notification` | Create a notification (title, body, type, priority, action_url, metadata, expires_in_minutes) |
+| `crow_dismiss_notification` | Dismiss or snooze by ID |
+| `crow_dismiss_all_notifications` | Bulk dismiss (type, before) |
+| `crow_notification_settings` | Get/set notification preferences |
+
+### Creating Notifications from Bundles
+
+Use the shared helper in `servers/shared/notifications.js`:
+
+```js
+import { createNotification } from "../../../servers/shared/notifications.js";
+
+await createNotification(db, {
+  title: "My event happened",
+  body: "Details here",
+  type: "system",        // reminder, media, peer, system
+  source: "my-bundle",
+  priority: "normal",    // low, normal, high
+  action_url: "/dashboard/my-panel",
+  expires_in_minutes: 60,
+});
+```
+
+The helper checks user preferences (`notification_prefs` in `dashboard_settings`) and skips disabled types.
+
+### Notification Types
+
+| Type | Source | Description |
+|------|--------|-------------|
+| `reminder` | scheduler, MCP | Schedule-triggered or AI-created reminders |
+| `media` | media bundle | Briefing ready, new content |
+| `peer` | sharing server | New peer message received |
+| `system` | scheduler, media | Feed errors, system alerts |
+
+### Retention
+
+- Max 500 notifications. The scheduler cleans up oldest dismissed, then oldest read when over limit.
+- Expired notifications (those with `expires_at`) are removed on each query.
+- Snoozed notifications are hidden until `snoozed_until` passes.
+
+### Future Extension Points (v2)
+
+**Notification Themes:** Custom bell/health icon rendering. Interface:
+
+```js
+// Future: register a custom notification theme
+registerNotificationTheme({
+  id: 'tamagotchi',
+  renderBadge(count) { /* return HTML */ },
+  renderDropdown(notifications) { /* return HTML */ },
+});
+```
+
+**Notification Channels:** Delivery beyond the dashboard (email, webhook, Slack). Interface:
+
+```js
+// Future: register a delivery channel
+registerNotificationChannel({
+  id: 'email',
+  async deliver(notification, config) { /* send email */ },
+});
+```
+
 ## Layout Extension
 
-The `renderLayout()` function accepts an `afterContent` parameter for content rendered after `</main>` inside the dashboard container. The player bar uses this slot. If you need additional fixed-position UI elements, pass them via `afterContent` in your layout call.
+The `renderLayout()` function accepts several extension slots:
+
+- `afterContent` — HTML rendered after `</main>` (used by the player bar at `position:fixed;bottom:0`)
+- `headerIcons` — HTML rendered inside `.content-header`, right of the page title (used by notification bell and health status)
+- `scripts` — Additional inline JS appended to the page
+
+If you need additional fixed-position UI elements, pass them via `afterContent` in your layout call.
 
 ## Persistent Memory
 

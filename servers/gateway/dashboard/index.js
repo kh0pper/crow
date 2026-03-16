@@ -6,6 +6,7 @@ import { Router } from "express";
 import express from "express";
 import { renderLayout, renderLogin } from "./shared/layout.js";
 import { playerBarHtml, playerBarJs } from "./shared/player.js";
+import { headerIconsHtml, headerIconsCss, headerIconsJs } from "./shared/notifications.js";
 import {
   dashboardAuth,
   isPasswordSet,
@@ -161,8 +162,9 @@ export default function dashboardRouter(mcpAuthMiddleware) {
           activePanel: panelId,
           panels: allPanels,
           theme,
+          headerIcons: headerIconsHtml,
           afterContent: playerBarHtml,
-          scripts: (opts.scripts || "") + playerBarJs,
+          scripts: (opts.scripts || "") + playerBarJs + headerIconsJs,
         }),
       });
 

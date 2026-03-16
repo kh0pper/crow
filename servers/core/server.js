@@ -5,7 +5,7 @@
  * tools active (memory by default) and activates others on demand via
  * toolListChanged notifications.
  *
- * Startup: 15 tools (12 memory + 3 management) vs 49+ with all servers.
+ * Startup: 23 tools (20 memory + 3 management) vs 58+ with all servers.
  * Configurable default via CROW_DEFAULT_SERVER env var.
  *
  * Management tools:

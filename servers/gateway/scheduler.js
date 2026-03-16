@@ -6,6 +6,7 @@
  */
 
 import { CronExpressionParser } from "cron-parser";
+import { createNotification, cleanupNotifications } from "../shared/notifications.js";
 
 const CHECK_INTERVAL_MS = 60 * 1000; // Check every 60 seconds
 
@@ -47,6 +48,29 @@ async function tick() {
         args: [now, nextRun, schedule.id],
       });
       console.log(`[scheduler] Fired: #${schedule.id} "${schedule.task}" — next: ${nextRun || "unknown"}`);
+
+      // Create notification for 'reminder:' prefix schedules
+      if (schedule.task.startsWith("reminder:")) {
+        const reminderText = schedule.task.slice("reminder:".length).trim();
+        try {
+          await createNotification(db, {
+            title: reminderText || "Scheduled reminder",
+            type: "reminder",
+            source: "scheduler",
+            priority: "normal",
+            schedule_id: schedule.id,
+          });
+        } catch (err) {
+          console.error(`[scheduler] Failed to create notification for #${schedule.id}:`, err.message);
+        }
+      }
+    }
+
+    // Notification retention cleanup (runs each tick, lightweight)
+    try {
+      await cleanupNotifications(db);
+    } catch (err) {
+      console.error("[scheduler] Notification cleanup error:", err.message);
     }
 
     // Also compute next_run for any schedules that don't have one yet

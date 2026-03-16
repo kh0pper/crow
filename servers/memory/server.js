@@ -10,6 +10,7 @@ import { z } from "zod";
 import { createDbClient, sanitizeFtsQuery, escapeLikePattern, isSqliteVecAvailable } from "../db.js";
 import { generateCrowContext, PROTECTED_SECTIONS } from "./crow-context.js";
 import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
+import { createNotification, cleanupNotifications } from "../shared/notifications.js";
 
 export function createMemoryServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
@@ -669,6 +670,177 @@ export function createMemoryServer(dbPath, options = {}) {
       await db.execute({ sql: `UPDATE schedules SET ${updates.join(", ")} WHERE id = ?`, args: params });
 
       return { content: [{ type: "text", text: `Schedule #${id} updated.` }] };
+    }
+  );
+
+  // --- Notification Tools ---
+
+  server.tool(
+    "crow_check_notifications",
+    "Check pending notifications. Returns unread notifications filtered by type. Automatically cleans expired and snoozed items. Call at session start to surface reminders.",
+    {
+      unread_only: z.boolean().default(true).describe("Only return unread, non-dismissed notifications"),
+      type: z.string().max(50).optional().describe("Filter by type: reminder, media, peer, system"),
+      limit: z.number().max(100).default(20).describe("Maximum results"),
+    },
+    async ({ unread_only, type, limit }) => {
+      // Clean expired on each check
+      await cleanupNotifications(db);
+
+      const now = new Date().toISOString();
+      let sql = "SELECT * FROM notifications WHERE 1=1";
+      const params = [];
+
+      if (unread_only) {
+        sql += " AND is_read = 0 AND is_dismissed = 0";
+        sql += " AND (snoozed_until IS NULL OR snoozed_until <= ?)";
+        params.push(now);
+      }
+      if (type) {
+        sql += " AND type = ?";
+        params.push(type);
+      }
+
+      sql += " ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 WHEN 'low' THEN 2 ELSE 1 END, created_at DESC LIMIT ?";
+      params.push(limit);
+
+      const { rows } = await db.execute({ sql, args: params });
+
+      if (rows.length === 0) {
+        return { content: [{ type: "text", text: "No pending notifications." }] };
+      }
+
+      const formatted = rows.map((r) => {
+        let line = `[#${r.id}] ${r.priority === "high" ? "!" : ""}${r.type}: ${r.title}`;
+        if (r.body) line += `\n  ${r.body}`;
+        if (r.action_url) line += `\n  Link: ${r.action_url}`;
+        if (r.source) line += `\n  Source: ${r.source}`;
+        line += `\n  Created: ${r.created_at}`;
+        return line;
+      }).join("\n\n");
+
+      return { content: [{ type: "text", text: `${rows.length} notification(s):\n\n${formatted}` }] };
+    }
+  );
+
+  server.tool(
+    "crow_create_notification",
+    "Create a notification for the user. Use for reminders, alerts, or any information the user should see in the Crow's Nest or at next session start.",
+    {
+      title: z.string().max(500).describe("Short headline"),
+      body: z.string().max(5000).optional().describe("Longer description"),
+      type: z.string().max(50).default("reminder").describe("Type: reminder, media, peer, system"),
+      priority: z.enum(["low", "normal", "high"]).default("normal").describe("Priority level"),
+      action_url: z.string().max(1000).optional().describe("Dashboard link to navigate to"),
+      metadata: z.record(z.any()).optional().describe("Structured data (stored as JSON)"),
+      expires_in_minutes: z.number().optional().describe("Auto-expire after N minutes"),
+    },
+    async ({ title, body, type, priority, action_url, metadata, expires_in_minutes }) => {
+      const result = await createNotification(db, {
+        title,
+        body,
+        type,
+        source: "mcp:ai",
+        priority,
+        action_url,
+        metadata,
+        expires_in_minutes,
+      });
+
+      if (!result) {
+        return { content: [{ type: "text", text: `Notification type "${type}" is disabled in user preferences.` }] };
+      }
+
+      return { content: [{ type: "text", text: `Notification created (id: ${result.id}, type: ${type}, priority: ${priority})` }] };
+    }
+  );
+
+  server.tool(
+    "crow_dismiss_notification",
+    "Dismiss a notification or snooze it for later. Snoozing hides the notification until the specified time.",
+    {
+      id: z.number().describe("Notification ID to dismiss"),
+      snooze_minutes: z.number().optional().describe("Snooze for N minutes instead of dismissing permanently"),
+    },
+    async ({ id, snooze_minutes }) => {
+      const { rows } = await db.execute({ sql: "SELECT * FROM notifications WHERE id = ?", args: [id] });
+      if (rows.length === 0) {
+        return { content: [{ type: "text", text: `Notification #${id} not found.` }] };
+      }
+
+      if (snooze_minutes) {
+        const snoozedUntil = new Date(Date.now() + snooze_minutes * 60000).toISOString();
+        await db.execute({
+          sql: "UPDATE notifications SET snoozed_until = ?, updated_at = datetime('now') WHERE id = ?",
+          args: [snoozedUntil, id],
+        });
+        return { content: [{ type: "text", text: `Notification #${id} snoozed until ${snoozedUntil}.` }] };
+      }
+
+      await db.execute({
+        sql: "UPDATE notifications SET is_dismissed = 1, updated_at = datetime('now') WHERE id = ?",
+        args: [id],
+      });
+      return { content: [{ type: "text", text: `Notification #${id} dismissed.` }] };
+    }
+  );
+
+  server.tool(
+    "crow_dismiss_all_notifications",
+    "Dismiss all notifications, optionally filtered by type or date.",
+    {
+      type: z.string().max(50).optional().describe("Only dismiss this type"),
+      before: z.string().max(50).optional().describe("Only dismiss notifications created before this ISO date"),
+    },
+    async ({ type, before }) => {
+      let sql = "UPDATE notifications SET is_dismissed = 1, updated_at = datetime('now') WHERE is_dismissed = 0";
+      const params = [];
+
+      if (type) {
+        sql += " AND type = ?";
+        params.push(type);
+      }
+      if (before) {
+        sql += " AND created_at < ?";
+        params.push(before);
+      }
+
+      const result = await db.execute({ sql, args: params });
+      return { content: [{ type: "text", text: `${result.rowsAffected} notification(s) dismissed.` }] };
+    }
+  );
+
+  server.tool(
+    "crow_notification_settings",
+    "Get or update notification preferences (which types are enabled).",
+    {
+      action: z.enum(["get", "set"]).describe("Get current settings or set new ones"),
+      types_enabled: z.array(z.string()).optional().describe("Enabled notification types (only for action=set). E.g. ['reminder', 'media', 'peer', 'system']"),
+    },
+    async ({ action, types_enabled }) => {
+      if (action === "get") {
+        const { rows } = await db.execute({
+          sql: "SELECT value FROM dashboard_settings WHERE key = 'notification_prefs'",
+          args: [],
+        });
+        if (rows.length === 0) {
+          return { content: [{ type: "text", text: 'Notification preferences: all types enabled (default)\n  Types: reminder, media, peer, system' }] };
+        }
+        const prefs = JSON.parse(rows[0].value);
+        return { content: [{ type: "text", text: `Notification preferences:\n  Enabled types: ${prefs.types_enabled?.join(", ") || "all"}` }] };
+      }
+
+      // action === "set"
+      if (!types_enabled) {
+        return { content: [{ type: "text", text: "Provide types_enabled array to update settings." }] };
+      }
+
+      const prefs = { types_enabled };
+      await db.execute({
+        sql: "INSERT OR REPLACE INTO dashboard_settings (key, value, updated_at) VALUES ('notification_prefs', ?, datetime('now'))",
+        args: [JSON.stringify(prefs)],
+      });
+      return { content: [{ type: "text", text: `Notification preferences updated. Enabled types: ${types_enabled.join(", ")}` }] };
     }
   );
 
