@@ -779,10 +779,10 @@ function pollHealth(attempts) {
       `<span style="color:var(--crow-text-muted);font-size:0.85rem">${desc}</span>`,
     ]);
 
-    const connectionHtml = dataTable(["Context", "URL", "Status"], urlRows)
+    const connectionHtml = dataTable([t("settings.context", lang), t("settings.url", lang), t("settings.statusColumn", lang)], urlRows)
       + `<p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.75rem">The Crow's Nest is private (local/Tailscale only). Set <code>CROW_GATEWAY_URL</code> in .env for public blog/podcast URLs.</p>`
-      + `<div style="margin-top:1rem"><h4 style="font-size:0.9rem;color:var(--crow-text-muted);margin-bottom:0.5rem">MCP Endpoints (for AI clients)</h4>`
-      + dataTable(["Server", "Endpoint URL", "Scope"], mcpRows)
+      + `<div style="margin-top:1rem"><h4 style="font-size:0.9rem;color:var(--crow-text-muted);margin-bottom:0.5rem">${t("settings.mcpEndpoints", lang)}</h4>`
+      + dataTable([t("settings.server", lang), t("settings.endpointUrl", lang), t("settings.scope", lang)], mcpRows)
       + `<p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.5rem">Use these Streamable HTTP endpoints to connect Claude.ai, ChatGPT, Gemini, Cursor, or other MCP clients. See the Help &amp; Setup section below for platform-specific instructions.</p></div>`;
 
     // AI Provider config
@@ -817,32 +817,32 @@ function pollHealth(attempts) {
       #ai-status { font-size:0.85rem; margin-top:0.75rem; }
     </style>
     <div class="ai-field">
-      <label>Provider</label>
+      <label>${t("settings.provider", lang)}</label>
       <select id="ai-provider" onchange="aiProviderChanged()">
-        <option value="">— Not configured —</option>
+        <option value="">${t("settings.notConfigured", lang)}</option>
         ${providerOptions}
       </select>
     </div>
     <div class="ai-field">
-      <label>API Key</label>
-      <input type="password" id="ai-api-key" placeholder="${hasKey ? "••••••••" : "Not set"}" autocomplete="off">
+      <label>${t("settings.apiKey", lang)}</label>
+      <input type="password" id="ai-api-key" placeholder="${hasKey ? "••••••••" : t("settings.notSet", lang)}" autocomplete="off">
     </div>
     <div class="ai-field">
-      <label>Model <span style="color:var(--crow-text-muted);font-weight:normal">(optional — uses provider default if blank)</span></label>
+      <label>${t("settings.model", lang)} <span style="color:var(--crow-text-muted);font-weight:normal">(${t("settings.modelOptional", lang)})</span></label>
       <input type="text" id="ai-model" value="${escapeHtml(currentModel)}" placeholder="e.g. gpt-4o, claude-sonnet-4-20250514, gemini-2.5-flash">
     </div>
     <div class="ai-field" id="ai-base-url-field" style="display:${["ollama", "openrouter", ""].includes(currentProvider) || currentBaseUrl ? "block" : "none"}">
-      <label>Base URL <span style="color:var(--crow-text-muted);font-weight:normal">(Ollama, OpenRouter, or custom endpoint)</span></label>
+      <label>${t("settings.baseUrl", lang)} <span style="color:var(--crow-text-muted);font-weight:normal">(${t("settings.baseUrlHint", lang)})</span></label>
       <input type="text" id="ai-base-url" value="${escapeHtml(currentBaseUrl)}" placeholder="http://localhost:11434">
     </div>
     <div class="ai-actions">
-      <button class="btn btn-primary btn-sm" onclick="saveAiProvider()">Save</button>
-      <button class="btn btn-secondary btn-sm" onclick="testAiProvider()">Test Connection</button>
-      ${currentProvider ? `<button class="btn btn-secondary btn-sm" onclick="removeAiProvider()">Remove</button>` : ""}
+      <button class="btn btn-primary btn-sm" onclick="saveAiProvider()">${t("settings.save", lang)}</button>
+      <button class="btn btn-secondary btn-sm" onclick="testAiProvider()">${t("settings.testConnection", lang)}</button>
+      ${currentProvider ? `<button class="btn btn-secondary btn-sm" onclick="removeAiProvider()">${t("settings.removeIntegration", lang)}</button>` : ""}
     </div>
     <div id="ai-status"></div>
     <p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.75rem">
-      Configure an AI provider to enable the AI Chat feature in Messages. API keys are stored on this device only. <a href="/dashboard/messages" style="color:var(--crow-accent)">Open Chat</a>
+      Configure an AI provider to enable the AI Chat feature in Messages. API keys are stored on this device only. <a href="/dashboard/messages" style="color:var(--crow-accent)">${t("settings.openChat", lang)}</a>
     </p>
     <script>
     function aiProviderChanged() {
@@ -868,25 +868,25 @@ function pollHealth(attempts) {
         var res = await fetch('/dashboard/settings', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:params.toString() });
         var data = await res.json();
         el.style.color = data.ok ? 'var(--crow-success)' : 'var(--crow-error)';
-        el.textContent = data.ok ? 'Saved. AI Chat is ready.' : (data.error || 'Save failed.');
+        el.textContent = data.ok ? '${t("settings.savedAiReady", lang)}' : (data.error || '${t("settings.saveFailed", lang)}');
         if (key) { document.getElementById('ai-api-key').value = ''; document.getElementById('ai-api-key').placeholder = '••••••••'; }
       } catch(e) { el.style.color='var(--crow-error)'; el.textContent='Save failed: '+e.message; }
     }
     async function testAiProvider() {
       var el = document.getElementById('ai-status');
       el.style.color = 'var(--crow-accent)';
-      el.textContent = 'Testing connection...';
+      el.textContent = '${t("settings.testingConnection", lang)}';
       try {
         var params = new URLSearchParams();
         params.set('action', 'test_ai_provider');
         var res = await fetch('/dashboard/settings', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:params.toString() });
         var data = await res.json();
         el.style.color = data.ok ? 'var(--crow-success)' : 'var(--crow-error)';
-        el.textContent = data.ok ? 'Connection successful! Provider: ' + (data.provider || 'unknown') : 'Failed: ' + (data.error || 'Unknown error');
+        el.textContent = data.ok ? '${t("settings.connectionSuccessful", lang)} ' + (data.provider || 'unknown') : '${t("settings.testFailed", lang)} ' + (data.error || 'Unknown error');
       } catch(e) { el.style.color='var(--crow-error)'; el.textContent='Test failed: '+e.message; }
     }
     async function removeAiProvider() {
-      if (!confirm('Remove AI provider configuration?')) return;
+      if (!confirm('${t("settings.removeAiConfirm", lang)}')) return;
       var params = new URLSearchParams();
       params.set('action', 'remove_ai_provider');
       try {
@@ -912,8 +912,8 @@ function pollHealth(attempts) {
     let contextRows = globalSections.map((s) => {
       const hasOverride = overriddenKeys.has(s.section_key);
       const statusBadge = hasOverride
-        ? `${badge("overridden", "connected")}`
-        : badge(s.enabled ? "active" : "disabled", s.enabled ? "published" : "draft");
+        ? `${badge(t("settings.overriddenBadge", lang), "connected")}`
+        : badge(s.enabled ? t("settings.activeBadge", lang) : t("settings.disabledBadge", lang), s.enabled ? "published" : "draft");
       return [
         escapeHtml(s.section_title),
         `<span class="mono" style="font-size:0.8rem">${escapeHtml(s.section_key)}</span>`,
@@ -923,13 +923,13 @@ function pollHealth(attempts) {
 
     const deviceLabel = currentDeviceId
       ? `<span class="mono" style="font-size:0.85rem">${escapeHtml(currentDeviceId)}</span>`
-      : `<span style="color:var(--crow-text-muted)">Not set</span>`;
+      : `<span style="color:var(--crow-text-muted)">${t("settings.notSetDevice", lang)}</span>`;
 
     const deviceContextHtml = `
       <div style="margin-bottom:1rem">
-        <span style="color:var(--crow-text-muted);font-size:0.85rem">Device ID:</span> ${deviceLabel}
+        <span style="color:var(--crow-text-muted);font-size:0.85rem">${t("settings.deviceId", lang)}</span> ${deviceLabel}
       </div>
-      ${dataTable(["Section", "Key", "Status"], contextRows)}
+      ${dataTable([t("settings.sectionColumn", lang), t("settings.keyColumn", lang), t("settings.statusColumn", lang)], contextRows)}
       <p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.75rem">
         Set <code>CROW_DEVICE_ID</code> in .env to enable per-device context overrides.
         ${currentDeviceId ? `This device has ${deviceSections.length} override(s). ` : ""}
@@ -1028,33 +1028,33 @@ function pollHealth(attempts) {
 
     // List existing profiles
     for (const p of aiProfiles) {
-      const maskedKey = p.apiKey ? "••••" + p.apiKey.slice(-4) : "Not set";
+      const maskedKey = p.apiKey ? "••••" + p.apiKey.slice(-4) : t("settings.notSet", lang);
       profilesHtml += `<div class="profile-card" data-profile-id="${escapeHtml(p.id)}">
         <div class="profile-card-header">
           <div>
             <div class="profile-card-name">${escapeHtml(p.name)}</div>
-            <div class="profile-card-meta">${escapeHtml(p.provider)} &middot; ${p.models?.length || 0} models &middot; Key: ${maskedKey}</div>
+            <div class="profile-card-meta">${escapeHtml(p.provider)} &middot; ${p.models?.length || 0} ${t("settings.models", lang)} &middot; ${t("settings.key", lang)} ${maskedKey}</div>
           </div>
         </div>
         <div class="profile-card-actions">
-          <button class="btn btn-secondary btn-sm" onclick="editProfile('${escapeHtml(p.id)}')">Edit</button>
-          <button class="btn btn-secondary btn-sm" onclick="testProfile('${escapeHtml(p.id)}',this)">Test</button>
-          <button class="btn btn-secondary btn-sm" style="color:var(--crow-error)" onclick="deleteProfile('${escapeHtml(p.id)}',this)">Delete</button>
+          <button class="btn btn-secondary btn-sm" onclick="editProfile('${escapeHtml(p.id)}')">${t("settings.editProfile", lang)}</button>
+          <button class="btn btn-secondary btn-sm" onclick="testProfile('${escapeHtml(p.id)}',this)">${t("settings.testProfile", lang)}</button>
+          <button class="btn btn-secondary btn-sm" style="color:var(--crow-error)" onclick="deleteProfile('${escapeHtml(p.id)}',this)">${t("settings.deleteProfile", lang)}</button>
         </div>
       </div>`;
     }
 
     // Add profile form (hidden by default, toggled by button)
     profilesHtml += `
-    <button class="btn btn-primary btn-sm" id="add-profile-btn" onclick="document.getElementById('profile-form').style.display='block';this.style.display='none'">+ Add Profile</button>
+    <button class="btn btn-primary btn-sm" id="add-profile-btn" onclick="document.getElementById('profile-form').style.display='block';this.style.display='none'">${t("settings.addProfile", lang)}</button>
     <div class="profile-form" id="profile-form" style="display:none">
       <input type="hidden" id="pf-id" value="">
       <div style="margin-bottom:0.75rem">
-        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">Profile Name</label>
-        <input type="text" id="pf-name" placeholder="e.g. DashScope, Z.AI" style="width:100%;padding:0.5rem;background:var(--crow-bg-deep,#111);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.85rem;box-sizing:border-box">
+        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">${t("settings.profileName", lang)}</label>
+        <input type="text" id="pf-name" placeholder="${t("settings.profileNamePlaceholder", lang)}" style="width:100%;padding:0.5rem;background:var(--crow-bg-deep,#111);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.85rem;box-sizing:border-box">
       </div>
       <div style="margin-bottom:0.75rem">
-        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">Provider</label>
+        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">${t("settings.provider", lang)}</label>
         <select id="pf-provider" style="width:100%;padding:0.5rem;background:var(--crow-bg-deep,#111);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.85rem;box-sizing:border-box">
           <option value="openai">OpenAI / Compatible</option>
           <option value="anthropic">Anthropic</option>
@@ -1063,24 +1063,24 @@ function pollHealth(attempts) {
         </select>
       </div>
       <div style="margin-bottom:0.75rem">
-        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">API Key</label>
-        <input type="password" id="pf-key" placeholder="Leave blank to keep existing" autocomplete="off" style="width:100%;padding:0.5rem;background:var(--crow-bg-deep,#111);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-family:'JetBrains Mono',monospace;font-size:0.85rem;box-sizing:border-box">
+        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">${t("settings.apiKeyLabel", lang)}</label>
+        <input type="password" id="pf-key" placeholder="${t("settings.leaveBlankKeep", lang)}" autocomplete="off" style="width:100%;padding:0.5rem;background:var(--crow-bg-deep,#111);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-family:'JetBrains Mono',monospace;font-size:0.85rem;box-sizing:border-box">
       </div>
       <div style="margin-bottom:0.75rem">
-        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">Base URL</label>
+        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">${t("settings.baseUrlLabel", lang)}</label>
         <input type="text" id="pf-url" placeholder="e.g. https://coding-intl.dashscope.aliyuncs.com/v1" style="width:100%;padding:0.5rem;background:var(--crow-bg-deep,#111);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-family:'JetBrains Mono',monospace;font-size:0.85rem;box-sizing:border-box">
       </div>
       <div style="margin-bottom:0.75rem">
-        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">Models <span style="font-weight:normal">(comma-separated)</span></label>
+        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">${t("settings.modelsLabel", lang)} <span style="font-weight:normal">(${t("settings.commaSeparated", lang)})</span></label>
         <textarea id="pf-models" rows="3" placeholder="qwen3.5-plus, glm-5, kimi-k2.5" style="width:100%;padding:0.5rem;background:var(--crow-bg-deep,#111);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-family:'JetBrains Mono',monospace;font-size:0.85rem;box-sizing:border-box;resize:vertical"></textarea>
       </div>
       <div style="margin-bottom:0.75rem">
-        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">Default Model</label>
+        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">${t("settings.defaultModel", lang)}</label>
         <input type="text" id="pf-default" placeholder="e.g. qwen3.5-plus" style="width:100%;padding:0.5rem;background:var(--crow-bg-deep,#111);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-family:'JetBrains Mono',monospace;font-size:0.85rem;box-sizing:border-box">
       </div>
       <div style="display:flex;gap:0.5rem">
-        <button class="btn btn-primary btn-sm" onclick="saveProfile()">Save Profile</button>
-        <button class="btn btn-secondary btn-sm" onclick="cancelProfileForm()">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="saveProfile()">${t("settings.saveProfile", lang)}</button>
+        <button class="btn btn-secondary btn-sm" onclick="cancelProfileForm()">${t("common.cancel", lang)}</button>
       </div>
       <div id="pf-status" style="font-size:0.85rem;margin-top:0.5rem"></div>
     </div>
@@ -1095,7 +1095,7 @@ function pollHealth(attempts) {
       document.getElementById('pf-name').value = p.name;
       document.getElementById('pf-provider').value = p.provider;
       document.getElementById('pf-key').value = '';
-      document.getElementById('pf-key').placeholder = 'Leave blank to keep existing';
+      document.getElementById('pf-key').placeholder = '${t("settings.leaveBlankKeep", lang)}';
       document.getElementById('pf-url').value = p.baseUrl || '';
       document.getElementById('pf-models').value = (p.models||[]).join(', ');
       document.getElementById('pf-default').value = p.defaultModel || '';
@@ -1131,13 +1131,13 @@ function pollHealth(attempts) {
         var res = await fetch('/dashboard/settings', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:params.toString() });
         var data = await res.json();
         el.style.color = data.ok ? 'var(--crow-success)' : 'var(--crow-error)';
-        el.textContent = data.ok ? 'Saved! Reloading...' : (data.error || 'Save failed');
+        el.textContent = data.ok ? '${t("settings.savedReloading", lang)}' : (data.error || '${t("settings.saveFailed", lang)}');
         if (data.ok) setTimeout(function(){ location.reload(); }, 500);
       } catch(e) { el.style.color='var(--crow-error)'; el.textContent='Save failed: '+e.message; }
     }
 
     async function deleteProfile(id, btn) {
-      if (!confirm('Delete this AI profile?')) return;
+      if (!confirm('${t("settings.deleteProfileConfirm", lang)}')) return;
       btn.disabled = true;
       var params = new URLSearchParams();
       params.set('action', 'delete_ai_profile');
@@ -1150,16 +1150,16 @@ function pollHealth(attempts) {
 
     async function testProfile(id, btn) {
       btn.disabled = true;
-      btn.textContent = 'Testing...';
+      btn.textContent = '${t("settings.testing", lang)}';
       var params = new URLSearchParams();
       params.set('action', 'test_ai_profile');
       params.set('profile_id', id);
       try {
         var res = await fetch('/dashboard/settings', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:params.toString() });
         var data = await res.json();
-        btn.textContent = data.ok ? 'Connected!' : 'Failed';
+        btn.textContent = data.ok ? '${t("settings.connectedStatus", lang)}' : '${t("settings.failedStatus", lang)}';
         btn.style.color = data.ok ? 'var(--crow-success)' : 'var(--crow-error)';
-        setTimeout(function(){ btn.textContent='Test'; btn.style.color=''; btn.disabled=false; }, 3000);
+        setTimeout(function(){ btn.textContent='${t("settings.testProfile", lang)}'; btn.style.color=''; btn.disabled=false; }, 3000);
       } catch(e) { btn.textContent='Error'; btn.disabled=false; }
     }
     <\/script>
@@ -1170,20 +1170,20 @@ function pollHealth(attempts) {
     const content = `
       ${successMsg}${errorMsg}
       ${stats}
-      ${section("AI Profiles", profilesHtml, { delay: 18 })}
-      ${section("AI Provider", aiProviderHtml, { delay: 20 })}
-      ${section("Connection URLs", connectionHtml, { delay: 25 })}
-      ${section("Help & Setup", helpHtml, { delay: 28 })}
-      ${section("Device Context", deviceContextHtml, { delay: 40 })}
-      ${section("Updates", updateHtml, { delay: 50 })}
-      ${section("Integrations", integrationsHtml, { delay: 100 })}
-      ${section("Identity", identityHtml, { delay: 200 })}
-      ${section("Blog Settings", blogForm, { delay: 250 })}
-      ${section("Contact Discovery", discoveryForm, { delay: 300 })}
-      ${section("Change Password", passwordForm, { delay: 350 })}
-      ${section("Language", langForm, { delay: 375 })}
+      ${section(t("settings.aiProfilesSection", lang), profilesHtml, { delay: 18 })}
+      ${section(t("settings.aiProviderSection", lang), aiProviderHtml, { delay: 20 })}
+      ${section(t("settings.connectionUrls", lang), connectionHtml, { delay: 25 })}
+      ${section(t("settings.helpSetupSection", lang), helpHtml, { delay: 28 })}
+      ${section(t("settings.deviceContextSection", lang), deviceContextHtml, { delay: 40 })}
+      ${section(t("settings.updatesSection", lang), updateHtml, { delay: 50 })}
+      ${section(t("settings.integrationsSection", lang), integrationsHtml, { delay: 100 })}
+      ${section(t("settings.identitySection", lang), identityHtml, { delay: 200 })}
+      ${section(t("settings.blogSettingsSection", lang), blogForm, { delay: 250 })}
+      ${section(t("settings.contactDiscoverySection", lang), discoveryForm, { delay: 300 })}
+      ${section(t("settings.changePasswordSection", lang), passwordForm, { delay: 350 })}
+      ${section(t("settings.languageSection", lang), langForm, { delay: 375 })}
     `;
 
-    return layout({ title: "Settings", content });
+    return layout({ title: t("settings.pageTitle", lang), content });
   },
 };

@@ -147,21 +147,21 @@ export default {
           <form method="POST">
             <input type="hidden" name="action" value="save">
             <input type="hidden" name="filename" value="${escapeHtml(safeName)}">
-            ${formField("Content", "content", { type: "textarea", value: content, rows: 20, required: true })}
+            ${formField(t("skills.contentLabel", lang), "content", { type: "textarea", value: content, rows: 20, required: true })}
             <div style="display:flex;gap:0.5rem;margin-top:1rem">
-              <button type="submit" class="btn btn-primary">Save</button>
-              <a href="/dashboard/skills" class="btn btn-secondary">Cancel</a>
-              <form method="POST" style="display:inline;margin-left:auto" onsubmit="return confirm('Delete this user skill? The built-in version (if one exists) will be used instead.')">
+              <button type="submit" class="btn btn-primary">${t("skills.save", lang)}</button>
+              <a href="/dashboard/skills" class="btn btn-secondary">${t("skills.cancel", lang)}</a>
+              <form method="POST" style="display:inline;margin-left:auto" onsubmit="return confirm('${tJs("skills.deleteUserSkillConfirm", lang)}')">
                 <input type="hidden" name="action" value="delete">
                 <input type="hidden" name="filename" value="${escapeHtml(safeName)}">
-                <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+                <button type="submit" class="btn btn-sm btn-danger">${t("skills.delete", lang)}</button>
               </form>
             </div>
           </form>`;
       }
 
       const editContent = section(`${escapeHtml(safeName)}`, editForm);
-      return layout({ title: `Skill: ${safeName}`, content: editContent });
+      return layout({ title: `${t("skills.skillPrefix", lang)} ${safeName}`, content: editContent });
     }
 
     // --- Main skills list ---
@@ -173,9 +173,9 @@ export default {
     const allSkillNames = [...new Set([...userSkills, ...repoSkills])].sort();
 
     const stats = statGrid([
-      statCard("Total Skills", allSkillNames.length, { delay: 0 }),
-      statCard("Built-in", repoSkills.length, { delay: 50 }),
-      statCard("Custom", userSkills.length, { delay: 100 }),
+      statCard(t("skills.totalSkills", lang), allSkillNames.length, { delay: 0 }),
+      statCard(t("skills.builtIn", lang), repoSkills.length, { delay: 50 }),
+      statCard(t("skills.custom", lang), userSkills.length, { delay: 100 }),
     ]);
 
     // Skills table
@@ -196,16 +196,16 @@ export default {
 
       let statusBadge;
       if (isOverridden) {
-        statusBadge = `${badge("overridden", "connected")} ${badge("built-in", "draft")}`;
+        statusBadge = `${badge(t("skills.overridden", lang), "connected")} ${badge(t("skills.builtInBadge", lang), "draft")}`;
       } else if (isUserOnly) {
-        statusBadge = badge("custom", "published");
+        statusBadge = badge(t("skills.customBadge", lang), "published");
       } else {
-        statusBadge = badge("built-in", "draft");
+        statusBadge = badge(t("skills.builtInBadge", lang), "draft");
       }
 
-      const viewBtn = `<a href="/dashboard/skills?edit=${encodeURIComponent(filename)}&source=${source}" class="btn btn-sm btn-secondary">${isBuiltIn ? "View" : "Edit"}</a>`;
+      const viewBtn = `<a href="/dashboard/skills?edit=${encodeURIComponent(filename)}&source=${source}" class="btn btn-sm btn-secondary">${isBuiltIn ? t("skills.view", lang) : t("skills.edit", lang)}</a>`;
       const deleteBtn = !isBuiltIn
-        ? ` <form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('Delete this skill?')"><input type="hidden" name="action" value="delete"><input type="hidden" name="filename" value="${escapeHtml(filename)}"><button class="btn btn-sm btn-danger" type="submit">Delete</button></form>`
+        ? ` <form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('${tJs("skills.deleteConfirm", lang)}')"><input type="hidden" name="action" value="delete"><input type="hidden" name="filename" value="${escapeHtml(filename)}"><button class="btn btn-sm btn-danger" type="submit">${t("skills.delete", lang)}</button></form>`
         : "";
 
       return [
@@ -217,31 +217,31 @@ export default {
     });
 
     const skillsTable = allSkillNames.length === 0
-      ? `<div class="empty-state"><h3>No skills found</h3><p>Skills should be in the skills/ directory.</p></div>`
-      : dataTable(["Name", "File", "Source", "Actions"], rows);
+      ? `<div class="empty-state"><h3>${t("skills.noSkillsFound", lang)}</h3><p>${t("skills.skillsDirectory", lang)}</p></div>`
+      : dataTable([t("skills.tableName", lang), t("skills.tableFile", lang), t("skills.tableSource", lang), t("skills.tableActions", lang)], rows);
 
     // Create form
     const createForm = `<form method="POST">
       <input type="hidden" name="action" value="create">
-      ${formField("Filename", "filename", { placeholder: "my-skill.md", required: true })}
-      ${formField("Content", "content", { type: "textarea", required: true, placeholder: "# My Skill\\n\\n## Description\\nWhat this skill does...\\n\\n## When to Use\\n- When the user asks to...\\n\\n## Workflow\\n1. ...", rows: 10 })}
-      <button type="submit" class="btn btn-primary">Create Skill</button>
+      ${formField(t("skills.filenameLabel", lang), "filename", { placeholder: t("skills.filenamePlaceholder", lang), required: true })}
+      ${formField(t("skills.contentLabel", lang), "content", { type: "textarea", required: true, placeholder: "# My Skill\\n\\n## Description\\nWhat this skill does...\\n\\n## When to Use\\n- When the user asks to...\\n\\n## Workflow\\n1. ...", rows: 10 })}
+      <button type="submit" class="btn btn-primary">${t("skills.createSkill", lang)}</button>
     </form>`;
 
     // Marketplace link
     const marketplaceLink = `<div style="background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px;padding:1rem;margin-bottom:1.5rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
-      <span style="font-weight:600;color:var(--crow-text)">Want more skills?</span>
-      <span style="color:var(--crow-text-secondary);flex:1">Browse and install skill bundles from the add-on marketplace.</span>
-      <a href="/dashboard/extensions" class="btn btn-sm btn-primary">Extensions</a>
+      <span style="font-weight:600;color:var(--crow-text)">${t("skills.wantMoreSkills", lang)}</span>
+      <span style="color:var(--crow-text-secondary);flex:1">${t("skills.browseSkillBundles", lang)}</span>
+      <a href="/dashboard/extensions" class="btn btn-sm btn-primary">${t("skills.extensionsLink", lang)}</a>
     </div>`;
 
     const content = `
       ${stats}
       ${marketplaceLink}
-      ${section("All Skills", skillsTable, { delay: 150 })}
-      ${section("Create New Skill", createForm, { delay: 200 })}
+      ${section(t("skills.allSkills", lang), skillsTable, { delay: 150 })}
+      ${section(t("skills.createNewSkill", lang), createForm, { delay: 200 })}
     `;
 
-    return layout({ title: "Skills", content });
+    return layout({ title: t("skills.pageTitle", lang), content });
   },
 };
