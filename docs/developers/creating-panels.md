@@ -108,6 +108,24 @@ Options:
 | `panels` | Array | Array of panel objects for the nav sidebar. |
 | `theme` | string | Force `'dark'` or `'light'`. Usually omitted (uses user preference). |
 | `scripts` | string | Additional inline JS to include on the page. |
+| `afterContent` | string | HTML rendered after `</main>` inside the dashboard (e.g., fixed-position bars). |
+
+### Global Player (`window.crowPlayer`)
+
+Every dashboard page includes a persistent audio player bar. Your panel can use it to play audio without building its own player:
+
+```js
+// Play a single track
+window.crowPlayer.load('/my-audio.mp3', 'Track Title', 'Subtitle');
+
+// Queue multiple tracks
+window.crowPlayer.queue([
+  { src: '/track1.mp3', title: 'Track 1' },
+  { src: '/track2.mp3', title: 'Track 2' },
+]);
+```
+
+See [Platform Capabilities](/developers/platform-capabilities) for the full API reference.
 
 ## Example: Memory Stats Panel
 

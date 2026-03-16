@@ -399,6 +399,24 @@ export default function mediaRouter(authMiddleware) {
     }
   });
 
+  // --- TTS generation (on-demand) ---
+  router.post("/api/media/articles/:id/listen", authMiddleware, async (req, res) => {
+    const db = createDbClient();
+    try {
+      const id = parseInt(req.params.id, 10);
+      const { getOrGenerateAudio, isEdgeTtsAvailable } = await importBundleModule("tts.js");
+      if (!(await isEdgeTtsAvailable())) {
+        return res.status(503).json({ error: "edge-tts is not installed. Run: npm install edge-tts" });
+      }
+      const result = await getOrGenerateAudio(db, id);
+      res.json({ audio_url: `/api/media/articles/${id}/audio`, cached: result.cached, duration: result.duration });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
   // --- Briefing audio ---
   router.get("/api/media/briefings/:id/audio", authMiddleware, async (req, res) => {
     const db = createDbClient();
@@ -492,12 +510,137 @@ export default function mediaRouter(authMiddleware) {
     }
   });
 
+  // --- Playlist items ---
+  router.post("/api/media/playlists/:id/items", authMiddleware, async (req, res) => {
+    const db = createDbClient();
+    try {
+      const playlistId = parseInt(req.params.id, 10);
+      const { item_type, item_id } = req.body;
+      if (!item_type || !item_id) return res.status(400).json({ error: "item_type and item_id required" });
+
+      const pl = await db.execute({ sql: "SELECT id FROM media_playlists WHERE id = ?", args: [playlistId] });
+      if (pl.rows.length === 0) return res.status(404).json({ error: "Playlist not found" });
+
+      const maxPos = await db.execute({
+        sql: "SELECT COALESCE(MAX(position), 0) as m FROM media_playlist_items WHERE playlist_id = ?",
+        args: [playlistId],
+      });
+      await db.execute({
+        sql: "INSERT INTO media_playlist_items (playlist_id, item_type, item_id, position) VALUES (?, ?, ?, ?)",
+        args: [playlistId, item_type, parseInt(item_id, 10), (maxPos.rows[0]?.m || 0) + 1],
+      });
+      await db.execute({
+        sql: "UPDATE media_playlists SET updated_at = datetime('now') WHERE id = ?",
+        args: [playlistId],
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
+  router.delete("/api/media/playlists/:id/items/:itemId", authMiddleware, async (req, res) => {
+    const db = createDbClient();
+    try {
+      const playlistId = parseInt(req.params.id, 10);
+      const itemId = parseInt(req.params.itemId, 10);
+      await db.execute({
+        sql: "DELETE FROM media_playlist_items WHERE id = ? AND playlist_id = ?",
+        args: [itemId, playlistId],
+      });
+      await db.execute({
+        sql: "UPDATE media_playlists SET updated_at = datetime('now') WHERE id = ?",
+        args: [playlistId],
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
   router.delete("/api/media/playlists/:id", authMiddleware, async (req, res) => {
     const db = createDbClient();
     try {
       const id = parseInt(req.params.id, 10);
       await db.execute({ sql: "DELETE FROM media_playlists WHERE id = ?", args: [id] });
       res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
+  // --- Generate Briefing ---
+  router.post("/api/media/briefings", authMiddleware, async (req, res) => {
+    const db = createDbClient();
+    try {
+      const topic = req.body.topic || null;
+      const count = Math.min(parseInt(req.body.count || "5", 10), 20);
+      const generateAudio = req.body.voice === "1" || req.body.voice === "true";
+
+      // Get top unread articles
+      let sql = `SELECT a.id, a.title, a.summary, a.content_full, a.content_raw,
+                        s.name as source_name, s.category as source_category
+                 FROM media_articles a
+                 JOIN media_sources s ON s.id = a.source_id
+                 LEFT JOIN media_article_states st ON st.article_id = a.id
+                 WHERE COALESCE(st.is_read, 0) = 0 AND s.enabled = 1`;
+      const args = [];
+      if (topic) {
+        const { escapeLikePattern: esc } = await import(pathToFileURL(dbModulePath).href);
+        const escaped = esc(topic);
+        sql += " AND (s.category LIKE ? ESCAPE '\\' OR a.title LIKE ? ESCAPE '\\')";
+        args.push(`%${escaped}%`, `%${escaped}%`);
+      }
+      sql += " ORDER BY a.pub_date DESC NULLS LAST LIMIT ?";
+      args.push(count);
+
+      const { rows: articles } = await db.execute({ sql, args });
+      if (articles.length === 0) {
+        return res.status(400).json({ error: "No unread articles found" + (topic ? ` matching "${topic}"` : "") });
+      }
+
+      // Build briefing script
+      const title = topic ? `Briefing: ${topic}` : `News Briefing`;
+      const scriptLines = articles.map((a, i) => {
+        const text = a.summary || (a.content_full || a.content_raw || "").slice(0, 500);
+        return `${i + 1}. ${a.title} (${a.source_name})\n${text}`;
+      });
+      const script = scriptLines.join("\n\n");
+      const articleIds = JSON.stringify(articles.map(a => a.id));
+
+      let audioPath = null;
+      let durationSec = null;
+
+      if (generateAudio) {
+        try {
+          const { isEdgeTtsAvailable, generateAudio: genAudio, resolveAudioDir } = await importBundleModule("tts.js");
+          if (await isEdgeTtsAvailable()) {
+            const { join } = await import("node:path");
+            const { createHash } = await import("node:crypto");
+            const audioDir = resolveAudioDir();
+            const hash = createHash("sha256").update(script).digest("hex").slice(0, 12);
+            const outPath = join(audioDir, `briefing-${hash}.mp3`);
+            const result = await genAudio(`${title}. ${script}`, "en-US-AriaNeural", outPath);
+            audioPath = outPath;
+            durationSec = result.duration;
+          }
+        } catch (e) {
+          console.warn("[media] Briefing TTS failed:", e.message);
+        }
+      }
+
+      const result = await db.execute({
+        sql: "INSERT INTO media_briefings (title, script, audio_path, article_ids, duration_sec) VALUES (?, ?, ?, ?, ?)",
+        args: [title, script, audioPath, articleIds, durationSec],
+      });
+
+      res.json({ id: result.lastInsertRowid, title, article_count: articles.length, has_audio: !!audioPath });
     } catch (err) {
       res.status(500).json({ error: err.message });
     } finally {
@@ -536,6 +679,121 @@ export default function mediaRouter(authMiddleware) {
       });
     } catch (err) {
       res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
+  // --- Playlist visibility ---
+  router.patch("/api/media/playlists/:id", authMiddleware, async (req, res) => {
+    const db = createDbClient();
+    try {
+      const id = parseInt(req.params.id, 10);
+      const { visibility } = req.body;
+      if (!["private", "public", "unlisted"].includes(visibility)) {
+        return res.status(400).json({ error: "visibility must be private, public, or unlisted" });
+      }
+
+      // Auto-generate slug when making public/unlisted
+      let slug = null;
+      if (visibility !== "private") {
+        const pl = await db.execute({ sql: "SELECT name, slug FROM media_playlists WHERE id = ?", args: [id] });
+        if (pl.rows.length === 0) return res.status(404).json({ error: "Not found" });
+        slug = pl.rows[0].slug;
+        if (!slug) {
+          slug = pl.rows[0].name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80);
+          // Ensure uniqueness
+          const existing = await db.execute({ sql: "SELECT id FROM media_playlists WHERE slug = ? AND id != ?", args: [slug, id] });
+          if (existing.rows.length > 0) slug += "-" + id;
+        }
+      }
+
+      await db.execute({
+        sql: "UPDATE media_playlists SET visibility = ?, slug = ?, updated_at = datetime('now') WHERE id = ?",
+        args: [visibility, slug, id],
+      });
+      res.json({ ok: true, slug, visibility });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
+  return router;
+}
+
+/**
+ * Public playlist routes — mounted WITHOUT auth middleware.
+ * Follows the same pattern as blog-public.js.
+ */
+export function mediaPublicRouter() {
+  const router = Router();
+
+  router.get("/media/playlists/:slug", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const slug = req.params.slug;
+      const pl = await db.execute({
+        sql: "SELECT * FROM media_playlists WHERE slug = ? AND visibility IN ('public', 'unlisted')",
+        args: [slug],
+      });
+      if (pl.rows.length === 0) return res.status(404).send("Playlist not found");
+
+      const playlist = pl.rows[0];
+      const { rows: items } = await db.execute({
+        sql: `SELECT pi.*, a.title, a.url, a.author, a.pub_date, a.summary, a.image_url, a.audio_url,
+                     a.content_fetch_status, s.name as source_name
+              FROM media_playlist_items pi
+              JOIN media_articles a ON a.id = pi.item_id AND pi.item_type = 'article'
+              JOIN media_sources s ON s.id = a.source_id
+              WHERE pi.playlist_id = ?
+              ORDER BY pi.position ASC`,
+        args: [playlist.id],
+      });
+
+      const itemsHtml = items.map((item, idx) => {
+        const paywalled = item.content_fetch_status === "failed";
+        return `<div style="display:flex;gap:0.75rem;align-items:center;padding:0.75rem;border-bottom:1px solid #2a2a3a">
+          <span style="font-size:0.8rem;color:#888;width:24px;text-align:center">${idx + 1}</span>
+          ${item.image_url ? `<img src="${escapeHtml(item.image_url)}" alt="" style="width:56px;height:56px;border-radius:4px;object-fit:cover;flex-shrink:0">` : ""}
+          <div style="flex:1;min-width:0">
+            <div style="font-size:0.9rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+              <a href="${escapeHtml(item.url || "#")}" target="_blank" rel="noopener" style="color:#e2e8f0;text-decoration:none">${escapeHtml(item.title)}</a>
+            </div>
+            <div style="font-size:0.75rem;color:#888">${escapeHtml(item.source_name || "")}${item.pub_date ? " \u00b7 " + item.pub_date.split("T")[0] : ""}</div>
+            ${paywalled ? '<span style="font-size:0.65rem;padding:0.1rem 0.4rem;border-radius:4px;background:rgba(251,191,36,0.15);color:#fbbf24">Subscriber content</span>' : ""}
+          </div>
+        </div>`;
+      }).join("");
+
+      function escapeHtml(s) { return s ? s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;") : ""; }
+
+      const html = `<!DOCTYPE html>
+<html lang="en"><head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(playlist.name)} — Crow Playlist</title>
+  <meta property="og:title" content="${escapeHtml(playlist.name)}">
+  <meta property="og:description" content="Playlist with ${items.length} articles">
+  <meta property="og:type" content="music.playlist">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  <style>body{margin:0;background:#0f0f1a;color:#e2e8f0;font-family:'DM Sans',sans-serif;min-height:100vh}
+  .container{max-width:640px;margin:0 auto;padding:2rem 1rem}
+  h1{font-family:'Fraunces',serif;font-size:1.5rem;margin:0 0 0.25rem}
+  .meta{font-size:0.85rem;color:#888;margin-bottom:1.5rem}
+  a{color:#6366f1}</style>
+</head><body>
+  <div class="container">
+    <h1>${escapeHtml(playlist.name)}</h1>
+    <div class="meta">${items.length} articles${playlist.description ? " \u00b7 " + escapeHtml(playlist.description) : ""}</div>
+    <div>${itemsHtml || "<p style='color:#888'>This playlist is empty.</p>"}</div>
+    <p style="margin-top:2rem;font-size:0.75rem;color:#555">Powered by <a href="https://github.com/kh0pp/crow">Crow</a></p>
+  </div>
+</body></html>`;
+
+      res.type("html").send(html);
+    } catch (err) {
+      res.status(500).send("Error loading playlist");
     } finally {
       db.close();
     }

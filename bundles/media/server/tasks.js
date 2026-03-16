@@ -11,7 +11,7 @@
  *   runner.stop();
  */
 
-import { fetchAndParseFeed, postProcessGoogleNewsItems } from "./feed-fetcher.js";
+import { fetchAndParseFeed, postProcessGoogleNewsItems, buildAuthHeaders } from "./feed-fetcher.js";
 
 const CHECK_INTERVAL = 60_000; // Check for due tasks every 60s
 const MAX_CONCURRENT_FETCHES = parseInt(process.env.CROW_MEDIA_MAX_FETCHES || "3", 10);
@@ -110,7 +110,8 @@ export async function fetchAllFeeds(db) {
 
 async function fetchSingleSource(db, source) {
   try {
-    let { feed, items } = await fetchAndParseFeed(source.url);
+    const authHeaders = buildAuthHeaders(source.auth_config);
+    let { feed, items } = await fetchAndParseFeed(source.url, authHeaders);
 
     // Post-process Google News titles
     if (source.source_type === 'google_news') {
@@ -282,5 +283,96 @@ export function registerMediaTasks(runner, db) {
   }, {
     intervalMs: 30 * 60_000, // 30 minutes
     priority: 8,
+  });
+
+  // Scheduled briefing generation — polls schedules table for media:briefing tasks
+  runner.registerTask("scheduled-briefings", async (db) => {
+    try {
+      const { rows: due } = await db.execute({
+        sql: `SELECT * FROM schedules
+              WHERE task = 'media:briefing' AND enabled = 1
+                AND (next_run IS NULL OR next_run <= datetime('now'))`,
+        args: [],
+      });
+      if (due.length === 0) return;
+
+      for (const schedule of due) {
+        try {
+          const config = schedule.config ? JSON.parse(schedule.config) : {};
+          const topic = config.topic || null;
+          const maxArticles = config.max_articles || 5;
+
+          // Get top unread articles
+          let sql = `SELECT a.id, a.title, a.summary, a.content_full, a.content_raw,
+                            s.name as source_name
+                     FROM media_articles a
+                     JOIN media_sources s ON s.id = a.source_id
+                     LEFT JOIN media_article_states st ON st.article_id = a.id
+                     WHERE COALESCE(st.is_read, 0) = 0 AND s.enabled = 1`;
+          const args = [];
+          if (topic) {
+            sql += " AND (s.category LIKE ? OR a.title LIKE ?)";
+            args.push(`%${topic}%`, `%${topic}%`);
+          }
+          sql += " ORDER BY a.pub_date DESC NULLS LAST LIMIT ?";
+          args.push(maxArticles);
+
+          const { rows: articles } = await db.execute({ sql, args });
+          if (articles.length === 0) continue;
+
+          // Build briefing
+          const title = topic ? `Scheduled: ${topic}` : "Scheduled Briefing";
+          const script = articles.map((a, i) => {
+            const text = a.summary || (a.content_full || a.content_raw || "").slice(0, 500);
+            return `${i + 1}. ${a.title} (${a.source_name})\n${text}`;
+          }).join("\n\n");
+
+          let audioPath = null;
+          let durationSec = null;
+
+          if (config.voice) {
+            try {
+              const { isEdgeTtsAvailable, generateAudio, resolveAudioDir } = await import("./tts.js");
+              if (await isEdgeTtsAvailable()) {
+                const { join } = await import("node:path");
+                const { createHash } = await import("node:crypto");
+                const audioDir = resolveAudioDir();
+                const hash = createHash("sha256").update(script).digest("hex").slice(0, 12);
+                const outPath = join(audioDir, `briefing-${hash}.mp3`);
+                const result = await generateAudio(`${title}. ${script}`, config.voice, outPath);
+                audioPath = outPath;
+                durationSec = result.duration;
+              }
+            } catch {}
+          }
+
+          await db.execute({
+            sql: "INSERT INTO media_briefings (title, script, audio_path, article_ids, duration_sec) VALUES (?, ?, ?, ?, ?)",
+            args: [title, script, audioPath, JSON.stringify(articles.map(a => a.id)), durationSec],
+          });
+
+          // Compute next_run from cron (simple next-minute calculation)
+          // Use a basic approach: set next_run to now + interval based on cron pattern
+          const cronParts = (schedule.cron || "").split(" ");
+          let intervalMs = 24 * 60 * 60_000; // default: daily
+          if (cronParts[4] && cronParts[4] !== "*") {
+            // Has day-of-week constraint — weekly-ish, set next to +24h (runner will re-check)
+            intervalMs = 24 * 60 * 60_000;
+          }
+          const nextRun = new Date(Date.now() + intervalMs).toISOString().replace("T", " ").slice(0, 19);
+          await db.execute({
+            sql: "UPDATE schedules SET last_run = datetime('now'), next_run = ? WHERE id = ?",
+            args: [nextRun, schedule.id],
+          });
+
+          console.log(`[media] Generated scheduled briefing: ${title} (${articles.length} articles)`);
+        } catch (err) {
+          console.warn(`[media] Scheduled briefing failed:`, err.message);
+        }
+      }
+    } catch {}
+  }, {
+    intervalMs: 30 * 60_000, // 30 minutes (same as digest-sender)
+    priority: 9,
   });
 }

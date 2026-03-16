@@ -56,6 +56,9 @@ export async function initMediaTables(db) {
     CREATE INDEX IF NOT EXISTS idx_media_sources_category ON media_sources(category);
   `);
 
+  // Add auth_config for paywalled sources
+  await addColumnIfMissing(db, "media_sources", "auth_config", "TEXT");
+
   // --- Media Articles ---
 
   await initTable(db, "media_articles table", `
@@ -198,6 +201,10 @@ export async function initMediaTables(db) {
       updated_at TEXT DEFAULT (datetime('now'))
     );
   `);
+
+  // Add columns that may be missing on older schemas
+  await addColumnIfMissing(db, "media_playlists", "slug", "TEXT");
+  await addColumnIfMissing(db, "media_playlists", "visibility", "TEXT DEFAULT 'private'");
 
   await initTable(db, "media_playlist_items table", `
     CREATE TABLE IF NOT EXISTS media_playlist_items (

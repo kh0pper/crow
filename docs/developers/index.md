@@ -26,6 +26,12 @@ Add new MCP tools to the crow-memory, crow-projects, crow-sharing, crow-storage,
 
 → [Core Tools](./core-tools)
 
+### Platform Capabilities
+
+Learn about the base infrastructure your add-ons can use: persistent media player, scheduling, web search, storage, P2P sharing, and AI chat.
+
+→ [Platform Capabilities](./platform-capabilities)
+
 ### Self-Hosted Bundles
 
 Create Docker Compose configurations with curated integration sets for specific use cases (academic, business, creative).

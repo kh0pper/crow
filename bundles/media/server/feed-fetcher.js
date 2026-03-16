@@ -11,21 +11,45 @@ const USER_AGENT = "Crow/1.0 (RSS Reader; +https://github.com/kh0pp/crow)";
 /**
  * Fetch a feed URL and return the raw XML text.
  * @param {string} url - Feed URL
+ * @param {object} [authHeaders] - Optional auth headers for paywalled feeds
  * @returns {Promise<string>} Raw XML
  */
-export async function fetchFeedXml(url) {
+export async function fetchFeedXml(url, authHeaders) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
   try {
+    const headers = { "User-Agent": USER_AGENT, Accept: "application/rss+xml, application/atom+xml, application/xml, text/xml, */*" };
+    if (authHeaders) Object.assign(headers, authHeaders);
     const res = await fetch(url, {
       signal: controller.signal,
-      headers: { "User-Agent": USER_AGENT, Accept: "application/rss+xml, application/atom+xml, application/xml, text/xml, */*" },
+      headers,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
     return await res.text();
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Build auth headers from an auth_config JSON object.
+ * @param {string|object} config - auth_config (JSON string or object)
+ * @returns {object|null} Headers object or null
+ */
+export function buildAuthHeaders(config) {
+  if (!config) return null;
+  const c = typeof config === "string" ? JSON.parse(config) : config;
+  const headers = {};
+  if (c.type === "bearer" && c.token) {
+    headers.Authorization = `Bearer ${c.token}`;
+  } else if (c.type === "basic" && c.username && c.password) {
+    headers.Authorization = `Basic ${Buffer.from(`${c.username}:${c.password}`).toString("base64")}`;
+  } else if (c.type === "api_key" && c.token) {
+    headers[c.header_name || "X-API-Key"] = c.token;
+  } else if (c.type === "cookie" && c.cookies) {
+    headers.Cookie = c.cookies;
+  }
+  return Object.keys(headers).length > 0 ? headers : null;
 }
 
 /**
@@ -44,10 +68,11 @@ export function parseFeed(xml) {
 /**
  * Fetch and parse a feed URL in one call.
  * @param {string} url
+ * @param {object} [authHeaders] - Optional auth headers for paywalled feeds
  * @returns {Promise<{ feed, items }>}
  */
-export async function fetchAndParseFeed(url) {
-  const xml = await fetchFeedXml(url);
+export async function fetchAndParseFeed(url, authHeaders) {
+  const xml = await fetchFeedXml(url, authHeaders);
   return parseFeed(xml);
 }
 

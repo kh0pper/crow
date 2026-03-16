@@ -406,6 +406,25 @@ try {
 }
 
 // Media is now a bundle add-on (bundles/media/). Install via Extensions panel or: crow bundle install media
+// Mount public media routes (playlists) — no auth required
+try {
+  const { existsSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { pathToFileURL } = await import("node:url");
+  const { homedir } = await import("node:os");
+  const installed = join(homedir(), ".crow", "bundles", "media", "panel", "routes.js");
+  const repo = join(import.meta.dirname, "../../bundles/media/panel/routes.js");
+  const routesPath = existsSync(installed) ? installed : repo;
+  if (existsSync(routesPath)) {
+    const { mediaPublicRouter } = await import(pathToFileURL(routesPath).href);
+    if (mediaPublicRouter) {
+      app.use(mediaPublicRouter());
+      console.log("Media public routes mounted at /media/playlists/*");
+    }
+  }
+} catch (err) {
+  // Media bundle not installed — skip silently
+}
 
 // --- Mount AI Chat Routes ---
 try {

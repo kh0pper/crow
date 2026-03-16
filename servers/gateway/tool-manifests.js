@@ -85,8 +85,29 @@ export const TOOL_MANIFESTS = {
     },
   },
 
-  // Media is available as a bundle add-on (bundles/media/).
-  // When installed, its 16 tools are discovered via the proxy system.
+  media: {
+    displayName: "Media",
+    description: "News & podcast hub: subscribe to RSS/Atom/YouTube/Google News, browse feed, search articles, personalized For You, TTS listen, briefings, playlists, smart folders, digests",
+    tools: {
+      crow_media_add_source: { params: "url?, query?, youtube_channel?, name?, category?, fetch_interval_min?", desc: "Subscribe to feed/channel" },
+      crow_media_list_sources: { params: "enabled_only?, category?", desc: "List subscribed sources" },
+      crow_media_remove_source: { params: "id, delete_articles?, confirm_token", desc: "Remove source (confirm required)" },
+      crow_media_feed: { params: "limit?, offset?, category?, source_id?, unread_only?, starred_only?, sort?", desc: "Browse feed (chronological or for_you)" },
+      crow_media_get_article: { params: "id", desc: "Get full article content" },
+      crow_media_search: { params: "query, category?, date_from?, limit?, discover_sources?", desc: "Full-text search articles (discover_sources=true for web RSS discovery)" },
+      crow_media_article_action: { params: "article_id, action", desc: "Star/save/read/feedback action" },
+      crow_media_refresh: { params: "source_id?", desc: "Trigger feed refresh" },
+      crow_media_stats: { params: "", desc: "Media statistics overview" },
+      crow_media_listen: { params: "article_id, voice?", desc: "Generate/retrieve TTS audio" },
+      crow_media_briefing: { params: "topic?, max_articles?, voice?", desc: "Generate news briefing" },
+      crow_media_playlist: { params: "action, id?, name?, description?, confirm_token?", desc: "Manage playlists (create/list/rename/delete)" },
+      crow_media_playlist_items: { params: "action, playlist_id, item_type?, item_id?, item_ids?", desc: "Manage playlist items (add/remove/reorder/list)" },
+      crow_media_smart_folders: { params: "action, id?, name?, description?, query?, limit?, offset?, confirm_token?", desc: "Manage smart folders" },
+      crow_media_digest_preview: { params: "smart_folder_id?, limit?", desc: "Preview digest content" },
+      crow_media_digest_settings: { params: "schedule?, email?, custom_instructions?, enabled?", desc: "Configure digest delivery" },
+      crow_media_schedule_briefing: { params: "cron, topic?, max_articles?, voice?, enabled?", desc: "Schedule automatic briefing generation" },
+    },
+  },
 
   storage: {
     displayName: "Storage",

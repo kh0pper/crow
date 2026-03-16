@@ -33,8 +33,7 @@ import { generateCrowContext } from "../memory/crow-context.js";
 
 /**
  * Server factory map — maps category names to their factory functions.
- * Storage is loaded dynamically since it may not be available.
- * Media is available as a bundle add-on (bundles/media/).
+ * Storage and media are loaded dynamically since they may not be available.
  */
 const SERVER_FACTORIES = {
   memory: createMemoryServer,
@@ -42,6 +41,7 @@ const SERVER_FACTORIES = {
   sharing: createSharingServer,
   blog: createBlogServer,
   // storage added dynamically in createRouterServer
+  // media added dynamically in createRouterServer (bundle add-on)
 };
 
 /** Backward-compat aliases for category names */
@@ -85,7 +85,7 @@ export function createRouterServer(options = {}) {
   async function getClient(category) {
     if (clients.has(category)) return clients.get(category);
 
-    // Check if storage is available
+    // Check if storage/media are available (loaded dynamically)
     let factories = { ...SERVER_FACTORIES };
     if (category === "storage") {
       try {
@@ -93,6 +93,22 @@ export function createRouterServer(options = {}) {
         factories.storage = createStorageServer;
       } catch {
         throw new Error("Storage server is not available. Set MINIO_ENDPOINT in .env to enable it.");
+      }
+    }
+    if (category === "media") {
+      try {
+        // Try installed bundle first, then repo
+        const { existsSync } = await import("node:fs");
+        const { join } = await import("node:path");
+        const { pathToFileURL } = await import("node:url");
+        const { homedir } = await import("node:os");
+        const installed = join(homedir(), ".crow", "bundles", "media", "server", "server.js");
+        const repo = join(import.meta.dirname, "../../bundles/media/server/server.js");
+        const serverPath = existsSync(installed) ? installed : repo;
+        const { createMediaServer } = await import(pathToFileURL(serverPath).href);
+        factories.media = createMediaServer;
+      } catch {
+        throw new Error("Media bundle is not installed. Install it via the Extensions panel or place it in bundles/media/.");
       }
     }
 
@@ -217,7 +233,7 @@ export function createRouterServer(options = {}) {
     "crow_discover",
     "Discover available actions and their full parameter schemas. Use without arguments to list all categories. Specify a category to list its actions. Specify category + action to get the full JSON Schema for that action.",
     {
-      category: z.string().optional().describe("Server category: memory, projects, blog, sharing, storage, media, tools"),
+      category: z.string().optional().describe("Server category: memory, projects, blog, sharing, media, storage, tools"),
       action: z.string().optional().describe("Specific action name to get full schema for"),
     },
     async ({ category, action }) => {
