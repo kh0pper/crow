@@ -1,12 +1,147 @@
 /**
- * Header Notification Bell + Health Status Icons
+ * Header Notification Bell + Health Status Icons + Tamagotchi Crow
  *
- * Provides HTML for the header icons and polling JS.
- * Injected into every dashboard page via the headerIcons + scripts slots.
+ * Provides HTML/CSS/JS for two modes:
+ *   1. Classic: bell icon + health pulse (headerIcons*)
+ *   2. Tamagotchi: animated pixel crow with combined dropdown (tamagotchi*)
+ *
+ * Shared notification rendering logic (sharedNotifJs) is used by both modes.
  *
  * Security: All user-generated content (notification titles, bodies) is escaped
  * via escapeNotifHtml() before DOM insertion. Health data is numeric only.
  */
+
+// ─── Shared notification JS (used by both classic and tamagotchi modes) ───
+
+export const sharedNotifJs = `
+  let _notifPollTimer = null;
+  let _tabVisible = true;
+
+  document.addEventListener('visibilitychange', function() {
+    _tabVisible = !document.hidden;
+    if (_tabVisible) pollNotifications();
+  });
+
+  function escapeNotifHtml(str) {
+    if (!str) return '';
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function formatUptime(seconds) {
+    var d = Math.floor(seconds / 86400);
+    var h = Math.floor((seconds % 86400) / 3600);
+    var m = Math.floor((seconds % 3600) / 60);
+    if (d > 0) return d + 'd ' + h + 'h';
+    if (h > 0) return h + 'h ' + m + 'm';
+    return m + 'm';
+  }
+
+  function formatTimeAgo(iso) {
+    var diff = Date.now() - new Date(iso + 'Z').getTime();
+    var mins = Math.floor(diff / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return mins + 'm ago';
+    var hrs = Math.floor(mins / 60);
+    if (hrs < 24) return hrs + 'h ago';
+    return Math.floor(hrs / 24) + 'd ago';
+  }
+
+  async function loadNotifications() {
+    var list = document.getElementById('notif-list');
+    try {
+      var resp = await fetch('/api/notifications?unread_only=true&limit=20');
+      if (!resp.ok) { list.textContent = 'Error loading'; return; }
+      var data = await resp.json();
+
+      if (!data.notifications || data.notifications.length === 0) {
+        list.textContent = '';
+        var empty = document.createElement('div');
+        empty.style.cssText = 'color:var(--crow-text-muted);text-align:center;padding:1rem';
+        empty.textContent = 'No notifications';
+        list.appendChild(empty);
+        return;
+      }
+
+      var typeEmoji = { reminder: '\\u{1F514}', media: '\\u{1F4F0}', peer: '\\u{1F4AC}', system: '\\u2699' };
+      var typeClass = { reminder: 'notif-type-reminder', media: 'notif-type-media', peer: 'notif-type-peer', system: 'notif-type-system' };
+
+      list.textContent = '';
+      data.notifications.forEach(function(n) {
+        var item = document.createElement('div');
+        item.className = 'notif-item';
+        item.onclick = function() { notifClick(n.id, n.action_url); };
+
+        var icon = document.createElement('span');
+        icon.className = 'notif-type-icon ' + (typeClass[n.type] || typeClass.system);
+        icon.textContent = typeEmoji[n.type] || typeEmoji.system;
+        item.appendChild(icon);
+
+        var body = document.createElement('div');
+        body.className = 'notif-item-body';
+
+        var title = document.createElement('div');
+        title.className = n.priority === 'high' ? 'notif-item-title high' : 'notif-item-title';
+        title.textContent = n.title;
+        body.appendChild(title);
+
+        if (n.body) {
+          var desc = document.createElement('div');
+          desc.className = 'notif-item-desc';
+          desc.textContent = n.body;
+          body.appendChild(desc);
+        }
+
+        var time = document.createElement('div');
+        time.className = 'notif-item-time';
+        time.textContent = formatTimeAgo(n.created_at);
+        body.appendChild(time);
+
+        item.appendChild(body);
+
+        var dismiss = document.createElement('button');
+        dismiss.className = 'notif-item-dismiss';
+        dismiss.title = 'Dismiss';
+        dismiss.textContent = '\\u00D7';
+        dismiss.onclick = function(e) { dismissNotification(e, n.id); };
+        item.appendChild(dismiss);
+
+        list.appendChild(item);
+      });
+    } catch(e) {
+      list.textContent = 'Failed to load';
+    }
+  }
+
+  async function notifClick(id, url) {
+    try { await fetch('/api/notifications/' + id + '/read', { method: 'POST' }); } catch(e) {}
+    if (url) window.location.href = url;
+    else { loadNotifications(); pollNotifications(); }
+  }
+
+  async function dismissNotification(e, id) {
+    e.stopPropagation();
+    try {
+      await fetch('/api/notifications/' + id + '/dismiss', { method: 'POST' });
+      loadNotifications();
+      pollNotifications();
+    } catch(e) {}
+  }
+
+  async function dismissAllNotifications(e) {
+    e.stopPropagation();
+    try {
+      await fetch('/api/notifications/dismiss-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}'
+      });
+      loadNotifications();
+      pollNotifications();
+    } catch(e) {}
+  }
+`;
+
+// ─── Classic mode: bell icon + health pulse ───
 
 export const headerIconsHtml = `
 <div class="header-icon-btn" id="health-icon-btn" onclick="toggleHealthDropdown(event)" title="System health">
@@ -183,13 +318,7 @@ export const headerIconsCss = `
 `;
 
 export const headerIconsJs = `
-  let _notifPollTimer = null;
-  let _tabVisible = true;
-
-  document.addEventListener('visibilitychange', function() {
-    _tabVisible = !document.hidden;
-    if (_tabVisible) pollNotifications();
-  });
+  ${sharedNotifJs}
 
   function toggleHealthDropdown(e) {
     e.stopPropagation();
@@ -216,30 +345,6 @@ export const headerIconsJs = `
   document.querySelectorAll('.header-dropdown').forEach(function(el) {
     el.addEventListener('click', function(e) { e.stopPropagation(); });
   });
-
-  function escapeNotifHtml(str) {
-    if (!str) return '';
-    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  }
-
-  function formatUptime(seconds) {
-    var d = Math.floor(seconds / 86400);
-    var h = Math.floor((seconds % 86400) / 3600);
-    var m = Math.floor((seconds % 3600) / 60);
-    if (d > 0) return d + 'd ' + h + 'h';
-    if (h > 0) return h + 'h ' + m + 'm';
-    return m + 'm';
-  }
-
-  function formatTimeAgo(iso) {
-    var diff = Date.now() - new Date(iso + 'Z').getTime();
-    var mins = Math.floor(diff / 60000);
-    if (mins < 1) return 'just now';
-    if (mins < 60) return mins + 'm ago';
-    var hrs = Math.floor(mins / 60);
-    if (hrs < 24) return hrs + 'h ago';
-    return Math.floor(hrs / 24) + 'd ago';
-  }
 
   async function pollNotifications() {
     if (!_tabVisible) return;
@@ -286,97 +391,283 @@ export const headerIconsJs = `
     } catch(e) {}
   }
 
-  async function loadNotifications() {
-    var list = document.getElementById('notif-list');
-    try {
-      var resp = await fetch('/api/notifications?unread_only=true&limit=20');
-      if (!resp.ok) { list.textContent = 'Error loading'; return; }
-      var data = await resp.json();
+  pollNotifications();
+  _notifPollTimer = setInterval(pollNotifications, 60000);
+`;
 
-      if (!data.notifications || data.notifications.length === 0) {
-        list.textContent = '';
-        var empty = document.createElement('div');
-        empty.style.cssText = 'color:var(--crow-text-muted);text-align:center;padding:1rem';
-        empty.textContent = 'No notifications';
-        list.appendChild(empty);
-        return;
-      }
+// ─── Tamagotchi mode: animated pixel crow with combined dropdown ───
 
-      var typeEmoji = { reminder: '\\u{1F514}', media: '\\u{1F4F0}', peer: '\\u{1F4AC}', system: '\\u2699' };
-      var typeClass = { reminder: 'notif-type-reminder', media: 'notif-type-media', peer: 'notif-type-peer', system: 'notif-type-system' };
+export const tamagotchiHtml = `
+<div class="crow-tama-wrap" id="crow-tama-wrap">
+  <svg class="crow-tama crow-happy" id="crow-tama" viewBox="0 0 48 56" width="42" height="49" onclick="toggleCrowDropdown(event)">
+    <g class="crow-body-group">
+      <!-- Feet -->
+      <g class="crow-feet">
+        <line x1="19" y1="42" x2="17" y2="48" stroke="#6366f1" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="19" y1="42" x2="21" y2="48" stroke="#6366f1" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="29" y1="42" x2="27" y2="48" stroke="#6366f1" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="29" y1="42" x2="31" y2="48" stroke="#6366f1" stroke-width="1.5" stroke-linecap="round"/>
+      </g>
+      <!-- Body -->
+      <ellipse class="crow-body" cx="24" cy="34" rx="12" ry="10" fill="#6366f1"/>
+      <!-- Wing -->
+      <ellipse class="crow-wing" cx="14" cy="33" rx="6" ry="8" fill="#818cf8" opacity="0.5" transform-origin="14 33"/>
+      <!-- Head -->
+      <circle class="crow-head" cx="24" cy="18" r="9" fill="#6366f1"/>
+      <!-- Eye -->
+      <circle class="crow-eye" cx="28" cy="16" r="3" fill="#fbbf24"/>
+      <circle class="crow-pupil" cx="29" cy="16" r="1.5" fill="#0f0f17"/>
+      <!-- Beak -->
+      <polygon class="crow-beak" points="33,18 40,20 33,22" fill="#fbbf24"/>
+    </g>
+    <!-- Thought bubble (notification count) -->
+    <g class="crow-bubble" id="crow-bubble" style="display:none">
+      <rect x="32" y="0" width="16" height="14" rx="5" fill="var(--crow-bg-surface, #1a1a2e)" stroke="var(--crow-border, #2a2a3e)" stroke-width="1"/>
+      <text class="crow-bubble-count" id="crow-bubble-count" x="40" y="10.5" text-anchor="middle" fill="#fbbf24" font-size="9" font-weight="700" font-family="'JetBrains Mono',monospace">0</text>
+    </g>
+    <!-- Alarmed exclamation -->
+    <text class="crow-exclaim" id="crow-exclaim" style="display:none" x="6" y="12" fill="#ef4444" font-size="14" font-weight="900" font-family="'DM Sans',sans-serif">!</text>
+  </svg>
+  <!-- Combined dropdown -->
+  <div id="crow-dropdown" class="crow-dropdown" style="display:none" onclick="event.stopPropagation()">
+    <div class="dropdown-title">
+      <span>Status</span>
+      <button class="btn btn-sm btn-secondary" onclick="dismissAllNotifications(event)">Clear all</button>
+    </div>
+    <div class="crow-health-bar" id="crow-health-bar">
+      <span class="crow-health-metric">CPU <span id="crow-cpu">--</span></span>
+      <span class="crow-health-sep">&middot;</span>
+      <span class="crow-health-metric">RAM <span id="crow-ram">--</span></span>
+      <span class="crow-health-sep">&middot;</span>
+      <span class="crow-health-metric">Disk <span id="crow-disk">--</span></span>
+      <span class="crow-health-sep">&middot;</span>
+      <span class="crow-health-metric" id="crow-uptime">--</span>
+    </div>
+    <div id="notif-list" class="dropdown-body">Loading...</div>
+  </div>
+</div>
+`;
 
-      list.textContent = '';
-      data.notifications.forEach(function(n) {
-        var item = document.createElement('div');
-        item.className = 'notif-item';
-        item.onclick = function() { notifClick(n.id, n.action_url); };
+export const tamagotchiCss = `
+  /* ─── Tamagotchi Crow ─── */
+  .crow-tama-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+  }
+  .crow-tama {
+    display: block;
+    overflow: visible;
+  }
 
-        var icon = document.createElement('span');
-        icon.className = 'notif-type-icon ' + (typeClass[n.type] || typeClass.system);
-        icon.textContent = typeEmoji[n.type] || typeEmoji.system;
-        item.appendChild(icon);
+  /* ─ Bounce keyframes ─ */
+  @keyframes crow-bounce-happy {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-3px); }
+  }
+  @keyframes crow-bounce-tired {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-2px); }
+  }
 
-        var body = document.createElement('div');
-        body.className = 'notif-item-body';
+  /* ─ Blink keyframe ─ */
+  @keyframes crow-blink {
+    0%, 92%, 100% { opacity: 1; }
+    95% { opacity: 0; }
+  }
 
-        var title = document.createElement('div');
-        title.className = n.priority === 'high' ? 'notif-item-title high' : 'notif-item-title';
-        title.textContent = n.title;
-        body.appendChild(title);
+  /* ─ Wing flap (alarmed) ─ */
+  @keyframes crow-flap {
+    0%, 100% { transform: rotateZ(0deg); }
+    50% { transform: rotateZ(-20deg); }
+  }
 
-        if (n.body) {
-          var desc = document.createElement('div');
-          desc.className = 'notif-item-desc';
-          desc.textContent = n.body;
-          body.appendChild(desc);
-        }
+  /* ─ Wing droop (tired) ─ */
+  @keyframes crow-droop {
+    0%, 100% { transform: rotateZ(5deg); }
+    50% { transform: rotateZ(10deg); }
+  }
 
-        var time = document.createElement('div');
-        time.className = 'notif-item-time';
-        time.textContent = formatTimeAgo(n.created_at);
-        body.appendChild(time);
+  /* ─ Bubble float ─ */
+  @keyframes crow-bubble-float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-2px); }
+  }
 
-        item.appendChild(body);
+  /* ─ Happy mood ─ */
+  .crow-happy .crow-body-group {
+    animation: crow-bounce-happy 2s ease-in-out infinite;
+  }
+  .crow-happy .crow-eye {
+    animation: crow-blink 4s step-end infinite;
+  }
+  .crow-happy .crow-wing {
+    animation: none;
+  }
+  .crow-happy .crow-beak {
+    fill: #fbbf24;
+  }
 
-        var dismiss = document.createElement('button');
-        dismiss.className = 'notif-item-dismiss';
-        dismiss.title = 'Dismiss';
-        dismiss.textContent = '\\u00D7';
-        dismiss.onclick = function(e) { dismissNotification(e, n.id); };
-        item.appendChild(dismiss);
+  /* ─ Tired mood ─ */
+  .crow-tired .crow-body-group {
+    animation: crow-bounce-tired 3s ease-in-out infinite;
+  }
+  .crow-tired .crow-eye {
+    animation: crow-blink 6s step-end infinite;
+  }
+  .crow-tired .crow-wing {
+    animation: crow-droop 3s ease-in-out infinite;
+  }
+  .crow-tired .crow-beak {
+    fill: #c8c864;
+  }
 
-        list.appendChild(item);
-      });
-    } catch(e) {
-      list.textContent = 'Failed to load';
+  /* ─ Alarmed mood ─ */
+  .crow-alarmed .crow-body-group {
+    animation: crow-bounce-happy 1s ease-in-out infinite;
+  }
+  .crow-alarmed .crow-eye {
+    animation: crow-blink 2s step-end infinite;
+  }
+  .crow-alarmed .crow-wing {
+    animation: crow-flap 0.3s ease-in-out infinite;
+  }
+  .crow-alarmed .crow-beak {
+    fill: #c8c864;
+  }
+
+  /* ─ Bubble ─ */
+  .crow-bubble {
+    animation: crow-bubble-float 3s ease-in-out infinite;
+  }
+
+  /* ─ Combined dropdown ─ */
+  .crow-dropdown {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    background: var(--crow-bg-surface);
+    border: 1px solid var(--crow-border);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    min-width: 320px;
+    max-width: 400px;
+    z-index: 200;
+    animation: fadeInUp 0.15s ease-out;
+  }
+  .crow-health-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid var(--crow-border);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--crow-text-secondary);
+    flex-wrap: wrap;
+  }
+  .crow-health-metric { white-space: nowrap; }
+  .crow-health-sep { color: var(--crow-text-muted); }
+  .crow-health-ok { color: var(--crow-success); }
+  .crow-health-warn { color: var(--crow-brand-gold); }
+  .crow-health-crit { color: var(--crow-error); }
+
+  @media (max-width: 768px) {
+    .crow-dropdown { position: fixed; top: auto; bottom: 60px; right: 8px; left: 8px; min-width: auto; max-width: none; }
+  }
+`;
+
+export const tamagotchiJs = `
+  ${sharedNotifJs}
+
+  function toggleCrowDropdown(e) {
+    e.stopPropagation();
+    var dd = document.getElementById('crow-dropdown');
+    dd.style.display = dd.style.display === 'none' ? 'block' : 'none';
+    if (dd.style.display === 'block') loadNotifications();
+  }
+
+  document.addEventListener('click', function() {
+    document.getElementById('crow-dropdown').style.display = 'none';
+  });
+
+  function healthColor(pct) {
+    if (pct >= 90) return 'crow-health-crit';
+    if (pct >= 70) return 'crow-health-warn';
+    return 'crow-health-ok';
+  }
+
+  function updateCrowMood(health) {
+    var svg = document.getElementById('crow-tama');
+    var exclaim = document.getElementById('crow-exclaim');
+    if (!svg || !health) return;
+
+    var worst = Math.max(health.ram_pct || 0, health.cpu_pct || 0, health.disk_pct || 0);
+    var mood;
+    if (worst >= 90) {
+      mood = 'crow-alarmed';
+      exclaim.style.display = '';
+    } else if (worst >= 70) {
+      mood = 'crow-tired';
+      exclaim.style.display = 'none';
+    } else {
+      mood = 'crow-happy';
+      exclaim.style.display = 'none';
+    }
+
+    svg.classList.remove('crow-happy', 'crow-tired', 'crow-alarmed');
+    svg.classList.add(mood);
+  }
+
+  function updateCrowHealthBar(health) {
+    if (!health) return;
+
+    var cpuEl = document.getElementById('crow-cpu');
+    var ramEl = document.getElementById('crow-ram');
+    var diskEl = document.getElementById('crow-disk');
+    var uptimeEl = document.getElementById('crow-uptime');
+
+    if (cpuEl) {
+      cpuEl.textContent = (health.cpu_pct || 0) + '%';
+      cpuEl.className = healthColor(health.cpu_pct || 0);
+    }
+    if (ramEl) {
+      ramEl.textContent = (health.ram_pct || 0) + '%';
+      ramEl.className = healthColor(health.ram_pct || 0);
+    }
+    if (diskEl) {
+      diskEl.textContent = (health.disk_pct || 0) + '%';
+      diskEl.className = healthColor(health.disk_pct || 0);
+    }
+    if (uptimeEl && health.uptime_seconds) {
+      uptimeEl.textContent = formatUptime(health.uptime_seconds);
     }
   }
 
-  async function notifClick(id, url) {
-    try { await fetch('/api/notifications/' + id + '/read', { method: 'POST' }); } catch(e) {}
-    if (url) window.location.href = url;
-    else { loadNotifications(); pollNotifications(); }
+  function updateCrowBubble(count) {
+    var bubble = document.getElementById('crow-bubble');
+    var countEl = document.getElementById('crow-bubble-count');
+    if (!bubble) return;
+
+    if (count > 0) {
+      bubble.style.display = '';
+      if (countEl) countEl.textContent = count > 99 ? '99+' : count;
+    } else {
+      bubble.style.display = 'none';
+    }
   }
 
-  async function dismissNotification(e, id) {
-    e.stopPropagation();
+  async function pollNotifications() {
+    if (!_tabVisible) return;
     try {
-      await fetch('/api/notifications/' + id + '/dismiss', { method: 'POST' });
-      loadNotifications();
-      pollNotifications();
-    } catch(e) {}
-  }
+      var resp = await fetch('/api/notifications/count');
+      if (!resp.ok) return;
+      var data = await resp.json();
 
-  async function dismissAllNotifications(e) {
-    e.stopPropagation();
-    try {
-      await fetch('/api/notifications/dismiss-all', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}'
-      });
-      loadNotifications();
-      pollNotifications();
+      updateCrowBubble(data.count);
+      updateCrowMood(data.health);
+      updateCrowHealthBar(data.health);
     } catch(e) {}
   }
 

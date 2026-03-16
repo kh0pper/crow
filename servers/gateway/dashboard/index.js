@@ -6,7 +6,7 @@ import { Router } from "express";
 import express from "express";
 import { renderLayout, renderLogin } from "./shared/layout.js";
 import { playerBarHtml, playerBarJs } from "./shared/player.js";
-import { headerIconsHtml, headerIconsCss, headerIconsJs } from "./shared/notifications.js";
+import { headerIconsHtml, headerIconsJs, tamagotchiHtml, tamagotchiJs } from "./shared/notifications.js";
 import {
   dashboardAuth,
   isPasswordSet,
@@ -19,7 +19,7 @@ import {
   validatePasswordStrength,
 } from "./auth.js";
 import { resolve } from "node:path";
-import { registerPanel, loadExternalPanels, getAllPanels, getPanel } from "./panel-registry.js";
+import { registerPanel, loadExternalPanels, getAllPanels, getVisiblePanels, getPanel } from "./panel-registry.js";
 import { createDbClient } from "../../db.js";
 
 // Import built-in panels
@@ -123,11 +123,11 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     res.redirect("/dashboard/messages");
   });
 
-  // Dashboard home — redirect to first panel
+  // Dashboard home — redirect to first visible panel
   router.get("/dashboard", (req, res) => {
-    const panels = getAllPanels();
-    if (panels.length > 0) {
-      res.redirect(panels[0].route);
+    const visible = getVisiblePanels();
+    if (visible.length > 0) {
+      res.redirect(visible[0].route);
     } else {
       res.redirect("/dashboard/settings");
     }
@@ -145,14 +145,19 @@ export default function dashboardRouter(mcpAuthMiddleware) {
 
     const db = createDbClient();
     try {
-      const allPanels = getAllPanels();
+      const visiblePanels = getVisiblePanels();
 
-      // Get theme preference
-      const themeResult = await db.execute({
-        sql: "SELECT value FROM dashboard_settings WHERE key = 'dashboard_theme'",
-        args: [],
-      });
+      // Get theme + tamagotchi preferences
+      const [themeResult, tamaResult] = await Promise.all([
+        db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'dashboard_theme'", args: [] }),
+        db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'tamagotchi_enabled'", args: [] }),
+      ]);
       const theme = themeResult.rows[0]?.value || "dark";
+      // Missing key = true (tamagotchi on by default)
+      const tamaEnabled = tamaResult.rows[0]?.value !== "false";
+
+      const activeHeaderHtml = tamaEnabled ? tamagotchiHtml : headerIconsHtml;
+      const activeHeaderJs = tamaEnabled ? tamagotchiJs : headerIconsJs;
 
       const result = await panel.handler(req, res, {
         db,
@@ -160,11 +165,11 @@ export default function dashboardRouter(mcpAuthMiddleware) {
         layout: (opts) => renderLayout({
           ...opts,
           activePanel: panelId,
-          panels: allPanels,
+          panels: visiblePanels,
           theme,
-          headerIcons: headerIconsHtml,
+          headerIcons: activeHeaderHtml,
           afterContent: playerBarHtml,
-          scripts: (opts.scripts || "") + playerBarJs + headerIconsJs,
+          scripts: (opts.scripts || "") + playerBarJs + activeHeaderJs,
         }),
       });
 
@@ -179,7 +184,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
           title: "Error",
           content: `<div class="alert alert-error">Something went wrong: ${err.message}</div>`,
           activePanel: panelId,
-          panels: getAllPanels(),
+          panels: getVisiblePanels(),
           theme: "dark",
         }));
       }

@@ -83,13 +83,37 @@ export default function notificationsRouter(dashboardAuth) {
       let health = null;
       try {
         const os = await import("node:os");
+        const fs = await import("node:fs");
         const totalMem = Math.round(os.totalmem() / 1048576);
         const freeMem = Math.round(os.freemem() / 1048576);
+        const cpuCount = os.cpus().length;
+
+        // CPU: 1-min load average normalized to core count
+        const cpuPct = Math.min(100, Math.round((os.loadavg()[0] / cpuCount) * 100));
+
+        // Disk: async statfs (Node 18.15+)
+        let diskPct = 0, diskUsedGb = 0, diskTotalGb = 0;
+        try {
+          const stats = await fs.promises.statfs("/");
+          const totalBytes = stats.blocks * stats.bsize;
+          const freeBytes = stats.bfree * stats.bsize;
+          const usedBytes = totalBytes - freeBytes;
+          diskTotalGb = Math.round(totalBytes / 1073741824);
+          diskUsedGb = Math.round(usedBytes / 1073741824);
+          diskPct = diskTotalGb > 0 ? Math.round((diskUsedGb / diskTotalGb) * 100) : 0;
+        } catch {
+          // statfs not available
+        }
+
         health = {
           ram_used_mb: totalMem - freeMem,
           ram_total_mb: totalMem,
           ram_pct: Math.round(((totalMem - freeMem) / totalMem) * 100),
-          cpus: os.cpus().length,
+          cpu_pct: cpuPct,
+          cpus: cpuCount,
+          disk_pct: diskPct,
+          disk_used_gb: diskUsedGb,
+          disk_total_gb: diskTotalGb,
           uptime_seconds: Math.round(os.uptime()),
         };
       } catch {

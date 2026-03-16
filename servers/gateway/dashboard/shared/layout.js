@@ -7,7 +7,7 @@
 
 import { CROW_HERO_SVG } from "./crow-hero.js";
 import { FONT_IMPORT, designTokensCss } from "./design-tokens.js";
-import { headerIconsCss } from "./notifications.js";
+import { headerIconsCss, tamagotchiCss } from "./notifications.js";
 
 /**
  * Render the full dashboard HTML page.
@@ -497,6 +497,9 @@ function dashboardCss() {
 
   /* Header icons (notifications, health) */
   ${headerIconsCss}
+
+  /* Tamagotchi crow */
+  ${tamagotchiCss}
 
   /* Responsive */
   @media (max-width: 768px) {
