@@ -105,8 +105,12 @@ export function buildNestHTML(data, lang) {
     const logo = getAddonLogo(b.id, 32);
     const iconHtml = logo || `<div style="width:32px;height:32px;border-radius:50%;background:rgba(168,85,247,0.15);color:#a855f7;display:flex;align-items:center;justify-content:center;font-size:0.85rem;font-weight:600">${escapeHtml(b.name.charAt(0).toUpperCase())}</div>`;
     const statusDot = `<span class="nest-tile-status" style="background:${b.isRunning ? "var(--crow-success)" : "var(--crow-text-muted)"}" title="${b.isRunning ? t("health.runningStatus", lang) : t("health.stoppedStatus", lang)}"></span>`;
-    const href = b.webUI ? `http://localhost:${b.webUI.port}${b.webUI.path || "/"}` : "/dashboard/extensions";
-    return `<a href="${escapeHtml(href)}" class="nest-tile nest-tile--bundle" ${b.webUI ? 'target="_blank"' : ""}>
+    const hasWebUI = !!b.webUI;
+    const webUIPort = hasWebUI ? b.webUI.port : "";
+    const webUIPath = hasWebUI ? (b.webUI.path || "/") : "";
+    const href = hasWebUI ? "#" : "/dashboard/extensions";
+    const onclick = hasWebUI ? ` onclick="window.open(location.protocol+'//'+location.hostname+':${webUIPort}${webUIPath}','_blank');return false"` : "";
+    return `<a href="${escapeHtml(href)}" class="nest-tile nest-tile--bundle"${onclick}>
       ${statusDot}
       <div class="nest-tile-icon" style="background:none">${iconHtml}</div>
       <div class="nest-tile-label">${escapeHtml(b.name)}</div>
