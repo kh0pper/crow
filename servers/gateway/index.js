@@ -394,6 +394,10 @@ try {
   const { createBlogServer } = await import("../blog/server.js");
   mountMcpServer(app, "/blog-mcp", () => createBlogServer(undefined, { instructions }), sessionManager, authMiddleware);
 
+  // Songbook routes (must mount before blog's /:slug catch-all)
+  const { default: songbookRouter } = await import("./routes/songbook.js");
+  app.use(songbookRouter());
+
   // Public blog routes (no auth)
   const { default: blogPublicRouter } = await import("./routes/blog-public.js");
   app.use(blogPublicRouter());

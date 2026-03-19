@@ -371,6 +371,43 @@
       "category": "networking",
       "official": true,
       "tags": ["networking", "vpn", "remote-access"]
+    },
+    {
+      "id": "songbook",
+      "name": "Songbook",
+      "description": "Personal chord book — ChordPro charts, transposition, chord diagrams, setlists, audio, and peer sharing",
+      "type": "skill",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "media",
+      "tags": ["music", "chords", "guitar", "piano", "songbook", "chordpro"],
+      "icon": "music",
+      "webUI": null,
+      "requires": {
+        "min_ram_mb": 0,
+        "min_disk_mb": 0
+      },
+      "notes": "Core extension. Songs are blog posts tagged 'songbook' with ChordPro content. No installation needed."
+    },
+    {
+      "id": "tax",
+      "name": "Tax Filing Assistant",
+      "description": "Prepare federal income taxes — document collection, calculation, PDF generation, and guided filing",
+      "type": "mcp-server",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "finance",
+      "tags": ["tax", "1040", "IRS", "filing", "finance"],
+      "icon": "file-text",
+      "webUI": null,
+      "requires": {
+        "min_ram_mb": 128,
+        "min_disk_mb": 100
+      },
+      "env_vars": [
+        { "name": "CROW_TAX_ENCRYPTION_KEY", "description": "Passphrase for encrypting PII at rest", "required": true, "secret": true }
+      ],
+      "notes": "Federal returns only — no state. 16 MCP tools for tax preparation. Generates filled IRS PDFs. PII encrypted at rest. Not a substitute for professional tax advice."
     }
   ]
 }

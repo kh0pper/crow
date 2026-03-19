@@ -38,6 +38,7 @@ export default defineConfig({
               { text: 'Uso de Skills', link: '/es/guide/skills' },
               { text: 'Compartir', link: '/es/guide/sharing' },
               { text: 'Blog', link: '/es/guide/blog' },
+              { text: 'Cancionero', link: '/es/guide/songbook' },
             ],
           },
           {
@@ -130,6 +131,7 @@ export default defineConfig({
           { text: 'Relay Protocol', link: '/architecture/relay-protocol' },
           { text: 'Storage Server', link: '/architecture/storage-server' },
           { text: 'Blog Server', link: '/architecture/blog-server' },
+          { text: 'Songbook', link: '/architecture/songbook' },
           { text: "Crow's Nest", link: '/architecture/dashboard' },
           { text: 'Gateway', link: '/architecture/gateway' },
           { text: 'Crow OS', link: '/architecture/crow-os' },
@@ -146,6 +148,7 @@ export default defineConfig({
           { text: 'Storage', link: '/guide/storage' },
           { text: 'Blog', link: '/guide/blog' },
           { text: 'Podcast', link: '/guide/podcast' },
+          { text: 'Songbook', link: '/guide/songbook' },
           { text: 'Blog Discovery', link: '/guide/blog-discovery' },
           { text: "Crow's Nest", link: '/guide/crows-nest' },
           { text: 'Home Screen', link: '/guide/home-screen' },
