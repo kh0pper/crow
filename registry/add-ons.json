@@ -387,7 +387,7 @@
         "min_ram_mb": 0,
         "min_disk_mb": 0
       },
-      "notes": "Core extension. Songs are blog posts tagged 'songbook' with ChordPro content. No installation needed."
+      "notes": "Songs are blog posts tagged 'songbook' with ChordPro content. Installs a Songbook panel and AI skill."
     },
     {
       "id": "tax",

@@ -32,6 +32,7 @@ const ICON_MAP = {
   home: "\u{1F3E0}",
   archive: "\u{1F4E6}",
   mic: "\u{1F3A4}",
+  music: "\u{1F3B5}",
 };
 
 function getInstalled() {

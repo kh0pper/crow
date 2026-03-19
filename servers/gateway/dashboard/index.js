@@ -26,7 +26,6 @@ import { createDbClient } from "../../db.js";
 // Import built-in panels
 import messagesPanel from "./panels/messages.js";
 import blogPanel from "./panels/blog.js";
-import songbookPanel from "./panels/songbook.js";
 import filesPanel from "./panels/files.js";
 import healthPanel from "./panels/health.js";
 import memoryPanel from "./panels/memory.js";
@@ -50,7 +49,6 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   registerPanel(messagesPanel);
   registerPanel(memoryPanel);
   registerPanel(blogPanel);
-  registerPanel(songbookPanel);
   registerPanel(filesPanel);
   registerPanel(extensionsPanel);
   registerPanel(skillsPanel);
