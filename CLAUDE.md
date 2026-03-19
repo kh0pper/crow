@@ -105,12 +105,16 @@ servers/blog/server.js         → createBlogServer(dbPath?, options?) → McpSe
 servers/blog/index.js          → stdio transport
 servers/blog/renderer.js       → Markdown→HTML (marked + sanitize-html)
 servers/blog/rss.js            → RSS 2.0 + Atom feed generation
+servers/blog/chordpro.js       → ChordPro parser, AST, transpose engine, detection
+servers/blog/chord-diagrams.js → SVG chord diagram generator (guitar + piano)
+servers/blog/songbook-renderer.js → Songbook HTML rendering (song page, index, setlist)
 servers/gateway/index.js       → Express + MCP transports (all servers)
 servers/gateway/session-manager.js → Consolidated session storage
 servers/gateway/routes/mcp.js  → Streamable HTTP + SSE transport mounting
 servers/gateway/routes/blog-public.js → Public blog routes (/blog/*)
 servers/gateway/routes/storage-http.js → File upload/download routes
 servers/gateway/routes/bundles.js → Bundle lifecycle API (install, uninstall, start, stop, status, env config)
+servers/gateway/routes/songbook.js → Public songbook routes (/blog/songbook/*)
 servers/gateway/dashboard/     → Crow's Nest UI (auth, layout, panels)
 servers/gateway/auth.js        → OAuth 2.1 provider (CrowOAuthProvider, SQLite-backed)
 servers/gateway/proxy.js       → Proxy layer for external MCP servers
@@ -164,6 +168,9 @@ Uses `@libsql/client` which supports both local SQLite files (default: `~/.crow/
 - **notifications** — User notifications with type filtering (reminder, media, peer, system), priority, expiry, action URLs. Max 500 retention enforced by `cleanupNotifications()`
 - **chat_conversations** — AI chat conversations (provider, model, system prompt, token tracking)
 - **chat_messages** — AI chat messages (role: user/assistant/system/tool, tool_calls JSON, token counts). FK to chat_conversations with CASCADE delete
+- **songbook_setlists** — Setlist containers (name, description, visibility)
+- **songbook_setlist_items** — Songs in setlists (setlist_id FK, post_id FK, position, key_override, notes) with unique index
+- **blog_comments** — Comment stub for forward-compatibility (post_id FK, contact_id FK, status, nostr_event_id)
 
 All FTS sync is handled by SQLite triggers defined in `init-db.js`. If you change the memories, sources, or blog_posts schema, you must also update the corresponding FTS virtual table and triggers.
 
@@ -301,6 +308,7 @@ Consult `skills/superpowers.md` first — it routes user intent to the right ski
 - `onboarding.md` — First-run sharing setup and device migration
 - `storage.md` — File storage management workflow
 - `blog.md` — Blog creation, publishing, theming, export
+- `songbook.md` — Personal chord book: ChordPro charts, transposition, chord diagrams, setlists, music theory
 - `data-backends.md` — External data backend registration and knowledge capture workflow
 - `network-setup.md` — Tailscale remote access guidance
 - `add-ons.md` — Add-on browsing, installation, removal

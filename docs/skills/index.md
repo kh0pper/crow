@@ -49,11 +49,13 @@ Skills are markdown files in `skills/` that define behavioral prompts for the AI
 | **Github** | `github.md` | Interact with GitHub — repositories, issues, pull requests, code — through the GitHub MCP server. Track development work |
 | **Google Chat** | `google-chat.md` | Interact with Google Chat — spaces, messages, threads — through the Google Workspace MCP server. Google Chat is already  |
 | **Google Workspace** | `google-workspace.md` | Interact with Google Workspace apps — Gmail, Calendar, Sheets, Docs, Slides — through the Google Workspace MCP server. S |
+| **Iterative Testing** | `iterative-testing.md` | Iterative prompt-and-record testing — run test plans on remote AI clients (Claude.ai, ChatGPT, etc.), record results, and plan fixes |
 | **Microsoft Teams** | `microsoft-teams.md` | Interact with Microsoft Teams — chats, channels, meetings — through the Teams MCP server. This integration is experiment |
 | **Mobile Access** | `mobile-access.md` | Guides setup and troubleshooting of remote access to Crow's memory and research tools from Claude mobile apps (Android/i |
 | **Notion** | `notion.md` | Interact with Notion workspaces — pages, databases, wiki content — through the Notion MCP server. Use Notion as a struct |
 | **Project Management** | `project-management.md` | Interact with Trello boards and Canvas LMS to retrieve and manage project/learning data. Syncs important information to  |
 | **Slack** | `slack.md` | Interact with Slack workspaces — channels, messages, threads — through the Slack MCP server. Monitor conversations, send |
+| **Songbook** | `songbook.md` | Personal chord book — ChordPro charts, transposition, chord diagrams, setlists, and music theory |
 | **Web Search** | `web-search.md` | Search the web using Brave Search for research, fact-checking, current events, and general information gathering. Every  |
 
 ## Developer Skills

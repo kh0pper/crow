@@ -637,6 +637,56 @@ await initTable("chat_messages table", `
 // Existing tables from prior installs are preserved (IF NOT EXISTS).
 
 
+// --- Songbook Tables ---
+
+await initTable("songbook_setlists table", `
+  CREATE TABLE IF NOT EXISTS songbook_setlists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    visibility TEXT DEFAULT 'private',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+await initTable("songbook_setlist_items table", `
+  CREATE TABLE IF NOT EXISTS songbook_setlist_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    setlist_id INTEGER NOT NULL,
+    post_id INTEGER NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    key_override TEXT,
+    notes TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (setlist_id) REFERENCES songbook_setlists(id) ON DELETE CASCADE,
+    FOREIGN KEY (post_id) REFERENCES blog_posts(id) ON DELETE CASCADE
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_setlist_items_unique
+    ON songbook_setlist_items(setlist_id, post_id);
+`);
+
+// --- Blog Comments (forward-compatibility stub — tools/UI in separate spec) ---
+
+await initTable("blog_comments table", `
+  CREATE TABLE IF NOT EXISTS blog_comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id INTEGER NOT NULL,
+    contact_id INTEGER,
+    author_name TEXT,
+    content TEXT NOT NULL,
+    status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'hidden')),
+    nostr_event_id TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (post_id) REFERENCES blog_posts(id) ON DELETE CASCADE,
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE SET NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_blog_comments_post ON blog_comments(post_id);
+  CREATE INDEX IF NOT EXISTS idx_blog_comments_status ON blog_comments(status);
+`);
+
 // --- Media tables removed — now self-initialized by the Media Hub bundle ---
 
 /* REMOVED: media_sources, media_articles, media_articles_fts + triggers,

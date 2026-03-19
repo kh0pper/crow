@@ -56,14 +56,21 @@ export function renderMarkdown(markdown) {
  * @param {string} title
  * @returns {string}
  */
+// Slugs reserved for sub-routes (songbook index, etc.)
+const RESERVED_SLUGS = new Set(["songbook"]);
+
 export function generateSlug(title) {
-  return title
+  let slug = title
     .toLowerCase()
     .replace(/[^a-z0-9\s-]/g, "")
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "")
     .slice(0, 80);
+  if (RESERVED_SLUGS.has(slug)) {
+    slug = `${slug}-post`;
+  }
+  return slug;
 }
 
 /**
