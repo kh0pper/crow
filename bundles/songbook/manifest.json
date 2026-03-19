@@ -1,0 +1,19 @@
+{
+  "id": "songbook",
+  "name": "Songbook",
+  "version": "1.0.0",
+  "description": "Personal chord book — ChordPro charts, transposition, chord diagrams, setlists, audio, and peer sharing",
+  "type": "skill",
+  "author": "Crow",
+  "category": "media",
+  "tags": ["music", "chords", "guitar", "piano", "songbook", "chordpro"],
+  "icon": "music",
+  "skills": ["skills/songbook.md"],
+  "panel": "panels/songbook.js",
+  "requires": {
+    "min_ram_mb": 0,
+    "min_disk_mb": 0
+  },
+  "webUI": null,
+  "notes": "Songs are blog posts tagged 'songbook' with ChordPro content. Adds a Songbook panel to the Crow's Nest and an AI skill for chord chart workflows."
+}
