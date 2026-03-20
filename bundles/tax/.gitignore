@@ -1,0 +1,6 @@
+node_modules/
+pdf/output/
+pdf/templates/*.pdf
+data/
+.env
+automation/node_modules/
