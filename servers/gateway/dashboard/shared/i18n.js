@@ -530,6 +530,33 @@ const translations = {
   "settings.notifMedia": { en: "Media", es: "Medios" },
   "settings.notifPeer": { en: "Peer Messages", es: "Mensajes de pares" },
   "settings.notifSystem": { en: "System", es: "Sistema" },
+
+  // ─── Settings Groups ───
+  "settings.group.general": { en: "General", es: "General" },
+  "settings.group.ai": { en: "AI & Models", es: "IA y Modelos" },
+  "settings.group.connections": { en: "Connections", es: "Conexiones" },
+  "settings.group.content": { en: "Content", es: "Contenido" },
+  "settings.group.system": { en: "System", es: "Sistema" },
+  "settings.group.account": { en: "Account", es: "Cuenta" },
+
+  // ─── Settings Section Labels ───
+  "settings.section.theme": { en: "Theme", es: "Tema" },
+  "settings.section.language": { en: "Language", es: "Idioma" },
+  "settings.section.notifications": { en: "Notifications", es: "Notificaciones" },
+  "settings.section.aiProvider": { en: "AI Provider", es: "Proveedor de IA" },
+  "settings.section.aiProfiles": { en: "AI Profiles", es: "Perfiles de IA" },
+  "settings.section.connections": { en: "Connection URLs", es: "URLs de conexión" },
+  "settings.section.helpSetup": { en: "Help & Setup", es: "Ayuda y configuración" },
+  "settings.section.integrations": { en: "Integrations", es: "Integraciones" },
+  "settings.section.blog": { en: "Blog Settings", es: "Ajustes del blog" },
+  "settings.section.discovery": { en: "Contact Discovery", es: "Descubrimiento de contactos" },
+  "settings.section.updates": { en: "Updates", es: "Actualizaciones" },
+  "settings.section.deviceContext": { en: "Device Context", es: "Contexto del dispositivo" },
+  "settings.section.identity": { en: "Identity", es: "Identidad" },
+  "settings.section.password": { en: "Change Password", es: "Cambiar contraseña" },
+
+  // ─── Settings Navigation ───
+  "settings.backToSettings": { en: "Settings", es: "Ajustes" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
