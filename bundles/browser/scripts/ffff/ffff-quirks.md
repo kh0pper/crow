@@ -1,72 +1,100 @@
 # FFFF Quirks & Known Behaviors
 
-Documented from the 2025 filing attempt. Reference this before any FFFF automation.
+Documented from the 2025 filing sessions. Reference before any FFFF automation.
 
-## Randomized Field IDs
+## Page Structure
 
-FFFF generates random DOM `id` attributes on every page load. **Never use `id` selectors.**
+FFFF uses a multi-frame layout:
+- **Main frame**: Top-level page with tabs (Step 1-4) and action buttons
+- **Tree frame** (`ffi_treeview_redirect`): Left sidebar form list
+- **Form frame** (`ffi_page_redirect`): Right pane where selected form renders
 
-**Solution:** Use `aria-label` attributes, which are stable across sessions. The `field-resolver.js` module handles this.
+Navigation: click `<li>` in tree frame → form loads in form frame. Each `<li>` has `onclick="LoadFormOnTreeRequest('formId')"`.
+
+## Field Identification
+
+- **Use `title` attribute** to find fields (always populated, human-readable)
+- **Do NOT use `name` attribute** — randomized per session (e.g., `e3570900328`, `s2026521355`)
+- **Do NOT use `aria-label`** — not consistently populated (many are null)
+- **Do NOT use `id`** — also randomized
+
+Field titles follow the pattern: `Line 1a. Total amount from Form(s) W-2, box 1 (see instructions)`
+
+## Buttons Location
+
+Action buttons are in the **main frame**, NOT the form frame:
+- `id="btnPerformMath"` — Do the Math
+- `id="btnSave"` — Save
+- `id="btnPrintForms"` — Print Return
+- `id="btnAddView"` — Add/View Forms
+- `id="btnDeleteForm"` — Delete this Form
+- `id="btnCompletedForm"` — Done With This Form
+- `id="btnFormInstruction"` — Instructions For This Form
+
+## "Do the Math" Behavior
+
+The button recalculates all auto-calculated (readonly) fields. From testing:
+- **Editable fields were NOT cleared** when values were consistent
+- **Auto-calculated fields updated correctly** based on editable inputs
+- The button disables itself after click (`this.disabled=true`) then submits
+- Wait 8 seconds after clicking for full recalculation
+
+**Precaution:** Still snapshot editable fields before clicking, in case future FFFF versions behave differently.
 
 ## Confirmation Popups
 
-FFFF shows native `confirm()` dialogs when:
-- Adding a form to the return
-- Removing a form
-- Navigating away from an unsaved form
-- After "Do the Math" in some cases
+FFFF uses native `confirm()` dialogs for:
+- Adding/removing forms
+- Certain navigation actions
 
-These popups appear in the **outer frame**, not inside the form iframe. If not handled, they can cause:
-- Session to appear frozen
-- Subsequent navigation to fail
-- Automatic logout
-
-**Solution:** `popup-handler.js` sets up a `page.on('dialog')` listener. Safe patterns (add/remove form) are auto-accepted.
-
-## "Do the Math" Clears Fields
-
-The "Do the Math" button recalculates the form. Side effects:
-- **Readonly/calculated fields** are updated (expected)
-- **Some user-entered fields may be cleared** (CRITICAL BUG)
-- **Commas may be added** to numeric values (cosmetic)
-
-**Solution:** `post-math-refill.js` implements snapshot → diff → refill.
+These appear in the main frame context. Handle with `page.on('dialog')`.
 
 ## Session Timeout
 
-FFFF sessions expire after approximately **15 minutes** of inactivity.
-
-Symptoms:
-- Form fields become unresponsive
+Sessions expire after ~15 minutes of inactivity. Symptoms:
+- Fields become unresponsive
 - Navigation returns to login page
-- Data entered in the current session may be lost
 
-**Solution:** `frame-manager.js` runs a heartbeat `evaluate()` every 5 minutes in the outer frame.
+**Prevention:** Periodically evaluate a no-op in the main frame (e.g., read `document.title`).
 
-## Nested Iframe Detachment
+## Step 2: W-2 / Withholding Verification
 
-Forms render inside an `<iframe>`. After certain operations, the iframe reference becomes stale:
-- After navigating between forms
-- After "Do the Math"
-- After handling a popup
-- After the session times out and refreshes
+FFFF has a separate "Step 2" tab for W-2 data entry. This is where:
+- W-2 Box 1-6, 12, 13 values are entered per employer
+- 1099-SA distribution data is entered
+- Total withholding is verified against 1040 Line 25
 
-Error messages: "Execution context was destroyed", "Frame was detached", "Target closed"
+**Critical check:** After entering all W-2 data, Line E (net difference) must be $0. If not, there's a mismatch between W-2 data and 1040 Line 25.
 
-**Solution:** `frame-manager.js` provides `getFormFrame()` with automatic retry and `withFormFrame()` wrapper that reacquires the frame on detachment.
+## TRS Employees (Texas Teachers)
 
-## Form Add Order
+Most Texas public school teachers pay into TRS (Teacher Retirement System) instead of Social Security. Their W-2s have:
+- **Box 3 (SS wages): BLANK** — enter 0
+- **Box 4 (SS tax): BLANK** — enter 0
+- **Box 5 (Medicare wages): POPULATED** — may differ from Box 1 due to pre-tax deductions
+- **Box 6 (Medicare tax): POPULATED**
+- **Box 13 (Retirement plan): CHECKED**
 
-When adding forms, FFFF may reorder or renumber them. Always verify the form list after adding.
+Austin ISD is an exception — their employees DO pay Social Security.
 
-## W-2 Entry Is Step 2
+## 6013(h) Election Statement
 
-W-2 data is NOT entered on the main form. FFFF has a separate "Step 2: Enter W-2 Information" section. This is where Box 1-17 data goes.
+If filing jointly with a nonresident alien spouse (6013(h) election):
+1. Check the "nonresident alien or dual-status alien spouse" checkbox on Form 1040
+2. Use FFFF's **"Add Statement"** button to attach the election text directly to the e-filed return
+3. **No separate mailing is required** — the statement is included with the electronic filing
+
+## Rounding
+
+FFFF rounds all amounts to whole dollars. Crow-tax calculates to the cent. Small differences (< $1) are expected and normal. Compare at the dollar level.
+
+## Form 8889 (HSA) Notes
+
+- Line 14a (distributions) and Line 14c are populated from 1099-SA data entered in Step 2
+- Line 9 (employer contributions) = W-2 code W amount — this is NOT deductible
+- Line 13 (HSA deduction) = personal contributions only (employer contributions excluded)
+- If employer contributions (line 9) exceed the limit (line 8), the excess is taxable
 
 ## E-File Is Step 4
 
 The e-file submission is in "Step 4". This should NEVER be automated — the user must review and submit manually.
-
-## 6013(h) Statement
-
-FFFF does not support file attachments. If a Section 6013(h) election statement is needed (nonresident spouse electing to be treated as resident), it must be printed and mailed separately to the IRS.
