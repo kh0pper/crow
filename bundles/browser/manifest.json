@@ -16,6 +16,8 @@
     "args": ["server/index.js"],
     "envKeys": ["CROW_BROWSER_VNC_PASSWORD", "CROW_BROWSER_CDP_PORT", "CROW_BROWSER_VNC_PORT"]
   },
+  "panel": "panel/browser.js",
+  "panelRoutes": "panel/routes.js",
   "skills": ["skills/crow-browser.md"],
   "requires": {
     "env": ["CROW_BROWSER_VNC_PASSWORD"],
