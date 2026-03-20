@@ -2,7 +2,7 @@
  * Memory Panel — Browse, search, and view stored memories
  */
 
-import { escapeHtml, statCard, statGrid, section, badge, formatDate, dataTable, formField } from "../shared/components.js";
+import { escapeHtml, section, badge, formatDate, dataTable, formField } from "../shared/components.js";
 import { sanitizeFtsQuery } from "../../../db.js";
 import { ICON_MEMORY } from "../shared/empty-state-icons.js";
 import { t, tJs } from "../shared/i18n.js";
@@ -84,19 +84,6 @@ export default {
     // Stats
     const totalResult = await db.execute("SELECT COUNT(*) as c FROM memories");
     const totalCount = totalResult.rows[0]?.c || 0;
-
-    const categoryResult = await db.execute(
-      "SELECT category, COUNT(*) as c FROM memories GROUP BY category ORDER BY c DESC"
-    );
-
-    const categoryCards = categoryResult.rows.map((row, i) =>
-      statCard(escapeHtml(row.category || "uncategorized"), row.c, { delay: 50 + i * 50 })
-    );
-
-    const stats = statGrid([
-      statCard(t("memory.totalMemories", lang), totalCount, { delay: 0 }),
-      ...categoryCards,
-    ]);
 
     // Search form
     const searchForm = `<form method="GET" action="/dashboard/memory" style="display:flex;gap:0.5rem;margin-bottom:1.5rem">
@@ -192,7 +179,6 @@ export default {
     }
 
     const content = `
-      ${stats}
       ${searchForm}
       ${section(query ? t("memory.searchResults", lang) : t("memory.recentMemories", lang), memoryList + pagination, { delay: 150 })}
     `;

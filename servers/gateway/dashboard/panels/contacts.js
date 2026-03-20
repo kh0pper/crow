@@ -2,7 +2,7 @@
  * Crow's Nest Panel — Contacts management (list, block/unblock, invite, discovery)
  */
 
-import { escapeHtml, statCard, statGrid, dataTable, section, badge } from "../shared/components.js";
+import { escapeHtml, dataTable, section, badge } from "../shared/components.js";
 
 export default {
   id: "contacts",
@@ -45,23 +45,6 @@ export default {
 
     const contacts = contactsResult.rows;
     const discoveryEnabled = discoveryResult.rows[0]?.value === "true";
-
-    // --- Stats ---
-    const totalContacts = contacts.length;
-    const blockedCount = contacts.filter((c) => c.is_blocked).length;
-    const recentCount = contacts.filter((c) => {
-      if (!c.last_seen) return false;
-      const lastSeen = new Date(c.last_seen);
-      const dayAgo = new Date(Date.now() - 86400000);
-      return lastSeen > dayAgo;
-    }).length;
-
-    const stats = statGrid([
-      statCard("Total", String(totalContacts), { delay: 0 }),
-      statCard("Active (24h)", String(recentCount), { delay: 50 }),
-      statCard("Blocked", String(blockedCount), { delay: 100 }),
-      statCard("Discovery", discoveryEnabled ? "On" : "Off", { delay: 150 }),
-    ]);
 
     // --- Contact list ---
     let contactListHtml;
@@ -118,7 +101,6 @@ export default {
       </p>`;
 
     const content = `
-      ${stats}
       ${section("Contacts", contactListHtml, { delay: 200 })}
       ${section("Add a Contact", inviteHtml, { delay: 250 })}
     `;

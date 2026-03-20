@@ -2,7 +2,7 @@
  * Blog Panel — List, create, edit, preview, publish posts
  */
 
-import { escapeHtml, statCard, statGrid, dataTable, section, formField, badge, actionBar, formatDate } from "../shared/components.js";
+import { escapeHtml, dataTable, section, formField, badge, actionBar, formatDate } from "../shared/components.js";
 import { ICON_DEPLOY } from "../shared/empty-state-icons.js";
 import { t, tJs } from "../shared/i18n.js";
 
@@ -86,16 +86,6 @@ export default {
     }
 
     // GET — show post list
-    const totalResult = await db.execute("SELECT COUNT(*) as c FROM blog_posts");
-    const publishedResult = await db.execute("SELECT COUNT(*) as c FROM blog_posts WHERE status = 'published'");
-    const draftResult = await db.execute("SELECT COUNT(*) as c FROM blog_posts WHERE status = 'draft'");
-
-    const stats = statGrid([
-      statCard(t("blog.total", lang), totalResult.rows[0]?.c || 0, { delay: 0 }),
-      statCard(t("blog.published", lang), publishedResult.rows[0]?.c || 0, { delay: 50 }),
-      statCard(t("blog.drafts", lang), draftResult.rows[0]?.c || 0, { delay: 100 }),
-    ]);
-
     // Check if editing a post
     let editPost = null;
     const editId = req.query.edit;
@@ -229,7 +219,6 @@ export default {
     </form>`;
 
     const content = `
-      ${stats}
       ${blogLink}
       ${section(t("blog.postsSection", lang), postTable, { delay: 150 })}
       ${section(formTitle, postForm, { delay: 200 })}
