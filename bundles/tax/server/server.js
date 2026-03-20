@@ -71,15 +71,15 @@ export function createTaxServer(dbPath, options = {}) {
   // --- crow_tax_prepare_from_documents ---
   server.tool(
     "crow_tax_prepare_from_documents",
-    "One-step tax return preparation: creates a return from ALL confirmed documents uploaded through the Tax Filing panel. Automatically adds W-2s, 1099s, 1098s, and calculates the return. Asks the user for any missing information (filing status, SSN, etc.).",
+    "One-step tax return preparation: creates a return from ALL confirmed documents uploaded through the Tax Filing panel. Automatically adds W-2s, 1099s, 1098s, and calculates. SSNs and names are auto-filled from W-2 documents when available — only ask the user for filing_status and tax_year.",
     {
       tax_year: z.number().describe("Tax year (e.g. 2025)"),
       filing_status: z.enum(["single", "mfj", "mfs", "hoh", "qw"]).describe("Filing status"),
-      taxpayer_name: z.string().describe("Taxpayer full name"),
-      taxpayer_ssn: z.string().describe("Taxpayer SSN (9 digits, use 000000000 as placeholder)"),
+      taxpayer_name: z.string().optional().describe("Auto-filled from first W-2 if not provided"),
+      taxpayer_ssn: z.string().optional().describe("Auto-filled from first W-2 if not provided"),
       taxpayer_dob: z.string().optional().describe("Taxpayer date of birth"),
-      spouse_name: z.string().optional().describe("Spouse name (required for MFJ)"),
-      spouse_ssn: z.string().optional().describe("Spouse SSN"),
+      spouse_name: z.string().optional().describe("Auto-filled from second W-2 if MFJ"),
+      spouse_ssn: z.string().optional().describe("Auto-filled from second W-2 if MFJ"),
       spouse_dob: z.string().optional().describe("Spouse date of birth"),
     },
     async (params) => {
@@ -93,12 +93,22 @@ export function createTaxServer(dbPath, options = {}) {
           return { content: [{ type: "text", text: "No confirmed documents found. Upload and confirm documents in the Tax Filing panel first." }], isError: true };
         }
 
+        // 1b. Auto-fill SSN and names from W-2 documents
+        const w2Docs = docs.rows.filter(d => d.doc_type === "w2").map(d => d.extracted_data ? JSON.parse(d.extracted_data) : null).filter(Boolean);
+        const w2_1 = w2Docs[0] || {};
+        const w2_2 = w2Docs[1] || {};
+
+        const taxpayerName = params.taxpayer_name || w2_1.employeeName || "Unknown";
+        const taxpayerSsn = params.taxpayer_ssn || (w2_1.employeeSsn || "").replace(/-/g, "") || "000000000";
+        const spouseName = params.spouse_name || (params.filing_status === "mfj" ? (w2_2.employeeName || "") : "");
+        const spouseSsn = params.spouse_ssn || (params.filing_status === "mfj" ? (w2_2.employeeSsn || "").replace(/-/g, "") : "");
+
         // 2. Create the return
         const id = genReturnId();
         const taxReturn = {
           taxYear: params.tax_year,
           filingStatus: params.filing_status,
-          taxpayer: { name: params.taxpayer_name, ssn: params.taxpayer_ssn, dateOfBirth: params.taxpayer_dob },
+          taxpayer: { name: taxpayerName, ssn: taxpayerSsn, dateOfBirth: params.taxpayer_dob },
           dependents: [],
           w2s: [],
           income1099: { sa: [], int: [], div: [], nec: [], g: [], misc: [] },
@@ -107,8 +117,8 @@ export function createTaxServer(dbPath, options = {}) {
           capitalGains: [],
           specialSituations: {},
         };
-        if (params.spouse_name) {
-          taxReturn.spouse = { name: params.spouse_name, ssn: params.spouse_ssn, dateOfBirth: params.spouse_dob };
+        if (spouseName) {
+          taxReturn.spouse = { name: spouseName, ssn: spouseSsn, dateOfBirth: params.spouse_dob };
         }
 
         const log = [`Created return ${id} (${params.tax_year} ${params.filing_status.toUpperCase()})`];

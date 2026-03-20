@@ -66,6 +66,8 @@ export async function extractW2(source, method) {
   const data = {
     employer: "",
     ein: "",
+    employeeName: "",
+    employeeSsn: "",
     wages: 0,
     federalWithheld: 0,
     ssWages: 0,
@@ -192,6 +194,35 @@ export async function extractW2(source, method) {
         continue;
       }
 
+      // Employee SSN — line with XXX-XX-XXXX pattern near "social security"
+      if (!data.employeeSsn && (line.includes("social security no") || line.includes("Employee's social"))) {
+        for (let j = i - 1; j <= Math.min(i + 2, lines.length - 1); j++) {
+          const m = lines[j].match(/(\d{3}-\d{2}-\d{4})/);
+          if (m) { data.employeeSsn = m[1]; break; }
+        }
+      }
+
+      // Employee name — look near "Employee's name" label (before OR after)
+      if (!data.employeeName && line.includes("Employee") && line.includes("name") && !line.includes("Employer")) {
+        const labelWords = new Set(["EMPLOYEE", "EMPLOYER", "STATE", "LOCAL", "COPY", "WAGE", "FORM", "TAX", "FILED", "FEDERAL", "INTERNAL", "REVENUE", "DEPARTMENT", "TREASURY", "STATEMENT", "ZIP"]);
+        for (let j = Math.max(0, i - 5); j <= Math.min(i + 3, lines.length - 1); j++) {
+          if (j === i) continue;
+          const parts = lines[j].split("|").map(p => p.trim());
+          for (const p of parts) {
+            // Name: 2-5 all-caps words, not a known label
+            const words = p.split(/\s+/);
+            if (words.length >= 2 && words.length <= 5 && p.length > 5 &&
+                words.every(w => /^[A-Z]/.test(w)) &&
+                !words.some(w => labelWords.has(w.toUpperCase())) &&
+                !/\d/.test(p) && !p.includes("'") && !p.includes(".")) {
+              data.employeeName = p;
+              break;
+            }
+          }
+          if (data.employeeName) break;
+        }
+      }
+
       // Box 12 — look for code + amount patterns like "DD | 1112.00" or "DD4400.16"
       if (line.includes("12a") || line.includes("12b") || line.includes("12c") || line.includes("12d")) {
         const parts = line.split("|").map(p => p.trim());
@@ -269,6 +300,18 @@ export async function extractW2(source, method) {
 
   // Find SSN
   const ssnLine = dataLines.find(l => /^\d{3}-\d{2}-\d{4}$/.test(l));
+  if (ssnLine) data.employeeSsn = ssnLine;
+
+  // Find employee name — after "Employee's name"
+  const empNameIdx = dataLines.findIndex(l => l.includes("Employee") && l.includes("name") && !l.includes("Employer"));
+  if (empNameIdx >= 0) {
+    for (let i = empNameIdx + 1; i < Math.min(empNameIdx + 3, dataLines.length); i++) {
+      if (dataLines[i].length > 3 && /^[A-Z]/.test(dataLines[i]) && !/^\d/.test(dataLines[i]) && !dataLines[i].includes("address")) {
+        data.employeeName = dataLines[i];
+        break;
+      }
+    }
+  }
 
   // Find EIN (format: XX-XXXXXXX, appears after "Employer ID")
   const einIdx = dataLines.findIndex(l => l.includes("Employer ID") || l.includes("EIN"));
