@@ -28,6 +28,36 @@ export default {
         return;
       }
 
+      if (action === "set_theme_mode") {
+        const mode = req.body.mode === "light" ? "light" : "dark";
+        await db.execute({
+          sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('blog_theme_mode', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
+          args: [mode, mode],
+        });
+        res.json({ ok: true });
+        return;
+      }
+
+      if (action === "update_theme") {
+        const themeFields = {
+          blog_theme_mode: req.body.theme_mode,
+          blog_theme_glass: req.body.theme_glass,
+          blog_theme_serif: req.body.theme_serif,
+          blog_theme_dashboard_mode: req.body.theme_dashboard_mode,
+          blog_theme_blog_mode: req.body.theme_blog_mode,
+        };
+        for (const [key, value] of Object.entries(themeFields)) {
+          if (value !== undefined) {
+            await db.execute({
+              sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
+              args: [key, value, value],
+            });
+          }
+        }
+        res.redirect("/dashboard/settings");
+        return;
+      }
+
       if (action === "update_blog") {
         const fields = ["blog_title", "blog_tagline", "blog_author", "blog_theme", "blog_listed"];
         for (const key of fields) {
@@ -561,11 +591,6 @@ function pollHealth(attempts) {
       ${formField(t("settings.blogTitle", lang), "blog_title", { value: bs.blog_title || "Crow Blog", placeholder: "My Blog" })}
       ${formField(t("settings.tagline", lang), "blog_tagline", { value: bs.blog_tagline || "", placeholder: t("settings.taglinePlaceholder", lang) })}
       ${formField(t("settings.defaultAuthor", lang), "blog_author", { value: bs.blog_author || "" })}
-      ${formField(t("settings.themeLabel", lang), "blog_theme", { type: "select", value: bs.blog_theme || "dark", options: [
-        { value: "dark", label: t("settings.darkDefault", lang) },
-        { value: "light", label: t("settings.light", lang) },
-        { value: "serif", label: t("settings.serif", lang) },
-      ]})}
       ${formField(t("settings.blogDiscovery", lang), "blog_listed", { type: "select", value: bs.blog_listed || "false", options: [
         { value: "false", label: t("settings.notListed", lang) },
         { value: "true", label: t("settings.listedInRegistry", lang) },
@@ -573,6 +598,69 @@ function pollHealth(attempts) {
       <p style="color:var(--crow-text-muted);font-size:0.85rem;margin:-0.5rem 0 1rem">When listed, your blog appears in the Crow Blog Registry so other Crow users can discover it.</p>
       <button type="submit" class="btn btn-primary">${t("settings.saveBlogSettings", lang)}</button>
     </form>`;
+
+    // Unified theme controls
+    const currentThemeMode = bs.blog_theme_mode || "dark";
+    const currentGlass = bs.blog_theme_glass === "true";
+    const currentSerif = bs.blog_theme_serif !== "false";
+    const currentDashMode = bs.blog_theme_dashboard_mode || "";
+    const currentBlogMode = bs.blog_theme_blog_mode || "";
+
+    const themeForm = `<form method="POST">
+      <input type="hidden" name="action" value="update_theme">
+      <div style="display:flex;flex-wrap:wrap;gap:1.5rem;margin-bottom:1.25rem">
+        <div style="flex:1;min-width:160px">
+          <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:6px;font-weight:500">Color Mode</label>
+          <div style="display:flex;gap:0.5rem">
+            <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.9rem">
+              <input type="radio" name="theme_mode" value="dark"${currentThemeMode === "dark" ? " checked" : ""} style="accent-color:var(--crow-accent);width:auto"> Dark
+            </label>
+            <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.9rem">
+              <input type="radio" name="theme_mode" value="light"${currentThemeMode === "light" ? " checked" : ""} style="accent-color:var(--crow-accent);width:auto"> Light
+            </label>
+          </div>
+        </div>
+        <div style="flex:1;min-width:160px">
+          <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:6px;font-weight:500">Glass Style</label>
+          <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.9rem">
+            <input type="checkbox" name="theme_glass" value="true"${currentGlass ? " checked" : ""} style="accent-color:var(--crow-accent);width:auto"> Enable glass aesthetic
+          </label>
+        </div>
+        <div style="flex:1;min-width:160px">
+          <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:6px;font-weight:500">Serif Headings</label>
+          <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.9rem">
+            <input type="checkbox" name="theme_serif" value="true"${currentSerif ? " checked" : ""} style="accent-color:var(--crow-accent);width:auto"> Use Fraunces for headings
+          </label>
+        </div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:1rem;margin-bottom:1.25rem">
+        ${formField("Dashboard Override", "theme_dashboard_mode", { type: "select", value: currentDashMode, options: [
+          { value: "", label: "Use global" },
+          { value: "dark", label: "Dark" },
+          { value: "light", label: "Light" },
+        ]})}
+        ${formField("Blog Override", "theme_blog_mode", { type: "select", value: currentBlogMode, options: [
+          { value: "", label: "Use global" },
+          { value: "dark", label: "Dark" },
+          { value: "light", label: "Light" },
+        ]})}
+      </div>
+      <p style="color:var(--crow-text-muted);font-size:0.8rem;margin-bottom:1rem">Glass adds iOS-inspired blur and transparency. Per-surface overrides let you run the dashboard in dark while the blog is light (or vice versa). Songbook follows the blog theme.</p>
+      <button type="submit" class="btn btn-primary">Save Theme</button>
+    </form>
+    <script>
+    // Handle unchecked checkboxes (send "false" instead of omitting)
+    document.querySelector('form [name="action"][value="update_theme"]')?.closest('form')?.addEventListener('submit', function(e) {
+      if (!this.querySelector('[name="theme_glass"]:checked')) {
+        var h = document.createElement('input'); h.type='hidden'; h.name='theme_glass'; h.value='false';
+        this.appendChild(h);
+      }
+      if (!this.querySelector('[name="theme_serif"]:checked')) {
+        var h = document.createElement('input'); h.type='hidden'; h.name='theme_serif'; h.value='false';
+        this.appendChild(h);
+      }
+    });
+    <\/script>`;
 
     // Contact discovery
     const discoveryForm = `<form method="POST">
@@ -1223,6 +1311,7 @@ function pollHealth(attempts) {
       ${section(t("settings.updatesSection", lang), updateHtml, { delay: 50 })}
       ${section(t("settings.integrationsSection", lang), integrationsHtml, { delay: 100 })}
       ${section(t("settings.identitySection", lang), identityHtml, { delay: 200 })}
+      ${section("Theme", themeForm, { delay: 245 })}
       ${section(t("settings.blogSettingsSection", lang), blogForm, { delay: 250 })}
       ${section(t("settings.contactDiscoverySection", lang), discoveryForm, { delay: 300 })}
       ${section(t("settings.notifications", lang), notifForm, { delay: 325 })}

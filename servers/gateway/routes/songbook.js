@@ -25,6 +25,10 @@ async function getBlogSettings(db) {
     tagline: s.tagline || "",
     author: s.author || "",
     theme: s.theme || "dark",
+    themeMode: s.theme_mode || "dark",
+    themeGlass: s.theme_glass === "true",
+    themeSerif: s.theme_serif !== "false",
+    themeBlogMode: s.theme_blog_mode || "",
   };
 }
 

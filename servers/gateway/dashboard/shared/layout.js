@@ -18,12 +18,18 @@ import { t, SUPPORTED_LANGS } from "./i18n.js";
  * @param {string} opts.activePanel - Active panel ID for nav highlighting
  * @param {Array} opts.panels - Array of { id, name, icon, route, navOrder }
  * @param {string} [opts.theme] - "dark" or "light" (default: dark)
+ * @param {boolean} [opts.glass] - Enable glass aesthetic
+ * @param {boolean} [opts.serif] - Enable serif headings
  * @param {string} [opts.scripts] - Additional inline JS
  * @param {string} [opts.afterContent] - HTML rendered after </main> inside .dashboard (e.g. persistent player bar)
  * @param {string} [opts.headerIcons] - HTML rendered inside .content-header, right of title (e.g. notification bell, health icon)
  */
-export function renderLayout({ title, content, activePanel, panels, theme, scripts, afterContent, headerIcons, lang }) {
-  const themeClass = theme === "light" ? "theme-light" : "";
+export function renderLayout({ title, content, activePanel, panels, theme, glass, serif, scripts, afterContent, headerIcons, lang }) {
+  const themeClass = [
+    theme === "light" ? "theme-light" : "",
+    glass ? "theme-glass" : "",
+    serif ? "theme-serif" : "",
+  ].filter(Boolean).join(" ");
   const sortedPanels = [...panels].sort((a, b) => (a.navOrder || 0) - (b.navOrder || 0));
 
   const navItems = sortedPanels.map((p) => {
@@ -81,6 +87,11 @@ export function renderLayout({ title, content, activePanel, panels, theme, scrip
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'action=set_theme&theme=' + (document.body.classList.contains('theme-light') ? 'light' : 'dark')
+      });
+      fetch('/dashboard/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'action=set_theme_mode&mode=' + (document.body.classList.contains('theme-light') ? 'light' : 'dark')
       });
     }
     function toggleSidebar() {
@@ -502,6 +513,30 @@ function dashboardCss() {
 
   /* Tamagotchi crow */
   ${tamagotchiCss}
+
+  /* Glass overrides for dashboard */
+  .theme-glass .sidebar {
+    backdrop-filter: var(--crow-glass-blur-heavy);
+    -webkit-backdrop-filter: var(--crow-glass-blur-heavy);
+    background: rgba(0,0,0,0.72);
+  }
+  .theme-glass.theme-light .sidebar {
+    background: rgba(245,245,247,0.72);
+  }
+  .theme-glass .card,
+  .theme-glass .stat-card {
+    backdrop-filter: var(--crow-glass-blur);
+    -webkit-backdrop-filter: var(--crow-glass-blur);
+    border-width: 0.5px;
+    box-shadow: none;
+  }
+  .theme-glass .card:hover {
+    box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+  }
+  .theme-glass .nav-item.active {
+    background: var(--crow-accent-muted);
+    border-left-color: var(--crow-accent);
+  }
 
   /* Responsive */
   @media (max-width: 768px) {

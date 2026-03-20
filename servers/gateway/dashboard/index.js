@@ -154,12 +154,20 @@ export default function dashboardRouter(mcpAuthMiddleware) {
       const visiblePanels = getVisiblePanels();
 
       // Get theme + tamagotchi + language preferences
-      const [themeResult, tamaResult, langResult] = await Promise.all([
+      const [themeResult, tamaResult, langResult, themeSettingsResult] = await Promise.all([
         db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'dashboard_theme'", args: [] }),
         db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'tamagotchi_enabled'", args: [] }),
         db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'language'", args: [] }),
+        db.execute({ sql: "SELECT key, value FROM dashboard_settings WHERE key IN ('blog_theme_mode', 'blog_theme_glass', 'blog_theme_serif', 'blog_theme_dashboard_mode')", args: [] }),
       ]);
-      const theme = themeResult.rows[0]?.value || "dark";
+      // Build unified theme settings
+      const ts = {};
+      for (const r of themeSettingsResult.rows) ts[r.key.replace("blog_", "")] = r.value;
+      const globalMode = ts.theme_mode || "dark";
+      const effectiveDashMode = ts.theme_dashboard_mode || globalMode;
+      const theme = effectiveDashMode;
+      const glass = ts.theme_glass === "true";
+      const serif = ts.theme_serif !== "false";
       // Missing key = true (tamagotchi on by default)
       const tamaEnabled = tamaResult.rows[0]?.value !== "false";
       lang = langResult.rows[0]?.value || "en";
@@ -176,6 +184,8 @@ export default function dashboardRouter(mcpAuthMiddleware) {
           activePanel: panelId,
           panels: visiblePanels,
           theme,
+          glass,
+          serif,
           lang,
           headerIcons: activeHeaderHtml,
           afterContent: playerBarHtml(lang),

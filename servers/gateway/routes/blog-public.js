@@ -42,6 +42,11 @@ async function getBlogSettings(db) {
     podcastCoverUrl: s.podcast_cover_url || "",
     podcastLanguage: s.podcast_language || "en",
     songbookOnIndex: s.songbook_on_index !== "false",
+    themeMode: s.theme_mode || "dark",
+    themeGlass: s.theme_glass === "true",
+    themeSerif: s.theme_serif !== "false",
+    themeBlogMode: s.theme_blog_mode || "",
+    themeDashboardMode: s.theme_dashboard_mode || "",
   };
 }
 
@@ -49,7 +54,6 @@ async function getBlogSettings(db) {
  * Dark Editorial design system CSS.
  */
 function designCss(settings) {
-  const themeClass = settings.theme === "light" ? "theme-light" : settings.theme === "serif" ? "theme-serif" : "";
   return `
 <style>
   ${FONT_IMPORT}
@@ -255,6 +259,28 @@ function designCss(settings) {
     to { opacity: 1; transform: translateY(0); }
   }
 
+  /* Glass overrides for blog */
+  .theme-glass .blog-header {
+    backdrop-filter: var(--crow-glass-blur-heavy);
+    -webkit-backdrop-filter: var(--crow-glass-blur-heavy);
+    background: rgba(0,0,0,0.72);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    border-bottom: 0.5px solid var(--crow-border);
+  }
+  .theme-glass.theme-light .blog-header {
+    background: rgba(245,245,247,0.72);
+  }
+  .theme-glass .post-card {
+    backdrop-filter: var(--crow-glass-blur);
+    -webkit-backdrop-filter: var(--crow-glass-blur);
+    border-width: 0.5px;
+  }
+  .theme-glass .post-card .tags a {
+    border-radius: var(--crow-radius-pill);
+  }
+
   ${settings.customCss}
 </style>`;
 }
@@ -263,7 +289,12 @@ function designCss(settings) {
  * HTML page shell.
  */
 function pageShell(settings, { title, content, ogMeta }) {
-  const themeClass = settings.theme === "light" ? "theme-light" : settings.theme === "serif" ? "theme-serif" : "";
+  const effectiveMode = settings.themeBlogMode || settings.themeMode || "dark";
+  const themeClass = [
+    effectiveMode === "light" ? "theme-light" : "",
+    settings.themeGlass ? "theme-glass" : "",
+    settings.themeSerif ? "theme-serif" : "",
+  ].filter(Boolean).join(" ");
   const og = ogMeta || "";
   return `<!DOCTYPE html>
 <html lang="en">

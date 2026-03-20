@@ -41,5 +41,45 @@ export function designTokensCss() {
 
   .theme-serif {
     --crow-body-font: 'Fraunces', serif;
+  }
+
+  /* Base radius tokens */
+  :root {
+    --crow-radius-card: 12px;
+    --crow-radius-pill: 8px;
+  }
+
+  /* Glass aesthetic — iOS-inspired blur/transparency */
+  .theme-glass {
+    --crow-bg-deep: #000000;
+    --crow-bg-surface: rgba(255,255,255,0.03);
+    --crow-bg-elevated: rgba(255,255,255,0.06);
+    --crow-border: rgba(255,255,255,0.06);
+    --crow-text-primary: #f5f5f7;
+    --crow-text-secondary: rgba(255,255,255,0.55);
+    --crow-text-muted: rgba(255,255,255,0.35);
+    --crow-accent: #2997ff;
+    --crow-accent-hover: #64b5f6;
+    --crow-accent-muted: rgba(41,151,255,0.1);
+    --crow-success: #30d158;
+    --crow-error: #ff453a;
+    --crow-info: #64d2ff;
+    --crow-glass-blur: blur(12px);
+    --crow-glass-blur-heavy: saturate(180%) blur(20px);
+    --crow-radius-card: 16px;
+    --crow-radius-pill: 100px;
+  }
+
+  .theme-glass.theme-light {
+    --crow-bg-deep: #f5f5f7;
+    --crow-bg-surface: rgba(0,0,0,0.03);
+    --crow-bg-elevated: rgba(0,0,0,0.06);
+    --crow-border: rgba(0,0,0,0.08);
+    --crow-text-primary: #1c1917;
+    --crow-text-secondary: rgba(0,0,0,0.55);
+    --crow-text-muted: rgba(0,0,0,0.35);
+    --crow-accent: #0071e3;
+    --crow-accent-hover: #0077ed;
+    --crow-accent-muted: rgba(0,113,227,0.1);
   }`;
 }
