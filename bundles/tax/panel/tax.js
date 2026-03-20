@@ -161,6 +161,8 @@ export default {
         // Define which fields to show based on document type
         const fieldDefs = {
           w2: [
+            { key: "employeeName", label: "Employee name", type: "text" },
+            { key: "employeeSsn", label: "Employee SSN", type: "text" },
             { key: "employer", label: "Employer name", type: "text" },
             { key: "ein", label: "EIN", type: "text" },
             { key: "wages", label: "Box 1 — Wages", type: "number" },
@@ -178,10 +180,12 @@ export default {
             { key: "distributionCode", label: "Box 3 — Distribution code", type: "text" },
           ],
           "1098-t": [
-            { key: "institution", label: "Institution", type: "text" },
             { key: "studentName", label: "Student name", type: "text" },
+            { key: "institution", label: "Institution", type: "text" },
             { key: "tuitionPaid", label: "Box 1 — Tuition paid", type: "number" },
             { key: "scholarships", label: "Box 5 — Scholarships", type: "number" },
+            { key: "isGraduate", label: "Box 9 — Graduate student", type: "text" },
+            { key: "isHalfTime", label: "Box 8 — At least half-time", type: "text" },
           ],
           "1098-e": [
             { key: "lender", label: "Lender", type: "text" },
