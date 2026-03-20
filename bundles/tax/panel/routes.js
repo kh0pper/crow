@@ -209,9 +209,9 @@ export default function taxRouter(authMiddleware) {
         });
       }
 
-      // Redirect back to tax panel if browser request
+      // Redirect back to tax panel documents tab
       if (req.headers.accept?.includes("text/html")) {
-        return res.redirect("/dashboard#tax");
+        return res.redirect("/dashboard/tax?tab=documents");
       }
 
       res.status(201).json({
@@ -229,10 +229,10 @@ export default function taxRouter(authMiddleware) {
     }
   });
 
-  // POST /api/tax/documents/:id/confirm — confirm extracted data and add to return
+  // POST /api/tax/documents/:id/confirm — confirm/correct extracted data
+  // Accepts either JSON { corrected_data } or form fields (field_wages, field_employer, etc.)
   router.post("/api/tax/documents/:id/confirm", authMiddleware, async (req, res) => {
     try {
-      const { corrected_data, return_id } = req.body;
       const db = await getDb();
 
       const result = await db.execute({
@@ -244,19 +244,40 @@ export default function taxRouter(authMiddleware) {
       }
 
       const doc = result.rows[0];
+      const existing = doc.extracted_data ? JSON.parse(doc.extracted_data) : {};
+      let finalData;
 
-      // Use corrected data if provided, otherwise use extracted data
-      const finalData = corrected_data || (doc.extracted_data ? JSON.parse(doc.extracted_data) : null);
-      if (!finalData) {
-        return res.status(400).json({ error: "No data to confirm" });
+      if (req.body.corrected_data) {
+        // JSON API call
+        finalData = req.body.corrected_data;
+      } else {
+        // Form submission — collect field_* params and build corrected data
+        finalData = { ...existing };
+        for (const [key, value] of Object.entries(req.body)) {
+          if (key.startsWith("field_")) {
+            const fieldName = key.substring(6);
+            const trimmed = String(value).trim();
+            // Detect numeric fields
+            const numVal = parseFloat(trimmed.replace(/[$,]/g, ""));
+            if (!isNaN(numVal) && /^[\d$,.\s-]+$/.test(trimmed)) {
+              finalData[fieldName] = numVal;
+            } else {
+              finalData[fieldName] = trimmed;
+            }
+          }
+        }
       }
 
-      // Update document status
+      // Update document status to confirmed with corrected data
       await db.execute({
-        sql: "UPDATE tax_documents SET status = 'confirmed', return_id = ?, extracted_data = ? WHERE id = ?",
-        args: [return_id || null, JSON.stringify(finalData), doc.id],
+        sql: "UPDATE tax_documents SET status = 'confirmed', extracted_data = ? WHERE id = ?",
+        args: [JSON.stringify(finalData), doc.id],
       });
 
+      // Redirect back to documents tab if browser request
+      if (req.headers.accept?.includes("text/html")) {
+        return res.redirect("/dashboard/tax?tab=documents");
+      }
       res.json({ confirmed: true, doc_id: doc.id, data: finalData });
     } catch (err) {
       res.status(500).json({ error: err.message });
