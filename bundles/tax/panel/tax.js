@@ -178,6 +178,14 @@ export default {
             { key: "tuitionPaid", label: "Box 1 — Tuition paid", type: "number" },
             { key: "scholarships", label: "Box 5 — Scholarships", type: "number" },
           ],
+          "1098-e": [
+            { key: "lender", label: "Lender", type: "text" },
+            { key: "interest", label: "Box 1 — Student loan interest", type: "number" },
+          ],
+          "1098": [
+            { key: "lender", label: "Lender", type: "text" },
+            { key: "interest", label: "Box 1 — Mortgage interest", type: "number" },
+          ],
         };
         const fields = fieldDefs[d.doc_type] || Object.keys(extracted || {}).map(k => ({ key: k, label: k, type: typeof extracted[k] === "number" ? "number" : "text" }));
 

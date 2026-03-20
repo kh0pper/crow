@@ -76,6 +76,56 @@ export async function extract1099(source, method) {
   const data = { payer: "" };
   const warnings = [];
 
+  if (method === "positional") {
+    // Positional extraction — pipe-separated rows with "Label: | Value" patterns
+    const lines = text.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+
+      // Payer/Trustee name — "Name: | HSA Bank..."
+      if ((line.includes("Name:") || line.includes("Trustee")) && !data.payer) {
+        const parts = line.split("|").map(p => p.trim());
+        for (const p of parts) {
+          if (p.length > 5 && !p.includes("Name") && !p.includes("Trustee") && /[A-Z]/.test(p)) {
+            data.payer = p;
+            break;
+          }
+        }
+      }
+
+      // Box 1 — "Box 1 Gross distribution | $3145.55"
+      if (line.includes("Box 1") && (line.includes("distribution") || line.includes("interest") || line.includes("compensation"))) {
+        const m = line.match(/\$\s*([\d,]+\.?\d*)/);
+        if (m) {
+          if (subtype === "sa") data.grossDistribution = parseAmount(m[1]);
+          else if (subtype === "int") data.interest = parseAmount(m[1]);
+          else if (subtype === "nec") data.nonemployeeCompensation = parseAmount(m[1]);
+          else data.otherIncome = parseAmount(m[1]);
+        }
+      }
+
+      // Box 3 — Distribution code
+      if (line.includes("Box 3") && line.includes("Distribution code")) {
+        const m = line.match(/\|\s*(\d)\s*$/);
+        if (m) data.distributionCode = parseInt(m[1]);
+      }
+
+      // Box 5 — Account type
+      if (line.includes("Box 5") && line.includes("Account type")) {
+        if (line.includes("HSA")) data.hsaOrMsa = "hsa";
+      }
+    }
+
+    // Set defaults for SA type
+    if (subtype === "sa") {
+      data.distributionCode = data.distributionCode || 1;
+      data.hsaOrMsa = data.hsaOrMsa || "hsa";
+    }
+
+    if (!data.payer) warnings.push("Could not extract payer name");
+    return { data, warnings, subtype };
+  }
+
   if (method === "form-fields" && typeof source === "object") {
     // Try direct field name matching
     for (const [fieldName, value] of Object.entries(source)) {

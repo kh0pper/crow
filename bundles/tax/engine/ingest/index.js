@@ -11,6 +11,7 @@ import { extname } from "node:path";
 import { extractW2 } from "./w2-reader.js";
 import { extract1099 } from "./1099-reader.js";
 import { extract1098T } from "./1098t-reader.js";
+import { extract1098E } from "./1098e-reader.js";
 import { scoreConfidence } from "./confidence.js";
 
 /**
@@ -25,6 +26,8 @@ const EXTRACTORS = {
   "1099-g": extract1099,
   "1099-misc": extract1099,
   "1098-t": extract1098T,
+  "1098-e": extract1098E,
+  "1098": extract1098E,
 };
 
 /**
