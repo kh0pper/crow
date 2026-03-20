@@ -441,6 +441,63 @@ export default function bundlesRouter() {
             appendLog(job, "Configuration applied to gateway");
             needsRestart = true;
           }
+
+          // Bundle types can also have MCP servers — register if manifest has server config
+          if (manifest?.server) {
+            const mcpAddons = readJsonSafe(MCP_ADDONS_PATH, {});
+            const env = {};
+            if (manifest.server.envKeys && env_vars) {
+              for (const key of manifest.server.envKeys) {
+                if (env_vars[key]) env[key] = env_vars[key];
+              }
+            }
+            if (manifest.env_vars) {
+              for (const v of manifest.env_vars) {
+                if (v.default && !env[v.name]) env[v.name] = v.default;
+              }
+            }
+            // Add CROW_DB_PATH if not set
+            if (!env.CROW_DB_PATH) env.CROW_DB_PATH = join(APP_ROOT, "data", "crow.db");
+            mcpAddons[bundle_id] = {
+              command: manifest.server.command,
+              args: manifest.server.args || [],
+              ...(Object.keys(env).length > 0 ? { env } : {}),
+            };
+            writeJsonSafe(MCP_ADDONS_PATH, mcpAddons);
+            appendLog(job, `Registered MCP server '${bundle_id}'`);
+            needsRestart = true;
+          }
+
+          // Bundle types can also have panels — install them
+          if (manifest?.panel) {
+            mkdirSync(PANELS_DIR, { recursive: true });
+            const panelSrc = join(destDir, manifest.panel);
+            if (existsSync(panelSrc)) {
+              cpSync(panelSrc, join(PANELS_DIR, `${bundle_id}.js`));
+              appendLog(job, `Installed panel: ${bundle_id}`);
+            }
+            if (manifest.panelRoutes) {
+              const routesSrc = join(destDir, manifest.panelRoutes);
+              if (existsSync(routesSrc)) {
+                cpSync(routesSrc, join(PANELS_DIR, `${bundle_id}-routes.js`));
+                appendLog(job, `Installed panel routes: ${bundle_id}-routes`);
+              }
+            }
+            // Ensure panels dir can resolve gateway dependencies
+            const nmLink = join(PANELS_DIR, "node_modules");
+            if (!existsSync(nmLink)) {
+              const gatewayNm = join(APP_ROOT, "node_modules");
+              if (existsSync(gatewayNm)) {
+                try { symlinkSync(gatewayNm, nmLink); } catch {}
+              }
+            }
+            const panelsConfig = readJsonSafe(PANELS_CONFIG_PATH, []);
+            if (!panelsConfig.includes(bundle_id)) {
+              panelsConfig.push(bundle_id);
+              writeJsonSafe(PANELS_CONFIG_PATH, panelsConfig);
+            }
+            needsRestart = true;
+          }
         } else if (addonType === "mcp-server") {
           // MCP server — register in mcp-addons.json
           if (manifest?.server) {
@@ -656,6 +713,12 @@ export default function bundlesRouter() {
         }
 
         finishJob(job, needsRestart ? "complete_restart" : "complete");
+
+        // Auto-restart gateway if panels or MCP servers were added
+        if (needsRestart) {
+          appendLog(job, "Scheduling gateway restart to load new panels/servers...");
+          scheduleGatewayRestart(3000);
+        }
       } catch (err) {
         appendLog(job, `Error: ${err.message}`);
         finishJob(job, "failed");
@@ -824,6 +887,11 @@ export default function bundlesRouter() {
         }
 
         finishJob(job, needsRestart ? "complete_restart" : "complete");
+
+        // Auto-restart gateway after uninstall if panels/servers were removed
+        if (needsRestart) {
+          scheduleGatewayRestart(3000);
+        }
       } catch (err) {
         appendLog(job, `Error: ${err.message}`);
         finishJob(job, "failed");
