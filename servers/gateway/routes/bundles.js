@@ -619,15 +619,25 @@ export default function bundlesRouter() {
         saveInstalled(installed);
         appendLog(job, "Installation tracked");
 
-        // Open firewall ports for Tailscale access (if manifest has ports and ufw is available)
+        // Open firewall ports and set up Tailscale HTTPS for direct-mode web UIs
         if (manifest?.ports && Array.isArray(manifest.ports)) {
+          const { execFileSync: efs } = await import("node:child_process");
           for (const port of manifest.ports) {
+            // Open firewall for Tailscale
             try {
-              const { execFileSync: efs } = await import("node:child_process");
               efs("sudo", ["-n", "ufw", "allow", "from", "100.64.0.0/10", "to", "any", "port", String(port), "proto", "tcp", "comment", `Crow: ${manifest.name || bundle_id}`], { timeout: 10000 });
               appendLog(job, `Opened firewall port ${port}/tcp for Tailscale`);
             } catch {
               appendLog(job, `Note: Could not open port ${port} (sudo/ufw not available — open manually if needed)`);
+            }
+          }
+          // Set up Tailscale HTTPS proxy for direct-mode webUI ports (SPA apps need TLS due to HSTS)
+          if (manifest?.webUI?.proxyMode === "direct" && manifest.webUI.port) {
+            try {
+              efs("sudo", ["-n", "tailscale", "serve", "--bg", "--https", String(manifest.webUI.port), `http://localhost:${manifest.webUI.port}`], { timeout: 15000 });
+              appendLog(job, `Set up Tailscale HTTPS on port ${manifest.webUI.port}`);
+            } catch {
+              appendLog(job, `Note: Could not set up Tailscale HTTPS for port ${manifest.webUI.port}`);
             }
           }
         }
@@ -773,14 +783,21 @@ export default function bundlesRouter() {
 
         // 4. Close firewall ports (if manifest has ports and ufw is available)
         if (manifest?.ports && Array.isArray(manifest.ports)) {
+          const { execFileSync: efs } = await import("node:child_process");
           for (const port of manifest.ports) {
             try {
-              const { execFileSync: efs } = await import("node:child_process");
               efs("sudo", ["-n", "ufw", "delete", "allow", "from", "100.64.0.0/10", "to", "any", "port", String(port), "proto", "tcp"], { timeout: 10000 });
               appendLog(job, `Closed firewall port ${port}/tcp`);
             } catch {
               appendLog(job, `Note: Could not close port ${port} (sudo/ufw not available)`);
             }
+          }
+          // Remove Tailscale HTTPS proxy for direct-mode webUI
+          if (manifest?.webUI?.proxyMode === "direct" && manifest.webUI.port) {
+            try {
+              efs("sudo", ["-n", "tailscale", "serve", `--https=${manifest.webUI.port}`, "off"], { timeout: 10000 });
+              appendLog(job, `Removed Tailscale HTTPS on port ${manifest.webUI.port}`);
+            } catch {}
           }
         }
 
