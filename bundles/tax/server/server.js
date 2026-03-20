@@ -227,7 +227,13 @@ export function createTaxServer(dbPath, options = {}) {
             log.push("", "Warnings:", ...warnings.map(w => `  - ${w}`));
           }
 
-          log.push("", "NOTE: Ask the user to verify the results. Use crow_tax_set_hsa, crow_tax_add_deduction, crow_tax_set_special, and crow_tax_add_education_credit to add details that couldn't be extracted from documents (e.g., HSA coverage months, educator expenses, 6013(h) election).");
+          log.push("", "NOTE: The return includes all confirmed documents. You may still need to:",
+            "  - crow_tax_add_deduction: add educator expenses ($300 max, ask who is the educator)",
+            "  - crow_tax_set_special: add 6013(h) election if nonresident spouse",
+            "  - crow_tax_set_hsa: adjust HSA coverage type (self/family) if needed",
+            "  Do NOT re-add education credits — they are already included from the 1098-T.",
+            "  Do NOT re-add W-2s, 1099s, or 1098s — they are already included.",
+          );
         } else {
           log.push("", "Calculation failed:", ...errors.map(e => `  - ${e}`));
         }
@@ -681,6 +687,16 @@ export function createTaxServer(dbPath, options = {}) {
 
       const data = ret.data;
       if (!data.educationCredits) data.educationCredits = [];
+
+      // Check for existing credit for same student — update instead of duplicate
+      const existingIdx = data.educationCredits.findIndex(c =>
+        c.studentName?.toLowerCase() === params.student_name.toLowerCase() ||
+        c.institution?.toLowerCase() === params.institution.toLowerCase()
+      );
+      if (existingIdx >= 0) {
+        data.educationCredits.splice(existingIdx, 1);
+      }
+
       data.educationCredits.push({
         studentName: params.student_name,
         institution: params.institution,
