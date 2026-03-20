@@ -30,15 +30,11 @@ function formatDate(dateStr) {
 }
 
 /**
- * Scoped songbook CSS variables and styles.
+ * Scoped songbook CSS — uses design tokens, no hardcoded colors.
+ * Glass effects only activate when .theme-glass is set on body.
  */
 function songbookCss() {
   return `
-  :root {
-    --songbook-chord-color: #2997ff;
-    --songbook-audio-color: #30d158;
-  }
-
   body {
     font-family: var(--crow-body-font, 'DM Sans', sans-serif);
     background: var(--crow-bg-deep);
@@ -53,22 +49,28 @@ function songbookCss() {
   /* Nav */
   .nav {
     position: sticky; top: 0; z-index: 100;
-    backdrop-filter: saturate(180%) blur(20px);
-    -webkit-backdrop-filter: saturate(180%) blur(20px);
-    background: rgba(15,15,23,0.72);
+    background: var(--crow-bg-deep);
     border-bottom: 0.5px solid var(--crow-border);
     padding: 12px 24px;
+  }
+  .theme-glass .nav {
+    backdrop-filter: var(--crow-glass-blur-heavy);
+    -webkit-backdrop-filter: var(--crow-glass-blur-heavy);
+    background: rgba(0,0,0,0.72);
+  }
+  .theme-glass.theme-light .nav {
+    background: rgba(245,245,247,0.72);
   }
   .nav-inner { max-width: 800px; margin: 0 auto; display: flex; align-items: center; gap: 16px; }
   .nav-brand { font-size: 13px; font-weight: 600; letter-spacing: 0.5px; color: var(--crow-text-muted); }
   .nav-crumb { font-size: 13px; color: var(--crow-text-muted); }
-  .nav-crumb a { color: var(--songbook-chord-color); text-decoration: none; }
+  .nav-crumb a { color: var(--crow-accent); text-decoration: none; }
 
   /* Hero */
   .hero { padding: 48px 0 40px; display: flex; gap: 32px; align-items: flex-start; }
   .album-art {
-    width: 180px; height: 180px; border-radius: 12px; flex-shrink: 0;
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+    width: 180px; height: 180px; border-radius: var(--crow-radius-card); flex-shrink: 0;
+    background: linear-gradient(135deg, var(--crow-bg-surface) 0%, var(--crow-bg-elevated) 100%);
     box-shadow: 0 8px 32px rgba(0,0,0,0.5);
     display: flex; align-items: center; justify-content: center;
     position: relative; overflow: hidden;
@@ -82,7 +84,7 @@ function songbookCss() {
   .hero-info { padding-top: 8px; flex: 1; }
   .hero-info .label {
     font-size: 12px; font-weight: 600; text-transform: uppercase;
-    letter-spacing: 1.5px; color: var(--songbook-chord-color); margin-bottom: 6px;
+    letter-spacing: 1.5px; color: var(--crow-accent); margin-bottom: 6px;
   }
   .song-title {
     font-family: 'Fraunces', serif; font-size: 2.2rem; font-weight: 700;
@@ -92,9 +94,13 @@ function songbookCss() {
   .meta-pills { display: flex; gap: 8px; flex-wrap: wrap; }
   .pill {
     display: inline-flex; align-items: center; gap: 5px;
-    background: rgba(255,255,255,0.06); backdrop-filter: blur(8px);
-    border-radius: 100px; padding: 5px 14px; font-size: 13px; font-weight: 500;
-    color: var(--crow-text-secondary); border: 0.5px solid rgba(255,255,255,0.08);
+    background: var(--crow-bg-elevated); border-radius: var(--crow-radius-pill);
+    padding: 5px 14px; font-size: 13px; font-weight: 500;
+    color: var(--crow-text-secondary); border: 0.5px solid var(--crow-border);
+  }
+  .theme-glass .pill {
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
   }
   .pill .val { color: var(--crow-text-primary); font-weight: 600; }
 
@@ -107,22 +113,26 @@ function songbookCss() {
   }
   .key-chip {
     width: 36px; height: 32px; border-radius: 8px; border: none;
-    background: rgba(255,255,255,0.06); color: var(--crow-text-muted);
+    background: var(--crow-bg-elevated); color: var(--crow-text-muted);
     font-size: 13px; font-weight: 600; font-family: 'JetBrains Mono', monospace;
     cursor: pointer; display: flex; align-items: center; justify-content: center;
     text-decoration: none; transition: all 0.2s;
   }
-  .key-chip:hover { background: rgba(255,255,255,0.1); color: var(--crow-text-primary); }
+  .key-chip:hover { background: var(--crow-bg-elevated); color: var(--crow-text-primary); opacity: 0.8; }
   .key-chip.active {
-    background: rgba(41,151,255,0.15); color: var(--songbook-chord-color);
-    box-shadow: 0 0 0 1.5px rgba(41,151,255,0.4);
+    background: var(--crow-accent-muted); color: var(--crow-accent);
+    box-shadow: 0 0 0 1.5px var(--crow-accent);
   }
 
   /* Chord diagrams card */
   .diagrams-card {
-    background: rgba(255,255,255,0.03); backdrop-filter: blur(12px);
-    border-radius: 16px; border: 0.5px solid rgba(255,255,255,0.06);
+    background: var(--crow-bg-surface); border-radius: var(--crow-radius-card);
+    border: 0.5px solid var(--crow-border);
     padding: 20px 24px; margin-bottom: 32px;
+  }
+  .theme-glass .diagrams-card {
+    backdrop-filter: var(--crow-glass-blur);
+    -webkit-backdrop-filter: var(--crow-glass-blur);
   }
   .diagrams-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
   .diagrams-header h3 {
@@ -130,7 +140,7 @@ function songbookCss() {
     letter-spacing: 1px; color: var(--crow-text-muted);
   }
   .instrument-tabs {
-    display: flex; background: rgba(255,255,255,0.06);
+    display: flex; background: var(--crow-bg-elevated);
     border-radius: 8px; padding: 2px; gap: 2px;
   }
   .inst-tab {
@@ -139,7 +149,7 @@ function songbookCss() {
     font-size: 12px; font-weight: 600; font-family: inherit;
     cursor: pointer; text-decoration: none;
   }
-  .inst-tab.active { background: rgba(255,255,255,0.12); color: var(--crow-text-primary); }
+  .inst-tab.active { background: var(--crow-bg-elevated); color: var(--crow-text-primary); }
   .diagrams-grid {
     display: flex; gap: 20px; flex-wrap: wrap; overflow-x: auto;
     -webkit-overflow-scrolling: touch;
@@ -158,13 +168,13 @@ function songbookCss() {
   .chart-section { margin-bottom: 40px; }
   .section-heading {
     font-size: 11px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 2px; color: rgba(255,255,255,0.2);
+    letter-spacing: 2px; color: var(--crow-text-muted);
     margin: 32px 0 16px; padding-bottom: 8px;
-    border-bottom: 0.5px solid rgba(255,255,255,0.06);
+    border-bottom: 0.5px solid var(--crow-border);
   }
   .section-heading:first-child { margin-top: 0; }
   .chart-line { font-family: 'JetBrains Mono', monospace; font-size: 14px; line-height: 1.3; white-space: pre-wrap; }
-  .chords-row { color: var(--songbook-chord-color); font-weight: 600; letter-spacing: 0.3px; margin-bottom: 1px; }
+  .chords-row { color: var(--crow-accent); font-weight: 600; letter-spacing: 0.3px; margin-bottom: 1px; }
   .lyrics-row { color: var(--crow-text-secondary); font-weight: 400; margin-bottom: 16px; }
   .song-comment {
     font-style: italic; color: var(--crow-text-muted);
@@ -173,35 +183,39 @@ function songbookCss() {
 
   /* Audio player */
   .player-card {
-    background: rgba(255,255,255,0.03); backdrop-filter: blur(20px);
-    border-radius: 16px; border: 0.5px solid rgba(255,255,255,0.06);
+    background: var(--crow-bg-surface); border-radius: var(--crow-radius-card);
+    border: 0.5px solid var(--crow-border);
     padding: 24px; margin-bottom: 32px;
+  }
+  .theme-glass .player-card {
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
   }
   .player-title {
     font-size: 11px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 2px; color: rgba(255,255,255,0.2); margin-bottom: 16px;
+    letter-spacing: 2px; color: var(--crow-text-muted); margin-bottom: 16px;
   }
   .player-controls { display: flex; align-items: center; gap: 16px; }
   .player-controls audio { flex: 1; height: 40px; }
   .download-link {
     display: inline-flex; align-items: center; gap: 6px;
-    color: var(--songbook-chord-color); font-size: 13px; font-weight: 500;
-    text-decoration: none; padding: 8px 16px; border-radius: 100px;
-    background: rgba(41,151,255,0.08); transition: background 0.2s;
+    color: var(--crow-accent); font-size: 13px; font-weight: 500;
+    text-decoration: none; padding: 8px 16px; border-radius: var(--crow-radius-pill);
+    background: var(--crow-accent-muted); transition: background 0.2s;
   }
-  .download-link:hover { background: rgba(41,151,255,0.15); }
+  .download-link:hover { opacity: 0.85; }
 
   /* Tags */
   .tags { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 32px; }
   .tag {
-    background: rgba(255,255,255,0.04); border-radius: 100px;
+    background: var(--crow-bg-elevated); border-radius: var(--crow-radius-pill);
     padding: 4px 12px; font-size: 12px; font-weight: 500;
-    color: var(--crow-text-muted); border: 0.5px solid rgba(255,255,255,0.06);
+    color: var(--crow-text-muted); border: 0.5px solid var(--crow-border);
   }
 
   /* Footer */
   .post-footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--crow-border); color: var(--crow-text-muted); font-size: 0.85rem; }
-  .post-footer a { color: var(--songbook-chord-color); text-decoration: none; }
+  .post-footer a { color: var(--crow-accent); text-decoration: none; }
 
   /* Mobile responsive */
   @media (max-width: 640px) {
@@ -285,6 +299,14 @@ export function renderSongPage(post, options = {}) {
 
   const baseUrl = `/blog/songbook/${escapeHtml(post.slug)}`;
 
+  // Compute theme classes from blog settings
+  const effectiveMode = blogSettings.themeBlogMode || blogSettings.themeMode || "dark";
+  const bodyClasses = [
+    effectiveMode === "light" ? "theme-light" : "",
+    blogSettings.themeGlass ? "theme-glass" : "",
+    blogSettings.themeSerif ? "theme-serif" : "",
+  ].filter(Boolean).join(" ");
+
   // Build page
   let html = `<!DOCTYPE html>
 <html lang="en">
@@ -301,7 +323,7 @@ export function renderSongPage(post, options = {}) {
   ${songbookCss()}
 </style>
 </head>
-<body>
+<body class="${bodyClasses}">
 
 <div class="nav">
   <div class="nav-inner">
@@ -445,6 +467,14 @@ export function renderSongbookIndex(posts, options = {}) {
     </a>`;
   }).join("\n");
 
+  // Compute theme classes
+  const effectiveMode = blogSettings.themeBlogMode || blogSettings.themeMode || "dark";
+  const bodyClasses = [
+    effectiveMode === "light" ? "theme-light" : "",
+    blogSettings.themeGlass ? "theme-glass" : "",
+    blogSettings.themeSerif ? "theme-serif" : "",
+  ].filter(Boolean).join(" ");
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -462,23 +492,23 @@ export function renderSongbookIndex(posts, options = {}) {
   .index-hero p { color: var(--crow-text-muted); font-size: 15px; }
   .filter-bar { display: flex; gap: 6px; margin-bottom: 20px; flex-wrap: wrap; }
   .filter-chip {
-    padding: 6px 16px; border-radius: 100px; border: none;
-    background: rgba(255,255,255,0.06); color: var(--crow-text-muted);
+    padding: 6px 16px; border-radius: var(--crow-radius-pill); border: none;
+    background: var(--crow-bg-elevated); color: var(--crow-text-muted);
     font-size: 13px; font-weight: 500; cursor: pointer; font-family: inherit;
     text-decoration: none; transition: all 0.2s;
   }
-  .filter-chip:hover { background: rgba(255,255,255,0.1); color: var(--crow-text-primary); }
-  .filter-chip.active { background: rgba(41,151,255,0.12); color: var(--songbook-chord-color); }
+  .filter-chip:hover { opacity: 0.8; color: var(--crow-text-primary); }
+  .filter-chip.active { background: var(--crow-accent-muted); color: var(--crow-accent); }
   .song-list {
-    border-radius: 12px; overflow: hidden;
-    border: 0.5px solid rgba(255,255,255,0.06);
+    border-radius: var(--crow-radius-card); overflow: hidden;
+    border: 0.5px solid var(--crow-border);
   }
   .song-row {
     display: flex; align-items: center; padding: 14px 20px;
-    border-bottom: 0.5px solid rgba(255,255,255,0.04);
+    border-bottom: 0.5px solid var(--crow-border);
     transition: background 0.15s; cursor: pointer; text-decoration: none; color: inherit;
   }
-  .song-row:hover { background: rgba(255,255,255,0.03); }
+  .song-row:hover { background: var(--crow-bg-surface); }
   .song-row:last-child { border-bottom: none; }
   .song-row .num { width: 28px; font-size: 13px; color: var(--crow-text-muted); font-weight: 500; }
   .song-row .info { flex: 1; }
@@ -488,12 +518,12 @@ export function renderSongbookIndex(posts, options = {}) {
     font-family: 'JetBrains Mono', monospace; font-size: 13px;
     font-weight: 600; color: var(--crow-text-muted); width: 48px; text-align: center;
   }
-  .song-row .audio-indicator { width: 32px; text-align: center; font-size: 13px; color: var(--songbook-audio-color); }
+  .song-row .audio-indicator { width: 32px; text-align: center; font-size: 13px; color: var(--crow-success); }
   .empty-state { text-align: center; padding: 4rem 1rem; color: var(--crow-text-muted); }
   .empty-state h2 { font-family: 'Fraunces', serif; font-size: 1.5rem; margin-bottom: 0.5rem; }
 </style>
 </head>
-<body>
+<body class="${bodyClasses}">
 
 <div class="nav">
   <div class="nav-inner">
@@ -550,6 +580,14 @@ export function renderSetlistPage(setlist, items, options = {}) {
     </a>`;
   }).join("\n");
 
+  // Compute theme classes
+  const effectiveMode = blogSettings.themeBlogMode || blogSettings.themeMode || "dark";
+  const bodyClasses = [
+    effectiveMode === "light" ? "theme-light" : "",
+    blogSettings.themeGlass ? "theme-glass" : "",
+    blogSettings.themeSerif ? "theme-serif" : "",
+  ].filter(Boolean).join(" ");
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -563,26 +601,26 @@ export function renderSetlistPage(setlist, items, options = {}) {
   ${songbookCss()}
 
   .setlist-card {
-    background: rgba(255,255,255,0.02); border-radius: 16px;
-    border: 0.5px solid rgba(255,255,255,0.06); padding: 24px; margin-bottom: 20px;
+    background: var(--crow-bg-surface); border-radius: var(--crow-radius-card);
+    border: 0.5px solid var(--crow-border); padding: 24px; margin-bottom: 20px;
   }
   .setlist-header { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 20px; }
   .setlist-header h2 { font-family: 'Fraunces', serif; font-size: 1.5rem; font-weight: 700; }
   .setlist-header .stats { font-size: 13px; color: var(--crow-text-muted); }
   .setlist-row {
     display: flex; align-items: center; padding: 10px 0;
-    border-bottom: 0.5px solid rgba(255,255,255,0.04);
+    border-bottom: 0.5px solid var(--crow-border);
     text-decoration: none; color: inherit;
   }
   .setlist-row:last-child { border-bottom: none; }
   .setlist-row:hover { opacity: 0.85; }
-  .setlist-row .order { width: 28px; font-size: 14px; font-weight: 600; color: rgba(255,255,255,0.15); }
+  .setlist-row .order { width: 28px; font-size: 14px; font-weight: 600; color: var(--crow-text-muted); }
   .setlist-row .song-name { flex: 1; font-size: 15px; font-weight: 500; }
   .setlist-row .setlist-key {
     font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 600;
     width: 100px; text-align: center;
   }
-  .setlist-row .transposed { color: var(--songbook-audio-color); }
+  .setlist-row .transposed { color: var(--crow-success); }
   .setlist-row .original-key { font-size: 10px; color: var(--crow-text-muted); }
 
   @media print {
@@ -590,7 +628,7 @@ export function renderSetlistPage(setlist, items, options = {}) {
   }
 </style>
 </head>
-<body>
+<body class="${bodyClasses}">
 
 <div class="nav">
   <div class="nav-inner">

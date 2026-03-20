@@ -860,6 +860,55 @@ for (const section of seedSections) {
   });
 }
 
+// --- One-time theme migration (old keys → new unified keys) ---
+try {
+  const oldTheme = await db.execute({
+    sql: "SELECT value FROM dashboard_settings WHERE key = 'blog_theme'",
+    args: [],
+  });
+  const oldDashTheme = await db.execute({
+    sql: "SELECT value FROM dashboard_settings WHERE key = 'dashboard_theme'",
+    args: [],
+  });
+
+  // Only migrate if new keys don't exist yet
+  const newKeys = await db.execute({
+    sql: "SELECT key FROM dashboard_settings WHERE key = 'blog_theme_mode'",
+    args: [],
+  });
+
+  if (newKeys.rows.length === 0) {
+    // Migrate blog_theme
+    if (oldTheme.rows.length > 0) {
+      const val = oldTheme.rows[0].value;
+      if (val === "light") {
+        await db.execute({
+          sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('blog_theme_mode', 'light', datetime('now')) ON CONFLICT(key) DO UPDATE SET value = 'light', updated_at = datetime('now')",
+          args: [],
+        });
+      }
+      if (val === "serif") {
+        await db.execute({
+          sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('blog_theme_serif', 'true', datetime('now')) ON CONFLICT(key) DO UPDATE SET value = 'true', updated_at = datetime('now')",
+          args: [],
+        });
+      }
+    }
+
+    // Migrate dashboard_theme
+    if (oldDashTheme.rows.length > 0 && oldDashTheme.rows[0].value === "light") {
+      await db.execute({
+        sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('blog_theme_dashboard_mode', 'light', datetime('now')) ON CONFLICT(key) DO UPDATE SET value = 'light', updated_at = datetime('now')",
+        args: [],
+      });
+    }
+    console.log("Theme migration complete (old keys preserved for backward compat).");
+  }
+} catch (err) {
+  // Non-fatal — table may not exist on first init
+  console.warn("Theme migration skipped:", err.message);
+}
+
 const tursoMode = process.env.TURSO_DATABASE_URL ? "Turso" : "local file";
 console.log(`Database initialized successfully (${tursoMode})`);
 db.close();
