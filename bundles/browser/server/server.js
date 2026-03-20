@@ -639,6 +639,341 @@ export function createBrowserServer(options = {}) {
   );
 
   // ==========================================
+  // Phase 1b: Content Extraction & Scraping
+  // ==========================================
+
+  // Tool: crow_browser_extract_text
+  server.tool(
+    "crow_browser_extract_text",
+    "Extract clean article text from the current page using Mozilla Readability. Strips ads, nav, and boilerplate.",
+    {
+      include_metadata: z.boolean().optional().describe("Include title, byline, excerpt (default: true)"),
+    },
+    async ({ include_metadata }) => {
+      try {
+        const p = await getPage();
+        const html = await p.content();
+        const url = p.url();
+
+        const { parseHTML } = await import("linkedom");
+        const { Readability } = await import("@mozilla/readability");
+
+        const { document } = parseHTML(html);
+        const reader = new Readability(document);
+        const article = reader.parse();
+
+        if (!article) {
+          return { content: [{ type: "text", text: "Could not extract article content from this page." }] };
+        }
+
+        const meta = include_metadata !== false ? {
+          title: article.title,
+          byline: article.byline,
+          excerpt: article.excerpt,
+          siteName: article.siteName,
+          url,
+        } : null;
+
+        const result = meta
+          ? `Title: ${article.title}\nByline: ${article.byline || "Unknown"}\nURL: ${url}\n\n${article.textContent}`
+          : article.textContent;
+
+        return { content: [{ type: "text", text: result }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Extract text failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool: crow_browser_extract_tables
+  server.tool(
+    "crow_browser_extract_tables",
+    "Extract HTML tables from the current page as structured JSON data.",
+    {
+      selector: z.string().optional().describe("CSS selector for specific table (omit for all tables)"),
+      format: z.enum(["json", "csv"]).optional().describe("Output format (default: json)"),
+    },
+    async ({ selector, format }) => {
+      try {
+        const p = await getPage();
+        const tables = await p.evaluate((sel) => {
+          const tableEls = sel
+            ? [document.querySelector(sel)].filter(Boolean)
+            : Array.from(document.querySelectorAll("table"));
+
+          return tableEls.map((table, idx) => {
+            const headers = Array.from(table.querySelectorAll("thead th, tr:first-child th")).map(
+              (th) => th.textContent.trim()
+            );
+            const rows = Array.from(table.querySelectorAll("tbody tr, tr")).slice(headers.length ? 0 : 1).map((tr) =>
+              Array.from(tr.querySelectorAll("td, th")).map((td) => td.textContent.trim())
+            );
+            // If no thead, use first row as headers
+            const finalHeaders = headers.length ? headers : (rows.length ? rows.shift() : []);
+            return {
+              index: idx,
+              headers: finalHeaders,
+              rows: rows.map((row) => {
+                const obj = {};
+                finalHeaders.forEach((h, i) => { obj[h || `col${i}`] = row[i] || ""; });
+                return obj;
+              }),
+              rowCount: rows.length,
+            };
+          });
+        }, selector);
+
+        if (tables.length === 0) {
+          return { content: [{ type: "text", text: "No tables found on this page." }] };
+        }
+
+        if (format === "csv") {
+          const { stringify } = await import("csv-stringify/sync");
+          const csvParts = tables.map((t) => {
+            const data = [t.headers, ...t.rows.map((r) => t.headers.map((h) => r[h] || ""))];
+            return `Table ${t.index} (${t.rowCount} rows):\n` + stringify(data);
+          });
+          return { content: [{ type: "text", text: csvParts.join("\n\n") }] };
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ tables_found: tables.length, tables }, null, 2),
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Extract tables failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool: crow_browser_extract_links
+  server.tool(
+    "crow_browser_extract_links",
+    "Extract all links from the current page with their text and URLs.",
+    {
+      filter: z.string().optional().describe("Text or URL pattern to filter links (regex)"),
+      limit: z.number().optional().describe("Maximum links to return (default: 100)"),
+    },
+    async ({ filter, limit }) => {
+      try {
+        const p = await getPage();
+        let links = await p.evaluate(() => {
+          return Array.from(document.querySelectorAll("a[href]")).map((a) => ({
+            text: a.textContent.trim().substring(0, 200),
+            href: a.href,
+            title: a.title || null,
+          })).filter((l) => l.href && !l.href.startsWith("javascript:"));
+        });
+
+        if (filter) {
+          const re = new RegExp(filter, "i");
+          links = links.filter((l) => re.test(l.text) || re.test(l.href));
+        }
+
+        links = links.slice(0, limit || 100);
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ count: links.length, links }, null, 2),
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Extract links failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool: crow_browser_scrape
+  server.tool(
+    "crow_browser_scrape",
+    "Extract structured data from the page using CSS selectors. Define a schema of selector → field name mappings.",
+    {
+      selectors: z.record(z.string(), z.string())
+        .describe("Map of field name → CSS selector (e.g. {\"title\": \"h1\", \"price\": \".price\"})"),
+      multiple: z.boolean().optional()
+        .describe("If true, return array of matches for repeating items (default: false)"),
+      container: z.string().optional()
+        .describe("CSS selector for repeating container element (required if multiple=true)"),
+    },
+    async ({ selectors, multiple, container }) => {
+      try {
+        const p = await getPage();
+        const result = await p.evaluate(({ selectors, multiple, container }) => {
+          if (multiple && container) {
+            const containers = document.querySelectorAll(container);
+            return Array.from(containers).map((c) => {
+              const item = {};
+              for (const [name, sel] of Object.entries(selectors)) {
+                const el = c.querySelector(sel);
+                item[name] = el ? el.textContent.trim() : null;
+              }
+              return item;
+            });
+          }
+          const item = {};
+          for (const [name, sel] of Object.entries(selectors)) {
+            const el = document.querySelector(sel);
+            item[name] = el ? el.textContent.trim() : null;
+          }
+          return item;
+        }, { selectors, multiple, container });
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(multiple ? { count: result.length, items: result } : result, null, 2),
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Scrape failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool: crow_browser_paginate
+  server.tool(
+    "crow_browser_paginate",
+    "Follow pagination links and collect content from multiple pages. Returns combined results.",
+    {
+      next_selector: z.string().describe("CSS selector for the 'next page' link/button"),
+      extract_selector: z.string().describe("CSS selector for content to extract from each page"),
+      max_pages: z.number().optional().describe("Maximum pages to follow (default: 5)"),
+    },
+    async ({ next_selector, extract_selector, max_pages }) => {
+      try {
+        const p = await getPage();
+        const pages = [];
+        const maxP = max_pages || 5;
+
+        for (let i = 0; i < maxP; i++) {
+          const content = await p.evaluate((sel) => {
+            const els = document.querySelectorAll(sel);
+            return Array.from(els).map((e) => e.textContent.trim());
+          }, extract_selector);
+
+          pages.push({ page: i + 1, url: p.url(), items: content });
+
+          // Try to click next
+          const nextEl = await p.$(next_selector);
+          if (!nextEl) break;
+
+          await nextEl.click();
+          await delay(1000, 2000);
+          await p.waitForLoadState("domcontentloaded").catch(() => {});
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              pages_scraped: pages.length,
+              total_items: pages.reduce((s, pg) => s + pg.items.length, 0),
+              pages,
+            }, null, 2),
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Paginate failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool: crow_browser_export
+  server.tool(
+    "crow_browser_export",
+    "Export previously scraped data as CSV or JSON file.",
+    {
+      data: z.array(z.record(z.string(), z.any())).describe("Array of data objects to export"),
+      format: z.enum(["csv", "json"]).describe("Export format"),
+      filename: z.string().optional().describe("Output filename (saved to ~/.crow/browser-exports/)"),
+    },
+    async ({ data, format, filename }) => {
+      try {
+        const exportDir = join(homedir(), ".crow", "browser-exports");
+        if (!existsSync(exportDir)) mkdirSync(exportDir, { recursive: true });
+
+        const ts = new Date().toISOString().replace(/[:.]/g, "-").substring(0, 19);
+        const fname = filename || `export-${ts}`;
+        const fullPath = join(exportDir, `${fname}.${format}`);
+
+        if (format === "csv") {
+          const { stringify } = await import("csv-stringify/sync");
+          const headers = Object.keys(data[0] || {});
+          const rows = [headers, ...data.map((row) => headers.map((h) => String(row[h] ?? "")))];
+          writeFileSync(fullPath, stringify(rows));
+        } else {
+          writeFileSync(fullPath, JSON.stringify(data, null, 2));
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ exported: true, path: fullPath, rows: data.length, format }),
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Export failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool: crow_browser_capture_har
+  server.tool(
+    "crow_browser_capture_har",
+    "Start or stop HAR (HTTP Archive) recording to capture all network requests. Useful for API discovery.",
+    {
+      action: z.enum(["start", "stop"]).describe("Start or stop HAR recording"),
+    },
+    async ({ action }) => {
+      try {
+        const p = await getPage();
+
+        if (action === "start") {
+          // Use CDP to enable network tracking
+          if (!cdpSession) {
+            return { content: [{ type: "text", text: "CDP session not available" }], isError: true };
+          }
+          await cdpSession.send("Network.enable");
+          // Store requests in a simple array on the page context
+          await p.evaluate(() => { window.__crow_har_requests = []; });
+          await cdpSession.on("Network.responseReceived", (params) => {
+            p.evaluate((entry) => {
+              window.__crow_har_requests = window.__crow_har_requests || [];
+              window.__crow_har_requests.push(entry);
+            }, {
+              url: params.response.url,
+              status: params.response.status,
+              mimeType: params.response.mimeType,
+              method: params.type,
+            }).catch(() => {});
+          });
+
+          return { content: [{ type: "text", text: "HAR recording started. Navigate the site, then call with action='stop' to get results." }] };
+        }
+
+        // Stop: collect recorded requests
+        const requests = await p.evaluate(() => window.__crow_har_requests || []);
+        await p.evaluate(() => { delete window.__crow_har_requests; });
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              requests_captured: requests.length,
+              requests: requests.slice(0, 200),
+            }, null, 2),
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text", text: `HAR capture failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // ==========================================
   // Prompt: crow_browser_guide
   // ==========================================
   server.prompt(
@@ -651,31 +986,31 @@ export function createBrowserServer(options = {}) {
           type: "text",
           text: `# Crow Browser — Quick Guide
 
-## Getting Started
-1. Start the container: \`docker compose -f ~/crow-browser/docker-compose.yml up -d\`
-2. Call \`crow_browser_launch\` to connect
-3. Open the VNC URL in your browser to watch
-
-## Core Workflow
-- \`crow_browser_navigate\` — go to a page
-- \`crow_browser_discover_selectors\` — find elements
+## Core Tools (Phase 1a)
+- \`crow_browser_launch\` / \`crow_browser_status\` — connect to browser
+- \`crow_browser_navigate\` — go to URL
+- \`crow_browser_discover_selectors\` — find interactive elements
 - \`crow_browser_fill_form\` — fill inputs with human-like typing
 - \`crow_browser_click\` — click with position randomization
 - \`crow_browser_screenshot\` — capture current state
 - \`crow_browser_evaluate\` — run JS in page context
+- \`crow_browser_wait_for_user\` — pause for CAPTCHA, 2FA
+- \`crow_browser_save_session\` / \`crow_browser_load_session\` — persist cookies
 
-## Session Management
-- \`crow_browser_save_session\` — save cookies + storage
-- \`crow_browser_load_session\` — restore a saved session
+## Content Extraction (Phase 1b)
+- \`crow_browser_extract_text\` — clean article text via Readability
+- \`crow_browser_extract_tables\` — HTML tables → JSON/CSV
+- \`crow_browser_extract_links\` — all links with text/URLs
+- \`crow_browser_scrape\` — structured data via CSS selectors
+- \`crow_browser_paginate\` — follow pagination, collect multi-page results
+- \`crow_browser_export\` — save data as CSV or JSON file
+- \`crow_browser_capture_har\` — record network requests (API discovery)
 
-## Human Intervention
-- \`crow_browser_wait_for_user\` — pause for CAPTCHA, 2FA, etc.
-
-## Tips
-- Use \`discover_selectors\` to find element selectors before filling/clicking
-- Save sessions before long operations in case of timeout
-- Use the VNC viewer for visual verification
-- All typing and clicking uses human-like patterns to avoid bot detection`,
+## Workflow
+1. \`launch\` → \`navigate\` → \`discover_selectors\` → \`fill_form\`/\`click\`
+2. For scraping: \`navigate\` → \`extract_text\` or \`scrape\` → \`export\`
+3. For multi-page: \`navigate\` → \`paginate\` → \`export\`
+4. Save sessions before long operations`,
         },
       }],
     })
