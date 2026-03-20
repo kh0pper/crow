@@ -79,6 +79,154 @@ export async function extractW2(source, method) {
   };
   const warnings = [];
 
+  if (method === "positional" && typeof source === "string") {
+    // Positional extraction — pipe-separated values grouped by row
+    // Layout: values and labels are on separate rows, duplicated across copies
+    const lines = source.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+
+    // Helper: get first unique numeric value from a pipe-separated line
+    const getFirstNum = (line) => {
+      const parts = line.split("|").map(p => p.trim());
+      for (const p of parts) {
+        const n = parseFloat(p.replace(/[$,]/g, ""));
+        if (!isNaN(n) && /^[\d$,.]+$/.test(p.trim())) return n;
+      }
+      return null;
+    };
+
+    // Helper: get first/second unique numeric values from a line (for Box pairs)
+    const getNumPair = (line) => {
+      const parts = line.split("|").map(p => p.trim());
+      const nums = [];
+      const seen = new Set();
+      for (const p of parts) {
+        const n = parseFloat(p.replace(/[$,]/g, ""));
+        if (!isNaN(n) && /^\s*[\d$,.]+\s*$/.test(p)) {
+          const key = n.toFixed(2);
+          if (!seen.has(key)) { seen.add(key); nums.push(n); }
+          if (nums.length >= 2) break;
+        }
+      }
+      return nums;
+    };
+
+    // Helper: get first text value from pipe-separated line
+    const getFirstText = (line) => {
+      const parts = line.split("|").map(p => p.trim());
+      const seen = new Set();
+      for (const p of parts) {
+        if (p.length > 2 && !/^\d+$/.test(p) && !seen.has(p)) {
+          seen.add(p);
+          return p;
+        }
+      }
+      return "";
+    };
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const nextLine = lines[i + 1] || "";
+
+      // Wages + Federal withheld — numbers on a line before "Wages, tips" label
+      if (nextLine.includes("Wages, tips") && nextLine.includes("Federal income tax")) {
+        const nums = getNumPair(line);
+        if (nums.length >= 2) {
+          data.wages = nums[0];
+          data.federalWithheld = nums[1];
+        } else if (nums.length === 1) {
+          data.wages = nums[0];
+        }
+        continue;
+      }
+
+      // Medicare wages + tax — numbers before "Medicare wages" label
+      if (nextLine.includes("Medicare wages") && nextLine.includes("Medicare tax")) {
+        const nums = getNumPair(line);
+        if (nums.length >= 2) {
+          data.medicareWages = nums[0];
+          data.medicareTaxWithheld = nums[1];
+        }
+        // Check if SS wages are on a different row (they might be blank for TRS)
+        continue;
+      }
+
+      // SS wages + tax — numbers before "Social security wages" label
+      // Note: for TRS employees, these may be blank (no SS) — only match actual dollar amounts, not box numbers
+      if (nextLine.includes("Social security wages") && nextLine.includes("Social security tax")) {
+        const nums = getNumPair(line);
+        // Filter out small integers that are likely box numbers (1-20), not dollar amounts
+        const validNums = nums.filter(n => n > 100 || n === 0);
+        if (validNums.length >= 2) {
+          data.ssWages = validNums[0];
+          data.ssTaxWithheld = validNums[1];
+        }
+        // If no valid numbers, SS is blank (TRS employee) — leave as 0
+        continue;
+      }
+
+      // Employer name — line after "Employer's name"
+      if (line.includes("Employer's name") && !data.employer) {
+        // Next line has the employer, deduplicated from pipe-separated copies
+        const emp = getFirstText(lines[i + 1] || "");
+        if (emp && !emp.includes("Employee") && emp.length > 3) data.employer = emp;
+        continue;
+      }
+
+      // Also try: employer name line that contains a recognizable business name
+      // (fallback for layouts where label and name are on the same line)
+      if (!data.employer && line.includes("Employer") && line.includes("name") && i + 1 < lines.length) {
+        const nextParts = (lines[i + 1] || "").split("|").map(p => p.trim());
+        for (const p of nextParts) {
+          if (p.length > 5 && /[A-Z]/.test(p) && !/^\d/.test(p) && !p.includes("Employee")) {
+            data.employer = p;
+            break;
+          }
+        }
+      }
+
+      // EIN — line after "Employer ID number"
+      if (line.includes("Employer ID number") || line.includes("EIN")) {
+        const einLine = lines[i + 1] || "";
+        const einMatch = einLine.match(/(\d{2}-\d{7})/);
+        if (einMatch) data.ein = einMatch[1];
+        continue;
+      }
+
+      // Box 12 — look for code + amount patterns like "DD | 1112.00" or "DD4400.16"
+      if (line.includes("12a") || line.includes("12b") || line.includes("12c") || line.includes("12d")) {
+        const parts = line.split("|").map(p => p.trim());
+        const seenCodes = new Set(data.code12.map(c => c.code));
+        for (let j = 0; j < parts.length; j++) {
+          // Pattern 1: separate code and amount: "DD" | "1112.00"
+          if (/^[A-Z]{1,2}$/.test(parts[j]) && j + 1 < parts.length) {
+            const amt = parseFloat(parts[j + 1].replace(/[$,]/g, ""));
+            if (!isNaN(amt) && amt > 0 && !seenCodes.has(parts[j])) {
+              seenCodes.add(parts[j]);
+              data.code12.push({ code: parts[j], amount: amt });
+            }
+          }
+          // Pattern 2: concatenated: "DD4400.16"
+          const concat = parts[j].match(/^([A-Z]{1,2})([\d,.]+)$/);
+          if (concat && !seenCodes.has(concat[1])) {
+            seenCodes.add(concat[1]);
+            data.code12.push({ code: concat[1], amount: parseAmount(concat[2]) });
+          }
+        }
+      }
+    }
+
+    // Sanity checks
+    if (data.wages === 0 && data.federalWithheld === 0) {
+      warnings.push("Could not extract wages or withholding — verify Box 1 and Box 2 manually");
+    }
+    if (data.ssWages === 0 && data.medicareWages === 0) {
+      warnings.push("Social security and Medicare wages are $0 — may be correct (TRS) or extraction failed");
+    }
+    if (!data.employer) warnings.push("Could not extract employer name");
+
+    return { data, warnings };
+  }
+
   if (method === "form-fields" && typeof source === "object") {
     // Form field extraction (fillable PDFs) — use field name matching
     const fieldMap = {

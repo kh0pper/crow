@@ -8,7 +8,8 @@
 // Method confidence multipliers
 const METHOD_CONFIDENCE = {
   "form-fields": 0.95,  // Fillable PDF fields are highly reliable
-  "text": 0.80,         // Text extraction depends on PDF layout
+  "positional": 0.90,   // Positional text preserves layout — good for W-2s
+  "text": 0.80,         // Plain text extraction depends on PDF layout
   "ocr": 0.60,          // OCR is least reliable
 };
 

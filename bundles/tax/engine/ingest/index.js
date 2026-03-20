@@ -64,7 +64,45 @@ export async function ingestDocument(filePath, documentType) {
     // Form fields not available, try text
   }
 
-  // Step 2: Try pdf-parse text extraction
+  // Step 2: Try BOTH positional and plain text, pick the better result
+  if (!result) {
+    const candidates = [];
+
+    // 2a: Positional extraction
+    try {
+      const { extractTextPositional } = await import("./ocr.js");
+      const text = await extractTextPositional(pdfBuffer);
+      if (text && text.trim().length > 50) {
+        const r = await extractor(text, "positional");
+        const nonZeroCount = Object.values(r.data).filter(v =>
+          (typeof v === "number" && v > 0) || (typeof v === "string" && v.length > 0) || (Array.isArray(v) && v.length > 0)
+        ).length;
+        candidates.push({ result: r, method: "positional", score: nonZeroCount });
+      }
+    } catch {}
+
+    // 2b: Plain text extraction
+    try {
+      const { extractText } = await import("./ocr.js");
+      const text = await extractText(pdfBuffer);
+      if (text && text.trim().length > 50) {
+        const r = await extractor(text, "text");
+        const nonZeroCount = Object.values(r.data).filter(v =>
+          (typeof v === "number" && v > 0) || (typeof v === "string" && v.length > 0) || (Array.isArray(v) && v.length > 0)
+        ).length;
+        candidates.push({ result: r, method: "text", score: nonZeroCount });
+      }
+    } catch {}
+
+    // Pick the candidate with more extracted fields
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => b.score - a.score);
+      result = candidates[0].result;
+      method = candidates[0].method;
+    }
+  }
+
+  // Step 3: OCR fallback
   if (!result) {
     try {
       const { extractText } = await import("./ocr.js");
