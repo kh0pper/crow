@@ -135,10 +135,10 @@ export function buildNestHTML(data, lang) {
       || `<div style="width:32px;height:32px;border-radius:50%;background:rgba(168,85,247,0.15);color:#a855f7;display:flex;align-items:center;justify-content:center;font-size:0.85rem;font-weight:600">${escapeHtml(b.name.charAt(0).toUpperCase())}</div>`;
     const statusDot = `<span class="nest-app-status" style="background:${b.isRunning ? "var(--crow-success)" : "var(--crow-text-muted)"}" title="${b.isRunning ? t("health.runningStatus", lang) : t("health.stoppedStatus", lang)}"></span>`;
     const hasWebUI = !!b.webUI;
-    const webUIPort = hasWebUI ? b.webUI.port : "";
-    const webUIPath = hasWebUI ? (b.webUI.path || "/") : "";
-    const href = hasWebUI ? "#" : "/dashboard/extensions";
-    const onclick = hasWebUI ? ` onclick="window.open(location.protocol+'//'+location.hostname+':${webUIPort}${webUIPath}','_blank');return false"` : "";
+    const hasPanel = panels.some(p => p.id === b.id);
+    const proxyPath = hasWebUI ? `/proxy/${b.id}${b.webUI.path || "/"}` : "";
+    const href = hasPanel ? `/dashboard/${b.id}` : hasWebUI ? proxyPath : "/dashboard/extensions";
+    const onclick = hasPanel ? "" : hasWebUI ? ` onclick="window.open('${proxyPath}','_blank');return false"` : "";
     const delay = tileIndex++ * 40;
     return `<a href="${escapeHtml(href)}" class="nest-app nest-app--bundle" style="animation-delay:${delay}ms"${onclick}>
       <div class="nest-app-icon">${statusDot}${iconHtml}</div>
