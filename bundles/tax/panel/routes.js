@@ -69,6 +69,7 @@ export default function taxRouter(authMiddleware) {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           filename TEXT NOT NULL,
           doc_type TEXT NOT NULL,
+          owner TEXT DEFAULT 'taxpayer',
           file_path TEXT NOT NULL,
           status TEXT DEFAULT 'uploaded',
           return_id TEXT,
@@ -80,6 +81,10 @@ export default function taxRouter(authMiddleware) {
         )`,
         args: [],
       });
+      // Add owner column if table already exists without it
+      try {
+        await db.execute({ sql: "ALTER TABLE tax_documents ADD COLUMN owner TEXT DEFAULT 'taxpayer'", args: [] });
+      } catch {} // Column already exists
     } catch {}
   })();
 
@@ -161,7 +166,7 @@ export default function taxRouter(authMiddleware) {
   // POST /api/tax/upload — upload and ingest a tax document PDF
   router.post("/api/tax/upload", authMiddleware, upload.single("document"), async (req, res) => {
     try {
-      const { doc_type } = req.body || {};
+      const { doc_type, owner } = req.body || {};
       if (!doc_type) {
         return res.status(400).json({ error: "Document type is required" });
       }
@@ -175,10 +180,10 @@ export default function taxRouter(authMiddleware) {
       const filePath = join(TAX_DOCS_DIR, `${Date.now()}-${safeName}`);
       writeFileSync(filePath, req.file.buffer);
 
-      // Record upload
+      // Record upload with owner tag
       await db.execute({
-        sql: "INSERT INTO tax_documents (filename, doc_type, file_path, status) VALUES (?, ?, ?, 'uploaded')",
-        args: [filename, doc_type, filePath],
+        sql: "INSERT INTO tax_documents (filename, doc_type, owner, file_path, status) VALUES (?, ?, ?, ?, 'uploaded')",
+        args: [filename, doc_type, owner || "taxpayer", filePath],
       });
 
       // Get the inserted ID
