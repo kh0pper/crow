@@ -577,7 +577,7 @@ app.get("/discover/find", async (req, res) => {
 let _extensionProxyWsSetup = null;
 try {
   const { default: extensionProxyRouter } = await import("./routes/extension-proxy.js");
-  const { router, setupWebSocket } = extensionProxyRouter(authMiddleware);
+  const { router, setupWebSocket } = extensionProxyRouter(dashboardAuth);
   app.use(router);
   _extensionProxyWsSetup = setupWebSocket;
 } catch (err) {
