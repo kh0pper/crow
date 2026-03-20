@@ -116,6 +116,7 @@ servers/gateway/routes/storage-http.js → File upload/download routes
 servers/gateway/routes/bundles.js → Bundle lifecycle API (install, uninstall, start, stop, status, env config)
 servers/gateway/routes/songbook.js → Public songbook routes (/blog/songbook/*)
 servers/gateway/dashboard/     → Crow's Nest UI (auth, layout, panels)
+servers/gateway/dashboard/settings/ → Settings panel: registry, menu renderer, 14 section modules
 servers/gateway/auth.js        → OAuth 2.1 provider (CrowOAuthProvider, SQLite-backed)
 servers/gateway/proxy.js       → Proxy layer for external MCP servers
 servers/gateway/router.js      → Tool router (7 category tools, ~75% context reduction)
@@ -272,6 +273,43 @@ Skills are markdown files in `skills/`. They are loaded by Claude on demand — 
 5. Use design tokens from `servers/gateway/dashboard/shared/design-tokens.js` (single source of truth for CSS variables)
 6. Handler receives `(req, res, { db, layout })` — return `layout({ title, content })` for consistent styling
 7. **Home screen tiles**: Built-in panels automatically appear as tiles on the Nest home screen. Set `hidden: true` in the manifest to hide from both the sidebar and home screen.
+
+### Adding a settings section
+
+The Settings panel uses an iOS/Android-style grouped menu. Each settings section is a module in `servers/gateway/dashboard/settings/sections/`. Section modules export:
+
+```js
+export default {
+  id: "my-section",                     // URL param: ?section=my-section
+  group: "general",                     // Group key: general, ai, connections, content, system, account
+  icon: `<svg .../>`,                   // 18x18 inline SVG
+  labelKey: "settings.section.mySection", // i18n key
+  navOrder: 10,                         // Sort within group
+  async getPreview({ settings, lang }) { return "preview text"; },
+  async render({ req, db, lang }) { return "<form>...</form>"; },
+  async handleAction({ req, res, db, action }) { /* return true if handled */ },
+};
+```
+
+- Built-in sections: add to `servers/gateway/dashboard/settings/sections/`, import and register in `panels/settings.js`
+- Add-on sections: place at `~/.crow/bundles/<id>/settings-section.js` — auto-discovered via `loadAddonSettings()`
+- Use `upsertSetting(db, key, value)` from `registry.js` for the common `INSERT ... ON CONFLICT DO UPDATE` pattern
+- `getPreview()` receives a pre-fetched `settings` object (all `dashboard_settings` rows), NOT a `db` handle
+- POST redirects should go to `?section=<id>` (not the main menu) so users return to the section they were editing
+- Group definitions with order: `general (10), ai (20), connections (30), content (40), system (50), account (60)`
+
+File structure:
+```
+servers/gateway/dashboard/
+  panels/settings.js              — Thin orchestrator (imports + registers sections)
+  settings/
+    registry.js                   — Section registry, group definitions, dispatchAction, upsertSetting
+    menu-renderer.js              — iOS-style grouped menu HTML + CSS
+    sections/
+      theme.js, language.js, notifications.js, ai-provider.js, ai-profiles.js,
+      connections.js, help-setup.js, integrations.js, blog.js, discovery.js,
+      updates.js, device-context.js, identity.js, password.js
+```
 
 ### Add-on system
 
