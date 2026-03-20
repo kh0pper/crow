@@ -233,6 +233,10 @@ export default {
                   </span>
                 </div>
               </form>
+              <form method="POST" action="/api/tax/documents/${d.id}/delete" style="margin-top:0.5rem;"
+                    onsubmit="return confirm('Delete this document?')">
+                <button type="submit" class="btn btn-sm btn-danger">Delete Document</button>
+              </form>
             </div>
           `;
         } else if (d.status === "confirmed") {
@@ -244,6 +248,15 @@ export default {
           }).join("");
           detailHtml = `<div style="margin-top:0.5rem;">
             <table class="table" style="font-size:0.85rem;"><tbody>${summaryRows}</tbody></table>
+            <div style="display:flex; gap:0.5rem; margin-top:0.5rem;">
+              <form method="POST" action="/api/tax/documents/${d.id}/edit" style="display:inline">
+                <button type="submit" class="btn btn-sm">Edit</button>
+              </form>
+              <form method="POST" action="/api/tax/documents/${d.id}/delete" style="display:inline"
+                    onsubmit="return confirm('Delete this document?')">
+                <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+              </form>
+            </div>
           </div>`;
         } else if (d.status === "error") {
           detailHtml = `<div style="margin-top:0.5rem; font-size:0.85rem;">
