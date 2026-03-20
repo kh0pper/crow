@@ -137,9 +137,9 @@ export function buildNestHTML(data, lang) {
     const hasWebUI = !!b.webUI;
     const hasPanel = panels.some(p => p.id === b.id);
     const isDirect = hasWebUI && b.webUI.proxyMode === "direct";
-    // Direct-mode: use HTTP + hostname + port (no TLS on extension ports)
+    // Direct-mode: use HTTPS + hostname + port (Tailscale serve provides TLS)
     // Subpath proxy: use /proxy/<id>/ through the gateway (inherits TLS)
-    const directUrl = `'http://'+location.hostname+':${hasWebUI ? b.webUI.port : ""}${hasWebUI ? (b.webUI.path || "/") : ""}'`;
+    const directUrl = `'https://'+location.hostname+':${hasWebUI ? b.webUI.port : ""}${hasWebUI ? (b.webUI.path || "/") : ""}'`;
     const proxyUrl = `'/proxy/${b.id}${hasWebUI ? (b.webUI.path || "/") : ""}'`;
     const href = hasPanel ? `/dashboard/${b.id}` : hasWebUI && !isDirect ? `/proxy/${b.id}${b.webUI.path || "/"}` : "/dashboard/extensions";
     const onclick = hasPanel ? "" : hasWebUI ? ` onclick="window.open(${isDirect ? directUrl : proxyUrl},'_blank');return false"` : "";
