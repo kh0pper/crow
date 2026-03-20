@@ -136,7 +136,6 @@ export function buildNestHTML(data, lang) {
     const statusDot = `<span class="nest-app-status" style="background:${b.isRunning ? "var(--crow-success)" : "var(--crow-text-muted)"}" title="${b.isRunning ? t("health.runningStatus", lang) : t("health.stoppedStatus", lang)}"></span>`;
     const hasWebUI = !!b.webUI;
     const hasPanel = panels.some(p => p.id === b.id);
-    const hasPanel = panels.some(p => p.id === b.id);
     const isDirect = hasWebUI && b.webUI.proxyMode === "direct";
     // Direct-mode: use HTTP + hostname + port (no TLS on extension ports)
     // Subpath proxy: use /proxy/<id>/ through the gateway (inherits TLS)
