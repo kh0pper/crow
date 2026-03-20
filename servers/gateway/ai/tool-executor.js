@@ -177,12 +177,52 @@ export function createToolExecutor() {
         const toolCount = Object.keys(manifest.tools).length;
         lines.push(`  ${cat} (${toolCount} actions): ${manifest.description}`);
       }
+      // Include addon servers as discoverable categories
+      if (connectedServers) {
+        for (const [id, entry] of connectedServers) {
+          if (entry.status === "connected" && entry.tools?.length) {
+            lines.push(`  tools/${id} (${entry.tools.length} tools): Installed extension`);
+          }
+        }
+      }
       return { result: lines.join("\n"), isError: false };
+    }
+
+    // Handle "tools" category — discover addon tools
+    if (category === "tools" || category.startsWith("tools/")) {
+      const addonId = category.includes("/") ? category.split("/")[1] : null;
+
+      if (action) {
+        // Get schema for a specific addon tool
+        for (const [id, entry] of connectedServers) {
+          if (entry.status !== "connected" || !entry.client) continue;
+          const tool = entry.tools?.find((t) => t.name === action);
+          if (tool) {
+            return {
+              result: JSON.stringify({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema }, null, 2),
+              isError: false,
+            };
+          }
+        }
+        return { result: `Tool "${action}" not found in any addon`, isError: true };
+      }
+
+      // List all addon tools (or just one addon)
+      const lines = [];
+      for (const [id, entry] of connectedServers) {
+        if (entry.status !== "connected") continue;
+        if (addonId && id !== addonId) continue;
+        lines.push(`[${id}] (${entry.tools?.length || 0} tools):`);
+        for (const t of entry.tools || []) {
+          lines.push(`  - ${t.name}: ${(t.description || "").substring(0, 100)}`);
+        }
+      }
+      return { result: lines.join("\n") || "No addon tools connected", isError: false };
     }
 
     const manifest = TOOL_MANIFESTS[category];
     if (!manifest) {
-      return { result: `Unknown category: ${category}`, isError: true };
+      return { result: `Unknown category: ${category}. Use crow_discover (no args) to see available categories.`, isError: true };
     }
 
     if (action) {
@@ -320,13 +360,21 @@ export function getChatTools() {
 
   // crow_tools (if external servers connected)
   if (connectedServers && connectedServers.size > 0) {
+    // Build a description that lists all available addon tools by server
+    const addonLines = [];
+    for (const [id, entry] of connectedServers) {
+      if (entry.status !== "connected" || !entry.tools?.length) continue;
+      const toolNames = entry.tools.map((t) => t.name).join(", ");
+      addonLines.push(`[${id}]: ${toolNames}`);
+    }
+
     tools.push({
       name: "crow_tools",
-      description: "Route to external integration tools. Use crow_discover with category 'tools' to see available integrations.",
+      description: `Route to installed extension tools. Call with action = tool name, params = tool parameters.\n\nAvailable tools by extension:\n${addonLines.join("\n")}\n\nUse crow_discover with category='tools' and action=<tool_name> to see the full parameter schema for any tool.`,
       inputSchema: {
         type: "object",
         properties: {
-          action: { type: "string", description: "Tool name from the external server" },
+          action: { type: "string", description: "Tool name (e.g. 'crow_tax_get_documents', 'crow_browser_navigate')" },
           params: { type: "object", description: "Parameters for the tool" },
         },
         required: ["action"],
