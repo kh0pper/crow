@@ -104,13 +104,13 @@ export default {
           <input type="hidden" name="action" value="restart">
           <button type="submit" class="btn btn-sm">Restart</button>
         </form>
-        ${containerRunning ? `<a href="http://localhost:6080/vnc.html" target="_blank" class="btn btn-sm" style="margin-left:auto;">Open VNC Viewer &#8599;</a>` : ""}
+        ${containerRunning ? `<a href="/proxy/browser/vnc.html" target="_blank" class="btn btn-sm" style="margin-left:auto;">Open VNC Viewer &#8599;</a>` : ""}
       </div>
 
       ${containerRunning ? `
         <div style="margin-bottom:1rem;">
           <h4 style="margin-bottom:0.5rem;">Live View</h4>
-          <iframe src="http://localhost:6080/vnc.html?autoconnect=true&resize=scale"
+          <iframe src="/proxy/browser/vnc.html?autoconnect=true&resize=scale"
                   style="width:100%; height:500px; border:1px solid var(--border); border-radius:8px;"
                   title="VNC Viewer"></iframe>
         </div>
