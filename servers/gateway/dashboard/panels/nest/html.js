@@ -136,9 +136,12 @@ export function buildNestHTML(data, lang) {
     const statusDot = `<span class="nest-app-status" style="background:${b.isRunning ? "var(--crow-success)" : "var(--crow-text-muted)"}" title="${b.isRunning ? t("health.runningStatus", lang) : t("health.stoppedStatus", lang)}"></span>`;
     const hasWebUI = !!b.webUI;
     const hasPanel = panels.some(p => p.id === b.id);
-    const proxyPath = hasWebUI ? `/proxy/${b.id}${b.webUI.path || "/"}` : "";
-    const href = hasPanel ? `/dashboard/${b.id}` : hasWebUI ? proxyPath : "/dashboard/extensions";
-    const onclick = hasPanel ? "" : hasWebUI ? ` onclick="window.open('${proxyPath}','_blank');return false"` : "";
+    const isDirect = hasWebUI && b.webUI.proxyMode === "direct";
+    const webUIUrl = hasWebUI
+      ? (isDirect ? `'+location.protocol+'//'+location.hostname+':${b.webUI.port}${b.webUI.path || "/"}'` : `'/proxy/${b.id}${b.webUI.path || "/"}'`)
+      : "";
+    const href = hasPanel ? `/dashboard/${b.id}` : hasWebUI && !isDirect ? `/proxy/${b.id}${b.webUI.path || "/"}` : "/dashboard/extensions";
+    const onclick = hasPanel ? "" : hasWebUI ? ` onclick="window.open(${isDirect ? `location.protocol+'//'+location.hostname+':${b.webUI.port}${b.webUI.path || "/"}'` : `'/proxy/${b.id}${b.webUI.path || "/"}'`},'_blank');return false"` : "";
     const delay = tileIndex++ * 40;
     return `<a href="${escapeHtml(href)}" class="nest-app nest-app--bundle" style="animation-delay:${delay}ms"${onclick}>
       <div class="nest-app-icon">${statusDot}${iconHtml}</div>

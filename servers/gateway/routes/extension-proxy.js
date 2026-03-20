@@ -48,6 +48,7 @@ function getProxiedExtensions() {
           port: manifest.webUI.port,
           path: manifest.webUI.path || "/",
           label: manifest.webUI.label || manifest.name || entry.id,
+          proxyMode: manifest.webUI.proxyMode || "subpath",
         });
       }
     }
@@ -69,6 +70,9 @@ export default function extensionProxyFactory(authMiddleware) {
   const proxyInstances = [];
 
   for (const ext of extensions) {
+    // Skip direct-mode extensions (SPA apps that can't work behind a subpath proxy)
+    if (ext.proxyMode === "direct") continue;
+
     const target = `http://127.0.0.1:${ext.port}`;
     const proxyPath = `/proxy/${ext.id}`;
 
@@ -108,14 +112,18 @@ export default function extensionProxyFactory(authMiddleware) {
     console.log(`  [proxy] Extension UI: ${ext.label} → ${proxyPath}/ → ${target}`);
   }
 
-  // GET /proxy — list all proxied extensions
+  // GET /proxy — list all extension web UIs (proxied and direct)
   router.get("/proxy", authMiddleware, (req, res) => {
+    const host = req.hostname || "localhost";
     res.json({
       extensions: extensions.map((ext) => ({
         id: ext.id,
         name: ext.name,
         label: ext.label,
-        url: `/proxy/${ext.id}${ext.path}`,
+        proxyMode: ext.proxyMode,
+        url: ext.proxyMode === "direct"
+          ? `${req.protocol}://${host}:${ext.port}${ext.path}`
+          : `/proxy/${ext.id}${ext.path}`,
         port: ext.port,
       })),
     });
