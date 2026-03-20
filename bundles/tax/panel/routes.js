@@ -289,5 +289,41 @@ export default function taxRouter(authMiddleware) {
     }
   });
 
+  // POST /api/tax/documents/:id/edit — revert confirmed document back to editable
+  router.post("/api/tax/documents/:id/edit", authMiddleware, async (req, res) => {
+    try {
+      const db = await getDb();
+      await db.execute({
+        sql: "UPDATE tax_documents SET status = 'ingested' WHERE id = ?",
+        args: [req.params.id],
+      });
+      if (req.headers.accept?.includes("text/html")) {
+        return res.redirect("/dashboard/tax?tab=documents");
+      }
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /api/tax/documents/:id/delete — remove a document
+  router.post("/api/tax/documents/:id/delete", authMiddleware, async (req, res) => {
+    try {
+      const db = await getDb();
+      // Get file path to delete the uploaded file
+      const result = await db.execute({ sql: "SELECT file_path FROM tax_documents WHERE id = ?", args: [req.params.id] });
+      if (result.rows[0]?.file_path) {
+        try { (await import("node:fs")).unlinkSync(result.rows[0].file_path); } catch {}
+      }
+      await db.execute({ sql: "DELETE FROM tax_documents WHERE id = ?", args: [req.params.id] });
+      if (req.headers.accept?.includes("text/html")) {
+        return res.redirect("/dashboard/tax?tab=documents");
+      }
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   return router;
 }
