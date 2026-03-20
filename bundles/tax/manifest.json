@@ -1,0 +1,38 @@
+{
+  "id": "tax",
+  "name": "Tax Filing Assistant",
+  "version": "1.0.0",
+  "description": "Prepare federal income taxes — document collection, calculation, PDF generation, and guided filing. Federal returns only (no state). Supports 1040, Schedules 1/C/D/SE, Form 8889, and common credits.",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "finance",
+  "tags": ["tax", "1040", "IRS", "filing", "finance"],
+  "icon": "file-text",
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "envKeys": ["CROW_TAX_DB_PATH"]
+  },
+  "panel": "panel/tax.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/crow-tax.md"],
+  "requires": {
+    "min_ram_mb": 128,
+    "min_disk_mb": 100
+  },
+  "env_vars": [
+    {
+      "name": "CROW_TAX_DB_PATH",
+      "description": "Path to tax data database (defaults to Crow's main DB)",
+      "default": ""
+    },
+    {
+      "name": "CROW_TAX_ENCRYPTION_KEY",
+      "description": "Passphrase for encrypting PII at rest (SSN, names). Set on first use.",
+      "required": true,
+      "secret": true
+    }
+  ],
+  "webUI": null,
+  "notes": "Federal returns only — no state income tax support. Supports MFJ, Single, HoH filing. 2025 tax year. Generates filled IRS PDFs ready to mail and step-by-step guided filing instructions. PII is encrypted at rest. Not a substitute for professional tax advice."
+}

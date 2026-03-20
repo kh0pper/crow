@@ -1,0 +1,155 @@
+{
+  "year": 2025,
+  "brackets": {
+    "single": [
+      { "min": 0, "max": 11925, "rate": 0.10 },
+      { "min": 11925, "max": 48475, "rate": 0.12 },
+      { "min": 48475, "max": 103350, "rate": 0.22 },
+      { "min": 103350, "max": 197300, "rate": 0.24 },
+      { "min": 197300, "max": 250525, "rate": 0.32 },
+      { "min": 250525, "max": 626350, "rate": 0.35 },
+      { "min": 626350, "max": null, "rate": 0.37 }
+    ],
+    "mfj": [
+      { "min": 0, "max": 23850, "rate": 0.10 },
+      { "min": 23850, "max": 96950, "rate": 0.12 },
+      { "min": 96950, "max": 206700, "rate": 0.22 },
+      { "min": 206700, "max": 394600, "rate": 0.24 },
+      { "min": 394600, "max": 501050, "rate": 0.32 },
+      { "min": 501050, "max": 751600, "rate": 0.35 },
+      { "min": 751600, "max": null, "rate": 0.37 }
+    ],
+    "mfs": [
+      { "min": 0, "max": 11925, "rate": 0.10 },
+      { "min": 11925, "max": 48475, "rate": 0.12 },
+      { "min": 48475, "max": 103350, "rate": 0.22 },
+      { "min": 103350, "max": 197300, "rate": 0.24 },
+      { "min": 197300, "max": 250525, "rate": 0.32 },
+      { "min": 250525, "max": 375800, "rate": 0.35 },
+      { "min": 375800, "max": null, "rate": 0.37 }
+    ],
+    "hoh": [
+      { "min": 0, "max": 17000, "rate": 0.10 },
+      { "min": 17000, "max": 64850, "rate": 0.12 },
+      { "min": 64850, "max": 103350, "rate": 0.22 },
+      { "min": 103350, "max": 197300, "rate": 0.24 },
+      { "min": 197300, "max": 250500, "rate": 0.32 },
+      { "min": 250500, "max": 626350, "rate": 0.35 },
+      { "min": 626350, "max": null, "rate": 0.37 }
+    ],
+    "qw": [
+      { "min": 0, "max": 23850, "rate": 0.10 },
+      { "min": 23850, "max": 96950, "rate": 0.12 },
+      { "min": 96950, "max": 206700, "rate": 0.22 },
+      { "min": 206700, "max": 394600, "rate": 0.24 },
+      { "min": 394600, "max": 501050, "rate": 0.32 },
+      { "min": 501050, "max": 751600, "rate": 0.35 },
+      { "min": 751600, "max": null, "rate": 0.37 }
+    ]
+  },
+  "standardDeduction": {
+    "single": 15000,
+    "mfj": 30000,
+    "mfs": 15000,
+    "hoh": 22500,
+    "qw": 30000
+  },
+  "hsaLimits": {
+    "self": 4300,
+    "family": 8750,
+    "catchUp55": 1000
+  },
+  "educatorExpenseLimit": 300,
+  "studentLoanInterestMax": 2500,
+  "studentLoanPhaseout": {
+    "single": { "start": 80000, "end": 95000 },
+    "mfj": { "start": 165000, "end": 195000 },
+    "mfs": { "start": 0, "end": 0 },
+    "hoh": { "start": 80000, "end": 95000 },
+    "qw": { "start": 165000, "end": 195000 }
+  },
+  "ssWageBase": 176100,
+  "ssTaxRate": 0.062,
+  "medicareTaxRate": 0.0145,
+  "selfEmploymentTaxRate": 0.9235,
+  "additionalMedicareRate": 0.009,
+  "additionalMedicareThreshold": {
+    "single": 200000,
+    "mfj": 250000,
+    "mfs": 125000,
+    "hoh": 200000,
+    "qw": 200000
+  },
+  "childTaxCredit": {
+    "amount": 2000,
+    "refundableMax": 1700,
+    "phaseoutStart": { "single": 200000, "mfj": 400000, "mfs": 200000, "hoh": 200000, "qw": 400000 },
+    "phaseoutRate": 50
+  },
+  "eitc": {
+    "maxChildren": 3,
+    "amounts": {
+      "0": 649,
+      "1": 4328,
+      "2": 7152,
+      "3": 8046
+    },
+    "phaseoutStart": {
+      "single": { "0": 10620, "1": 22120, "2": 22120, "3": 22120 },
+      "mfj": { "0": 17250, "1": 28820, "2": 28820, "3": 28820 }
+    },
+    "incomeLimit": {
+      "single": { "0": 19104, "1": 49084, "2": 55768, "3": 59899 },
+      "mfj": { "0": 25734, "1": 55768, "2": 62688, "3": 66819 }
+    },
+    "investmentIncomeLimit": 11950
+  },
+  "educationCredits": {
+    "aotc": {
+      "maxCredit": 2500,
+      "maxExpenses": 4000,
+      "refundableRate": 0.40,
+      "maxYears": 4,
+      "phaseout": {
+        "single": { "start": 80000, "end": 90000 },
+        "mfj": { "start": 160000, "end": 180000 },
+        "mfs": { "start": 0, "end": 0 },
+        "hoh": { "start": 80000, "end": 90000 },
+        "qw": { "start": 160000, "end": 180000 }
+      }
+    },
+    "llc": {
+      "maxCredit": 2000,
+      "rate": 0.20,
+      "maxExpenses": 10000,
+      "phaseout": {
+        "single": { "start": 80000, "end": 90000 },
+        "mfj": { "start": 160000, "end": 180000 },
+        "mfs": { "start": 0, "end": 0 },
+        "hoh": { "start": 80000, "end": 90000 },
+        "qw": { "start": 160000, "end": 180000 }
+      }
+    }
+  },
+  "qualifiedBusinessIncomeDeduction": 0.20,
+  "netInvestmentIncomeTaxRate": 0.038,
+  "netInvestmentIncomeTaxThreshold": {
+    "single": 200000,
+    "mfj": 250000,
+    "mfs": 125000,
+    "hoh": 200000,
+    "qw": 250000
+  },
+  "capitalGainsRates": {
+    "rate0Threshold": { "single": 48350, "mfj": 96700, "mfs": 48350, "hoh": 64750, "qw": 96700 },
+    "rate15Threshold": { "single": 533400, "mfj": 600050, "mfs": 300025, "hoh": 566700, "qw": 600050 },
+    "rates": [0, 0.15, 0.20]
+  },
+  "amtExemption": {
+    "single": 88100,
+    "mfj": 137000,
+    "mfs": 68500,
+    "hoh": 88100,
+    "qw": 137000
+  }
+}

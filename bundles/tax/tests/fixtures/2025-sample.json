@@ -1,0 +1,95 @@
+{
+  "description": "John & Jane 2025 tax return — anonymized test fixture",
+  "taxYear": 2025,
+  "filingStatus": "mfj",
+  "taxpayer": {
+    "name": "John Q. Public",
+    "ssn": "000000000",
+    "dateOfBirth": "1990-01-01"
+  },
+  "spouse": {
+    "name": "Jane A. Public",
+    "ssn": "000000001",
+    "dateOfBirth": "1992-01-01"
+  },
+  "dependents": [],
+  "w2s": [
+    {
+      "employer": "Acme Corporation",
+      "wages": 60000.21,
+      "federalWithheld": 4200.00,
+      "ssWages": 60000.21,
+      "ssTaxWithheld": 3720.01,
+      "medicareWages": 60000.21,
+      "medicareTaxWithheld": 870.00,
+      "stateWages": 0,
+      "stateWithheld": 0,
+      "code12": [],
+      "isStatutoryEmployee": false
+    },
+    {
+      "employer": "Widget Industries",
+      "wages": 76962.38,
+      "federalWithheld": 8480.00,
+      "ssWages": 76962.38,
+      "ssTaxWithheld": 4771.67,
+      "medicareWages": 76962.38,
+      "medicareTaxWithheld": 1115.95,
+      "stateWages": 0,
+      "stateWithheld": 0,
+      "code12": [
+        { "code": "W", "amount": 470.58 }
+      ],
+      "isStatutoryEmployee": false
+    }
+  ],
+  "income1099": {
+    "sa": [
+      {
+        "payer": "Optum Bank",
+        "grossDistribution": 420.00,
+        "distributionCode": 1,
+        "hsaOrMsa": "hsa"
+      }
+    ],
+    "int": [],
+    "div": [],
+    "nec": [],
+    "g": [],
+    "misc": []
+  },
+  "deductions": {
+    "studentLoanInterest": 170.58,
+    "educatorExpenses": [
+      {
+        "name": "Jane A. Public",
+        "role": "teacher",
+        "k12School": true,
+        "hoursPerYear": 1800,
+        "amount": 450
+      },
+      {
+        "name": "John Q. Public",
+        "role": "counselor",
+        "k12School": false,
+        "hoursPerYear": 1200,
+        "amount": 200
+      }
+    ]
+  },
+  "hsa": {
+    "coverageType": "self",
+    "employerContributions": 470.58,
+    "personalContributions": 0,
+    "distributions": 420.00,
+    "qualifiedExpenses": 420.00,
+    "distributionCode": 1,
+    "monthsCovered": 12,
+    "hadHdhpFullYear": true,
+    "catchUp55": false
+  },
+  "specialSituations": {
+    "nonresidentSpouseElection": true,
+    "spouseGreenCardDate": "2025-01-01"
+  }
+}
