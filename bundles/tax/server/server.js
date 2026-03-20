@@ -93,10 +93,18 @@ export function createTaxServer(dbPath, options = {}) {
           return { content: [{ type: "text", text: "No confirmed documents found. Upload and confirm documents in the Tax Filing panel first." }], isError: true };
         }
 
-        // 1b. Auto-fill SSN and names from W-2 documents
-        const w2Docs = docs.rows.filter(d => d.doc_type === "w2").map(d => d.extracted_data ? JSON.parse(d.extracted_data) : null).filter(Boolean);
-        const w2_1 = w2Docs[0] || {};
-        const w2_2 = w2Docs[1] || {};
+        // 1b. Auto-fill SSN and names from W-2 documents, using owner tags
+        const parsedDocs = docs.rows.map(d => ({
+          ...d,
+          data: d.extracted_data ? JSON.parse(d.extracted_data) : null,
+          owner: d.owner || "taxpayer",
+        }));
+        const taxpayerW2 = parsedDocs.find(d => d.doc_type === "w2" && d.owner === "taxpayer")?.data || {};
+        const spouseW2 = parsedDocs.find(d => d.doc_type === "w2" && d.owner === "spouse")?.data || {};
+        // Fallback: if no owner tags, use first/second W-2
+        const w2Docs = parsedDocs.filter(d => d.doc_type === "w2" && d.data);
+        const w2_1 = taxpayerW2.employeeName ? taxpayerW2 : (w2Docs[0]?.data || {});
+        const w2_2 = spouseW2.employeeName ? spouseW2 : (w2Docs[1]?.data || {});
 
         const taxpayerName = params.taxpayer_name || w2_1.employeeName || "Unknown";
         const taxpayerSsn = params.taxpayer_ssn || (w2_1.employeeSsn || "").replace(/-/g, "") || "000000000";
@@ -167,6 +175,30 @@ export function createTaxServer(dbPath, options = {}) {
             taxReturn.deductions.studentLoanInterest = (taxReturn.deductions.studentLoanInterest || 0) + (data.interest || 0);
             log.push(`  Added 1098-E: $${(data.interest || 0).toFixed(2)} student loan interest`);
           }
+        }
+
+        // 3b. Auto-configure HSA if 1099-SA was added
+        const hsaDist = taxReturn.income1099.sa.reduce((s, sa) => s + (sa.grossDistribution || 0), 0);
+        if (hsaDist > 0) {
+          // Find employer HSA contributions from W-2 code W
+          let employerHsa = 0;
+          for (const w2 of taxReturn.w2s) {
+            for (const c of w2.code12 || []) {
+              if (c.code === "W") employerHsa += c.amount;
+            }
+          }
+          taxReturn.hsa = {
+            coverageType: "self", // Default — user can change to "family" later
+            employerContributions: employerHsa,
+            personalContributions: 0,
+            distributions: hsaDist,
+            qualifiedExpenses: hsaDist, // Assume all qualified — user confirmed via documents
+            distributionCode: 1,
+            monthsCovered: 12,
+            hadHdhpFullYear: true,
+            catchUp55: false,
+          };
+          log.push(`  Auto-configured HSA: employer $${employerHsa.toFixed(2)}, distributions $${hsaDist.toFixed(2)} (all qualified)`);
         }
 
         // 4. Calculate

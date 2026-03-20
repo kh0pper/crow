@@ -111,6 +111,11 @@ export default {
               <option value="1098">1098 (Mortgage)</option>
             </optgroup>
           </select>
+          <select name="owner" style="padding:0.4rem 0.6rem; border:1px solid var(--border); border-radius:4px; background:var(--bg);">
+            <option value="taxpayer">Taxpayer</option>
+            <option value="spouse">Spouse</option>
+            <option value="joint">Joint/Shared</option>
+          </select>
           <input type="file" name="document" accept=".pdf" required style="flex:1;" />
           <button type="submit" class="btn btn-primary">Upload &amp; Extract</button>
         </div>
