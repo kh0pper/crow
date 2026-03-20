@@ -457,8 +457,9 @@ export function createBlogServer(dbPath, options = {}) {
       podcast_owner_email: z.string().max(200).optional().describe("Podcast owner email (required by Apple Podcasts)"),
       podcast_cover_url: z.string().max(1000).optional().describe("Podcast cover image URL (1400x1400 to 3000x3000 JPEG/PNG)"),
       podcast_language: z.string().max(10).optional().describe("Podcast language code (e.g. 'en', 'es', 'fr')"),
+      songbook_on_index: z.boolean().optional().describe("Show songbook posts on the main blog index (default: true)"),
     },
-    async ({ action, title, tagline, author, theme, podcast_category, podcast_type, podcast_owner_email, podcast_cover_url, podcast_language }) => {
+    async ({ action, title, tagline, author, theme, podcast_category, podcast_type, podcast_owner_email, podcast_cover_url, podcast_language, songbook_on_index }) => {
       if (action === "get") {
         const result = await db.execute({
           sql: "SELECT key, value FROM dashboard_settings WHERE key LIKE 'blog_%'",
@@ -468,7 +469,7 @@ export function createBlogServer(dbPath, options = {}) {
         for (const r of result.rows) {
           settings[r.key.replace("blog_", "")] = r.value;
         }
-        let text = `Blog Settings:\n  Title: ${settings.title || "Crow Blog"}\n  Tagline: ${settings.tagline || ""}\n  Author: ${settings.author || ""}\n  Theme: ${settings.theme || "dark"}`;
+        let text = `Blog Settings:\n  Title: ${settings.title || "Crow Blog"}\n  Tagline: ${settings.tagline || ""}\n  Author: ${settings.author || ""}\n  Theme: ${settings.theme || "dark"}\n  Songbook on index: ${settings.songbook_on_index !== "false" ? "yes" : "no"}`;
         if (settings.podcast_category || settings.podcast_type || settings.podcast_owner_email || settings.podcast_cover_url || settings.podcast_language) {
           text += `\n\nPodcast Settings:\n  Category: ${settings.podcast_category || "Society & Culture"}\n  Type: ${settings.podcast_type || "episodic"}\n  Owner Email: ${settings.podcast_owner_email || "(not set)"}\n  Cover Image: ${settings.podcast_cover_url || "(not set)"}\n  Language: ${settings.podcast_language || "en"}`;
         }
@@ -485,6 +486,7 @@ export function createBlogServer(dbPath, options = {}) {
       if (podcast_owner_email !== undefined) updates.push(["blog_podcast_owner_email", podcast_owner_email]);
       if (podcast_cover_url !== undefined) updates.push(["blog_podcast_cover_url", podcast_cover_url]);
       if (podcast_language !== undefined) updates.push(["blog_podcast_language", podcast_language]);
+      if (songbook_on_index !== undefined) updates.push(["blog_songbook_on_index", String(songbook_on_index)]);
 
       for (const [key, value] of updates) {
         await db.execute({

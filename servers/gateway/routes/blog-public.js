@@ -14,6 +14,7 @@
 import { Router } from "express";
 import { createDbClient, escapeLikePattern } from "../../db.js";
 import { renderMarkdown } from "../../blog/renderer.js";
+import { isChordPro } from "../../blog/chordpro.js";
 import { generateRss, generateAtom } from "../../blog/rss.js";
 import { generatePodcastFeed } from "../../blog/podcast-rss.js";
 import { FONT_IMPORT, designTokensCss } from "../dashboard/shared/design-tokens.js";
@@ -40,6 +41,7 @@ async function getBlogSettings(db) {
     podcastOwnerEmail: s.podcast_owner_email || "",
     podcastCoverUrl: s.podcast_cover_url || "",
     podcastLanguage: s.podcast_language || "en",
+    songbookOnIndex: s.songbook_on_index !== "false",
   };
 }
 
@@ -280,6 +282,7 @@ function pageShell(settings, { title, content, ogMeta }) {
     ${settings.tagline ? `<p>${escapeHtml(settings.tagline)}</p>` : ""}
     <nav>
       <a href="/blog">Posts</a>
+      <a href="/blog/songbook">Songbook</a>
       <a href="/blog/feed.xml">RSS</a>
     </nav>
   </header>
@@ -338,8 +341,9 @@ export default function blogPublicRouter() {
       const perPage = 10;
       const offset = (page - 1) * perPage;
 
+      const songbookFilter = settings.songbookOnIndex ? "" : " AND (tags IS NULL OR tags NOT LIKE '%songbook%')";
       const posts = await db.execute({
-        sql: "SELECT id, slug, title, excerpt, author, tags, published_at, cover_image_key FROM blog_posts WHERE status = 'published' AND visibility = 'public' ORDER BY published_at DESC LIMIT ? OFFSET ?",
+        sql: `SELECT id, slug, title, excerpt, author, tags, published_at, cover_image_key FROM blog_posts WHERE status = 'published' AND visibility = 'public'${songbookFilter} ORDER BY published_at DESC LIMIT ? OFFSET ?`,
         args: [perPage + 1, offset],
       });
 
@@ -672,6 +676,13 @@ export default function blogPublicRouter() {
       }
 
       const post = result.rows[0];
+
+      // Songbook posts redirect to their canonical songbook URL
+      if (post.tags?.includes("songbook") && isChordPro(post.content)) {
+        const qs = req.url.includes("?") ? "?" + req.url.split("?")[1] : "";
+        return res.redirect(301, `/blog/songbook/${post.slug}${qs}`);
+      }
+
       const html = renderMarkdown(post.content);
       const tags = (post.tags || "").split(",").map((t) => t.trim()).filter(Boolean);
       const tagsHtml = tags.length > 0

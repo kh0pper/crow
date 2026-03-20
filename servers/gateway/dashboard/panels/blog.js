@@ -59,6 +59,17 @@ export default {
         return;
       }
 
+      if (action === "toggle_songbook_index") {
+        const current = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'blog_songbook_on_index'", args: [] });
+        const newVal = (current.rows[0]?.value === "false") ? "true" : "false";
+        await db.execute({
+          sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('blog_songbook_on_index', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
+          args: [newVal, newVal],
+        });
+        res.redirect("/dashboard/blog");
+        return;
+      }
+
       if (action === "edit") {
         const { id, title, content, tags, visibility, cover_image_key } = req.body;
         if (!id || !title || !content) {
@@ -96,14 +107,26 @@ export default {
       editPost = rows[0] || null;
     }
 
+    // Songbook index setting
+    const songbookSettingResult = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'blog_songbook_on_index'", args: [] });
+    const songbookOnIndex = songbookSettingResult.rows[0]?.value !== "false";
+
     // Live blog link
     const publicUrl = process.env.CROW_GATEWAY_URL || "";
     const blogBaseUrl = publicUrl ? `${publicUrl}/blog/` : `/blog/`;
     const blogLink = `<div style="background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px;padding:1rem;margin-bottom:1.5rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
       <span style="font-weight:600;color:var(--crow-text)">${t("blog.liveBlog", lang)}</span>
       <a href="${escapeHtml(blogBaseUrl)}" target="_blank" style="flex:1;min-width:200px;font-size:0.85rem;word-break:break-all">${escapeHtml(blogBaseUrl)}</a>
+      <a href="${escapeHtml(blogBaseUrl)}songbook" target="_blank" class="btn btn-sm btn-secondary">Songbook</a>
       <a href="${escapeHtml(blogBaseUrl)}feed.xml" target="_blank" class="btn btn-sm btn-secondary">${t("blog.rss", lang)}</a>
       <a href="${escapeHtml(blogBaseUrl)}feed.atom" target="_blank" class="btn btn-sm btn-secondary">${t("blog.atom", lang)}</a>
+      <form method="POST" style="margin:0;display:inline-flex;align-items:center;gap:0.5rem">
+        <input type="hidden" name="action" value="toggle_songbook_index">
+        <label style="font-size:0.8rem;color:var(--crow-text-muted);cursor:pointer;display:inline-flex;align-items:center;gap:0.35rem">
+          <input type="checkbox" ${songbookOnIndex ? "checked" : ""} onchange="this.form.submit()" style="cursor:pointer">
+          Songs on blog index
+        </label>
+      </form>
     </div>`;
 
     // Post list
