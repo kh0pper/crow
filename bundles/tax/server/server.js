@@ -68,6 +68,65 @@ export function createTaxServer(dbPath, options = {}) {
     return rows.rows[0] || null;
   }
 
+  // --- crow_tax_get_documents ---
+  server.tool(
+    "crow_tax_get_documents",
+    "List all uploaded and confirmed tax documents. Returns extracted data from W-2s, 1099s, 1098s that have been uploaded through the Tax Filing panel. Use this to find documents before creating a return.",
+    {},
+    async () => {
+      try {
+        const docs = await db.execute({
+          sql: "SELECT id, filename, doc_type, status, extracted_data, warnings, uploaded_at FROM tax_documents ORDER BY uploaded_at DESC",
+          args: [],
+        });
+
+        if (docs.rows.length === 0) {
+          return { content: [{ type: "text", text: "No tax documents found. Upload documents through the Tax Filing panel (Documents tab) first." }] };
+        }
+
+        const results = docs.rows.map((d) => {
+          const data = d.extracted_data ? JSON.parse(d.extracted_data) : null;
+          return {
+            id: d.id,
+            filename: d.filename,
+            type: d.doc_type,
+            status: d.status,
+            data,
+          };
+        });
+
+        const confirmed = results.filter((d) => d.status === "confirmed");
+        const pending = results.filter((d) => d.status !== "confirmed");
+
+        const lines = [
+          `Found ${results.length} document(s): ${confirmed.length} confirmed, ${pending.length} pending`,
+          "",
+        ];
+
+        for (const doc of results) {
+          lines.push(`--- ${doc.filename} (${doc.type}) [${doc.status}] ---`);
+          if (doc.data) {
+            for (const [k, v] of Object.entries(doc.data)) {
+              if (v === 0 || v === "" || v === null || v === false) continue;
+              if (Array.isArray(v) && v.length === 0) continue;
+              const display = typeof v === "number" ? `$${v.toFixed(2)}` : (Array.isArray(v) ? v.map(x => `${x.code}:$${x.amount}`).join(", ") : String(v));
+              lines.push(`  ${k}: ${display}`);
+            }
+          }
+          lines.push("");
+        }
+
+        if (confirmed.length > 0) {
+          lines.push("To create a return from these documents, use crow_tax_new_return, then add each document with crow_tax_add_w2, crow_tax_add_1099, etc.");
+        }
+
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
   // --- crow_tax_new_return ---
   server.tool(
     "crow_tax_new_return",
