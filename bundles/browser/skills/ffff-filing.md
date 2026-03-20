@@ -154,10 +154,25 @@ After entering W-2 data:
 
 **Important for TRS employees (Texas teachers):** Some Texas school districts participate in TRS instead of Social Security. These employees have **blank Box 3 and Box 4** on their W-2. Enter 0 for SS wages and SS tax. Medicare (Box 5/6) is still applicable.
 
-### Step 7: Review & Save
+### Step 7: Cross-Reference Verification
+
+Before saving, run an automated cross-reference of ALL FFFF values against the source documents and crow-tax engine. Navigate to each form in the tree, read all field values, and compare:
+
+**For each W-2:** Compare every box (1-6, 12, 13, EIN, employee name) against the original PDF.
+**For Form 1040:** Compare Lines 1a, 9, 10, 11a, 12e, 15, 16, 20, 24, 25a, 33, 34 against crow-tax `crow_tax_get_form`.
+**For Schedule 1:** Compare Lines 11, 13, 21, 26 against crow-tax.
+**For Form 8889:** Compare Lines 6, 9, 14a, 14c, 15, 16 against 1099-SA and W-2 code W values.
+**For Form 8863:** Compare Lines 10, 12, 18, 19 against 1098-T and crow-tax.
+**Step 2 withholding:** Verify Line E (net difference) = $0.
+
+Tolerance: $1 for rounding (FFFF uses whole dollars). Flag any mismatch > $1 as an error.
+
+Present the cross-reference results to the user as a table. If ANY mismatches are found, fix them and re-run "Do the Math" before proceeding.
+
+### Step 8: Save & E-File
 
 1. Click "Save" (`id="btnSave"`) to save the return
-2. Tell user to review all forms in VNC
+2. Tell user to review all forms in VNC — they should scroll through every form
 3. User navigates to Step 4 (E-File) and submits manually
 4. **Do NOT automate the final submit**
 
