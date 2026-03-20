@@ -1,7 +1,11 @@
 /**
  * PDF Text Extraction and OCR
  *
- * Pipeline: pdf-lib form fields → pdf-parse text → tesseract.js OCR
+ * Pipeline: pdf-lib form fields → positional text → plain text → OCR fallback
+ *
+ * Key insight: many W-2 PDFs have values in separate text layers that plain
+ * extraction misses. Positional extraction preserves the layout by sorting
+ * text items by (y, x) position and grouping into rows.
  */
 
 /**
@@ -22,7 +26,6 @@ export async function extractFormFields(pdfBuffer) {
   for (const field of fields) {
     const name = field.getName();
     try {
-      // Try getText for text fields
       if (typeof field.getText === "function") {
         result[name] = field.getText() || "";
       } else if (typeof field.isChecked === "function") {
@@ -39,7 +42,55 @@ export async function extractFormFields(pdfBuffer) {
 }
 
 /**
- * Extract text content from a PDF using pdf-parse.
+ * Extract text with positional information — preserves layout by grouping
+ * text items into rows based on Y coordinate.
+ *
+ * This is the preferred extraction method for W-2s and similar forms where
+ * labels and values are in separate text layers.
+ *
+ * @param {Buffer} pdfBuffer
+ * @returns {Promise<string>} Text with positional layout preserved
+ */
+export async function extractTextPositional(pdfBuffer) {
+  const pdfParse = (await import("pdf-parse")).default;
+
+  const result = await pdfParse(pdfBuffer, {
+    pagerender: function (pageData) {
+      return pageData.getTextContent().then(function (content) {
+        const items = content.items.map((item) => ({
+          text: item.str,
+          x: Math.round(item.transform[4]),
+          y: Math.round(item.transform[5]),
+        }));
+
+        // Sort by Y (top to bottom), then X (left to right)
+        items.sort((a, b) => b.y - a.y || a.x - b.x);
+
+        // Group by Y position (within 3px tolerance)
+        const rows = [];
+        let currentRow = [];
+        let lastY = null;
+        for (const item of items) {
+          if (lastY !== null && Math.abs(item.y - lastY) > 3) {
+            if (currentRow.length) rows.push(currentRow);
+            currentRow = [];
+          }
+          if (item.text.trim()) currentRow.push(item);
+          lastY = item.y;
+        }
+        if (currentRow.length) rows.push(currentRow);
+
+        // Join each row's items with separator
+        return rows.map((row) => row.map((item) => item.text.trim()).join(" | ")).join("\n");
+      });
+    },
+  });
+
+  return result.text;
+}
+
+/**
+ * Extract plain text content from a PDF using pdf-parse (default mode).
  *
  * @param {Buffer} pdfBuffer
  * @returns {Promise<string>}
@@ -57,10 +108,6 @@ export async function extractText(pdfBuffer) {
  * @returns {Promise<string>}
  */
 export async function ocrExtract(pdfBuffer) {
-  // tesseract.js works with images, not PDFs directly.
-  // For OCR, we first need to convert PDF pages to images.
-  // This requires a heavier dependency chain (pdf2pic or similar).
-  // For now, try pdf-parse first — most tax documents are text-based PDFs.
   const text = await extractText(pdfBuffer);
   if (text && text.trim().length > 50) {
     return text;
