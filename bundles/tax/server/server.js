@@ -229,8 +229,8 @@ export function createTaxServer(dbPath, options = {}) {
           }
 
           log.push("", "IMPORTANT — verify with the user before generating PDFs:",
-            "  1. Is the education credit type correct? (AOTC vs LLC — ask if student is graduate/undergraduate)",
-            "     To fix: crow_tax_add_education_credit with is_graduate=true/false (replaces existing)",
+            "  1. Education credit: Ask 'What type of program are you enrolled in?' (undergraduate degree, graduate degree, professional certificate, trade/vocational program). Undergraduate = AOTC eligible. Graduate/professional/trade = LLC only.",
+            "     To fix: crow_tax_add_education_credit with is_graduate=true for non-undergraduate (replaces existing)",
             "  2. Educator expenses: ask who is an educator (NOT assumed from employer name)",
             "     To add: crow_tax_add_deduction with type='educator'",
             "  3. HSA coverage: self or family? (currently set to self)",
