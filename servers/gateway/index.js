@@ -573,10 +573,28 @@ app.get("/discover/find", async (req, res) => {
 
 // --- Start Server ---
 
-app.listen(PORT, "0.0.0.0", (error) => {
+// --- Mount Extension Web UI Proxy ---
+let _extensionProxyWsSetup = null;
+try {
+  const { default: extensionProxyRouter } = await import("./routes/extension-proxy.js");
+  const { router, setupWebSocket } = extensionProxyRouter(authMiddleware);
+  app.use(router);
+  _extensionProxyWsSetup = setupWebSocket;
+} catch (err) {
+  if (err.code !== "ERR_MODULE_NOT_FOUND") {
+    console.warn("[extension-proxy] Failed to mount:", err.message);
+  }
+}
+
+const server = app.listen(PORT, "0.0.0.0", (error) => {
   if (error) {
     console.error("Failed to start gateway:", error);
     process.exit(1);
+  }
+
+  // Wire up WebSocket upgrade for extension proxies (needs server instance)
+  if (_extensionProxyWsSetup) {
+    _extensionProxyWsSetup(server);
   }
   console.log(`Crow Gateway listening on http://0.0.0.0:${PORT}`);
   console.log(`  Streamable HTTP (2025-03-26):`);
