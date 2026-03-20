@@ -18,7 +18,7 @@
   },
   "panel": "panel/browser.js",
   "panelRoutes": "panel/routes.js",
-  "skills": ["skills/crow-browser.md"],
+  "skills": ["skills/crow-browser.md", "skills/ffff-filing.md"],
   "requires": {
     "env": ["CROW_BROWSER_VNC_PASSWORD"],
     "min_ram_mb": 1024,
