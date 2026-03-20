@@ -68,6 +68,135 @@ export function createTaxServer(dbPath, options = {}) {
     return rows.rows[0] || null;
   }
 
+  // --- crow_tax_prepare_from_documents ---
+  server.tool(
+    "crow_tax_prepare_from_documents",
+    "One-step tax return preparation: creates a return from ALL confirmed documents uploaded through the Tax Filing panel. Automatically adds W-2s, 1099s, 1098s, and calculates the return. Asks the user for any missing information (filing status, SSN, etc.).",
+    {
+      tax_year: z.number().describe("Tax year (e.g. 2025)"),
+      filing_status: z.enum(["single", "mfj", "mfs", "hoh", "qw"]).describe("Filing status"),
+      taxpayer_name: z.string().describe("Taxpayer full name"),
+      taxpayer_ssn: z.string().describe("Taxpayer SSN (9 digits, use 000000000 as placeholder)"),
+      taxpayer_dob: z.string().optional().describe("Taxpayer date of birth"),
+      spouse_name: z.string().optional().describe("Spouse name (required for MFJ)"),
+      spouse_ssn: z.string().optional().describe("Spouse SSN"),
+      spouse_dob: z.string().optional().describe("Spouse date of birth"),
+    },
+    async (params) => {
+      try {
+        // 1. Get confirmed documents
+        const docs = await db.execute({
+          sql: "SELECT * FROM tax_documents WHERE status = 'confirmed' ORDER BY uploaded_at",
+          args: [],
+        });
+        if (docs.rows.length === 0) {
+          return { content: [{ type: "text", text: "No confirmed documents found. Upload and confirm documents in the Tax Filing panel first." }], isError: true };
+        }
+
+        // 2. Create the return
+        const id = genReturnId();
+        const taxReturn = {
+          taxYear: params.tax_year,
+          filingStatus: params.filing_status,
+          taxpayer: { name: params.taxpayer_name, ssn: params.taxpayer_ssn, dateOfBirth: params.taxpayer_dob },
+          dependents: [],
+          w2s: [],
+          income1099: { sa: [], int: [], div: [], nec: [], g: [], misc: [] },
+          deductions: { educatorExpenses: [] },
+          educationCredits: [],
+          capitalGains: [],
+          specialSituations: {},
+        };
+        if (params.spouse_name) {
+          taxReturn.spouse = { name: params.spouse_name, ssn: params.spouse_ssn, dateOfBirth: params.spouse_dob };
+        }
+
+        const log = [`Created return ${id} (${params.tax_year} ${params.filing_status.toUpperCase()})`];
+
+        // 3. Add each confirmed document
+        for (const doc of docs.rows) {
+          const data = doc.extracted_data ? JSON.parse(doc.extracted_data) : null;
+          if (!data) continue;
+
+          if (doc.doc_type === "w2") {
+            taxReturn.w2s.push({
+              employer: data.employer || "Unknown",
+              wages: data.wages || 0,
+              federalWithheld: data.federalWithheld || 0,
+              ssWages: data.ssWages || 0,
+              ssTaxWithheld: data.ssTaxWithheld || 0,
+              medicareWages: data.medicareWages || 0,
+              medicareTaxWithheld: data.medicareTaxWithheld || 0,
+              stateWages: data.stateWages || 0,
+              stateWithheld: data.stateWithheld || 0,
+              code12: data.code12 || [],
+              isStatutoryEmployee: false,
+            });
+            log.push(`  Added W-2: ${data.employer} ($${(data.wages || 0).toFixed(2)})`);
+          } else if (doc.doc_type === "1099-sa") {
+            taxReturn.income1099.sa.push({
+              payer: data.payer || "Unknown",
+              grossDistribution: data.grossDistribution || 0,
+              distributionCode: data.distributionCode || 1,
+              hsaOrMsa: "hsa",
+            });
+            log.push(`  Added 1099-SA: $${(data.grossDistribution || 0).toFixed(2)}`);
+          } else if (doc.doc_type === "1098-t") {
+            taxReturn.educationCredits.push({
+              studentName: data.studentName || params.taxpayer_name,
+              institution: data.institution || "Unknown",
+              tuitionPaid: data.tuitionPaid || 0,
+              scholarships: data.scholarships || 0,
+              isGraduate: data.isGraduate || false,
+              isHalfTime: data.isHalfTime !== false,
+              yearsClaimedAotc: data.yearsClaimedAotc || 0,
+              felonyDrugConviction: false,
+            });
+            log.push(`  Added 1098-T: ${data.institution} ($${(data.tuitionPaid || 0).toFixed(2)})`);
+          } else if (doc.doc_type === "1098-e") {
+            taxReturn.deductions.studentLoanInterest = (taxReturn.deductions.studentLoanInterest || 0) + (data.interest || 0);
+            log.push(`  Added 1098-E: $${(data.interest || 0).toFixed(2)} student loan interest`);
+          }
+        }
+
+        // 4. Calculate
+        await saveReturn(id, taxReturn, null, "draft");
+        const { result, forms, warnings, errors } = processReturn(taxReturn);
+
+        if (result) {
+          await saveReturn(id, taxReturn, result, errors.length > 0 ? "draft" : "calculated");
+
+          log.push("", "=== Calculation Result ===",
+            `Total income:    $${result.income.totalIncome.toFixed(2)}`,
+            `AGI:             $${result.agi.toFixed(2)}`,
+            `Deduction:       $${result.deduction.chosen.toFixed(2)} (${result.deduction.usesItemized ? "itemized" : "standard"})`,
+            `Taxable income:  $${result.taxableIncome.toFixed(2)}`,
+            `Tax:             $${result.tax.bracketTax.toFixed(2)}`,
+            `Credits:         $${result.credits.totalCredits.toFixed(2)}`,
+            `Total tax:       $${result.result.totalTax.toFixed(2)}`,
+            `Payments:        $${result.payments.totalPayments.toFixed(2)}`,
+            result.result.refundOrOwed >= 0
+              ? `REFUND:          $${result.result.refundOrOwed.toFixed(2)}`
+              : `AMOUNT OWED:     $${Math.abs(result.result.refundOrOwed).toFixed(2)}`,
+            `Required forms:  ${Object.keys(forms).join(", ")}`,
+          );
+
+          if (warnings.length > 0) {
+            log.push("", "Warnings:", ...warnings.map(w => `  - ${w}`));
+          }
+
+          log.push("", "NOTE: Ask the user to verify the results. Use crow_tax_set_hsa, crow_tax_add_deduction, crow_tax_set_special, and crow_tax_add_education_credit to add details that couldn't be extracted from documents (e.g., HSA coverage months, educator expenses, 6013(h) election).");
+        } else {
+          log.push("", "Calculation failed:", ...errors.map(e => `  - ${e}`));
+        }
+
+        return { content: [{ type: "text", text: log.join("\n") }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Preparation failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
   // --- crow_tax_get_documents ---
   server.tool(
     "crow_tax_get_documents",
