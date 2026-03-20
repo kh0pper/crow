@@ -1,0 +1,46 @@
+{
+  "id": "browser",
+  "name": "Browser Automation",
+  "version": "1.0.0",
+  "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "automation",
+  "tags": ["browser", "automation", "scraping", "cdp", "vnc", "stealth"],
+  "icon": "globe",
+  "docker": {
+    "composefile": "docker-compose.yml"
+  },
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "envKeys": ["CROW_BROWSER_VNC_PASSWORD", "CROW_BROWSER_CDP_PORT", "CROW_BROWSER_VNC_PORT"]
+  },
+  "skills": ["skills/crow-browser.md"],
+  "requires": {
+    "env": ["CROW_BROWSER_VNC_PASSWORD"],
+    "min_ram_mb": 1024,
+    "min_disk_mb": 512
+  },
+  "env_vars": [
+    {
+      "name": "CROW_BROWSER_VNC_PASSWORD",
+      "description": "VNC password for browser viewing",
+      "required": true,
+      "secret": true
+    },
+    {
+      "name": "CROW_BROWSER_CDP_PORT",
+      "description": "Chrome DevTools Protocol port",
+      "default": "9222"
+    },
+    {
+      "name": "CROW_BROWSER_VNC_PORT",
+      "description": "noVNC web viewer port",
+      "default": "6080"
+    }
+  ],
+  "ports": [6080, 9222],
+  "webUI": { "port": 6080, "path": "/vnc.html", "label": "VNC Viewer" },
+  "notes": "11 MCP tools for browser automation. Runs headless Chrome in Docker with Xvfb + VNC. All interactions use human-like patterns for stealth. CDP and VNC bind to localhost only."
+}

@@ -1,0 +1,20 @@
+{
+  "name": "crow-browser",
+  "version": "0.1.0",
+  "description": "Browser automation Crow bundle — stealth browsing, form filling, scraping via CDP",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node --test tests/"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "playwright": "^1.49.0",
+    "zod": "^3.24.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "license": "MIT"
+}
