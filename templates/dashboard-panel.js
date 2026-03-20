@@ -15,8 +15,6 @@
 
 import {
   escapeHtml,
-  statCard,
-  statGrid,
   dataTable,
   section,
   formField,
@@ -41,18 +39,12 @@ export default {
     }
 
     // Build page content using shared components
-    const stats = statGrid([
-      statCard("Items", "0", { delay: 0 }),
-      statCard("Status", "Active", { delay: 50 }),
-    ]);
-
     const tableContent = dataTable(
       ["Name", "Status", "Date"],
       [] // Your data rows here
     );
 
     const content = `
-      ${stats}
       ${section("Data", tableContent, { delay: 100 })}
     `;
 

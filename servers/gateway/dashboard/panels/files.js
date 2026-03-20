@@ -2,7 +2,7 @@
  * Files Panel — Card-based file manager with drag-and-drop upload
  */
 
-import { escapeHtml, statCard, statGrid, section, formatDate, formatBytes, badge } from "../shared/components.js";
+import { escapeHtml, section, formatDate, formatBytes, badge } from "../shared/components.js";
 import { ICON_INTEGRATIONS } from "../shared/empty-state-icons.js";
 import { t, tJs } from "../shared/i18n.js";
 
@@ -94,14 +94,6 @@ export default {
       </div>
       ${quotaWarning}
     </div>` : "";
-
-    const stats = statGrid([
-      statCard(t("files.filesCount", lang), total, { delay: 0 }),
-      statCard(t("files.images", lang), imageCount, { delay: 50 }),
-      statCard(t("files.used", lang), formatBytes(totalSize), { delay: 100 }),
-      statCard(t("files.quota", lang), `${usedPct}%`, { delay: 150 }),
-      statCard(t("files.storage", lang), storageOnline ? t("files.online", lang) : t("files.offline", lang), { delay: 200 }),
-    ]);
 
     // Filter by type
     const typeFilter = req.query?.type || "";
@@ -276,7 +268,6 @@ export default {
 
     const content = `
       ${gridStyles}
-      ${stats}
       ${quotaBar}
       ${uploadZone ? section(t("files.upload", lang), uploadZone, { delay: 150 }) : ""}
       ${section(t("files.filesSection", lang), filterTabs + fileGrid, { delay: 200 })}

@@ -7,7 +7,7 @@
  * User skills take precedence over repo skills with the same filename.
  */
 
-import { escapeHtml, statCard, statGrid, section, formField, badge, dataTable } from "../shared/components.js";
+import { escapeHtml, section, formField, badge, dataTable } from "../shared/components.js";
 import { t, tJs } from "../shared/i18n.js";
 import { existsSync, readFileSync, writeFileSync, unlinkSync, readdirSync, mkdirSync } from "fs";
 import { join, basename, dirname } from "path";
@@ -172,12 +172,6 @@ export default {
     const userSkillSet = new Set(userSkills);
     const allSkillNames = [...new Set([...userSkills, ...repoSkills])].sort();
 
-    const stats = statGrid([
-      statCard(t("skills.totalSkills", lang), allSkillNames.length, { delay: 0 }),
-      statCard(t("skills.builtIn", lang), repoSkills.length, { delay: 50 }),
-      statCard(t("skills.custom", lang), userSkills.length, { delay: 100 }),
-    ]);
-
     // Skills table
     const rows = allSkillNames.map((filename) => {
       const isOverridden = userSkillSet.has(filename) && repoSkills.includes(filename);
@@ -236,7 +230,6 @@ export default {
     </div>`;
 
     const content = `
-      ${stats}
       ${marketplaceLink}
       ${section(t("skills.allSkills", lang), skillsTable, { delay: 150 })}
       ${section(t("skills.createNewSkill", lang), createForm, { delay: 200 })}

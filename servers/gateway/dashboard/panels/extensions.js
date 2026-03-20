@@ -6,7 +6,7 @@
  * The Crow's Nest is auth-protected and only accessible on local/Tailscale networks.
  */
 
-import { escapeHtml, statCard, statGrid, section, badge, formatDate } from "../shared/components.js";
+import { escapeHtml, section, badge, formatDate } from "../shared/components.js";
 import { t, tJs } from "../shared/i18n.js";
 import { getAddonLogo } from "../shared/logos.js";
 import { existsSync, readFileSync } from "fs";
@@ -228,14 +228,6 @@ export default {
         }
       } catch {}
     }
-
-    const runningCount = Object.values(bundleStatus).filter((s) => s.running).length;
-
-    const stats = statGrid([
-      statCard(t("extensions.installed", lang), installedCount, { delay: 0 }),
-      statCard(t("extensions.runningLabel", lang), runningCount, { delay: 50 }),
-      statCard(t("extensions.available", lang), available.length, { delay: 100 }),
-    ]);
 
     // Installed add-ons with action buttons
     let installedHtml;
@@ -771,7 +763,6 @@ export default {
     <\/script>`;
 
     const content = `
-      ${stats}
       ${section(t("extensions.installedSection", lang), installedHtml, { delay: 100 })}
       ${sourceNote}
       ${section(t("extensions.availableSection", lang), availableHtml, { delay: 150 })}

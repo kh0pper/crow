@@ -6,7 +6,6 @@
  * POST dispatch happens BEFORE the ?section check so it works from any page.
  */
 
-import { statCard, statGrid } from "../shared/components.js";
 import { t } from "../shared/i18n.js";
 import {
   registerSettingsSection,
@@ -79,20 +78,8 @@ export default {
       return layout({ title: t(section.labelKey, lang), content: back + html });
     }
 
-    // Main menu: stats grid + grouped menu rows
-    const [memC, srcC, conC, postC] = await Promise.all([
-      db.execute("SELECT COUNT(*) as c FROM memories"),
-      db.execute("SELECT COUNT(*) as c FROM research_sources"),
-      db.execute("SELECT COUNT(*) as c FROM contacts WHERE is_blocked = 0"),
-      db.execute("SELECT COUNT(*) as c FROM blog_posts"),
-    ]);
-    const stats = statGrid([
-      statCard(t("settings.memories", lang), memC.rows[0]?.c || 0, { delay: 0 }),
-      statCard(t("settings.sourcesLabel", lang), srcC.rows[0]?.c || 0, { delay: 50 }),
-      statCard(t("settings.contactsLabel", lang), conC.rows[0]?.c || 0, { delay: 100 }),
-      statCard(t("settings.postsLabel", lang), postC.rows[0]?.c || 0, { delay: 150 }),
-    ]);
+    // Main menu: grouped menu rows
     const menu = await renderSettingsMenu(getSettingsSections(), db, lang);
-    return layout({ title: t("settings.pageTitle", lang), content: stats + menu });
+    return layout({ title: t("settings.pageTitle", lang), content: menu });
   },
 };
