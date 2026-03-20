@@ -78,6 +78,20 @@ export default function extensionProxyFactory(authMiddleware) {
       ws: true,
       pathRewrite: { [`^/proxy/${ext.id}`]: "" },
       logLevel: "warn",
+      // Strip headers that block iframe embedding and fix cookies
+      on: {
+        proxyRes: (proxyRes) => {
+          // Allow embedding in iframes (needed for VNC, MinIO console)
+          delete proxyRes.headers["x-frame-options"];
+          delete proxyRes.headers["content-security-policy"];
+          // Fix cookie paths (backend sets path=/ but we serve from /proxy/<id>/)
+          const setCookie = proxyRes.headers["set-cookie"];
+          if (setCookie) {
+            proxyRes.headers["set-cookie"] = (Array.isArray(setCookie) ? setCookie : [setCookie])
+              .map(c => c.replace(/path=\//i, `path=/proxy/${ext.id}/`));
+          }
+        },
+      },
       onError: (err, req, res) => {
         if (!res || res.headersSent) return;
         res.status(502).json({
