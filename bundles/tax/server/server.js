@@ -170,7 +170,8 @@ export function createTaxServer(dbPath, options = {}) {
               yearsClaimedAotc: data.yearsClaimedAotc || 0,
               felonyDrugConviction: false,
             });
-            log.push(`  Added 1098-T: ${data.institution} ($${(data.tuitionPaid || 0).toFixed(2)})`);
+            const creditType = data.isGraduate ? "LLC (graduate)" : "AOTC (undergraduate)";
+            log.push(`  Added 1098-T: ${data.institution} ($${(data.tuitionPaid || 0).toFixed(2)}) → ${creditType}`);
           } else if (doc.doc_type === "1098-e") {
             taxReturn.deductions.studentLoanInterest = (taxReturn.deductions.studentLoanInterest || 0) + (data.interest || 0);
             log.push(`  Added 1098-E: $${(data.interest || 0).toFixed(2)} student loan interest`);
@@ -227,12 +228,16 @@ export function createTaxServer(dbPath, options = {}) {
             log.push("", "Warnings:", ...warnings.map(w => `  - ${w}`));
           }
 
-          log.push("", "NOTE: The return includes all confirmed documents. You may still need to:",
-            "  - crow_tax_add_deduction: add educator expenses ($300 max, ask who is the educator)",
-            "  - crow_tax_set_special: add 6013(h) election if nonresident spouse",
-            "  - crow_tax_set_hsa: adjust HSA coverage type (self/family) if needed",
-            "  Do NOT re-add education credits — they are already included from the 1098-T.",
-            "  Do NOT re-add W-2s, 1099s, or 1098s — they are already included.",
+          log.push("", "IMPORTANT — verify with the user before generating PDFs:",
+            "  1. Is the education credit type correct? (AOTC vs LLC — ask if student is graduate/undergraduate)",
+            "     To fix: crow_tax_add_education_credit with is_graduate=true/false (replaces existing)",
+            "  2. Educator expenses: ask who is an educator (NOT assumed from employer name)",
+            "     To add: crow_tax_add_deduction with type='educator'",
+            "  3. HSA coverage: self or family? (currently set to self)",
+            "     To fix: crow_tax_set_hsa",
+            "  4. Special situations: 6013(h) election for nonresident spouse?",
+            "     To add: crow_tax_set_special",
+            "  Do NOT re-add W-2s, 1099s, or 1098-E — already included.",
           );
         } else {
           log.push("", "Calculation failed:", ...errors.map(e => `  - ${e}`));
