@@ -206,7 +206,23 @@ function extensionStyles() {
   color:var(--crow-text-muted);
   margin:0 0 0.6rem 0.1rem;
 }
-.ext-installed__list { display:flex; flex-direction:column; gap:0.5rem; margin-bottom:1.5rem; }
+.ext-installed-toggle {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:0.6rem 1rem;
+  background:var(--crow-bg-surface);
+  border:1px solid var(--crow-border);
+  border-radius:var(--crow-radius-card, 12px);
+  cursor:pointer; user-select:none;
+  font-size:0.85rem; font-weight:600;
+  color:var(--crow-text-secondary);
+  margin-bottom:0.5rem;
+  transition:border-color 0.15s;
+}
+.ext-installed-toggle:hover { border-color:var(--crow-accent); }
+.ext-installed-toggle__chevron { transition:transform 0.2s; font-size:0.8rem; }
+.ext-installed-toggle__chevron--open { transform:rotate(180deg); }
+.ext-installed__list { display:none; flex-direction:column; gap:0.5rem; margin-bottom:1.5rem; }
+.ext-installed__list--open { display:flex; }
 .ext-installed__item {
   display:flex; align-items:center; gap:0.75rem;
   padding:0.65rem 1rem;
@@ -377,6 +393,7 @@ function extensionStyles() {
 /* Glass overrides */
 .theme-glass .ext-card,
 .theme-glass .ext-installed__item,
+.theme-glass .ext-installed-toggle,
 .theme-glass .ext-stores__header,
 .theme-glass .ext-stores__body {
   backdrop-filter:var(--crow-glass-blur);
@@ -537,7 +554,7 @@ export default {
             actions = `<button class="btn btn-sm btn-primary bundle-action" data-action="start" data-id="${escapeHtml(id)}">${t("extensions.start", lang)}</button>`;
           }
         }
-        actions += `<button class="btn btn-sm bundle-uninstall" style="color:var(--crow-text-muted);border-color:var(--crow-border)" data-id="${escapeHtml(id)}" data-name="${escapeHtml(name)}" data-docker="${isDocker}">${t("extensions.remove", lang)}</button>`;
+        actions += `<button class="btn btn-sm btn-secondary bundle-uninstall" data-id="${escapeHtml(id)}" data-name="${escapeHtml(name)}" data-docker="${isDocker}">${t("extensions.remove", lang)}</button>`;
 
         return `<div class="ext-installed__item" style="animation:fadeInUp 0.4s ease-out ${Math.min(i * 30, 300)}ms both">
           <div class="ext-installed__icon">${iconHtml}</div>
@@ -552,8 +569,11 @@ export default {
       }).join("");
 
       installedHtml = `
-        <div class="ext-section-label">${t("extensions.installedSection", lang)}</div>
-        <div class="ext-installed__list">${items}</div>`;
+        <div class="ext-installed-toggle" onclick="(function(){var b=document.getElementById('installed-list');var c=document.getElementById('installed-chevron');b.classList.toggle('ext-installed__list--open');c.classList.toggle('ext-installed-toggle__chevron--open')})()">
+          <span>${t("extensions.installedSection", lang)} (${installedCount})</span>
+          <span class="ext-installed-toggle__chevron" id="installed-chevron">&#9662;</span>
+        </div>
+        <div class="ext-installed__list" id="installed-list">${items}</div>`;
     }
 
     // ─── Category tabs ───
