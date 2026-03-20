@@ -10,7 +10,7 @@ import { join } from "node:path";
 async function handler(req, res, { db, layout, appRoot }) {
   const { pathToFileURL } = await import("node:url");
   const componentsPath = join(appRoot, "servers/gateway/dashboard/shared/components.js");
-  const { escapeHtml, statCard, statGrid, dataTable, formField, badge, actionBar, section, formatDate } = await import(pathToFileURL(componentsPath).href);
+  const { escapeHtml, dataTable, formField, badge, actionBar, section, formatDate } = await import(pathToFileURL(componentsPath).href);
 
   const podcastRssPath = join(appRoot, "servers/blog/podcast-rss.js");
   const { parsePodcastMeta } = await import(pathToFileURL(podcastRssPath).href);
@@ -84,18 +84,10 @@ async function handler(req, res, { db, layout, appRoot }) {
   });
   const totalCount = countResult.rows[0]?.total || 0;
   const publishedCount = countResult.rows[0]?.published || 0;
-  const draftCount = totalCount - publishedCount;
-
   const episodes = await db.execute({
     sql: "SELECT * FROM blog_posts WHERE tags LIKE ? ORDER BY created_at DESC LIMIT 50",
     args: ["%podcast%"],
   });
-
-  const stats = statGrid([
-    statCard("Episodes", totalCount, { delay: 0 }),
-    statCard("Published", publishedCount, { delay: 50 }),
-    statCard("Drafts", draftCount, { delay: 100 }),
-  ]);
 
   // RSS feed URL — prefer public URL for podcast directories
   const siteUrl = process.env.CROW_GATEWAY_URL || `${req.protocol}://${req.get("host")}`;
@@ -318,7 +310,6 @@ async function handler(req, res, { db, layout, appRoot }) {
 <\\/script>` : "";
 
   const content = `
-    ${stats}
     ${feedSection}
     ${section("Episodes", episodeTable, { delay: 150 })}
     ${section("New Episode", createForm, { delay: 200 })}

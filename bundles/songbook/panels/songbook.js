@@ -10,7 +10,7 @@ import { join } from "node:path";
 async function handler(req, res, { db, layout, appRoot, lang }) {
   const { pathToFileURL } = await import("node:url");
   const componentsPath = join(appRoot, "servers/gateway/dashboard/shared/components.js");
-  const { escapeHtml, statCard, statGrid, dataTable, formField, badge, formatDate } = await import(pathToFileURL(componentsPath).href);
+  const { escapeHtml, dataTable, formField, badge, formatDate } = await import(pathToFileURL(componentsPath).href);
 
   const chordproPath = join(appRoot, "servers/blog/chordpro.js");
   const { parseSongMeta } = await import(pathToFileURL(chordproPath).href);
@@ -81,17 +81,6 @@ async function handler(req, res, { db, layout, appRoot, lang }) {
     }
   }
 
-  // --- Stats ---
-  const songCount = await db.execute("SELECT COUNT(*) as c FROM blog_posts WHERE tags LIKE '%songbook%'");
-  const publishedCount = await db.execute("SELECT COUNT(*) as c FROM blog_posts WHERE tags LIKE '%songbook%' AND status = 'published'");
-  const setlistCount = await db.execute("SELECT COUNT(*) as c FROM songbook_setlists");
-
-  const stats = statGrid([
-    statCard("Songs", songCount.rows[0]?.c || 0, { delay: 0 }),
-    statCard("Published", publishedCount.rows[0]?.c || 0, { delay: 50 }),
-    statCard("Setlists", setlistCount.rows[0]?.c || 0, { delay: 100 }),
-  ]);
-
   const tabs = `<div style="display:flex;gap:4px;margin-bottom:1.5rem">
     <a href="/dashboard/songbook" class="btn btn-sm ${view === "songs" ? "btn-primary" : "btn-secondary"}">Songs</a>
     <a href="/dashboard/songbook?view=setlists" class="btn btn-sm ${view === "setlists" ? "btn-primary" : "btn-secondary"}">Setlists</a>
@@ -128,7 +117,7 @@ async function handler(req, res, { db, layout, appRoot, lang }) {
       </form>
     </details>`;
 
-    return layout({ title: "Songbook — Setlists", content: `${stats}${tabs}${setlistTable}${addForm}` });
+    return layout({ title: "Songbook — Setlists", content: `${tabs}${setlistTable}${addForm}` });
   }
 
   // --- Songs view ---
@@ -169,7 +158,7 @@ async function handler(req, res, { db, layout, appRoot, lang }) {
     </form>
   </details>`;
 
-  return layout({ title: "Songbook", content: `${stats}${tabs}${songTable}${addForm}` });
+  return layout({ title: "Songbook", content: `${tabs}${songTable}${addForm}` });
 }
 
 export default {
