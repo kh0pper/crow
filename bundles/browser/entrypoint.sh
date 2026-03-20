@@ -34,6 +34,7 @@ DISPLAY=:99 $CHROME_PATH \
   --no-sandbox --disable-setuid-sandbox \
   --remote-debugging-port="$CDP_PORT" \
   --remote-debugging-address=0.0.0.0 \
+  --remote-allow-origins=* \
   --disable-blink-features=AutomationControlled \
   --window-size=1920,1080 --start-maximized \
   --no-first-run --no-default-browser-check \

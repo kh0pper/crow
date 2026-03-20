@@ -4,9 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: crow-browser
-    ports:
-      - "127.0.0.1:6080:6080"   # noVNC web viewer (localhost only)
-      - "127.0.0.1:9222:9222"   # CDP (localhost only)
+    network_mode: host
     environment:
       - DISPLAY=:99
       - VNC_PASSWORD=${CROW_BROWSER_VNC_PASSWORD:?VNC password is required}
