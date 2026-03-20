@@ -262,5 +262,29 @@ export async function initMediaTables(db) {
     CREATE INDEX IF NOT EXISTS idx_interest_profiles_type ON media_interest_profiles(profile_type);
   `);
 
+  // --- Normalize pub_date values ---
+  // RSS feeds provide dates in RFC 2822 format (e.g. "Wed, 31 Dec 2025 08:00:00 GMT")
+  // which don't sort correctly in SQLite. Convert all non-ISO dates to ISO 8601.
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT id, pub_date FROM media_articles WHERE pub_date IS NOT NULL AND pub_date NOT LIKE '____-__-__T%'",
+    });
+    if (rows.length > 0) {
+      let fixed = 0;
+      for (const row of rows) {
+        try {
+          const d = new Date(row.pub_date);
+          if (!isNaN(d.getTime())) {
+            await db.execute({ sql: "UPDATE media_articles SET pub_date = ? WHERE id = ?", args: [d.toISOString(), row.id] });
+            fixed++;
+          }
+        } catch {}
+      }
+      if (fixed > 0) console.log(`[media] Normalized ${fixed} pub_date values to ISO 8601`);
+    }
+  } catch (err) {
+    console.warn("[media] pub_date normalization skipped:", err.message);
+  }
+
   console.log("[media] Tables initialized");
 }
