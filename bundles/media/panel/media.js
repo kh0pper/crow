@@ -22,7 +22,7 @@ export default {
     const { existsSync } = await import("node:fs");
 
     const componentsPath = join(appRoot, "servers/gateway/dashboard/shared/components.js");
-    const { escapeHtml, statCard, statGrid, badge, formatDate } = await import(pathToFileURL(componentsPath).href);
+    const { escapeHtml, badge, formatDate } = await import(pathToFileURL(componentsPath).href);
 
     // Resolve bundle server directory (installed vs repo)
     const installedServerDir = join(process.env.HOME || "", ".crow", "bundles", "media", "server");
@@ -716,21 +716,7 @@ export default {
           </form>
         </div>`;
 
-      // --- Stats (clickable, Sources tab only) ---
-      const [sourcesCount, articlesCount, unreadCount, starredCount] = await Promise.all([
-        db.execute("SELECT COUNT(*) as c FROM media_sources WHERE enabled = 1"),
-        db.execute("SELECT COUNT(*) as c FROM media_articles"),
-        db.execute("SELECT COUNT(*) as c FROM media_articles a LEFT JOIN media_article_states st ON st.article_id = a.id WHERE COALESCE(st.is_read, 0) = 0"),
-        db.execute("SELECT COUNT(*) as c FROM media_article_states WHERE is_starred = 1"),
-      ]);
-      const statsHtml = `<div class="card-grid" style="margin-bottom:1.5rem">
-        ${statCard("Sources", String(sourcesCount.rows[0]?.c || 0), { delay: 0 })}
-        ${statCard("Articles", String(articlesCount.rows[0]?.c || 0), { delay: 50 })}
-        <a href="/dashboard/media?tab=feed&unread_only=true" style="text-decoration:none">${statCard("Unread", String(unreadCount.rows[0]?.c || 0), { delay: 100 })}</a>
-        <a href="/dashboard/media?tab=feed&starred_only=true" style="text-decoration:none">${statCard("Starred", String(starredCount.rows[0]?.c || 0), { delay: 150 })}</a>
-      </div>`;
-
-      tabContent = statsHtml + addRssForm + addGoogleNewsForm + addYoutubeForm + sourcesList;
+      tabContent = addRssForm + addGoogleNewsForm + addYoutubeForm + sourcesList;
     }
 
     // --- Playlists tab ---

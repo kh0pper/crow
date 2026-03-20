@@ -64,7 +64,7 @@ let tablesInitialized = false;
 async function handler(req, res, { db, layout, appRoot }) {
   const { pathToFileURL } = await import("node:url");
   const componentsPath = join(appRoot, "servers/gateway/dashboard/shared/components.js");
-  const { escapeHtml, statCard, statGrid, section, badge, dataTable, formField } = await import(pathToFileURL(componentsPath).href);
+  const { escapeHtml, section, badge, dataTable, formField } = await import(pathToFileURL(componentsPath).href);
 
   // Initialize podcast tables on first call
   if (!tablesInitialized) {
@@ -167,24 +167,13 @@ async function handler(req, res, { db, layout, appRoot }) {
     ? `<div class="alert alert-error" style="margin-bottom:1rem">${req.query.error === "empty" ? "Please enter a feed URL." : `Error: ${escapeHtml(req.query.error)}`}</div>`
     : "";
 
-  const [subsResult, episodeCountResult, unlistenedResult, playlistResult] = await Promise.all([
+  const [subsResult, episodeCountResult] = await Promise.all([
     db.execute("SELECT * FROM podcast_subscriptions ORDER BY title ASC"),
     db.execute("SELECT COUNT(*) as c FROM podcast_episodes"),
-    db.execute("SELECT COUNT(*) as c FROM podcast_episodes WHERE listened = 0"),
-    db.execute("SELECT COUNT(*) as c FROM podcast_playlists"),
   ]);
 
   const subs = subsResult.rows;
   const totalEpisodes = episodeCountResult.rows[0]?.c || 0;
-  const unlistened = unlistenedResult.rows[0]?.c || 0;
-  const playlistCount = playlistResult.rows[0]?.c || 0;
-
-  const stats = statGrid([
-    statCard("Subscriptions", String(subs.length), { delay: 0 }),
-    statCard("Episodes", String(totalEpisodes), { delay: 50 }),
-    statCard("Unplayed", String(unlistened), { delay: 100 }),
-    statCard("Playlists", String(playlistCount), { delay: 150 }),
-  ]);
 
   // Subscribe form
   const subscribeForm = `
@@ -264,7 +253,6 @@ async function handler(req, res, { db, layout, appRoot }) {
 
   const content = `
     ${errorMsg}
-    ${stats}
     ${section("Subscribe", subscribeForm, { delay: 200 })}
     ${section("Subscriptions", subsHtml, { delay: 250 })}
     ${section("Recent Episodes", episodesHtml, { delay: 300 })}
