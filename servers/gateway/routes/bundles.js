@@ -20,7 +20,7 @@ import { Router } from "express";
 import { createNotification } from "../../shared/notifications.js";
 import { createDbClient } from "../../db.js";
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, copyFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -496,6 +496,17 @@ export default function bundlesRouter() {
               if (existsSync(routesSrc)) {
                 cpSync(routesSrc, join(PANELS_DIR, `${bundle_id}-routes.js`));
                 appendLog(job, `Installed panel routes: ${bundle_id}-routes`);
+              }
+            }
+            // Ensure panels dir can resolve gateway dependencies (express, multer, etc.)
+            const nmLink = join(PANELS_DIR, "node_modules");
+            if (!existsSync(nmLink)) {
+              const gatewayNm = join(APP_ROOT, "node_modules");
+              if (existsSync(gatewayNm)) {
+                try {
+                  symlinkSync(gatewayNm, nmLink);
+                  appendLog(job, "Linked gateway node_modules for panel route resolution");
+                } catch {}
               }
             }
             // Register in panels.json
