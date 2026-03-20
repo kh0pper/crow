@@ -445,8 +445,9 @@ export default {
     const installed = getInstalled();
     const installedCount = Object.keys(installed).length;
 
-    // Try remote registry, fall back to local
-    let registry = { "add-ons": [] };
+    // Load remote registry + merge with local (local entries override/supplement remote)
+    let remoteAddons = [];
+    let localAddons = [];
     let registrySource = "none";
     try {
       const controller = new AbortController();
@@ -454,22 +455,30 @@ export default {
       const resp = await fetch(REGISTRY_URL, { signal: controller.signal });
       clearTimeout(timeout);
       if (resp.ok) {
-        registry = await resp.json();
+        const remote = await resp.json();
+        remoteAddons = remote["add-ons"] || [];
         registrySource = "remote";
       }
     } catch {}
 
-    if (registrySource === "none") {
-      try {
-        if (existsSync(LOCAL_REGISTRY)) {
-          registry = JSON.parse(readFileSync(LOCAL_REGISTRY, "utf8"));
-          registrySource = "local";
-        }
-      } catch {}
-    }
+    try {
+      if (existsSync(LOCAL_REGISTRY)) {
+        const local = JSON.parse(readFileSync(LOCAL_REGISTRY, "utf8"));
+        localAddons = local["add-ons"] || [];
+        if (registrySource === "none") registrySource = "local";
+        else registrySource += "+local";
+      }
+    } catch {}
+
+    // Merge: local entries override remote for matching IDs, new local entries are appended
+    const localIds = new Set(localAddons.map((a) => a.id));
+    const mergedAddons = [
+      ...remoteAddons.filter((a) => !localIds.has(a.id)),
+      ...localAddons,
+    ];
 
     // Merge official add-ons with community store add-ons
-    const officialAddons = (registry["add-ons"] || []).map((a) => ({ ...a, _community: false }));
+    const officialAddons = mergedAddons.map((a) => ({ ...a, _community: false }));
     const communityStores = getStores();
     const communityResults = await Promise.all(communityStores.map((s) => fetchCommunityStore(s.url)));
     const communityAddons = communityResults.flatMap((r) => r.addons);
