@@ -312,8 +312,8 @@ export function setSessionCookie(res, token) {
   const secure = process.env.CROW_HOSTED || process.env.NODE_ENV === 'production';
   const secureSuffix = secure ? '; Secure' : '';
   res.setHeader("Set-Cookie", [
-    `${SESSION_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${secureSuffix}`,
-    `${CSRF_COOKIE}=${randomBytes(16).toString("hex")}; SameSite=Strict; Path=/; Max-Age=${maxAge}${secureSuffix}`,
+    `${SESSION_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secureSuffix}`,
+    `${CSRF_COOKIE}=${randomBytes(16).toString("hex")}; SameSite=Lax; Path=/; Max-Age=${maxAge}${secureSuffix}`,
   ]);
 }
 
@@ -322,8 +322,8 @@ export function setSessionCookie(res, token) {
  */
 export function clearSessionCookie(res) {
   res.setHeader("Set-Cookie", [
-    `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`,
-    `${CSRF_COOKIE}=; SameSite=Strict; Path=/; Max-Age=0`,
+    `${SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`,
+    `${CSRF_COOKIE}=; SameSite=Lax; Path=/; Max-Age=0`,
   ]);
 }
 

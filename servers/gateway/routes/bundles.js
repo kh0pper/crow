@@ -619,6 +619,19 @@ export default function bundlesRouter() {
         saveInstalled(installed);
         appendLog(job, "Installation tracked");
 
+        // Open firewall ports for Tailscale access (if manifest has ports and ufw is available)
+        if (manifest?.ports && Array.isArray(manifest.ports)) {
+          for (const port of manifest.ports) {
+            try {
+              const { execFileSync: efs } = await import("node:child_process");
+              efs("sudo", ["-n", "ufw", "allow", "from", "100.64.0.0/10", "to", "any", "port", String(port), "proto", "tcp", "comment", `Crow: ${manifest.name || bundle_id}`], { timeout: 10000 });
+              appendLog(job, `Opened firewall port ${port}/tcp for Tailscale`);
+            } catch {
+              appendLog(job, `Note: Could not open port ${port} (sudo/ufw not available — open manually if needed)`);
+            }
+          }
+        }
+
         let notifDb;
         try {
           notifDb = createDbClient();
@@ -758,11 +771,24 @@ export default function bundlesRouter() {
           needsRestart = true;
         }
 
-        // 4. Remove bundle files
+        // 4. Close firewall ports (if manifest has ports and ufw is available)
+        if (manifest?.ports && Array.isArray(manifest.ports)) {
+          for (const port of manifest.ports) {
+            try {
+              const { execFileSync: efs } = await import("node:child_process");
+              efs("sudo", ["-n", "ufw", "delete", "allow", "from", "100.64.0.0/10", "to", "any", "port", String(port), "proto", "tcp"], { timeout: 10000 });
+              appendLog(job, `Closed firewall port ${port}/tcp`);
+            } catch {
+              appendLog(job, `Note: Could not close port ${port} (sudo/ufw not available)`);
+            }
+          }
+        }
+
+        // 5. Remove bundle files
         rmSync(bundleDir, { recursive: true, force: true });
         appendLog(job, "Bundle files removed");
 
-        // 5. Update installed.json
+        // 6. Update installed.json
         const installed = getInstalled().filter((i) => i.id !== bundle_id);
         saveInstalled(installed);
         appendLog(job, "Installation record removed");
