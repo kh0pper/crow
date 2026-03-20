@@ -129,9 +129,25 @@ export function createToolExecutor() {
         return await handleDiscover(args);
       }
 
-      // crow_tools — external integrations
+      // crow_tools — external integrations (legacy wrapper, still supported)
       if (name === "crow_tools") {
         return await handleExternalTool(args);
+      }
+
+      // Direct addon tool call (e.g., "crow_tax_prepare_from_documents")
+      if (connectedServers) {
+        for (const [integrationId, entry] of connectedServers) {
+          if (entry.status !== "connected" || !entry.client) continue;
+          const hasTool = entry.tools?.some((t) => t.name === name);
+          if (hasTool) {
+            try {
+              const result = await entry.client.callTool({ name, arguments: args });
+              return formatResult(result);
+            } catch (err) {
+              return { result: `Error calling ${name} (${integrationId}): ${err.message}`, isError: true };
+            }
+          }
+        }
       }
 
       // Direct tool name (resolve to category)
@@ -252,11 +268,35 @@ export function createToolExecutor() {
 
   /**
    * Handle crow_tools (external integration) tool call.
+   *
+   * Forgiving parameter handling — accepts multiple formats that weaker models produce:
+   *   { action: "tool", params: { key: val } }           — correct format
+   *   { action: "tool", params: { arguments: { ... } } } — nested arguments (common mistake)
+   *   { action: "tool", arguments: { key: val } }         — arguments instead of params
+   *   { action: "tool", key: val, ... }                   — flat params mixed with action
    */
   async function handleExternalTool(args) {
-    const { action, params } = args;
+    let { action, params } = args;
     if (!action) {
-      return { result: "crow_tools requires an 'action' parameter", isError: true };
+      return { result: "crow_tools requires an 'action' parameter. Example: { action: 'crow_tax_get_documents', params: {} }", isError: true };
+    }
+
+    // Normalize params from various formats weaker models produce
+    if (!params || typeof params !== "object") {
+      params = {};
+    }
+    // Unwrap nested { arguments: { ... } } inside params
+    if (params.arguments && typeof params.arguments === "object" && Object.keys(params).length <= 2) {
+      params = params.arguments;
+    }
+    // If model put tool params directly on args (flat), extract them
+    if (Object.keys(params).length === 0) {
+      const flat = { ...args };
+      delete flat.action;
+      delete flat.params;
+      if (Object.keys(flat).length > 0) {
+        params = flat;
+      }
     }
 
     for (const [integrationId, entry] of connectedServers) {
@@ -264,7 +304,7 @@ export function createToolExecutor() {
       const hasTool = entry.tools.some((t) => t.name === action);
       if (hasTool) {
         try {
-          const result = await entry.client.callTool({ name: action, arguments: params || {} });
+          const result = await entry.client.callTool({ name: action, arguments: params });
           return formatResult(result);
         } catch (err) {
           return { result: `Error calling ${action} (${integrationId}): ${err.message}`, isError: true };
@@ -272,7 +312,7 @@ export function createToolExecutor() {
       }
     }
 
-    return { result: `Tool "${action}" not found in any connected integration.`, isError: true };
+    return { result: `Tool "${action}" not found in any connected extension. Available: ${[...connectedServers.entries()].filter(([,e]) => e.status === "connected").map(([id, e]) => `${id}(${e.tools?.length || 0})`).join(", ")}`, isError: true };
   }
 
   /**
@@ -358,23 +398,43 @@ export function getChatTools() {
     },
   });
 
-  // crow_tools (if external servers connected)
+  // Addon tools (from installed extensions)
   if (connectedServers && connectedServers.size > 0) {
-    // Build a description that lists all available addon tools by server
-    const addonLines = [];
+    // Promote high-level "entry point" tools as direct tools (no crow_tools wrapper needed).
+    // These are the tools an AI should call first — they do the most with fewest calls.
+    const PROMOTED_PATTERNS = [/prepare/, /get_documents/, /calculate/, /generate_pdfs/];
+
+    const promotedTools = [];
+    const allAddonLines = [];
+
     for (const [id, entry] of connectedServers) {
       if (entry.status !== "connected" || !entry.tools?.length) continue;
-      const toolNames = entry.tools.map((t) => t.name).join(", ");
-      addonLines.push(`[${id}]: ${toolNames}`);
+      const toolNames = [];
+
+      for (const tool of entry.tools) {
+        const isPromoted = PROMOTED_PATTERNS.some((p) => p.test(tool.name));
+        if (isPromoted) {
+          // Expose as direct tool with real schema — no wrapper needed
+          tools.push({
+            name: tool.name,
+            description: tool.description || "",
+            inputSchema: tool.inputSchema || { type: "object", properties: {} },
+          });
+          promotedTools.push(tool.name);
+        }
+        toolNames.push(tool.name);
+      }
+      allAddonLines.push(`[${id}]: ${toolNames.join(", ")}`);
     }
 
+    // Also keep crow_tools for accessing granular tools that aren't promoted
     tools.push({
       name: "crow_tools",
-      description: `Route to installed extension tools. Call with action = tool name, params = tool parameters.\n\nAvailable tools by extension:\n${addonLines.join("\n")}\n\nUse crow_discover with category='tools' and action=<tool_name> to see the full parameter schema for any tool.`,
+      description: `Call any installed extension tool. Use: { action: "tool_name", params: { ... } }.\n\nAll tools by extension:\n${allAddonLines.join("\n")}${promotedTools.length ? `\n\nNote: These tools can also be called directly (no crow_tools wrapper): ${promotedTools.join(", ")}` : ""}`,
       inputSchema: {
         type: "object",
         properties: {
-          action: { type: "string", description: "Tool name (e.g. 'crow_tax_get_documents', 'crow_browser_navigate')" },
+          action: { type: "string", description: "Tool name" },
           params: { type: "object", description: "Parameters for the tool" },
         },
         required: ["action"],
