@@ -1,15 +1,15 @@
 /**
- * Extensions Panel — Browse, install, and manage add-ons
+ * Extensions Panel — App store-style add-on browser
  *
  * Security note: All dynamic content is server-side escaped via escapeHtml().
  * Client-side modal content uses DOM manipulation with textContent for user data.
  * The Crow's Nest is auth-protected and only accessible on local/Tailscale networks.
  */
 
-import { escapeHtml, section, badge, formatDate } from "../shared/components.js";
+import { escapeHtml, badge, formatDate } from "../shared/components.js";
 import { t, tJs } from "../shared/i18n.js";
 import { getAddonLogo } from "../shared/logos.js";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, writeFileSync } from "fs";
 import { execFileSync } from "child_process";
 import { join, dirname } from "path";
 import { homedir } from "os";
@@ -33,6 +33,34 @@ const ICON_MAP = {
   archive: "\u{1F4E6}",
   mic: "\u{1F3A4}",
   music: "\u{1F3B5}",
+  rss: "\u{1F4F0}",
+  "message-circle": "\u{1F4AC}",
+  gamepad: "\u{1F3AE}",
+  "file-text": "\u{1F4C4}",
+};
+
+const CATEGORY_COLORS = {
+  ai:           { bg: "rgba(168,85,247,0.12)", color: "#a855f7" },
+  media:        { bg: "rgba(251,191,36,0.12)", color: "#fbbf24" },
+  productivity: { bg: "rgba(59,130,246,0.12)", color: "#3b82f6" },
+  storage:      { bg: "rgba(34,197,94,0.12)",  color: "#22c55e" },
+  "smart-home": { bg: "rgba(251,146,60,0.12)", color: "#fb923c" },
+  networking:   { bg: "rgba(56,189,248,0.12)", color: "#38bdf8" },
+  gaming:       { bg: "rgba(244,63,94,0.12)",  color: "#f43f5e" },
+  finance:      { bg: "rgba(245,158,11,0.12)", color: "#f59e0b" },
+  other:        { bg: "rgba(161,161,170,0.12)", color: "#a1a1aa" },
+};
+
+const CATEGORY_LABELS = {
+  ai: "extensions.categoryAi",
+  media: "extensions.categoryMedia",
+  productivity: "extensions.categoryProductivity",
+  storage: "extensions.categoryStorage",
+  "smart-home": "extensions.categorySmartHome",
+  networking: "extensions.categoryNetworking",
+  gaming: "extensions.categoryGaming",
+  finance: "extensions.categoryFinance",
+  other: "extensions.categoryOther",
 };
 
 function getInstalled() {
@@ -66,7 +94,6 @@ function saveStores(stores) {
 /** Fetch add-ons from a community store GitHub repo */
 async function fetchCommunityStore(storeUrl) {
   try {
-    // Convert GitHub repo URL to raw registry.json URL
     const match = storeUrl.match(/github\.com\/([^/]+)\/([^/]+)/);
     if (!match) return { addons: [], store: null };
 
@@ -115,8 +142,261 @@ function formatResources(requires) {
     parts.push(`${disk} disk`);
   }
   return parts.length > 0
-    ? `<span style="font-size:0.75rem;color:var(--crow-text-muted)">${parts.join(" · ")}</span>`
+    ? `<span class="ext-card__resources">${parts.join(" · ")}</span>`
     : "";
+}
+
+function getCategoryColor(category) {
+  return CATEGORY_COLORS[category] || CATEGORY_COLORS.other;
+}
+
+/**
+ * Render an add-on icon with 3-step fallback:
+ * 1. SVG logo from logos.js
+ * 2. Emoji from ICON_MAP
+ * 3. First-letter circle with category color
+ */
+function renderIcon(addon, size) {
+  const logo = getAddonLogo(addon.id, size);
+  if (logo) return logo;
+
+  const emoji = ICON_MAP[addon.icon];
+  if (emoji) {
+    const emojiSize = size >= 48 ? "1.75rem" : "1.25rem";
+    return `<span style="font-size:${emojiSize}">${emoji}</span>`;
+  }
+
+  // First-letter circle fallback
+  const cat = getCategoryColor(addon.category);
+  const initial = escapeHtml((addon.name || "?").charAt(0).toUpperCase());
+  const radius = size >= 48 ? "14px" : "10px";
+  const fontSize = size >= 48 ? "1.1rem" : "0.85rem";
+  return `<div style="width:${size}px;height:${size}px;border-radius:${radius};background:${cat.bg};color:${cat.color};display:flex;align-items:center;justify-content:center;font-size:${fontSize};font-weight:600">${initial}</div>`;
+}
+
+/** Scoped CSS for the extensions panel */
+function extensionStyles() {
+  return `<style>
+/* ─── Extensions Store ─── */
+.ext-search { position:relative; margin-bottom:1.5rem; }
+.ext-search__icon {
+  position:absolute; left:0.85rem; top:50%;
+  transform:translateY(-50%);
+  width:16px; height:16px;
+  color:var(--crow-text-muted); pointer-events:none;
+}
+.ext-search__input {
+  width:100%; box-sizing:border-box;
+  padding:0.65rem 0.75rem 0.65rem 2.5rem;
+  border:1px solid var(--crow-border);
+  border-radius:var(--crow-radius-card, 12px);
+  background:var(--crow-bg-surface);
+  color:var(--crow-text-primary);
+  font-size:0.9rem;
+  font-family:'DM Sans',sans-serif;
+  transition:border-color 0.15s;
+}
+.ext-search__input:focus { outline:none; border-color:var(--crow-accent); }
+.ext-search__input::placeholder { color:var(--crow-text-muted); }
+
+/* Installed strip */
+.ext-section-label {
+  font-size:0.75rem; font-weight:600;
+  text-transform:uppercase; letter-spacing:0.08em;
+  color:var(--crow-text-muted);
+  margin:0 0 0.6rem 0.1rem;
+}
+.ext-installed__list { display:flex; flex-direction:column; gap:0.5rem; margin-bottom:1.5rem; }
+.ext-installed__item {
+  display:flex; align-items:center; gap:0.75rem;
+  padding:0.65rem 1rem;
+  background:var(--crow-bg-surface);
+  border:1px solid var(--crow-border);
+  border-radius:var(--crow-radius-card, 12px);
+  transition:border-color 0.15s;
+}
+.ext-installed__item:hover { border-color:var(--crow-accent); }
+.ext-installed__icon { flex-shrink:0; width:36px; height:36px; display:flex; align-items:center; justify-content:center; }
+.ext-installed__info { flex:1; min-width:0; display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap; }
+.ext-installed__name { font-family:'Fraunces',serif; font-size:0.95rem; font-weight:600; }
+.ext-installed__meta { font-size:0.75rem; font-family:'JetBrains Mono',monospace; color:var(--crow-text-muted); }
+.ext-installed__actions { display:flex; gap:0.4rem; align-items:center; flex-shrink:0; }
+
+/* Category tabs */
+.ext-tabs {
+  display:flex; gap:0.5rem;
+  margin-bottom:1.25rem;
+  overflow-x:auto; scrollbar-width:none;
+  padding-bottom:0.25rem;
+  -webkit-overflow-scrolling:touch;
+}
+.ext-tabs::-webkit-scrollbar { display:none; }
+.ext-tab {
+  flex-shrink:0;
+  padding:0.4rem 0.9rem;
+  border-radius:var(--crow-radius-pill, 8px);
+  background:transparent;
+  border:1px solid var(--crow-border);
+  color:var(--crow-text-secondary);
+  font-size:0.8rem; font-weight:500;
+  cursor:pointer;
+  transition:all 0.15s;
+  white-space:nowrap;
+  font-family:'DM Sans',sans-serif;
+}
+.ext-tab:hover { border-color:var(--crow-accent); color:var(--crow-text-primary); }
+.ext-tab--active {
+  background:var(--crow-accent-muted);
+  color:var(--crow-accent);
+  border-color:var(--crow-accent);
+}
+
+/* Browse grid */
+.ext-grid {
+  display:grid;
+  grid-template-columns:repeat(auto-fill, minmax(220px, 1fr));
+  gap:1rem;
+  margin-bottom:1.5rem;
+}
+
+/* Add-on card (vertical) */
+.ext-card {
+  background:var(--crow-bg-surface);
+  border:1px solid var(--crow-border);
+  border-radius:var(--crow-radius-card, 12px);
+  padding:1.25rem 1rem;
+  display:flex; flex-direction:column; align-items:center;
+  text-align:center;
+  transition:transform 0.15s, border-color 0.15s, box-shadow 0.15s;
+  cursor:default;
+}
+.ext-card:hover {
+  transform:translateY(-3px);
+  border-color:var(--crow-accent);
+  box-shadow:0 8px 24px rgba(0,0,0,0.2);
+}
+.ext-card__icon {
+  width:64px; height:64px;
+  border-radius:16px;
+  display:flex; align-items:center; justify-content:center;
+  margin-bottom:0.75rem;
+  transition:transform 0.2s ease;
+}
+.ext-card:hover .ext-card__icon { transform:scale(1.06); }
+.ext-card__icon > div { width:32px; height:32px; }
+.ext-card__body { flex:1; display:flex; flex-direction:column; align-items:center; width:100%; }
+.ext-card__name {
+  font-family:'Fraunces',serif;
+  font-size:0.95rem; font-weight:600;
+  margin-bottom:0.35rem;
+  color:var(--crow-text-primary);
+}
+.ext-card__desc {
+  font-size:0.8rem;
+  color:var(--crow-text-secondary);
+  line-height:1.45;
+  margin-bottom:0.5rem;
+  display:-webkit-box;
+  -webkit-line-clamp:2;
+  -webkit-box-orient:vertical;
+  overflow:hidden;
+}
+.ext-card__meta { display:flex; flex-wrap:wrap; gap:0.25rem; justify-content:center; margin-bottom:0.4rem; }
+.ext-card__badge {
+  font-size:0.6rem; font-weight:500;
+  padding:0.1rem 0.4rem; border-radius:4px;
+  text-transform:uppercase; letter-spacing:0.02em;
+}
+.ext-card__badge--official { color:var(--crow-accent); background:var(--crow-accent-muted); }
+.ext-card__badge--community { color:#f0ad4e; background:rgba(240,173,78,0.15); border:1px solid rgba(240,173,78,0.3); }
+.ext-card__badge--type { color:var(--crow-text-muted); background:var(--crow-bg-elevated); }
+.ext-card__resources { font-size:0.7rem; color:var(--crow-text-muted); margin-bottom:0.2rem; }
+.ext-card__version { font-size:0.7rem; color:var(--crow-text-muted); font-family:'JetBrains Mono',monospace; }
+.ext-card__footer { margin-top:auto; padding-top:0.6rem; width:100%; }
+.ext-card__footer .btn { width:100%; justify-content:center; }
+.ext-card__footer .badge { display:block; text-align:center; }
+
+/* Community stores (collapsible) */
+.ext-stores { margin-bottom:1.5rem; }
+.ext-stores__header {
+  display:flex; align-items:center; gap:0.5rem;
+  padding:0.75rem 1rem;
+  background:var(--crow-bg-surface);
+  border:1px solid var(--crow-border);
+  border-radius:var(--crow-radius-card, 12px);
+  cursor:pointer;
+  font-size:0.9rem; font-weight:500;
+  color:var(--crow-text-secondary);
+  transition:border-color 0.15s;
+  user-select:none;
+}
+.ext-stores__header:hover { border-color:var(--crow-accent); }
+.ext-stores__chevron { margin-left:auto; transition:transform 0.2s; font-size:0.8rem; }
+.ext-stores__chevron--open { transform:rotate(180deg); }
+.ext-stores__body {
+  display:none;
+  padding:1rem;
+  background:var(--crow-bg-surface);
+  border:1px solid var(--crow-border);
+  border-top:none;
+  border-radius:0 0 var(--crow-radius-card, 12px) var(--crow-radius-card, 12px);
+}
+.ext-stores__body--open { display:block; }
+
+/* Help card */
+.ext-help {
+  background:var(--crow-bg-surface);
+  border:1px solid var(--crow-border);
+  border-radius:var(--crow-radius-card, 12px);
+  padding:1rem 1.25rem;
+  color:var(--crow-text-muted);
+  font-size:0.85rem;
+}
+
+/* Modal overlay */
+#modal-overlay {
+  display:none; position:fixed;
+  top:0; left:0; width:100%; height:100%;
+  background:rgba(0,0,0,0.6);
+  z-index:1000;
+  align-items:center; justify-content:center;
+  backdrop-filter:blur(4px);
+  -webkit-backdrop-filter:blur(4px);
+}
+#modal-content {
+  background:var(--crow-bg-surface);
+  border:1px solid var(--crow-border);
+  border-radius:var(--crow-radius-card, 12px);
+  padding:1.5rem;
+  max-width:500px; width:90%;
+  max-height:80vh; overflow-y:auto; overflow-x:hidden;
+  box-sizing:border-box; word-wrap:break-word;
+  box-shadow:0 20px 60px rgba(0,0,0,0.5);
+}
+
+/* Glass overrides */
+.theme-glass .ext-card,
+.theme-glass .ext-installed__item,
+.theme-glass .ext-stores__header,
+.theme-glass .ext-stores__body {
+  backdrop-filter:var(--crow-glass-blur);
+  -webkit-backdrop-filter:var(--crow-glass-blur);
+}
+.theme-glass .ext-card:hover { box-shadow:0 8px 32px rgba(0,0,0,0.3); }
+.theme-glass .ext-search__input {
+  backdrop-filter:var(--crow-glass-blur);
+  -webkit-backdrop-filter:var(--crow-glass-blur);
+}
+
+/* Responsive */
+@media (max-width:600px) {
+  .ext-grid { grid-template-columns:repeat(auto-fill, minmax(160px, 1fr)); gap:0.75rem; }
+  .ext-card { padding:1rem 0.75rem; }
+  .ext-card__icon { width:48px; height:48px; border-radius:12px; }
+  .ext-installed__item { flex-wrap:wrap; }
+  .ext-installed__actions { width:100%; justify-content:flex-end; margin-top:0.25rem; }
+}
+</style>`;
 }
 
 export default {
@@ -160,9 +440,7 @@ export default {
         registry = await resp.json();
         registrySource = "remote";
       }
-    } catch {
-      // Remote unavailable — try local fallback
-    }
+    } catch {}
 
     if (registrySource === "none") {
       try {
@@ -179,7 +457,6 @@ export default {
     const communityResults = await Promise.all(communityStores.map((s) => fetchCommunityStore(s.url)));
     const communityAddons = communityResults.flatMap((r) => r.addons);
 
-    // Deduplicate by ID (official takes precedence)
     const officialIds = new Set(officialAddons.map((a) => a.id));
     const dedupedCommunity = communityAddons.filter((a) => !officialIds.has(a.id));
     const available = [...officialAddons, ...dedupedCommunity];
@@ -229,15 +506,19 @@ export default {
       } catch {}
     }
 
-    // Installed add-ons with action buttons
-    let installedHtml;
-    if (installedCount === 0) {
-      installedHtml = `<div class="empty-state"><h3>${t("extensions.noAddonsInstalled", lang)}</h3><p>${t("extensions.browseBelow", lang)}</p></div>`;
-    } else {
-      const cards = Object.entries(installed).map(([id, info], i) => {
+    // ─── Search bar ───
+    const searchHtml = `<div class="ext-search">
+      <svg class="ext-search__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input class="ext-search__input" type="text" placeholder="${t("extensions.searchPlaceholder", lang)}" id="ext-search">
+    </div>`;
+
+    // ─── Installed strip ───
+    let installedHtml = "";
+    if (installedCount > 0) {
+      const items = Object.entries(installed).map(([id, info], i) => {
         const registryEntry = available.find((a) => a.id === id);
         const name = registryEntry?.name || id;
-        const logoHtml = getAddonLogo(id, 32) || `<span style="font-size:1.5rem">${ICON_MAP[registryEntry?.icon] || ""}</span>`;
+        const iconHtml = renderIcon(registryEntry || { id, name, icon: registryEntry?.icon, category: registryEntry?.category }, 32);
         const status = bundleStatus[id];
         const isDocker = !!status;
         const isRunning = status?.running;
@@ -246,7 +527,6 @@ export default {
           ? (isRunning ? badge(t("extensions.runningBadge", lang), "published") : badge(t("extensions.stoppedBadge", lang), "draft"))
           : badge(t("extensions.mcpServer", lang), "connected");
 
-        // Action buttons using data attributes (no inline event handlers with dynamic data)
         let actions = "";
         if (isDocker) {
           if (isRunning) {
@@ -259,64 +539,59 @@ export default {
         }
         actions += `<button class="btn btn-sm bundle-uninstall" style="color:var(--crow-text-muted);border-color:var(--crow-border)" data-id="${escapeHtml(id)}" data-name="${escapeHtml(name)}" data-docker="${isDocker}">${t("extensions.remove", lang)}</button>`;
 
-        return `<div class="card" style="animation-delay:${i * 50}ms;margin-bottom:0.75rem">
-          <div style="display:flex;align-items:flex-start;gap:1rem">
-            <div style="flex-shrink:0">${logoHtml}</div>
-            <div style="flex:1;min-width:0">
-              <h4 style="font-family:'Fraunces',serif;font-size:1rem;margin-bottom:0.25rem">${escapeHtml(name)}</h4>
-              <div style="font-size:0.8rem;color:var(--crow-text-muted);font-family:'JetBrains Mono',monospace">
-                ${statusBadge} v${escapeHtml(info.version || registryEntry?.version || "?")} · ${t("extensions.installedDate", lang)} ${formatDate(info.installed_at || info.installedAt)}
-              </div>
-            </div>
-            <div style="display:flex;gap:0.5rem;align-items:center;flex-shrink:0">
-              ${actions}
-            </div>
+        return `<div class="ext-installed__item" style="animation:fadeInUp 0.4s ease-out ${Math.min(i * 30, 300)}ms both">
+          <div class="ext-installed__icon">${iconHtml}</div>
+          <div class="ext-installed__info">
+            <span class="ext-installed__name">${escapeHtml(name)}</span>
+            ${statusBadge}
+            <span class="ext-installed__meta">v${escapeHtml(info.version || registryEntry?.version || "?")} · ${t("extensions.installedDate", lang)} ${formatDate(info.installed_at || info.installedAt)}</span>
           </div>
-          <div id="status-${escapeHtml(id)}" style="font-size:0.8rem;margin-top:0.5rem;display:none"></div>
+          <div class="ext-installed__actions">${actions}</div>
+          <div id="status-${escapeHtml(id)}" style="font-size:0.8rem;margin-top:0.4rem;display:none;width:100%"></div>
         </div>`;
       }).join("");
-      installedHtml = cards;
+
+      installedHtml = `
+        <div class="ext-section-label">${t("extensions.installedSection", lang)}</div>
+        <div class="ext-installed__list">${items}</div>`;
     }
 
-    // Available add-ons with install buttons
-    // Collect unique types for filter tabs
-    const addonTypes = [...new Set(available.map((a) => a.type))].sort();
+    // ─── Category tabs ───
+    const categories = [...new Set(available.map((a) => a.category || "other"))].sort();
+    const categoryCounts = {};
+    for (const cat of categories) {
+      categoryCounts[cat] = available.filter((a) => (a.category || "other") === cat).length;
+    }
 
-    let availableHtml;
+    const tabsHtml = `<div class="ext-tabs" id="ext-tabs">
+      <button class="ext-tab ext-tab--active" data-category="all">${t("extensions.categoryAll", lang)} (${available.length})</button>
+      ${categories.map((cat) => {
+        const labelKey = CATEGORY_LABELS[cat] || "extensions.categoryOther";
+        return `<button class="ext-tab" data-category="${escapeHtml(cat)}">${t(labelKey, lang)} (${categoryCounts[cat]})</button>`;
+      }).join("")}
+    </div>`;
+
+    // ─── Available add-on cards (grid) ───
+    let gridHtml;
     if (available.length === 0) {
-      availableHtml = `<div class="empty-state"><h3>${t("extensions.registryUnavailable", lang)}</h3><p>${t("extensions.registryUnavailableDesc", lang)}</p></div>`;
+      gridHtml = `<div style="text-align:center;padding:2rem;color:var(--crow-text-muted)">
+        <h3>${t("extensions.registryUnavailable", lang)}</h3>
+        <p>${t("extensions.registryUnavailableDesc", lang)}</p>
+      </div>`;
     } else {
-      // Filter tabs
-      const filterTabs = `
-        <div style="display:flex;gap:0.25rem;margin-bottom:1rem;flex-wrap:wrap" id="type-filters">
-          <button class="btn btn-sm type-filter active" data-type="all" style="font-size:0.8rem">All (${available.length})</button>
-          ${addonTypes.map((tp) => {
-            const count = available.filter((a) => a.type === tp).length;
-            const label = tp === "mcp-server" ? t("extensions.mcpServers", lang) : tp === "bundle" ? t("extensions.bundles", lang) : tp.charAt(0).toUpperCase() + tp.slice(1) + "s";
-            return `<button class="btn btn-sm type-filter" data-type="${escapeHtml(tp)}" style="font-size:0.8rem">${escapeHtml(label)} (${count})</button>`;
-          }).join("")}
-        </div>`;
-
       const cards = available.map((addon, i) => {
         const isInstalled = installed[addon.id];
-        const typeBadge = badge(addon.type, "draft");
-        const communityBadge = addon._community
-          ? `<span style="font-size:0.65rem;color:#f0ad4e;background:rgba(240,173,78,0.15);padding:0.1rem 0.4rem;border-radius:4px;border:1px solid rgba(240,173,78,0.3);margin-right:0.25rem" title="${t("extensions.communityNotVerified", lang)}">${t("extensions.community", lang)}</span>`
-          : `<span style="font-size:0.65rem;color:var(--crow-accent);background:var(--crow-accent-muted);padding:0.1rem 0.4rem;border-radius:4px;margin-right:0.25rem">${t("extensions.official", lang)}</span>`;
-        const logoHtml = getAddonLogo(addon.id, 32) || `<span style="font-size:1.5rem">${ICON_MAP[addon.icon] || ""}</span>`;
-        const tags = (addon.tags || []).slice(0, 4).map((tag) =>
-          `<span style="font-size:0.7rem;color:var(--crow-accent);background:var(--crow-accent-muted);padding:0.1rem 0.4rem;border-radius:4px;margin-right:0.25rem">${escapeHtml(tag)}</span>`
-        ).join("");
-        const resources = formatResources(addon.requires);
-        const envCount = (addon.env_vars || addon.requires?.env || []).length;
-        const envNote = envCount > 0
-          ? `<span style="font-size:0.75rem;color:var(--crow-text-muted)">${envCount} env var${envCount > 1 ? "s" : ""}</span>`
-          : "";
-        const notes = addon.notes
-          ? `<div style="font-size:0.75rem;color:var(--crow-text-muted);margin-top:0.4rem;font-style:italic">${escapeHtml(addon.notes)}</div>`
-          : "";
+        const cat = addon.category || "other";
+        const catColor = getCategoryColor(cat);
+        const iconHtml = renderIcon(addon, 32);
 
-        // Install button or "Installed" badge — env_vars stored as data attribute
+        const communityBadge = addon._community
+          ? `<span class="ext-card__badge ext-card__badge--community" title="${t("extensions.communityNotVerified", lang)}">${t("extensions.community", lang)}</span>`
+          : `<span class="ext-card__badge ext-card__badge--official">${t("extensions.official", lang)}</span>`;
+
+        const typeBadge = `<span class="ext-card__badge ext-card__badge--type">${escapeHtml(addon.type)}</span>`;
+        const resources = formatResources(addon.requires);
+
         let installButton;
         if (isInstalled) {
           installButton = badge(t("extensions.installedBadge", lang), "published");
@@ -327,44 +602,40 @@ export default {
           installButton = `<button class="btn btn-sm btn-primary bundle-install" data-id="${escapeHtml(addon.id)}" data-name="${escapeHtml(addon.name)}" data-envvars="${envVarsAttr}" data-minram="${minRam}" data-mindisk="${minDisk}" data-community="${addon._community ? "true" : "false"}">${t("extensions.install", lang)}</button>`;
         }
 
-        return `<div class="card addon-card" data-addon-type="${escapeHtml(addon.type)}" style="animation-delay:${(i + installedCount) * 50}ms;transition:transform 0.15s,border-color 0.15s">
-          <div style="display:flex;align-items:flex-start;gap:1rem">
-            <div style="flex-shrink:0">${logoHtml}</div>
-            <div style="flex:1;min-width:0">
-              <h4 style="font-family:'Fraunces',serif;font-size:1rem;margin-bottom:0.25rem">${escapeHtml(addon.name)}</h4>
-              <p style="color:var(--crow-text-secondary);font-size:0.9rem;margin-bottom:0.4rem">${escapeHtml(addon.description)}</p>
-              <div style="display:flex;flex-wrap:wrap;gap:0.25rem;align-items:center">
-                ${communityBadge}
-                ${typeBadge}
-                ${tags}
-              </div>
-              <div style="display:flex;gap:0.75rem;align-items:center;margin-top:0.4rem;flex-wrap:wrap">
-                ${resources}
-                ${envNote}
-                <span style="font-size:0.75rem;color:var(--crow-text-muted);font-family:'JetBrains Mono',monospace">v${escapeHtml(addon.version || "1.0.0")} · ${escapeHtml(addon.author || "community")}</span>
-              </div>
-              ${notes}
+        const tags = (addon.tags || []).join(",");
+        const delay = Math.min(i * 30, 300);
+
+        return `<div class="ext-card addon-card" data-addon-type="${escapeHtml(addon.type)}" data-addon-category="${escapeHtml(cat)}" data-addon-name="${escapeHtml((addon.name || "").toLowerCase())}" data-addon-desc="${escapeHtml((addon.description || "").toLowerCase())}" data-addon-tags="${escapeHtml(tags.toLowerCase())}" style="animation:fadeInUp 0.4s ease-out ${delay}ms both">
+          <div class="ext-card__icon" style="background:${catColor.bg};color:${catColor.color}">${iconHtml}</div>
+          <div class="ext-card__body">
+            <div class="ext-card__name">${escapeHtml(addon.name)}</div>
+            <p class="ext-card__desc">${escapeHtml(addon.description)}</p>
+            <div class="ext-card__meta">
+              ${communityBadge}
+              ${typeBadge}
             </div>
-            <div style="flex-shrink:0">${installButton}</div>
+            ${resources}
+            <span class="ext-card__version">v${escapeHtml(addon.version || "1.0.0")} · ${escapeHtml(addon.author || "community")}</span>
           </div>
+          <div class="ext-card__footer">${installButton}</div>
         </div>`;
       }).join("");
-      availableHtml = `<style>
-        .addon-card:hover { transform: translateY(-2px); border-color: var(--crow-accent); }
-        .type-filter { background: transparent; border: 1px solid var(--crow-border); color: var(--crow-text-secondary); cursor: pointer; }
-        .type-filter.active { background: var(--crow-accent-muted); color: var(--crow-accent); border-color: var(--crow-accent); }
-        .type-filter:hover { border-color: var(--crow-accent); }
-      </style>${filterTabs}<div class="card-grid" id="addon-grid">${cards}</div>`;
+
+      gridHtml = `<div class="ext-grid" id="addon-grid">${cards}</div>`;
     }
 
     const sourceNote = registrySource === "local"
       ? `<div style="font-size:0.75rem;color:var(--crow-text-muted);margin-bottom:0.5rem">${t("extensions.localRegistry", lang)}</div>`
       : "";
 
-    // Community stores management section
-    const storesHtml = `
-      <div class="card" style="animation-delay:200ms">
-        <h4 style="font-family:'Fraunces',serif;font-size:0.95rem;margin-bottom:0.75rem">${t("extensions.communityStores", lang)}</h4>
+    // ─── Community stores (collapsible) ───
+    const storesHtml = `<div class="ext-stores">
+      <div class="ext-stores__header" onclick="(function(e){var b=document.getElementById('stores-body');var c=document.getElementById('stores-chevron');b.classList.toggle('ext-stores__body--open');c.classList.toggle('ext-stores__chevron--open')})()" >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
+        ${t("extensions.communityStores", lang)} (${communityStores.length})
+        <span class="ext-stores__chevron" id="stores-chevron">&#9662;</span>
+      </div>
+      <div class="ext-stores__body" id="stores-body">
         ${communityStores.length > 0 ? communityStores.map((s) => `
           <div style="display:flex;align-items:center;justify-content:space-between;padding:0.4rem 0;border-bottom:1px solid var(--crow-border)">
             <span style="font-size:0.85rem;color:var(--crow-text-secondary);font-family:'JetBrains Mono',monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%">${escapeHtml(s.url)}</span>
@@ -377,17 +648,23 @@ export default {
         `).join("") : `<p style="font-size:0.85rem;color:var(--crow-text-muted);margin-bottom:0.75rem">${t("extensions.noStoresConfigured", lang)}</p>`}
         <form method="POST" style="display:flex;gap:0.5rem;margin-top:0.75rem">
           <input type="hidden" name="action" value="add_store">
-          <input type="text" name="store_url" placeholder="https://github.com/user/crow-store" style="flex:1;padding:0.4rem 0.6rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg);color:var(--crow-text);font-size:0.85rem;font-family:'JetBrains Mono',monospace">
+          <input type="text" name="store_url" placeholder="https://github.com/user/crow-store" style="flex:1;padding:0.4rem 0.6rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg-deep);color:var(--crow-text-primary);font-size:0.85rem;font-family:'JetBrains Mono',monospace;box-sizing:border-box">
           <button type="submit" class="btn btn-sm btn-primary">${t("extensions.addStore", lang)}</button>
         </form>
-      </div>`;
-
-    // Modal container and client-side JavaScript
-    // Uses data attributes and DOM APIs (textContent) instead of innerHTML with user data
-    const interactiveScript = `
-    <div id="modal-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:1000;align-items:center;justify-content:center">
-      <div id="modal-content" style="background:var(--crow-bg-card, #1d1d1f);border:1px solid var(--crow-border);border-radius:8px;padding:1.5rem;max-width:500px;width:90%;max-height:80vh;overflow-y:auto;overflow-x:hidden;box-sizing:border-box;word-wrap:break-word">
       </div>
+    </div>`;
+
+    // ─── Help card ───
+    const helpHtml = `<div class="ext-help">
+      ${t("extensions.askAi", lang)} <code>"install the [name] add-on"</code><br>
+      ${t("extensions.toCreateOwn", lang)} <a href="/crow/developers/creating-addons" style="color:var(--crow-accent)">${t("extensions.devGuide", lang)}</a>.
+    </div>`;
+
+    // ─── Modal + client-side JavaScript ───
+    // Modal JS preserved verbatim from original; filter + search JS rewritten
+    const interactiveScript = `
+    <div id="modal-overlay">
+      <div id="modal-content"></div>
     </div>
 
     <script>
@@ -460,7 +737,6 @@ export default {
             h3.textContent = '${tJs("extensions.installTitle", lang)}' + " " + name;
             frag.appendChild(h3);
 
-            // Community warning banner
             if (isCommunity) {
               var communityWarn = document.createElement("div");
               communityWarn.style.cssText = "background:rgba(240,173,78,0.1);border:1px solid rgba(240,173,78,0.3);border-radius:6px;padding:0.75rem 1rem;margin-bottom:1rem";
@@ -480,7 +756,6 @@ export default {
             desc.textContent = '${tJs("extensions.installDesc", lang)}';
             frag.appendChild(desc);
 
-            // Resource warning (check server health)
             if (minRam > 0 || minDisk > 0) {
               var warnDiv = document.createElement("div");
               warnDiv.id = "resource-warning";
@@ -488,7 +763,6 @@ export default {
               warnDiv.textContent = '${tJs("extensions.working", lang)}';
               frag.appendChild(warnDiv);
               fetch(API + "/status").then(function(r) { return r.json(); }).catch(function() { return null; }).then(function() {
-                // Use /dashboard/nest API for resource data
                 fetch("/api/health").then(function(r) { return r.json(); }).then(function(h) {
                   var warnings = [];
                   if (minRam > 0 && h && h.ram_free_mb && h.ram_free_mb < minRam) {
@@ -507,7 +781,6 @@ export default {
               });
             }
 
-            // Env var fields
             var envNames = [];
             if (envVars.length > 0) {
               var configH = document.createElement("h4");
@@ -530,7 +803,7 @@ export default {
                 input.id = "env_" + ev.name;
                 input.value = ev.default || "";
                 input.placeholder = ev.description || "";
-                input.style.cssText = "width:100%;padding:0.5rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg);color:var(--crow-text);font-family:JetBrains Mono,monospace;font-size:0.85rem;box-sizing:border-box";
+                input.style.cssText = "width:100%;padding:0.5rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg-deep);color:var(--crow-text-primary);font-family:JetBrains Mono,monospace;font-size:0.85rem;box-sizing:border-box";
                 wrap.appendChild(input);
 
                 var hint = document.createElement("div");
@@ -720,7 +993,6 @@ export default {
               setTimeout(function() { location.reload(); }, 1500);
             } else if (job.status === "complete_restart") {
               statusEl.style.color = "var(--crow-accent)";
-              // Show last log entry (may include AI Chat setup info) before restart message
               var lastLog = job.log[job.log.length - 1] || "";
               var aiChatMsg = job.log.find(function(l) { return l.indexOf("AI Chat") !== -1; });
               if (aiChatMsg) {
@@ -728,7 +1000,6 @@ export default {
               } else {
                 statusEl.textContent = '${tJs("extensions.gatewayRestarting", lang)}';
               }
-              // Tell the server to restart, then wait for it to come back
               fetch(API + "/restart", { method: "POST", headers: { "Content-Type": "application/json" } }).catch(function() {});
               waitForRestart(statusEl);
             } else if (job.status === "failed") {
@@ -740,39 +1011,52 @@ export default {
               setTimeout(function() { pollJob(jobId, statusEl, btn); }, 1000);
             }
           }).catch(function() {
-            // Network error likely means gateway is restarting
             waitForRestart(statusEl);
           });
         }
-        // --- Type filter tabs ---
-        document.querySelectorAll(".type-filter").forEach(function(btn) {
+
+        // --- Category filter tabs ---
+        function applyFilters() {
+          var activeTab = document.querySelector(".ext-tab--active");
+          var cat = activeTab ? activeTab.dataset.category : "all";
+          var searchInput = document.getElementById("ext-search");
+          var q = searchInput ? searchInput.value.toLowerCase().trim() : "";
+
+          document.querySelectorAll(".addon-card").forEach(function(card) {
+            var catMatch = cat === "all" || card.dataset.addonCategory === cat;
+            var searchMatch = !q
+              || (card.dataset.addonName || "").indexOf(q) !== -1
+              || (card.dataset.addonDesc || "").indexOf(q) !== -1
+              || (card.dataset.addonTags || "").indexOf(q) !== -1;
+            card.style.display = (catMatch && searchMatch) ? "" : "none";
+          });
+        }
+
+        document.querySelectorAll(".ext-tab").forEach(function(btn) {
           btn.addEventListener("click", function() {
-            var type = this.dataset.type;
-            document.querySelectorAll(".type-filter").forEach(function(b) { b.classList.remove("active"); });
-            this.classList.add("active");
-            document.querySelectorAll(".addon-card").forEach(function(card) {
-              if (type === "all" || card.dataset.addonType === type) {
-                card.style.display = "";
-              } else {
-                card.style.display = "none";
-              }
-            });
+            document.querySelectorAll(".ext-tab").forEach(function(b) { b.classList.remove("ext-tab--active"); });
+            this.classList.add("ext-tab--active");
+            applyFilters();
           });
         });
+
+        // --- Search ---
+        var searchInput = document.getElementById("ext-search");
+        if (searchInput) {
+          searchInput.addEventListener("input", applyFilters);
+        }
       })();
     <\/script>`;
 
     const content = `
-      ${section(t("extensions.installedSection", lang), installedHtml, { delay: 100 })}
+      ${extensionStyles()}
+      ${searchHtml}
+      ${installedHtml}
       ${sourceNote}
-      ${section(t("extensions.availableSection", lang), availableHtml, { delay: 150 })}
+      ${tabsHtml}
+      ${gridHtml}
       ${storesHtml}
-      <div class="card" style="animation-delay:250ms">
-        <p style="color:var(--crow-text-muted);font-size:0.85rem">
-          ${t("extensions.askAi", lang)} <code>"install the [name] add-on"</code><br>
-          ${t("extensions.toCreateOwn", lang)} <a href="/crow/developers/creating-addons">${t("extensions.devGuide", lang)}</a>.
-        </p>
-      </div>
+      ${helpHtml}
       ${interactiveScript}
     `;
 

@@ -345,6 +345,17 @@ const translations = {
   "extensions.needsDisk": { en: "This add-on needs ~", es: "Este complemento necesita ~" },
   "extensions.diskFree": { en: "MB disk. Your server has", es: "MB disco. Tu servidor tiene" },
   "extensions.installMayCauseInstability": { en: "Installing may cause instability.", es: "La instalación puede causar inestabilidad." },
+  "extensions.searchPlaceholder": { en: "Search add-ons...", es: "Buscar complementos..." },
+  "extensions.categoryAll": { en: "All", es: "Todos" },
+  "extensions.categoryAi": { en: "AI", es: "IA" },
+  "extensions.categoryMedia": { en: "Media", es: "Multimedia" },
+  "extensions.categoryProductivity": { en: "Productivity", es: "Productividad" },
+  "extensions.categoryStorage": { en: "Storage", es: "Almacenamiento" },
+  "extensions.categorySmartHome": { en: "Smart Home", es: "Casa inteligente" },
+  "extensions.categoryNetworking": { en: "Networking", es: "Redes" },
+  "extensions.categoryGaming": { en: "Gaming", es: "Juegos" },
+  "extensions.categoryFinance": { en: "Finance", es: "Finanzas" },
+  "extensions.categoryOther": { en: "Other", es: "Otros" },
 
   // ─── Skills Panel ───
   "skills.pageTitle": { en: "Skills", es: "Habilidades" },
