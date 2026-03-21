@@ -1,0 +1,22 @@
+services:
+  trilium:
+    image: triliumnext/notes:latest
+    container_name: crow-trilium
+    ports:
+      - "127.0.0.1:8088:8080"
+    volumes:
+      - ${TRILIUM_DATA_PATH:-trilium-data}:/home/node/trilium-data
+    environment:
+      - TRILIUM_DATA_DIR=/home/node/trilium-data
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health-check"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  trilium-data:

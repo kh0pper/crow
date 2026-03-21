@@ -1,0 +1,11 @@
+{
+  "name": "crow-trilium",
+  "version": "1.0.0",
+  "description": "TriliumNext MCP server — knowledge base search, note management, and web clipping via ETAPI",
+  "type": "module",
+  "main": "server/index.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  }
+}
