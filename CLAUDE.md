@@ -143,6 +143,16 @@ bundles/ollama/                → Ollama local AI add-on (Docker + skill)
 bundles/localai/               → LocalAI OpenAI-compatible local AI add-on (Docker + skill)
 bundles/nextcloud/             → Nextcloud files add-on (Docker + WebDAV)
 bundles/immich/                → Immich photos add-on (custom MCP server + Docker)
+bundles/jellyfin/              → Jellyfin media server add-on (Docker + MCP server, 7 tools)
+bundles/plex/                  → Plex Media Server connector (MCP server, 7 tools, optional Docker)
+bundles/iptv/                  → IPTV channel manager (MCP server, 6 tools, M3U/XMLTV)
+bundles/kodi/                  → Kodi remote control (MCP server, 6 tools, JSON-RPC)
+bundles/trilium/               → TriliumNext knowledge base (Docker + MCP server, 11 tools, ETAPI)
+android/                       → Android WebView shell app (Crow's Nest mobile client)
+servers/gateway/public/        → PWA assets (manifest.json, service worker, icons)
+servers/gateway/push/          → Web Push notification infrastructure (VAPID)
+servers/gateway/routes/push.js → Push subscription registration endpoints
+servers/gateway/dashboard/nav-registry.js → Grouped sidebar navigation (user-customizable)
 scripts/crow                   → CLI entry point (status, bundle management)
 scripts/crow-install.sh        → Raspberry Pi / Debian installer script
 scripts/crow-update.sh         → Safe update with rollback
@@ -179,6 +189,13 @@ Uses `@libsql/client` for local SQLite files (default: `~/.crow/data/crow.db`, g
 - **crow_instances** — Instance registry for multi-instance chaining (id TEXT PK, name, crow_id, directory, hostname, tailscale_ip, gateway_url, sync_url, sync_profile, topics, is_home, auth_token_hash, last_seen_at, status)
 - **sync_conflicts** — Conflict log for instance sync (table_name, row_id, winning/losing instance_id + lamport_ts + data, resolved flag)
 - **sync_state** — Per-instance Lamport counter and checkpoint tracking (instance_id PK, local_counter, last_applied_seq_per_peer JSON)
+- **contact_groups** — Contact organization groups (id, name, color, sort_order)
+- **contact_group_members** — Many-to-many contacts-to-groups (group_id FK, contact_id FK, unique index)
+- **push_subscriptions** — Web Push notification subscriptions (endpoint UNIQUE, keys_json, platform, device_name)
+- **iptv_playlists** — IPTV M3U playlist sources (name, url, auto_refresh, channel_count)
+- **iptv_channels** — IPTV channels from playlists (playlist_id FK, name, stream_url, tvg_id, group_title, is_favorite)
+- **iptv_epg** — Electronic Program Guide entries (channel_tvg_id, title, start_time, end_time, indexed)
+- **iptv_recordings** — IPTV recording jobs (channel_id FK, status, file_path, duration)
 
 All FTS sync is handled by SQLite triggers defined in `init-db.js`. If you change the memories, sources, or blog_posts schema, you must also update the corresponding FTS virtual table and triggers.
 
@@ -378,6 +395,11 @@ Add-on skills (activated when corresponding add-on is installed):
 - `nextcloud.md` — Nextcloud file access via WebDAV
 - `immich.md` — Photo library search and album management
 - `tailscale.md` — Private network access setup via Tailscale bundle
+- `jellyfin.md` — Jellyfin media server: library search, browsing, playback control
+- `plex.md` — Plex Media Server: library browsing, playback, On Deck
+- `iptv.md` — IPTV channel management: M3U playlists, EPG, favorites
+- `kodi.md` — Kodi remote control: JSON-RPC playback, library browsing
+- `trilium.md` — TriliumNext knowledge base: note search, creation, web clipping, organization
 
 ### Maintaining CLAUDE.md vs crow.md
 
