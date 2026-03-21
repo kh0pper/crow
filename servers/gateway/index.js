@@ -672,12 +672,33 @@ const server = app.listen(PORT, "0.0.0.0", (error) => {
       const { loadOrCreateIdentity } = await import("../sharing/identity.js");
       const identity = loadOrCreateIdentity();
 
-      // Prefer Tailscale IP for gateway URL (reachable across tailnet)
+      // Prefer Tailscale HTTPS serve URL, fall back to Tailscale IP, then localhost
       let gatewayUrl = `http://localhost:${PORT}`;
       try {
         const { execFileSync } = await import("child_process");
-        const tsIp = execFileSync("tailscale", ["ip", "-4"], { timeout: 3000, stdio: "pipe" }).toString().trim();
-        if (tsIp) gatewayUrl = `http://${tsIp}:${PORT}`;
+        // Check if Tailscale serve is configured (provides HTTPS URLs)
+        const serveStatus = execFileSync("tailscale", ["serve", "status"], { timeout: 3000, stdio: "pipe" }).toString();
+        const serveMatch = serveStatus.match(/https:\/\/[\w.-]+\.ts\.net(?::\d+)?/);
+        if (serveMatch) {
+          // Find the serve entry that proxies to our port
+          const lines = serveStatus.split("\n");
+          for (let i = 0; i < lines.length; i++) {
+            const urlMatch = lines[i].match(/(https:\/\/[\w.-]+\.ts\.net(?::\d+)?)/);
+            if (urlMatch && lines[i + 1]?.includes(`localhost:${PORT}`)) {
+              gatewayUrl = urlMatch[1];
+              break;
+            }
+          }
+          // If no port-specific match, use the first HTTPS URL
+          if (gatewayUrl.startsWith("http://") && serveMatch) {
+            gatewayUrl = serveMatch[0];
+          }
+        }
+        // Fall back to Tailscale IP if no serve URL found
+        if (gatewayUrl.startsWith("http://localhost")) {
+          const tsIp = execFileSync("tailscale", ["ip", "-4"], { timeout: 3000, stdio: "pipe" }).toString().trim();
+          if (tsIp) gatewayUrl = `http://${tsIp}:${PORT}`;
+        }
       } catch {}
 
       await ensureLocalInstanceRegistered(createDbClient(), {
