@@ -7,4 +7,4 @@ description: Explora bases de datos SQLite, ejecuta consultas, crea visualizacio
 
 Explora cualquier base de datos SQLite, ejecuta consultas SQL, crea gráficos y publica estudios de caso en tu blog de Crow.
 
-Ver la [versión en inglés](/software/crow/guide/data-dashboard) para la documentación completa.
+Ver la [versión en inglés](../../guide/data-dashboard) para la documentación completa.

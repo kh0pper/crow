@@ -7,4 +7,4 @@ description: Configura Crow en la VM e2-micro siempre gratuita de Google Cloud
 
 Configura Crow en la VM e2-micro siempre gratuita de Google Cloud con Tailscale y encadénalo con tus otras instancias.
 
-Ver la [versión en inglés](/software/crow/getting-started/google-cloud) para la documentación completa.
+Ver la [versión en inglés](../../getting-started/google-cloud) para la documentación completa.
