@@ -671,9 +671,18 @@ const server = app.listen(PORT, "0.0.0.0", (error) => {
     try {
       const { loadOrCreateIdentity } = await import("../sharing/identity.js");
       const identity = loadOrCreateIdentity();
+
+      // Prefer Tailscale IP for gateway URL (reachable across tailnet)
+      let gatewayUrl = `http://localhost:${PORT}`;
+      try {
+        const { execFileSync } = await import("child_process");
+        const tsIp = execFileSync("tailscale", ["ip", "-4"], { timeout: 3000, stdio: "pipe" }).toString().trim();
+        if (tsIp) gatewayUrl = `http://${tsIp}:${PORT}`;
+      } catch {}
+
       await ensureLocalInstanceRegistered(createDbClient(), {
         crowId: identity.crowId,
-        gatewayUrl: `http://localhost:${PORT}`,
+        gatewayUrl,
       });
     } catch (err) {
       // Non-fatal — instance registry is optional for basic operation
