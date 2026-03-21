@@ -68,6 +68,8 @@ export function designTokensCss() {
     --crow-glass-blur-heavy: saturate(180%) blur(20px);
     --crow-radius-card: 16px;
     --crow-radius-pill: 100px;
+    --crow-bg-popup: rgba(30,30,30,0.85);
+    --crow-border-popup: rgba(255,255,255,0.12);
   }
 
   .theme-glass.theme-light {
@@ -81,5 +83,7 @@ export function designTokensCss() {
     --crow-accent: #0071e3;
     --crow-accent-hover: #0077ed;
     --crow-accent-muted: rgba(0,113,227,0.1);
+    --crow-bg-popup: rgba(245,245,247,0.85);
+    --crow-border-popup: rgba(0,0,0,0.12);
   }`;
 }

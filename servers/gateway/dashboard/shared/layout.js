@@ -537,6 +537,16 @@ function dashboardCss() {
     background: var(--crow-accent-muted);
     border-left-color: var(--crow-accent);
   }
+  /* Glass overrides for popups, modals, and fixed overlays */
+  .theme-glass .header-dropdown,
+  .theme-glass .crow-dropdown,
+  .theme-glass #modal-content,
+  .theme-glass #crow-player-bar {
+    background: var(--crow-bg-popup);
+    backdrop-filter: var(--crow-glass-blur);
+    -webkit-backdrop-filter: var(--crow-glass-blur);
+    border-color: var(--crow-border-popup);
+  }
 
   /* Responsive */
   @media (max-width: 768px) {
