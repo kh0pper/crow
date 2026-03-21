@@ -19,6 +19,10 @@ export function createMemoryServer(dbPath, options = {}) {
   // Passed via options by the gateway when an AI provider with embeddings is configured.
   const getEmbedding = options.getEmbedding || null;
 
+  // Optional sync manager for instance-to-instance replication.
+  // When set, mutations emit change entries to connected instances.
+  const syncManager = options.syncManager || null;
+
   // Cache sqlite-vec availability (checked once on first use)
   let _vecAvailable = null;
   async function hasVec() {
@@ -61,16 +65,27 @@ export function createMemoryServer(dbPath, options = {}) {
       tags: z.string().max(500).optional().describe("Comma-separated tags for filtering"),
       source: z.string().max(500).optional().describe("Where this information came from"),
       importance: z.number().min(1).max(10).default(5).describe("1-10 importance rating"),
+      instance_id: z.string().max(100).optional().describe("Instance ID (origin). Omit to use local instance."),
+      project_id: z.number().optional().describe("Project ID for project-scoped memories"),
     },
-    async ({ content, category, context, tags, source, importance }) => {
+    async ({ content, category, context, tags, source, importance, instance_id, project_id }) => {
       const result = await db.execute({
-        sql: "INSERT INTO memories (content, category, context, tags, source, importance) VALUES (?, ?, ?, ?, ?, ?)",
-        args: [content, category, context ?? null, tags ?? null, source ?? null, importance],
+        sql: "INSERT INTO memories (content, category, context, tags, source, importance, instance_id, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        args: [content, category, context ?? null, tags ?? null, source ?? null, importance, instance_id ?? null, project_id ?? null],
       });
       const memoryId = Number(result.lastInsertRowid);
 
       // Store embedding asynchronously (non-blocking)
       storeEmbedding(memoryId, content);
+
+      // Emit sync entry (non-blocking)
+      if (syncManager) {
+        syncManager.emitChange("memories", "insert", {
+          id: memoryId, content, category, context: context ?? null,
+          tags: tags ?? null, source: source ?? null, importance,
+          instance_id: instance_id ?? null, project_id: project_id ?? null,
+        }).catch(() => {});
+      }
 
       return {
         content: [
@@ -92,8 +107,10 @@ export function createMemoryServer(dbPath, options = {}) {
       min_importance: z.number().min(1).max(10).optional().describe("Minimum importance threshold"),
       limit: z.number().max(100).default(10).describe("Maximum results to return"),
       semantic: z.boolean().default(false).describe("Enable semantic search (requires embedding provider + sqlite-vec)"),
+      instance_id: z.string().max(100).optional().describe("Filter by origin instance ID"),
+      project_id: z.number().optional().describe("Filter by project ID"),
     },
-    async ({ query, category, min_importance, limit, semantic }) => {
+    async ({ query, category, min_importance, limit, semantic, instance_id, project_id }) => {
       // Try semantic search first if requested and available
       let semanticRows = [];
       if (semantic && getEmbedding && await hasVec()) {
@@ -111,6 +128,8 @@ export function createMemoryServer(dbPath, options = {}) {
 
             if (category) { vecSql += " AND m.category = ?"; vecParams.push(category); }
             if (min_importance) { vecSql += " AND m.importance >= ?"; vecParams.push(min_importance); }
+            if (instance_id) { vecSql += " AND m.instance_id = ?"; vecParams.push(instance_id); }
+            if (project_id) { vecSql += " AND m.project_id = ?"; vecParams.push(project_id); }
 
             vecSql += ` ORDER BY e.distance LIMIT ?`;
             vecParams.push(limit);
@@ -146,6 +165,14 @@ export function createMemoryServer(dbPath, options = {}) {
         if (min_importance) {
           sql += " AND m.importance >= ?";
           params.push(min_importance);
+        }
+        if (instance_id) {
+          sql += " AND m.instance_id = ?";
+          params.push(instance_id);
+        }
+        if (project_id) {
+          sql += " AND m.project_id = ?";
+          params.push(project_id);
         }
 
         sql += " ORDER BY rank LIMIT ?";
@@ -190,8 +217,10 @@ export function createMemoryServer(dbPath, options = {}) {
     {
       context: z.string().max(2000).describe("Describe the current context or topic to find relevant memories"),
       limit: z.number().max(100).default(5).describe("Maximum results"),
+      instance_id: z.string().max(100).optional().describe("Filter by origin instance ID"),
+      project_id: z.number().optional().describe("Filter by project ID"),
     },
-    async ({ context, limit }) => {
+    async ({ context, limit, instance_id, project_id }) => {
       const contextWords = context.split(/\s+/).filter((w) => w.length > 2).slice(0, 10).join(" ");
       const safeQuery = sanitizeFtsQuery(contextWords);
 
@@ -199,16 +228,20 @@ export function createMemoryServer(dbPath, options = {}) {
         return { content: [{ type: "text", text: "Context too short to search." }] };
       }
 
-      const { rows } = await db.execute({
-        sql: `
-          SELECT m.*, rank FROM memories_fts fts
-          JOIN memories m ON m.id = fts.rowid
-          WHERE memories_fts MATCH ?
-          ORDER BY rank
-          LIMIT ?
-        `,
-        args: [safeQuery, limit],
-      });
+      let sql = `
+        SELECT m.*, rank FROM memories_fts fts
+        JOIN memories m ON m.id = fts.rowid
+        WHERE memories_fts MATCH ?
+      `;
+      const params = [safeQuery];
+
+      if (instance_id) { sql += " AND m.instance_id = ?"; params.push(instance_id); }
+      if (project_id) { sql += " AND m.project_id = ?"; params.push(project_id); }
+
+      sql += " ORDER BY rank LIMIT ?";
+      params.push(limit);
+
+      const { rows } = await db.execute({ sql, args: params });
 
       if (rows.length === 0) {
         return { content: [{ type: "text", text: "No relevant memories found for this context." }] };
@@ -233,8 +266,10 @@ export function createMemoryServer(dbPath, options = {}) {
       min_importance: z.number().min(1).max(10).optional().describe("Minimum importance"),
       sort_by: z.enum(["recent", "importance", "accessed"]).default("recent").describe("Sort order"),
       limit: z.number().max(100).default(20).describe("Max results"),
+      instance_id: z.string().max(100).optional().describe("Filter by origin instance ID"),
+      project_id: z.number().optional().describe("Filter by project ID"),
     },
-    async ({ category, tag, min_importance, sort_by, limit }) => {
+    async ({ category, tag, min_importance, sort_by, limit, instance_id, project_id }) => {
       let sql = "SELECT * FROM memories WHERE 1=1";
       const params = [];
 
@@ -249,6 +284,14 @@ export function createMemoryServer(dbPath, options = {}) {
       if (min_importance) {
         sql += " AND importance >= ?";
         params.push(min_importance);
+      }
+      if (instance_id) {
+        sql += " AND instance_id = ?";
+        params.push(instance_id);
+      }
+      if (project_id) {
+        sql += " AND project_id = ?";
+        params.push(project_id);
       }
 
       const sortMap = {
@@ -310,6 +353,14 @@ export function createMemoryServer(dbPath, options = {}) {
 
       await db.execute({ sql: `UPDATE memories SET ${updates.join(", ")} WHERE id = ?`, args: params });
 
+      // Emit sync entry
+      if (syncManager) {
+        const updated = { id, content, category, tags, importance, context };
+        // Remove undefined fields
+        for (const k of Object.keys(updated)) { if (updated[k] === undefined) delete updated[k]; }
+        syncManager.emitChange("memories", "update", updated).catch(() => {});
+      }
+
       return { content: [{ type: "text", text: `Memory #${id} updated.` }] };
     }
   );
@@ -346,6 +397,12 @@ export function createMemoryServer(dbPath, options = {}) {
       }
 
       await db.execute({ sql: "DELETE FROM memories WHERE id = ?", args: [id] });
+
+      // Emit sync entry
+      if (syncManager) {
+        syncManager.emitChange("memories", "delete", { id }).catch(() => {});
+      }
+
       return { content: [{ type: "text", text: `Memory #${id} deleted.` }] };
     }
   );
@@ -379,16 +436,17 @@ export function createMemoryServer(dbPath, options = {}) {
       include_dynamic: z.boolean().default(true).describe("Include dynamic sections (memory stats, active projects, preferences)"),
       platform: z.string().default("generic").describe("Target platform hint: claude, chatgpt, gemini, grok, cursor, windsurf, cline, generic"),
       device_id: z.string().max(200).optional().describe("Device ID to merge device-specific overrides with global context"),
+      project_id: z.number().optional().describe("Project ID to merge project-specific overrides with global context"),
     },
-    async ({ include_dynamic, platform, device_id }) => {
-      const markdown = await generateCrowContext(db, { includeDynamic: include_dynamic, platform, deviceId: device_id ?? null });
+    async ({ include_dynamic, platform, device_id, project_id }) => {
+      const markdown = await generateCrowContext(db, { includeDynamic: include_dynamic, platform, deviceId: device_id ?? null, projectId: project_id ?? null });
       return { content: [{ type: "text", text: markdown }] };
     }
   );
 
   server.tool(
     "crow_update_context_section",
-    "Update an existing crow.md section's content, title, enabled status, or sort order. Works on both protected and custom sections. Use device_id to update a device-specific override instead of the global section.",
+    "Update an existing crow.md section's content, title, enabled status, or sort order. Works on both protected and custom sections. Use device_id/project_id to target a scoped override instead of the global section.",
     {
       section_key: z.string().max(500).describe("The section key to update (e.g. 'identity', 'memory_protocol')"),
       content: z.string().max(50000).optional().describe("New content for the section"),
@@ -396,20 +454,28 @@ export function createMemoryServer(dbPath, options = {}) {
       enabled: z.boolean().optional().describe("Enable or disable this section"),
       sort_order: z.number().optional().describe("New sort order (lower = earlier)"),
       device_id: z.string().max(200).optional().describe("Device ID to update a device-specific override. Omit for global section."),
+      project_id: z.number().optional().describe("Project ID to update a project-specific override. Omit for global section."),
     },
-    async ({ section_key, content, section_title, enabled, sort_order, device_id }) => {
-      // Build WHERE clause based on device_id
-      const whereClause = device_id
-        ? "section_key = ? AND device_id = ?"
-        : "section_key = ? AND device_id IS NULL";
-      const whereArgs = device_id ? [section_key, device_id] : [section_key];
+    async ({ section_key, content, section_title, enabled, sort_order, device_id, project_id }) => {
+      // Build WHERE clause based on device_id and project_id
+      const whereParts = ["section_key = ?"];
+      const whereArgs = [section_key];
+
+      if (device_id) { whereParts.push("device_id = ?"); whereArgs.push(device_id); }
+      else { whereParts.push("device_id IS NULL"); }
+
+      if (project_id) { whereParts.push("project_id = ?"); whereArgs.push(project_id); }
+      else { whereParts.push("project_id IS NULL"); }
+
+      const whereClause = whereParts.join(" AND ");
 
       const { rows } = await db.execute({
         sql: `SELECT * FROM crow_context WHERE ${whereClause}`,
         args: whereArgs,
       });
       if (rows.length === 0) {
-        const target = device_id ? ` (device: ${device_id})` : "";
+        const scope = [device_id ? `device: ${device_id}` : null, project_id ? `project: ${project_id}` : null].filter(Boolean).join(", ");
+        const target = scope ? ` (${scope})` : "";
         return { content: [{ type: "text", text: `Section "${section_key}"${target} not found.` }] };
       }
 
@@ -432,37 +498,52 @@ export function createMemoryServer(dbPath, options = {}) {
         args: params,
       });
 
-      const target = device_id ? ` (device: ${device_id})` : "";
+      // Emit sync entry
+      if (syncManager) {
+        syncManager.emitChange("crow_context", "update", { section_key, content, section_title, device_id: device_id ?? null, project_id: project_id ?? null }).catch(() => {});
+      }
+
+      const scope = [device_id ? `device: ${device_id}` : null, project_id ? `project: ${project_id}` : null].filter(Boolean).join(", ");
+      const target = scope ? ` (${scope})` : "";
       return { content: [{ type: "text", text: `Section "${section_key}"${target} updated.` }] };
     }
   );
 
   server.tool(
     "crow_add_context_section",
-    "Add a new custom section to crow.md. Custom sections can be used to extend Crow's behavioral context with project-specific or user-specific instructions. Use device_id to create a device-specific override that takes precedence over the global section on that device.",
+    "Add a new custom section to crow.md. Custom sections extend Crow's behavioral context with project-specific, device-specific, or user-specific instructions. Scoped overrides take precedence over global sections.",
     {
       section_key: z.string().max(500).describe("Unique key for the section (e.g. 'project_guidelines', 'coding_style')"),
       section_title: z.string().max(500).describe("Display title for the section"),
       content: z.string().max(50000).describe("Markdown content for the section"),
       sort_order: z.number().default(100).describe("Sort order (lower = earlier, default 100)"),
       device_id: z.string().max(200).optional().describe("Device ID to create a device-specific override. Omit for global section."),
+      project_id: z.number().optional().describe("Project ID to create a project-specific override. Omit for global section."),
     },
-    async ({ section_key, section_title, content, sort_order, device_id }) => {
-      // Protected sections can have device overrides but not new global entries
-      if (PROTECTED_SECTIONS.includes(section_key) && !device_id) {
+    async ({ section_key, section_title, content, sort_order, device_id, project_id }) => {
+      // Protected sections can have scoped overrides but not new global entries
+      if (PROTECTED_SECTIONS.includes(section_key) && !device_id && !project_id) {
         return { content: [{ type: "text", text: `Cannot create section with protected key "${section_key}". Use crow_update_context_section to modify it.` }] };
       }
 
       try {
         await db.execute({
-          sql: "INSERT INTO crow_context (section_key, section_title, content, sort_order, device_id) VALUES (?, ?, ?, ?, ?)",
-          args: [section_key, section_title, content, sort_order, device_id ?? null],
+          sql: "INSERT INTO crow_context (section_key, section_title, content, sort_order, device_id, project_id) VALUES (?, ?, ?, ?, ?, ?)",
+          args: [section_key, section_title, content, sort_order, device_id ?? null, project_id ?? null],
         });
-        const target = device_id ? ` (device: ${device_id})` : "";
+
+        // Emit sync entry
+        if (syncManager) {
+          syncManager.emitChange("crow_context", "insert", { section_key, section_title, content, sort_order, device_id: device_id ?? null, project_id: project_id ?? null }).catch(() => {});
+        }
+
+        const scope = [device_id ? `device: ${device_id}` : null, project_id ? `project: ${project_id}` : null].filter(Boolean).join(", ");
+        const target = scope ? ` (${scope})` : "";
         return { content: [{ type: "text", text: `Section "${section_key}"${target} added to crow.md.` }] };
       } catch (err) {
         if (err.message?.includes("UNIQUE")) {
-          const target = device_id ? ` for device "${device_id}"` : "";
+          const scope = [device_id ? `device: ${device_id}` : null, project_id ? `project: ${project_id}` : null].filter(Boolean).join(", ");
+          const target = scope ? ` (${scope})` : "";
           return { content: [{ type: "text", text: `Section "${section_key}"${target} already exists. Use crow_update_context_section to modify it.` }] };
         }
         throw err;
@@ -472,30 +553,34 @@ export function createMemoryServer(dbPath, options = {}) {
 
   server.tool(
     "crow_list_context_sections",
-    "List all crow.md sections with their metadata (key, title, sort order, enabled status, device ID). Does not return full content — use crow_get_context for that. Use device_id to filter sections for a specific device.",
+    "List all crow.md sections with their metadata (key, title, sort order, enabled status, device/project scope). Does not return full content — use crow_get_context for that.",
     {
       device_id: z.string().max(200).optional().describe("Filter to sections for this device (also shows global sections). Omit to show all sections."),
+      project_id: z.number().optional().describe("Filter to sections for this project (also shows global sections). Omit to show all sections."),
     },
-    async ({ device_id } = {}) => {
+    async ({ device_id, project_id } = {}) => {
       const { rows } = await db.execute(
-        "SELECT section_key, section_title, sort_order, enabled, updated_at, device_id FROM crow_context ORDER BY sort_order ASC, id ASC"
+        "SELECT section_key, section_title, sort_order, enabled, updated_at, device_id, project_id FROM crow_context ORDER BY sort_order ASC, id ASC"
       );
 
       if (rows.length === 0) {
         return { content: [{ type: "text", text: "No crow.md sections found. Run `npm run init-db` to seed defaults." }] };
       }
 
-      // If device_id filter is set, show global + that device's sections
-      const filtered = device_id
-        ? rows.filter((r) => !r.device_id || r.device_id === device_id)
-        : rows;
+      // Filter: show global + matching device/project sections
+      const filtered = rows.filter((r) => {
+        const deviceMatch = !device_id || !r.device_id || r.device_id === device_id;
+        const projectMatch = !project_id || !r.project_id || r.project_id === project_id;
+        return deviceMatch && projectMatch;
+      });
 
       const formatted = filtered
         .map((r) => {
           const status = r.enabled ? "enabled" : "disabled";
           const prot = PROTECTED_SECTIONS.includes(r.section_key) ? " [protected]" : "";
-          const device = r.device_id ? ` [device: ${r.device_id}]` : "";
-          return `- ${r.section_key}${prot}${device}: "${r.section_title}" (order: ${r.sort_order}, ${status}, updated: ${r.updated_at})`;
+          const scope = [r.device_id ? `device: ${r.device_id}` : null, r.project_id ? `project: ${r.project_id}` : null].filter(Boolean).join(", ");
+          const scopeLabel = scope ? ` [${scope}]` : "";
+          return `- ${r.section_key}${prot}${scopeLabel}: "${r.section_title}" (order: ${r.sort_order}, ${status}, updated: ${r.updated_at})`;
         })
         .join("\n");
 
@@ -505,30 +590,43 @@ export function createMemoryServer(dbPath, options = {}) {
 
   server.tool(
     "crow_delete_context_section",
-    "Delete a custom crow.md section. Protected sections (identity, memory_protocol, research_protocol, session_protocol, transparency_rules, skills_reference, key_principles) cannot be deleted — only disabled. Device-specific overrides of protected sections CAN be deleted (restores the global version for that device).",
+    "Delete a custom crow.md section. Protected sections cannot be deleted — only disabled. Scoped overrides (device/project) of protected sections CAN be deleted (restores the global version).",
     {
       section_key: z.string().max(500).describe("The section key to delete"),
-      device_id: z.string().max(200).optional().describe("Device ID to delete only the device-specific override. Omit to delete the global section."),
+      device_id: z.string().max(200).optional().describe("Device ID to delete only the device-specific override. Omit for global."),
+      project_id: z.number().optional().describe("Project ID to delete only the project-specific override. Omit for global."),
     },
-    async ({ section_key, device_id }) => {
-      // Protected global sections cannot be deleted, but device overrides can
-      if (PROTECTED_SECTIONS.includes(section_key) && !device_id) {
+    async ({ section_key, device_id, project_id }) => {
+      // Protected global sections cannot be deleted, but scoped overrides can
+      if (PROTECTED_SECTIONS.includes(section_key) && !device_id && !project_id) {
         return {
           content: [{ type: "text", text: `Cannot delete protected section "${section_key}". Use crow_update_context_section with enabled=false to disable it instead.` }],
         };
       }
 
-      const whereClause = device_id
-        ? "section_key = ? AND device_id = ?"
-        : "section_key = ? AND device_id IS NULL";
-      const whereArgs = device_id ? [section_key, device_id] : [section_key];
+      const whereParts = ["section_key = ?"];
+      const whereArgs = [section_key];
+
+      if (device_id) { whereParts.push("device_id = ?"); whereArgs.push(device_id); }
+      else { whereParts.push("device_id IS NULL"); }
+
+      if (project_id) { whereParts.push("project_id = ?"); whereArgs.push(project_id); }
+      else { whereParts.push("project_id IS NULL"); }
+
+      const whereClause = whereParts.join(" AND ");
 
       const result = await db.execute({
         sql: `DELETE FROM crow_context WHERE ${whereClause}`,
         args: whereArgs,
       });
 
-      const target = device_id ? ` (device: ${device_id})` : "";
+      // Emit sync entry
+      if (syncManager) {
+        syncManager.emitChange("crow_context", "delete", { section_key, device_id: device_id ?? null, project_id: project_id ?? null }).catch(() => {});
+      }
+
+      const scope = [device_id ? `device: ${device_id}` : null, project_id ? `project: ${project_id}` : null].filter(Boolean).join(", ");
+      const target = scope ? ` (${scope})` : "";
       return {
         content: [
           {

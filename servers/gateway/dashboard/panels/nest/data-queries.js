@@ -145,5 +145,14 @@ export async function getNestData(db, lang) {
     }));
   } catch {}
 
-  return { pinnedItems, bundles, dockerInfo, dbStats, recentChats, recentSessions };
+  // Registered instances
+  let instances = [];
+  try {
+    const { rows } = await db.execute(
+      "SELECT * FROM crow_instances WHERE status != 'revoked' ORDER BY is_home DESC, name ASC"
+    );
+    instances = rows;
+  } catch {}
+
+  return { pinnedItems, bundles, dockerInfo, dbStats, recentChats, recentSessions, instances };
 }

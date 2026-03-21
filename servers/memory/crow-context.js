@@ -31,7 +31,7 @@ export const PROTECTED_SECTIONS = [
  * @param {string} [options.deviceId=null] - Device ID for per-device overrides (null = global only)
  * @returns {Promise<string>} Assembled markdown document
  */
-export async function generateCrowContext(db, { includeDynamic = true, platform = "generic", deviceId = null } = {}) {
+export async function generateCrowContext(db, { includeDynamic = true, platform = "generic", deviceId = null, projectId = null } = {}) {
   let sections;
 
   try {
@@ -48,8 +48,8 @@ export async function generateCrowContext(db, { includeDynamic = true, platform 
     return getFallbackDocument();
   }
 
-  // Merge global + device-specific sections (device overrides global for same section_key)
-  sections = mergeDeviceSections(sections, deviceId);
+  // Merge global + device-specific + project-specific sections
+  sections = mergeScopedSections(sections, deviceId, projectId);
 
   // Assemble static sections
   const parts = ["# crow.md — Cross-Platform Behavioral Context\n"];
@@ -141,48 +141,68 @@ async function generateDynamicSections(db) {
 }
 
 /**
- * Merge global and device-specific context sections.
+ * Merge context sections across three scoping dimensions:
+ *   1. Global (device_id NULL, project_id NULL) — base layer
+ *   2. Device-specific (device_id set, project_id NULL) — overrides global
+ *   3. Project-specific (project_id set, device_id NULL) — overrides global
+ *   4. Device+project (both set) — highest priority override
  *
- * Global sections have device_id = NULL. Device-specific sections override
- * global sections with the same section_key. Device-only sections (no global
- * counterpart) are appended at the end.
+ * Priority order: device+project > project > device > global
+ * Sections only for other devices/projects are ignored.
  *
- * @param {Array} sections - All sections (global + device-specific)
- * @param {string|null} deviceId - Target device ID, or null for global only
+ * @param {Array} sections - All sections (all scopes)
+ * @param {string|null} deviceId - Target device ID, or null
+ * @param {number|null} projectId - Target project ID, or null
  * @returns {Array} Merged sections
  */
-function mergeDeviceSections(sections, deviceId) {
-  if (!deviceId) {
-    // No device specified — return only global sections
-    return sections.filter((s) => !s.device_id);
-  }
-
-  const globalSections = new Map();
-  const deviceSections = new Map();
+function mergeScopedSections(sections, deviceId, projectId) {
+  // Bucket sections by scope level
+  const global = new Map();       // device_id NULL, project_id NULL
+  const device = new Map();       // device_id match, project_id NULL
+  const project = new Map();      // project_id match, device_id NULL
+  const deviceProject = new Map(); // both match
 
   for (const section of sections) {
-    if (!section.device_id) {
-      globalSections.set(section.section_key, section);
-    } else if (section.device_id === deviceId) {
-      deviceSections.set(section.section_key, section);
+    const dMatch = section.device_id === deviceId;
+    const dNull = !section.device_id;
+    const pMatch = section.project_id === projectId;
+    const pNull = !section.project_id;
+
+    if (dNull && pNull) {
+      global.set(section.section_key, section);
+    } else if (deviceId && dMatch && pNull) {
+      device.set(section.section_key, section);
+    } else if (projectId && pMatch && dNull) {
+      project.set(section.section_key, section);
+    } else if (deviceId && projectId && dMatch && pMatch) {
+      deviceProject.set(section.section_key, section);
     }
-    // Sections for other devices are ignored
+    // Sections for other devices/projects are ignored
   }
 
-  // Start with global sections, override with device-specific
+  // Merge with priority: deviceProject > project > device > global
+  const allKeys = new Set([
+    ...global.keys(),
+    ...device.keys(),
+    ...project.keys(),
+    ...deviceProject.keys(),
+  ]);
+
   const merged = [];
-  for (const [key, section] of globalSections) {
-    merged.push(deviceSections.has(key) ? deviceSections.get(key) : section);
+  for (const key of allKeys) {
+    const section = deviceProject.get(key) || project.get(key) || device.get(key) || global.get(key);
+    if (section) merged.push(section);
   }
 
-  // Append device-only sections (no global counterpart)
-  for (const [key, section] of deviceSections) {
-    if (!globalSections.has(key)) {
-      merged.push(section);
-    }
-  }
+  // Preserve sort order
+  merged.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0) || a.id - b.id);
 
   return merged;
+}
+
+// Backward-compatible alias
+function mergeDeviceSections(sections, deviceId) {
+  return mergeScopedSections(sections, deviceId, null);
 }
 
 /**
@@ -215,7 +235,7 @@ function getPlatformHint(platform) {
  * @param {string} [options.deviceId=null] - Device ID for per-device overrides
  * @returns {Promise<string|null>} Condensed context or null if unavailable
  */
-export async function generateCondensedContext(db, { routerStyle = false, deviceId = null } = {}) {
+export async function generateCondensedContext(db, { routerStyle = false, deviceId = null, projectId = null } = {}) {
   const essentialKeys = [
     "identity",
     "memory_protocol",
@@ -227,7 +247,7 @@ export async function generateCondensedContext(db, { routerStyle = false, device
   let sections;
   try {
     const result = await db.execute({
-      sql: "SELECT section_key, section_title, content, device_id FROM crow_context WHERE enabled = 1 AND section_key IN (?, ?, ?, ?, ?) ORDER BY sort_order ASC",
+      sql: "SELECT section_key, section_title, content, device_id, project_id FROM crow_context WHERE enabled = 1 AND section_key IN (?, ?, ?, ?, ?) ORDER BY sort_order ASC",
       args: essentialKeys,
     });
     sections = result.rows;
@@ -239,8 +259,8 @@ export async function generateCondensedContext(db, { routerStyle = false, device
     return null;
   }
 
-  // Merge global + device-specific sections
-  sections = mergeDeviceSections(sections, deviceId);
+  // Merge global + device-specific + project-specific sections
+  sections = mergeScopedSections(sections, deviceId, projectId);
 
   const parts = ["Crow — Behavioral Context\n"];
 

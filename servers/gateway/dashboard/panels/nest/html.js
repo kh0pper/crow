@@ -31,6 +31,9 @@ const TILE_ICONS = {
   blog_draft: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`,
   project: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>`,
 
+  // Instance
+  instance: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>`,
+
   // Fallback
   default: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/></svg>`,
 };
@@ -73,7 +76,7 @@ function getAddonIcon(iconKey) {
 }
 
 export function buildNestHTML(data, lang) {
-  const { pinnedItems, bundles } = data;
+  const { pinnedItems, bundles, instances } = data;
 
   let tileIndex = 0;
 
@@ -150,10 +153,33 @@ export function buildNestHTML(data, lang) {
     </a>`;
   }).join("");
 
+  // --- Instance Tiles (shown only if instances are registered) ---
+  let instancesHtml = "";
+  if (instances && instances.length > 0) {
+    const instanceIcon = getTileIcon("instance");
+    const instanceTiles = instances.map(inst => {
+      const statusColor = inst.status === "active" ? "var(--crow-success)"
+        : inst.status === "offline" ? "var(--crow-error)"
+        : "var(--crow-text-muted)";
+      const homeLabel = inst.is_home ? ` <span style="font-size:0.6rem;opacity:0.7;text-transform:uppercase;letter-spacing:0.05em">home</span>` : "";
+      const statusDot = `<span class="nest-app-status" style="background:${statusColor}" title="${escapeHtml(inst.status)}"></span>`;
+      const href = inst.gateway_url || "#";
+      const delay = tileIndex++ * 40;
+      return `<a href="${escapeHtml(href)}" class="nest-app nest-app--instance" style="animation-delay:${delay}ms"${inst.gateway_url ? ` target="_blank"` : ""}>
+        <div class="nest-app-icon">${statusDot}${instanceIcon}</div>
+        <div class="nest-app-label">${escapeHtml(inst.name)}${homeLabel}</div>
+        <div class="nest-app-meta" style="font-size:0.6rem;color:var(--crow-text-muted);margin-top:2px">${escapeHtml(inst.hostname || "")}</div>
+      </a>`;
+    }).join("");
+
+    instancesHtml = `<div class="nest-section-label" style="padding:0.5rem 1rem 0;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;color:var(--crow-text-muted);font-weight:600">${t("nest.instances", lang)}</div>
+    <div class="nest-grid nest-grid--instances">${instanceTiles}</div>`;
+  }
+
   // --- App Grid (panels + bundles, no quick actions) ---
   const gridHtml = `<div class="nest-grid">
     ${panelTiles}${bundleTiles}
   </div>`;
 
-  return `${welcomeHtml}${pinnedHtml}${gridHtml}`;
+  return `${welcomeHtml}${pinnedHtml}${instancesHtml}${gridHtml}`;
 }

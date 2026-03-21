@@ -118,6 +118,9 @@ servers/gateway/routes/songbook.js → Public songbook routes (/blog/songbook/*)
 servers/gateway/dashboard/     → Crow's Nest UI (auth, layout, panels)
 servers/gateway/dashboard/settings/ → Settings panel: registry, menu renderer, 14 section modules
 servers/gateway/auth.js        → OAuth 2.1 provider (CrowOAuthProvider, SQLite-backed)
+servers/gateway/instance-registry.js → Instance registry: register, list, heartbeat, discovery, token management
+servers/sharing/instance-sync.js → InstanceSyncManager: Hypercore-based P2P replication with Lamport timestamps and conflict detection
+servers/sharing/peer-manager.js → Hyperswarm peer discovery + instance sync topic (joinInstanceSync, onInstanceConnected)
 servers/gateway/proxy.js       → Proxy layer for external MCP servers
 servers/gateway/router.js      → Tool router (7 category tools, ~75% context reduction)
 servers/gateway/ai/provider.js → AI provider registry, adapter factory, hot-reload from .env
@@ -153,7 +156,7 @@ Data lives in `~/.crow/data/` (preferred) or `./data/` (fallback). Resolution or
 
 Uses `@libsql/client` which supports both local SQLite files (default: `~/.crow/data/crow.db`, gitignored) and remote Turso databases. Set `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` for cloud; otherwise falls back to local file. Client factory in `servers/db.js` (also exports `resolveDataDir()`, `sanitizeFtsQuery()`, and `escapeLikePattern()` utility functions). Schema defined in `scripts/init-db.js`. Key tables:
 
-- **memories** — Full-text searchable (FTS5 virtual table `memories_fts`), with triggers to keep FTS in sync on insert/update/delete
+- **memories** — Full-text searchable (FTS5 virtual table `memories_fts`), with triggers to keep FTS in sync on insert/update/delete. Scope columns: `instance_id` (origin instance), `project_id` (project scope) — these are on the main table only (NOT in FTS), filtered via JOIN
 - **research_projects** — Projects with `type` column (research, data_connector, extensible). → **research_sources** → **research_notes** — Foreign keys with `ON DELETE SET NULL`
 - **data_backends** — External MCP server registrations linked to projects. Stores connection references (env var names, not secrets). Status tracked by gateway proxy.
 - **sources_fts** — FTS5 index over sources
@@ -172,6 +175,9 @@ Uses `@libsql/client` which supports both local SQLite files (default: `~/.crow/
 - **songbook_setlists** — Setlist containers (name, description, visibility)
 - **songbook_setlist_items** — Songs in setlists (setlist_id FK, post_id FK, position, key_override, notes) with unique index
 - **blog_comments** — Comment stub for forward-compatibility (post_id FK, contact_id FK, status, nostr_event_id)
+- **crow_instances** — Instance registry for multi-instance chaining (id TEXT PK, name, crow_id, directory, hostname, tailscale_ip, gateway_url, sync_url, sync_profile, topics, is_home, auth_token_hash, last_seen_at, status)
+- **sync_conflicts** — Conflict log for instance sync (table_name, row_id, winning/losing instance_id + lamport_ts + data, resolved flag)
+- **sync_state** — Per-instance Lamport counter and checkpoint tracking (instance_id PK, local_counter, last_applied_seq_per_peer JSON)
 
 All FTS sync is handled by SQLite triggers defined in `init-db.js`. If you change the memories, sources, or blog_posts schema, you must also update the corresponding FTS virtual table and triggers.
 
@@ -195,15 +201,19 @@ All servers deliver a condensed crow.md (~1KB) via the MCP `instructions` field 
 
 **Router variant:** `generateInstructions({ routerStyle: true })` produces category-style tool names (`crow_memory action: "store_memory"`) instead of direct names.
 
-### Per-device context overrides
+### Per-device and per-project context overrides
 
-The `crow_context` table supports per-device behavioral customization via the `device_id` column. Global sections have `device_id = NULL`; device-specific overrides have a non-null `device_id` string (e.g., `"grackle"`, `"phone"`, `"work-laptop"`).
+The `crow_context` table supports scoped behavioral customization via `device_id` and `project_id` columns. Four scope levels exist:
+1. **Global** (`device_id NULL`, `project_id NULL`) — base layer, applies everywhere
+2. **Device-specific** (`device_id` set, `project_id NULL`) — overrides global for a device
+3. **Project-specific** (`project_id` set, `device_id NULL`) — overrides global for a project
+4. **Device+project** (both set) — highest priority, overrides all others
 
-**How merging works:** When `deviceId` is passed to `generateCrowContext()`, `generateCondensedContext()`, or `generateInstructions()`, the system merges global + device-specific sections. Device-specific sections override globals with the same `section_key`. Device-only sections (no global counterpart) are appended.
+**How merging works:** When `deviceId` and/or `projectId` are passed to `generateCrowContext()`, `generateCondensedContext()`, or `generateInstructions()`, the `mergeScopedSections()` function in `crow-context.js` merges all matching scopes. Priority: device+project > project > device > global. Sections only for other devices/projects are ignored.
 
-**Tool support:** All context tools (`crow_get_context`, `crow_update_context_section`, `crow_add_context_section`, `crow_list_context_sections`, `crow_delete_context_section`) accept an optional `device_id` parameter. Protected sections can have device overrides created via `crow_add_context_section` with a `device_id`; deleting a device override restores the global version.
+**Tool support:** All context tools (`crow_get_context`, `crow_update_context_section`, `crow_add_context_section`, `crow_list_context_sections`, `crow_delete_context_section`) accept optional `device_id` and `project_id` parameters. Protected sections can have scoped overrides; deleting a scoped override restores the next-lower scope.
 
-**Schema:** Two partial unique indexes enforce uniqueness — `idx_crow_context_global` (on `section_key WHERE device_id IS NULL`) and `idx_crow_context_device` (on `section_key, device_id WHERE device_id IS NOT NULL`).
+**Schema:** Four partial unique indexes enforce uniqueness — `idx_crow_context_global` (section_key WHERE both NULL), `idx_crow_context_device` (section_key, device_id WHERE project_id NULL), `idx_crow_context_project` (section_key, project_id WHERE device_id NULL), `idx_crow_context_device_project` (section_key, device_id, project_id WHERE both NOT NULL).
 
 ### MCP Prompts
 
