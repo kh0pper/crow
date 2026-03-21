@@ -5,6 +5,8 @@ export default defineConfig({
   description: 'AI-powered research and project management platform — works with Claude, ChatGPT, Gemini, Grok, Cursor, and more',
   base: '/software/crow/',
 
+  srcExclude: ['superpowers/**'],
+
   head: [
     ['meta', { name: 'theme-color', content: '#1d1d1f' }],
   ],
