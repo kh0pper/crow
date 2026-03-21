@@ -467,14 +467,24 @@ export async function loadRemoteInstances() {
           throw new Error(`Health check returned ${resp.status}`);
         }
 
-        console.log(`  [proxy] Instance "${inst.name}" (${inst.hostname}): reachable`);
+        console.log(`  [proxy] Instance "${inst.name}" (${inst.hostname}): reachable, connecting...`);
 
-        // Create a proxy "client" object that forwards tool calls via HTTP
-        const remoteClient = createRemoteInstanceClient(inst);
+        // Create a proper MCP client using StreamableHTTPClientTransport
+        const remoteClient = await createRemoteInstanceClient(inst);
+
+        // Discover tools on the remote instance
+        let remoteTools = [];
+        try {
+          const { tools } = await remoteClient.listTools();
+          remoteTools = tools;
+          console.log(`  [proxy] Instance "${inst.name}": ${remoteTools.length} tools discovered`);
+        } catch (err) {
+          console.warn(`  [proxy] Instance "${inst.name}": tool discovery failed — ${err.message}`);
+        }
 
         connectedServers.set(instanceKey, {
           client: remoteClient,
-          tools: [], // Populated lazily via crow_discover on the remote
+          tools: remoteTools,
           status: "connected",
           isRemote: true,
           instanceId: inst.id,
@@ -518,107 +528,30 @@ export async function loadRemoteInstances() {
 }
 
 /**
- * Create a proxy client for a remote Crow instance.
- * Implements callTool() by forwarding via HTTP POST to the remote gateway.
+ * Create a proper MCP client connected to a remote Crow instance's gateway.
+ * Uses the SDK's StreamableHTTPClientTransport for session-aware communication.
  */
-function createRemoteInstanceClient(instance) {
+async function createRemoteInstanceClient(instance) {
+  const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+
   const baseUrl = instance.gateway_url.replace(/\/$/, "");
+  const mcpUrl = new URL(`${baseUrl}/memory/mcp`);
 
-  return {
-    /**
-     * Forward a tool call to the remote instance's router endpoint.
-     * Uses the router's crow_discover/crow_tools pattern via direct MCP RPC.
-     */
-    async callTool({ name, arguments: args }) {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
+  const transport = new StreamableHTTPClientTransport(mcpUrl);
 
-      try {
-        // POST a JSON-RPC request to the remote gateway's router endpoint
-        const headers = { "Content-Type": "application/json" };
+  const client = new Client({
+    name: `crow-federation-${instance.id}`,
+    version: "0.1.0",
+  });
 
-        // Add bearer token auth if available
-        if (instance.auth_token_hash) {
-          // The token itself isn't stored locally — the hash is.
-          // For now, use no-auth mode or an env var pattern.
-          // TODO: Phase 5 enhancement — store encrypted tokens per-instance
-        }
+  await Promise.race([
+    client.connect(transport),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Federation connection timed out (10s)")), 10_000)
+    ),
+  ]);
 
-        const rpcBody = {
-          jsonrpc: "2.0",
-          id: Date.now(),
-          method: "tools/call",
-          params: { name, arguments: args || {} },
-        };
-
-        const resp = await fetch(`${baseUrl}/memory/mcp`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(rpcBody),
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeout);
-
-        if (!resp.ok) {
-          throw new Error(`Remote returned HTTP ${resp.status}`);
-        }
-
-        const result = await resp.json();
-
-        if (result.error) {
-          return {
-            content: [{ type: "text", text: `Remote error: ${result.error.message || JSON.stringify(result.error)}` }],
-            isError: true,
-          };
-        }
-
-        return result.result || result;
-      } catch (err) {
-        clearTimeout(timeout);
-        const isTimeout = err.name === "AbortError";
-        return {
-          content: [{
-            type: "text",
-            text: `Federation error (${instance.name}): ${isTimeout ? "Request timed out (10s)" : err.message}`,
-          }],
-          isError: true,
-        };
-      }
-    },
-
-    /** List tools from the remote instance */
-    async listTools() {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
-
-      try {
-        const rpcBody = {
-          jsonrpc: "2.0",
-          id: Date.now(),
-          method: "tools/list",
-          params: {},
-        };
-
-        const resp = await fetch(`${baseUrl}/memory/mcp`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(rpcBody),
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeout);
-
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
-        const result = await resp.json();
-        return { tools: result.result?.tools || [] };
-      } catch (err) {
-        clearTimeout(timeout);
-        return { tools: [] };
-      }
-    },
-  };
+  return client;
 }
 
 /**
