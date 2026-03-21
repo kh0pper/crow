@@ -37,6 +37,7 @@ import {
 import { SUPPORTED_LANGS } from "./shared/i18n.js";
 import { resolve } from "node:path";
 import { registerPanel, loadExternalPanels, getAllPanels, getVisiblePanels, getPanel } from "./panel-registry.js";
+import { resolveNavGroups } from "./nav-registry.js";
 import { createDbClient } from "../../db.js";
 
 // Import built-in panels
@@ -49,6 +50,7 @@ import extensionsPanel from "./panels/extensions.js";
 import skillsPanel from "./panels/skills.js";
 import projectsPanel from "./panels/projects.js";
 import settingsPanel from "./panels/settings.js";
+import contactsPanel from "./panels/contacts.js";
 import bundlesRouterFactory from "../routes/bundles.js";
 
 /**
@@ -71,6 +73,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   registerPanel(extensionsPanel);
   registerPanel(skillsPanel);
   registerPanel(settingsPanel);
+  registerPanel(contactsPanel);
 
   // Load third-party panels (async, non-blocking)
   loadExternalPanels().catch((err) => {
@@ -417,11 +420,6 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // Mount bundles API (protected by dashboard auth above)
   router.use("/dashboard", bundlesRouterFactory());
 
-  // Contacts redirect — absorbed into Messages panel
-  router.get("/dashboard/contacts", (req, res) => {
-    res.redirect("/dashboard/messages");
-  });
-
   // Dashboard home — redirect to first visible panel
   router.get("/dashboard", (req, res) => {
     const visible = getVisiblePanels();
@@ -446,6 +444,14 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     let lang = "en";
     try {
       const visiblePanels = getVisiblePanels();
+
+      // Resolve nav groups for sidebar
+      let navGroups;
+      try {
+        navGroups = await resolveNavGroups(db, visiblePanels);
+      } catch (err) {
+        console.warn("[dashboard] Nav groups resolution failed, using flat nav:", err.message);
+      }
 
       // Get theme + tamagotchi + language preferences
       const [themeResult, tamaResult, langResult, themeSettingsResult] = await Promise.all([
@@ -477,6 +483,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
           ...opts,
           activePanel: panelId,
           panels: visiblePanels,
+          navGroups,
           theme,
           glass,
           serif,

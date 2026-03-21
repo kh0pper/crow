@@ -32,8 +32,10 @@ import deviceContextSection from "../settings/sections/device-context.js";
 import identitySection from "../settings/sections/identity.js";
 import passwordSection from "../settings/sections/password.js";
 import twoFactorSection from "../settings/sections/two-factor.js";
+import navGroupsSection from "../settings/sections/nav-groups.js";
 
 // Register built-in sections
+registerSettingsSection(navGroupsSection);
 registerSettingsSection(themeSection);
 registerSettingsSection(languageSection);
 registerSettingsSection(notificationsSection);
@@ -59,6 +61,7 @@ export default {
   icon: "settings",
   route: "/dashboard/settings",
   navOrder: 90,
+  category: "system",
 
   async handler(req, res, { db, layout, lang }) {
     const sectionId = req.query.section;

@@ -424,6 +424,7 @@ export default {
   icon: "extensions",
   route: "/dashboard/extensions",
   navOrder: 80,
+  category: "tools",
 
   async handler(req, res, { db, layout, lang }) {
     // Handle POST for store management

@@ -26,6 +26,7 @@ export default {
   icon: "project",
   route: "/dashboard/projects",
   navOrder: 13,
+  category: "content",
 
   async handler(req, res, { db, layout, lang }) {
     // --- POST Actions ---

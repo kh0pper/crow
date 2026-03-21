@@ -15,6 +15,7 @@ export default {
   icon: "memory",
   route: "/dashboard/memory",
   navOrder: 15,
+  category: "core",
 
   async handler(req, res, { db, layout, lang }) {
     // Handle POST actions (edit, delete)

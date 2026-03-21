@@ -18,6 +18,7 @@ export default {
   route: "/dashboard/nest",
   navOrder: 1,
   hidden: false,
+  category: "core",
 
   async handler(req, res, { db, lang, layout }) {
     // Handle POST actions (pin/unpin)
