@@ -1,281 +1,100 @@
-# Reflection — Friction Analysis & Improvement Skill
+# Session Reflection
 
-## Description
-A deep-dive friction analysis skill. Identifies what went wrong, analyzes root causes, and proposes concrete improvements. Stores findings in crow-memory for continuous improvement.
+A meta-skill for evaluating *how well things went* and proposing concrete fixes. Identifies friction, maps root causes, writes a fix plan, and implements only after user approval.
 
-For a quick session wrap-up (deliverables, decisions, next steps), use `session-summary.md` instead. Reflection is for when things didn't go smoothly.
-
-Can be invoked as `/reflection` or auto-triggered by the superpowers skill when friction accumulates or context is filling up.
+**Distinct from `session-summary.md`:** Session-summary records *what was done*. Reflection evaluates *how well it went* and fixes problems.
 
 ## When to Use
-- **Auto-trigger**: When superpowers.md detects 2+ friction signals (always via checkpoint — see Transparency below)
-- **Auto-trigger**: When context window is approaching capacity (~80% full)
-- **Manual**: User types `/reflection` or asks to reflect
-- **End of session**: When the session had notable friction (2+ signals). For smooth sessions, use `session-summary.md` instead
-- **NOT needed**: For routine, smooth, short sessions — `session-summary.md` is sufficient
 
-## Transparency
-
-Reflection involves multiple phases of autonomous analysis. Surface progress to the user so they can see what's happening.
-
-### Phase Progress FYI
-Show a brief FYI as each phase begins:
-*[crow: reflection phase 1 — summarizing session accomplishments]*
-*[crow: reflection phase 2 — cataloging friction points]*
-*[crow: reflection phase 4 — analyzing root causes]*
-*[crow: reflection phase 5 — reading relevant files]*
-*[crow: reflection phase 6 — entering plan mode for user review]*
-*[crow: reflection phase 7 — implementing approved changes]*
-*[crow: reflection phase 8 — storing reflection in memory]*
-*[crow: reflection phase 9 — evaluating skill-writing handoff]*
-
-### Auto-Fix Undo
-When auto-applying a minor fix (Phase 9), show:
-*[crow: auto-applied minor fix to \<skill\>.md — \<what changed\>. Say "undo that" to revert.]*
-
-Track the previous file state so "undo that" can restore it within the session.
-
-### Deferred Gap FYI
-When storing a skill gap for next session:
-*[crow: stored skill gap for next session — "\<gap description\>"]*
-
----
+- When a session had notable friction (failed tool calls, user corrections, wasted effort)
+- When the user asks to reflect (`/reflection` or "reflect on what went wrong")
+- At end of session if 2+ friction signals occurred
+- NOT for routine smooth sessions
 
 ## Workflow
 
-### Phase 1: Session Summary
-Capture what was accomplished:
-1. List deliverables completed (files created, messages sent, research done)
-2. List decisions made and their rationale
-3. List research conducted and sources added
-4. Note any unfinished work or next steps
+### Step 1: Catalog Friction Points
 
-Store as memory (write content in user's preferred language; use bilingual tags per `skills/i18n.md`):
-```
-crow_store_memory({
-  content: "<structured summary — in user's preferred language>",
-  category: "project",
-  tags: "session-summary, <localized:resumen-de-sesión>, <date>, <project-names>",
-  importance: 7
-})
-```
+Review the session for moments where:
+- A tool call failed or required multiple attempts
+- The user had to correct or redirect the approach
+- A workflow took significantly more steps than expected
+- Information was missing or had to be fetched unexpectedly
+- The user expressed frustration or had to intervene
 
-### Phase 2: Friction Catalog
-Review the session for friction points:
-- Tool calls that failed or required multiple attempts
-- User corrections or redirections
-- Workflows that took more steps than expected
-- Missing information that had to be fetched unexpectedly
-- User frustration or intervention
-
-### Phase 3: Classify Severity
+### Step 2: Classify Severity
 
 | Level | Meaning | Example |
 |-------|---------|---------|
-| HIGH | Blocked work or user had to redo | Auth failure on critical API, wrong file overwritten |
-| MEDIUM | Wasted time but self-recovered | Search query needed 3 tries, wrong tool used first |
-| LOW | Minor inconvenience | Slightly verbose output, extra confirmation step |
+| HIGH | Blocked work or user had to redo | Wrong database used, container misconfigured |
+| MEDIUM | Wasted time but self-recovered | Needed 3 tries to find a file, wrong tool first |
+| LOW | Minor inconvenience | Extra confirmation step, verbose output |
 
-### Phase 4: Root Cause Analysis
-For each friction point, determine the root cause:
+### Step 3: Map Root Causes
+
+For each friction point, determine:
 - **Code/tool bug** — The tool should work but doesn't → needs a code fix
 - **Missing/incomplete skill** — The workflow isn't documented → needs skill refinement
-- **Behavioral context issue** — crow.md instructions are missing, unclear, or wrong → needs crow.md section update (see Phase 7b)
+- **Behavioral context issue** — crow.md instructions are missing/wrong → needs crow.md update
 - **Missing memory** — Context should have been stored earlier → needs memory update
 - **External issue** — API down, rate limited, etc. → note for awareness
 
-**Prefer code fixes over skill workarounds.** If a tool should work but doesn't, the right fix is in the code, not adding a "remember to work around this" note to a skill.
+**Prefer code fixes over skill workarounds.** If a tool should work but doesn't, fix the tool.
 
-#### Skill Metrics Update
-When a skill is identified as a friction root cause, log a friction incident (content in user's language, tags bilingual):
+### Step 4: Read Relevant Files
+
+Load each skill file, code file, or config that needs changes. Don't propose changes to files you haven't read. Understand the current state before proposing fixes.
+
+### Step 5: Present the Fix Plan
+
+**This is the critical step.** Present a structured plan covering ALL identified friction points:
+
 ```
-crow_store_memory({
-  content: "Skill friction: <skill-name>.md — <description in user's language>. Incident date: <date>. Severity: <HIGH/MEDIUM/LOW>.",
-  category: "learning",
-  tags: "skill-metrics, <localized:métricas-de-habilidad>, skill-friction, <localized:fricción-de-habilidad>, <skill-name>",
-  importance: 6
-})
+## Reflection Fix Plan
+
+### Fix 1: <friction point> (HIGH/MEDIUM/LOW)
+- **Root cause:** <code bug / skill gap / missing memory / etc.>
+- **File(s):** <exact paths>
+- **Change:** <specific description of what to change>
+- **Verification:** <how to confirm the fix works>
+
+### Fix 2: ...
+
+### Memory updates:
+- <what to store for next time>
 ```
 
-When crow.md behavioral context is identified as a friction root cause, log with crow-specific tags:
-```
-crow_store_memory({
-  content: "Behavioral context friction: crow.md section '<section_key>' — <description in user's language>. Incident date: <date>. Severity: <HIGH/MEDIUM/LOW>.",
-  category: "learning",
-  tags: "skill-metrics, <localized>, crow-context-friction, <localized>, <section_key>",
-  importance: 6
-})
-```
-This builds a per-skill friction history that skill-writing can query to identify chronically problematic skills.
+**On Claude Code:** Use `EnterPlanMode` to present the plan if available. The user reviews and approves/revises before implementation.
 
-### Phase 5: Read Relevant Files
+**On other platforms (Claude.ai, ChatGPT, BYOAI chat):** Present the plan inline and explicitly ask: "Should I apply these fixes? Reply with the fix numbers to approve, or 'all' to approve everything."
 
-Load each skill file or code file that needs changes to understand the current state. Don't propose changes to files you haven't read. This grounds the plan in real code, not assumptions.
+**Do NOT skip this step.** Do NOT auto-apply fixes without presenting the plan first. The user must see what will change and approve it.
 
-### Phase 6: Enter Plan Mode
+### Step 6: Implement Approved Changes
 
-**This is the critical step.** Call `EnterPlanMode` and write a plan covering:
+After user approval:
+1. Apply each approved fix (code edits, skill updates, memory stores)
+2. Show a brief note for each change applied
+3. Run verification steps
+4. Commit if code changes were made
 
-1. Each friction point with severity and root cause classification
-2. **Code fixes** — Specific file paths and the exact changes needed
-3. **Skill refinements** — Which skill files need updates and what to add/change
-4. **crow.md section updates** — Which crow.md sections need content changes (use `crow_update_context_section` or `crow_add_context_section`)
-5. **Memory updates** — What should be stored for next time
-6. **Verification steps** — How to confirm each fix works (run tests, check behavior, etc.)
+### Step 7: Store Reflection
 
-The user reviews and approves/revises before any changes are implemented. This lets the user redirect — e.g., from a skill workaround to a proper code fix, or to deprioritize a low-severity issue.
-
-**Do NOT implement changes before the plan is approved.** The plan is the gate.
-
-### Phase 7: Implement Approved Changes
-
-After user approval, exit plan mode and:
-1. Make the approved changes (code fixes, skill edits, crow.md updates)
-2. Run any verification steps (tests, linting, manual checks)
-3. Commit changes if appropriate
-
-### Phase 8: Store Reflection
-Store the reflection in crow-memory (content in user's preferred language, tags bilingual):
+After fixes are applied (or if user declines fixes), store a reflection note:
 
 ```
 crow_store_memory({
-  content: "# Reflection / <localized>: <date>\n\n## Session Topic / <localized>: <topic>\n\n## Friction Points / <localized>\n### 1. <point> (HIGH/MEDIUM/LOW)\n- What happened: <description in user's language>\n- Root cause: <code bug / skill gap / missing memory>\n- Fix applied: <what was changed, in user's language>\n\n## Changes Made / <localized>\n- <file>: <what changed>\n\n## Open Issues / <localized>\n- <anything unresolved>",
+  content: "# Reflection: <date>\n\n## Friction Points\n### 1. <point> (SEVERITY)\n- What happened: <description>\n- Root cause: <classification>\n- Fix applied: <what was changed, or 'deferred'>\n\n## Changes Made\n- <file>: <what changed>\n\n## Open Issues\n- <anything unresolved>",
   category: "learning",
-  tags: "reflection, <localized:reflexión>, session-review, <localized:revisión-de-sesión>, <date>, <project-names>",
+  tags: "reflection, session-review, <date>",
   importance: 8
 })
 ```
 
-### Phase 9: Skill-Writing Handoff
-When Phase 4 identifies a root cause of **"Missing/incomplete skill"**, hand off to the skill-writing workflow:
+## Key Principles
 
-**If the user is still engaged (mid-session or has time):**
-1. Classify the needed change as **minor** or **major** (see classification below)
-2. **Minor fixes** (add a tip, reorder steps, fix a tool reference, add an edge case): Apply the edit directly, log it in memory, and inform the user it was auto-applied
-3. **Major changes** (new skill, structural rewrite, new triggers, merge/split skills): Propose via the skill-writing consent protocol — describe the change and wait for approval
-
-**If the session is ending or user is wrapping up:**
-1. Store a structured skill gap entry in memory for deferred pickup (content in user's language, tags bilingual):
-```
-crow_store_memory({
-  content: "Skill gap identified: <description in user's language>. Affected skill: <skill-name or 'new skill needed'>. Suggested fix: <specific change in user's language>. Source: reflection on <date>.",
-  category: "learning",
-  tags: "skill-gap, <localized:brecha-de-habilidad>, skill-writing-queue, <localized:cola-de-escritura>, <skill-name>",
-  importance: 8
-})
-```
-2. Skill-writing will pick this up at the next session start
-
-### Phase 9b: crow.md Update Handoff
-When Phase 4 identifies a root cause of **"Behavioral context issue"**, update the crow.md behavioral context:
-
-**If the user is still engaged (mid-session or has time):**
-1. Classify the needed change as **minor** or **major** (see crow.md classification below)
-2. **Minor fixes** (add a tip, fix inaccurate instruction, add edge case): Apply via `crow_update_context_section` directly, log in memory, inform the user
-3. **Major changes** (restructure section, add new section, change core protocol logic, disable/rewrite protected section): Propose via checkpoint — describe the change and wait for approval
-
-**If the session is ending or user is wrapping up:**
-1. Store a structured crow.md gap entry in memory for deferred pickup (content in user's language, tags bilingual):
-```
-crow_store_memory({
-  content: "crow.md context gap: <description in user's language>. Affected section: <section_key>. Suggested fix: <specific change in user's language>. Source: reflection on <date>.",
-  category: "learning",
-  tags: "crow-context-friction, <localized>, skill-writing-queue, <localized>, <section_key>",
-  importance: 8
-})
-```
-2. Skill-writing will pick this up at the next session start (it searches for `crow-context-friction` tags)
-
-#### crow.md Minor vs Major Classification
-
-| Change Type | Classification | Action |
-|---|---|---|
-| Add/edit a tip or clarification in a section | Minor | Auto-apply via `crow_update_context_section` |
-| Fix inaccurate or outdated instruction | Minor | Auto-apply |
-| Add an edge case or caveat | Minor | Auto-apply |
-| Reorder or restructure a section | Major | Ask first |
-| Add a new custom section | Major | Ask first |
-| Change core protocol logic (memory, research, session) | Major | Ask first |
-| Disable or significantly rewrite a protected section | Major | Ask first |
-
-#### crow.md Auto-Fix Transparency
-When auto-applying a minor crow.md fix, show:
-*[crow: auto-updated crow.md section "\<section_key\>" — \<what changed\>. Say "undo that" to revert.]*
-
-Track the previous section content so "undo that" can restore it within the session.
-
-After any crow.md update (minor or major), store a record:
-```
-crow_store_memory({
-  content: "crow.md updated: section '<section_key>' — <what changed, in user's language>. Source: reflection on <date>.",
-  category: "learning",
-  tags: "crow-context-update, <localized>, reflection, <date>",
-  importance: 7
-})
-```
-
-#### Minor vs Major Classification
-
-| Change Type | Classification | Action |
-|---|---|---|
-| Add/edit a tip or best practice | Minor | Auto-apply |
-| Reorder steps for clarity | Minor | Auto-apply |
-| Fix a tool name or reference | Minor | Auto-apply |
-| Add an edge case or caveat | Minor | Auto-apply |
-| Add a new workflow step | Major | Ask first |
-| Add/change trigger conditions | Major | Ask first |
-| Create an entirely new skill | Major | Ask first |
-| Rewrite a section structurally | Major | Ask first |
-| Merge or split skills | Major | Ask first |
-| Change which tools a skill uses | Major | Ask first |
-
----
-
-## Standalone Mode (`/reflection`)
-When invoked standalone (not as part of session end):
-- Skip Phase 1 (session summary)
-- Focus on Phases 2-8 (friction analysis, plan mode review, implementation)
-- Useful for deep-diving into a specific problem mid-session
-
----
-
-## Integration with Session Protocol
-In `session-context.md`, the end-of-session protocol should:
-1. Run standard session-end steps (store context, update projects)
-2. If the session had notable friction → run this reflection skill
-3. If the session was smooth → skip reflection, just do summary
-
----
-
-## Language Adaptation
-
-All reflection output must follow `skills/i18n.md`:
-
-### Output Language
-- All user-facing reflection output (friction catalog, proposals, summaries) → user's stored language preference
-- Phase names appear bilingual: "Phase 1: Session Summary / Fase 1: Resumen de Sesión"
-- Technical identifiers (tag names, tool names, file paths) stay in English
-
-### Memory Entries
-- All `crow_store_memory` calls in this skill write content in user's preferred language
-- Tags use bilingual format: English canonical + localized (see tag templates above)
-
-### Auto-Fix Notifications
-- When auto-applying minor fixes (Phase 7), inform the user in their preferred language
-- Example (Spanish): "Se aplicó automáticamente una corrección menor a `reflection.md`: se agregó un caso extremo."
-
----
-
-## Memory Tags Reference
-- `session-summary` / `resumen-de-sesión` — What was accomplished
-- `reflection` / `reflexión` — Friction analysis and improvement proposals
-- `session-review` / `revisión-de-sesión` — Combined tag for searching all session meta-notes
-- `learning` / `aprendizaje` — Category for insights that improve future sessions
-- `skill-metrics` / `métricas-de-habilidad` — Skill usage and friction tracking data
-- `skill-friction` / `fricción-de-habilidad` — Specific friction incidents tied to a skill
-- `skill-gap` / `brecha-de-habilidad` — Identified skill gaps queued for skill-writing pickup
-- `skill-writing-queue` / `cola-de-escritura` — Deferred skill changes awaiting next session
-- `crow-context-friction` / `fricción-de-contexto-crow` — Friction caused by crow.md behavioral instructions
-- `crow-context-update` / `actualización-de-contexto-crow` — crow.md section changes applied from reflection
-
-*Note: Spanish translations shown as examples. For other languages, generate localized tags on the fly per `skills/i18n.md`.*
+- **Plan before act.** Never apply fixes without presenting a plan and getting approval.
+- **Prefer code fixes** over skill workarounds or memory band-aids.
+- **Be specific.** "Fix the database issue" is not a plan. "Delete ~/.crow/data/crow.db to eliminate the ambiguous fallback" is.
+- **Read before proposing.** Don't suggest changes to files you haven't read.
+- **Verify after applying.** Each fix should have a concrete verification step.
