@@ -199,6 +199,9 @@ app.get("/robots.txt", (req, res) => {
   res.send(body);
 });
 
+// --- Root redirect (convenience for managed hosting users) ---
+app.get("/", (req, res) => res.redirect("/dashboard/nest"));
+
 // --- Health Check ---
 app.get("/health", async (req, res) => {
   const proxyStatus = getProxyStatus();
