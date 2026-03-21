@@ -1,0 +1,25 @@
+{
+  "id": "trilium",
+  "name": "TriliumNext",
+  "version": "1.0.0",
+  "description": "Knowledge base and note-taking — organize notes, clip web pages, and build a personal wiki with ETAPI",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "productivity",
+  "tags": ["notes", "knowledge-base", "wiki", "productivity", "self-hosted"],
+  "icon": "book-open",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["TRILIUM_URL", "TRILIUM_ETAPI_TOKEN"] },
+  "panel": "panel/trilium.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/trilium.md"],
+  "requires": { "env": ["TRILIUM_ETAPI_TOKEN"], "min_ram_mb": 512, "min_disk_mb": 500 },
+  "env_vars": [
+    { "name": "TRILIUM_URL", "description": "TriliumNext server URL", "default": "http://localhost:8088", "required": true },
+    { "name": "TRILIUM_ETAPI_TOKEN", "description": "ETAPI token (Options > ETAPI in TriliumNext)", "required": true, "secret": true },
+    { "name": "TRILIUM_DATA_PATH", "description": "Host path for note data (Docker mode)", "required": false }
+  ],
+  "ports": [8088],
+  "webUI": { "port": 8088, "path": "/", "label": "TriliumNext" },
+  "notes": "Self-host via Docker or connect to existing TriliumNext (set TRILIUM_URL + TRILIUM_ETAPI_TOKEN). Get your ETAPI token from Options > ETAPI in the TriliumNext UI."
+}
