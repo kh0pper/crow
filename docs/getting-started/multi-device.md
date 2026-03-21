@@ -133,6 +133,26 @@ Federation lets you call tools on the remote instance:
 
 This queries both the local database and `server-a`'s database, merging results.
 
+## Example: Oracle Cloud + Google Cloud
+
+A common setup is Oracle Cloud (home, 1GB RAM) + Google Cloud (satellite, 1GB RAM) — two always-free clouds chained together.
+
+### Setup
+
+| Instance | Role | IP (Tailscale) | Guide |
+|----------|------|----------------|-------|
+| Oracle Cloud | Home | `100.x.x.x` | [Setup guide](./oracle-cloud) |
+| Google Cloud | Satellite | `100.y.y.y` | [Setup guide](./google-cloud) |
+
+Follow the Google Cloud guide's [Step 9: Chain with Oracle Cloud](./google-cloud#step-9-chain-with-oracle-cloud) for the complete walkthrough.
+
+### What you get
+
+- **Redundancy** — memories exist on both clouds
+- **Federation** — query Oracle's projects from Google Cloud
+- **Free tier stacking** — separate workloads across two machines
+- **Geographic distribution** — Oracle (your home region) + Google Cloud (US)
+
 ## Troubleshooting
 
 ### Instances show "offline"
@@ -155,6 +175,19 @@ This queries both the local database and `server-a`'s database, merging results.
 ### Sync conflicts
 
 When two instances edit the same memory offline, a conflict is created. Check the Nest dashboard's Instances panel for pending conflicts and resolve them there.
+
+### Tailscale not connecting between clouds
+
+- Verify both machines are on the same Tailscale network: `tailscale status` on both
+- Check that UDP port 41641 is open on both (required for direct connections)
+- Try `tailscale ping <other-ip>` to test connectivity
+- If using Google Cloud, verify the VPC firewall allows Tailscale UDP traffic
+
+### Gateway health check fails from remote machine
+
+- Verify the gateway is running: `curl http://localhost:3001/health` on the machine itself
+- Check UFW: `sudo ufw status` — port 3001 should be allowed from `100.64.0.0/10` (Tailscale)
+- Check cloud firewall rules (Oracle Security Lists / Google VPC Firewall)
 
 ## Next Steps
 

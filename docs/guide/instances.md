@@ -7,6 +7,18 @@ description: Connect multiple Crow installations across machines into a unified 
 
 Run Crow on multiple machines — a home server, a cloud VPS, a Raspberry Pi — and chain them together under a single identity. Memories sync automatically, and you can call tools on any instance from any other.
 
+## Why Chain Instances?
+
+| Benefit | How it helps |
+|---------|-------------|
+| **Redundancy** | If one instance goes down, your data is safe on the other |
+| **Free tier stacking** | Combine Oracle Cloud + Google Cloud for 2GB total RAM at zero cost |
+| **Project isolation** | Dedicate instances to different workstreams (research on one, data scraping on another) |
+| **Geographic distribution** | Place instances in different regions for lower latency |
+| **Offline resilience** | Satellites work independently when disconnected, then sync when reconnected |
+
+The simplest chain is two always-free cloud VMs: [Oracle Cloud](../getting-started/oracle-cloud) as home + [Google Cloud](../getting-started/google-cloud) as satellite. See the [Multi-Device Quick Start](../getting-started/multi-device) to set it up in 15 minutes.
+
 ## What is an Instance?
 
 An instance is a directory-scoped Crow installation. Each machine (or each project directory) can host its own instance with its own database, MCP servers, and gateway.

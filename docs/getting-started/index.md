@@ -10,6 +10,12 @@ A permanent cloud server that never sleeps, never expires, and costs nothing. Us
 
 > [Oracle Cloud Setup Guide](./oracle-cloud)
 
+### Google Cloud Free Tier
+
+A permanent free VM (1GB RAM, 30GB disk) in the US. Great as a secondary instance for multi-cloud chaining with Oracle Cloud.
+
+> [Google Cloud Setup Guide](./google-cloud)
+
 ### Home Server (Pi / Always-On Machine)
 
 Run Crow on a Raspberry Pi, old laptop, NUC, or any always-on Linux box. One-command install.
@@ -32,6 +38,10 @@ Pre-configured Crow instance — no setup, no maintenance. Your own subdomain at
 
 - **[Docker](./docker)** — Self-host the gateway with Docker Compose. Best for developers who want full control.
 - **[Cloud Deploy (Legacy)](./cloud-deploy)** — Archived Render deployment guide. Oracle Cloud is recommended for new deployments.
+
+::: info Multi-Instance Chaining
+Run Crow on **multiple free-tier clouds** and chain them together. Your memories sync automatically, and you can call tools on any instance from any other. Set up [Oracle Cloud](./oracle-cloud) + [Google Cloud](./google-cloud), then [chain them](./multi-device).
+:::
 
 ## What You'll Get
 

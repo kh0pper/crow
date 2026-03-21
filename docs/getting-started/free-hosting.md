@@ -7,6 +7,7 @@ Crow can be deployed for free on several platforms. Here's how they compare:
 | Option | Compute | RAM | Storage | Always On? | External DB? | Best For |
 |---|---|---|---|---|---|---|
 | **[Oracle Cloud](./oracle-cloud)** | 1 OCPU (x86) | 1 GB | 47 GB | Yes | No (local SQLite) | Permanent free cloud server |
+| **[Google Cloud](./google-cloud)** | e2-micro (0.25 vCPU) | 1 GB | 30 GB | Yes | No (local SQLite) | Secondary/satellite instance |
 | **[Home Server](./home-server)** | Varies | 4-32 GB | Unlimited | Yes | No (local SQLite) | Full control, all add-ons |
 | **[Desktop Install](./desktop-install)** | Your PC | Your PC | Your PC | While running | No (local SQLite) | Quick start, single machine |
 | **[Managed Hosting](./managed-hosting)** | Shared | Shared | Included | Yes | No | Zero maintenance ($15/mo) |
@@ -44,6 +45,8 @@ Skip all infrastructure. $15/mo or $120/yr gets you a pre-configured Crow instan
 - **Have a Raspberry Pi or old laptop?** → [Home Server](./home-server). Full control, all add-ons supported.
 - **Just want to try Crow?** → [Desktop Install](./desktop-install). Clone, setup, connect — done in 5 minutes.
 - **Don't want to manage anything?** → [Managed Hosting](./managed-hosting). Zero maintenance, live in minutes.
+
+**Our recommendation:** Start with [Oracle Cloud](./oracle-cloud) as your primary instance — it has more RAM and is reliably available. Then add [Google Cloud](./google-cloud) as a satellite and [chain them together](./multi-device) for redundancy and federation. Two always-free clouds, synced automatically.
 
 ::: details Legacy: Render (Archived)
 The Render + Turso deployment path is no longer supported. Turso cloud database support has been removed from Crow — multi-device sync is now handled by Hypercore P2P replication with local SQLite.
