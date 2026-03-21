@@ -50,11 +50,17 @@ Server-rendered web UI with Dark Editorial design. Password-protected, session-b
 
 > **[Crow's Nest Guide](https://maestro.press/software/crow/guide/crows-nest)** · **[Architecture](https://maestro.press/software/crow/architecture/dashboard)**
 
-## Blog Platform
+## Blog & Songbook
 
-Create, edit, and publish blog posts through your AI assistant. Markdown rendering, customizable themes, RSS/Atom feeds, and shareable public URLs via the gateway.
+Create, edit, and publish blog posts through your AI assistant. Markdown rendering, customizable themes, RSS/Atom feeds, and shareable public URLs via the gateway. The built-in **Songbook** lets you manage ChordPro chord charts, transpose songs, generate chord diagrams, and organize setlists.
 
-> **[Blog Guide](https://maestro.press/software/crow/guide/blog)** · **[Architecture](https://maestro.press/software/crow/architecture/blog-server)**
+> **[Blog Guide](https://maestro.press/software/crow/guide/blog)** · **[Songbook Guide](https://maestro.press/software/crow/guide/songbook)** · **[Architecture](https://maestro.press/software/crow/architecture/blog-server)**
+
+## AI Chat Gateway (BYOAI)
+
+Use the Crow's Nest as a chat frontend with your own AI provider — OpenAI, Anthropic, Google, Ollama, or any OpenAI-compatible endpoint. Tool calling routes through Crow's MCP servers, so your AI can access memories, projects, and files during conversations. No API keys leave your server.
+
+> **[Chat Architecture](https://maestro.press/software/crow/architecture/gateway#chat-api)**
 
 ## Works With
 

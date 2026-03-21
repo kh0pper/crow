@@ -58,6 +58,16 @@ Then verify:
 
 > "Search my memories for 'ChatGPT'."
 
+## Troubleshooting OAuth
+
+If the connector fails to connect or tools don't appear:
+
+- **Leave OAuth fields blank if prompted.** Crow uses Dynamic Client Registration — ChatGPT discovers OAuth endpoints automatically from the `.well-known` metadata.
+- **Verify your gateway's OAuth metadata is reachable.** Visit `https://your-crow-server/.well-known/oauth-authorization-server` in your browser — you should see a JSON response with `authorization_endpoint`, `token_endpoint`, and `registration_endpoint`.
+- **Check `CROW_GATEWAY_URL` in your `.env` file.** This must match your actual public URL exactly (including `https://`). If you're using Tailscale Funnel, it should be `https://<hostname>.<tailnet>.ts.net`.
+- **Start a new conversation after gateway restarts.** OAuth sessions are tied to the gateway process. When the gateway restarts, existing sessions become invalid.
+- **Use the `/sse` endpoints, not `/mcp`.** ChatGPT uses the SSE transport, not Streamable HTTP.
+
 ## Cross-Platform Context
 
 Crow automatically delivers behavioral context when ChatGPT connects. During the MCP handshake, ChatGPT receives Crow's identity, memory protocols, session protocol, and transparency rules — no manual setup required.

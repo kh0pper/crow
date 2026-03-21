@@ -75,10 +75,12 @@ The gateway implements OAuth 2.1 with Dynamic Client Registration:
 
 OAuth is backed by SQLite tables (`oauth_clients`, `oauth_tokens`) for persistence across restarts.
 
-Run without auth for development:
+Run without auth for local development only:
 ```bash
 node servers/gateway/index.js --no-auth
 ```
+
+> **Safety guard:** The gateway refuses to start with `--no-auth` if `CROW_GATEWAY_URL` contains a public domain (e.g., `.ts.net`, `.onrender.com`, `.fly.dev`). This prevents accidental exposure of unauthenticated MCP endpoints via Tailscale Funnel or cloud hosting.
 
 ## Integration Proxy
 
@@ -120,11 +122,13 @@ No authentication required — doesn't expose secrets.
 
 ## Security Considerations
 
-- **Never use `--no-auth` in production** — it disables all authentication. The gateway will refuse to start with `--no-auth` when `NODE_ENV=production`
-- **Always deploy behind HTTPS** — Render and Railway provide this automatically. If self-hosting, use a reverse proxy (nginx, Caddy) with TLS
-- The **`/setup` page** is unauthenticated by design — it shows which integrations are connected and endpoint URLs, but never exposes API keys or secrets
+- **Never use `--no-auth` in production** — it disables all authentication. The gateway refuses `--no-auth` when `NODE_ENV=production` or when `CROW_GATEWAY_URL` contains a public domain
+- **Always deploy behind HTTPS** — Render and Railway provide this automatically. If self-hosting, use a reverse proxy (nginx, Caddy) with TLS, or Tailscale Funnel
+- The **`/setup` page** is unauthenticated by design — it only shows a password form (no secrets). Gate it with `CROW_SETUP_TOKEN` for hosted instances
+- **`/api/health`** is protected by dashboard session auth — it exposes system metrics (RAM, disk, CPU). The public **`/health`** endpoint returns only server status (no system info)
 - **OAuth tokens** are stored in the SQLite database and persist across restarts
 - **Rate limiting** is built in — 200 requests per 15 minutes (general) and 20 requests per 15 minutes (auth endpoints: `/authorize`, `/token`, `/register`). For high-traffic deployments, add additional rate limiting via your reverse proxy or hosting provider
+- **Content Security Policy** restricts resource loading — allows Google Fonts (dashboard), same-origin scripts, and podcast media sources
 - The **`/crow.md` endpoint** is protected by OAuth when auth is enabled, since it exposes behavioral context
 
 For the full public/private access model, see the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md#whats-public-by-default).
@@ -206,10 +210,11 @@ Chat messages are rate-limited to 10 messages per minute per session (separate f
 {
   "status": "ok",
   "servers": ["crow-memory", "crow-projects", "crow-sharing", "crow-storage", "crow-blog"],
-  "externalServers": [{"id": "github", "name": "GitHub", "tools": 15}],
-  "auth": true
+  "externalServers": [{"id": "github", "name": "GitHub", "tools": 15}]
 }
 ```
+
+System resource metrics (RAM, disk, CPU) are available at `GET /api/health`, protected by dashboard session auth.
 
 ## Federation
 
