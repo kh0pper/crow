@@ -22,11 +22,14 @@ export default {
     const errorMsg = req.query.error === "short"
       ? `<div class="alert alert-error">${t("settings.passwordTooShort", lang)}</div>`
       : req.query.error === "mismatch"
-      ? `<div class="alert alert-error">${t("settings.passwordMismatch", lang)}</div>` : "";
+      ? `<div class="alert alert-error">${t("settings.passwordMismatch", lang)}</div>`
+      : req.query.error === "wrong_current"
+      ? `<div class="alert alert-error">${t("settings.currentPasswordWrong", lang)}</div>` : "";
 
     return `${successMsg}${errorMsg}
     <form method="POST">
       <input type="hidden" name="action" value="change_password">
+      ${formField(t("settings.currentPassword", lang), "current_password", { type: "password", required: true, placeholder: t("settings.currentPasswordPlaceholder", lang) })}
       ${formField(t("settings.newPassword", lang), "password", { type: "password", required: true, placeholder: t("settings.newPasswordPlaceholder", lang) })}
       ${formField(t("settings.confirmPassword", lang), "confirm", { type: "password", required: true })}
       <button type="submit" class="btn btn-secondary">${t("settings.changePasswordButton", lang)}</button>
@@ -36,8 +39,19 @@ export default {
   async handleAction({ req, res, db, action }) {
     if (action !== "change_password") return false;
 
-    const { setPassword, validatePasswordStrength } = await import("../../auth.js");
-    const { password, confirm } = req.body;
+    const { setPassword, validatePasswordStrength, verifyPassword } = await import("../../auth.js");
+    const { current_password, password, confirm } = req.body;
+
+    // Verify current password
+    const result = await db.execute("SELECT value FROM dashboard_settings WHERE key = 'password_hash'");
+    if (result.rows.length > 0) {
+      const valid = await verifyPassword(current_password, result.rows[0].value);
+      if (!valid) {
+        res.redirect("/dashboard/settings?section=password&error=wrong_current");
+        return true;
+      }
+    }
+
     const strength = validatePasswordStrength(password);
     if (!strength.valid) {
       res.redirect("/dashboard/settings?section=password&error=short");

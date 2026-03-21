@@ -10,6 +10,7 @@
 
 import { scrypt, randomBytes, timingSafeEqual, createHash } from "node:crypto";
 import { createDbClient, auditLog } from "../../db.js";
+import { is2faEnabled, verifyDeviceTrust, createPending2faToken } from "./totp.js";
 
 function hashToken(t) { return createHash('sha256').update(t).digest('hex'); }
 
@@ -50,7 +51,7 @@ function hashPassword(password) {
 /**
  * Verify a password against a hash.
  */
-function verifyPassword(password, stored) {
+export function verifyPassword(password, stored) {
   return new Promise((resolve, reject) => {
     const [salt, hash] = stored.split(":");
     scrypt(password, salt, 64, (err, key) => {
@@ -159,7 +160,7 @@ export async function attemptLogin(password, ip) {
     const lockout = await getLockout(db, ip);
     if (lockout && lockout.lockedUntil && Date.now() < lockout.lockedUntil) {
       const remaining = Math.ceil((lockout.lockedUntil - Date.now()) / 60000);
-      return { error: `Account locked. Try again in ${remaining} minute(s).` };
+      return { error: `Account locked. Try again in ${remaining} minute(s).`, locked: true };
     }
 
     const result = await db.execute({
@@ -175,7 +176,26 @@ export async function attemptLogin(password, ip) {
       a.count++;
       if (a.count >= LOCKOUT_THRESHOLD) {
         a.lockedUntil = Date.now() + LOCKOUT_DURATION;
-        await auditLog(db, 'auth_lockout', { ip });
+        // Detailed security report
+        const userAgent = arguments.length > 3 ? arguments[3] : null;
+        await auditLog(db, 'security_lockout_report', {
+          ip,
+          userAgent,
+          attempts: a.count,
+          lockedUntil: new Date(a.lockedUntil).toISOString(),
+        });
+        // Send lockout alert to hosting API (managed hosting only)
+        if (isHosted && process.env.CROW_HOSTING_API_URL && process.env.CROW_HOSTING_AUTH_TOKEN) {
+          try {
+            fetch(`${process.env.CROW_HOSTING_API_URL}/api/security/lockout-alert`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "X-Instance-Token": process.env.CROW_HOSTING_AUTH_TOKEN },
+              body: JSON.stringify({ ip, attempts: a.count, userAgent }),
+            }).catch(() => {}); // Fire and forget
+          } catch {
+            // Non-critical
+          }
+        }
       }
       await setLockout(db, ip, a);
       await auditLog(db, 'auth_login_failure', { ip });
@@ -184,7 +204,24 @@ export async function attemptLogin(password, ip) {
 
     // Reset attempts on success + clean expired lockouts
     await clearLockout(db, ip);
-    await auditLog(db, 'auth_login_success', { ip });
+
+    // Check if 2FA is enabled
+    const twoFaEnabled = await is2faEnabled();
+    if (twoFaEnabled) {
+      // Check device trust cookie (passed via options)
+      const deviceTrustToken = arguments.length > 2 ? arguments[2] : null;
+      if (deviceTrustToken && await verifyDeviceTrust(deviceTrustToken)) {
+        // Trusted device — skip 2FA, issue session directly
+        await auditLog(db, 'auth_login_success', { ip, method: '2fa_trusted_device' });
+      } else {
+        // Need 2FA verification — create pending token
+        await auditLog(db, 'auth_password_verified', { ip });
+        const pending2faToken = await createPending2faToken();
+        return { requires2fa: true, pending2faToken };
+      }
+    } else {
+      await auditLog(db, 'auth_login_success', { ip });
+    }
 
     // Create session token
     const token = randomBytes(32).toString("hex");
@@ -194,6 +231,25 @@ export async function attemptLogin(password, ip) {
       args: [hashToken(token), expiresAt],
     });
 
+    return { token };
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Complete login after 2FA verification. Issues a session token.
+ */
+export async function complete2faLogin(ip) {
+  const db = createDbClient();
+  try {
+    await auditLog(db, 'auth_login_success', { ip, method: '2fa' });
+    const token = randomBytes(32).toString("hex");
+    const expiresAt = new Date(Date.now() + SESSION_MAX_AGE).toISOString();
+    await db.execute({
+      sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard', ?)",
+      args: [hashToken(token), expiresAt],
+    });
     return { token };
   } finally {
     db.close();

@@ -109,7 +109,7 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
  * @param {string} [opts.error] - Error message to display
  * @param {boolean} [opts.isSetup] - True if setting password for first time
  */
-export function renderLogin({ error, isSetup, setupToken, lang } = {}) {
+export function renderLogin({ error, isSetup, setupToken, lockoutHelp, lang } = {}) {
   return `<!DOCTYPE html>
 <html lang="${lang || 'en'}">
 <head>
@@ -134,6 +134,194 @@ export function renderLogin({ error, isSetup, setupToken, lang } = {}) {
         <input type="password" name="confirm" placeholder="${escapeHtml(t("login.confirmPlaceholder", lang))}" required minlength="12">` :
         `<input type="password" name="password" placeholder="${escapeHtml(t("login.passwordPlaceholder", lang))}" required autofocus>`}
         <button type="submit">${isSetup ? escapeHtml(t("login.setPasswordButton", lang)) : escapeHtml(t("login.loginButton", lang))}</button>
+      </form>
+      ${!isSetup ? `<p style="margin-top:1rem;font-size:0.8rem;color:var(--crow-text-tertiary)"><a href="/dashboard/reset">${escapeHtml(t("login.forgotPassword", lang))}</a></p>` : ""}
+      ${lockoutHelp || ""}
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+/**
+ * Render the 2FA verification page (TOTP code entry after password).
+ */
+export function render2faVerify({ error, lang } = {}) {
+  return `<!DOCTYPE html>
+<html lang="${lang || 'en'}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(t("login.2faTitle", lang))} — Crow's Nest</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  ${dashboardCss()}
+</head>
+<body>
+  <div class="login-page">
+    <div class="login-card">
+      <div style="width:120px;height:120px;margin:0 auto 1rem">${CROW_HERO_SVG}</div>
+      <h1 class="login-logo">Crow</h1>
+      <p class="login-subtitle">${escapeHtml(t("login.2faSubtitle", lang))}</p>
+      ${error ? `<div class="login-error">${escapeHtml(error)}</div>` : ""}
+      <form method="POST" action="/dashboard/login/2fa">
+        <input type="text" name="totp_code" placeholder="${escapeHtml(t("login.2faPlaceholder", lang))}" required autofocus autocomplete="one-time-code" inputmode="numeric" pattern="[0-9\\-]*" maxlength="14" style="text-align:center;font-size:1.2rem;letter-spacing:0.2em">
+        <label style="display:flex;align-items:center;gap:0.5rem;margin:0.75rem 0;font-size:0.85rem;color:var(--crow-text-secondary);cursor:pointer">
+          <input type="checkbox" name="trust_device" value="1"> ${escapeHtml(t("login.2faTrustDevice", lang))}
+        </label>
+        <button type="submit">${escapeHtml(t("login.2faVerifyButton", lang))}</button>
+      </form>
+      <p style="margin-top:1rem;font-size:0.8rem;color:var(--crow-text-tertiary)">
+        <a href="/dashboard/login/2fa/recovery">${escapeHtml(t("login.2faUseRecovery", lang))}</a>
+      </p>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+/**
+ * Render the 2FA recovery code entry page.
+ */
+export function render2faRecovery({ error, lang } = {}) {
+  return `<!DOCTYPE html>
+<html lang="${lang || 'en'}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(t("login.2faRecoveryTitle", lang))} — Crow's Nest</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  ${dashboardCss()}
+</head>
+<body>
+  <div class="login-page">
+    <div class="login-card">
+      <div style="width:120px;height:120px;margin:0 auto 1rem">${CROW_HERO_SVG}</div>
+      <h1 class="login-logo">Crow</h1>
+      <p class="login-subtitle">${escapeHtml(t("login.2faRecoverySubtitle", lang))}</p>
+      ${error ? `<div class="login-error">${escapeHtml(error)}</div>` : ""}
+      <form method="POST" action="/dashboard/login/2fa/recovery">
+        <input type="text" name="recovery_code" placeholder="xxxx-xxxx-xxxx" required autofocus autocomplete="off" style="text-align:center;font-size:1.1rem;letter-spacing:0.1em" maxlength="14">
+        <button type="submit">${escapeHtml(t("login.2faRecoveryButton", lang))}</button>
+      </form>
+      <p style="margin-top:1rem;font-size:0.8rem;color:var(--crow-text-tertiary)">
+        <a href="/dashboard/login">${escapeHtml(t("login.backToLogin", lang))}</a>
+      </p>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+/**
+ * Render the mandatory 2FA setup page (for managed hosting first login).
+ */
+export function render2faSetup({ secret, qrDataUri, recoveryCodes, error, lang } = {}) {
+  const codesHtml = recoveryCodes ? recoveryCodes.map(c => `<code style="display:block;padding:0.25rem 0;font-size:0.95rem">${escapeHtml(c)}</code>`).join("") : "";
+  return `<!DOCTYPE html>
+<html lang="${lang || 'en'}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(t("login.2faSetupTitle", lang))} — Crow's Nest</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  ${dashboardCss()}
+</head>
+<body>
+  <div class="login-page">
+    <div class="login-card" style="max-width:440px">
+      <h1 class="login-logo" style="font-size:1.5rem">${escapeHtml(t("login.2faSetupTitle", lang))}</h1>
+      <p class="login-subtitle">${escapeHtml(t("login.2faSetupSubtitle", lang))}</p>
+      ${error ? `<div class="login-error">${escapeHtml(error)}</div>` : ""}
+      ${qrDataUri ? `<div style="text-align:center;margin:1rem 0"><img src="${qrDataUri}" alt="QR Code" width="200" height="200" style="border-radius:8px;background:#fff;padding:8px"></div>` : ""}
+      ${secret ? `<p style="font-size:0.75rem;color:var(--crow-text-tertiary);word-break:break-all;text-align:center;margin-bottom:1rem">${escapeHtml(t("login.2faManualKey", lang))}: <code>${escapeHtml(secret)}</code></p>` : ""}
+      ${recoveryCodes ? `
+        <div style="background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:8px;padding:1rem;margin:1rem 0;text-align:center">
+          <p style="font-size:0.8rem;font-weight:600;margin-bottom:0.5rem;color:var(--crow-text-secondary)">${escapeHtml(t("login.2faRecoveryCodes", lang))}</p>
+          ${codesHtml}
+          <p style="font-size:0.7rem;color:var(--crow-text-tertiary);margin-top:0.5rem">${escapeHtml(t("login.2faSaveCodesWarning", lang))}</p>
+        </div>` : ""}
+      <form method="POST" action="/dashboard/login/2fa/setup">
+        <input type="hidden" name="secret" value="${escapeHtml(secret || "")}">
+        <input type="text" name="totp_code" placeholder="${escapeHtml(t("login.2faPlaceholder", lang))}" required autofocus autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]*" maxlength="6" style="text-align:center;font-size:1.2rem;letter-spacing:0.2em">
+        <button type="submit">${escapeHtml(t("login.2faSetupVerifyButton", lang))}</button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+/**
+ * Render the password reset request page (enter email / request reset).
+ */
+export function renderResetRequest({ error, success, isHosted, lang } = {}) {
+  return `<!DOCTYPE html>
+<html lang="${lang || 'en'}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(t("login.resetTitle", lang))} — Crow's Nest</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  ${dashboardCss()}
+</head>
+<body>
+  <div class="login-page">
+    <div class="login-card">
+      <div style="width:120px;height:120px;margin:0 auto 1rem">${CROW_HERO_SVG}</div>
+      <h1 class="login-logo">Crow</h1>
+      <p class="login-subtitle">${escapeHtml(t("login.resetSubtitle", lang))}</p>
+      ${error ? `<div class="login-error">${escapeHtml(error)}</div>` : ""}
+      ${success ? `<div style="background:var(--crow-accent-bg,rgba(100,200,100,0.1));border:1px solid var(--crow-accent,#4a9);border-radius:8px;padding:1rem;margin-bottom:1rem;font-size:0.9rem">${escapeHtml(success)}</div>` : ""}
+      ${isHosted ? `
+      <form method="POST" action="/dashboard/reset">
+        <button type="submit">${escapeHtml(t("login.resetSendButton", lang))}</button>
+      </form>` : `
+      <p style="font-size:0.9rem;color:var(--crow-text-secondary);margin-bottom:1rem">${escapeHtml(t("login.resetSelfHosted", lang))}</p>
+      <pre style="background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:8px;padding:1rem;font-size:0.85rem;overflow-x:auto">npm run reset-password</pre>`}
+      <p style="margin-top:1rem;font-size:0.8rem;color:var(--crow-text-tertiary)">
+        <a href="/dashboard/login">${escapeHtml(t("login.backToLogin", lang))}</a>
+      </p>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+/**
+ * Render the password reset form (new password entry after clicking email link).
+ */
+export function renderResetForm({ error, token, lang } = {}) {
+  return `<!DOCTYPE html>
+<html lang="${lang || 'en'}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(t("login.resetTitle", lang))} — Crow's Nest</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,700&display=swap" rel="stylesheet">
+  ${dashboardCss()}
+</head>
+<body>
+  <div class="login-page">
+    <div class="login-card">
+      <div style="width:120px;height:120px;margin:0 auto 1rem">${CROW_HERO_SVG}</div>
+      <h1 class="login-logo">Crow</h1>
+      <p class="login-subtitle">${escapeHtml(t("login.resetNewPassword", lang))}</p>
+      ${error ? `<div class="login-error">${escapeHtml(error)}</div>` : ""}
+      <form method="POST" action="/dashboard/reset/complete">
+        <input type="hidden" name="token" value="${escapeHtml(token || "")}">
+        <input type="password" name="password" placeholder="${escapeHtml(t("login.choosePasswordPlaceholder", lang))}" required minlength="12" autofocus>
+        <input type="password" name="confirm" placeholder="${escapeHtml(t("login.confirmPlaceholder", lang))}" required minlength="12">
+        <button type="submit">${escapeHtml(t("login.resetPasswordButton", lang))}</button>
       </form>
     </div>
   </div>

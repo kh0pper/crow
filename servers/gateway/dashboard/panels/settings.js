@@ -31,6 +31,7 @@ import updatesSection from "../settings/sections/updates.js";
 import deviceContextSection from "../settings/sections/device-context.js";
 import identitySection from "../settings/sections/identity.js";
 import passwordSection from "../settings/sections/password.js";
+import twoFactorSection from "../settings/sections/two-factor.js";
 
 // Register built-in sections
 registerSettingsSection(themeSection);
@@ -47,6 +48,7 @@ registerSettingsSection(updatesSection);
 registerSettingsSection(deviceContextSection);
 registerSettingsSection(identitySection);
 registerSettingsSection(passwordSection);
+registerSettingsSection(twoFactorSection);
 
 // Load add-on settings (async, non-blocking)
 loadAddonSettings().catch(err => console.warn("[settings] Add-on settings load error:", err.message));
