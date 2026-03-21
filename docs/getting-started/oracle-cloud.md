@@ -271,6 +271,12 @@ echo 'CROW_GATEWAY_URL=https://blog.yourdomain.com' >> ~/.crow/app/.env
 sudo systemctl restart crow-gateway
 ```
 
+## Chain with Another Instance
+
+Have another machine? Chain your Oracle Cloud instance with a [Google Cloud free tier VM](./google-cloud), a [Raspberry Pi](./raspberry-pi), or any other device for redundant, synced Crow across multiple machines.
+
+See [Multi-Device Quick Start](./multi-device) for the full walkthrough.
+
 ## What to Do If Compromised
 
 If you suspect unauthorized access:

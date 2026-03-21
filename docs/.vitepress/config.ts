@@ -27,6 +27,7 @@ export default defineConfig({
             items: [
               { text: 'Descripción General', link: '/es/getting-started/' },
               { text: 'Oracle Cloud Nivel Gratuito', link: '/es/getting-started/oracle-cloud' },
+              { text: 'Google Cloud Nivel Gratuito', link: '/es/getting-started/google-cloud' },
               { text: 'Servidor en Casa', link: '/es/getting-started/home-server' },
               { text: 'Instalación de Escritorio', link: '/es/getting-started/desktop-install' },
               { text: 'Hosting Administrado', link: '/es/getting-started/managed-hosting' },
@@ -71,6 +72,7 @@ export default defineConfig({
         items: [
           { text: 'Overview', link: '/getting-started/' },
           { text: 'Oracle Cloud Free Tier', link: '/getting-started/oracle-cloud' },
+          { text: 'Google Cloud Free Tier', link: '/getting-started/google-cloud' },
           { text: 'Home Server', link: '/getting-started/home-server' },
           { text: 'Desktop Install', link: '/getting-started/desktop-install' },
           { text: 'Managed Hosting', link: '/getting-started/managed-hosting' },
