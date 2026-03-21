@@ -38,6 +38,7 @@ export default {
   icon: "files",
   route: "/dashboard/files",
   navOrder: 30,
+  category: "tools",
 
   async handler(req, res, { db, layout, lang }) {
     // Handle POST actions

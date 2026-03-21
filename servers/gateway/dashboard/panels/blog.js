@@ -12,6 +12,7 @@ export default {
   icon: "edit",
   route: "/dashboard/blog",
   navOrder: 20,
+  category: "content",
 
   async handler(req, res, { db, layout, lang }) {
     // Handle POST actions

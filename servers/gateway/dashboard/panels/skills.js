@@ -54,6 +54,7 @@ export default {
   icon: "skills",
   route: "/dashboard/skills",
   navOrder: 35,
+  category: "tools",
 
   async handler(req, res, { db, layout, lang }) {
     // Handle POST actions

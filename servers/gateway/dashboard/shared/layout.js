@@ -23,8 +23,9 @@ import { t, SUPPORTED_LANGS } from "./i18n.js";
  * @param {string} [opts.scripts] - Additional inline JS
  * @param {string} [opts.afterContent] - HTML rendered after </main> inside .dashboard (e.g. persistent player bar)
  * @param {string} [opts.headerIcons] - HTML rendered inside .content-header, right of title (e.g. notification bell, health icon)
+ * @param {Array} [opts.navGroups] - Grouped nav: [{ id, name, collapsed, panels: [{ id, name, icon, route, navOrder }] }]
  */
-export function renderLayout({ title, content, activePanel, panels, theme, glass, serif, scripts, afterContent, headerIcons, lang }) {
+export function renderLayout({ title, content, activePanel, panels, theme, glass, serif, scripts, afterContent, headerIcons, lang, navGroups }) {
   const themeClass = [
     theme === "light" ? "theme-light" : "",
     glass ? "theme-glass" : "",
@@ -32,12 +33,36 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
   ].filter(Boolean).join(" ");
   const sortedPanels = [...panels].sort((a, b) => (a.navOrder || 0) - (b.navOrder || 0));
 
-  const navItems = sortedPanels.map((p) => {
-    const active = p.id === activePanel ? "active" : "";
-    const icon = NAV_ICONS[p.icon] || NAV_ICONS.default;
-    const label = t("nav." + p.id, lang) !== "nav." + p.id ? t("nav." + p.id, lang) : p.name;
-    return `<a href="${p.route}" class="nav-item ${active}">${icon}<span>${escapeHtml(label)}</span></a>`;
-  }).join("\n        ");
+  let navItems;
+  if (navGroups && navGroups.length > 0) {
+    // Grouped navigation
+    navItems = navGroups.map((g) => {
+      const groupLabel = t("nav.group." + g.id, lang) !== "nav.group." + g.id ? t("nav.group." + g.id, lang) : g.name;
+      const items = g.panels.map((p) => {
+        const active = p.id === activePanel ? "active" : "";
+        const icon = NAV_ICONS[p.icon] || NAV_ICONS.default;
+        const label = t("nav." + p.id, lang) !== "nav." + p.id ? t("nav." + p.id, lang) : p.name;
+        return `<a href="${p.route}" class="nav-item ${active}">${icon}<span>${escapeHtml(label)}</span></a>`;
+      }).join("\n          ");
+      return `<div class="nav-group${g.collapsed ? " collapsed" : ""}" data-group-id="${escapeHtml(g.id)}">
+          <button class="nav-group-header" onclick="toggleNavGroup('${escapeHtml(g.id)}')">
+            <span>${escapeHtml(groupLabel)}</span>
+            <svg class="nav-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          <div class="nav-group-items" id="nav-group-${escapeHtml(g.id)}">
+            ${items}
+          </div>
+        </div>`;
+    }).join("\n        ");
+  } else {
+    // Flat navigation (backward compatible)
+    navItems = sortedPanels.map((p) => {
+      const active = p.id === activePanel ? "active" : "";
+      const icon = NAV_ICONS[p.icon] || NAV_ICONS.default;
+      const label = t("nav." + p.id, lang) !== "nav." + p.id ? t("nav." + p.id, lang) : p.name;
+      return `<a href="${p.route}" class="nav-item ${active}">${icon}<span>${escapeHtml(label)}</span></a>`;
+    }).join("\n        ");
+  }
 
   return `<!DOCTYPE html>
 <html lang="${lang || 'en'}">
@@ -96,6 +121,17 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
     }
     function toggleSidebar() {
       document.querySelector('.sidebar').classList.toggle('open');
+    }
+    function toggleNavGroup(id) {
+      const group = document.querySelector('.nav-group[data-group-id="' + id + '"]');
+      if (group) {
+        group.classList.toggle('collapsed');
+        fetch('/dashboard/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'action=toggle_nav_group&group_id=' + encodeURIComponent(id)
+        });
+      }
     }
     ${scripts || ""}
   </script>
@@ -422,6 +458,41 @@ function dashboardCss() {
     padding-left: calc(0.75rem - 3px);
   }
   .nav-item svg { flex-shrink: 0; }
+
+  /* Nav groups */
+  .nav-group { margin-bottom: 0.25rem; }
+  .nav-group-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 0.35rem 0.75rem;
+    background: none;
+    border: none;
+    color: var(--crow-text-muted);
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    transition: color 0.15s;
+  }
+  .nav-group-header:hover { color: var(--crow-text-secondary); }
+  .nav-chevron {
+    transition: transform 0.2s ease;
+    flex-shrink: 0;
+  }
+  .nav-group.collapsed .nav-chevron { transform: rotate(-90deg); }
+  .nav-group-items {
+    overflow: hidden;
+    max-height: 500px;
+    transition: max-height 0.25s ease-out, opacity 0.2s ease;
+    opacity: 1;
+  }
+  .nav-group.collapsed .nav-group-items {
+    max-height: 0;
+    opacity: 0;
+  }
   .sidebar-footer {
     padding: 0.75rem;
     border-top: 1px solid var(--crow-border);

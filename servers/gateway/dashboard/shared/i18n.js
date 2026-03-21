@@ -25,6 +25,14 @@ const translations = {
   "nav.extensions": { en: "Extensions", es: "Extensiones" },
   "nav.skills": { en: "Skills", es: "Habilidades" },
   "nav.settings": { en: "Settings", es: "Ajustes" },
+  "nav.contacts": { en: "Contacts", es: "Contactos" },
+  "nav.projects": { en: "Projects", es: "Proyectos" },
+  // Nav group headers
+  "nav.group.core": { en: "Core", es: "Principal" },
+  "nav.group.content": { en: "Content", es: "Contenido" },
+  "nav.group.media": { en: "Media", es: "Medios" },
+  "nav.group.tools": { en: "Tools", es: "Herramientas" },
+  "nav.group.system": { en: "System", es: "Sistema" },
 
   // ─── Login ───
   "login.title": { en: "Login", es: "Iniciar sesión" },
@@ -602,6 +610,7 @@ const translations = {
   "settings.section.deviceContext": { en: "Device Context", es: "Contexto del dispositivo" },
   "settings.section.identity": { en: "Identity", es: "Identidad" },
   "settings.section.password": { en: "Change Password", es: "Cambiar contraseña" },
+  "settings.section.navGroups": { en: "Navigation", es: "Navegación" },
   "settings.section.twoFactor": { en: "Two-Factor Auth", es: "Autenticación 2FA" },
   "settings.2faEnabled": { en: "Two-factor authentication enabled.", es: "Autenticación de dos factores activada." },
   "settings.2faDisabled": { en: "Two-factor authentication disabled.", es: "Autenticación de dos factores desactivada." },
@@ -619,6 +628,15 @@ const translations = {
 
   // ─── Settings Navigation ───
   "settings.backToSettings": { en: "Settings", es: "Ajustes" },
+
+  // ─── Nav Groups Settings ───
+  "navGroups.description": { en: "Organize your sidebar by creating groups and moving panels between them.", es: "Organiza tu barra lateral creando grupos y moviendo paneles entre ellos." },
+  "navGroups.noGroups": { en: "No navigation groups configured. Create one to get started.", es: "No hay grupos de navegación configurados. Crea uno para comenzar." },
+  "navGroups.newGroupName": { en: "New group name", es: "Nombre del nuevo grupo" },
+  "navGroups.createGroup": { en: "Create Group", es: "Crear grupo" },
+  "navGroups.rename": { en: "Rename", es: "Renombrar" },
+  "navGroups.noPanels": { en: "No panels in this group", es: "No hay paneles en este grupo" },
+  "navGroups.collapsed": { en: "collapsed", es: "colapsado" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

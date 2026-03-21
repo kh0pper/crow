@@ -22,6 +22,7 @@ export default {
   icon: "messages",
   route: "/dashboard/messages",
   navOrder: 10,
+  category: "core",
 
   async handler(req, res, { db, lang, layout }) {
     // --- Handle POST actions ---
