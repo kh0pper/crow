@@ -164,7 +164,7 @@ export function buildNestHTML(data, lang) {
         : "var(--crow-text-muted)";
       const homeLabel = inst.is_home ? ` <span style="font-size:0.6rem;opacity:0.7;text-transform:uppercase;letter-spacing:0.05em">home</span>` : "";
       const statusDot = `<span class="nest-app-status" style="background:${statusColor}" title="${escapeHtml(inst.status)}"></span>`;
-      const href = inst.gateway_url || "#";
+      const href = inst.gateway_url ? `${inst.gateway_url}/dashboard/nest` : "#";
       const delay = tileIndex++ * 40;
       return `<a href="${escapeHtml(href)}" class="nest-app nest-app--instance" style="animation-delay:${delay}ms"${inst.gateway_url ? ` target="_blank"` : ""}>
         <div class="nest-app-icon">${statusDot}${instanceIcon}</div>
