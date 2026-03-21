@@ -63,7 +63,7 @@ import { createRelayHandlers } from "../sharing/relay.js";
 import { generateCrowContext } from "../memory/crow-context.js";
 import { createDbClient } from "../db.js";
 import { createOAuthProvider, initOAuthTables } from "./auth.js";
-import { initProxyServers, createProxyServer, getProxyStatus, loadDynamicBackends } from "./proxy.js";
+import { initProxyServers, createProxyServer, getProxyStatus, loadDynamicBackends, loadRemoteInstances } from "./proxy.js";
 import { createRouterServer } from "./router.js";
 import { setupPageHandler } from "./setup-page.js";
 import { dashboardAuth } from "./dashboard/auth.js";
@@ -273,6 +273,11 @@ const crowMdHandler = async (req, res) => {
 };
 
 // --- OAuth Setup ---
+// --- Instance-to-instance auth (bearer token from registered instances) ---
+// This runs before OAuth and allows federated requests with pre-shared tokens.
+import { instanceAuthMiddleware } from "./instance-registry.js";
+app.use(instanceAuthMiddleware(createDbClient()));
+
 let authMiddleware = null;
 
 if (!noAuth) {
@@ -644,6 +649,11 @@ const server = app.listen(PORT, "0.0.0.0", (error) => {
   // Initialize external server proxy AFTER listening (so health checks pass during startup).
   initProxyServers().catch((err) => {
     console.error("[proxy] Failed to initialize:", err.message);
+  });
+
+  // Probe and connect to remote Crow instances (federation)
+  loadRemoteInstances().catch((err) => {
+    console.warn("[proxy] Remote instance loading:", err.message);
   });
 
   // Start auto-update checker

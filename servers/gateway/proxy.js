@@ -425,6 +425,203 @@ export function createProxyServer() {
 }
 
 /**
+ * Connect to remote Crow instances via HTTP federation.
+ * Queries crow_instances table for active remote instances with gateway URLs,
+ * probes their /health endpoint, and registers them in connectedServers.
+ *
+ * Remote tool calls are proxied via HTTP POST to the instance's gateway.
+ */
+export async function loadRemoteInstances() {
+  let db;
+  try {
+    db = createDbClient();
+    const { getOrCreateLocalInstanceId } = await import("./instance-registry.js");
+    const localId = getOrCreateLocalInstanceId();
+
+    const { rows } = await db.execute({
+      sql: "SELECT * FROM crow_instances WHERE status = 'active' AND gateway_url IS NOT NULL AND id != ?",
+      args: [localId],
+    });
+
+    if (rows.length === 0) return;
+
+    console.log(`[proxy] Probing ${rows.length} remote instance(s)...`);
+
+    for (const inst of rows) {
+      const instanceKey = `instance-${inst.id}`;
+
+      // Skip if already connected
+      const existing = connectedServers.get(instanceKey);
+      if (existing && existing.status === "connected") continue;
+
+      try {
+        // Probe health endpoint with timeout
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        const healthUrl = `${inst.gateway_url}/health`;
+
+        const resp = await fetch(healthUrl, { signal: controller.signal });
+        clearTimeout(timeout);
+
+        if (!resp.ok) {
+          throw new Error(`Health check returned ${resp.status}`);
+        }
+
+        console.log(`  [proxy] Instance "${inst.name}" (${inst.hostname}): reachable`);
+
+        // Create a proxy "client" object that forwards tool calls via HTTP
+        const remoteClient = createRemoteInstanceClient(inst);
+
+        connectedServers.set(instanceKey, {
+          client: remoteClient,
+          tools: [], // Populated lazily via crow_discover on the remote
+          status: "connected",
+          isRemote: true,
+          instanceId: inst.id,
+          instanceName: inst.name,
+          gatewayUrl: inst.gateway_url,
+          hostname: inst.hostname,
+        });
+
+        // Update last_seen
+        await db.execute({
+          sql: "UPDATE crow_instances SET last_seen_at = datetime('now'), status = 'active', updated_at = datetime('now') WHERE id = ?",
+          args: [inst.id],
+        });
+      } catch (err) {
+        console.warn(`  [proxy] Instance "${inst.name}" (${inst.hostname}): unreachable — ${err.message}`);
+        connectedServers.set(instanceKey, {
+          client: null,
+          tools: [],
+          status: "offline",
+          isRemote: true,
+          instanceId: inst.id,
+          instanceName: inst.name,
+          gatewayUrl: inst.gateway_url,
+          hostname: inst.hostname,
+          error: err.message,
+        });
+
+        await db.execute({
+          sql: "UPDATE crow_instances SET status = 'offline', updated_at = datetime('now') WHERE id = ?",
+          args: [inst.id],
+        }).catch(() => {});
+      }
+    }
+  } catch (err) {
+    if (!err.message?.includes("no such table")) {
+      console.warn(`[proxy] Failed to load remote instances: ${err.message}`);
+    }
+  } finally {
+    if (db) db.close();
+  }
+}
+
+/**
+ * Create a proxy client for a remote Crow instance.
+ * Implements callTool() by forwarding via HTTP POST to the remote gateway.
+ */
+function createRemoteInstanceClient(instance) {
+  const baseUrl = instance.gateway_url.replace(/\/$/, "");
+
+  return {
+    /**
+     * Forward a tool call to the remote instance's router endpoint.
+     * Uses the router's crow_discover/crow_tools pattern via direct MCP RPC.
+     */
+    async callTool({ name, arguments: args }) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+
+      try {
+        // POST a JSON-RPC request to the remote gateway's router endpoint
+        const headers = { "Content-Type": "application/json" };
+
+        // Add bearer token auth if available
+        if (instance.auth_token_hash) {
+          // The token itself isn't stored locally — the hash is.
+          // For now, use no-auth mode or an env var pattern.
+          // TODO: Phase 5 enhancement — store encrypted tokens per-instance
+        }
+
+        const rpcBody = {
+          jsonrpc: "2.0",
+          id: Date.now(),
+          method: "tools/call",
+          params: { name, arguments: args || {} },
+        };
+
+        const resp = await fetch(`${baseUrl}/memory/mcp`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(rpcBody),
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeout);
+
+        if (!resp.ok) {
+          throw new Error(`Remote returned HTTP ${resp.status}`);
+        }
+
+        const result = await resp.json();
+
+        if (result.error) {
+          return {
+            content: [{ type: "text", text: `Remote error: ${result.error.message || JSON.stringify(result.error)}` }],
+            isError: true,
+          };
+        }
+
+        return result.result || result;
+      } catch (err) {
+        clearTimeout(timeout);
+        const isTimeout = err.name === "AbortError";
+        return {
+          content: [{
+            type: "text",
+            text: `Federation error (${instance.name}): ${isTimeout ? "Request timed out (10s)" : err.message}`,
+          }],
+          isError: true,
+        };
+      }
+    },
+
+    /** List tools from the remote instance */
+    async listTools() {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+
+      try {
+        const rpcBody = {
+          jsonrpc: "2.0",
+          id: Date.now(),
+          method: "tools/list",
+          params: {},
+        };
+
+        const resp = await fetch(`${baseUrl}/memory/mcp`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(rpcBody),
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeout);
+
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+        const result = await resp.json();
+        return { tools: result.result?.tools || [] };
+      } catch (err) {
+        clearTimeout(timeout);
+        return { tools: [] };
+      }
+    },
+  };
+}
+
+/**
  * Get status of all integrations for the /health and /setup endpoints.
  */
 export function getProxyStatus() {

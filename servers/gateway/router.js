@@ -175,12 +175,39 @@ export function createRouterServer(options = {}) {
 
   routerServer.tool(
     "crow_tools",
-    "Route to external integration tools (Trello, Canvas, Slack, etc.). Use crow_discover with category 'tools' to see available integrations and their tools.",
+    "Route to external integration tools (Trello, Canvas, Slack, etc.) and remote Crow instances. Use crow_discover with category 'tools' or 'instances' to see what's available.",
     {
       action: z.string().describe("Tool name from the external server"),
       params: z.record(z.any()).optional().describe("Parameters for the tool"),
+      instance_id: z.string().optional().describe("Route to a specific remote instance by ID (use crow_discover category 'instances' to see available)"),
     },
-    async ({ action, params }) => {
+    async ({ action, params, instance_id }) => {
+      // If instance_id is specified, route directly to that remote instance
+      if (instance_id) {
+        const instanceKey = `instance-${instance_id}`;
+        const entry = connectedServers.get(instanceKey);
+        if (!entry || !entry.isRemote) {
+          return {
+            content: [{ type: "text", text: `Remote instance "${instance_id}" not found. Use crow_discover category "instances" to see available instances.` }],
+            isError: true,
+          };
+        }
+        if (entry.status !== "connected" || !entry.client) {
+          return {
+            content: [{ type: "text", text: `Remote instance "${entry.instanceName}" is ${entry.status}${entry.error ? `: ${entry.error}` : ""}` }],
+            isError: true,
+          };
+        }
+        try {
+          return await entry.client.callTool({ name: action, arguments: params || {} });
+        } catch (error) {
+          return {
+            content: [{ type: "text", text: `Error calling ${action} on ${entry.instanceName}: ${error.message}` }],
+            isError: true,
+          };
+        }
+      }
+
       if (connectedServers.size === 0) {
         return {
           content: [{
@@ -190,9 +217,10 @@ export function createRouterServer(options = {}) {
         };
       }
 
-      // Find which connected server has this tool
+      // Find which connected server has this tool (local integrations first, then remote instances)
       for (const [integrationId, entry] of connectedServers) {
         if (entry.status !== "connected" || !entry.client) continue;
+        if (entry.isRemote) continue; // Skip remote instances for name-based lookup
 
         const hasTool = entry.tools.some((t) => t.name === action);
         if (hasTool) {
@@ -215,13 +243,17 @@ export function createRouterServer(options = {}) {
       const available = [];
       for (const [id, entry] of connectedServers) {
         if (entry.status !== "connected") continue;
-        available.push(`${id}: ${entry.tools.map((t) => t.name).join(", ")}`);
+        if (entry.isRemote) {
+          available.push(`${id} (remote: ${entry.instanceName}): use instance_id="${entry.instanceId}" to route tools`);
+        } else {
+          available.push(`${id}: ${entry.tools.map((t) => t.name).join(", ")}`);
+        }
       }
 
       return {
         content: [{
           type: "text",
-          text: `Tool "${action}" not found in any connected integration.\n\nAvailable tools:\n${available.join("\n") || "None"}`,
+          text: `Tool "${action}" not found in any connected integration.\n\nAvailable:\n${available.join("\n") || "None"}`,
         }],
       };
     }
@@ -252,14 +284,40 @@ export function createRouterServer(options = {}) {
 
         // Add external tools
         let externalCount = 0;
+        let remoteCount = 0;
         for (const [, entry] of connectedServers) {
+          if (entry.isRemote) { remoteCount++; continue; }
           if (entry.status === "connected") externalCount += entry.tools.length;
         }
         if (externalCount > 0) {
           lines.push(`  tools (${externalCount} actions): External integrations`);
         }
+        if (remoteCount > 0) {
+          lines.push(`  instances (${remoteCount} remote): Federated Crow instances`);
+        }
 
         lines.push("\nUse crow_discover with a category to see its actions.");
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      // Handle "instances" category (remote Crow instances)
+      if (category === "instances") {
+        const lines = ["Remote Crow instances:"];
+        let found = false;
+        for (const [id, entry] of connectedServers) {
+          if (!entry.isRemote) continue;
+          found = true;
+          const statusIcon = entry.status === "connected" ? "●" : entry.status === "offline" ? "○" : "!";
+          lines.push(`\n  ${statusIcon} ${entry.instanceName || id} (${entry.status})`);
+          lines.push(`    ID: ${entry.instanceId}`);
+          lines.push(`    Host: ${entry.hostname || "unknown"}`);
+          lines.push(`    Gateway: ${entry.gatewayUrl || "none"}`);
+          if (entry.error) lines.push(`    Error: ${entry.error}`);
+          lines.push(`    Route tools via: crow_tools action="<tool_name>" instance_id="${entry.instanceId}"`);
+        }
+        if (!found) {
+          lines.push("  No remote instances registered. Use crow_register_instance to add one.");
+        }
         return { content: [{ type: "text", text: lines.join("\n") }] };
       }
 

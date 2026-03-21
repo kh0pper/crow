@@ -370,3 +370,52 @@ export function computeInstanceSyncTopic(crowId) {
     .update(crowId + "instance-sync")
     .digest();
 }
+
+/**
+ * Validate a bearer token against registered instances.
+ * Used for instance-to-instance HTTP authentication.
+ *
+ * @param {import("@libsql/client").Client} db
+ * @param {string} token - The bearer token from the Authorization header
+ * @returns {Promise<object|null>} The matching instance row, or null if invalid
+ */
+export async function validateInstanceToken(db, token) {
+  if (!token) return null;
+
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT * FROM crow_instances WHERE auth_token_hash = ? AND status = 'active'",
+      args: [tokenHash],
+    });
+    return rows[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Express middleware for instance-to-instance auth.
+ * Checks for Bearer token in Authorization header and validates against instance registry.
+ * Sets req.instanceAuth = { instance } on success.
+ */
+export function instanceAuthMiddleware(db) {
+  return async (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return next(); // No bearer token — fall through to other auth methods
+    }
+
+    const token = authHeader.slice(7);
+    const instance = await validateInstanceToken(db, token);
+
+    if (instance) {
+      req.instanceAuth = { instance };
+      return next();
+    }
+
+    // Invalid token — don't reject, fall through to other auth
+    return next();
+  };
+}
