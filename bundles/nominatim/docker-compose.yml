@@ -1,0 +1,26 @@
+services:
+  nominatim:
+    image: mediagis/nominatim:4.4
+    container_name: crow-nominatim
+    restart: unless-stopped
+    environment:
+      PBF_URL: ${NOMINATIM_PBF_URL:-https://download.geofabrik.de/north-america/us-latest.osm.pbf}
+      REPLICATION_URL: ${NOMINATIM_REPLICATION_URL:-https://download.geofabrik.de/north-america/us-updates}
+      IMPORT_STYLE: full
+    volumes:
+      - nominatim-data:/var/lib/postgresql/14/main
+      - nominatim-flat:/nominatim/flatnode
+    ports:
+      - "${NOMINATIM_PORT:-8088}:8080"
+    mem_limit: 4g
+    shm_size: 1g
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  nominatim-data:
+  nominatim-flat:
