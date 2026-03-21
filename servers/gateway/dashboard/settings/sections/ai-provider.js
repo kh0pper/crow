@@ -37,6 +37,7 @@ export default {
       { id: "google", name: "Google Gemini", defaultModel: "gemini-2.5-flash" },
       { id: "ollama", name: "Ollama (local)", defaultModel: "llama3.1" },
       { id: "openrouter", name: "OpenRouter", defaultModel: "openai/gpt-4o" },
+      { id: "meta", name: "Meta AI (Llama)", defaultModel: "Llama-4-Maverick-17B-128E-Instruct-FP8" },
     ];
 
     const currentProvider = aiProviderConfig?.provider || "";
@@ -88,7 +89,7 @@ export default {
       var p = document.getElementById('ai-provider').value;
       var urlField = document.getElementById('ai-base-url-field');
       urlField.style.display = (p === 'ollama' || p === 'openrouter' || p === '') ? 'block' : 'none';
-      var defaults = {openai:'gpt-4o',anthropic:'claude-sonnet-4-20250514',google:'gemini-2.5-flash',ollama:'llama3.1',openrouter:'openai/gpt-4o'};
+      var defaults = {openai:'gpt-4o',anthropic:'claude-sonnet-4-20250514',google:'gemini-2.5-flash',ollama:'llama3.1',openrouter:'openai/gpt-4o',meta:'Llama-4-Maverick-17B-128E-Instruct-FP8'};
       document.getElementById('ai-model').placeholder = defaults[p] || 'Model name';
     }
     async function saveAiProvider() {

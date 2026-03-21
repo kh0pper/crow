@@ -26,8 +26,23 @@ function mcpToolsToOpenAI(tools) {
 
 /**
  * Convert chat messages to OpenAI message format.
+ * @param {Array} messages
+ * @param {Array} [tools] - Tool schemas, used to fix up empty arguments for
+ *   providers (e.g. Meta Llama) that reject "{}" as "parameters missing".
  */
-function toOpenAIMessages(messages) {
+function toOpenAIMessages(messages, tools) {
+  // Build a map of tool name → first schema property for empty-args fixup
+  const toolFirstProp = new Map();
+  if (tools) {
+    for (const t of tools) {
+      const props = t.inputSchema?.properties;
+      if (props) {
+        const firstKey = Object.keys(props)[0];
+        if (firstKey) toolFirstProp.set(t.name, firstKey);
+      }
+    }
+  }
+
   return messages.map((m) => {
     if (m.role === "tool") {
       return {
@@ -41,14 +56,21 @@ function toOpenAIMessages(messages) {
       return {
         role: "assistant",
         content: m.content || null,
-        tool_calls: toolCalls.map((tc) => ({
-          id: tc.id,
-          type: "function",
-          function: {
-            name: tc.name,
-            arguments: typeof tc.arguments === "string" ? tc.arguments : JSON.stringify(tc.arguments),
-          },
-        })),
+        tool_calls: toolCalls.map((tc) => {
+          let args = typeof tc.arguments === "string" ? tc.arguments : JSON.stringify(tc.arguments);
+          // Fix empty arguments for providers that reject "{}" (e.g. Meta Llama API)
+          if (args === "{}" || args === "") {
+            const firstProp = toolFirstProp.get(tc.name);
+            if (firstProp) {
+              args = JSON.stringify({ [firstProp]: "" });
+            }
+          }
+          return {
+            id: tc.id,
+            type: "function",
+            function: { name: tc.name, arguments: args },
+          };
+        }),
       };
     }
     return { role: m.role, content: m.content || "" };
@@ -67,15 +89,15 @@ export default function createOpenAIAdapter(config) {
       const temperature = options.temperature ?? 0.7;
       const maxTokens = options.maxTokens || 4096;
 
+      const openaiTools = mcpToolsToOpenAI(tools);
+
       const body = {
         model,
-        messages: toOpenAIMessages(messages),
+        messages: toOpenAIMessages(messages, tools),
         temperature,
         max_tokens: maxTokens,
         stream: true,
       };
-
-      const openaiTools = mcpToolsToOpenAI(tools);
       if (openaiTools) {
         body.tools = openaiTools;
       }

@@ -196,7 +196,7 @@ export default {
         profiles[idx].name = profile_name;
         profiles[idx].provider = profile_provider;
         if (profile_api_key) profiles[idx].apiKey = profile_api_key;
-        profiles[idx].baseUrl = profile_base_url || "";
+        profiles[idx].baseUrl = (profile_base_url || "").trim();
         profiles[idx].models = models;
         profiles[idx].defaultModel = defaultModel;
       } else {
@@ -207,7 +207,7 @@ export default {
           name: profile_name,
           provider: profile_provider,
           apiKey: profile_api_key || "",
-          baseUrl: profile_base_url || "",
+          baseUrl: (profile_base_url || "").trim(),
           models,
           defaultModel,
         });
