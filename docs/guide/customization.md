@@ -193,6 +193,60 @@ This tells Crow which device it's running on. Once the gateway wiring is complet
 
 ---
 
+## Sidebar navigation
+
+The Crow's Nest sidebar organizes panels into collapsible groups. You can customize the grouping, naming, and order to match your workflow.
+
+### Default groups
+
+The sidebar ships with these groups:
+
+| Group | Panels |
+|---|---|
+| **Core** | Home, Memory, Messages, Contacts |
+| **Content** | Blog, Podcasts, Skills |
+| **Media** | Media Hub (plus media bundle tabs) |
+| **Tools** | Files, Extensions, Data Dashboard |
+| **System** | Settings |
+
+### Renaming groups
+
+Change a group name from **Crow's Nest** > **Settings** > **Appearance**, or ask:
+
+> "Crow, rename the 'Content' sidebar group to 'Creative'"
+
+### Creating new groups
+
+Add a custom group to organize panels your way:
+
+> "Crow, create a sidebar group called 'Research' and move Memory and Files into it"
+
+Custom groups appear in the sidebar in the order you specify.
+
+### Moving panels between groups
+
+Rearrange panels across groups:
+
+> "Crow, move the Blog panel from Content to a new group called 'Publishing'"
+
+You can also drag panels between groups in the Crow's Nest settings.
+
+### Collapsing groups
+
+Click a group header in the sidebar to collapse or expand it. Collapsed state is remembered per session.
+
+### How bundles auto-categorize
+
+When you install a bundle (like Jellyfin, Kodi, or IPTV), its panel automatically appears in the appropriate group:
+
+- **Media bundles** (Jellyfin, Plex, Kodi, IPTV) add tabs to the **Media** group's Media Hub panel
+- **Knowledge bundles** (TriliumNext, Obsidian) appear in the **Tools** group
+- **Infrastructure bundles** (Ollama, LocalAI) appear in the **System** group
+
+You can move bundle panels to different groups after installation.
+
+---
+
 ## Safety checkpoints
 
 Crow uses a tiered safety system that asks for confirmation before taking risky actions. This happens automatically — you don't need to enable it.

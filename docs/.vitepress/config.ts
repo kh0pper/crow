@@ -44,6 +44,7 @@ export default defineConfig({
               { text: 'Cancionero', link: '/es/guide/songbook' },
               { text: 'Multi-Instancia', link: '/es/guide/instances' },
               { text: 'Panel de Datos', link: '/es/guide/data-dashboard' },
+              { text: 'Contactos', link: '/es/guide/contacts' },
             ],
           },
           {
@@ -52,6 +53,17 @@ export default defineConfig({
               { text: 'Claude Web y Móvil', link: '/es/platforms/claude' },
               { text: 'ChatGPT', link: '/es/platforms/chatgpt' },
               { text: 'Claude Code (CLI)', link: '/es/platforms/claude-code' },
+              { text: 'Aplicacion Android', link: '/es/platforms/android' },
+            ],
+          },
+          {
+            text: 'Integraciones',
+            items: [
+              { text: 'Jellyfin', link: '/es/integrations/jellyfin' },
+              { text: 'Plex', link: '/es/integrations/plex' },
+              { text: 'IPTV', link: '/es/integrations/iptv' },
+              { text: 'Kodi', link: '/es/integrations/kodi' },
+              { text: 'TriliumNext', link: '/es/integrations/trilium' },
             ],
           },
         ],
@@ -107,6 +119,7 @@ export default defineConfig({
           { text: 'Qwen CLI', link: '/platforms/qwen-cli' },
           { text: 'Qwen Coder CLI', link: '/platforms/qwen-coder' },
           { text: 'OpenClaw', link: '/platforms/openclaw' },
+          { text: 'Android App', link: '/platforms/android' },
         ],
       },
       {
@@ -126,6 +139,11 @@ export default defineConfig({
           { text: 'Home Assistant', link: '/integrations/home-assistant' },
           { text: 'Obsidian', link: '/integrations/obsidian' },
           { text: 'Render', link: '/integrations/render' },
+          { text: 'Jellyfin', link: '/integrations/jellyfin' },
+          { text: 'Plex', link: '/integrations/plex' },
+          { text: 'IPTV', link: '/integrations/iptv' },
+          { text: 'Kodi', link: '/integrations/kodi' },
+          { text: 'TriliumNext', link: '/integrations/trilium' },
         ],
       },
       {
@@ -183,6 +201,7 @@ export default defineConfig({
           { text: 'Multi-Instance Chaining', link: '/guide/instances' },
           { text: 'Data Dashboard', link: '/guide/data-dashboard' },
           { text: 'Data Sharing', link: '/guide/data-sharing' },
+          { text: 'Contacts', link: '/guide/contacts' },
         ],
       },
       {
