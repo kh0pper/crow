@@ -142,6 +142,20 @@ For secure remote access, install Tailscale on the host machine (not inside Dock
 
 The first time you visit the Crow's Nest (`/dashboard`), you'll be prompted to set a password. You can also set it from the `/setup` page or by asking your AI: "Set my Crow's Nest password."
 
+### Two-Factor Authentication (Optional)
+
+You can enable TOTP-based 2FA from **Settings → Two-Factor Auth** in the Crow's Nest. This adds a second verification step using an authenticator app (Google Authenticator, Authy, etc.).
+
+### Forgot Your Password?
+
+If you get locked out, reset your password from the command line:
+
+```bash
+npm run reset-password
+```
+
+This prompts you for a new password and updates the database directly — no email or external service needed.
+
 ## Connect Your AI
 
 Visit `http://localhost:3001/setup` to see integration status and endpoint URLs.

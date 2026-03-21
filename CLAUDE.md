@@ -25,6 +25,7 @@ npm run migrate-data     # Migrate data from ./data/ to ~/.crow/data/
 npm run sync-skills      # Regenerate docs/skills/index.md from skills/*.md
 npm run backup           # Back up database (SQL dump + binary copy)
 npm run restore          # Restore database from backup file
+npm run reset-password   # Reset Crow's Nest password (self-hosted, interactive CLI)
 ```
 
 ### Crow CLI (Crow OS / self-hosted)

@@ -44,6 +44,8 @@ Everything a self-hosted Crow instance can do:
 | **Control** | Hosted by Maestro Press | Full control over your server |
 | **Data** | Stored on Maestro Press infrastructure | Stored wherever you choose |
 | **Public blog/podcast** | Ready to go, no extra setup | Requires reverse proxy + domain |
+| **2FA** | Mandatory (TOTP) | Optional |
+| **Password reset** | Email-based | CLI (`npm run reset-password`) |
 | **Best for** | Users who want Crow without the ops work | Developers and tinkerers |
 
 Both options give you the same Crow features. Self-hosting is free and gives you full control. Managed hosting trades a small monthly cost for zero maintenance.
@@ -51,6 +53,32 @@ Both options give you the same Crow features. Self-hosting is free and gives you
 ::: tip Hybrid setup
 Managed hosting can be chained with a self-hosted instance for the best of both worlds — always-on cloud access plus a home server for heavy processing and data storage. See [Multi-Device Quick Start](./multi-device) to set it up.
 :::
+
+## Security
+
+Managed hosting includes additional security features that are automatically enabled:
+
+### Two-Factor Authentication (Required)
+
+On your first login, you'll be asked to set up two-factor authentication (2FA) using an authenticator app like Google Authenticator or Authy.
+
+1. Scan the QR code with your authenticator app
+2. Enter the 6-digit code to verify
+3. Save your 8 recovery codes in a safe place — they won't be shown again
+
+2FA is **mandatory** for managed hosting and cannot be disabled. You can optionally trust a device for 30 days to skip the code on future logins. Manage your 2FA settings (regenerate codes, revoke trusted devices) in **Settings → Two-Factor Auth**.
+
+### Password Reset
+
+If you forget your password, click **"Forgot password?"** on the login page. A reset link will be sent to the email address on your account (the one used during signup). The link expires after 1 hour.
+
+### Account Lockout
+
+After 5 failed login attempts, your account is locked for 15 minutes. When this happens:
+- You'll receive an email alert with the source IP address
+- The lockout screen shows a link to reset your password and contact support at **support@maestro.press**
+
+For the full security model, see the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md).
 
 ## FAQ
 

@@ -109,11 +109,15 @@ You don't need to set up every integration. Each API key you add is one more thi
 If you use [managed hosting](https://maestro.press/hosting/) ($15/mo), these additional protections apply:
 
 - **Instance isolation** — Each customer gets a separate Docker container and separate database. Up to 5 instances per shared server, with no cross-instance access.
+- **Mandatory two-factor authentication (2FA)** — All managed hosting accounts must set up TOTP-based 2FA on first login. Uses standard authenticator apps (Google Authenticator, Authy, etc.). 8 single-use recovery codes are provided at setup. 2FA cannot be disabled on managed hosting instances.
+- **Device trust** — After verifying with 2FA, you can trust a device for 30 days to skip the TOTP step on subsequent logins. Trusted devices can be revoked from Settings at any time.
 - **OAuth tokens hashed** — All OAuth access and refresh tokens are SHA-256 hashed before storage. If the database were compromised, tokens cannot be reused.
-- **Crow's Nest passwords hashed** — Passwords are hashed with scrypt (N=16384, r=8, p=1) using a unique random salt.
+- **Crow's Nest passwords hashed** — Passwords are hashed with scrypt (N=16384, r=8, p=1) using a unique random salt. Changing your password requires entering the current password.
+- **Email-based password reset** — If you're locked out, request a password reset from the login page. A time-limited reset link (1 hour expiry) is sent to the email address on file. Rate limited to 3 requests per hour.
 - **24-hour session duration** — Crow's Nest sessions expire after 24 hours in hosted mode (vs. 7 days for self-hosted).
 - **Secure cookies** — Session cookies are set with `HttpOnly`, `SameSite=Strict`, and `Secure` flags in production.
-- **Audit logging** — Authentication events (login success/failure, lockout, token issuance, password changes) are logged with 90-day retention.
+- **Lockout alerts** — After 5 failed login attempts, the account is locked for 15 minutes and an alert email is sent to the account owner with the source IP address. The lockout screen provides a link to password reset and support contact.
+- **Audit logging** — Authentication events (login success/failure, lockout, token issuance, password changes, 2FA setup, password resets) are logged with 90-day retention.
 - **API keys as env vars only** — Your API keys are stored only as environment variables, never in the database.
 - **No data access** — Maestro Press does not access customer data except for maintenance, support, or legal obligation.
 
@@ -125,10 +129,13 @@ A summary of the technical measures protecting your data across all deployment m
 |---|---|
 | API keys | Stored as environment variables only, never in the database or logs |
 | OAuth tokens | SHA-256 hashed before database storage |
-| Crow's Nest password | scrypt-hashed with unique random salt |
+| Crow's Nest password | scrypt-hashed with unique random salt; change requires current password |
+| Two-factor auth | TOTP-based 2FA (mandatory on managed hosting, optional self-hosted); 8 SHA-256 hashed recovery codes |
+| Device trust | 30-day trusted device cookies (random token, SHA-256 hashed); revocable from settings |
+| Password reset | Email-based (managed hosting, 1-hour token, rate limited); CLI-based (self-hosted) |
 | Session cookies | `HttpOnly`, `SameSite=Strict`, `Secure` (production) |
 | Auth endpoints | Rate-limited (20 requests per 15 minutes) |
-| Account lockout | 5 failed attempts triggers 15-minute lockout |
+| Account lockout | 5 failed attempts triggers 15-minute lockout; email alert to owner (managed hosting) |
 | Security headers | `X-Content-Type-Options`, `X-Frame-Options`, HSTS |
 | CORS | Restricted to configured origins only |
 | Audit log | Auth events logged, 90-day retention, auto-cleaned at startup |
