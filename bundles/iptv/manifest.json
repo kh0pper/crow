@@ -1,0 +1,28 @@
+{
+  "id": "iptv",
+  "name": "IPTV",
+  "version": "1.0.0",
+  "description": "IPTV channel management — M3U playlists, EPG program guide, channel groups, and favorites",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "media",
+  "tags": ["iptv", "tv", "m3u", "epg", "channels", "streaming", "live"],
+  "icon": "tv",
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "envKeys": []
+  },
+  "panel": "panel/iptv.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/iptv.md"],
+  "requires": {
+    "min_ram_mb": 128,
+    "min_disk_mb": 200
+  },
+  "env_vars": [
+    { "name": "CROW_IPTV_RECORDINGS_PATH", "description": "Directory for recorded streams", "required": false, "default": "~/.crow/data/iptv-recordings" },
+    { "name": "CROW_IPTV_EPG_REFRESH_HOURS", "description": "EPG refresh interval in hours", "default": "12", "required": false }
+  ],
+  "notes": "Lightweight IPTV manager — no Docker required. Add M3U playlists via AI or the panel. EPG data parsed from XMLTV sources."
+}
