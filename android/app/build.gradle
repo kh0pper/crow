@@ -14,9 +14,19 @@ android {
         versionName "1.0.0"
     }
 
+    signingConfigs {
+        release {
+            storeFile file(System.getenv("CROW_KEYSTORE_PATH") ?: "${System.getProperty('user.home')}/.crow/android-keystore/crow-release.jks")
+            storePassword System.getenv("CROW_KEYSTORE_PASSWORD") ?: ""
+            keyAlias "crow"
+            keyPassword System.getenv("CROW_KEY_PASSWORD") ?: ""
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
+            signingConfig signingConfigs.release
         }
     }
 
