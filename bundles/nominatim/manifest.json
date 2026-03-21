@@ -1,0 +1,51 @@
+{
+  "id": "nominatim",
+  "name": "Nominatim GIS",
+  "version": "1.0.0",
+  "description": "Self-hosted geocoding and GIS — forward/reverse geocode, batch geocode data columns, generate GeoJSON, map visualizations",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "data",
+  "tags": ["gis", "geocoding", "maps", "openstreetmap", "nominatim", "geojson"],
+  "icon": "map",
+  "docker": {
+    "composefile": "docker-compose.yml"
+  },
+  "panel": {
+    "id": "gis",
+    "name": "GIS Map",
+    "extends": "data-dashboard"
+  },
+  "skills": ["skills/gis.md"],
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "cwd": "."
+  },
+  "requires": {
+    "env": [],
+    "min_ram_mb": 4096,
+    "min_disk_mb": 30000
+  },
+  "env_vars": [
+    {
+      "name": "NOMINATIM_URL",
+      "description": "Nominatim API URL (default: http://localhost:8088)",
+      "required": false,
+      "default": "http://localhost:8088"
+    },
+    {
+      "name": "NOMINATIM_PBF_URL",
+      "description": "PBF data file URL for import (default: US extract from Geofabrik)",
+      "required": false,
+      "default": "https://download.geofabrik.de/north-america/us-latest.osm.pbf"
+    },
+    {
+      "name": "NOMINATIM_PORT",
+      "description": "Port for Nominatim API (default: 8088)",
+      "required": false,
+      "default": "8088"
+    }
+  ],
+  "notes": "Requires significant disk space (US extract: ~30GB, full planet: ~1TB) and 4GB+ RAM. Initial import takes several hours. Depends on the Data Dashboard bundle for full integration."
+}

@@ -428,6 +428,23 @@
       "notes": "10 MCP tools for data exploration. Includes SQL editor, schema explorer, and case study publishing. Works with any SQLite database registered as a project backend."
     },
     {
+      "id": "nominatim",
+      "name": "Nominatim GIS",
+      "description": "Self-hosted geocoding and GIS — forward/reverse geocode, batch geocode data columns, generate GeoJSON, map visualizations",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "data",
+      "official": true,
+      "tags": ["gis", "geocoding", "maps", "openstreetmap", "nominatim", "geojson"],
+      "icon": "map",
+      "requires": {
+        "min_ram_mb": 4096,
+        "min_disk_mb": 30000
+      },
+      "notes": "Requires ~30GB disk (US extract) and 4GB+ RAM. Initial import takes hours. Depends on Data Dashboard for full integration."
+    },
+    {
       "id": "browser",
       "name": "Browser Automation",
       "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
