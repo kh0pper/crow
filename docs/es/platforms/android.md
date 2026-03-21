@@ -12,7 +12,7 @@ Accede a Crow desde tu dispositivo Android con la aplicacion nativa o como una P
 
 Descarga la ultima version de Crow para Android:
 
-[Descargar Crow para Android](https://github.com/kh0pper/crow/releases/download/android-v1.0.0/app-debug.apk)
+[Descargar Crow para Android](https://github.com/kh0pper/crow/releases/download/android-v1.0.0/app-release.apk)
 
 ### Paso 2: Habilitar origenes desconocidos
 
