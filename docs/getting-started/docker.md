@@ -9,7 +9,7 @@ Run the Crow gateway in Docker for self-hosted deployments.
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose installed
-- Uses local SQLite by default — no database setup needed. [Turso](https://turso.tech) is optional for Render cloud deploys.
+- Uses local SQLite — no database setup needed.
 
 ## Cloud Profile
 
@@ -23,9 +23,6 @@ Set environment variables in a `.env` file or pass them directly:
 
 ```env
 # No database config needed — Crow uses local SQLite automatically.
-# For Render cloud deploys only:
-# TURSO_DATABASE_URL=libsql://your-db.turso.io
-# TURSO_AUTH_TOKEN=your-token
 ```
 
 ## Local Profile

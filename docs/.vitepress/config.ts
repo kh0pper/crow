@@ -39,6 +39,8 @@ export default defineConfig({
               { text: 'Compartir', link: '/es/guide/sharing' },
               { text: 'Blog', link: '/es/guide/blog' },
               { text: 'Cancionero', link: '/es/guide/songbook' },
+              { text: 'Multi-Instancia', link: '/es/guide/instances' },
+              { text: 'Panel de Datos', link: '/es/guide/data-dashboard' },
             ],
           },
           {
@@ -81,6 +83,7 @@ export default defineConfig({
           { text: 'Desktop Setup (Claude Desktop)', link: '/getting-started/desktop-setup' },
           { text: 'Full Setup (MinIO + Gateway)', link: '/getting-started/full-setup' },
           { text: 'Raspberry Pi (Crow OS)', link: '/getting-started/raspberry-pi' },
+          { text: 'Multi-Device Quick Start', link: '/getting-started/multi-device' },
         ],
       },
       {
@@ -137,6 +140,8 @@ export default defineConfig({
           { text: 'Crow OS', link: '/architecture/crow-os' },
           { text: 'Portable Identity', link: '/architecture/portable-identity' },
           { text: 'Context Management', link: '/architecture/context-management' },
+          { text: 'Multi-Instance Sync', link: '/architecture/instances' },
+          { text: 'Data Dashboard', link: '/architecture/data-dashboard' },
         ],
       },
       {
@@ -171,6 +176,9 @@ export default defineConfig({
           { text: 'Extensions', link: '/guide/extensions' },
           { text: 'Tax Filing Assistant', link: '/guide/tax-filing' },
           { text: 'Browser Automation', link: '/guide/browser-automation' },
+          { text: 'Multi-Instance Chaining', link: '/guide/instances' },
+          { text: 'Data Dashboard', link: '/guide/data-dashboard' },
+          { text: 'Data Sharing', link: '/guide/data-sharing' },
         ],
       },
       {
@@ -189,6 +197,8 @@ export default defineConfig({
           { text: 'Core Tools', link: '/developers/core-tools' },
           { text: 'Self-Hosted Bundles', link: '/developers/bundles' },
           { text: 'Community Directory', link: '/developers/directory' },
+          { text: 'Data Dashboard Dev', link: '/developers/data-dashboard' },
+          { text: 'Nominatim GIS Dev', link: '/developers/nominatim' },
         ],
       },
       {

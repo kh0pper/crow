@@ -12,7 +12,7 @@ Crow runs on everything from a $15 Raspberry Pi to a cloud server. This guide he
 |---|---|---|---|---|
 | Raspberry Pi Zero/3 | 512MB–1GB | 16–32GB SD | Memory + blog, 1–2 light add-ons | No Immich, no Ollama, limited storage |
 | Raspberry Pi 4/5 | 2–8GB | 32GB+ SD/SSD | Most add-ons, moderate storage | Ollama only with small models, SSD recommended |
-| Free cloud (Render) | 512MB | Ephemeral | Memory + blog, remote access | No Docker add-ons, storage resets on deploy, sleeps after inactivity |
+| Free cloud (Render) *(legacy)* | 512MB | Ephemeral | Testing only | No Docker add-ons, storage resets on deploy, sleeps after inactivity |
 | Oracle Cloud Free Tier | 1–24GB | 50–200GB | Full platform with add-ons | Network egress limits, ARM architecture |
 | Home server | 4–32GB | 500GB+ | Everything | Power/network dependent |
 
@@ -48,19 +48,19 @@ The Pi 4 and Pi 5 are capable machines. With 4–8GB RAM you can run Immich, Nex
 
 ---
 
-## Free Cloud (Render)
+## Free Cloud (Render) — Legacy
 
-**Best for:** Testing Crow without managing hardware (legacy — see Oracle Cloud for a better free option).
+**Best for:** No longer recommended. Use [Oracle Cloud Free Tier](#oracle-cloud-free-tier) instead.
 
-Render's free tier gives you a persistent web service with 512MB RAM. Crow's memory and blog servers run fine within this budget. The catch: the disk is ephemeral — any files uploaded via the storage server are lost when the instance redeploys. Use an external database (Turso) and external object storage (Backblaze B2 or similar) if you want persistence.
+Render's free tier gives you a persistent web service with 512MB RAM but has ephemeral disk — any files uploaded via the storage server are lost when the instance redeploys. The Render + Turso deployment path that previously addressed this limitation has been removed. Render deployments now require local SQLite on ephemeral disk, making data persistence unreliable.
 
 **Add-ons to install:** None — Docker-based add-ons are not available on Render's free tier.
 
-**Storage:** Don't rely on local disk. Set `TURSO_DATABASE_URL` for the database and configure an S3-compatible bucket for file storage.
+**Storage:** Ephemeral disk only. Data does not persist across redeploys.
 
 **Inactivity:** Free Render services sleep after 15 minutes of no requests, adding a cold-start delay. Upgrade to a paid plan to keep it always-on.
 
-**Network:** Render provides a public HTTPS URL out of the box. No Tailscale or Caddy needed for the gateway itself. For a monetized blog, point a custom domain at your Render service.
+**Network:** Render provides a public HTTPS URL out of the box. No Tailscale or Caddy needed for the gateway itself.
 
 ---
 

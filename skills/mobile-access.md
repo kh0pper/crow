@@ -32,12 +32,7 @@ Claude Mobile App / claude.ai
 - Set up Tailscale for private access, or Caddy for public HTTPS
 - Add as connector: `https://your-crow-server/memory/mcp` and `https://your-crow-server/projects/mcp`
 
-### Option 2: Render.com (Legacy)
-- Use the "Deploy to Render" button or `render.yaml` blueprint
-- Free tier sleeps after 15 min, requires Turso for persistence
-- URL format: `https://crow-gateway-xxxx.onrender.com`
-
-### Option 3: Self-Hosted Docker
+### Option 2: Self-Hosted Docker
 - `docker compose --profile cloud up --build` for VPS deployment
 - `docker compose --profile local up --build` for home network + tunnel
 - Requires HTTPS reverse proxy (Caddy, nginx) or Cloudflare Tunnel
@@ -67,11 +62,6 @@ Claude Mobile App / claude.ai
 - Sessions are stored in memory and don't survive server restarts
 - After restarting the gateway, clients reconnect automatically
 - If persistent: check that the `Mcp-Session-Id` header is being forwarded
-
-### Render.com free tier sleep
-- Free Render services sleep after 15 minutes of inactivity
-- First request after sleep takes ~30 seconds (cold start)
-- Upgrade to paid plan for always-on access
 
 ## Best Practices
 - Use cloud deployment for reliable mobile access

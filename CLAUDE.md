@@ -66,7 +66,7 @@ This is an MCP (Model Context Protocol) platform. The AI is the primary interfac
 
 ### Core layers
 
-1. **Custom MCP Servers** (`servers/`) — Five Node.js servers exposing tools over MCP's stdio transport. All share a single SQLite database (local file or Turso cloud).
+1. **Custom MCP Servers** (`servers/`) — Five Node.js servers exposing tools over MCP's stdio transport. All share a single SQLite database (local file).
    - `servers/memory/` — Persistent memory: store, search (FTS5 + optional semantic search via sqlite-vec), recall, list, update, delete, stats
    - `servers/research/` — Project management: projects (research, data_connector, extensible types), sources (with multi-format citations: APA, MLA, Chicago, web), notes, bibliography, data backend registration and management
    - `servers/sharing/` — P2P sharing: Hyperswarm discovery, Hypercore data sync, Nostr messaging, peer relay, identity management
@@ -154,7 +154,7 @@ Data lives in `~/.crow/data/` (preferred) or `./data/` (fallback). Resolution or
 
 ### Database
 
-Uses `@libsql/client` which supports both local SQLite files (default: `~/.crow/data/crow.db`, gitignored) and remote Turso databases. Set `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` for cloud; otherwise falls back to local file. Client factory in `servers/db.js` (also exports `resolveDataDir()`, `sanitizeFtsQuery()`, and `escapeLikePattern()` utility functions). Schema defined in `scripts/init-db.js`. Key tables:
+Uses `@libsql/client` for local SQLite files (default: `~/.crow/data/crow.db`, gitignored). Client factory in `servers/db.js` (also exports `resolveDataDir()`, `sanitizeFtsQuery()`, and `escapeLikePattern()` utility functions). Schema defined in `scripts/init-db.js`. Key tables:
 
 - **memories** — Full-text searchable (FTS5 virtual table `memories_fts`), with triggers to keep FTS in sync on insert/update/delete. Scope columns: `instance_id` (origin instance), `project_id` (project scope) — these are on the main table only (NOT in FTS), filtered via JOIN
 - **research_projects** — Projects with `type` column (research, data_connector, extensible). → **research_sources** → **research_notes** — Foreign keys with `ON DELETE SET NULL`
@@ -232,7 +232,7 @@ The router registers all 5 so clients at `/router/mcp` see everything.
 ### Key dependencies
 
 - `@modelcontextprotocol/sdk` — MCP server SDK (stdio + HTTP transports, auth)
-- `@libsql/client` — SQLite/Turso client (supports local files and remote Turso databases)
+- `@libsql/client` — SQLite client (local files)
 - `zod` — Schema validation for MCP tool parameters
 - `hyperswarm` — DHT-based P2P peer discovery with NAT holepunching
 - `hypercore` — Append-only replicated feeds for data sync

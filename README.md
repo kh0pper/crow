@@ -27,7 +27,7 @@ Published by [Maestro Press](https://maestro.press) | [Product Page](https://mae
                                │
                       ┌────────┴────────┐
                       │     SQLite       │
-                      │ (local or Turso) │
+                      │   (local file)   │
                       └─────────────────┘
 
 ## P2P Sharing — A First for AI Platforms

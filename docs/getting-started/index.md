@@ -31,7 +31,7 @@ Pre-configured Crow instance — no setup, no maintenance. Your own subdomain at
 ### Other Options
 
 - **[Docker](./docker)** — Self-host the gateway with Docker Compose. Best for developers who want full control.
-- **[Cloud Deploy (Legacy)](./cloud-deploy)** — Deploy to Render with Turso. Still works, but Oracle Cloud is recommended for new deployments.
+- **[Cloud Deploy (Legacy)](./cloud-deploy)** — Archived Render deployment guide. Oracle Cloud is recommended for new deployments.
 
 ## What You'll Get
 

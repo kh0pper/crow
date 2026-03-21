@@ -5,7 +5,7 @@ Oracle Cloud's Always Free tier gives you a permanent server that never sleeps, 
 ::: tip Why Oracle Cloud?
 - **Genuinely free** — the credit card is for identity verification only. You will not be charged.
 - **Never sleeps** — your server is always on, always responsive
-- **Local SQLite** — no external database service needed (no Turso, no connection strings)
+- **Local SQLite** — no external database service needed
 - **47 GB disk** — more than enough for Crow and all your data
 - **10 TB/month bandwidth** — more than most paid plans
 :::

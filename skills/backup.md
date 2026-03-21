@@ -84,5 +84,4 @@ The script automatically backs up the current database before overwriting it.
 
 - SQL dumps are portable and work across SQLite versions
 - Binary copies are faster to restore but version-dependent
-- For Turso (cloud) databases, use the Turso CLI for backup/restore instead
 - The backup script respects `CROW_DB_PATH` and `CROW_DATA_DIR` environment variables

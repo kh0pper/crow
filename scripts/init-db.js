@@ -2,13 +2,11 @@ import { createDbClient, resolveDataDir, isSqliteVecAvailable } from "../servers
 import { mkdirSync } from "fs";
 import { resolve } from "path";
 
-// Ensure data directory exists for local file mode
-if (!process.env.TURSO_DATABASE_URL) {
-  const dataDir = process.env.CROW_DB_PATH
-    ? resolve(process.env.CROW_DB_PATH, "..")
-    : resolveDataDir();
-  mkdirSync(dataDir, { recursive: true });
-}
+// Ensure data directory exists
+const dataDir = process.env.CROW_DB_PATH
+  ? resolve(process.env.CROW_DB_PATH, "..")
+  : resolveDataDir();
+mkdirSync(dataDir, { recursive: true });
 
 const db = createDbClient();
 
@@ -1033,6 +1031,5 @@ try {
   console.warn("Theme migration skipped:", err.message);
 }
 
-const tursoMode = process.env.TURSO_DATABASE_URL ? "Turso" : "local file";
-console.log(`Database initialized successfully (${tursoMode})`);
+console.log("Database initialized successfully (local file)");
 db.close();

@@ -1,9 +1,7 @@
 /**
  * Crow Database Client Factory (Bundle Edition)
  *
- * Creates a @libsql/client instance configured for either:
- * - Turso (remote): when TURSO_DATABASE_URL is set
- * - Local SQLite file: fallback using file: URL
+ * Creates a @libsql/client instance for local SQLite files.
  *
  * Subset of servers/db.js — excludes verifyDb, auditLog, isSqliteVecAvailable.
  */
@@ -84,14 +82,6 @@ export async function ensureColumn(db, table, column, type) {
 }
 
 export function createDbClient(dbPath) {
-  const tursoUrl = process.env.TURSO_DATABASE_URL;
-  const tursoToken = process.env.TURSO_AUTH_TOKEN;
-
-  if (tursoUrl) {
-    return createClient({ url: tursoUrl, authToken: tursoToken });
-  }
-
-  // Local file-based SQLite
   const filePath = dbPath || process.env.CROW_DB_PATH || resolve(resolveDataDir(), "crow.db");
   return createClient({ url: `file:${filePath}` });
 }
