@@ -480,6 +480,102 @@
       ],
       "ports": [6080, 9222],
       "notes": "11 MCP tools for browser automation. Runs headless Chrome in Docker with Xvfb + VNC. Human-like typing and clicking for stealth. CDP and VNC bind to localhost only — access via SSH tunnel from other machines."
+    },
+    {
+      "id": "jellyfin",
+      "name": "Jellyfin",
+      "description": "Self-hosted media server — stream movies, TV shows, and music with AI-powered library management",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "media",
+      "tags": ["media", "movies", "tv", "music", "streaming", "self-hosted"],
+      "icon": "film",
+      "webUI": { "port": 8096, "path": "/", "label": "Jellyfin" },
+      "requires": { "env": ["JELLYFIN_API_KEY"], "min_ram_mb": 1024, "min_disk_mb": 2000 },
+      "env_vars": [
+        { "name": "JELLYFIN_URL", "description": "Jellyfin server URL", "default": "http://localhost:8096", "required": true },
+        { "name": "JELLYFIN_API_KEY", "description": "Jellyfin API key (Dashboard > API Keys)", "required": true, "secret": true },
+        { "name": "JELLYFIN_MEDIA_PATH", "description": "Host path for media files (Docker mode)", "required": false },
+        { "name": "JELLYFIN_CONFIG_PATH", "description": "Host path for config (Docker mode)", "required": false }
+      ],
+      "ports": [8096],
+      "notes": "Self-host via Docker (set JELLYFIN_MEDIA_PATH) or connect to existing (set JELLYFIN_URL + JELLYFIN_API_KEY). 7 MCP tools for library search, browsing, and playback control."
+    },
+    {
+      "id": "plex",
+      "name": "Plex",
+      "description": "Connect your Plex Media Server — browse library, control playback, manage playlists via AI",
+      "type": "mcp-server",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "media",
+      "tags": ["media", "movies", "tv", "music", "streaming", "plex"],
+      "icon": "play-circle",
+      "webUI": { "port": 32400, "path": "/web/index.html", "label": "Plex", "proxyMode": "direct" },
+      "requires": { "env": ["PLEX_URL", "PLEX_TOKEN"], "min_ram_mb": 128, "min_disk_mb": 100 },
+      "env_vars": [
+        { "name": "PLEX_URL", "description": "Plex server URL (e.g., http://localhost:32400)", "required": true },
+        { "name": "PLEX_TOKEN", "description": "Plex authentication token", "required": true, "secret": true }
+      ],
+      "notes": "Connects to existing Plex instance. Get token from browser dev tools on app.plex.tv. Some features require Plex Pass."
+    },
+    {
+      "id": "iptv",
+      "name": "IPTV",
+      "description": "IPTV channel management — M3U playlists, EPG program guide, channel groups, and favorites",
+      "type": "mcp-server",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "media",
+      "tags": ["iptv", "tv", "m3u", "epg", "channels", "streaming", "live"],
+      "icon": "tv",
+      "webUI": null,
+      "requires": { "min_ram_mb": 128, "min_disk_mb": 200 },
+      "env_vars": [
+        { "name": "CROW_IPTV_RECORDINGS_PATH", "description": "Directory for recorded streams", "default": "~/.crow/data/iptv-recordings" },
+        { "name": "CROW_IPTV_EPG_REFRESH_HOURS", "description": "EPG refresh interval in hours", "default": "12" }
+      ],
+      "notes": "Lightweight IPTV manager — no Docker required. Add M3U playlists via AI or the panel. EPG data parsed from XMLTV sources."
+    },
+    {
+      "id": "kodi",
+      "name": "Kodi",
+      "description": "Remote control for Kodi — browse library, control playback, queue media via JSON-RPC",
+      "type": "mcp-server",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "media",
+      "tags": ["media", "kodi", "remote", "xbmc", "htpc", "playback"],
+      "icon": "monitor",
+      "webUI": { "port": 8080, "path": "/", "label": "Kodi Web", "proxyMode": "direct" },
+      "requires": { "env": ["KODI_URL"], "min_ram_mb": 64, "min_disk_mb": 50 },
+      "env_vars": [
+        { "name": "KODI_URL", "description": "Kodi JSON-RPC endpoint (e.g., http://kodi.local:8080)", "required": true },
+        { "name": "KODI_USER", "description": "Kodi web interface username", "required": false },
+        { "name": "KODI_PASSWORD", "description": "Kodi web interface password", "required": false, "secret": true }
+      ],
+      "notes": "Connects to existing Kodi instance. Enable HTTP remote control in Kodi Settings > Services > Web server."
+    },
+    {
+      "id": "trilium",
+      "name": "TriliumNext",
+      "description": "Personal knowledge base — search notes, manage note trees, clip web content, AI-powered organization via ETAPI",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": ["notes", "knowledge-base", "wiki", "organization", "research", "markdown"],
+      "icon": "book-open",
+      "webUI": { "port": 8088, "path": "/", "label": "TriliumNext" },
+      "requires": { "env": ["TRILIUM_ETAPI_TOKEN"], "min_ram_mb": 256, "min_disk_mb": 500 },
+      "env_vars": [
+        { "name": "TRILIUM_URL", "description": "TriliumNext server URL", "default": "http://localhost:8088", "required": true },
+        { "name": "TRILIUM_ETAPI_TOKEN", "description": "ETAPI authentication token", "required": true, "secret": true },
+        { "name": "TRILIUM_DATA_PATH", "description": "Host path for TriliumNext data (Docker mode)", "required": false }
+      ],
+      "ports": [8088],
+      "notes": "Self-host via Docker or connect to existing. Get ETAPI token from Options > ETAPI in TriliumNext. 11 MCP tools for note management."
     }
   ]
 }
