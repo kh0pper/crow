@@ -1,0 +1,28 @@
+{
+  "id": "plex",
+  "name": "Plex",
+  "version": "1.0.0",
+  "description": "Connect to Plex Media Server — search library, browse collections, control playback, view active sessions",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "media",
+  "tags": ["media", "plex", "movies", "tv", "music", "streaming"],
+  "icon": "film",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["PLEX_URL", "PLEX_TOKEN"] },
+  "panel": "panel/plex.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/plex.md"],
+  "requires": { "env": ["PLEX_URL", "PLEX_TOKEN"], "min_ram_mb": 64, "min_disk_mb": 50 },
+  "env_vars": [
+    { "name": "PLEX_URL", "description": "Plex Media Server URL (e.g., http://localhost:32400)", "required": true },
+    { "name": "PLEX_TOKEN", "description": "Plex authentication token (see skill for how to find it)", "required": true, "secret": true },
+    { "name": "PLEX_MACHINE_ID", "description": "Plex server machine identifier (optional, for multi-server setups)", "required": false },
+    { "name": "PLEX_MEDIA_PATH", "description": "Host path for media files (Docker self-host mode)", "required": false },
+    { "name": "PLEX_CONFIG_PATH", "description": "Host path for Plex config/database (Docker self-host mode)", "required": false },
+    { "name": "PLEX_CLAIM_TOKEN", "description": "Plex claim token for initial server setup (Docker self-host mode, from plex.tv/claim)", "required": false, "secret": true }
+  ],
+  "ports": [32400],
+  "webUI": { "port": 32400, "path": "/web", "label": "Plex Web", "proxyMode": "direct" },
+  "notes": "Connects to an existing Plex Media Server. Optionally self-host via Docker (set PLEX_MEDIA_PATH + PLEX_CLAIM_TOKEN). Plex Web is a SPA and cannot be proxied behind a subpath."
+}

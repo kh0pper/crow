@@ -1,0 +1,26 @@
+services:
+  plex:
+    image: plexinc/pms-docker:latest
+    container_name: crow-plex
+    network_mode: host
+    volumes:
+      - ${PLEX_CONFIG_PATH:-plex-config}:/config
+      - ${PLEX_MEDIA_PATH:?Set PLEX_MEDIA_PATH}:/data
+      - plex-transcode:/transcode
+    environment:
+      - TZ=${TZ:-UTC}
+      - PLEX_CLAIM=${PLEX_CLAIM_TOKEN:-}
+      - ADVERTISE_IP=http://${PLEX_URL:-localhost}:32400/
+    init: true
+    mem_limit: 4g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:32400/identity"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  plex-config:
+  plex-transcode:
