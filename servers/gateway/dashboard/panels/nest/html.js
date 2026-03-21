@@ -49,6 +49,7 @@ const PANEL_ICON_MAP = {
   settings: "settings",
   health: "health",
   contacts: "contacts",
+  project: "project",
   media: "media",
   mic: "media",
 };

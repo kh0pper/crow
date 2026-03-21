@@ -42,11 +42,11 @@ Use the session-start or crow-guide prompts for detailed workflow guidance.`;
  * @returns {Promise<string>}
  */
 export async function generateInstructions(options = {}) {
-  const { dbPath, routerStyle = false, deviceId = null } = options;
+  const { dbPath, routerStyle = false, deviceId = null, projectId = null } = options;
 
   try {
     const db = createDbClient(dbPath);
-    const condensed = await generateCondensedContext(db, { routerStyle, deviceId });
+    const condensed = await generateCondensedContext(db, { routerStyle, deviceId, projectId });
 
     if (!condensed) {
       return STATIC_INSTRUCTIONS;
