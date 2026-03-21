@@ -1,0 +1,11 @@
+{
+  "name": "crow-jellyfin",
+  "version": "1.0.0",
+  "description": "Jellyfin MCP server — media library search, playback, and remote control",
+  "type": "module",
+  "main": "server/index.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  }
+}
