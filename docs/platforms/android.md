@@ -12,7 +12,7 @@ Access Crow from your Android device with the native app or as a Progressive Web
 
 Download the latest Crow Android app:
 
-[Download Crow for Android](https://maestro.press/software/crow/download/crow-android.apk)
+[Download Crow for Android](https://github.com/kh0pper/crow/releases/download/android-v1.0.0/app-debug.apk)
 
 ### Step 2: Enable unknown sources
 
