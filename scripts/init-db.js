@@ -846,6 +846,20 @@ await initTable("contact_group_members table", `
   CREATE UNIQUE INDEX IF NOT EXISTS idx_group_members_unique ON contact_group_members(group_id, contact_id);
 `);
 
+// --- Push Subscriptions (Web Push / PWA) ---
+
+await initTable("push_subscriptions table", `
+  CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    endpoint TEXT NOT NULL UNIQUE,
+    keys_json TEXT NOT NULL,
+    platform TEXT NOT NULL DEFAULT 'web',
+    device_name TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    last_seen TEXT DEFAULT (datetime('now'))
+  );
+`);
+
 // --- Optional: sqlite-vec virtual table for semantic search ---
 const hasVec = await isSqliteVecAvailable(db);
 if (hasVec) {

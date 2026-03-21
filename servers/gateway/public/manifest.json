@@ -1,0 +1,13 @@
+{
+  "name": "Crow's Nest",
+  "short_name": "Crow",
+  "description": "AI-powered personal platform",
+  "start_url": "/dashboard/nest",
+  "display": "standalone",
+  "background_color": "#1d1d1f",
+  "theme_color": "#1d1d1f",
+  "orientation": "any",
+  "icons": [
+    { "src": "/icons/crow-icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
