@@ -64,6 +64,14 @@ export async function createNotification(db, opts) {
     args: [type, source, title, body, priority, action_url, metadataJson, schedule_id, expiresAt],
   });
 
+  // Send web push notification (non-blocking, fails silently when not available)
+  try {
+    const { sendPushToAll } = await import("../gateway/push/web-push.js");
+    await sendPushToAll(db, { title, body: body || title, url: action_url });
+  } catch {
+    // Push module not available (non-gateway context) — skip silently
+  }
+
   return { id: Number(result.lastInsertRowid) };
 }
 

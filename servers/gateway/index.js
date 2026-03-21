@@ -72,6 +72,8 @@ import { mountMcpServer } from "./routes/mcp.js";
 import { generateInstructions } from "../shared/instructions.js";
 import { startAutoUpdate } from "./auto-update.js";
 import { startScheduler } from "./scheduler.js";
+import { initWebPush } from "./push/web-push.js";
+import { join } from "node:path";
 
 const PORT = parseInt(process.env.PORT || process.env.CROW_GATEWAY_PORT || "3001", 10);
 const noAuth = process.argv.includes("--no-auth");
@@ -205,6 +207,20 @@ app.use("/register", authLimiter);
 
 // Body parsing with size limit
 app.use(express.json({ limit: "1mb" }));
+
+// --- Static files (PWA manifest, service worker, icons) ---
+app.use(express.static(join(__gatewayDir, "public"), {
+  maxAge: "1h",
+  setHeaders: (res, filePath) => {
+    // Service worker must not be cached aggressively
+    if (filePath.endsWith("sw.js")) {
+      res.setHeader("Cache-Control", "no-cache");
+    }
+  },
+}));
+
+// --- Initialize Web Push ---
+initWebPush();
 
 // --- robots.txt (site-wide, before any router mounts) ---
 app.get("/robots.txt", (req, res) => {
@@ -469,6 +485,15 @@ try {
   console.log("Notifications API mounted at /api/notifications");
 } catch (err) {
   console.warn("[notifications] Failed to mount:", err.message);
+}
+
+// --- Mount Push Subscription API ---
+try {
+  const { default: pushRouter } = await import("./routes/push.js");
+  app.use(pushRouter(dashboardAuth));
+  console.log("Push API mounted at /api/push");
+} catch (err) {
+  console.warn("[push] Failed to mount:", err.message);
 }
 
 // --- Protected API endpoints (behind dashboard auth) ---
