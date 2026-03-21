@@ -1,8 +1,19 @@
 /**
- * Crow's Nest Panel — Contacts management (list, block/unblock, invite, discovery)
+ * Crow's Nest Panel — Contacts
+ *
+ * Full-featured contact management: card grid, profiles, groups,
+ * manual contacts, vCard import/export, own-profile editing.
+ *
+ * Orchestrator: imports modular CSS, HTML, client JS, data queries, and POST handlers.
  */
 
-import { escapeHtml, dataTable, section, badge } from "../shared/components.js";
+import { contactsCss } from "./contacts/css.js";
+import { renderContactList, renderContactProfile, renderGroupManager, renderMyProfile } from "./contacts/html.js";
+import { contactsClientJs } from "./contacts/client.js";
+import { getContacts, getContact, getContactActivity, getGroups, getMyProfile } from "./contacts/data-queries.js";
+import { handleContactAction } from "./contacts/api-handlers.js";
+import { section } from "../shared/components.js";
+import { t } from "../shared/i18n.js";
 
 export default {
   id: "contacts",
@@ -10,102 +21,75 @@ export default {
   icon: "contacts",
   route: "/dashboard/contacts",
   navOrder: 12,
-  hidden: false,
   category: "core",
 
-  async handler(req, res, { db, layout }) {
+  async handler(req, res, { db, layout, lang }) {
     // --- Handle POST actions ---
     if (req.method === "POST") {
-      const { action, crow_id } = req.body;
-
-      if (action === "block" && crow_id) {
-        await db.execute({
-          sql: "UPDATE contacts SET is_blocked = 1 WHERE crow_id = ?",
-          args: [crow_id],
-        });
-        return res.redirect("/dashboard/contacts");
-      }
-
-      if (action === "unblock" && crow_id) {
-        await db.execute({
-          sql: "UPDATE contacts SET is_blocked = 0 WHERE crow_id = ?",
-          args: [crow_id],
-        });
-        return res.redirect("/dashboard/contacts");
+      const result = await handleContactAction(req, db);
+      if (result?.redirect) return res.redirect(result.redirect);
+      if (result?.download) {
+        res.setHeader("Content-Type", "text/vcard; charset=utf-8");
+        res.setHeader("Content-Disposition", "attachment; filename=contacts.vcf");
+        return res.send(result.download);
       }
     }
 
-    // --- Fetch data ---
-    const [contactsResult, discoveryResult] = await Promise.all([
-      db.execute("SELECT * FROM contacts ORDER BY is_blocked ASC, last_seen DESC"),
-      db.execute({
-        sql: "SELECT value FROM dashboard_settings WHERE key = 'discovery_enabled'",
-        args: [],
-      }),
-    ]);
+    // --- Determine view ---
+    const view = req.query.view || "all";
+    const contactId = req.query.contact ? parseInt(req.query.contact) : null;
 
-    const contacts = contactsResult.rows;
-    const discoveryEnabled = discoveryResult.rows[0]?.value === "true";
+    // --- Fetch common data ---
+    const groups = await getGroups(db);
 
-    // --- Contact list ---
-    let contactListHtml;
-    if (contacts.length === 0) {
-      contactListHtml = `
-        <div style="text-align:center;padding:2rem;color:var(--crow-text-muted)">
-          <p style="font-size:1.1rem;margin-bottom:0.5rem">No contacts yet</p>
-          <p style="font-size:0.85rem">Ask your AI to generate an invite code with "create an invite" or use the sharing skill.</p>
-        </div>`;
+    let bodyHtml = "";
+    const css = contactsCss();
+    const js = contactsClientJs();
+
+    // Tab bar (not shown on contact detail view)
+    const showTabs = view !== "contact";
+
+    if (view === "contact" && contactId) {
+      // --- Contact Profile ---
+      const contact = await getContact(db, contactId);
+      const activities = contact ? await getContactActivity(db, contact.id) : [];
+      bodyHtml = renderContactProfile(contact, activities, groups, groups, lang);
+    } else if (view === "groups") {
+      // --- Group Manager ---
+      const contacts = await getContacts(db, { limit: 500 });
+      bodyHtml = renderGroupManager(groups, contacts, lang);
+    } else if (view === "profile") {
+      // --- My Profile ---
+      const profile = await getMyProfile(db);
+      bodyHtml = renderMyProfile(profile, lang);
     } else {
-      const rows = contacts.map((c) => {
-        const name = escapeHtml(c.display_name || c.crow_id.substring(0, 16) + "...");
-        const crowId = `<code style="font-size:0.75rem;color:var(--crow-text-muted)">${escapeHtml(c.crow_id.substring(0, 24))}...</code>`;
-
-        const statusBadge = c.is_blocked
-          ? badge("Blocked", "error")
-          : c.last_seen
-            ? badge("Active", "connected")
-            : badge("Pending", "draft");
-
-        const lastSeenStr = c.last_seen
-          ? new Date(c.last_seen).toLocaleDateString()
-          : "Never";
-
-        const actionBtn = c.is_blocked
-          ? `<form method="POST" style="display:inline">
-               <input type="hidden" name="action" value="unblock">
-               <input type="hidden" name="crow_id" value="${escapeHtml(c.crow_id)}">
-               <button type="submit" class="btn btn-sm btn-secondary">Unblock</button>
-             </form>`
-          : `<form method="POST" style="display:inline" onsubmit="return confirm('Block this contact? They won\\'t be able to message or share with you.')">
-               <input type="hidden" name="action" value="block">
-               <input type="hidden" name="crow_id" value="${escapeHtml(c.crow_id)}">
-               <button type="submit" class="btn btn-sm btn-secondary" style="color:var(--crow-error)">Block</button>
-             </form>`;
-
-        return [name + "<br>" + crowId, statusBadge, lastSeenStr, actionBtn];
-      });
-
-      contactListHtml = dataTable(
-        ["Contact", "Status", "Last Seen", "Actions"],
-        rows
-      );
+      // --- All Contacts (default) ---
+      const filters = {
+        search: req.query.search || "",
+        groupId: req.query.groupId || "",
+        type: req.query.type || "all",
+      };
+      const contacts = await getContacts(db, filters);
+      bodyHtml = renderContactList(contacts, groups, filters, lang);
     }
 
-    // --- Invite section ---
-    const inviteHtml = `
-      <p style="color:var(--crow-text-muted);font-size:0.85rem;margin-bottom:0.75rem">
-        To add a contact, ask your AI: <em>"Generate an invite code"</em> or <em>"Invite someone to my Crow network"</em>.
-        Share the resulting code with the person you want to connect with.
-      </p>
-      <p style="color:var(--crow-text-muted);font-size:0.85rem">
-        To accept an invite, ask: <em>"Accept this invite: [paste code]"</em>
-      </p>`;
+    // Build tabs HTML
+    let tabsHtml = "";
+    if (showTabs) {
+      const tabs = [
+        { id: "all", label: t("contacts.tabAll", lang) },
+        { id: "groups", label: t("contacts.tabGroups", lang) },
+        { id: "profile", label: t("contacts.tabProfile", lang) },
+      ];
+      tabsHtml = `<div class="contacts-tabs">
+        ${tabs.map((tab) =>
+          `<a href="/dashboard/contacts?view=${tab.id}" class="contacts-tab${view === tab.id ? " active" : ""}">${tab.label}</a>`
+        ).join("")}
+      </div>`;
+    }
 
-    const content = `
-      ${section("Contacts", contactListHtml, { delay: 200 })}
-      ${section("Add a Contact", inviteHtml, { delay: 250 })}
-    `;
+    const content = css + tabsHtml + bodyHtml + js;
 
-    return layout({ title: "Contacts", content });
+    return layout({ title: t("nav.contacts", lang), content });
   },
 };
