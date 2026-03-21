@@ -19,7 +19,18 @@ export default {
     // --- Dynamic imports (replaces static ESM import) ---
     const { pathToFileURL } = await import("node:url");
     const { join } = await import("node:path");
-    const { existsSync } = await import("node:fs");
+    const { existsSync, readFileSync } = await import("node:fs");
+    const { homedir } = await import("node:os");
+
+    /** Check ~/.crow/installed.json for installed bundle IDs */
+    function getInstalledBundles() {
+      const installedPath = join(homedir(), ".crow", "installed.json");
+      if (!existsSync(installedPath)) return [];
+      try {
+        const installed = JSON.parse(readFileSync(installedPath, "utf8"));
+        return Array.isArray(installed) ? installed.map(a => typeof a === "string" ? a : a?.id).filter(Boolean) : [];
+      } catch { return []; }
+    }
 
     const componentsPath = join(appRoot, "servers/gateway/dashboard/shared/components.js");
     const { escapeHtml, badge, formatDate } = await import(pathToFileURL(componentsPath).href);
@@ -466,6 +477,14 @@ export default {
       ? `<div class="alert alert-error" style="margin-bottom:1rem">${escapeHtml(req.query.error)}</div>`
       : "";
 
+    // --- Detect installed media bundles for dynamic tabs ---
+    const installedBundles = getInstalledBundles();
+    const hasJellyfin = installedBundles.includes("jellyfin");
+    const hasPlex = installedBundles.includes("plex");
+    const hasIptv = installedBundles.includes("iptv");
+    const hasKodi = installedBundles.includes("kodi");
+    const hasLibrary = hasJellyfin || hasPlex;
+
     // --- Tab navigation ---
     const tabs = [
       { id: "feed", label: "Feed" },
@@ -476,6 +495,11 @@ export default {
       { id: "folders", label: "Folders" },
       { id: "sources", label: "Sources" },
     ];
+
+    // Dynamic tabs based on installed bundles
+    if (hasLibrary) tabs.push({ id: "library", label: "Library" });
+    if (hasIptv) tabs.push({ id: "live", label: "Live" });
+    if (hasKodi) tabs.push({ id: "remote", label: "Remote" });
     const tabNav = `<div style="display:flex;gap:0.5rem;margin-bottom:1rem;border-bottom:1px solid var(--crow-border);padding-bottom:0.5rem">
       ${tabs.map((t) => `<a href="/dashboard/media?tab=${t.id}" style="padding:0.4rem 0.75rem;border-radius:4px;text-decoration:none;font-size:0.85rem;${tab === t.id ? "background:var(--crow-accent);color:white" : "color:var(--crow-text-secondary)"}">${t.label}</a>`).join("")}
     </div>`;
@@ -1020,6 +1044,415 @@ export default {
       </div>`;
 
       tabContent = createForm + listHtml + digestForm;
+    }
+
+    // --- Library tab (Jellyfin / Plex) ---
+    if (tab === "library" && hasLibrary) {
+      const librarySource = hasJellyfin ? "jellyfin" : "plex";
+      const libraryEndpoint = hasJellyfin ? "/api/jellyfin/recent" : "/api/plex/on-deck";
+      const libraryLabel = hasJellyfin ? "Jellyfin" : "Plex";
+
+      tabContent = `<div id="library-content">
+        <div style="text-align:center;padding:2rem;color:var(--crow-text-muted)">Loading ${escapeHtml(libraryLabel)} library...</div>
+      </div>
+      <script>
+      (function() {
+        fetch('${libraryEndpoint}')
+          .then(function(r) {
+            if (!r.ok) throw new Error(r.status === 502 ? '${escapeHtml(libraryLabel)} bundle is not running' : 'Failed to load library');
+            return r.json();
+          })
+          .then(function(data) {
+            var items = data.items || data.MediaContainer && data.MediaContainer.Metadata || [];
+            var container = document.getElementById('library-content');
+            if (items.length === 0) {
+              container.textContent = '';
+              var empty = document.createElement('div');
+              empty.style.cssText = 'text-align:center;padding:2rem;color:var(--crow-text-muted)';
+              var h3 = document.createElement('h3');
+              h3.style.fontFamily = "'Fraunces',serif";
+              h3.textContent = 'No recent items';
+              var p = document.createElement('p');
+              p.textContent = 'Your ${escapeHtml(libraryLabel)} library is empty or the server returned no items.';
+              empty.appendChild(h3);
+              empty.appendChild(p);
+              container.appendChild(empty);
+              return;
+            }
+            var grid = document.createElement('div');
+            grid.className = 'media-grid';
+            items.forEach(function(item) {
+              var title = item.Name || item.title || 'Untitled';
+              var subtitle = item.SeriesName || item.grandparentTitle || item.Type || item.type || '';
+              var imageUrl = item.ImageUrl || item.image_url || item.thumb || '';
+              var streamUrl = item.StreamUrl || item.stream_url || item.Media && item.Media[0] && item.Media[0].Part && item.Media[0].Part[0] && item.Media[0].Part[0].key || '';
+              var itemType = item.Type || item.type || 'unknown';
+              var isAudio = itemType === 'Audio' || itemType === 'audio' || itemType === 'MusicAlbum';
+
+              var card = document.createElement('div');
+              card.className = 'media-card';
+              card.style.cssText = 'background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:6px;overflow:hidden;display:flex;flex-direction:column';
+
+              // Image area
+              var imgWrap = document.createElement('div');
+              imgWrap.style.cssText = 'position:relative;padding-top:56.25%;background:var(--crow-bg-deep);border-radius:6px 6px 0 0;overflow:hidden';
+              if (imageUrl) {
+                var img = document.createElement('img');
+                img.src = imageUrl;
+                img.alt = '';
+                img.loading = 'lazy';
+                img.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover';
+                imgWrap.appendChild(img);
+              } else {
+                var letter = document.createElement('div');
+                letter.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-family:'Fraunces',serif;font-size:2rem;color:hsla(220,60%,70%,0.4)";
+                letter.textContent = title.charAt(0).toUpperCase();
+                imgWrap.style.background = 'linear-gradient(135deg,hsl(220,40%,20%),hsl(260,30%,15%))';
+                imgWrap.appendChild(letter);
+              }
+              card.appendChild(imgWrap);
+
+              // Content area
+              var body = document.createElement('div');
+              body.style.cssText = 'padding:0.75rem;flex:1;display:flex;flex-direction:column';
+              var typeLabel = document.createElement('span');
+              typeLabel.style.cssText = 'font-size:0.7rem;color:var(--crow-accent);font-weight:500;text-transform:uppercase;letter-spacing:0.03em;margin-bottom:0.35rem';
+              typeLabel.textContent = itemType;
+              body.appendChild(typeLabel);
+              var h4 = document.createElement('h4');
+              h4.style.cssText = 'margin:0 0 0.3rem;font-size:0.9rem;font-weight:600;line-height:1.3';
+              h4.textContent = title;
+              body.appendChild(h4);
+              if (subtitle) {
+                var sub = document.createElement('p');
+                sub.style.cssText = 'margin:0;font-size:0.78rem;color:var(--crow-text-secondary);flex:1';
+                sub.textContent = subtitle;
+                body.appendChild(sub);
+              }
+              if (streamUrl) {
+                var footer = document.createElement('div');
+                footer.style.cssText = 'margin-top:0.5rem;padding-top:0.4rem;border-top:1px solid var(--crow-border);display:flex;justify-content:flex-end';
+                if (isAudio) {
+                  var playBtn = document.createElement('button');
+                  playBtn.className = 'btn btn-sm btn-primary';
+                  playBtn.style.cssText = 'font-size:0.8rem;padding:0.2rem 0.5rem';
+                  playBtn.textContent = '\\u25B6 Play';
+                  playBtn.addEventListener('click', (function(src, t, s) {
+                    return function() { if (window.crowPlayer) window.crowPlayer.load(src, t, s); };
+                  })(streamUrl, title, subtitle));
+                  footer.appendChild(playBtn);
+                } else {
+                  var watchLink = document.createElement('a');
+                  watchLink.href = streamUrl;
+                  watchLink.target = '_blank';
+                  watchLink.rel = 'noopener';
+                  watchLink.className = 'btn btn-sm btn-primary';
+                  watchLink.style.cssText = 'font-size:0.8rem;padding:0.2rem 0.5rem;text-decoration:none';
+                  watchLink.textContent = '\\u25B6 Watch';
+                  footer.appendChild(watchLink);
+                }
+                body.appendChild(footer);
+              }
+              card.appendChild(body);
+              grid.appendChild(card);
+            });
+            container.textContent = '';
+            container.appendChild(grid);
+          })
+          .catch(function(err) {
+            var container = document.getElementById('library-content');
+            container.textContent = '';
+            var errDiv = document.createElement('div');
+            errDiv.style.cssText = 'text-align:center;padding:2rem;color:var(--crow-text-muted)';
+            var h3 = document.createElement('h3');
+            h3.style.fontFamily = "'Fraunces',serif";
+            h3.textContent = 'Bundle not running';
+            var p = document.createElement('p');
+            p.textContent = err.message;
+            errDiv.appendChild(h3);
+            errDiv.appendChild(p);
+            container.appendChild(errDiv);
+          });
+      })();
+      <\/script>`;
+    }
+
+    // --- Live tab (IPTV) ---
+    if (tab === "live" && hasIptv) {
+      tabContent = `<div id="live-content">
+        <div style="text-align:center;padding:2rem;color:var(--crow-text-muted)">Loading channels...</div>
+      </div>
+      <script>
+      (function() {
+        fetch('/api/iptv/channels?favorites_only=true')
+          .then(function(r) {
+            if (!r.ok) throw new Error(r.status === 502 ? 'IPTV bundle is not running' : 'Failed to load channels');
+            return r.json();
+          })
+          .then(function(data) {
+            var channels = data.channels || [];
+            var container = document.getElementById('live-content');
+            if (channels.length === 0) {
+              container.textContent = '';
+              var empty = document.createElement('div');
+              empty.style.cssText = 'text-align:center;padding:2rem;color:var(--crow-text-muted)';
+              var h3 = document.createElement('h3');
+              h3.style.fontFamily = "'Fraunces',serif";
+              h3.textContent = 'No favorite channels';
+              var p = document.createElement('p');
+              p.textContent = 'Mark channels as favorites in the IPTV panel, or no channels are available.';
+              empty.appendChild(h3);
+              empty.appendChild(p);
+              container.appendChild(empty);
+              return;
+            }
+            var grid = document.createElement('div');
+            grid.className = 'media-grid';
+            channels.forEach(function(ch) {
+              var name = ch.name || ch.title || 'Unknown Channel';
+              var program = ch.current_program || ch.now_playing || '';
+              var logo = ch.logo || ch.icon || '';
+              var streamUrl = ch.stream_url || ch.url || '';
+
+              var card = document.createElement('div');
+              card.className = 'media-card';
+              card.style.cssText = 'background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:6px;overflow:hidden;display:flex;flex-direction:column';
+
+              var imgWrap = document.createElement('div');
+              imgWrap.style.cssText = 'position:relative;padding-top:56.25%;background:var(--crow-bg-deep);border-radius:6px 6px 0 0;overflow:hidden';
+              if (logo) {
+                var img = document.createElement('img');
+                img.src = logo;
+                img.alt = '';
+                img.loading = 'lazy';
+                img.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);max-width:80%;max-height:80%;object-fit:contain';
+                imgWrap.appendChild(img);
+              } else {
+                imgWrap.style.background = 'linear-gradient(135deg,hsl(0,40%,20%),hsl(30,30%,15%))';
+                var letter = document.createElement('div');
+                letter.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-family:'Fraunces',serif;font-size:2rem;color:hsla(0,60%,70%,0.4)";
+                letter.textContent = name.charAt(0).toUpperCase();
+                imgWrap.appendChild(letter);
+              }
+              card.appendChild(imgWrap);
+
+              var body = document.createElement('div');
+              body.style.cssText = 'padding:0.75rem;flex:1;display:flex;flex-direction:column';
+              var liveRow = document.createElement('div');
+              liveRow.style.cssText = 'display:flex;align-items:center;gap:0.4rem;margin-bottom:0.35rem';
+              var dot = document.createElement('span');
+              dot.style.cssText = 'display:inline-block;width:8px;height:8px;border-radius:50%;background:#ef4444;flex-shrink:0';
+              var liveLabel = document.createElement('span');
+              liveLabel.style.cssText = 'font-size:0.7rem;color:var(--crow-accent);font-weight:500;text-transform:uppercase;letter-spacing:0.03em';
+              liveLabel.textContent = 'LIVE';
+              liveRow.appendChild(dot);
+              liveRow.appendChild(liveLabel);
+              body.appendChild(liveRow);
+              var h4 = document.createElement('h4');
+              h4.style.cssText = 'margin:0 0 0.3rem;font-size:0.9rem;font-weight:600;line-height:1.3';
+              h4.textContent = name;
+              body.appendChild(h4);
+              if (program) {
+                var prog = document.createElement('p');
+                prog.style.cssText = 'margin:0;font-size:0.78rem;color:var(--crow-text-secondary);flex:1';
+                prog.textContent = program;
+                body.appendChild(prog);
+              }
+              if (streamUrl) {
+                var footer = document.createElement('div');
+                footer.style.cssText = 'margin-top:0.5rem;padding-top:0.4rem;border-top:1px solid var(--crow-border);display:flex;justify-content:flex-end';
+                var watchLink = document.createElement('a');
+                watchLink.href = streamUrl;
+                watchLink.target = '_blank';
+                watchLink.rel = 'noopener';
+                watchLink.className = 'btn btn-sm btn-primary';
+                watchLink.style.cssText = 'font-size:0.8rem;padding:0.2rem 0.5rem;text-decoration:none';
+                watchLink.textContent = '\\u25B6 Watch';
+                footer.appendChild(watchLink);
+                body.appendChild(footer);
+              }
+              card.appendChild(body);
+              grid.appendChild(card);
+            });
+            container.textContent = '';
+            container.appendChild(grid);
+          })
+          .catch(function(err) {
+            var container = document.getElementById('live-content');
+            container.textContent = '';
+            var errDiv = document.createElement('div');
+            errDiv.style.cssText = 'text-align:center;padding:2rem;color:var(--crow-text-muted)';
+            var h3 = document.createElement('h3');
+            h3.style.fontFamily = "'Fraunces',serif";
+            h3.textContent = 'Bundle not running';
+            var p = document.createElement('p');
+            p.textContent = err.message;
+            errDiv.appendChild(h3);
+            errDiv.appendChild(p);
+            container.appendChild(errDiv);
+          });
+      })();
+      <\/script>`;
+    }
+
+    // --- Remote tab (Kodi) ---
+    if (tab === "remote" && hasKodi) {
+      tabContent = `<div id="remote-content">
+        <div style="text-align:center;padding:2rem;color:var(--crow-text-muted)">Connecting to Kodi...</div>
+      </div>
+      <script>
+      (function() {
+        var remoteEl = document.getElementById('remote-content');
+
+        function formatKodiTime(t) {
+          if (!t) return '';
+          var h = t.hours || 0, m = t.minutes || 0, s = t.seconds || 0;
+          if (h > 0) return h + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+          return m + ':' + String(s).padStart(2,'0');
+        }
+
+        function renderNowPlaying(data) {
+          remoteEl.textContent = '';
+
+          if (!data || (!data.title && !data.item)) {
+            var empty = document.createElement('div');
+            empty.style.cssText = 'text-align:center;padding:2rem;color:var(--crow-text-muted)';
+            var h3 = document.createElement('h3');
+            h3.style.fontFamily = "'Fraunces',serif";
+            h3.textContent = 'Nothing playing';
+            var p = document.createElement('p');
+            p.textContent = 'Start playing something on Kodi to see controls here.';
+            empty.appendChild(h3);
+            empty.appendChild(p);
+            remoteEl.appendChild(empty);
+            return;
+          }
+          var title = data.title || (data.item && data.item.label) || 'Unknown';
+          var subtitle = data.artist || data.showtitle || (data.item && data.item.type) || '';
+          var thumb = data.thumbnail || data.thumb || '';
+          var speed = data.speed !== undefined ? data.speed : 0;
+          var isPlaying = speed > 0;
+          var pct = data.percentage !== undefined ? Math.round(data.percentage) : 0;
+          var elapsed = data.time ? formatKodiTime(data.time) : '';
+          var total = data.totaltime ? formatKodiTime(data.totaltime) : '';
+
+          var card = document.createElement('div');
+          card.className = 'card';
+          card.style.cssText = 'padding:1.25rem;max-width:480px;margin:0 auto';
+
+          if (thumb) {
+            var thumbWrap = document.createElement('div');
+            thumbWrap.style.cssText = 'text-align:center;margin-bottom:1rem';
+            var thumbImg = document.createElement('img');
+            thumbImg.src = thumb;
+            thumbImg.alt = '';
+            thumbImg.style.cssText = 'max-width:200px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.3)';
+            thumbWrap.appendChild(thumbImg);
+            card.appendChild(thumbWrap);
+          }
+
+          var info = document.createElement('div');
+          info.style.cssText = 'text-align:center;margin-bottom:1rem';
+          var titleEl = document.createElement('h3');
+          titleEl.style.cssText = "margin:0 0 0.25rem;font-family:'Fraunces',serif;font-size:1.1rem";
+          titleEl.textContent = title;
+          info.appendChild(titleEl);
+          if (subtitle) {
+            var subEl = document.createElement('p');
+            subEl.style.cssText = 'margin:0;font-size:0.85rem;color:var(--crow-text-secondary)';
+            subEl.textContent = subtitle;
+            info.appendChild(subEl);
+          }
+          card.appendChild(info);
+
+          // Progress bar
+          var progress = document.createElement('div');
+          progress.style.cssText = 'margin-bottom:1rem';
+          var bar = document.createElement('div');
+          bar.style.cssText = 'height:4px;background:var(--crow-bg-deep);border-radius:2px;overflow:hidden';
+          var fill = document.createElement('div');
+          fill.style.cssText = 'height:100%;width:' + pct + '%;background:var(--crow-accent);transition:width 1s linear';
+          bar.appendChild(fill);
+          progress.appendChild(bar);
+          if (elapsed || total) {
+            var times = document.createElement('div');
+            times.style.cssText = 'display:flex;justify-content:space-between;font-size:0.7rem;color:var(--crow-text-muted);margin-top:0.25rem';
+            var elapsedEl = document.createElement('span');
+            elapsedEl.textContent = elapsed;
+            var totalEl = document.createElement('span');
+            totalEl.textContent = total;
+            times.appendChild(elapsedEl);
+            times.appendChild(totalEl);
+            progress.appendChild(times);
+          }
+          card.appendChild(progress);
+
+          // Transport controls
+          var transport = document.createElement('div');
+          transport.style.cssText = 'display:flex;justify-content:center;gap:0.75rem;align-items:center';
+
+          function makeBtn(label, cmd, className, style, titleText) {
+            var btn = document.createElement('button');
+            btn.className = className;
+            btn.style.cssText = style;
+            btn.title = titleText;
+            btn.textContent = label;
+            btn.addEventListener('click', function() { window.crowKodiCmd(cmd); });
+            return btn;
+          }
+
+          transport.appendChild(makeBtn('\\u23EE', 'prev', 'btn btn-secondary', 'font-size:1.2rem;padding:0.4rem 0.7rem', 'Previous'));
+          transport.appendChild(makeBtn(isPlaying ? '\\u23F8' : '\\u25B6', 'playpause', 'btn btn-primary', 'font-size:1.4rem;padding:0.5rem 1rem;border-radius:50%;width:50px;height:50px', 'Play/Pause'));
+          transport.appendChild(makeBtn('\\u23ED', 'next', 'btn btn-secondary', 'font-size:1.2rem;padding:0.4rem 0.7rem', 'Next'));
+          card.appendChild(transport);
+
+          // Volume row
+          var volRow = document.createElement('div');
+          volRow.style.cssText = 'display:flex;justify-content:center;gap:0.5rem;align-items:center;margin-top:1rem';
+          volRow.appendChild(makeBtn('\\uD83D\\uDD08', 'volume_down', 'btn btn-sm btn-secondary', '', 'Volume down'));
+          volRow.appendChild(makeBtn('\\u25A0', 'stop', 'btn btn-sm btn-secondary', '', 'Stop'));
+          volRow.appendChild(makeBtn('\\uD83D\\uDD0A', 'volume_up', 'btn btn-sm btn-secondary', '', 'Volume up'));
+          card.appendChild(volRow);
+
+          remoteEl.appendChild(card);
+        }
+
+        function poll() {
+          fetch('/api/kodi/now-playing')
+            .then(function(r) {
+              if (!r.ok) throw new Error(r.status === 502 ? 'Kodi bundle is not running' : 'Failed to connect to Kodi');
+              return r.json();
+            })
+            .then(function(data) { renderNowPlaying(data); })
+            .catch(function(err) {
+              remoteEl.textContent = '';
+              var errDiv = document.createElement('div');
+              errDiv.style.cssText = 'text-align:center;padding:2rem;color:var(--crow-text-muted)';
+              var h3 = document.createElement('h3');
+              h3.style.fontFamily = "'Fraunces',serif";
+              h3.textContent = 'Bundle not running';
+              var p = document.createElement('p');
+              p.textContent = err.message;
+              errDiv.appendChild(h3);
+              errDiv.appendChild(p);
+              remoteEl.appendChild(errDiv);
+            });
+        }
+
+        window.crowKodiCmd = function(cmd) {
+          fetch('/api/kodi/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: cmd })
+          }).then(function() { setTimeout(poll, 300); })
+            .catch(function(e) { console.error('Kodi command failed:', e); });
+        };
+
+        poll();
+        var kodiPollInterval = setInterval(poll, 5000);
+        window.addEventListener('beforeunload', function() { clearInterval(kodiPollInterval); });
+      })();
+      <\/script>`;
     }
 
     const content = `
