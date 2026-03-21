@@ -1,0 +1,11 @@
+{
+  "name": "crow-kodi",
+  "version": "1.0.0",
+  "description": "Kodi MCP server — JSON-RPC remote control and library browser",
+  "type": "module",
+  "main": "server/index.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  }
+}
