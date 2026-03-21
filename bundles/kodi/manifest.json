@@ -1,0 +1,23 @@
+{
+  "id": "kodi",
+  "name": "Kodi",
+  "version": "1.0.0",
+  "description": "Remote control for Kodi — browse library, control playback, queue media via JSON-RPC",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "media",
+  "tags": ["media", "kodi", "remote", "xbmc", "htpc", "playback"],
+  "icon": "monitor",
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["KODI_URL"] },
+  "panel": "panel/kodi.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/kodi.md"],
+  "requires": { "env": ["KODI_URL"], "min_ram_mb": 64, "min_disk_mb": 50 },
+  "env_vars": [
+    { "name": "KODI_URL", "description": "Kodi JSON-RPC endpoint (e.g., http://kodi.local:8080)", "required": true },
+    { "name": "KODI_USER", "description": "Kodi web interface username", "required": false },
+    { "name": "KODI_PASSWORD", "description": "Kodi web interface password", "required": false, "secret": true }
+  ],
+  "webUI": { "port": 8080, "path": "/", "label": "Kodi Web", "proxyMode": "direct" },
+  "notes": "Connects to an existing Kodi instance. Enable 'Allow remote control via HTTP' in Kodi Settings > Services > Web server."
+}
