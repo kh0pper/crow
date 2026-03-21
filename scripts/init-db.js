@@ -816,6 +816,36 @@ await addColumnIfMissing("messages", "lamport_ts", "INTEGER DEFAULT 0");
 await addColumnIfMissing("relay_config", "lamport_ts", "INTEGER DEFAULT 0");
 await addColumnIfMissing("crow_instances", "lamport_ts", "INTEGER DEFAULT 0");
 
+// --- Contacts panel: new columns for profiles, manual contacts ---
+await addColumnIfMissing("contacts", "avatar_url", "TEXT");
+await addColumnIfMissing("contacts", "bio", "TEXT");
+await addColumnIfMissing("contacts", "notes", "TEXT");
+await addColumnIfMissing("contacts", "contact_type", "TEXT DEFAULT 'crow'");
+await addColumnIfMissing("contacts", "email", "TEXT");
+await addColumnIfMissing("contacts", "phone", "TEXT");
+
+// --- Contact Groups ---
+await initTable("contact_groups table", `
+  CREATE TABLE IF NOT EXISTS contact_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    color TEXT DEFAULT '#6366f1',
+    sort_order INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+await initTable("contact_group_members table", `
+  CREATE TABLE IF NOT EXISTS contact_group_members (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id INTEGER NOT NULL REFERENCES contact_groups(id) ON DELETE CASCADE,
+    contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_group_members_unique ON contact_group_members(group_id, contact_id);
+`);
+
 // --- Optional: sqlite-vec virtual table for semantic search ---
 const hasVec = await isSqliteVecAvailable(db);
 if (hasVec) {
