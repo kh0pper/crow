@@ -162,6 +162,10 @@ Caddy automatically obtains and renews Let's Encrypt certificates. Make sure you
 If you're running on Oracle Cloud, you also need to add ingress rules for TCP ports 80 and 443 in your VCN's security list. See the [Oracle Cloud section](/getting-started/cloud-deploy#oracle-cloud-free-tier) for details.
 :::
 
+::: tip Beyond single-device access
+Tailscale also enables multi-instance chaining — run Crow on multiple machines and sync data between them over your private Tailscale network. See [Multi-Device Quick Start](./multi-device).
+:::
+
 ## Troubleshooting
 
 ### Cannot reach the server

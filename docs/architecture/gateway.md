@@ -210,3 +210,7 @@ Chat messages are rate-limited to 10 messages per minute per session (separate f
   "auth": true
 }
 ```
+
+## Federation
+
+The gateway can proxy tool calls to remote Crow instances via HTTP. When an instance is registered in the `crow_instances` table with a `gateway_url`, the proxy layer connects using the MCP SDK's `StreamableHTTPClientTransport` and makes remote tools available through the `crow_tools` router action with an `instance_id` parameter. See [Multi-Instance Architecture](./instances) for sync, conflict resolution, and security details.

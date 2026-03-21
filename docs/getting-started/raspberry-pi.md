@@ -169,6 +169,10 @@ sudo systemctl restart caddy
 
 See the [Tailscale Setup Guide](/getting-started/tailscale-setup) for detailed instructions.
 
+::: tip Chain with a cloud instance
+Your Pi can sync with an always-free cloud instance for redundancy. If the Pi goes offline, your data is still accessible from the cloud. Set up [Oracle Cloud](./oracle-cloud) or [Google Cloud](./google-cloud), then [chain them](./multi-device) — memories sync automatically when the Pi comes back online.
+:::
+
 ### Making Your Blog Public
 
 Once Tailscale is installed, you can use [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) to make your blog accessible from the public internet — no port forwarding or domain registration needed.

@@ -56,6 +56,10 @@ Set a memorable hostname in your [Tailscale admin console](https://login.tailsca
 
 See the [Tailscale Setup Guide](./tailscale-setup) for advanced configuration, including HTTPS certificates and Tailscale Funnel for public blog access.
 
+::: tip Chain with cloud instances
+Your home server can sync with always-free cloud instances for redundancy and remote access. If your home network goes down, your data is safe in the cloud. Set up [Oracle Cloud](./oracle-cloud) or [Google Cloud](./google-cloud) as a second instance, then [chain them together](./multi-device) — memories sync automatically across both.
+:::
+
 ## Connect Your AI Platform
 
 Once Crow is running, connect it from any AI platform:

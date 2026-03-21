@@ -65,3 +65,7 @@ Once the gateway is running, connect your AI platform:
 
 > "Remember that today is my first day using Crow"
 > "What do you remember?"
+
+::: tip Multi-instance sync
+This Docker instance can sync with other Crow installations on different machines. Set up a second instance on [Oracle Cloud](./oracle-cloud) or [Google Cloud](./google-cloud), then [chain them](./multi-device) for redundancy and remote access.
+:::

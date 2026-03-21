@@ -104,6 +104,10 @@ Key tables:
 - `blog_posts_fts` — FTS5 index over blog posts with sync triggers
 - `dashboard_settings` — Key-value store for Crow's Nest config
 
+## Multi-Instance Sync
+
+Crow instances can be chained together for P2P data replication via Hypercore feeds. Each instance keeps its own SQLite database; changes propagate through signed, Lamport-timestamped entries. Federation allows tool calls to be proxied across instances via the gateway's StreamableHTTPClientTransport. See [Multi-Instance Architecture](./instances) for the full design.
+
 ## Behavioral Context (crow.md)
 
 Crow's behavioral instructions — identity, memory protocols, research protocols, session management, and key principles — are stored in the `crow_context` database table and served dynamically as **crow.md**. This makes the same behavioral context available across all platforms (Claude, ChatGPT, Gemini, Grok, Cursor, etc.).

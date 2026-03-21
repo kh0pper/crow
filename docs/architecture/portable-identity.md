@@ -19,6 +19,10 @@ Inspired by Urbit's "pier" model, where your entire digital identity is a single
 
 **The key insight:** After the data directory standardization (all data in `~/.crow/`), migration is already possible — it's just not automated yet.
 
+::: info Chaining vs. Migration
+Portable identity enables **migration** — moving your Crow identity from one device to another. For running multiple instances **simultaneously** with synced data, see [Multi-Instance Chaining](./instances) instead. Both features use the same identity export/import mechanism, but chaining keeps all instances running in parallel.
+:::
+
 ## What Works Today
 
 ### Local SQLite Users (Most Common)

@@ -137,3 +137,7 @@ This generates a single `crow-core` entry that activates servers on demand. See 
 - No web-based Crow's Nest (requires the gateway)
 - No public blog (requires the gateway + HTTPS)
 - For remote access from any device, see [Oracle Cloud](./oracle-cloud) or [Home Server](./home-server)
+
+::: tip Solve these limitations with chaining
+Most of these limitations disappear when you chain this desktop instance with a cloud or home server instance. Your desktop stays local and fast, while the cloud instance provides remote access, a public blog, and data backup. Set up [Oracle Cloud](./oracle-cloud) or [Google Cloud](./google-cloud), then [chain them](./multi-device) — memories sync automatically.
+:::
