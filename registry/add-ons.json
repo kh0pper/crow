@@ -410,6 +410,24 @@
       "notes": "Federal returns only — no state. 17 MCP tools including document ingestion (PDF reader). 2024 + 2025 tax years. Generates filled IRS PDFs. PII encrypted at rest. Not a substitute for professional tax advice."
     },
     {
+      "id": "data-dashboard",
+      "name": "Data Dashboard",
+      "description": "Explore SQLite databases, run queries, build charts, create case studies, and publish to your blog",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "data",
+      "official": true,
+      "tags": ["data", "sql", "charts", "visualization", "case-study", "research"],
+      "icon": "database",
+      "webUI": null,
+      "requires": {
+        "min_ram_mb": 128,
+        "min_disk_mb": 100
+      },
+      "notes": "10 MCP tools for data exploration. Includes SQL editor, schema explorer, and case study publishing. Works with any SQLite database registered as a project backend."
+    },
+    {
       "id": "browser",
       "name": "Browser Automation",
       "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",

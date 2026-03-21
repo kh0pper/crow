@@ -355,6 +355,7 @@ const translations = {
   "extensions.categorySmartHome": { en: "Smart Home", es: "Casa inteligente" },
   "extensions.categoryNetworking": { en: "Networking", es: "Redes" },
   "extensions.categoryGaming": { en: "Gaming", es: "Juegos" },
+  "extensions.categoryData": { en: "Data", es: "Datos" },
   "extensions.categoryFinance": { en: "Finance", es: "Finanzas" },
   "extensions.categoryOther": { en: "Other", es: "Otros" },
 

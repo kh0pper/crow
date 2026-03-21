@@ -1,0 +1,30 @@
+{
+  "id": "data-dashboard",
+  "name": "Data Dashboard",
+  "version": "1.0.0",
+  "description": "Explore SQLite databases, run queries, build charts, create case studies, and publish to your blog",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "data",
+  "tags": ["data", "sql", "charts", "visualization", "case-study", "research"],
+  "icon": "database",
+  "panel": {
+    "id": "data-dashboard",
+    "name": "Data Dashboard",
+    "icon": "media",
+    "route": "/dashboard/data-dashboard",
+    "navOrder": 16
+  },
+  "skills": ["skills/data-dashboard.md", "skills/data-scraping.md"],
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "cwd": "."
+  },
+  "requires": {
+    "env": [],
+    "min_ram_mb": 128,
+    "min_disk_mb": 100
+  },
+  "env_vars": []
+}

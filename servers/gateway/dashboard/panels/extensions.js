@@ -47,6 +47,7 @@ const CATEGORY_COLORS = {
   "smart-home": { bg: "rgba(251,146,60,0.12)", color: "#fb923c" },
   networking:   { bg: "rgba(56,189,248,0.12)", color: "#38bdf8" },
   gaming:       { bg: "rgba(244,63,94,0.12)",  color: "#f43f5e" },
+  data:         { bg: "rgba(14,165,233,0.12)",  color: "#0ea5e9" },
   finance:      { bg: "rgba(245,158,11,0.12)", color: "#f59e0b" },
   other:        { bg: "rgba(161,161,170,0.12)", color: "#a1a1aa" },
 };
@@ -59,6 +60,7 @@ const CATEGORY_LABELS = {
   "smart-home": "extensions.categorySmartHome",
   networking: "extensions.categoryNetworking",
   gaming: "extensions.categoryGaming",
+  data: "extensions.categoryData",
   finance: "extensions.categoryFinance",
   other: "extensions.categoryOther",
 };
