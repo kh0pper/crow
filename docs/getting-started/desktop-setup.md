@@ -69,3 +69,7 @@ By default, each Crow server is a separate entry in your Claude Desktop config. 
 - Only accessible from the machine running the servers
 - No OAuth — direct process connection
 - For mobile/web access, use the [Cloud Deploy](./cloud-deploy) instead
+
+::: tip Want remote access?
+Chain this desktop instance with a cloud instance for remote access and sync. Set up [Oracle Cloud](./oracle-cloud) or [Google Cloud](./google-cloud), then [chain them together](./multi-device) — your memories stay in sync across both.
+:::

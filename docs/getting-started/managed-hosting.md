@@ -48,6 +48,10 @@ Everything a self-hosted Crow instance can do:
 
 Both options give you the same Crow features. Self-hosting is free and gives you full control. Managed hosting trades a small monthly cost for zero maintenance.
 
+::: tip Hybrid setup
+Managed hosting can be chained with a self-hosted instance for the best of both worlds — always-on cloud access plus a home server for heavy processing and data storage. See [Multi-Device Quick Start](./multi-device) to set it up.
+:::
+
 ## FAQ
 
 **Can I migrate to self-hosting later?**

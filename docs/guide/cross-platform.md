@@ -44,6 +44,10 @@ Crow sits between you and your AI platforms as a shared layer:
 
 ## Quick Start: Platform Hopping
 
+::: tip Multi-instance sync
+Beyond using Crow from multiple AI platforms, you can run Crow on multiple *machines* and chain them together. Each instance syncs memories automatically via P2P — your desktop, cloud server, and Raspberry Pi all stay in sync. See [Multi-Instance Chaining](./instances) and [Multi-Device Quick Start](../getting-started/multi-device).
+:::
+
 ### Step 1: Deploy Crow
 
 Follow the [Cloud Deploy Guide](/getting-started/cloud-deploy) to get your gateway running. You'll get a URL like:

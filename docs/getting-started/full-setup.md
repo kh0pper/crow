@@ -153,6 +153,10 @@ Visit `http://localhost:3001/setup` to see integration status and endpoint URLs.
 > "Remember that today is my first day using Crow"
 > "What do you remember?"
 
+::: tip Chain multiple instances
+Docker instances can be chained with other Crow installations — cloud VMs, desktops, or Raspberry Pis. Memories sync automatically via P2P. See [Multi-Device Quick Start](./multi-device).
+:::
+
 ## Next Steps
 
 - [Storage guide](/guide/storage) — Learn how to upload and manage files
