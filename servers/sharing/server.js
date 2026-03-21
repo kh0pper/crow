@@ -4,7 +4,7 @@
  * Creates a configured McpServer with P2P sharing tools.
  * Transport-agnostic: used by both stdio (index.js) and HTTP (gateway).
  *
- * 12 MCP tools:
+ * 17 MCP tools:
  *   crow_generate_invite    — Create invite code with 24h expiry
  *   crow_accept_invite      — Accept invite, handshake, show safety number
  *   crow_list_contacts      — List peers with online/offline status
@@ -17,6 +17,11 @@
  *   crow_set_discoverable   — Opt in/out of contact discovery
  *   crow_discover_relays    — List configured relays
  *   crow_add_relay          — Add a Nostr or peer relay
+ *   crow_list_instances     — List registered Crow instances
+ *   crow_register_instance  — Register a Crow instance
+ *   crow_update_instance    — Update instance details
+ *   crow_revoke_instance    — Revoke an instance (device compromise, decommission)
+ *   crow_list_sync_conflicts — List and review sync conflicts between instances
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -32,8 +37,10 @@ import {
 } from "./identity.js";
 import { PeerManager } from "./peer-manager.js";
 import { SyncManager } from "./sync.js";
+import { InstanceSyncManager } from "./instance-sync.js";
 import { NostrManager } from "./nostr.js";
 import { createNotification } from "../shared/notifications.js";
+import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
 
 // Singleton sharing managers — Hyperswarm and Nostr connections are shared across
 // all McpServer instances (stdio, gateway per-session, router dispatch).
@@ -48,13 +55,25 @@ function getSharedManagers(dbPath) {
   const syncManager = new SyncManager(identity);
   const nostrManager = new NostrManager(identity, db);
 
-  _sharedManagers = { db, identity, peerManager, syncManager, nostrManager, initialized: false };
+  // Instance sync manager for cross-instance replication
+  const localInstanceId = getOrCreateLocalInstanceId();
+  const instanceSyncManager = new InstanceSyncManager(identity, db, localInstanceId);
+
+  _sharedManagers = { db, identity, peerManager, syncManager, instanceSyncManager, nostrManager, initialized: false };
   return _sharedManagers;
+}
+
+/**
+ * Get the shared InstanceSyncManager instance (for use by other servers via gateway).
+ * Returns null if managers haven't been initialized yet.
+ */
+export function getInstanceSyncManager() {
+  return _sharedManagers?.instanceSyncManager || null;
 }
 
 export function createSharingServer(dbPath, options = {}) {
   const managers = getSharedManagers(dbPath);
-  const { db, identity, peerManager, syncManager, nostrManager } = managers;
+  const { db, identity, peerManager, syncManager, instanceSyncManager, nostrManager } = managers;
 
   // One-time initialization: start Hyperswarm, join contacts, wire callbacks
   if (!managers.initialized) {
@@ -84,9 +103,62 @@ export function createSharingServer(dbPath, options = {}) {
       } catch (err) {
         console.warn("[sharing] Failed to load contacts on startup:", err.message);
       }
+
+      // Join instance sync topic for cross-instance discovery
+      try {
+        await peerManager.joinInstanceSync();
+
+        // Initialize feeds for known instances
+        const { rows: instances } = await db.execute({
+          sql: "SELECT id, sync_url FROM crow_instances WHERE status = 'active' AND id != ?",
+          args: [instanceSyncManager.localInstanceId],
+        });
+        for (const inst of instances) {
+          try {
+            // Feed key from sync_url (hex-encoded) or null for first contact
+            const feedKey = inst.sync_url ? Buffer.from(inst.sync_url, "hex") : null;
+            await instanceSyncManager.initInstance(inst.id, feedKey);
+          } catch (err) {
+            console.warn(`[sharing] Failed to init sync feed for instance ${inst.id}:`, err.message);
+          }
+        }
+        if (instances.length > 0) {
+          console.log(`[sharing] Initialized sync feeds for ${instances.length} instance(s)`);
+        }
+      } catch (err) {
+        console.warn("[sharing] Instance sync setup:", err.message);
+      }
     }).catch((err) => {
       console.warn("[sharing] PeerManager start failed:", err.message);
     });
+
+  // Wire instance-to-instance connections for Hypercore replication
+  peerManager.onInstanceConnected = async (crowId, conn) => {
+    console.log(`[sharing] Instance peer connected: ${crowId}`);
+
+    // Find which instance this connection belongs to
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT id FROM crow_instances WHERE crow_id = ? AND status = 'active' AND id != ?",
+        args: [crowId, instanceSyncManager.localInstanceId],
+      });
+
+      for (const inst of rows) {
+        // Initialize feed if not already done
+        await instanceSyncManager.initInstance(inst.id, null);
+        // Replicate over this connection
+        await instanceSyncManager.replicate(inst.id, conn);
+      }
+
+      // Update last_seen on all matching instances
+      await db.execute({
+        sql: "UPDATE crow_instances SET last_seen_at = datetime('now'), status = 'active' WHERE crow_id = ? AND id != ?",
+        args: [crowId, instanceSyncManager.localInstanceId],
+      });
+    } catch (err) {
+      console.warn(`[sharing] Instance connection handling failed for ${crowId}:`, err.message);
+    }
+  };
 
   // Wire peer connections — update last_seen and deliver pending shares
   peerManager.onPeerConnected = async (crowId, conn) => {
@@ -1055,6 +1127,257 @@ export function createSharingServer(dbPath, options = {}) {
           type: "text",
           text: `Added ${type} relay: ${url}`,
         }],
+      };
+    }
+  );
+
+  // --- Instance Management Tools ---
+
+  server.tool(
+    "crow_list_instances",
+    "List all registered Crow instances (local and remote). Shows instance name, hostname, directory, status, and whether it's the home instance.",
+    {
+      status: z.enum(["active", "offline", "paused", "revoked"]).optional()
+        .describe("Filter by status (default: all)"),
+    },
+    async ({ status }) => {
+      const { listInstances } = await import("../gateway/instance-registry.js");
+      const instances = await listInstances(db, { status });
+
+      if (instances.length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: "No instances registered yet. Use crow_register_instance to register this Crow installation.",
+          }],
+        };
+      }
+
+      const lines = instances.map((inst) => {
+        const home = inst.is_home ? " [HOME]" : "";
+        const topics = inst.topics ? ` | topics: ${inst.topics}` : "";
+        const lastSeen = inst.last_seen_at ? ` | last seen: ${inst.last_seen_at}` : "";
+        return `• ${inst.name}${home} (${inst.status})\n  id: ${inst.id}\n  host: ${inst.hostname || "unknown"} | dir: ${inst.directory || "unknown"}${topics}${lastSeen}`;
+      });
+
+      return {
+        content: [{
+          type: "text",
+          text: `Registered instances (${instances.length}):\n\n${lines.join("\n\n")}`,
+        }],
+      };
+    }
+  );
+
+  server.tool(
+    "crow_register_instance",
+    "Register a Crow instance in the instance registry. Each Crow installation directory is a separate instance. The first registered instance is typically designated as 'home' (the sync hub).",
+    {
+      name: z.string().max(100).describe("Display name for this instance (e.g., 'Main', 'Finance', 'Cloud Blog')"),
+      directory: z.string().max(500).optional().describe("Installation directory path (e.g., ~/crow)"),
+      hostname: z.string().max(100).optional().describe("Machine hostname (e.g., grackle, black-swan)"),
+      tailscale_ip: z.string().max(50).optional().describe("Tailscale IP for cross-machine access"),
+      gateway_url: z.string().max(500).optional().describe("Gateway URL if running (e.g., https://grackle:3001)"),
+      sync_profile: z.enum(["full", "memory-only", "blog-only", "custom"]).optional()
+        .describe("What to sync: full (everything), memory-only, blog-only, or custom"),
+      topics: z.string().max(500).optional()
+        .describe("Comma-separated routing keywords (e.g., 'finance, budget, tax')"),
+      is_home: z.boolean().optional().describe("Designate as home instance (sync hub). Only one instance can be home."),
+    },
+    async ({ name, directory, hostname, tailscale_ip, gateway_url, sync_profile, topics, is_home }) => {
+      const {
+        registerInstance,
+        getOrCreateLocalInstanceId,
+        generateAuthToken,
+        computeInstanceSyncTopic,
+      } = await import("../gateway/instance-registry.js");
+
+      const instanceId = getOrCreateLocalInstanceId();
+      const crowId = identity.crowId;
+
+      // Generate auth token for this instance
+      const { token, hash } = generateAuthToken();
+
+      // Compute Hyperswarm sync topic
+      const syncTopic = computeInstanceSyncTopic(crowId);
+
+      await registerInstance(db, {
+        id: instanceId,
+        name,
+        crowId,
+        directory: directory || process.cwd(),
+        hostname: hostname || (await import("os")).hostname(),
+        tailscaleIp: tailscale_ip || null,
+        gatewayUrl: gateway_url || null,
+        syncUrl: syncTopic.toString("hex"),
+        syncProfile: sync_profile || "full",
+        topics: topics || null,
+        isHome: is_home || false,
+        authTokenHash: hash,
+      });
+
+      try {
+        await createNotification(db, {
+          title: `Instance registered: ${name}`,
+          type: "system",
+          source: "instance-registry",
+          action_url: "/dashboard/nest",
+        });
+      } catch {}
+
+      const homeNote = is_home ? "\nDesignated as HOME instance (sync hub)." : "";
+      return {
+        content: [{
+          type: "text",
+          text: `Instance registered successfully.\n\nName: ${name}\nInstance ID: ${instanceId}\nCrow ID: ${crowId}\nAuth token: ${token}\n(Save this token — it's needed for remote instances to authenticate with this one)${homeNote}`,
+        }],
+      };
+    }
+  );
+
+  server.tool(
+    "crow_update_instance",
+    "Update a registered instance's details (name, URL, topics, sync profile, or designate as home).",
+    {
+      instance_id: z.string().max(100).describe("Instance ID to update"),
+      name: z.string().max(100).optional().describe("New display name"),
+      gateway_url: z.string().max(500).optional().describe("Updated gateway URL"),
+      tailscale_ip: z.string().max(50).optional().describe("Updated Tailscale IP"),
+      sync_profile: z.enum(["full", "memory-only", "blog-only", "custom"]).optional()
+        .describe("Updated sync profile"),
+      topics: z.string().max(500).optional().describe("Updated routing keywords"),
+      is_home: z.boolean().optional().describe("Set as home instance"),
+      status: z.enum(["active", "offline", "paused"]).optional().describe("Updated status"),
+    },
+    async ({ instance_id, ...fields }) => {
+      const { getInstance, updateInstance } = await import("../gateway/instance-registry.js");
+
+      const existing = await getInstance(db, instance_id);
+      if (!existing) {
+        return {
+          content: [{ type: "text", text: `Instance not found: ${instance_id}` }],
+          isError: true,
+        };
+      }
+
+      const updates = {};
+      for (const [key, value] of Object.entries(fields)) {
+        if (value !== undefined) updates[key] = value;
+      }
+
+      if (Object.keys(updates).length === 0) {
+        return {
+          content: [{ type: "text", text: "No fields to update." }],
+        };
+      }
+
+      await updateInstance(db, instance_id, updates);
+
+      return {
+        content: [{
+          type: "text",
+          text: `Instance "${existing.name}" updated: ${Object.keys(updates).join(", ")}`,
+        }],
+      };
+    }
+  );
+
+  server.tool(
+    "crow_revoke_instance",
+    "Revoke a registered instance — sets status to 'revoked', clears its auth token, and stops accepting its sync data. Use this if a device is compromised or an instance is no longer needed.",
+    {
+      instance_id: z.string().max(100).describe("Instance ID to revoke"),
+      confirm: z.boolean().describe("Must be true to confirm revocation (this action cannot be undone)"),
+    },
+    async ({ instance_id, confirm }) => {
+      if (!confirm) {
+        return {
+          content: [{ type: "text", text: "Revocation not confirmed. Set confirm: true to proceed." }],
+        };
+      }
+
+      const { getInstance, revokeInstance } = await import("../gateway/instance-registry.js");
+
+      const existing = await getInstance(db, instance_id);
+      if (!existing) {
+        return {
+          content: [{ type: "text", text: `Instance not found: ${instance_id}` }],
+          isError: true,
+        };
+      }
+
+      if (existing.is_home) {
+        return {
+          content: [{ type: "text", text: "Cannot revoke the home instance. Designate another instance as home first." }],
+          isError: true,
+        };
+      }
+
+      await revokeInstance(db, instance_id);
+
+      try {
+        await createNotification(db, {
+          title: `Instance revoked: ${existing.name}`,
+          type: "system",
+          source: "instance-registry",
+        });
+      } catch {}
+
+      return {
+        content: [{
+          type: "text",
+          text: `Instance "${existing.name}" has been revoked. Its auth token has been cleared and it will no longer be able to sync.`,
+        }],
+      };
+    }
+  );
+
+  server.tool(
+    "crow_list_sync_conflicts",
+    "List sync conflicts between instances. When the same data is modified on multiple instances, conflicts are logged with both versions preserved. Review and resolve conflicts to keep data consistent.",
+    {
+      table_name: z.string().max(100).optional().describe("Filter by table name (e.g., 'memories', 'crow_context')"),
+      unresolved_only: z.boolean().default(true).describe("Only show unresolved conflicts"),
+      limit: z.number().max(100).default(20).describe("Maximum results"),
+    },
+    async ({ table_name, unresolved_only, limit }) => {
+      let sql = "SELECT * FROM sync_conflicts WHERE 1=1";
+      const params = [];
+
+      if (table_name) {
+        sql += " AND table_name = ?";
+        params.push(table_name);
+      }
+      if (unresolved_only) {
+        sql += " AND resolved = 0";
+      }
+
+      sql += " ORDER BY created_at DESC LIMIT ?";
+      params.push(limit);
+
+      const { rows } = await db.execute({ sql, args: params });
+
+      if (rows.length === 0) {
+        return {
+          content: [{ type: "text", text: unresolved_only ? "No unresolved sync conflicts." : "No sync conflicts found." }],
+        };
+      }
+
+      const formatted = rows.map((r) => {
+        const winning = JSON.parse(r.winning_data);
+        const losing = JSON.parse(r.losing_data);
+        const winPreview = typeof winning.content === "string" ? winning.content.substring(0, 80) : JSON.stringify(winning).substring(0, 80);
+        const losePreview = typeof losing.content === "string" ? losing.content.substring(0, 80) : JSON.stringify(losing).substring(0, 80);
+        return `Conflict #${r.id} (${r.table_name}, row: ${r.row_id}, ${r.resolved ? "resolved" : "unresolved"})
+  Winner: instance ${r.winning_instance_id} (ts: ${r.winning_lamport_ts})
+    ${winPreview}...
+  Loser:  instance ${r.losing_instance_id} (ts: ${r.losing_lamport_ts})
+    ${losePreview}...
+  Created: ${r.created_at}`;
+      }).join("\n\n");
+
+      return {
+        content: [{ type: "text", text: `Sync conflicts (${rows.length}):\n\n${formatted}` }],
       };
     }
   );

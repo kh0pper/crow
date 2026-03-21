@@ -101,6 +101,11 @@ export const TOOL_MANIFESTS = {
       crow_send_message: { params: "contact, message", desc: "Send encrypted message via Nostr (cannot be retracted)" },
       crow_revoke_access: { params: "contact, share_type, item_id, confirm_token", desc: "Revoke shared access. Returns preview + token on first call; pass token back to execute." },
       crow_sharing_status: { params: "", desc: "Sharing status" },
+      crow_list_instances: { params: "status?", desc: "List registered Crow instances" },
+      crow_register_instance: { params: "name, directory?, hostname?, tailscale_ip?, gateway_url?, sync_profile?, topics?, is_home?", desc: "Register a Crow instance" },
+      crow_update_instance: { params: "instance_id, name?, gateway_url?, tailscale_ip?, sync_profile?, topics?, is_home?, status?", desc: "Update instance details" },
+      crow_revoke_instance: { params: "instance_id, confirm", desc: "Revoke an instance (irreversible)" },
+      crow_list_sync_conflicts: { params: "table_name?, unresolved_only?, limit?", desc: "List sync conflicts between instances" },
     },
   },
 

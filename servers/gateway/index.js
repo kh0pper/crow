@@ -58,7 +58,7 @@ import cors from "cors";
 
 import { createMemoryServer } from "../memory/server.js";
 import { createProjectServer } from "../research/server.js";
-import { createSharingServer } from "../sharing/server.js";
+import { createSharingServer, getInstanceSyncManager } from "../sharing/server.js";
 import { createRelayHandlers } from "../sharing/relay.js";
 import { generateCrowContext } from "../memory/crow-context.js";
 import { createDbClient } from "../db.js";
@@ -357,18 +357,21 @@ const routerInstructions = await generateInstructions({ routerStyle: true, devic
 
 // --- Mount Core MCP Servers ---
 
-mountMcpServer(app, "/memory", () => createMemoryServer(undefined, { instructions }), sessionManager, authMiddleware);
+// Initialize sharing managers eagerly (starts Hyperswarm + Nostr + InstanceSync on boot, not on first request)
+createSharingServer(undefined, { instructions });
+// Get the sync manager so memory server can emit change entries
+const syncManager = getInstanceSyncManager();
+
+mountMcpServer(app, "/memory", () => createMemoryServer(undefined, { instructions, syncManager }), sessionManager, authMiddleware);
 const projectServerFactory = () => createProjectServer(undefined, { instructions });
 mountMcpServer(app, "/projects", projectServerFactory, sessionManager, authMiddleware);
 // Legacy alias — existing remote clients use /research/mcp
 mountMcpServer(app, "/research", projectServerFactory, sessionManager, authMiddleware);
-// Initialize sharing managers eagerly (starts Hyperswarm + Nostr on boot, not on first request)
-createSharingServer(undefined, { instructions });
 mountMcpServer(app, "/sharing", () => createSharingServer(undefined, { instructions }), sessionManager, authMiddleware);
 mountMcpServer(app, "/tools", createProxyServer, sessionManager, authMiddleware);
 
 // Also mount at /mcp for single-server compatibility (uses memory)
-mountMcpServer(app, "", () => createMemoryServer(undefined, { instructions }), sessionManager, authMiddleware);
+mountMcpServer(app, "", () => createMemoryServer(undefined, { instructions, syncManager }), sessionManager, authMiddleware);
 
 // --- Mount Router (consolidated endpoint, ~75% context reduction) ---
 if (process.env.CROW_DISABLE_ROUTER !== "1") {
@@ -652,6 +655,21 @@ const server = app.listen(PORT, "0.0.0.0", (error) => {
   startScheduler(createDbClient()).catch((err) => {
     console.error("[scheduler] Failed to start:", err.message);
   });
+
+  // Register this instance in the instance registry
+  import("./instance-registry.js").then(async ({ ensureLocalInstanceRegistered }) => {
+    try {
+      const { loadOrCreateIdentity } = await import("../sharing/identity.js");
+      const identity = loadOrCreateIdentity();
+      await ensureLocalInstanceRegistered(createDbClient(), {
+        crowId: identity.crowId,
+        gatewayUrl: `http://localhost:${PORT}`,
+      });
+    } catch (err) {
+      // Non-fatal — instance registry is optional for basic operation
+      console.warn("[instance-registry] Auto-registration skipped:", err.message);
+    }
+  }).catch(() => {});
 });
 
 // --- Graceful Shutdown ---

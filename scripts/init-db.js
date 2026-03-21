@@ -543,6 +543,64 @@ try {
   // Indexes already exist
 }
 
+// --- Scoped Memory: instance_id + project_id ---
+// instance_id = origin instance (which Crow instance created this memory)
+// project_id = project scope (optional, for project-specific memories)
+// These are NOT in the FTS5 index — search uses JOIN filtering on the memories table.
+
+await addColumnIfMissing("memories", "instance_id", "TEXT DEFAULT NULL");
+await addColumnIfMissing("memories", "project_id", "INTEGER DEFAULT NULL");
+
+try {
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_memories_instance_id ON memories(instance_id)");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_memories_project_id ON memories(project_id)");
+} catch {}
+
+// --- Scoped Context: project_id ---
+// Extends per-device overrides with per-project overrides.
+// A section can exist: globally (both NULL), per-device, per-project, or per-device+project.
+
+await addColumnIfMissing("crow_context", "project_id", "INTEGER DEFAULT NULL");
+
+// Recreate unique indexes to include project_id dimension.
+// The old indexes (idx_crow_context_global, idx_crow_context_device) only cover
+// device_id — they need to be replaced with indexes that also consider project_id.
+try {
+  // Drop old indexes (safe — CREATE IF NOT EXISTS won't collide)
+  await db.execute("DROP INDEX IF EXISTS idx_crow_context_global");
+  await db.execute("DROP INDEX IF EXISTS idx_crow_context_device");
+
+  // Global: section_key unique when both device_id and project_id are NULL
+  await db.execute(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_crow_context_global
+      ON crow_context(section_key)
+      WHERE device_id IS NULL AND project_id IS NULL
+  `);
+
+  // Device-only: unique per (section_key, device_id) when project_id is NULL
+  await db.execute(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_crow_context_device
+      ON crow_context(section_key, device_id)
+      WHERE device_id IS NOT NULL AND project_id IS NULL
+  `);
+
+  // Project-only: unique per (section_key, project_id) when device_id is NULL
+  await db.execute(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_crow_context_project
+      ON crow_context(section_key, project_id)
+      WHERE project_id IS NOT NULL AND device_id IS NULL
+  `);
+
+  // Device+project: unique per (section_key, device_id, project_id) when both set
+  await db.execute(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_crow_context_device_project
+      ON crow_context(section_key, device_id, project_id)
+      WHERE device_id IS NOT NULL AND project_id IS NOT NULL
+  `);
+} catch (err) {
+  console.warn("  crow_context project_id index note:", err.message);
+}
+
 // --- Notifications ---
 
 await initTable("notifications table", `
@@ -693,6 +751,72 @@ await initTable("blog_comments table", `
    media_article_states, media_feedback, media_audio_cache, media_briefings,
    media_playlists, media_playlist_items, media_smart_folders,
    media_digest_preferences, media_interest_profiles */
+
+// --- Instance Registry ---
+
+await initTable("crow_instances table", `
+  CREATE TABLE IF NOT EXISTS crow_instances (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    crow_id TEXT NOT NULL,
+    directory TEXT,
+    hostname TEXT,
+    tailscale_ip TEXT,
+    gateway_url TEXT,
+    sync_url TEXT,
+    sync_profile TEXT DEFAULT 'full' CHECK(sync_profile IN ('full', 'memory-only', 'blog-only', 'custom')),
+    topics TEXT,
+    is_home INTEGER DEFAULT 0,
+    auth_token_hash TEXT,
+    last_seen_at TEXT,
+    status TEXT DEFAULT 'active' CHECK(status IN ('active', 'offline', 'paused', 'revoked')),
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_instances_crow_id ON crow_instances(crow_id);
+  CREATE INDEX IF NOT EXISTS idx_instances_status ON crow_instances(status);
+  CREATE INDEX IF NOT EXISTS idx_instances_is_home ON crow_instances(is_home);
+`);
+
+await initTable("sync_conflicts table", `
+  CREATE TABLE IF NOT EXISTS sync_conflicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_name TEXT NOT NULL,
+    row_id TEXT NOT NULL,
+    winning_instance_id TEXT NOT NULL,
+    losing_instance_id TEXT NOT NULL,
+    winning_lamport_ts INTEGER NOT NULL,
+    losing_lamport_ts INTEGER NOT NULL,
+    winning_data TEXT NOT NULL,
+    losing_data TEXT NOT NULL,
+    resolved INTEGER DEFAULT 0,
+    resolved_at TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_sync_conflicts_table ON sync_conflicts(table_name);
+  CREATE INDEX IF NOT EXISTS idx_sync_conflicts_resolved ON sync_conflicts(resolved);
+`);
+
+await initTable("sync_state table", `
+  CREATE TABLE IF NOT EXISTS sync_state (
+    instance_id TEXT PRIMARY KEY,
+    local_counter INTEGER DEFAULT 0,
+    last_applied_seq_per_peer TEXT DEFAULT '{}',
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+// --- Lamport timestamp columns for synced tables ---
+
+await addColumnIfMissing("memories", "lamport_ts", "INTEGER DEFAULT 0");
+await addColumnIfMissing("crow_context", "lamport_ts", "INTEGER DEFAULT 0");
+await addColumnIfMissing("contacts", "lamport_ts", "INTEGER DEFAULT 0");
+await addColumnIfMissing("shared_items", "lamport_ts", "INTEGER DEFAULT 0");
+await addColumnIfMissing("messages", "lamport_ts", "INTEGER DEFAULT 0");
+await addColumnIfMissing("relay_config", "lamport_ts", "INTEGER DEFAULT 0");
+await addColumnIfMissing("crow_instances", "lamport_ts", "INTEGER DEFAULT 0");
 
 // --- Optional: sqlite-vec virtual table for semantic search ---
 const hasVec = await isSqliteVecAvailable(db);

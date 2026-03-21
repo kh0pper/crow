@@ -29,9 +29,11 @@ export class PeerManager {
     this.swarm = null;
     this.connections = new Map(); // crowId -> { conn, authenticated }
     this.topics = new Map(); // crowId -> topic buffer
+    this.instanceSyncTopic = null; // Buffer — the instance sync DHT topic
     this.onPeerConnected = null; // callback(crowId, conn)
     this.onPeerData = null; // callback(crowId, data)
     this.onPeerDisconnected = null; // callback(crowId)
+    this.onInstanceConnected = null; // callback(crowId, conn) — instance-to-instance connections
   }
 
   /**
@@ -83,11 +85,39 @@ export class PeerManager {
   }
 
   /**
+   * Join the instance sync DHT topic.
+   * All instances owned by the same Crow ID join this topic for P2P discovery.
+   * topic = sha256(crowId + "instance-sync")
+   */
+  async joinInstanceSync() {
+    if (!this.swarm) throw new Error("PeerManager not started");
+
+    this.instanceSyncTopic = createHash("sha256")
+      .update(this.identity.crowId + "instance-sync")
+      .digest();
+
+    const discovery = this.swarm.join(this.instanceSyncTopic, { server: true, client: true });
+    await discovery.flushed();
+
+    console.log(`[peer-manager] Joined instance sync topic for ${this.identity.crowId}`);
+    return this.instanceSyncTopic;
+  }
+
+  /**
+   * Check if a connection came from the instance sync topic.
+   */
+  _isInstanceConnection(info) {
+    if (!this.instanceSyncTopic || !info?.topics) return false;
+    return info.topics.some(t => t.equals(this.instanceSyncTopic));
+  }
+
+  /**
    * Handle incoming connection with challenge-response auth.
    */
   _handleConnection(conn, info) {
     let authenticated = false;
     let remoteCrowId = null;
+    const isInstanceConn = this._isInstanceConnection(info);
 
     // Send challenge
     const challenge = randomBytes(32);
@@ -108,7 +138,7 @@ export class PeerManager {
         if (!line.trim()) continue;
         try {
           const msg = JSON.parse(line);
-          this._handleMessage(conn, msg, challenge, { authenticated, remoteCrowId }, (state) => {
+          this._handleMessage(conn, msg, challenge, { authenticated, remoteCrowId, isInstanceConn }, (state) => {
             authenticated = state.authenticated;
             remoteCrowId = state.remoteCrowId;
           });
@@ -170,7 +200,10 @@ export class PeerManager {
 
           conn.write(JSON.stringify({ type: "authenticated" }) + "\n");
 
-          if (this.onPeerConnected) {
+          // Dispatch to the appropriate handler based on connection origin
+          if (state.isInstanceConn && this.onInstanceConnected) {
+            this.onInstanceConnected(msg.crowId, conn);
+          } else if (this.onPeerConnected) {
             this.onPeerConnected(msg.crowId, conn);
           }
         } else {
