@@ -1,7 +1,7 @@
 {
   "name": "crow-platform",
   "version": "0.1.0",
-  "description": "AI-enabled project management and research platform powered by Claude - a collection of MCP servers, skills, and persistent memory",
+  "description": "Self-hosted AI platform with persistent memory, encrypted P2P sharing, and 20+ integrations — works with Claude, ChatGPT, Gemini, and any MCP client",
   "type": "module",
   "scripts": {
     "setup": "node scripts/setup.js",

@@ -60,6 +60,16 @@ If it works, you'll see Crow's memory tools in action. You can verify stored mem
 
 > "What do you remember?"
 
+## Troubleshooting OAuth
+
+If the connector fails to connect or tools don't appear:
+
+- **Leave OAuth Client ID and Client Secret blank.** Crow uses Dynamic Client Registration (RFC 7591) — Claude discovers the OAuth endpoints automatically from the `.well-known` metadata. No pre-configured credentials needed.
+- **Verify your gateway's OAuth metadata is reachable.** Visit `https://your-crow-server/.well-known/oauth-authorization-server` in your browser — you should see a JSON response with `authorization_endpoint`, `token_endpoint`, and `registration_endpoint`.
+- **Check `CROW_GATEWAY_URL` in your `.env` file.** This must match your actual public URL exactly (including `https://`). If you're using Tailscale Funnel, it should be `https://<hostname>.<tailnet>.ts.net`.
+- **Start a new conversation after gateway restarts.** OAuth sessions are tied to the gateway process. When the gateway restarts, existing Claude.ai sessions become invalid — start a fresh conversation to re-authenticate.
+- **Check gateway logs for OAuth errors.** If running via systemd: `journalctl -u crow-gateway -f`. Look for errors in the `/register`, `/authorize`, or `/token` endpoints.
+
 ## Cross-Platform Context
 
 Crow automatically delivers behavioral context during the MCP connection handshake. When Claude connects to any Crow server, it receives Crow's identity, memory protocols, session protocol, transparency rules, and capability reference — no user action required.

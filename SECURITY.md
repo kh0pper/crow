@@ -42,6 +42,26 @@ If you deploy Crow to the cloud (Render, Railway, etc.):
 - **OAuth 2.1** protects your MCP endpoints — only authorized AI clients can access your tools
 - The **`/setup` page** is safe to visit — it shows connection status but never displays secrets
 
+## Self-Hosted Deployment Security
+
+If you're running Crow on your own hardware (Raspberry Pi, home server, VPS):
+
+- **OAuth 2.1 is enabled by default** — no configuration needed. All MCP endpoints require bearer tokens out of the box.
+- **The `--no-auth` flag is for local development only.** The gateway automatically refuses to start with `--no-auth` if `CROW_GATEWAY_URL` points to a public domain (e.g., `.ts.net`, `.onrender.com`, `.fly.dev`). It is also blocked when `NODE_ENV=production`.
+- **Set `CROW_SETUP_TOKEN`** in your `.env` file to gate first-run password setup. Without this, anyone who reaches your gateway before you do can set the Crow's Nest password.
+- **Satellite instances need their own OAuth too.** If you run multiple Crow gateways (e.g., a finance gateway on a separate port), each one should run with authentication enabled — not `--no-auth`.
+
+### Pre-Deployment Checklist
+
+Before exposing your Crow gateway to the internet:
+
+- [ ] HTTPS is enabled (via Tailscale Funnel, Cloudflare Tunnel, or reverse proxy with TLS)
+- [ ] Gateway starts without `--no-auth` (auth is active)
+- [ ] `CROW_SETUP_TOKEN` is set in `.env` (gates first-run password setup)
+- [ ] `CROW_GATEWAY_URL` matches your actual public URL
+- [ ] Crow's Nest password is set (visit `/setup` or `/dashboard`)
+- [ ] `CORS_ALLOWED_ORIGINS` is configured if needed (default: disabled)
+
 ## What's Public by Default
 
 Crow follows a simple principle: **your blog is the storefront, the Crow's Nest is the locked back office**. Here's what's accessible at each level:

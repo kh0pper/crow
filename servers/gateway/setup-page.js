@@ -13,6 +13,9 @@
 import { isPasswordSet, parseCookies } from "./dashboard/auth.js";
 import { CROW_HERO_SVG } from "./dashboard/shared/crow-hero.js";
 
+/** Escape a string for safe interpolation into HTML attributes. */
+const escapeAttr = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
 // --- i18n translations (password form only) ---
 const translations = {
   en: {
@@ -109,8 +112,8 @@ export async function setupPageHandler(req, res) {
 </head>
 <body>
   <div class="lang-toggle">
-    <a href="?lang=en${setupToken && queryToken ? '&token=' + queryToken : ''}" class="lang-btn${lang === "en" ? " active" : ""}" onclick="setLang('en');return false;">EN</a>
-    <a href="?lang=es${setupToken && queryToken ? '&token=' + queryToken : ''}" class="lang-btn${lang === "es" ? " active" : ""}" onclick="setLang('es');return false;">ES</a>
+    <a href="?lang=en${setupToken && queryToken ? '&token=' + escapeAttr(queryToken) : ''}" class="lang-btn${lang === "en" ? " active" : ""}" onclick="setLang('en');return false;">EN</a>
+    <a href="?lang=es${setupToken && queryToken ? '&token=' + escapeAttr(queryToken) : ''}" class="lang-btn${lang === "es" ? " active" : ""}" onclick="setLang('es');return false;">ES</a>
   </div>
 
   <div style="text-align:center;margin-bottom:8px"><div style="width:80px;height:80px;margin:0 auto">${CROW_HERO_SVG}</div></div>
@@ -127,7 +130,7 @@ export async function setupPageHandler(req, res) {
     <div class="instructions">
       <p style="margin-bottom:12px">${t.protectPassword}</p>
       <form method="POST" action="/dashboard/login" style="display:flex;gap:8px;flex-wrap:wrap;align-items:start">
-        ${setupToken ? `<input type="hidden" name="setup_token" value="${setupToken}">` : ""}
+        ${setupToken ? `<input type="hidden" name="setup_token" value="${escapeAttr(setupToken)}">` : ""}
         <input type="password" name="password" placeholder="${t.choosePassword}" required minlength="12"
           style="flex:1;min-width:160px;padding:10px 14px;border:1px solid #d2d2d7;border-radius:8px;font-size:14px">
         <input type="password" name="confirm" placeholder="${t.confirmPassword}" required minlength="12"

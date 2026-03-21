@@ -9,32 +9,32 @@ Create Crow's Nest panels, MCP server integrations, or skill files that users in
 
 **Types:** Crow's Nest panels, MCP servers, skill files, Docker bundles.
 
-**Guide:** [Creating Add-ons](https://kh0pper.github.io/crow/developers/creating-addons) | [Add-on Registry](https://kh0pper.github.io/crow/developers/addon-registry)
+**Guide:** [Creating Add-ons](https://maestro.press/software/crow/developers/creating-addons) | [Add-on Registry](https://maestro.press/software/crow/developers/addon-registry)
 
 ### 2. Skills (No code required)
 Create new behavioral prompts that teach the AI workflows. Skills are markdown files — no code required.
 
-**Guide:** [Writing Skills](https://kh0pper.github.io/crow/developers/skills)
+**Guide:** [Writing Skills](https://maestro.press/software/crow/developers/skills)
 
 ### 3. MCP Integrations (Core registry)
 Add support for new external services (e.g., Linear, Jira, Todoist) to the core server registry.
 
-**Guide:** [Building Integrations](https://kh0pper.github.io/crow/developers/integrations)
+**Guide:** [Building Integrations](https://maestro.press/software/crow/developers/integrations)
 
 ### 4. Core Server Tools
 Add new MCP tools to crow-memory, crow-projects, crow-sharing, crow-storage, or crow-blog servers.
 
-**Guide:** [Core Tools](https://kh0pper.github.io/crow/developers/core-tools)
+**Guide:** [Core Tools](https://maestro.press/software/crow/developers/core-tools)
 
 ### 5. Crow's Nest Panels
 Build custom panels for the Crow's Nest. See the panel template in `templates/dashboard-panel.js`.
 
-**Guide:** [Creating Panels](https://kh0pper.github.io/crow/developers/creating-panels)
+**Guide:** [Creating Panels](https://maestro.press/software/crow/developers/creating-panels)
 
 ### 6. Self-Hosted Bundles
 Create Docker Compose configurations with curated integration sets or self-hosting add-ons (Ollama, Nextcloud, Immich, etc.). See `bundles/` for examples.
 
-**Guide:** [Bundles](https://kh0pper.github.io/crow/developers/bundles)
+**Guide:** [Bundles](https://maestro.press/software/crow/developers/bundles)
 
 ## Development Setup
 
@@ -50,7 +50,7 @@ npm run setup          # Install dependencies + initialize database
 node servers/memory/index.js    # crow-memory (stdio)
 node servers/research/index.js  # crow-projects (stdio)
 node servers/sharing/index.js   # crow-sharing (stdio)
-node servers/gateway/index.js --no-auth  # HTTP gateway (dev mode)
+node servers/gateway/index.js --no-auth  # HTTP gateway (local dev only — blocked if CROW_GATEWAY_URL is public)
 ```
 
 ### Database
@@ -88,5 +88,5 @@ Not ready to code? Open an issue:
 
 ## Community
 
-- [Developer Docs](https://kh0pper.github.io/crow/developers/)
-- [Community Directory](https://kh0pper.github.io/crow/developers/directory)
+- [Developer Docs](https://maestro.press/software/crow/developers/)
+- [Community Directory](https://maestro.press/software/crow/developers/directory)

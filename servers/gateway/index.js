@@ -80,7 +80,16 @@ if (noAuth && process.env.NODE_ENV === "production") {
   console.error("ERROR: --no-auth cannot be used when NODE_ENV=production. Exiting.");
   process.exit(1);
 }
+
+// Detect public-looking gateway URLs and refuse --no-auth
 if (noAuth) {
+  const gwUrl = process.env.CROW_GATEWAY_URL || "";
+  const publicPatterns = [".ts.net", ".onrender.com", ".railway.app", ".fly.dev", ".maestro.press", ".crow.maestro.press"];
+  if (publicPatterns.some(p => gwUrl.includes(p))) {
+    console.error(`ERROR: --no-auth cannot be used with a public gateway URL (${gwUrl}).`);
+    console.error("Remove --no-auth or unset CROW_GATEWAY_URL to run locally.");
+    process.exit(1);
+  }
   console.warn("⚠️  WARNING: Running without authentication. Do NOT use in production.");
 }
 
@@ -146,6 +155,16 @@ app.use((req, res, next) => {
   }
   res.setHeader("X-XSS-Protection", "0");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  // Content Security Policy — allows Google Fonts (dashboard), podcast audio, data URIs
+  res.setHeader("Content-Security-Policy", [
+    "default-src 'self'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src https://fonts.gstatic.com",
+    "script-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "media-src 'self' https: blob:",
+    "connect-src 'self'",
+  ].join("; "));
   if (req.secure || req.headers["x-forwarded-proto"] === "https") {
     res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
   }
@@ -230,31 +249,11 @@ app.get("/health", async (req, res) => {
       total: coreToolCount + externalToolCount,
       routerMode: routerDisabled ? null : 7,
     },
-    auth: !noAuth,
   });
 });
 
-// --- System Health API (for resource checks) ---
-app.get("/api/health", async (req, res) => {
-  const os = await import("node:os");
-  const { execFileSync } = await import("node:child_process");
-  const totalMem = Math.round(os.totalmem() / 1048576);
-  const freeMem = Math.round(os.freemem() / 1048576);
-  let diskFreeMb = null;
-  try {
-    const df = execFileSync("df", ["-BM", "--output=avail", "/"], { timeout: 5000 }).toString();
-    const lines = df.trim().split("\n");
-    if (lines.length > 1) diskFreeMb = parseInt(lines[1], 10) || null;
-  } catch {}
-  res.json({
-    ram_total_mb: totalMem,
-    ram_free_mb: freeMem,
-    ram_used_mb: totalMem - freeMem,
-    disk_free_mb: diskFreeMb,
-    uptime_seconds: Math.round(os.uptime()),
-    cpus: os.cpus().length,
-  });
-});
+// --- System Health API (protected — exposes RAM, disk, CPU info) ---
+// Mounted after dashboard auth setup below (see "Protected API endpoints" section)
 
 // --- Setup Page (no auth — first-run password only, redirects after password set) ---
 app.get("/setup", setupPageHandler);
@@ -471,6 +470,28 @@ try {
 } catch (err) {
   console.warn("[notifications] Failed to mount:", err.message);
 }
+
+// --- Protected API endpoints (behind dashboard auth) ---
+app.get("/api/health", dashboardAuth, async (req, res) => {
+  const os = await import("node:os");
+  const { execFileSync } = await import("node:child_process");
+  const totalMem = Math.round(os.totalmem() / 1048576);
+  const freeMem = Math.round(os.freemem() / 1048576);
+  let diskFreeMb = null;
+  try {
+    const df = execFileSync("df", ["-BM", "--output=avail", "/"], { timeout: 5000 }).toString();
+    const lines = df.trim().split("\n");
+    if (lines.length > 1) diskFreeMb = parseInt(lines[1], 10) || null;
+  } catch {}
+  res.json({
+    ram_total_mb: totalMem,
+    ram_free_mb: freeMem,
+    ram_used_mb: totalMem - freeMem,
+    disk_free_mb: diskFreeMb,
+    uptime_seconds: Math.round(os.uptime()),
+    cpus: os.cpus().length,
+  });
+});
 
 // --- Mount Crow's Nest (conditional) ---
 try {
