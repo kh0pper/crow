@@ -10,6 +10,7 @@
  *   - anthropic  — Anthropic Messages API
  *   - google     — Google Gemini API
  *   - ollama     — Ollama native /api/chat endpoint
+ *   - meta       — Meta Llama API (OpenAI-compatible)
  */
 
 import { readEnvFile, resolveEnvPath } from "../env-manager.js";
@@ -91,6 +92,7 @@ export async function createProviderAdapter() {
   // Resolve provider to adapter loader (support aliases)
   let adapterKey = provider;
   if (provider === "openrouter") adapterKey = "openai";
+  if (provider === "meta") adapterKey = "openai";
 
   const loader = ADAPTER_LOADERS[adapterKey];
   if (!loader) {
@@ -122,6 +124,9 @@ export async function createProviderAdapter() {
   if (provider === "openrouter" && !baseUrl) {
     adapterConfig.baseUrl = "https://openrouter.ai/api/v1";
   }
+  if (provider === "meta" && !baseUrl) {
+    adapterConfig.baseUrl = "https://api.llama.com/compat/v1/";
+  }
 
   const adapter = createAdapter(adapterConfig);
   return { adapter, config };
@@ -151,7 +156,7 @@ export async function getAiProfiles(db, { includeKeys = false } = {}) {
  * Returns { adapter, config } — same shape as createProviderAdapter().
  */
 export async function createAdapterFromProfile(profile, model) {
-  const adapterKey = profile.provider === "openrouter" ? "openai" : profile.provider;
+  const adapterKey = ["openrouter", "meta"].includes(profile.provider) ? "openai" : profile.provider;
   const loader = ADAPTER_LOADERS[adapterKey];
   if (!loader) {
     throw Object.assign(new Error(`Unknown provider: ${profile.provider}`), { code: "invalid_provider" });
@@ -172,6 +177,9 @@ export async function createAdapterFromProfile(profile, model) {
   // OpenRouter default base URL (mirrors createProviderAdapter logic)
   if (profile.provider === "openrouter" && !profile.baseUrl) {
     adapterConfig.baseUrl = "https://openrouter.ai/api/v1";
+  }
+  if (profile.provider === "meta" && !profile.baseUrl) {
+    adapterConfig.baseUrl = "https://api.llama.com/compat/v1/";
   }
 
   const adapter = mod.default(adapterConfig);

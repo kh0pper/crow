@@ -50,6 +50,7 @@ No gateway restart needed — the config is hot-reloaded.
 | Google Gemini | `google` | `gemini-2.5-flash` | Yes | [Get key](https://aistudio.google.com/app/apikey) |
 | Ollama | `ollama` | `llama3.1` | No | Fully local, no API key needed |
 | OpenRouter | `openrouter` | `openai/gpt-4o` | Yes | [Get key](https://openrouter.ai/keys) — access 100+ models |
+| Meta AI (Llama) | `meta` | `Llama-4-Maverick-17B-128E-Instruct-FP8` | Yes | [Get key](https://llama.com/) — Llama 4 & 3.3 models |
 | DashScope Coding | `openai` | `qwen3.5-plus` | Yes | [Get key](https://dashscope.console.aliyun.com/apiKey) — Qwen, GLM, Kimi, MiniMax ([guide](/guide/dashscope-coding)) |
 | Z.AI Coding | `openai` | `glm-5` | Yes | [Get key](https://z.ai) — GLM models ([guide](/guide/zai-coding)) |
 
@@ -107,6 +108,33 @@ AI_MODEL=openai/gpt-4o
 
 OpenRouter gives you access to 100+ models from multiple providers through a single API key. Great for trying different models without signing up for each provider separately. Many models have free tiers.
 
+### Meta AI (Llama)
+
+```env
+AI_PROVIDER=meta
+AI_API_KEY=LLM|...
+AI_MODEL=Llama-4-Maverick-17B-128E-Instruct-FP8
+```
+
+Meta's Llama API provides direct access to Llama models. Available models:
+
+| Model | RPM | TPM |
+|---|---|---|
+| `Llama-4-Maverick-17B-128E-Instruct-FP8` | 10 | 250,000 |
+| `Llama-4-Scout-17B-16E-Instruct-FP8` | 10 | 250,000 |
+| `Llama-3.3-70B-Instruct` | 10 | 250,000 |
+| `Llama-3.3-8B-Instruct` | 10 | 250,000 |
+
+The API is OpenAI-compatible — no custom base URL needed.
+
+::: tip API Key Format
+Meta API keys start with `LLM|` (e.g., `LLM|953656...|8vKG-...`). Get one at [llama.com](https://llama.com/).
+:::
+
+::: warning Semantic Search
+Meta's API does not support embeddings. Semantic search is not available when using Meta as your AI provider — Crow falls back to keyword search (FTS5) automatically.
+:::
+
 ### DashScope Coding Plan (Alibaba Cloud)
 
 ```env
@@ -146,7 +174,7 @@ This works with vLLM, LM Studio, text-generation-webui, and other OpenAI-compati
 
 | Variable | Required | Description |
 |---|---|---|
-| `AI_PROVIDER` | Yes | Provider name: `openai`, `anthropic`, `google`, `ollama`, `openrouter` |
+| `AI_PROVIDER` | Yes | Provider name: `openai`, `anthropic`, `google`, `ollama`, `openrouter`, `meta` |
 | `AI_API_KEY` | Depends | API key (not needed for Ollama) |
 | `AI_MODEL` | No | Model name (uses provider default if blank) |
 | `AI_BASE_URL` | No | Custom API endpoint (for Ollama, OpenRouter, or self-hosted) |
@@ -250,7 +278,7 @@ LocalAI provides an OpenAI-compatible API running entirely on your hardware — 
 Set `AI_PROVIDER` in Settings or `.env`. At minimum you need the provider name.
 
 ### "API key is invalid (401)"
-Double-check your `AI_API_KEY`. For Anthropic, keys start with `sk-ant-`. For OpenAI, `sk-`. For Google, `AIza`.
+Double-check your `AI_API_KEY`. For Anthropic, keys start with `sk-ant-`. For OpenAI, `sk-`. For Google, `AIza`. For Meta, keys start with `LLM|`.
 
 ### "Model not found (404)"
 The model name is provider-specific. Check the provider's docs for available models. For Ollama, run `ollama pull <model>` first.

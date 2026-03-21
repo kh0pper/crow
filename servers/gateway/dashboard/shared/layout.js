@@ -729,7 +729,8 @@ function dashboardCss() {
   .theme-glass .header-dropdown,
   .theme-glass .crow-dropdown,
   .theme-glass #modal-content,
-  .theme-glass #crow-player-bar {
+  .theme-glass #crow-player-bar,
+  .theme-glass .msg-popover {
     background: var(--crow-bg-popup);
     backdrop-filter: var(--crow-glass-blur);
     -webkit-backdrop-filter: var(--crow-glass-blur);
