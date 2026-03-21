@@ -26,13 +26,6 @@ function resolveDataDir() {
 }
 
 export function createDbClient(dbPath) {
-  const tursoUrl = process.env.TURSO_DATABASE_URL;
-  const tursoToken = process.env.TURSO_AUTH_TOKEN;
-
-  if (tursoUrl) {
-    return createClient({ url: tursoUrl, authToken: tursoToken });
-  }
-
   const filePath = dbPath || process.env.CROW_TAX_DB_PATH || process.env.CROW_DB_PATH || resolve(resolveDataDir(), "crow.db");
   return createClient({ url: `file:${filePath}` });
 }

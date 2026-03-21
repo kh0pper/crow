@@ -10,7 +10,7 @@ Crow can be deployed for free on several platforms. Here's how they compare:
 | **[Home Server](./home-server)** | Varies | 4-32 GB | Unlimited | Yes | No (local SQLite) | Full control, all add-ons |
 | **[Desktop Install](./desktop-install)** | Your PC | Your PC | Your PC | While running | No (local SQLite) | Quick start, single machine |
 | **[Managed Hosting](./managed-hosting)** | Shared | Shared | Included | Yes | No | Zero maintenance ($15/mo) |
-| **Render** *(legacy)* | Shared | 512 MB | Ephemeral | No (sleeps) | Yes (Turso) | Testing only |
+| **Render** *(legacy)* | Shared | 512 MB | Ephemeral | No (sleeps) | N/A | Not recommended |
 
 ## Oracle Cloud Free Tier (Recommended)
 
@@ -45,8 +45,8 @@ Skip all infrastructure. $15/mo or $120/yr gets you a pre-configured Crow instan
 - **Just want to try Crow?** → [Desktop Install](./desktop-install). Clone, setup, connect — done in 5 minutes.
 - **Don't want to manage anything?** → [Managed Hosting](./managed-hosting). Zero maintenance, live in minutes.
 
-::: details Legacy: Render + Turso
-Render's free tier sleeps after 15 minutes of inactivity (30-second cold starts), has ephemeral disk (requiring Turso as a second dependency), and adds unnecessary complexity. It still works for testing but is not recommended for new deployments.
+::: details Legacy: Render (Archived)
+The Render + Turso deployment path is no longer supported. Turso cloud database support has been removed from Crow — multi-device sync is now handled by Hypercore P2P replication with local SQLite.
 
-See the [Cloud Deploy (Legacy)](./cloud-deploy) guide if you need it.
+See the [Cloud Deploy (Legacy)](./cloud-deploy) guide for historical reference.
 :::

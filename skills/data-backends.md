@@ -75,4 +75,4 @@ When querying data through an external backend:
 
 - Credentials live in `.env` only — never in the database
 - `connection_ref` stores env var **names** (e.g., `"envVars": ["POSTGRES_URL"]"`), not values
-- The database may sync to cloud (Turso) or be shared via P2P — no secrets in DB rows
+- The database may be shared via P2P — no secrets in DB rows

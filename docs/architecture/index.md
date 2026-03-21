@@ -33,8 +33,8 @@ Crow is an MCP (Model Context Protocol) platform — not a traditional web app. 
                                │
                         ┌──────┴───────┐
                         │    SQLite    │
-                        │ (local file  │
-                        │  or Turso)   │
+                        │ (local file) │
+                        │              │
                         └──────────────┘
 ```
 
@@ -88,10 +88,7 @@ servers/gateway/index.js   → Express + HTTP/SSE transports (all five servers)
 
 ## Database
 
-Uses `@libsql/client` which supports both:
-
-- **Local**: SQLite file at `~/.crow/data/crow.db`
-- **Cloud**: [Turso](https://turso.tech) with `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN`
+Uses `@libsql/client` with a local SQLite file at `~/.crow/data/crow.db`. Multi-device sync is handled by Hypercore P2P replication.
 
 Key tables:
 - `memories` — Full-text searchable via FTS5 virtual table with sync triggers

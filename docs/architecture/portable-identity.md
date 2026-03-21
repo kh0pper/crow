@@ -41,13 +41,6 @@ Your Crow ID, all memories, research, blog posts, contacts, and messages come wi
 
 ## Complications
 
-### Turso (Cloud Database) Users
-
-Users with `TURSO_DATABASE_URL` in their `.env` don't have a local database to copy. Options:
-
-1. **Re-point .env** — Just set the same Turso URL on the new machine (trivial, but keeps cloud dependency)
-2. **Export to local** — Future `crow export-db` command to dump Turso to local SQLite file for full portability
-
 ### MinIO (Object Storage) Users
 
 Files stored in MinIO are not in `~/.crow/data/`. Options:
@@ -102,16 +95,6 @@ Implementation:
 2. Include SHA256 checksum for integrity verification
 3. Optionally export Docker volumes for installed bundles
 4. `crow restore` extracts, runs `npm install`, `npm run init-db`, starts services
-
-### Later: Cloud-to-Local Migration
-
-For users moving from Render + Turso to self-hosted:
-
-```bash
-crow export-db          # Dump Turso → local SQLite
-crow export-files       # Download S3 → local directory
-# Then migrate ~/.crow/ as normal
-```
 
 ## Lessons from Urbit
 

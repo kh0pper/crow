@@ -72,7 +72,6 @@ If you accidentally shared an API key (posted it publicly, committed it to GitHu
 
 | Service | Where to revoke |
 |---|---|
-| Turso | [Turso Dashboard](https://turso.tech) → Database → Settings |
 | GitHub | [GitHub Settings](https://github.com/settings/tokens) → Personal Access Tokens |
 | Slack | [Slack API](https://api.slack.com/apps) → Your App → OAuth & Permissions |
 | Google | [Google Cloud Console](https://console.cloud.google.com/apis/credentials) |

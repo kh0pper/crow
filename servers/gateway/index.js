@@ -87,7 +87,7 @@ if (noAuth) {
 // Initialize OAuth tables
 await initOAuthTables();
 
-// Verify core schema exists — auto-initialize if missing (Turso/Docker first run)
+// Verify core schema exists — auto-initialize if missing (Docker first run)
 try {
   const _schemaDb = createDbClient();
   const { rows } = await _schemaDb.execute(

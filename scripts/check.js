@@ -39,7 +39,6 @@ try {
 // --- Load env ---
 
 const env = loadEnv();
-const isTurso = !!env.TURSO_DATABASE_URL;
 
 // --- Check database ---
 
@@ -48,8 +47,6 @@ let memoryCount = 0;
 
 try {
   // Temporarily set env vars so createDbClient picks them up
-  if (env.TURSO_DATABASE_URL) process.env.TURSO_DATABASE_URL = env.TURSO_DATABASE_URL;
-  if (env.TURSO_AUTH_TOKEN) process.env.TURSO_AUTH_TOKEN = env.TURSO_AUTH_TOKEN;
   if (env.CROW_DB_PATH) process.env.CROW_DB_PATH = env.CROW_DB_PATH;
 
   const db = createDbClient();
@@ -62,8 +59,6 @@ try {
     dbStatus = "missing";
   } else if (/no such table/i.test(err.message)) {
     dbStatus = "no-schema";
-  } else if (isTurso) {
-    dbStatus = "turso-unreachable";
   } else {
     dbStatus = "error";
   }
@@ -76,8 +71,6 @@ if (dbStatus === "ok") {
   console.log(`  ${red("Database:      not found")}`);
 } else if (dbStatus === "no-schema") {
   console.log(`  ${red("Database:      not initialized (tables missing)")}`);
-} else if (dbStatus === "turso-unreachable") {
-  console.log(`  ${red("Database:      Turso unreachable — check TURSO_DATABASE_URL and TURSO_AUTH_TOKEN")}`);
 } else {
   console.log(`  ${red("Database:      error connecting")}`);
 }
@@ -170,8 +163,6 @@ if (dbStatus === "ok") {
   } else {
     console.log(`  Run 'npm run init-db' first, then try again.`);
   }
-} else if (dbStatus === "turso-unreachable") {
-  console.log(`  Check your Turso credentials in .env and try again.`);
 } else {
   console.log(`  Something went wrong. Try 'npm run setup' to reinitialize.`);
 }

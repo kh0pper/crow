@@ -1,9 +1,10 @@
-## Crow — Render.com One-Click Deploy (Legacy)
+## Crow — Render.com One-Click Deploy (Legacy/Archived)
 ## Note: Oracle Cloud Free Tier is now the recommended free deployment option.
 ## See docs/getting-started/oracle-cloud.md for the recommended setup.
 ##
-## This file is maintained for existing Render users.
-## Click "New" → "Blueprint" on Render and point to this repo.
+## This file is archived. Turso cloud database support has been removed.
+## Render's ephemeral disk requires an external database, which Crow no longer supports.
+## Existing Render deployments should migrate to Oracle Cloud Free Tier or self-hosted.
 
 services:
   - type: web

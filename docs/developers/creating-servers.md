@@ -14,7 +14,7 @@ An MCP server exposes tools that AI assistants can call. Crow's built-in servers
 
 - **Custom tools** — Give your AI new capabilities tailored to your workflow
 - **Consistent architecture** — Follow the same factory pattern so your server works with both stdio and HTTP transports
-- **Database access** — Use the shared SQLite/Turso database for persistence
+- **Database access** — Use the shared SQLite database for persistence
 - **Community sharing** — Publish your server as an add-on for other Crow users
 
 ## The Factory Pattern

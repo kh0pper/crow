@@ -127,9 +127,8 @@ log("Want to generate Claude Desktop config? Run: node scripts/generate-desktop-
 header("Setup Complete");
 
 // Detect deployment type
-const isTurso = !!process.env.TURSO_DATABASE_URL;
 const isCrowOS = home && existsSync(resolve(home, ".crow", "app", "package.json"));
-const isGateway = isTurso || isCrowOS;
+const isGateway = isCrowOS;
 
 // Build dynamic server list from registry
 const totalServers = CORE_SERVERS.length + EXTERNAL_SERVERS.length;
