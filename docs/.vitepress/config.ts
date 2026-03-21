@@ -168,6 +168,9 @@ export default defineConfig({
           { text: 'Customization', link: '/guide/customization' },
           { text: 'Brand & Design', link: '/guide/brand' },
           { text: 'Scheduling', link: '/guide/scheduling' },
+          { text: 'Extensions', link: '/guide/extensions' },
+          { text: 'Tax Filing Assistant', link: '/guide/tax-filing' },
+          { text: 'Browser Automation', link: '/guide/browser-automation' },
         ],
       },
       {
