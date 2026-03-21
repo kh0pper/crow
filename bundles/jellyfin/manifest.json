@@ -1,0 +1,27 @@
+{
+  "id": "jellyfin",
+  "name": "Jellyfin",
+  "version": "1.0.0",
+  "description": "Self-hosted media server — stream movies, TV shows, and music with AI-powered library management",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "media",
+  "tags": ["media", "movies", "tv", "music", "streaming", "self-hosted"],
+  "icon": "film",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["JELLYFIN_URL", "JELLYFIN_API_KEY"] },
+  "panel": "panel/jellyfin.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/jellyfin.md"],
+  "requires": { "env": ["JELLYFIN_API_KEY"], "min_ram_mb": 1024, "min_disk_mb": 2000 },
+  "env_vars": [
+    { "name": "JELLYFIN_URL", "description": "Jellyfin server URL", "default": "http://localhost:8096", "required": true },
+    { "name": "JELLYFIN_API_KEY", "description": "Jellyfin API key (Dashboard > API Keys)", "required": true, "secret": true },
+    { "name": "JELLYFIN_USER_ID", "description": "Default user ID for library browsing", "required": false },
+    { "name": "JELLYFIN_MEDIA_PATH", "description": "Host path for media files (Docker mode)", "required": false },
+    { "name": "JELLYFIN_CONFIG_PATH", "description": "Host path for config (Docker mode)", "required": false }
+  ],
+  "ports": [8096],
+  "webUI": { "port": 8096, "path": "/", "label": "Jellyfin" },
+  "notes": "Self-host via Docker (set JELLYFIN_MEDIA_PATH) or connect to existing (set JELLYFIN_URL + JELLYFIN_API_KEY)."
+}
