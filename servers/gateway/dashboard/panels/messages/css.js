@@ -598,6 +598,10 @@ export function messagesCSS() {
     .msg-info:not(.hidden) { width: 200px; }
   }
   @media (max-width: 768px) {
+    .msg-hub {
+      height: 100%;
+      min-height: 0;
+    }
     .msg-info { display: none !important; }
     .msg-bubble { max-width: 85%; }
   }

@@ -13,7 +13,8 @@
 import { t, tJs } from "./i18n.js";
 
 export function playerBarHtml(lang) {
-  return `<div id="crow-player-bar" style="display:none;position:fixed;bottom:0;left:240px;right:0;background:var(--crow-bg-surface);border-top:2px solid var(--crow-accent);z-index:1000;padding:0;transition:left 0.2s">
+  return `<style>@media(max-width:768px){#crow-player-bar{left:0!important}}</style>
+<div id="crow-player-bar" style="display:none;position:fixed;bottom:0;left:240px;right:0;background:var(--crow-bg-surface);border-top:2px solid var(--crow-accent);z-index:1000;padding:0;transition:left 0.2s">
   <div style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 1rem">
     <button id="crow-player-prev" onclick="window.crowPlayer.prev()" title="${t("player.previous", lang)}" style="background:none;border:none;color:var(--crow-text-muted);cursor:pointer;font-size:0.9rem;padding:0.2rem;display:none">&#9198;</button>
     <button id="crow-player-toggle" onclick="window.crowPlayer.toggle()" title="${t("player.playPause", lang)}" style="background:var(--crow-accent);color:white;border:none;border-radius:50%;width:32px;height:32px;cursor:pointer;font-size:1rem;display:flex;align-items:center;justify-content:center;flex-shrink:0">&#9654;</button>
