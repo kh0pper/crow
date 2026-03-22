@@ -41,6 +41,7 @@ public class MainActivity extends AppCompatActivity {
 
     private WebView webView;
     private SwipeRefreshLayout swipeRefresh;
+    private volatile boolean isWebViewAtTop = true;
     private FrameLayout statusOverlay;
     private TextView statusText;
     private ValueCallback<Uri[]> fileUploadCallback;
@@ -87,6 +88,34 @@ public class MainActivity extends AppCompatActivity {
         swipeRefresh.setOnRefreshListener(() -> {
             webView.reload();
             swipeRefresh.setRefreshing(false);
+        });
+
+        // Only allow pull-to-refresh when WebView content is scrolled to the top.
+        // The Crow's Nest uses CSS overflow-y:auto on .content-body, so
+        // webView.getScrollY() is always 0. We must check via JavaScript.
+        swipeRefresh.setOnChildScrollUpCallback((parent, child) -> {
+            // Disable refresh by default; JS callback re-enables when at top
+            return !isWebViewAtTop;
+        });
+
+        // Poll scroll position via JS whenever the user touches the screen
+        webView.setOnTouchListener((v, event) -> {
+            webView.evaluateJavascript(
+                "(function() {" +
+                "  var el = document.querySelector('.content-body');" +
+                "  if (el) return el.scrollTop;" +
+                "  return window.scrollY || document.documentElement.scrollTop || 0;" +
+                "})()",
+                value -> {
+                    try {
+                        double scrollTop = Double.parseDouble(value);
+                        isWebViewAtTop = scrollTop <= 5;
+                    } catch (Exception e) {
+                        isWebViewAtTop = true;
+                    }
+                }
+            );
+            return false; // Don't consume the touch event
         });
 
         // Schedule background notification polling (every 15 minutes)
