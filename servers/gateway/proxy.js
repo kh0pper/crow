@@ -8,7 +8,7 @@
 
 import { spawn } from "node:child_process";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -218,10 +218,65 @@ export async function disconnectAddonServer(id) {
 }
 
 /**
+ * Gracefully shut down all connected proxy servers.
+ * Closes each MCP client, which terminates the child process via the SDK's
+ * StdioClientTransport.close() (stdin.end → SIGTERM → SIGKILL escalation).
+ */
+export async function shutdownAll() {
+  const entries = [...connectedServers.entries()];
+  await Promise.allSettled(
+    entries.map(async ([id, entry]) => {
+      if (entry.client) {
+        try { await entry.client.close(); } catch {}
+      }
+    })
+  );
+  connectedServers.clear();
+}
+
+/**
+ * Kill stale addon server processes left over from a previous gateway instance.
+ * Finds node processes whose cwd is in ~/.crow/bundles/ and whose parent is
+ * NOT the current gateway (i.e., orphans from a crash or restart).
+ */
+function cleanupStaleAddonProcesses() {
+  let cleaned = 0;
+  try {
+    const myPid = process.pid;
+    const bundleDir = join(homedir(), ".crow", "bundles");
+    // Match "node server/index.js" — the cwd check below narrows to bundles only
+    const output = execFileSync(
+      "pgrep", ["-a", "-f", "node server/index\\.js"],
+      { encoding: "utf8", timeout: 5000 }
+    ).trim();
+    if (!output) return;
+
+    for (const line of output.split("\n")) {
+      const pid = parseInt(line.split(/\s+/)[0], 10);
+      if (!pid || pid === myPid) continue;
+      try {
+        const cwd = readlinkSync(`/proc/${pid}/cwd`);
+        if (!cwd.startsWith(bundleDir)) continue;
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+        const ppid = parseInt(stat.split(" ")[3], 10);
+        if (ppid !== myPid) {
+          console.log(`  [proxy] Killing stale addon process PID ${pid} (cwd: ${cwd})`);
+          process.kill(pid, "SIGTERM");
+          cleaned++;
+        }
+      } catch {}
+    }
+  } catch {}
+  if (cleaned > 0) console.log(`  [proxy] Cleaned up ${cleaned} stale addon process(es)`);
+}
+
+/**
  * Create a combined McpServer that proxies tools from all connected external servers.
  * Call this once at gateway startup; it spawns all configured servers.
  */
 export async function initProxyServers() {
+  cleanupStaleAddonProcesses();
+
   const configured = INTEGRATIONS.filter((i) => {
     if (!isIntegrationConfigured(i)) return false;
     if (i.requires && i.requires.length > 0) {

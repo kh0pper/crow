@@ -763,8 +763,19 @@ const server = app.listen(PORT, "0.0.0.0", (error) => {
 
 // --- Graceful Shutdown ---
 
-process.on("SIGINT", async () => {
+let shuttingDown = false;
+
+async function gracefulShutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log("\nShutting down gateway...");
-  await sessionManager.closeAll();
+  const { shutdownAll } = await import("./proxy.js");
+  await Promise.race([
+    Promise.allSettled([sessionManager.closeAll(), shutdownAll()]),
+    new Promise((resolve) => setTimeout(resolve, 10_000)),
+  ]);
   process.exit(0);
-});
+}
+
+process.on("SIGINT", gracefulShutdown);
+process.on("SIGTERM", gracefulShutdown);
