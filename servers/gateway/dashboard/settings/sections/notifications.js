@@ -8,7 +8,7 @@
 import { escapeHtml } from "../../shared/components.js";
 import { t } from "../../shared/i18n.js";
 import { upsertSetting } from "../registry.js";
-import { getVapidPublicKey } from "../../push/web-push.js";
+import { getVapidPublicKey } from "../../../push/web-push.js";
 
 export default {
   id: "notifications",
