@@ -37,6 +37,13 @@ const APP_ROOT = resolve(__dirname, "../../..");
 const APP_BUNDLES = join(APP_ROOT, "bundles");
 const APP_ENV_PATH = join(APP_ROOT, ".env");
 
+function resolvePanelPath(manifest, bundleId) {
+  if (!manifest?.panel) return null;
+  if (typeof manifest.panel === "string") return manifest.panel;
+  const panelId = manifest.panel.id || bundleId;
+  return `panel/${panelId}.js`;
+}
+
 // In-memory job tracking (simple — no DB table needed for MVP)
 const jobs = new Map();
 let jobCounter = 0;
@@ -471,7 +478,8 @@ export default function bundlesRouter() {
           // Bundle types can also have panels — install them
           if (manifest?.panel) {
             mkdirSync(PANELS_DIR, { recursive: true });
-            const panelSrc = join(destDir, manifest.panel);
+            const panelPath = resolvePanelPath(manifest, bundle_id);
+            const panelSrc = join(destDir, panelPath);
             if (existsSync(panelSrc)) {
               cpSync(panelSrc, join(PANELS_DIR, `${bundle_id}.js`));
               appendLog(job, `Installed panel: ${bundle_id}`);
@@ -543,7 +551,8 @@ export default function bundlesRouter() {
           // Install panel + routes if present in manifest
           if (manifest?.panel) {
             mkdirSync(PANELS_DIR, { recursive: true });
-            const panelSrc = join(destDir, manifest.panel);
+            const panelPath = resolvePanelPath(manifest, bundle_id);
+            const panelSrc = join(destDir, panelPath);
             if (existsSync(panelSrc)) {
               cpSync(panelSrc, join(PANELS_DIR, `${bundle_id}.js`));
               appendLog(job, `Installed panel: ${bundle_id}`);
@@ -591,8 +600,9 @@ export default function bundlesRouter() {
           // Panel — copy panel file to ~/.crow/panels/ and register
           mkdirSync(PANELS_DIR, { recursive: true });
           if (manifest?.panel) {
-            const src = join(destDir, manifest.panel);
-            const dest = join(PANELS_DIR, manifest.panel.split("/").pop());
+            const panelPath = resolvePanelPath(manifest, bundle_id);
+            const src = join(destDir, panelPath);
+            const dest = join(PANELS_DIR, panelPath.split("/").pop());
             if (existsSync(src)) {
               cpSync(src, dest);
               const panelsCfg = readJsonSafe(PANELS_CONFIG_PATH, []);
@@ -600,16 +610,17 @@ export default function bundlesRouter() {
                 panelsCfg.push(bundle_id);
                 writeJsonSafe(PANELS_CONFIG_PATH, panelsCfg);
               }
-              appendLog(job, `Installed panel: ${manifest.panel.split("/").pop()}`);
+              appendLog(job, `Installed panel: ${panelPath.split("/").pop()}`);
             }
           }
         }
 
         // 3b. Handle panel field on any add-on type
         if (manifest.panel && addonType !== "panel") {
-          const panelSourceDir = join(APP_BUNDLES, bundle_id, manifest.panel.replace(/[^a-zA-Z0-9_\-\/\.]/g, ""));
+          const panelPath = resolvePanelPath(manifest, bundle_id);
+          const panelSourceDir = join(APP_BUNDLES, bundle_id, panelPath.replace(/[^a-zA-Z0-9_\-\/\.]/g, ""));
           if (existsSync(panelSourceDir)) {
-            const panelFilename = manifest.panel.split("/").pop();
+            const panelFilename = panelPath.split("/").pop();
             const panelDest = join(CROW_HOME, "panels", panelFilename);
             // Ensure panels directory exists
             mkdirSync(join(CROW_HOME, "panels"), { recursive: true });
@@ -796,7 +807,8 @@ export default function bundlesRouter() {
             writeJsonSafe(PANELS_CONFIG_PATH, panelsCfg);
           }
           if (manifest?.panel) {
-            const panelFile = join(PANELS_DIR, manifest.panel.split("/").pop());
+            const panelPath = resolvePanelPath(manifest, bundle_id);
+            const panelFile = join(PANELS_DIR, panelPath.split("/").pop());
             if (existsSync(panelFile)) rmSync(panelFile);
             appendLog(job, "Removed panel file and registration");
           }
@@ -805,7 +817,8 @@ export default function bundlesRouter() {
         // 1b. Handle panel cleanup for any add-on type
         let needsRestart = false;
         if (manifest && manifest.panel && addonType !== "panel") {
-          const panelFilename = manifest.panel.split("/").pop();
+          const panelPath = resolvePanelPath(manifest, bundle_id);
+          const panelFilename = panelPath.split("/").pop();
           const panelDest = join(CROW_HOME, "panels", panelFilename);
           const panelId = panelFilename.replace(/\.js$/, "");
           // Remove panel file
