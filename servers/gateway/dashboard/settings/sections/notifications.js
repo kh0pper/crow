@@ -1,10 +1,14 @@
 /**
  * Settings Section: Notifications
+ *
+ * Manages notification type preferences AND push notification subscriptions.
+ * Push works in any context: web browser, PWA, or Android WebView app.
  */
 
 import { escapeHtml } from "../../shared/components.js";
 import { t } from "../../shared/i18n.js";
 import { upsertSetting } from "../registry.js";
+import { getVapidPublicKey } from "../../push/web-push.js";
 
 export default {
   id: "notifications",
@@ -46,13 +50,172 @@ export default {
       </label>`;
     }).join("");
 
+    // Push subscription count
+    let pushCount = 0;
+    try {
+      const { rows } = await db.execute("SELECT COUNT(*) as cnt FROM push_subscriptions");
+      pushCount = rows[0]?.cnt || 0;
+    } catch {}
+
+    const vapidKey = getVapidPublicKey();
+    const pushAvailable = !!vapidKey;
+
+    // Push subscription UI
+    const pushSection = pushAvailable
+      ? `<div style="margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--crow-border)">
+        <h4 style="margin:0 0 0.5rem 0;font-size:0.95rem">Push Notifications</h4>
+        <p style="color:var(--crow-text-muted);font-size:0.85rem;margin-bottom:0.75rem">
+          Receive push notifications on this device. Works in browsers, as a PWA, and in the Android app.
+        </p>
+        <div id="push-status" style="margin-bottom:0.75rem"></div>
+        <button id="push-toggle-btn" onclick="togglePushSubscription()" class="btn btn-primary" style="display:none">
+          Enable Push
+        </button>
+        <p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.5rem">
+          ${pushCount} device${pushCount !== 1 ? "s" : ""} registered
+        </p>
+      </div>`
+      : `<div style="margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--crow-border)">
+        <h4 style="margin:0 0 0.5rem 0;font-size:0.95rem">Push Notifications</h4>
+        <p style="color:var(--crow-text-muted);font-size:0.85rem">
+          Not configured. Add VAPID keys to .env. Generate with:
+          <code style="background:var(--crow-bg-elevated);padding:0.1rem 0.3rem;border-radius:3px">npx web-push generate-vapid-keys</code>
+        </p>
+      </div>`;
+
+    // Client-side JS for push management (uses DOM API, no innerHTML with user data)
+    const pushJs = pushAvailable
+      ? `<script>
+    (function() {
+      var VAPID_KEY = '${escapeHtml(vapidKey)}';
+      var statusEl = document.getElementById('push-status');
+      var btnEl = document.getElementById('push-toggle-btn');
+      var isSubscribed = false;
+
+      function urlB64ToUint8(b64) {
+        var p = '='.repeat((4 - b64.length % 4) % 4);
+        var raw = atob((b64 + p).replace(/-/g, '+').replace(/_/g, '/'));
+        var arr = new Uint8Array(raw.length);
+        for (var i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+        return arr;
+      }
+
+      function platform() {
+        if (navigator.userAgent.indexOf('CrowAndroid') !== -1) return 'android';
+        if (window.matchMedia('(display-mode: standalone)').matches) return 'pwa';
+        return 'web';
+      }
+
+      function setStatus(text, color) {
+        statusEl.textContent = '';
+        var span = document.createElement('span');
+        span.style.cssText = 'font-size:0.85rem;color:' + (color || 'var(--crow-text-muted)');
+        span.textContent = text;
+        statusEl.appendChild(span);
+      }
+
+      function arrayToBase64Url(buffer) {
+        var bytes = new Uint8Array(buffer);
+        var str = '';
+        for (var i = 0; i < bytes.length; i++) str += String.fromCharCode(bytes[i]);
+        return btoa(str).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+      }
+
+      function updateUI() {
+        if (isSubscribed) {
+          var p = platform();
+          var label = p === 'android' ? 'Android app' : p === 'pwa' ? 'PWA' : 'browser';
+          setStatus('\\u2713 Push enabled on this ' + label, 'var(--crow-accent)');
+          btnEl.textContent = 'Disable Push';
+          btnEl.className = 'btn';
+        } else {
+          setStatus('Push notifications are off for this device.');
+          btnEl.textContent = 'Enable Push';
+          btnEl.className = 'btn btn-primary';
+        }
+        btnEl.style.display = '';
+      }
+
+      async function check() {
+        if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+          setStatus('Push notifications are not supported in this browser.');
+          return;
+        }
+        try {
+          var reg = await navigator.serviceWorker.ready;
+          var sub = await reg.pushManager.getSubscription();
+          isSubscribed = !!sub;
+          updateUI();
+        } catch (err) {
+          setStatus('Error: ' + err.message, '#e74c3c');
+        }
+      }
+
+      window.togglePushSubscription = async function() {
+        btnEl.disabled = true;
+        btnEl.textContent = 'Working...';
+        try {
+          var reg = await navigator.serviceWorker.ready;
+          if (isSubscribed) {
+            var sub = await reg.pushManager.getSubscription();
+            if (sub) {
+              await fetch('/api/push/register', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ endpoint: sub.endpoint })
+              });
+              await sub.unsubscribe();
+            }
+            isSubscribed = false;
+          } else {
+            var perm = await Notification.requestPermission();
+            if (perm !== 'granted') {
+              setStatus('Notification permission denied. Check your browser or device settings.', '#e74c3c');
+              btnEl.disabled = false;
+              btnEl.textContent = 'Enable Push';
+              return;
+            }
+            var sub = await reg.pushManager.subscribe({
+              userVisibleOnly: true,
+              applicationServerKey: urlB64ToUint8(VAPID_KEY)
+            });
+            await fetch('/api/push/register', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                endpoint: sub.endpoint,
+                keys: {
+                  p256dh: arrayToBase64Url(sub.getKey('p256dh')),
+                  auth: arrayToBase64Url(sub.getKey('auth'))
+                },
+                platform: platform(),
+                deviceName: navigator.userAgent.substring(0, 100)
+              })
+            });
+            isSubscribed = true;
+          }
+          updateUI();
+        } catch (err) {
+          setStatus('Error: ' + err.message, '#e74c3c');
+        } finally {
+          btnEl.disabled = false;
+        }
+      };
+
+      check();
+    })();
+    </script>`
+      : "";
+
     return `<form method="POST" action="/dashboard/settings">
       <input type="hidden" name="_csrf" value="${req.csrfToken}" />
       <input type="hidden" name="action" value="save_notification_prefs" />
       <p style="color:var(--crow-text-muted);font-size:0.85rem;margin-bottom:0.75rem">${t("settings.notifTypes", lang)}</p>
       ${checkboxes}
       <button type="submit" class="btn btn-primary" style="margin-top:0.5rem">${t("common.save", lang)}</button>
-    </form>`;
+    </form>
+    ${pushSection}
+    ${pushJs}`;
   },
 
   async handleAction({ req, res, db, action }) {
