@@ -406,7 +406,7 @@ export default function mediaRouter(authMiddleware) {
       const id = parseInt(req.params.id, 10);
       const { getOrGenerateAudio, isEdgeTtsAvailable } = await importBundleModule("tts.js");
       if (!(await isEdgeTtsAvailable())) {
-        return res.status(503).json({ error: "edge-tts is not installed. Run: npm install edge-tts" });
+        return res.status(503).json({ error: "node-edge-tts is not installed. Run: npm install node-edge-tts" });
       }
       const result = await getOrGenerateAudio(db, id);
       res.json({ audio_url: `/api/media/articles/${id}/audio`, cached: result.cached, duration: result.duration });
