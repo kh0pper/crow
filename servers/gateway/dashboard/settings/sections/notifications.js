@@ -138,7 +138,11 @@ export default {
 
       async function check() {
         if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-          setStatus('Push notifications are not supported in this browser.');
+          if (navigator.userAgent.indexOf('CrowAndroid') !== -1 || /wv\\)/.test(navigator.userAgent)) {
+            setStatus('Push is not available in the Android app. To get push notifications on this phone, open this page in Chrome and tap "Add to Home Screen" to install the PWA.');
+          } else {
+            setStatus('Push notifications are not supported in this browser. Try Chrome or Firefox.');
+          }
           return;
         }
         try {
