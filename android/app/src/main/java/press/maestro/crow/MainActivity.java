@@ -1,15 +1,19 @@
 package press.maestro.crow;
 
+import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.webkit.ValueCallback;
-import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.widget.FrameLayout;
@@ -18,18 +22,30 @@ import android.widget.TextView;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+import androidx.work.Constraints;
+import androidx.work.ExistingPeriodicWorkPolicy;
+import androidx.work.NetworkType;
+import androidx.work.PeriodicWorkRequest;
+import androidx.work.WorkManager;
+
+import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends AppCompatActivity {
 
-    private static final String PREFS_NAME = "crow_prefs";
+    private static final String PREFS_NAME = "CrowPrefs";
     private static final String KEY_GATEWAY_URL = "gateway_url";
+    private static final String WORK_NAME = "crow_notification_poll";
+    private static final long FOREGROUND_POLL_INTERVAL_MS = 60_000; // 60 seconds
 
     private WebView webView;
     private SwipeRefreshLayout swipeRefresh;
     private FrameLayout statusOverlay;
     private TextView statusText;
     private ValueCallback<Uri[]> fileUploadCallback;
+    private Handler foregroundPollHandler;
+    private Runnable foregroundPollRunnable;
 
     private final ActivityResultLauncher<Intent> fileChooserLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -45,6 +61,11 @@ public class MainActivity extends AppCompatActivity {
                 fileUploadCallback = null;
             });
 
+    private final ActivityResultLauncher<String> notifPermissionLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
+                // Nothing to do — notifications work if granted, silently skip if denied
+            });
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -55,6 +76,12 @@ public class MainActivity extends AppCompatActivity {
         statusOverlay = findViewById(R.id.statusOverlay);
         statusText = findViewById(R.id.statusText);
 
+        // Create notification channels
+        NotificationHelper.createChannels(this);
+
+        // Request notification permission (Android 13+)
+        requestNotificationPermission();
+
         configureWebView();
 
         swipeRefresh.setOnRefreshListener(() -> {
@@ -62,11 +89,86 @@ public class MainActivity extends AppCompatActivity {
             swipeRefresh.setRefreshing(false);
         });
 
+        // Schedule background notification polling (every 15 minutes)
+        scheduleBackgroundPolling();
+
+        // Set up foreground polling handler
+        foregroundPollHandler = new Handler(Looper.getMainLooper());
+        foregroundPollRunnable = new Runnable() {
+            @Override
+            public void run() {
+                // Run the notification check on a background thread
+                new Thread(() -> {
+                    NotificationWorker worker = null;
+                    try {
+                        // Use WorkManager's one-time work for immediate check
+                        androidx.work.OneTimeWorkRequest immediateWork =
+                                new androidx.work.OneTimeWorkRequest.Builder(NotificationWorker.class)
+                                        .build();
+                        WorkManager.getInstance(getApplicationContext()).enqueue(immediateWork);
+                    } catch (Exception e) {
+                        // Ignore — best effort
+                    }
+                }).start();
+                foregroundPollHandler.postDelayed(this, FOREGROUND_POLL_INTERVAL_MS);
+            }
+        };
+
+        // Load gateway or open settings
         String gatewayUrl = getGatewayUrl();
         if (gatewayUrl == null || gatewayUrl.isEmpty()) {
             openSettings();
         } else {
+            handleIntent(getIntent(), gatewayUrl);
+        }
+    }
+
+    private void requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                    != PackageManager.PERMISSION_GRANTED) {
+                notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS);
+            }
+        }
+    }
+
+    private void scheduleBackgroundPolling() {
+        Constraints constraints = new Constraints.Builder()
+                .setRequiredNetworkType(NetworkType.CONNECTED)
+                .build();
+
+        PeriodicWorkRequest pollWork = new PeriodicWorkRequest.Builder(
+                NotificationWorker.class, 15, TimeUnit.MINUTES)
+                .setConstraints(constraints)
+                .build();
+
+        WorkManager.getInstance(this).enqueueUniquePeriodicWork(
+                WORK_NAME,
+                ExistingPeriodicWorkPolicy.KEEP,
+                pollWork);
+    }
+
+    /**
+     * Handle intent extras — notification tap opens a specific URL.
+     */
+    private void handleIntent(Intent intent, String gatewayUrl) {
+        String actionUrl = intent.getStringExtra("action_url");
+        if (actionUrl != null && !actionUrl.isEmpty()) {
+            // Notification tap — load the action URL relative to gateway
+            String fullUrl = gatewayUrl.replaceAll("/+$", "") + actionUrl;
+            loadGateway(fullUrl);
+        } else {
             loadGateway(gatewayUrl);
+        }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        String gatewayUrl = getGatewayUrl();
+        if (gatewayUrl != null) {
+            handleIntent(intent, gatewayUrl);
         }
     }
 
@@ -122,6 +224,15 @@ public class MainActivity extends AppCompatActivity {
                 loadGateway(gatewayUrl);
             }
         }
+        // Start foreground polling
+        foregroundPollHandler.postDelayed(foregroundPollRunnable, FOREGROUND_POLL_INTERVAL_MS);
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        // Stop foreground polling
+        foregroundPollHandler.removeCallbacks(foregroundPollRunnable);
     }
 
     @Override
