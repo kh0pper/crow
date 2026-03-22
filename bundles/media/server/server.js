@@ -658,7 +658,7 @@ export function createMediaServer(dbPath, options = {}) {
     "Generate or retrieve TTS audio for an article. Requires node-edge-tts package (npm install node-edge-tts).",
     {
       article_id: z.number().describe("Article ID"),
-      voice: z.string().max(100).optional().describe("Edge TTS voice (default: en-US-AriaNeural)"),
+      voice: z.string().max(100).optional().describe("Edge TTS voice (default: reads from TTS settings, fallback: en-US-BrianNeural)"),
     },
     async ({ article_id, voice }) => {
       try {
@@ -669,7 +669,15 @@ export function createMediaServer(dbPath, options = {}) {
             isError: true,
           };
         }
-        const result = await getOrGenerateAudio(db, article_id, voice || "en-US-AriaNeural");
+        // Read voice from crow-wide TTS settings if not explicitly provided
+        let effectiveVoice = voice;
+        if (!effectiveVoice) {
+          try {
+            const vRow = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'tts_voice'", args: [] });
+            effectiveVoice = vRow.rows[0]?.value || "en-US-BrianNeural";
+          } catch { effectiveVoice = "en-US-BrianNeural"; }
+        }
+        const result = await getOrGenerateAudio(db, article_id, effectiveVoice);
         const durationMin = result.duration ? `${Math.floor(result.duration / 60)}:${String(Math.round(result.duration % 60)).padStart(2, "0")}` : "unknown";
         return {
           content: [{
