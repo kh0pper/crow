@@ -28,6 +28,7 @@
     { "name": "CROW_SMTP_PORT", "description": "SMTP port", "default": "587", "required": false },
     { "name": "CROW_SMTP_USER", "description": "SMTP username", "required": false },
     { "name": "CROW_SMTP_PASS", "description": "SMTP password", "required": false, "secret": true },
-    { "name": "CROW_SMTP_FROM", "description": "Sender email", "required": false }
+    { "name": "CROW_SMTP_FROM", "description": "Sender email", "required": false },
+    { "name": "BRAVE_API_KEY", "description": "Brave Search API key for RSS feed discovery", "required": false, "secret": true }
   ]
 }
