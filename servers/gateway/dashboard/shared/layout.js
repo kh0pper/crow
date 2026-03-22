@@ -68,7 +68,7 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(title)} — Crow's Nest</title>
   <link rel="manifest" href="/manifest.json">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -96,6 +96,7 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
         <a href="/dashboard/logout" class="nav-item logout">${escapeHtml(t("nav.logout", lang))}</a>
       </div>
     </aside>
+    <div class="sidebar-overlay" onclick="closeSidebar()"></div>
     <main class="main-content">
       <header class="content-header">
         <button class="hamburger" onclick="toggleSidebar()" aria-label="Toggle menu">
@@ -125,8 +126,28 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
       });
     }
     function toggleSidebar() {
-      document.querySelector('.sidebar').classList.toggle('open');
+      var sidebar = document.querySelector('.sidebar');
+      if (sidebar.classList.contains('open')) {
+        closeSidebar();
+      } else {
+        document.body._scrollY = window.scrollY;
+        sidebar.classList.add('open');
+        document.body.classList.add('sidebar-open');
+      }
     }
+    function closeSidebar() {
+      document.querySelector('.sidebar').classList.remove('open');
+      document.body.classList.remove('sidebar-open');
+      if (document.body._scrollY !== undefined) {
+        window.scrollTo(0, document.body._scrollY);
+      }
+    }
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') closeSidebar();
+    });
+    document.querySelectorAll('.sidebar .nav-item').forEach(function(a) {
+      a.addEventListener('click', closeSidebar);
+    });
     function toggleNavGroup(id) {
       const group = document.querySelector('.nav-group[data-group-id="' + id + '"]');
       if (group) {
@@ -159,7 +180,7 @@ export function renderLogin({ error, isSetup, setupToken, lockoutHelp, lang } = 
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${isSetup ? escapeHtml(t("login.setupTitle", lang)) : escapeHtml(t("login.title", lang))} — Crow's Nest</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -196,7 +217,7 @@ export function render2faVerify({ error, lang } = {}) {
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.2faTitle", lang))} — Crow's Nest</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -234,7 +255,7 @@ export function render2faRecovery({ error, lang } = {}) {
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.2faRecoveryTitle", lang))} — Crow's Nest</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -270,7 +291,7 @@ export function render2faSetup({ secret, qrDataUri, recoveryCodes, error, lang }
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.2faSetupTitle", lang))} — Crow's Nest</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -310,7 +331,7 @@ export function renderResetRequest({ error, success, isHosted, lang } = {}) {
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.resetTitle", lang))} — Crow's Nest</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -348,7 +369,7 @@ export function renderResetForm({ error, token, lang } = {}) {
 <html lang="${lang || 'en'}">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>${escapeHtml(t("login.resetTitle", lang))} — Crow's Nest</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -817,7 +838,23 @@ function dashboardCss() {
     border-color: var(--crow-border-popup);
   }
 
-  /* Responsive */
+  /* Sidebar overlay (hidden by default, shown on mobile when sidebar is open) */
+  .sidebar-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 99;
+  }
+
+  /* Safe area insets for notched devices */
+  @supports (padding: env(safe-area-inset-top)) {
+    .content-header { padding-top: env(safe-area-inset-top); }
+    .sidebar { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+    .content-body { padding-bottom: env(safe-area-inset-bottom); }
+  }
+
+  /* Responsive — mobile */
   @media (max-width: 768px) {
     .sidebar {
       transform: translateX(-100%);
@@ -826,9 +863,37 @@ function dashboardCss() {
       transform: translateX(0);
       box-shadow: 4px 0 24px rgba(0,0,0,0.5);
     }
-    .main-content { margin-left: 0; }
+    .sidebar.open ~ .sidebar-overlay {
+      display: block;
+    }
+    body.sidebar-open {
+      overflow: hidden;
+      position: fixed;
+      width: 100%;
+    }
+    .main-content {
+      margin-left: 0;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      height: 100dvh;
+      overflow: hidden;
+    }
+    .content-header {
+      flex-shrink: 0;
+    }
+    .content-body {
+      flex: 1;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      min-height: 0;
+      padding: 1rem;
+    }
     .hamburger { display: block; }
-    .content-body { padding: 1rem; }
+    .dashboard {
+      height: 100vh;
+      height: 100dvh;
+    }
   }
 </style>`;
 }
