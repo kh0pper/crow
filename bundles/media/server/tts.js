@@ -1,16 +1,14 @@
 /**
  * TTS (Text-to-Speech) Module
  *
- * Uses edge-tts (optional dependency) to generate audio from article text.
+ * Uses node-edge-tts (optional dependency) to generate audio from article text.
  * Caches results by content hash to avoid re-generation.
  * Rate-limited: max 1 concurrent, daily cap via CROW_MEDIA_TTS_DAILY_LIMIT.
  */
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, statSync, unlinkSync } from "node:fs";
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { join } from "node:path";
 import { resolveDataDir } from "./db.js";
 
 const DAILY_LIMIT = parseInt(process.env.CROW_MEDIA_TTS_DAILY_LIMIT || "50", 10);
@@ -29,30 +27,12 @@ function resetDailyIfNeeded() {
 }
 
 /**
- * Import edge-tts compiled JS.
- * edge-tts@1.0.1 ships "main": "index.ts" which Node refuses to type-strip
- * in node_modules (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING).
- * Use createRequire to locate the package, then import out/index.js directly.
- */
-async function importEdgeTts() {
-  const require = createRequire(import.meta.url);
-  const pkgEntry = require.resolve("edge-tts");
-  const pkgDir = dirname(pkgEntry);
-  return import(pathToFileURL(join(pkgDir, "out", "index.js")).href);
-}
-
-/** Escape SSML special characters (edge-tts interpolates text into SSML). */
-function escapeSsml(text) {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-/**
- * Check if edge-tts is available.
+ * Check if node-edge-tts is available.
  * @returns {Promise<boolean>}
  */
 export async function isEdgeTtsAvailable() {
   try {
-    await importEdgeTts();
+    await import("node-edge-tts");
     return true;
   } catch {
     return false;
@@ -78,8 +58,9 @@ export function resolveAudioDir() {
  * @returns {Promise<{ duration: number, fileSize: number }>}
  */
 export async function generateAudio(text, voice, outputPath) {
-  const { ttsSave } = await importEdgeTts();
-  await ttsSave(escapeSsml(text), outputPath, { voice });
+  const { EdgeTTS } = await import("node-edge-tts");
+  const tts = new EdgeTTS({ voice, lang: "en-US" });
+  await tts.ttsPromise(text, outputPath);
 
   const stat = statSync(outputPath);
   // Estimate duration: ~150 words/min for TTS, ~5 chars/word

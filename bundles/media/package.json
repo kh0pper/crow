@@ -13,7 +13,7 @@
     "sanitize-html": "^2.17.1"
   },
   "optionalDependencies": {
-    "edge-tts": "^1.0.1",
+    "node-edge-tts": "^1.2.10",
     "nodemailer": "^6.10.0"
   }
 }

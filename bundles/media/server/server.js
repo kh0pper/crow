@@ -655,7 +655,7 @@ export function createMediaServer(dbPath, options = {}) {
   // --- crow_media_listen ---
   server.tool(
     "crow_media_listen",
-    "Generate or retrieve TTS audio for an article. Requires edge-tts package (npm install edge-tts).",
+    "Generate or retrieve TTS audio for an article. Requires node-edge-tts package (npm install node-edge-tts).",
     {
       article_id: z.number().describe("Article ID"),
       voice: z.string().max(100).optional().describe("Edge TTS voice (default: en-US-AriaNeural)"),
@@ -665,7 +665,7 @@ export function createMediaServer(dbPath, options = {}) {
         const { isEdgeTtsAvailable, getOrGenerateAudio } = await import("./tts.js");
         if (!(await isEdgeTtsAvailable())) {
           return {
-            content: [{ type: "text", text: "edge-tts is not installed. Run: npm install edge-tts" }],
+            content: [{ type: "text", text: "node-edge-tts is not installed. Run: npm install node-edge-tts" }],
             isError: true,
           };
         }

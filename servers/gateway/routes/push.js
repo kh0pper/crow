@@ -88,7 +88,7 @@ export default function pushRouter(authMiddleware) {
       const { rows } = await db.execute({
         sql: `SELECT id, title, body, type, source, action_url, priority, created_at
               FROM notifications
-              WHERE created_at > ? AND dismissed_at IS NULL
+              WHERE created_at > ? AND is_dismissed = 0
               ORDER BY created_at DESC
               LIMIT 50`,
         args: [since],
