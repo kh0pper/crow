@@ -8,7 +8,9 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, statSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { resolveDataDir } from "./db.js";
 
 const DAILY_LIMIT = parseInt(process.env.CROW_MEDIA_TTS_DAILY_LIMIT || "50", 10);
@@ -27,12 +29,30 @@ function resetDailyIfNeeded() {
 }
 
 /**
+ * Import edge-tts compiled JS.
+ * edge-tts@1.0.1 ships "main": "index.ts" which Node refuses to type-strip
+ * in node_modules (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING).
+ * Use createRequire to locate the package, then import out/index.js directly.
+ */
+async function importEdgeTts() {
+  const require = createRequire(import.meta.url);
+  const pkgEntry = require.resolve("edge-tts");
+  const pkgDir = dirname(pkgEntry);
+  return import(pathToFileURL(join(pkgDir, "out", "index.js")).href);
+}
+
+/** Escape SSML special characters (edge-tts interpolates text into SSML). */
+function escapeSsml(text) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/**
  * Check if edge-tts is available.
  * @returns {Promise<boolean>}
  */
 export async function isEdgeTtsAvailable() {
   try {
-    await import("edge-tts");
+    await importEdgeTts();
     return true;
   } catch {
     return false;
@@ -58,11 +78,8 @@ export function resolveAudioDir() {
  * @returns {Promise<{ duration: number, fileSize: number }>}
  */
 export async function generateAudio(text, voice, outputPath) {
-  const edgeTts = await import("edge-tts");
-
-  // edge-tts exposes a Communicate class
-  const communicate = new edgeTts.Communicate(text, voice);
-  await communicate.save(outputPath);
+  const { ttsSave } = await importEdgeTts();
+  await ttsSave(escapeSsml(text), outputPath, { voice });
 
   const stat = statSync(outputPath);
   // Estimate duration: ~150 words/min for TTS, ~5 chars/word
