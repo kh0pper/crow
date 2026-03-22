@@ -71,7 +71,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | "tutor me", "teach me", "quiz me", "help me understand" | "enséñame", "explícame", "evalúame" | tutoring | crow-memory |
 | "wrap up", "summarize session", "what did we do" | "resumir sesión", "qué hicimos" | session-summary | crow-memory |
 | "change language", "speak in..." | "cambiar idioma", "háblame en..." | i18n | crow-memory |
-| Session start / Inicio de sesión | — | session-context, i18n, skill-writing (deferred gap check) | crow-memory |
+| Session start / Inicio de sesión | — | session-summary, i18n, skill-writing (deferred gap check) | crow-memory |
 | High friction detected / Fricción detectada | — | reflection → skill-writing (handoff) | crow-memory, filesystem |
 | Reflection identifies skill gap | — | reflection Phase 7 → skill-writing | crow-memory, filesystem |
 | Multi-step task (3+ steps or 2+ files) | — | plan-review (auto-activate) | (depends on task) |
