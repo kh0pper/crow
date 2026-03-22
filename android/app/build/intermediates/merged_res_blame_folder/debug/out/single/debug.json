@@ -1,0 +1,18 @@
+[
+    {
+        "merged": "press.maestro.crow.app-merged_res-32:/layout_activity_settings.xml.flat",
+        "source": "press.maestro.crow.app-main-34:/layout/activity_settings.xml"
+    },
+    {
+        "merged": "press.maestro.crow.app-merged_res-32:/layout_activity_main.xml.flat",
+        "source": "press.maestro.crow.app-main-34:/layout/activity_main.xml"
+    },
+    {
+        "merged": "press.maestro.crow.app-merged_res-32:/drawable_ic_launcher.xml.flat",
+        "source": "press.maestro.crow.app-main-34:/drawable/ic_launcher.xml"
+    },
+    {
+        "merged": "press.maestro.crow.app-merged_res-32:/mipmap-anydpi-v26_ic_launcher.xml.flat",
+        "source": "press.maestro.crow.app-main-34:/mipmap-anydpi-v26/ic_launcher.xml"
+    }
+]

@@ -16,7 +16,7 @@ import java.net.URL;
 
 public class SettingsActivity extends AppCompatActivity {
 
-    private static final String PREFS_NAME = "crow_prefs";
+    private static final String PREFS_NAME = "CrowPrefs";
     private static final String KEY_GATEWAY_URL = "gateway_url";
 
     private EditText urlInput;

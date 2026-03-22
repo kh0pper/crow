@@ -5,8 +5,8 @@
 
     <!-- Gateway -->
     <string name="gateway_url_label">Gateway URL</string>
-    <string name="gateway_url_hint">Enter the URL of your Crow gateway server.</string>
-    <string name="gateway_url_placeholder">http://100.121.254.89:3001</string>
+    <string name="gateway_url_hint">Use your Tailscale MagicDNS HTTPS URL for best compatibility.</string>
+    <string name="gateway_url_placeholder">https://your-machine.tail12345.ts.net:8444</string>
     <string name="test_connection">Test Connection</string>
     <string name="testing_connection">Testing connection\u2026</string>
     <string name="connection_success">Connected successfully.</string>

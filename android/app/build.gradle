@@ -41,4 +41,5 @@ dependencies {
     implementation 'androidx.webkit:webkit:1.8.0'
     implementation 'androidx.preference:preference:1.2.1'
     implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
+    implementation 'androidx.work:work-runtime:2.9.0'
 }

@@ -1,0 +1,109 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="press.maestro.crow"
+4    android:versionCode="1"
+5    android:versionName="1.0.0" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="24"
+9        android:targetSdkVersion="34" />
+10
+11    <uses-permission android:name="android.permission.INTERNET" />
+11-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:4:5-67
+11-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:4:22-64
+12    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+12-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:5:5-79
+12-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:5:22-76
+13
+14    <permission
+14-->[androidx.core:core:1.9.0] /home/kh0pp/.gradle/caches/transforms-3/69031d9de34e6ae4e80492f7a424b6d1/transformed/core-1.9.0/AndroidManifest.xml:22:5-24:47
+15        android:name="press.maestro.crow.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+15-->[androidx.core:core:1.9.0] /home/kh0pp/.gradle/caches/transforms-3/69031d9de34e6ae4e80492f7a424b6d1/transformed/core-1.9.0/AndroidManifest.xml:23:9-81
+16        android:protectionLevel="signature" />
+16-->[androidx.core:core:1.9.0] /home/kh0pp/.gradle/caches/transforms-3/69031d9de34e6ae4e80492f7a424b6d1/transformed/core-1.9.0/AndroidManifest.xml:24:9-44
+17
+18    <uses-permission android:name="press.maestro.crow.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" />
+18-->[androidx.core:core:1.9.0] /home/kh0pp/.gradle/caches/transforms-3/69031d9de34e6ae4e80492f7a424b6d1/transformed/core-1.9.0/AndroidManifest.xml:26:5-97
+18-->[androidx.core:core:1.9.0] /home/kh0pp/.gradle/caches/transforms-3/69031d9de34e6ae4e80492f7a424b6d1/transformed/core-1.9.0/AndroidManifest.xml:26:22-94
+19
+20    <application
+20-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:7:5-28:19
+21        android:allowBackup="true"
+21-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:8:9-35
+22        android:appComponentFactory="androidx.core.app.CoreComponentFactory"
+22-->[androidx.core:core:1.9.0] /home/kh0pp/.gradle/caches/transforms-3/69031d9de34e6ae4e80492f7a424b6d1/transformed/core-1.9.0/AndroidManifest.xml:28:18-86
+23        android:debuggable="true"
+24        android:extractNativeLibs="false"
+25        android:icon="@mipmap/ic_launcher"
+25-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:9:9-43
+26        android:label="@string/app_name"
+26-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:10:9-41
+27        android:theme="@style/AppTheme"
+27-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:11:9-40
+28        android:usesCleartextTraffic="true" >
+28-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:12:9-44
+29        <activity
+29-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:14:9-22:20
+30            android:name="press.maestro.crow.MainActivity"
+30-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:15:13-41
+31            android:configChanges="orientation|screenSize|keyboardHidden"
+31-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:17:13-74
+32            android:exported="true" >
+32-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:16:13-36
+33            <intent-filter>
+33-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:18:13-21:29
+34                <action android:name="android.intent.action.MAIN" />
+34-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:19:17-69
+34-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:19:25-66
+35
+36                <category android:name="android.intent.category.LAUNCHER" />
+36-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:20:17-77
+36-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:20:27-74
+37            </intent-filter>
+38        </activity>
+39        <activity
+39-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:24:9-27:58
+40            android:name="press.maestro.crow.SettingsActivity"
+40-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:25:13-45
+41            android:label="@string/settings_title"
+41-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:26:13-51
+42            android:parentActivityName="press.maestro.crow.MainActivity" />
+42-->/home/kh0pp/crow/android/app/src/main/AndroidManifest.xml:27:13-55
+43
+44        <provider
+44-->[androidx.emoji2:emoji2:1.2.0] /home/kh0pp/.gradle/caches/transforms-3/986cb90b811bf58fb8e8ff4e6584552d/transformed/emoji2-1.2.0/AndroidManifest.xml:24:9-32:20
+45            android:name="androidx.startup.InitializationProvider"
+45-->[androidx.emoji2:emoji2:1.2.0] /home/kh0pp/.gradle/caches/transforms-3/986cb90b811bf58fb8e8ff4e6584552d/transformed/emoji2-1.2.0/AndroidManifest.xml:25:13-67
+46            android:authorities="press.maestro.crow.androidx-startup"
+46-->[androidx.emoji2:emoji2:1.2.0] /home/kh0pp/.gradle/caches/transforms-3/986cb90b811bf58fb8e8ff4e6584552d/transformed/emoji2-1.2.0/AndroidManifest.xml:26:13-68
+47            android:exported="false" >
+47-->[androidx.emoji2:emoji2:1.2.0] /home/kh0pp/.gradle/caches/transforms-3/986cb90b811bf58fb8e8ff4e6584552d/transformed/emoji2-1.2.0/AndroidManifest.xml:27:13-37
+48            <meta-data
+48-->[androidx.emoji2:emoji2:1.2.0] /home/kh0pp/.gradle/caches/transforms-3/986cb90b811bf58fb8e8ff4e6584552d/transformed/emoji2-1.2.0/AndroidManifest.xml:29:13-31:52
+49                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+49-->[androidx.emoji2:emoji2:1.2.0] /home/kh0pp/.gradle/caches/transforms-3/986cb90b811bf58fb8e8ff4e6584552d/transformed/emoji2-1.2.0/AndroidManifest.xml:30:17-75
+50                android:value="androidx.startup" />
+50-->[androidx.emoji2:emoji2:1.2.0] /home/kh0pp/.gradle/caches/transforms-3/986cb90b811bf58fb8e8ff4e6584552d/transformed/emoji2-1.2.0/AndroidManifest.xml:31:17-49
+51            <meta-data
+51-->[androidx.lifecycle:lifecycle-process:2.4.1] /home/kh0pp/.gradle/caches/transforms-3/b414648e0504e137bfb93e4ffd20cdf8/transformed/lifecycle-process-2.4.1/AndroidManifest.xml:31:13-33:52
+52                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+52-->[androidx.lifecycle:lifecycle-process:2.4.1] /home/kh0pp/.gradle/caches/transforms-3/b414648e0504e137bfb93e4ffd20cdf8/transformed/lifecycle-process-2.4.1/AndroidManifest.xml:32:17-78
+53                android:value="androidx.startup" />
+53-->[androidx.lifecycle:lifecycle-process:2.4.1] /home/kh0pp/.gradle/caches/transforms-3/b414648e0504e137bfb93e4ffd20cdf8/transformed/lifecycle-process-2.4.1/AndroidManifest.xml:33:17-49
+54        </provider>
+55
+56        <uses-library
+56-->[androidx.window:window:1.0.0] /home/kh0pp/.gradle/caches/transforms-3/f85d8380377799d3d79bbe7a0a0e480a/transformed/window-1.0.0/AndroidManifest.xml:25:9-27:40
+57            android:name="androidx.window.extensions"
+57-->[androidx.window:window:1.0.0] /home/kh0pp/.gradle/caches/transforms-3/f85d8380377799d3d79bbe7a0a0e480a/transformed/window-1.0.0/AndroidManifest.xml:26:13-54
+58            android:required="false" />
+58-->[androidx.window:window:1.0.0] /home/kh0pp/.gradle/caches/transforms-3/f85d8380377799d3d79bbe7a0a0e480a/transformed/window-1.0.0/AndroidManifest.xml:27:13-37
+59        <uses-library
+59-->[androidx.window:window:1.0.0] /home/kh0pp/.gradle/caches/transforms-3/f85d8380377799d3d79bbe7a0a0e480a/transformed/window-1.0.0/AndroidManifest.xml:28:9-30:40
+60            android:name="androidx.window.sidecar"
+60-->[androidx.window:window:1.0.0] /home/kh0pp/.gradle/caches/transforms-3/f85d8380377799d3d79bbe7a0a0e480a/transformed/window-1.0.0/AndroidManifest.xml:29:13-51
+61            android:required="false" />
+61-->[androidx.window:window:1.0.0] /home/kh0pp/.gradle/caches/transforms-3/f85d8380377799d3d79bbe7a0a0e480a/transformed/window-1.0.0/AndroidManifest.xml:30:13-37
+62    </application>
+63
+64</manifest>

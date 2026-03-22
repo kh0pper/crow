@@ -1,0 +1,4 @@
+#Sat Mar 21 19:53:38 CDT 2026
+base.0=/home/kh0pp/crow/android/app/build/intermediates/dex/release/mergeDexRelease/classes.dex
+renamed.0=classes.dex
+path.0=classes.dex

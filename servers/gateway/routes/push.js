@@ -79,5 +79,28 @@ export default function pushRouter(authMiddleware) {
     }
   });
 
+  // GET /api/push/notifications — poll for new notifications (used by Android app)
+  router.get("/api/push/notifications", authMiddleware, async (req, res) => {
+    const since = req.query.since || "1970-01-01T00:00:00Z";
+
+    const db = createDbClient();
+    try {
+      const { rows } = await db.execute({
+        sql: `SELECT id, title, body, type, source, action_url, priority, created_at
+              FROM notifications
+              WHERE created_at > ? AND dismissed_at IS NULL
+              ORDER BY created_at DESC
+              LIMIT 50`,
+        args: [since],
+      });
+      res.json({ notifications: rows });
+    } catch (err) {
+      console.error("[push] Notification poll failed:", err.message);
+      res.status(500).json({ error: "Failed to fetch notifications" });
+    } finally {
+      db.close();
+    }
+  });
+
   return router;
 }
