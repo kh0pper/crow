@@ -2,11 +2,9 @@
  * Data Dashboard — Crow's Nest Panel
  *
  * 4-tab interface: Schema Explorer, SQL Editor, Charts, Case Studies.
- * Server-rendered HTML matching Crow's Nest dark editorial design.
+ * Bundle-compatible: uses dynamic imports with appRoot so it works
+ * both from the repo and when installed to ~/.crow/panels/.
  */
-
-import { escapeHtml, section, badge, dataTable, formField, formatDate } from "../../../../servers/gateway/dashboard/shared/components.js";
-import { t } from "../../../../servers/gateway/dashboard/shared/i18n.js";
 
 export default {
   id: "data-dashboard",
@@ -15,7 +13,22 @@ export default {
   route: "/dashboard/data-dashboard",
   navOrder: 16,
 
-  async handler(req, res, { db, layout, lang }) {
+  async handler(req, res, { db, layout, lang, appRoot }) {
+    const { pathToFileURL } = await import("node:url");
+    const { join } = await import("node:path");
+    const { existsSync } = await import("node:fs");
+
+    const componentsPath = join(appRoot, "servers/gateway/dashboard/shared/components.js");
+    const { escapeHtml, section, badge, dataTable, formField, formatDate } = await import(pathToFileURL(componentsPath).href);
+
+    // Resolve bundle server directory (installed vs repo)
+    const installedServerDir = join(process.env.HOME || "", ".crow", "bundles", "data-dashboard", "server");
+    const repoServerDir = join(appRoot, "bundles", "data-dashboard", "server");
+    const bundleServerDir = existsSync(installedServerDir) ? installedServerDir : repoServerDir;
+
+    async function importBundleModule(name) {
+      return import(pathToFileURL(join(bundleServerDir, name)).href);
+    }
     const tab = req.query.tab || "schema";
     const backendId = req.query.backend_id ? parseInt(req.query.backend_id) : null;
 
@@ -71,20 +84,22 @@ export default {
       No SQLite databases registered. Use <code>crow_data_create_database</code> to create one.
     </div>`;
 
+    const ctx = { escapeHtml, section, badge, dataTable, formatDate, importBundleModule };
+
     // Render active tab
     let tabContent = "";
     switch (tab) {
       case "schema":
-        tabContent = await renderSchemaTab(db, backendId, lang);
+        tabContent = await renderSchemaTab(db, backendId, lang, ctx);
         break;
       case "sql":
-        tabContent = await renderSqlTab(db, backendId, req.query.q, lang);
+        tabContent = await renderSqlTab(db, backendId, req.query.q, lang, ctx);
         break;
       case "charts":
         tabContent = renderChartsTab(lang);
         break;
       case "cases":
-        tabContent = await renderCasesTab(db, lang);
+        tabContent = await renderCasesTab(db, lang, ctx);
         break;
     }
 
@@ -93,7 +108,7 @@ export default {
   },
 };
 
-async function renderSchemaTab(db, backendId, lang) {
+async function renderSchemaTab(db, backendId, lang, { escapeHtml, section, badge, dataTable, importBundleModule }) {
   if (!backendId) {
     return `<div style="padding:2rem;text-align:center;color:var(--crow-text-muted)">Select a database to explore its schema.</div>`;
   }
@@ -112,15 +127,15 @@ async function renderSchemaTab(db, backendId, lang) {
   const dbPath = ref.path;
 
   try {
-    const { getSchema } = await import("../server/query-engine.js");
+    const { getSchema } = await importBundleModule("query-engine.js");
     const schema = await getSchema(dbPath);
 
     if (schema.tables.length === 0) {
       return section("Schema", `<p style="color:var(--crow-text-muted)">Database is empty — no tables found.</p>`);
     }
 
-    const tablesHtml = schema.tables.map((t, i) => {
-      const colRows = t.columns.map(c => [
+    const tablesHtml = schema.tables.map((tbl, i) => {
+      const colRows = tbl.columns.map(c => [
         escapeHtml(c.name),
         badge(c.type || "TEXT", "info"),
         c.pk ? badge("PK", "connected") : "",
@@ -128,10 +143,10 @@ async function renderSchemaTab(db, backendId, lang) {
         c.default_value ? escapeHtml(String(c.default_value)) : "",
       ]);
 
-      return section(`${escapeHtml(t.name)} (${t.rowCount} rows)`,
+      return section(`${escapeHtml(tbl.name)} (${tbl.rowCount} rows)`,
         dataTable(["Column", "Type", "Key", "Nullable", "Default"], colRows) +
-        (t.indexes.length > 0 ? `<div style="margin-top:0.5rem;font-size:0.75rem;color:var(--crow-text-muted)">Indexes: ${t.indexes.map(i => escapeHtml(i)).join(", ")}</div>` : "") +
-        `<a href="/dashboard/data-dashboard?tab=sql&backend_id=${backendId}&q=${encodeURIComponent(`SELECT * FROM "${t.name}" LIMIT 10`)}" style="font-size:0.8rem;color:var(--crow-accent);margin-top:0.5rem;display:inline-block">Preview →</a>`,
+        (tbl.indexes.length > 0 ? `<div style="margin-top:0.5rem;font-size:0.75rem;color:var(--crow-text-muted)">Indexes: ${tbl.indexes.map(idx => escapeHtml(idx)).join(", ")}</div>` : "") +
+        `<a href="/dashboard/data-dashboard?tab=sql&backend_id=${backendId}&q=${encodeURIComponent(`SELECT * FROM "${tbl.name}" LIMIT 10`)}" style="font-size:0.8rem;color:var(--crow-accent);margin-top:0.5rem;display:inline-block">Preview →</a>`,
         { delay: i * 50 }
       );
     }).join("");
@@ -142,7 +157,7 @@ async function renderSchemaTab(db, backendId, lang) {
   }
 }
 
-async function renderSqlTab(db, backendId, queryParam, lang) {
+async function renderSqlTab(db, backendId, queryParam, lang, { escapeHtml, dataTable, importBundleModule }) {
   if (!backendId) {
     return `<div style="padding:2rem;text-align:center;color:var(--crow-text-muted)">Select a database to run queries.</div>`;
   }
@@ -160,7 +175,7 @@ async function renderSqlTab(db, backendId, queryParam, lang) {
       if (backends.length === 0) throw new Error("Backend not found");
 
       const ref = JSON.parse(backends[0].connection_ref);
-      const { executeReadQuery } = await import("../server/query-engine.js");
+      const { executeReadQuery } = await importBundleModule("query-engine.js");
       const result = await executeReadQuery(ref.path, sql, 100);
 
       if (result.rowCount === 0) {
@@ -204,7 +219,7 @@ function renderChartsTab(lang) {
   </div>`;
 }
 
-async function renderCasesTab(db, lang) {
+async function renderCasesTab(db, lang, { escapeHtml, badge, formatDate }) {
   let studies = [];
   try {
     const { rows } = await db.execute(
