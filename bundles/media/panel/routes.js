@@ -408,7 +408,9 @@ export default function mediaRouter(authMiddleware) {
       if (!(await isEdgeTtsAvailable())) {
         return res.status(503).json({ error: "node-edge-tts is not installed. Run: npm install node-edge-tts" });
       }
-      const result = await getOrGenerateAudio(db, id);
+      const voiceRow = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'tts_voice'", args: [] });
+      const voice = voiceRow.rows[0]?.value || "en-US-BrianNeural";
+      const result = await getOrGenerateAudio(db, id, voice);
       res.json({ audio_url: `/api/media/articles/${id}/audio`, cached: result.cached, duration: result.duration });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -626,7 +628,9 @@ export default function mediaRouter(authMiddleware) {
             const audioDir = resolveAudioDir();
             const hash = createHash("sha256").update(script).digest("hex").slice(0, 12);
             const outPath = join(audioDir, `briefing-${hash}.mp3`);
-            const result = await genAudio(`${title}. ${script}`, "en-US-AriaNeural", outPath);
+            const bVoiceRow = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'tts_voice'", args: [] });
+            const bVoice = bVoiceRow.rows[0]?.value || "en-US-BrianNeural";
+            const result = await genAudio(`${title}. ${script}`, bVoice, outPath);
             audioPath = outPath;
             durationSec = result.duration;
           }

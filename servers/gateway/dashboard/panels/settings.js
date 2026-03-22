@@ -33,11 +33,13 @@ import identitySection from "../settings/sections/identity.js";
 import passwordSection from "../settings/sections/password.js";
 import twoFactorSection from "../settings/sections/two-factor.js";
 import navGroupsSection from "../settings/sections/nav-groups.js";
+import ttsSection from "../settings/sections/tts.js";
 
 // Register built-in sections
 registerSettingsSection(navGroupsSection);
 registerSettingsSection(themeSection);
 registerSettingsSection(languageSection);
+registerSettingsSection(ttsSection);
 registerSettingsSection(notificationsSection);
 registerSettingsSection(aiProviderSection);
 registerSettingsSection(aiProfilesSection);

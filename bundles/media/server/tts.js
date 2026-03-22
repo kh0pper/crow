@@ -76,7 +76,7 @@ export async function generateAudio(text, voice, outputPath) {
  * @param {string} [voice] - TTS voice name
  * @returns {Promise<{ audioPath: string, duration: number, cached: boolean }>}
  */
-export async function getOrGenerateAudio(db, articleId, voice = "en-US-AriaNeural") {
+export async function getOrGenerateAudio(db, articleId, voice = "en-US-BrianNeural") {
   // Check cache
   const cached = await db.execute({
     sql: "SELECT * FROM media_audio_cache WHERE article_id = ?",
@@ -85,7 +85,7 @@ export async function getOrGenerateAudio(db, articleId, voice = "en-US-AriaNeura
 
   if (cached.rows.length > 0) {
     const row = cached.rows[0];
-    if (existsSync(row.audio_path)) {
+    if (existsSync(row.audio_path) && row.voice === voice) {
       // Update last accessed
       await db.execute({
         sql: "UPDATE media_audio_cache SET last_accessed = datetime('now') WHERE id = ?",
@@ -93,7 +93,7 @@ export async function getOrGenerateAudio(db, articleId, voice = "en-US-AriaNeura
       });
       return { audioPath: row.audio_path, duration: row.duration_sec, cached: true };
     }
-    // File missing — remove stale cache entry
+    // File missing or voice changed — remove stale cache entry
     await db.execute({ sql: "DELETE FROM media_audio_cache WHERE id = ?", args: [row.id] });
   }
 
