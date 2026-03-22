@@ -1,6 +1,6 @@
 ---
 name: session-summary
-description: Quick session summary — records deliverables, decisions, and next steps
+description: Save session summary and key learnings to Crow memory
 triggers:
   - session summary
   - summarize session
@@ -14,11 +14,12 @@ tools:
 
 ## When to Activate
 
-- End of every non-trivial session (as part of session-context.md end protocol)
-- User asks for a summary of what was accomplished
-- User says "wrap up" or "what did we do"
+- User asks for a session summary or says "wrap up" / "what did we do"
+- End of a non-trivial session
 
-This is the **quick path** — always appropriate, even for smooth sessions. For friction analysis and improvement proposals, use `reflection.md` instead.
+## Core Principle
+
+**Invoking this skill IS the approval.** Store memories immediately — do not ask for confirmation. Show what was saved afterward with an option to remove.
 
 ## Workflow
 
@@ -27,13 +28,48 @@ This is the **quick path** — always appropriate, even for smooth sessions. For
 Scan the conversation for:
 - Deliverables completed (files created/modified, messages sent, research done)
 - Decisions made and their rationale
-- Research conducted and sources added
+- Process learnings (build quirks, deployment steps, workarounds discovered)
 - Unfinished work or next steps
 - Key context the next session should know
 
-### 2. Build Summary
+### 2. Build and Store Immediately
 
-Use the structured template (in user's preferred language):
+Build the session summary using the template below, plus any additional memories (process learnings, new preferences, project status updates). Store everything in one step — do NOT show a preview or ask for approval first.
+
+```
+crow_store_memory({
+  content: "<structured summary>",
+  category: "learning",
+  tags: "session-summary, <date>, <project-names>",
+  importance: 7
+})
+```
+
+Store additional learnings with appropriate category and importance.
+
+### 3. Show What Was Saved
+
+After storing, display a numbered list:
+
+```
+[crow: stored N memories]
+1. Session summary — <one-line description> (learning, importance 7)
+2. <additional memory description> (category, importance N)
+
+**Say "remove N" to undo any.**
+```
+
+### 4. Update Project Status
+
+If projects were worked on, update their status with `crow_update_project`.
+
+### 5. Reflect If Needed
+
+If the session had 2+ friction signals (failed tools, user corrections, unexpected blockers), suggest running `/reflection` for deeper analysis. But don't force it — the user can decline.
+
+## Session Summary Template
+
+Use this structure (in user's preferred language):
 
 ```
 # Session Summary — <date>
@@ -58,28 +94,6 @@ Use the structured template (in user's preferred language):
 - "Decisions made" captures the **why**, not just the what
 - Skip sections that don't apply
 - "Key context" is for continuity — what would you want to know first in a fresh session?
-
-### 3. Store in Memory
-
-```
-crow_store_memory({
-  content: "<structured summary>",
-  category: "learning",
-  tags: "session-summary, <localized>, <date>, <project-names>",
-  importance: 7
-})
-```
-
-Show transparency line:
-*[crow: stored session summary — "<one-line description>" (learning, importance 7)]*
-
-### 4. Update Project Status
-
-If projects were worked on, update their status with `crow_update_project`.
-
-## When to Escalate to Reflection
-
-If the session had 2+ friction signals (failed tools, user corrections, unexpected blockers), suggest running `/reflection` for deeper analysis. But don't force it — the user can decline.
 
 ## Language Adaptation
 
