@@ -9,10 +9,9 @@ Skills are markdown files in `skills/` that define behavioral prompts for the AI
 | **I18n** | `i18n.md` | Defines how Crow adapts to each user's preferred language. All user-facing output is delivered in the user's language. S |
 | **Memory Management** | `memory-management.md` | Store, search, and retrieve persistent memories across sessions. Use this skill to maintain context about the user, thei |
 | **Plan Review** | `plan-review.md` | Before executing multi-step or significant tasks, Crow outlines its approach as an inline plan and waits for user approv |
-| **Reflection** | `reflection.md` | A deep-dive friction analysis skill. Identifies what went wrong, analyzes root causes, and proposes concrete improvement |
+| **Reflection** | `reflection.md` | A meta-skill for evaluating *how well things went* and proposing concrete fixes. Identifies friction, maps root causes,  |
 | **Research Pipeline** | `research-pipeline.md` | Manage academic and professional research with full source tracking, APA citations, and verification. Every piece of inf |
-| **Session Context** | `session-context.md` | Automatically load and save context at the beginning and end of sessions. Ensures continuity across conversations. |
-| **Session Summary** | `session-summary.md` | Quick session summary — records deliverables, decisions, and next steps |
+| **Session Summary** | `session-summary.md` | Save session summary and key learnings to Crow memory |
 | **Skill Writing** | `skill-writing.md` | This skill enables the AI to create, modify, and propose new skill files (`skills/*.md`) when existing skills don't cove |
 | **Superpowers** | `superpowers.md` | This is the master routing skill. Consult this **before every task** to determine which skills and tools to activate. It |
 
@@ -45,6 +44,7 @@ Skills are markdown files in `skills/` that define behavioral prompts for the AI
 | Skill | File | Purpose |
 |---|---|---|
 | **Discord** | `discord.md` | Interact with Discord servers — channels, messages, threads — through the Discord MCP server. Monitor community discussi |
+| **Extension Dev** | `extension-dev.md` | Develop, test, and publish Crow extensions (bundles, panels, MCP servers, skills) |
 | **Filesystem** | `filesystem.md` | Access and manage local files and directories through the Filesystem MCP server. Read documents, organize research mater |
 | **Github** | `github.md` | Interact with GitHub — repositories, issues, pull requests, code — through the GitHub MCP server. Track development work |
 | **Google Chat** | `google-chat.md` | Interact with Google Chat — spaces, messages, threads — through the Google Workspace MCP server. Google Chat is already  |
