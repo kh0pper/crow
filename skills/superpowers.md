@@ -52,6 +52,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | "upload file", "store file", "storage", "download file" | "subir archivo", "almacenar", "descargar archivo" | storage | crow-storage |
 | "blog post", "write a post", "publish", "blog settings" | "publicar", "escribir un post", "blog", "configuración del blog" | blog | crow-blog, crow-storage |
 | "chord chart", "song", "songbook", "chords", "transpose", "setlist", "chord diagram", "music theory" | "acordes", "canción", "cancionero", "transponer", "setlist", "diagrama de acordes", "teoría musical" | songbook | crow-blog, crow-storage |
+| "knowledge base", "resource guide", "KB", "community resources", "verify resources", "flag outdated" | "base de conocimiento", "guía de recursos", "recursos comunitarios", "verificar recursos" | knowledge-base (add-on) | crow-knowledge-base, crow-sharing |
 | "news", "articles", "feed", "RSS", "briefing", "podcast", "youtube" | "noticias", "artículos", "podcast", "youtube" | media (add-on) | crow-media |
 | "crow's nest", "dashboard", "settings", "control panel" | "panel", "configuración", "panel de control" | network-setup | (dashboard routes) |
 | "add-on", "extension", "install plugin", "browse extensions" | "complemento", "extensión", "instalar plugin" | add-ons | crow-memory, filesystem |

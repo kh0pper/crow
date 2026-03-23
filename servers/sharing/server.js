@@ -191,6 +191,7 @@ export function createSharingServer(dbPath, options = {}) {
           project: "research_projects",
           source: "research_sources",
           note: "research_notes",
+          kb_article: "kb_articles",
         };
         const table = tableMap[share.share_type];
         if (!table) continue;
@@ -274,6 +275,43 @@ export function createSharingServer(dbPath, options = {}) {
             args: [payload.payload.content || ""],
           });
           importedItemId = Number(result.lastInsertRowid);
+        } else if (payload.share_type === "kb_article") {
+          try {
+            const p = payload.payload;
+            const { randomUUID } = await import("node:crypto");
+            // Find or create a collection for received articles
+            let colId = null;
+            const existing = await db.execute({ sql: "SELECT id FROM kb_collections LIMIT 1", args: [] });
+            if (existing.rows.length > 0) {
+              colId = existing.rows[0].id;
+            } else {
+              // Create a default collection for shared articles
+              const newCol = await db.execute({
+                sql: `INSERT INTO kb_collections (slug, name, description, visibility) VALUES ('shared', 'Shared Articles', 'Articles received from contacts', 'private')`,
+                args: [],
+              });
+              colId = Number(newCol.lastInsertRowid);
+            }
+            const result = await db.execute({
+              sql: `INSERT INTO kb_articles (collection_id, pair_id, language, slug, title, content, excerpt, author, tags, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')`,
+              args: [
+                colId,
+                p.pair_id || randomUUID(),
+                p.language || "en",
+                p.slug || p.title?.toLowerCase().replace(/[^\w\s-]/g, "").replace(/\s+/g, "-").slice(0, 200) || "shared-article",
+                p.title || "Shared article",
+                p.content || "",
+                p.excerpt || null,
+                p.author || null,
+                p.tags || null,
+              ],
+            });
+            importedItemId = Number(result.lastInsertRowid);
+          } catch (kbErr) {
+            // kb_articles table may not exist if knowledge-base bundle is not installed
+            console.warn(`[sharing] Cannot import kb_article — knowledge-base bundle may not be installed: ${kbErr.message}`);
+          }
         }
 
         await db.execute({
@@ -546,7 +584,7 @@ export function createSharingServer(dbPath, options = {}) {
     "Share a memory, research project, source, or note with a connected contact. The data is encrypted end-to-end. Returns a preview and confirmation token on first call; pass the token back to execute.",
     {
       contact: z.string().max(500).describe("Crow ID or display name of the contact"),
-      share_type: z.enum(["memory", "project", "source", "note"]).describe("Type of item to share"),
+      share_type: z.enum(["memory", "project", "source", "note", "kb_article"]).describe("Type of item to share"),
       item_id: z.number().describe("ID of the item to share"),
       permissions: z.enum(["read", "read-write", "one-time"]).default("read").describe("Permission level"),
       confirm_token: z.string().max(100).describe('Confirmation token — pass "" on first call to get a preview, then pass the returned token to execute'),
@@ -772,7 +810,7 @@ export function createSharingServer(dbPath, options = {}) {
     "Revoke a previously shared item or project from a contact. Stops ongoing sync for shared projects. Returns a preview and confirmation token on first call; pass the token back to execute.",
     {
       contact: z.string().max(500).describe("Crow ID or display name of the contact"),
-      share_type: z.enum(["memory", "project", "source", "note"]).describe("Type of shared item"),
+      share_type: z.enum(["memory", "project", "source", "note", "kb_article"]).describe("Type of shared item"),
       item_id: z.number().describe("ID of the shared item to revoke"),
       confirm_token: z.string().max(100).describe('Confirmation token — pass "" on first call to get a preview, then pass the returned token to execute'),
     },

@@ -576,6 +576,28 @@
       ],
       "ports": [8088],
       "notes": "Self-host via Docker or connect to existing. Get ETAPI token from Options > ETAPI in TriliumNext. 11 MCP tools for note management."
+    },
+    {
+      "id": "knowledge-base",
+      "name": "Knowledge Base",
+      "version": "1.0.0",
+      "description": "Multilingual knowledge base — create, manage, and share organized collections of guides and articles with structured resource tracking, verification workflows, and LAN discovery",
+      "type": "mcp-server",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": ["knowledge-base", "guides", "articles", "bilingual", "resources", "documentation", "wcag"],
+      "icon": "book-open",
+      "server": {
+        "command": "node",
+        "args": ["server/index.js"],
+        "envKeys": []
+      },
+      "panel": "panel/knowledge-base.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": ["skills/knowledge-base.md"],
+      "requires": { "min_ram_mb": 128, "min_disk_mb": 200 },
+      "env_vars": [],
+      "notes": "General-purpose knowledge base with multilingual support, LAN discovery (mDNS), WCAG 2.1 AA-compliant public pages, and AI-assisted content verification. No Docker required. 10 MCP tools."
     }
   ]
 }
