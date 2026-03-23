@@ -148,6 +148,7 @@ bundles/plex/                  → Plex Media Server connector (MCP server, 7 to
 bundles/iptv/                  → IPTV channel manager (MCP server, 6 tools, M3U/XMLTV)
 bundles/kodi/                  → Kodi remote control (MCP server, 6 tools, JSON-RPC)
 bundles/trilium/               → TriliumNext knowledge base (Docker + MCP server, 11 tools, ETAPI)
+bundles/knowledge-base/        → Multilingual knowledge base (MCP server, 10 tools, LAN discovery, WCAG 2.1 AA)
 android/                       → Android WebView shell app (Crow's Nest mobile client)
 servers/gateway/public/        → PWA assets (manifest.json, service worker, icons)
 servers/gateway/push/          → Web Push notification infrastructure (VAPID)
@@ -196,8 +197,15 @@ Uses `@libsql/client` for local SQLite files (default: `~/.crow/data/crow.db`, g
 - **iptv_channels** — IPTV channels from playlists (playlist_id FK, name, stream_url, tvg_id, group_title, is_favorite)
 - **iptv_epg** — Electronic Program Guide entries (channel_tvg_id, title, start_time, end_time, indexed)
 - **iptv_recordings** — IPTV recording jobs (channel_id FK, status, file_path, duration)
+- **kb_collections** — Knowledge base collections (slug UNIQUE, name, languages, visibility CHECK private/public/peers/lan, lan_enabled)
+- **kb_categories** — KB categories (collection_id FK, slug, sort_order, icon). UNIQUE(collection_id, slug)
+- **kb_category_names** — Localized category names (category_id FK, language, name). UNIQUE(category_id, language)
+- **kb_articles** — KB articles, one row per language (collection_id FK, category_id FK, pair_id links translations, language, slug, title, content, status, last_verified_at). UNIQUE(collection_id, slug, language), UNIQUE(pair_id, language)
+- **kb_articles_fts** — FTS5 index over kb_articles (title, content, excerpt, tags) with insert/update/delete triggers
+- **kb_resources** — Structured resource entries within articles (article_id FK, name, phone, address, website, hours, eligibility, flagged, flag_reason, last_verified_at)
+- **kb_review_log** — Verification audit trail (resource_id FK, article_id FK, action, details, reviewed_by)
 
-All FTS sync is handled by SQLite triggers defined in `init-db.js`. If you change the memories, sources, or blog_posts schema, you must also update the corresponding FTS virtual table and triggers.
+All FTS sync is handled by SQLite triggers defined in `init-db.js` (core tables) or bundle `init-tables.js` (bundle tables like kb_articles_fts). If you change the memories, sources, blog_posts, or kb_articles schema, you must also update the corresponding FTS virtual table and triggers.
 
 ### MCP configuration
 
@@ -401,6 +409,7 @@ Add-on skills (activated when corresponding add-on is installed):
 - `iptv.md` — IPTV channel management: M3U playlists, EPG, favorites
 - `kodi.md` — Kodi remote control: JSON-RPC playback, library browsing
 - `trilium.md` — TriliumNext knowledge base: note search, creation, web clipping, organization
+- `knowledge-base.md` — Multilingual knowledge base: create, edit, publish, search, verify resources, share articles, LAN discovery
 
 ### Maintaining CLAUDE.md vs crow.md
 

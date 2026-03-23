@@ -460,6 +460,42 @@ try {
   // Media bundle not installed — skip silently
 }
 
+// Mount Knowledge Base public routes (no auth required)
+try {
+  const { existsSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { pathToFileURL } = await import("node:url");
+  const { homedir } = await import("node:os");
+  const installed = join(homedir(), ".crow", "bundles", "knowledge-base", "routes", "kb-public.js");
+  const repo = join(import.meta.dirname, "../../bundles/knowledge-base/routes/kb-public.js");
+  const routesPath = existsSync(installed) ? installed : repo;
+  if (existsSync(routesPath)) {
+    const { default: kbPublicRouter } = await import(pathToFileURL(routesPath).href);
+    if (kbPublicRouter) {
+      app.use(kbPublicRouter());
+      console.log("Knowledge Base public routes mounted at /kb/*");
+
+      // Start LAN discovery (mDNS) for KB collections with lan_enabled = 1
+      try {
+        const lanPath = routesPath.replace(/routes[/\\]kb-public\.js$/, "server/lan-discovery.js");
+        const dbPath = routesPath.replace(/routes[/\\]kb-public\.js$/, "server/db.js");
+        if (existsSync(lanPath) && existsSync(dbPath)) {
+          const { startLanDiscovery } = await import(pathToFileURL(lanPath).href);
+          const { createDbClient: createKbDb } = await import(pathToFileURL(dbPath).href);
+          await startLanDiscovery(createKbDb(), PORT);
+        }
+      } catch (lanErr) {
+        console.warn("[knowledge-base] LAN discovery not started:", lanErr.message);
+      }
+    }
+  }
+} catch (err) {
+  // Knowledge Base bundle not installed — skip silently
+  if (err.code !== "ERR_MODULE_NOT_FOUND") {
+    console.warn("[knowledge-base] Failed to mount public routes:", err.message);
+  }
+}
+
 // --- Mount AI Chat Routes ---
 try {
   const { default: chatRouter } = await import("./routes/chat.js");
