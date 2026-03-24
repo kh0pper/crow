@@ -1006,6 +1006,21 @@ Example: [crow checkpoint: About to create research project "Climate Policy Anal
 **Skill activation:** Say what you want naturally. The AI matches your intent to the right skill and activates it automatically. Use the \`session-start\` prompt for full workflow guidance.`,
   },
   {
+    key: "writing_style",
+    title: "Writing Style",
+    order: 55,
+    content: `## Writing Rules
+
+### Banned Patterns
+(Add patterns you want Crow to never use in any writing)
+
+### Preferred Style
+(Add your style preferences: tone, register, formatting)
+
+### Context-Specific Rules
+(Add rules for specific contexts: emails, reports, blog posts, etc.)`,
+  },
+  {
     key: "key_principles",
     title: "Key Principles",
     order: 60,

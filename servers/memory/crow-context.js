@@ -19,6 +19,7 @@ export const PROTECTED_SECTIONS = [
   "transparency_rules",
   "skills_reference",
   "key_principles",
+  "writing_style",
 ];
 
 /**
@@ -242,12 +243,13 @@ export async function generateCondensedContext(db, { routerStyle = false, device
     "session_protocol",
     "transparency_rules",
     "skills_reference",
+    "writing_style",
   ];
 
   let sections;
   try {
     const result = await db.execute({
-      sql: "SELECT section_key, section_title, content, device_id, project_id FROM crow_context WHERE enabled = 1 AND section_key IN (?, ?, ?, ?, ?) ORDER BY sort_order ASC",
+      sql: `SELECT section_key, section_title, content, device_id, project_id FROM crow_context WHERE enabled = 1 AND section_key IN (${essentialKeys.map(() => '?').join(',')}) ORDER BY sort_order ASC`,
       args: essentialKeys,
     });
     sections = result.rows;
@@ -343,6 +345,18 @@ function condenseSection(key, content, { routerStyle = false } = {}) {
         return `Capabilities: crow_memory (store/search/recall memories), crow_projects (projects/sources/citations/data backends), crow_blog (create/publish posts), crow_sharing (P2P sharing/messaging), crow_storage (file upload/download), crow_tools (external integrations). Use crow_discover for full action schemas.\n${skillRouting}`;
       }
       return `Capabilities: Memory (crow_store_memory, crow_search_memories, crow_recall_by_context), Projects (crow_create_project, crow_add_source, crow_generate_bibliography, crow_register_backend), Blog (crow_create_post, crow_publish_post), Sharing (crow_generate_invite, crow_share, crow_send_message), Storage (crow_upload_file, crow_list_files).\n${skillRouting}`;
+    }
+
+    case "writing_style": {
+      // Extract banned patterns subsection if present
+      const banIdx = content.indexOf("### Banned Patterns");
+      if (banIdx >= 0) {
+        const afterBan = content.slice(banIdx + 20).trim();
+        const nextSection = afterBan.indexOf("###");
+        const banContent = nextSection >= 0 ? afterBan.slice(0, nextSection).trim() : afterBan.slice(0, 120).trim();
+        return `Writing rules: ${banContent.slice(0, 120)}`;
+      }
+      return `Writing rules: ${lines.slice(0, 2).join(" ").slice(0, 120)}`;
     }
 
     default:
