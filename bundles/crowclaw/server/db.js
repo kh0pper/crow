@@ -1,17 +1,13 @@
 /**
- * Crow Database Client Factory (Bundle Edition)
+ * CrowClaw Database Client Factory
  *
- * Creates a @libsql/client instance for local SQLite files.
- *
- * Subset of servers/db.js — excludes verifyDb, auditLog, isSqliteVecAvailable.
+ * Creates a @libsql/client instance pointing at Crow's shared crow.db.
+ * Subset of the media bundle's db.js.
  */
 
 import { createClient } from "@libsql/client";
 import { existsSync } from "fs";
-import { resolve, dirname } from "path";
-import { fileURLToPath } from "url";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { resolve } from "path";
 
 /**
  * Resolve the Crow data directory path.
@@ -26,9 +22,6 @@ export function resolveDataDir() {
   if (home && existsSync(crowHome)) {
     return crowHome;
   }
-  // Bundle fallback: try repo root's data/ dir (3 levels up from bundles/iptv/server/)
-  const repoData = resolve(__dirname, "../../../data");
-  if (existsSync(repoData)) return repoData;
   return resolve(home || ".", "data");
 }
 
