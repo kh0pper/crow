@@ -101,10 +101,95 @@ export default {
         res.redirect("/dashboard/skills");
         return;
       }
+
+      if (action === "save-writing-rules") {
+        const { content } = req.body;
+        await db.execute({
+          sql: 'UPDATE crow_context SET content = ?, updated_at = datetime("now") WHERE section_key = ? AND device_id IS NULL AND project_id IS NULL',
+          args: [content, "writing_style"],
+        });
+        res.redirect("/dashboard/skills");
+        return;
+      }
+
+      if (action === "save-context-section") {
+        const { sectionKey, content } = req.body;
+        const EDITABLE_SECTIONS = [
+          "identity", "memory_protocol", "research_protocol",
+          "session_protocol", "transparency_rules", "key_principles",
+          "writing_style",
+        ];
+        if (!EDITABLE_SECTIONS.includes(sectionKey)) {
+          res.redirect("/dashboard/skills");
+          return;
+        }
+        await db.execute({
+          sql: 'UPDATE crow_context SET content = ?, updated_at = datetime("now") WHERE section_key = ? AND device_id IS NULL AND project_id IS NULL',
+          args: [content, sectionKey],
+        });
+        res.redirect("/dashboard/skills");
+        return;
+      }
     }
 
-    // Handle edit view
-    const editFile = req.query.edit;
+    // Handle writing rules edit view
+    const editParam = req.query.edit;
+    if (editParam === "writing-rules") {
+      const result = await db.execute({
+        sql: "SELECT content FROM crow_context WHERE section_key = 'writing_style' AND device_id IS NULL AND project_id IS NULL",
+        args: [],
+      });
+      const currentContent = result.rows[0]?.content || "";
+      const editForm = `
+        <form method="POST">
+          <input type="hidden" name="action" value="save-writing-rules">
+          ${formField("Writing Rules", "content", { type: "textarea", value: currentContent, rows: 20, required: true })}
+          <div style="display:flex;gap:0.5rem;margin-top:1rem">
+            <button type="submit" class="btn btn-primary">Save</button>
+            <a href="/dashboard/skills" class="btn btn-secondary">Cancel</a>
+          </div>
+        </form>`;
+      const editContent = section("Writing Rules", editForm);
+      return layout({ title: "Edit Writing Rules", content: editContent });
+    }
+
+    // Handle crow context section edit view
+    if (editParam && editParam.startsWith("context-")) {
+      const sectionKey = editParam.slice("context-".length);
+      const EDITABLE_SECTIONS = [
+        "identity", "memory_protocol", "research_protocol",
+        "session_protocol", "transparency_rules", "key_principles",
+        "writing_style",
+      ];
+      if (!EDITABLE_SECTIONS.includes(sectionKey)) {
+        res.redirect("/dashboard/skills");
+        return;
+      }
+      const result = await db.execute({
+        sql: "SELECT section_title, content FROM crow_context WHERE section_key = ? AND device_id IS NULL AND project_id IS NULL",
+        args: [sectionKey],
+      });
+      const row = result.rows[0];
+      if (!row) {
+        res.redirect("/dashboard/skills");
+        return;
+      }
+      const editForm = `
+        <form method="POST">
+          <input type="hidden" name="action" value="save-context-section">
+          <input type="hidden" name="sectionKey" value="${escapeHtml(sectionKey)}">
+          ${formField(escapeHtml(row.section_title || sectionKey), "content", { type: "textarea", value: row.content || "", rows: 20, required: true })}
+          <div style="display:flex;gap:0.5rem;margin-top:1rem">
+            <button type="submit" class="btn btn-primary">Save</button>
+            <a href="/dashboard/skills" class="btn btn-secondary">Cancel</a>
+          </div>
+        </form>`;
+      const editContent = section(escapeHtml(row.section_title || sectionKey), editForm);
+      return layout({ title: `Edit: ${row.section_title || sectionKey}`, content: editContent });
+    }
+
+    // Handle skill file edit view
+    const editFile = editParam;
     const editSource = req.query.source; // "user" or "repo"
     if (editFile) {
       const safeName = basename(editFile).replace(/[^a-z0-9._-]/gi, "");
@@ -223,6 +308,89 @@ export default {
       <button type="submit" class="btn btn-primary">${t("skills.createSkill", lang)}</button>
     </form>`;
 
+    // --- Writing Rules section ---
+    const writingStyleResult = await db.execute({
+      sql: "SELECT content FROM crow_context WHERE section_key = 'writing_style' AND device_id IS NULL AND project_id IS NULL",
+      args: [],
+    });
+    const writingStyleContent = writingStyleResult.rows[0]?.content || "";
+    const isTemplateContent = !writingStyleContent || writingStyleContent.trim().length < 20;
+
+    let writingRulesBody;
+    if (isTemplateContent) {
+      writingRulesBody = `
+        <p style="color:var(--crow-text-secondary);font-style:italic;margin-bottom:1rem">Define rules Crow follows for all writing. Both you and your AI can edit these.</p>
+        <a href="/dashboard/skills?edit=writing-rules" class="btn btn-sm btn-primary">Set Up Writing Rules</a>`;
+    } else {
+      writingRulesBody = `
+        <pre style="background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:8px;padding:1rem;overflow-x:auto;font-size:0.85rem;line-height:1.6;max-height:300px;overflow-y:auto;white-space:pre-wrap;word-wrap:break-word">${escapeHtml(writingStyleContent)}</pre>
+        <div style="margin-top:0.75rem">
+          <a href="/dashboard/skills?edit=writing-rules" class="btn btn-sm btn-secondary">Edit</a>
+        </div>`;
+    }
+
+    const writingRulesSection = `<div class="card" style="margin-bottom:1.5rem;border-left:3px solid #4caf50">
+      <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem;padding-bottom:0.5rem;border-bottom:1px solid var(--crow-border)">
+        <h3 style="font-family:'Fraunces',serif;font-size:1.1rem;margin:0">Writing Rules</h3>
+        ${badge("Always Active", "connected")}
+      </div>
+      ${writingRulesBody}
+    </div>`;
+
+    // --- Crow Context section ---
+    const contextResult = await db.execute({
+      sql: "SELECT section_key, section_title, content FROM crow_context WHERE device_id IS NULL AND project_id IS NULL ORDER BY sort_order ASC",
+      args: [],
+    });
+    const contextRows = contextResult.rows || [];
+
+    const READ_ONLY_SECTIONS = ["skills_reference"];
+    const CORE_SECTIONS = ["memory_protocol", "session_protocol", "transparency_rules"];
+
+    const contextCards = contextRows
+      .filter((row) => row.section_key !== "writing_style")
+      .map((row) => {
+        const content = row.content || "";
+        const preview = content.length > 100 ? escapeHtml(content.slice(0, 100)) + "..." : escapeHtml(content);
+        const isReadOnly = READ_ONLY_SECTIONS.includes(row.section_key);
+        const isCore = CORE_SECTIONS.includes(row.section_key);
+
+        let badgeHtml = "";
+        if (isReadOnly) {
+          badgeHtml = ` ${badge("Auto-generated", "draft")}`;
+        } else if (isCore) {
+          badgeHtml = ` ${badge("Core", "warning")}`;
+        }
+
+        const editBtn = isReadOnly
+          ? ""
+          : `<a href="/dashboard/skills?edit=context-${encodeURIComponent(row.section_key)}" class="btn btn-sm btn-secondary" style="margin-top:0.5rem">Edit</a>`;
+
+        return `<details style="margin-bottom:0.5rem;border:1px solid var(--crow-border);border-radius:6px;overflow:hidden">
+          <summary style="padding:0.75rem 1rem;cursor:pointer;background:var(--crow-bg-elevated);display:flex;align-items:center;gap:0.5rem;font-weight:500">
+            ${escapeHtml(row.section_title || row.section_key)}${badgeHtml}
+          </summary>
+          <div style="padding:0.75rem 1rem;font-size:0.85rem">
+            <pre style="background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:6px;padding:0.75rem;overflow-x:auto;font-size:0.82rem;line-height:1.5;max-height:250px;overflow-y:auto;white-space:pre-wrap;word-wrap:break-word;margin:0">${escapeHtml(content)}</pre>
+            ${editBtn}
+          </div>
+        </details>`;
+      })
+      .join("");
+
+    const crowContextBody = contextCards || `<p style="color:var(--crow-text-secondary)">No context sections found.</p>`;
+    const crowContextSection = `<div class="card" style="margin-bottom:1.5rem">
+      <details>
+        <summary style="cursor:pointer">
+          <h3 style="font-family:'Fraunces',serif;font-size:1.1rem;display:inline">Crow Context (crow.md)</h3>
+          <span style="color:var(--crow-text-muted);font-size:0.85rem;margin-left:0.5rem">${contextRows.filter((r) => r.section_key !== "writing_style").length} sections</span>
+        </summary>
+        <div style="margin-top:1rem">
+          ${crowContextBody}
+        </div>
+      </details>
+    </div>`;
+
     // Marketplace link
     const marketplaceLink = `<div style="background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px;padding:1rem;margin-bottom:1.5rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
       <span style="font-weight:600;color:var(--crow-text)">${t("skills.wantMoreSkills", lang)}</span>
@@ -231,6 +399,8 @@ export default {
     </div>`;
 
     const content = `
+      ${writingRulesSection}
+      ${crowContextSection}
       ${marketplaceLink}
       ${section(t("skills.allSkills", lang), skillsTable, { delay: 150 })}
       ${section(t("skills.createNewSkill", lang), createForm, { delay: 200 })}

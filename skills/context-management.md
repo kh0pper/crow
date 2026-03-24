@@ -49,6 +49,33 @@ Suggest switching to **crow-core** (`servers/core/index.js`):
 - External integrations add 5-20+ tools each
 - The router's `crow_discover` tool lets you look up exact parameter schemas without loading them all upfront
 
+## Setting Up Writing Rules
+
+Users can define writing rules that Crow follows across all platforms — chat, email, documents, and any other writing context.
+
+Rules are stored in the `writing_style` context section, which is always loaded at conversation start. This means Crow applies them automatically without the user needing to repeat themselves.
+
+### Adding rules
+
+Users can set rules via natural language:
+
+- "Crow, add a writing rule: never use em dashes"
+- "Crow, writing rule: keep emails under 3 paragraphs"
+- "Crow, add a rule: use Oxford commas"
+
+Save these to the `writing_style` context using `crow_memory`. Users can also add or edit rules directly through the **Skills panel** in Crow's Nest.
+
+### Example rules
+
+- **Banned words/patterns** — "Never use 'utilize', 'leverage', or 'synergy'"
+- **Preferred tone** — "Keep tone conversational but not casual"
+- **Context-specific rules** — "In work emails, always include a clear ask. In personal messages, keep it brief."
+- **Formatting preferences** — "Use bullet points instead of numbered lists when order doesn't matter"
+
+### Applying rules
+
+When writing or editing text, check the `writing_style` context and apply all active rules. If a user's request conflicts with a stored rule, follow the user's immediate instruction — but don't change the stored rule unless they ask.
+
 ## Don't
 
 - Don't suggest optimization unprompted unless quality is visibly degrading
