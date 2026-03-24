@@ -83,5 +83,9 @@ export async function ensureColumn(db, table, column, type) {
 
 export function createDbClient(dbPath) {
   const filePath = dbPath || process.env.CROW_DB_PATH || resolve(resolveDataDir(), "crow.db");
-  return createClient({ url: `file:${filePath}` });
+  const client = createClient({ url: `file:${filePath}` });
+  client.execute("PRAGMA busy_timeout = 5000").catch(err =>
+    console.warn("[db] Failed to set busy_timeout:", err.message)
+  );
+  return client;
 }
