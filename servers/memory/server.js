@@ -258,6 +258,173 @@ export function createMemoryServer(dbPath, options = {}) {
   );
 
   server.tool(
+    "crow_deep_recall",
+    "Proactive recall: search ALL knowledge sources (memories, research sources, research notes, blog posts) for topic-relevant context. Use before writing, creating content, or analyzing to pull in findings from prior sessions.",
+    {
+      topic: z.string().max(500).describe("Topic to recall context for"),
+      per_source_limit: z.number().max(20).default(5).describe("Max results per source type"),
+      include_sources: z.array(z.enum(["memories", "research_sources", "research_notes", "blog_posts"]))
+        .optional().describe("Filter to specific source types (default: all)"),
+      project_id: z.number().optional().describe("Filter research sources/notes by project ID"),
+      min_importance: z.number().min(1).max(10).optional().describe("Min importance for memories"),
+    },
+    async ({ topic, per_source_limit, include_sources, project_id, min_importance }) => {
+      const safeQuery = sanitizeFtsQuery(topic);
+      const safeLike = escapeLikePattern(topic);
+      const sources = include_sources || ["memories", "research_sources", "research_notes", "blog_posts"];
+      const searched = [];
+      const failed = [];
+      const allResults = [];
+
+      // --- Memories (FTS5) ---
+      if (sources.includes("memories")) {
+        try {
+          if (safeQuery) {
+            let sql = `
+              SELECT m.*, rank FROM memories_fts fts
+              JOIN memories m ON m.id = fts.rowid
+              WHERE memories_fts MATCH ?
+            `;
+            const params = [safeQuery];
+            if (project_id) { sql += " AND m.project_id = ?"; params.push(project_id); }
+            if (min_importance) { sql += " AND m.importance >= ?"; params.push(min_importance); }
+            sql += " ORDER BY rank LIMIT ?";
+            params.push(per_source_limit);
+
+            const { rows } = await db.execute({ sql, args: params });
+
+            // Update access tracking for returned memories
+            for (const row of rows) {
+              await db.execute({
+                sql: "UPDATE memories SET accessed_at = datetime('now'), access_count = access_count + 1 WHERE id = ?",
+                args: [row.id],
+              });
+            }
+
+            for (const r of rows) {
+              allResults.push({
+                type: "memory",
+                text: `[memory #${r.id}] (${r.category}, importance: ${r.importance})\n--- stored content ---\n${r.content}\n--- end stored content ---${r.tags ? `\nTags: ${r.tags}` : ""}`,
+              });
+            }
+          }
+          searched.push("memories");
+        } catch (err) {
+          failed.push(`memories: ${err.message}`);
+        }
+      }
+
+      // --- Research Sources (FTS5 — scoped to title/authors/abstract/content_summary/tags) ---
+      if (sources.includes("research_sources")) {
+        try {
+          if (safeQuery) {
+            let sql = `
+              SELECT s.*, rank FROM sources_fts sfts
+              JOIN research_sources s ON s.id = sfts.rowid
+              WHERE sources_fts MATCH '{title authors abstract content_summary tags} : ' || ?
+            `;
+            const params = [safeQuery];
+            if (project_id) { sql += " AND s.project_id = ?"; params.push(project_id); }
+            sql += " ORDER BY rank LIMIT ?";
+            params.push(per_source_limit);
+
+            const { rows } = await db.execute({ sql, args: params });
+
+            for (const r of rows) {
+              const snippet = r.abstract
+                ? (r.abstract.length > 500 ? r.abstract.substring(0, 500) + "..." : r.abstract)
+                : (r.content_summary ? (r.content_summary.length > 500 ? r.content_summary.substring(0, 500) + "..." : r.content_summary) : "(no abstract)");
+              allResults.push({
+                type: "source",
+                text: `[source #${r.id}] "${r.title}" (${r.source_type || "unknown"}${r.year ? `, ${r.year}` : ""})\n${snippet}`,
+              });
+            }
+          }
+          searched.push("research_sources");
+        } catch (err) {
+          failed.push(`research_sources: ${err.message}`);
+        }
+      }
+
+      // --- Research Notes (LIKE — no FTS table) ---
+      if (sources.includes("research_notes")) {
+        try {
+          if (safeLike) {
+            const likeParam = `%${safeLike}%`;
+            let sql = `
+              SELECT rn.*, rs.title as source_title FROM research_notes rn
+              LEFT JOIN research_sources rs ON rn.source_id = rs.id
+              WHERE (rn.content LIKE ? ESCAPE '\\' OR rn.title LIKE ? ESCAPE '\\')
+            `;
+            const params = [likeParam, likeParam];
+            if (project_id) { sql += " AND rn.project_id = ?"; params.push(project_id); }
+            sql += " ORDER BY rn.created_at DESC LIMIT ?";
+            params.push(per_source_limit);
+
+            const { rows } = await db.execute({ sql, args: params });
+
+            for (const r of rows) {
+              const noteContent = r.content.length > 500 ? r.content.substring(0, 500) + "..." : r.content;
+              allResults.push({
+                type: "note",
+                text: `[note #${r.id}]${r.source_title ? ` re: "${r.source_title}"` : ""}${r.title ? ` (${r.title})` : ""}\n${noteContent}`,
+              });
+            }
+          }
+          searched.push("research_notes");
+        } catch (err) {
+          failed.push(`research_notes: ${err.message}`);
+        }
+      }
+
+      // --- Blog Posts (FTS5 — include draft and published, exclude archived) ---
+      if (sources.includes("blog_posts")) {
+        try {
+          if (safeQuery) {
+            const sql = `
+              SELECT p.*, rank FROM blog_posts_fts bfts
+              JOIN blog_posts p ON p.id = bfts.rowid
+              WHERE blog_posts_fts MATCH ?
+              AND p.status != 'archived'
+              ORDER BY rank LIMIT ?
+            `;
+            const { rows } = await db.execute({ sql, args: [safeQuery, per_source_limit] });
+
+            for (const r of rows) {
+              const excerpt = r.excerpt
+                ? (r.excerpt.length > 300 ? r.excerpt.substring(0, 300) + "..." : r.excerpt)
+                : (r.content ? (r.content.length > 300 ? r.content.substring(0, 300) + "..." : r.content) : "");
+              allResults.push({
+                type: "blog",
+                text: `[blog] "${r.title}" (${r.status}${r.published_at ? `, published ${r.published_at}` : ""})\n${excerpt}`,
+              });
+            }
+          }
+          searched.push("blog_posts");
+        } catch (err) {
+          failed.push(`blog_posts: ${err.message}`);
+        }
+      }
+
+      // --- Format response ---
+      const total = allResults.length;
+      let header = `Deep recall for "${topic}":\n\n`;
+      header += `Sources searched: ${searched.join(", ")}\n`;
+      if (failed.length > 0) {
+        header += `Sources failed: ${failed.join("; ")}\n`;
+      }
+      header += `Found ${total} results:\n`;
+
+      if (total === 0) {
+        return { content: [{ type: "text", text: header }] };
+      }
+
+      const formattedResults = allResults.map((r) => r.text).join("\n\n");
+      return { content: [{ type: "text", text: header + "\n" + formattedResults }] };
+    }
+  );
+
+  server.tool(
     "crow_list_memories",
     "List memories with optional filtering by category, tags, or importance. Good for browsing what's stored.",
     {
