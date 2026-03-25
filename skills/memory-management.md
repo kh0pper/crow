@@ -33,15 +33,18 @@ Use `crow_store_memory` with appropriate categorization:
 - **1-2**: Ephemeral notes, temporary context
 
 ### Searching and Recall
-- Use `crow_search_memories` for specific keyword searches
-- Use `crow_recall_by_context` at the start of tasks to find relevant prior context
+- Use `crow_deep_recall` for comprehensive cross-source recall (memories + research sources + research notes + blog posts)
+- Use `crow_search_memories` for specific keyword searches within memories only
+- Use `crow_recall_by_context` for quick memory-only context recall on simple tasks
 - Use `crow_list_memories` to browse by category or importance
 - Use `crow_memory_stats` to understand what's stored
 
 ## Workflow: Session Start
-1. Use `crow_recall_by_context` with the current task description
-2. Review returned memories for relevant context
+1. Use `crow_deep_recall` with the current task description (searches memories, research, notes, and blog posts)
+2. Review returned results across all knowledge sources
 3. Proceed with the task, informed by prior context
+
+Use `crow_recall_by_context` for quick/simple tasks. Use `crow_deep_recall` when you need comprehensive cross-source recall.
 
 ## Workflow: Storing New Information
 1. Identify information worth persisting
@@ -104,6 +107,15 @@ crow_search_memories({
 ```
 crow_recall_by_context({
   context: "Setting up the API endpoints for the user dashboard"
+})
+```
+
+### Deep recall (cross-source)
+```
+crow_deep_recall({
+  topic: "authentication and user sessions",
+  per_source_limit: 5,
+  project_id: 1
 })
 ```
 
