@@ -62,6 +62,24 @@ export function isVisionModel(provider, modelId) {
 }
 
 /**
+ * Map a base URL to the OpenClaw provider namespace used by `openclaw models` CLI.
+ * This enables provider-qualified model IDs (e.g., "zai/glm-4.6v") for set-image.
+ */
+function openclawProviderFromBaseUrl(baseUrl) {
+  if (!baseUrl) return null;
+  const url = baseUrl.toLowerCase();
+  if (url.includes("z.ai")) return "zai";
+  if (url.includes("dashscope")) return "qwen-portal";
+  if (url.includes("llama.com")) return "meta";
+  if (url.includes("openai.com")) return "openai";
+  if (url.includes("anthropic.com")) return "anthropic";
+  if (url.includes("googleapis.com") || url.includes("generativelanguage")) return "google";
+  if (url.includes("openrouter.ai")) return "openrouter";
+  if (url.includes("localhost") || url.includes("127.0.0.1")) return "ollama";
+  return null;
+}
+
+/**
  * Read Crow's active AI provider config.
  * Imports from Crow's gateway module dynamically.
  * @param {string} crowRoot - Path to ~/crow
@@ -116,10 +134,14 @@ export function crowToOpenClawModels(crowConfig, profileName = "crow-byoai") {
     : [model || DEFAULT_MODELS[provider] || ""];
 
   let imageModel = null;
+  // Resolve OpenClaw provider prefix for CLI commands (e.g., "zai/glm-4.6v")
+  const openclawProvider = openclawProviderFromBaseUrl(resolvedBaseUrl);
 
   const modelEntries = modelIds.map(id => {
     const vision = isVisionModel(provider, id);
-    if (vision && !imageModel) imageModel = id;
+    if (vision && !imageModel) {
+      imageModel = openclawProvider ? `${openclawProvider}/${id}` : id;
+    }
     return {
       id,
       name: id,
