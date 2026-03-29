@@ -1,0 +1,18 @@
+# Runtime / secrets that should NOT be in this repo
+*.bak
+sessions/
+memory/
+logs/
+completions/
+canvas/
+cron/
+delivery-queue/
+credentials/
+devices/
+identity/
+*.sock
+__pycache__/
+node_modules/
+
+# Runtime config with secrets
+config/

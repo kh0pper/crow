@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "defaults": {
+    "security": "allowlist",
+    "ask": "on-miss",
+    "askFallback": "deny",
+    "autoAllowSkills": true
+  },
+  "agents": {
+    "*": {
+      "allowlist": [
+        { "pattern": "/usr/bin/ls" },
+        { "pattern": "/usr/bin/cat" },
+        { "pattern": "/usr/bin/grep" },
+        { "pattern": "/usr/bin/head" },
+        { "pattern": "/usr/bin/tail" },
+        { "pattern": "/usr/bin/which" },
+        { "pattern": "/usr/bin/echo" },
+        { "pattern": "/usr/bin/find" },
+        { "pattern": "/usr/bin/wc" },
+        { "pattern": "/usr/bin/sort" },
+        { "pattern": "/usr/bin/date" },
+        { "pattern": "/usr/bin/uname" },
+        { "pattern": "/usr/bin/whoami" },
+        { "pattern": "/usr/bin/hostname" },
+        { "pattern": "/usr/bin/env" },
+        { "pattern": "/usr/bin/dirname" },
+        { "pattern": "/usr/bin/basename" },
+        { "pattern": "/usr/bin/realpath" },
+        { "pattern": "/usr/bin/stat" },
+        { "pattern": "/usr/bin/file" },
+        { "pattern": "/usr/bin/diff" },
+        { "pattern": "/usr/bin/tr" },
+        { "pattern": "/usr/bin/cut" },
+        { "pattern": "/usr/bin/uniq" }
+      ],
+      "denylist": [
+        { "pattern": "rm -rf *" },
+        { "pattern": "dd *" },
+        { "pattern": "mkfs*" },
+        { "pattern": "curl * | sh" },
+        { "pattern": "curl * | bash" },
+        { "pattern": "wget * | sh" },
+        { "pattern": "wget * | bash" }
+      ]
+    }
+  }
+}

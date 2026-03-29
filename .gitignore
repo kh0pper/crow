@@ -9,3 +9,7 @@ data/*.db-shm
 .claude/skills/
 tests/claude-ai/results/*.json
 tests/claude-ai/screenshots/
+
+# CrowClaw runtime config (contains API keys, tokens)
+bundles/crowclaw/config/
+bundles/crowclaw/workspace/

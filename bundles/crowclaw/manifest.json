@@ -1,0 +1,21 @@
+{
+  "id": "crowclaw",
+  "name": "CrowClaw",
+  "version": "1.0.0",
+  "description": "Create, configure, deploy, and monitor OpenClaw bots through MCP tools",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "ai",
+  "tags": ["ai", "bot", "discord", "telegram", "openclaw", "assistant", "chat"],
+  "icon": "bot",
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "envKeys": []
+  },
+  "panel": "panel/crowclaw.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/crowclaw.md"],
+  "requires": { "min_ram_mb": 256, "min_disk_mb": 100 },
+  "webUI": { "port": 18789, "path": "/", "label": "OpenClaw Control" }
+}
