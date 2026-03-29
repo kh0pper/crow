@@ -168,16 +168,19 @@ export function crowToOpenClawModels(crowConfig, profileName = "crow-byoai") {
 
 /**
  * Convert a Crow AI profile to OpenClaw models.json format.
- * Uses profile.id (unique hex) as provider key to avoid name collisions.
+ * Uses the OpenClaw provider namespace (e.g., "zai", "qwen-portal") as the
+ * provider key so models.json aligns with OpenClaw's auth profiles.
+ * Falls back to crow-{id} if no mapping exists.
  */
 export function profileToOpenClawModels(profile) {
+  const openclawName = openclawProviderFromBaseUrl(profile.baseUrl) || `crow-${profile.id}`;
   return crowToOpenClawModels({
     provider: profile.provider,
     apiKey: profile.apiKey,
     model: profile.defaultModel,
     models: profile.models,
     baseUrl: profile.baseUrl,
-  }, `crow-${profile.id}`);
+  }, openclawName);
 }
 
 /**
