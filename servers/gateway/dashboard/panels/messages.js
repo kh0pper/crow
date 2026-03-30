@@ -47,7 +47,7 @@ export default {
     // --- Check storage availability ---
     let storageAvailable = false;
     try {
-      const { isAvailable } = await import("../../storage/s3-client.js");
+      const { isAvailable } = await import("../../../storage/s3-client.js");
       storageAvailable = await isAvailable();
     } catch {}
 
