@@ -18,6 +18,10 @@ Crow uses the open [Model Context Protocol (MCP)](https://modelcontextprotocol.i
 | [Qwen Coder CLI](./qwen-coder) | stdio / HTTP | OAuth 2.1 | Easy | Compatible |
 | [OpenClaw](./openclaw) | stdio / HTTP | OAuth 2.1 / N/A | Easy | Compatible |
 
+::: info Native Bot Management
+OpenClaw bots can also be managed directly from the Crow dashboard using the [CrowClaw extension](/guide/bot-management). CrowClaw handles bot creation, AI configuration (BYOAI bridge), skill deployment, and monitoring — no manual MCP config needed. Bots appear in the Messages panel alongside peers and AI chat.
+:::
+
 ## Transport Types
 
 Crow's gateway supports two MCP transport protocols:

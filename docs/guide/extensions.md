@@ -39,6 +39,7 @@ Extensions with web UIs are automatically proxied through the gateway (no extra 
 | Ollama | Bundle | Local AI models for embeddings and analysis |
 | LocalAI | Bundle | OpenAI-compatible local inference |
 | OpenClaw | Bundle | Discord/Telegram/WhatsApp AI bot |
+| [CrowClaw](/guide/bot-management) | MCP Server | Bot management — create, deploy, and manage AI bots from the dashboard. BYOAI auto-config, Messages integration, skill deployment. |
 
 ### Finance
 | Extension | Type | Description |

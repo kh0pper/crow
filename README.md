@@ -22,6 +22,7 @@ Published by [Maestro Press](https://maestro.press) | [Product Page](https://mae
 │  ├── crow-sharing (P2P encrypted sharing + Nostr messaging)          │
 │  ├── crow-storage (S3-compatible file storage + quotas)              │
 │  ├── crow-blog (publishing platform + RSS/Atom feeds)                │
+│  ├── CrowClaw (bot management: lifecycle, BYOAI bridge, skills)      │
 │  └── proxy → GitHub, Slack, Notion, Gmail, Trello, Discord, etc.     │
 └──────────────────────────────┬───────────────────────────────────────┘
                                │
@@ -61,6 +62,17 @@ Create, edit, and publish blog posts through your AI assistant. Markdown renderi
 Use the Crow's Nest as a chat frontend with your own AI provider — OpenAI, Anthropic, Google, Ollama, or any OpenAI-compatible endpoint. Tool calling routes through Crow's MCP servers, so your AI can access memories, projects, and files during conversations. No API keys leave your server.
 
 > **[Chat Architecture](https://maestro.press/software/crow/architecture/gateway#chat-api)**
+
+## Bot Management (CrowClaw)
+
+Manage AI bots on Discord, WhatsApp, Telegram, and other chat platforms directly from the dashboard. The CrowClaw extension handles bot lifecycle, AI provider configuration, skill deployment, and monitoring. Bots share the same database as every other connection — memories, projects, files, and messages are all accessible from any platform.
+
+- **Install and go** — CrowClaw auto-configures bot AI from Crow's existing providers (BYOAI bridge)
+- **One inbox** — Bots appear in the Messages panel alongside peers and AI chat
+- **Bots control Crow apps** — A bot can publish blog posts, organize files, manage projects, and control integrations via the same MCP tools available to Claude or ChatGPT
+- **Message attachments** — Send images to bots with vision model analysis (when S3 storage is configured)
+
+> **[Bot Management Guide](https://maestro.press/software/crow/guide/bot-management)** · **[Architecture](https://maestro.press/software/crow/architecture/crowclaw)**
 
 ## Works With
 

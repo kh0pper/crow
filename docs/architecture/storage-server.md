@@ -163,3 +163,49 @@ Allowed categories:
 - `audio/*` — MP3, WAV, OGG
 
 Executables, scripts, and archive formats are rejected by default.
+
+## Message Attachments
+
+The Messages panel uses the storage server for file attachments across all conversation types (peer messages, AI chat, bot chat).
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Messages Panel (attachment UI)                         │
+│  ├── Select file → preview (thumbnail / file card)      │
+│  ├── Send message                                       │
+│  │   └── POST /storage/upload (multipart)               │
+│  │       └── MinIO bucket (crow-files)                  │
+│  │           └── s3_key stored in message record         │
+│  └── Display message                                    │
+│      └── Presigned URL generated on read                │
+│          └── Inline image / download link               │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Flow
+
+1. User selects a file via the attachment UI (shared component across all message types)
+2. On send, the file is uploaded to MinIO via `POST /storage/upload`
+3. The returned `s3_key`, `name`, `mime_type`, and `size` are stored as JSON in the message's `attachments` column
+4. When messages are loaded, presigned URLs are generated from the stored `s3_key` for display
+5. Images render inline; other file types show as download links
+
+### Bot Vision Pipeline
+
+When an image is attached to a bot message:
+
+1. The image is downloaded from S3 to a temporary file
+2. A vision model (configured in the bot's `openclaw.json`) analyzes the image via direct API call
+3. The vision model's text description is injected as context before the user's message
+4. The temporary file is cleaned up after the bot responds
+
+This allows non-vision primary models (e.g., `glm-5`) to understand image content through a separate vision model (e.g., `glm-4.6v`).
+
+### AI Chat Attachments
+
+For BYOAI AI Chat, image attachments are passed as multimodal content parts to the AI provider:
+
+- **OpenAI-compatible**: `image_url` content part with presigned S3 URL
+- **Anthropic**: `image` content part with presigned S3 URL
+
+This requires the configured AI model to support vision (e.g., GPT-4o, Claude Sonnet).
