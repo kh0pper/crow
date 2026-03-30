@@ -41,7 +41,7 @@ public class MainActivity extends AppCompatActivity {
 
     private WebView webView;
     private SwipeRefreshLayout swipeRefresh;
-    private volatile boolean isWebViewAtTop = true;
+    private volatile boolean isWebViewAtTop = false;
     private FrameLayout statusOverlay;
     private TextView statusText;
     private ValueCallback<Uri[]> fileUploadCallback;
@@ -98,23 +98,37 @@ public class MainActivity extends AppCompatActivity {
             return !isWebViewAtTop;
         });
 
-        // Poll scroll position via JS whenever the user touches the screen
+        // Poll scroll position via JS on touch-down to detect nested scrollable containers.
+        // Only evaluate on ACTION_DOWN to avoid running JS on every ACTION_MOVE during scrolling.
+        // Walks all elements inside .content-body checking for any scrolled-down overflow container
+        // (e.g. .msg-chat-viewport in Messages, <pre> blocks in Skills, etc.).
         webView.setOnTouchListener((v, event) -> {
-            webView.evaluateJavascript(
-                "(function() {" +
-                "  var el = document.querySelector('.content-body');" +
-                "  if (el) return el.scrollTop;" +
-                "  return window.scrollY || document.documentElement.scrollTop || 0;" +
-                "})()",
-                value -> {
-                    try {
-                        double scrollTop = Double.parseDouble(value);
-                        isWebViewAtTop = scrollTop <= 5;
-                    } catch (Exception e) {
-                        isWebViewAtTop = true;
+            if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
+                webView.evaluateJavascript(
+                    "(function() {" +
+                    "  var all = document.querySelectorAll('.content-body, .content-body *');" +
+                    "  for (var i = 0; i < all.length; i++) {" +
+                    "    var el = all[i];" +
+                    "    if (el.scrollHeight > el.clientHeight) {" +
+                    "      var style = window.getComputedStyle(el);" +
+                    "      var ov = style.overflowY;" +
+                    "      if ((ov === 'auto' || ov === 'scroll') && el.scrollTop > 5) {" +
+                    "        return el.scrollTop;" +
+                    "      }" +
+                    "    }" +
+                    "  }" +
+                    "  return window.scrollY || document.documentElement.scrollTop || 0;" +
+                    "})()",
+                    value -> {
+                        try {
+                            double scrollTop = Double.parseDouble(value);
+                            isWebViewAtTop = scrollTop <= 5;
+                        } catch (Exception e) {
+                            isWebViewAtTop = false;
+                        }
                     }
-                }
-            );
+                );
+            }
             return false; // Don't consume the touch event
         });
 
