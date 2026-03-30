@@ -40,26 +40,29 @@ User ──► Crow's Nest ──► /api/chat ──► AI Provider API ──�
 
 **Setup:** See the [AI Providers (BYOAI) guide](/guide/ai-providers).
 
-### 3. OpenClaw (Chat Platform Bots)
+### 3. Native Bots (CrowClaw)
 
-[OpenClaw](https://openclaw.ai) bots run on Discord, WhatsApp, Telegram, and other chat platforms. They connect to Crow via MCP (stdio or HTTP) just like external AI platforms, gaining access to the same tools and data.
+AI bots that live on Discord, WhatsApp, Telegram, and other chat platforms — managed directly from the Crow dashboard. The [CrowClaw](/guide/bot-management) extension handles bot lifecycle, AI configuration, skill deployment, and monitoring.
 
 ```
-Chat Platform ──► OpenClaw Bot ──► MCP Transport ──► Crow MCP Servers ──► Database
-  (Discord,         (gateway +       (stdio or
-   WhatsApp,         skills)          Streamable HTTP)
-   Telegram)
+Chat Platform ──► OpenClaw Engine ──► Crow MCP Servers ──► SQLite Database
+  (Discord,         (managed by            ▲
+   WhatsApp,         CrowClaw)             │
+   Telegram)                          CrowClaw Panel
+                                     (dashboard UI)
 ```
 
-**How it works:** OpenClaw manages the conversational interface and platform connections. Crow's MCP servers are registered in OpenClaw's configuration, giving the bot access to persistent memory, project management, sharing, and more. The bot uses the same MCP tools that Claude or ChatGPT would.
+**How it works:** Install the CrowClaw extension, create a bot from the dashboard, and deploy it. CrowClaw auto-configures the bot's AI provider from Crow's existing AI profiles (BYOAI bridge), deploys skills, and manages the bot's systemd service. The bot appears in the Messages panel alongside peers and AI chat — one inbox for everything.
 
-**Best for:** Accessing Crow from mobile chat apps, multi-platform presence, collaborative use through shared Discord channels.
+Bots aren't just chat interfaces — they can **control Crow apps**. Since the bot connects via MCP, it has access to the same tool suite as Claude or ChatGPT: memory, projects, blog, sharing, storage, and extensions. A household bot can track expenses and manage a pantry. A research bot can monitor RSS feeds and store findings in projects. A blog bot can publish scheduled posts.
 
-**Setup:** See the [OpenClaw platform guide](/platforms/openclaw).
+**Best for:** Accessing Crow from mobile chat apps, multi-platform presence, automated workflows, collaborative use through shared channels.
+
+**Setup:** See the [Bot Management guide](/guide/bot-management) or install CrowClaw from [Extensions](/guide/extensions).
 
 ## What They All Share
 
-All three connection patterns access the **same database, same tools, and same data**. A memory stored from Claude.ai is instantly searchable from the Crow's Nest AI Chat and from an OpenClaw bot on Discord. A blog post drafted in Cursor can be published from ChatGPT.
+All three connection patterns access the **same database, same tools, and same data**. A memory stored from Claude.ai is instantly searchable from the Crow's Nest AI Chat and from a bot on Discord. A blog post drafted in Cursor can be published from ChatGPT.
 
 | Resource | Shared across all connections |
 |---|---|
@@ -120,15 +123,17 @@ When a peer is offline, messages and shares can be held by an opt-in peer relay 
 |---|---|
 | Deep research session with Claude | External MCP (stdio) |
 | Quick memory lookup from your phone | BYOAI Chat (Crow's Nest) |
-| Team collaboration on Discord | OpenClaw |
+| Team collaboration on Discord | Native Bots (CrowClaw) |
 | Code project with AI assistance | External MCP via Cursor or Claude Code |
 | Fully local, no cloud AI | BYOAI Chat with Ollama |
-| Access from multiple chat apps | OpenClaw (Discord + WhatsApp + Telegram) |
+| Access from multiple chat apps | Native Bots (Discord + WhatsApp + Telegram) |
+| Automated household management | Native Bots with skills |
 | All of the above, simultaneously | All three — they share one database |
 
 ## Next Steps
 
 - [AI Providers (BYOAI)](/guide/ai-providers) — Configure the built-in AI Chat
+- [Bot Management](/guide/bot-management) — Create and manage bots from the dashboard
 - [Cross-Platform Guide](/guide/cross-platform) — How behavioral context syncs across platforms
 - [OpenClaw](/platforms/openclaw) — Connect Crow to chat platform bots
 - [Platforms](/platforms/) — Per-platform setup guides for external MCP

@@ -132,6 +132,18 @@ The following executable MIME types are blocked:
 - `application/x-bat`
 - `application/x-msi`
 
+## Unlocked Capabilities
+
+When S3 storage is configured, it enables capabilities across the platform — not just file uploads:
+
+- **Message attachments** — Send images, documents, and files in all Messages panel conversations (peer messages, AI chat, and bot chat). Files are uploaded to S3 and delivered via presigned URLs.
+- **Bot vision** — Image attachments sent to bots are routed through a vision model for analysis, enabling bots to understand photos, receipts, screenshots, and documents.
+- **Blog assets** — Upload header images and inline media for blog posts without needing a separate image host.
+- **Project files** — Attach PDFs, datasets, and reference materials to research projects.
+- **File sharing** — Share files with connected peers through the existing P2P sharing system.
+
+Storage is optional — Crow works without it. But configuring MinIO unlocks these features with no additional setup.
+
 ## Deleting Files
 
 > "Delete the file old-draft.pdf from storage"
