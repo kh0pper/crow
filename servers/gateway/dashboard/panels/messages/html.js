@@ -136,7 +136,7 @@ export function buildMessagesHTML(data) {
       </div>
     </div>
 
-    <input type="file" id="msg-file-input" style="display:none" multiple>
+    <input type="file" id="msg-file-input" style="display:none" multiple accept="image/*,application/pdf,audio/*,video/*,text/*,application/json,application/zip">
     <div id="msg-storage-available" data-available="${storageAvailable ? '1' : '0'}" style="display:none"></div>
   `;
 }

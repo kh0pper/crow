@@ -142,11 +142,24 @@ export async function initCrowClawTables(db) {
       tool_name TEXT,
       tool_result TEXT,
       session_id TEXT,
+      attachments TEXT,
       created_at TEXT DEFAULT (datetime('now'))
     );
 
     CREATE INDEX IF NOT EXISTS idx_cbm_bot_session ON crowclaw_bot_messages(bot_id, session_id);
   `);
+
+  // Migration: add attachments column if missing (existing tables)
+  try {
+    await db.execute("SELECT attachments FROM crowclaw_bot_messages LIMIT 0");
+  } catch {
+    try {
+      await db.execute("ALTER TABLE crowclaw_bot_messages ADD COLUMN attachments TEXT");
+      console.log("[crowclaw] Added attachments column to crowclaw_bot_messages");
+    } catch (err) {
+      console.error("[crowclaw] Migration failed:", err.message);
+    }
+  }
 
   console.log("[crowclaw] Tables initialized");
 }

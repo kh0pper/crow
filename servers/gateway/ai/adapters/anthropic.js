@@ -39,7 +39,16 @@ function toAnthropicMessages(messages) {
     }
 
     if (m.role === "user") {
-      result.push({ role: "user", content: m.content || "" });
+      // User messages with resolved image URLs → multimodal content array
+      if (m._imageUrls && m._imageUrls.length > 0) {
+        const content = [{ type: "text", text: m.content || "" }];
+        for (const url of m._imageUrls) {
+          content.push({ type: "image", source: { type: "url", url } });
+        }
+        result.push({ role: "user", content });
+      } else {
+        result.push({ role: "user", content: m.content || "" });
+      }
       i++;
       continue;
     }
