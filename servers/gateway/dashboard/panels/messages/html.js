@@ -39,6 +39,12 @@ export function buildMessagesHTML(data) {
         <div class="msg-avatar msg-avatar-ai">${label}</div>
         <span class="msg-unread-badge" data-badge-ai="${item.id}"></span>
       </div>`;
+    } else if (item.type === "bot") {
+      const label = escapeHtml(initials(item.displayName));
+      return `<div class="msg-avatar-item" data-type="bot" data-id="${item.id}" onclick="msgSelectItem('bot',${item.id})" title="${escapeHtml(item.displayName)}">
+        <div class="msg-avatar msg-avatar-bot">${label}</div>
+        <span class="msg-unread-badge" data-badge-bot="${item.id}"></span>
+      </div>`;
     } else {
       const color = peerColor(item.id);
       const label = escapeHtml(initials(item.displayName));

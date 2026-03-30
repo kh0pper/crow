@@ -64,6 +64,28 @@ export async function getUnifiedConversationList(db) {
     }
   } catch {}
 
+  // CrowClaw bots (running)
+  try {
+    const { rows: botRows } = await db.execute(`
+      SELECT b.id, b.name, b.display_name, b.status,
+             (SELECT MAX(m.created_at) FROM crowclaw_bot_messages m WHERE m.bot_id = b.id) as last_activity
+      FROM crowclaw_bots b
+      WHERE b.status = 'running'
+      ORDER BY last_activity DESC NULLS LAST
+    `);
+
+    for (const row of botRows) {
+      items.push({
+        type: "bot",
+        id: row.id,
+        displayName: row.display_name || row.name,
+        botName: row.name,
+        lastActivity: row.last_activity || null,
+        unread: 0,
+      });
+    }
+  } catch {}
+
   // Sort all items by last activity
   items.sort((a, b) => {
     const aTime = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;

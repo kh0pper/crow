@@ -96,12 +96,14 @@ export function messagesClientJS(opts) {
   }
 
   // === State ===
-  var _activeItem = null; // { type: 'ai'|'peer', id: number }
+  var _activeItem = null; // { type: 'ai'|'peer'|'bot', id: number }
   var _sending = false;
   var _replyingTo = null; // { id, content, senderName }
   var _pendingAttachments = []; // [{ s3_key, name, mime_type, size }]
   var _pollInterval = null;
   var _messages = []; // loaded messages cache for threading lookups
+  var _botSessionId = null; // current bot chat session ID
+  var _botPollTimer = null; // polling timer for bot agent responses
 
   // === Popover ===
   function msgTogglePopover() {
@@ -142,8 +144,13 @@ export function messagesClientJS(opts) {
     // Close popover
     document.getElementById('msg-popover').classList.remove('visible');
 
+    // Stop any bot polling from previous conversation
+    if (_botPollTimer) { clearTimeout(_botPollTimer); _botPollTimer = null; }
+
     if (type === 'ai') {
       loadAiConversation(id);
+    } else if (type === 'bot') {
+      loadBotConversation(id);
     } else {
       loadPeerConversation(id);
     }
@@ -474,6 +481,191 @@ export function messagesClientJS(opts) {
     if (sendBtn) sendBtn.disabled = false;
   }
 
+  // === Bot Chat ===
+  async function loadBotConversation(botId) {
+    var chat = document.getElementById('msg-chat');
+    chat.textContent = '';
+
+    try {
+      var r = await fetch('/api/bot-chat/' + encodeURIComponent(botId) + '/messages');
+      var data = await r.json();
+      var bot = data.bot;
+      var msgs = data.messages || [];
+      _messages = msgs;
+      _botSessionId = data.sessionId;
+
+      if (!bot) {
+        chat.appendChild(el('div', { className: 'msg-empty' }, [
+          el('div', {}, [el('h3', { text: '${tJs("messages.contactNotFound", lang)}' })])
+        ]));
+        return;
+      }
+
+      renderChatUI(chat, {
+        name: bot.displayName || bot.name,
+        meta: bot.status,
+        type: 'bot',
+        id: botId,
+        isOnline: bot.status === 'running',
+      }, msgs);
+
+      showBotInfo(bot);
+    } catch(e) { console.error('Failed to load bot conversation:', e); }
+  }
+
+  async function sendBotMessage() {
+    if (_sending || !_activeItem || _activeItem.type !== 'bot') return;
+    var textarea = document.getElementById('msg-input');
+    var content = (textarea.value || '').trim();
+    if (!content) return;
+
+    _sending = true;
+    textarea.value = '';
+    textarea.style.height = 'auto';
+    document.getElementById('msg-send-btn').disabled = true;
+
+    var viewport = document.getElementById('msg-viewport');
+
+    // Optimistic user bubble
+    appendBubble(viewport, { role: 'user', content: content });
+    viewport.scrollTop = viewport.scrollHeight;
+
+    // Thinking indicator
+    var thinking = el('div', { className: 'msg-typing', id: 'bot-thinking', text: '${tJs("messages.thinking", lang)}' });
+    viewport.appendChild(thinking);
+    viewport.scrollTop = viewport.scrollHeight;
+
+    try {
+      var r = await fetch('/api/bot-chat/' + encodeURIComponent(_activeItem.id) + '/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: content, sessionId: _botSessionId }),
+      });
+      var data = await r.json();
+
+      if (data.error) {
+        if (thinking.parentNode) thinking.remove();
+        var errDiv = el('div', { className: 'msg-bubble tool', css: 'border-color:var(--crow-error,#ef4444)' });
+        errDiv.textContent = '${tJs("messages.error", lang)} ' + data.error;
+        viewport.appendChild(errDiv);
+        _sending = false;
+        var sendBtn = document.getElementById('msg-send-btn');
+        if (sendBtn) sendBtn.disabled = false;
+        return;
+      }
+
+      _botSessionId = data.sessionId;
+
+      // Poll for response
+      pollBotResponse(_activeItem.id, data.messageId, viewport, thinking);
+    } catch(e) {
+      if (thinking.parentNode) thinking.remove();
+      var errDiv2 = el('div', { className: 'msg-bubble tool', css: 'border-color:var(--crow-error)' });
+      errDiv2.textContent = '${tJs("messages.connectionError", lang)} ' + e.message;
+      viewport.appendChild(errDiv2);
+      _sending = false;
+      var sendBtn2 = document.getElementById('msg-send-btn');
+      if (sendBtn2) sendBtn2.disabled = false;
+    }
+  }
+
+  function pollBotResponse(botId, msgId, viewport, thinking) {
+    var attempts = 0;
+    var maxAttempts = 40; // 40 * 3s = 120s max
+
+    function poll() {
+      if (!_activeItem || _activeItem.type !== 'bot' || _activeItem.id !== botId) {
+        // User switched away
+        _sending = false;
+        return;
+      }
+
+      fetch('/api/bot-chat/' + encodeURIComponent(botId) + '/messages/' + encodeURIComponent(msgId) + '/status')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.status === 'processing') {
+            attempts++;
+            if (attempts >= maxAttempts) {
+              if (thinking.parentNode) thinking.remove();
+              var timeoutDiv = el('div', { className: 'msg-bubble tool', css: 'border-color:var(--crow-error)' });
+              timeoutDiv.textContent = '${tJs("messages.error", lang)} Agent response timed out.';
+              viewport.appendChild(timeoutDiv);
+              _sending = false;
+              var sendBtn = document.getElementById('msg-send-btn');
+              if (sendBtn) sendBtn.disabled = false;
+              return;
+            }
+            _botPollTimer = setTimeout(poll, 3000);
+            return;
+          }
+
+          if (thinking.parentNode) thinking.remove();
+
+          if (data.status === 'complete' && data.messages) {
+            for (var i = 0; i < data.messages.length; i++) {
+              var msg = data.messages[i];
+              _messages.push(msg);
+              appendBubble(viewport, msg);
+            }
+          } else if (data.status === 'error') {
+            var errDiv = el('div', { className: 'msg-bubble tool', css: 'border-color:var(--crow-error)' });
+            errDiv.textContent = '${tJs("messages.error", lang)} ' + (data.error || '${tJs("messages.unknown", lang)}');
+            viewport.appendChild(errDiv);
+          }
+
+          viewport.scrollTop = viewport.scrollHeight;
+          _sending = false;
+          var sendBtn2 = document.getElementById('msg-send-btn');
+          if (sendBtn2) sendBtn2.disabled = false;
+        })
+        .catch(function() {
+          _botPollTimer = setTimeout(poll, 3000);
+        });
+    }
+
+    _botPollTimer = setTimeout(poll, 2000); // First poll after 2s
+  }
+
+  function showBotInfo(bot) {
+    var infoPanel = document.getElementById('msg-info');
+    infoPanel.classList.remove('hidden');
+
+    var profile = document.getElementById('msg-info-profile');
+    profile.textContent = '';
+    var avatar = el('div', { className: 'msg-info-avatar', css: 'background:linear-gradient(135deg,#10b981,#059669)' });
+    var displayName = bot.displayName || bot.name;
+    var parts = displayName.trim().split(/\\s+/);
+    avatar.textContent = parts.length >= 2 ? (parts[0][0] + parts[1][0]).toUpperCase() : displayName.substring(0, 2).toUpperCase();
+    profile.appendChild(avatar);
+    profile.appendChild(el('div', { className: 'msg-info-name', text: displayName }));
+    profile.appendChild(el('div', { className: 'msg-info-id', text: 'Bot: ' + (bot.name || '') }));
+
+    var details = document.getElementById('msg-info-details');
+    details.textContent = '';
+    var sec = el('div', { className: 'msg-info-section' });
+    sec.appendChild(el('div', { className: 'msg-info-section-title', text: '${tJs("messages.status", lang)}' }));
+    var statusRow = el('div', { className: 'msg-info-row' });
+    statusRow.appendChild(el('span', { className: 'msg-chat-header-status ' + (bot.status === 'running' ? 'online' : 'offline'), css: 'display:inline-block' }));
+    statusRow.appendChild(document.createTextNode(' ' + (bot.status || 'unknown')));
+    sec.appendChild(statusRow);
+    details.appendChild(sec);
+
+    var actions = document.getElementById('msg-info-actions');
+    actions.textContent = '';
+    actions.appendChild(el('button', {
+      className: 'msg-info-action-btn',
+      text: '${tJs("messages.newConversationTitle", lang)}',
+      onclick: async function() {
+        try {
+          var r = await fetch('/api/bot-chat/' + encodeURIComponent(bot.id) + '/new-session', { method: 'POST' });
+          var data = await r.json();
+          _botSessionId = data.sessionId;
+          loadBotConversation(bot.id);
+        } catch(e) { console.error('Failed to create new session:', e); }
+      },
+    }));
+  }
+
   // === Shared Chat UI Rendering ===
   function renderChatUI(container, headerData, msgs) {
     container.textContent = '';
@@ -481,7 +673,7 @@ export function messagesClientJS(opts) {
     // Header
     var header = el('div', { className: 'msg-chat-header' });
 
-    if (headerData.type === 'peer') {
+    if (headerData.type === 'peer' || headerData.type === 'bot') {
       header.appendChild(el('span', { className: 'msg-chat-header-status ' + (headerData.isOnline ? 'online' : 'offline') }));
     }
 
@@ -585,7 +777,8 @@ export function messagesClientJS(opts) {
   function sendCurrentMessage() {
     if (!_activeItem) return;
     if (_activeItem.type === 'ai') sendAiMessage();
-    else sendPeerMessage();
+    else if (_activeItem.type === 'bot') sendBotMessage();
+    else if (_activeItem.type === 'peer') sendPeerMessage();
   }
 
   // === Message Bubble Rendering ===

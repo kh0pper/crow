@@ -132,5 +132,21 @@ export async function initCrowClawTables(db) {
     CREATE INDEX IF NOT EXISTS idx_crowclaw_safety_time ON crowclaw_safety_events(timestamp DESC);
   `);
 
+  // --- Bot Messages (for Crow Messages panel chat) ---
+  await initTable(db, "crowclaw_bot_messages", `
+    CREATE TABLE IF NOT EXISTS crowclaw_bot_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      bot_id INTEGER NOT NULL REFERENCES crowclaw_bots(id),
+      role TEXT NOT NULL,
+      content TEXT,
+      tool_name TEXT,
+      tool_result TEXT,
+      session_id TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cbm_bot_session ON crowclaw_bot_messages(bot_id, session_id);
+  `);
+
   console.log("[crowclaw] Tables initialized");
 }
