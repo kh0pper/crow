@@ -598,6 +598,69 @@ export function messagesCSS() {
     margin-bottom: 6px;
   }
 
+  /* === Attachment Preview Strip === */
+  .msg-attachment-preview {
+    display: none;
+    padding: 6px 8px;
+    border-top: 1px solid var(--crow-border);
+    background: color-mix(in srgb, var(--crow-accent) 4%, var(--crow-bg-surface));
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .msg-attachment-preview.visible { display: flex; }
+
+  .msg-attachment-preview-item {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    background: var(--crow-bg-deep, #0f0f17);
+    border: 1px solid var(--crow-border);
+    border-radius: 8px;
+    font-size: 0.78rem;
+    max-width: 200px;
+  }
+  .msg-attachment-preview-item img {
+    width: 36px;
+    height: 36px;
+    object-fit: cover;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
+  .msg-attachment-preview-item .att-name {
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--crow-text-secondary);
+  }
+  .msg-attachment-preview-item .att-size {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    color: var(--crow-text-muted);
+    flex-shrink: 0;
+  }
+  .msg-attachment-preview-remove {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--crow-error, #ef4444);
+    color: #fff;
+    border: none;
+    font-size: 0.65rem;
+    line-height: 18px;
+    text-align: center;
+    cursor: pointer;
+    padding: 0;
+  }
+  .msg-attachment-preview-remove:hover { opacity: 0.8; }
+
   /* === Responsive === */
   @media (max-width: 900px) {
     .msg-info:not(.hidden) { width: 200px; }

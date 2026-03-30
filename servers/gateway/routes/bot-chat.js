@@ -15,8 +15,10 @@ import { Router } from "express";
 import { execFile, execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, mkdirSync, createWriteStream } from "node:fs";
+import { unlink } from "node:fs/promises";
 import { createDbClient } from "../../db.js";
+import { getObject } from "../../storage/s3-client.js";
 
 /** Rate limiter: botId → { count, windowStart } */
 const rateLimits = new Map();
@@ -45,6 +47,37 @@ const OPENCLAW_BIN = findOpenclawBin();
 
 /** In-flight agent turns: messageId → { pending: true } or { response: ... } */
 const pendingTurns = new Map();
+
+/** MIME extension map for inbound media */
+const MIME_EXT = { "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp", "audio/mpeg": "mp3", "audio/ogg": "ogg", "video/mp4": "mp4", "application/pdf": "pdf" };
+
+/**
+ * Download an S3 object to OpenClaw's media inbound directory.
+ * Returns the local file path, or null on failure.
+ */
+async function saveToInbound(configDir, s3Key, mimeType) {
+  try {
+    const inboundDir = resolve(configDir, "..", "media", "inbound");
+    mkdirSync(inboundDir, { recursive: true });
+
+    const ext = MIME_EXT[mimeType] || s3Key.split(".").pop() || "bin";
+    const filename = `${randomUUID()}.${ext}`;
+    const localPath = resolve(inboundDir, filename);
+
+    const { stream } = await getObject(s3Key);
+    await new Promise((res, rej) => {
+      const ws = createWriteStream(localPath);
+      stream.pipe(ws);
+      ws.on("finish", res);
+      ws.on("error", rej);
+    });
+
+    return localPath;
+  } catch (err) {
+    console.error("[bot-chat] Failed to save inbound media:", err.message);
+    return null;
+  }
+}
 
 function checkRateLimit(botId) {
   const now = Date.now();
@@ -91,14 +124,14 @@ export default function botChatRouter(dashboardAuth) {
 
       let sql, args;
       if (sessionId) {
-        sql = `SELECT id, role, content, tool_name, tool_result, session_id, created_at
+        sql = `SELECT id, role, content, tool_name, tool_result, session_id, attachments, created_at
                FROM crowclaw_bot_messages
                WHERE bot_id = ? AND session_id = ?
                ORDER BY id ASC LIMIT ?`;
         args = [botId, sessionId, limit];
       } else {
         // Get latest session's messages
-        sql = `SELECT id, role, content, tool_name, tool_result, session_id, created_at
+        sql = `SELECT id, role, content, tool_name, tool_result, session_id, attachments, created_at
                FROM crowclaw_bot_messages
                WHERE bot_id = ? AND session_id = (
                  SELECT session_id FROM crowclaw_bot_messages WHERE bot_id = ? ORDER BY id DESC LIMIT 1
@@ -108,11 +141,15 @@ export default function botChatRouter(dashboardAuth) {
       }
 
       const { rows } = await db.execute({ sql, args });
+      const messages = rows.map((r) => ({
+        ...r,
+        attachments: r.attachments ? JSON.parse(r.attachments) : null,
+      }));
 
       res.json({
         bot: { id: bot.id, name: bot.name, displayName: bot.display_name, status: bot.status },
-        messages: rows,
-        sessionId: rows.length > 0 ? rows[0].session_id : null,
+        messages,
+        sessionId: messages.length > 0 ? messages[0].session_id : null,
       });
     } catch (err) {
       console.error("[bot-chat] GET messages error:", err.message);
@@ -135,11 +172,12 @@ export default function botChatRouter(dashboardAuth) {
         return res.status(429).json({ error: "Rate limit exceeded (10 msg/min)" });
       }
 
-      const { content, sessionId: requestedSessionId } = req.body || {};
-      if (!content || typeof content !== "string") {
-        return res.status(400).json({ error: "Message content required" });
+      const { content, sessionId: requestedSessionId, attachments } = req.body || {};
+      if ((!content || typeof content !== "string") && (!attachments || !attachments.length)) {
+        return res.status(400).json({ error: "Message content or attachments required" });
       }
-      if (Buffer.byteLength(content, "utf8") > MAX_MESSAGE_BYTES) {
+      const messageText = content || "(attachment)";
+      if (Buffer.byteLength(messageText, "utf8") > MAX_MESSAGE_BYTES) {
         return res.status(413).json({ error: "Message too large (max 10KB)" });
       }
 
@@ -153,13 +191,14 @@ export default function botChatRouter(dashboardAuth) {
         sessionId = rows[0]?.session_id || randomUUID();
       }
 
-      // Save user message
+      // Save user message (with attachment metadata)
+      const attachJson = attachments && attachments.length > 0 ? JSON.stringify(attachments) : null;
       let userMsgId;
       try {
         const insertResult = await db.execute({
-          sql: `INSERT INTO crowclaw_bot_messages (bot_id, role, content, session_id)
-                VALUES (?, 'user', ?, ?)`,
-          args: [botId, content, sessionId],
+          sql: `INSERT INTO crowclaw_bot_messages (bot_id, role, content, session_id, attachments)
+                VALUES (?, 'user', ?, ?, ?)`,
+          args: [botId, messageText, sessionId, attachJson],
         });
         userMsgId = Number(insertResult.lastInsertRowid);
       } catch (insertErr) {
@@ -173,13 +212,35 @@ export default function botChatRouter(dashboardAuth) {
 
       res.json({ messageId: userMsgId, sessionId, status: "processing" });
 
-      // Spawn agent turn in background
+      // Process attachments: save images to OpenClaw's inbound media dir
       const configDir = expandTilde(bot.config_dir);
+      const inboundPaths = [];
+      if (attachments && attachments.length > 0) {
+        for (const att of attachments) {
+          if (att.s3_key && att.mime_type && att.mime_type.startsWith("image/")) {
+            const localPath = await saveToInbound(configDir, att.s3_key, att.mime_type);
+            if (localPath) inboundPaths.push(localPath);
+          }
+        }
+      }
+
+      // Build agent message with attachment context (sanitize user-supplied metadata)
+      let agentMessage = messageText;
+      if (inboundPaths.length > 0) {
+        const imageRefs = inboundPaths.map((p) => `[Image saved to inbound: ${p}]`).join("\n");
+        agentMessage = `${imageRefs}\n\n${messageText}`;
+      } else if (attachments && attachments.length > 0) {
+        const sanitize = (s, max) => String(s || "").replace(/[\[\]\n\r]/g, "_").slice(0, max);
+        const fileRefs = attachments.map((a) => `[Attached: ${sanitize(a.name, 255)} (${sanitize(a.mime_type, 100)})]`).join("\n");
+        agentMessage = `${fileRefs}\n\n${messageText}`;
+      }
+
+      // Spawn agent turn in background
       const env = { ...process.env, OPENCLAW_CONFIG_PATH: resolve(configDir, "openclaw.json") };
 
       execFile(
         OPENCLAW_BIN,
-        ["agent", "--session-id", sessionId, "--message", content, "--json"],
+        ["agent", "--session-id", sessionId, "--message", agentMessage, "--json"],
         { env, timeout: 120_000, maxBuffer: 1024 * 1024 },
         async (err, stdout, stderr) => {
           try {
@@ -191,6 +252,7 @@ export default function botChatRouter(dashboardAuth) {
                 args: [botId, `Error: ${errMsg}`, sessionId],
               });
               pendingTurns.set(turnKey, { pending: false, error: errMsg });
+              setTimeout(() => pendingTurns.delete(turnKey), 5 * 60 * 1000);
               return;
             }
 
@@ -238,11 +300,17 @@ export default function botChatRouter(dashboardAuth) {
 
             pendingTurns.set(turnKey, { pending: false, response: replyText });
 
+            // Clean up inbound media files (agent has already processed them)
+            for (const p of inboundPaths) {
+              unlink(p).catch(() => {});
+            }
+
             // Clean up old pending turns after 5 minutes
             setTimeout(() => pendingTurns.delete(turnKey), 5 * 60 * 1000);
           } catch (saveErr) {
             console.error("[bot-chat] Error saving agent response:", saveErr.message);
             pendingTurns.set(turnKey, { pending: false, error: "Failed to save response" });
+            setTimeout(() => pendingTurns.delete(turnKey), 5 * 60 * 1000);
           }
         },
       );
@@ -269,7 +337,7 @@ export default function botChatRouter(dashboardAuth) {
 
       // Check DB for messages after the user message
       const { rows } = await db.execute({
-        sql: `SELECT id, role, content, tool_name, tool_result, session_id, created_at
+        sql: `SELECT id, role, content, tool_name, tool_result, session_id, attachments, created_at
               FROM crowclaw_bot_messages
               WHERE bot_id = ? AND id > ?
               ORDER BY id ASC`,
@@ -278,7 +346,11 @@ export default function botChatRouter(dashboardAuth) {
 
       if (rows.length > 0) {
         pendingTurns.delete(turnKey);
-        return res.json({ status: "complete", messages: rows });
+        const messages = rows.map((r) => ({
+          ...r,
+          attachments: r.attachments ? JSON.parse(r.attachments) : null,
+        }));
+        return res.json({ status: "complete", messages });
       }
 
       // Still no response — check if we know about this turn

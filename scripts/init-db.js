@@ -688,6 +688,18 @@ await initTable("chat_messages table", `
   CREATE INDEX IF NOT EXISTS idx_chat_messages_conv ON chat_messages(conversation_id);
 `);
 
+// Migration: add attachments column to chat_messages if missing
+try {
+  await db.execute("SELECT attachments FROM chat_messages LIMIT 0");
+} catch {
+  try {
+    await db.execute("ALTER TABLE chat_messages ADD COLUMN attachments TEXT");
+    console.log("[init-db] Added attachments column to chat_messages");
+  } catch (err) {
+    console.error("[init-db] chat_messages migration failed:", err.message);
+  }
+}
+
 // Podcast tables and Media tables are now bundle add-ons.
 // They self-initialize via init-tables.js in their respective bundles.
 // Existing tables from prior installs are preserved (IF NOT EXISTS).

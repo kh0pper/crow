@@ -73,6 +73,15 @@ function toOpenAIMessages(messages, tools) {
         }),
       };
     }
+    // User messages with resolved image URLs → multimodal content array
+    // (imageUrls are pre-resolved presigned URLs, set by the chat route)
+    if (m.role === "user" && m._imageUrls && m._imageUrls.length > 0) {
+      const content = [{ type: "text", text: m.content || "" }];
+      for (const url of m._imageUrls) {
+        content.push({ type: "image_url", image_url: { url } });
+      }
+      return { role: "user", content };
+    }
     return { role: m.role, content: m.content || "" };
   });
 }

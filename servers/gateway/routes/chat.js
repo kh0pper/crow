@@ -20,6 +20,7 @@ import { createDbClient } from "../../db.js";
 import { createProviderAdapter, createAdapterFromProfile, getProviderConfig, getAiProfiles, listProviders, testProviderConnection, testProfileConnection } from "../ai/provider.js";
 import { createToolExecutor, getChatTools, MAX_TOOL_ROUNDS } from "../ai/tool-executor.js";
 import { generateSystemPrompt } from "../ai/system-prompt.js";
+import { getPresignedUrl, isAvailable as isStorageAvailable } from "../../storage/s3-client.js";
 
 /** Sliding window: max messages to send to AI */
 const CONTEXT_WINDOW = 20;
@@ -194,16 +195,21 @@ export default function chatRouter(dashboardAuth) {
 
       const { rows: msgRows } = await db.execute({
         sql: `SELECT id, role, content, tool_calls, tool_call_id, tool_name,
-                     input_tokens, output_tokens, created_at
+                     input_tokens, output_tokens, attachments, created_at
               FROM chat_messages
               WHERE conversation_id = ?
               ORDER BY id ASC`,
         args: [id],
       });
 
+      const messages = msgRows.map((m) => ({
+        ...m,
+        attachments: m.attachments ? JSON.parse(m.attachments) : null,
+      }));
+
       res.json({
         conversation: convRows[0],
-        messages: msgRows,
+        messages,
       });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -322,16 +328,18 @@ export default function chatRouter(dashboardAuth) {
       const conversation = convRows[0];
 
       // Save user message
-      const { content } = req.body || {};
-      if (!content || typeof content !== "string" || !content.trim()) {
-        sendEvent("error", { message: "Message content is required", code: "invalid_input" });
+      const { content, attachments } = req.body || {};
+      if ((!content || typeof content !== "string" || !content.trim()) && (!attachments || !attachments.length)) {
+        sendEvent("error", { message: "Message content or attachments required", code: "invalid_input" });
         res.end();
         return;
       }
+      const messageText = (content || "(attachment)").trim();
+      const attachJson = attachments && attachments.length > 0 ? JSON.stringify(attachments) : null;
 
       await db.execute({
-        sql: "INSERT INTO chat_messages (conversation_id, role, content) VALUES (?, 'user', ?)",
-        args: [convId, content.trim()],
+        sql: "INSERT INTO chat_messages (conversation_id, role, content, attachments) VALUES (?, 'user', ?, ?)",
+        args: [convId, messageText, attachJson],
       });
 
       // Get provider adapter (profile-aware)
@@ -377,7 +385,7 @@ export default function chatRouter(dashboardAuth) {
 
         // Load recent messages (sliding window)
         const { rows: recentMessages } = await db.execute({
-          sql: `SELECT role, content, tool_calls, tool_call_id, tool_name
+          sql: `SELECT role, content, tool_calls, tool_call_id, tool_name, attachments
                 FROM chat_messages
                 WHERE conversation_id = ?
                 ORDER BY id DESC
@@ -385,6 +393,25 @@ export default function chatRouter(dashboardAuth) {
           args: [convId, CONTEXT_WINDOW],
         });
         recentMessages.reverse();
+
+        // Resolve image attachment presigned URLs for vision models
+        for (const m of recentMessages) {
+          if (m.role === "user" && m.attachments) {
+            try {
+              const atts = typeof m.attachments === "string" ? JSON.parse(m.attachments) : m.attachments;
+              const imageAtts = (atts || []).filter((a) => a.mime_type && a.mime_type.startsWith("image/") && a.s3_key);
+              if (imageAtts.length > 0 && await isStorageAvailable()) {
+                m._imageUrls = [];
+                for (const att of imageAtts) {
+                  try {
+                    const url = await getPresignedUrl(att.s3_key, { expiry: 3600 });
+                    m._imageUrls.push(url);
+                  } catch {}
+                }
+              }
+            } catch {}
+          }
+        }
 
         // Build messages array for AI
         const aiMessages = [

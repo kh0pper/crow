@@ -269,7 +269,7 @@ export function messagesClientJS(opts) {
     if (_sending || !_activeItem || _activeItem.type !== 'ai') return;
     var textarea = document.getElementById('msg-input');
     var content = (textarea.value || '').trim();
-    if (!content) return;
+    if (!content && _pendingAttachments.length === 0) return;
 
     _sending = true;
     textarea.value = '';
@@ -277,9 +277,12 @@ export function messagesClientJS(opts) {
     document.getElementById('msg-send-btn').disabled = true;
 
     var viewport = document.getElementById('msg-viewport');
+    var atts = _pendingAttachments.slice();
+    _pendingAttachments = [];
+    renderAttachmentPreview();
 
     // Add user message bubble
-    appendBubble(viewport, { role: 'user', content: content });
+    appendBubble(viewport, { role: 'user', content: content || '(attachment)', attachments: atts.length > 0 ? atts : null });
     viewport.scrollTop = viewport.scrollHeight;
 
     // Typing indicator
@@ -299,7 +302,7 @@ export function messagesClientJS(opts) {
       var response = await fetch('/api/chat/conversations/' + encodeURIComponent(_activeItem.id) + '/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: content }),
+        body: JSON.stringify({ content: content || '(see attached file)', attachments: atts.length > 0 ? atts : undefined }),
       });
 
       var reader = response.body.getReader();
@@ -442,7 +445,7 @@ export function messagesClientJS(opts) {
     if (_sending || !_activeItem || _activeItem.type !== 'peer') return;
     var textarea = document.getElementById('msg-input');
     var content = (textarea.value || '').trim();
-    if (!content) return;
+    if (!content && _pendingAttachments.length === 0) return;
 
     _sending = true;
     textarea.value = '';
@@ -450,13 +453,16 @@ export function messagesClientJS(opts) {
     document.getElementById('msg-send-btn').disabled = true;
 
     var viewport = document.getElementById('msg-viewport');
+    var atts = _pendingAttachments.slice();
+    _pendingAttachments = [];
+    renderAttachmentPreview();
 
     // Optimistic UI
     appendBubble(viewport, {
       direction: 'sent',
-      content: content,
+      content: content || '',
       created_at: new Date().toISOString(),
-      attachments: _pendingAttachments.length > 0 ? _pendingAttachments : null,
+      attachments: atts.length > 0 ? atts : null,
     });
     viewport.scrollTop = viewport.scrollHeight;
 
@@ -465,15 +471,14 @@ export function messagesClientJS(opts) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: content,
-          attachments: _pendingAttachments.length > 0 ? _pendingAttachments : undefined,
+          message: content || '(attachment)',
+          attachments: atts.length > 0 ? atts : undefined,
         }),
       });
     } catch(e) {
       console.error('Failed to send peer message:', e);
     }
 
-    _pendingAttachments = [];
     _replyingTo = null;
     hideReplyBar();
     _sending = false;
@@ -517,7 +522,7 @@ export function messagesClientJS(opts) {
     if (_sending || !_activeItem || _activeItem.type !== 'bot') return;
     var textarea = document.getElementById('msg-input');
     var content = (textarea.value || '').trim();
-    if (!content) return;
+    if (!content && _pendingAttachments.length === 0) return;
 
     _sending = true;
     textarea.value = '';
@@ -525,9 +530,12 @@ export function messagesClientJS(opts) {
     document.getElementById('msg-send-btn').disabled = true;
 
     var viewport = document.getElementById('msg-viewport');
+    var atts = _pendingAttachments.slice();
+    _pendingAttachments = [];
+    renderAttachmentPreview();
 
     // Optimistic user bubble
-    appendBubble(viewport, { role: 'user', content: content });
+    appendBubble(viewport, { role: 'user', content: content || '(attachment)', attachments: atts.length > 0 ? atts : null });
     viewport.scrollTop = viewport.scrollHeight;
 
     // Thinking indicator
@@ -539,7 +547,7 @@ export function messagesClientJS(opts) {
       var r = await fetch('/api/bot-chat/' + encodeURIComponent(_activeItem.id) + '/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: content, sessionId: _botSessionId }),
+        body: JSON.stringify({ content: content || '(see attached file)', sessionId: _botSessionId, attachments: atts.length > 0 ? atts : undefined }),
       });
       var data = await r.json();
 
@@ -734,6 +742,10 @@ export function messagesClientJS(opts) {
     }}));
     container.appendChild(replyBar);
 
+    // Attachment preview strip
+    var attPreview = el('div', { className: 'msg-attachment-preview', id: 'msg-att-preview' });
+    container.appendChild(attPreview);
+
     // Input area
     var inputArea = el('div', { className: 'msg-chat-input' });
 
@@ -894,6 +906,37 @@ export function messagesClientJS(opts) {
   }
 
   // === File Attachment ===
+  function renderAttachmentPreview() {
+    var strip = document.getElementById('msg-att-preview');
+    if (!strip) return;
+    strip.textContent = '';
+    if (_pendingAttachments.length === 0) {
+      strip.classList.remove('visible');
+      return;
+    }
+    strip.classList.add('visible');
+    for (var i = 0; i < _pendingAttachments.length; i++) {
+      (function(idx) {
+        var att = _pendingAttachments[idx];
+        var item = el('div', { className: 'msg-attachment-preview-item' });
+
+        if (att.mime_type && att.mime_type.startsWith('image/')) {
+          item.appendChild(el('img', { src: '/storage/file/' + encodeURIComponent(att.s3_key), alt: att.name }));
+        }
+
+        item.appendChild(el('span', { className: 'att-name', text: att.name || 'file' }));
+        item.appendChild(el('span', { className: 'att-size', text: formatBytes(att.size) }));
+
+        var removeBtn = el('button', { className: 'msg-attachment-preview-remove', text: '\\u00d7', onclick: function() {
+          _pendingAttachments.splice(idx, 1);
+          renderAttachmentPreview();
+        }});
+        item.appendChild(removeBtn);
+        strip.appendChild(item);
+      })(i);
+    }
+  }
+
   ${storageAvailable ? `
   document.getElementById('msg-file-input').addEventListener('change', async function(e) {
     var files = e.target.files;
@@ -915,8 +958,7 @@ export function messagesClientJS(opts) {
             mime_type: file.type,
             size: file.size,
           });
-          var input = document.getElementById('msg-input');
-          if (input) input.placeholder = _pendingAttachments.length + ' file(s). ${tJs("messages.typeMessage", lang)}';
+          renderAttachmentPreview();
         }
       } catch(err) { console.error('Upload failed:', err); }
     }
