@@ -103,6 +103,11 @@ export function messagesCSS() {
     background: linear-gradient(135deg, #6366f1, #8b5cf6);
   }
 
+  /* Bot avatar gradient */
+  .msg-avatar-bot {
+    background: linear-gradient(135deg, #10b981, #059669);
+  }
+
   /* Peer avatar solid colors (generated via data attr) */
   .msg-avatar-peer {
     background: var(--peer-color, #6366f1);

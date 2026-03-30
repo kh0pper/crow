@@ -514,6 +514,15 @@ try {
   console.warn("[peer-messages] Failed to mount:", err.message);
 }
 
+// --- Mount Bot Chat API ---
+try {
+  const { default: botChatRouter } = await import("./routes/bot-chat.js");
+  app.use(botChatRouter(dashboardAuth));
+  console.log("Bot Chat API mounted at /api/bot-chat");
+} catch (err) {
+  console.warn("[bot-chat] Failed to mount:", err.message);
+}
+
 // --- Mount Notifications API ---
 try {
   const { default: notificationsRouter } = await import("./routes/notifications.js");
