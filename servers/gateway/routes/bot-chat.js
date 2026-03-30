@@ -2,6 +2,9 @@
  * Bot Chat API Routes
  *
  * REST endpoints for chatting with CrowClaw bots via OpenClaw agent CLI.
+ * Image messages use a vision model pipeline: images are analyzed by the
+ * configured vision model (e.g., glm-4.6v), and the description is injected
+ * into the agent's context before the CLI call.
  * Protected by dashboard session auth (cookie-based).
  *
  * Routes:
@@ -15,7 +18,7 @@ import { Router } from "express";
 import { execFile, execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, mkdirSync, createWriteStream } from "node:fs";
+import { existsSync, readdirSync, mkdirSync, createWriteStream, readFileSync } from "node:fs";
 import { unlink } from "node:fs/promises";
 import { createDbClient } from "../../db.js";
 import { getObject } from "../../storage/s3-client.js";
@@ -77,6 +80,98 @@ async function saveToInbound(configDir, s3Key, mimeType) {
     console.error("[bot-chat] Failed to save inbound media:", err.message);
     return null;
   }
+}
+
+/**
+ * Read the bot's vision model config from openclaw.json.
+ * Returns { model, provider } from tools.media.models (image capability).
+ */
+function readVisionModelConfig(configDir) {
+  try {
+    const configPath = resolve(configDir, "openclaw.json");
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    const mediaModels = config.tools?.media?.models || [];
+    const imageModel = mediaModels.find(m => m.capabilities?.includes("image"));
+    if (imageModel) return { model: imageModel.model, provider: imageModel.provider };
+    // Fallback: use agents.defaults.imageModel
+    const imgModel = config.agents?.defaults?.imageModel?.primary;
+    if (imgModel) {
+      const [provider, model] = imgModel.includes("/") ? imgModel.split("/", 2) : [null, imgModel];
+      return { model, provider };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the API base URL and key for a vision model provider using Crow's AI profiles.
+ */
+async function resolveVisionApiConfig(provider) {
+  const db = createDbClient();
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT value FROM dashboard_settings WHERE key = 'ai_profiles'",
+      args: [],
+    });
+    if (!rows[0]) return null;
+    const profiles = JSON.parse(rows[0].value);
+    // Match provider name to profile (zai → Z.AI, etc.)
+    const providerMap = { zai: "Z.AI", "qwen-portal": "Dashscope", meta: "Meta AI" };
+    const profileName = providerMap[provider] || provider;
+    const profile = profiles.find(p => p.name === profileName || p.name?.toLowerCase() === provider);
+    if (!profile?.baseUrl || !profile?.apiKey) return null;
+    return { baseUrl: profile.baseUrl, apiKey: profile.apiKey };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Call a vision model to analyze an image file and return a text description.
+ * This mirrors OpenClaw's inbound media pipeline: the vision model (e.g., glm-4.6v)
+ * generates a description, which gets injected into the agent's context as text.
+ * The agent's primary model (e.g., glm-5) doesn't need vision capabilities.
+ *
+ * @param {string} imagePath - Local image file path
+ * @param {string} mimeType - Image MIME type
+ * @param {string} baseUrl - Vision model API base URL
+ * @param {string} apiKey - API key
+ * @param {string} model - Vision model ID
+ * @returns {Promise<string>} Text description of the image
+ */
+async function analyzeImageWithVision(imagePath, mimeType, baseUrl, apiKey, model) {
+  const imageData = readFileSync(imagePath).toString("base64");
+  const dataUrl = `data:${mimeType};base64,${imageData}`;
+
+  const resp = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image_url", image_url: { url: dataUrl } },
+          { type: "text", text: "Describe this image in detail. Include all visible text, numbers, and relevant information." },
+        ],
+      }],
+      max_tokens: 1000,
+    }),
+    signal: AbortSignal.timeout(60_000),
+  });
+
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "");
+    throw new Error(`Vision API error ${resp.status}: ${body.slice(0, 200)}`);
+  }
+
+  const json = await resp.json();
+  return json.choices?.[0]?.message?.content || "Unable to analyze image.";
 }
 
 function checkRateLimit(botId) {
@@ -219,101 +314,186 @@ export default function botChatRouter(dashboardAuth) {
         for (const att of attachments) {
           if (att.s3_key && att.mime_type && att.mime_type.startsWith("image/")) {
             const localPath = await saveToInbound(configDir, att.s3_key, att.mime_type);
-            if (localPath) inboundPaths.push(localPath);
+            if (localPath) inboundPaths.push({ path: localPath, contentType: att.mime_type });
           }
         }
       }
 
-      // Build agent message with attachment context (sanitize user-supplied metadata)
-      let agentMessage = messageText;
-      if (inboundPaths.length > 0) {
-        const imageRefs = inboundPaths.map((p) => `[Image saved to inbound: ${p}]`).join("\n");
-        agentMessage = `${imageRefs}\n\n${messageText}`;
-      } else if (attachments && attachments.length > 0) {
-        const sanitize = (s, max) => String(s || "").replace(/[\[\]\n\r]/g, "_").slice(0, max);
-        const fileRefs = attachments.map((a) => `[Attached: ${sanitize(a.name, 255)} (${sanitize(a.mime_type, 100)})]`).join("\n");
-        agentMessage = `${fileRefs}\n\n${messageText}`;
-      }
+      // Route: WebSocket for image messages (triggers vision pipeline), CLI for text-only
+      const hasImages = inboundPaths.length > 0;
 
-      // Spawn agent turn in background
-      const env = { ...process.env, OPENCLAW_CONFIG_PATH: resolve(configDir, "openclaw.json") };
+      if (hasImages) {
+        // --- Vision path: analyze images with vision model, then send enriched text to agent ---
+        // This mirrors OpenClaw's inbound media pipeline: the vision model generates a
+        // text description that gets prepended to the user's message. The agent's primary
+        // model doesn't need vision capabilities.
+        const visionConfig = readVisionModelConfig(configDir);
+        const apiConfig = visionConfig ? await resolveVisionApiConfig(visionConfig.provider) : null;
 
-      execFile(
-        OPENCLAW_BIN,
-        ["agent", "--session-id", sessionId, "--message", agentMessage, "--json"],
-        { env, timeout: 120_000, maxBuffer: 1024 * 1024 },
-        async (err, stdout, stderr) => {
+        if (!visionConfig || !apiConfig) {
+          console.error("[bot-chat] No vision model configured for bot", botId);
+          pendingTurns.set(turnKey, { pending: false, error: "Bot vision model not configured" });
+          setTimeout(() => pendingTurns.delete(turnKey), 5 * 60 * 1000);
+          return;
+        }
+
+        // Analyze each image with the vision model, then send to agent via CLI
+        (async () => {
           try {
-            if (err) {
-              const errMsg = err.killed ? "Agent timed out (120s)" : (stderr || err.message);
-              await db.execute({
-                sql: `INSERT INTO crowclaw_bot_messages (bot_id, role, content, session_id)
-                      VALUES (?, 'assistant', ?, ?)`,
-                args: [botId, `Error: ${errMsg}`, sessionId],
-              });
-              pendingTurns.set(turnKey, { pending: false, error: errMsg });
-              setTimeout(() => pendingTurns.delete(turnKey), 5 * 60 * 1000);
-              return;
-            }
-
-            // Parse JSON output from openclaw agent --json (pretty-printed multi-line JSON)
-            let agentResult;
-            try {
-              agentResult = JSON.parse(stdout.trim());
-            } catch {
-              // Fallback: treat entire stdout as plain text response
-              agentResult = { reply: stdout.trim() || "No response from agent." };
-            }
-
-            // Extract response text from openclaw agent --json structure:
-            // { result: { payloads: [{ text: "...", mediaUrl: ... }] } }
-            let replyText;
-            if (agentResult.result?.payloads?.length > 0) {
-              replyText = agentResult.result.payloads.map(p => p.text).filter(Boolean).join("\n\n");
-            }
-            if (!replyText) {
-              replyText = agentResult.reply
-                || agentResult.response
-                || agentResult.content
-                || agentResult.text
-                || (typeof agentResult.message === "string" ? agentResult.message : null)
-                || JSON.stringify(agentResult);
-            }
-
-            // Save tool calls if present
-            if (agentResult.toolCalls && Array.isArray(agentResult.toolCalls)) {
-              for (const tc of agentResult.toolCalls) {
-                await db.execute({
-                  sql: `INSERT INTO crowclaw_bot_messages (bot_id, role, content, tool_name, tool_result, session_id)
-                        VALUES (?, 'tool', NULL, ?, ?, ?)`,
-                  args: [botId, tc.name || "tool", JSON.stringify(tc.result || tc.output || "").slice(0, 2000), sessionId],
-                });
+            const descriptions = [];
+            for (const { path: imgPath, contentType } of inboundPaths) {
+              try {
+                const desc = await analyzeImageWithVision(
+                  imgPath, contentType, apiConfig.baseUrl, apiConfig.apiKey, visionConfig.model
+                );
+                descriptions.push(desc);
+              } catch (visionErr) {
+                console.error("[bot-chat] Vision analysis failed:", visionErr.message);
+                descriptions.push("(Image could not be analyzed)");
               }
             }
 
-            // Save assistant response
+            // Build enriched message: vision descriptions + original text
+            const imageContext = descriptions.map((d, i) =>
+              `[Image ${i + 1} analysis]\n${d}`
+            ).join("\n\n");
+            const agentMessage = `${imageContext}\n\n${messageText}`;
+
+            // Send to agent via CLI with vision context
+            const env = { ...process.env, OPENCLAW_CONFIG_PATH: resolve(configDir, "openclaw.json") };
+
+            execFile(
+              OPENCLAW_BIN,
+              ["agent", "--session-id", sessionId, "--message", agentMessage, "--json"],
+              { env, timeout: 120_000, maxBuffer: 1024 * 1024 },
+              async (err, stdout, stderr) => {
+                try {
+                  if (err) {
+                    const errMsg = err.killed ? "Agent timed out (120s)" : (stderr || err.message);
+                    await db.execute({
+                      sql: `INSERT INTO crowclaw_bot_messages (bot_id, role, content, session_id)
+                            VALUES (?, 'assistant', ?, ?)`,
+                      args: [botId, `Error: ${errMsg}`, sessionId],
+                    });
+                    pendingTurns.set(turnKey, { pending: false, error: errMsg });
+                  } else {
+                    let agentResult;
+                    try { agentResult = JSON.parse(stdout.trim()); }
+                    catch { agentResult = { reply: stdout.trim() || "No response from agent." }; }
+
+                    let replyText;
+                    if (agentResult.result?.payloads?.length > 0) {
+                      replyText = agentResult.result.payloads.map(p => p.text).filter(Boolean).join("\n\n");
+                    }
+                    if (!replyText) {
+                      replyText = agentResult.reply || agentResult.response || agentResult.content
+                        || agentResult.text || (typeof agentResult.message === "string" ? agentResult.message : null)
+                        || JSON.stringify(agentResult);
+                    }
+
+                    await db.execute({
+                      sql: `INSERT INTO crowclaw_bot_messages (bot_id, role, content, session_id)
+                            VALUES (?, 'assistant', ?, ?)`,
+                      args: [botId, replyText, sessionId],
+                    });
+                    pendingTurns.set(turnKey, { pending: false, response: replyText });
+                  }
+                } catch (saveErr) {
+                  console.error("[bot-chat] Error saving agent response:", saveErr.message);
+                  pendingTurns.set(turnKey, { pending: false, error: "Failed to save response" });
+                }
+                for (const { path } of inboundPaths) unlink(path).catch(() => {});
+                setTimeout(() => pendingTurns.delete(turnKey), 5 * 60 * 1000);
+              },
+            );
+          } catch (err) {
+            console.error("[bot-chat] Vision pipeline error:", err.message);
+            const errMsg = err.message || "Vision analysis failed";
             await db.execute({
               sql: `INSERT INTO crowclaw_bot_messages (bot_id, role, content, session_id)
                     VALUES (?, 'assistant', ?, ?)`,
-              args: [botId, replyText, sessionId],
+              args: [botId, `Error: ${errMsg}`, sessionId],
             });
-
-            pendingTurns.set(turnKey, { pending: false, response: replyText });
-
-            // Clean up inbound media files (agent has already processed them)
-            for (const p of inboundPaths) {
-              unlink(p).catch(() => {});
-            }
-
-            // Clean up old pending turns after 5 minutes
-            setTimeout(() => pendingTurns.delete(turnKey), 5 * 60 * 1000);
-          } catch (saveErr) {
-            console.error("[bot-chat] Error saving agent response:", saveErr.message);
-            pendingTurns.set(turnKey, { pending: false, error: "Failed to save response" });
+            pendingTurns.set(turnKey, { pending: false, error: errMsg });
+            for (const { path } of inboundPaths) unlink(path).catch(() => {});
             setTimeout(() => pendingTurns.delete(turnKey), 5 * 60 * 1000);
           }
-        },
-      );
+        })();
+      } else {
+        // --- CLI path: text-only messages (simpler, proven) ---
+        let agentMessage = messageText;
+        if (attachments && attachments.length > 0 && !hasImages) {
+          const sanitize = (s, max) => String(s || "").replace(/[\[\]\n\r]/g, "_").slice(0, max);
+          const fileRefs = attachments.map((a) => `[Attached: ${sanitize(a.name, 255)} (${sanitize(a.mime_type, 100)})]`).join("\n");
+          agentMessage = `${fileRefs}\n\n${messageText}`;
+        }
+
+        const env = { ...process.env, OPENCLAW_CONFIG_PATH: resolve(configDir, "openclaw.json") };
+
+        execFile(
+          OPENCLAW_BIN,
+          ["agent", "--session-id", sessionId, "--message", agentMessage, "--json"],
+          { env, timeout: 120_000, maxBuffer: 1024 * 1024 },
+          async (err, stdout, stderr) => {
+            try {
+              if (err) {
+                const errMsg = err.killed ? "Agent timed out (120s)" : (stderr || err.message);
+                await db.execute({
+                  sql: `INSERT INTO crowclaw_bot_messages (bot_id, role, content, session_id)
+                        VALUES (?, 'assistant', ?, ?)`,
+                  args: [botId, `Error: ${errMsg}`, sessionId],
+                });
+                pendingTurns.set(turnKey, { pending: false, error: errMsg });
+                setTimeout(() => pendingTurns.delete(turnKey), 5 * 60 * 1000);
+                return;
+              }
+
+              let agentResult;
+              try {
+                agentResult = JSON.parse(stdout.trim());
+              } catch {
+                agentResult = { reply: stdout.trim() || "No response from agent." };
+              }
+
+              let replyText;
+              if (agentResult.result?.payloads?.length > 0) {
+                replyText = agentResult.result.payloads.map(p => p.text).filter(Boolean).join("\n\n");
+              }
+              if (!replyText) {
+                replyText = agentResult.reply
+                  || agentResult.response
+                  || agentResult.content
+                  || agentResult.text
+                  || (typeof agentResult.message === "string" ? agentResult.message : null)
+                  || JSON.stringify(agentResult);
+              }
+
+              if (agentResult.toolCalls && Array.isArray(agentResult.toolCalls)) {
+                for (const tc of agentResult.toolCalls) {
+                  await db.execute({
+                    sql: `INSERT INTO crowclaw_bot_messages (bot_id, role, content, tool_name, tool_result, session_id)
+                          VALUES (?, 'tool', NULL, ?, ?, ?)`,
+                    args: [botId, tc.name || "tool", JSON.stringify(tc.result || tc.output || "").slice(0, 2000), sessionId],
+                  });
+                }
+              }
+
+              await db.execute({
+                sql: `INSERT INTO crowclaw_bot_messages (bot_id, role, content, session_id)
+                      VALUES (?, 'assistant', ?, ?)`,
+                args: [botId, replyText, sessionId],
+              });
+
+              pendingTurns.set(turnKey, { pending: false, response: replyText });
+              setTimeout(() => pendingTurns.delete(turnKey), 5 * 60 * 1000);
+            } catch (saveErr) {
+              console.error("[bot-chat] Error saving agent response:", saveErr.message);
+              pendingTurns.set(turnKey, { pending: false, error: "Failed to save response" });
+              setTimeout(() => pendingTurns.delete(turnKey), 5 * 60 * 1000);
+            }
+          },
+        );
+      }
     } catch (err) {
       console.error("[bot-chat] POST message error:", err.message);
       res.status(500).json({ error: "Failed to send message" });
