@@ -26,6 +26,7 @@ import { createMemoryServer } from "../memory/server.js";
 import { createProjectServer } from "../research/server.js";
 import { createSharingServer } from "../sharing/server.js";
 import { createBlogServer } from "../blog/server.js";
+import { createOrchestratorServer } from "../orchestrator/server.js";
 import { TOOL_MANIFESTS, buildCompressedDescription } from "./tool-manifests.js";
 import { connectedServers } from "./proxy.js";
 import { createDbClient } from "../db.js";
@@ -40,6 +41,7 @@ const SERVER_FACTORIES = {
   projects: createProjectServer,
   sharing: createSharingServer,
   blog: createBlogServer,
+  orchestrator: createOrchestratorServer,
   // storage added dynamically in createRouterServer
   // media added dynamically in createRouterServer (bundle add-on)
 };

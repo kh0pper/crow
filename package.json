@@ -51,6 +51,7 @@
     "qrcode": "^1.5.4",
     "sanitize-html": "^2.17.1",
     "web-push": "^3.6.7",
+    "open-multi-agent": "file:../open-multi-agent",
     "ws": "^8.19.0",
     "zod": "^3.24.0"
   },
