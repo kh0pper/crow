@@ -291,17 +291,19 @@ The `servers/orchestrator/` server provides multi-agent orchestration powered by
 - `crow_schedule_pipeline` — Create a cron schedule for a pipeline (uses `pipeline:` prefix in schedules table)
 - `crow_list_pipelines` — List available pipelines
 
-**Presets** (`servers/orchestrator/presets.js`): Each preset defines a team of agents with specific tool whitelists. Keep max ~10 tools per agent to fit 16K local model context. Available presets: `research`, `research_cloud`, `memory_ops`, `full`.
+**Presets** (`servers/orchestrator/presets.js`): Each preset defines a team of agents with role-appropriate tool whitelists. Available presets: `research`, `memory_ops`, `full`. Presets are provider-agnostic by default; the LLM provider is resolved from `CROW_ORCHESTRATOR_PROVIDER` env var or the first provider in `models.json`.
 
 **Pipelines** (`servers/orchestrator/pipelines.js`): Predefined goal + preset combos that can run on schedule. Available: `memory-consolidation` (daily 3am), `daily-summary` (daily 10pm), `research-digest` (weekly Monday 9am). Results are stored as memories with `pipeline,automated` tags.
 
 **Pipeline runner** (`servers/orchestrator/pipeline-runner.js`): Timer-based executor started by the gateway alongside the existing scheduler. Polls every 60s for `pipeline:` prefix entries in the schedules table. Includes overlap protection.
 
-**MCP bridge** (`servers/orchestrator/mcp-bridge.js`): Connects Crow's MCP servers to `open-multi-agent`'s `ToolRegistry` via in-process `InMemoryTransport`. Bridge tools use `z.any()` (passthrough validation) with `rawInputSchema` set to the real JSON Schema from each MCP tool. Per-preset category filtering ensures only needed servers are connected.
+**MCP bridge** (`servers/orchestrator/mcp-bridge.js`): Connects Crow's MCP servers to `open-multi-agent`'s `ToolRegistry` via in-process `InMemoryTransport`. Bridge tools use `z.any()` (passthrough validation) with `rawInputSchema` set to the real JSON Schema from each MCP tool. Per-preset category filtering ensures only needed servers are connected. Also supports `registerRemoteTools()` for bridging tools from remote Crow instances (namespaced as `instanceName:toolName`).
 
-**LLM config**: Reads `models.json` (same config as Crow's main agent) to resolve provider endpoints. Presets specify `provider` + `model` fields. Local presets use llama.cpp on port 8081; cloud presets use z.ai or other providers. `maxConcurrency: 1` serializes LLM calls (single GPU). 5-minute timeout on all orchestrations.
+**LLM config**: Reads `models.json` (same config as Crow's main agent) to resolve provider endpoints. Default provider resolved from `CROW_ORCHESTRATOR_PROVIDER` env var or first provider in `models.json`. Individual agents can override with their own `provider`/`model` fields. 5-minute timeout on all orchestrations.
 
-**Adding a new preset**: Add an entry to `presets.js` with `provider`, `model`, `categories` (which MCP servers to bridge), and `agents[]` (each with `name`, `systemPrompt`, `tools[]`, `maxTurns`).
+**Remote tools**: Presets with `categories: ["memory", "remote"]` can access tools on connected remote Crow instances. Remote tools are namespaced (e.g., `colibri:ha_light_toggle`). Use `crow_list_remote_tools` to see available remote tools. Wildcard `"instance:*"` in agent tool lists expands to all tools from that instance.
+
+**Adding a new preset**: Add an entry to `presets.js` with `categories` (which MCP servers to bridge) and `agents[]` (each with `name`, `systemPrompt`, `tools[]`, `maxTurns`). Optionally set `provider`/`model` to override the default.
 
 **Adding a new pipeline**: Add an entry to `pipelines.js` with `goal`, `preset`, `defaultCron`, `storeResult`, and `resultCategory`.
 

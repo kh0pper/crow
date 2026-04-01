@@ -34,7 +34,7 @@ const SERVER_FACTORIES = {
   projects: createProjectServer,
   sharing: createSharingServer,
   blog: createBlogServer,
-  orchestrator: createOrchestratorServer,
+  orchestrator: () => createOrchestratorServer(undefined, { connectedServers }),
 };
 
 /**

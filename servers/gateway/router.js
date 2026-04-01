@@ -41,7 +41,7 @@ const SERVER_FACTORIES = {
   projects: createProjectServer,
   sharing: createSharingServer,
   blog: createBlogServer,
-  orchestrator: createOrchestratorServer,
+  orchestrator: () => createOrchestratorServer(undefined, { connectedServers }),
   // storage added dynamically in createRouterServer
   // media added dynamically in createRouterServer (bundle add-on)
 };
