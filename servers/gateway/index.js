@@ -72,6 +72,7 @@ import { mountMcpServer } from "./routes/mcp.js";
 import { generateInstructions } from "../shared/instructions.js";
 import { startAutoUpdate } from "./auto-update.js";
 import { startScheduler } from "./scheduler.js";
+import { startOrchestratorPipelines } from "../orchestrator/server.js";
 import { initWebPush } from "./push/web-push.js";
 import { join } from "node:path";
 
@@ -759,6 +760,13 @@ const server = app.listen(PORT, "0.0.0.0", (error) => {
   startScheduler(createDbClient()).catch((err) => {
     console.error("[scheduler] Failed to start:", err.message);
   });
+
+  // Start orchestrator pipeline runner (polls for pipeline: schedules)
+  try {
+    startOrchestratorPipelines(createDbClient());
+  } catch (err) {
+    console.error("[pipeline-runner] Failed to start:", err.message);
+  }
 
   // Register this instance in the instance registry
   import("./instance-registry.js").then(async ({ ensureLocalInstanceRegistered }) => {

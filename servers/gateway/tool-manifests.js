@@ -133,6 +133,19 @@ export const TOOL_MANIFESTS = {
     },
   },
 
+  orchestrator: {
+    displayName: "Orchestrator",
+    description: "Multi-agent orchestration: run teams of AI agents on complex goals using presets, check job status",
+    tools: {
+      crow_orchestrate: { params: "goal, preset?", desc: "Start a multi-agent team on a goal (async, returns job ID)" },
+      crow_orchestrate_status: { params: "jobId", desc: "Check status / retrieve result of an orchestration job" },
+      crow_list_presets: { params: "", desc: "List available team presets" },
+      crow_run_pipeline: { params: "pipeline", desc: "Execute a named pipeline immediately (returns job ID)" },
+      crow_schedule_pipeline: { params: "pipeline, cron_expression?, description?", desc: "Schedule a pipeline to run on a cron schedule" },
+      crow_list_pipelines: { params: "", desc: "List available pipelines with descriptions and default schedules" },
+    },
+  },
+
   storage: {
     displayName: "Storage",
     description: "S3-compatible file storage: upload (base64 or presigned URL), list, download URLs, delete, quota management",

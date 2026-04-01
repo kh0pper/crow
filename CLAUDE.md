@@ -67,12 +67,13 @@ This is an MCP (Model Context Protocol) platform. The AI is the primary interfac
 
 ### Core layers
 
-1. **Custom MCP Servers** (`servers/`) — Five Node.js servers exposing tools over MCP's stdio transport. All share a single SQLite database (local file).
-   - `servers/memory/` — Persistent memory: store, search (FTS5 + optional semantic search via sqlite-vec), recall, deep recall (cross-source: memories + research + notes + blog), list, update, delete, stats
+1. **Custom MCP Servers** (`servers/`) — Six Node.js servers exposing tools over MCP's stdio transport. All share a single SQLite database (local file).
+   - `servers/memory/` — Persistent memory: store, search (FTS5 + optional semantic search via sqlite-vec), recall, deep recall (cross-source: memories + research + notes + blog), dream (memory health analysis: stale detection, shingle-based duplicate detection, category health stats), list, update, delete, stats
    - `servers/research/` — Project management: projects (research, data_connector, extensible types), sources (with multi-format citations: APA, MLA, Chicago, web), notes, bibliography, data backend registration and management
    - `servers/sharing/` — P2P sharing: Hyperswarm discovery, Hypercore data sync, Nostr messaging, peer relay, identity management
    - `servers/storage/` — S3-compatible file storage: upload, list, presigned URLs, delete, quota management (requires MinIO)
    - `servers/blog/` — Blogging platform: create, edit, publish, themes, RSS/Atom, export, share posts
+   - `servers/orchestrator/` — Multi-agent orchestration: run teams of AI agents on complex goals using presets and pipelines, powered by `open-multi-agent` engine with Crow's MCP tools bridged into a shared ToolRegistry
 
 2. **HTTP Gateway** (`servers/gateway/`) — Express server that wraps all MCP servers with Streamable HTTP + SSE transports + OAuth 2.1. Includes proxy layer for external MCP servers, **tool router** (`/router/mcp` — 7 tools instead of 49+), **AI chat gateway** (`/api/chat/*` — BYOAI with tool calling), public blog routes, Crow's Nest UI, peer relay, and setup page. Modularized into Express routers (`routes/mcp.js`, `routes/chat.js`, `routes/blog-public.js`, `routes/storage-http.js`, `dashboard/`).
 
@@ -109,6 +110,12 @@ servers/blog/rss.js            → RSS 2.0 + Atom feed generation
 servers/blog/chordpro.js       → ChordPro parser, AST, transpose engine, detection
 servers/blog/chord-diagrams.js → SVG chord diagram generator (guitar + piano)
 servers/blog/songbook-renderer.js → Songbook HTML rendering (song page, index, setlist)
+servers/orchestrator/server.js  → createOrchestratorServer(dbPath?, options?) → McpServer + startOrchestratorPipelines(db)
+servers/orchestrator/index.js   → stdio transport
+servers/orchestrator/mcp-bridge.js → Connects Crow MCP servers to open-multi-agent ToolRegistry (z.any() + rawInputSchema passthrough)
+servers/orchestrator/presets.js → Team preset definitions (research, memory_ops, full, research_cloud)
+servers/orchestrator/pipelines.js → Pipeline definitions (memory-consolidation, daily-summary, research-digest)
+servers/orchestrator/pipeline-runner.js → Timer-based pipeline executor (polls schedules table for pipeline: entries)
 servers/gateway/index.js       → Express + MCP transports (all servers)
 servers/gateway/session-manager.js → Consolidated session storage
 servers/gateway/routes/mcp.js  → Streamable HTTP + SSE transport mounting
@@ -268,8 +275,35 @@ The router registers all 5 so clients at `/router/mcp` see everything.
 - `multer` — Multipart file upload handling
 - `marked` — Markdown to HTML rendering
 - `sanitize-html` — HTML sanitization (XSS prevention, no jsdom dependency)
+- `open-multi-agent` — Multi-agent orchestration engine (local path: `file:../open-multi-agent`)
 
 Node.js >= 18 required. ESM modules (`"type": "module"` in package.json).
+
+### Multi-Agent Orchestrator
+
+The `servers/orchestrator/` server provides multi-agent orchestration powered by the `open-multi-agent` engine. Multiple AI agents collaborate on complex goals, with access to Crow's MCP tools.
+
+**Tools:**
+- `crow_orchestrate` — Start a multi-agent team on a goal (async, returns job ID)
+- `crow_orchestrate_status` — Poll job status/results
+- `crow_list_presets` — List available team presets
+- `crow_run_pipeline` — Execute a named pipeline immediately (async, returns job ID)
+- `crow_schedule_pipeline` — Create a cron schedule for a pipeline (uses `pipeline:` prefix in schedules table)
+- `crow_list_pipelines` — List available pipelines
+
+**Presets** (`servers/orchestrator/presets.js`): Each preset defines a team of agents with specific tool whitelists. Keep max ~10 tools per agent to fit 16K local model context. Available presets: `research`, `research_cloud`, `memory_ops`, `full`.
+
+**Pipelines** (`servers/orchestrator/pipelines.js`): Predefined goal + preset combos that can run on schedule. Available: `memory-consolidation` (daily 3am), `daily-summary` (daily 10pm), `research-digest` (weekly Monday 9am). Results are stored as memories with `pipeline,automated` tags.
+
+**Pipeline runner** (`servers/orchestrator/pipeline-runner.js`): Timer-based executor started by the gateway alongside the existing scheduler. Polls every 60s for `pipeline:` prefix entries in the schedules table. Includes overlap protection.
+
+**MCP bridge** (`servers/orchestrator/mcp-bridge.js`): Connects Crow's MCP servers to `open-multi-agent`'s `ToolRegistry` via in-process `InMemoryTransport`. Bridge tools use `z.any()` (passthrough validation) with `rawInputSchema` set to the real JSON Schema from each MCP tool. Per-preset category filtering ensures only needed servers are connected.
+
+**LLM config**: Reads `models.json` (same config as Crow's main agent) to resolve provider endpoints. Presets specify `provider` + `model` fields. Local presets use llama.cpp on port 8081; cloud presets use z.ai or other providers. `maxConcurrency: 1` serializes LLM calls (single GPU). 5-minute timeout on all orchestrations.
+
+**Adding a new preset**: Add an entry to `presets.js` with `provider`, `model`, `categories` (which MCP servers to bridge), and `agents[]` (each with `name`, `systemPrompt`, `tools[]`, `maxTurns`).
+
+**Adding a new pipeline**: Add an entry to `pipelines.js` with `goal`, `preset`, `defaultCron`, `storeResult`, and `resultCategory`.
 
 ## Extending the Platform
 
@@ -395,6 +429,7 @@ Consult `skills/superpowers.md` first — it routes user intent to the right ski
 - `onboarding-tour.md` — First-run platform tour for new users
 - `context-management.md` — Self-monitor context usage and suggest optimization
 - `ideation.md` — Universal notes-to-plans organization
+- `crow-dream.md` — Memory consolidation: analyze health, find stale/duplicate memories, prune with approval
 - `crow-developer.md` — Developer workflow for working on the Crow codebase
 
 Add-on skills (activated when corresponding add-on is installed):

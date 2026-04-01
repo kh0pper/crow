@@ -165,6 +165,7 @@ export default defineConfig({
           { text: 'Multi-Instance Sync', link: '/architecture/instances' },
           { text: 'CrowClaw', link: '/architecture/crowclaw' },
           { text: 'Data Dashboard', link: '/architecture/data-dashboard' },
+          { text: 'Orchestrator', link: '/architecture/orchestrator' },
         ],
       },
       {
