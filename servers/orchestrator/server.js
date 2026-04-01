@@ -12,6 +12,7 @@
  *   crow_run_pipeline       — Execute a named pipeline immediately
  *   crow_schedule_pipeline  — Schedule a pipeline on a cron schedule
  *   crow_list_pipelines     — List available pipelines
+ *   crow_list_remote_tools  — List tools available on remote Crow instances
  *
  * Jobs are stored in-memory and pruned after 1 hour.
  */
@@ -23,7 +24,7 @@ import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 
 import { OpenMultiAgent, ToolRegistry, registerBuiltInTools } from "open-multi-agent";
-import { registerCrowTools } from "./mcp-bridge.js";
+import { registerCrowTools, registerRemoteTools } from "./mcp-bridge.js";
 import { presets } from "./presets.js";
 import { pipelines } from "./pipelines.js";
 import { startPipelineRunner } from "./pipeline-runner.js";
@@ -35,10 +36,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // Models config loader
 // ---------------------------------------------------------------------------
 
-/**
- * Load models.json and extract provider config (baseUrl, apiKey).
- * Searches multiple known locations.
- */
 function loadModelsConfig() {
   const searchPaths = [
     resolve(__dirname, "../../bundles/crowclaw/config/agents/main/models.json"),
@@ -76,6 +73,35 @@ function resolveProvider(modelsConfig, providerName) {
   };
 }
 
+/**
+ * Resolve the default orchestrator provider and model.
+ * Priority: env vars > first provider in models.json.
+ */
+function resolveDefaultOrchestratorConfig(modelsConfig) {
+  const providers = modelsConfig.providers || {};
+  const providerKeys = Object.keys(providers);
+
+  // Resolve provider
+  const envProvider = process.env.CROW_ORCHESTRATOR_PROVIDER;
+  const providerName = (envProvider && providers[envProvider]) ? envProvider : providerKeys[0];
+  if (!providerName) {
+    throw new Error("No LLM providers configured in models.json");
+  }
+
+  const provider = providers[providerName];
+
+  // Resolve model
+  const envModel = process.env.CROW_ORCHESTRATOR_MODEL;
+  const modelId = envModel || provider.models?.[0]?.id;
+
+  return {
+    provider: providerName,
+    model: modelId,
+    baseURL: provider.baseUrl,
+    apiKey: provider.apiKey || undefined,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Job storage
 // ---------------------------------------------------------------------------
@@ -102,31 +128,6 @@ function generateJobId() {
 setInterval(pruneJobs, 10 * 60 * 1000).unref();
 
 // ---------------------------------------------------------------------------
-// Per-preset ToolRegistry (keyed by sorted category list)
-// ---------------------------------------------------------------------------
-
-/** @type {Map<string, ToolRegistry>} */
-const registryCache = new Map();
-
-/**
- * Get or create a ToolRegistry for the given MCP categories.
- * Each unique set of categories gets its own registry (cached).
- * Only the needed servers are connected — avoids loading sharing/blog
- * servers whose Hyperswarm/Nostr connections can interfere with tool calls.
- */
-async function getRegistryForCategories(categories) {
-  const key = [...categories].sort().join(",");
-  if (registryCache.has(key)) return registryCache.get(key);
-
-  const registry = new ToolRegistry();
-  registerBuiltInTools(registry);
-  const { toolCount } = await registerCrowTools(registry, { categories });
-  console.log(`[orchestrator] Registry [${key}]: ${toolCount} Crow tools + built-ins`);
-  registryCache.set(key, registry);
-  return registry;
-}
-
-// ---------------------------------------------------------------------------
 // Health check
 // ---------------------------------------------------------------------------
 
@@ -134,7 +135,6 @@ async function checkLlmHealth(baseURL) {
   if (!baseURL) return true; // No URL = cloud provider, assume reachable
 
   try {
-    // Try /health (llama.cpp) or just /v1/models (OpenAI-compatible)
     const healthUrl = baseURL.replace(/\/v1\/?$/, "/health");
     const res = await fetch(healthUrl, {
       signal: AbortSignal.timeout(5000),
@@ -148,6 +148,50 @@ async function checkLlmHealth(baseURL) {
 const PIPELINE_PREFIX = "pipeline:";
 
 // ---------------------------------------------------------------------------
+// Per-preset ToolRegistry (keyed by sorted category list)
+// ---------------------------------------------------------------------------
+
+/** @type {Map<string, ToolRegistry>} */
+const registryCache = new Map();
+
+/**
+ * Get or create a ToolRegistry for the given MCP categories.
+ * Caches by category set (except when "remote" is included — remote tools are dynamic).
+ */
+async function getRegistryForCategories(categories, connectedServers) {
+  const hasRemote = categories.includes("remote");
+  const localCategories = categories.filter((c) => c !== "remote");
+  const key = [...localCategories].sort().join(",");
+
+  let registry;
+  if (!hasRemote && registryCache.has(key)) {
+    registry = registryCache.get(key);
+  } else {
+    registry = new ToolRegistry();
+    registerBuiltInTools(registry);
+
+    if (localCategories.length > 0) {
+      const { toolCount } = await registerCrowTools(registry, { categories: localCategories });
+      console.log(`[orchestrator] Registry [${key}]: ${toolCount} Crow tools + built-ins`);
+    }
+
+    if (!hasRemote) {
+      registryCache.set(key, registry);
+    }
+  }
+
+  // Register remote instance tools (not cached — connections are dynamic)
+  if (hasRemote && connectedServers) {
+    const { toolCount: remoteCount } = await registerRemoteTools(registry, connectedServers);
+    if (remoteCount > 0) {
+      console.log(`[orchestrator] Registry [${key}+remote]: +${remoteCount} remote tools`);
+    }
+  }
+
+  return registry;
+}
+
+// ---------------------------------------------------------------------------
 // Server factory
 // ---------------------------------------------------------------------------
 
@@ -158,6 +202,170 @@ export function createOrchestratorServer(dbPath, options = {}) {
   );
 
   const modelsConfig = loadModelsConfig();
+  const connectedServers = options.connectedServers || null;
+
+  // Resolve default provider/model once at startup
+  let defaults;
+  try {
+    defaults = resolveDefaultOrchestratorConfig(modelsConfig);
+    console.log(`[orchestrator] Default provider: ${defaults.provider}, model: ${defaults.model}`);
+  } catch (err) {
+    console.warn(`[orchestrator] No default provider: ${err.message}`);
+    defaults = { provider: null, model: null, baseURL: null, apiKey: null };
+  }
+
+  // -----------------------------------------------------------------------
+  // Helper: resolve provider config for a preset (with per-agent overrides)
+  // -----------------------------------------------------------------------
+
+  function resolveAgentConfig(agent, preset) {
+    const agentProvider = agent.provider || preset.provider || defaults.provider;
+    const agentModel = agent.model || preset.model || defaults.model;
+    if (!agentProvider) {
+      throw new Error("No LLM provider configured. Set CROW_ORCHESTRATOR_PROVIDER or add a provider to models.json.");
+    }
+    const pc = resolveProvider(modelsConfig, agentProvider);
+    return {
+      name: agent.name,
+      model: agentModel,
+      provider: "openai", // All providers use OpenAI-compatible API
+      apiKey: pc.apiKey,
+      baseURL: pc.baseURL,
+      systemPrompt: agent.systemPrompt,
+      tools: agent.tools,
+      maxTurns: agent.maxTurns || 6,
+      maxTokens: agent.maxTokens || preset.maxTokens || 8192,
+    };
+  }
+
+  // -----------------------------------------------------------------------
+  // Helper: health check for a preset's default provider
+  // -----------------------------------------------------------------------
+
+  async function checkPresetHealth(preset) {
+    const providerName = preset.provider || defaults.provider;
+    if (!providerName) return { healthy: false, error: "No LLM provider configured" };
+
+    let pc;
+    try {
+      pc = resolveProvider(modelsConfig, providerName);
+    } catch (err) {
+      return { healthy: false, error: err.message };
+    }
+
+    // Only health-check providers with a baseURL (local/self-hosted)
+    if (pc.baseURL) {
+      const healthy = await checkLlmHealth(pc.baseURL);
+      if (!healthy) {
+        return { healthy: false, error: `LLM server not reachable at ${pc.baseURL}` };
+      }
+    }
+
+    return { healthy: true, providerConfig: pc };
+  }
+
+  // -----------------------------------------------------------------------
+  // Background orchestration runner (inside closure for connectedServers access)
+  // -----------------------------------------------------------------------
+
+  async function runOrchestration(jobId, goal, preset, providerConfig) {
+    const job = jobs.get(jobId);
+    if (!job) return;
+
+    try {
+      const categories = preset.categories || ["memory", "projects"];
+      const registry = await getRegistryForCategories(categories, connectedServers);
+
+      // Expand wildcard tool references (e.g., "colibri:*")
+      const expandedAgents = preset.agents.map((a) => {
+        if (!a.tools || a.tools.length === 0) return a;
+        const allTools = registry.list ? [...registry.list()] : [];
+        const expanded = a.tools.flatMap((t) => {
+          if (typeof t === "string" && t.endsWith(":*")) {
+            const prefix = t.slice(0, -1); // "colibri:"
+            const matches = allTools.filter((name) => name.startsWith(prefix));
+            if (matches.length === 0) {
+              console.warn(`[orchestrator] Wildcard "${t}" matched 0 tools (instance may be offline)`);
+            }
+            return matches;
+          }
+          return [t];
+        });
+        return { ...a, tools: expanded };
+      });
+
+      // Build agent configs with per-agent provider resolution
+      const agentConfigs = expandedAgents.map((a) => resolveAgentConfig(a, preset));
+
+      const presetProvider = preset.provider || defaults.provider;
+      const presetModel = preset.model || defaults.model;
+      const presetPC = resolveProvider(modelsConfig, presetProvider);
+
+      const orchestrator = new OpenMultiAgent({
+        maxConcurrency: preset.maxConcurrency || 1,
+        defaultModel: presetModel,
+        defaultProvider: "openai",
+        defaultApiKey: presetPC.apiKey,
+        defaultBaseURL: presetPC.baseURL,
+        toolRegistry: registry,
+        onProgress: (event) => {
+          let extra = "";
+          if (event.type === "task_complete" && event.data?.output) {
+            extra = ` output=${event.data.output.length}chars`;
+          }
+          if (event.type === "agent_complete" && event.data?.toolCalls?.length > 0) {
+            extra = ` toolCalls=${event.data.toolCalls.length}`;
+          }
+          if (event.type === "error") {
+            const d = event.data;
+            const msg = d?.message || d?.output || String(d);
+            extra = ` error="${msg.slice(0, 300)}"`;
+          }
+          console.log(`[orchestrator] [${jobId}] ${event.type}${event.agent ? ` agent=${event.agent}` : ""}${event.task ? ` task=${event.task}` : ""}${extra}`);
+        },
+      });
+
+      const team = orchestrator.createTeam("team", {
+        name: "team",
+        agents: agentConfigs,
+        sharedMemory: true,
+        maxConcurrency: preset.maxConcurrency || 1,
+      });
+
+      // Run with 5 minute timeout
+      const result = await Promise.race([
+        orchestrator.runTeam(team, goal),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Orchestration timed out after 5 minutes")), 300000)
+        ),
+      ]);
+
+      // Extract coordinator's final synthesis
+      const coordinatorResult = result.agentResults.get("coordinator");
+      const output = coordinatorResult?.output || "(no coordinator output)";
+
+      const fullResult = [
+        output,
+        "",
+        "---",
+        `Orchestration completed: ${result.success ? "success" : "partial failure"}`,
+        `Total tokens: ${result.totalTokenUsage.input_tokens} in / ${result.totalTokenUsage.output_tokens} out`,
+      ].join("\n");
+
+      job.status = "completed";
+      job.result = fullResult;
+
+      await orchestrator.shutdown();
+    } catch (err) {
+      job.status = "failed";
+      job.error = err.message || String(err);
+      console.error(`[orchestrator] Job ${jobId} failed:`, err.message);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // MCP Tools
+  // -----------------------------------------------------------------------
 
   // --- crow_list_presets ---
 
@@ -169,9 +377,11 @@ export function createOrchestratorServer(dbPath, options = {}) {
       const lines = [];
       for (const [name, preset] of Object.entries(presets)) {
         const agentNames = preset.agents.map((a) => a.name).join(", ");
+        const provider = preset.provider || defaults.provider || "(none)";
+        const model = preset.model || defaults.model || "(none)";
         lines.push(
           `**${name}** — ${preset.description}\n` +
-          `  Provider: ${preset.provider}, Model: ${preset.model}\n` +
+          `  Provider: ${provider}, Model: ${model}\n` +
           `  Agents: ${agentNames}`
         );
       }
@@ -203,37 +413,15 @@ export function createOrchestratorServer(dbPath, options = {}) {
         };
       }
 
-      // Resolve LLM provider
-      let providerConfig;
-      try {
-        providerConfig = resolveProvider(modelsConfig, preset.provider);
-      } catch (err) {
-        return {
-          content: [{ type: "text", text: err.message }],
-          isError: true,
-        };
+      const { healthy, error } = await checkPresetHealth(preset);
+      if (!healthy) {
+        return { content: [{ type: "text", text: error }], isError: true };
       }
 
-      // Health check for local providers
-      if (preset.provider === "local") {
-        const healthy = await checkLlmHealth(providerConfig.baseURL);
-        if (!healthy) {
-          return {
-            content: [{
-              type: "text",
-              text: `LLM server not reachable at ${providerConfig.baseURL}. Is llama-server running?`,
-            }],
-            isError: true,
-          };
-        }
-      }
-
-      // Create job
       const jobId = generateJobId();
       jobs.set(jobId, { status: "running", startedAt: Date.now() });
 
-      // Run orchestration in background (do NOT await)
-      runOrchestration(jobId, goal, preset, providerConfig).catch((err) => {
+      runOrchestration(jobId, goal, preset, null).catch((err) => {
         console.error(`[orchestrator] Job ${jobId} unexpected error:`, err);
         const job = jobs.get(jobId);
         if (job && job.status === "running") {
@@ -284,7 +472,7 @@ export function createOrchestratorServer(dbPath, options = {}) {
     "crow_run_pipeline",
     "Execute a named pipeline immediately. Pipelines are predefined multi-agent workflows (e.g. memory-consolidation, daily-summary). Returns a job ID — poll with crow_orchestrate_status.",
     {
-      pipeline: z.string().describe("Pipeline name (use crow_list_presets to see pipelines section)"),
+      pipeline: z.string().describe("Pipeline name (use crow_list_pipelines to see options)"),
     },
     async ({ pipeline: pipelineName }) => {
       const pipeline = pipelines[pipelineName];
@@ -298,7 +486,6 @@ export function createOrchestratorServer(dbPath, options = {}) {
         };
       }
 
-      // Delegate to crow_orchestrate internally
       const preset = presets[pipeline.preset];
       if (!preset) {
         return {
@@ -307,30 +494,15 @@ export function createOrchestratorServer(dbPath, options = {}) {
         };
       }
 
-      let providerConfig;
-      try {
-        providerConfig = resolveProvider(modelsConfig, preset.provider);
-      } catch (err) {
-        return { content: [{ type: "text", text: err.message }], isError: true };
-      }
-
-      if (preset.provider === "local") {
-        const healthy = await checkLlmHealth(providerConfig.baseURL);
-        if (!healthy) {
-          return {
-            content: [{
-              type: "text",
-              text: `LLM server not reachable at ${providerConfig.baseURL}. Is llama-server running?`,
-            }],
-            isError: true,
-          };
-        }
+      const { healthy, error } = await checkPresetHealth(preset);
+      if (!healthy) {
+        return { content: [{ type: "text", text: error }], isError: true };
       }
 
       const jobId = generateJobId();
       jobs.set(jobId, { status: "running", startedAt: Date.now(), pipeline: pipelineName });
 
-      runOrchestration(jobId, pipeline.goal, preset, providerConfig).catch((err) => {
+      runOrchestration(jobId, pipeline.goal, preset, null).catch((err) => {
         console.error(`[orchestrator] Pipeline job ${jobId} error:`, err);
         const job = jobs.get(jobId);
         if (job && job.status === "running") {
@@ -372,7 +544,6 @@ export function createOrchestratorServer(dbPath, options = {}) {
 
       const cron = cron_expression || pipeline.defaultCron;
 
-      // Validate cron
       let nextRun = null;
       try {
         const { CronExpressionParser } = await import("cron-parser");
@@ -389,14 +560,12 @@ export function createOrchestratorServer(dbPath, options = {}) {
       const task = `${PIPELINE_PREFIX}${pipelineName}`;
       const desc = description || pipeline.description;
 
-      // Check for existing schedule with the same task
       const { rows: existing } = await db.execute({
         sql: "SELECT id FROM schedules WHERE task = ?",
         args: [task],
       });
 
       if (existing.length > 0) {
-        // Update existing schedule
         await db.execute({
           sql: "UPDATE schedules SET cron_expression = ?, description = ?, next_run = ?, enabled = 1, updated_at = datetime('now') WHERE task = ?",
           args: [cron, desc, nextRun, task],
@@ -444,6 +613,41 @@ export function createOrchestratorServer(dbPath, options = {}) {
     }
   );
 
+  // --- crow_list_remote_tools ---
+
+  server.tool(
+    "crow_list_remote_tools",
+    "List tools available on remote Crow instances. Shows connected instances and their exposed tools.",
+    {},
+    async () => {
+      if (!connectedServers) {
+        return {
+          content: [{ type: "text", text: "No remote instances available (orchestrator running in stdio mode)." }],
+        };
+      }
+
+      const lines = [];
+      for (const [key, entry] of connectedServers) {
+        if (!entry.isRemote) continue;
+        const status = entry.status === "connected" ? "connected" : `offline (${entry.error || "unknown"})`;
+        const toolNames = (entry.tools || []).map((t) => t.name);
+        lines.push(
+          `**${entry.instanceName || key}** — ${status}\n` +
+          `  Gateway: ${entry.gatewayUrl || "unknown"}\n` +
+          `  Tools (${toolNames.length}): ${toolNames.join(", ") || "(none)"}`
+        );
+      }
+
+      if (lines.length === 0) {
+        return { content: [{ type: "text", text: "No remote instances registered." }] };
+      }
+
+      return {
+        content: [{ type: "text", text: lines.join("\n\n") }],
+      };
+    }
+  );
+
   return server;
 }
 
@@ -453,12 +657,21 @@ export function createOrchestratorServer(dbPath, options = {}) {
 
 /**
  * Start the background pipeline runner. Call from gateway startup.
- * Polls the schedules table for pipeline: entries and runs orchestrations.
  *
  * @param {object} db - libsql database client
+ * @param {object} [options]
+ * @param {Map} [options.connectedServers] - Remote instance connections (from proxy.js)
  */
-export function startOrchestratorPipelines(db) {
+export function startOrchestratorPipelines(db, options = {}) {
   const modelsConfig = loadModelsConfig();
+  const connectedServers = options.connectedServers || null;
+
+  let pipelineDefaults;
+  try {
+    pipelineDefaults = resolveDefaultOrchestratorConfig(modelsConfig);
+  } catch {
+    pipelineDefaults = { provider: null, model: null, baseURL: null, apiKey: null };
+  }
 
   async function runOrchestrationSync(goal, presetName) {
     const preset = presets[presetName];
@@ -466,31 +679,104 @@ export function startOrchestratorPipelines(db) {
       return { status: "failed", error: `Unknown preset: "${presetName}"` };
     }
 
-    let providerConfig;
+    const providerName = preset.provider || pipelineDefaults.provider;
+    if (!providerName) {
+      return { status: "failed", error: "No LLM provider configured" };
+    }
+
+    let pc;
     try {
-      providerConfig = resolveProvider(modelsConfig, preset.provider);
+      pc = resolveProvider(modelsConfig, providerName);
     } catch (err) {
       return { status: "failed", error: err.message };
     }
 
-    if (preset.provider === "local") {
-      const healthy = await checkLlmHealth(providerConfig.baseURL);
+    if (pc.baseURL) {
+      const healthy = await checkLlmHealth(pc.baseURL);
       if (!healthy) {
-        return { status: "failed", error: `LLM not reachable at ${providerConfig.baseURL}` };
+        return { status: "failed", error: `LLM not reachable at ${pc.baseURL}` };
       }
     }
+
+    // Build a temporary orchestrator server to reuse runOrchestration
+    const tempServer = createOrchestratorServer(undefined, { connectedServers });
 
     const jobId = generateJobId();
     jobs.set(jobId, { status: "running", startedAt: Date.now() });
 
-    await runOrchestration(jobId, goal, preset, providerConfig);
+    // Run orchestration using the registry from getRegistryForCategories
+    const categories = preset.categories || ["memory", "projects"];
+    const registry = await getRegistryForCategories(categories, connectedServers);
 
-    const job = jobs.get(jobId);
-    return {
-      status: job?.status || "failed",
-      result: job?.result,
-      error: job?.error,
-    };
+    const presetModel = preset.model || pipelineDefaults.model;
+    const agentConfigs = preset.agents.map((a) => {
+      const agentProvider = a.provider || preset.provider || pipelineDefaults.provider;
+      const agentModel = a.model || preset.model || pipelineDefaults.model;
+      const agentPC = resolveProvider(modelsConfig, agentProvider);
+      return {
+        name: a.name,
+        model: agentModel,
+        provider: "openai",
+        apiKey: agentPC.apiKey,
+        baseURL: agentPC.baseURL,
+        systemPrompt: a.systemPrompt,
+        tools: a.tools,
+        maxTurns: a.maxTurns || 6,
+        maxTokens: a.maxTokens || preset.maxTokens || 8192,
+      };
+    });
+
+    const presetPC = resolveProvider(modelsConfig, providerName);
+
+    try {
+      const orchestrator = new OpenMultiAgent({
+        maxConcurrency: preset.maxConcurrency || 1,
+        defaultModel: presetModel,
+        defaultProvider: "openai",
+        defaultApiKey: presetPC.apiKey,
+        defaultBaseURL: presetPC.baseURL,
+        toolRegistry: registry,
+        onProgress: (event) => {
+          if (event.type === "error") {
+            const d = event.data;
+            const msg = d?.message || d?.output || String(d);
+            console.log(`[pipeline-runner] ${event.type} ${event.agent || ""} error="${msg.slice(0, 200)}"`);
+          }
+        },
+      });
+
+      const team = orchestrator.createTeam("team", {
+        name: "team",
+        agents: agentConfigs,
+        sharedMemory: true,
+        maxConcurrency: preset.maxConcurrency || 1,
+      });
+
+      const result = await Promise.race([
+        orchestrator.runTeam(team, goal),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Pipeline timed out after 5 minutes")), 300000)
+        ),
+      ]);
+
+      const coordinatorResult = result.agentResults.get("coordinator");
+      const output = coordinatorResult?.output || "(no coordinator output)";
+
+      await orchestrator.shutdown();
+
+      return {
+        status: "completed",
+        result: [
+          output,
+          "",
+          "---",
+          `Pipeline completed: ${result.success ? "success" : "partial failure"}`,
+          `Total tokens: ${result.totalTokenUsage.input_tokens} in / ${result.totalTokenUsage.output_tokens} out`,
+        ].join("\n"),
+      };
+    } catch (err) {
+      return { status: "failed", error: err.message || String(err) };
+    }
   }
 
   async function storeResultAsMemory(title, content, category) {
@@ -505,99 +791,4 @@ export function startOrchestratorPipelines(db) {
     runOrchestration: runOrchestrationSync,
     storeResult: storeResultAsMemory,
   });
-}
-
-// ---------------------------------------------------------------------------
-// Background orchestration runner
-// ---------------------------------------------------------------------------
-
-async function runOrchestration(jobId, goal, preset, providerConfig) {
-  const job = jobs.get(jobId);
-  if (!job) return;
-
-  try {
-    const categories = preset.categories || ["memory", "projects"];
-    const registry = await getRegistryForCategories(categories);
-
-    // Build agent configs from preset
-    const agentConfigs = preset.agents.map((a) => ({
-      name: a.name,
-      model: preset.model,
-      provider: "openai",  // All providers use OpenAI-compatible API
-      apiKey: providerConfig.apiKey,
-      baseURL: providerConfig.baseURL,
-      systemPrompt: a.systemPrompt,
-      tools: a.tools,
-      maxTurns: a.maxTurns || 6,
-      maxTokens: 4096,
-    }));
-
-    const orchestrator = new OpenMultiAgent({
-      maxConcurrency: 1,
-      defaultModel: preset.model,
-      defaultProvider: "openai",
-      defaultApiKey: providerConfig.apiKey,
-      defaultBaseURL: providerConfig.baseURL,
-      toolRegistry: registry,
-      onProgress: (event) => {
-        let extra = "";
-        if (event.type === "task_complete" && event.data?.output) {
-          extra = ` output=${event.data.output.length}chars`;
-        }
-        if (event.type === "agent_complete" && event.data?.toolCalls?.length > 0) {
-          extra = ` toolCalls=${event.data.toolCalls.length}`;
-        }
-        if (event.type === "error") {
-          const d = event.data;
-          const msg = d?.message || d?.output || String(d);
-          extra = ` error="${msg.slice(0, 300)}"`;
-        }
-        console.log(`[orchestrator] [${jobId}] ${event.type}${event.agent ? ` agent=${event.agent}` : ""}${event.task ? ` task=${event.task}` : ""}${extra}`);
-      },
-    });
-
-    const team = orchestrator.createTeam("team", {
-      name: "team",
-      agents: agentConfigs,
-      sharedMemory: true,
-      maxConcurrency: 1,
-    });
-
-    // Run with 5 minute timeout
-    const result = await Promise.race([
-      orchestrator.runTeam(team, goal),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Orchestration timed out after 5 minutes")), 300000)
-      ),
-    ]);
-
-    // Extract coordinator's final synthesis
-    const coordinatorResult = result.agentResults.get("coordinator");
-    const output = coordinatorResult?.output || "(no coordinator output)";
-
-    // Also gather individual agent outputs for context
-    const agentOutputs = [];
-    for (const [name, agentResult] of result.agentResults) {
-      if (name !== "coordinator") {
-        agentOutputs.push(`## ${name}\n${agentResult.output}`);
-      }
-    }
-
-    const fullResult = [
-      output,
-      "",
-      "---",
-      `Orchestration completed: ${result.success ? "success" : "partial failure"}`,
-      `Total tokens: ${result.totalTokenUsage.input_tokens} in / ${result.totalTokenUsage.output_tokens} out`,
-    ].join("\n");
-
-    job.status = "completed";
-    job.result = fullResult;
-
-    await orchestrator.shutdown();
-  } catch (err) {
-    job.status = "failed";
-    job.error = err.message || String(err);
-    console.error(`[orchestrator] Job ${jobId} failed:`, err.message);
-  }
 }

@@ -10,7 +10,7 @@ Powered by the [open-multi-agent](https://github.com/kh0pper/open-multi-agent) e
 User Goal → Coordinator Agent → Task Decomposition
                                       ↓
                               Worker Agent Pool
-                          (each with filtered tools)
+                          (each with role-appropriate tools)
                                       ↓
                       Shared Memory + Tool Results
                                       ↓
@@ -19,7 +19,7 @@ User Goal → Coordinator Agent → Task Decomposition
 
 1. You provide a **goal** (plain text) and select a **preset** (team configuration)
 2. A **coordinator agent** decomposes the goal into tasks and assigns them to worker agents
-3. Each **worker agent** has access to a filtered subset of Crow's MCP tools (max ~10 per agent)
+3. Each **worker agent** has access to a curated set of Crow's MCP tools relevant to its role
 4. Workers execute tasks, calling tools and sharing results via shared memory
 5. The coordinator synthesizes all findings into a final output
 
@@ -70,18 +70,21 @@ Schedule a pipeline to run on a cron schedule. Creates an entry in Crow's schedu
 
 List all available pipelines with descriptions and default schedules. No parameters.
 
+### crow_list_remote_tools
+
+List tools available on remote Crow instances. Shows connected instances and their exposed tools. No parameters.
+
 ## Presets
 
-Presets define team configurations: which LLM provider and model to use, and which agents participate with what tools.
+Presets define team configurations. Presets are provider-agnostic by default; the LLM provider is resolved from `CROW_ORCHESTRATOR_PROVIDER` env var or the first provider in `models.json`.
 
-| Preset | Description | Provider | Agents |
-|---|---|---|---|
-| `research` | Research team with memory/project search and writing | local | researcher, writer |
-| `research_cloud` | Same as research but using cloud LLM | z.ai | researcher, writer |
-| `memory_ops` | Memory analysis, consolidation, and organization | local | analyst |
-| `full` | Broad team with research, memory writing, and synthesis | local | researcher, memory_writer, writer |
+| Preset | Description | Agents |
+|---|---|---|
+| `research` | Research team with memory/project search and writing | researcher (18 tools), writer (no tools) |
+| `memory_ops` | Memory analysis, consolidation, and organization | analyst (11 tools) |
+| `full` | Broad team with research, memory writing, and synthesis | researcher (15 tools), memory_writer (4 tools), writer (no tools) |
 
-Each agent's `tools` array is a whitelist. The coordinator agent (auto-created by the engine) always gets `tools: []` so it only decomposes goals without calling tools.
+Each agent's `tools` array lists the specific tools relevant to its role. The coordinator agent (auto-created by the engine) always gets `tools: []` so it only decomposes goals without calling tools.
 
 ### Adding a Preset
 
@@ -92,13 +95,11 @@ export const presets = {
   my_preset: {
     description: "What this team does",
     categories: ["memory", "projects"],  // which MCP servers to bridge
-    provider: "local",                   // from models.json
-    model: "opus-reasoning-35b",
     agents: [
       {
         name: "worker",
         systemPrompt: "You are a specialized agent...",
-        tools: ["crow_search_memories", "crow_list_memories"],
+        tools: ["crow_search_memories", "crow_list_memories", "crow_store_memory"],
         maxTurns: 6,
       },
     ],
@@ -106,7 +107,22 @@ export const presets = {
 }
 ```
 
-Keep tool count per agent to ~10 max to fit within 16K context windows on local models.
+List the tools each agent actually needs for its role. Agents that should not call tools (writers, synthesizers) use `tools: []`.
+
+### Per-Agent Provider Overrides
+
+Individual agents can use different LLM providers within the same orchestration:
+
+```javascript
+{
+  name: "researcher",
+  provider: "zai",     // override default provider
+  model: "glm-5",      // override default model
+  tools: [...],
+}
+```
+
+This enables hybrid orchestrations where some agents run on local models and others on cloud APIs.
 
 ## Pipelines
 
@@ -146,12 +162,35 @@ The MCP bridge (`servers/orchestrator/mcp-bridge.js`) connects Crow's MCP server
 
 Per-preset category filtering ensures only the needed servers are connected (e.g., the `research` preset only bridges memory and projects, not sharing or blog).
 
+## Remote Instance Tools
+
+Presets can include `"remote"` in their `categories` array to access tools on connected remote Crow instances. Remote tools are registered with namespaced names like `colibri:ha_light_toggle`.
+
+```javascript
+{
+  description: "Home automation with remote tools",
+  categories: ["memory", "remote"],
+  agents: [{
+    name: "controller",
+    tools: ["colibri:ha_light_toggle", "colibri:ha_status"],
+    // or use wildcard: tools: ["colibri:*"]
+  }],
+}
+```
+
+The `"instance:*"` wildcard expands to all tools from that instance at orchestration time.
+
+Remote tool connections come from the gateway's `connectedServers` map (populated by `proxy.js` from the `crow_instances` table). The orchestrator receives this via dependency injection, so it works in gateway mode but gracefully degrades in stdio mode (no remote tools available).
+
 ## LLM Configuration
 
-The orchestrator reads `models.json` (same config file as Crow's main AI chat) to resolve provider endpoints. Local presets use llama.cpp on port 8081; cloud presets use z.ai or other configured providers.
+The orchestrator reads `models.json` (same config file as Crow's main AI chat) to resolve provider endpoints. Configure via environment variables:
+
+- `CROW_ORCHESTRATOR_PROVIDER` — default provider name (falls back to first provider in models.json)
+- `CROW_ORCHESTRATOR_MODEL` — default model ID (falls back to first model from the resolved provider)
 
 Key settings:
-- `maxConcurrency: 1` serializes LLM calls (single GPU constraint)
-- `maxTokens: 4096` per agent response (leaves room for prompts within 16K context)
+- `maxConcurrency` defaults to 1, configurable per preset
+- `maxTokens` defaults to 8192, configurable per agent or preset
 - 5-minute timeout on all orchestrations
-- Health check on local LLM before starting (checks `/health` endpoint)
+- Health check on providers with a `baseURL` before starting (checks `/health` endpoint)

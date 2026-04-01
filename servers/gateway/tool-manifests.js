@@ -143,6 +143,7 @@ export const TOOL_MANIFESTS = {
       crow_run_pipeline: { params: "pipeline", desc: "Execute a named pipeline immediately (returns job ID)" },
       crow_schedule_pipeline: { params: "pipeline, cron_expression?, description?", desc: "Schedule a pipeline to run on a cron schedule" },
       crow_list_pipelines: { params: "", desc: "List available pipelines with descriptions and default schedules" },
+      crow_list_remote_tools: { params: "", desc: "List tools available on remote Crow instances" },
     },
   },
 

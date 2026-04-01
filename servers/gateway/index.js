@@ -73,6 +73,7 @@ import { generateInstructions } from "../shared/instructions.js";
 import { startAutoUpdate } from "./auto-update.js";
 import { startScheduler } from "./scheduler.js";
 import { startOrchestratorPipelines } from "../orchestrator/server.js";
+import { connectedServers } from "./proxy.js";
 import { initWebPush } from "./push/web-push.js";
 import { join } from "node:path";
 
@@ -763,7 +764,7 @@ const server = app.listen(PORT, "0.0.0.0", (error) => {
 
   // Start orchestrator pipeline runner (polls for pipeline: schedules)
   try {
-    startOrchestratorPipelines(createDbClient());
+    startOrchestratorPipelines(createDbClient(), { connectedServers });
   } catch (err) {
     console.error("[pipeline-runner] Failed to start:", err.message);
   }

@@ -145,3 +145,72 @@ export async function registerCrowTools(registry, options = {}) {
 
   return { clients, toolCount };
 }
+
+/**
+ * Register tools from remote Crow instances into the ToolRegistry.
+ * Remote tools are namespaced as "{instanceName}:{toolName}".
+ *
+ * @param {import('open-multi-agent').ToolRegistry} registry - Target registry.
+ * @param {Map} connectedServers - Remote instance map from proxy.js.
+ * @param {Object} [options]
+ * @param {string[]} [options.instances] - Filter to specific instance names.
+ * @returns {{ toolCount: number }}
+ */
+export async function registerRemoteTools(registry, connectedServers, options = {}) {
+  let toolCount = 0;
+
+  for (const [key, entry] of connectedServers) {
+    if (!entry.isRemote || entry.status !== "connected" || !entry.client) continue;
+
+    const instanceName = entry.instanceName || entry.instanceId || key;
+
+    // Optional instance filter
+    if (options.instances && !options.instances.includes(instanceName)) continue;
+
+    for (const tool of entry.tools || []) {
+      const namespacedName = `${instanceName}:${tool.name}`;
+      const description = `[${instanceName}] ${tool.description || tool.name}`;
+      const rawSchema = tool.inputSchema || { type: "object", properties: {} };
+
+      registry.register({
+        name: namespacedName,
+        description,
+        inputSchema: z.any(),
+        rawInputSchema: rawSchema,
+        execute: async (input) => {
+          try {
+            const result = await entry.client.callTool({
+              name: tool.name,
+              arguments: input || {},
+            });
+
+            let text = "";
+            if (result.content) {
+              for (const block of result.content) {
+                if (block.type === "text") text += block.text;
+              }
+            }
+
+            return {
+              data: text || "(empty result)",
+              isError: result.isError || false,
+            };
+          } catch (err) {
+            return {
+              data: `Remote tool error (${instanceName}): ${err.message}`,
+              isError: true,
+            };
+          }
+        },
+      });
+
+      toolCount++;
+    }
+
+    if ((entry.tools || []).length > 0) {
+      console.log(`[mcp-bridge] ${instanceName} (remote): ${entry.tools.length} tools registered`);
+    }
+  }
+
+  return { toolCount };
+}
