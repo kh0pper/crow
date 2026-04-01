@@ -131,8 +131,24 @@ setInterval(pruneJobs, 10 * 60 * 1000).unref();
 // Health check
 // ---------------------------------------------------------------------------
 
+/**
+ * Check if a local/self-hosted LLM server is reachable.
+ * Only checks URLs that look like local endpoints (localhost, private IPs).
+ * Cloud APIs are assumed reachable (they authenticate, not health-check).
+ */
 async function checkLlmHealth(baseURL) {
-  if (!baseURL) return true; // No URL = cloud provider, assume reachable
+  if (!baseURL) return true;
+
+  // Only health-check local/private endpoints
+  try {
+    const url = new URL(baseURL);
+    const host = url.hostname;
+    const isLocal = host === "localhost" || host === "127.0.0.1" || host === "::1"
+      || host.startsWith("10.") || host.startsWith("192.168.") || host.startsWith("100.");
+    if (!isLocal) return true; // Cloud API — skip health check
+  } catch {
+    return true; // Can't parse URL, assume reachable
+  }
 
   try {
     const healthUrl = baseURL.replace(/\/v1\/?$/, "/health");
