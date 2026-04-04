@@ -75,7 +75,7 @@ Most Texas public school teachers pay into TRS (Teacher Retirement System) inste
 - **Box 6 (Medicare tax): POPULATED**
 - **Box 13 (Retirement plan): CHECKED**
 
-Austin ISD is an exception — their employees DO pay Social Security.
+Some Texas districts are exceptions and DO pay Social Security. Check the employee's W-2 to confirm.
 
 ## 6013(h) Election Statement
 
