@@ -66,11 +66,11 @@ describe("Form 1040 lines", () => {
   const lines = getFormLines("f1040", result, fixture);
 
   it("should map wages to line 1a", () => {
-    assert.equal(lines["1a"], 136962.59);
+    assert.equal(lines["1a"], 127000);
   });
 
   it("should map AGI to line 11", () => {
-    assert.equal(lines["11"], 136492.01);
+    assert.equal(lines["11"], 125450);
   });
 
   it("should map standard deduction to line 12", () => {
@@ -78,19 +78,19 @@ describe("Form 1040 lines", () => {
   });
 
   it("should map taxable income to line 15", () => {
-    assert.equal(lines["15"], 106492);
+    assert.equal(lines["15"], 95450);
   });
 
   it("should map bracket tax to line 16", () => {
-    assert.equal(lines["16"], 13256.24);
+    assert.equal(lines["16"], 10977);
   });
 
   it("should map federal withholding to line 25a", () => {
-    assert.equal(lines["25a"], 12680);
+    assert.equal(lines["25a"], 11600);
   });
 
-  it("should show amount owed on line 37", () => {
-    assert.equal(lines["37"], 576.24);
+  it("should show refund on line 34", () => {
+    assert.equal(lines["34"], 623);
   });
 });
 
@@ -107,11 +107,11 @@ describe("Schedule 1 lines", () => {
   });
 
   it("should map student loan interest to line 20", () => {
-    assert.equal(lines["20"], 170.58);
+    assert.equal(lines["20"], 1250);
   });
 
   it("should map total adjustments to line 26", () => {
-    assert.equal(lines["26"], 470.58);
+    assert.equal(lines["26"], 1550);
   });
 });
 

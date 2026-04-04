@@ -145,7 +145,7 @@ Strategy:
 
 FFFF Step 2 ("Verify Federal Withholding") is a separate tab. Navigate by clicking the Step 2 tab text in the main frame.
 
-W-2 forms are entered here with all box values (1-6, 12, 13). **This is where the actual W-2 data lives** — the 1040 Line 25a just shows the total.
+W-2 forms are entered here with all box values (Box a Employee SSN, 1-6, 12, 13). **Box a (Employee SSN) is required for each W-2 — a blank SSN will cause the IRS to reject the e-file.** The 1040 Line 25a just shows the withholding total.
 
 After entering W-2 data:
 - **Line A1** should equal total of all W-2 Box 2 values
@@ -158,7 +158,7 @@ After entering W-2 data:
 
 Before saving, run an automated cross-reference of ALL FFFF values against the source documents and crow-tax engine. Navigate to each form in the tree, read all field values, and compare:
 
-**For each W-2:** Compare every box (1-6, 12, 13, EIN, employee name) against the original PDF.
+**For each W-2:** Compare Box a (Employee SSN), boxes 1-6, 12, 13, EIN, and employee name against the original PDF. **Box a is critical** — a blank Employee SSN will cause the IRS to reject the e-file.
 **For Form 1040:** Compare Lines 1a, 9, 10, 11a, 12e, 15, 16, 20, 24, 25a, 33, 34 against crow-tax `crow_tax_get_form`.
 **For Schedule 1:** Compare Lines 11, 13, 21, 26 against crow-tax.
 **For Form 8889:** Compare Lines 6, 9, 14a, 14c, 15, 16 against 1099-SA and W-2 code W values.

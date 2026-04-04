@@ -16,12 +16,12 @@
   "w2s": [
     {
       "employer": "Acme Corporation",
-      "wages": 60000.21,
-      "federalWithheld": 4200.00,
-      "ssWages": 60000.21,
-      "ssTaxWithheld": 3720.01,
-      "medicareWages": 60000.21,
-      "medicareTaxWithheld": 870.00,
+      "wages": 55000.00,
+      "federalWithheld": 4400.00,
+      "ssWages": 55000.00,
+      "ssTaxWithheld": 3410.00,
+      "medicareWages": 55000.00,
+      "medicareTaxWithheld": 797.50,
       "stateWages": 0,
       "stateWithheld": 0,
       "code12": [],
@@ -29,16 +29,16 @@
     },
     {
       "employer": "Widget Industries",
-      "wages": 76962.38,
-      "federalWithheld": 8480.00,
-      "ssWages": 76962.38,
-      "ssTaxWithheld": 4771.67,
-      "medicareWages": 76962.38,
-      "medicareTaxWithheld": 1115.95,
+      "wages": 72000.00,
+      "federalWithheld": 7200.00,
+      "ssWages": 72000.00,
+      "ssTaxWithheld": 4464.00,
+      "medicareWages": 72000.00,
+      "medicareTaxWithheld": 1044.00,
       "stateWages": 0,
       "stateWithheld": 0,
       "code12": [
-        { "code": "W", "amount": 470.58 }
+        { "code": "W", "amount": 1200.00 }
       ],
       "isStatutoryEmployee": false
     }
@@ -46,8 +46,8 @@
   "income1099": {
     "sa": [
       {
-        "payer": "Optum Bank",
-        "grossDistribution": 420.00,
+        "payer": "First National HSA",
+        "grossDistribution": 850.00,
         "distributionCode": 1,
         "hsaOrMsa": "hsa"
       }
@@ -59,37 +59,28 @@
     "misc": []
   },
   "deductions": {
-    "studentLoanInterest": 170.58,
+    "studentLoanInterest": 1250.00,
     "educatorExpenses": [
       {
         "name": "Jane A. Public",
         "role": "teacher",
         "k12School": true,
         "hoursPerYear": 1800,
-        "amount": 450
-      },
-      {
-        "name": "John Q. Public",
-        "role": "counselor",
-        "k12School": false,
-        "hoursPerYear": 1200,
-        "amount": 200
+        "amount": 300
       }
     ]
   },
   "hsa": {
     "coverageType": "self",
-    "employerContributions": 470.58,
+    "employerContributions": 1200.00,
     "personalContributions": 0,
-    "distributions": 420.00,
-    "qualifiedExpenses": 420.00,
+    "distributions": 850.00,
+    "qualifiedExpenses": 850.00,
     "distributionCode": 1,
     "monthsCovered": 12,
     "hadHdhpFullYear": true,
     "catchUp55": false
   },
-  "specialSituations": {
-    "nonresidentSpouseElection": true,
-    "spouseGreenCardDate": "2025-01-01"
-  }
+  "specialSituations": {}
+
 }

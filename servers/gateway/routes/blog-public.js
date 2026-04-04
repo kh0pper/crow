@@ -21,6 +21,19 @@ import { FONT_IMPORT, designTokensCss } from "../dashboard/shared/design-tokens.
 import { isAvailable, getObject } from "../../storage/s3-client.js";
 
 /**
+ * Derive site URL from request (respects X-Forwarded-Host when behind proxy).
+ * Falls back to CROW_GATEWAY_URL env var, then localhost.
+ */
+function getSiteUrl(req) {
+  const forwardedHost = req.get('X-Forwarded-Host');
+  if (forwardedHost) {
+    const proto = req.get('X-Forwarded-Proto') || req.protocol;
+    return `${proto}://${forwardedHost}`;
+  }
+  return process.env.CROW_GATEWAY_URL || `http://localhost:${process.env.PORT || process.env.CROW_GATEWAY_PORT || 3001}`;
+}
+
+/**
  * Get blog settings from dashboard_settings table.
  */
 async function getBlogSettings(db) {
@@ -431,7 +444,7 @@ export default function blogPublicRouter() {
         sql: "SELECT slug, title, excerpt, author, published_at, tags FROM blog_posts WHERE status = 'published' AND visibility = 'public' ORDER BY published_at DESC LIMIT 50",
         args: [],
       });
-      const siteUrl = process.env.CROW_GATEWAY_URL || `http://localhost:${process.env.PORT || process.env.CROW_GATEWAY_PORT || 3001}`;
+      const siteUrl = getSiteUrl(req);
       const xml = generateRss({ title: settings.title, description: settings.tagline, siteUrl, author: settings.author, posts: posts.rows });
       res.type("application/rss+xml").send(xml);
     } finally {
@@ -448,7 +461,7 @@ export default function blogPublicRouter() {
         sql: "SELECT slug, title, excerpt, author, published_at, tags FROM blog_posts WHERE status = 'published' AND visibility = 'public' ORDER BY published_at DESC LIMIT 50",
         args: [],
       });
-      const siteUrl = process.env.CROW_GATEWAY_URL || `http://localhost:${process.env.PORT || process.env.CROW_GATEWAY_PORT || 3001}`;
+      const siteUrl = getSiteUrl(req);
       const xml = generateAtom({ title: settings.title, description: settings.tagline, siteUrl, author: settings.author, posts: posts.rows });
       res.type("application/atom+xml").send(xml);
     } finally {
@@ -471,7 +484,7 @@ export default function blogPublicRouter() {
         return;
       }
 
-      const siteUrl = process.env.CROW_GATEWAY_URL || `http://localhost:${process.env.PORT || process.env.CROW_GATEWAY_PORT || 3001}`;
+      const siteUrl = getSiteUrl(req);
       const xml = await generatePodcastFeed(posts.rows, {
         title: settings.title,
         tagline: settings.tagline,
@@ -500,7 +513,7 @@ export default function blogPublicRouter() {
         sql: "SELECT slug, updated_at, published_at FROM blog_posts WHERE status = 'published' AND visibility = 'public' ORDER BY published_at DESC",
         args: [],
       });
-      const siteUrl = process.env.CROW_GATEWAY_URL || `http://localhost:${process.env.PORT || process.env.CROW_GATEWAY_PORT || 3001}`;
+      const siteUrl = getSiteUrl(req);
 
       let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
       xml += `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n`;
@@ -542,7 +555,7 @@ export default function blogPublicRouter() {
       }
 
       const settings = await getBlogSettings(db);
-      const siteUrl = process.env.CROW_GATEWAY_URL || `http://localhost:${process.env.PORT || process.env.CROW_GATEWAY_PORT || 3001}`;
+      const siteUrl = getSiteUrl(req);
 
       const countResult = await db.execute({
         sql: "SELECT COUNT(*) as cnt FROM blog_posts WHERE status = 'published' AND visibility = 'public'",
@@ -578,7 +591,7 @@ export default function blogPublicRouter() {
     const db = createDbClient();
     try {
       const settings = await getBlogSettings(db);
-      const siteUrl = process.env.CROW_GATEWAY_URL || `http://localhost:${process.env.PORT || process.env.CROW_GATEWAY_PORT || 3001}`;
+      const siteUrl = getSiteUrl(req);
 
       const countResult = await db.execute({
         sql: "SELECT COUNT(*) as cnt FROM blog_posts WHERE status = 'published' AND visibility = 'public'",
@@ -724,7 +737,7 @@ export default function blogPublicRouter() {
         ? `<figure style="margin:-0.5rem 0 2rem"><img src="/blog/media/${encodeURIComponent(post.cover_image_key)}" alt="${escapeHtml(post.title)}" style="width:100%;border-radius:12px;max-height:400px;object-fit:cover"></figure>`
         : "";
 
-      const siteUrl = process.env.CROW_GATEWAY_URL || "";
+      const siteUrl = getSiteUrl(req);
       const ogImage = post.cover_image_key
         ? `\n  <meta property="og:image" content="${siteUrl}/blog/media/${encodeURIComponent(post.cover_image_key)}">`
         : "";

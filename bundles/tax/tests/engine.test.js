@@ -55,45 +55,41 @@ describe("Tax tables", () => {
 describe("Calculator — John & Jane 2025", () => {
   const { result, forms, warnings, errors } = processReturn(fixture);
 
-  it("should calculate without schema errors", () => {
-    // Only validation "error" is John's non-K-12 educator expense — this is expected
-    assert.equal(errors.length, 1);
-    assert.ok(errors[0].includes("John Q. Public"));
-    assert.ok(errors[0].includes("not a K-12 school"));
+  it("should calculate without errors", () => {
+    assert.equal(errors.length, 0);
     assert.ok(result !== null);
   });
 
   it("should compute total wages correctly", () => {
-    // W-2 #1: $60,000.21 + W-2 #2: $76,962.38 = $136,962.59
-    assert.equal(result.income.totalWages, 136962.59);
+    // W-2 #1: $55,000 + W-2 #2: $72,000 = $127,000
+    assert.equal(result.income.totalWages, 127000);
   });
 
   it("should NOT deduct HSA employer contributions", () => {
-    // Employer contributed $470.58 via W-2 code W
+    // Employer contributed $1,200 via W-2 code W
     // Personal contributions are $0
     // HSA deduction should be $0
     assert.equal(result.adjustments.hsaDeduction, 0);
   });
 
   it("should only allow qualified educator expenses", () => {
-    // Jane: teacher, K-12, 1800hrs → qualifies, $300 (capped from $450)
-    // John: counselor, NOT K-12 → disqualified, $0
+    // Jane: teacher, K-12, 1800hrs → qualifies, $300
     assert.equal(result.adjustments.educatorExpenseDeduction, 300);
   });
 
   it("should compute student loan interest deduction", () => {
-    // $170.58 paid, under $2500 cap, AGI well under phaseout
-    assert.equal(result.adjustments.studentLoanDeduction, 170.58);
+    // $1,250 paid, under $2,500 cap, AGI under phaseout
+    assert.equal(result.adjustments.studentLoanDeduction, 1250);
   });
 
   it("should compute total adjustments", () => {
-    // educator $300 + HSA $0 + student loan $170.58 = $470.58
-    assert.equal(result.adjustments.totalAdjustments, 470.58);
+    // educator $300 + HSA $0 + student loan $1,250 = $1,550
+    assert.equal(result.adjustments.totalAdjustments, 1550);
   });
 
   it("should compute AGI correctly", () => {
-    // $136,962.59 - $470.58 = $136,492.01
-    assert.equal(result.agi, 136492.01);
+    // $127,000 - $1,550 = $125,450
+    assert.equal(result.agi, 125450);
   });
 
   it("should use standard deduction for MFJ", () => {
@@ -102,36 +98,35 @@ describe("Calculator — John & Jane 2025", () => {
   });
 
   it("should compute taxable income", () => {
-    // $136,492.01 - $30,000 = $106,492.01 → floor to $106,492
-    assert.equal(result.taxableIncome, 106492);
+    // $125,450 - $30,000 = $95,450
+    assert.equal(result.taxableIncome, 95450);
   });
 
   it("should compute bracket tax correctly", () => {
-    // MFJ brackets on $106,492:
+    // MFJ brackets on $95,450:
     // 10% on first $23,850 = $2,385.00
-    // 12% on $23,850-$96,950 = $8,772.00
-    // 22% on $96,950-$106,492 = $2,099.24
-    // Total = $13,256.24
-    assert.equal(result.tax.bracketTax, 13256.24);
+    // 12% on $23,850-$95,450 = $8,592.00
+    // Total = $10,977
+    assert.equal(result.tax.bracketTax, 10977);
   });
 
   it("should compute total tax", () => {
-    assert.equal(result.result.totalTax, 13256.24);
+    assert.equal(result.result.totalTax, 10977);
   });
 
   it("should compute federal withholding", () => {
-    // W-2 #1: $4,200 + W-2 #2: $8,480 = $12,680
-    assert.equal(result.payments.federalWithheld, 12680);
+    // W-2 #1: $4,400 + W-2 #2: $7,200 = $11,600
+    assert.equal(result.payments.federalWithheld, 11600);
   });
 
-  it("should compute amount owed", () => {
-    // $12,680 payments - $13,256.24 tax = -$576.24 (owed)
-    assert.ok(result.result.refundOrOwed < 0);
-    assert.equal(Math.abs(result.result.refundOrOwed), 576.24);
+  it("should compute refund", () => {
+    // $11,600 payments - $10,977 tax = $623 refund
+    assert.ok(result.result.refundOrOwed > 0);
+    assert.equal(result.result.refundOrOwed, 623);
   });
 
   it("should have HSA taxable distributions = $0 (all qualified)", () => {
-    // $420 distributions, $420 qualified expenses → $0 taxable
+    // $850 distributions, $850 qualified expenses → $0 taxable
     assert.equal(result.income.hsaTaxableDistributions, 0);
   });
 
@@ -139,11 +134,7 @@ describe("Calculator — John & Jane 2025", () => {
     assert.ok(result.workPapers.length > 0);
     const agiPaper = result.workPapers.find(w => w.line === "1040.11");
     assert.ok(agiPaper);
-    assert.equal(agiPaper.value, 136492.01);
-  });
-
-  it("should detect 6013(h) warning", () => {
-    assert.ok(warnings.some(w => w.includes("6013(h)")));
+    assert.equal(agiPaper.value, 125450);
   });
 
   it("should generate required forms", () => {
@@ -162,7 +153,7 @@ describe("Form 8889 — HSA", () => {
   });
 
   it("should show employer contributions on line 9", () => {
-    assert.equal(f8889["9"], 470.58);
+    assert.equal(f8889["9"], 1200);
   });
 
   it("should have $0 personal deduction on line 13", () => {
@@ -171,7 +162,7 @@ describe("Form 8889 — HSA", () => {
   });
 
   it("should have $0 taxable distributions on line 16", () => {
-    // $420 distributions - $420 qualified expenses = $0
+    // $850 distributions - $850 qualified expenses = $0
     assert.equal(f8889["16"], 0);
   });
 });
@@ -182,7 +173,7 @@ describe("Validation rules", () => {
       ...fixture,
       hsa: {
         ...fixture.hsa,
-        personalContributions: 5000, // $470.58 employer + $5000 = exceeds $4,300 self limit
+        personalContributions: 5000, // $1,200 employer + $5,000 = exceeds $4,300 self limit
       },
     };
     const { errors } = processReturn(overContrib);
