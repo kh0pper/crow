@@ -54,7 +54,7 @@ export function processReturn(rawReturn) {
   const forms = getAllFormLines(result, taxReturn);
 
   // Detect unsupported situations
-  const warnings = detectUnsupportedSituations(taxReturn);
+  const warnings = detectUnsupportedSituations(taxReturn, tables);
 
   // Run validation checks
   const errors = validate(result, taxReturn, tables);

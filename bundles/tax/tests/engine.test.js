@@ -43,7 +43,8 @@ describe("Tax tables", () => {
   it("should load 2025 tables", () => {
     const tables = loadTables(2025);
     assert.equal(tables.year, 2025);
-    assert.equal(tables.standardDeduction.mfj, 30000);
+    assert.equal(tables.standardDeduction.mfj, 31500);
+    assert.equal(tables.saltCap.default, 40000);
     assert.equal(tables.hsaLimits.self, 4300);
   });
 
@@ -93,25 +94,25 @@ describe("Calculator — John & Jane 2025", () => {
   });
 
   it("should use standard deduction for MFJ", () => {
-    assert.equal(result.deduction.chosen, 30000);
+    assert.equal(result.deduction.chosen, 31500);
     assert.equal(result.deduction.usesItemized, false);
   });
 
   it("should compute taxable income", () => {
-    // $125,450 - $30,000 = $95,450
-    assert.equal(result.taxableIncome, 95450);
+    // $125,450 - $31,500 = $93,950
+    assert.equal(result.taxableIncome, 93950);
   });
 
   it("should compute bracket tax correctly", () => {
-    // MFJ brackets on $95,450:
+    // MFJ brackets on $93,950:
     // 10% on first $23,850 = $2,385.00
-    // 12% on $23,850-$95,450 = $8,592.00
-    // Total = $10,977
-    assert.equal(result.tax.bracketTax, 10977);
+    // 12% on $23,850-$93,950 = $8,412.00
+    // Total = $10,797
+    assert.equal(result.tax.bracketTax, 10797);
   });
 
   it("should compute total tax", () => {
-    assert.equal(result.result.totalTax, 10977);
+    assert.equal(result.result.totalTax, 10797);
   });
 
   it("should compute federal withholding", () => {
@@ -120,9 +121,9 @@ describe("Calculator — John & Jane 2025", () => {
   });
 
   it("should compute refund", () => {
-    // $11,600 payments - $10,977 tax = $623 refund
+    // $11,600 payments - $10,797 tax = $803 refund
     assert.ok(result.result.refundOrOwed > 0);
-    assert.equal(result.result.refundOrOwed, 623);
+    assert.equal(result.result.refundOrOwed, 803);
   });
 
   it("should have HSA taxable distributions = $0 (all qualified)", () => {

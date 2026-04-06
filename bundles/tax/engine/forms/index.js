@@ -100,7 +100,7 @@ export function getAllFormLines(result, taxReturn) {
 /**
  * Detect situations that require forms we don't support.
  */
-export function detectUnsupportedSituations(taxReturn) {
+export function detectUnsupportedSituations(taxReturn, tables) {
   const warnings = [];
 
   // State taxes
@@ -112,7 +112,8 @@ export function detectUnsupportedSituations(taxReturn) {
   // AMT
   // Simplified check — high income + large deductions may trigger AMT
   const totalIncome = taxReturn.w2s.reduce((s, w) => s + w.wages, 0);
-  if (totalIncome > 300000 && taxReturn.deductions.saltTaxes > 10000) {
+  const saltThreshold = tables?.saltCap?.default ?? 10000;
+  if (totalIncome > 300000 && taxReturn.deductions.saltTaxes > saltThreshold) {
     warnings.push("High income with large SALT deductions may require AMT calculation (Form 6251). Not supported — consult a tax professional.");
   }
 

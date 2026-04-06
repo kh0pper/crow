@@ -48,11 +48,11 @@
     ]
   },
   "standardDeduction": {
-    "single": 15000,
-    "mfj": 30000,
-    "mfs": 15000,
-    "hoh": 22500,
-    "qw": 30000
+    "single": 15750,
+    "mfj": 31500,
+    "mfs": 15750,
+    "hoh": 23625,
+    "qw": 31500
   },
   "hsaLimits": {
     "self": 4300,
@@ -80,8 +80,15 @@
     "hoh": 200000,
     "qw": 200000
   },
+  "saltCap": {
+    "default": 40000,
+    "mfs": 20000,
+    "phaseoutStart": 500000,
+    "phaseoutEnd": 600000,
+    "phaseoutFloor": 10000
+  },
   "childTaxCredit": {
-    "amount": 2000,
+    "amount": 2200,
     "refundableMax": 1700,
     "phaseoutStart": { "single": 200000, "mfj": 400000, "mfs": 200000, "hoh": 200000, "qw": 400000 },
     "phaseoutRate": 50

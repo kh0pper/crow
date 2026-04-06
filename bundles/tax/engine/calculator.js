@@ -287,7 +287,13 @@ export function calculate(taxReturn, tables) {
   }
 
   // Itemized deductions
-  const saltCap = fs === "mfs" ? 5000 : 10000;
+  let saltCap = tables.saltCap?.[fs] ?? tables.saltCap?.default ?? 10000;
+  if (tables.saltCap?.phaseoutStart && agi > tables.saltCap.phaseoutStart) {
+    const floor = tables.saltCap.phaseoutFloor ?? 10000;
+    const range = tables.saltCap.phaseoutEnd - tables.saltCap.phaseoutStart;
+    const reduction = Math.min(1, (agi - tables.saltCap.phaseoutStart) / range) * (saltCap - floor);
+    saltCap = Math.max(floor, Math.round(saltCap - reduction));
+  }
   const itemizedSalt = Math.min(taxReturn.deductions.saltTaxes || 0, saltCap);
   const medicalFloor = round2(agi * 0.075);
   const medicalDeduction = Math.max(0, (taxReturn.deductions.medicalExpenses || 0) - medicalFloor);
