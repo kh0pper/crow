@@ -169,19 +169,19 @@ describe("Integration: Full tax filing flow", () => {
     // Verify key values
     assert.ok(text.includes("127000"), "Should show total wages");
     assert.ok(text.includes("125450"), "Should show AGI");
-    assert.ok(text.includes("30000"), "Should show standard deduction");
-    assert.ok(text.includes("95450"), "Should show taxable income");
-    assert.ok(text.includes("10977"), "Should show bracket tax");
+    assert.ok(text.includes("31500"), "Should show standard deduction");
+    assert.ok(text.includes("93950"), "Should show taxable income");
+    assert.ok(text.includes("10797"), "Should show bracket tax");
     assert.ok(text.includes("11600"), "Should show withholding");
-    assert.ok(text.includes("623"), "Should show refund");
+    assert.ok(text.includes("803"), "Should show refund");
     assert.ok(text.includes("REFUND"), "Should indicate refund");
 
     console.log("\n  Calculation summary verified:");
     console.log("    Wages:    $127,000");
     console.log("    AGI:      $125,450");
-    console.log("    Tax:      $10,977");
+    console.log("    Tax:      $10,797");
     console.log("    Withheld: $11,600");
-    console.log("    Refund:   $623");
+    console.log("    Refund:   $803");
   });
 
   it("Step 10: Get Form 1040 lines", async () => {

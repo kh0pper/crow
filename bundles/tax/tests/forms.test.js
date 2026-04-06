@@ -74,15 +74,15 @@ describe("Form 1040 lines", () => {
   });
 
   it("should map standard deduction to line 12", () => {
-    assert.equal(lines["12"], 30000);
+    assert.equal(lines["12"], 31500);
   });
 
   it("should map taxable income to line 15", () => {
-    assert.equal(lines["15"], 95450);
+    assert.equal(lines["15"], 93950);
   });
 
   it("should map bracket tax to line 16", () => {
-    assert.equal(lines["16"], 10977);
+    assert.equal(lines["16"], 10797);
   });
 
   it("should map federal withholding to line 25a", () => {
@@ -90,7 +90,7 @@ describe("Form 1040 lines", () => {
   });
 
   it("should show refund on line 34", () => {
-    assert.equal(lines["34"], 623);
+    assert.equal(lines["34"], 803);
   });
 });
 

@@ -54,6 +54,7 @@
     "hoh": 21900,
     "qw": 29200
   },
+  "saltCap": { "default": 10000, "mfs": 5000 },
   "hsaLimits": {
     "self": 4150,
     "family": 8300,
