@@ -99,7 +99,7 @@ Here is a more complete example (a bundle with Docker, an MCP server, a panel, a
 | `description` | Yes | Short description (under 200 characters) |
 | `author` | Yes | Author name or handle |
 | `license` | Yes | SPDX license identifier |
-| `category` | Yes | Category: `ai`, `media`, `productivity`, `storage`, `smart-home`, `networking`, `gaming`, `data`, `finance` |
+| `category` | Yes | Category: `ai`, `media`, `productivity`, `storage`, `smart-home`, `networking`, `social`, `gaming`, `data`, `finance`, `other` |
 | `tags` | No | Array of searchable tags (max 10) |
 | `icon` | No | Icon key (see [Supported icon keys](#supported-icon-keys) below) |
 | `docker` | No | Docker config: `{ "composefile": "docker-compose.yml" }` |
@@ -212,10 +212,15 @@ crow-media-manager/
 ## Testing Locally
 
 1. Create your add-on directory with a `manifest.json`
-2. For panels: symlink or copy to `~/.crow/panels/`
-3. For servers: add to `scripts/server-registry.js` temporarily
-4. For skills: copy to `skills/`
-5. Restart the gateway and verify everything works
+2. Add the entry to `registry/add-ons.json` (required for the Extensions page to show it)
+3. For panels: symlink or copy to `~/.crow/panels/` and add the ID to `~/.crow/panels.json`
+4. For servers: add to `scripts/server-registry.js` temporarily
+5. For skills: copy to `skills/`
+6. Restart the gateway and verify everything works
+
+::: tip
+If you use a new `category` or `icon` value, you also need to update the Extensions panel infrastructure. See the [Maintainer Checklist](/developers/addon-registry#_6-listing) in the registry docs for the full list of files.
+:::
 
 Test the manifest:
 
@@ -239,9 +244,9 @@ When a bundle add-on is installed, it automatically appears as a tile on the Cro
 
 The `icon` field in your manifest should be one of these feather-style icon names:
 
-`brain`, `cloud`, `image`, `home`, `book`, `rss`, `mic`, `music`, `message-circle`, `gamepad`, `archive`, `file-text`
+`brain`, `cloud`, `image`, `home`, `book`, `rss`, `mic`, `music`, `message-circle`, `gamepad`, `archive`, `file-text`, `phone-video`
 
-Unknown icon keys fall back to a first-letter circle.
+Unknown icon keys fall back to a first-letter circle. To add a new icon key, add an entry to `ICON_MAP` in `servers/gateway/dashboard/panels/extensions.js`.
 
 ### What doesn't get tiles
 
