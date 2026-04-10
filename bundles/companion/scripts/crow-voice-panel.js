@@ -274,6 +274,9 @@
 
   window.CrowWS = window.CrowWS || { handlers: [] };
   window.CrowWS.handlers.push(function(d) {
+    // When calls bundle is active, its own panel handles peer display
+    if (window.CrowWebRTC && window.CrowWebRTC._disabled) return;
+
     if (d.type === "group-update" && d.members) {
       onGroupUpdate(d.members, d.your_uid);
     }

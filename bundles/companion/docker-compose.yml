@@ -13,6 +13,7 @@ services:
       - companion-history:/app/chat_history
       - ${EIKANYA_MODELS_DIR:-}:/app/live2d-models/eikanya:ro
       - ${CROW_DB_PATH:-~/.crow/data/crow.db}:/crow-data/crow.db:ro
+      - ${HOME}/.crow/bundles:/crow-bundles:ro
     environment:
       - COMPANION_TTS_VOICE=${COMPANION_TTS_VOICE:-en-US-AvaMultilingualNeural}
       - COMPANION_PERSONA=${COMPANION_PERSONA:-You are Crow, an AI companion and assistant. You are helpful, curious, and have a dry wit. Keep responses conversational and concise since they will be spoken aloud.}

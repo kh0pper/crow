@@ -32,6 +32,7 @@
 
 // Load .env file if present (for systemd and other environments without dotenv)
 import { readFileSync, existsSync } from "node:fs";
+import { createHmac } from "node:crypto";
 import { resolve as resolvePath, dirname as dirnamePath } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -58,7 +59,7 @@ import cors from "cors";
 
 import { createMemoryServer } from "../memory/server.js";
 import { createProjectServer } from "../research/server.js";
-import { createSharingServer, getInstanceSyncManager } from "../sharing/server.js";
+import { createSharingServer, getInstanceSyncManager, validateRoomToken } from "../sharing/server.js";
 import { createRelayHandlers } from "../sharing/relay.js";
 import { generateCrowContext } from "../memory/crow-context.js";
 import { createDbClient } from "../db.js";
@@ -152,9 +153,10 @@ app.set("trust proxy", 1);
 // Security headers
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
-  // Allow same-origin iframes (needed for extension web UI embeds like VNC)
-  // Skip entirely for /proxy/ routes — proxied apps manage their own framing
-  if (!req.path.startsWith("/proxy/")) {
+  // Frame embedding: X-Frame-Options is legacy and doesn't support cross-port.
+  // Skip for /proxy/ (proxied apps manage own), /blog/ and /dashboard/ (loaded in companion iframe).
+  // CSP frame-ancestors (below) provides the actual protection.
+  if (!req.path.startsWith("/proxy/") && !req.path.startsWith("/companion") && !req.path.startsWith("/blog") && !req.path.startsWith("/dashboard")) {
     res.setHeader("X-Frame-Options", "SAMEORIGIN");
   }
   res.setHeader("X-XSS-Protection", "0");
@@ -168,6 +170,8 @@ app.use((req, res, next) => {
     "img-src 'self' data: blob:",
     "media-src 'self' https: blob:",
     "connect-src 'self'",
+    "frame-src 'self' https:",
+    "frame-ancestors 'self' https:",
   ].join("; "));
   if (req.secure || req.headers["x-forwarded-proto"] === "https") {
     res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
@@ -186,14 +190,16 @@ app.use(cors({
   credentials: true,
 }));
 
-// Rate limiting — general
-app.use(rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 200,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Too many requests, please try again later" },
-}));
+// Rate limiting — general (skip for --no-auth since it's a local-only bridge)
+if (!noAuth) {
+  app.use(rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 200,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests, please try again later" },
+  }));
+}
 
 // Rate limiting — auth endpoints (stricter)
 const authLimiter = rateLimit({
@@ -238,6 +244,35 @@ app.get("/robots.txt", (req, res) => {
 
 // --- Root redirect (convenience for managed hosting users) ---
 app.get("/", (req, res) => res.redirect("/dashboard/nest"));
+
+// --- Room Token Validation (used by companion for WebSocket auth) ---
+app.get("/api/room/validate", (req, res) => {
+  const { room, token } = req.query;
+  if (!room || !token) return res.status(400).json({ valid: false, error: "Missing room or token" });
+  const result = validateRoomToken(String(room), String(token));
+  if (!result) return res.status(401).json({ valid: false });
+  res.json({ valid: true, ...result });
+});
+
+// --- TURN Credentials (time-limited, HMAC-based for coturn use-auth-secret) ---
+const turnCredLimiter = rateLimit({ windowMs: 60 * 1000, max: 10, standardHeaders: true });
+app.get("/api/turn-credentials", turnCredLimiter, (req, res) => {
+  const secret = process.env.TURN_SECRET;
+  const turnUrl = process.env.TURN_URL || process.env.WEBRTC_TURN_URL;
+  if (!secret || !turnUrl) {
+    return res.status(404).json({ error: "TURN server not configured" });
+  }
+  const ttl = 3600; // 1 hour
+  const timestamp = Math.floor(Date.now() / 1000) + ttl;
+  const username = String(timestamp);
+  const credential = createHmac("sha1", secret).update(username).digest("base64");
+  res.json({
+    urls: turnUrl,
+    username,
+    credential,
+    ttl,
+  });
+});
 
 // --- Health Check ---
 app.get("/health", async (req, res) => {
@@ -438,6 +473,17 @@ try {
 } catch (err) {
   if (err.code !== "ERR_MODULE_NOT_FOUND") {
     console.warn("[blog] Failed to mount:", err.message);
+  }
+}
+
+// --- Mount Window Manager Server ---
+try {
+  const { createWmServer } = await import("../wm/server.js");
+  mountMcpServer(app, "/wm", () => createWmServer(undefined, { instructions }), sessionManager, null);
+  console.log("Window Manager server mounted");
+} catch (err) {
+  if (err.code !== "ERR_MODULE_NOT_FOUND") {
+    console.warn("[wm] Failed to mount:", err.message);
   }
 }
 
@@ -681,6 +727,32 @@ app.get("/discover/find", async (req, res) => {
 
 // --- Start Server ---
 
+// --- Mount Calls Routes (gated behind CROW_CALLS_ENABLED) ---
+let _setupCallsSignaling = null;
+if (process.env.CROW_CALLS_ENABLED === "1") {
+  try {
+    const { default: callsPageRouter } = await import("./routes/calls-page.js");
+    app.use(callsPageRouter(dashboardAuth));
+    const { default: setupCallsSignaling } = await import("./routes/calls-signaling.js");
+    _setupCallsSignaling = setupCallsSignaling;
+  } catch (err) {
+    if (err.code !== "ERR_MODULE_NOT_FOUND") {
+      console.warn("[calls] Failed to mount:", err.message);
+    }
+  }
+}
+
+// --- Mount Companion Proxy ---
+let _setupCompanionProxy = null;
+try {
+  const { default: setupCompanionProxy } = await import("./routes/companion-proxy.js");
+  _setupCompanionProxy = setupCompanionProxy;
+} catch (err) {
+  if (err.code !== "ERR_MODULE_NOT_FOUND") {
+    console.warn("[companion-proxy] Failed to load:", err.message);
+  }
+}
+
 // --- Mount Extension Web UI Proxy ---
 let _extensionProxyWsSetup = null;
 try {
@@ -700,9 +772,19 @@ const server = app.listen(PORT, "0.0.0.0", (error) => {
     process.exit(1);
   }
 
+  // Wire up calls WebSocket signaling (MUST be before extension and companion)
+  if (_setupCallsSignaling) {
+    _setupCallsSignaling(server);
+  }
+
   // Wire up WebSocket upgrade for extension proxies (needs server instance)
   if (_extensionProxyWsSetup) {
     _extensionProxyWsSetup(server);
+  }
+
+  // Wire up companion proxy (needs server instance for WebSocket upgrade)
+  if (_setupCompanionProxy) {
+    _setupCompanionProxy(app, server);
   }
   console.log(`Crow Gateway listening on http://0.0.0.0:${PORT}`);
   console.log(`  Streamable HTTP (2025-03-26):`);

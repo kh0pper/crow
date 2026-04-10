@@ -4,6 +4,7 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.net.Uri;
 import android.webkit.JsResult;
+import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebView;
@@ -14,6 +15,56 @@ public class CrowWebChromeClient extends WebChromeClient {
 
     public CrowWebChromeClient(MainActivity activity) {
         this.activity = activity;
+    }
+
+    @Override
+    public void onPermissionRequest(final PermissionRequest request) {
+        // Grant audio/video permissions for companion voice chat and camera
+        activity.runOnUiThread(() -> {
+            String[] resources = request.getResources();
+            boolean needsAudio = false;
+            boolean needsVideo = false;
+
+            for (String resource : resources) {
+                if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resource)) {
+                    needsAudio = true;
+                }
+                if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(resource)) {
+                    needsVideo = true;
+                }
+            }
+
+            if (!needsAudio && !needsVideo) {
+                request.deny();
+                return;
+            }
+
+            boolean hasAudio = activity.hasAudioPermission();
+            boolean hasCamera = activity.hasCameraPermission();
+
+            if (needsVideo && needsAudio) {
+                // Both requested: compound permission flow
+                if (hasAudio && hasCamera) {
+                    request.grant(resources);
+                } else {
+                    activity.requestAudioAndCameraPermissionForWebView(request);
+                }
+            } else if (needsVideo) {
+                // Video only
+                if (hasCamera) {
+                    request.grant(resources);
+                } else {
+                    activity.requestCameraPermissionForWebView(request);
+                }
+            } else {
+                // Audio only
+                if (hasAudio) {
+                    request.grant(resources);
+                } else {
+                    activity.requestAudioPermissionForWebView(request);
+                }
+            }
+        });
     }
 
     @Override

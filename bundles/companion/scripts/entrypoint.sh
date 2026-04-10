@@ -42,6 +42,17 @@ bash /app/scripts/inject-webrtc.sh
 echo "Injecting voice panel..."
 bash /app/scripts/inject-voice-panel.sh
 
+# Inject face tracking (MediaPipe Face Mesh → Live2D, optional toggle)
+echo "Injecting face tracking..."
+bash /app/scripts/inject-face-tracking.sh
+
+# If calls bundle is installed, layer enhancements on top
+CALLS_DIR="/crow-bundles/calls"
+if [ -d "$CALLS_DIR/scripts" ]; then
+  echo "Calls bundle detected, injecting enhancements..."
+  bash /app/scripts/inject-call-enhancements.sh "$CALLS_DIR"
+fi
+
 # Start Open-LLM-VTuber
 echo "Starting companion server..."
 exec uv run run_server.py

@@ -54,19 +54,55 @@ export class NostrManager {
    * Connect to configured relays.
    */
   async connectRelays(customRelays) {
+    // Prevent concurrent connection attempts
+    if (this._connectingPromise) return this._connectingPromise;
+
+    if (this.relays.size > 0) return [...this.relays.keys()];
+
+    this._connectingPromise = this._doConnectRelays(customRelays);
+    try {
+      return await this._connectingPromise;
+    } finally {
+      this._connectingPromise = null;
+    }
+  }
+
+  async _doConnectRelays(customRelays) {
     const relayUrls = customRelays || DEFAULT_RELAYS;
 
-    for (const url of relayUrls) {
-      try {
-        const relay = await Relay.connect(url);
-        this.relays.set(url, relay);
-      } catch (err) {
-        // Relay connection failed — non-fatal, try others
-        console.warn(`[nostr] Failed to connect to ${url}:`, err.message);
+    // Connect to relays in parallel with a per-relay timeout
+    const results = await Promise.allSettled(
+      relayUrls.map(async (url) => {
+        const relay = await Promise.race([
+          Relay.connect(url),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("connection timeout")), 10000)
+          ),
+        ]);
+        return { url, relay };
+      })
+    );
+
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        this.relays.set(result.value.url, result.value.relay);
+      } else {
+        const url = relayUrls[results.indexOf(result)];
+        console.warn(`[nostr] Failed to connect to ${url}:`, result.reason?.message);
       }
     }
 
     return [...this.relays.keys()];
+  }
+
+  /**
+   * Send an encrypted self-message via Nostr (for instance-to-instance relay).
+   * All instances share the same Nostr identity, so this sends to own pubkey.
+   * App-level routing uses target_instance field in the payload.
+   */
+  async sendSelfMessage(content) {
+    const pseudoContact = { secp256k1_pubkey: this.identity.secp256k1Pubkey };
+    return this.sendMessage(pseudoContact, content);
   }
 
   /**
@@ -131,9 +167,7 @@ export class NostrManager {
    * Subscribe to messages from a specific contact.
    */
   async subscribeToContact(contact) {
-    if (this.relays.size === 0) {
-      await this.connectRelays();
-    }
+    await this.connectRelays();
 
     let contactPubkey = contact.secp256k1_pubkey || contact.secp256k1Pubkey;
     // Strip compressed key prefix for Nostr (32-byte x-only)
@@ -165,9 +199,17 @@ export class NostrManager {
                 );
                 const decrypted = nip44.v2.decrypt(event.content, conversationKey);
 
-                // Skip system messages (invite_accepted, etc.) — don't store as regular messages
-                if (decrypted.startsWith("{") && decrypted.includes('"invite_accepted"')) {
-                  return;
+                // Skip system messages — don't store as regular messages
+                // These are handled by subscribeToIncoming's social callback
+                if (decrypted.startsWith("{")) {
+                  try {
+                    const parsed = JSON.parse(decrypted);
+                    if (parsed.type === "invite_accepted" || parsed.type === "crow_social") {
+                      return;
+                    }
+                  } catch {
+                    // Not valid JSON, treat as regular message
+                  }
                 }
 
                 // Cache locally
@@ -261,15 +303,19 @@ export class NostrManager {
   }
 
   /**
-   * Subscribe to all incoming DMs directed at us (for invite acceptance auto-add).
-   * Calls onInviteAccepted(payload) when an invite_accepted message is received.
+   * Subscribe to all incoming DMs directed at us.
+   * Routes message types:
+   *   - invite_accepted → onInviteAccepted(payload)
+   *   - crow_social → onSocialMessage(subtype, payload, senderPubkey)
    */
-  async subscribeToIncoming(onInviteAccepted) {
-    if (this.relays.size === 0) {
-      await this.connectRelays();
-    }
+  async subscribeToIncoming(onInviteAccepted, onSocialMessage) {
+    await this.connectRelays();
 
+    if (this.relays.size > 0) {
+      console.log(`[nostr] Subscribed to incoming on ${this.relays.size} relay(s)`);
+    }
     const ownPubkey = this.pubkey?.length === 66 ? this.pubkey.slice(2) : this.pubkey;
+    const seenEventIds = new Set();
 
     for (const [url, relay] of this.relays) {
       try {
@@ -283,6 +329,10 @@ export class NostrManager {
           ],
           {
             onevent: async (event) => {
+              // Deduplicate events across relays
+              if (seenEventIds.has(event.id)) return;
+              seenEventIds.add(event.id);
+
               try {
                 // Derive sender pubkey from event
                 let senderPubkey = event.pubkey;
@@ -293,19 +343,21 @@ export class NostrManager {
                 );
                 const decrypted = nip44.v2.decrypt(event.content, conversationKey);
 
-                // Check if it's an invite_accepted message
-                if (decrypted.startsWith("{") && decrypted.includes("invite_accepted")) {
+                // Check if it's a structured JSON message
+                if (decrypted.startsWith("{")) {
                   try {
                     const payload = JSON.parse(decrypted);
                     if (payload.type === "invite_accepted" && onInviteAccepted) {
                       await onInviteAccepted(payload);
+                    } else if (payload.type === "crow_social" && payload.subtype && onSocialMessage) {
+                      await onSocialMessage(payload.subtype, payload.payload || {}, senderPubkey);
                     }
                   } catch {
                     // Not valid JSON or not our message type
                   }
                 }
-              } catch {
-                // Decryption failed — not for us
+              } catch (decryptErr) {
+                // Decryption failed — event not for us or from unknown sender
               }
             },
           }

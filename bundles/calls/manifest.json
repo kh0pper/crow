@@ -1,0 +1,31 @@
+{
+  "id": "calls",
+  "name": "Video & Audio Calls",
+  "version": "0.1.0",
+  "description": "Peer-to-peer video and audio calling between Crow users",
+  "type": "bundle",
+  "category": "social",
+  "icon": "phone-video",
+  "requires": {
+    "min_ram_mb": 128
+  },
+  "env_vars": [
+    {
+      "name": "CROW_CALLS_ENABLED",
+      "description": "Enable calls signaling endpoint in gateway",
+      "default": "1",
+      "required": false,
+      "secret": false
+    },
+    {
+      "name": "CROW_CALLS_MAX_PEERS",
+      "description": "Maximum participants per call room",
+      "default": "4",
+      "required": false,
+      "secret": false
+    }
+  ],
+  "panel": "panel/calls.js",
+  "skills": ["skills/calls.md"],
+  "enhancedBy": ["companion"]
+}

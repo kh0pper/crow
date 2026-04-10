@@ -26,7 +26,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createDbClient } from "../db.js";
 import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
 import {
@@ -45,6 +45,10 @@ import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
 // Singleton sharing managers — Hyperswarm and Nostr connections are shared across
 // all McpServer instances (stdio, gateway per-session, router dispatch).
 let _sharedManagers = null;
+
+// In-memory room state — active companion room tokens.
+// Map<roomCode, { token, hostCrowId, hostName, companionUrl, createdAt, participants: Set<contactId> }>
+const _activeRooms = new Map();
 
 function getSharedManagers(dbPath) {
   if (_sharedManagers) return _sharedManagers;
@@ -71,6 +75,327 @@ export function getInstanceSyncManager() {
   return _sharedManagers?.instanceSyncManager || null;
 }
 
+/**
+ * Validate a room token for companion access.
+ * Returns the room info if valid, null if invalid/expired.
+ */
+export function validateRoomToken(roomCode, token) {
+  const room = _activeRooms.get(roomCode);
+  if (!room) return null;
+  if (room.token !== token) return null;
+  // Rooms expire after 24 hours
+  if (Date.now() - room.createdAt > 24 * 60 * 60 * 1000) {
+    _activeRooms.delete(roomCode);
+    return null;
+  }
+  return { roomCode, hostCrowId: room.hostCrowId, hostName: room.hostName };
+}
+
+/**
+ * Send a room invite to a contact by name. Used by the WM server
+ * to proxy "invite <name>" commands from the companion.
+ * Returns { ok, message, roomCode?, joinUrl? }
+ */
+export async function sendRoomInvite(contactName, hostName) {
+  if (!_sharedManagers) return { ok: false, message: "Sharing server not initialized" };
+  const { db, identity, nostrManager } = _sharedManagers;
+
+  const result = await db.execute({
+    sql: "SELECT * FROM contacts WHERE (crow_id = ? OR display_name = ?) AND is_blocked = 0",
+    args: [contactName, contactName],
+  });
+  if (result.rows.length === 0) {
+    return { ok: false, message: `Contact not found: ${contactName}` };
+  }
+  const contactRow = result.rows[0];
+
+  const roomCode = randomBytes(6).toString("hex");
+  const token = randomBytes(16).toString("hex");
+
+  const gatewayUrl = process.env.CROW_GATEWAY_URL || "";
+  const companionPort = process.env.COMPANION_PORT || "12393";
+  const joinUrl = gatewayUrl
+    ? `${gatewayUrl}/companion/?room=${roomCode}&token=${token}`
+    : `http://localhost:${companionPort}/?room=${roomCode}&token=${token}`;
+
+  _activeRooms.set(roomCode, {
+    token,
+    hostCrowId: identity.crowId,
+    hostName: hostName || identity.crowId,
+    companionUrl: joinUrl,
+    createdAt: Date.now(),
+    participants: new Set([contactRow.id]),
+  });
+
+  const envelope = JSON.stringify({
+    type: "crow_social",
+    version: 1,
+    subtype: "room_invite",
+    payload: {
+      room_code: roomCode,
+      join_url: joinUrl,
+      host_name: hostName || identity.crowId,
+      host_crow_id: identity.crowId,
+    },
+  });
+
+  try {
+    const delivery = await nostrManager.sendMessage(contactRow, envelope);
+    try {
+      await createNotification(db, {
+        title: `Room invite sent to ${contactRow.display_name || contactRow.crow_id}`,
+        type: "system",
+        source: "sharing:room_invite",
+        action_url: joinUrl,
+      });
+    } catch {}
+    return {
+      ok: true,
+      message: `Invite sent to ${contactRow.display_name || contactRow.crow_id} via ${delivery.relays.length} relay(s).`,
+      roomCode,
+      joinUrl,
+    };
+  } catch (err) {
+    _activeRooms.delete(roomCode);
+    return { ok: false, message: `Failed to send invite: ${err.message}` };
+  }
+}
+
+/**
+ * Get all active rooms (for status display).
+ */
+export function getActiveRooms() {
+  const rooms = [];
+  for (const [code, room] of _activeRooms) {
+    // Clean up expired rooms
+    if (Date.now() - room.createdAt > 24 * 60 * 60 * 1000) {
+      _activeRooms.delete(code);
+      continue;
+    }
+    rooms.push({ code, hostName: room.hostName, participants: room.participants.size, createdAt: room.createdAt });
+  }
+  return rooms;
+}
+
+/**
+ * Send a text voice memo to a contact. The recipient's companion speaks it aloud via TTS.
+ * Returns { ok, message }
+ */
+export async function sendVoiceMemo(contactName, text, senderName) {
+  if (!_sharedManagers) return { ok: false, message: "Sharing server not initialized" };
+  const { db, identity, nostrManager } = _sharedManagers;
+
+  const result = await db.execute({
+    sql: "SELECT * FROM contacts WHERE (crow_id = ? OR display_name = ?) AND is_blocked = 0",
+    args: [contactName, contactName],
+  });
+  if (result.rows.length === 0) return { ok: false, message: `Contact not found: ${contactName}` };
+  const contact = result.rows[0];
+
+  const envelope = JSON.stringify({
+    type: "crow_social",
+    version: 1,
+    subtype: "voice_memo",
+    payload: {
+      text,
+      sender_name: senderName || identity.crowId,
+      sender_crow_id: identity.crowId,
+      timestamp: new Date().toISOString(),
+    },
+  });
+
+  try {
+    const delivery = await nostrManager.sendMessage(contact, envelope);
+    return {
+      ok: true,
+      message: `Voice memo sent to ${contact.display_name || contact.crow_id} via ${delivery.relays.length} relay(s).`,
+    };
+  } catch (err) {
+    return { ok: false, message: `Failed to send voice memo: ${err.message}` };
+  }
+}
+
+/**
+ * Send an emoji reaction to a contact.
+ * Returns { ok, message }
+ */
+export async function sendReaction(contactName, emoji, senderName) {
+  if (!_sharedManagers) return { ok: false, message: "Sharing server not initialized" };
+  const { db, identity, nostrManager } = _sharedManagers;
+
+  const result = await db.execute({
+    sql: "SELECT * FROM contacts WHERE (crow_id = ? OR display_name = ?) AND is_blocked = 0",
+    args: [contactName, contactName],
+  });
+  if (result.rows.length === 0) return { ok: false, message: `Contact not found: ${contactName}` };
+  const contact = result.rows[0];
+
+  const envelope = JSON.stringify({
+    type: "crow_social",
+    version: 1,
+    subtype: "reaction",
+    payload: {
+      emoji,
+      sender_name: senderName || identity.crowId,
+      sender_crow_id: identity.crowId,
+      timestamp: new Date().toISOString(),
+    },
+  });
+
+  try {
+    const delivery = await nostrManager.sendMessage(contact, envelope);
+    return {
+      ok: true,
+      message: `Reaction ${emoji} sent to ${contact.display_name || contact.crow_id}.`,
+    };
+  } catch (err) {
+    return { ok: false, message: `Failed to send reaction: ${err.message}` };
+  }
+}
+
+// ─── Bot Relay: AI-to-AI Task Delegation ───
+
+// Pending relays waiting for results (relay_id → { timeout, instanceName })
+const _pendingRelays = new Map();
+
+// Cached local instance name (resolved at first relay)
+let _localInstanceName = null;
+
+async function resolveLocalInstanceName(db) {
+  if (_localInstanceName) return _localInstanceName;
+  const localId = getOrCreateLocalInstanceId();
+  const result = await db.execute({
+    sql: "SELECT name FROM crow_instances WHERE id = ?",
+    args: [localId],
+  });
+  _localInstanceName = result.rows.length > 0 ? result.rows[0].name : null;
+  return _localInstanceName;
+}
+
+/**
+ * Send a task to a remote Crow instance for execution.
+ * Uses Nostr self-messaging with target_instance for routing.
+ * Returns { ok, message, relayId? }
+ */
+export async function sendBotRelay(instanceName, task) {
+  if (!_sharedManagers) return { ok: false, message: "Sharing server not initialized" };
+  const { db, identity, nostrManager } = _sharedManagers;
+
+  // Verify the target instance exists and is active
+  const result = await db.execute({
+    sql: "SELECT * FROM crow_instances WHERE name = ? AND status = 'active'",
+    args: [instanceName],
+  });
+  if (result.rows.length === 0) return { ok: false, message: `Instance not found or inactive: ${instanceName}` };
+
+  const localName = await resolveLocalInstanceName(db);
+  const relayId = randomBytes(16).toString("hex");
+
+  const envelope = JSON.stringify({
+    type: "crow_social",
+    version: 1,
+    subtype: "bot_relay",
+    payload: {
+      relay_id: relayId,
+      task,
+      target_instance: instanceName,
+      sender_name: localName || "unknown",
+      sender_instance: localName || "unknown",
+      sender_crow_id: identity.crowId,
+      timestamp: new Date().toISOString(),
+    },
+  });
+
+  try {
+    const delivery = await nostrManager.sendSelfMessage(envelope);
+
+    // Track pending relay with 5-min timeout
+    const timeout = setTimeout(async () => {
+      _pendingRelays.delete(relayId);
+      try {
+        await createNotification(db, {
+          title: `No response from ${instanceName}`,
+          body: `Relay task timed out: ${task.slice(0, 100)}`,
+          type: "system",
+          source: "sharing:bot_relay_timeout",
+        });
+      } catch {}
+    }, 5 * 60 * 1000);
+    _pendingRelays.set(relayId, { timeout, instanceName });
+
+    return {
+      ok: true,
+      message: `Task relayed to ${instanceName} via ${delivery.relays.length} relay(s).`,
+      relayId,
+    };
+  } catch (err) {
+    return { ok: false, message: `Failed to relay task: ${err.message}` };
+  }
+}
+
+/**
+ * Handle an incoming bot_relay request: execute the task using local AI + tools.
+ */
+async function handleIncomingBotRelay(payload, db, identity, nostrManager) {
+  const { relay_id, task, sender_instance, sender_name } = payload;
+  console.log(`[sharing] Bot relay from ${sender_instance}: ${task}`);
+
+  let resultText = "";
+  let status = "success";
+
+  try {
+    const { runOneShot } = await import("../gateway/ai/one-shot.js");
+    resultText = await runOneShot(
+      "You are a helpful assistant. Execute the requested task using available tools. Reply with a brief result (1-2 sentences).",
+      task
+    );
+  } catch (err) {
+    if (err.code === "not_configured") {
+      // No AI provider — create notification for manual handling
+      try {
+        await createNotification(db, {
+          title: `Relay task from ${sender_name || sender_instance}`,
+          body: task,
+          type: "system",
+          source: "sharing:bot_relay_manual",
+          priority: "high",
+        });
+      } catch {}
+      resultText = "No AI provider configured. Task forwarded as notification.";
+      status = "error";
+    } else {
+      resultText = `Error: ${err.message}`;
+      status = "error";
+    }
+  }
+
+  // Truncate result
+  if (resultText.length > 500) resultText = resultText.slice(0, 497) + "...";
+
+  // Send result back
+  const localName = await resolveLocalInstanceName(db);
+  const envelope = JSON.stringify({
+    type: "crow_social",
+    version: 1,
+    subtype: "bot_relay_result",
+    payload: {
+      relay_id,
+      status,
+      result: resultText,
+      target_instance: sender_instance,
+      responder_instance: localName || "unknown",
+      timestamp: new Date().toISOString(),
+    },
+  });
+
+  try {
+    await nostrManager.sendSelfMessage(envelope);
+    console.log(`[sharing] Bot relay result sent to ${sender_instance}`);
+  } catch (err) {
+    console.warn(`[sharing] Failed to send relay result: ${err.message}`);
+  }
+}
+
 export function createSharingServer(dbPath, options = {}) {
   const managers = getSharedManagers(dbPath);
   const { db, identity, peerManager, syncManager, instanceSyncManager, nostrManager } = managers;
@@ -83,7 +408,7 @@ export function createSharingServer(dbPath, options = {}) {
     peerManager.start().then(async () => {
       try {
         const contacts = await db.execute({
-          sql: "SELECT id, crow_id, ed25519_pubkey, secp256k1_pubkey FROM contacts WHERE is_blocked = 0",
+          sql: "SELECT id, crow_id, display_name, ed25519_pubkey, secp256k1_pubkey FROM contacts WHERE is_blocked = 0",
           args: [],
         });
         for (const c of contacts.rows) {
@@ -92,6 +417,13 @@ export function createSharingServer(dbPath, options = {}) {
             await peerManager.joinContact({
               crowId: c.crow_id,
               ed25519Pubkey: c.ed25519_pubkey,
+            });
+            // Subscribe to Nostr messages from this contact
+            await nostrManager.subscribeToContact({
+              id: c.id,
+              crow_id: c.crow_id,
+              secp256k1_pubkey: c.secp256k1_pubkey,
+              display_name: c.display_name,
             });
           } catch (err) {
             console.warn(`[sharing] Failed to join topic for ${c.crow_id}:`, err.message);
@@ -102,6 +434,149 @@ export function createSharingServer(dbPath, options = {}) {
         }
       } catch (err) {
         console.warn("[sharing] Failed to load contacts on startup:", err.message);
+      }
+
+      // Subscribe to all incoming DMs (invites, social messages)
+      // Done here so relay connections from subscribeToContact are reused
+      try {
+        await nostrManager.subscribeToIncoming(async (payload) => {
+          if (!payload.crowId || !payload.ed25519Pub || !payload.secp256k1Pub) return;
+
+          const existing = await db.execute({
+            sql: "SELECT id FROM contacts WHERE crow_id = ?",
+            args: [payload.crowId],
+          });
+          if (existing.rows.length > 0) return;
+
+          const result = await db.execute({
+            sql: `INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey)
+                  VALUES (?, ?, ?, ?)`,
+            args: [payload.crowId, payload.displayName || payload.crowId, payload.ed25519Pub, payload.secp256k1Pub],
+          });
+
+          const contactId = Number(result.lastInsertRowid);
+          await syncManager.initContact(contactId, null);
+          await peerManager.joinContact({ crowId: payload.crowId, ed25519Pubkey: payload.ed25519Pub });
+          await nostrManager.subscribeToContact({
+            id: contactId, crowId: payload.crowId, secp256k1_pubkey: payload.secp256k1Pub,
+          });
+          console.log(`[sharing] Auto-added contact from invite acceptance: ${payload.displayName || payload.crowId}`);
+        }, async (subtype, payload, senderPubkey) => {
+          console.log(`[sharing] Received crow_social message: ${subtype}`);
+          if (subtype === "room_invite") {
+            const { room_code, join_url, host_name, host_crow_id } = payload;
+            if (!room_code || !join_url) return;
+            try {
+              await createNotification(db, {
+                title: `${host_name || "Someone"} invited you to a room`,
+                body: `Tap to join the companion room`,
+                type: "peer",
+                source: "sharing:room_invite",
+                priority: "high",
+                action_url: join_url,
+              });
+            } catch (err) {
+              console.warn("[sharing] Failed to create room invite notification:", err.message);
+            }
+          } else if (subtype === "room_closed") {
+            const { host_name } = payload;
+            try {
+              await createNotification(db, {
+                title: `${host_name || "Host"} closed the room`,
+                type: "peer",
+                source: "sharing:room_closed",
+              });
+            } catch {}
+          } else if (subtype === "voice_memo") {
+            const { text, sender_name } = payload;
+            if (!text) return;
+            try {
+              await createNotification(db, {
+                title: `Voice memo from ${sender_name || "Someone"}`,
+                body: text.length > 200 ? text.slice(0, 200) + "..." : text,
+                type: "peer",
+                source: "sharing:voice_memo",
+                priority: "high",
+              });
+            } catch (err) {
+              console.warn("[sharing] Failed to create voice memo notification:", err.message);
+            }
+          } else if (subtype === "reaction") {
+            const { emoji, sender_name } = payload;
+            if (!emoji) return;
+            try {
+              await createNotification(db, {
+                title: `${sender_name || "Someone"} reacted ${emoji}`,
+                type: "peer",
+                source: "sharing:reaction",
+              });
+            } catch {}
+          } else if (subtype === "group_message") {
+            const { group_name, sender_name, message: msgText } = payload;
+            if (!msgText) return;
+            try {
+              await createNotification(db, {
+                title: `[${group_name || "Group"}] ${sender_name || "Someone"}`,
+                body: msgText.length > 200 ? msgText.slice(0, 200) + "..." : msgText,
+                type: "peer",
+                source: "sharing:group_message",
+                priority: "high",
+              });
+            } catch (err) {
+              console.warn("[sharing] Failed to create group message notification:", err.message);
+            }
+            // Also store as a regular message with group context
+            try {
+              // Find the sender contact
+              const senderContact = await db.execute({
+                sql: "SELECT id FROM contacts WHERE crow_id = ?",
+                args: [payload.sender_crow_id || ""],
+              });
+              if (senderContact.rows.length > 0) {
+                await db.execute({
+                  sql: `INSERT INTO messages (contact_id, nostr_event_id, content, direction, is_read, created_at)
+                        VALUES (?, ?, ?, 'received', 0, datetime('now'))`,
+                  args: [senderContact.rows[0].id, `grp_${Date.now()}`, `[${group_name}] ${msgText}`],
+                });
+              }
+            } catch {}
+          } else if (subtype === "bot_relay") {
+            const localName = await resolveLocalInstanceName(db);
+            if (payload.target_instance !== localName) return; // Not for us
+            // Validate sender is a known instance
+            const senderCheck = await db.execute({
+              sql: "SELECT id FROM crow_instances WHERE name = ? AND status = 'active'",
+              args: [payload.sender_instance],
+            });
+            if (senderCheck.rows.length === 0) {
+              console.warn(`[sharing] Bot relay from unknown instance: ${payload.sender_instance}`);
+              return;
+            }
+            handleIncomingBotRelay(payload, db, identity, nostrManager);
+          } else if (subtype === "bot_relay_result") {
+            const localName = await resolveLocalInstanceName(db);
+            if (payload.target_instance !== localName) return; // Not for us
+            const pending = _pendingRelays.get(payload.relay_id);
+            if (pending) {
+              clearTimeout(pending.timeout);
+              _pendingRelays.delete(payload.relay_id);
+            }
+            try {
+              await createNotification(db, {
+                title: `${payload.responder_instance}: ${payload.status === "success" ? "Done" : "Error"}`,
+                body: payload.result || "No details",
+                type: "system",
+                source: "sharing:bot_relay_result",
+                priority: "high",
+              });
+            } catch (err) {
+              console.warn("[sharing] Failed to create relay result notification:", err.message);
+            }
+          }
+        });
+        console.log("[sharing] Subscribed to incoming Nostr messages");
+      } catch (err) {
+        console.warn("[sharing] Failed to subscribe to incoming messages:", err.message);
       }
 
       // Join instance sync topic for cross-instance discovery
@@ -344,45 +819,8 @@ export function createSharingServer(dbPath, options = {}) {
     console.log(`[sharing] Received Hypercore entry for contact ${contactId}:`, entry.type);
   };
 
-  // Listen for invite acceptance messages (auto-add contacts)
-  nostrManager.subscribeToIncoming(async (payload) => {
-    if (!payload.crowId || !payload.ed25519Pub || !payload.secp256k1Pub) return;
-
-    // Check if already a contact
-    const existing = await db.execute({
-      sql: "SELECT id FROM contacts WHERE crow_id = ?",
-      args: [payload.crowId],
-    });
-    if (existing.rows.length > 0) return;
-
-    // Auto-add the contact
-    const result = await db.execute({
-      sql: `INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey)
-            VALUES (?, ?, ?, ?)`,
-      args: [
-        payload.crowId,
-        payload.displayName || payload.crowId,
-        payload.ed25519Pub,
-        payload.secp256k1Pub,
-      ],
-    });
-
-    const contactId = Number(result.lastInsertRowid);
-    await syncManager.initContact(contactId, null);
-    await peerManager.joinContact({
-      crowId: payload.crowId,
-      ed25519Pubkey: payload.ed25519Pub,
-    });
-    await nostrManager.subscribeToContact({
-      id: contactId,
-      crowId: payload.crowId,
-      secp256k1_pubkey: payload.secp256k1Pub,
-    });
-
-    console.log(`[sharing] Auto-added contact from invite acceptance: ${payload.displayName || payload.crowId}`);
-  }).catch((err) => {
-    console.warn("[sharing] Failed to subscribe to incoming messages:", err.message);
-  });
+  // subscribeToIncoming is now set up inside peerManager.start().then()
+  // so relay connections from subscribeToContact are reused
 
   } // end one-time initialization
 
@@ -800,6 +1238,144 @@ export function createSharingServer(dbPath, options = {}) {
           isError: true,
         };
       }
+    }
+  );
+
+  // --- Tool: crow_create_message_group ---
+
+  server.tool(
+    "crow_create_message_group",
+    "Create a message group for group conversations. Add contacts by name or Crow ID.",
+    {
+      name: z.string().max(200).describe("Group name"),
+      members: z.array(z.string().max(500)).describe("Array of contact names or Crow IDs to add"),
+      color: z.string().max(20).optional().describe("Group color (hex, e.g. #6366f1)"),
+    },
+    async ({ name, members, color }) => {
+      // Create the group
+      const groupResult = await db.execute({
+        sql: "INSERT INTO contact_groups (name, color) VALUES (?, ?)",
+        args: [name, color || "#6366f1"],
+      });
+      const groupId = Number(groupResult.lastInsertRowid);
+
+      // Resolve and add members
+      const added = [];
+      const notFound = [];
+      for (const member of members) {
+        const contact = await db.execute({
+          sql: "SELECT id, display_name, crow_id FROM contacts WHERE (crow_id = ? OR display_name = ?) AND is_blocked = 0",
+          args: [member, member],
+        });
+        if (contact.rows.length > 0) {
+          const row = contact.rows[0];
+          try {
+            await db.execute({
+              sql: "INSERT INTO contact_group_members (group_id, contact_id) VALUES (?, ?)",
+              args: [groupId, row.id],
+            });
+            added.push(row.display_name || row.crow_id);
+          } catch { /* duplicate, ignore */ }
+        } else {
+          notFound.push(member);
+        }
+      }
+
+      let text = `Created group "${name}" (ID: ${groupId}) with ${added.length} member(s): ${added.join(", ")}`;
+      if (notFound.length > 0) text += `\nNot found: ${notFound.join(", ")}`;
+      return { content: [{ type: "text", text }] };
+    }
+  );
+
+  // --- Tool: crow_list_message_groups ---
+
+  server.tool(
+    "crow_list_message_groups",
+    "List all message groups with their members.",
+    {},
+    async () => {
+      const groups = await db.execute("SELECT * FROM contact_groups ORDER BY sort_order, name");
+      if (groups.rows.length === 0) {
+        return { content: [{ type: "text", text: "No message groups. Create one with crow_create_message_group." }] };
+      }
+
+      const lines = [];
+      for (const grp of groups.rows) {
+        const members = await db.execute({
+          sql: `SELECT c.display_name, c.crow_id FROM contacts c
+                JOIN contact_group_members gm ON gm.contact_id = c.id
+                WHERE gm.group_id = ?`,
+          args: [grp.id],
+        });
+        const memberNames = members.rows.map(m => m.display_name || m.crow_id).join(", ");
+        lines.push(`[${grp.id}] ${grp.name} (${members.rows.length} members): ${memberNames || "empty"}`);
+      }
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+  );
+
+  // --- Tool: crow_send_group_message ---
+
+  server.tool(
+    "crow_send_group_message",
+    "Send a message to all members of a contact group. Messages are sent as individual encrypted DMs with group context.",
+    {
+      group: z.string().max(200).describe("Group name or ID"),
+      message: z.string().max(10000).describe("Message text to send"),
+    },
+    async ({ group, message }) => {
+      // Find the group
+      const groupResult = await db.execute({
+        sql: "SELECT * FROM contact_groups WHERE name = ? OR id = ?",
+        args: [group, isNaN(Number(group)) ? -1 : Number(group)],
+      });
+      if (groupResult.rows.length === 0) {
+        return { content: [{ type: "text", text: `Group not found: ${group}` }], isError: true };
+      }
+      const grp = groupResult.rows[0];
+
+      // Get group members with contact info
+      const membersResult = await db.execute({
+        sql: `SELECT c.* FROM contacts c
+              JOIN contact_group_members gm ON gm.contact_id = c.id
+              WHERE gm.group_id = ? AND c.is_blocked = 0`,
+        args: [grp.id],
+      });
+
+      if (membersResult.rows.length === 0) {
+        return { content: [{ type: "text", text: `Group "${grp.name}" has no members` }], isError: true };
+      }
+
+      // Build group message envelope
+      const envelope = JSON.stringify({
+        type: "crow_social",
+        version: 1,
+        subtype: "group_message",
+        payload: {
+          group_name: grp.name,
+          group_id: grp.id,
+          sender_name: identity.displayName || identity.crowId,
+          sender_crow_id: identity.crowId,
+          message,
+          timestamp: new Date().toISOString(),
+        },
+      });
+
+      // Fan-out: send to each member individually
+      const sent = [];
+      const failed = [];
+      for (const contact of membersResult.rows) {
+        try {
+          await nostrManager.sendMessage(contact, envelope);
+          sent.push(contact.display_name || contact.crow_id);
+        } catch (err) {
+          failed.push(contact.display_name || contact.crow_id);
+        }
+      }
+
+      let text = `Sent to ${sent.length}/${membersResult.rows.length} members of "${grp.name}"`;
+      if (failed.length > 0) text += `\nFailed: ${failed.join(", ")}`;
+      return { content: [{ type: "text", text }] };
     }
   );
 
@@ -1417,6 +1993,137 @@ export function createSharingServer(dbPath, options = {}) {
       return {
         content: [{ type: "text", text: `Sync conflicts (${rows.length}):\n\n${formatted}` }],
       };
+    }
+  );
+
+  // --- Tool: crow_room_invite ---
+
+  server.tool(
+    "crow_room_invite",
+    "Invite a Crow contact to join your companion room. Generates a room token and sends an encrypted invite via Nostr. The contact receives a notification with a join link.",
+    {
+      contact: z.string().max(500).describe("Crow ID or display name of the contact to invite"),
+      host_name: z.string().max(100).optional().describe("Your display name shown in the invite (defaults to Crow ID)"),
+    },
+    async ({ contact, host_name }) => {
+      const result = await sendRoomInvite(contact, host_name);
+      if (!result.ok) {
+        return { content: [{ type: "text", text: result.message }], isError: true };
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: [
+              result.message,
+              `Room code: ${result.roomCode}`,
+              `Join URL: ${result.joinUrl}`,
+              `They will receive a notification to join your room.`,
+            ].join("\n"),
+          },
+        ],
+      };
+    }
+  );
+
+  // --- Tool: crow_room_close ---
+
+  server.tool(
+    "crow_room_close",
+    "Close an active companion room. Invalidates the room token and optionally notifies participants.",
+    {
+      room_code: z.string().max(50).optional().describe("Room code to close (closes the most recent room if omitted)"),
+    },
+    async ({ room_code }) => {
+      let code = room_code;
+
+      // If no code specified, close the most recent room
+      if (!code) {
+        let latestTime = 0;
+        for (const [rc, room] of _activeRooms) {
+          if (room.hostCrowId === identity.crowId && room.createdAt > latestTime) {
+            latestTime = room.createdAt;
+            code = rc;
+          }
+        }
+      }
+
+      if (!code || !_activeRooms.has(code)) {
+        return {
+          content: [{ type: "text", text: "No active room found to close." }],
+          isError: true,
+        };
+      }
+
+      const room = _activeRooms.get(code);
+
+      // Notify participants that the room is closing
+      for (const contactId of room.participants) {
+        try {
+          const { rows } = await db.execute({
+            sql: "SELECT * FROM contacts WHERE id = ? AND is_blocked = 0",
+            args: [contactId],
+          });
+          if (rows.length > 0) {
+            const envelope = JSON.stringify({
+              type: "crow_social",
+              version: 1,
+              subtype: "room_closed",
+              payload: {
+                room_code: code,
+                host_name: room.hostName,
+                host_crow_id: room.hostCrowId,
+              },
+            });
+            await nostrManager.sendMessage(rows[0], envelope);
+          }
+        } catch {
+          // Best-effort notification
+        }
+      }
+
+      _activeRooms.delete(code);
+
+      return {
+        content: [{ type: "text", text: `Room ${code} closed. Participants have been notified.` }],
+      };
+    }
+  );
+
+  // --- Tool: crow_voice_memo ---
+
+  server.tool(
+    "crow_voice_memo",
+    "Send a text voice memo to a Crow contact. The recipient's companion will speak it aloud using TTS.",
+    {
+      contact: z.string().max(500).describe("Crow ID or display name of the contact"),
+      message: z.string().max(2000).describe("The message text to send as a voice memo"),
+      sender_name: z.string().max(100).optional().describe("Your display name (defaults to Crow ID)"),
+    },
+    async ({ contact, message, sender_name }) => {
+      const result = await sendVoiceMemo(contact, message, sender_name);
+      if (!result.ok) {
+        return { content: [{ type: "text", text: result.message }], isError: true };
+      }
+      return { content: [{ type: "text", text: result.message }] };
+    }
+  );
+
+  // --- Tool: crow_react ---
+
+  server.tool(
+    "crow_react",
+    "Send an emoji reaction to a Crow contact.",
+    {
+      contact: z.string().max(500).describe("Crow ID or display name of the contact"),
+      emoji: z.string().max(20).describe("The emoji to send (e.g. thumbs up, heart, fire)"),
+    },
+    async ({ contact, emoji }) => {
+      const result = await sendReaction(contact, emoji);
+      if (!result.ok) {
+        return { content: [{ type: "text", text: result.message }], isError: true };
+      }
+      return { content: [{ type: "text", text: result.message }] };
     }
   );
 

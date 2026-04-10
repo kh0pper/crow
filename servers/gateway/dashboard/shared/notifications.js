@@ -147,8 +147,17 @@ export function sharedNotifJs(lang) {
 
 // ─── Classic mode: bell icon + health pulse ───
 
-export function headerIconsHtml(lang) {
+export function headerIconsHtml(lang, { companionAvailable } = {}) {
+  const kioskBtn = companionAvailable ? `
+<button class="header-icon-btn kiosk-toggle-btn" id="kiosk-toggle-btn" onclick="toggleKioskMode()" title="${t("kiosk.toggle", lang)}">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <path d="M12 18.5A3.5 3.5 0 1 0 8.5 15"/>
+    <path d="M12 2a7 7 0 0 1 7 7c0 3.5-2 5-3.5 6.5"/>
+    <circle cx="12" cy="9" r="1" fill="currentColor"/>
+  </svg>
+</button>` : "";
   return `
+${kioskBtn}
 <div class="header-icon-btn" id="health-icon-btn" onclick="toggleHealthDropdown(event)" title="${t("notif.systemHealth", lang)}">
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
     <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
@@ -317,6 +326,29 @@ export const headerIconsCss = `
   .health-stat-row:last-child { border-bottom: none; }
   .health-stat-label { color: var(--crow-text-muted); font-size: 0.8rem; }
   .health-stat-value { font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; }
+  /* ─── Kiosk Mode ─── */
+  .kiosk-toggle-btn {
+    border-color: var(--crow-accent);
+    color: var(--crow-accent);
+  }
+  .kiosk-toggle-btn:hover {
+    background: rgba(99,102,241,0.1);
+  }
+  .kiosk-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    background: #000;
+  }
+  .kiosk-overlay.active {
+    display: block;
+  }
+  .kiosk-overlay iframe {
+    width: 100%;
+    height: 100%;
+    border: none;
+  }
   @media (max-width: 768px) {
     .header-dropdown { position: fixed; top: auto; bottom: 60px; right: 8px; left: 8px; min-width: auto; max-width: none; }
     .health-label { display: none; }
@@ -405,8 +437,17 @@ export function headerIconsJs(lang) {
 
 // ─── Tamagotchi mode: animated pixel crow with combined dropdown ───
 
-export function tamagotchiHtml(lang) {
+export function tamagotchiHtml(lang, { companionAvailable } = {}) {
+  const kioskBtn = companionAvailable ? `
+<button class="header-icon-btn kiosk-toggle-btn" id="kiosk-toggle-btn" onclick="toggleKioskMode()" title="${t("kiosk.toggle", lang)}">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <path d="M12 18.5A3.5 3.5 0 1 0 8.5 15"/>
+    <path d="M12 2a7 7 0 0 1 7 7c0 3.5-2 5-3.5 6.5"/>
+    <circle cx="12" cy="9" r="1" fill="currentColor"/>
+  </svg>
+</button>` : "";
   return `
+${kioskBtn}
 <div class="crow-tama-wrap" id="crow-tama-wrap">
   <svg class="crow-tama crow-happy" id="crow-tama" viewBox="0 0 48 56" width="42" height="49" onclick="toggleCrowDropdown(event)">
     <g class="crow-body-group">

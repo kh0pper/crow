@@ -101,6 +101,12 @@ export default {
       return true;
     }
 
+    if (action === "set_kiosk") {
+      await upsertSetting(db, "kiosk_mode", req.body.kiosk === "true" ? "true" : "false");
+      res.json({ ok: true });
+      return true;
+    }
+
     if (action === "set_theme_mode") {
       const mode = req.body.mode === "light" ? "light" : "dark";
       await upsertSetting(db, "blog_theme_mode", mode);

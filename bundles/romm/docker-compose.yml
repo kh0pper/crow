@@ -16,7 +16,7 @@ services:
       romm-db:
         condition: service_healthy
     volumes:
-      - ${ROMM_LIBRARY_PATH}:/romm/library
+      - ${ROMM_LIBRARY_PATH:?Set ROMM_LIBRARY_PATH to your ROM directory}:/romm/library
       - romm-resources:/romm/resources
       - romm-redis:/redis-data
     environment:
@@ -24,8 +24,8 @@ services:
       - DB_PORT=3306
       - DB_NAME=romm
       - DB_USER=romm
-      - DB_PASSWD=${ROMM_DB_PASSWORD}
-      - ROMM_AUTH_SECRET_KEY=${ROMM_AUTH_SECRET_KEY}
+      - DB_PASSWD=${ROMM_DB_PASSWORD:?Set ROMM_DB_PASSWORD}
+      - ROMM_AUTH_SECRET_KEY=${ROMM_AUTH_SECRET_KEY:?Set ROMM_AUTH_SECRET_KEY}
       - IGDB_CLIENT_ID=${IGDB_CLIENT_ID:-}
       - IGDB_CLIENT_SECRET=${IGDB_CLIENT_SECRET:-}
     healthcheck:
@@ -41,12 +41,12 @@ services:
     volumes:
       - romm-db-data:/var/lib/mysql
     environment:
-      - MYSQL_ROOT_PASSWORD=${ROMM_DB_PASSWORD}
+      - MYSQL_ROOT_PASSWORD=${ROMM_DB_PASSWORD:?Set ROMM_DB_PASSWORD}
       - MYSQL_DATABASE=romm
       - MYSQL_USER=romm
-      - MYSQL_PASSWORD=${ROMM_DB_PASSWORD}
+      - MYSQL_PASSWORD=${ROMM_DB_PASSWORD:?Set ROMM_DB_PASSWORD}
     healthcheck:
-      test: ["CMD", "healthcheck", "--connect", "--silent"]
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 30s
       timeout: 10s
       retries: 5
