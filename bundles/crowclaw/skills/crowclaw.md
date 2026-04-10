@@ -83,4 +83,4 @@ New bots get hardened defaults:
 
 ## Panel
 
-Bot dashboard at `http://grackle/dashboard/bots` — bot cards, detail view, profiles, workspace files, deployment history, safety events. Links to OpenClaw Control UI.
+Bot dashboard at `http://<crow-host>/dashboard/bots` — bot cards, detail view, profiles, workspace files, deployment history, safety events. Links to OpenClaw Control UI.
