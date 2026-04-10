@@ -13,3 +13,10 @@ tests/claude-ai/screenshots/
 # CrowClaw runtime config (contains API keys, tokens)
 bundles/crowclaw/config/
 bundles/crowclaw/workspace/
+bundles/crowclaw/~/
+
+# Build artifacts
+__pycache__/
+
+# Credential backups
+.env.bak
