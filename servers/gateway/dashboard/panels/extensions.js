@@ -37,6 +37,7 @@ const ICON_MAP = {
   "message-circle": "\u{1F4AC}",
   gamepad: "\u{1F3AE}",
   "file-text": "\u{1F4C4}",
+  "phone-video": "\u{1F4F9}",
 };
 
 const CATEGORY_COLORS = {
@@ -48,6 +49,7 @@ const CATEGORY_COLORS = {
   networking:   { bg: "rgba(56,189,248,0.12)", color: "#38bdf8" },
   gaming:       { bg: "rgba(244,63,94,0.12)",  color: "#f43f5e" },
   data:         { bg: "rgba(14,165,233,0.12)",  color: "#0ea5e9" },
+  social:       { bg: "rgba(236,72,153,0.12)", color: "#ec4899" },
   finance:      { bg: "rgba(245,158,11,0.12)", color: "#f59e0b" },
   other:        { bg: "rgba(161,161,170,0.12)", color: "#a1a1aa" },
 };
@@ -61,6 +63,7 @@ const CATEGORY_LABELS = {
   networking: "extensions.categoryNetworking",
   gaming: "extensions.categoryGaming",
   data: "extensions.categoryData",
+  social: "extensions.categorySocial",
   finance: "extensions.categoryFinance",
   other: "extensions.categoryOther",
 };
