@@ -248,5 +248,132 @@ export function createStorageServer(dbPath, options = {}) {
     }
   );
 
+  // --- crow_generate_background ---
+  const SDXL_SERVICE_URL = process.env.SDXL_SERVICE_URL || "http://127.0.0.1:3005";
+
+  server.tool(
+    "crow_generate_background",
+    "Generate a new AI background image via SDXL Turbo. The image is set as the companion's current background automatically. IMPORTANT: First generation after cold start takes 15-20s for model loading. If you get a 'loading' response, wait 30 seconds and try ONE more time. Never retry in a loop.",
+    {
+      prompt: z.string().max(500).describe("Description of the background scene to generate (e.g. 'cozy library at night with warm lighting')"),
+      negative_prompt: z.string().max(500).optional().describe("What to avoid in the image"),
+      width: z.number().min(256).max(1536).optional().describe("Image width in pixels (default 1024)"),
+      height: z.number().min(256).max(1536).optional().describe("Image height in pixels (default 576)"),
+    },
+    async ({ prompt, negative_prompt, width, height }) => {
+      try {
+        // Pre-check: is the model currently loading?
+        try {
+          const healthResp = await fetch(`${SDXL_SERVICE_URL}/health`, { signal: AbortSignal.timeout(3000) });
+          if (healthResp.ok) {
+            const health = await healthResp.json();
+            if (health.loading) {
+              return { content: [{ type: "text", text: `The SDXL model is currently loading. Please wait 20-30 seconds and try again once. Do not retry in a loop.` }] };
+            }
+          }
+        } catch { /* health check failed, proceed anyway */ }
+
+        const body = { prompt };
+        if (negative_prompt) body.negative_prompt = negative_prompt;
+        if (width) body.width = width;
+        if (height) body.height = height;
+
+        const resp = await fetch(`${SDXL_SERVICE_URL}/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(60000),
+        });
+
+        if (resp.status === 503) {
+          return { content: [{ type: "text", text: "The SDXL model is loading. Please wait 20-30 seconds and try once more." }] };
+        }
+
+        if (!resp.ok) {
+          const err = await resp.text();
+          return { content: [{ type: "text", text: `SDXL generation failed (${resp.status}): ${err}` }], isError: true };
+        }
+
+        const result = await resp.json();
+        const bgUrl = `${SDXL_SERVICE_URL}${result.url}`;
+
+        return {
+          content: [{
+            type: "text",
+            text: `Background generated in ${result.elapsed_seconds}s.\nPrompt: ${result.prompt}\nSize: ${result.width}x${result.height}\nURL: ${bgUrl}${result.gallery_name ? `\nSaved to gallery: ${result.gallery_name}` : ""}`,
+          }],
+        };
+      } catch (err) {
+        if (err.name === "TimeoutError" || err.name === "AbortError") {
+          return { content: [{ type: "text", text: "Background generation is taking longer than expected (model may be loading for first use). Please wait 30 seconds and try once more." }] };
+        }
+        const msg = err.code === "ECONNREFUSED"
+          ? "SDXL extension is not installed. Install it from Extensions to enable background generation."
+          : `SDXL error: ${err.message}`;
+        return { content: [{ type: "text", text: msg }], isError: true };
+      }
+    }
+  );
+
+  // --- crow_list_backgrounds ---
+  server.tool(
+    "crow_list_backgrounds",
+    "List previously generated background images in the gallery",
+    {},
+    async () => {
+      try {
+        const resp = await fetch(`${SDXL_SERVICE_URL}/gallery`);
+        if (!resp.ok) {
+          return { content: [{ type: "text", text: `Failed to list backgrounds: ${resp.status}` }], isError: true };
+        }
+        const result = await resp.json();
+        if (result.backgrounds.length === 0) {
+          return { content: [{ type: "text", text: "No backgrounds generated yet." }] };
+        }
+        const list = result.backgrounds.map(bg =>
+          `- ${bg.name} (${bg.size_kb}KB, ${bg.created})`
+        ).join("\n");
+        return { content: [{ type: "text", text: `Generated backgrounds:\n${list}` }] };
+      } catch (err) {
+        const msg = err.code === "ECONNREFUSED"
+          ? "SDXL service is not running."
+          : `Error: ${err.message}`;
+        return { content: [{ type: "text", text: msg }], isError: true };
+      }
+    }
+  );
+
+  // --- crow_set_background ---
+  server.tool(
+    "crow_set_background",
+    "Set a previously generated gallery image as the current companion background",
+    {
+      name: z.string().max(200).describe("Gallery filename to set as current background"),
+    },
+    async ({ name }) => {
+      try {
+        const resp = await fetch(`${SDXL_SERVICE_URL}/set/${encodeURIComponent(name)}`, { method: "POST" });
+        if (!resp.ok) {
+          const err = await resp.text();
+          return { content: [{ type: "text", text: `Failed to set background: ${err}` }], isError: true };
+        }
+        const result = await resp.json();
+        return {
+          content: [{ type: "text", text: `Background set to ${result.set_from} (${result.type}).\nURL: ${SDXL_SERVICE_URL}${result.url}` }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // Note: crow_animate_background (SVD video) removed — static SDXL images
+  // make better backgrounds than short looping videos. The SVD model and
+  // /generate-video endpoint still exist on the SDXL service for manual use.
+  //
+  // Note: crow_unload_background_models removed — keeping SDXL loaded avoids
+  // cold start delays (~25s). The /unload endpoint still exists on the SDXL
+  // service for manual use via curl if needed.
+
   return server;
 }

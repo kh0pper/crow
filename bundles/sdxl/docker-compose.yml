@@ -1,0 +1,30 @@
+services:
+  sdxl:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: crow-sdxl
+    container_name: crow-sdxl
+    restart: unless-stopped
+    ports:
+      - "${SDXL_PORT:-3005}:3005"
+    volumes:
+      - sdxl-backgrounds:/app/backgrounds
+      - sdxl-models:/app/models
+    environment:
+      - SDXL_PORT=3005
+      - SDXL_HOST=0.0.0.0
+      - SDXL_BACKGROUNDS_DIR=/app/backgrounds
+      - SDXL_MODEL_CACHE=/app/models
+      - NVIDIA_VISIBLE_DEVICES=all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  sdxl-backgrounds:
+  sdxl-models:

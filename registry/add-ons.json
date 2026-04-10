@@ -9,11 +9,19 @@
       "version": "1.0.0",
       "author": "Crow",
       "category": "productivity",
-      "tags": ["notes", "knowledge-base", "markdown", "vault", "research"],
+      "tags": [
+        "notes",
+        "knowledge-base",
+        "markdown",
+        "vault",
+        "research"
+      ],
       "icon": "book",
       "webUI": null,
       "requires": {
-        "env": ["OBSIDIAN_VAULT_PATH"],
+        "env": [
+          "OBSIDIAN_VAULT_PATH"
+        ],
         "min_ram_mb": 128,
         "min_disk_mb": 50
       },
@@ -28,16 +36,25 @@
     {
       "id": "home-assistant",
       "name": "Home Assistant",
-      "description": "Control your smart home through Home Assistant — lights, temperature, switches, and more",
+      "description": "Control your smart home through Home Assistant \u2014 lights, temperature, switches, and more",
       "type": "mcp-server",
       "version": "1.0.0",
       "author": "Crow",
       "category": "smart-home",
-      "tags": ["smart-home", "iot", "automation", "devices", "sensors"],
+      "tags": [
+        "smart-home",
+        "iot",
+        "automation",
+        "devices",
+        "sensors"
+      ],
       "icon": "home",
       "webUI": null,
       "requires": {
-        "env": ["HA_URL", "HA_TOKEN"],
+        "env": [
+          "HA_URL",
+          "HA_TOKEN"
+        ],
         "min_ram_mb": 256,
         "min_disk_mb": 100
       },
@@ -63,11 +80,19 @@
       "version": "1.0.0",
       "author": "Crow",
       "category": "ai",
-      "tags": ["ai", "local", "embeddings", "privacy", "llm"],
+      "tags": [
+        "ai",
+        "local",
+        "embeddings",
+        "privacy",
+        "llm"
+      ],
       "icon": "brain",
       "webUI": null,
       "requires": {
-        "env": ["OLLAMA_HOST"],
+        "env": [
+          "OLLAMA_HOST"
+        ],
         "min_ram_mb": 2048,
         "min_disk_mb": 5000
       },
@@ -79,22 +104,37 @@
           "required": true
         }
       ],
-      "ports": [11434],
+      "ports": [
+        11434
+      ],
       "notes": "RAM and disk depend on model size. Small models need ~2GB, large models need 8GB+."
     },
     {
       "id": "localai",
       "name": "LocalAI",
-      "description": "OpenAI-compatible local AI server — chat, embeddings, and TTS without a cloud API",
+      "description": "OpenAI-compatible local AI server \u2014 chat, embeddings, and TTS without a cloud API",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "ai",
-      "tags": ["ai", "local", "embeddings", "privacy", "llm", "openai-compatible"],
+      "tags": [
+        "ai",
+        "local",
+        "embeddings",
+        "privacy",
+        "llm",
+        "openai-compatible"
+      ],
       "icon": "brain",
-      "webUI": { "port": 8080, "path": "/", "label": "LocalAI" },
+      "webUI": {
+        "port": 8080,
+        "path": "/",
+        "label": "LocalAI"
+      },
       "requires": {
-        "env": ["LOCALAI_HOST"],
+        "env": [
+          "LOCALAI_HOST"
+        ],
         "min_ram_mb": 4096,
         "min_disk_mb": 10000
       },
@@ -106,22 +146,38 @@
           "required": true
         }
       ],
-      "ports": [8080],
+      "ports": [
+        8080
+      ],
       "notes": "OpenAI-compatible API. Set AI_PROVIDER=openai and AI_BASE_URL=http://localhost:8080/v1 to use with Crow AI Chat."
     },
     {
       "id": "nextcloud",
       "name": "Nextcloud",
-      "description": "Access Nextcloud files via WebDAV mount — sync documents, browse folders",
+      "description": "Access Nextcloud files via WebDAV mount \u2014 sync documents, browse folders",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "productivity",
-      "tags": ["files", "sync", "self-hosted", "webdav", "documents"],
+      "tags": [
+        "files",
+        "sync",
+        "self-hosted",
+        "webdav",
+        "documents"
+      ],
       "icon": "cloud",
-      "webUI": { "port": 8080, "path": "/", "label": "Nextcloud" },
+      "webUI": {
+        "port": 8080,
+        "path": "/",
+        "label": "Nextcloud"
+      },
       "requires": {
-        "env": ["NEXTCLOUD_URL", "NEXTCLOUD_USER", "NEXTCLOUD_PASSWORD"],
+        "env": [
+          "NEXTCLOUD_URL",
+          "NEXTCLOUD_USER",
+          "NEXTCLOUD_PASSWORD"
+        ],
         "min_ram_mb": 512,
         "min_disk_mb": 1024
       },
@@ -144,7 +200,9 @@
           "secret": true
         }
       ],
-      "ports": [8080]
+      "ports": [
+        8080
+      ]
     },
     {
       "id": "immich",
@@ -154,11 +212,24 @@
       "version": "1.0.0",
       "author": "Crow",
       "category": "media",
-      "tags": ["photos", "albums", "self-hosted", "backup", "search"],
+      "tags": [
+        "photos",
+        "albums",
+        "self-hosted",
+        "backup",
+        "search"
+      ],
       "icon": "image",
-      "webUI": { "port": 2283, "path": "/", "label": "Immich" },
+      "webUI": {
+        "port": 2283,
+        "path": "/",
+        "label": "Immich"
+      },
       "requires": {
-        "env": ["IMMICH_URL", "IMMICH_API_KEY"],
+        "env": [
+          "IMMICH_URL",
+          "IMMICH_API_KEY"
+        ],
         "min_ram_mb": 2048,
         "min_disk_mb": 5000
       },
@@ -180,16 +251,28 @@
     {
       "id": "minio",
       "name": "File Storage (MinIO)",
-      "description": "S3-compatible file storage — upload, organize, and share files through Crow",
+      "description": "S3-compatible file storage \u2014 upload, organize, and share files through Crow",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "storage",
-      "tags": ["storage", "files", "s3", "upload", "self-hosted"],
+      "tags": [
+        "storage",
+        "files",
+        "s3",
+        "upload",
+        "self-hosted"
+      ],
       "icon": "archive",
-      "webUI": { "port": 9001, "path": "/", "label": "Console" },
+      "webUI": {
+        "port": 9001,
+        "path": "/",
+        "label": "Console"
+      },
       "requires": {
-        "env": ["MINIO_ROOT_PASSWORD"],
+        "env": [
+          "MINIO_ROOT_PASSWORD"
+        ],
         "min_ram_mb": 256,
         "min_disk_mb": 500
       },
@@ -225,7 +308,10 @@
           "required": false
         }
       ],
-      "ports": [9000, 9001],
+      "ports": [
+        9000,
+        9001
+      ],
       "notes": "After installation, Crow's storage tools (upload, list, delete files) are available automatically. MinIO console at http://localhost:9001."
     },
     {
@@ -236,7 +322,15 @@
       "version": "1.0.0",
       "author": "Crow",
       "category": "media",
-      "tags": ["news", "rss", "youtube", "podcast", "feed", "tts", "digest"],
+      "tags": [
+        "news",
+        "rss",
+        "youtube",
+        "podcast",
+        "feed",
+        "tts",
+        "digest"
+      ],
       "icon": "rss",
       "webUI": null,
       "requires": {
@@ -244,7 +338,11 @@
         "min_disk_mb": 200
       },
       "env_vars": [
-        { "name": "CROW_MEDIA_TASKS", "description": "Enable background tasks", "default": "1" }
+        {
+          "name": "CROW_MEDIA_TASKS",
+          "description": "Enable background tasks",
+          "default": "1"
+        }
       ],
       "notes": "16 MCP tools for news and media management. No external services required. AI analysis uses your configured AI provider. TTS requires edge-tts (npm install edge-tts). Email digests require SMTP + nodemailer."
     },
@@ -256,7 +354,14 @@
       "version": "1.1.0",
       "author": "Crow",
       "category": "media",
-      "tags": ["podcast", "audio", "rss", "itunes", "subscribe", "listen"],
+      "tags": [
+        "podcast",
+        "audio",
+        "rss",
+        "itunes",
+        "subscribe",
+        "listen"
+      ],
       "icon": "mic",
       "webUI": null,
       "requires": {
@@ -266,74 +371,61 @@
       "notes": "Includes both a podcast player (subscribe and listen) and a podcast publisher (create episodes as blog posts). Tables are self-initialized on first use."
     },
     {
-      "id": "openclaw",
-      "name": "OpenClaw",
-      "description": "Run OpenClaw, the open-source personal AI assistant, with Crow as its persistent memory and project backend",
-      "type": "bundle",
+      "id": "crowclaw",
+      "name": "CrowClaw",
+      "description": "Create, configure, deploy, and monitor OpenClaw bots through MCP tools",
+      "type": "mcp-server",
       "version": "1.0.0",
       "author": "Crow",
       "category": "ai",
-      "tags": ["ai", "bot", "discord", "telegram", "whatsapp", "assistant", "chat"],
-      "icon": "message-circle",
-      "webUI": { "port": 18789, "path": "/", "label": "OpenClaw Control" },
-      "requires": {
-        "env": ["OPENCLAW_GATEWAY_TOKEN"],
-        "min_ram_mb": 2048,
-        "min_disk_mb": 1000
-      },
-      "env_vars": [
-        {
-          "name": "OPENCLAW_GATEWAY_TOKEN",
-          "description": "Token for accessing the OpenClaw Control UI",
-          "required": true,
-          "secret": true
-        },
-        {
-          "name": "OPENCLAW_AI_PROVIDER",
-          "description": "AI provider to use (anthropic, openai, google, ollama)",
-          "default": "anthropic",
-          "required": true
-        },
-        {
-          "name": "ANTHROPIC_API_KEY",
-          "description": "Anthropic API key (if using Claude)",
-          "required": false,
-          "secret": true
-        },
-        {
-          "name": "OPENCLAW_DISCORD_TOKEN",
-          "description": "Discord bot token (from Discord Developer Portal)",
-          "required": false,
-          "secret": true
-        },
-        {
-          "name": "OPENCLAW_TELEGRAM_TOKEN",
-          "description": "Telegram bot token (from @BotFather)",
-          "required": false,
-          "secret": true
-        },
-        {
-          "name": "CROW_GATEWAY_URL",
-          "description": "Crow gateway URL for MCP integration (e.g., http://host.docker.internal:3001)",
-          "required": false
-        }
+      "tags": [
+        "ai",
+        "bot",
+        "discord",
+        "telegram",
+        "openclaw",
+        "assistant",
+        "chat"
       ],
-      "ports": [18789],
-      "notes": "Connects to Discord, Telegram, WhatsApp, Slack, Signal, iMessage, and more. Configure chat platform tokens after install. Set CROW_GATEWAY_URL to connect Crow tools."
+      "icon": "bot",
+      "webUI": {
+        "port": 18789,
+        "path": "/",
+        "label": "OpenClaw Control"
+      },
+      "requires": {
+        "min_ram_mb": 256,
+        "min_disk_mb": 100
+      }
     },
     {
       "id": "romm",
       "name": "RoMM",
-      "description": "Retro game library and emulator — browse, organize, and play retro games in the browser",
+      "description": "Retro game library and emulator \u2014 browse, organize, and play retro games in the browser",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "gaming",
-      "tags": ["gaming", "retro", "emulator", "roms", "library"],
+      "tags": [
+        "gaming",
+        "retro",
+        "emulator",
+        "roms",
+        "library"
+      ],
       "icon": "gamepad",
-      "webUI": { "port": 3080, "path": "/", "label": "RoMM" },
+      "webUI": {
+        "port": 3080,
+        "path": "/",
+        "label": "RoMM",
+        "proxyMode": "direct"
+      },
       "requires": {
-        "env": ["ROMM_LIBRARY_PATH", "ROMM_DB_PASSWORD", "ROMM_AUTH_SECRET_KEY"],
+        "env": [
+          "ROMM_LIBRARY_PATH",
+          "ROMM_DB_PASSWORD",
+          "ROMM_AUTH_SECRET_KEY"
+        ],
         "min_ram_mb": 512,
         "min_disk_mb": 2000
       },
@@ -358,29 +450,42 @@
           "secret": true
         }
       ],
-      "ports": [3080],
+      "ports": [
+        3080
+      ],
       "notes": "Organize ROMs into system subdirectories (gba/, snes/, n64/, etc.). IGDB credentials (free) enable automatic cover art and metadata."
     },
     {
       "id": "tailscale",
       "name": "Tailscale",
-      "description": "Private network access — reach Crow from any device on your Tailnet",
+      "description": "Private network access \u2014 reach Crow from any device on your Tailnet",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "networking",
       "official": true,
-      "tags": ["networking", "vpn", "remote-access"]
+      "tags": [
+        "networking",
+        "vpn",
+        "remote-access"
+      ]
     },
     {
       "id": "songbook",
       "name": "Songbook",
-      "description": "Personal chord book — ChordPro charts, transposition, chord diagrams, setlists, audio, and peer sharing",
+      "description": "Personal chord book \u2014 ChordPro charts, transposition, chord diagrams, setlists, audio, and peer sharing",
       "type": "skill",
       "version": "1.0.0",
       "author": "Crow",
       "category": "media",
-      "tags": ["music", "chords", "guitar", "piano", "songbook", "chordpro"],
+      "tags": [
+        "music",
+        "chords",
+        "guitar",
+        "piano",
+        "songbook",
+        "chordpro"
+      ],
       "icon": "music",
       "webUI": null,
       "requires": {
@@ -392,12 +497,18 @@
     {
       "id": "tax",
       "name": "Tax Filing Assistant",
-      "description": "Prepare federal income taxes — document collection, calculation, PDF generation, and guided filing",
+      "description": "Prepare federal income taxes \u2014 document collection, calculation, PDF generation, and guided filing",
       "type": "mcp-server",
       "version": "1.0.0",
       "author": "Crow",
       "category": "finance",
-      "tags": ["tax", "1040", "IRS", "filing", "finance"],
+      "tags": [
+        "tax",
+        "1040",
+        "IRS",
+        "filing",
+        "finance"
+      ],
       "icon": "file-text",
       "webUI": null,
       "requires": {
@@ -405,9 +516,14 @@
         "min_disk_mb": 100
       },
       "env_vars": [
-        { "name": "CROW_TAX_ENCRYPTION_KEY", "description": "Passphrase for encrypting PII at rest", "required": true, "secret": true }
+        {
+          "name": "CROW_TAX_ENCRYPTION_KEY",
+          "description": "Passphrase for encrypting PII at rest",
+          "required": true,
+          "secret": true
+        }
       ],
-      "notes": "Federal returns only — no state. 17 MCP tools including document ingestion (PDF reader). 2024 + 2025 tax years. Generates filled IRS PDFs. PII encrypted at rest. Not a substitute for professional tax advice."
+      "notes": "Federal returns only \u2014 no state. 17 MCP tools including document ingestion (PDF reader). 2024 + 2025 tax years. Generates filled IRS PDFs. PII encrypted at rest. Not a substitute for professional tax advice."
     },
     {
       "id": "data-dashboard",
@@ -418,7 +534,14 @@
       "author": "Crow",
       "category": "data",
       "official": true,
-      "tags": ["data", "sql", "charts", "visualization", "case-study", "research"],
+      "tags": [
+        "data",
+        "sql",
+        "charts",
+        "visualization",
+        "case-study",
+        "research"
+      ],
       "icon": "database",
       "webUI": null,
       "requires": {
@@ -430,13 +553,20 @@
     {
       "id": "nominatim",
       "name": "Nominatim GIS",
-      "description": "Self-hosted geocoding and GIS — forward/reverse geocode, batch geocode data columns, generate GeoJSON, map visualizations",
+      "description": "Self-hosted geocoding and GIS \u2014 forward/reverse geocode, batch geocode data columns, generate GeoJSON, map visualizations",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "data",
       "official": true,
-      "tags": ["gis", "geocoding", "maps", "openstreetmap", "nominatim", "geojson"],
+      "tags": [
+        "gis",
+        "geocoding",
+        "maps",
+        "openstreetmap",
+        "nominatim",
+        "geojson"
+      ],
       "icon": "map",
       "requires": {
         "min_ram_mb": 4096,
@@ -447,16 +577,29 @@
     {
       "id": "browser",
       "name": "Browser Automation",
-      "description": "Stealth browser automation — navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
+      "description": "Stealth browser automation \u2014 navigate, fill forms, take screenshots, extract content via Chrome DevTools Protocol with VNC viewing",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "automation",
-      "tags": ["browser", "automation", "scraping", "cdp", "vnc", "stealth"],
+      "tags": [
+        "browser",
+        "automation",
+        "scraping",
+        "cdp",
+        "vnc",
+        "stealth"
+      ],
       "icon": "globe",
-      "webUI": { "port": 6080, "path": "/vnc.html", "label": "VNC Viewer" },
+      "webUI": {
+        "port": 6080,
+        "path": "/vnc.html",
+        "label": "VNC Viewer"
+      },
       "requires": {
-        "env": ["CROW_BROWSER_VNC_PASSWORD"],
+        "env": [
+          "CROW_BROWSER_VNC_PASSWORD"
+        ],
         "min_ram_mb": 1024,
         "min_disk_mb": 512
       },
@@ -478,126 +621,415 @@
           "default": "6080"
         }
       ],
-      "ports": [6080, 9222],
-      "notes": "11 MCP tools for browser automation. Runs headless Chrome in Docker with Xvfb + VNC. Human-like typing and clicking for stealth. CDP and VNC bind to localhost only — access via SSH tunnel from other machines."
+      "ports": [
+        6080,
+        9222
+      ],
+      "notes": "11 MCP tools for browser automation. Runs headless Chrome in Docker with Xvfb + VNC. Human-like typing and clicking for stealth. CDP and VNC bind to localhost only \u2014 access via SSH tunnel from other machines."
     },
     {
       "id": "jellyfin",
       "name": "Jellyfin",
-      "description": "Self-hosted media server — stream movies, TV shows, and music with AI-powered library management",
+      "description": "Self-hosted media server \u2014 stream movies, TV shows, and music with AI-powered library management",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "media",
-      "tags": ["media", "movies", "tv", "music", "streaming", "self-hosted"],
-      "icon": "film",
-      "webUI": { "port": 8096, "path": "/", "label": "Jellyfin" },
-      "requires": { "env": ["JELLYFIN_API_KEY"], "min_ram_mb": 1024, "min_disk_mb": 2000 },
-      "env_vars": [
-        { "name": "JELLYFIN_URL", "description": "Jellyfin server URL", "default": "http://localhost:8096", "required": true },
-        { "name": "JELLYFIN_API_KEY", "description": "Jellyfin API key (Dashboard > API Keys)", "required": true, "secret": true },
-        { "name": "JELLYFIN_MEDIA_PATH", "description": "Host path for media files (Docker mode)", "required": false },
-        { "name": "JELLYFIN_CONFIG_PATH", "description": "Host path for config (Docker mode)", "required": false }
+      "tags": [
+        "media",
+        "movies",
+        "tv",
+        "music",
+        "streaming",
+        "self-hosted"
       ],
-      "ports": [8096],
+      "icon": "film",
+      "webUI": {
+        "port": 8096,
+        "path": "/",
+        "label": "Jellyfin"
+      },
+      "requires": {
+        "env": [
+          "JELLYFIN_API_KEY"
+        ],
+        "min_ram_mb": 1024,
+        "min_disk_mb": 2000
+      },
+      "env_vars": [
+        {
+          "name": "JELLYFIN_URL",
+          "description": "Jellyfin server URL",
+          "default": "http://localhost:8096",
+          "required": true
+        },
+        {
+          "name": "JELLYFIN_API_KEY",
+          "description": "Jellyfin API key (Dashboard > API Keys)",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "JELLYFIN_MEDIA_PATH",
+          "description": "Host path for media files (Docker mode)",
+          "required": false
+        },
+        {
+          "name": "JELLYFIN_CONFIG_PATH",
+          "description": "Host path for config (Docker mode)",
+          "required": false
+        }
+      ],
+      "ports": [
+        8096
+      ],
       "notes": "Self-host via Docker (set JELLYFIN_MEDIA_PATH) or connect to existing (set JELLYFIN_URL + JELLYFIN_API_KEY). 7 MCP tools for library search, browsing, and playback control."
     },
     {
       "id": "plex",
       "name": "Plex",
-      "description": "Connect your Plex Media Server — browse library, control playback, manage playlists via AI",
+      "description": "Connect your Plex Media Server \u2014 browse library, control playback, manage playlists via AI",
       "type": "mcp-server",
       "version": "1.0.0",
       "author": "Crow",
       "category": "media",
-      "tags": ["media", "movies", "tv", "music", "streaming", "plex"],
+      "tags": [
+        "media",
+        "movies",
+        "tv",
+        "music",
+        "streaming",
+        "plex"
+      ],
       "icon": "play-circle",
-      "webUI": { "port": 32400, "path": "/web/index.html", "label": "Plex", "proxyMode": "direct" },
-      "requires": { "env": ["PLEX_URL", "PLEX_TOKEN"], "min_ram_mb": 128, "min_disk_mb": 100 },
+      "webUI": {
+        "port": 32400,
+        "path": "/web/index.html",
+        "label": "Plex",
+        "proxyMode": "direct"
+      },
+      "requires": {
+        "env": [
+          "PLEX_URL",
+          "PLEX_TOKEN"
+        ],
+        "min_ram_mb": 128,
+        "min_disk_mb": 100
+      },
       "env_vars": [
-        { "name": "PLEX_URL", "description": "Plex server URL (e.g., http://localhost:32400)", "required": true },
-        { "name": "PLEX_TOKEN", "description": "Plex authentication token", "required": true, "secret": true }
+        {
+          "name": "PLEX_URL",
+          "description": "Plex server URL (e.g., http://localhost:32400)",
+          "required": true
+        },
+        {
+          "name": "PLEX_TOKEN",
+          "description": "Plex authentication token",
+          "required": true,
+          "secret": true
+        }
       ],
       "notes": "Connects to existing Plex instance. Get token from browser dev tools on app.plex.tv. Some features require Plex Pass."
     },
     {
       "id": "iptv",
       "name": "IPTV",
-      "description": "IPTV channel management — M3U playlists, EPG program guide, channel groups, and favorites",
+      "description": "IPTV channel management \u2014 M3U playlists, EPG program guide, channel groups, and favorites",
       "type": "mcp-server",
       "version": "1.0.0",
       "author": "Crow",
       "category": "media",
-      "tags": ["iptv", "tv", "m3u", "epg", "channels", "streaming", "live"],
+      "tags": [
+        "iptv",
+        "tv",
+        "m3u",
+        "epg",
+        "channels",
+        "streaming",
+        "live"
+      ],
       "icon": "tv",
       "webUI": null,
-      "requires": { "min_ram_mb": 128, "min_disk_mb": 200 },
+      "requires": {
+        "min_ram_mb": 128,
+        "min_disk_mb": 200
+      },
       "env_vars": [
-        { "name": "CROW_IPTV_RECORDINGS_PATH", "description": "Directory for recorded streams", "default": "~/.crow/data/iptv-recordings" },
-        { "name": "CROW_IPTV_EPG_REFRESH_HOURS", "description": "EPG refresh interval in hours", "default": "12" }
+        {
+          "name": "CROW_IPTV_RECORDINGS_PATH",
+          "description": "Directory for recorded streams",
+          "default": "~/.crow/data/iptv-recordings"
+        },
+        {
+          "name": "CROW_IPTV_EPG_REFRESH_HOURS",
+          "description": "EPG refresh interval in hours",
+          "default": "12"
+        }
       ],
-      "notes": "Lightweight IPTV manager — no Docker required. Add M3U playlists via AI or the panel. EPG data parsed from XMLTV sources."
+      "notes": "Lightweight IPTV manager \u2014 no Docker required. Add M3U playlists via AI or the panel. EPG data parsed from XMLTV sources."
     },
     {
       "id": "kodi",
       "name": "Kodi",
-      "description": "Remote control for Kodi — browse library, control playback, queue media via JSON-RPC",
+      "description": "Remote control for Kodi \u2014 browse library, control playback, queue media via JSON-RPC",
       "type": "mcp-server",
       "version": "1.0.0",
       "author": "Crow",
       "category": "media",
-      "tags": ["media", "kodi", "remote", "xbmc", "htpc", "playback"],
+      "tags": [
+        "media",
+        "kodi",
+        "remote",
+        "xbmc",
+        "htpc",
+        "playback"
+      ],
       "icon": "monitor",
-      "webUI": { "port": 8080, "path": "/", "label": "Kodi Web", "proxyMode": "direct" },
-      "requires": { "env": ["KODI_URL"], "min_ram_mb": 64, "min_disk_mb": 50 },
+      "webUI": {
+        "port": 8080,
+        "path": "/",
+        "label": "Kodi Web",
+        "proxyMode": "direct"
+      },
+      "requires": {
+        "env": [
+          "KODI_URL"
+        ],
+        "min_ram_mb": 64,
+        "min_disk_mb": 50
+      },
       "env_vars": [
-        { "name": "KODI_URL", "description": "Kodi JSON-RPC endpoint (e.g., http://kodi.local:8080)", "required": true },
-        { "name": "KODI_USER", "description": "Kodi web interface username", "required": false },
-        { "name": "KODI_PASSWORD", "description": "Kodi web interface password", "required": false, "secret": true }
+        {
+          "name": "KODI_URL",
+          "description": "Kodi JSON-RPC endpoint (e.g., http://kodi.local:8080)",
+          "required": true
+        },
+        {
+          "name": "KODI_USER",
+          "description": "Kodi web interface username",
+          "required": false
+        },
+        {
+          "name": "KODI_PASSWORD",
+          "description": "Kodi web interface password",
+          "required": false,
+          "secret": true
+        }
       ],
       "notes": "Connects to existing Kodi instance. Enable HTTP remote control in Kodi Settings > Services > Web server."
     },
     {
       "id": "trilium",
       "name": "TriliumNext",
-      "description": "Personal knowledge base — search notes, manage note trees, clip web content, AI-powered organization via ETAPI",
+      "description": "Personal knowledge base \u2014 search notes, manage note trees, clip web content, AI-powered organization via ETAPI",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "productivity",
-      "tags": ["notes", "knowledge-base", "wiki", "organization", "research", "markdown"],
-      "icon": "book-open",
-      "webUI": { "port": 8088, "path": "/", "label": "TriliumNext" },
-      "requires": { "env": ["TRILIUM_ETAPI_TOKEN"], "min_ram_mb": 256, "min_disk_mb": 500 },
-      "env_vars": [
-        { "name": "TRILIUM_URL", "description": "TriliumNext server URL", "default": "http://localhost:8088", "required": true },
-        { "name": "TRILIUM_ETAPI_TOKEN", "description": "ETAPI authentication token", "required": true, "secret": true },
-        { "name": "TRILIUM_DATA_PATH", "description": "Host path for TriliumNext data (Docker mode)", "required": false }
+      "tags": [
+        "notes",
+        "knowledge-base",
+        "wiki",
+        "organization",
+        "research",
+        "markdown"
       ],
-      "ports": [8088],
+      "icon": "book-open",
+      "webUI": {
+        "port": 8088,
+        "path": "/",
+        "label": "TriliumNext"
+      },
+      "requires": {
+        "env": [
+          "TRILIUM_ETAPI_TOKEN"
+        ],
+        "min_ram_mb": 256,
+        "min_disk_mb": 500
+      },
+      "env_vars": [
+        {
+          "name": "TRILIUM_URL",
+          "description": "TriliumNext server URL",
+          "default": "http://localhost:8088",
+          "required": true
+        },
+        {
+          "name": "TRILIUM_ETAPI_TOKEN",
+          "description": "ETAPI authentication token",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "TRILIUM_DATA_PATH",
+          "description": "Host path for TriliumNext data (Docker mode)",
+          "required": false
+        }
+      ],
+      "ports": [
+        8088
+      ],
       "notes": "Self-host via Docker or connect to existing. Get ETAPI token from Options > ETAPI in TriliumNext. 11 MCP tools for note management."
     },
     {
       "id": "knowledge-base",
       "name": "Knowledge Base",
       "version": "1.0.0",
-      "description": "Multilingual knowledge base — create, manage, and share organized collections of guides and articles with structured resource tracking, verification workflows, and LAN discovery",
+      "description": "Multilingual knowledge base \u2014 create, manage, and share organized collections of guides and articles with structured resource tracking, verification workflows, and LAN discovery",
       "type": "mcp-server",
       "author": "Crow",
       "category": "productivity",
-      "tags": ["knowledge-base", "guides", "articles", "bilingual", "resources", "documentation", "wcag"],
+      "tags": [
+        "knowledge-base",
+        "guides",
+        "articles",
+        "bilingual",
+        "resources",
+        "documentation",
+        "wcag"
+      ],
       "icon": "book-open",
       "server": {
         "command": "node",
-        "args": ["server/index.js"],
+        "args": [
+          "server/index.js"
+        ],
         "envKeys": []
       },
       "panel": "panel/knowledge-base.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/knowledge-base.md"],
-      "requires": { "min_ram_mb": 128, "min_disk_mb": 200 },
+      "skills": [
+        "skills/knowledge-base.md"
+      ],
+      "requires": {
+        "min_ram_mb": 128,
+        "min_disk_mb": 200
+      },
       "env_vars": [],
       "notes": "General-purpose knowledge base with multilingual support, LAN discovery (mDNS), WCAG 2.1 AA-compliant public pages, and AI-assisted content verification. No Docker required. 10 MCP tools."
+    },
+    {
+      "id": "companion",
+      "name": "AI Companion",
+      "description": "Voice-interactive AI companion with animated Live2D avatar, powered by Open-LLM-VTuber with Crow BYOAI",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "ai",
+      "tags": [
+        "companion",
+        "voice",
+        "avatar",
+        "vtuber",
+        "live2d"
+      ],
+      "icon": "\ud83d\udc26",
+      "webUI": {
+        "port": 12393,
+        "path": "/",
+        "label": "AI Companion",
+        "proxyMode": "direct"
+      },
+      "requires": {
+        "min_ram_mb": 512,
+        "min_disk_mb": 2000
+      },
+      "env_vars": [
+        {
+          "name": "COMPANION_TTS_VOICE",
+          "description": "Edge TTS voice name",
+          "default": "en-US-AvaMultilingualNeural",
+          "required": false,
+          "secret": false
+        },
+        {
+          "name": "COMPANION_PERSONA",
+          "description": "Personality prompt for the companion",
+          "default": "You are Crow, an AI companion. Helpful, curious, dry wit. Keep responses concise for speech.",
+          "required": false,
+          "secret": false
+        },
+        {
+          "name": "COMPANION_CHARACTER_NAME",
+          "description": "Display name for the companion",
+          "default": "Crow",
+          "required": false,
+          "secret": false
+        }
+      ],
+      "notes": "Uses Crow AI Profiles for LLM inference. Voice recognition runs locally. TTS uses Edge TTS (free). Requires Tailscale HTTPS for microphone access."
+    },
+    {
+      "id": "coturn",
+      "name": "TURN Server (coturn)",
+      "description": "Self-hosted TURN relay for WebRTC voice chat. Enables NAT traversal for remote companion access when STUN alone is not sufficient.",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "infrastructure",
+      "tags": ["webrtc", "turn", "nat", "voice", "relay", "infrastructure"],
+      "icon": "radio",
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "skills": [],
+      "requires": {
+        "env": ["TURN_SECRET"],
+        "min_ram_mb": 64,
+        "min_disk_mb": 50
+      },
+      "env_vars": [
+        {
+          "name": "TURN_SECRET",
+          "description": "Shared secret for generating time-limited TURN credentials",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "TURN_REALM",
+          "description": "TURN server realm (usually your domain)",
+          "default": "crow.local",
+          "required": false,
+          "secret": false
+        },
+        {
+          "name": "TURN_EXTERNAL_IP",
+          "description": "Public IP of this machine (required for remote access, leave empty for LAN-only)",
+          "required": false,
+          "secret": false
+        }
+      ],
+      "ports": [3478, 5349],
+      "webUI": null,
+      "notes": "Optional for Tailscale-only deployments (STUN is sufficient). Required when users connect from restrictive networks. The companion gateway generates time-limited credentials via /api/turn-credentials."
+    },
+    {
+      "id": "sdxl",
+      "name": "SDXL Background Generator",
+      "version": "1.0.0",
+      "description": "AI-generated backgrounds for the companion avatar using SDXL Turbo. Requires NVIDIA GPU.",
+      "type": "bundle",
+      "author": "Crow",
+      "category": "ai",
+      "tags": ["ai", "gpu", "image-generation", "sdxl", "backgrounds"],
+      "icon": "image",
+      "webUI": null,
+      "requires": {
+        "min_ram_mb": 4096,
+        "min_disk_mb": 25000,
+        "gpu": true
+      },
+      "env_vars": [
+        {
+          "name": "SDXL_PORT",
+          "description": "SDXL service port",
+          "default": "3005",
+          "required": false,
+          "secret": false
+        }
+      ],
+      "ports": [3005],
+      "notes": "Requires nvidia-container-toolkit. Models (~25GB) download on first start. Used by companion and storage server's crow_generate_background tool."
     }
   ]
 }
