@@ -1,0 +1,47 @@
+#!/bin/bash
+set -e
+
+echo "=== Crow AI Companion ==="
+
+# Check for additional Live2D models
+bash /app/scripts/download-models.sh
+
+# Patch Open-LLM-VTuber for reliable multi-turn tool calling
+echo "Applying tool calling patches..."
+python3 /app/scripts/patch-tool-calling.py
+
+# Patch auto-grouping for household mode (if profiles are configured)
+echo "Applying auto-group patch..."
+python3 /app/scripts/patch-auto-group.py
+
+# Generate conf.yaml from Crow's AI profiles
+echo "Generating config from Crow AI profiles..."
+APP_DIR=/app uv run python3 /app/scripts/generate-config.py
+
+# Start notification bridge in the background
+echo "Starting notification bridge..."
+uv run python3 /app/scripts/notify-bridge.py &
+
+# Inject Crow Dark Editorial theme (CSS into <head>, must run first)
+echo "Injecting theme..."
+bash /app/scripts/inject-theme.sh
+
+# Inject SDXL background auto-refresh into frontend
+echo "Injecting background refresh..."
+bash /app/scripts/inject-bg-refresh.sh
+
+# Inject window manager (must run after bg-refresh for shared WS bridge)
+echo "Injecting window manager..."
+bash /app/scripts/inject-wm.sh
+
+# Inject WebRTC audio bridge (must run after bg-refresh for shared WS bridge)
+echo "Injecting WebRTC audio bridge..."
+bash /app/scripts/inject-webrtc.sh
+
+# Inject voice panel (must run after WebRTC for stream API access)
+echo "Injecting voice panel..."
+bash /app/scripts/inject-voice-panel.sh
+
+# Start Open-LLM-VTuber
+echo "Starting companion server..."
+exec uv run run_server.py

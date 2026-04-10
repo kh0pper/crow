@@ -1,0 +1,64 @@
+{
+  "id": "companion",
+  "name": "AI Companion",
+  "version": "1.0.0",
+  "description": "Voice-interactive AI companion with animated Live2D avatar. Powered by Open-LLM-VTuber with Crow's BYOAI profiles.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "ai",
+  "tags": ["companion", "voice", "avatar", "vtuber", "live2d"],
+  "icon": "🐦",
+  "docker": {
+    "composefile": "docker-compose.yml"
+  },
+  "ports": [12393],
+  "webUI": {
+    "port": 12393,
+    "path": "/",
+    "label": "AI Companion",
+    "proxyMode": "direct"
+  },
+  "skills": ["skills/companion.md"],
+  "env_vars": [
+    {
+      "name": "COMPANION_AVATAR",
+      "description": "Live2D avatar model (bundled: mao_pro, shizuku, hiyori, epsilon, hibiki, mark, simple; eikanya: senko, xinnong, dafeng, aijier, shengluyisi, biaoqiang, aersasi, ak12, an94)",
+      "default": "mao_pro",
+      "required": false,
+      "secret": false
+    },
+    {
+      "name": "EIKANYA_MODELS_DIR",
+      "description": "Path to downloaded Eikanya Live2D models directory",
+      "default": "",
+      "required": false,
+      "secret": false
+    },
+    {
+      "name": "COMPANION_TTS_VOICE",
+      "description": "Edge TTS voice (run 'edge-tts --list-voices' for options)",
+      "default": "en-US-AvaMultilingualNeural",
+      "required": false,
+      "secret": false
+    },
+    {
+      "name": "COMPANION_PERSONA",
+      "description": "Persona prompt for the companion's personality",
+      "default": "You are Crow, an AI companion and assistant. You are helpful, curious, and have a dry wit. Keep responses conversational and concise since they will be spoken aloud.",
+      "required": false,
+      "secret": false
+    },
+    {
+      "name": "COMPANION_CHARACTER_NAME",
+      "description": "Display name for the companion",
+      "default": "Crow",
+      "required": false,
+      "secret": false
+    }
+  ],
+  "requires": {
+    "min_ram_mb": 512,
+    "min_disk_mb": 2000
+  },
+  "notes": "Uses Crow's AI Profiles for LLM inference (configure in Settings > AI Profiles). Voice recognition (ASR) runs locally on CPU. Text-to-speech uses Microsoft Edge TTS (free, requires internet). Access via Tailscale HTTPS for microphone support."
+}
