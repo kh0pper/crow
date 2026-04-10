@@ -1,0 +1,43 @@
+{
+  "id": "sdxl",
+  "name": "SDXL Background Generator",
+  "version": "1.0.0",
+  "description": "AI-generated backgrounds for the companion avatar using SDXL Turbo. Requires NVIDIA GPU.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "ai",
+  "tags": ["ai", "gpu", "image-generation", "sdxl", "backgrounds"],
+  "icon": "image",
+  "docker": { "composefile": "docker-compose.yml" },
+  "ports": [3005],
+  "webUI": null,
+  "requires": {
+    "min_ram_mb": 4096,
+    "min_disk_mb": 25000,
+    "gpu": true
+  },
+  "env_vars": [
+    {
+      "name": "SDXL_PORT",
+      "description": "SDXL service port",
+      "default": "3005",
+      "required": false,
+      "secret": false
+    },
+    {
+      "name": "SDXL_BACKGROUNDS_DIR",
+      "description": "Directory for generated background images and gallery",
+      "default": "/app/backgrounds",
+      "required": false,
+      "secret": false
+    },
+    {
+      "name": "SDXL_MODEL_CACHE",
+      "description": "HuggingFace model cache directory (SDXL Turbo + SVD weights)",
+      "default": "/app/models",
+      "required": false,
+      "secret": false
+    }
+  ],
+  "notes": "Requires nvidia-container-toolkit on the host. Models (~25GB) download automatically on first start. Used by the AI Companion for dynamic backgrounds and by the storage server's crow_generate_background tool."
+}

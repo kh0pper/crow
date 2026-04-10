@@ -106,6 +106,14 @@ export const TOOL_MANIFESTS = {
       crow_update_instance: { params: "instance_id, name?, gateway_url?, tailscale_ip?, sync_profile?, topics?, is_home?, status?", desc: "Update instance details" },
       crow_revoke_instance: { params: "instance_id, confirm", desc: "Revoke an instance (irreversible)" },
       crow_list_sync_conflicts: { params: "table_name?, unresolved_only?, limit?", desc: "List sync conflicts between instances" },
+      crow_room_invite: { params: "contact, host_name?", desc: "Invite contact to companion room via Nostr" },
+      crow_room_close: { params: "room_code?", desc: "Close active companion room" },
+      crow_voice_memo: { params: "contact, message, sender_name?", desc: "Send text voice memo (recipient's companion speaks it)" },
+      crow_react: { params: "contact, emoji", desc: "Send emoji reaction to a contact" },
+      crow_relay: { params: "instance, task", desc: "Relay a natural language task to a remote Crow instance for execution" },
+      crow_create_message_group: { params: "name, members[], color?", desc: "Create a message group with contacts" },
+      crow_list_message_groups: { params: "", desc: "List message groups and their members" },
+      crow_send_group_message: { params: "group, message", desc: "Send message to all group members (fan-out encrypted DMs)" },
     },
   },
 
@@ -149,13 +157,16 @@ export const TOOL_MANIFESTS = {
 
   storage: {
     displayName: "Storage",
-    description: "S3-compatible file storage: upload (base64 or presigned URL), list, download URLs, delete, quota management",
+    description: "S3-compatible file storage: upload (base64 or presigned URL), list, download URLs, delete, quota management. SDXL background generation for companion avatar.",
     tools: {
       crow_upload_file: { params: "file_name, mime_type?, data_base64?, bucket?, reference_type?, reference_id?", desc: "Upload file" },
       crow_list_files: { params: "bucket?, mime_type?, reference_type?, reference_id?, limit?", desc: "List files" },
       crow_get_file_url: { params: "s3_key, expiry?, bucket?", desc: "Get download URL" },
       crow_delete_file: { params: "s3_key, bucket?, confirm_token", desc: "Permanently delete a file (cannot be undone). Returns preview + token on first call; pass token back to execute." },
       crow_storage_stats: { params: "", desc: "Storage statistics" },
+      crow_generate_background: { params: "prompt, negative_prompt?, width?, height?", desc: "Generate SDXL Turbo background (requires SDXL extension)" },
+      crow_list_backgrounds: { params: "", desc: "List generated backgrounds in gallery (images + videos)" },
+      crow_set_background: { params: "name", desc: "Set gallery item as current companion background" },
     },
   },
 };
