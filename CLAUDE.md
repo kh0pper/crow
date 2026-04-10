@@ -336,6 +336,18 @@ Skills are markdown files in `skills/`. They are loaded by Claude on demand — 
 4. Run `npm run sync-skills` to update `docs/skills/index.md`
 5. Add to VitePress sidebar if creating a new guide page
 
+### Adding a new bundle add-on
+
+Full checklist for adding a bundle that appears on the Extensions page and (if it has a panel) in the sidebar:
+
+1. Create bundle directory at `bundles/<id>/` with `manifest.json`, scripts, panel, skills
+2. Add the JSON entry to `registry/add-ons.json` (without this, the Extensions page won't show it)
+3. If the `icon` value is new: add it to `ICON_MAP` in `servers/gateway/dashboard/panels/extensions.js`
+4. If the `category` is new: add to `CATEGORY_COLORS` and `CATEGORY_LABELS` in `extensions.js`, add `extensions.category*` i18n key in `servers/gateway/dashboard/shared/i18n.js`, add to `CATEGORY_TO_GROUP` in `servers/gateway/dashboard/nav-registry.js`
+5. If the bundle has a panel: ensure the panel file is at `bundles/<id>/panel/<id>.js` — the install flow copies it to `~/.crow/panels/` and adds to `~/.crow/panels.json`
+6. If the bundle has skills: add to `skills/superpowers.md` trigger table
+7. Restart both gateways after any changes
+
 ### Adding a Crow's Nest panel
 
 1. Create a JS module exporting `{ id, name, icon, route, navOrder, handler }` (see `templates/dashboard-panel.js`)

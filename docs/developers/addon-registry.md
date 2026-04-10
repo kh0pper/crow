@@ -64,9 +64,9 @@ The registry is a JSON file at `registry/add-ons.json`:
 | `type` | Yes | `panel`, `mcp-server`, `skill`, or `bundle` |
 | `version` | Yes | Semver version |
 | `author` | Yes | GitHub username or handle |
-| `category` | Yes | Category: `ai`, `media`, `productivity`, `storage`, `smart-home`, `networking`, `gaming`, `data`, `finance` (unknown values display as "other") |
+| `category` | Yes | Category: `ai`, `media`, `productivity`, `storage`, `smart-home`, `networking`, `social`, `gaming`, `data`, `finance`, `other` |
 | `tags` | No | Array of searchable tags (max 10) |
-| `icon` | No | Icon key: `brain`, `cloud`, `image`, `book`, `home`, `rss`, `mic`, `music`, `message-circle`, `gamepad`, `archive`, `file-text` |
+| `icon` | No | Icon key: `brain`, `cloud`, `image`, `book`, `home`, `rss`, `mic`, `music`, `message-circle`, `gamepad`, `archive`, `file-text`, `phone-video` |
 | `requires.env` | No | Required environment variable names |
 | `requires.min_ram_mb` | No | Minimum RAM in MB |
 | `requires.min_disk_mb` | No | Minimum disk space in MB |
@@ -130,6 +130,18 @@ A maintainer reviews your submission for:
 ### 6. Listing
 
 Once approved, the maintainer adds your add-on to `registry/add-ons.json` and merges. Your add-on is now discoverable by all Crow users.
+
+::: warning Maintainer Checklist
+Adding a registry entry alone is not enough. The maintainer must complete **all** of these steps or the add-on will be invisible or broken in the UI:
+
+1. **Registry entry** — Add the JSON entry to `registry/add-ons.json`
+2. **Icon map** — If the `icon` value is new, add it to `ICON_MAP` in `servers/gateway/dashboard/panels/extensions.js`
+3. **Category color** — If the `category` is new, add it to `CATEGORY_COLORS` in `extensions.js`
+4. **Category label** — If the `category` is new, add it to `CATEGORY_LABELS` in `extensions.js`
+5. **i18n key** — If the `category` is new, add an `extensions.category*` key to `servers/gateway/dashboard/shared/i18n.js`
+6. **Nav group mapping** — If the `category` is new, add it to `CATEGORY_TO_GROUP` in `servers/gateway/dashboard/nav-registry.js` (determines which sidebar group the panel appears in)
+7. **Gateway restart** — Required after any registry or panel changes
+:::
 
 ## Turnaround
 
