@@ -21,7 +21,7 @@ A Crow add-on is a packaged extension that other users can install. It follows a
 | Type | What it contains | Installed to |
 |---|---|---|
 | `panel` | Crow's Nest panel | `~/.crow/panels/` |
-| `mcp-server` | MCP server (factory + stdio) | `~/.crow/servers/` |
+| `mcp-server` | MCP server (factory + stdio) | Registered in `~/.crow/mcp-addons.json` |
 | `skill` | Skill markdown file | `~/.crow/skills/` |
 | `bundle` | Multiple components | Each to its respective location |
 
@@ -31,32 +31,60 @@ Every add-on has a `manifest.json` at its root:
 
 ```json
 {
-  "name": "crow-weather-panel",
+  "id": "weather",
+  "name": "Weather Panel",
   "version": "1.0.0",
   "type": "panel",
   "description": "Weather panel showing local forecast",
   "author": "Your Name",
   "license": "MIT",
-  "crow": {
-    "minVersion": "1.0.0"
+  "category": "productivity",
+  "tags": ["weather", "dashboard"],
+  "icon": "cloud",
+  "panel": "panel/index.js",
+  "requires": {
+    "env": ["WEATHER_API_KEY"]
   },
-  "components": [
-    {
-      "type": "panel",
-      "id": "weather",
-      "entry": "panel/index.js"
-    }
-  ],
-  "dependencies": {
-    "node-fetch": "^3.0.0"
-  },
-  "envVars": [
+  "env_vars": [
     {
       "name": "WEATHER_API_KEY",
       "description": "API key from openweathermap.org",
-      "required": true
+      "required": true,
+      "secret": true
     }
   ]
+}
+```
+
+Here is a more complete example (a bundle with Docker, an MCP server, a panel, and a skill):
+
+```json
+{
+  "id": "jellyfin",
+  "name": "Jellyfin",
+  "version": "1.0.0",
+  "type": "bundle",
+  "description": "Self-hosted media server with AI-powered library management",
+  "author": "Crow",
+  "category": "media",
+  "tags": ["media", "movies", "tv", "music", "streaming"],
+  "icon": "film",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "envKeys": ["JELLYFIN_URL", "JELLYFIN_API_KEY"]
+  },
+  "panel": "panel/jellyfin.js",
+  "skills": ["skills/jellyfin.md"],
+  "requires": { "env": ["JELLYFIN_API_KEY"], "min_ram_mb": 1024, "min_disk_mb": 2000 },
+  "env_vars": [
+    { "name": "JELLYFIN_URL", "description": "Jellyfin server URL", "default": "http://localhost:8096", "required": true },
+    { "name": "JELLYFIN_API_KEY", "description": "Jellyfin API key", "required": true, "secret": true }
+  ],
+  "ports": [8096],
+  "webUI": { "port": 8096, "path": "/", "label": "Jellyfin" },
+  "notes": "Self-host via Docker or connect to an existing Jellyfin instance."
 }
 ```
 
@@ -64,16 +92,26 @@ Every add-on has a `manifest.json` at its root:
 
 | Field | Required | Description |
 |---|---|---|
-| `name` | Yes | Package name (lowercase, hyphens ok) |
+| `id` | Yes | Unique identifier (lowercase, hyphens only) |
+| `name` | Yes | Human-readable name |
 | `version` | Yes | Semver version string |
 | `type` | Yes | One of: `panel`, `mcp-server`, `skill`, `bundle` |
 | `description` | Yes | Short description (under 200 characters) |
 | `author` | Yes | Author name or handle |
 | `license` | Yes | SPDX license identifier |
-| `crow.minVersion` | No | Minimum Crow version required |
-| `components` | Yes | Array of component definitions |
-| `dependencies` | No | npm dependencies (installed automatically) |
-| `envVars` | No | Required environment variables |
+| `category` | Yes | Category: `ai`, `media`, `productivity`, `storage`, `smart-home`, `networking`, `gaming`, `data`, `finance` |
+| `tags` | No | Array of searchable tags (max 10) |
+| `icon` | No | Icon key (see [Supported icon keys](#supported-icon-keys) below) |
+| `docker` | No | Docker config: `{ "composefile": "docker-compose.yml" }` |
+| `server` | No | MCP server config: `{ "command", "args", "envKeys" }` |
+| `panel` | No | Path to Crow's Nest panel module (relative to add-on root) |
+| `panelRoutes` | No | Path to additional Express routes for the panel |
+| `skills` | No | Array of skill markdown file paths (relative to add-on root) |
+| `requires` | No | Requirements: `env` (array), `min_ram_mb`, `min_disk_mb`, `gpu` (boolean) |
+| `env_vars` | No | Detailed env var definitions (name, description, required, secret, default) |
+| `ports` | No | Ports used by the add-on |
+| `webUI` | No | Web interface config (see below), or `null` for headless add-ons |
+| `notes` | No | Additional notes shown on the Extensions page |
 
 ### `webUI` Field
 
@@ -95,7 +133,11 @@ Add-ons that provide a browser-accessible interface should declare a `webUI` obj
 | `path` | URL path to append after the port (e.g., `/` or `/admin`) |
 | `label` | Button text shown on launcher tiles and the Extensions page |
 
-Set `webUI` to `null` for headless add-ons (no web interface). When `webUI` is present, the Crow's Nest launcher shows an "Open" button linking to `http://localhost:<port><path>`.
+Set `webUI` to `null` for headless add-ons (no web interface). The Crow's Nest home screen tile uses this logic for click targets:
+
+1. If the bundle has a **panel**, the tile links to the panel (`/dashboard/<id>`)
+2. If the bundle has **webUI but no panel**, the tile opens the web interface
+3. If the bundle has **neither**, the tile links to the Extensions page
 
 ### `panel` Field
 
@@ -123,49 +165,48 @@ If you are submitting an add-on to the registry, you can propose an SVG logo to 
 
 ```
 crow-weather-panel/
-  manifest.json
+  manifest.json              # "panel": "panel/index.js"
   panel/
-    index.js          # Panel manifest + handler
-    assets/           # Optional static files
+    index.js                 # Panel manifest + handler
+    assets/                  # Optional static files
 ```
 
 ### MCP server add-on
 
 ```
 crow-task-server/
-  manifest.json
+  manifest.json              # "server": { "command": "node", "args": ["server/index.js"], "envKeys": [...] }
   server/
-    server.js         # Factory function
-    index.js          # Stdio entry point
+    server.js                # Factory function
+    index.js                 # Stdio entry point
   schema/
-    init.sql          # Database tables (run during install)
+    init.sql                 # Database tables (run during install)
   skills/
-    tasks.md          # Optional companion skill
+    tasks.md                 # Optional companion skill
 ```
 
 ### Skill add-on
 
 ```
 crow-pomodoro-skill/
-  manifest.json
+  manifest.json              # "skills": ["skills/pomodoro.md"]
   skills/
-    pomodoro.md       # Skill file
+    pomodoro.md              # Skill file
 ```
 
-### Bundle add-on
+### Bundle add-on (Docker + server + panel + skill)
 
 ```
-crow-project-manager/
-  manifest.json
+crow-media-manager/
+  manifest.json              # All fields: docker, server, panel, skills
+  docker-compose.yml         # Referenced by "docker": { "composefile": "docker-compose.yml" }
   server/
     server.js
     index.js
   panel/
     index.js
   skills/
-    project-manager.md
-  schema/
-    init.sql
+    media-manager.md
 ```
 
 ## Testing Locally
@@ -198,7 +239,7 @@ When a bundle add-on is installed, it automatically appears as a tile on the Cro
 
 The `icon` field in your manifest should be one of these feather-style icon names:
 
-`brain`, `cloud`, `image`, `home`, `book`, `rss`, `mic`, `message-circle`, `gamepad`, `archive`
+`brain`, `cloud`, `image`, `home`, `book`, `rss`, `mic`, `music`, `message-circle`, `gamepad`, `archive`, `file-text`
 
 Unknown icon keys fall back to a first-letter circle.
 
