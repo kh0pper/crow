@@ -1,0 +1,35 @@
+services:
+  companion:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: crow-companion
+    container_name: crow-companion
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - companion-models:/app/models
+      - companion-cache:/app/cache
+      - companion-history:/app/chat_history
+      - ${EIKANYA_MODELS_DIR:-}:/app/live2d-models/eikanya:ro
+      - ${CROW_DB_PATH:-~/.crow/data/crow.db}:/crow-data/crow.db:ro
+    environment:
+      - COMPANION_TTS_VOICE=${COMPANION_TTS_VOICE:-en-US-AvaMultilingualNeural}
+      - COMPANION_PERSONA=${COMPANION_PERSONA:-You are Crow, an AI companion and assistant. You are helpful, curious, and have a dry wit. Keep responses conversational and concise since they will be spoken aloud.}
+      - COMPANION_CHARACTER_NAME=${COMPANION_CHARACTER_NAME:-Crow}
+      - COMPANION_AVATAR=${COMPANION_AVATAR:-mao_pro}
+      - COMPANION_AI_PROFILE=${COMPANION_AI_PROFILE:-}
+      - COMPANION_AI_MODEL=${COMPANION_AI_MODEL:-}
+      - COMPANION_BIND_HOST=${COMPANION_BIND_HOST:-127.0.0.1}
+      - CROW_DB_PATH=/crow-data/crow.db
+      - SDXL_HOST=${SDXL_HOST:-localhost}
+      - SDXL_PORT=${SDXL_PORT:-3005}
+      - CROW_GATEWAY_URL=${CROW_GATEWAY_URL:-}
+      - COMPANION_PROFILE_1_NAME=${COMPANION_PROFILE_1_NAME:-}
+      - COMPANION_PROFILE_1_COLOR=${COMPANION_PROFILE_1_COLOR:-#818cf8}
+    mem_limit: 2g
+
+volumes:
+  companion-models:
+  companion-cache:
+  companion-history:
