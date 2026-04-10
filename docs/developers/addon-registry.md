@@ -64,14 +64,20 @@ The registry is a JSON file at `registry/add-ons.json`:
 | `type` | Yes | `panel`, `mcp-server`, `skill`, or `bundle` |
 | `version` | Yes | Semver version |
 | `author` | Yes | GitHub username or handle |
-| `category` | Yes | Category: `productivity`, `ai`, `media`, `smart-home`, `data` |
+| `category` | Yes | Category: `ai`, `media`, `productivity`, `storage`, `smart-home`, `networking`, `gaming`, `data`, `finance` (unknown values display as "other") |
 | `tags` | No | Array of searchable tags (max 10) |
-| `icon` | No | Icon key: `brain`, `cloud`, `image`, `book`, `home` |
+| `icon` | No | Icon key: `brain`, `cloud`, `image`, `book`, `home`, `rss`, `mic`, `music`, `message-circle`, `gamepad`, `archive`, `file-text` |
 | `requires.env` | No | Required environment variable names |
 | `requires.min_ram_mb` | No | Minimum RAM in MB |
 | `requires.min_disk_mb` | No | Minimum disk space in MB |
+| `requires.gpu` | No | Set `true` if the add-on needs a GPU |
 | `env_vars` | No | Detailed env var descriptions (name, description, required, secret, default) |
 | `ports` | No | Ports used by the add-on |
+| `webUI` | No | Web interface: `{ "port", "path", "label" }` or `null` for headless add-ons |
+| `server` | No | MCP server config: `{ "command", "args", "envKeys" }` |
+| `panel` | No | Path to Crow's Nest panel module |
+| `skills` | No | Array of skill file paths |
+| `docker` | No | Docker config: `{ "composefile": "docker-compose.yml" }` |
 | `notes` | No | Additional notes (shown in italics on the Extensions card) |
 
 ## Submission Process
