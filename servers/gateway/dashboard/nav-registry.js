@@ -36,6 +36,7 @@ const CATEGORY_TO_GROUP = {
   content: "content",
   media: "media",
   ai: "tools",
+  social: "core",
   productivity: "tools",
   system: "system",
 };
