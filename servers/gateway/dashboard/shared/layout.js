@@ -81,6 +81,7 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
   ${dashboardCss()}
 </head>
 <body class="${themeClass}">
+  <div id="kiosk-overlay" class="kiosk-overlay"></div>
   <div class="dashboard">
     <aside class="sidebar">
       <div class="sidebar-header">
@@ -125,6 +126,49 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
         body: 'action=set_theme_mode&mode=' + (document.body.classList.contains('theme-light') ? 'light' : 'dark')
       });
     }
+    // ─── Kiosk Mode ───
+    function toggleKioskMode() {
+      var overlay = document.getElementById('kiosk-overlay');
+      if (overlay.classList.contains('active')) {
+        exitKioskMode();
+        return;
+      }
+      var companionUrl = 'https://' + location.hostname + ':12393/';
+      var iframe = document.createElement('iframe');
+      iframe.src = companionUrl;
+      iframe.setAttribute('allow', 'microphone; camera; autoplay; fullscreen');
+      iframe.setAttribute('allowfullscreen', '');
+      iframe.style.cssText = 'width:100%;height:100%;border:none';
+      overlay.appendChild(iframe);
+      overlay.classList.add('active');
+      fetch('/dashboard/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'action=set_kiosk&kiosk=true'
+      });
+    }
+    function exitKioskMode() {
+      var overlay = document.getElementById('kiosk-overlay');
+      overlay.classList.remove('active');
+      while (overlay.firstChild) overlay.removeChild(overlay.firstChild);
+      fetch('/dashboard/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'action=set_kiosk&kiosk=false'
+      });
+    }
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape' && document.getElementById('kiosk-overlay').classList.contains('active')) {
+        exitKioskMode();
+        e.stopPropagation();
+      }
+    });
+
+    // Listen for companion requesting exit
+    window.addEventListener('message', function(e) {
+      if (e.data === 'crow-exit-kiosk') exitKioskMode();
+    });
+
     function toggleSidebar() {
       var sidebar = document.querySelector('.sidebar');
       if (sidebar.classList.contains('open')) {

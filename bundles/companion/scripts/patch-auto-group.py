@@ -420,6 +420,168 @@ def patch_room_token_validation():
     print("patch-auto-group: room token validation enabled")
 
 
+def patch_auto_group_stale_check():
+    """Fix auto-grouping to skip stale clients not in client_connections.
+
+    The existing auto-group iterates client_group_map to find an existing client,
+    but disconnected clients may still have entries. This causes the new client
+    to join a group with a ghost member, leading to KeyError when the group
+    conversation tries to access that member's ServiceContext.
+    """
+    with open(HANDLER_FILE, "r") as f:
+        content = f.read()
+
+    if "# [crow-patch] stale-client-check" in content:
+        print("patch-auto-group: stale-client-check already patched")
+        return
+
+    # The auto-group loop finds ANY uid in client_group_map, even disconnected ones.
+    # Add a check that the uid is still in client_connections.
+    old = (
+        '        # Find any existing client to group with\n'
+        '        existing_uid = None\n'
+        '        for uid, gid in self.chat_group_manager.client_group_map.items():\n'
+        '            if uid != client_uid:\n'
+        '                existing_uid = uid\n'
+        '                break'
+    )
+
+    new = (
+        '        # Find any existing client to group with\n'
+        '        # [crow-patch] stale-client-check\n'
+        '        # Only consider clients that are still connected\n'
+        '        existing_uid = None\n'
+        '        for uid, gid in self.chat_group_manager.client_group_map.items():\n'
+        '            if uid != client_uid and uid in self.client_connections:\n'
+        '                existing_uid = uid\n'
+        '                break'
+    )
+
+    if old not in content:
+        print("patch-auto-group: WARNING - could not find stale-client-check patch target",
+              file=sys.stderr)
+        return
+
+    content = content.replace(old, new)
+
+    with open(HANDLER_FILE, "w") as f:
+        f.write(content)
+
+    print("patch-auto-group: stale-client-check enabled")
+
+
+def patch_group_conversation_member_filter():
+    """Filter stale members from group conversations before processing.
+
+    When process_group_conversation receives group_members, some members
+    may have disconnected since the group was formed. Accessing their
+    ServiceContext raises KeyError. This patch filters group_members to
+    only include UIDs present in client_contexts.
+    """
+    group_file = "/app/src/open_llm_vtuber/conversations/group_conversation.py"
+
+    with open(group_file, "r") as f:
+        content = f.read()
+
+    if "# [crow-patch] filter-stale-members" in content:
+        print("patch-auto-group: filter-stale-members already patched")
+        return
+
+    # Add filtering right after the function starts, before any member access
+    old = (
+        '    # Create TTSTaskManager for each member\n'
+        '    tts_managers = {uid: TTSTaskManager() for uid in group_members}'
+    )
+
+    new = (
+        '    # [crow-patch] filter-stale-members\n'
+        '    # Remove members whose ServiceContext no longer exists (disconnected)\n'
+        '    group_members = [uid for uid in group_members if uid in client_contexts]\n'
+        '    if not group_members:\n'
+        '        logger.warning("No active members in group, skipping conversation")\n'
+        '        return\n'
+        '    # Create TTSTaskManager for each member\n'
+        '    tts_managers = {uid: TTSTaskManager() for uid in group_members}'
+    )
+
+    if old not in content:
+        print("patch-auto-group: WARNING - could not find filter-stale-members patch target",
+              file=sys.stderr)
+        return
+
+    content = content.replace(old, new)
+
+    with open(group_file, "w") as f:
+        f.write(content)
+
+    print("patch-auto-group: filter-stale-members enabled")
+
+
+def patch_disconnect_context_close():
+    """Fix handle_disconnect to close the context before popping it.
+
+    The existing code pops client_contexts[client_uid] on one line, then
+    tries to .get() it again for close() — which always returns None.
+    This means MCP cleanup never runs on disconnect.
+    """
+    with open(HANDLER_FILE, "r") as f:
+        content = f.read()
+
+    if "# [crow-patch] fix-context-close" in content:
+        print("patch-auto-group: fix-context-close already patched")
+        return
+
+    old = (
+        '        # Clean up other client data\n'
+        '        self.client_connections.pop(client_uid, None)\n'
+        '        self.client_contexts.pop(client_uid, None)\n'
+        '        self.received_data_buffers.pop(client_uid, None)\n'
+        '        if client_uid in self.current_conversation_tasks:\n'
+        '            task = self.current_conversation_tasks[client_uid]\n'
+        '            if task and not task.done():\n'
+        '                task.cancel()\n'
+        '            self.current_conversation_tasks.pop(client_uid, None)\n'
+        '\n'
+        '        # Call context close to clean up resources (e.g., MCPClient)\n'
+        '        context = self.client_contexts.get(client_uid)\n'
+        '        if context:\n'
+        '            await context.close()'
+    )
+
+    new = (
+        '        # [crow-patch] fix-context-close\n'
+        '        # Close context BEFORE popping it from the dict\n'
+        '        context = self.client_contexts.get(client_uid)\n'
+        '        if context:\n'
+        '            try:\n'
+        '                await context.close()\n'
+        '            except Exception as e:\n'
+        '                logger.error(f"Error closing context for {client_uid}: {e}")\n'
+        '\n'
+        '        # Clean up other client data\n'
+        '        self.client_connections.pop(client_uid, None)\n'
+        '        self.client_contexts.pop(client_uid, None)\n'
+        '        self.received_data_buffers.pop(client_uid, None)\n'
+        '        if client_uid in self.current_conversation_tasks:\n'
+        '            task = self.current_conversation_tasks[client_uid]\n'
+        '            if task and not task.done():\n'
+        '                task.cancel()\n'
+        '            self.current_conversation_tasks.pop(client_uid, None)'
+    )
+
+    if old not in content:
+        print("patch-auto-group: WARNING - could not find fix-context-close patch target",
+              file=sys.stderr)
+        return
+
+    content = content.replace(old, new)
+
+    with open(HANDLER_FILE, "w") as f:
+        f.write(content)
+
+    print("patch-auto-group: fix-context-close enabled")
+
+
 if __name__ == "__main__":
     patch_auto_group()
     patch_wm_snapshot_broadcast()
@@ -428,3 +590,6 @@ if __name__ == "__main__":
     patch_room_token_validation()
     patch_group_uid()
     patch_webrtc_relay()  # Must run after patch_wm_snapshot_broadcast
+    patch_auto_group_stale_check()  # Must run after patch_auto_group
+    patch_group_conversation_member_filter()
+    patch_disconnect_context_close()

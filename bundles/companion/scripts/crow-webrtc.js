@@ -393,6 +393,9 @@
   // Register with shared WS bridge
   window.CrowWS = window.CrowWS || { handlers: [] };
   window.CrowWS.handlers.push(function(d) {
+    // When calls bundle is active, companion WebRTC is disabled (CrowCalls takes over)
+    if (window.CrowWebRTC && window.CrowWebRTC._disabled) return;
+
     // Group membership changed
     if (d.type === "group-update" && d.members) {
       onGroupUpdate(d.members, d.your_uid);

@@ -93,6 +93,7 @@
     romm: "allow-scripts allow-same-origin",
     plex: "allow-scripts allow-same-origin",
     nest: "allow-scripts allow-same-origin",
+    videocall: "allow-scripts allow-same-origin",
     content: "",
   };
 
@@ -104,6 +105,7 @@
     plex: "\u25B6\u20DD", // ▶⃝
     romm: "\u265F",     // ♟
     nest: "\u2302",     // ⌂
+    videocall: "\uD83D\uDCF9", // 📹
     content: "\u2630",  // ☰
   };
 
@@ -799,6 +801,7 @@
     { id: "romm",     icon: "\u265F", name: "RoMM",     desc: "Retro game library" },
     { id: "plex",     icon: "\u25B6", name: "Plex",     desc: "Movies and TV shows" },
     { id: "nest",     icon: "\u2302", name: "Nest",     desc: "Dashboard panels" },
+    { id: "videocall", icon: "\uD83D\uDCF9", name: "Video Call", desc: "Call a contact" },
   ];
 
   function showLauncher() {
@@ -1046,6 +1049,7 @@
             plex: { url: "", title: "Plex" },
             romm: { url: "", title: "RoMM" },
             nest: { url: "", title: "Crow's Nest" },
+            videocall: { url: "", title: "Video Call" },
           };
           var def = appDefaults[data.app];
           if (def) {
@@ -1058,6 +1062,7 @@
               romm: "https://" + host + ":3080/",
               jellyfin: "",  // needs JELLYFIN_URL config
               plex: "",      // needs PLEX_URL config
+              videocall: "https://" + host + ":8444/dashboard/calls",
             };
             if (urls[data.app]) {
               store.addWindow({ appId: data.app, url: urls[data.app], title: def.title });

@@ -99,6 +99,11 @@ const translations = {
   "time.hAgo": { en: "h ago", es: "h atrás" },
   "time.dAgo": { en: "d ago", es: "d atrás" },
 
+  // ─── Kiosk Mode ───
+  "kiosk.toggle": { en: "Companion", es: "Compañero" },
+  "kiosk.exit": { en: "Exit Companion", es: "Salir del compañero" },
+  "kiosk.unavailable": { en: "AI Companion is not running", es: "El compañero de IA no está activo" },
+
   // ─── Notifications ───
   "notif.systemHealth": { en: "System Health", es: "Estado del sistema" },
   "notif.notifications": { en: "Notifications", es: "Notificaciones" },
@@ -386,6 +391,13 @@ const translations = {
   "extensions.needsDisk": { en: "This add-on needs ~", es: "Este complemento necesita ~" },
   "extensions.diskFree": { en: "MB disk. Your server has", es: "MB disco. Tu servidor tiene" },
   "extensions.installMayCauseInstability": { en: "Installing may cause instability.", es: "La instalación puede causar inestabilidad." },
+  "extensions.tags": { en: "Tags", es: "Etiquetas" },
+  "extensions.requirements": { en: "Requirements", es: "Requisitos" },
+  "extensions.ports": { en: "Ports", es: "Puertos" },
+  "extensions.webInterface": { en: "Web Interface", es: "Interfaz web" },
+  "extensions.notes": { en: "Notes", es: "Notas" },
+  "extensions.gpuRequired": { en: "GPU Required", es: "GPU requerida" },
+  "extensions.close": { en: "Close", es: "Cerrar" },
   "extensions.searchPlaceholder": { en: "Search add-ons...", es: "Buscar complementos..." },
   "extensions.categoryAll": { en: "All", es: "Todos" },
   "extensions.categoryAi": { en: "AI", es: "IA" },
@@ -617,6 +629,7 @@ const translations = {
   "settings.ttsFemale": { en: "Female", es: "Femenina" },
   "settings.ttsMale": { en: "Male", es: "Masculina" },
   "settings.ttsCurrentVoice": { en: "Current voice", es: "Voz actual" },
+  "settings.section.companionVoice": { en: "Companion Voice", es: "Voz del compañero" },
   "settings.section.twoFactor": { en: "Two-Factor Auth", es: "Autenticación 2FA" },
   "settings.2faEnabled": { en: "Two-factor authentication enabled.", es: "Autenticación de dos factores activada." },
   "settings.2faDisabled": { en: "Two-factor authentication disabled.", es: "Autenticación de dos factores desactivada." },

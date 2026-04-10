@@ -594,6 +594,150 @@ export function createMemoryServer(dbPath, options = {}) {
     }
   );
 
+  // --- Dream Consolidation Tool ---
+
+  server.tool(
+    "crow_dream",
+    "Analyze memory health: find stale, contradictory, or redundant memories. Returns a consolidation report without making changes. Use with the /crow-dream skill for the full workflow.",
+    {
+      stale_days: z.number().default(30).describe("Flag memories not accessed in N days"),
+      low_importance_threshold: z.number().default(3).describe("Flag old low-importance memories"),
+      dry_run: z.boolean().default(true).describe("If true, only report — don't delete or update anything"),
+    },
+    async ({ stale_days, low_importance_threshold, dry_run }) => {
+      const staleDaysModifier = `-${stale_days} days`;
+
+      // 1. Stale memories: not accessed in N days AND importance <= threshold
+      const { rows: staleRows } = await db.execute({
+        sql: `SELECT id, category, importance, content, created_at, accessed_at, access_count
+              FROM memories
+              WHERE ((accessed_at IS NULL AND created_at < datetime('now', ?))
+                 OR (accessed_at < datetime('now', ?)))
+              AND importance <= ?
+              ORDER BY importance ASC, accessed_at ASC`,
+        args: [staleDaysModifier, staleDaysModifier, low_importance_threshold],
+      });
+
+      // 2. Category health stats
+      const { rows: categoryRows } = await db.execute({
+        sql: `SELECT category, COUNT(*) as total,
+                     ROUND(AVG(importance), 1) as avg_importance,
+                     MIN(accessed_at) as oldest_access,
+                     SUM(CASE WHEN accessed_at < datetime('now', '-30 days') OR accessed_at IS NULL THEN 1 ELSE 0 END) as stale_count
+              FROM memories GROUP BY category`,
+      });
+
+      // 3. Total count
+      const { rows: totalRows } = await db.execute("SELECT COUNT(*) as count FROM memories");
+      const totalMemories = totalRows[0].count;
+
+      // 4. Duplicate detection via shingle similarity (within same category, capped)
+      function getShingles(text, n = 3) {
+        const words = text.toLowerCase().split(/\s+/).slice(0, 67);
+        const shingles = new Set();
+        for (let i = 0; i <= words.length - n; i++) {
+          shingles.add(words.slice(i, i + n).join(" "));
+        }
+        return shingles;
+      }
+
+      function jaccardSimilarity(a, b) {
+        const intersection = new Set([...a].filter(x => b.has(x)));
+        const union = new Set([...a, ...b]);
+        return union.size === 0 ? 0 : intersection.size / union.size;
+      }
+
+      // Get recent memories grouped by category for duplicate detection
+      const { rows: recentMemories } = await db.execute({
+        sql: `SELECT id, category, content, importance, created_at
+              FROM memories ORDER BY created_at DESC LIMIT 1000`,
+      });
+
+      const byCategory = {};
+      for (const m of recentMemories) {
+        const cat = m.category || "general";
+        if (!byCategory[cat]) byCategory[cat] = [];
+        if (byCategory[cat].length < 200) {
+          byCategory[cat].push(m);
+        }
+      }
+
+      const duplicatePairs = [];
+      for (const [cat, memories] of Object.entries(byCategory)) {
+        const shingleCache = memories.map(m => ({
+          id: m.id,
+          importance: m.importance,
+          preview: m.content.substring(0, 100),
+          shingles: getShingles(m.content),
+        }));
+
+        for (let i = 0; i < shingleCache.length; i++) {
+          for (let j = i + 1; j < shingleCache.length; j++) {
+            if (shingleCache[i].shingles.size === 0 || shingleCache[j].shingles.size === 0) continue;
+            const sim = jaccardSimilarity(shingleCache[i].shingles, shingleCache[j].shingles);
+            if (sim > 0.5) {
+              duplicatePairs.push({
+                category: cat,
+                id_a: shingleCache[i].id,
+                id_b: shingleCache[j].id,
+                preview_a: shingleCache[i].preview,
+                preview_b: shingleCache[j].preview,
+                similarity: Math.round(sim * 100),
+              });
+            }
+          }
+        }
+      }
+
+      // Build report
+      let text = `# Dream Consolidation Report\n\n`;
+      text += `**Total memories:** ${totalMemories}\n`;
+      text += `**Stale threshold:** ${stale_days} days, importance <= ${low_importance_threshold}\n`;
+      text += `**Mode:** ${dry_run ? "dry run (no changes)" : "LIVE — changes will be applied"}\n\n`;
+
+      // Category health
+      text += `## Category Health\n`;
+      for (const c of categoryRows) {
+        text += `- **${c.category}**: ${c.total} memories, avg importance ${c.avg_importance}, ${c.stale_count} stale\n`;
+      }
+      text += `\n`;
+
+      // Stale memories
+      text += `## Stale Memories (${staleRows.length})\n`;
+      if (staleRows.length === 0) {
+        text += `No stale memories found.\n\n`;
+      } else {
+        for (const s of staleRows) {
+          const preview = s.content.substring(0, 120).replace(/\n/g, " ");
+          text += `- [#${s.id}] ${s.category}, importance ${s.importance}, `;
+          text += `accessed: ${s.accessed_at || "never"}, `;
+          text += `accesses: ${s.access_count}\n  "${preview}..."\n`;
+        }
+        text += `\n`;
+      }
+
+      // Potential duplicates
+      text += `## Potential Duplicates (${duplicatePairs.length} pairs)\n`;
+      if (duplicatePairs.length === 0) {
+        text += `No duplicates detected.\n\n`;
+      } else {
+        for (const d of duplicatePairs) {
+          text += `- [#${d.id_a}] ↔ [#${d.id_b}] (${d.category}, ${d.similarity}% similar)\n`;
+          text += `  A: "${d.preview_a}..."\n`;
+          text += `  B: "${d.preview_b}..."\n`;
+        }
+        text += `\n`;
+      }
+
+      text += `## Recommended Actions\n`;
+      text += `- Stale memories to review: ${staleRows.length}\n`;
+      text += `- Duplicate pairs to merge: ${duplicatePairs.length}\n`;
+      text += `Use crow_delete_memory or crow_update_memory to act on these findings.\n`;
+
+      return { content: [{ type: "text", text }] };
+    }
+  );
+
   // --- Cross-Platform Context (crow.md) Tools ---
 
   server.tool(

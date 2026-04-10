@@ -12,7 +12,7 @@ Access Crow from your Android device with the native app or as a Progressive Web
 
 Download the latest Crow Android app:
 
-[Download Crow for Android](https://github.com/kh0pper/crow/releases/download/android-v1.0.0/app-release.apk)
+[Download Crow for Android](https://github.com/kh0pper/crow/releases/download/android-v1.2.0/app-release.apk)
 
 ### Step 2: Enable unknown sources
 
@@ -77,6 +77,7 @@ The Crow app can send push notifications for reminders, peer messages, and syste
 
 All Crow's Nest panels are available from the Android app:
 
+- **Calls** — Peer-to-peer voice and video calling with camera support
 - **Memory** — Browse and search your stored memories
 - **Messages** — AI Chat and peer messaging
 - **Blog** — Read and manage posts
@@ -85,6 +86,15 @@ All Crow's Nest panels are available from the Android app:
 - **Contacts** — View and manage your contact list
 - **Skills** — Browse available skills
 - **Settings** — Full configuration access
+
+### Voice and Video Calls (v1.2.0)
+
+The Calls panel lets you start peer-to-peer voice and video calls with your contacts:
+
+- Audio calls with echo cancellation and noise suppression
+- Camera video with adaptive quality (adjusts to network conditions)
+- Standalone call pages via shareable room links
+- Camera permission is requested only when you first enable video
 
 ## Troubleshooting
 

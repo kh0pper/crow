@@ -17,7 +17,7 @@ services:
       - minio-data:/data
     ports:
       - "127.0.0.1:9000:9000"   # API — internal only
-      - "0.0.0.0:9001:9001"     # Console — accessible via Tailscale (firewall-controlled)
+      - "127.0.0.1:9001:9001"   # Console — use Tailscale serve for remote access
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]

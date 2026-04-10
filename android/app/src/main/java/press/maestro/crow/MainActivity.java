@@ -13,6 +13,7 @@ import android.os.Looper;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
+import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -45,6 +46,7 @@ public class MainActivity extends AppCompatActivity {
     private FrameLayout statusOverlay;
     private TextView statusText;
     private ValueCallback<Uri[]> fileUploadCallback;
+    private PermissionRequest pendingWebViewPermRequest;
     private Handler foregroundPollHandler;
     private Runnable foregroundPollRunnable;
 
@@ -65,6 +67,34 @@ public class MainActivity extends AppCompatActivity {
     private final ActivityResultLauncher<String> notifPermissionLauncher =
             registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
                 // Nothing to do — notifications work if granted, silently skip if denied
+            });
+
+    private boolean pendingNeedCamera = false;
+
+    private final ActivityResultLauncher<String> cameraPermissionLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
+                if (pendingWebViewPermRequest != null) {
+                    // Grant even if camera denied (audio-only fallback)
+                    pendingWebViewPermRequest.grant(pendingWebViewPermRequest.getResources());
+                }
+                pendingWebViewPermRequest = null;
+            });
+
+    private final ActivityResultLauncher<String> audioPermissionLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
+                if (granted && pendingWebViewPermRequest != null) {
+                    // If camera is also needed, request it next
+                    if (pendingNeedCamera && !hasCameraPermission()) {
+                        pendingNeedCamera = false;
+                        cameraPermissionLauncher.launch(Manifest.permission.CAMERA);
+                        return;
+                    }
+                    pendingWebViewPermRequest.grant(pendingWebViewPermRequest.getResources());
+                } else if (pendingWebViewPermRequest != null) {
+                    pendingWebViewPermRequest.deny();
+                }
+                pendingWebViewPermRequest = null;
+                pendingNeedCamera = false;
             });
 
     @Override
@@ -222,7 +252,7 @@ public class MainActivity extends AppCompatActivity {
         settings.setDatabaseEnabled(true);
         settings.setAllowFileAccess(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
-        settings.setUserAgentString(settings.getUserAgentString() + " CrowAndroid/1.0");
+        settings.setUserAgentString(settings.getUserAgentString() + " CrowAndroid/1.2");
 
         webView.setWebViewClient(new CrowWebViewClient(this));
         webView.setWebChromeClient(new CrowWebChromeClient(this));
@@ -256,6 +286,49 @@ public class MainActivity extends AppCompatActivity {
     public void onFileUploadRequested(ValueCallback<Uri[]> callback, Intent chooserIntent) {
         fileUploadCallback = callback;
         fileChooserLauncher.launch(chooserIntent);
+    }
+
+    /** Check if app has RECORD_AUDIO permission (called by CrowWebChromeClient) */
+    public boolean hasAudioPermission() {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /** Check if app has CAMERA permission (called by CrowWebChromeClient) */
+    public boolean hasCameraPermission() {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /** Request RECORD_AUDIO and grant WebView permission on callback */
+    public void requestAudioPermissionForWebView(PermissionRequest request) {
+        pendingWebViewPermRequest = request;
+        pendingNeedCamera = false;
+        audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO);
+    }
+
+    /** Request both RECORD_AUDIO and CAMERA, granting WebView permission when both complete */
+    public void requestAudioAndCameraPermissionForWebView(PermissionRequest request) {
+        pendingWebViewPermRequest = request;
+        if (!hasAudioPermission()) {
+            // Audio first, then camera in the audio callback
+            pendingNeedCamera = true;
+            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO);
+        } else if (!hasCameraPermission()) {
+            // Audio already granted, just request camera
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA);
+        } else {
+            // Both already granted
+            request.grant(request.getResources());
+            pendingWebViewPermRequest = null;
+        }
+    }
+
+    /** Request only CAMERA permission for WebView */
+    public void requestCameraPermissionForWebView(PermissionRequest request) {
+        pendingWebViewPermRequest = request;
+        pendingNeedCamera = false;
+        cameraPermissionLauncher.launch(Manifest.permission.CAMERA);
     }
 
     @Override

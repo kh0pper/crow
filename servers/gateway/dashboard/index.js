@@ -36,9 +36,27 @@ import {
 } from "./totp.js";
 import { SUPPORTED_LANGS } from "./shared/i18n.js";
 import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { execFileSync } from "node:child_process";
 import { registerPanel, loadExternalPanels, getAllPanels, getVisiblePanels, getPanel } from "./panel-registry.js";
 import { resolveNavGroups } from "./nav-registry.js";
 import { createDbClient } from "../../db.js";
+
+/** Check if companion bundle is installed and its container is running */
+function isCompanionAvailable() {
+  try {
+    const installedPath = resolve(homedir(), ".crow", "installed.json");
+    if (!existsSync(installedPath)) return false;
+    const installed = JSON.parse(readFileSync(installedPath, "utf-8"));
+    const list = Array.isArray(installed) ? installed : Object.values(installed);
+    if (!list.some(e => e.id === "companion")) return false;
+    const status = execFileSync("docker", ["ps", "--filter", "name=crow-companion", "--format", "{{.Status}}"], {
+      encoding: "utf-8", timeout: 3000,
+    }).trim();
+    return status.toLowerCase().startsWith("up");
+  } catch { return false; }
+}
 
 // Import built-in panels
 import messagesPanel from "./panels/messages.js";
@@ -472,8 +490,19 @@ export default function dashboardRouter(mcpAuthMiddleware) {
       const tamaEnabled = tamaResult.rows[0]?.value !== "false";
       lang = langResult.rows[0]?.value || "en";
 
-      const activeHeaderHtml = tamaEnabled ? tamagotchiHtml(lang) : headerIconsHtml(lang);
+      const companionAvailable = isCompanionAvailable();
+      const headerOpts = { companionAvailable };
+      const activeHeaderHtml = tamaEnabled ? tamagotchiHtml(lang, headerOpts) : headerIconsHtml(lang, headerOpts);
       const activeHeaderJs = tamaEnabled ? tamagotchiJs(lang) : headerIconsJs(lang);
+
+      // Auto-restore kiosk mode if it was active
+      let kioskAutoStart = "";
+      if (companionAvailable) {
+        const kioskResult = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'kiosk_mode'", args: [] });
+        if (kioskResult.rows[0]?.value === "true") {
+          kioskAutoStart = "if (typeof toggleKioskMode === 'function') toggleKioskMode();";
+        }
+      }
 
       const result = await panel.handler(req, res, {
         db,
@@ -490,7 +519,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
           lang,
           headerIcons: activeHeaderHtml,
           afterContent: playerBarHtml(lang),
-          scripts: (opts.scripts || "") + playerBarJs(lang) + activeHeaderJs,
+          scripts: (opts.scripts || "") + playerBarJs(lang) + activeHeaderJs + kioskAutoStart,
         }),
       });
 

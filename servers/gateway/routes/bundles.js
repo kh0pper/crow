@@ -432,13 +432,25 @@ export default function bundlesRouter() {
               appendLog(job, `Warning: docker compose pull failed: ${err.message}`);
             }
 
-            // Start containers
-            appendLog(job, "Starting containers...");
+            // Start containers (add --build if compose file has build directives)
+            const composeContent = readFileSync(composePath, "utf8");
+            const needsBuild = /^\s+build:/m.test(composeContent);
+            const upArgs = needsBuild ? ["up", "-d", "--build"] : ["up", "-d"];
+            appendLog(job, needsBuild ? "Building and starting containers..." : "Starting containers...");
             try {
-              await runCompose(["up", "-d"], { cwd: destDir });
+              await runCompose(upArgs, { cwd: destDir });
               appendLog(job, "Containers started");
             } catch (err) {
-              appendLog(job, `Warning: docker compose up failed: ${err.message}`);
+              const detail = err.stderr || err.message;
+              appendLog(job, `docker compose up failed: ${detail}`);
+              // Still add to installed.json so user can configure env vars and hit "Start"
+              const installed2 = getInstalled();
+              if (!installed2.find((i) => i.id === bundle_id)) {
+                installed2.push({ id: bundle_id, type: addonType, version: manifest?.version, installedAt: new Date().toISOString() });
+                saveInstalled(installed2);
+              }
+              finishJob(job, "failed");
+              return;
             }
           }
 
@@ -927,7 +939,9 @@ export default function bundlesRouter() {
     }
 
     try {
-      await runCompose(["up", "-d"], { cwd: bundleDir });
+      const content = readFileSync(composePath, "utf8");
+      const upArgs = /^\s+build:/m.test(content) ? ["up", "-d", "--build"] : ["up", "-d"];
+      await runCompose(upArgs, { cwd: bundleDir });
       res.json({ ok: true, message: `Bundle '${bundle_id}' started` });
     } catch (err) {
       res.status(500).json({ error: `Failed to start: ${err.stderr || err.message}` });

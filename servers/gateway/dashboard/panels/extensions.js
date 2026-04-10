@@ -407,6 +407,33 @@ function extensionStyles() {
   -webkit-backdrop-filter:var(--crow-glass-blur);
 }
 
+/* Detail modal */
+#modal-content { position:relative; }
+.ext-detail__header { display:flex; gap:1rem; align-items:flex-start; margin-bottom:1rem; }
+.ext-detail__icon { flex-shrink:0; width:64px; height:64px; border-radius:16px; display:flex; align-items:center; justify-content:center; }
+.ext-detail__info { flex:1; min-width:0; }
+.ext-detail__title { font-family:'Fraunces',serif; font-size:1.15rem; font-weight:600; margin:0 0 0.25rem; color:var(--crow-text-primary); }
+.ext-detail__author { font-size:0.75rem; font-family:'JetBrains Mono',monospace; color:var(--crow-text-muted); }
+.ext-detail__badges { display:flex; flex-wrap:wrap; gap:0.3rem; margin:0.75rem 0; }
+.ext-detail__desc { font-size:0.9rem; color:var(--crow-text-secondary); line-height:1.6; margin-bottom:1rem; }
+.ext-detail__section { margin-bottom:1rem; }
+.ext-detail__section-title { font-size:0.7rem; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:var(--crow-text-muted); margin-bottom:0.4rem; }
+.ext-detail__tags { display:flex; flex-wrap:wrap; gap:0.3rem; }
+.ext-detail__tag { font-size:0.7rem; padding:0.15rem 0.5rem; border-radius:4px; background:var(--crow-bg-elevated); color:var(--crow-text-secondary); }
+.ext-detail__notes { font-size:0.85rem; color:var(--crow-text-secondary); background:var(--crow-bg-deep); border-radius:8px; padding:0.75rem 1rem; line-height:1.5; }
+.ext-detail__req { display:flex; flex-wrap:wrap; gap:0.4rem; }
+.ext-detail__req-chip { padding:0.2rem 0.6rem; border-radius:4px; background:var(--crow-bg-elevated); font-family:'JetBrains Mono',monospace; font-size:0.75rem; color:var(--crow-text-secondary); }
+.ext-detail__actions { display:flex; gap:0.5rem; justify-content:flex-end; margin-top:1.25rem; padding-top:1rem; border-top:1px solid var(--crow-border); }
+.ext-detail__close { position:absolute; top:0.5rem; right:0.75rem; background:none; border:none; color:var(--crow-text-muted); font-size:1.4rem; cursor:pointer; padding:0.25rem; line-height:1; transition:color 0.15s; }
+.ext-detail__close:hover { color:var(--crow-text-primary); }
+
+@media (max-width:480px) {
+  .ext-detail__header { flex-direction:column; align-items:center; text-align:center; }
+  .ext-detail__badges { justify-content:center; }
+  .ext-detail__actions { flex-direction:column; }
+  .ext-detail__actions .btn { width:100%; justify-content:center; }
+}
+
 /* Responsive */
 @media (max-width:600px) {
   .ext-grid { grid-template-columns:repeat(auto-fill, minmax(160px, 1fr)); gap:0.75rem; }
@@ -568,7 +595,7 @@ export default {
         }
         actions += `<button class="btn btn-sm btn-secondary bundle-uninstall" data-id="${escapeHtml(id)}" data-name="${escapeHtml(name)}" data-docker="${isDocker}">${t("extensions.remove", lang)}</button>`;
 
-        return `<div class="ext-installed__item" style="animation:fadeInUp 0.4s ease-out ${Math.min(i * 30, 300)}ms both">
+        return `<div class="ext-installed__item" data-addon-id="${escapeHtml(id)}" style="animation:fadeInUp 0.4s ease-out ${Math.min(i * 30, 300)}ms both">
           <div class="ext-installed__icon">${iconHtml}</div>
           <div class="ext-installed__info">
             <span class="ext-installed__name">${escapeHtml(name)}</span>
@@ -637,7 +664,7 @@ export default {
         const tags = (addon.tags || []).join(",");
         const delay = Math.min(i * 30, 300);
 
-        return `<div class="ext-card addon-card" data-addon-type="${escapeHtml(addon.type)}" data-addon-category="${escapeHtml(cat)}" data-addon-name="${escapeHtml((addon.name || "").toLowerCase())}" data-addon-desc="${escapeHtml((addon.description || "").toLowerCase())}" data-addon-tags="${escapeHtml(tags.toLowerCase())}" style="animation:fadeInUp 0.4s ease-out ${delay}ms both">
+        return `<div class="ext-card addon-card" data-addon-id="${escapeHtml(addon.id)}" data-addon-type="${escapeHtml(addon.type)}" data-addon-category="${escapeHtml(cat)}" data-addon-name="${escapeHtml((addon.name || "").toLowerCase())}" data-addon-desc="${escapeHtml((addon.description || "").toLowerCase())}" data-addon-tags="${escapeHtml(tags.toLowerCase())}" style="animation:fadeInUp 0.4s ease-out ${delay}ms both">
           <div class="ext-card__icon" style="background:${catColor.bg};color:${catColor.color}">${iconHtml}</div>
           <div class="ext-card__body">
             <div class="ext-card__name">${escapeHtml(addon.name)}</div>
@@ -691,6 +718,37 @@ export default {
       ${t("extensions.askAi", lang)} <code>"install the [name] add-on"</code><br>
       ${t("extensions.toCreateOwn", lang)} <a href="/crow/developers/creating-addons" style="color:var(--crow-accent)">${t("extensions.devGuide", lang)}</a>.
     </div>`;
+
+    // ─── Addon registry blob for client-side detail modal ───
+    const addonMap = {};
+    for (const addon of available) {
+      const catColor = getCategoryColor(addon.category);
+      addonMap[addon.id] = {
+        id: addon.id,
+        name: addon.name,
+        description: addon.description,
+        type: addon.type,
+        version: addon.version,
+        author: addon.author,
+        category: addon.category,
+        tags: addon.tags || [],
+        notes: addon.notes || "",
+        ports: addon.ports || [],
+        webUI: addon.webUI || null,
+        requires: addon.requires || {},
+        env_vars: (addon.env_vars || []).map(ev => ({
+          name: ev.name, description: ev.description,
+          default: ev.secret ? "" : (ev.default || ""), required: ev.required, secret: !!ev.secret,
+        })),
+        official: !addon._community,
+        _iconHtml: renderIcon(addon, 48),
+        _iconBg: catColor.bg,
+        _iconColor: catColor.color,
+        _installed: !!installed[addon.id],
+      };
+    }
+    const addonRegistryJson = JSON.stringify(addonMap).replace(/<\//g, "<\\/");
+    const addonRegistryScript = `<script id="addon-registry" type="application/json">${addonRegistryJson}<\/script>`;
 
     // ─── Modal + client-side JavaScript ───
     // Modal JS preserved verbatim from original; filter + search JS rewritten
@@ -752,16 +810,8 @@ export default {
           });
         });
 
-        // --- Install modal ---
-        document.querySelectorAll(".bundle-install").forEach(function(btn) {
-          btn.addEventListener("click", function() {
-            var id = this.dataset.id;
-            var name = this.dataset.name;
-            var envVars = JSON.parse(this.dataset.envvars || "[]");
-            var minRam = parseInt(this.dataset.minram || "0", 10);
-            var minDisk = parseInt(this.dataset.mindisk || "0", 10);
-            var isCommunity = this.dataset.community === "true";
-
+        // --- Install modal (extracted as named function) ---
+        function showInstallModal(id, name, envVars, minRam, minDisk, isCommunity) {
             var frag = document.createElement("div");
 
             var h3 = document.createElement("h3");
@@ -898,6 +948,16 @@ export default {
 
             setModalContent(frag);
             showModal();
+        }
+
+        document.querySelectorAll(".bundle-install").forEach(function(btn) {
+          btn.addEventListener("click", function(e) {
+            e.stopPropagation();
+            showInstallModal(this.dataset.id, this.dataset.name,
+              JSON.parse(this.dataset.envvars || "[]"),
+              parseInt(this.dataset.minram || "0", 10),
+              parseInt(this.dataset.mindisk || "0", 10),
+              this.dataset.community === "true");
           });
         });
 
@@ -1077,6 +1137,248 @@ export default {
         if (searchInput) {
           searchInput.addEventListener("input", applyFilters);
         }
+
+        // --- Detail modal ---
+        var ADDON_DATA = (function() {
+          var el = document.getElementById("addon-registry");
+          if (!el) return {};
+          try { return JSON.parse(el.textContent); } catch(e) { return {}; }
+        })();
+
+        function showDetailModal(addon) {
+          var frag = document.createElement("div");
+          frag.style.position = "relative";
+
+          // Close button
+          var closeBtn = document.createElement("button");
+          closeBtn.className = "ext-detail__close";
+          closeBtn.textContent = "\\u00D7";
+          closeBtn.addEventListener("click", hideModal);
+          frag.appendChild(closeBtn);
+
+          // Header: icon + info
+          var header = document.createElement("div");
+          header.className = "ext-detail__header";
+
+          var iconWrap = document.createElement("div");
+          iconWrap.className = "ext-detail__icon";
+          iconWrap.style.cssText = "background:" + (addon._iconBg || "var(--crow-bg-elevated)") + ";color:" + (addon._iconColor || "var(--crow-accent)");
+          // Safety: _iconHtml is server-generated from hardcoded SVG dictionary in logos.js.
+          // getAddonLogo() returns null for unknown IDs; community addons get emoji/letter fallback.
+          // No user-supplied content reaches innerHTML here.
+          iconWrap.innerHTML = addon._iconHtml || "";
+          header.appendChild(iconWrap);
+
+          var info = document.createElement("div");
+          info.className = "ext-detail__info";
+
+          var title = document.createElement("h3");
+          title.className = "ext-detail__title";
+          title.textContent = addon.name || addon.id;
+          info.appendChild(title);
+
+          var author = document.createElement("div");
+          author.className = "ext-detail__author";
+          author.textContent = "v" + (addon.version || "1.0.0") + " \\u00B7 " + (addon.author || "community");
+          info.appendChild(author);
+
+          header.appendChild(info);
+          frag.appendChild(header);
+
+          // Badges
+          var badges = document.createElement("div");
+          badges.className = "ext-detail__badges";
+
+          var catBadge = document.createElement("span");
+          catBadge.className = "ext-card__badge";
+          catBadge.style.cssText = "color:" + (addon._iconColor || "var(--crow-accent)") + ";background:" + (addon._iconBg || "var(--crow-accent-muted)");
+          catBadge.textContent = addon.category || "other";
+          badges.appendChild(catBadge);
+
+          var typeBadge = document.createElement("span");
+          typeBadge.className = "ext-card__badge ext-card__badge--type";
+          typeBadge.textContent = addon.type || "bundle";
+          badges.appendChild(typeBadge);
+
+          var officialBadge = document.createElement("span");
+          officialBadge.className = addon.official ? "ext-card__badge ext-card__badge--official" : "ext-card__badge ext-card__badge--community";
+          officialBadge.textContent = addon.official ? '${tJs("extensions.official", lang)}' : '${tJs("extensions.community", lang)}';
+          badges.appendChild(officialBadge);
+
+          frag.appendChild(badges);
+
+          // Description
+          var descP = document.createElement("p");
+          descP.className = "ext-detail__desc";
+          descP.textContent = addon.description || "";
+          frag.appendChild(descP);
+
+          // Tags
+          if (addon.tags && addon.tags.length > 0) {
+            var tagSection = document.createElement("div");
+            tagSection.className = "ext-detail__section";
+            var tagTitle = document.createElement("div");
+            tagTitle.className = "ext-detail__section-title";
+            tagTitle.textContent = '${tJs("extensions.tags", lang)}';
+            tagSection.appendChild(tagTitle);
+            var tagWrap = document.createElement("div");
+            tagWrap.className = "ext-detail__tags";
+            addon.tags.forEach(function(tag) {
+              var chip = document.createElement("span");
+              chip.className = "ext-detail__tag";
+              chip.textContent = tag;
+              tagWrap.appendChild(chip);
+            });
+            tagSection.appendChild(tagWrap);
+            frag.appendChild(tagSection);
+          }
+
+          // Requirements
+          var req = addon.requires || {};
+          if (req.min_ram_mb || req.min_disk_mb || req.gpu) {
+            var reqSection = document.createElement("div");
+            reqSection.className = "ext-detail__section";
+            var reqTitle = document.createElement("div");
+            reqTitle.className = "ext-detail__section-title";
+            reqTitle.textContent = '${tJs("extensions.requirements", lang)}';
+            reqSection.appendChild(reqTitle);
+            var reqWrap = document.createElement("div");
+            reqWrap.className = "ext-detail__req";
+            if (req.min_ram_mb) {
+              var ramChip = document.createElement("span");
+              ramChip.className = "ext-detail__req-chip";
+              ramChip.textContent = (req.min_ram_mb >= 1024 ? Math.floor(req.min_ram_mb / 1024) + "GB" : req.min_ram_mb + "MB") + " RAM";
+              reqWrap.appendChild(ramChip);
+            }
+            if (req.min_disk_mb) {
+              var diskChip = document.createElement("span");
+              diskChip.className = "ext-detail__req-chip";
+              diskChip.textContent = (req.min_disk_mb >= 1024 ? Math.floor(req.min_disk_mb / 1024) + "GB" : req.min_disk_mb + "MB") + " disk";
+              reqWrap.appendChild(diskChip);
+            }
+            if (req.gpu) {
+              var gpuChip = document.createElement("span");
+              gpuChip.className = "ext-detail__req-chip";
+              gpuChip.style.cssText = "color:var(--crow-accent);border:1px solid var(--crow-accent)";
+              gpuChip.textContent = '${tJs("extensions.gpuRequired", lang)}';
+              reqWrap.appendChild(gpuChip);
+            }
+            reqSection.appendChild(reqWrap);
+            frag.appendChild(reqSection);
+          }
+
+          // Ports
+          if (addon.ports && addon.ports.length > 0) {
+            var portSection = document.createElement("div");
+            portSection.className = "ext-detail__section";
+            var portTitle = document.createElement("div");
+            portTitle.className = "ext-detail__section-title";
+            portTitle.textContent = '${tJs("extensions.ports", lang)}';
+            portSection.appendChild(portTitle);
+            var portWrap = document.createElement("div");
+            portWrap.className = "ext-detail__req";
+            addon.ports.forEach(function(p) {
+              var chip = document.createElement("span");
+              chip.className = "ext-detail__req-chip";
+              chip.textContent = p;
+              portWrap.appendChild(chip);
+            });
+            portSection.appendChild(portWrap);
+            frag.appendChild(portSection);
+          }
+
+          // Web UI
+          if (addon.webUI) {
+            var uiSection = document.createElement("div");
+            uiSection.className = "ext-detail__section";
+            var uiTitle = document.createElement("div");
+            uiTitle.className = "ext-detail__section-title";
+            uiTitle.textContent = '${tJs("extensions.webInterface", lang)}';
+            uiSection.appendChild(uiTitle);
+            var uiChip = document.createElement("span");
+            uiChip.className = "ext-detail__req-chip";
+            uiChip.textContent = (addon.webUI.label || "Web UI") + " :" + (addon.webUI.port || "") + (addon.webUI.path || "/");
+            uiSection.appendChild(uiChip);
+            frag.appendChild(uiSection);
+          }
+
+          // Notes
+          if (addon.notes) {
+            var noteSection = document.createElement("div");
+            noteSection.className = "ext-detail__section";
+            var noteTitle = document.createElement("div");
+            noteTitle.className = "ext-detail__section-title";
+            noteTitle.textContent = '${tJs("extensions.notes", lang)}';
+            noteSection.appendChild(noteTitle);
+            var noteBox = document.createElement("div");
+            noteBox.className = "ext-detail__notes";
+            noteBox.textContent = addon.notes;
+            noteSection.appendChild(noteBox);
+            frag.appendChild(noteSection);
+          }
+
+          // Actions
+          var actions = document.createElement("div");
+          actions.className = "ext-detail__actions";
+
+          var closeAction = document.createElement("button");
+          closeAction.className = "btn btn-secondary";
+          closeAction.textContent = '${tJs("extensions.close", lang)}';
+          closeAction.addEventListener("click", hideModal);
+          actions.appendChild(closeAction);
+
+          if (!addon._installed) {
+            var installAction = document.createElement("button");
+            installAction.className = "btn btn-primary";
+            installAction.textContent = '${tJs("extensions.install", lang)}';
+            installAction.addEventListener("click", function() {
+              hideModal();
+              showInstallModal(addon.id, addon.name, addon.env_vars || [],
+                (addon.requires || {}).min_ram_mb || 0,
+                (addon.requires || {}).min_disk_mb || 0,
+                !addon.official);
+            });
+            actions.appendChild(installAction);
+          } else {
+            var installedBadge = document.createElement("span");
+            installedBadge.className = "badge badge--published";
+            installedBadge.style.cssText = "display:flex;align-items:center;padding:0.3rem 0.8rem;font-size:0.85rem";
+            installedBadge.textContent = '${tJs("extensions.installedBadge", lang)}';
+            actions.appendChild(installedBadge);
+          }
+
+          frag.appendChild(actions);
+          setModalContent(frag);
+          showModal();
+        }
+
+        // --- Card click → detail modal ---
+        document.querySelectorAll(".addon-card").forEach(function(card) {
+          card.style.cursor = "pointer";
+          card.addEventListener("click", function(e) {
+            if (e.target.closest(".bundle-install") || e.target.closest(".btn")) return;
+            var id = card.dataset.addonId;
+            var addon = ADDON_DATA[id];
+            if (addon) showDetailModal(addon);
+          });
+        });
+
+        document.querySelectorAll(".ext-installed__item").forEach(function(item) {
+          item.style.cursor = "pointer";
+          item.addEventListener("click", function(e) {
+            if (e.target.closest(".bundle-action") || e.target.closest(".bundle-uninstall") || e.target.closest(".btn")) return;
+            var id = item.dataset.addonId;
+            var addon = ADDON_DATA[id];
+            if (addon) showDetailModal(addon);
+          });
+        });
+
+        // --- Escape key ---
+        document.addEventListener("keydown", function(e) {
+          if (e.key === "Escape" && document.getElementById("modal-overlay").style.display === "flex") {
+            hideModal();
+          }
+        });
       })();
     <\/script>`;
 
@@ -1089,6 +1391,7 @@ export default {
       ${gridHtml}
       ${storesHtml}
       ${helpHtml}
+      ${addonRegistryScript}
       ${interactiveScript}
     `;
 
