@@ -1030,6 +1030,48 @@
       ],
       "ports": [3005],
       "notes": "Requires nvidia-container-toolkit. Models (~25GB) download on first start. Used by companion and storage server's crow_generate_background tool."
+    },
+    {
+      "id": "calls",
+      "name": "Video & Audio Calls",
+      "description": "Peer-to-peer video and audio calling between Crow users. Start voice or video calls from the Nest panel or share direct room links. When the companion bundle is also installed, adds AI avatar modes and face tracking.",
+      "type": "bundle",
+      "version": "0.1.0",
+      "author": "Crow",
+      "category": "social",
+      "tags": [
+        "calls",
+        "video",
+        "audio",
+        "webrtc",
+        "voice",
+        "peer-to-peer"
+      ],
+      "icon": "phone-video",
+      "webUI": null,
+      "requires": {
+        "min_ram_mb": 128
+      },
+      "env_vars": [
+        {
+          "name": "CROW_CALLS_ENABLED",
+          "description": "Enable calls signaling endpoint in gateway",
+          "default": "1",
+          "required": false,
+          "secret": false
+        },
+        {
+          "name": "CROW_CALLS_MAX_PEERS",
+          "description": "Maximum participants per call room",
+          "default": "4",
+          "required": false,
+          "secret": false
+        }
+      ],
+      "panel": "panel/calls.js",
+      "skills": ["skills/calls.md"],
+      "enhancedBy": ["companion"],
+      "notes": "No Docker container required. Adds gateway WebSocket signaling, static scripts, a Nest panel, and a skill file. Gateway restart required after install."
     }
   ]
 }

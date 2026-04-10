@@ -408,6 +408,7 @@ const translations = {
   "extensions.categoryNetworking": { en: "Networking", es: "Redes" },
   "extensions.categoryGaming": { en: "Gaming", es: "Juegos" },
   "extensions.categoryData": { en: "Data", es: "Datos" },
+  "extensions.categorySocial": { en: "Social", es: "Social" },
   "extensions.categoryFinance": { en: "Finance", es: "Finanzas" },
   "extensions.categoryOther": { en: "Other", es: "Otros" },
 
