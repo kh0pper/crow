@@ -1,0 +1,25 @@
+{
+  "id": "shiori",
+  "name": "Shiori",
+  "version": "1.0.0",
+  "description": "Simple bookmark manager — save web pages with cached content for offline reading",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "productivity",
+  "tags": ["bookmarks", "web-clipper", "archive", "self-hosted"],
+  "icon": "bookmark",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["SHIORI_URL", "SHIORI_USERNAME", "SHIORI_PASSWORD"] },
+  "panel": "panel/shiori.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/shiori.md"],
+  "requires": { "env": ["SHIORI_USERNAME", "SHIORI_PASSWORD"], "min_ram_mb": 128, "min_disk_mb": 200 },
+  "env_vars": [
+    { "name": "SHIORI_URL", "description": "Shiori server URL", "default": "http://localhost:8086", "required": true },
+    { "name": "SHIORI_USERNAME", "description": "Shiori login username", "default": "shiori", "required": true },
+    { "name": "SHIORI_PASSWORD", "description": "Shiori login password", "required": true, "secret": true }
+  ],
+  "ports": [8086],
+  "webUI": { "port": 8086, "path": "/", "label": "Shiori" },
+  "notes": "Self-host via Docker or connect to an existing Shiori instance. Default credentials are shiori/gopher — change them after first login."
+}

@@ -1,0 +1,69 @@
+services:
+  paperless:
+    image: paperlessngx/paperless-ngx:latest
+    container_name: crow-paperless
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ${PAPERLESS_DATA_PATH:-paperless-data}:/usr/src/paperless/data
+      - ${PAPERLESS_MEDIA_PATH:-paperless-media}:/usr/src/paperless/media
+      - paperless-export:/usr/src/paperless/export
+      - paperless-consume:/usr/src/paperless/consume
+    environment:
+      - PAPERLESS_REDIS=redis://crow-paperless-redis:6379
+      - PAPERLESS_DBHOST=crow-paperless-db
+      - PAPERLESS_DBUSER=paperless
+      - PAPERLESS_DBPASS=${PAPERLESS_DB_PASSWORD:-paperless}
+      - PAPERLESS_DBNAME=paperless
+    depends_on:
+      paperless-db:
+        condition: service_healthy
+      paperless-redis:
+        condition: service_healthy
+    init: true
+    mem_limit: 1g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  paperless-db:
+    image: postgres:15-alpine
+    container_name: crow-paperless-db
+    volumes:
+      - paperless-db-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=paperless
+      - POSTGRES_PASSWORD=${PAPERLESS_DB_PASSWORD:-paperless}
+      - POSTGRES_DB=paperless
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "paperless"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  paperless-redis:
+    image: redis:7-alpine
+    container_name: crow-paperless-redis
+    volumes:
+      - paperless-redis-data:/data
+    mem_limit: 128m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  paperless-data:
+  paperless-media:
+  paperless-export:
+  paperless-consume:
+  paperless-db-data:
+  paperless-redis-data:

@@ -1,0 +1,25 @@
+{
+  "id": "actual-budget",
+  "name": "Actual Budget",
+  "version": "1.0.0",
+  "description": "Privacy-first personal finance — track spending, manage budgets, and view financial reports",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "finance",
+  "tags": ["budget", "finance", "money", "personal-finance", "self-hosted"],
+  "icon": "dollar",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["ACTUAL_URL", "ACTUAL_PASSWORD"] },
+  "panel": "panel/actual-budget.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/actual-budget.md"],
+  "requires": { "env": ["ACTUAL_PASSWORD"], "min_ram_mb": 256, "min_disk_mb": 200 },
+  "env_vars": [
+    { "name": "ACTUAL_URL", "description": "Actual Budget server URL", "default": "http://localhost:5006", "required": true },
+    { "name": "ACTUAL_PASSWORD", "description": "Actual server password", "required": true, "secret": true },
+    { "name": "ACTUAL_SYNC_ID", "description": "Budget sync ID to auto-select budget", "required": false }
+  ],
+  "ports": [5006],
+  "webUI": { "port": 5006, "path": "/", "label": "Actual Budget" },
+  "notes": "Privacy-first budgeting. Data stays local. Set ACTUAL_PASSWORD to match your Actual server password."
+}

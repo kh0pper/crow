@@ -1,0 +1,44 @@
+services:
+  miniflux:
+    image: miniflux/miniflux:latest
+    container_name: crow-miniflux
+    ports:
+      - "127.0.0.1:8085:8080"
+    environment:
+      - DATABASE_URL=postgres://miniflux:${MINIFLUX_DB_PASSWORD:-miniflux}@crow-miniflux-db/miniflux?sslmode=disable
+      - RUN_MIGRATIONS=1
+      - CREATE_ADMIN=1
+      - ADMIN_USERNAME=${MINIFLUX_ADMIN_USER:-admin}
+      - ADMIN_PASSWORD=${MINIFLUX_ADMIN_PASSWORD:?Set MINIFLUX_ADMIN_PASSWORD}
+    depends_on:
+      miniflux-db:
+        condition: service_healthy
+    init: true
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+
+  miniflux-db:
+    image: postgres:15-alpine
+    container_name: crow-miniflux-db
+    volumes:
+      - miniflux-db-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=miniflux
+      - POSTGRES_PASSWORD=${MINIFLUX_DB_PASSWORD:-miniflux}
+      - POSTGRES_DB=miniflux
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "miniflux"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  miniflux-db-data:

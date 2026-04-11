@@ -1,0 +1,62 @@
+services:
+  wallabag:
+    image: wallabag/wallabag:latest
+    container_name: crow-wallabag
+    ports:
+      - "127.0.0.1:8084:80"
+    environment:
+      - SYMFONY__ENV__DATABASE_DRIVER=pdo_mysql
+      - SYMFONY__ENV__DATABASE_HOST=crow-wallabag-db
+      - SYMFONY__ENV__DATABASE_PORT=3306
+      - SYMFONY__ENV__DATABASE_NAME=wallabag
+      - SYMFONY__ENV__DATABASE_USER=wallabag
+      - SYMFONY__ENV__DATABASE_PASSWORD=${WALLABAG_DB_PASSWORD:-wallabag}
+      - SYMFONY__ENV__REDIS_HOST=crow-wallabag-redis
+      - SYMFONY__ENV__DOMAIN_NAME=${WALLABAG_URL:-http://localhost:8084}
+      - SYMFONY__ENV__SERVER_NAME="Crow Wallabag"
+    depends_on:
+      wallabag-db:
+        condition: service_healthy
+      wallabag-redis:
+        condition: service_healthy
+    init: true
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  wallabag-db:
+    image: mariadb:10.11
+    container_name: crow-wallabag-db
+    volumes:
+      - wallabag-db-data:/var/lib/mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=${WALLABAG_DB_PASSWORD:-wallabag}
+      - MYSQL_DATABASE=wallabag
+      - MYSQL_USER=wallabag
+      - MYSQL_PASSWORD=${WALLABAG_DB_PASSWORD:-wallabag}
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "-u", "root", "-p${WALLABAG_DB_PASSWORD:-wallabag}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  wallabag-redis:
+    image: redis:7-alpine
+    container_name: crow-wallabag-redis
+    mem_limit: 128m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  wallabag-db-data:

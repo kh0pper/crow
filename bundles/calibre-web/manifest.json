@@ -1,0 +1,25 @@
+{
+  "id": "calibre-web",
+  "name": "Calibre-Web",
+  "version": "1.0.0",
+  "description": "Web-based ebook reader and library manager for Calibre",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "media",
+  "tags": ["ebooks", "calibre", "reader", "library", "self-hosted"],
+  "icon": "book",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["CALIBRE_WEB_URL", "CALIBRE_WEB_API_KEY"] },
+  "panel": "panel/calibre-web.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/calibre-web.md"],
+  "requires": { "env": ["CALIBRE_WEB_API_KEY", "CALIBRE_WEB_DB_PATH"], "min_ram_mb": 256, "min_disk_mb": 200 },
+  "env_vars": [
+    { "name": "CALIBRE_WEB_URL", "description": "Calibre-Web server URL", "default": "http://localhost:8083", "required": true },
+    { "name": "CALIBRE_WEB_API_KEY", "description": "Calibre-Web API key for authentication", "required": true, "secret": true },
+    { "name": "CALIBRE_WEB_DB_PATH", "description": "Host path to Calibre metadata.db directory", "required": true }
+  ],
+  "ports": [8083],
+  "webUI": { "port": 8083, "path": "/", "label": "Calibre-Web" },
+  "notes": "Self-host via Docker (set CALIBRE_WEB_DB_PATH to directory containing metadata.db) or connect to existing Calibre-Web instance (set CALIBRE_WEB_URL + CALIBRE_WEB_API_KEY)."
+}

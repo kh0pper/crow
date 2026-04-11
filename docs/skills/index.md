@@ -43,6 +43,7 @@ Skills are markdown files in `skills/` that define behavioral prompts for the AI
 
 | Skill | File | Purpose |
 |---|---|---|
+| **Crow Dream** | `crow-dream.md` | Consolidate and prune Crow memories — review stale, duplicate, and low-value memories |
 | **Discord** | `discord.md` | Interact with Discord servers — channels, messages, threads — through the Discord MCP server. Monitor community discussi |
 | **Extension Dev** | `extension-dev.md` | Develop, test, and publish Crow extensions (bundles, panels, MCP servers, skills) |
 | **Filesystem** | `filesystem.md` | Access and manage local files and directories through the Filesystem MCP server. Read documents, organize research mater |

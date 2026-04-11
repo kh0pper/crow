@@ -38,6 +38,12 @@ const ICON_MAP = {
   gamepad: "\u{1F3AE}",
   "file-text": "\u{1F4C4}",
   "phone-video": "\u{1F4F9}",
+  bell: "\u{1F514}",
+  radio: "\u{1F4E1}",
+  bookmark: "\u{1F516}",
+  "check-square": "\u2705",
+  dollar: "\u{1F4B0}",
+  document: "\u{1F4D1}",
 };
 
 const CATEGORY_COLORS = {
@@ -49,9 +55,11 @@ const CATEGORY_COLORS = {
   networking:   { bg: "rgba(56,189,248,0.12)", color: "#38bdf8" },
   gaming:       { bg: "rgba(244,63,94,0.12)",  color: "#f43f5e" },
   data:         { bg: "rgba(14,165,233,0.12)",  color: "#0ea5e9" },
-  social:       { bg: "rgba(236,72,153,0.12)", color: "#ec4899" },
-  finance:      { bg: "rgba(245,158,11,0.12)", color: "#f59e0b" },
-  other:        { bg: "rgba(161,161,170,0.12)", color: "#a1a1aa" },
+  social:         { bg: "rgba(236,72,153,0.12)", color: "#ec4899" },
+  finance:        { bg: "rgba(245,158,11,0.12)", color: "#f59e0b" },
+  infrastructure: { bg: "rgba(148,163,184,0.12)", color: "#94a3b8" },
+  automation:     { bg: "rgba(45,212,191,0.12)", color: "#2dd4bf" },
+  other:          { bg: "rgba(161,161,170,0.12)", color: "#a1a1aa" },
 };
 
 const CATEGORY_LABELS = {
@@ -65,6 +73,8 @@ const CATEGORY_LABELS = {
   data: "extensions.categoryData",
   social: "extensions.categorySocial",
   finance: "extensions.categoryFinance",
+  infrastructure: "extensions.categoryInfrastructure",
+  automation: "extensions.categoryAutomation",
   other: "extensions.categoryOther",
 };
 
@@ -519,6 +529,7 @@ export default {
     const officialIds = new Set(officialAddons.map((a) => a.id));
     const dedupedCommunity = communityAddons.filter((a) => !officialIds.has(a.id));
     const available = [...officialAddons, ...dedupedCommunity];
+    available.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
 
     // Detect docker compose command variant
     let composeCmd = null;

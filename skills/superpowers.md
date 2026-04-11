@@ -54,6 +54,13 @@ This is the master routing skill. Consult this **before every task** to determin
 | "chord chart", "song", "songbook", "chords", "transpose", "setlist", "chord diagram", "music theory" | "acordes", "canción", "cancionero", "transponer", "setlist", "diagrama de acordes", "teoría musical" | songbook | crow-blog, crow-storage |
 | "knowledge base", "resource guide", "KB", "community resources", "verify resources", "flag outdated" | "base de conocimiento", "guía de recursos", "recursos comunitarios", "verificar recursos" | knowledge-base (add-on) | crow-knowledge-base, crow-sharing |
 | "news", "articles", "feed", "RSS", "briefing", "podcast", "youtube" | "noticias", "artículos", "podcast", "youtube" | media (add-on) | crow-media |
+| "calibre", "ebook", "read book", "ebook library" | "calibre", "libro electrónico", "leer libro" | calibre-server, calibre-web (add-on) | crow-calibre-server, crow-calibre-web |
+| "miniflux", "RSS reader", "subscribe feed", "news reader" | "miniflux", "lector RSS", "suscribir feed" | miniflux (add-on) | crow-miniflux |
+| "audiobook", "audiobookshelf", "listen to book" | "audiolibro", "audiobookshelf", "escuchar libro" | audiobookshelf (add-on) | crow-audiobookshelf |
+| "paperless", "scan document", "OCR", "document archive" | "paperless", "escanear documento", "OCR", "archivo documental" | paperless (add-on) | crow-paperless |
+| "bookmark", "save link", "linkding", "shiori" | "marcador", "guardar enlace", "linkding", "shiori" | linkding, shiori (add-on) | crow-linkding, crow-shiori |
+| "vikunja", "todo list", "task manager", "kanban" | "vikunja", "lista de tareas", "gestor de tareas", "kanban" | vikunja (add-on) | crow-vikunja |
+| "actual budget", "personal finance", "budget tracking" | "actual budget", "finanzas personales", "presupuesto" | actual-budget (add-on) | crow-actual-budget |
 | "crow's nest", "dashboard", "settings", "control panel" | "panel", "configuración", "panel de control" | network-setup | (dashboard routes) |
 | "add-on", "extension", "install plugin", "browse extensions" | "complemento", "extensión", "instalar plugin" | add-ons | crow-memory, filesystem |
 | "build extension", "create bundle", "develop panel", "new add-on for crow", "publish extension" | "crear extensión", "desarrollar panel", "nuevo complemento para crow" | extension-dev | crow-memory, filesystem |

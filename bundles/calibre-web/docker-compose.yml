@@ -1,0 +1,24 @@
+services:
+  calibre-web:
+    image: linuxserver/calibre-web:latest
+    container_name: crow-calibre-web
+    ports:
+      - "127.0.0.1:8083:8083"
+    volumes:
+      - calibre-web-config:/config
+      - ${CALIBRE_WEB_DB_PATH:?Set CALIBRE_WEB_DB_PATH}:/books
+    environment:
+      - PUID=1000
+      - PGID=1000
+    init: true
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  calibre-web-config:

@@ -1,0 +1,27 @@
+{
+  "id": "paperless",
+  "name": "Paperless-ngx",
+  "version": "1.0.0",
+  "description": "Document management with OCR — scan, search, tag, and organize paper documents digitally",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "productivity",
+  "tags": ["documents", "OCR", "scanner", "archive", "self-hosted"],
+  "icon": "document",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["PAPERLESS_URL", "PAPERLESS_API_TOKEN"] },
+  "panel": "panel/paperless.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/paperless.md"],
+  "requires": { "env": ["PAPERLESS_API_TOKEN"], "min_ram_mb": 1024, "min_disk_mb": 2000 },
+  "env_vars": [
+    { "name": "PAPERLESS_URL", "description": "Paperless-ngx server URL", "default": "http://localhost:8000", "required": true },
+    { "name": "PAPERLESS_API_TOKEN", "description": "Paperless-ngx API token (Settings > API Tokens)", "required": true, "secret": true },
+    { "name": "PAPERLESS_DATA_PATH", "description": "Host path for data files (Docker mode)", "required": false },
+    { "name": "PAPERLESS_MEDIA_PATH", "description": "Host path for media files (Docker mode)", "required": false },
+    { "name": "PAPERLESS_DB_PASSWORD", "description": "PostgreSQL password for Docker database", "required": false, "secret": true }
+  ],
+  "ports": [8000],
+  "webUI": { "port": 8000, "path": "/", "label": "Paperless-ngx" },
+  "notes": "Self-host via Docker (multi-container: app + postgres + redis) or connect to existing (set PAPERLESS_URL + PAPERLESS_API_TOKEN)."
+}

@@ -1,0 +1,26 @@
+{
+  "id": "calibre-server",
+  "name": "Calibre Server",
+  "version": "1.0.0",
+  "description": "OPDS content server for ebooks — search, browse, and download from your Calibre library",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "media",
+  "tags": ["ebooks", "calibre", "OPDS", "library", "self-hosted"],
+  "icon": "book",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["CALIBRE_URL", "CALIBRE_USERNAME", "CALIBRE_PASSWORD"] },
+  "panel": "panel/calibre-server.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/calibre-server.md"],
+  "requires": { "env": ["CALIBRE_LIBRARY_PATH"], "min_ram_mb": 512, "min_disk_mb": 500 },
+  "env_vars": [
+    { "name": "CALIBRE_URL", "description": "Calibre content server URL", "default": "http://localhost:8081", "required": true },
+    { "name": "CALIBRE_LIBRARY_PATH", "description": "Host path to your Calibre library folder", "required": true },
+    { "name": "CALIBRE_USERNAME", "description": "HTTP Basic auth username (if auth enabled)", "required": false },
+    { "name": "CALIBRE_PASSWORD", "description": "HTTP Basic auth password", "required": false, "secret": true }
+  ],
+  "ports": [8081],
+  "webUI": { "port": 8081, "path": "/", "label": "Calibre" },
+  "notes": "Self-host via Docker (set CALIBRE_LIBRARY_PATH) or connect to existing Calibre content server (set CALIBRE_URL)."
+}

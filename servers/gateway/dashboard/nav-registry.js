@@ -39,6 +39,8 @@ const CATEGORY_TO_GROUP = {
   social: "core",
   productivity: "tools",
   finance: "tools",
+  infrastructure: "tools",
+  automation: "tools",
   system: "system",
 };
 
