@@ -257,13 +257,19 @@ function revertEnvInGateway(envKeys) {
 /**
  * Schedule a graceful gateway restart so new env vars take effect.
  * Uses the same pattern as auto-update: exit with code 1 so systemd restarts.
+ * Emits 'crow:shutdown' on process so the HTTP server can close its listening
+ * socket before the exit — prevents EADDRINUSE when systemd starts the new instance.
  * For non-systemd, just sets process.env so the storage server can reinitialize.
  */
 function scheduleGatewayRestart(delayMs = 2000) {
   if (process.env.INVOCATION_ID) {
-    // Running as systemd service — exit to trigger restart
+    // Running as systemd service — close server, then exit to trigger restart
     console.log("[bundles] Restarting gateway to apply new configuration...");
-    setTimeout(() => process.exit(1), delayMs);
+    setTimeout(() => {
+      process.emit("crow:shutdown");
+      // Give server.close() time to release the port, then exit
+      setTimeout(() => process.exit(1), 1000);
+    }, delayMs);
   } else {
     // Not systemd — reload env vars into current process
     try {

@@ -1,0 +1,41 @@
+{
+  "id": "ntfy",
+  "name": "Push Notifications (ntfy)",
+  "version": "1.0.0",
+  "description": "Self-hosted push notifications via ntfy. Instant delivery to any device with the ntfy app.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "infrastructure",
+  "tags": ["notifications", "push", "ntfy", "alerts", "infrastructure"],
+  "icon": "bell",
+  "docker": {
+    "composefile": "docker-compose.yml"
+  },
+  "requires": {
+    "min_ram_mb": 64,
+    "min_disk_mb": 50
+  },
+  "env_vars": [
+    {
+      "name": "NTFY_TOPIC",
+      "description": "Notification topic name (unique to your instance)",
+      "default": "crow",
+      "required": true
+    },
+    {
+      "name": "NTFY_PORT",
+      "description": "ntfy server port",
+      "default": "2586",
+      "required": false
+    },
+    {
+      "name": "NTFY_AUTH_TOKEN",
+      "description": "Access token for private topics (leave empty for open topics on local network)",
+      "required": false,
+      "secret": true
+    }
+  ],
+  "ports": [2586],
+  "webUI": null,
+  "notes": "Install the ntfy app on your phone (Android/iOS) and subscribe to your topic for instant push notifications. Works over Tailscale."
+}

@@ -72,6 +72,14 @@ export async function createNotification(db, opts) {
     // Push module not available (non-gateway context) — skip silently
   }
 
+  // Send ntfy notification (non-blocking, fails silently when not configured)
+  try {
+    const { sendNtfyNotification } = await import("../gateway/push/ntfy.js");
+    await sendNtfyNotification({ title, body: body || title, url: action_url, priority, type });
+  } catch {
+    // ntfy module not available or not configured — skip silently
+  }
+
   return { id: Number(result.lastInsertRowid) };
 }
 

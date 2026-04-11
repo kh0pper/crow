@@ -119,11 +119,18 @@ export async function checkForUpdates() {
 
     log(`${behindCount} new commit(s) available. Updating...`);
 
+    // Stash any local changes before pulling
+    const stashResult = await run("git", ["stash", "--include-untracked"]);
+    const didStash = !stashResult.stdout.includes("No local changes");
+
     // Pull
     const pullResult = await run("git", ["pull", "--ff-only", "origin", "main"]);
     if (pullResult.code !== 0) {
       const msg = `Pull failed: ${pullResult.stderr}`;
       log(msg);
+      if (didStash) {
+        await run("git", ["stash", "pop"]);
+      }
       await saveSetting("auto_update_last_check", new Date().toISOString());
       await saveSetting("auto_update_last_result", msg);
       return { updated: false, error: msg };
@@ -143,6 +150,18 @@ export async function checkForUpdates() {
     log("Running database migrations...");
     await run("node", ["scripts/init-db.js"]);
 
+    // Restore stashed local changes
+    if (didStash) {
+      const popResult = await run("git", ["stash", "pop"]);
+      if (popResult.code !== 0) {
+        // Conflict: restore clean post-pull state, keep changes in stash
+        await run("git", ["checkout", "--", "."]);
+        log("Warning: local changes could not be auto-merged after update. They are saved in 'git stash list' and can be recovered with 'git stash pop'.");
+      } else {
+        log("Local changes stashed and restored successfully.");
+      }
+    }
+
     const newRef = await run("git", ["rev-parse", "--short", "HEAD"]);
     const newVersion = newRef.stdout;
 
@@ -156,9 +175,12 @@ export async function checkForUpdates() {
     // Restart if running as systemd service
     if (process.env.INVOCATION_ID) {
       log("Restarting gateway via systemd...");
-      // Exit with code 1 so Restart=on-failure brings the service back up
-      // Delay to allow the HTTP response to complete first
-      setTimeout(() => process.exit(1), 1500);
+      // Close the HTTP server first to release the port, then exit
+      // so systemd restart doesn't hit EADDRINUSE
+      setTimeout(() => {
+        process.emit("crow:shutdown");
+        setTimeout(() => process.exit(1), 1000);
+      }, 1500);
     }
 
     return { updated: true, from: currentVersion, to: newVersion };
