@@ -2,6 +2,8 @@
 
 Send encrypted messages, have threaded conversations, and interact with your contacts — all powered by the Nostr protocol. No accounts, no central servers, no metadata leaks.
 
+For voice and video, see [Video & Audio Calls](/guide/calls).
+
 ## How It Works
 
 Crow uses the **Nostr protocol** for lightweight social features:

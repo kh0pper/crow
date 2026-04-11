@@ -66,10 +66,17 @@ Extensions with web UIs are automatically proxied through the gateway (no extra 
 | Home Assistant | MCP Server | Control lights, switches, sensors |
 | RoMM | Bundle | Retro game library and emulator |
 
-### Networking
+### Social & Communication
+| Extension | Type | Description |
+|-----------|------|-------------|
+| [Video & Audio Calls](/guide/calls) | Bundle | Peer-to-peer video/audio calling with WebRTC |
+
+### Infrastructure
 | Extension | Type | Description |
 |-----------|------|-------------|
 | Tailscale | Bundle | VPN access from any device |
+| [Push Notifications (ntfy)](/guide/notifications#ntfy-bundle) | Bundle | Self-hosted push via ntfy app |
+| TURN Server (coturn) | Bundle | WebRTC relay for NAT traversal |
 
 ## Extension Web UIs
 
