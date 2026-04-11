@@ -74,6 +74,19 @@ These are installable add-ons with Docker Compose configurations. Install with `
 | **Ollama** | Bundle (Docker) | Local AI models for embeddings, summarization, classification |
 | **Nextcloud** | Bundle (Docker) | File sync via WebDAV mount (v1: files only) |
 | **Immich** | Bundle (Docker + custom MCP) | Photo library search, album management |
+| **Calibre Server** | Bundle (Docker) | OPDS ebook server — search, browse, download |
+| **Calibre-Web** | Bundle (Docker) | Web-based ebook reader with shelves and reading progress |
+| **Miniflux** | Bundle (Docker) | Minimalist RSS reader with feed management |
+| **Audiobookshelf** | Bundle (Docker) | Audiobook and podcast server with progress tracking |
+| **Kavita** | Bundle (Docker) | Manga, comics, and ebook reader |
+| **Navidrome** | Bundle (Docker) | Music streaming server (Subsonic-compatible) |
+| **Paperless-ngx** | Bundle (Docker) | Document management with OCR |
+| **Wallabag** | Bundle (Docker) | Read-it-later article archiver |
+| **Linkding** | Bundle (Docker) | Lightweight bookmark manager |
+| **Shiori** | Bundle (Docker) | Bookmark manager with offline page caching |
+| **BookStack** | Bundle (Docker) | Wiki platform (shelves, books, chapters, pages) |
+| **Vikunja** | Bundle (Docker) | Task management with kanban boards |
+| **Actual Budget** | Bundle (Docker) | Privacy-first personal budgeting |
 
 ## How Integration Proxy Works
 
