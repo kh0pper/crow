@@ -17,7 +17,7 @@ export default {
   async handler(req, res, { db, lang, layout }) {
     // Fetch contacts
     const { rows: contacts } = await db.execute({
-      sql: "SELECT id, crow_id, display_name, is_blocked, last_seen_at FROM contacts WHERE is_blocked = 0 ORDER BY last_seen_at DESC",
+      sql: "SELECT id, crow_id, display_name, is_blocked, last_seen FROM contacts WHERE is_blocked = 0 ORDER BY last_seen DESC",
       args: [],
     });
 
