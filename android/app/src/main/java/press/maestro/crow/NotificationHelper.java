@@ -19,6 +19,7 @@ public class NotificationHelper {
     public static final String CHANNEL_SYSTEM = "crow_system";
     public static final String CHANNEL_REMINDERS = "crow_reminders";
     public static final String CHANNEL_MEDIA = "crow_media";
+    public static final String CHANNEL_SERVICE = "crow_service";
 
     /**
      * Create notification channels (Android 8+). Safe to call multiple times.
@@ -44,6 +45,12 @@ public class NotificationHelper {
         mgr.createNotificationChannel(new NotificationChannel(
                 CHANNEL_MEDIA, "Media",
                 NotificationManager.IMPORTANCE_LOW));
+
+        NotificationChannel serviceChannel = new NotificationChannel(
+                CHANNEL_SERVICE, "Connection Status",
+                NotificationManager.IMPORTANCE_MIN);
+        serviceChannel.setShowBadge(false);
+        mgr.createNotificationChannel(serviceChannel);
     }
 
     /**
@@ -97,5 +104,17 @@ public class NotificationHelper {
         } catch (SecurityException e) {
             // POST_NOTIFICATIONS permission not granted — silently ignore
         }
+    }
+
+    /**
+     * Map ntfy tag strings to Crow notification type.
+     * Tags come as comma-separated in the ntfy JSON "tags" array.
+     */
+    public static String typeFromNtfyTags(String tags) {
+        if (tags == null) return "system";
+        if (tags.contains("incoming_envelope")) return "peer";
+        if (tags.contains("alarm_clock")) return "reminder";
+        if (tags.contains("musical_note")) return "media";
+        return "system";
     }
 }

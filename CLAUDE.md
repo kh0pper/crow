@@ -433,6 +433,7 @@ Consult `skills/superpowers.md` first — it routes user intent to the right ski
 - `songbook.md` — Personal chord book: ChordPro charts, transposition, chord diagrams, setlists, music theory
 - `data-backends.md` — External data backend registration and knowledge capture workflow
 - `extension-dev.md` — Extension development: scaffold, test, and publish bundles, panels, MCP servers, and skills
+- `developer-kit.md` — Developer kit: scaffold, test, and submit Crow extensions to the registry
 - `network-setup.md` — Tailscale remote access guidance
 - `add-ons.md` — Add-on browsing, installation, removal
 - `scheduling.md` — Scheduled and recurring task management

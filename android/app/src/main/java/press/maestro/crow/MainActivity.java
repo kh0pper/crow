@@ -165,6 +165,9 @@ public class MainActivity extends AppCompatActivity {
         // Schedule background notification polling (every 15 minutes)
         scheduleBackgroundPolling();
 
+        // Start ntfy listener service for real-time push notifications
+        startNtfyService();
+
         // Set up foreground polling handler
         foregroundPollHandler = new Handler(Looper.getMainLooper());
         foregroundPollRunnable = new Runnable() {
@@ -278,6 +281,14 @@ public class MainActivity extends AppCompatActivity {
         return prefs.getString(KEY_GATEWAY_URL, null);
     }
 
+    private void startNtfyService() {
+        String gatewayUrl = getGatewayUrl();
+        if (gatewayUrl != null && !gatewayUrl.isEmpty()) {
+            Intent serviceIntent = new Intent(this, NtfyListenerService.class);
+            ContextCompat.startForegroundService(this, serviceIntent);
+        }
+    }
+
     private void openSettings() {
         Intent intent = new Intent(this, SettingsActivity.class);
         startActivity(intent);
@@ -342,6 +353,9 @@ public class MainActivity extends AppCompatActivity {
         }
         // Start foreground polling
         foregroundPollHandler.postDelayed(foregroundPollRunnable, FOREGROUND_POLL_INTERVAL_MS);
+
+        // Restart ntfy service (handles returning from settings with new gateway URL)
+        startNtfyService();
     }
 
     @Override

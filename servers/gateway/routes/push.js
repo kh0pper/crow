@@ -102,5 +102,35 @@ export default function pushRouter(authMiddleware) {
     }
   });
 
+  // GET /api/push/ntfy-config — connection parameters for Android ntfy client
+  router.get("/api/push/ntfy-config", authMiddleware, (req, res) => {
+    const topic = process.env.NTFY_TOPIC;
+    if (!topic) {
+      return res.json({ enabled: false });
+    }
+
+    const port = process.env.NTFY_PORT || "2586";
+    const authToken = process.env.NTFY_AUTH_TOKEN || null;
+
+    // Derive external ntfy URL
+    let url = process.env.NTFY_EXTERNAL_URL || null;
+    if (!url) {
+      const gatewayUrl = process.env.CROW_GATEWAY_URL;
+      if (gatewayUrl) {
+        try {
+          const parsed = new URL(gatewayUrl);
+          parsed.port = port;
+          url = parsed.origin;
+        } catch {
+          return res.json({ enabled: false });
+        }
+      } else {
+        return res.json({ enabled: false });
+      }
+    }
+
+    res.json({ enabled: true, url, topic, authToken });
+  });
+
   return router;
 }

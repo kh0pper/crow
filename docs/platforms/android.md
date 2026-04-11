@@ -12,7 +12,7 @@ Access Crow from your Android device with the native app or as a Progressive Web
 
 Download the latest Crow Android app:
 
-[Download Crow for Android](https://github.com/kh0pper/crow/releases/download/android-v1.2.0/app-release.apk)
+[Download Crow for Android](https://github.com/kh0pper/crow/releases/download/android-v1.3.0/app-release.apk)
 
 ### Step 2: Enable unknown sources
 
@@ -67,7 +67,24 @@ Tailscale runs in the background with minimal battery impact. Your Crow connecti
 
 ## Push Notifications
 
-The Crow app can send push notifications for reminders, peer messages, and system alerts.
+The Crow app delivers push notifications through two channels:
+
+### Instant push via ntfy (v1.3.0+)
+
+When the [ntfy bundle](/guide/notifications#ntfy-bundle) is installed on your Crow instance, the app maintains a persistent connection to the ntfy server and delivers notifications instantly. No separate app needed.
+
+1. Install the ntfy bundle on your Crow instance (from Extensions or `crow bundle install ntfy`)
+2. Open the Crow app and connect to your gateway
+3. The app automatically detects ntfy and starts the push listener
+4. A small "Crow connected" indicator appears in your notification shade
+
+The ntfy listener runs as a background service, surviving app closure and device reboots.
+
+### Background polling (fallback)
+
+If ntfy is not installed, the app polls your gateway every 15 minutes for new notifications. This is slower but requires no additional setup.
+
+### Notification setup
 
 1. When the app first launches, it will request notification permission — tap **Allow**
 2. If you dismissed the prompt, go to **Android Settings** > **Apps** > **Crow** > **Notifications** and enable them
@@ -86,6 +103,10 @@ All Crow's Nest panels are available from the Android app:
 - **Contacts** — View and manage your contact list
 - **Skills** — Browse available skills
 - **Settings** — Full configuration access
+
+### Instant Push Notifications (v1.3.0)
+
+With the ntfy bundle installed, notifications arrive within a second. Calls, messages, reminders, and system alerts all push to your phone instantly without the 15-minute polling delay. See [Notifications & Push](/guide/notifications) for details.
 
 ### Voice and Video Calls (v1.2.0)
 
