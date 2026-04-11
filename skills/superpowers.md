@@ -64,6 +64,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | "crow's nest", "dashboard", "settings", "control panel" | "panel", "configuración", "panel de control" | network-setup | (dashboard routes) |
 | "add-on", "extension", "install plugin", "browse extensions" | "complemento", "extensión", "instalar plugin" | add-ons | crow-memory, filesystem |
 | "build extension", "create bundle", "develop panel", "new add-on for crow", "publish extension" | "crear extensión", "desarrollar panel", "nuevo complemento para crow" | extension-dev | crow-memory, filesystem |
+| "developer kit", "build extension for crow", "submit add-on", "create crow extension", "publish to registry" | "kit de desarrollador", "crear extensión para crow", "enviar complemento", "publicar en registro" | developer-kit | crow-memory, filesystem |
 | "what can you do", "getting started", "new to crow" | "qué puedes hacer", "cómo empezar", "nuevo en crow" | onboarding-tour | crow-memory |
 | "tailscale", "remote access", "network setup", "private access", "VPN" | "tailscale", "acceso remoto", "configurar red", "acceso privado", "red privada" | network-setup, tailscale | (documentation) |
 | "report bug", "file issue", "feature request", "found a bug" | "reportar bug", "crear issue", "solicitar función" | bug-report | crow-memory, github |

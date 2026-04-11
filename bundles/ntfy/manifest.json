@@ -36,6 +36,11 @@
     }
   ],
   "ports": [2586],
-  "webUI": null,
+  "webUI": {
+    "port": 2586,
+    "path": "/",
+    "label": "ntfy",
+    "proxyMode": "direct"
+  },
   "notes": "Install the ntfy app on your phone (Android/iOS) and subscribe to your topic for instant push notifications. Works over Tailscale."
 }

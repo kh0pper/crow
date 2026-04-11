@@ -1444,6 +1444,26 @@
       "ports": [5006],
       "webUI": { "port": 5006, "path": "/", "label": "Actual Budget" },
       "notes": "Privacy-first budgeting. Data stays local. Password-based auth. 7 MCP tools for accounts, transactions, budgets, and reports."
+    },
+    {
+      "id": "developer-kit",
+      "name": "Developer Kit",
+      "description": "Build and submit Crow extensions with guided scaffolding, testing, and registry submission",
+      "type": "skill",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "infrastructure",
+      "tags": ["developer", "extension", "addon", "scaffolding", "publish", "sdk"],
+      "icon": "archive",
+      "webUI": null,
+      "requires": {
+        "env": [],
+        "min_ram_mb": 0,
+        "min_disk_mb": 1
+      },
+      "env_vars": [],
+      "skills": ["skills/developer-kit.md"],
+      "notes": "Skill-only. Guides AI through building and submitting Crow extensions."
     }
   ]
 }
