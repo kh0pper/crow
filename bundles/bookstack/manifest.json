@@ -1,0 +1,26 @@
+{
+  "id": "bookstack",
+  "name": "BookStack",
+  "version": "1.0.0",
+  "description": "Self-hosted wiki platform — organize knowledge in shelves, books, chapters, and pages",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "productivity",
+  "tags": ["wiki", "documentation", "knowledge-base", "self-hosted"],
+  "icon": "book",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["BOOKSTACK_URL", "BOOKSTACK_TOKEN_ID", "BOOKSTACK_TOKEN_SECRET"] },
+  "panel": "panel/bookstack.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/bookstack.md"],
+  "requires": { "env": ["BOOKSTACK_TOKEN_ID", "BOOKSTACK_TOKEN_SECRET"], "min_ram_mb": 512, "min_disk_mb": 500 },
+  "env_vars": [
+    { "name": "BOOKSTACK_URL", "description": "BookStack server URL", "default": "http://localhost:6875", "required": true },
+    { "name": "BOOKSTACK_TOKEN_ID", "description": "BookStack API token ID (Settings > API Tokens)", "required": true },
+    { "name": "BOOKSTACK_TOKEN_SECRET", "description": "BookStack API token secret", "required": true, "secret": true },
+    { "name": "BOOKSTACK_DB_PASSWORD", "description": "MariaDB password (Docker mode)", "required": false, "secret": true }
+  ],
+  "ports": [6875],
+  "webUI": { "port": 6875, "path": "/", "label": "BookStack" },
+  "notes": "Self-host via Docker (includes MariaDB) or connect to existing (set BOOKSTACK_URL + API tokens). Create tokens in BookStack under Settings > API Tokens."
+}

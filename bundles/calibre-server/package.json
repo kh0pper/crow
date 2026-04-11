@@ -1,0 +1,11 @@
+{
+  "name": "crow-calibre-server",
+  "version": "1.0.0",
+  "description": "Calibre content server MCP — search, browse, and download ebooks via OPDS",
+  "type": "module",
+  "main": "server/index.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  }
+}

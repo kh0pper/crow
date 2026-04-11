@@ -1,0 +1,27 @@
+{
+  "id": "miniflux",
+  "name": "Miniflux",
+  "version": "1.0.0",
+  "description": "Minimalist RSS reader — subscribe to feeds, read articles, and track news",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "media",
+  "tags": ["rss", "news", "feeds", "reader", "self-hosted"],
+  "icon": "rss",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["MINIFLUX_URL", "MINIFLUX_API_KEY"] },
+  "panel": "panel/miniflux.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/miniflux.md"],
+  "requires": { "env": ["MINIFLUX_API_KEY"], "min_ram_mb": 512, "min_disk_mb": 500 },
+  "env_vars": [
+    { "name": "MINIFLUX_URL", "description": "Miniflux server URL", "default": "http://localhost:8085", "required": true },
+    { "name": "MINIFLUX_API_KEY", "description": "Miniflux API key (Settings > API Keys)", "required": true, "secret": true },
+    { "name": "MINIFLUX_ADMIN_USER", "description": "Admin username for Docker setup", "default": "admin", "required": false },
+    { "name": "MINIFLUX_ADMIN_PASSWORD", "description": "Admin password for Docker setup", "required": false, "secret": true },
+    { "name": "MINIFLUX_DB_PASSWORD", "description": "PostgreSQL password for Docker setup", "required": false, "secret": true }
+  ],
+  "ports": [8085],
+  "webUI": { "port": 8085, "path": "/", "label": "Miniflux" },
+  "notes": "Self-host via Docker (set MINIFLUX_ADMIN_PASSWORD) or connect to existing (set MINIFLUX_URL + MINIFLUX_API_KEY)."
+}

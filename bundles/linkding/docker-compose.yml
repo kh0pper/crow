@@ -1,0 +1,20 @@
+services:
+  linkding:
+    image: sissbruecker/linkding:latest
+    container_name: crow-linkding
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - linkding-data:/etc/linkding/data
+    init: true
+    mem_limit: 128m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  linkding-data:

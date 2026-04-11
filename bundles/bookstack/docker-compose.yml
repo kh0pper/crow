@@ -1,0 +1,51 @@
+services:
+  bookstack:
+    image: linuxserver/bookstack:latest
+    container_name: crow-bookstack
+    ports:
+      - "127.0.0.1:6875:80"
+    volumes:
+      - bookstack-config:/config
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - DB_HOST=crow-bookstack-db
+      - DB_PORT=3306
+      - DB_DATABASE=bookstack
+      - DB_USERNAME=bookstack
+      - DB_PASSWORD=${BOOKSTACK_DB_PASSWORD:-bookstack}
+      - APP_URL=${BOOKSTACK_URL:-http://localhost:6875}
+    depends_on:
+      bookstack-db:
+        condition: service_healthy
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  bookstack-db:
+    image: mariadb:10.11
+    container_name: crow-bookstack-db
+    volumes:
+      - bookstack-db-data:/var/lib/mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=${BOOKSTACK_DB_PASSWORD:-bookstack}
+      - MYSQL_DATABASE=bookstack
+      - MYSQL_USER=bookstack
+      - MYSQL_PASSWORD=${BOOKSTACK_DB_PASSWORD:-bookstack}
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "-u", "root", "-p${BOOKSTACK_DB_PASSWORD:-bookstack}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  bookstack-config:
+  bookstack-db-data:

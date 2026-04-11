@@ -1,0 +1,26 @@
+services:
+  audiobookshelf:
+    image: advplyr/audiobookshelf:latest
+    container_name: crow-audiobookshelf
+    ports:
+      - "127.0.0.1:13378:80"
+    volumes:
+      - ${AUDIOBOOKSHELF_AUDIOBOOK_PATH:-audiobookshelf-audiobooks}:/audiobooks
+      - ${AUDIOBOOKSHELF_PODCAST_PATH:-audiobookshelf-podcasts}:/podcasts
+      - audiobookshelf-config:/config
+      - audiobookshelf-metadata:/metadata
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  audiobookshelf-audiobooks:
+  audiobookshelf-podcasts:
+  audiobookshelf-config:
+  audiobookshelf-metadata:

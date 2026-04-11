@@ -1,0 +1,26 @@
+{
+  "id": "kavita",
+  "name": "Kavita",
+  "version": "1.0.0",
+  "description": "Self-hosted manga, comics, and ebook reader — browse series, track reading progress",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "media",
+  "tags": ["manga", "comics", "ebooks", "reader", "self-hosted"],
+  "icon": "book",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["KAVITA_URL", "KAVITA_USERNAME", "KAVITA_PASSWORD"] },
+  "panel": "panel/kavita.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/kavita.md"],
+  "requires": { "env": ["KAVITA_USERNAME", "KAVITA_PASSWORD"], "min_ram_mb": 512, "min_disk_mb": 1000 },
+  "env_vars": [
+    { "name": "KAVITA_URL", "description": "Kavita server URL", "default": "http://localhost:5000", "required": true },
+    { "name": "KAVITA_USERNAME", "description": "Kavita username for API authentication", "required": true },
+    { "name": "KAVITA_PASSWORD", "description": "Kavita password for API authentication", "required": true, "secret": true },
+    { "name": "KAVITA_LIBRARY_PATH", "description": "Host path for manga/comics/ebooks (Docker mode)", "required": false }
+  ],
+  "ports": [5000],
+  "webUI": { "port": 5000, "path": "/", "label": "Kavita" },
+  "notes": "Port 5000 is commonly used — set KAVITA_PORT in docker-compose.yml if needed."
+}

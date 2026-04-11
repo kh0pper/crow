@@ -1,0 +1,24 @@
+{
+  "id": "vikunja",
+  "name": "Vikunja",
+  "version": "1.0.0",
+  "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "productivity",
+  "tags": ["tasks", "todo", "kanban", "project-management", "self-hosted"],
+  "icon": "check-square",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["VIKUNJA_URL", "VIKUNJA_API_TOKEN"] },
+  "panel": "panel/vikunja.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/vikunja.md"],
+  "requires": { "env": ["VIKUNJA_API_TOKEN"], "min_ram_mb": 256, "min_disk_mb": 200 },
+  "env_vars": [
+    { "name": "VIKUNJA_URL", "description": "Vikunja server URL", "default": "http://localhost:3456", "required": true },
+    { "name": "VIKUNJA_API_TOKEN", "description": "API token from Vikunja Settings > API Tokens", "required": true, "secret": true }
+  ],
+  "ports": [3456],
+  "webUI": { "port": 3456, "path": "/", "label": "Vikunja" },
+  "notes": "Self-host via Docker (uses built-in SQLite) or connect to existing (set VIKUNJA_URL + VIKUNJA_API_TOKEN). Create tokens in Vikunja under Settings > API Tokens."
+}

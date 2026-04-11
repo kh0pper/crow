@@ -1,0 +1,24 @@
+{
+  "id": "linkding",
+  "name": "Linkding",
+  "version": "1.0.0",
+  "description": "Lightweight bookmark manager — save, tag, search, and organize web links",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "productivity",
+  "tags": ["bookmarks", "links", "tags", "self-hosted"],
+  "icon": "bookmark",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["LINKDING_URL", "LINKDING_API_TOKEN"] },
+  "panel": "panel/linkding.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/linkding.md"],
+  "requires": { "env": ["LINKDING_API_TOKEN"], "min_ram_mb": 128, "min_disk_mb": 100 },
+  "env_vars": [
+    { "name": "LINKDING_URL", "description": "Linkding server URL", "default": "http://localhost:9090", "required": true },
+    { "name": "LINKDING_API_TOKEN", "description": "API token from Linkding Settings > Integrations", "required": true, "secret": true }
+  ],
+  "ports": [9090],
+  "webUI": { "port": 9090, "path": "/", "label": "Linkding" },
+  "notes": "Self-host via Docker or connect to an existing Linkding instance. Generate an API token in Linkding Settings > Integrations."
+}

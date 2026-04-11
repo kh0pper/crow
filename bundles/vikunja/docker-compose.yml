@@ -1,0 +1,26 @@
+services:
+  vikunja:
+    image: vikunja/vikunja:latest
+    container_name: crow-vikunja
+    ports:
+      - "127.0.0.1:3456:3456"
+    volumes:
+      - vikunja-data:/app/vikunja/files
+      - vikunja-db:/db
+    environment:
+      - VIKUNJA_DATABASE_TYPE=sqlite
+      - VIKUNJA_DATABASE_PATH=/db/vikunja.db
+      - VIKUNJA_SERVICE_FRONTENDURL=${VIKUNJA_URL:-http://localhost:3456}/
+    init: true
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3456/api/v1/info"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  vikunja-data:
+  vikunja-db:

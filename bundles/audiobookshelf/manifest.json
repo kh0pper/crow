@@ -1,0 +1,26 @@
+{
+  "id": "audiobookshelf",
+  "name": "Audiobookshelf",
+  "version": "1.0.0",
+  "description": "Self-hosted audiobook and podcast server — search, browse, and track listening progress",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "media",
+  "tags": ["audiobooks", "podcasts", "audio", "library", "self-hosted"],
+  "icon": "mic",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["AUDIOBOOKSHELF_URL", "AUDIOBOOKSHELF_API_KEY"] },
+  "panel": "panel/audiobookshelf.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/audiobookshelf.md"],
+  "requires": { "env": ["AUDIOBOOKSHELF_API_KEY"], "min_ram_mb": 512, "min_disk_mb": 2000 },
+  "env_vars": [
+    { "name": "AUDIOBOOKSHELF_URL", "description": "Audiobookshelf server URL", "default": "http://localhost:13378", "required": true },
+    { "name": "AUDIOBOOKSHELF_API_KEY", "description": "Audiobookshelf API token (Settings > Users > your user)", "required": true, "secret": true },
+    { "name": "AUDIOBOOKSHELF_AUDIOBOOK_PATH", "description": "Host path for audiobook files (Docker mode)", "required": false },
+    { "name": "AUDIOBOOKSHELF_PODCAST_PATH", "description": "Host path for podcast files (Docker mode)", "required": false }
+  ],
+  "ports": [13378],
+  "webUI": { "port": 13378, "path": "/", "label": "Audiobookshelf" },
+  "notes": "Self-host via Docker (set AUDIOBOOKSHELF_AUDIOBOOK_PATH) or connect to existing (set AUDIOBOOKSHELF_URL + AUDIOBOOKSHELF_API_KEY)."
+}

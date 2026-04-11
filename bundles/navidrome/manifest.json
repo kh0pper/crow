@@ -1,0 +1,25 @@
+{
+  "id": "navidrome",
+  "name": "Navidrome",
+  "version": "1.0.0",
+  "description": "Lightweight music streaming server — browse albums, artists, playlists, and stream music",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "media",
+  "tags": ["music", "streaming", "subsonic", "audio", "self-hosted"],
+  "icon": "music",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["NAVIDROME_URL", "NAVIDROME_USERNAME", "NAVIDROME_PASSWORD"] },
+  "panel": "panel/navidrome.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/navidrome.md"],
+  "requires": { "env": ["NAVIDROME_USERNAME", "NAVIDROME_PASSWORD"], "min_ram_mb": 256, "min_disk_mb": 500 },
+  "env_vars": [
+    { "name": "NAVIDROME_URL", "description": "Navidrome server URL", "default": "http://localhost:4533", "required": true },
+    { "name": "NAVIDROME_USERNAME", "description": "Navidrome username", "required": true },
+    { "name": "NAVIDROME_PASSWORD", "description": "Navidrome password", "required": true, "secret": true },
+    { "name": "NAVIDROME_MUSIC_PATH", "description": "Host path for music files (Docker mode)", "required": false }
+  ],
+  "ports": [4533],
+  "webUI": { "port": 4533, "path": "/", "label": "Navidrome" }
+}

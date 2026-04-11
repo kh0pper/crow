@@ -459,6 +459,19 @@ Add-on skills (activated when corresponding add-on is installed):
 - `kodi.md` — Kodi remote control: JSON-RPC playback, library browsing
 - `trilium.md` — TriliumNext knowledge base: note search, creation, web clipping, organization
 - `knowledge-base.md` — Multilingual knowledge base: create, edit, publish, search, verify resources, share articles, LAN discovery
+- `calibre-server.md` — Calibre content server: search, browse, download ebooks via OPDS
+- `calibre-web.md` — Calibre-Web reader: search, shelves, reading status, download
+- `miniflux.md` — Miniflux RSS reader: subscribe feeds, read articles, star, mark read
+- `audiobookshelf.md` — Audiobookshelf: search audiobooks/podcasts, track listening progress
+- `kavita.md` — Kavita reader: browse manga/comics/ebooks, track reading progress
+- `navidrome.md` — Navidrome music: search, browse albums/artists, stream, playlists
+- `paperless.md` — Paperless-ngx: search/upload documents, OCR, tags, correspondents
+- `wallabag.md` — Wallabag read-it-later: save articles, search, tag, archive
+- `linkding.md` — Linkding bookmarks: save, search, tag, organize web links
+- `shiori.md` — Shiori bookmarks: save pages with cached content, offline reading
+- `bookstack.md` — BookStack wiki: search, browse shelves/books/pages, create/edit pages
+- `vikunja.md` — Vikunja tasks: projects, tasks, labels, due dates, kanban
+- `actual-budget.md` — Actual Budget: accounts, transactions, budgets, spending reports
 
 ### Maintaining CLAUDE.md vs crow.md
 

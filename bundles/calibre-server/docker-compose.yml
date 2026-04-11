@@ -1,0 +1,24 @@
+services:
+  calibre-server:
+    image: linuxserver/calibre:latest
+    container_name: crow-calibre-server
+    ports:
+      - "127.0.0.1:8081:8081"
+    volumes:
+      - ${CALIBRE_LIBRARY_PATH:?Set CALIBRE_LIBRARY_PATH}:/config/Calibre Library
+      - calibre-server-config:/config
+    environment:
+      - PUID=1000
+      - PGID=1000
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  calibre-server-config:

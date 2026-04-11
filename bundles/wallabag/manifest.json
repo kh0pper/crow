@@ -1,0 +1,28 @@
+{
+  "id": "wallabag",
+  "name": "Wallabag",
+  "version": "1.0.0",
+  "description": "Self-hosted read-it-later — save articles, read offline, and organize with tags",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "productivity",
+  "tags": ["read-later", "articles", "bookmarks", "pocket", "self-hosted"],
+  "icon": "archive",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["WALLABAG_URL", "WALLABAG_CLIENT_ID", "WALLABAG_CLIENT_SECRET", "WALLABAG_USERNAME", "WALLABAG_PASSWORD"] },
+  "panel": "panel/wallabag.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/wallabag.md"],
+  "requires": { "env": ["WALLABAG_CLIENT_ID", "WALLABAG_CLIENT_SECRET", "WALLABAG_USERNAME", "WALLABAG_PASSWORD"], "min_ram_mb": 512, "min_disk_mb": 500 },
+  "env_vars": [
+    { "name": "WALLABAG_URL", "description": "Wallabag server URL", "default": "http://localhost:8084", "required": true },
+    { "name": "WALLABAG_CLIENT_ID", "description": "Wallabag OAuth2 client ID (API clients management)", "required": true },
+    { "name": "WALLABAG_CLIENT_SECRET", "description": "Wallabag OAuth2 client secret", "required": true, "secret": true },
+    { "name": "WALLABAG_USERNAME", "description": "Wallabag username", "required": true },
+    { "name": "WALLABAG_PASSWORD", "description": "Wallabag password", "required": true, "secret": true },
+    { "name": "WALLABAG_DB_PASSWORD", "description": "MariaDB password for Docker database", "required": false, "secret": true }
+  ],
+  "ports": [8084],
+  "webUI": { "port": 8084, "path": "/", "label": "Wallabag" },
+  "notes": "Self-host via Docker (multi-container: app + mariadb + redis) or connect to existing (set WALLABAG_URL + OAuth2 credentials). Create an API client in Wallabag under Developer > Create a new client."
+}

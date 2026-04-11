@@ -1,0 +1,22 @@
+services:
+  kavita:
+    image: jvmilazz0/kavita:latest
+    container_name: crow-kavita
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - ${KAVITA_LIBRARY_PATH:-kavita-data}:/manga
+      - kavita-config:/kavita/config
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  kavita-config:
+  kavita-data:
