@@ -18,7 +18,7 @@
  */
 
 import { WebSocketServer } from "ws";
-import { validateRoomToken } from "../../sharing/server.js";
+import { validateCallRoomToken } from "./calls-page.js";
 
 const MAX_PEERS = parseInt(process.env.CROW_CALLS_MAX_PEERS || "4", 10);
 const RECONNECT_WINDOW_MS = 30_000; // 30s window for reconnection without triggering leave
@@ -175,21 +175,17 @@ export default function setupCallsSignaling(server) {
 
     // Validate room token (only at connect time)
     if (token) {
-      const result = validateRoomToken(room, token);
+      const result = validateCallRoomToken(room, token);
       if (!result) {
         socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
         socket.destroy();
         return;
       }
     } else {
-      // No token = household/local mode (same as companion pattern)
-      // Only allow if room doesn't exist yet (creating) or uid already in room (reconnect)
-      const existingRoom = _rooms.get(room);
-      if (existingRoom && !existingRoom.has(uid) && existingRoom.size >= MAX_PEERS) {
-        socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
-        socket.destroy();
-        return;
-      }
+      // No token provided — reject. Room tokens are always required.
+      socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+      socket.destroy();
+      return;
     }
 
     // Upgrade the connection (consumes the socket)

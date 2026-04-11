@@ -124,17 +124,10 @@ export default function callsPageRouter(dashboardAuth) {
         try {
           // Lazy import to avoid circular deps and only load when needed
           const { sendRoomInvite } = await import("../../sharing/server.js");
-          // sendRoomInvite expects contact name, not ID. It also creates its
-          // own room entry. We'll use our room code/token instead by sending
-          // a custom invite message.
-          // For now, use the sharing server's built-in invite and include our
-          // call URL in the response. The contact will receive a notification.
-          inviteResult = await sendRoomInvite(contactId, hostName);
-
-          // Override the join URL in the invite result to point to /calls
-          if (inviteResult.ok) {
-            inviteResult.callUrl = callUrl;
-          }
+          // Pass our room credentials so the Nostr invite uses the same room
+          inviteResult = await sendRoomInvite(contactId, hostName, {
+            roomCode, token, joinUrl: callUrl,
+          });
         } catch (err) {
           inviteResult = { ok: false, message: err.message };
         }

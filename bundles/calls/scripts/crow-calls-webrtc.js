@@ -1049,17 +1049,7 @@
     },
   };
 
-  // Auto-init from page config if available (standalone call page)
-  if (window.CrowCallConfig) {
-    var cfg = window.CrowCallConfig;
-    init({
-      wsUrl: cfg.wsUrl,
-      roomCode: cfg.roomCode,
-      token: cfg.token,
-      gatewayUrl: cfg.gatewayUrl,
-      name: cfg.userName || "User",
-      color: cfg.userColor || null,
-    });
-  }
+  // Init is triggered by crow-call-ui.js startCall() when user clicks "Join Call".
+  // No auto-init on page load — avoids premature WebSocket connections.
 
 })();

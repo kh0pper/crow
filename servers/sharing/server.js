@@ -96,7 +96,7 @@ export function validateRoomToken(roomCode, token) {
  * to proxy "invite <name>" commands from the companion.
  * Returns { ok, message, roomCode?, joinUrl? }
  */
-export async function sendRoomInvite(contactName, hostName) {
+export async function sendRoomInvite(contactName, hostName, opts = {}) {
   if (!_sharedManagers) return { ok: false, message: "Sharing server not initialized" };
   const { db, identity, nostrManager } = _sharedManagers;
 
@@ -109,14 +109,26 @@ export async function sendRoomInvite(contactName, hostName) {
   }
   const contactRow = result.rows[0];
 
-  const roomCode = randomBytes(6).toString("hex");
-  const token = randomBytes(16).toString("hex");
+  // Use caller-provided room credentials if available (calls bundle flow),
+  // otherwise generate new ones (companion/MCP tool flow)
+  const roomCode = opts.roomCode || randomBytes(6).toString("hex");
+  const token = opts.token || randomBytes(16).toString("hex");
 
-  const gatewayUrl = process.env.CROW_GATEWAY_URL || "";
-  const companionPort = process.env.COMPANION_PORT || "12393";
-  const joinUrl = gatewayUrl
-    ? `${gatewayUrl}/companion/?room=${roomCode}&token=${token}`
-    : `http://localhost:${companionPort}/?room=${roomCode}&token=${token}`;
+  let joinUrl;
+  if (opts.joinUrl) {
+    joinUrl = opts.joinUrl;
+  } else {
+    const gatewayUrl = process.env.CROW_GATEWAY_URL || "";
+    // Use /calls URL when calls bundle is enabled, /companion/ otherwise
+    if (process.env.CROW_CALLS_ENABLED === "1" && gatewayUrl) {
+      joinUrl = `${gatewayUrl}/calls?room=${roomCode}&token=${token}`;
+    } else {
+      const companionPort = process.env.COMPANION_PORT || "12393";
+      joinUrl = gatewayUrl
+        ? `${gatewayUrl}/companion/?room=${roomCode}&token=${token}`
+        : `http://localhost:${companionPort}/?room=${roomCode}&token=${token}`;
+    }
+  }
 
   _activeRooms.set(roomCode, {
     token,
@@ -468,8 +480,8 @@ export function createSharingServer(dbPath, options = {}) {
             if (!room_code || !join_url) return;
             try {
               await createNotification(db, {
-                title: `${host_name || "Someone"} invited you to a room`,
-                body: `Tap to join the companion room`,
+                title: `${host_name || "Someone"} is calling`,
+                body: `Tap to join the call`,
                 type: "peer",
                 source: "sharing:room_invite",
                 priority: "high",
