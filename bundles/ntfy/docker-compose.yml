@@ -1,0 +1,14 @@
+services:
+  ntfy:
+    image: binwiederhier/ntfy:v2.11.0
+    container_name: crow-ntfy
+    restart: unless-stopped
+    command: serve --listen-http :80
+    volumes:
+      - ntfy-cache:/var/cache/ntfy
+    ports:
+      - "127.0.0.1:${NTFY_PORT:-2586}:80"
+    mem_limit: 128m
+
+volumes:
+  ntfy-cache:

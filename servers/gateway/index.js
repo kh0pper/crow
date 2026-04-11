@@ -786,6 +786,12 @@ const server = app.listen(PORT, "0.0.0.0", (error) => {
   if (_setupCompanionProxy) {
     _setupCompanionProxy(app, server);
   }
+  // Graceful shutdown: close listening socket so systemd restart doesn't hit EADDRINUSE
+  process.on("crow:shutdown", () => {
+    console.log("[gateway] Closing server for restart...");
+    server.close();
+  });
+
   console.log(`Crow Gateway listening on http://0.0.0.0:${PORT}`);
   console.log(`  Streamable HTTP (2025-03-26):`);
   console.log(`    Memory:   POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/memory/mcp`);

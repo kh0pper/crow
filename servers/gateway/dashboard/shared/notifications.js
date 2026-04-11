@@ -19,6 +19,8 @@ export function sharedNotifJs(lang) {
   return `
   let _notifPollTimer = null;
   let _tabVisible = true;
+  let _prevNotifCount = -1;
+  let _activeCallToasts = [];
 
   document.addEventListener('visibilitychange', function() {
     _tabVisible = !document.hidden;
@@ -141,6 +143,79 @@ export function sharedNotifJs(lang) {
       loadNotifications();
       pollNotifications();
     } catch(e) {}
+  }
+
+  // ─── Incoming call toast ───
+
+  function checkForCallNotifications(newCount) {
+    if (_prevNotifCount < 0) { _prevNotifCount = newCount; return; }
+    if (newCount <= _prevNotifCount) { _prevNotifCount = newCount; return; }
+    _prevNotifCount = newCount;
+    // Count increased — fetch recent notifications and check for call invites
+    fetch('/api/notifications?unread_only=true&limit=5')
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(data) {
+        if (!data || !data.notifications) return;
+        data.notifications.forEach(function(n) {
+          if (n.source === 'sharing:room_invite' && _activeCallToasts.indexOf(n.id) === -1) {
+            showCallToast(n);
+          }
+        });
+      })
+      .catch(function() {});
+  }
+
+  function showCallToast(n) {
+    _activeCallToasts.push(n.id);
+    var toast = document.createElement('div');
+    toast.className = 'crow-call-toast';
+    toast.setAttribute('data-notif-id', n.id);
+
+    var info = document.createElement('div');
+    info.className = 'crow-call-toast-info';
+    var icon = document.createElement('span');
+    icon.className = 'crow-call-toast-icon';
+    icon.textContent = '\\u{1F4DE}';
+    info.appendChild(icon);
+    var text = document.createElement('span');
+    text.textContent = escapeNotifHtml(n.title || 'Incoming call');
+    info.appendChild(text);
+    toast.appendChild(info);
+
+    var actions = document.createElement('div');
+    actions.className = 'crow-call-toast-actions';
+    var acceptBtn = document.createElement('a');
+    acceptBtn.className = 'crow-call-toast-accept';
+    acceptBtn.textContent = 'Accept';
+    acceptBtn.href = n.action_url || '#';
+    acceptBtn.target = '_blank';
+    acceptBtn.onclick = function() {
+      fetch('/api/notifications/' + n.id + '/read', { method: 'POST' }).catch(function(){});
+      removeCallToast(toast, n.id);
+    };
+    actions.appendChild(acceptBtn);
+    var dismissBtn = document.createElement('button');
+    dismissBtn.className = 'crow-call-toast-dismiss';
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.onclick = function() {
+      fetch('/api/notifications/' + n.id + '/dismiss', { method: 'POST' }).catch(function(){});
+      removeCallToast(toast, n.id);
+      pollNotifications();
+    };
+    actions.appendChild(dismissBtn);
+    toast.appendChild(actions);
+
+    document.body.appendChild(toast);
+    // Trigger slide-in
+    requestAnimationFrame(function() { toast.classList.add('crow-call-toast--visible'); });
+    // Auto-dismiss after 60s
+    setTimeout(function() { removeCallToast(toast, n.id); }, 60000);
+  }
+
+  function removeCallToast(el, id) {
+    _activeCallToasts = _activeCallToasts.filter(function(x) { return x !== id; });
+    el.classList.remove('crow-call-toast--visible');
+    setTimeout(function() { if (el.parentNode) el.parentNode.removeChild(el); }, 300);
   }
 `;
 }
@@ -349,9 +424,70 @@ export const headerIconsCss = `
     height: 100%;
     border: none;
   }
+  /* ─── Incoming Call Toast ─── */
+  .crow-call-toast {
+    position: fixed;
+    top: -80px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10001;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.75rem 1.25rem;
+    background: rgba(26,26,46,0.92);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(99,102,241,0.4);
+    border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    transition: top 0.3s ease-out;
+    max-width: 480px;
+    width: calc(100% - 2rem);
+  }
+  .crow-call-toast--visible { top: 16px; }
+  .crow-call-toast-info {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1;
+    min-width: 0;
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--crow-text-primary, #e7e5e4);
+  }
+  .crow-call-toast-icon { font-size: 1.2rem; flex-shrink: 0; }
+  .crow-call-toast-actions { display: flex; gap: 0.5rem; flex-shrink: 0; }
+  .crow-call-toast-accept {
+    padding: 0.4rem 1rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    background: rgba(34,197,94,0.15);
+    color: #22c55e;
+    border: 1px solid rgba(34,197,94,0.3);
+    border-radius: 8px;
+    text-decoration: none;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .crow-call-toast-accept:hover { background: rgba(34,197,94,0.25); }
+  .crow-call-toast-dismiss {
+    padding: 0.4rem 0.75rem;
+    font-size: 0.8rem;
+    font-weight: 500;
+    background: none;
+    color: var(--crow-text-muted, #78716c);
+    border: 1px solid var(--crow-border, rgba(61,61,77,0.4));
+    border-radius: 8px;
+    cursor: pointer;
+    transition: color 0.15s;
+  }
+  .crow-call-toast-dismiss:hover { color: var(--crow-error, #ef4444); }
+
   @media (max-width: 768px) {
     .header-dropdown { position: fixed; top: auto; bottom: 60px; right: 8px; left: 8px; min-width: auto; max-width: none; }
     .health-label { display: none; }
+    .crow-call-toast { max-width: none; width: calc(100% - 1rem); }
   }
 `;
 
@@ -391,6 +527,8 @@ export function headerIconsJs(lang) {
       var resp = await fetch('/api/notifications/count');
       if (!resp.ok) return;
       var data = await resp.json();
+
+      checkForCallNotifications(data.count);
 
       var badge = document.getElementById('notif-badge');
       if (data.count > 0) {
@@ -717,6 +855,7 @@ export function tamagotchiJs(lang) {
       if (!resp.ok) return;
       var data = await resp.json();
 
+      checkForCallNotifications(data.count);
       updateCrowBubble(data.count);
       updateCrowMood(data.health);
       updateCrowHealthBar(data.health);
