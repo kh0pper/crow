@@ -38,6 +38,7 @@ const CATEGORY_TO_GROUP = {
   ai: "tools",
   social: "core",
   productivity: "tools",
+  finance: "tools",
   system: "system",
 };
 
