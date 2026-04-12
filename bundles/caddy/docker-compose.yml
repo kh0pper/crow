@@ -1,0 +1,62 @@
+# Caddy reverse proxy with automatic HTTPS (ACME).
+#
+# Image tag note: caddy:2-alpine is one of the few tags we intentionally leave
+# floating on the major version. Caddy upstream explicitly recommends 2-alpine
+# for reverse-proxy use and guarantees v2.x semver compatibility. Every other
+# bundle in Crow pins a resolved semver — Caddy is the documented exception.
+#
+# Ports:
+#   80, 443 bind to 0.0.0.0 (required to answer public HTTPS traffic and
+#     complete Let's Encrypt HTTP-01 / TLS-ALPN-01 challenges).
+#   2019    binds to 127.0.0.1 (admin API used by the Crow MCP server for
+#     reload / status / site management — never expose this to the network).
+#
+# Layout of the single bind mount (~/.crow/caddy/):
+#   Caddyfile         — user-editable config (Crow's MCP tools also read/write)
+#   data/             — ACME private keys and cert cache (Caddy drops it here
+#                       via XDG_DATA_HOME). We chmod 0700 on first init.
+#   config/           — Caddy's auto-save state (XDG_CONFIG_HOME)
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: crow-caddy
+    ports:
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
+      - "0.0.0.0:443:443/udp"     # HTTP/3 (QUIC)
+      - "127.0.0.1:2019:2019"     # admin API, host-local only
+    volumes:
+      - ${CADDY_CONFIG_DIR:-~/.crow/caddy}:/srv/caddy
+    environment:
+      - CADDY_EMAIL=${CADDY_EMAIL}
+      - XDG_DATA_HOME=/srv/caddy
+      - XDG_CONFIG_HOME=/srv/caddy
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        if [ ! -f /srv/caddy/Caddyfile ]; then
+          cat > /srv/caddy/Caddyfile <<CADDYFILE_EOF
+        # Crow-managed Caddyfile. The global options block is required by
+        # Crow's MCP server/panel to reach the admin API from the host.
+        # Everything below is yours to edit. Run caddy_reload after edits.
+        {
+        	email {\$$CADDY_EMAIL}
+        	admin 0.0.0.0:2019
+        }
+        CADDYFILE_EOF
+        fi
+        mkdir -p /srv/caddy/caddy /srv/caddy/config
+        chmod 0700 /srv/caddy/caddy 2>/dev/null || true
+        exec caddy run --config /srv/caddy/Caddyfile --adapter caddyfile
+    init: true
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
