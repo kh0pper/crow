@@ -338,7 +338,9 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
   }
 
   // Blockly static assets served under /kiosk/blockly/*
-  router.get("/kiosk/blockly/*", async (req, res) => {
+  // Express 5 / path-to-regexp requires a named wildcard; bare `*` throws
+  // at mount time and breaks the whole router.
+  router.get("/kiosk/blockly/*asset", async (req, res) => {
     const guard = await requireKioskSession(req, db);
     if (!guard.ok) return res.status(401).send("No session.");
     const rel = req.path.replace(/^\/kiosk\/blockly\//, "").replace(/\.\./g, "");

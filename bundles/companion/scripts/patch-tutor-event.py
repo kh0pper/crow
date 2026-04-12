@@ -87,32 +87,20 @@ HANDLER_METHOD = '''
         if not context:
             return
 
-        # Speak via the per-client TTS engine, not the LLM path. This means
-        # the filtered text bypasses the conversation agent entirely — no
-        # risk of it being fed back into an LLM turn, no memory writes, no
-        # secondary tool calls.
+        # Send only a text frame to the kiosk. The companion's frontend
+        # (or the kiosk's own speechSynthesis) handles TTS rendering. We
+        # deliberately DO NOT call the per-client TTS engine directly —
+        # different adapters return different types (sync str vs async
+        # audio bytes) and the filtered text bypasses the LLM path, so
+        # no agent-level audio generation is triggered.
         try:
-            tts = getattr(context, "tts_engine", None)
-            if tts and hasattr(tts, "generate_audio"):
-                audio = await tts.generate_audio(text)
-                # Send a display-text message first so the frontend shows it.
-                import json
-                await websocket.send_text(json.dumps({
-                    "type": "full-text",
-                    "text": text,
-                }))
-                if audio is not None:
-                    # Different TTS adapters yield different payloads; we do a
-                    # best-effort passthrough. If the audio path isn't wired,
-                    # the text frame alone still gives the kid feedback.
-                    try:
-                        from .utils.stream_audio import prepare_audio_payload
-                        payload_frame = prepare_audio_payload(audio)
-                        await websocket.send_text(json.dumps(payload_frame))
-                    except Exception:
-                        pass
+            import json
+            await websocket.send_text(json.dumps({
+                "type": "full-text",
+                "text": text,
+            }))
         except Exception as err:
-            _ll_logger.warning(f"tutor-event TTS failed: {err}")
+            _ll_logger.warning(f"tutor-event send failed: {err}")
 '''
 
 
