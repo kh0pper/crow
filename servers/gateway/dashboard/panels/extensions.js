@@ -49,6 +49,8 @@ const ICON_MAP = {
   lock: "\u{1F512}",
   search: "\u{1F50D}",
   shield: "\u{1F6E1}\uFE0F",
+  activity: "\u{1F4C8}",
+  eye: "\u{1F441}\uFE0F",
 };
 
 const CATEGORY_COLORS = {

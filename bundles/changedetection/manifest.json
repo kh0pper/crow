@@ -1,0 +1,24 @@
+{
+  "id": "changedetection",
+  "name": "Change Detection",
+  "version": "1.0.0",
+  "description": "Watch any webpage for changes — get notified when prices drop, stock appears, or content updates",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "automation",
+  "tags": ["monitoring", "scraping", "alerts", "automation", "self-hosted"],
+  "icon": "eye",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["CHANGEDETECTION_URL", "CHANGEDETECTION_API_KEY"] },
+  "panel": "panel/changedetection.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/changedetection.md"],
+  "requires": { "env": ["CHANGEDETECTION_API_KEY"], "min_ram_mb": 256, "min_disk_mb": 500 },
+  "env_vars": [
+    { "name": "CHANGEDETECTION_URL", "description": "Change Detection base URL", "default": "http://localhost:5010", "required": true },
+    { "name": "CHANGEDETECTION_API_KEY", "description": "API key (Settings > API in the web UI)", "required": true, "secret": true }
+  ],
+  "ports": [5010],
+  "webUI": { "port": 5010, "path": "/", "label": "Change Detection" },
+  "notes": "First-run: open the web UI, go to Settings > API to copy the API key into Crow settings. 5 MCP tools for watch management."
+}
