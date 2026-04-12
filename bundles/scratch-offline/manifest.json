@@ -1,8 +1,8 @@
 {
   "id": "scratch-offline",
-  "name": "Scratch (Offline)",
+  "name": "Offline Block Coding (Scratch-compatible)",
   "version": "1.0.0",
-  "description": "Self-hosted Scratch programming environment — visual block-based coding for ages 8+. Full scratch-gui (MIT) built from source on first install and served locally; no Scratch.mit.edu dependency, no telemetry. Complements Maker Lab for older learners stepping up from Blockly.",
+  "description": "Self-hosted block-based coding environment for ages 8+ using the MIT-licensed scratch-gui source code. Independent deployment — not affiliated with or endorsed by the Scratch Foundation. Built from source on first install and served locally; no Scratch.mit.edu dependency, no telemetry. Complements Maker Lab for older learners stepping up from Blockly.",
   "type": "bundle",
   "author": "Crow",
   "category": "education",
@@ -23,8 +23,8 @@
     { "name": "SCRATCH_GUI_REF", "description": "scratch-gui git ref (tag, branch, or commit SHA) to build. Defaults to 'master'. Bump with care and retest — upstream doesn't maintain stable tags.", "default": "master", "required": false }
   ],
   "ports": [8087],
-  "webUI": { "port": 8087, "path": "/", "label": "Scratch (Offline)" },
+  "webUI": { "port": 8087, "path": "/", "label": "Offline Block Coding" },
   "sibling_of": ["maker-lab"],
   "age_gate": { "min_age": 8 },
-  "notes": "First install builds scratch-gui from source (requires ~2 GB disk + ~5-15 min on a Pi 4 / ~2 min on x86). Runtime footprint after build is ~50 MB static HTML/JS served by nginx. No sign-in, no cloud save — projects download as .sb3 files only. Gated to age 8+ in the Maker Lab recommender; younger learners stay on Blockly."
+  "notes": "Independent self-hosted deployment of the open-source scratch-gui code (MIT license) — not an official Scratch Foundation product, and the 'Scratch' name/logo are trademarks of the Scratch Foundation. First install builds scratch-gui from source (requires ~2 GB disk + ~5-15 min on a Pi 4 / ~2 min on x86). Runtime footprint after build is ~50 MB static HTML/JS served by nginx. No sign-in, no cloud save — projects download as .sb3 files only. Gated to age 8+ in the Maker Lab recommender; younger learners stay on Blockly."
 }

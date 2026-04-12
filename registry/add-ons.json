@@ -69,9 +69,9 @@
     },
     {
       "id": "scratch-offline",
-      "name": "Scratch (Offline)",
+      "name": "Offline Block Coding (Scratch-compatible)",
       "version": "1.0.0",
-      "description": "Self-hosted Scratch programming environment \u2014 visual block-based coding for ages 8+. Full scratch-gui (MIT) built from source on first install and served locally; no Scratch.mit.edu dependency, no telemetry. Complements Maker Lab for older learners stepping up from Blockly.",
+      "description": "Self-hosted block-based coding environment for ages 8+ using the MIT-licensed scratch-gui source code. Independent deployment \u2014 not affiliated with or endorsed by the Scratch Foundation. Built from source on first install and served locally; no Scratch.mit.edu dependency, no telemetry. Complements Maker Lab for older learners stepping up from Blockly.",
       "type": "bundle",
       "author": "Crow",
       "category": "education",
@@ -89,7 +89,7 @@
       "webUI": {
         "port": 8087,
         "path": "/",
-        "label": "Scratch (Offline)"
+        "label": "Offline Block Coding"
       },
       "requires": {
         "env": [],
@@ -104,7 +104,7 @@
       ],
       "sibling_of": ["maker-lab"],
       "age_gate": { "min_age": 8 },
-      "notes": "First install builds scratch-gui from source (~2 GB disk + ~5-15 min on a Pi 4 / ~2 min on x86). Runtime footprint after build is ~50 MB static. No sign-in, no cloud save \u2014 projects download as .sb3 files only. Gated to age 8+; younger learners stay on Blockly."
+      "notes": "Independent self-hosted deployment of the open-source scratch-gui code (MIT license) \u2014 not an official Scratch Foundation product, and the 'Scratch' name/logo are trademarks of the Scratch Foundation. First install builds scratch-gui from source (~2 GB disk + ~5-15 min on a Pi 4 / ~2 min on x86). Runtime footprint after build is ~50 MB static. No sign-in, no cloud save \u2014 projects download as .sb3 files only. Gated to age 8+; younger learners stay on Blockly."
     },
     {
       "id": "vllm",

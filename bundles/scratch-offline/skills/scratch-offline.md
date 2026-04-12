@@ -1,6 +1,6 @@
 ---
 name: scratch-offline
-description: Help ages-8+ learners step up from Blockly into Scratch — open the offline editor, explain blocks, guide on project ideas; age-gated so younger learners stay on Blockly
+description: Help ages-8+ learners step up from Blockly into a Scratch-compatible offline block coder — open the editor, explain blocks, guide on project ideas; age-gated so younger learners stay on Blockly
 triggers:
   - scratch
   - scratch project
@@ -12,7 +12,13 @@ tools:
   - crow-memory
 ---
 
-# Scratch (Offline) — self-hosted block programming
+# Offline Block Coding (Scratch-compatible) — self-hosted block programming
+
+> This bundle is an independent self-hosted deployment of the open-source
+> `scratch-gui` code (MIT licensed). It is **not** affiliated with or endorsed
+> by the Scratch Foundation. "Scratch" is a trademark of the Scratch Foundation;
+> references below are to the ecosystem, vocabulary, and `.sb3` file format,
+> not the official product or service.
 
 ## When to activate
 
@@ -22,7 +28,7 @@ tools:
 
 ## Age gate
 
-Scratch is recommended for **ages 8+** by its authors. The Maker Lab recommender surfaces this bundle only when `learner.age >= 8`. If a younger learner asks for Scratch:
+Scratch (the ecosystem) is recommended for **ages 8+** by its authors. The Maker Lab recommender surfaces this bundle only when `learner.age >= 8`. If a younger learner asks for it:
 
 - Don't refuse outright — acknowledge the request.
 - Point them at Blockly in Maker Lab as the age-appropriate on-ramp.
