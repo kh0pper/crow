@@ -79,6 +79,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | "test round", "run tests on", "test on claude.ai", "iterative testing" | "ronda de pruebas", "probar en claude.ai", "pruebas iterativas" | iterative-testing | crow-memory |
 | "organize notes", "brain dump", "sort these ideas", "help me plan from these" | "organizar notas", "ideas sueltas", "ordenar estas ideas", "aquí están mis notas" | ideation | crow-memory, crow-projects |
 | "schedule", "remind me", "every day at", "recurring" | "programar", "recuérdame", "cada día a las" | scheduling | crow-memory |
+| "toot", "post to fediverse", "follow @user@...", "mastodon", "gotosocial", "activitypub" | "publicar en fediverso", "tootear", "seguir @usuario@...", "mastodon", "gotosocial" | gotosocial | crow-gotosocial |
 | "tutor me", "teach me", "quiz me", "help me understand" | "enséñame", "explícame", "evalúame" | tutoring | crow-memory |
 | "wrap up", "summarize session", "what did we do" | "resumir sesión", "qué hicimos" | session-summary | crow-memory |
 | "change language", "speak in..." | "cambiar idioma", "háblame en..." | i18n | crow-memory |

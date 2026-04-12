@@ -3004,6 +3004,75 @@
       "notes": "Privacy-first budgeting. Data stays local. Password-based auth. 7 MCP tools for accounts, transactions, budgets, and reports."
     },
     {
+      "id": "gotosocial",
+      "name": "GoToSocial",
+      "description": "Lightweight ActivityPub microblog server (fediverse). Pi-friendly single-binary alternative to Mastodon — joins the public fediverse with a sub-500 MB footprint.",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "federated-social",
+      "tags": [
+        "activitypub",
+        "fediverse",
+        "microblog",
+        "federated",
+        "mastodon-compatible"
+      ],
+      "icon": "globe",
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": ["server/index.js"],
+        "envKeys": ["GTS_URL", "GTS_ACCESS_TOKEN"]
+      },
+      "panel": "panel/gotosocial.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": ["skills/gotosocial.md"],
+      "consent_required": true,
+      "requires": {
+        "env": ["GTS_HOST", "GTS_ACCOUNT_DOMAIN"],
+        "bundles": ["caddy"],
+        "min_ram_mb": 512,
+        "recommended_ram_mb": 1024,
+        "min_disk_mb": 2000,
+        "recommended_disk_mb": 20000
+      },
+      "env_vars": [
+        {
+          "name": "GTS_HOST",
+          "description": "Public domain for this GoToSocial instance (must be a subdomain; subpath mounts break ActivityPub).",
+          "required": true
+        },
+        {
+          "name": "GTS_ACCOUNT_DOMAIN",
+          "description": "Account handle domain (usually same as GTS_HOST; otherwise needs apex WebFinger delegation).",
+          "required": true
+        },
+        {
+          "name": "GTS_ACCESS_TOKEN",
+          "description": "Admin API token (generate via docker exec ... admin account create-token).",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "GTS_MEDIA_RETENTION_DAYS",
+          "description": "Days to retain remote media cache (default 14; Pi-class should lower to 7).",
+          "default": "14",
+          "required": false
+        },
+        {
+          "name": "GTS_IMPORT_BLOCKLIST",
+          "description": "Optional: URL to an IFTAS / Bad Space / custom domain blocklist (imported once post-install).",
+          "required": false
+        }
+      ],
+      "ports": [],
+      "webUI": null,
+      "notes": "No host port publish. Expose via Caddy after install: caddy_add_federation_site { domain, upstream: 'gotosocial:8080', profile: 'activitypub' }."
+    },
+    {
       "id": "developer-kit",
       "name": "Developer Kit",
       "description": "Build and submit Crow extensions with guided scaffolding, testing, and registry submission",

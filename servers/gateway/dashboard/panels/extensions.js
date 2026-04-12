@@ -68,6 +68,9 @@ const CATEGORY_COLORS = {
   infrastructure: { bg: "rgba(148,163,184,0.12)", color: "#94a3b8" },
   automation:     { bg: "rgba(45,212,191,0.12)", color: "#2dd4bf" },
   education:      { bg: "rgba(132,204,22,0.12)",  color: "#84cc16" },
+  "federated-social": { bg: "rgba(217,70,239,0.12)",  color: "#d946ef" },
+  "federated-media":  { bg: "rgba(236,72,153,0.12)",  color: "#f472b6" },
+  "federated-comms":  { bg: "rgba(167,139,250,0.12)", color: "#a78bfa" },
   other:          { bg: "rgba(161,161,170,0.12)", color: "#a1a1aa" },
 };
 
@@ -85,6 +88,9 @@ const CATEGORY_LABELS = {
   infrastructure: "extensions.categoryInfrastructure",
   automation: "extensions.categoryAutomation",
   education: "extensions.categoryEducation",
+  "federated-social": "extensions.categoryFederatedSocial",
+  "federated-media": "extensions.categoryFederatedMedia",
+  "federated-comms": "extensions.categoryFederatedComms",
   other: "extensions.categoryOther",
 };
 

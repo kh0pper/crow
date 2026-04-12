@@ -1,0 +1,11 @@
+{
+  "name": "crow-gotosocial",
+  "version": "1.0.0",
+  "description": "GoToSocial MCP server — post, follow, search, moderate across the fediverse",
+  "type": "module",
+  "main": "server/index.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  }
+}
