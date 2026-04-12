@@ -1,0 +1,28 @@
+services:
+  maker-lab-advanced:
+    image: jupyterhub/jupyterhub:5
+    container_name: crow-maker-lab-advanced
+    ports:
+      - "127.0.0.1:${MLA_HTTP_PORT:-8088}:8000"
+    volumes:
+      - ${MLA_DATA_PATH:-mla-data}:/srv/jupyterhub
+      - ./config/jupyterhub_config.py:/srv/jupyterhub/jupyterhub_config.py:ro
+    environment:
+      - MLA_ADMIN_USER=${MLA_ADMIN_USER:?Set MLA_ADMIN_USER}
+      - MLA_ADMIN_PASSWORD=${MLA_ADMIN_PASSWORD:?Set MLA_ADMIN_PASSWORD}
+    command:
+      - "sh"
+      - "-c"
+      - "pip install --quiet notebook jupyterlab jupyterhub-nativeauthenticator && jupyterhub -f /srv/jupyterhub/jupyterhub_config.py"
+    init: true
+    mem_limit: 4g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/hub/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+volumes:
+  mla-data:
