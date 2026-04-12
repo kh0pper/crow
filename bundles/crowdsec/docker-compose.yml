@@ -1,0 +1,53 @@
+# CrowdSec detection engine.
+#
+# Pinned to v1.7.7. Detection only — this bundle does NOT enforce decisions.
+# A separate bouncer (firewall, nginx, cloudflare, etc.) polls the LAPI and
+# applies bans. PR 4.5 will add a firewall-bouncer as a custom Dockerfile
+# (crowdsec upstream doesn't ship one); tracked in the skill.
+#
+# Privileges (documented in install_consent_messages, gated by PR 0):
+#   - Read-only Docker socket: lets crowdsec auto-discover containers and
+#     tail their logs. Never writable; Crow's validator refuses rw variants.
+#
+# Ports:
+#   8091 → 8080  Local API (LAPI). Bouncers connect here. Bound to
+#                127.0.0.1 so a later public bouncer must go through
+#                Crow's reverse proxy (Caddy) explicitly.
+#
+# Volumes bind-mount ~/.crow/crowdsec/ for user-inspectable config, data,
+# and collections. Running `cscli` inside the container is the supported
+# admin interface; skill documents the common commands.
+
+services:
+  crowdsec:
+    image: crowdsecurity/crowdsec:v1.7.7
+    container_name: crow-crowdsec
+    ports:
+      - "127.0.0.1:8091:8080"
+    volumes:
+      - ${CROWDSEC_CONFIG_DIR:-~/.crow/crowdsec}/config:/etc/crowdsec
+      - ${CROWDSEC_CONFIG_DIR:-~/.crow/crowdsec}/data:/var/lib/crowdsec/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      # Collections pre-installed on first boot. linux/sshd/base-http-scenarios
+      # cover host SSH + any containerized HTTP service (Caddy, Nextcloud,
+      # Gitea, etc.). Whitelist collection avoids banning localhost/RFC1918.
+      - COLLECTIONS=crowdsecurity/linux crowdsecurity/sshd crowdsecurity/base-http-scenarios crowdsecurity/whitelist-good-actors
+      # Tail Docker container logs. The entrypoint seeds a docker acquisition
+      # config so this works out of the box.
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      # Non-interactive: don't prompt for console enrollment — the operator
+      # runs `cscli console enroll <token>` later if they want the UI.
+      - NO_HUB_UPGRADE=false
+      - DISABLE_AGENT=false
+      - DISABLE_LOCAL_API=false
+      - USE_WAL=true
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/v1/decisions"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
