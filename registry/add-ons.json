@@ -1445,6 +1445,37 @@
       "notes": "Uses built-in SQLite. First-run setup wizard at http://localhost:3040. SSH on port 2223 via Gitea's built-in Go SSH server (no host sshd needed). Clone with ssh://git@host:2223/user/repo (scp-style git@host:user/repo silently hits port 22 and will not reach this bundle)."
     },
     {
+      "id": "vaultwarden",
+      "name": "Vaultwarden",
+      "description": "Bitwarden-compatible password manager — self-hosted vault used with the official Bitwarden browser and mobile apps",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "infrastructure",
+      "tags": ["passwords", "vault", "bitwarden", "secrets", "security", "self-hosted"],
+      "icon": "lock",
+      "docker": { "composefile": "docker-compose.yml" },
+      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["VAULTWARDEN_URL", "VAULTWARDEN_ADMIN_TOKEN"] },
+      "panel": "panel/vaultwarden.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": ["skills/vaultwarden.md"],
+      "consent_required": true,
+      "install_consent_messages": {
+        "en": "Vaultwarden stores the passwords and secrets for your entire digital life. Before you install: (1) back up ~/.crow/vaultwarden/data on a recurring schedule — losing it means losing everything; (2) the admin token sits in .env in plaintext; (3) open signups are ON by default — create your account immediately after first start and flip VAULTWARDEN_SIGNUPS_ALLOWED=false. The Crow MCP tools intentionally do NOT expose vault contents — use the official Bitwarden browser extension or mobile app.",
+        "es": "Vaultwarden guardará las contraseñas de toda tu vida digital. Antes de instalar: (1) haz copias de seguridad periódicas de ~/.crow/vaultwarden/data — perderlo significa perderlo todo; (2) el token de administrador queda en .env en texto plano; (3) los registros abiertos están activados por defecto — crea tu cuenta inmediatamente y pon VAULTWARDEN_SIGNUPS_ALLOWED=false. Las herramientas MCP de Crow NO exponen el contenido del vault — usa la extensión oficial de Bitwarden."
+      },
+      "requires": { "env": ["VAULTWARDEN_ADMIN_TOKEN"], "min_ram_mb": 256, "min_disk_mb": 200 },
+      "env_vars": [
+        { "name": "VAULTWARDEN_URL", "description": "Vaultwarden server URL", "default": "http://localhost:8097", "required": true },
+        { "name": "VAULTWARDEN_ADMIN_TOKEN", "description": "Secret that unlocks /admin. Generate with: openssl rand -base64 48", "required": true, "secret": true },
+        { "name": "VAULTWARDEN_DOMAIN", "description": "Public URL (set to https://... behind Caddy)", "default": "http://localhost:8097", "required": false },
+        { "name": "VAULTWARDEN_SIGNUPS_ALLOWED", "description": "Allow open signups. Start true, create your account, then flip to false.", "default": "true", "required": false }
+      ],
+      "ports": [8097],
+      "webUI": { "port": 8097, "path": "/", "label": "Vaultwarden" },
+      "notes": "3 MCP tools (status, user_count, backup_info). Deliberately does NOT expose vault contents — use the Bitwarden browser extension or mobile app for credential access. Back up ~/.crow/vaultwarden/data regularly."
+    },
+    {
       "id": "vikunja",
       "name": "Vikunja",
       "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",

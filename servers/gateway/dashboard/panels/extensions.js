@@ -45,6 +45,7 @@ const ICON_MAP = {
   dollar: "\u{1F4B0}",
   document: "\u{1F4D1}",
   git: "\u{1F33F}",
+  lock: "\u{1F512}",
 };
 
 const CATEGORY_COLORS = {
