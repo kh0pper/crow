@@ -1,10 +1,16 @@
 /**
- * Companion Settings Section: TTS Voice & AI Provider
- * Auto-discovered from ~/.crow/bundles/companion/settings-section.js
+ * Companion Settings Section — three fieldsets, each with independent save:
+ *   1. Persona       — COMPANION_PERSONA, COMPANION_CHARACTER_NAME, COMPANION_AVATAR
+ *   2. AI Provider   — COMPANION_AI_PROFILE, COMPANION_AI_MODEL
+ *   3. Household     — 4-slot profiles; each picks a tts_profile + voice within it
  *
- * Avatar selection has been moved to the companion's character selector
- * (Open-LLM-VTuber UI), so users can switch avatars live without a restart.
- * This section manages TTS voice and AI provider (which require a restart).
+ * Voice selection is now a two-level picker: first the platform-wide
+ * `tts_profile` (from sections/tts-profiles.js), then a voice offered by
+ * that profile's adapter. Legacy COMPANION_TTS_VOICE is read as fallback
+ * for one release but no longer written by this form.
+ *
+ * The deprecated section id `companion-voice` remains available via the
+ * dashboard's SECTION_ALIASES map so old deep-links keep resolving.
  */
 
 import { existsSync, readFileSync, writeFileSync } from "fs";
@@ -14,19 +20,19 @@ import { execFileSync } from "child_process";
 
 const BUNDLE_DIR = join(homedir(), ".crow", "bundles", "companion");
 
-/** Read the bundle's .env file as key-value pairs */
+/* ---------- .env helpers ---------- */
+
 function readBundleEnv() {
   const envPath = join(BUNDLE_DIR, ".env");
   if (!existsSync(envPath)) return {};
   const env = {};
   for (const line of readFileSync(envPath, "utf8").split("\n")) {
-    const match = line.match(/^([A-Z_]+)=(.*)$/);
+    const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
     if (match) env[match[1]] = match[2];
   }
   return env;
 }
 
-/** Write key-value pairs to the bundle's .env file */
 function writeBundleEnv(env) {
   const envPath = join(BUNDLE_DIR, ".env");
   const lines = Object.entries(env)
@@ -35,223 +41,143 @@ function writeBundleEnv(env) {
   writeFileSync(envPath, lines.join("\n") + "\n");
 }
 
-/** Get the current TTS voice from the bundle env or compose defaults */
-function getCurrentVoice() {
-  const env = readBundleEnv();
-  return env.COMPANION_TTS_VOICE || "en-US-AvaMultilingualNeural";
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
-/** Get current AI profile slug from bundle env */
-function getCurrentAiProfile() {
-  const env = readBundleEnv();
-  return env.COMPANION_AI_PROFILE || "";
+function recreateCompanion() {
+  try {
+    execFileSync("docker", ["compose", "up", "-d", "--no-build", "--force-recreate"], {
+      cwd: BUNDLE_DIR,
+      timeout: 60000,
+      stdio: "pipe",
+    });
+  } catch { /* best effort */ }
 }
 
-/** Get current AI model override from bundle env */
-function getCurrentAiModel() {
-  const env = readBundleEnv();
-  return env.COMPANION_AI_MODEL || "";
+/* ---------- DB reads ---------- */
+
+async function readAiProfiles(db) {
+  try {
+    const res = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'ai_profiles'", args: [] });
+    return res.rows[0]?.value ? JSON.parse(res.rows[0].value) : [];
+  } catch { return []; }
 }
 
-/** Read household profiles from env vars */
+async function readTtsProfiles(db) {
+  try {
+    const res = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'tts_profiles'", args: [] });
+    return res.rows[0]?.value ? JSON.parse(res.rows[0].value) : [];
+  } catch { return []; }
+}
+
+/* ---------- Household profile pack/unpack ---------- */
+
 function getHouseholdProfiles() {
   const env = readBundleEnv();
   const profiles = [];
   for (let i = 1; i <= 4; i++) {
     const name = env[`COMPANION_PROFILE_${i}_NAME`];
-    if (!name) continue;
     profiles.push({
       index: i,
-      name,
-      avatar: env[`COMPANION_PROFILE_${i}_AVATAR`] || "mao_pro",
-      voice: env[`COMPANION_PROFILE_${i}_VOICE`] || "en-US-AvaMultilingualNeural",
+      name: name || "",
+      avatar: env[`COMPANION_PROFILE_${i}_AVATAR`] || "",
+      ttsProfileId: env[`COMPANION_PROFILE_${i}_TTS_PROFILE_ID`] || "",
+      voice: env[`COMPANION_PROFILE_${i}_TTS_VOICE`]
+          || env[`COMPANION_PROFILE_${i}_VOICE`] || "",
     });
   }
   return profiles;
 }
 
-/** Curated voice list with popular voices grouped by language */
-const VOICE_GROUPS = [
-  {
-    label: "English (US)",
-    lang: "en-US",
-    voices: [
-      { n: "en-US-AvaMultilingualNeural", g: "F", p: "Expressive, Caring, Pleasant, Friendly" },
-      { n: "en-US-AndrewMultilingualNeural", g: "M", p: "Warm, Confident, Authentic, Honest" },
-      { n: "en-US-EmmaMultilingualNeural", g: "F", p: "Cheerful, Clear, Conversational" },
-      { n: "en-US-BrianMultilingualNeural", g: "M", p: "Approachable, Casual, Sincere" },
-      { n: "en-US-AriaNeural", g: "F", p: "Positive, Confident" },
-      { n: "en-US-JennyNeural", g: "F", p: "Friendly, Considerate, Comfort" },
-      { n: "en-US-GuyNeural", g: "M", p: "Passion" },
-      { n: "en-US-AnaNeural", g: "F", p: "Cute" },
-      { n: "en-US-ChristopherNeural", g: "M", p: "Reliable, Authority" },
-      { n: "en-US-EricNeural", g: "M", p: "Rational" },
-      { n: "en-US-MichelleNeural", g: "F", p: "Friendly, Pleasant" },
-      { n: "en-US-RogerNeural", g: "M", p: "Lively" },
-      { n: "en-US-SteffanNeural", g: "M", p: "Rational" },
-    ],
-  },
-  {
-    label: "English (UK)",
-    lang: "en-GB",
-    voices: [
-      { n: "en-GB-SoniaNeural", g: "F", p: "Friendly, Positive" },
-      { n: "en-GB-RyanNeural", g: "M", p: "Friendly, Positive" },
-      { n: "en-GB-LibbyNeural", g: "F", p: "Friendly, Positive" },
-      { n: "en-GB-ThomasNeural", g: "M", p: "Friendly, Positive" },
-      { n: "en-GB-MaisieNeural", g: "F", p: "Friendly, Positive" },
-    ],
-  },
-  {
-    label: "English (Australia)",
-    lang: "en-AU",
-    voices: [
-      { n: "en-AU-NatashaNeural", g: "F", p: "Friendly, Positive" },
-      { n: "en-AU-WilliamMultilingualNeural", g: "M", p: "Friendly, Positive" },
-    ],
-  },
-  {
-    label: "Spanish",
-    lang: "es",
-    voices: [
-      { n: "es-MX-DaliaNeural", g: "F", p: "Friendly, Positive" },
-      { n: "es-MX-JorgeNeural", g: "M", p: "Friendly, Positive" },
-      { n: "es-ES-ElviraNeural", g: "F", p: "Friendly, Positive" },
-      { n: "es-ES-AlvaroNeural", g: "M", p: "Friendly, Positive" },
-    ],
-  },
-  {
-    label: "French",
-    lang: "fr",
-    voices: [
-      { n: "fr-FR-DeniseNeural", g: "F", p: "Friendly, Positive" },
-      { n: "fr-FR-HenriNeural", g: "M", p: "Friendly, Positive" },
-      { n: "fr-FR-VivienneMultilingualNeural", g: "F", p: "Friendly, Positive" },
-      { n: "fr-FR-RemyMultilingualNeural", g: "M", p: "Friendly, Positive" },
-    ],
-  },
-  {
-    label: "German",
-    lang: "de",
-    voices: [
-      { n: "de-DE-KatjaNeural", g: "F", p: "Friendly, Positive" },
-      { n: "de-DE-ConradNeural", g: "M", p: "Friendly, Positive" },
-      { n: "de-DE-SeraphinaMultilingualNeural", g: "F", p: "Friendly, Positive" },
-      { n: "de-DE-FlorianMultilingualNeural", g: "M", p: "Friendly, Positive" },
-    ],
-  },
-  {
-    label: "Japanese",
-    lang: "ja-JP",
-    voices: [
-      { n: "ja-JP-NanamiNeural", g: "F", p: "Friendly, Positive" },
-      { n: "ja-JP-KeitaNeural", g: "M", p: "Friendly, Positive" },
-      { n: "ja-JP-MasaruMultilingualNeural", g: "M", p: "Friendly, Positive" },
-    ],
-  },
-  {
-    label: "Chinese (Mandarin)",
-    lang: "zh-CN",
-    voices: [
-      { n: "zh-CN-XiaoxiaoNeural", g: "F", p: "Warm" },
-      { n: "zh-CN-YunxiNeural", g: "M", p: "Lively, Sunshine" },
-      { n: "zh-CN-XiaoyiNeural", g: "F", p: "Lively, Cute" },
-      { n: "zh-CN-YunjianNeural", g: "M", p: "Passion, Confident" },
-    ],
-  },
-  {
-    label: "Korean",
-    lang: "ko-KR",
-    voices: [
-      { n: "ko-KR-SunHiNeural", g: "F", p: "Friendly, Positive" },
-      { n: "ko-KR-InJoonNeural", g: "M", p: "Friendly, Positive" },
-      { n: "ko-KR-HyunsuNeural", g: "M", p: "Friendly, Positive" },
-    ],
-  },
-  {
-    label: "Portuguese (Brazil)",
-    lang: "pt-BR",
-    voices: [
-      { n: "pt-BR-FranciscaNeural", g: "F", p: "Friendly, Positive" },
-      { n: "pt-BR-AntonioNeural", g: "M", p: "Friendly, Positive" },
-      { n: "pt-BR-ThalitaMultilingualNeural", g: "F", p: "Friendly, Positive" },
-    ],
-  },
-  {
-    label: "Italian",
-    lang: "it-IT",
-    voices: [
-      { n: "it-IT-ElsaNeural", g: "F", p: "Friendly, Positive" },
-      { n: "it-IT-DiegoNeural", g: "M", p: "Friendly, Positive" },
-      { n: "it-IT-GiuseppeMultilingualNeural", g: "M", p: "Friendly, Positive" },
-    ],
-  },
-  {
-    label: "Hindi",
-    lang: "hi-IN",
-    voices: [
-      { n: "hi-IN-SwaraNeural", g: "F", p: "Friendly, Positive" },
-      { n: "hi-IN-MadhurNeural", g: "M", p: "Friendly, Positive" },
-    ],
-  },
-];
-
-/** Read AI profiles from DB via the provided db handle */
-async function getAiProfiles(db) {
-  try {
-    const result = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'ai_profiles'", args: [] });
-    return result.rows[0]?.value ? JSON.parse(result.rows[0].value) : [];
-  } catch { return []; }
-}
-
 export default {
-  id: "companion-voice",
+  id: "companion",
   group: "content",
   icon: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`,
-  labelKey: "settings.section.companionVoice",
+  labelKey: "settings.section.companion",
   navOrder: 45,
 
   async getPreview() {
-    const voice = getCurrentVoice();
-    const short = voice.split("-").pop().replace(/Neural$/, "").replace(/Multilingual$/, "");
-    return short;
+    const env = readBundleEnv();
+    const charName = env.COMPANION_CHARACTER_NAME || "Crow";
+    const hhCount = getHouseholdProfiles().filter(p => p.name).length;
+    return hhCount > 0 ? `${charName} · ${hhCount} household member${hhCount === 1 ? "" : "s"}` : charName;
   },
 
-  async render({ req, db }) {
-    const currentVoice = getCurrentVoice();
-    const savedProfile = getCurrentAiProfile();
-    const currentModel = getCurrentAiModel();
+  async render({ db }) {
     const env = readBundleEnv();
-    const customVoice = env.COMPANION_TTS_VOICE_CUSTOM || "";
-    const profiles = await getAiProfiles(db);
+    const persona = env.COMPANION_PERSONA || "";
+    const charName = env.COMPANION_CHARACTER_NAME || "Crow";
+    const avatar = env.COMPANION_AVATAR || "mao_pro";
+    const aiProfileSlug = env.COMPANION_AI_PROFILE || "";
+    const aiModel = env.COMPANION_AI_MODEL || "";
 
-    // Check if saved profile still exists (may have been deleted from AI Profiles)
-    const profileSlugs = profiles.map(p => p.name.toLowerCase().replace(/\s+/g, "_").replace(/\./g, "_"));
-    const currentProfile = (savedProfile && profileSlugs.includes(savedProfile)) ? savedProfile : "";
-    const profileStale = savedProfile && !currentProfile;
+    const aiProfiles = await readAiProfiles(db);
+    const ttsProfiles = await readTtsProfiles(db);
+    const household = getHouseholdProfiles();
 
-    let html = `<form method="POST">
-      <input type="hidden" name="action" value="update_companion_settings">
+    const fs = "border:1px solid var(--crow-border);border-radius:8px;padding:1rem 1.25rem;margin-bottom:1rem;background:var(--crow-surface)";
+    const lg = "font-weight:600;font-size:0.95rem;padding:0 0.5rem";
+    const lb = "display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px";
+    const ip = "width:100%;padding:0.5rem;background:var(--crow-bg-deep,#111);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.85rem;box-sizing:border-box";
+    const bt = "padding:0.4rem 0.9rem;background:var(--crow-accent);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:0.85rem;font-weight:500";
+    const st = "font-size:0.8rem;margin-left:0.75rem";
 
-      <div style="margin-bottom:1.5rem">
-        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:8px;font-weight:500">
-          AI Provider
-        </label>${profileStale ? `
-        <p style="font-size:0.8rem;color:var(--crow-error);margin:0 0 12px;padding:8px 12px;border:1px solid var(--crow-error);border-radius:6px;background:rgba(239,68,68,0.1)">
-          Previously selected profile "${savedProfile}" no longer exists. Falling back to Auto.
-        </p>` : ""}
-        <p style="font-size:0.75rem;color:var(--crow-text-muted);margin:0 0 12px">
-          Choose which AI profile powers voice chat. Avatar selection is in the companion's character menu.
-        </p>`;
+    /* ---- Persona ---- */
+    let html = `
+      <form method="POST" data-section-form="persona">
+        <fieldset style="${fs}">
+          <legend style="${lg}">Persona</legend>
+          <p style="font-size:0.75rem;color:var(--crow-text-muted);margin:0 0 0.75rem">
+            Character identity. Changes require a container restart.
+          </p>
+          <input type="hidden" name="action" value="update_companion_persona">
 
-    if (profiles.length === 0) {
+          <div style="margin-bottom:0.75rem">
+            <label style="${lb}">Character name</label>
+            <input type="text" name="character_name" value="${escapeHtml(charName)}" placeholder="Crow" style="${ip}">
+          </div>
+
+          <div style="margin-bottom:0.75rem">
+            <label style="${lb}">Default avatar ID (Live2D model name)</label>
+            <input type="text" name="avatar" value="${escapeHtml(avatar)}" placeholder="mao_pro" style="${ip};font-family:'JetBrains Mono',monospace">
+          </div>
+
+          <div style="margin-bottom:0.75rem">
+            <label style="${lb}">Persona prompt (system instructions)</label>
+            <textarea name="persona" rows="6" placeholder="You are Crow, an AI companion…" style="${ip};font-family:inherit;resize:vertical">${escapeHtml(persona)}</textarea>
+          </div>
+
+          <div style="display:flex;align-items:center">
+            <button type="submit" style="${bt}">Save persona &amp; restart</button>
+            <span data-section-status="persona" style="${st}"></span>
+          </div>
+        </fieldset>
+      </form>`;
+
+    /* ---- AI Provider ---- */
+    html += `
+      <form method="POST" data-section-form="ai">
+        <fieldset style="${fs}">
+          <legend style="${lg}">AI Provider</legend>
+          <p style="font-size:0.75rem;color:var(--crow-text-muted);margin:0 0 0.75rem">
+            Which AI profile answers voice chat. Define profiles in
+            <a href="?section=ai-profiles" style="color:var(--crow-accent)">AI Profiles</a>.
+          </p>
+          <input type="hidden" name="action" value="update_companion_ai">`;
+
+    if (aiProfiles.length === 0) {
       html += `<p style="font-size:0.85rem;color:var(--crow-text-muted);padding:12px;border:1px solid var(--crow-border);border-radius:8px;background:var(--crow-bg-elevated)">
-          No AI profiles configured. <a href="?section=ai-profiles" style="color:var(--crow-accent)">Add one in AI Profiles</a> first.
-        </p>`;
+        No AI profiles configured. <a href="?section=ai-profiles" style="color:var(--crow-accent)">Add one</a> first.
+      </p>`;
     } else {
-      // Auto-detect (let generate-config.py pick the best one)
-      const autoChecked = !currentProfile ? " checked" : "";
-      html += `<label style="display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--crow-border);border-radius:8px;cursor:pointer;font-size:0.85rem;margin-bottom:8px;background:${!currentProfile ? "var(--crow-bg-elevated)" : "transparent"}">
+      const autoChecked = !aiProfileSlug ? " checked" : "";
+      html += `<label style="display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--crow-border);border-radius:8px;cursor:pointer;font-size:0.85rem;margin-bottom:8px;background:${!aiProfileSlug ? "var(--crow-bg-elevated)" : "transparent"}">
         <input type="radio" name="ai_profile" value=""${autoChecked} style="accent-color:var(--crow-accent);width:auto;margin:0">
         <div>
           <div style="font-weight:500">Auto (recommended)</div>
@@ -259,34 +185,35 @@ export default {
         </div>
       </label>`;
 
-      for (const p of profiles) {
+      for (const p of aiProfiles) {
         const slug = p.name.toLowerCase().replace(/\s+/g, "_").replace(/\./g, "_");
-        const checked = slug === currentProfile ? " checked" : "";
+        const checked = slug === aiProfileSlug ? " checked" : "";
         const isLocal = /localhost|127\.0\.0\.1|172\.17/.test(p.baseUrl || "");
         const badge = isLocal ? "Local" : "Cloud";
         const badgeColor = isLocal ? "var(--crow-success)" : "var(--crow-accent)";
         const modelCount = (p.models || []).length;
-        html += `<label style="display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--crow-border);border-radius:8px;cursor:pointer;font-size:0.85rem;margin-bottom:8px;background:${slug === currentProfile ? "var(--crow-bg-elevated)" : "transparent"}">
-          <input type="radio" name="ai_profile" value="${slug}"${checked} style="accent-color:var(--crow-accent);width:auto;margin:0">
+        html += `<label style="display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--crow-border);border-radius:8px;cursor:pointer;font-size:0.85rem;margin-bottom:8px;background:${slug === aiProfileSlug ? "var(--crow-bg-elevated)" : "transparent"}">
+          <input type="radio" name="ai_profile" value="${escapeHtml(slug)}"${checked} style="accent-color:var(--crow-accent);width:auto;margin:0">
           <div style="flex:1">
             <div style="font-weight:500;display:flex;align-items:center;gap:6px">
-              ${p.name}
+              ${escapeHtml(p.name)}
               <span style="font-size:0.65rem;padding:2px 6px;border-radius:4px;background:${badgeColor};color:#fff;font-weight:600">${badge}</span>
             </div>
-            <div style="font-size:0.75rem;color:var(--crow-text-muted)">${modelCount} model${modelCount !== 1 ? "s" : ""}</div>
+            <div style="font-size:0.75rem;color:var(--crow-text-muted)">${modelCount} model${modelCount === 1 ? "" : "s"}</div>
           </div>
         </label>`;
 
-        // Model selector (shown when this profile is selected)
         if (modelCount > 1) {
           const defaultModel = p.defaultModel || p.models[0];
-          html += `<div class="profile-models" data-profile="${slug}" style="margin:-4px 0 8px 28px;padding:8px 14px;border:1px solid var(--crow-border);border-radius:8px;display:${slug === currentProfile ? "block" : "none"}">`;
+          html += `<div class="profile-models" data-profile="${escapeHtml(slug)}" style="margin:-4px 0 8px 28px;padding:8px 14px;border:1px solid var(--crow-border);border-radius:8px;display:${slug === aiProfileSlug ? "block" : "none"}">`;
           for (const m of p.models) {
-            const mChecked = (slug === currentProfile && currentModel === m) ? " checked" : (slug === currentProfile && !currentModel && m === defaultModel) ? " checked" : "";
+            const mChecked = (slug === aiProfileSlug && aiModel === m)
+              ? " checked"
+              : (slug === aiProfileSlug && !aiModel && m === defaultModel) ? " checked" : "";
             const shortName = m.length > 40 ? m.substring(0, 37) + "..." : m;
             html += `<label style="display:flex;align-items:center;gap:6px;padding:4px 0;cursor:pointer;font-size:0.8rem">
-              <input type="radio" name="ai_model_${slug}" value="${m}"${mChecked} style="accent-color:var(--crow-accent);width:auto;margin:0">
-              <span>${shortName}</span>
+              <input type="radio" name="ai_model_${escapeHtml(slug)}" value="${escapeHtml(m)}"${mChecked} style="accent-color:var(--crow-accent);width:auto;margin:0">
+              <span>${escapeHtml(shortName)}</span>
               ${m === defaultModel ? '<span style="font-size:0.65rem;color:var(--crow-text-muted)">(default)</span>' : ""}
             </label>`;
           }
@@ -295,102 +222,108 @@ export default {
       }
     }
 
-    html += `</div>
+    html += `
+          <div style="display:flex;align-items:center;margin-top:0.75rem">
+            <button type="submit" style="${bt}" ${aiProfiles.length === 0 ? "disabled" : ""}>Save AI provider &amp; restart</button>
+            <span data-section-status="ai" style="${st}"></span>
+          </div>
+        </fieldset>
+      </form>`;
 
-      <div style="margin-bottom:1.5rem">
-        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:8px;font-weight:500">
-          Household Profiles
-        </label>
-        <p style="font-size:0.75rem;color:var(--crow-text-muted);margin:0 0 12px">
-          Define profiles so each person picks their name, avatar, and voice from the character selector. When profiles are set, the companion auto-groups all connections into one room.
-        </p>`;
+    /* ---- Household ---- */
+    const ttsProfileOptions = ['<option value="">— none (use default) —</option>']
+      .concat(ttsProfiles.map(tp =>
+        `<option value="${escapeHtml(tp.id)}" data-default-voice="${escapeHtml(tp.defaultVoice || "")}">${escapeHtml(tp.name)}${tp.isDefault ? " (default)" : ""}</option>`
+      ))
+      .join("");
 
-    const hProfiles = getHouseholdProfiles();
+    html += `
+      <form method="POST" data-section-form="household">
+        <fieldset style="${fs}">
+          <legend style="${lg}">Household Profiles</legend>
+          <p style="font-size:0.75rem;color:var(--crow-text-muted);margin:0 0 0.75rem">
+            Each profile becomes a persona in the character selector. Voice comes from a platform-wide
+            <a href="?section=tts-profiles" style="color:var(--crow-accent)">TTS profile</a> — pick the profile first, then a voice.
+          </p>
+          <input type="hidden" name="action" value="update_companion_household">`;
+
     for (let i = 1; i <= 4; i++) {
-      const p = hProfiles.find(hp => hp.index === i);
-      const name = p ? p.name : "";
-      const avatar = p ? p.avatar : "";
-      const voice = p ? p.voice : "";
+      const p = household.find(hp => hp.index === i) || { index: i, name: "", avatar: "", ttsProfileId: "", voice: "" };
       const num = i;
-      const borderColor = name ? "var(--crow-accent)" : "var(--crow-border)";
-      html += `<details style="margin-bottom:8px;border:1px solid ${borderColor};border-radius:8px;overflow:hidden"${name ? " open" : ""}>
+      const borderColor = p.name ? "var(--crow-accent)" : "var(--crow-border)";
+      const openAttr = p.name ? " open" : "";
+      const optionsForThisRow = ttsProfileOptions.replace(
+        `value="${escapeHtml(p.ttsProfileId)}"`,
+        `value="${escapeHtml(p.ttsProfileId)}" selected`
+      );
+      html += `<details style="margin-bottom:8px;border:1px solid ${borderColor};border-radius:8px;overflow:hidden"${openAttr}>
         <summary style="padding:10px 14px;cursor:pointer;font-size:0.85rem;font-weight:500;background:var(--crow-bg-elevated)">
-          ${name ? name : `Profile ${num} (empty)`}
+          ${p.name ? escapeHtml(p.name) : `Profile ${num} (empty)`}
         </summary>
-        <div style="padding:12px 14px;display:flex;flex-direction:column;gap:8px">
+        <div style="padding:12px 14px;display:flex;flex-direction:column;gap:10px">
           <div>
-            <label style="font-size:0.75rem;color:var(--crow-text-muted)">Name</label>
-            <input type="text" name="profile_${num}_name" value="${name}" placeholder="e.g. Alex"
-              style="width:100%;padding:6px 10px;border:1px solid var(--crow-border);border-radius:6px;background:var(--crow-bg);color:var(--crow-text);font-size:0.85rem;box-sizing:border-box">
+            <label style="${lb}">Name</label>
+            <input type="text" name="profile_${num}_name" value="${escapeHtml(p.name)}" placeholder="e.g. Alex" style="${ip}">
           </div>
           <div>
-            <label style="font-size:0.75rem;color:var(--crow-text-muted)">Avatar ID</label>
-            <input type="text" name="profile_${num}_avatar" value="${avatar}" placeholder="e.g. Cha_AnnoyingParrot, senko, mao_pro"
-              style="width:100%;padding:6px 10px;border:1px solid var(--crow-border);border-radius:6px;background:var(--crow-bg);color:var(--crow-text);font-size:0.85rem;box-sizing:border-box">
+            <label style="${lb}">Avatar ID</label>
+            <input type="text" name="profile_${num}_avatar" value="${escapeHtml(p.avatar)}" placeholder="e.g. Cha_AnnoyingParrot, senko, mao_pro" style="${ip};font-family:'JetBrains Mono',monospace">
           </div>
           <div>
-            <label style="font-size:0.75rem;color:var(--crow-text-muted)">TTS Voice</label>
-            <input type="text" name="profile_${num}_voice" value="${voice}" placeholder="e.g. en-US-AvaMultilingualNeural"
-              style="width:100%;padding:6px 10px;border:1px solid var(--crow-border);border-radius:6px;background:var(--crow-bg);color:var(--crow-text);font-size:0.85rem;box-sizing:border-box">
+            <label style="${lb}">TTS profile</label>
+            <select name="profile_${num}_tts_profile" data-tts-select="${num}" style="${ip}">${optionsForThisRow}</select>
+          </div>
+          <div>
+            <label style="${lb}">Voice (provider-specific name — blank = profile default)</label>
+            <input type="text" name="profile_${num}_tts_voice" value="${escapeHtml(p.voice)}" placeholder="e.g. en-US-AvaMultilingualNeural, alloy, af_bella" style="${ip};font-family:'JetBrains Mono',monospace" data-tts-voice="${num}">
           </div>
         </div>
       </details>`;
     }
 
-    html += `</div>
+    html += `
+          <div style="display:flex;align-items:center;margin-top:0.75rem">
+            <button type="submit" style="${bt}">Save household &amp; restart</button>
+            <span data-section-status="household" style="${st}"></span>
+          </div>
+        </fieldset>
+      </form>
 
-      <div style="margin-bottom:1.5rem">
-        <label style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:8px;font-weight:500">
-          TTS Voice
-        </label>
-        <p style="font-size:0.8rem;color:var(--crow-text-muted);margin:0 0 12px">
-          Current: <strong style="color:var(--crow-text)">${currentVoice}</strong>
-        </p>`;
+      <script>
+      document.querySelectorAll('form[data-section-form]').forEach(function(form) {
+        form.addEventListener('submit', function(ev) {
+          ev.preventDefault();
+          var key = form.getAttribute('data-section-form');
+          var status = document.querySelector('[data-section-status="' + key + '"]');
+          status.textContent = 'Saving…';
+          status.style.color = 'var(--crow-text-muted)';
+          var fd = new URLSearchParams(new FormData(form));
+          fetch('/dashboard/settings', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: fd.toString() })
+            .then(function(r){ return r.json(); })
+            .then(function(data){
+              if (data && data.ok) {
+                status.textContent = 'Saved. Restarting companion…';
+                status.style.color = 'var(--crow-success)';
+              } else {
+                status.textContent = (data && data.error) || 'Save failed';
+                status.style.color = 'var(--crow-error)';
+              }
+            })
+            .catch(function(e){ status.textContent = 'Error: ' + e.message; status.style.color = 'var(--crow-error)'; });
+        });
+      });
 
-    for (const group of VOICE_GROUPS) {
-      html += `<details style="margin-bottom:8px;border:1px solid var(--crow-border);border-radius:8px;overflow:hidden"${group.lang === "en-US" ? " open" : ""}>
-        <summary style="padding:10px 14px;cursor:pointer;font-size:0.85rem;font-weight:500;background:var(--crow-bg-elevated)">${group.label}</summary>
-        <div style="padding:8px 14px">`;
+      document.querySelectorAll('[data-tts-select]').forEach(function(sel) {
+        var num = sel.getAttribute('data-tts-select');
+        sel.addEventListener('change', function() {
+          var voiceInput = document.querySelector('[data-tts-voice="' + num + '"]');
+          if (!voiceInput || voiceInput.value.trim() !== '') return;
+          var opt = sel.options[sel.selectedIndex];
+          var def = opt ? opt.getAttribute('data-default-voice') : '';
+          if (def) voiceInput.value = def;
+        });
+      });
 
-      for (const v of group.voices) {
-        const checked = v.n === currentVoice ? " checked" : "";
-        const genderIcon = v.g === "F" ? "&#9792;" : "&#9794;";
-        const genderColor = v.g === "F" ? "#e879a0" : "#79b8e8";
-        const shortName = v.n.split("-").pop().replace(/Neural$/, "").replace(/Multilingual/, " ML");
-        html += `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer;font-size:0.85rem;border-bottom:1px solid var(--crow-border-subtle, rgba(255,255,255,0.05))">
-          <input type="radio" name="voice" value="${v.n}"${checked} style="accent-color:var(--crow-accent);width:auto;margin:0">
-          <span style="color:${genderColor};font-size:1rem">${genderIcon}</span>
-          <span style="font-weight:500">${shortName}</span>
-          <span style="color:var(--crow-text-muted);font-size:0.75rem;margin-left:auto">${v.p}</span>
-        </label>`;
-      }
-      html += `</div></details>`;
-    }
-
-    // Custom voice input
-    html += `<details style="margin-bottom:8px;border:1px solid var(--crow-border);border-radius:8px;overflow:hidden">
-      <summary style="padding:10px 14px;cursor:pointer;font-size:0.85rem;font-weight:500;background:var(--crow-bg-elevated)">Custom Voice Name</summary>
-      <div style="padding:12px 14px">
-        <p style="font-size:0.75rem;color:var(--crow-text-muted);margin:0 0 8px">
-          Enter any Edge TTS voice name (run <code>edge-tts --list-voices</code> for full list of 320+ voices)
-        </p>
-        <input type="text" name="custom_voice" value="${customVoice}" placeholder="e.g. en-IN-NeerjaExpressiveNeural"
-          style="width:100%;padding:8px 12px;border:1px solid var(--crow-border);border-radius:6px;background:var(--crow-bg);color:var(--crow-text);font-size:0.85rem;box-sizing:border-box">
-        <label style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:0.8rem;cursor:pointer">
-          <input type="radio" name="voice" value="__custom__"${!VOICE_GROUPS.some(g => g.voices.some(v => v.n === currentVoice)) ? " checked" : ""} style="accent-color:var(--crow-accent);width:auto;margin:0">
-          Use custom voice
-        </label>
-      </div>
-    </details></div>`;
-
-    html += `<div style="margin-top:1.5rem;display:flex;gap:10px">
-        <button type="submit" style="padding:10px 24px;background:var(--crow-accent);color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:0.85rem;font-weight:500">
-          Save & Restart Companion
-        </button>
-      </div>
-    </form>
-    <script>
-      // Show/hide model selectors based on selected profile
       document.querySelectorAll('input[name="ai_profile"]').forEach(function(r) {
         r.addEventListener('change', function() {
           document.querySelectorAll('.profile-models').forEach(function(d) { d.style.display = 'none'; });
@@ -398,77 +331,80 @@ export default {
           if (sel) sel.style.display = 'block';
         });
       });
-    <\/script>`;
+      <\/script>`;
 
     return html;
   },
 
   async handleAction({ req, res }) {
-    const { action, voice, custom_voice, ai_profile } = req.body;
+    const { action } = req.body;
 
-    if (action !== "update_companion_settings") return false;
-
-    const env = readBundleEnv();
-
-    // Household profiles
-    for (let i = 1; i <= 4; i++) {
-      const name = (req.body[`profile_${i}_name`] || "").trim();
-      const avatar = (req.body[`profile_${i}_avatar`] || "").trim();
-      const voice = (req.body[`profile_${i}_voice`] || "").trim();
-      if (name) {
-        env[`COMPANION_PROFILE_${i}_NAME`] = name;
-        if (avatar) env[`COMPANION_PROFILE_${i}_AVATAR`] = avatar;
-        if (voice) env[`COMPANION_PROFILE_${i}_VOICE`] = voice;
-      } else {
-        delete env[`COMPANION_PROFILE_${i}_NAME`];
-        delete env[`COMPANION_PROFILE_${i}_AVATAR`];
-        delete env[`COMPANION_PROFILE_${i}_VOICE`];
-      }
+    if (action === "update_companion_persona") {
+      const env = readBundleEnv();
+      const persona = (req.body.persona || "").toString();
+      const characterName = (req.body.character_name || "").toString().trim();
+      const avatar = (req.body.avatar || "").toString().trim();
+      if (persona) env.COMPANION_PERSONA = persona.replace(/\n/g, "\\n");
+      else delete env.COMPANION_PERSONA;
+      if (characterName) env.COMPANION_CHARACTER_NAME = characterName;
+      else delete env.COMPANION_CHARACTER_NAME;
+      if (avatar) env.COMPANION_AVATAR = avatar;
+      else delete env.COMPANION_AVATAR;
+      writeBundleEnv(env);
+      recreateCompanion();
+      res.json({ ok: true });
+      return true;
     }
 
-    // AI profile
-    if (ai_profile !== undefined) {
-      if (ai_profile) {
-        env.COMPANION_AI_PROFILE = ai_profile;
-        // Check for model override
-        const modelKey = `ai_model_${ai_profile}`;
-        if (req.body[modelKey]) {
-          env.COMPANION_AI_MODEL = req.body[modelKey];
-        } else {
-          delete env.COMPANION_AI_MODEL;
-        }
+    if (action === "update_companion_ai") {
+      const env = readBundleEnv();
+      const aiProfile = (req.body.ai_profile || "").toString();
+      if (aiProfile) {
+        env.COMPANION_AI_PROFILE = aiProfile;
+        const modelKey = `ai_model_${aiProfile}`;
+        if (req.body[modelKey]) env.COMPANION_AI_MODEL = req.body[modelKey];
+        else delete env.COMPANION_AI_MODEL;
       } else {
-        // Auto mode
         delete env.COMPANION_AI_PROFILE;
         delete env.COMPANION_AI_MODEL;
       }
+      writeBundleEnv(env);
+      recreateCompanion();
+      res.json({ ok: true });
+      return true;
     }
 
-    // Determine voice
-    let selectedVoice;
-    if (voice === "__custom__" && custom_voice?.trim()) {
-      selectedVoice = custom_voice.trim();
-      env.COMPANION_TTS_VOICE_CUSTOM = custom_voice.trim();
-    } else if (voice && voice !== "__custom__") {
-      selectedVoice = voice;
+    if (action === "update_companion_household") {
+      const env = readBundleEnv();
+      for (let i = 1; i <= 4; i++) {
+        const name = (req.body[`profile_${i}_name`] || "").trim();
+        const avatar = (req.body[`profile_${i}_avatar`] || "").trim();
+        const ttsProfileId = (req.body[`profile_${i}_tts_profile`] || "").trim();
+        const voice = (req.body[`profile_${i}_tts_voice`] || "").trim();
+
+        if (name) {
+          env[`COMPANION_PROFILE_${i}_NAME`] = name;
+          if (avatar) env[`COMPANION_PROFILE_${i}_AVATAR`] = avatar;
+          else delete env[`COMPANION_PROFILE_${i}_AVATAR`];
+          if (ttsProfileId) env[`COMPANION_PROFILE_${i}_TTS_PROFILE_ID`] = ttsProfileId;
+          else delete env[`COMPANION_PROFILE_${i}_TTS_PROFILE_ID`];
+          if (voice) env[`COMPANION_PROFILE_${i}_TTS_VOICE`] = voice;
+          else delete env[`COMPANION_PROFILE_${i}_TTS_VOICE`];
+          delete env[`COMPANION_PROFILE_${i}_VOICE`];
+        } else {
+          delete env[`COMPANION_PROFILE_${i}_NAME`];
+          delete env[`COMPANION_PROFILE_${i}_AVATAR`];
+          delete env[`COMPANION_PROFILE_${i}_TTS_PROFILE_ID`];
+          delete env[`COMPANION_PROFILE_${i}_TTS_VOICE`];
+          delete env[`COMPANION_PROFILE_${i}_VOICE`];
+        }
+      }
+      writeBundleEnv(env);
+      recreateCompanion();
+      res.json({ ok: true });
+      return true;
     }
 
-    if (selectedVoice) {
-      env.COMPANION_TTS_VOICE = selectedVoice;
-    }
-
-    writeBundleEnv(env);
-
-    // Recreate the companion container to pick up new env vars
-    try {
-      execFileSync("docker", ["compose", "up", "-d", "--no-build", "--force-recreate"], {
-        cwd: BUNDLE_DIR,
-        timeout: 60000,
-        stdio: "pipe",
-      });
-    } catch { /* best effort */ }
-
-    res.redirect("?section=companion-voice");
-    return true;
+    return false;
   },
 };

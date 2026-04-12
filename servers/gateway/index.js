@@ -140,6 +140,20 @@ try {
   // audit_log table may not exist yet (first run before init-db)
 }
 
+// Run startup migrations (idempotent; each migration self-tracks via dashboard_settings.migrations)
+try {
+  const { runGatewayMigrations } = await import("./migrations.js");
+  const _migDb = createDbClient();
+  const results = await runGatewayMigrations(_migDb);
+  _migDb.close();
+  for (const r of results) {
+    if (r.ran) console.log(`[migrations] ${r.id}: applied (profile="${r.profileName}", voice=${r.voice})`);
+    else if (r.error) console.warn(`[migrations] ${r.id}: FAILED — ${r.error}`);
+  }
+} catch (e) {
+  console.warn("[migrations] startup migrations skipped:", e.message);
+}
+
 // Consolidated session manager
 const sessionManager = new SessionManager();
 
@@ -678,6 +692,15 @@ try {
   console.warn("[push] Failed to mount:", err.message);
 }
 
+// --- Mount STT Debug endpoint (smoke test for STT profiles) ---
+try {
+  const { default: sttDebugRouter } = await import("./routes/stt-debug.js");
+  app.use(sttDebugRouter(dashboardAuth));
+  console.log("STT debug API mounted at /api/stt/debug");
+} catch (err) {
+  console.warn("[stt-debug] Failed to mount:", err.message);
+}
+
 // --- Protected API endpoints (behind dashboard auth) ---
 app.get("/api/health", dashboardAuth, async (req, res) => {
   const os = await import("node:os");
@@ -906,6 +929,20 @@ const server = app.listen(PORT, "0.0.0.0", (error) => {
   if (_setupCompanionProxy) {
     _setupCompanionProxy(app, server);
   }
+
+  // Wire up any panel-registered WebSocket setups (e.g. meta-glasses /session)
+  import("./dashboard/panel-registry.js")
+    .then(({ getPanelWebSocketSetups }) => {
+      for (const [id, setupFn] of getPanelWebSocketSetups()) {
+        try {
+          setupFn(server);
+          console.log(`  [panel] ${id} WebSocket handler mounted`);
+        } catch (err) {
+          console.warn(`  [panel] ${id} WebSocket setup failed:`, err.message);
+        }
+      }
+    })
+    .catch((err) => console.warn("[panel-ws] setup skipped:", err.message));
   // Graceful shutdown: close listening socket so systemd restart doesn't hit EADDRINUSE
   process.on("crow:shutdown", () => {
     console.log("[gateway] Closing server for restart...");
