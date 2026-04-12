@@ -172,7 +172,10 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
   const router = Router();
   let db;
 
-  router.use((req, res, next) => {
+  // Path-scoped to just the two namespaces this router serves so the
+  // middleware doesn't match unrelated traffic on the app root. See the
+  // gateway's [panel] mount warning for the rationale.
+  router.use(["/kiosk", "/maker-lab"], (req, res, next) => {
     if (!db && createDbClient) {
       db = createDbClient();
       if (db && startRetentionSweep) startRetentionSweep(db);
@@ -337,9 +340,10 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
     `);
   }
 
-  // Blockly static assets served under /kiosk/blockly/*
-  // Express 5 / path-to-regexp requires a named wildcard; bare `*` throws
-  // at mount time and breaks the whole router.
+  // Blockly static assets served under /kiosk/blockly/<asset>.
+  // Express 5 / path-to-regexp v6 requires a named wildcard; bare `*` throws
+  // at mount time ("Missing parameter name at index 16") and breaks the
+  // whole router. DO NOT revert to the bare `*` form — leave the :asset name.
   router.get("/kiosk/blockly/*asset", async (req, res) => {
     const guard = await requireKioskSession(req, db);
     if (!guard.ok) return res.status(401).send("No session.");
