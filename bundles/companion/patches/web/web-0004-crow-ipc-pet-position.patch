@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crow Maintainers <crow@localhost>
+Date: Thu, 1 Jan 1970 00:00:00 +0000
+Subject: [PATCH 4/6] Expose `crow:pet-position` IPC hook for gateway-driven placement
+
+Crow's `crow_wm_open` tool (to land in Phase 3.1) needs to tell the
+pet-mode window where to sit relative to the Blockly kiosk — nominally
+anchored to the right edge of the kiosk's host display, bottom-aligned
+with a configurable margin. That's a gateway → Electron-main direction
+of travel, so it has to cross an IPC boundary.
+
+This patch adds a single `ipcMain.handle('crow:pet-position', ...)`
+channel in `src/main/index.ts` that accepts `{ x, y, width, height }`
+or a symbolic anchor (`'right' | 'left' | 'bottom-right' | ...`) and
+calls into `WindowManager.setPetBounds()` (new method in
+`window-manager.ts`). The renderer does not use this channel; only the
+external Crow gateway writes to it via a small named-pipe / unix-socket
+bridge that ships alongside the AppImage (bridge itself is Phase 3.1).
+
+Applies against: vendor/open-llm-vtuber-web @ d176e7df2366952e3bacbf12cf9a8b18a4315932
+
+TODO(Phase 3.1): fill in hunks. Touch points:
+- src/main/index.ts — register `ipcMain.handle('crow:pet-position', ...)`
+  after the existing `'get-platform'` handler at line ~12.
+- src/main/window-manager.ts — add `setPetBounds(spec)` public method
+  that validates the incoming spec, resolves symbolic anchors against
+  the current display, and calls `this.window.setBounds(...)`.
+---
+ src/main/index.ts          | TODO
+ src/main/window-manager.ts | TODO
+ 2 files changed, TODO insertions(+)
+
+diff --git a/src/main/index.ts b/src/main/index.ts
+--- a/src/main/index.ts
++++ b/src/main/index.ts
+@@ TODO(Phase 3.1): near line 12, after 'get-platform' handler @@
++  ipcMain.handle('crow:pet-position', (_event, spec) => {
++    // TODO(3.1): validate spec shape (Zod or hand-rolled) and delegate:
++    //   return windowManager.setPetBounds(spec);
++  });
+
+diff --git a/src/main/window-manager.ts b/src/main/window-manager.ts
+--- a/src/main/window-manager.ts
++++ b/src/main/window-manager.ts
+@@ TODO(Phase 3.1): add public method on WindowManager class @@
++  public setPetBounds(spec: CrowPetBoundsSpec): { ok: boolean } {
++    // TODO(3.1): resolve symbolic anchors, clamp to display bounds,
++    // then: this.window?.setBounds({ x, y, width, height });
++    return { ok: true };
++  }
+--
+2.40.0
