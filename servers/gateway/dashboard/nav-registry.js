@@ -43,6 +43,9 @@ const CATEGORY_TO_GROUP = {
   automation: "tools",
   education: "content",
   system: "system",
+  "federated-social": "core",
+  "federated-media": "media",
+  "federated-comms": "core",
 };
 
 /**
