@@ -70,3 +70,40 @@ Expand beyond individual courses to department-level and institutional workflows
 - Milestones 2 and 3 complete
 - Institutional data access agreements and backend implementations
 - Multi-user sharing workflows stable (Milestone 1 sharing already supports project collaboration)
+
+## Extension Ecosystem: Bundle MVP Follow-ups
+
+Parallel track to the vertical milestones above. The 15-bundle MVP expansion merged 2026-04-12 across 7 PRs (PR 0 through PR 5; see git history on `main`). 13 bundles shipped; these are the remaining threads.
+
+### PR 4.5 -- crowdsec-firewall-bouncer (blocked on Pi availability)
+
+The only MVP bundle that didn't ship. CrowdSec upstream does not publish a Docker image for their firewall-bouncer -- `cs-firewall-bouncer`, `firewall-bouncer`, and the iptables/nftables variants all 404 on Docker Hub. Their install path is a host apt package + systemd service.
+
+**Plan when resumed:**
+
+- Custom `Dockerfile` in `bundles/crowdsec-firewall-bouncer/` using the statically compiled binary from GitHub releases
+- `network_mode: host`, `cap_add: [NET_ADMIN, NET_RAW]`, `privileged: true` in the manifest
+- First bundle to exercise PR 0's privileged install path and the typed-INSTALL consent gate
+- **Must include a tested unwind command** verified end-to-end on a throwaway host (colibri or mockingbird). A broken install can lock the operator out of iptables; dry-running the unwind before any grackle deploy is non-negotiable
+
+### Async install job silent-failure
+
+During the consent-modal smoke test on the `--no-auth` gateway (port 3004), a Netdata install returned `{ok: true, job_id: "1"}` but nothing appeared in `installed.json` or `docker ps`. Dozzle installed fine on the auth'd gateway (3002), so it may be specific to the `--no-auth` configuration -- but worth diagnosing before adding more bundles.
+
+### End-to-end consent-modal UX coverage
+
+Dozzle was verified manually through the browser; Netdata's token round-trip was verified via curl (token mint → consent check → atomic single-consume → replay rejection). Still want eyes on:
+
+- **Caddy** -- ports 80/443 may conflict on a host already running a web server; test on a clean VM
+- **Vaultwarden** -- requires generating `VAULTWARDEN_ADMIN_TOKEN` before install succeeds
+- **CrowdSec** -- requires `docker exec crow-crowdsec cscli bouncers add crow-mcp` post-install to produce the bouncer API key
+
+Each should render the EN/ES localized consent message and the checkbox-only gate.
+
+### Typed-INSTALL gate coverage
+
+Zero bundle-level exercise today. The gate is only shown for `privileged: true` manifests, and no MVP bundle declares that yet. First real exercise lands with PR 4.5.
+
+### Registry mirror automation
+
+The `crow-addons` registry is mirrored manually per PR today (flagged for Phase 2 in the plan hand-off). 13 bundles accumulated across the MVP merge are still pending mirror: caddy, uptime-kuma, stirling-pdf, changedetection, homepage, netdata, dozzle, adguard-home, crowdsec, gitea, forgejo, vaultwarden, searxng.
