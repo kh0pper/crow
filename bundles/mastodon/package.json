@@ -1,0 +1,11 @@
+{
+  "name": "crow-mastodon",
+  "version": "1.0.0",
+  "description": "Mastodon MCP server — statuses, timelines, search, follows, admin moderation",
+  "type": "module",
+  "main": "server/index.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  }
+}
