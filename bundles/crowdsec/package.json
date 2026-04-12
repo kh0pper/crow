@@ -1,0 +1,11 @@
+{
+  "name": "crow-crowdsec",
+  "version": "1.0.0",
+  "description": "CrowdSec MCP server — alerts, decisions, metrics via LAPI",
+  "type": "module",
+  "main": "server/index.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  }
+}

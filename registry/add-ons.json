@@ -1611,6 +1611,35 @@
       "notes": "Log viewer is UI-first. Actions and shell modes disabled by default. 2 MCP tools: status, container_url."
     },
     {
+      "id": "crowdsec",
+      "name": "CrowdSec Engine",
+      "description": "Open-source intrusion detection: parses logs, detects attack patterns (brute force, port scans, bot scraping), and publishes decisions for bouncers to enforce.",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "infrastructure",
+      "tags": ["security", "ids", "intrusion-detection", "logs", "observability"],
+      "icon": "shield",
+      "docker": { "composefile": "docker-compose.yml" },
+      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["CROWDSEC_LAPI_URL", "CROWDSEC_API_KEY"] },
+      "panel": "panel/crowdsec.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": ["skills/crowdsec.md"],
+      "consent_required": true,
+      "install_consent_messages": {
+        "en": "CrowdSec requires read-only access to the Docker socket so it can tail container logs for attack-pattern detection. Crow enforces read-only. Detection only — CrowdSec does NOT enforce decisions by itself; a separate bouncer (PR 4.5) handles blocking.",
+        "es": "CrowdSec necesita acceso de solo lectura al socket de Docker para leer logs de contenedores y detectar patrones de ataque. Crow impone solo lectura. Solo detección — CrowdSec NO aplica decisiones por sí mismo; un bouncer aparte (PR 4.5) hace el bloqueo."
+      },
+      "requires": { "env": [], "min_ram_mb": 256, "min_disk_mb": 500 },
+      "env_vars": [
+        { "name": "CROWDSEC_LAPI_URL", "description": "Local API URL", "default": "http://127.0.0.1:8091", "required": false },
+        { "name": "CROWDSEC_API_KEY", "description": "Bouncer API key (generate with: docker exec crow-crowdsec cscli bouncers add crow-mcp)", "required": false, "secret": true }
+      ],
+      "ports": [8091],
+      "webUI": null,
+      "notes": "Detection only (no enforcement yet). Generate bouncer API key on first boot. Docker socket read-only. Pre-installed collections: linux, sshd, base-http-scenarios, whitelist-good-actors. 4 MCP tools: status, alerts, decisions, delete_decision."
+    },
+    {
       "id": "vikunja",
       "name": "Vikunja",
       "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",
