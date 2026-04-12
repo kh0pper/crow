@@ -7,13 +7,14 @@ services:
     volumes:
       - ${MLA_DATA_PATH:-mla-data}:/srv/jupyterhub
       - ./config/jupyterhub_config.py:/srv/jupyterhub/jupyterhub_config.py:ro
+      - ./scripts/bootstrap-admin.py:/srv/jupyterhub/bootstrap-admin.py:ro
     environment:
       - MLA_ADMIN_USER=${MLA_ADMIN_USER:?Set MLA_ADMIN_USER}
       - MLA_ADMIN_PASSWORD=${MLA_ADMIN_PASSWORD:?Set MLA_ADMIN_PASSWORD}
     command:
       - "sh"
       - "-c"
-      - "pip install --quiet notebook jupyterlab jupyterhub-nativeauthenticator && jupyterhub -f /srv/jupyterhub/jupyterhub_config.py"
+      - "pip install --quiet notebook jupyterlab jupyterhub-nativeauthenticator bcrypt && python /srv/jupyterhub/bootstrap-admin.py && jupyterhub -f /srv/jupyterhub/jupyterhub_config.py"
     init: true
     mem_limit: 4g
     restart: unless-stopped

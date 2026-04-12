@@ -88,17 +88,10 @@ c.JupyterHub.template_paths = [
 c.JupyterHub.db_url = "sqlite:////srv/jupyterhub/jupyterhub.sqlite"
 c.JupyterHub.cookie_secret_file = "/srv/jupyterhub/jupyterhub_cookie_secret"
 
-# --- Admin bootstrap (manual first-run) ------------------------------
-# NativeAuthenticator's ORM API varies across releases, so we skip
-# programmatic seeding and rely on the UI signup flow:
-#
-#   1. On first launch, the admin navigates to /hub/signup, enters
-#      MLA_ADMIN_USER and MLA_ADMIN_PASSWORD, clicks Sign Up.
-#   2. Because MLA_ADMIN_USER is in admin_users above, the account is
-#      auto-authorized and promoted without requiring self-approval.
-#   3. The admin then uses /hub/authorize to approve additional
-#      learner signups.
-#
-# This is a Phase 5 v1 compromise. A future version can plug in a
-# one-shot bootstrap container that runs `jupyterhub-nativeauthenticator`
-# CLI commands after the hub DB is ready.
+# --- Admin bootstrap -------------------------------------------------
+# The container's command chain runs scripts/bootstrap-admin.py before
+# `jupyterhub` starts. It seeds MLA_ADMIN_USER into the NativeAuthenticator
+# users_info table with a bcrypt-hashed MLA_ADMIN_PASSWORD and
+# is_authorized=True, so the admin can log in directly without going
+# through /hub/signup. Idempotent: if the row already exists, the script
+# is a no-op — passwords are only ever rotated via the UI.
