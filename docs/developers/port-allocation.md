@@ -93,7 +93,7 @@ These bundles use `network_mode: host`. They consume whatever ports their upstre
 - `coturn` (3478 UDP, plus turnserver listen ports)
 - `plex` (32400, plus discovery ports)
 - `tailscale` (MagicDNS, peer connections)
-- `crowdsec-firewall-bouncer` (MVP PR 4) — needs host network to manipulate iptables/nftables
+- `crowdsec-firewall-bouncer` (deferred to PR 4.5 — upstream does not publish a Docker image; needs a custom Dockerfile and a tested unwind command verified on a throwaway host) — will need host network to manipulate iptables/nftables
 
 ## Process for amending this file
 
