@@ -669,35 +669,9 @@ export function createMakerLabServer(db, options = {}) {
     "Validate a lesson JSON against the schema. Returns specific errors so custom lesson authors (teachers/parents) can fix them without reading code.",
     { lesson: z.record(z.any()) },
     async ({ lesson }) => {
-      const errs = [];
-      const required = ["id", "title", "surface", "age_band", "steps", "canned_hints"];
-      for (const k of required) {
-        if (!(k in lesson)) errs.push(`missing: ${k}`);
-      }
-      if (lesson.age_band && !["5-9", "10-13", "14+"].includes(lesson.age_band)) {
-        errs.push(`age_band must be one of 5-9 | 10-13 | 14+`);
-      }
-      if (lesson.canned_hints && !Array.isArray(lesson.canned_hints)) {
-        errs.push("canned_hints must be an array of strings");
-      }
-      if (Array.isArray(lesson.canned_hints)) {
-        for (let i = 0; i < lesson.canned_hints.length; i++) {
-          if (typeof lesson.canned_hints[i] !== "string") {
-            errs.push(`canned_hints[${i}] must be a string`);
-          }
-        }
-      }
-      if (lesson.reading_level != null && (typeof lesson.reading_level !== "number" || lesson.reading_level > 3)) {
-        errs.push("reading_level must be a number ≤ 3 for the 5-9 band");
-      }
-      if (Array.isArray(lesson.steps)) {
-        for (let i = 0; i < lesson.steps.length; i++) {
-          const s = lesson.steps[i];
-          if (!s || typeof s !== "object") { errs.push(`steps[${i}] must be an object`); continue; }
-          if (!s.prompt) errs.push(`steps[${i}].prompt missing`);
-        }
-      }
-      return mcpOk({ valid: errs.length === 0, errors: errs });
+      const { validateLesson } = await import("./lesson-validator.js");
+      const { valid, errors } = validateLesson(lesson);
+      return mcpOk({ valid, errors });
     }
   );
 

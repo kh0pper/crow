@@ -24,6 +24,10 @@ import QRCode from "qrcode";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+async function loadDeviceBinding() {
+  return import(pathToFileURL(resolve(__dirname, "../server/device-binding.js")).href);
+}
+
 export default {
   id: "maker-lab",
   name: "Maker Lab",
@@ -257,6 +261,68 @@ export default {
         return res.redirect("/dashboard/maker-lab");
       }
 
+      if (a === "set_solo_lan_exposure") {
+        const v = String(req.body.value || "").toLowerCase() === "on" ? "on" : "off";
+        const devBinding = await loadDeviceBinding();
+        await devBinding.setSoloLanExposure(db, v);
+        return res.redirect("/dashboard/maker-lab?settings=1&saved=1");
+      }
+
+      if (a === "import_lesson") {
+        const raw = String(req.body.lesson_json || "");
+        let parsed;
+        try {
+          parsed = JSON.parse(raw);
+        } catch (err) {
+          return layout({
+            title: "Import lesson — parse error",
+            content: renderLessonImportResult({ errors: [`JSON parse error: ${err.message}`], raw, escapeHtml }),
+          });
+        }
+        const { validateLesson } = await import(pathToFileURL(resolve(__dirname, "../server/lesson-validator.js")).href);
+        const { valid, errors } = validateLesson(parsed);
+        if (!valid) {
+          return layout({
+            title: "Import lesson — validation failed",
+            content: renderLessonImportResult({ errors, raw, escapeHtml }),
+          });
+        }
+        // Write to ~/.crow/bundles/maker-lab/curriculum/custom/<id>.json
+        const { mkdirSync, writeFileSync } = await import("node:fs");
+        const home = process.env.HOME || ".";
+        const dir = resolve(home, ".crow/bundles/maker-lab/curriculum/custom");
+        try {
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(resolve(dir, `${parsed.id}.json`), JSON.stringify(parsed, null, 2) + "\n");
+        } catch (err) {
+          return layout({
+            title: "Import lesson — write failed",
+            content: renderLessonImportResult({ errors: [`Failed to write: ${err.message}`], raw, escapeHtml }),
+          });
+        }
+        return res.redirect(`/dashboard/maker-lab?lessons=1&imported=${encodeURIComponent(parsed.id)}`);
+      }
+
+      if (a === "delete_custom_lesson") {
+        const id = String(req.body.lesson_id || "").replace(/[^\w-]/g, "");
+        if (!id) return res.redirect("/dashboard/maker-lab?lessons=1");
+        const { unlinkSync, existsSync: existsFn } = await import("node:fs");
+        const home = process.env.HOME || ".";
+        const path = resolve(home, ".crow/bundles/maker-lab/curriculum/custom", `${id}.json`);
+        try {
+          if (existsFn(path)) unlinkSync(path);
+        } catch {}
+        return res.redirect(`/dashboard/maker-lab?lessons=1&deleted=${encodeURIComponent(id)}`);
+      }
+
+      if (a === "unbind_device") {
+        const fp = String(req.body.fingerprint || "");
+        if (!fp) return res.redirect("/dashboard/maker-lab?settings=1");
+        const devBinding = await loadDeviceBinding();
+        await devBinding.unbindDevice(db, fp);
+        return res.redirect("/dashboard/maker-lab?settings=1&unbound=1");
+      }
+
       if (a === "revoke_batch") {
         const batchId = String(req.body.batch_id || "");
         const reason = String(req.body.reason || "").slice(0, 500);
@@ -299,6 +365,63 @@ export default {
       return layout({
         title,
         content: renderQrPage({ code, shortUrl, fullUrl, qrSvg, row, escapeHtml }),
+      });
+    }
+
+    // Lessons view
+    if (req.query.lessons) {
+      const { readdirSync, readFileSync, existsSync: existsFn } = await import("node:fs");
+      const home = process.env.HOME || ".";
+      const customDir = resolve(home, ".crow/bundles/maker-lab/curriculum/custom");
+      const bundledDirs = [
+        { band: "5-9", dir: resolve(__dirname, "../curriculum/age-5-9") },
+        { band: "10-13", dir: resolve(__dirname, "../curriculum/age-10-13") },
+        { band: "14+", dir: resolve(__dirname, "../curriculum/age-14+") },
+      ];
+      const loadDir = (dir) => {
+        if (!existsFn(dir)) return [];
+        try {
+          return readdirSync(dir)
+            .filter((f) => f.endsWith(".json"))
+            .map((f) => {
+              try {
+                const parsed = JSON.parse(readFileSync(resolve(dir, f), "utf8"));
+                return { file: f, lesson: parsed };
+              } catch (err) {
+                return { file: f, error: err.message };
+              }
+            });
+        } catch { return []; }
+      };
+      const bundled = bundledDirs.map((b) => ({ band: b.band, items: loadDir(b.dir) }));
+      const custom = loadDir(customDir);
+      return layout({
+        title: "Maker Lab — Lessons",
+        content: renderLessonsView({
+          bundled, custom,
+          imported: String(req.query.imported || ""),
+          deleted: String(req.query.deleted || ""),
+          escapeHtml,
+        }),
+      });
+    }
+
+    // Settings view
+    if (req.query.settings) {
+      const devBinding = await loadDeviceBinding();
+      const [lanExposure, devices, mode] = await Promise.all([
+        devBinding.getSoloLanExposure(db),
+        devBinding.listBoundDevices(db),
+        getMode(),
+      ]);
+      return layout({
+        title: "Maker Lab — Settings",
+        content: renderSettingsView({
+          mode, lanExposure, devices,
+          saved: req.query.saved === "1",
+          unbound: req.query.unbound === "1",
+          escapeHtml,
+        }),
       });
     }
 
@@ -738,6 +861,10 @@ function renderMainView({ mode, err, pendingDelete, showGuestPicker, learners, a
     <div class="maker-lab">
       ${css()}
       ${errBanner}
+      <div class="top-actions">
+        <a class="btn small" href="/dashboard/maker-lab?settings=1">⚙ Settings</a>
+        <a class="btn small" href="/dashboard/maker-lab?lessons=1">📚 Lessons</a>
+      </div>
       <div class="mode-tabs">${modeTabs}${guestSection.includes('guest-btn') ? guestSection : ''}</div>
       ${guestSection.includes('guest-btn') ? '' : guestSection}
       <div class="headline">${modeHeadline}</div>
@@ -789,6 +916,8 @@ function css() {
     .session-list { list-style: none; padding: 0; margin: 0.75rem 0 0 0; display: grid; gap: 0.35rem; }
     .session-list li { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; padding: 0.4rem 0.6rem; background: rgba(0,0,0,0.05); border-radius: 4px; }
     .session-list li .meta { color: var(--muted, #888); font-size: 0.8em; margin-left: auto; }
+    .top-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-bottom: 0.5rem; }
+    .btn.small { padding: 0.2rem 0.6rem; font-size: 0.8em; }
   </style>`;
 }
 
@@ -967,6 +1096,233 @@ function renderTranscriptsView({ learner, settings, transcripts, escapeHtml }) {
         ${transcripts.length ? `Showing up to 500 most recent turns across ${sessions.size} session(s).` : `No transcripts yet.`}
       </div>
       ${sessionBlocks || '<p>(nothing to show)</p>'}
+    </div>
+  `;
+}
+
+// ─── Render: Settings view ────────────────────────────────────────────────
+
+function renderSettingsView({ mode, lanExposure, devices, saved, unbound, escapeHtml }) {
+  const banner = saved ? `<div class="banner success">Saved.</div>`
+    : unbound ? `<div class="banner success">Device unbound.</div>`
+    : "";
+
+  const soloSection = mode === "solo" ? `
+    <div class="settings-section">
+      <h3>Solo mode — LAN exposure</h3>
+      <p class="help">
+        By default the solo kiosk is loopback-only — only browsers on the Crow host itself can use it.
+        Turning this on lets you open <code>/kiosk/</code> from any device on your LAN, but every new
+        device must first be "bound" by signing in to Crow's Nest on it.
+      </p>
+      <form method="POST" action="/dashboard/maker-lab">
+        <input type="hidden" name="action" value="set_solo_lan_exposure">
+        <label class="toggle">
+          <input type="checkbox" name="value" value="on" ${lanExposure === "on" ? "checked" : ""}
+                 onchange="this.form.submit()">
+          <span>${lanExposure === "on" ? "LAN exposure: on" : "LAN exposure: off (loopback only)"}</span>
+        </label>
+      </form>
+    </div>
+  ` : `
+    <div class="settings-section">
+      <h3>Solo mode settings</h3>
+      <p class="help">Switch to Solo mode from the main page to configure LAN exposure and bound devices.</p>
+    </div>
+  `;
+
+  const devicesSection = `
+    <div class="settings-section">
+      <h3>Bound devices (${devices.length})</h3>
+      <p class="help">
+        Devices that have been bound as solo kiosks. Unbinding forces a device to re-authenticate on next use.
+      </p>
+      ${devices.length ? `
+        <table class="device-table">
+          <thead><tr><th>Fingerprint</th><th>Learner</th><th>Bound</th><th>Last seen</th><th></th></tr></thead>
+          <tbody>
+            ${devices.map((d) => `
+              <tr>
+                <td><code>${escapeHtml(d.fingerprint.slice(0, 12))}…</code></td>
+                <td>${escapeHtml(d.learner_name || "(deleted)")}</td>
+                <td>${escapeHtml(d.bound_at)}</td>
+                <td>${escapeHtml(d.last_seen_at || "—")}</td>
+                <td>
+                  <form method="POST" action="/dashboard/maker-lab" style="display:inline">
+                    <input type="hidden" name="action" value="unbind_device">
+                    <input type="hidden" name="fingerprint" value="${escapeHtml(d.fingerprint)}">
+                    <button type="submit" class="btn small danger-outline">Unbind</button>
+                  </form>
+                </td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      ` : `<p>(no bound devices)</p>`}
+    </div>
+  `;
+
+  return `
+    <style>
+      .settings-page { padding: 1.5rem; max-width: 800px; margin: 0 auto; }
+      .settings-page h2 { margin-top: 0; }
+      .row { display: flex; gap: 0.5rem; align-items: baseline; margin-bottom: 1rem; }
+      .btn { padding: 0.35rem 0.9rem; border: 1px solid var(--border, #333); background: transparent; color: inherit; border-radius: 4px; text-decoration: none; font-size: 0.9em; cursor: pointer; }
+      .btn.small { padding: 0.2rem 0.6rem; font-size: 0.8em; }
+      .btn.danger-outline { color: #ef4444; border-color: #ef4444; }
+      .settings-section { padding: 1rem 1.25rem; background: var(--card, rgba(255,255,255,0.03)); border: 1px solid var(--border, #333); border-radius: 6px; margin-bottom: 1rem; }
+      .settings-section h3 { margin: 0 0 0.5rem 0; }
+      .settings-section .help { color: var(--muted, #888); font-size: 0.9em; margin-bottom: 0.75rem; }
+      .toggle { display: flex; gap: 0.5rem; align-items: center; cursor: pointer; }
+      .device-table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+      .device-table th, .device-table td { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--border, #333); text-align: left; }
+      .banner { padding: 0.6rem 0.9rem; border-radius: 4px; margin-bottom: 0.75rem; font-size: 0.9em; }
+      .banner.success { background: rgba(34,197,94,0.15); color: #22c55e; }
+    </style>
+    <div class="settings-page">
+      <div class="row">
+        <a class="btn" href="/dashboard/maker-lab">← Back</a>
+        <h2 style="margin:0">Settings</h2>
+        <span style="color:var(--muted,#888);font-size:0.9em">mode: <strong>${escapeHtml(mode)}</strong></span>
+      </div>
+      ${banner}
+      ${soloSection}
+      ${devicesSection}
+      <div class="settings-section">
+        <h3>Data handling</h3>
+        <p class="help">See <code>bundles/maker-lab/DATA-HANDLING.md</code> for what data Maker Lab stores, how long, and the COPPA / GDPR-K posture.</p>
+      </div>
+    </div>
+  `;
+}
+
+// ─── Render: Lessons view ─────────────────────────────────────────────────
+
+function renderLessonsView({ bundled, custom, imported, deleted, escapeHtml }) {
+  const banner = imported
+    ? `<div class="banner success">Imported lesson <code>${escapeHtml(imported)}</code>.</div>`
+    : deleted
+    ? `<div class="banner success">Deleted custom lesson <code>${escapeHtml(deleted)}</code>.</div>`
+    : "";
+
+  const renderItem = (item, isCustom) => {
+    if (item.error) {
+      return `<li class="lesson-item error"><code>${escapeHtml(item.file)}</code>: ${escapeHtml(item.error)}</li>`;
+    }
+    const l = item.lesson;
+    return `
+      <li class="lesson-item">
+        <div class="lesson-meta">
+          <strong>${escapeHtml(l.title || l.id)}</strong>
+          <span class="chip">${escapeHtml(l.age_band || "?")}</span>
+          <span class="chip">${escapeHtml(l.surface || "?")}</span>
+          ${l.reading_level != null ? `<span class="chip">grade ${escapeHtml(String(l.reading_level))}</span>` : ""}
+        </div>
+        <div class="lesson-id"><code>${escapeHtml(l.id)}</code></div>
+        ${isCustom ? `
+          <form method="POST" action="/dashboard/maker-lab" style="display:inline">
+            <input type="hidden" name="action" value="delete_custom_lesson">
+            <input type="hidden" name="lesson_id" value="${escapeHtml(l.id)}">
+            <button type="submit" class="btn small danger-outline" onclick="return confirm('Delete ${escapeHtml(l.id)}?')">Delete</button>
+          </form>
+        ` : `<span class="chip bundled">bundled</span>`}
+      </li>
+    `;
+  };
+
+  const bundledHtml = bundled
+    .filter((b) => b.items.length > 0)
+    .map((b) => `
+      <h3>Age band ${escapeHtml(b.band)} (${b.items.length})</h3>
+      <ul class="lessons">${b.items.map((x) => renderItem(x, false)).join("")}</ul>
+    `).join("");
+
+  const customHtml = `
+    <h3>Custom lessons (${custom.length})</h3>
+    ${custom.length
+      ? `<ul class="lessons">${custom.map((x) => renderItem(x, true)).join("")}</ul>`
+      : `<p class="help">No custom lessons yet. Use the form below to add one.</p>`}
+  `;
+
+  const importForm = `
+    <div class="import-section">
+      <h3>Import a lesson</h3>
+      <p class="help">
+        Paste a lesson JSON below. It will be validated against <code>bundles/maker-lab/curriculum/SCHEMA.md</code>.
+        Valid lessons land in <code>~/.crow/bundles/maker-lab/curriculum/custom/&lt;id&gt;.json</code> and appear immediately — no restart.
+      </p>
+      <form method="POST" action="/dashboard/maker-lab">
+        <input type="hidden" name="action" value="import_lesson">
+        <textarea name="lesson_json" rows="14" required placeholder='{
+  "id": "my-lesson",
+  "title": "A New Lesson",
+  "surface": "blockly",
+  "age_band": "5-9",
+  "reading_level": 2,
+  "steps": [{ "prompt": "Drag a block." }],
+  "canned_hints": ["Try the first block in the toolbox!"]
+}'></textarea>
+        <div class="row">
+          <button type="submit" class="btn primary">Validate &amp; save</button>
+          <a class="btn" href="/dashboard/maker-lab?lessons=1">Cancel</a>
+        </div>
+      </form>
+    </div>
+  `;
+
+  return `
+    <style>
+      .lessons-page { padding: 1.5rem; max-width: 900px; margin: 0 auto; }
+      .lessons-page h2 { margin-top: 0; }
+      .row { display: flex; gap: 0.5rem; align-items: baseline; margin-bottom: 1rem; }
+      .btn { padding: 0.35rem 0.9rem; border: 1px solid var(--border, #333); background: transparent; color: inherit; border-radius: 4px; text-decoration: none; font-size: 0.9em; cursor: pointer; }
+      .btn.small { padding: 0.2rem 0.6rem; font-size: 0.8em; }
+      .btn.primary { background: var(--accent, #84cc16); color: #000; border-color: var(--accent, #84cc16); font-weight: 600; }
+      .btn.danger-outline { color: #ef4444; border-color: #ef4444; }
+      .banner { padding: 0.6rem 0.9rem; border-radius: 4px; margin-bottom: 0.75rem; font-size: 0.9em; }
+      .banner.success { background: rgba(34,197,94,0.15); color: #22c55e; }
+      .banner.error { background: rgba(239,68,68,0.15); color: #ef4444; }
+      .lessons { list-style: none; padding: 0; margin: 0.5rem 0 1.5rem 0; display: grid; gap: 0.5rem; }
+      .lesson-item { padding: 0.7rem 1rem; background: var(--card, rgba(255,255,255,0.03)); border: 1px solid var(--border, #333); border-radius: 6px; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; justify-content: space-between; }
+      .lesson-item.error { border-color: #ef4444; }
+      .lesson-meta { display: flex; gap: 0.5rem; align-items: baseline; flex-wrap: wrap; }
+      .lesson-id { color: var(--muted, #888); font-size: 0.85em; }
+      .chip { padding: 0.1rem 0.5rem; background: rgba(132,204,22,0.15); color: #84cc16; border-radius: 10px; font-size: 0.75em; }
+      .chip.bundled { background: rgba(148,163,184,0.2); color: #94a3b8; }
+      .help { color: var(--muted, #888); font-size: 0.9em; }
+      textarea { width: 100%; padding: 0.6rem; background: var(--input, rgba(0,0,0,0.3)); color: inherit; border: 1px solid var(--border, #333); border-radius: 4px; font-family: ui-monospace, Menlo, monospace; font-size: 0.9em; margin-bottom: 0.5rem; box-sizing: border-box; }
+      .import-section { padding: 1rem 1.25rem; background: var(--card, rgba(255,255,255,0.03)); border: 1px solid var(--border, #333); border-radius: 6px; margin-bottom: 1rem; }
+    </style>
+    <div class="lessons-page">
+      <div class="row">
+        <a class="btn" href="/dashboard/maker-lab">← Back</a>
+        <h2 style="margin:0">Lessons</h2>
+      </div>
+      ${banner}
+      ${bundledHtml}
+      ${customHtml}
+      ${importForm}
+    </div>
+  `;
+}
+
+function renderLessonImportResult({ errors, raw, escapeHtml }) {
+  return `
+    <style>
+      .import-err { padding: 1.5rem; max-width: 800px; margin: 0 auto; }
+      .import-err .banner { padding: 0.8rem 1rem; border-radius: 4px; margin-bottom: 1rem; background: rgba(239,68,68,0.15); color: #ef4444; }
+      .import-err ul { padding-left: 1.25rem; }
+      .import-err pre { background: var(--input, rgba(0,0,0,0.3)); padding: 0.8rem; border-radius: 4px; overflow: auto; max-height: 40vh; font-size: 0.85em; }
+      .btn { padding: 0.35rem 0.9rem; border: 1px solid var(--border, #333); background: transparent; color: inherit; border-radius: 4px; text-decoration: none; font-size: 0.9em; }
+    </style>
+    <div class="import-err">
+      <div class="banner">
+        <strong>Validation failed.</strong> Fix these and re-submit.
+        <ul>${errors.map((e) => `<li>${escapeHtml(e)}</li>`).join("")}</ul>
+      </div>
+      <h3>Your input</h3>
+      <pre>${escapeHtml(raw)}</pre>
+      <a class="btn" href="/dashboard/maker-lab?lessons=1">← Back</a>
     </div>
   `;
 }

@@ -217,20 +217,104 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
   });
 
   // ─── /kiosk/ — Blockly surface ─────────────────────────────────────────
+  //
+  // Three paths:
+  //   1. Valid session cookie → serve the Blockly kiosk.
+  //   2. No cookie, solo mode, loopback request → auto-mint a default-learner
+  //      session and redirect. (Solo-mode convenience.)
+  //   3. No cookie, solo mode, LAN exposure on, known bound device → same.
+  //   4. No cookie, solo mode, LAN exposure on, unknown device but admin
+  //      crow_session present → bind the device and auto-mint.
+  //   5. Everything else → "Ask a grown-up" screen.
 
   router.get("/kiosk/", async (req, res) => {
     const guard = await requireKioskSession(req, db);
-    if (!guard.ok) {
-      if (guard.reason === "session_invalid") clearSessionCookie(req, res);
-      return res.status(401).type("html").send(`
+    if (guard.ok) {
+      // Path 1: already-valid session. Serve Blockly.
+      return serveBlockly(req, res);
+    }
+    if (guard.reason === "session_invalid") clearSessionCookie(req, res);
+
+    // Solo auto-redeem check. Only runs when the deployment mode is "solo".
+    const modeRow = await db.execute({
+      sql: "SELECT value FROM dashboard_settings WHERE key = 'maker_lab.mode'",
+      args: [],
+    });
+    const mode = modeRow.rows[0]?.value || "family";
+    if (mode !== "solo") {
+      return noSessionResponse(res);
+    }
+
+    const deviceBinding = await import(pathToFileURL(resolve(__dirname, "../server/device-binding.js")).href);
+    const sessionsMod = await import(pathToFileURL(resolve(__dirname, "../server/sessions.js")).href);
+
+    const fp = fingerprint(req);
+    const loopback = deviceBinding.isLoopback(req);
+    const lanExposure = await deviceBinding.getSoloLanExposure(db);
+
+    if (!loopback && lanExposure !== "on") {
+      // Path 5 (LAN call in loopback-only posture): refuse.
+      return res.status(403).type("html").send(`
         <!doctype html><meta charset="utf-8">
-        <title>Ask a grown-up</title>
+        <title>Kiosk unavailable</title>
         <style>body{font-family:system-ui;padding:2rem;color:#333;max-width:40em;margin:0 auto}</style>
-        <h1>Ask a grown-up to start a new session.</h1>
-        <p>This kiosk doesn't have an active session right now.</p>
+        <h1>This kiosk is set to loopback-only.</h1>
+        <p>Open it on the Crow host itself, or ask the admin to enable LAN exposure in <em>Maker Lab → Settings</em>.</p>
       `);
     }
 
+    let allow = loopback;
+    let bindingLabel = null;
+
+    if (!loopback && lanExposure === "on") {
+      const bound = await deviceBinding.getBoundDevice(db, fp);
+      if (bound) {
+        // Path 3: known bound device. Touch timestamp and allow.
+        await deviceBinding.touchBoundDevice(db, fp);
+        allow = true;
+      } else if (await deviceBinding.hasAdminSession(req)) {
+        // Path 4: admin's Crow's Nest cookie is present — bind this device.
+        const defaultLearnerId = await deviceBinding.ensureDefaultLearner(db);
+        await deviceBinding.bindDevice(db, { fingerprint: fp, learnerId: defaultLearnerId, label: null });
+        bindingLabel = "bound via admin session";
+        allow = true;
+      } else {
+        // Path 5 (unknown LAN device, no admin cookie): bind-prompt page.
+        return res.status(401).type("html").send(`
+          <!doctype html><meta charset="utf-8">
+          <title>Set up this kiosk</title>
+          <style>body{font-family:system-ui;padding:2rem;color:#333;max-width:40em;margin:0 auto}.btn{display:inline-block;padding:0.5rem 1rem;background:#3b82f6;color:#fff;border-radius:4px;text-decoration:none}</style>
+          <h1>This device isn't set up yet.</h1>
+          <p>Sign in to Crow's Nest first, then reload this page.</p>
+          <p><a class="btn" href="/dashboard/">Sign in to Crow's Nest</a></p>
+        `);
+      }
+    }
+
+    if (!allow) return noSessionResponse(res);
+
+    // Auto-mint a default-learner session and redeem in one shot.
+    try {
+      const learnerId = await deviceBinding.ensureDefaultLearner(db);
+      const r = await sessionsMod.mintSessionForLearner(db, { learnerId, durationMin: 60 });
+      // Claim the code immediately (server-side). Mirrors what /kiosk/r/:code does.
+      await db.execute({
+        sql: `UPDATE maker_redemption_codes SET used_at = datetime('now'), claimed_by_fingerprint = ?
+              WHERE code = ? AND used_at IS NULL`,
+        args: [fp, r.redemptionCode],
+      });
+      await db.execute({
+        sql: `UPDATE maker_sessions SET kiosk_device_id = ? WHERE token = ?`,
+        args: [fp, r.sessionToken],
+      });
+      setSessionCookie(req, res, signCookie(r.sessionToken, fp));
+      return res.redirect(302, "/kiosk/");
+    } catch (err) {
+      return res.status(500).type("text").send(`Solo redeem failed: ${err.message}`);
+    }
+  });
+
+  function serveBlockly(req, res) {
     const blocklyIndex = resolve(__dirname, "../public/blockly/index.html");
     if (!existsSync(blocklyIndex)) {
       return res.type("html").send(`
@@ -241,7 +325,17 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
       `);
     }
     res.sendFile(blocklyIndex);
-  });
+  }
+
+  function noSessionResponse(res) {
+    return res.status(401).type("html").send(`
+      <!doctype html><meta charset="utf-8">
+      <title>Ask a grown-up</title>
+      <style>body{font-family:system-ui;padding:2rem;color:#333;max-width:40em;margin:0 auto}</style>
+      <h1>Ask a grown-up to start a new session.</h1>
+      <p>This kiosk doesn't have an active session right now.</p>
+    `);
+  }
 
   // Blockly static assets served under /kiosk/blockly/*
   router.get("/kiosk/blockly/*", async (req, res) => {
