@@ -1,0 +1,46 @@
+# Forgejo — community-driven soft-fork of Gitea.
+#
+# Image registry note:
+#   codeberg.org/forgejo/forgejo is hosted on Codeberg's own OCI registry,
+#   not Docker Hub. `docker pull` handles this transparently. CI's
+#   image-freshness workflow calls `docker pull` directly, so it covers
+#   non-Docker-Hub registries without any special handling.
+#
+# Storage:
+#   ~/.crow/forgejo/data — bind mount for repos, attachments, SQLite DB.
+#
+# Ports:
+#   3050 (host) -> 3000 (container) — HTTP web UI + API on 127.0.0.1
+#   2224 (host) -> 22   (container) — built-in Go SSH server on 127.0.0.1.
+#                                     Clone with ssh://git@host:2224/user/repo
+
+services:
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:9.0.3
+    container_name: crow-forgejo
+    ports:
+      - "127.0.0.1:3050:3000"
+      - "127.0.0.1:2224:22"
+    volumes:
+      - ${FORGEJO_DATA_DIR:-~/.crow/forgejo/data}:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - FORGEJO__database__DB_TYPE=sqlite3
+      - FORGEJO__database__PATH=/data/gitea/forgejo.db
+      - FORGEJO__server__DOMAIN=localhost
+      - FORGEJO__server__ROOT_URL=${FORGEJO_URL:-http://localhost:3050}/
+      - FORGEJO__server__SSH_PORT=2224
+      - FORGEJO__server__SSH_LISTEN_PORT=22
+      - FORGEJO__server__START_SSH_SERVER=true
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/api/healthz || wget -q --spider http://localhost:3000/api/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
