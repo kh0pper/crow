@@ -23,9 +23,12 @@ export async function renderSettingsMenu(sections, db, lang) {
     settings[row.key] = row.value;
   }
 
-  // Group sections
+  // Group sections (skip hidden ones — still registered and deep-linkable,
+  // but not shown in the menu. Used for staged rollouts where a feature
+  // bundle ships settings that shouldn't appear until the consumer lands.)
   const grouped = {};
   for (const section of sections) {
+    if (section.hidden) continue;
     const group = section.group || "general";
     if (!grouped[group]) grouped[group] = [];
     grouped[group].push(section);
