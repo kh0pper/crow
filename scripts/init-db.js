@@ -481,6 +481,72 @@ await initTable("audit_log table", `
   CREATE INDEX IF NOT EXISTS idx_audit_log_event_created ON audit_log(event_type, created_at);
 `);
 
+// --- F.11: Moderation Actions (queued destructive moderation) ---
+// Bundles (gotosocial, funkwhale, pixelfed, lemmy, mastodon, peertube) INSERT
+// rows here when an AI invokes a destructive moderation verb. The operator
+// confirms from the Nest panel before the action fires.
+await initTable("moderation_actions table", `
+  CREATE TABLE IF NOT EXISTS moderation_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bundle_id TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    requested_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    confirmed_by TEXT,
+    confirmed_at INTEGER,
+    error TEXT,
+    idempotency_key TEXT UNIQUE NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_moderation_actions_status ON moderation_actions(status, expires_at);
+  CREATE INDEX IF NOT EXISTS idx_moderation_actions_bundle ON moderation_actions(bundle_id, requested_at DESC);
+`);
+
+// --- F.11: Identity Attestations ---
+// Crow's root Ed25519 identity signs per-app handles so remote viewers can
+// verify "these handles belong to the same root identity" via the gateway's
+// /.well-known/crow-identity.json endpoint. version + revoked_at support
+// key rotation.
+await initTable("identity_attestations table", `
+  CREATE TABLE IF NOT EXISTS identity_attestations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    crow_id TEXT NOT NULL,
+    app TEXT NOT NULL,
+    external_handle TEXT NOT NULL,
+    app_pubkey TEXT,
+    sig TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    revoked_at INTEGER
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_identity_attestations_crow ON identity_attestations(crow_id, app);
+  CREATE INDEX IF NOT EXISTS idx_identity_attestations_active ON identity_attestations(app, external_handle) WHERE revoked_at IS NULL;
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_attestations_uniq ON identity_attestations(crow_id, app, external_handle, version);
+`);
+
+await initTable("identity_attestation_revocations table", `
+  CREATE TABLE IF NOT EXISTS identity_attestation_revocations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    attestation_id INTEGER NOT NULL REFERENCES identity_attestations(id) ON DELETE CASCADE,
+    revoked_at INTEGER NOT NULL,
+    reason TEXT,
+    sig TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_identity_attestation_revocations_attestation ON identity_attestation_revocations(attestation_id);
+  CREATE INDEX IF NOT EXISTS idx_identity_attestation_revocations_revoked_at ON identity_attestation_revocations(revoked_at DESC);
+`);
+
+// Extend contacts with external_handle + external_source so discovered
+// federated contacts (Mastodon follows, Lemmy community subscribers, etc.)
+// can be linked to the local contacts table.
+await addColumnIfMissing("contacts", "external_handle", "TEXT");
+await addColumnIfMissing("contacts", "external_source", "TEXT");
+
 // --- Per-Device Context Support ---
 // Existing installs have section_key UNIQUE constraint that blocks device overrides.
 // Migration: add device_id column, drop the old UNIQUE constraint, add partial indexes.
