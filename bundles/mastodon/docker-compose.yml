@@ -1,0 +1,207 @@
+# Mastodon — flagship ActivityPub microblogging server.
+#
+# Five-container bundle: web (Rails/Puma) + streaming (Node) + sidekiq
+# (background jobs) + postgres + redis. web, streaming, and sidekiq on
+# crow-federation (Caddy reverse-proxies to web + streaming); DB/redis
+# on default.
+#
+# Data:
+#   ~/.crow/mastodon/postgres/    Postgres data dir
+#   ~/.crow/mastodon/redis/       Redis persistence
+#   ~/.crow/mastodon/system/      Active-storage media uploads (if on-disk)
+#
+# Media: on-disk by default. Set MASTODON_S3_* to route to MinIO /
+# external S3 — storage-translators.mastodon() maps to S3_* envelope
+# (documented at https://docs.joinmastodon.org/admin/optional/object-storage/).
+# configure-storage.mjs in scripts/ handles this at install time.
+#
+# Image: ghcr.io/mastodon/mastodon:v4.3.0 (pin semver at impl time;
+# check release feed + CVE advisories before merge). Mastodon 4.3+
+# splits web and streaming into separate images
+# (ghcr.io/mastodon/mastodon-streaming).
+
+networks:
+  crow-federation:
+    external: true
+  default:
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: crow-mastodon-postgres
+    networks:
+      - default
+    environment:
+      POSTGRES_USER: mastodon
+      POSTGRES_PASSWORD: ${MASTODON_DB_PASSWORD}
+      POSTGRES_DB: mastodon_production
+    volumes:
+      - ${MASTODON_DATA_DIR:-~/.crow/mastodon}/postgres:/var/lib/postgresql/data
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mastodon -d mastodon_production"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  redis:
+    image: redis:7-alpine
+    container_name: crow-mastodon-redis
+    networks:
+      - default
+    volumes:
+      - ${MASTODON_DATA_DIR:-~/.crow/mastodon}/redis:/data
+    init: true
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  web:
+    image: ghcr.io/mastodon/mastodon:v4.3.0
+    container_name: crow-mastodon-web
+    networks:
+      - default
+      - crow-federation
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RAILS_ENV: production
+      NODE_ENV: production
+      LOCAL_DOMAIN: ${MASTODON_LOCAL_DOMAIN}
+      WEB_DOMAIN: ${MASTODON_WEB_DOMAIN:-}
+      ALTERNATE_DOMAINS: ""
+      SINGLE_USER_MODE: ${MASTODON_SINGLE_USER_MODE:-false}
+      SECRET_KEY_BASE: ${MASTODON_SECRET_KEY_BASE}
+      OTP_SECRET: ${MASTODON_OTP_SECRET}
+      VAPID_PRIVATE_KEY: ${MASTODON_VAPID_PRIVATE_KEY}
+      VAPID_PUBLIC_KEY: ${MASTODON_VAPID_PUBLIC_KEY}
+      DB_HOST: postgres
+      DB_USER: mastodon
+      DB_NAME: mastodon_production
+      DB_PASS: ${MASTODON_DB_PASSWORD}
+      DB_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      BIND: 0.0.0.0
+      PORT: "3000"
+      TRUSTED_PROXY_IP: "0.0.0.0/0"
+      # Media retention (sidekiq scheduled job reads this)
+      MEDIA_CACHE_RETENTION_PERIOD: ${MASTODON_MEDIA_RETENTION_DAYS:-14}
+      # S3 (empty unless configure-storage.mjs populated them)
+      S3_ENABLED: ${S3_ENABLED:-false}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_PROTOCOL: ${S3_PROTOCOL:-}
+      S3_HOSTNAME: ${S3_HOSTNAME:-}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_FORCE_SINGLE_REQUEST: ${S3_FORCE_SINGLE_REQUEST:-true}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      # SMTP (optional)
+      SMTP_SERVER: ${MASTODON_SMTP_SERVER:-}
+      SMTP_PORT: ${MASTODON_SMTP_PORT:-587}
+      SMTP_LOGIN: ${MASTODON_SMTP_LOGIN:-}
+      SMTP_PASSWORD: ${MASTODON_SMTP_PASSWORD:-}
+      SMTP_FROM_ADDRESS: ${MASTODON_SMTP_FROM_ADDRESS:-}
+    volumes:
+      - ${MASTODON_DATA_DIR:-~/.crow/mastodon}/system:/mastodon/public/system
+    command: >
+      bash -c "bin/rails db:migrate && bin/rails assets:precompile &&
+               bundle exec puma -C config/puma.rb"
+    init: true
+    mem_limit: 2g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+
+  streaming:
+    image: ghcr.io/mastodon/mastodon-streaming:v4.3.0
+    container_name: crow-mastodon-streaming
+    networks:
+      - default
+      - crow-federation
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      LOCAL_DOMAIN: ${MASTODON_LOCAL_DOMAIN}
+      WEB_DOMAIN: ${MASTODON_WEB_DOMAIN:-}
+      DB_HOST: postgres
+      DB_USER: mastodon
+      DB_NAME: mastodon_production
+      DB_PASS: ${MASTODON_DB_PASSWORD}
+      DB_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      BIND: 0.0.0.0
+      PORT: "4000"
+      STREAMING_CLUSTER_NUM: "1"
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/api/v1/streaming/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  sidekiq:
+    image: ghcr.io/mastodon/mastodon:v4.3.0
+    container_name: crow-mastodon-sidekiq
+    networks:
+      - default
+      - crow-federation
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      RAILS_ENV: production
+      LOCAL_DOMAIN: ${MASTODON_LOCAL_DOMAIN}
+      WEB_DOMAIN: ${MASTODON_WEB_DOMAIN:-}
+      SECRET_KEY_BASE: ${MASTODON_SECRET_KEY_BASE}
+      OTP_SECRET: ${MASTODON_OTP_SECRET}
+      VAPID_PRIVATE_KEY: ${MASTODON_VAPID_PRIVATE_KEY}
+      VAPID_PUBLIC_KEY: ${MASTODON_VAPID_PUBLIC_KEY}
+      DB_HOST: postgres
+      DB_USER: mastodon
+      DB_NAME: mastodon_production
+      DB_PASS: ${MASTODON_DB_PASSWORD}
+      DB_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      MEDIA_CACHE_RETENTION_PERIOD: ${MASTODON_MEDIA_RETENTION_DAYS:-14}
+      S3_ENABLED: ${S3_ENABLED:-false}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_PROTOCOL: ${S3_PROTOCOL:-}
+      S3_HOSTNAME: ${S3_HOSTNAME:-}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      SMTP_SERVER: ${MASTODON_SMTP_SERVER:-}
+      SMTP_PORT: ${MASTODON_SMTP_PORT:-587}
+      SMTP_LOGIN: ${MASTODON_SMTP_LOGIN:-}
+      SMTP_PASSWORD: ${MASTODON_SMTP_PASSWORD:-}
+      SMTP_FROM_ADDRESS: ${MASTODON_SMTP_FROM_ADDRESS:-}
+    volumes:
+      - ${MASTODON_DATA_DIR:-~/.crow/mastodon}/system:/mastodon/public/system
+    command: ["bundle", "exec", "sidekiq"]
+    init: true
+    mem_limit: 1500m
+    restart: unless-stopped
