@@ -46,6 +46,7 @@ const ICON_MAP = {
   document: "\u{1F4D1}",
   git: "\u{1F33F}",
   lock: "\u{1F512}",
+  search: "\u{1F50D}",
 };
 
 const CATEGORY_COLORS = {
