@@ -31,6 +31,7 @@ const translations = {
   "nav.group.core": { en: "Core", es: "Principal" },
   "nav.group.content": { en: "Content", es: "Contenido" },
   "nav.group.media": { en: "Media", es: "Medios" },
+  "nav.group.education": { en: "Education", es: "Educación" },
   "nav.group.tools": { en: "Tools", es: "Herramientas" },
   "nav.group.system": { en: "System", es: "Sistema" },
 
