@@ -44,6 +44,7 @@ const ICON_MAP = {
   "check-square": "\u2705",
   dollar: "\u{1F4B0}",
   document: "\u{1F4D1}",
+  git: "\u{1F33F}",
 };
 
 const CATEGORY_COLORS = {
