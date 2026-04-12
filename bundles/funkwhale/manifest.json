@@ -1,0 +1,48 @@
+{
+  "id": "funkwhale",
+  "name": "Funkwhale",
+  "version": "1.0.0",
+  "description": "Federated music server — self-hosted audio library + podcast streaming + fediverse-federated listening over ActivityPub. Upload your own library; follow remote channels and artists across the fediverse.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "federated-media",
+  "tags": ["music", "funkwhale", "activitypub", "fediverse", "federated", "audio", "podcasts"],
+  "icon": "music",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "envKeys": ["FUNKWHALE_URL", "FUNKWHALE_ACCESS_TOKEN", "FUNKWHALE_HOSTNAME"]
+  },
+  "panel": "panel/funkwhale.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/funkwhale.md"],
+  "consent_required": true,
+  "install_consent_messages": {
+    "en": "Funkwhale joins the public fediverse over ActivityPub — your Funkwhale instance becomes addressable at the domain you configure, any library/channel you make public is discoverable and followable by remote Mastodon/GoToSocial/Pixelfed users, and published audio can be replicated to federated servers and cannot be fully recalled. Funkwhale stores your music library in Postgres metadata + on-disk (or S3) audio files; a modest library (1000 tracks) consumes 5-20 GB depending on format and bitrate. If you enable federation with remote pods, their library metadata is cached locally — this can grow to hundreds of MB. Funkwhale is hardware-gated: refused on hosts with <1.5 GB effective RAM after committed bundles; warns below 8 GB total host RAM. Uploading copyrighted material you don't have rights to is your legal responsibility — major fediverse hubs may defederate servers that become known for piracy.",
+    "es": "Funkwhale se une al fediverso público vía ActivityPub — tu instancia de Funkwhale será direccionable en el dominio que configures, cualquier biblioteca/canal que hagas público será descubrible y seguible por usuarios remotos de Mastodon/GoToSocial/Pixelfed, y el audio publicado puede replicarse a servidores federados y no puede recuperarse completamente. Funkwhale almacena tu biblioteca musical como metadatos en Postgres + archivos de audio en disco (o S3); una biblioteca modesta (1000 pistas) consume 5-20 GB según formato y bitrate. Si habilitas la federación con pods remotos, sus metadatos se cachean localmente — esto puede crecer a cientos de MB. Funkwhale está limitado por hardware: rechazado en hosts con <1.5 GB de RAM efectiva tras los paquetes comprometidos; advierte por debajo de 8 GB de RAM total. Subir material con copyright del que no tienes derechos es tu responsabilidad legal — los principales hubs del fediverso pueden dejar de federarse con servidores conocidos por piratería."
+  },
+  "requires": {
+    "env": ["FUNKWHALE_HOSTNAME", "FUNKWHALE_POSTGRES_PASSWORD", "FUNKWHALE_DJANGO_SECRET_KEY"],
+    "bundles": ["caddy"],
+    "min_ram_mb": 1500,
+    "recommended_ram_mb": 3000,
+    "min_disk_mb": 10000,
+    "recommended_disk_mb": 100000
+  },
+  "env_vars": [
+    { "name": "FUNKWHALE_HOSTNAME", "description": "Public domain (e.g. music.example.com). Must be a subdomain; path-mounts break ActivityPub actor URLs.", "required": true },
+    { "name": "FUNKWHALE_POSTGRES_PASSWORD", "description": "Password for the bundled Postgres role.", "required": true, "secret": true },
+    { "name": "FUNKWHALE_DJANGO_SECRET_KEY", "description": "Django secret key (use 64+ random chars). Changing this invalidates existing sessions.", "required": true, "secret": true },
+    { "name": "FUNKWHALE_URL", "description": "Internal URL the Crow MCP server uses to reach Funkwhale's API (over the crow-federation docker network).", "default": "http://funkwhale-api:5000", "required": false },
+    { "name": "FUNKWHALE_ACCESS_TOKEN", "description": "OAuth2 / PAT access token for the admin account (create via Settings → Applications in the web UI, or POST /api/v1/oauth/apps + token exchange).", "required": false, "secret": true },
+    { "name": "FUNKWHALE_S3_ENDPOINT", "description": "Optional S3-compatible endpoint for audio storage (defaults to on-disk). If set with FUNKWHALE_S3_BUCKET/ACCESS/SECRET, audio files go to S3 via the storage-translators mapping.", "required": false },
+    { "name": "FUNKWHALE_S3_BUCKET", "description": "S3 bucket name for audio storage.", "required": false },
+    { "name": "FUNKWHALE_S3_ACCESS_KEY", "description": "S3 access key.", "required": false, "secret": true },
+    { "name": "FUNKWHALE_S3_SECRET_KEY", "description": "S3 secret key.", "required": false, "secret": true },
+    { "name": "FUNKWHALE_S3_REGION", "description": "S3 region (default us-east-1).", "default": "us-east-1", "required": false }
+  ],
+  "ports": [],
+  "webUI": null,
+  "notes": "Five containers (api + celeryworker + celerybeat + nginx + postgres + redis). No host port publish — expose via caddy_add_federation_site { domain: FUNKWHALE_HOSTNAME, upstream: 'funkwhale-nginx:80', profile: 'activitypub' }. Initial superuser created via `docker exec crow-funkwhale-api funkwhale-manage createsuperuser`. Audio storage defaults to on-disk; set FUNKWHALE_S3_* to wire MinIO/external S3 via the storage-translators funkwhale() mapping."
+}
