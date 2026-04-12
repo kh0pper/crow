@@ -872,6 +872,49 @@ await initTable("push_subscriptions table", `
   );
 `);
 
+// --- Bundle Settings (PR 0: per-bundle config / safety toggles, DB-read at tool-call time) ---
+
+await initTable("bundle_settings table", `
+  CREATE TABLE IF NOT EXISTS bundle_settings (
+    bundle_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (bundle_id, key)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_bundle_settings_bundle ON bundle_settings(bundle_id);
+`);
+
+// --- Install Consents (PR 0: server-validated consent tokens for privileged/consent_required bundles) ---
+
+await initTable("install_consents table", `
+  CREATE TABLE IF NOT EXISTS install_consents (
+    token TEXT PRIMARY KEY,
+    bundle_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    consumed INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_install_consents_bundle ON install_consents(bundle_id);
+  CREATE INDEX IF NOT EXISTS idx_install_consents_expires ON install_consents(expires_at);
+`);
+
+// --- CrowdSec Decisions Cache (PR 0: cross-process LAPI decision cache for gateway middleware) ---
+
+await initTable("crowdsec_decisions_cache table", `
+  CREATE TABLE IF NOT EXISTS crowdsec_decisions_cache (
+    ip TEXT PRIMARY KEY,
+    decision TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    cached_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_crowdsec_cache_expires ON crowdsec_decisions_cache(expires_at);
+`);
+
 // --- Optional: sqlite-vec virtual table for semantic search ---
 const hasVec = await isSqliteVecAvailable(db);
 if (hasVec) {
