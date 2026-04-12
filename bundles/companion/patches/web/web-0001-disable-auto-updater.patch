@@ -1,51 +1,47 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 532adb97e884b2f27730653e618b0bb81e5e60db Mon Sep 17 00:00:00 2001
 From: Crow Maintainers <crow@localhost>
-Date: Thu, 1 Jan 1970 00:00:00 +0000
+Date: Sun, 12 Apr 2026 14:39:13 -0500
 Subject: [PATCH 1/6] Disable electron-updater for Crow-pinned AppImage builds
 
 Crow ships the pet-mode AppImage from a specific pinned upstream SHA
 (see .gitmodules for `vendor/open-llm-vtuber-web`). Upstream's
 electron-updater machinery expects to phone home to a GitHub release
-channel that Crow does not publish to — leaving it enabled would either
-fail silently on first launch or, worse, pull a newer upstream with
-patches unapplied. We strip the autoUpdater wiring and replace it with
-an in-process no-op so the rest of the app behaves identically.
+channel that Crow does not publish to. We drop the dependency from
+package.json and set `publish: null` in electron-builder.yml so no
+auto-update artifacts are emitted.
 
 Applies against: vendor/open-llm-vtuber-web @ d176e7df2366952e3bacbf12cf9a8b18a4315932
 
-TODO(Phase 3.1): fill in hunks once the submodule is checked out and
-line numbers are stable. Touch points already surveyed:
-- package.json   — remove `electron-updater` dep line
-- src/main/index.ts — drop any autoUpdater import / init call (none at
-  d176e7d; this patch may be a no-op on the current pin, in which case
-  keep the patch file as a guardrail for future SHA bumps)
-- electron-builder.yml — ensure `publish` is `null` (currently unset,
-  which defaults to GitHub; make explicit)
 ---
- electron-builder.yml | TODO
- package.json         | TODO
- src/main/index.ts    | TODO
- 3 files changed, TODO insertions(+), TODO deletions(-)
+ electron-builder.yml | 5 +----
+ package.json         | 1 -
+ 2 files changed, 1 insertion(+), 5 deletions(-)
 
 diff --git a/electron-builder.yml b/electron-builder.yml
+index 697cba9..56fcbe0 100644
 --- a/electron-builder.yml
 +++ b/electron-builder.yml
-@@ TODO(Phase 3.1) @@
--# TODO: explicit `publish: null` block to disable electron-updater feed
-+# TODO: explicit `publish: null` block to disable electron-updater feed
-
+@@ -49,9 +49,6 @@ linux:
+ appImage:
+   artifactName: ${name}-${version}.${ext}
+ npmRebuild: false
+-publish:
+-  provider: github
+-  releaseType: release
+-  publishAutoUpdate: false
++publish: null
+ electronDownload:
+   mirror: https://npmmirror.com/mirrors/electron/
+\ No newline at end of file
 diff --git a/package.json b/package.json
+index c77387a..22a1f7e 100644
 --- a/package.json
 +++ b/package.json
-@@ TODO(Phase 3.1) @@
--    "electron-updater": "TODO"
-+    // remove electron-updater from dependencies
-
-diff --git a/src/main/index.ts b/src/main/index.ts
---- a/src/main/index.ts
-+++ b/src/main/index.ts
-@@ TODO(Phase 3.1) @@
--// TODO: drop autoUpdater import + init if present at the pinned SHA
-+// TODO: drop autoUpdater import + init if present at the pinned SHA
---
-2.40.0
+@@ -34,7 +34,6 @@
+     "@ricky0123/vad-web": "^0.0.24",
+     "clsx": "^2.1.1",
+     "date-fns": "^4.1.0",
+-    "electron-updater": "^6.1.7",
+     "eslint": "^8.57.1",
+     "framer-motion": "^11.14.4",
+     "i18next": "^25.0.1",

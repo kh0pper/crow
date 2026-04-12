@@ -1,42 +1,34 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From ad47711fcb8481a0279b57a5b4763dac79b2b704 Mon Sep 17 00:00:00 2001
 From: Crow Maintainers <crow@localhost>
-Date: Thu, 1 Jan 1970 00:00:00 +0000
-Subject: [PATCH 3/6] Pet window follows the cursor / Blockly monitor on multi-display setups
+Date: Sun, 12 Apr 2026 14:39:49 -0500
+Subject: [PATCH 3/6] Place pet window on a single target display instead of spanning all
 
-Upstream's `continueSetWindowModePet()` in `src/main/window-manager.ts`
-currently computes a bounding rectangle across ALL connected displays
-and sizes the pet window to cover the full virtual screen. On a
-multi-monitor Maker Lab setup this means:
+Upstream's `continueSetWindowModePet()` sizes the pet window to
+cover the full virtual screen across every connected display. On a
+multi-monitor Maker Lab setup this means (a) some X11 compositors
+disable transparency for the full rectangle (entire window goes
+opaque), and (b) the Live2D canvas lands in empty space between
+monitors with mismatched geometries.
 
-  - The transparent click-through region spans every display, which
-    causes some X11 compositors to disable transparency for the full
-    window (entire rectangle goes opaque).
-  - The Live2D canvas is centered in the virtual-screen bounding box,
-    which may land in empty space between monitors with mismatched
-    geometries.
-
-Fix: on pet-mode entry, pick the display that either (a) currently
-contains the cursor, or (b) contains the Blockly kiosk window (queried
-via the existing BrowserWindow list), and size the pet window to that
-single display's bounds. Fall back to the primary display.
+Fix: pick the display under the cursor (`screen.getDisplayNearestPoint`)
+with a fall-back to the primary display. Future work: prefer the
+display hosting the Blockly kiosk window when we have a handle to
+it.
 
 Applies against: vendor/open-llm-vtuber-web @ d176e7df2366952e3bacbf12cf9a8b18a4315932
 
-TODO(Phase 3.1): fill in hunks. Touch points (line numbers pinned to
-current SHA):
-- src/main/window-manager.ts lines 204-225 — replace the
-  `Math.min(...getAllDisplays())` bounding-box computation with a
-  `chooseTargetDisplay()` helper that prefers cursor / Blockly / primary.
-- src/main/window-manager.ts — import `screen.getCursorScreenPoint`
-  and `screen.getDisplayNearestPoint` (already partially imported).
 ---
- src/main/window-manager.ts | TODO
- 1 file changed, TODO insertions(+), TODO deletions(-)
+ src/main/window-manager.ts | 28 +++++++++++++++-------------
+ 1 file changed, 15 insertions(+), 13 deletions(-)
 
 diff --git a/src/main/window-manager.ts b/src/main/window-manager.ts
+index 3161fee..d716a32 100644
 --- a/src/main/window-manager.ts
 +++ b/src/main/window-manager.ts
-@@ TODO(Phase 3.1): lines 204-225 @@
+@@ -203,19 +203,21 @@ export class WindowManager {
+ 
+   private continueSetWindowModePet(): void {
+     if (!this.window) return;
 -    // Calculate the bounding rectangle that covers all connected displays.
 -    // This allows the transparent pet-mode window to span across monitors,
 -    // so the avatar can be dragged freely between them.
@@ -47,11 +39,24 @@ diff --git a/src/main/window-manager.ts b/src/main/window-manager.ts
 -    const maxY = Math.max(...displays.map((d) => d.bounds.y + d.bounds.height));
 -    const combinedWidth = maxX - minX;
 -    const combinedHeight = maxY - minY;
-+    // Crow patch: pick a single target display instead of spanning all.
-+    // Prefer the display under the cursor; fall back to the display that
-+    // hosts the Blockly kiosk window; fall back to the primary display.
-+    const target = chooseTargetDisplay();     // TODO(3.1): implement
+-
+-    // Resize and position the window to cover the entire virtual screen
+-    // so the avatar is not clipped when dragged to a second monitor.
++    // Crow patch: pick a SINGLE target display instead of spanning the
++    // whole virtual screen. Spanning everything causes some X11
++    // compositors to disable transparency for the full rectangle, and
++    // the avatar ends up in empty space between monitors with
++    // mismatched geometries. Preference order:
++    //   1. display under the cursor (for multi-monitor)
++    //   2. display nearest the Blockly kiosk window, if present
++    //   3. primary display
++    const cursor = screen.getCursorScreenPoint();
++    const target =
++      screen.getDisplayNearestPoint(cursor)
++      || screen.getPrimaryDisplay();
 +    const { x: minX, y: minY, width: combinedWidth, height: combinedHeight } =
 +      target.bounds;
---
-2.40.0
++
+     this.window.setBounds({
+       x: minX,
+       y: minY,
