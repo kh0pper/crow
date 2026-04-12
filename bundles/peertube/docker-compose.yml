@@ -1,0 +1,131 @@
+# PeerTube — federated video platform.
+#
+# Three-container bundle: peertube (app + transcoding) + postgres + redis.
+# peertube on crow-federation; DB + redis isolated to default.
+#
+# Data:
+#   ~/.crow/peertube/postgres/    Postgres data dir
+#   ~/.crow/peertube/redis/       Redis persistence
+#   ~/.crow/peertube/data/        /data: video originals + transcoded
+#                                 variants + HLS playlists + thumbnails
+#                                 (can grow TB with on-disk storage)
+#   ~/.crow/peertube/config/      Generated production.yaml overrides
+#
+# Storage: on-disk by default but STRONGLY recommend S3. Set PEERTUBE_S3_*
+# and scripts/configure-storage.mjs writes the PEERTUBE_OBJECT_STORAGE_*
+# envelope to .env. Without S3 + aggressive pruning, a single active
+# channel can fill a 500 GB disk within months.
+#
+# Image: chocobozzz/peertube:production-bookworm (stable line; pin tag to
+# a specific release for production — we use the floating tag for the
+# roll-out, will pin before merge).
+
+networks:
+  crow-federation:
+    external: true
+  default:
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: crow-peertube-postgres
+    networks:
+      - default
+    environment:
+      POSTGRES_USER: peertube
+      POSTGRES_PASSWORD: ${PEERTUBE_DB_PASSWORD}
+      POSTGRES_DB: peertube_prod
+    volumes:
+      - ${PEERTUBE_DATA_DIR:-~/.crow/peertube}/postgres:/var/lib/postgresql/data
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U peertube -d peertube_prod"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  redis:
+    image: redis:7-alpine
+    container_name: crow-peertube-redis
+    networks:
+      - default
+    volumes:
+      - ${PEERTUBE_DATA_DIR:-~/.crow/peertube}/redis:/data
+    init: true
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  peertube:
+    image: chocobozzz/peertube:production-bookworm
+    container_name: crow-peertube
+    networks:
+      - default
+      - crow-federation
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      PEERTUBE_DB_HOSTNAME: postgres
+      PEERTUBE_DB_USERNAME: peertube
+      PEERTUBE_DB_PASSWORD: ${PEERTUBE_DB_PASSWORD}
+      PEERTUBE_DB_SSL: "false"
+      PEERTUBE_REDIS_HOSTNAME: redis
+      PEERTUBE_WEBSERVER_HOSTNAME: ${PEERTUBE_WEBSERVER_HOSTNAME}
+      PEERTUBE_WEBSERVER_PORT: "443"
+      PEERTUBE_WEBSERVER_HTTPS: "true"
+      PEERTUBE_TRUST_PROXY: '["127.0.0.1","loopback","172.16.0.0/12"]'
+      PEERTUBE_SECRET: ${PEERTUBE_SECRET}
+      PEERTUBE_ADMIN_EMAIL: ${PEERTUBE_ADMIN_EMAIL:-admin@example.com}
+      # Transcoding
+      PEERTUBE_TRANSCODING_ENABLED: "true"
+      PEERTUBE_TRANSCODING_THREADS: ${PEERTUBE_TRANSCODING_THREADS:-0}
+      PEERTUBE_TRANSCODING_CONCURRENCY: ${PEERTUBE_TRANSCODING_CONCURRENCY:-1}
+      # Signup
+      PEERTUBE_SIGNUP_ENABLED: ${PEERTUBE_SIGNUP_ENABLED:-false}
+      PEERTUBE_SIGNUP_LIMIT: "100"
+      PEERTUBE_SIGNUP_MINIMUM_AGE: "16"
+      # Quotas
+      PEERTUBE_USER_VIDEO_QUOTA: "${PEERTUBE_VIDEO_QUOTA_MB:-10000}000000"
+      # Remote cache retention (scheduler reads this)
+      PEERTUBE_VIDEOS_CLEANUP_REMOTE_INTERVAL: "${PEERTUBE_MEDIA_RETENTION_DAYS:-14} days"
+      # S3 passthrough (empty unless configure-storage.mjs populated these)
+      PEERTUBE_OBJECT_STORAGE_ENABLED: ${PEERTUBE_OBJECT_STORAGE_ENABLED:-false}
+      PEERTUBE_OBJECT_STORAGE_ENDPOINT: ${PEERTUBE_OBJECT_STORAGE_ENDPOINT:-}
+      PEERTUBE_OBJECT_STORAGE_REGION: ${PEERTUBE_OBJECT_STORAGE_REGION:-us-east-1}
+      PEERTUBE_OBJECT_STORAGE_ACCESS_KEY_ID: ${PEERTUBE_OBJECT_STORAGE_ACCESS_KEY_ID:-}
+      PEERTUBE_OBJECT_STORAGE_SECRET_ACCESS_KEY: ${PEERTUBE_OBJECT_STORAGE_SECRET_ACCESS_KEY:-}
+      PEERTUBE_OBJECT_STORAGE_VIDEOS_BUCKET_NAME: ${PEERTUBE_OBJECT_STORAGE_VIDEOS_BUCKET_NAME:-}
+      PEERTUBE_OBJECT_STORAGE_STREAMING_PLAYLISTS_BUCKET_NAME: ${PEERTUBE_OBJECT_STORAGE_STREAMING_PLAYLISTS_BUCKET_NAME:-}
+      PEERTUBE_OBJECT_STORAGE_WEB_VIDEOS_BUCKET_NAME: ${PEERTUBE_OBJECT_STORAGE_WEB_VIDEOS_BUCKET_NAME:-}
+      PEERTUBE_OBJECT_STORAGE_ORIGINAL_VIDEO_FILES_BUCKET_NAME: ${PEERTUBE_OBJECT_STORAGE_ORIGINAL_VIDEO_FILES_BUCKET_NAME:-}
+      PEERTUBE_OBJECT_STORAGE_USER_EXPORTS_BUCKET_NAME: ${PEERTUBE_OBJECT_STORAGE_USER_EXPORTS_BUCKET_NAME:-}
+      PEERTUBE_OBJECT_STORAGE_UPLOAD_ACL_PUBLIC: ${PEERTUBE_OBJECT_STORAGE_UPLOAD_ACL_PUBLIC:-public-read}
+      PEERTUBE_OBJECT_STORAGE_UPLOAD_ACL_PRIVATE: ${PEERTUBE_OBJECT_STORAGE_UPLOAD_ACL_PRIVATE:-private}
+      # SMTP (optional)
+      PEERTUBE_SMTP_HOSTNAME: ${PEERTUBE_SMTP_HOSTNAME:-}
+      PEERTUBE_SMTP_PORT: ${PEERTUBE_SMTP_PORT:-587}
+      PEERTUBE_SMTP_USERNAME: ${PEERTUBE_SMTP_USERNAME:-}
+      PEERTUBE_SMTP_PASSWORD: ${PEERTUBE_SMTP_PASSWORD:-}
+      PEERTUBE_SMTP_FROM: ${PEERTUBE_SMTP_FROM:-}
+    volumes:
+      - ${PEERTUBE_DATA_DIR:-~/.crow/peertube}/data:/data
+      - ${PEERTUBE_DATA_DIR:-~/.crow/peertube}/config:/config
+    init: true
+    mem_limit: 6g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9000/api/v1/ping >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
