@@ -1,0 +1,37 @@
+# AdGuard Home — network-wide DNS-based ad/tracker blocking.
+#
+# Pinned to v0.107.73 (current stable at time of authoring).
+#
+# Ports (all 127.0.0.1-bound by default):
+#   3020 → 3000 admin UI (also the initial-setup wizard endpoint)
+#   5335 → 53   DNS (UDP + TCP). Non-standard host port so we don't collide
+#               with systemd-resolved / libnss on port 53. Clients that need
+#               AdGuard's DNS explicitly target 127.0.0.1:5335, or you edit
+#               this file to bind :53:53 on 0.0.0.0 after confirming no
+#               other resolver is listening.
+#   8530 → 853  DNS-over-TLS (for future when the admin configures certs).
+#
+# Volumes bind-mount ~/.crow/adguard-home/ so config and filter lists are
+# user-inspectable and back-upable.
+
+services:
+  adguard:
+    image: adguard/adguardhome:v0.107.73
+    container_name: crow-adguard
+    ports:
+      - "127.0.0.1:3020:3000"
+      - "127.0.0.1:5335:53/tcp"
+      - "127.0.0.1:5335:53/udp"
+      - "127.0.0.1:8530:853/tcp"
+    volumes:
+      - ${ADGUARD_CONFIG_DIR:-~/.crow/adguard-home}/work:/opt/adguardhome/work
+      - ${ADGUARD_CONFIG_DIR:-~/.crow/adguard-home}/conf:/opt/adguardhome/conf
+    init: true
+    mem_limit: 384m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
