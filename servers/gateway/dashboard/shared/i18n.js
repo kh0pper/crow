@@ -412,6 +412,7 @@ const translations = {
   "extensions.categoryFinance": { en: "Finance", es: "Finanzas" },
   "extensions.categoryInfrastructure": { en: "Infrastructure", es: "Infraestructura" },
   "extensions.categoryAutomation": { en: "Automation", es: "Automatizaci\u00f3n" },
+  "extensions.categoryEducation": { en: "Education", es: "Educaci\u00f3n" },
   "extensions.categoryOther": { en: "Other", es: "Otros" },
 
   // ─── Skills Panel ───

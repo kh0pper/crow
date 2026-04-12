@@ -1,0 +1,64 @@
+{
+  "id": "maker-lab",
+  "name": "Maker Lab",
+  "version": "0.1.0",
+  "description": "Scaffolded AI learning companion paired with FOSS maker surfaces (Blockly first). Hint-ladder pedagogy, per-learner memory, age-banded personas, classroom-capable.",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "education",
+  "tags": ["education", "stem", "kids", "classroom", "tutor", "blockly", "maker"],
+  "icon": "graduation-cap",
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "envKeys": ["MAKER_LAB_MODE", "MAKER_LAB_LLM_ENDPOINT", "MAKER_LAB_LLM_MODEL"]
+  },
+  "panel": "panel/maker-lab.js",
+  "skills": ["skills/maker-lab.md"],
+  "requires": {
+    "min_ram_mb": 256,
+    "min_disk_mb": 100,
+    "bundles": ["companion"],
+    "local_llm_endpoint": {
+      "required": true,
+      "protocol": "openai_compatible",
+      "recommended_engine_by_mode": {
+        "solo": "ollama",
+        "family": "ollama",
+        "classroom": "vllm"
+      },
+      "min_model": "llama3.2:3b"
+    }
+  },
+  "env_vars": [
+    {
+      "name": "MAKER_LAB_MODE",
+      "description": "Deployment mode: solo | family | classroom",
+      "default": "family",
+      "required": false,
+      "secret": false
+    },
+    {
+      "name": "MAKER_LAB_LLM_ENDPOINT",
+      "description": "OpenAI-compatible chat-completions base URL (e.g. http://localhost:11434/v1 for Ollama). Leave blank to reuse Crow's default AI Profile.",
+      "default": "",
+      "required": false,
+      "secret": false
+    },
+    {
+      "name": "MAKER_LAB_LLM_MODEL",
+      "description": "Model name to use for maker_hint calls (e.g. llama3.2:3b).",
+      "default": "llama3.2:3b",
+      "required": false,
+      "secret": false
+    },
+    {
+      "name": "MAKER_LAB_KIOSK_BIND",
+      "description": "Kiosk HTTP bind address. In solo mode defaults to 127.0.0.1 (loopback only); opt in to LAN exposure in Settings.",
+      "default": "127.0.0.1",
+      "required": false,
+      "secret": false
+    }
+  ],
+  "notes": "Phase 1 scaffold. Classroom mode recommends the vllm bundle (Phase 4 sibling) for continuous-batching concurrency. See bundles/maker-lab/PHASE-0-REPORT.md for the Ollama vs vLLM benchmark."
+}

@@ -104,7 +104,7 @@ export async function getNestData(db, lang) {
     const [memR, srcR, projR, conR, blogR, pageCntR, pageSzR] = await Promise.all([
       db.execute("SELECT COUNT(*) as c FROM memories"),
       db.execute("SELECT COUNT(*) as c FROM research_sources"),
-      db.execute("SELECT COUNT(*) as c FROM research_projects"),
+      db.execute("SELECT COUNT(*) as c FROM research_projects WHERE (type IS NULL OR type != 'learner_profile')"),
       db.execute("SELECT COUNT(*) as c FROM contacts"),
       db.execute("SELECT COUNT(*) as c FROM blog_posts"),
       db.execute("PRAGMA page_count"),

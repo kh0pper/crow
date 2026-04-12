@@ -85,21 +85,24 @@ async function renderListView(db, query, layout, lang) {
   const statusFilter = query.status || null;
   const searchQuery = query.q || null;
 
-  // Count and fetch projects
-  let countSql = "SELECT COUNT(*) as c FROM research_projects";
+  // Count and fetch projects.
+  // Exclude learner_profile rows — those are maker-lab learner profiles
+  // and belong on the Maker Lab panel, not here.
+  let countSql = "SELECT COUNT(*) as c FROM research_projects WHERE (type IS NULL OR type != 'learner_profile')";
   let fetchSql = `
     SELECT p.*,
       (SELECT COUNT(*) FROM research_sources WHERE project_id = p.id) as source_count,
       (SELECT COUNT(*) FROM research_notes WHERE project_id = p.id) as note_count,
       (SELECT COUNT(*) FROM data_backends WHERE project_id = p.id) as backend_count
     FROM research_projects p
+    WHERE (p.type IS NULL OR p.type != 'learner_profile')
   `;
   const countArgs = [];
   const fetchArgs = [];
 
   if (statusFilter) {
-    countSql += " WHERE status = ?";
-    fetchSql += " WHERE p.status = ?";
+    countSql += " AND status = ?";
+    fetchSql += " AND p.status = ?";
     countArgs.push(statusFilter);
     fetchArgs.push(statusFilter);
   }
@@ -107,9 +110,8 @@ async function renderListView(db, query, layout, lang) {
   if (searchQuery) {
     const safe = sanitizeFtsQuery(searchQuery);
     if (safe) {
-      const whereKeyword = statusFilter ? " AND" : " WHERE";
-      countSql += `${whereKeyword} name LIKE ? ESCAPE '\\'`;
-      fetchSql += `${whereKeyword} p.name LIKE ? ESCAPE '\\'`;
+      countSql += ` AND name LIKE ? ESCAPE '\\'`;
+      fetchSql += ` AND p.name LIKE ? ESCAPE '\\'`;
       const pattern = `%${escapeLikePattern(searchQuery)}%`;
       countArgs.push(pattern);
       fetchArgs.push(pattern);
@@ -229,7 +231,7 @@ async function renderListView(db, query, layout, lang) {
 
 async function renderDetailView(db, projectId, layout, lang) {
   const { rows: projRows } = await db.execute({
-    sql: "SELECT * FROM research_projects WHERE id = ?",
+    sql: "SELECT * FROM research_projects WHERE id = ? AND (type IS NULL OR type != 'learner_profile')",
     args: [projectId],
   });
 

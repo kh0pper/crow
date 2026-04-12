@@ -2,6 +2,31 @@
   "version": 2,
   "add-ons": [
     {
+      "id": "maker-lab",
+      "name": "Maker Lab",
+      "version": "0.1.0",
+      "description": "Scaffolded AI learning companion paired with FOSS maker surfaces (Blockly first). Hint-ladder pedagogy, per-learner memory, age-banded personas, classroom-capable.",
+      "type": "mcp-server",
+      "author": "Crow",
+      "category": "education",
+      "tags": ["education", "stem", "kids", "classroom", "tutor", "blockly", "maker"],
+      "icon": "graduation-cap",
+      "server": {
+        "command": "node",
+        "args": ["server/index.js"],
+        "envKeys": ["MAKER_LAB_MODE", "MAKER_LAB_LLM_ENDPOINT", "MAKER_LAB_LLM_MODEL"]
+      },
+      "panel": "panel/maker-lab.js",
+      "skills": ["skills/maker-lab.md"],
+      "requires": {
+        "min_ram_mb": 256,
+        "min_disk_mb": 100,
+        "bundles": ["companion"]
+      },
+      "env_vars": [],
+      "notes": "Hard deps: companion bundle + any OpenAI-compatible local-LLM endpoint. Recommended engine: ollama (solo/family) or vllm (classroom). See bundles/maker-lab/PHASE-0-REPORT.md."
+    },
+    {
       "id": "obsidian",
       "name": "Obsidian Vault",
       "description": "Connect your Obsidian vault to Crow for reading, searching, and syncing notes",
