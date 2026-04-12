@@ -624,12 +624,43 @@ try {
   app.use(dashboardRouter(authMiddleware));
   console.log("Crow's Nest mounted at /dashboard");
 
-  // Mount external panel routes at app root (preserves /api/* paths)
+  // Mount external panel routes at app root (preserves /api/* paths).
+  //
+  // GOTCHA: bundles mounted here share the app-root namespace. A panel that
+  // does `router.use(middleware)` WITHOUT a path prefix will have that
+  // middleware applied to every request that reaches its router — including
+  // traffic destined for later-mounted panels (Express forwards unmatched
+  // requests through every router in mount order). If that middleware is an
+  // auth check, it 302s ALL unmatched traffic to /dashboard/login, silently
+  // starving every subsequent panel.
+  //
+  // We inspect each panel router for that anti-pattern and either (a) log a
+  // loud warning in dev, or (b) refuse to mount in production. Bundles must
+  // path-scope their auth middleware: `router.use("/api", authMiddleware)`.
   try {
     const { loadExternalPanels, getPanelRoutes } = await import("./dashboard/panel-registry.js");
     await loadExternalPanels();
+    // Express 5 marks a `router.use(mw)` (no path prefix) layer with
+    // `slash: true` — it matches every request path.
     for (const [id, routerFn] of getPanelRoutes()) {
-      app.use(routerFn(dashboardAuth));
+      const instance = routerFn(dashboardAuth);
+      const unscoped = (instance?.stack || []).filter((layer) =>
+        !layer.route && layer.slash === true
+      );
+      // Crow's own dbMiddleware pattern and the first few layers are typically
+      // benign pass-throughs (they call next()). The dangerous ones are
+      // middleware that terminate the response (redirect/send) without
+      // calling next(). We can't know that statically, so we flag count > 0
+      // and let STRICT_PANEL_MOUNT=1 enforce.
+      if (unscoped.length > 0) {
+        const msg = `[panel] ${id}: ${unscoped.length} unpathed router.use(middleware) layer(s). Scope with router.use("/api", ...) or similar — otherwise it can intercept traffic destined for panels mounted AFTER this one.`;
+        if (process.env.STRICT_PANEL_MOUNT === "1") {
+          console.error(msg, "Refusing to mount (STRICT_PANEL_MOUNT=1).");
+          continue;
+        }
+        console.warn(msg);
+      }
+      app.use(instance);
       console.log(`  [panel] ${id} routes mounted`);
     }
   } catch (err) {
