@@ -1,0 +1,24 @@
+{
+  "id": "forgejo",
+  "name": "Forgejo",
+  "version": "1.0.0",
+  "description": "Community-driven soft-fork of Gitea — self-hosted git with an independent governance model and ActivityPub federation roadmap",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "infrastructure",
+  "tags": ["git", "scm", "source-control", "code-hosting", "self-hosted", "federated"],
+  "icon": "git",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["FORGEJO_URL", "FORGEJO_TOKEN"] },
+  "panel": "panel/forgejo.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/forgejo.md"],
+  "requires": { "env": ["FORGEJO_TOKEN"], "min_ram_mb": 512, "min_disk_mb": 500 },
+  "env_vars": [
+    { "name": "FORGEJO_URL", "description": "Forgejo server URL", "default": "http://localhost:3050", "required": true },
+    { "name": "FORGEJO_TOKEN", "description": "Personal access token (Settings > Applications > Generate New Token)", "required": true, "secret": true }
+  ],
+  "ports": [3050, 2224],
+  "webUI": { "port": 3050, "path": "/", "label": "Forgejo" },
+  "notes": "Forgejo is API-compatible with Gitea (v1 REST endpoints). First-run: open http://localhost:3050 to complete the setup wizard, then generate a personal access token under Settings > Applications. Git over SSH uses port 2224: clone with ssh://git@host:2224/user/repo.git. Install this bundle if you prefer Forgejo's community-governed, AGPL-licensed fork; install gitea for the upstream project. Running both on the same host is fine — ports do not collide."
+}

@@ -967,14 +967,23 @@
       "version": "1.0.0",
       "author": "Crow",
       "category": "infrastructure",
-      "tags": ["webrtc", "turn", "nat", "voice", "relay", "infrastructure"],
+      "tags": [
+        "webrtc",
+        "turn",
+        "nat",
+        "voice",
+        "relay",
+        "infrastructure"
+      ],
       "icon": "radio",
       "docker": {
         "composefile": "docker-compose.yml"
       },
       "skills": [],
       "requires": {
-        "env": ["TURN_SECRET"],
+        "env": [
+          "TURN_SECRET"
+        ],
         "min_ram_mb": 64,
         "min_disk_mb": 50
       },
@@ -999,7 +1008,10 @@
           "secret": false
         }
       ],
-      "ports": [3478, 5349],
+      "ports": [
+        3478,
+        5349
+      ],
       "webUI": null,
       "notes": "Optional for Tailscale-only deployments (STUN is sufficient). Required when users connect from restrictive networks. The companion gateway generates time-limited credentials via /api/turn-credentials."
     },
@@ -1011,7 +1023,13 @@
       "type": "bundle",
       "author": "Crow",
       "category": "ai",
-      "tags": ["ai", "gpu", "image-generation", "sdxl", "backgrounds"],
+      "tags": [
+        "ai",
+        "gpu",
+        "image-generation",
+        "sdxl",
+        "backgrounds"
+      ],
       "icon": "image",
       "webUI": null,
       "requires": {
@@ -1028,7 +1046,9 @@
           "secret": false
         }
       ],
-      "ports": [3005],
+      "ports": [
+        3005
+      ],
       "notes": "Requires nvidia-container-toolkit. Models (~25GB) download on first start. Used by companion and storage server's crow_generate_background tool."
     },
     {
@@ -1039,7 +1059,13 @@
       "version": "1.0.0",
       "author": "Crow",
       "category": "infrastructure",
-      "tags": ["notifications", "push", "ntfy", "alerts", "infrastructure"],
+      "tags": [
+        "notifications",
+        "push",
+        "ntfy",
+        "alerts",
+        "infrastructure"
+      ],
       "icon": "bell",
       "requires": {
         "min_ram_mb": 64,
@@ -1065,7 +1091,9 @@
           "secret": true
         }
       ],
-      "ports": [2586],
+      "ports": [
+        2586
+      ],
       "notes": "Install the ntfy app on your phone (Android/iOS) and subscribe to your topic for instant push notifications. Works over Tailscale."
     },
     {
@@ -1106,34 +1134,88 @@
         }
       ],
       "panel": "panel/calls.js",
-      "skills": ["skills/calls.md"],
-      "enhancedBy": ["companion"],
+      "skills": [
+        "skills/calls.md"
+      ],
+      "enhancedBy": [
+        "companion"
+      ],
       "notes": "No Docker container required. Adds gateway WebSocket signaling, static scripts, a Nest panel, and a skill file. Gateway restart required after install."
     },
     {
       "id": "calibre-server",
       "name": "Calibre Server",
-      "description": "OPDS content server for ebooks — search, browse, and download from your Calibre library",
+      "description": "OPDS content server for ebooks \u2014 search, browse, and download from your Calibre library",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "media",
-      "tags": ["ebooks", "calibre", "OPDS", "library", "self-hosted"],
+      "tags": [
+        "ebooks",
+        "calibre",
+        "OPDS",
+        "library",
+        "self-hosted"
+      ],
       "icon": "book",
-      "docker": { "composefile": "docker-compose.yml" },
-      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["CALIBRE_URL", "CALIBRE_USERNAME", "CALIBRE_PASSWORD"] },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "CALIBRE_URL",
+          "CALIBRE_USERNAME",
+          "CALIBRE_PASSWORD"
+        ]
+      },
       "panel": "panel/calibre-server.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/calibre-server.md"],
-      "requires": { "env": ["CALIBRE_LIBRARY_PATH"], "min_ram_mb": 512, "min_disk_mb": 500 },
-      "env_vars": [
-        { "name": "CALIBRE_URL", "description": "Calibre content server URL", "default": "http://localhost:8081", "required": true },
-        { "name": "CALIBRE_LIBRARY_PATH", "description": "Host path to Calibre library directory", "required": true },
-        { "name": "CALIBRE_USERNAME", "description": "HTTP Basic auth username (if auth enabled)", "required": false },
-        { "name": "CALIBRE_PASSWORD", "description": "HTTP Basic auth password", "required": false, "secret": true }
+      "skills": [
+        "skills/calibre-server.md"
       ],
-      "ports": [8081],
-      "webUI": { "port": 8081, "path": "/", "label": "Calibre" },
+      "requires": {
+        "env": [
+          "CALIBRE_LIBRARY_PATH"
+        ],
+        "min_ram_mb": 512,
+        "min_disk_mb": 500
+      },
+      "env_vars": [
+        {
+          "name": "CALIBRE_URL",
+          "description": "Calibre content server URL",
+          "default": "http://localhost:8081",
+          "required": true
+        },
+        {
+          "name": "CALIBRE_LIBRARY_PATH",
+          "description": "Host path to Calibre library directory",
+          "required": true
+        },
+        {
+          "name": "CALIBRE_USERNAME",
+          "description": "HTTP Basic auth username (if auth enabled)",
+          "required": false
+        },
+        {
+          "name": "CALIBRE_PASSWORD",
+          "description": "HTTP Basic auth password",
+          "required": false,
+          "secret": true
+        }
+      ],
+      "ports": [
+        8081
+      ],
+      "webUI": {
+        "port": 8081,
+        "path": "/",
+        "label": "Calibre"
+      },
       "notes": "Exposes Calibre's content server (OPDS + JSON API). Point CALIBRE_LIBRARY_PATH at your existing Calibre library. 6 MCP tools."
     },
     {
@@ -1144,256 +1226,765 @@
       "version": "1.0.0",
       "author": "Crow",
       "category": "media",
-      "tags": ["ebooks", "reader", "calibre", "library", "self-hosted"],
+      "tags": [
+        "ebooks",
+        "reader",
+        "calibre",
+        "library",
+        "self-hosted"
+      ],
       "icon": "book",
-      "docker": { "composefile": "docker-compose.yml" },
-      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["CALIBRE_WEB_URL", "CALIBRE_WEB_API_KEY"] },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "CALIBRE_WEB_URL",
+          "CALIBRE_WEB_API_KEY"
+        ]
+      },
       "panel": "panel/calibre-web.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/calibre-web.md"],
-      "requires": { "env": ["CALIBRE_WEB_DB_PATH"], "min_ram_mb": 256, "min_disk_mb": 500 },
-      "env_vars": [
-        { "name": "CALIBRE_WEB_URL", "description": "Calibre-Web server URL", "default": "http://localhost:8083", "required": true },
-        { "name": "CALIBRE_WEB_API_KEY", "description": "Calibre-Web API key", "required": true, "secret": true },
-        { "name": "CALIBRE_WEB_DB_PATH", "description": "Host path to Calibre metadata.db directory", "required": true }
+      "skills": [
+        "skills/calibre-web.md"
       ],
-      "ports": [8083],
-      "webUI": { "port": 8083, "path": "/", "label": "Calibre-Web" },
+      "requires": {
+        "env": [
+          "CALIBRE_WEB_DB_PATH"
+        ],
+        "min_ram_mb": 256,
+        "min_disk_mb": 500
+      },
+      "env_vars": [
+        {
+          "name": "CALIBRE_WEB_URL",
+          "description": "Calibre-Web server URL",
+          "default": "http://localhost:8083",
+          "required": true
+        },
+        {
+          "name": "CALIBRE_WEB_API_KEY",
+          "description": "Calibre-Web API key",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "CALIBRE_WEB_DB_PATH",
+          "description": "Host path to Calibre metadata.db directory",
+          "required": true
+        }
+      ],
+      "ports": [
+        8083
+      ],
+      "webUI": {
+        "port": 8083,
+        "path": "/",
+        "label": "Calibre-Web"
+      },
       "notes": "Web-based reader with shelves and reading progress. Point CALIBRE_WEB_DB_PATH at your Calibre library containing metadata.db. 7 MCP tools."
     },
     {
       "id": "miniflux",
       "name": "Miniflux",
-      "description": "Minimalist RSS reader — subscribe to feeds, read articles, and track news",
+      "description": "Minimalist RSS reader \u2014 subscribe to feeds, read articles, and track news",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "media",
-      "tags": ["rss", "news", "feeds", "reader", "self-hosted"],
+      "tags": [
+        "rss",
+        "news",
+        "feeds",
+        "reader",
+        "self-hosted"
+      ],
       "icon": "rss",
-      "docker": { "composefile": "docker-compose.yml" },
-      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["MINIFLUX_URL", "MINIFLUX_API_KEY"] },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "MINIFLUX_URL",
+          "MINIFLUX_API_KEY"
+        ]
+      },
       "panel": "panel/miniflux.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/miniflux.md"],
-      "requires": { "env": ["MINIFLUX_API_KEY"], "min_ram_mb": 512, "min_disk_mb": 500 },
-      "env_vars": [
-        { "name": "MINIFLUX_URL", "description": "Miniflux server URL", "default": "http://localhost:8085", "required": true },
-        { "name": "MINIFLUX_API_KEY", "description": "Miniflux API key (Settings > API Keys)", "required": true, "secret": true },
-        { "name": "MINIFLUX_ADMIN_USER", "description": "Admin username (Docker setup)", "default": "admin", "required": false },
-        { "name": "MINIFLUX_ADMIN_PASSWORD", "description": "Admin password (Docker setup)", "required": false, "secret": true },
-        { "name": "MINIFLUX_DB_PASSWORD", "description": "PostgreSQL password (Docker setup)", "required": false, "secret": true }
+      "skills": [
+        "skills/miniflux.md"
       ],
-      "ports": [8085],
-      "webUI": { "port": 8085, "path": "/", "label": "Miniflux" },
+      "requires": {
+        "env": [
+          "MINIFLUX_API_KEY"
+        ],
+        "min_ram_mb": 512,
+        "min_disk_mb": 500
+      },
+      "env_vars": [
+        {
+          "name": "MINIFLUX_URL",
+          "description": "Miniflux server URL",
+          "default": "http://localhost:8085",
+          "required": true
+        },
+        {
+          "name": "MINIFLUX_API_KEY",
+          "description": "Miniflux API key (Settings > API Keys)",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "MINIFLUX_ADMIN_USER",
+          "description": "Admin username (Docker setup)",
+          "default": "admin",
+          "required": false
+        },
+        {
+          "name": "MINIFLUX_ADMIN_PASSWORD",
+          "description": "Admin password (Docker setup)",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "MINIFLUX_DB_PASSWORD",
+          "description": "PostgreSQL password (Docker setup)",
+          "required": false,
+          "secret": true
+        }
+      ],
+      "ports": [
+        8085
+      ],
+      "webUI": {
+        "port": 8085,
+        "path": "/",
+        "label": "Miniflux"
+      },
       "notes": "Docker stack includes PostgreSQL. Port remapped from 8080 to 8085. 7 MCP tools for feed management and article reading."
     },
     {
       "id": "audiobookshelf",
       "name": "Audiobookshelf",
-      "description": "Self-hosted audiobook and podcast server — search, browse, and track listening progress",
+      "description": "Self-hosted audiobook and podcast server \u2014 search, browse, and track listening progress",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "media",
-      "tags": ["audiobooks", "podcasts", "audio", "library", "self-hosted"],
+      "tags": [
+        "audiobooks",
+        "podcasts",
+        "audio",
+        "library",
+        "self-hosted"
+      ],
       "icon": "mic",
-      "docker": { "composefile": "docker-compose.yml" },
-      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["AUDIOBOOKSHELF_URL", "AUDIOBOOKSHELF_API_KEY"] },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "AUDIOBOOKSHELF_URL",
+          "AUDIOBOOKSHELF_API_KEY"
+        ]
+      },
       "panel": "panel/audiobookshelf.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/audiobookshelf.md"],
-      "requires": { "env": ["AUDIOBOOKSHELF_API_KEY"], "min_ram_mb": 512, "min_disk_mb": 2000 },
-      "env_vars": [
-        { "name": "AUDIOBOOKSHELF_URL", "description": "Audiobookshelf server URL", "default": "http://localhost:13378", "required": true },
-        { "name": "AUDIOBOOKSHELF_API_KEY", "description": "Audiobookshelf API key (Settings > Users)", "required": true, "secret": true },
-        { "name": "AUDIOBOOKSHELF_AUDIOBOOK_PATH", "description": "Host path for audiobook files (Docker mode)", "required": false },
-        { "name": "AUDIOBOOKSHELF_PODCAST_PATH", "description": "Host path for podcast files (Docker mode)", "required": false }
+      "skills": [
+        "skills/audiobookshelf.md"
       ],
-      "ports": [13378],
-      "webUI": { "port": 13378, "path": "/", "label": "Audiobookshelf" },
+      "requires": {
+        "env": [
+          "AUDIOBOOKSHELF_API_KEY"
+        ],
+        "min_ram_mb": 512,
+        "min_disk_mb": 2000
+      },
+      "env_vars": [
+        {
+          "name": "AUDIOBOOKSHELF_URL",
+          "description": "Audiobookshelf server URL",
+          "default": "http://localhost:13378",
+          "required": true
+        },
+        {
+          "name": "AUDIOBOOKSHELF_API_KEY",
+          "description": "Audiobookshelf API key (Settings > Users)",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "AUDIOBOOKSHELF_AUDIOBOOK_PATH",
+          "description": "Host path for audiobook files (Docker mode)",
+          "required": false
+        },
+        {
+          "name": "AUDIOBOOKSHELF_PODCAST_PATH",
+          "description": "Host path for podcast files (Docker mode)",
+          "required": false
+        }
+      ],
+      "ports": [
+        13378
+      ],
+      "webUI": {
+        "port": 13378,
+        "path": "/",
+        "label": "Audiobookshelf"
+      },
       "notes": "Self-host via Docker or connect to existing instance. 7 MCP tools for library browsing and listening progress."
     },
     {
       "id": "kavita",
       "name": "Kavita",
-      "description": "Self-hosted manga, comics, and ebook reader — browse series, track reading progress",
+      "description": "Self-hosted manga, comics, and ebook reader \u2014 browse series, track reading progress",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "media",
-      "tags": ["manga", "comics", "ebooks", "reader", "self-hosted"],
+      "tags": [
+        "manga",
+        "comics",
+        "ebooks",
+        "reader",
+        "self-hosted"
+      ],
       "icon": "book",
-      "docker": { "composefile": "docker-compose.yml" },
-      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["KAVITA_URL", "KAVITA_USERNAME", "KAVITA_PASSWORD"] },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "KAVITA_URL",
+          "KAVITA_USERNAME",
+          "KAVITA_PASSWORD"
+        ]
+      },
       "panel": "panel/kavita.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/kavita.md"],
-      "requires": { "env": ["KAVITA_USERNAME", "KAVITA_PASSWORD"], "min_ram_mb": 512, "min_disk_mb": 1000 },
-      "env_vars": [
-        { "name": "KAVITA_URL", "description": "Kavita server URL", "default": "http://localhost:5000", "required": true },
-        { "name": "KAVITA_USERNAME", "description": "Kavita admin username", "required": true },
-        { "name": "KAVITA_PASSWORD", "description": "Kavita admin password", "required": true, "secret": true },
-        { "name": "KAVITA_LIBRARY_PATH", "description": "Host path for manga/comic/ebook files (Docker mode)", "required": false }
+      "skills": [
+        "skills/kavita.md"
       ],
-      "ports": [5000],
-      "webUI": { "port": 5000, "path": "/", "label": "Kavita" },
+      "requires": {
+        "env": [
+          "KAVITA_USERNAME",
+          "KAVITA_PASSWORD"
+        ],
+        "min_ram_mb": 512,
+        "min_disk_mb": 1000
+      },
+      "env_vars": [
+        {
+          "name": "KAVITA_URL",
+          "description": "Kavita server URL",
+          "default": "http://localhost:5000",
+          "required": true
+        },
+        {
+          "name": "KAVITA_USERNAME",
+          "description": "Kavita admin username",
+          "required": true
+        },
+        {
+          "name": "KAVITA_PASSWORD",
+          "description": "Kavita admin password",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "KAVITA_LIBRARY_PATH",
+          "description": "Host path for manga/comic/ebook files (Docker mode)",
+          "required": false
+        }
+      ],
+      "ports": [
+        5000
+      ],
+      "webUI": {
+        "port": 5000,
+        "path": "/",
+        "label": "Kavita"
+      },
       "notes": "Port 5000 is commonly used. JWT auth with auto-login. 7 MCP tools for library browsing and reading progress."
     },
     {
       "id": "navidrome",
       "name": "Navidrome",
-      "description": "Lightweight music streaming server — browse albums, artists, playlists, and stream music",
+      "description": "Lightweight music streaming server \u2014 browse albums, artists, playlists, and stream music",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "media",
-      "tags": ["music", "streaming", "subsonic", "audio", "self-hosted"],
+      "tags": [
+        "music",
+        "streaming",
+        "subsonic",
+        "audio",
+        "self-hosted"
+      ],
       "icon": "music",
-      "docker": { "composefile": "docker-compose.yml" },
-      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["NAVIDROME_URL", "NAVIDROME_USERNAME", "NAVIDROME_PASSWORD"] },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "NAVIDROME_URL",
+          "NAVIDROME_USERNAME",
+          "NAVIDROME_PASSWORD"
+        ]
+      },
       "panel": "panel/navidrome.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/navidrome.md"],
-      "requires": { "env": ["NAVIDROME_USERNAME", "NAVIDROME_PASSWORD"], "min_ram_mb": 256, "min_disk_mb": 500 },
-      "env_vars": [
-        { "name": "NAVIDROME_URL", "description": "Navidrome server URL", "default": "http://localhost:4533", "required": true },
-        { "name": "NAVIDROME_USERNAME", "description": "Navidrome username", "required": true },
-        { "name": "NAVIDROME_PASSWORD", "description": "Navidrome password", "required": true, "secret": true },
-        { "name": "NAVIDROME_MUSIC_PATH", "description": "Host path for music files (Docker mode)", "required": false }
+      "skills": [
+        "skills/navidrome.md"
       ],
-      "ports": [4533],
-      "webUI": { "port": 4533, "path": "/", "label": "Navidrome" },
+      "requires": {
+        "env": [
+          "NAVIDROME_USERNAME",
+          "NAVIDROME_PASSWORD"
+        ],
+        "min_ram_mb": 256,
+        "min_disk_mb": 500
+      },
+      "env_vars": [
+        {
+          "name": "NAVIDROME_URL",
+          "description": "Navidrome server URL",
+          "default": "http://localhost:4533",
+          "required": true
+        },
+        {
+          "name": "NAVIDROME_USERNAME",
+          "description": "Navidrome username",
+          "required": true
+        },
+        {
+          "name": "NAVIDROME_PASSWORD",
+          "description": "Navidrome password",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "NAVIDROME_MUSIC_PATH",
+          "description": "Host path for music files (Docker mode)",
+          "required": false
+        }
+      ],
+      "ports": [
+        4533
+      ],
+      "webUI": {
+        "port": 4533,
+        "path": "/",
+        "label": "Navidrome"
+      },
       "notes": "Uses Subsonic API for compatibility. Mount your music directory via NAVIDROME_MUSIC_PATH. 7 MCP tools."
     },
     {
       "id": "paperless",
       "name": "Paperless-ngx",
-      "description": "Document management with OCR — scan, search, tag, and organize paper documents digitally",
+      "description": "Document management with OCR \u2014 scan, search, tag, and organize paper documents digitally",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "productivity",
-      "tags": ["documents", "OCR", "scanner", "archive", "self-hosted"],
+      "tags": [
+        "documents",
+        "OCR",
+        "scanner",
+        "archive",
+        "self-hosted"
+      ],
       "icon": "document",
-      "docker": { "composefile": "docker-compose.yml" },
-      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["PAPERLESS_URL", "PAPERLESS_API_TOKEN"] },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "PAPERLESS_URL",
+          "PAPERLESS_API_TOKEN"
+        ]
+      },
       "panel": "panel/paperless.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/paperless.md"],
-      "requires": { "env": ["PAPERLESS_API_TOKEN"], "min_ram_mb": 1024, "min_disk_mb": 2000 },
-      "env_vars": [
-        { "name": "PAPERLESS_URL", "description": "Paperless-ngx server URL", "default": "http://localhost:8000", "required": true },
-        { "name": "PAPERLESS_API_TOKEN", "description": "API token (Administration > Users > Edit > Auth Tokens)", "required": true, "secret": true },
-        { "name": "PAPERLESS_DATA_PATH", "description": "Host path for data directory (Docker mode)", "required": false },
-        { "name": "PAPERLESS_MEDIA_PATH", "description": "Host path for media/documents (Docker mode)", "required": false },
-        { "name": "PAPERLESS_DB_PASSWORD", "description": "PostgreSQL password (Docker setup)", "required": false, "secret": true }
+      "skills": [
+        "skills/paperless.md"
       ],
-      "ports": [8000],
-      "webUI": { "port": 8000, "path": "/", "label": "Paperless-ngx" },
+      "requires": {
+        "env": [
+          "PAPERLESS_API_TOKEN"
+        ],
+        "min_ram_mb": 1024,
+        "min_disk_mb": 2000
+      },
+      "env_vars": [
+        {
+          "name": "PAPERLESS_URL",
+          "description": "Paperless-ngx server URL",
+          "default": "http://localhost:8000",
+          "required": true
+        },
+        {
+          "name": "PAPERLESS_API_TOKEN",
+          "description": "API token (Administration > Users > Edit > Auth Tokens)",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "PAPERLESS_DATA_PATH",
+          "description": "Host path for data directory (Docker mode)",
+          "required": false
+        },
+        {
+          "name": "PAPERLESS_MEDIA_PATH",
+          "description": "Host path for media/documents (Docker mode)",
+          "required": false
+        },
+        {
+          "name": "PAPERLESS_DB_PASSWORD",
+          "description": "PostgreSQL password (Docker setup)",
+          "required": false,
+          "secret": true
+        }
+      ],
+      "ports": [
+        8000
+      ],
+      "webUI": {
+        "port": 8000,
+        "path": "/",
+        "label": "Paperless-ngx"
+      },
       "notes": "Docker stack includes PostgreSQL + Redis. Full-text OCR search. 8 MCP tools for document management."
     },
     {
       "id": "wallabag",
       "name": "Wallabag",
-      "description": "Self-hosted read-it-later — save articles, read offline, and organize with tags",
+      "description": "Self-hosted read-it-later \u2014 save articles, read offline, and organize with tags",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "productivity",
-      "tags": ["read-later", "articles", "bookmarks", "pocket", "self-hosted"],
+      "tags": [
+        "read-later",
+        "articles",
+        "bookmarks",
+        "pocket",
+        "self-hosted"
+      ],
       "icon": "archive",
-      "docker": { "composefile": "docker-compose.yml" },
-      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["WALLABAG_URL", "WALLABAG_CLIENT_ID", "WALLABAG_CLIENT_SECRET", "WALLABAG_USERNAME", "WALLABAG_PASSWORD"] },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "WALLABAG_URL",
+          "WALLABAG_CLIENT_ID",
+          "WALLABAG_CLIENT_SECRET",
+          "WALLABAG_USERNAME",
+          "WALLABAG_PASSWORD"
+        ]
+      },
       "panel": "panel/wallabag.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/wallabag.md"],
-      "requires": { "env": ["WALLABAG_CLIENT_ID", "WALLABAG_CLIENT_SECRET", "WALLABAG_USERNAME", "WALLABAG_PASSWORD"], "min_ram_mb": 512, "min_disk_mb": 500 },
-      "env_vars": [
-        { "name": "WALLABAG_URL", "description": "Wallabag server URL", "default": "http://localhost:8084", "required": true },
-        { "name": "WALLABAG_CLIENT_ID", "description": "OAuth2 client ID (API Clients Management in Wallabag)", "required": true },
-        { "name": "WALLABAG_CLIENT_SECRET", "description": "OAuth2 client secret", "required": true, "secret": true },
-        { "name": "WALLABAG_USERNAME", "description": "Wallabag username", "required": true },
-        { "name": "WALLABAG_PASSWORD", "description": "Wallabag password", "required": true, "secret": true },
-        { "name": "WALLABAG_DB_PASSWORD", "description": "MariaDB password (Docker setup)", "required": false, "secret": true }
+      "skills": [
+        "skills/wallabag.md"
       ],
-      "ports": [8084],
-      "webUI": { "port": 8084, "path": "/", "label": "Wallabag" },
+      "requires": {
+        "env": [
+          "WALLABAG_CLIENT_ID",
+          "WALLABAG_CLIENT_SECRET",
+          "WALLABAG_USERNAME",
+          "WALLABAG_PASSWORD"
+        ],
+        "min_ram_mb": 512,
+        "min_disk_mb": 500
+      },
+      "env_vars": [
+        {
+          "name": "WALLABAG_URL",
+          "description": "Wallabag server URL",
+          "default": "http://localhost:8084",
+          "required": true
+        },
+        {
+          "name": "WALLABAG_CLIENT_ID",
+          "description": "OAuth2 client ID (API Clients Management in Wallabag)",
+          "required": true
+        },
+        {
+          "name": "WALLABAG_CLIENT_SECRET",
+          "description": "OAuth2 client secret",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "WALLABAG_USERNAME",
+          "description": "Wallabag username",
+          "required": true
+        },
+        {
+          "name": "WALLABAG_PASSWORD",
+          "description": "Wallabag password",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "WALLABAG_DB_PASSWORD",
+          "description": "MariaDB password (Docker setup)",
+          "required": false,
+          "secret": true
+        }
+      ],
+      "ports": [
+        8084
+      ],
+      "webUI": {
+        "port": 8084,
+        "path": "/",
+        "label": "Wallabag"
+      },
       "notes": "Docker stack includes MariaDB + Redis. OAuth2 auth requires creating an API client in Wallabag settings first. Port remapped from 80 to 8084. 6 MCP tools."
     },
     {
       "id": "linkding",
       "name": "Linkding",
-      "description": "Lightweight bookmark manager — save, tag, search, and organize web links",
+      "description": "Lightweight bookmark manager \u2014 save, tag, search, and organize web links",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "productivity",
-      "tags": ["bookmarks", "links", "tags", "self-hosted"],
+      "tags": [
+        "bookmarks",
+        "links",
+        "tags",
+        "self-hosted"
+      ],
       "icon": "bookmark",
-      "docker": { "composefile": "docker-compose.yml" },
-      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["LINKDING_URL", "LINKDING_API_TOKEN"] },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "LINKDING_URL",
+          "LINKDING_API_TOKEN"
+        ]
+      },
       "panel": "panel/linkding.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/linkding.md"],
-      "requires": { "env": ["LINKDING_API_TOKEN"], "min_ram_mb": 128, "min_disk_mb": 100 },
-      "env_vars": [
-        { "name": "LINKDING_URL", "description": "Linkding server URL", "default": "http://localhost:9090", "required": true },
-        { "name": "LINKDING_API_TOKEN", "description": "API token (Settings > Integrations)", "required": true, "secret": true }
+      "skills": [
+        "skills/linkding.md"
       ],
-      "ports": [9090],
-      "webUI": { "port": 9090, "path": "/", "label": "Linkding" },
+      "requires": {
+        "env": [
+          "LINKDING_API_TOKEN"
+        ],
+        "min_ram_mb": 128,
+        "min_disk_mb": 100
+      },
+      "env_vars": [
+        {
+          "name": "LINKDING_URL",
+          "description": "Linkding server URL",
+          "default": "http://localhost:9090",
+          "required": true
+        },
+        {
+          "name": "LINKDING_API_TOKEN",
+          "description": "API token (Settings > Integrations)",
+          "required": true,
+          "secret": true
+        }
+      ],
+      "ports": [
+        9090
+      ],
+      "webUI": {
+        "port": 9090,
+        "path": "/",
+        "label": "Linkding"
+      },
       "notes": "Lightweight single-container bookmark manager. 6 MCP tools."
     },
     {
       "id": "shiori",
       "name": "Shiori",
-      "description": "Simple bookmark manager — save web pages with cached content for offline reading",
+      "description": "Simple bookmark manager \u2014 save web pages with cached content for offline reading",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "productivity",
-      "tags": ["bookmarks", "web-clipper", "archive", "self-hosted"],
+      "tags": [
+        "bookmarks",
+        "web-clipper",
+        "archive",
+        "self-hosted"
+      ],
       "icon": "bookmark",
-      "docker": { "composefile": "docker-compose.yml" },
-      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["SHIORI_URL", "SHIORI_USERNAME", "SHIORI_PASSWORD"] },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "SHIORI_URL",
+          "SHIORI_USERNAME",
+          "SHIORI_PASSWORD"
+        ]
+      },
       "panel": "panel/shiori.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/shiori.md"],
-      "requires": { "env": ["SHIORI_USERNAME", "SHIORI_PASSWORD"], "min_ram_mb": 128, "min_disk_mb": 200 },
-      "env_vars": [
-        { "name": "SHIORI_URL", "description": "Shiori server URL", "default": "http://localhost:8086", "required": true },
-        { "name": "SHIORI_USERNAME", "description": "Shiori username", "default": "shiori", "required": true },
-        { "name": "SHIORI_PASSWORD", "description": "Shiori password", "required": true, "secret": true }
+      "skills": [
+        "skills/shiori.md"
       ],
-      "ports": [8086],
-      "webUI": { "port": 8086, "path": "/", "label": "Shiori" },
+      "requires": {
+        "env": [
+          "SHIORI_USERNAME",
+          "SHIORI_PASSWORD"
+        ],
+        "min_ram_mb": 128,
+        "min_disk_mb": 200
+      },
+      "env_vars": [
+        {
+          "name": "SHIORI_URL",
+          "description": "Shiori server URL",
+          "default": "http://localhost:8086",
+          "required": true
+        },
+        {
+          "name": "SHIORI_USERNAME",
+          "description": "Shiori username",
+          "default": "shiori",
+          "required": true
+        },
+        {
+          "name": "SHIORI_PASSWORD",
+          "description": "Shiori password",
+          "required": true,
+          "secret": true
+        }
+      ],
+      "ports": [
+        8086
+      ],
+      "webUI": {
+        "port": 8086,
+        "path": "/",
+        "label": "Shiori"
+      },
       "notes": "Caches full page content for offline reading. Port remapped from 8080 to 8086. Session-based auth. 6 MCP tools."
     },
     {
       "id": "bookstack",
       "name": "BookStack",
-      "description": "Self-hosted wiki platform — organize knowledge in shelves, books, chapters, and pages",
+      "description": "Self-hosted wiki platform \u2014 organize knowledge in shelves, books, chapters, and pages",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "productivity",
-      "tags": ["wiki", "documentation", "knowledge-base", "self-hosted"],
+      "tags": [
+        "wiki",
+        "documentation",
+        "knowledge-base",
+        "self-hosted"
+      ],
       "icon": "book",
-      "docker": { "composefile": "docker-compose.yml" },
-      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["BOOKSTACK_URL", "BOOKSTACK_TOKEN_ID", "BOOKSTACK_TOKEN_SECRET"] },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "BOOKSTACK_URL",
+          "BOOKSTACK_TOKEN_ID",
+          "BOOKSTACK_TOKEN_SECRET"
+        ]
+      },
       "panel": "panel/bookstack.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/bookstack.md"],
-      "requires": { "env": ["BOOKSTACK_TOKEN_ID", "BOOKSTACK_TOKEN_SECRET"], "min_ram_mb": 512, "min_disk_mb": 500 },
-      "env_vars": [
-        { "name": "BOOKSTACK_URL", "description": "BookStack server URL", "default": "http://localhost:6875", "required": true },
-        { "name": "BOOKSTACK_TOKEN_ID", "description": "API token ID (Settings > API Tokens)", "required": true },
-        { "name": "BOOKSTACK_TOKEN_SECRET", "description": "API token secret", "required": true, "secret": true },
-        { "name": "BOOKSTACK_DB_PASSWORD", "description": "MariaDB password (Docker setup)", "required": false, "secret": true }
+      "skills": [
+        "skills/bookstack.md"
       ],
-      "ports": [6875],
-      "webUI": { "port": 6875, "path": "/", "label": "BookStack" },
+      "requires": {
+        "env": [
+          "BOOKSTACK_TOKEN_ID",
+          "BOOKSTACK_TOKEN_SECRET"
+        ],
+        "min_ram_mb": 512,
+        "min_disk_mb": 500
+      },
+      "env_vars": [
+        {
+          "name": "BOOKSTACK_URL",
+          "description": "BookStack server URL",
+          "default": "http://localhost:6875",
+          "required": true
+        },
+        {
+          "name": "BOOKSTACK_TOKEN_ID",
+          "description": "API token ID (Settings > API Tokens)",
+          "required": true
+        },
+        {
+          "name": "BOOKSTACK_TOKEN_SECRET",
+          "description": "API token secret",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "BOOKSTACK_DB_PASSWORD",
+          "description": "MariaDB password (Docker setup)",
+          "required": false,
+          "secret": true
+        }
+      ],
+      "ports": [
+        6875
+      ],
+      "webUI": {
+        "port": 6875,
+        "path": "/",
+        "label": "BookStack"
+      },
       "notes": "Docker stack includes MariaDB. Port remapped from 80 to 6875. Composite token auth (ID:SECRET). 8 MCP tools."
     },
     {
@@ -1404,27 +1995,605 @@
       "version": "1.0.0",
       "author": "Crow",
       "category": "infrastructure",
-      "tags": ["reverse-proxy", "https", "acme", "letsencrypt", "tls"],
+      "tags": [
+        "reverse-proxy",
+        "https",
+        "acme",
+        "letsencrypt",
+        "tls"
+      ],
       "icon": "shield",
-      "docker": { "composefile": "docker-compose.yml" },
-      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["CADDY_ADMIN_URL", "CADDY_CONFIG_DIR"] },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "CADDY_ADMIN_URL",
+          "CADDY_CONFIG_DIR"
+        ]
+      },
       "panel": "panel/caddy.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/caddy.md"],
+      "skills": [
+        "skills/caddy.md"
+      ],
       "consent_required": true,
       "install_consent_messages": {
         "en": "Caddy binds ports 80 and 443 on all interfaces (0.0.0.0) so it can answer HTTP/HTTPS requests from the public internet and complete Let's Encrypt ACME challenges. Make sure ports 80 and 443 are open on your firewall/router and that no other service on this host is already listening on them. Caddy will automatically request and renew TLS certificates for any domain you configure; the domain's A/AAAA record must point to this host first.",
-        "es": "Caddy se vincula a los puertos 80 y 443 en todas las interfaces (0.0.0.0) para responder a peticiones HTTP/HTTPS desde internet y completar los desafíos ACME de Let's Encrypt. Asegúrate de que los puertos 80 y 443 estén abiertos en tu firewall/router y que ningún otro servicio de este host los esté usando. Caddy solicitará y renovará certificados TLS automáticamente para cada dominio que configures; el registro A/AAAA del dominio debe apuntar primero a este host."
+        "es": "Caddy se vincula a los puertos 80 y 443 en todas las interfaces (0.0.0.0) para responder a peticiones HTTP/HTTPS desde internet y completar los desaf\u00edos ACME de Let's Encrypt. Aseg\u00farate de que los puertos 80 y 443 est\u00e9n abiertos en tu firewall/router y que ning\u00fan otro servicio de este host los est\u00e9 usando. Caddy solicitar\u00e1 y renovar\u00e1 certificados TLS autom\u00e1ticamente para cada dominio que configures; el registro A/AAAA del dominio debe apuntar primero a este host."
       },
-      "requires": { "env": ["CADDY_EMAIL"], "min_ram_mb": 128, "min_disk_mb": 200 },
+      "requires": {
+        "env": [
+          "CADDY_EMAIL"
+        ],
+        "min_ram_mb": 128,
+        "min_disk_mb": 200
+      },
       "env_vars": [
-        { "name": "CADDY_EMAIL", "description": "Email for Let's Encrypt ACME account registration", "required": true },
-        { "name": "CADDY_ADMIN_URL", "description": "Caddy admin API URL", "default": "http://127.0.0.1:2019", "required": false },
-        { "name": "CADDY_CONFIG_DIR", "description": "Directory containing Caddyfile (mounted into container)", "default": "~/.crow/caddy", "required": false }
+        {
+          "name": "CADDY_EMAIL",
+          "description": "Email for Let's Encrypt ACME account registration",
+          "required": true
+        },
+        {
+          "name": "CADDY_ADMIN_URL",
+          "description": "Caddy admin API URL",
+          "default": "http://127.0.0.1:2019",
+          "required": false
+        },
+        {
+          "name": "CADDY_CONFIG_DIR",
+          "description": "Directory containing Caddyfile (mounted into container)",
+          "default": "~/.crow/caddy",
+          "required": false
+        }
       ],
-      "ports": [80, 443, 2019],
+      "ports": [
+        80,
+        443,
+        2019
+      ],
       "webUI": null,
       "notes": "Binds 80/443 on 0.0.0.0 (required for ACME). Admin API bound to 127.0.0.1:2019. Caddyfile at ~/.crow/caddy/Caddyfile. 5 MCP tools: status, reload, list_sites, add_site, remove_site."
+    },
+    {
+      "id": "adguard-home",
+      "name": "AdGuard Home",
+      "description": "Network-wide ads and tracker blocking DNS server. Filters queries with user-configurable blocklists and serves the admin UI in the browser.",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "networking",
+      "tags": [
+        "dns",
+        "adblock",
+        "privacy",
+        "network",
+        "security"
+      ],
+      "icon": "shield",
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "ADGUARD_URL",
+          "ADGUARD_USERNAME",
+          "ADGUARD_PASSWORD"
+        ]
+      },
+      "panel": "panel/adguard-home.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": [
+        "skills/adguard-home.md"
+      ],
+      "requires": {
+        "env": [
+          "ADGUARD_USERNAME",
+          "ADGUARD_PASSWORD"
+        ],
+        "min_ram_mb": 256,
+        "min_disk_mb": 200
+      },
+      "env_vars": [
+        {
+          "name": "ADGUARD_URL",
+          "description": "AdGuard Home admin URL",
+          "default": "http://localhost:3020",
+          "required": false
+        },
+        {
+          "name": "ADGUARD_USERNAME",
+          "description": "Admin username (set during setup wizard)",
+          "required": true
+        },
+        {
+          "name": "ADGUARD_PASSWORD",
+          "description": "Admin password (set during setup wizard)",
+          "required": true,
+          "secret": true
+        }
+      ],
+      "ports": [
+        3020,
+        5335,
+        8530
+      ],
+      "webUI": {
+        "port": 3020,
+        "path": "/",
+        "label": "AdGuard Home"
+      },
+      "notes": "First-boot: run setup wizard at localhost:3020, create admin credentials, copy to .env. DNS bound to 127.0.0.1:5335 to avoid systemd-resolved collision. 4 MCP tools: status, stats, query_log, toggle_protection."
+    },
+    {
+      "id": "forgejo",
+      "name": "Forgejo",
+      "description": "Community-driven soft-fork of Gitea \u2014 self-hosted git with an AGPL license and ActivityPub federation roadmap",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "infrastructure",
+      "tags": [
+        "git",
+        "scm",
+        "source-control",
+        "code-hosting",
+        "self-hosted",
+        "federated"
+      ],
+      "icon": "git",
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "FORGEJO_URL",
+          "FORGEJO_TOKEN"
+        ]
+      },
+      "panel": "panel/forgejo.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": [
+        "skills/forgejo.md"
+      ],
+      "requires": {
+        "env": [
+          "FORGEJO_TOKEN"
+        ],
+        "min_ram_mb": 512,
+        "min_disk_mb": 500
+      },
+      "env_vars": [
+        {
+          "name": "FORGEJO_URL",
+          "description": "Forgejo server URL",
+          "default": "http://localhost:3050",
+          "required": true
+        },
+        {
+          "name": "FORGEJO_TOKEN",
+          "description": "Personal access token (Settings > Applications)",
+          "required": true,
+          "secret": true
+        }
+      ],
+      "ports": [
+        3050,
+        2224
+      ],
+      "webUI": {
+        "port": 3050,
+        "path": "/",
+        "label": "Forgejo"
+      },
+      "notes": "API-compatible with Gitea's v1 REST endpoints. SSH on port 2224 via Forgejo's built-in Go SSH server. Use ssh://git@host:2224/user/repo (not scp-style git@host:user/repo which hits port 22). Install alongside Gitea \u2014 ports do not collide."
+    },
+    {
+      "id": "gitea",
+      "name": "Gitea",
+      "description": "Self-hosted git service \u2014 repos, issues, pull requests, and built-in SSH server for git over SSH",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "infrastructure",
+      "tags": [
+        "git",
+        "scm",
+        "source-control",
+        "code-hosting",
+        "self-hosted"
+      ],
+      "icon": "git",
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "GITEA_URL",
+          "GITEA_TOKEN"
+        ]
+      },
+      "panel": "panel/gitea.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": [
+        "skills/gitea.md"
+      ],
+      "requires": {
+        "env": [
+          "GITEA_TOKEN"
+        ],
+        "min_ram_mb": 512,
+        "min_disk_mb": 500
+      },
+      "env_vars": [
+        {
+          "name": "GITEA_URL",
+          "description": "Gitea server URL",
+          "default": "http://localhost:3040",
+          "required": true
+        },
+        {
+          "name": "GITEA_TOKEN",
+          "description": "Personal access token (Settings > Applications)",
+          "required": true,
+          "secret": true
+        }
+      ],
+      "ports": [
+        3040,
+        2223
+      ],
+      "webUI": {
+        "port": 3040,
+        "path": "/",
+        "label": "Gitea"
+      },
+      "notes": "Uses built-in SQLite. First-run setup wizard at http://localhost:3040. SSH on port 2223 via Gitea's built-in Go SSH server (no host sshd needed). Clone with ssh://git@host:2223/user/repo (scp-style git@host:user/repo silently hits port 22 and will not reach this bundle)."
+    },
+    {
+      "id": "vaultwarden",
+      "name": "Vaultwarden",
+      "description": "Bitwarden-compatible password manager \u2014 self-hosted vault used with the official Bitwarden browser and mobile apps",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "infrastructure",
+      "tags": [
+        "passwords",
+        "vault",
+        "bitwarden",
+        "secrets",
+        "security",
+        "self-hosted"
+      ],
+      "icon": "lock",
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "VAULTWARDEN_URL",
+          "VAULTWARDEN_ADMIN_TOKEN"
+        ]
+      },
+      "panel": "panel/vaultwarden.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": [
+        "skills/vaultwarden.md"
+      ],
+      "consent_required": true,
+      "install_consent_messages": {
+        "en": "Vaultwarden stores the passwords and secrets for your entire digital life. Before you install: (1) back up ~/.crow/vaultwarden/data on a recurring schedule \u2014 losing it means losing everything; (2) the admin token sits in .env in plaintext; (3) open signups are ON by default \u2014 create your account immediately after first start and flip VAULTWARDEN_SIGNUPS_ALLOWED=false. The Crow MCP tools intentionally do NOT expose vault contents \u2014 use the official Bitwarden browser extension or mobile app.",
+        "es": "Vaultwarden guardar\u00e1 las contrase\u00f1as de toda tu vida digital. Antes de instalar: (1) haz copias de seguridad peri\u00f3dicas de ~/.crow/vaultwarden/data \u2014 perderlo significa perderlo todo; (2) el token de administrador queda en .env en texto plano; (3) los registros abiertos est\u00e1n activados por defecto \u2014 crea tu cuenta inmediatamente y pon VAULTWARDEN_SIGNUPS_ALLOWED=false. Las herramientas MCP de Crow NO exponen el contenido del vault \u2014 usa la extensi\u00f3n oficial de Bitwarden."
+      },
+      "requires": {
+        "env": [
+          "VAULTWARDEN_ADMIN_TOKEN"
+        ],
+        "min_ram_mb": 256,
+        "min_disk_mb": 200
+      },
+      "env_vars": [
+        {
+          "name": "VAULTWARDEN_URL",
+          "description": "Vaultwarden server URL",
+          "default": "http://localhost:8097",
+          "required": true
+        },
+        {
+          "name": "VAULTWARDEN_ADMIN_TOKEN",
+          "description": "Secret that unlocks /admin. Generate with: openssl rand -base64 48",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "VAULTWARDEN_DOMAIN",
+          "description": "Public URL (set to https://... behind Caddy)",
+          "default": "http://localhost:8097",
+          "required": false
+        },
+        {
+          "name": "VAULTWARDEN_SIGNUPS_ALLOWED",
+          "description": "Allow open signups. Start true, create your account, then flip to false.",
+          "default": "true",
+          "required": false
+        }
+      ],
+      "ports": [
+        8097
+      ],
+      "webUI": {
+        "port": 8097,
+        "path": "/",
+        "label": "Vaultwarden"
+      },
+      "notes": "3 MCP tools (status, user_count, backup_info). Deliberately does NOT expose vault contents \u2014 use the Bitwarden browser extension or mobile app for credential access. Back up ~/.crow/vaultwarden/data regularly."
+    },
+    {
+      "id": "searxng",
+      "name": "SearXNG",
+      "description": "Privacy-respecting metasearch engine aggregating 70+ sources without tracking",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": [
+        "search",
+        "metasearch",
+        "privacy",
+        "self-hosted"
+      ],
+      "icon": "search",
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "SEARXNG_BASE_URL"
+        ]
+      },
+      "panel": "panel/searxng.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": [
+        "skills/searxng.md"
+      ],
+      "requires": {
+        "min_ram_mb": 256,
+        "min_disk_mb": 150
+      },
+      "env_vars": [
+        {
+          "name": "SEARXNG_BASE_URL",
+          "description": "Public URL SearXNG advertises in links",
+          "default": "http://localhost:8098/",
+          "required": false
+        },
+        {
+          "name": "SEARXNG_SECRET_KEY",
+          "description": "Secret key for SearXNG. Auto-generated on first boot if left empty.",
+          "required": false,
+          "secret": true
+        }
+      ],
+      "ports": [
+        8098
+      ],
+      "webUI": {
+        "port": 8098,
+        "path": "/",
+        "label": "SearXNG"
+      },
+      "notes": "Config in ~/.crow/searxng/settings.yml. JSON API enabled. First-boot entrypoint seeds a default config and random secret if not provided. 3 MCP tools: search, list_engines, status."
+    },
+    {
+      "id": "netdata",
+      "name": "Netdata",
+      "description": "Real-time infrastructure and container monitoring \u2014 CPU, memory, disk, network, and Docker container metrics with one-second granularity.",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "infrastructure",
+      "tags": [
+        "monitoring",
+        "metrics",
+        "observability",
+        "docker",
+        "system"
+      ],
+      "icon": "activity",
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "NETDATA_URL"
+        ]
+      },
+      "panel": "panel/netdata.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": [
+        "skills/netdata.md"
+      ],
+      "consent_required": true,
+      "install_consent_messages": {
+        "en": "Netdata requires read-only access to the Docker socket so it can monitor every container on this host. Anything with Docker socket access can see container names, images, env vars, and resource usage. Crow enforces read-only (no writes, no container control). Netdata also mounts /proc and /sys read-only for system metrics.",
+        "es": "Netdata necesita acceso de solo lectura al socket de Docker para monitorizar cada contenedor en este host. Cualquier software con acceso al socket de Docker puede ver nombres de contenedores, im\u00e1genes, variables de entorno y uso de recursos. Crow impone solo lectura. Netdata tambi\u00e9n monta /proc y /sys como solo lectura para m\u00e9tricas del sistema."
+      },
+      "requires": {
+        "env": [],
+        "min_ram_mb": 512,
+        "min_disk_mb": 500
+      },
+      "env_vars": [
+        {
+          "name": "NETDATA_URL",
+          "description": "Netdata agent URL",
+          "default": "http://localhost:19999",
+          "required": false
+        }
+      ],
+      "ports": [
+        19999
+      ],
+      "webUI": {
+        "port": 19999,
+        "path": "/",
+        "label": "Netdata"
+      },
+      "notes": "MVP scope: no SYS_PTRACE / pid:host (per-process stats unavailable). Docker socket read-only. Per-container metrics + system metrics work. 4 MCP tools: status, charts, query, alarms."
+    },
+    {
+      "id": "dozzle",
+      "name": "Dozzle",
+      "description": "Real-time Docker container log viewer in the browser. Tail, search, and filter logs across every container on this host.",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "infrastructure",
+      "tags": [
+        "logs",
+        "docker",
+        "debugging",
+        "observability"
+      ],
+      "icon": "file-text",
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "DOZZLE_URL"
+        ]
+      },
+      "panel": "panel/dozzle.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": [
+        "skills/dozzle.md"
+      ],
+      "consent_required": true,
+      "install_consent_messages": {
+        "en": "Dozzle requires read-only access to the Docker socket so it can stream container logs in your browser. Logs often contain stack traces, connection strings, and occasionally secrets that were accidentally logged. Crow enforces read-only. Dozzle binds to 127.0.0.1 only \u2014 never expose its port publicly without enabling authentication.",
+        "es": "Dozzle necesita acceso de solo lectura al socket de Docker para transmitir logs de contenedores en tu navegador. Los logs suelen incluir trazas, cadenas de conexi\u00f3n y, a veces, secretos registrados por error. Crow impone solo lectura. Dozzle se vincula solo a 127.0.0.1 \u2014 nunca expongas su puerto p\u00fablicamente sin autenticaci\u00f3n."
+      },
+      "requires": {
+        "env": [],
+        "min_ram_mb": 64,
+        "min_disk_mb": 50
+      },
+      "env_vars": [
+        {
+          "name": "DOZZLE_URL",
+          "description": "Dozzle URL",
+          "default": "http://localhost:8095",
+          "required": false
+        }
+      ],
+      "ports": [
+        8095
+      ],
+      "webUI": {
+        "port": 8095,
+        "path": "/",
+        "label": "Dozzle"
+      },
+      "notes": "Log viewer is UI-first. Actions and shell modes disabled by default. 2 MCP tools: status, container_url."
+    },
+    {
+      "id": "crowdsec",
+      "name": "CrowdSec Engine",
+      "description": "Open-source intrusion detection: parses logs, detects attack patterns (brute force, port scans, bot scraping), and publishes decisions for bouncers to enforce.",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "infrastructure",
+      "tags": [
+        "security",
+        "ids",
+        "intrusion-detection",
+        "logs",
+        "observability"
+      ],
+      "icon": "shield",
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "CROWDSEC_LAPI_URL",
+          "CROWDSEC_API_KEY"
+        ]
+      },
+      "panel": "panel/crowdsec.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": [
+        "skills/crowdsec.md"
+      ],
+      "consent_required": true,
+      "install_consent_messages": {
+        "en": "CrowdSec requires read-only access to the Docker socket so it can tail container logs for attack-pattern detection. Crow enforces read-only. Detection only \u2014 CrowdSec does NOT enforce decisions by itself; a separate bouncer (PR 4.5) handles blocking.",
+        "es": "CrowdSec necesita acceso de solo lectura al socket de Docker para leer logs de contenedores y detectar patrones de ataque. Crow impone solo lectura. Solo detecci\u00f3n \u2014 CrowdSec NO aplica decisiones por s\u00ed mismo; un bouncer aparte (PR 4.5) hace el bloqueo."
+      },
+      "requires": {
+        "env": [],
+        "min_ram_mb": 256,
+        "min_disk_mb": 500
+      },
+      "env_vars": [
+        {
+          "name": "CROWDSEC_LAPI_URL",
+          "description": "Local API URL",
+          "default": "http://127.0.0.1:8091",
+          "required": false
+        },
+        {
+          "name": "CROWDSEC_API_KEY",
+          "description": "Bouncer API key (generate with: docker exec crow-crowdsec cscli bouncers add crow-mcp)",
+          "required": false,
+          "secret": true
+        }
+      ],
+      "ports": [
+        8091
+      ],
+      "webUI": null,
+      "notes": "Detection only (no enforcement yet). Generate bouncer API key on first boot. Docker socket read-only. Pre-installed collections: linux, sshd, base-http-scenarios, whitelist-good-actors. 4 MCP tools: status, alerts, decisions, delete_decision."
     },
     {
       "id": "uptime-kuma",
@@ -1434,139 +2603,378 @@
       "version": "1.0.0",
       "author": "Crow",
       "category": "infrastructure",
-      "tags": ["monitoring", "uptime", "alerts", "status-page", "self-hosted"],
+      "tags": [
+        "monitoring",
+        "uptime",
+        "alerts",
+        "status-page",
+        "self-hosted"
+      ],
       "icon": "activity",
-      "docker": { "composefile": "docker-compose.yml" },
-      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["UPTIMEKUMA_URL", "UPTIMEKUMA_USERNAME", "UPTIMEKUMA_PASSWORD"] },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "UPTIMEKUMA_URL",
+          "UPTIMEKUMA_USERNAME",
+          "UPTIMEKUMA_PASSWORD"
+        ]
+      },
       "panel": "panel/uptime-kuma.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/uptime-kuma.md"],
-      "requires": { "env": [], "min_ram_mb": 256, "min_disk_mb": 200 },
-      "env_vars": [
-        { "name": "UPTIMEKUMA_URL", "description": "Uptime Kuma base URL", "default": "http://localhost:3007", "required": true },
-        { "name": "UPTIMEKUMA_USERNAME", "description": "Admin username (for /metrics basic auth)", "required": false },
-        { "name": "UPTIMEKUMA_PASSWORD", "description": "Admin password (for /metrics basic auth)", "required": false, "secret": true }
+      "skills": [
+        "skills/uptime-kuma.md"
       ],
-      "ports": [3007],
-      "webUI": { "port": 3007, "path": "/", "label": "Uptime Kuma" },
+      "requires": {
+        "env": [],
+        "min_ram_mb": 256,
+        "min_disk_mb": 200
+      },
+      "env_vars": [
+        {
+          "name": "UPTIMEKUMA_URL",
+          "description": "Uptime Kuma base URL",
+          "default": "http://localhost:3007",
+          "required": true
+        },
+        {
+          "name": "UPTIMEKUMA_USERNAME",
+          "description": "Admin username (for /metrics basic auth)",
+          "required": false
+        },
+        {
+          "name": "UPTIMEKUMA_PASSWORD",
+          "description": "Admin password (for /metrics basic auth)",
+          "required": false,
+          "secret": true
+        }
+      ],
+      "ports": [
+        3007
+      ],
+      "webUI": {
+        "port": 3007,
+        "path": "/",
+        "label": "Uptime Kuma"
+      },
       "notes": "Listens on 3001 inside container, published on 127.0.0.1:3007. First-run: create admin user in web UI, then set UPTIMEKUMA_USERNAME/PASSWORD for /metrics parsing. 2 MCP tools (socket.io API is not wrapped)."
     },
     {
       "id": "stirling-pdf",
       "name": "Stirling PDF",
-      "description": "Local PDF manipulation toolbox — merge, split, OCR, convert, compress, and 50+ other operations in-browser",
+      "description": "Local PDF manipulation toolbox \u2014 merge, split, OCR, convert, compress, and 50+ other operations in-browser",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "productivity",
-      "tags": ["pdf", "documents", "ocr", "convert", "self-hosted"],
-      "icon": "file-text",
-      "docker": { "composefile": "docker-compose.yml" },
-      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["STIRLING_URL"] },
-      "panel": "panel/stirling-pdf.js",
-      "skills": ["skills/stirling-pdf.md"],
-      "requires": { "env": [], "min_ram_mb": 1024, "min_disk_mb": 2000 },
-      "env_vars": [
-        { "name": "STIRLING_URL", "description": "Stirling PDF base URL", "default": "http://localhost:8092", "required": true }
+      "tags": [
+        "pdf",
+        "documents",
+        "ocr",
+        "convert",
+        "self-hosted"
       ],
-      "ports": [8092],
-      "webUI": { "port": 8092, "path": "/", "label": "Stirling PDF" },
-      "notes": "No REST API — all operations run client-side in the browser. Panel embeds the web UI; MCP server has 2 tools (status + web URL). Stirling 2.x ships with a login form; create the admin on first visit. Bound to 127.0.0.1 only."
+      "icon": "file-text",
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "STIRLING_URL"
+        ]
+      },
+      "panel": "panel/stirling-pdf.js",
+      "skills": [
+        "skills/stirling-pdf.md"
+      ],
+      "requires": {
+        "env": [],
+        "min_ram_mb": 1024,
+        "min_disk_mb": 2000
+      },
+      "env_vars": [
+        {
+          "name": "STIRLING_URL",
+          "description": "Stirling PDF base URL",
+          "default": "http://localhost:8092",
+          "required": true
+        }
+      ],
+      "ports": [
+        8092
+      ],
+      "webUI": {
+        "port": 8092,
+        "path": "/",
+        "label": "Stirling PDF"
+      },
+      "notes": "No REST API \u2014 all operations run client-side in the browser. Panel embeds the web UI; MCP server has 2 tools (status + web URL). Stirling 2.x ships with a login form; create the admin on first visit. Bound to 127.0.0.1 only."
     },
     {
       "id": "changedetection",
       "name": "Change Detection",
-      "description": "Watch any webpage for changes — get notified when prices drop, stock appears, or content updates",
+      "description": "Watch any webpage for changes \u2014 get notified when prices drop, stock appears, or content updates",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "automation",
-      "tags": ["monitoring", "scraping", "alerts", "automation", "self-hosted"],
+      "tags": [
+        "monitoring",
+        "scraping",
+        "alerts",
+        "automation",
+        "self-hosted"
+      ],
       "icon": "eye",
-      "docker": { "composefile": "docker-compose.yml" },
-      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["CHANGEDETECTION_URL", "CHANGEDETECTION_API_KEY"] },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "CHANGEDETECTION_URL",
+          "CHANGEDETECTION_API_KEY"
+        ]
+      },
       "panel": "panel/changedetection.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/changedetection.md"],
-      "requires": { "env": ["CHANGEDETECTION_API_KEY"], "min_ram_mb": 256, "min_disk_mb": 500 },
-      "env_vars": [
-        { "name": "CHANGEDETECTION_URL", "description": "Change Detection base URL", "default": "http://localhost:5010", "required": true },
-        { "name": "CHANGEDETECTION_API_KEY", "description": "API key (Settings > API in the web UI)", "required": true, "secret": true }
+      "skills": [
+        "skills/changedetection.md"
       ],
-      "ports": [5010],
-      "webUI": { "port": 5010, "path": "/", "label": "Change Detection" },
+      "requires": {
+        "env": [
+          "CHANGEDETECTION_API_KEY"
+        ],
+        "min_ram_mb": 256,
+        "min_disk_mb": 500
+      },
+      "env_vars": [
+        {
+          "name": "CHANGEDETECTION_URL",
+          "description": "Change Detection base URL",
+          "default": "http://localhost:5010",
+          "required": true
+        },
+        {
+          "name": "CHANGEDETECTION_API_KEY",
+          "description": "API key (Settings > API in the web UI)",
+          "required": true,
+          "secret": true
+        }
+      ],
+      "ports": [
+        5010
+      ],
+      "webUI": {
+        "port": 5010,
+        "path": "/",
+        "label": "Change Detection"
+      },
       "notes": "First-run: open the web UI, go to Settings > API, copy the API key into Crow settings. 5 MCP tools for watch management."
     },
     {
       "id": "homepage",
       "name": "Homepage",
-      "description": "Static startpage / dashboard — YAML-configured launcher for self-hosted services",
+      "description": "Static startpage / dashboard \u2014 YAML-configured launcher for self-hosted services",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "productivity",
-      "tags": ["dashboard", "launcher", "startpage", "services", "self-hosted"],
-      "icon": "home",
-      "docker": { "composefile": "docker-compose.yml" },
-      "panel": "panel/homepage.js",
-      "skills": ["skills/homepage.md"],
-      "requires": { "env": [], "min_ram_mb": 256, "min_disk_mb": 200 },
-      "env_vars": [
-        { "name": "HOMEPAGE_URL", "description": "Homepage base URL", "default": "http://localhost:3030", "required": true },
-        { "name": "HOMEPAGE_ALLOWED_HOSTS", "description": "Comma-separated host:port list Homepage will accept", "default": "localhost:3030", "required": false },
-        { "name": "HOMEPAGE_CONFIG_DIR", "description": "YAML config directory (mounted into container)", "default": "~/.crow/homepage", "required": false }
+      "tags": [
+        "dashboard",
+        "launcher",
+        "startpage",
+        "services",
+        "self-hosted"
       ],
-      "ports": [3030],
-      "webUI": { "port": 3030, "path": "/", "label": "Homepage" },
+      "icon": "home",
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "panel": "panel/homepage.js",
+      "skills": [
+        "skills/homepage.md"
+      ],
+      "requires": {
+        "env": [],
+        "min_ram_mb": 256,
+        "min_disk_mb": 200
+      },
+      "env_vars": [
+        {
+          "name": "HOMEPAGE_URL",
+          "description": "Homepage base URL",
+          "default": "http://localhost:3030",
+          "required": true
+        },
+        {
+          "name": "HOMEPAGE_ALLOWED_HOSTS",
+          "description": "Comma-separated host:port list Homepage will accept",
+          "default": "localhost:3030",
+          "required": false
+        },
+        {
+          "name": "HOMEPAGE_CONFIG_DIR",
+          "description": "YAML config directory (mounted into container)",
+          "default": "~/.crow/homepage",
+          "required": false
+        }
+      ],
+      "ports": [
+        3030
+      ],
+      "webUI": {
+        "port": 3030,
+        "path": "/",
+        "label": "Homepage"
+      },
       "notes": "Panel-only (no MCP server). Edit YAML files in HOMEPAGE_CONFIG_DIR to configure services/widgets/bookmarks. Seed config is copied on first run."
     },
     {
       "id": "vikunja",
       "name": "Vikunja",
-      "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",
+      "description": "Self-hosted task management \u2014 projects, kanban boards, due dates, labels, and team collaboration",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "productivity",
-      "tags": ["tasks", "todo", "kanban", "project-management", "self-hosted"],
+      "tags": [
+        "tasks",
+        "todo",
+        "kanban",
+        "project-management",
+        "self-hosted"
+      ],
       "icon": "check-square",
-      "docker": { "composefile": "docker-compose.yml" },
-      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["VIKUNJA_URL", "VIKUNJA_API_TOKEN"] },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "VIKUNJA_URL",
+          "VIKUNJA_API_TOKEN"
+        ]
+      },
       "panel": "panel/vikunja.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/vikunja.md"],
-      "requires": { "env": ["VIKUNJA_API_TOKEN"], "min_ram_mb": 256, "min_disk_mb": 200 },
-      "env_vars": [
-        { "name": "VIKUNJA_URL", "description": "Vikunja server URL", "default": "http://localhost:3456", "required": true },
-        { "name": "VIKUNJA_API_TOKEN", "description": "API token (Settings > API Tokens)", "required": true, "secret": true }
+      "skills": [
+        "skills/vikunja.md"
       ],
-      "ports": [3456],
-      "webUI": { "port": 3456, "path": "/", "label": "Vikunja" },
+      "requires": {
+        "env": [
+          "VIKUNJA_API_TOKEN"
+        ],
+        "min_ram_mb": 256,
+        "min_disk_mb": 200
+      },
+      "env_vars": [
+        {
+          "name": "VIKUNJA_URL",
+          "description": "Vikunja server URL",
+          "default": "http://localhost:3456",
+          "required": true
+        },
+        {
+          "name": "VIKUNJA_API_TOKEN",
+          "description": "API token (Settings > API Tokens)",
+          "required": true,
+          "secret": true
+        }
+      ],
+      "ports": [
+        3456
+      ],
+      "webUI": {
+        "port": 3456,
+        "path": "/",
+        "label": "Vikunja"
+      },
       "notes": "Uses built-in SQLite. Single container. 8 MCP tools for task and project management."
     },
     {
       "id": "actual-budget",
       "name": "Actual Budget",
-      "description": "Privacy-first personal finance — track spending, manage budgets, and view financial reports",
+      "description": "Privacy-first personal finance \u2014 track spending, manage budgets, and view financial reports",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "finance",
-      "tags": ["budget", "finance", "money", "personal-finance", "self-hosted"],
+      "tags": [
+        "budget",
+        "finance",
+        "money",
+        "personal-finance",
+        "self-hosted"
+      ],
       "icon": "dollar",
-      "docker": { "composefile": "docker-compose.yml" },
-      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["ACTUAL_URL", "ACTUAL_PASSWORD"] },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "ACTUAL_URL",
+          "ACTUAL_PASSWORD"
+        ]
+      },
       "panel": "panel/actual-budget.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/actual-budget.md"],
-      "requires": { "env": ["ACTUAL_PASSWORD"], "min_ram_mb": 256, "min_disk_mb": 200 },
-      "env_vars": [
-        { "name": "ACTUAL_URL", "description": "Actual Budget server URL", "default": "http://localhost:5006", "required": true },
-        { "name": "ACTUAL_PASSWORD", "description": "Actual server password", "required": true, "secret": true },
-        { "name": "ACTUAL_SYNC_ID", "description": "Budget sync ID to auto-select budget", "required": false }
+      "skills": [
+        "skills/actual-budget.md"
       ],
-      "ports": [5006],
-      "webUI": { "port": 5006, "path": "/", "label": "Actual Budget" },
+      "requires": {
+        "env": [
+          "ACTUAL_PASSWORD"
+        ],
+        "min_ram_mb": 256,
+        "min_disk_mb": 200
+      },
+      "env_vars": [
+        {
+          "name": "ACTUAL_URL",
+          "description": "Actual Budget server URL",
+          "default": "http://localhost:5006",
+          "required": true
+        },
+        {
+          "name": "ACTUAL_PASSWORD",
+          "description": "Actual server password",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "ACTUAL_SYNC_ID",
+          "description": "Budget sync ID to auto-select budget",
+          "required": false
+        }
+      ],
+      "ports": [
+        5006
+      ],
+      "webUI": {
+        "port": 5006,
+        "path": "/",
+        "label": "Actual Budget"
+      },
       "notes": "Privacy-first budgeting. Data stays local. Password-based auth. 7 MCP tools for accounts, transactions, budgets, and reports."
     },
     {
@@ -1577,7 +2985,14 @@
       "version": "1.0.0",
       "author": "Crow",
       "category": "infrastructure",
-      "tags": ["developer", "extension", "addon", "scaffolding", "publish", "sdk"],
+      "tags": [
+        "developer",
+        "extension",
+        "addon",
+        "scaffolding",
+        "publish",
+        "sdk"
+      ],
       "icon": "archive",
       "webUI": null,
       "requires": {
@@ -1586,7 +3001,9 @@
         "min_disk_mb": 1
       },
       "env_vars": [],
-      "skills": ["skills/developer-kit.md"],
+      "skills": [
+        "skills/developer-kit.md"
+      ],
       "notes": "Skill-only. Guides AI through building and submitting Crow extensions."
     }
   ]

@@ -1,0 +1,29 @@
+{
+  "id": "crowdsec",
+  "name": "CrowdSec Engine",
+  "version": "1.0.0",
+  "description": "Open-source intrusion detection: parses logs, detects attack patterns (brute force, port scans, bot scraping), and publishes decisions for bouncers to enforce.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "infrastructure",
+  "tags": ["security", "ids", "intrusion-detection", "logs", "observability"],
+  "icon": "shield",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["CROWDSEC_LAPI_URL", "CROWDSEC_API_KEY"] },
+  "panel": "panel/crowdsec.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/crowdsec.md"],
+  "consent_required": true,
+  "install_consent_messages": {
+    "en": "CrowdSec requires read-only access to the Docker socket (/var/run/docker.sock) so it can tail logs from every container on this host for attack-pattern detection. Crow enforces read-only Docker socket (no writes, no container control). CrowdSec does NOT enforce decisions by itself — it only detects and records. To actually block attackers you install a separate 'bouncer' (firewall-bouncer, nginx-bouncer, etc.); the MVP ships detection only. See the skill for the follow-up PR that adds a firewall bouncer.",
+    "es": "CrowdSec necesita acceso de solo lectura al socket de Docker (/var/run/docker.sock) para leer logs de cada contenedor en este host y detectar patrones de ataque. Crow impone solo lectura (sin escrituras ni control de contenedores). CrowdSec NO aplica decisiones por sí mismo — solo detecta y registra. Para bloquear atacantes instalas un 'bouncer' aparte (firewall-bouncer, nginx-bouncer, etc.); el MVP incluye solo detección. El skill documenta el PR siguiente con el bouncer de firewall."
+  },
+  "requires": { "env": [], "min_ram_mb": 256, "min_disk_mb": 500 },
+  "env_vars": [
+    { "name": "CROWDSEC_LAPI_URL", "description": "Local API URL (reachable from host for bouncers)", "default": "http://127.0.0.1:8091", "required": false },
+    { "name": "CROWDSEC_API_KEY", "description": "Bouncer API key (auto-generated on first boot; read from cscli bouncers list)", "required": false, "secret": true }
+  ],
+  "ports": [8091],
+  "webUI": null,
+  "notes": "Detection only — no enforcement. Bouncer bundles (PR 4.5+) attach to the LAPI on 127.0.0.1:8091 and enforce decisions. Logs from every running container are tailed via Docker socket (read-only). Default collections: linux, base-http-scenarios, whitelists. Console enrollment optional (cscli console enroll <token>)."
+}
