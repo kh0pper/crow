@@ -2505,12 +2505,13 @@ export function createSharingServer(dbPath, options = {}) {
           const inserted = await db.execute({
             sql: `INSERT INTO crosspost_log
                     (idempotency_key, source_app, source_post_id, target_app,
-                     transform, status, scheduled_at, created_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     transform, status, scheduled_at, created_at, transformed_payload_json)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                   RETURNING id`,
             args: [
               idempotency_key, source_app, source_post_id, target_app,
               `${source_app}→${target_app}`, status, scheduledAt, now,
+              JSON.stringify(transformed),
             ],
           });
           const logId = Number(inserted.rows[0].id);
