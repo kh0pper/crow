@@ -1476,6 +1476,30 @@
       "notes": "3 MCP tools (status, user_count, backup_info). Deliberately does NOT expose vault contents — use the Bitwarden browser extension or mobile app for credential access. Back up ~/.crow/vaultwarden/data regularly."
     },
     {
+      "id": "searxng",
+      "name": "SearXNG",
+      "description": "Privacy-respecting metasearch engine aggregating 70+ sources without tracking",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": ["search", "metasearch", "privacy", "self-hosted"],
+      "icon": "search",
+      "docker": { "composefile": "docker-compose.yml" },
+      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["SEARXNG_BASE_URL"] },
+      "panel": "panel/searxng.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": ["skills/searxng.md"],
+      "requires": { "min_ram_mb": 256, "min_disk_mb": 150 },
+      "env_vars": [
+        { "name": "SEARXNG_BASE_URL", "description": "Public URL SearXNG advertises in links", "default": "http://localhost:8098/", "required": false },
+        { "name": "SEARXNG_SECRET_KEY", "description": "Secret key for SearXNG. Auto-generated on first boot if left empty.", "required": false, "secret": true }
+      ],
+      "ports": [8098],
+      "webUI": { "port": 8098, "path": "/", "label": "SearXNG" },
+      "notes": "Config in ~/.crow/searxng/settings.yml. JSON API enabled. First-boot entrypoint seeds a default config and random secret if not provided. 3 MCP tools: search, list_engines, status."
+    },
+    {
       "id": "vikunja",
       "name": "Vikunja",
       "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",
