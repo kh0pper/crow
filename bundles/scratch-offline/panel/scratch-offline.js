@@ -1,14 +1,17 @@
 /**
- * Crow's Nest Panel — Scratch (Offline): launcher + setup hints + embed
+ * Crow's Nest Panel — Offline Block Coding (Scratch-compatible): launcher + setup hints + embed
  *
- * Same shape as the kolibri panel — Scratch is a UI-first surface; Crow
- * just provides a tile, first-install notes (the source build is slow
- * the first time), and an embed option.
+ * Independent self-hosted deployment of the open-source scratch-gui code
+ * (MIT license). Not affiliated with the Scratch Foundation.
+ *
+ * Same shape as the kolibri panel — this is a UI-first surface; Crow just
+ * provides a tile, first-install notes (the source build is slow the first
+ * time), and an embed option.
  */
 
 export default {
   id: "scratch-offline",
-  name: "Scratch (Offline)",
+  name: "Offline Block Coding (Scratch-compatible)",
   icon: "graduation-cap",
   route: "/dashboard/scratch-offline",
   navOrder: 56,
@@ -35,19 +38,20 @@ export default {
     if (tab === "embed") {
       body = `
         <div class="sc-embed-wrap">
-          <p class="sc-hint">Scratch's service worker pins many assets; if the embed goes blank after a rebuild, <a href="${escapeHtml(scratchUrl)}" target="_blank" rel="noopener">open in a new tab</a> and hard-refresh.</p>
-          <iframe src="${escapeHtml(scratchUrl)}" class="sc-iframe" title="Scratch (Offline)" allow="microphone; camera"></iframe>
+          <p class="sc-hint">The editor's service worker pins many assets; if the embed goes blank after a rebuild, <a href="${escapeHtml(scratchUrl)}" target="_blank" rel="noopener">open in a new tab</a> and hard-refresh.</p>
+          <iframe src="${escapeHtml(scratchUrl)}" class="sc-iframe" title="Offline Block Coding" allow="microphone; camera"></iframe>
         </div>
       `;
     } else {
       body = `
         <section class="sc-card">
           <h2>What this is</h2>
-          <p>Self-hosted Scratch programming environment — the same block-based editor kids use on scratch.mit.edu, running entirely on your server with no cloud save, no sign-in, and no telemetry. Projects download as <code>.sb3</code> files.</p>
+          <p>Self-hosted block-based coding environment built from the MIT-licensed <a href="https://github.com/scratchfoundation/scratch-gui" target="_blank" rel="noopener"><code>scratch-gui</code></a> source, running entirely on your server with no cloud save, no sign-in, and no telemetry. Projects download as <code>.sb3</code> files.</p>
+          <p class="sc-muted">Independent self-hosted deployment — not affiliated with or endorsed by the Scratch Foundation. "Scratch" is a trademark of the Scratch Foundation.</p>
         </section>
         <section class="sc-card">
           <h2>Launch</h2>
-          <p><a class="sc-btn" href="${escapeHtml(scratchUrl)}" target="_blank" rel="noopener">Open Scratch ↗</a></p>
+          <p><a class="sc-btn" href="${escapeHtml(scratchUrl)}" target="_blank" rel="noopener">Open editor ↗</a></p>
           <p class="sc-muted">Or <a href="?tab=embed">embed it inside the Nest</a>.</p>
         </section>
         <section class="sc-card">
@@ -57,7 +61,7 @@ export default {
         </section>
         <section class="sc-card">
           <h2>Age gate</h2>
-          <p>Scratch is recommended by its authors for <strong>ages 8+</strong>. The Maker Lab recommender surfaces this bundle only when <code>learner.age &gt;= 8</code>; younger learners stay on Blockly.</p>
+          <p>The Scratch ecosystem is recommended by its authors for <strong>ages 8+</strong>. The Maker Lab recommender surfaces this bundle only when <code>learner.age &gt;= 8</code>; younger learners stay on Blockly.</p>
         </section>
         <section class="sc-card">
           <h2>No cloud save — by design</h2>
@@ -69,18 +73,19 @@ export default {
     const content = `
       <style>${styles()}</style>
       <div class="sc-panel">
-        <h1>Scratch (Offline)</h1>
+        <h1>Offline Block Coding <span class="sc-subtitle">(Scratch-compatible)</span></h1>
         ${tabBar}
         <div class="sc-body">${body}</div>
       </div>
     `;
-    return layout({ title: "Scratch (Offline)", content });
+    return layout({ title: "Offline Block Coding (Scratch-compatible)", content });
   },
 };
 
 function styles() {
   return `
     .sc-panel { max-width: 900px; margin: 0 auto; padding: 1.5rem; }
+    .sc-subtitle { font-size: 0.75em; color: var(--fg-muted, #888); font-weight: normal; }
     .sc-tabs { display: flex; gap: 0.5rem; margin: 1rem 0 1.5rem; border-bottom: 1px solid var(--border, #333); }
     .sc-tab { padding: 0.5rem 1rem; color: var(--fg-muted, #888); text-decoration: none; border-bottom: 2px solid transparent; }
     .sc-tab.active { color: var(--fg, #eee); border-bottom-color: #f59e0b; }
