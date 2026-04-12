@@ -1,0 +1,59 @@
+{
+  "id": "peertube",
+  "name": "PeerTube",
+  "version": "1.0.0",
+  "description": "Federated video platform over ActivityPub — YouTube-alternative on the fediverse. Upload and transcode video, federate channels, stream via WebTorrent or HLS. Heaviest bundle in the federated line — S3 storage + aggressive transcoding policy are load-bearing, not optional.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "federated-media",
+  "tags": ["peertube", "activitypub", "fediverse", "video", "federated", "youtube-alt", "webtorrent"],
+  "icon": "phone-video",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "envKeys": ["PEERTUBE_URL", "PEERTUBE_ACCESS_TOKEN", "PEERTUBE_WEBSERVER_HOSTNAME"]
+  },
+  "panel": "panel/peertube.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/peertube.md"],
+  "consent_required": true,
+  "install_consent_messages": {
+    "en": "PeerTube joins the public fediverse over ActivityPub — your instance becomes publicly addressable at the domain you configure, any video you publish can be replicated to federated servers and cached there; replicated content cannot be fully recalled. Video storage is unbounded without S3 + scheduled pruning: a single 1080p30 video is 500MB+ in transcoded variants, and federated caches of remote channels can add hundreds of GB within months. Video transcoding spikes RAM to 3-5 GB PER concurrent upload (ffmpeg on x264). PeerTube is hardware-gated: REFUSED on hosts with <16 GB total RAM and <500 GB disk; warned below 32 GB / 2 TB. If transcoding + S3 both disabled, webtorrent seeding is your only scaling lever — the instance becomes unfeasible past ~100 videos. Hosting copyrighted video (music, films, clips you don't have rights to) is a legal fast-track to defederation and takedown notices. DMCA + equivalent requests are your legal responsibility.",
+    "es": "PeerTube se une al fediverso público vía ActivityPub — tu instancia será direccionable en el dominio que configures, cualquier video publicado puede replicarse a servidores federados y cachearse allí; el contenido replicado no puede recuperarse completamente. El almacenamiento de video es ilimitado sin S3 + recorte programado: un solo video 1080p30 son 500MB+ en variantes transcodificadas, y los cachés federados de canales remotos pueden añadir cientos de GB en meses. La transcodificación de video eleva la RAM a 3-5 GB POR subida concurrente (ffmpeg x264). PeerTube está limitado por hardware: RECHAZADO en hosts con <16 GB de RAM total y <500 GB de disco; advierte bajo 32 GB / 2 TB. Si transcodificación + S3 están deshabilitados, el seeding webtorrent es tu única palanca de escala — la instancia se vuelve inviable pasados ~100 videos. Hospedar video con copyright (música, películas, clips sin derechos) es un camino directo a la defederación y avisos DMCA. Solicitudes DMCA + equivalentes son tu responsabilidad legal."
+  },
+  "requires": {
+    "env": ["PEERTUBE_WEBSERVER_HOSTNAME", "PEERTUBE_DB_PASSWORD", "PEERTUBE_SECRET"],
+    "bundles": ["caddy"],
+    "min_ram_mb": 4000,
+    "recommended_ram_mb": 8000,
+    "min_disk_mb": 100000,
+    "recommended_disk_mb": 2000000
+  },
+  "env_vars": [
+    { "name": "PEERTUBE_WEBSERVER_HOSTNAME", "description": "Public domain (subdomain; IMMUTABLE after first federation). Appears in video URLs, channel URLs, every ActivityPub actor.", "required": true },
+    { "name": "PEERTUBE_DB_PASSWORD", "description": "Password for the bundled Postgres role.", "required": true, "secret": true },
+    { "name": "PEERTUBE_SECRET", "description": "Server secret (32+ random chars). Signs federation requests; IMMUTABLE — rotation requires re-announcing every federated actor.", "required": true, "secret": true },
+    { "name": "PEERTUBE_ACCESS_TOKEN", "description": "OAuth bearer token (Administration → Users → your account → Personal Access Tokens, OR POST /api/v1/users/token with username+password + client_id+client_secret from /api/v1/oauth-clients/local).", "required": false, "secret": true },
+    { "name": "PEERTUBE_URL", "description": "Internal URL the MCP server uses to reach PeerTube (default http://peertube:9000 over crow-federation).", "default": "http://peertube:9000", "required": false },
+    { "name": "PEERTUBE_ADMIN_EMAIL", "description": "Admin email — where takedown notices, abuse reports, and federation alerts go.", "required": false },
+    { "name": "PEERTUBE_TRANSCODING_THREADS", "description": "Worker threads per concurrent transcode (default 0 = all CPUs). Lower on multi-tenant hosts to keep latency under control.", "default": "0", "required": false },
+    { "name": "PEERTUBE_TRANSCODING_CONCURRENCY", "description": "Max simultaneous transcodes. 1-2 on 16 GB hosts; 4+ on 32 GB+.", "default": "1", "required": false },
+    { "name": "PEERTUBE_SIGNUP_ENABLED", "description": "Allow new user signups (true/false). Default false; opening signup without moderation tooling invites abuse.", "default": "false", "required": false },
+    { "name": "PEERTUBE_VIDEO_QUOTA_MB", "description": "Default per-user video quota in MB. 10 GB default (10000).", "default": "10000", "required": false },
+    { "name": "PEERTUBE_MEDIA_RETENTION_DAYS", "description": "Remote video cache retention in days (default 14; 7 on smaller hosts).", "default": "14", "required": false },
+    { "name": "PEERTUBE_S3_ENDPOINT", "description": "Optional S3-compatible endpoint for video storage. STRONGLY RECOMMENDED on active instances. When set with bucket/access/secret, scripts/configure-storage.mjs routes via storage-translators.peertube() (PEERTUBE_OBJECT_STORAGE_* envelope).", "required": false },
+    { "name": "PEERTUBE_S3_BUCKET", "description": "S3 bucket for video originals + transcoded variants + streaming playlists.", "required": false },
+    { "name": "PEERTUBE_S3_ACCESS_KEY", "description": "S3 access key.", "required": false, "secret": true },
+    { "name": "PEERTUBE_S3_SECRET_KEY", "description": "S3 secret key.", "required": false, "secret": true },
+    { "name": "PEERTUBE_S3_REGION", "description": "S3 region.", "default": "us-east-1", "required": false },
+    { "name": "PEERTUBE_SMTP_HOSTNAME", "description": "Outbound SMTP (registration confirmation, takedown receipts).", "required": false },
+    { "name": "PEERTUBE_SMTP_PORT", "description": "SMTP port.", "default": "587", "required": false },
+    { "name": "PEERTUBE_SMTP_USERNAME", "description": "SMTP username.", "required": false },
+    { "name": "PEERTUBE_SMTP_PASSWORD", "description": "SMTP password.", "required": false, "secret": true },
+    { "name": "PEERTUBE_SMTP_FROM", "description": "From address.", "required": false }
+  ],
+  "ports": [],
+  "webUI": null,
+  "notes": "Three containers (peertube + postgres + redis). chocobozzz/peertube:production-bookworm image. Expose via caddy_add_federation_site { domain: PEERTUBE_WEBSERVER_HOSTNAME, upstream: 'peertube:9000', profile: 'activitypub-peertube' } — the peertube profile also wires WebSocket upgrade on /socket.io and large request-body limits for video upload chunking. Admin credentials: first-boot logs print a randomly-generated admin password (search `docker logs crow-peertube | grep -A1 \"Username\"`); rotate via `docker exec -it crow-peertube npm run reset-password -- -u root` immediately."
+}
