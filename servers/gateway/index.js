@@ -56,6 +56,7 @@ import { getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/
 import express from "express";
 import rateLimit from "express-rate-limit";
 import cors from "cors";
+import { crowdsecMiddleware } from "./middleware/crowdsec.js";
 
 import { createMemoryServer } from "../memory/server.js";
 import { createProjectServer } from "../research/server.js";
@@ -178,6 +179,12 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+// PR 0: CrowdSec gateway-middleware bouncer (no-op when CROW_CROWDSEC_BOUNCER_KEY is unset).
+// Mounted after security headers, before CORS/rate-limit so banned IPs get a fast 403
+// without consuming rate-limit budget. Uses synchronous LAPI lookup with 200ms timeout
+// and fail-open on any error. See servers/gateway/middleware/crowdsec.js.
+app.use(crowdsecMiddleware({ db: createDbClient() }));
 
 // CORS
 const corsOrigins = process.env.CORS_ALLOWED_ORIGINS
