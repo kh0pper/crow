@@ -3111,6 +3111,46 @@
       "notes": "No host port publish. After install: caddy_add_federation_site { domain: WF_HOST, upstream: 'writefreely:8080', profile: 'activitypub' }. Admin account is created via the first-run web UI (no CLI bootstrap)."
     },
     {
+      "id": "matrix-dendrite",
+      "name": "Matrix (Dendrite)",
+      "description": "Matrix homeserver on Dendrite — federated real-time chat with end-to-end encryption. Lighter than Synapse, monolithic binary. Joins the Matrix federation graph via HTTPS federation (:8448 or .well-known delegation).",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "federated-comms",
+      "tags": ["matrix", "dendrite", "chat", "federation", "e2ee", "realtime"],
+      "icon": "message-circle",
+      "docker": { "composefile": "docker-compose.yml" },
+      "server": {
+        "command": "node",
+        "args": ["server/index.js"],
+        "envKeys": ["MATRIX_URL", "MATRIX_ACCESS_TOKEN", "MATRIX_USER_ID", "MATRIX_SERVER_NAME"]
+      },
+      "panel": "panel/matrix-dendrite.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": ["skills/matrix-dendrite.md"],
+      "consent_required": true,
+      "requires": {
+        "env": ["MATRIX_SERVER_NAME", "MATRIX_POSTGRES_PASSWORD"],
+        "bundles": ["caddy"],
+        "min_ram_mb": 2048,
+        "recommended_ram_mb": 4096,
+        "min_disk_mb": 10000,
+        "recommended_disk_mb": 100000
+      },
+      "env_vars": [
+        { "name": "MATRIX_SERVER_NAME", "description": "Public homeserver domain (appears in user IDs as @alice:<this>).", "required": true },
+        { "name": "MATRIX_HOST", "description": "Domain Caddy reverse-proxies the client-server API on. May differ from MATRIX_SERVER_NAME when using .well-known delegation.", "required": false },
+        { "name": "MATRIX_POSTGRES_PASSWORD", "description": "Password for the bundled Postgres role.", "required": true, "secret": true },
+        { "name": "MATRIX_ACCESS_TOKEN", "description": "Admin access token (from POST /_matrix/client/v3/login after registering the admin via the CLI).", "required": false, "secret": true },
+        { "name": "MATRIX_USER_ID", "description": "Admin user's full Matrix ID (@admin:example.com).", "required": false },
+        { "name": "MATRIX_REGISTRATION_SHARED_SECRET", "description": "Dendrite's registration shared secret (printed to logs on first boot).", "required": false, "secret": true }
+      ],
+      "ports": [],
+      "webUI": null,
+      "notes": "Two containers (dendrite + postgres). Federation: pick EITHER caddy_add_matrix_federation_port (router forwards :8448) OR caddy_set_wellknown matrix-server on the apex. Initial admin registered via `docker exec crow-dendrite create-account`."
+    },
+    {
       "id": "developer-kit",
       "name": "Developer Kit",
       "description": "Build and submit Crow extensions with guided scaffolding, testing, and registry submission",

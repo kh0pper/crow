@@ -1,0 +1,77 @@
+{
+  "id": "matrix-dendrite",
+  "name": "Matrix (Dendrite)",
+  "version": "1.0.0",
+  "description": "Matrix homeserver on Dendrite — federated real-time chat with end-to-end encryption. Lighter than Synapse, monolithic binary. Joins the Matrix federation graph via HTTPS federation (:8448 or .well-known delegation).",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "federated-comms",
+  "tags": ["matrix", "dendrite", "chat", "federation", "e2ee", "realtime"],
+  "icon": "message-circle",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "envKeys": ["MATRIX_URL", "MATRIX_ACCESS_TOKEN", "MATRIX_USER_ID", "MATRIX_SERVER_NAME"]
+  },
+  "panel": "panel/matrix-dendrite.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/matrix-dendrite.md"],
+  "consent_required": true,
+  "install_consent_messages": {
+    "en": "Dendrite joins the public Matrix federation graph. Your homeserver becomes addressable at the domain you configure; any room you join, create, or publish is replicated (including message history) to every other server with a member in that room — and that replication cannot be fully recalled. Federation requires EITHER port 8448/tcp forwarded from your router to this host (Caddy will request a dedicated cert via caddy_add_matrix_federation_port), OR a .well-known/matrix/server JSON delegation on your apex domain (caddy_set_wellknown). Neither works without explicit setup. Dendrite stores all room state + message history + media in Postgres; federated joins of large rooms (e.g. Matrix HQ) can add tens of GB within days. Automatic media retention trimming is not yet wired up in this bundle — monitor disk. If your homeserver is reported for abuse, major homeservers (matrix.org, synapse.matrix.org) may defederate your domain; a poisoned domain cannot easily be rehabilitated. Dendrite itself is hardware-gated to refuse install on hosts with <8 GB RAM — the 2 GB minimum is only realistic when the homeserver isn't federated with busy rooms.",
+    "es": "Dendrite se une al grafo público de federación de Matrix. Tu homeserver será direccionable en el dominio que configures; cualquier sala a la que te unas, crees o publiques se replica (incluido el historial de mensajes) a todos los servidores que tengan un miembro en esa sala — y esa replicación no puede recuperarse completamente. La federación requiere O el puerto 8448/tcp reenviado desde tu router a este host (Caddy solicitará un certificado dedicado vía caddy_add_matrix_federation_port) O una delegación JSON en .well-known/matrix/server en tu dominio raíz (caddy_set_wellknown). Ninguno funciona sin configuración explícita. Dendrite almacena todo el estado de sala + historial + medios en Postgres; las uniones federadas a salas grandes (p. ej. Matrix HQ) pueden añadir decenas de GB en días. El recorte automático de retención de medios aún no está cableado en este paquete — monitoriza el disco. Si tu homeserver es reportado por abuso, los homeservers principales (matrix.org, synapse.matrix.org) pueden dejar de federarse con tu dominio; un dominio envenenado no puede rehabilitarse fácilmente. Dendrite se niega a instalarse en hosts con <8 GB RAM — el mínimo de 2 GB solo es realista cuando el homeserver no está federado con salas muy activas."
+  },
+  "requires": {
+    "env": ["MATRIX_SERVER_NAME", "MATRIX_POSTGRES_PASSWORD"],
+    "bundles": ["caddy"],
+    "min_ram_mb": 2048,
+    "recommended_ram_mb": 4096,
+    "min_disk_mb": 10000,
+    "recommended_disk_mb": 100000
+  },
+  "env_vars": [
+    {
+      "name": "MATRIX_SERVER_NAME",
+      "description": "The homeserver's public domain — this is the server_name that appears in user IDs (@alice:example.com). Typically an apex (example.com) with a .well-known/matrix/server delegation, OR a subdomain you'll expose on :8448 directly (matrix.example.com).",
+      "required": true
+    },
+    {
+      "name": "MATRIX_HOST",
+      "description": "Domain Caddy reverse-proxies the client-server API from. If using .well-known delegation, this differs from MATRIX_SERVER_NAME (e.g., server_name=example.com, host=matrix.example.com). If using :8448, usually the same as server_name.",
+      "required": false
+    },
+    {
+      "name": "MATRIX_POSTGRES_PASSWORD",
+      "description": "Password for the dendrite Postgres role (the bundle provisions Postgres inside the compose).",
+      "required": true,
+      "secret": true
+    },
+    {
+      "name": "MATRIX_URL",
+      "description": "Internal URL the Crow MCP server uses to reach Dendrite's client-server API (over the crow-federation docker network).",
+      "default": "http://dendrite:8008",
+      "required": false
+    },
+    {
+      "name": "MATRIX_ACCESS_TOKEN",
+      "description": "Access token for the admin account (obtain via POST /_matrix/client/v3/login after registering the admin via the Dendrite CLI).",
+      "required": false,
+      "secret": true
+    },
+    {
+      "name": "MATRIX_USER_ID",
+      "description": "Admin user's full Matrix ID (@admin:example.com). Used by the MCP server to scope tools to the admin context.",
+      "required": false
+    },
+    {
+      "name": "MATRIX_REGISTRATION_SHARED_SECRET",
+      "description": "Dendrite's registration shared secret (generated on first boot; used by the register-admin.sh script). Do not expose.",
+      "required": false,
+      "secret": true
+    }
+  ],
+  "ports": [],
+  "webUI": null,
+  "notes": "Two containers: dendrite + postgres. Both on crow-federation network; no host port publish. Federation needs EITHER caddy_add_matrix_federation_port (forwards 8448/tcp from router) OR caddy_set_wellknown matrix-server on the apex. Initial admin must be registered via `docker exec crow-dendrite create-account` after first boot."
+}

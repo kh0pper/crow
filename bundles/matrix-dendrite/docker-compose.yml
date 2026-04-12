@@ -1,0 +1,99 @@
+# Matrix-Dendrite — federated real-time chat.
+#
+# Two-container bundle: dendrite + postgres. Both on crow-federation; no
+# host port publish. Caddy reverse-proxies :443 → dendrite:8008 for the
+# client-server API. Federation (:8448) is handled via either:
+#   (a) caddy_add_matrix_federation_port forwarding :8448 → dendrite:8448
+#       (router must forward 8448/tcp), OR
+#   (b) caddy_set_wellknown matrix-server on the apex domain
+#
+# Data:
+#   ~/.crow/matrix-dendrite/dendrite/      signing keys, media, jetstream
+#   ~/.crow/matrix-dendrite/postgres/      Postgres data dir
+# First-boot entrypoint generates signing keys + dendrite.yaml if absent.
+
+networks:
+  crow-federation:
+    external: true
+  default:
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: crow-dendrite-postgres
+    networks:
+      - default
+    environment:
+      POSTGRES_USER: dendrite
+      POSTGRES_PASSWORD: ${MATRIX_POSTGRES_PASSWORD}
+      POSTGRES_DB: dendrite
+      # Single-database install: Dendrite accepts a single DB URI and
+      # manages its own schema namespaces internally.
+    volumes:
+      - ${MATRIX_DATA_DIR:-~/.crow/matrix-dendrite}/postgres:/var/lib/postgresql/data
+    init: true
+    mem_limit: 1g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dendrite"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  dendrite:
+    image: matrixdotorg/dendrite-monolith:v0.13.8
+    container_name: crow-dendrite
+    networks:
+      - default
+      - crow-federation
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MATRIX_SERVER_NAME: ${MATRIX_SERVER_NAME}
+      MATRIX_POSTGRES_URL: "postgres://dendrite:${MATRIX_POSTGRES_PASSWORD}@postgres:5432/dendrite?sslmode=disable"
+      DENDRITE_TRACE_HTTP: "0"
+    volumes:
+      - ${MATRIX_DATA_DIR:-~/.crow/matrix-dendrite}/dendrite:/etc/dendrite
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        CFG=/etc/dendrite/dendrite.yaml
+        KEY=/etc/dendrite/matrix_key.pem
+        if [ ! -f "$$CFG" ]; then
+          # First boot — generate signing key + config
+          /usr/bin/generate-keys --private-key "$$KEY"
+          # Generate minimal config via the bundled template approach.
+          # Dendrite's "generate-config" tool wants to print to stdout.
+          /usr/bin/generate-config \
+            --server "$${MATRIX_SERVER_NAME}" \
+            --db "$${MATRIX_POSTGRES_URL}" \
+            --private-key "$$KEY" \
+            > "$$CFG"
+          # Enable registration with shared secret for the host-side
+          # create-account helper. Patch the generated yaml in place:
+          SECRET=$$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 48)
+          # shellcheck disable=SC2016
+          sed -i "s|^\\s*registration_shared_secret:.*|  registration_shared_secret: \"$$SECRET\"|" "$$CFG"
+          # Ensure federation + metrics are on
+          sed -i "s|^\\s*disable_federation:.*|  disable_federation: false|" "$$CFG"
+          echo "Generated /etc/dendrite/dendrite.yaml with fresh signing key."
+          echo "Registration shared secret: $$SECRET"
+          echo "(copy this into MATRIX_REGISTRATION_SHARED_SECRET in .env)"
+        fi
+        exec /usr/bin/dendrite \
+          --config /etc/dendrite/dendrite.yaml \
+          --http-bind-address 0.0.0.0:8008 \
+          --https-bind-address 0.0.0.0:8448
+    init: true
+    mem_limit: 4g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8008/_matrix/client/versions >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s

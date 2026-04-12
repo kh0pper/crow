@@ -81,6 +81,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | "schedule", "remind me", "every day at", "recurring" | "programar", "recuérdame", "cada día a las" | scheduling | crow-memory |
 | "toot", "post to fediverse", "follow @user@...", "mastodon", "gotosocial", "activitypub" | "publicar en fediverso", "tootear", "seguir @usuario@...", "mastodon", "gotosocial" | gotosocial | crow-gotosocial |
 | "writefreely", "federated blog", "long-form post", "publish article", "blog to fediverse" | "writefreely", "blog federado", "artículo largo", "publicar al fediverso" | writefreely | crow-writefreely |
+| "matrix", "dendrite", "join #room:server", "send @user:server", "e2ee chat", "matrix room" | "matrix", "dendrite", "unirse a #sala:servidor", "mensaje a @usuario:servidor", "chat e2ee" | matrix-dendrite | crow-matrix-dendrite |
 | "tutor me", "teach me", "quiz me", "help me understand" | "enséñame", "explícame", "evalúame" | tutoring | crow-memory |
 | "wrap up", "summarize session", "what did we do" | "resumir sesión", "qué hicimos" | session-summary | crow-memory |
 | "change language", "speak in..." | "cambiar idioma", "háblame en..." | i18n | crow-memory |
