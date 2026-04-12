@@ -1,0 +1,27 @@
+# Dozzle — real-time Docker log viewer.
+#
+# Pinned to v10.3.1. Docker socket mounted read-only; Crow's compose validator
+# refuses any writable variant. Bound to 127.0.0.1 only — never expose the
+# port publicly without enabling Dozzle's built-in auth.
+
+services:
+  dozzle:
+    image: amir20/dozzle:v10.3.1
+    container_name: crow-dozzle
+    ports:
+      - "127.0.0.1:8095:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - DOZZLE_NO_ANALYTICS=true
+      - DOZZLE_ENABLE_ACTIONS=false
+      - DOZZLE_ENABLE_SHELL=false
+    init: true
+    mem_limit: 128m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "dozzle", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5s

@@ -1,0 +1,11 @@
+{
+  "name": "crow-adguard-home",
+  "version": "1.0.0",
+  "description": "AdGuard Home MCP server — DNS filtering stats, query log, and rule management",
+  "type": "module",
+  "main": "server/index.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  }
+}

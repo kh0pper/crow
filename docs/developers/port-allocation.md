@@ -34,6 +34,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 587 | — | mail submission | reserved (Phase 2 mail) |
 | 993 | — | mail IMAPS | reserved (Phase 2 mail) |
 | 2222 | — | (avoid: common host anti-scan sshd port) | avoid |
+| 2019 | 127.0.0.1 | Caddy admin API (host-local) | MVP PR 0.5 |
 | 2223 | 127.0.0.1 | gitea (SSH) | MVP PR 5 |
 | 2224 | 127.0.0.1 | forgejo (SSH) | MVP PR 5 |
 | 2283 | 127.0.0.1 | immich (existing — verify in compose) | existing |
