@@ -1,0 +1,75 @@
+# SearXNG — privacy-respecting metasearch engine.
+#
+# Config:
+#   ~/.crow/searxng/settings.yml — user-editable config (mounted)
+#   The entrypoint seeds a minimal working settings.yml on first boot if
+#   the file does not exist. It also rewrites the secret_key line if the
+#   user leaves SEARXNG_SECRET_KEY empty — a fresh random secret is
+#   generated per install.
+#
+# JSON API:
+#   SearXNG's JSON output format is enabled in the seeded settings.yml so
+#   the Crow MCP server can issue /search?format=json queries.
+
+services:
+  searxng:
+    image: searxng/searxng:2026.4.11-9e08a6771
+    container_name: crow-searxng
+    ports:
+      - "127.0.0.1:8098:8080"
+    volumes:
+      - ${SEARXNG_CONFIG_DIR:-~/.crow/searxng}:/etc/searxng
+    environment:
+      - SEARXNG_BASE_URL=${SEARXNG_BASE_URL:-http://localhost:8098/}
+      - SEARXNG_SECRET_KEY=${SEARXNG_SECRET_KEY:-}
+      - UWSGI_WORKERS=2
+      - UWSGI_THREADS=4
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        CONFIG=/etc/searxng/settings.yml
+        if [ ! -f "$$CONFIG" ]; then
+          # Seed a minimal working config on first boot.
+          SECRET="$$SEARXNG_SECRET_KEY"
+          if [ -z "$$SECRET" ]; then
+            SECRET=$$(head -c 32 /dev/urandom | base64 | tr -d '\n/+' | head -c 48)
+          fi
+          cat > "$$CONFIG" <<CFG_EOF
+        # Seeded by Crow on first boot. Edit freely and restart the bundle.
+        use_default_settings: true
+        general:
+          instance_name: "Crow SearXNG"
+          contact_url: false
+        server:
+          secret_key: "$$SECRET"
+          limiter: false
+          image_proxy: true
+          bind_address: "0.0.0.0"
+          port: 8080
+        search:
+          formats:
+            - html
+            - json
+          safe_search: 0
+          autocomplete: "duckduckgo"
+        ui:
+          static_use_hash: true
+        CFG_EOF
+        else
+          # Rotate secret_key on subsequent boots only if user passes one via env.
+          if [ -n "$$SEARXNG_SECRET_KEY" ]; then
+            sed -i "s|^  secret_key:.*|  secret_key: \"$$SEARXNG_SECRET_KEY\"|" "$$CONFIG" || true
+          fi
+        fi
+        exec /usr/local/searxng/dockerfiles/docker-entrypoint.sh
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
