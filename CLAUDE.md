@@ -205,7 +205,7 @@ Uses `@libsql/client` for local SQLite files (default: `~/.crow/data/crow.db`, g
 - **identity_attestations** — F.11 signed bindings (crow_id, app, external_handle, app_pubkey?, sig, version, revoked_at). Published via gateway `/.well-known/crow-identity.json`. UNIQUE(crow_id, app, external_handle, version) — new version row per rotation
 - **identity_attestation_revocations** — F.11 signed revocations (attestation_id FK CASCADE, revoked_at, reason, sig). Published via `/.well-known/crow-identity-revocations.json`
 - **crosspost_rules** — F.12.2 opt-in crosspost config (source_app, source_trigger, target_app, transform, active). Triggers: `on_publish`, `on_tag:<tag>`, `manual`
-- **crosspost_log** — F.12.2 audit + idempotency log (idempotency_key, source_app, source_post_id, target_app, status, target_post_id, scheduled_at, published_at, cancelled_at). UNIQUE(idempotency_key, source_app, target_app). 7-day idempotency window; >30 days GC'd daily
+- **crosspost_log** — F.12.2 audit + idempotency log (idempotency_key, source_app, source_post_id, target_app, status, target_post_id, scheduled_at, published_at, cancelled_at, **transformed_payload_json** — F.13). UNIQUE(idempotency_key, source_app, target_app). 7-day idempotency window; F.13 scheduler auto-publishes `ready`/`queued`-past-scheduled_at rows to mastodon/gotosocial/crow-blog and marks media-heavy targets (pixelfed/peertube/funkwhale) as `manual`. GC prunes >30 days
 - **iptv_playlists** — IPTV M3U playlist sources (name, url, auto_refresh, channel_count)
 - **iptv_channels** — IPTV channels from playlists (playlist_id FK, name, stream_url, tvg_id, group_title, is_favorite)
 - **iptv_epg** — Electronic Program Guide entries (channel_tvg_id, title, start_time, end_time, indexed)

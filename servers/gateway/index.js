@@ -140,6 +140,20 @@ try {
   // audit_log table may not exist yet (first run before init-db)
 }
 
+// Run startup migrations (idempotent; each migration self-tracks via dashboard_settings.migrations)
+try {
+  const { runGatewayMigrations } = await import("./migrations.js");
+  const _migDb = createDbClient();
+  const results = await runGatewayMigrations(_migDb);
+  _migDb.close();
+  for (const r of results) {
+    if (r.ran) console.log(`[migrations] ${r.id}: applied (profile="${r.profileName}", voice=${r.voice})`);
+    else if (r.error) console.warn(`[migrations] ${r.id}: FAILED — ${r.error}`);
+  }
+} catch (e) {
+  console.warn("[migrations] startup migrations skipped:", e.message);
+}
+
 // Consolidated session manager
 const sessionManager = new SessionManager();
 

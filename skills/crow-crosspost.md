@@ -98,7 +98,7 @@ Operator can cancel before `scheduled_at`:
 crow_crosspost_cancel { "log_id": <id> }
 ```
 
-After `scheduled_at` passes, a future dispatcher (not yet shipped — lands in a follow-up) calls the target app's publish verb + `crow_crosspost_mark_published`.
+After `scheduled_at` passes, the F.13 scheduler inside the gateway auto-publishes the stored `transformed_payload_json` to the target bundle (text targets: mastodon, gotosocial, crow-blog). Media-heavy targets (pixelfed photos, peertube videos, funkwhale tracks) stay status=`manual` because the scheduler doesn't have the binary file data to upload — operator invokes the target's own upload tool + `crow_crosspost_mark_published` by hand.
 
 ### List recent cross-posts
 
@@ -123,4 +123,4 @@ If you've attested your handles on the source and target apps, cross-posts inher
 
 ## Log retention
 
-Entries >30 days are garbage-collected by the daily cleanup sweeper (not yet wired — manual `DELETE FROM crosspost_log WHERE created_at < strftime('%s', 'now', '-30 days')` until F.12.3 or similar).
+Entries >30 days are garbage-collected by the F.13 scheduler's hourly GC tick (only prunes terminal statuses: published/cancelled/error/manual — in-flight queued/ready rows are kept). The same tick sweeps `moderation_actions` past their 72h expires_at into `status='expired'`.
