@@ -21,6 +21,7 @@ produces `~/.crow/bin/open-llm-vtuber.AppImage`.
 | `web-0006-persona-swap.patch` | **intentionally empty** | Spike 2 confirmed upstream `switch-config` handles per-connection persona; slot retained to keep numbering contiguous. |
 | `web-0007-crow-pet-anchor-on-launch.patch` | active | Read `CROW_PET_ANCHOR` env var at launch, auto-switch to pet mode, apply anchor (right / left / bottom-right / bottom-left) with 320x480 pet-body defaults. |
 | `web-0008-pet-control-socket.patch` | active | Unix-socket control channel at `$XDG_RUNTIME_DIR/crow-pet.sock` so the Crow gateway can re-anchor a running pet via `{op:"anchor",spec:...}` without respawning. |
+| `web-0009-cubism-acceptance.patch` | active | First-launch acceptance dialog for the Live2D Cubism SDK; fetches the SDK from Live2D's CDN, verifies its pinned SHA-256, and caches it under `~/.crow/cache/cubism/`. Decline or SHA mismatch disables pet mode for that launch. |
 
 ## Applying
 
