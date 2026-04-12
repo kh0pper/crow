@@ -34,6 +34,11 @@ export default {
         </div>
 
         <div class="cd-section">
+          <h3>Certificate Health</h3>
+          <div id="cd-certs" class="cd-certs"><div class="np-loading">Loading…</div></div>
+        </div>
+
+        <div class="cd-section">
           <h3>Sites</h3>
           <div id="cd-sites" class="cd-sites"><div class="np-loading">Loading…</div></div>
         </div>
@@ -222,9 +227,64 @@ function script() {
       } catch (e) { alert('Remove failed: ' + e.message); }
     }
 
+    async function loadCerts() {
+      const el = document.getElementById('cd-certs');
+      clearNode(el);
+      try {
+        const res = await fetch('/api/caddy/cert-health');
+        const data = await res.json();
+        if (data.error) { el.appendChild(errorNode(data.error)); return; }
+        if (!data.results || data.results.length === 0) {
+          const d = document.createElement('div');
+          d.className = 'np-idle';
+          d.textContent = 'No sites configured yet — add one below and Caddy will request a certificate on first request.';
+          el.appendChild(d);
+          return;
+        }
+        const card = document.createElement('div');
+        card.className = 'cd-card';
+        const summary = document.createElement('div');
+        summary.className = 'cd-cert-summary cd-cert-' + data.summary;
+        summary.textContent = 'Overall: ' + data.summary.toUpperCase();
+        card.appendChild(summary);
+
+        for (const r of data.results) {
+          const row = document.createElement('div');
+          row.className = 'cd-cert-row cd-cert-' + r.status;
+          const head = document.createElement('div');
+          head.className = 'cd-cert-head';
+          const dot = document.createElement('span');
+          dot.className = 'cd-cert-dot cd-cert-dot-' + r.status;
+          dot.textContent = r.status === 'ok' ? '\u2713' : r.status === 'warning' ? '!' : '\u2717';
+          head.appendChild(dot);
+          const dom = document.createElement('b');
+          dom.textContent = r.domain;
+          head.appendChild(dom);
+          row.appendChild(head);
+
+          const meta = document.createElement('div');
+          meta.className = 'cd-cert-meta';
+          meta.textContent = r.issuer + (r.expires_at ? '  \u2022  expires ' + new Date(r.expires_at).toLocaleDateString() : '');
+          row.appendChild(meta);
+
+          if (r.problems && r.problems.length) {
+            const p = document.createElement('div');
+            p.className = 'cd-cert-problems';
+            p.textContent = r.problems.join('; ');
+            row.appendChild(p);
+          }
+          card.appendChild(row);
+        }
+        el.appendChild(card);
+      } catch (e) {
+        el.appendChild(errorNode('Cannot load cert health: ' + e.message));
+      }
+    }
+
     document.getElementById('cd-add').addEventListener('submit', cdAdd);
     loadStatus();
     loadSites();
+    loadCerts();
   `;
 }
 
@@ -256,5 +316,25 @@ function styles() {
                             background: var(--crow-bg-elevated); border-radius: 10px; text-align: center; }
     .np-error { color: var(--crow-error, #ef4444); font-size: 0.9rem; padding: 1rem;
                 background: var(--crow-bg-elevated); border-radius: 10px; text-align: center; }
+
+    .cd-cert-summary { font-size: .85rem; font-weight: 600; text-transform: uppercase;
+                       letter-spacing: .05em; padding: .35rem .6rem; border-radius: 6px;
+                       display: inline-block; margin-bottom: .8rem; }
+    .cd-cert-summary.cd-cert-ok { background: rgba(34,197,94,.15); color: #22c55e; }
+    .cd-cert-summary.cd-cert-warning { background: rgba(234,179,8,.15); color: #eab308; }
+    .cd-cert-summary.cd-cert-error { background: rgba(239,68,68,.15); color: #ef4444; }
+    .cd-cert-row { padding: .6rem 0; border-top: 1px solid var(--crow-border); }
+    .cd-cert-row:first-of-type { border-top: none; }
+    .cd-cert-head { display: flex; align-items: center; gap: .5rem; }
+    .cd-cert-head b { font-size: .95rem; color: var(--crow-text-primary); }
+    .cd-cert-dot { display: inline-flex; align-items: center; justify-content: center;
+                   width: 1.2rem; height: 1.2rem; border-radius: 50%; font-size: .75rem;
+                   font-weight: bold; }
+    .cd-cert-dot-ok { background: #22c55e; color: #0b0d10; }
+    .cd-cert-dot-warning { background: #eab308; color: #0b0d10; }
+    .cd-cert-dot-error { background: #ef4444; color: #fff; }
+    .cd-cert-meta { font-size: .8rem; color: var(--crow-text-muted); margin-top: .2rem;
+                    margin-left: 1.7rem; font-family: ui-monospace, monospace; }
+    .cd-cert-problems { font-size: .8rem; color: #ef4444; margin-top: .15rem; margin-left: 1.7rem; }
   `;
 }
