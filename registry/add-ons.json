@@ -9,20 +9,38 @@
       "type": "mcp-server",
       "author": "Crow",
       "category": "education",
-      "tags": ["education", "stem", "kids", "classroom", "tutor", "blockly", "maker"],
+      "tags": [
+        "education",
+        "stem",
+        "kids",
+        "classroom",
+        "tutor",
+        "blockly",
+        "maker"
+      ],
       "icon": "graduation-cap",
       "server": {
         "command": "node",
-        "args": ["server/index.js"],
-        "envKeys": ["MAKER_LAB_MODE", "MAKER_LAB_LLM_ENDPOINT", "MAKER_LAB_LLM_MODEL"]
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "MAKER_LAB_MODE",
+          "MAKER_LAB_LLM_ENDPOINT",
+          "MAKER_LAB_LLM_MODEL"
+        ]
       },
       "panel": "panel/maker-lab.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/maker-lab.md"],
+      "skills": [
+        "skills/maker-lab.md"
+      ],
       "requires": {
         "min_ram_mb": 256,
         "min_disk_mb": 100,
-        "bundles": ["companion"]
+        "bundles": [
+          "companion"
+        ]
       },
       "env_vars": [],
       "notes": "Hard deps: companion bundle + any OpenAI-compatible local-LLM endpoint. Recommended engine: ollama (solo/family) or vllm (classroom). See bundles/maker-lab/PHASE-0-REPORT.md."
@@ -59,12 +77,32 @@
         "recommended_disk_mb": 20000
       },
       "env_vars": [
-        { "name": "KOLIBRI_URL", "description": "Internal URL for reaching the Kolibri API.", "default": "http://localhost:8085", "required": false },
-        { "name": "KOLIBRI_HTTP_PORT", "description": "Host port to expose Kolibri on. Default 8085.", "default": "8085", "required": false },
-        { "name": "KOLIBRI_DATA_PATH", "description": "Host path for content + SQLite DB (defaults to a named volume).", "required": false },
-        { "name": "KOLIBRI_FACILITY_NAME", "description": "Default facility name shown on first run.", "required": false }
+        {
+          "name": "KOLIBRI_URL",
+          "description": "Internal URL for reaching the Kolibri API.",
+          "default": "http://localhost:8085",
+          "required": false
+        },
+        {
+          "name": "KOLIBRI_HTTP_PORT",
+          "description": "Host port to expose Kolibri on. Default 8085.",
+          "default": "8085",
+          "required": false
+        },
+        {
+          "name": "KOLIBRI_DATA_PATH",
+          "description": "Host path for content + SQLite DB (defaults to a named volume).",
+          "required": false
+        },
+        {
+          "name": "KOLIBRI_FACILITY_NAME",
+          "description": "Default facility name shown on first run.",
+          "required": false
+        }
       ],
-      "sibling_of": ["maker-lab"],
+      "sibling_of": [
+        "maker-lab"
+      ],
       "notes": "First-run setup is completed in the Kolibri web UI. Sibling of maker-lab \u2014 Kolibri is the content spine, maker-lab is the scaffolded tutor. Pi 4 friendly (512 MB floor). A populated K-5 STEM library typically runs 5-10 GB."
     },
     {
@@ -99,11 +137,25 @@
         "recommended_disk_mb": 4000
       },
       "env_vars": [
-        { "name": "SCRATCH_HTTP_PORT", "description": "Host port to expose Scratch on. Default 8087.", "default": "8087", "required": false },
-        { "name": "SCRATCH_GUI_REF", "description": "scratch-gui git ref (tag, branch, or commit SHA) to build. Defaults to 'master'.", "default": "master", "required": false }
+        {
+          "name": "SCRATCH_HTTP_PORT",
+          "description": "Host port to expose Scratch on. Default 8087.",
+          "default": "8087",
+          "required": false
+        },
+        {
+          "name": "SCRATCH_GUI_REF",
+          "description": "scratch-gui git ref (tag, branch, or commit SHA) to build. Defaults to 'master'.",
+          "default": "master",
+          "required": false
+        }
       ],
-      "sibling_of": ["maker-lab"],
-      "age_gate": { "min_age": 8 },
+      "sibling_of": [
+        "maker-lab"
+      ],
+      "age_gate": {
+        "min_age": 8
+      },
       "notes": "Independent self-hosted deployment of the open-source scratch-gui code (MIT license) \u2014 not an official Scratch Foundation product, and the 'Scratch' name/logo are trademarks of the Scratch Foundation. First install builds scratch-gui from source (~2 GB disk + ~5-15 min on a Pi 4 / ~2 min on x86). Runtime footprint after build is ~50 MB static. No sign-in, no cloud save \u2014 projects download as .sb3 files only. Gated to age 8+; younger learners stay on Blockly."
     },
     {
@@ -130,7 +182,9 @@
         "label": "vLLM API docs"
       },
       "requires": {
-        "env": ["VLLM_MODEL"],
+        "env": [
+          "VLLM_MODEL"
+        ],
         "gpu": true,
         "min_vram_gb": 8,
         "recommended_vram_gb": 16,
@@ -141,12 +195,40 @@
         "platform": "linux-x86_64"
       },
       "env_vars": [
-        { "name": "VLLM_MODEL", "description": "HuggingFace model ID to serve (e.g. Qwen/Qwen2.5-3B-Instruct).", "required": true },
-        { "name": "VLLM_HTTP_PORT", "description": "Host port for the OpenAI-compatible endpoint.", "default": "8089", "required": false },
-        { "name": "VLLM_MAX_NUM_SEQS", "description": "Max concurrent requests in flight.", "default": "16", "required": false },
-        { "name": "VLLM_GPU_MEMORY_UTILIZATION", "description": "Fraction of GPU VRAM to claim.", "default": "0.85", "required": false },
-        { "name": "VLLM_HF_TOKEN", "description": "HuggingFace token for gated models.", "required": false, "secret": true },
-        { "name": "VLLM_MODEL_CACHE_PATH", "description": "Host path for the HuggingFace model cache.", "required": false }
+        {
+          "name": "VLLM_MODEL",
+          "description": "HuggingFace model ID to serve (e.g. Qwen/Qwen2.5-3B-Instruct).",
+          "required": true
+        },
+        {
+          "name": "VLLM_HTTP_PORT",
+          "description": "Host port for the OpenAI-compatible endpoint.",
+          "default": "8089",
+          "required": false
+        },
+        {
+          "name": "VLLM_MAX_NUM_SEQS",
+          "description": "Max concurrent requests in flight.",
+          "default": "16",
+          "required": false
+        },
+        {
+          "name": "VLLM_GPU_MEMORY_UTILIZATION",
+          "description": "Fraction of GPU VRAM to claim.",
+          "default": "0.85",
+          "required": false
+        },
+        {
+          "name": "VLLM_HF_TOKEN",
+          "description": "HuggingFace token for gated models.",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "VLLM_MODEL_CACHE_PATH",
+          "description": "Host path for the HuggingFace model cache.",
+          "required": false
+        }
       ],
       "notes": "Linux x86_64 + NVIDIA GPU required. Recommended: Qwen2.5-3B-Instruct on a 16 GB GPU at VLLM_MAX_NUM_SEQS=16 (per the Maker Lab Phase 0 benchmark). Drops into Maker Lab as MAKER_LAB_LLM_ENDPOINT without changes."
     },
@@ -176,21 +258,48 @@
         "label": "JupyterHub"
       },
       "requires": {
-        "env": ["MLA_ADMIN_USER", "MLA_ADMIN_PASSWORD"],
+        "env": [
+          "MLA_ADMIN_USER",
+          "MLA_ADMIN_PASSWORD"
+        ],
         "min_ram_mb": 2048,
         "recommended_ram_mb": 8000,
         "min_disk_mb": 4000,
         "recommended_disk_mb": 40000,
-        "bundles": ["maker-lab"]
+        "bundles": [
+          "maker-lab"
+        ]
       },
       "env_vars": [
-        { "name": "MLA_ADMIN_USER", "description": "Initial JupyterHub admin username.", "required": true },
-        { "name": "MLA_ADMIN_PASSWORD", "description": "Initial admin password.", "required": true, "secret": true },
-        { "name": "MLA_HTTP_PORT", "description": "Host port for the JupyterHub UI.", "default": "8088", "required": false },
-        { "name": "MLA_DATA_PATH", "description": "Host path for user home dirs + hub state.", "required": false }
+        {
+          "name": "MLA_ADMIN_USER",
+          "description": "Initial JupyterHub admin username.",
+          "required": true
+        },
+        {
+          "name": "MLA_ADMIN_PASSWORD",
+          "description": "Initial admin password.",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "MLA_HTTP_PORT",
+          "description": "Host port for the JupyterHub UI.",
+          "default": "8088",
+          "required": false
+        },
+        {
+          "name": "MLA_DATA_PATH",
+          "description": "Host path for user home dirs + hub state.",
+          "required": false
+        }
       ],
-      "sibling_of": ["maker-lab"],
-      "age_gate": { "min_age": 9 },
+      "sibling_of": [
+        "maker-lab"
+      ],
+      "age_gate": {
+        "min_age": 9
+      },
       "notes": "v1 single-admin classroom shape: NativeAuthenticator + SimpleLocalProcessSpawner. Kid-safe kernel defaults disable shell-escape magics. True multi-host / sandboxed-per-user deploys are future work. Hard dep on maker-lab."
     },
     {
@@ -3172,7 +3281,7 @@
     {
       "id": "gotosocial",
       "name": "GoToSocial",
-      "description": "Lightweight ActivityPub microblog server (fediverse). Pi-friendly single-binary alternative to Mastodon — joins the public fediverse with a sub-500 MB footprint.",
+      "description": "Lightweight ActivityPub microblog server (fediverse). Pi-friendly single-binary alternative to Mastodon \u2014 joins the public fediverse with a sub-500 MB footprint.",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
@@ -3190,16 +3299,28 @@
       },
       "server": {
         "command": "node",
-        "args": ["server/index.js"],
-        "envKeys": ["GTS_URL", "GTS_ACCESS_TOKEN"]
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "GTS_URL",
+          "GTS_ACCESS_TOKEN"
+        ]
       },
       "panel": "panel/gotosocial.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/gotosocial.md"],
+      "skills": [
+        "skills/gotosocial.md"
+      ],
       "consent_required": true,
       "requires": {
-        "env": ["GTS_HOST", "GTS_ACCOUNT_DOMAIN"],
-        "bundles": ["caddy"],
+        "env": [
+          "GTS_HOST",
+          "GTS_ACCOUNT_DOMAIN"
+        ],
+        "bundles": [
+          "caddy"
+        ],
         "min_ram_mb": 512,
         "recommended_ram_mb": 1024,
         "min_disk_mb": 2000,
@@ -3241,36 +3362,75 @@
     {
       "id": "writefreely",
       "name": "WriteFreely",
-      "description": "Lightweight, minimalist ActivityPub blogging platform. Single-binary, single-SQLite-file footprint — ideal for long-form writing federated to the fediverse.",
+      "description": "Lightweight, minimalist ActivityPub blogging platform. Single-binary, single-SQLite-file footprint \u2014 ideal for long-form writing federated to the fediverse.",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "federated-social",
-      "tags": ["activitypub", "fediverse", "blog", "long-form", "federated", "writing"],
+      "tags": [
+        "activitypub",
+        "fediverse",
+        "blog",
+        "long-form",
+        "federated",
+        "writing"
+      ],
       "icon": "file-text",
-      "docker": { "composefile": "docker-compose.yml" },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
       "server": {
         "command": "node",
-        "args": ["server/index.js"],
-        "envKeys": ["WF_URL", "WF_ACCESS_TOKEN", "WF_COLLECTION_ALIAS"]
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "WF_URL",
+          "WF_ACCESS_TOKEN",
+          "WF_COLLECTION_ALIAS"
+        ]
       },
       "panel": "panel/writefreely.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/writefreely.md"],
+      "skills": [
+        "skills/writefreely.md"
+      ],
       "consent_required": true,
       "requires": {
-        "env": ["WF_HOST"],
-        "bundles": ["caddy"],
+        "env": [
+          "WF_HOST"
+        ],
+        "bundles": [
+          "caddy"
+        ],
         "min_ram_mb": 256,
         "recommended_ram_mb": 512,
         "min_disk_mb": 500,
         "recommended_disk_mb": 5000
       },
       "env_vars": [
-        { "name": "WF_HOST", "description": "Public subdomain for this WriteFreely instance.", "required": true },
-        { "name": "WF_ACCESS_TOKEN", "description": "Admin API token (from POST /api/auth/login after first-run web setup).", "required": false, "secret": true },
-        { "name": "WF_COLLECTION_ALIAS", "description": "Default collection (blog) alias.", "required": false },
-        { "name": "WF_SINGLE_USER", "description": "Single-user mode (true) or multi-user (false).", "default": "true", "required": false }
+        {
+          "name": "WF_HOST",
+          "description": "Public subdomain for this WriteFreely instance.",
+          "required": true
+        },
+        {
+          "name": "WF_ACCESS_TOKEN",
+          "description": "Admin API token (from POST /api/auth/login after first-run web setup).",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "WF_COLLECTION_ALIAS",
+          "description": "Default collection (blog) alias.",
+          "required": false
+        },
+        {
+          "name": "WF_SINGLE_USER",
+          "description": "Single-user mode (true) or multi-user (false).",
+          "default": "true",
+          "required": false
+        }
       ],
       "ports": [],
       "webUI": null,
@@ -3279,38 +3439,88 @@
     {
       "id": "matrix-dendrite",
       "name": "Matrix (Dendrite)",
-      "description": "Matrix homeserver on Dendrite — federated real-time chat with end-to-end encryption. Lighter than Synapse, monolithic binary. Joins the Matrix federation graph via HTTPS federation (:8448 or .well-known delegation).",
+      "description": "Matrix homeserver on Dendrite \u2014 federated real-time chat with end-to-end encryption. Lighter than Synapse, monolithic binary. Joins the Matrix federation graph via HTTPS federation (:8448 or .well-known delegation).",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "federated-comms",
-      "tags": ["matrix", "dendrite", "chat", "federation", "e2ee", "realtime"],
+      "tags": [
+        "matrix",
+        "dendrite",
+        "chat",
+        "federation",
+        "e2ee",
+        "realtime"
+      ],
       "icon": "message-circle",
-      "docker": { "composefile": "docker-compose.yml" },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
       "server": {
         "command": "node",
-        "args": ["server/index.js"],
-        "envKeys": ["MATRIX_URL", "MATRIX_ACCESS_TOKEN", "MATRIX_USER_ID", "MATRIX_SERVER_NAME"]
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "MATRIX_URL",
+          "MATRIX_ACCESS_TOKEN",
+          "MATRIX_USER_ID",
+          "MATRIX_SERVER_NAME"
+        ]
       },
       "panel": "panel/matrix-dendrite.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/matrix-dendrite.md"],
+      "skills": [
+        "skills/matrix-dendrite.md"
+      ],
       "consent_required": true,
       "requires": {
-        "env": ["MATRIX_SERVER_NAME", "MATRIX_POSTGRES_PASSWORD"],
-        "bundles": ["caddy"],
+        "env": [
+          "MATRIX_SERVER_NAME",
+          "MATRIX_POSTGRES_PASSWORD"
+        ],
+        "bundles": [
+          "caddy"
+        ],
         "min_ram_mb": 2048,
         "recommended_ram_mb": 4096,
         "min_disk_mb": 10000,
         "recommended_disk_mb": 100000
       },
       "env_vars": [
-        { "name": "MATRIX_SERVER_NAME", "description": "Public homeserver domain (appears in user IDs as @alice:<this>).", "required": true },
-        { "name": "MATRIX_HOST", "description": "Domain Caddy reverse-proxies the client-server API on. May differ from MATRIX_SERVER_NAME when using .well-known delegation.", "required": false },
-        { "name": "MATRIX_POSTGRES_PASSWORD", "description": "Password for the bundled Postgres role.", "required": true, "secret": true },
-        { "name": "MATRIX_ACCESS_TOKEN", "description": "Admin access token (from POST /_matrix/client/v3/login after registering the admin via the CLI).", "required": false, "secret": true },
-        { "name": "MATRIX_USER_ID", "description": "Admin user's full Matrix ID (@admin:example.com).", "required": false },
-        { "name": "MATRIX_REGISTRATION_SHARED_SECRET", "description": "Dendrite's registration shared secret (printed to logs on first boot).", "required": false, "secret": true }
+        {
+          "name": "MATRIX_SERVER_NAME",
+          "description": "Public homeserver domain (appears in user IDs as @alice:<this>).",
+          "required": true
+        },
+        {
+          "name": "MATRIX_HOST",
+          "description": "Domain Caddy reverse-proxies the client-server API on. May differ from MATRIX_SERVER_NAME when using .well-known delegation.",
+          "required": false
+        },
+        {
+          "name": "MATRIX_POSTGRES_PASSWORD",
+          "description": "Password for the bundled Postgres role.",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "MATRIX_ACCESS_TOKEN",
+          "description": "Admin access token (from POST /_matrix/client/v3/login after registering the admin via the CLI).",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "MATRIX_USER_ID",
+          "description": "Admin user's full Matrix ID (@admin:example.com).",
+          "required": false
+        },
+        {
+          "name": "MATRIX_REGISTRATION_SHARED_SECRET",
+          "description": "Dendrite's registration shared secret (printed to logs on first boot).",
+          "required": false,
+          "secret": true
+        }
       ],
       "ports": [],
       "webUI": null,
@@ -3319,41 +3529,107 @@
     {
       "id": "funkwhale",
       "name": "Funkwhale",
-      "description": "Federated music server — self-hosted audio library + podcast streaming + fediverse-federated listening over ActivityPub. Follow remote channels/libraries, share your own over AP.",
+      "description": "Federated music server \u2014 self-hosted audio library + podcast streaming + fediverse-federated listening over ActivityPub. Follow remote channels/libraries, share your own over AP.",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "federated-media",
-      "tags": ["music", "funkwhale", "activitypub", "fediverse", "federated", "audio", "podcasts"],
+      "tags": [
+        "music",
+        "funkwhale",
+        "activitypub",
+        "fediverse",
+        "federated",
+        "audio",
+        "podcasts"
+      ],
       "icon": "music",
-      "docker": { "composefile": "docker-compose.yml" },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
       "server": {
         "command": "node",
-        "args": ["server/index.js"],
-        "envKeys": ["FUNKWHALE_URL", "FUNKWHALE_ACCESS_TOKEN", "FUNKWHALE_HOSTNAME"]
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "FUNKWHALE_URL",
+          "FUNKWHALE_ACCESS_TOKEN",
+          "FUNKWHALE_HOSTNAME"
+        ]
       },
       "panel": "panel/funkwhale.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/funkwhale.md"],
+      "skills": [
+        "skills/funkwhale.md"
+      ],
       "consent_required": true,
       "requires": {
-        "env": ["FUNKWHALE_HOSTNAME", "FUNKWHALE_POSTGRES_PASSWORD", "FUNKWHALE_DJANGO_SECRET_KEY"],
-        "bundles": ["caddy"],
+        "env": [
+          "FUNKWHALE_HOSTNAME",
+          "FUNKWHALE_POSTGRES_PASSWORD",
+          "FUNKWHALE_DJANGO_SECRET_KEY"
+        ],
+        "bundles": [
+          "caddy"
+        ],
         "min_ram_mb": 1500,
         "recommended_ram_mb": 3000,
         "min_disk_mb": 10000,
         "recommended_disk_mb": 100000
       },
       "env_vars": [
-        { "name": "FUNKWHALE_HOSTNAME", "description": "Public domain for this Funkwhale pod (subdomain; path-mounts break ActivityPub).", "required": true },
-        { "name": "FUNKWHALE_POSTGRES_PASSWORD", "description": "Password for the bundled Postgres role.", "required": true, "secret": true },
-        { "name": "FUNKWHALE_DJANGO_SECRET_KEY", "description": "Django secret key (64+ random chars). Changing this invalidates sessions.", "required": true, "secret": true },
-        { "name": "FUNKWHALE_ACCESS_TOKEN", "description": "Personal Access Token from Settings → Applications (after superuser creation).", "required": false, "secret": true },
-        { "name": "FUNKWHALE_S3_ENDPOINT", "description": "Optional S3-compatible endpoint for audio storage. If set, scripts/configure-storage.mjs translates to AWS_* via storage-translators.funkwhale().", "required": false },
-        { "name": "FUNKWHALE_S3_BUCKET", "description": "S3 bucket for audio.", "required": false },
-        { "name": "FUNKWHALE_S3_ACCESS_KEY", "description": "S3 access key.", "required": false, "secret": true },
-        { "name": "FUNKWHALE_S3_SECRET_KEY", "description": "S3 secret key.", "required": false, "secret": true },
-        { "name": "FUNKWHALE_S3_REGION", "description": "S3 region.", "default": "us-east-1", "required": false }
+        {
+          "name": "FUNKWHALE_HOSTNAME",
+          "description": "Public domain for this Funkwhale pod (subdomain; path-mounts break ActivityPub).",
+          "required": true
+        },
+        {
+          "name": "FUNKWHALE_POSTGRES_PASSWORD",
+          "description": "Password for the bundled Postgres role.",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "FUNKWHALE_DJANGO_SECRET_KEY",
+          "description": "Django secret key (64+ random chars). Changing this invalidates sessions.",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "FUNKWHALE_ACCESS_TOKEN",
+          "description": "Personal Access Token from Settings \u2192 Applications (after superuser creation).",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "FUNKWHALE_S3_ENDPOINT",
+          "description": "Optional S3-compatible endpoint for audio storage. If set, scripts/configure-storage.mjs translates to AWS_* via storage-translators.funkwhale().",
+          "required": false
+        },
+        {
+          "name": "FUNKWHALE_S3_BUCKET",
+          "description": "S3 bucket for audio.",
+          "required": false
+        },
+        {
+          "name": "FUNKWHALE_S3_ACCESS_KEY",
+          "description": "S3 access key.",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "FUNKWHALE_S3_SECRET_KEY",
+          "description": "S3 secret key.",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "FUNKWHALE_S3_REGION",
+          "description": "S3 region.",
+          "default": "us-east-1",
+          "required": false
+        }
       ],
       "ports": [],
       "webUI": null,
@@ -3362,43 +3638,118 @@
     {
       "id": "pixelfed",
       "name": "Pixelfed",
-      "description": "Federated photo-sharing over ActivityPub — Instagram-alternative on the fediverse. Publish photos that remote Mastodon/GoToSocial/Funkwhale followers see in their timelines.",
+      "description": "Federated photo-sharing over ActivityPub \u2014 Instagram-alternative on the fediverse. Publish photos that remote Mastodon/GoToSocial/Funkwhale followers see in their timelines.",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "federated-media",
-      "tags": ["pixelfed", "activitypub", "fediverse", "photos", "federated", "instagram-alt"],
+      "tags": [
+        "pixelfed",
+        "activitypub",
+        "fediverse",
+        "photos",
+        "federated",
+        "instagram-alt"
+      ],
       "icon": "image",
-      "docker": { "composefile": "docker-compose.yml" },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
       "server": {
         "command": "node",
-        "args": ["server/index.js"],
-        "envKeys": ["PIXELFED_URL", "PIXELFED_ACCESS_TOKEN", "PIXELFED_HOSTNAME"]
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "PIXELFED_URL",
+          "PIXELFED_ACCESS_TOKEN",
+          "PIXELFED_HOSTNAME"
+        ]
       },
       "panel": "panel/pixelfed.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/pixelfed.md"],
+      "skills": [
+        "skills/pixelfed.md"
+      ],
       "consent_required": true,
       "requires": {
-        "env": ["PIXELFED_HOSTNAME", "PIXELFED_DB_PASSWORD", "PIXELFED_APP_KEY"],
-        "bundles": ["caddy"],
+        "env": [
+          "PIXELFED_HOSTNAME",
+          "PIXELFED_DB_PASSWORD",
+          "PIXELFED_APP_KEY"
+        ],
+        "bundles": [
+          "caddy"
+        ],
         "min_ram_mb": 1500,
         "recommended_ram_mb": 3000,
         "min_disk_mb": 10000,
         "recommended_disk_mb": 100000
       },
       "env_vars": [
-        { "name": "PIXELFED_HOSTNAME", "description": "Public domain for this Pixelfed pod (subdomain).", "required": true },
-        { "name": "PIXELFED_DB_PASSWORD", "description": "Password for the bundled Postgres role.", "required": true, "secret": true },
-        { "name": "PIXELFED_APP_KEY", "description": "Laravel application key (32+ random bytes).", "required": true, "secret": true },
-        { "name": "PIXELFED_ACCESS_TOKEN", "description": "OAuth2 PAT (Settings → Development → New Application).", "required": false, "secret": true },
-        { "name": "PIXELFED_OPEN_REGISTRATION", "description": "Allow new signups (true/false).", "default": "false", "required": false },
-        { "name": "PIXELFED_MEDIA_RETENTION_DAYS", "description": "Remote media cache retention.", "default": "14", "required": false },
-        { "name": "PIXELFED_S3_ENDPOINT", "description": "Optional S3-compatible endpoint. When set, configure-storage.mjs routes media via storage-translators.pixelfed().", "required": false },
-        { "name": "PIXELFED_S3_BUCKET", "description": "S3 bucket.", "required": false },
-        { "name": "PIXELFED_S3_ACCESS_KEY", "description": "S3 access key.", "required": false, "secret": true },
-        { "name": "PIXELFED_S3_SECRET_KEY", "description": "S3 secret key.", "required": false, "secret": true },
-        { "name": "PIXELFED_S3_REGION", "description": "S3 region.", "default": "us-east-1", "required": false }
+        {
+          "name": "PIXELFED_HOSTNAME",
+          "description": "Public domain for this Pixelfed pod (subdomain).",
+          "required": true
+        },
+        {
+          "name": "PIXELFED_DB_PASSWORD",
+          "description": "Password for the bundled Postgres role.",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "PIXELFED_APP_KEY",
+          "description": "Laravel application key (32+ random bytes).",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "PIXELFED_ACCESS_TOKEN",
+          "description": "OAuth2 PAT (Settings \u2192 Development \u2192 New Application).",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "PIXELFED_OPEN_REGISTRATION",
+          "description": "Allow new signups (true/false).",
+          "default": "false",
+          "required": false
+        },
+        {
+          "name": "PIXELFED_MEDIA_RETENTION_DAYS",
+          "description": "Remote media cache retention.",
+          "default": "14",
+          "required": false
+        },
+        {
+          "name": "PIXELFED_S3_ENDPOINT",
+          "description": "Optional S3-compatible endpoint. When set, configure-storage.mjs routes media via storage-translators.pixelfed().",
+          "required": false
+        },
+        {
+          "name": "PIXELFED_S3_BUCKET",
+          "description": "S3 bucket.",
+          "required": false
+        },
+        {
+          "name": "PIXELFED_S3_ACCESS_KEY",
+          "description": "S3 access key.",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "PIXELFED_S3_SECRET_KEY",
+          "description": "S3 secret key.",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "PIXELFED_S3_REGION",
+          "description": "S3 region.",
+          "default": "us-east-1",
+          "required": false
+        }
       ],
       "ports": [],
       "webUI": null,
@@ -3407,38 +3758,90 @@
     {
       "id": "lemmy",
       "name": "Lemmy",
-      "description": "Federated link aggregator and discussion platform over ActivityPub — Reddit-alternative. Posts, comments, communities, votes; federates with Lemmy/Kbin/Mastodon.",
+      "description": "Federated link aggregator and discussion platform over ActivityPub \u2014 Reddit-alternative. Posts, comments, communities, votes; federates with Lemmy/Kbin/Mastodon.",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "federated-social",
-      "tags": ["lemmy", "activitypub", "fediverse", "link-aggregator", "discussion", "reddit-alt"],
+      "tags": [
+        "lemmy",
+        "activitypub",
+        "fediverse",
+        "link-aggregator",
+        "discussion",
+        "reddit-alt"
+      ],
       "icon": "message-circle",
-      "docker": { "composefile": "docker-compose.yml" },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
       "server": {
         "command": "node",
-        "args": ["server/index.js"],
-        "envKeys": ["LEMMY_URL", "LEMMY_JWT", "LEMMY_HOSTNAME"]
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "LEMMY_URL",
+          "LEMMY_JWT",
+          "LEMMY_HOSTNAME"
+        ]
       },
       "panel": "panel/lemmy.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/lemmy.md"],
+      "skills": [
+        "skills/lemmy.md"
+      ],
       "consent_required": true,
       "requires": {
-        "env": ["LEMMY_HOSTNAME", "LEMMY_DB_PASSWORD", "LEMMY_PICTRS_API_KEY"],
-        "bundles": ["caddy"],
+        "env": [
+          "LEMMY_HOSTNAME",
+          "LEMMY_DB_PASSWORD",
+          "LEMMY_PICTRS_API_KEY"
+        ],
+        "bundles": [
+          "caddy"
+        ],
         "min_ram_mb": 1000,
         "recommended_ram_mb": 2000,
         "min_disk_mb": 5000,
         "recommended_disk_mb": 50000
       },
       "env_vars": [
-        { "name": "LEMMY_HOSTNAME", "description": "Public domain (subdomain).", "required": true },
-        { "name": "LEMMY_DB_PASSWORD", "description": "Password for the bundled Postgres role.", "required": true, "secret": true },
-        { "name": "LEMMY_PICTRS_API_KEY", "description": "Shared secret between Lemmy and pict-rs (any random 32+ chars).", "required": true, "secret": true },
-        { "name": "LEMMY_JWT", "description": "Admin JWT (obtain via POST /api/v3/user/login after setup wizard).", "required": false, "secret": true },
-        { "name": "LEMMY_OPEN_REGISTRATION", "description": "Allow new user signups.", "default": "false", "required": false },
-        { "name": "LEMMY_FEDERATION_ENABLED", "description": "Federate with other ActivityPub servers.", "default": "true", "required": false }
+        {
+          "name": "LEMMY_HOSTNAME",
+          "description": "Public domain (subdomain).",
+          "required": true
+        },
+        {
+          "name": "LEMMY_DB_PASSWORD",
+          "description": "Password for the bundled Postgres role.",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "LEMMY_PICTRS_API_KEY",
+          "description": "Shared secret between Lemmy and pict-rs (any random 32+ chars).",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "LEMMY_JWT",
+          "description": "Admin JWT (obtain via POST /api/v3/user/login after setup wizard).",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "LEMMY_OPEN_REGISTRATION",
+          "description": "Allow new user signups.",
+          "default": "false",
+          "required": false
+        },
+        {
+          "name": "LEMMY_FEDERATION_ENABLED",
+          "description": "Federate with other ActivityPub servers.",
+          "default": "true",
+          "required": false
+        }
       ],
       "ports": [],
       "webUI": null,
@@ -3447,52 +3850,170 @@
     {
       "id": "mastodon",
       "name": "Mastodon",
-      "description": "The flagship ActivityPub server — federated microblogging at scale. Full v1/v2 Mastodon API, web UI, Sidekiq background jobs, streaming API. Heaviest of the small-AP bundles.",
+      "description": "The flagship ActivityPub server \u2014 federated microblogging at scale. Full v1/v2 Mastodon API, web UI, Sidekiq background jobs, streaming API. Heaviest of the small-AP bundles.",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "federated-social",
-      "tags": ["mastodon", "activitypub", "fediverse", "microblog", "federated", "flagship"],
+      "tags": [
+        "mastodon",
+        "activitypub",
+        "fediverse",
+        "microblog",
+        "federated",
+        "flagship"
+      ],
       "icon": "globe",
-      "docker": { "composefile": "docker-compose.yml" },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
       "server": {
         "command": "node",
-        "args": ["server/index.js"],
-        "envKeys": ["MASTODON_URL", "MASTODON_ACCESS_TOKEN", "MASTODON_LOCAL_DOMAIN"]
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "MASTODON_URL",
+          "MASTODON_ACCESS_TOKEN",
+          "MASTODON_LOCAL_DOMAIN"
+        ]
       },
       "panel": "panel/mastodon.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/mastodon.md"],
+      "skills": [
+        "skills/mastodon.md"
+      ],
       "consent_required": true,
       "requires": {
-        "env": ["MASTODON_LOCAL_DOMAIN", "MASTODON_DB_PASSWORD", "MASTODON_SECRET_KEY_BASE", "MASTODON_OTP_SECRET", "MASTODON_VAPID_PRIVATE_KEY", "MASTODON_VAPID_PUBLIC_KEY"],
-        "bundles": ["caddy"],
+        "env": [
+          "MASTODON_LOCAL_DOMAIN",
+          "MASTODON_DB_PASSWORD",
+          "MASTODON_SECRET_KEY_BASE",
+          "MASTODON_OTP_SECRET",
+          "MASTODON_VAPID_PRIVATE_KEY",
+          "MASTODON_VAPID_PUBLIC_KEY"
+        ],
+        "bundles": [
+          "caddy"
+        ],
         "min_ram_mb": 3000,
         "recommended_ram_mb": 6000,
         "min_disk_mb": 20000,
         "recommended_disk_mb": 500000
       },
       "env_vars": [
-        { "name": "MASTODON_LOCAL_DOMAIN", "description": "Public domain in handles (@user@<this>). IMMUTABLE after first federation.", "required": true },
-        { "name": "MASTODON_WEB_DOMAIN", "description": "Web UI domain (if delegating federation).", "required": false },
-        { "name": "MASTODON_DB_PASSWORD", "description": "Postgres password.", "required": true, "secret": true },
-        { "name": "MASTODON_SECRET_KEY_BASE", "description": "Rails secret_key_base (128 hex). rake secret.", "required": true, "secret": true },
-        { "name": "MASTODON_OTP_SECRET", "description": "2FA OTP secret (128 hex). rake secret.", "required": true, "secret": true },
-        { "name": "MASTODON_VAPID_PRIVATE_KEY", "description": "Web Push VAPID private key.", "required": true, "secret": true },
-        { "name": "MASTODON_VAPID_PUBLIC_KEY", "description": "Web Push VAPID public key.", "required": true },
-        { "name": "MASTODON_ACCESS_TOKEN", "description": "OAuth PAT (read/write/admin:read/admin:write).", "required": false, "secret": true },
-        { "name": "MASTODON_MEDIA_RETENTION_DAYS", "description": "Remote media cache retention.", "default": "14", "required": false },
-        { "name": "MASTODON_SINGLE_USER_MODE", "description": "Skip landing page, redirect to admin profile.", "default": "false", "required": false },
-        { "name": "MASTODON_S3_ENDPOINT", "description": "Optional S3-compatible endpoint. When set, configure-storage.mjs routes media via storage-translators.mastodon().", "required": false },
-        { "name": "MASTODON_S3_BUCKET", "description": "S3 bucket.", "required": false },
-        { "name": "MASTODON_S3_ACCESS_KEY", "description": "S3 access key.", "required": false, "secret": true },
-        { "name": "MASTODON_S3_SECRET_KEY", "description": "S3 secret key.", "required": false, "secret": true },
-        { "name": "MASTODON_S3_REGION", "description": "S3 region.", "default": "us-east-1", "required": false },
-        { "name": "MASTODON_SMTP_SERVER", "description": "Outbound SMTP for confirmations.", "required": false },
-        { "name": "MASTODON_SMTP_PORT", "description": "SMTP port.", "default": "587", "required": false },
-        { "name": "MASTODON_SMTP_LOGIN", "description": "SMTP username.", "required": false },
-        { "name": "MASTODON_SMTP_PASSWORD", "description": "SMTP password.", "required": false, "secret": true },
-        { "name": "MASTODON_SMTP_FROM_ADDRESS", "description": "From address.", "required": false }
+        {
+          "name": "MASTODON_LOCAL_DOMAIN",
+          "description": "Public domain in handles (@user@<this>). IMMUTABLE after first federation.",
+          "required": true
+        },
+        {
+          "name": "MASTODON_WEB_DOMAIN",
+          "description": "Web UI domain (if delegating federation).",
+          "required": false
+        },
+        {
+          "name": "MASTODON_DB_PASSWORD",
+          "description": "Postgres password.",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "MASTODON_SECRET_KEY_BASE",
+          "description": "Rails secret_key_base (128 hex). rake secret.",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "MASTODON_OTP_SECRET",
+          "description": "2FA OTP secret (128 hex). rake secret.",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "MASTODON_VAPID_PRIVATE_KEY",
+          "description": "Web Push VAPID private key.",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "MASTODON_VAPID_PUBLIC_KEY",
+          "description": "Web Push VAPID public key.",
+          "required": true
+        },
+        {
+          "name": "MASTODON_ACCESS_TOKEN",
+          "description": "OAuth PAT (read/write/admin:read/admin:write).",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "MASTODON_MEDIA_RETENTION_DAYS",
+          "description": "Remote media cache retention.",
+          "default": "14",
+          "required": false
+        },
+        {
+          "name": "MASTODON_SINGLE_USER_MODE",
+          "description": "Skip landing page, redirect to admin profile.",
+          "default": "false",
+          "required": false
+        },
+        {
+          "name": "MASTODON_S3_ENDPOINT",
+          "description": "Optional S3-compatible endpoint. When set, configure-storage.mjs routes media via storage-translators.mastodon().",
+          "required": false
+        },
+        {
+          "name": "MASTODON_S3_BUCKET",
+          "description": "S3 bucket.",
+          "required": false
+        },
+        {
+          "name": "MASTODON_S3_ACCESS_KEY",
+          "description": "S3 access key.",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "MASTODON_S3_SECRET_KEY",
+          "description": "S3 secret key.",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "MASTODON_S3_REGION",
+          "description": "S3 region.",
+          "default": "us-east-1",
+          "required": false
+        },
+        {
+          "name": "MASTODON_SMTP_SERVER",
+          "description": "Outbound SMTP for confirmations.",
+          "required": false
+        },
+        {
+          "name": "MASTODON_SMTP_PORT",
+          "description": "SMTP port.",
+          "default": "587",
+          "required": false
+        },
+        {
+          "name": "MASTODON_SMTP_LOGIN",
+          "description": "SMTP username.",
+          "required": false
+        },
+        {
+          "name": "MASTODON_SMTP_PASSWORD",
+          "description": "SMTP password.",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "MASTODON_SMTP_FROM_ADDRESS",
+          "description": "From address.",
+          "required": false
+        }
       ],
       "ports": [],
       "webUI": null,
@@ -3501,55 +4022,167 @@
     {
       "id": "peertube",
       "name": "PeerTube",
-      "description": "Federated video platform over ActivityPub — YouTube-alternative. Upload, transcode, federate channels, WebTorrent/HLS streaming. Heaviest bundle in the federated line.",
+      "description": "Federated video platform over ActivityPub \u2014 YouTube-alternative. Upload, transcode, federate channels, WebTorrent/HLS streaming. Heaviest bundle in the federated line.",
       "type": "bundle",
       "version": "1.0.0",
       "author": "Crow",
       "category": "federated-media",
-      "tags": ["peertube", "activitypub", "fediverse", "video", "federated", "youtube-alt", "webtorrent"],
+      "tags": [
+        "peertube",
+        "activitypub",
+        "fediverse",
+        "video",
+        "federated",
+        "youtube-alt",
+        "webtorrent"
+      ],
       "icon": "phone-video",
-      "docker": { "composefile": "docker-compose.yml" },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
       "server": {
         "command": "node",
-        "args": ["server/index.js"],
-        "envKeys": ["PEERTUBE_URL", "PEERTUBE_ACCESS_TOKEN", "PEERTUBE_WEBSERVER_HOSTNAME"]
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": [
+          "PEERTUBE_URL",
+          "PEERTUBE_ACCESS_TOKEN",
+          "PEERTUBE_WEBSERVER_HOSTNAME"
+        ]
       },
       "panel": "panel/peertube.js",
       "panelRoutes": "panel/routes.js",
-      "skills": ["skills/peertube.md"],
+      "skills": [
+        "skills/peertube.md"
+      ],
       "consent_required": true,
       "requires": {
-        "env": ["PEERTUBE_WEBSERVER_HOSTNAME", "PEERTUBE_DB_PASSWORD", "PEERTUBE_SECRET"],
-        "bundles": ["caddy"],
+        "env": [
+          "PEERTUBE_WEBSERVER_HOSTNAME",
+          "PEERTUBE_DB_PASSWORD",
+          "PEERTUBE_SECRET"
+        ],
+        "bundles": [
+          "caddy"
+        ],
         "min_ram_mb": 4000,
         "recommended_ram_mb": 8000,
         "min_disk_mb": 100000,
         "recommended_disk_mb": 2000000
       },
       "env_vars": [
-        { "name": "PEERTUBE_WEBSERVER_HOSTNAME", "description": "Public domain (subdomain; IMMUTABLE after first federation).", "required": true },
-        { "name": "PEERTUBE_DB_PASSWORD", "description": "Postgres password.", "required": true, "secret": true },
-        { "name": "PEERTUBE_SECRET", "description": "Server secret (32+ random chars). IMMUTABLE — rotation breaks federation.", "required": true, "secret": true },
-        { "name": "PEERTUBE_ACCESS_TOKEN", "description": "OAuth bearer token.", "required": false, "secret": true },
-        { "name": "PEERTUBE_ADMIN_EMAIL", "description": "Admin email for takedown notices + abuse reports.", "required": false },
-        { "name": "PEERTUBE_TRANSCODING_CONCURRENCY", "description": "Max simultaneous transcodes. 1-2 on 16 GB; 4+ on 32 GB+.", "default": "1", "required": false },
-        { "name": "PEERTUBE_SIGNUP_ENABLED", "description": "Allow new user signups.", "default": "false", "required": false },
-        { "name": "PEERTUBE_VIDEO_QUOTA_MB", "description": "Default per-user quota in MB.", "default": "10000", "required": false },
-        { "name": "PEERTUBE_MEDIA_RETENTION_DAYS", "description": "Remote video cache retention.", "default": "14", "required": false },
-        { "name": "PEERTUBE_S3_ENDPOINT", "description": "Optional S3-compatible endpoint. STRONGLY RECOMMENDED; configure-storage.mjs routes via storage-translators.peertube().", "required": false },
-        { "name": "PEERTUBE_S3_BUCKET", "description": "S3 bucket.", "required": false },
-        { "name": "PEERTUBE_S3_ACCESS_KEY", "description": "S3 access key.", "required": false, "secret": true },
-        { "name": "PEERTUBE_S3_SECRET_KEY", "description": "S3 secret key.", "required": false, "secret": true },
-        { "name": "PEERTUBE_S3_REGION", "description": "S3 region.", "default": "us-east-1", "required": false },
-        { "name": "PEERTUBE_SMTP_HOSTNAME", "description": "Outbound SMTP (takedown receipts).", "required": false },
-        { "name": "PEERTUBE_SMTP_PORT", "description": "SMTP port.", "default": "587", "required": false },
-        { "name": "PEERTUBE_SMTP_USERNAME", "description": "SMTP username.", "required": false },
-        { "name": "PEERTUBE_SMTP_PASSWORD", "description": "SMTP password.", "required": false, "secret": true },
-        { "name": "PEERTUBE_SMTP_FROM", "description": "From address.", "required": false }
+        {
+          "name": "PEERTUBE_WEBSERVER_HOSTNAME",
+          "description": "Public domain (subdomain; IMMUTABLE after first federation).",
+          "required": true
+        },
+        {
+          "name": "PEERTUBE_DB_PASSWORD",
+          "description": "Postgres password.",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "PEERTUBE_SECRET",
+          "description": "Server secret (32+ random chars). IMMUTABLE \u2014 rotation breaks federation.",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "PEERTUBE_ACCESS_TOKEN",
+          "description": "OAuth bearer token.",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "PEERTUBE_ADMIN_EMAIL",
+          "description": "Admin email for takedown notices + abuse reports.",
+          "required": false
+        },
+        {
+          "name": "PEERTUBE_TRANSCODING_CONCURRENCY",
+          "description": "Max simultaneous transcodes. 1-2 on 16 GB; 4+ on 32 GB+.",
+          "default": "1",
+          "required": false
+        },
+        {
+          "name": "PEERTUBE_SIGNUP_ENABLED",
+          "description": "Allow new user signups.",
+          "default": "false",
+          "required": false
+        },
+        {
+          "name": "PEERTUBE_VIDEO_QUOTA_MB",
+          "description": "Default per-user quota in MB.",
+          "default": "10000",
+          "required": false
+        },
+        {
+          "name": "PEERTUBE_MEDIA_RETENTION_DAYS",
+          "description": "Remote video cache retention.",
+          "default": "14",
+          "required": false
+        },
+        {
+          "name": "PEERTUBE_S3_ENDPOINT",
+          "description": "Optional S3-compatible endpoint. STRONGLY RECOMMENDED; configure-storage.mjs routes via storage-translators.peertube().",
+          "required": false
+        },
+        {
+          "name": "PEERTUBE_S3_BUCKET",
+          "description": "S3 bucket.",
+          "required": false
+        },
+        {
+          "name": "PEERTUBE_S3_ACCESS_KEY",
+          "description": "S3 access key.",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "PEERTUBE_S3_SECRET_KEY",
+          "description": "S3 secret key.",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "PEERTUBE_S3_REGION",
+          "description": "S3 region.",
+          "default": "us-east-1",
+          "required": false
+        },
+        {
+          "name": "PEERTUBE_SMTP_HOSTNAME",
+          "description": "Outbound SMTP (takedown receipts).",
+          "required": false
+        },
+        {
+          "name": "PEERTUBE_SMTP_PORT",
+          "description": "SMTP port.",
+          "default": "587",
+          "required": false
+        },
+        {
+          "name": "PEERTUBE_SMTP_USERNAME",
+          "description": "SMTP username.",
+          "required": false
+        },
+        {
+          "name": "PEERTUBE_SMTP_PASSWORD",
+          "description": "SMTP password.",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "PEERTUBE_SMTP_FROM",
+          "description": "From address.",
+          "required": false
+        }
       ],
       "ports": [],
       "webUI": null,
-      "notes": "Three containers (peertube + postgres + redis). chocobozzz/peertube:production-bookworm. Expose via caddy_add_federation_site { domain: PEERTUBE_WEBSERVER_HOSTNAME, upstream: 'peertube:9000', profile: 'activitypub-peertube' }. Admin password printed to logs on first boot — rotate IMMEDIATELY via `docker exec -it crow-peertube npm run reset-password -- -u root`."
+      "notes": "Three containers (peertube + postgres + redis). chocobozzz/peertube:production-bookworm. Expose via caddy_add_federation_site { domain: PEERTUBE_WEBSERVER_HOSTNAME, upstream: 'peertube:9000', profile: 'activitypub-peertube' }. Admin password printed to logs on first boot \u2014 rotate IMMEDIATELY via `docker exec -it crow-peertube npm run reset-password -- -u root`."
     },
     {
       "id": "matrix-bridges",
@@ -3559,32 +4192,84 @@
       "version": "1.0.0",
       "author": "Crow",
       "category": "federated-comms",
-      "tags": ["matrix", "bridges", "signal", "telegram", "whatsapp", "mautrix", "meta-bundle"],
+      "tags": [
+        "matrix",
+        "bridges",
+        "signal",
+        "telegram",
+        "whatsapp",
+        "mautrix",
+        "meta-bundle"
+      ],
       "icon": "message-circle",
-      "docker": { "composefile": "docker-compose.yml" },
+      "docker": {
+        "composefile": "docker-compose.yml"
+      },
       "server": null,
-      "skills": ["skills/matrix-bridges.md"],
+      "skills": [
+        "skills/matrix-bridges.md"
+      ],
       "consent_required": true,
       "requires": {
-        "env": ["MATRIX_BRIDGE_HOMESERVER_URL", "MATRIX_BRIDGE_DOMAIN"],
-        "bundles": ["caddy", "matrix-dendrite"],
+        "env": [
+          "MATRIX_BRIDGE_HOMESERVER_URL",
+          "MATRIX_BRIDGE_DOMAIN"
+        ],
+        "bundles": [
+          "caddy",
+          "matrix-dendrite"
+        ],
         "min_ram_mb": 500,
         "recommended_ram_mb": 2000,
         "min_disk_mb": 5000,
         "recommended_disk_mb": 30000
       },
       "env_vars": [
-        { "name": "MATRIX_BRIDGE_HOMESERVER_URL", "description": "Internal URL of Dendrite (http://dendrite:8008).", "default": "http://dendrite:8008", "required": true },
-        { "name": "MATRIX_BRIDGE_DOMAIN", "description": "MATRIX_SERVER_NAME from matrix-dendrite bundle.", "required": true },
-        { "name": "BRIDGE_SIGNAL_ENABLED", "description": "Enable mautrix-signal. RISK: Signal ToS prohibits bots.", "default": "false", "required": false },
-        { "name": "BRIDGE_TELEGRAM_ENABLED", "description": "Enable mautrix-telegram.", "default": "false", "required": false },
-        { "name": "BRIDGE_TELEGRAM_API_ID", "description": "Telegram API ID from my.telegram.org/apps.", "required": false, "secret": true },
-        { "name": "BRIDGE_TELEGRAM_API_HASH", "description": "Telegram API hash.", "required": false, "secret": true },
-        { "name": "BRIDGE_WHATSAPP_ENABLED", "description": "Enable mautrix-whatsapp. RISK: Meta may ban the phone.", "default": "false", "required": false }
+        {
+          "name": "MATRIX_BRIDGE_HOMESERVER_URL",
+          "description": "Internal URL of Dendrite (http://dendrite:8008).",
+          "default": "http://dendrite:8008",
+          "required": true
+        },
+        {
+          "name": "MATRIX_BRIDGE_DOMAIN",
+          "description": "MATRIX_SERVER_NAME from matrix-dendrite bundle.",
+          "required": true
+        },
+        {
+          "name": "BRIDGE_SIGNAL_ENABLED",
+          "description": "Enable mautrix-signal. RISK: Signal ToS prohibits bots.",
+          "default": "false",
+          "required": false
+        },
+        {
+          "name": "BRIDGE_TELEGRAM_ENABLED",
+          "description": "Enable mautrix-telegram.",
+          "default": "false",
+          "required": false
+        },
+        {
+          "name": "BRIDGE_TELEGRAM_API_ID",
+          "description": "Telegram API ID from my.telegram.org/apps.",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "BRIDGE_TELEGRAM_API_HASH",
+          "description": "Telegram API hash.",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "BRIDGE_WHATSAPP_ENABLED",
+          "description": "Enable mautrix-whatsapp. RISK: Meta may ban the phone.",
+          "default": "false",
+          "required": false
+        }
       ],
       "ports": [],
       "webUI": null,
-      "notes": "Opt-in per bridge via BRIDGE_*_ENABLED env flags. post-install.sh copies each bridge's /data/registration.yaml into crow-dendrite:/etc/dendrite/appservices/ + patches dendrite.yaml + restarts crow-dendrite. Pair by DM'ing the bridge bot (@signalbot:yourdomain → 'login') from a Matrix client."
+      "notes": "Opt-in per bridge via BRIDGE_*_ENABLED env flags. post-install.sh copies each bridge's /data/registration.yaml into crow-dendrite:/etc/dendrite/appservices/ + patches dendrite.yaml + restarts crow-dendrite. Pair by DM'ing the bridge bot (@signalbot:yourdomain \u2192 'login') from a Matrix client."
     },
     {
       "id": "developer-kit",
@@ -3614,6 +4299,45 @@
         "skills/developer-kit.md"
       ],
       "notes": "Skill-only. Guides AI through building and submitting Crow extensions."
+    },
+    {
+      "id": "meta-glasses",
+      "name": "Meta Glasses",
+      "version": "0.1.0",
+      "description": "Pair Meta Ray-Ban (Gen 2) smart glasses with your Crow BYOAI. Uses Meta's official Wearables Device Access Toolkit on the Crow Android app (1.4.0+); voice turns flow through your default STT + AI + TTS profiles.",
+      "type": "mcp-server",
+      "author": "Crow",
+      "category": "hardware",
+      "tags": [
+        "glasses",
+        "wearable",
+        "meta",
+        "ray-ban",
+        "voice",
+        "camera",
+        "ai",
+        "byoai"
+      ],
+      "icon": "eye",
+      "server": {
+        "command": "node",
+        "args": [
+          "server/index.js"
+        ],
+        "envKeys": []
+      },
+      "panel": "panel/meta-glasses.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": [
+        "skills/meta-glasses.md"
+      ],
+      "requires": {
+        "min_ram_mb": 128,
+        "min_disk_mb": 20,
+        "min_android_app": "1.4.0"
+      },
+      "env_vars": [],
+      "notes": "Requires Crow Android app 1.4.0+. Gen 2 (Ray-Ban Meta) only \u2014 Gen 1 Ray-Ban Stories is not supported."
     }
   ]
 }

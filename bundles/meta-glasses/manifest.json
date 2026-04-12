@@ -1,0 +1,26 @@
+{
+  "id": "meta-glasses",
+  "name": "Meta Glasses",
+  "version": "0.1.0",
+  "description": "Pair Meta Ray-Ban (Gen 2) smart glasses with your Crow BYOAI. The Crow Android app uses Meta's official Wearables Device Access Toolkit to give the glasses a voice turn powered by your configured STT + AI + TTS profiles.",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "hardware",
+  "tags": ["glasses", "wearable", "meta", "ray-ban", "voice", "camera", "ai", "byoai"],
+  "icon": "eye",
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "envKeys": []
+  },
+  "panel": "panel/meta-glasses.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/meta-glasses.md"],
+  "requires": {
+    "min_ram_mb": 128,
+    "min_disk_mb": 20,
+    "min_android_app": "1.4.0"
+  },
+  "env_vars": [],
+  "notes": "Requires Crow Android app 1.4.0+ with the Meta Wearables DAT integration compiled in. The gateway-side code runs anywhere; glasses audio/camera capture happens on the paired Android phone. STT and TTS are taken from the default stt_profile / tts_profile (platform-wide settings). Chat routes through the default ai_profile."
+}

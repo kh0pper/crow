@@ -1,0 +1,11 @@
+{
+  "name": "crow-meta-glasses",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Meta Ray-Ban (Gen 2) glasses bundle — pairs DAT companion app with Crow BYOAI.",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.0"
+  }
+}

@@ -8,10 +8,13 @@ android {
 
     defaultConfig {
         applicationId "press.maestro.crow"
-        minSdk 24
+        // PR 3 raises minSdk to 34 because:
+        //   - FOREGROUND_SERVICE_CONNECTED_DEVICE was introduced in API 34
+        //   - Meta Wearables DAT SDK (mwdat-*) targets API 34+
+        minSdk 34
         targetSdk 34
-        versionCode 4
-        versionName "1.3.0"
+        versionCode 5
+        versionName "1.4.0"
     }
 
     signingConfigs {
@@ -43,4 +46,15 @@ dependencies {
     implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
     implementation 'androidx.work:work-runtime:2.9.0'
     implementation 'androidx.security:security-crypto:1.1.0-alpha06'
+
+    // WebSocket client for /session connection to the Crow gateway.
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+
+    // Meta Wearables Device Access Toolkit (preview).
+    // If you're building without access to the preview Maven, comment these
+    // out — the glasses pairing UI will show "DAT unavailable" and the
+    // rest of the app still builds.
+    implementation 'com.meta.wearables:mwdat-core:0.5.0'
+    implementation 'com.meta.wearables:mwdat-camera:0.5.0'
+    // testImplementation 'com.meta.wearables:mwdat-mockdevice:0.5.0'
 }
