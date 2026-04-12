@@ -1,0 +1,30 @@
+{
+  "id": "caddy",
+  "name": "Caddy Reverse Proxy",
+  "version": "1.0.0",
+  "description": "Reverse proxy with automatic HTTPS via Let's Encrypt (ACME). Foundation for publicly exposed or federated bundles.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "infrastructure",
+  "tags": ["reverse-proxy", "https", "acme", "letsencrypt", "tls"],
+  "icon": "shield",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["CADDY_ADMIN_URL", "CADDY_CONFIG_DIR"] },
+  "panel": "panel/caddy.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/caddy.md"],
+  "consent_required": true,
+  "install_consent_messages": {
+    "en": "Caddy binds ports 80 and 443 on all interfaces (0.0.0.0) so it can answer HTTP/HTTPS requests from the public internet and complete Let's Encrypt ACME challenges. Make sure ports 80 and 443 are open on your firewall/router and that no other service on this host is already listening on them (e.g., another web server). Caddy will automatically request and renew TLS certificates for any domain you configure; the domain's A/AAAA record must point to this host first.",
+    "es": "Caddy se vincula a los puertos 80 y 443 en todas las interfaces (0.0.0.0) para responder a peticiones HTTP/HTTPS desde internet y completar los desafíos ACME de Let's Encrypt. Asegúrate de que los puertos 80 y 443 estén abiertos en tu firewall/router y que ningún otro servicio de este host los esté usando. Caddy solicitará y renovará certificados TLS automáticamente para cada dominio que configures; el registro A/AAAA del dominio debe apuntar primero a este host."
+  },
+  "requires": { "env": ["CADDY_EMAIL"], "min_ram_mb": 128, "min_disk_mb": 200 },
+  "env_vars": [
+    { "name": "CADDY_EMAIL", "description": "Email address for Let's Encrypt ACME account registration (required for cert renewal notices)", "required": true },
+    { "name": "CADDY_ADMIN_URL", "description": "Caddy admin API URL (set automatically when running alongside the caddy container)", "default": "http://127.0.0.1:2019", "required": false },
+    { "name": "CADDY_CONFIG_DIR", "description": "Path to the directory containing Caddyfile (managed by Crow; editable by the operator)", "default": "~/.crow/caddy", "required": false }
+  ],
+  "ports": [80, 443, 2019],
+  "webUI": null,
+  "notes": "Ports 80/443 bind to 0.0.0.0 (required for ACME HTTP-01 and public request handling). Admin API bound to 127.0.0.1:2019 (host-local only). Caddyfile is mounted from ~/.crow/caddy/Caddyfile — edit it directly or use crow's MCP tools. ACME state stored in ~/.crow/caddy/data (mode 0700)."
+}

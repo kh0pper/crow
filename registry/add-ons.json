@@ -1397,6 +1397,36 @@
       "notes": "Docker stack includes MariaDB. Port remapped from 80 to 6875. Composite token auth (ID:SECRET). 8 MCP tools."
     },
     {
+      "id": "caddy",
+      "name": "Caddy Reverse Proxy",
+      "description": "Reverse proxy with automatic HTTPS via Let's Encrypt (ACME). Foundation for publicly exposed or federated bundles.",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "infrastructure",
+      "tags": ["reverse-proxy", "https", "acme", "letsencrypt", "tls"],
+      "icon": "shield",
+      "docker": { "composefile": "docker-compose.yml" },
+      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["CADDY_ADMIN_URL", "CADDY_CONFIG_DIR"] },
+      "panel": "panel/caddy.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": ["skills/caddy.md"],
+      "consent_required": true,
+      "install_consent_messages": {
+        "en": "Caddy binds ports 80 and 443 on all interfaces (0.0.0.0) so it can answer HTTP/HTTPS requests from the public internet and complete Let's Encrypt ACME challenges. Make sure ports 80 and 443 are open on your firewall/router and that no other service on this host is already listening on them. Caddy will automatically request and renew TLS certificates for any domain you configure; the domain's A/AAAA record must point to this host first.",
+        "es": "Caddy se vincula a los puertos 80 y 443 en todas las interfaces (0.0.0.0) para responder a peticiones HTTP/HTTPS desde internet y completar los desafíos ACME de Let's Encrypt. Asegúrate de que los puertos 80 y 443 estén abiertos en tu firewall/router y que ningún otro servicio de este host los esté usando. Caddy solicitará y renovará certificados TLS automáticamente para cada dominio que configures; el registro A/AAAA del dominio debe apuntar primero a este host."
+      },
+      "requires": { "env": ["CADDY_EMAIL"], "min_ram_mb": 128, "min_disk_mb": 200 },
+      "env_vars": [
+        { "name": "CADDY_EMAIL", "description": "Email for Let's Encrypt ACME account registration", "required": true },
+        { "name": "CADDY_ADMIN_URL", "description": "Caddy admin API URL", "default": "http://127.0.0.1:2019", "required": false },
+        { "name": "CADDY_CONFIG_DIR", "description": "Directory containing Caddyfile (mounted into container)", "default": "~/.crow/caddy", "required": false }
+      ],
+      "ports": [80, 443, 2019],
+      "webUI": null,
+      "notes": "Binds 80/443 on 0.0.0.0 (required for ACME). Admin API bound to 127.0.0.1:2019. Caddyfile at ~/.crow/caddy/Caddyfile. 5 MCP tools: status, reload, list_sites, add_site, remove_site."
+    },
+    {
       "id": "vikunja",
       "name": "Vikunja",
       "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",
