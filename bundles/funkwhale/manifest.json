@@ -44,5 +44,5 @@
   ],
   "ports": [],
   "webUI": null,
-  "notes": "Five containers (api + celeryworker + celerybeat + nginx + postgres + redis). No host port publish — expose via caddy_add_federation_site { domain: FUNKWHALE_HOSTNAME, upstream: 'funkwhale-nginx:80', profile: 'activitypub' }. Initial superuser created via `docker exec crow-funkwhale-api funkwhale-manage createsuperuser`. Audio storage defaults to on-disk; set FUNKWHALE_S3_* to wire MinIO/external S3 via the storage-translators funkwhale() mapping."
+  "notes": "Five containers (api + celeryworker + celerybeat + front + postgres + redis). Funkwhale 2.x images: funkwhale/api:2.0.1 (backend) + funkwhale/front:2.0.1 (SPA). Caddy must SPLIT-ROUTE: /api, /federation, /.well-known/webfinger → funkwhale-api:5000; everything else → funkwhale-front:80. The shared activitypub profile needs per-path matchers — follow-up PR adds a dedicated funkwhale profile to the Caddy bundle. Initial superuser via `docker exec crow-funkwhale-api funkwhale-manage createsuperuser`. Audio storage: on-disk default; set FUNKWHALE_S3_* to wire S3 via storage-translators.funkwhale()."
 }

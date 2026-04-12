@@ -1,22 +1,43 @@
 # Funkwhale — federated music server.
 #
-# Six-container bundle: api + celeryworker + celerybeat + nginx + postgres + redis.
-# All on crow-federation + an internal default network. Caddy reverse-proxies
-# :443 → funkwhale-nginx:80, which in turn serves static files and proxies
-# /api + /federation + websockets to funkwhale-api:5000.
+# Five-container bundle: api + celeryworker + celerybeat + front + postgres + redis.
+# api + front on crow-federation; DB + redis isolated to default.
+#
+# Funkwhale 2.x split the old `funkwhale/funkwhale` image into two:
+#   funkwhale/api:2.0.1   Django backend (gunicorn on :5000)
+#   funkwhale/front:2.0.1 Static SPA (nginx-served on :80)
+#
+# Caddy MUST split routing between the two (profile work deferred —
+# operators set this up manually until the `funkwhale` profile lands
+# in the Caddy bundle):
+#   / + /public + /library       → funkwhale-front:80  (SPA)
+#   /api/* + /federation/* + /.well-known/webfinger
+#                                → funkwhale-api:5000  (backend)
+#   /media/* + /static/*         → funkwhale-front:80  (served from
+#                                   shared volume populated by api's
+#                                   `collectstatic` step on first boot)
 #
 # Data:
 #   ~/.crow/funkwhale/postgres/   Postgres data dir
-#   ~/.crow/funkwhale/redis/      Redis persistence (optional AOF/RDB)
-#   ~/.crow/funkwhale/data/       Funkwhale /data (audio uploads, transcodes)
-#   ~/.crow/funkwhale/music/      Optional read-only in-place library (FUNKWHALE_MUSIC_DIR)
+#   ~/.crow/funkwhale/redis/      Redis persistence
+#   ~/.crow/funkwhale/data/       Funkwhale /srv/funkwhale/data
+#                                 (audio uploads, transcodes, static)
+#   ~/.crow/funkwhale/music/      Optional read-only in-place library
+#                                 (FUNKWHALE_MUSIC_DIR)
 #
 # Audio storage: on-disk by default. Set FUNKWHALE_S3_* env vars to route
-# uploads to MinIO / external S3 — storage-translators.funkwhale() handles
-# the env-var mapping to AWS_* names Funkwhale expects.
+# uploads to MinIO / external S3 — storage-translators.funkwhale() maps
+# AWS_* names Funkwhale expects.
 #
-# Image: funkwhale/funkwhale:1.4 (pinned at impl time; verify upstream
-# release notes + CVE feed before bumping).
+# Image tags pinned at implementation time (F.15, 2026-04-12):
+#   funkwhale/api:2.0.1          stable line
+#   funkwhale/front:2.0.1        matched to api version
+#   postgres:15-alpine           matches official Funkwhale compose
+#   redis:7-alpine               matches official Funkwhale compose
+#
+# Verified against https://dev.funkwhale.audio/funkwhale/funkwhale/-/raw/stable/deploy/docker-compose.yml
+# at bump time; F.15 pin bump replaces the F.4 compose which referenced
+# the non-existent funkwhale/funkwhale:1.4 + funkwhale/nginx:1.4 images.
 
 networks:
   crow-federation:
@@ -62,7 +83,7 @@ services:
       retries: 10
 
   api:
-    image: funkwhale/funkwhale:1.4
+    image: funkwhale/api:2.0.1
     container_name: crow-funkwhale-api
     networks:
       - default
@@ -99,12 +120,6 @@ services:
     volumes:
       - ${FUNKWHALE_DATA_DIR:-~/.crow/funkwhale}/data:/srv/funkwhale/data
       - ${FUNKWHALE_MUSIC_DIR:-~/.crow/funkwhale/music}:/music:ro
-    command: >
-      sh -c "funkwhale-manage migrate --noinput &&
-             funkwhale-manage collectstatic --noinput &&
-             gunicorn config.asgi:application -w $${FUNKWHALE_WEB_WORKERS:-2}
-               -k uvicorn.workers.UvicornWorker -b 0.0.0.0:5000
-               --access-logfile - --error-logfile -"
     init: true
     mem_limit: 1500m
     restart: unless-stopped
@@ -116,7 +131,7 @@ services:
       start_period: 120s
 
   celeryworker:
-    image: funkwhale/funkwhale:1.4
+    image: funkwhale/api:2.0.1
     container_name: crow-funkwhale-celeryworker
     networks:
       - default
@@ -145,7 +160,7 @@ services:
     restart: unless-stopped
 
   celerybeat:
-    image: funkwhale/funkwhale:1.4
+    image: funkwhale/api:2.0.1
     container_name: crow-funkwhale-celerybeat
     networks:
       - default
@@ -168,9 +183,9 @@ services:
     mem_limit: 256m
     restart: unless-stopped
 
-  nginx:
-    image: funkwhale/nginx:1.4
-    container_name: crow-funkwhale-nginx
+  front:
+    image: funkwhale/front:2.0.1
+    container_name: crow-funkwhale-front
     networks:
       - default
       - crow-federation
@@ -190,7 +205,7 @@ services:
     mem_limit: 128m
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/api/v1/instance/nodeinfo/2.0/ >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 10
