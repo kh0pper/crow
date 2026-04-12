@@ -25,6 +25,7 @@ import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
+import { checkInstall as checkHardwareGate } from "../hardware-gate.js";
 
 // PR 0: Consent token configuration (server-validated, race-safe install consent)
 const CONSENT_TOKEN_TTL_SECONDS = 15 * 60; // 15 min — covers slow image pulls
@@ -578,6 +579,31 @@ export default function bundlesRouter() {
           error: `Bundle '${bundle_id}' requires the following bundles to be installed first: ${missing.join(", ")}`,
           missing_dependencies: missing,
         });
+      }
+    }
+
+    // F.0: hardware gate — refuse install if RAM/disk headroom is insufficient,
+    // warn (but allow) if under the recommended threshold. MemAvailable + SSD-
+    // backed swap at half-weight is the effective-RAM basis; already-installed
+    // bundles' recommended_ram_mb is subtracted from the pool. Bypass via
+    // `force_install: true` (CLI-only — the web UI never surfaces this flag).
+    if (!req.body.force_install) {
+      const gate = checkHardwareGate({
+        manifest: manifestPre,
+        installed,
+        manifestLookup: (id) => getManifest(id),
+        dataDir: CROW_HOME,
+      });
+      if (!gate.allow) {
+        return res.status(400).json({
+          ok: false,
+          error: gate.reason,
+          hardware_gate: gate,
+        });
+      }
+      if (gate.level === "warn") {
+        // Attach warning to the job so the UI can surface it; install proceeds.
+        req._hardwareWarning = gate;
       }
     }
 
