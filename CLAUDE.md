@@ -201,6 +201,9 @@ Uses `@libsql/client` for local SQLite files (default: `~/.crow/data/crow.db`, g
 - **contact_groups** — Contact organization groups (id, name, color, sort_order)
 - **contact_group_members** — Many-to-many contacts-to-groups (group_id FK, contact_id FK, unique index)
 - **push_subscriptions** — Web Push notification subscriptions (endpoint UNIQUE, keys_json, platform, device_name)
+- **moderation_actions** — F.11 queued destructive moderation actions from federated bundles (bundle_id, action_type, payload_json, requested_at, expires_at, status, idempotency_key UNIQUE). 72h default TTL; operator confirms via Nest panel
+- **identity_attestations** — F.11 signed bindings (crow_id, app, external_handle, app_pubkey?, sig, version, revoked_at). Published via gateway `/.well-known/crow-identity.json`. UNIQUE(crow_id, app, external_handle, version) — new version row per rotation
+- **identity_attestation_revocations** — F.11 signed revocations (attestation_id FK CASCADE, revoked_at, reason, sig). Published via `/.well-known/crow-identity-revocations.json`
 - **iptv_playlists** — IPTV M3U playlist sources (name, url, auto_refresh, channel_count)
 - **iptv_channels** — IPTV channels from playlists (playlist_id FK, name, stream_url, tvg_id, group_title, is_favorite)
 - **iptv_epg** — Electronic Program Guide entries (channel_tvg_id, title, start_time, end_time, indexed)
@@ -436,6 +439,7 @@ Consult `skills/superpowers.md` first — it routes user intent to the right ski
 - `extension-dev.md` — Extension development: scaffold, test, and publish bundles, panels, MCP servers, and skills
 - `developer-kit.md` — Developer kit: scaffold, test, and submit Crow extensions to the registry
 - `network-setup.md` — Tailscale remote access guidance
+- `crow-identity.md` — F.11 identity attestations: sign per-app handles (Mastodon/Funkwhale/Matrix/etc.) with the Crow root Ed25519 key, publish via `/.well-known/crow-identity.json`, verify + revoke. Off by default; opt-in per handle — public linkage is effectively permanent
 - `add-ons.md` — Add-on browsing, installation, removal
 - `scheduling.md` — Scheduled and recurring task management
 - `tutoring.md` — Socratic tutoring with progress tracking
