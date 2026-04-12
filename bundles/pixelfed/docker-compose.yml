@@ -16,7 +16,7 @@
 # FILESYSTEM_CLOUD=s3 envelope Pixelfed expects. configure-storage.mjs in
 # scripts/ does the translation at install time.
 #
-# Image: zknt/pixelfed:0.12 (floats within 0.12.x — verify the current
+# Image: zknt/pixelfed:2026-03-24 (floats within 0.12.x — verify the current
 # tag + CVE feed at implementation time per the plan's image-tag policy).
 
 networks:
@@ -63,7 +63,7 @@ services:
       retries: 10
 
   pixelfed:
-    image: zknt/pixelfed:0.12
+    image: zknt/pixelfed:2026-03-24
     container_name: crow-pixelfed
     networks:
       - default
@@ -143,7 +143,7 @@ services:
       start_period: 120s
 
   horizon:
-    image: zknt/pixelfed:0.12
+    image: zknt/pixelfed:2026-03-24
     container_name: crow-pixelfed-horizon
     networks:
       - default

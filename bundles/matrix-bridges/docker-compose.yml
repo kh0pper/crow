@@ -20,7 +20,7 @@ networks:
 
 services:
   mautrix-signal:
-    image: dock.mau.dev/mautrix/signal:latest
+    image: dock.mau.dev/mautrix/signal:v0.8.0
     container_name: crow-mautrix-signal
     profiles: ["signal"]
     networks:
@@ -44,7 +44,7 @@ services:
       start_period: 30s
 
   mautrix-telegram:
-    image: dock.mau.dev/mautrix/telegram:latest
+    image: dock.mau.dev/mautrix/telegram:v0.15.3
     container_name: crow-mautrix-telegram
     profiles: ["telegram"]
     networks:
@@ -68,7 +68,7 @@ services:
       start_period: 30s
 
   mautrix-whatsapp:
-    image: dock.mau.dev/mautrix/whatsapp:latest
+    image: dock.mau.dev/mautrix/whatsapp:v0.11.2
     container_name: crow-mautrix-whatsapp
     profiles: ["whatsapp"]
     networks:
