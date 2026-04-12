@@ -69,6 +69,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | "tailscale", "remote access", "network setup", "private access", "VPN" | "tailscale", "acceso remoto", "configurar red", "acceso privado", "red privada" | network-setup, tailscale | (documentation) |
 | "report bug", "file issue", "feature request", "found a bug" | "reportar bug", "crear issue", "solicitar función" | bug-report | crow-memory, github |
 | "help my kid learn", "teach Ada coding", "start a STEM session", "maker lab", "classroom session", "tutor session", "try it without saving" | "ayuda a mi hijo aprender", "enseñar programación a Ada", "sesión STEM", "laboratorio creativo", "modo aula" | maker-lab | maker-lab, companion, crow-memory |
+| "find a lesson", "teach me about X", "i want to learn", "homework help", "math practice", "reading practice", "science video", "khan academy", "kolibri" | "busca una lección", "enséñame sobre X", "quiero aprender", "ayuda con la tarea", "práctica de matemáticas", "video de ciencias", "kolibri" | kolibri | kolibri, crow-memory |
 | "obsidian", "vault", "daily note", "sync to obsidian" | "obsidian", "bóveda", "nota diaria" | obsidian | obsidian, crow-projects |
 | "lights", "temperature", "smart home", "turn on/off" | "luces", "temperatura", "hogar inteligente" | home-assistant | home-assistant |
 | "ollama", "local model", "run locally", "embeddings" | "ollama", "modelo local", "ejecutar local" | ollama | crow-memory |

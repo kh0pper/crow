@@ -28,6 +28,46 @@
       "notes": "Hard deps: companion bundle + any OpenAI-compatible local-LLM endpoint. Recommended engine: ollama (solo/family) or vllm (classroom). See bundles/maker-lab/PHASE-0-REPORT.md."
     },
     {
+      "id": "kolibri",
+      "name": "Kolibri",
+      "version": "1.0.0",
+      "description": "Offline-first learning platform from Learning Equality \u2014 self-hosted STEM and literacy content for ages 5-18. Classroom-capable, LAN-sync built in, thousands of free educational channels curated by the global learning community.",
+      "type": "bundle",
+      "author": "Crow",
+      "category": "education",
+      "tags": [
+        "education",
+        "kolibri",
+        "offline-first",
+        "stem",
+        "k12",
+        "classroom",
+        "learning",
+        "maker-lab"
+      ],
+      "icon": "graduation-cap",
+      "webUI": {
+        "port": 8085,
+        "path": "/",
+        "label": "Kolibri"
+      },
+      "requires": {
+        "env": [],
+        "min_ram_mb": 512,
+        "recommended_ram_mb": 1500,
+        "min_disk_mb": 500,
+        "recommended_disk_mb": 20000
+      },
+      "env_vars": [
+        { "name": "KOLIBRI_URL", "description": "Internal URL for reaching the Kolibri API.", "default": "http://localhost:8085", "required": false },
+        { "name": "KOLIBRI_HTTP_PORT", "description": "Host port to expose Kolibri on. Default 8085.", "default": "8085", "required": false },
+        { "name": "KOLIBRI_DATA_PATH", "description": "Host path for content + SQLite DB (defaults to a named volume).", "required": false },
+        { "name": "KOLIBRI_FACILITY_NAME", "description": "Default facility name shown on first run.", "required": false }
+      ],
+      "sibling_of": ["maker-lab"],
+      "notes": "First-run setup is completed in the Kolibri web UI. Sibling of maker-lab \u2014 Kolibri is the content spine, maker-lab is the scaffolded tutor. Pi 4 friendly (512 MB floor). A populated K-5 STEM library typically runs 5-10 GB."
+    },
+    {
       "id": "obsidian",
       "name": "Obsidian Vault",
       "description": "Connect your Obsidian vault to Crow for reading, searching, and syncing notes",
