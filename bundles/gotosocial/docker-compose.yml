@@ -1,0 +1,50 @@
+# GoToSocial — lightweight ActivityPub server.
+#
+# Deployment model: no host port publish. Caddy (crow-federation network)
+# reaches the container by service name (gotosocial:8080) and terminates TLS
+# at 443. Add the site with caddy_add_federation_site after install.
+#
+# Data lives at ~/.crow/gotosocial/ (single bind mount). SQLite is the
+# default backend; switching to Postgres requires manual compose edit.
+
+networks:
+  crow-federation:
+    external: true
+  default:
+
+services:
+  gotosocial:
+    image: superseriousbusiness/gotosocial:0.18.0
+    container_name: crow-gotosocial
+    networks:
+      - default
+      - crow-federation
+    environment:
+      GTS_HOST: ${GTS_HOST}
+      GTS_ACCOUNT_DOMAIN: ${GTS_ACCOUNT_DOMAIN:-${GTS_HOST}}
+      GTS_PROTOCOL: https
+      GTS_PORT: "8080"
+      GTS_BIND_ADDRESS: 0.0.0.0
+      # SQLite by default — simplest for Pi-class hosts. Switch to postgres
+      # by setting GTS_DB_TYPE=postgres plus GTS_DB_ADDRESS/USER/PASSWORD.
+      GTS_DB_TYPE: sqlite
+      GTS_DB_ADDRESS: /gotosocial/storage/sqlite.db
+      GTS_STORAGE_BACKEND: local
+      GTS_STORAGE_LOCAL_BASE_PATH: /gotosocial/storage
+      GTS_LETSENCRYPT_ENABLED: "false"   # Caddy handles TLS
+      GTS_TRUSTED_PROXIES: 172.16.0.0/12,10.0.0.0/8
+      GTS_MEDIA_REMOTE_CACHE_DAYS: ${GTS_MEDIA_RETENTION_DAYS:-14}
+      # Advertise-proto: behind Caddy the client sees HTTPS; tell GTS the
+      # external scheme so generated URLs are correct.
+      GTS_ADVERTISE_HTTPS: "true"
+    volumes:
+      - ${GTS_DATA_DIR:-~/.crow/gotosocial}:/gotosocial/storage
+    init: true
+    mem_limit: 1g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/readyz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s

@@ -1,0 +1,71 @@
+{
+  "id": "gotosocial",
+  "name": "GoToSocial",
+  "version": "1.0.0",
+  "description": "Lightweight ActivityPub microblog server (fediverse). Pi-friendly single-binary alternative to Mastodon — joins the public fediverse with a sub-500 MB footprint.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "federated-social",
+  "tags": ["activitypub", "fediverse", "microblog", "federated", "mastodon-compatible"],
+  "icon": "globe",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "envKeys": ["GTS_URL", "GTS_ACCESS_TOKEN"]
+  },
+  "panel": "panel/gotosocial.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/gotosocial.md"],
+  "consent_required": true,
+  "install_consent_messages": {
+    "en": "GoToSocial joins the fediverse: your instance becomes publicly addressable under the domain you configure, and any content you publish is replicated to other ActivityPub servers. Replicated content cannot be fully recalled — deletions may not reach every server that cached your post. The instance fetches and caches content and profile images from other federated servers, which may include objectionable material. You are responsible for moderating your instance and for legal compliance in your jurisdiction. If your instance is reported for abuse, major hubs (mastodon.social, matrix.org) may defederate your domain — and a poisoned domain cannot easily be rehabilitated; you may need to move to a fresh domain. Automatic media pruning (14-day retention by default, 7 days on Pi-class hosts) is enabled from day 1; remote media caches still grow substantially under active federation.",
+    "es": "GoToSocial se une al fediverso: tu instancia será públicamente direccionable bajo el dominio que configures, y todo el contenido que publiques se replica a otros servidores ActivityPub. El contenido replicado no puede recuperarse completamente — las eliminaciones pueden no llegar a todos los servidores que guardaron tu publicación. La instancia obtiene y guarda contenido e imágenes de perfil de otros servidores federados, que pueden incluir material objetable. Eres responsable de moderar tu instancia y cumplir con la ley de tu jurisdicción. Si tu instancia es reportada por abuso, los nodos principales (mastodon.social, matrix.org) pueden dejar de federarse con tu dominio — y un dominio envenenado no puede rehabilitarse fácilmente; puede que tengas que mudarte a un dominio nuevo. La limpieza automática de medios (14 días por defecto, 7 días en hosts tipo Pi) está activa desde el primer día; los cachés de medios remotos igualmente crecen bajo federación activa."
+  },
+  "requires": {
+    "env": ["GTS_HOST", "GTS_ACCOUNT_DOMAIN"],
+    "bundles": ["caddy"],
+    "min_ram_mb": 512,
+    "recommended_ram_mb": 1024,
+    "min_disk_mb": 2000,
+    "recommended_disk_mb": 20000
+  },
+  "env_vars": [
+    {
+      "name": "GTS_HOST",
+      "description": "Public domain for this GoToSocial instance (e.g., gts.example.com). Must be a subdomain dedicated to GoToSocial — ActivityPub actors are URL-keyed and subpath mounts break federation.",
+      "required": true
+    },
+    {
+      "name": "GTS_ACCOUNT_DOMAIN",
+      "description": "Account domain used in @user@domain handles. Usually the same as GTS_HOST. If your apex is example.com and GTS_HOST=gts.example.com, set this to example.com and add a .well-known/webfinger delegation on the apex.",
+      "required": true
+    },
+    {
+      "name": "GTS_URL",
+      "description": "Internal URL the Crow MCP server uses to reach GoToSocial (over the crow-federation docker network).",
+      "default": "http://gotosocial:8080",
+      "required": false
+    },
+    {
+      "name": "GTS_ACCESS_TOKEN",
+      "description": "API access token for the admin account (generated via the web UI after first login, or via the CLI: docker exec gotosocial ./gotosocial admin account create-token).",
+      "required": false,
+      "secret": true
+    },
+    {
+      "name": "GTS_MEDIA_RETENTION_DAYS",
+      "description": "Days to keep remote media in the local cache before pruning. Default 14; Pi-class hosts should lower to 7.",
+      "default": "14",
+      "required": false
+    },
+    {
+      "name": "GTS_IMPORT_BLOCKLIST",
+      "description": "Optional: URL to an IFTAS / Bad Space / custom domain blocklist (one domain per line). Imported on first post-install run if set.",
+      "required": false
+    }
+  ],
+  "ports": [],
+  "webUI": null,
+  "notes": "Subdomain-only deployment (federation requires URL-keyed actors). Caddy reaches GoToSocial by docker service name (gotosocial:8080) over the crow-federation network; no host port is published. After install, run caddy_add_federation_site { domain: GTS_HOST, upstream: 'gotosocial:8080', profile: 'activitypub', wellknown: { nodeinfo: { href: 'https://<GTS_HOST>/nodeinfo/2.0' } } } to expose the instance with a real LE cert."
+}
