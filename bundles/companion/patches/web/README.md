@@ -5,21 +5,21 @@ Patches against the upstream Electron/React web client
 submodule at `vendor/open-llm-vtuber-web/` and pinned by SHA in
 `.gitmodules`.
 
-Phase 3.0 status: patch files exist as **skeletons** — unified-diff
-headers + rationale + TODO-marked hunks. The actual diffs land in
-Phase 3.1 once the submodule is checked out and line numbers are
-stable against the pinned SHA.
+Status: all patches active (Phase 3.1+). `build-pet-linux.sh` applies
+the series in numeric order against the pinned submodule SHA and
+produces `~/.crow/bin/open-llm-vtuber.AppImage`.
 
 ## Patch slots
 
 | Patch | Status | What it does |
 |---|---|---|
-| `web-0001-disable-auto-updater.patch` | skeleton | Strip `electron-updater` wiring; Crow ships its own pinned AppImage. |
-| `web-0002-linux-transparency-flags.patch` | skeleton | Auto-apply `--enable-transparent-visuals --disable-gpu-compositing` on Linux when no compositor is detected. |
-| `web-0003-multimonitor-positioning.patch` | skeleton | Place pet-mode window on the display under the cursor (or hosting the Blockly kiosk) instead of spanning the entire virtual screen. |
-| `web-0004-crow-ipc-pet-position.patch` | skeleton | Expose `ipcMain.handle('crow:pet-position', ...)` so the Crow gateway can anchor the pet window programmatically. |
-| `web-0005-no-sandbox-fallback.patch` | skeleton | Detect Chromium sandbox failure on AppImage launch, warn the user, relaunch with `--no-sandbox`. |
+| `web-0001-disable-auto-updater.patch` | active | Strip `electron-updater` wiring; Crow ships its own pinned AppImage. |
+| `web-0002-linux-transparency-flags.patch` | active | Auto-apply `--enable-transparent-visuals --disable-gpu-compositing` on Linux when no compositor is detected. |
+| `web-0003-multimonitor-positioning.patch` | active | Place pet-mode window on the display under the cursor instead of spanning the entire virtual screen. |
+| `web-0004-crow-ipc-pet-position.patch` | active | Expose `ipcMain.handle('crow:pet-position', ...)` so the Crow gateway can anchor the pet window programmatically. |
+| `web-0005-no-sandbox-fallback.patch` | active | Proactively append `--no-sandbox` on AppImage launches and log a visible warning. |
 | `web-0006-persona-swap.patch` | **intentionally empty** | Spike 2 confirmed upstream `switch-config` handles per-connection persona; slot retained to keep numbering contiguous. |
+| `web-0007-crow-pet-anchor-on-launch.patch` | active | Read `CROW_PET_ANCHOR` env var at launch, auto-switch to pet mode, apply anchor (right / left / bottom-right / bottom-left) with 320x480 pet-body defaults. |
 
 ## Applying
 
