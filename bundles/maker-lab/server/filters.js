@@ -143,17 +143,14 @@ export function rateLimitCheck(token, limitPerMin = HINT_RATE_PER_MIN) {
 
 export async function getLearnerAge(db, learnerId) {
   if (!learnerId) return null;
-  const r = await db.execute({
-    sql: `SELECT metadata FROM research_projects WHERE id=? AND type='learner_profile'`,
-    args: [learnerId],
-  });
-  if (!r.rows.length) return null;
   try {
-    const meta = JSON.parse(r.rows[0].metadata || "{}");
-    return typeof meta.age === "number" ? meta.age : null;
-  } catch {
-    return null;
-  }
+    const r = await db.execute({
+      sql: `SELECT age FROM maker_learner_settings WHERE learner_id=?`,
+      args: [learnerId],
+    });
+    if (r.rows.length && typeof r.rows[0].age === "number") return r.rows[0].age;
+  } catch {}
+  return null;
 }
 
 export async function resolvePersonaForSession(db, session) {

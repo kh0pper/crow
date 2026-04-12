@@ -16,7 +16,6 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { randomBytes, randomUUID } from "node:crypto";
 import {
   personaForAge,
   ageBandFromGuestBand,
@@ -25,29 +24,15 @@ import {
   filterHint,
 } from "./filters.js";
 import { handleHintRequest } from "./hint-pipeline.js";
+import {
+  SESSION_DEFAULT_MIN,
+  SESSION_MAX_MIN,
+  mintSessionForLearner,
+  mintGuestSession,
+  mintBatchSessions,
+} from "./sessions.js";
 
-// ─── Constants ────────────────────────────────────────────────────────────
-
-const SESSION_DEFAULT_MIN = 60;
-const SESSION_MAX_MIN = 240;
-const GUEST_MAX_MIN = 30;
-const CODE_TTL_MIN = 10;
 const ENDING_FLUSH_SEC = 5;
-
-function mintToken() {
-  return randomBytes(24).toString("base64url");
-}
-
-function mintRedemptionCode() {
-  const A = "ABCDEFGHJKLMNPQRSTUVWXYZ"; // no I, O
-  const N = "23456789"; // no 0, 1
-  const pick = (s) => s[Math.floor(Math.random() * s.length)];
-  return `${pick(A)}${pick(A)}${pick(A)}-${pick(N)}${pick(N)}${pick(N)}`;
-}
-
-function addMinutesISO(min) {
-  return new Date(Date.now() + min * 60_000).toISOString();
-}
 
 // ─── Session resolution ───────────────────────────────────────────────────
 
@@ -115,17 +100,16 @@ export function createMakerLabServer(db, options = {}) {
     },
     async ({ name, age, avatar, notes }) => {
       try {
-        const meta = JSON.stringify({ age, avatar: avatar || null, notes: notes || null });
         const res = await db.execute({
-          sql: `INSERT INTO research_projects (name, type, description, metadata, created_at, updated_at)
-                VALUES (?, 'learner_profile', ?, ?, datetime('now'), datetime('now')) RETURNING id`,
-          args: [name, notes || null, meta],
+          sql: `INSERT INTO research_projects (name, type, description, created_at, updated_at)
+                VALUES (?, 'learner_profile', ?, datetime('now'), datetime('now')) RETURNING id`,
+          args: [name, notes || null],
         });
         const learnerId = Number(res.rows[0].id);
         await db.execute({
-          sql: `INSERT INTO maker_learner_settings (learner_id, consent_captured_at)
-                VALUES (?, datetime('now'))`,
-          args: [learnerId],
+          sql: `INSERT INTO maker_learner_settings (learner_id, age, avatar, consent_captured_at)
+                VALUES (?, ?, ?, datetime('now'))`,
+          args: [learnerId, age, avatar || null],
         });
         return mcpOk({ learner_id: learnerId, name, age, persona: personaForAge(age) });
       } catch (err) {
@@ -140,7 +124,8 @@ export function createMakerLabServer(db, options = {}) {
     {},
     async () => {
       const r = await db.execute({
-        sql: `SELECT rp.id, rp.name, rp.metadata, rp.created_at,
+        sql: `SELECT rp.id, rp.name, rp.created_at,
+                     mls.age, mls.avatar,
                      mls.transcripts_enabled, mls.consent_captured_at
               FROM research_projects rp
               LEFT JOIN maker_learner_settings mls ON mls.learner_id = rp.id
@@ -148,19 +133,16 @@ export function createMakerLabServer(db, options = {}) {
               ORDER BY rp.created_at DESC`,
         args: [],
       });
-      const learners = r.rows.map((row) => {
-        let meta = {};
-        try { meta = JSON.parse(row.metadata || "{}"); } catch {}
-        return {
-          learner_id: Number(row.id),
-          name: row.name,
-          age: meta.age ?? null,
-          persona: personaForAge(meta.age),
-          transcripts_enabled: !!row.transcripts_enabled,
-          consent_captured_at: row.consent_captured_at,
-          created_at: row.created_at,
-        };
-      });
+      const learners = r.rows.map((row) => ({
+        learner_id: Number(row.id),
+        name: row.name,
+        age: row.age ?? null,
+        avatar: row.avatar ?? null,
+        persona: personaForAge(row.age),
+        transcripts_enabled: !!row.transcripts_enabled,
+        consent_captured_at: row.consent_captured_at,
+        created_at: row.created_at,
+      }));
       return mcpOk({ learners });
     }
   );
@@ -171,7 +153,7 @@ export function createMakerLabServer(db, options = {}) {
     { learner_id: z.number().int().positive() },
     async ({ learner_id }) => {
       const r = await db.execute({
-        sql: `SELECT rp.id, rp.name, rp.metadata, rp.created_at, mls.*
+        sql: `SELECT rp.id, rp.name, rp.created_at, mls.*
               FROM research_projects rp
               LEFT JOIN maker_learner_settings mls ON mls.learner_id = rp.id
               WHERE rp.id = ? AND rp.type = 'learner_profile'`,
@@ -179,14 +161,12 @@ export function createMakerLabServer(db, options = {}) {
       });
       if (!r.rows.length) return mcpError(`Learner ${learner_id} not found`);
       const row = r.rows[0];
-      let meta = {};
-      try { meta = JSON.parse(row.metadata || "{}"); } catch {}
       return mcpOk({
         learner_id: Number(row.id),
         name: row.name,
-        age: meta.age ?? null,
-        avatar: meta.avatar ?? null,
-        persona: personaForAge(meta.age),
+        age: row.age ?? null,
+        avatar: row.avatar ?? null,
+        persona: personaForAge(row.age),
         transcripts_enabled: !!row.transcripts_enabled,
         transcripts_retention_days: row.transcripts_retention_days ?? 30,
         idle_lock_default_min: row.idle_lock_default_min,
@@ -215,26 +195,19 @@ export function createMakerLabServer(db, options = {}) {
     async (args) => {
       const { learner_id } = args;
       const r = await db.execute({
-        sql: `SELECT metadata FROM research_projects WHERE id=? AND type='learner_profile'`,
+        sql: `SELECT id FROM research_projects WHERE id=? AND type='learner_profile'`,
         args: [learner_id],
       });
       if (!r.rows.length) return mcpError(`Learner ${learner_id} not found`);
-      let meta = {};
-      try { meta = JSON.parse(r.rows[0].metadata || "{}"); } catch {}
-      if (args.age != null) meta.age = args.age;
-      if (args.avatar != null) meta.avatar = args.avatar;
+      if (args.name != null) {
+        await db.execute({
+          sql: `UPDATE research_projects SET name=?, updated_at=datetime('now') WHERE id=?`,
+          args: [args.name, learner_id],
+        });
+      }
 
-      const sets = ["metadata=?, updated_at=datetime('now')"];
-      const sqlArgs = [JSON.stringify(meta)];
-      if (args.name != null) { sets.push("name=?"); sqlArgs.push(args.name); }
-      sqlArgs.push(learner_id);
-      await db.execute({
-        sql: `UPDATE research_projects SET ${sets.join(", ")} WHERE id=?`,
-        args: sqlArgs,
-      });
-
-      // Upsert settings row
-      const settingsCols = ["transcripts_enabled", "transcripts_retention_days", "idle_lock_default_min", "auto_resume_min", "voice_input_enabled"];
+      // Upsert settings row (includes age, avatar, and per-learner flags).
+      const settingsCols = ["age", "avatar", "transcripts_enabled", "transcripts_retention_days", "idle_lock_default_min", "auto_resume_min", "voice_input_enabled"];
       const updates = [];
       const updArgs = [];
       for (const c of settingsCols) {
@@ -323,40 +296,23 @@ export function createMakerLabServer(db, options = {}) {
       batch_id: z.string().max(64).optional(),
     },
     async ({ learner_id, duration_min = SESSION_DEFAULT_MIN, idle_lock_min, batch_id }) => {
-      const r = await db.execute({
-        sql: `SELECT rp.id, rp.name, mls.transcripts_enabled, mls.idle_lock_default_min
-              FROM research_projects rp
-              LEFT JOIN maker_learner_settings mls ON mls.learner_id=rp.id
-              WHERE rp.id=? AND rp.type='learner_profile'`,
-        args: [learner_id],
-      });
-      if (!r.rows.length) return mcpError(`Learner ${learner_id} not found`);
-      const learner = r.rows[0];
-      const token = mintToken();
-      const code = mintRedemptionCode();
-      const expiresAt = addMinutesISO(duration_min);
-      const codeExpiresAt = addMinutesISO(CODE_TTL_MIN);
-      const idleMin = idle_lock_min ?? learner.idle_lock_default_min ?? null;
-
-      await db.execute({
-        sql: `INSERT INTO maker_sessions
-              (token, learner_id, is_guest, expires_at, idle_lock_min, transcripts_enabled_snapshot, batch_id)
-              VALUES (?, ?, 0, ?, ?, ?, ?)`,
-        args: [token, learner_id, expiresAt, idleMin, learner.transcripts_enabled ? 1 : 0, batch_id || null],
-      });
-      await db.execute({
-        sql: `INSERT INTO maker_redemption_codes (code, session_token, expires_at) VALUES (?, ?, ?)`,
-        args: [code, token, codeExpiresAt],
-      });
-      return mcpOk({
-        redemption_code: code,
-        short_url: `/kiosk/r/${code}`,
-        code_expires_at: codeExpiresAt,
-        session_expires_at: expiresAt,
-        learner_id,
-        learner_name: learner.name,
-        batch_id: batch_id || null,
-      });
+      try {
+        const r = await mintSessionForLearner(db, {
+          learnerId: learner_id, durationMin: duration_min,
+          idleLockMin: idle_lock_min, batchId: batch_id || null,
+        });
+        return mcpOk({
+          redemption_code: r.redemptionCode,
+          short_url: r.shortUrl,
+          code_expires_at: r.codeExpiresAt,
+          session_expires_at: r.sessionExpiresAt,
+          learner_id: r.learnerId,
+          learner_name: r.learnerName,
+          batch_id: r.batchId,
+        });
+      } catch (err) {
+        return mcpError(err.message);
+      }
     }
   );
 
@@ -370,47 +326,20 @@ export function createMakerLabServer(db, options = {}) {
       batch_label: z.string().max(200).optional(),
     },
     async ({ learner_ids, duration_min = SESSION_DEFAULT_MIN, idle_lock_min, batch_label }) => {
-      const batchId = randomUUID();
-      await db.execute({
-        sql: `INSERT INTO maker_batches (batch_id, label) VALUES (?, ?)`,
-        args: [batchId, batch_label || null],
+      const { batchId, sessions, errors } = await mintBatchSessions(db, {
+        learnerIds: learner_ids, durationMin: duration_min,
+        idleLockMin: idle_lock_min, batchLabel: batch_label,
       });
-      const sessions = [];
-      for (const lid of learner_ids) {
-        const r = await db.execute({
-          sql: `SELECT rp.id, rp.name, mls.transcripts_enabled, mls.idle_lock_default_min
-                FROM research_projects rp
-                LEFT JOIN maker_learner_settings mls ON mls.learner_id=rp.id
-                WHERE rp.id=? AND rp.type='learner_profile'`,
-          args: [lid],
-        });
-        if (!r.rows.length) {
-          sessions.push({ learner_id: lid, error: "not_found" });
-          continue;
-        }
-        const learner = r.rows[0];
-        const token = mintToken();
-        const code = mintRedemptionCode();
-        const expiresAt = addMinutesISO(duration_min);
-        const codeExpiresAt = addMinutesISO(CODE_TTL_MIN);
-        const idleMin = idle_lock_min ?? learner.idle_lock_default_min ?? null;
-        await db.execute({
-          sql: `INSERT INTO maker_sessions
-                (token, learner_id, is_guest, expires_at, idle_lock_min, transcripts_enabled_snapshot, batch_id)
-                VALUES (?, ?, 0, ?, ?, ?, ?)`,
-          args: [token, lid, expiresAt, idleMin, learner.transcripts_enabled ? 1 : 0, batchId],
-        });
-        await db.execute({
-          sql: `INSERT INTO maker_redemption_codes (code, session_token, expires_at) VALUES (?, ?, ?)`,
-          args: [code, token, codeExpiresAt],
-        });
-        sessions.push({
-          learner_id: lid, learner_name: learner.name,
-          redemption_code: code, short_url: `/kiosk/r/${code}`,
-          code_expires_at: codeExpiresAt, session_expires_at: expiresAt,
-        });
-      }
-      return mcpOk({ batch_id: batchId, batch_label: batch_label || null, sessions });
+      return mcpOk({
+        batch_id: batchId,
+        batch_label: batch_label || null,
+        sessions: sessions.map((r) => ({
+          learner_id: r.learnerId, learner_name: r.learnerName,
+          redemption_code: r.redemptionCode, short_url: r.shortUrl,
+          code_expires_at: r.codeExpiresAt, session_expires_at: r.sessionExpiresAt,
+        })),
+        errors,
+      });
     }
   );
 
@@ -421,25 +350,12 @@ export function createMakerLabServer(db, options = {}) {
       age_band: z.enum(["5-9", "10-13", "14+"]),
     },
     async ({ age_band }) => {
-      const token = mintToken();
-      const code = mintRedemptionCode();
-      const expiresAt = addMinutesISO(GUEST_MAX_MIN);
-      const codeExpiresAt = addMinutesISO(CODE_TTL_MIN);
-      await db.execute({
-        sql: `INSERT INTO maker_sessions
-              (token, learner_id, is_guest, guest_age_band, expires_at, transcripts_enabled_snapshot)
-              VALUES (?, NULL, 1, ?, ?, 0)`,
-        args: [token, age_band, expiresAt],
-      });
-      await db.execute({
-        sql: `INSERT INTO maker_redemption_codes (code, session_token, expires_at) VALUES (?, ?, ?)`,
-        args: [code, token, codeExpiresAt],
-      });
+      const r = await mintGuestSession(db, { ageBand: age_band });
       return mcpOk({
-        redemption_code: code,
-        short_url: `/kiosk/r/${code}`,
+        redemption_code: r.redemptionCode,
+        short_url: r.shortUrl,
         persona: ageBandFromGuestBand(age_band),
-        session_expires_at: expiresAt,
+        session_expires_at: r.sessionExpiresAt,
         is_guest: true,
       });
     }
