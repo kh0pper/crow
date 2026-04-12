@@ -1,0 +1,28 @@
+{
+  "id": "dozzle",
+  "name": "Dozzle",
+  "version": "1.0.0",
+  "description": "Real-time Docker container log viewer in the browser. Tail, search, and filter logs across every container on this host.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "infrastructure",
+  "tags": ["logs", "docker", "debugging", "observability"],
+  "icon": "file-text",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["DOZZLE_URL"] },
+  "panel": "panel/dozzle.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/dozzle.md"],
+  "consent_required": true,
+  "install_consent_messages": {
+    "en": "Dozzle requires read-only access to the Docker socket (/var/run/docker.sock) so it can list containers and stream their logs in your browser. This is a significant privilege: container logs often contain stack traces, connection strings, and occasionally secrets that were accidentally logged. Crow enforces read-only Docker socket (no writes, no container control). Dozzle binds to 127.0.0.1 only — never expose its port publicly without authentication enabled.",
+    "es": "Dozzle necesita acceso de solo lectura al socket de Docker (/var/run/docker.sock) para listar contenedores y transmitir sus logs en tu navegador. Es un privilegio significativo: los logs de contenedores suelen incluir trazas, cadenas de conexión y, a veces, secretos registrados por error. Crow impone solo lectura en el socket de Docker (sin escrituras ni control de contenedores). Dozzle se vincula solo a 127.0.0.1 — nunca expongas su puerto públicamente sin autenticación."
+  },
+  "requires": { "env": [], "min_ram_mb": 64, "min_disk_mb": 50 },
+  "env_vars": [
+    { "name": "DOZZLE_URL", "description": "Dozzle URL (host-local)", "default": "http://localhost:8095", "required": false }
+  ],
+  "ports": [8095],
+  "webUI": { "port": 8095, "path": "/", "label": "Dozzle" },
+  "notes": "Log viewer is primarily a UI; MCP exposes a lightweight status + link tool. For automated log analysis, use Netdata's log collection or shell into the target container directly. Docker socket mounted read-only."
+}

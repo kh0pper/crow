@@ -44,6 +44,7 @@ const ICON_MAP = {
   "check-square": "\u2705",
   dollar: "\u{1F4B0}",
   document: "\u{1F4D1}",
+  activity: "\u{1F4C8}",
   git: "\u{1F33F}",
   lock: "\u{1F512}",
   search: "\u{1F50D}",

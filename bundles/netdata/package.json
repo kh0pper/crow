@@ -1,0 +1,11 @@
+{
+  "name": "crow-netdata",
+  "version": "1.0.0",
+  "description": "Netdata MCP server — system and container metrics via the Netdata agent HTTP API",
+  "type": "module",
+  "main": "server/index.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  }
+}
