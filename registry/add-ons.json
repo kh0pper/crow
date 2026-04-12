@@ -3239,6 +3239,46 @@
       "notes": "Four containers (app + horizon + postgres + redis). zknt/pixelfed image runs nginx+PHP-FPM under supervisord. Expose via caddy_add_federation_site { domain: PIXELFED_HOSTNAME, upstream: 'pixelfed:80', profile: 'activitypub' }. Admin user via `docker exec -it crow-pixelfed php artisan user:create`."
     },
     {
+      "id": "lemmy",
+      "name": "Lemmy",
+      "description": "Federated link aggregator and discussion platform over ActivityPub — Reddit-alternative. Posts, comments, communities, votes; federates with Lemmy/Kbin/Mastodon.",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "federated-social",
+      "tags": ["lemmy", "activitypub", "fediverse", "link-aggregator", "discussion", "reddit-alt"],
+      "icon": "message-circle",
+      "docker": { "composefile": "docker-compose.yml" },
+      "server": {
+        "command": "node",
+        "args": ["server/index.js"],
+        "envKeys": ["LEMMY_URL", "LEMMY_JWT", "LEMMY_HOSTNAME"]
+      },
+      "panel": "panel/lemmy.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": ["skills/lemmy.md"],
+      "consent_required": true,
+      "requires": {
+        "env": ["LEMMY_HOSTNAME", "LEMMY_DB_PASSWORD", "LEMMY_PICTRS_API_KEY"],
+        "bundles": ["caddy"],
+        "min_ram_mb": 1000,
+        "recommended_ram_mb": 2000,
+        "min_disk_mb": 5000,
+        "recommended_disk_mb": 50000
+      },
+      "env_vars": [
+        { "name": "LEMMY_HOSTNAME", "description": "Public domain (subdomain).", "required": true },
+        { "name": "LEMMY_DB_PASSWORD", "description": "Password for the bundled Postgres role.", "required": true, "secret": true },
+        { "name": "LEMMY_PICTRS_API_KEY", "description": "Shared secret between Lemmy and pict-rs (any random 32+ chars).", "required": true, "secret": true },
+        { "name": "LEMMY_JWT", "description": "Admin JWT (obtain via POST /api/v3/user/login after setup wizard).", "required": false, "secret": true },
+        { "name": "LEMMY_OPEN_REGISTRATION", "description": "Allow new user signups.", "default": "false", "required": false },
+        { "name": "LEMMY_FEDERATION_ENABLED", "description": "Federate with other ActivityPub servers.", "default": "true", "required": false }
+      ],
+      "ports": [],
+      "webUI": null,
+      "notes": "Four containers (lemmy + lemmy-ui + postgres + pict-rs). Expose via caddy_add_federation_site { domain: LEMMY_HOSTNAME, upstream: 'lemmy-ui:1234', profile: 'activitypub' }. Admin registers via the web setup wizard on first boot."
+    },
+    {
       "id": "developer-kit",
       "name": "Developer Kit",
       "description": "Build and submit Crow extensions with guided scaffolding, testing, and registry submission",

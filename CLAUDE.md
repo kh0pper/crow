@@ -467,6 +467,7 @@ Add-on skills (activated when corresponding add-on is installed):
 - `matrix-dendrite.md` — Matrix homeserver on Dendrite: create/join/leave rooms, send messages, sync, invite users, federation health; appservice registration prep for F.12 bridges; :8448-vs-well-known either/or federation story
 - `funkwhale.md` — Funkwhale federated music pod: library listing, search, upload, follow remote channels/libraries, playlists, listening history, moderation (block_user/mute inline; block_domain/defederate queued), media prune; on-disk or S3 audio storage via storage-translators.funkwhale()
 - `pixelfed.md` — Pixelfed federated photo-sharing: post photos (upload+status), feed, search, follow, moderation (block_user/mute inline; block_domain/defederate/import_blocklist queued), admin reports, remote reporting, media prune; Mastodon-compatible REST API; on-disk or S3 media via storage-translators.pixelfed()
+- `lemmy.md` — Lemmy federated link aggregator: status, list/follow/unfollow communities, post (link + body), comment, feed (Subscribed/Local/All), search, moderation (block_user/block_community inline; block_instance/defederate queued), admin reports, pict-rs media prune; Lemmy v3 REST API; community-scoped federation
 - `calibre-server.md` — Calibre content server: search, browse, download ebooks via OPDS
 - `calibre-web.md` — Calibre-Web reader: search, shelves, reading status, download
 - `miniflux.md` — Miniflux RSS reader: subscribe feeds, read articles, star, mark read
