@@ -3073,6 +3073,44 @@
       "notes": "No host port publish. Expose via Caddy after install: caddy_add_federation_site { domain, upstream: 'gotosocial:8080', profile: 'activitypub' }."
     },
     {
+      "id": "writefreely",
+      "name": "WriteFreely",
+      "description": "Lightweight, minimalist ActivityPub blogging platform. Single-binary, single-SQLite-file footprint — ideal for long-form writing federated to the fediverse.",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "federated-social",
+      "tags": ["activitypub", "fediverse", "blog", "long-form", "federated", "writing"],
+      "icon": "file-text",
+      "docker": { "composefile": "docker-compose.yml" },
+      "server": {
+        "command": "node",
+        "args": ["server/index.js"],
+        "envKeys": ["WF_URL", "WF_ACCESS_TOKEN", "WF_COLLECTION_ALIAS"]
+      },
+      "panel": "panel/writefreely.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": ["skills/writefreely.md"],
+      "consent_required": true,
+      "requires": {
+        "env": ["WF_HOST"],
+        "bundles": ["caddy"],
+        "min_ram_mb": 256,
+        "recommended_ram_mb": 512,
+        "min_disk_mb": 500,
+        "recommended_disk_mb": 5000
+      },
+      "env_vars": [
+        { "name": "WF_HOST", "description": "Public subdomain for this WriteFreely instance.", "required": true },
+        { "name": "WF_ACCESS_TOKEN", "description": "Admin API token (from POST /api/auth/login after first-run web setup).", "required": false, "secret": true },
+        { "name": "WF_COLLECTION_ALIAS", "description": "Default collection (blog) alias.", "required": false },
+        { "name": "WF_SINGLE_USER", "description": "Single-user mode (true) or multi-user (false).", "default": "true", "required": false }
+      ],
+      "ports": [],
+      "webUI": null,
+      "notes": "No host port publish. After install: caddy_add_federation_site { domain: WF_HOST, upstream: 'writefreely:8080', profile: 'activitypub' }. Admin account is created via the first-run web UI (no CLI bootstrap)."
+    },
+    {
       "id": "developer-kit",
       "name": "Developer Kit",
       "description": "Build and submit Crow extensions with guided scaffolding, testing, and registry submission",

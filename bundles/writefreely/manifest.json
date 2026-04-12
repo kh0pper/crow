@@ -1,0 +1,66 @@
+{
+  "id": "writefreely",
+  "name": "WriteFreely",
+  "version": "1.0.0",
+  "description": "Lightweight, minimalist ActivityPub blogging platform. Single-binary, single-SQLite-file footprint — ideal for long-form writing federated to the fediverse. Complements GoToSocial (microblog) and Crow's own blog.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "federated-social",
+  "tags": ["activitypub", "fediverse", "blog", "long-form", "federated", "writing"],
+  "icon": "file-text",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "envKeys": ["WF_URL", "WF_ACCESS_TOKEN", "WF_COLLECTION_ALIAS"]
+  },
+  "panel": "panel/writefreely.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/writefreely.md"],
+  "consent_required": true,
+  "install_consent_messages": {
+    "en": "WriteFreely joins the fediverse: your blog becomes publicly addressable at the domain you configure, and posts marked public are federated via ActivityPub to following Mastodon / GoToSocial / other instances. Replicated posts cannot be fully recalled — deletions may not reach every server that boosted your content. WriteFreely itself does not moderate remote content (it is publish-only); inbound federation is limited to follow-from-remote events, so moderation surface is narrow. If your instance is reported for abuse, the normal defederation risks apply — a poisoned domain cannot easily be rehabilitated.",
+    "es": "WriteFreely se une al fediverso: tu blog será públicamente direccionable en el dominio que configures, y las publicaciones marcadas como públicas se federan vía ActivityPub a instancias que te sigan (Mastodon, GoToSocial, etc.). Las publicaciones replicadas no pueden recuperarse completamente — las eliminaciones pueden no llegar a todos los servidores que hicieron boost de tu contenido. WriteFreely en sí mismo no modera contenido remoto (es solo de publicación); la federación entrante se limita a eventos de seguimiento, por lo que la superficie de moderación es estrecha. Si tu instancia es reportada por abuso, aplican los riesgos normales de defederación — un dominio envenenado no puede rehabilitarse fácilmente."
+  },
+  "requires": {
+    "env": ["WF_HOST"],
+    "bundles": ["caddy"],
+    "min_ram_mb": 256,
+    "recommended_ram_mb": 512,
+    "min_disk_mb": 500,
+    "recommended_disk_mb": 5000
+  },
+  "env_vars": [
+    {
+      "name": "WF_HOST",
+      "description": "Public domain for this WriteFreely instance (must be a subdomain; subpath mounts break ActivityPub).",
+      "required": true
+    },
+    {
+      "name": "WF_URL",
+      "description": "Internal URL the Crow MCP server uses to reach WriteFreely (over the crow-federation docker network).",
+      "default": "http://writefreely:8080",
+      "required": false
+    },
+    {
+      "name": "WF_ACCESS_TOKEN",
+      "description": "API access token for the admin account. Obtain via POST /api/auth/login after first-run web setup (or from the WriteFreely CLI).",
+      "required": false,
+      "secret": true
+    },
+    {
+      "name": "WF_COLLECTION_ALIAS",
+      "description": "Default collection (blog) alias for post operations. Single-user blogs typically have one collection; multi-user installs require explicit alias per post.",
+      "required": false
+    },
+    {
+      "name": "WF_SINGLE_USER",
+      "description": "Set to true for single-user blog mode (simpler setup, one implicit collection). false for multi-user Medium-like mode.",
+      "default": "true",
+      "required": false
+    }
+  ],
+  "ports": [],
+  "webUI": null,
+  "notes": "No host port publish. Expose via Caddy after install: caddy_add_federation_site { domain: WF_HOST, upstream: 'writefreely:8080', profile: 'activitypub' }. On first-run the admin account is created via the web UI; there is no CLI bootstrap."
+}
