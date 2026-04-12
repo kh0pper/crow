@@ -1,0 +1,48 @@
+# Netdata agent — real-time system + container monitoring.
+#
+# Pinned to v2.10.1 (the current stable release at time of authoring).
+# Netdata's :latest floats to nightly; :stable aliases the current semver.
+# We pin to the explicit version tag for reproducible installs.
+#
+# Privileges (documented in manifest install_consent_messages, gated by PR 0):
+#   - Read-only Docker socket: lets netdata discover running containers and
+#     report per-container CPU/mem/net/disk. Never writable.
+#   - /proc and /sys read-only: standard host metrics. No /etc mounts (the
+#     platform blocks /etc and we accept reduced hostname/OS metadata).
+#
+# NOT in the MVP:
+#   - SYS_PTRACE capability + pid:host (per-process stats). Would require
+#     privileged:true, deliberately excluded for MVP scope.
+
+services:
+  netdata:
+    image: netdata/netdata:v2.10.1
+    container_name: crow-netdata
+    hostname: crow-netdata
+    ports:
+      - "127.0.0.1:19999:19999"
+    volumes:
+      - netdataconfig:/etc/netdata
+      - netdatalib:/var/lib/netdata
+      - netdatacache:/var/cache/netdata
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+    environment:
+      - DOCKER_HOST=/var/run/docker.sock
+      - NETDATA_CLAIM_URL=
+      - NETDATA_CLAIM_TOKEN=
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:19999/api/v1/info"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  netdataconfig:
+  netdatalib:
+  netdatacache:

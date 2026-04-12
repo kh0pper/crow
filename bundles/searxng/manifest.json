@@ -1,0 +1,24 @@
+{
+  "id": "searxng",
+  "name": "SearXNG",
+  "version": "1.0.0",
+  "description": "Privacy-respecting metasearch engine — aggregates results from 70+ sources (Google, Bing, DuckDuckGo, Wikipedia, GitHub, arXiv, more) without tracking",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "productivity",
+  "tags": ["search", "metasearch", "privacy", "self-hosted"],
+  "icon": "search",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["SEARXNG_BASE_URL"] },
+  "panel": "panel/searxng.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/searxng.md"],
+  "requires": { "min_ram_mb": 256, "min_disk_mb": 150 },
+  "env_vars": [
+    { "name": "SEARXNG_BASE_URL", "description": "Public URL SearXNG advertises in generated links", "default": "http://localhost:8098/", "required": false },
+    { "name": "SEARXNG_SECRET_KEY", "description": "Secret key used to sign SearXNG tokens. If left empty, the entrypoint generates one on first boot (stored inside the container config volume).", "required": false, "secret": true }
+  ],
+  "ports": [8098],
+  "webUI": { "port": 8098, "path": "/", "label": "SearXNG" },
+  "notes": "Config lives in ~/.crow/searxng/ (settings.yml, uwsgi.ini). On first boot the container seeds a default settings.yml and generates a random SECRET_KEY if the env var is empty. JSON API is enabled for MCP use — the crow skill documents how to extend it with more engines."
+}

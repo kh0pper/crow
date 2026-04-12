@@ -1,0 +1,47 @@
+# Gitea — self-hosted git service.
+#
+# Storage:
+#   ~/.crow/gitea/data is a bind mount so repos, attachments, and the SQLite
+#   database live in a user-inspectable location. Back this directory up to
+#   preserve all git history.
+#
+# Ports:
+#   3040 (host) -> 3000 (container) — HTTP web UI + API, bound to 127.0.0.1
+#   2223 (host) -> 22   (container) — Gitea's built-in Go SSH server for git
+#                                     clone/push over SSH. Bound to 127.0.0.1;
+#                                     expose at the reverse proxy / firewall
+#                                     level if you want remote access.
+#
+# Gitea does NOT run sshd — the built-in Go implementation serves on 22 inside
+# the container. Clone with: ssh://git@localhost:2223/user/repo.git
+
+services:
+  gitea:
+    image: gitea/gitea:1.23.8
+    container_name: crow-gitea
+    ports:
+      - "127.0.0.1:3040:3000"
+      - "127.0.0.1:2223:22"
+    volumes:
+      - ${GITEA_DATA_DIR:-~/.crow/gitea/data}:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__database__DB_TYPE=sqlite3
+      - GITEA__database__PATH=/data/gitea/gitea.db
+      - GITEA__server__DOMAIN=localhost
+      - GITEA__server__ROOT_URL=${GITEA_URL:-http://localhost:3040}/
+      - GITEA__server__SSH_PORT=2223
+      - GITEA__server__SSH_LISTEN_PORT=22
+      - GITEA__server__START_SSH_SERVER=true
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/api/healthz || wget -q --spider http://localhost:3000/api/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
