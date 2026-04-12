@@ -833,6 +833,139 @@ export default {
             h3.textContent = '${tJs("extensions.installTitle", lang)}' + " " + name;
             frag.appendChild(h3);
 
+            // PR 0: Consent gate. Before showing env config, check whether the bundle
+            // requires server-validated consent (privileged or consent_required).
+            // If yes, render a warning box with capability list and gate the install
+            // button until the user checks "I understand" (and types INSTALL for privileged).
+            // The consent_token returned from /consent-challenge is passed to /install.
+            var consentToken = null;       // populated on /consent-challenge if required
+            var consentSatisfied = true;   // false until user passes the gate (only when consent required)
+            var installBtnRef = null;      // forward ref so consent UI can enable/disable it
+
+            function refreshInstallBtnState() {
+              if (!installBtnRef) return;
+              installBtnRef.disabled = !consentSatisfied;
+            }
+
+            // Async: fetch consent challenge (non-blocking; install button starts disabled if required)
+            fetch(API + "/consent-challenge/" + encodeURIComponent(id) + "?lang=" + encodeURIComponent('${lang}'))
+              .then(function(r) { return r.json(); })
+              .then(function(data) {
+                if (!data || data.required === false) return; // no consent required
+                consentSatisfied = false; // gate the install button
+                refreshInstallBtnState();
+                consentToken = data.token;
+
+                var box = document.createElement("div");
+                var isPriv = data.privileged === true;
+                var bg = isPriv ? "rgba(231,76,60,0.10)" : "rgba(240,173,78,0.10)";
+                var bd = isPriv ? "rgba(231,76,60,0.35)" : "rgba(240,173,78,0.35)";
+                var color = isPriv ? "#e74c3c" : "#f0ad4e";
+                box.style.cssText = "background:" + bg + ";border:1px solid " + bd + ";border-radius:6px;padding:0.85rem 1rem;margin-bottom:1rem";
+
+                var title = document.createElement("div");
+                title.style.cssText = "font-weight:600;color:" + color + ";margin-bottom:0.5rem;font-size:0.95rem";
+                title.textContent = isPriv
+                  ? "Privileged bundle — explicit consent required"
+                  : "Consent required";
+                box.appendChild(title);
+
+                var msg = document.createElement("div");
+                msg.style.cssText = "color:var(--crow-text-secondary);font-size:0.85rem;line-height:1.5;margin-bottom:0.6rem;white-space:pre-wrap";
+                msg.textContent = data.message || "";
+                box.appendChild(msg);
+
+                if (Array.isArray(data.capabilities) && data.capabilities.length > 0) {
+                  var capLabel = document.createElement("div");
+                  capLabel.style.cssText = "font-size:0.78rem;color:var(--crow-text-muted);text-transform:uppercase;letter-spacing:0.05em;margin:0.5rem 0 0.25rem";
+                  capLabel.textContent = "Capabilities";
+                  box.appendChild(capLabel);
+
+                  var capList = document.createElement("ul");
+                  capList.style.cssText = "margin:0 0 0.5rem 1.25rem;color:var(--crow-text-secondary);font-size:0.85rem;line-height:1.5";
+                  data.capabilities.forEach(function(c) {
+                    var li = document.createElement("li");
+                    li.textContent = c;
+                    capList.appendChild(li);
+                  });
+                  box.appendChild(capList);
+                }
+
+                if (Array.isArray(data.prereqs) && data.prereqs.length > 0) {
+                  var preqLabel = document.createElement("div");
+                  preqLabel.style.cssText = "font-size:0.78rem;color:var(--crow-text-muted);text-transform:uppercase;letter-spacing:0.05em;margin:0.5rem 0 0.25rem";
+                  preqLabel.textContent = "Required bundles";
+                  box.appendChild(preqLabel);
+
+                  var anyMissing = false;
+                  var preqList = document.createElement("ul");
+                  preqList.style.cssText = "margin:0 0 0.5rem 1.25rem;font-size:0.85rem;line-height:1.5";
+                  data.prereqs.forEach(function(p) {
+                    var li = document.createElement("li");
+                    li.style.color = p.installed ? "var(--crow-success, #2ecc71)" : "var(--crow-error, #e74c3c)";
+                    li.textContent = (p.installed ? "✓ " : "✗ ") + p.id + (p.installed ? " (installed)" : " (NOT installed — install this first)");
+                    if (!p.installed) anyMissing = true;
+                    preqList.appendChild(li);
+                  });
+                  box.appendChild(preqList);
+                  if (anyMissing) {
+                    consentSatisfied = false;
+                    refreshInstallBtnState();
+                  }
+                }
+
+                // Consent gate: checkbox + (for privileged) typed confirmation
+                var gate = document.createElement("div");
+                gate.style.cssText = "margin-top:0.5rem";
+
+                var checkLabel = document.createElement("label");
+                checkLabel.style.cssText = "display:flex;align-items:center;gap:0.4rem;font-size:0.88rem;color:var(--crow-text-secondary);cursor:pointer;margin-bottom:0.4rem";
+                var check = document.createElement("input");
+                check.type = "checkbox";
+                checkLabel.appendChild(check);
+                checkLabel.appendChild(document.createTextNode(" I understand and consent"));
+                gate.appendChild(checkLabel);
+
+                var confirmInput = null;
+                if (isPriv) {
+                  var confirmLabel = document.createElement("label");
+                  confirmLabel.style.cssText = "display:block;font-size:0.78rem;color:var(--crow-text-muted);text-transform:uppercase;letter-spacing:0.05em;margin:0.4rem 0 0.2rem";
+                  confirmLabel.textContent = 'Type "INSTALL" to confirm';
+                  gate.appendChild(confirmLabel);
+                  confirmInput = document.createElement("input");
+                  confirmInput.type = "text";
+                  confirmInput.placeholder = "INSTALL";
+                  confirmInput.style.cssText = "width:100%;padding:0.45rem;border:1px solid var(--crow-border);border-radius:4px;background:var(--crow-bg-deep);color:var(--crow-text-primary);font-family:JetBrains Mono,monospace;font-size:0.85rem;box-sizing:border-box";
+                  gate.appendChild(confirmInput);
+                }
+
+                function evaluateGate() {
+                  var ok = check.checked;
+                  if (isPriv && confirmInput) {
+                    ok = ok && (confirmInput.value || "").trim().toLowerCase() === "install";
+                  }
+                  // dependents must also be installed
+                  if (Array.isArray(data.prereqs)) {
+                    for (var i = 0; i < data.prereqs.length; i++) {
+                      if (!data.prereqs[i].installed) ok = false;
+                    }
+                  }
+                  consentSatisfied = ok;
+                  refreshInstallBtnState();
+                }
+
+                check.addEventListener("change", evaluateGate);
+                if (confirmInput) confirmInput.addEventListener("input", evaluateGate);
+                box.appendChild(gate);
+
+                // Insert consent box right after the heading
+                frag.insertBefore(box, frag.children[1] || null);
+              })
+              .catch(function() {
+                // Network error — leave install enabled (fail-open). The server will reject
+                // the install if consent is actually required (no token) so it's safe.
+              });
+
             if (isCommunity) {
               var communityWarn = document.createElement("div");
               communityWarn.style.cssText = "background:rgba(240,173,78,0.1);border:1px solid rgba(240,173,78,0.3);border-radius:6px;padding:0.75rem 1rem;margin-bottom:1rem";
@@ -928,6 +1061,10 @@ export default {
             var installBtn = document.createElement("button");
             installBtn.className = "btn btn-primary";
             installBtn.textContent = '${tJs("extensions.install", lang)}';
+            installBtnRef = installBtn;
+            // Start disabled if consent is required (will be enabled when gate is satisfied);
+            // initial value of consentSatisfied is true and gets flipped by the consent fetch.
+            refreshInstallBtnState();
             installBtn.addEventListener("click", function() {
               installBtn.disabled = true;
               installBtn.textContent = '${tJs("extensions.installing", lang)}';
@@ -941,9 +1078,30 @@ export default {
                 if (inp && inp.value) envData[n] = inp.value;
               });
 
-              apiCall("install", { bundle_id: id, env_vars: envData }).then(function(res) {
+              var payload = { bundle_id: id, env_vars: envData };
+              if (consentToken) payload.consent_token = consentToken;
+
+              apiCall("install", payload).then(function(res) {
                 if (res.ok && res.data.job_id) {
                   pollJob(res.data.job_id, statusDiv, installBtn);
+                } else if (res.data && res.data.consent_expired) {
+                  // PR 0: Consent token expired (e.g., slow image pull). Mint a fresh token
+                  // silently and retry the install with the same env config preserved.
+                  statusDiv.style.color = "var(--crow-warning, #f0ad4e)";
+                  statusDiv.textContent = "Consent expired — refreshing and retrying...";
+                  fetch(API + "/consent-challenge/" + encodeURIComponent(id) + "?lang=" + encodeURIComponent('${lang}'))
+                    .then(function(r) { return r.json(); })
+                    .then(function(d) {
+                      if (d && d.token) {
+                        consentToken = d.token;
+                        installBtn.click();
+                      } else {
+                        statusDiv.style.color = "var(--crow-error, #e74c3c)";
+                        statusDiv.textContent = "Could not refresh consent. Retry manually.";
+                        installBtn.disabled = false;
+                        installBtn.textContent = '${tJs("extensions.retry", lang)}';
+                      }
+                    });
                 } else {
                   statusDiv.style.color = "var(--crow-error, #e74c3c)";
                   statusDiv.textContent = res.data.error || '${tJs("extensions.installFailed", lang)}';
