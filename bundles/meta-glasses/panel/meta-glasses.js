@@ -231,6 +231,6 @@ export default {
 
       <script>${CLIENT_SCRIPT}<\/script>`;
 
-    layout({ title: "Meta Glasses", content });
+    res.send(layout({ title: "Meta Glasses", content }));
   },
 };
