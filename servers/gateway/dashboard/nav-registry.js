@@ -12,6 +12,7 @@ const DEFAULT_NAV_GROUPS = [
   { id: "core", name: "Core", collapsed: false },
   { id: "content", name: "Content", collapsed: false },
   { id: "media", name: "Media", collapsed: false },
+  { id: "education", name: "Education", collapsed: false },
   { id: "tools", name: "Tools", collapsed: false },
   { id: "system", name: "System", collapsed: true },
 ];
@@ -41,7 +42,7 @@ const CATEGORY_TO_GROUP = {
   finance: "tools",
   infrastructure: "tools",
   automation: "tools",
-  education: "content",
+  education: "education",
   system: "system",
   "federated-social": "core",
   "federated-media": "media",
@@ -97,6 +98,27 @@ export async function resolveNavGroups(db, visiblePanels) {
       assignments[panel.id] = groupId;
       assignmentsChanged = true;
     }
+  }
+
+  // One-time migration: move auto-assigned education panels out of
+  // whatever group they landed in (pre-change: "content") into the
+  // dedicated "education" group. Gated by a flag so we only do this
+  // once and don't fight subsequent user customization.
+  const migrationFlag = await db.execute({
+    sql: "SELECT value FROM dashboard_settings WHERE key = 'nav_migration_education_v1'",
+    args: [],
+  });
+  if (migrationFlag.rows.length === 0) {
+    if (!groups.find((g) => g.id === "education")) {
+      groups.push({ id: "education", name: "Education", collapsed: false });
+    }
+    for (const panel of visiblePanels) {
+      if (panel.category === "education" && assignments[panel.id] !== "education") {
+        assignments[panel.id] = "education";
+        assignmentsChanged = true;
+      }
+    }
+    await upsertSetting(db, "nav_migration_education_v1", "1");
   }
 
   if (needsSeed || assignmentsChanged) {
