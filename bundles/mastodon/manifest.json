@@ -1,0 +1,59 @@
+{
+  "id": "mastodon",
+  "name": "Mastodon",
+  "version": "1.0.0",
+  "description": "The flagship ActivityPub server — federated microblogging at scale. Heaviest of the small-AP bundles. Hosts a public (or invite-only) Mastodon instance with the full v1/v2 API surface, web UI, and Sidekiq background job processing.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "federated-social",
+  "tags": ["mastodon", "activitypub", "fediverse", "microblog", "federated", "flagship"],
+  "icon": "globe",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "envKeys": ["MASTODON_URL", "MASTODON_ACCESS_TOKEN", "MASTODON_LOCAL_DOMAIN"]
+  },
+  "panel": "panel/mastodon.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/mastodon.md"],
+  "consent_required": true,
+  "install_consent_messages": {
+    "en": "Mastodon joins the public fediverse over ActivityPub — your instance becomes publicly addressable at the domain you configure (LOCAL_DOMAIN appears in user handles @user@example.com and is IMMUTABLE after first boot — changing it effectively abandons all existing federation identities). Any content you publish can be replicated to federated servers and cannot be fully recalled. Mastodon's remote-media cache can reach 10-100 GB within weeks under an active follow graph — automatic pruning (14-day default) is enabled but on busy instances you may need S3 storage to stay ahead of local disk. Mastodon is hardware-gated: refused on hosts with <8 GB total RAM — the 3 GB container-minimum is only realistic when the instance isn't federated with many busy actors. Runs 4 containers (web, streaming, sidekiq, plus postgres/redis); typical idle ~3 GB, under load 6 GB+. Hosting illegal content or enabling harassment is your legal responsibility — major hubs may defederate your instance quickly.",
+    "es": "Mastodon se une al fediverso público vía ActivityPub — tu instancia será direccionable en el dominio que configures (LOCAL_DOMAIN aparece en handles como @usuario@ejemplo.com y es INMUTABLE tras el primer arranque — cambiarlo abandona efectivamente todas las identidades de federación existentes). Cualquier contenido publicado puede replicarse a servidores federados y no puede recuperarse completamente. El caché de medios remotos de Mastodon puede alcanzar 10-100 GB en semanas con un grafo de seguimiento activo — el recorte automático (14 días por defecto) está habilitado pero en instancias activas puede ser necesario almacenamiento S3 para mantener el disco local. Mastodon está limitado por hardware: rechazado en hosts con <8 GB de RAM total — el mínimo de 3 GB por contenedor solo es realista cuando la instancia no está federada con muchos actores activos. Ejecuta 4 contenedores (web, streaming, sidekiq, más postgres/redis); típico ~3 GB en reposo, 6 GB+ bajo carga. Hospedar contenido ilegal o permitir acoso es tu responsabilidad legal — los hubs principales pueden dejar de federarse rápidamente."
+  },
+  "requires": {
+    "env": ["MASTODON_LOCAL_DOMAIN", "MASTODON_DB_PASSWORD", "MASTODON_SECRET_KEY_BASE", "MASTODON_OTP_SECRET", "MASTODON_VAPID_PRIVATE_KEY", "MASTODON_VAPID_PUBLIC_KEY"],
+    "bundles": ["caddy"],
+    "min_ram_mb": 3000,
+    "recommended_ram_mb": 6000,
+    "min_disk_mb": 20000,
+    "recommended_disk_mb": 500000
+  },
+  "env_vars": [
+    { "name": "MASTODON_LOCAL_DOMAIN", "description": "Public domain that appears in handles (@user@<this>). IMMUTABLE after first boot — changing breaks all federation identities.", "required": true },
+    { "name": "MASTODON_WEB_DOMAIN", "description": "Domain where the web UI lives (if using apex-delegation this differs from LOCAL_DOMAIN; otherwise same).", "required": false },
+    { "name": "MASTODON_DB_PASSWORD", "description": "Password for the bundled Postgres role.", "required": true, "secret": true },
+    { "name": "MASTODON_SECRET_KEY_BASE", "description": "Rails secret_key_base (128 hex chars). Generate: `docker run --rm ghcr.io/mastodon/mastodon:v4.3 bundle exec rake secret`.", "required": true, "secret": true },
+    { "name": "MASTODON_OTP_SECRET", "description": "2FA OTP secret (128 hex chars). Generate same way as SECRET_KEY_BASE.", "required": true, "secret": true },
+    { "name": "MASTODON_VAPID_PRIVATE_KEY", "description": "Web Push VAPID private key. Generate: `docker run --rm ghcr.io/mastodon/mastodon:v4.3 bundle exec rake mastodon:webpush:generate_vapid_key` → gives both keys.", "required": true, "secret": true },
+    { "name": "MASTODON_VAPID_PUBLIC_KEY", "description": "Web Push VAPID public key (pair of above).", "required": true },
+    { "name": "MASTODON_ACCESS_TOKEN", "description": "Admin access token (Settings → Development → New Application, grant read/write/admin:read/admin:write).", "required": false, "secret": true },
+    { "name": "MASTODON_URL", "description": "Internal URL the MCP server uses to reach Mastodon's web container (default http://mastodon-web:3000 over crow-federation).", "default": "http://mastodon-web:3000", "required": false },
+    { "name": "MASTODON_MEDIA_RETENTION_DAYS", "description": "Remote media cache retention in days (default 14; 7 on Pi-class hosts).", "default": "14", "required": false },
+    { "name": "MASTODON_SINGLE_USER_MODE", "description": "Skip the landing page and redirect to the admin profile.", "default": "false", "required": false },
+    { "name": "MASTODON_S3_ENDPOINT", "description": "Optional S3-compatible endpoint for media storage. If set with bucket/access/secret, media goes to S3 via storage-translators.mastodon().", "required": false },
+    { "name": "MASTODON_S3_BUCKET", "description": "S3 bucket for media.", "required": false },
+    { "name": "MASTODON_S3_ACCESS_KEY", "description": "S3 access key.", "required": false, "secret": true },
+    { "name": "MASTODON_S3_SECRET_KEY", "description": "S3 secret key.", "required": false, "secret": true },
+    { "name": "MASTODON_S3_REGION", "description": "S3 region.", "default": "us-east-1", "required": false },
+    { "name": "MASTODON_SMTP_SERVER", "description": "Outbound SMTP server (required for registration confirmations + password reset).", "required": false },
+    { "name": "MASTODON_SMTP_PORT", "description": "SMTP port (default 587).", "default": "587", "required": false },
+    { "name": "MASTODON_SMTP_LOGIN", "description": "SMTP username.", "required": false },
+    { "name": "MASTODON_SMTP_PASSWORD", "description": "SMTP password.", "required": false, "secret": true },
+    { "name": "MASTODON_SMTP_FROM_ADDRESS", "description": "From address for outbound mail (e.g. Mastodon <notifications@example.com>).", "required": false }
+  ],
+  "ports": [],
+  "webUI": null,
+  "notes": "Five containers (web + streaming + sidekiq + postgres + redis). Expose via caddy_add_federation_site { domain: MASTODON_LOCAL_DOMAIN, upstream: 'mastodon-web:3000', profile: 'activitypub-mastodon' } — the mastodon profile also wires the streaming path (/api/v1/streaming → mastodon-streaming:4000) and static asset caching. Admin via `docker exec -it crow-mastodon-web bin/tootctl accounts create admin --email <you@example.com> --confirmed --role Admin`."
+}
