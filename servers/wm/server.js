@@ -75,6 +75,29 @@ const PET_APPIMAGE_PATH = resolve(homedir(), ".crow/bin/open-llm-vtuber.AppImage
 const PET_VALID_ANCHORS = ["right", "left", "bottom-right", "bottom-left"];
 let petPid = null;
 
+// Kill-switch. CROW_PET_MODE env wins over the manifest for quick operator
+// toggling. Manifest default: true on Linux x86_64, false elsewhere (no
+// AppImage exists for other platforms anyway). Read once at module load —
+// changes require a gateway restart, which matches how manifests are reloaded.
+function readPetModeEnabled() {
+  const envOverride = process.env.CROW_PET_MODE;
+  if (envOverride !== undefined) {
+    return String(envOverride).toLowerCase() !== "false" && envOverride !== "0";
+  }
+  try {
+    const serverDir = fileURLToPath(new URL(".", import.meta.url));
+    const manifestPath = resolve(serverDir, "../../bundles/companion/manifest.json");
+    if (existsSync(manifestPath)) {
+      const raw = JSON.parse(readFileSync(manifestPath, "utf-8"));
+      const flag = raw?.companion?.pet_mode;
+      if (flag === false) return false;
+      if (flag === true) return true;
+    }
+  } catch { /* fall through to platform default */ }
+  return process.platform === "linux" && process.arch === "x64";
+}
+const PET_MODE_ENABLED = readPetModeEnabled();
+
 // Socket path resolution mirrors patch 0008's server-side logic.
 function petSocketPath() {
   if (process.env.CROW_PET_SOCKET) return process.env.CROW_PET_SOCKET;
@@ -109,6 +132,9 @@ function sendPetOp(msg, timeoutMs = 500) {
 }
 
 async function launchPet(anchor) {
+  if (!PET_MODE_ENABLED) {
+    return { error: "Pet mode is disabled on this install. Set companion.pet_mode: true in bundles/companion/manifest.json (or unset CROW_PET_MODE=false) and restart the gateway to enable." };
+  }
   if (process.platform !== "linux") {
     return { error: "Pet mode is Linux-only. Use web-tiled mode on this platform." };
   }
