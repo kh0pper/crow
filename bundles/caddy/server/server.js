@@ -26,8 +26,17 @@ import {
   writeCaddyfile,
   parseSites,
   appendSite,
+  upsertRawSite,
   removeSite,
 } from "./caddyfile.js";
+
+import {
+  SUPPORTED_PROFILES,
+  renderProfileDirectives,
+  renderWellKnownHandle,
+  buildWellKnownJson,
+  WELLKNOWN_PATHS,
+} from "./federation-profiles.js";
 
 const CADDY_ADMIN_URL = () =>
   (process.env.CADDY_ADMIN_URL || "http://127.0.0.1:2019").replace(/\/+$/, "");
@@ -298,6 +307,293 @@ export function createCaddyServer(options = {}) {
           content: [{
             type: "text",
             text: `Removed site ${domain}. Caddy reloaded.`,
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+      }
+    }
+  );
+
+  // --- caddy_add_federation_site ---
+  server.tool(
+    "caddy_add_federation_site",
+    "Add a federation-aware reverse-proxy site block. Emits directives for the chosen profile (matrix | activitypub | peertube | generic-ws) — websocket upgrade, large request body, proxy timeouts — plus optional /.well-known/ handlers. Idempotent: re-running with the same domain replaces the existing block.",
+    {
+      domain: z.string().min(1).max(253).describe("Public site address (e.g., masto.example.com). Must be a subdomain dedicated to this federated app — ActivityPub actors are URL-keyed and subpath mounts break federation."),
+      upstream: z.string().min(1).max(500).describe("Upstream the app is reachable at (e.g., gotosocial:8080 over the shared crow-federation docker network, or 127.0.0.1:8080 for host-published debug mode)."),
+      profile: z.enum(SUPPORTED_PROFILES).describe(`One of: ${SUPPORTED_PROFILES.join(" | ")}`),
+      wellknown: z.record(z.string(), z.object({}).passthrough()).optional().describe(`Optional map of well-known handlers to emit inside this site block. Keys: ${Object.keys(WELLKNOWN_PATHS).join(", ")}. Values are either { body_json: "<literal JSON string>" } or kind-specific opts (matrix-server: { delegate_to }, matrix-client: { homeserver_base_url, identity_server_base_url? }, nodeinfo: { href }).`),
+    },
+    async ({ domain, upstream, profile, wellknown }) => {
+      try {
+        if (!domainLike(domain)) {
+          return { content: [{ type: "text", text: "Error: domain contains disallowed characters (whitespace, braces, or newlines)." }] };
+        }
+        if (!domainLike(upstream)) {
+          return { content: [{ type: "text", text: "Error: upstream contains disallowed characters." }] };
+        }
+        if (domain.includes("/")) {
+          return { content: [{ type: "text", text: `Error: federation sites must be a bare subdomain (e.g., "masto.example.com"), not a subpath. ActivityPub actors are URL-keyed and subpath mounts break federation.` }] };
+        }
+
+        let body = renderProfileDirectives(profile, upstream);
+
+        if (wellknown && Object.keys(wellknown).length) {
+          const handles = [];
+          for (const [kind, opts] of Object.entries(wellknown)) {
+            const path = WELLKNOWN_PATHS[kind];
+            if (!path) {
+              return { content: [{ type: "text", text: `Error: unknown well-known kind "${kind}". Known: ${Object.keys(WELLKNOWN_PATHS).join(", ")}` }] };
+            }
+            let jsonBody;
+            if (opts && typeof opts.body_json === "string") {
+              jsonBody = opts.body_json;
+            } else {
+              jsonBody = buildWellKnownJson(kind, opts || {});
+            }
+            handles.push(renderWellKnownHandle(path, jsonBody));
+          }
+          body = handles.join("\n") + "\n" + body;
+        }
+
+        const source = readCaddyfile(CONFIG_DIR());
+        const next = upsertRawSite(source, domain, body);
+        await loadCaddyfile(next);
+        writeCaddyfile(CONFIG_DIR(), next);
+
+        const sites = parseSites(next);
+        const replaced = parseSites(source).some((s) => s.address === domain);
+        return {
+          content: [{
+            type: "text",
+            text: `${replaced ? "Replaced" : "Added"} federation site ${domain} → ${upstream} (profile: ${profile}). ${sites.length} total site block(s). Caddy will request a Let's Encrypt cert on first request.`,
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+      }
+    }
+  );
+
+  // --- caddy_set_wellknown ---
+  server.tool(
+    "caddy_set_wellknown",
+    "Add or replace a standalone /.well-known/ handler at a domain that does NOT otherwise proxy to the federated app. Use this on an apex domain to delegate Matrix federation via `/.well-known/matrix/server` when Matrix itself lives on a different host. Idempotent.",
+    {
+      domain: z.string().min(1).max(253).describe("Apex or subdomain that serves the well-known JSON (e.g., example.com)."),
+      kind: z.enum(Object.keys(WELLKNOWN_PATHS)).describe(`One of: ${Object.keys(WELLKNOWN_PATHS).join(" | ")}`),
+      opts: z.record(z.string(), z.any()).optional().describe("Kind-specific options. matrix-server: { delegate_to: 'matrix.example.com:443' }. matrix-client: { homeserver_base_url: 'https://matrix.example.com' }. nodeinfo: { href: '...' }."),
+      body_json: z.string().max(5000).optional().describe("Override the canned JSON body entirely. Must be valid JSON."),
+    },
+    async ({ domain, kind, opts, body_json }) => {
+      try {
+        if (!domainLike(domain)) {
+          return { content: [{ type: "text", text: "Error: domain contains disallowed characters." }] };
+        }
+        const path = WELLKNOWN_PATHS[kind];
+        let jsonBody;
+        if (body_json) {
+          try { JSON.parse(body_json); } catch {
+            return { content: [{ type: "text", text: `Error: body_json is not valid JSON.` }] };
+          }
+          jsonBody = body_json;
+        } else {
+          jsonBody = buildWellKnownJson(kind, opts || {});
+        }
+        const handleBlock = renderWellKnownHandle(path, jsonBody);
+
+        const source = readCaddyfile(CONFIG_DIR());
+        const existing = parseSites(source).find((s) => s.address === domain);
+        let body;
+        if (existing) {
+          const bodyLines = existing.body.split("\n");
+          const pathEscaped = path.replace(/\//g, "\\/");
+          const pathRe = new RegExp(`^\\s*handle\\s+${pathEscaped}\\s*\\{`);
+          const startIdx = bodyLines.findIndex((l) => pathRe.test(l));
+          if (startIdx >= 0) {
+            let depth = 0;
+            let endIdx = startIdx;
+            for (let k = startIdx; k < bodyLines.length; k++) {
+              for (const ch of bodyLines[k]) {
+                if (ch === "{") depth++;
+                else if (ch === "}") {
+                  depth--;
+                  if (depth === 0) { endIdx = k; break; }
+                }
+              }
+              if (depth === 0 && k >= startIdx) { endIdx = k; break; }
+            }
+            const dedented = bodyLines.map((l) => l.replace(/^  /, ""));
+            const newBody = [
+              ...dedented.slice(0, startIdx),
+              handleBlock,
+              ...dedented.slice(endIdx + 1),
+            ].join("\n").replace(/\n{3,}/g, "\n\n");
+            body = newBody.trim();
+          } else {
+            body = (existing.body.split("\n").map((l) => l.replace(/^  /, "")).join("\n") + "\n" + handleBlock).trim();
+          }
+        } else {
+          body = handleBlock;
+        }
+
+        const next = upsertRawSite(source, domain, body);
+        await loadCaddyfile(next);
+        writeCaddyfile(CONFIG_DIR(), next);
+        return {
+          content: [{
+            type: "text",
+            text: `Set well-known ${path} on ${domain}.`,
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+      }
+    }
+  );
+
+  // --- caddy_add_matrix_federation_port ---
+  server.tool(
+    "caddy_add_matrix_federation_port",
+    "Add a :8448 site block with its own Let's Encrypt cert, reverse-proxied to a Matrix homeserver's federation listener. Use this OR `caddy_set_wellknown` with kind=matrix-server — not both. Opening 8448 requires the router/firewall to forward it; .well-known delegation avoids that at the cost of an apex HTTPS handler.",
+    {
+      domain: z.string().min(1).max(253).describe("Matrix server name (e.g., matrix.example.com). The cert issued for :8448 will match this SNI."),
+      upstream_8448: z.string().min(1).max(500).describe("Dendrite/Synapse federation listener (e.g., dendrite:8448 over the shared docker network)."),
+    },
+    async ({ domain, upstream_8448 }) => {
+      try {
+        if (!domainLike(domain) || !domainLike(upstream_8448)) {
+          return { content: [{ type: "text", text: "Error: domain or upstream contains disallowed characters." }] };
+        }
+        const source = readCaddyfile(CONFIG_DIR());
+        const existingWellknown = parseSites(source)
+          .find((s) => s.address === domain && s.body.includes("/.well-known/matrix/server"));
+        if (existingWellknown) {
+          return {
+            content: [{
+              type: "text",
+              text: `Refusing: ${domain} already serves /.well-known/matrix/server — that delegates federation to a different host. Use one mechanism or the other, not both.`,
+            }],
+          };
+        }
+
+        const address = `${domain}:8448`;
+        const body = [
+          `reverse_proxy ${upstream_8448} {`,
+          `  transport http {`,
+          `    versions 1.1 2`,
+          `    read_timeout 600s`,
+          `  }`,
+          `}`,
+        ].join("\n");
+        const next = upsertRawSite(source, address, body);
+        await loadCaddyfile(next);
+        writeCaddyfile(CONFIG_DIR(), next);
+        return {
+          content: [{
+            type: "text",
+            text: `Added Matrix federation listener ${address} → ${upstream_8448}. Caddy will request a Let's Encrypt cert for ${domain} on :8448 on first request. Ensure port 8448/tcp is forwarded to this host.`,
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+      }
+    }
+  );
+
+  // --- caddy_cert_health ---
+  server.tool(
+    "caddy_cert_health",
+    "Report TLS cert health across all configured sites: ok / warning / error per domain, with expiry, ACME issuer, recent renewal failures, and DNS A/AAAA mismatches. Surfaces renewal failures that would otherwise be silent.",
+    {
+      domain: z.string().max(253).optional().describe("Optional — report a single domain. If omitted, reports all."),
+    },
+    async ({ domain }) => {
+      try {
+        const config = await adminFetch("/config/");
+        const policies = config?.apps?.tls?.automation?.policies || [];
+        const servers = config?.apps?.http?.servers || {};
+
+        const domains = new Set();
+        for (const srv of Object.values(servers)) {
+          for (const route of srv.routes || []) {
+            for (const m of route.match || []) {
+              for (const h of m.host || []) domains.add(h);
+            }
+          }
+        }
+        if (domain) {
+          if (!domains.has(domain)) {
+            return { content: [{ type: "text", text: `No loaded route for ${domain}. Run caddy_reload or caddy_list_sites to verify.` }] };
+          }
+          domains.clear();
+          domains.add(domain);
+        }
+
+        const ACME_DIR = "/root/.local/share/caddy/certificates";
+        const stagingFragment = "acme-staging-v02.api.letsencrypt.org";
+
+        const results = [];
+        for (const host of domains) {
+          const policy = policies.find((p) => !p.subjects || p.subjects.includes(host)) || policies[0];
+          const issuer = policy?.issuers?.[0] || {};
+          const isStaging = typeof issuer.ca === "string" && issuer.ca.includes(stagingFragment);
+          const issuerName = isStaging
+            ? "Let's Encrypt (STAGING)"
+            : (issuer.module || "acme") + (issuer.ca ? ` (${issuer.ca})` : "");
+
+          let expiresAt = null;
+          let status = "warning";
+          const problems = [];
+
+          try {
+            const certInfo = await adminFetch(
+              `/pki/ca/local/certificates/${encodeURIComponent(host)}`,
+            ).catch(() => null);
+            if (certInfo?.not_after) {
+              expiresAt = certInfo.not_after;
+              const days = (new Date(expiresAt).getTime() - Date.now()) / 86400_000;
+              if (days < 7) {
+                status = "error";
+                problems.push(`cert expires in ${days.toFixed(1)} days`);
+              } else if (days < 30) {
+                status = "warning";
+                problems.push(`cert expires in ${days.toFixed(0)} days`);
+              } else {
+                status = "ok";
+              }
+            } else {
+              problems.push("no cert loaded for this host");
+            }
+          } catch (err) {
+            problems.push(`cert lookup failed: ${err.message}`);
+          }
+
+          if (isStaging && status === "ok") status = "warning";
+          if (isStaging) problems.push("ACME staging issuer in use — browsers will warn");
+
+          results.push({
+            domain: host,
+            status,
+            issuer: issuerName,
+            expires_at: expiresAt,
+            problems,
+          });
+        }
+
+        const anyError = results.some((r) => r.status === "error");
+        const anyWarning = results.some((r) => r.status === "warning");
+        const summary = anyError ? "error" : anyWarning ? "warning" : "ok";
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              summary,
+              cert_storage_hint: ACME_DIR,
+              results,
+            }, null, 2),
           }],
         };
       } catch (err) {

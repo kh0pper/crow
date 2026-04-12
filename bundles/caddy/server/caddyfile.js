@@ -188,6 +188,36 @@ export function appendSite(source, domain, upstream, extra = "") {
 }
 
 /**
+ * Append a pre-rendered site block (address + body already formatted).
+ * Body text is indented with two spaces per line. Used by
+ * caddy_add_federation_site and caddy_add_matrix_federation_port where the
+ * inner directives include nested blocks that don't fit the simple
+ * `reverse_proxy <upstream>` shape.
+ *
+ * If a block with the same address already exists, it is replaced in place
+ * (idempotent emit — reviewer requirement for federation profiles).
+ */
+export function upsertRawSite(source, address, bodyText) {
+  const indented = bodyText
+    .split("\n")
+    .map((l) => (l.length ? "  " + l : ""))
+    .join("\n");
+  const block = `${address} {\n${indented}\n}\n`;
+
+  const sites = parseSites(source);
+  const match = sites.find((s) => s.address === address);
+  if (match) {
+    const before = source.slice(0, match.start);
+    const after = source.slice(match.end);
+    const joined = (before + block + after).replace(/\n{3,}/g, "\n\n");
+    return joined;
+  }
+  const base = source.endsWith("\n") || source === "" ? source : source + "\n";
+  const sep = base && !base.endsWith("\n\n") ? "\n" : "";
+  return base + sep + block;
+}
+
+/**
  * Remove a site block matching the given address.
  * If multiple blocks match (rare), only the first is removed.
  * Returns { source: updated source, removed: boolean }.

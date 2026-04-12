@@ -17,10 +17,20 @@
 #                       via XDG_DATA_HOME). We chmod 0700 on first init.
 #   config/           — Caddy's auto-save state (XDG_CONFIG_HOME)
 
+networks:
+  crow-federation:
+    external: true
+    # Created by bundles/caddy/scripts/post-install.sh on install.
+    # Federated app bundles (F.1+) join this same network so Caddy can reach
+    # their upstreams by docker service name without publishing host ports.
+
 services:
   caddy:
     image: caddy:2-alpine
     container_name: crow-caddy
+    networks:
+      - default
+      - crow-federation
     ports:
       - "0.0.0.0:80:80"
       - "0.0.0.0:443:443"
