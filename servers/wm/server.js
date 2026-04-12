@@ -16,6 +16,9 @@ import { z } from "zod";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
+import { homedir } from "node:os";
+import net from "node:net";
 import YouTubeSR from "youtube-sr";
 const YouTube = YouTubeSR.default || YouTubeSR;
 
@@ -64,6 +67,86 @@ async function getSendBotRelay() {
 }
 
 const VALID_APPS = ["youtube", "browser", "blog", "jellyfin", "plex", "romm", "nest", "videocall"];
+
+// Pet-mode AppImage (Phase 3.1): built by bundles/companion/scripts/build-pet-linux.sh
+// and installed to ~/.crow/bin/. Linux-only; tracked PID lives in-memory so
+// a restart of the WM server orphans the pet — caller re-launches explicitly.
+const PET_APPIMAGE_PATH = resolve(homedir(), ".crow/bin/open-llm-vtuber.AppImage");
+const PET_VALID_ANCHORS = ["right", "left", "bottom-right", "bottom-left"];
+let petPid = null;
+
+// Socket path resolution mirrors patch 0008's server-side logic.
+function petSocketPath() {
+  if (process.env.CROW_PET_SOCKET) return process.env.CROW_PET_SOCKET;
+  if (process.env.XDG_RUNTIME_DIR) return `${process.env.XDG_RUNTIME_DIR}/crow-pet.sock`;
+  const uid = typeof process.getuid === "function" ? process.getuid() : process.pid;
+  return `/tmp/crow-pet-${uid}.sock`;
+}
+
+// Send a JSON op to the running pet's control socket. Short timeout —
+// if the pet is wedged we fall back to respawn rather than hang.
+function sendPetOp(msg, timeoutMs = 500) {
+  return new Promise((resolveP) => {
+    const sockPath = petSocketPath();
+    if (!existsSync(sockPath)) return resolveP({ ok: false, error: "no-socket" });
+    const c = net.createConnection(sockPath);
+    let buf = "";
+    const timer = setTimeout(() => { try { c.destroy(); } catch {} resolveP({ ok: false, error: "timeout" }); }, timeoutMs);
+    c.setEncoding("utf8");
+    c.on("connect", () => { c.write(JSON.stringify(msg) + "\n"); });
+    c.on("data", (chunk) => {
+      buf += chunk;
+      const idx = buf.indexOf("\n");
+      if (idx >= 0) {
+        clearTimeout(timer);
+        try { resolveP(JSON.parse(buf.slice(0, idx))); }
+        catch { resolveP({ ok: false, error: "bad-response" }); }
+        try { c.end(); } catch {}
+      }
+    });
+    c.on("error", (e) => { clearTimeout(timer); resolveP({ ok: false, error: String(e.message || e) }); });
+  });
+}
+
+async function launchPet(anchor) {
+  if (process.platform !== "linux") {
+    return { error: "Pet mode is Linux-only. Use web-tiled mode on this platform." };
+  }
+  if (!existsSync(PET_APPIMAGE_PATH)) {
+    return { error: `Pet AppImage not found at ${PET_APPIMAGE_PATH}. Run bundles/companion/scripts/build-pet-linux.sh to build it.` };
+  }
+  if (petPid) {
+    try {
+      process.kill(petPid, 0);
+      // Pet is alive — try to re-anchor via control socket instead of respawning.
+      const effectiveAnchor = anchor || "bottom-right";
+      const r = await sendPetOp({ op: "anchor", spec: { anchor: effectiveAnchor, width: 320, height: 480 } });
+      if (r.ok) return { pid: petPid, anchor: effectiveAnchor, reanchored: true };
+      return { error: `Pet is already running (pid ${petPid}) but control socket is unreachable: ${r.error}. Use 'close pet' first.` };
+    }
+    catch { petPid = null; }
+  }
+  // Default to bottom-right — keeps the mascot out of the Blockly kiosk's
+  // workspace on a typical 1920x1080 layout. Patch 0007 reads CROW_PET_ANCHOR
+  // at launch and calls setPetBounds({ anchor, width: 320, height: 480 }).
+  const effectiveAnchor = anchor || "bottom-right";
+  const env = { ...process.env, CROW_PET_ANCHOR: effectiveAnchor };
+  // Detach so the pet outlives the MCP process; ignore I/O.
+  const child = spawn(PET_APPIMAGE_PATH, [], {
+    detached: true,
+    stdio: "ignore",
+    env,
+  });
+  child.unref();
+  petPid = child.pid;
+  return { pid: child.pid, anchor: effectiveAnchor };
+}
+
+function closePet() {
+  if (!petPid) return { ok: false, error: "Pet is not running." };
+  try { process.kill(petPid, "SIGTERM"); const was = petPid; petPid = null; return { ok: true, pid: was }; }
+  catch (e) { petPid = null; return { ok: false, error: String(e.message || e) }; }
+}
 
 const APP_DESCRIPTIONS = VALID_APPS.map(a => {
   switch (a) {
@@ -227,7 +310,7 @@ export function createWmServer(dbPath, options = {}) {
   // One tool with a simple "command" string is far more reliable.
   server.tool(
     "crow_wm",
-    `Screen control. ALWAYS call this tool when the user wants to: open/play/watch/search something, close a window, pause, resume, mute, or unmute. NEVER describe what you would do — ALWAYS call this tool.\n\nCommands:\n- open youtube <query> — search and play a YouTube video\n- open browser <url> — open a web page\n- open blog <slug> — open a blog post\n- open jellyfin — open media library\n- open plex — open Plex media library\n- open nest <panel> — open dashboard panel\n- open videocall <room=CODE&token=TOKEN> — open a video call\n- close / close youtube / close all — close windows\n- pause — pause current media\n- resume — resume current media\n- mute / unmute — audio control\n- save workspace <name> — save current window layout\n- load workspace <name> — restore a saved layout\n- list workspaces — show saved layouts\n- search <query> — search the web and show results on screen\n- display <title> | <content> — show information on screen (use | to separate title from body text; use || for paragraph breaks)\n- invite <name> — invite a contact to join your room\n- memo <contact> <message> — send a voice memo to a contact\n- react <contact> <emoji> — send an emoji reaction to a contact`,
+    `Screen control. ALWAYS call this tool when the user wants to: open/play/watch/search something, close a window, pause, resume, mute, or unmute. NEVER describe what you would do — ALWAYS call this tool.\n\nCommands:\n- open youtube <query> — search and play a YouTube video\n- open browser <url> — open a web page\n- open blog <slug> — open a blog post\n- open jellyfin — open media library\n- open plex — open Plex media library\n- open nest <panel> — open dashboard panel\n- open videocall <room=CODE&token=TOKEN> — open a video call\n- open pet [anchor] — launch the Live2D pet mascot (Linux only; anchor: right, left, bottom-right, bottom-left)\n- close / close youtube / close pet / close all — close windows\n- pause — pause current media\n- resume — resume current media\n- mute / unmute — audio control\n- save workspace <name> — save current window layout\n- load workspace <name> — restore a saved layout\n- list workspaces — show saved layouts\n- search <query> — search the web and show results on screen\n- display <title> | <content> — show information on screen (use | to separate title from body text; use || for paragraph breaks)\n- invite <name> — invite a contact to join your room\n- memo <contact> <message> — send a voice memo to a contact\n- react <contact> <emoji> — send an emoji reaction to a contact`,
     {
       command: z.string().max(2000).describe("What to do, e.g.: open youtube relaxing music, pause, resume, close youtube, close all, display Search Results | Result 1: ... || Result 2: ..."),
     },
@@ -255,11 +338,27 @@ export function createWmServer(dbPath, options = {}) {
       }
       if (cmd.startsWith("close ")) {
         const appName = cmd.slice(6).trim();
+        if (appName === "pet") {
+          const r = closePet();
+          if (!r.ok) return err(r.error);
+          return ok({ action: "pet_closed", pid: r.pid });
+        }
         if (VALID_APPS.includes(appName)) return ok({ action: "close", app: appName });
         return ok({ action: "close_focused" });
       }
       if (cmd.startsWith("open ")) {
         const rest = cmd.slice(5).trim();
+        // Pet mode (Phase 3.1): spawn the Live2D AppImage alongside Blockly.
+        // Linux-only; gracefully errors on other platforms.
+        if (rest === "pet" || rest.startsWith("pet ")) {
+          const anchor = rest === "pet" ? null : rest.slice(4).trim();
+          if (anchor && !PET_VALID_ANCHORS.includes(anchor)) {
+            return err(`Invalid pet anchor "${anchor}". Valid: ${PET_VALID_ANCHORS.join(", ")}`);
+          }
+          const r = await launchPet(anchor);
+          if (r.error) return err(r.error);
+          return ok({ action: r.reanchored ? "pet_reanchored" : "pet_launched", pid: r.pid, anchor: r.anchor });
+        }
         // Parse "open <app> <query>"
         for (const app of VALID_APPS) {
           if (rest === app || rest.startsWith(app + " ")) {

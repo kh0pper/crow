@@ -157,6 +157,10 @@ bundles/kodi/                  → Kodi remote control (MCP server, 6 tools, JSO
 bundles/trilium/               → TriliumNext knowledge base (Docker + MCP server, 11 tools, ETAPI)
 bundles/knowledge-base/        → Multilingual knowledge base (MCP server, 10 tools, LAN discovery, WCAG 2.1 AA)
 bundles/maker-lab/             → STEM education companion for kids (MCP server, 21 tools, age-banded personas, classroom-capable). Phase 1 scaffold; see bundles/maker-lab/PHASE-0-REPORT.md
+bundles/kolibri/               → Kolibri learning platform (Docker + panel + skill; offline-first STEM/literacy, Pi-friendly, sibling of maker-lab)
+bundles/scratch-offline/       → Scratch block-based coding (Dockerfile builds scratch-gui from source + nginx; age 8+, no cloud save)
+bundles/vllm/                  → vLLM GPU inference server (OpenAI-compatible endpoint; Linux x86_64 + NVIDIA only; recommended classroom engine for Maker Lab)
+bundles/maker-lab-advanced/    → Maker Lab Advanced (Phase 5): JupyterHub for 9+ learners, kid-safe kernel defaults, AI pair-programmer at tween/teen reading level
 android/                       → Android WebView shell app (Crow's Nest mobile client)
 servers/gateway/public/        → PWA assets (manifest.json, service worker, icons)
 servers/gateway/push/          → Web Push notification infrastructure (VAPID)
@@ -205,7 +209,7 @@ Uses `@libsql/client` for local SQLite files (default: `~/.crow/data/crow.db`, g
 - **identity_attestations** — F.11 signed bindings (crow_id, app, external_handle, app_pubkey?, sig, version, revoked_at). Published via gateway `/.well-known/crow-identity.json`. UNIQUE(crow_id, app, external_handle, version) — new version row per rotation
 - **identity_attestation_revocations** — F.11 signed revocations (attestation_id FK CASCADE, revoked_at, reason, sig). Published via `/.well-known/crow-identity-revocations.json`
 - **crosspost_rules** — F.12.2 opt-in crosspost config (source_app, source_trigger, target_app, transform, active). Triggers: `on_publish`, `on_tag:<tag>`, `manual`
-- **crosspost_log** — F.12.2 audit + idempotency log (idempotency_key, source_app, source_post_id, target_app, status, target_post_id, scheduled_at, published_at, cancelled_at). UNIQUE(idempotency_key, source_app, target_app). 7-day idempotency window; >30 days GC'd daily
+- **crosspost_log** — F.12.2 audit + idempotency log (idempotency_key, source_app, source_post_id, target_app, status, target_post_id, scheduled_at, published_at, cancelled_at, **transformed_payload_json** — F.13). UNIQUE(idempotency_key, source_app, target_app). 7-day idempotency window; F.13 scheduler auto-publishes `ready`/`queued`-past-scheduled_at rows to mastodon/gotosocial/crow-blog and marks media-heavy targets (pixelfed/peertube/funkwhale) as `manual`. GC prunes >30 days
 - **iptv_playlists** — IPTV M3U playlist sources (name, url, auto_refresh, channel_count)
 - **iptv_channels** — IPTV channels from playlists (playlist_id FK, name, stream_url, tvg_id, group_title, is_favorite)
 - **iptv_epg** — Electronic Program Guide entries (channel_tvg_id, title, start_time, end_time, indexed)
@@ -478,6 +482,10 @@ Add-on skills (activated when corresponding add-on is installed):
 - `lemmy.md` — Lemmy federated link aggregator: status, list/follow/unfollow communities, post (link + body), comment, feed (Subscribed/Local/All), search, moderation (block_user/block_community inline; block_instance/defederate queued), admin reports, pict-rs media prune; Lemmy v3 REST API; community-scoped federation
 - `mastodon.md` — Mastodon federated microblog (flagship ActivityPub): status, post, post_with_media (async media upload), feed (home/public/local/notifications), search, follow/unfollow, moderation (block_user/mute inline; defederate/import_blocklist queued admin), admin reports, remote reporting, media prune (tootctl); Mastodon v1/v2 reference API; on-disk or S3 media via storage-translators.mastodon()
 - `peertube.md` — PeerTube federated video (YouTube-alt): status, list channels/videos, upload_video (multipart), search, subscribe/unsubscribe, rate_video, moderation (block_user inline; block_server/defederate queued admin), admin abuse reports with predefined_reasons taxonomy, remote reporting, media prune recipe; PeerTube v1 REST API; on-disk or S3 via storage-translators.peertube() (strongly recommend S3 — storage unbounded without it)
+- `kolibri.md` — Kolibri offline-first learning platform: channel recommendation by age/subject, classroom setup, LAN-sync, pairs with maker-lab as content spine
+- `scratch-offline.md` — Self-hosted Scratch (age 8+ block coding): first-project coaching, vocabulary-stays-in-Scratch-terms dialogue, pair with Maker Lab when the learner is stuck
+- `vllm.md` — Operational skill for the vLLM classroom inference engine: GPU sizing, model selection, Maker Lab wiring, common-issue diagnostics
+- `maker-lab-advanced.md` — Pair-programmer for JupyterHub classroom (ages 9+): traceback explanation, next-cell suggestions at tween/teen reading level, routes back to maker-lab for Blockly, flags kid-safe kernel as a default (not a security sandbox)
 - `calibre-server.md` — Calibre content server: search, browse, download ebooks via OPDS
 - `calibre-web.md` — Calibre-Web reader: search, shelves, reading status, download
 - `miniflux.md` — Miniflux RSS reader: subscribe feeds, read articles, star, mark read

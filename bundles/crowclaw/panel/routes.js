@@ -29,8 +29,11 @@ export default function crowclawRouter(authMiddleware) {
   const router = Router();
   const db = createDbClient();
 
-  // All routes require auth
-  router.use(authMiddleware);
+  // All routes require auth. SCOPE to /api/ so this router doesn't consume
+  // unrelated traffic (e.g. /kiosk/, /maker-lab/*) when mounted at app root
+  // alongside other panel routers. Without the path prefix, this middleware
+  // intercepts EVERY unmatched request and 302s to /dashboard/login.
+  router.use("/api", authMiddleware);
 
   // --- All bots status ---
   router.get("/api/status", async (req, res) => {

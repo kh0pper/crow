@@ -1,0 +1,95 @@
+name: Pet-mode AppImage
+
+# Rebuilds the Crow pet-mode AppImage (Phase 3 of the Maker Lab initiative)
+# when the pinned upstream SHA or any patch file changes, and on a nightly
+# schedule so drift against upstream surfaces early.
+#
+# Ships the AppImage as a workflow artifact with 30-day retention. Release-
+# asset automation is a future step once the project adopts semver tags.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".gitmodules"
+      - "bundles/companion/patches/web/**"
+      - "bundles/companion/scripts/build-pet-linux.sh"
+      - ".github/workflows/pet-mode-appimage.yml"
+  schedule:
+    # Nightly at 04:42 UTC - far from GitHub's on-the-hour surge.
+    - cron: "42 4 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      COMMIT_SHA: ${{ github.sha }}
+    steps:
+      - name: Check out repo + submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Print build preflight
+        run: |
+          set -e
+          echo "Node:  $(node --version)"
+          echo "npm:   $(npm --version)"
+          echo "Disk:"
+          df -h /
+          echo "Submodule pin:"
+          git -C vendor/open-llm-vtuber-web rev-parse HEAD
+          echo "Patches:"
+          ls -1 bundles/companion/patches/web/
+
+      - name: Patch-only dry run
+        # Fail fast if any patch doesn't apply against the pinned SHA.
+        run: CROW_PET_PATCH_ONLY=1 bash bundles/companion/scripts/build-pet-linux.sh
+
+      - name: Full build
+        run: bash bundles/companion/scripts/build-pet-linux.sh
+
+      - name: Verify AppImage produced
+        run: |
+          set -e
+          test -x "$HOME/.crow/bin/open-llm-vtuber.AppImage"
+          size=$(stat -c%s "$HOME/.crow/bin/open-llm-vtuber.AppImage")
+          echo "AppImage size: $size bytes"
+          if [ "$size" -lt 52428800 ]; then
+            echo "AppImage suspiciously small (<50 MB). Aborting."
+            exit 1
+          fi
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: open-llm-vtuber-AppImage-${{ env.COMMIT_SHA }}
+          path: ~/.crow/bin/open-llm-vtuber.AppImage
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Pet-mode AppImage build" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$HOME/.crow/bin/open-llm-vtuber.AppImage" ]; then
+            size=$(stat -c%s "$HOME/.crow/bin/open-llm-vtuber.AppImage")
+            size_mb=$((size / 1048576))
+            echo "- Built: **${size_mb} MB** AppImage" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Submodule pin: \`$(git -C vendor/open-llm-vtuber-web rev-parse --short HEAD)\`" >> "$GITHUB_STEP_SUMMARY"
+            patches=$(ls -1 bundles/companion/patches/web/web-*.patch | wc -l)
+            echo "- Patches applied: $patches" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Build FAILED - no AppImage produced" >> "$GITHUB_STEP_SUMMARY"
+          fi

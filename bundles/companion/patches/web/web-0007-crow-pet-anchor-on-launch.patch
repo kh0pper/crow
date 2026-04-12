@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crow Maintainers <crow@localhost>
+Date: Sun, 12 Apr 2026 15:15:00 -0500
+Subject: [PATCH 7/7] Honor CROW_PET_ANCHOR env var on launch (auto-pet-mode + anchor)
+
+Closes the loop on `crow_wm open pet [anchor]` from Phase 3.1. The WM
+MCP server passes the anchor via the `CROW_PET_ANCHOR` env var when
+spawning the AppImage. This patch teaches the Electron main process
+to:
+
+1. Auto-switch to pet mode on launch if the env var is set (deferred
+   until `window.ready-to-show` so the renderer has mounted).
+2. Apply the anchor at the end of `continueSetWindowModePet()` once
+   the existing multi-monitor positioning has run. Pet-body defaults
+   to 320x480 — a typical Live2D portrait that fits beside a Blockly
+   kiosk at 1920x1080 without overlap.
+
+Valid anchors: right, left, bottom-right, bottom-left. Any other
+value is ignored (pet stays in full-display transparent surface).
+
+Applies against: vendor/open-llm-vtuber-web @ d176e7df2366952e3bacbf12cf9a8b18a4315932
+(after patches 0001-0005 are applied)
+
+diff --git a/src/main/index.ts b/src/main/index.ts
+index 39cf76a..d681579 100644
+--- a/src/main/index.ts
++++ b/src/main/index.ts
+@@ -174,6 +174,17 @@ app.whenReady().then(() => {
+ 
+   setupIPC();
+ 
++  // Crow patch: auto-switch to pet mode on launch when CROW_PET_ANCHOR
++  // is set (populated by `crow_wm open pet [anchor]`). The window fires
++  // 'ready-to-show' asynchronously, so defer the mode switch until the
++  // renderer has mounted; WindowManager's own transition machinery then
++  // picks up the anchor in continueSetWindowModePet().
++  if (process.env.CROW_PET_ANCHOR) {
++    window.once("ready-to-show", () => {
++      windowManager.setWindowMode("pet");
++    });
++  }
++
+   app.on("activate", () => {
+     const window = windowManager.getWindow();
+     if (window) {
+diff --git a/src/main/window-manager.ts b/src/main/window-manager.ts
+index 531761f..1375c72 100644
+--- a/src/main/window-manager.ts
++++ b/src/main/window-manager.ts
+@@ -239,9 +239,17 @@ export class WindowManager {
+       this.window.setIgnoreMouseEvents(true, { forward: true });
+     }
+ 
++    // Crow patch: apply CROW_PET_ANCHOR if set at launch. Pet-body
++    // defaults are chosen to fit a typical Live2D portrait without
++    // overlapping the Blockly kiosk at 1920x1080.
++    const anchor = process.env.CROW_PET_ANCHOR;
++    if (anchor && ['right', 'left', 'bottom-right', 'bottom-left'].includes(anchor)) {
++      this.setPetBounds({ anchor, width: 320, height: 480 });
++    }
++
+     this.window.webContents.send('mode-changed', 'pet');
+   }
+-  
++
+   getWindow(): BrowserWindow | null {
+     return this.window;
+   }

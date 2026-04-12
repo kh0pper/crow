@@ -1,0 +1,62 @@
+From ad47711fcb8481a0279b57a5b4763dac79b2b704 Mon Sep 17 00:00:00 2001
+From: Crow Maintainers <crow@localhost>
+Date: Sun, 12 Apr 2026 14:39:49 -0500
+Subject: [PATCH 3/6] Place pet window on a single target display instead of spanning all
+
+Upstream's `continueSetWindowModePet()` sizes the pet window to
+cover the full virtual screen across every connected display. On a
+multi-monitor Maker Lab setup this means (a) some X11 compositors
+disable transparency for the full rectangle (entire window goes
+opaque), and (b) the Live2D canvas lands in empty space between
+monitors with mismatched geometries.
+
+Fix: pick the display under the cursor (`screen.getDisplayNearestPoint`)
+with a fall-back to the primary display. Future work: prefer the
+display hosting the Blockly kiosk window when we have a handle to
+it.
+
+Applies against: vendor/open-llm-vtuber-web @ d176e7df2366952e3bacbf12cf9a8b18a4315932
+
+---
+ src/main/window-manager.ts | 28 +++++++++++++++-------------
+ 1 file changed, 15 insertions(+), 13 deletions(-)
+
+diff --git a/src/main/window-manager.ts b/src/main/window-manager.ts
+index 3161fee..d716a32 100644
+--- a/src/main/window-manager.ts
++++ b/src/main/window-manager.ts
+@@ -203,19 +203,21 @@ export class WindowManager {
+ 
+   private continueSetWindowModePet(): void {
+     if (!this.window) return;
+-    // Calculate the bounding rectangle that covers all connected displays.
+-    // This allows the transparent pet-mode window to span across monitors,
+-    // so the avatar can be dragged freely between them.
+-    const displays = screen.getAllDisplays();
+-    const minX = Math.min(...displays.map((d) => d.bounds.x));
+-    const minY = Math.min(...displays.map((d) => d.bounds.y));
+-    const maxX = Math.max(...displays.map((d) => d.bounds.x + d.bounds.width));
+-    const maxY = Math.max(...displays.map((d) => d.bounds.y + d.bounds.height));
+-    const combinedWidth = maxX - minX;
+-    const combinedHeight = maxY - minY;
+-
+-    // Resize and position the window to cover the entire virtual screen
+-    // so the avatar is not clipped when dragged to a second monitor.
++    // Crow patch: pick a SINGLE target display instead of spanning the
++    // whole virtual screen. Spanning everything causes some X11
++    // compositors to disable transparency for the full rectangle, and
++    // the avatar ends up in empty space between monitors with
++    // mismatched geometries. Preference order:
++    //   1. display under the cursor (for multi-monitor)
++    //   2. display nearest the Blockly kiosk window, if present
++    //   3. primary display
++    const cursor = screen.getCursorScreenPoint();
++    const target =
++      screen.getDisplayNearestPoint(cursor)
++      || screen.getPrimaryDisplay();
++    const { x: minX, y: minY, width: combinedWidth, height: combinedHeight } =
++      target.bounds;
++
+     this.window.setBounds({
+       x: minX,
+       y: minY,

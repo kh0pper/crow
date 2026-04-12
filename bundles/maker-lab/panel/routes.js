@@ -172,7 +172,10 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
   const router = Router();
   let db;
 
-  router.use((req, res, next) => {
+  // Path-scoped to just the two namespaces this router serves so the
+  // middleware doesn't match unrelated traffic on the app root. See the
+  // gateway's [panel] mount warning for the rationale.
+  router.use(["/kiosk", "/maker-lab"], (req, res, next) => {
     if (!db && createDbClient) {
       db = createDbClient();
       if (db && startRetentionSweep) startRetentionSweep(db);
@@ -337,8 +340,11 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
     `);
   }
 
-  // Blockly static assets served under /kiosk/blockly/*
-  router.get("/kiosk/blockly/*", async (req, res) => {
+  // Blockly static assets served under /kiosk/blockly/<asset>.
+  // Express 5 / path-to-regexp v6 requires a named wildcard; bare `*` throws
+  // at mount time ("Missing parameter name at index 16") and breaks the
+  // whole router. DO NOT revert to the bare `*` form — leave the :asset name.
+  router.get("/kiosk/blockly/*asset", async (req, res) => {
     const guard = await requireKioskSession(req, db);
     if (!guard.ok) return res.status(401).send("No session.");
     const rel = req.path.replace(/^\/kiosk\/blockly\//, "").replace(/\.\./g, "");
@@ -561,6 +567,22 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
     } catch (err) {
       return res.status(500).json({ error: "hint_failed", detail: err.message });
     }
+  });
+
+  // ─── /maker-lab/api/engine ───────────────────────────────────────────
+  // Phase 4b — returns the active LLM engine resolution so the Nest
+  // (and the vLLM panel's "wired in?" indicator) can tell which
+  // backend Maker Lab is currently routing hints through. Read-only;
+  // no secrets leaked.
+  router.get("/maker-lab/api/engine", async (req, res) => {
+    const mod = await import(pathToFileURL(resolve(__dirname, "../server/resolve-llm-endpoint.js")).href);
+    const resolved = await mod.resolveLlmEndpoint();
+    res.json({
+      engine: resolved.engine,
+      endpoint: resolved.endpoint,
+      model: resolved.model,
+      source: resolved.source,
+    });
   });
 
   // ─── /maker-lab/api/hint-internal ────────────────────────────────────

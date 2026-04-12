@@ -1,0 +1,108 @@
+From 5fa462adb3643c19f5cc1564dc75b25ab76bbc50 Mon Sep 17 00:00:00 2001
+From: Crow Maintainers <crow@localhost>
+Date: Sun, 12 Apr 2026 14:40:10 -0500
+Subject: [PATCH 4/6] Expose crow:pet-position IPC hook for gateway-driven placement
+
+Crow's `crow_wm` tool (Phase 3.1 wire-up) needs to anchor the pet
+window relative to the Blockly kiosk. This patch adds:
+
+- `ipcMain.handle('crow:pet-position', ...)` in src/main/index.ts
+- `WindowManager.setPetBounds(spec)` in src/main/window-manager.ts
+
+The handler accepts an explicit `{ x, y, width, height }` rect or a
+symbolic anchor (`'right' | 'left' | 'bottom-right' | 'bottom-left'`).
+Symbolic anchors resolve against the display the window currently
+lives on; coordinates are clamped to work area so the window can't
+escape the screen.
+
+The surface is intentionally narrow (one channel, one payload shape)
+so upstream drift stays cheap to rebase.
+
+Applies against: vendor/open-llm-vtuber-web @ d176e7df2366952e3bacbf12cf9a8b18a4315932
+
+---
+ src/main/index.ts          | 14 ++++++++++++
+ src/main/window-manager.ts | 47 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 61 insertions(+)
+
+diff --git a/src/main/index.ts b/src/main/index.ts
+index 4c1393d..ccdd9ca 100644
+--- a/src/main/index.ts
++++ b/src/main/index.ts
+@@ -31,6 +31,20 @@ let isQuitting = false;
+ function setupIPC(): void {
+   ipcMain.handle("get-platform", () => process.platform);
+ 
++  // --- BEGIN CROW PATCH: pet-position IPC ---------------------------
++  // Surface for the Crow gateway / maker-lab kiosk to anchor the pet
++  // window programmatically. Accepts an explicit rectangle or a
++  // symbolic anchor. Intentionally narrow — one channel, one payload
++  // shape — so upstream drift stays cheap to rebase.
++  ipcMain.handle(
++    "crow:pet-position",
++    (_event, spec: { x?: number; y?: number; width?: number; height?: number; anchor?: string }) => {
++      if (!windowManager) return { ok: false, error: "not-ready" };
++      return windowManager.setPetBounds(spec || {});
++    },
++  );
++  // --- END CROW PATCH -----------------------------------------------
++
+   ipcMain.on("set-ignore-mouse-events", (_event, ignore: boolean) => {
+     const window = windowManager.getWindow();
+     if (window) {
+diff --git a/src/main/window-manager.ts b/src/main/window-manager.ts
+index d716a32..531761f 100644
+--- a/src/main/window-manager.ts
++++ b/src/main/window-manager.ts
+@@ -342,4 +342,51 @@ export class WindowManager {
+   getCurrentMode(): 'window' | 'pet' {
+     return this.currentMode;
+   }
++
++  // --- BEGIN CROW PATCH: pet-bounds setter --------------------------
++  // Called from the main-process IPC handler `crow:pet-position`.
++  // Accepts an explicit rect {x,y,width,height} or a symbolic anchor
++  // ("right", "left", "bottom-right", "bottom-left"). Symbolic anchors
++  // resolve against the display the window currently lives on. Clamps
++  // to the target display's work area so the window never escapes.
++  public setPetBounds(
++    spec: { x?: number; y?: number; width?: number; height?: number; anchor?: string },
++  ): { ok: boolean; bounds?: Electron.Rectangle; error?: string } {
++    if (!this.window) return { ok: false, error: "no-window" };
++    const current = this.window.getBounds();
++    const display = screen.getDisplayNearestPoint({ x: current.x, y: current.y });
++    const work = display.workArea;
++    let width = spec.width ?? current.width;
++    let height = spec.height ?? current.height;
++    let x = spec.x ?? current.x;
++    let y = spec.y ?? current.y;
++    const margin = 16;
++    switch (spec.anchor) {
++      case "right":
++        x = work.x + work.width - width - margin;
++        y = work.y + Math.round((work.height - height) / 2);
++        break;
++      case "left":
++        x = work.x + margin;
++        y = work.y + Math.round((work.height - height) / 2);
++        break;
++      case "bottom-right":
++        x = work.x + work.width - width - margin;
++        y = work.y + work.height - height - margin;
++        break;
++      case "bottom-left":
++        x = work.x + margin;
++        y = work.y + work.height - height - margin;
++        break;
++      default:
++        break;
++    }
++    // Clamp to work area.
++    x = Math.max(work.x, Math.min(x, work.x + work.width - width));
++    y = Math.max(work.y, Math.min(y, work.y + work.height - height));
++    const bounds = { x, y, width, height };
++    this.window.setBounds(bounds);
++    return { ok: true, bounds };
++  }
++  // --- END CROW PATCH -----------------------------------------------
+ }

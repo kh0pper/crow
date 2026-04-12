@@ -20,6 +20,7 @@ import {
   pickCannedHint,
   resolvePersonaForSession,
 } from "./filters.js";
+import { resolveLlmEndpoint } from "./resolve-llm-endpoint.js";
 
 const LLM_TIMEOUT_MS = 15_000;
 
@@ -36,23 +37,17 @@ const PERSONA_PROMPT = {
     "Plain language, precise terminology. Direct Q&A is fine; no hint ladder required.",
 };
 
-function resolveEndpoint() {
-  const explicit = process.env.MAKER_LAB_LLM_ENDPOINT;
-  if (explicit && explicit.trim()) return explicit.trim().replace(/\/$/, "");
-  return "http://localhost:11434/v1";
-}
-
-function resolveModel() {
-  return process.env.MAKER_LAB_LLM_MODEL || "llama3.2:3b";
-}
-
 function resolveApiKey() {
   return process.env.MAKER_LAB_LLM_API_KEY || "not-needed";
 }
 
 async function callLLM({ persona, question, lesson }) {
-  const endpoint = resolveEndpoint();
-  const model = resolveModel();
+  // Phase 4b — auto-detect vLLM / Ollama on first call, cache the
+  // resolution for the life of the process. Explicit
+  // MAKER_LAB_LLM_ENDPOINT still wins.
+  const resolved = await resolveLlmEndpoint();
+  const endpoint = resolved.endpoint;
+  const model = resolved.model;
   const url = `${endpoint}/chat/completions`;
 
   const systemPrompt = PERSONA_PROMPT[persona] || PERSONA_PROMPT["kid-tutor"];

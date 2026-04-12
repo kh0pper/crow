@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crow Maintainers <crow@localhost>
+Date: Thu, 1 Jan 1970 00:00:00 +0000
+Subject: [PATCH 6/6] Persona swap — INTENTIONALLY EMPTY (see rationale)
+
+This patch slot is reserved but contains no code changes.
+
+Rationale (Spike 2, see bundles/maker-lab/PHASE-0-REPORT.md):
+
+The upstream Open-LLM-VTuber backend already supports per-connection
+persona swap via the `switch-config` WebSocket message. Maker-lab ships
+three character YAMLs (kid / tween / adult tutor) and drives the swap
+server-side on `maker_start_session` — the web client needs no patch
+to participate.
+
+We keep this file as a numbered slot so:
+
+  1. The patch-series numbering stays contiguous (0001..0006), which
+     matches the `build-pet-linux.sh` apply loop.
+  2. If upstream changes direction and persona swap moves from the
+     server config into a renderer-side selection, we have a pre-named
+     slot to fill without renumbering the rest of the series.
+
+Applies against: vendor/open-llm-vtuber-web @ d176e7df2366952e3bacbf12cf9a8b18a4315932
+
+No-op — build script tolerates zero-hunk patches.
+---
+ 0 files changed, 0 insertions(+), 0 deletions(-)
+
+--
+2.40.0
