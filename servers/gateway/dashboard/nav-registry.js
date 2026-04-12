@@ -41,6 +41,7 @@ const CATEGORY_TO_GROUP = {
   finance: "tools",
   infrastructure: "tools",
   automation: "tools",
+  education: "content",
   system: "system",
 };
 

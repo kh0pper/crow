@@ -51,6 +51,7 @@ const ICON_MAP = {
   shield: "\u{1F6E1}\uFE0F",
   activity: "\u{1F4C8}",
   eye: "\u{1F441}\uFE0F",
+  "graduation-cap": "\u{1F393}",
 };
 
 const CATEGORY_COLORS = {
@@ -66,6 +67,7 @@ const CATEGORY_COLORS = {
   finance:        { bg: "rgba(245,158,11,0.12)", color: "#f59e0b" },
   infrastructure: { bg: "rgba(148,163,184,0.12)", color: "#94a3b8" },
   automation:     { bg: "rgba(45,212,191,0.12)", color: "#2dd4bf" },
+  education:      { bg: "rgba(132,204,22,0.12)",  color: "#84cc16" },
   other:          { bg: "rgba(161,161,170,0.12)", color: "#a1a1aa" },
 };
 
@@ -82,6 +84,7 @@ const CATEGORY_LABELS = {
   finance: "extensions.categoryFinance",
   infrastructure: "extensions.categoryInfrastructure",
   automation: "extensions.categoryAutomation",
+  education: "extensions.categoryEducation",
   other: "extensions.categoryOther",
 };
 

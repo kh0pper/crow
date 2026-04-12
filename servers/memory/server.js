@@ -213,14 +213,15 @@ export function createMemoryServer(dbPath, options = {}) {
 
   server.tool(
     "crow_recall_by_context",
-    "Retrieve memories relevant to a given context. Uses full-text search across content, context, and tags to find the most relevant stored information.",
+    "Retrieve memories relevant to a given context. Uses full-text search across content, context, and tags. Memories tagged source='maker-lab' are excluded by default to keep kid-session memories out of generic recall; pass include_maker_lab=true to include them (use this when operating within the maker-lab skill).",
     {
       context: z.string().max(2000).describe("Describe the current context or topic to find relevant memories"),
       limit: z.number().max(100).default(5).describe("Maximum results"),
       instance_id: z.string().max(100).optional().describe("Filter by origin instance ID"),
       project_id: z.number().optional().describe("Filter by project ID"),
+      include_maker_lab: z.boolean().optional().describe("When true, include memories tagged source='maker-lab'. Default false."),
     },
-    async ({ context, limit, instance_id, project_id }) => {
+    async ({ context, limit, instance_id, project_id, include_maker_lab }) => {
       const contextWords = context.split(/\s+/).filter((w) => w.length > 2).slice(0, 10).join(" ");
       const safeQuery = sanitizeFtsQuery(contextWords);
 
@@ -237,6 +238,9 @@ export function createMemoryServer(dbPath, options = {}) {
 
       if (instance_id) { sql += " AND m.instance_id = ?"; params.push(instance_id); }
       if (project_id) { sql += " AND m.project_id = ?"; params.push(project_id); }
+      if (!include_maker_lab) {
+        sql += " AND (m.source IS NULL OR m.source != 'maker-lab')";
+      }
 
       sql += " ORDER BY rank LIMIT ?";
       params.push(limit);

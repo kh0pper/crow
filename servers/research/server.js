@@ -185,6 +185,10 @@ export function createProjectServer(dbPath, options = {}) {
       if (type) {
         conditions.push("p.type = ?");
         params.push(type);
+      } else {
+        // Hide learner profiles (maker-lab) from the generic project listing
+        // unless the caller explicitly filters by type.
+        conditions.push("(p.type IS NULL OR p.type != 'learner_profile')");
       }
       if (conditions.length > 0) {
         sql += " WHERE " + conditions.join(" AND ");
@@ -554,7 +558,7 @@ export function createProjectServer(dbPath, options = {}) {
     "Get statistics about the project database.",
     {},
     async () => {
-      const projects = (await db.execute("SELECT COUNT(*) as count FROM research_projects")).rows[0];
+      const projects = (await db.execute("SELECT COUNT(*) as count FROM research_projects WHERE (type IS NULL OR type != 'learner_profile')")).rows[0];
       const sources = (await db.execute("SELECT COUNT(*) as count FROM research_sources")).rows[0];
       const verified = (await db.execute("SELECT COUNT(*) as count FROM research_sources WHERE verified = 1")).rows[0];
       const byType = (await db.execute("SELECT source_type, COUNT(*) as count FROM research_sources GROUP BY source_type ORDER BY count DESC")).rows;
@@ -757,7 +761,7 @@ export function createProjectServer(dbPath, options = {}) {
 
   server.resource("projects", "projects://list", async (uri) => {
     const { rows: projects } = await db.execute(
-      "SELECT id, name, type, status, description FROM research_projects ORDER BY updated_at DESC"
+      "SELECT id, name, type, status, description FROM research_projects WHERE (type IS NULL OR type != 'learner_profile') ORDER BY updated_at DESC"
     );
     return {
       contents: [
