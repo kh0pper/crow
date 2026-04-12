@@ -1427,6 +1427,31 @@
       "notes": "Binds 80/443 on 0.0.0.0 (required for ACME). Admin API bound to 127.0.0.1:2019. Caddyfile at ~/.crow/caddy/Caddyfile. 5 MCP tools: status, reload, list_sites, add_site, remove_site."
     },
     {
+      "id": "adguard-home",
+      "name": "AdGuard Home",
+      "description": "Network-wide ads and tracker blocking DNS server. Filters queries with user-configurable blocklists and serves the admin UI in the browser.",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "networking",
+      "tags": ["dns", "adblock", "privacy", "network", "security"],
+      "icon": "shield",
+      "docker": { "composefile": "docker-compose.yml" },
+      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["ADGUARD_URL", "ADGUARD_USERNAME", "ADGUARD_PASSWORD"] },
+      "panel": "panel/adguard-home.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": ["skills/adguard-home.md"],
+      "requires": { "env": ["ADGUARD_USERNAME", "ADGUARD_PASSWORD"], "min_ram_mb": 256, "min_disk_mb": 200 },
+      "env_vars": [
+        { "name": "ADGUARD_URL", "description": "AdGuard Home admin URL", "default": "http://localhost:3020", "required": false },
+        { "name": "ADGUARD_USERNAME", "description": "Admin username (set during setup wizard)", "required": true },
+        { "name": "ADGUARD_PASSWORD", "description": "Admin password (set during setup wizard)", "required": true, "secret": true }
+      ],
+      "ports": [3020, 5335, 8530],
+      "webUI": { "port": 3020, "path": "/", "label": "AdGuard Home" },
+      "notes": "First-boot: run setup wizard at localhost:3020, create admin credentials, copy to .env. DNS bound to 127.0.0.1:5335 to avoid systemd-resolved collision. 4 MCP tools: status, stats, query_log, toggle_protection."
+    },
+    {
       "id": "vikunja",
       "name": "Vikunja",
       "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",
