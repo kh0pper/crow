@@ -1,0 +1,29 @@
+# Change Detection — watch webpages for content changes.
+#
+# Published on 127.0.0.1:5010 (avoids collision with Kavita on :5000).
+# The image is distroless-ish: no curl or wget is present, so the
+# healthcheck uses Python (which is the application runtime and is
+# guaranteed to be on the image).
+
+services:
+  changedetection:
+    image: ghcr.io/dgtlmoon/changedetection.io:0.49.4
+    container_name: crow-changedetection
+    ports:
+      - "127.0.0.1:5010:5000"
+    volumes:
+      - changedetection-data:/datastore
+    environment:
+      - BASE_URL=${CHANGEDETECTION_URL:-http://localhost:5010}
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+
+volumes:
+  changedetection-data:
