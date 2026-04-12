@@ -14,7 +14,7 @@ networks:
 
 services:
   gotosocial:
-    image: superseriousbusiness/gotosocial:0.18.0
+    image: superseriousbusiness/gotosocial:0.21.2
     container_name: crow-gotosocial
     networks:
       - default
