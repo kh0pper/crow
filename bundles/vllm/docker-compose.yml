@@ -1,0 +1,43 @@
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: crow-vllm
+    # NVIDIA Container Toolkit is required — install nvidia-container-toolkit
+    # on the host and make sure `docker info | grep -i nvidia` lists the
+    # runtime. The modern deploy.resources form below is preferred over
+    # `runtime: nvidia` on recent Docker + Compose v2.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ports:
+      - "127.0.0.1:${VLLM_HTTP_PORT:-8089}:8000"
+    ipc: host
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${VLLM_HF_TOKEN:-}
+      - VLLM_NO_USAGE_STATS=1
+      - DO_NOT_TRACK=1
+    volumes:
+      - ${VLLM_MODEL_CACHE_PATH:-vllm-models}:/root/.cache/huggingface
+    command:
+      - "--model=${VLLM_MODEL:?Set VLLM_MODEL (e.g. Qwen/Qwen2.5-3B-Instruct)}"
+      - "--host=0.0.0.0"
+      - "--port=8000"
+      - "--max-num-seqs=${VLLM_MAX_NUM_SEQS:-16}"
+      - "--gpu-memory-utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.85}"
+      - "--served-model-name=${VLLM_MODEL}"
+    restart: unless-stopped
+    healthcheck:
+      # vLLM exposes /health once the model is loaded. First-start model
+      # download + loading can take 5-15 min, so start_period is generous.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 900s
+
+volumes:
+  vllm-models:
