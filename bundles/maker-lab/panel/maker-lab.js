@@ -214,6 +214,38 @@ export default {
         return res.redirect("/dashboard/maker-lab");
       }
 
+      if (a === "update_learner") {
+        const lid = Number(req.body.learner_id);
+        if (!Number.isFinite(lid)) return res.redirect("/dashboard/maker-lab?err=learner_not_found");
+        const name = String(req.body.name || "").trim().slice(0, 100);
+        const age = Number(req.body.age);
+        const avatar = String(req.body.avatar || "").slice(0, 50) || null;
+        if (!name || !Number.isFinite(age) || age < 3 || age > 100) {
+          return res.redirect(`/dashboard/maker-lab?edit=${lid}&err=create_invalid`);
+        }
+        await db.execute({
+          sql: `UPDATE research_projects SET name=?, updated_at=datetime('now')
+                WHERE id=? AND type='learner_profile'`,
+          args: [name, lid],
+        });
+        const transcripts = req.body.transcripts_enabled === "1" ? 1 : 0;
+        const retention = Math.max(0, Math.min(3650, Number(req.body.transcripts_retention_days) || 30));
+        const idleMin = req.body.idle_lock_default_min === "" ? null
+          : Math.max(0, Math.min(240, Number(req.body.idle_lock_default_min) || 0));
+        const autoResume = Math.max(0, Math.min(240, Number(req.body.auto_resume_min) || 15));
+        const voice = req.body.voice_input_enabled === "1" ? 1 : 0;
+        await db.execute({
+          sql: `UPDATE maker_learner_settings SET
+                  age = ?, avatar = ?,
+                  transcripts_enabled = ?, transcripts_retention_days = ?,
+                  idle_lock_default_min = ?, auto_resume_min = ?,
+                  voice_input_enabled = ?, updated_at = datetime('now')
+                WHERE learner_id = ?`,
+          args: [age, avatar, transcripts, retention, idleMin, autoResume, voice, lid],
+        });
+        return res.redirect(`/dashboard/maker-lab?edit=${lid}&saved=1`);
+      }
+
       if (a === "unlock_idle") {
         const token = String(req.body.session_token || "");
         if (token) {
@@ -267,6 +299,62 @@ export default {
       return layout({
         title,
         content: renderQrPage({ code, shortUrl, fullUrl, qrSvg, row, escapeHtml }),
+      });
+    }
+
+    // Per-learner edit view
+    if (req.query.edit) {
+      const lid = Number(req.query.edit);
+      if (!Number.isFinite(lid)) {
+        return layout({ title: "Not found", content: `<a href="/dashboard/maker-lab">Back</a>` });
+      }
+      const r = await db.execute({
+        sql: `SELECT rp.id, rp.name, rp.created_at, mls.*
+              FROM research_projects rp
+              LEFT JOIN maker_learner_settings mls ON mls.learner_id = rp.id
+              WHERE rp.id = ? AND rp.type = 'learner_profile'`,
+        args: [lid],
+      });
+      if (!r.rows.length) {
+        return layout({ title: "Not found", content: `<p>Learner not found.</p><a href="/dashboard/maker-lab">Back</a>` });
+      }
+      const saved = req.query.saved === "1";
+      const errKey = String(req.query.err || "");
+      return layout({
+        title: `Edit ${r.rows[0].name}`,
+        content: renderEditView({ learner: r.rows[0], saved, errKey, escapeHtml }),
+      });
+    }
+
+    // Transcripts view
+    if (req.query.transcripts) {
+      const lid = Number(req.query.transcripts);
+      if (!Number.isFinite(lid)) {
+        return layout({ title: "Not found", content: `<a href="/dashboard/maker-lab">Back</a>` });
+      }
+      const [learnerR, settingsR, transcriptsR] = await Promise.all([
+        db.execute({ sql: "SELECT id, name FROM research_projects WHERE id=? AND type='learner_profile'", args: [lid] }),
+        db.execute({ sql: "SELECT * FROM maker_learner_settings WHERE learner_id=?", args: [lid] }),
+        db.execute({
+          sql: `SELECT id, session_token, turn_no, role, content, created_at
+                FROM maker_transcripts
+                WHERE learner_id = ?
+                ORDER BY created_at DESC, turn_no DESC
+                LIMIT 500`,
+          args: [lid],
+        }),
+      ]);
+      if (!learnerR.rows.length) {
+        return layout({ title: "Not found", content: `<a href="/dashboard/maker-lab">Back</a>` });
+      }
+      return layout({
+        title: `Transcripts — ${learnerR.rows[0].name}`,
+        content: renderTranscriptsView({
+          learner: learnerR.rows[0],
+          settings: settingsR.rows[0] || {},
+          transcripts: transcriptsR.rows,
+          escapeHtml,
+        }),
       });
     }
 
@@ -553,6 +641,8 @@ function renderMainView({ mode, err, pendingDelete, showGuestPicker, learners, a
               <button type="submit" class="btn primary">Start session</button>
             </form>
           `}
+          <a class="btn small" href="/dashboard/maker-lab?edit=${l.id}">Settings</a>
+          ${l.transcripts_enabled ? `<a class="btn small" href="/dashboard/maker-lab?transcripts=${l.id}">Transcripts</a>` : ''}
           ${isPending ? `
             <form method="POST" action="/dashboard/maker-lab" style="display:inline">
               <input type="hidden" name="action" value="delete_learner">
@@ -700,4 +790,183 @@ function css() {
     .session-list li { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; padding: 0.4rem 0.6rem; background: rgba(0,0,0,0.05); border-radius: 4px; }
     .session-list li .meta { color: var(--muted, #888); font-size: 0.8em; margin-left: auto; }
   </style>`;
+}
+
+// ─── Render: per-learner edit view ────────────────────────────────────────
+
+function renderEditView({ learner, saved, errKey, escapeHtml }) {
+  const persona = learner.age == null ? "kid-tutor"
+    : learner.age <= 9 ? "kid-tutor"
+    : learner.age <= 13 ? "tween-tutor"
+    : "adult-tutor";
+  const errMsg = errKey === "create_invalid" ? "Name is required and age must be 3-100." : "";
+  const savedBanner = saved ? `<div class="banner success">Settings saved.</div>` : "";
+  const errBanner = errMsg ? `<div class="banner error">${escapeHtml(errMsg)}</div>` : "";
+  return `
+    <style>
+      .edit-page { padding: 1.5rem; max-width: 640px; margin: 0 auto; }
+      .edit-page h2 { margin-top: 0; }
+      .field { display: grid; gap: 0.25rem; margin-bottom: 1rem; }
+      .field > label { font-weight: 600; font-size: 0.9em; }
+      .field .help { color: var(--muted, #888); font-size: 0.8em; }
+      .field input[type="text"], .field input[type="number"], .field input[type="email"] { padding: 0.45rem; background: var(--input, rgba(0,0,0,0.3)); color: inherit; border: 1px solid var(--border, #333); border-radius: 4px; max-width: 300px; }
+      .field.checkbox { flex-direction: row; align-items: center; gap: 0.5rem; }
+      .field.checkbox label { font-weight: normal; display: flex; gap: 0.5rem; align-items: center; }
+      .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: baseline; }
+      .consent-note { padding: 0.5rem 0.8rem; background: rgba(59,130,246,0.08); border-left: 3px solid #3b82f6; border-radius: 4px; font-size: 0.85em; margin-bottom: 1rem; }
+      .btn { padding: 0.45rem 1rem; border: 1px solid var(--border, #333); background: transparent; color: inherit; border-radius: 4px; cursor: pointer; font-size: 0.95em; text-decoration: none; display: inline-flex; align-items: center; gap: 0.25rem; }
+      .btn.primary { background: var(--accent, #84cc16); color: #000; border-color: var(--accent, #84cc16); font-weight: 600; }
+      .banner { padding: 0.6rem 0.9rem; border-radius: 4px; margin-bottom: 0.75rem; font-size: 0.9em; }
+      .banner.success { background: rgba(34,197,94,0.15); color: #22c55e; }
+      .banner.error { background: rgba(239,68,68,0.15); color: #ef4444; }
+      .persona-chip { padding: 0.15rem 0.6rem; background: rgba(132,204,22,0.15); color: #84cc16; border-radius: 999px; font-size: 0.85em; }
+    </style>
+    <div class="edit-page">
+      <div class="row">
+        <a class="btn" href="/dashboard/maker-lab">← Back</a>
+        <h2 style="margin:0">Settings — ${escapeHtml(learner.name)}</h2>
+        <span class="persona-chip">${persona}</span>
+      </div>
+      ${savedBanner}${errBanner}
+      <div class="consent-note">
+        Consent captured ${learner.consent_captured_at ? `on ${escapeHtml(learner.consent_captured_at)}` : "— not yet recorded"}.
+        ${learner.consent_captured_at ? "" : `<strong>No consent record found.</strong> Delete and recreate the profile to capture consent.`}
+      </div>
+      <form method="POST" action="/dashboard/maker-lab">
+        <input type="hidden" name="action" value="update_learner">
+        <input type="hidden" name="learner_id" value="${learner.id}">
+
+        <div class="field">
+          <label>Name</label>
+          <input type="text" name="name" required maxlength="100" value="${escapeHtml(learner.name)}">
+        </div>
+        <div class="field">
+          <label>Age</label>
+          <input type="number" name="age" required min="3" max="100" value="${learner.age ?? ""}">
+          <div class="help">Drives persona: ≤9 = kid-tutor, 10-13 = tween-tutor, 14+ = adult-tutor.</div>
+        </div>
+        <div class="field">
+          <label>Avatar</label>
+          <input type="text" name="avatar" maxlength="50" placeholder="mao_pro" value="${escapeHtml(learner.avatar || "")}">
+          <div class="help">Live2D model id used by the companion.</div>
+        </div>
+
+        <h3 style="margin-top:1.5rem">Privacy</h3>
+        <div class="field checkbox">
+          <label>
+            <input type="checkbox" name="transcripts_enabled" value="1" ${learner.transcripts_enabled ? "checked" : ""}>
+            Record conversation transcripts for this learner
+          </label>
+          <div class="help">Off by default. When on, each kid-tutor turn is stored for review. Flag is read at session start and frozen for the session's lifetime — changes take effect next session.</div>
+        </div>
+        <div class="field">
+          <label>Transcript retention (days)</label>
+          <input type="number" name="transcripts_retention_days" min="0" max="3650" value="${learner.transcripts_retention_days ?? 30}">
+          <div class="help">0 = purge on session end.</div>
+        </div>
+
+        <h3 style="margin-top:1.5rem">Session behavior</h3>
+        <div class="field">
+          <label>Idle lock (minutes, blank = off)</label>
+          <input type="number" name="idle_lock_default_min" min="0" max="240" value="${learner.idle_lock_default_min ?? ""}">
+          <div class="help">Lock the kiosk after this many minutes with no tutor/lesson activity. The session token stays valid.</div>
+        </div>
+        <div class="field">
+          <label>Auto-resume after lock (minutes)</label>
+          <input type="number" name="auto_resume_min" min="0" max="240" value="${learner.auto_resume_min ?? 15}">
+          <div class="help">0 = never auto-resume (admin must manually unlock).</div>
+        </div>
+        <div class="field checkbox">
+          <label>
+            <input type="checkbox" name="voice_input_enabled" value="1" ${learner.voice_input_enabled ? "checked" : ""}>
+            Enable voice input (mic) for this learner
+          </label>
+          <div class="help"><strong>Caution:</strong> voice input is NOT filtered by the hint output guard. Appropriate for older kids only.</div>
+        </div>
+
+        <div class="row" style="margin-top:1.5rem">
+          <button type="submit" class="btn primary">Save settings</button>
+          <a class="btn" href="/dashboard/maker-lab">Cancel</a>
+        </div>
+      </form>
+    </div>
+  `;
+}
+
+// ─── Render: transcripts view ─────────────────────────────────────────────
+
+function renderTranscriptsView({ learner, settings, transcripts, escapeHtml }) {
+  const retention = settings.transcripts_retention_days ?? 30;
+  const enabled = !!settings.transcripts_enabled;
+
+  // Group by session_token
+  const sessions = new Map();
+  for (const t of transcripts) {
+    if (!sessions.has(t.session_token)) sessions.set(t.session_token, []);
+    sessions.get(t.session_token).push(t);
+  }
+
+  // Reverse within each session so turns are in chronological order
+  for (const [k, arr] of sessions) {
+    arr.sort((a, b) => a.turn_no - b.turn_no);
+  }
+
+  const sessionBlocks = [...sessions.entries()].map(([token, turns]) => {
+    const first = turns[0];
+    const last = turns[turns.length - 1];
+    return `
+      <details class="session-block">
+        <summary>
+          <span>Session ${escapeHtml(token.slice(0, 8))}…</span>
+          <span class="meta">${escapeHtml(first.created_at)} — ${escapeHtml(last.created_at)} · ${turns.length} turns</span>
+        </summary>
+        <div class="turns">
+          ${turns.map((t) => `
+            <div class="turn role-${t.role}">
+              <span class="role-chip">${t.role}</span>
+              <div class="content">${escapeHtml(t.content)}</div>
+              <span class="turn-meta">#${t.turn_no} · ${escapeHtml(t.created_at)}</span>
+            </div>
+          `).join("")}
+        </div>
+      </details>
+    `;
+  }).join("");
+
+  return `
+    <style>
+      .transcripts-page { padding: 1.5rem; max-width: 900px; margin: 0 auto; }
+      .transcripts-page h2 { margin-top: 0; }
+      .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: baseline; margin-bottom: 1rem; }
+      .chip { padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.8em; }
+      .chip.on { background: rgba(34,197,94,0.15); color: #22c55e; }
+      .chip.off { background: rgba(161,161,170,0.2); color: #a1a1aa; }
+      .banner { padding: 0.6rem 0.9rem; border-radius: 4px; margin-bottom: 0.75rem; font-size: 0.9em; }
+      .banner.info { background: rgba(59,130,246,0.1); color: #60a5fa; }
+      .session-block { margin-bottom: 0.75rem; padding: 0.75rem 1rem; background: var(--card, rgba(255,255,255,0.03)); border: 1px solid var(--border, #333); border-radius: 6px; }
+      .session-block summary { cursor: pointer; display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+      .session-block .meta { color: var(--muted, #888); font-size: 0.85em; }
+      .turns { margin-top: 0.75rem; display: grid; gap: 0.5rem; }
+      .turn { padding: 0.6rem 0.8rem; border-radius: 6px; background: rgba(0,0,0,0.08); display: grid; grid-template-columns: 4rem 1fr auto; gap: 0.5rem; align-items: start; }
+      .turn.role-kid { background: rgba(59,130,246,0.08); }
+      .turn.role-tutor { background: rgba(132,204,22,0.08); }
+      .role-chip { font-weight: 600; text-transform: uppercase; font-size: 0.75em; color: var(--muted, #888); }
+      .turn .content { white-space: pre-wrap; }
+      .turn-meta { color: var(--muted, #888); font-size: 0.75em; white-space: nowrap; }
+      .btn { padding: 0.35rem 0.9rem; border: 1px solid var(--border, #333); background: transparent; color: inherit; border-radius: 4px; text-decoration: none; font-size: 0.9em; }
+    </style>
+    <div class="transcripts-page">
+      <div class="row">
+        <a class="btn" href="/dashboard/maker-lab">← Back</a>
+        <h2 style="margin:0">Transcripts — ${escapeHtml(learner.name)}</h2>
+        <span class="chip ${enabled ? 'on' : 'off'}">${enabled ? 'recording on' : 'recording off'}</span>
+        <a class="btn" href="/dashboard/maker-lab?edit=${learner.id}">Settings</a>
+      </div>
+      <div class="banner info">
+        Retention: <strong>${retention === 0 ? "purge on session end" : `${retention} days`}</strong>.
+        ${transcripts.length ? `Showing up to 500 most recent turns across ${sessions.size} session(s).` : `No transcripts yet.`}
+      </div>
+      ${sessionBlocks || '<p>(nothing to show)</p>'}
+    </div>
+  `;
 }
