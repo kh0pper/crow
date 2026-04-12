@@ -569,6 +569,22 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
     }
   });
 
+  // ─── /maker-lab/api/engine ───────────────────────────────────────────
+  // Phase 4b — returns the active LLM engine resolution so the Nest
+  // (and the vLLM panel's "wired in?" indicator) can tell which
+  // backend Maker Lab is currently routing hints through. Read-only;
+  // no secrets leaked.
+  router.get("/maker-lab/api/engine", async (req, res) => {
+    const mod = await import(pathToFileURL(resolve(__dirname, "../server/resolve-llm-endpoint.js")).href);
+    const resolved = await mod.resolveLlmEndpoint();
+    res.json({
+      engine: resolved.engine,
+      endpoint: resolved.endpoint,
+      model: resolved.model,
+      source: resolved.source,
+    });
+  });
+
   // ─── /maker-lab/api/hint-internal ────────────────────────────────────
   // Loopback-only internal endpoint. Called by the companion's
   // tutor-event WebSocket handler (Python backend, same host) to resolve

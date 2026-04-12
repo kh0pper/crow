@@ -30,21 +30,29 @@ export default {
 
     // Live status probe — tight timeout so the panel stays snappy even
     // when vLLM is still loading the model or the container is down.
-    let live = null;
-    try {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 2000);
-      const resp = await fetch(`${endpointUrl}/v1/models`, { signal: ctrl.signal });
-      clearTimeout(t);
-      if (resp.ok) {
-        const data = await resp.json();
-        live = { ok: true, models: (data.data || []).map((m) => m.id) };
-      } else {
-        live = { ok: false, status: resp.status, reason: `HTTP ${resp.status}` };
-      }
-    } catch (e) {
-      live = { ok: false, reason: String(e.message || e).slice(0, 120) };
+    async function probe(url, timeoutMs) {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), timeoutMs);
+        const resp = await fetch(url, { signal: ctrl.signal });
+        clearTimeout(t);
+        if (resp.ok) return await resp.json();
+      } catch { /* swallow */ }
+      return null;
     }
+
+    const modelsData = await probe(`${endpointUrl}/v1/models`, 2000);
+    const live = modelsData
+      ? { ok: true, models: (modelsData.data || []).map((m) => m.id) }
+      : { ok: false, reason: "no response" };
+
+    // Phase 4b — cross-check: is Maker Lab's hint pipeline currently
+    // routed through this vLLM instance? Short-timeout probe of
+    // /maker-lab/api/engine; silent if Maker Lab isn't installed.
+    const gatewayPort = process.env.CROW_GATEWAY_PORT || "3002";
+    const engineData = await probe(`http://127.0.0.1:${gatewayPort}/maker-lab/api/engine`, 1000);
+    const wiredIntoMakerLab = !!(engineData && engineData.engine === "vllm"
+      && typeof engineData.endpoint === "string" && engineData.endpoint.includes(`:${port}`));
 
     const statusBadge = live && live.ok
       ? `<span class="vl-badge vl-ok">● live · ${escapeHtml(String(live.models.length))} model${live.models.length === 1 ? "" : "s"} loaded</span>`
@@ -66,9 +74,16 @@ export default {
       </section>
       <section class="vl-card">
         <h2>Wiring it into Maker Lab</h2>
-        <p>Set these in Maker Lab's env (or the Nest's Settings → AI profiles):</p>
-        <pre><code>MAKER_LAB_LLM_ENDPOINT=${escapeHtml(endpointUrl)}/v1
-MAKER_LAB_LLM_MODEL=${escapeHtml(configuredModel)}</code></pre>
+        ${wiredIntoMakerLab
+          ? `<p><span class="vl-badge vl-ok">● auto-wired</span> Maker Lab detected this vLLM instance at startup and routes hints through it. No extra env vars needed.</p>
+             <p class="vl-muted">Active model: <code>${escapeHtml(engineData.model || "(unknown)")}</code>. To override, set <code>MAKER_LAB_LLM_ENDPOINT</code> explicitly — the operator override always wins over auto-detection.</p>`
+          : engineData
+            ? `<p><span class="vl-badge vl-off">○ not wired</span> Maker Lab is routing through <code>${escapeHtml(engineData.engine || "?")}</code> at <code>${escapeHtml(engineData.endpoint || "?")}</code>.</p>
+               <p class="vl-muted">This usually means vLLM wasn't ready when Maker Lab started. Restart the maker-lab service after vLLM finishes its first-start model download.</p>`
+            : `<p><span class="vl-badge vl-off">○ Maker Lab not installed</span> or the engine-resolution endpoint is unreachable.</p>
+               <p>When Maker Lab is installed alongside vLLM, the hint pipeline auto-detects this endpoint at startup. Manual override:</p>
+               <pre><code>MAKER_LAB_LLM_ENDPOINT=${escapeHtml(endpointUrl)}/v1
+MAKER_LAB_LLM_MODEL=${escapeHtml(configuredModel)}</code></pre>`}
         <p class="vl-muted">vLLM's endpoint is OpenAI-compatible — any client that speaks <code>/v1/chat/completions</code> (including Companion, the gateway's BYOAI chat, and third-party tools) drops in here directly.</p>
       </section>
       <section class="vl-card">
