@@ -537,6 +537,7 @@ export default function bundlesRouter() {
         message: pickConsentMessage(manifest, lang),
         capabilities: summarizePrivileges(manifest, composePath),
         prereqs,
+        min_android_app: manifest.requires?.min_android_app || null,
         token,
         expires_in_seconds,
       });
@@ -580,6 +581,16 @@ export default function bundlesRouter() {
           missing_dependencies: missing,
         });
       }
+    }
+
+    // PR 3: advisory Android-app version gate. The gateway can't verify the
+    // user's phone from here — the check happens on the phone when the panel
+    // JS reads navigator.userAgent. Log a warning so ops can see the
+    // requirement and include it in the install response for UIs that want
+    // to surface it.
+    const minAndroidApp = manifestPre?.requires?.min_android_app;
+    if (minAndroidApp) {
+      console.log(`[bundles] ${bundle_id} declares min_android_app=${minAndroidApp} — enforced client-side on the Crow Android app`);
     }
 
     // F.0: hardware gate — refuse install if RAM/disk headroom is insufficient,

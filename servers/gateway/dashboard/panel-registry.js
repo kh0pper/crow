@@ -15,6 +15,9 @@ const panels = new Map();
 /** @type {Map<string, Function>} Panel routes: id → (authMiddleware) => Router */
 const panelRoutes = new Map();
 
+/** @type {Map<string, Function>} Panel WS setup hooks: id → (httpServer) => any */
+const panelWebSocketSetups = new Map();
+
 /**
  * Register a built-in panel.
  * @param {object} manifest - { id, name, icon, route, navOrder, handler }
@@ -64,6 +67,11 @@ export async function loadExternalPanels() {
         if (typeof routerFn === "function") {
           panelRoutes.set(id, routerFn);
         }
+        // Panels may also expose a `setupWebSocket(httpServer)` named export.
+        // We collect it here; index.js invokes it once the HTTP server is up.
+        if (typeof routesMod.setupWebSocket === "function") {
+          panelWebSocketSetups.set(id, routesMod.setupWebSocket);
+        }
       } catch (err) {
         console.warn(`[dashboard] Failed to load panel routes ${id}:`, err.message);
       }
@@ -101,4 +109,14 @@ export function getPanel(id) {
  */
 export function getPanelRoutes() {
   return panelRoutes;
+}
+
+/**
+ * Get all registered panel WebSocket setup hooks.
+ * Each hook is called once with the HTTP server instance during gateway
+ * startup, after `app.listen()`.
+ * @returns {Map<string, Function>} id → (httpServer) => any
+ */
+export function getPanelWebSocketSetups() {
+  return panelWebSocketSetups;
 }

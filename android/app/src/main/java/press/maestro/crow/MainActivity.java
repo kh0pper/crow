@@ -13,6 +13,7 @@ import android.os.Looper;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
+import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebSettings;
@@ -255,10 +256,36 @@ public class MainActivity extends AppCompatActivity {
         settings.setDatabaseEnabled(true);
         settings.setAllowFileAccess(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
-        settings.setUserAgentString(settings.getUserAgentString() + " CrowAndroid/1.2");
+        settings.setUserAgentString(settings.getUserAgentString() + " CrowAndroid/1.4.0");
 
         webView.setWebViewClient(new CrowWebViewClient(this));
         webView.setWebChromeClient(new CrowWebChromeClient(this));
+
+        // Expose native features to the Crow dashboard as `window.Crow.*`.
+        // Panels check for these before attempting features that need
+        // device-only APIs (e.g. Bluetooth for the Meta Glasses bundle).
+        webView.addJavascriptInterface(new CrowBridge(), "Crow");
+    }
+
+    /**
+     * JavaScript bridge exposed to the dashboard as `window.Crow`.
+     * Methods annotated with @JavascriptInterface become callable from JS.
+     */
+    public class CrowBridge {
+        /** Version advertised to panels for capability gating. */
+        @JavascriptInterface
+        public String appVersion() {
+            return "1.4.0";
+        }
+
+        /** Launch the Meta Glasses pairing UI. Called by the meta-glasses panel. */
+        @JavascriptInterface
+        public void launchGlassesPairing() {
+            runOnUiThread(() -> {
+                Intent intent = new Intent(MainActivity.this, PairingActivity.class);
+                startActivity(intent);
+            });
+        }
     }
 
     private void loadGateway(String url) {
