@@ -1555,6 +1555,62 @@
       "notes": "Config in ~/.crow/searxng/settings.yml. JSON API enabled. First-boot entrypoint seeds a default config and random secret if not provided. 3 MCP tools: search, list_engines, status."
     },
     {
+      "id": "netdata",
+      "name": "Netdata",
+      "description": "Real-time infrastructure and container monitoring — CPU, memory, disk, network, and Docker container metrics with one-second granularity.",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "infrastructure",
+      "tags": ["monitoring", "metrics", "observability", "docker", "system"],
+      "icon": "activity",
+      "docker": { "composefile": "docker-compose.yml" },
+      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["NETDATA_URL"] },
+      "panel": "panel/netdata.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": ["skills/netdata.md"],
+      "consent_required": true,
+      "install_consent_messages": {
+        "en": "Netdata requires read-only access to the Docker socket so it can monitor every container on this host. Anything with Docker socket access can see container names, images, env vars, and resource usage. Crow enforces read-only (no writes, no container control). Netdata also mounts /proc and /sys read-only for system metrics.",
+        "es": "Netdata necesita acceso de solo lectura al socket de Docker para monitorizar cada contenedor en este host. Cualquier software con acceso al socket de Docker puede ver nombres de contenedores, imágenes, variables de entorno y uso de recursos. Crow impone solo lectura. Netdata también monta /proc y /sys como solo lectura para métricas del sistema."
+      },
+      "requires": { "env": [], "min_ram_mb": 512, "min_disk_mb": 500 },
+      "env_vars": [
+        { "name": "NETDATA_URL", "description": "Netdata agent URL", "default": "http://localhost:19999", "required": false }
+      ],
+      "ports": [19999],
+      "webUI": { "port": 19999, "path": "/", "label": "Netdata" },
+      "notes": "MVP scope: no SYS_PTRACE / pid:host (per-process stats unavailable). Docker socket read-only. Per-container metrics + system metrics work. 4 MCP tools: status, charts, query, alarms."
+    },
+    {
+      "id": "dozzle",
+      "name": "Dozzle",
+      "description": "Real-time Docker container log viewer in the browser. Tail, search, and filter logs across every container on this host.",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "infrastructure",
+      "tags": ["logs", "docker", "debugging", "observability"],
+      "icon": "file-text",
+      "docker": { "composefile": "docker-compose.yml" },
+      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["DOZZLE_URL"] },
+      "panel": "panel/dozzle.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": ["skills/dozzle.md"],
+      "consent_required": true,
+      "install_consent_messages": {
+        "en": "Dozzle requires read-only access to the Docker socket so it can stream container logs in your browser. Logs often contain stack traces, connection strings, and occasionally secrets that were accidentally logged. Crow enforces read-only. Dozzle binds to 127.0.0.1 only — never expose its port publicly without enabling authentication.",
+        "es": "Dozzle necesita acceso de solo lectura al socket de Docker para transmitir logs de contenedores en tu navegador. Los logs suelen incluir trazas, cadenas de conexión y, a veces, secretos registrados por error. Crow impone solo lectura. Dozzle se vincula solo a 127.0.0.1 — nunca expongas su puerto públicamente sin autenticación."
+      },
+      "requires": { "env": [], "min_ram_mb": 64, "min_disk_mb": 50 },
+      "env_vars": [
+        { "name": "DOZZLE_URL", "description": "Dozzle URL", "default": "http://localhost:8095", "required": false }
+      ],
+      "ports": [8095],
+      "webUI": { "port": 8095, "path": "/", "label": "Dozzle" },
+      "notes": "Log viewer is UI-first. Actions and shell modes disabled by default. 2 MCP tools: status, container_url."
+    },
+    {
       "id": "vikunja",
       "name": "Vikunja",
       "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",
