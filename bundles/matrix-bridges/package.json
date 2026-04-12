@@ -1,0 +1,7 @@
+{
+  "name": "crow-matrix-bridges",
+  "version": "1.0.0",
+  "description": "Matrix appservice bridges meta-bundle (Signal/Telegram/WhatsApp). No MCP server — bridge state is managed via Dendrite's native tools and the bridge bots themselves.",
+  "type": "module",
+  "main": null
+}

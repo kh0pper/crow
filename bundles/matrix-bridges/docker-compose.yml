@@ -1,0 +1,90 @@
+# Matrix Bridges — Signal + Telegram + WhatsApp appservice sidecars.
+#
+# Each bridge is a `profiles`-gated service; the post-install.sh script
+# enables the relevant profile based on BRIDGE_*_ENABLED env flags.
+# All bridges join the crow-federation network so Dendrite can reach them
+# over the internal docker DNS (appservice URL = http://<container>:<port>).
+#
+# Data:
+#   ~/.crow/matrix-bridges/signal/      mautrix-signal sqlite + config
+#   ~/.crow/matrix-bridges/telegram/    mautrix-telegram sqlite + config
+#   ~/.crow/matrix-bridges/whatsapp/    mautrix-whatsapp sqlite + config
+#   ~/.crow/matrix-bridges/signald/     signald state (mautrix-signal sidecar)
+#
+# Images: dock.mau.dev official mautrix tags. Pinned in each service.
+
+networks:
+  crow-federation:
+    external: true
+  default:
+
+services:
+  mautrix-signal:
+    image: dock.mau.dev/mautrix/signal:latest
+    container_name: crow-mautrix-signal
+    profiles: ["signal"]
+    networks:
+      - default
+      - crow-federation
+    environment:
+      MAUTRIX_HOMESERVER_ADDRESS: ${MATRIX_BRIDGE_HOMESERVER_URL}
+      MAUTRIX_HOMESERVER_DOMAIN: ${MATRIX_BRIDGE_DOMAIN}
+    volumes:
+      - ${MATRIX_BRIDGES_DATA_DIR:-~/.crow/matrix-bridges}/signal:/data
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    # Bridge generates /data/registration.yaml on first boot; post-install
+    # copies it into crow-dendrite:/etc/dendrite/appservices/signal.yaml
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /data/registration.yaml"]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  mautrix-telegram:
+    image: dock.mau.dev/mautrix/telegram:latest
+    container_name: crow-mautrix-telegram
+    profiles: ["telegram"]
+    networks:
+      - default
+      - crow-federation
+    environment:
+      MAUTRIX_HOMESERVER_ADDRESS: ${MATRIX_BRIDGE_HOMESERVER_URL}
+      MAUTRIX_HOMESERVER_DOMAIN: ${MATRIX_BRIDGE_DOMAIN}
+      MAUTRIX_TELEGRAM_API_ID: ${BRIDGE_TELEGRAM_API_ID:-}
+      MAUTRIX_TELEGRAM_API_HASH: ${BRIDGE_TELEGRAM_API_HASH:-}
+    volumes:
+      - ${MATRIX_BRIDGES_DATA_DIR:-~/.crow/matrix-bridges}/telegram:/data
+    init: true
+    mem_limit: 768m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /data/registration.yaml"]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  mautrix-whatsapp:
+    image: dock.mau.dev/mautrix/whatsapp:latest
+    container_name: crow-mautrix-whatsapp
+    profiles: ["whatsapp"]
+    networks:
+      - default
+      - crow-federation
+    environment:
+      MAUTRIX_HOMESERVER_ADDRESS: ${MATRIX_BRIDGE_HOMESERVER_URL}
+      MAUTRIX_HOMESERVER_DOMAIN: ${MATRIX_BRIDGE_DOMAIN}
+    volumes:
+      - ${MATRIX_BRIDGES_DATA_DIR:-~/.crow/matrix-bridges}/whatsapp:/data
+    init: true
+    mem_limit: 2g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /data/registration.yaml"]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 30s

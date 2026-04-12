@@ -88,6 +88,8 @@ This is the master routing skill. Consult this **before every task** to determin
 | "mastodon", "toot", "fediverse", "activitypub", "@user@server", "federated timeline", "boost", "mastodon instance" | "mastodon", "tootear", "fediverso", "activitypub", "@usuario@servidor", "linea temporal federada", "reblog" | mastodon | crow-mastodon |
 | "peertube", "upload video", "federated video", "video channel", "fediverse video", "youtube alternative", "webtorrent" | "peertube", "subir video", "video federado", "canal video", "video fediverso", "alternativa youtube" | peertube | crow-peertube |
 | "attest identity", "prove I am", "link my mastodon", "verify handle", "keyoxide", "crow identity attestation", "revoke attestation" | "atestar identidad", "probar que soy", "vincular mi mastodon", "verificar handle", "keyoxide", "atestación identidad crow" | crow-identity | crow-sharing |
+| "matrix bridge", "bridge signal", "bridge telegram", "bridge whatsapp", "mautrix", "signal to matrix", "telegram to matrix" | "puente matrix", "puente signal", "puente telegram", "puente whatsapp", "mautrix", "signal a matrix" | matrix-bridges | crow-matrix-dendrite |
+| "cross-post", "crosspost", "mirror post to", "publish to both", "mastodon and", "share my post to" | "publicación cruzada", "crosspost", "replicar publicación", "publicar en ambos" | crow-crosspost | crow-sharing |
 | "tutor me", "teach me", "quiz me", "help me understand" | "enséñame", "explícame", "evalúame" | tutoring | crow-memory |
 | "wrap up", "summarize session", "what did we do" | "resumir sesión", "qué hicimos" | session-summary | crow-memory |
 | "change language", "speak in..." | "cambiar idioma", "háblame en..." | i18n | crow-memory |
