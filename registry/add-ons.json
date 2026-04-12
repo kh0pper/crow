@@ -1427,6 +1427,31 @@
       "notes": "Binds 80/443 on 0.0.0.0 (required for ACME). Admin API bound to 127.0.0.1:2019. Caddyfile at ~/.crow/caddy/Caddyfile. 5 MCP tools: status, reload, list_sites, add_site, remove_site."
     },
     {
+      "id": "uptime-kuma",
+      "name": "Uptime Kuma",
+      "description": "Service monitoring and uptime tracking with response-time graphs and status pages",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "infrastructure",
+      "tags": ["monitoring", "uptime", "alerts", "status-page", "self-hosted"],
+      "icon": "activity",
+      "docker": { "composefile": "docker-compose.yml" },
+      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["UPTIMEKUMA_URL", "UPTIMEKUMA_USERNAME", "UPTIMEKUMA_PASSWORD"] },
+      "panel": "panel/uptime-kuma.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": ["skills/uptime-kuma.md"],
+      "requires": { "env": [], "min_ram_mb": 256, "min_disk_mb": 200 },
+      "env_vars": [
+        { "name": "UPTIMEKUMA_URL", "description": "Uptime Kuma base URL", "default": "http://localhost:3007", "required": true },
+        { "name": "UPTIMEKUMA_USERNAME", "description": "Admin username (for /metrics basic auth)", "required": false },
+        { "name": "UPTIMEKUMA_PASSWORD", "description": "Admin password (for /metrics basic auth)", "required": false, "secret": true }
+      ],
+      "ports": [3007],
+      "webUI": { "port": 3007, "path": "/", "label": "Uptime Kuma" },
+      "notes": "Listens on 3001 inside container, published on 127.0.0.1:3007. First-run: create admin user in web UI, then set UPTIMEKUMA_USERNAME/PASSWORD for /metrics parsing. 2 MCP tools (socket.io API is not wrapped)."
+    },
+    {
       "id": "vikunja",
       "name": "Vikunja",
       "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",
