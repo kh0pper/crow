@@ -1,0 +1,28 @@
+{
+  "id": "netdata",
+  "name": "Netdata",
+  "version": "1.0.0",
+  "description": "Real-time infrastructure and container monitoring — CPU, memory, disk, network, and Docker container metrics with one-second granularity.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "infrastructure",
+  "tags": ["monitoring", "metrics", "observability", "docker", "system"],
+  "icon": "activity",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["NETDATA_URL"] },
+  "panel": "panel/netdata.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/netdata.md"],
+  "consent_required": true,
+  "install_consent_messages": {
+    "en": "Netdata requires read-only access to the Docker socket (/var/run/docker.sock) so it can discover and monitor every container on this host. This is a significant privilege: anything with Docker socket access can see container names, images, env vars, and resource usage. Crow enforces read-only (no writes, no container control), but review the compose file if this is sensitive on your host. Netdata also mounts /proc and /sys read-only for system metrics.",
+    "es": "Netdata necesita acceso de solo lectura al socket de Docker (/var/run/docker.sock) para descubrir y monitorizar cada contenedor en este host. Es un privilegio significativo: cualquier software con acceso al socket de Docker puede ver nombres de contenedores, imágenes, variables de entorno y uso de recursos. Crow impone solo lectura (sin escrituras ni control de contenedores), pero revisa el archivo compose si esto es sensible en tu host. Netdata también monta /proc y /sys como solo lectura para métricas del sistema."
+  },
+  "requires": { "env": [], "min_ram_mb": 512, "min_disk_mb": 500 },
+  "env_vars": [
+    { "name": "NETDATA_URL", "description": "Netdata agent URL (host-local)", "default": "http://localhost:19999", "required": false }
+  ],
+  "ports": [19999],
+  "webUI": { "port": 19999, "path": "/", "label": "Netdata" },
+  "notes": "Runs without SYS_PTRACE / pid:host for MVP — per-process stats are unavailable but system + container metrics work. Docker socket mounted read-only. /etc not mounted (hostname/OS shown as 'unknown' in netdata UI; acceptable trade-off)."
+}
