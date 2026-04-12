@@ -547,6 +547,10 @@ await initTable("identity_attestation_revocations table", `
 await addColumnIfMissing("contacts", "external_handle", "TEXT");
 await addColumnIfMissing("contacts", "external_source", "TEXT");
 
+// F.13: scheduler needs the transformed payload to publish. Earlier crosspost_log
+// rows (from F.12) will have NULL — scheduler treats NULL as "manually handled".
+await addColumnIfMissing("crosspost_log", "transformed_payload_json", "TEXT");
+
 // --- F.12: Crosspost rules + log ---
 // crosspost_rules holds the operator's opt-in config: "when a new post appears
 // in app X, publish a transformed copy to app Y". Triggers: on_publish (with
