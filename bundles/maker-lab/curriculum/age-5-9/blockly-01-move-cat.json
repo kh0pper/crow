@@ -4,15 +4,24 @@
   "surface": "blockly",
   "age_band": "5-9",
   "reading_level": 2,
-  "goal": "Drag a move block into the workspace and click play to move the cat.",
+  "goal": "Drag a move block into the workspace and press play to move the cat.",
   "steps": [
-    { "prompt": "Drag the move block into the workspace." },
-    { "prompt": "Click the green play button!" }
+    { "prompt": "Find the Do block and drag it into the workspace." },
+    { "prompt": "Press play!" }
   ],
   "canned_hints": [
     "Look for the block shaped like a little arrow!",
-    "Try dragging it right under the 'when start' block.",
+    "Try dragging it under the start block.",
     "The green play button is at the top!"
   ],
+  "toolbox": {
+    "categories": [
+      { "name": "Do", "colour": "#3b82f6", "blocks": ["text_print"] }
+    ]
+  },
+  "success_check": {
+    "required_blocks": ["text_print"],
+    "message_missing": "Drag a Do block into the workspace first!"
+  },
   "tags": ["sequences", "starter"]
 }

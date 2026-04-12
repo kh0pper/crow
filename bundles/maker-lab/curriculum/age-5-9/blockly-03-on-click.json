@@ -4,16 +4,26 @@
   "surface": "blockly",
   "age_band": "5-9",
   "reading_level": 3,
-  "goal": "Make the cat do something only when you click it.",
+  "goal": "Use an If block so something only happens when a question is true.",
   "steps": [
-    { "prompt": "Grab the 'when clicked' block." },
-    { "prompt": "Put a move block under it." },
-    { "prompt": "Press play, then click the cat!" }
+    { "prompt": "Find the If block." },
+    { "prompt": "Put a Do block inside it." },
+    { "prompt": "Press play and see what happens!" }
   ],
   "canned_hints": [
-    "Events are like doorbells — the code runs when something rings them!",
-    "The cat won't move until you click on it. That's on purpose.",
-    "Try putting more than one move block under 'when clicked'."
+    "An If block is like a question: only do this IF the answer is yes.",
+    "Put the Do block inside the If, under the 'do' label.",
+    "You can build more than one step inside."
   ],
+  "toolbox": {
+    "categories": [
+      { "name": "If", "colour": "#ec4899", "blocks": ["controls_if", "logic_boolean"] },
+      { "name": "Do", "colour": "#3b82f6", "blocks": ["text_print"] }
+    ]
+  },
+  "success_check": {
+    "required_blocks": ["controls_if", "text_print"],
+    "message_missing": "Put a Do block inside an If block."
+  },
   "tags": ["events", "interaction"]
 }

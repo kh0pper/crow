@@ -1,0 +1,28 @@
+{
+  "id": "blockly-04-two-in-a-row",
+  "title": "Two Steps in a Row",
+  "surface": "blockly",
+  "age_band": "5-9",
+  "reading_level": 2,
+  "goal": "Stack two Do blocks one after the other. The computer runs them in order, top to bottom.",
+  "steps": [
+    { "prompt": "Drag one Do block into the workspace." },
+    { "prompt": "Drag a second Do block and snap it right underneath." },
+    { "prompt": "Press play." }
+  ],
+  "canned_hints": [
+    "Blocks that touch run one after the other, from top to bottom.",
+    "Try changing what the second block says!",
+    "You can stack as many as you want — like LEGO."
+  ],
+  "toolbox": {
+    "categories": [
+      { "name": "Do", "colour": "#3b82f6", "blocks": ["text_print"] }
+    ]
+  },
+  "success_check": {
+    "required_blocks": ["text_print"],
+    "message_missing": "Try stacking two Do blocks!"
+  },
+  "tags": ["sequences"]
+}

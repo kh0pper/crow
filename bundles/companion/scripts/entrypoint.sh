@@ -14,6 +14,12 @@ python3 /app/scripts/patch-tool-calling.py
 echo "Applying auto-group patch..."
 python3 /app/scripts/patch-auto-group.py
 
+# Maker Lab: patch tutor-event WebSocket handler (idempotent; no-op if missing)
+if [ -f /app/scripts/patch-tutor-event.py ]; then
+  echo "Applying Maker Lab tutor-event patch..."
+  python3 /app/scripts/patch-tutor-event.py || echo "  (patch failed; companion will continue without tutor-event support)"
+fi
+
 # Generate conf.yaml from Crow's AI profiles
 echo "Generating config from Crow AI profiles..."
 APP_DIR=/app uv run python3 /app/scripts/generate-config.py

@@ -1,0 +1,34 @@
+{
+  "id": "blockly-10-capstone-party",
+  "title": "Dance Party (Capstone)",
+  "surface": "blockly",
+  "age_band": "5-9",
+  "reading_level": 3,
+  "goal": "Put everything together: a Repeat that runs an If, with different Do blocks for yes and no.",
+  "steps": [
+    { "prompt": "Start with a Repeat set to 5." },
+    { "prompt": "Put an If / else inside the Repeat." },
+    { "prompt": "Drop a compare block in the yes-or-no slot (5 bigger than 3 works fine)." },
+    { "prompt": "Put one Do in the If, a different Do in the else." },
+    { "prompt": "Press play and watch your party!" }
+  ],
+  "canned_hints": [
+    "You know all these blocks — just stack them!",
+    "Repeat is the outside shell. Everything else goes inside.",
+    "No wrong answer here — make it yours."
+  ],
+  "toolbox": {
+    "categories": [
+      { "name": "Repeat", "colour": "#84cc16", "blocks": ["controls_repeat_ext"] },
+      { "name": "If", "colour": "#ec4899", "blocks": ["controls_if"] },
+      { "name": "Compare", "colour": "#22c55e", "blocks": ["logic_compare", "logic_boolean"] },
+      { "name": "Do", "colour": "#3b82f6", "blocks": ["text_print"] },
+      { "name": "Numbers", "colour": "#fbbf24", "blocks": ["math_number"] }
+    ]
+  },
+  "success_check": {
+    "required_blocks": ["controls_repeat_ext", "controls_if", "text_print"],
+    "message_missing": "The capstone wants a Repeat, an If, and a Do — all in one."
+  },
+  "tags": ["capstone", "loops", "conditions", "sequences"]
+}

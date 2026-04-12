@@ -25,6 +25,7 @@ COPY scripts/inject-wm.sh /app/scripts/inject-wm.sh
 COPY scripts/crow-wm.js /app/scripts/crow-wm.js
 COPY scripts/patch-tool-calling.py /app/scripts/patch-tool-calling.py
 COPY scripts/patch-auto-group.py /app/scripts/patch-auto-group.py
+COPY scripts/patch-tutor-event.py /app/scripts/patch-tutor-event.py
 COPY scripts/crow-webrtc.js /app/scripts/crow-webrtc.js
 COPY scripts/inject-webrtc.sh /app/scripts/inject-webrtc.sh
 COPY scripts/crow-voice-panel.js /app/scripts/crow-voice-panel.js

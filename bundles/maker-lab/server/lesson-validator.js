@@ -98,5 +98,50 @@ export function validateLesson(lesson) {
     }
   }
 
+  // toolbox: either an array of block-type strings or { categories: [...] }
+  if (lesson.toolbox != null) {
+    const tb = lesson.toolbox;
+    if (Array.isArray(tb)) {
+      if (!tb.every((t) => typeof t === "string")) {
+        errors.push("toolbox (array form) must be an array of block-type strings");
+      }
+    } else if (typeof tb === "object") {
+      if (!Array.isArray(tb.categories)) {
+        errors.push("toolbox.categories must be an array");
+      } else {
+        for (let i = 0; i < tb.categories.length; i++) {
+          const cat = tb.categories[i];
+          if (!cat || typeof cat !== "object") { errors.push(`toolbox.categories[${i}] must be an object`); continue; }
+          if (typeof cat.name !== "string") errors.push(`toolbox.categories[${i}].name must be a string`);
+          if (!Array.isArray(cat.blocks) || !cat.blocks.every((b) => typeof b === "string")) {
+            errors.push(`toolbox.categories[${i}].blocks must be an array of block-type strings`);
+          }
+          if (cat.colour != null && typeof cat.colour !== "string") {
+            errors.push(`toolbox.categories[${i}].colour must be a string`);
+          }
+        }
+      }
+    } else {
+      errors.push("toolbox must be an array or an object with a categories array");
+    }
+  }
+
+  // success_check: { required_blocks: [], message_missing? }
+  if (lesson.success_check != null) {
+    const sc = lesson.success_check;
+    if (!sc || typeof sc !== "object" || Array.isArray(sc)) {
+      errors.push("success_check must be an object");
+    } else {
+      if (sc.required_blocks != null) {
+        if (!Array.isArray(sc.required_blocks) || !sc.required_blocks.every((b) => typeof b === "string")) {
+          errors.push("success_check.required_blocks must be an array of block-type strings");
+        }
+      }
+      if (sc.message_missing != null && typeof sc.message_missing !== "string") {
+        errors.push("success_check.message_missing must be a string");
+      }
+    }
+  }
+
   return { valid: errors.length === 0, errors };
 }

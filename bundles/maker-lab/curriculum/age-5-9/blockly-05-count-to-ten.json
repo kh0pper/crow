@@ -1,20 +1,20 @@
 {
-  "id": "blockly-02-repeat",
-  "title": "Make the Cat Dance",
+  "id": "blockly-05-count-to-ten",
+  "title": "Count to Ten",
   "surface": "blockly",
   "age_band": "5-9",
   "reading_level": 2,
-  "goal": "Use a Repeat block so the cat moves four times.",
+  "goal": "Use a Repeat block with the number 10 so the cat counts to ten.",
   "steps": [
-    { "prompt": "Find the Repeat block. It has a little hole inside." },
+    { "prompt": "Drag a Repeat block into the workspace." },
+    { "prompt": "Change the number inside it to 10." },
     { "prompt": "Put a Do block inside the Repeat." },
-    { "prompt": "Change the number to 4." },
-    { "prompt": "Press play and watch the cat go!" }
+    { "prompt": "Press play!" }
   ],
   "canned_hints": [
-    "A Repeat block is like saying 'do it again, and again, and again!'",
-    "You can drop other blocks inside the Repeat block.",
-    "Try changing the number. What changes?"
+    "The number in the Repeat block says how many times to do it.",
+    "Click the number to change it.",
+    "What if you put 100 there? (Press play and see!)"
   ],
   "toolbox": {
     "categories": [
@@ -27,5 +27,5 @@
     "required_blocks": ["controls_repeat_ext", "text_print"],
     "message_missing": "You need a Repeat block with a Do block inside!"
   },
-  "tags": ["loops", "repetition"]
+  "tags": ["loops", "counting"]
 }

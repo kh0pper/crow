@@ -1,0 +1,30 @@
+{
+  "id": "blockly-06-change-the-words",
+  "title": "Make It Your Own",
+  "surface": "blockly",
+  "age_band": "5-9",
+  "reading_level": 2,
+  "goal": "Change the words inside a Do block so the cat says what YOU want.",
+  "steps": [
+    { "prompt": "Drag a Do block into the workspace." },
+    { "prompt": "Click the text inside the Do block." },
+    { "prompt": "Type a silly word!" },
+    { "prompt": "Press play and watch." }
+  ],
+  "canned_hints": [
+    "The text inside the block is what the cat says.",
+    "You can type any letters you want.",
+    "Try adding a second Do block with a different word!"
+  ],
+  "toolbox": {
+    "categories": [
+      { "name": "Do", "colour": "#3b82f6", "blocks": ["text_print"] },
+      { "name": "Words", "colour": "#a855f7", "blocks": ["text"] }
+    ]
+  },
+  "success_check": {
+    "required_blocks": ["text_print"],
+    "message_missing": "Drag a Do block and change the words!"
+  },
+  "tags": ["sequences", "customization"]
+}
