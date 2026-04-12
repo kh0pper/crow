@@ -1,0 +1,30 @@
+# Uptime Kuma — self-hosted uptime monitoring.
+#
+# The image listens on port 3001 internally; we publish on 127.0.0.1:3007
+# to keep it host-local and avoid a collision with Crow's gateway (3001).
+#
+# First-run: open http://localhost:3007 to create the admin account and
+# monitors. The MCP server and dashboard panel here only use the public
+# ping endpoint and the Prometheus /metrics endpoint (basic auth with the
+# admin credentials once the wizard has been completed).
+
+services:
+  uptime-kuma:
+    image: louislam/uptime-kuma:1.23.16
+    container_name: crow-uptime-kuma
+    ports:
+      - "127.0.0.1:3007:3001"
+    volumes:
+      - uptime-kuma-data:/app/data
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "/app/extra/healthcheck.js"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  uptime-kuma-data:

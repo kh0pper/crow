@@ -1,0 +1,25 @@
+{
+  "id": "uptime-kuma",
+  "name": "Uptime Kuma",
+  "version": "1.0.0",
+  "description": "Service monitoring and uptime tracking with response-time graphs and status pages",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "infrastructure",
+  "tags": ["monitoring", "uptime", "alerts", "status-page", "self-hosted"],
+  "icon": "activity",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["UPTIMEKUMA_URL", "UPTIMEKUMA_USERNAME", "UPTIMEKUMA_PASSWORD"] },
+  "panel": "panel/uptime-kuma.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/uptime-kuma.md"],
+  "requires": { "env": [], "min_ram_mb": 256, "min_disk_mb": 200 },
+  "env_vars": [
+    { "name": "UPTIMEKUMA_URL", "description": "Uptime Kuma base URL", "default": "http://localhost:3007", "required": true },
+    { "name": "UPTIMEKUMA_USERNAME", "description": "Admin username for Prometheus /metrics basic auth (set after first-run wizard)", "required": false },
+    { "name": "UPTIMEKUMA_PASSWORD", "description": "Admin password for /metrics basic auth", "required": false, "secret": true }
+  ],
+  "ports": [3007],
+  "webUI": { "port": 3007, "path": "/", "label": "Uptime Kuma" },
+  "notes": "Uptime Kuma listens on 3001 inside the container and is published on 127.0.0.1:3007. On first launch, open the web UI to create the admin account. Uptime Kuma's primary API is socket.io (not REST); this bundle ships two host-side tools that only use the public ping endpoint and the Prometheus /metrics endpoint (basic auth). Monitor creation and pause/resume are not wrapped — use the web UI for those actions."
+}
