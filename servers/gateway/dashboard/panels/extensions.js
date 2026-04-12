@@ -46,6 +46,7 @@ const ICON_MAP = {
   document: "\u{1F4D1}",
   shield: "\u{1F6E1}\uFE0F",
   activity: "\u{1F4C8}",
+  eye: "\u{1F441}\uFE0F",
 };
 
 const CATEGORY_COLORS = {
