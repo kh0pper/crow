@@ -112,9 +112,10 @@ function clearSessionCookie(req, res) {
 async function resolveSessionRow(db, token) {
   if (!token) return null;
   const r = await db.execute({
-    sql: `SELECT s.*, rp.name AS learner_name, rp.metadata AS learner_metadata
+    sql: `SELECT s.*, rp.name AS learner_name, mls.age AS learner_age
           FROM maker_sessions s
           LEFT JOIN research_projects rp ON rp.id = s.learner_id
+          LEFT JOIN maker_learner_settings mls ON mls.learner_id = s.learner_id
           WHERE s.token = ?`,
     args: [token],
   });
@@ -248,11 +249,7 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
     const guard = await requireKioskSession(req, db);
     if (!guard.ok) return res.status(401).json({ error: guard.reason });
     const s = guard.session;
-    let age = null;
-    try {
-      const m = JSON.parse(s.learner_metadata || "{}");
-      age = typeof m.age === "number" ? m.age : null;
-    } catch {}
+    const age = typeof s.learner_age === "number" ? s.learner_age : null;
     const persona = s.is_guest ? ageBandFromGuestBand(s.guest_age_band) : personaForAge(age);
     // Activity touch
     await db.execute({

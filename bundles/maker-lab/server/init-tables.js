@@ -110,10 +110,13 @@ export async function initMakerLabTables(db) {
     CREATE INDEX IF NOT EXISTS idx_maker_transcripts_created ON maker_transcripts(created_at);
   `);
 
-  // Per-learner settings.
+  // Per-learner settings. Also stores age + avatar — research_projects
+  // doesn't have a metadata column, so learner attributes live here.
   await initTable(db, "maker_learner_settings", `
     CREATE TABLE IF NOT EXISTS maker_learner_settings (
       learner_id INTEGER PRIMARY KEY REFERENCES research_projects(id) ON DELETE CASCADE,
+      age INTEGER,
+      avatar TEXT,
       transcripts_enabled INTEGER NOT NULL DEFAULT 0,
       transcripts_retention_days INTEGER NOT NULL DEFAULT 30,
       idle_lock_default_min INTEGER,
@@ -123,6 +126,19 @@ export async function initMakerLabTables(db) {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+
+  // Migration for existing installs created before age/avatar were added.
+  async function addColumnIfMissing(table, col, decl) {
+    try {
+      const r = await db.execute(`PRAGMA table_info(${table})`);
+      const cols = new Set(r.rows.map((x) => x.name));
+      if (!cols.has(col)) {
+        await db.execute(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`);
+      }
+    } catch {}
+  }
+  await addColumnIfMissing("maker_learner_settings", "age", "INTEGER");
+  await addColumnIfMissing("maker_learner_settings", "avatar", "TEXT");
 
   // Boot-time sweep: remove orphaned guest sessions from a crash.
   try {
