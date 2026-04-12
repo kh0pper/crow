@@ -465,6 +465,7 @@ Add-on skills (activated when corresponding add-on is installed):
 - `gotosocial.md` — GoToSocial ActivityPub microblog: post, follow, search, moderate (block_user/mute inline; defederate/block_domain/import_blocklist queued for operator confirmation), media prune, federation health
 - `writefreely.md` — WriteFreely federated blog: create/update/publish/unpublish posts, list collections, fetch public posts, export; minimalist publisher (no comments, no moderation queue — WF is publish-oriented only)
 - `matrix-dendrite.md` — Matrix homeserver on Dendrite: create/join/leave rooms, send messages, sync, invite users, federation health; appservice registration prep for F.12 bridges; :8448-vs-well-known either/or federation story
+- `funkwhale.md` — Funkwhale federated music pod: library listing, search, upload, follow remote channels/libraries, playlists, listening history, moderation (block_user/mute inline; block_domain/defederate queued), media prune; on-disk or S3 audio storage via storage-translators.funkwhale()
 - `calibre-server.md` — Calibre content server: search, browse, download ebooks via OPDS
 - `calibre-web.md` — Calibre-Web reader: search, shelves, reading status, download
 - `miniflux.md` — Miniflux RSS reader: subscribe feeds, read articles, star, mark read

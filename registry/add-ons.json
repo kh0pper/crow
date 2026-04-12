@@ -3151,6 +3151,49 @@
       "notes": "Two containers (dendrite + postgres). Federation: pick EITHER caddy_add_matrix_federation_port (router forwards :8448) OR caddy_set_wellknown matrix-server on the apex. Initial admin registered via `docker exec crow-dendrite create-account`."
     },
     {
+      "id": "funkwhale",
+      "name": "Funkwhale",
+      "description": "Federated music server — self-hosted audio library + podcast streaming + fediverse-federated listening over ActivityPub. Follow remote channels/libraries, share your own over AP.",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "federated-media",
+      "tags": ["music", "funkwhale", "activitypub", "fediverse", "federated", "audio", "podcasts"],
+      "icon": "music",
+      "docker": { "composefile": "docker-compose.yml" },
+      "server": {
+        "command": "node",
+        "args": ["server/index.js"],
+        "envKeys": ["FUNKWHALE_URL", "FUNKWHALE_ACCESS_TOKEN", "FUNKWHALE_HOSTNAME"]
+      },
+      "panel": "panel/funkwhale.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": ["skills/funkwhale.md"],
+      "consent_required": true,
+      "requires": {
+        "env": ["FUNKWHALE_HOSTNAME", "FUNKWHALE_POSTGRES_PASSWORD", "FUNKWHALE_DJANGO_SECRET_KEY"],
+        "bundles": ["caddy"],
+        "min_ram_mb": 1500,
+        "recommended_ram_mb": 3000,
+        "min_disk_mb": 10000,
+        "recommended_disk_mb": 100000
+      },
+      "env_vars": [
+        { "name": "FUNKWHALE_HOSTNAME", "description": "Public domain for this Funkwhale pod (subdomain; path-mounts break ActivityPub).", "required": true },
+        { "name": "FUNKWHALE_POSTGRES_PASSWORD", "description": "Password for the bundled Postgres role.", "required": true, "secret": true },
+        { "name": "FUNKWHALE_DJANGO_SECRET_KEY", "description": "Django secret key (64+ random chars). Changing this invalidates sessions.", "required": true, "secret": true },
+        { "name": "FUNKWHALE_ACCESS_TOKEN", "description": "Personal Access Token from Settings → Applications (after superuser creation).", "required": false, "secret": true },
+        { "name": "FUNKWHALE_S3_ENDPOINT", "description": "Optional S3-compatible endpoint for audio storage. If set, scripts/configure-storage.mjs translates to AWS_* via storage-translators.funkwhale().", "required": false },
+        { "name": "FUNKWHALE_S3_BUCKET", "description": "S3 bucket for audio.", "required": false },
+        { "name": "FUNKWHALE_S3_ACCESS_KEY", "description": "S3 access key.", "required": false, "secret": true },
+        { "name": "FUNKWHALE_S3_SECRET_KEY", "description": "S3 secret key.", "required": false, "secret": true },
+        { "name": "FUNKWHALE_S3_REGION", "description": "S3 region.", "default": "us-east-1", "required": false }
+      ],
+      "ports": [],
+      "webUI": null,
+      "notes": "Six containers (api + celeryworker + celerybeat + nginx + postgres + redis). Expose via caddy_add_federation_site { domain: FUNKWHALE_HOSTNAME, upstream: 'funkwhale-nginx:80', profile: 'activitypub' }. Audio storage on-disk by default; set FUNKWHALE_S3_* to route to MinIO/external S3 via storage-translators."
+    },
+    {
       "id": "developer-kit",
       "name": "Developer Kit",
       "description": "Build and submit Crow extensions with guided scaffolding, testing, and registry submission",
