@@ -1,0 +1,20 @@
+{
+  "id": "blockly-02-repeat",
+  "title": "Make the Cat Dance",
+  "surface": "blockly",
+  "age_band": "5-9",
+  "reading_level": 2,
+  "goal": "Use a repeat block so the cat moves four times.",
+  "steps": [
+    { "prompt": "Find the repeat block (it has a little hole inside)." },
+    { "prompt": "Put the move block inside the repeat." },
+    { "prompt": "Change the number to 4." },
+    { "prompt": "Press play and watch the cat go!" }
+  ],
+  "canned_hints": [
+    "A repeat block is like saying 'do it again, and again, and again!'",
+    "You can drop other blocks INSIDE the repeat block.",
+    "Try changing the number inside the repeat. What changes?"
+  ],
+  "tags": ["loops", "repetition"]
+}

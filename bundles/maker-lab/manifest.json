@@ -14,6 +14,7 @@
     "envKeys": ["MAKER_LAB_MODE", "MAKER_LAB_LLM_ENDPOINT", "MAKER_LAB_LLM_MODEL"]
   },
   "panel": "panel/maker-lab.js",
+  "panelRoutes": "panel/routes.js",
   "skills": ["skills/maker-lab.md"],
   "requires": {
     "min_ram_mb": 256,

@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH 0003] maker-lab: register as fourth MCP server
+
+Adds maker-lab to the companion's generated mcp_servers.json so the
+companion's LLM can discover maker_* tools by name (not just via the
+router category).
+
+Optional for Phase 2 MVP — tools are already reachable via the existing
+`crow` router bridge. Direct registration improves LLM tool-selection
+accuracy on adult-tutor sessions where the LLM might pick its own tools.
+
+Note: unlike 0001, this patch is against BUNDLE code
+(bundles/companion/scripts/generate-config.py), not upstream. It's filed
+in patches/backend/ because the Phase 3 submodule flow applies all
+backend-side changes together.
+
+---
+ scripts/generate-config.py | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/scripts/generate-config.py b/scripts/generate-config.py
+--- a/scripts/generate-config.py
++++ b/scripts/generate-config.py
+@@ -568,6 +568,14 @@ def main():
+                     "--transport", "streamablehttp",
+                 ],
+             },
++            "maker-lab": {
++                "command": "uv",
++                "args": [
++                    "run", "mcp-proxy",
++                    f"http://{mcp_bridge_host}:{mcp_bridge_port}/maker-lab/mcp",
++                    "--transport", "streamablehttp",
++                ],
++            } if os.environ.get("MAKER_LAB_ENABLED") == "1" else None,
+         }
+     }
+     # Strip None-valued entries (conditional servers not enabled)
+--
+2.40.0

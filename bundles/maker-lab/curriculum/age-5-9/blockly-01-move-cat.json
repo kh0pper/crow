@@ -1,0 +1,18 @@
+{
+  "id": "blockly-01-move-cat",
+  "title": "Move the Cat",
+  "surface": "blockly",
+  "age_band": "5-9",
+  "reading_level": 2,
+  "goal": "Drag a move block into the workspace and click play to move the cat.",
+  "steps": [
+    { "prompt": "Drag the move block into the workspace." },
+    { "prompt": "Click the green play button!" }
+  ],
+  "canned_hints": [
+    "Look for the block shaped like a little arrow!",
+    "Try dragging it right under the 'when start' block.",
+    "The green play button is at the top!"
+  ],
+  "tags": ["sequences", "starter"]
+}

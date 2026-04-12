@@ -29,6 +29,7 @@ import { z } from "zod";
 import { createHash, randomBytes } from "node:crypto";
 import { createDbClient } from "../db.js";
 import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
+import { isKioskActive, kioskBlockedResponse } from "../shared/kiosk-guard.js";
 import {
   loadOrCreateIdentity,
   generateInviteCode,
@@ -850,6 +851,7 @@ export function createSharingServer(dbPath, options = {}) {
       display_name: z.string().max(100).optional().describe("Optional display name for this contact"),
     },
     async ({ display_name }) => {
+      if (await isKioskActive(db)) return kioskBlockedResponse("crow_generate_invite");
       const code = generateInviteCode(identity);
       return {
         content: [
@@ -1040,6 +1042,7 @@ export function createSharingServer(dbPath, options = {}) {
       confirm_token: z.string().max(100).describe('Confirmation token — pass "" on first call to get a preview, then pass the returned token to execute'),
     },
     async ({ contact, share_type, item_id, permissions, confirm_token }) => {
+      if (await isKioskActive(db)) return kioskBlockedResponse("crow_share");
       // Find contact
       const result = await db.execute({
         sql: "SELECT * FROM contacts WHERE (crow_id = ? OR display_name = ?) AND is_blocked = 0",
@@ -1219,6 +1222,7 @@ export function createSharingServer(dbPath, options = {}) {
       message: z.string().max(10000).describe("Message text to send"),
     },
     async ({ contact, message }) => {
+      if (await isKioskActive(db)) return kioskBlockedResponse("crow_send_message");
       // Find contact
       const result = await db.execute({
         sql: "SELECT * FROM contacts WHERE (crow_id = ? OR display_name = ?) AND is_blocked = 0",

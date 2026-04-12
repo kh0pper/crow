@@ -1,0 +1,19 @@
+{
+  "id": "blockly-03-on-click",
+  "title": "The Cat Wakes Up",
+  "surface": "blockly",
+  "age_band": "5-9",
+  "reading_level": 3,
+  "goal": "Make the cat do something only when you click it.",
+  "steps": [
+    { "prompt": "Grab the 'when clicked' block." },
+    { "prompt": "Put a move block under it." },
+    { "prompt": "Press play, then click the cat!" }
+  ],
+  "canned_hints": [
+    "Events are like doorbells — the code runs when something rings them!",
+    "The cat won't move until you click on it. That's on purpose.",
+    "Try putting more than one move block under 'when clicked'."
+  ],
+  "tags": ["events", "interaction"]
+}
