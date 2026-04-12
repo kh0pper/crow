@@ -1,0 +1,45 @@
+# Homepage — YAML-configured dashboard / launcher.
+#
+# Panel-only bundle: Homepage has no automation API, so Crow just embeds
+# the UI. YAML config lives at HOMEPAGE_CONFIG_DIR (default ~/.crow/homepage)
+# and is editable by the operator.
+#
+# Healthcheck: the image is distroless-ish — it has wget but not curl/nc.
+# The check hits the root page through wget.
+
+services:
+  homepage:
+    image: ghcr.io/gethomepage/homepage:v0.10.9
+    container_name: crow-homepage
+    ports:
+      - "127.0.0.1:3030:3000"
+    volumes:
+      - ${HOMEPAGE_CONFIG_DIR:-~/.crow/homepage}:/app/config
+    environment:
+      - HOMEPAGE_ALLOWED_HOSTS=${HOMEPAGE_ALLOWED_HOSTS:-localhost:3030}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        if [ ! -f /app/config/services.yaml ]; then
+          mkdir -p /app/config
+          cp -n /app/src/skeleton/*.yaml /app/config/ 2>/dev/null || true
+          if [ ! -f /app/config/settings.yaml ]; then
+            cat > /app/config/settings.yaml <<'SETTINGS_EOF'
+        title: Homepage
+        theme: dark
+        color: slate
+        SETTINGS_EOF
+          fi
+        fi
+        exec node server.js
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s

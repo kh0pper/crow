@@ -1,0 +1,23 @@
+{
+  "id": "homepage",
+  "name": "Homepage",
+  "version": "1.0.0",
+  "description": "Static startpage / dashboard — YAML-configured launcher for self-hosted services",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "productivity",
+  "tags": ["dashboard", "launcher", "startpage", "services", "self-hosted"],
+  "icon": "home",
+  "docker": { "composefile": "docker-compose.yml" },
+  "panel": "panel/homepage.js",
+  "skills": ["skills/homepage.md"],
+  "requires": { "env": [], "min_ram_mb": 256, "min_disk_mb": 200 },
+  "env_vars": [
+    { "name": "HOMEPAGE_URL", "description": "Homepage base URL", "default": "http://localhost:3030", "required": true },
+    { "name": "HOMEPAGE_ALLOWED_HOSTS", "description": "Comma-separated host:port list Homepage will accept (e.g., localhost:3030,mybox.local:3030)", "default": "localhost:3030", "required": false },
+    { "name": "HOMEPAGE_CONFIG_DIR", "description": "Directory holding services.yaml / widgets.yaml / bookmarks.yaml / settings.yaml", "default": "~/.crow/homepage", "required": false }
+  ],
+  "ports": [3030],
+  "webUI": { "port": 3030, "path": "/", "label": "Homepage" },
+  "notes": "Panel-only bundle (no MCP server — Homepage has no public API). Edit YAML files in HOMEPAGE_CONFIG_DIR to configure services, widgets, and bookmarks. Seed config is written on first run if the directory is empty."
+}
