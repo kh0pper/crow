@@ -158,6 +158,7 @@ bundles/trilium/               → TriliumNext knowledge base (Docker + MCP serv
 bundles/knowledge-base/        → Multilingual knowledge base (MCP server, 10 tools, LAN discovery, WCAG 2.1 AA)
 bundles/maker-lab/             → STEM education companion for kids (MCP server, 21 tools, age-banded personas, classroom-capable). Phase 1 scaffold; see bundles/maker-lab/PHASE-0-REPORT.md
 bundles/kolibri/               → Kolibri learning platform (Docker + panel + skill; offline-first STEM/literacy, Pi-friendly, sibling of maker-lab)
+bundles/scratch-offline/       → Scratch block-based coding (Dockerfile builds scratch-gui from source + nginx; age 8+, no cloud save)
 android/                       → Android WebView shell app (Crow's Nest mobile client)
 servers/gateway/public/        → PWA assets (manifest.json, service worker, icons)
 servers/gateway/push/          → Web Push notification infrastructure (VAPID)
@@ -464,6 +465,7 @@ Add-on skills (activated when corresponding add-on is installed):
 - `knowledge-base.md` — Multilingual knowledge base: create, edit, publish, search, verify resources, share articles, LAN discovery
 - `maker-lab.md` — STEM education companion for kids: scaffolded AI tutor, hint-ladder pedagogy, age-banded personas (kid/tween/adult), solo/family/classroom modes, guest sidecar
 - `kolibri.md` — Kolibri offline-first learning platform: channel recommendation by age/subject, classroom setup, LAN-sync, pairs with maker-lab as content spine
+- `scratch-offline.md` — Self-hosted Scratch (age 8+ block coding): first-project coaching, vocabulary-stays-in-Scratch-terms dialogue, pair with Maker Lab when the learner is stuck
 - `calibre-server.md` — Calibre content server: search, browse, download ebooks via OPDS
 - `calibre-web.md` — Calibre-Web reader: search, shelves, reading status, download
 - `miniflux.md` — Miniflux RSS reader: subscribe feeds, read articles, star, mark read
