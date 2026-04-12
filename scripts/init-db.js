@@ -547,6 +547,49 @@ await initTable("identity_attestation_revocations table", `
 await addColumnIfMissing("contacts", "external_handle", "TEXT");
 await addColumnIfMissing("contacts", "external_source", "TEXT");
 
+// --- F.12: Crosspost rules + log ---
+// crosspost_rules holds the operator's opt-in config: "when a new post appears
+// in app X, publish a transformed copy to app Y". Triggers: on_publish (with
+// 60s grace), on_tag:<tag>, manual.
+// crosspost_log is the idempotency + audit log — duplicate idempotency keys
+// within 7 days return the cached result; entries >30 days are GC'd daily.
+await initTable("crosspost_rules table", `
+  CREATE TABLE IF NOT EXISTS crosspost_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_app TEXT NOT NULL,
+    source_trigger TEXT NOT NULL,
+    target_app TEXT NOT NULL,
+    transform TEXT,
+    active INTEGER DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_crosspost_rules_active ON crosspost_rules(active, source_app, source_trigger);
+`);
+
+await initTable("crosspost_log table", `
+  CREATE TABLE IF NOT EXISTS crosspost_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    idempotency_key TEXT NOT NULL,
+    source_app TEXT NOT NULL,
+    source_post_id TEXT NOT NULL,
+    target_app TEXT NOT NULL,
+    transform TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    target_post_id TEXT,
+    error TEXT,
+    scheduled_at INTEGER NOT NULL,
+    published_at INTEGER,
+    cancelled_at INTEGER,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_crosspost_log_idem ON crosspost_log(idempotency_key, source_app, target_app);
+  CREATE INDEX IF NOT EXISTS idx_crosspost_log_scheduled ON crosspost_log(status, scheduled_at);
+  CREATE INDEX IF NOT EXISTS idx_crosspost_log_created ON crosspost_log(created_at DESC);
+`);
+
 // --- Per-Device Context Support ---
 // Existing installs have section_key UNIQUE constraint that blocks device overrides.
 // Migration: add device_id column, drop the old UNIQUE constraint, add partial indexes.

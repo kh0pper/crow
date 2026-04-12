@@ -204,6 +204,8 @@ Uses `@libsql/client` for local SQLite files (default: `~/.crow/data/crow.db`, g
 - **moderation_actions** — F.11 queued destructive moderation actions from federated bundles (bundle_id, action_type, payload_json, requested_at, expires_at, status, idempotency_key UNIQUE). 72h default TTL; operator confirms via Nest panel
 - **identity_attestations** — F.11 signed bindings (crow_id, app, external_handle, app_pubkey?, sig, version, revoked_at). Published via gateway `/.well-known/crow-identity.json`. UNIQUE(crow_id, app, external_handle, version) — new version row per rotation
 - **identity_attestation_revocations** — F.11 signed revocations (attestation_id FK CASCADE, revoked_at, reason, sig). Published via `/.well-known/crow-identity-revocations.json`
+- **crosspost_rules** — F.12.2 opt-in crosspost config (source_app, source_trigger, target_app, transform, active). Triggers: `on_publish`, `on_tag:<tag>`, `manual`
+- **crosspost_log** — F.12.2 audit + idempotency log (idempotency_key, source_app, source_post_id, target_app, status, target_post_id, scheduled_at, published_at, cancelled_at). UNIQUE(idempotency_key, source_app, target_app). 7-day idempotency window; >30 days GC'd daily
 - **iptv_playlists** — IPTV M3U playlist sources (name, url, auto_refresh, channel_count)
 - **iptv_channels** — IPTV channels from playlists (playlist_id FK, name, stream_url, tvg_id, group_title, is_favorite)
 - **iptv_epg** — Electronic Program Guide entries (channel_tvg_id, title, start_time, end_time, indexed)
@@ -440,6 +442,7 @@ Consult `skills/superpowers.md` first — it routes user intent to the right ski
 - `developer-kit.md` — Developer kit: scaffold, test, and submit Crow extensions to the registry
 - `network-setup.md` — Tailscale remote access guidance
 - `crow-identity.md` — F.11 identity attestations: sign per-app handles (Mastodon/Funkwhale/Matrix/etc.) with the Crow root Ed25519 key, publish via `/.well-known/crow-identity.json`, verify + revoke. Off by default; opt-in per handle — public linkage is effectively permanent
+- `crow-crosspost.md` — F.12.2 cross-app publishing: mirror a post from one federated bundle to another via pure-function transforms (writefreely→mastodon, peertube→mastodon, pixelfed→mastodon, funkwhale→mastodon, gotosocial→mastodon, blog→gotosocial). Idempotency_key required; 60s publish-delay safety valve with operator cancel; no fake undo-after-publish
 - `add-ons.md` — Add-on browsing, installation, removal
 - `scheduling.md` — Scheduled and recurring task management
 - `tutoring.md` — Socratic tutoring with progress tracking
@@ -469,6 +472,7 @@ Add-on skills (activated when corresponding add-on is installed):
 - `gotosocial.md` — GoToSocial ActivityPub microblog: post, follow, search, moderate (block_user/mute inline; defederate/block_domain/import_blocklist queued for operator confirmation), media prune, federation health
 - `writefreely.md` — WriteFreely federated blog: create/update/publish/unpublish posts, list collections, fetch public posts, export; minimalist publisher (no comments, no moderation queue — WF is publish-oriented only)
 - `matrix-dendrite.md` — Matrix homeserver on Dendrite: create/join/leave rooms, send messages, sync, invite users, federation health; appservice registration prep for F.12 bridges; :8448-vs-well-known either/or federation story
+- `matrix-bridges.md` — F.12.1 Matrix appservice bridges meta-bundle (mautrix-signal/telegram/whatsapp). Opt-in per bridge; each has distinct legal/privacy risks (Signal ToS prohibits bots; Meta may ban bridged WhatsApp numbers). post-install.sh writes appservice YAMLs into Dendrite + restarts it. Requires matrix-dendrite bundle
 - `funkwhale.md` — Funkwhale federated music pod: library listing, search, upload, follow remote channels/libraries, playlists, listening history, moderation (block_user/mute inline; block_domain/defederate queued), media prune; on-disk or S3 audio storage via storage-translators.funkwhale()
 - `pixelfed.md` — Pixelfed federated photo-sharing: post photos (upload+status), feed, search, follow, moderation (block_user/mute inline; block_domain/defederate/import_blocklist queued), admin reports, remote reporting, media prune; Mastodon-compatible REST API; on-disk or S3 media via storage-translators.pixelfed()
 - `lemmy.md` — Lemmy federated link aggregator: status, list/follow/unfollow communities, post (link + body), comment, feed (Subscribed/Local/All), search, moderation (block_user/block_community inline; block_instance/defederate queued), admin reports, pict-rs media prune; Lemmy v3 REST API; community-scoped federation
