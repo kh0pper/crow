@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crow Maintainers <crow@localhost>
+Date: Thu, 1 Jan 1970 00:00:00 +0000
+Subject: [PATCH 2/6] Auto-apply Linux transparency flags when compositor is absent
+
+Pet mode relies on `transparent: true` BrowserWindow. On Linux this only
+works when a compositor is running (mutter / kwin / picom / wayfire /
+river, etc.). Without one, electron falls back to an opaque black
+background — the mascot appears inside a black rectangle.
+
+Chromium fixes this when launched with:
+
+  --enable-transparent-visuals --disable-gpu-compositing
+
+but these must be appended via `app.commandLine.appendSwitch` BEFORE
+`app.whenReady()` resolves. Upstream does not do this, because on
+Windows/macOS the flags are unnecessary and on Linux they assume a
+compositor is present.
+
+This patch adds a small probe (read $XDG_SESSION_TYPE / look for a
+compositor socket) in `src/main/index.ts` and conditionally appends
+the two switches on Linux when the probe fails. On Wayland sessions
+the flags are harmless; on X11 without a compositor they are
+load-bearing.
+
+Applies against: vendor/open-llm-vtuber-web @ d176e7df2366952e3bacbf12cf9a8b18a4315932
+
+TODO(Phase 3.1): fill in hunks. Touch points:
+- src/main/index.ts — add `maybeApplyLinuxTransparencyFlags()` helper
+  and call it at module-top (line ~1, before any `app.on(...)` binding)
+---
+ src/main/index.ts | TODO
+ 1 file changed, TODO insertions(+)
+
+diff --git a/src/main/index.ts b/src/main/index.ts
+--- a/src/main/index.ts
++++ b/src/main/index.ts
+@@ TODO(Phase 3.1) @@
++// --- BEGIN CROW PATCH: Linux transparency flags ----------------------
++// TODO(Phase 3.1): finalize helper body and placement; sketch:
++//
++//   if (process.platform === 'linux') {
++//     const sessionType = process.env.XDG_SESSION_TYPE || '';
++//     const hasCompositor = sessionType === 'wayland' ||
++//                           hasX11Compositor();   // helper reads _NET_WM_CM_S0
++//     if (!hasCompositor) {
++//       app.commandLine.appendSwitch('enable-transparent-visuals');
++//       app.commandLine.appendSwitch('disable-gpu-compositing');
++//     }
++//   }
++// --- END CROW PATCH ---------------------------------------------------
+--
+2.40.0

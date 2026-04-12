@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crow Maintainers <crow@localhost>
+Date: Thu, 1 Jan 1970 00:00:00 +0000
+Subject: [PATCH 5/6] Detect SUID-sandbox failures on AppImage launches and warn before falling back to --no-sandbox
+
+Recent Ubuntu / Debian derivatives (22.04+, and all kernels with
+`kernel.unprivileged_userns_clone=0`) refuse to start Chromium's SUID
+sandbox inside an AppImage. Upstream's user-visible failure is a cryptic
+"Failed to move to new namespace" error with no mitigation hint.
+
+The pragmatic fix is to relaunch with `--no-sandbox`, which upstream
+allows via environment but does not document. We want to:
+
+  1. Catch the sandbox failure (detectable via the GPU process exit
+     code / the specific stderr pattern) on app startup.
+  2. Log a clear warning to the user that the sandbox is disabled,
+     with a link to the Live2D / Maker Lab docs page explaining why
+     and how to re-enable it (enable unprivileged user namespaces).
+  3. Relaunch with `--no-sandbox` appended.
+
+This patch adds that flow in `src/main/index.ts`, gated on Linux +
+AppImage (detected via `process.env.APPIMAGE`).
+
+Applies against: vendor/open-llm-vtuber-web @ d176e7df2366952e3bacbf12cf9a8b18a4315932
+
+TODO(Phase 3.1): fill in hunks. Touch points:
+- src/main/index.ts — add `tryLaunchOrFallbackNoSandbox()` helper.
+  Wrap the initial `app.whenReady().then(...)` (line ~76) so a sandbox
+  failure path relaunches with the flag and a `showSandboxWarning()`
+  dialog.
+- Docs link target: https://maestro.press/software/crow/bundles/maker-lab/sandbox
+  (stub page to be filled when this patch actually lands).
+---
+ src/main/index.ts | TODO
+ 1 file changed, TODO insertions(+)
+
+diff --git a/src/main/index.ts b/src/main/index.ts
+--- a/src/main/index.ts
++++ b/src/main/index.ts
+@@ TODO(Phase 3.1): around app.whenReady() at line ~76 @@
++// --- BEGIN CROW PATCH: AppImage sandbox fallback ---------------------
++// TODO(3.1): detect Chromium sandbox failure, warn the user, and
++// relaunch with `--no-sandbox`. Sketch:
++//
++//   if (process.platform === 'linux' && process.env.APPIMAGE) {
++//     process.on('uncaughtException', (err) => {
++//       if (looksLikeSandboxFailure(err)) {
++//         showSandboxWarning();
++//         app.commandLine.appendSwitch('no-sandbox');
++//         app.relaunch();
++//         app.exit(0);
++//       }
++//     });
++//   }
++// --- END CROW PATCH --------------------------------------------------
+--
+2.40.0
