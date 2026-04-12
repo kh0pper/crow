@@ -151,6 +151,49 @@
       "notes": "Linux x86_64 + NVIDIA GPU required. Recommended: Qwen2.5-3B-Instruct on a 16 GB GPU at VLLM_MAX_NUM_SEQS=16 (per the Maker Lab Phase 0 benchmark). Drops into Maker Lab as MAKER_LAB_LLM_ENDPOINT without changes."
     },
     {
+      "id": "maker-lab-advanced",
+      "name": "Maker Lab Advanced",
+      "version": "0.1.0",
+      "description": "Self-hosted JupyterHub for older learners (ages 9+) \u2014 single-machine multi-user Python notebooks with kid-safe kernel defaults and an AI pair-programmer. Sibling bundle to maker-lab for the 9+ landing zone.",
+      "type": "bundle",
+      "author": "Crow",
+      "category": "education",
+      "tags": [
+        "education",
+        "jupyter",
+        "jupyterhub",
+        "python",
+        "notebook",
+        "classroom",
+        "k12",
+        "teen",
+        "maker-lab"
+      ],
+      "icon": "graduation-cap",
+      "webUI": {
+        "port": 8088,
+        "path": "/",
+        "label": "JupyterHub"
+      },
+      "requires": {
+        "env": ["MLA_ADMIN_USER", "MLA_ADMIN_PASSWORD"],
+        "min_ram_mb": 2048,
+        "recommended_ram_mb": 8000,
+        "min_disk_mb": 4000,
+        "recommended_disk_mb": 40000,
+        "bundles": ["maker-lab"]
+      },
+      "env_vars": [
+        { "name": "MLA_ADMIN_USER", "description": "Initial JupyterHub admin username.", "required": true },
+        { "name": "MLA_ADMIN_PASSWORD", "description": "Initial admin password.", "required": true, "secret": true },
+        { "name": "MLA_HTTP_PORT", "description": "Host port for the JupyterHub UI.", "default": "8088", "required": false },
+        { "name": "MLA_DATA_PATH", "description": "Host path for user home dirs + hub state.", "required": false }
+      ],
+      "sibling_of": ["maker-lab"],
+      "age_gate": { "min_age": 9 },
+      "notes": "v1 single-admin classroom shape: NativeAuthenticator + SimpleLocalProcessSpawner. Kid-safe kernel defaults disable shell-escape magics. True multi-host / sandboxed-per-user deploys are future work. Hard dep on maker-lab."
+    },
+    {
       "id": "obsidian",
       "name": "Obsidian Vault",
       "description": "Connect your Obsidian vault to Crow for reading, searching, and syncing notes",

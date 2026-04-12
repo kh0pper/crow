@@ -160,6 +160,7 @@ bundles/maker-lab/             → STEM education companion for kids (MCP server
 bundles/kolibri/               → Kolibri learning platform (Docker + panel + skill; offline-first STEM/literacy, Pi-friendly, sibling of maker-lab)
 bundles/scratch-offline/       → Scratch block-based coding (Dockerfile builds scratch-gui from source + nginx; age 8+, no cloud save)
 bundles/vllm/                  → vLLM GPU inference server (OpenAI-compatible endpoint; Linux x86_64 + NVIDIA only; recommended classroom engine for Maker Lab)
+bundles/maker-lab-advanced/    → Maker Lab Advanced (Phase 5): JupyterHub for 9+ learners, kid-safe kernel defaults, AI pair-programmer at tween/teen reading level
 android/                       → Android WebView shell app (Crow's Nest mobile client)
 servers/gateway/public/        → PWA assets (manifest.json, service worker, icons)
 servers/gateway/push/          → Web Push notification infrastructure (VAPID)
@@ -468,6 +469,7 @@ Add-on skills (activated when corresponding add-on is installed):
 - `kolibri.md` — Kolibri offline-first learning platform: channel recommendation by age/subject, classroom setup, LAN-sync, pairs with maker-lab as content spine
 - `scratch-offline.md` — Self-hosted Scratch (age 8+ block coding): first-project coaching, vocabulary-stays-in-Scratch-terms dialogue, pair with Maker Lab when the learner is stuck
 - `vllm.md` — Operational skill for the vLLM classroom inference engine: GPU sizing, model selection, Maker Lab wiring, common-issue diagnostics
+- `maker-lab-advanced.md` — Pair-programmer for JupyterHub classroom (ages 9+): traceback explanation, next-cell suggestions at tween/teen reading level, routes back to maker-lab for Blockly, flags kid-safe kernel as a default (not a security sandbox)
 - `calibre-server.md` — Calibre content server: search, browse, download ebooks via OPDS
 - `calibre-web.md` — Calibre-Web reader: search, shelves, reading status, download
 - `miniflux.md` — Miniflux RSS reader: subscribe feeds, read articles, star, mark read
