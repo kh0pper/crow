@@ -1,0 +1,25 @@
+{
+  "id": "adguard-home",
+  "name": "AdGuard Home",
+  "version": "1.0.0",
+  "description": "Network-wide ads and tracker blocking DNS server. Filters queries with user-configurable blocklists and serves the admin UI in the browser.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "networking",
+  "tags": ["dns", "adblock", "privacy", "network", "security"],
+  "icon": "shield",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["ADGUARD_URL", "ADGUARD_USERNAME", "ADGUARD_PASSWORD"] },
+  "panel": "panel/adguard-home.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/adguard-home.md"],
+  "requires": { "env": ["ADGUARD_USERNAME", "ADGUARD_PASSWORD"], "min_ram_mb": 256, "min_disk_mb": 200 },
+  "env_vars": [
+    { "name": "ADGUARD_URL", "description": "AdGuard Home admin URL", "default": "http://localhost:3020", "required": false },
+    { "name": "ADGUARD_USERNAME", "description": "Admin username (set during initial setup wizard)", "required": true },
+    { "name": "ADGUARD_PASSWORD", "description": "Admin password (set during initial setup wizard)", "required": true, "secret": true }
+  ],
+  "ports": [3020, 5335, 8530],
+  "webUI": { "port": 3020, "path": "/", "label": "AdGuard Home" },
+  "notes": "First-boot: open http://localhost:3020 and complete the setup wizard. Bind admin to port 3000 (container), DNS to port 53, and set admin credentials — then copy them into .env. DNS port exposed on 127.0.0.1:5335 to avoid conflicting with systemd-resolved on host. To serve DNS to your LAN, edit the compose to bind 0.0.0.0:53 (significant — plan the host firewall and upstream DNS redirect first)."
+}

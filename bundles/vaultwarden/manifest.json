@@ -1,0 +1,31 @@
+{
+  "id": "vaultwarden",
+  "name": "Vaultwarden",
+  "version": "1.0.0",
+  "description": "Bitwarden-compatible password manager — self-hosted vault for passwords, notes, and 2FA, used with the Bitwarden browser and mobile apps",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "infrastructure",
+  "tags": ["passwords", "vault", "bitwarden", "secrets", "security", "self-hosted"],
+  "icon": "lock",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["VAULTWARDEN_URL", "VAULTWARDEN_ADMIN_TOKEN"] },
+  "panel": "panel/vaultwarden.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/vaultwarden.md"],
+  "consent_required": true,
+  "install_consent_messages": {
+    "en": "Vaultwarden stores the passwords and secrets for your entire digital life. Before you install: (1) this bundle will hold every credential you import, so back up ~/.crow/vaultwarden/data on a recurring schedule — losing it means losing everything; (2) the admin token sits in your .env file in plaintext — anyone with shell access on this host can administer the vault; (3) signups default to OPEN — without the admin token, anyone who can reach http://localhost:8097 can create the first account and lock you out. Create your account immediately after first start, then set VAULTWARDEN_SIGNUPS_ALLOWED=false and restart the bundle. The Crow MCP tools intentionally do NOT expose vault contents — use the official Bitwarden browser extension or mobile app as your working client.",
+    "es": "Vaultwarden guardará las contraseñas y secretos de toda tu vida digital. Antes de instalar: (1) este bundle contendrá todas tus credenciales, haz copias de seguridad periódicas de ~/.crow/vaultwarden/data — perderlo significa perderlo todo; (2) el token de administrador queda en el archivo .env en texto plano — cualquiera con acceso al shell puede administrar el vault; (3) por defecto se permiten registros — sin proteger el token, cualquiera que pueda alcanzar http://localhost:8097 puede crear la primera cuenta y dejarte fuera. Crea tu cuenta inmediatamente tras el primer arranque, luego pon VAULTWARDEN_SIGNUPS_ALLOWED=false y reinicia. Las herramientas MCP de Crow intencionalmente NO exponen el contenido del vault — usa la extensión oficial de Bitwarden o la app móvil como cliente."
+  },
+  "requires": { "env": ["VAULTWARDEN_ADMIN_TOKEN"], "min_ram_mb": 256, "min_disk_mb": 200 },
+  "env_vars": [
+    { "name": "VAULTWARDEN_URL", "description": "Vaultwarden server URL", "default": "http://localhost:8097", "required": true },
+    { "name": "VAULTWARDEN_ADMIN_TOKEN", "description": "Argon2id or Bcrypt hash protecting /admin. Generate with: openssl rand -base64 48 (store the output, then run `vaultwarden hash` inside the container to get the hash to paste here). For a simpler MVP you may paste the plain random string — Vaultwarden accepts both.", "required": true, "secret": true },
+    { "name": "VAULTWARDEN_DOMAIN", "description": "Public URL Vaultwarden advertises to clients (set to https://... when put behind Caddy)", "default": "http://localhost:8097", "required": false },
+    { "name": "VAULTWARDEN_SIGNUPS_ALLOWED", "description": "Whether new users can sign up via the web UI. Start true, create your admin account, then flip to false and restart.", "default": "true", "required": false }
+  ],
+  "ports": [8097],
+  "webUI": { "port": 8097, "path": "/", "label": "Vaultwarden" },
+  "notes": "Password managers need careful handling. See the skill for the recommended setup order (create account → disable signups → back up data dir). The MCP tools are deliberately minimal: status, user_count, backup_info. They do NOT read vault contents — use the Bitwarden browser extension or mobile app for day-to-day password access."
+}
