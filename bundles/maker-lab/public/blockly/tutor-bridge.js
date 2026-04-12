@@ -97,6 +97,7 @@ const offlineChip = document.getElementById("offlineChip");
 let hintLevel = 1;
 let currentLesson = null;
 let currentSurface = "blockly";
+let currentWorkspace = null;
 
 hintClose?.addEventListener("click", () => {
   hintBubble.hidden = true;
@@ -152,6 +153,20 @@ async function postProgress(payload) {
 }
 
 doneBtn?.addEventListener("click", async () => {
+  // success_check gate: missing required blocks → nudge, don't mark complete.
+  const required = currentLesson?.success_check?.required_blocks;
+  if (Array.isArray(required) && required.length && currentWorkspace) {
+    const present = workspaceBlockTypes(currentWorkspace);
+    const missing = required.filter((t) => !present.has(t));
+    if (missing.length) {
+      const msg = currentLesson.success_check.message_missing
+        || `Almost! Your workspace is missing: ${missing.join(", ")}.`;
+      hintText.textContent = msg;
+      hintBubble.hidden = false;
+      speak(msg);
+      return;
+    }
+  }
   const payload = {
     surface: currentSurface,
     activity: currentLesson?.id || "unknown",
@@ -164,8 +179,8 @@ doneBtn?.addEventListener("click", async () => {
     hintText.textContent = "Great job! 🎉";
     hintBubble.hidden = false;
     hintLevel = 1;
+    speak("Great job!");
   } catch {
-    // Queue for when we come back online.
     await queuePush(payload);
     offlineChip.hidden = false;
   }
@@ -280,25 +295,88 @@ async function loadLesson(id) {
   }
 }
 
-function mountBlockly() {
+// Default shadow values for common block types so they drop in ready to run
+// (otherwise `controls_repeat_ext` has an empty TIMES slot that won't connect
+// to plain number blocks).
+const BLOCK_SHADOWS = {
+  controls_repeat_ext: {
+    TIMES: { type: "math_number", fields: { NUM: 4 } },
+  },
+  text_print: {
+    TEXT: { type: "text", fields: { TEXT: "Hi!" } },
+  },
+  logic_compare: {
+    A: { type: "math_number", fields: { NUM: 5 } },
+    B: { type: "math_number", fields: { NUM: 3 } },
+  },
+};
+
+function blockEntry(type) {
+  const entry = { kind: "block", type };
+  const shadows = BLOCK_SHADOWS[type];
+  if (shadows) {
+    entry.inputs = {};
+    for (const [slot, shadow] of Object.entries(shadows)) {
+      entry.inputs[slot] = { shadow };
+    }
+  }
+  return entry;
+}
+
+// Build a Blockly JSON toolbox from lesson.toolbox (either shape) or a
+// sensible default when no lesson is loaded.
+function buildToolbox(lessonToolbox) {
+  if (!lessonToolbox) {
+    return {
+      kind: "categoryToolbox",
+      contents: [
+        { kind: "category", name: "Do", colour: "#3b82f6", contents: [blockEntry("text_print")] },
+      ],
+    };
+  }
+  if (Array.isArray(lessonToolbox)) {
+    return { kind: "flyoutToolbox", contents: lessonToolbox.map(blockEntry) };
+  }
+  if (lessonToolbox.categories) {
+    return {
+      kind: "categoryToolbox",
+      contents: lessonToolbox.categories.map((c) => ({
+        kind: "category",
+        name: c.name,
+        colour: c.colour || "#3b82f6",
+        contents: (c.blocks || []).map(blockEntry),
+      })),
+    };
+  }
+  return buildToolbox(null);
+}
+
+function mountBlockly(lessonToolbox) {
   if (typeof Blockly === "undefined") {
     titleEl.textContent = "Blockly couldn't load. Ask a grown-up to check the network.";
     return null;
   }
-  const toolbox = document.getElementById("toolbox");
   return Blockly.inject("blocklyArea", {
-    toolbox,
+    toolbox: buildToolbox(lessonToolbox),
     trashcan: true,
     grid: { spacing: 20, length: 3, colour: "#ccc", snap: true },
     zoom: { controls: true, wheel: true, startScale: 1.1 },
   });
 }
 
+// Walk all blocks in the workspace and collect their type names. Used by the
+// success_check gate on "Done" — missing required types block progression.
+function workspaceBlockTypes(ws) {
+  if (!ws || typeof ws.getAllBlocks !== "function") return new Set();
+  return new Set(ws.getAllBlocks(false).map((b) => b.type));
+}
+
 async function init() {
   const urlLesson = new URLSearchParams(location.search).get("lesson") || "blockly-01-move-cat";
   await loadContext();
   await loadLesson(urlLesson);
-  const ws = mountBlockly();
+  const ws = mountBlockly(currentLesson?.toolbox);
+  currentWorkspace = ws;
   // Count workspace changes as activity (per plan's allowlist: hint request,
   // progress POST, Blockly workspace change, explicit heartbeat — NOT
   // mouse-move or scroll).

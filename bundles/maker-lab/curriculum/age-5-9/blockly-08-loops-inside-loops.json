@@ -1,0 +1,31 @@
+{
+  "id": "blockly-08-loops-inside-loops",
+  "title": "Loops Inside Loops",
+  "surface": "blockly",
+  "age_band": "5-9",
+  "reading_level": 3,
+  "goal": "Put a Repeat block inside another Repeat block. That's a lot of times.",
+  "steps": [
+    { "prompt": "Drag a Repeat block into the workspace. Set it to 3." },
+    { "prompt": "Drag a second Repeat block inside the first one. Set the inside one to 4." },
+    { "prompt": "Put a Do block inside the inside Repeat." },
+    { "prompt": "Press play — how many times does the Do happen?" }
+  ],
+  "canned_hints": [
+    "The outer Repeat runs the inner Repeat every single time.",
+    "3 times 4 is 12 — that's how many times the Do happens.",
+    "Try different numbers and see!"
+  ],
+  "toolbox": {
+    "categories": [
+      { "name": "Repeat", "colour": "#84cc16", "blocks": ["controls_repeat_ext"] },
+      { "name": "Do", "colour": "#3b82f6", "blocks": ["text_print"] },
+      { "name": "Numbers", "colour": "#fbbf24", "blocks": ["math_number"] }
+    ]
+  },
+  "success_check": {
+    "required_blocks": ["controls_repeat_ext", "text_print"],
+    "message_missing": "You need Repeat blocks with a Do block inside."
+  },
+  "tags": ["loops", "nesting", "advanced"]
+}

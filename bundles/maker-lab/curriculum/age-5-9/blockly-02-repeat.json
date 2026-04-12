@@ -4,17 +4,28 @@
   "surface": "blockly",
   "age_band": "5-9",
   "reading_level": 2,
-  "goal": "Use a repeat block so the cat moves four times.",
+  "goal": "Use a Repeat block so the cat moves four times.",
   "steps": [
-    { "prompt": "Find the repeat block (it has a little hole inside)." },
-    { "prompt": "Put the move block inside the repeat." },
+    { "prompt": "Find the Repeat block. It has a little hole inside." },
+    { "prompt": "Put a Do block inside the Repeat." },
     { "prompt": "Change the number to 4." },
     { "prompt": "Press play and watch the cat go!" }
   ],
   "canned_hints": [
-    "A repeat block is like saying 'do it again, and again, and again!'",
-    "You can drop other blocks INSIDE the repeat block.",
-    "Try changing the number inside the repeat. What changes?"
+    "A Repeat block is like saying 'do it again, and again, and again!'",
+    "You can drop other blocks inside the Repeat block.",
+    "Try changing the number. What changes?"
   ],
+  "toolbox": {
+    "categories": [
+      { "name": "Repeat", "colour": "#84cc16", "blocks": ["controls_repeat_ext"] },
+      { "name": "Do", "colour": "#3b82f6", "blocks": ["text_print"] },
+      { "name": "Numbers", "colour": "#fbbf24", "blocks": ["math_number"] }
+    ]
+  },
+  "success_check": {
+    "required_blocks": ["controls_repeat_ext", "text_print"],
+    "message_missing": "You need a Repeat block with a Do block inside!"
+  },
   "tags": ["loops", "repetition"]
 }

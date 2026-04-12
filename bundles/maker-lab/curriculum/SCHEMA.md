@@ -27,9 +27,46 @@ errors like `missing: canned_hints[]` or `reading_level must be a number <= 3`.
 | `goal` | string | Short description for the tutor's system prompt. |
 | `reading_level` | number | Self-declared grade. For `5-9`, must be `<= 3`. |
 | `starter_workspace` | string | Blockly XML to prefill the workspace. |
-| `success_check` | object | Lightweight pattern-match against submitted workspace XML. |
+| `toolbox` | object or array | Per-lesson Blockly toolbox. See below. Falls back to the default toolbox if absent. |
+| `success_check` | object | Checks the kid's workspace when they click "I'm done!". See below. |
 | `background` | string | Lesson cover image filename in the bundle's assets dir. |
 | `tags` | array of strings | For organization. |
+
+### `toolbox`
+
+Two forms, both accepted:
+
+**Simple** — just a list of Blockly block type names:
+
+```json
+"toolbox": ["controls_repeat_ext", "text_print", "math_number"]
+```
+
+**Grouped by category** — better for a real kid UX:
+
+```json
+"toolbox": {
+  "categories": [
+    { "name": "Repeat", "colour": "#84cc16", "blocks": ["controls_repeat_ext"] },
+    { "name": "Do", "colour": "#3b82f6", "blocks": ["text_print"] }
+  ]
+}
+```
+
+Common block types a 5-9 lesson will use: `controls_repeat_ext` (repeat N times), `controls_if`, `text_print` (stand-in for "do something"), `math_number`, `logic_compare`.
+
+### `success_check`
+
+Minimum viable: a list of block types that must appear in the kid's workspace before "I'm done!" succeeds.
+
+```json
+"success_check": {
+  "required_blocks": ["controls_repeat_ext", "text_print"],
+  "message_missing": "Don't forget to use a Repeat block!"
+}
+```
+
+If `success_check` is absent, any workspace is accepted.
 
 ## Example
 

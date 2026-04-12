@@ -1,0 +1,30 @@
+{
+  "id": "blockly-09-yes-or-no",
+  "title": "Yes or No?",
+  "surface": "blockly",
+  "age_band": "5-9",
+  "reading_level": 3,
+  "goal": "Use If / else to run one thing when yes, and another thing when no.",
+  "steps": [
+    { "prompt": "Drag an If block." },
+    { "prompt": "Click the little gear on the If block and add an else." },
+    { "prompt": "Put one Do in the If and a different Do in the else." },
+    { "prompt": "Try both true and false in the yes-or-no slot." }
+  ],
+  "canned_hints": [
+    "The gear lets you add an else. Drag it onto the If.",
+    "One Do runs if yes, the other Do runs if no.",
+    "The yes-or-no slot takes true or false blocks."
+  ],
+  "toolbox": {
+    "categories": [
+      { "name": "If", "colour": "#ec4899", "blocks": ["controls_if", "logic_boolean"] },
+      { "name": "Do", "colour": "#3b82f6", "blocks": ["text_print"] }
+    ]
+  },
+  "success_check": {
+    "required_blocks": ["controls_if", "logic_boolean", "text_print"],
+    "message_missing": "Use an If with a true/false block and a Do."
+  },
+  "tags": ["conditions", "branching"]
+}

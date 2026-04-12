@@ -1,0 +1,33 @@
+{
+  "id": "blockly-07-big-and-small",
+  "title": "Big and Small Numbers",
+  "surface": "blockly",
+  "age_band": "5-9",
+  "reading_level": 3,
+  "goal": "Compare two numbers. The If block only runs when 5 is bigger than 3.",
+  "steps": [
+    { "prompt": "Drag an If block into the workspace." },
+    { "prompt": "Put a compare block in the diamond slot." },
+    { "prompt": "Type two numbers, one bigger than the other." },
+    { "prompt": "Put a Do block inside the If." },
+    { "prompt": "Press play." }
+  ],
+  "canned_hints": [
+    "The diamond slot wants a yes-or-no answer.",
+    "5 bigger than 3 means yes!",
+    "Try flipping them. What happens?"
+  ],
+  "toolbox": {
+    "categories": [
+      { "name": "If", "colour": "#ec4899", "blocks": ["controls_if"] },
+      { "name": "Compare", "colour": "#22c55e", "blocks": ["logic_compare"] },
+      { "name": "Numbers", "colour": "#fbbf24", "blocks": ["math_number"] },
+      { "name": "Do", "colour": "#3b82f6", "blocks": ["text_print"] }
+    ]
+  },
+  "success_check": {
+    "required_blocks": ["controls_if", "logic_compare", "text_print"],
+    "message_missing": "You need an If block with a compare block inside — and a Do block."
+  },
+  "tags": ["conditions", "comparison"]
+}

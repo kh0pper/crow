@@ -563,6 +563,52 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
     }
   });
 
+  // ─── /maker-lab/api/hint-internal ────────────────────────────────────
+  // Loopback-only internal endpoint. Called by the companion's
+  // tutor-event WebSocket handler (Python backend, same host) to resolve
+  // a hint from a session_token WITHOUT the kiosk cookie/fingerprint
+  // binding — the token itself is the credential here. Because the
+  // endpoint is restricted to loopback, only processes on the Crow host
+  // (i.e., the companion container which runs with network_mode: host
+  // AND thus shares the host's loopback) can reach it.
+
+  router.post("/maker-lab/api/hint-internal", express_json(), async (req, res) => {
+    const deviceBinding = await import(pathToFileURL(resolve(__dirname, "../server/device-binding.js")).href);
+    if (!deviceBinding.isLoopback(req)) {
+      return res.status(403).json({ error: "loopback_only" });
+    }
+    const { session_token, surface, question, level, lesson_id, canned_hints } = req.body || {};
+    if (!session_token || typeof session_token !== "string") {
+      return res.status(400).json({ error: "bad_session_token" });
+    }
+    if (!question || typeof question !== "string") {
+      return res.status(400).json({ error: "bad_question" });
+    }
+    // Resolve session directly (no cookie check; this endpoint trusts the
+    // token because access is loopback-restricted).
+    const session = await resolveSessionRow(db, session_token);
+    if (!session) return res.status(401).json({ error: "session_invalid" });
+    if (session.state === "revoked") return res.status(410).json({ error: "revoked" });
+
+    const { handleHintRequest } = await import(pathToFileURL(resolve(__dirname, "../server/hint-pipeline.js")).href);
+    try {
+      const result = await handleHintRequest(db, {
+        sessionToken: session_token,
+        session,
+        surface: String(surface || "companion").slice(0, 50),
+        question: question.slice(0, 2000),
+        level: Math.min(3, Math.max(1, Number(level) || 1)),
+        lessonId: lesson_id ? String(lesson_id).slice(0, 100) : null,
+        cannedHints: Array.isArray(canned_hints)
+          ? canned_hints.map((h) => String(h).slice(0, 500)).slice(0, 10)
+          : null,
+      });
+      return res.json(result);
+    } catch (err) {
+      return res.status(500).json({ error: "hint_failed", detail: err.message });
+    }
+  });
+
   // ─── /kiosk/api/end ────────────────────────────────────────────────────
 
   router.post("/kiosk/api/end", async (req, res) => {
