@@ -69,6 +69,7 @@ import skillsPanel from "./panels/skills.js";
 import projectsPanel from "./panels/projects.js";
 import settingsPanel from "./panels/settings.js";
 import contactsPanel from "./panels/contacts.js";
+import fediversePanel from "./panels/fediverse.js";
 import bundlesRouterFactory from "../routes/bundles.js";
 
 /**
@@ -92,6 +93,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   registerPanel(skillsPanel);
   registerPanel(settingsPanel);
   registerPanel(contactsPanel);
+  registerPanel(fediversePanel);
 
   // Load third-party panels (async, non-blocking)
   loadExternalPanels().catch((err) => {
@@ -437,6 +439,16 @@ export default function dashboardRouter(mcpAuthMiddleware) {
 
   // Mount bundles API (protected by dashboard auth above)
   router.use("/dashboard", bundlesRouterFactory());
+
+  // F.14: Fediverse Admin action POSTs (confirm/reject moderation, cancel/retry crosspost)
+  router.post("/dashboard/fediverse/action", async (req, res) => {
+    const db = createDbClient();
+    try {
+      await fediversePanel.handleAction(req, res, { db });
+    } finally {
+      try { db.close(); } catch {}
+    }
+  });
 
   // Dashboard home — redirect to first visible panel
   router.get("/dashboard", (req, res) => {

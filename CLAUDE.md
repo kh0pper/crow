@@ -77,7 +77,7 @@ This is an MCP (Model Context Protocol) platform. The AI is the primary interfac
 
 2. **HTTP Gateway** (`servers/gateway/`) — Express server that wraps all MCP servers with Streamable HTTP + SSE transports + OAuth 2.1. Includes proxy layer for external MCP servers, **tool router** (`/router/mcp` — 7 tools instead of 49+), **AI chat gateway** (`/api/chat/*` — BYOAI with tool calling), public blog routes, Crow's Nest UI, peer relay, and setup page. Modularized into Express routers (`routes/mcp.js`, `routes/chat.js`, `routes/blog-public.js`, `routes/storage-http.js`, `dashboard/`).
 
-3. **Crow's Nest** (`servers/gateway/dashboard/`) — Server-side rendered HTML control panel (the "Crow's Nest") with Dark Editorial design. Password auth, session cookies, panel registry. Built-in panels: Health, Messages (AI Chat + Peer Messages tabs), Contacts, Memory, Blog (with markdown preview), Podcasts (subscriber + player), Files, Extensions, Skills, Settings. Third-party panels via `~/.crow/panels/`.
+3. **Crow's Nest** (`servers/gateway/dashboard/`) — Server-side rendered HTML control panel (the "Crow's Nest") with Dark Editorial design. Password auth, session cookies, panel registry. Built-in panels: Health, Messages (AI Chat + Peer Messages tabs), Contacts, Memory, Blog (with markdown preview), Podcasts (subscriber + player), Files, Extensions, Skills, Settings, **Fediverse Admin (F.14 — moderation queue + crosspost queue)**. Third-party panels via `~/.crow/panels/`.
 
 4. **Skills** (`skills/`) — 30 markdown files that serve as behavioral prompts loaded by Claude. Not code — they define workflows, trigger patterns, and integration logic.
 
