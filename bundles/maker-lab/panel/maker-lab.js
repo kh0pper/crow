@@ -20,9 +20,58 @@
 import { pathToFileURL } from "node:url";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import QRCode from "qrcode";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Sibling surfaces surfaced in the "Add more surfaces" card. Each entry
+// mirrors the bundle id in registry/add-ons.json; the install flow goes
+// through the existing /bundles/api/install endpoint. webPath is used
+// post-install to turn the button into an "Open ↗" launch link.
+const SIBLING_SURFACES = [
+  {
+    id: "kolibri",
+    name: "Kolibri",
+    tagline: "Offline-first learning platform — content spine for Maker Lab.",
+    minAge: null,
+    webPath: "/dashboard/kolibri",
+  },
+  {
+    id: "scratch-offline",
+    name: "Offline Block Coding (Scratch-compatible)",
+    tagline: "Self-hosted block coding for ages 8+ — a step up from Blockly.",
+    minAge: 8,
+    webPath: "/dashboard/scratch-offline",
+  },
+  {
+    id: "maker-lab-advanced",
+    name: "Maker Lab Advanced",
+    tagline: "JupyterHub classroom for ages 9+ — Python notebooks with a kid-safe kernel.",
+    minAge: 9,
+    webPath: "/dashboard/maker-lab-advanced",
+  },
+  {
+    id: "vllm",
+    name: "vLLM",
+    tagline: "GPU classroom inference engine — auto-wires to Maker Lab once installed.",
+    minAge: null,
+    webPath: "/dashboard/vllm",
+  },
+];
+
+function readInstalledBundleIds() {
+  try {
+    const p = join(homedir(), ".crow/installed.json");
+    if (!existsSync(p)) return new Set();
+    const raw = JSON.parse(readFileSync(p, "utf8"));
+    const arr = Array.isArray(raw) ? raw : Object.entries(raw).map(([id, v]) => ({ id, ...v }));
+    return new Set(arr.map((e) => e.id).filter(Boolean));
+  } catch {
+    return new Set();
+  }
+}
 
 async function loadDeviceBinding() {
   return import(pathToFileURL(resolve(__dirname, "../server/device-binding.js")).href);
@@ -583,9 +632,16 @@ export default {
       args: [],
     });
 
+    const installedBundleIds = readInstalledBundleIds();
+    const maxLearnerAge = learners.reduce(
+      (max, l) => (Number.isFinite(l.age) && l.age > max ? l.age : max),
+      0,
+    );
+
     const content = renderMainView({
       mode, err, pendingDelete, showGuestPicker,
       learners, allActive, activeByLearner, batches: batchesR.rows,
+      installedBundleIds, maxLearnerAge,
       escapeHtml,
     });
 
@@ -682,7 +738,58 @@ function renderBatchSheet({ batch, rows, escapeHtml, fullKioskUrl, publicBaseUrl
 
 // ─── Render: main view ────────────────────────────────────────────────────
 
-function renderMainView({ mode, err, pendingDelete, showGuestPicker, learners, allActive, activeByLearner, batches, escapeHtml }) {
+function renderSiblingSurfacesCard({ installedBundleIds, maxLearnerAge, escapeHtml }) {
+  // When there are no learners yet, don't gate by age — the operator is
+  // still setting up and should see all options.
+  const ageFloor = maxLearnerAge > 0 ? maxLearnerAge : Infinity;
+  const visible = SIBLING_SURFACES.filter((s) => s.minAge == null || ageFloor >= s.minAge);
+  if (!visible.length) return "";
+  const tiles = visible.map((s) => {
+    const installed = installedBundleIds.has(s.id);
+    const action = installed
+      ? `<a class="btn small primary" href="${escapeHtml(s.webPath)}">Open ${escapeHtml(s.name.split(" ")[0])} ↗</a>`
+      : `<button type="button" class="btn small primary" data-install-bundle="${escapeHtml(s.id)}">Install</button>`;
+    const gateNote = s.minAge ? `<span class="meta"> · ages ${s.minAge}+</span>` : "";
+    return `
+      <div class="sibling-tile">
+        <div class="sibling-head"><strong>${escapeHtml(s.name)}</strong>${gateNote}</div>
+        <div class="sibling-body">${escapeHtml(s.tagline)}</div>
+        <div class="sibling-actions">${action}</div>
+      </div>
+    `;
+  }).join("");
+  return `
+    <details class="panel" open>
+      <summary>Add more surfaces</summary>
+      <div class="sibling-grid">${tiles}</div>
+    </details>
+    <script>
+      document.querySelectorAll("[data-install-bundle]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const id = btn.getAttribute("data-install-bundle");
+          btn.disabled = true;
+          btn.textContent = "Installing…";
+          try {
+            const res = await fetch("/bundles/api/install", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ bundle_id: id }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+            window.location.reload();
+          } catch (e) {
+            btn.disabled = false;
+            btn.textContent = "Install";
+            alert("Install failed: " + e.message);
+          }
+        });
+      });
+    </script>
+  `;
+}
+
+function renderMainView({ mode, err, pendingDelete, showGuestPicker, learners, allActive, activeByLearner, batches, installedBundleIds, maxLearnerAge, escapeHtml }) {
   const errMsgs = {
     create_invalid: "Name is required and age must be between 3 and 100.",
     consent_required: "Consent checkbox is required.",
@@ -857,6 +964,8 @@ function renderMainView({ mode, err, pendingDelete, showGuestPicker, learners, a
     classroom: "Classroom mode — multi-select learners, then Bulk Start for a printable QR sheet.",
   })[mode];
 
+  const siblingsCard = renderSiblingSurfacesCard({ installedBundleIds, maxLearnerAge, escapeHtml });
+
   return `
     <div class="maker-lab">
       ${css()}
@@ -873,6 +982,7 @@ function renderMainView({ mode, err, pendingDelete, showGuestPicker, learners, a
       ${learnersHtml || '<div class="panel">No learners yet. Add one above to get started.</div>'}
       ${activeList}
       ${batchList}
+      ${siblingsCard}
     </div>
   `;
 }
@@ -886,6 +996,11 @@ function css() {
     .headline { color: var(--muted, #888); font-size: 0.9em; margin-bottom: 1rem; }
     .panel { background: var(--card, rgba(255,255,255,0.03)); padding: 1rem; border-radius: 8px; margin-bottom: 1rem; }
     .panel summary { cursor: pointer; font-weight: 600; }
+    .sibling-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.75rem; margin-top: 0.75rem; }
+    .sibling-tile { padding: 0.75rem; background: rgba(255,255,255,0.04); border: 1px solid var(--border, #333); border-radius: 6px; display: flex; flex-direction: column; gap: 0.4rem; }
+    .sibling-head { display: flex; align-items: baseline; gap: 0.4rem; }
+    .sibling-body { color: var(--muted, #888); font-size: 0.88em; flex: 1; }
+    .sibling-actions { display: flex; gap: 0.5rem; }
     .create-form { display: grid; gap: 0.5rem; margin-top: 0.75rem; max-width: 400px; }
     .create-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.9em; }
     .create-form label.consent { flex-direction: row; gap: 0.5rem; align-items: flex-start; font-weight: normal; }
