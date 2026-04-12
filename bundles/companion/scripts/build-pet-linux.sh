@@ -2,16 +2,16 @@
 # build-pet-linux.sh — Build the Crow pet-mode AppImage from the pinned
 # upstream Open-LLM-VTuber-Web submodule.
 #
-# Phase 3.0 status: SKELETON. The flow below is wired end-to-end but
-# exits early unless CROW_PET_BUILD_ENABLE=1 is set. Phase 3.1 flips the
-# default and lands the actual patch hunks.
+# Phase 3.1: runs end-to-end by default. Set CROW_PET_PATCH_ONLY=1 to
+# stop after applying patches (useful for rebasing against a newer
+# submodule SHA).
 #
 # Usage:
 #   bundles/companion/scripts/build-pet-linux.sh
-#   CROW_PET_BUILD_ENABLE=1 bundles/companion/scripts/build-pet-linux.sh
+#   CROW_PET_PATCH_ONLY=1 bundles/companion/scripts/build-pet-linux.sh
 #
-# Idempotent: safe to re-run. Re-applies patches from scratch each run
-# by resetting the submodule to its pinned SHA before applying.
+# Idempotent: safe to re-run. Resets the submodule to its pinned SHA
+# before applying patches.
 
 set -euo pipefail
 
@@ -23,16 +23,10 @@ SUBMODULE_DIR="${REPO_ROOT}/vendor/open-llm-vtuber-web"
 PATCH_DIR="${BUNDLE_DIR}/patches/web"
 OUT_DIR="${HOME}/.crow/bin"
 OUT_PATH="${OUT_DIR}/open-llm-vtuber.AppImage"
+PATCH_ONLY="${CROW_PET_PATCH_ONLY:-0}"
 
 log() { printf '[build-pet-linux] %s\n' "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
-
-# --- Phase 3.0 guard ---------------------------------------------------
-if [[ "${CROW_PET_BUILD_ENABLE:-0}" != "1" ]]; then
-  log "Phase 3.0 scaffold — skeleton only."
-  log "Set CROW_PET_BUILD_ENABLE=1 to attempt the real build (Phase 3.1+)."
-  log "Dry-running the flow now for verification:"
-fi
 
 # --- Preflight ---------------------------------------------------------
 [[ -d "${SUBMODULE_DIR}" ]] || die "submodule missing: ${SUBMODULE_DIR} (run: git submodule update --init vendor/open-llm-vtuber-web)"
@@ -67,11 +61,13 @@ IFS=$'\n' PATCHES_SORTED=($(printf '%s\n' "${PATCHES[@]}" | sort))
 unset IFS
 
 for patch in "${PATCHES_SORTED[@]}"; do
-  log "  applying $(basename "${patch}")"
-  if [[ "${CROW_PET_BUILD_ENABLE:-0}" != "1" ]]; then
-    log "    (skeleton: skipped — Phase 3.1 will finalize hunks and apply)"
+  name="$(basename "${patch}")"
+  # Skip intentionally empty patches (0006 persona-swap).
+  if ! grep -q '^diff --git' "${patch}"; then
+    log "  skipping ${name} (no hunks — reserved slot)"
     continue
   fi
+  log "  applying ${name}"
   (
     cd "${SUBMODULE_DIR}"
     # --3way: graceful fallback if the patch doesn't apply cleanly
@@ -80,34 +76,34 @@ for patch in "${PATCHES_SORTED[@]}"; do
   )
 done
 
-# --- Step 3: npm ci + electron-builder --------------------------------
-log "step 3/4: npm ci + electron-builder (Linux AppImage)"
-if [[ "${CROW_PET_BUILD_ENABLE:-0}" != "1" ]]; then
-  log "  (skeleton: skipped — Phase 3.1 runs npm ci and build:linux)"
-else
-  (
-    cd "${SUBMODULE_DIR}"
-    npm ci
-    # Prefer the upstream-defined script; fall back to electron-builder CLI.
-    if npm run --silent build:linux --if-present; then
-      :
-    else
-      npx electron-builder --linux AppImage
-    fi
-  )
+if [[ "${PATCH_ONLY}" == "1" ]]; then
+  log "CROW_PET_PATCH_ONLY=1 — stopping after patch apply."
+  exit 0
 fi
+
+# --- Step 3: npm install + electron-builder ---------------------------
+# Use `npm install` (not `npm ci`) because patch 0001 removes the
+# electron-updater dep from package.json without touching the lock;
+# npm ci would fail on the resulting mismatch.
+log "step 3/4: npm install + electron-builder (Linux AppImage)"
+(
+  cd "${SUBMODULE_DIR}"
+  npm install --no-audit --no-fund --loglevel=error
+  # Prefer the upstream-defined script; fall back to electron-builder CLI.
+  if npm run --silent build:linux --if-present 2>/dev/null; then
+    :
+  else
+    npx electron-builder --linux AppImage
+  fi
+)
 
 # --- Step 4: copy AppImage to ~/.crow/bin/ ----------------------------
 log "step 4/4: installing AppImage to ${OUT_PATH}"
 mkdir -p "${OUT_DIR}"
-if [[ "${CROW_PET_BUILD_ENABLE:-0}" != "1" ]]; then
-  log "  (skeleton: skipped — Phase 3.1 copies dist/*.AppImage here)"
-else
-  DIST_DIR="${SUBMODULE_DIR}/dist"
-  APPIMAGE="$(ls -1 "${DIST_DIR}"/*.AppImage 2>/dev/null | head -n1 || true)"
-  [[ -n "${APPIMAGE}" ]] || die "no AppImage produced in ${DIST_DIR}"
-  install -m 0755 "${APPIMAGE}" "${OUT_PATH}"
-  log "installed: ${OUT_PATH}"
-fi
+# electron-builder writes into release/${version}/; also check dist/ as a fallback.
+APPIMAGE="$(find "${SUBMODULE_DIR}/release" "${SUBMODULE_DIR}/dist" -name '*.AppImage' 2>/dev/null | head -n1 || true)"
+[[ -n "${APPIMAGE}" ]] || die "no AppImage produced under ${SUBMODULE_DIR}/release or dist"
+install -m 0755 "${APPIMAGE}" "${OUT_PATH}"
+log "installed: ${OUT_PATH} ($(du -h "${OUT_PATH}" | cut -f1))"
 
 log "done."
