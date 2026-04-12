@@ -3194,6 +3194,51 @@
       "notes": "Six containers (api + celeryworker + celerybeat + nginx + postgres + redis). Expose via caddy_add_federation_site { domain: FUNKWHALE_HOSTNAME, upstream: 'funkwhale-nginx:80', profile: 'activitypub' }. Audio storage on-disk by default; set FUNKWHALE_S3_* to route to MinIO/external S3 via storage-translators."
     },
     {
+      "id": "pixelfed",
+      "name": "Pixelfed",
+      "description": "Federated photo-sharing over ActivityPub — Instagram-alternative on the fediverse. Publish photos that remote Mastodon/GoToSocial/Funkwhale followers see in their timelines.",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "federated-media",
+      "tags": ["pixelfed", "activitypub", "fediverse", "photos", "federated", "instagram-alt"],
+      "icon": "image",
+      "docker": { "composefile": "docker-compose.yml" },
+      "server": {
+        "command": "node",
+        "args": ["server/index.js"],
+        "envKeys": ["PIXELFED_URL", "PIXELFED_ACCESS_TOKEN", "PIXELFED_HOSTNAME"]
+      },
+      "panel": "panel/pixelfed.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": ["skills/pixelfed.md"],
+      "consent_required": true,
+      "requires": {
+        "env": ["PIXELFED_HOSTNAME", "PIXELFED_DB_PASSWORD", "PIXELFED_APP_KEY"],
+        "bundles": ["caddy"],
+        "min_ram_mb": 1500,
+        "recommended_ram_mb": 3000,
+        "min_disk_mb": 10000,
+        "recommended_disk_mb": 100000
+      },
+      "env_vars": [
+        { "name": "PIXELFED_HOSTNAME", "description": "Public domain for this Pixelfed pod (subdomain).", "required": true },
+        { "name": "PIXELFED_DB_PASSWORD", "description": "Password for the bundled Postgres role.", "required": true, "secret": true },
+        { "name": "PIXELFED_APP_KEY", "description": "Laravel application key (32+ random bytes).", "required": true, "secret": true },
+        { "name": "PIXELFED_ACCESS_TOKEN", "description": "OAuth2 PAT (Settings → Development → New Application).", "required": false, "secret": true },
+        { "name": "PIXELFED_OPEN_REGISTRATION", "description": "Allow new signups (true/false).", "default": "false", "required": false },
+        { "name": "PIXELFED_MEDIA_RETENTION_DAYS", "description": "Remote media cache retention.", "default": "14", "required": false },
+        { "name": "PIXELFED_S3_ENDPOINT", "description": "Optional S3-compatible endpoint. When set, configure-storage.mjs routes media via storage-translators.pixelfed().", "required": false },
+        { "name": "PIXELFED_S3_BUCKET", "description": "S3 bucket.", "required": false },
+        { "name": "PIXELFED_S3_ACCESS_KEY", "description": "S3 access key.", "required": false, "secret": true },
+        { "name": "PIXELFED_S3_SECRET_KEY", "description": "S3 secret key.", "required": false, "secret": true },
+        { "name": "PIXELFED_S3_REGION", "description": "S3 region.", "default": "us-east-1", "required": false }
+      ],
+      "ports": [],
+      "webUI": null,
+      "notes": "Four containers (app + horizon + postgres + redis). zknt/pixelfed image runs nginx+PHP-FPM under supervisord. Expose via caddy_add_federation_site { domain: PIXELFED_HOSTNAME, upstream: 'pixelfed:80', profile: 'activitypub' }. Admin user via `docker exec -it crow-pixelfed php artisan user:create`."
+    },
+    {
       "id": "developer-kit",
       "name": "Developer Kit",
       "description": "Build and submit Crow extensions with guided scaffolding, testing, and registry submission",
