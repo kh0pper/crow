@@ -157,6 +157,7 @@ bundles/kodi/                  → Kodi remote control (MCP server, 6 tools, JSO
 bundles/trilium/               → TriliumNext knowledge base (Docker + MCP server, 11 tools, ETAPI)
 bundles/knowledge-base/        → Multilingual knowledge base (MCP server, 10 tools, LAN discovery, WCAG 2.1 AA)
 bundles/maker-lab/             → STEM education companion for kids (MCP server, 21 tools, age-banded personas, classroom-capable). Phase 1 scaffold; see bundles/maker-lab/PHASE-0-REPORT.md
+bundles/kolibri/               → Kolibri learning platform (Docker + panel + skill; offline-first STEM/literacy, Pi-friendly, sibling of maker-lab)
 android/                       → Android WebView shell app (Crow's Nest mobile client)
 servers/gateway/public/        → PWA assets (manifest.json, service worker, icons)
 servers/gateway/push/          → Web Push notification infrastructure (VAPID)
@@ -462,6 +463,7 @@ Add-on skills (activated when corresponding add-on is installed):
 - `trilium.md` — TriliumNext knowledge base: note search, creation, web clipping, organization
 - `knowledge-base.md` — Multilingual knowledge base: create, edit, publish, search, verify resources, share articles, LAN discovery
 - `maker-lab.md` — STEM education companion for kids: scaffolded AI tutor, hint-ladder pedagogy, age-banded personas (kid/tween/adult), solo/family/classroom modes, guest sidecar
+- `kolibri.md` — Kolibri offline-first learning platform: channel recommendation by age/subject, classroom setup, LAN-sync, pairs with maker-lab as content spine
 - `calibre-server.md` — Calibre content server: search, browse, download ebooks via OPDS
 - `calibre-web.md` — Calibre-Web reader: search, shelves, reading status, download
 - `miniflux.md` — Miniflux RSS reader: subscribe feeds, read articles, star, mark read
