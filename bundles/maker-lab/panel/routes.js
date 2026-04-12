@@ -158,12 +158,25 @@ function ageBandFromGuestBand(band) {
   return "adult-tutor";
 }
 
+// Lazy-import the retention sweep so the panel router still loads on installs
+// where the bundle's server/ modules aren't reachable.
+let startRetentionSweep;
+try {
+  const mod = await import(pathToFileURL(resolve(__dirname, "../server/retention-sweep.js")).href);
+  startRetentionSweep = mod.startRetentionSweep;
+} catch {
+  startRetentionSweep = null;
+}
+
 export default function makerLabKioskRouter(/* dashboardAuth */) {
   const router = Router();
   let db;
 
   router.use((req, res, next) => {
-    if (!db && createDbClient) db = createDbClient();
+    if (!db && createDbClient) {
+      db = createDbClient();
+      if (db && startRetentionSweep) startRetentionSweep(db);
+    }
     if (!db) return res.status(500).json({ error: "db_unavailable" });
     next();
   });
@@ -251,11 +264,72 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
     const s = guard.session;
     const age = typeof s.learner_age === "number" ? s.learner_age : null;
     const persona = s.is_guest ? ageBandFromGuestBand(s.guest_age_band) : personaForAge(age);
-    // Activity touch
-    await db.execute({
-      sql: `UPDATE maker_sessions SET last_activity_at = datetime('now'), idle_locked_at = NULL WHERE token = ?`,
-      args: [guard.sessionToken],
-    });
+
+    // /api/context is PASSIVE (read-only). It does NOT touch last_activity_at —
+    // that would make idle-lock impossible since the client polls this endpoint.
+    // Activity is written by /api/hint, /api/progress, /api/heartbeat only.
+
+    // Inline idle-lock state machine:
+    //   1) If idle_lock_min set AND no lock yet AND last_activity > idle_lock_min ago
+    //      → set idle_locked_at = now
+    //   2) If locked AND auto_resume_min > 0 AND locked > auto_resume_min ago
+    //      → clear idle_locked_at, reset last_activity_at (auto-resume)
+    let idleLocked = !!s.idle_locked_at;
+    let autoResumeEta = null;
+
+    if (s.idle_lock_min && !s.idle_locked_at) {
+      // Check if we should lock.
+      const check = await db.execute({
+        sql: `SELECT token, idle_lock_min,
+                     (julianday('now') - julianday(last_activity_at)) * 1440 AS minutes_idle
+              FROM maker_sessions WHERE token = ?`,
+        args: [guard.sessionToken],
+      });
+      const row = check.rows[0];
+      if (row && row.minutes_idle >= row.idle_lock_min) {
+        await db.execute({
+          sql: `UPDATE maker_sessions SET idle_locked_at = datetime('now') WHERE token = ? AND idle_locked_at IS NULL`,
+          args: [guard.sessionToken],
+        });
+        idleLocked = true;
+      }
+    }
+
+    if (s.idle_locked_at) {
+      // Get effective auto_resume_min from learner settings (non-guest only).
+      let autoMin = 15;
+      if (!s.is_guest && s.learner_id != null) {
+        try {
+          const settingsR = await db.execute({
+            sql: `SELECT auto_resume_min FROM maker_learner_settings WHERE learner_id = ?`,
+            args: [s.learner_id],
+          });
+          if (settingsR.rows.length && settingsR.rows[0].auto_resume_min != null) {
+            autoMin = settingsR.rows[0].auto_resume_min;
+          }
+        } catch {}
+      }
+      if (autoMin > 0) {
+        const r = await db.execute({
+          sql: `SELECT (julianday('now') - julianday(idle_locked_at)) * 1440 AS mins_locked
+                FROM maker_sessions WHERE token = ?`,
+          args: [guard.sessionToken],
+        });
+        const minsLocked = r.rows[0]?.mins_locked || 0;
+        if (minsLocked >= autoMin) {
+          // Auto-resume: clear lock AND reset activity so we don't instantly re-lock.
+          await db.execute({
+            sql: `UPDATE maker_sessions SET idle_locked_at = NULL, last_activity_at = datetime('now')
+                  WHERE token = ?`,
+            args: [guard.sessionToken],
+          });
+          idleLocked = false;
+        } else {
+          autoResumeEta = Math.max(0, (autoMin - minsLocked) * 60); // seconds remaining
+        }
+      }
+    }
+
     res.json({
       persona,
       state: s.state,
@@ -263,8 +337,27 @@ export default function makerLabKioskRouter(/* dashboardAuth */) {
       hints_used: s.hints_used,
       expires_at: s.expires_at,
       idle_lock_min: s.idle_lock_min,
+      idle_locked: idleLocked,
+      auto_resume_eta_seconds: autoResumeEta,
       transcripts_on: !!s.transcripts_enabled_snapshot,
     });
+  });
+
+  // ─── /kiosk/api/heartbeat ──────────────────────────────────────────────
+  // Activity touch. Called by tutor-bridge.js on Blockly workspace change
+  // events AND by the "I'm here" button if we add one. This is the only
+  // client-initiated path that counts as activity besides hint/progress POSTs.
+
+  router.post("/kiosk/api/heartbeat", express_json(), async (req, res) => {
+    const guard = await requireKioskSession(req, db);
+    if (!guard.ok) return res.status(401).json({ error: guard.reason });
+    if (guard.session.state === "revoked") return res.status(410).json({ error: "revoked" });
+    await db.execute({
+      sql: `UPDATE maker_sessions SET last_activity_at = datetime('now'), idle_locked_at = NULL
+            WHERE token = ?`,
+      args: [guard.sessionToken],
+    });
+    res.json({ ok: true });
   });
 
   // ─── /kiosk/api/lesson/:id ─────────────────────────────────────────────

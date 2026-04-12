@@ -181,6 +181,59 @@ window.addEventListener("offline", () => {
   offlineChip.hidden = false;
 });
 
+// ─── Idle lock screen ──────────────────────────────────────────────────────
+
+let lockEl = null;
+let lockCountdownEl = null;
+let resumeTimer = null;
+
+function buildLockScreen() {
+  const root = document.createElement("div");
+  root.className = "lock-screen";
+  const box = document.createElement("div");
+  box.className = "lock-box";
+  const title = document.createElement("div");
+  title.className = "lock-title";
+  title.textContent = "Ask a grown-up to unlock";
+  const hint = document.createElement("div");
+  hint.className = "lock-hint";
+  hint.textContent = "We noticed you took a break.";
+  const countdown = document.createElement("div");
+  countdown.className = "lock-countdown";
+  box.appendChild(title);
+  box.appendChild(hint);
+  box.appendChild(countdown);
+  root.appendChild(box);
+  lockCountdownEl = countdown;
+  return root;
+}
+
+function showLockScreen(etaSeconds) {
+  if (!lockEl) {
+    lockEl = buildLockScreen();
+    document.body.appendChild(lockEl);
+  }
+  lockEl.hidden = false;
+  if (resumeTimer) clearInterval(resumeTimer);
+  let remaining = Math.max(0, Math.floor(Number(etaSeconds) || 0));
+  const render = () => {
+    if (!lockCountdownEl) return;
+    if (remaining <= 0) {
+      lockCountdownEl.textContent = "Waking up…";
+    } else {
+      const m = Math.floor(remaining / 60), s = remaining % 60;
+      lockCountdownEl.textContent = `Auto-resume in ${m}:${String(s).padStart(2, "0")}`;
+    }
+  };
+  render();
+  resumeTimer = setInterval(() => { remaining--; render(); }, 1000);
+}
+
+function hideLockScreen() {
+  if (lockEl) lockEl.hidden = true;
+  if (resumeTimer) { clearInterval(resumeTimer); resumeTimer = null; }
+}
+
 // ─── Boot ──────────────────────────────────────────────────────────────────
 
 async function loadContext() {
@@ -191,7 +244,26 @@ async function loadContext() {
     } else {
       transcriptChip.textContent = "This chat is private";
     }
+    if (ctx.idle_locked) {
+      showLockScreen(ctx.auto_resume_eta_seconds);
+    } else {
+      hideLockScreen();
+    }
   } catch { /* non-fatal */ }
+}
+
+async function heartbeat() {
+  try {
+    await apiFetch("/kiosk/api/heartbeat", { method: "POST", body: "{}" });
+  } catch { /* best-effort */ }
+}
+
+let lastHeartbeatAt = 0;
+function throttledHeartbeat() {
+  const now = Date.now();
+  if (now - lastHeartbeatAt < 5000) return;
+  lastHeartbeatAt = now;
+  heartbeat();
 }
 
 async function loadLesson(id) {
@@ -227,11 +299,23 @@ async function init() {
   await loadContext();
   await loadLesson(urlLesson);
   const ws = mountBlockly();
-  // Count workspace changes as activity (allowlist, per plan).
-  ws?.addChangeListener(() => {
-    // Best-effort heartbeat: light touch via context GET.
-    // Real activity tracking is server-side on any /kiosk/api/* hit.
+  // Count workspace changes as activity (per plan's allowlist: hint request,
+  // progress POST, Blockly workspace change, explicit heartbeat — NOT
+  // mouse-move or scroll).
+  ws?.addChangeListener((ev) => {
+    // Filter out Blockly-internal UI events (clicks, viewport moves) that
+    // aren't structural changes. Only the BLOCK_CHANGE / BLOCK_CREATE /
+    // BLOCK_MOVE / BLOCK_DELETE family counts as activity.
+    if (!ev || !ev.type) return;
+    const actionable = ev.type === "create" || ev.type === "delete" ||
+      ev.type === "change" || ev.type === "move";
+    if (!actionable) return;
+    throttledHeartbeat();
   });
+  // Poll /api/context periodically so idle-lock state surfaces to the kiosk
+  // even when the kid is just staring. 15s cadence keeps DB churn low while
+  // giving a tight enough feedback loop for the countdown.
+  setInterval(loadContext, 15_000);
   // Drain any queued progress from a previous offline spell.
   if (navigator.onLine) { queueDrain(postProgress).catch(() => {}); }
 }

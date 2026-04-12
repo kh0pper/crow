@@ -12,10 +12,12 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { createMakerLabServer } from "./server.js";
 import { initMakerLabTables } from "./init-tables.js";
 import { createDbClient } from "./db.js";
+import { startRetentionSweep } from "./retention-sweep.js";
 
 const db = createDbClient();
 
 await initMakerLabTables(db);
+startRetentionSweep(db);
 
 const server = createMakerLabServer(db, {
   instructions:
