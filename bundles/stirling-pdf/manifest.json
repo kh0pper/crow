@@ -1,0 +1,22 @@
+{
+  "id": "stirling-pdf",
+  "name": "Stirling PDF",
+  "version": "1.0.0",
+  "description": "Local PDF manipulation toolbox — merge, split, OCR, convert, compress, and 50+ other operations in-browser",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "productivity",
+  "tags": ["pdf", "documents", "ocr", "convert", "self-hosted"],
+  "icon": "file-text",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["STIRLING_URL"] },
+  "panel": "panel/stirling-pdf.js",
+  "skills": ["skills/stirling-pdf.md"],
+  "requires": { "env": [], "min_ram_mb": 1024, "min_disk_mb": 2000 },
+  "env_vars": [
+    { "name": "STIRLING_URL", "description": "Stirling PDF base URL", "default": "http://localhost:8092", "required": true }
+  ],
+  "ports": [8092],
+  "webUI": { "port": 8092, "path": "/", "label": "Stirling PDF" },
+  "notes": "Stirling PDF has no public API suitable for MCP. This bundle ships a panel with an iframe to the web UI and a tiny MCP server with a status check. Stirling 2.x includes a login form by default; create the admin account on first visit. Bound to 127.0.0.1 only."
+}
