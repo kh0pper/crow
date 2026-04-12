@@ -1,0 +1,152 @@
+# Lemmy — federated link aggregator + discussion platform.
+#
+# Four-container bundle: lemmy (backend, Rust) + lemmy-ui (frontend) +
+# postgres + pict-rs (image hosting). lemmy + lemmy-ui on crow-federation
+# (Caddy reverse-proxies to lemmy-ui:1234); DB + pict-rs on default.
+#
+# Lemmy-UI serves the SPA AND proxies /api/v3/* to lemmy:8536 internally,
+# so a single Caddy federation site is enough.
+#
+# Data:
+#   ~/.crow/lemmy/postgres/    Postgres data dir
+#   ~/.crow/lemmy/pictrs/      pict-rs sled db + media files
+#   ~/.crow/lemmy/lemmy.hjson  Generated once at install time; not volume-mounted
+#                              because lemmy reads env-var overrides too.
+#
+# Images: dessalines/lemmy:0.19 and dessalines/lemmy-ui:0.19 (floats
+# within 0.19.x — verify latest + CVE feed at implementation time per the
+# plan's image-tag policy).
+
+networks:
+  crow-federation:
+    external: true
+  default:
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: crow-lemmy-postgres
+    networks:
+      - default
+    environment:
+      POSTGRES_USER: lemmy
+      POSTGRES_PASSWORD: ${LEMMY_DB_PASSWORD}
+      POSTGRES_DB: lemmy
+    volumes:
+      - ${LEMMY_DATA_DIR:-~/.crow/lemmy}/postgres:/var/lib/postgresql/data
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lemmy"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  pictrs:
+    image: asonix/pictrs:0.5
+    container_name: crow-lemmy-pictrs
+    user: "991:991"
+    networks:
+      - default
+    environment:
+      PICTRS__SERVER__API_KEY: ${LEMMY_PICTRS_API_KEY}
+      PICTRS__MEDIA__VIDEO_CODEC: vp9
+      PICTRS__MEDIA__GIF__MAX_WIDTH: "256"
+      PICTRS__MEDIA__GIF__MAX_HEIGHT: "256"
+      PICTRS__MEDIA__GIF__MAX_AREA: "65536"
+      PICTRS__MEDIA__GIF__MAX_FRAME_COUNT: "400"
+      RUST_LOG: warn,tracing=warn
+      RUST_BACKTRACE: full
+    volumes:
+      - ${LEMMY_DATA_DIR:-~/.crow/lemmy}/pictrs:/mnt
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+
+  lemmy:
+    image: dessalines/lemmy:0.19
+    container_name: crow-lemmy
+    hostname: lemmy
+    networks:
+      - default
+      - crow-federation
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RUST_LOG: "warn"
+      RUST_BACKTRACE: "full"
+      LEMMY_DATABASE_URL: "postgres://lemmy:${LEMMY_DB_PASSWORD}@postgres:5432/lemmy"
+      LEMMY_CONFIG_LOCATION: /config/config.hjson
+    volumes:
+      - ./config:/config:ro
+    entrypoint:
+      - sh
+      - -c
+      - |
+        mkdir -p /config
+        cat > /config/config.hjson <<HJSON
+        {
+          hostname: "${LEMMY_HOSTNAME}"
+          bind: "0.0.0.0"
+          port: 8536
+          tls_enabled: false
+          database: {
+            host: postgres
+            port: 5432
+            database: lemmy
+            user: lemmy
+            password: "${LEMMY_DB_PASSWORD}"
+          }
+          pictrs: {
+            url: "http://pictrs:8080/"
+            api_key: "${LEMMY_PICTRS_API_KEY}"
+          }
+          federation: {
+            enabled: ${LEMMY_FEDERATION_ENABLED:-true}
+            debug: false
+          }
+          setup: {
+            admin_username: "admin_pending"
+            admin_password: "change_me_via_web_setup"
+            site_name: "Crow Lemmy"
+          }
+          captcha: { enabled: true, difficulty: medium }
+          opentelemetry_url: null
+        }
+        HJSON
+        exec /app/lemmy
+    init: true
+    mem_limit: 768m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8536/api/v3/site >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  lemmy-ui:
+    image: dessalines/lemmy-ui:0.19
+    container_name: crow-lemmy-ui
+    networks:
+      - default
+      - crow-federation
+    depends_on:
+      lemmy:
+        condition: service_healthy
+    environment:
+      LEMMY_UI_LEMMY_INTERNAL_HOST: "lemmy:8536"
+      LEMMY_UI_LEMMY_EXTERNAL_HOST: ${LEMMY_HOSTNAME}
+      LEMMY_UI_HTTPS: "true"
+    init: true
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:1234/ >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s

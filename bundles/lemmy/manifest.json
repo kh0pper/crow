@@ -1,0 +1,45 @@
+{
+  "id": "lemmy",
+  "name": "Lemmy",
+  "version": "1.0.0",
+  "description": "Federated link aggregator and discussion platform over ActivityPub — Reddit-alternative on the fediverse. Posts, comments, communities, votes; remote Lemmy/Mastodon/Kbin users can follow your communities and comment cross-server.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "federated-social",
+  "tags": ["lemmy", "activitypub", "fediverse", "link-aggregator", "discussion", "reddit-alt"],
+  "icon": "message-circle",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "envKeys": ["LEMMY_URL", "LEMMY_JWT", "LEMMY_HOSTNAME"]
+  },
+  "panel": "panel/lemmy.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/lemmy.md"],
+  "consent_required": true,
+  "install_consent_messages": {
+    "en": "Lemmy joins the public fediverse over ActivityPub — your instance becomes publicly addressable at the domain you configure, any community you host or post you publish can be replicated to federated servers (other Lemmy instances, Kbin, Mastodon, Friendica) and cannot be fully recalled. Lemmy's pict-rs image cache grows with federated content: 5-20 GB within weeks is typical on an active instance. Lemmy is hardware-gated to refuse install on hosts with <1 GB effective RAM after committed bundles; warns below 4 GB total. Because Lemmy's federation is community-scoped rather than user-scoped, a single large community can pull heavy content from many remote instances — monitor disk. Hosting illegal content (CSAM, credible threats) is your legal responsibility — major hubs (lemmy.world, lemmy.ml) may defederate your instance if reports go unaddressed.",
+    "es": "Lemmy se une al fediverso público vía ActivityPub — tu instancia será direccionable en el dominio que configures, cualquier comunidad que hospedes o publicación que hagas puede replicarse a servidores federados (otras instancias de Lemmy, Kbin, Mastodon, Friendica) y no puede recuperarse completamente. El caché de imágenes pict-rs de Lemmy crece con el contenido federado: 5-20 GB en semanas es típico en una instancia activa. Lemmy está limitado por hardware: rechazado en hosts con <1 GB de RAM efectiva tras paquetes comprometidos; advierte bajo 4 GB totales. Como la federación de Lemmy es por comunidad (no por usuario), una sola comunidad grande puede traer contenido pesado de muchas instancias remotas — monitoriza el disco. Hospedar contenido ilegal (CSAM, amenazas creíbles) es tu responsabilidad legal — los hubs principales (lemmy.world, lemmy.ml) pueden dejar de federarse con tu instancia si los reportes no son atendidos."
+  },
+  "requires": {
+    "env": ["LEMMY_HOSTNAME", "LEMMY_DB_PASSWORD", "LEMMY_PICTRS_API_KEY"],
+    "bundles": ["caddy"],
+    "min_ram_mb": 1000,
+    "recommended_ram_mb": 2000,
+    "min_disk_mb": 5000,
+    "recommended_disk_mb": 50000
+  },
+  "env_vars": [
+    { "name": "LEMMY_HOSTNAME", "description": "Public domain (subdomain; path-mounts break ActivityPub).", "required": true },
+    { "name": "LEMMY_DB_PASSWORD", "description": "Password for the bundled Postgres role.", "required": true, "secret": true },
+    { "name": "LEMMY_PICTRS_API_KEY", "description": "Shared secret Lemmy uses to talk to pict-rs (any random 32+ char string).", "required": true, "secret": true },
+    { "name": "LEMMY_JWT", "description": "Admin login JWT (obtain via POST /api/v3/user/login after registering the admin via the web UI).", "required": false, "secret": true },
+    { "name": "LEMMY_URL", "description": "Internal URL the MCP server uses to reach Lemmy's API (default http://lemmy:8536 over crow-federation).", "default": "http://lemmy:8536", "required": false },
+    { "name": "LEMMY_OPEN_REGISTRATION", "description": "Allow new user signups (true/false). Default false — opens registration only after moderation tooling is configured.", "default": "false", "required": false },
+    { "name": "LEMMY_FEDERATION_ENABLED", "description": "Whether to federate with other ActivityPub servers (true/false).", "default": "true", "required": false }
+  ],
+  "ports": [],
+  "webUI": null,
+  "notes": "Four containers (lemmy + lemmy-ui + postgres + pict-rs). Expose via caddy_add_federation_site { domain: LEMMY_HOSTNAME, upstream: 'lemmy-ui:1234', profile: 'activitypub' }. The UI proxies /api/v3/ to lemmy:8536 internally. Initial admin registers via the /signup page during the first-boot setup wizard (no CLI bootstrap needed)."
+}
