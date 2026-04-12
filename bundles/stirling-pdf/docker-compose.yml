@@ -1,0 +1,38 @@
+# Stirling PDF — local PDF manipulation toolbox.
+#
+# Stirling PDF has no public REST API for automation; all operations happen
+# in-browser via its web UI. This bundle simply runs the container and links
+# to it from a Crow panel iframe.
+#
+# Stirling PDF 2.x includes a login form by default. The first admin user
+# is created through the web UI on first visit. We bind strictly to
+# 127.0.0.1 so only the local host can reach it; if you want to publish
+# Stirling on a public domain, route it through the caddy bundle.
+
+services:
+  stirling-pdf:
+    image: frooodle/s-pdf:2.9.2
+    container_name: crow-stirling-pdf
+    ports:
+      - "127.0.0.1:8092:8080"
+    volumes:
+      - stirling-configs:/configs
+      - stirling-logs:/logs
+      - stirling-tessdata:/usr/share/tessdata
+    environment:
+      - DISABLE_ADDITIONAL_FEATURES=true
+      - LANGS=en_US
+    init: true
+    mem_limit: 2g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/login"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  stirling-configs:
+  stirling-logs:
+  stirling-tessdata:

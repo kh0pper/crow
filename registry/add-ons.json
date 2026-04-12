@@ -1452,6 +1452,28 @@
       "notes": "Listens on 3001 inside container, published on 127.0.0.1:3007. First-run: create admin user in web UI, then set UPTIMEKUMA_USERNAME/PASSWORD for /metrics parsing. 2 MCP tools (socket.io API is not wrapped)."
     },
     {
+      "id": "stirling-pdf",
+      "name": "Stirling PDF",
+      "description": "Local PDF manipulation toolbox — merge, split, OCR, convert, compress, and 50+ other operations in-browser",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "productivity",
+      "tags": ["pdf", "documents", "ocr", "convert", "self-hosted"],
+      "icon": "file-text",
+      "docker": { "composefile": "docker-compose.yml" },
+      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["STIRLING_URL"] },
+      "panel": "panel/stirling-pdf.js",
+      "skills": ["skills/stirling-pdf.md"],
+      "requires": { "env": [], "min_ram_mb": 1024, "min_disk_mb": 2000 },
+      "env_vars": [
+        { "name": "STIRLING_URL", "description": "Stirling PDF base URL", "default": "http://localhost:8092", "required": true }
+      ],
+      "ports": [8092],
+      "webUI": { "port": 8092, "path": "/", "label": "Stirling PDF" },
+      "notes": "No REST API — all operations run client-side in the browser. Panel embeds the web UI; MCP server has 2 tools (status + web URL). Stirling 2.x ships with a login form; create the admin on first visit. Bound to 127.0.0.1 only."
+    },
+    {
       "id": "vikunja",
       "name": "Vikunja",
       "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",
