@@ -463,6 +463,7 @@ Add-on skills (activated when corresponding add-on is installed):
 - `knowledge-base.md` — Multilingual knowledge base: create, edit, publish, search, verify resources, share articles, LAN discovery
 - `maker-lab.md` — STEM education companion for kids: scaffolded AI tutor, hint-ladder pedagogy, age-banded personas (kid/tween/adult), solo/family/classroom modes, guest sidecar
 - `gotosocial.md` — GoToSocial ActivityPub microblog: post, follow, search, moderate (block_user/mute inline; defederate/block_domain/import_blocklist queued for operator confirmation), media prune, federation health
+- `writefreely.md` — WriteFreely federated blog: create/update/publish/unpublish posts, list collections, fetch public posts, export; minimalist publisher (no comments, no moderation queue — WF is publish-oriented only)
 - `calibre-server.md` — Calibre content server: search, browse, download ebooks via OPDS
 - `calibre-web.md` — Calibre-Web reader: search, shelves, reading status, download
 - `miniflux.md` — Miniflux RSS reader: subscribe feeds, read articles, star, mark read

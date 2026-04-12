@@ -1,0 +1,106 @@
+# WriteFreely — ActivityPub blogging platform.
+#
+# Deployment: no host port publish. Caddy reaches writefreely:8080 by
+# docker service name over the crow-federation network.
+#
+# Data at ~/.crow/writefreely/ — SQLite + uploads + keys. Migration to
+# MySQL requires manual compose edit.
+
+networks:
+  crow-federation:
+    external: true
+  default:
+
+services:
+  writefreely:
+    image: writeas/writefreely:0.15
+    container_name: crow-writefreely
+    networks:
+      - default
+      - crow-federation
+    environment:
+      # WriteFreely reads its config from /go/keys/config.ini. The
+      # entrypoint below seeds that file on first run using the env
+      # vars below, then execs into writefreely.
+      WF_HOST: ${WF_HOST}
+      WF_SINGLE_USER: ${WF_SINGLE_USER:-true}
+      WF_DB_TYPE: sqlite3
+      WF_DB_FILENAME: /go/keys/writefreely.db
+      WF_PORT: "8080"
+      WF_BIND_ADDRESS: 0.0.0.0
+      # Behind Caddy: let WriteFreely know the public scheme is HTTPS so
+      # generated absolute URLs (ActivityPub actors, webfinger) use it.
+      WF_PUBLIC_SCHEME: https
+    volumes:
+      - ${WF_DATA_DIR:-~/.crow/writefreely}:/go/keys
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        CFG=/go/keys/config.ini
+        if [ ! -f "$$CFG" ]; then
+          cat > "$$CFG" <<INI
+        [server]
+        hidden_host =
+        port = $${WF_PORT}
+        bind = $${WF_BIND_ADDRESS}
+        tls_cert_path =
+        tls_key_path =
+        autocert =
+        templates_parent_dir = /go/src/code.as/core/writefreely
+        static_parent_dir = /go/src/code.as/core/writefreely
+        pages_parent_dir = /go/keys
+        keys_parent_dir = /go/keys
+        hash_seed = crow-managed
+        gopher_port = 0
+
+        [database]
+        type = $${WF_DB_TYPE}
+        filename = $${WF_DB_FILENAME}
+        username =
+        password =
+        database =
+        host =
+        port = 3306
+        tls = false
+
+        [app]
+        site_name = WriteFreely on Crow
+        site_description = A federated blog powered by Crow.
+        host = https://$${WF_HOST}
+        theme = write
+        disable_js = false
+        webfonts = true
+        landing =
+        single_user = $${WF_SINGLE_USER}
+        open_registration = false
+        min_username_len = 3
+        max_blogs = 1
+        federation = true
+        public_stats = true
+        private = false
+        local_timeline = true
+        user_invites =
+        default_visibility = public
+        update_checks = false
+        disable_password_auth = false
+
+        [oauth.generic]
+        INI
+        fi
+        # Init DB on first run
+        if [ ! -f /go/keys/writefreely.db ]; then
+          /go/bin/writefreely --init-db -c "$$CFG"
+          /go/bin/writefreely --gen-keys -c "$$CFG"
+        fi
+        exec /go/bin/writefreely -c "$$CFG"
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
