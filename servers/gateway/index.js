@@ -281,6 +281,88 @@ app.get("/api/turn-credentials", turnCredLimiter, (req, res) => {
   });
 });
 
+// --- F.11: Identity Attestation (.well-known endpoints, rate-limited) ---
+// Public, unauthenticated, rate-limited to 60 req/min/IP. Paginated at
+// 256 active attestations per page. Revocations >1 year move to cold
+// storage (not yet implemented — current window retains everything).
+const identityLimiter = rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true });
+const IDENTITY_PAGE_SIZE = 256;
+
+app.get("/.well-known/crow-identity.json", identityLimiter, async (req, res) => {
+  try {
+    const { loadOrCreateIdentity } = await import("../sharing/identity.js");
+    const identity = loadOrCreateIdentity();
+    const cursor = Number(req.query.cursor) || 0;
+    const rows = await relayDb.execute({
+      sql: `SELECT id, app, external_handle, app_pubkey, sig, version, created_at
+            FROM identity_attestations
+            WHERE crow_id = ? AND revoked_at IS NULL
+            ORDER BY id ASC LIMIT ? OFFSET ?`,
+      args: [identity.crowId, IDENTITY_PAGE_SIZE + 1, cursor],
+    });
+    const hasNext = rows.rows.length > IDENTITY_PAGE_SIZE;
+    const page = rows.rows.slice(0, IDENTITY_PAGE_SIZE);
+    res.set("Cache-Control", "public, max-age=60");
+    res.json({
+      version: 1,
+      crow_id: identity.crowId,
+      root_pubkey: identity.ed25519Pubkey,
+      page_size: IDENTITY_PAGE_SIZE,
+      cursor,
+      next: hasNext ? cursor + IDENTITY_PAGE_SIZE : null,
+      active_attestations: page.map(r => ({
+        id: Number(r.id),
+        app: r.app,
+        external_handle: r.external_handle,
+        app_pubkey: r.app_pubkey || null,
+        sig: r.sig,
+        version: Number(r.version),
+        created_at: Number(r.created_at),
+      })),
+      revocation_list_url: "/.well-known/crow-identity-revocations.json",
+    });
+  } catch (err) {
+    res.status(500).json({ error: "identity publication unavailable" });
+  }
+});
+
+app.get("/.well-known/crow-identity-revocations.json", identityLimiter, async (req, res) => {
+  try {
+    const { loadOrCreateIdentity } = await import("../sharing/identity.js");
+    const identity = loadOrCreateIdentity();
+    const cursor = Number(req.query.cursor) || 0;
+    const rows = await relayDb.execute({
+      sql: `SELECT r.id, r.attestation_id, r.revoked_at, r.reason, r.sig, a.app, a.external_handle, a.version
+            FROM identity_attestation_revocations r
+            JOIN identity_attestations a ON a.id = r.attestation_id
+            WHERE a.crow_id = ?
+            ORDER BY r.revoked_at DESC LIMIT ? OFFSET ?`,
+      args: [identity.crowId, IDENTITY_PAGE_SIZE + 1, cursor],
+    });
+    const hasNext = rows.rows.length > IDENTITY_PAGE_SIZE;
+    const page = rows.rows.slice(0, IDENTITY_PAGE_SIZE);
+    res.set("Cache-Control", "public, max-age=60");
+    res.json({
+      version: 1,
+      crow_id: identity.crowId,
+      page_size: IDENTITY_PAGE_SIZE,
+      cursor,
+      next: hasNext ? cursor + IDENTITY_PAGE_SIZE : null,
+      revocations: page.map(r => ({
+        attestation_id: Number(r.attestation_id),
+        app: r.app,
+        external_handle: r.external_handle,
+        version: Number(r.version),
+        revoked_at: Number(r.revoked_at),
+        reason: r.reason || null,
+        sig: r.sig,
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: "revocation list unavailable" });
+  }
+});
+
 // --- Health Check ---
 app.get("/health", async (req, res) => {
   const proxyStatus = getProxyStatus();

@@ -87,6 +87,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | "lemmy", "link aggregator", "reddit alternative", "subscribe community", "post link", "fediverse discussion", "upvote" | "lemmy", "agregador enlaces", "alternativa reddit", "suscribir comunidad", "publicar enlace", "discusión fediverso" | lemmy | crow-lemmy |
 | "mastodon", "toot", "fediverse", "activitypub", "@user@server", "federated timeline", "boost", "mastodon instance" | "mastodon", "tootear", "fediverso", "activitypub", "@usuario@servidor", "linea temporal federada", "reblog" | mastodon | crow-mastodon |
 | "peertube", "upload video", "federated video", "video channel", "fediverse video", "youtube alternative", "webtorrent" | "peertube", "subir video", "video federado", "canal video", "video fediverso", "alternativa youtube" | peertube | crow-peertube |
+| "attest identity", "prove I am", "link my mastodon", "verify handle", "keyoxide", "crow identity attestation", "revoke attestation" | "atestar identidad", "probar que soy", "vincular mi mastodon", "verificar handle", "keyoxide", "atestación identidad crow" | crow-identity | crow-sharing |
 | "tutor me", "teach me", "quiz me", "help me understand" | "enséñame", "explícame", "evalúame" | tutoring | crow-memory |
 | "wrap up", "summarize session", "what did we do" | "resumir sesión", "qué hicimos" | session-summary | crow-memory |
 | "change language", "speak in..." | "cambiar idioma", "háblame en..." | i18n | crow-memory |
