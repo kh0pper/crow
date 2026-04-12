@@ -85,8 +85,11 @@ function launchPet(anchor) {
     try { process.kill(petPid, 0); return { error: `Pet is already running (pid ${petPid}). Use 'close pet' first.` }; }
     catch { petPid = null; }
   }
-  const env = { ...process.env };
-  if (anchor) env.CROW_PET_ANCHOR = anchor;
+  // Default to bottom-right — keeps the mascot out of the Blockly kiosk's
+  // workspace on a typical 1920x1080 layout. Patch 0007 reads CROW_PET_ANCHOR
+  // at launch and calls setPetBounds({ anchor, width: 320, height: 480 }).
+  const effectiveAnchor = anchor || "bottom-right";
+  const env = { ...process.env, CROW_PET_ANCHOR: effectiveAnchor };
   // Detach so the pet outlives the MCP process; ignore I/O.
   const child = spawn(PET_APPIMAGE_PATH, [], {
     detached: true,
@@ -95,7 +98,7 @@ function launchPet(anchor) {
   });
   child.unref();
   petPid = child.pid;
-  return { pid: child.pid, anchor: anchor || null };
+  return { pid: child.pid, anchor: effectiveAnchor };
 }
 
 function closePet() {
