@@ -20,6 +20,7 @@ produces `~/.crow/bin/open-llm-vtuber.AppImage`.
 | `web-0005-no-sandbox-fallback.patch` | active | Proactively append `--no-sandbox` on AppImage launches and log a visible warning. |
 | `web-0006-persona-swap.patch` | **intentionally empty** | Spike 2 confirmed upstream `switch-config` handles per-connection persona; slot retained to keep numbering contiguous. |
 | `web-0007-crow-pet-anchor-on-launch.patch` | active | Read `CROW_PET_ANCHOR` env var at launch, auto-switch to pet mode, apply anchor (right / left / bottom-right / bottom-left) with 320x480 pet-body defaults. |
+| `web-0008-pet-control-socket.patch` | active | Unix-socket control channel at `$XDG_RUNTIME_DIR/crow-pet.sock` so the Crow gateway can re-anchor a running pet via `{op:"anchor",spec:...}` without respawning. |
 
 ## Applying
 
