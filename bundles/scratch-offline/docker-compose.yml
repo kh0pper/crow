@@ -1,0 +1,20 @@
+services:
+  scratch-offline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SCRATCH_GUI_REF: ${SCRATCH_GUI_REF:-master}
+    image: crow-scratch-offline:latest
+    container_name: crow-scratch-offline
+    ports:
+      - "127.0.0.1:${SCRATCH_HTTP_PORT:-8087}:8080"
+    init: true
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

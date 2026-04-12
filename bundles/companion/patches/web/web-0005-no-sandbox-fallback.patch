@@ -1,0 +1,61 @@
+From a0ea17cf599f835fee598422f7778024abc37256 Mon Sep 17 00:00:00 2001
+From: Crow Maintainers <crow@localhost>
+Date: Sun, 12 Apr 2026 14:40:25 -0500
+Subject: [PATCH 5/6] Enable --no-sandbox fallback for AppImages on locked-down distros
+
+Ubuntu / Debian derivatives with `kernel.unprivileged_userns_clone=0`
+refuse to start Chromium's SUID sandbox inside an AppImage and crash
+with a cryptic 'Failed to move to new namespace' error.
+
+We detect the AppImage-on-Linux case via $APPIMAGE, log a visible
+warning with a docs link, and proactively append `--no-sandbox`. The
+flag is only appended on AppImage launches — regular dev `npm run
+dev` launches keep the sandbox. A `child-process-gone` listener
+re-logs the warning if the GPU process still crashes.
+
+Applies against: vendor/open-llm-vtuber-web @ d176e7df2366952e3bacbf12cf9a8b18a4315932
+
+---
+ src/main/index.ts | 29 +++++++++++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/src/main/index.ts b/src/main/index.ts
+index ccdd9ca..39cf76a 100644
+--- a/src/main/index.ts
++++ b/src/main/index.ts
+@@ -24,6 +24,35 @@ if (process.platform === "linux") {
+ }
+ // --- END CROW PATCH ---------------------------------------------------
+ 
++// --- BEGIN CROW PATCH: AppImage sandbox fallback ---------------------
++// Recent Ubuntu / Debian derivatives (kernel.unprivileged_userns_clone=0)
++// refuse to start Chromium's SUID sandbox inside an AppImage, crashing
++// with a cryptic "Failed to move to new namespace" error. Detect the
++// AppImage case, log a visible warning, and relaunch with --no-sandbox.
++// We never silently disable the sandbox on non-AppImage launches.
++if (
++  process.platform === "linux"
++  && process.env.APPIMAGE
++  && !app.commandLine.hasSwitch("no-sandbox")
++) {
++  const sandboxWarning =
++    "[crow] AppImage detected on Linux: enabling --no-sandbox fallback. "
++    + "See https://maestro.press/software/crow/bundles/maker-lab/sandbox "
++    + "for how to re-enable the sandbox (requires unprivileged user namespaces).";
++  app.on("child-process-gone", (_event, details) => {
++    if (details.type === "GPU" && details.reason === "crashed") {
++      // eslint-disable-next-line no-console
++      console.warn(sandboxWarning);
++    }
++  });
++  // Append proactively — cheaper than a relaunch round-trip on the
++  // distros where SUID sandbox has never worked for unprivileged users.
++  app.commandLine.appendSwitch("no-sandbox");
++  // eslint-disable-next-line no-console
++  console.warn(sandboxWarning);
++}
++// --- END CROW PATCH --------------------------------------------------
++
+ let windowManager: WindowManager;
+ let menuManager: MenuManager;
+ let isQuitting = false;

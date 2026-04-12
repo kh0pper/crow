@@ -1,0 +1,58 @@
+From 30e6a323086a566dfea4e81924742c8a260db15e Mon Sep 17 00:00:00 2001
+From: Crow Maintainers <crow@localhost>
+Date: Sun, 12 Apr 2026 14:39:34 -0500
+Subject: [PATCH 2/6] Auto-apply Linux transparency flags when no compositor is present
+
+Pet mode relies on `transparent: true` BrowserWindow. On Linux this
+only works when a compositor is running (mutter / kwin / picom / etc.).
+Without one, electron falls back to an opaque black background.
+
+Chromium accepts:
+
+  --enable-transparent-visuals --disable-gpu-compositing
+
+but they must be appended via `app.commandLine.appendSwitch` BEFORE
+`app.whenReady()` resolves. We probe $XDG_SESSION_TYPE and the X11
+socket presence, and append the flags only when the probe fails.
+Harmless on Wayland; load-bearing on X11-without-compositor.
+
+Applies against: vendor/open-llm-vtuber-web @ d176e7df2366952e3bacbf12cf9a8b18a4315932
+
+---
+ src/main/index.ts | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/src/main/index.ts b/src/main/index.ts
+index e1e1bf6..4c1393d 100644
+--- a/src/main/index.ts
++++ b/src/main/index.ts
+@@ -1,9 +1,29 @@
+ /* eslint-disable no-shadow */
+ import { app, ipcMain, globalShortcut, desktopCapturer } from "electron";
+ import { electronApp, optimizer } from "@electron-toolkit/utils";
++import { existsSync } from "fs";
+ import { WindowManager } from "./window-manager";
+ import { MenuManager } from "./menu-manager";
+ 
++// --- BEGIN CROW PATCH: Linux transparency flags ----------------------
++// On Linux `transparent: true` BrowserWindow only renders a truly
++// transparent background when a compositor is running. On sessions
++// without one (older X11 kiosks, some minimal WMs) Chromium falls back
++// to opaque black unless we pass these switches BEFORE app.whenReady().
++// Harmless on Wayland; load-bearing on X11-without-compositor.
++if (process.platform === "linux") {
++  const sessionType = process.env.XDG_SESSION_TYPE || "";
++  const isWayland = sessionType === "wayland";
++  const hasX11Compositor =
++    sessionType === "x11" &&
++    existsSync(`/tmp/.X11-unix/X${(process.env.DISPLAY || ":0").replace(/^:/, "").split(".")[0]}`);
++  if (!isWayland && !hasX11Compositor) {
++    app.commandLine.appendSwitch("enable-transparent-visuals");
++    app.commandLine.appendSwitch("disable-gpu-compositing");
++  }
++}
++// --- END CROW PATCH ---------------------------------------------------
++
+ let windowManager: WindowManager;
+ let menuManager: MenuManager;
+ let isQuitting = false;

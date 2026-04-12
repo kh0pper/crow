@@ -1027,6 +1027,24 @@
         case "media":
           handleMediaCommand(data);
           break;
+        case "pet_launched":
+          // Pet AppImage was spawned by the MCP server. Surface a toast so
+          // the user knows something happened — the pet itself appears as
+          // a separate native window outside the iframe sandbox.
+          if (window.CrowToast && typeof window.CrowToast.show === "function") {
+            window.CrowToast.show("Pet launched" + (data.anchor ? " (" + data.anchor + ")" : ""));
+          }
+          break;
+        case "pet_reanchored":
+          if (window.CrowToast && typeof window.CrowToast.show === "function") {
+            window.CrowToast.show("Pet moved to " + (data.anchor || "anchor"));
+          }
+          break;
+        case "pet_closed":
+          if (window.CrowToast && typeof window.CrowToast.show === "function") {
+            window.CrowToast.show("Pet closed");
+          }
+          break;
         case "save_workspace":
           var count = saveWorkspace(data.name || "default");
           break;

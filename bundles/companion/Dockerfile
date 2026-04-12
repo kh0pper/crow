@@ -30,9 +30,12 @@ COPY scripts/crow-webrtc.js /app/scripts/crow-webrtc.js
 COPY scripts/inject-webrtc.sh /app/scripts/inject-webrtc.sh
 COPY scripts/crow-voice-panel.js /app/scripts/crow-voice-panel.js
 COPY scripts/inject-voice-panel.sh /app/scripts/inject-voice-panel.sh
+COPY scripts/crow-face-tracking.js /app/scripts/crow-face-tracking.js
+COPY scripts/inject-face-tracking.sh /app/scripts/inject-face-tracking.sh
+COPY scripts/inject-call-enhancements.sh /app/scripts/inject-call-enhancements.sh
 COPY scripts/entrypoint.sh /app/entrypoint.sh
 COPY scripts/download-models.sh /app/scripts/download-models.sh
-RUN chmod +x /app/entrypoint.sh /app/scripts/download-models.sh /app/scripts/inject-theme.sh /app/scripts/inject-bg-refresh.sh /app/scripts/inject-wm.sh /app/scripts/inject-webrtc.sh /app/scripts/inject-voice-panel.sh
+RUN chmod +x /app/entrypoint.sh /app/scripts/download-models.sh /app/scripts/inject-theme.sh /app/scripts/inject-bg-refresh.sh /app/scripts/inject-wm.sh /app/scripts/inject-webrtc.sh /app/scripts/inject-voice-panel.sh /app/scripts/inject-face-tracking.sh /app/scripts/inject-call-enhancements.sh
 
 EXPOSE 12393
 

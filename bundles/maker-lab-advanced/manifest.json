@@ -1,0 +1,33 @@
+{
+  "id": "maker-lab-advanced",
+  "name": "Maker Lab Advanced",
+  "version": "0.1.0",
+  "description": "Self-hosted JupyterHub for older learners (ages 9+) — single-machine multi-user Python notebooks with kid-safe kernel defaults and an AI pair-programmer. Sibling bundle to maker-lab: Blockly is the 5-9 on-ramp, Scratch is the 8+ step-up, this is the 9+ landing zone with real Python.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "education",
+  "tags": ["education", "jupyter", "jupyterhub", "python", "notebook", "classroom", "k12", "teen", "maker-lab"],
+  "icon": "graduation-cap",
+  "docker": { "composefile": "docker-compose.yml" },
+  "panel": "panel/maker-lab-advanced.js",
+  "skills": ["skills/maker-lab-advanced.md"],
+  "requires": {
+    "env": ["MLA_ADMIN_USER", "MLA_ADMIN_PASSWORD"],
+    "min_ram_mb": 2048,
+    "recommended_ram_mb": 8000,
+    "min_disk_mb": 4000,
+    "recommended_disk_mb": 40000,
+    "bundles": ["maker-lab"]
+  },
+  "env_vars": [
+    { "name": "MLA_ADMIN_USER", "description": "Initial JupyterHub admin username. Gets first login; add more admins from the UI after setup.", "required": true },
+    { "name": "MLA_ADMIN_PASSWORD", "description": "Initial admin password. Set via NativeAuthenticator on first boot; change via the JupyterHub UI afterward.", "required": true, "secret": true },
+    { "name": "MLA_HTTP_PORT", "description": "Host port for the JupyterHub UI. Default 8088.", "default": "8088", "required": false },
+    { "name": "MLA_DATA_PATH", "description": "Host path for user home dirs + JupyterHub state (defaults to a named volume).", "required": false }
+  ],
+  "ports": [8088],
+  "webUI": { "port": 8088, "path": "/", "label": "JupyterHub" },
+  "sibling_of": ["maker-lab"],
+  "age_gate": { "min_age": 9 },
+  "notes": "v1 single-admin classroom shape: NativeAuthenticator + SimpleLocalProcessSpawner, shared container runtime, loopback-bound on :8088. Kid-safe kernel config blocks shell-escape patterns and chroots file writes to the user's home. True multi-host / GitHub-OAuth / sandboxed-per-user deploys are future work. Hard dep on the maker-lab bundle: the pair-programmer skill reuses maker-lab's hint pipeline and persona prompts at a higher reading level."
+}
