@@ -19,6 +19,9 @@
     "proxyMode": "direct"
   },
   "skills": ["skills/companion.md"],
+  "companion": {
+    "pet_mode": true
+  },
   "env_vars": [
     {
       "name": "COMPANION_AVATAR",
