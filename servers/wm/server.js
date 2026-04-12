@@ -18,6 +18,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
+import net from "node:net";
 import YouTubeSR from "youtube-sr";
 const YouTube = YouTubeSR.default || YouTubeSR;
 
@@ -74,7 +75,40 @@ const PET_APPIMAGE_PATH = resolve(homedir(), ".crow/bin/open-llm-vtuber.AppImage
 const PET_VALID_ANCHORS = ["right", "left", "bottom-right", "bottom-left"];
 let petPid = null;
 
-function launchPet(anchor) {
+// Socket path resolution mirrors patch 0008's server-side logic.
+function petSocketPath() {
+  if (process.env.CROW_PET_SOCKET) return process.env.CROW_PET_SOCKET;
+  if (process.env.XDG_RUNTIME_DIR) return `${process.env.XDG_RUNTIME_DIR}/crow-pet.sock`;
+  const uid = typeof process.getuid === "function" ? process.getuid() : process.pid;
+  return `/tmp/crow-pet-${uid}.sock`;
+}
+
+// Send a JSON op to the running pet's control socket. Short timeout —
+// if the pet is wedged we fall back to respawn rather than hang.
+function sendPetOp(msg, timeoutMs = 500) {
+  return new Promise((resolveP) => {
+    const sockPath = petSocketPath();
+    if (!existsSync(sockPath)) return resolveP({ ok: false, error: "no-socket" });
+    const c = net.createConnection(sockPath);
+    let buf = "";
+    const timer = setTimeout(() => { try { c.destroy(); } catch {} resolveP({ ok: false, error: "timeout" }); }, timeoutMs);
+    c.setEncoding("utf8");
+    c.on("connect", () => { c.write(JSON.stringify(msg) + "\n"); });
+    c.on("data", (chunk) => {
+      buf += chunk;
+      const idx = buf.indexOf("\n");
+      if (idx >= 0) {
+        clearTimeout(timer);
+        try { resolveP(JSON.parse(buf.slice(0, idx))); }
+        catch { resolveP({ ok: false, error: "bad-response" }); }
+        try { c.end(); } catch {}
+      }
+    });
+    c.on("error", (e) => { clearTimeout(timer); resolveP({ ok: false, error: String(e.message || e) }); });
+  });
+}
+
+async function launchPet(anchor) {
   if (process.platform !== "linux") {
     return { error: "Pet mode is Linux-only. Use web-tiled mode on this platform." };
   }
@@ -82,7 +116,14 @@ function launchPet(anchor) {
     return { error: `Pet AppImage not found at ${PET_APPIMAGE_PATH}. Run bundles/companion/scripts/build-pet-linux.sh to build it.` };
   }
   if (petPid) {
-    try { process.kill(petPid, 0); return { error: `Pet is already running (pid ${petPid}). Use 'close pet' first.` }; }
+    try {
+      process.kill(petPid, 0);
+      // Pet is alive — try to re-anchor via control socket instead of respawning.
+      const effectiveAnchor = anchor || "bottom-right";
+      const r = await sendPetOp({ op: "anchor", spec: { anchor: effectiveAnchor, width: 320, height: 480 } });
+      if (r.ok) return { pid: petPid, anchor: effectiveAnchor, reanchored: true };
+      return { error: `Pet is already running (pid ${petPid}) but control socket is unreachable: ${r.error}. Use 'close pet' first.` };
+    }
     catch { petPid = null; }
   }
   // Default to bottom-right — keeps the mascot out of the Blockly kiosk's
@@ -314,9 +355,9 @@ export function createWmServer(dbPath, options = {}) {
           if (anchor && !PET_VALID_ANCHORS.includes(anchor)) {
             return err(`Invalid pet anchor "${anchor}". Valid: ${PET_VALID_ANCHORS.join(", ")}`);
           }
-          const r = launchPet(anchor);
+          const r = await launchPet(anchor);
           if (r.error) return err(r.error);
-          return ok({ action: "pet_launched", pid: r.pid, anchor: r.anchor });
+          return ok({ action: r.reanchored ? "pet_reanchored" : "pet_launched", pid: r.pid, anchor: r.anchor });
         }
         // Parse "open <app> <query>"
         for (const app of VALID_APPS) {

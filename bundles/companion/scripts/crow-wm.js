@@ -1035,6 +1035,11 @@
             window.CrowToast.show("Pet launched" + (data.anchor ? " (" + data.anchor + ")" : ""));
           }
           break;
+        case "pet_reanchored":
+          if (window.CrowToast && typeof window.CrowToast.show === "function") {
+            window.CrowToast.show("Pet moved to " + (data.anchor || "anchor"));
+          }
+          break;
         case "pet_closed":
           if (window.CrowToast && typeof window.CrowToast.show === "function") {
             window.CrowToast.show("Pet closed");

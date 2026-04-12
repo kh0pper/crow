@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crow Maintainers <crow@localhost>
+Date: Sun, 12 Apr 2026 15:25:00 -0500
+Subject: [PATCH 8/8] Unix-socket control channel for re-anchoring a running pet
+
+Phase 3.1 added `crow_wm open pet [anchor]`; Phase 3.2 made the anchor
+actually take effect at launch. But a second call while the pet was
+already running was rejected ("already running"). This patch adds a
+tiny Unix-socket control channel the Crow gateway can write to so
+subsequent anchor calls re-position the live pet without a respawn.
+
+Wire protocol: newline-delimited JSON.
+
+  client → server:  {"op":"anchor","spec":{"anchor":"right"}}
+  server → client:  {"ok":true,"bounds":{"x":...,"y":...}}
+
+Other ops:
+  {"op":"ping"} → {"ok":true,"pid":<electron-pid>}
+  unknown op   → {"ok":false,"error":"unknown-op: <op>"}
+
+Socket path resolution (server side):
+  1. $CROW_PET_SOCKET (explicit override)
+  2. $XDG_RUNTIME_DIR/crow-pet.sock
+  3. /tmp/crow-pet-<uid>.sock
+
+Socket mode is set to 0600 (owner-only) — same-user trust boundary
+since the Crow gateway and AppImage run as the same user. Cleaned up
+on before-quit; any stale file is unlinked on startup.
+
+Applies against: vendor/open-llm-vtuber-web @ d176e7df2366952e3bacbf12cf9a8b18a4315932
+(after patches 0001-0005, 0007 — patch 0006 is empty)
+
+diff --git a/src/main/index.ts b/src/main/index.ts
+index d681579..9392604 100644
+--- a/src/main/index.ts
++++ b/src/main/index.ts
+@@ -1,7 +1,8 @@
+ /* eslint-disable no-shadow */
+ import { app, ipcMain, globalShortcut, desktopCapturer } from "electron";
+ import { electronApp, optimizer } from "@electron-toolkit/utils";
+-import { existsSync } from "fs";
++import { existsSync, unlinkSync } from "fs";
++import net from "net";
+ import { WindowManager } from "./window-manager";
+ import { MenuManager } from "./menu-manager";
+ 
+@@ -185,6 +186,48 @@ app.whenReady().then(() => {
+     });
+   }
+ 
++  // --- BEGIN CROW PATCH: pet control socket -------------------------
++  // Unix socket the Crow gateway writes to so `open pet <anchor>`
++  // can re-anchor a running pet without respawning it. Newline-
++  // delimited JSON: { op: "anchor", spec: {...} } → { ok, bounds }.
++  // Socket path defaults to $XDG_RUNTIME_DIR/crow-pet.sock with a
++  // /tmp fallback so it works in desktop shells that don't set it.
++  const socketPath = process.env.CROW_PET_SOCKET
++    || (process.env.XDG_RUNTIME_DIR
++      ? `${process.env.XDG_RUNTIME_DIR}/crow-pet.sock`
++      : `/tmp/crow-pet-${process.getuid?.() ?? process.pid}.sock`);
++  try { if (existsSync(socketPath)) unlinkSync(socketPath); } catch { /* best-effort */ }
++  const petServer = net.createServer((conn) => {
++    conn.setEncoding("utf8");
++    let buf = "";
++    conn.on("data", (chunk) => {
++      buf += chunk;
++      let idx;
++      while ((idx = buf.indexOf("\n")) >= 0) {
++        const line = buf.slice(0, idx); buf = buf.slice(idx + 1);
++        if (!line.trim()) continue;
++        let msg;
++        try { msg = JSON.parse(line); } catch { conn.write(JSON.stringify({ ok: false, error: "bad-json" }) + "\n"); continue; }
++        if (msg.op === "anchor") {
++          const result = windowManager.setPetBounds(msg.spec || {});
++          conn.write(JSON.stringify(result) + "\n");
++        } else if (msg.op === "ping") {
++          conn.write(JSON.stringify({ ok: true, pid: process.pid }) + "\n");
++        } else {
++          conn.write(JSON.stringify({ ok: false, error: `unknown-op: ${msg.op}` }) + "\n");
++        }
++      }
++    });
++  });
++  petServer.listen(socketPath, () => {
++    try { require("fs").chmodSync(socketPath, 0o600); } catch { /* ok if umask already tight */ }
++  });
++  app.on("before-quit", () => {
++    try { petServer.close(); } catch {}
++    try { if (existsSync(socketPath)) unlinkSync(socketPath); } catch {}
++  });
++  // --- END CROW PATCH -----------------------------------------------
++
+   app.on("activate", () => {
+     const window = windowManager.getWindow();
+     if (window) {
