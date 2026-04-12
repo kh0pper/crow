@@ -1,0 +1,186 @@
+# Pixelfed — federated photo-sharing on ActivityPub.
+#
+# Four-container bundle: pixelfed (nginx+PHP-FPM via supervisord in the
+# zknt image) + horizon (laravel queue worker) + postgres + redis. app +
+# horizon on crow-federation; DB/redis isolated to default. Caddy
+# reverse-proxies :443 → pixelfed:80.
+#
+# Data:
+#   ~/.crow/pixelfed/postgres/    Postgres data dir
+#   ~/.crow/pixelfed/redis/       Redis persistence
+#   ~/.crow/pixelfed/storage/     Laravel storage/ (uploads, cache, logs)
+#   ~/.crow/pixelfed/uploads/     Public uploads dir (symlinked from storage)
+#
+# Media storage: on-disk by default. Set PIXELFED_S3_* to route to MinIO /
+# external S3 — storage-translators.pixelfed() maps to the AWS_* +
+# FILESYSTEM_CLOUD=s3 envelope Pixelfed expects. configure-storage.mjs in
+# scripts/ does the translation at install time.
+#
+# Image: zknt/pixelfed:0.12 (floats within 0.12.x — verify the current
+# tag + CVE feed at implementation time per the plan's image-tag policy).
+
+networks:
+  crow-federation:
+    external: true
+  default:
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: crow-pixelfed-postgres
+    networks:
+      - default
+    environment:
+      POSTGRES_USER: pixelfed
+      POSTGRES_PASSWORD: ${PIXELFED_DB_PASSWORD}
+      POSTGRES_DB: pixelfed
+    volumes:
+      - ${PIXELFED_DATA_DIR:-~/.crow/pixelfed}/postgres:/var/lib/postgresql/data
+    init: true
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pixelfed"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  redis:
+    image: redis:7-alpine
+    container_name: crow-pixelfed-redis
+    networks:
+      - default
+    volumes:
+      - ${PIXELFED_DATA_DIR:-~/.crow/pixelfed}/redis:/data
+    init: true
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  pixelfed:
+    image: zknt/pixelfed:0.12
+    container_name: crow-pixelfed
+    networks:
+      - default
+      - crow-federation
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      APP_NAME: Pixelfed
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_KEY: ${PIXELFED_APP_KEY}
+      APP_URL: https://${PIXELFED_HOSTNAME}
+      APP_DOMAIN: ${PIXELFED_HOSTNAME}
+      ADMIN_DOMAIN: ${PIXELFED_HOSTNAME}
+      SESSION_DOMAIN: ${PIXELFED_HOSTNAME}
+      TRUST_PROXIES: "*"
+      # DB
+      DB_CONNECTION: pgsql
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_DATABASE: pixelfed
+      DB_USERNAME: pixelfed
+      DB_PASSWORD: ${PIXELFED_DB_PASSWORD}
+      # Cache / queue
+      BROADCAST_DRIVER: log
+      CACHE_DRIVER: redis
+      QUEUE_DRIVER: redis
+      SESSION_DRIVER: redis
+      REDIS_CLIENT: predis
+      REDIS_HOST: redis
+      REDIS_PASSWORD: "null"
+      REDIS_PORT: "6379"
+      # Federation
+      ACTIVITY_PUB: "true"
+      AP_REMOTE_FOLLOW: "true"
+      AP_SHAREDINBOX: "true"
+      AP_INBOX: "true"
+      AP_OUTBOX: "true"
+      # Registration / limits
+      OPEN_REGISTRATION: ${PIXELFED_OPEN_REGISTRATION:-false}
+      ENFORCE_EMAIL_VERIFICATION: "true"
+      PF_MAX_USERS: ${PIXELFED_MAX_USERS:-1000}
+      OAUTH_ENABLED: "true"
+      # Media
+      PF_OPTIMIZE_IMAGES: "true"
+      IMAGE_DRIVER: imagick
+      MAX_PHOTO_SIZE: ${PIXELFED_MAX_PHOTO_SIZE:-15000}
+      MAX_ALBUM_LENGTH: ${PIXELFED_MAX_ALBUM_LENGTH:-4}
+      MEDIA_EXIF_DATABASE: "false"
+      MEDIA_DELETE_LOCAL_AFTER_CLOUD: "true"
+      # Remote media cache retention (days)
+      PF_REMOTE_MEDIA_DAYS: ${PIXELFED_MEDIA_RETENTION_DAYS:-14}
+      # S3 (empty unless configure-storage.mjs populated them)
+      FILESYSTEM_CLOUD: ${FILESYSTEM_CLOUD:-local}
+      PF_ENABLE_CLOUD: ${PF_ENABLE_CLOUD:-false}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_BUCKET: ${AWS_BUCKET:-}
+      AWS_URL: ${AWS_URL:-}
+      AWS_ENDPOINT: ${AWS_ENDPOINT:-}
+      AWS_USE_PATH_STYLE_ENDPOINT: ${AWS_USE_PATH_STYLE_ENDPOINT:-true}
+    volumes:
+      - ${PIXELFED_DATA_DIR:-~/.crow/pixelfed}/storage:/var/www/storage
+      - ${PIXELFED_DATA_DIR:-~/.crow/pixelfed}/uploads:/var/www/public/storage
+    init: true
+    mem_limit: 1500m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1/api/v1/instance >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+  horizon:
+    image: zknt/pixelfed:0.12
+    container_name: crow-pixelfed-horizon
+    networks:
+      - default
+    depends_on:
+      pixelfed:
+        condition: service_healthy
+    environment:
+      APP_NAME: Pixelfed
+      APP_ENV: production
+      APP_KEY: ${PIXELFED_APP_KEY}
+      APP_URL: https://${PIXELFED_HOSTNAME}
+      APP_DOMAIN: ${PIXELFED_HOSTNAME}
+      DB_CONNECTION: pgsql
+      DB_HOST: postgres
+      DB_DATABASE: pixelfed
+      DB_USERNAME: pixelfed
+      DB_PASSWORD: ${PIXELFED_DB_PASSWORD}
+      BROADCAST_DRIVER: log
+      CACHE_DRIVER: redis
+      QUEUE_DRIVER: redis
+      REDIS_CLIENT: predis
+      REDIS_HOST: redis
+      REDIS_PASSWORD: "null"
+      REDIS_PORT: "6379"
+      FILESYSTEM_CLOUD: ${FILESYSTEM_CLOUD:-local}
+      PF_ENABLE_CLOUD: ${PF_ENABLE_CLOUD:-false}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_BUCKET: ${AWS_BUCKET:-}
+      AWS_URL: ${AWS_URL:-}
+      AWS_ENDPOINT: ${AWS_ENDPOINT:-}
+      AWS_USE_PATH_STYLE_ENDPOINT: ${AWS_USE_PATH_STYLE_ENDPOINT:-true}
+    volumes:
+      - ${PIXELFED_DATA_DIR:-~/.crow/pixelfed}/storage:/var/www/storage
+      - ${PIXELFED_DATA_DIR:-~/.crow/pixelfed}/uploads:/var/www/public/storage
+    command: ["php", "/var/www/artisan", "horizon"]
+    init: true
+    mem_limit: 768m
+    restart: unless-stopped
