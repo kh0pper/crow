@@ -1,0 +1,75 @@
+name: Bundle Image Freshness Check
+
+# Nightly check that every bundle's docker image still pulls.
+# Catches upstream image deletions, repo renames, and tag deprecations.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract bundle images
+        run: |
+          set -e
+          : > /tmp/images.txt
+          for compose in bundles/*/docker-compose.yml; do
+            [ -f "$compose" ] || continue
+            grep -E '^\s*image:\s+' "$compose" | grep -v '^\s*#' | \
+              sed -E 's/^\s*image:\s*//' | tr -d '"' | tr -d "'" >> /tmp/images.txt || true
+          done
+          sort -u /tmp/images.txt -o /tmp/images.txt
+          echo "Found $(wc -l < /tmp/images.txt) unique images:"
+          cat /tmp/images.txt
+
+      - name: Pull each image
+        id: pull
+        run: |
+          set +e
+          fail=0
+          : > /tmp/missing.txt
+          while IFS= read -r img; do
+            [ -z "$img" ] && continue
+            echo "::group::Pulling $img"
+            if docker pull "$img" >/dev/null 2>&1; then
+              echo "OK"
+            else
+              echo "FAIL"
+              echo "$img" >> /tmp/missing.txt
+              fail=1
+            fi
+            echo "::endgroup::"
+          done < /tmp/images.txt
+          exit $fail
+
+      - name: File issue on failure
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body = "Nightly image-freshness check failed.\n\n";
+            try {
+              const missing = fs.readFileSync('/tmp/missing.txt', 'utf8').trim().split('\n').filter(Boolean);
+              body += "Images that failed to pull:\n";
+              for (const img of missing) body += "- `" + img + "`\n";
+            } catch (e) {
+              body += "Could not read missing list — see workflow logs.";
+            }
+            body += "\n\nWorkflow run: " + context.serverUrl + "/" + context.repo.owner + "/" + context.repo.repo + "/actions/runs/" + context.runId;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: "Bundle image-freshness check failed",
+              body,
+              labels: ["bundle-image-stale", "automated"],
+            });
