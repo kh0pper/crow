@@ -1,0 +1,39 @@
+{
+  "id": "matrix-bridges",
+  "name": "Matrix Bridges",
+  "version": "1.0.0",
+  "description": "Meta-bundle for Matrix appservice bridges (Signal, Telegram, WhatsApp, custom crow-matrix-bridge). Opt-in per bridge; each has its own consent text and hardware requirements. Installs appservice registrations into Dendrite and restarts the homeserver.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "federated-comms",
+  "tags": ["matrix", "bridges", "signal", "telegram", "whatsapp", "mautrix", "meta-bundle"],
+  "icon": "message-circle",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": null,
+  "skills": ["skills/matrix-bridges.md"],
+  "consent_required": true,
+  "install_consent_messages": {
+    "en": "This meta-bundle installs Matrix appservice bridges that relay messages between Matrix (your Dendrite homeserver from F.3) and closed platforms (Signal, Telegram, WhatsApp). EACH BRIDGE HAS ITS OWN LEGAL + PRIVACY PROFILE. Signal's ToS explicitly prohibits automated relays and bot accounts — running mautrix-signal against a personal Signal number risks Signal terminating that number with no appeal. Telegram tolerates bot bridges but throttles aggressively on new accounts. WhatsApp actively blocks accounts that register as a 'multi-device' client from a non-WhatsApp app; mautrix-whatsapp expects the target phone to be opted-in and the owner accepts that Meta may ban the number. All bridges require double-puppeting (bridge bot posts AS you, not as a proxy), which means your Matrix account can inadvertently leak every Signal/Telegram/WhatsApp message to Dendrite admins + your homeserver's federation peers. Each bridge enabled here adds 500 MB-2 GB of RAM + 5-20 GB of disk (mautrix-whatsapp alone can spike 2 GB during media-heavy chats). Only enable bridges you actively need; disable bridges you stop using (stale bridges keep consuming resources AND keep the bridge bot in every room it joined). Dendrite must be RESTARTED after bridges are enabled — appservice registrations are read only at startup; hot-reload silently no-ops.",
+    "es": "Este meta-paquete instala puentes appservice de Matrix que retransmiten mensajes entre Matrix (tu homeserver Dendrite de F.3) y plataformas cerradas (Signal, Telegram, WhatsApp). CADA PUENTE TIENE SU PROPIO PERFIL LEGAL + DE PRIVACIDAD. Los ToS de Signal prohíben explícitamente los relays automatizados y cuentas bot — ejecutar mautrix-signal contra un número Signal personal arriesga que Signal termine ese número sin apelación. Telegram tolera puentes bot pero limita agresivamente cuentas nuevas. WhatsApp bloquea activamente cuentas que se registran como cliente 'multi-dispositivo' desde una app que no es WhatsApp; mautrix-whatsapp espera que el teléfono destino esté opt-in y el dueño acepta que Meta puede banear el número. Todos los puentes requieren doble-puppeting (el bot del puente publica COMO tú, no como proxy), lo que significa que tu cuenta de Matrix puede filtrar inadvertidamente todos los mensajes de Signal/Telegram/WhatsApp a admins de Dendrite + pares federados de tu homeserver. Cada puente habilitado añade 500 MB-2 GB de RAM + 5-20 GB de disco (mautrix-whatsapp solo puede subir a 2 GB en chats con muchos medios). Solo habilita los puentes que activamente necesitas; deshabilita los que dejas de usar (puentes obsoletos siguen consumiendo recursos Y mantienen al bot del puente en cada sala a la que se unió). Dendrite debe REINICIARSE después de habilitar puentes — los registros appservice se leen solo al inicio; un hot-reload silenciosamente no hace nada."
+  },
+  "requires": {
+    "env": ["MATRIX_BRIDGE_HOMESERVER_URL", "MATRIX_BRIDGE_DOMAIN"],
+    "bundles": ["caddy", "matrix-dendrite"],
+    "min_ram_mb": 500,
+    "recommended_ram_mb": 2000,
+    "min_disk_mb": 5000,
+    "recommended_disk_mb": 30000
+  },
+  "env_vars": [
+    { "name": "MATRIX_BRIDGE_HOMESERVER_URL", "description": "Internal URL of the Dendrite client-server API (http://dendrite:8008 over crow-federation).", "default": "http://dendrite:8008", "required": true },
+    { "name": "MATRIX_BRIDGE_DOMAIN", "description": "MATRIX_SERVER_NAME from the matrix-dendrite bundle (appears in bridge bot MXIDs as @signalbot:<this>).", "required": true },
+    { "name": "BRIDGE_SIGNAL_ENABLED", "description": "Enable mautrix-signal. RISK: Signal ToS prohibits automated clients — number may be terminated.", "default": "false", "required": false },
+    { "name": "BRIDGE_TELEGRAM_ENABLED", "description": "Enable mautrix-telegram. Requires a Telegram API ID + hash.", "default": "false", "required": false },
+    { "name": "BRIDGE_TELEGRAM_API_ID", "description": "Telegram API ID from my.telegram.org/apps.", "required": false, "secret": true },
+    { "name": "BRIDGE_TELEGRAM_API_HASH", "description": "Telegram API hash.", "required": false, "secret": true },
+    { "name": "BRIDGE_WHATSAPP_ENABLED", "description": "Enable mautrix-whatsapp. RISK: WhatsApp may ban the linked phone number.", "default": "false", "required": false }
+  ],
+  "ports": [],
+  "webUI": null,
+  "notes": "Enabled bridges become sidecar containers. post-install.sh generates appservice registration YAMLs, calls matrix_register_appservice via docker exec, copies the YAMLs into /etc/dendrite/appservices/, and restarts the crow-dendrite container (registrations are read only at startup). To add/remove bridges: toggle BRIDGE_*_ENABLED in .env, run `crow bundle restart matrix-bridges`, then restart Dendrite manually."
+}

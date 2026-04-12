@@ -3386,6 +3386,41 @@
       "notes": "Three containers (peertube + postgres + redis). chocobozzz/peertube:production-bookworm. Expose via caddy_add_federation_site { domain: PEERTUBE_WEBSERVER_HOSTNAME, upstream: 'peertube:9000', profile: 'activitypub-peertube' }. Admin password printed to logs on first boot — rotate IMMEDIATELY via `docker exec -it crow-peertube npm run reset-password -- -u root`."
     },
     {
+      "id": "matrix-bridges",
+      "name": "Matrix Bridges",
+      "description": "Meta-bundle for Matrix appservice bridges (Signal, Telegram, WhatsApp). Opt-in per bridge; each has its own legal + privacy profile. Requires matrix-dendrite.",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "federated-comms",
+      "tags": ["matrix", "bridges", "signal", "telegram", "whatsapp", "mautrix", "meta-bundle"],
+      "icon": "message-circle",
+      "docker": { "composefile": "docker-compose.yml" },
+      "server": null,
+      "skills": ["skills/matrix-bridges.md"],
+      "consent_required": true,
+      "requires": {
+        "env": ["MATRIX_BRIDGE_HOMESERVER_URL", "MATRIX_BRIDGE_DOMAIN"],
+        "bundles": ["caddy", "matrix-dendrite"],
+        "min_ram_mb": 500,
+        "recommended_ram_mb": 2000,
+        "min_disk_mb": 5000,
+        "recommended_disk_mb": 30000
+      },
+      "env_vars": [
+        { "name": "MATRIX_BRIDGE_HOMESERVER_URL", "description": "Internal URL of Dendrite (http://dendrite:8008).", "default": "http://dendrite:8008", "required": true },
+        { "name": "MATRIX_BRIDGE_DOMAIN", "description": "MATRIX_SERVER_NAME from matrix-dendrite bundle.", "required": true },
+        { "name": "BRIDGE_SIGNAL_ENABLED", "description": "Enable mautrix-signal. RISK: Signal ToS prohibits bots.", "default": "false", "required": false },
+        { "name": "BRIDGE_TELEGRAM_ENABLED", "description": "Enable mautrix-telegram.", "default": "false", "required": false },
+        { "name": "BRIDGE_TELEGRAM_API_ID", "description": "Telegram API ID from my.telegram.org/apps.", "required": false, "secret": true },
+        { "name": "BRIDGE_TELEGRAM_API_HASH", "description": "Telegram API hash.", "required": false, "secret": true },
+        { "name": "BRIDGE_WHATSAPP_ENABLED", "description": "Enable mautrix-whatsapp. RISK: Meta may ban the phone.", "default": "false", "required": false }
+      ],
+      "ports": [],
+      "webUI": null,
+      "notes": "Opt-in per bridge via BRIDGE_*_ENABLED env flags. post-install.sh copies each bridge's /data/registration.yaml into crow-dendrite:/etc/dendrite/appservices/ + patches dendrite.yaml + restarts crow-dendrite. Pair by DM'ing the bridge bot (@signalbot:yourdomain → 'login') from a Matrix client."
+    },
+    {
       "id": "developer-kit",
       "name": "Developer Kit",
       "description": "Build and submit Crow extensions with guided scaffolding, testing, and registry submission",
