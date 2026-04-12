@@ -1,0 +1,29 @@
+name: Port Allocation Check
+
+# Verifies that:
+#   1. Every host port in any bundles/**/docker-compose.yml is unique across bundles.
+#   2. Every host port is documented in docs/developers/port-allocation.md.
+
+on:
+  pull_request:
+    paths:
+      - "bundles/**/docker-compose.yml"
+      - "docs/developers/port-allocation.md"
+      - ".github/workflows/port-allocation.yml"
+  push:
+    branches: [main]
+    paths:
+      - "bundles/**/docker-compose.yml"
+      - "docs/developers/port-allocation.md"
+
+permissions:
+  contents: read
+
+jobs:
+  check-ports:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run port-allocation check
+        run: node scripts/check-port-allocation.js
