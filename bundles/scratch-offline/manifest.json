@@ -1,0 +1,30 @@
+{
+  "id": "scratch-offline",
+  "name": "Scratch (Offline)",
+  "version": "1.0.0",
+  "description": "Self-hosted Scratch programming environment — visual block-based coding for ages 8+. Full scratch-gui (MIT) built from source on first install and served locally; no Scratch.mit.edu dependency, no telemetry. Complements Maker Lab for older learners stepping up from Blockly.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "education",
+  "tags": ["education", "scratch", "coding", "blocks", "k12", "stem", "offline-first", "maker-lab"],
+  "icon": "graduation-cap",
+  "docker": { "composefile": "docker-compose.yml" },
+  "panel": "panel/scratch-offline.js",
+  "skills": ["skills/scratch-offline.md"],
+  "requires": {
+    "env": [],
+    "min_ram_mb": 256,
+    "recommended_ram_mb": 1024,
+    "min_disk_mb": 2000,
+    "recommended_disk_mb": 4000
+  },
+  "env_vars": [
+    { "name": "SCRATCH_HTTP_PORT", "description": "Host port to expose Scratch on. Default 8087.", "default": "8087", "required": false },
+    { "name": "SCRATCH_GUI_REF", "description": "scratch-gui git ref (tag, branch, or commit SHA) to build. Defaults to 'master'. Bump with care and retest — upstream doesn't maintain stable tags.", "default": "master", "required": false }
+  ],
+  "ports": [8087],
+  "webUI": { "port": 8087, "path": "/", "label": "Scratch (Offline)" },
+  "sibling_of": ["maker-lab"],
+  "age_gate": { "min_age": 8 },
+  "notes": "First install builds scratch-gui from source (requires ~2 GB disk + ~5-15 min on a Pi 4 / ~2 min on x86). Runtime footprint after build is ~50 MB static HTML/JS served by nginx. No sign-in, no cloud save — projects download as .sb3 files only. Gated to age 8+ in the Maker Lab recommender; younger learners stay on Blockly."
+}
