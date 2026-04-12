@@ -1,0 +1,24 @@
+{
+  "id": "gitea",
+  "name": "Gitea",
+  "version": "1.0.0",
+  "description": "Self-hosted git service — repos, issues, pull requests, and built-in SSH server for git over SSH",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "infrastructure",
+  "tags": ["git", "scm", "source-control", "code-hosting", "self-hosted"],
+  "icon": "git",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["GITEA_URL", "GITEA_TOKEN"] },
+  "panel": "panel/gitea.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/gitea.md"],
+  "requires": { "env": ["GITEA_TOKEN"], "min_ram_mb": 512, "min_disk_mb": 500 },
+  "env_vars": [
+    { "name": "GITEA_URL", "description": "Gitea server URL", "default": "http://localhost:3040", "required": true },
+    { "name": "GITEA_TOKEN", "description": "Personal access token (Settings > Applications > Generate New Token)", "required": true, "secret": true }
+  ],
+  "ports": [3040, 2223],
+  "webUI": { "port": 3040, "path": "/", "label": "Gitea" },
+  "notes": "First-run: open http://localhost:3040 to complete the setup wizard (database is preconfigured to SQLite). Then create the first admin user, log in, and generate a personal access token under Settings > Applications. Git over SSH uses port 2223: clone with ssh://git@host:2223/user/repo.git (the scp-style git@host:user/repo silently hits port 22 and will not reach this bundle)."
+}

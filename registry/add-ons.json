@@ -1397,6 +1397,30 @@
       "notes": "Docker stack includes MariaDB. Port remapped from 80 to 6875. Composite token auth (ID:SECRET). 8 MCP tools."
     },
     {
+      "id": "gitea",
+      "name": "Gitea",
+      "description": "Self-hosted git service — repos, issues, pull requests, and built-in SSH server for git over SSH",
+      "type": "bundle",
+      "version": "1.0.0",
+      "author": "Crow",
+      "category": "infrastructure",
+      "tags": ["git", "scm", "source-control", "code-hosting", "self-hosted"],
+      "icon": "git",
+      "docker": { "composefile": "docker-compose.yml" },
+      "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["GITEA_URL", "GITEA_TOKEN"] },
+      "panel": "panel/gitea.js",
+      "panelRoutes": "panel/routes.js",
+      "skills": ["skills/gitea.md"],
+      "requires": { "env": ["GITEA_TOKEN"], "min_ram_mb": 512, "min_disk_mb": 500 },
+      "env_vars": [
+        { "name": "GITEA_URL", "description": "Gitea server URL", "default": "http://localhost:3040", "required": true },
+        { "name": "GITEA_TOKEN", "description": "Personal access token (Settings > Applications)", "required": true, "secret": true }
+      ],
+      "ports": [3040, 2223],
+      "webUI": { "port": 3040, "path": "/", "label": "Gitea" },
+      "notes": "Uses built-in SQLite. First-run setup wizard at http://localhost:3040. SSH on port 2223 via Gitea's built-in Go SSH server (no host sshd needed). Clone with ssh://git@host:2223/user/repo (scp-style git@host:user/repo silently hits port 22 and will not reach this bundle)."
+    },
+    {
       "id": "vikunja",
       "name": "Vikunja",
       "description": "Self-hosted task management — projects, kanban boards, due dates, labels, and team collaboration",
