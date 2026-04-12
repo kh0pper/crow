@@ -1,0 +1,155 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crow Maintainers <crow@localhost>
+Date: Sun, 12 Apr 2026 16:30:00 -0500
+Subject: [PATCH 9/9] Cubism SDK first-fetch acceptance dialog + SHA verification
+
+Closes the Phase 3 loose end on Live2D Cubism SDK licensing. The SDK is
+proprietary and published under the Live2D Proprietary Software License;
+Crow does not bundle or redistribute it. On first pet-mode entry this
+patch shows a license-summary dialog and, on accept, fetches the SDK
+from Live2D's CDN, verifies its SHA-256, and caches it under
+~/.crow/cache/cubism/. Subsequent launches reuse the cached file
+without prompting. On cancel or verification failure, pet mode is
+disabled for that launch and the web-tiled window stays available.
+
+SDK URL: https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js
+SHA-256 pin (Spike 4, Phase 0 report):
+  942783587666a3a1bddea93afd349e26f798ed19dcd7a52449d0ae3322fcff7c
+
+Verification is not optional — a mismatch surfaces an error dialog
+pointing at Live2D's manual-download page and refuses to load.
+
+Cache layout:
+  ~/.crow/cache/cubism/live2dcubismcore.min.js
+
+Applies against: vendor/open-llm-vtuber-web @ d176e7df2366952e3bacbf12cf9a8b18a4315932
+(after patches 0001-0005, 0007-0008 — patch 0006 is empty)
+
+diff --git a/src/main/index.ts b/src/main/index.ts
+index 9392604..b6d6241 100644
+--- a/src/main/index.ts
++++ b/src/main/index.ts
+@@ -1,7 +1,10 @@
+ /* eslint-disable no-shadow */
+-import { app, ipcMain, globalShortcut, desktopCapturer } from "electron";
++import { app, dialog, ipcMain, globalShortcut, desktopCapturer, net as electronNet } from "electron";
+ import { electronApp, optimizer } from "@electron-toolkit/utils";
+-import { existsSync, unlinkSync } from "fs";
++import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
++import { createHash } from "crypto";
++import { join } from "path";
++import { homedir } from "os";
+ import net from "net";
+ import { WindowManager } from "./window-manager";
+ import { MenuManager } from "./menu-manager";
+@@ -54,6 +57,94 @@ if (
+ }
+ // --- END CROW PATCH --------------------------------------------------
+ 
++// --- BEGIN CROW PATCH: Cubism SDK first-fetch acceptance -------------
++// Pet mode uses the Live2D Cubism SDK, which is proprietary (Live2D
++// Proprietary Software License). We do not bundle or redistribute it.
++// On first pet-mode entry the user accepts the license in a dialog,
++// then we fetch the SDK from Live2D's CDN, verify a pinned SHA-256,
++// and cache it under ~/.crow/cache/cubism/. Subsequent launches reuse
++// the cached file silently. On cancel, pet mode is skipped for this
++// launch (web-tiled window stays usable). On SHA mismatch, an error
++// dialog points the user at the manual-download flow.
++const CUBISM_SDK_URL =
++  "https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js";
++const CUBISM_SDK_SHA256 =
++  "942783587666a3a1bddea93afd349e26f798ed19dcd7a52449d0ae3322fcff7c";
++const CUBISM_CACHE_DIR = join(homedir(), ".crow", "cache", "cubism");
++const CUBISM_CACHE_PATH = join(CUBISM_CACHE_DIR, "live2dcubismcore.min.js");
++
++function sha256Hex(buf: Buffer): string {
++  return createHash("sha256").update(buf).digest("hex");
++}
++
++function fetchCubismSdk(): Promise<Buffer> {
++  return new Promise((resolveP, rejectP) => {
++    const chunks: Buffer[] = [];
++    const req = electronNet.request(CUBISM_SDK_URL);
++    req.on("response", (res) => {
++      if (res.statusCode !== 200) {
++        rejectP(new Error(`HTTP ${res.statusCode}`));
++        return;
++      }
++      res.on("data", (chunk: Buffer) => chunks.push(chunk));
++      res.on("end", () => resolveP(Buffer.concat(chunks)));
++    });
++    req.on("error", rejectP);
++    req.end();
++  });
++}
++
++async function ensureCubismSdk(): Promise<boolean> {
++  if (existsSync(CUBISM_CACHE_PATH)) {
++    try {
++      const cached = readFileSync(CUBISM_CACHE_PATH);
++      if (sha256Hex(cached) === CUBISM_SDK_SHA256) return true;
++    } catch { /* corrupted — re-fetch */ }
++  }
++  const { response } = await dialog.showMessageBox({
++    type: "question",
++    title: "Live2D Cubism SDK",
++    message: "Pet mode needs the Live2D Cubism SDK (~130 KB).",
++    detail:
++      "Live2D Cubism SDK for Web © Live2D Inc. is published under the "
++      + "Live2D Proprietary Software License. Crow does not bundle or "
++      + "redistribute the SDK — if you accept, the file is downloaded "
++      + "from Live2D's CDN directly into ~/.crow/cache/cubism/. "
++      + "If you cancel, pet mode is disabled for this launch and the "
++      + "web-tiled view stays available.",
++    buttons: ["I accept — download the SDK", "Cancel — disable pet mode"],
++    defaultId: 0,
++    cancelId: 1,
++  });
++  if (response !== 0) return false;
++  let bytes: Buffer;
++  try {
++    bytes = await fetchCubismSdk();
++  } catch (e: any) {
++    await dialog.showErrorBox("Cubism SDK download failed", String(e?.message || e));
++    return false;
++  }
++  const gotHash = sha256Hex(bytes);
++  if (gotHash !== CUBISM_SDK_SHA256) {
++    await dialog.showMessageBox({
++      type: "error",
++      title: "Cubism SDK verification failed",
++      message: "The downloaded SDK did not match the expected SHA-256.",
++      detail:
++        `Expected: ${CUBISM_SDK_SHA256}\nGot:      ${gotHash}\n\n`
++        + "The CDN may be serving a different version. Manually download "
++        + "live2dcubismcore.min.js from https://www.live2d.com/en/sdk/download/web/ "
++        + "and copy it into ~/.crow/cache/cubism/.",
++      buttons: ["OK"],
++    });
++    return false;
++  }
++  mkdirSync(CUBISM_CACHE_DIR, { recursive: true });
++  writeFileSync(CUBISM_CACHE_PATH, bytes);
++  return true;
++}
++// --- END CROW PATCH --------------------------------------------------
++
+ let windowManager: WindowManager;
+ let menuManager: MenuManager;
+ let isQuitting = false;
+@@ -180,9 +271,13 @@ app.whenReady().then(() => {
+   // 'ready-to-show' asynchronously, so defer the mode switch until the
+   // renderer has mounted; WindowManager's own transition machinery then
+   // picks up the anchor in continueSetWindowModePet().
++  // Patch 0009 gates the mode switch behind Cubism SDK acceptance +
++  // SHA-verified fetch; on decline or verification failure we leave
++  // the app in its default window mode.
+   if (process.env.CROW_PET_ANCHOR) {
+-    window.once("ready-to-show", () => {
+-      windowManager.setWindowMode("pet");
++    window.once("ready-to-show", async () => {
++      const ok = await ensureCubismSdk();
++      if (ok) windowManager.setWindowMode("pet");
+     });
+   }
+ 
