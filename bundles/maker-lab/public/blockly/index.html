@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Maker Lab — Blockly</title>
+<link rel="stylesheet" href="/kiosk/blockly/kiosk.css">
+<!--
+  Blockly is loaded from jsDelivr at a pinned version. For air-gapped
+  classrooms, replace this with a locally-hosted copy (see SCHEMA.md).
+  SRI is intentionally omitted while we iterate; pin before classroom use.
+-->
+<script src="https://cdn.jsdelivr.net/npm/blockly@11.1.1/blockly.min.js"></script>
+</head>
+<body>
+<header class="top">
+  <div class="lesson-title" id="lessonTitle">Loading…</div>
+  <div class="status-chip" id="transcriptChip"></div>
+  <div class="spacer"></div>
+  <button class="btn hint-btn" id="hintBtn" title="Ask your tutor">?</button>
+  <button class="btn done-btn" id="doneBtn">I'm done!</button>
+</header>
+
+<main class="layout">
+  <div id="blocklyArea"></div>
+</main>
+
+<aside class="hint-bubble" id="hintBubble" hidden>
+  <div class="hint-text" id="hintText"></div>
+  <button class="btn hint-close" id="hintClose">OK</button>
+</aside>
+
+<div class="offline-chip" id="offlineChip" hidden>Reconnecting…</div>
+
+<!-- Minimal starter toolbox. A real curriculum-driven toolbox lands in a follow-up. -->
+<xml id="toolbox" style="display: none">
+  <category name="Move" colour="#84cc16">
+    <block type="controls_repeat_ext">
+      <value name="TIMES"><shadow type="math_number"><field name="NUM">4</field></shadow></value>
+    </block>
+    <block type="controls_if"></block>
+  </category>
+  <category name="Do" colour="#3b82f6">
+    <block type="text_print"><value name="TEXT"><shadow type="text"><field name="TEXT">Hi!</field></shadow></value></block>
+  </category>
+</xml>
+
+<script type="module" src="/kiosk/blockly/tutor-bridge.js"></script>
+</body>
+</html>

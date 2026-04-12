@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH 0001] maker-lab: tutor-event WebSocket message handler
+
+Adds a typed `tutor-event` WebSocket message and dispatcher. Used by the
+Maker Lab Blockly kiosk's tutor-bridge.js to request scaffolded hints that
+the companion then speaks via the per-client TTS engine.
+
+This is NOT a text-input prefix hack — tutor-event payloads are never
+spoken verbatim. The handler validates session_token against maker-lab,
+calls maker_hint (server-side filtered + rate-limited), and only the
+tool's return value is rendered.
+
+Contract:
+  { type: "tutor-event",
+    event: "hint_request",
+    session_token: str,     # validated against maker-lab
+    surface: str,
+    question: str,
+    level: int,              # 1..3
+    lesson_id: str | None,
+    canned_hints: [str] | None }
+
+Applies against upstream commit: <pin during Phase 3 submodule setup>
+---
+ src/open_llm_vtuber/websocket_handler.py | 33 ++++++++++++++++++++++++
+ 1 file changed, 33 insertions(+)
+
+diff --git a/src/open_llm_vtuber/websocket_handler.py b/src/open_llm_vtuber/websocket_handler.py
+--- a/src/open_llm_vtuber/websocket_handler.py
++++ b/src/open_llm_vtuber/websocket_handler.py
+@@ -84,6 +84,7 @@ class WebSocketHandler:
+             "fetch-configs": self._handle_fetch_configs,
+             "switch-config": self._handle_config_switch,
+             "fetch-backgrounds": self._handle_fetch_backgrounds,
++            "tutor-event": self._handle_tutor_event,
+             "audio-play-start": self._handle_audio_play_start,
+             "request-init-config": self._handle_init_config_request,
+             "heartbeat": self._handle_heartbeat,
+@@ -650,3 +651,34 @@ class WebSocketHandler:
+         if config_file_name:
+             context = self.client_contexts[client_uid]
+             await context.handle_config_switch(websocket, config_file_name)
++
++    async def _handle_tutor_event(
++        self, websocket: WebSocket, client_uid: str, data: dict
++    ):
++        """Maker Lab tutor event (hint_request etc).
++
++        Validates session_token against maker-lab via the already-bridged
++        `crow` MCP proxy. Never treats the payload as user text; the LLM
++        path stays unmodified. Only the filtered return is rendered.
++        """
++        import aiohttp
++        event = str(data.get("event") or "")
++        token = str(data.get("session_token") or "")
++        if not token or event != "hint_request":
++            return
++        url = f"http://localhost:3004/maker-lab/api/hint-internal"
++        payload = {
++            "session_token": token,
++            "surface": str(data.get("surface") or ""),
++            "question": str(data.get("question") or ""),
++            "level": int(data.get("level") or 1),
++            "lesson_id": data.get("lesson_id"),
++            "canned_hints": data.get("canned_hints"),
++        }
++        try:
++            async with aiohttp.ClientSession() as s:
++                async with s.post(url, json=payload, timeout=20) as resp:
++                    reply = await resp.json()
++        except Exception as err:
++            reply = {"text": "Your tutor is taking a nap.", "source": f"http_error:{err}"}
++        context = self.client_contexts.get(client_uid)
++        if context and context.tts_engine:
++            await context.tts_engine.speak(reply.get("text") or "")
+--
+2.40.0
