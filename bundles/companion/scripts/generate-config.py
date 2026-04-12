@@ -227,6 +227,138 @@ def get_ai_profiles(db_path):
     return []
 
 
+def get_tts_profiles(db_path):
+    """Read TTS profiles from Crow's dashboard_settings table.
+
+    Shape: [{id, name, provider, apiKey, baseUrl, defaultVoice, isDefault}]
+    """
+    if not db_path:
+        return []
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute(
+            "SELECT value FROM dashboard_settings WHERE key = 'tts_profiles'"
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return json.loads(row[0])
+    except Exception as e:
+        print(f"Warning: Could not read TTS profiles: {e}", file=sys.stderr)
+    return []
+
+
+def find_tts_profile(tts_profiles, profile_id):
+    """Return the matching profile, or the default, or first, or None."""
+    if profile_id:
+        for p in tts_profiles:
+            if p.get("id") == profile_id:
+                return p
+    for p in tts_profiles:
+        if p.get("isDefault"):
+            return p
+    return tts_profiles[0] if tts_profiles else None
+
+
+def tts_config_block(tts_profile, voice):
+    """Map a Crow tts_profile + voice → OLVV tts_config block.
+
+    Supported provider mappings (as of OLVV SHA 19b58b1f):
+      edge       → edge_tts { voice }
+      openai     → openai_tts { model, voice, api_key, base_url }
+      azure      → azure_tts { api_key, region, voice }
+      elevenlabs → elevenlabs_tts { api_key, voice_id }
+      piper      → piper_tts { voice_name }
+      kokoro     → openai_tts { voice, base_url, api_key }  (OpenAI-compatible)
+
+    Falls back to edge_tts with the supplied voice if profile is None
+    or provider is unknown — preserves legacy behavior.
+    """
+    if not tts_profile:
+        effective_voice = voice or "en-US-AvaMultilingualNeural"
+        return {"tts_model": "edge_tts", "edge_tts": {"voice": effective_voice}}
+
+    provider = tts_profile.get("provider", "edge")
+    effective_voice = voice or tts_profile.get("defaultVoice", "")
+    api_key = tts_profile.get("apiKey", "")
+    base_url = tts_profile.get("baseUrl", "")
+
+    if provider == "edge":
+        return {
+            "tts_model": "edge_tts",
+            "edge_tts": {"voice": effective_voice or "en-US-AvaMultilingualNeural"},
+        }
+
+    if provider == "openai":
+        return {
+            "tts_model": "openai_tts",
+            "openai_tts": {
+                "model": "tts-1",
+                "voice": effective_voice or "alloy",
+                "api_key": api_key,
+                "base_url": base_url or "https://api.openai.com/v1",
+                "file_extension": "mp3",
+            },
+        }
+
+    if provider == "azure":
+        # Azure endpoint shape: https://<region>.tts.speech.microsoft.com
+        # OLVV takes region name, not full URL. Best-effort parse.
+        region = ""
+        if base_url:
+            m = base_url.replace("https://", "").replace("http://", "").split(".")
+            if m:
+                region = m[0]
+        return {
+            "tts_model": "azure_tts",
+            "azure_tts": {
+                "api_key": api_key,
+                "region": region,
+                "voice": effective_voice or "en-US-JennyNeural",
+            },
+        }
+
+    if provider == "elevenlabs":
+        return {
+            "tts_model": "elevenlabs_tts",
+            "elevenlabs_tts": {
+                "api_key": api_key,
+                "voice_id": effective_voice or "EXAVITQu4vr4xnSDxMaL",
+            },
+        }
+
+    if provider == "piper":
+        return {
+            "tts_model": "piper_tts",
+            "piper_tts": {
+                "voice_name": effective_voice or "en_US-amy-medium",
+                "voice_models_dir": base_url or "",
+            },
+        }
+
+    if provider == "kokoro":
+        # Kokoro-FastAPI is OpenAI-compatible — route through openai_tts.
+        return {
+            "tts_model": "openai_tts",
+            "openai_tts": {
+                "model": "kokoro",
+                "voice": effective_voice or "af_bella",
+                "api_key": api_key or "not-needed",
+                "base_url": base_url or "http://localhost:8880/v1",
+                "file_extension": "mp3",
+            },
+        }
+
+    print(
+        f"Warning: Unknown TTS provider '{provider}', falling back to edge_tts",
+        file=sys.stderr,
+    )
+    return {
+        "tts_model": "edge_tts",
+        "edge_tts": {"voice": effective_voice or "en-US-AvaMultilingualNeural"},
+    }
+
+
 def slugify(name):
     """Convert profile name to a safe slug."""
     return name.lower().replace(" ", "_").replace(".", "_")
@@ -255,9 +387,19 @@ def resolve_ai_profile(profiles, env_vars):
     return profiles[0] if profiles else None
 
 
-def generate_config(profiles, env_vars):
-    """Generate conf.yaml content from AI profiles and env vars."""
-    tts_voice = env_vars.get("COMPANION_TTS_VOICE", "en-US-AvaMultilingualNeural")
+def generate_config(profiles, env_vars, tts_profiles=None):
+    """Generate conf.yaml content from AI profiles and env vars.
+
+    TTS resolution order:
+      1. legacy COMPANION_TTS_VOICE env var, as a voice override
+      2. platform default tts_profile (if any) + its defaultVoice
+      The resolved voice is passed into tts_config_block() alongside the
+      default tts_profile so the right OLVV TTS block gets emitted.
+    """
+    tts_profiles = tts_profiles or []
+    legacy_voice = env_vars.get("COMPANION_TTS_VOICE", "")
+    default_tts_profile = find_tts_profile(tts_profiles, None)
+    tts_voice = legacy_voice or (default_tts_profile.get("defaultVoice") if default_tts_profile else "en-US-AvaMultilingualNeural")
     persona = env_vars.get("COMPANION_PERSONA", "") or (
         "You are Crow, an AI companion and assistant. You are helpful, curious, "
         "and have a dry wit. Keep responses conversational and concise since they "
@@ -344,10 +486,7 @@ def generate_config(profiles, env_vars):
                     "provider": "cpu",
                 },
             },
-            "tts_config": {
-                "tts_model": "edge_tts",
-                "edge_tts": {"voice": tts_voice},
-            },
+            "tts_config": tts_config_block(default_tts_profile, tts_voice),
             "vad_config": {
                 "vad_model": None,
                 "silero_vad": {
@@ -384,28 +523,35 @@ def generate_config(profiles, env_vars):
 def get_household_profiles():
     """Read household profiles from COMPANION_PROFILE_* env vars.
 
-    Format:
-        COMPANION_PROFILE_1_NAME=User
-        COMPANION_PROFILE_1_AVATAR=Cha_AnnoyingParrot
-        COMPANION_PROFILE_1_VOICE=en-GB-LibbyNeural
-        COMPANION_PROFILE_2_NAME=Partner
-        COMPANION_PROFILE_2_AVATAR=senko
-        COMPANION_PROFILE_2_VOICE=en-US-AvaMultilingualNeural
+    Current keys (per-profile, 1..9):
+        COMPANION_PROFILE_N_NAME            — display name (required)
+        COMPANION_PROFILE_N_AVATAR          — Live2D model id
+        COMPANION_PROFILE_N_TTS_PROFILE_ID  — id of a platform tts_profile
+        COMPANION_PROFILE_N_TTS_VOICE       — voice name within that profile
+
+    Legacy fallback (deprecated, read for one release):
+        COMPANION_PROFILE_N_VOICE  (raw Edge TTS voice)
     """
     profiles = []
-    for i in range(1, 10):  # Support up to 9 profiles
+    for i in range(1, 10):
         name = os.environ.get(f"COMPANION_PROFILE_{i}_NAME")
         if not name:
             continue
+        voice = (
+            os.environ.get(f"COMPANION_PROFILE_{i}_TTS_VOICE")
+            or os.environ.get(f"COMPANION_PROFILE_{i}_VOICE")
+            or ""
+        )
         profiles.append({
             "name": name,
             "avatar": os.environ.get(f"COMPANION_PROFILE_{i}_AVATAR", "mao_pro"),
-            "voice": os.environ.get(f"COMPANION_PROFILE_{i}_VOICE", "en-US-AvaMultilingualNeural"),
+            "tts_profile_id": os.environ.get(f"COMPANION_PROFILE_{i}_TTS_PROFILE_ID", ""),
+            "voice": voice or "en-US-AvaMultilingualNeural",
         })
     return profiles
 
 
-def generate_character_configs(all_models, default_avatar):
+def generate_character_configs(all_models, default_avatar, tts_profiles=None):
     """Generate per-avatar character configs for the companion's character selector.
 
     Each "character" in the Open-LLM-VTuber UI represents a different avatar model,
@@ -415,6 +561,7 @@ def generate_character_configs(all_models, default_avatar):
     characters are generated INSTEAD of plain avatar characters. Each profile
     gets its own name, avatar, and TTS voice in the character selector.
     """
+    tts_profiles = tts_profiles or []
     configs = {}
     household = get_household_profiles()
     profile_avatars = set()
@@ -454,6 +601,11 @@ def generate_character_configs(all_models, default_avatar):
                 f"{profile['name']} explicitly asks about shared information."
             )
 
+            # Resolve this profile's TTS provider block.
+            # Priority: explicit tts_profile_id → default platform profile → fallback edge_tts.
+            profile_tts = find_tts_profile(tts_profiles, profile.get("tts_profile_id"))
+            tts_block = tts_config_block(profile_tts, profile.get("voice", ""))
+
             config = {
                 "character_config": {
                     "conf_name": f"crow_profile_{slug}",
@@ -462,10 +614,7 @@ def generate_character_configs(all_models, default_avatar):
                     "human_name": profile["name"],
                     "live2d_model_name": avatar_id,
                     "persona_prompt": profile_persona,
-                    "tts_config": {
-                        "tts_model": "edge_tts",
-                        "edge_tts": {"voice": profile["voice"]},
-                    },
+                    "tts_config": tts_block,
                 }
             }
             configs[f"crow_profile_{slug}.yaml"] = config
@@ -514,13 +663,16 @@ def main():
     if not db_path:
         print("Warning: Crow database not found, using fallback config", file=sys.stderr)
         profiles = []
+        tts_profiles = []
     else:
         print(f"Reading AI profiles from {db_path}")
         profiles = get_ai_profiles(db_path)
         print(f"Found {len(profiles)} AI profile(s)")
+        tts_profiles = get_tts_profiles(db_path)
+        print(f"Found {len(tts_profiles)} TTS profile(s)")
 
     env_vars = {
-        "COMPANION_TTS_VOICE": os.environ.get("COMPANION_TTS_VOICE", "en-US-AvaMultilingualNeural"),
+        "COMPANION_TTS_VOICE": os.environ.get("COMPANION_TTS_VOICE", ""),
         "COMPANION_PERSONA": os.environ.get("COMPANION_PERSONA", ""),
         "COMPANION_CHARACTER_NAME": os.environ.get("COMPANION_CHARACTER_NAME", "Crow"),
         "COMPANION_AVATAR": os.environ.get("COMPANION_AVATAR", "mao_pro"),
@@ -529,7 +681,7 @@ def main():
     }
 
     # Generate main config
-    config = generate_config(profiles, env_vars)
+    config = generate_config(profiles, env_vars, tts_profiles)
     conf_path = os.path.join(app_dir, "conf.yaml")
     with open(conf_path, "w") as f:
         yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
@@ -593,7 +745,7 @@ def main():
     for old_file in os.listdir(characters_dir):
         if old_file.startswith("crow_") and old_file.endswith(".yaml"):
             os.remove(os.path.join(characters_dir, old_file))
-    char_configs = generate_character_configs(all_avatar_models, default_avatar)
+    char_configs = generate_character_configs(all_avatar_models, default_avatar, tts_profiles)
     for filename, char_config in char_configs.items():
         char_path = os.path.join(characters_dir, filename)
         with open(char_path, "w") as f:

@@ -10,8 +10,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install uv for fast dependency management
 RUN pip install --no-cache-dir uv
 
-# Clone Open-LLM-VTuber
-RUN git clone --recursive https://github.com/Open-LLM-VTuber/Open-LLM-VTuber.git /app
+# Clone Open-LLM-VTuber at a pinned SHA.
+# Rationale: the Companion bundle's scripts/generate-config.py emits TTS
+# blocks whose shape depends on OLVV's conf.yaml schema. Pinning keeps us
+# on a known-good revision that supports edge_tts, openai_tts, azure_tts,
+# piper_tts, and elevenlabs_tts providers. Bump deliberately, not by drift.
+ARG OLVV_SHA=19b58b1f6c01e082289fce089392997b9d14fbc4
+RUN git clone --recursive https://github.com/Open-LLM-VTuber/Open-LLM-VTuber.git /app \
+    && cd /app \
+    && git checkout ${OLVV_SHA} \
+    && git submodule update --init --recursive
 
 # Install Python dependencies + mcp-proxy for Crow MCP bridge
 RUN uv sync --no-dev && uv pip install pyyaml mcp-proxy

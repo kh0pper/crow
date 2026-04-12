@@ -33,13 +33,15 @@ import identitySection from "../settings/sections/identity.js";
 import passwordSection from "../settings/sections/password.js";
 import twoFactorSection from "../settings/sections/two-factor.js";
 import navGroupsSection from "../settings/sections/nav-groups.js";
-import ttsSection from "../settings/sections/tts.js";
+import ttsProfilesSection from "../settings/sections/tts-profiles.js";
+import sttProfilesSection from "../settings/sections/stt-profiles.js";
 
 // Register built-in sections
 registerSettingsSection(navGroupsSection);
 registerSettingsSection(themeSection);
 registerSettingsSection(languageSection);
-registerSettingsSection(ttsSection);
+registerSettingsSection(ttsProfilesSection);
+registerSettingsSection(sttProfilesSection);
 registerSettingsSection(notificationsSection);
 registerSettingsSection(aiProviderSection);
 registerSettingsSection(aiProfilesSection);
@@ -78,7 +80,13 @@ export default {
 
     // Sub-page: render individual section
     if (sectionId) {
-      const section = getSettingsSection(sectionId);
+      // Alias map: resolve deprecated section ids to their replacements.
+      const SECTION_ALIASES = {
+        tts: "tts-profiles",
+        "companion-voice": "companion",
+      };
+      const resolvedId = SECTION_ALIASES[sectionId] || sectionId;
+      const section = getSettingsSection(resolvedId);
       if (!section) return res.redirect("/dashboard/settings");
       const html = await section.render({ req, res, db, lang });
       const back = `<a href="/dashboard/settings" class="settings-back">&larr; ${t("settings.backToSettings", lang)}</a>`;
