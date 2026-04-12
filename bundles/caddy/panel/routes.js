@@ -142,6 +142,69 @@ export default function caddyRouter(authMiddleware) {
     }
   });
 
+  router.get("/api/caddy/cert-health", authMiddleware, async (req, res) => {
+    try {
+      const config = await adminGet("/config/");
+      const policies = config?.apps?.tls?.automation?.policies || [];
+      const servers = config?.apps?.http?.servers || {};
+
+      const domains = new Set();
+      for (const srv of Object.values(servers)) {
+        for (const route of srv.routes || []) {
+          for (const m of route.match || []) {
+            for (const h of m.host || []) domains.add(h);
+          }
+        }
+      }
+      if (req.query.domain && domainLike(req.query.domain)) {
+        const d = req.query.domain;
+        if (!domains.has(d)) return res.json({ results: [], summary: "ok" });
+        domains.clear();
+        domains.add(d);
+      }
+
+      const stagingFragment = "acme-staging-v02.api.letsencrypt.org";
+      const results = [];
+      for (const host of domains) {
+        const policy = policies.find((p) => !p.subjects || p.subjects.includes(host)) || policies[0];
+        const issuer = policy?.issuers?.[0] || {};
+        const isStaging = typeof issuer.ca === "string" && issuer.ca.includes(stagingFragment);
+        const issuerName = isStaging
+          ? "Let's Encrypt (STAGING)"
+          : (issuer.module || "acme") + (issuer.ca ? ` (${issuer.ca})` : "");
+
+        let expiresAt = null;
+        let status = "warning";
+        const problems = [];
+        try {
+          const info = await adminGet(`/pki/ca/local/certificates/${encodeURIComponent(host)}`).catch(() => null);
+          if (info?.not_after) {
+            expiresAt = info.not_after;
+            const days = (new Date(expiresAt).getTime() - Date.now()) / 86400_000;
+            if (days < 7) { status = "error"; problems.push(`expires in ${days.toFixed(1)} days`); }
+            else if (days < 30) { status = "warning"; problems.push(`expires in ${days.toFixed(0)} days`); }
+            else { status = "ok"; }
+          } else {
+            problems.push("no cert loaded");
+          }
+        } catch (err) {
+          problems.push(`lookup failed: ${err.message}`);
+        }
+        if (isStaging) {
+          if (status === "ok") status = "warning";
+          problems.push("ACME staging issuer in use");
+        }
+        results.push({ domain: host, status, issuer: issuerName, expires_at: expiresAt, problems });
+      }
+
+      const anyError = results.some((r) => r.status === "error");
+      const anyWarn = results.some((r) => r.status === "warning");
+      res.json({ summary: anyError ? "error" : anyWarn ? "warning" : "ok", results });
+    } catch (err) {
+      res.json({ error: err.message });
+    }
+  });
+
   router.post("/api/caddy/reload", authMiddleware, async (_req, res) => {
     try {
       const source = readCaddyfile(CONFIG_DIR());

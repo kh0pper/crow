@@ -915,6 +915,20 @@ await initTable("crowdsec_decisions_cache table", `
   CREATE INDEX IF NOT EXISTS idx_crowdsec_cache_expires ON crowdsec_decisions_cache(expires_at);
 `);
 
+// --- Rate limit buckets (F.0: SQLite-backed token buckets for federated-bundle MCP tools) ---
+
+await initTable("rate_limit_buckets table", `
+  CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+    tool_id TEXT NOT NULL,
+    bucket_key TEXT NOT NULL,
+    tokens REAL NOT NULL,
+    refilled_at INTEGER NOT NULL,
+    PRIMARY KEY (tool_id, bucket_key)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_rate_limit_buckets_refilled ON rate_limit_buckets(refilled_at);
+`);
+
 // --- Optional: sqlite-vec virtual table for semantic search ---
 const hasVec = await isSqliteVecAvailable(db);
 if (hasVec) {
