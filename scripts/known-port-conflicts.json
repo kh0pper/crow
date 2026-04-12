@@ -1,0 +1,4 @@
+{
+  "_comment": "Pre-existing port collisions allowed by check-port-allocation.js. Do not add new entries — fix the conflict instead. Each entry must list ALL bundles that share the port; check passes only if the bundle set matches exactly.",
+  "8080": ["localai", "nextcloud"]
+}

@@ -71,6 +71,11 @@ The registry is a JSON file at `registry/add-ons.json`:
 | `requires.min_ram_mb` | No | Minimum RAM in MB |
 | `requires.min_disk_mb` | No | Minimum disk space in MB |
 | `requires.gpu` | No | Set `true` if the add-on needs a GPU |
+| `requires.bundles` | No | Array of bundle IDs that must be installed first. Install endpoint refuses if any are missing; uninstall is blocked while dependents are installed. |
+| `privileged` | No | Set `true` for bundles that need NET_ADMIN, NET_RAW, SYS_ADMIN, or `network_mode: host`. Triggers the install-modal consent flow with a server-validated single-use token. |
+| `consent_required` | No | Set `true` for bundles with significant operational cost or read-Docker-socket access (netdata, dozzle). Triggers the consent modal even if not `privileged`. |
+| `install_consent_messages` | No | Object keyed by language code (`en`, `es`, ...) with the warning text shown in the install-confirmation modal. Falls back to `install_consent_message` then a generic string. |
+| `install_consent_message` | No | Single-language fallback for `install_consent_messages`. |
 | `env_vars` | No | Detailed env var descriptions (name, description, required, secret, default) |
 | `ports` | No | Ports used by the add-on |
 | `webUI` | No | Web interface: `{ "port", "path", "label" }` or `null` for headless add-ons |

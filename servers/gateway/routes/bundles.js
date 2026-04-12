@@ -24,6 +24,11 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, cop
 import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { randomBytes } from "node:crypto";
+
+// PR 0: Consent token configuration (server-validated, race-safe install consent)
+const CONSENT_TOKEN_TTL_SECONDS = 15 * 60; // 15 min — covers slow image pulls
+const CONSENT_TOKEN_SCHEMA_VERSION = 1;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CROW_HOME = join(homedir(), ".crow");
@@ -172,17 +177,33 @@ function isValidBundleId(id) {
  * Rejects: sensitive host mounts, privileged mode, dangerous capabilities.
  * Returns { valid: true } or { valid: false, reason: string }.
  */
-function validateComposeFile(composePath, bundleId) {
+/**
+ * Inspect a compose file for security concerns.
+ *
+ * @param {string} composePath - path to docker-compose.yml
+ * @param {string} bundleId
+ * @param {object} [opts]
+ * @param {object} [opts.manifest] - bundle manifest; if it has `privileged: true`
+ *   AND `opts.consentVerified` is true, NET_ADMIN/host-network/privileged are allowed.
+ *   Read-only Docker socket mounts are allowed when manifest declares `consent_required: true`
+ *   (and consent has been verified) — bundles like netdata/dozzle need this.
+ * @param {boolean} [opts.consentVerified=false] - true when the install request supplied a
+ *   valid consent token consumed by validateConsentToken().
+ * @returns {{valid: boolean, reason?: string}}
+ */
+function validateComposeFile(composePath, bundleId, opts = {}) {
+  const { manifest, consentVerified = false } = opts;
+  const isPrivilegedAllowed = !!(manifest?.privileged && consentVerified);
+  const isConsentBundle = !!(manifest?.consent_required && consentVerified);
   try {
     const content = readFileSync(composePath, "utf8");
 
-    // Sensitive host paths that should never be mounted
+    // Sensitive host paths that should never be mounted (regardless of consent)
     const sensitivePatterns = [
       /^\s*-\s+["']?\/:/m,                    // root mount /
       /^\s*-\s+["']?\/etc[/:]/m,              // /etc
       /^\s*-\s+["']?~?\/?\.ssh[/:]/m,         // ~/.ssh
       /^\s*-\s+["']?~?\/?\.crow\/data[/:]/m,  // ~/.crow/data
-      /^\s*-\s+["']?\/var\/run\/docker/m,      // Docker socket
     ];
 
     for (const pattern of sensitivePatterns) {
@@ -191,20 +212,153 @@ function validateComposeFile(composePath, bundleId) {
       }
     }
 
-    // Check for privileged mode
-    if (/^\s*privileged:\s*true/m.test(content)) {
-      return { valid: false, reason: "Compose file uses privileged mode" };
+    // Docker socket — allowed read-only ONLY when manifest has consent_required and consent was verified
+    // (netdata, dozzle pattern). Read-write Docker socket is never allowed via this path.
+    const rwSocketPattern = /^\s*-\s+["']?\/var\/run\/docker\.sock(?!\s*:[^:]*:\s*ro)/m;
+    const anySocketPattern = /^\s*-\s+["']?\/var\/run\/docker/m;
+    if (rwSocketPattern.test(content)) {
+      return { valid: false, reason: "Read-write Docker socket mounts are not permitted" };
+    }
+    if (anySocketPattern.test(content) && !isConsentBundle && !isPrivilegedAllowed) {
+      return { valid: false, reason: "Docker socket mount requires manifest 'consent_required: true' and verified consent" };
     }
 
-    // Check for dangerous capabilities
-    if (/NET_ADMIN|SYS_ADMIN|SYS_PTRACE|SYS_RAWIO/m.test(content)) {
-      return { valid: false, reason: "Compose file requests dangerous capabilities (NET_ADMIN, SYS_ADMIN, etc.)" };
+    // Privileged mode
+    if (/^\s*privileged:\s*true/m.test(content) && !isPrivilegedAllowed) {
+      return { valid: false, reason: "Compose file uses privileged mode but manifest does not declare 'privileged: true' (or consent was not verified)" };
+    }
+
+    // Dangerous capabilities (NET_ADMIN etc.) — gated by manifest.privileged + consent
+    if (/NET_ADMIN|SYS_ADMIN|SYS_PTRACE|SYS_RAWIO|NET_RAW/m.test(content) && !isPrivilegedAllowed) {
+      return { valid: false, reason: "Compose file requests dangerous capabilities (NET_ADMIN, SYS_ADMIN, NET_RAW, etc.) but manifest does not declare 'privileged: true' (or consent was not verified)" };
+    }
+
+    // Host networking — gated by manifest.privileged + consent
+    if (/network_mode:\s*host/i.test(content) && !isPrivilegedAllowed) {
+      return { valid: false, reason: "Compose file uses host networking but manifest does not declare 'privileged: true' (or consent was not verified)" };
     }
 
     return { valid: true };
   } catch (err) {
     return { valid: false, reason: `Could not read compose file: ${err.message}` };
   }
+}
+
+// --- PR 0: Consent token helpers (server-validated install consent) ---
+
+/**
+ * Mint a single-use consent token for a bundle install. Stores in install_consents table
+ * with an expiry. The client passes this token back on POST /install.
+ */
+async function mintConsentToken(db, bundleId) {
+  const token = randomBytes(32).toString("hex");
+  const now = Math.floor(Date.now() / 1000);
+  await db.execute({
+    sql: `INSERT INTO install_consents (token, bundle_id, schema_version, created_at, expires_at, consumed)
+          VALUES (?, ?, ?, ?, ?, 0)`,
+    args: [token, bundleId, CONSENT_TOKEN_SCHEMA_VERSION, now, now + CONSENT_TOKEN_TTL_SECONDS],
+  });
+  return { token, expires_in_seconds: CONSENT_TOKEN_TTL_SECONDS };
+}
+
+/**
+ * Atomically validate-and-consume a consent token. Returns true only if:
+ *   - token row exists for the given bundleId
+ *   - schema_version matches current version
+ *   - not yet expired
+ *   - not yet consumed
+ * The consume step is atomic to prevent double-spend / double-install races.
+ */
+async function validateConsentToken(db, bundleId, token) {
+  if (!token || typeof token !== "string") return false;
+  const now = Math.floor(Date.now() / 1000);
+  const result = await db.execute({
+    sql: `UPDATE install_consents
+          SET consumed = 1
+          WHERE token = ?
+            AND bundle_id = ?
+            AND schema_version = ?
+            AND consumed = 0
+            AND expires_at > ?
+          RETURNING token`,
+    args: [token, bundleId, CONSENT_TOKEN_SCHEMA_VERSION, now],
+  });
+  return result.rows.length > 0;
+}
+
+/**
+ * Best-effort cleanup of expired consent tokens. Called opportunistically.
+ */
+async function pruneExpiredConsents(db) {
+  const now = Math.floor(Date.now() / 1000);
+  await db.execute({
+    sql: "DELETE FROM install_consents WHERE expires_at < ? OR consumed = 1",
+    args: [now],
+  }).catch(() => {});
+}
+
+/**
+ * Determine whether a bundle requires consent (privileged or consent_required).
+ */
+function manifestRequiresConsent(manifest) {
+  return !!(manifest && (manifest.privileged === true || manifest.consent_required === true));
+}
+
+/**
+ * Pick the install_consent_message for the user's preferred language.
+ * Falls back to English, then to a generic message.
+ */
+function pickConsentMessage(manifest, lang = "en") {
+  if (manifest?.install_consent_messages && typeof manifest.install_consent_messages === "object") {
+    return manifest.install_consent_messages[lang]
+      ?? manifest.install_consent_messages.en
+      ?? manifest.install_consent_message
+      ?? "This bundle requires explicit consent to install.";
+  }
+  return manifest?.install_consent_message ?? "This bundle requires explicit consent to install.";
+}
+
+/**
+ * Summarize the privileged capabilities a bundle requests, for display in the install modal.
+ */
+function summarizePrivileges(manifest, composePath) {
+  const caps = [];
+  if (manifest?.privileged) {
+    try {
+      const content = readFileSync(composePath, "utf8");
+      if (/network_mode:\s*host/i.test(content)) caps.push("host networking");
+      if (/NET_ADMIN/.test(content)) caps.push("NET_ADMIN (modify firewall)");
+      if (/NET_RAW/.test(content)) caps.push("NET_RAW (raw sockets)");
+      if (/SYS_ADMIN/.test(content)) caps.push("SYS_ADMIN (system administration)");
+      if (/SYS_PTRACE/.test(content)) caps.push("SYS_PTRACE (process tracing)");
+      if (/^\s*privileged:\s*true/m.test(content)) caps.push("full privileged mode");
+    } catch { /* ignore */ }
+  }
+  if (manifest?.consent_required && !manifest?.privileged) {
+    try {
+      const content = readFileSync(composePath, "utf8");
+      if (/\/var\/run\/docker/.test(content)) caps.push("read Docker socket (sees all containers/env)");
+    } catch { /* ignore */ }
+  }
+  return caps;
+}
+
+/**
+ * Find installed bundles that depend on a given bundle (via requires.bundles).
+ * Used to block uninstall when dependents would break.
+ */
+function findDependents(bundleId) {
+  const installed = getInstalled();
+  const dependents = [];
+  for (const entry of installed) {
+    if (entry.id === bundleId) continue;
+    const m = getManifest(entry.id);
+    const reqs = m?.requires?.bundles;
+    if (Array.isArray(reqs) && reqs.includes(bundleId)) {
+      dependents.push(entry.id);
+    }
+  }
+  return dependents;
 }
 
 /**
@@ -349,9 +503,52 @@ export default function bundlesRouter() {
     res.json({ bundles: results });
   });
 
+  // GET /bundles/api/consent-challenge/:id — Mint a consent token for a privileged or consent_required bundle.
+  // Returns { required: false } for bundles that don't need consent (so the UI can skip the modal).
+  router.get("/bundles/api/consent-challenge/:id", async (req, res) => {
+    const bundleId = req.params.id;
+    if (!bundleId || !isValidBundleId(bundleId)) {
+      return res.status(400).json({ error: "Invalid bundle ID" });
+    }
+    const manifest = getManifest(bundleId);
+    if (!manifest) {
+      return res.status(404).json({ error: `Bundle '${bundleId}' not found` });
+    }
+    if (!manifestRequiresConsent(manifest)) {
+      return res.json({ required: false });
+    }
+    const composePath = join(APP_BUNDLES, bundleId, "docker-compose.yml");
+    const lang = (req.query.lang || req.headers["accept-language"] || "en").toString().slice(0, 2).toLowerCase();
+    const db = createDbClient();
+    try {
+      await pruneExpiredConsents(db);
+      const { token, expires_in_seconds } = await mintConsentToken(db, bundleId);
+      // Compute prereq install state for UI to show prereq checklist
+      const reqBundles = manifest.requires?.bundles || [];
+      const installedIds = new Set(getInstalled().map((i) => i.id));
+      const prereqs = reqBundles.map((id) => ({ id, installed: installedIds.has(id) }));
+      res.json({
+        required: true,
+        bundle_id: bundleId,
+        bundle_name: manifest.name || bundleId,
+        privileged: !!manifest.privileged,
+        consent_required: !!manifest.consent_required,
+        message: pickConsentMessage(manifest, lang),
+        capabilities: summarizePrivileges(manifest, composePath),
+        prereqs,
+        token,
+        expires_in_seconds,
+      });
+    } catch (err) {
+      res.status(500).json({ error: `Failed to mint consent token: ${err.message}` });
+    } finally {
+      try { db.close(); } catch {}
+    }
+  });
+
   // POST /bundles/api/install — Install a bundle
   router.post("/bundles/api/install", async (req, res) => {
-    const { bundle_id, env_vars } = req.body;
+    const { bundle_id, env_vars, consent_token } = req.body;
 
     if (!bundle_id || !isValidBundleId(bundle_id)) {
       return res.status(400).json({ error: "Invalid bundle ID" });
@@ -367,6 +564,46 @@ export default function bundlesRouter() {
     const installed = getInstalled();
     if (installed.find((i) => i.id === bundle_id)) {
       return res.status(409).json({ error: `Bundle '${bundle_id}' is already installed` });
+    }
+
+    // PR 0: dependency check — refuse install if any required bundle is missing
+    const manifestPre = getManifest(bundle_id);
+    const requiredBundles = manifestPre?.requires?.bundles || [];
+    if (requiredBundles.length > 0) {
+      const installedIds = new Set(installed.map((i) => i.id));
+      const missing = requiredBundles.filter((id) => !installedIds.has(id));
+      if (missing.length > 0) {
+        return res.status(400).json({
+          ok: false,
+          error: `Bundle '${bundle_id}' requires the following bundles to be installed first: ${missing.join(", ")}`,
+          missing_dependencies: missing,
+        });
+      }
+    }
+
+    // PR 0: consent token check — required for privileged or consent_required bundles
+    let consentVerified = false;
+    if (manifestRequiresConsent(manifestPre)) {
+      if (!consent_token) {
+        return res.status(403).json({
+          ok: false,
+          error: "Consent token required. Call GET /bundles/api/consent-challenge/:id to obtain one.",
+          consent_required: true,
+        });
+      }
+      const consentDb = createDbClient();
+      try {
+        consentVerified = await validateConsentToken(consentDb, bundle_id, consent_token);
+      } finally {
+        try { consentDb.close(); } catch {}
+      }
+      if (!consentVerified) {
+        return res.status(403).json({
+          ok: false,
+          error: "Consent token is invalid, expired, or already consumed. Mint a new one and retry.",
+          consent_expired: true,
+        });
+      }
     }
 
     // Block bundles with network_mode: host on managed hosting (security risk on shared infrastructure)
@@ -416,19 +653,21 @@ export default function bundlesRouter() {
           // Docker bundle — pull images and start containers
           const composePath = join(destDir, "docker-compose.yml");
           if (existsSync(composePath)) {
-            // Validate compose file for community add-ons (official ones from APP_BUNDLES are trusted)
-            const isCommunity = !existsSync(join(APP_BUNDLES, bundle_id, "docker-compose.yml"));
-            if (isCommunity) {
-              const validation = validateComposeFile(composePath, bundle_id);
-              if (!validation.valid) {
-                appendLog(job, `Security check failed: ${validation.reason}`);
-                // Clean up copied files
-                rmSync(destDir, { recursive: true, force: true });
-                finishJob(job, "failed");
-                return;
-              }
-              appendLog(job, "Security check passed");
+            // PR 0: validate compose for ALL bundles (first-party + community).
+            // First-party bundles with privileged/host-network must declare manifest.privileged
+            // and the install request must include a verified consent token.
+            const validation = validateComposeFile(composePath, bundle_id, {
+              manifest,
+              consentVerified,
+            });
+            if (!validation.valid) {
+              appendLog(job, `Security check failed: ${validation.reason}`);
+              // Clean up copied files
+              rmSync(destDir, { recursive: true, force: true });
+              finishJob(job, "failed");
+              return;
             }
+            appendLog(job, "Security check passed");
 
             appendLog(job, "Pulling Docker images...");
             try {
@@ -766,6 +1005,16 @@ export default function bundlesRouter() {
     const bundleDir = join(BUNDLES_DIR, bundle_id);
     if (!existsSync(bundleDir)) {
       return res.status(404).json({ error: `Bundle '${bundle_id}' is not installed` });
+    }
+
+    // PR 0: refuse to uninstall when other installed bundles depend on this one
+    const dependents = findDependents(bundle_id);
+    if (dependents.length > 0) {
+      return res.status(409).json({
+        ok: false,
+        error: `Cannot uninstall '${bundle_id}' — other installed bundles depend on it: ${dependents.join(", ")}. Uninstall the dependents first.`,
+        dependents,
+      });
     }
 
     const job = createJob(bundle_id, "uninstall");
