@@ -51,6 +51,8 @@ async function loadTts()         { return import(pathToFileURL(join(gatewayDir, 
 async function loadStt()         { return import(pathToFileURL(join(gatewayDir, "ai/stt/index.js")).href); }
 async function loadProvider()    { return import(pathToFileURL(join(gatewayDir, "ai/provider.js")).href); }
 async function loadDb()          { return import(pathToFileURL(join(gatewayDir, "..", "db.js")).href); }
+async function loadToolExec()    { return import(pathToFileURL(join(gatewayDir, "ai/tool-executor.js")).href); }
+async function loadSystemPrompt(){ return import(pathToFileURL(join(gatewayDir, "ai/system-prompt.js")).href); }
 
 /* ---------- Shared session state ---------- */
 
@@ -164,10 +166,13 @@ async function* pcmStream(adapter, text, voice, negotiation, extraOpts = {}) {
 
 async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
   const db = (await loadDb()).createDbClient();
+  let toolExecutor = null;
   try {
     const { getDefaultSttProfile, createSttAdapter, getSttProfiles } = await loadStt();
     const { getTtsProfiles, createTtsAdapter, getDefaultTtsProfile } = await loadTts();
     const { createAdapterFromProfile, getAiProfiles } = await loadProvider();
+    const { createToolExecutor, getChatTools, MAX_TOOL_ROUNDS } = await loadToolExec();
+    const { generateSystemPrompt } = await loadSystemPrompt();
 
     // 1. STT
     const sttProfile = device.stt_profile_id
@@ -237,27 +242,65 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
       }
     }
 
-    const messages = [{ role: "user", content: transcript }];
-    for await (const event of chatAdapter.chatStream(messages, [], { temperature: 0.7, maxTokens: 600 })) {
-      if (event.type === "content_delta" && event.text) {
-        sendText(ws, { type: "llm_delta", text: event.text });
-        textBuffer += event.text;
-        while (true) {
-          const match = SENTENCE_END.exec(textBuffer);
-          if (!match) break;
-          const end = match.index + match[0].length;
-          const sentence = textBuffer.slice(0, end);
-          textBuffer = textBuffer.slice(end);
-          await flushTts(sentence);
+    toolExecutor = createToolExecutor();
+    const tools = getChatTools();
+    const systemPrompt = await generateSystemPrompt({ deviceId: device.id });
+    console.log(`[meta-glasses] voice turn: transcript=${JSON.stringify(transcript)} ai=${aiProfile.name}/${aiProfile.defaultModel} tools=${tools.length}`);
+
+    const messages = [
+      { role: "system", content: systemPrompt + "\n\nThe user is speaking to you through Meta Ray-Ban glasses. Keep replies concise and conversational (1-3 short sentences). Plain prose only, no markdown, no lists. When the user asks to remember something or recall something, actually call the appropriate tool — don't just say you will." },
+      { role: "user", content: transcript },
+    ];
+
+    async function drainBuffer(force) {
+      while (true) {
+        const match = SENTENCE_END.exec(textBuffer);
+        if (!match) break;
+        const end = match.index + match[0].length;
+        const sentence = textBuffer.slice(0, end);
+        textBuffer = textBuffer.slice(end);
+        await flushTts(sentence);
+      }
+      if (force && textBuffer.trim()) { await flushTts(textBuffer); textBuffer = ""; }
+    }
+
+    let rounds = 0;
+    while (rounds < MAX_TOOL_ROUNDS) {
+      rounds++;
+      let assistantContent = "";
+      const toolCalls = [];
+      for await (const event of chatAdapter.chatStream(messages, tools, { temperature: 0.7, maxTokens: 600 })) {
+        if (event.type === "content_delta" && event.text) {
+          sendText(ws, { type: "llm_delta", text: event.text });
+          assistantContent += event.text;
+          textBuffer += event.text;
+          await drainBuffer(false);
+        } else if (event.type === "tool_call") {
+          toolCalls.push({ id: event.id, name: event.name, arguments: event.arguments });
+        } else if (event.type === "done") {
+          break;
         }
       }
-      if (event.type === "done") break;
+      console.log(`[meta-glasses] round ${rounds}: content_len=${assistantContent.length} tool_calls=${toolCalls.length}${toolCalls.length ? " (" + toolCalls.map(t => t.name + "/" + (t.arguments?.action || "?")).join(",") + ")" : ""}`);
+      if (assistantContent || toolCalls.length > 0) {
+        const m = { role: "assistant", content: assistantContent || "" };
+        if (toolCalls.length > 0) {
+          // The OpenAI-compatible adapter expects tool_calls as a JSON string
+          // (it calls JSON.parse on it). Anthropic adapter accepts either.
+          m.tool_calls = JSON.stringify(toolCalls.map(tc => ({ id: tc.id, name: tc.name, arguments: tc.arguments })));
+        }
+        messages.push(m);
+      }
+      if (toolCalls.length === 0) break;
+      const results = await toolExecutor.executeToolCalls(toolCalls);
+      for (const r of results) messages.push({ role: "tool", content: r.result, tool_call_id: r.id, tool_name: r.name });
     }
-    if (textBuffer.trim()) await flushTts(textBuffer);
+    await drainBuffer(true);
     sendText(ws, { type: "tts_end" });
   } catch (err) {
     sendText(ws, { type: "error", code: "turn_failed", recoverable: true, message: err.message });
   } finally {
+    if (toolExecutor) { try { await toolExecutor.close(); } catch {} }
     try { db.close(); } catch {}
   }
 }
