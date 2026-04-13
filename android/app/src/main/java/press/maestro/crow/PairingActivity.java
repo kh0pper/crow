@@ -61,6 +61,7 @@ public class PairingActivity extends AppCompatActivity {
     private static final String[] BT_PERMS = new String[]{
             Manifest.permission.BLUETOOTH_CONNECT,
             Manifest.permission.BLUETOOTH_SCAN,
+            Manifest.permission.RECORD_AUDIO,
     };
 
     private final ActivityResultLauncher<String[]> btPermissionLauncher =
@@ -71,9 +72,9 @@ public class PairingActivity extends AppCompatActivity {
                     if (granted == null || !granted) { allGranted = false; break; }
                 }
                 if (allGranted) {
-                    appendLog("Bluetooth permissions granted.");
+                    appendLog("Permissions granted (Bluetooth + microphone).");
                 } else {
-                    appendLog("Bluetooth permissions denied. Pairing won't work until you grant them in Settings → Apps → Crow → Permissions.");
+                    appendLog("One or more permissions denied. Grant them in Settings → Apps → Crow → Permissions, then retry.");
                 }
             });
 
@@ -120,6 +121,32 @@ public class PairingActivity extends AppCompatActivity {
             startDatPairing();
         });
         root.addView(startBtn, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // Temporary push-to-talk test button. Press and hold to record,
+        // release to hand the audio to the gateway for STT → LLM → TTS.
+        Button pttBtn = new Button(this);
+        pttBtn.setText("Hold to talk");
+        pttBtn.setOnTouchListener((v, event) -> {
+            switch (event.getActionMasked()) {
+                case android.view.MotionEvent.ACTION_DOWN:
+                    appendLog("Turn start.");
+                    Intent begin = new Intent(this, GlassesService.class).setAction(GlassesService.ACTION_BEGIN_TURN);
+                    ContextCompat.startForegroundService(this, begin);
+                    v.setPressed(true);
+                    return true;
+                case android.view.MotionEvent.ACTION_UP:
+                case android.view.MotionEvent.ACTION_CANCEL:
+                    appendLog("Turn end.");
+                    Intent end = new Intent(this, GlassesService.class).setAction(GlassesService.ACTION_END_TURN);
+                    ContextCompat.startForegroundService(this, end);
+                    v.setPressed(false);
+                    return true;
+            }
+            return false;
+        });
+        root.addView(pttBtn, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
