@@ -65,6 +65,30 @@ function sendBinary(ws, chunk) {
   ws.send(chunk);
 }
 
+/**
+ * Prepend a RIFF/WAV header onto raw 16-bit signed LE mono PCM. STT
+ * providers (Groq/Whisper/Deepgram) expect a container, not headerless
+ * PCM — this is the minimal 44-byte header.
+ */
+function wrapPcmAsWav(pcm, sampleRate) {
+  const header = Buffer.alloc(44);
+  const byteRate = sampleRate * 2;
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);        // PCM chunk size
+  header.writeUInt16LE(1, 20);          // PCM format
+  header.writeUInt16LE(1, 22);          // mono
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(2, 32);          // block align
+  header.writeUInt16LE(16, 34);         // bits per sample
+  header.write("data", 36);
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
+}
+
 /* ---------- TTS codec negotiation ----------
  *
  * The Android client opens an AudioTrack configured for raw 16-bit signed
@@ -413,6 +437,8 @@ export function setupWebSocket(server) {
       let inTurn = false;
       let turnBuffer = [];
       let turnOpts = {};
+      let micSampleRate = 16000;
+      let micIsPcm = false;
 
       let alive = true;
       ws.on("pong", () => { alive = true; });
@@ -431,9 +457,11 @@ export function setupWebSocket(server) {
         try { msg = JSON.parse(raw.toString("utf8")); } catch { return; }
         switch (msg.type) {
           case "hello":
+            micIsPcm = msg.codec === "pcm";
+            micSampleRate = msg.sample_rate || 16000;
             turnOpts = {
-              contentType: msg.codec === "pcm" ? "audio/wav" : "audio/ogg;codecs=opus",
-              filename: `turn.${msg.codec === "pcm" ? "wav" : "opus"}`,
+              contentType: micIsPcm ? "audio/wav" : "audio/ogg;codecs=opus",
+              filename: `turn.${micIsPcm ? "wav" : "opus"}`,
             };
             break;
           case "turn_start":
@@ -443,8 +471,9 @@ export function setupWebSocket(server) {
           case "turn_end": {
             if (!inTurn) return;
             inTurn = false;
-            const audio = Buffer.concat(turnBuffer);
+            const raw = Buffer.concat(turnBuffer);
             turnBuffer = [];
+            const audio = micIsPcm ? wrapPcmAsWav(raw, micSampleRate) : raw;
             runVoiceTurn(ws, device, audio, turnOpts).catch((err) => {
               sendText(ws, { type: "error", code: "turn_failed", recoverable: true, message: err.message });
             });

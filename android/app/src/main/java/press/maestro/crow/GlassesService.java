@@ -10,7 +10,9 @@ import android.content.SharedPreferences;
 import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioManager;
+import android.media.AudioRecord;
 import android.media.AudioTrack;
+import android.media.MediaRecorder;
 import android.os.Build;
 import android.os.IBinder;
 import android.util.Log;
@@ -51,6 +53,8 @@ import java.util.concurrent.TimeUnit;
  */
 public class GlassesService extends Service {
     public static final String EXTRA_DEVICE_ID = "device_id";
+    public static final String ACTION_BEGIN_TURN = "press.maestro.crow.BEGIN_TURN";
+    public static final String ACTION_END_TURN = "press.maestro.crow.END_TURN";
 
     private static final String TAG = "GlassesService";
     private static final String CHANNEL_ID = "glasses_service";
@@ -74,6 +78,12 @@ public class GlassesService extends Service {
     // though write() accepted everything.
     private ByteArrayOutputStream ttsBuffer;
     private int ttsSampleRate = 24000;
+    // Mic capture — AudioRecord reads 20 ms frames of 16 kHz mono s16 PCM
+    // from BT SCO (glasses mic via HFP) and posts them to the WS.
+    private static final int MIC_SAMPLE_RATE = 16000;
+    private AudioRecord micRecord;
+    private Thread micThread;
+    private volatile boolean micRunning = false;
 
     @Override
     public void onCreate() {
@@ -89,20 +99,33 @@ public class GlassesService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null) {
-            deviceId = intent.getStringExtra(EXTRA_DEVICE_ID);
+            String action = intent.getAction();
+            if (ACTION_BEGIN_TURN.equals(action)) {
+                beginTurn();
+                return START_STICKY;
+            }
+            if (ACTION_END_TURN.equals(action)) {
+                endTurn();
+                return START_STICKY;
+            }
+            if (intent.hasExtra(EXTRA_DEVICE_ID)) {
+                deviceId = intent.getStringExtra(EXTRA_DEVICE_ID);
+            }
         }
         startForeground(NOTIFICATION_ID, buildNotification("Connecting to glasses..."));
         if (deviceId == null) {
             stopSelf();
             return START_NOT_STICKY;
         }
-        connectWebSocket();
+        if (ws == null) connectWebSocket();
         return START_STICKY;
     }
 
     /** Called by the in-app PTT button or WakeWordEngine when user starts speaking. */
     public void beginTurn() {
-        if (ws == null || inTurn) return;
+        if (ws == null) { Log.w(TAG, "beginTurn: ws is null"); return; }
+        if (inTurn) { Log.w(TAG, "beginTurn: already in turn"); return; }
+        Log.i(TAG, "beginTurn");
         inTurn = true;
         JSONObject msg = new JSONObject();
         try {
@@ -118,7 +141,8 @@ public class GlassesService extends Service {
 
     /** Called when the user releases the PTT button / wake-word confirms end. */
     public void endTurn() {
-        if (!inTurn) return;
+        if (!inTurn) { Log.w(TAG, "endTurn: not in turn"); return; }
+        Log.i(TAG, "endTurn");
         inTurn = false;
         stopMicPump();
         audioManager.setBluetoothScoOn(false);
@@ -127,20 +151,83 @@ public class GlassesService extends Service {
     }
 
     /**
-     * Read mic PCM from the BT SCO stream and forward as binary frames.
-     * TODO(meta-glasses): implement the AudioRecord reader loop here.
-     * Pseudocode:
-     *   AudioRecord rec = new AudioRecord(VOICE_RECOGNITION, 16000, MONO, PCM_16BIT, bufSize);
-     *   rec.startRecording();
-     *   while (inTurn) { rec.read(buf, 0, buf.length); ws.send(ByteString.of(buf)); }
+     * Open an AudioRecord on the BT SCO mic (glasses via HFP, handed to us
+     * after {@link AudioManager#startBluetoothSco()} completes) and forward
+     * 20 ms PCM frames to the WebSocket as binary frames until the turn ends.
+     *
+     * The DAT SDK 0.5.0 doesn't expose a mic API, so we rely on the
+     * standard Android BT HFP pipeline. If SCO isn't actually wired to the
+     * glasses mic (e.g. because Meta AI holds it), this captures the phone
+     * mic instead — audible but not spatial-to-glasses. Something we'll
+     * validate when DAT exposes a first-class mic surface.
      */
     private void startMicPump() {
-        // Placeholder — fills in once BT SCO PCM framing is validated on
-        // real Ray-Ban Meta hardware.
+        if (micRunning) return;
+        int minBuf = AudioRecord.getMinBufferSize(MIC_SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+        if (minBuf <= 0) {
+            Log.w(TAG, "AudioRecord.getMinBufferSize failed: " + minBuf);
+            return;
+        }
+        // Use a 1 s internal buffer so SCO warmup/wakelock hiccups don't drop
+        // samples; read 20 ms frames to the WS.
+        int bufSize = Math.max(minBuf, MIC_SAMPLE_RATE * 2);
+        try {
+            micRecord = new AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    MIC_SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    bufSize);
+        } catch (SecurityException e) {
+            Log.w(TAG, "AudioRecord denied (RECORD_AUDIO): " + e.getMessage());
+            return;
+        }
+        if (micRecord.getState() != AudioRecord.STATE_INITIALIZED) {
+            Log.w(TAG, "AudioRecord not initialized");
+            try { micRecord.release(); } catch (Exception ignored) {}
+            micRecord = null;
+            return;
+        }
+        micRecord.startRecording();
+        micRunning = true;
+        micThread = new Thread(() -> {
+            // 20 ms frames = 320 samples = 640 bytes at 16 kHz mono s16.
+            byte[] buf = new byte[640];
+            long framesSent = 0;
+            while (micRunning) {
+                int n = micRecord.read(buf, 0, buf.length);
+                if (n <= 0) {
+                    if (n == AudioRecord.ERROR_INVALID_OPERATION || n == AudioRecord.ERROR_BAD_VALUE) {
+                        Log.w(TAG, "AudioRecord.read err=" + n);
+                        break;
+                    }
+                    continue;
+                }
+                if (ws != null) {
+                    byte[] frame = (n == buf.length) ? buf : java.util.Arrays.copyOf(buf, n);
+                    ws.send(ByteString.of(frame));
+                    framesSent++;
+                }
+            }
+            Log.i(TAG, "mic pump stopped, frames_sent=" + framesSent);
+        }, "mic-pump");
+        micThread.start();
+        Log.i(TAG, "mic pump started (16 kHz mono PCM, 20 ms frames)");
     }
 
     private void stopMicPump() {
-        // Placeholder — mirrors startMicPump.
+        micRunning = false;
+        Thread t = micThread;
+        micThread = null;
+        if (t != null) {
+            try { t.join(500); } catch (InterruptedException ignored) {}
+        }
+        if (micRecord != null) {
+            try { micRecord.stop(); } catch (Exception ignored) {}
+            try { micRecord.release(); } catch (Exception ignored) {}
+            micRecord = null;
+        }
     }
 
     private void connectWebSocket() {
@@ -309,6 +396,7 @@ public class GlassesService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        stopMicPump();
         try { if (ws != null) ws.close(1000, "service_stop"); } catch (Exception ignored) {}
         closeAudioTrack();
     }
