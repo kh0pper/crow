@@ -26,6 +26,7 @@ import okio.ByteString;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -64,6 +65,15 @@ public class GlassesService extends Service {
     private AudioTrack audioTrack;
     private String deviceId;
     private volatile boolean inTurn = false;
+    private long ttsStartNanos = 0;
+    private long ttsBytesReceived = 0;
+    // PCM chunks arriving between tts_start/tts_end are accumulated here,
+    // then written to a MODE_STATIC AudioTrack at tts_end. MODE_STREAM
+    // behaves unreliably when the gateway blasts data faster than the
+    // A2DP output can warm up — playback head stays at 0 frames even
+    // though write() accepted everything.
+    private ByteArrayOutputStream ttsBuffer;
+    private int ttsSampleRate = 24000;
 
     @Override
     public void onCreate() {
@@ -170,10 +180,16 @@ public class GlassesService extends Service {
                             Log.i(TAG, "session ready: " + msg.optString("session_id"));
                             break;
                         case "tts_start":
-                            openAudioTrack(msg.optInt("sample_rate", 24000));
+                            ttsSampleRate = msg.optInt("sample_rate", 24000);
+                            Log.i(TAG, "tts_start codec=" + msg.optString("codec") + " sr=" + ttsSampleRate);
+                            ttsStartNanos = System.nanoTime();
+                            ttsBytesReceived = 0;
+                            ttsBuffer = new ByteArrayOutputStream(64 * 1024);
                             break;
                         case "tts_end":
-                            closeAudioTrack();
+                            long elapsedMs = (System.nanoTime() - ttsStartNanos) / 1_000_000L;
+                            Log.i(TAG, "tts_end bytes=" + ttsBytesReceived + " elapsed=" + elapsedMs + "ms");
+                            playTtsBuffer();
                             break;
                         case "transcript_final":
                             Log.i(TAG, "transcript: " + msg.optString("text"));
@@ -188,10 +204,12 @@ public class GlassesService extends Service {
             }
 
             @Override public void onMessage(WebSocket webSocket, ByteString bytes) {
-                // Binary frame → TTS audio chunk. Write to AudioTrack.
-                if (audioTrack != null) {
+                // Binary frame → TTS PCM chunk. Accumulate; we'll hand the
+                // full buffer to a MODE_STATIC AudioTrack at tts_end.
+                if (ttsBuffer != null) {
                     byte[] data = bytes.toByteArray();
-                    audioTrack.write(data, 0, data.length);
+                    try { ttsBuffer.write(data); } catch (Exception e) { Log.w(TAG, "ttsBuffer.write err=" + e.getMessage()); }
+                    ttsBytesReceived += data.length;
                 }
             }
 
@@ -210,32 +228,57 @@ public class GlassesService extends Service {
         });
     }
 
-    private synchronized void openAudioTrack(int sampleRate) {
+    /** Play the accumulated TTS PCM buffer via a MODE_STATIC AudioTrack. */
+    private synchronized void playTtsBuffer() {
         closeAudioTrack();
-        int minBuf = AudioTrack.getMinBufferSize(sampleRate,
-                AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
+        if (ttsBuffer == null) return;
+        byte[] pcm = ttsBuffer.toByteArray();
+        ttsBuffer = null;
+        if (pcm.length < 2) return;
+
         audioTrack = new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build())
                 .setAudioFormat(new AudioFormat.Builder()
-                        .setSampleRate(sampleRate)
+                        .setSampleRate(ttsSampleRate)
                         .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                         .build())
-                .setBufferSizeInBytes(Math.max(minBuf, 4096))
-                .setTransferMode(AudioTrack.MODE_STREAM)
+                .setBufferSizeInBytes(pcm.length)
+                .setTransferMode(AudioTrack.MODE_STATIC)
                 .build();
-        audioTrack.play();
+        int written = audioTrack.write(pcm, 0, pcm.length);
+        Log.i(TAG, "playTtsBuffer wrote " + written + "/" + pcm.length + " bytes");
+        if (written > 0) {
+            try { audioTrack.play(); } catch (Exception e) { Log.w(TAG, "play err=" + e.getMessage()); }
+        }
     }
 
     private synchronized void closeAudioTrack() {
-        if (audioTrack != null) {
-            try { audioTrack.stop(); } catch (Exception ignored) {}
-            try { audioTrack.release(); } catch (Exception ignored) {}
-            audioTrack = null;
-        }
+        if (audioTrack == null) return;
+        final AudioTrack t = audioTrack;
+        audioTrack = null;
+        // Handoff to a short-lived thread so the WebSocket thread isn't blocked
+        // while the track drains whatever's still buffered. MODE_STREAM stop()
+        // plays the buffered samples to completion, but if we call release()
+        // right after stop() we can truncate playback (exactly what was cutting
+        // off the last ~1 s of every TTS utterance). Poll the playback head
+        // until it stops advancing, then release.
+        new Thread(() -> {
+            try { t.stop(); } catch (Exception ignored) {}
+            int last = -1, stable = 0;
+            long deadline = System.currentTimeMillis() + 15000; // hard cap
+            while (System.currentTimeMillis() < deadline && stable < 5) {
+                try { Thread.sleep(100); } catch (InterruptedException ignored) {}
+                int pos;
+                try { pos = t.getPlaybackHeadPosition(); } catch (Exception e) { break; }
+                if (pos == last) stable++; else { stable = 0; last = pos; }
+            }
+            Log.i(TAG, "audio drain done, final head=" + last);
+            try { t.release(); } catch (Exception ignored) {}
+        }, "audio-drain").start();
     }
 
     private void createNotificationChannel() {
