@@ -51,10 +51,14 @@ dependencies {
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
 
     // Meta Wearables Device Access Toolkit (preview).
-    // If you're building without access to the preview Maven, comment these
-    // out — the glasses pairing UI will show "DAT unavailable" and the
-    // rest of the app still builds.
-    implementation 'com.meta.wearables:mwdat-core:0.5.0'
-    implementation 'com.meta.wearables:mwdat-camera:0.5.0'
-    // testImplementation 'com.meta.wearables:mwdat-mockdevice:0.5.0'
+    // Distributed via GitHub Packages (Meta-hosted Maven) — the repo is
+    // configured in the top-level build.gradle. You need a GitHub PAT with
+    // `read:packages` scope exported as GITHUB_TOKEN (and your GitHub
+    // username as GITHUB_USERNAME) before building.
+    //
+    // If you're building without access, comment these out — the app still
+    // compiles but the pairing UI falls back to its stub code path.
+    implementation 'com.meta.wearable:mwdat-core:0.5.0'
+    implementation 'com.meta.wearable:mwdat-camera:0.5.0'
+    // testImplementation 'com.meta.wearable:mwdat-mockdevice:0.5.0'
 }

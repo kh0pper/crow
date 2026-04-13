@@ -12,7 +12,15 @@ Access Crow from your Android device with the native app or as a Progressive Web
 
 Download the latest Crow Android app:
 
-[Download Crow for Android](https://github.com/kh0pper/crow/releases/download/android-v1.3.0/app-release.apk)
+[Download Crow for Android (v1.4.0)](https://github.com/kh0pper/crow/releases/download/android-v1.4.0/app-debug.apk)
+
+::: warning Debug-signed build
+v1.4.0 is signed with the debug keystore rather than the release keystore. It includes the new Meta Ray-Ban glasses integration, which requires a specific signing fingerprint registered at Meta's Wearables Developer Center — the debug key is currently the one registered there. A release-signed APK will ship once the release fingerprint is also authorized on Meta's side.
+
+**If you already have v1.3.0 installed**, you need to uninstall it first before installing v1.4.0 — Android refuses to upgrade between builds signed with different keys.
+:::
+
+Looking for the older release? [Download v1.3.0 (release-signed)](https://github.com/kh0pper/crow/releases/download/android-v1.3.0/app-release.apk).
 
 ### Step 2: Enable unknown sources
 
@@ -29,7 +37,7 @@ On Android 8+, this setting is per-app. You only need to allow the browser you u
 
 ### Step 3: Install
 
-1. Open the downloaded `crow-android.apk` file
+1. Open the downloaded `app-debug.apk` file
 2. Tap **Install** when prompted
 3. Once installed, open the Crow app
 
@@ -50,7 +58,7 @@ If you prefer not to install an APK, you can add the Crow's Nest as a home scree
 5. Tap **Add to Home Screen**
 6. Name it "Crow" and tap **Add**
 
-The PWA runs in a standalone window without browser chrome, giving it a native app feel.
+The PWA runs in a standalone window without browser chrome, giving it a native app feel. The PWA does **not** support the Meta Glasses integration — that requires the native APK.
 
 ## Tailscale Setup
 
@@ -104,6 +112,15 @@ All Crow's Nest panels are available from the Android app:
 - **Skills** — Browse available skills
 - **Settings** — Full configuration access
 
+### Meta Ray-Ban Glasses (v1.4.0)
+
+The app can pair with Meta Ray-Ban (Gen 2) smart glasses via Meta's official Wearables Device Access Toolkit and drive them with your own BYOAI. Voice turns captured on the glasses flow through your configured Speech-to-Text → AI → Text-to-Speech profiles on your Crow instance, and the answer plays back through the glasses' speakers.
+
+- Requires Android 14+ (API 34) for the connected-device foreground service
+- Gen 1 Ray-Ban Stories are **not** supported (Meta's DAT SDK doesn't expose the required primitives on Gen 1)
+- The glasses must already be paired in the Meta AI companion app before pairing with Crow
+- See the [Meta Glasses guide](/guide/meta-glasses) for the full setup walkthrough
+
 ### Instant Push Notifications (v1.3.0)
 
 With the ntfy bundle installed, notifications arrive within a second. Calls, messages, reminders, and system alerts all push to your phone instantly without the 15-minute polling delay. See [Notifications & Push](/guide/notifications) for details.
@@ -133,9 +150,14 @@ The Calls panel lets you start peer-to-peer voice and video calls with your cont
 ### App not installing
 
 - Make sure you enabled "Install from unknown sources" for the correct app (your browser)
-- Check that your Android version is 8.0 or higher
+- Check that your Android version is 14.0 or higher (the new Meta Glasses features require API 34; older Android versions can use v1.3.0)
 - If storage is full, free up space and retry
+- If upgrading from v1.3.0, uninstall the old version first — v1.4.0 uses a different signing key
 
 ### PWA not working offline
 
 The PWA requires a network connection to your gateway. It does not cache data for offline use — it connects to your Crow instance in real time.
+
+### Meta Glasses issues
+
+See the dedicated [Meta Glasses guide](/guide/meta-glasses) for pairing and voice-turn troubleshooting.
