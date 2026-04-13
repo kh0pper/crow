@@ -208,6 +208,7 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js').catch(function() {});
     }
+
   </script>
 </body>
 </html>`;

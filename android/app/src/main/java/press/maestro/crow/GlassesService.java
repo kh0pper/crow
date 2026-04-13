@@ -3,6 +3,7 @@ package press.maestro.crow;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
@@ -69,6 +70,12 @@ public class GlassesService extends Service {
     private AudioTrack audioTrack;
     private String deviceId;
     private volatile boolean inTurn = false;
+    // Reconnect bookkeeping. `stopping` is set in onDestroy so our own
+    // close() doesn't trigger a reconnect loop. `reconnectPending` prevents
+    // stacking multiple pending reconnects if both onClosed and onFailure
+    // fire for the same event.
+    private volatile boolean stopping = false;
+    private volatile boolean reconnectPending = false;
     private long ttsStartNanos = 0;
     private long ttsBytesReceived = 0;
     // PCM chunks arriving between tts_start/tts_end are accumulated here,
@@ -127,6 +134,7 @@ public class GlassesService extends Service {
         if (inTurn) { Log.w(TAG, "beginTurn: already in turn"); return; }
         Log.i(TAG, "beginTurn");
         inTurn = true;
+        updateNotification("Listening...");
         JSONObject msg = new JSONObject();
         try {
             msg.put("type", "turn_start");
@@ -144,6 +152,7 @@ public class GlassesService extends Service {
         if (!inTurn) { Log.w(TAG, "endTurn: not in turn"); return; }
         Log.i(TAG, "endTurn");
         inTurn = false;
+        updateNotification("Connected");
         stopMicPump();
         audioManager.setBluetoothScoOn(false);
         audioManager.stopBluetoothSco();
@@ -281,6 +290,12 @@ public class GlassesService extends Service {
                         case "transcript_final":
                             Log.i(TAG, "transcript: " + msg.optString("text"));
                             break;
+                        case "remote_turn":
+                            // Nest panel (or any authed caller) driving PTT.
+                            String action = msg.optString("action");
+                            if ("begin".equals(action)) beginTurn();
+                            else if ("end".equals(action)) endTurn();
+                            break;
                         case "error":
                             Log.w(TAG, "server error: " + msg.optString("code") + " " + msg.optString("message"));
                             break;
@@ -305,14 +320,33 @@ public class GlassesService extends Service {
                 webSocket.close(1000, null);
             }
 
+            @Override public void onClosed(WebSocket webSocket, int code, String reason) {
+                Log.i(TAG, "WebSocket closed: " + code + " " + reason);
+                if (ws == webSocket) ws = null;
+                // Gateway restart triggers a clean 1000 close — OkHttp
+                // doesn't re-establish, so we must. Skip if we're shutting
+                // down ourselves.
+                scheduleReconnect(2000);
+            }
+
             @Override public void onFailure(WebSocket webSocket, Throwable t, Response response) {
                 Log.w(TAG, "WebSocket failed: " + t.getMessage());
                 updateNotification("Disconnected — retrying");
-                // Simple retry after 5s; OkHttp doesn't auto-reconnect.
-                new android.os.Handler(getMainLooper()).postDelayed(
-                        GlassesService.this::connectWebSocket, 5000);
+                if (ws == webSocket) ws = null;
+                scheduleReconnect(5000);
             }
         });
+    }
+
+    private void scheduleReconnect(long delayMs) {
+        if (stopping || reconnectPending) return;
+        reconnectPending = true;
+        new android.os.Handler(getMainLooper()).postDelayed(() -> {
+            reconnectPending = false;
+            if (stopping) return;
+            Log.i(TAG, "Attempting WebSocket reconnect...");
+            connectWebSocket();
+        }, delayMs);
     }
 
     /** Play the accumulated TTS PCM buffer via a MODE_STATIC AudioTrack. */
@@ -377,13 +411,24 @@ public class GlassesService extends Service {
     }
 
     private Notification buildNotification(String text) {
-        return new NotificationCompat.Builder(this, CHANNEL_ID)
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
+        Intent beginIntent = new Intent(this, GlassesService.class).setAction(ACTION_BEGIN_TURN);
+        Intent endIntent = new Intent(this, GlassesService.class).setAction(ACTION_END_TURN);
+        PendingIntent beginPi = PendingIntent.getForegroundService(this, 1, beginIntent, flags);
+        PendingIntent endPi = PendingIntent.getForegroundService(this, 2, endIntent, flags);
+
+        NotificationCompat.Builder b = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("Crow Glasses")
                 .setContentText(text)
                 .setSmallIcon(android.R.drawable.ic_menu_compass)
                 .setOngoing(true)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
-                .build();
+                .setPriority(NotificationCompat.PRIORITY_LOW);
+        if (inTurn) {
+            b.addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", endPi);
+        } else {
+            b.addAction(android.R.drawable.ic_btn_speak_now, "Ask Crow", beginPi);
+        }
+        return b.build();
     }
 
     private void updateNotification(String text) {
@@ -396,8 +441,10 @@ public class GlassesService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        stopping = true;
         stopMicPump();
         try { if (ws != null) ws.close(1000, "service_stop"); } catch (Exception ignored) {}
+        ws = null;
         closeAudioTrack();
     }
 

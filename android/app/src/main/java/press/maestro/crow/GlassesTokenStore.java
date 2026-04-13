@@ -47,4 +47,9 @@ public final class GlassesTokenStore {
     public static void clear(Context ctx, String deviceId) {
         open(ctx).edit().remove(deviceId).apply();
     }
+
+    /** List all stored device IDs (for auto-start on boot / app launch). */
+    public static java.util.Set<String> listDeviceIds(Context ctx) {
+        return open(ctx).getAll().keySet();
+    }
 }

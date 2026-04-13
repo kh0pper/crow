@@ -157,6 +157,44 @@ const CLIENT_SCRIPT = `
     }
   }
 
+  var ptt = { active: false };
+  async function sendTurn(action) {
+    try {
+      var res = await fetch('/api/meta-glasses/turn', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ action: action })
+      });
+      return await res.json();
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
+  async function toggleTalk() {
+    var btn = document.getElementById('mg-talk-btn');
+    var status = document.getElementById('mg-talk-status');
+    if (!ptt.active) {
+      status.textContent = 'Starting turn...';
+      var begin = await sendTurn('begin');
+      if (!begin.ok || !begin.delivered) {
+        status.textContent = 'No connected glasses session.';
+        return;
+      }
+      ptt.active = true;
+      btn.textContent = 'Stop';
+      btn.classList.add('btn-danger');
+      status.textContent = 'Listening — speak, then press Stop.';
+    } else {
+      status.textContent = 'Ending turn...';
+      await sendTurn('end');
+      ptt.active = false;
+      btn.textContent = 'Ask Crow';
+      btn.classList.remove('btn-danger');
+      status.textContent = 'Processing...';
+    }
+  }
+
   async function pushSay() {
     var text = (document.getElementById('mg-say-text').value || '').trim();
     if (!text) return;
@@ -180,6 +218,7 @@ const CLIENT_SCRIPT = `
 
   document.getElementById('mg-pair-btn').addEventListener('click', pairFromAndroid);
   document.getElementById('mg-say-btn').addEventListener('click', pushSay);
+  document.getElementById('mg-talk-btn').addEventListener('click', toggleTalk);
 
   renderCompat();
   refreshDevices();
@@ -228,6 +267,16 @@ export default {
         </div>
 
         <div id="mg-devices"></div>
+
+        <div class="mg-card" style="margin-top:1rem">
+          <div style="display:flex;align-items:center;gap:0.75rem">
+            <button id="mg-talk-btn" class="btn btn-primary" style="min-width:120px">Ask Crow</button>
+            <div id="mg-talk-status" style="font-size:0.85rem;color:var(--crow-text-muted)"></div>
+          </div>
+          <div style="font-size:0.75rem;color:var(--crow-text-muted);margin-top:0.5rem">
+            Starts a voice turn on the first connected glasses session. Speak through the glasses, then press Stop.
+          </div>
+        </div>
 
         <details style="margin-top:1.5rem">
           <summary style="cursor:pointer;font-size:0.85rem;color:var(--crow-text-muted)">Developer tools</summary>
