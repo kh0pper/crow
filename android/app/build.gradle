@@ -1,5 +1,6 @@
 plugins {
     id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
 }
 
 android {
@@ -37,6 +38,10 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
 }
 
 dependencies {
@@ -60,5 +65,12 @@ dependencies {
     // compiles but the pairing UI falls back to its stub code path.
     implementation 'com.meta.wearable:mwdat-core:0.5.0'
     implementation 'com.meta.wearable:mwdat-camera:0.5.0'
+
+    // Kotlin stdlib + coroutines — required to consume the DAT SDK's Flow-based
+    // APIs (Wearables.registrationState, Wearables.devices). The bridge in
+    // press.maestro.crow.dat.DatBridge exposes Java-friendly callbacks.
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.1.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
     // testImplementation 'com.meta.wearable:mwdat-mockdevice:0.5.0'
 }

@@ -18,6 +18,8 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
+import press.maestro.crow.dat.DatBridge;
+
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
@@ -139,33 +141,28 @@ public class PairingActivity extends AppCompatActivity {
     }
 
     /**
-     * Kick off the Meta DAT pairing sheet.
+     * Kick off the Meta DAT registration + device discovery flow via {@link DatBridge}.
      *
-     * TODO(meta-glasses): wire the real SDK call here. At the time of this
-     * writing the DAT SDK's preview API exposes a helper along the lines of:
-     *
-     *   com.meta.wearables.DeviceSession.createPairingIntent(context)
-     *
-     * and returns a device handle via an ActivityResultCallback. We stub
-     * out the success case so the rest of the pipeline is exercisable
-     * against {@code mwdat-mockdevice}. Once the real SDK is linked,
-     * replace {@link #stubCompletePairing()} with the DAT callback.
+     * The Meta Wearables DAT SDK doesn't expose a per-device "pairing intent" — the
+     * Meta AI companion app owns glasses pairing. Instead this app registers with
+     * Meta AI and then reads the available {@code Wearables.devices} set. The
+     * bridge handles the Flow collection and surfaces a simple callback.
      */
     private void startDatPairing() {
-        appendLog("Launching DAT pairing sheet...");
-        // TODO: Intent datIntent = DeviceSession.createPairingIntent(this);
-        //       startActivityForResult(datIntent, 0x1234);
-        //       onActivityResult → call completePairing(deviceId, generation)
-        //
-        // Placeholder: simulate a successful pairing using a mock device id.
-        stubCompletePairing();
-    }
-
-    /** Placeholder: simulate a DAT pairing success. Remove once SDK is wired. */
-    private void stubCompletePairing() {
-        String deviceId = "mock-" + System.currentTimeMillis();
-        String generation = "unknown"; // Real SDK would report gen2/gen1
-        completePairing(deviceId, "Mock Glasses", generation);
+        appendLog("Launching DAT registration via Meta AI...");
+        DatBridge.startRegistration(this, this, new DatBridge.Listener() {
+            @Override public void onStatus(String message) {
+                appendLog(message);
+            }
+            @Override public void onDevicePaired(String deviceId, String displayName) {
+                // DAT only supports Ray-Ban Meta (Gen 2) and Ray-Ban Meta Display —
+                // Gen 1 Stories won't surface in Wearables.devices at all.
+                completePairing(deviceId, displayName, "gen2");
+            }
+            @Override public void onError(String message) {
+                appendLog("DAT error: " + message);
+            }
+        });
     }
 
     /**
