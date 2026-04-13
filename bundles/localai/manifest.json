@@ -6,16 +6,32 @@
   "type": "bundle",
   "author": "Crow",
   "category": "ai",
-  "tags": ["ai", "local", "embeddings", "privacy", "llm", "openai-compatible"],
+  "tags": [
+    "ai",
+    "local",
+    "embeddings",
+    "privacy",
+    "llm",
+    "openai-compatible"
+  ],
   "icon": "brain",
   "docker": {
     "composefile": "docker-compose.yml"
   },
-  "skills": ["skills/localai.md"],
+  "skills": [
+    "skills/localai.md"
+  ],
   "requires": {
-    "env": ["LOCALAI_HOST"],
+    "env": [
+      "LOCALAI_HOST"
+    ],
     "min_ram_mb": 4096,
-    "min_disk_mb": 10000
+    "min_disk_mb": 10000,
+    "gpu_arch": [
+      "cuda",
+      "rocm",
+      "cpu"
+    ]
   },
   "env_vars": [
     {
@@ -25,7 +41,9 @@
       "required": true
     }
   ],
-  "ports": [8080],
+  "ports": [
+    8080
+  ],
   "webUI": {
     "port": 8080,
     "path": "/"

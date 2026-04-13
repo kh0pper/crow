@@ -192,7 +192,10 @@
         "recommended_ram_mb": 16000,
         "min_disk_mb": 20000,
         "recommended_disk_mb": 80000,
-        "platform": "linux-x86_64"
+        "platform": "linux-x86_64",
+        "gpu_arch": [
+          "cuda"
+        ]
       },
       "env_vars": [
         {
@@ -395,7 +398,12 @@
           "OLLAMA_HOST"
         ],
         "min_ram_mb": 2048,
-        "min_disk_mb": 5000
+        "min_disk_mb": 5000,
+        "gpu_arch": [
+          "cuda",
+          "rocm",
+          "cpu"
+        ]
       },
       "env_vars": [
         {
@@ -437,7 +445,12 @@
           "LOCALAI_HOST"
         ],
         "min_ram_mb": 4096,
-        "min_disk_mb": 10000
+        "min_disk_mb": 10000,
+        "gpu_arch": [
+          "cuda",
+          "rocm",
+          "cpu"
+        ]
       },
       "env_vars": [
         {
@@ -1336,7 +1349,10 @@
       "requires": {
         "min_ram_mb": 4096,
         "min_disk_mb": 25000,
-        "gpu": true
+        "gpu": true,
+        "gpu_arch": [
+          "cuda"
+        ]
       },
       "env_vars": [
         {

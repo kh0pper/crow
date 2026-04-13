@@ -9,6 +9,7 @@
 import { escapeHtml, badge, formatDate } from "../shared/components.js";
 import { t, tJs } from "../shared/i18n.js";
 import { getAddonLogo } from "../shared/logos.js";
+import { detectGpuArch, checkGpuArchCompatible } from "../../gpu-arch.js";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { execFileSync } from "child_process";
 import { join, dirname } from "path";
@@ -668,7 +669,8 @@ export default {
         <p>${t("extensions.registryUnavailableDesc", lang)}</p>
       </div>`;
     } else {
-      const cards = available.map((addon, i) => {
+      const hostArches = detectGpuArch();
+            const cards = available.map((addon, i) => {
         const isInstalled = installed[addon.id];
         const cat = addon.category || "other";
         const catColor = getCategoryColor(cat);
@@ -682,8 +684,12 @@ export default {
         const resources = formatResources(addon.requires);
 
         let installButton;
+        const gpuCompat = checkGpuArchCompatible(addon, hostArches);
         if (isInstalled) {
           installButton = badge(t("extensions.installedBadge", lang), "published");
+        } else if (!gpuCompat.ok) {
+          const tip = `${gpuCompat.reason || "Incompatible GPU arch."}`;
+          installButton = `<span class="ext-card__badge ext-card__badge--type" title="${escapeHtml(tip)}" style="opacity:0.85">incompatible host</span>`;
         } else {
           const envVarsAttr = escapeHtml(JSON.stringify(addon.env_vars || []));
           const minRam = addon.requires?.min_ram_mb || 0;

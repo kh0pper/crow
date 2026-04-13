@@ -6,16 +6,31 @@
   "type": "bundle",
   "author": "Crow",
   "category": "ai",
-  "tags": ["ai", "local", "embeddings", "privacy", "llm"],
+  "tags": [
+    "ai",
+    "local",
+    "embeddings",
+    "privacy",
+    "llm"
+  ],
   "icon": "brain",
   "docker": {
     "composefile": "docker-compose.yml"
   },
-  "skills": ["skills/ollama.md"],
+  "skills": [
+    "skills/ollama.md"
+  ],
   "requires": {
-    "env": ["OLLAMA_HOST"],
+    "env": [
+      "OLLAMA_HOST"
+    ],
     "min_ram_mb": 2048,
-    "min_disk_mb": 5000
+    "min_disk_mb": 5000,
+    "gpu_arch": [
+      "cuda",
+      "rocm",
+      "cpu"
+    ]
   },
   "env_vars": [
     {
@@ -25,7 +40,9 @@
       "required": true
     }
   ],
-  "ports": [11434],
+  "ports": [
+    11434
+  ],
   "webUI": null,
   "notes": "RAM and disk depend on model size. Small models (tinyllama) need ~2GB RAM. Large models (llama3) need 8GB+. Each model uses 2-50GB disk."
 }
