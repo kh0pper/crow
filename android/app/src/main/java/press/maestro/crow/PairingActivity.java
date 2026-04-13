@@ -6,6 +6,7 @@ import android.os.Bundle;
 import android.text.method.ScrollingMovementMethod;
 import android.view.Gravity;
 import android.view.ViewGroup;
+import android.webkit.CookieManager;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -146,6 +147,14 @@ public class PairingActivity extends AppCompatActivity {
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("POST");
                 conn.setRequestProperty("Content-Type", "application/json");
+                // The gateway's /api/meta-glasses/pair route is gated by
+                // dashboardAuth. The Crow WebView in MainActivity holds the
+                // session cookie after login; share it with this HttpURLConnection
+                // so we don't get redirected to the HTML login page.
+                String cookies = CookieManager.getInstance().getCookie(base);
+                if (cookies != null && !cookies.isEmpty()) {
+                    conn.setRequestProperty("Cookie", cookies);
+                }
                 conn.setDoOutput(true);
                 JSONObject body = new JSONObject()
                         .put("id", deviceId)
