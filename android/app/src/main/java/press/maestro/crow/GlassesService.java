@@ -225,6 +225,81 @@ public class GlassesService extends Service {
         Log.i(TAG, "mic pump started (16 kHz mono PCM, 20 ms frames)");
     }
 
+    /**
+     * Handle a capture_photo request from the gateway: use DatBridge to grab
+     * a still via StreamSession, upload it to the gateway, and reply on the
+     * same WebSocket with a photo_ready message (or photo_error on failure).
+     */
+    private void handleCapturePhoto(final String reqId) {
+        Log.i(TAG, "capture_photo request_id=" + reqId);
+        press.maestro.crow.dat.DatBridge.capturePhoto(this, new press.maestro.crow.dat.DatBridge.PhotoListener() {
+            @Override public void onPhoto(byte[] bytes, String mime) {
+                Log.i(TAG, "capture_photo ok bytes=" + bytes.length + " mime=" + mime);
+                uploadPhotoAsync(reqId, bytes, mime);
+            }
+            @Override public void onError(String code, String message) {
+                Log.w(TAG, "capture_photo err code=" + code + " msg=" + message);
+                try {
+                    JSONObject e = new JSONObject();
+                    e.put("type", "photo_error");
+                    e.put("request_id", reqId);
+                    e.put("code", code);
+                    e.put("message", message);
+                    if (ws != null) ws.send(e.toString());
+                } catch (Exception ignored) {}
+            }
+        });
+    }
+
+    private void uploadPhotoAsync(String reqId, byte[] bytes, String mime) {
+        new Thread(() -> {
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+            String gateway = prefs.getString(KEY_GATEWAY_URL, null);
+            if (gateway == null) return;
+            String token = GlassesTokenStore.load(this, deviceId);
+            if (token == null) return;
+            String base = gateway.replaceAll("/+$", "");
+            String ext = mime.endsWith("heic") ? "heic" : "jpg";
+            String url = base + "/api/meta-glasses/photo?device_id=" + deviceId + "&request_id=" + reqId + "&ext=" + ext;
+            try {
+                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+                conn.setRequestMethod("POST");
+                conn.setRequestProperty("Authorization", "Bearer " + token);
+                conn.setRequestProperty("Content-Type", mime);
+                conn.setDoOutput(true);
+                conn.setFixedLengthStreamingMode(bytes.length);
+                try (java.io.OutputStream os = conn.getOutputStream()) { os.write(bytes); }
+                int code = conn.getResponseCode();
+                String body = new String(code >= 200 && code < 300 ? conn.getInputStream().readAllBytes() : conn.getErrorStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                Log.i(TAG, "photo upload http=" + code + " body=" + body);
+                JSONObject reply = new JSONObject();
+                if (code >= 200 && code < 300) {
+                    JSONObject parsed = new JSONObject(body);
+                    reply.put("type", "photo_ready");
+                    reply.put("request_id", reqId);
+                    reply.put("url", parsed.optString("url"));
+                    reply.put("mime", mime);
+                } else {
+                    reply.put("type", "photo_error");
+                    reply.put("request_id", reqId);
+                    reply.put("code", "upload_failed");
+                    reply.put("message", "HTTP " + code);
+                }
+                if (ws != null) ws.send(reply.toString());
+            } catch (Exception e) {
+                Log.w(TAG, "photo upload failed: " + e.getMessage());
+                try {
+                    JSONObject err = new JSONObject();
+                    err.put("type", "photo_error");
+                    err.put("request_id", reqId);
+                    err.put("code", "upload_failed");
+                    err.put("message", e.getMessage() == null ? "io error" : e.getMessage());
+                    if (ws != null) ws.send(err.toString());
+                } catch (Exception ignored) {}
+            }
+        }, "photo-upload").start();
+    }
+
     private void stopMicPump() {
         micRunning = false;
         Thread t = micThread;
@@ -295,6 +370,10 @@ public class GlassesService extends Service {
                             String action = msg.optString("action");
                             if ("begin".equals(action)) beginTurn();
                             else if ("end".equals(action)) endTurn();
+                            break;
+                        case "capture_photo":
+                            String reqId = msg.optString("request_id", "");
+                            handleCapturePhoto(reqId);
                             break;
                         case "error":
                             Log.w(TAG, "server error: " + msg.optString("code") + " " + msg.optString("message"));

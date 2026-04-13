@@ -21,11 +21,12 @@
  *   server→client binary: TTS audio chunks per tts_start codec
  */
 
-import { Router } from "express";
+import express, { Router } from "express";
 import { join } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { homedir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { WebSocketServer } from "ws";
 
 /* ---------- Bundle path resolution ---------- */
@@ -57,6 +58,25 @@ async function loadSystemPrompt(){ return import(pathToFileURL(join(gatewayDir, 
 /* ---------- Shared session state ---------- */
 
 const _sessions = new Map();
+// Outstanding capture_photo requests: request_id → { resolve, reject, timer }
+const _pendingCaptures = new Map();
+
+/** Send a capture_photo command to a session and await upload. */
+function triggerCapture(sess) {
+  const reqId = randomUUID();
+  const p = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      _pendingCaptures.delete(reqId);
+      reject(new Error("capture timeout"));
+    }, 20_000);
+    _pendingCaptures.set(reqId, { resolve, reject, timer });
+  });
+  sendText(sess.ws, { type: "capture_photo", request_id: reqId });
+  return p;
+}
+// Where uploaded photos live. Crow data dir has a "uploads" convention.
+const _photoDir = join(homedir(), ".crow", "data", "glasses-photos");
+try { mkdirSync(_photoDir, { recursive: true }); } catch {}
 
 // Per-device short-term conversation history (non-system messages).
 // Keeps the last N turns so follow-ups like "add purple too" retain
@@ -318,7 +338,35 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
         messages.push(m);
       }
       if (toolCalls.length === 0) break;
-      const results = await toolExecutor.executeToolCalls(toolCalls);
+
+      // Intercept crow_glasses_capture_photo so it actually captures via the
+      // connected /session WebSocket instead of hitting the stdio MCP stub.
+      // LLMs call it two ways: direct tool name, or via the crow_tools
+      // addon-proxy wrapper with action="crow_glasses_capture_photo".
+      const isCaptureTool = (tc) =>
+        tc.name === "crow_glasses_capture_photo" ||
+        (tc.name === "crow_tools" && tc.arguments?.action === "crow_glasses_capture_photo");
+      const localResults = [];
+      const remoteCalls = [];
+      for (const tc of toolCalls) {
+        if (isCaptureTool(tc)) {
+          const sess = _sessions.get(device.id);
+          if (!sess) {
+            localResults.push({ id: tc.id, name: tc.name, result: "No connected glasses session to capture from.", isError: true });
+            continue;
+          }
+          try {
+            const r = await triggerCapture(sess);
+            localResults.push({ id: tc.id, name: tc.name, result: `Photo captured. URL: ${r.url} (${r.size} bytes). Tell the user the photo was saved — do not hallucinate its contents.`, isError: false });
+          } catch (err) {
+            localResults.push({ id: tc.id, name: tc.name, result: `Photo capture failed: ${err.message}`, isError: true });
+          }
+        } else {
+          remoteCalls.push(tc);
+        }
+      }
+      const remoteResults = remoteCalls.length ? await toolExecutor.executeToolCalls(remoteCalls) : [];
+      const results = [...localResults, ...remoteResults];
       for (const r of results) messages.push({ role: "tool", content: r.result, tool_call_id: r.id, tool_name: r.name });
     }
     await drainBuffer(true);
@@ -459,6 +507,80 @@ export default function metaGlassesRouter(dashboardAuth) {
   });
 
   /**
+   * Photo upload endpoint: Android POSTs the captured photo bytes here.
+   * Authorized by the device's bearer token (same token as /session).
+   * Returns { ok, url } with a stable URL the LLM / client can serve.
+   */
+  router.post("/api/meta-glasses/photo",
+    express.raw({ type: "*/*", limit: "25mb" }),
+    async (req, res) => {
+      const deviceId = req.query.device_id;
+      const reqId = req.query.request_id || randomUUID();
+      const ext = (req.query.ext || "jpg").replace(/[^a-z0-9]/gi, "") || "jpg";
+      const auth = req.headers["authorization"] || "";
+      const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+      if (!deviceId || !token) return res.status(400).json({ ok: false, error: "device_id+token required" });
+
+      const { createDbClient } = await loadDb();
+      const { verifyToken } = await loadDeviceStore();
+      const db = createDbClient();
+      let device;
+      try { device = await verifyToken(db, deviceId, token); } finally { try { db.close(); } catch {} }
+      if (!device) return res.status(401).json({ ok: false, error: "bad token" });
+
+      const fname = `${Date.now()}_${reqId}.${ext}`;
+      const diskPath = join(_photoDir, fname);
+      try { writeFileSync(diskPath, req.body); } catch (err) {
+        return res.status(500).json({ ok: false, error: err.message });
+      }
+      const url = `/api/meta-glasses/photo/${encodeURIComponent(fname)}`;
+      res.json({ ok: true, url, size: req.body.length });
+
+      // Resolve any pending capture request for this request_id.
+      const pending = _pendingCaptures.get(reqId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        _pendingCaptures.delete(reqId);
+        pending.resolve({ ok: true, url, size: req.body.length });
+      }
+    });
+
+  /** Serve a stored photo. Authed (so only the Nest / authed LLM callers can read). */
+  router.get("/api/meta-glasses/photo/:name", async (req, res) => {
+    const name = req.params.name.replace(/[^\w.\-]/g, "");
+    const p = join(_photoDir, name);
+    if (!existsSync(p)) return res.status(404).json({ ok: false, error: "not found" });
+    res.sendFile(p);
+  });
+
+  /**
+   * Trigger a photo capture on a connected glasses session. Blocks up to
+   * 20 s for the phone to capture, upload, and reply with photo_ready.
+   */
+  router.post("/api/meta-glasses/capture", async (req, res) => {
+    const { device_id } = req.body || {};
+    const targetIds = device_id ? [device_id] : [..._sessions.keys()];
+    const id = targetIds.find(x => _sessions.get(x));
+    if (!id) return res.status(404).json({ ok: false, error: "no connected session" });
+    const sess = _sessions.get(id);
+    const reqId = randomUUID();
+    const p = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        _pendingCaptures.delete(reqId);
+        reject(new Error("capture timeout"));
+      }, 20_000);
+      _pendingCaptures.set(reqId, { resolve, reject, timer });
+    });
+    sendText(sess.ws, { type: "capture_photo", request_id: reqId });
+    try {
+      const result = await p;
+      res.json(result);
+    } catch (err) {
+      res.status(504).json({ ok: false, error: err.message });
+    }
+  });
+
+  /**
    * Remote push-to-talk: tells the paired device to begin/end a voice turn
    * over its existing /session WebSocket. Lets the Crow's Nest panel
    * (and any other dashboard surface) drive the voice loop without the
@@ -571,6 +693,18 @@ export function setupWebSocket(server) {
             runVoiceTurn(ws, device, audio, turnOpts).catch((err) => {
               sendText(ws, { type: "error", code: "turn_failed", recoverable: true, message: err.message });
             });
+            break;
+          }
+          case "photo_error": {
+            // Phone reports a capture failure (permission, stream start, etc.).
+            // Reject the matching pending capture so callers see a real error,
+            // not a 20 s timeout.
+            const pending = _pendingCaptures.get(msg.request_id);
+            if (pending) {
+              clearTimeout(pending.timer);
+              _pendingCaptures.delete(msg.request_id);
+              pending.reject(new Error(`${msg.code || "capture_failed"}: ${msg.message || ""}`));
+            }
             break;
           }
         }
