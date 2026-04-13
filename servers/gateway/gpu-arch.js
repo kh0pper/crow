@@ -23,6 +23,38 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
+
+/**
+ * Resolve a binary by trying PATH first, then a list of common absolute paths.
+ * Returns the first existing absolute path, or the bare name (so PATH lookup
+ * still happens). gpu-arch detection runs from the gateway whose systemd unit
+ * may not have GPU vendor SDK directories in PATH.
+ */
+function resolveBinary(name, fallbackDirs) {
+  // Probe each fallback dir literally + glob-expand /opt/rocm-* style patterns.
+  for (const dir of fallbackDirs) {
+    if (dir.includes("*")) {
+      const [base, suffix] = dir.split("*");
+      const parent = base.replace(/\/[^/]*$/, "");
+      const prefix = base.split("/").pop() || "";
+      try {
+        for (const entry of readdirSync(parent)) {
+          if (!entry.startsWith(prefix)) continue;
+          const candidate = parent + "/" + entry + suffix + "/" + name;
+          if (existsSync(candidate)) return candidate;
+        }
+      } catch { /* skip */ }
+    } else {
+      const candidate = dir + "/" + name;
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return name;
+}
+
+const ROCMINFO = resolveBinary("rocminfo", ["/opt/rocm/bin", "/opt/rocm-*/bin", "/usr/bin", "/usr/local/bin"]);
+const NVIDIASMI = resolveBinary("nvidia-smi", ["/usr/bin", "/usr/local/bin", "/usr/local/nvidia/bin"]);
 
 /** Family tags that match any specific arch in the family. */
 const FAMILY_MEMBERS = {
@@ -49,7 +81,7 @@ export function detectGpuArch({ refresh = false } = {}) {
   // ROCm: rocminfo is the canonical source; parse "Name: gfxNNNN" lines for
   // GPU agents (skip CPU agents which also appear in rocminfo output).
   try {
-    const out = execFileSync("rocminfo", [], { stdio: ["ignore", "pipe", "ignore"], timeout: 5000, encoding: "utf8" });
+    const out = execFileSync(ROCMINFO, [], { stdio: ["ignore", "pipe", "ignore"], timeout: 5000, encoding: "utf8" });
     let inGpuAgent = false;
     for (const line of out.split("\n")) {
       if (/^\s*Device Type:\s*GPU/.test(line)) inGpuAgent = true;
@@ -70,7 +102,7 @@ export function detectGpuArch({ refresh = false } = {}) {
   // Convert to sm_XY form to match CUDA convention.
   try {
     const out = execFileSync(
-      "nvidia-smi",
+      NVIDIASMI,
       ["--query-gpu=compute_cap", "--format=csv,noheader"],
       { stdio: ["ignore", "pipe", "ignore"], timeout: 5000, encoding: "utf8" },
     );
