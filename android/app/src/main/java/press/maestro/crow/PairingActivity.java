@@ -150,6 +150,17 @@ public class PairingActivity extends AppCompatActivity {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
+        Button camPermBtn = new Button(this);
+        camPermBtn.setText("Grant glasses camera access");
+        camPermBtn.setOnClickListener(v -> {
+            appendLog("Opening glasses camera permission sheet...");
+            Intent i = new Intent(this, press.maestro.crow.dat.DatCameraPermissionActivity.class);
+            startActivity(i);
+        });
+        root.addView(camPermBtn, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
         log = new TextView(this);
         log.setTextSize(12);
         log.setPadding(0, 24, 0, 0);
