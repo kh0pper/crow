@@ -18,7 +18,16 @@ const CLIENT_SCRIPT = `
     }
     return 0;
   }
-  function appVersionFromUA() {
+  function detectAppVersion() {
+    // Primary signal: the native JS bridge. window.Crow is only injected
+    // by the Crow Android app's CrowBridge (see MainActivity.java).
+    if (window.Crow && typeof window.Crow.appVersion === "function") {
+      try {
+        var v = window.Crow.appVersion();
+        if (v) return v;
+      } catch (_) {}
+    }
+    // Fallback: UA sniff (can be stale right after an app upgrade).
     var ua = navigator.userAgent || "";
     var m = ua.match(/CrowAndroid\\/(\\d+\\.\\d+(?:\\.\\d+)?)/);
     return m ? m[1] : null;
@@ -34,21 +43,25 @@ const CLIENT_SCRIPT = `
   function renderCompat() {
     var bar = document.getElementById('mg-compat');
     clear(bar);
-    var ver = appVersionFromUA();
+    bar.style.display = 'block';
+    var ver = detectAppVersion();
     if (!ver) {
-      bar.style.display = 'block';
-      bar.appendChild(el('strong', null, 'Crow Android app not detected.'));
+      bar.style.borderColor = 'var(--crow-warning, #b45309)';
+      bar.appendChild(el('strong', null, '\u26A0\uFE0F  Crow Android app not detected.'));
       bar.appendChild(document.createTextNode(' Open this page in the Crow Android app (1.4.0+) to pair glasses. If you have it but this bar still shows, the app is older than 1.4.0.'));
       return;
     }
     if (cmpVer(ver, MG_REQUIRED_APP) < 0) {
-      bar.style.display = 'block';
       bar.style.borderColor = 'var(--crow-warning, #b45309)';
-      bar.appendChild(el('strong', null, 'Crow Android app ' + ver + ' detected.'));
+      bar.appendChild(el('strong', null, '\u26A0\uFE0F  Crow Android app ' + ver + ' detected.'));
       bar.appendChild(document.createTextNode(' Version ' + MG_REQUIRED_APP + '+ is required for glasses pairing. Update from the Crow releases page.'));
       return;
     }
-    bar.style.display = 'none';
+    // Compatible — confirm visibly rather than hiding. Color-blind-safe:
+    // text + icon + copy all convey the state without relying on hue.
+    bar.style.borderColor = 'var(--crow-success, #15803d)';
+    bar.appendChild(el('strong', null, '\u2705  Ready to pair.'));
+    bar.appendChild(document.createTextNode(' Crow Android app ' + ver + ' detected — tap Pair new glasses below to begin.'));
   }
 
   function renderDevices(devices) {
@@ -56,7 +69,7 @@ const CLIENT_SCRIPT = `
     clear(root);
     if (!devices || devices.length === 0) {
       root.appendChild(el('div', { className: 'mg-empty' },
-        'No glasses paired yet. Open the Crow Android app and tap Pair Glasses to begin.'));
+        'No glasses paired yet. Tap Pair new glasses above to begin.'));
       return;
     }
     devices.forEach(function(d) {
