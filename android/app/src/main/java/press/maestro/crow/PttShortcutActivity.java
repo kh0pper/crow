@@ -20,7 +20,10 @@ public class PttShortcutActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        Intent svc = new Intent(this, GlassesService.class).setAction(GlassesService.ACTION_BEGIN_TURN);
+        boolean inTurn = getSharedPreferences(CrowPttTileService.PTT_PREFS, MODE_PRIVATE)
+                .getBoolean(CrowPttTileService.KEY_IN_TURN, false);
+        String action = inTurn ? GlassesService.ACTION_END_TURN : GlassesService.ACTION_BEGIN_TURN;
+        Intent svc = new Intent(this, GlassesService.class).setAction(action);
         try { ContextCompat.startForegroundService(this, svc); } catch (Throwable ignored) {}
         finish();
     }

@@ -78,6 +78,7 @@ public class GlassesService extends Service {
     // fire for the same event.
     private volatile boolean stopping = false;
     private volatile boolean reconnectPending = false;
+    private volatile boolean connecting = false;
     private long ttsStartNanos = 0;
     private long ttsBytesReceived = 0;
     // PCM chunks arriving between tts_start/tts_end are accumulated here,
@@ -107,24 +108,36 @@ public class GlassesService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null) {
-            String action = intent.getAction();
-            if (ACTION_BEGIN_TURN.equals(action)) {
-                beginTurn();
-                return START_STICKY;
-            }
-            if (ACTION_END_TURN.equals(action)) {
-                endTurn();
-                return START_STICKY;
-            }
-            if (intent.hasExtra(EXTRA_DEVICE_ID)) {
-                deviceId = intent.getStringExtra(EXTRA_DEVICE_ID);
-            }
+        // Android requires startForeground() within ~5 s of every
+        // startForegroundService(). Call it FIRST on every entry so the
+        // action-short-circuit paths (ACTION_BEGIN_TURN from QS tile etc.)
+        // don't trip ForegroundServiceDidNotStartInTimeException. Subsequent
+        // startForeground calls for the same id are no-ops.
+        // Resolve deviceId from intent first (if provided) or fall back to
+        // the first paired device so the service can self-hydrate when
+        // invoked by the tile/shortcut without explicit extras.
+        if (intent != null && intent.hasExtra(EXTRA_DEVICE_ID)) {
+            deviceId = intent.getStringExtra(EXTRA_DEVICE_ID);
+        }
+        if (deviceId == null) {
+            java.util.Set<String> ids = GlassesTokenStore.listDeviceIds(this);
+            if (!ids.isEmpty()) deviceId = ids.iterator().next();
         }
         startForeground(NOTIFICATION_ID, buildNotification("Connecting to glasses..."));
         if (deviceId == null) {
             stopSelf();
             return START_NOT_STICKY;
+        }
+
+        String action = intent == null ? null : intent.getAction();
+        if (ACTION_BEGIN_TURN.equals(action)) {
+            if (ws == null) connectWebSocket();
+            beginTurn();
+            return START_STICKY;
+        }
+        if (ACTION_END_TURN.equals(action)) {
+            endTurn();
+            return START_STICKY;
         }
         if (ws == null) connectWebSocket();
         return START_STICKY;
@@ -318,12 +331,16 @@ public class GlassesService extends Service {
         }
     }
 
-    private void connectWebSocket() {
+    private synchronized void connectWebSocket() {
+        if (stopping) return;
+        if (connecting) { Log.i(TAG, "connectWebSocket: already connecting"); return; }
+        if (ws != null) { Log.i(TAG, "connectWebSocket: already have ws"); return; }
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         String gateway = prefs.getString(KEY_GATEWAY_URL, null);
         if (gateway == null) { stopSelf(); return; }
         String token = GlassesTokenStore.load(this, deviceId);
         if (token == null) { stopSelf(); return; }
+        connecting = true;
 
         String wsUrl = gateway.replaceFirst("^http", "ws").replaceAll("/+$", "")
                 + "/api/meta-glasses/session?device_id=" + deviceId;
@@ -334,6 +351,7 @@ public class GlassesService extends Service {
 
         ws = http.newWebSocket(req, new WebSocketListener() {
             @Override public void onOpen(WebSocket webSocket, Response response) {
+                connecting = false;
                 Log.i(TAG, "WebSocket open for " + deviceId);
                 JSONObject hello = new JSONObject();
                 try {
@@ -413,6 +431,7 @@ public class GlassesService extends Service {
             }
 
             @Override public void onFailure(WebSocket webSocket, Throwable t, Response response) {
+                connecting = false;
                 Log.w(TAG, "WebSocket failed: " + t.getMessage());
                 updateNotification("Disconnected — retrying");
                 if (ws == webSocket) ws = null;
