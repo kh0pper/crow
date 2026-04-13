@@ -2,17 +2,31 @@
   "id": "vllm",
   "name": "vLLM",
   "version": "1.0.0",
-  "description": "GPU-accelerated local LLM inference server — OpenAI-compatible endpoint backed by vLLM's continuous batching and PagedAttention. Recommended classroom engine for Maker Lab: the Phase 0 Ollama benchmark hit unusable p95 latencies at N=25 concurrent learners; vLLM is architecturally the right shape for that scale.",
+  "description": "GPU-accelerated local LLM inference server \u2014 OpenAI-compatible endpoint backed by vLLM's continuous batching and PagedAttention. Recommended classroom engine for Maker Lab: the Phase 0 Ollama benchmark hit unusable p95 latencies at N=25 concurrent learners; vLLM is architecturally the right shape for that scale.",
   "type": "bundle",
   "author": "Crow",
   "category": "ai",
-  "tags": ["ai", "llm", "vllm", "gpu", "classroom", "openai-compatible", "maker-lab"],
+  "tags": [
+    "ai",
+    "llm",
+    "vllm",
+    "gpu",
+    "classroom",
+    "openai-compatible",
+    "maker-lab"
+  ],
   "icon": "brain",
-  "docker": { "composefile": "docker-compose.yml" },
+  "docker": {
+    "composefile": "docker-compose.yml"
+  },
   "panel": "panel/vllm.js",
-  "skills": ["skills/vllm.md"],
+  "skills": [
+    "skills/vllm.md"
+  ],
   "requires": {
-    "env": ["VLLM_MODEL"],
+    "env": [
+      "VLLM_MODEL"
+    ],
     "gpu": true,
     "min_vram_gb": 8,
     "recommended_vram_gb": 16,
@@ -20,17 +34,54 @@
     "recommended_ram_mb": 16000,
     "min_disk_mb": 20000,
     "recommended_disk_mb": 80000,
-    "platform": "linux-x86_64"
+    "platform": "linux-x86_64",
+    "gpu_arch": [
+      "cuda"
+    ]
   },
   "env_vars": [
-    { "name": "VLLM_MODEL", "description": "HuggingFace model ID to serve, e.g. 'Qwen/Qwen2.5-3B-Instruct' or 'meta-llama/Llama-3.2-3B-Instruct'. Must fit in your GPU's VRAM (roughly: model params in billions * 2 GB for fp16, * 1 GB for int8).", "required": true },
-    { "name": "VLLM_HTTP_PORT", "description": "Host port to expose the OpenAI-compatible endpoint on. Default 8089.", "default": "8089", "required": false },
-    { "name": "VLLM_MAX_NUM_SEQS", "description": "Max concurrent requests in flight (vLLM's continuous-batching slot count). 16 is a good classroom default; higher risks OOM.", "default": "16", "required": false },
-    { "name": "VLLM_GPU_MEMORY_UTILIZATION", "description": "Fraction of GPU VRAM vLLM is allowed to claim. Lower it to leave room for other GPU services (SDXL, Whisper). Default 0.85.", "default": "0.85", "required": false },
-    { "name": "VLLM_HF_TOKEN", "description": "HuggingFace token for gated models (Llama, Mistral instruct tunes). Leave blank for public models.", "required": false, "secret": true },
-    { "name": "VLLM_MODEL_CACHE_PATH", "description": "Host path for the HuggingFace model cache (defaults to a named volume). Point at a drive with 40+ GB of free space if pulling larger models.", "required": false }
+    {
+      "name": "VLLM_MODEL",
+      "description": "HuggingFace model ID to serve, e.g. 'Qwen/Qwen2.5-3B-Instruct' or 'meta-llama/Llama-3.2-3B-Instruct'. Must fit in your GPU's VRAM (roughly: model params in billions * 2 GB for fp16, * 1 GB for int8).",
+      "required": true
+    },
+    {
+      "name": "VLLM_HTTP_PORT",
+      "description": "Host port to expose the OpenAI-compatible endpoint on. Default 8089.",
+      "default": "8089",
+      "required": false
+    },
+    {
+      "name": "VLLM_MAX_NUM_SEQS",
+      "description": "Max concurrent requests in flight (vLLM's continuous-batching slot count). 16 is a good classroom default; higher risks OOM.",
+      "default": "16",
+      "required": false
+    },
+    {
+      "name": "VLLM_GPU_MEMORY_UTILIZATION",
+      "description": "Fraction of GPU VRAM vLLM is allowed to claim. Lower it to leave room for other GPU services (SDXL, Whisper). Default 0.85.",
+      "default": "0.85",
+      "required": false
+    },
+    {
+      "name": "VLLM_HF_TOKEN",
+      "description": "HuggingFace token for gated models (Llama, Mistral instruct tunes). Leave blank for public models.",
+      "required": false,
+      "secret": true
+    },
+    {
+      "name": "VLLM_MODEL_CACHE_PATH",
+      "description": "Host path for the HuggingFace model cache (defaults to a named volume). Point at a drive with 40+ GB of free space if pulling larger models.",
+      "required": false
+    }
   ],
-  "ports": [8089],
-  "webUI": { "port": 8089, "path": "/docs", "label": "vLLM API docs" },
+  "ports": [
+    8089
+  ],
+  "webUI": {
+    "port": 8089,
+    "path": "/docs",
+    "label": "vLLM API docs"
+  },
   "notes": "Linux x86_64 + NVIDIA GPU required. Recommended classroom shape: Qwen2.5-3B-Instruct at VLLM_MAX_NUM_SEQS=16 on a 16 GB consumer GPU (tested in the Maker Lab Phase 0 benchmark, see bundles/maker-lab/PHASE-0-REPORT.md Spike 5). vLLM's OpenAI-compatible endpoint drops into Maker Lab's MAKER_LAB_LLM_ENDPOINT as-is."
 }

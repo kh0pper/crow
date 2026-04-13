@@ -26,6 +26,7 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { checkInstall as checkHardwareGate } from "../hardware-gate.js";
+import { checkGpuArchCompatible } from "../gpu-arch.js";
 
 // PR 0: Consent token configuration (server-validated, race-safe install consent)
 const CONSENT_TOKEN_TTL_SECONDS = 15 * 60; // 15 min — covers slow image pulls
@@ -615,6 +616,20 @@ export default function bundlesRouter() {
       if (gate.level === "warn") {
         // Attach warning to the job so the UI can surface it; install proceeds.
         req._hardwareWarning = gate;
+      }
+    }
+
+    // GPU arch gate — refuse install if the bundle's required GPU architecture
+    // family doesn't match what the host actually has (e.g. CUDA-only bundle on
+    // an AMD ROCm box). No force_install bypass: the install would crash anyway.
+    {
+      const gpuCheck = checkGpuArchCompatible(manifestPre);
+      if (!gpuCheck.ok) {
+        return res.status(400).json({
+          ok: false,
+          error: gpuCheck.reason,
+          gpu_arch_gate: gpuCheck,
+        });
       }
     }
 

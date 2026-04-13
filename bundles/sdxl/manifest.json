@@ -6,15 +6,28 @@
   "type": "bundle",
   "author": "Crow",
   "category": "ai",
-  "tags": ["ai", "gpu", "image-generation", "sdxl", "backgrounds"],
+  "tags": [
+    "ai",
+    "gpu",
+    "image-generation",
+    "sdxl",
+    "backgrounds"
+  ],
   "icon": "image",
-  "docker": { "composefile": "docker-compose.yml" },
-  "ports": [3005],
+  "docker": {
+    "composefile": "docker-compose.yml"
+  },
+  "ports": [
+    3005
+  ],
   "webUI": null,
   "requires": {
     "min_ram_mb": 4096,
     "min_disk_mb": 25000,
-    "gpu": true
+    "gpu": true,
+    "gpu_arch": [
+      "cuda"
+    ]
   },
   "env_vars": [
     {
