@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="ask_crow"
+        android:enabled="true"
+        android:icon="@android:drawable/ic_btn_speak_now"
+        android:shortcutShortLabel="@string/ptt_shortcut_short"
+        android:shortcutLongLabel="@string/ptt_shortcut_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="press.maestro.crow"
+            android:targetClass="press.maestro.crow.PttShortcutActivity" />
+    </shortcut>
+</shortcuts>

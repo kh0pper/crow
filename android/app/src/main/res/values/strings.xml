@@ -2,6 +2,8 @@
 <resources>
     <string name="app_name">Crow\'s Nest</string>
     <string name="settings_title">Settings</string>
+    <string name="ptt_shortcut_short">Ask Crow</string>
+    <string name="ptt_shortcut_long">Start a voice turn through paired glasses</string>
 
     <!-- Gateway -->
     <string name="gateway_url_label">Gateway URL</string>
