@@ -295,6 +295,10 @@ export async function initProxyServers() {
 
   if (configured.length === 0) {
     console.log("[proxy] No external integrations configured — /tools/mcp will have no tools.");
+    // Still load dynamic backends and bundle-installed MCP addons — they don't
+    // require external integrations to be configured.
+    await loadDynamicBackends();
+    await loadAddonServers();
     return;
   }
 
