@@ -78,20 +78,17 @@ export function detectGpuArch({ refresh = false } = {}) {
   if (cachedHostArches && !refresh) return cachedHostArches;
   const tags = new Set(["cpu"]);
 
-  // ROCm: rocminfo is the canonical source; parse "Name: gfxNNNN" lines for
-  // GPU agents (skip CPU agents which also appear in rocminfo output).
+  // ROCm: rocminfo lists each agent's `Name:` line. CPU agents have a marketing
+  // name (e.g. "AMD RYZEN AI MAX+ 395 ..."), GPU agents have an arch name
+  // (e.g. "gfx1151"). The arch never appears in CPU agent metadata, so a bare
+  // text match for `Name: gfxNNNN` is unambiguous and avoids state machines.
   try {
     const out = execFileSync(ROCMINFO, [], { stdio: ["ignore", "pipe", "ignore"], timeout: 5000, encoding: "utf8" });
-    let inGpuAgent = false;
     for (const line of out.split("\n")) {
-      if (/^\s*Device Type:\s*GPU/.test(line)) inGpuAgent = true;
-      else if (/^\s*Device Type:\s*CPU/.test(line)) inGpuAgent = false;
-      else if (inGpuAgent) {
-        const m = line.match(/^\s*Name:\s*(gfx[0-9a-f]+)\s*$/);
-        if (m) {
-          tags.add(m[1]);
-          tags.add("rocm");
-        }
+      const m = line.match(/^\s*Name:\s*(gfx[0-9a-f]+)\s*$/);
+      if (m) {
+        tags.add(m[1]);
+        tags.add("rocm");
       }
     }
   } catch {
