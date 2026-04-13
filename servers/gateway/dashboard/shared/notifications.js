@@ -233,6 +233,14 @@ export function headerIconsHtml(lang, { companionAvailable } = {}) {
 </button>` : "";
   return `
 ${kioskBtn}
+<button class="header-icon-btn crow-ptt-btn" id="crow-ptt-btn" onclick="toggleCrowPtt(event)" title="Ask Crow through glasses" aria-label="Ask Crow" style="display:none">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 1 0 6 0V4a3 3 0 0 0-3-3z"/>
+    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+    <path d="M12 19v4"/>
+    <path d="M8 23h8"/>
+  </svg>
+</button>
 <div class="header-icon-btn" id="health-icon-btn" onclick="toggleHealthDropdown(event)" title="${t("notif.systemHealth", lang)}">
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
     <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
@@ -401,6 +409,17 @@ export const headerIconsCss = `
   .health-stat-row:last-child { border-bottom: none; }
   .health-stat-label { color: var(--crow-text-muted); font-size: 0.8rem; }
   .health-stat-value { font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; }
+  /* ─── Crow PTT (glasses voice turn) ─── */
+  .crow-ptt-btn.active {
+    background: #dc2626;
+    border-color: #dc2626;
+    color: #fff;
+    animation: crow-ptt-pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes crow-ptt-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.6); }
+    50%      { box-shadow: 0 0 0 6px rgba(220,38,38,0); }
+  }
   /* ─── Kiosk Mode ─── */
   .kiosk-toggle-btn {
     border-color: var(--crow-accent);
@@ -503,6 +522,55 @@ export function headerIconsJs(lang) {
     dd.style.display = dd.style.display === 'none' ? 'block' : 'none';
   }
 
+  var _crowPttActive = false;
+  async function _refreshCrowPttVisibility() {
+    var btn = document.getElementById('crow-ptt-btn');
+    if (!btn) return;
+    try {
+      var res = await fetch('/api/meta-glasses/devices', { credentials: 'same-origin' });
+      if (!res.ok) { btn.style.display = 'none'; return; }
+      var data = await res.json();
+      btn.style.display = (data.connected_count > 0) ? '' : 'none';
+    } catch {
+      btn.style.display = 'none';
+    }
+  }
+  _refreshCrowPttVisibility();
+  setInterval(_refreshCrowPttVisibility, 15000);
+
+  async function toggleCrowPtt(e) {
+    e.stopPropagation();
+    var btn = document.getElementById('crow-ptt-btn');
+    if (!btn) return;
+    var action = _crowPttActive ? 'end' : 'begin';
+    try {
+      var res = await fetch('/api/meta-glasses/turn', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ action: action }),
+      });
+      var data = await res.json();
+      if (action === 'begin') {
+        if (!data.ok || !data.delivered) {
+          var orig = btn.title;
+          btn.title = 'No connected glasses session';
+          setTimeout(function() { btn.title = orig; }, 1500);
+          return;
+        }
+        _crowPttActive = true;
+        btn.classList.add('active');
+        btn.title = 'Stop turn';
+      } else {
+        _crowPttActive = false;
+        btn.classList.remove('active');
+        btn.title = 'Ask Crow through glasses';
+      }
+    } catch (err) {
+      console.warn('ptt', err);
+    }
+  }
+
   function toggleNotifDropdown(e) {
     e.stopPropagation();
     var dd = document.getElementById('notif-dropdown');
@@ -586,6 +654,14 @@ export function tamagotchiHtml(lang, { companionAvailable } = {}) {
 </button>` : "";
   return `
 ${kioskBtn}
+<button class="header-icon-btn crow-ptt-btn" id="crow-ptt-btn" onclick="toggleCrowPtt(event)" title="Ask Crow through glasses" aria-label="Ask Crow" style="display:none">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 1 0 6 0V4a3 3 0 0 0-3-3z"/>
+    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+    <path d="M12 19v4"/>
+    <path d="M8 23h8"/>
+  </svg>
+</button>
 <div class="crow-tama-wrap" id="crow-tama-wrap">
   <svg class="crow-tama crow-happy" id="crow-tama" viewBox="0 0 48 56" width="42" height="49" onclick="toggleCrowDropdown(event)">
     <g class="crow-body-group">
@@ -770,6 +846,53 @@ export const tamagotchiCss = `
 export function tamagotchiJs(lang) {
   return `
   ${sharedNotifJs(lang)}
+
+  var _crowPttActive = false;
+  async function _refreshCrowPttVisibility() {
+    var btn = document.getElementById('crow-ptt-btn');
+    if (!btn) return;
+    try {
+      var res = await fetch('/api/meta-glasses/devices', { credentials: 'same-origin' });
+      if (!res.ok) { btn.style.display = 'none'; return; }
+      var data = await res.json();
+      btn.style.display = (data.connected_count > 0) ? '' : 'none';
+    } catch {
+      btn.style.display = 'none';
+    }
+  }
+  _refreshCrowPttVisibility();
+  setInterval(_refreshCrowPttVisibility, 15000);
+
+  async function toggleCrowPtt(e) {
+    e.stopPropagation();
+    var btn = document.getElementById('crow-ptt-btn');
+    if (!btn) return;
+    var action = _crowPttActive ? 'end' : 'begin';
+    try {
+      var res = await fetch('/api/meta-glasses/turn', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ action: action }),
+      });
+      var data = await res.json();
+      if (action === 'begin') {
+        if (!data.ok || !data.delivered) {
+          var orig = btn.title;
+          btn.title = 'No connected glasses session';
+          setTimeout(function() { btn.title = orig; }, 1500);
+          return;
+        }
+        _crowPttActive = true;
+        btn.classList.add('active');
+        btn.title = 'Stop turn';
+      } else {
+        _crowPttActive = false;
+        btn.classList.remove('active');
+        btn.title = 'Ask Crow through glasses';
+      }
+    } catch (err) { console.warn('ptt', err); }
+  }
 
   function toggleCrowDropdown(e) {
     e.stopPropagation();

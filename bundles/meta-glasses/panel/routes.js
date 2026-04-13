@@ -58,6 +58,30 @@ async function loadSystemPrompt(){ return import(pathToFileURL(join(gatewayDir, 
 
 const _sessions = new Map();
 
+// Per-device short-term conversation history (non-system messages).
+// Keeps the last N turns so follow-ups like "add purple too" retain
+// context. Expires after CONVO_IDLE_MS of inactivity so long gaps
+// between sessions start fresh.
+const _convoHistory = new Map(); // deviceId → { messages: [...], lastAt: ts }
+const CONVO_MAX_MESSAGES = 24;   // ~8 user/assistant/tool triples
+const CONVO_IDLE_MS = 15 * 60 * 1000; // 15 min
+
+function getConvo(deviceId) {
+  const entry = _convoHistory.get(deviceId);
+  if (!entry) return [];
+  if (Date.now() - entry.lastAt > CONVO_IDLE_MS) {
+    _convoHistory.delete(deviceId);
+    return [];
+  }
+  return entry.messages;
+}
+
+function saveConvo(deviceId, messages) {
+  // Drop the leading system message; we re-generate it every turn.
+  const trimmed = messages.filter(m => m.role !== "system").slice(-CONVO_MAX_MESSAGES);
+  _convoHistory.set(deviceId, { messages: trimmed, lastAt: Date.now() });
+}
+
 function sendText(ws, obj) {
   if (ws.readyState !== 1) return;
   ws.send(JSON.stringify(obj));
@@ -247,8 +271,10 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
     const systemPrompt = await generateSystemPrompt({ deviceId: device.id });
     console.log(`[meta-glasses] voice turn: transcript=${JSON.stringify(transcript)} ai=${aiProfile.name}/${aiProfile.defaultModel} tools=${tools.length}`);
 
+    const priorMessages = getConvo(device.id);
     const messages = [
       { role: "system", content: systemPrompt + "\n\nThe user is speaking to you through Meta Ray-Ban glasses. Keep replies concise and conversational (1-3 short sentences). Plain prose only, no markdown, no lists. When the user asks to remember something or recall something, actually call the appropriate tool — don't just say you will." },
+      ...priorMessages,
       { role: "user", content: transcript },
     ];
 
@@ -297,6 +323,7 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
     }
     await drainBuffer(true);
     sendText(ws, { type: "tts_end" });
+    saveConvo(device.id, messages);
   } catch (err) {
     sendText(ws, { type: "error", code: "turn_failed", recoverable: true, message: err.message });
   } finally {
@@ -316,7 +343,9 @@ export default function metaGlassesRouter(dashboardAuth) {
     const { listDevices } = await loadDeviceStore();
     const db = createDbClient();
     try {
-      res.json({ devices: await listDevices(db) });
+      const devices = await listDevices(db);
+      const annotated = devices.map(d => ({ ...d, connected: _sessions.has(d.id) }));
+      res.json({ devices: annotated, connected_count: annotated.filter(d => d.connected).length });
     } finally {
       db.close();
     }
@@ -427,6 +456,28 @@ export default function metaGlassesRouter(dashboardAuth) {
     } finally {
       db.close();
     }
+  });
+
+  /**
+   * Remote push-to-talk: tells the paired device to begin/end a voice turn
+   * over its existing /session WebSocket. Lets the Crow's Nest panel
+   * (and any other dashboard surface) drive the voice loop without the
+   * user having to hold a physical button on the phone.
+   */
+  router.post("/api/meta-glasses/turn", async (req, res) => {
+    const { action, device_id } = req.body || {};
+    if (action !== "begin" && action !== "end") {
+      return res.status(400).json({ ok: false, error: "action must be 'begin' or 'end'" });
+    }
+    const targetIds = device_id ? [device_id] : [..._sessions.keys()];
+    let delivered = 0;
+    for (const id of targetIds) {
+      const sess = _sessions.get(id);
+      if (!sess?.ws) continue;
+      sendText(sess.ws, { type: "remote_turn", action });
+      delivered++;
+    }
+    res.json({ ok: true, delivered, targeted: targetIds.length });
   });
 
   return router;

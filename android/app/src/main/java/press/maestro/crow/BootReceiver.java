@@ -23,6 +23,17 @@ public class BootReceiver extends BroadcastReceiver {
         if (gatewayUrl != null && !gatewayUrl.isEmpty()) {
             Intent serviceIntent = new Intent(context, NtfyListenerService.class);
             ContextCompat.startForegroundService(context, serviceIntent);
+
+            // Restart GlassesService for each paired device so the voice
+            // loop + /session WebSocket come back up automatically on
+            // boot (no need to open the pair screen again).
+            try {
+                for (String id : GlassesTokenStore.listDeviceIds(context)) {
+                    Intent glassesIntent = new Intent(context, GlassesService.class);
+                    glassesIntent.putExtra(GlassesService.EXTRA_DEVICE_ID, id);
+                    ContextCompat.startForegroundService(context, glassesIntent);
+                }
+            } catch (Exception ignored) {}
         }
     }
 }
