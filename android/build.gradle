@@ -12,5 +12,20 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+        // Meta Wearables Device Access Toolkit — distributed via GitHub Packages
+        // (Meta-hosted). Requires a GitHub personal access token with
+        // `read:packages` scope, exported as GITHUB_TOKEN before building.
+        //
+        //   export GITHUB_USERNAME=<your github username>
+        //   export GITHUB_TOKEN=<PAT with read:packages scope>
+        //   ./gradlew assembleDebug
+        maven {
+            name "GitHubPackagesMetaWearablesDat"
+            url "https://maven.pkg.github.com/facebook/meta-wearables-dat-android"
+            credentials {
+                username = System.getenv("GITHUB_USERNAME") ?: ""
+                password = System.getenv("GITHUB_TOKEN") ?: ""
+            }
+        }
     }
 }

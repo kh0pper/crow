@@ -26,6 +26,21 @@
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="true">
 
+        <!--
+            Meta Wearables DAT credentials for the "Crow Glasses Integration"
+            project (Meta Wearables Developer Center). These are bound to the
+            DEBUG keystore fingerprint as of 2026-04-12. Before shipping a
+            release APK, swap these for release-keystore-authorized values or
+            gate them via Gradle buildType manifestPlaceholders. See
+            ~/.claude/projects/.../memory/meta-glasses-dat-credentials.md.
+        -->
+        <meta-data
+            android:name="com.meta.wearable.mwdat.APPLICATION_ID"
+            android:value="1274778610825937" />
+        <meta-data
+            android:name="com.meta.wearable.mwdat.CLIENT_TOKEN"
+            android:value="AR|1274778610825937|7ce74ccce928ccad53e7caed624eb58d" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
