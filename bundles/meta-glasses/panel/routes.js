@@ -65,6 +65,77 @@ function sendBinary(ws, chunk) {
   ws.send(chunk);
 }
 
+/* ---------- TTS codec negotiation ----------
+ *
+ * The Android client opens an AudioTrack configured for raw 16-bit signed
+ * PCM mono and writes whatever bytes arrive on the socket directly into it.
+ * That means we must hand it raw PCM in matching sample rate. Each TTS
+ * adapter takes a different `format` string for its provider; this helper
+ * returns the right one (plus a header-stripping rule for piper which
+ * always emits a 44-byte WAV header before the PCM body).
+ *
+ * Returns null when the adapter cannot produce raw PCM — in that case the
+ * caller falls back to advertising the legacy mp3 codec, which the current
+ * Android client will play as noise. (Edge / native MediaCodec decode is
+ * the next iteration.)
+ */
+function negotiatePcm(adapterName) {
+  switch (adapterName) {
+    case "openai-tts":
+      // OpenAI TTS pcm = signed 16-bit LE mono @ 24 kHz, no header.
+      return { synthFormat: "pcm", codec: "pcm", sampleRate: 24000, stripHeaderBytes: 0 };
+    case "kokoro":
+      // Kokoro mirrors OpenAI's response_format. Defaults to 24 kHz.
+      return { synthFormat: "pcm", codec: "pcm", sampleRate: 24000, stripHeaderBytes: 0 };
+    case "elevenlabs":
+      // ElevenLabs supports `pcm_24000` -> 24 kHz s16le mono raw.
+      return { synthFormat: "pcm_24000", codec: "pcm", sampleRate: 24000, stripHeaderBytes: 0 };
+    case "azure":
+      // Azure: raw-24khz-16bit-mono-pcm == 24 kHz s16le mono raw.
+      return { synthFormat: "raw-24khz-16bit-mono-pcm", codec: "pcm", sampleRate: 24000, stripHeaderBytes: 0 };
+    case "piper":
+      // Piper emits a 44-byte RIFF/WAV header followed by 22.05 kHz s16le mono.
+      // Strip the header on the first chunk and advertise 22050 Hz.
+      return { synthFormat: undefined, codec: "pcm", sampleRate: 22050, stripHeaderBytes: 44 };
+    default:
+      // edge-tts and others: no raw PCM path. Caller emits mp3 + warning.
+      return null;
+  }
+}
+
+async function* pcmStream(adapter, text, voice, negotiation, extraOpts = {}) {
+  let bytesToStrip = negotiation.stripHeaderBytes || 0;
+  const opts = negotiation.synthFormat ? { ...extraOpts, format: negotiation.synthFormat } : extraOpts;
+  // Buffer the entire synthesis before yielding. Rationale: PCM has no codec
+  // compression, so OpenAI (and most TTS providers) stream bytes at roughly
+  // realtime playback speed — 48 kB/s for 24 kHz s16le mono. The phone's
+  // AudioTrack consumes at the same rate, so any network jitter drains the
+  // client-side buffer and causes underrun (audible as static/clicks).
+  // By buffering here first, we can then blast the PCM to the phone
+  // faster-than-realtime over the WebSocket, giving AudioTrack plenty of
+  // headroom. Cost: +latency equal to synthesis time before first audio.
+  const parts = [];
+  for await (const chunk of adapter.synthesize(text, voice, opts)) {
+    if (bytesToStrip > 0) {
+      if (chunk.length <= bytesToStrip) {
+        bytesToStrip -= chunk.length;
+        continue;
+      }
+      const trimmed = chunk.slice(bytesToStrip);
+      bytesToStrip = 0;
+      if (trimmed.length) parts.push(trimmed);
+    } else {
+      parts.push(chunk);
+    }
+  }
+  const full = Buffer.concat(parts.map(p => Buffer.isBuffer(p) ? p : Buffer.from(p)));
+  // Yield in ~64 KB frames so WebSocket backpressure can apply on slow links.
+  const FRAME = 64 * 1024;
+  for (let off = 0; off < full.length; off += FRAME) {
+    yield full.subarray(off, Math.min(off + FRAME, full.length));
+  }
+}
+
 /* ---------- Voice-turn pipeline ---------- */
 
 async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
@@ -116,7 +187,13 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
     }
     const { adapter: ttsAdapter } = await createTtsAdapter(ttsProfile);
 
-    sendText(ws, { type: "tts_start", codec: "mp3", sample_rate: 24000 });
+    const ttsNeg = negotiatePcm(ttsAdapter.name);
+    if (ttsNeg) {
+      sendText(ws, { type: "tts_start", codec: ttsNeg.codec, sample_rate: ttsNeg.sampleRate });
+    } else {
+      console.warn(`[meta-glasses] TTS adapter '${ttsAdapter.name}' has no PCM path; sending mp3 (will not play correctly on current Android client).`);
+      sendText(ws, { type: "tts_start", codec: "mp3", sample_rate: 24000 });
+    }
 
     let textBuffer = "";
     const SENTENCE_END = /[.!?…。]["')\]]?\s|[\n]/;
@@ -125,7 +202,10 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
       const trimmed = text.trim();
       if (!trimmed) return;
       try {
-        for await (const chunk of ttsAdapter.synthesize(trimmed, ttsProfile.defaultVoice, {})) {
+        const stream = ttsNeg
+          ? pcmStream(ttsAdapter, trimmed, ttsProfile.defaultVoice, ttsNeg)
+          : ttsAdapter.synthesize(trimmed, ttsProfile.defaultVoice, {});
+        for await (const chunk of stream) {
           sendBinary(ws, chunk);
         }
       } catch (err) {
@@ -256,9 +336,18 @@ export default function metaGlassesRouter(dashboardAuth) {
           : await getDefaultTtsProfile(db, { includeKeys: true });
         if (!ttsProfile) continue;
         const { adapter } = await createTtsAdapter(ttsProfile);
-        sendText(sess.ws, { type: "tts_start", codec: "mp3", sample_rate: 24000 });
+        const neg = negotiatePcm(adapter.name);
+        if (neg) {
+          sendText(sess.ws, { type: "tts_start", codec: neg.codec, sample_rate: neg.sampleRate });
+        } else {
+          console.warn(`[meta-glasses] TTS adapter '${adapter.name}' has no PCM path; sending mp3.`);
+          sendText(sess.ws, { type: "tts_start", codec: "mp3", sample_rate: 24000 });
+        }
         try {
-          for await (const chunk of adapter.synthesize(text, ttsProfile.defaultVoice, {})) {
+          const stream = neg
+            ? pcmStream(adapter, text, ttsProfile.defaultVoice, neg)
+            : adapter.synthesize(text, ttsProfile.defaultVoice, {});
+          for await (const chunk of stream) {
             sendBinary(sess.ws, chunk);
           }
           sendText(sess.ws, { type: "tts_end" });
