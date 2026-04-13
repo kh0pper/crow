@@ -14,10 +14,14 @@ class CrowApplication : Application() {
         } catch (t: Throwable) {
             Log.w("CrowApplication", "Wearables.initialize failed", t)
         }
-        // Restart GlassesService for any previously-paired device. Without
-        // this, the service only starts during an explicit pairing flow,
-        // so a user who launches the app on a paired device gets no
-        // notification PTT and no reconnect.
+        // Restart GlassesService for any previously-paired device IF we're
+        // being created from a user-visible context (launcher tap, boot
+        // receiver path). In background-only Application creation — e.g.
+        // Android re-creating our process because a QS tile was clicked —
+        // the system blocks FGS starts with
+        // ForegroundServiceStartNotAllowedException, which we just swallow
+        // here. The tile and shortcut entry points call
+        // startForegroundService themselves, so a denial here is harmless.
         try {
             val gateway = getSharedPreferences("CrowPrefs", MODE_PRIVATE)
                 .getString("gateway_url", null)
@@ -25,11 +29,18 @@ class CrowApplication : Application() {
                 for (id in GlassesTokenStore.listDeviceIds(this)) {
                     val svc = Intent(this, GlassesService::class.java)
                     svc.putExtra(GlassesService.EXTRA_DEVICE_ID, id)
-                    ContextCompat.startForegroundService(this, svc)
+                    try {
+                        ContextCompat.startForegroundService(this, svc)
+                    } catch (t: Throwable) {
+                        // Background FGS block is expected when we're being
+                        // created to service a QS tile click — the tile's
+                        // own startForegroundService has the temp-allow grant.
+                        Log.d("CrowApplication", "deferred GlassesService start: ${t.message}")
+                    }
                 }
             }
         } catch (t: Throwable) {
-            Log.w("CrowApplication", "GlassesService auto-start failed", t)
+            Log.w("CrowApplication", "GlassesService auto-start outer failed", t)
         }
     }
 }
