@@ -8,12 +8,14 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.ComponentName;
 import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
 import android.media.MediaRecorder;
+import android.service.quicksettings.TileService;
 import android.os.Build;
 import android.os.IBinder;
 import android.util.Log;
@@ -135,6 +137,7 @@ public class GlassesService extends Service {
         Log.i(TAG, "beginTurn");
         inTurn = true;
         updateNotification("Listening...");
+        syncPttState(true);
         JSONObject msg = new JSONObject();
         try {
             msg.put("type", "turn_start");
@@ -153,6 +156,7 @@ public class GlassesService extends Service {
         Log.i(TAG, "endTurn");
         inTurn = false;
         updateNotification("Connected");
+        syncPttState(false);
         stopMicPump();
         audioManager.setBluetoothScoOn(false);
         audioManager.stopBluetoothSco();
@@ -516,6 +520,15 @@ public class GlassesService extends Service {
     }
 
     private int NotificationID() { return NOTIFICATION_ID; }
+
+    /** Mirror turn state into the prefs the QS tile reads, and poke the tile. */
+    private void syncPttState(boolean turnActive) {
+        getSharedPreferences(CrowPttTileService.PTT_PREFS, MODE_PRIVATE)
+                .edit().putBoolean(CrowPttTileService.KEY_IN_TURN, turnActive).apply();
+        try {
+            TileService.requestListeningState(this, new ComponentName(this, CrowPttTileService.class));
+        } catch (Throwable ignored) {}
+    }
 
     @Override
     public void onDestroy() {
