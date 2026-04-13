@@ -1,7 +1,9 @@
 package press.maestro.crow;
 
+import android.Manifest;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.text.method.ScrollingMovementMethod;
 import android.view.Gravity;
@@ -11,6 +13,8 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
@@ -46,6 +50,38 @@ public class PairingActivity extends AppCompatActivity {
 
     private TextView log;
 
+    /**
+     * Request BLUETOOTH_CONNECT + BLUETOOTH_SCAN at runtime. Android 14+ requires
+     * these grants before an app can start a foreground service of type
+     * `connectedDevice` — which GlassesService is. Without them the FGS start
+     * throws SecurityException and the process dies.
+     */
+    private static final String[] BT_PERMS = new String[]{
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.BLUETOOTH_SCAN,
+    };
+
+    private final ActivityResultLauncher<String[]> btPermissionLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(), results -> {
+                boolean allGranted = true;
+                for (String p : BT_PERMS) {
+                    Boolean granted = results.get(p);
+                    if (granted == null || !granted) { allGranted = false; break; }
+                }
+                if (allGranted) {
+                    appendLog("Bluetooth permissions granted.");
+                } else {
+                    appendLog("Bluetooth permissions denied. Pairing won't work until you grant them in Settings → Apps → Crow → Permissions.");
+                }
+            });
+
+    private boolean hasBtPermissions() {
+        for (String p : BT_PERMS) {
+            if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) return false;
+        }
+        return true;
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -73,7 +109,14 @@ public class PairingActivity extends AppCompatActivity {
 
         Button startBtn = new Button(this);
         startBtn.setText("Open pairing sheet");
-        startBtn.setOnClickListener(v -> startDatPairing());
+        startBtn.setOnClickListener(v -> {
+            if (!hasBtPermissions()) {
+                appendLog("Requesting Bluetooth permissions…");
+                btPermissionLauncher.launch(BT_PERMS);
+                return;
+            }
+            startDatPairing();
+        });
         root.addView(startBtn, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
