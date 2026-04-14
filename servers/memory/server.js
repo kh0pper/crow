@@ -11,6 +11,15 @@ import { createDbClient, sanitizeFtsQuery, escapeLikePattern, isSqliteVecAvailab
 import { generateCrowContext, PROTECTED_SECTIONS } from "./crow-context.js";
 import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
 import { createNotification, cleanupNotifications } from "../shared/notifications.js";
+import {
+  embedText as phase4EmbedText,
+  embedProviderInfo,
+  upsertMemoryEmbedding,
+  loadMemoryEmbeddings,
+  rankByCosine,
+  cosineSim,
+} from "./embeddings.js";
+import { rerank as phase4Rerank } from "./rerank.js";
 
 export function createMemoryServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
@@ -32,19 +41,46 @@ export function createMemoryServer(dbPath, options = {}) {
     return _vecAvailable;
   }
 
-  // Store embedding for a memory (fire-and-forget, errors don't block)
+  // --- Phase 4: BLOB-based semantic memory via grackle-embed ---
+  // Cache provider-health check so we don't probe on every write.
+  let _phase4ProviderInfo = null;
+  async function phase4ProviderHealthy() {
+    if (_phase4ProviderInfo === null) {
+      _phase4ProviderInfo = await embedProviderInfo().catch(() => ({ ok: false }));
+    }
+    return _phase4ProviderInfo;
+  }
+
+  // Store embedding for a memory (fire-and-forget, errors don't block).
+  // Prefers:
+  //   1. Legacy options.getEmbedding + sqlite-vec path (kept for backward compat)
+  //   2. Phase 4 BLOB + grackle-embed path (default when provider is healthy)
   async function storeEmbedding(memoryId, content) {
-    if (!getEmbedding || !(await hasVec())) return;
+    // Legacy injected path (preserved)
+    if (getEmbedding && await hasVec()) {
+      try {
+        const vec = await getEmbedding(content);
+        if (!vec || vec.length === 0) return;
+        const blob = Buffer.from(vec.buffer);
+        await db.execute({
+          sql: "INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding) VALUES (?, ?)",
+          args: [memoryId, blob],
+        });
+        return;
+      } catch {}
+    }
+    // Phase 4 default path — non-blocking, degrades to no-op on provider failure
+    const info = await phase4ProviderHealthy();
+    if (!info.ok) return;
     try {
-      const vec = await getEmbedding(content);
+      const vec = await phase4EmbedText(content);
       if (!vec || vec.length === 0) return;
-      const blob = Buffer.from(vec.buffer);
-      await db.execute({
-        sql: "INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding) VALUES (?, ?)",
-        args: [memoryId, blob],
+      await upsertMemoryEmbedding(db, memoryId, vec, {
+        model: info.model,
+        dim: vec.length,
       });
     } catch {
-      // Silently ignore embedding failures
+      // Silently ignore — search still works FTS-only
     }
   }
 
@@ -106,13 +142,15 @@ export function createMemoryServer(dbPath, options = {}) {
       category: z.string().max(500).optional().describe("Filter by category"),
       min_importance: z.number().min(1).max(10).optional().describe("Minimum importance threshold"),
       limit: z.number().max(100).default(10).describe("Maximum results to return"),
-      semantic: z.boolean().default(false).describe("Enable semantic search (requires embedding provider + sqlite-vec)"),
+      semantic: z.boolean().default(true).describe("Enable semantic search + reranker (auto-falls back to FTS-only if grackle-embed offline)"),
       instance_id: z.string().max(100).optional().describe("Filter by origin instance ID"),
       project_id: z.number().optional().describe("Filter by project ID"),
     },
     async ({ query, category, min_importance, limit, semantic, instance_id, project_id }) => {
       // Try semantic search first if requested and available
       let semanticRows = [];
+
+      // Legacy sqlite-vec path (kept for backward compat with injected getEmbedding)
       if (semantic && getEmbedding && await hasVec()) {
         try {
           const queryVec = await getEmbedding(query);
@@ -139,6 +177,47 @@ export function createMemoryServer(dbPath, options = {}) {
           }
         } catch {
           // Semantic search failed — fall through to FTS5
+        }
+      }
+
+      // Phase 4: BLOB + in-process cosine path (default when semantic=true
+      // and no legacy injection). Loads all memory embeddings, scores by
+      // cosine similarity, optionally reranks top-K via grackle-rerank.
+      if (semantic && semanticRows.length === 0) {
+        try {
+          const info = await phase4ProviderHealthy();
+          if (info.ok) {
+            const queryVec = await phase4EmbedText(query);
+            const allEmbs = await loadMemoryEmbeddings(db, { model: info.model });
+            if (queryVec && allEmbs.length > 0) {
+              const topK = Math.min(Math.max(limit * 3, 30), 200);
+              const topCandidates = rankByCosine(queryVec, allEmbs, topK);
+              // Fetch the full memory rows for those IDs, with filters
+              const ids = topCandidates.map((c) => c.memory_id);
+              if (ids.length > 0) {
+                const placeholders = ids.map(() => "?").join(",");
+                let fetchSql = `SELECT * FROM memories WHERE id IN (${placeholders})`;
+                const fetchArgs = [...ids];
+                if (category) { fetchSql += " AND category = ?"; fetchArgs.push(category); }
+                if (min_importance) { fetchSql += " AND importance >= ?"; fetchArgs.push(min_importance); }
+                if (instance_id) { fetchSql += " AND instance_id = ?"; fetchArgs.push(instance_id); }
+                if (project_id) { fetchSql += " AND project_id = ?"; fetchArgs.push(project_id); }
+                const { rows: rawRows } = await db.execute({ sql: fetchSql, args: fetchArgs });
+                const byId = new Map(rawRows.map((r) => [r.id, r]));
+                // Preserve cosine-sorted order + attach score
+                const ordered = topCandidates
+                  .map((c) => byId.get(c.memory_id) && ({ ...byId.get(c.memory_id), cosine: c.score }))
+                  .filter(Boolean);
+
+                // Optional reranker pass over top candidates
+                const rerankInputs = ordered.map((m) => ({ id: m.id, text: m.content, _memory: m }));
+                const reranked = await phase4Rerank(query, rerankInputs, { topK: limit });
+                semanticRows = reranked.map((r) => ({ ...(r._memory), rerank: r.relevance ?? null }));
+              }
+            }
+          }
+        } catch {
+          // Silent fallback to FTS
         }
       }
 
