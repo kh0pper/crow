@@ -29,11 +29,12 @@
 
         <!--
             Meta Wearables DAT credentials for the "Crow Glasses Integration"
-            project (Meta Wearables Developer Center). These are bound to the
-            DEBUG keystore fingerprint as of 2026-04-12. Before shipping a
-            release APK, swap these for release-keystore-authorized values or
-            gate them via Gradle buildType manifestPlaceholders. See
-            ~/.claude/projects/.../memory/meta-glasses-dat-credentials.md.
+            project (Meta Wearables Developer Center). As of 2026-04-14 these
+            work for BOTH debug and release builds: Meta Dev Center has both
+            keystore signatures linked to this single APPLICATION_ID.
+              debug   SHA-256 base64url: StBwV5kRyRhPUuOKtJIGTd8aicyUoFwsXXig8G2sZWs
+              release SHA-256 base64url: vdssZL6KvS4knCnYGwuEa9EPKZ_F56mn6rSisclZPTI
+            Package name: press.maestro.crow.
         -->
         <meta-data
             android:name="com.meta.wearable.mwdat.APPLICATION_ID"

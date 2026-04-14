@@ -26,11 +26,25 @@ import { createMemoryServer } from "../memory/server.js";
 import { createProjectServer } from "../research/server.js";
 import { createSharingServer } from "../sharing/server.js";
 import { createBlogServer } from "../blog/server.js";
-import { createOrchestratorServer } from "../orchestrator/server.js";
 import { TOOL_MANIFESTS, buildCompressedDescription } from "./tool-manifests.js";
 import { connectedServers } from "./proxy.js";
 import { createDbClient } from "../db.js";
 import { generateCrowContext } from "../memory/crow-context.js";
+
+// Orchestrator depends on open-multi-agent (file:../open-multi-agent path
+// dep). On deployments without the sibling repo (e.g. hosted relays) the
+// import fails, so probe it once at module load and only register the
+// factory if available.
+let createOrchestratorServer = null;
+try {
+  ({ createOrchestratorServer } = await import("../orchestrator/server.js"));
+} catch (err) {
+  if (err.code === "ERR_MODULE_NOT_FOUND") {
+    console.warn("[router] orchestrator unavailable (open-multi-agent not installed). Category disabled.");
+  } else {
+    throw err;
+  }
+}
 
 /**
  * Server factory map — maps category names to their factory functions.
@@ -41,7 +55,9 @@ const SERVER_FACTORIES = {
   projects: createProjectServer,
   sharing: createSharingServer,
   blog: createBlogServer,
-  orchestrator: () => createOrchestratorServer(undefined, { connectedServers }),
+  ...(createOrchestratorServer
+    ? { orchestrator: () => createOrchestratorServer(undefined, { connectedServers }) }
+    : {}),
   // storage added dynamically in createRouterServer
   // media added dynamically in createRouterServer (bundle add-on)
 };
