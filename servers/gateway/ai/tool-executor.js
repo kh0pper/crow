@@ -15,9 +15,17 @@ import { createMemoryServer } from "../../memory/server.js";
 import { createProjectServer } from "../../research/server.js";
 import { createSharingServer } from "../../sharing/server.js";
 import { createBlogServer } from "../../blog/server.js";
-import { createOrchestratorServer } from "../../orchestrator/server.js";
 import { TOOL_MANIFESTS } from "../tool-manifests.js";
 import { connectedServers } from "../proxy.js";
+
+// See router.js for rationale — orchestrator is optional when the
+// open-multi-agent sibling repo isn't installed.
+let createOrchestratorServer = null;
+try {
+  ({ createOrchestratorServer } = await import("../../orchestrator/server.js"));
+} catch (err) {
+  if (err.code !== "ERR_MODULE_NOT_FOUND") throw err;
+}
 
 /** Max characters for a single tool result before truncation */
 const MAX_RESULT_LENGTH = 2000;
@@ -34,7 +42,9 @@ const SERVER_FACTORIES = {
   projects: createProjectServer,
   sharing: createSharingServer,
   blog: createBlogServer,
-  orchestrator: () => createOrchestratorServer(undefined, { connectedServers }),
+  ...(createOrchestratorServer
+    ? { orchestrator: () => createOrchestratorServer(undefined, { connectedServers }) }
+    : {}),
 };
 
 /**

@@ -72,8 +72,26 @@ object DatBridge {
                 val permResult = Wearables.checkPermissionStatus(Permission.CAMERA)
                 val status = permResult.getOrNull()
                 Log.i(TAG, "camera permission status=$status permResult=$permResult")
-                // Don't pre-block on Denied — the check can lag real state after
-                // a fresh grant. Let startStreamSession tell us the truth.
+
+                // Diagnostic: capture current SDK state snapshot right before
+                // startStreamSession. This helps distinguish "no device paired"
+                // from "stream rejected" when state→STOPPED happens instantly.
+                try {
+                    val regState = Wearables.registrationState.first()
+                    Log.i(TAG, "pre-capture registrationState=$regState")
+                } catch (t: Throwable) {
+                    Log.w(TAG, "pre-capture registrationState read failed: ${t.message}")
+                }
+                try {
+                    val devs = withTimeoutOrNull(500) { Wearables.devices.first() } ?: emptySet()
+                    Log.i(TAG, "pre-capture devices size=${devs.size} ids=${devs.map { it.toString() }}")
+                    if (devs.isEmpty()) {
+                        listener.onError("no_device", "Wearables.devices is empty — glasses not registered in this SDK session")
+                        return@launch
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "pre-capture devices read failed: ${t.message}")
+                }
 
                 val session = try {
                     Wearables.startStreamSession(
@@ -82,16 +100,20 @@ object DatBridge {
                         StreamConfiguration(videoQuality = VideoQuality.MEDIUM, frameRate = 24),
                     )
                 } catch (t: Throwable) {
+                    Log.w(TAG, "startStreamSession threw", t)
                     listener.onError("stream_start_failed", t.message ?: "startStreamSession failed")
                     return@launch
                 }
+                Log.i(TAG, "startStreamSession returned session=$session initialState=${session.state.value}")
 
-                val seen = mutableListOf<StreamSessionState>()
+                val seen = mutableListOf<Pair<Long, StreamSessionState>>()
+                val startedAt = System.currentTimeMillis()
                 val streaming = withTimeoutOrNull(15_000) {
                     session.state.first { s ->
-                        seen.add(s)
-                        Log.i(TAG, "stream state=$s")
-                        s == StreamSessionState.STREAMING || s == StreamSessionState.STOPPED || s == StreamSessionState.CLOSED
+                        val dt = System.currentTimeMillis() - startedAt
+                        seen.add(dt to s)
+                        Log.i(TAG, "stream state=$s (+${dt}ms)")
+                        s == StreamSessionState.STREAMING || s == StreamSessionState.CLOSED
                     }
                 }
                 if (streaming != StreamSessionState.STREAMING) {
@@ -132,48 +154,49 @@ object DatBridge {
 
     @JvmStatic
     fun startRegistration(activity: Activity, owner: LifecycleOwner, listener: Listener): Job {
+        // One-shot: plain lifecycleScope.launch (no repeatOnLifecycle). An earlier
+        // version wrapped this in repeatOnLifecycle(STARTED), which re-fired the
+        // whole registration every time PairingActivity returned to STARTED —
+        // including after the DatCameraPermissionActivity finished. That
+        // re-registration wiped the freshly-granted CAMERA scope in Meta AI.
         val scope = owner.lifecycleScope
         return scope.launch {
             try {
-                owner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                    listener.onStatus("Requesting registration in Meta AI app...")
-                    try {
-                        Wearables.startRegistration(activity)
-                    } catch (t: Throwable) {
-                        listener.onError("startRegistration threw: ${t.message}")
-                        return@repeatOnLifecycle
-                    }
+                listener.onStatus("Requesting registration in Meta AI app...")
+                try {
+                    Wearables.startRegistration(activity)
+                } catch (t: Throwable) {
+                    listener.onError("startRegistration threw: ${t.message}")
+                    return@launch
+                }
 
-                    val registered = Wearables.registrationState.first { state ->
-                        when (state) {
-                            is RegistrationState.Registered -> true
-                            else -> {
-                                listener.onStatus("Registration state: ${state.javaClass.simpleName}")
-                                false
-                            }
+                Wearables.registrationState.first { state ->
+                    when (state) {
+                        is RegistrationState.Registered -> true
+                        else -> {
+                            listener.onStatus("Registration state: ${state.javaClass.simpleName}")
+                            false
                         }
                     }
-                    listener.onStatus("Registered. Waiting for a Ray-Ban device...")
-
-                    val devices = Wearables.devices.first { it.isNotEmpty() }
-                    val deviceId = devices.first()
-                    val idStr = deviceId.toString()
-
-                    val displayName = try {
-                        val metaFlow = Wearables.devicesMetadata[deviceId]
-                        val meta = metaFlow?.first()
-                        val name = meta?.name
-                        if (name.isNullOrEmpty()) idStr else name
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "devicesMetadata read failed", t)
-                        idStr
-                    }
-
-                    listener.onStatus("Device ready: $displayName ($idStr)")
-                    listener.onDevicePaired(idStr, displayName)
-                    // One-shot: stop collecting once we've handed off to the gateway register step.
-                    return@repeatOnLifecycle
                 }
+                listener.onStatus("Registered. Waiting for a Ray-Ban device...")
+
+                val devices = Wearables.devices.first { it.isNotEmpty() }
+                val deviceId = devices.first()
+                val idStr = deviceId.toString()
+
+                val displayName = try {
+                    val metaFlow = Wearables.devicesMetadata[deviceId]
+                    val meta = metaFlow?.first()
+                    val name = meta?.name
+                    if (name.isNullOrEmpty()) idStr else name
+                } catch (t: Throwable) {
+                    Log.w(TAG, "devicesMetadata read failed", t)
+                    idStr
+                }
+
+                listener.onStatus("Device ready: $displayName ($idStr)")
+                listener.onDevicePaired(idStr, displayName)
             } catch (t: Throwable) {
                 listener.onError("DAT bridge error: ${t.message}")
             }
