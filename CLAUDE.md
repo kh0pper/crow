@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Working with this repo
+
+- **Always commit with a positional path arg**: `git commit <path> -m "..."`, not `git add <path> && git commit -m "..."`. The repo's index frequently carries unrelated WIP across branch checkouts because parallel Claude sessions modify files in the working tree concurrently. `git add` extends the index rather than replacing it, so a subsequent `git commit` without a path will sweep in those WIP files. Verify with `git show --stat HEAD` after every commit. (See `~/.claude/CLAUDE.md` Learnings 2026-04-14 for the incident this came from.)
+- **Always `git pull --rebase` before pushing a branch** — parallel sessions commonly push to `main` between your fetch and your push. `--rebase` cleanly drops upstream-equivalent commits.
+
 ## Build & Run Commands
 
 ```bash
@@ -303,6 +308,8 @@ Node.js >= 18 required. ESM modules (`"type": "module"` in package.json).
 ### Multi-Agent Orchestrator
 
 The `servers/orchestrator/` server provides multi-agent orchestration powered by the `open-multi-agent` engine. Multiple AI agents collaborate on complex goals, with access to Crow's MCP tools.
+
+**`open-multi-agent` is an `optionalDependency`** (`file:../open-multi-agent` sibling repo). Hosted relays and minimal deployments don't need it. The gateway lazy-imports the orchestrator at three call sites and gracefully omits orchestrator tools when the package is missing — you'll see `[router] orchestrator unavailable` / `[pipeline-runner] Orchestrator unavailable` warnings in the logs but the rest of the gateway runs normally. If you change orchestrator imports, update **all three** call sites: `servers/gateway/router.js`, `servers/gateway/ai/tool-executor.js`, and `servers/gateway/index.js` (pipeline runner).
 
 **Tools:**
 - `crow_orchestrate` — Start a multi-agent team on a goal (async, returns job ID)
