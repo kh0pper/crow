@@ -1,0 +1,32 @@
+{
+  "id": "vllm-rocm-qwen35-4b",
+  "type": "bundle",
+  "name": "vLLM Qwen3.5-4B (ROCm gfx1151)",
+  "category": "ai",
+  "description": "Phase 3 dispatch upgrade — Qwen3.5-4B BF16 (Mar 2026 release, 97.5% multi-tool pass). Served via vLLM-ROCm on AMD Strix Halo (gfx1151). Initially deployed on staging port :8011 alongside the legacy :8001 (Qwen3-4B) for Maker Lab cutover; flip via Maker Lab MCP env var update, then retire :8001.",
+  "host": "local",
+  "requires": {
+    "gpu": true,
+    "min_vram_gb": 12,
+    "platform": "linux-x86_64",
+    "gpu_arch": ["rocm"]
+  },
+  "env_vars": [],
+  "port": 8011,
+  "providers": [
+    {
+      "id": "crow-dispatch",
+      "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+      "apiKey": "none",
+      "description": "Fast tool-dispatch + Maker Lab classroom endpoint (Qwen3.5-4B BF16)",
+      "models": [
+        {
+          "id": "qwen3.5-4b",
+          "contextLen": 32768,
+          "warm": true,
+          "priority": "maker_lab"
+        }
+      ]
+    }
+  ]
+}

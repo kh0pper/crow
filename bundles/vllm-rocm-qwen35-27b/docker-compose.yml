@@ -1,0 +1,43 @@
+services:
+  vllm-rocm-qwen35-27b:
+    image: ${VLLM_ROCM_IMAGE}
+    container_name: vllm-rocm-qwen35-27b
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "${VIDEO_GID}"
+      - "${RENDER_GID}"
+    env_file:
+      - ../.env.rocm
+    environment:
+      HF_HOME: /models
+      HUGGING_FACE_HUB_TOKEN: ${VLLM_HF_TOKEN:-}
+    volumes:
+      - /home/kh0pp/llm/hf-cache:/models
+    ports:
+      - "${CROW_TAILSCALE_IP}:8012:8000"
+    entrypoint: ["vllm", "serve"]
+    command:
+      - Qwen/Qwen3.5-27B
+      - --served-model-name
+      - qwen3.5-27b
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --dtype
+      - bfloat16
+      - --gpu-memory-utilization
+      - "0.65"
+      - --max-model-len
+      - "32768"
+      - --max-num-seqs
+      - "4"
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - hermes
+      - --enforce-eager
+    restart: unless-stopped
+    ipc: host
+    shm_size: 16g

@@ -1,0 +1,32 @@
+{
+  "id": "vllm-rocm-qwen35-27b",
+  "type": "bundle",
+  "name": "vLLM Qwen3.5-27B (ROCm gfx1151)",
+  "category": "ai",
+  "description": "Phase 3 daily-driver upgrade — Qwen3.5-27B BF16 (Feb 2026 release, ~54GB resident vs 64GB for Qwen3-32B). Served via vLLM-ROCm on AMD Strix Halo (gfx1151). Initially deployed on staging port :8012 alongside legacy :8002 (Qwen3-32B); flip via models.json baseUrl, then retire :8002. Automatic rollback on 4 thresholds per plan §3c.",
+  "host": "local",
+  "requires": {
+    "gpu": true,
+    "min_vram_gb": 80,
+    "platform": "linux-x86_64",
+    "gpu_arch": ["rocm"]
+  },
+  "env_vars": [],
+  "port": 8012,
+  "providers": [
+    {
+      "id": "crow-chat",
+      "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+      "apiKey": "none",
+      "description": "Daily-driver mid-tier reasoning/synthesis (Qwen3.5-27B BF16)",
+      "models": [
+        {
+          "id": "qwen3.5-27b",
+          "contextLen": 32768,
+          "warm": true,
+          "priority": "interactive"
+        }
+      ]
+    }
+  ]
+}
