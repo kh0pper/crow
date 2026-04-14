@@ -37,20 +37,21 @@ function assert(cond, msg) {
 async function setup() {
   await db.execute(`
     CREATE TABLE dashboard_settings (
-      key TEXT NOT NULL,
+      key TEXT PRIMARY KEY,
       value TEXT NOT NULL,
       updated_at TEXT DEFAULT (datetime('now')),
-      instance_id TEXT DEFAULT NULL,
       lamport_ts INTEGER DEFAULT 0
     )
   `);
   await db.execute(`
-    CREATE UNIQUE INDEX idx_dashboard_settings_global
-      ON dashboard_settings(key) WHERE instance_id IS NULL
-  `);
-  await db.execute(`
-    CREATE UNIQUE INDEX idx_dashboard_settings_instance
-      ON dashboard_settings(key, instance_id) WHERE instance_id IS NOT NULL
+    CREATE TABLE dashboard_settings_overrides (
+      key TEXT NOT NULL,
+      instance_id TEXT NOT NULL,
+      value TEXT NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now')),
+      lamport_ts INTEGER DEFAULT 0,
+      PRIMARY KEY (key, instance_id)
+    )
   `);
 }
 
