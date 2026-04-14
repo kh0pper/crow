@@ -78,7 +78,9 @@ export async function forwardBundleAction({
   }
 
   // 3. Build + sign request
-  const path = `/bundles/api/${action}`;
+  // Bundle routes are mounted under /dashboard/bundles/api/* per
+  // servers/gateway/dashboard/index.js:439. Same path on both sides.
+  const path = `/dashboard/bundles/api/${action}`;
   const url = String(instance.gateway_url).replace(/\/+$/, "") + path;
   const bodyObj = { bundle_id: bundleId };
   const body = JSON.stringify(bodyObj);
