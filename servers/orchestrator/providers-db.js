@@ -101,9 +101,26 @@ export async function loadProvidersFromDb(db) {
   return { providers, _source: "db:providers" };
 }
 
+// -----------------------------------------------------------------------
+// Optional syncManager injection — callers that have access to a
+// connected InstanceSyncManager (the gateway, typically) can set it here
+// so mutations push to paired peers via emitChange. If unset, peers
+// still receive updates via pull-side sync (their sync loop scans the
+// table periodically by lamport_ts).
+// -----------------------------------------------------------------------
+
+let _syncManager = null;
+export function setProviderSyncManager(mgr) { _syncManager = mgr || null; }
+
+async function emitSync(op, row) {
+  if (!_syncManager) return;
+  try { await _syncManager.emitChange("providers", op, row); } catch {}
+}
+
 /**
  * Upsert a single provider. Bumps lamport_ts and sets instance_id so
- * instance-sync can propagate.
+ * instance-sync can propagate. Emits a sync change to peers when a
+ * syncManager has been attached via setProviderSyncManager.
  */
 export async function upsertProvider(db, provider) {
   if (!provider || !provider.id) throw new Error("provider.id required");
@@ -113,6 +130,7 @@ export async function upsertProvider(db, provider) {
     args: [provider.id],
   });
   const currentTs = rows[0]?.lamport_ts ?? 0;
+  const existed = rows.length > 0;
   const newTs = Math.max(Number(currentTs), Number(provider.lamport_ts || 0)) + 1;
 
   await db.execute({
@@ -143,6 +161,20 @@ export async function upsertProvider(db, provider) {
       instanceId,
     ],
   });
+
+  await emitSync(existed ? "update" : "insert", {
+    id: provider.id,
+    base_url: provider.baseUrl || provider.base_url || "",
+    api_key: provider.apiKey ?? provider.api_key ?? null,
+    host: provider.host || "local",
+    bundle_id: provider.bundleId ?? provider.bundle_id ?? null,
+    description: provider.description ?? null,
+    models: JSON.stringify(provider.models || []),
+    disabled: provider.disabled ? 1 : 0,
+    lamport_ts: newTs,
+    instance_id: instanceId,
+  });
+
   return { id: provider.id, lamport_ts: newTs };
 }
 
@@ -153,7 +185,7 @@ export async function upsertProvider(db, provider) {
 export async function disableProvider(db, id) {
   const instanceId = getOrCreateLocalInstanceId();
   const { rows } = await db.execute({
-    sql: "SELECT lamport_ts FROM providers WHERE id = ?",
+    sql: "SELECT * FROM providers WHERE id = ?",
     args: [id],
   });
   if (rows.length === 0) return { ok: false, reason: "not_found" };
@@ -162,6 +194,7 @@ export async function disableProvider(db, id) {
     sql: "UPDATE providers SET disabled = 1, lamport_ts = ?, instance_id = ?, updated_at = datetime('now') WHERE id = ?",
     args: [newTs, instanceId, id],
   });
+  await emitSync("update", { ...rows[0], disabled: 1, lamport_ts: newTs, instance_id: instanceId });
   return { ok: true, lamport_ts: newTs };
 }
 

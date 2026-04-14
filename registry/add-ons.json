@@ -4444,6 +4444,66 @@
         }
       ],
       "notes": "On-demand. Mutex with embed/rerank during burst (vision unloads them temporarily). ~11GB VRAM peak. Requires vLLM >=0.11.0 + Blackwell or newer for FP8 e4m3."
+    },
+    {
+      "id": "llamacpp-vulkan-qwen3-coder",
+      "name": "llama.cpp Coder (Qwen3-Coder-30B-A3B Q8_0)",
+      "version": "1.0.0",
+      "description": "On-demand code specialist MoE (~30GB). Runs on Strix Halo gfx1151 via kyuz0 llama.cpp image. Shares :8003 with GLM-4.5-Air.",
+      "type": "bundle",
+      "category": "ai",
+      "tags": ["ai", "code", "llama.cpp", "rocm", "gfx1151", "moe"],
+      "icon": "cpu",
+      "host": "local",
+      "requires": {
+        "gpu": true,
+        "min_vram_gb": 40,
+        "platform": "linux-x86_64",
+        "gpu_arch": ["rocm"]
+      },
+      "env_vars": [],
+      "port": 8003,
+      "providers": [
+        {
+          "id": "crow-swap-coder",
+          "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+          "apiKey": "none",
+          "models": [
+            { "id": "qwen3-coder-30b-a3b", "contextLen": 32768, "warm": false, "onDemand": true, "mutexGroup": "8003-swap", "priority": "interactive" }
+          ]
+        }
+      ],
+      "notes": "On-demand. First start downloads ~30GB from HF. Shares :8003 with GLM-4.5-Air via mutex."
+    },
+    {
+      "id": "llamacpp-vulkan-glm-45-air",
+      "name": "llama.cpp GLM-4.5-Air Q5_K_M (MoE 106B/12B)",
+      "version": "1.0.0",
+      "description": "On-demand deep-reasoning MoE (~72GB). 12B active params for 70B-class quality. Shares :8003 with coder; conflicts with crow-chat (requires :8002 unload).",
+      "type": "bundle",
+      "category": "ai",
+      "tags": ["ai", "reasoning", "llama.cpp", "rocm", "gfx1151", "moe"],
+      "icon": "cpu",
+      "host": "local",
+      "requires": {
+        "gpu": true,
+        "min_vram_gb": 80,
+        "platform": "linux-x86_64",
+        "gpu_arch": ["rocm"]
+      },
+      "env_vars": [],
+      "port": 8003,
+      "providers": [
+        {
+          "id": "crow-swap-deep",
+          "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+          "apiKey": "none",
+          "models": [
+            { "id": "glm-4.5-air", "contextLen": 16384, "warm": false, "onDemand": true, "mutexGroup": "8003-swap", "conflictsWith": ["crow-chat"], "priority": "batch" }
+          ]
+        }
+      ],
+      "notes": "On-demand. First start downloads ~72GB from HF. Cannot coexist with :8002 (orchestrator unloads crow-chat automatically before warming)."
     }
   ]
 }

@@ -25,7 +25,7 @@
           "contextLen": 16384,
           "warm": false,
           "onDemand": true,
-          "mutexGroup": "grackle-specialists",
+          "conflictsWith": ["grackle-embed", "grackle-rerank"],
           "priority": "interactive"
         }
       ]

@@ -1,0 +1,35 @@
+{
+  "id": "llamacpp-vulkan-glm-45-air",
+  "type": "bundle",
+  "name": "llama.cpp GLM-4.5-Air Q5_K_M (Vulkan AMDVLK)",
+  "category": "ai",
+  "description": "On-demand deep-reasoning specialist — GLM-4.5-Air 106B/12B MoE Q5_K_M (~72GB) via llama.cpp. Vulkan AMDVLK backend on Strix Halo gfx1151. Shares :8003 mutex group with coder. Conflicts with crow-chat (requires :8002 unload before warming).",
+  "host": "local",
+  "requires": {
+    "gpu": true,
+    "min_vram_gb": 80,
+    "platform": "linux-x86_64",
+    "gpu_arch": ["rocm"]
+  },
+  "env_vars": [],
+  "port": 8003,
+  "providers": [
+    {
+      "id": "crow-swap-deep",
+      "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+      "apiKey": "none",
+      "description": "Deep-reasoning specialist (GLM-4.5-Air Q5_K_M, on-demand; conflicts with crow-chat)",
+      "models": [
+        {
+          "id": "glm-4.5-air",
+          "contextLen": 16384,
+          "warm": false,
+          "onDemand": true,
+          "mutexGroup": "8003-swap",
+          "conflictsWith": ["crow-chat"],
+          "priority": "batch"
+        }
+      ]
+    }
+  ]
+}
