@@ -232,6 +232,81 @@ function finishJob(job, status) {
 }
 
 /** Read installed.json as array */
+/**
+ * Repair missing bundle UI artifacts for already-installed bundles.
+ *
+ * Prior incident (2026-04-14): the Companion bundle's docker service was migrated
+ * from grackle to crow, but ~/.crow/bundles/companion/settings-section.js was
+ * absent on crow because only the docker volumes moved over. This meant the
+ * Settings → Companion section disappeared until the file was manually copied.
+ *
+ * This function idempotently re-copies settings-section.js and panel/ from the
+ * app repo (APP_BUNDLES) into ~/.crow/bundles/<id>/ for every installed bundle.
+ * It's safe to run on every gateway start — cpSync overwrites identical files.
+ *
+ * Returns { repaired: string[], errors: Array<{id, error}> }.
+ */
+export function repairInstalledBundleAssets() {
+  const repaired = [];
+  const errors = [];
+
+  let installed;
+  try {
+    installed = getInstalled();
+  } catch (err) {
+    return { repaired, errors: [{ id: "*", error: `read installed: ${err.message}` }] };
+  }
+  if (!Array.isArray(installed) || installed.length === 0) {
+    return { repaired, errors };
+  }
+
+  for (const entry of installed) {
+    const id = typeof entry === "string" ? entry : entry?.id;
+    if (!id || !isValidBundleId(id)) continue;
+
+    const appSrc = join(APP_BUNDLES, id);
+    if (!existsSync(appSrc)) continue; // not a first-party bundle — skip
+
+    const destDir = join(BUNDLES_DIR, id);
+    const touched = [];
+    try {
+      mkdirSync(destDir, { recursive: true });
+
+      // settings-section.js: single file — copy if missing or stale-size
+      const settingsSrc = join(appSrc, "settings-section.js");
+      const settingsDst = join(destDir, "settings-section.js");
+      if (existsSync(settingsSrc) && !existsSync(settingsDst)) {
+        copyFileSync(settingsSrc, settingsDst);
+        touched.push("settings-section.js");
+      }
+
+      // panel/: dir — copy recursively if missing
+      const panelSrc = join(appSrc, "panel");
+      const panelDst = join(destDir, "panel");
+      if (existsSync(panelSrc) && !existsSync(panelDst)) {
+        cpSync(panelSrc, panelDst, { recursive: true });
+        touched.push("panel/");
+      }
+
+      // manifest.json: refresh if missing (keeps operator from losing bundle metadata)
+      const manifestSrc = join(appSrc, "manifest.json");
+      const manifestDst = join(destDir, "manifest.json");
+      if (existsSync(manifestSrc) && !existsSync(manifestDst)) {
+        copyFileSync(manifestSrc, manifestDst);
+        touched.push("manifest.json");
+      }
+
+      if (touched.length > 0) {
+        repaired.push(`${id}: ${touched.join(", ")}`);
+      }
+    } catch (err) {
+      errors.push({ id, error: err.message });
+    }
+  }
+
+  return { repaired, errors };
+}
+
 function getInstalled() {
   try {
     if (existsSync(INSTALLED_PATH)) {

@@ -16,6 +16,7 @@ import { mkdirSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { sign, verify } from "./identity.js";
 import { resolveDataDir } from "../db.js";
+import { isSyncable } from "../gateway/dashboard/settings/sync-allowlist.js";
 
 // Tables that participate in core sync
 const SYNCED_TABLES = [
@@ -30,6 +31,10 @@ const SYNCED_TABLES = [
   // changes propagate to peers so model swaps/additions are one-and-done.
   // Toggle off by removing this line if you want per-instance divergence.
   "providers",
+  // Scoped-settings replication (2026-04-14): only rows with instance_id IS NULL
+  // AND whose key is in the SYNC_ALLOWLIST are actually emitted/applied.
+  // See shouldSyncRow() below.
+  "dashboard_settings",
 ];
 
 // Columns to exclude from sync payloads (security-sensitive or instance-local)
@@ -39,6 +44,24 @@ const EXCLUDED_COLUMNS = {
   // local-lab scenarios but flag here as the place to exclude if paranoid.
   providers: [],
 };
+
+/**
+ * Per-table filter: decide whether a mutated row should be broadcast (or an
+ * inbound row applied). Returning false means "this row is local-only; skip it".
+ *
+ * For dashboard_settings we enforce:
+ *   - instance_id IS NULL (i.e. the global scope row)
+ *   - key matches the SYNC_ALLOWLIST
+ *
+ * All other synced tables default to true (no filter).
+ */
+function shouldSyncRow(table, row) {
+  if (table !== "dashboard_settings") return true;
+  if (!row) return false;
+  if (row.instance_id !== null && row.instance_id !== undefined) return false;
+  if (!row.key) return false;
+  return isSyncable(row.key);
+}
 
 export class InstanceSyncManager {
   /**
@@ -192,6 +215,7 @@ export class InstanceSyncManager {
    */
   async emitChange(table, op, row) {
     if (!SYNCED_TABLES.includes(table)) return;
+    if (!shouldSyncRow(table, row)) return; // local-only row; don't broadcast
 
     const lamportTs = await this._nextLamport();
 
@@ -215,12 +239,20 @@ export class InstanceSyncManager {
     entry.signature = sign(payload, this.identity.ed25519Priv);
 
     // Update the row's lamport_ts in the local database
-    if (op !== "delete" && row.id !== undefined) {
+    if (op !== "delete") {
       try {
-        await this.db.execute({
-          sql: `UPDATE ${table} SET lamport_ts = ? WHERE id = ?`,
-          args: [lamportTs, row.id],
-        });
+        if (table === "dashboard_settings" && row.key !== undefined) {
+          await this.db.execute({
+            sql: `UPDATE dashboard_settings SET lamport_ts = ?
+                  WHERE key = ? AND instance_id IS NULL`,
+            args: [lamportTs, row.key],
+          });
+        } else if (row.id !== undefined) {
+          await this.db.execute({
+            sql: `UPDATE ${table} SET lamport_ts = ? WHERE id = ?`,
+            args: [lamportTs, row.id],
+          });
+        }
       } catch {
         // Non-fatal — row may not have lamport_ts column yet
       }
@@ -267,6 +299,11 @@ export class InstanceSyncManager {
     // Validate table
     if (!SYNCED_TABLES.includes(table)) return;
 
+    // Defense in depth: drop inbound rows that fail the local syncability check.
+    // A peer claiming a non-allowlisted dashboard_settings key (or a row with
+    // instance_id != NULL) is either misconfigured or malicious — either way we don't apply.
+    if (!shouldSyncRow(table, row)) return;
+
     // Verify signature
     const entryWithoutSig = { table, op, row, lamport_ts, instance_id };
     const payload = JSON.stringify(entryWithoutSig);
@@ -283,6 +320,16 @@ export class InstanceSyncManager {
 
     // Advance local counter
     await this._advanceCounter(lamport_ts);
+
+    // Tables keyed by 'key' instead of 'id' need special-case apply logic.
+    if (table === "dashboard_settings") {
+      try {
+        await this._applyDashboardSetting(op, row, lamport_ts);
+      } catch (err) {
+        console.warn(`[instance-sync] Failed to apply ${op} on dashboard_settings:`, err.message);
+      }
+      return;
+    }
 
     // Check for conflicts
     if (op === "update" && row.id !== undefined) {
@@ -306,6 +353,43 @@ export class InstanceSyncManager {
     } catch (err) {
       console.warn(`[instance-sync] Failed to apply ${op} on ${table}:`, err.message);
     }
+  }
+
+  /**
+   * Apply a dashboard_settings mutation. Keyed by (key, instance_id IS NULL)
+   * (only global rows are synced). Last-write-wins by lamport_ts.
+   */
+  async _applyDashboardSetting(op, row, lamportTs) {
+    if (!row || !row.key) return;
+
+    // Check current global row (if any) for LWW
+    const { rows: existing } = await this.db.execute({
+      sql: `SELECT value, lamport_ts FROM dashboard_settings
+            WHERE key = ? AND instance_id IS NULL`,
+      args: [row.key],
+    });
+    const localTs = existing[0]?.lamport_ts || 0;
+    if (lamportTs < localTs) return; // older — ignore
+    if (lamportTs === localTs && existing[0]?.value === row.value) return; // same state
+
+    if (op === "delete") {
+      await this.db.execute({
+        sql: `DELETE FROM dashboard_settings WHERE key = ? AND instance_id IS NULL`,
+        args: [row.key],
+      });
+      return;
+    }
+
+    // Upsert global row
+    await this.db.execute({
+      sql: `DELETE FROM dashboard_settings WHERE key = ? AND instance_id IS NULL`,
+      args: [row.key],
+    });
+    await this.db.execute({
+      sql: `INSERT INTO dashboard_settings (key, value, updated_at, instance_id, lamport_ts)
+            VALUES (?, ?, datetime('now'), NULL, ?)`,
+      args: [row.key, row.value ?? "", lamportTs],
+    });
   }
 
   /**
