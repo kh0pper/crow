@@ -788,6 +788,17 @@ try {
   console.warn("[providers] Failed to mount health matrix:", err.message);
 }
 
+// --- Provider DB seed (Phase 5-full: first-boot migration from models.json) ---
+try {
+  const { seedProvidersFromModelsJson } = await import("../orchestrator/providers-db.js");
+  const seed = await seedProvidersFromModelsJson(createDbClient());
+  if (seed.seeded > 0) {
+    console.log(`[providers] Seeded ${seed.seeded} providers from ${seed.source}`);
+  }
+} catch (err) {
+  console.warn("[providers] First-boot seed skipped:", err.message);
+}
+
 // --- Mount Crow's Nest (conditional) ---
 try {
   const { default: dashboardRouter } = await import("./dashboard/index.js");

@@ -26,11 +26,18 @@ const SYNCED_TABLES = [
   "messages",
   "relay_config",
   "crow_instances",
+  // Phase 5-full: LLM provider registry. Operator-editable on any instance;
+  // changes propagate to peers so model swaps/additions are one-and-done.
+  // Toggle off by removing this line if you want per-instance divergence.
+  "providers",
 ];
 
 // Columns to exclude from sync payloads (security-sensitive or instance-local)
 const EXCLUDED_COLUMNS = {
   crow_instances: ["auth_token_hash"],
+  // apiKey can be sensitive for some deployments; keep in sync by default for
+  // local-lab scenarios but flag here as the place to exclude if paranoid.
+  providers: [],
 };
 
 export class InstanceSyncManager {
