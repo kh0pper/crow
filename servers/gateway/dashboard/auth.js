@@ -288,33 +288,22 @@ export async function destroySession(token) {
 }
 
 /**
- * Check if request IP is on the local/Tailscale allowlist.
+ * True if ip is RFC1918 private, Tailscale CGNAT (100.64.0.0/10), or in
+ * CROW_ALLOWED_IPS. Does NOT include bare loopback — callers decide whether
+ * to trust localhost based on the request's Tailscale header context.
  */
-export function isAllowedNetwork(req) {
-  if (process.env.CROW_DASHBOARD_PUBLIC === "true") return true;
-
-  const ip = req.ip || req.connection?.remoteAddress || "";
-  // Normalize IPv6-mapped IPv4
-  const addr = ip.replace(/^::ffff:/, "");
-
-  // Localhost
-  if (addr === "127.0.0.1" || addr === "::1" || addr === "localhost") return true;
-
-  // RFC 1918 private ranges
+function isPrivateOrAllowlistedIp(addr) {
   if (/^10\./.test(addr)) return true;
   if (/^172\.(1[6-9]|2\d|3[01])\./.test(addr)) return true;
   if (/^192\.168\./.test(addr)) return true;
 
-  // Tailscale CGNAT range (100.64.0.0/10)
   const parts = addr.split(".").map(Number);
   if (parts.length === 4 && parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127) return true;
 
-  // Custom IP allowlist (comma-separated IPs or CIDR ranges)
   const custom = process.env.CROW_ALLOWED_IPS;
   if (custom) {
     for (const entry of custom.split(",").map((s) => s.trim()).filter(Boolean)) {
       if (entry.includes("/")) {
-        // CIDR check
         const [net, bits] = entry.split("/");
         const netParts = net.split(".").map(Number);
         const mask = ~((1 << (32 - Number(bits))) - 1) >>> 0;
@@ -328,6 +317,41 @@ export function isAllowedNetwork(req) {
   }
 
   return false;
+}
+
+/**
+ * Decide whether a request is allowed to reach private routes (/dashboard,
+ * MCP endpoints, etc.).
+ *
+ * INVARIANT: private routes MUST NEVER be reachable via Tailscale Funnel.
+ * req.ip is 127.0.0.1 for BOTH Funnel and Serve (tailscaled proxies via
+ * localhost either way), so we distinguish via headers that tailscaled
+ * strips-then-re-sets based on authenticated origin. Verified against
+ * tailscale/ipn/ipnlocal/serve.go:1046-1072 — Header.Del is called
+ * unconditionally on Tailscale-User-Login, Tailscale-Funnel-Request, etc.
+ * before re-setting, so public clients cannot forge either header.
+ */
+export function isAllowedNetwork(req) {
+  if (process.env.CROW_DASHBOARD_PUBLIC === "true") return true;
+
+  // Hard reject: tailscaled marks public Funnel traffic with this. Client
+  // forgeries are Del'd upstream before the Set at serve.go:1059.
+  if (req.headers["tailscale-funnel-request"]) return false;
+
+  // Serve (tailnet) traffic carries authenticated identity headers. Clients
+  // cannot forge them (same Del-then-Set upstream).
+  if (req.headers["tailscale-user-login"]) return true;
+
+  const addr = (req.ip || req.connection?.remoteAddress || "").replace(/^::ffff:/, "");
+
+  // No Tailscale headers: direct peer connection. Reject bare loopback —
+  // any local process (including a misconfigured reverse proxy) would land
+  // here, and we can't distinguish malicious from trusted. Operators who
+  // front Crow with Caddy/nginx on the same host must use CROW_ALLOWED_IPS
+  // or CROW_DASHBOARD_PUBLIC=true (with their own ACLs at the proxy).
+  if (addr === "127.0.0.1" || addr === "::1" || addr === "localhost") return false;
+
+  return isPrivateOrAllowlistedIp(addr);
 }
 
 /**
