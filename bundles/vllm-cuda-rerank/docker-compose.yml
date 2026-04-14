@@ -1,0 +1,33 @@
+services:
+  vllm-cuda-rerank:
+    image: ${VLLM_CUDA_IMAGE}
+    container_name: vllm-cuda-rerank
+    runtime: nvidia
+    env_file:
+      - ../.env.cuda
+    environment:
+      HF_HOME: /models
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      NVIDIA_VISIBLE_DEVICES: all
+    volumes:
+      - ${GRACKLE_HF_CACHE}:/models
+    ports:
+      - "${GRACKLE_TAILSCALE_IP}:9101:8000"
+    command:
+      - --model=Qwen/Qwen3-Reranker-0.6B
+      - --served-model-name=qwen3-reranker-0.6b
+      - --task=score
+      - --host=0.0.0.0
+      - --port=8000
+      - --dtype=bfloat16
+      - --gpu-memory-utilization=0.12
+      - --max-num-seqs=32
+    restart: unless-stopped
+    ipc: host
+    shm_size: 2g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/models', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s

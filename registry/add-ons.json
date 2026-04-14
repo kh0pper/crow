@@ -4354,6 +4354,96 @@
       },
       "env_vars": [],
       "notes": "Requires Crow Android app 1.4.0+. Gen 2 (Ray-Ban Meta) only \u2014 Gen 1 Ray-Ban Stories is not supported."
+    },
+    {
+      "id": "vllm-cuda-embed",
+      "name": "vLLM Embeddings (Qwen3-Embedding-0.6B)",
+      "version": "1.0.0",
+      "description": "Multilingual text embeddings (Qwen3-Embedding-0.6B, 1024-dim Matryoshka). Powers semantic search across memory, research notes, and blog. CUDA only.",
+      "type": "bundle",
+      "category": "ai",
+      "tags": ["ai", "embeddings", "semantic-search", "cuda", "vllm"],
+      "icon": "cpu",
+      "host": "49cf71ca878643ba7717f344329266fd",
+      "requires": {
+        "gpu": true,
+        "min_vram_gb": 2,
+        "platform": "linux-x86_64",
+        "gpu_arch": ["cuda"]
+      },
+      "env_vars": [],
+      "port": 9100,
+      "providers": [
+        {
+          "id": "grackle-embed",
+          "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+          "apiKey": "none",
+          "models": [
+            { "id": "qwen3-embedding-0.6b", "task": "embed", "dim": 1024, "matryoshkaDims": [1024, 768, 512, 256], "warm": true, "priority": "interactive" }
+          ]
+        }
+      ],
+      "notes": "Always-warm. Pairs with vllm-cuda-rerank. Steady-state ~1.6GB VRAM."
+    },
+    {
+      "id": "vllm-cuda-rerank",
+      "name": "vLLM Reranker (Qwen3-Reranker-0.6B)",
+      "version": "1.0.0",
+      "description": "Cross-encoder reranker for hybrid FTS+vector retrieval. Multilingual, instruction-aware. CUDA only.",
+      "type": "bundle",
+      "category": "ai",
+      "tags": ["ai", "reranker", "rag", "cuda", "vllm"],
+      "icon": "cpu",
+      "host": "49cf71ca878643ba7717f344329266fd",
+      "requires": {
+        "gpu": true,
+        "min_vram_gb": 2,
+        "platform": "linux-x86_64",
+        "gpu_arch": ["cuda"]
+      },
+      "env_vars": [],
+      "port": 9101,
+      "providers": [
+        {
+          "id": "grackle-rerank",
+          "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+          "apiKey": "none",
+          "models": [
+            { "id": "qwen3-reranker-0.6b", "task": "score", "warm": true, "priority": "interactive" }
+          ]
+        }
+      ],
+      "notes": "Always-warm. Use after embeddings retrieval to reorder top-K. Steady-state ~1.6GB VRAM."
+    },
+    {
+      "id": "vllm-cuda-vision",
+      "name": "vLLM Vision (Qwen3-VL-8B-Instruct-FP8)",
+      "version": "1.0.0",
+      "description": "Vision-language model: image understanding, OCR, structured output. FP8 on Blackwell. CUDA only, on-demand.",
+      "type": "bundle",
+      "category": "ai",
+      "tags": ["ai", "vision", "vlm", "ocr", "cuda", "vllm"],
+      "icon": "eye",
+      "host": "49cf71ca878643ba7717f344329266fd",
+      "requires": {
+        "gpu": true,
+        "min_vram_gb": 14,
+        "platform": "linux-x86_64",
+        "gpu_arch": ["cuda"]
+      },
+      "env_vars": [],
+      "port": 9102,
+      "providers": [
+        {
+          "id": "grackle-vision",
+          "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+          "apiKey": "none",
+          "models": [
+            { "id": "qwen3-vl-8b-instruct-fp8", "contextLen": 16384, "warm": false, "onDemand": true, "mutexGroup": "grackle-specialists", "priority": "interactive" }
+          ]
+        }
+      ],
+      "notes": "On-demand. Mutex with embed/rerank during burst (vision unloads them temporarily). ~11GB VRAM peak. Requires vLLM >=0.11.0 + Blackwell or newer for FP8 e4m3."
     }
   ]
 }

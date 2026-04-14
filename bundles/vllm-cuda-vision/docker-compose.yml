@@ -1,0 +1,34 @@
+services:
+  vllm-cuda-vision:
+    image: ${VLLM_CUDA_IMAGE}
+    container_name: vllm-cuda-vision
+    runtime: nvidia
+    env_file:
+      - ../.env.cuda
+    environment:
+      HF_HOME: /models
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      NVIDIA_VISIBLE_DEVICES: all
+    volumes:
+      - ${GRACKLE_HF_CACHE}:/models
+    ports:
+      - "${GRACKLE_TAILSCALE_IP}:9102:8000"
+    # Qwen3-VL-8B-Instruct-FP8 (Qwen-published FP8 checkpoint, w8a8 on Blackwell)
+    command:
+      - --model=Qwen/Qwen3-VL-8B-Instruct-FP8
+      - --served-model-name=qwen3-vl-8b-instruct-fp8
+      - --host=0.0.0.0
+      - --port=8000
+      - --quantization=fp8
+      - --max-model-len=16384
+      - --gpu-memory-utilization=0.80
+      - --max-num-seqs=4
+    restart: "no"
+    ipc: host
+    shm_size: 4g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/models', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
