@@ -18,6 +18,45 @@ import { join } from "path";
 import { homedir } from "os";
 import { execFileSync } from "child_process";
 
+/**
+ * Dual-write sync-safe Companion settings into dashboard_settings under
+ * keys matched by the SYNC_ALLOWLIST prefix "companion_*". This lets peer
+ * Crow instances mirror the operator's persona and profile choices without
+ * moving per-machine paths (EIKANYA_MODELS_DIR, etc.) across the sync boundary.
+ *
+ * Non-fatal: if db is unavailable or writeSetting is not importable (older
+ * gateway), the bundle's .env remains the source of truth.
+ */
+async function mirrorToDashboard(db, key, value) {
+  if (!db || !key) return;
+  // Try the shared helper first (gives us emitChange → peer broadcast for free).
+  // Fall back to raw SQL when the bundle is loaded from ~/.crow/bundles/ where
+  // the relative path to the gateway registry doesn't resolve.
+  const v = value == null ? "" : String(value);
+  try {
+    const mod = await import("crow/servers/gateway/dashboard/settings/registry.js")
+      .catch(() => import(`${process.cwd()}/servers/gateway/dashboard/settings/registry.js`))
+      .catch(() => null);
+    if (mod && typeof mod.writeSetting === "function") {
+      await mod.writeSetting(db, key, v, { scope: "global", allowLocalFallback: true });
+      return;
+    }
+  } catch {}
+  // Fallback: write the global row directly (no peer emit — peers will pick it
+  // up next time anything touches the row via the gateway's registry helpers).
+  try {
+    await db.execute({
+      sql: `DELETE FROM dashboard_settings WHERE key = ? AND instance_id IS NULL`,
+      args: [key],
+    });
+    await db.execute({
+      sql: `INSERT INTO dashboard_settings (key, value, updated_at, instance_id)
+            VALUES (?, ?, datetime('now'), NULL)`,
+      args: [key, v],
+    });
+  } catch {}
+}
+
 const BUNDLE_DIR = join(homedir(), ".crow", "bundles", "companion");
 
 /* ---------- .env helpers ---------- */
@@ -336,7 +375,7 @@ export default {
     return html;
   },
 
-  async handleAction({ req, res }) {
+  async handleAction({ req, res, db }) {
     const { action } = req.body;
 
     if (action === "update_companion_persona") {
@@ -351,6 +390,10 @@ export default {
       if (avatar) env.COMPANION_AVATAR = avatar;
       else delete env.COMPANION_AVATAR;
       writeBundleEnv(env);
+      // Mirror sync-safe fields (persona + character name) to dashboard_settings.
+      // Avatar path is per-machine, so it stays in bundle .env only.
+      await mirrorToDashboard(db, "companion_persona", persona);
+      await mirrorToDashboard(db, "companion_character_name", characterName);
       recreateCompanion();
       res.json({ ok: true });
       return true;
@@ -369,6 +412,9 @@ export default {
         delete env.COMPANION_AI_MODEL;
       }
       writeBundleEnv(env);
+      // Mirror: ai profile id + model name (both sync-safe; names not paths)
+      await mirrorToDashboard(db, "companion_ai_profile", env.COMPANION_AI_PROFILE || "");
+      await mirrorToDashboard(db, "companion_ai_model", env.COMPANION_AI_MODEL || "");
       recreateCompanion();
       res.json({ ok: true });
       return true;
@@ -400,6 +446,19 @@ export default {
         }
       }
       writeBundleEnv(env);
+      // Mirror household profile names + TTS profile ids (NOT voice paths) as sync-safe JSON
+      const householdSummary = [];
+      for (let i = 1; i <= 4; i++) {
+        const name = env[`COMPANION_PROFILE_${i}_NAME`];
+        if (!name) continue;
+        householdSummary.push({
+          slot: i,
+          name,
+          tts_profile_id: env[`COMPANION_PROFILE_${i}_TTS_PROFILE_ID`] || null,
+          tts_voice: env[`COMPANION_PROFILE_${i}_TTS_VOICE`] || null,
+        });
+      }
+      await mirrorToDashboard(db, "companion_household", JSON.stringify(householdSummary));
       recreateCompanion();
       res.json({ ok: true });
       return true;

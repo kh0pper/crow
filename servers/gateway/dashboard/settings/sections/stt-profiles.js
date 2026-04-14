@@ -12,6 +12,7 @@
 import { escapeHtml } from "../../shared/components.js";
 import { upsertSetting } from "../registry.js";
 import { PROVIDER_INFO } from "../../../ai/stt/index.js";
+import { renderScopeToggle, scopeToggleScript } from "../../shared/scope-toggle.js";
 
 export default {
   id: "stt-profiles",
@@ -42,7 +43,8 @@ export default {
       .map(([id, info]) => `<option value="${id}">${escapeHtml(info.name)}${info.supportsStreaming ? " (streaming)" : ""}</option>`)
       .join("");
 
-    let html = `<style>
+    const scopeToggle = await renderScopeToggle(db, "stt_profiles");
+    let html = scopeToggle + scopeToggleScript() + `<style>
       .sttp-card { border:1px solid var(--crow-border); border-radius:8px; padding:0.75rem 1rem; margin-bottom:0.5rem; background:var(--crow-surface); }
       .sttp-card.default { border-color:var(--crow-accent); }
       .sttp-card-name { font-weight:600; font-size:0.95rem; }

@@ -28,7 +28,7 @@ export default {
 
   async render({ db }) {
     const { rows } = await db.execute({
-      sql: `SELECT section_key, title, sort_order, device_id, project_id, protected, content
+      sql: `SELECT section_key, section_title, sort_order, device_id, project_id, content
             FROM crow_context ORDER BY sort_order, section_key`,
       args: [],
     });
@@ -38,20 +38,16 @@ export default {
 
     const fmtSection = (r) => {
       const scope = [];
-      if (r.device_id) scope.push(`device=${r.device_id.slice(0, 10)}…`);
+      if (r.device_id) scope.push(`device=${String(r.device_id).slice(0, 10)}…`);
       if (r.project_id) scope.push(`project=${r.project_id}`);
       const scopeStr = scope.length ? ` <span style="font-size:0.72rem;color:var(--crow-accent)">[${scope.join(" ")}]</span>` : "";
-      const protectedBadge = r.protected
-        ? `<span style="font-size:0.7rem;padding:2px 6px;background:var(--crow-bg-deep);color:var(--crow-text-muted);border-radius:3px">protected</span>`
-        : "";
       const contentPreview = (r.content || "").slice(0, 200).replace(/\n/g, " ");
       return `
         <div style="padding:12px;border:1px solid var(--crow-border);border-radius:4px;margin-bottom:8px">
           <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
             <div style="font-family:'JetBrains Mono',monospace;font-size:0.85rem">${escapeHtml(r.section_key)}${scopeStr}</div>
-            ${protectedBadge}
           </div>
-          <div style="font-weight:500;margin-bottom:4px">${escapeHtml(r.title || "")}</div>
+          <div style="font-weight:500;margin-bottom:4px">${escapeHtml(r.section_title || "")}</div>
           <div style="font-size:0.82rem;color:var(--crow-text-muted);line-height:1.4">${escapeHtml(contentPreview)}${(r.content || "").length > 200 ? "…" : ""}</div>
         </div>
       `;

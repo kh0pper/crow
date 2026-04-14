@@ -5,6 +5,7 @@
 import { escapeHtml } from "../../shared/components.js";
 import { t, tJs } from "../../shared/i18n.js";
 import { upsertSetting } from "../registry.js";
+import { renderScopeToggle, scopeToggleScript } from "../../shared/scope-toggle.js";
 
 export default {
   id: "ai-profiles",
@@ -24,7 +25,9 @@ export default {
     let aiProfiles = [];
     try { aiProfiles = JSON.parse(profilesResult.rows[0]?.value || "[]"); } catch {}
 
-    let html = `<style>
+    const scopeToggle = await renderScopeToggle(db, "ai_profiles", { lang });
+
+    let html = scopeToggle + scopeToggleScript() + `<style>
       .profile-card { border:1px solid var(--crow-border); border-radius:8px; padding:0.75rem 1rem; margin-bottom:0.5rem; background:var(--crow-surface); }
       .profile-card-header { display:flex; align-items:center; justify-content:space-between; gap:0.5rem; }
       .profile-card-name { font-weight:600; font-size:0.95rem; }

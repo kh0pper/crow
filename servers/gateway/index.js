@@ -588,6 +588,29 @@ try {
   setProviderSyncManager(syncManager);
 } catch {}
 
+// Scoped-settings sync: wire the registry's writeSetting to emitChange so
+// operator edits on one instance propagate to paired peers.
+try {
+  const { setSettingsSyncManager } = await import("./dashboard/settings/registry.js");
+  setSettingsSyncManager(syncManager);
+} catch {}
+
+// Bundle asset repair: when a bundle is marked installed but its ~/.crow/bundles/<id>/
+// directory is missing user-visible files (settings-section.js, panel/, manifest.json),
+// re-copy them from the app repo. Prevents the Companion migration gap from recurring.
+try {
+  const { repairInstalledBundleAssets } = await import("./routes/bundles.js");
+  const { repaired, errors } = repairInstalledBundleAssets();
+  if (repaired.length > 0) {
+    console.log(`[bundles] Repaired assets: ${repaired.join("; ")}`);
+  }
+  if (errors.length > 0) {
+    console.warn(`[bundles] Asset repair errors:`, errors);
+  }
+} catch (err) {
+  console.warn("[bundles] Asset repair failed:", err.message);
+}
+
 mountMcpServer(app, "/memory", () => createMemoryServer(undefined, { instructions, syncManager }), sessionManager, authMiddleware);
 const projectServerFactory = () => createProjectServer(undefined, { instructions });
 mountMcpServer(app, "/projects", projectServerFactory, sessionManager, authMiddleware);
@@ -753,6 +776,15 @@ try {
   console.log("Push API mounted at /api/push");
 } catch (err) {
   console.warn("[push] Failed to mount:", err.message);
+}
+
+// --- Mount Settings Scope API (global vs per-instance override) ---
+try {
+  const { default: settingsScopeRouter } = await import("./routes/settings-scope.js");
+  app.use(settingsScopeRouter(dashboardAuth));
+  console.log("Settings Scope API mounted at /api/settings/scope");
+} catch (err) {
+  console.warn("[settings-scope] Failed to mount:", err.message);
 }
 
 // --- Mount STT Debug endpoint (smoke test for STT profiles) ---
