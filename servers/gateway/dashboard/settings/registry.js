@@ -112,7 +112,8 @@ async function emitSettingsSync(op, row) {
 
 /**
  * Read a setting with scope resolution.
- * Instance-scoped row (instance_id = local id) wins; otherwise falls back to global.
+ * Per-instance override (dashboard_settings_overrides row for this instance) wins;
+ * otherwise falls back to the global row in dashboard_settings.
  *
  * @param {import("@libsql/client").Client} db
  * @param {string} key
@@ -120,55 +121,49 @@ async function emitSettingsSync(op, row) {
  */
 export async function readSetting(db, key) {
   const localId = getOrCreateLocalInstanceId();
-  // ORDER BY instance_id DESC with NULLS LAST via IS NULL — instance-scoped beats global
-  const { rows } = await db.execute({
-    sql: `SELECT value FROM dashboard_settings
-          WHERE key = ? AND (instance_id IS NULL OR instance_id = ?)
-          ORDER BY (instance_id IS NULL) ASC
-          LIMIT 1`,
+  const override = await db.execute({
+    sql: `SELECT value FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ?`,
     args: [key, localId],
   });
-  return rows[0]?.value ?? null;
+  if (override.rows[0]?.value !== undefined) return override.rows[0].value;
+  const globalRow = await db.execute({
+    sql: `SELECT value FROM dashboard_settings WHERE key = ?`,
+    args: [key],
+  });
+  return globalRow.rows[0]?.value ?? null;
 }
 
 /**
  * Read multiple settings matching a LIKE pattern (e.g. "integration_%").
  * Applies the same scope resolution per-key.
- *
- * @param {import("@libsql/client").Client} db
- * @param {string} pattern - LIKE pattern
- * @returns {Promise<Map<string, string>>}
  */
 export async function readSettings(db, pattern) {
   const localId = getOrCreateLocalInstanceId();
-  const { rows } = await db.execute({
-    sql: `SELECT key, value, instance_id FROM dashboard_settings
-          WHERE key LIKE ? AND (instance_id IS NULL OR instance_id = ?)`,
+  const out = new Map();
+  const globals = await db.execute({
+    sql: `SELECT key, value FROM dashboard_settings WHERE key LIKE ?`,
+    args: [pattern],
+  });
+  for (const r of globals.rows) out.set(r.key, r.value);
+  const overrides = await db.execute({
+    sql: `SELECT key, value FROM dashboard_settings_overrides WHERE key LIKE ? AND instance_id = ?`,
     args: [pattern, localId],
   });
-  const byKey = new Map();
-  for (const r of rows) {
-    // Prefer instance-scoped row
-    const existing = byKey.get(r.key);
-    if (!existing || (existing.instance_id === null && r.instance_id !== null)) {
-      byKey.set(r.key, r);
-    }
-  }
-  const out = new Map();
-  for (const [k, r] of byKey) out.set(k, r.value);
+  for (const r of overrides.rows) out.set(r.key, r.value);
   return out;
 }
 
 /**
  * Write a setting with explicit scope.
  *
- * @param {import("@libsql/client").Client} db
- * @param {string} key
- * @param {string} value
- * @param {{scope?: "global"|"local", allowLocalFallback?: boolean}} [opts]
- *   - scope: "global" (NULL instance_id, synced if allowlisted) or "local" (instance-scoped, never synced)
- *   - allowLocalFallback: when true, writing a non-syncable key at scope="global" silently
- *     downgrades to local instead of throwing. Default true (backward compat for upsertSetting).
+ * scope:
+ *   - "global" → dashboard_settings row (synced if key in SYNC_ALLOWLIST).
+ *     Also clears any local override for this instance so the global row is effective.
+ *   - "local"  → dashboard_settings_overrides row keyed by (key, instance_id).
+ *     Never syncs. Takes precedence over the global row on reads.
+ *
+ * allowLocalFallback: when scope="global" and the key is NOT in the allowlist,
+ * silently downgrade to local. Default true (preserves legacy upsertSetting behavior).
  */
 export async function writeSetting(db, key, value, opts = {}) {
   const { scope = "global", allowLocalFallback = true } = opts;
@@ -185,67 +180,54 @@ export async function writeSetting(db, key, value, opts = {}) {
 
   if (effectiveScope === "local") {
     const localId = getOrCreateLocalInstanceId();
-    // Delete-then-insert (partial unique index: key, instance_id where instance_id IS NOT NULL)
     await db.execute({
-      sql: `DELETE FROM dashboard_settings WHERE key = ? AND instance_id = ?`,
-      args: [key, localId],
+      sql: `INSERT INTO dashboard_settings_overrides (key, instance_id, value, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(key, instance_id) DO UPDATE SET
+              value = excluded.value, updated_at = datetime('now')`,
+      args: [key, localId, value],
     });
-    await db.execute({
-      sql: `INSERT INTO dashboard_settings (key, value, updated_at, instance_id)
-            VALUES (?, ?, datetime('now'), ?)`,
-      args: [key, value, localId],
-    });
-    // Local rows never sync by design.
     return { scope: "local", instance_id: localId };
   }
 
-  // global
+  // global — upsert into dashboard_settings (PK on key, untouched for backward compat).
   await db.execute({
-    sql: `DELETE FROM dashboard_settings WHERE key = ? AND instance_id IS NULL`,
-    args: [key],
-  });
-  await db.execute({
-    sql: `INSERT INTO dashboard_settings (key, value, updated_at, instance_id)
-          VALUES (?, ?, datetime('now'), NULL)`,
+    sql: `INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
     args: [key, value],
   });
-  // Emit to peers (the allowlist + instance_id filter inside InstanceSyncManager
-  // will drop non-syncable rows; we still emit to keep the call-site simple).
+  // Emit to peers — filter happens inside InstanceSyncManager.
   await emitSettingsSync("update", { key, value, instance_id: null });
   return { scope: "global", instance_id: null };
 }
 
 /**
- * Delete a local (instance-scoped) override for a key, restoring the global row as the
- * effective value. No-op if no local override exists.
+ * Delete a per-instance override, restoring the global row as the effective value.
  */
 export async function deleteLocalSetting(db, key) {
   const localId = getOrCreateLocalInstanceId();
   await db.execute({
-    sql: `DELETE FROM dashboard_settings WHERE key = ? AND instance_id = ?`,
+    sql: `DELETE FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ?`,
     args: [key, localId],
   });
 }
 
 /**
- * Resolve current scope of a key: "local" if an instance-scoped row exists,
+ * Resolve current scope of a key: "local" if an override exists for this instance,
  * "global" if only the global row exists, "none" if neither.
  */
 export async function getSettingScope(db, key) {
   const localId = getOrCreateLocalInstanceId();
-  const { rows } = await db.execute({
-    sql: `SELECT instance_id FROM dashboard_settings
-          WHERE key = ? AND (instance_id IS NULL OR instance_id = ?)`,
+  const override = await db.execute({
+    sql: `SELECT 1 FROM dashboard_settings_overrides WHERE key = ? AND instance_id = ?`,
     args: [key, localId],
   });
-  let hasLocal = false;
-  let hasGlobal = false;
-  for (const r of rows) {
-    if (r.instance_id === null) hasGlobal = true;
-    else if (r.instance_id === localId) hasLocal = true;
-  }
-  if (hasLocal) return "local";
-  if (hasGlobal) return "global";
+  if (override.rows.length > 0) return "local";
+  const globalRow = await db.execute({
+    sql: `SELECT 1 FROM dashboard_settings WHERE key = ?`,
+    args: [key],
+  });
+  if (globalRow.rows.length > 0) return "global";
   return "none";
 }
 

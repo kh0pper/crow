@@ -967,57 +967,58 @@ await addColumnIfMissing("messages", "lamport_ts", "INTEGER DEFAULT 0");
 await addColumnIfMissing("relay_config", "lamport_ts", "INTEGER DEFAULT 0");
 await addColumnIfMissing("crow_instances", "lamport_ts", "INTEGER DEFAULT 0");
 
-// --- Scoped Settings: instance_id + lamport_ts on dashboard_settings ---
-// Enables per-instance overrides while allowing the global (NULL instance_id) row
-// to replicate across paired Crow peers via the sync allowlist.
+// --- Scoped Settings: lamport_ts on dashboard_settings + dashboard_settings_overrides ---
+// Rather than recreate dashboard_settings with a composite PK (which breaks
+// every existing `ON CONFLICT(key)` upsert in first- and third-party bundle code),
+// we keep dashboard_settings as PK(key) and store per-instance overrides in a
+// sibling table. readSetting/writeSetting in registry.js merge the two.
 
-await addColumnIfMissing("dashboard_settings", "instance_id", "TEXT DEFAULT NULL");
 await addColumnIfMissing("dashboard_settings", "lamport_ts", "INTEGER DEFAULT 0");
 
-// Recreate dashboard_settings so PRIMARY KEY allows (key, instance_id) pairs.
-// Existing installs have PK(key) only, which blocks per-instance override rows.
+await initTable("dashboard_settings_overrides table", `
+  CREATE TABLE IF NOT EXISTS dashboard_settings_overrides (
+    key TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now')),
+    lamport_ts INTEGER DEFAULT 0,
+    PRIMARY KEY (key, instance_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_dashboard_overrides_key ON dashboard_settings_overrides(key);
+`);
+
+// If a previous botched migration recreated dashboard_settings without PK(key),
+// restore it. Detect by checking pragma + absence of the overrides table data
+// (already populated means we already did it).
 try {
   const { rows: cols } = await db.execute("PRAGMA table_info(dashboard_settings)");
   const keyCol = cols.find(c => c.name === "key");
-  // If 'key' is flagged as PK (pk=1) and there are no composite partial indexes yet, recreate
-  const { rows: existing } = await db.execute(
-    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='dashboard_settings' AND name='idx_dashboard_settings_instance'"
-  );
-  if (keyCol && keyCol.pk === 1 && existing.length === 0) {
+  if (keyCol && keyCol.pk === 0) {
+    // Previous broken shape — drop extra columns and restore PK(key)
     await db.executeMultiple(`
-      CREATE TABLE IF NOT EXISTS dashboard_settings_new (
-        key TEXT NOT NULL,
+      CREATE TABLE IF NOT EXISTS dashboard_settings_restore (
+        key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
         updated_at TEXT DEFAULT (datetime('now')),
-        instance_id TEXT DEFAULT NULL,
         lamport_ts INTEGER DEFAULT 0
       );
-      INSERT OR IGNORE INTO dashboard_settings_new (key, value, updated_at, instance_id, lamport_ts)
-        SELECT key, value, updated_at, instance_id, lamport_ts FROM dashboard_settings;
+      INSERT OR IGNORE INTO dashboard_settings_restore (key, value, updated_at, lamport_ts)
+        SELECT key, value, updated_at, COALESCE(lamport_ts, 0) FROM dashboard_settings
+        WHERE instance_id IS NULL;
+      -- Move per-instance rows into the overrides table
+      INSERT OR IGNORE INTO dashboard_settings_overrides (key, instance_id, value, updated_at, lamport_ts)
+        SELECT key, instance_id, value, updated_at, COALESCE(lamport_ts, 0) FROM dashboard_settings
+        WHERE instance_id IS NOT NULL;
+      DROP INDEX IF EXISTS idx_dashboard_settings_global;
+      DROP INDEX IF EXISTS idx_dashboard_settings_instance;
       DROP TABLE dashboard_settings;
-      ALTER TABLE dashboard_settings_new RENAME TO dashboard_settings;
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboard_settings_global
-        ON dashboard_settings(key) WHERE instance_id IS NULL;
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboard_settings_instance
-        ON dashboard_settings(key, instance_id) WHERE instance_id IS NOT NULL;
+      ALTER TABLE dashboard_settings_restore RENAME TO dashboard_settings;
     `);
-    console.log("  Migrated dashboard_settings: composite PK via partial indexes (key + instance_id)");
+    console.log("  Restored dashboard_settings PK(key); moved per-instance rows to dashboard_settings_overrides");
   }
 } catch (err) {
-  console.warn("  dashboard_settings migration note:", err.message);
+  console.warn("  dashboard_settings restore note:", err.message);
 }
-
-// Ensure partial indexes exist on fresh installs too
-try {
-  await db.execute(`
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboard_settings_global
-      ON dashboard_settings(key) WHERE instance_id IS NULL
-  `);
-  await db.execute(`
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_dashboard_settings_instance
-      ON dashboard_settings(key, instance_id) WHERE instance_id IS NOT NULL
-  `);
-} catch {}
 
 // --- Contacts panel: new columns for profiles, manual contacts ---
 await addColumnIfMissing("contacts", "avatar_url", "TEXT");

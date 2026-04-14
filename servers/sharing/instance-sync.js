@@ -57,9 +57,9 @@ const EXCLUDED_COLUMNS = {
  */
 function shouldSyncRow(table, row) {
   if (table !== "dashboard_settings") return true;
-  if (!row) return false;
-  if (row.instance_id !== null && row.instance_id !== undefined) return false;
-  if (!row.key) return false;
+  if (!row || !row.key) return false;
+  // dashboard_settings holds only the global scope; per-instance overrides live
+  // in dashboard_settings_overrides (never synced). Allowlist gates the key.
   return isSyncable(row.key);
 }
 
@@ -243,8 +243,7 @@ export class InstanceSyncManager {
       try {
         if (table === "dashboard_settings" && row.key !== undefined) {
           await this.db.execute({
-            sql: `UPDATE dashboard_settings SET lamport_ts = ?
-                  WHERE key = ? AND instance_id IS NULL`,
+            sql: `UPDATE dashboard_settings SET lamport_ts = ? WHERE key = ?`,
             args: [lamportTs, row.key],
           });
         } else if (row.id !== undefined) {
@@ -356,38 +355,34 @@ export class InstanceSyncManager {
   }
 
   /**
-   * Apply a dashboard_settings mutation. Keyed by (key, instance_id IS NULL)
-   * (only global rows are synced). Last-write-wins by lamport_ts.
+   * Apply a dashboard_settings mutation. Only the global row is synced;
+   * per-instance overrides live in dashboard_settings_overrides.
+   * Last-write-wins by lamport_ts.
    */
   async _applyDashboardSetting(op, row, lamportTs) {
     if (!row || !row.key) return;
 
-    // Check current global row (if any) for LWW
     const { rows: existing } = await this.db.execute({
-      sql: `SELECT value, lamport_ts FROM dashboard_settings
-            WHERE key = ? AND instance_id IS NULL`,
+      sql: `SELECT value, lamport_ts FROM dashboard_settings WHERE key = ?`,
       args: [row.key],
     });
     const localTs = existing[0]?.lamport_ts || 0;
-    if (lamportTs < localTs) return; // older — ignore
-    if (lamportTs === localTs && existing[0]?.value === row.value) return; // same state
+    if (lamportTs < localTs) return;
+    if (lamportTs === localTs && existing[0]?.value === row.value) return;
 
     if (op === "delete") {
       await this.db.execute({
-        sql: `DELETE FROM dashboard_settings WHERE key = ? AND instance_id IS NULL`,
+        sql: `DELETE FROM dashboard_settings WHERE key = ?`,
         args: [row.key],
       });
       return;
     }
 
-    // Upsert global row
     await this.db.execute({
-      sql: `DELETE FROM dashboard_settings WHERE key = ? AND instance_id IS NULL`,
-      args: [row.key],
-    });
-    await this.db.execute({
-      sql: `INSERT INTO dashboard_settings (key, value, updated_at, instance_id, lamport_ts)
-            VALUES (?, ?, datetime('now'), NULL, ?)`,
+      sql: `INSERT INTO dashboard_settings (key, value, updated_at, lamport_ts)
+            VALUES (?, ?, datetime('now'), ?)
+            ON CONFLICT(key) DO UPDATE SET
+              value = excluded.value, updated_at = datetime('now'), lamport_ts = excluded.lamport_ts`,
       args: [row.key, row.value ?? "", lamportTs],
     });
   }
