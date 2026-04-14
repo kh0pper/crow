@@ -1,0 +1,34 @@
+{
+  "id": "llamacpp-vulkan-qwen3-coder",
+  "type": "bundle",
+  "name": "llama.cpp Qwen3-Coder-30B-A3B (Vulkan AMDVLK)",
+  "category": "ai",
+  "description": "On-demand code specialist — Qwen3-Coder-30B-A3B Q8_0 MoE via llama.cpp. Uses Vulkan AMDVLK backend on Strix Halo gfx1151 (stable MoE path per research). Shares :8003 mutex group with llamacpp-vulkan-glm-45-air.",
+  "host": "local",
+  "requires": {
+    "gpu": true,
+    "min_vram_gb": 40,
+    "platform": "linux-x86_64",
+    "gpu_arch": ["rocm"]
+  },
+  "env_vars": [],
+  "port": 8003,
+  "providers": [
+    {
+      "id": "crow-swap-coder",
+      "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+      "apiKey": "none",
+      "description": "Code specialist (Qwen3-Coder-30B-A3B Q8_0 MoE, on-demand)",
+      "models": [
+        {
+          "id": "qwen3-coder-30b-a3b",
+          "contextLen": 32768,
+          "warm": false,
+          "onDemand": true,
+          "mutexGroup": "8003-swap",
+          "priority": "interactive"
+        }
+      ]
+    }
+  ]
+}

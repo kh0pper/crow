@@ -581,6 +581,13 @@ createSharingServer(undefined, { instructions });
 // Get the sync manager so memory server can emit change entries
 const syncManager = getInstanceSyncManager();
 
+// Phase 5-polish: attach syncManager to providers-db so upsert/disable push
+// to paired peers via emitChange (pull-side already covered by SYNCED_TABLES).
+try {
+  const { setProviderSyncManager } = await import("../orchestrator/providers-db.js");
+  setProviderSyncManager(syncManager);
+} catch {}
+
 mountMcpServer(app, "/memory", () => createMemoryServer(undefined, { instructions, syncManager }), sessionManager, authMiddleware);
 const projectServerFactory = () => createProjectServer(undefined, { instructions });
 mountMcpServer(app, "/projects", projectServerFactory, sessionManager, authMiddleware);

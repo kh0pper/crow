@@ -1,0 +1,39 @@
+services:
+  llamacpp-vulkan-qwen3-coder:
+    image: kyuz0/amd-strix-halo-toolboxes:rocm-7.2.1
+    container_name: llamacpp-vulkan-qwen3-coder
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "${VIDEO_GID}"
+      - "${RENDER_GID}"
+    env_file:
+      - ../.env.rocm
+    volumes:
+      - /home/kh0pp/llm/hf-cache:/models
+    ports:
+      - "${CROW_TAILSCALE_IP}:8003:8000"
+    entrypoint: ["llama-server"]
+    command:
+      - --hf-repo
+      - unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF
+      - --hf-file
+      - Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf
+      - --alias
+      - qwen3-coder-30b-a3b
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - -ngl
+      - "999"
+      - -fa
+      - "on"
+      - --no-mmap
+      - -c
+      - "32768"
+      - --jinja
+    restart: "no"
+    ipc: host
+    shm_size: 16g

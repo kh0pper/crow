@@ -1,0 +1,39 @@
+services:
+  llamacpp-vulkan-glm-45-air:
+    image: kyuz0/amd-strix-halo-toolboxes:rocm-7.2.1
+    container_name: llamacpp-vulkan-glm-45-air
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "${VIDEO_GID}"
+      - "${RENDER_GID}"
+    env_file:
+      - ../.env.rocm
+    volumes:
+      - /home/kh0pp/llm/hf-cache:/models
+    ports:
+      - "${CROW_TAILSCALE_IP}:8003:8000"
+    entrypoint: ["llama-server"]
+    command:
+      - --hf-repo
+      - unsloth/GLM-4.5-Air-GGUF
+      - --hf-file
+      - Q5_K_M/GLM-4.5-Air-Q5_K_M-00001-of-00002.gguf
+      - --alias
+      - glm-4.5-air
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - -ngl
+      - "999"
+      - -fa
+      - "on"
+      - --no-mmap
+      - -c
+      - "16384"
+      - --jinja
+    restart: "no"
+    ipc: host
+    shm_size: 16g
