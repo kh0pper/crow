@@ -432,11 +432,25 @@ export default function dashboardRouter(mcpAuthMiddleware) {
 
   // --- Protected routes ---
 
+  // Instantiate bundles router once so the cross-host bypass and the normal
+  // dashboard-auth mount both dispatch to the same routes.
+  const bundlesRouter = bundlesRouterFactory();
+
+  // Cross-host bypass: signed peer-to-peer calls go straight to bundlesRouter,
+  // skipping dashboardAuth. Authentication is handled by bundlesRouter's own
+  // HMAC middleware (servers/gateway/routes/bundles.js crossHostVerifyMiddleware).
+  router.use("/dashboard", (req, res, next) => {
+    if (req.headers["x-crow-signature"]) {
+      return bundlesRouter(req, res, next);
+    }
+    return next();
+  });
+
   // Auth middleware for all other dashboard routes
   router.use("/dashboard", dashboardAuth);
 
-  // Mount bundles API (protected by dashboard auth above)
-  router.use("/dashboard", bundlesRouterFactory());
+  // Normal mount (session-cookie-authenticated path)
+  router.use("/dashboard", bundlesRouter);
 
   // Dashboard home — redirect to first visible panel
   router.get("/dashboard", (req, res) => {

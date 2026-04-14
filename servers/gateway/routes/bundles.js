@@ -167,17 +167,21 @@ function crossHostVerifyMiddleware(dbClient) {
 
     req.crossHostAuth = result;
 
+    // Audit the validation attempt regardless of outcome. Handler path may
+    // still fail (e.g. bundle missing) but the HMAC-validity fact is what
+    // matters for the security log.
+    await auditCrossHostCall(dbClient, {
+      sourceInstanceId: source,
+      direction: "inbound",
+      action: `bundle.${(req.path.split("/").pop() || "")}`,
+      bundleId: req.body?.bundle_id,
+      hmacValid: result.valid,
+      timestampSkewMs: result.timestampSkewMs,
+      nonce: result.nonce,
+      error: result.valid ? null : result.reason,
+    });
+
     if (!result.valid) {
-      await auditCrossHostCall(dbClient, {
-        sourceInstanceId: source,
-        direction: "inbound",
-        action: `bundle.${(req.path.split("/").pop() || "")}`,
-        bundleId: req.body?.bundle_id,
-        hmacValid: false,
-        timestampSkewMs: result.timestampSkewMs,
-        nonce: result.nonce,
-        error: result.reason,
-      });
       return res.status(401).json({ error: result.reason });
     }
 
@@ -1441,18 +1445,6 @@ export default function bundlesRouter() {
         await runCompose(["stop"], { cwd: bundleDir });
       } else {
         return res.status(400).json({ error: `unsupported action: ${action}` });
-      }
-      if (req.crossHostAuth?.valid) {
-        await auditCrossHostCall(dbForXhost, {
-          sourceInstanceId: req.crossHostAuth.sourceInstanceId,
-          direction: "inbound",
-          action: `bundle.${action}`,
-          bundleId,
-          hmacValid: true,
-          timestampSkewMs: req.crossHostAuth.timestampSkewMs,
-          nonce: req.crossHostAuth.nonce,
-          httpStatus: 200,
-        });
       }
       return res.json({ ok: true, message: `Bundle '${bundleId}' ${action}ped` });
     } catch (err) {
