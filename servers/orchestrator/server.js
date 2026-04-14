@@ -38,6 +38,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function loadModelsConfig() {
   const searchPaths = [
+    resolve(__dirname, "../../models.json"),
     resolve(__dirname, "../../bundles/crowclaw/config/agents/main/models.json"),
     resolve(__dirname, "../../config/models.json"),
   ];

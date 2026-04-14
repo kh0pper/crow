@@ -767,6 +767,15 @@ app.get("/api/health", dashboardAuth, async (req, res) => {
   });
 });
 
+// --- Provider health matrix (orchestrator registry liveness) ---
+try {
+  const { providersHealthHandler } = await import("../orchestrator/providers.js");
+  app.get("/api/providers/health", dashboardAuth, providersHealthHandler);
+  console.log("Provider health matrix mounted at /api/providers/health");
+} catch (err) {
+  console.warn("[providers] Failed to mount health matrix:", err.message);
+}
+
 // --- Mount Crow's Nest (conditional) ---
 try {
   const { default: dashboardRouter } = await import("./dashboard/index.js");
