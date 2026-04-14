@@ -12,12 +12,13 @@ const sections = new Map();
 
 /** Group definitions with order and i18n label keys */
 export const GROUPS = {
-  general:     { order: 10, labelKey: "settings.group.general" },
-  ai:          { order: 20, labelKey: "settings.group.ai" },
-  connections: { order: 30, labelKey: "settings.group.connections" },
-  content:     { order: 40, labelKey: "settings.group.content" },
-  system:      { order: 50, labelKey: "settings.group.system" },
-  account:     { order: 60, labelKey: "settings.group.account" },
+  general:       { order: 10, labelKey: "settings.group.general" },
+  ai:            { order: 20, labelKey: "settings.group.ai" },
+  connections:   { order: 30, labelKey: "settings.group.connections" },
+  content:       { order: 40, labelKey: "settings.group.content" },
+  multiInstance: { order: 45, labelKey: "settings.group.multiInstance" },
+  system:        { order: 50, labelKey: "settings.group.system" },
+  account:       { order: 60, labelKey: "settings.group.account" },
 };
 
 /**

@@ -612,6 +612,7 @@ const translations = {
   "settings.group.ai": { en: "AI & Models", es: "IA y Modelos" },
   "settings.group.connections": { en: "Connections", es: "Conexiones" },
   "settings.group.content": { en: "Content", es: "Contenido" },
+  "settings.group.multiInstance": { en: "Multi-Instance", es: "Multi-instancia" },
   "settings.group.system": { en: "System", es: "Sistema" },
   "settings.group.account": { en: "Account", es: "Cuenta" },
 
@@ -631,6 +632,12 @@ const translations = {
   "settings.section.identity": { en: "Identity", es: "Identidad" },
   "settings.section.password": { en: "Change Password", es: "Cambiar contraseña" },
   "settings.section.navGroups": { en: "Navigation", es: "Navegación" },
+  // Multi-Instance group
+  "settings.section.providers": { en: "LLM Providers", es: "Proveedores LLM" },
+  "settings.section.pairedInstances": { en: "Paired Instances", es: "Instancias emparejadas" },
+  "settings.section.syncProfiles": { en: "Sync Profiles", es: "Perfiles de sincronización" },
+  "settings.section.auditLog": { en: "Cross-Host Audit", es: "Auditoría entre hosts" },
+  "settings.section.sharedContext": { en: "Shared Context (crow.md)", es: "Contexto compartido (crow.md)" },
   "settings.section.tts": { en: "Text-to-Speech", es: "Texto a voz" },
   "settings.section.ttsProfiles": { en: "Text-to-Speech", es: "Texto a voz" },
   "settings.section.sttProfiles": { en: "Speech-to-Text", es: "Voz a texto" },
