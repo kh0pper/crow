@@ -384,7 +384,15 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
 
 export default function metaGlassesRouter(dashboardAuth) {
   const router = Router();
-  router.use("/api/meta-glasses", dashboardAuth);
+  // The Android app uploads captured photos via POST /api/meta-glasses/photo
+  // with an `Authorization: Bearer <device-token>` header and no session
+  // cookie. The route handler verifies the bearer token itself, so skip
+  // dashboardAuth for that one endpoint; without this skip the request hits
+  // the login page before it can reach the handler.
+  router.use("/api/meta-glasses", (req, res, next) => {
+    if (req.method === "POST" && req.path === "/photo") return next();
+    return dashboardAuth(req, res, next);
+  });
 
   router.get("/api/meta-glasses/devices", async (req, res) => {
     const { createDbClient } = await loadDb();
