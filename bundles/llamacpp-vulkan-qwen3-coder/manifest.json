@@ -26,6 +26,7 @@
           "warm": false,
           "onDemand": true,
           "mutexGroup": "8003-swap",
+          "conflictsWith": ["crow-chat"],
           "priority": "interactive"
         }
       ]
