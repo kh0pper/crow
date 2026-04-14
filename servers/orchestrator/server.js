@@ -29,6 +29,8 @@ import { presets } from "./presets.js";
 import { pipelines } from "./pipelines.js";
 import { startPipelineRunner } from "./pipeline-runner.js";
 import { createDbClient } from "../db.js";
+import { ensureModelWarm, releaseModel, getLifecycleSnapshot, resetAllRefcounts } from "./lifecycle.js";
+import { attachEventLogger, logEvent } from "./events.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -221,6 +223,13 @@ export function createOrchestratorServer(dbPath, options = {}) {
   const modelsConfig = loadModelsConfig();
   const connectedServers = options.connectedServers || null;
 
+  // Phase 5-full: attach the event logger so lifecycle + dispatch events
+  // persist to orchestrator_events. No-op if no DB is available.
+  try {
+    const db = createDbClient(dbPath);
+    attachEventLogger(db);
+  } catch {}
+
   // Resolve default provider/model once at startup
   let defaults;
   try {
@@ -288,6 +297,36 @@ export function createOrchestratorServer(dbPath, options = {}) {
   async function runOrchestration(jobId, goal, preset, providerConfig) {
     const job = jobs.get(jobId);
     if (!job) return;
+
+    // Phase 5-full: ensure all providers the preset agents need are warm.
+    // Collect unique provider IDs from preset + per-agent overrides.
+    const requiredProviders = new Set();
+    if (preset.provider) requiredProviders.add(preset.provider);
+    for (const a of preset.agents || []) {
+      if (a.provider) requiredProviders.add(a.provider);
+    }
+    const warmed = [];
+    for (const providerId of requiredProviders) {
+      const r = await ensureModelWarm(providerId);
+      await logEvent({
+        run_id: jobId,
+        event_type: r.ok ? "dispatch.provider_ready" : "dispatch.provider_failed",
+        provider_id: providerId,
+        preset: preset.name || null,
+        data: r.ok ? null : { reason: r.reason },
+      });
+      if (r.ok) warmed.push(providerId);
+      else {
+        // A required provider failed to warm — abort this run cleanly
+        for (const w of warmed) await releaseModel(w);
+        const err = `required provider "${providerId}" unavailable: ${r.reason}`;
+        job.status = "failed"; job.error = err;
+        await logEvent({ run_id: jobId, event_type: "dispatch.aborted", preset: preset.name || null, data: { error: err } });
+        return;
+      }
+    }
+
+    await logEvent({ run_id: jobId, event_type: "dispatch.run_start", preset: preset.name || null, data: { goal: String(goal).slice(0, 200) } });
 
     try {
       const categories = preset.categories || ["memory", "projects"];
@@ -373,10 +412,27 @@ export function createOrchestratorServer(dbPath, options = {}) {
       job.result = fullResult;
 
       await orchestrator.shutdown();
+      await logEvent({
+        run_id: jobId,
+        event_type: "dispatch.run_complete",
+        preset: preset.name || null,
+        data: { tokens_in: result.totalTokenUsage.input_tokens, tokens_out: result.totalTokenUsage.output_tokens },
+      });
     } catch (err) {
       job.status = "failed";
       job.error = err.message || String(err);
       console.error(`[orchestrator] Job ${jobId} failed:`, err.message);
+      await logEvent({
+        run_id: jobId,
+        event_type: "dispatch.run_error",
+        preset: preset.name || null,
+        data: { error: String(err.message || err).slice(0, 500) },
+      });
+    } finally {
+      // Release every provider we warmed up for this run.
+      for (const providerId of requiredProviders) {
+        await releaseModel(providerId).catch(() => {});
+      }
     }
   }
 
@@ -662,6 +718,35 @@ export function createOrchestratorServer(dbPath, options = {}) {
       return {
         content: [{ type: "text", text: lines.join("\n\n") }],
       };
+    }
+  );
+
+  // --- crow_lifecycle_snapshot (Phase 5-full) ---
+  server.tool(
+    "crow_lifecycle_snapshot",
+    "Return the current orchestrator lifecycle snapshot (refcounts per provider, last released timestamps).",
+    {},
+    async () => {
+      const snap = getLifecycleSnapshot();
+      if (Object.keys(snap).length === 0) {
+        return { content: [{ type: "text", text: "No providers currently tracked." }] };
+      }
+      const lines = Object.entries(snap).map(([k, v]) => {
+        const age = v.lastReleasedAt ? ` (released ${Math.round((Date.now() - v.lastReleasedAt) / 1000)}s ago)` : "";
+        return `  ${k}: refs=${v.refs}${age}`;
+      });
+      return { content: [{ type: "text", text: "Lifecycle snapshot:\n" + lines.join("\n") }] };
+    }
+  );
+
+  // --- crow_reset_refcounts (operator kill switch) ---
+  server.tool(
+    "crow_reset_refcounts",
+    "Operator kill switch: clear all lifecycle refcounts and reconcile against live provider health. Use when refcount state drifts from reality.",
+    {},
+    async () => {
+      const r = await resetAllRefcounts();
+      return { content: [{ type: "text", text: `Refcounts reset. Reconciled ${r.reconciled} providers.` }] };
     }
   );
 

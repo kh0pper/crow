@@ -1135,6 +1135,26 @@ await initTable("blog_post_embeddings table (Phase 4)", `
   CREATE INDEX IF NOT EXISTS idx_blog_emb_model ON blog_post_embeddings(model);
 `);
 
+// --- Phase 5-full orchestrator events (observability timeline) ---
+await initTable("orchestrator_events table (Phase 5-full)", `
+  CREATE TABLE IF NOT EXISTS orchestrator_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT,
+    event_type TEXT NOT NULL,
+    provider_id TEXT,
+    bundle_id TEXT,
+    preset TEXT,
+    agent_name TEXT,
+    refs INTEGER,
+    data TEXT,
+    at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_orch_events_run ON orchestrator_events(run_id, at DESC);
+  CREATE INDEX IF NOT EXISTS idx_orch_events_type ON orchestrator_events(event_type, at DESC);
+  CREATE INDEX IF NOT EXISTS idx_orch_events_provider ON orchestrator_events(provider_id, at DESC);
+`);
+
 // Seed 7 protected default sections (safe to re-run)
 const seedSections = [
   {
