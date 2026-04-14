@@ -480,6 +480,18 @@ const crowMdHandler = async (req, res) => {
 import { instanceAuthMiddleware } from "./instance-registry.js";
 app.use(instanceAuthMiddleware(createDbClient()));
 
+// --- Instance enrollment (Phase 5-MVP peer pairing) ---
+// Off by default; set CROW_ENROLL_ENABLED=1 during the pairing ceremony.
+try {
+  const { instanceEnrollRouter } = await import("./routes/instance-enroll.js");
+  app.use(instanceEnrollRouter(createDbClient()));
+  if (process.env.CROW_ENROLL_ENABLED === "1") {
+    console.log("⚠ Instance enrollment ENABLED (POST /instance/enroll-request). Disable after pairing.");
+  }
+} catch (err) {
+  console.warn("[instance-enroll] Failed to mount:", err.message);
+}
+
 let authMiddleware = null;
 
 if (!noAuth) {
