@@ -16,10 +16,14 @@ services:
       - "${CROW_TAILSCALE_IP}:8003:8000"
     entrypoint: ["llama-server"]
     command:
-      - --hf-repo
-      - unsloth/GLM-4.5-Air-GGUF
-      - --hf-file
-      - Q5_K_M/GLM-4.5-Air-Q5_K_M-00001-of-00002.gguf
+      # Pre-download (~55GB across 2 shards; llama.cpp auto-loads shard 2):
+      #   mkdir -p /home/kh0pp/llm/hf-cache/glm-45-air/
+      #   for i in 1 2; do
+      #     curl -L -o /home/kh0pp/llm/hf-cache/glm-45-air/GLM-4.5-Air-Q5_K_M-0000${i}-of-00002.gguf \
+      #       "https://huggingface.co/unsloth/GLM-4.5-Air-GGUF/resolve/main/Q5_K_M/GLM-4.5-Air-Q5_K_M-0000${i}-of-00002.gguf"
+      #   done
+      - -m
+      - /models/glm-45-air/GLM-4.5-Air-Q5_K_M-00001-of-00002.gguf
       - --alias
       - glm-4.5-air
       - --host

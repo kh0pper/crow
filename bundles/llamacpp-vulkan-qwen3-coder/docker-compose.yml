@@ -16,10 +16,11 @@ services:
       - "${CROW_TAILSCALE_IP}:8003:8000"
     entrypoint: ["llama-server"]
     command:
-      - --hf-repo
-      - unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF
-      - --hf-file
-      - Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf
+      # Pre-downloaded to /home/kh0pp/llm/hf-cache/qwen3-coder-30b/ by:
+      #   curl -L -o /home/kh0pp/llm/hf-cache/qwen3-coder-30b/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf \
+      #        https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/resolve/main/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf
+      - -m
+      - /models/qwen3-coder-30b/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf
       - --alias
       - qwen3-coder-30b-a3b
       - --host
