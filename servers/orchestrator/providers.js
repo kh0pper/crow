@@ -10,9 +10,10 @@
  * /api/providers/health. The handler is meant to sit behind dashboard auth.
  */
 
-import { readFileSync } from "fs";
+import { readFileSync, existsSync, statSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
+import { createDbClient } from "../db.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -22,16 +23,74 @@ const SEARCH_PATHS = [
   resolve(__dirname, "../../config/models.json"),
 ];
 
+// -----------------------------------------------------------------------
+// Cache layer — providers are read many times per orchestration; cache DB
+// rows in-process and invalidate every 30s OR when upsertProvider is called.
+// -----------------------------------------------------------------------
+
+let _cache = null;
+let _cacheLoadedAt = 0;
+const CACHE_TTL_MS = 30_000;
+
 /**
- * Load models.json from the first path that exists.
- * @returns {{providers: Record<string, object>, $schemaVersion?: string}}
+ * Force cache invalidation (called by upsertProvider / disableProvider).
+ */
+export function invalidateProvidersCache() {
+  _cache = null;
+  _cacheLoadedAt = 0;
+}
+
+/**
+ * Load providers. Tries the DB first (Phase 5-full canonical source), then
+ * falls back to models.json. Returns the same shape the orchestrator has
+ * always expected: { providers, _source }.
+ *
+ * Sync mode: the orchestrator + providers-health.js + lifecycle.js all call
+ * this in hot paths that can't easily be async. We maintain a cached snapshot
+ * that's refreshed by an async warmer and return the cached copy here.
  */
 export function loadProviders() {
+  // Best-effort cache refresh if stale
+  if (_cache && Date.now() - _cacheLoadedAt < CACHE_TTL_MS) return _cache;
+  // Fire async refresh; return stale or fall back to models.json meanwhile
+  refreshCache().catch(() => {});
+  return _cache || loadFromModelsJson();
+}
+
+async function refreshCache() {
+  try {
+    const { loadProvidersFromDb } = await import("./providers-db.js");
+    const db = createDbClient();
+    const fromDb = await loadProvidersFromDb(db);
+    if (fromDb && Object.keys(fromDb.providers).length > 0) {
+      _cache = fromDb;
+      _cacheLoadedAt = Date.now();
+      return;
+    }
+  } catch {}
+  _cache = loadFromModelsJson();
+  _cacheLoadedAt = Date.now();
+}
+
+function loadFromModelsJson() {
   for (const p of SEARCH_PATHS) {
     try {
       const raw = readFileSync(p, "utf-8");
       const cfg = JSON.parse(raw);
-      return { ...cfg, _source: p };
+      // Strip JSON-schema meta keys
+      const providers = {};
+      for (const [k, v] of Object.entries(cfg.providers || {})) {
+        if (k.startsWith("$")) continue;
+        providers[k] = {
+          baseUrl: v.baseUrl,
+          apiKey: v.apiKey,
+          host: v.host,
+          bundleId: v.bundleId,
+          description: v.$description || v.description,
+          models: v.models || [],
+        };
+      }
+      return { providers, _source: p };
     } catch {
       // try next
     }

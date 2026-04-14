@@ -30,7 +30,12 @@ import { checkGpuArchCompatible } from "../gpu-arch.js";
 import { forwardBundleAction } from "../../shared/peer-forward.js";
 import { verifyRequest, auditCrossHostCall } from "../../shared/cross-host-auth.js";
 import { getPeerCreds } from "../../shared/peer-credentials.js";
-import { getOrCreateLocalInstanceId } from "../instance-registry.js";
+import { getOrCreateLocalInstanceId, getInstance } from "../instance-registry.js";
+import {
+  registerProviderFromManifest,
+  unregisterProvidersByBundle,
+} from "../../orchestrator/providers-db.js";
+import { invalidateProvidersCache } from "../../orchestrator/providers.js";
 
 // PR 0: Consent token configuration (server-validated, race-safe install consent)
 const CONSENT_TOKEN_TTL_SECONDS = 15 * 60; // 15 min — covers slow image pulls
@@ -1177,6 +1182,35 @@ export default function bundlesRouter() {
           notifDb?.close();
         }
 
+        // Phase 5-full: auto-register providers declared in manifest.providers[]
+        try {
+          const manifest = getManifest(addon.id);
+          if (manifest?.providers?.length) {
+            const providerDb = createDbClient();
+            let hostIp = "127.0.0.1";
+            if (manifest.host && manifest.host !== "local") {
+              try {
+                const peer = await getInstance(providerDb, manifest.host);
+                hostIp = peer?.tailscale_ip || peer?.gateway_url?.replace(/^https?:\/\//, "").replace(/:\d+$/, "").replace(/\/.*/, "") || hostIp;
+              } catch {}
+            }
+            const port = manifest.port || 0;
+            for (const pdef of manifest.providers) {
+              try {
+                const r = await registerProviderFromManifest({
+                  db: providerDb, manifest, providerDef: pdef, port, hostIp,
+                });
+                appendLog(job, `Registered provider: ${pdef.id} (${r.lamport_ts})`);
+              } catch (err) {
+                appendLog(job, `Provider register skipped for ${pdef.id}: ${err.message}`);
+              }
+            }
+            invalidateProvidersCache();
+          }
+        } catch (err) {
+          appendLog(job, `Provider auto-register skipped: ${err.message}`);
+        }
+
         finishJob(job, needsRestart ? "complete_restart" : "complete");
 
         // Auto-restart gateway if panels or MCP servers were added
@@ -1361,6 +1395,17 @@ export default function bundlesRouter() {
           });
         } catch {} finally {
           notifDb?.close();
+        }
+
+        // Phase 5-full: soft-disable providers registered by this bundle
+        try {
+          const r = await unregisterProvidersByBundle(createDbClient(), addonId);
+          if (r.disabled > 0) {
+            appendLog(job, `Disabled ${r.disabled} provider(s) registered by bundle`);
+            invalidateProvidersCache();
+          }
+        } catch (err) {
+          appendLog(job, `Provider unregister skipped: ${err.message}`);
         }
 
         finishJob(job, needsRestart ? "complete_restart" : "complete");

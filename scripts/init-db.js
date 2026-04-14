@@ -1135,6 +1135,28 @@ await initTable("blog_post_embeddings table (Phase 4)", `
   CREATE INDEX IF NOT EXISTS idx_blog_emb_model ON blog_post_embeddings(model);
 `);
 
+// --- Phase 5-full providers registry (operator-editable, instance-synced) ---
+await initTable("providers table (Phase 5-full)", `
+  CREATE TABLE IF NOT EXISTS providers (
+    id TEXT PRIMARY KEY,
+    base_url TEXT NOT NULL,
+    api_key TEXT,
+    host TEXT DEFAULT 'local',
+    bundle_id TEXT,
+    description TEXT,
+    models TEXT NOT NULL DEFAULT '[]',
+    disabled INTEGER DEFAULT 0,
+    lamport_ts INTEGER DEFAULT 0,
+    instance_id TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_providers_host ON providers(host);
+  CREATE INDEX IF NOT EXISTS idx_providers_bundle ON providers(bundle_id);
+  CREATE INDEX IF NOT EXISTS idx_providers_enabled ON providers(disabled);
+`);
+
 // --- Phase 5-full orchestrator events (observability timeline) ---
 await initTable("orchestrator_events table (Phase 5-full)", `
   CREATE TABLE IF NOT EXISTS orchestrator_events (
