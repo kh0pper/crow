@@ -1079,8 +1079,61 @@ if (hasVec) {
   `);
   console.log("  ✓ sqlite-vec available — semantic search enabled");
 } else {
-  console.log("  ℹ sqlite-vec not available — using FTS5 only (semantic search disabled)");
+  console.log("  ℹ sqlite-vec not available — using BLOB+JS fallback for semantic search");
 }
+
+// --- Phase 4 semantic memory tables (always created; BLOB fallback works without sqlite-vec) ---
+// Per-content-type embedding tables. `vec` is a Float32Array serialized as BLOB.
+// `model` + `dim` track the model that generated the vector so we can detect drift
+// on model swap and re-embed via backfill.
+
+await initTable("memory_embeddings_blob table (Phase 4)", `
+  CREATE TABLE IF NOT EXISTS memory_embeddings_blob (
+    memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    dim INTEGER NOT NULL,
+    vec BLOB NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_memory_emb_model ON memory_embeddings_blob(model);
+`);
+
+await initTable("source_embeddings table (Phase 4)", `
+  CREATE TABLE IF NOT EXISTS source_embeddings (
+    source_id INTEGER PRIMARY KEY REFERENCES research_sources(id) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    dim INTEGER NOT NULL,
+    vec BLOB NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_source_emb_model ON source_embeddings(model);
+`);
+
+await initTable("note_embeddings table (Phase 4)", `
+  CREATE TABLE IF NOT EXISTS note_embeddings (
+    note_id INTEGER PRIMARY KEY REFERENCES research_notes(id) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    dim INTEGER NOT NULL,
+    vec BLOB NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_note_emb_model ON note_embeddings(model);
+`);
+
+await initTable("blog_post_embeddings table (Phase 4)", `
+  CREATE TABLE IF NOT EXISTS blog_post_embeddings (
+    post_id INTEGER PRIMARY KEY REFERENCES blog_posts(id) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    dim INTEGER NOT NULL,
+    vec BLOB NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_blog_emb_model ON blog_post_embeddings(model);
+`);
 
 // Seed 7 protected default sections (safe to re-run)
 const seedSections = [
