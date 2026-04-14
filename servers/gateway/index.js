@@ -74,7 +74,9 @@ import { mountMcpServer } from "./routes/mcp.js";
 import { generateInstructions } from "../shared/instructions.js";
 import { startAutoUpdate } from "./auto-update.js";
 import { startScheduler } from "./scheduler.js";
-import { startOrchestratorPipelines } from "../orchestrator/server.js";
+// startOrchestratorPipelines is loaded lazily — its open-multi-agent
+// dependency is a sibling-repo path dep that may not be installed on
+// every deployment (hosted relays don't need orchestrator).
 import { connectedServers } from "./proxy.js";
 import { initWebPush } from "./push/web-push.js";
 import { join } from "node:path";
@@ -1049,12 +1051,20 @@ const server = app.listen(PORT, "0.0.0.0", (error) => {
     console.error("[scheduler] Failed to start:", err.message);
   });
 
-  // Start orchestrator pipeline runner (polls for pipeline: schedules)
-  try {
-    startOrchestratorPipelines(createDbClient(), { connectedServers });
-  } catch (err) {
-    console.error("[pipeline-runner] Failed to start:", err.message);
-  }
+  // Start orchestrator pipeline runner (polls for pipeline: schedules).
+  // Lazy import so deployments without the open-multi-agent sibling repo
+  // (e.g. hosted relays) keep running.
+  import("../orchestrator/server.js")
+    .then(({ startOrchestratorPipelines }) => {
+      startOrchestratorPipelines(createDbClient(), { connectedServers });
+    })
+    .catch((err) => {
+      if (err.code === "ERR_MODULE_NOT_FOUND") {
+        console.warn("[pipeline-runner] Orchestrator unavailable (open-multi-agent not installed). Skipping.");
+      } else {
+        console.error("[pipeline-runner] Failed to start:", err.message);
+      }
+    });
 
   // Register this instance in the instance registry
   import("./instance-registry.js").then(async ({ ensureLocalInstanceRegistered }) => {
