@@ -99,6 +99,11 @@ if (noAuth) {
   console.warn("⚠️  WARNING: Running without authentication. Do NOT use in production.");
 }
 
+if (process.env.CROW_DASHBOARD_PUBLIC === "true") {
+  console.warn("⚠️  WARNING: CROW_DASHBOARD_PUBLIC=true — Crow's Nest dashboard is exposed to the public internet.");
+  console.warn("   Ensure you have a strong admin password and 2FA enabled. Prefer `tailscale serve` for private remote access.");
+}
+
 // Initialize OAuth tables
 await initOAuthTables();
 
@@ -194,6 +199,29 @@ app.use((req, res, next) => {
   next();
 });
 
+// Reject Tailscale Funnel traffic for all non-public paths. Public paths
+// are blog, feeds, sitemap, robots, setup, .well-known (OAuth metadata),
+// health, push subscription endpoints are also blocked here by default —
+// if an operator needs a path public, either add it to PUBLIC_FUNNEL_PREFIXES
+// or set CROW_DASHBOARD_PUBLIC=true.
+// This is defense in depth: a misconfigured `tailscale funnel /` used to
+// expose the entire gateway (including the Nest dashboard) to the internet;
+// this middleware ensures even that misconfig fails closed.
+const PUBLIC_FUNNEL_PREFIXES = [
+  "/blog",
+  "/robots.txt",
+  "/sitemap.xml",
+  "/.well-known/",
+  "/favicon.ico",
+  "/manifest.json",
+];
+app.use((req, res, next) => {
+  if (!req.headers["tailscale-funnel-request"]) return next();
+  if (process.env.CROW_DASHBOARD_PUBLIC === "true") return next();
+  if (PUBLIC_FUNNEL_PREFIXES.some((p) => req.path === p || req.path.startsWith(p))) return next();
+  res.status(403).type("text/plain").send("Forbidden: private path not reachable via Tailscale Funnel.");
+});
+
 // PR 0: CrowdSec gateway-middleware bouncer (no-op when CROW_CROWDSEC_BOUNCER_KEY is unset).
 // Mounted after security headers, before CORS/rate-limit so banned IPs get a fast 403
 // without consuming rate-limit budget. Uses synchronous LAPI lookup with 200ms timeout
@@ -233,6 +261,20 @@ const authLimiter = rateLimit({
 app.use("/authorize", authLimiter);
 app.use("/token", authLimiter);
 app.use("/register", authLimiter);
+
+// Dashboard login rate limit. Key on req.ip + Tailscale-User-Login because
+// Funnel traffic all appears as 127.0.0.1 and would otherwise share one
+// bucket with the legit operator. rejectFunneled blocks Funnel before this
+// fires, but this is defense in depth if that middleware is ever bypassed.
+const dashboardLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${req.ip}:${req.headers["tailscale-user-login"] || ""}`,
+  message: { error: "Too many login attempts, please try again later" },
+});
+app.use("/dashboard/login", dashboardLoginLimiter);
 
 // Body parsing with size limit
 app.use(express.json({ limit: "1mb" }));

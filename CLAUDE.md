@@ -172,6 +172,17 @@ scripts/crow-update.sh         → Safe update with rollback
 scripts/migrate-data-dir.js    → Data directory migration (./data/ → ~/.crow/data/)
 ```
 
+### Network exposure invariant
+
+**The Crow's Nest dashboard and all private routes (MCP, AI chat, storage, push, instance sync) MUST NEVER be reachable via Tailscale Funnel.** Only `/blog`, `/robots.txt`, `/sitemap.xml`, `/.well-known/`, `/favicon.ico`, and `/manifest.json` are safe to expose publicly.
+
+Enforcement:
+1. **Server-side middleware** — `servers/gateway/index.js` rejects any request carrying the `Tailscale-Funnel-Request` header unless the path matches `PUBLIC_FUNNEL_PREFIXES` or `CROW_DASHBOARD_PUBLIC=true`.
+2. **`isAllowedNetwork()`** in `servers/gateway/dashboard/auth.js` — uses the Tailscale-injected `Tailscale-User-Login` / `Tailscale-Funnel-Request` headers (verified unforgeable against `tailscale/ipn/ipnlocal/serve.go:1046-1072`) to distinguish tailnet Serve from public Funnel. Bare loopback is rejected — callers on the same host must use `CROW_ALLOWED_IPS` or `CROW_DASHBOARD_PUBLIC=true`.
+3. **Funnel config** — never map `/` or any non-public prefix. Use `tailscale funnel --set-path=/blog` and friends. The docs at `docs/getting-started/tailscale-setup.md` show the correct pattern.
+
+If you touch any of these three layers, run the `servers/gateway/__tests__/auth.test.js` integration tests.
+
 ### Data Directory
 
 Data lives in `~/.crow/data/` (preferred) or `./data/` (fallback). Resolution order: `CROW_DATA_DIR` env → `~/.crow/data/` (if exists) → `./data/`. The `resolveDataDir()` function in `servers/db.js` handles this. Migration script (`scripts/migrate-data-dir.js`) moves data from `./data/` to `~/.crow/data/` and creates a symlink for backward compatibility.

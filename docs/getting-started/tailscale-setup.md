@@ -102,13 +102,35 @@ Your blog is public at your gateway URL, but the Crow's Nest stays private. To m
 
 ### Option A: Tailscale Funnel (Personal/Hobby Use)
 
-The simplest approach — expose port 3001 publicly:
+::: danger Never funnel the root path
+`sudo tailscale funnel 3001` (or any command that maps `/` to the gateway) exposes the Crow's Nest dashboard login to the public internet. The gateway blocks funneled dashboard requests server-side, but the correct configuration is to funnel only the public blog paths. Always use `--set-path` as shown below.
+:::
+
+Expose only the public blog paths (blog, feeds, OAuth discovery):
 
 ```bash
-sudo tailscale funnel 3001
+sudo tailscale funnel --bg --set-path=/blog http://localhost:3001/blog
+sudo tailscale funnel --bg --set-path=/robots.txt http://localhost:3001/robots.txt
+sudo tailscale funnel --bg --set-path=/sitemap.xml http://localhost:3001/sitemap.xml
+sudo tailscale funnel --bg --set-path=/.well-known/ http://localhost:3001/.well-known/
 ```
 
-The gateway's built-in network restrictions ensure `/dashboard/*` routes are only accessible from local/Tailscale IPs, so the Crow's Nest remains protected even with Funnel enabled. Only the blog, health check, and MCP endpoints (which require OAuth) are accessible publicly.
+Verify the Crow's Nest is **not** publicly reachable:
+
+```bash
+curl -I https://<your-tailnet>.ts.net/dashboard   # expect 404 (no handler)
+curl -I https://<your-tailnet>.ts.net/blog        # expect 200
+```
+
+The gateway also rejects any funneled request to a private path server-side (it sets `Tailscale-Funnel-Request` on Funnel traffic, which `isAllowedNetwork()` uses to fail closed). This is defense in depth — you still must not funnel `/`.
+
+For tailnet-only access to the full gateway (dashboard, MCP, AI chat), use `tailscale serve` on a separate port:
+
+```bash
+sudo tailscale serve --bg --https=8444 http://localhost:3001
+```
+
+Then reach the Nest at `https://<your-tailnet>.ts.net:8444/dashboard` from any device on your tailnet.
 
 ::: warning Tailscale Funnel Limitations
 Tailscale Funnel is designed for **personal and hobby use**. It has bandwidth limits and is not intended as a production hosting solution. If you plan to monetize your blog or podcast (ads, subscriptions, paid content), use a proper reverse proxy with a custom domain instead (Option B below) or consider [managed hosting](./managed-hosting).
