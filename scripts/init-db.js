@@ -927,6 +927,36 @@ await initTable("sync_state table", `
   );
 `);
 
+// --- Cross-host control plane (Phase 5-MVP) ---
+
+// Add trusted column to crow_instances — gate for accepting cross-host actions.
+// Default 0 so newly-registered instances cannot receive cross-host RPC until
+// an operator promotes them (e.g. via `crow instance pair`).
+await addColumnIfMissing("crow_instances", "trusted", "INTEGER DEFAULT 0");
+
+await initTable("cross_host_calls audit table", `
+  CREATE TABLE IF NOT EXISTS cross_host_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_instance_id TEXT,
+    target_instance_id TEXT,
+    direction TEXT NOT NULL CHECK(direction IN ('outbound', 'inbound')),
+    action TEXT NOT NULL,
+    bundle_id TEXT,
+    actor TEXT,
+    http_status INTEGER,
+    hmac_valid INTEGER,
+    timestamp_skew_ms INTEGER,
+    nonce TEXT,
+    error TEXT,
+    request_id TEXT,
+    at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_xhost_target ON cross_host_calls(target_instance_id, at DESC);
+  CREATE INDEX IF NOT EXISTS idx_xhost_source ON cross_host_calls(source_instance_id, at DESC);
+  CREATE INDEX IF NOT EXISTS idx_xhost_action ON cross_host_calls(action, at DESC);
+`);
+
 // --- Lamport timestamp columns for synced tables ---
 
 await addColumnIfMissing("memories", "lamport_ts", "INTEGER DEFAULT 0");

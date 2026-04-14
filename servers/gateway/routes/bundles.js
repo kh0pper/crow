@@ -27,6 +27,10 @@ import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { checkInstall as checkHardwareGate } from "../hardware-gate.js";
 import { checkGpuArchCompatible } from "../gpu-arch.js";
+import { forwardBundleAction } from "../../shared/peer-forward.js";
+import { verifyRequest, auditCrossHostCall } from "../../shared/cross-host-auth.js";
+import { getPeerCreds } from "../../shared/peer-credentials.js";
+import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 
 // PR 0: Consent token configuration (server-validated, race-safe install consent)
 const CONSENT_TOKEN_TTL_SECONDS = 15 * 60; // 15 min — covers slow image pulls
@@ -43,6 +47,143 @@ const INSTALLED_PATH = join(CROW_HOME, "installed.json");
 const APP_ROOT = resolve(__dirname, "../../..");
 const APP_BUNDLES = join(APP_ROOT, "bundles");
 const APP_ENV_PATH = join(APP_ROOT, ".env");
+
+// -----------------------------------------------------------------------
+// Cross-host manifest support (Phase 5-MVP)
+// -----------------------------------------------------------------------
+
+const BUNDLE_HOST_ALLOW_PATH = join(CROW_HOME, "bundle-host-allow.json");
+
+/**
+ * Read the host-allowlist (~/.crow/bundle-host-allow.json) — an array of
+ * bundle IDs that may carry a cross-host `host:` field.
+ * Returns a Set.
+ */
+function readBundleHostAllowlist() {
+  try {
+    if (existsSync(BUNDLE_HOST_ALLOW_PATH)) {
+      const arr = JSON.parse(readFileSync(BUNDLE_HOST_ALLOW_PATH, "utf-8"));
+      if (Array.isArray(arr)) return new Set(arr);
+    }
+  } catch {}
+  return new Set();
+}
+
+/**
+ * Read a bundle's manifest.json and return its `host` field if present and
+ * the manifest is trusted enough to carry a non-local host directive.
+ *
+ * Trust sources (any one suffices):
+ *   1. Bundle ID appears in registry/add-ons.json (installed via official registry).
+ *   2. Bundle ID appears in ~/.crow/bundle-host-allow.json.
+ *   3. Env CROW_BUNDLE_HOST_ALLOW_ALL=1 (dev mode).
+ *
+ * Returns: { host: <instance-id | 'local' | null>, trusted: boolean,
+ *            reason: string if untrusted }
+ */
+function resolveManifestHost(bundleId) {
+  // Look for the manifest in installed location first, then app repo
+  const candidates = [
+    join(BUNDLES_DIR, bundleId, "manifest.json"),
+    join(APP_BUNDLES, bundleId, "manifest.json"),
+  ];
+  let manifest = null;
+  for (const p of candidates) {
+    try {
+      if (existsSync(p)) {
+        manifest = JSON.parse(readFileSync(p, "utf-8"));
+        break;
+      }
+    } catch {}
+  }
+  if (!manifest) return { host: null, trusted: false, reason: "no_manifest" };
+
+  const host = manifest.host || null;
+  if (!host || host === "local") return { host: host || "local", trusted: true };
+
+  // Non-local host — enforce trust boundary
+  if (process.env.CROW_BUNDLE_HOST_ALLOW_ALL === "1") {
+    return { host, trusted: true, reason: "dev_allow_all" };
+  }
+
+  // Check registry
+  try {
+    const registryPath = join(APP_ROOT, "registry", "add-ons.json");
+    if (existsSync(registryPath)) {
+      const reg = JSON.parse(readFileSync(registryPath, "utf-8"));
+      const known = (reg["add-ons"] || []).some((a) => a.id === bundleId);
+      if (known) return { host, trusted: true, reason: "registry" };
+    }
+  } catch {}
+
+  // Check local allowlist
+  const allow = readBundleHostAllowlist();
+  if (allow.has(bundleId)) return { host, trusted: true, reason: "allowlist" };
+
+  return { host, trusted: false, reason: "untrusted_manifest_host" };
+}
+
+/**
+ * Express middleware that verifies an inbound cross-host signed request.
+ * Mounted on bundle action routes so only cross-host peers can hit them
+ * WITHOUT dashboardAuth — local (same-origin) callers continue to rely on
+ * dashboardAuth or OAuth. Peer calls short-circuit those via HMAC.
+ *
+ * Sets req.crossHostAuth = { valid, sourceInstanceId, ... }.
+ * Non-signed requests are passed through (next()) so existing auth paths apply.
+ */
+function crossHostVerifyMiddleware(dbClient) {
+  return async (req, res, next) => {
+    const sig = req.headers["x-crow-signature"];
+    if (!sig) return next(); // not a peer call — pass through
+
+    const source = req.headers["x-crow-source"];
+    if (!source) {
+      return res.status(401).json({ error: "missing_x_crow_source" });
+    }
+
+    // Load shared signing_key from peer-tokens.json
+    const creds = getPeerCreds(source);
+    if (!creds || !creds.signing_key) {
+      await auditCrossHostCall(dbClient, {
+        sourceInstanceId: source,
+        direction: "inbound",
+        action: `bundle.${(req.path.split("/").pop() || "")}`,
+        error: "no_signing_key_for_source",
+      });
+      return res.status(401).json({ error: "unknown_peer" });
+    }
+
+    const rawBody = typeof req.body === "string" ? req.body : JSON.stringify(req.body || {});
+    const result = verifyRequest({
+      method: req.method,
+      path: req.originalUrl || req.url,
+      body: rawBody,
+      headers: Object.fromEntries(
+        Object.entries(req.headers).map(([k, v]) => [k.toLowerCase(), Array.isArray(v) ? v[0] : v])
+      ),
+      signingKey: creds.signing_key,
+    });
+
+    req.crossHostAuth = result;
+
+    if (!result.valid) {
+      await auditCrossHostCall(dbClient, {
+        sourceInstanceId: source,
+        direction: "inbound",
+        action: `bundle.${(req.path.split("/").pop() || "")}`,
+        bundleId: req.body?.bundle_id,
+        hmacValid: false,
+        timestampSkewMs: result.timestampSkewMs,
+        nonce: result.nonce,
+        error: result.reason,
+      });
+      return res.status(401).json({ error: result.reason });
+    }
+
+    return next();
+  };
+}
 
 function resolvePanelPath(manifest, bundleId) {
   if (!manifest?.panel) return null;
@@ -1231,50 +1372,122 @@ export default function bundlesRouter() {
     })();
   });
 
-  // POST /bundles/api/start — Start bundle containers
-  router.post("/bundles/api/start", async (req, res) => {
-    const { bundle_id } = req.body;
+  // Cross-host verification middleware — runs before start/stop, only acts if
+  // X-Crow-Signature header is present (otherwise falls through to existing auth).
+  const dbForXhost = createDbClient();
+  const xhostVerify = crossHostVerifyMiddleware(dbForXhost);
 
+  /**
+   * Unified bundle-action dispatcher: if the bundle manifest declares
+   * `host: <instance-id>` (and trust boundary passes), forward to that peer.
+   * Otherwise run the action locally via runCompose.
+   *
+   * Called by both start and stop handlers.
+   */
+  async function dispatchBundleAction({ action, bundleId, actor, req, res }) {
+    // First: resolve manifest host (if peer). Only honored when trusted.
+    const hostInfo = resolveManifestHost(bundleId);
+    if (hostInfo.host && hostInfo.host !== "local") {
+      if (!hostInfo.trusted) {
+        await auditCrossHostCall(dbForXhost, {
+          direction: "outbound",
+          action: `bundle.${action}`,
+          bundleId,
+          actor,
+          error: `blocked_manifest_host:${hostInfo.reason}`,
+        });
+        return res.status(403).json({
+          error: "manifest_host_not_trusted",
+          reason: hostInfo.reason,
+          hint: "Install the bundle via `crow bundle install` or add it to ~/.crow/bundle-host-allow.json",
+        });
+      }
+      // Forward to peer
+      const localId = getOrCreateLocalInstanceId();
+      const result = await forwardBundleAction({
+        db: dbForXhost,
+        sourceInstanceId: localId,
+        targetInstanceId: hostInfo.host,
+        action,
+        bundleId,
+        actor,
+      });
+      if (!result.ok) {
+        return res.status(result.status || 502).json({
+          error: `cross_host_${action}_failed`,
+          reason: result.error,
+        });
+      }
+      return res.json({
+        ok: true,
+        via: "cross-host",
+        target: hostInfo.host,
+        message: result.body?.message || `Bundle '${bundleId}' ${action}ped (remote)`,
+      });
+    }
+
+    // Local path
+    const bundleDir = join(BUNDLES_DIR, bundleId);
+    const composePath = join(bundleDir, "docker-compose.yml");
+    if (!existsSync(composePath)) {
+      return res.status(404).json({ error: `Bundle '${bundleId}' has no Docker containers` });
+    }
+    try {
+      if (action === "start") {
+        const content = readFileSync(composePath, "utf8");
+        const upArgs = /^\s+build:/m.test(content) ? ["up", "-d", "--build"] : ["up", "-d"];
+        await runCompose(upArgs, { cwd: bundleDir });
+      } else if (action === "stop") {
+        await runCompose(["stop"], { cwd: bundleDir });
+      } else {
+        return res.status(400).json({ error: `unsupported action: ${action}` });
+      }
+      if (req.crossHostAuth?.valid) {
+        await auditCrossHostCall(dbForXhost, {
+          sourceInstanceId: req.crossHostAuth.sourceInstanceId,
+          direction: "inbound",
+          action: `bundle.${action}`,
+          bundleId,
+          hmacValid: true,
+          timestampSkewMs: req.crossHostAuth.timestampSkewMs,
+          nonce: req.crossHostAuth.nonce,
+          httpStatus: 200,
+        });
+      }
+      return res.json({ ok: true, message: `Bundle '${bundleId}' ${action}ped` });
+    } catch (err) {
+      return res.status(500).json({ error: `Failed to ${action}: ${err.stderr || err.message}` });
+    }
+  }
+
+  // POST /bundles/api/start — Start bundle containers (local or peer)
+  router.post("/bundles/api/start", xhostVerify, async (req, res) => {
+    const { bundle_id } = req.body || {};
     if (!bundle_id || !isValidBundleId(bundle_id)) {
       return res.status(400).json({ error: "Invalid bundle ID" });
     }
-
-    const bundleDir = join(BUNDLES_DIR, bundle_id);
-    const composePath = join(bundleDir, "docker-compose.yml");
-    if (!existsSync(composePath)) {
-      return res.status(404).json({ error: `Bundle '${bundle_id}' has no Docker containers` });
-    }
-
-    try {
-      const content = readFileSync(composePath, "utf8");
-      const upArgs = /^\s+build:/m.test(content) ? ["up", "-d", "--build"] : ["up", "-d"];
-      await runCompose(upArgs, { cwd: bundleDir });
-      res.json({ ok: true, message: `Bundle '${bundle_id}' started` });
-    } catch (err) {
-      res.status(500).json({ error: `Failed to start: ${err.stderr || err.message}` });
-    }
+    return dispatchBundleAction({
+      action: "start",
+      bundleId: bundle_id,
+      actor: req.crossHostAuth?.sourceInstanceId || "local",
+      req,
+      res,
+    });
   });
 
-  // POST /bundles/api/stop — Stop bundle containers
-  router.post("/bundles/api/stop", async (req, res) => {
-    const { bundle_id } = req.body;
-
+  // POST /bundles/api/stop — Stop bundle containers (local or peer)
+  router.post("/bundles/api/stop", xhostVerify, async (req, res) => {
+    const { bundle_id } = req.body || {};
     if (!bundle_id || !isValidBundleId(bundle_id)) {
       return res.status(400).json({ error: "Invalid bundle ID" });
     }
-
-    const bundleDir = join(BUNDLES_DIR, bundle_id);
-    const composePath = join(bundleDir, "docker-compose.yml");
-    if (!existsSync(composePath)) {
-      return res.status(404).json({ error: `Bundle '${bundle_id}' has no Docker containers` });
-    }
-
-    try {
-      await runCompose(["stop"], { cwd: bundleDir });
-      res.json({ ok: true, message: `Bundle '${bundle_id}' stopped` });
-    } catch (err) {
-      res.status(500).json({ error: `Failed to stop: ${err.stderr || err.message}` });
-    }
+    return dispatchBundleAction({
+      action: "stop",
+      bundleId: bundle_id,
+      actor: req.crossHostAuth?.sourceInstanceId || "local",
+      req,
+      res,
+    });
   });
 
   // POST /bundles/api/env — Save env vars for an installed bundle

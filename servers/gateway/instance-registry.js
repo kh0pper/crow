@@ -164,6 +164,7 @@ export async function updateInstance(db, id, fields) {
   const allowed = [
     "name", "directory", "hostname", "tailscale_ip", "gateway_url",
     "sync_url", "sync_profile", "topics", "is_home", "auth_token_hash", "status",
+    "trusted",
   ];
 
   const sets = [];
