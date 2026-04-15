@@ -40,6 +40,7 @@ import twoFactorSection from "../settings/sections/two-factor.js";
 import navGroupsSection from "../settings/sections/nav-groups.js";
 import ttsProfilesSection from "../settings/sections/tts-profiles.js";
 import sttProfilesSection from "../settings/sections/stt-profiles.js";
+import visionProfilesSection from "../settings/sections/vision-profiles.js";
 
 // Register built-in sections
 registerSettingsSection(navGroupsSection);
@@ -47,6 +48,7 @@ registerSettingsSection(themeSection);
 registerSettingsSection(languageSection);
 registerSettingsSection(ttsProfilesSection);
 registerSettingsSection(sttProfilesSection);
+registerSettingsSection(visionProfilesSection);
 registerSettingsSection(notificationsSection);
 registerSettingsSection(aiProviderSection);
 registerSettingsSection(providersSection);

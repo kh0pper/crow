@@ -98,6 +98,22 @@ async function main() {
   const scope = await getSettingScope(db, "password_hash");
   assert(scope === "local", `password_hash silently downgrades to local scope (got ${scope})`);
 
+  // 7. vision_profiles is allowlisted (Phase 1)
+  assert(isSyncable("vision_profiles"), "isSyncable('vision_profiles') true (Phase 1)");
+  await writeSetting(db, "vision_profiles", "[]", { scope: "local" });
+  const vpScope = await getSettingScope(db, "vision_profiles");
+  assert(vpScope === "local", `vision_profiles first-write local scope (got ${vpScope})`);
+  const vpVal = await readSetting(db, "vision_profiles");
+  assert(vpVal === "[]", `vision_profiles read-with-override → ${vpVal}`);
+
+  // 8. resolve-provider: pointer-mode fallbacks + orchestrator default
+  const { resolveOrchestratorDefault, listProviders } =
+    await import("../../servers/gateway/ai/resolve-provider.js");
+  const providers = listProviders();
+  assert(providers.length > 0, `listProviders() returned ${providers.length} providers`);
+  const def = resolveOrchestratorDefault();
+  assert(!!def.baseUrl && !!def.model, `resolveOrchestratorDefault() → ${def.provider_id}/${def.model}`);
+
   console.log("\nPASS");
 }
 

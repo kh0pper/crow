@@ -54,6 +54,9 @@ async function loadProvider()    { return import(pathToFileURL(join(gatewayDir, 
 async function loadDb()          { return import(pathToFileURL(join(gatewayDir, "..", "db.js")).href); }
 async function loadToolExec()    { return import(pathToFileURL(join(gatewayDir, "ai/tool-executor.js")).href); }
 async function loadSystemPrompt(){ return import(pathToFileURL(join(gatewayDir, "ai/system-prompt.js")).href); }
+async function loadVision()       { return import(pathToFileURL(join(gatewayDir, "ai/vision.js")).href); }
+async function loadResolveProv()  { return import(pathToFileURL(join(gatewayDir, "ai/resolve-provider.js")).href); }
+async function loadSettingsReg()  { return import(pathToFileURL(join(gatewayDir, "dashboard/settings/registry.js")).href); }
 
 /* ---------- Shared session state ---------- */
 
@@ -100,6 +103,44 @@ function saveConvo(deviceId, messages) {
   // Drop the leading system message; we re-generate it every turn.
   const trimmed = messages.filter(m => m.role !== "system").slice(-CONVO_MAX_MESSAGES);
   _convoHistory.set(deviceId, { messages: trimmed, lastAt: Date.now() });
+}
+
+/**
+ * Resolve the active vision-model provider config for a voice turn.
+ *
+ * Precedence:
+ *   1. device.vision_profile_id (override)
+ *   2. aiProfile.vision_profile_id (default)
+ *   3. First profile marked isDefault in vision_profiles (platform default)
+ *
+ * If any pointer profile is selected, resolves via models.json. Direct-mode
+ * profiles return their stored baseUrl/model/apiKey. On any miss (no profile,
+ * missing provider, etc.) returns null so the caller skips vision.
+ */
+async function resolveVisionProfileConfig(db, device, aiProfile) {
+  try {
+    const { readSetting } = await loadSettingsReg();
+    const raw = await readSetting(db, "vision_profiles");
+    if (!raw) return null;
+    let profiles = [];
+    try { profiles = JSON.parse(raw); } catch { return null; }
+    const targetId = device?.vision_profile_id || aiProfile?.vision_profile_id;
+    const profile = targetId
+      ? profiles.find(p => p.id === targetId)
+      : (profiles.find(p => p.isDefault) || profiles[0]);
+    if (!profile) return null;
+    if (profile.provider_id) {
+      const { resolveProvider } = await loadResolveProv();
+      return resolveProvider(profile.provider_id, profile.model_id);
+    }
+    if (profile.baseUrl && profile.model) {
+      return { baseUrl: profile.baseUrl, apiKey: profile.apiKey || "none", model: profile.model };
+    }
+    return null;
+  } catch (err) {
+    console.warn(`[meta-glasses] vision profile resolve failed: ${err.message}`);
+    return null;
+  }
 }
 
 function sendText(ws, obj) {
@@ -362,8 +403,39 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
             continue;
           }
           try {
+            // Resolve effective vision profile: device override → AI profile default → none.
+            const visionConfig = await resolveVisionProfileConfig(db, device, aiProfile);
+            if (visionConfig) {
+              // Filler TTS to bridge cold-start (Qwen3-VL is ~25-30s cold).
+              try { await flushTts("Let me look at that."); } catch {}
+            }
             const r = await triggerCapture(sess);
-            localResults.push({ id: tc.id, name: tc.name, result: `Photo captured. URL: ${r.url} (${r.size} bytes). Tell the user the photo was saved — do not hallucinate its contents.`, isError: false });
+            let description = null;
+            if (visionConfig) {
+              try {
+                const { readFileSync } = await import("node:fs");
+                const basename = decodeURIComponent(r.url.split("/").pop() || "");
+                const diskPath = join(_photoDir, basename);
+                const imageBytes = readFileSync(diskPath);
+                const mime = basename.endsWith(".png") ? "image/png" : "image/jpeg";
+                const { analyzeImage } = await loadVision();
+                const result = await analyzeImage({
+                  providerConfig: visionConfig,
+                  prompt: "Describe what you see in this image. Be concise (1-3 sentences). This will be spoken to the user via TTS.",
+                  imageBytes,
+                  mime,
+                  timeoutMs: 10_000,
+                  maxTokens: 300,
+                });
+                description = result.description;
+              } catch (visionErr) {
+                console.warn(`[meta-glasses] vision analysis failed: ${visionErr.message}`);
+              }
+            }
+            const msg = description
+              ? `Photo captured. URL: ${r.url}. Vision analysis: ${description}. Use the description to answer the user.`
+              : `Photo captured. URL: ${r.url} (${r.size} bytes). Tell the user the photo was saved — do not hallucinate its contents.`;
+            localResults.push({ id: tc.id, name: tc.name, result: msg, isError: false });
           } catch (err) {
             localResults.push({ id: tc.id, name: tc.name, result: `Photo capture failed: ${err.message}`, isError: true });
           }
