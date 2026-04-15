@@ -1,22 +1,34 @@
 # Funkwhale — federated music server.
 #
-# Six-container bundle: api + celeryworker + celerybeat + nginx + postgres + redis.
-# All on crow-federation + an internal default network. Caddy reverse-proxies
-# :443 → funkwhale-nginx:80, which in turn serves static files and proxies
-# /api + /federation + websockets to funkwhale-api:5000.
+# Single-container `funkwhale/all-in-one` quickstart (bundles api + celery +
+# nginx + postgres + redis into one image). Simpler to operate than the split
+# stack and maps onto Funkwhale's published quickstart guide.
+#
+# Operators who need the split architecture (independent celery scaling,
+# external postgres, etc.) should deploy Funkwhale's upstream docker-compose
+# directly — this bundle prioritises one-click install.
 #
 # Data:
-#   ~/.crow/funkwhale/postgres/   Postgres data dir
-#   ~/.crow/funkwhale/redis/      Redis persistence (optional AOF/RDB)
-#   ~/.crow/funkwhale/data/       Funkwhale /data (audio uploads, transcodes)
-#   ~/.crow/funkwhale/music/      Optional read-only in-place library (FUNKWHALE_MUSIC_DIR)
+#   ~/.crow/funkwhale/data/       Everything — Postgres, Redis, audio uploads,
+#                                 static, media, library metadata. Mounted at
+#                                 /data inside the container.
+#   ~/.crow/funkwhale/music/      Optional read-only library (mapped to /music
+#                                 inside the container; MUSIC_DIRECTORY_PATH).
 #
-# Audio storage: on-disk by default. Set FUNKWHALE_S3_* env vars to route
-# uploads to MinIO / external S3 — storage-translators.funkwhale() handles
-# the env-var mapping to AWS_* names Funkwhale expects.
+# Networks:
+#   crow-federation (external)    Shared with Caddy for federation. Optional
+#                                 — if you're tailnet-only and skipping Caddy,
+#                                 the network still needs to exist (docker
+#                                 network create crow-federation).
 #
-# Image: funkwhale/funkwhale:1.4 (pinned at impl time; verify upstream
-# release notes + CVE feed before bumping).
+# Audio storage:
+#   Set AWS_* vars in .env to route uploads to MinIO / S3. The gateway
+#   install flow auto-injects these when shared storage is configured in the
+#   Nest (see manifest.storage.translator="funkwhale"). Leave unset for
+#   on-disk storage in the /data volume.
+#
+# Image: funkwhale/all-in-one:1.2.10 (pinned — verify upstream release notes
+# + CVE feed before bumping). Upstream currently ships 1.2.x stable.
 
 networks:
   crow-federation:
@@ -24,70 +36,23 @@ networks:
   default:
 
 services:
-  postgres:
-    image: postgres:15-alpine
-    container_name: crow-funkwhale-postgres
-    networks:
-      - default
-    environment:
-      POSTGRES_USER: funkwhale
-      POSTGRES_PASSWORD: ${FUNKWHALE_POSTGRES_PASSWORD}
-      POSTGRES_DB: funkwhale
-    volumes:
-      - ${FUNKWHALE_DATA_DIR:-~/.crow/funkwhale}/postgres:/var/lib/postgresql/data
-    init: true
-    mem_limit: 512m
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U funkwhale"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
-
-  redis:
-    image: redis:7-alpine
-    container_name: crow-funkwhale-redis
-    networks:
-      - default
-    volumes:
-      - ${FUNKWHALE_DATA_DIR:-~/.crow/funkwhale}/redis:/data
-    init: true
-    mem_limit: 256m
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  api:
-    image: funkwhale/funkwhale:1.4
-    container_name: crow-funkwhale-api
+  funkwhale:
+    image: funkwhale/all-in-one:1.2.10
+    container_name: crow-funkwhale
     networks:
       - default
       - crow-federation
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     environment:
       FUNKWHALE_HOSTNAME: ${FUNKWHALE_HOSTNAME}
       FUNKWHALE_PROTOCOL: ${FUNKWHALE_PROTOCOL:-https}
       DJANGO_SECRET_KEY: ${FUNKWHALE_DJANGO_SECRET_KEY}
-      DATABASE_URL: postgresql://funkwhale:${FUNKWHALE_POSTGRES_PASSWORD}@postgres:5432/funkwhale
-      CACHE_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: redis://redis:6379/0
-      DJANGO_ALLOWED_HOSTS: ${FUNKWHALE_HOSTNAME},funkwhale-api,api,localhost
-      FUNKWHALE_WEB_WORKERS: "2"
-      MEDIA_ROOT: /srv/funkwhale/data/media
-      STATIC_ROOT: /srv/funkwhale/data/static
-      MUSIC_DIRECTORY_PATH: /music
-      MUSIC_DIRECTORY_SERVE_PATH: /music
-      # S3 storage (activated when AWS_ACCESS_KEY_ID is non-empty — see
-      # scripts/configure-storage.mjs which writes the translated env vars
-      # into .env when FUNKWHALE_S3_* is configured at install time)
+      # Per-deploy TLS termination choice. 'https' is correct if a reverse
+      # proxy (Caddy) handles TLS; 'http' for tailnet-direct without a cert.
+      NESTED_PROXY: ${FUNKWHALE_NESTED_PROXY:-0}
+      # allowed_hosts includes the hostname + internal service names
+      DJANGO_ALLOWED_HOSTS: ${FUNKWHALE_HOSTNAME},funkwhale,localhost,127.0.0.1
+      # S3 storage (set by the gateway install flow when shared storage is
+      # configured in the Nest — see manifest.storage.translator=funkwhale).
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_STORAGE_BUCKET_NAME: ${AWS_STORAGE_BUCKET_NAME:-}
@@ -96,107 +61,22 @@ services:
       AWS_LOCATION: ${AWS_LOCATION:-}
       AWS_QUERYSTRING_AUTH: ${AWS_QUERYSTRING_AUTH:-true}
       AWS_QUERYSTRING_EXPIRE: ${AWS_QUERYSTRING_EXPIRE:-3600}
-    volumes:
-      - ${FUNKWHALE_DATA_DIR:-~/.crow/funkwhale}/data:/srv/funkwhale/data
-      - ${FUNKWHALE_MUSIC_DIR:-~/.crow/funkwhale/music}:/music:ro
-    command: >
-      sh -c "funkwhale-manage migrate --noinput &&
-             funkwhale-manage collectstatic --noinput &&
-             gunicorn config.asgi:application -w $${FUNKWHALE_WEB_WORKERS:-2}
-               -k uvicorn.workers.UvicornWorker -b 0.0.0.0:5000
-               --access-logfile - --error-logfile -"
-    init: true
-    mem_limit: 1500m
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5000/api/v1/instance/nodeinfo/2.0/ >/dev/null 2>&1 || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 10
-      start_period: 120s
-
-  celeryworker:
-    image: funkwhale/funkwhale:1.4
-    container_name: crow-funkwhale-celeryworker
-    networks:
-      - default
-    depends_on:
-      api:
-        condition: service_healthy
-    environment:
-      FUNKWHALE_HOSTNAME: ${FUNKWHALE_HOSTNAME}
-      DJANGO_SECRET_KEY: ${FUNKWHALE_DJANGO_SECRET_KEY}
-      DATABASE_URL: postgresql://funkwhale:${FUNKWHALE_POSTGRES_PASSWORD}@postgres:5432/funkwhale
-      CACHE_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: redis://redis:6379/0
-      C_FORCE_ROOT: "true"
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
-      AWS_STORAGE_BUCKET_NAME: ${AWS_STORAGE_BUCKET_NAME:-}
-      AWS_S3_ENDPOINT_URL: ${AWS_S3_ENDPOINT_URL:-}
-      AWS_S3_REGION_NAME: ${AWS_S3_REGION_NAME:-us-east-1}
-    volumes:
-      - ${FUNKWHALE_DATA_DIR:-~/.crow/funkwhale}/data:/srv/funkwhale/data
-      - ${FUNKWHALE_MUSIC_DIR:-~/.crow/funkwhale/music}:/music:ro
-    command: >
-      celery -A funkwhale_api.taskapp worker -l INFO --concurrency=${FUNKWHALE_CELERYD_CONCURRENCY:-2}
-    init: true
-    mem_limit: 768m
-    restart: unless-stopped
-
-  celerybeat:
-    image: funkwhale/funkwhale:1.4
-    container_name: crow-funkwhale-celerybeat
-    networks:
-      - default
-    depends_on:
-      api:
-        condition: service_healthy
-    environment:
-      FUNKWHALE_HOSTNAME: ${FUNKWHALE_HOSTNAME}
-      DJANGO_SECRET_KEY: ${FUNKWHALE_DJANGO_SECRET_KEY}
-      DATABASE_URL: postgresql://funkwhale:${FUNKWHALE_POSTGRES_PASSWORD}@postgres:5432/funkwhale
-      CACHE_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: redis://redis:6379/0
-      C_FORCE_ROOT: "true"
-    volumes:
-      - ${FUNKWHALE_DATA_DIR:-~/.crow/funkwhale}/data:/srv/funkwhale/data
-    command: >
-      celery -A funkwhale_api.taskapp beat -l INFO
-        --schedule=/srv/funkwhale/data/celerybeat-schedule
-    init: true
-    mem_limit: 256m
-    restart: unless-stopped
-
-  nginx:
-    image: funkwhale/nginx:1.4
-    container_name: crow-funkwhale-nginx
-    networks:
-      - default
-      - crow-federation
-    depends_on:
-      api:
-        condition: service_healthy
-    # Tailnet-direct path (set FUNKWHALE_NGINX_BIND_ADDR=<tailnet-ip> in .env
-    # to skip Caddy for local/tailnet deployments). Leave unset for federation
-    # installs — Caddy reverse-proxies via the crow-federation network.
-    ports:
-      - "${FUNKWHALE_NGINX_BIND_ADDR:-127.0.0.1}:${FUNKWHALE_NGINX_BIND_PORT:-8600}:80"
-    environment:
-      FUNKWHALE_API_IP: api
-      FUNKWHALE_API_PORT: "5000"
-      FUNKWHALE_HOSTNAME: ${FUNKWHALE_HOSTNAME}
-      FUNKWHALE_PROTOCOL: ${FUNKWHALE_PROTOCOL:-https}
       NGINX_MAX_BODY_SIZE: ${FUNKWHALE_NGINX_MAX_BODY_SIZE:-100M}
     volumes:
-      - ${FUNKWHALE_DATA_DIR:-~/.crow/funkwhale}/data:/srv/funkwhale/data:ro
+      - ${FUNKWHALE_DATA_DIR:-~/.crow/funkwhale}/data:/data
       - ${FUNKWHALE_MUSIC_DIR:-~/.crow/funkwhale/music}:/music:ro
+    ports:
+      # Tailnet-direct path (set FUNKWHALE_NGINX_BIND_ADDR=<tailnet-ip> in
+      # .env to skip Caddy for local/tailnet deployments). Leave unset when
+      # fronting with Caddy — Caddy reverse-proxies via the crow-federation
+      # Docker network.
+      - "${FUNKWHALE_NGINX_BIND_ADDR:-127.0.0.1}:${FUNKWHALE_NGINX_BIND_PORT:-8600}:80"
     init: true
-    mem_limit: 128m
+    mem_limit: 2g
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/api/v1/instance/nodeinfo/2.0/ >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 10
-      start_period: 60s
+      start_period: 180s

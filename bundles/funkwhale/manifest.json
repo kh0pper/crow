@@ -27,17 +27,19 @@
     "es": "Funkwhale se une al fediverso público vía ActivityPub — tu instancia de Funkwhale será direccionable en el dominio que configures, cualquier biblioteca/canal que hagas público será descubrible y seguible por usuarios remotos de Mastodon/GoToSocial/Pixelfed, y el audio publicado puede replicarse a servidores federados y no puede recuperarse completamente. Funkwhale almacena tu biblioteca musical como metadatos en Postgres + archivos de audio en disco (o S3); una biblioteca modesta (1000 pistas) consume 5-20 GB según formato y bitrate. Si habilitas la federación con pods remotos, sus metadatos se cachean localmente — esto puede crecer a cientos de MB. Funkwhale está limitado por hardware: rechazado en hosts con <1.5 GB de RAM efectiva tras los paquetes comprometidos; advierte por debajo de 8 GB de RAM total. Subir material con copyright del que no tienes derechos es tu responsabilidad legal — los principales hubs del fediverso pueden dejar de federarse con servidores conocidos por piratería."
   },
   "requires": {
-    "env": ["FUNKWHALE_HOSTNAME", "FUNKWHALE_POSTGRES_PASSWORD", "FUNKWHALE_DJANGO_SECRET_KEY"],
+    "env": ["FUNKWHALE_HOSTNAME", "FUNKWHALE_DJANGO_SECRET_KEY"],
     "min_ram_mb": 1500,
     "recommended_ram_mb": 3000,
     "min_disk_mb": 10000,
     "recommended_disk_mb": 100000
   },
   "env_vars": [
-    { "name": "FUNKWHALE_HOSTNAME", "description": "Public domain (e.g. music.example.com). Must be a subdomain; path-mounts break ActivityPub actor URLs.", "required": true },
-    { "name": "FUNKWHALE_POSTGRES_PASSWORD", "description": "Password for the bundled Postgres role.", "required": true, "secret": true },
+    { "name": "FUNKWHALE_HOSTNAME", "description": "Hostname the bundle serves. For tailnet-direct installs use <tailnet-ip>:<port>; for federation behind Caddy use a real subdomain (path-mounts break ActivityPub actor URLs).", "required": true },
+    { "name": "FUNKWHALE_PROTOCOL", "description": "http or https. Use https when Caddy is fronting the instance; http for tailnet-direct without a cert.", "default": "https", "required": false },
+    { "name": "FUNKWHALE_NGINX_BIND_ADDR", "description": "Host IP to bind the bundled nginx to. Default 127.0.0.1 (localhost-only); set to a tailnet IP to expose directly without Caddy.", "default": "127.0.0.1", "required": false },
+    { "name": "FUNKWHALE_NGINX_BIND_PORT", "description": "Host port for the bundled nginx.", "default": "8600", "required": false },
     { "name": "FUNKWHALE_DJANGO_SECRET_KEY", "description": "Django secret key (use 64+ random chars). Changing this invalidates existing sessions.", "required": true, "secret": true },
-    { "name": "FUNKWHALE_URL", "description": "Internal URL the Crow MCP server uses to reach Funkwhale's API (over the crow-federation docker network).", "default": "http://funkwhale-api:5000", "required": false },
+    { "name": "FUNKWHALE_URL", "description": "Internal URL the Crow MCP server uses to reach Funkwhale's API.", "default": "http://crow-funkwhale", "required": false },
     { "name": "FUNKWHALE_ACCESS_TOKEN", "description": "OAuth2 / PAT access token for the admin account (create via Settings → Applications in the web UI, or POST /api/v1/oauth/apps + token exchange).", "required": false, "secret": true },
     { "name": "FUNKWHALE_S3_ENDPOINT", "description": "Optional S3-compatible endpoint for audio storage (defaults to on-disk). If set with FUNKWHALE_S3_BUCKET/ACCESS/SECRET, audio files go to S3 via the storage-translators mapping.", "required": false },
     { "name": "FUNKWHALE_S3_BUCKET", "description": "S3 bucket name for audio storage.", "required": false },
