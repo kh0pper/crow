@@ -92,6 +92,7 @@
       "host": "grackle-5fc01ac74463b6f4",
       "bundleId": "vllm-cuda-rerank",
       "mutexGroup": "grackle-specialists-swap",
+      "defaultMember": true,
       "models": [
         {
           "id": "qwen3-reranker-0.6b",
