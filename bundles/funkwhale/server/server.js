@@ -428,6 +428,49 @@ export async function createFunkwhaleServer(options = {}) {
     },
   );
 
+  // --- fw_play ---
+  //
+  // Resolves a track to a streamable listen URL + codec and returns an
+  // `_audio_stream` envelope. The meta-glasses voice-turn interceptor
+  // detects the envelope, invokes pushAudioStream on the paired device's
+  // WebSocket, and replaces the tool result with a short prose summary so
+  // the LLM doesn't see (and parrot) the raw URL/credentials.
+  //
+  // Funkwhale listen endpoint: /api/v1/listen/{track_uuid}/?to=<format>.
+  // We pass codec="mp3" for maximum Android MediaCodec compatibility; the
+  // server transcodes on the fly if the upload is a different format.
+  //
+  // `auth: "funkwhale"` is a sentinel for pushAudioStream to inject the
+  // FUNKWHALE_ACCESS_TOKEN bearer header server-side — the token is never
+  // serialized into the tool result.
+  server.tool(
+    "fw_play",
+    "Play a Funkwhale track on the paired glasses / phone speaker. Takes a track UUID from fw_search. Returns a streaming envelope that the meta-glasses voice loop intercepts; the LLM should summarize verbally (e.g. 'Playing <title> by <artist>').",
+    {
+      track_uuid: z.string().min(1).max(128).describe("Track UUID from fw_search results (the `id` field)."),
+      format: z.enum(["mp3", "ogg", "opus"]).optional().describe("Transcode format; default mp3."),
+    },
+    async ({ track_uuid, format }) => {
+      try {
+        const authErr = requireAuth(); if (authErr) return authErr;
+        const meta = await fwFetch(`/api/v1/tracks/${encodeURIComponent(track_uuid)}/`).catch(() => null);
+        const title = meta?.title || "unknown track";
+        const artist = meta?.artist?.name || "unknown artist";
+        const codec = format || "mp3";
+        const url = `${FUNKWHALE_URL}/api/v1/listen/${encodeURIComponent(track_uuid)}/?to=${codec}`;
+        return textResponse({
+          ok: true,
+          title,
+          artist,
+          _audio_stream: { url, codec, auth: "funkwhale" },
+          prose: `Playing ${title} by ${artist}.`,
+        });
+      } catch (err) {
+        return errResponse(err);
+      }
+    },
+  );
+
   // --- fw_block_user (inline, rate-limited) ---
   server.tool(
     "fw_block_user",
