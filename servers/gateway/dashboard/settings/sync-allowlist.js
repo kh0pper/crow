@@ -19,6 +19,7 @@ export const SYNC_ALLOWLIST = {
   "companion_*":         "Companion persona / household config (sync-safe subset)",
   nav_groups:            "Sidebar group layout",
   nav_panel_assignments: "Panel-to-group assignments",
+  "storage.shared.*":    "Shared MinIO / S3 object-store config (secrets sealed via secret-box)",
 };
 
 /**

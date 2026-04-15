@@ -70,6 +70,24 @@ const OUTBOUND_TRANSFORMS = {
  *
  * All other synced tables default to true (no filter).
  */
+// Debounced storage-client invalidation. The six storage.shared.* keys arrive
+// as six separate sync entries within milliseconds; a 500ms trailing debounce
+// collapses that burst into one resetStorageClient() call after the write
+// settles, avoiding five intermediate rebuilds against partial config.
+let _storageResetTimer = null;
+function _scheduleStorageReset() {
+  if (_storageResetTimer) clearTimeout(_storageResetTimer);
+  _storageResetTimer = setTimeout(async () => {
+    _storageResetTimer = null;
+    try {
+      const { resetStorageClient } = await import("../storage/s3-client.js");
+      resetStorageClient();
+    } catch (err) {
+      console.warn("[instance-sync] resetStorageClient import failed:", err.message);
+    }
+  }, 500);
+}
+
 function shouldSyncRow(table, row) {
   if (table !== "dashboard_settings") return true;
   if (!row || !row.key) return false;
@@ -342,6 +360,9 @@ export class InstanceSyncManager {
     if (table === "dashboard_settings") {
       try {
         await this._applyDashboardSetting(op, row, lamport_ts);
+        if (row?.key && String(row.key).startsWith("storage.shared.")) {
+          _scheduleStorageReset();
+        }
       } catch (err) {
         console.warn(`[instance-sync] Failed to apply ${op} on dashboard_settings:`, err.message);
       }
