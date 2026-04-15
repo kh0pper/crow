@@ -156,6 +156,7 @@ async function addColumnIfMissing(table, column, definition) {
 }
 
 await addColumnIfMissing("research_projects", "type", "TEXT DEFAULT 'research'");
+await addColumnIfMissing("research_notes", "lamport_ts", "INTEGER DEFAULT 0");
 await addColumnIfMissing("research_sources", "backend_id", "INTEGER REFERENCES data_backends(id) ON DELETE SET NULL");
 await addColumnIfMissing("contacts", "feed_key", "TEXT");
 
@@ -434,6 +435,29 @@ await initTable("blog_posts FTS triggers", `
     INSERT INTO blog_posts_fts(rowid, title, content, excerpt, tags)
     VALUES (new.id, new.title, new.content, new.excerpt, new.tags);
   END;
+`);
+
+// --- Meta-glasses note sessions (Phase 6) ---
+
+await initTable("glasses_note_sessions table", `
+  CREATE TABLE IF NOT EXISTS glasses_note_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    topic TEXT,
+    mode TEXT NOT NULL CHECK(mode IN ('dictation','session','continuous')),
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    ended_at TEXT,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','ended','cancelled')),
+    project_id INTEGER,
+    note_id INTEGER,
+    summary TEXT,
+    action_items_json TEXT,
+    lamport_ts INTEGER DEFAULT 0
+  );
+`);
+await initTable("glasses_note_sessions index", `
+  CREATE INDEX IF NOT EXISTS idx_note_sessions_device_status
+    ON glasses_note_sessions(device_id, status);
 `);
 
 // --- Meta-glasses photo library (Phase 5) ---

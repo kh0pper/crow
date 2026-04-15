@@ -35,6 +35,12 @@ const SYNCED_TABLES = [
   // AND whose key is in the SYNC_ALLOWLIST are actually emitted/applied.
   // See shouldSyncRow() below.
   "dashboard_settings",
+  // Phase 6 (meta-glasses note-taking). research_notes + glasses_note_sessions
+  // replicate so notes captured via glasses surface on paired instances.
+  // research_projects stays local-only — see OUTBOUND_TRANSFORMS: research_notes
+  // below, which NULLs project_id on the wire.
+  "research_notes",
+  "glasses_note_sessions",
 ];
 
 // Columns to exclude from sync payloads (security-sensitive or instance-local)
@@ -43,6 +49,15 @@ const EXCLUDED_COLUMNS = {
   // apiKey can be sensitive for some deployments; keep in sync by default for
   // local-lab scenarios but flag here as the place to exclude if paranoid.
   providers: [],
+};
+
+// Per-table outbound mutations applied right after the EXCLUDED_COLUMNS strip.
+// Use for cases where the local representation differs from the synced
+// representation — e.g. research_notes.project_id is a local FK (project rows
+// aren't synced), so we NULL it on the wire. Synced notes show up on peers
+// as project-less (null project_id).
+const OUTBOUND_TRANSFORMS = {
+  research_notes: (row) => ({ ...row, project_id: null }),
 };
 
 /**
@@ -221,10 +236,13 @@ export class InstanceSyncManager {
 
     // Strip excluded columns
     const excluded = EXCLUDED_COLUMNS[table] || [];
-    const cleanRow = { ...row };
+    let cleanRow = { ...row };
     for (const col of excluded) {
       delete cleanRow[col];
     }
+    // Apply per-table outbound transform (e.g. NULL project_id on notes).
+    const transform = OUTBOUND_TRANSFORMS[table];
+    if (transform) cleanRow = transform(cleanRow);
 
     const entry = {
       table,
