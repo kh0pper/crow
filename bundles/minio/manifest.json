@@ -46,6 +46,12 @@
       "description": "Use SSL for MinIO connection",
       "default": "false",
       "required": false
+    },
+    {
+      "name": "MINIO_BIND_ADDR",
+      "description": "Host IP to bind the MinIO API + console ports to. Default 127.0.0.1 (localhost-only). Set to this host's tailnet IP to share MinIO across paired Crow instances. Never set to 0.0.0.0 on a host without a firewall that blocks non-tailnet.",
+      "default": "127.0.0.1",
+      "required": false
     }
   ],
   "ports": [9000, 9001],
