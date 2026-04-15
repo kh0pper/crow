@@ -704,6 +704,23 @@ export default function metaGlassesRouter(dashboardAuth) {
     }
   });
 
+  // Operator endpoint: push an audio stream (compressed media) to a paired
+  // device. Useful for diagnostics, testing the Phase 4 MediaCodec path, or
+  // playing arbitrary content from the Nest without going through the LLM.
+  //
+  // Body: { device_id, url, codec, sample_rate?, channels?, auth? }
+  //   auth must be one of the allow-listed sentinels (see pushAudioStream).
+  router.post("/api/meta-glasses/stream", async (req, res) => {
+    const { device_id, url, codec, sample_rate, channels, auth } = req.body || {};
+    if (!device_id || !url || !codec) {
+      return res.status(400).json({ ok: false, error: "device_id, url, codec required" });
+    }
+    const outcome = await pushAudioStream(device_id, {
+      url, codec, sampleRate: sample_rate, channels, auth,
+    });
+    return res.json({ ok: outcome?.delivered === true, ...outcome });
+  });
+
   router.post("/api/meta-glasses/say", async (req, res) => {
     const { text, device_id } = req.body || {};
     if (!text || typeof text !== "string") {
