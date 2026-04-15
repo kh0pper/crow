@@ -675,6 +675,7 @@ export function createSharingServer(dbPath, options = {}) {
   // the id on the challenge/challenge-response JSON (disambiguates peers
   // when all instances of one user share one crow_id).
   peerManager.localInstanceId = instanceSyncManager.localInstanceId;
+  console.log(`[sharing] peerManager.localInstanceId = ${peerManager.localInstanceId?.slice(0,12)}… (wiring complete)`);
 
   // peer-manager asks us for OUR outgoing feed key to a specific peer
   // instance (remoteInstanceId is the peer's local id, which matches the
