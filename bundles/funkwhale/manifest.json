@@ -28,7 +28,6 @@
   },
   "requires": {
     "env": ["FUNKWHALE_HOSTNAME", "FUNKWHALE_POSTGRES_PASSWORD", "FUNKWHALE_DJANGO_SECRET_KEY"],
-    "bundles": ["caddy"],
     "min_ram_mb": 1500,
     "recommended_ram_mb": 3000,
     "min_disk_mb": 10000,
@@ -48,5 +47,6 @@
   ],
   "ports": [],
   "webUI": null,
-  "notes": "Five containers (api + celeryworker + celerybeat + nginx + postgres + redis). No host port publish — expose via caddy_add_federation_site { domain: FUNKWHALE_HOSTNAME, upstream: 'funkwhale-nginx:80', profile: 'activitypub' }. Initial superuser created via `docker exec crow-funkwhale-api funkwhale-manage createsuperuser`. Audio storage defaults to on-disk; set FUNKWHALE_S3_* to wire MinIO/external S3 via the storage-translators funkwhale() mapping."
+  "optional_bundles": ["caddy"],
+  "notes": "Six containers (api + celeryworker + celerybeat + nginx + postgres + redis). For public ActivityPub federation install the caddy bundle and expose via caddy_add_federation_site { domain: FUNKWHALE_HOSTNAME, upstream: 'funkwhale-nginx:80', profile: 'activitypub' }. For tailnet-only installs, set FUNKWHALE_NGINX_BIND_ADDR=<tailnet-ip> + FUNKWHALE_NGINX_BIND_PORT=<port> + FUNKWHALE_PROTOCOL=http — skips caddy entirely. Initial superuser created via `docker exec crow-funkwhale-api funkwhale-manage createsuperuser`. Audio storage defaults to on-disk; set FUNKWHALE_S3_* (manual) or configure Shared Storage in the Nest (automatic — see storage.translator manifest field) to wire MinIO/external S3."
 }
