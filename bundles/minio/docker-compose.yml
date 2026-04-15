@@ -16,8 +16,11 @@ services:
     volumes:
       - minio-data:/data
     ports:
-      - "127.0.0.1:9000:9000"   # API — internal only
-      - "127.0.0.1:9001:9001"   # Console — use Tailscale serve for remote access
+      # Default 127.0.0.1 — set MINIO_BIND_ADDR=<tailnet-ip> in .env to expose
+      # across a tailnet (for shared-storage across paired Crow instances).
+      # Never set to 0.0.0.0 on a host without a firewall that blocks non-tailnet.
+      - "${MINIO_BIND_ADDR:-127.0.0.1}:9000:9000"
+      - "${MINIO_BIND_ADDR:-127.0.0.1}:9001:9001"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
