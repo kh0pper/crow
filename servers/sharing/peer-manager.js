@@ -46,7 +46,15 @@ export class PeerManager {
     this.swarm = new Hyperswarm();
 
     this.swarm.on("connection", (conn, info) => {
+      const pid = info?.publicKey?.toString("hex")?.slice(0,16) || "?";
+      const topics = info?.topics?.map(t => t.toString("hex").slice(0,12)).join(",") || "?";
+      console.log(`[peer-manager] swarm.connection peer=${pid} topics=${topics} instanceSyncTopic=${this.instanceSyncTopic?.toString("hex").slice(0,12) || "null"}`);
       this._handleConnection(conn, info);
+    });
+    this.swarm.on("update", () => {
+      if (this.instanceSyncTopic) {
+        console.log(`[peer-manager] swarm.update peers=${this.swarm.peers.size} conns=${this.swarm.connections.size}`);
+      }
     });
 
     return this;
