@@ -133,10 +133,14 @@ export class PeerManager {
       pubkey: this.identity.ed25519Pubkey,
       crowId: this.identity.crowId,
     };
-    if (isInstanceConn && this.localInstanceId) {
+    // Always include our instance_id when available. The remote uses crow_id
+    // match to decide whether to treat this as an instance-sync connection;
+    // we can't make that call on the sender side because we don't yet know
+    // the peer's crow_id at challenge-send time. Safe to include on contact
+    // connections too — the receiver ignores it for non-same-user peers.
+    if (this.localInstanceId) {
       challengePayload.instance_id = this.localInstanceId;
     }
-    console.log(`[peer-manager] sending challenge isInstanceConn=${isInstanceConn} localInstanceId=${this.localInstanceId?.slice(0,12) || "null"}`);
     conn.write(JSON.stringify(challengePayload) + "\n");
 
     let buffer = "";
@@ -179,16 +183,19 @@ export class PeerManager {
   _handleMessage(conn, msg, ourChallenge, state, setState) {
     switch (msg.type) {
       case "challenge": {
-        // Respond with signed challenge + our own challenge response. On
-        // instance-sync connections we also ride our outgoing Hypercore feed
-        // key on this message so the peer can open its inbound feed without
-        // any additional round-trips. Peer is identified by their
-        // instance_id (crow_id alone is ambiguous — all paired instances of
-        // the same user share one Crow identity).
+        // Respond with signed challenge + our own challenge response. When
+        // the peer's crow_id matches our own, this is an instance-sync
+        // connection regardless of Hyperswarm's topic hint (hyperswarm
+        // doesn't consistently populate info.topics on both sides, so the
+        // crow_id-match is the reliable signal that both endpoints belong
+        // to the same user). Piggyback our local instance_id + outgoing
+        // feed key so the peer can open its inbound feed without more
+        // round trips.
         (async () => {
           const response = sign(msg.challenge, this.identity.ed25519Priv);
+          const isInstance = state.isInstanceConn || msg.crowId === this.identity.crowId;
           let feedKeyHex = null;
-          if (state.isInstanceConn && msg.instance_id && this.getFeedKeyForInstance) {
+          if (isInstance && msg.instance_id && this.getFeedKeyForInstance) {
             try { feedKeyHex = await this.getFeedKeyForInstance(msg.instance_id); } catch {}
           }
           const payload = {
@@ -197,11 +204,10 @@ export class PeerManager {
             pubkey: this.identity.ed25519Pubkey,
             crowId: this.identity.crowId,
           };
-          if (state.isInstanceConn && this.localInstanceId) {
+          if (isInstance && this.localInstanceId) {
             payload.instance_id = this.localInstanceId;
           }
           if (feedKeyHex) payload.feed_key_hex = feedKeyHex;
-          console.log(`[peer-manager] challenge from ${msg.crowId} instance_id=${msg.instance_id || "none"} isInstanceConn=${state.isInstanceConn} → respond feed_key=${feedKeyHex ? feedKeyHex.slice(0,16) : "null"}`);
           conn.write(JSON.stringify(payload) + "\n");
         })();
         break;
@@ -228,19 +234,23 @@ export class PeerManager {
 
           conn.write(JSON.stringify({ type: "authenticated" }) + "\n");
 
-          console.log(`[peer-manager] challenge-response from ${msg.crowId} instance_id=${msg.instance_id || "none"} feed_key=${msg.feed_key_hex ? msg.feed_key_hex.slice(0,16) : "none"} isInstanceConn=${state.isInstanceConn}`);
+          // Same-crow_id peer is definitely an instance-sync connection
+          // (peer is one of our own paired instances), regardless of
+          // whether Hyperswarm tagged the connection with our topic.
+          const isInstance = state.isInstanceConn || msg.crowId === this.identity.crowId;
+
           // Peer piggybacked their outgoing Hypercore feed key on the
           // challenge-response — persist it before dispatching so the
           // onInstanceConnected handler can open the inbound feed with
           // the received key on its first attempt. Must include the
           // peer's instance_id so we know which crow_instances row to
           // write to (crow_id is shared across all paired instances).
-          if (state.isInstanceConn && msg.instance_id && msg.feed_key_hex && this.onInstanceKeyReceived) {
+          if (isInstance && msg.instance_id && msg.feed_key_hex && this.onInstanceKeyReceived) {
             Promise.resolve(this.onInstanceKeyReceived(msg.instance_id, msg.feed_key_hex)).catch(() => {});
           }
 
           // Dispatch to the appropriate handler based on connection origin
-          if (state.isInstanceConn && this.onInstanceConnected) {
+          if (isInstance && this.onInstanceConnected) {
             this.onInstanceConnected(msg.crowId, conn);
           } else if (this.onPeerConnected) {
             this.onPeerConnected(msg.crowId, conn);
