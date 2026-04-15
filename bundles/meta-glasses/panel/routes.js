@@ -205,6 +205,16 @@ async function resolveVisionProfileConfig(db, device, aiProfile) {
       : (profiles.find(p => p.isDefault) || profiles[0]);
     if (!profile) return null;
     if (profile.provider_id) {
+      // Ask the GPU orchestrator to make the provider resident before we
+      // resolve + call it. Silent best-effort — if orchestrator isn't
+      // wired or docker control fails, we fall through to the direct
+      // provider call and surface whatever error that produces.
+      try {
+        const { acquireProvider } = await import(pathToFileURL(join(gatewayDir, "gpu-orchestrator.js")).href);
+        await acquireProvider(profile.provider_id);
+      } catch (err) {
+        console.warn(`[meta-glasses] gpu-orchestrator acquire(${profile.provider_id}) failed: ${err.message}`);
+      }
       const { resolveProvider } = await loadResolveProv();
       return resolveProvider(profile.provider_id, profile.model_id);
     }
@@ -545,7 +555,7 @@ LONG WORK via the orchestrator. For research, multi-step analysis, code work, or
                   prompt: "Describe what you see in this image. Be concise (1-3 sentences). This will be spoken to the user via TTS.",
                   imageBytes,
                   mime,
-                  timeoutMs: 10_000,
+                  timeoutMs: 30_000,
                   maxTokens: 300,
                 });
                 description = result.description;
@@ -998,7 +1008,7 @@ async function recordGlassesPhoto({ deviceId, diskPath, fname, mime, size }) {
         prompt: "Briefly describe what's in this image (1 sentence). This is a searchable library caption.",
         imageBytes: readFileSync(diskPath),
         mime,
-        timeoutMs: 20_000,
+        timeoutMs: 30_000,
         maxTokens: 100,
       });
       await db2.execute({

@@ -13,16 +13,17 @@ services:
       - ${GRACKLE_HF_CACHE}:/models
     ports:
       - "${GRACKLE_TAILSCALE_IP}:9102:8000"
-    # Qwen3-VL-8B-Instruct-FP8 (Qwen-published FP8 checkpoint, w8a8 on Blackwell)
+    # Qwen3-VL-4B-Instruct-FP8 — fits on 16 GB card alongside embed+rerank.
+    # 8B OOMs on grackle's RTX 5060 Ti (weights 10.96 GiB + KV 4.62 GiB > 15.48 GiB).
     command:
-      - --model=Qwen/Qwen3-VL-8B-Instruct-FP8
-      - --served-model-name=qwen3-vl-8b-instruct-fp8
+      - --model=Qwen/Qwen3-VL-4B-Instruct-FP8
+      - --served-model-name=qwen3-vl-4b-instruct-fp8
       - --host=0.0.0.0
       - --port=8000
       - --quantization=fp8
-      - --max-model-len=16384
-      - --gpu-memory-utilization=0.80
-      - --max-num-seqs=4
+      - --max-model-len=8192
+      - --gpu-memory-utilization=0.75
+      - --max-num-seqs=2
     restart: "no"
     ipc: host
     shm_size: 4g

@@ -68,11 +68,12 @@
       ]
     },
     "grackle-embed": {
-      "$description": "Text embeddings for semantic memory/research/blog search. Qwen3-Embedding-0.6B BF16 via vLLM-CUDA on grackle.",
+      "$description": "Text embeddings for semantic memory/research/blog search. Qwen3-Embedding-0.6B BF16 via vLLM-CUDA on grackle. Always-resident (kept up by gpu-orchestrator) because embed outages silently break memory stores.",
       "baseUrl": "http://100.121.254.89:9100/v1",
       "apiKey": "none",
       "host": "grackle-5fc01ac74463b6f4",
       "bundleId": "vllm-cuda-embed",
+      "alwaysResident": true,
       "models": [
         {
           "id": "qwen3-embedding-0.6b",
@@ -85,11 +86,12 @@
       ]
     },
     "grackle-rerank": {
-      "$description": "Cross-encoder reranker for top-K reordering after hybrid FTS+vector retrieval. Qwen3-Reranker-0.6B BF16 via vLLM-CUDA on grackle.",
+      "$description": "Cross-encoder reranker for top-K reordering after hybrid FTS+vector retrieval. Qwen3-Reranker-0.6B BF16 via vLLM-CUDA on grackle. Shares mutex group grackle-specialists-swap with grackle-vision on the 16 GB card.",
       "baseUrl": "http://100.121.254.89:9101/v1",
       "apiKey": "none",
       "host": "grackle-5fc01ac74463b6f4",
       "bundleId": "vllm-cuda-rerank",
+      "mutexGroup": "grackle-specialists-swap",
       "models": [
         {
           "id": "qwen3-reranker-0.6b",
@@ -100,18 +102,18 @@
       ]
     },
     "grackle-vision": {
-      "$description": "Vision-language model for image understanding + OCR + structured output. Qwen3-VL-8B-Instruct-FP8 via vLLM-CUDA on grackle. On-demand; mutex with grackle-embed + grackle-rerank (vision temporarily unloads them).",
+      "$description": "Vision-language model for image understanding + OCR + structured output. Qwen3-VL-4B-Instruct-FP8 via vLLM-CUDA on grackle. Swapped in on demand by gpu-orchestrator; mutex with grackle-rerank.",
       "baseUrl": "http://100.121.254.89:9102/v1",
       "apiKey": "none",
       "host": "grackle-5fc01ac74463b6f4",
       "bundleId": "vllm-cuda-vision",
+      "mutexGroup": "grackle-specialists-swap",
       "models": [
         {
-          "id": "qwen3-vl-8b-instruct-fp8",
+          "id": "qwen3-vl-4b-instruct-fp8",
           "contextLen": 16384,
           "warm": false,
           "onDemand": true,
-          "mutexGroup": "grackle-specialists",
           "priority": "interactive"
         }
       ]

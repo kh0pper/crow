@@ -1117,6 +1117,15 @@ const server = app.listen(PORT, "0.0.0.0", (error) => {
     console.error("[auto-update] Failed to start:", err.message);
   });
 
+  // Bring up alwaysResident vLLM bundles (embed, etc.) via gpu-orchestrator.
+  // Non-fatal — if docker isn't available the gateway still runs; bundles
+  // just have to be started manually.
+  import("./gpu-orchestrator.js").then(({ initOrchestrator }) => {
+    initOrchestrator().catch((err) => {
+      console.warn(`[gpu-orchestrator] init failed: ${err.message}`);
+    });
+  });
+
   // Start schedule executor
   startScheduler(createDbClient()).catch((err) => {
     console.error("[scheduler] Failed to start:", err.message);
