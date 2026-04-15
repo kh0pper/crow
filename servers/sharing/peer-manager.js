@@ -34,8 +34,9 @@ export class PeerManager {
     this.onPeerData = null; // callback(crowId, data)
     this.onPeerDisconnected = null; // callback(crowId)
     this.onInstanceConnected = null; // callback(crowId, conn) — instance-to-instance connections
-    this.onInstanceKeyReceived = null; // callback(crowId, feedKeyHex) — peer advertised their outgoing Hypercore feed key
-    this.getFeedKeyForCrow = null; // async (remoteCrowId) => hex — wired by server.js to look up our outgoing feed key for this peer
+    this.onInstanceKeyReceived = null; // callback(remoteInstanceId, feedKeyHex) — peer advertised their outgoing Hypercore feed key
+    this.getFeedKeyForInstance = null; // async (remoteInstanceId) => hex — our outgoing feed key to this specific peer instance
+    this.localInstanceId = null; // wired by server.js — the local Crow instance id we advertise to peers
   }
 
   /**
@@ -121,14 +122,21 @@ export class PeerManager {
     let remoteCrowId = null;
     const isInstanceConn = this._isInstanceConnection(info);
 
-    // Send challenge
+    // Send challenge. On instance-sync connections we also advertise our
+    // local instance_id so the peer can look up OUR row in their
+    // crow_instances table (crow_id alone is ambiguous — all instances of
+    // the same user share one Crow identity).
     const challenge = randomBytes(32);
-    conn.write(JSON.stringify({
+    const challengePayload = {
       type: "challenge",
       challenge: challenge.toString("hex"),
       pubkey: this.identity.ed25519Pubkey,
       crowId: this.identity.crowId,
-    }) + "\n");
+    };
+    if (isInstanceConn && this.localInstanceId) {
+      challengePayload.instance_id = this.localInstanceId;
+    }
+    conn.write(JSON.stringify(challengePayload) + "\n");
 
     let buffer = "";
     conn.on("data", (data) => {
@@ -173,12 +181,14 @@ export class PeerManager {
         // Respond with signed challenge + our own challenge response. On
         // instance-sync connections we also ride our outgoing Hypercore feed
         // key on this message so the peer can open its inbound feed without
-        // any additional round-trips (see getFeedKeyForCrow wiring in server.js).
+        // any additional round-trips. Peer is identified by their
+        // instance_id (crow_id alone is ambiguous — all paired instances of
+        // the same user share one Crow identity).
         (async () => {
           const response = sign(msg.challenge, this.identity.ed25519Priv);
           let feedKeyHex = null;
-          if (state.isInstanceConn && this.getFeedKeyForCrow) {
-            try { feedKeyHex = await this.getFeedKeyForCrow(msg.crowId); } catch {}
+          if (state.isInstanceConn && msg.instance_id && this.getFeedKeyForInstance) {
+            try { feedKeyHex = await this.getFeedKeyForInstance(msg.instance_id); } catch {}
           }
           const payload = {
             type: "challenge-response",
@@ -186,6 +196,9 @@ export class PeerManager {
             pubkey: this.identity.ed25519Pubkey,
             crowId: this.identity.crowId,
           };
+          if (state.isInstanceConn && this.localInstanceId) {
+            payload.instance_id = this.localInstanceId;
+          }
           if (feedKeyHex) payload.feed_key_hex = feedKeyHex;
           conn.write(JSON.stringify(payload) + "\n");
         })();
@@ -216,9 +229,11 @@ export class PeerManager {
           // Peer piggybacked their outgoing Hypercore feed key on the
           // challenge-response — persist it before dispatching so the
           // onInstanceConnected handler can open the inbound feed with
-          // the received key on its first attempt.
-          if (state.isInstanceConn && msg.feed_key_hex && this.onInstanceKeyReceived) {
-            Promise.resolve(this.onInstanceKeyReceived(msg.crowId, msg.feed_key_hex)).catch(() => {});
+          // the received key on its first attempt. Must include the
+          // peer's instance_id so we know which crow_instances row to
+          // write to (crow_id is shared across all paired instances).
+          if (state.isInstanceConn && msg.instance_id && msg.feed_key_hex && this.onInstanceKeyReceived) {
+            Promise.resolve(this.onInstanceKeyReceived(msg.instance_id, msg.feed_key_hex)).catch(() => {});
           }
 
           // Dispatch to the appropriate handler based on connection origin
