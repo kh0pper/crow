@@ -74,7 +74,7 @@ services:
         condition: service_healthy
     environment:
       FUNKWHALE_HOSTNAME: ${FUNKWHALE_HOSTNAME}
-      FUNKWHALE_PROTOCOL: https
+      FUNKWHALE_PROTOCOL: ${FUNKWHALE_PROTOCOL:-https}
       DJANGO_SECRET_KEY: ${FUNKWHALE_DJANGO_SECRET_KEY}
       DATABASE_URL: postgresql://funkwhale:${FUNKWHALE_POSTGRES_PASSWORD}@postgres:5432/funkwhale
       CACHE_URL: redis://redis:6379/0
@@ -177,11 +177,16 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    # Tailnet-direct path (set FUNKWHALE_NGINX_BIND_ADDR=<tailnet-ip> in .env
+    # to skip Caddy for local/tailnet deployments). Leave unset for federation
+    # installs — Caddy reverse-proxies via the crow-federation network.
+    ports:
+      - "${FUNKWHALE_NGINX_BIND_ADDR:-127.0.0.1}:${FUNKWHALE_NGINX_BIND_PORT:-8600}:80"
     environment:
       FUNKWHALE_API_IP: api
       FUNKWHALE_API_PORT: "5000"
       FUNKWHALE_HOSTNAME: ${FUNKWHALE_HOSTNAME}
-      FUNKWHALE_PROTOCOL: https
+      FUNKWHALE_PROTOCOL: ${FUNKWHALE_PROTOCOL:-https}
       NGINX_MAX_BODY_SIZE: ${FUNKWHALE_NGINX_MAX_BODY_SIZE:-100M}
     volumes:
       - ${FUNKWHALE_DATA_DIR:-~/.crow/funkwhale}/data:/srv/funkwhale/data:ro
