@@ -34,6 +34,8 @@ export class PeerManager {
     this.onPeerData = null; // callback(crowId, data)
     this.onPeerDisconnected = null; // callback(crowId)
     this.onInstanceConnected = null; // callback(crowId, conn) — instance-to-instance connections
+    this.onInstanceKeyReceived = null; // callback(crowId, feedKeyHex) — peer advertised their outgoing Hypercore feed key
+    this.getFeedKeyForCrow = null; // async (remoteCrowId) => hex — wired by server.js to look up our outgoing feed key for this peer
   }
 
   /**
@@ -168,14 +170,25 @@ export class PeerManager {
   _handleMessage(conn, msg, ourChallenge, state, setState) {
     switch (msg.type) {
       case "challenge": {
-        // Respond with signed challenge + our own challenge response
-        const response = sign(msg.challenge, this.identity.ed25519Priv);
-        conn.write(JSON.stringify({
-          type: "challenge-response",
-          signature: response,
-          pubkey: this.identity.ed25519Pubkey,
-          crowId: this.identity.crowId,
-        }) + "\n");
+        // Respond with signed challenge + our own challenge response. On
+        // instance-sync connections we also ride our outgoing Hypercore feed
+        // key on this message so the peer can open its inbound feed without
+        // any additional round-trips (see getFeedKeyForCrow wiring in server.js).
+        (async () => {
+          const response = sign(msg.challenge, this.identity.ed25519Priv);
+          let feedKeyHex = null;
+          if (state.isInstanceConn && this.getFeedKeyForCrow) {
+            try { feedKeyHex = await this.getFeedKeyForCrow(msg.crowId); } catch {}
+          }
+          const payload = {
+            type: "challenge-response",
+            signature: response,
+            pubkey: this.identity.ed25519Pubkey,
+            crowId: this.identity.crowId,
+          };
+          if (feedKeyHex) payload.feed_key_hex = feedKeyHex;
+          conn.write(JSON.stringify(payload) + "\n");
+        })();
         break;
       }
 
@@ -200,6 +213,14 @@ export class PeerManager {
 
           conn.write(JSON.stringify({ type: "authenticated" }) + "\n");
 
+          // Peer piggybacked their outgoing Hypercore feed key on the
+          // challenge-response — persist it before dispatching so the
+          // onInstanceConnected handler can open the inbound feed with
+          // the received key on its first attempt.
+          if (state.isInstanceConn && msg.feed_key_hex && this.onInstanceKeyReceived) {
+            Promise.resolve(this.onInstanceKeyReceived(msg.crowId, msg.feed_key_hex)).catch(() => {});
+          }
+
           // Dispatch to the appropriate handler based on connection origin
           if (state.isInstanceConn && this.onInstanceConnected) {
             this.onInstanceConnected(msg.crowId, conn);
@@ -220,6 +241,16 @@ export class PeerManager {
       case "data": {
         if (state.authenticated && state.remoteCrowId && this.onPeerData) {
           this.onPeerData(state.remoteCrowId, msg.payload);
+        }
+        break;
+      }
+
+      case "feed-key-announce": {
+        // Peer advertises the Hypercore feed key they use to write to us.
+        // We persist it so future gateway starts can open the inbound feed
+        // without waiting for a fresh Hyperswarm handshake.
+        if (state.authenticated && state.remoteCrowId && this.onInstanceKeyReceived && msg.feed_key_hex) {
+          this.onInstanceKeyReceived(state.remoteCrowId, msg.feed_key_hex);
         }
         break;
       }
