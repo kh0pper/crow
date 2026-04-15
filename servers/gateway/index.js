@@ -1058,7 +1058,12 @@ const server = app.listen(PORT, "0.0.0.0", (error) => {
         console.warn("[tailnet-sync] InstanceSyncManager not ready; skipping");
         return;
       }
-      const ctx = { identity: loadOrCreateIdentity(), instanceSyncManager: ism, db: createDbClient() };
+      const ctx = {
+        identity: loadOrCreateIdentity(),
+        instanceSyncManager: ism,
+        db: createDbClient(),
+        gatewayPort: PORT,
+      };
       setupTailnetSyncServer(server, ctx);
       await startTailnetSyncClients(ctx);
     } catch (err) {

@@ -51,13 +51,44 @@ function verifyHandshakePayload(payload, expectedPubkeyHex) {
   return verify(message, payload.sig_hex, expectedPubkeyHex);
 }
 
-function gatewayUrlToWsUrl(gatewayUrl) {
-  if (!gatewayUrl) return null;
-  const u = String(gatewayUrl).replace(/\/$/, "");
-  if (u.startsWith("https://")) return u.replace(/^https:/, "wss:") + WS_PATH;
-  if (u.startsWith("http://")) return u.replace(/^http:/, "ws:") + WS_PATH;
-  if (u.startsWith("wss://") || u.startsWith("ws://")) return u + WS_PATH;
-  return `ws://${u}${WS_PATH}`;
+/**
+ * Derive a WebSocket URL for tailnet-sync from a peer's crow_instances row.
+ * Prefers a direct tailnet-port endpoint over public Funnel URLs because the
+ * Tailscale Funnel only proxies a curated public path-list (/blog etc.) — the
+ * /api/instance-sync/stream path is deliberately not exposed publicly.
+ *
+ * Resolution order:
+ *   1. tailscale_ip + CROW_GATEWAY_PORT (default 3002) — the canonical tailnet path.
+ *   2. host of gateway_url + CROW_GATEWAY_PORT — when tailscale_ip is unset
+ *      but gateway_url's host is a magic-dns name we can re-port-target.
+ *   3. gateway_url as-is (last resort; works only if the operator has wired
+ *      Funnel/proxy to forward /api/instance-sync/stream — uncommon).
+ */
+function peerToWsUrl(peer, fallbackPort = 3002) {
+  // Prefer the peer's explicit port from gateway_url; only fall back to
+  // fallbackPort when the URL has none. (Each Crow may run on a different
+  // port — crow uses 3001, grackle uses 3002.)
+  let portFromUrl = null;
+  let hostFromUrl = null;
+  const raw = peer?.gateway_url;
+  if (raw) {
+    const noScheme = String(raw).replace(/^[a-z]+:\/\//, "").split("/")[0];
+    const colonIdx = noScheme.lastIndexOf(":");
+    if (colonIdx >= 0) {
+      hostFromUrl = noScheme.slice(0, colonIdx);
+      const p = parseInt(noScheme.slice(colonIdx + 1), 10);
+      if (!Number.isNaN(p)) portFromUrl = p;
+    } else {
+      hostFromUrl = noScheme;
+    }
+    // Treat the public Funnel port (443) as "no usable port" — Funnel only
+    // proxies a public path-list, which excludes /api/instance-sync/stream.
+    if (portFromUrl === 443) portFromUrl = null;
+  }
+  const port = portFromUrl || fallbackPort;
+  if (peer?.tailscale_ip) return `ws://${peer.tailscale_ip}:${port}${WS_PATH}`;
+  if (hostFromUrl) return `ws://${hostFromUrl}:${port}${WS_PATH}`;
+  return null;
 }
 
 /**
@@ -266,7 +297,7 @@ class PeerDialer {
   async connect() {
     if (this.stopped) return;
     const { identity, instanceSyncManager, db } = this.ctx;
-    const wsUrl = gatewayUrlToWsUrl(this.peer.gateway_url);
+    const wsUrl = peerToWsUrl(this.peer, this.ctx.gatewayPort);
     if (!wsUrl) {
       // No tailnet endpoint to dial; leave for Hyperswarm.
       return;
@@ -384,7 +415,7 @@ export async function startTailnetSyncClients(ctx) {
     let rows;
     try {
       const r = await db.execute({
-        sql: "SELECT id, gateway_url, sync_url, status FROM crow_instances WHERE status IN ('active','offline') AND id != ?",
+        sql: "SELECT id, gateway_url, tailscale_ip, sync_url, status FROM crow_instances WHERE status IN ('active','offline') AND id != ?",
         args: [instanceSyncManager.localInstanceId],
       });
       rows = r.rows;
