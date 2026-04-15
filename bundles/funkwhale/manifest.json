@@ -9,6 +9,10 @@
   "tags": ["music", "funkwhale", "activitypub", "fediverse", "federated", "audio", "podcasts"],
   "icon": "music",
   "docker": { "composefile": "docker-compose.yml" },
+  "storage": {
+    "translator": "funkwhale",
+    "bucket": "funkwhale"
+  },
   "server": {
     "command": "node",
     "args": ["server/index.js"],
