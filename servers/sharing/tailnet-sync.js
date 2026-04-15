@@ -272,6 +272,14 @@ class PeerDialer {
       return;
     }
     if (this.peer.id === instanceSyncManager.localInstanceId) return; // self
+    // Deterministic dialer election: exactly one side dials, the other side
+    // accepts. We dial only when our id sorts BEFORE the peer's id. This
+    // prevents both sides from opening their own connection (and calling
+    // feed.replicate on the same feed twice, which throws inside Hypercore).
+    if (instanceSyncManager.localInstanceId >= this.peer.id) {
+      // Wait passively for the peer's inbound dial.
+      return;
+    }
 
     let ws;
     try { ws = new WebSocket(wsUrl, { handshakeTimeout: HANDSHAKE_TIMEOUT_MS, rejectUnauthorized: false }); }
