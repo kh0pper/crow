@@ -136,6 +136,7 @@ export class PeerManager {
     if (isInstanceConn && this.localInstanceId) {
       challengePayload.instance_id = this.localInstanceId;
     }
+    console.log(`[peer-manager] sending challenge isInstanceConn=${isInstanceConn} localInstanceId=${this.localInstanceId?.slice(0,12) || "null"}`);
     conn.write(JSON.stringify(challengePayload) + "\n");
 
     let buffer = "";
@@ -200,6 +201,7 @@ export class PeerManager {
             payload.instance_id = this.localInstanceId;
           }
           if (feedKeyHex) payload.feed_key_hex = feedKeyHex;
+          console.log(`[peer-manager] challenge from ${msg.crowId} instance_id=${msg.instance_id || "none"} isInstanceConn=${state.isInstanceConn} → respond feed_key=${feedKeyHex ? feedKeyHex.slice(0,16) : "null"}`);
           conn.write(JSON.stringify(payload) + "\n");
         })();
         break;
@@ -226,6 +228,7 @@ export class PeerManager {
 
           conn.write(JSON.stringify({ type: "authenticated" }) + "\n");
 
+          console.log(`[peer-manager] challenge-response from ${msg.crowId} instance_id=${msg.instance_id || "none"} feed_key=${msg.feed_key_hex ? msg.feed_key_hex.slice(0,16) : "none"} isInstanceConn=${state.isInstanceConn}`);
           // Peer piggybacked their outgoing Hypercore feed key on the
           // challenge-response — persist it before dispatching so the
           // onInstanceConnected handler can open the inbound feed with
