@@ -671,55 +671,58 @@ export function createSharingServer(dbPath, options = {}) {
     }
   };
 
-  // peer-manager asks us for OUR outgoing feed key to a given peer crow_id
-  // so it can piggyback the key on the challenge-response JSON message.
-  // Called once per incoming challenge. We return null if we don't have a
-  // crow_instances row for this crow_id yet — in that case the peer will
-  // learn our key on the next handshake after we pair.
-  peerManager.getFeedKeyForCrow = async (remoteCrowId) => {
+  // Advertise our own local instance_id to peer-manager so it can include
+  // the id on the challenge/challenge-response JSON (disambiguates peers
+  // when all instances of one user share one crow_id).
+  peerManager.localInstanceId = instanceSyncManager.localInstanceId;
+
+  // peer-manager asks us for OUR outgoing feed key to a specific peer
+  // instance (remoteInstanceId is the peer's local id, which matches the
+  // `id` column in our crow_instances table for that peer's row).
+  peerManager.getFeedKeyForInstance = async (remoteInstanceId) => {
     try {
+      // Only return a key if we actually have a paired row for this instance.
       const { rows } = await db.execute({
-        sql: "SELECT id FROM crow_instances WHERE crow_id = ? AND status IN ('active','offline') AND id != ? LIMIT 1",
-        args: [remoteCrowId, instanceSyncManager.localInstanceId],
+        sql: "SELECT id FROM crow_instances WHERE id = ? AND status IN ('active','offline') AND id != ? LIMIT 1",
+        args: [remoteInstanceId, instanceSyncManager.localInstanceId],
       });
       if (rows.length === 0) return null;
-      // Ensure the outbound feed exists so getOutFeedKey can return something.
-      await instanceSyncManager.initInstance(rows[0].id, null);
-      const key = instanceSyncManager.getOutFeedKey(rows[0].id);
+      // Ensure our outbound feed to this peer exists before asking for the key.
+      await instanceSyncManager.initInstance(remoteInstanceId, null);
+      const key = instanceSyncManager.getOutFeedKey(remoteInstanceId);
       return key ? key.toString("hex") : null;
     } catch (err) {
-      console.warn(`[sharing] getFeedKeyForCrow for ${remoteCrowId}:`, err.message);
+      console.warn(`[sharing] getFeedKeyForInstance for ${remoteInstanceId}:`, err.message);
       return null;
     }
   };
 
   // Persist a peer-advertised feed key so we can open their incoming feed.
-  // Called when the peer piggybacks feed_key_hex on the challenge-response
-  // JSON message (see peer-manager.js).
-  peerManager.onInstanceKeyReceived = async (remoteCrowId, feedKeyHex) => {
+  // Called when the peer piggybacks (instance_id, feed_key_hex) on the
+  // challenge-response JSON message (see peer-manager.js).
+  peerManager.onInstanceKeyReceived = async (remoteInstanceId, feedKeyHex) => {
     try {
       const { rows } = await db.execute({
-        sql: "SELECT id, sync_url FROM crow_instances WHERE crow_id = ? AND status IN ('active','offline') AND id != ?",
-        args: [remoteCrowId, instanceSyncManager.localInstanceId],
+        sql: "SELECT sync_url FROM crow_instances WHERE id = ? AND status IN ('active','offline') AND id != ?",
+        args: [remoteInstanceId, instanceSyncManager.localInstanceId],
       });
-      for (const inst of rows) {
-        if (inst.sync_url === feedKeyHex) continue; // unchanged — skip
-        await db.execute({
-          sql: "UPDATE crow_instances SET sync_url = ?, updated_at = datetime('now') WHERE id = ?",
-          args: [feedKeyHex, inst.id],
-        });
-        console.log(`[sharing] Stored feed key from ${remoteCrowId} for instance ${inst.id.slice(0, 12)}…`);
-        // Open the incoming feed now that we have the key. initInstance is
-        // idempotent — re-calling with a non-null feedKey adds the inFeed
-        // without disturbing the already-open outFeed.
-        try {
-          await instanceSyncManager.initInstance(inst.id, Buffer.from(feedKeyHex, "hex"));
-        } catch (err) {
-          console.warn(`[sharing] Failed to open inbound feed after key exchange: ${err.message}`);
-        }
+      if (rows.length === 0) return; // Not paired with this instance_id — drop
+      if (rows[0].sync_url === feedKeyHex) return; // unchanged — skip
+      await db.execute({
+        sql: "UPDATE crow_instances SET sync_url = ?, updated_at = datetime('now') WHERE id = ?",
+        args: [feedKeyHex, remoteInstanceId],
+      });
+      console.log(`[sharing] Stored feed key for instance ${remoteInstanceId.slice(0, 12)}…`);
+      // Open the incoming feed now that we have the key. initInstance is
+      // idempotent — re-calling with a non-null feedKey adds the inFeed
+      // without disturbing the already-open outFeed.
+      try {
+        await instanceSyncManager.initInstance(remoteInstanceId, Buffer.from(feedKeyHex, "hex"));
+      } catch (err) {
+        console.warn(`[sharing] Failed to open inbound feed after key exchange: ${err.message}`);
       }
     } catch (err) {
-      console.warn(`[sharing] onInstanceKeyReceived for ${remoteCrowId}:`, err.message);
+      console.warn(`[sharing] onInstanceKeyReceived for ${remoteInstanceId}:`, err.message);
     }
   };
 
