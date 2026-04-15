@@ -61,40 +61,75 @@ function gatewayUrlToWsUrl(gatewayUrl) {
 }
 
 /**
- * Read one JSON-text-frame from a WebSocket with a timeout.
- * Throws on timeout or when the socket closes first.
+ * Attach a JSON-text-frame queue to a WebSocket and return a `readJsonFrame`
+ * function that consumes frames in order. Necessary because the server
+ * sometimes sends multiple text frames back-to-back during the handshake;
+ * a one-shot ws.once("message") listener would miss the second frame.
+ *
+ * Once the WS hands off to Hypercore (binary replication), call detach() to
+ * stop intercepting frames so binary data flows through cleanly.
  */
-function readJsonFrame(ws, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const onMsg = (data, isBinary) => {
-      if (isBinary) {
-        cleanup();
-        return reject(new Error("expected text frame, got binary"));
-      }
-      cleanup();
-      try { resolve(JSON.parse(data.toString())); }
-      catch (err) { reject(err); }
-    };
-    const onClose = () => { cleanup(); reject(new Error("socket closed during handshake")); };
-    const onError = (err) => { cleanup(); reject(err); };
-    const timer = setTimeout(() => { cleanup(); reject(new Error("handshake timeout")); }, timeoutMs);
-    function cleanup() {
-      clearTimeout(timer);
-      ws.off("message", onMsg);
-      ws.off("close", onClose);
-      ws.off("error", onError);
-    }
-    ws.on("message", onMsg);
-    ws.on("close", onClose);
-    ws.on("error", onError);
-  });
+function attachFrameReader(ws) {
+  const queue = [];
+  const waiters = [];
+  let closed = false;
+  let closeReason = null;
+
+  function onMsg(data, isBinary) {
+    if (isBinary) return; // binary frames aren't ours — let Hypercore take them
+    let parsed;
+    try { parsed = JSON.parse(data.toString()); }
+    catch { return; }
+    if (waiters.length > 0) waiters.shift().resolve(parsed);
+    else queue.push(parsed);
+  }
+  function onClose() {
+    closed = true;
+    closeReason = new Error("socket closed during handshake");
+    for (const w of waiters) w.reject(closeReason);
+    waiters.length = 0;
+  }
+  function onError(err) {
+    closed = true;
+    closeReason = err;
+    for (const w of waiters) w.reject(err);
+    waiters.length = 0;
+  }
+
+  ws.on("message", onMsg);
+  ws.on("close", onClose);
+  ws.on("error", onError);
+
+  function detach() {
+    ws.off("message", onMsg);
+    ws.off("close", onClose);
+    ws.off("error", onError);
+  }
+  function readJsonFrame(timeoutMs) {
+    if (closed) return Promise.reject(closeReason || new Error("socket closed"));
+    if (queue.length > 0) return Promise.resolve(queue.shift());
+    return new Promise((resolve, reject) => {
+      const w = { resolve, reject };
+      waiters.push(w);
+      const timer = setTimeout(() => {
+        const idx = waiters.indexOf(w);
+        if (idx >= 0) waiters.splice(idx, 1);
+        reject(new Error("handshake timeout"));
+      }, timeoutMs);
+      const origResolve = w.resolve;
+      const origReject = w.reject;
+      w.resolve = (v) => { clearTimeout(timer); origResolve(v); };
+      w.reject = (e) => { clearTimeout(timer); origReject(e); };
+    });
+  }
+  return { readJsonFrame, detach };
 }
 
 /**
  * Server-side handler for an authenticated WS connection.
  * Performs reverse handshake, feed-key exchange, then pipes Hypercore replication.
  */
-async function handleAcceptedConnection(ws, peerHandshake, ctx) {
+async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
   const { identity, instanceSyncManager, db, log = console } = ctx;
   const remoteInstanceId = peerHandshake.instance_id;
 
@@ -133,7 +168,7 @@ async function handleAcceptedConnection(ws, peerHandshake, ctx) {
   ws.send(JSON.stringify({ feed_key_hex: ourOutKey ? ourOutKey.toString("hex") : null }));
 
   let peerKeyMsg;
-  try { peerKeyMsg = await readJsonFrame(ws, HANDSHAKE_TIMEOUT_MS); }
+  try { peerKeyMsg = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS); }
   catch (err) {
     log.warn?.(`[tailnet-sync] feed-key frame missing from ${remoteInstanceId}: ${err.message}`);
     ws.close(1002, "no feed key");
@@ -161,6 +196,7 @@ async function handleAcceptedConnection(ws, peerHandshake, ctx) {
   } catch {}
 
   // Hand the WS off to Hypercore for binary replication framing.
+  frameReader.detach();
   const stream = createWebSocketStream(ws, { allowHalfOpen: false });
   stream.on("error", () => {}); // hypercore-protocol logs its own errors; suppress to avoid crashes
   await instanceSyncManager.replicate(remoteInstanceId, stream);
@@ -178,17 +214,20 @@ export function setupTailnetSyncServer(server, ctx) {
   server.on("upgrade", async (req, socket, head) => {
     if (!req.url || !req.url.startsWith(WS_PATH)) return; // let other handlers process
     wss.handleUpgrade(req, socket, head, async (ws) => {
+      const frameReader = attachFrameReader(ws);
       try {
         // Read peer's handshake first.
-        const peerHs = await readJsonFrame(ws, HANDSHAKE_TIMEOUT_MS);
+        const peerHs = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS);
         if (!verifyHandshakePayload(peerHs, identity.ed25519Pubkey)) {
           log.warn?.(`[tailnet-sync] handshake sig invalid from ${req.socket.remoteAddress}`);
           ws.close(1008, "bad sig");
+          frameReader.detach();
           return;
         }
-        await handleAcceptedConnection(ws, peerHs, ctx);
+        await handleAcceptedConnection(ws, peerHs, frameReader, ctx);
       } catch (err) {
         log.warn?.(`[tailnet-sync] inbound conn error: ${err.message}`);
+        frameReader.detach();
         try { ws.close(1011, "internal error"); } catch {}
       }
     });
@@ -242,15 +281,17 @@ class PeerDialer {
     }
     this.ws = ws;
 
+    const frameReader = attachFrameReader(ws);
     ws.once("open", async () => {
       try {
         // Send our handshake.
         ws.send(JSON.stringify(buildHandshakePayload(identity, instanceSyncManager.localInstanceId)));
         // Read server handshake.
-        const serverHs = await readJsonFrame(ws, HANDSHAKE_TIMEOUT_MS);
+        const serverHs = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS);
         if (!verifyHandshakePayload(serverHs, identity.ed25519Pubkey)) {
           console.warn(`[tailnet-sync] server handshake sig invalid from ${wsUrl}`);
           ws.close(1008, "bad sig");
+          frameReader.detach();
           return;
         }
         // Server said its instance_id. If matches a different paired record,
@@ -259,11 +300,12 @@ class PeerDialer {
         if (remoteInstanceId === instanceSyncManager.localInstanceId) {
           console.warn(`[tailnet-sync] server claims our own instance_id; closing`);
           ws.close(1008, "self");
+          frameReader.detach();
           return;
         }
 
         // Receive server's feed key.
-        const peerKeyMsg = await readJsonFrame(ws, HANDSHAKE_TIMEOUT_MS);
+        const peerKeyMsg = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS);
         // Send ours.
         await instanceSyncManager.initInstance(remoteInstanceId, peerKeyMsg?.feed_key_hex ? Buffer.from(peerKeyMsg.feed_key_hex, "hex") : null);
         const ourOutKey = instanceSyncManager.getOutFeedKey(remoteInstanceId);
@@ -294,12 +336,14 @@ class PeerDialer {
         this.retryMs = RETRY_BASE_MS;
 
         // Hand off to Hypercore.
+        frameReader.detach();
         const stream = createWebSocketStream(ws, { allowHalfOpen: false });
         stream.on("error", () => {});
         await instanceSyncManager.replicate(remoteInstanceId, stream);
         console.log(`[tailnet-sync] replicating with peer ${remoteInstanceId.slice(0,12)}… (client side)`);
       } catch (err) {
         console.warn(`[tailnet-sync] outbound conn error to ${wsUrl}: ${err.message}`);
+        frameReader.detach();
         try { ws.close(); } catch {}
       }
     });
