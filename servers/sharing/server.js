@@ -686,12 +686,10 @@ export function createSharingServer(dbPath, options = {}) {
         sql: "SELECT id FROM crow_instances WHERE id = ? AND status IN ('active','offline') AND id != ? LIMIT 1",
         args: [remoteInstanceId, instanceSyncManager.localInstanceId],
       });
-      console.log(`[sharing] getFeedKeyForInstance(${remoteInstanceId?.slice(0,12)}) rows=${rows.length} localInstanceId=${instanceSyncManager.localInstanceId?.slice(0,12)}`);
       if (rows.length === 0) return null;
       // Ensure our outbound feed to this peer exists before asking for the key.
       await instanceSyncManager.initInstance(remoteInstanceId, null);
       const key = instanceSyncManager.getOutFeedKey(remoteInstanceId);
-      console.log(`[sharing] getFeedKeyForInstance result key=${key ? key.toString("hex").slice(0,12) : "null"}`);
       return key ? key.toString("hex") : null;
     } catch (err) {
       console.warn(`[sharing] getFeedKeyForInstance for ${remoteInstanceId}:`, err.message);

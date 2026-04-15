@@ -234,6 +234,16 @@ export class PeerManager {
 
           conn.write(JSON.stringify({ type: "authenticated" }) + "\n");
 
+          // Self-loopback filter: Hyperswarm's DHT discovery on the
+          // instance-sync topic (sha256(crowId+"instance-sync")) can return
+          // ourselves as a candidate peer. Drop the connection before we
+          // invoke any callbacks — there's nothing to sync with ourselves.
+          if (msg.crowId === this.identity.crowId && msg.instance_id && msg.instance_id === this.localInstanceId) {
+            conn.destroy();
+            this.connections.delete(msg.crowId);
+            break;
+          }
+
           // Same-crow_id peer is definitely an instance-sync connection
           // (peer is one of our own paired instances), regardless of
           // whether Hyperswarm tagged the connection with our topic.
@@ -245,7 +255,6 @@ export class PeerManager {
           // the received key on its first attempt. Must include the
           // peer's instance_id so we know which crow_instances row to
           // write to (crow_id is shared across all paired instances).
-          console.log(`[peer-manager] chal-resp from ${msg.crowId} isInstance=${isInstance} instance_id=${msg.instance_id || "-"} feed_key=${msg.feed_key_hex ? msg.feed_key_hex.slice(0,12) : "-"}`);
           if (isInstance && msg.instance_id && msg.feed_key_hex && this.onInstanceKeyReceived) {
             Promise.resolve(this.onInstanceKeyReceived(msg.instance_id, msg.feed_key_hex)).catch(() => {});
           }
