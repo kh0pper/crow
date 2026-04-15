@@ -1044,6 +1044,28 @@ const server = app.listen(PORT, "0.0.0.0", (error) => {
     _setupCallsSignaling(server);
   }
 
+  // Tailnet-transport instance-sync — for paired Crow instances of the same
+  // user we run feed-key-exchange + Hypercore replication over an authenticated
+  // WebSocket on tailnet. Hyperswarm stays in place for contact-peer traffic
+  // and as a fallback for instances that don't have a known gateway_url.
+  (async () => {
+    try {
+      const { setupTailnetSyncServer, startTailnetSyncClients } = await import("../sharing/tailnet-sync.js");
+      const { getInstanceSyncManager } = await import("../sharing/server.js");
+      const { loadOrCreateIdentity } = await import("../sharing/identity.js");
+      const ism = getInstanceSyncManager();
+      if (!ism) {
+        console.warn("[tailnet-sync] InstanceSyncManager not ready; skipping");
+        return;
+      }
+      const ctx = { identity: loadOrCreateIdentity(), instanceSyncManager: ism, db: createDbClient() };
+      setupTailnetSyncServer(server, ctx);
+      await startTailnetSyncClients(ctx);
+    } catch (err) {
+      console.warn("[tailnet-sync] setup failed:", err.message);
+    }
+  })();
+
   // Wire up WebSocket upgrade for extension proxies (needs server instance)
   if (_extensionProxyWsSetup) {
     _extensionProxyWsSetup(server);
