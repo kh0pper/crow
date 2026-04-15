@@ -942,6 +942,64 @@ export function setupWebSocket(server) {
   return { openSessionCount: () => _sessions.size };
 }
 
+/* ---------- Phase 4: audio_stream proxy (Android MediaCodec pending) ----------
+ *
+ * Outbound WebSocket protocol, already ratified in this bundle:
+ *   server → client text:   { type: "audio_stream_start", codec: "mp3"|"ogg"|"aac",
+ *                             sample_rate, channels, content_length? }
+ *   server → client binary: compressed audio bytes for the duration of the stream
+ *   server → client text:   { type: "audio_stream_end", ok: true|false, error? }
+ *
+ * Tool-result shape for producers (funkwhale, podcast bundles, etc.):
+ *   { _audio_stream: { url, codec, sample_rate?, channels? } }
+ *   — the voice-turn loop proxies the URL to the device and never surfaces
+ *   the tool result to the LLM as text.
+ *
+ * pushAudioStream below implements the server side. The Android client must
+ * add a MediaCodec decoder + separate AudioTrack (Phase 4 Android PR). Until
+ * that APK lands, this helper is callable but ineffective on phone.
+ *
+ * Backpressure: chunked at 64KB with WebSocket drain awaits, total in-flight
+ * bounded at 1MB (bufferedAmount check).
+ */
+export async function pushAudioStream(deviceId, { url, codec, sampleRate, channels } = {}) {
+  if (!deviceId || !url || !codec) return { delivered: false, reason: "bad_args" };
+  const sess = _sessions.get(deviceId);
+  if (!sess?.ws) return { delivered: false, reason: "absent" };
+  if (!acquireTurnLock(deviceId, sess.ws)) return { delivered: false, reason: "lock_busy" };
+  try {
+    const resp = await fetch(url, { redirect: "follow" });
+    if (!resp.ok || !resp.body) {
+      sendText(sess.ws, { type: "audio_stream_end", ok: false, error: `HTTP ${resp.status}` });
+      return { delivered: false, reason: `http_${resp.status}` };
+    }
+    const contentLength = Number(resp.headers.get("content-length")) || undefined;
+    sendText(sess.ws, {
+      type: "audio_stream_start",
+      codec, sample_rate: sampleRate || null, channels: channels || null,
+      content_length: contentLength,
+    });
+    const reader = resp.body.getReader();
+    while (true) {
+      // Backpressure: 1MB cap
+      if (sess.ws.bufferedAmount > 1_000_000) {
+        await new Promise(r => setTimeout(r, 50));
+        continue;
+      }
+      const { value, done } = await reader.read();
+      if (done) break;
+      sendBinary(sess.ws, Buffer.from(value));
+    }
+    sendText(sess.ws, { type: "audio_stream_end", ok: true });
+    return { delivered: true };
+  } catch (err) {
+    sendText(sess.ws, { type: "audio_stream_end", ok: false, error: err.message });
+    return { delivered: false, reason: err.message };
+  } finally {
+    releaseTurnLock(deviceId, sess.ws);
+  }
+}
+
 /* ---------- Server-initiated TTS (Phase 3) ---------- */
 
 const DEVICE_PRESENCE_MS = 60_000;
