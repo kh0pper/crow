@@ -342,7 +342,7 @@ class PeerDialer {
         await instanceSyncManager.replicate(remoteInstanceId, stream);
         console.log(`[tailnet-sync] replicating with peer ${remoteInstanceId.slice(0,12)}… (client side)`);
       } catch (err) {
-        console.warn(`[tailnet-sync] outbound conn error to ${wsUrl}: ${err.message}`);
+        console.warn(`[tailnet-sync] outbound conn error to ${wsUrl}: ${err.message}\n${err.stack?.split("\n").slice(0,4).join("\n")}`);
         frameReader.detach();
         try { ws.close(); } catch {}
       }
