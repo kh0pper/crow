@@ -81,6 +81,81 @@ function triggerCapture(sess) {
 const _photoDir = join(homedir(), ".crow", "data", "glasses-photos");
 try { mkdirSync(_photoDir, { recursive: true }); } catch {}
 
+/* ---------- Per-device turn mutex (Phase 2) ----------
+ * Prevents overlapping voice turns on the same device. A rapid second PTT
+ * while the first is still drafting TTS would corrupt the adapter state.
+ * The lock is released in finally, on ws close, or by the 60s watchdog.
+ */
+const _turnLocks = new Map(); // deviceId → { acquiredAt, ws, watchdog }
+const TURN_WATCHDOG_MS = 60_000;
+
+function acquireTurnLock(deviceId, ws) {
+  if (_turnLocks.has(deviceId)) return false;
+  const watchdog = setTimeout(() => {
+    const e = _turnLocks.get(deviceId);
+    if (e && e.ws === ws) {
+      _turnLocks.delete(deviceId);
+      try { sendText(ws, { type: "error", code: "turn_timeout", recoverable: true }); } catch {}
+    }
+  }, TURN_WATCHDOG_MS);
+  _turnLocks.set(deviceId, { acquiredAt: Date.now(), ws, watchdog });
+  return true;
+}
+function releaseTurnLock(deviceId, ws) {
+  const entry = _turnLocks.get(deviceId);
+  if (entry && (!ws || entry.ws === ws)) {
+    clearTimeout(entry.watchdog);
+    _turnLocks.delete(deviceId);
+  }
+}
+
+/* ---------- Destructive-action spoken confirmation (Phase 2) ----------
+ * First call to a destructive tool returns a "confirmation required" prompt
+ * instead of executing. Next turn, the LLM retries the same tool with same
+ * args; if the user's transcript starts with an affirmative token within
+ * 60s, the call runs. Any mismatch clears the pending state.
+ * Per-device map — 'yes' on glasses A cannot fulfill a pending on glasses B.
+ */
+const _pendingConfirms = new Map(); // deviceId → { toolName, argsHash, at }
+const CONFIRM_TTL_MS = 60_000;
+const DESTRUCTIVE_EXACT = new Set([
+  "crow_delete_post",
+  "crow_delete_memory",
+  "crow_delete_setlist",
+  "crow_unpublish_post",
+  "crow_remove_backend",
+  "crow_dismiss_all_notifications",
+]);
+const DESTRUCTIVE_REGEX = /^crow_(delete|remove|destroy|unpublish)_/;
+const AFFIRMATIVE_STARTS = /^\s*(yes|yeah|yep|yup|confirmed?|do it|go ahead|proceed|ok|okay)\b/i;
+const NEGATIVE_STARTS = /^\s*(no|nope|cancel|stop|wait|nevermind|never mind)\b/i;
+
+function isDestructiveTool(name) {
+  if (!name) return false;
+  if (DESTRUCTIVE_EXACT.has(name)) return true;
+  if (DESTRUCTIVE_REGEX.test(name)) return true;
+  return false;
+}
+function describeDestructiveAction(tc) {
+  const base = (tc.name || "").replace(/^crow_/, "").replace(/_/g, " ");
+  const arg = tc.arguments || {};
+  const ref = arg.id || arg.slug || arg.post_id || arg.memory_id || arg.setlist_id || "";
+  return ref ? `${base} ${ref}` : base;
+}
+function canonicalArgsHash(args) {
+  // Canonical JSON (sorted keys, stable recursion) — equality check only.
+  const seen = new WeakSet();
+  const canonical = (v) => {
+    if (v === null || typeof v !== "object") return JSON.stringify(v);
+    if (seen.has(v)) return '"__cycle__"';
+    seen.add(v);
+    if (Array.isArray(v)) return "[" + v.map(canonical).join(",") + "]";
+    const keys = Object.keys(v).sort();
+    return "{" + keys.map(k => JSON.stringify(k) + ":" + canonical(v[k])).join(",") + "}";
+  };
+  return canonical(args || {});
+}
+
 // Per-device short-term conversation history (non-system messages).
 // Keeps the last N turns so follow-ups like "add purple too" retain
 // context. Expires after CONVO_IDLE_MS of inactivity so long gaps
@@ -334,7 +409,17 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
 
     const priorMessages = getConvo(device.id);
     const messages = [
-      { role: "system", content: systemPrompt + "\n\nThe user is speaking to you through Meta Ray-Ban glasses. Keep replies concise and conversational (1-3 short sentences). Plain prose only, no markdown, no lists. When the user asks to remember something or recall something, actually call the appropriate tool — don't just say you will. If a tool returns content explicitly meant to be read aloud (a news briefing, an article, a podcast description, a recall result), recite it in full instead of summarizing — the user is listening, not reading." },
+      { role: "system", content: systemPrompt + `
+
+The user is speaking to you through Meta Ray-Ban glasses. Keep replies concise and conversational (1-3 short sentences). Plain prose only, no markdown, no lists. When the user asks to remember something or recall something, actually call the appropriate tool — don't just say you will.
+
+If a tool returns content explicitly meant to be read aloud (a news briefing, an article, a podcast description, a recall result), recite it in full instead of summarizing — the user is listening, not reading. If a tool result is wrapped in <audio_friendly>…</audio_friendly> tags, read exactly what is between the tags, verbatim, without trimming or paraphrasing.
+
+CAPABILITIES. You can play music (call the music tools), read news (news tools), look up things (crow_search_memories / crow_recall / crow_search_notes / crow_deep_recall), set reminders (crow_create_notification), control smart home, draft blog posts (crow_create_post), and take photos (crow_glasses_capture_photo). Use the tools — don't just say you will.
+
+DESTRUCTIVE TOOLS. For any tool that deletes, removes, unpublishes, or dismisses (e.g. crow_delete_memory, crow_unpublish_post, crow_dismiss_all_notifications), the server will return "Confirmation required" the first time you call it. When that happens, speak the exact confirmation question the server provided and then END YOUR TURN — do not call another tool. The user's next spoken answer will be inspected server-side; if they say yes, retry the SAME tool with the SAME arguments on the next turn and it will execute. If they say no or change topic, drop the action.
+
+LONG WORK via the orchestrator. For research, multi-step analysis, code work, or anything that would take more than one chat turn, call crow_orchestrate with a team preset (research, memory_ops, full, or another from crow_list_presets) — this launches a team of specialized agents in the background. After calling crow_orchestrate, speak a brief ack ("I'm on it…") and then call crow_orchestrate_status periodically with the returned job id until it reports completed. Deliver the summary verbatim if it's <audio_friendly>-wrapped. This single call authorizes whatever the preset's agents need to do; individual confirmation is not re-asked per internal tool.` },
       ...priorMessages,
       { role: "user", content: transcript },
     ];
@@ -393,9 +478,45 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
       const isCaptureTool = (tc) =>
         tc.name === "crow_glasses_capture_photo" ||
         (tc.name === "crow_tools" && tc.arguments?.action === "crow_glasses_capture_photo");
+      // Destructive-tool spoken confirmation. If the LLM calls a destructive
+      // tool, the FIRST call is intercepted — we store the pending state and
+      // return a "confirmation required" tool-result. The LLM is expected to
+      // speak the confirmation question and end the turn. On the NEXT turn,
+      // if the LLM retries the same tool+args AND the user's transcript
+      // starts with an affirmative within 60s, it executes. Anything else
+      // clears the pending state.
+      const confirmNow = (tc) => {
+        if (!isDestructiveTool(tc.name)) return false;
+        const pending = _pendingConfirms.get(device.id);
+        const hash = canonicalArgsHash(tc.arguments);
+        const transcriptOk = AFFIRMATIVE_STARTS.test(transcript || "");
+        const transcriptNo = NEGATIVE_STARTS.test(transcript || "");
+        if (pending
+            && pending.toolName === tc.name
+            && pending.argsHash === hash
+            && (Date.now() - pending.at) < CONFIRM_TTL_MS
+            && transcriptOk
+            && !transcriptNo) {
+          _pendingConfirms.delete(device.id);
+          return true; // proceed to execute
+        }
+        // Fresh — store and return gate message. Clear any stale entry.
+        _pendingConfirms.set(device.id, { toolName: tc.name, argsHash: hash, at: Date.now() });
+        return "gated";
+      };
       const localResults = [];
       const remoteCalls = [];
       for (const tc of toolCalls) {
+        const gate = confirmNow(tc);
+        if (gate === "gated") {
+          localResults.push({
+            id: tc.id,
+            name: tc.name,
+            result: `Confirmation required. Tell the user: "Are you sure you want to ${describeDestructiveAction(tc)}? Say yes to proceed." Then end your turn — do not call another tool.`,
+            isError: false,
+          });
+          continue;
+        }
         if (isCaptureTool(tc)) {
           const sess = _sessions.get(device.id);
           if (!sess) {
@@ -779,9 +900,15 @@ export function setupWebSocket(server) {
             const raw = Buffer.concat(turnBuffer);
             turnBuffer = [];
             const audio = micIsPcm ? wrapPcmAsWav(raw, micSampleRate) : raw;
-            runVoiceTurn(ws, device, audio, turnOpts).catch((err) => {
-              sendText(ws, { type: "error", code: "turn_failed", recoverable: true, message: err.message });
-            });
+            if (!acquireTurnLock(device.id, ws)) {
+              sendText(ws, { type: "error", code: "turn_busy", recoverable: true });
+              break;
+            }
+            runVoiceTurn(ws, device, audio, turnOpts)
+              .catch((err) => {
+                sendText(ws, { type: "error", code: "turn_failed", recoverable: true, message: err.message });
+              })
+              .finally(() => releaseTurnLock(device.id, ws));
             break;
           }
           case "photo_error": {
@@ -802,6 +929,7 @@ export function setupWebSocket(server) {
       ws.on("close", () => {
         clearInterval(pinger);
         if (_sessions.get(deviceId)?.ws === ws) _sessions.delete(deviceId);
+        releaseTurnLock(deviceId, ws);
       });
       ws.on("error", () => { /* close follows */ });
     });
