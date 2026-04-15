@@ -753,6 +753,15 @@ export default function metaGlassesRouter(dashboardAuth) {
         _pendingCaptures.delete(reqId);
         pending.resolve({ ok: true, url, size: req.body.length });
       }
+
+      // Phase 5: fire-and-forget library insert + auto-caption. Runs
+      // after the HTTP response so no user-facing latency.
+      recordGlassesPhoto({
+        deviceId: device.id,
+        diskPath, fname,
+        mime: req.body.length > 0 ? (ext === "png" ? "image/png" : "image/jpeg") : "application/octet-stream",
+        size: req.body.length,
+      }).catch(err => console.warn(`[meta-glasses] library insert failed: ${err.message}`));
     });
 
   /** Serve a stored photo. Authed (so only the Nest / authed LLM callers can read). */
@@ -940,6 +949,97 @@ export function setupWebSocket(server) {
   });
 
   return { openSessionCount: () => _sessions.size };
+}
+
+/* ---------- Phase 5: photo library insert + caption ---------- */
+
+async function recordGlassesPhoto({ deviceId, diskPath, fname, mime, size }) {
+  const { createDbClient } = await loadDb();
+  const db = createDbClient();
+  let photoId;
+  try {
+    const ins = await db.execute({
+      sql: `INSERT INTO glasses_photos (device_id, disk_path, mime, size_bytes)
+            VALUES (?, ?, ?, ?)`,
+      args: [deviceId, diskPath, mime, size],
+    });
+    photoId = Number(ins.lastInsertRowid);
+  } finally {
+    try { db.close(); } catch {}
+  }
+  if (!photoId) return;
+
+  // Fire-and-forget: resolve the default vision profile (no device/AI profile
+  // plumbing here — library captions use the platform default). Skip silently
+  // if no vision profile is set. PII redaction is not yet active (OCR is
+  // deferred; caption only in the first cut).
+  try {
+    const { readSetting } = await loadSettingsReg();
+    const db2 = createDbClient();
+    try {
+      const raw = await readSetting(db2, "vision_profiles");
+      if (!raw) return;
+      let profiles = [];
+      try { profiles = JSON.parse(raw); } catch { return; }
+      const profile = profiles.find(p => p.isDefault) || profiles[0];
+      if (!profile) return;
+      let providerConfig;
+      if (profile.provider_id) {
+        const { resolveProvider } = await loadResolveProv();
+        providerConfig = resolveProvider(profile.provider_id, profile.model_id);
+      } else if (profile.baseUrl && profile.model) {
+        providerConfig = { baseUrl: profile.baseUrl, apiKey: profile.apiKey || "none", model: profile.model };
+      } else { return; }
+
+      const { analyzeImage } = await loadVision();
+      const { readFileSync } = await import("node:fs");
+      const { description } = await analyzeImage({
+        providerConfig,
+        prompt: "Briefly describe what's in this image (1 sentence). This is a searchable library caption.",
+        imageBytes: readFileSync(diskPath),
+        mime,
+        timeoutMs: 20_000,
+        maxTokens: 100,
+      });
+      await db2.execute({
+        sql: `UPDATE glasses_photos SET caption = ? WHERE id = ?`,
+        args: [description || null, photoId],
+      });
+    } finally {
+      try { db2.close(); } catch {}
+    }
+  } catch (err) {
+    console.warn(`[meta-glasses] caption pipeline error for photo ${photoId}: ${err.message}`);
+  }
+}
+
+/**
+ * Search the glasses photo library by caption/OCR.
+ * Returns [{ id, url, caption, ocr_text, captured_at }, ...].
+ */
+export async function searchGlassesPhotos(query, { limit = 10 } = {}) {
+  const { createDbClient, sanitizeFtsQuery } = await loadDb();
+  const db = createDbClient();
+  try {
+    const q = sanitizeFtsQuery ? sanitizeFtsQuery(query || "") : (query || "").replace(/['"]/g, " ");
+    if (!q.trim()) return [];
+    const { rows } = await db.execute({
+      sql: `SELECT g.id, g.disk_path, g.caption, g.ocr_text, g.captured_at
+            FROM glasses_photos g JOIN glasses_photos_fts f ON g.id = f.rowid
+            WHERE glasses_photos_fts MATCH ?
+            ORDER BY g.captured_at DESC LIMIT ?`,
+      args: [q, limit],
+    });
+    return rows.map(r => ({
+      id: r.id,
+      url: `/api/meta-glasses/photo/${encodeURIComponent(String(r.disk_path).split("/").pop())}`,
+      caption: r.caption,
+      ocr_text: r.ocr_text,
+      captured_at: r.captured_at,
+    }));
+  } finally {
+    try { db.close(); } catch {}
+  }
 }
 
 /* ---------- Phase 4: audio_stream proxy (Android MediaCodec pending) ----------

@@ -436,6 +436,52 @@ await initTable("blog_posts FTS triggers", `
   END;
 `);
 
+// --- Meta-glasses photo library (Phase 5) ---
+
+await initTable("glasses_photos table", `
+  CREATE TABLE IF NOT EXISTS glasses_photos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    captured_at TEXT NOT NULL DEFAULT (datetime('now')),
+    minio_key TEXT,
+    disk_path TEXT,
+    caption TEXT,
+    ocr_text TEXT,
+    mime TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL
+  );
+`);
+await initTable("glasses_photos index", `
+  CREATE INDEX IF NOT EXISTS idx_glasses_photos_device_time
+    ON glasses_photos(device_id, captured_at DESC);
+`);
+await initTable("glasses_photos FTS index", `
+  CREATE VIRTUAL TABLE IF NOT EXISTS glasses_photos_fts USING fts5(
+    caption, ocr_text,
+    content=glasses_photos,
+    content_rowid=id,
+    tokenize='unicode61'
+  );
+`);
+await initTable("glasses_photos FTS triggers", `
+  CREATE TRIGGER IF NOT EXISTS glasses_photos_ai AFTER INSERT ON glasses_photos BEGIN
+    INSERT INTO glasses_photos_fts(rowid, caption, ocr_text)
+    VALUES (new.id, new.caption, new.ocr_text);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS glasses_photos_ad AFTER DELETE ON glasses_photos BEGIN
+    INSERT INTO glasses_photos_fts(glasses_photos_fts, rowid, caption, ocr_text)
+    VALUES ('delete', old.id, old.caption, old.ocr_text);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS glasses_photos_au AFTER UPDATE ON glasses_photos BEGIN
+    INSERT INTO glasses_photos_fts(glasses_photos_fts, rowid, caption, ocr_text)
+    VALUES ('delete', old.id, old.caption, old.ocr_text);
+    INSERT INTO glasses_photos_fts(rowid, caption, ocr_text)
+    VALUES (new.id, new.caption, new.ocr_text);
+  END;
+`);
+
 // --- Dashboard Settings ---
 
 await initTable("dashboard_settings table", `
