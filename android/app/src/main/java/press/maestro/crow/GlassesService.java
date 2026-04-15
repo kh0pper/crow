@@ -14,6 +14,9 @@ import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
+import android.media.MediaCodec;
+import android.media.MediaExtractor;
+import android.media.MediaFormat;
 import android.media.MediaRecorder;
 import android.service.quicksettings.TileService;
 import android.os.Build;
@@ -32,6 +35,9 @@ import okio.ByteString;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.nio.ByteBuffer;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -94,6 +100,31 @@ public class GlassesService extends Service {
     private AudioRecord micRecord;
     private Thread micThread;
     private volatile boolean micRunning = false;
+
+    // Phase 4 audio_stream (music / podcast / etc. compressed audio).
+    // Binary frames between audio_stream_start/audio_stream_end are routed
+    // to a temp file; after _end we MediaExtractor + MediaCodec decode to
+    // PCM and play via a separate AudioTrack (musicTrack), so TTS (ttsTrack
+    // via audioTrack field above, USAGE_MEDIA / CONTENT_TYPE_SPEECH) and
+    // music don't collide. When TTS arrives during music playback we duck
+    // musicTrack to 25 % for the TTS utterance.
+    private static final int INBOUND_TTS = 0;
+    private static final int INBOUND_STREAM = 1;
+    private volatile int currentInboundMode = INBOUND_TTS;
+    private AudioTrack musicTrack;
+    private File streamFile;
+    private FileOutputStream streamFileOut;
+    private String streamCodec;
+    private int streamSampleRateHint;
+    private int streamChannelsHint;
+    private Thread streamDecoderThread;
+    private volatile boolean streamDecoding = false;
+    // Outstanding TTS utterances whose drain hasn't completed yet. Tracked
+    // so back-to-back TTS doesn't un-duck music in the middle of utterance N+1
+    // because utterance N's drain finished. duckMusic(true) increments,
+    // drain completion decrements; hitting 0 restores the music volume.
+    private final java.util.concurrent.atomic.AtomicInteger pendingTtsDucks =
+        new java.util.concurrent.atomic.AtomicInteger(0);
 
     @Override
     public void onCreate() {
@@ -378,11 +409,25 @@ public class GlassesService extends Service {
                             ttsStartNanos = System.nanoTime();
                             ttsBytesReceived = 0;
                             ttsBuffer = new ByteArrayOutputStream(64 * 1024);
+                            currentInboundMode = INBOUND_TTS;
+                            duckMusic(true);
                             break;
                         case "tts_end":
                             long elapsedMs = (System.nanoTime() - ttsStartNanos) / 1_000_000L;
                             Log.i(TAG, "tts_end bytes=" + ttsBytesReceived + " elapsed=" + elapsedMs + "ms");
                             playTtsBuffer();
+                            // Ducking is released at the end of TTS playback in playTtsBuffer's
+                            // drain thread; for now schedule a fallback restore if playback fails.
+                            break;
+                        case "audio_stream_start":
+                            beginStream(
+                                msg.optString("codec", "mp3"),
+                                msg.optInt("sample_rate", 0),
+                                msg.optInt("channels", 0)
+                            );
+                            break;
+                        case "audio_stream_end":
+                            endStream(msg.optBoolean("ok", true), msg.optString("error", null));
                             break;
                         case "transcript_final":
                             Log.i(TAG, "transcript: " + msg.optString("text"));
@@ -407,10 +452,18 @@ public class GlassesService extends Service {
             }
 
             @Override public void onMessage(WebSocket webSocket, ByteString bytes) {
-                // Binary frame → TTS PCM chunk. Accumulate; we'll hand the
-                // full buffer to a MODE_STATIC AudioTrack at tts_end.
+                byte[] data = bytes.toByteArray();
+                if (currentInboundMode == INBOUND_STREAM && streamFileOut != null) {
+                    try {
+                        streamFileOut.write(data);
+                    } catch (Exception e) {
+                        Log.w(TAG, "streamFileOut.write err=" + e.getMessage());
+                    }
+                    return;
+                }
+                // Default: TTS PCM chunk — accumulate; we'll hand the full
+                // buffer to a MODE_STATIC AudioTrack at tts_end.
                 if (ttsBuffer != null) {
-                    byte[] data = bytes.toByteArray();
                     try { ttsBuffer.write(data); } catch (Exception e) { Log.w(TAG, "ttsBuffer.write err=" + e.getMessage()); }
                     ttsBytesReceived += data.length;
                 }
@@ -457,7 +510,7 @@ public class GlassesService extends Service {
         if (ttsBuffer == null) return;
         byte[] pcm = ttsBuffer.toByteArray();
         ttsBuffer = null;
-        if (pcm.length < 2) return;
+        if (pcm.length < 2) { duckMusic(false); return; }
 
         audioTrack = new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder()
@@ -477,6 +530,206 @@ public class GlassesService extends Service {
         if (written > 0) {
             try { audioTrack.play(); } catch (Exception e) { Log.w(TAG, "play err=" + e.getMessage()); }
         }
+    }
+
+    /**
+     * Handle audio_stream_start: open a temp file for incoming binary frames
+     * and switch the inbound-mode router to STREAM. Any prior music playback
+     * is stopped and any prior stream temp file is released so overlapping
+     * starts don't leak.
+     */
+    private synchronized void beginStream(String codec, int sampleRateHint, int channelsHint) {
+        closeMusicTrack();
+        releaseStreamFile();
+        streamCodec = (codec == null || codec.isEmpty()) ? "mp3" : codec.toLowerCase();
+        streamSampleRateHint = sampleRateHint;
+        streamChannelsHint = channelsHint;
+        try {
+            streamFile = File.createTempFile("crow-stream-", "." + streamCodec, getCacheDir());
+            streamFileOut = new FileOutputStream(streamFile);
+            currentInboundMode = INBOUND_STREAM;
+            Log.i(TAG, "audio_stream_start codec=" + streamCodec + " sr=" + sampleRateHint + " ch=" + channelsHint + " file=" + streamFile.getName());
+        } catch (Exception e) {
+            Log.w(TAG, "beginStream failed: " + e.getMessage());
+            releaseStreamFile();
+            currentInboundMode = INBOUND_TTS;
+        }
+    }
+
+    /**
+     * Handle audio_stream_end: close the temp file and (on ok=true) fire a
+     * background decoder thread that does MediaExtractor + MediaCodec →
+     * musicTrack. Inbound-mode router is reset to TTS.
+     */
+    private synchronized void endStream(boolean ok, String error) {
+        final File file = streamFile;
+        final FileOutputStream out = streamFileOut;
+        streamFile = null;
+        streamFileOut = null;
+        currentInboundMode = INBOUND_TTS;
+        if (out != null) { try { out.close(); } catch (Exception ignored) {} }
+        if (!ok || file == null) {
+            Log.w(TAG, "audio_stream_end ok=" + ok + " error=" + error);
+            if (file != null) { try { file.delete(); } catch (Exception ignored) {} }
+            return;
+        }
+        Log.i(TAG, "audio_stream_end bytes=" + file.length() + " — decoding");
+        streamDecoderThread = new Thread(() -> decodeAndPlayStream(file), "stream-decoder");
+        streamDecoding = true;
+        streamDecoderThread.start();
+    }
+
+    /**
+     * Decode the temp file via MediaExtractor + MediaCodec and pump PCM into
+     * a streaming AudioTrack (musicTrack). Uses the first audio track found.
+     * Supports any codec the device's MediaCodec decodes from a container
+     * MediaExtractor recognises (mp3, aac/m4a, ogg/vorbis, opus, flac).
+     */
+    private void decodeAndPlayStream(File file) {
+        MediaExtractor extractor = null;
+        MediaCodec codec = null;
+        AudioTrack track = null;
+        try {
+            extractor = new MediaExtractor();
+            extractor.setDataSource(file.getAbsolutePath());
+            int audioTrackIdx = -1;
+            MediaFormat inputFormat = null;
+            for (int i = 0; i < extractor.getTrackCount(); i++) {
+                MediaFormat fmt = extractor.getTrackFormat(i);
+                String mime = fmt.getString(MediaFormat.KEY_MIME);
+                if (mime != null && mime.startsWith("audio/")) {
+                    audioTrackIdx = i;
+                    inputFormat = fmt;
+                    break;
+                }
+            }
+            if (audioTrackIdx < 0 || inputFormat == null) {
+                Log.w(TAG, "decodeAndPlayStream: no audio track found");
+                return;
+            }
+            extractor.selectTrack(audioTrackIdx);
+            String mime = inputFormat.getString(MediaFormat.KEY_MIME);
+            int sampleRate = inputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE);
+            int channels = inputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
+            Log.i(TAG, "stream decode: mime=" + mime + " sr=" + sampleRate + " ch=" + channels);
+
+            codec = MediaCodec.createDecoderByType(mime);
+            codec.configure(inputFormat, null, null, 0);
+            codec.start();
+
+            int channelMask = (channels == 1) ? AudioFormat.CHANNEL_OUT_MONO : AudioFormat.CHANNEL_OUT_STEREO;
+            int minBuf = AudioTrack.getMinBufferSize(sampleRate, channelMask, AudioFormat.ENCODING_PCM_16BIT);
+            int trackBuf = Math.max(minBuf, sampleRate * 2 * channels); // ~1 s safety
+            track = new AudioTrack.Builder()
+                    .setAudioAttributes(new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .build())
+                    .setAudioFormat(new AudioFormat.Builder()
+                            .setSampleRate(sampleRate)
+                            .setChannelMask(channelMask)
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .build())
+                    .setBufferSizeInBytes(trackBuf)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build();
+            synchronized (this) { musicTrack = track; }
+            if (pendingTtsDucks.get() > 0) {
+                try { track.setVolume(0.25f); } catch (Exception ignored) {}
+            }
+            track.play();
+
+            MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+            boolean sawInputEOS = false;
+            boolean sawOutputEOS = false;
+            long framesDecoded = 0;
+            while (!sawOutputEOS && streamDecoding) {
+                if (!sawInputEOS) {
+                    int inIdx = codec.dequeueInputBuffer(10_000);
+                    if (inIdx >= 0) {
+                        ByteBuffer inBuf = codec.getInputBuffer(inIdx);
+                        if (inBuf == null) continue;
+                        int size = extractor.readSampleData(inBuf, 0);
+                        if (size < 0) {
+                            codec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                            sawInputEOS = true;
+                        } else {
+                            long pts = extractor.getSampleTime();
+                            codec.queueInputBuffer(inIdx, 0, size, pts, 0);
+                            extractor.advance();
+                        }
+                    }
+                }
+                int outIdx = codec.dequeueOutputBuffer(info, 10_000);
+                if (outIdx >= 0) {
+                    ByteBuffer outBuf = codec.getOutputBuffer(outIdx);
+                    if (outBuf != null && info.size > 0) {
+                        byte[] pcm = new byte[info.size];
+                        outBuf.position(info.offset);
+                        outBuf.get(pcm, 0, info.size);
+                        // Track may have been released by a concurrent stop.
+                        AudioTrack t = musicTrack;
+                        if (t != null) {
+                            try { t.write(pcm, 0, pcm.length); } catch (IllegalStateException ignored) {}
+                            framesDecoded += pcm.length / (2 * channels);
+                        }
+                    }
+                    codec.releaseOutputBuffer(outIdx, false);
+                    if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) sawOutputEOS = true;
+                }
+                // outIdx == INFO_TRY_AGAIN_LATER etc. are fine — retry loop.
+            }
+            Log.i(TAG, "stream decode done, frames=" + framesDecoded);
+        } catch (Exception e) {
+            Log.w(TAG, "decodeAndPlayStream err: " + e.getMessage());
+        } finally {
+            streamDecoding = false;
+            if (codec != null) { try { codec.stop(); } catch (Exception ignored) {} try { codec.release(); } catch (Exception ignored) {} }
+            if (extractor != null) { try { extractor.release(); } catch (Exception ignored) {} }
+            // Drain + release the track in-place (background thread is fine).
+            if (track != null) {
+                try { track.stop(); } catch (Exception ignored) {}
+                try { track.release(); } catch (Exception ignored) {}
+                synchronized (this) { if (musicTrack == track) musicTrack = null; }
+            }
+            try { file.delete(); } catch (Exception ignored) {}
+        }
+    }
+
+    private synchronized void closeMusicTrack() {
+        streamDecoding = false;
+        Thread t = streamDecoderThread;
+        streamDecoderThread = null;
+        // The decoder thread will stop + release its own AudioTrack when
+        // streamDecoding flips to false. Give it a brief moment to exit so
+        // overlapping begin/end calls don't race; don't block the WS thread.
+        AudioTrack mt = musicTrack;
+        musicTrack = null;
+        if (mt != null) {
+            try { mt.stop(); } catch (Exception ignored) {}
+            try { mt.release(); } catch (Exception ignored) {}
+        }
+        if (t != null) {
+            new Thread(() -> { try { t.join(500); } catch (InterruptedException ignored) {} }, "stream-decoder-join").start();
+        }
+    }
+
+    private synchronized void releaseStreamFile() {
+        if (streamFileOut != null) { try { streamFileOut.close(); } catch (Exception ignored) {} streamFileOut = null; }
+        if (streamFile != null) { try { streamFile.delete(); } catch (Exception ignored) {} streamFile = null; }
+    }
+
+    /**
+     * TTS ducking: when TTS arrives during music playback, lower the music
+     * AudioTrack volume so the speech is intelligible; restore when the
+     * utterance count returns to 0. No-op if music isn't playing.
+     */
+    private void duckMusic(boolean duck) {
+        int count = duck ? pendingTtsDucks.incrementAndGet() : Math.max(0, pendingTtsDucks.decrementAndGet());
+        AudioTrack t;
+        synchronized (this) { t = musicTrack; }
+        if (t == null) return;
+        try { t.setVolume(count > 0 ? 0.25f : 1.0f); } catch (Exception ignored) {}
     }
 
     private synchronized void closeAudioTrack() {
@@ -501,6 +754,8 @@ public class GlassesService extends Service {
             }
             Log.i(TAG, "audio drain done, final head=" + last);
             try { t.release(); } catch (Exception ignored) {}
+            // Restore music volume after TTS playback completes.
+            duckMusic(false);
         }, "audio-drain").start();
     }
 
@@ -557,6 +812,8 @@ public class GlassesService extends Service {
         try { if (ws != null) ws.close(1000, "service_stop"); } catch (Exception ignored) {}
         ws = null;
         closeAudioTrack();
+        closeMusicTrack();
+        releaseStreamFile();
     }
 
     @Override

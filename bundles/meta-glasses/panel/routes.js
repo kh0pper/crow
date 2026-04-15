@@ -577,8 +577,33 @@ LONG WORK via the orchestrator. For research, multi-step analysis, code work, or
       const remoteResults = remoteCalls.length ? await toolExecutor.executeToolCalls(remoteCalls) : [];
       const results = [...localResults, ...remoteResults];
       for (const r of results) {
-        messages.push({ role: "tool", content: r.result, tool_call_id: r.id, tool_name: r.name });
-        if (typeof r.result === "string" && r.result.length > 500) nextMaxTokens = 4000;
+        // Intercept `_audio_stream` envelopes: trigger pushAudioStream to the
+        // paired device and replace the LLM-visible result with a short prose
+        // line so the LLM doesn't parrot the URL or auth sentinel back at the
+        // user. Anything without a JSON envelope passes through unchanged.
+        let piped = r.result;
+        if (typeof piped === "string" && piped.includes('"_audio_stream"')) {
+          try {
+            const parsed = JSON.parse(piped);
+            const env = parsed?._audio_stream;
+            if (env && env.url && env.codec) {
+              const outcome = await pushAudioStream(device.id, {
+                url: env.url,
+                codec: env.codec,
+                sampleRate: env.sample_rate,
+                channels: env.channels,
+                auth: env.auth,
+              });
+              piped = outcome?.delivered
+                ? (parsed.prose || `Started playback (${env.codec}).`)
+                : `Playback failed: ${outcome?.reason || "unknown"}. Tell the user briefly.`;
+            }
+          } catch {
+            // Not a JSON envelope — leave untouched.
+          }
+        }
+        messages.push({ role: "tool", content: piped, tool_call_id: r.id, tool_name: r.name });
+        if (typeof piped === "string" && piped.length > 500) nextMaxTokens = 4000;
       }
     }
     await drainBuffer(true);
@@ -1072,13 +1097,25 @@ export async function searchGlassesPhotos(query, { limit = 10 } = {}) {
  * Backpressure: chunked at 64KB with WebSocket drain awaits, total in-flight
  * bounded at 1MB (bufferedAmount check).
  */
-export async function pushAudioStream(deviceId, { url, codec, sampleRate, channels } = {}) {
+// Maps `auth: "<sentinel>"` from _audio_stream envelopes to the server-side
+// env-var bearer token to inject. Keeps credentials out of tool results and
+// chat history — only the sentinel string travels through the LLM layer.
+const AUDIO_STREAM_AUTH_SENTINELS = {
+  funkwhale: () => process.env.FUNKWHALE_ACCESS_TOKEN || null,
+};
+
+export async function pushAudioStream(deviceId, { url, codec, sampleRate, channels, auth } = {}) {
   if (!deviceId || !url || !codec) return { delivered: false, reason: "bad_args" };
   const sess = _sessions.get(deviceId);
   if (!sess?.ws) return { delivered: false, reason: "absent" };
   if (!acquireTurnLock(deviceId, sess.ws)) return { delivered: false, reason: "lock_busy" };
   try {
-    const resp = await fetch(url, { redirect: "follow" });
+    const headers = {};
+    if (auth && AUDIO_STREAM_AUTH_SENTINELS[auth]) {
+      const token = AUDIO_STREAM_AUTH_SENTINELS[auth]();
+      if (token) headers.Authorization = `Bearer ${token}`;
+    }
+    const resp = await fetch(url, { redirect: "follow", headers });
     if (!resp.ok || !resp.body) {
       sendText(sess.ws, { type: "audio_stream_end", ok: false, error: `HTTP ${resp.status}` });
       return { delivered: false, reason: `http_${resp.status}` };
