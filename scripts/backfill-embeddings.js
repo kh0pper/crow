@@ -35,7 +35,7 @@ function parseArgs(argv) {
   return out;
 }
 
-async function backfillMemories(db, { batchSize, limit, model }) {
+async function backfillMemories(db, { batchSize, limit, model, log }) {
   const limitClause = limit ? ` LIMIT ${limit}` : "";
   const { rows } = await db.execute(`
     SELECT m.id, m.content
@@ -44,15 +44,15 @@ async function backfillMemories(db, { batchSize, limit, model }) {
     WHERE e.memory_id IS NULL AND m.content IS NOT NULL AND length(m.content) > 0
     ORDER BY m.id DESC${limitClause}
   `);
-  if (rows.length === 0) { console.log("  memories: already backfilled"); return 0; }
-  console.log(`  memories: ${rows.length} to embed`);
+  if (rows.length === 0) { log("  memories: already backfilled"); return 0; }
+  log(`  memories: ${rows.length} to embed`);
   return embedBatch(rows, batchSize, async (row, vec) => {
     await upsertMemoryEmbedding(db, row.id, vec, { model, dim: vec.length });
-  });
+  }, log);
 }
 
 function makeGenericBackfill(kindLabel, helpers, table, fk, contentSql) {
-  return async function backfill(db, { batchSize, limit, model }) {
+  return async function backfill(db, { batchSize, limit, model, log }) {
     const limitClause = limit ? ` LIMIT ${limit}` : "";
     const { rows } = await db.execute(`
       SELECT s.id, ${contentSql} AS content
@@ -61,11 +61,11 @@ function makeGenericBackfill(kindLabel, helpers, table, fk, contentSql) {
       WHERE e.${fk} IS NULL AND ${contentSql} IS NOT NULL AND length(${contentSql}) > 0
       ORDER BY s.id DESC${limitClause}
     `);
-    if (rows.length === 0) { console.log(`  ${kindLabel}: already backfilled`); return 0; }
-    console.log(`  ${kindLabel}: ${rows.length} to embed`);
+    if (rows.length === 0) { log(`  ${kindLabel}: already backfilled`); return 0; }
+    log(`  ${kindLabel}: ${rows.length} to embed`);
     return embedBatch(rows, batchSize, async (row, vec) => {
       await helpers.upsert(db, row.id, vec, { model, dim: vec.length });
-    });
+    }, log);
   };
 }
 
@@ -74,13 +74,13 @@ sourceEmbeddings._tableName = "source_embeddings";
 noteEmbeddings._tableName = "note_embeddings";
 blogEmbeddings._tableName = "blog_post_embeddings";
 
-async function embedBatch(rows, batchSize, writeFn) {
+async function embedBatch(rows, batchSize, writeFn, log) {
   let done = 0;
   for (let i = 0; i < rows.length; i += batchSize) {
     const batch = rows.slice(i, i + batchSize);
     const texts = batch.map((r) => String(r.content || "").slice(0, 8000));
     const vecs = await embedText(texts).catch((err) => {
-      console.error(`  embed batch failed @${i}: ${err.message}`);
+      log.error(`  embed batch failed @${i}: ${err.message}`);
       return null;
     });
     if (!vecs) continue;
@@ -89,13 +89,69 @@ async function embedBatch(rows, batchSize, writeFn) {
         await writeFn(batch[j], vecs[j]);
         done++;
       } catch (err) {
-        console.error(`  write failed id=${batch[j].id}: ${err.message}`);
+        log.error(`  write failed id=${batch[j].id}: ${err.message}`);
       }
     }
-    process.stdout.write(`.${done % 10 === 0 ? `(${done})` : ""}`);
   }
-  process.stdout.write("\n");
   return done;
+}
+
+/**
+ * Library entry point — run the same backfill used by the CLI.
+ *
+ * @param {object} [opts]
+ * @param {object} [opts.db] — caller-provided libsql client. Created locally if omitted; closed only when locally created.
+ * @param {"memories"|"sources"|"notes"|"blog"|null} [opts.only]
+ * @param {number} [opts.batchSize=16]
+ * @param {number|null} [opts.limit=null]
+ * @param {(msg: string) => void} [opts.log=console.log]
+ * @returns {Promise<{ok: boolean, total: number, perKind: Record<string, number>, error?: string}>}
+ */
+export async function runBackfill(opts = {}) {
+  const {
+    only = null,
+    batchSize = 16,
+    limit = null,
+  } = opts;
+  const logger = opts.log ?? console.log;
+  const log = (msg) => logger(msg);
+  log.error = (msg) => (opts.logError ?? console.error)(msg);
+
+  const info = await embedProviderInfo();
+  if (!info.ok) return { ok: false, total: 0, perKind: {}, error: info.error };
+  log(`provider=${info.provider} model=${info.model} baseUrl=${info.baseUrl}`);
+
+  const ownsDb = !opts.db;
+  const db = opts.db ?? (await createDbClient());
+  const perKind = {};
+  let total = 0;
+  try {
+    const tasks = [
+      ["memories", (args) => backfillMemories(db, args)],
+      ["sources", makeGenericBackfill("sources", sourceEmbeddings, "research_sources", "source_id",
+        "COALESCE(s.title, '') || ' ' || COALESCE(s.abstract, '') || ' ' || COALESCE(s.content_summary, '')")],
+      ["notes", makeGenericBackfill("notes", noteEmbeddings, "research_notes", "note_id",
+        "COALESCE(s.content, '')")],
+      ["blog", makeGenericBackfill("blog", blogEmbeddings, "blog_posts", "post_id",
+        "COALESCE(s.title, '') || ' ' || COALESCE(s.excerpt, '') || ' ' || COALESCE(s.content, '')")],
+    ];
+    for (const [kind, fn] of tasks) {
+      if (only && only !== kind) continue;
+      try {
+        const n = kind === "memories"
+          ? await fn({ batchSize, limit, model: info.model, log })
+          : await fn(db, { batchSize, limit, model: info.model, log });
+        perKind[kind] = n || 0;
+        total += n || 0;
+      } catch (err) {
+        log.error(`  ${kind}: error ${err.message}`);
+        perKind[kind] = -1;
+      }
+    }
+  } finally {
+    if (ownsDb) { try { db.close?.(); } catch {} }
+  }
+  return { ok: true, total, perKind };
 }
 
 async function main() {
@@ -107,42 +163,20 @@ async function main() {
     console.log("  --limit N                             cap rows per content type (for testing)");
     process.exit(0);
   }
-
-  const info = await embedProviderInfo();
-  if (!info.ok) {
-    console.error(`FAIL: embedding provider unhealthy: ${info.error}`);
+  const result = await runBackfill({
+    only: args.only,
+    batchSize: args.batchSize,
+    limit: args.limit,
+  });
+  if (!result.ok) {
+    console.error(`FAIL: embedding provider unhealthy: ${result.error}`);
     process.exit(1);
   }
-  console.log(`provider=${info.provider} model=${info.model} baseUrl=${info.baseUrl}`);
-
-  const db = await createDbClient();
-  try {
-    const tasks = [
-      ["memories", () => backfillMemories(db, { ...args, model: info.model })],
-      ["sources", makeGenericBackfill("sources", sourceEmbeddings, "research_sources", "source_id",
-        "COALESCE(s.title, '') || ' ' || COALESCE(s.abstract, '') || ' ' || COALESCE(s.content_summary, '')")],
-      ["notes", makeGenericBackfill("notes", noteEmbeddings, "research_notes", "note_id",
-        "COALESCE(s.content, '')")],
-      ["blog", makeGenericBackfill("blog", blogEmbeddings, "blog_posts", "post_id",
-        "COALESCE(s.title, '') || ' ' || COALESCE(s.excerpt, '') || ' ' || COALESCE(s.content, '')")],
-    ];
-
-    let total = 0;
-    for (const [kind, fn] of tasks) {
-      if (args.only && args.only !== kind) continue;
-      try {
-        const n = typeof fn === "function" && fn.length <= 1
-          ? await fn(db, { ...args, model: info.model })
-          : await fn();
-        total += n || 0;
-      } catch (err) {
-        console.error(`  ${kind}: error ${err.message}`);
-      }
-    }
-    console.log(`\ntotal embedded: ${total}`);
-  } finally {
-    try { db.close?.(); } catch {}
-  }
+  console.log(`\ntotal embedded: ${result.total}`);
 }
 
-main().catch((err) => { console.error(`FAIL: ${err.message}`); process.exit(1); });
+// Only run CLI when invoked directly (not when imported as a library).
+const invokedDirectly = import.meta.url === `file://${process.argv[1]}`;
+if (invokedDirectly) {
+  main().catch((err) => { console.error(`FAIL: ${err.message}`); process.exit(1); });
+}

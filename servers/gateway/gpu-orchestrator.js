@@ -270,9 +270,37 @@ export function startIdleRevertTimer() {
   console.log(`[gpu-orchestrator] idle auto-revert enabled: threshold=${IDLE_REVERT_MS}ms, interval=${IDLE_CHECK_INTERVAL_MS}ms`);
 }
 
+function providerHasEmbedModel(provider) {
+  return Array.isArray(provider?.models)
+    && provider.models.some((m) => m?.task === "embed");
+}
+
+async function triggerEmbedBackfill() {
+  try {
+    const { runBackfill } = await import("../../scripts/backfill-embeddings.js");
+    console.log("[gpu-orchestrator] embed recovered — running embedding backfill");
+    const result = await runBackfill({
+      log: (msg) => console.log(`[gpu-orchestrator/backfill] ${msg}`),
+      logError: (msg) => console.warn(`[gpu-orchestrator/backfill] ${msg}`),
+    });
+    if (!result.ok) {
+      console.warn(`[gpu-orchestrator] backfill skipped: ${result.error}`);
+      return;
+    }
+    const perKind = Object.entries(result.perKind).map(([k, n]) => `${k}=${n}`).join(" ");
+    console.log(`[gpu-orchestrator] backfill done: total=${result.total} ${perKind}`);
+  } catch (err) {
+    console.warn(`[gpu-orchestrator] backfill failed: ${err.message}`);
+  }
+}
+
 /**
  * Startup — ensure all alwaysResident providers are up.
  * Non-fatal: logs and continues on error. Call from gateway init.
+ *
+ * If an embed-capable alwaysResident provider was down at startup and came
+ * back up here, fire a non-blocking embedding backfill to catch rows that
+ * were inserted while embed was offline.
  */
 export async function initOrchestrator() {
   if (_initialized) return;
@@ -284,6 +312,7 @@ export async function initOrchestrator() {
     return;
   }
   console.log(`[gpu-orchestrator] ensuring alwaysResident: ${residents.join(", ")}`);
+  let embedRecovered = false;
   for (const name of residents) {
     try {
       const p = getProvider(name);
@@ -298,10 +327,17 @@ export async function initOrchestrator() {
       console.log(`[gpu-orchestrator] starting ${name} (bundleId=${p.bundleId})`);
       await bundleUp(p.bundleId);
       const ready = await waitForReady(p.baseUrl);
-      if (!ready) console.warn(`[gpu-orchestrator] ${name} did NOT warm up in time`);
+      if (!ready) {
+        console.warn(`[gpu-orchestrator] ${name} did NOT warm up in time`);
+        continue;
+      }
+      if (providerHasEmbedModel(p)) embedRecovered = true;
     } catch (err) {
       console.error(`[gpu-orchestrator] failed to bring up ${name}: ${err.message}`);
     }
   }
   startIdleRevertTimer();
+  if (embedRecovered) {
+    triggerEmbedBackfill(); // fire-and-forget — don't block gateway startup
+  }
 }
