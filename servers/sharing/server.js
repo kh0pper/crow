@@ -606,9 +606,12 @@ export function createSharingServer(dbPath, options = {}) {
       try {
         await peerManager.joinInstanceSync();
 
-        // Initialize feeds for known instances
+        // Initialize feeds for known instances. Include 'offline' peers so a
+        // late-arriving Hyperswarm connection can replicate into a feed that's
+        // already open, rather than racing a first-open against the connection.
+        // Revoked/paused peers are deliberately excluded.
         const { rows: instances } = await db.execute({
-          sql: "SELECT id, sync_url FROM crow_instances WHERE status = 'active' AND id != ?",
+          sql: "SELECT id, sync_url FROM crow_instances WHERE status IN ('active','offline') AND id != ?",
           args: [instanceSyncManager.localInstanceId],
         });
         for (const inst of instances) {
@@ -634,10 +637,14 @@ export function createSharingServer(dbPath, options = {}) {
   peerManager.onInstanceConnected = async (crowId, conn) => {
     console.log(`[sharing] Instance peer connected: ${crowId}`);
 
-    // Find which instance this connection belongs to
+    // Find which instance this connection belongs to. Accept status='active'
+    // or 'offline' — a live Hyperswarm connection IS the signal the peer is
+    // up, so treating an offline-but-connected peer as unreachable would
+    // create a chicken-and-egg where sync never initializes and status never
+    // flips to active. Revoked/paused peers stay excluded.
     try {
       const { rows } = await db.execute({
-        sql: "SELECT id FROM crow_instances WHERE crow_id = ? AND status = 'active' AND id != ?",
+        sql: "SELECT id FROM crow_instances WHERE crow_id = ? AND status IN ('active','offline') AND id != ?",
         args: [crowId, instanceSyncManager.localInstanceId],
       });
 
