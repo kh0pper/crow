@@ -838,6 +838,15 @@ try {
   console.warn("[providers] First-boot seed skipped:", err.message);
 }
 
+// --- Wire storage client to DB + identity (DB-first precedence over env) ---
+try {
+  const { initStorage } = await import("../storage/s3-client.js");
+  const { loadOrCreateIdentity } = await import("../sharing/identity.js");
+  await initStorage({ db: createDbClient(), identity: loadOrCreateIdentity() });
+} catch (err) {
+  console.warn("[storage] initStorage failed (env fallback remains active):", err.message);
+}
+
 // --- Mount Crow's Nest (conditional) ---
 try {
   const { default: dashboardRouter } = await import("./dashboard/index.js");
