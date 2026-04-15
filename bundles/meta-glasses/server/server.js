@@ -90,6 +90,165 @@ export function createMetaGlassesServer(options = {}) {
     },
   );
 
+  // ---- Phase 6: note sessions ----
+
+  async function loadDb() {
+    return import("../../../servers/db.js");
+  }
+
+  async function getOrCreateDefaultProject(db) {
+    const { readSetting, writeSetting } = await import("../../../servers/gateway/dashboard/settings/registry.js");
+    const cached = await readSetting(db, "meta_glasses_default_project_id");
+    if (cached && /^\d+$/.test(cached)) return Number(cached);
+    const ins = await db.execute({
+      sql: `INSERT INTO research_projects (name, description, type, created_at)
+            VALUES ('Glasses Dictation', 'Auto-captured notes from Meta glasses', 'research', datetime('now'))`,
+      args: [],
+    });
+    const id = Number(ins.lastInsertRowid);
+    try { await writeSetting(db, "meta_glasses_default_project_id", String(id), { scope: "local" }); } catch {}
+    return id;
+  }
+
+  server.tool(
+    "crow_glasses_start_note_session",
+    "Begin a note-taking session. Returns a session id. Use mode='dictation' for one-shot, 'session' for multi-turn discrete events.",
+    {
+      topic: z.string().max(200).optional(),
+      mode: z.enum(["dictation", "session", "continuous"]).optional().describe("Default: 'session'. 'continuous' is reserved; use 'session' unless you know the phone supports continuous streaming."),
+      device_id: z.string().min(1).max(200).describe("The glasses device id taking notes."),
+      project_id: z.number().int().optional(),
+    },
+    async ({ topic, mode = "session", device_id, project_id }) => {
+      try {
+        const { createDbClient } = await loadDb();
+        const db = createDbClient();
+        try {
+          const pid = project_id || await getOrCreateDefaultProject(db);
+          const noteIns = await db.execute({
+            sql: `INSERT INTO research_notes (project_id, content, created_at, updated_at)
+                  VALUES (?, ?, datetime('now'), datetime('now'))`,
+            args: [pid, topic ? `# ${topic}\n\n` : ""],
+          });
+          const note_id = Number(noteIns.lastInsertRowid);
+          const sessIns = await db.execute({
+            sql: `INSERT INTO glasses_note_sessions (device_id, topic, mode, project_id, note_id, status)
+                  VALUES (?, ?, ?, ?, ?, 'active')`,
+            args: [device_id, topic || null, mode, pid, note_id],
+          });
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                session_id: Number(sessIns.lastInsertRowid),
+                note_id, project_id: pid, mode, topic,
+                needs_consent: mode === "continuous",
+              }, null, 2),
+            }],
+          };
+        } finally {
+          try { db.close(); } catch {}
+        }
+      } catch (err) {
+        return { content: [{ type: "text", text: `Failed: ${err.message}` }], isError: true };
+      }
+    },
+  );
+
+  server.tool(
+    "crow_glasses_add_to_note",
+    "Append a line to an active glasses note session. If session_id is omitted, the most-recent active session for the device is used.",
+    {
+      text: z.string().min(1).max(10000),
+      session_id: z.number().int().optional(),
+      device_id: z.string().min(1).max(200).describe("Required if session_id is omitted so the server can locate the active session."),
+    },
+    async ({ text, session_id, device_id }) => {
+      try {
+        const { createDbClient } = await loadDb();
+        const db = createDbClient();
+        try {
+          let sid = session_id;
+          if (!sid) {
+            const { rows } = await db.execute({
+              sql: `SELECT id, note_id FROM glasses_note_sessions
+                    WHERE device_id = ? AND status = 'active'
+                    ORDER BY started_at DESC LIMIT 1`,
+              args: [device_id],
+            });
+            if (!rows[0]) return { content: [{ type: "text", text: "No active session for device." }], isError: true };
+            sid = rows[0].id;
+          }
+          const s = await db.execute({ sql: `SELECT note_id FROM glasses_note_sessions WHERE id = ?`, args: [sid] });
+          if (!s.rows[0]) return { content: [{ type: "text", text: "Session not found." }], isError: true };
+          const noteId = s.rows[0].note_id;
+          const stamp = new Date().toTimeString().slice(0, 5);
+          const line = `[${stamp}] ${text}\n`;
+          await db.execute({
+            sql: `UPDATE research_notes SET content = COALESCE(content, '') || ?, updated_at = datetime('now') WHERE id = ?`,
+            args: [line, noteId],
+          });
+          return { content: [{ type: "text", text: `Appended: '${line.trim()}'. Say 'undo that' to remove if needed.` }] };
+        } finally {
+          try { db.close(); } catch {}
+        }
+      } catch (err) {
+        return { content: [{ type: "text", text: `Failed: ${err.message}` }], isError: true };
+      }
+    },
+  );
+
+  server.tool(
+    "crow_glasses_end_note_session",
+    "End a glasses note session. Marks the session 'ended' and returns the backing note id for the operator to review in the Nest.",
+    {
+      session_id: z.number().int().optional(),
+      device_id: z.string().min(1).max(200),
+    },
+    async ({ session_id, device_id }) => {
+      try {
+        const { createDbClient } = await loadDb();
+        const db = createDbClient();
+        try {
+          let sid = session_id;
+          if (!sid) {
+            const { rows } = await db.execute({
+              sql: `SELECT id FROM glasses_note_sessions
+                    WHERE device_id = ? AND status = 'active'
+                    ORDER BY started_at DESC LIMIT 1`,
+              args: [device_id],
+            });
+            if (!rows[0]) return { content: [{ type: "text", text: "No active session for device." }], isError: true };
+            sid = rows[0].id;
+          }
+          await db.execute({
+            sql: `UPDATE glasses_note_sessions SET status = 'ended', ended_at = datetime('now') WHERE id = ?`,
+            args: [sid],
+          });
+          const { rows } = await db.execute({
+            sql: `SELECT note_id, topic FROM glasses_note_sessions WHERE id = ?`,
+            args: [sid],
+          });
+          const note_id = rows[0]?.note_id;
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                session_id: Number(sid),
+                note_id, topic: rows[0]?.topic,
+                summary: "Session ended. Summarization + action-item extraction pipeline is deferred to a follow-up — the raw note is available in the Nest.",
+              }, null, 2),
+            }],
+          };
+        } finally {
+          try { db.close(); } catch {}
+        }
+      } catch (err) {
+        return { content: [{ type: "text", text: `Failed: ${err.message}` }], isError: true };
+      }
+    },
+  );
+
   server.tool(
     "crow_glasses_capture_photo",
     "Ask paired glasses to capture a still photo. Returns a hint string — the photo itself arrives asynchronously on the bundle's /session WebSocket.",
