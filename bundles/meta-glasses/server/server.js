@@ -54,6 +54,43 @@ export function createMetaGlassesServer(options = {}) {
   );
 
   server.tool(
+    "crow_glasses_search_photos",
+    "Search the glasses photo library by caption or extracted text (OCR). Returns top matches with presigned URLs, captions, and capture timestamps.",
+    {
+      query: z.string().min(1).max(500).describe("Free-text query; matched against caption + OCR via FTS5."),
+      limit: z.number().int().min(1).max(50).optional().describe("Max results (default 10)."),
+    },
+    async ({ query, limit = 10 }) => {
+      try {
+        const { createDbClient, sanitizeFtsQuery } = await import("../../../servers/db.js");
+        const db = createDbClient();
+        try {
+          const q = sanitizeFtsQuery ? sanitizeFtsQuery(query) : query.replace(/['"]/g, " ");
+          const { rows } = await db.execute({
+            sql: `SELECT g.id, g.disk_path, g.caption, g.ocr_text, g.captured_at
+                  FROM glasses_photos g JOIN glasses_photos_fts f ON g.id = f.rowid
+                  WHERE glasses_photos_fts MATCH ?
+                  ORDER BY g.captured_at DESC LIMIT ?`,
+            args: [q, limit],
+          });
+          const hits = rows.map(r => ({
+            id: Number(r.id),
+            caption: r.caption,
+            ocr_text: r.ocr_text,
+            captured_at: r.captured_at,
+            url: `/api/meta-glasses/photo/${encodeURIComponent(String(r.disk_path).split("/").pop())}`,
+          }));
+          return { content: [{ type: "text", text: JSON.stringify({ query, count: hits.length, hits }, null, 2) }] };
+        } finally {
+          try { db.close(); } catch {}
+        }
+      } catch (err) {
+        return { content: [{ type: "text", text: `Search failed: ${err.message}` }], isError: true };
+      }
+    },
+  );
+
+  server.tool(
     "crow_glasses_capture_photo",
     "Ask paired glasses to capture a still photo. Returns a hint string — the photo itself arrives asynchronously on the bundle's /session WebSocket.",
     {
