@@ -24,7 +24,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, cop
 import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { checkInstall as checkHardwareGate } from "../hardware-gate.js";
 import { checkGpuArchCompatible } from "../gpu-arch.js";
 import { forwardBundleAction } from "../../shared/peer-forward.js";
@@ -392,6 +392,79 @@ function readJsonSafe(path, fallback) {
 function writeJsonSafe(path, data) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(data, null, 2));
+}
+
+/**
+ * Append or replace a managed env block inside the given .env file.
+ * blockName is the human marker: "# crow-<name> BEGIN" / "# crow-<name> END".
+ * version: optional fingerprint of the block's contents, stamped as a comment
+ *   so drift between bundle .env and current DB config is detectable later.
+ * Idempotent — existing block is replaced in place.
+ */
+function appendManagedBlock(envPath, blockName, kvPairs, version) {
+  const begin = `# crow-${blockName} BEGIN (managed by gateway — do not edit)`;
+  const end = `# crow-${blockName} END`;
+  const lines = [begin];
+  if (version) lines.push(`# crow-${blockName}-version: ${version}`);
+  for (const [k, v] of Object.entries(kvPairs)) lines.push(`${k}=${v}`);
+  lines.push(end, "");
+  const block = lines.join("\n");
+
+  let cur = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+  const pattern = new RegExp(`${begin.replace(/[().*+?^$|\\/[\]{}]/g, "\\$&")}[\\s\\S]*?${end}\\n?`);
+  if (pattern.test(cur)) {
+    cur = cur.replace(pattern, "");
+  }
+  if (cur.length && !cur.endsWith("\n")) cur += "\n";
+  writeFileSync(envPath, cur + block);
+}
+
+/**
+ * Read the version stamp written by appendManagedBlock. Returns null if the
+ * block is missing or has no version comment.
+ */
+function readManagedBlockVersion(envPath, blockName) {
+  if (!existsSync(envPath)) return null;
+  const cur = readFileSync(envPath, "utf8");
+  const m = cur.match(new RegExp(`# crow-${blockName}-version: (\\S+)`));
+  return m ? m[1] : null;
+}
+
+/**
+ * Translate shared-storage config from dashboard_settings into the bundle's
+ * app-specific S3 env shape and write a managed block to its .env.
+ *
+ * Returns { version, keys } on success, null if DB has no shared-storage
+ * config (so the caller can log "on-disk fallback").
+ */
+async function injectSharedStorage({ destDir, bundleId, translator, bucketSuffix }) {
+  const { loadSharedStorageFromDb } = await import("../../storage/s3-client.js");
+  const { loadOrCreateIdentity } = await import("../../sharing/identity.js");
+  const { translate } = await import("../storage-translators.js");
+  const shared = await loadSharedStorageFromDb(createDbClient(), loadOrCreateIdentity());
+  if (!shared) return null;
+
+  const scheme = shared.useSSL ? "https" : "http";
+  const endpointUrl = `${scheme}://${shared.host}:${shared.port}`;
+  const bucket = `${shared.bucketPrefix}-${bucketSuffix || bundleId}`;
+
+  const translated = translate(translator, {
+    endpoint: endpointUrl,
+    region: shared.region,
+    bucket,
+    accessKey: shared.accessKey,
+    secretKey: shared.secretKey,
+  });
+
+  // Version stamp: sha256 of the translated (plaintext) block with keys
+  // sorted lexicographically. Hashing plaintext rather than sealed ciphertext
+  // so re-seals with fresh nonces don't spuriously signal drift.
+  const sortedKeys = Object.keys(translated).sort();
+  const canonical = JSON.stringify(sortedKeys.map((k) => [k, translated[k]]));
+  const version = createHash("sha256").update(canonical).digest("hex");
+
+  appendManagedBlock(join(destDir, ".env"), "shared-storage", translated, version);
+  return { version, keys: sortedKeys };
 }
 
 /** Validate bundle ID format (alphanumeric + hyphens only) */
@@ -922,6 +995,27 @@ export default function bundlesRouter() {
         } else if (existsSync(join(destDir, ".env.example")) && !existsSync(join(destDir, ".env"))) {
           cpSync(join(destDir, ".env.example"), join(destDir, ".env"));
           appendLog(job, "Created .env from .env.example");
+        }
+
+        // 2.5 Inject shared-storage vars if bundle declares a translator.
+        // Gateway owns the translation in-process (configure-storage.mjs is not
+        // invoked by the install flow — it's a manual-recovery tool only).
+        if (manifest?.storage?.translator) {
+          try {
+            const injected = await injectSharedStorage({
+              destDir,
+              bundleId: bundle_id,
+              translator: manifest.storage.translator,
+              bucketSuffix: manifest.storage.bucket || bundle_id,
+            });
+            if (injected === null) {
+              appendLog(job, "No shared-storage config in DB; bundle will use on-disk storage.");
+            } else {
+              appendLog(job, `Injected shared-storage vars via translator=${manifest.storage.translator} (version=${injected.version.slice(0, 8)})`);
+            }
+          } catch (err) {
+            appendLog(job, `Warning: shared-storage injection failed: ${err.message}`);
+          }
         }
 
         // 3. Type-specific install steps
