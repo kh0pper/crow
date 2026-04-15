@@ -1062,7 +1062,11 @@ const server = app.listen(PORT, "0.0.0.0", (error) => {
         identity: loadOrCreateIdentity(),
         instanceSyncManager: ism,
         db: createDbClient(),
-        gatewayPort: PORT,
+        // Standard Crow gateway port — used only as a fallback when the peer's
+        // gateway_url has no usable port (e.g. Funnel URLs). Each Crow may
+        // run on a different port (crow:3001, grackle:3002), so we derive
+        // each peer's port from THEIR gateway_url, not ours.
+        gatewayPort: 3002,
       };
       setupTailnetSyncServer(server, ctx);
       await startTailnetSyncClients(ctx);
