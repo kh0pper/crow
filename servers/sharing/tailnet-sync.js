@@ -27,7 +27,8 @@
  */
 
 import { WebSocketServer, WebSocket, createWebSocketStream } from "ws";
-import { randomBytes, createHash } from "node:crypto";
+import { randomBytes } from "node:crypto";
+import NoiseSecretStream from "@hyperswarm/secret-stream";
 import { sign, verify } from "./identity.js";
 
 const WS_PATH = "/api/instance-sync/stream";
@@ -194,12 +195,8 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
   }
 
   // Ensure our outFeed exists, then exchange feed keys.
-  console.log(`[tailnet-sync] server step1: initInstance(${remoteInstanceId.slice(0,12)}, sync_url=${peerRow.sync_url?.slice(0,12) || "null"})`);
-  try {
-    await instanceSyncManager.initInstance(remoteInstanceId, peerRow.sync_url ? Buffer.from(peerRow.sync_url, "hex") : null);
-  } catch (err) { console.warn(`[tailnet-sync] server step1 err: ${err.message}\n${err.stack?.split("\n").slice(0,6).join("\n")}`); throw err; }
+  await instanceSyncManager.initInstance(remoteInstanceId, peerRow.sync_url ? Buffer.from(peerRow.sync_url, "hex") : null);
   const ourOutKey = instanceSyncManager.getOutFeedKey(remoteInstanceId);
-  console.log(`[tailnet-sync] server step2: ourOutKey=${ourOutKey ? ourOutKey.toString("hex").slice(0,12) : "null"}`);
   ws.send(JSON.stringify({ feed_key_hex: ourOutKey ? ourOutKey.toString("hex") : null }));
 
   let peerKeyMsg;
@@ -209,7 +206,6 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
     ws.close(1002, "no feed key");
     return;
   }
-  console.log(`[tailnet-sync] server step3: peerKey=${peerKeyMsg?.feed_key_hex?.slice(0,12) || "null"} (was=${peerRow.sync_url?.slice(0,12) || "null"})`);
   if (peerKeyMsg?.feed_key_hex && peerKeyMsg.feed_key_hex !== peerRow.sync_url) {
     try {
       await db.execute({
@@ -219,7 +215,7 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
       await instanceSyncManager.initInstance(remoteInstanceId, Buffer.from(peerKeyMsg.feed_key_hex, "hex"));
       console.log(`[tailnet-sync] persisted feed key from peer ${remoteInstanceId.slice(0,12)}…`);
     } catch (err) {
-      log.warn?.(`[tailnet-sync] persisting feed key failed: ${err.message}\n${err.stack?.split("\n").slice(0,6).join("\n")}`);
+      log.warn?.(`[tailnet-sync] persisting feed key failed: ${err.message}`);
     }
   }
 
@@ -231,14 +227,15 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
     });
   } catch {}
 
-  // Hand the WS off to Hypercore for binary replication framing.
-  console.log(`[tailnet-sync] server step4: replicate(${remoteInstanceId.slice(0,12)})`);
+  // Hand the WS off to Hypercore for binary replication framing. Hypercore
+  // expects a NoiseSecretStream; wrap the WS Duplex first. Server side =
+  // isInitiator: false (the dialer is the initiator).
   frameReader.detach();
-  const stream = createWebSocketStream(ws, { allowHalfOpen: false });
-  stream.on("error", () => {}); // hypercore-protocol logs its own errors; suppress to avoid crashes
-  try {
-    await instanceSyncManager.replicate(remoteInstanceId, stream);
-  } catch (err) { console.warn(`[tailnet-sync] server step4 err: ${err.message}\n${err.stack?.split("\n").slice(0,6).join("\n")}`); throw err; }
+  const wsStream = createWebSocketStream(ws, { allowHalfOpen: false });
+  wsStream.on("error", () => {});
+  const noiseStream = new NoiseSecretStream(false, wsStream);
+  noiseStream.on("error", () => {});
+  await instanceSyncManager.replicate(remoteInstanceId, noiseStream);
   console.log(`[tailnet-sync] replicating with peer ${remoteInstanceId.slice(0,12)}… (server side)`);
 }
 
@@ -265,7 +262,7 @@ export function setupTailnetSyncServer(server, ctx) {
         }
         await handleAcceptedConnection(ws, peerHs, frameReader, ctx);
       } catch (err) {
-        log.warn?.(`[tailnet-sync] inbound conn error: ${err.message}\n${err.stack?.split("\n").slice(0,5).join("\n")}`);
+        log.warn?.(`[tailnet-sync] inbound conn error: ${err.message}`);
         frameReader.detach();
         try { ws.close(1011, "internal error"); } catch {}
       }
@@ -353,15 +350,8 @@ class PeerDialer {
 
         // Receive server's feed key.
         const peerKeyMsg = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS);
-        const incomingKeyHex = peerKeyMsg?.feed_key_hex || null;
-        const incomingKeyBuf = incomingKeyHex ? Buffer.from(incomingKeyHex, "hex") : null;
-        console.log(`[tailnet-sync] client step:initInstance peer=${remoteInstanceId.slice(0,12)} keyLen=${incomingKeyBuf?.length || 0} hex=${incomingKeyHex?.slice(0,16) || "null"}`);
-        try {
-          await instanceSyncManager.initInstance(remoteInstanceId, incomingKeyBuf);
-        } catch (err) {
-          console.warn(`[tailnet-sync] client initInstance err: ${err.code || ""} ${err.message}\n  cause: ${err.cause?.message || ""}\n  stack: ${err.stack?.split("\n").slice(0,5).join(" | ")}`);
-          throw err;
-        }
+        const incomingKeyBuf = peerKeyMsg?.feed_key_hex ? Buffer.from(peerKeyMsg.feed_key_hex, "hex") : null;
+        await instanceSyncManager.initInstance(remoteInstanceId, incomingKeyBuf);
         const ourOutKey = instanceSyncManager.getOutFeedKey(remoteInstanceId);
         ws.send(JSON.stringify({ feed_key_hex: ourOutKey ? ourOutKey.toString("hex") : null }));
 
@@ -389,14 +379,16 @@ class PeerDialer {
         // Reset retry backoff on successful auth.
         this.retryMs = RETRY_BASE_MS;
 
-        // Hand off to Hypercore.
+        // Hand off to Hypercore. Client side = isInitiator: true.
         frameReader.detach();
-        const stream = createWebSocketStream(ws, { allowHalfOpen: false });
-        stream.on("error", () => {});
-        await instanceSyncManager.replicate(remoteInstanceId, stream);
+        const wsStream = createWebSocketStream(ws, { allowHalfOpen: false });
+        wsStream.on("error", () => {});
+        const noiseStream = new NoiseSecretStream(true, wsStream);
+        noiseStream.on("error", () => {});
+        await instanceSyncManager.replicate(remoteInstanceId, noiseStream);
         console.log(`[tailnet-sync] replicating with peer ${remoteInstanceId.slice(0,12)}… (client side)`);
       } catch (err) {
-        console.warn(`[tailnet-sync] outbound conn error to ${wsUrl}: ${err.message}\n${err.stack?.split("\n").slice(0,4).join("\n")}`);
+        console.warn(`[tailnet-sync] outbound conn error to ${wsUrl}: ${err.message}`);
         frameReader.detach();
         try { ws.close(); } catch {}
       }

@@ -226,9 +226,13 @@ export class InstanceSyncManager {
   }
 
   /**
-   * Replicate feeds over a connection stream.
+   * Replicate feeds over a NoiseSecretStream-wrapped transport. Hyperswarm
+   * connections are already NoiseSecretStream instances; for plain WebSocket
+   * or other Duplex transports, wrap with `new NoiseSecretStream(isInitiator,
+   * underlyingDuplex)` first (see tailnet-sync.js).
+   *
    * @param {string} remoteInstanceId
-   * @param {object} stream - Hyperswarm connection
+   * @param {object} stream - NoiseSecretStream (Hypercore reads .noiseStream from it)
    */
   async replicate(remoteInstanceId, stream) {
     const outFeed = this.outFeeds.get(remoteInstanceId);
