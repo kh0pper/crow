@@ -194,8 +194,12 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
   }
 
   // Ensure our outFeed exists, then exchange feed keys.
-  await instanceSyncManager.initInstance(remoteInstanceId, peerRow.sync_url ? Buffer.from(peerRow.sync_url, "hex") : null);
+  console.log(`[tailnet-sync] server step1: initInstance(${remoteInstanceId.slice(0,12)}, sync_url=${peerRow.sync_url?.slice(0,12) || "null"})`);
+  try {
+    await instanceSyncManager.initInstance(remoteInstanceId, peerRow.sync_url ? Buffer.from(peerRow.sync_url, "hex") : null);
+  } catch (err) { console.warn(`[tailnet-sync] server step1 err: ${err.message}\n${err.stack?.split("\n").slice(0,6).join("\n")}`); throw err; }
   const ourOutKey = instanceSyncManager.getOutFeedKey(remoteInstanceId);
+  console.log(`[tailnet-sync] server step2: ourOutKey=${ourOutKey ? ourOutKey.toString("hex").slice(0,12) : "null"}`);
   ws.send(JSON.stringify({ feed_key_hex: ourOutKey ? ourOutKey.toString("hex") : null }));
 
   let peerKeyMsg;
@@ -205,6 +209,7 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
     ws.close(1002, "no feed key");
     return;
   }
+  console.log(`[tailnet-sync] server step3: peerKey=${peerKeyMsg?.feed_key_hex?.slice(0,12) || "null"} (was=${peerRow.sync_url?.slice(0,12) || "null"})`);
   if (peerKeyMsg?.feed_key_hex && peerKeyMsg.feed_key_hex !== peerRow.sync_url) {
     try {
       await db.execute({
@@ -214,7 +219,7 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
       await instanceSyncManager.initInstance(remoteInstanceId, Buffer.from(peerKeyMsg.feed_key_hex, "hex"));
       console.log(`[tailnet-sync] persisted feed key from peer ${remoteInstanceId.slice(0,12)}…`);
     } catch (err) {
-      log.warn?.(`[tailnet-sync] persisting feed key failed: ${err.message}`);
+      log.warn?.(`[tailnet-sync] persisting feed key failed: ${err.message}\n${err.stack?.split("\n").slice(0,6).join("\n")}`);
     }
   }
 
@@ -227,10 +232,13 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
   } catch {}
 
   // Hand the WS off to Hypercore for binary replication framing.
+  console.log(`[tailnet-sync] server step4: replicate(${remoteInstanceId.slice(0,12)})`);
   frameReader.detach();
   const stream = createWebSocketStream(ws, { allowHalfOpen: false });
   stream.on("error", () => {}); // hypercore-protocol logs its own errors; suppress to avoid crashes
-  await instanceSyncManager.replicate(remoteInstanceId, stream);
+  try {
+    await instanceSyncManager.replicate(remoteInstanceId, stream);
+  } catch (err) { console.warn(`[tailnet-sync] server step4 err: ${err.message}\n${err.stack?.split("\n").slice(0,6).join("\n")}`); throw err; }
   console.log(`[tailnet-sync] replicating with peer ${remoteInstanceId.slice(0,12)}… (server side)`);
 }
 
@@ -257,7 +265,7 @@ export function setupTailnetSyncServer(server, ctx) {
         }
         await handleAcceptedConnection(ws, peerHs, frameReader, ctx);
       } catch (err) {
-        log.warn?.(`[tailnet-sync] inbound conn error: ${err.message}`);
+        log.warn?.(`[tailnet-sync] inbound conn error: ${err.message}\n${err.stack?.split("\n").slice(0,5).join("\n")}`);
         frameReader.detach();
         try { ws.close(1011, "internal error"); } catch {}
       }
