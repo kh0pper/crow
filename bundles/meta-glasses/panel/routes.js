@@ -293,7 +293,7 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
 
     const priorMessages = getConvo(device.id);
     const messages = [
-      { role: "system", content: systemPrompt + "\n\nThe user is speaking to you through Meta Ray-Ban glasses. Keep replies concise and conversational (1-3 short sentences). Plain prose only, no markdown, no lists. When the user asks to remember something or recall something, actually call the appropriate tool — don't just say you will." },
+      { role: "system", content: systemPrompt + "\n\nThe user is speaking to you through Meta Ray-Ban glasses. Keep replies concise and conversational (1-3 short sentences). Plain prose only, no markdown, no lists. When the user asks to remember something or recall something, actually call the appropriate tool — don't just say you will. If a tool returns content explicitly meant to be read aloud (a news briefing, an article, a podcast description, a recall result), recite it in full instead of summarizing — the user is listening, not reading." },
       ...priorMessages,
       { role: "user", content: transcript },
     ];
@@ -311,11 +311,17 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
     }
 
     let rounds = 0;
+    // Adaptive maxTokens: bumped to 4000 for the round after a long tool
+    // result (>~500 chars) so multi-sentence recitations (news briefings,
+    // articles) aren't silently truncated. Resets to 600 otherwise.
+    let nextMaxTokens = 600;
     while (rounds < MAX_TOOL_ROUNDS) {
       rounds++;
       let assistantContent = "";
       const toolCalls = [];
-      for await (const event of chatAdapter.chatStream(messages, tools, { temperature: 0.7, maxTokens: 600 })) {
+      const roundMaxTokens = nextMaxTokens;
+      nextMaxTokens = 600;
+      for await (const event of chatAdapter.chatStream(messages, tools, { temperature: 0.7, maxTokens: roundMaxTokens })) {
         if (event.type === "content_delta" && event.text) {
           sendText(ws, { type: "llm_delta", text: event.text });
           assistantContent += event.text;
@@ -367,7 +373,10 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
       }
       const remoteResults = remoteCalls.length ? await toolExecutor.executeToolCalls(remoteCalls) : [];
       const results = [...localResults, ...remoteResults];
-      for (const r of results) messages.push({ role: "tool", content: r.result, tool_call_id: r.id, tool_name: r.name });
+      for (const r of results) {
+        messages.push({ role: "tool", content: r.result, tool_call_id: r.id, tool_name: r.name });
+        if (typeof r.result === "string" && r.result.length > 500) nextMaxTokens = 4000;
+      }
     }
     await drainBuffer(true);
     sendText(ws, { type: "tts_end" });
