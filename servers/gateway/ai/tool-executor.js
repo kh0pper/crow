@@ -414,7 +414,23 @@ export function getChatTools() {
   if (connectedServers && connectedServers.size > 0) {
     // Promote high-level "entry point" tools as direct tools (no crow_tools wrapper needed).
     // These are the tools an AI should call first — they do the most with fewest calls.
-    const PROMOTED_PATTERNS = [/prepare/, /get_documents/, /calculate/, /generate_pdfs/];
+    // Bundles with consistent naming prefixes (fw_, ha_, etc.) get all their tools
+    // promoted so the AI can use them in voice flows like fw_play through the glasses.
+    const PROMOTED_PATTERNS = [
+      /prepare/, /get_documents/, /calculate/, /generate_pdfs/,
+      /^fw_/,           // funkwhale: fw_search, fw_play, fw_libraries, ...
+      /^ha_/,           // home-assistant
+      /^iptv_/,         // iptv channel manager
+      /^kodi_/,         // kodi remote
+      /^plex_/,         // plex media server
+      /^jellyfin_/,     // jellyfin media server
+      /^pf_/,           // pixelfed
+      /^ptube_/,        // peertube
+      /^masto_/,        // mastodon
+      /^gts_/,          // gotosocial
+      /^lemmy_/,        // lemmy
+      /^matrix_/,       // matrix-dendrite
+    ];
 
     const promotedTools = [];
     const allAddonLines = [];
