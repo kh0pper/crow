@@ -1749,5 +1749,99 @@ export default function bundlesRouter() {
     scheduleGatewayRestart(1000);
   });
 
+  // GET /bundles/api/shared-storage/status — List installed S3-capable bundles
+  // with their on-disk managed-block version vs the current DB hash. The Nest
+  // Shared Storage section reads this to render the drift banner.
+  router.get("/bundles/api/shared-storage/status", async (req, res) => {
+    try {
+      const { loadSharedStorageFromDb } = await import("../../storage/s3-client.js");
+      const { loadOrCreateIdentity } = await import("../../sharing/identity.js");
+      const { translate } = await import("../storage-translators.js");
+      const shared = await loadSharedStorageFromDb(createDbClient(), loadOrCreateIdentity());
+
+      const installed = getInstalled();
+      const entries = [];
+      for (const inst of installed) {
+        const manifest = getManifest(inst.id);
+        if (!manifest?.storage?.translator) continue;
+        const bundleDir = join(BUNDLES_DIR, inst.id);
+        const envPath = join(bundleDir, ".env");
+        const onDiskVersion = readManagedBlockVersion(envPath, "shared-storage");
+
+        let currentVersion = null;
+        if (shared) {
+          const scheme = shared.useSSL ? "https" : "http";
+          const translated = translate(manifest.storage.translator, {
+            endpoint: `${scheme}://${shared.host}:${shared.port}`,
+            region: shared.region,
+            bucket: `${shared.bucketPrefix}-${manifest.storage.bucket || inst.id}`,
+            accessKey: shared.accessKey,
+            secretKey: shared.secretKey,
+          });
+          const sortedKeys = Object.keys(translated).sort();
+          const canonical = JSON.stringify(sortedKeys.map((k) => [k, translated[k]]));
+          currentVersion = createHash("sha256").update(canonical).digest("hex");
+        }
+
+        entries.push({
+          id: inst.id,
+          name: manifest.name || inst.id,
+          translator: manifest.storage.translator,
+          bucket: `${shared?.bucketPrefix || "crow"}-${manifest.storage.bucket || inst.id}`,
+          onDiskVersion: onDiskVersion || null,
+          currentVersion,
+          drift: onDiskVersion && currentVersion && onDiskVersion !== currentVersion,
+          missing: shared && !onDiskVersion, // shared config exists but bundle has no block
+        });
+      }
+
+      res.json({
+        ok: true,
+        shared_configured: !!shared,
+        bundles: entries,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /bundles/api/shared-storage/apply/:id — Rewrite the shared-storage
+  // managed block in an installed bundle's .env from current DB config, then
+  // docker compose up -d --force-recreate to pick up the new env.
+  router.post("/bundles/api/shared-storage/apply/:id", async (req, res) => {
+    const bundleId = req.params.id;
+    if (!isValidBundleId(bundleId)) {
+      return res.status(400).json({ error: "Invalid bundle ID" });
+    }
+    const manifest = getManifest(bundleId);
+    if (!manifest?.storage?.translator) {
+      return res.status(400).json({ error: `Bundle '${bundleId}' does not declare manifest.storage.translator` });
+    }
+    const bundleDir = join(BUNDLES_DIR, bundleId);
+    if (!existsSync(bundleDir)) {
+      return res.status(404).json({ error: `Bundle '${bundleId}' is not installed` });
+    }
+
+    try {
+      const injected = await injectSharedStorage({
+        destDir: bundleDir,
+        bundleId,
+        translator: manifest.storage.translator,
+        bucketSuffix: manifest.storage.bucket || bundleId,
+      });
+      if (injected === null) {
+        return res.status(400).json({ error: "No shared-storage config in DB. Enter MinIO endpoint + credentials in Settings → Shared Storage first." });
+      }
+      // Force-recreate so the affected containers pick up the new env.
+      const composePath = join(bundleDir, "docker-compose.yml");
+      if (existsSync(composePath)) {
+        await runCompose(["up", "-d", "--force-recreate"], { cwd: bundleDir });
+      }
+      res.json({ ok: true, version: injected.version, recreated: existsSync(composePath) });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   return router;
 }

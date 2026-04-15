@@ -139,6 +139,11 @@ export default {
       Leaving access/secret blank keeps the currently-sealed values.
     </div>
 
+    <div id="ss-bundles" style="margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--crow-border);font-size:0.9rem">
+      <div style="color:var(--crow-text-muted);font-size:0.82rem;margin-bottom:0.5rem">Bundles using shared storage</div>
+      <div id="ss-bundles-list" style="color:var(--crow-text-muted);font-size:0.85rem">Loading…</div>
+    </div>
+
     <script>
     (function() {
       const form = document.getElementById('ss-form');
@@ -183,6 +188,60 @@ export default {
         if (r.ok) show('ok', '✓ Connected. ' + (r.json?.buckets?.length || 0) + ' bucket(s): ' + (r.json?.buckets || []).slice(0,6).join(', '));
         else show('err', r.json?.error || '✗ Connection failed');
       });
+
+      function mkEl(tag, attrs, text) {
+        const el = document.createElement(tag);
+        if (attrs) for (const k in attrs) el.setAttribute(k, attrs[k]);
+        if (text != null) el.textContent = text;
+        return el;
+      }
+      function mkPill(state) {
+        const labels = { ok: 'in sync', drift: 'drifted — apply', missing: 'missing — apply', none: 'no config' };
+        const styles = {
+          ok: 'background:#0a3a1e;color:#7fe0a0',
+          drift: 'background:#3a2b0a;color:#f3c26e',
+          missing: 'background:#3a0a1a;color:#f77ea0',
+          none: 'background:#222;color:#888',
+        };
+        return mkEl('span', { style: styles[state] + ';padding:2px 8px;border-radius:3px;font-size:0.78rem' }, labels[state]);
+      }
+      async function loadBundles() {
+        const el = document.getElementById('ss-bundles-list');
+        try {
+          const res = await fetch('/dashboard/bundles/api/shared-storage/status', { credentials: 'same-origin' });
+          if (!res.ok) { el.textContent = 'Could not load bundle status.'; return; }
+          const data = await res.json();
+          el.textContent = '';
+          if (!data.bundles || data.bundles.length === 0) {
+            el.appendChild(mkEl('em', null, 'No installed bundles declare shared storage.'));
+            return;
+          }
+          for (const b of data.bundles) {
+            const state = b.drift ? 'drift' : b.missing ? 'missing' : b.onDiskVersion ? 'ok' : 'none';
+            const row = mkEl('div', { style: 'display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--crow-border)' });
+            const left = mkEl('div');
+            left.appendChild(mkEl('strong', null, b.name));
+            left.appendChild(mkEl('span', { style: 'color:var(--crow-text-muted);font-size:0.78rem' }, ' · ' + b.bucket));
+            const right = mkEl('div', { style: 'display:flex;gap:0.5rem;align-items:center' });
+            right.appendChild(mkPill(state));
+            if (state === 'drift' || state === 'missing') {
+              const btn = mkEl('button', { class: 'ss-btn', 'data-apply-id': b.id, style: 'padding:3px 10px;font-size:0.8rem' }, 'Apply');
+              btn.addEventListener('click', async () => {
+                btn.disabled = true;
+                btn.textContent = 'Applying…';
+                const r = await fetch('/dashboard/bundles/api/shared-storage/apply/' + encodeURIComponent(b.id), { method: 'POST', credentials: 'same-origin' });
+                if (r.ok) loadBundles();
+                else { btn.disabled = false; btn.textContent = 'Apply (failed)'; }
+              });
+              right.appendChild(btn);
+            }
+            row.appendChild(left);
+            row.appendChild(right);
+            el.appendChild(row);
+          }
+        } catch (e) { el.textContent = 'Error: ' + e.message; }
+      }
+      loadBundles();
     })();
     </script>
     `;
