@@ -242,7 +242,6 @@ export async function shutdownAll() {
 function cleanupStaleAddonProcesses() {
   let cleaned = 0;
   try {
-    const myPid = process.pid;
     const bundleDir = join(homedir(), ".crow", "bundles");
     // Match "node server/index.js" — the cwd check below narrows to bundles only
     const output = execFileSync(
@@ -253,17 +252,21 @@ function cleanupStaleAddonProcesses() {
 
     for (const line of output.split("\n")) {
       const pid = parseInt(line.split(/\s+/)[0], 10);
-      if (!pid || pid === myPid) continue;
+      if (!pid || pid === process.pid) continue;
       try {
         const cwd = readlinkSync(`/proc/${pid}/cwd`);
         if (!cwd.startsWith(bundleDir)) continue;
         const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
         const ppid = parseInt(stat.split(" ")[3], 10);
-        if (ppid !== myPid) {
-          console.log(`  [proxy] Killing stale addon process PID ${pid} (cwd: ${cwd})`);
-          process.kill(pid, "SIGTERM");
-          cleaned++;
-        }
+        // Only kill TRUE orphans (init-adopted, ppid=1). A non-zero ppid that
+        // isn't our own means the addon belongs to ANOTHER gateway instance
+        // (e.g. crow-finance-gateway) which is still parenting it — leave it
+        // alone. Killing it would create a hostile-cleanup loop where each
+        // gateway boot kills the other gateway's bundle children.
+        if (ppid !== 1) continue;
+        console.log(`  [proxy] Killing stale addon process PID ${pid} (cwd: ${cwd})`);
+        process.kill(pid, "SIGTERM");
+        cleaned++;
       } catch {}
     }
   } catch {}
