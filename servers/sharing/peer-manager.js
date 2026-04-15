@@ -245,6 +245,7 @@ export class PeerManager {
           // the received key on its first attempt. Must include the
           // peer's instance_id so we know which crow_instances row to
           // write to (crow_id is shared across all paired instances).
+          console.log(`[peer-manager] chal-resp from ${msg.crowId} isInstance=${isInstance} instance_id=${msg.instance_id || "-"} feed_key=${msg.feed_key_hex ? msg.feed_key_hex.slice(0,12) : "-"}`);
           if (isInstance && msg.instance_id && msg.feed_key_hex && this.onInstanceKeyReceived) {
             Promise.resolve(this.onInstanceKeyReceived(msg.instance_id, msg.feed_key_hex)).catch(() => {});
           }
