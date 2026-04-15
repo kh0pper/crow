@@ -14,6 +14,7 @@ export const SYNC_ALLOWLIST = {
   ai_profiles:           "AI conversation profiles",
   tts_profiles:          "Text-to-Speech voice profiles",
   stt_profiles:          "Speech-to-Text profiles",
+  vision_profiles:       "Vision-language model profiles (image understanding + OCR)",
   "integration_*":       "External-service integration enablement",
   "companion_*":         "Companion persona / household config (sync-safe subset)",
   nav_groups:            "Sidebar group layout",

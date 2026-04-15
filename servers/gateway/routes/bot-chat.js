@@ -142,36 +142,16 @@ async function resolveVisionApiConfig(provider) {
  * @returns {Promise<string>} Text description of the image
  */
 async function analyzeImageWithVision(imagePath, mimeType, baseUrl, apiKey, model) {
-  const imageData = readFileSync(imagePath).toString("base64");
-  const dataUrl = `data:${mimeType};base64,${imageData}`;
-
-  const resp = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [{
-        role: "user",
-        content: [
-          { type: "image_url", image_url: { url: dataUrl } },
-          { type: "text", text: "Describe this image in detail. Include all visible text, numbers, and relevant information." },
-        ],
-      }],
-      max_tokens: 1000,
-    }),
-    signal: AbortSignal.timeout(60_000),
+  const { analyzeImage } = await import("../ai/vision.js");
+  const { description } = await analyzeImage({
+    providerConfig: { baseUrl, apiKey, model },
+    prompt: "Describe this image in detail. Include all visible text, numbers, and relevant information.",
+    imagePath,
+    mime: mimeType,
+    timeoutMs: 60_000,
+    maxTokens: 1000,
   });
-
-  if (!resp.ok) {
-    const body = await resp.text().catch(() => "");
-    throw new Error(`Vision API error ${resp.status}: ${body.slice(0, 200)}`);
-  }
-
-  const json = await resp.json();
-  return json.choices?.[0]?.message?.content || "Unable to analyze image.";
+  return description || "Unable to analyze image.";
 }
 
 function checkRateLimit(botId) {

@@ -74,7 +74,7 @@ export async function findDevice(db, id) {
 export async function pairDevice(db, {
   id, name, generation = "unknown",
   household_profile = null, stt_profile_id = null,
-  ai_profile_slug = null, tts_profile_id = null,
+  ai_profile_slug = null, tts_profile_id = null, vision_profile_id = null,
 }) {
   if (!id) throw new Error("device id required");
   const token = randomBytes(32).toString("hex");
@@ -92,6 +92,7 @@ export async function pairDevice(db, {
     stt_profile_id,
     ai_profile_slug,
     tts_profile_id,
+    vision_profile_id,
     generation,
   };
   if (existing >= 0) devices[existing] = record;
@@ -133,7 +134,7 @@ export async function updateDeviceProfiles(db, id, patch) {
   const devices = await readAll(db);
   const idx = devices.findIndex(d => d.id === id);
   if (idx === -1) return null;
-  const allow = ["household_profile", "stt_profile_id", "ai_profile_slug", "tts_profile_id", "name"];
+  const allow = ["household_profile", "stt_profile_id", "ai_profile_slug", "tts_profile_id", "vision_profile_id", "name"];
   for (const k of allow) {
     if (k in patch) devices[idx][k] = patch[k] === "" ? null : patch[k];
   }

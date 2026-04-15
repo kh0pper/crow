@@ -180,7 +180,7 @@ export default {
 
   async handleAction({ req, res, db, action }) {
     if (action === "save_ai_profile") {
-      const { profile_id, profile_name, profile_provider, profile_api_key, profile_base_url, profile_models, profile_default_model } = req.body;
+      const { profile_id, profile_name, profile_provider, profile_api_key, profile_base_url, profile_models, profile_default_model, vision_profile_id } = req.body;
       if (!profile_name || !profile_provider) {
         res.json({ ok: false, error: "Name and provider are required" });
         return true;
@@ -202,6 +202,7 @@ export default {
         profiles[idx].baseUrl = (profile_base_url || "").trim();
         profiles[idx].models = models;
         profiles[idx].defaultModel = defaultModel;
+        if (vision_profile_id !== undefined) profiles[idx].vision_profile_id = vision_profile_id || null;
       } else {
         const { randomBytes } = await import("node:crypto");
         const id = randomBytes(4).toString("hex");
@@ -213,6 +214,7 @@ export default {
           baseUrl: (profile_base_url || "").trim(),
           models,
           defaultModel,
+          vision_profile_id: vision_profile_id || null,
         });
       }
 
