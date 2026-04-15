@@ -306,8 +306,15 @@ class PeerDialer {
 
         // Receive server's feed key.
         const peerKeyMsg = await frameReader.readJsonFrame(HANDSHAKE_TIMEOUT_MS);
-        // Send ours.
-        await instanceSyncManager.initInstance(remoteInstanceId, peerKeyMsg?.feed_key_hex ? Buffer.from(peerKeyMsg.feed_key_hex, "hex") : null);
+        const incomingKeyHex = peerKeyMsg?.feed_key_hex || null;
+        const incomingKeyBuf = incomingKeyHex ? Buffer.from(incomingKeyHex, "hex") : null;
+        console.log(`[tailnet-sync] client step:initInstance peer=${remoteInstanceId.slice(0,12)} keyLen=${incomingKeyBuf?.length || 0} hex=${incomingKeyHex?.slice(0,16) || "null"}`);
+        try {
+          await instanceSyncManager.initInstance(remoteInstanceId, incomingKeyBuf);
+        } catch (err) {
+          console.warn(`[tailnet-sync] client initInstance err: ${err.code || ""} ${err.message}\n  cause: ${err.cause?.message || ""}\n  stack: ${err.stack?.split("\n").slice(0,5).join(" | ")}`);
+          throw err;
+        }
         const ourOutKey = instanceSyncManager.getOutFeedKey(remoteInstanceId);
         ws.send(JSON.stringify({ feed_key_hex: ourOutKey ? ourOutKey.toString("hex") : null }));
 
