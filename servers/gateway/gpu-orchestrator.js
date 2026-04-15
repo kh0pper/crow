@@ -41,8 +41,13 @@ const READINESS_POLL_MS = 2_000;
 const READINESS_INITIAL_DELAY_MS = 1_000;
 const PROBE_TIMEOUT_MS = 2_000;
 
+const IDLE_REVERT_MS = Number(process.env.GPU_IDLE_REVERT_MS ?? 20 * 60 * 1000);
+const IDLE_CHECK_INTERVAL_MS = Number(process.env.GPU_IDLE_CHECK_INTERVAL_MS ?? 2 * 60 * 1000);
+
 let _swapInFlight = Promise.resolve();
 let _initialized = false;
+let _idleRevertTimer = null;
+const _lastUsedAt = new Map(); // providerName -> epoch ms of last acquireProvider success
 
 // -----------------------------------------------------------------------
 // Bundle control
@@ -135,6 +140,20 @@ function alwaysResidentProviders() {
     .map(([n]) => n);
 }
 
+// Map<mutexGroup, { default: string|null, members: Array<{name, baseUrl, bundleId}> }>
+function getMutexGroups() {
+  const cfg = loadProviders();
+  const groups = new Map();
+  for (const [name, v] of Object.entries(cfg.providers || {})) {
+    if (!v.mutexGroup) continue;
+    if (!groups.has(v.mutexGroup)) groups.set(v.mutexGroup, { default: null, members: [] });
+    const g = groups.get(v.mutexGroup);
+    g.members.push({ name, baseUrl: v.baseUrl, bundleId: v.bundleId });
+    if (v.defaultMember === true) g.default = name;
+  }
+  return groups;
+}
+
 // -----------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------
@@ -165,7 +184,10 @@ export async function acquireProvider(providerName) {
 
   const swap = _swapInFlight.then(async () => {
     // Fast path: already resident.
-    if (await probeReady(p.baseUrl)) return true;
+    if (await probeReady(p.baseUrl)) {
+      _lastUsedAt.set(providerName, Date.now());
+      return true;
+    }
 
     // Stop mutex siblings first.
     const siblings = getMutexSiblings(providerName);
@@ -177,6 +199,7 @@ export async function acquireProvider(providerName) {
         await bundleStop(sib.bundleId).catch((err) =>
           console.warn(`[gpu-orchestrator] stop ${sib.bundleId} failed: ${err.message}`)
         );
+        _lastUsedAt.delete(sibName);
       }
     }
 
@@ -184,14 +207,67 @@ export async function acquireProvider(providerName) {
     console.log(`[gpu-orchestrator] starting ${providerName} (bundleId=${p.bundleId})`);
     await bundleUp(p.bundleId);
     const ready = await waitForReady(p.baseUrl);
-    if (ready) console.log(`[gpu-orchestrator] ${providerName} ready`);
-    else console.warn(`[gpu-orchestrator] ${providerName} did NOT become ready within ${READINESS_TIMEOUT_MS}ms`);
+    if (ready) {
+      console.log(`[gpu-orchestrator] ${providerName} ready`);
+      _lastUsedAt.set(providerName, Date.now());
+    } else {
+      console.warn(`[gpu-orchestrator] ${providerName} did NOT become ready within ${READINESS_TIMEOUT_MS}ms`);
+    }
     return ready;
   });
 
   // Replace the in-flight promise so the next acquire queues behind this.
   _swapInFlight = swap.catch(() => {});
   return swap;
+}
+
+/**
+ * Idle auto-revert — for each mutex group with a declared defaultMember,
+ * if a non-default member is currently resident and has not been acquired
+ * within IDLE_REVERT_MS, swap back to the default. Pre-existing residents
+ * with no recorded usage get a grace period (timer seeded on first sighting).
+ */
+async function checkIdleRevert() {
+  const groups = getMutexGroups();
+  for (const [, group] of groups) {
+    if (!group.default) continue;
+    for (const m of group.members) {
+      if (m.name === group.default) continue;
+      if (!m.baseUrl) continue;
+      if (!(await probeReady(m.baseUrl))) {
+        _lastUsedAt.delete(m.name);
+        continue;
+      }
+      const last = _lastUsedAt.get(m.name);
+      if (last === undefined) {
+        _lastUsedAt.set(m.name, Date.now()); // seed grace period
+        continue;
+      }
+      const idleFor = Date.now() - last;
+      if (idleFor < IDLE_REVERT_MS) continue;
+      console.log(`[gpu-orchestrator] ${m.name} idle ${Math.round(idleFor / 1000)}s — reverting to ${group.default}`);
+      try {
+        await acquireProvider(group.default);
+      } catch (err) {
+        console.warn(`[gpu-orchestrator] auto-revert to ${group.default} failed: ${err.message}`);
+      }
+    }
+  }
+}
+
+export function startIdleRevertTimer() {
+  if (_idleRevertTimer) return;
+  if (!(IDLE_REVERT_MS > 0) || !(IDLE_CHECK_INTERVAL_MS > 0)) {
+    console.log("[gpu-orchestrator] idle auto-revert disabled");
+    return;
+  }
+  _idleRevertTimer = setInterval(() => {
+    checkIdleRevert().catch((err) =>
+      console.warn(`[gpu-orchestrator] idle check failed: ${err.message}`)
+    );
+  }, IDLE_CHECK_INTERVAL_MS);
+  _idleRevertTimer.unref?.();
+  console.log(`[gpu-orchestrator] idle auto-revert enabled: threshold=${IDLE_REVERT_MS}ms, interval=${IDLE_CHECK_INTERVAL_MS}ms`);
 }
 
 /**
@@ -204,6 +280,7 @@ export async function initOrchestrator() {
   const residents = alwaysResidentProviders();
   if (residents.length === 0) {
     console.log("[gpu-orchestrator] no alwaysResident providers declared");
+    startIdleRevertTimer();
     return;
   }
   console.log(`[gpu-orchestrator] ensuring alwaysResident: ${residents.join(", ")}`);
@@ -226,4 +303,5 @@ export async function initOrchestrator() {
       console.error(`[gpu-orchestrator] failed to bring up ${name}: ${err.message}`);
     }
   }
+  startIdleRevertTimer();
 }
