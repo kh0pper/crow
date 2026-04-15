@@ -856,7 +856,7 @@ export function setupWebSocket(server) {
       if (prior?.ws && prior.ws !== ws) {
         try { prior.ws.close(1000, "superseded"); } catch {}
       }
-      _sessions.set(deviceId, { ws, device, openedAt: Date.now() });
+      _sessions.set(deviceId, { ws, device, openedAt: Date.now(), lastPingAt: Date.now() });
 
       sendText(ws, { type: "ready", session_id: `${deviceId}:${Date.now()}` });
 
@@ -867,7 +867,11 @@ export function setupWebSocket(server) {
       let micIsPcm = false;
 
       let alive = true;
-      ws.on("pong", () => { alive = true; });
+      ws.on("pong", () => {
+        alive = true;
+        const s = _sessions.get(deviceId);
+        if (s && s.ws === ws) s.lastPingAt = Date.now();
+      });
       const pinger = setInterval(() => {
         if (!alive) { try { ws.terminate(); } catch {} clearInterval(pinger); return; }
         alive = false;
@@ -936,4 +940,82 @@ export function setupWebSocket(server) {
   });
 
   return { openSessionCount: () => _sessions.size };
+}
+
+/* ---------- Server-initiated TTS (Phase 3) ---------- */
+
+const DEVICE_PRESENCE_MS = 60_000;
+const MUTEX_DEFER_MS = 30_000;
+
+function deviceIsPresent(deviceId) {
+  const s = _sessions.get(deviceId);
+  if (!s) return false;
+  if (!s.lastPingAt) return (Date.now() - (s.openedAt || 0)) < DEVICE_PRESENCE_MS;
+  return (Date.now() - s.lastPingAt) < DEVICE_PRESENCE_MS;
+}
+
+export function isQuietHours(quietHoursStr, date = new Date()) {
+  // "HH:MM-HH:MM" in local time. Wrap-around supported.
+  if (!quietHoursStr || !/^\d{2}:\d{2}-\d{2}:\d{2}$/.test(quietHoursStr)) return false;
+  const [start, end] = quietHoursStr.split("-");
+  const [sh, sm] = start.split(":").map(Number);
+  const [eh, em] = end.split(":").map(Number);
+  const mins = date.getHours() * 60 + date.getMinutes();
+  const sMins = sh * 60 + sm, eMins = eh * 60 + em;
+  return sMins <= eMins
+    ? (mins >= sMins && mins < eMins)
+    : (mins >= sMins || mins < eMins);
+}
+
+/**
+ * Deliver `text` to device `deviceId` as TTS, subject to policy.
+ * Policy is enforced by the caller (scheduler) or opt-in here via opts.
+ *
+ * Returns { delivered: boolean, reason?: string }.
+ */
+export async function pushTtsToDevice(deviceId, text, opts = {}) {
+  if (!deviceId || !text) return { delivered: false, reason: "bad_args" };
+  if (!deviceIsPresent(deviceId)) return { delivered: false, reason: "absent" };
+
+  // Wait for the turn mutex if briefly held.
+  const started = Date.now();
+  while (_turnLocks.has(deviceId)) {
+    if (Date.now() - started > MUTEX_DEFER_MS) {
+      return { delivered: false, reason: "mutex_timeout" };
+    }
+    await new Promise(r => setTimeout(r, 500));
+    if (!deviceIsPresent(deviceId)) return { delivered: false, reason: "absent" };
+  }
+  // Acquire the lock so no voice turn starts mid-push.
+  const sess = _sessions.get(deviceId);
+  if (!sess?.ws) return { delivered: false, reason: "absent" };
+  if (!acquireTurnLock(deviceId, sess.ws)) {
+    return { delivered: false, reason: "lock_busy" };
+  }
+  try {
+    const db = (await loadDb()).createDbClient();
+    try {
+      const { getTtsProfiles, createTtsAdapter, getDefaultTtsProfile } = await loadTts();
+      const ttsProfile = sess.device?.tts_profile_id
+        ? (await getTtsProfiles(db, { includeKeys: true })).find(p => p.id === sess.device.tts_profile_id)
+        : await getDefaultTtsProfile(db, { includeKeys: true });
+      if (!ttsProfile) return { delivered: false, reason: "no_tts_profile" };
+      const { adapter: ttsAdapter } = await createTtsAdapter(ttsProfile);
+      const neg = negotiatePcm(ttsAdapter.name);
+      if (neg) sendText(sess.ws, { type: "tts_start", codec: neg.codec, sample_rate: neg.sampleRate });
+      else sendText(sess.ws, { type: "tts_start", codec: "mp3", sample_rate: 24000 });
+      const stream = neg
+        ? pcmStream(ttsAdapter, text, ttsProfile.defaultVoice, neg)
+        : ttsAdapter.synthesize(text, ttsProfile.defaultVoice, {});
+      for await (const chunk of stream) sendBinary(sess.ws, chunk);
+      sendText(sess.ws, { type: "tts_end" });
+      return { delivered: true };
+    } finally {
+      try { db.close(); } catch {}
+    }
+  } catch (err) {
+    return { delivered: false, reason: err.message };
+  } finally {
+    releaseTurnLock(deviceId, sess.ws);
+  }
 }

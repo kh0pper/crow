@@ -7,11 +7,52 @@
 
 import { CronExpressionParser } from "cron-parser";
 import { createNotification, cleanupNotifications } from "../shared/notifications.js";
+import { readSetting } from "./dashboard/settings/registry.js";
 
 const CHECK_INTERVAL_MS = 60 * 1000; // Check every 60 seconds
 
 let timer = null;
 let db = null;
+
+/**
+ * Phase 3 helper: push a TTS message to glasses if the operator opted in
+ * for this notification type and not in quiet hours. Silent on "absent"
+ * or "mutex_timeout"; logs but doesn't throw.
+ */
+async function maybeDeliverToGlasses(database, type, text) {
+  try {
+    const toggleKey = `meta_glasses_voice_notify_${type}`;
+    const toggleRaw = await readSetting(database, toggleKey);
+    if (toggleRaw !== "1" && toggleRaw !== "true") return;
+    const quietRaw = await readSetting(database, "meta_glasses_voice_quiet_hours");
+    let rt;
+    try {
+      const mod = await import("../../bundles/meta-glasses/panel/routes.js");
+      rt = mod;
+    } catch { return; }
+    if (rt.isQuietHours && rt.isQuietHours(quietRaw || "")) return;
+    // Deliver to every paired, present device. Scheduler doesn't (yet)
+    // scope reminders to a particular device, so broadcast opt-in.
+    const { createDbClient } = await import("../db.js");
+    const devDb = createDbClient();
+    try {
+      // Device list lives in dashboard_settings['meta_glasses_devices'] (JSON array).
+      const raw = await readSetting(devDb, "meta_glasses_devices");
+      if (!raw) return;
+      let devices = [];
+      try { devices = JSON.parse(raw); } catch { return; }
+      for (const d of devices) {
+        if (!d?.id) continue;
+        const res = await rt.pushTtsToDevice(d.id, text);
+        if (res?.delivered) console.log(`[scheduler] glasses voice: delivered to ${d.id}`);
+      }
+    } finally {
+      try { devDb.close(); } catch {}
+    }
+  } catch (err) {
+    console.warn("[scheduler] glasses voice error:", err.message);
+  }
+}
 
 /**
  * Compute the next occurrence from a cron expression.
@@ -63,6 +104,11 @@ async function tick() {
         } catch (err) {
           console.error(`[scheduler] Failed to create notification for #${schedule.id}:`, err.message);
         }
+        // Phase 3: glasses voice delivery (default off). Opt-in per type via
+        // dashboard_settings key meta_glasses_voice_notify_{type} = "1". Quiet
+        // hours silence voice (Nest entry remains).
+        await maybeDeliverToGlasses(db, "reminder", reminderText || "Scheduled reminder")
+          .catch(err => console.warn("[scheduler] glasses voice notify:", err.message));
       }
     }
 
