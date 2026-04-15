@@ -7,7 +7,7 @@
   "host": "49cf71ca878643ba7717f344329266fd",
   "requires": {
     "gpu": true,
-    "min_vram_gb": 14,
+    "min_vram_gb": 8,
     "platform": "linux-x86_64",
     "gpu_arch": ["cuda"]
   },
@@ -21,11 +21,10 @@
       "description": "Vision-language inference via Qwen3-VL-8B-Instruct-FP8 (grackle, on-demand)",
       "models": [
         {
-          "id": "qwen3-vl-8b-instruct-fp8",
+          "id": "qwen3-vl-4b-instruct-fp8",
           "contextLen": 16384,
           "warm": false,
           "onDemand": true,
-          "conflictsWith": ["grackle-embed", "grackle-rerank"],
           "priority": "interactive"
         }
       ]
