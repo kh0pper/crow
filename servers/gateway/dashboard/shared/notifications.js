@@ -536,7 +536,9 @@ export function headerIconsJs(lang) {
     }
   }
   _refreshCrowPttVisibility();
-  setInterval(_refreshCrowPttVisibility, 15000);
+  if (!window.__crowPttVisibilityInterval) {
+    window.__crowPttVisibilityInterval = setInterval(_refreshCrowPttVisibility, 15000);
+  }
 
   async function toggleCrowPtt(e) {
     e.stopPropagation();
@@ -637,7 +639,10 @@ export function headerIconsJs(lang) {
   }
 
   pollNotifications();
-  _notifPollTimer = setInterval(pollNotifications, 60000);
+  if (!window.__crowNotifPollInterval) {
+    window.__crowNotifPollInterval = setInterval(pollNotifications, 60000);
+    _notifPollTimer = window.__crowNotifPollInterval;
+  }
 `;
 }
 
@@ -861,7 +866,9 @@ export function tamagotchiJs(lang) {
     }
   }
   _refreshCrowPttVisibility();
-  setInterval(_refreshCrowPttVisibility, 15000);
+  if (!window.__crowPttVisibilityInterval) {
+    window.__crowPttVisibilityInterval = setInterval(_refreshCrowPttVisibility, 15000);
+  }
 
   async function toggleCrowPtt(e) {
     e.stopPropagation();
@@ -986,6 +993,9 @@ export function tamagotchiJs(lang) {
   }
 
   pollNotifications();
-  _notifPollTimer = setInterval(pollNotifications, 60000);
+  if (!window.__crowNotifPollInterval) {
+    window.__crowNotifPollInterval = setInterval(pollNotifications, 60000);
+    _notifPollTimer = window.__crowNotifPollInterval;
+  }
 `;
 }

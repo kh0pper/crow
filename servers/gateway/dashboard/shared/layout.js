@@ -10,6 +10,18 @@ import { FONT_IMPORT, designTokensCss } from "./design-tokens.js";
 import { headerIconsCss, tamagotchiCss } from "./notifications.js";
 import { t, SUPPORTED_LANGS } from "./i18n.js";
 
+// Turbo Drive feature flag. When CROW_ENABLE_TURBO=1, inject the vendored
+// Turbo 8.0.5 UMD build + meta tags that configure navigation behavior.
+// `turbo-cache-control: no-cache` disables Turbo's preview-from-stale-snapshot
+// (important for a dashboard with live data). `view-transition: same-origin`
+// enables the View Transitions API fallback where supported.
+function turboHead() {
+  if (process.env.CROW_ENABLE_TURBO !== "1") return "";
+  return `<script src="/vendor/turbo-8.0.5.umd.js" defer></script>
+  <meta name="turbo-cache-control" content="no-cache">
+  <meta name="view-transition" content="same-origin">`;
+}
+
 /**
  * Render the full dashboard HTML page.
  * @param {object} opts
@@ -79,6 +91,7 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400;0,500;0,700;1,400&family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,700;1,9..144,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   ${dashboardCss()}
+  ${turboHead()}
 </head>
 <body class="${themeClass}">
   <div id="kiosk-overlay" class="kiosk-overlay"></div>
@@ -157,17 +170,28 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
         body: 'action=set_kiosk&kiosk=false'
       });
     }
-    document.addEventListener('keydown', function(e) {
-      if (e.key === 'Escape' && document.getElementById('kiosk-overlay').classList.contains('active')) {
-        exitKioskMode();
-        e.stopPropagation();
-      }
-    });
+    // Document/window-level listeners must only attach ONCE per document
+    // lifetime. Under Turbo these scripts re-execute on every nav; without
+    // this guard, each nav stacks additional keydown + message listeners.
+    if (!window.__crowLayoutKeyListeners) {
+      window.__crowLayoutKeyListeners = true;
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && document.getElementById('kiosk-overlay') && document.getElementById('kiosk-overlay').classList.contains('active')) {
+          exitKioskMode();
+          e.stopPropagation();
+        }
+      });
 
-    // Listen for companion requesting exit
-    window.addEventListener('message', function(e) {
-      if (e.data === 'crow-exit-kiosk') exitKioskMode();
-    });
+      // Listen for companion requesting exit
+      window.addEventListener('message', function(e) {
+        if (e.data === 'crow-exit-kiosk') exitKioskMode();
+      });
+
+      // Global Escape-closes-sidebar listener — also only once per document
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') closeSidebar();
+      });
+    }
 
     function toggleSidebar() {
       var sidebar = document.querySelector('.sidebar');
@@ -186,9 +210,8 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
         window.scrollTo(0, document.body._scrollY);
       }
     }
-    document.addEventListener('keydown', function(e) {
-      if (e.key === 'Escape') closeSidebar();
-    });
+    // Sidebar nav-item click handlers are attached fresh each nav because
+    // the sidebar DOM is swapped — listeners auto-GC with old DOM.
     document.querySelectorAll('.sidebar .nav-item').forEach(function(a) {
       a.addEventListener('click', closeSidebar);
     });
@@ -204,8 +227,9 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
       }
     }
     ${scripts || ""}
-    // Service Worker registration (PWA)
-    if ('serviceWorker' in navigator) {
+    // Service Worker registration (PWA) — once per document lifetime
+    if ('serviceWorker' in navigator && !window.__crowSwRegistered) {
+      window.__crowSwRegistered = true;
       navigator.serviceWorker.register('/sw.js').catch(function() {});
     }
 
