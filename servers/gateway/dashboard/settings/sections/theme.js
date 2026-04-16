@@ -6,7 +6,7 @@
  */
 
 import { formField } from "../../shared/components.js";
-import { upsertSetting } from "../registry.js";
+import { upsertSetting, readSettings } from "../registry.js";
 
 export default {
   id: "theme",
@@ -24,12 +24,11 @@ export default {
   },
 
   async render({ db, lang }) {
-    const result = await db.execute({
-      sql: "SELECT key, value FROM dashboard_settings WHERE key LIKE 'blog_theme_%'",
-      args: [],
-    });
-    const bs = {};
-    for (const r of result.rows) bs[r.key] = r.value;
+    // blog_theme_* keys fall off the sync allowlist (per-instance preference),
+    // so writes land in dashboard_settings_overrides. Read via readSettings()
+    // to merge globals + overrides; a plain SELECT on dashboard_settings would
+    // show stale values after any local save.
+    const bs = Object.fromEntries(await readSettings(db, "blog_theme_%"));
 
     const currentThemeMode = bs.blog_theme_mode || "dark";
     const currentGlass = bs.blog_theme_glass === "true";

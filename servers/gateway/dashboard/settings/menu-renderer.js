@@ -2,7 +2,7 @@
  * Settings Menu Renderer — iOS/Android-style grouped menu
  */
 
-import { GROUPS } from "./registry.js";
+import { GROUPS, readSettings } from "./registry.js";
 import { t } from "../shared/i18n.js";
 
 /**
@@ -13,15 +13,10 @@ import { t } from "../shared/i18n.js";
  * @returns {Promise<string>} HTML string
  */
 export async function renderSettingsMenu(sections, db, lang) {
-  // Bulk-fetch all dashboard_settings rows (one query)
-  const settingsResult = await db.execute({
-    sql: "SELECT key, value FROM dashboard_settings",
-    args: [],
-  });
-  const settings = {};
-  for (const row of settingsResult.rows) {
-    settings[row.key] = row.value;
-  }
+  // Merge globals + this-instance overrides. Section.getPreview() expects the
+  // effective values; reading dashboard_settings alone would leave stale rows
+  // in the preview row (e.g. Theme would show old mode after a local save).
+  const settings = Object.fromEntries(await readSettings(db, "%"));
 
   // Group sections (skip hidden ones — still registered and deep-linkable,
   // but not shown in the menu. Used for staged rollouts where a feature

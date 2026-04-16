@@ -41,6 +41,7 @@ import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { registerPanel, loadExternalPanels, getAllPanels, getVisiblePanels, getPanel } from "./panel-registry.js";
 import { resolveNavGroups } from "./nav-registry.js";
+import { readSetting, readSettings } from "./settings/registry.js";
 import { createDbClient } from "../../db.js";
 
 /** Check if companion bundle is installed and its container is running */
@@ -487,24 +488,24 @@ export default function dashboardRouter(mcpAuthMiddleware) {
         console.warn("[dashboard] Nav groups resolution failed, using flat nav:", err.message);
       }
 
-      // Get theme + tamagotchi + language preferences
-      const [themeResult, tamaResult, langResult, themeSettingsResult] = await Promise.all([
-        db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'dashboard_theme'", args: [] }),
-        db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'tamagotchi_enabled'", args: [] }),
-        db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'language'", args: [] }),
-        db.execute({ sql: "SELECT key, value FROM dashboard_settings WHERE key IN ('blog_theme_mode', 'blog_theme_glass', 'blog_theme_serif', 'blog_theme_dashboard_mode')", args: [] }),
+      // Get theme + tamagotchi + language preferences.
+      // These keys are not in the sync allowlist → writes fall to local-scope
+      // dashboard_settings_overrides. Use readSetting/readSettings so the
+      // layout sees the per-instance value, not the stale global row.
+      const [tamaVal, langVal, themeMap] = await Promise.all([
+        readSetting(db, "tamagotchi_enabled"),
+        readSetting(db, "language"),
+        readSettings(db, "blog_theme_%"),
       ]);
-      // Build unified theme settings
       const ts = {};
-      for (const r of themeSettingsResult.rows) ts[r.key.replace("blog_", "")] = r.value;
+      for (const [k, v] of themeMap) ts[k.replace("blog_", "")] = v;
       const globalMode = ts.theme_mode || "dark";
       const effectiveDashMode = ts.theme_dashboard_mode || globalMode;
       const theme = effectiveDashMode;
       const glass = ts.theme_glass === "true";
       const serif = ts.theme_serif !== "false";
-      // Missing key = true (tamagotchi on by default)
-      const tamaEnabled = tamaResult.rows[0]?.value !== "false";
-      lang = langResult.rows[0]?.value || "en";
+      const tamaEnabled = tamaVal !== "false";
+      lang = langVal || "en";
 
       const companionAvailable = isCompanionAvailable();
       const headerOpts = { companionAvailable };
@@ -514,8 +515,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
       // Auto-restore kiosk mode if it was active
       let kioskAutoStart = "";
       if (companionAvailable) {
-        const kioskResult = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = 'kiosk_mode'", args: [] });
-        if (kioskResult.rows[0]?.value === "true") {
+        if ((await readSetting(db, "kiosk_mode")) === "true") {
           kioskAutoStart = "if (typeof toggleKioskMode === 'function') toggleKioskMode();";
         }
       }
