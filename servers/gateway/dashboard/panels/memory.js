@@ -16,6 +16,7 @@ export default {
   route: "/dashboard/memory",
   navOrder: 15,
   category: "core",
+  preload: true,
 
   async handler(req, res, { db, layout, lang }) {
     // Handle POST actions (edit, delete)

@@ -20,7 +20,13 @@ const panelWebSocketSetups = new Map();
 
 /**
  * Register a built-in panel.
- * @param {object} manifest - { id, name, icon, route, navOrder, handler }
+ * @param {object} manifest - { id, name, icon, route, navOrder, handler,
+ *   hidden?, category?, preload? }
+ *
+ * `preload: true` emits `data-turbo-preload` on the sidebar link so Turbo
+ * Drive prefetches the panel in the background. Reserve for high-traffic,
+ * cheap-render panels (nest, messages, memory, blog). Do NOT preload panels
+ * with expensive server-side queries (orchestrator, extensions, projects).
  */
 export function registerPanel(manifest) {
   panels.set(manifest.id, manifest);

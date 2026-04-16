@@ -13,6 +13,7 @@ export default {
   route: "/dashboard/blog",
   navOrder: 20,
   category: "content",
+  preload: true,
 
   async handler(req, res, { db, layout, lang }) {
     // Handle POST actions
