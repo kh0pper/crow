@@ -49,7 +49,7 @@ export default {
         await upsertSetting(db, key, value);
       }
     }
-    res.redirect("/dashboard/settings?section=blog");
+    res.redirectAfterPost("/dashboard/settings?section=blog");
     return true;
   },
 };

@@ -37,7 +37,7 @@ export default function browserRouter(authMiddleware) {
     }
 
     if (req.headers.accept?.includes("text/html")) {
-      return res.redirect("/dashboard/browser");
+      return res.redirectAfterPost("/dashboard/browser");
     }
     res.json({ ok: true, action });
   });

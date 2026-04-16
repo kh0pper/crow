@@ -170,6 +170,16 @@ const app = express();
 // Trust reverse proxies (Tailscale Funnel, Cloudflare Tunnel, etc.)
 app.set("trust proxy", 1);
 
+// `res.redirectAfterPost(url)` → res.redirect(303, url). Turbo Drive treats
+// 302-after-POST as "stay on current URL" and 303 as "GET the new URL", so
+// any redirect that can be issued in response to a non-GET request should use
+// 303. See scripts/migrate-redirect-303.js for the codemod that migrated the
+// existing POST handlers.
+app.use((req, res, next) => {
+  res.redirectAfterPost = (url) => res.redirect(303, url);
+  next();
+});
+
 // --- Security Middleware ---
 
 // Security headers
@@ -249,6 +259,7 @@ if (!noAuth) {
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: "Too many requests, please try again later" },
+    skip: (req) => req.path.startsWith("/dashboard") || req.path.startsWith("/api/meta-glasses/"),
   }));
 }
 

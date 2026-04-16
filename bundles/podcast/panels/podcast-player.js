@@ -87,7 +87,7 @@ async function handler(req, res, { db, layout, appRoot }) {
 
     if (action === "subscribe") {
       const feedUrl = (req.body.feed_url || "").trim();
-      if (!feedUrl) return res.redirect("/dashboard/podcast-player?error=empty");
+      if (!feedUrl) return res.redirectAfterPost("/dashboard/podcast-player?error=empty");
 
       try {
         const xml = await fetchFeed(feedUrl);
@@ -113,9 +113,9 @@ async function handler(req, res, { db, layout, appRoot }) {
           }
         }
       } catch (err) {
-        return res.redirect(`/dashboard/podcast-player?error=${encodeURIComponent(err.message)}`);
+        return res.redirectAfterPost(`/dashboard/podcast-player?error=${encodeURIComponent(err.message)}`);
       }
-      return res.redirect("/dashboard/podcast-player");
+      return res.redirectAfterPost("/dashboard/podcast-player");
     }
 
     if (action === "unsubscribe") {
@@ -123,7 +123,7 @@ async function handler(req, res, { db, layout, appRoot }) {
       if (id) {
         await db.execute({ sql: "DELETE FROM podcast_subscriptions WHERE id = ?", args: [id] });
       }
-      return res.redirect("/dashboard/podcast-player");
+      return res.redirectAfterPost("/dashboard/podcast-player");
     }
 
     if (action === "toggle_listened") {
@@ -131,7 +131,7 @@ async function handler(req, res, { db, layout, appRoot }) {
       if (id) {
         await db.execute({ sql: "UPDATE podcast_episodes SET listened = CASE WHEN listened = 1 THEN 0 ELSE 1 END WHERE id = ?", args: [id] });
       }
-      return res.redirect("/dashboard/podcast-player");
+      return res.redirectAfterPost("/dashboard/podcast-player");
     }
 
     if (action === "refresh") {
@@ -158,7 +158,7 @@ async function handler(req, res, { db, layout, appRoot }) {
           }
         }
       }
-      return res.redirect("/dashboard/podcast-player");
+      return res.redirectAfterPost("/dashboard/podcast-player");
     }
   }
 

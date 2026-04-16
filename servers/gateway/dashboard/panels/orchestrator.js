@@ -49,7 +49,7 @@ export default {
           const { resetAllRefcounts } = await import("../../../orchestrator/lifecycle.js");
           await resetAllRefcounts();
         } catch {}
-        res.redirect("/dashboard/orchestrator");
+        res.redirectAfterPost("/dashboard/orchestrator");
         return;
       }
     }

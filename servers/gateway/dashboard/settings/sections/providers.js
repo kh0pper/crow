@@ -233,14 +233,14 @@ export default {
       }
       await upsertProvider(db, payload);
       invalidateProvidersCache();
-      res.redirect("?section=providers");
+      res.redirectAfterPost("?section=providers");
       return true;
     }
     if (action === "provider_disable") {
       const payload = JSON.parse(req.body?.payload || "{}");
       await disableProvider(db, payload.id);
       invalidateProvidersCache();
-      res.redirect("?section=providers");
+      res.redirectAfterPost("?section=providers");
       return true;
     }
     return false;

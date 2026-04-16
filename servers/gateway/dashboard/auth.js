@@ -377,7 +377,7 @@ export function dashboardAuth(req, res, next) {
       req.dashboardSession = token;
       next();
     } else {
-      res.redirect("/dashboard/login");
+      res.redirectAfterPost("/dashboard/login");
     }
   }).catch(() => {
     res.redirect("/dashboard/login");

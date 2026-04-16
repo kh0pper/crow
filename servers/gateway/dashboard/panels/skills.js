@@ -70,7 +70,7 @@ export default {
             writeFileSync(join(USER_SKILLS_DIR, safeName), content, "utf-8");
           }
         }
-        res.redirect("/dashboard/skills");
+        res.redirectAfterPost("/dashboard/skills");
         return;
       }
 
@@ -83,7 +83,7 @@ export default {
             unlinkSync(filePath);
           }
         }
-        res.redirect("/dashboard/skills");
+        res.redirectAfterPost("/dashboard/skills");
         return;
       }
 
@@ -98,7 +98,7 @@ export default {
             writeFileSync(filePath, content, "utf-8");
           }
         }
-        res.redirect("/dashboard/skills");
+        res.redirectAfterPost("/dashboard/skills");
         return;
       }
 
@@ -108,7 +108,7 @@ export default {
           sql: 'UPDATE crow_context SET content = ?, updated_at = datetime("now") WHERE section_key = ? AND device_id IS NULL AND project_id IS NULL',
           args: [content, "writing_style"],
         });
-        res.redirect("/dashboard/skills");
+        res.redirectAfterPost("/dashboard/skills");
         return;
       }
 
@@ -120,14 +120,14 @@ export default {
           "writing_style",
         ];
         if (!EDITABLE_SECTIONS.includes(sectionKey)) {
-          res.redirect("/dashboard/skills");
+          res.redirectAfterPost("/dashboard/skills");
           return;
         }
         await db.execute({
           sql: 'UPDATE crow_context SET content = ?, updated_at = datetime("now") WHERE section_key = ? AND device_id IS NULL AND project_id IS NULL',
           args: [content, sectionKey],
         });
-        res.redirect("/dashboard/skills");
+        res.redirectAfterPost("/dashboard/skills");
         return;
       }
     }

@@ -149,12 +149,12 @@ export default {
               args: [],
             });
             if (Number(c.rows[0].n) > 1) {
-              return res.redirect("/dashboard/maker-lab?err=solo_multiple_learners");
+              return res.redirectAfterPost("/dashboard/maker-lab?err=solo_multiple_learners");
             }
           }
           await setMode(mode);
         }
-        return res.redirect("/dashboard/maker-lab");
+        return res.redirectAfterPost("/dashboard/maker-lab");
       }
 
       if (a === "create_learner") {
@@ -163,10 +163,10 @@ export default {
         const avatar = String(req.body.avatar || "").slice(0, 50) || null;
         const consent = req.body.consent === "1";
         if (!name || !Number.isFinite(age) || age < 3 || age > 100) {
-          return res.redirect("/dashboard/maker-lab?err=create_invalid");
+          return res.redirectAfterPost("/dashboard/maker-lab?err=create_invalid");
         }
         if (!consent) {
-          return res.redirect("/dashboard/maker-lab?err=consent_required");
+          return res.redirectAfterPost("/dashboard/maker-lab?err=consent_required");
         }
         const ins = await db.execute({
           sql: `INSERT INTO research_projects (name, type, description, created_at, updated_at)
@@ -179,14 +179,14 @@ export default {
                 VALUES (?, ?, ?, datetime('now'))`,
           args: [lid, age, avatar],
         });
-        return res.redirect(`/dashboard/maker-lab?created=${lid}`);
+        return res.redirectAfterPost(`/dashboard/maker-lab?created=${lid}`);
       }
 
       if (a === "delete_learner") {
         const lid = Number(req.body.learner_id);
-        if (!Number.isFinite(lid)) return res.redirect("/dashboard/maker-lab");
+        if (!Number.isFinite(lid)) return res.redirectAfterPost("/dashboard/maker-lab");
         if (req.body.confirm !== "DELETE") {
-          return res.redirect(`/dashboard/maker-lab?pending_delete=${lid}`);
+          return res.redirectAfterPost(`/dashboard/maker-lab?pending_delete=${lid}`);
         }
         await db.execute({ sql: "DELETE FROM maker_sessions WHERE learner_id=?", args: [lid] });
         await db.execute({ sql: "DELETE FROM maker_transcripts WHERE learner_id=?", args: [lid] });
@@ -197,7 +197,7 @@ export default {
           sql: "DELETE FROM research_projects WHERE id=? AND type='learner_profile'",
           args: [lid],
         });
-        return res.redirect("/dashboard/maker-lab?deleted=1");
+        return res.redirectAfterPost("/dashboard/maker-lab?deleted=1");
       }
 
       if (a === "start_session") {
@@ -208,9 +208,9 @@ export default {
           const r = await mintSessionForLearner(db, {
             learnerId: lid, durationMin: duration, idleLockMin: idle,
           });
-          return res.redirect(`/dashboard/maker-lab?qr=${encodeURIComponent(r.redemptionCode)}`);
+          return res.redirectAfterPost(`/dashboard/maker-lab?qr=${encodeURIComponent(r.redemptionCode)}`);
         } catch (err) {
-          return res.redirect(`/dashboard/maker-lab?err=${encodeURIComponent(err.code || "mint_failed")}`);
+          return res.redirectAfterPost(`/dashboard/maker-lab?err=${encodeURIComponent(err.code || "mint_failed")}`);
         }
       }
 
@@ -219,21 +219,21 @@ export default {
         const ids = (Array.isArray(raw) ? raw : [raw])
           .map((x) => Number(x))
           .filter((n) => Number.isFinite(n) && n > 0);
-        if (!ids.length) return res.redirect("/dashboard/maker-lab?err=no_learners");
+        if (!ids.length) return res.redirectAfterPost("/dashboard/maker-lab?err=no_learners");
         const duration = Math.max(5, Math.min(240, Number(req.body.duration_min) || 60));
         const idle = req.body.idle_lock_min ? Math.max(0, Math.min(240, Number(req.body.idle_lock_min))) : undefined;
         const label = String(req.body.batch_label || "").trim().slice(0, 200) || null;
         const { batchId } = await mintBatchSessions(db, {
           learnerIds: ids, durationMin: duration, idleLockMin: idle, batchLabel: label,
         });
-        return res.redirect(`/dashboard/maker-lab?batch=${encodeURIComponent(batchId)}`);
+        return res.redirectAfterPost(`/dashboard/maker-lab?batch=${encodeURIComponent(batchId)}`);
       }
 
       if (a === "start_guest") {
         const band = ["5-9", "10-13", "14+"].includes(String(req.body.age_band))
           ? String(req.body.age_band) : "5-9";
         const r = await mintGuestSession(db, { ageBand: band });
-        return res.redirect(`/dashboard/maker-lab?qr=${encodeURIComponent(r.redemptionCode)}&guest=1`);
+        return res.redirectAfterPost(`/dashboard/maker-lab?qr=${encodeURIComponent(r.redemptionCode)}&guest=1`);
       }
 
       if (a === "end_session") {
@@ -253,28 +253,28 @@ export default {
             } catch {}
           }, 5000);
         }
-        return res.redirect("/dashboard/maker-lab");
+        return res.redirectAfterPost("/dashboard/maker-lab");
       }
 
       if (a === "force_end") {
         const token = String(req.body.session_token || "");
         const reason = String(req.body.reason || "admin_force").slice(0, 500);
-        if (!token || reason.length < 3) return res.redirect("/dashboard/maker-lab?err=reason_required");
+        if (!token || reason.length < 3) return res.redirectAfterPost("/dashboard/maker-lab?err=reason_required");
         await db.execute({
           sql: `UPDATE maker_sessions SET state='revoked', revoked_at=datetime('now') WHERE token=?`,
           args: [token],
         });
-        return res.redirect("/dashboard/maker-lab");
+        return res.redirectAfterPost("/dashboard/maker-lab");
       }
 
       if (a === "update_learner") {
         const lid = Number(req.body.learner_id);
-        if (!Number.isFinite(lid)) return res.redirect("/dashboard/maker-lab?err=learner_not_found");
+        if (!Number.isFinite(lid)) return res.redirectAfterPost("/dashboard/maker-lab?err=learner_not_found");
         const name = String(req.body.name || "").trim().slice(0, 100);
         const age = Number(req.body.age);
         const avatar = String(req.body.avatar || "").slice(0, 50) || null;
         if (!name || !Number.isFinite(age) || age < 3 || age > 100) {
-          return res.redirect(`/dashboard/maker-lab?edit=${lid}&err=create_invalid`);
+          return res.redirectAfterPost(`/dashboard/maker-lab?edit=${lid}&err=create_invalid`);
         }
         await db.execute({
           sql: `UPDATE research_projects SET name=?, updated_at=datetime('now')
@@ -296,7 +296,7 @@ export default {
                 WHERE learner_id = ?`,
           args: [age, avatar, transcripts, retention, idleMin, autoResume, voice, lid],
         });
-        return res.redirect(`/dashboard/maker-lab?edit=${lid}&saved=1`);
+        return res.redirectAfterPost(`/dashboard/maker-lab?edit=${lid}&saved=1`);
       }
 
       if (a === "unlock_idle") {
@@ -307,14 +307,14 @@ export default {
             args: [token],
           });
         }
-        return res.redirect("/dashboard/maker-lab");
+        return res.redirectAfterPost("/dashboard/maker-lab");
       }
 
       if (a === "set_solo_lan_exposure") {
         const v = String(req.body.value || "").toLowerCase() === "on" ? "on" : "off";
         const devBinding = await loadDeviceBinding();
         await devBinding.setSoloLanExposure(db, v);
-        return res.redirect("/dashboard/maker-lab?settings=1&saved=1");
+        return res.redirectAfterPost("/dashboard/maker-lab?settings=1&saved=1");
       }
 
       if (a === "import_lesson") {
@@ -349,33 +349,33 @@ export default {
             content: renderLessonImportResult({ errors: [`Failed to write: ${err.message}`], raw, escapeHtml }),
           });
         }
-        return res.redirect(`/dashboard/maker-lab?lessons=1&imported=${encodeURIComponent(parsed.id)}`);
+        return res.redirectAfterPost(`/dashboard/maker-lab?lessons=1&imported=${encodeURIComponent(parsed.id)}`);
       }
 
       if (a === "delete_custom_lesson") {
         const id = String(req.body.lesson_id || "").replace(/[^\w-]/g, "");
-        if (!id) return res.redirect("/dashboard/maker-lab?lessons=1");
+        if (!id) return res.redirectAfterPost("/dashboard/maker-lab?lessons=1");
         const { unlinkSync, existsSync: existsFn } = await import("node:fs");
         const home = process.env.HOME || ".";
         const path = resolve(home, ".crow/bundles/maker-lab/curriculum/custom", `${id}.json`);
         try {
           if (existsFn(path)) unlinkSync(path);
         } catch {}
-        return res.redirect(`/dashboard/maker-lab?lessons=1&deleted=${encodeURIComponent(id)}`);
+        return res.redirectAfterPost(`/dashboard/maker-lab?lessons=1&deleted=${encodeURIComponent(id)}`);
       }
 
       if (a === "unbind_device") {
         const fp = String(req.body.fingerprint || "");
-        if (!fp) return res.redirect("/dashboard/maker-lab?settings=1");
+        if (!fp) return res.redirectAfterPost("/dashboard/maker-lab?settings=1");
         const devBinding = await loadDeviceBinding();
         await devBinding.unbindDevice(db, fp);
-        return res.redirect("/dashboard/maker-lab?settings=1&unbound=1");
+        return res.redirectAfterPost("/dashboard/maker-lab?settings=1&unbound=1");
       }
 
       if (a === "revoke_batch") {
         const batchId = String(req.body.batch_id || "");
         const reason = String(req.body.reason || "").slice(0, 500);
-        if (!batchId || reason.length < 3) return res.redirect("/dashboard/maker-lab?err=reason_required");
+        if (!batchId || reason.length < 3) return res.redirectAfterPost("/dashboard/maker-lab?err=reason_required");
         await db.execute({
           sql: `UPDATE maker_sessions SET state='revoked', revoked_at=datetime('now')
                 WHERE batch_id=? AND state != 'revoked'`,
@@ -385,7 +385,7 @@ export default {
           sql: `UPDATE maker_batches SET revoked_at=datetime('now'), revoke_reason=? WHERE batch_id=?`,
           args: [reason, batchId],
         });
-        return res.redirect("/dashboard/maker-lab?revoked_batch=" + encodeURIComponent(batchId));
+        return res.redirectAfterPost("/dashboard/maker-lab?revoked_batch=" + encodeURIComponent(batchId));
       }
     }
 

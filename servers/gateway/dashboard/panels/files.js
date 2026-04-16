@@ -55,7 +55,7 @@ export default {
         } catch {
           // S3 might not be available
         }
-        res.redirect("/dashboard/files");
+        res.redirectAfterPost("/dashboard/files");
         return;
       }
     }

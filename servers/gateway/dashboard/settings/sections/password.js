@@ -47,22 +47,22 @@ export default {
     if (result.rows.length > 0) {
       const valid = await verifyPassword(current_password, result.rows[0].value);
       if (!valid) {
-        res.redirect("/dashboard/settings?section=password&error=wrong_current");
+        res.redirectAfterPost("/dashboard/settings?section=password&error=wrong_current");
         return true;
       }
     }
 
     const strength = validatePasswordStrength(password);
     if (!strength.valid) {
-      res.redirect("/dashboard/settings?section=password&error=short");
+      res.redirectAfterPost("/dashboard/settings?section=password&error=short");
       return true;
     }
     if (password !== confirm) {
-      res.redirect("/dashboard/settings?section=password&error=mismatch");
+      res.redirectAfterPost("/dashboard/settings?section=password&error=mismatch");
       return true;
     }
     await setPassword(password);
-    res.redirect("/dashboard/settings?section=password&success=password");
+    res.redirectAfterPost("/dashboard/settings?section=password&success=password");
     return true;
   },
 };

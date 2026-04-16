@@ -175,11 +175,11 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     if (await needs2faSetup()) {
       // Issue session first so they can access the setup page
       setSessionCookie(res, result.token);
-      return res.redirect("/dashboard/login/2fa/setup");
+      return res.redirectAfterPost("/dashboard/login/2fa/setup");
     }
 
     setSessionCookie(res, result.token);
-    res.redirect("/dashboard");
+    res.redirectAfterPost("/dashboard");
   });
 
   // 2FA verification (TOTP code entry after password)
@@ -225,7 +225,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     // Append our extra cookies
     const existing = res.getHeader("Set-Cookie") || [];
     res.setHeader("Set-Cookie", [...(Array.isArray(existing) ? existing : [existing]), ...cookieHeaders]);
-    res.redirect("/dashboard");
+    res.redirectAfterPost("/dashboard");
   });
 
   // 2FA recovery code entry page
@@ -263,7 +263,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     setSessionCookie(res, result.token);
     const existing = res.getHeader("Set-Cookie") || [];
     res.setHeader("Set-Cookie", Array.isArray(existing) ? existing : [existing]);
-    res.redirect("/dashboard");
+    res.redirectAfterPost("/dashboard");
   });
 
   // 2FA setup page (mandatory for managed hosting, optional access for self-hosted via settings)
@@ -289,7 +289,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
 
     const currentSecret = await getTotpSecret();
     if (!currentSecret || currentSecret !== secret) {
-      return res.redirect("/dashboard/login/2fa/setup");
+      return res.redirectAfterPost("/dashboard/login/2fa/setup");
     }
 
     if (!verifyTotp(totp_code, currentSecret)) {
@@ -308,7 +308,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
 
     // Enable 2FA
     await enable2fa();
-    res.redirect("/dashboard");
+    res.redirectAfterPost("/dashboard");
   });
 
   // Password reset request page

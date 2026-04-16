@@ -164,7 +164,7 @@ export default function iptvRouter(authMiddleware) {
 
       // Redirect back to IPTV panel
       const referer = req.headers.referer || "/dashboard/iptv";
-      res.redirect(referer);
+      res.redirectAfterPost(referer);
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

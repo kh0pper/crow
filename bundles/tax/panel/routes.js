@@ -216,7 +216,7 @@ export default function taxRouter(authMiddleware) {
 
       // Redirect back to tax panel documents tab
       if (req.headers.accept?.includes("text/html")) {
-        return res.redirect("/dashboard/tax?tab=documents");
+        return res.redirectAfterPost("/dashboard/tax?tab=documents");
       }
 
       res.status(201).json({
@@ -281,7 +281,7 @@ export default function taxRouter(authMiddleware) {
 
       // Redirect back to documents tab if browser request
       if (req.headers.accept?.includes("text/html")) {
-        return res.redirect("/dashboard/tax?tab=documents");
+        return res.redirectAfterPost("/dashboard/tax?tab=documents");
       }
       res.json({ confirmed: true, doc_id: doc.id, data: finalData });
     } catch (err) {
@@ -298,7 +298,7 @@ export default function taxRouter(authMiddleware) {
         args: [req.params.id],
       });
       if (req.headers.accept?.includes("text/html")) {
-        return res.redirect("/dashboard/tax?tab=documents");
+        return res.redirectAfterPost("/dashboard/tax?tab=documents");
       }
       res.json({ ok: true });
     } catch (err) {
@@ -317,7 +317,7 @@ export default function taxRouter(authMiddleware) {
       }
       await db.execute({ sql: "DELETE FROM tax_documents WHERE id = ?", args: [req.params.id] });
       if (req.headers.accept?.includes("text/html")) {
-        return res.redirect("/dashboard/tax?tab=documents");
+        return res.redirectAfterPost("/dashboard/tax?tab=documents");
       }
       res.json({ ok: true });
     } catch (err) {
