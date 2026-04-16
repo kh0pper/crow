@@ -119,14 +119,19 @@ export function messagesClientJS(opts) {
     if (dialog) dialog.classList.toggle('visible');
   }
 
-  // Close popover on outside click
-  document.addEventListener('click', function(e) {
-    var pop = document.getElementById('msg-popover');
-    var btn = document.querySelector('.msg-strip-new');
-    if (pop && !pop.contains(e.target) && btn && !btn.contains(e.target)) {
-      pop.classList.remove('visible');
-    }
-  });
+  // Close popover on outside click — attach once per document lifetime so
+  // Turbo re-entries don't stack listeners. Lookups are by ID, so the
+  // listener works against whichever popover is currently mounted.
+  if (!window.__msgOutsideClickBound) {
+    window.__msgOutsideClickBound = true;
+    document.addEventListener('click', function(e) {
+      var pop = document.getElementById('msg-popover');
+      var btn = document.querySelector('.msg-strip-new');
+      if (pop && !pop.contains(e.target) && btn && !btn.contains(e.target)) {
+        pop.classList.remove('visible');
+      }
+    });
+  }
 
   // === Avatar Strip Selection ===
   function msgSelectItem(type, id) {
@@ -584,6 +589,11 @@ export function messagesClientJS(opts) {
     function poll() {
       if (!_activeItem || _activeItem.type !== 'bot' || _activeItem.id !== botId) {
         // User switched away
+        _sending = false;
+        return;
+      }
+      // Also bail if the Messages panel itself was swapped out under Turbo.
+      if (!viewport.isConnected) {
         _sending = false;
         return;
       }
@@ -1087,15 +1097,31 @@ export function messagesClientJS(opts) {
 
   // === Polling for Real-Time Updates ===
   function startPolling() {
-    if (_pollInterval) return;
+    // Under Turbo, this script re-runs on every nav into Messages. Clear
+    // any prior poll tracked on window, then start fresh and track the
+    // new handle so the next re-entry (or navigation away) can clear it.
+    if (window.__msgPollInterval) {
+      clearInterval(window.__msgPollInterval);
+      window.__msgPollInterval = null;
+    }
     _pollInterval = setInterval(pollStatus, 7000);
+    window.__msgPollInterval = _pollInterval;
   }
 
   function stopPolling() {
     if (_pollInterval) { clearInterval(_pollInterval); _pollInterval = null; }
+    if (window.__msgPollInterval) { clearInterval(window.__msgPollInterval); window.__msgPollInterval = null; }
   }
 
   async function pollStatus() {
+    // Self-cancel if the Messages panel DOM has been swapped out — the
+    // avatar strip is the root anchor and disappears when Turbo renders
+    // a different panel.
+    if (!document.querySelector('.msg-avatar-strip, [data-badge-peer]') &&
+        !document.getElementById('msg-popover')) {
+      stopPolling();
+      return;
+    }
     try {
       var r = await fetch('/api/messages/status');
       var data = await r.json();
@@ -1140,8 +1166,9 @@ export function messagesClientJS(opts) {
     } catch(e) { /* polling error — ignore */ }
   }
 
-  // Start polling
+  // Start polling. beforeunload does not fire on Turbo in-document nav,
+  // so cleanup happens via the next re-entry's startPolling() call +
+  // pollStatus's self-cancel when the panel DOM is gone.
   startPolling();
-  window.addEventListener('beforeunload', stopPolling);
   <\/script>`;
 }
