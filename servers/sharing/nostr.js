@@ -24,6 +24,7 @@ import {
   getPublicKey,
 } from "nostr-tools/pure";
 import { createNotification } from "../shared/notifications.js";
+import bus from "../shared/event-bus.js";
 import * as nip44 from "nostr-tools/nip44";
 import * as nip19 from "nostr-tools/nip19";
 import { Relay } from "nostr-tools/relay";
@@ -229,6 +230,18 @@ export class NostrManager {
                           source: "sharing:message",
                           action_url: "/dashboard/messages",
                         });
+                      } catch {}
+                      // Broadcast the new per-peer unread count to any
+                      // live Turbo Stream subscribers. Swallowed
+                      // errors must not break the inbound message path.
+                      try {
+                        const { rows } = await this.db.execute({
+                          sql: `SELECT COUNT(*) AS unread FROM messages
+                                WHERE contact_id = ? AND is_read = 0 AND direction = 'received'`,
+                          args: [contactId],
+                        });
+                        const unread = Number(rows?.[0]?.unread ?? 0);
+                        bus.emit("messages:changed", { contactId, unread });
                       } catch {}
                     }
                   } catch {
