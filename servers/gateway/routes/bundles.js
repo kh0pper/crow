@@ -456,6 +456,20 @@ async function injectSharedStorage({ destDir, bundleId, translator, bucketSuffix
     secretKey: shared.secretKey,
   });
 
+  // Per-translator side knobs that have to be on for S3 storage to work end
+  // to end. These are NOT part of the storage-translator output (which is
+  // pure config-mapping) but are required side-effects of having the bundle
+  // talk to S3 instead of on-disk media.
+  //   funkwhale: PROXY_MEDIA=False makes Django redirect to presigned S3
+  //              URLs instead of nginx X-Accel-Redirect (which only works
+  //              for on-disk media; X-Accel against an S3 path 404s).
+  const SIDE_KNOBS = {
+    funkwhale: { PROXY_MEDIA: "False" },
+    // mastodon, peertube, pixelfed, etc. work with their default toggles —
+    // their translators set every required env var.
+  };
+  Object.assign(translated, SIDE_KNOBS[translator] || {});
+
   // Version stamp: sha256 of the translated (plaintext) block with keys
   // sorted lexicographically. Hashing plaintext rather than sealed ciphertext
   // so re-seals with fresh nonces don't spuriously signal drift.
@@ -982,6 +996,30 @@ export default function bundlesRouter() {
         mkdirSync(destDir, { recursive: true });
         cpSync(sourceDir, destDir, { recursive: true });
         appendLog(job, "Copied bundle files");
+
+        // 1.5 If the bundle ships its own package.json (typically because it
+        // brings an MCP server using @modelcontextprotocol/sdk), install
+        // those deps now. Without this the proxy spawns the MCP child and it
+        // immediately dies with ERR_MODULE_NOT_FOUND for the SDK, which
+        // surfaces user-side as "I don't have a music player integration
+        // installed" or similar mysteries.
+        if (existsSync(join(destDir, "package.json")) && !existsSync(join(destDir, "node_modules"))) {
+          appendLog(job, "Installing bundle dependencies (npm install)…");
+          try {
+            execFileSync("npm", ["install", "--omit=optional", "--no-audit", "--no-fund"], {
+              cwd: destDir,
+              env: process.env,
+              timeout: 120_000,
+              stdio: "pipe",
+            });
+            appendLog(job, "Dependencies installed");
+          } catch (err) {
+            appendLog(job, `Warning: npm install failed: ${err.message?.slice(0, 200)}`);
+            // Don't fail install; some bundles may have optional deps that
+            // can't resolve in every environment. The MCP server will fail
+            // to start later but the bundle install itself succeeds.
+          }
+        }
 
         // 2. Write env vars if provided
         if (env_vars && typeof env_vars === "object") {
