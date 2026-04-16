@@ -205,8 +205,10 @@ function minifluxScript() {
     loadEntries('mf-unread', '/api/miniflux/entries?status=unread&limit=20');
     loadEntries('mf-starred', '/api/miniflux/entries?starred=true&limit=10');
 
-    // Refresh every 30s
-    setInterval(function() {
+    // Refresh every 30s. Track on window so Turbo re-entries clear the
+    // prior poll instead of stacking.
+    if (window.__mfRefreshInterval) clearInterval(window.__mfRefreshInterval);
+    window.__mfRefreshInterval = setInterval(function() {
       loadStats();
       loadEntries('mf-unread', '/api/miniflux/entries?status=unread&limit=20');
     }, 30000);

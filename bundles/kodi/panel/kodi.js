@@ -432,9 +432,12 @@ function kodiScript() {
       }
     }
 
-    // Init
+    // Init. Track the poll on window so Turbo re-entries clear the prior
+    // one instead of stacking.
     refreshNowPlaying();
+    if (window.__kodiPollTimer) clearInterval(window.__kodiPollTimer);
     pollTimer = setInterval(refreshNowPlaying, 5000);
+    window.__kodiPollTimer = pollTimer;
 
     // Auto-load library if on a library tab
     if (document.querySelector('.kodi-library')) {

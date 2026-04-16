@@ -1567,12 +1567,18 @@ export default {
           });
         });
 
-        // --- Escape key ---
-        document.addEventListener("keydown", function(e) {
-          if (e.key === "Escape" && document.getElementById("modal-overlay").style.display === "flex") {
-            hideModal();
-          }
-        });
+        // --- Escape key --- attach once per document lifetime so Turbo
+        // re-entries don't stack keydown listeners. The modal lookup is
+        // by id so it works against whichever overlay is currently mounted.
+        if (!window.__extEscapeBound) {
+          window.__extEscapeBound = true;
+          document.addEventListener("keydown", function(e) {
+            var overlay = document.getElementById("modal-overlay");
+            if (e.key === "Escape" && overlay && overlay.style.display === "flex") {
+              hideModal();
+            }
+          });
+        }
       })();
     <\/script>`;
 

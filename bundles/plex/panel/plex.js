@@ -351,7 +351,9 @@ function plexScript() {
       loadServerInfo();
       loadLibraries();
       loadSessions();
-      setInterval(loadSessions, 10000);
+      // Track on window so Turbo re-entries clear the prior poll.
+      if (window.__plexSessionsInterval) clearInterval(window.__plexSessionsInterval);
+      window.__plexSessionsInterval = setInterval(loadSessions, 10000);
     }
     if (document.getElementById('plex-ondeck')) {
       loadOnDeck();

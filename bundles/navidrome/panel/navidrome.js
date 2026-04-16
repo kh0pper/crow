@@ -281,8 +281,11 @@ function navidromeScript() {
     loadAlbums();
     loadPlaylists();
 
-    // Refresh now playing every 10s
-    setInterval(loadNowPlaying, 10000);
+    // Refresh now playing every 10s. Track on window so Turbo re-entries
+    // can clear the prior poll instead of stacking. loadNowPlaying()
+    // already bails when #nd-nowplaying is absent.
+    if (window.__ndNowPlayingInterval) clearInterval(window.__ndNowPlayingInterval);
+    window.__ndNowPlayingInterval = setInterval(loadNowPlaying, 10000);
   `;
 }
 
