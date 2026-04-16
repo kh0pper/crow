@@ -40,7 +40,7 @@ export default {
         // Execute query and show results
         const bid = parseInt(req.body.backend_id);
         const sql = req.body.sql;
-        return res.redirect(`/dashboard/data-dashboard?tab=sql&backend_id=${bid}&q=${encodeURIComponent(sql)}`);
+        return res.redirectAfterPost(`/dashboard/data-dashboard?tab=sql&backend_id=${bid}&q=${encodeURIComponent(sql)}`);
       }
     }
 

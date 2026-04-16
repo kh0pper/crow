@@ -48,7 +48,7 @@ async function handler(req, res, { db, layout, appRoot }) {
         sql: "INSERT INTO blog_posts (slug, title, content, visibility, tags) VALUES (?, ?, ?, ?, ?)",
         args: [slug, title, content, visibility || "public", "podcast"],
       });
-      res.redirect("/dashboard/podcast");
+      res.redirectAfterPost("/dashboard/podcast");
       return;
     }
 
@@ -57,7 +57,7 @@ async function handler(req, res, { db, layout, appRoot }) {
         sql: "UPDATE blog_posts SET status = 'published', published_at = datetime('now') WHERE id = ?",
         args: [req.body.id],
       });
-      res.redirect("/dashboard/podcast");
+      res.redirectAfterPost("/dashboard/podcast");
       return;
     }
 
@@ -66,13 +66,13 @@ async function handler(req, res, { db, layout, appRoot }) {
         sql: "UPDATE blog_posts SET status = 'draft', published_at = NULL WHERE id = ?",
         args: [req.body.id],
       });
-      res.redirect("/dashboard/podcast");
+      res.redirectAfterPost("/dashboard/podcast");
       return;
     }
 
     if (action === "delete") {
       await db.execute({ sql: "DELETE FROM blog_posts WHERE id = ?", args: [req.body.id] });
-      res.redirect("/dashboard/podcast");
+      res.redirectAfterPost("/dashboard/podcast");
       return;
     }
   }

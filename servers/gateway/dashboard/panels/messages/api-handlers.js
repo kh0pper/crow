@@ -33,7 +33,7 @@ export async function handlePostAction(req, res, { db }) {
       sql: "SELECT display_name, crow_id FROM contacts WHERE id = ?",
       args: [parseInt(req.body.contact_id)],
     });
-    if (rows.length === 0) return res.redirect("/dashboard/messages");
+    if (rows.length === 0) return res.redirectAfterPost("/dashboard/messages");
 
     const contactIdentifier = rows[0].display_name || rows[0].crow_id;
     try {
@@ -46,7 +46,7 @@ export async function handlePostAction(req, res, { db }) {
     } catch (err) {
       console.error("[messages] Failed to send peer message:", err.message);
     }
-    return res.redirect("/dashboard/messages");
+    return res.redirectAfterPost("/dashboard/messages");
   }
 
   if (action === "mark_read" && req.body.id) {
@@ -54,7 +54,7 @@ export async function handlePostAction(req, res, { db }) {
       sql: "UPDATE messages SET is_read = 1 WHERE id = ?",
       args: [parseInt(req.body.id)],
     });
-    return res.redirect("/dashboard/messages");
+    return res.redirectAfterPost("/dashboard/messages");
   }
 
   if (action === "block" && req.body.crow_id) {
@@ -62,7 +62,7 @@ export async function handlePostAction(req, res, { db }) {
       sql: "UPDATE contacts SET is_blocked = 1 WHERE crow_id = ?",
       args: [req.body.crow_id],
     });
-    return res.redirect("/dashboard/messages");
+    return res.redirectAfterPost("/dashboard/messages");
   }
 
   if (action === "unblock" && req.body.crow_id) {
@@ -70,7 +70,7 @@ export async function handlePostAction(req, res, { db }) {
       sql: "UPDATE contacts SET is_blocked = 0 WHERE crow_id = ?",
       args: [req.body.crow_id],
     });
-    return res.redirect("/dashboard/messages");
+    return res.redirectAfterPost("/dashboard/messages");
   }
 
   if (action === "generate_invite") {
@@ -104,7 +104,7 @@ export async function handlePostAction(req, res, { db }) {
     } catch (err) {
       console.error("[messages] Failed to accept invite:", err.message);
     }
-    return res.redirect("/dashboard/messages");
+    return res.redirectAfterPost("/dashboard/messages");
   }
 
   return false; // Action not handled

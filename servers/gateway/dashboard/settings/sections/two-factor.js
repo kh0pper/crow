@@ -122,41 +122,41 @@ export default {
 
       // Verify the code
       if (!verifyTotp(totp_code, secret)) {
-        res.redirect("/dashboard/settings?section=two-factor&error=invalid-code");
+        res.redirectAfterPost("/dashboard/settings?section=two-factor&error=invalid-code");
         return true;
       }
 
       await enable2fa();
-      res.redirect("/dashboard/settings?section=two-factor&success=2fa-enabled");
+      res.redirectAfterPost("/dashboard/settings?section=two-factor&success=2fa-enabled");
       return true;
     }
 
     if (action === "disable_2fa") {
       if (isHosted) {
         // Cannot disable on managed hosting
-        res.redirect("/dashboard/settings?section=two-factor");
+        res.redirectAfterPost("/dashboard/settings?section=two-factor");
         return true;
       }
       await disable2fa();
-      res.redirect("/dashboard/settings?section=two-factor&success=2fa-disabled");
+      res.redirectAfterPost("/dashboard/settings?section=two-factor&success=2fa-disabled");
       return true;
     }
 
     if (action === "regenerate_recovery_codes") {
       const secret = await getTotpSecret();
       if (!secret) {
-        res.redirect("/dashboard/settings?section=two-factor");
+        res.redirectAfterPost("/dashboard/settings?section=two-factor");
         return true;
       }
       const newCodes = generateRecoveryCodes();
       await saveTotpSetup(secret, newCodes);
-      res.redirect(`/dashboard/settings?section=two-factor&success=2fa-codes-regenerated&codes=${encodeURIComponent(JSON.stringify(newCodes))}`);
+      res.redirectAfterPost(`/dashboard/settings?section=two-factor&success=2fa-codes-regenerated&codes=${encodeURIComponent(JSON.stringify(newCodes))}`);
       return true;
     }
 
     if (action === "revoke_devices") {
       await revokeAllDeviceTrust();
-      res.redirect("/dashboard/settings?section=two-factor&success=2fa-devices-revoked");
+      res.redirectAfterPost("/dashboard/settings?section=two-factor&success=2fa-devices-revoked");
       return true;
     }
 

@@ -493,12 +493,12 @@ export default {
           stores.push({ url: store_url, addedAt: new Date().toISOString() });
           saveStores(stores);
         }
-        return res.redirect("/dashboard/extensions");
+        return res.redirectAfterPost("/dashboard/extensions");
       }
       if (action === "remove_store" && store_url) {
         const stores = getStores().filter((s) => s.url !== store_url);
         saveStores(stores);
-        return res.redirect("/dashboard/extensions");
+        return res.redirectAfterPost("/dashboard/extensions");
       }
     }
 

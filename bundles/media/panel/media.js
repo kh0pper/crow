@@ -204,7 +204,7 @@ export default {
         const category = (req.body.category || "").trim();
         const authType = (req.body.auth_type || "").trim();
         const authToken = (req.body.auth_token || "").trim();
-        if (!url) return res.redirect("/dashboard/media?tab=sources&error=URL+required");
+        if (!url) return res.redirectAfterPost("/dashboard/media?tab=sources&error=URL+required");
 
         // Build auth_config from form fields
         let authConfig = null;
@@ -248,15 +248,15 @@ export default {
             } catch {}
           }
         } catch (err) {
-          return res.redirect(`/dashboard/media?tab=sources&error=${encodeURIComponent(err.message)}`);
+          return res.redirectAfterPost(`/dashboard/media?tab=sources&error=${encodeURIComponent(err.message)}`);
         }
-        return res.redirect("/dashboard/media?tab=sources");
+        return res.redirectAfterPost("/dashboard/media?tab=sources");
       }
 
       if (action === "add_google_news") {
         const query = (req.body.query || "").trim();
         const category = (req.body.category || "").trim();
-        if (!query) return res.redirect("/dashboard/media?tab=sources&error=Query+required");
+        if (!query) return res.redirectAfterPost("/dashboard/media?tab=sources&error=Query+required");
 
         try {
           const { fetchAndParseFeed, buildGoogleNewsUrl, postProcessGoogleNewsItems } = await importBundleModule("feed-fetcher.js");
@@ -287,15 +287,15 @@ export default {
             } catch {}
           }
         } catch (err) {
-          return res.redirect(`/dashboard/media?tab=sources&error=${encodeURIComponent(err.message)}`);
+          return res.redirectAfterPost(`/dashboard/media?tab=sources&error=${encodeURIComponent(err.message)}`);
         }
-        return res.redirect("/dashboard/media?tab=sources");
+        return res.redirectAfterPost("/dashboard/media?tab=sources");
       }
 
       if (action === "add_youtube") {
         const ytChannel = (req.body.youtube_channel || "").trim();
         const category = (req.body.category || "").trim();
-        if (!ytChannel) return res.redirect("/dashboard/media?tab=sources&error=Channel+required");
+        if (!ytChannel) return res.redirectAfterPost("/dashboard/media?tab=sources&error=Channel+required");
 
         try {
           const { fetchAndParseFeed, extractYoutubeChannelId, buildYoutubeRssUrl } = await importBundleModule("feed-fetcher.js");
@@ -326,9 +326,9 @@ export default {
             } catch {}
           }
         } catch (err) {
-          return res.redirect(`/dashboard/media?tab=sources&error=${encodeURIComponent(err.message)}`);
+          return res.redirectAfterPost(`/dashboard/media?tab=sources&error=${encodeURIComponent(err.message)}`);
         }
-        return res.redirect("/dashboard/media?tab=sources");
+        return res.redirectAfterPost("/dashboard/media?tab=sources");
       }
 
       if (action === "remove_source") {
@@ -341,7 +341,7 @@ export default {
           await db.execute({ sql: "DELETE FROM media_articles WHERE source_id = ?", args: [id] });
           await db.execute({ sql: "DELETE FROM media_sources WHERE id = ?", args: [id] });
         }
-        return res.redirect("/dashboard/media?tab=sources");
+        return res.redirectAfterPost("/dashboard/media?tab=sources");
       }
 
       if (action === "refresh_source") {
@@ -375,7 +375,7 @@ export default {
             }
           } catch {}
         }
-        return res.redirect("/dashboard/media?tab=sources");
+        return res.redirectAfterPost("/dashboard/media?tab=sources");
       }
 
       if (action === "create_playlist") {
@@ -383,13 +383,13 @@ export default {
         if (plName) {
           await db.execute({ sql: "INSERT INTO media_playlists (name) VALUES (?)", args: [plName] });
         }
-        return res.redirect("/dashboard/media?tab=playlists");
+        return res.redirectAfterPost("/dashboard/media?tab=playlists");
       }
 
       if (action === "delete_playlist") {
         const id = parseInt(req.body.playlist_id, 10);
         if (id) await db.execute({ sql: "DELETE FROM media_playlists WHERE id = ?", args: [id] });
-        return res.redirect("/dashboard/media?tab=playlists");
+        return res.redirectAfterPost("/dashboard/media?tab=playlists");
       }
 
       if (action === "create_smart_folder") {
@@ -404,13 +404,13 @@ export default {
             args: [folderName, JSON.stringify(queryObj)],
           });
         }
-        return res.redirect("/dashboard/media?tab=folders");
+        return res.redirectAfterPost("/dashboard/media?tab=folders");
       }
 
       if (action === "delete_smart_folder") {
         const id = parseInt(req.body.folder_id, 10);
         if (id) await db.execute({ sql: "DELETE FROM media_smart_folders WHERE id = ?", args: [id] });
-        return res.redirect("/dashboard/media?tab=folders");
+        return res.redirectAfterPost("/dashboard/media?tab=folders");
       }
 
       if (action === "save_digest_settings") {
@@ -430,7 +430,7 @@ export default {
             args: [email || null, schedule, enabled],
           });
         }
-        return res.redirect("/dashboard/media?tab=folders");
+        return res.redirectAfterPost("/dashboard/media?tab=folders");
       }
 
       if (action === "toggle_star") {
@@ -443,7 +443,7 @@ export default {
           });
         }
         const returnTab = req.body.return_tab || "feed";
-        return res.redirect(`/dashboard/media?tab=${returnTab}`);
+        return res.redirectAfterPost(`/dashboard/media?tab=${returnTab}`);
       }
 
       if (action === "thumbs_up" || action === "thumbs_down") {
@@ -459,7 +459,7 @@ export default {
           } catch {}
         }
         const returnTab = req.body.return_tab || "feed";
-        return res.redirect(`/dashboard/media?tab=${returnTab}`);
+        return res.redirectAfterPost(`/dashboard/media?tab=${returnTab}`);
       }
     }
 

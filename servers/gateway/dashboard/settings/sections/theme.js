@@ -127,7 +127,7 @@ export default {
           await upsertSetting(db, key, value);
         }
       }
-      res.redirect("/dashboard/settings?section=theme");
+      res.redirectAfterPost("/dashboard/settings?section=theme");
       return true;
     }
 

@@ -32,7 +32,7 @@ export default {
           sql: "INSERT INTO blog_posts (slug, title, content, visibility, tags, cover_image_key) VALUES (?, ?, ?, ?, ?, ?)",
           args: [slug, title, content, visibility || "private", tags || null, cover_image_key || null],
         });
-        res.redirect("/dashboard/blog");
+        res.redirectAfterPost("/dashboard/blog");
         return;
       }
 
@@ -41,7 +41,7 @@ export default {
           sql: "UPDATE blog_posts SET status = 'published', published_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
           args: [req.body.id],
         });
-        res.redirect("/dashboard/blog");
+        res.redirectAfterPost("/dashboard/blog");
         return;
       }
 
@@ -50,13 +50,13 @@ export default {
           sql: "UPDATE blog_posts SET status = 'draft', updated_at = datetime('now') WHERE id = ?",
           args: [req.body.id],
         });
-        res.redirect("/dashboard/blog");
+        res.redirectAfterPost("/dashboard/blog");
         return;
       }
 
       if (action === "delete") {
         await db.execute({ sql: "DELETE FROM blog_posts WHERE id = ?", args: [req.body.id] });
-        res.redirect("/dashboard/blog");
+        res.redirectAfterPost("/dashboard/blog");
         return;
       }
 
@@ -67,21 +67,21 @@ export default {
           sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('blog_songbook_on_index', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
           args: [newVal, newVal],
         });
-        res.redirect("/dashboard/blog");
+        res.redirectAfterPost("/dashboard/blog");
         return;
       }
 
       if (action === "edit") {
         const { id, title, content, tags, visibility, cover_image_key } = req.body;
         if (!id || !title || !content) {
-          return res.redirect("/dashboard/blog");
+          return res.redirectAfterPost("/dashboard/blog");
         }
         const slug = title.toLowerCase().replace(/[^a-z0-9\s-]/g, "").replace(/\s+/g, "-").slice(0, 80);
         await db.execute({
           sql: "UPDATE blog_posts SET title = ?, slug = ?, content = ?, tags = ?, visibility = ?, cover_image_key = ?, updated_at = datetime('now') WHERE id = ?",
           args: [title, slug, content, tags || null, visibility || "private", cover_image_key || null, id],
         });
-        res.redirect("/dashboard/blog");
+        res.redirectAfterPost("/dashboard/blog");
         return;
       }
     }

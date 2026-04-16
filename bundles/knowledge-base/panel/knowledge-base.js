@@ -48,7 +48,7 @@ export default {
           args: [visibility || "private", lan_enabled === "1" ? 1 : 0, Number(collection_id)],
         });
       }
-      return res.redirect(`/dashboard/knowledge-base?tab=collections`);
+      return res.redirectAfterPost(`/dashboard/knowledge-base?tab=collections`);
     }
 
     const tab = req.query.tab || "articles";

@@ -53,30 +53,30 @@ async function handler(req, res, { db, layout, appRoot, lang }) {
         sql: "INSERT INTO blog_posts (slug, title, content, visibility, tags, author) VALUES (?, ?, ?, ?, ?, ?)",
         args: [slug, title, content, visibility || "private", finalTags, author],
       });
-      res.redirect("/dashboard/songbook");
+      res.redirectAfterPost("/dashboard/songbook");
       return;
     }
 
     if (action === "delete_song") {
       await db.execute({ sql: "DELETE FROM blog_posts WHERE id = ?", args: [req.body.id] });
-      res.redirect("/dashboard/songbook");
+      res.redirectAfterPost("/dashboard/songbook");
       return;
     }
 
     if (action === "create_setlist") {
       const { name, description, visibility } = req.body;
-      if (!name) { res.redirect("/dashboard/songbook?view=setlists"); return; }
+      if (!name) { res.redirectAfterPost("/dashboard/songbook?view=setlists"); return; }
       await db.execute({
         sql: "INSERT INTO songbook_setlists (name, description, visibility) VALUES (?, ?, ?)",
         args: [name, description || null, visibility || "private"],
       });
-      res.redirect("/dashboard/songbook?view=setlists");
+      res.redirectAfterPost("/dashboard/songbook?view=setlists");
       return;
     }
 
     if (action === "delete_setlist") {
       await db.execute({ sql: "DELETE FROM songbook_setlists WHERE id = ?", args: [req.body.id] });
-      res.redirect("/dashboard/songbook?view=setlists");
+      res.redirectAfterPost("/dashboard/songbook?view=setlists");
       return;
     }
   }

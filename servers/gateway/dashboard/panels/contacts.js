@@ -27,7 +27,7 @@ export default {
     // --- Handle POST actions ---
     if (req.method === "POST") {
       const result = await handleContactAction(req, db);
-      if (result?.redirect) return res.redirect(result.redirect);
+      if (result?.redirect) return res.redirectAfterPost(result.redirect);
       if (result?.download) {
         res.setHeader("Content-Type", "text/vcard; charset=utf-8");
         res.setHeader("Content-Disposition", "attachment; filename=contacts.vcf");

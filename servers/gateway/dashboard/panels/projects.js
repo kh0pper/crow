@@ -36,13 +36,13 @@ export default {
       if (action === "create") {
         const { name, description, type, tags } = req.body;
         if (!name?.trim()) {
-          return res.redirect("/dashboard/projects?error=name_required");
+          return res.redirectAfterPost("/dashboard/projects?error=name_required");
         }
         await db.execute({
           sql: "INSERT INTO research_projects (name, description, type, tags) VALUES (?, ?, ?, ?)",
           args: [name.trim(), description?.trim() || null, type || "research", tags?.trim() || null],
         });
-        return res.redirect("/dashboard/projects");
+        return res.redirectAfterPost("/dashboard/projects");
       }
 
       if (action === "update_status") {
@@ -53,7 +53,7 @@ export default {
             args: [status, id],
           });
         }
-        return res.redirect(`/dashboard/projects?view=${id}`);
+        return res.redirectAfterPost(`/dashboard/projects?view=${id}`);
       }
 
       if (action === "update") {
@@ -64,7 +64,7 @@ export default {
             args: [name.trim(), description?.trim() || null, tags?.trim() || null, id],
           });
         }
-        return res.redirect(`/dashboard/projects?view=${id}`);
+        return res.redirectAfterPost(`/dashboard/projects?view=${id}`);
       }
     }
 

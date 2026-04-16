@@ -232,7 +232,7 @@ export default {
     if (req.body.type_system) typesEnabled.push("system");
     const prefs = JSON.stringify({ types_enabled: typesEnabled });
     await upsertSetting(db, "notification_prefs", prefs);
-    res.redirect("/dashboard/settings?section=notifications");
+    res.redirectAfterPost("/dashboard/settings?section=notifications");
     return true;
   },
 };

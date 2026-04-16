@@ -45,7 +45,7 @@ export default {
     await upsertSetting(db, "language", newLang);
     const secure = process.env.CROW_HOSTED || process.env.NODE_ENV === "production" ? "; Secure" : "";
     res.setHeader("Set-Cookie", `crow_lang=${newLang}; Path=/; Max-Age=${30*24*60*60}; SameSite=Strict${secure}`);
-    res.redirect("/dashboard/settings?section=language");
+    res.redirectAfterPost("/dashboard/settings?section=language");
     return true;
   },
 };

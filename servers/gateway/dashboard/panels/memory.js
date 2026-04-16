@@ -24,7 +24,7 @@ export default {
 
       if (action === "delete") {
         await db.execute({ sql: "DELETE FROM memories WHERE id = ?", args: [req.body.id] });
-        res.redirect("/dashboard/memory");
+        res.redirectAfterPost("/dashboard/memory");
         return;
       }
 
@@ -36,7 +36,7 @@ export default {
             args: [content, category || "general", parseInt(importance, 10) || 5, id],
           });
         }
-        res.redirect("/dashboard/memory");
+        res.redirectAfterPost("/dashboard/memory");
         return;
       }
     }

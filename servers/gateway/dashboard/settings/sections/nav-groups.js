@@ -128,7 +128,7 @@ export default {
         group.name = new_name.trim().slice(0, 30);
         await upsertSetting(db, "nav_groups", JSON.stringify(groups));
       }
-      res.redirect("/dashboard/settings?section=nav-groups");
+      res.redirectAfterPost("/dashboard/settings?section=nav-groups");
       return true;
     }
 
@@ -148,13 +148,13 @@ export default {
       // Only delete if no panels assigned
       const hasAssigned = Object.values(assignments).some((gid) => gid === group_id);
       if (hasAssigned) {
-        res.redirect("/dashboard/settings?section=nav-groups");
+        res.redirectAfterPost("/dashboard/settings?section=nav-groups");
         return true;
       }
 
       groups = groups.filter((g) => g.id !== group_id);
       await upsertSetting(db, "nav_groups", JSON.stringify(groups));
-      res.redirect("/dashboard/settings?section=nav-groups");
+      res.redirectAfterPost("/dashboard/settings?section=nav-groups");
       return true;
     }
 
@@ -172,13 +172,13 @@ export default {
 
       // Don't create duplicate
       if (groups.find((g) => g.id === id)) {
-        res.redirect("/dashboard/settings?section=nav-groups");
+        res.redirectAfterPost("/dashboard/settings?section=nav-groups");
         return true;
       }
 
       groups.push({ id, name, collapsed: false });
       await upsertSetting(db, "nav_groups", JSON.stringify(groups));
-      res.redirect("/dashboard/settings?section=nav-groups");
+      res.redirectAfterPost("/dashboard/settings?section=nav-groups");
       return true;
     }
 
@@ -192,7 +192,7 @@ export default {
 
       assignments[panel_id] = target_group;
       await upsertSetting(db, "nav_panel_assignments", JSON.stringify(assignments));
-      res.redirect("/dashboard/settings?section=nav-groups");
+      res.redirectAfterPost("/dashboard/settings?section=nav-groups");
       return true;
     }
 
