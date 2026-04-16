@@ -785,6 +785,18 @@ try {
   console.warn("[notifications] Failed to mount:", err.message);
 }
 
+// --- Mount Turbo Streams (server-pushed HTML fragments) ---
+// Private routes under /dashboard/streams/*; the Funnel-reject
+// middleware above blocks public access. See routes/streams.js for the
+// per-route invariants.
+try {
+  const { default: streamsRouter } = await import("./routes/streams.js");
+  app.use(streamsRouter(dashboardAuth));
+  console.log("Turbo Streams mounted at /dashboard/streams");
+} catch (err) {
+  console.warn("[streams] Failed to mount:", err.message);
+}
+
 // --- Mount Push Subscription API ---
 try {
   const { default: pushRouter } = await import("./routes/push.js");

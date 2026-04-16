@@ -5,6 +5,8 @@
  * to create notifications with preference-aware filtering.
  */
 
+import bus from "./event-bus.js";
+
 const MAX_NOTIFICATIONS = 500;
 
 /**
@@ -63,6 +65,26 @@ export async function createNotification(db, opts) {
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [type, source, title, body, priority, action_url, metadataJson, schedule_id, expiresAt],
   });
+
+  // Broadcast a bell-badge refresh to any live Turbo Stream subscribers.
+  // Compute the unread count here (not per-subscriber) so 5 open tabs
+  // don't each hit the DB on every notification. Fail-open: a
+  // subscriber error must never break the primary insert or the push
+  // paths below.
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT COUNT(*) AS count FROM notifications
+            WHERE is_read = 0 AND is_dismissed = 0
+              AND (snoozed_until IS NULL OR snoozed_until <= datetime('now'))
+              AND (expires_at IS NULL OR expires_at > datetime('now'))`,
+      args: [],
+    });
+    const unreadCount = Number(rows?.[0]?.count ?? 0);
+    bus.emit("notifications:changed", { unreadCount });
+  } catch {
+    // Logging/stream failure must not cascade. The row is already
+    // written; polling fallback will reconcile within 5 min.
+  }
 
   // Send web push notification (non-blocking, fails silently when not available)
   try {
