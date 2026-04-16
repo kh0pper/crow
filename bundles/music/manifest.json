@@ -1,0 +1,12 @@
+{
+  "id": "music",
+  "name": "Music",
+  "version": "1.0.0",
+  "description": "Crow-native music player. Browse your Funkwhale library, play through the browser or your glasses, and get standard Android media controls. Uses the persistent player bar that persists across panels.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "media",
+  "tags": ["music", "funkwhale", "player", "subsonic"],
+  "icon": "music",
+  "panel": "panel/music.js"
+}
