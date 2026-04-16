@@ -284,7 +284,10 @@ export async function createFunkwhaleServer(options = {}) {
         const t = type || "tracks";
         const out = await fwFetch(`/api/v1/${t}/`, { query: { q, page_size: page_size || 20 } });
         const simplified = (out.results || []).map((item) => ({
-          id: item.id || item.uuid,
+          // Prefer UUID when available — fw_play's listen endpoint needs the
+          // UUID, not the integer id. Funkwhale tracks have both; using id
+          // (integer) here would make fw_play 404 on the audio fetch.
+          id: item.uuid || item.id,
           fid: item.fid || null,
           name: item.title || item.name || item.artist?.name,
           artist: item.artist?.name,
