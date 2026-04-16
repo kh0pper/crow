@@ -1065,6 +1065,7 @@ export default {
           .then(function(data) {
             var items = data.items || data.MediaContainer && data.MediaContainer.Metadata || [];
             var container = document.getElementById('library-content');
+            if (!container) return; // navigated away mid-fetch
             if (items.length === 0) {
               container.textContent = '';
               var empty = document.createElement('div');
@@ -1161,6 +1162,7 @@ export default {
           })
           .catch(function(err) {
             var container = document.getElementById('library-content');
+            if (!container) return;
             container.textContent = '';
             var errDiv = document.createElement('div');
             errDiv.style.cssText = 'text-align:center;padding:2rem;color:var(--crow-text-muted)';
@@ -1192,6 +1194,7 @@ export default {
           .then(function(data) {
             var channels = data.channels || [];
             var container = document.getElementById('live-content');
+            if (!container) return; // navigated away mid-fetch
             if (channels.length === 0) {
               container.textContent = '';
               var empty = document.createElement('div');
@@ -1279,6 +1282,7 @@ export default {
           })
           .catch(function(err) {
             var container = document.getElementById('live-content');
+            if (!container) return;
             container.textContent = '';
             var errDiv = document.createElement('div');
             errDiv.style.cssText = 'text-align:center;padding:2rem;color:var(--crow-text-muted)';
@@ -1302,7 +1306,16 @@ export default {
       </div>
       <script>
       (function() {
+        // Under Turbo, this IIFE re-executes on every navigation into the
+        // media panel's Remote tab. Kill any prior Kodi poll so concurrent
+        // re-entries don't stack 5-second pollers. beforeunload never fires
+        // under Turbo nav, so we can't rely on it for cleanup.
+        if (window.__mediaKodiPollInterval) {
+          clearInterval(window.__mediaKodiPollInterval);
+          window.__mediaKodiPollInterval = null;
+        }
         var remoteEl = document.getElementById('remote-content');
+        if (!remoteEl) return;
 
         function formatKodiTime(t) {
           if (!t) return '';
@@ -1418,13 +1431,22 @@ export default {
         }
 
         function poll() {
+          // Bail if the remote tab was swapped out (Turbo nav to another panel)
+          if (!remoteEl.isConnected) {
+            if (window.__mediaKodiPollInterval) {
+              clearInterval(window.__mediaKodiPollInterval);
+              window.__mediaKodiPollInterval = null;
+            }
+            return;
+          }
           fetch('/api/kodi/now-playing')
             .then(function(r) {
               if (!r.ok) throw new Error(r.status === 502 ? 'Kodi bundle is not running' : 'Failed to connect to Kodi');
               return r.json();
             })
-            .then(function(data) { renderNowPlaying(data); })
+            .then(function(data) { if (remoteEl.isConnected) renderNowPlaying(data); })
             .catch(function(err) {
+              if (!remoteEl.isConnected) return;
               remoteEl.textContent = '';
               var errDiv = document.createElement('div');
               errDiv.style.cssText = 'text-align:center;padding:2rem;color:var(--crow-text-muted)';
@@ -1449,8 +1471,7 @@ export default {
         };
 
         poll();
-        var kodiPollInterval = setInterval(poll, 5000);
-        window.addEventListener('beforeunload', function() { clearInterval(kodiPollInterval); });
+        window.__mediaKodiPollInterval = setInterval(poll, 5000);
       })();
       <\/script>`;
     }
