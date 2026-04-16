@@ -281,8 +281,11 @@ function absScript() {
     loadProgress();
     loadRecent();
 
-    // Refresh progress every 30s
-    setInterval(loadProgress, 30000);
+    // Refresh progress every 30s. Track on window so Turbo re-entries clear
+    // the prior poll instead of stacking; loadProgress already bails on
+    // missing container.
+    if (window.__absProgressInterval) clearInterval(window.__absProgressInterval);
+    window.__absProgressInterval = setInterval(loadProgress, 30000);
   `;
 }
 

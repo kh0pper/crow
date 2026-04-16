@@ -288,8 +288,10 @@ function jellyfinScript() {
     loadSessions();
     loadRecent();
 
-    // Refresh sessions every 10s
-    setInterval(loadSessions, 10000);
+    // Refresh sessions every 10s. Track on window so Turbo re-entries clear
+    // the prior poll instead of stacking.
+    if (window.__jfSessionsInterval) clearInterval(window.__jfSessionsInterval);
+    window.__jfSessionsInterval = setInterval(loadSessions, 10000);
   `;
 }
 

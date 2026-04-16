@@ -237,11 +237,19 @@ export default {
       </div>
 
       <script>
-        // Auto-refresh every 5s unless user is actively reading (cursor near top)
-        let lastScroll = window.scrollY;
-        setInterval(() => {
+        // Auto-refresh every 5s unless user is actively reading (cursor near top).
+        // Tracked on window so Turbo re-entries replace instead of stack the
+        // timer — and so nav away doesn't trigger a reload on a different page.
+        if (window.__orchReloadInterval) clearInterval(window.__orchReloadInterval);
+        window.__orchReloadInterval = setInterval(() => {
           if (document.visibilityState !== "visible") return;
           if (window.scrollY > 200) return; // user scrolled down, don't yank them
+          // Self-cancel if the orchestrator timeline is no longer mounted
+          if (!document.querySelector(".orch-table")) {
+            clearInterval(window.__orchReloadInterval);
+            window.__orchReloadInterval = null;
+            return;
+          }
           window.location.reload();
         }, 5000);
       </script>
