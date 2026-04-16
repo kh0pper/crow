@@ -22,6 +22,95 @@ function turboHead() {
   <meta name="view-transition" content="same-origin">`;
 }
 
+// Turbo diagnostic overlay. Visible when ?diag=turbo is on the URL (or
+// localStorage.crowDiagTurbo==='1'). Shows the last 20 uncaught errors,
+// whether Turbo loaded, whether window.crowPlayer exists, and the last few
+// Turbo lifecycle events. Cheap to ship in every page — the overlay only
+// renders DOM if the query param / localStorage flag is set, so there's
+// no visible effect by default.
+function turboDiagScript() {
+  if (process.env.CROW_ENABLE_TURBO !== "1") return "";
+  return `<script>
+(function() {
+  if (window.__crowDiagInit) return;
+  window.__crowDiagInit = true;
+  var urlEnabled = /(?:^|[?&])diag=turbo(?:&|$)/.test(location.search);
+  var lsEnabled = false;
+  try { lsEnabled = localStorage.getItem('crowDiagTurbo') === '1'; } catch(e) {}
+  if (urlEnabled) { try { localStorage.setItem('crowDiagTurbo', '1'); lsEnabled = true; } catch(e) {} }
+  var off = /(?:^|[?&])diag=off(?:&|$)/.test(location.search);
+  if (off) { try { localStorage.removeItem('crowDiagTurbo'); } catch(e) {} return; }
+  if (!lsEnabled) return;
+
+  var errors = [];
+  var events = [];
+
+  function stamp() {
+    var d = new Date();
+    return d.getMinutes() + ':' + String(d.getSeconds()).padStart(2,'0') + '.' + String(d.getMilliseconds()).padStart(3,'0');
+  }
+
+  window.addEventListener('error', function(e) {
+    errors.push(stamp() + ' ' + (e.message||'?') + ' @ ' + (e.filename||'?') + ':' + (e.lineno||'?'));
+    if (errors.length > 20) errors.shift();
+    render();
+  });
+  window.addEventListener('unhandledrejection', function(e) {
+    errors.push(stamp() + ' unhandled: ' + (e.reason && (e.reason.message||e.reason) || 'unknown'));
+    if (errors.length > 20) errors.shift();
+    render();
+  });
+
+  ['turbo:load','turbo:before-visit','turbo:visit','turbo:before-render','turbo:render','turbo:before-fetch-request','turbo:before-fetch-response'].forEach(function(evt) {
+    document.addEventListener(evt, function(e) {
+      var url = (e.detail && (e.detail.url || (e.detail.fetchResponse && e.detail.fetchResponse.response && e.detail.fetchResponse.response.url))) || '';
+      events.push(stamp() + ' ' + evt + (url ? ' ' + url.replace(/^https?:\\/\\/[^/]+/, '') : ''));
+      if (events.length > 15) events.shift();
+      render();
+    });
+  });
+
+  var box;
+  function ensureBox() {
+    if (box) return box;
+    box = document.createElement('div');
+    box.id = 'crow-diag-turbo';
+    box.style.cssText = 'position:fixed;bottom:4.5rem;right:0.5rem;width:22em;max-height:60vh;overflow:auto;background:rgba(10,12,18,0.92);color:#d4e3ff;font:11px/1.35 JetBrains Mono,monospace;padding:0.5rem 0.6rem;border:1px solid rgba(127,200,255,0.4);border-radius:4px;z-index:99999;box-shadow:0 4px 14px rgba(0,0,0,0.6);';
+    document.body.appendChild(box);
+    return box;
+  }
+
+  function render() {
+    if (!document.body) return;
+    var el = ensureBox();
+    var lines = [];
+    lines.push('turbo: ' + (typeof window.Turbo === 'undefined' ? 'NOT LOADED' : (window.Turbo.session ? 'active' : 'loaded')));
+    lines.push('crowPlayer: ' + (window.crowPlayer ? (typeof window.crowPlayer.queue === 'function' ? 'ok' : 'present-but-partial') : 'MISSING'));
+    var audio = document.getElementById('crow-audio');
+    lines.push('audio: ' + (audio ? 'present (init=' + (audio.dataset.crowPlayerInitialized||'?') + ', src=' + (audio.src ? audio.src.slice(-40) : '(empty)') + ')' : 'MISSING'));
+    var root = document.getElementById('music-root');
+    if (root) lines.push('music-root: init=' + (root.dataset.initialized||'?'));
+    if (errors.length) { lines.push(''); lines.push('errors:'); errors.slice().reverse().forEach(function(x){ lines.push('  '+x); }); }
+    if (events.length) { lines.push(''); lines.push('events:'); events.slice().reverse().forEach(function(x){ lines.push('  '+x); }); }
+    lines.push('');
+    lines.push('hide: add ?diag=off to URL');
+    el.textContent = lines.join('\\n');
+    el.style.whiteSpace = 'pre-wrap';
+  }
+
+  // Render once on boot, again after DOMContentLoaded, again after turbo:load.
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', render);
+  } else {
+    render();
+  }
+  document.addEventListener('turbo:load', render);
+  // Re-render periodically so player state updates stay visible.
+  setInterval(render, 2000);
+})();
+</script>`;
+}
+
 /**
  * Render the full dashboard HTML page.
  * @param {object} opts
@@ -251,6 +340,7 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
     }
 
   </script>
+  ${turboDiagScript()}
 </body>
 </html>`;
 }
