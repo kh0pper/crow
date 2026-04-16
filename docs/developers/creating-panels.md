@@ -281,3 +281,78 @@ These automatically adapt to dark and light modes. See the [Brand Identity](/arc
 3. Enable it in `panels.json`
 4. Start the gateway: `npm run gateway`
 5. Open `http://localhost:3001/dashboard/your-panel-id`
+
+## Turbo Drive compatibility
+
+The Crow's Nest navigates between panels with [Turbo Drive](https://turbo.hotwired.dev/) when `CROW_ENABLE_TURBO=1` is set on the gateway. Turbo does an HTTP fetch, body-swaps the `<main>` content, and keeps the `<head>` + sidebar + persistent player bar in place. Normal panels work unchanged, but a few patterns need care:
+
+### Idempotent inline scripts
+
+Any `<script>` tag your panel emits inside the body **re-executes on every Turbo navigation into the panel**. If it attaches listeners to `document` / `window`, starts a `setInterval`, opens a `WebSocket`, or allocates any resource not owned by an element inside the panel root, it will leak (stacked listeners, multiplied pollers) every time the user visits.
+
+The idiomatic fix is to track the resource on a `window.__myPanel*` global and clear the prior one on re-entry:
+
+```js
+<script>
+(function() {
+  // Clear any prior interval (from a previous nav into this panel)
+  if (window.__myPanelPollInterval) {
+    clearInterval(window.__myPanelPollInterval);
+    window.__myPanelPollInterval = null;
+  }
+
+  async function poll() {
+    var root = document.getElementById('my-panel-root');
+    if (!root || !root.isConnected) {
+      // Panel was swapped out — self-cancel
+      clearInterval(window.__myPanelPollInterval);
+      window.__myPanelPollInterval = null;
+      return;
+    }
+    // ... fetch + render
+  }
+
+  poll();
+  window.__myPanelPollInterval = setInterval(poll, 10000);
+})();
+</script>
+```
+
+**Element-level listeners** (click handlers on buttons inside the panel root) don't need any guard — they're attached to a fresh DOM on each nav and auto-GC with the old body when Turbo swaps.
+
+**Document-level listeners** (e.g., `document.addEventListener('keydown', ...)` for a modal-closes-on-escape handler) should be attached once per document lifetime with a `window.__myBound` flag, and the callback should look up the current DOM via IDs rather than closing over specific elements.
+
+### 303-after-POST for form responses
+
+Turbo treats `302 Found` after a form POST as "stay on the current URL". For a submit to update the browser URL correctly, respond with `303 See Other`. The gateway exposes `res.redirectAfterPost(url)` as a helper:
+
+```js
+if (req.method === "POST" && req.body.action === "save") {
+  await saveIt(req.body);
+  return res.redirectAfterPost("/dashboard/my-panel?saved=1");
+}
+```
+
+For `router.get(...)` routes (GET-after-GET redirects), plain `res.redirect(url)` is fine — Turbo treats a 302 after a GET correctly.
+
+### Escape hatch: `data-turbo="false"`
+
+To opt a specific link or form out of Turbo entirely, set `data-turbo="false"`:
+
+```html
+<a href="/dashboard/logout" data-turbo="false">Logout</a>
+```
+
+This is the pattern for auth-boundary links (logout, login). The gateway also intercepts `401` responses and redirects-to-`/dashboard/login` and forces a full reload via `turbo:before-fetch-response`, so session expiry is always handled safely.
+
+### Iframe-embedding panels
+
+A number of bundle panels (Jellyfin, Navidrome, Audiobookshelf, Paperless, Vaultwarden, Calibre-Web, Gitea, Stirling-PDF, Netdata, etc.) embed a third-party web UI inside an `<iframe>`. **Under Turbo, navigating to a different panel discards the iframe**, and coming back re-creates it — which means Jellyfin video restarts at 0:00, Vaultwarden's session can drop, Navidrome's in-browser player stops.
+
+The pre-Turbo behavior was identical (full page reload also killed the iframe), but Turbo makes panel toggling feel instant, which encourages users to flip between panels more. Three media-session iframes (`jellyfin`, `navidrome`, `audiobookshelf`) are marked `data-turbo-permanent id="<panel>-iframe"` so the iframe survives in narrow same-panel scenarios (e.g., switching between the Overview and Web UI tabs of the same bundle). For broader persistence across panels, use the native Crow panel instead — the Music bundle's panel uses `window.crowPlayer` and the persistent player bar, which keeps audio playing across any panel navigation.
+
+If you build an iframe-based panel, treat it as "visit once, stay focused" and steer users toward native equivalents for media playback.
+
+### Debugging Turbo issues
+
+The gateway ships an opt-in diagnostic overlay when `CROW_ENABLE_TURBO=1`. Append `?diag=turbo` to any dashboard URL to turn it on (persisted per browser via `localStorage.crowDiagTurbo`). The overlay shows Turbo boot state, `window.crowPlayer` availability, permanent-element init flags, recent `turbo:*` lifecycle events, and any uncaught errors or unhandled promise rejections. Append `?diag=off` to dismiss.

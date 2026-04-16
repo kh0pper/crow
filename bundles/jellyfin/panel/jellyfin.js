@@ -43,7 +43,7 @@ export default {
       const jellyfinUrl = process.env.JELLYFIN_URL || "http://localhost:8096";
       body = `
         <div class="jf-webui">
-          <iframe src="${escapeHtml(jellyfinUrl)}" class="jf-iframe" allow="autoplay; fullscreen; picture-in-picture"></iframe>
+          <iframe id="jellyfin-iframe" data-turbo-permanent src="${escapeHtml(jellyfinUrl)}" class="jf-iframe" allow="autoplay; fullscreen; picture-in-picture"></iframe>
         </div>
       `;
     } else {
