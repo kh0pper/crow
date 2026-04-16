@@ -7,6 +7,15 @@
 
 const CLIENT_SCRIPT = `
 (function() {
+  // Under Turbo Drive, this IIFE re-executes on every navigation into the
+  // meta-glasses panel. Kill any prior refresh interval so concurrent
+  // re-entries don't stack pollers. Element-level listeners (the buttons
+  // below) are safely re-attached to the fresh DOM each time.
+  if (window.__mgRefreshInterval) {
+    clearInterval(window.__mgRefreshInterval);
+    window.__mgRefreshInterval = null;
+  }
+
   var MG_REQUIRED_APP = "1.4.0";
 
   function cmpVer(a, b) {
@@ -107,11 +116,16 @@ const CLIENT_SCRIPT = `
 
   async function refreshDevices() {
     var root = document.getElementById('mg-devices');
+    // Bail if the panel was unmounted (e.g., Turbo navigated away between
+    // poll tick and fetch completion). Prevents null.appendChild crashes.
+    if (!root) return;
     try {
       var res = await fetch('/api/meta-glasses/devices', { credentials: 'same-origin' });
       var data = await res.json();
+      if (!document.getElementById('mg-devices')) return;
       renderDevices(data.devices || []);
     } catch (e) {
+      if (!root.isConnected) return;
       clear(root);
       var err = el('div', { className: 'mg-empty' }, 'Failed to load devices: ' + e.message);
       err.style.color = 'var(--crow-error)';
@@ -222,7 +236,7 @@ const CLIENT_SCRIPT = `
 
   renderCompat();
   refreshDevices();
-  setInterval(refreshDevices, 5000);
+  window.__mgRefreshInterval = setInterval(refreshDevices, 5000);
 })();
 `;
 
