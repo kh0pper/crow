@@ -188,6 +188,33 @@ Enforcement:
 
 If you touch any of these three layers, run the `servers/gateway/__tests__/auth.test.js` integration tests.
 
+### Turbo Drive
+
+The dashboard uses [Turbo Drive](https://turbo.hotwired.dev/) for client-side panel navigation when `CROW_ENABLE_TURBO=1` is set on the gateway. This is what keeps the player bar visible (and audio playing) across panel navigation, and updates the URL correctly after form submits without a full page reload.
+
+**Enable (systemd drop-in; recommended because easy to roll back):**
+```bash
+sudo tee /etc/systemd/system/crow-gateway.service.d/turbo.conf > /dev/null <<'EOF'
+[Service]
+Environment=CROW_ENABLE_TURBO=1
+EOF
+sudo systemctl daemon-reload && sudo systemctl restart crow-gateway
+```
+Remove the file to roll back.
+
+**What ships in the platform when the flag is on:**
+- `servers/gateway/public/vendor/turbo-8.0.5.umd.js` is vendored (pinned; do not float to `@8`).
+- `turboHead()` in `servers/gateway/dashboard/shared/layout.js` injects the `<script defer>` + `<meta turbo-cache-control="no-cache">` + `<meta view-transition="same-origin">` into the dashboard `<head>`.
+- `res.redirectAfterPost(url)` middleware emits `303 See Other` so Turbo updates the URL after a form POST (a bare `302` makes Turbo stay on the old URL). All existing POST handlers were migrated via `scripts/migrate-redirect-303.js`.
+- `#crow-player-bar` and nested `<audio>` are `data-turbo-permanent`; player state survives every panel nav.
+- A `turbo:before-fetch-response` listener in the layout's global script forces a full reload on `401` responses or redirects to `/dashboard/login` (auth-boundary interception).
+- Panel inline scripts track `setInterval` / document-level listeners on `window.__<panel>*` globals with clear-prior-on-re-entry so Turbo re-visits don't stack resources. See `docs/developers/creating-panels.md#turbo-drive-compatibility` for the panel-author guide.
+- Media-session iframes (Jellyfin, Navidrome, Audiobookshelf) are marked `data-turbo-permanent` with stable ids for narrow intra-panel persistence. Inter-panel nav still discards them — steer users toward native panels (e.g., the Music bundle) for persistent playback.
+
+**Debug overlay:** append `?diag=turbo` to any dashboard URL while the flag is on; the bottom-right overlay shows Turbo boot state, `window.crowPlayer` availability, recent `turbo:*` events, and any uncaught errors. `?diag=off` dismisses.
+
+**Rollback is clean.** Every piece of Turbo code is either gated on the flag or behavior-neutral without it. If a regression shows up, drop the drop-in file and the dashboard renders exactly as before.
+
 ### Data Directory
 
 Data lives in `~/.crow/data/` (preferred) or `./data/` (fallback). Resolution order: `CROW_DATA_DIR` env → `~/.crow/data/` (if exists) → `./data/`. The `resolveDataDir()` function in `servers/db.js` handles this. Migration script (`scripts/migrate-data-dir.js`) moves data from `./data/` to `~/.crow/data/` and creates a symlink for backward compatibility.
