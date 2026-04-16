@@ -219,6 +219,11 @@ app.use((req, res, next) => {
 // This is defense in depth: a misconfigured `tailscale funnel /` used to
 // expose the entire gateway (including the Nest dashboard) to the internet;
 // this middleware ensures even that misconfig fails closed.
+//
+// NOTE (Turbo Streams): /dashboard/streams/* SSE endpoints are private
+// and intentionally NOT in PUBLIC_FUNNEL_PREFIXES. Adding any /dashboard
+// prefix here would expose all stream-emitted data (unread counts,
+// media state, orchestrator events) to the public internet.
 const PUBLIC_FUNNEL_PREFIXES = [
   "/blog",
   "/robots.txt",

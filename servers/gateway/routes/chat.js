@@ -21,6 +21,7 @@ import { createProviderAdapter, createAdapterFromProfile, getProviderConfig, get
 import { createToolExecutor, getChatTools, MAX_TOOL_ROUNDS } from "../ai/tool-executor.js";
 import { generateSystemPrompt } from "../ai/system-prompt.js";
 import { getPresignedUrl, isAvailable as isStorageAvailable } from "../../storage/s3-client.js";
+import { openStream } from "../streams/sse.js";
 
 /** Sliding window: max messages to send to AI */
 const CONTEXT_WINDOW = 20;
@@ -292,17 +293,9 @@ export default function chatRouter(dashboardAuth) {
     const db = createDbClient();
     const toolExecutor = createToolExecutor();
 
-    // Set up SSE
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-      "X-Accel-Buffering": "no",
-    });
-
-    function sendEvent(event, data) {
-      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    }
+    // Shared SSE primitive — handles heartbeats, keep-alive, EPIPE, and
+    // idempotent close. See servers/gateway/streams/sse.js.
+    const { send: sendEvent, close: closeStream } = openStream(res);
 
     // AbortController for cancellation
     const abortController = new AbortController();
@@ -322,7 +315,7 @@ export default function chatRouter(dashboardAuth) {
       });
       if (convRows.length === 0) {
         sendEvent("error", { message: "Conversation not found", code: "not_found" });
-        res.end();
+        closeStream();
         return;
       }
       const conversation = convRows[0];
@@ -331,7 +324,7 @@ export default function chatRouter(dashboardAuth) {
       const { content, attachments } = req.body || {};
       if ((!content || typeof content !== "string" || !content.trim()) && (!attachments || !attachments.length)) {
         sendEvent("error", { message: "Message content or attachments required", code: "invalid_input" });
-        res.end();
+        closeStream();
         return;
       }
       const messageText = (content || "(attachment)").trim();
@@ -362,7 +355,7 @@ export default function chatRouter(dashboardAuth) {
         }
       } catch (err) {
         sendEvent("error", { message: err.message, code: err.code || "provider_error" });
-        res.end();
+        closeStream();
         return;
       }
 
@@ -548,7 +541,7 @@ export default function chatRouter(dashboardAuth) {
       activeGenerations.delete(convId);
       await toolExecutor.close();
       db.close();
-      res.end();
+      closeStream();
     }
   });
 
