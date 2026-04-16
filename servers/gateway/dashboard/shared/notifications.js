@@ -512,6 +512,13 @@ export const headerIconsCss = `
 
 export function headerIconsJs(lang) {
   return `
+(function() {
+  // Under Turbo Drive, this inline script re-executes on every body swap.
+  // Classic-script 'let' at top-level lives in the Realm's global lex env,
+  // so re-declaring on re-execution throws SyntaxError. Wrap in an IIFE
+  // with an idempotency guard so state + listeners attach exactly once.
+  if (window.__crowNotifInit) return;
+  window.__crowNotifInit = true;
   ${sharedNotifJs(lang)}
 
   function toggleHealthDropdown(e) {
@@ -643,6 +650,14 @@ export function headerIconsJs(lang) {
     window.__crowNotifPollInterval = setInterval(pollNotifications, 60000);
     _notifPollTimer = window.__crowNotifPollInterval;
   }
+  // Expose HTML onclick callbacks. Function declarations are hoisted, so
+  // these references resolve even though the assignments read "before" the
+  // function bodies in source order.
+  window.dismissAllNotifications = dismissAllNotifications;
+  window.toggleCrowPtt = toggleCrowPtt;
+  window.toggleHealthDropdown = toggleHealthDropdown;
+  window.toggleNotifDropdown = toggleNotifDropdown;
+})();
 `;
 }
 
@@ -850,6 +865,12 @@ export const tamagotchiCss = `
 
 export function tamagotchiJs(lang) {
   return `
+(function() {
+  // See headerIconsJs for rationale: Turbo body-swap re-injection + classic-
+  // script top-level 'let' collide. IIFE + guard keeps listeners/intervals
+  // from stacking across navigations.
+  if (window.__crowNotifInit) return;
+  window.__crowNotifInit = true;
   ${sharedNotifJs(lang)}
 
   var _crowPttActive = false;
@@ -997,5 +1018,9 @@ export function tamagotchiJs(lang) {
     window.__crowNotifPollInterval = setInterval(pollNotifications, 60000);
     _notifPollTimer = window.__crowNotifPollInterval;
   }
+  window.dismissAllNotifications = dismissAllNotifications;
+  window.toggleCrowPtt = toggleCrowPtt;
+  window.toggleCrowDropdown = toggleCrowDropdown;
+})();
 `;
 }
