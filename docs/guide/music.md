@@ -86,6 +86,10 @@ This is per-track-on-start, not scrobble-grade ("50% or 4 minutes"). Good enough
 
 **No Android media controls in the shade** → Ensure you're viewing the panel inside the Crow Android app (not a mobile browser tab). `navigator.mediaSession` needs same-document WebView context.
 
+**Audio stops when I navigate to another panel** → Set `CROW_ENABLE_TURBO=1` on the gateway (see [Turbo Drive](/developers/platform-capabilities#turbo-drive)). With the flag off, each sidebar click is a full page reload that tears down `<audio>`; Chrome's autoplay policy then blocks resumed playback. With Turbo on, the player bar is `data-turbo-permanent` so it and the audio element survive across every panel navigation.
+
+**Play All silently does nothing** → The stream endpoint is returning 502, usually because the gateway's upstream fetch to Funkwhale or MinIO failed. Check `docker ps` for the Funkwhale and MinIO containers, and confirm shared MinIO on the paired `crow` host (if you're using one) is healthy — the media presigned URLs Funkwhale hands out point at MinIO, and a dead MinIO produces a `{"error":"fetch failed"}` response. See [Tailscale setup](/getting-started/tailscale-setup) if shared storage is newly unreachable after a reboot.
+
 ## Roadmap
 
 - **Subsonic/Navidrome backend:** Mirror endpoints under `/api/subsonic/*` so the Music panel works with Navidrome or any OpenSubsonic-compatible server. Same UI, different backend. Planned follow-up.
