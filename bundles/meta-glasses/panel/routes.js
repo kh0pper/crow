@@ -90,7 +90,16 @@ const _turnLocks = new Map(); // deviceId → { acquiredAt, ws, watchdog }
 const TURN_WATCHDOG_MS = 60_000;
 
 function acquireTurnLock(deviceId, ws) {
-  if (_turnLocks.has(deviceId)) return false;
+  const existing = _turnLocks.get(deviceId);
+  if (existing) {
+    // Re-entrant: if the SAME WebSocket already holds the lock, allow re-entry.
+    // This is the case when an in-progress voice turn calls pushAudioStream as
+    // part of intercepting an `_audio_stream` envelope from a tool result —
+    // the turn already owns the lock, so we shouldn't return busy. A different
+    // ws still gets refused (genuine concurrent-turn case).
+    if (existing.ws === ws) return true;
+    return false;
+  }
   const watchdog = setTimeout(() => {
     const e = _turnLocks.get(deviceId);
     if (e && e.ws === ws) {
@@ -1125,6 +1134,11 @@ export async function pushAudioStream(deviceId, { url, codec, sampleRate, channe
   if (!deviceId || !url || !codec) return { delivered: false, reason: "bad_args" };
   const sess = _sessions.get(deviceId);
   if (!sess?.ws) return { delivered: false, reason: "absent" };
+  // Detect whether we'd be acquiring a fresh lock or reusing one already held
+  // by the same ws (the case when this is called from inside a voice-turn
+  // intercepting an `_audio_stream` envelope). If we acquired fresh, we must
+  // release in finally; if we reused, the outer turn handler still owns it.
+  const lockReentrant = _turnLocks.get(deviceId)?.ws === sess.ws;
   if (!acquireTurnLock(deviceId, sess.ws)) return { delivered: false, reason: "lock_busy" };
   try {
     const headers = {};
@@ -1157,10 +1171,13 @@ export async function pushAudioStream(deviceId, { url, codec, sampleRate, channe
     sendText(sess.ws, { type: "audio_stream_end", ok: true });
     return { delivered: true };
   } catch (err) {
+    // (re-throw fall-through to common finally for lock release)
     sendText(sess.ws, { type: "audio_stream_end", ok: false, error: err.message });
     return { delivered: false, reason: err.message };
   } finally {
-    releaseTurnLock(deviceId, sess.ws);
+    // Only release the lock if WE acquired it. When reentrant (parent voice
+    // turn already owns it), the outer handler is responsible for releasing.
+    if (!lockReentrant) releaseTurnLock(deviceId, sess.ws);
   }
 }
 
