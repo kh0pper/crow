@@ -28,11 +28,25 @@ self.addEventListener("activate", (e) => {
 });
 
 self.addEventListener("fetch", (e) => {
-  // Network-first for API and dashboard routes
-  if (
-    e.request.url.includes("/api/") ||
-    e.request.url.includes("/dashboard/")
-  ) {
+  const url = e.request.url;
+
+  // Special case: /dashboard/nest is pre-cached for offline shell loading
+  if (url.endsWith("/dashboard/nest")) {
+    e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
+    return;
+  }
+
+  // Other /dashboard/* routes: network-only, NO cache fallback.
+  // Under Turbo Drive, a cache fallback would return stale HTML to the
+  // body-swap machinery, potentially corrupting the UI. Let the browser's
+  // native offline UI handle failed fetches.
+  if (url.includes("/dashboard/")) {
+    e.respondWith(fetch(e.request));
+    return;
+  }
+
+  // API routes: network-first with cache fallback (existing behavior)
+  if (url.includes("/api/")) {
     e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
     return;
   }
