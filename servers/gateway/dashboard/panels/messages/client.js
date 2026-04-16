@@ -1100,11 +1100,16 @@ export function messagesClientJS(opts) {
     // Under Turbo, this script re-runs on every nav into Messages. Clear
     // any prior poll tracked on window, then start fresh and track the
     // new handle so the next re-entry (or navigation away) can clear it.
+    //
+    // Live badge updates come via <turbo-stream-source
+    // src="/dashboard/streams/messages">; this 5-min poll is a
+    // fallback-only safety net for transient SSE drops. Pre-Streams
+    // it was 7s — dropping to 300s is safe given the live path.
     if (window.__msgPollInterval) {
       clearInterval(window.__msgPollInterval);
       window.__msgPollInterval = null;
     }
-    _pollInterval = setInterval(pollStatus, 7000);
+    _pollInterval = setInterval(pollStatus, 300000);
     window.__msgPollInterval = _pollInterval;
   }
 

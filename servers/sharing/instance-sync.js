@@ -17,6 +17,7 @@ import { resolve } from "node:path";
 import { sign, verify } from "./identity.js";
 import { resolveDataDir } from "../db.js";
 import { isSyncable } from "../gateway/dashboard/settings/sync-allowlist.js";
+import bus from "../shared/event-bus.js";
 
 // Tables that participate in core sync
 const SYNCED_TABLES = [
@@ -394,6 +395,25 @@ export class InstanceSyncManager {
       }
     } catch (err) {
       console.warn(`[instance-sync] Failed to apply ${op} on ${table}:`, err.message);
+    }
+
+    // Broadcast a messages:changed event when a synced-in message row
+    // lands locally. Without this, a paired Crow receiving a peer
+    // message via Nostr forwards the row via InstanceSync but our
+    // local onMessage / createNotification paths never fire, so
+    // badges wouldn't live-update. The 5-min fallback poll would
+    // eventually catch up, but this closes the gap for cross-instance
+    // traffic. Errors are swallowed — the row is already applied.
+    if (op === "insert" && table === "messages" && row?.contact_id != null) {
+      try {
+        const { rows } = await this.db.execute({
+          sql: `SELECT COUNT(*) AS unread FROM messages
+                WHERE contact_id = ? AND is_read = 0 AND direction = 'received'`,
+          args: [row.contact_id],
+        });
+        const unread = Number(rows?.[0]?.unread ?? 0);
+        bus.emit("messages:changed", { contactId: row.contact_id, unread });
+      } catch {}
     }
   }
 

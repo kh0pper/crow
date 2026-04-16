@@ -51,7 +51,7 @@ export function buildMessagesHTML(data) {
       const unreadClass = item.unread > 0 ? " visible" : "";
       return `<div class="msg-avatar-item" data-type="peer" data-id="${item.id}" onclick="msgSelectItem('peer',${item.id})" title="${escapeHtml(item.displayName)}">
         <div class="msg-avatar msg-avatar-peer" style="--peer-color:${color}">${label}</div>
-        <span class="msg-unread-badge${unreadClass}" data-badge-peer="${item.id}">${item.unread > 0 ? item.unread : ""}</span>
+        <span id="badge-peer-${item.id}" class="msg-unread-badge${unreadClass}" data-badge-peer="${item.id}">${item.unread > 0 ? item.unread : ""}</span>
       </div>`;
     }
   }).join("");
@@ -77,6 +77,9 @@ export function buildMessagesHTML(data) {
   return `
     <div class="msg-hub" style="position:relative">
       ${inviteBanner}
+      <!-- Live peer-badge updates via Turbo Stream (Phase C.3). The
+           fallback poll at 5min lives in client.js pollStatus. -->
+      <turbo-stream-source src="/dashboard/streams/messages"></turbo-stream-source>
       <!-- Avatar Strip -->
       <div class="msg-strip">
         <button class="msg-strip-new" onclick="msgTogglePopover()" title="${t("messages.newConversation", lang)}">+</button>
