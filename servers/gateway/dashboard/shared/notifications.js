@@ -257,6 +257,7 @@ ${kioskBtn}
     <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
   </svg>
   <span id="notif-badge" class="notif-badge" style="display:none">0</span>
+  <turbo-stream-source src="/dashboard/streams/notifications"></turbo-stream-source>
   <div id="notif-dropdown" class="header-dropdown notif-dropdown" style="display:none">
     <div class="dropdown-title">${t("notif.notifications", lang)} <button class="btn btn-sm btn-secondary" onclick="dismissAllNotifications(event)">${t("notif.clearAll", lang)}</button></div>
     <div id="notif-list" class="dropdown-body">${t("common.loading", lang)}</div>
@@ -646,8 +647,11 @@ export function headerIconsJs(lang) {
   }
 
   pollNotifications();
+  // 5-min fallback poll. Live updates come via the Turbo Stream at
+  // /dashboard/streams/notifications; this interval is a safety net
+  // for transient SSE drops and is intentionally slow.
   if (!window.__crowNotifPollInterval) {
-    window.__crowNotifPollInterval = setInterval(pollNotifications, 60000);
+    window.__crowNotifPollInterval = setInterval(pollNotifications, 300000);
     _notifPollTimer = window.__crowNotifPollInterval;
   }
   // Expose HTML onclick callbacks. Function declarations are hoisted, so
@@ -1014,8 +1018,11 @@ export function tamagotchiJs(lang) {
   }
 
   pollNotifications();
+  // 5-min fallback poll. Live updates come via the Turbo Stream at
+  // /dashboard/streams/notifications; this interval is a safety net
+  // for transient SSE drops and is intentionally slow.
   if (!window.__crowNotifPollInterval) {
-    window.__crowNotifPollInterval = setInterval(pollNotifications, 60000);
+    window.__crowNotifPollInterval = setInterval(pollNotifications, 300000);
     _notifPollTimer = window.__crowNotifPollInterval;
   }
   window.dismissAllNotifications = dismissAllNotifications;
