@@ -41,7 +41,7 @@ export default {
       const absUrl = process.env.AUDIOBOOKSHELF_URL || "http://localhost:13378";
       body = `
         <div class="abs-webui">
-          <iframe src="${escapeHtml(absUrl)}" class="abs-iframe" allow="autoplay; fullscreen"></iframe>
+          <iframe id="audiobookshelf-iframe" data-turbo-permanent src="${escapeHtml(absUrl)}" class="abs-iframe" allow="autoplay; fullscreen"></iframe>
         </div>
       `;
     } else {

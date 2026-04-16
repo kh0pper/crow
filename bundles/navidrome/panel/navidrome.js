@@ -41,7 +41,7 @@ export default {
       const navidromeUrl = process.env.NAVIDROME_URL || "http://localhost:4533";
       body = `
         <div class="nd-webui">
-          <iframe src="${escapeHtml(navidromeUrl)}" class="nd-iframe" allow="autoplay; fullscreen"></iframe>
+          <iframe id="navidrome-iframe" data-turbo-permanent src="${escapeHtml(navidromeUrl)}" class="nd-iframe" allow="autoplay; fullscreen"></iframe>
         </div>
       `;
     } else {
