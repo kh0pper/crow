@@ -190,19 +190,19 @@ If you touch any of these three layers, run the `servers/gateway/__tests__/auth.
 
 ### Turbo Drive
 
-The dashboard uses [Turbo Drive](https://turbo.hotwired.dev/) for client-side panel navigation when `CROW_ENABLE_TURBO=1` is set on the gateway. This is what keeps the player bar visible (and audio playing) across panel navigation, and updates the URL correctly after form submits without a full page reload.
+The dashboard uses [Turbo Drive](https://turbo.hotwired.dev/) for client-side panel navigation. **Default-on** as of 2026-04-16 after the Phase 8 walkthrough passed; set `CROW_ENABLE_TURBO=0` to opt out. This is what keeps the player bar visible (and audio playing) across panel navigation, and updates the URL correctly after form submits without a full page reload.
 
-**Enable (systemd drop-in; recommended because easy to roll back):**
+**Opt out (systemd drop-in; recommended because easy to roll forward):**
 ```bash
 sudo tee /etc/systemd/system/crow-gateway.service.d/turbo.conf > /dev/null <<'EOF'
 [Service]
-Environment=CROW_ENABLE_TURBO=1
+Environment=CROW_ENABLE_TURBO=0
 EOF
 sudo systemctl daemon-reload && sudo systemctl restart crow-gateway
 ```
-Remove the file to roll back.
+Remove the file to return to the default (Turbo on).
 
-**What ships in the platform when the flag is on:**
+**What ships in the platform when Turbo is active:**
 - `servers/gateway/public/vendor/turbo-8.0.5.umd.js` is vendored (pinned; do not float to `@8`).
 - `turboHead()` in `servers/gateway/dashboard/shared/layout.js` injects the `<script defer>` + `<meta turbo-cache-control="no-cache">` + `<meta view-transition="same-origin">` into the dashboard `<head>`.
 - `res.redirectAfterPost(url)` middleware emits `303 See Other` so Turbo updates the URL after a form POST (a bare `302` makes Turbo stay on the old URL). All existing POST handlers were migrated via `scripts/migrate-redirect-303.js`.
@@ -211,9 +211,9 @@ Remove the file to roll back.
 - Panel inline scripts track `setInterval` / document-level listeners on `window.__<panel>*` globals with clear-prior-on-re-entry so Turbo re-visits don't stack resources. See `docs/developers/creating-panels.md#turbo-drive-compatibility` for the panel-author guide.
 - Media-session iframes (Jellyfin, Navidrome, Audiobookshelf) are marked `data-turbo-permanent` with stable ids for narrow intra-panel persistence. Inter-panel nav still discards them — steer users toward native panels (e.g., the Music bundle) for persistent playback.
 
-**Debug overlay:** append `?diag=turbo` to any dashboard URL while the flag is on; the bottom-right overlay shows Turbo boot state, `window.crowPlayer` availability, recent `turbo:*` events, and any uncaught errors. `?diag=off` dismisses.
+**Debug overlay:** append `?diag=turbo` to any dashboard URL; the bottom-right overlay shows Turbo boot state, `window.crowPlayer` availability, recent `turbo:*` events, and any uncaught errors. `?diag=off` dismisses. The overlay is only rendered if the query param / localStorage flag is set, so it costs nothing by default.
 
-**Rollback is clean.** Every piece of Turbo code is either gated on the flag or behavior-neutral without it. If a regression shows up, drop the drop-in file and the dashboard renders exactly as before.
+**Rollback is clean.** Every piece of Turbo code is either gated behind `CROW_ENABLE_TURBO=0` or behavior-neutral if Turbo doesn't load. If a regression shows up, add the opt-out drop-in above and the dashboard renders exactly as it did pre-rollout.
 
 ### Data Directory
 

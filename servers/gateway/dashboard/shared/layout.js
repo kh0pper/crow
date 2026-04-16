@@ -10,13 +10,13 @@ import { FONT_IMPORT, designTokensCss } from "./design-tokens.js";
 import { headerIconsCss, tamagotchiCss } from "./notifications.js";
 import { t, SUPPORTED_LANGS } from "./i18n.js";
 
-// Turbo Drive feature flag. When CROW_ENABLE_TURBO=1, inject the vendored
-// Turbo 8.0.5 UMD build + meta tags that configure navigation behavior.
+// Turbo Drive. Default-on as of the post-Phase-8 flip: inject the vendored
+// Turbo 8.0.5 UMD build unless explicitly opted out with CROW_ENABLE_TURBO=0.
 // `turbo-cache-control: no-cache` disables Turbo's preview-from-stale-snapshot
 // (important for a dashboard with live data). `view-transition: same-origin`
 // enables the View Transitions API fallback where supported.
 function turboHead() {
-  if (process.env.CROW_ENABLE_TURBO !== "1") return "";
+  if (process.env.CROW_ENABLE_TURBO === "0") return "";
   return `<script src="/vendor/turbo-8.0.5.umd.js" defer></script>
   <meta name="turbo-cache-control" content="no-cache">
   <meta name="view-transition" content="same-origin">`;
@@ -29,7 +29,7 @@ function turboHead() {
 // renders DOM if the query param / localStorage flag is set, so there's
 // no visible effect by default.
 function turboDiagScript() {
-  if (process.env.CROW_ENABLE_TURBO !== "1") return "";
+  if (process.env.CROW_ENABLE_TURBO === "0") return "";
   return `<script>
 (function() {
   if (window.__crowDiagInit) return;
