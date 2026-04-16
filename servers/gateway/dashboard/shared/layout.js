@@ -107,7 +107,7 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
         <button onclick="toggleTheme()" class="theme-toggle" title="${escapeHtml(t("nav.toggleTheme", lang))}">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
         </button>
-        <a href="/dashboard/logout" class="nav-item logout">${escapeHtml(t("nav.logout", lang))}</a>
+        <a href="/dashboard/logout" class="nav-item logout" data-turbo="false">${escapeHtml(t("nav.logout", lang))}</a>
       </div>
     </aside>
     <div class="sidebar-overlay" onclick="closeSidebar()"></div>
@@ -190,6 +190,23 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
       // Global Escape-closes-sidebar listener — also only once per document
       document.addEventListener('keydown', function(e) {
         if (e.key === 'Escape') closeSidebar();
+      });
+
+      // Auth-boundary interception: when a Turbo fetch lands on a 401 or
+      // crosses into /dashboard/login (session expired mid-nav), force a
+      // full reload instead of body-swapping a login page into the
+      // authenticated layout's DOM. Prevents orphaned tamagotchi/notif
+      // timers and stale sidebar scripts from continuing to poll an
+      // unauthenticated endpoint. No-op when Turbo isn't loaded.
+      document.addEventListener('turbo:before-fetch-response', function(event) {
+        var fetchResponse = event.detail && event.detail.fetchResponse;
+        if (!fetchResponse || !fetchResponse.response) return;
+        var resp = fetchResponse.response;
+        var url = resp.url || '';
+        if (resp.status === 401 || /\\/dashboard\\/login(\\/|$|\\?)/.test(url)) {
+          event.preventDefault();
+          window.location.href = url || '/dashboard/login';
+        }
       });
     }
 
