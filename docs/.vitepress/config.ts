@@ -202,6 +202,7 @@ export default defineConfig({
           { text: 'Contact Discovery', link: '/guide/contact-discovery' },
           { text: 'Bot Management', link: '/guide/bot-management' },
           { text: 'Meta Glasses', link: '/guide/meta-glasses' },
+          { text: 'Music', link: '/guide/music' },
           { text: 'Context & Performance', link: '/guide/context-performance' },
           { text: 'Data Backends', link: '/guide/data-backends' },
           { text: 'Deployment Tiers', link: '/guide/deployment-tiers' },
