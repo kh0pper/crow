@@ -51,6 +51,9 @@ services:
       NESTED_PROXY: ${FUNKWHALE_NESTED_PROXY:-0}
       # allowed_hosts includes the hostname + internal service names
       DJANGO_ALLOWED_HOSTS: ${FUNKWHALE_HOSTNAME},funkwhale,localhost,127.0.0.1
+      # When using S3 storage, return 302 redirects to presigned URLs instead
+      # of nginx X-Accel-Redirect (which only works for on-disk media).
+      PROXY_MEDIA: ${PROXY_MEDIA:-True}
       # S3 storage (set by the gateway install flow when shared storage is
       # configured in the Nest — see manifest.storage.translator=funkwhale).
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
