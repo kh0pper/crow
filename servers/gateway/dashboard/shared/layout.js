@@ -63,8 +63,12 @@ function turboDiagScript() {
 
   ['turbo:load','turbo:before-visit','turbo:visit','turbo:before-render','turbo:render','turbo:before-fetch-request','turbo:before-fetch-response'].forEach(function(evt) {
     document.addEventListener(evt, function(e) {
-      var url = (e.detail && (e.detail.url || (e.detail.fetchResponse && e.detail.fetchResponse.response && e.detail.fetchResponse.response.url))) || '';
-      events.push(stamp() + ' ' + evt + (url ? ' ' + url.replace(/^https?:\\/\\/[^/]+/, '') : ''));
+      var raw = e.detail && (e.detail.url || (e.detail.fetchResponse && e.detail.fetchResponse.response && e.detail.fetchResponse.response.url));
+      // e.detail.url is a URL object on turbo:before-fetch-request; coerce to
+      // string before .replace() to avoid "url.replace is not a function".
+      var url = raw ? String(raw) : '';
+      var shortUrl = url ? url.replace(/^https?:\\/\\/[^/]+/, '') : '';
+      events.push(stamp() + ' ' + evt + (shortUrl ? ' ' + shortUrl : ''));
       if (events.length > 15) events.shift();
       render();
     });

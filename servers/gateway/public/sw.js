@@ -30,6 +30,16 @@ self.addEventListener("activate", (e) => {
 self.addEventListener("fetch", (e) => {
   const url = e.request.url;
 
+  // Don't intercept cross-origin requests. When the SW re-fetches a
+  // stylesheet/font that the <link> tag would have fetched natively, the
+  // SW's fetch() call is subject to the page's connect-src (which is 'self'
+  // here), even though the original request was allowed under style-src /
+  // font-src. Letting cross-origin requests fall through avoids spurious
+  // CSP violations (Google Fonts CSS was the offender).
+  let reqOrigin;
+  try { reqOrigin = new URL(url).origin; } catch { reqOrigin = null; }
+  if (reqOrigin && reqOrigin !== self.location.origin) return;
+
   // Special case: /dashboard/nest is pre-cached for offline shell loading
   if (url.endsWith("/dashboard/nest")) {
     e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
