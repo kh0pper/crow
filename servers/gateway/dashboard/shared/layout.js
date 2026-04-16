@@ -147,7 +147,8 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
         const active = p.id === activePanel ? "active" : "";
         const icon = NAV_ICONS[p.icon] || NAV_ICONS.default;
         const label = t("nav." + p.id, lang) !== "nav." + p.id ? t("nav." + p.id, lang) : p.name;
-        return `<a href="${p.route}" class="nav-item ${active}">${icon}<span>${escapeHtml(label)}</span></a>`;
+        const preload = p.preload ? " data-turbo-preload" : "";
+        return `<a href="${p.route}" class="nav-item ${active}"${preload}>${icon}<span>${escapeHtml(label)}</span></a>`;
       }).join("\n          ");
       return `<div class="nav-group${g.collapsed ? " collapsed" : ""}" data-group-id="${escapeHtml(g.id)}">
           <button class="nav-group-header" onclick="toggleNavGroup('${escapeHtml(g.id)}')">
@@ -165,7 +166,8 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
       const active = p.id === activePanel ? "active" : "";
       const icon = NAV_ICONS[p.icon] || NAV_ICONS.default;
       const label = t("nav." + p.id, lang) !== "nav." + p.id ? t("nav." + p.id, lang) : p.name;
-      return `<a href="${p.route}" class="nav-item ${active}">${icon}<span>${escapeHtml(label)}</span></a>`;
+      const preload = p.preload ? " data-turbo-preload" : "";
+      return `<a href="${p.route}" class="nav-item ${active}"${preload}>${icon}<span>${escapeHtml(label)}</span></a>`;
     }).join("\n        ");
   }
 

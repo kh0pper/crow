@@ -19,6 +19,7 @@ export default {
   navOrder: 1,
   hidden: false,
   category: "core",
+  preload: true,
 
   async handler(req, res, { db, lang, layout }) {
     // Handle POST actions (pin/unpin)
