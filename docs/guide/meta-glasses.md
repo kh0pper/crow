@@ -158,6 +158,54 @@ curl -X POST http://localhost:3000/api/meta-glasses/say \
   -d '{"text":"Reminder: stand up"}'
 ```
 
+### Play music ("hands-free" Funkwhale)
+
+If you've installed the [Funkwhale bundle](/platforms/openclaw#funkwhale)
+and configured shared MinIO/S3 storage, the glasses can play your library
+through their bone-conduction speakers without ever pulling out your phone.
+
+Install + configure once:
+
+1. Add MinIO config in **Settings → Multi-Instance → Shared Storage** (one
+   endpoint, applies to every paired Crow instance).
+2. Install the Funkwhale bundle from Extensions. The gateway auto-injects
+   `AWS_*` credentials into Funkwhale's container, so audio uploads land
+   on shared MinIO instead of local disk.
+3. Set `PROXY_MEDIA=False` in `~/.crow/bundles/funkwhale/.env` (already
+   the install default for new shared-storage installs) so Funkwhale
+   redirects to S3 presigned URLs instead of nginx X-Accel.
+4. Mint a personal access token in Funkwhale's web UI
+   (Settings → Your applications → Register one, scopes
+   `read write read:libraries read:listenings`), drop it into
+   `~/crow/.env` as `FUNKWHALE_ACCESS_TOKEN`, restart the gateway.
+
+Then say:
+
+> "Play *Comfy in Nautica* by Panda Bear from my library."
+
+The chain runs entirely server-side — `fw_search` → `fw_play(track_uuid)`
+→ Funkwhale 302 to a presigned MinIO URL → gateway fetches with
+`Authorization: Bearer <token>` (token never leaves the server) → binary
+frames over the device WebSocket → Android `MediaCodec` decodes →
+`musicTrack` `AudioTrack` plays through the glasses speakers.
+
+**TTS ducking** is automatic: ask Crow a question mid-playback, the music
+volume drops to 0.25 while Crow speaks, returns to 1.0 on drain. Chained
+TTS messages don't un-duck mid-utterance (per-device `pendingTtsDucks`
+counter).
+
+The same `_audio_stream` envelope works for any future audio producer —
+podcast bundles, TTS narration of long-form articles, etc. — just emit
+`{ _audio_stream: { url, codec, auth: "<sentinel>" } }` from your tool.
+
+```bash
+# Operator-direct push for diagnostics:
+curl -X POST http://localhost:3000/api/meta-glasses/stream \
+  -H 'Content-Type: application/json' \
+  --cookie "$CROW_COOKIE" \
+  -d '{"device_id":"<id>","url":"https://...mp3","codec":"mp3"}'
+```
+
 ## Household profiles
 
 If you share your Crow with family, pair each person's glasses separately
