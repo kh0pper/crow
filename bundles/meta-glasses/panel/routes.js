@@ -591,11 +591,25 @@ LONG WORK via the orchestrator. For research, multi-step analysis, code work, or
         // line so the LLM doesn't parrot the URL or auth sentinel back at the
         // user. Anything without a JSON envelope passes through unchanged.
         let piped = r.result;
+        if (typeof piped === "string" && piped.includes('"_audio_stream_control"')) {
+          try {
+            const parsed = JSON.parse(piped);
+            const ctl = parsed?._audio_stream_control;
+            if (ctl?.action === "stop") {
+              clearAudioQueue(device.id);
+              piped = parsed.prose || "Stopped playback.";
+            }
+          } catch { /* leave untouched */ }
+        }
         if (typeof piped === "string" && piped.includes('"_audio_stream"')) {
           try {
             const parsed = JSON.parse(piped);
             const env = parsed?._audio_stream;
             if (env && env.url && env.codec) {
+              // Set up the queue (if any) BEFORE pushing the first stream so
+              // that pushAudioStream's chaining sees it. Empty queue = single
+              // track. Each queue item is {url, codec, auth, sampleRate?, channels?}.
+              setAudioQueue(device.id, Array.isArray(env.queue) ? env.queue : []);
               const outcome = await pushAudioStream(device.id, {
                 url: env.url,
                 codec: env.codec,
@@ -1169,16 +1183,55 @@ export async function pushAudioStream(deviceId, { url, codec, sampleRate, channe
       sendBinary(sess.ws, Buffer.from(value));
     }
     sendText(sess.ws, { type: "audio_stream_end", ok: true });
+
+    // After this stream finishes, pop the next one off the device's queue
+    // (set by the audio-stream interceptor BEFORE calling pushAudioStream
+    // for the first track of an album). Recurses synchronously so the lock
+    // stays held across the whole album — gives back-to-back playback with
+    // no per-track gap. Cleared via clearAudioQueue() (e.g. fw_stop_playback).
+    const next = popAudioQueue(deviceId);
+    if (next) {
+      // Tail-call style — the outer pushAudioStream call's finally will run
+      // ONCE after the entire chain completes.
+      return await pushAudioStream(deviceId, next);
+    }
     return { delivered: true };
   } catch (err) {
-    // (re-throw fall-through to common finally for lock release)
     sendText(sess.ws, { type: "audio_stream_end", ok: false, error: err.message });
+    clearAudioQueue(deviceId); // an error mid-album halts the rest
     return { delivered: false, reason: err.message };
   } finally {
     // Only release the lock if WE acquired it. When reentrant (parent voice
     // turn already owns it), the outer handler is responsible for releasing.
     if (!lockReentrant) releaseTurnLock(deviceId, sess.ws);
   }
+}
+
+/**
+ * Per-device server-side audio queue. Used by fw_play_album (and any future
+ * "playlist"-style envelope) to play multiple tracks back-to-back without
+ * needing a phone-side queue or each track being a separate AI tool call.
+ *
+ * Each entry is the same shape pushAudioStream takes: {url, codec, auth?, ...}.
+ */
+const _audioQueues = new Map(); // deviceId → array of stream descriptors
+
+function setAudioQueue(deviceId, queue) {
+  if (Array.isArray(queue) && queue.length > 0) {
+    _audioQueues.set(deviceId, [...queue]);
+  } else {
+    _audioQueues.delete(deviceId);
+  }
+}
+function popAudioQueue(deviceId) {
+  const q = _audioQueues.get(deviceId);
+  if (!q || q.length === 0) return null;
+  const next = q.shift();
+  if (q.length === 0) _audioQueues.delete(deviceId);
+  return next;
+}
+function clearAudioQueue(deviceId) {
+  _audioQueues.delete(deviceId);
 }
 
 /* ---------- Server-initiated TTS (Phase 3) ---------- */

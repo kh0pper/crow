@@ -284,14 +284,19 @@ export async function createFunkwhaleServer(options = {}) {
         const t = type || "tracks";
         const out = await fwFetch(`/api/v1/${t}/`, { query: { q, page_size: page_size || 20 } });
         const simplified = (out.results || []).map((item) => ({
-          // Prefer UUID when available — fw_play's listen endpoint needs the
-          // UUID, not the integer id. Funkwhale tracks have both; using id
-          // (integer) here would make fw_play 404 on the audio fetch.
-          id: item.uuid || item.id,
+          // For tracks specifically, the listen endpoint needs the UUID, but
+          // Funkwhale's track API returns no top-level `uuid` field — only
+          // `id` (integer) and the UUID embedded in `listen_url`. Extract
+          // it so fw_play can build a working listen URL. For artists/
+          // albums/channels, the integer id is the canonical identifier.
+          id: t === "tracks"
+            ? (item.listen_url?.match(/\/listen\/([0-9a-f-]+)\//)?.[1] || item.id)
+            : (item.uuid || item.id),
           fid: item.fid || null,
           name: item.title || item.name || item.artist?.name,
           artist: item.artist?.name,
           album: item.album?.title,
+          album_id: item.album?.id,
           is_local: item.is_local,
         }));
         return textResponse({ count: out.count, type: t, results: simplified });
@@ -471,6 +476,82 @@ export async function createFunkwhaleServer(options = {}) {
       } catch (err) {
         return errResponse(err);
       }
+    },
+  );
+
+  // --- fw_play_album: queue every track on an album for hands-free playback ---
+  server.tool(
+    "fw_play_album",
+    "Play every track of an album sequentially through the paired glasses speaker. Takes the album's integer id from fw_search results (where type='albums') or fw_list_library. Returns an _audio_stream envelope with a queue array that the meta-glasses voice loop plays back-to-back.",
+    {
+      album_id: z.union([z.string(), z.number()]).describe("Album id (integer) from fw_search results."),
+      format: z.enum(["mp3", "ogg", "opus"]).optional().describe("Transcode format; default mp3."),
+    },
+    async ({ album_id, format }) => {
+      try {
+        const authErr = requireAuth(); if (authErr) return authErr;
+        const codec = format || "mp3";
+        const meta = await fwFetch(`/api/v1/albums/${encodeURIComponent(album_id)}/`).catch(() => null);
+        const albumTitle = meta?.title || `album ${album_id}`;
+        const artist = meta?.artist?.name || "unknown artist";
+        // Funkwhale doesn't inline tracks on the album endpoint — use the
+        // tracks list with album filter, ordered by position.
+        const list = await fwFetch(`/api/v1/tracks/`, {
+          query: { album: album_id, page_size: 100, ordering: "position" },
+        });
+        const tracks = (list?.results || []).filter((t) => t.is_playable !== false);
+        if (tracks.length === 0) {
+          return textResponse({ ok: false, prose: `${albumTitle} has no playable tracks.` });
+        }
+        const streams = tracks.map((t) => {
+          const m = (t.listen_url || "").match(/\/listen\/([0-9a-f-]+)\//);
+          const trackUuid = m?.[1];
+          if (!trackUuid) return null;
+          return {
+            url: `${FUNKWHALE_URL}/api/v1/listen/${encodeURIComponent(trackUuid)}/?to=${codec}`,
+            codec,
+            auth: "funkwhale",
+            title: t.title,
+          };
+        }).filter(Boolean);
+        if (streams.length === 0) {
+          return textResponse({ ok: false, prose: `Couldn't resolve any playable URLs for ${albumTitle}.` });
+        }
+        const [first, ...rest] = streams;
+        return textResponse({
+          ok: true,
+          album: albumTitle,
+          artist,
+          track_count: streams.length,
+          _audio_stream: {
+            url: first.url,
+            codec: first.codec,
+            auth: first.auth,
+            queue: rest, // remaining tracks; meta-glasses panel plays back-to-back
+          },
+          prose: `Playing ${albumTitle} by ${artist} — ${streams.length} tracks.`,
+        });
+      } catch (err) {
+        return errResponse(err);
+      }
+    },
+  );
+
+  // --- fw_stop_playback: cancel any queued playback on the device ---
+  server.tool(
+    "fw_stop_playback",
+    "Stop the currently-playing audio stream on the paired glasses and clear any queued tracks. Use when the user says 'stop', 'pause', 'next', etc. (this is a hard stop — no resume).",
+    {},
+    async () => {
+      // The actual cancellation happens inside the meta-glasses panel which
+      // owns the per-device queue + active stream. The tool result's prose
+      // is what the LLM speaks; the panel intercepts the marker via
+      // _audio_stream_control.
+      return textResponse({
+        ok: true,
+        _audio_stream_control: { action: "stop" },
+        prose: "Stopping playback.",
+      });
     },
   );
 
