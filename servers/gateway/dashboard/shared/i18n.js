@@ -622,6 +622,7 @@ const translations = {
   "settings.section.notifications": { en: "Notifications", es: "Notificaciones" },
   "settings.section.aiProvider": { en: "AI Provider", es: "Proveedor de IA" },
   "settings.section.aiProfiles": { en: "AI Profiles", es: "Perfiles de IA" },
+  "settings.section.llm": { en: "LLM Orchestrator", es: "Orquestador LLM" },
   "settings.section.connections": { en: "Connection URLs", es: "URLs de conexión" },
   "settings.section.helpSetup": { en: "Help & Setup", es: "Ayuda y configuración" },
   "settings.section.integrations": { en: "Integrations", es: "Integraciones" },

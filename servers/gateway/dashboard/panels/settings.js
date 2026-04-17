@@ -42,11 +42,13 @@ import navGroupsSection from "../settings/sections/nav-groups.js";
 import ttsProfilesSection from "../settings/sections/tts-profiles.js";
 import sttProfilesSection from "../settings/sections/stt-profiles.js";
 import visionProfilesSection from "../settings/sections/vision-profiles.js";
+import llmSection from "../settings/sections/llm.js";
 
 // Register built-in sections
 registerSettingsSection(navGroupsSection);
 registerSettingsSection(themeSection);
 registerSettingsSection(languageSection);
+registerSettingsSection(llmSection);
 registerSettingsSection(ttsProfilesSection);
 registerSettingsSection(sttProfilesSection);
 registerSettingsSection(visionProfilesSection);
