@@ -452,6 +452,7 @@ Full checklist for adding a bundle that appears on the Extensions page and (if i
 5. If the bundle has a panel: ensure the panel file is at `bundles/<id>/panel/<id>.js` — the install flow copies it to `~/.crow/panels/` and adds to `~/.crow/panels.json`
 6. If the bundle has skills: add to `skills/superpowers.md` trigger table
 7. Restart both gateways after any changes
+8. **Shared environment files:** If your bundle references shared infra (GPU GIDs, tailnet IPs, image pins), reference `~/.crow/env/rocm.env` or `~/.crow/env/cuda.env` via `env_file: - ${HOME}/.crow/env/<name>.env` in `docker-compose.yml`. These files are untracked (operator-specific values). docker-compose also auto-loads a project-dir `.env` for YAML-level `${VAR}` substitution — symlink it too: `ln -s ~/.crow/env/rocm.env bundles/<id>/.env`. Do **not** put shared env files under `bundles/`; that path breaks `crow bundle install`'s cp-based deployment.
 
 ### Adding a Crow's Nest panel
 

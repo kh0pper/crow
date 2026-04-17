@@ -1,0 +1,14 @@
+{
+  "id": "vllm-rocm-qwen3",
+  "type": "bundle",
+  "name": "vLLM Qwen3-4B (ROCm gfx1151)",
+  "category": "ai",
+  "description": "Fast tool-dispatch LLM (Qwen3-4B BF16) served via vLLM on AMD Strix Halo (gfx1151). Part of crow's tiered Mode A.",
+  "requires": {
+    "gpu": true,
+    "min_vram_gb": 12,
+    "platform": "linux-x86_64"
+  },
+  "env_vars": [],
+  "port": 8001
+}
