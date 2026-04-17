@@ -22,6 +22,9 @@ import { createToolExecutor, getChatTools, MAX_TOOL_ROUNDS } from "../ai/tool-ex
 import { generateSystemPrompt } from "../ai/system-prompt.js";
 import { getPresignedUrl, isAvailable as isStorageAvailable } from "../../storage/s3-client.js";
 import { openStream } from "../streams/sse.js";
+import { resolveProviderConfig } from "../ai/resolve-profile.js";
+import { checkVendorSwitch } from "../ai/vendor-guard.js";
+import { listProvidersAll } from "../../orchestrator/providers-db.js";
 
 /** Sliding window: max messages to send to AI */
 const CONTEXT_WINDOW = 20;
@@ -109,23 +112,30 @@ export default function chatRouter(dashboardAuth) {
   router.post("/api/chat/conversations", async (req, res) => {
     const db = createDbClient();
     try {
-      const { title, system_prompt, profile_id, model } = req.body || {};
+      const { title, system_prompt, profile_id, model, provider: bodyProvider } = req.body || {};
 
       let provider, convModel, profileId = null;
 
       if (profile_id) {
-        // Profile-based conversation
+        // Path A — Profile-based conversation
         const profiles = await getAiProfiles(db);
         const profile = profiles.find(p => p.id === profile_id);
         if (!profile) return res.status(400).json({ error: "Unknown profile" });
         provider = profile.provider;
-        convModel = model || profile.defaultModel || "";
+        convModel = model || profile.model_id || profile.defaultModel || "";
         profileId = profile_id;
+      } else if (bodyProvider) {
+        // Path B — Quick Chat: body carries provider + model (+ optional system_prompt).
+        // `bodyProvider` may be either a provider_type label (legacy: "openai")
+        // OR a provider row id (new: "cloud-openai-main"). Accept both; the
+        // message-send path resolves the row by either key.
+        provider = bodyProvider;
+        convModel = model || "";
       } else {
-        // Env-based fallback
+        // Env-based fallback (legacy, kept during the dual-ship window)
         const config = getProviderConfig();
         if (!config) {
-          return res.status(400).json({ error: "No AI provider configured. Add an AI Profile in Settings." });
+          return res.status(400).json({ error: "No AI provider configured. Add an AI Profile or use Quick Chat." });
         }
         provider = config.provider;
         convModel = model || config.model || "";
@@ -249,13 +259,13 @@ export default function chatRouter(dashboardAuth) {
       const id = parseInt(req.params.id);
       if (!id) return res.status(400).json({ error: "Invalid conversation ID" });
 
-      const { model } = req.body || {};
+      const { model, provider: newProvider } = req.body || {};
       if (!model || typeof model !== "string" || model.length > 100) {
         return res.status(400).json({ error: "Valid model name required" });
       }
 
       // Validate model against profile's model list (if profile-based)
-      const conv = await db.execute({ sql: "SELECT profile_id FROM chat_conversations WHERE id = ?", args: [id] });
+      const conv = await db.execute({ sql: "SELECT profile_id, provider FROM chat_conversations WHERE id = ?", args: [id] });
       if (!conv.rows[0]) return res.status(404).json({ error: "Conversation not found" });
 
       if (conv.rows[0].profile_id) {
@@ -266,11 +276,21 @@ export default function chatRouter(dashboardAuth) {
         }
       }
 
+      // Cross-vendor tool-use guard — if caller sends `provider` alongside
+      // `model` and the new vendor bucket differs from the conversation's
+      // current one, reject when the conversation has active tool_calls.
+      if (newProvider && typeof newProvider === "string") {
+        const err = await checkVendorSwitch(db, id, conv.rows[0].provider, newProvider);
+        if (err) return res.status(400).json(err);
+      }
+
       await db.execute({
-        sql: "UPDATE chat_conversations SET model = ?, updated_at = datetime('now') WHERE id = ?",
-        args: [model, id],
+        sql: newProvider
+          ? "UPDATE chat_conversations SET model = ?, provider = ?, updated_at = datetime('now') WHERE id = ?"
+          : "UPDATE chat_conversations SET model = ?, updated_at = datetime('now') WHERE id = ?",
+        args: newProvider ? [model, newProvider, id] : [model, id],
       });
-      res.json({ ok: true, model });
+      res.json({ ok: true, model, provider: newProvider || conv.rows[0].provider });
     } catch (err) {
       res.status(500).json({ error: err.message });
     } finally {
@@ -321,7 +341,7 @@ export default function chatRouter(dashboardAuth) {
       const conversation = convRows[0];
 
       // Save user message
-      const { content, attachments } = req.body || {};
+      const { content, attachments, model: bodyModel, provider: bodyProvider } = req.body || {};
       if ((!content || typeof content !== "string" || !content.trim()) && (!attachments || !attachments.length)) {
         sendEvent("error", { message: "Message content or attachments required", code: "invalid_input" });
         closeStream();
@@ -335,10 +355,47 @@ export default function chatRouter(dashboardAuth) {
         args: [convId, messageText, attachJson],
       });
 
-      // Get provider adapter (profile-aware)
+      // Per-message model override (Path A): body.model wins for THIS
+      // assistant turn only — does NOT PATCH conversation.model. Pairs
+      // with an optional body.provider so Quick Chats can one-shot a
+      // different vendor without sticking. If the proposed vendor
+      // differs from the conversation's current vendor AND the history
+      // carries active tool_calls, fail with 400 (cross-vendor tool-lock).
+      let effectiveModel = (typeof bodyModel === "string" && bodyModel.trim()) ? bodyModel.trim() : conversation.model;
+      let effectiveProvider = conversation.provider;
+      if (typeof bodyProvider === "string" && bodyProvider.trim()) {
+        const guardErr = await checkVendorSwitch(db, convId, conversation.provider, bodyProvider);
+        if (guardErr) {
+          sendEvent("error", { message: guardErr.message, code: guardErr.code });
+          closeStream();
+          return;
+        }
+        effectiveProvider = bodyProvider.trim();
+      }
+
+      // Get provider adapter (profile-aware; per-message overrides honored)
       let adapter;
       try {
-        if (conversation.profile_id) {
+        if (bodyProvider && bodyProvider !== conversation.provider) {
+          // Quick-Chat per-message vendor override — resolve by provider_id OR
+          // by provider_type via the DB-first resolver. Falls back to
+          // models.json if no DB row matches.
+          const cfg = await resolveProviderConfig(db, effectiveProvider, effectiveModel).catch(() => null);
+          if (cfg) {
+            const { createAdapterFromProfile: fromProfile } = await import("../ai/provider.js");
+            const pseudoProfile = {
+              provider: cfg.provider_type || effectiveProvider,
+              apiKey: cfg.apiKey === "none" ? "" : cfg.apiKey,
+              baseUrl: cfg.baseUrl,
+            };
+            const result = await fromProfile(pseudoProfile, effectiveModel);
+            adapter = result.adapter;
+          } else {
+            sendEvent("error", { message: `Unknown provider: ${effectiveProvider}`, code: "provider_error" });
+            closeStream();
+            return;
+          }
+        } else if (conversation.profile_id) {
           const profiles = await getAiProfiles(db, { includeKeys: true });
           const profile = profiles.find(p => p.id === conversation.profile_id);
           if (!profile) {
@@ -346,12 +403,26 @@ export default function chatRouter(dashboardAuth) {
             const result = await createProviderAdapter();
             adapter = result.adapter;
           } else {
-            const result = await createAdapterFromProfile(profile, conversation.model);
+            const result = await createAdapterFromProfile(profile, effectiveModel);
             adapter = result.adapter;
           }
         } else {
-          const result = await createProviderAdapter();
-          adapter = result.adapter;
+          // No profile: try DB-first resolver on the conversation's
+          // provider/model (Quick Chat). Fall back to env on miss.
+          const cfg = await resolveProviderConfig(db, effectiveProvider, effectiveModel).catch(() => null);
+          if (cfg) {
+            const { createAdapterFromProfile: fromProfile } = await import("../ai/provider.js");
+            const pseudoProfile = {
+              provider: cfg.provider_type || effectiveProvider,
+              apiKey: cfg.apiKey === "none" ? "" : cfg.apiKey,
+              baseUrl: cfg.baseUrl,
+            };
+            const result = await fromProfile(pseudoProfile, effectiveModel);
+            adapter = result.adapter;
+          } else {
+            const result = await createProviderAdapter();
+            adapter = result.adapter;
+          }
         }
       } catch (err) {
         sendEvent("error", { message: err.message, code: err.code || "provider_error" });
@@ -465,20 +536,23 @@ export default function chatRouter(dashboardAuth) {
             // Save what we have and exit
             if (assistantContent) {
               await db.execute({
-                sql: `INSERT INTO chat_messages (conversation_id, role, content, input_tokens, output_tokens)
-                      VALUES (?, 'assistant', ?, ?, ?)`,
-                args: [convId, assistantContent, roundInputTokens, roundOutputTokens],
+                sql: `INSERT INTO chat_messages (conversation_id, role, content, input_tokens, output_tokens, model_id)
+                      VALUES (?, 'assistant', ?, ?, ?, ?)`,
+                args: [convId, assistantContent, roundInputTokens, roundOutputTokens, effectiveModel || null],
               });
             }
             break;
           }
         }
 
-        // Save assistant message
+        // Save assistant message (model_id records which model actually
+        // answered — may differ from conversation.model for per-message
+        // Path A overrides). NULLable; user-row + tool-row INSERTs
+        // elsewhere in this file intentionally leave it unset.
         if (assistantContent || toolCalls.length > 0) {
           await db.execute({
-            sql: `INSERT INTO chat_messages (conversation_id, role, content, tool_calls, input_tokens, output_tokens)
-                  VALUES (?, 'assistant', ?, ?, ?, ?)`,
+            sql: `INSERT INTO chat_messages (conversation_id, role, content, tool_calls, input_tokens, output_tokens, model_id)
+                  VALUES (?, 'assistant', ?, ?, ?, ?, ?)`,
             args: [
               convId,
               assistantContent || null,
@@ -489,6 +563,7 @@ export default function chatRouter(dashboardAuth) {
               }))) : null,
               roundInputTokens,
               roundOutputTokens,
+              effectiveModel || null,
             ],
           });
         }

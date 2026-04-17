@@ -27,6 +27,7 @@ import { resolveEnvPath, readEnvFile } from "../../../env-manager.js";
 import { upsertSetting, readSetting } from "../registry.js";
 
 const FLAG_KEY = "llm_settings_migrated";
+const SHAPE_V2_FLAG_KEY = "chat_profile_shape_v2";
 const ENV_DEFAULT_ID = "cloud-env-default";
 const KNOWN_PROVIDERS = new Set([
   "openai", "anthropic", "google", "ollama", "openrouter", "meta", "openai-compat",
@@ -179,11 +180,53 @@ async function migrateEnvDefault(db) {
 }
 
 /**
+ * Phase 7: backfill chat-profile shape v2 fields (kind/system_prompt/temperature).
+ * Runs independently of the main migration flag so it catches profiles
+ * already migrated under v1. Idempotent — only writes when at least one
+ * profile lacks `kind`.
+ */
+async function ensureChatProfileShapeV2(db) {
+  if (await readSetting(db, SHAPE_V2_FLAG_KEY)) {
+    return { skipped: "already_v2" };
+  }
+  const profiles = await readAiProfiles(db);
+  let enriched = 0;
+  const next = profiles.map((p) => {
+    if (!p || typeof p !== "object") return p;
+    if ("kind" in p && "system_prompt" in p && "temperature" in p) return p;
+    enriched++;
+    return {
+      kind: p.kind || "single",
+      system_prompt: p.system_prompt ?? null,
+      temperature: p.temperature ?? null,
+      ...p,
+    };
+  });
+  if (enriched > 0) {
+    await upsertSetting(db, "ai_profiles", JSON.stringify(next));
+  }
+  await upsertSetting(
+    db,
+    SHAPE_V2_FLAG_KEY,
+    JSON.stringify({ at: new Date().toISOString(), version: 2 }),
+  );
+  return { enriched };
+}
+
+/**
  * Entry point. Idempotent. Returns a summary for logging.
  */
 export async function migrateLlmSettings(db) {
+  // Run the additive v2 shape pass first — independent flag, always
+  // runs unless already applied. Cheap: a single JSON parse + re-serialize
+  // when any profile is missing the new fields.
+  const shapeV2 = await ensureChatProfileShapeV2(db);
+
   if (await isAlreadyMigrated(db)) {
-    return { skipped: "already_migrated" };
+    return {
+      skipped: "already_migrated",
+      shape_v2: shapeV2,
+    };
   }
 
   const profiles = await readAiProfiles(db);
@@ -208,5 +251,6 @@ export async function migrateLlmSettings(db) {
     providers_created: step1.created,
     env_default_migrated: !!step2.migrated,
     env_default_provider_id: step2.provider_id || null,
+    shape_v2: shapeV2,
   };
 }
