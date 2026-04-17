@@ -875,6 +875,21 @@ try {
   console.warn("[providers] Failed to mount health matrix:", err.message);
 }
 
+// --- LLM settings migration (rewrites ai_profiles to pointer mode, folds
+// .env AI_* into a cloud-env-default provider row). Idempotent; runs
+// BEFORE seed/reconciler so subsequent steps see a clean target.
+try {
+  const { migrateLlmSettings } = await import("./dashboard/settings/migrations/llm-settings-migration.js");
+  const result = await migrateLlmSettings(createDbClient());
+  if (result.skipped) {
+    // already_migrated — silent unless debugging
+  } else {
+    console.log(`[llm-migration] profiles=${result.profiles_total} rewrote=${result.profiles_rewrote} providers_created=${result.providers_created} env_default=${result.env_default_migrated}`);
+  }
+} catch (err) {
+  console.warn("[llm-migration] skipped:", err.message);
+}
+
 // --- Provider DB seed (Phase 5-full: first-boot migration from models.json) ---
 try {
   const { seedProvidersFromModelsJson } = await import("../orchestrator/providers-db.js");
