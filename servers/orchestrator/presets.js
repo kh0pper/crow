@@ -200,6 +200,10 @@ export const presets = {
         name: "viewer",
         // On-demand vision specialist (grackle-vision)
         provider: "grackle-vision",
+        // Explicit annotation consumed by compat.js / role-shape.js. Intentionally
+        // set on this agent only — the synthesizer's prompt mentions "image
+        // description" but it processes text output, not raw images.
+        needs_vision: true,
         systemPrompt:
           "You describe images in detail. Extract text (OCR), identify objects, read charts, " +
           "and produce structured output when requested. Be precise — the synthesizer depends on you.",
