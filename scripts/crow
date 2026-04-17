@@ -157,6 +157,20 @@ cmd_bundle_install() {
     echo "Created .env from .env.example — edit ${dest_dir}/.env with your settings"
   fi
 
+  # If the bundle's docker-compose.yml references a shared env file at
+  # ${HOME}/.crow/env/<name>.env (e.g., rocm.env, cuda.env), symlink it as
+  # the project-local .env so docker-compose can substitute ${VIDEO_GID},
+  # ${CROW_TAILSCALE_IP}, etc. in the YAML. env_file: only supplies the
+  # container runtime env, not compose's YAML-level substitution.
+  if [ -f "${dest_dir}/docker-compose.yml" ] && [ ! -e "${dest_dir}/.env" ]; then
+    local shared_env
+    shared_env=$(grep -oE '\$\{HOME\}/\.crow/env/[^[:space:]"]+' "${dest_dir}/docker-compose.yml" | head -1 | sed "s|\${HOME}|$HOME|")
+    if [ -n "$shared_env" ] && [ -f "$shared_env" ]; then
+      ln -s "$shared_env" "${dest_dir}/.env"
+      echo "Linked .env -> $shared_env (for YAML substitution)"
+    fi
+  fi
+
   # Pull Docker images if docker-compose.yml exists
   if [ -f "${dest_dir}/docker-compose.yml" ]; then
     echo "Pulling Docker images..."
