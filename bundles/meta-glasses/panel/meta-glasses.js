@@ -123,6 +123,28 @@ const CLIENT_SCRIPT = `
       ocrRow.appendChild(ocrHelp);
       card.appendChild(ocrRow);
 
+      // Per-device photo retention (Phase 5 B.4). Default 'never'.
+      // Disk-only rows are never auto-pruned; the 30d / 1y settings
+      // only apply once a row has been backfilled to MinIO.
+      var retRow = el('div', { className: 'mg-retention-row' });
+      retRow.style.cssText = 'margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid var(--crow-border);display:flex;align-items:center;gap:0.5rem;font-size:0.85rem';
+      retRow.appendChild(el('label', { for: 'mg-retention-' + d.id }, 'Photo retention:'));
+      var retSelect = el('select');
+      retSelect.id = 'mg-retention-' + d.id;
+      retSelect.style.cssText = 'padding:0.25rem;background:var(--crow-bg-deep,#111);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.85rem';
+      var current = d.photo_retention || 'never';
+      retSelect.dataset.prior = current;
+      [['never','Never delete'], ['30d','30 days'], ['1y','1 year']].forEach(function(pair) {
+        var opt = el('option', { value: pair[0] }, pair[1]);
+        if (pair[0] === current) opt.selected = true;
+        retSelect.appendChild(opt);
+      });
+      retSelect.addEventListener('change', function() {
+        setRetention(d.id, retSelect.value, retSelect);
+      });
+      retRow.appendChild(retSelect);
+      card.appendChild(retRow);
+
       var actions = el('div', { className: 'mg-actions' });
       var rotateBtn = el('button', { className: 'btn btn-secondary btn-sm' }, 'Rotate token');
       rotateBtn.addEventListener('click', function() { rotateToken(d.id, rotateBtn); });
@@ -154,6 +176,29 @@ const CLIENT_SCRIPT = `
       checkbox.checked = !enabled; // revert on network failure
     } finally {
       checkbox.disabled = false;
+    }
+  }
+
+  async function setRetention(id, value, sel) {
+    var prior = sel.dataset.prior || 'never';
+    sel.disabled = true;
+    try {
+      var res = await fetch('/api/meta-glasses/devices/' + encodeURIComponent(id), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ photo_retention: value }),
+      });
+      var data = await res.json();
+      if (!data.ok) {
+        sel.value = prior;
+      } else {
+        sel.dataset.prior = value;
+      }
+    } catch (e) {
+      sel.value = prior;
+    } finally {
+      sel.disabled = false;
     }
   }
 
@@ -540,6 +585,47 @@ async function renderLibraryTab({ req, res, db, layout, styles, tabBar }) {
         <div class="mg-lib-grid">${thumbsMarkup}</div>
         ${paginationHtml}
       </turbo-frame>
+      <details style="margin-top:1.5rem">
+        <summary style="cursor:pointer;font-size:0.85rem;color:var(--crow-text-muted)">Admin tools</summary>
+        <div style="margin-top:0.5rem;padding:0.75rem 1rem;border:1px solid var(--crow-border);border-radius:8px;background:var(--crow-surface)">
+          <p style="font-size:0.8rem;margin:0 0 0.5rem">Run the daily retention pipeline now (backfill disk-only photos to MinIO, reclaim disk copies past the 7-day grace window, prune per-device retention + orphan sweep). Normally fires daily during the 03:00 hour.</p>
+          <div style="display:flex;align-items:center;gap:0.5rem">
+            <button id="mg-retention-btn" class="btn btn-secondary btn-sm">Run retention now</button>
+            <div id="mg-retention-status" style="font-size:0.8rem;color:var(--crow-text-muted)"></div>
+          </div>
+        </div>
+      </details>
+      <script>
+        (function() {
+          var btn = document.getElementById('mg-retention-btn');
+          var status = document.getElementById('mg-retention-status');
+          if (!btn) return;
+          btn.addEventListener('click', async function() {
+            btn.disabled = true;
+            status.textContent = 'Running...';
+            try {
+              var res = await fetch('/dashboard/meta-glasses/library/retention-run', {
+                method: 'POST',
+                credentials: 'same-origin',
+              });
+              var data = await res.json();
+              if (data.ok) {
+                var s = data.summary || {};
+                status.textContent = 'Done — backfilled ' + (s.backfilled||0) +
+                  ', reclaimed ' + (s.reclaimed||0) +
+                  ', pruned ' + (s.pruned||0) +
+                  ' (' + (s.elapsed_ms||0) + 'ms)';
+              } else {
+                status.textContent = 'Failed: ' + (data.error || 'unknown');
+              }
+            } catch (e) {
+              status.textContent = 'Error: ' + e.message;
+            } finally {
+              btn.disabled = false;
+            }
+          });
+        })();
+      </script>
     </div>`;
 
   res.send(layout({ title: "Meta Glasses — Library", content }));

@@ -119,6 +119,45 @@ async function tick() {
       console.error("[scheduler] Notification cleanup error:", err.message);
     }
 
+    // Phase 5 B.4: meta-glasses photo retention. Runs once per day during
+    // the 03:00 hour. Gated to the primary `crow-gateway` (port 3002)
+    // because `crow-finance-gateway` (port 3003) runs the same scheduler
+    // loop and would double-fire. The CAS UPDATE below claims the day
+    // atomically — any tick in the 03:00 hour can win, so a gateway
+    // restart at 03:15 doesn't lose the day. The dashboard_settings key
+    // `meta_glasses_last_retention_run` is exclusively owned by this
+    // cron; a GLOB guard rejects non-ISO values to defend against
+    // accidental corruption from a debug session.
+    try {
+      const PORT = Number(process.env.CROW_GATEWAY_PORT || 3002);
+      const isPrimaryGateway = PORT === 3002;
+      const nowDate = new Date();
+      if (isPrimaryGateway && nowDate.getHours() === 3) {
+        const today = nowDate.toISOString().slice(0, 10);
+        const claim = await db.execute({
+          sql: `INSERT INTO dashboard_settings (key, value, updated_at)
+                VALUES ('meta_glasses_last_retention_run', ?, datetime('now'))
+                ON CONFLICT(key) DO UPDATE SET
+                  value = excluded.value, updated_at = datetime('now')
+                WHERE
+                  value GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+                  AND value < excluded.value`,
+          args: [today],
+        });
+        if (Number(claim.rowsAffected || 0) >= 1) {
+          try {
+            const { runPhotoRetention } = await import("../../bundles/meta-glasses/panel/routes.js");
+            const summary = await runPhotoRetention(db);
+            console.log(`[scheduler] meta-glasses retention: ${JSON.stringify(summary)}`);
+          } catch (err) {
+            console.warn(`[scheduler] meta-glasses retention failed: ${err.message}`);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(`[scheduler] retention CAS error: ${err.message}`);
+    }
+
     // Also compute next_run for any schedules that don't have one yet
     const { rows: needsNextRun } = await db.execute({
       sql: "SELECT id, cron_expression FROM schedules WHERE enabled = 1 AND next_run IS NULL",
