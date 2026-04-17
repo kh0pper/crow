@@ -75,6 +75,7 @@ export async function pairDevice(db, {
   id, name, generation = "unknown",
   household_profile = null, stt_profile_id = null,
   ai_profile_slug = null, tts_profile_id = null, vision_profile_id = null,
+  ocr_enabled = false,
 }) {
   if (!id) throw new Error("device id required");
   const token = randomBytes(32).toString("hex");
@@ -82,6 +83,9 @@ export async function pairDevice(db, {
   const devices = await readAll(db);
   const now = new Date().toISOString();
   const existing = devices.findIndex(d => d.id === id);
+  // Re-pair preserves the prior ocr_enabled toggle — token rotation
+  // shouldn't silently revert a user's explicit opt-in.
+  const priorOcr = existing >= 0 ? !!devices[existing].ocr_enabled : false;
   const record = {
     id,
     name: name || id,
@@ -93,6 +97,7 @@ export async function pairDevice(db, {
     ai_profile_slug,
     tts_profile_id,
     vision_profile_id,
+    ocr_enabled: !!(ocr_enabled || priorOcr),
     generation,
   };
   if (existing >= 0) devices[existing] = record;
@@ -134,9 +139,17 @@ export async function updateDeviceProfiles(db, id, patch) {
   const devices = await readAll(db);
   const idx = devices.findIndex(d => d.id === id);
   if (idx === -1) return null;
-  const allow = ["household_profile", "stt_profile_id", "ai_profile_slug", "tts_profile_id", "vision_profile_id", "name"];
+  const allow = ["household_profile", "stt_profile_id", "ai_profile_slug", "tts_profile_id", "vision_profile_id", "ocr_enabled", "name"];
   for (const k of allow) {
-    if (k in patch) devices[idx][k] = patch[k] === "" ? null : patch[k];
+    if (k in patch) {
+      // ocr_enabled is a boolean; coerce HTML-form strings "true"/"false"/"on".
+      if (k === "ocr_enabled") {
+        const v = patch[k];
+        devices[idx][k] = v === true || v === "true" || v === "on" || v === 1;
+      } else {
+        devices[idx][k] = patch[k] === "" ? null : patch[k];
+      }
+    }
   }
   await writeAll(db, devices);
   const { token_hash, ...rest } = devices[idx];

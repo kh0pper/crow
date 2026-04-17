@@ -100,6 +100,29 @@ const CLIENT_SCRIPT = `
       if (d.household_profile) meta.appendChild(document.createTextNode(' · profile: ' + d.household_profile));
       card.appendChild(meta);
 
+      // Per-device OCR toggle (Phase 5 B.2). Off by default; enabling
+      // runs a second vision call per capture to extract text and
+      // writes it to the searchable library after redacting a small
+      // set of PII patterns. Disclaimer copy is verbatim from the plan.
+      var ocrRow = el('div', { className: 'mg-ocr-row' });
+      ocrRow.style.cssText = 'margin-top:0.5rem;padding-top:0.5rem;border-top:1px solid var(--crow-border)';
+      var ocrLabel = el('label', { className: 'mg-ocr-label' });
+      ocrLabel.style.cssText = 'display:flex;align-items:center;gap:0.5rem;font-size:0.85rem;cursor:pointer';
+      var ocrCheckbox = el('input');
+      ocrCheckbox.type = 'checkbox';
+      ocrCheckbox.checked = !!d.ocr_enabled;
+      ocrCheckbox.addEventListener('change', function() {
+        setOcrEnabled(d.id, ocrCheckbox.checked, ocrCheckbox);
+      });
+      ocrLabel.appendChild(ocrCheckbox);
+      ocrLabel.appendChild(el('span', null, 'Enable OCR on captures'));
+      ocrRow.appendChild(ocrLabel);
+      var ocrHelp = el('div', { className: 'mg-ocr-help' });
+      ocrHelp.style.cssText = 'font-size:0.72rem;color:var(--crow-text-muted);margin-top:0.35rem;line-height:1.4';
+      ocrHelp.textContent = "OCR-extracted text becomes searchable. We redact a small set of patterns (SSN, credit card, email, phone) but cannot redact names, addresses, account numbers, or personal info that doesn't match those patterns. The original photo is never modified. OCR is off by default.";
+      ocrRow.appendChild(ocrHelp);
+      card.appendChild(ocrRow);
+
       var actions = el('div', { className: 'mg-actions' });
       var rotateBtn = el('button', { className: 'btn btn-secondary btn-sm' }, 'Rotate token');
       rotateBtn.addEventListener('click', function() { rotateToken(d.id, rotateBtn); });
@@ -112,6 +135,26 @@ const CLIENT_SCRIPT = `
 
       root.appendChild(card);
     });
+  }
+
+  async function setOcrEnabled(id, enabled, checkbox) {
+    checkbox.disabled = true;
+    try {
+      var res = await fetch('/api/meta-glasses/devices/' + encodeURIComponent(id), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ ocr_enabled: enabled }),
+      });
+      var data = await res.json();
+      if (!data.ok) {
+        checkbox.checked = !enabled; // revert
+      }
+    } catch (e) {
+      checkbox.checked = !enabled; // revert on network failure
+    } finally {
+      checkbox.disabled = false;
+    }
   }
 
   async function refreshDevices() {
