@@ -67,6 +67,40 @@ async function loadSharedDeps() {
 
 // --- HTTP helper ---
 
+/**
+ * Resolve either a numeric track id or a listen-URL UUID to the full
+ * track metadata object. Funkwhale's /api/v1/tracks/<id>/ endpoint only
+ * accepts the NUMERIC id; passing the UUID yields a silent 404.
+ * Returns null if the track can't be found after a bounded scan.
+ */
+async function resolveTrackMeta(trackUuidOrId) {
+  const raw = String(trackUuidOrId || "");
+  if (!raw) return null;
+  // Numeric fast path.
+  if (/^\d+$/.test(raw)) {
+    try { return await fwFetch(`/api/v1/tracks/${encodeURIComponent(raw)}/`); }
+    catch { return null; }
+  }
+  // UUID path — scan the track list looking for a matching listen_url.
+  // Libraries with thousands of tracks should move to a search-by-name
+  // strategy; for now bound the scan at 50 pages of 100 (5000 tracks).
+  const MAX_PAGES = 50;
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    let list;
+    try { list = await fwFetch("/api/v1/tracks/", { query: { page, page_size: 100 } }); }
+    catch { return null; }
+    for (const item of list?.results || []) {
+      const m = (item.listen_url || "").match(/\/listen\/([0-9a-f-]+)\//);
+      if (m?.[1] === raw) {
+        try { return await fwFetch(`/api/v1/tracks/${item.id}/`); }
+        catch { return null; }
+      }
+    }
+    if (!list?.next) break;
+  }
+  return null;
+}
+
 async function fwFetch(path, { method = "GET", body, query, noAuth, timeoutMs = 20_000, rawForm } = {}) {
   const qs = query
     ? "?" +
@@ -461,15 +495,36 @@ export async function createFunkwhaleServer(options = {}) {
     async ({ track_uuid, format }) => {
       try {
         const authErr = requireAuth(); if (authErr) return authErr;
-        const meta = await fwFetch(`/api/v1/tracks/${encodeURIComponent(track_uuid)}/`).catch(() => null);
-        const title = meta?.title || "unknown track";
-        const artist = meta?.artist?.name || "unknown artist";
+        // fw_search emits the UUID in `id` (so the listen endpoint works),
+        // but Funkwhale's /api/v1/tracks/<id>/ metadata endpoint only
+        // accepts the NUMERIC track id — a UUID gives 404. Prior code
+        // silently swallowed the 404 with .catch(() => null) and fell
+        // through to the literal string "unknown track", which the shade
+        // + media notification then rendered as "Unknown Track / Unknown
+        // Artist." Resolve UUID -> numeric id first, then fetch metadata.
+        const meta = await resolveTrackMeta(track_uuid);
+        if (!meta) {
+          return errResponse(new Error(`Could not resolve track ${track_uuid} — not found in the local Funkwhale catalog. Try fw_search again.`));
+        }
+        const title = meta.title || "Unknown track";
+        const artist = meta.artist?.name || "Unknown artist";
+        const artworkUrl = meta.album?.cover?.urls?.medium_square_crop
+                        || meta.album?.cover?.urls?.original
+                        || null;
         const codec = format || "mp3";
-        const url = `${FUNKWHALE_URL}/api/v1/listen/${encodeURIComponent(track_uuid)}/?to=${codec}`;
+        // The listen endpoint wants the UUID. If the caller passed a
+        // numeric id, extract the UUID from the resolved listen_url.
+        let listenId = track_uuid;
+        if (/^\d+$/.test(String(track_uuid))) {
+          const m = (meta.listen_url || "").match(/\/listen\/([0-9a-f-]+)\//);
+          if (m?.[1]) listenId = m[1];
+        }
+        const url = `${FUNKWHALE_URL}/api/v1/listen/${encodeURIComponent(listenId)}/?to=${codec}`;
         return textResponse({
           ok: true,
           title,
           artist,
+          artwork_url: artworkUrl,
           _audio_stream: { url, codec, auth: "funkwhale" },
           prose: `Playing ${title} by ${artist}.`,
         });
@@ -494,6 +549,9 @@ export async function createFunkwhaleServer(options = {}) {
         const meta = await fwFetch(`/api/v1/albums/${encodeURIComponent(album_id)}/`).catch(() => null);
         const albumTitle = meta?.title || `album ${album_id}`;
         const artist = meta?.artist?.name || "unknown artist";
+        const artworkUrl = meta?.cover?.urls?.medium_square_crop
+                        || meta?.cover?.urls?.original
+                        || null;
         // Funkwhale doesn't inline tracks on the album endpoint — use the
         // tracks list with album filter, ordered by position.
         const list = await fwFetch(`/api/v1/tracks/`, {
@@ -512,6 +570,8 @@ export async function createFunkwhaleServer(options = {}) {
             codec,
             auth: "funkwhale",
             title: t.title,
+            artist,
+            artworkUrl,
           };
         }).filter(Boolean);
         if (streams.length === 0) {
@@ -521,7 +581,9 @@ export async function createFunkwhaleServer(options = {}) {
         return textResponse({
           ok: true,
           album: albumTitle,
+          title: first.title,
           artist,
+          artwork_url: artworkUrl,
           track_count: streams.length,
           _audio_stream: {
             url: first.url,
@@ -537,20 +599,58 @@ export async function createFunkwhaleServer(options = {}) {
     },
   );
 
-  // --- fw_stop_playback: cancel any queued playback on the device ---
+  // --- fw_stop_playback: hard stop and clear queue ---
   server.tool(
     "fw_stop_playback",
-    "Stop the currently-playing audio stream on the paired glasses and clear any queued tracks. Use when the user says 'stop', 'pause', 'next', etc. (this is a hard stop — no resume).",
+    "Stop the currently-playing audio stream on the paired glasses and clear any queued tracks. This is a hard stop with no resume. For temporary pause, use fw_pause instead.",
     {},
     async () => {
-      // The actual cancellation happens inside the meta-glasses panel which
-      // owns the per-device queue + active stream. The tool result's prose
-      // is what the LLM speaks; the panel intercepts the marker via
-      // _audio_stream_control.
       return textResponse({
         ok: true,
         _audio_stream_control: { action: "stop" },
         prose: "Stopping playback.",
+      });
+    },
+  );
+
+  // --- fw_pause: pause current track (can resume) ---
+  server.tool(
+    "fw_pause",
+    "Pause the currently-playing audio stream on the glasses. Playback can be resumed with fw_resume.",
+    {},
+    async () => {
+      return textResponse({
+        ok: true,
+        _audio_stream_control: { action: "pause" },
+        prose: "Paused.",
+      });
+    },
+  );
+
+  // --- fw_resume: resume paused playback ---
+  server.tool(
+    "fw_resume",
+    "Resume paused audio playback on the glasses.",
+    {},
+    async () => {
+      return textResponse({
+        ok: true,
+        _audio_stream_control: { action: "resume" },
+        prose: "Resuming.",
+      });
+    },
+  );
+
+  // --- fw_next_track: skip to next track in queue ---
+  server.tool(
+    "fw_next_track",
+    "Skip to the next track in the album queue on the glasses. If no tracks remain, playback stops.",
+    {},
+    async () => {
+      return textResponse({
+        ok: true,
+        _audio_stream_control: { action: "next" },
+        prose: "Skipping to next track.",
       });
     },
   );
