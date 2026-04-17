@@ -200,6 +200,15 @@ cmd_bundle_install() {
     }
   " 2>/dev/null || true
 
+  # Register manifest.providers[] in the DB (LLM consolidation Gap 2). The
+  # HTTP install path does this automatically; CLI installs previously did
+  # not, so provider rows only appeared after a gateway restart (which
+  # triggers the reconciler). The one-shot exits 0 on any error so the CLI
+  # install never fails on this step.
+  if [ -f "${CROW_APP}/scripts/crow-register-providers.js" ]; then
+    node "${CROW_APP}/scripts/crow-register-providers.js" "${bundle_id}" 2>&1 || echo "(provider register skipped; gateway reconciler will catch)"
+  fi
+
   echo ""
   echo "Bundle '${bundle_id}' installed."
 }
