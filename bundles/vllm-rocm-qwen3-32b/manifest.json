@@ -1,0 +1,14 @@
+{
+  "id": "vllm-rocm-qwen3-32b",
+  "type": "bundle",
+  "name": "vLLM Qwen3-32B (ROCm gfx1151)",
+  "category": "ai",
+  "description": "Mid-tier reasoning/synthesis LLM (Qwen3-32B dense 32B BF16) on AMD Strix Halo. Replaces GLM-4.7-Flash slot (incompatible architecture). Part of crow's tiered Mode A.",
+  "requires": {
+    "gpu": true,
+    "min_vram_gb": 80,
+    "platform": "linux-x86_64"
+  },
+  "env_vars": [],
+  "port": 8002
+}

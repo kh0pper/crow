@@ -9,7 +9,7 @@ services:
       - "${VIDEO_GID}"
       - "${RENDER_GID}"
     env_file:
-      - ../.env.rocm
+      - ${HOME}/.crow/env/rocm.env
     environment:
       HF_HOME: /models
       HUGGING_FACE_HUB_TOKEN: ${VLLM_HF_TOKEN:-}

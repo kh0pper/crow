@@ -1,0 +1,38 @@
+services:
+  vllm-rocm-kimi:
+    image: ${VLLM_ROCM_IMAGE}
+    container_name: vllm-rocm-kimi
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "${VIDEO_GID}"
+      - "${RENDER_GID}"
+    env_file:
+      - ${HOME}/.crow/env/rocm.env
+    environment:
+      HF_HOME: /models
+      HUGGING_FACE_HUB_TOKEN: ${VLLM_HF_TOKEN:-}
+    volumes:
+      - /home/kh0pp/llm/hf-cache:/models
+    ports:
+      - "${CROW_TAILSCALE_IP}:8003:8000"
+    entrypoint: ["bash", "-lc"]
+    command:
+      - |
+        pip install --no-cache-dir 'fla-core>=0.4.0' && \
+        vllm serve moonshotai/Kimi-Linear-48B-A3B-Instruct \
+          --served-model-name kimi-linear-48b \
+          --host 0.0.0.0 \
+          --port 8000 \
+          --dtype bfloat16 \
+          --gpu-memory-utilization 0.70 \
+          --max-model-len 32768 \
+          --max-num-seqs 1 \
+          --trust-remote-code \
+          --enforce-eager \
+          --enable-auto-tool-choice \
+          --tool-call-parser hermes
+    restart: "no"
+    ipc: host
+    shm_size: 16g

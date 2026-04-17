@@ -1,7 +1,7 @@
 services:
-  llamacpp-vulkan-qwen3-coder:
+  llamacpp-qwen72b:
     image: kyuz0/amd-strix-halo-toolboxes:rocm-7.2.1
-    container_name: llamacpp-vulkan-qwen3-coder
+    container_name: llamacpp-qwen72b
     devices:
       - /dev/kfd
       - /dev/dri
@@ -11,18 +11,15 @@ services:
     env_file:
       - ${HOME}/.crow/env/rocm.env
     volumes:
-      - /home/kh0pp/llm/hf-cache:/models
+      - /home/kh0pp/llm/hf-cache:/models:ro
     ports:
       - "${CROW_TAILSCALE_IP}:8003:8000"
     entrypoint: ["llama-server"]
     command:
-      # Pre-downloaded to /home/kh0pp/llm/hf-cache/qwen3-coder-30b/ by:
-      #   curl -L -o /home/kh0pp/llm/hf-cache/qwen3-coder-30b/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf \
-      #        https://huggingface.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/resolve/main/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf
       - -m
-      - /models/qwen3-coder-30b/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf
+      - /models/qwen2.5-72b/Qwen2.5-72B-Instruct-Q4_K_M.gguf
       - --alias
-      - qwen3-coder-30b-a3b
+      - qwen2.5-72b
       - --host
       - "0.0.0.0"
       - --port
@@ -30,10 +27,10 @@ services:
       - -ngl
       - "999"
       - -fa
-      - "on"
+      - "1"
       - --no-mmap
       - -c
-      - "32768"
+      - "65536"
       - --jinja
     restart: "no"
     ipc: host

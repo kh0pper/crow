@@ -4,7 +4,7 @@ services:
     container_name: vllm-cuda-rerank
     runtime: nvidia
     env_file:
-      - ../.env.cuda
+      - ${HOME}/.crow/env/cuda.env
     environment:
       HF_HOME: /models
       HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
