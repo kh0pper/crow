@@ -226,20 +226,24 @@ export default {
 
       <div class="orch-card">
         <h3>Event Timeline ${req.query.run ? "(filtered)" : `(last ${filteredEvents.length})`}</h3>
+        ${req.query.run ? "" : '<turbo-stream-source src="/dashboard/streams/orchestrator"></turbo-stream-source>'}
         <div style="overflow-x:auto">
           <table class="orch-table">
             <thead><tr>
               <th>Time</th><th>Event</th><th>Provider</th>${req.query.run ? "" : "<th>Run</th>"}<th>Detail</th>
             </tr></thead>
-            <tbody>${finalEventRows}</tbody>
+            <tbody id="orch-event-tbody">${finalEventRows}</tbody>
           </table>
         </div>
       </div>
 
       <script>
-        // Auto-refresh every 5s unless user is actively reading (cursor near top).
-        // Tracked on window so Turbo re-entries replace instead of stack the
-        // timer — and so nav away doesn't trigger a reload on a different page.
+        // Live event rows arrive via <turbo-stream-source src="/dashboard/
+        // streams/orchestrator"> — see routes/streams.js. This 5-min
+        // reload is the fallback for snapshot-level state (active runs
+        // summary, lifecycle refcounts) which aren't live-streamed yet.
+        // Pre-Streams it was 5s. Tracked on window so Turbo re-entries
+        // replace instead of stack the timer.
         if (window.__orchReloadInterval) clearInterval(window.__orchReloadInterval);
         window.__orchReloadInterval = setInterval(() => {
           if (document.visibilityState !== "visible") return;
@@ -251,7 +255,7 @@ export default {
             return;
           }
           window.location.reload();
-        }, 5000);
+        }, 300000);
       </script>
     `;
 
