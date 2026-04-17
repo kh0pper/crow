@@ -160,6 +160,9 @@ await addColumnIfMissing("research_notes", "lamport_ts", "INTEGER DEFAULT 0");
 await addColumnIfMissing("research_sources", "backend_id", "INTEGER REFERENCES data_backends(id) ON DELETE SET NULL");
 await addColumnIfMissing("contacts", "feed_key", "TEXT");
 await addColumnIfMissing("glasses_photos", "minio_key", "TEXT");
+// LLM consolidation (Phase 1): cloud-provider tag + per-message model recording.
+await addColumnIfMissing("providers", "provider_type", "TEXT");
+await addColumnIfMissing("chat_messages", "model_id", "TEXT");
 
 await initTable("sources FTS index", `
   CREATE VIRTUAL TABLE IF NOT EXISTS sources_fts USING fts5(
@@ -1301,6 +1304,7 @@ await initTable("providers table (Phase 5-full)", `
     disabled INTEGER DEFAULT 0,
     lamport_ts INTEGER DEFAULT 0,
     instance_id TEXT,
+    provider_type TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
   );
@@ -1328,6 +1332,26 @@ await initTable("orchestrator_events table (Phase 5-full)", `
   CREATE INDEX IF NOT EXISTS idx_orch_events_run ON orchestrator_events(run_id, at DESC);
   CREATE INDEX IF NOT EXISTS idx_orch_events_type ON orchestrator_events(event_type, at DESC);
   CREATE INDEX IF NOT EXISTS idx_orch_events_provider ON orchestrator_events(provider_id, at DESC);
+`);
+
+// --- LLM consolidation: per-agent provider/model overrides for presets.
+// Synthetic `id` PK = `${preset_name}:${agent_name}` so instance-sync can
+// dispatch on `WHERE id = ?` (the sync machinery short-circuits when
+// row.id is undefined — composite keys silently fail to replicate).
+await initTable("orchestrator_role_overrides table", `
+  CREATE TABLE IF NOT EXISTS orchestrator_role_overrides (
+    id TEXT PRIMARY KEY,
+    preset_name TEXT NOT NULL,
+    agent_name TEXT NOT NULL,
+    provider_id TEXT,
+    model_id TEXT,
+    lamport_ts INTEGER DEFAULT 0,
+    instance_id TEXT,
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_role_overrides_unique
+    ON orchestrator_role_overrides(preset_name, agent_name);
 `);
 
 // Seed 7 protected default sections (safe to re-run)

@@ -32,6 +32,10 @@ const SYNCED_TABLES = [
   // changes propagate to peers so model swaps/additions are one-and-done.
   // Toggle off by removing this line if you want per-instance divergence.
   "providers",
+  // LLM consolidation: per-agent provider/model overrides for presets.
+  // Synthetic `id` PK (= "${preset_name}:${agent_name}") so the standard
+  // _applyInsert / _applyUpdate / _applyDelete paths dispatch correctly.
+  "orchestrator_role_overrides",
   // Scoped-settings replication (2026-04-14): only rows with instance_id IS NULL
   // AND whose key is in the SYNC_ALLOWLIST are actually emitted/applied.
   // See shouldSyncRow() below.

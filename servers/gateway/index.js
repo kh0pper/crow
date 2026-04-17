@@ -886,6 +886,21 @@ try {
   console.warn("[providers] First-boot seed skipped:", err.message);
 }
 
+// --- Provider DB reconciler (LLM-consolidation: continuous sync from models.json) ---
+// Picks up post-boot edits to models.json and upserts them. Skips rows marked
+// disabled=1 by unregisterProvidersByBundle so uninstalled bundles don't
+// silently re-enable on the next restart. The "Sync bundle providers" button
+// in the LLM settings page passes force=true to explicitly re-enable.
+try {
+  const { syncProvidersFromModelsJson } = await import("../orchestrator/providers-db.js");
+  const res = await syncProvidersFromModelsJson(createDbClient());
+  if (res.upserted > 0 || res.skipped_disabled > 0) {
+    console.log(`[providers] Reconciled models.json → DB: upserted=${res.upserted} skipped_disabled=${res.skipped_disabled}`);
+  }
+} catch (err) {
+  console.warn("[providers] Reconciler skipped:", err.message);
+}
+
 // --- Wire storage client to DB + identity (DB-first precedence over env) ---
 try {
   const { initStorage } = await import("../storage/s3-client.js");
