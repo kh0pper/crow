@@ -291,65 +291,256 @@ export default {
   navOrder: 55,
   category: "hardware",
 
-  async handler(req, res, { layout }) {
-    const styles = `
-      .mg-wrap { max-width: 780px; }
-      .mg-hero { border: 1px solid var(--crow-border); border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 1rem; background: var(--crow-surface); }
-      .mg-hero h1 { margin: 0 0 0.25rem; font-size: 1.1rem; }
-      .mg-hero p { margin: 0; color: var(--crow-text-muted); font-size: 0.9rem; }
-      .mg-card { border: 1px solid var(--crow-border); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 0.5rem; background: var(--crow-surface); }
-      .mg-card-name { font-weight: 600; font-size: 0.95rem; }
-      .mg-card-meta { font-size: 0.8rem; color: var(--crow-text-muted); margin-top: 0.25rem; }
-      .mg-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap; }
-      .mg-empty { text-align: center; color: var(--crow-text-muted); padding: 2rem 1rem; border: 1px dashed var(--crow-border); border-radius: 10px; }
-      .mg-badge { font-size: 0.65rem; padding: 0.1rem 0.4rem; border-radius: 3px; background: var(--crow-accent); color: #fff; font-weight: 600; margin-left: 0.4rem; }
-      .mg-badge-warn { background: var(--crow-warning, #b45309); }
-      .mg-status-dot { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%; margin-right: 0.4rem; background: var(--crow-text-muted); }
-      .mg-status-dot.online { background: var(--crow-success); }
-    `;
+  async handler(req, res, { db, layout }) {
+    const tab = req.query.tab === "library" ? "library" : "pair";
+    const styles = SHARED_STYLES;
+    const tabBar = renderTabBar(tab);
 
-    const content = `
-      <style>${styles}</style>
-      <div class="mg-wrap">
-        <div class="mg-hero">
-          <h1>Meta Glasses</h1>
-          <p>Pair Meta Ray-Ban (Gen 2) smart glasses and drive them with your Crow BYOAI.</p>
-        </div>
+    if (tab === "library") {
+      return renderLibraryTab({ req, res, db, layout, styles, tabBar });
+    }
 
-        <div id="mg-compat" class="mg-card" style="display:none"></div>
-
-        <div style="display:flex;align-items:center;justify-content:space-between;margin:1rem 0 0.5rem">
-          <h2 style="margin:0;font-size:0.9rem;text-transform:uppercase;letter-spacing:0.08em;color:var(--crow-text-muted)">Paired devices</h2>
-          <button id="mg-pair-btn" class="btn btn-primary btn-sm">Pair new glasses</button>
-        </div>
-
-        <div id="mg-devices"></div>
-
-        <div class="mg-card" style="margin-top:1rem">
-          <div style="display:flex;align-items:center;gap:0.75rem">
-            <button id="mg-talk-btn" class="btn btn-primary" style="min-width:120px">Ask Crow</button>
-            <div id="mg-talk-status" style="font-size:0.85rem;color:var(--crow-text-muted)"></div>
-          </div>
-          <div style="font-size:0.75rem;color:var(--crow-text-muted);margin-top:0.5rem">
-            Starts a voice turn on the first connected glasses session. Speak through the glasses, then press Stop.
-          </div>
-        </div>
-
-        <details style="margin-top:1.5rem">
-          <summary style="cursor:pointer;font-size:0.85rem;color:var(--crow-text-muted)">Developer tools</summary>
-          <div style="margin-top:0.5rem;padding:0.75rem 1rem;border:1px solid var(--crow-border);border-radius:8px;background:var(--crow-surface)">
-            <p style="font-size:0.8rem;margin:0 0 0.5rem">Push a line of speech to all connected sessions:</p>
-            <div style="display:flex;gap:0.5rem">
-              <input id="mg-say-text" placeholder="Hello from Crow" style="flex:1;padding:0.4rem;background:var(--crow-bg-deep,#111);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.85rem">
-              <button id="mg-say-btn" class="btn btn-secondary btn-sm">Say</button>
-            </div>
-            <div id="mg-say-status" style="font-size:0.8rem;margin-top:0.35rem;color:var(--crow-text-muted)"></div>
-          </div>
-        </details>
-      </div>
-
-      <script>${CLIENT_SCRIPT}<\/script>`;
-
-    res.send(layout({ title: "Meta Glasses", content }));
+    return renderPairTab({ req, res, layout, styles, tabBar });
   },
 };
+
+const SHARED_STYLES = `
+  .mg-wrap { max-width: 780px; }
+  .mg-hero { border: 1px solid var(--crow-border); border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 1rem; background: var(--crow-surface); }
+  .mg-hero h1 { margin: 0 0 0.25rem; font-size: 1.1rem; }
+  .mg-hero p { margin: 0; color: var(--crow-text-muted); font-size: 0.9rem; }
+  .mg-card { border: 1px solid var(--crow-border); border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 0.5rem; background: var(--crow-surface); }
+  .mg-card-name { font-weight: 600; font-size: 0.95rem; }
+  .mg-card-meta { font-size: 0.8rem; color: var(--crow-text-muted); margin-top: 0.25rem; }
+  .mg-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap; }
+  .mg-empty { text-align: center; color: var(--crow-text-muted); padding: 2rem 1rem; border: 1px dashed var(--crow-border); border-radius: 10px; }
+  .mg-badge { font-size: 0.65rem; padding: 0.1rem 0.4rem; border-radius: 3px; background: var(--crow-accent); color: #fff; font-weight: 600; margin-left: 0.4rem; }
+  .mg-badge-warn { background: var(--crow-warning, #b45309); }
+  .mg-status-dot { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%; margin-right: 0.4rem; background: var(--crow-text-muted); }
+  .mg-status-dot.online { background: var(--crow-success); }
+  .mg-tabs { display: flex; gap: 0.25rem; margin-bottom: 1rem; border-bottom: 1px solid var(--crow-border); }
+  .mg-tab { padding: 0.5rem 0.85rem; font-size: 0.85rem; color: var(--crow-text-muted); text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .mg-tab.active { color: var(--crow-text); border-bottom-color: var(--crow-accent); font-weight: 500; }
+  .mg-tab:hover { color: var(--crow-text); }
+  .mg-lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 0.75rem; }
+  .mg-lib-card { border: 1px solid var(--crow-border); border-radius: 8px; overflow: hidden; background: var(--crow-surface); display: flex; flex-direction: column; }
+  .mg-lib-thumb { width: 100%; height: 140px; object-fit: cover; background: var(--crow-bg-deep, #111); display: block; }
+  .mg-lib-thumb-link { background: var(--crow-bg-deep, #111); height: 140px; display: flex; align-items: center; justify-content: center; color: var(--crow-text-muted); font-size: 0.75rem; text-decoration: none; }
+  .mg-lib-caption { padding: 0.4rem 0.55rem; font-size: 0.78rem; color: var(--crow-text); line-height: 1.35; }
+  .mg-lib-date { font-size: 0.68rem; color: var(--crow-text-muted); padding: 0 0.55rem 0.4rem; }
+  .mg-lib-actions { padding: 0 0.55rem 0.55rem; display: flex; gap: 0.3rem; }
+  .mg-lib-search { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; }
+  .mg-lib-search input { flex: 1; padding: 0.45rem 0.6rem; background: var(--crow-bg-deep, #111); border: 1px solid var(--crow-border); border-radius: 4px; color: var(--crow-text); font-size: 0.85rem; }
+  .mg-lib-detail { border: 1px solid var(--crow-border); border-radius: 10px; padding: 1rem; margin-bottom: 1rem; background: var(--crow-surface); }
+  .mg-lib-detail img { max-width: 100%; height: auto; border-radius: 6px; display: block; margin-bottom: 0.75rem; }
+`;
+
+function renderTabBar(active) {
+  return `<nav class="mg-tabs">
+    <a href="/dashboard/meta-glasses" class="mg-tab ${active === "pair" ? "active" : ""}">Devices</a>
+    <a href="/dashboard/meta-glasses?tab=library" class="mg-tab ${active === "library" ? "active" : ""}">Library</a>
+  </nav>`;
+}
+
+function renderPairTab({ res, layout, styles, tabBar }) {
+  const content = `
+    <style>${styles}</style>
+    <div class="mg-wrap">
+      ${tabBar}
+      <div class="mg-hero">
+        <h1>Meta Glasses</h1>
+        <p>Pair Meta Ray-Ban (Gen 2) smart glasses and drive them with your Crow BYOAI.</p>
+      </div>
+
+      <div id="mg-compat" class="mg-card" style="display:none"></div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:1rem 0 0.5rem">
+        <h2 style="margin:0;font-size:0.9rem;text-transform:uppercase;letter-spacing:0.08em;color:var(--crow-text-muted)">Paired devices</h2>
+        <button id="mg-pair-btn" class="btn btn-primary btn-sm">Pair new glasses</button>
+      </div>
+
+      <div id="mg-devices"></div>
+
+      <div class="mg-card" style="margin-top:1rem">
+        <div style="display:flex;align-items:center;gap:0.75rem">
+          <button id="mg-talk-btn" class="btn btn-primary" style="min-width:120px">Ask Crow</button>
+          <div id="mg-talk-status" style="font-size:0.85rem;color:var(--crow-text-muted)"></div>
+        </div>
+        <div style="font-size:0.75rem;color:var(--crow-text-muted);margin-top:0.5rem">
+          Starts a voice turn on the first connected glasses session. Speak through the glasses, then press Stop.
+        </div>
+      </div>
+
+      <details style="margin-top:1.5rem">
+        <summary style="cursor:pointer;font-size:0.85rem;color:var(--crow-text-muted)">Developer tools</summary>
+        <div style="margin-top:0.5rem;padding:0.75rem 1rem;border:1px solid var(--crow-border);border-radius:8px;background:var(--crow-surface)">
+          <p style="font-size:0.8rem;margin:0 0 0.5rem">Push a line of speech to all connected sessions:</p>
+          <div style="display:flex;gap:0.5rem">
+            <input id="mg-say-text" placeholder="Hello from Crow" style="flex:1;padding:0.4rem;background:var(--crow-bg-deep,#111);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text);font-size:0.85rem">
+            <button id="mg-say-btn" class="btn btn-secondary btn-sm">Say</button>
+          </div>
+          <div id="mg-say-status" style="font-size:0.8rem;margin-top:0.35rem;color:var(--crow-text-muted)"></div>
+        </div>
+      </details>
+    </div>
+
+    <script>${CLIENT_SCRIPT}<\/script>`;
+
+  res.send(layout({ title: "Meta Glasses", content }));
+}
+
+function escH(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+async function renderLibraryTab({ req, res, db, layout, styles, tabBar }) {
+  const q = String(req.query.q || "").trim();
+  const detailId = req.query.id ? parseInt(String(req.query.id), 10) : null;
+  const page = Math.max(1, parseInt(String(req.query.page || "1"), 10) || 1);
+  const PAGE_SIZE = 24;
+  const offset = (page - 1) * PAGE_SIZE;
+
+  // Build a per-request mint function for presigned URLs. Falls back to the
+  // legacy disk route when MinIO is unavailable or minio_key is NULL.
+  let s3Ready = false;
+  let mintUrl = null;
+  try {
+    const { isAvailable, getPresignedUrl } = await import("../../../servers/storage/s3-client.js");
+    s3Ready = await isAvailable();
+    mintUrl = getPresignedUrl;
+  } catch {}
+  async function urlFor(row) {
+    if (s3Ready && row.minio_key && mintUrl) {
+      try { return await mintUrl(row.minio_key, { expiry: 3600 }); } catch {}
+    }
+    const name = String(row.disk_path || "").split("/").pop();
+    return name ? `/api/meta-glasses/photo/${encodeURIComponent(name)}` : null;
+  }
+
+  // Query: FTS when q, recency otherwise. Always include pagination.
+  let rows = [];
+  let total = 0;
+  try {
+    if (q) {
+      const countRow = await db.execute({
+        sql: `SELECT COUNT(*) AS n FROM glasses_photos g JOIN glasses_photos_fts f ON g.id = f.rowid
+              WHERE glasses_photos_fts MATCH ?`,
+        args: [q],
+      });
+      total = Number(countRow.rows?.[0]?.n ?? 0);
+      const r = await db.execute({
+        sql: `SELECT g.id, g.device_id, g.captured_at, g.disk_path, g.minio_key, g.caption, g.ocr_text
+              FROM glasses_photos g JOIN glasses_photos_fts f ON g.id = f.rowid
+              WHERE glasses_photos_fts MATCH ?
+              ORDER BY g.captured_at DESC LIMIT ? OFFSET ?`,
+        args: [q, PAGE_SIZE, offset],
+      });
+      rows = r.rows;
+    } else {
+      const countRow = await db.execute("SELECT COUNT(*) AS n FROM glasses_photos");
+      total = Number(countRow.rows?.[0]?.n ?? 0);
+      const r = await db.execute({
+        sql: `SELECT id, device_id, captured_at, disk_path, minio_key, caption, ocr_text
+              FROM glasses_photos ORDER BY captured_at DESC LIMIT ? OFFSET ?`,
+        args: [PAGE_SIZE, offset],
+      });
+      rows = r.rows;
+    }
+  } catch (err) {
+    console.warn(`[meta-glasses] library query failed: ${err.message}`);
+  }
+
+  // Detail row takes precedence (still inside the frame so back-nav swaps).
+  let detailHtml = "";
+  if (detailId) {
+    try {
+      const r = await db.execute({
+        sql: `SELECT id, device_id, captured_at, disk_path, minio_key, mime, size_bytes, caption, ocr_text
+              FROM glasses_photos WHERE id = ?`,
+        args: [detailId],
+      });
+      const d = r.rows[0];
+      if (d) {
+        const detailUrl = await urlFor(d);
+        const when = escH(d.captured_at);
+        const dev = escH(d.device_id);
+        const caption = d.caption ? `<p style="margin:0 0 0.5rem;font-size:0.95rem">${escH(d.caption)}</p>` : "";
+        const ocr = d.ocr_text ? `<div style="margin:0.5rem 0"><div style="font-size:0.75rem;color:var(--crow-text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.25rem">OCR</div><pre style="font-size:0.82rem;white-space:pre-wrap;margin:0;background:var(--crow-bg-deep,#111);padding:0.5rem;border-radius:4px">${escH(d.ocr_text)}</pre></div>` : "";
+        const img = detailUrl ? `<img src="${escH(detailUrl)}" alt="${escH(d.caption || "")}">` : `<div class="mg-empty">Image unavailable.</div>`;
+        detailHtml = `<div class="mg-lib-detail">
+          ${img}
+          ${caption}
+          ${ocr}
+          <div style="font-size:0.75rem;color:var(--crow-text-muted);margin:0.25rem 0 0.75rem">${dev} · ${when}${d.size_bytes ? ` · ${Math.round(d.size_bytes / 1024)} KB` : ""}${d.mime ? ` · ${escH(d.mime)}` : ""}</div>
+          <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+            <a href="/dashboard/meta-glasses?tab=library" class="btn btn-secondary btn-sm">Back</a>
+            <form method="POST" action="/dashboard/meta-glasses/library/delete" style="display:inline" onsubmit="return confirm('Delete this photo? This removes the MinIO object + DB row.')">
+              <input type="hidden" name="id" value="${d.id}">
+              <button class="btn btn-sm" style="background:var(--crow-error);color:#fff;border-color:var(--crow-error)" type="submit">Delete</button>
+            </form>
+          </div>
+        </div>`;
+      } else {
+        detailHtml = `<div class="mg-empty">Photo ${detailId} not found.</div>`;
+      }
+    } catch (err) {
+      detailHtml = `<div class="mg-empty">Error loading photo: ${escH(err.message)}</div>`;
+    }
+  }
+
+  const thumbsMarkup = rows.length === 0
+    ? (q
+        ? `<div class="mg-empty">No matches for "${escH(q)}".</div>`
+        : `<div class="mg-empty">No photos captured yet. Ask the AI to take a photo through your glasses.</div>`)
+    : (await Promise.all(rows.map(async (r) => {
+        const url = await urlFor(r);
+        const captionText = r.caption || (r.ocr_text ? r.ocr_text.slice(0, 80) : "(no caption)");
+        const when = r.captured_at ? escH(r.captured_at).replace("T", " ").slice(0, 16) : "";
+        const thumb = url && (r.minio_key || r.disk_path)
+          ? `<a href="/dashboard/meta-glasses?tab=library&id=${r.id}"><img class="mg-lib-thumb" src="${escH(url)}" alt="${escH(captionText)}"></a>`
+          : `<a href="/dashboard/meta-glasses?tab=library&id=${r.id}" class="mg-lib-thumb-link">photo unavailable</a>`;
+        return `<div class="mg-lib-card">
+          ${thumb}
+          <div class="mg-lib-caption">${escH(captionText).slice(0, 80)}</div>
+          <div class="mg-lib-date">${when}</div>
+        </div>`;
+      }))).join("");
+
+  // Pagination
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  let paginationHtml = "";
+  if (totalPages > 1) {
+    const bits = [];
+    const base = `/dashboard/meta-glasses?tab=library${q ? `&q=${encodeURIComponent(q)}` : ""}`;
+    if (page > 1) bits.push(`<a href="${base}&page=${page - 1}" class="btn btn-sm btn-secondary">Prev</a>`);
+    bits.push(`<span style="color:var(--crow-text-muted);font-size:0.82rem">${page} / ${totalPages} · ${total} photo${total === 1 ? "" : "s"}</span>`);
+    if (page < totalPages) bits.push(`<a href="${base}&page=${page + 1}" class="btn btn-sm btn-secondary">Next</a>`);
+    paginationHtml = `<div style="display:flex;align-items:center;justify-content:center;gap:1rem;margin-top:1rem">${bits.join("")}</div>`;
+  }
+
+  // Invariant: EVERY `?tab=library` GET response renders the
+  // <turbo-frame id="mg-library-results"> wrapper at the same DOM
+  // position. Turbo scopes its frame-swap by ID — if the post-delete
+  // 303 lands on a response that conditionally omits the frame, the
+  // swap silently no-ops and the user sees stale markup.
+  const content = `
+    <style>${styles}</style>
+    <div class="mg-wrap">
+      ${tabBar}
+      <form class="mg-lib-search" method="GET" action="/dashboard/meta-glasses" data-turbo-frame="mg-library-results">
+        <input type="hidden" name="tab" value="library">
+        <input type="text" name="q" value="${escH(q)}" placeholder="Search captions + OCR text (FTS5)">
+        <button type="submit" class="btn btn-primary btn-sm">Search</button>
+        ${q ? `<a href="/dashboard/meta-glasses?tab=library" data-turbo-frame="mg-library-results" class="btn btn-secondary btn-sm">Clear</a>` : ""}
+      </form>
+      <turbo-frame id="mg-library-results" data-turbo-action="advance">
+        ${detailHtml}
+        <div class="mg-lib-grid">${thumbsMarkup}</div>
+        ${paginationHtml}
+      </turbo-frame>
+    </div>`;
+
+  res.send(layout({ title: "Meta Glasses — Library", content }));
+}

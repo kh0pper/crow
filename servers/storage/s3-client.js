@@ -126,6 +126,28 @@ export function defaultBucket() {
 }
 
 /**
+ * Browser-reachable origin for the configured storage endpoint — e.g.
+ * "http://100.118.41.122:9000" or "https://s3.example.com:443". Returns
+ * null when storage isn't configured. Used by the gateway CSP middleware
+ * to allow <img src="..."> with presigned URLs without enabling a
+ * blanket host. The origin is taken from the DB config if present; env
+ * fallback reads MINIO_ENDPOINT + MINIO_USE_SSL.
+ */
+export function getStorageOrigin() {
+  const cfg = _cachedDbConfig;
+  if (cfg?.host) {
+    const scheme = cfg.useSSL ? "https" : "http";
+    return `${scheme}://${cfg.host}:${cfg.port || (cfg.useSSL ? 443 : 9000)}`;
+  }
+  const envEndpoint = process.env.MINIO_ENDPOINT || process.env.S3_ENDPOINT;
+  if (!envEndpoint) return null;
+  const { host, port } = _splitHostPort(envEndpoint);
+  const useSSL = (process.env.MINIO_USE_SSL || process.env.S3_USE_SSL || "").toLowerCase() === "true";
+  const scheme = useSSL ? "https" : "http";
+  return `${scheme}://${host}:${port || (useSSL ? 443 : 9000)}`;
+}
+
+/**
  * Get or create the MinIO/S3 client instance.
  * Returns null if not configured.
  */

@@ -891,6 +891,80 @@ export default function metaGlassesRouter(dashboardAuth) {
     }
   });
 
+  // Library: delete a photo by id. Removes the MinIO object (if any),
+  // unlinks the disk file (if any), then deletes the DB row. Redirect
+  // back to the library tab so Turbo can re-extract the
+  // mg-library-results frame from the full-page response.
+  router.post("/dashboard/meta-glasses/library/delete", dashboardAuth, async (req, res) => {
+    const id = parseInt(req.body?.id, 10);
+    if (!id) return res.redirectAfterPost("/dashboard/meta-glasses?tab=library");
+    const { createDbClient } = await loadDb();
+    const db = createDbClient();
+    try {
+      const { rows } = await db.execute({
+        sql: `SELECT minio_key, disk_path FROM glasses_photos WHERE id = ?`,
+        args: [id],
+      });
+      const row = rows[0];
+      if (row?.minio_key) {
+        try {
+          const { deleteObject } = await loadS3();
+          await deleteObject(row.minio_key);
+        } catch (err) {
+          console.warn(`[meta-glasses] library delete: MinIO removeObject failed for ${row.minio_key}: ${err.message}`);
+        }
+      }
+      if (row?.disk_path) {
+        try {
+          const { unlinkSync } = await import("node:fs");
+          unlinkSync(row.disk_path);
+        } catch {}
+      }
+      await db.execute({ sql: `DELETE FROM glasses_photos WHERE id = ?`, args: [id] });
+    } catch (err) {
+      console.warn(`[meta-glasses] library delete for ${id} failed: ${err.message}`);
+    } finally {
+      try { db.close(); } catch {}
+    }
+    res.redirectAfterPost("/dashboard/meta-glasses?tab=library");
+  });
+
+  // Library: delete all photos for a single device. Per-device scope
+  // is explicit — cross-device wipe is out of scope this phase.
+  router.post("/dashboard/meta-glasses/library/delete-all", dashboardAuth, async (req, res) => {
+    const deviceId = String(req.body?.device_id || "").trim();
+    if (!deviceId) return res.redirectAfterPost("/dashboard/meta-glasses?tab=library");
+    const { createDbClient } = await loadDb();
+    const db = createDbClient();
+    let removed = 0;
+    try {
+      const { rows } = await db.execute({
+        sql: `SELECT id, minio_key, disk_path FROM glasses_photos WHERE device_id = ?`,
+        args: [deviceId],
+      });
+      const { unlinkSync } = await import("node:fs");
+      let s3;
+      try { s3 = await loadS3(); } catch {}
+      for (const row of rows) {
+        if (s3 && row.minio_key) {
+          try { await s3.deleteObject(row.minio_key); } catch {}
+        }
+        if (row.disk_path) { try { unlinkSync(row.disk_path); } catch {} }
+      }
+      const del = await db.execute({
+        sql: `DELETE FROM glasses_photos WHERE device_id = ?`,
+        args: [deviceId],
+      });
+      removed = Number(del.rowsAffected || 0);
+      console.log(`[meta-glasses] library delete-all: removed ${removed} photos for device=${deviceId}`);
+    } catch (err) {
+      console.warn(`[meta-glasses] library delete-all for device=${deviceId} failed: ${err.message}`);
+    } finally {
+      try { db.close(); } catch {}
+    }
+    res.redirectAfterPost("/dashboard/meta-glasses?tab=library");
+  });
+
   // Operator endpoint: push an audio stream (compressed media) to a paired
   // device. Useful for diagnostics, testing the Phase 4 MediaCodec path, or
   // playing arbitrary content from the Nest without going through the LLM.

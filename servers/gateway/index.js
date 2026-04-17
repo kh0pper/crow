@@ -182,8 +182,22 @@ app.use((req, res, next) => {
 
 // --- Security Middleware ---
 
+// Cached storage-origin for CSP img-src. Set once at first request after
+// gateway startup; the storage config is normally ready by then.
+let _cspStorageOrigin = null;
+async function resolveCspStorageOrigin() {
+  if (_cspStorageOrigin !== null) return _cspStorageOrigin;
+  try {
+    const { getStorageOrigin } = await import("../storage/s3-client.js");
+    _cspStorageOrigin = getStorageOrigin() || ""; // "" marks "resolved but unavailable"
+  } catch {
+    _cspStorageOrigin = "";
+  }
+  return _cspStorageOrigin;
+}
+
 // Security headers
-app.use((req, res, next) => {
+app.use(async (req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   // Frame embedding: X-Frame-Options is legacy and doesn't support cross-port.
   // Skip for /proxy/ (proxied apps manage own), /blog/ and /dashboard/ (loaded in companion iframe).
@@ -193,13 +207,19 @@ app.use((req, res, next) => {
   }
   res.setHeader("X-XSS-Protection", "0");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
-  // Content Security Policy — allows Google Fonts (dashboard), podcast audio, data URIs
+  // Content Security Policy — allows Google Fonts (dashboard), podcast audio,
+  // data URIs, and (when configured) the storage endpoint so Nest panels can
+  // render presigned-URL thumbnails for MinIO-backed assets.
+  const storageOrigin = await resolveCspStorageOrigin();
+  const imgSrc = storageOrigin
+    ? `img-src 'self' data: blob: ${storageOrigin}`
+    : "img-src 'self' data: blob:";
   res.setHeader("Content-Security-Policy", [
     "default-src 'self'",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src https://fonts.gstatic.com",
     "script-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob:",
+    imgSrc,
     "media-src 'self' https: blob:",
     "connect-src 'self'",
     "frame-src 'self' https:",
