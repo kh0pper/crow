@@ -106,6 +106,15 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
+        <!-- Routes BT AVRCP / wired headset media-key broadcasts to the active MediaSession -->
+        <receiver
+            android:name="androidx.media.session.MediaButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
+
         <receiver
             android:name=".BootReceiver"
             android:exported="true">
