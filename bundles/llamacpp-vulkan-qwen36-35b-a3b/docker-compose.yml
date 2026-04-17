@@ -1,0 +1,44 @@
+services:
+  llamacpp-vulkan-qwen36-35b-a3b:
+    image: kyuz0/amd-strix-halo-toolboxes:rocm-7.2.1
+    container_name: llamacpp-vulkan-qwen36-35b-a3b
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "${VIDEO_GID}"
+      - "${RENDER_GID}"
+    env_file:
+      - ${HOME}/.crow/env/rocm.env
+    volumes:
+      - /home/kh0pp/llm/hf-cache:/models
+    ports:
+      - "${CROW_TAILSCALE_IP}:8003:8000"
+    entrypoint: ["llama-server"]
+    command:
+      # Pre-downloaded to /home/kh0pp/llm/hf-cache/qwen36-35b-a3b/ by:
+      #   curl -L -o /home/kh0pp/llm/hf-cache/qwen36-35b-a3b/Qwen3.6-35B-A3B-UD-Q6_K.gguf \
+      #        https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q6_K.gguf
+      #   curl -L -o /home/kh0pp/llm/hf-cache/qwen36-35b-a3b/mmproj-F16.gguf \
+      #        https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/mmproj-F16.gguf
+      - -m
+      - /models/qwen36-35b-a3b/Qwen3.6-35B-A3B-UD-Q6_K.gguf
+      - --mmproj
+      - /models/qwen36-35b-a3b/mmproj-F16.gguf
+      - --alias
+      - qwen3.6-35b-a3b
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - -ngl
+      - "999"
+      - -fa
+      - "on"
+      - --no-mmap
+      - -c
+      - "32768"
+      - --jinja
+    restart: "no"
+    ipc: host
+    shm_size: 16g

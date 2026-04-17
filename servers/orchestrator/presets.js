@@ -179,8 +179,8 @@ export const presets = {
       },
       {
         name: "coder",
-        // On-demand code specialist (Phase 3d — swap-slot)
-        provider: "crow-swap-coder",
+        // On-demand agentic-coding specialist (Qwen3.6-35B-A3B, Apr 2026)
+        provider: "crow-swap-agentic",
         systemPrompt:
           "You are a code specialist. Write clean, well-tested code following the project's " +
           "conventions. Reference memories/sources provided by the researcher. Output code " +

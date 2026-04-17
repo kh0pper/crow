@@ -67,6 +67,23 @@
         }
       ]
     },
+    "crow-swap-agentic": {
+      "$description": "On-demand agentic-coding + VLM specialist. Qwen3.6-35B-A3B UD-Q6_K MoE via llama.cpp Vulkan AMDVLK on Strix Halo. Mutex with crow-swap-coder + crow-swap-deep.",
+      "baseUrl": "http://100.118.41.122:8003/v1",
+      "apiKey": "none",
+      "host": "local",
+      "bundleId": "llamacpp-vulkan-qwen36-35b-a3b",
+      "models": [
+        {
+          "id": "qwen3.6-35b-a3b",
+          "contextLen": 32768,
+          "warm": false,
+          "onDemand": true,
+          "mutexGroup": "8003-swap",
+          "priority": "interactive"
+        }
+      ]
+    },
     "grackle-embed": {
       "$description": "Text embeddings for semantic memory/research/blog search. Qwen3-Embedding-0.6B BF16 via vLLM-CUDA on grackle. Always-resident (kept up by gpu-orchestrator) because embed outages silently break memory stores.",
       "baseUrl": "http://100.121.254.89:9100/v1",

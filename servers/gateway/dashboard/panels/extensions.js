@@ -53,6 +53,7 @@ const ICON_MAP = {
   activity: "\u{1F4C8}",
   eye: "\u{1F441}\uFE0F",
   "graduation-cap": "\u{1F393}",
+  cpu: "\u{1F9EE}",
 };
 
 const CATEGORY_COLORS = {
