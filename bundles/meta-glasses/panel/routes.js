@@ -279,7 +279,7 @@ async function resolveVisionProfileConfig(db, device, aiProfile) {
         console.warn(`[meta-glasses] gpu-orchestrator acquire(${profile.provider_id}) failed: ${err.message}`);
       }
       const { resolveProvider } = await loadResolveProv();
-      return resolveProvider(profile.provider_id, profile.model_id);
+      return await resolveProvider(profile.provider_id, profile.model_id);
     }
     if (profile.baseUrl && profile.model) {
       return { baseUrl: profile.baseUrl, apiKey: profile.apiKey || "none", model: profile.model };
@@ -1875,7 +1875,7 @@ async function _enrichGlassesPhoto({ photoId, deviceId, diskPath, mime }) {
       let providerConfig;
       if (profile.provider_id) {
         const { resolveProvider } = await loadResolveProv();
-        providerConfig = resolveProvider(profile.provider_id, profile.model_id);
+        providerConfig = await resolveProvider(profile.provider_id, profile.model_id);
       } else if (profile.baseUrl && profile.model) {
         providerConfig = { baseUrl: profile.baseUrl, apiKey: profile.apiKey || "none", model: profile.model };
       } else { return; }

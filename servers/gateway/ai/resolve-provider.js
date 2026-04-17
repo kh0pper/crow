@@ -1,27 +1,30 @@
 /**
- * Resolve AI / vision profile pointers against the local models.json registry.
+ * Thin async wrapper around resolve-profile.js for backward compat.
  *
- * When a profile stores `{ provider_id, model_id }` instead of raw
- * `{ baseUrl, apiKey, model }`, this helper pulls the current values from
- * models.json so profiles stay in sync with orchestrator config without
- * manual edits.
+ * Historically this file was a sync, models.json-only resolver. The LLM
+ * consolidation makes it async + DB-first (so cloud providers that only
+ * live in the `providers` table — e.g. the ones the migration creates
+ * from ai_profiles — can be pointed at by vision-profiles and
+ * meta-glasses). Callers must `await` the resolver.
  *
- * Cached by mtime. If the user edits models.json, the next call reloads.
+ * Prefer `resolveProviderConfig` from resolve-profile.js in new code.
  */
 
+import {
+  resolveProviderConfig as _resolveProviderConfig,
+} from "./resolve-profile.js";
 import { readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve as resolvePath } from "node:path";
+import { createDbClient } from "../../db.js";
 
 const MODELS_JSON_URL = new URL("../../../models.json", import.meta.url);
 const MODELS_JSON_PATH = fileURLToPath(MODELS_JSON_URL);
 
 let _cache = { mtimeMs: 0, data: null };
-
 function loadModelsJson() {
   let st;
   try { st = statSync(MODELS_JSON_PATH); }
-  catch (err) { throw new Error(`models.json not found at ${MODELS_JSON_PATH}: ${err.message}`); }
+  catch { return { providers: {} }; }
   if (_cache.data && _cache.mtimeMs === st.mtimeMs) return _cache.data;
   const raw = readFileSync(MODELS_JSON_PATH, "utf8");
   const data = JSON.parse(raw);
@@ -30,33 +33,24 @@ function loadModelsJson() {
 }
 
 /**
- * Resolve (provider_id, model_id) to a provider config.
+ * Resolve (provider_id, model_id) → adapter config. Async + DB-first.
+ * If `db` is omitted, a fresh libsql client is opened — convenient for
+ * existing callers but pass an explicit client if you already have one.
+ *
  * @param {string} providerId
- * @param {string} [modelId] — if omitted, first model in provider's models[] is used
- * @returns {{ baseUrl: string, apiKey: string, model: string, provider_id: string }}
+ * @param {string} [modelId]
+ * @param {object} [db]  optional libsql client
+ * @returns {Promise<{ baseUrl, apiKey, model, provider_id }>}
  */
-export function resolveProvider(providerId, modelId) {
-  const cfg = loadModelsJson();
-  const provider = cfg?.providers?.[providerId];
-  if (!provider) throw new Error(`models.json: provider "${providerId}" not found`);
-  let modelEntry;
-  if (modelId) {
-    modelEntry = (provider.models || []).find(m => m.id === modelId);
-    if (!modelEntry) throw new Error(`models.json: model "${modelId}" not in provider "${providerId}"`);
-  } else {
-    modelEntry = (provider.models || [])[0];
-    if (!modelEntry) throw new Error(`models.json: provider "${providerId}" has no models`);
-  }
-  return {
-    baseUrl: provider.baseUrl,
-    apiKey: provider.apiKey || "none",
-    model: modelEntry.id,
-    provider_id: providerId,
-  };
+export async function resolveProvider(providerId, modelId, db) {
+  const client = db || createDbClient();
+  return _resolveProviderConfig(client, providerId, modelId);
 }
 
 /**
- * List provider+model IDs for UI dropdowns.
+ * List provider+model IDs for UI dropdowns (models.json view).
+ * Stays sync — consumers that need the DB-augmented list use listProvidersAll
+ * from providers-db.js directly.
  */
 export function listProviders() {
   const cfg = loadModelsJson();
@@ -72,10 +66,9 @@ export function listProviders() {
 }
 
 /**
- * Orchestrator-default fallback. Honors CROW_ORCHESTRATOR_PROVIDER and, when
- * the resolved provider matches that env var, CROW_ORCHESTRATOR_MODEL.
- * Otherwise picks the provider's first warm model (or first listed).
- * @returns {{ baseUrl: string, apiKey: string, model: string, provider_id: string }}
+ * Orchestrator-default fallback. Honors CROW_ORCHESTRATOR_PROVIDER and
+ * CROW_ORCHESTRATOR_MODEL. Stays sync (models.json-only) because the
+ * orchestrator's hot path can't easily tolerate a DB round-trip here.
  */
 export function resolveOrchestratorDefault() {
   const cfg = loadModelsJson();

@@ -40,9 +40,9 @@ async function resolveEffectiveScope(db) {
   return (raw === "global" || raw === "local") ? raw : FIRST_WRITE_DEFAULT_SCOPE;
 }
 
-function resolveProfileToConfig(profile) {
+async function resolveProfileToConfig(profile, db) {
   if (profile?.provider_id) {
-    return resolveProvider(profile.provider_id, profile.model_id);
+    return resolveProvider(profile.provider_id, profile.model_id, db);
   }
   if (!profile?.baseUrl || !profile?.model) return null;
   return {
@@ -406,7 +406,7 @@ export default {
         const profile = profiles.find(p => p.id === profile_id);
         if (!profile) { res.json({ ok: false, error: "Profile not found" }); return true; }
         let providerConfig;
-        try { providerConfig = resolveProfileToConfig(profile); }
+        try { providerConfig = await resolveProfileToConfig(profile, db); }
         catch (err) { res.json({ ok: false, error: `Resolve failed: ${err.message}` }); return true; }
         if (!providerConfig) { res.json({ ok: false, error: "Profile incomplete" }); return true; }
 
