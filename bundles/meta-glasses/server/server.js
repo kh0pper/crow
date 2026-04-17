@@ -10,6 +10,86 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
+// Phase 6 C.1: tolerate three JSON output shapes from the summarization
+// LLM call: bare `{...}`, fenced ```json {...} ```, or surrounding prose
+// with a `{...}` somewhere inside. Returns null only when ALL three fail
+// — the caller persists the raw text into glasses_note_sessions.summary_raw
+// so an operator can debug from the Nest later instead of chasing logs.
+function robustJsonExtract(text) {
+  if (!text || typeof text !== "string") return null;
+  try { return JSON.parse(text); } catch {}
+  const fence = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+  if (fence) { try { return JSON.parse(fence[1]); } catch {} }
+  const m = text.match(/\{[\s\S]*\}/);
+  if (m) { try { return JSON.parse(m[0]); } catch {} }
+  return null;
+}
+
+// Phase 6 C.1: summarize a glasses dictation session into { summary,
+// action_items[] }. Provider-agnostic — uses the gateway's chat adapter
+// with NO tools (a one-shot completion). Returns parse_error +
+// raw_excerpt so the caller can persist diagnostics on extraction
+// failure instead of silently returning empty.
+async function summarizeSession({ noteId, topic }, db) {
+  const { rows } = await db.execute({
+    sql: "SELECT content FROM research_notes WHERE id = ?",
+    args: [noteId],
+  });
+  const body = String(rows[0]?.content || "");
+  if (!body.trim()) return { summary: null, action_items: [] };
+
+  // Resolve AI provider from dashboard ai_profiles (default profile),
+  // not .env — the gateway runs without .env AI_PROVIDER set when an
+  // operator drives configuration through the Nest's Settings → AI
+  // Profiles UI. Mirrors recordGlassesPhoto's vision-profile lookup.
+  let adapter;
+  try {
+    const { getAiProfiles, createAdapterFromProfile } = await import("../../../servers/gateway/ai/provider.js");
+    const profiles = await getAiProfiles(db, { includeKeys: true });
+    const profile = profiles.find(p => p.isDefault) || profiles[0];
+    if (!profile) {
+      return { summary: null, action_items: [], parse_error: "No AI profile configured." };
+    }
+    ({ adapter } = await createAdapterFromProfile(profile, profile.defaultModel));
+  } catch (err) {
+    return { summary: null, action_items: [], parse_error: `AI provider unavailable: ${err.message}` };
+  }
+
+  const systemPrompt = `You are a meeting note summarizer. Output ONLY a JSON object with exactly two top-level keys: "summary" (string, 2-3 sentences capturing the gist) and "action_items" (array of objects, each with required "text" string and optional "owner" string and optional "due" ISO date string). Respond with ONLY the JSON object — no prose, no markdown fences.`;
+  const userPrompt = `Notes from session "${topic || "(untitled)"}":\n\n${body}`;
+  const messages = [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userPrompt },
+  ];
+  let text = "";
+  try {
+    for await (const ev of adapter.chatStream(messages, [], { maxTokens: 2000, temperature: 0.2 })) {
+      if (ev.type === "content_delta") text += ev.text;
+    }
+  } catch (err) {
+    return { summary: null, action_items: [], parse_error: `LLM call failed: ${err.message}` };
+  }
+
+  const parsed = robustJsonExtract(text);
+  if (!parsed || typeof parsed !== "object") {
+    return {
+      summary: null,
+      action_items: [],
+      parse_error: "Could not parse JSON from LLM response.",
+      raw_excerpt: text.slice(0, 500),
+      raw_full: text,
+    };
+  }
+  return {
+    summary: typeof parsed.summary === "string" ? parsed.summary : null,
+    action_items: Array.isArray(parsed.action_items)
+      ? parsed.action_items.filter(it => it && typeof it.text === "string")
+      : [],
+  };
+}
+
+const CONFIRM_MAX_RETRIES = 3;
+
 export function createMetaGlassesServer(options = {}) {
   const server = new McpServer(
     { name: "crow-meta-glasses", version: "0.1.0" },
@@ -200,7 +280,7 @@ export function createMetaGlassesServer(options = {}) {
 
   server.tool(
     "crow_glasses_end_note_session",
-    "End a glasses note session. Marks the session 'ended' and returns the backing note id for the operator to review in the Nest.",
+    "End a glasses note session. Runs summarization + action-item extraction via the configured AI provider, prepends a '## Summary' block to the backing note, and returns the structured result. The LLM should read the action_items back to the user and call crow_glasses_confirm_action_items on the next turn.",
     {
       session_id: z.number().int().optional(),
       device_id: z.string().min(1).max(200),
@@ -221,22 +301,248 @@ export function createMetaGlassesServer(options = {}) {
             if (!rows[0]) return { content: [{ type: "text", text: "No active session for device." }], isError: true };
             sid = rows[0].id;
           }
-          await db.execute({
-            sql: `UPDATE glasses_note_sessions SET status = 'ended', ended_at = datetime('now') WHERE id = ?`,
-            args: [sid],
-          });
-          const { rows } = await db.execute({
+          // Look up note + topic before flipping status, so we can summarize.
+          const meta = await db.execute({
             sql: `SELECT note_id, topic FROM glasses_note_sessions WHERE id = ?`,
             args: [sid],
           });
-          const note_id = rows[0]?.note_id;
+          const noteId = meta.rows[0]?.note_id;
+          const topic = meta.rows[0]?.topic;
+          if (!noteId) {
+            await db.execute({
+              sql: `UPDATE glasses_note_sessions SET status = 'ended', ended_at = datetime('now') WHERE id = ?`,
+              args: [sid],
+            });
+            return { content: [{ type: "text", text: "Session has no backing note; ended without summary." }], isError: true };
+          }
+
+          const result = await summarizeSession({ noteId, topic }, db);
+          const actionItemsJson = JSON.stringify(result.action_items || []);
+
+          // Persist summary fields. summary_raw captures the unparseable LLM
+          // output for post-hoc debugging when robustJsonExtract failed.
+          if (result.parse_error && result.raw_full) {
+            await db.execute({
+              sql: `UPDATE glasses_note_sessions
+                    SET status = 'ended', ended_at = datetime('now'),
+                        summary = NULL, action_items_json = '[]', summary_raw = ?
+                    WHERE id = ?`,
+              args: [String(result.raw_full).slice(0, 50_000), sid],
+            });
+          } else {
+            await db.execute({
+              sql: `UPDATE glasses_note_sessions
+                    SET status = 'ended', ended_at = datetime('now'),
+                        summary = ?, action_items_json = ?
+                    WHERE id = ?`,
+              args: [result.summary, actionItemsJson, sid],
+            });
+            // Prepend the summary block to the note so the operator sees it
+            // first when reviewing in the Nest. Skip if no summary parsed.
+            if (result.summary) {
+              const block = `## Summary\n${result.summary}\n\n`;
+              await db.execute({
+                sql: `UPDATE research_notes
+                      SET content = ? || COALESCE(content, ''), updated_at = datetime('now')
+                      WHERE id = ?`,
+                args: [block, noteId],
+              });
+            }
+          }
+
+          const out = {
+            session_id: Number(sid),
+            note_id: noteId,
+            topic,
+            summary: result.summary,
+            action_items: result.action_items || [],
+            needs_confirmation: (result.action_items || []).length > 0,
+          };
+          if (result.parse_error) {
+            out.parse_error = result.parse_error;
+            out.raw_excerpt = result.raw_excerpt;
+          }
+          return { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] };
+        } finally {
+          try { db.close(); } catch {}
+        }
+      } catch (err) {
+        return { content: [{ type: "text", text: `Failed: ${err.message}` }], isError: true };
+      }
+    },
+  );
+
+  server.tool(
+    "crow_glasses_undo_last_append",
+    "Remove the most recently appended line from an active glasses note session. Use when the user says 'undo that' shortly after a wrong dictation. Returns the removed line text.",
+    {
+      session_id: z.number().int().optional(),
+      device_id: z.string().min(1).max(200),
+    },
+    async ({ session_id, device_id }) => {
+      try {
+        const { createDbClient } = await loadDb();
+        const db = createDbClient();
+        try {
+          let sid = session_id;
+          if (!sid) {
+            const { rows } = await db.execute({
+              sql: `SELECT id FROM glasses_note_sessions
+                    WHERE device_id = ? AND status = 'active'
+                    ORDER BY started_at DESC LIMIT 1`,
+              args: [device_id],
+            });
+            if (!rows[0]) return { content: [{ type: "text", text: "No active session for device." }], isError: true };
+            sid = rows[0].id;
+          }
+          const sess = await db.execute({ sql: `SELECT note_id FROM glasses_note_sessions WHERE id = ?`, args: [sid] });
+          const noteId = sess.rows[0]?.note_id;
+          if (!noteId) return { content: [{ type: "text", text: "Session has no backing note." }], isError: true };
+          const noteRow = await db.execute({ sql: `SELECT content FROM research_notes WHERE id = ?`, args: [noteId] });
+          const content = String(noteRow.rows[0]?.content || "");
+          if (!content) return { content: [{ type: "text", text: "Nothing to undo (note is empty)." }] };
+
+          // crow_glasses_add_to_note appends `[HH:MM] <text>\n` lines.
+          // Strip the LAST such line. If the last non-empty line doesn't
+          // match that shape, decline rather than mangling a header or
+          // operator-edited paragraph.
+          const trimmed = content.replace(/\n+$/, "");
+          const lastNl = trimmed.lastIndexOf("\n");
+          const lastLine = lastNl === -1 ? trimmed : trimmed.slice(lastNl + 1);
+          if (!/^\[\d{2}:\d{2}\] /.test(lastLine)) {
+            return { content: [{ type: "text", text: "Last line wasn't a dictated entry — refusing to mutate." }], isError: true };
+          }
+          const remainder = lastNl === -1 ? "" : trimmed.slice(0, lastNl);
+          const newContent = remainder ? remainder + "\n" : "";
+          await db.execute({
+            sql: `UPDATE research_notes SET content = ?, updated_at = datetime('now') WHERE id = ?`,
+            args: [newContent, noteId],
+          });
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ session_id: Number(sid), removed: lastLine }, null, 2),
+            }],
+          };
+        } finally {
+          try { db.close(); } catch {}
+        }
+      } catch (err) {
+        return { content: [{ type: "text", text: `Failed: ${err.message}` }], isError: true };
+      }
+    },
+  );
+
+  server.tool(
+    "crow_glasses_confirm_action_items",
+    "Confirm which action items from a just-summarized session to convert into Crow notifications. `keep` is 'all', 'none', or an array of 1-indexed item numbers. Retry budget: a malformed `keep` returns an error and increments confirm_retry_count; after 3 failures the call fails closed (zero items kept) so the operator must re-summarize.",
+    {
+      session_id: z.number().int(),
+      keep: z.union([
+        z.literal("all"),
+        z.literal("none"),
+        z.array(z.number().int().min(1).max(100)),
+      ]),
+    },
+    async ({ session_id, keep }) => {
+      try {
+        const { createDbClient } = await loadDb();
+        const db = createDbClient();
+        try {
+          const sess = await db.execute({
+            sql: `SELECT id, action_items_json, COALESCE(confirm_retry_count, 0) AS retries
+                  FROM glasses_note_sessions WHERE id = ?`,
+            args: [session_id],
+          });
+          if (!sess.rows[0]) return { content: [{ type: "text", text: "Session not found." }], isError: true };
+          const retries = Number(sess.rows[0].retries || 0);
+          let items = [];
+          try { items = JSON.parse(sess.rows[0].action_items_json || "[]"); } catch {}
+          if (!Array.isArray(items)) items = [];
+
+          // Normalize and validate `keep`. On malformed: increment retry
+          // budget; if exhausted, fail closed (zero items kept).
+          let toKeep = [];
+          let invalid = false;
+          if (keep === "all") {
+            toKeep = items.slice();
+          } else if (keep === "none") {
+            toKeep = [];
+          } else if (Array.isArray(keep)) {
+            const seen = new Set();
+            for (const idx of keep) {
+              const n = Number(idx);
+              if (!Number.isInteger(n) || n < 1 || n > items.length) { invalid = true; break; }
+              if (!seen.has(n)) { seen.add(n); toKeep.push(items[n - 1]); }
+            }
+          } else {
+            invalid = true;
+          }
+
+          if (invalid) {
+            const newRetries = retries + 1;
+            await db.execute({
+              sql: `UPDATE glasses_note_sessions
+                    SET confirm_retry_count = COALESCE(confirm_retry_count, 0) + 1
+                    WHERE id = ?`,
+              args: [session_id],
+            });
+            const remaining = Math.max(0, CONFIRM_MAX_RETRIES - newRetries);
+            if (remaining === 0) {
+              return {
+                content: [{
+                  type: "text",
+                  text: JSON.stringify({
+                    error: "confirm_failed_closed",
+                    message: "0 items kept — ask the operator to re-summarize if needed.",
+                    retries_remaining: 0,
+                  }),
+                }],
+                isError: true,
+              };
+            }
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  error: "invalid_keep",
+                  message: `\`keep\` must be 'all', 'none', or an array of 1-indexed integers in [1, ${items.length}].`,
+                  retries_remaining: remaining,
+                }),
+              }],
+              isError: true,
+            };
+          }
+
+          // Insert notifications for kept items. Per the plan:
+          // notifications is NOT in SYNCED_TABLES — action items surface
+          // on whichever instance ran summarization; paired Crows get
+          // their own from their own sessions.
+          const { createNotification } = await import("../../../servers/shared/notifications.js");
+          let created = 0;
+          const failures = [];
+          for (const it of toKeep) {
+            try {
+              const owner = it.owner ? ` (${it.owner})` : "";
+              const due = it.due ? ` — due ${it.due}` : "";
+              await createNotification(db, {
+                title: `${it.text}${owner}${due}`,
+                type: "reminder",
+                source: "meta-glasses",
+                priority: "normal",
+                action_url: `/dashboard/notifications`,
+              });
+              created++;
+            } catch (err) {
+              failures.push(err.message);
+            }
+          }
           return {
             content: [{
               type: "text",
               text: JSON.stringify({
-                session_id: Number(sid),
-                note_id, topic: rows[0]?.topic,
-                summary: "Session ended. Summarization + action-item extraction pipeline is deferred to a follow-up — the raw note is available in the Nest.",
+                session_id, kept: toKeep.length, created,
+                failures: failures.length ? failures : undefined,
               }, null, 2),
             }],
           };

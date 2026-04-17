@@ -461,6 +461,19 @@ await initTable("glasses_note_sessions index", `
     ON glasses_note_sessions(device_id, status);
 `);
 
+// Phase 6 C.1: action-item confirmation retry budget + raw LLM output
+// for parse-error debugging. addColumnIfMissing on SQLite leaves
+// pre-existing rows with NULL — read sites must use COALESCE(confirm_retry_count, 0).
+await addColumnIfMissing("glasses_note_sessions", "confirm_retry_count", "INTEGER DEFAULT 0");
+await addColumnIfMissing("glasses_note_sessions", "summary_raw", "TEXT");
+
+// Phase 6 C.1: research_notes.updated_at was referenced by Phase 6
+// crow_glasses_add_to_note (commit 9783a8b) but the column was never
+// added to the schema, so the UPDATE silently errored under the
+// tool's try/catch. Adding it here makes the dictation append actually
+// persist its timestamp; legacy rows get NULL until first edit.
+await addColumnIfMissing("research_notes", "updated_at", "TEXT");
+
 // --- Meta-glasses photo library (Phase 5) ---
 
 await initTable("glasses_photos table", `
