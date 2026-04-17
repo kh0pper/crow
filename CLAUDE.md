@@ -215,6 +215,45 @@ Remove the file to return to the default (Turbo on).
 
 **Rollback is clean.** Every piece of Turbo code is either gated behind `CROW_ENABLE_TURBO=0` or behavior-neutral if Turbo doesn't load. If a regression shows up, add the opt-out drop-in above and the dashboard renders exactly as it did pre-rollout.
 
+### Turbo Streams & Frames
+
+**Live dashboard updates via server-pushed HTML fragments and scoped sub-navigation.** Streams replace polling; Frames replace full-panel swaps on in-panel navigation.
+
+**In-process event bus** — `servers/shared/event-bus.js` exports a single per-process `EventEmitter`. Each gateway (crow-gateway on 3002, crow-finance-gateway on 3003) runs its own Node process with its own bus; there is NO cross-process propagation here. Cross-instance events still travel via `InstanceSyncManager`.
+
+**Stream primitives** live under `servers/gateway/streams/`:
+- `sse.js` — `openStream(res)` opens an SSE response with a 30s keepalive and `res.on("error")` handler for EPIPE-safe teardown.
+- `turbo-stream.js` — `html\`\``, `raw()`, `turboStream(action, target, body)`, `sseTurbo(sendRaw, action, target, body)`. The `sseTurbo` helper emits one `data:` record per content line so multi-line frames survive transport (the spec concatenates with `\n` on the consumer side).
+- `authed-stream.js` — `openAuthedStream(req, res)` layers a 5-min session re-check on `openStream`. Stream routes MUST use this variant so logged-out tabs close cleanly.
+
+**Escape-by-default contract for Stream bodies.** Every `<turbo-stream>` body MUST flow from the `html\`\`` tag function (which escapes every interpolant) OR an explicit `raw()` opt-out (for pre-sanitized markdown, etc.). A bare `${userInput}` interpolation into `turboStream()` / `sseTurbo()` is an XSS bug. When reviewing new emit sites, grep for `turboStream|sseTurbo` and confirm each call site feeds from `html\`\`` or a reviewed `raw()`.
+
+**Paired-instance emit discipline.** When a table is in `SYNCED_TABLES` (see `servers/sharing/instance-sync.js`), an inbound replication-path write does NOT fire the usual `createNotification` / nostr.js code path — the row just lands locally via `_applyEntry`. To live-update badges across paired Crows, emit from `_applyEntry` as well as the primary write paths. Tables currently emitting from both:
+- `messages` — `servers/sharing/nostr.js` (live Nostr inbound) + `servers/sharing/instance-sync.js::_applyEntry` (synced rows).
+- `notifications` — NOT in `SYNCED_TABLES`; `createNotification` alone is sufficient.
+
+**Emit + subscriber isolation.** `EventEmitter.emit` is synchronous and re-throws unhandled subscriber errors. Every emit site wraps in `try { bus.emit(...) } catch {}` so a broken subscriber cannot break the primary DB write. Every subscriber handler defends against its own exceptions; one slow subscriber cannot block siblings but CAN delay them (since emit is synchronous).
+
+**Stream routes** live in `servers/gateway/routes/streams.js`, mounted under `/dashboard/streams/*`. That prefix is intentionally omitted from `PUBLIC_FUNNEL_PREFIXES` in `servers/gateway/index.js`, so Tailscale Funnel traffic is rejected with HTTP 403 before reaching any handler. Smoke test:
+```
+curl -H "Tailscale-Funnel-Request: 1" -i http://localhost:3002/dashboard/streams/notifications
+# Expect: HTTP/1.1 403 Forbidden
+```
+Active streams: notifications bell, messages peer badges, orchestrator event timeline, glasses media, extensions jobs. Fallback polls run at 5 min as a safety net — after 2 weeks of clean dogfood they can be deleted.
+
+**`chat.js` SSE** (`servers/gateway/routes/chat.js`) uses `openStream()` directly (not `openAuthedStream` — chat already mounts its own auth). Curl smoke test:
+```
+curl -N -H 'Cookie: crow_session=<valid>' \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"hello"}' \
+  http://localhost:3002/api/chat/conversations/<id>/messages
+# Expect: event: content ... event: done
+```
+
+**Turbo Frames** currently wrap two lists: `#memory-results` (Memory panel) and `#blog-post-list` (Blog panel). `data-turbo-action="advance"` on the frame keeps the URL in sync with the current page, so bookmarks and back/forward still work. The existing server route returns a full-page response; Turbo extracts the matching frame and swaps only its contents. No separate frame-only route is needed for this pattern.
+
+**Messages conversation Frame (D.1) is deferred.** The Messages panel is currently implemented as a client-side SPA (peer-select is a JS click handler that fetches via REST and builds DOM, not an href navigation). Wrapping `#msg-chat` in a `<turbo-frame>` without also migrating that client code to server-rendered routes would be a no-op. A future refactor pass can convert peer-select to link navigation and land the frame at the same time.
+
 ### Data Directory
 
 Data lives in `~/.crow/data/` (preferred) or `./data/` (fallback). Resolution order: `CROW_DATA_DIR` env → `~/.crow/data/` (if exists) → `./data/`. The `resolveDataDir()` function in `servers/db.js` handles this. Migration script (`scripts/migrate-data-dir.js`) moves data from `./data/` to `~/.crow/data/` and creates a symlink for backward compatibility.
