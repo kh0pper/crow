@@ -14,6 +14,7 @@ const EXPECTED_PROVIDERS = [
   "crow-chat",
   "crow-swap-coder",
   "crow-swap-deep",
+  "crow-swap-agentic",
   "grackle-embed",
   "grackle-rerank",
   "grackle-vision",
