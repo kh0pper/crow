@@ -159,6 +159,7 @@ await addColumnIfMissing("research_projects", "type", "TEXT DEFAULT 'research'")
 await addColumnIfMissing("research_notes", "lamport_ts", "INTEGER DEFAULT 0");
 await addColumnIfMissing("research_sources", "backend_id", "INTEGER REFERENCES data_backends(id) ON DELETE SET NULL");
 await addColumnIfMissing("contacts", "feed_key", "TEXT");
+await addColumnIfMissing("glasses_photos", "minio_key", "TEXT");
 
 await initTable("sources FTS index", `
   CREATE VIRTUAL TABLE IF NOT EXISTS sources_fts USING fts5(

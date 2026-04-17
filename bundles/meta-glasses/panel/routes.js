@@ -82,6 +82,7 @@ async function loadSystemPrompt(){ return import(pathToFileURL(join(gatewayDir, 
 async function loadVision()       { return import(pathToFileURL(join(gatewayDir, "ai/vision.js")).href); }
 async function loadResolveProv()  { return import(pathToFileURL(join(gatewayDir, "ai/resolve-provider.js")).href); }
 async function loadSettingsReg()  { return import(pathToFileURL(join(gatewayDir, "dashboard/settings/registry.js")).href); }
+async function loadS3()           { return import(pathToFileURL(join(gatewayDir, "..", "storage", "s3-client.js")).href); }
 
 /* ---------- Shared session state ---------- */
 
@@ -1420,19 +1421,60 @@ export function setupWebSocket(server) {
 
 async function recordGlassesPhoto({ deviceId, diskPath, fname, mime, size }) {
   const { createDbClient } = await loadDb();
+  const { readFileSync } = await import("node:fs");
+
+  // 1. Best-effort MinIO upload BEFORE the DB insert. If MinIO isn't
+  //    configured, we fall straight through to disk-only. If upload
+  //    throws, we log and keep disk as the authoritative source. The
+  //    resulting `minioKey` is either a real key or null; the INSERT
+  //    records both.
+  let minioKey = null;
+  try {
+    const { isAvailable, uploadObject } = await loadS3();
+    if (await isAvailable()) {
+      const ext = (mime?.split("/")[1] || "jpg").split("+")[0];
+      const candidate = `meta-glasses/${deviceId}/${Date.now()}-${randomUUID()}.${ext}`;
+      try {
+        await uploadObject(candidate, readFileSync(diskPath), { contentType: mime });
+        minioKey = candidate;
+      } catch (err) {
+        console.warn(`[meta-glasses] MinIO upload failed for photo (device=${deviceId}); keeping disk copy only: ${err.message}`);
+        minioKey = null;
+      }
+    }
+  } catch (err) {
+    // loadS3 itself failed (module missing, etc) — stay on disk path.
+    console.warn(`[meta-glasses] S3 client unavailable: ${err.message}`);
+  }
+
+  // 2. DB insert. If this fails after a successful MinIO upload, the
+  //    MinIO object would be orphaned — compensate by deleting it.
+  //    (minio-js removeObject is idempotent on 404.)
   const db = createDbClient();
   let photoId;
   try {
     const ins = await db.execute({
-      sql: `INSERT INTO glasses_photos (device_id, disk_path, mime, size_bytes)
-            VALUES (?, ?, ?, ?)`,
-      args: [deviceId, diskPath, mime, size],
+      sql: `INSERT INTO glasses_photos (device_id, disk_path, minio_key, mime, size_bytes)
+            VALUES (?, ?, ?, ?, ?)`,
+      args: [deviceId, diskPath, minioKey, mime, size],
     });
     photoId = Number(ins.lastInsertRowid);
+  } catch (err) {
+    if (minioKey) {
+      try {
+        const { deleteObject } = await loadS3();
+        await deleteObject(minioKey);
+      } catch {}
+    }
+    throw err;
   } finally {
     try { db.close(); } catch {}
   }
   if (!photoId) return;
+  // NOTE: the disk file at `diskPath` is intentionally NOT unlinked in
+  // this session. A future retention cron (Phase 5 B.4) prunes disk
+  // copies once MinIO has served them successfully or after a grace
+  // period. Keeps the system recoverable if MinIO is briefly down.
 
   // Fire-and-forget: resolve the default vision profile (no device/AI profile
   // plumbing here — library captions use the platform default). Skip silently
@@ -1481,6 +1523,13 @@ async function recordGlassesPhoto({ deviceId, diskPath, fname, mime, size }) {
 /**
  * Search the glasses photo library by caption/OCR.
  * Returns [{ id, url, caption, ocr_text, captured_at }, ...].
+ *
+ * URLs resolve in the following order: if `minio_key` is present AND
+ * MinIO is available, a per-row presigned GET is minted with a 1-hour
+ * TTL. Otherwise we fall back to the legacy disk-backed
+ * /api/meta-glasses/photo/:name route. Presigned-URL minting is async,
+ * so the map is wrapped in Promise.all — bare .map(async r => ...)
+ * would hand back an array of unresolved Promises.
  */
 export async function searchGlassesPhotos(query, { limit = 10 } = {}) {
   const { createDbClient, sanitizeFtsQuery } = await loadDb();
@@ -1489,18 +1538,37 @@ export async function searchGlassesPhotos(query, { limit = 10 } = {}) {
     const q = sanitizeFtsQuery ? sanitizeFtsQuery(query || "") : (query || "").replace(/['"]/g, " ");
     if (!q.trim()) return [];
     const { rows } = await db.execute({
-      sql: `SELECT g.id, g.disk_path, g.caption, g.ocr_text, g.captured_at
+      sql: `SELECT g.id, g.disk_path, g.minio_key, g.caption, g.ocr_text, g.captured_at
             FROM glasses_photos g JOIN glasses_photos_fts f ON g.id = f.rowid
             WHERE glasses_photos_fts MATCH ?
             ORDER BY g.captured_at DESC LIMIT ?`,
       args: [q, limit],
     });
-    return rows.map(r => ({
-      id: r.id,
-      url: `/api/meta-glasses/photo/${encodeURIComponent(String(r.disk_path).split("/").pop())}`,
-      caption: r.caption,
-      ocr_text: r.ocr_text,
-      captured_at: r.captured_at,
+    let s3Ready = false;
+    let getPresignedUrl = null;
+    try {
+      const s3 = await loadS3();
+      s3Ready = await s3.isAvailable();
+      getPresignedUrl = s3.getPresignedUrl;
+    } catch {}
+    return Promise.all(rows.map(async (r) => {
+      let url;
+      if (s3Ready && r.minio_key && getPresignedUrl) {
+        try {
+          url = await getPresignedUrl(r.minio_key, { expiry: 3600 });
+        } catch {
+          url = `/api/meta-glasses/photo/${encodeURIComponent(String(r.disk_path || "").split("/").pop())}`;
+        }
+      } else {
+        url = `/api/meta-glasses/photo/${encodeURIComponent(String(r.disk_path || "").split("/").pop())}`;
+      }
+      return {
+        id: r.id,
+        url,
+        caption: r.caption,
+        ocr_text: r.ocr_text,
+        captured_at: r.captured_at,
+      };
     }));
   } finally {
     try { db.close(); } catch {}
