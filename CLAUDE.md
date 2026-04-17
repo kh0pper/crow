@@ -252,7 +252,18 @@ curl -N -H 'Cookie: crow_session=<valid>' \
 
 **Turbo Frames** currently wrap two lists: `#memory-results` (Memory panel) and `#blog-post-list` (Blog panel). `data-turbo-action="advance"` on the frame keeps the URL in sync with the current page, so bookmarks and back/forward still work. The existing server route returns a full-page response; Turbo extracts the matching frame and swaps only its contents. No separate frame-only route is needed for this pattern.
 
-**Messages conversation Frame (D.1) is deferred.** The Messages panel is currently implemented as a client-side SPA (peer-select is a JS click handler that fetches via REST and builds DOM, not an href navigation). Wrapping `#msg-chat` in a `<turbo-frame>` without also migrating that client code to server-rendered routes would be a no-op. A future refactor pass can convert peer-select to link navigation and land the frame at the same time.
+**Messages conversation Frame (D.1) is deferred.** The Messages panel is implemented as a client-side SPA: `msgSelectItem(type, id)` in `servers/gateway/dashboard/panels/messages/client.js:137` is a `onclick` handler that calls `loadAiConversation` / `loadPeerConversation` / `loadBotConversation`, each of which fetches JSON from `/api/messages/peer/:id` (or AI chat REST), then builds the entire chat UI via `textContent` + `appendChild`. There is no href navigation, no URL change, no server-side conversation template.
+
+Wrapping `#msg-chat` in a `<turbo-frame>` without migrating this flow is a no-op — nothing navigates into the frame. Turning peer selection into link nav (`<a href="/dashboard/messages/conversation/peer/:id" data-turbo-frame="conversation-body">`) requires a server-side renderer for the chat body that matches the client's current output for headers, message bubbles, markdown, attachments, reply bar, file upload UI, and read-tracking. Migrating AI chat and bot chat to the same pattern is further complicated by SSE streaming for AI responses and polling for bot responses — both currently depend on the client's in-memory `_messages` / `_activeItem` state.
+
+A proper migration would:
+1. Add `servers/gateway/dashboard/panels/messages/conversation-render.js` exposing `renderPeerConversation(db, contactId, lang)`, matching the client's DOM output (including attachment previews, reply bar, `data-message-id` wiring).
+2. Add GET route `/dashboard/messages/conversation/peer/:id` in `messages.js` returning the frame body.
+3. Update `messages/html.js` to wrap `#msg-chat` in `<turbo-frame id="conversation-body" data-turbo-action="advance">` and change peer `.msg-avatar-item` elements from `onclick="msgSelectItem('peer',...)"` to `<a href="..." data-turbo-frame="conversation-body">` link nav.
+4. Bridge the frame render to client state: wire a `turbo:frame-load` listener that sets `_activeItem`, attaches the `pollStatus` / `sendPeerMessage` handlers, and arms `file-input` change.
+5. Leave AI chat + bot chat on the JS path for now; either (a) gate `msgSelectItem` to dispatch only for `type !== "peer"`, or (b) migrate all three types in a follow-up.
+
+Out of scope for the current Turbo follow-on plan because (a) the SPA works fine today and (b) the refactor has real regression risk (markdown output divergence, attachment upload + reply bar regressions, state-machine desync between server render and client handlers). Track this as a standalone refactor plan when addressing "URL syncing for conversations / notification deeplinks" or similar concrete ask.
 
 ### Data Directory
 
