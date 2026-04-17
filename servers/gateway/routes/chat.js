@@ -74,6 +74,31 @@ export default function chatRouter(dashboardAuth) {
     res.json(result);
   });
 
+  // DB-backed registry view for the Quick Chat picker. Returns only
+  // enabled rows, flattened to { id, label, type, models[] } so the
+  // client can build provider + model dropdowns without another DB
+  // round-trip per selection.
+  router.get("/api/chat/registry-providers", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const all = await listProvidersAll(db);
+      res.json({
+        providers: all
+          .filter((p) => !p.disabled)
+          .map((p) => ({
+            id: p.id,
+            host: p.host,
+            provider_type: p.provider_type || null,
+            models: (p.models || []).map((m) => (typeof m === "string" ? m : m.id)).filter(Boolean),
+          })),
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
   // --- AI Profiles ---
 
   router.get("/api/chat/profiles", async (req, res) => {
