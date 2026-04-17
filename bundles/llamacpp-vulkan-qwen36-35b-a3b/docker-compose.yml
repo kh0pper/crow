@@ -11,7 +11,7 @@ services:
     env_file:
       - ${HOME}/.crow/env/rocm.env
     volumes:
-      - /home/kh0pp/llm/hf-cache:/models
+      - ${LLM_CACHE}:/models
     ports:
       - "${CROW_TAILSCALE_IP}:8003:8000"
     entrypoint: ["llama-server"]

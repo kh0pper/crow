@@ -14,7 +14,7 @@ services:
       HF_HOME: /models
       HUGGING_FACE_HUB_TOKEN: ${VLLM_HF_TOKEN:-}
     volumes:
-      - /home/kh0pp/llm/hf-cache:/models
+      - ${LLM_CACHE}:/models
     ports:
       - "${CROW_TAILSCALE_IP}:8003:8000"
     entrypoint: ["bash", "-lc"]
