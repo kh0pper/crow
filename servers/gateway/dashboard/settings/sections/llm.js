@@ -48,14 +48,36 @@ export default {
   async render({ req, db, lang }) {
     const active = resolveTab(req);
     const tabsHtml = TABS.map((t) => {
-      const sel = t.id === active.id ? "style=\"border-bottom:2px solid var(--crow-accent);font-weight:600\"" : "";
-      return `<a href="?section=llm&tab=${t.id}" data-turbo-frame="_top" style="padding:0.5rem 1rem;display:inline-block;color:var(--crow-text);text-decoration:none" ${sel}>${escapeHtml(t.label)}</a>`;
+      const activeAttr = t.id === active.id ? ' aria-current="page"' : '';
+      return `<a class="llm-tab${t.id === active.id ? " llm-tab-active" : ""}" href="?section=llm&tab=${t.id}" data-turbo-frame="_top"${activeAttr}>${escapeHtml(t.label)}</a>`;
     }).join("");
     const body = await active.render({ req, db, lang });
-    return `
-      <div style="border-bottom:1px solid var(--crow-border);margin-bottom:1rem">${tabsHtml}</div>
-      <div class="llm-tab-body">${body}</div>
-    `;
+    return `<style>
+      .llm-tabs { display:flex; gap:0.25rem; border-bottom:1px solid var(--crow-border); margin-bottom:1.25rem; padding-left:0.25rem; }
+      .llm-tab {
+        padding:0.55rem 0.95rem;
+        color:var(--crow-text-secondary);
+        text-decoration:none;
+        font-size:0.9rem;
+        border-bottom:2px solid transparent;
+        margin-bottom:-1px;
+        transition:color 120ms ease, border-color 120ms ease;
+      }
+      .llm-tab:hover { color:var(--crow-text-primary); }
+      .llm-tab-active {
+        color:var(--crow-text-primary);
+        border-bottom-color:var(--crow-accent);
+        font-weight:600;
+      }
+      .llm-section-hint {
+        font-size:0.82rem;
+        color:var(--crow-text-muted);
+        margin-bottom:0.85rem;
+        line-height:1.45;
+      }
+    </style>
+    <nav class="llm-tabs">${tabsHtml}</nav>
+    <div class="llm-tab-body">${body}</div>`;
   },
 
   async handleAction({ req, res, db, action }) {

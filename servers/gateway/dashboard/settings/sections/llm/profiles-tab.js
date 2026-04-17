@@ -22,34 +22,36 @@ async function readJson(db, key) {
 }
 
 function profileBadge(p) {
+  const base = `font-size:0.68rem;padding:1px 8px;border-radius:var(--crow-radius-pill);letter-spacing:0.02em;font-family:'JetBrains Mono',monospace`;
   if (p?.provider_id) {
-    return `<span style="font-size:0.7rem;padding:1px 6px;background:var(--crow-bg-deep);border-radius:3px;color:var(--crow-accent)">pointer → ${escapeHtml(p.provider_id)}${p.model_id ? " · " + escapeHtml(p.model_id) : ""}</span>`;
+    const label = `→ ${escapeHtml(p.provider_id)}${p.model_id ? " · " + escapeHtml(p.model_id) : ""}`;
+    return `<span style="${base};background:var(--crow-accent-muted);color:var(--crow-accent)" title="${label}">pointer</span>`;
   }
   if (p?.baseUrl) {
-    return `<span style="font-size:0.7rem;padding:1px 6px;background:var(--crow-bg-deep);border-radius:3px;color:var(--crow-text-muted)">direct</span>`;
+    return `<span style="${base};background:var(--crow-bg-elevated);color:var(--crow-text-muted);border:1px solid var(--crow-border)">direct</span>`;
   }
   return "";
 }
 
 function profileRow(p) {
-  return `<li style="padding:4px 0;border-bottom:1px solid var(--crow-border)">
-    <span style="font-weight:500">${escapeHtml(p.name || p.id || "(unnamed)")}</span>
+  return `<li class="llm-profile-row">
+    <span class="llm-profile-name">${escapeHtml(p.name || p.id || "(unnamed)")}</span>
     ${profileBadge(p)}
   </li>`;
 }
 
 function block(title, section, profiles) {
-  const rows = profiles.length
-    ? `<ul style="list-style:none;padding:0;margin:0">${profiles.map(profileRow).join("")}</ul>`
-    : `<div style="font-size:0.8rem;color:var(--crow-text-muted);padding:0.5rem 0">No profiles yet.</div>`;
+  const body = profiles.length
+    ? `<ul class="llm-profile-list">${profiles.map(profileRow).join("")}</ul>`
+    : `<div class="llm-profile-empty">No profiles yet.</div>`;
   return `
-    <div style="flex:1;min-width:260px;padding:0.75rem;background:var(--crow-bg-deep);border-radius:4px;margin-right:0.75rem;margin-bottom:0.75rem">
-      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:0.5rem">
-        <h3 style="margin:0;font-size:0.9rem">${escapeHtml(title)}</h3>
-        <a href="?section=${escapeHtml(section)}" style="font-size:0.75rem;color:var(--crow-accent)">Manage →</a>
-      </div>
-      ${rows}
-    </div>
+    <section class="llm-profile-block">
+      <header class="llm-profile-header">
+        <h3>${escapeHtml(title)}</h3>
+        <a href="?section=${escapeHtml(section)}" class="llm-profile-link">Manage &rsaquo;</a>
+      </header>
+      ${body}
+    </section>
   `;
 }
 
@@ -62,17 +64,47 @@ export default {
       readJson(db, "vision_profiles"),
     ]);
 
-    return `
-      <div style="margin-bottom:0.75rem;font-size:0.85rem;color:var(--crow-text-muted)">
-        Profile summaries — the "pointer" badge indicates a profile resolves via the providers DB table (preferred). "direct" profiles carry their own baseUrl + apiKey (legacy; migration rewrites them on startup).
-      </div>
-      <div style="display:flex;flex-wrap:wrap">
-        ${block("Chat profiles", "ai-profiles", chat)}
-        ${block("TTS profiles", "tts-profiles", tts)}
-        ${block("STT profiles", "stt-profiles", stt)}
-        ${block("Vision profiles", "vision-profiles", vision)}
-      </div>
-    `;
+    return `<style>
+      .llm-profile-grid {
+        display:grid;
+        grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
+        gap:0.85rem;
+      }
+      .llm-profile-block {
+        border:1px solid var(--crow-border);
+        border-radius:var(--crow-radius-card);
+        background:var(--crow-bg-surface);
+        padding:0.85rem 1rem;
+      }
+      .llm-profile-header {
+        display:flex; justify-content:space-between; align-items:baseline;
+        margin-bottom:0.65rem;
+        padding-bottom:0.45rem;
+        border-bottom:1px solid var(--crow-border);
+      }
+      .llm-profile-header h3 { margin:0; font-size:0.88rem; color:var(--crow-text-primary); }
+      .llm-profile-link { font-size:0.75rem; color:var(--crow-accent); text-decoration:none; }
+      .llm-profile-link:hover { text-decoration:underline; }
+      .llm-profile-list { list-style:none; padding:0; margin:0; }
+      .llm-profile-row {
+        display:flex; justify-content:space-between; align-items:center; gap:0.5rem;
+        padding:0.35rem 0;
+        border-bottom:1px dashed var(--crow-border);
+      }
+      .llm-profile-row:last-child { border-bottom:none; }
+      .llm-profile-name { font-size:0.85rem; color:var(--crow-text-primary); font-weight:500; }
+      .llm-profile-empty { font-size:0.8rem; color:var(--crow-text-muted); padding:0.3rem 0; }
+    </style>
+
+    <p class="llm-section-hint">
+      Profile summaries — the <strong>pointer</strong> badge means the profile resolves via the providers DB (preferred). <strong>direct</strong> profiles carry their own <code>baseUrl</code> + <code>apiKey</code> (legacy; migration rewrites them on startup). Full editors live on the legacy per-type sections for now — polish merges them here in a follow-up.
+    </p>
+    <div class="llm-profile-grid">
+      ${block("Chat profiles", "ai-profiles", chat)}
+      ${block("TTS profiles", "tts-profiles", tts)}
+      ${block("STT profiles", "stt-profiles", stt)}
+      ${block("Vision profiles", "vision-profiles", vision)}
+    </div>`;
   },
 
   async handleAction() {

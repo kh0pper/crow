@@ -76,6 +76,23 @@ export default {
       return null;
     }
 
+    // Collect tier-2 warnings for currently-active overrides so we can
+    // surface them at the top of the tab instead of only inside dropdowns.
+    const activeWarnings = [];
+    for (const r of roles) {
+      const ov = ovByAgent.get(`${r.preset_name}:${r.agent_name}`);
+      if (!ov?.provider_id) continue;
+      const picked = providerById.get(ov.provider_id);
+      if (!picked || picked.disabled) continue;
+      const siblings = roles
+        .filter((x) => x.preset_name === r.preset_name && x.agent_name !== r.agent_name)
+        .map((x) => ({ agent_name: x.agent_name, provider: resolveAssignment(x.preset_name, x.agent_name) }));
+      const res = compat(r, picked, { otherAssignments: siblings });
+      for (const w of res.warnings) {
+        activeWarnings.push({ ...w, role: `${r.preset_name}.${r.agent_name}` });
+      }
+    }
+
     const blocks = [];
     for (const [presetName, rs] of byPreset) {
       const rowsHtml = rs.map((r) => {
@@ -90,55 +107,170 @@ export default {
         const defaultLabel = def.provider ? `preset default — ${def.provider}` : "preset default";
         const pOptions = providers.map((p) => {
           const lbl = optionLabel(r, p, otherAssignments);
-          const suffix = lbl.badge + (lbl.title ? "" : "");
           const selected = ov?.provider_id === p.id ? " selected" : "";
-          return `<option value="${escapeHtml(p.id)}" title="${escapeHtml(lbl.title)}"${selected} data-warn="${lbl.warn ? 1 : 0}" data-blocked="${lbl.blocked ? 1 : 0}">${suffix} ${escapeHtml(p.id)}${p.disabled ? " (disabled)" : ""}</option>`;
+          return `<option value="${escapeHtml(p.id)}" title="${escapeHtml(lbl.title)}"${selected}>${lbl.badge} ${escapeHtml(p.id)}${p.disabled ? " (disabled)" : ""}</option>`;
         }).join("");
 
         const isOverridden = !!ov?.provider_id;
         const overrideBadge = isOverridden
-          ? `<span style="font-size:0.72rem;padding:2px 6px;background:var(--crow-accent);color:var(--crow-bg);border-radius:3px">Overridden</span>`
-          : "";
+          ? `<span class="llm-role-pill llm-role-pill-overridden" title="Override in effect — points at ${escapeHtml(ov.provider_id)}${ov.model_id ? " · " + escapeHtml(ov.model_id) : ""}">Overridden</span>`
+          : `<span class="llm-role-pill llm-role-pill-default">Preset default</span>`;
 
-        return `<tr>
-          <td style="padding:8px">
-            <div style="font-family:'JetBrains Mono',monospace">${escapeHtml(r.agent_name)}</div>
-            <div style="font-size:0.72rem;color:var(--crow-text-muted)">${escapeHtml(shape?.tag_text || "")}</div>
-          </td>
-          <td style="padding:8px">
-            <form method="post" style="display:flex;gap:0.25rem;align-items:center">
-              <input type="hidden" name="action" value="llm_role_override">
-              <input type="hidden" name="preset_name" value="${escapeHtml(r.preset_name)}">
-              <input type="hidden" name="agent_name" value="${escapeHtml(r.agent_name)}">
-              <select name="provider_id" style="background:var(--crow-bg);border:1px solid var(--crow-border);color:var(--crow-text);padding:0.25rem;border-radius:3px;font-size:0.85rem;min-width:240px">
-                <option value="">— ${escapeHtml(defaultLabel)} —</option>
-                ${pOptions}
-              </select>
-              <input type="text" name="model_id" placeholder="model (optional)" value="${escapeHtml(ov?.model_id || "")}" style="background:var(--crow-bg);border:1px solid var(--crow-border);color:var(--crow-text);padding:0.25rem;border-radius:3px;font-size:0.85rem;width:160px">
-              <button type="submit" class="btn btn-primary btn-xs">Save</button>
-              ${isOverridden ? `</form><form method="post" style="display:inline;margin-left:0.25rem"><input type="hidden" name="action" value="llm_role_reset"><input type="hidden" name="preset_name" value="${escapeHtml(r.preset_name)}"><input type="hidden" name="agent_name" value="${escapeHtml(r.agent_name)}"><button type="submit" class="btn btn-secondary btn-xs">Reset</button></form>` : `</form>`}
-          </td>
-          <td style="padding:8px">${overrideBadge}</td>
-        </tr>`;
+        const tagText = shape?.tag_text ? `<span class="llm-role-tag">${escapeHtml(shape.tag_text)}</span>` : "";
+
+        return `<div class="llm-role-row${isOverridden ? " llm-role-row-overridden" : ""}">
+          <div class="llm-role-head">
+            <div class="llm-role-name">${escapeHtml(r.agent_name)}</div>
+            ${tagText}
+            ${overrideBadge}
+          </div>
+          <form method="post" class="llm-role-form">
+            <input type="hidden" name="action" value="llm_role_override">
+            <input type="hidden" name="preset_name" value="${escapeHtml(r.preset_name)}">
+            <input type="hidden" name="agent_name" value="${escapeHtml(r.agent_name)}">
+            <select name="provider_id" aria-label="Provider for ${escapeHtml(r.agent_name)}">
+              <option value="">— ${escapeHtml(defaultLabel)} —</option>
+              ${pOptions}
+            </select>
+            <input type="text" name="model_id" placeholder="model (optional)" value="${escapeHtml(ov?.model_id || "")}">
+            <button type="submit" class="btn btn-primary btn-xs">Save</button>
+          </form>
+          ${isOverridden ? `<form method="post" class="llm-role-reset"><input type="hidden" name="action" value="llm_role_reset"><input type="hidden" name="preset_name" value="${escapeHtml(r.preset_name)}"><input type="hidden" name="agent_name" value="${escapeHtml(r.agent_name)}"><button type="submit" class="btn btn-secondary btn-xs">Reset to preset default</button></form>` : ``}
+        </div>`;
       }).join("");
 
       blocks.push(`
-        <div style="margin-bottom:1.5rem">
-          <h3 style="margin:0 0 0.5rem;font-size:0.95rem;font-family:'JetBrains Mono',monospace;color:var(--crow-text-muted)">${escapeHtml(presetName)}</h3>
-          <table style="width:100%;border-collapse:collapse;font-size:0.9rem;border:1px solid var(--crow-border);border-radius:4px;overflow:hidden">
-            <thead><tr style="background:var(--crow-bg-deep);color:var(--crow-text-muted);font-weight:500;font-size:0.8rem"><th style="text-align:left;padding:8px">Agent</th><th style="text-align:left;padding:8px">Provider override</th><th style="padding:8px"></th></tr></thead>
-            <tbody>${rowsHtml}</tbody>
-          </table>
-        </div>
+        <section class="llm-preset-card">
+          <header class="llm-preset-header">
+            <h3>${escapeHtml(presetName)}</h3>
+            <span class="llm-preset-count">${rs.length} agent${rs.length === 1 ? "" : "s"}</span>
+          </header>
+          <div class="llm-preset-rows">${rowsHtml}</div>
+        </section>
       `);
     }
 
-    return `
-      <div style="margin-bottom:0.75rem;font-size:0.85rem;color:var(--crow-text-muted)">
-        ${roles.length} agent roles across ${byPreset.size} presets. Leaving the dropdown on "preset default" deletes the override row (reverts to presets.js). Dropdown marks: ● compatible · ⚠ warning · ✗ blocker. Hover for details.
-      </div>
-      ${blocks.join("")}
-    `;
+    const warningsBanner = activeWarnings.length > 0 ? `
+      <div class="llm-warning-banner" role="status">
+        <div class="llm-warning-banner-title">⚠ ${activeWarnings.length} active override${activeWarnings.length === 1 ? "" : "s"} with warnings</div>
+        <ul class="llm-warning-banner-list">
+          ${activeWarnings.slice(0, 5).map((w) => `<li><code>${escapeHtml(w.role)}</code> — ${escapeHtml(w.message)}</li>`).join("")}
+          ${activeWarnings.length > 5 ? `<li style="color:var(--crow-text-muted)">…and ${activeWarnings.length - 5} more</li>` : ""}
+        </ul>
+      </div>` : "";
+
+    return `<style>
+      .llm-preset-card {
+        border:1px solid var(--crow-border);
+        border-radius:var(--crow-radius-card);
+        background:var(--crow-bg-surface);
+        margin-bottom:1rem;
+        overflow:hidden;
+      }
+      .llm-preset-header {
+        display:flex; align-items:baseline; justify-content:space-between;
+        padding:0.7rem 1rem;
+        background:var(--crow-bg-elevated);
+        border-bottom:1px solid var(--crow-border);
+      }
+      .llm-preset-header h3 {
+        margin:0;
+        font-family:'JetBrains Mono',monospace;
+        font-size:0.9rem;
+        color:var(--crow-text-primary);
+        letter-spacing:0.02em;
+      }
+      .llm-preset-count { font-size:0.72rem; color:var(--crow-text-muted); }
+      .llm-preset-rows { padding:0.35rem 0; }
+      .llm-role-row {
+        padding:0.65rem 1rem;
+        border-bottom:1px solid var(--crow-border);
+      }
+      .llm-role-row:last-child { border-bottom:none; }
+      .llm-role-row-overridden { background:color-mix(in srgb, var(--crow-accent) 4%, transparent); }
+      .llm-role-head {
+        display:flex; align-items:center; gap:0.6rem;
+        margin-bottom:0.45rem;
+      }
+      .llm-role-name { font-family:'JetBrains Mono',monospace; font-size:0.9rem; color:var(--crow-text-primary); font-weight:500; }
+      .llm-role-tag { font-size:0.72rem; color:var(--crow-text-muted); }
+      .llm-role-pill {
+        margin-left:auto;
+        font-size:0.7rem;
+        padding:2px 10px;
+        border-radius:var(--crow-radius-pill);
+        letter-spacing:0.02em;
+      }
+      .llm-role-pill-default {
+        background:var(--crow-bg-elevated);
+        color:var(--crow-text-muted);
+        border:1px solid var(--crow-border);
+      }
+      .llm-role-pill-overridden {
+        background:var(--crow-accent);
+        color:#fff;
+        font-weight:500;
+      }
+      .llm-role-form {
+        display:flex;
+        gap:0.5rem;
+        align-items:center;
+        flex-wrap:wrap;
+      }
+      .llm-role-form select,
+      .llm-role-form input[type="text"] {
+        background:var(--crow-bg-surface);
+        border:1px solid var(--crow-border);
+        color:var(--crow-text-primary);
+        padding:0.35rem 0.55rem;
+        border-radius:6px;
+        font-size:0.85rem;
+      }
+      .llm-role-form select { flex:1 1 320px; min-width:240px; font-family:'JetBrains Mono',monospace; }
+      .llm-role-form input[type="text"] { flex:0 1 160px; font-family:'JetBrains Mono',monospace; }
+      .llm-role-form select:focus,
+      .llm-role-form input:focus {
+        outline:none;
+        border-color:var(--crow-accent);
+        box-shadow:0 0 0 2px var(--crow-accent-muted);
+      }
+      .llm-role-reset { margin-top:0.35rem; }
+      .llm-warning-banner {
+        border:1px solid var(--crow-brand-gold);
+        background:color-mix(in srgb, var(--crow-brand-gold) 10%, var(--crow-bg-surface));
+        border-radius:var(--crow-radius-card);
+        padding:0.85rem 1rem;
+        margin-bottom:1.25rem;
+      }
+      .llm-warning-banner-title {
+        font-weight:600;
+        color:var(--crow-brand-gold);
+        margin-bottom:0.35rem;
+        font-size:0.88rem;
+      }
+      .llm-warning-banner-list {
+        margin:0; padding-left:1.15rem;
+        font-size:0.82rem;
+        color:var(--crow-text-secondary);
+        line-height:1.5;
+      }
+      .llm-warning-banner-list code {
+        background:var(--crow-bg-elevated);
+        padding:1px 5px;
+        border-radius:4px;
+        font-family:'JetBrains Mono',monospace;
+        font-size:0.78rem;
+        color:var(--crow-text-primary);
+      }
+    </style>
+
+    <p class="llm-section-hint">
+      ${roles.length} agent roles across ${byPreset.size} presets. Leaving the dropdown on "preset default" deletes the override row (reverts to <code>presets.js</code>). Dropdown marks: <strong style="color:var(--crow-success)">●</strong> compatible · <strong style="color:var(--crow-brand-gold)">⚠</strong> warning · <strong style="color:var(--crow-error)">✗</strong> blocker. Hover any option for details.
+    </p>
+
+    ${warningsBanner}
+
+    ${blocks.join("")}`;
   },
 
   async handleAction({ req, res, db, action }) {
