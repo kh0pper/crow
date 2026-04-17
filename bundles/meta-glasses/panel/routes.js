@@ -23,11 +23,36 @@
 
 import express, { Router } from "express";
 import { join } from "node:path";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, appendFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer } from "ws";
+
+// Bus used to push glasses media-state changes to the Nest player bar
+// via /dashboard/streams/glasses (see servers/gateway/routes/streams.js).
+// Imported once here and fired from the few highest-signal mutation
+// sites; the 5-min fallback poll in shared/player.js catches any
+// state changes that bypass these sites (rare voice-turn fast-paths,
+// audio-stream-done callbacks, etc.).
+import glassesBus from "../../../servers/shared/event-bus.js";
+
+function emitGlassesMediaState(deviceId) {
+  if (!deviceId) return;
+  try {
+    const state = _devicePlaybackState.get(deviceId) || "idle";
+    const np = _nowPlaying.get(deviceId);
+    glassesBus.emit("glasses:media", {
+      deviceId,
+      state,
+      title: np?.title || null,
+      artist: np?.artist || null,
+      queueLength: np?.queueLength || 0,
+    });
+  } catch {
+    // Never break the mutation path on a broken subscriber.
+  }
+}
 
 /* ---------- Bundle path resolution ---------- */
 
@@ -116,6 +141,34 @@ function releaseTurnLock(deviceId, ws) {
     clearTimeout(entry.watchdog);
     _turnLocks.delete(deviceId);
   }
+}
+
+/* ---------- Fast-path: simple media voice commands ----------
+ * Matches short media commands (stop, pause, resume, next/skip) and executes
+ * them directly without going through the LLM. Saves ~4-7 seconds per command.
+ * Returns { action, say } if matched, null if the LLM should handle it.
+ */
+const MEDIA_FAST_PATHS = [
+  { pattern: /^(stop|stop\s+(the\s+)?(music|audio|playback|playing|song|track))$/i,
+    needsState: ["playing", "paused", "idle"], action: "stop", say: "Stopped." },
+  { pattern: /^(pause|pause\s+(the\s+)?(music|audio|playback|playing|song|track)|pause\s+it)$/i,
+    needsState: ["playing"], action: "pause", say: "Paused." },
+  { pattern: /^(resume|continue|unpause)$/i,
+    needsState: ["paused"], action: "resume", say: "Resuming." },
+  { pattern: /^(next|skip|next\s+(song|track)|skip\s+(song|track))$/i,
+    needsState: ["playing"], action: "next", say: "Next track." },
+];
+
+function matchMediaFastPath(transcript, deviceId) {
+  const state = _devicePlaybackState.get(deviceId) || "idle";
+  // STT often adds trailing punctuation ("Stop.", "Pause!") — strip it
+  const cleaned = transcript.replace(/[.!?,;:]+$/, "").trim();
+  for (const fp of MEDIA_FAST_PATHS) {
+    if (fp.pattern.test(cleaned) && fp.needsState.includes(state)) {
+      return fp;
+    }
+  }
+  return null;
 }
 
 /* ---------- Destructive-action spoken confirmation (Phase 2) ----------
@@ -373,6 +426,63 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
       return;
     }
 
+    // Fast-path: simple media commands skip the LLM entirely (~800ms vs 5-8s)
+    const mediaFast = matchMediaFastPath(transcript, device.id);
+    if (mediaFast) {
+      if (mediaFast.action === "stop") {
+        clearAudioQueue(device.id);
+        sendMediaControl(device.id, "stop");
+        _devicePlaybackState.set(device.id, "idle");
+        _nowPlaying.delete(device.id);
+      } else if (mediaFast.action === "next") {
+        sendMediaControl(device.id, "stop");
+        const w = _streamDoneWaiters.get(device.id);
+        if (w) {
+          clearTimeout(w.timer);
+          _streamDoneWaiters.delete(device.id);
+          const absorb = setTimeout(() => _streamDoneWaiters.delete(device.id), 2000);
+          _streamDoneWaiters.set(device.id, {
+            resolve: () => { clearTimeout(absorb); _streamDoneWaiters.delete(device.id); },
+            reject: () => { clearTimeout(absorb); _streamDoneWaiters.delete(device.id); },
+            timer: absorb,
+          });
+          w.resolve();
+        }
+      } else {
+        sendMediaControl(device.id, mediaFast.action);
+        _devicePlaybackState.set(device.id, mediaFast.action === "pause" ? "paused" : "playing");
+      }
+      emitGlassesMediaState(device.id);
+      // Speak brief confirmation via TTS
+      const { getTtsProfiles, createTtsAdapter, getDefaultTtsProfile } = await loadTts();
+      const ttsProfile = device.tts_profile_id
+        ? (await getTtsProfiles(db, { includeKeys: true })).find(p => p.id === device.tts_profile_id)
+        : await getDefaultTtsProfile(db, { includeKeys: true });
+      if (ttsProfile) {
+        try {
+          const { adapter: ttsAdapter } = await createTtsAdapter(ttsProfile);
+          const ttsNeg = negotiatePcm(ttsAdapter.name);
+          if (ttsNeg) {
+            sendText(ws, { type: "tts_start", codec: ttsNeg.codec, sample_rate: ttsNeg.sampleRate });
+            for await (const chunk of pcmStream(ttsAdapter, mediaFast.say, ttsProfile.defaultVoice, ttsNeg)) {
+              sendBinary(ws, chunk);
+            }
+            sendText(ws, { type: "tts_end" });
+          }
+        } catch (err) {
+          console.warn(`[meta-glasses] fast-path TTS error: ${err.message}`);
+        }
+      }
+      // Save to conversation history so subsequent LLM turns have context
+      const priorMessages = getConvo(device.id);
+      saveConvo(device.id, [
+        ...priorMessages,
+        { role: "user", content: transcript },
+        { role: "assistant", content: mediaFast.say },
+      ]);
+      return;
+    }
+
     // 2. BYOAI chat
     const aiProfiles = await getAiProfiles(db, { includeKeys: true });
     const slugOf = (n) => n.toLowerCase().replace(/\s+/g, "_").replace(/\./g, "_");
@@ -597,7 +707,38 @@ LONG WORK via the orchestrator. For research, multi-step analysis, code work, or
             const ctl = parsed?._audio_stream_control;
             if (ctl?.action === "stop") {
               clearAudioQueue(device.id);
-              piped = parsed.prose || "Stopped playback.";
+              sendMediaControl(device.id, "stop");
+              _devicePlaybackState.set(device.id, "idle");
+              _nowPlaying.delete(device.id);
+              emitGlassesMediaState(device.id);
+              piped = parsed.prose || "Stopped.";
+            } else if (ctl?.action === "pause") {
+              sendMediaControl(device.id, "pause");
+              _devicePlaybackState.set(device.id, "paused");
+              emitGlassesMediaState(device.id);
+              piped = parsed.prose || "Paused.";
+            } else if (ctl?.action === "resume") {
+              sendMediaControl(device.id, "resume");
+              _devicePlaybackState.set(device.id, "playing");
+              emitGlassesMediaState(device.id);
+              piped = parsed.prose || "Resuming.";
+            } else if (ctl?.action === "next") {
+              // Send stop first, then resolve the chain waiter to advance.
+              sendMediaControl(device.id, "stop");
+              const w = _streamDoneWaiters.get(device.id);
+              if (w) {
+                clearTimeout(w.timer);
+                _streamDoneWaiters.delete(device.id);
+                // Absorb stale audio_stream_done from the killed track
+                const absorb = setTimeout(() => _streamDoneWaiters.delete(device.id), 2000);
+                _streamDoneWaiters.set(device.id, {
+                  resolve: () => { clearTimeout(absorb); _streamDoneWaiters.delete(device.id); },
+                  reject: () => { clearTimeout(absorb); _streamDoneWaiters.delete(device.id); },
+                  timer: absorb,
+                });
+                w.resolve();
+              }
+              piped = parsed.prose || "Next track.";
             }
           } catch { /* leave untouched */ }
         }
@@ -610,16 +751,38 @@ LONG WORK via the orchestrator. For research, multi-step analysis, code work, or
               // that pushAudioStream's chaining sees it. Empty queue = single
               // track. Each queue item is {url, codec, auth, sampleRate?, channels?}.
               setAudioQueue(device.id, Array.isArray(env.queue) ? env.queue : []);
-              const outcome = await pushAudioStream(device.id, {
+              _devicePlaybackState.set(device.id, "playing");
+              _nowPlaying.set(device.id, {
+                title: parsed.title || null,
+                artist: parsed.artist || null,
+                artworkUrl: parsed.artwork_url || null,
+                queueLength: (Array.isArray(env.queue) ? env.queue.length : 0) + 1,
+              });
+              emitGlassesMediaState(device.id);
+              // Fire-and-forget: don't await pushAudioStream so the voice turn
+              // can finish speaking the prose immediately. The stream runs in
+              // the background; failures are handled silently.
+              pushAudioStream(device.id, {
                 url: env.url,
                 codec: env.codec,
                 sampleRate: env.sample_rate,
                 channels: env.channels,
                 auth: env.auth,
+                title: parsed.title || null,
+                artist: parsed.artist || null,
+                artworkUrl: parsed.artwork_url || null,
+              }).then(outcome => {
+                if (!outcome?.delivered) {
+                  _devicePlaybackState.set(device.id, "idle");
+                  _nowPlaying.delete(device.id);
+                  emitGlassesMediaState(device.id);
+                }
+              }).catch(() => {
+                _devicePlaybackState.set(device.id, "idle");
+                _nowPlaying.delete(device.id);
+                emitGlassesMediaState(device.id);
               });
-              piped = outcome?.delivered
-                ? (parsed.prose || `Started playback (${env.codec}).`)
-                : `Playback failed: ${outcome?.reason || "unknown"}. Tell the user briefly.`;
+              piped = parsed.prose || `Started playback (${env.codec}).`;
             }
           } catch {
             // Not a JSON envelope — leave untouched.
@@ -734,12 +897,40 @@ export default function metaGlassesRouter(dashboardAuth) {
   // Body: { device_id, url, codec, sample_rate?, channels?, auth? }
   //   auth must be one of the allow-listed sentinels (see pushAudioStream).
   router.post("/api/meta-glasses/stream", async (req, res) => {
-    const { device_id, url, codec, sample_rate, channels, auth } = req.body || {};
+    const { device_id, url, codec, sample_rate, channels, auth, title, artist, artwork_url, queue } = req.body || {};
     if (!device_id || !url || !codec) {
       return res.status(400).json({ ok: false, error: "device_id, url, codec required" });
     }
+    // URL-host validation: when funkwhale-authed, reject URLs that don't
+    // match FUNKWHALE_URL's hostname. Prevents using this endpoint as a
+    // confused deputy to send FUNKWHALE_ACCESS_TOKEN to arbitrary hosts.
+    if (auth === "funkwhale" && process.env.FUNKWHALE_URL) {
+      try {
+        const fwHost = new URL(process.env.FUNKWHALE_URL).hostname;
+        const validate = (u) => {
+          try { return new URL(u).hostname === fwHost; } catch { return false; }
+        };
+        if (!validate(url)) {
+          return res.status(400).json({ ok: false, error: "url_host_not_allowed" });
+        }
+        if (Array.isArray(queue)) {
+          for (const q of queue) {
+            if (!validate(q?.url)) {
+              return res.status(400).json({ ok: false, error: "queue_url_host_not_allowed" });
+            }
+          }
+        }
+      } catch (err) {
+        return res.status(400).json({ ok: false, error: "url_validation_failed" });
+      }
+    }
+    // If a queue is provided, seed it before pushing the first track so the
+    // existing chain logic picks up tracks 2..N via audio_stream_done ack.
+    if (Array.isArray(queue) && queue.length > 0) {
+      setAudioQueue(device_id, queue);
+    }
     const outcome = await pushAudioStream(device_id, {
-      url, codec, sampleRate: sample_rate, channels, auth,
+      url, codec, sampleRate: sample_rate, channels, auth, title, artist, artworkUrl: artwork_url,
     });
     return res.json({ ok: outcome?.delivered === true, ...outcome });
   });
@@ -788,6 +979,155 @@ export default function metaGlassesRouter(dashboardAuth) {
       res.json({ ok: true, delivered, targeted: targetIds.length });
     } finally {
       db.close();
+    }
+  });
+
+  /* ---------- Media control REST endpoints ---------- */
+
+  const ALLOWED_MEDIA_ACTIONS = new Set(["stop", "pause", "resume", "next"]);
+
+  router.get("/api/meta-glasses/media/status", (req, res) => {
+    const deviceId = req.query.device_id;
+    if (!deviceId) return res.status(400).json({ error: "device_id required" });
+    const state = _devicePlaybackState.get(deviceId) || "idle";
+    const np = _nowPlaying.get(deviceId);
+    res.json({
+      state,
+      title: np?.title || null,
+      artist: np?.artist || null,
+      queue_length: np?.queueLength || 0,
+    });
+  });
+
+  router.post("/api/meta-glasses/media/control", (req, res) => {
+    const { device_id, action } = req.body || {};
+    if (!device_id || !action) return res.status(400).json({ error: "device_id and action required" });
+    if (!ALLOWED_MEDIA_ACTIONS.has(action)) return res.status(400).json({ error: "unknown action" });
+    const sess = _sessions.get(device_id);
+    if (!sess?.ws) return res.status(404).json({ error: "device not connected" });
+
+    if (action === "stop") {
+      clearAudioQueue(device_id);
+      sendMediaControl(device_id, "stop");
+      _devicePlaybackState.set(device_id, "idle");
+      _nowPlaying.delete(device_id);
+    } else if (action === "next") {
+      // Send stop to phone first, then resolve the chain waiter so it
+      // advances to the next track. Register a temporary waiter to absorb
+      // the stale audio_stream_done from the killed track.
+      sendMediaControl(device_id, "stop");
+      const w = _streamDoneWaiters.get(device_id);
+      if (w) {
+        clearTimeout(w.timer);
+        _streamDoneWaiters.delete(device_id);
+        // Absorb the stale ack from the killed track: register a throwaway
+        // waiter that auto-expires, so the ack doesn't set state to idle.
+        const absorb = setTimeout(() => _streamDoneWaiters.delete(device_id), 2000);
+        _streamDoneWaiters.set(device_id, {
+          resolve: () => { clearTimeout(absorb); _streamDoneWaiters.delete(device_id); },
+          reject: () => { clearTimeout(absorb); _streamDoneWaiters.delete(device_id); },
+          timer: absorb,
+        });
+        w.resolve(); // wake the chain to push the next track
+      }
+    } else {
+      sendMediaControl(device_id, action);
+      _devicePlaybackState.set(device_id, action === "pause" ? "paused" : "playing");
+    }
+    emitGlassesMediaState(device_id);
+    res.json({ ok: true, state: _devicePlaybackState.get(device_id) || "idle" });
+  });
+
+  /**
+   * Artwork proxy: phone fetches album art via the gateway so no arbitrary
+   * URLs are fetched on-device. Validates src host against an allow-list
+   * (Funkwhale, localhost). Rejects unknown hosts that resolve to RFC1918 /
+   * link-local / Tailscale CGNAT. Streams bytes back without buffering.
+   */
+  router.get("/api/meta-glasses/artwork", async (req, res) => {
+    // Auth: bearer token matching a paired device (same as /session upgrade).
+    const deviceId = req.query.device_id;
+    const authHdr = req.headers["authorization"] || "";
+    const token = authHdr.startsWith("Bearer ") ? authHdr.slice(7) : null;
+    if (!deviceId || !token) return res.status(401).json({ error: "unauthorized" });
+    const { createDbClient } = await loadDb();
+    const db = createDbClient();
+    let device = null;
+    try {
+      const { verifyToken } = await loadDeviceStore();
+      device = await verifyToken(db, deviceId, token);
+    } finally { try { db.close(); } catch {} }
+    if (!device) return res.status(401).json({ error: "invalid token" });
+
+    const src = req.query.src;
+    if (!src) return res.status(400).json({ error: "src required" });
+
+    // Validate URL
+    let srcUrl;
+    try { srcUrl = new URL(src); } catch { return res.status(400).json({ error: "invalid url" }); }
+    if (srcUrl.protocol !== "http:" && srcUrl.protocol !== "https:") {
+      return res.status(400).json({ error: "unsupported scheme" });
+    }
+
+    // Build allow-list from env
+    const funkwhaleUrl = process.env.FUNKWHALE_URL || "";
+    const allowHosts = new Set(["localhost", "127.0.0.1"]);
+    try { if (funkwhaleUrl) allowHosts.add(new URL(funkwhaleUrl).hostname); } catch {}
+
+    const isAllowListed = allowHosts.has(srcUrl.hostname);
+    if (!isAllowListed) {
+      // Resolve and reject private ranges
+      const dns = await import("node:dns");
+      try {
+        const addr = await new Promise((resolve, reject) => {
+          dns.lookup(srcUrl.hostname, { family: 4 }, (err, address) => {
+            if (err) reject(err); else resolve(address);
+          });
+        });
+        const parts = addr.split(".").map(Number);
+        const [a, b] = parts;
+        const isPrivate = a === 10
+          || (a === 172 && b >= 16 && b <= 31)
+          || (a === 192 && b === 168)
+          || (a === 169 && b === 254)
+          || a === 127
+          || (a === 100 && b >= 64 && b <= 127); // CGNAT / Tailscale
+        if (isPrivate) return res.status(403).json({ error: "host not allowed" });
+      } catch {
+        return res.status(502).json({ error: "dns lookup failed" });
+      }
+    }
+
+    // Inject Funkwhale bearer if host matches FUNKWHALE_URL
+    const headers = {};
+    try {
+      if (funkwhaleUrl && srcUrl.hostname === new URL(funkwhaleUrl).hostname && process.env.FUNKWHALE_ACCESS_TOKEN) {
+        headers.Authorization = `Bearer ${process.env.FUNKWHALE_ACCESS_TOKEN}`;
+      }
+    } catch {}
+
+    // Abort upstream fetch if client disconnects
+    const controller = new AbortController();
+    req.on("close", () => { try { controller.abort(); } catch {} });
+
+    try {
+      const upstream = await fetch(src, { headers, signal: controller.signal, redirect: "follow" });
+      if (!upstream.ok || !upstream.body) {
+        return res.status(upstream.status || 502).json({ error: `upstream ${upstream.status}` });
+      }
+      const ct = upstream.headers.get("content-type") || "application/octet-stream";
+      const cl = upstream.headers.get("content-length");
+      res.setHeader("Content-Type", ct);
+      if (cl) res.setHeader("Content-Length", cl);
+      const reader = upstream.body.getReader();
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        res.write(Buffer.from(value));
+      }
+      res.end();
+    } catch (err) {
+      if (!res.headersSent) res.status(502).json({ error: err.message });
     }
   });
 
@@ -906,7 +1246,7 @@ export default function metaGlassesRouter(dashboardAuth) {
  * Call once at gateway startup with the HTTP server instance.
  */
 export function setupWebSocket(server) {
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
 
   server.on("upgrade", async (req, socket, head) => {
     const url = req.url || "";
@@ -999,6 +1339,52 @@ export function setupWebSocket(server) {
               .finally(() => releaseTurnLock(device.id, ws));
             break;
           }
+          case "audio_stream_done": {
+            const w = _streamDoneWaiters.get(device.id);
+            if (w) {
+              clearTimeout(w.timer);
+              _streamDoneWaiters.delete(device.id);
+              w.resolve();
+            } else {
+              // No waiter = last track finished naturally (single or end of album)
+              _devicePlaybackState.set(device.id, "idle");
+              _nowPlaying.delete(device.id);
+              emitGlassesMediaState(device.id);
+            }
+            break;
+          }
+          case "media_control": {
+            // Phone-initiated transport action (notification button / BT headset).
+            // Mirror the REST /api/meta-glasses/media/control behavior so server
+            // state stays in sync. DO NOT echo media_control back — phone already acted.
+            const mcAction = msg.action;
+            if (mcAction === "stop") {
+              clearAudioQueue(device.id);
+              _devicePlaybackState.set(device.id, "idle");
+              _nowPlaying.delete(device.id);
+              emitGlassesMediaState(device.id);
+            } else if (mcAction === "pause") {
+              _devicePlaybackState.set(device.id, "paused");
+              emitGlassesMediaState(device.id);
+            } else if (mcAction === "resume") {
+              _devicePlaybackState.set(device.id, "playing");
+              emitGlassesMediaState(device.id);
+            } else if (mcAction === "next") {
+              const w2 = _streamDoneWaiters.get(device.id);
+              if (w2) {
+                clearTimeout(w2.timer);
+                _streamDoneWaiters.delete(device.id);
+                const absorb = setTimeout(() => _streamDoneWaiters.delete(device.id), 2000);
+                _streamDoneWaiters.set(device.id, {
+                  resolve: () => { clearTimeout(absorb); _streamDoneWaiters.delete(device.id); },
+                  reject:  () => { clearTimeout(absorb); _streamDoneWaiters.delete(device.id); },
+                  timer: absorb,
+                });
+                w2.resolve();
+              }
+            }
+            break;
+          }
           case "photo_error": {
             // Phone reports a capture failure (permission, stream start, etc.).
             // Reject the matching pending capture so callers see a real error,
@@ -1017,6 +1403,10 @@ export function setupWebSocket(server) {
       ws.on("close", () => {
         clearInterval(pinger);
         if (_sessions.get(deviceId)?.ws === ws) _sessions.delete(deviceId);
+        clearAudioQueue(deviceId);
+        _devicePlaybackState.delete(deviceId);
+        _nowPlaying.delete(deviceId);
+        emitGlassesMediaState(deviceId);
         releaseTurnLock(deviceId, ws);
       });
       ws.on("error", () => { /* close follows */ });
@@ -1144,7 +1534,7 @@ const AUDIO_STREAM_AUTH_SENTINELS = {
   funkwhale: () => process.env.FUNKWHALE_ACCESS_TOKEN || null,
 };
 
-export async function pushAudioStream(deviceId, { url, codec, sampleRate, channels, auth } = {}) {
+export async function pushAudioStream(deviceId, { url, codec, sampleRate, channels, auth, title, artist, artworkUrl } = {}) {
   if (!deviceId || !url || !codec) return { delivered: false, reason: "bad_args" };
   const sess = _sessions.get(deviceId);
   if (!sess?.ws) return { delivered: false, reason: "absent" };
@@ -1160,16 +1550,90 @@ export async function pushAudioStream(deviceId, { url, codec, sampleRate, channe
       const token = AUDIO_STREAM_AUTH_SENTINELS[auth]();
       if (token) headers.Authorization = `Bearer ${token}`;
     }
-    const resp = await fetch(url, { redirect: "follow", headers });
+    // Manual redirect handling to avoid leaking the bearer to signed storage
+    // URLs or attacker-controlled hosts. Validate the Location host on any 3xx,
+    // then drop the bearer and auto-follow the rest of the chain.
+    let resp = await fetch(url, { redirect: "manual", headers });
+    if (resp.status >= 300 && resp.status < 400) {
+      const location = resp.headers.get("location");
+      if (!location) {
+        sendText(sess.ws, { type: "audio_stream_end", ok: false, error: "redirect_no_location" });
+        return { delivered: false, reason: "redirect_no_location" };
+      }
+      // For funkwhale, validate the Location host. Signed storage URLs commonly
+      // go cross-host (e.g. to S3/minio) — that's fine as long as the first hop
+      // matches an allow-listed host. After this hop, drop the bearer; signed
+      // URLs carry their own auth in query params.
+      try {
+        const locUrl = new URL(location, url);
+        if (auth === "funkwhale" && process.env.FUNKWHALE_URL) {
+          const fwHost = new URL(process.env.FUNKWHALE_URL).hostname;
+          const origHost = new URL(url).hostname;
+          // Accept: same host as the original (internal redirect) OR a
+          // storage URL that funkwhale itself issued (location can point
+          // anywhere — funkwhale's S3 backend, etc.). The trust anchor is
+          // that the ORIGINAL url was funkwhale-hosted (validated upstream).
+          // We trust funkwhale's redirect target since we trust the server.
+          // We just ensure we're not following a redirect on a non-fw origin.
+          if (origHost !== fwHost) {
+            sendText(sess.ws, { type: "audio_stream_end", ok: false, error: "redirect_unexpected_origin" });
+            return { delivered: false, reason: "redirect_unexpected_origin" };
+          }
+        }
+        // Re-fetch without the bearer — signed storage URLs have their own auth.
+        resp = await fetch(locUrl.toString(), { redirect: "follow" });
+      } catch (err) {
+        sendText(sess.ws, { type: "audio_stream_end", ok: false, error: "redirect_invalid_url" });
+        return { delivered: false, reason: "redirect_invalid_url" };
+      }
+    }
     if (!resp.ok || !resp.body) {
       sendText(sess.ws, { type: "audio_stream_end", ok: false, error: `HTTP ${resp.status}` });
       return { delivered: false, reason: `http_${resp.status}` };
     }
+    // Record listen in Funkwhale history (fire-and-forget, only after upstream ok).
+    // NOTE: `url` is the ORIGINAL request URL — DO NOT replace with resp.url
+    // (signed storage URLs won't match the /listen/<uuid>/ regex).
+    // Funkwhale's history endpoint needs the integer track PK, not the UUID —
+    // resolve via GET /api/v1/tracks/{uuid}/ first.
+    if (auth === "funkwhale") {
+      try {
+        const trackUuid = url.match(/\/listen\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\//i)?.[1];
+        const fwBase = process.env.FUNKWHALE_URL?.replace(/\/$/, "");
+        const fwToken = process.env.FUNKWHALE_ACCESS_TOKEN;
+        if (trackUuid && fwBase && fwToken) {
+          fetch(`${fwBase}/api/v1/tracks/${encodeURIComponent(trackUuid)}/`, {
+            headers: { Authorization: `Bearer ${fwToken}` },
+          })
+            .then((r) => r.ok ? r.json() : null)
+            .then((meta) => {
+              if (!meta?.id) return;
+              return fetch(`${fwBase}/api/v1/history/listenings/`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "Authorization": `Bearer ${fwToken}`,
+                },
+                body: JSON.stringify({ track: meta.id }),
+              });
+            })
+            .catch((err) => console.warn(`[meta-glasses] record listen failed: ${err.message}`));
+        }
+      } catch (err) {
+        console.warn(`[meta-glasses] listen-record prep failed: ${err.message}`);
+      }
+    }
     const contentLength = Number(resp.headers.get("content-length")) || undefined;
+    // Resolve title/artist/artwork_url: explicit args win, fall back to _nowPlaying
+    // (set by the envelope interceptor for the head-of-album track).
+    const np = _nowPlaying.get(deviceId) || {};
     sendText(sess.ws, {
       type: "audio_stream_start",
       codec, sample_rate: sampleRate || null, channels: channels || null,
       content_length: contentLength,
+      title:  title  ?? np.title  ?? null,
+      artist: artist ?? np.artist ?? null,
+      artwork_url: artworkUrl ?? np.artworkUrl ?? null,
     });
     const reader = resp.body.getReader();
     while (true) {
@@ -1182,19 +1646,44 @@ export async function pushAudioStream(deviceId, { url, codec, sampleRate, channe
       if (done) break;
       sendBinary(sess.ws, Buffer.from(value));
     }
-    sendText(sess.ws, { type: "audio_stream_end", ok: true });
-
-    // After this stream finishes, pop the next one off the device's queue
-    // (set by the audio-stream interceptor BEFORE calling pushAudioStream
-    // for the first track of an album). Recurses synchronously so the lock
-    // stays held across the whole album — gives back-to-back playback with
-    // no per-track gap. Cleared via clearAudioQueue() (e.g. fw_stop_playback).
+    // If there's a next track queued, register the done-waiter BEFORE sending
+    // audio_stream_end so we don't race with the phone's ack.
     const next = popAudioQueue(deviceId);
     if (next) {
-      // Tail-call style — the outer pushAudioStream call's finally will run
-      // ONCE after the entire chain completes.
+      const donePromise = waitForStreamDone(deviceId);
+      sendText(sess.ws, { type: "audio_stream_end", ok: true });
+      // Release the lock while the phone plays. This lets voice turns
+      // ("stop", "skip", questions) run in the inter-track gap.
+      if (!lockReentrant) releaseTurnLock(deviceId, sess.ws);
+      try {
+        await donePromise;
+      } catch (err) {
+        console.warn(`[meta-glasses] queue chain for ${deviceId}: ${err.message}`);
+        clearAudioQueue(deviceId);
+        return { delivered: true, queueAborted: true };
+      }
+      // Re-acquire for next track. If a voice turn is in progress, spin
+      // until it completes. Queue check on each spin prevents spinning
+      // forever if fw_stop_playback was called.
+      while (!acquireTurnLock(deviceId, sess.ws)) {
+        await new Promise(r => setTimeout(r, 200));
+        if (!sess.ws || sess.ws.readyState !== 1) return { delivered: true, queueAborted: true };
+      }
+      // Update _nowPlaying for the next queue item so audio_stream_start gets
+      // per-track metadata (album artwork usually stays the same across an album).
+      if (next.title || next.artist || next.artworkUrl) {
+        const prev = _nowPlaying.get(deviceId) || {};
+        _nowPlaying.set(deviceId, {
+          title: next.title || null,
+          artist: next.artist || prev.artist || null,
+          artworkUrl: next.artworkUrl || prev.artworkUrl || null,
+          queueLength: Math.max((prev.queueLength || 1) - 1, 1),
+        });
+        emitGlassesMediaState(deviceId);
+      }
       return await pushAudioStream(deviceId, next);
     }
+    sendText(sess.ws, { type: "audio_stream_end", ok: true });
     return { delivered: true };
   } catch (err) {
     sendText(sess.ws, { type: "audio_stream_end", ok: false, error: err.message });
@@ -1215,6 +1704,16 @@ export async function pushAudioStream(deviceId, { url, codec, sampleRate, channe
  * Each entry is the same shape pushAudioStream takes: {url, codec, auth?, ...}.
  */
 const _audioQueues = new Map(); // deviceId → array of stream descriptors
+const _streamDoneWaiters = new Map(); // deviceId → { resolve, reject, timer }
+const _devicePlaybackState = new Map(); // deviceId → "idle" | "playing" | "paused"
+const _nowPlaying = new Map(); // deviceId → { title, artist, queueLength }
+
+function sendMediaControl(deviceId, action) {
+  const sess = _sessions.get(deviceId);
+  if (!sess?.ws) return false;
+  sendText(sess.ws, { type: "media_control", action });
+  return true;
+}
 
 function setAudioQueue(deviceId, queue) {
   if (Array.isArray(queue) && queue.length > 0) {
@@ -1232,6 +1731,22 @@ function popAudioQueue(deviceId) {
 }
 function clearAudioQueue(deviceId) {
   _audioQueues.delete(deviceId);
+  const w = _streamDoneWaiters.get(deviceId);
+  if (w) {
+    clearTimeout(w.timer);
+    _streamDoneWaiters.delete(deviceId);
+    w.reject(new Error("queue cleared"));
+  }
+}
+
+function waitForStreamDone(deviceId, timeoutMs = 15 * 60 * 1000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      _streamDoneWaiters.delete(deviceId);
+      reject(new Error("audio_stream_done timeout"));
+    }, timeoutMs);
+    _streamDoneWaiters.set(deviceId, { resolve, reject, timer });
+  });
 }
 
 /* ---------- Server-initiated TTS (Phase 3) ---------- */

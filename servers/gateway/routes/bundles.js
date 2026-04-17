@@ -18,6 +18,7 @@
 
 import { Router } from "express";
 import { createNotification } from "../../shared/notifications.js";
+import bus from "../../shared/event-bus.js";
 import { createDbClient } from "../../db.js";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync } from "node:fs";
@@ -224,11 +225,30 @@ function createJob(bundleId, action) {
 
 function appendLog(job, line) {
   job.log.push(line);
+  emitJobChanged(job);
 }
 
 function finishJob(job, status) {
   job.status = status;
   job.completedAt = new Date().toISOString();
+  emitJobChanged(job);
+}
+
+// Broadcasts the job's new state to any live Turbo Stream subscribers
+// (see /dashboard/streams/jobs in routes/streams.js). All mutations go
+// through appendLog/finishJob so this is the chokepoint. Non-throwing.
+function emitJobChanged(job) {
+  try {
+    bus.emit("jobs:changed", {
+      jobId: job.id,
+      status: job.status,
+      addonId: job.addonId || null,
+      action: job.action || null,
+      lastLine: job.log.length > 0 ? job.log[job.log.length - 1] : "",
+      startedAt: job.startedAt,
+      completedAt: job.completedAt,
+    });
+  } catch {}
 }
 
 /** Read installed.json as array */
