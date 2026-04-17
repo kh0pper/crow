@@ -389,11 +389,56 @@ export function playerBarJs(lang) {
   function startGlassesPoll() {
     if (glassesPollTimer) return;
     pollGlassesStatus(); // immediate first poll
-    glassesPollTimer = setInterval(pollGlassesStatus, 10000);
+    // Live updates stream over EventSource (see below). This 5-min
+    // poll is a fallback-only safety net for transient SSE drops.
+    // Pre-Streams it was 10s.
+    glassesPollTimer = setInterval(pollGlassesStatus, 300000);
+    startGlassesStream();
   }
 
   function stopGlassesPoll() {
     if (glassesPollTimer) { clearInterval(glassesPollTimer); glassesPollTimer = null; }
+    stopGlassesStream();
+  }
+
+  // --- Live glasses media state via SSE (/dashboard/streams/glasses) ---
+  // Server emits JSON matching /api/meta-glasses/media/status, so the
+  // client pipes it through handleGlassesPollResult() just like a poll
+  // response. We use a plain EventSource because player-bar state is
+  // too stateful for a simple turbo-stream HTML swap.
+  function startGlassesStream() {
+    if (!glassesDeviceId) return;
+    if (window.__crowGlassesStream) return; // one per tab
+    try {
+      var es = new EventSource('/dashboard/streams/glasses');
+      window.__crowGlassesStream = es;
+      es.addEventListener('media', function(evt) {
+        try {
+          var data = JSON.parse(evt.data);
+          if (!data) return;
+          // Filter: ignore events for other devices if multiple are paired.
+          if (glassesDeviceId && data.device_id && data.device_id !== glassesDeviceId) return;
+          handleGlassesPollResult(data);
+        } catch (e) {}
+      });
+      es.addEventListener('session-expired', function() {
+        try { es.close(); } catch(e) {}
+        window.__crowGlassesStream = null;
+        // Next fallback poll will hit /api/meta-glasses/media/status
+        // and re-auth via the usual cookie path.
+      });
+      es.onerror = function() {
+        // EventSource auto-reconnects; swallow to avoid noisy console logs.
+      };
+    } catch (e) {
+      // No EventSource support or network error; fallback poll covers us.
+    }
+  }
+  function stopGlassesStream() {
+    if (window.__crowGlassesStream) {
+      try { window.__crowGlassesStream.close(); } catch(e) {}
+      window.__crowGlassesStream = null;
+    }
   }
 
   // Visibility-based polling: poll immediately when tab becomes visible, pause when hidden

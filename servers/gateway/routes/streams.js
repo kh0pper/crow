@@ -166,5 +166,74 @@ export default function streamsRouter(dashboardAuth) {
     res.on("error", () => bus.off("orchestrator:event", handler));
   });
 
+  // --- Glasses media state (C.5) ---
+  //
+  // Emits JSON payloads over SSE (not Turbo Stream frames) because the
+  // player bar's client-side logic in shared/player.js does more than
+  // swap markup: it resolves `activeBackend` precedence (local audio
+  // vs. glasses), keeps localStorage in sync across tabs, and drives
+  // media-session metadata. Plain SSE lets player.js's
+  // handleGlassesPollResult() consume the payload directly instead of
+  // re-implementing that logic on the server.
+  //
+  // The stream is still gated by dashboardAuth and lives under
+  // /dashboard/streams/* so the Funnel-reject middleware keeps it
+  // private.
+  //
+  // Fallback poll in player.js keeps running at 5 min as a safety net.
+  router.get("/dashboard/streams/glasses", (req, res) => {
+    const { send } = openAuthedStream(req, res);
+
+    const handler = (payload) => {
+      try {
+        send("media", {
+          device_id: payload?.deviceId || null,
+          state: payload?.state || "idle",
+          title: payload?.title || null,
+          artist: payload?.artist || null,
+          queue_length: payload?.queueLength || 0,
+        });
+      } catch {
+        // Subscriber isolation.
+      }
+    };
+
+    bus.on("glasses:media", handler);
+    res.on("close", () => bus.off("glasses:media", handler));
+    res.on("error", () => bus.off("glasses:media", handler));
+  });
+
+  // --- Extensions install/uninstall job progress (C.5) ---
+  //
+  // Emits JSON payloads over SSE. The Extensions panel's client-side
+  // pollJob() is kept as a long fallback (in case the tab loses SSE
+  // during an install), but the stream drives the log-line updates
+  // that users want to see live. Status transitions are rare (one per
+  // install) and narrowly scoped so we don't need per-job filtering
+  // on the server — the client picks out its own job by id.
+  router.get("/dashboard/streams/jobs", (req, res) => {
+    const { send } = openAuthedStream(req, res);
+
+    const handler = (payload) => {
+      try {
+        send("job", {
+          job_id: payload?.jobId || null,
+          status: payload?.status || "running",
+          addon_id: payload?.addonId || null,
+          action: payload?.action || null,
+          last_line: payload?.lastLine || "",
+          started_at: payload?.startedAt || null,
+          completed_at: payload?.completedAt || null,
+        });
+      } catch {
+        // Subscriber isolation.
+      }
+    };
+
+    bus.on("jobs:changed", handler);
+    res.on("close", () => bus.off("jobs:changed", handler));
+    res.on("error", () => bus.off("jobs:changed", handler));
+  });
+
   return router;
 }
