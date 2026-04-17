@@ -571,5 +571,30 @@ export function createMetaGlassesServer(options = {}) {
     },
   );
 
+  server.tool(
+    "crow_glasses_capture_and_attach_photo",
+    "During an active note session, capture a photo via the paired glasses and attach it inline to the backing note as a markdown image. Use when the user says 'take a photo of this' or 'add a picture' mid-session. Returns a sentinel envelope — the meta-glasses panel intercepts it, triggers the capture, awaits upload + DB insert, appends `![caption](photo://<photo_id>) *HH:MM*` to the note, and enqueues a caption backfill row if no caption was supplied.",
+    {
+      device_id: z.string().min(1).max(200),
+      session_id: z.number().int().optional().describe("Explicit session id; omit to use the most-recent active session for the device."),
+      caption: z.string().max(500).optional().describe("Optional pre-written caption. If omitted, a '[caption pending]' placeholder is used until the auto-caption pipeline replaces it."),
+    },
+    async ({ device_id, session_id, caption }) => {
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            _capture_and_attach: {
+              device_id,
+              session_id: session_id ?? null,
+              caption: caption ?? null,
+            },
+            prose: "Capturing and attaching photo to the active note session.",
+          }, null, 2),
+        }],
+      };
+    },
+  );
+
   return server;
 }

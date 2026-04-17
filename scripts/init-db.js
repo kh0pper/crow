@@ -474,6 +474,22 @@ await addColumnIfMissing("glasses_note_sessions", "summary_raw", "TEXT");
 // persist its timestamp; legacy rows get NULL until first edit.
 await addColumnIfMissing("research_notes", "updated_at", "TEXT");
 
+// Phase 6 C.2: caption fill-in tracking. crow_glasses_capture_and_attach_photo
+// inserts the markdown ref + a backfill row immediately; the scheduler's
+// runCaptionBackfill replaces the `[caption pending]` placeholder once the
+// auto-caption from recordGlassesPhoto's vision pipeline lands. Restart-safe
+// (a setTimeout would be lost on gateway restart). Caps at 5 attempts before
+// giving up and leaving the placeholder for operator edit.
+await initTable("glasses_caption_backfill table", `
+  CREATE TABLE IF NOT EXISTS glasses_caption_backfill (
+    note_id INTEGER NOT NULL,
+    photo_id INTEGER NOT NULL,
+    requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (note_id, photo_id)
+  );
+`);
+
 // --- Meta-glasses photo library (Phase 5) ---
 
 await initTable("glasses_photos table", `

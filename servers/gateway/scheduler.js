@@ -119,6 +119,18 @@ async function tick() {
       console.error("[scheduler] Notification cleanup error:", err.message);
     }
 
+    // Phase 6 C.2: meta-glasses caption backfill. Runs every tick on
+    // the primary gateway to keep note-attach fill-in lag at seconds
+    // rather than hours. Lightweight — only touches rows in
+    // glasses_caption_backfill (typically 0 or a handful).
+    try {
+      const PORT = Number(process.env.CROW_GATEWAY_PORT || 3002);
+      if (PORT === 3002) {
+        const { runCaptionBackfill } = await import("../../bundles/meta-glasses/panel/routes.js");
+        await runCaptionBackfill(db).catch(() => {});
+      }
+    } catch {}
+
     // Phase 5 B.4: meta-glasses photo retention. Runs once per day during
     // the 03:00 hour. Gated to the primary `crow-gateway` (port 3002)
     // because `crow-finance-gateway` (port 3003) runs the same scheduler
