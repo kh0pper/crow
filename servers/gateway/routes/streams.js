@@ -25,7 +25,7 @@ import { Router } from "express";
 import { createDbClient } from "../../db.js";
 import bus from "../../shared/event-bus.js";
 import { openAuthedStream } from "../streams/authed-stream.js";
-import { html, sseTurbo } from "../streams/turbo-stream.js";
+import { html, raw, sseTurbo } from "../streams/turbo-stream.js";
 
 export default function streamsRouter(dashboardAuth) {
   const router = Router();
@@ -97,6 +97,73 @@ export default function streamsRouter(dashboardAuth) {
     bus.on("messages:changed", handler);
     res.on("close", () => bus.off("messages:changed", handler));
     res.on("error", () => bus.off("messages:changed", handler));
+  });
+
+  // --- Orchestrator event timeline (C.4) ---
+  //
+  // Emits one `<turbo-stream action="prepend" target="orch-event-tbody">`
+  // per new orchestrator_events row. Replaces the previous 5s
+  // self-reload of the entire page with pushed HTML fragments. The
+  // fallback reload stays at 5 min.
+  //
+  // Real event_type strings handled here (as of 2026-04-16):
+  //   dispatch.{provider_ready,provider_failed,aborted,run_start,
+  //             run_complete,run_error}
+  //   lifecycle.{ref_inc,warm_existing,bundle_start,
+  //              bundle_start_failed,warm_timeout,warmed,
+  //              release_ignored_pinned,ref_dec,bundle_stop,released,
+  //              refcounts_reset}
+  // Every emit goes to the same target; the panel's client-side
+  // doesn't branch by event_type (keeps the Stream surface narrow).
+  // Filtered views (?run=...) do NOT mount a stream source; they rely
+  // on the 5-min reload fallback.
+  router.get("/dashboard/streams/orchestrator", (req, res) => {
+    const { sendRaw } = openAuthedStream(req, res);
+
+    const handler = (payload) => {
+      try {
+        const eventType = String(payload?.event_type ?? "");
+        const provider = payload?.provider_id ?? "-";
+        const runId = payload?.run_id ?? "";
+        const at = String(payload?.at ?? "");
+        const dataStr = payload?.data == null
+          ? ""
+          : typeof payload.data === "string"
+            ? payload.data
+            : (() => {
+                try {
+                  return JSON.stringify(payload.data);
+                } catch {
+                  return "";
+                }
+              })();
+        const detailBits = [];
+        if (payload?.preset) detailBits.push(`preset=${payload.preset}`);
+        if (payload?.bundle_id) detailBits.push(`bundle=${payload.bundle_id}`);
+        if (typeof payload?.refs === "number") detailBits.push(`refs=${payload.refs}`);
+        const meta = detailBits.join(" · ");
+        // runLink is pre-built escaped HTML; wrap in raw() so the
+        // outer html`` tag doesn't double-escape its tags.
+        const runLinkHtml = runId
+          ? html`<a href="?run=${runId}" style="color:var(--crow-accent);text-decoration:none">${runId.slice(0, 14)}</a>`
+          : "-";
+        const detailSuffix = dataStr ? html` · ${dataStr}` : "";
+        const row = html`<tr data-turbo-event="${eventType}">
+          <td style="padding:4px 8px;color:var(--crow-text-muted);font-family:'JetBrains Mono',monospace;font-size:0.78rem;white-space:nowrap">${at.slice(11, 19)}</td>
+          <td style="padding:4px 8px;font-family:'JetBrains Mono',monospace;font-size:0.8rem">${eventType}</td>
+          <td style="padding:4px 8px;font-family:'JetBrains Mono',monospace;font-size:0.8rem">${provider}</td>
+          <td style="padding:4px 8px;font-family:'JetBrains Mono',monospace;font-size:0.78rem;color:var(--crow-text-muted)">${raw(runLinkHtml)}</td>
+          <td style="padding:4px 8px;font-size:0.78rem;color:var(--crow-text-muted)">${meta}${raw(detailSuffix)}</td>
+        </tr>`;
+        sseTurbo(sendRaw, "prepend", "orch-event-tbody", row);
+      } catch {
+        // Subscriber isolation.
+      }
+    };
+
+    bus.on("orchestrator:event", handler);
+    res.on("close", () => bus.off("orchestrator:event", handler));
+    res.on("error", () => bus.off("orchestrator:event", handler));
   });
 
   return router;

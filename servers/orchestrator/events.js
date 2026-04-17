@@ -11,6 +11,7 @@
  */
 
 import { onLifecycleEvent } from "./lifecycle.js";
+import bus from "../shared/event-bus.js";
 
 let _db = null;
 
@@ -71,6 +72,29 @@ export async function logEvent({
   } catch (err) {
     console.warn(`[orch-events] log failed: ${err.message}`);
   }
+  // Broadcast to any Nest panel clients listening via Turbo Stream. The
+  // emit is after the insert so a subscriber failure (or bus-side
+  // error) cannot block the write or any caller. Real event_type
+  // strings seen in the codebase as of 2026-04-16:
+  //   dispatch.{provider_ready,provider_failed,aborted,run_start,
+  //             run_complete,run_error}
+  //   lifecycle.{ref_inc,warm_existing,bundle_start,
+  //              bundle_start_failed,warm_timeout,warmed,
+  //              release_ignored_pinned,ref_dec,bundle_stop,released,
+  //              refcounts_reset}
+  try {
+    bus.emit("orchestrator:event", {
+      event_type,
+      run_id,
+      provider_id,
+      bundle_id,
+      preset,
+      agent_name,
+      refs,
+      data,
+      at: new Date().toISOString(),
+    });
+  } catch {}
 }
 
 /**
