@@ -337,12 +337,17 @@ export default {
   category: "hardware",
 
   async handler(req, res, { db, layout }) {
-    const tab = req.query.tab === "library" ? "library" : "pair";
+    const tab = req.query.tab === "library" ? "library"
+              : req.query.tab === "notes"   ? "notes"
+              : "pair";
     const styles = SHARED_STYLES;
     const tabBar = renderTabBar(tab);
 
     if (tab === "library") {
       return renderLibraryTab({ req, res, db, layout, styles, tabBar });
+    }
+    if (tab === "notes") {
+      return renderNotesTab({ req, res, db, layout, styles, tabBar });
     }
 
     return renderPairTab({ req, res, layout, styles, tabBar });
@@ -384,6 +389,7 @@ function renderTabBar(active) {
   return `<nav class="mg-tabs">
     <a href="/dashboard/meta-glasses" class="mg-tab ${active === "pair" ? "active" : ""}">Devices</a>
     <a href="/dashboard/meta-glasses?tab=library" class="mg-tab ${active === "library" ? "active" : ""}">Library</a>
+    <a href="/dashboard/meta-glasses?tab=notes" class="mg-tab ${active === "notes" ? "active" : ""}">Notes</a>
   </nav>`;
 }
 
@@ -629,4 +635,148 @@ async function renderLibraryTab({ req, res, db, layout, styles, tabBar }) {
     </div>`;
 
   res.send(layout({ title: "Meta Glasses — Library", content }));
+}
+
+async function renderNotesTab({ req, res, db, layout, styles, tabBar }) {
+  const sessionId = req.query.id ? parseInt(String(req.query.id), 10) : null;
+  const page = Math.max(1, parseInt(String(req.query.page || "1"), 10) || 1);
+  const PAGE_SIZE = 24;
+  const offset = (page - 1) * PAGE_SIZE;
+
+  // Detail view — fetch session + render note markdown with photo:// refs
+  // re-minted to fresh presigned URLs.
+  let detailHtml = "";
+  if (sessionId) {
+    try {
+      const r = await db.execute({
+        sql: `SELECT s.id, s.device_id, s.topic, s.mode, s.status, s.started_at,
+                     s.ended_at, s.summary, s.action_items_json, s.summary_raw,
+                     s.note_id, n.content AS note_content
+              FROM glasses_note_sessions s
+              LEFT JOIN research_notes n ON n.id = s.note_id
+              WHERE s.id = ?`,
+        args: [sessionId],
+      });
+      const d = r.rows[0];
+      if (!d) {
+        detailHtml = `<div class="mg-empty">Session ${sessionId} not found.</div>`;
+      } else {
+        // Re-mint photo:// refs + render markdown. Importing lazily so the
+        // panel module doesn't drag in the whole blog renderer at load.
+        const { remintPhotoRefs } = await import("./routes.js");
+        const { renderMarkdown } = await import("../../../servers/blog/renderer.js");
+        const reminted = await remintPhotoRefs(db, String(d.note_content || ""));
+        const rendered = renderMarkdown(reminted || "*(empty note)*");
+        let actionItems = [];
+        try { actionItems = JSON.parse(d.action_items_json || "[]"); } catch {}
+        const actionList = actionItems.length === 0
+          ? ""
+          : `<div class="mg-notes-actions">
+              <h3>Action items</h3>
+              <ul>${actionItems.map(it => `<li>${escH(it.text || "")}${it.owner ? ` <em>(${escH(it.owner)})</em>` : ""}${it.due ? ` — due ${escH(it.due)}` : ""}</li>`).join("")}</ul>
+             </div>`;
+        const rawBlock = d.summary_raw
+          ? `<details style="margin-top:1rem"><summary style="font-size:0.85rem;color:var(--crow-text-muted);cursor:pointer">Debug: unparseable summarizer output</summary><pre style="font-size:0.75rem;white-space:pre-wrap;background:var(--crow-bg-deep,#111);padding:0.5rem;border-radius:4px">${escH(String(d.summary_raw).slice(0, 5000))}</pre></details>`
+          : "";
+        detailHtml = `<div class="mg-notes-detail">
+          <div class="mg-notes-header">
+            <h2>${escH(d.topic || "(untitled session)")}</h2>
+            <div class="mg-notes-meta">${escH(d.device_id)} · ${escH(d.mode)} · ${escH(d.status)} · started ${escH(d.started_at || "")}${d.ended_at ? ` · ended ${escH(d.ended_at)}` : ""}</div>
+          </div>
+          <div class="mg-notes-body">${rendered}</div>
+          ${actionList}
+          ${rawBlock}
+          <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:1rem">
+            <a href="/dashboard/meta-glasses?tab=notes" class="btn btn-secondary btn-sm">Back</a>
+            <form method="POST" action="/dashboard/meta-glasses/notes/delete" style="display:inline" onsubmit="return confirm('Delete this session + its note? The backing research_notes row is also removed.')">
+              <input type="hidden" name="session_id" value="${d.id}">
+              <button class="btn btn-sm" style="background:var(--crow-error);color:#fff;border-color:var(--crow-error)" type="submit">Delete</button>
+            </form>
+          </div>
+        </div>`;
+      }
+    } catch (err) {
+      detailHtml = `<div class="mg-empty">Error loading session: ${escH(err.message)}</div>`;
+    }
+  }
+
+  // List view — sessions with a short summary excerpt.
+  let rows = [];
+  let total = 0;
+  try {
+    const c = await db.execute("SELECT COUNT(*) AS n FROM glasses_note_sessions");
+    total = Number(c.rows[0]?.n ?? 0);
+    const r = await db.execute({
+      sql: `SELECT id, device_id, topic, mode, status, started_at, ended_at, summary
+            FROM glasses_note_sessions
+            ORDER BY started_at DESC LIMIT ? OFFSET ?`,
+      args: [PAGE_SIZE, offset],
+    });
+    rows = r.rows;
+  } catch (err) {
+    console.warn(`[meta-glasses] notes list query failed: ${err.message}`);
+  }
+
+  const listHtml = rows.length === 0
+    ? `<div class="mg-empty">No note sessions yet. Ask the AI to start one ("start taking notes on the kitchen project").</div>`
+    : rows.map(s => {
+        const excerpt = s.summary ? escH(String(s.summary).slice(0, 180)) : "<em>(no summary)</em>";
+        const when = escH(String(s.started_at || "").replace("T", " ").slice(0, 16));
+        const statusClass = s.status === "active" ? "mg-note-active" : "mg-note-ended";
+        return `<a class="mg-notes-card ${statusClass}" href="/dashboard/meta-glasses?tab=notes&id=${s.id}">
+          <div class="mg-notes-card-head">
+            <span class="mg-notes-topic">${escH(s.topic || "(untitled)")}</span>
+            <span class="mg-notes-badge">${escH(s.mode)} · ${escH(s.status)}</span>
+          </div>
+          <div class="mg-notes-excerpt">${excerpt}</div>
+          <div class="mg-notes-meta-sm">${escH(s.device_id)} · ${when}</div>
+        </a>`;
+      }).join("");
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  let paginationHtml = "";
+  if (totalPages > 1) {
+    const base = `/dashboard/meta-glasses?tab=notes`;
+    const bits = [];
+    if (page > 1) bits.push(`<a href="${base}&page=${page - 1}" class="btn btn-sm btn-secondary">Prev</a>`);
+    bits.push(`<span style="color:var(--crow-text-muted);font-size:0.82rem">${page} / ${totalPages} · ${total} session${total === 1 ? "" : "s"}</span>`);
+    if (page < totalPages) bits.push(`<a href="${base}&page=${page + 1}" class="btn btn-sm btn-secondary">Next</a>`);
+    paginationHtml = `<div style="display:flex;align-items:center;justify-content:center;gap:1rem;margin-top:1rem">${bits.join("")}</div>`;
+  }
+
+  // Extra CSS scoped to the Notes tab. Kept inline to avoid growing
+  // SHARED_STYLES (which is already loaded by every tab).
+  const notesCss = `
+    .mg-notes-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap:0.75rem; margin-top:1rem; }
+    .mg-notes-card { display:block; padding:0.75rem 1rem; border:1px solid var(--crow-border); border-radius:8px; background:var(--crow-surface); color:var(--crow-text); text-decoration:none; transition:border-color 120ms ease; }
+    .mg-notes-card:hover { border-color:var(--crow-accent, #3b82f6); }
+    .mg-notes-card.mg-note-active { border-left:3px solid var(--crow-success, #15803d); }
+    .mg-notes-card-head { display:flex; align-items:center; justify-content:space-between; gap:0.5rem; margin-bottom:0.25rem; }
+    .mg-notes-topic { font-weight:600; font-size:0.92rem; }
+    .mg-notes-badge { font-size:0.7rem; color:var(--crow-text-muted); text-transform:uppercase; letter-spacing:0.04em; }
+    .mg-notes-excerpt { font-size:0.82rem; color:var(--crow-text-muted); margin-bottom:0.35rem; min-height:1.2em; }
+    .mg-notes-meta-sm { font-size:0.72rem; color:var(--crow-text-muted); }
+    .mg-notes-detail { margin-top:1rem; padding:1rem 1.25rem; border:1px solid var(--crow-border); border-radius:8px; background:var(--crow-surface); }
+    .mg-notes-header h2 { margin:0 0 0.25rem; font-size:1.1rem; }
+    .mg-notes-meta { font-size:0.78rem; color:var(--crow-text-muted); margin-bottom:1rem; }
+    .mg-notes-body img { max-width:100%; height:auto; border-radius:4px; margin:0.25rem 0; }
+    .mg-notes-body p, .mg-notes-body li { line-height:1.55; }
+    .mg-notes-actions h3 { font-size:0.88rem; text-transform:uppercase; letter-spacing:0.05em; color:var(--crow-text-muted); margin:1rem 0 0.25rem; }
+    .mg-notes-actions ul { margin:0; padding-left:1.25rem; font-size:0.88rem; }
+  `;
+
+  // Invariant mirrors the Library tab: render a turbo-frame wrapper at
+  // the same DOM position on every tab=notes response so post-delete
+  // 303s swap cleanly without a full-page reload.
+  const content = `
+    <style>${styles}${notesCss}</style>
+    <div class="mg-wrap">
+      ${tabBar}
+      <turbo-frame id="mg-notes-results" data-turbo-action="advance">
+        ${detailHtml}
+        ${sessionId ? "" : `<div class="mg-notes-grid">${listHtml}</div>${paginationHtml}`}
+      </turbo-frame>
+    </div>`;
+
+  res.send(layout({ title: "Meta Glasses — Notes", content }));
 }

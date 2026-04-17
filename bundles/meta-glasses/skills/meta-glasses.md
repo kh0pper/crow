@@ -46,6 +46,16 @@ pair (via the panel) before recommending actions.
   `{ error: "invalid_keep", retries_remaining: N }`. After 3 failures the
   call fails closed (zero items kept). Don't retry past the budget — ask
   the user to re-summarize.
+- `crow_glasses_capture_and_attach_photo({ device_id, session_id?, caption? })`
+  — during an active note session, capture a photo via the glasses and
+  inline it into the backing note as `![caption](photo://<photo_id>) *HH:MM*`.
+  If no `caption` is given, a placeholder is inserted and the scheduler
+  backfills the auto-caption once recordGlassesPhoto's vision pipeline
+  completes. `photo://` is a **reserved scheme** within Crow notes —
+  the Notes tab's renderer re-mints presigned URLs at render time, so
+  don't emit `photo://` URLs pointing at anything other than valid
+  glasses_photos row ids. Non-digit variants (e.g. `photo://xyz`) are
+  preserved verbatim as literal text.
 
 ### Notes-sync caveat
 

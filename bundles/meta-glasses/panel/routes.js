@@ -789,6 +789,23 @@ LONG WORK via the orchestrator. For research, multi-step analysis, code work, or
             // Not a JSON envelope — leave untouched.
           }
         }
+        // Phase 6 C.2: capture-and-attach-photo sentinel. The MCP tool
+        // returns { _capture_and_attach: { device_id, session_id?, caption? } };
+        // the panel actually does the work (triggerCapture + note append +
+        // caption backfill row). This keeps the MCP process clean of
+        // WebSocket/session access while still letting the LLM call a
+        // single tool to chain capture + attach.
+        if (typeof piped === "string" && piped.includes('"_capture_and_attach"')) {
+          try {
+            const parsed = JSON.parse(piped);
+            const env = parsed?._capture_and_attach;
+            if (env && env.device_id === device.id) {
+              piped = await handleCaptureAndAttach(env, db);
+            }
+          } catch (err) {
+            piped = `Capture-and-attach failed: ${err.message}`;
+          }
+        }
         messages.push({ role: "tool", content: piped, tool_call_id: r.id, tool_name: r.name });
         if (typeof piped === "string" && piped.length > 500) nextMaxTokens = 4000;
       }
@@ -802,6 +819,181 @@ LONG WORK via the orchestrator. For research, multi-step analysis, code work, or
     if (toolExecutor) { try { await toolExecutor.close(); } catch {} }
     try { db.close(); } catch {}
   }
+}
+
+/* ---------- Phase 6 C.2 helpers: capture-and-attach + caption backfill + remint ---------- */
+
+async function handleCaptureAndAttach({ device_id, session_id, caption }, db) {
+  const sess = _sessions.get(device_id);
+  if (!sess) return "No connected glasses session to capture from.";
+  // Resolve the active session. The MCP tool allows caller to pass
+  // session_id explicitly; otherwise pick the most-recent active one
+  // for this device.
+  let sid = session_id || null;
+  let noteId = null;
+  try {
+    if (sid) {
+      const { rows } = await db.execute({ sql: `SELECT note_id FROM glasses_note_sessions WHERE id = ? AND status = 'active'`, args: [sid] });
+      noteId = rows[0]?.note_id ?? null;
+      if (!noteId) return "Session not found or not active.";
+    } else {
+      const { rows } = await db.execute({
+        sql: `SELECT id, note_id FROM glasses_note_sessions
+              WHERE device_id = ? AND status = 'active'
+              ORDER BY started_at DESC LIMIT 1`,
+        args: [device_id],
+      });
+      if (!rows[0]) return "No active note session for this device — start one first with crow_glasses_start_note_session.";
+      sid = rows[0].id;
+      noteId = rows[0].note_id;
+    }
+  } catch (err) {
+    return `Capture-and-attach failed (session lookup): ${err.message}`;
+  }
+
+  // Trigger capture. triggerCapture resolves with `{ ok, url, size,
+  // photo_id, minio_key }` when the phone's upload completes (the route
+  // handler now awaits recordGlassesPhoto before resolving the pending).
+  let captureResult;
+  try {
+    captureResult = await triggerCapture(sess);
+  } catch (err) {
+    return `Capture failed: ${err.message}`;
+  }
+  const photoId = captureResult?.photo_id;
+  if (!photoId) return "Capture succeeded but no photo id was returned — attach skipped.";
+
+  // Append markdown ref using the photo:// sentinel scheme. The Notes
+  // tab's renderer re-mints presigned URLs at render time, so the 1 h
+  // TTL never bites a reader.
+  const captionText = caption || "[caption pending]";
+  const stamp = new Date().toTimeString().slice(0, 5);
+  const line = `\n![${captionText.replace(/[\]\[]/g, "")}](photo://${photoId}) *${stamp}*\n`;
+  try {
+    await db.execute({
+      sql: `UPDATE research_notes SET content = COALESCE(content, '') || ?, updated_at = datetime('now') WHERE id = ?`,
+      args: [line, noteId],
+    });
+  } catch (err) {
+    return `Captured but note update failed: ${err.message}`;
+  }
+
+  // If caller didn't supply a caption, enqueue a backfill row. The
+  // scheduler's runCaptionBackfill tick will replace the placeholder
+  // with the auto-caption once recordGlassesPhoto's enrichment
+  // pipeline has written glasses_photos.caption.
+  if (!caption) {
+    try {
+      await db.execute({
+        sql: `INSERT OR IGNORE INTO glasses_caption_backfill (note_id, photo_id)
+              VALUES (?, ?)`,
+        args: [noteId, photoId],
+      });
+    } catch {}
+  }
+
+  return `Photo ${photoId} attached to note ${noteId} with caption "${captionText}".`;
+}
+
+export async function runCaptionBackfill(db) {
+  const MAX_ATTEMPTS = 5;
+  const { rows } = await db.execute({
+    sql: `SELECT note_id, photo_id, attempts FROM glasses_caption_backfill`,
+    args: [],
+  });
+  let replaced = 0;
+  let dropped = 0;
+  for (const row of rows) {
+    // Look up the photo's caption (set by _enrichGlassesPhoto).
+    const { rows: pr } = await db.execute({
+      sql: `SELECT caption FROM glasses_photos WHERE id = ?`,
+      args: [row.photo_id],
+    });
+    const caption = pr[0]?.caption;
+    if (caption) {
+      // Find the `![\[caption pending\]](photo://<id>)` placeholder and replace.
+      const noteRow = await db.execute({ sql: `SELECT content FROM research_notes WHERE id = ?`, args: [row.note_id] });
+      const content = String(noteRow.rows[0]?.content || "");
+      // Regex: ![<anything>](photo://<id>) — the caption field may be
+      // literally "[caption pending]" (square brackets are pre-stripped
+      // in handleCaptureAndAttach) or any other placeholder. Replace only
+      // the first match targeting this photo_id.
+      const re = new RegExp(`!\\[[^\\]]*\\]\\(photo://${row.photo_id}\\b([^)]*)\\)`, "g");
+      let found = false;
+      const safeCaption = String(caption).replace(/[\]\[]/g, "");
+      const newContent = content.replace(re, (match, tail) => {
+        if (found) return match;
+        found = true;
+        return `![${safeCaption}](photo://${row.photo_id}${tail})`;
+      });
+      if (found) {
+        await db.execute({
+          sql: `UPDATE research_notes SET content = ?, updated_at = datetime('now') WHERE id = ?`,
+          args: [newContent, row.note_id],
+        });
+        replaced++;
+      }
+      await db.execute({
+        sql: `DELETE FROM glasses_caption_backfill WHERE note_id = ? AND photo_id = ?`,
+        args: [row.note_id, row.photo_id],
+      });
+    } else if (Number(row.attempts || 0) + 1 >= MAX_ATTEMPTS) {
+      await db.execute({
+        sql: `DELETE FROM glasses_caption_backfill WHERE note_id = ? AND photo_id = ?`,
+        args: [row.note_id, row.photo_id],
+      });
+      dropped++;
+    } else {
+      await db.execute({
+        sql: `UPDATE glasses_caption_backfill SET attempts = attempts + 1 WHERE note_id = ? AND photo_id = ?`,
+        args: [row.note_id, row.photo_id],
+      });
+    }
+  }
+  return { replaced, dropped };
+}
+
+/**
+ * Phase 6 C.2: rewrite `photo://<id>` markdown refs to freshly-minted
+ * presigned URLs at render time. Notes store the sentinel; the renderer
+ * swaps in real URLs with a 1 h TTL so opening a note days later still
+ * shows working images. The regex requires digit-only IDs + a word
+ * boundary so a literal `photo://xyz` in operator-typed text is
+ * preserved verbatim. Caps at 200 unique IDs per render (SQLite's
+ * default SQLITE_MAX_VARIABLE_NUMBER is 999; 200 gives headroom).
+ */
+export async function remintPhotoRefs(db, content) {
+  const matches = [...String(content || "").matchAll(/photo:\/\/(\d+)\b/g)];
+  if (matches.length === 0) return content;
+  const ids = [...new Set(matches.map(m => Number(m[1])))].slice(0, 200);
+  if (matches.length > ids.length) {
+    console.warn(`[meta-glasses] remintPhotoRefs: note has ${matches.length} refs; capped to ${ids.length}`);
+  }
+  const { rows } = await db.execute({
+    sql: `SELECT id, minio_key, disk_path FROM glasses_photos WHERE id IN (${ids.map(() => "?").join(",")})`,
+    args: ids,
+  });
+  const byId = new Map(rows.map(r => [Number(r.id), r]));
+  let s3Ready = false;
+  let getPresignedUrl = null;
+  try {
+    const s3 = await loadS3();
+    s3Ready = await s3.isAvailable();
+    getPresignedUrl = s3.getPresignedUrl;
+  } catch {}
+  const PLACEHOLDER = "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2264%22%20height%3D%2264%22%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20fill%3D%22%23888%22%2F%3E%3Ctext%20x%3D%2232%22%20y%3D%2234%22%20text-anchor%3D%22middle%22%20font-size%3D%2210%22%20fill%3D%22%23fff%22%3Emissing%3C%2Ftext%3E%3C%2Fsvg%3E";
+  const resolved = new Map();
+  for (const id of ids) {
+    const row = byId.get(id);
+    let url = PLACEHOLDER;
+    if (row?.minio_key && s3Ready && getPresignedUrl) {
+      try { url = await getPresignedUrl(row.minio_key, { expiry: 3600 }); } catch {}
+    } else if (row?.disk_path) {
+      url = `/api/meta-glasses/photo/${encodeURIComponent(String(row.disk_path).split("/").pop())}`;
+    }
+    resolved.set(id, url);
+  }
+  return String(content).replace(/photo:\/\/(\d+)\b/g, (_, idStr) => resolved.get(Number(idStr)) || PLACEHOLDER);
 }
 
 /* ---------- Express router ---------- */
@@ -963,6 +1155,28 @@ export default function metaGlassesRouter(dashboardAuth) {
       try { db.close(); } catch {}
     }
     res.redirectAfterPost("/dashboard/meta-glasses?tab=library");
+  });
+
+  // Notes: delete a session + its backing research_notes row.
+  router.post("/dashboard/meta-glasses/notes/delete", dashboardAuth, async (req, res) => {
+    const sid = parseInt(req.body?.session_id, 10);
+    if (!sid) return res.redirectAfterPost("/dashboard/meta-glasses?tab=notes");
+    const { createDbClient } = await loadDb();
+    const db = createDbClient();
+    try {
+      const { rows } = await db.execute({ sql: `SELECT note_id FROM glasses_note_sessions WHERE id = ?`, args: [sid] });
+      const noteId = rows[0]?.note_id;
+      await db.execute({ sql: `DELETE FROM glasses_note_sessions WHERE id = ?`, args: [sid] });
+      if (noteId) {
+        await db.execute({ sql: `DELETE FROM research_notes WHERE id = ?`, args: [noteId] });
+        await db.execute({ sql: `DELETE FROM glasses_caption_backfill WHERE note_id = ?`, args: [noteId] });
+      }
+    } catch (err) {
+      console.warn(`[meta-glasses] notes delete for session=${sid} failed: ${err.message}`);
+    } finally {
+      try { db.close(); } catch {}
+    }
+    res.redirectAfterPost("/dashboard/meta-glasses?tab=notes");
   });
 
   // Library: run the daily retention pipeline now (operator-triggered).
@@ -1253,22 +1467,35 @@ export default function metaGlassesRouter(dashboardAuth) {
       const url = `/api/meta-glasses/photo/${encodeURIComponent(fname)}`;
       res.json({ ok: true, url, size: req.body.length });
 
-      // Resolve any pending capture request for this request_id.
+      // Phase 6 C.2: await the library INSERT so we can include the
+      // photoId in the pending capture resolve (so chained tools like
+      // crow_glasses_capture_and_attach_photo get the id). Enrichment
+      // (vision/OCR) still runs fire-and-forget inside recordGlassesPhoto,
+      // so this await is ~50-200ms (MinIO upload + single DB INSERT).
+      let photoMeta = null;
+      try {
+        photoMeta = await recordGlassesPhoto({
+          deviceId: device.id,
+          diskPath, fname,
+          mime: req.body.length > 0 ? (ext === "png" ? "image/png" : "image/jpeg") : "application/octet-stream",
+          size: req.body.length,
+        });
+      } catch (err) {
+        console.warn(`[meta-glasses] library insert failed: ${err.message}`);
+      }
+
       const pending = _pendingCaptures.get(reqId);
       if (pending) {
         clearTimeout(pending.timer);
         _pendingCaptures.delete(reqId);
-        pending.resolve({ ok: true, url, size: req.body.length });
+        pending.resolve({
+          ok: true,
+          url,
+          size: req.body.length,
+          photo_id: photoMeta?.photoId || null,
+          minio_key: photoMeta?.minioKey || null,
+        });
       }
-
-      // Phase 5: fire-and-forget library insert + auto-caption. Runs
-      // after the HTTP response so no user-facing latency.
-      recordGlassesPhoto({
-        deviceId: device.id,
-        diskPath, fname,
-        mime: req.body.length > 0 ? (ext === "png" ? "image/png" : "image/jpeg") : "application/octet-stream",
-        size: req.body.length,
-      }).catch(err => console.warn(`[meta-glasses] library insert failed: ${err.message}`));
     });
 
   /** Serve a stored photo. Authed (so only the Nest / authed LLM callers can read). */
@@ -1614,16 +1841,27 @@ async function recordGlassesPhoto({ deviceId, diskPath, fname, mime, size }) {
   } finally {
     try { db.close(); } catch {}
   }
-  if (!photoId) return;
+  if (!photoId) return null;
   // NOTE: the disk file at `diskPath` is intentionally NOT unlinked in
   // this session. A future retention cron (Phase 5 B.4) prunes disk
   // copies once MinIO has served them successfully or after a grace
   // period. Keeps the system recoverable if MinIO is briefly down.
 
+  // Phase 6 C.2: fire-and-forget the enrichment pipeline so the caller
+  // gets photoId back synchronously. The capture-and-attach tool needs
+  // the id immediately to write a `photo://<id>` markdown ref; waiting
+  // for the 5-30s vision call would time out the MCP tool.
+  _enrichGlassesPhoto({ photoId, deviceId, diskPath, mime }).catch(err =>
+    console.warn(`[meta-glasses] enrich pipeline error for photo ${photoId}: ${err.message}`)
+  );
+  return { photoId, minioKey };
+}
+
+async function _enrichGlassesPhoto({ photoId, deviceId, diskPath, mime }) {
+  const { createDbClient } = await loadDb();
   // Fire-and-forget: resolve the default vision profile (no device/AI profile
   // plumbing here — library captions use the platform default). Skip silently
-  // if no vision profile is set. PII redaction is not yet active (OCR is
-  // deferred; caption only in the first cut).
+  // if no vision profile is set.
   try {
     const { readSetting } = await loadSettingsReg();
     const db2 = createDbClient();
@@ -1956,6 +2194,16 @@ export async function runPhotoRetention(db, { budgetMs = 60_000 } = {}) {
     summary.pruned = r.prunedTotal || 0;
   } catch (err) {
     console.warn(`[meta-glasses] prune failed: ${err.message}`);
+  }
+  // 4. Phase 6 C.2: caption backfill. Piggybacks on the daily run; the
+  //    scheduler also calls runCaptionBackfill directly every tick so
+  //    fill-in lag is typically seconds, not hours.
+  try {
+    const r = await runCaptionBackfill(db);
+    summary.caption_replaced = r.replaced || 0;
+    summary.caption_dropped = r.dropped || 0;
+  } catch (err) {
+    console.warn(`[meta-glasses] caption backfill failed: ${err.message}`);
   }
   summary.elapsed_ms = Date.now() - started;
   return summary;
