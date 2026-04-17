@@ -14,8 +14,8 @@ android {
         //   - Meta Wearables DAT SDK (mwdat-*) targets API 34+
         minSdk 34
         targetSdk 34
-        versionCode 9
-        versionName "1.4.4"
+        versionCode 10
+        versionName "1.4.5"
     }
 
     signingConfigs {
