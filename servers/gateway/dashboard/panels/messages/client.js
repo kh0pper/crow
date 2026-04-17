@@ -191,7 +191,7 @@ export function messagesClientJS(opts) {
         return;
       }
 
-      // Show profile/model picker popover
+      // Show profile/model picker popover with Profile + Quick Chat tabs
       var popover = document.getElementById('msg-popover');
       popover.textContent = '';
       popover.classList.add('visible');
@@ -199,11 +199,21 @@ export function messagesClientJS(opts) {
       var title = el('div', { css: 'font-size:0.85rem;font-weight:600;padding:0.5rem 0.75rem;color:var(--crow-text-muted)' }, ['${tJs("messages.newAiChat", lang)}']);
       popover.appendChild(title);
 
+      // --- Tab bar ---
+      var tabs = el('div', { css: 'display:flex;gap:0.25rem;padding:0 0.75rem;border-bottom:1px solid var(--crow-border);margin-bottom:0.5rem' });
+      var tabProfile = el('button', { className: 'msg-new-tab msg-new-tab-active', text: 'Profile', css: 'background:none;border:none;padding:0.4rem 0.75rem;color:var(--crow-text-primary);font-weight:600;border-bottom:2px solid var(--crow-accent);cursor:pointer;margin-bottom:-1px' });
+      var tabQuick = el('button', { className: 'msg-new-tab', text: 'Quick chat', css: 'background:none;border:none;padding:0.4rem 0.75rem;color:var(--crow-text-secondary);border-bottom:2px solid transparent;cursor:pointer;margin-bottom:-1px' });
+      tabs.appendChild(tabProfile);
+      tabs.appendChild(tabQuick);
+      popover.appendChild(tabs);
+
+      // --- Profile pane ---
+      var profilePane = el('div', { css: 'padding:0' });
       var profileSelect = el('select', { className: 'msg-model-select', css: 'margin:0 0.75rem 0.5rem;width:calc(100% - 1.5rem)' });
       profiles.forEach(function(p) {
         profileSelect.appendChild(el('option', { value: p.id, text: p.name }));
       });
-      popover.appendChild(profileSelect);
+      profilePane.appendChild(profileSelect);
 
       var modelSelect = el('select', { className: 'msg-model-select', css: 'margin:0 0.75rem 0.5rem;width:calc(100% - 1.5rem)' });
       function updateModels() {
@@ -220,7 +230,7 @@ export function messagesClientJS(opts) {
       }
       profileSelect.addEventListener('change', updateModels);
       updateModels();
-      popover.appendChild(modelSelect);
+      profilePane.appendChild(modelSelect);
 
       var createBtn = el('button', { className: 'msg-popover-item', css: 'text-align:center;font-weight:600;color:var(--crow-accent)', text: '${tJs("messages.createChat", lang)}', onclick: async function() {
         popover.classList.remove('visible');
@@ -232,7 +242,102 @@ export function messagesClientJS(opts) {
         var data = await r.json();
         if (data.id) window.location.href = '/dashboard/messages';
       }});
-      popover.appendChild(createBtn);
+      profilePane.appendChild(createBtn);
+      popover.appendChild(profilePane);
+
+      // --- Quick Chat pane (hidden initially) ---
+      var quickPane = el('div', { css: 'padding:0;display:none' });
+      var quickProviderSelect = el('select', { className: 'msg-model-select', css: 'margin:0 0.75rem 0.5rem;width:calc(100% - 1.5rem)' });
+      var quickModelSelect = el('select', { className: 'msg-model-select', css: 'margin:0 0.75rem 0.5rem;width:calc(100% - 1.5rem)' });
+      var quickSystemPrompt = el('textarea', { className: 'msg-system-prompt', placeholder: 'System prompt (optional)', css: 'margin:0 0.75rem 0.5rem;width:calc(100% - 1.5rem);min-height:60px;padding:0.35rem 0.5rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text-primary);font-size:0.82rem;resize:vertical;box-sizing:border-box' });
+      var quickLoading = el('div', { css: 'padding:0.5rem 0.75rem;font-size:0.8rem;color:var(--crow-text-muted)', text: 'Loading providers…' });
+      quickPane.appendChild(quickLoading);
+
+      var registryProviders = null;
+      async function loadRegistryProviders() {
+        if (registryProviders) return registryProviders;
+        var r = await fetch('/api/chat/registry-providers');
+        var data = await r.json();
+        registryProviders = data.providers || [];
+        return registryProviders;
+      }
+
+      function updateQuickModels() {
+        quickModelSelect.textContent = '';
+        var pid = quickProviderSelect.value;
+        var p = (registryProviders || []).find(function(x){return x.id===pid});
+        if (p && p.models && p.models.length) {
+          p.models.forEach(function(m) { quickModelSelect.appendChild(el('option', { value: m, text: m })); });
+        } else {
+          quickModelSelect.appendChild(el('option', { value: '', text: '(no declared models — type below)' }));
+        }
+      }
+
+      async function buildQuickPane() {
+        var list = await loadRegistryProviders();
+        if (quickLoading.parentNode) quickLoading.remove();
+        if (list.length === 0) {
+          var empty = el('div', { css: 'padding:0.5rem 0.75rem;font-size:0.82rem;color:var(--crow-text-muted)', text: 'No providers registered. Add one on the LLM settings page first.' });
+          quickPane.appendChild(empty);
+          return;
+        }
+        quickProviderSelect.textContent = '';
+        list.forEach(function(p) {
+          var label = p.id + (p.provider_type ? ' · ' + p.provider_type : '') + (p.host === 'cloud' ? ' (cloud)' : '');
+          quickProviderSelect.appendChild(el('option', { value: p.id, text: label }));
+        });
+        quickProviderSelect.addEventListener('change', updateQuickModels);
+        updateQuickModels();
+        quickPane.appendChild(quickProviderSelect);
+        quickPane.appendChild(quickModelSelect);
+        quickPane.appendChild(quickSystemPrompt);
+
+        var startBtn = el('button', { className: 'msg-popover-item', css: 'text-align:center;font-weight:600;color:var(--crow-accent)', text: 'Start Quick Chat', onclick: async function() {
+          popover.classList.remove('visible');
+          var body = {
+            title: '${tJs("messages.newConversationTitle", lang)}',
+            provider: quickProviderSelect.value,
+            model: quickModelSelect.value,
+          };
+          if (quickSystemPrompt.value && quickSystemPrompt.value.trim()) body.system_prompt = quickSystemPrompt.value.trim();
+          var r = await fetch('/api/chat/conversations', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          var data = await r.json();
+          if (data.id) window.location.href = '/dashboard/messages';
+        }});
+        quickPane.appendChild(startBtn);
+      }
+      popover.appendChild(quickPane);
+
+      // Tab switching
+      tabProfile.addEventListener('click', function() {
+        tabProfile.classList.add('msg-new-tab-active');
+        tabProfile.style.color = 'var(--crow-text-primary)';
+        tabProfile.style.fontWeight = '600';
+        tabProfile.style.borderBottomColor = 'var(--crow-accent)';
+        tabQuick.classList.remove('msg-new-tab-active');
+        tabQuick.style.color = 'var(--crow-text-secondary)';
+        tabQuick.style.fontWeight = 'normal';
+        tabQuick.style.borderBottomColor = 'transparent';
+        profilePane.style.display = 'block';
+        quickPane.style.display = 'none';
+      });
+      tabQuick.addEventListener('click', function() {
+        tabQuick.classList.add('msg-new-tab-active');
+        tabQuick.style.color = 'var(--crow-text-primary)';
+        tabQuick.style.fontWeight = '600';
+        tabQuick.style.borderBottomColor = 'var(--crow-accent)';
+        tabProfile.classList.remove('msg-new-tab-active');
+        tabProfile.style.color = 'var(--crow-text-secondary)';
+        tabProfile.style.fontWeight = 'normal';
+        tabProfile.style.borderBottomColor = 'transparent';
+        profilePane.style.display = 'none';
+        quickPane.style.display = 'block';
+        buildQuickPane().catch(function(e) { console.error('quickPane load failed:', e); });
+      });
 
     } catch(e) { console.error(e); }
   }
@@ -248,13 +353,21 @@ export function messagesClientJS(opts) {
       var msgs = data.messages || [];
       _messages = msgs;
 
-      // Get model list from profile (if profile-based conversation)
+      // Get model list from profile (if profile-based) OR from the
+      // providers registry (Quick Chat — conv.provider is a provider id).
       var models = [];
       var currentModel = conv.model || '';
       if (conv.profile_id) {
         var pdata = await getProfiles();
         var profile = (pdata.profiles || []).find(function(p){return p.id === conv.profile_id});
         if (profile && profile.models) models = profile.models;
+      } else if (conv.provider) {
+        try {
+          var rp = await fetch('/api/chat/registry-providers');
+          var rpd = await rp.json();
+          var reg = (rpd.providers || []).find(function(p){return p.id === conv.provider});
+          if (reg && reg.models && reg.models.length) models = reg.models;
+        } catch(e) { /* fallback: no compose picker */ }
       }
 
       renderChatUI(chat, {
@@ -265,6 +378,9 @@ export function messagesClientJS(opts) {
         models: models,
         currentModel: currentModel,
       }, msgs);
+
+      // Expose current model so the compose-bar picker can detect overrides.
+      if (_activeItem && _activeItem.type === 'ai') _activeItem.currentModel = currentModel;
 
       showAiInfo(conv);
     } catch(e) { console.error('Failed to load AI conversation:', e); }
@@ -304,10 +420,30 @@ export function messagesClientJS(opts) {
     var currentEventType = null;
 
     try {
+      // Compose-bar model picker (Path A): one-shot override by default;
+      // Pin checkbox promotes to sticky via PATCH before the POST.
+      var composeModelEl = document.getElementById('msg-compose-model');
+      var composePinEl = document.getElementById('msg-compose-pin');
+      var msgBody = { content: content || '(see attached file)', attachments: atts.length > 0 ? atts : undefined };
+      if (composeModelEl && composeModelEl.value && composeModelEl.value !== _activeItem.currentModel) {
+        if (composePinEl && composePinEl.checked) {
+          // Sticky: PATCH conversation first.
+          try {
+            await fetch('/api/chat/conversations/' + encodeURIComponent(_activeItem.id), {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ model: composeModelEl.value }),
+            });
+            _activeItem.currentModel = composeModelEl.value;
+          } catch(e) { console.warn('Pin PATCH failed:', e); }
+        } else {
+          msgBody.model = composeModelEl.value;
+        }
+      }
       var response = await fetch('/api/chat/conversations/' + encodeURIComponent(_activeItem.id) + '/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: content || '(see attached file)', attachments: atts.length > 0 ? atts : undefined }),
+        body: JSON.stringify(msgBody),
       });
 
       var reader = response.body.getReader();
@@ -782,6 +918,29 @@ export function messagesClientJS(opts) {
       this.style.height = Math.min(this.scrollHeight, 120) + 'px';
     });
     inputArea.appendChild(textarea);
+
+    // Per-message model picker (Path A compose-bar) — one-shot by default;
+    // "Pin" toggle fires the existing PATCH to make the selection sticky.
+    // Appears only on AI conversations where the conversation advertises
+    // a model list (profile-based, or Quick Chat with a declared models list).
+    if (headerData.type === 'ai' && headerData.models && headerData.models.length > 0) {
+      var composeWrap = el('div', { css: 'display:flex;align-items:center;gap:0.35rem;margin-right:0.4rem' });
+      var composeSelect = el('select', { className: 'msg-model-select', id: 'msg-compose-model', css: 'max-width:160px' });
+      headerData.models.forEach(function(m) {
+        var opt = el('option', { text: m, value: m });
+        if (m === headerData.currentModel) opt.selected = true;
+        composeSelect.appendChild(opt);
+      });
+      composeWrap.appendChild(composeSelect);
+
+      var pinLabel = el('label', { css: 'display:flex;align-items:center;gap:0.2rem;font-size:0.72rem;color:var(--crow-text-muted);cursor:pointer;user-select:none', title: 'Pin the selected model to this conversation (sticky)' });
+      var pinCheck = el('input', { type: 'checkbox', id: 'msg-compose-pin', css: 'margin:0;cursor:pointer' });
+      pinLabel.appendChild(pinCheck);
+      pinLabel.appendChild(document.createTextNode('Pin'));
+      composeWrap.appendChild(pinLabel);
+
+      inputArea.appendChild(composeWrap);
+    }
 
     inputArea.appendChild(el('button', {
       className: 'msg-send-btn',
