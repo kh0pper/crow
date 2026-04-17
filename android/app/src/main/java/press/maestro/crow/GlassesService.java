@@ -160,8 +160,15 @@ public class GlassesService extends Service {
         // QS player card on 13+, BT AVRCP)
         mediaSession = new MediaSessionCompat(this, "CrowGlasses");
         mediaSession.setCallback(new MediaSessionCompat.Callback() {
-            // BT AVRCP sends discrete play/pause KeyEvents, not a toggle. Guard
-            // each callback so a redundant "play" while already playing doesn't pause.
+            // BT AVRCP nominally sends discrete play/pause KeyEvents, not a
+            // toggle. The Meta Ray-Ban (Gen 2) glasses firmware is non-
+            // compliant — the temple tap fires KEYCODE_MEDIA_PAUSE on
+            // EVERY tap (verified via logcat 2026-04-17), so the original
+            // defensive guard correctly paused on tap 1 but silently
+            // blocked every resume attempt via temple tap thereafter.
+            // onPause now toggles when already paused, matching physical-
+            // tap semantics. onPlay stays guarded so a compliant device
+            // can't fire a bogus "play" that turns into a pause.
             @Override public void onPlay() {
                 if (musicPaused) {
                     resumeMusicTrack();
@@ -169,7 +176,12 @@ public class GlassesService extends Service {
                 }
             }
             @Override public void onPause() {
-                if (!musicPaused && mediaActive) {
+                if (!mediaActive) return;
+                if (musicPaused) {
+                    // Duplicate PAUSE (Meta glasses firmware quirk) — treat as resume.
+                    resumeMusicTrack();
+                    sendMediaControlToGateway("resume");
+                } else {
                     pauseMusicTrack();
                     sendMediaControlToGateway("pause");
                 }
