@@ -87,11 +87,13 @@ export default {
     const totalResult = await db.execute("SELECT COUNT(*) as c FROM memories");
     const totalCount = totalResult.rows[0]?.c || 0;
 
-    // Search form
-    const searchForm = `<form method="GET" action="/dashboard/memory" style="display:flex;gap:0.5rem;margin-bottom:1.5rem">
+    // Search form — targets the memory-results frame so submissions swap
+    // only the results list (+ pagination) without a full-page reload.
+    // Turbo updates the URL via data-turbo-action="advance" on the frame.
+    const searchForm = `<form method="GET" action="/dashboard/memory" data-turbo-frame="memory-results" style="display:flex;gap:0.5rem;margin-bottom:1.5rem">
       <input type="text" name="q" value="${escapeHtml(query)}" placeholder="${t("memory.searchPlaceholder", lang)}" style="flex:1">
       <button type="submit" class="btn btn-primary">${t("memory.search", lang)}</button>
-      ${query ? `<a href="/dashboard/memory" class="btn btn-secondary">${t("memory.clear", lang)}</a>` : ""}
+      ${query ? `<a href="/dashboard/memory" data-turbo-frame="memory-results" class="btn btn-secondary">${t("memory.clear", lang)}</a>` : ""}
     </form>`;
 
     // Fetch memories
@@ -180,9 +182,21 @@ export default {
       pagination = `<div style="display:flex;align-items:center;justify-content:center;gap:1rem;margin-top:1rem">${links.join("")}</div>`;
     }
 
+    // Results + pagination live inside a Turbo Frame so form submits and
+    // page-link clicks swap only the list, preserving search-form focus
+    // and scroll position. data-turbo-action="advance" pushes the URL
+    // so back/forward and bookmarks work as usual. A GET to this route
+    // always includes the frame in its full-page response, so Turbo can
+    // extract and swap it cleanly.
+    const framedResults = `
+      <turbo-frame id="memory-results" data-turbo-action="advance">
+        ${memoryList + pagination}
+      </turbo-frame>
+    `;
+
     const content = `
       ${searchForm}
-      ${section(query ? t("memory.searchResults", lang) : t("memory.recentMemories", lang), memoryList + pagination, { delay: 150 })}
+      ${section(query ? t("memory.searchResults", lang) : t("memory.recentMemories", lang), framedResults, { delay: 150 })}
     `;
 
     return layout({ title: t("memory.pageTitle", lang), content });
