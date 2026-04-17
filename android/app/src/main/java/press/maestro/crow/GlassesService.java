@@ -9,6 +9,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.ComponentName;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioManager;
@@ -20,10 +22,16 @@ import android.media.MediaFormat;
 import android.media.MediaRecorder;
 import android.service.quicksettings.TileService;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.support.v4.media.MediaMetadataCompat;
+import android.support.v4.media.session.MediaSessionCompat;
+import android.support.v4.media.session.PlaybackStateCompat;
 import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
+import androidx.media.session.MediaButtonReceiver;
+import androidx.media.app.NotificationCompat.MediaStyle;
 
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -64,10 +72,14 @@ public class GlassesService extends Service {
     public static final String EXTRA_DEVICE_ID = "device_id";
     public static final String ACTION_BEGIN_TURN = "press.maestro.crow.BEGIN_TURN";
     public static final String ACTION_END_TURN = "press.maestro.crow.END_TURN";
+    public static final String ACTION_MEDIA_TOGGLE = "press.maestro.crow.MEDIA_TOGGLE";
+    public static final String ACTION_MEDIA_STOP = "press.maestro.crow.MEDIA_STOP";
+    public static final String ACTION_MEDIA_NEXT = "press.maestro.crow.MEDIA_NEXT";
 
     private static final String TAG = "GlassesService";
     private static final String CHANNEL_ID = "glasses_service";
     private static final int NOTIFICATION_ID = 8414;
+    private static final int MEDIA_NOTIFICATION_ID = 8415;
 
     private static final String PREFS_NAME = "CrowPrefs";
     private static final String KEY_GATEWAY_URL = "gateway_url";
@@ -119,6 +131,13 @@ public class GlassesService extends Service {
     private int streamChannelsHint;
     private Thread streamDecoderThread;
     private volatile boolean streamDecoding = false;
+    private volatile boolean musicPaused = false;
+    private MediaSessionCompat mediaSession;
+    private volatile String currentTrackTitle;
+    private volatile String currentTrackArtist;
+    private volatile String currentArtworkUrl;
+    private volatile Bitmap currentArtworkBitmap;
+    private volatile boolean mediaActive = false;
     // Outstanding TTS utterances whose drain hasn't completed yet. Tracked
     // so back-to-back TTS doesn't un-duck music in the middle of utterance N+1
     // because utterance N's drain finished. duckMusic(true) increments,
@@ -130,11 +149,38 @@ public class GlassesService extends Service {
     public void onCreate() {
         super.onCreate();
         createNotificationChannel();
+        NotificationHelper.createChannels(this); // ensure CHANNEL_MEDIA exists
         http = new OkHttpClient.Builder()
                 .pingInterval(15, TimeUnit.SECONDS)
                 .readTimeout(0, TimeUnit.SECONDS)
                 .build();
         audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+
+        // MediaSession for standard Android media controls (shade, lockscreen,
+        // QS player card on 13+, BT AVRCP)
+        mediaSession = new MediaSessionCompat(this, "CrowGlasses");
+        mediaSession.setCallback(new MediaSessionCompat.Callback() {
+            // BT AVRCP sends discrete play/pause KeyEvents, not a toggle. Guard
+            // each callback so a redundant "play" while already playing doesn't pause.
+            @Override public void onPlay() {
+                if (musicPaused) {
+                    resumeMusicTrack();
+                    sendMediaControlToGateway("resume");
+                }
+            }
+            @Override public void onPause() {
+                if (!musicPaused && mediaActive) {
+                    pauseMusicTrack();
+                    sendMediaControlToGateway("pause");
+                }
+            }
+            @Override public void onStop()       { handleMediaStop(); }
+            @Override public void onSkipToNext() { handleMediaNext(); }
+        });
+        mediaSession.setMediaButtonReceiver(
+            MediaButtonReceiver.buildMediaButtonPendingIntent(this,
+                PlaybackStateCompat.ACTION_PLAY_PAUSE));
+        publishPlaybackState(PlaybackStateCompat.STATE_NONE);
     }
 
     @Override
@@ -170,6 +216,9 @@ public class GlassesService extends Service {
             endTurn();
             return START_STICKY;
         }
+        if (ACTION_MEDIA_TOGGLE.equals(action)) { handleMediaToggle(); return START_STICKY; }
+        if (ACTION_MEDIA_STOP.equals(action))   { handleMediaStop();   return START_STICKY; }
+        if (ACTION_MEDIA_NEXT.equals(action))   { handleMediaNext();   return START_STICKY; }
         if (ws == null) connectWebSocket();
         return START_STICKY;
     }
@@ -419,13 +468,20 @@ public class GlassesService extends Service {
                             // Ducking is released at the end of TTS playback in playTtsBuffer's
                             // drain thread; for now schedule a fallback restore if playback fails.
                             break;
-                        case "audio_stream_start":
+                        case "audio_stream_start": {
+                            // org.json optString(key,null) returns "null" string for
+                            // explicit-null JSON values; guard with isNull/has.
+                            String title   = (msg.has("title")       && !msg.isNull("title"))       ? msg.optString("title",       null) : null;
+                            String artist  = (msg.has("artist")      && !msg.isNull("artist"))      ? msg.optString("artist",      null) : null;
+                            String artwork = (msg.has("artwork_url") && !msg.isNull("artwork_url")) ? msg.optString("artwork_url", null) : null;
                             beginStream(
                                 msg.optString("codec", "mp3"),
                                 msg.optInt("sample_rate", 0),
-                                msg.optInt("channels", 0)
+                                msg.optInt("channels", 0),
+                                title, artist, artwork
                             );
                             break;
+                        }
                         case "audio_stream_end":
                             endStream(msg.optBoolean("ok", true), msg.optString("error", null));
                             break;
@@ -442,6 +498,18 @@ public class GlassesService extends Service {
                             String reqId = msg.optString("request_id", "");
                             handleCapturePhoto(reqId);
                             break;
+                        case "media_control": {
+                            String ctlAction = msg.optString("action", "");
+                            Log.i(TAG, "media_control action=" + ctlAction);
+                            if ("stop".equals(ctlAction)) {
+                                closeMusicTrack();
+                            } else if ("pause".equals(ctlAction)) {
+                                pauseMusicTrack();
+                            } else if ("resume".equals(ctlAction)) {
+                                resumeMusicTrack();
+                            }
+                            break;
+                        }
                         case "error":
                             Log.w(TAG, "server error: " + msg.optString("code") + " " + msg.optString("message"));
                             break;
@@ -538,7 +606,8 @@ public class GlassesService extends Service {
      * is stopped and any prior stream temp file is released so overlapping
      * starts don't leak.
      */
-    private synchronized void beginStream(String codec, int sampleRateHint, int channelsHint) {
+    private synchronized void beginStream(String codec, int sampleRateHint, int channelsHint,
+                                           String title, String artist, String artworkUrl) {
         closeMusicTrack();
         releaseStreamFile();
         streamCodec = (codec == null || codec.isEmpty()) ? "mp3" : codec.toLowerCase();
@@ -549,6 +618,20 @@ public class GlassesService extends Service {
             streamFileOut = new FileOutputStream(streamFile);
             currentInboundMode = INBOUND_STREAM;
             Log.i(TAG, "audio_stream_start codec=" + streamCodec + " sr=" + sampleRateHint + " ch=" + channelsHint + " file=" + streamFile.getName());
+            // Media metadata + notification
+            currentTrackTitle = title;
+            currentTrackArtist = artist;
+            if (artworkUrl != null && !artworkUrl.equals(currentArtworkUrl)) {
+                currentArtworkUrl = artworkUrl;
+                currentArtworkBitmap = null;
+                fetchArtworkAsync(artworkUrl);
+            } else if (artworkUrl == null) {
+                currentArtworkUrl = null;
+                currentArtworkBitmap = null;
+            }
+            publishMetadata(title, artist, currentArtworkBitmap);
+            publishPlaybackState(PlaybackStateCompat.STATE_BUFFERING);
+            postMediaNotification();
         } catch (Exception e) {
             Log.w(TAG, "beginStream failed: " + e.getMessage());
             releaseStreamFile();
@@ -589,6 +672,7 @@ public class GlassesService extends Service {
         MediaExtractor extractor = null;
         MediaCodec codec = null;
         AudioTrack track = null;
+        long framesDecoded = 0;
         try {
             extractor = new MediaExtractor();
             extractor.setDataSource(file.getAbsolutePath());
@@ -638,12 +722,17 @@ public class GlassesService extends Service {
                 try { track.setVolume(0.25f); } catch (Exception ignored) {}
             }
             track.play();
+            publishPlaybackState(PlaybackStateCompat.STATE_PLAYING);
+            new Handler(getMainLooper()).post(this::updateMediaNotification);
 
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             boolean sawInputEOS = false;
             boolean sawOutputEOS = false;
-            long framesDecoded = 0;
             while (!sawOutputEOS && streamDecoding) {
+                if (musicPaused) {
+                    try { Thread.sleep(100); } catch (InterruptedException ignored) {}
+                    continue;
+                }
                 if (!sawInputEOS) {
                     int inIdx = codec.dequeueInputBuffer(10_000);
                     if (inIdx >= 0) {
@@ -693,11 +782,22 @@ public class GlassesService extends Service {
                 synchronized (this) { if (musicTrack == track) musicTrack = null; }
             }
             try { file.delete(); } catch (Exception ignored) {}
+            // Tell the gateway this track has finished playing so it can
+            // pull the next one off the queue (album playback).
+            try {
+                WebSocket socket = ws;
+                if (socket != null) {
+                    JSONObject done = new JSONObject();
+                    done.put("type", "audio_stream_done");
+                    socket.send(done.toString());
+                }
+            } catch (Exception ignored) {}
         }
     }
 
     private synchronized void closeMusicTrack() {
         streamDecoding = false;
+        musicPaused = false;
         Thread t = streamDecoderThread;
         streamDecoderThread = null;
         // The decoder thread will stop + release its own AudioTrack when
@@ -712,11 +812,217 @@ public class GlassesService extends Service {
         if (t != null) {
             new Thread(() -> { try { t.join(500); } catch (InterruptedException ignored) {} }, "stream-decoder-join").start();
         }
+        currentTrackTitle = null;
+        currentTrackArtist = null;
+        currentArtworkUrl = null;
+        currentArtworkBitmap = null;
+        // Only publish STOPPED + clear notification if the media UI was actually
+        // active — avoids flicker when beginStream calls closeMusicTrack() to
+        // replace the current track with a new one.
+        if (mediaActive) {
+            publishPlaybackState(PlaybackStateCompat.STATE_STOPPED);
+            clearMediaNotification();
+        }
+    }
+
+    private synchronized void pauseMusicTrack() {
+        AudioTrack t = musicTrack;
+        if (t != null && streamDecoding) {
+            musicPaused = true;
+            try { t.pause(); } catch (Exception ignored) {}
+            Log.i(TAG, "music paused");
+            publishPlaybackState(PlaybackStateCompat.STATE_PAUSED);
+            updateMediaNotification();
+        }
+    }
+
+    private synchronized void resumeMusicTrack() {
+        AudioTrack t = musicTrack;
+        if (t != null && streamDecoding) {
+            musicPaused = false;
+            try { t.play(); } catch (Exception ignored) {}
+            Log.i(TAG, "music resumed");
+            publishPlaybackState(PlaybackStateCompat.STATE_PLAYING);
+            updateMediaNotification();
+        }
     }
 
     private synchronized void releaseStreamFile() {
         if (streamFileOut != null) { try { streamFileOut.close(); } catch (Exception ignored) {} streamFileOut = null; }
         if (streamFile != null) { try { streamFile.delete(); } catch (Exception ignored) {} streamFile = null; }
+    }
+
+    // --- MediaSession + MediaStyle notification ---
+
+    private void handleMediaToggle() {
+        if (musicPaused) {
+            resumeMusicTrack();
+            sendMediaControlToGateway("resume");
+        } else {
+            pauseMusicTrack();
+            sendMediaControlToGateway("pause");
+        }
+    }
+
+    private void handleMediaStop() {
+        sendMediaControlToGateway("stop");
+        closeMusicTrack();
+    }
+
+    private void handleMediaNext() {
+        publishPlaybackState(PlaybackStateCompat.STATE_SKIPPING_TO_NEXT);
+        sendMediaControlToGateway("next");
+    }
+
+    private void sendMediaControlToGateway(String action) {
+        WebSocket socket = ws;
+        if (socket == null) return;
+        try {
+            JSONObject msg = new JSONObject();
+            msg.put("type", "media_control");
+            msg.put("action", action);
+            socket.send(msg.toString());
+        } catch (Exception ignored) {}
+    }
+
+    private void publishPlaybackState(int state) {
+        if (mediaSession == null) return;
+        long actions = PlaybackStateCompat.ACTION_PLAY
+                     | PlaybackStateCompat.ACTION_PAUSE
+                     | PlaybackStateCompat.ACTION_PLAY_PAUSE
+                     | PlaybackStateCompat.ACTION_STOP
+                     | PlaybackStateCompat.ACTION_SKIP_TO_NEXT;
+        PlaybackStateCompat ps = new PlaybackStateCompat.Builder()
+            .setActions(actions)
+            .setState(state, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f)
+            .build();
+        mediaSession.setPlaybackState(ps);
+        mediaSession.setActive(state == PlaybackStateCompat.STATE_PLAYING
+                            || state == PlaybackStateCompat.STATE_PAUSED
+                            || state == PlaybackStateCompat.STATE_BUFFERING
+                            || state == PlaybackStateCompat.STATE_SKIPPING_TO_NEXT);
+    }
+
+    private void publishMetadata(String title, String artist, Bitmap art) {
+        if (mediaSession == null) return;
+        MediaMetadataCompat.Builder b = new MediaMetadataCompat.Builder()
+            .putString(MediaMetadataCompat.METADATA_KEY_TITLE,  title  == null ? "" : title)
+            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist == null ? "" : artist)
+            .putString(MediaMetadataCompat.METADATA_KEY_ALBUM_ARTIST, artist == null ? "" : artist);
+        if (art != null) {
+            b.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, art);
+            b.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, art);
+        }
+        mediaSession.setMetadata(b.build());
+    }
+
+    private Notification buildMediaNotification() {
+        if (mediaSession == null) return null;
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
+        PendingIntent togglePi = PendingIntent.getForegroundService(this, 10,
+            new Intent(this, GlassesService.class).setAction(ACTION_MEDIA_TOGGLE), flags);
+        PendingIntent stopPi = PendingIntent.getForegroundService(this, 11,
+            new Intent(this, GlassesService.class).setAction(ACTION_MEDIA_STOP), flags);
+        PendingIntent nextPi = PendingIntent.getForegroundService(this, 12,
+            new Intent(this, GlassesService.class).setAction(ACTION_MEDIA_NEXT), flags);
+        PendingIntent contentPi = PendingIntent.getActivity(this, 13,
+            new Intent(this, MainActivity.class).setFlags(
+                Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            flags);
+
+        int toggleIcon = musicPaused ? android.R.drawable.ic_media_play : android.R.drawable.ic_media_pause;
+        String toggleLabel = musicPaused ? "Play" : "Pause";
+
+        NotificationCompat.Builder b = new NotificationCompat.Builder(this, NotificationHelper.CHANNEL_MEDIA)
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setContentTitle(currentTrackTitle  == null || currentTrackTitle.isEmpty()  ? "Crow" : currentTrackTitle)
+            .setContentText (currentTrackArtist == null || currentTrackArtist.isEmpty() ? null  : currentTrackArtist)
+            .setContentIntent(contentPi)
+            .setDeleteIntent(stopPi)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setOngoing(!musicPaused)
+            .setOnlyAlertOnce(true)
+            .addAction(toggleIcon, toggleLabel, togglePi)
+            .addAction(android.R.drawable.ic_media_next, "Next", nextPi)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopPi)
+            .setStyle(new MediaStyle()
+                .setMediaSession(mediaSession.getSessionToken())
+                .setShowActionsInCompactView(0, 1, 2)
+                .setShowCancelButton(true)
+                .setCancelButtonIntent(stopPi));
+        if (currentArtworkBitmap != null) {
+            b.setLargeIcon(currentArtworkBitmap);
+        }
+        return b.build();
+    }
+
+    private void postMediaNotification() {
+        mediaActive = true;
+        Notification n = buildMediaNotification();
+        if (n == null) return;
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        if (nm != null) nm.notify(MEDIA_NOTIFICATION_ID, n);
+    }
+
+    private void updateMediaNotification() {
+        if (!mediaActive) return;
+        Notification n = buildMediaNotification();
+        if (n == null) return;
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        if (nm != null) nm.notify(MEDIA_NOTIFICATION_ID, n);
+    }
+
+    private void clearMediaNotification() {
+        mediaActive = false;
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        if (nm != null) nm.cancel(MEDIA_NOTIFICATION_ID);
+    }
+
+    /**
+     * Fetch album artwork via the gateway proxy. Phone never connects to
+     * arbitrary URLs — only to the gateway, which validates the src host.
+     * Downsamples to ~512px max to keep bitmap memory bounded.
+     */
+    private void fetchArtworkAsync(String artworkUrl) {
+        if (artworkUrl == null || artworkUrl.isEmpty()) return;
+        final String requestedUrl = artworkUrl;
+        new Thread(() -> {
+            try {
+                SharedPreferences p = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+                String gateway = p.getString(KEY_GATEWAY_URL, null);
+                if (gateway == null) return;
+                String token = GlassesTokenStore.load(this, deviceId);
+                if (token == null) return;
+                String base = gateway.replaceAll("/+$", "");
+                String proxied = base + "/api/meta-glasses/artwork?src="
+                               + java.net.URLEncoder.encode(requestedUrl, "UTF-8")
+                               + "&device_id=" + java.net.URLEncoder.encode(deviceId, "UTF-8");
+                Request req = new Request.Builder()
+                    .url(proxied)
+                    .header("Authorization", "Bearer " + token)
+                    .build();
+                try (Response resp = http.newCall(req).execute()) {
+                    if (!resp.isSuccessful() || resp.body() == null) return;
+                    byte[] bytes = resp.body().bytes();
+                    BitmapFactory.Options o1 = new BitmapFactory.Options();
+                    o1.inJustDecodeBounds = true;
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.length, o1);
+                    int sample = 1;
+                    int maxDim = Math.max(o1.outWidth, o1.outHeight);
+                    while (maxDim > 0 && maxDim / sample > 512) sample *= 2;
+                    BitmapFactory.Options o2 = new BitmapFactory.Options();
+                    o2.inSampleSize = sample;
+                    Bitmap bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, o2);
+                    if (bmp == null) return;
+                    if (!requestedUrl.equals(currentArtworkUrl)) return;
+                    currentArtworkBitmap = bmp;
+                    new Handler(getMainLooper()).post(() -> {
+                        publishMetadata(currentTrackTitle, currentTrackArtist, currentArtworkBitmap);
+                        updateMediaNotification();
+                    });
+                }
+            } catch (Exception ignored) {}
+        }, "artwork-fetch").start();
     }
 
     /**
@@ -814,6 +1120,13 @@ public class GlassesService extends Service {
         closeAudioTrack();
         closeMusicTrack();
         releaseStreamFile();
+        // Clear media notification BEFORE releasing the session
+        clearMediaNotification();
+        if (mediaSession != null) {
+            try { mediaSession.setActive(false); } catch (Exception ignored) {}
+            try { mediaSession.release(); } catch (Exception ignored) {}
+            mediaSession = null;
+        }
     }
 
     @Override

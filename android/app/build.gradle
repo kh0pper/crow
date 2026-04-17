@@ -14,8 +14,8 @@ android {
         //   - Meta Wearables DAT SDK (mwdat-*) targets API 34+
         minSdk 34
         targetSdk 34
-        versionCode 6
-        versionName "1.4.1"
+        versionCode 9
+        versionName "1.4.4"
     }
 
     signingConfigs {
@@ -46,6 +46,7 @@ android {
 
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'androidx.media:media:1.7.0'
     implementation 'androidx.webkit:webkit:1.8.0'
     implementation 'androidx.preference:preference:1.2.1'
     implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'

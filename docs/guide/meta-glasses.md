@@ -206,6 +206,57 @@ curl -X POST http://localhost:3000/api/meta-glasses/stream \
   -d '{"device_id":"<id>","url":"https://...mp3","codec":"mp3"}'
 ```
 
+## Music playback
+
+The glasses are a full music-playback target. When you (or the AI) request a
+track, audio is streamed from the gateway to your phone over the session
+WebSocket, decoded on-device via MediaCodec, and played through the glasses'
+speakers via A2DP.
+
+### Voice commands
+
+- **"Play Person Pitch by Panda Bear"** → the AI calls `fw_play_album`,
+  queues the album, and music begins.
+- **"Play Comfy in Nautica"** → the AI calls `fw_play` for the single track.
+- **"Stop"** / **"Pause"** / **"Resume"** / **"Next"** / **"Skip"** — simple
+  media commands are recognized via a fast-path that bypasses the LLM entirely
+  (~800 ms response time vs ~5–8 s for full LLM-mediated commands).
+
+### Touch controls
+
+Install the [Music panel](/guide/music) for a browse-and-tap experience.
+Every track row has a **👓 Play on Glasses** button that routes audio to
+the glasses with one tap — no voice required.
+
+### Android media notification
+
+While music plays, a standard **Android media-style notification** appears
+in the phone's notification shade and on the lockscreen, showing:
+
+- Album art (fetched via a gateway-side artwork proxy; SSRF-guarded)
+- Track title and artist
+- Play/pause, next, and stop buttons
+- Close button
+
+The notification is backed by `MediaSessionCompat` + `MediaStyle`, so:
+
+- Bluetooth headset play/pause hardware keys work automatically
+- On Android 13+, the rich **Quick Settings media card** appears alongside
+  the shade notification
+- Notification button taps and media-key events sync back to the gateway so
+  server-side playback state and the Crow's Nest persistent media bar stay
+  consistent — no feedback loops
+
+### Listen history
+
+Every track played through the glasses is recorded in Funkwhale's listen
+history automatically. The **Recent** tab in the Music panel and the
+**Recent Listens** section in the Funkwhale panel both populate from this.
+
+The listen is recorded **after the upstream fetch succeeds** (not on request),
+so failed fetches don't log phantom listens. One listen per track start (not
+scrobble-grade "50% + 4 minutes").
+
 ## Household profiles
 
 If you share your Crow with family, pair each person's glasses separately
@@ -257,6 +308,8 @@ The `/session` protocol is documented in the bundle's `README.md`.
 
 ## Related guides
 
+- [Music](/guide/music) — Crow-native music panel with browse/search/queue and a "Play on Glasses" button
+- [Funkwhale integration](/integrations/funkwhale) — server setup and federation
 - [AI Providers (BYOAI)](/guide/ai-providers)
 - Speech-to-Text settings live at `Settings → Speech-to-Text` in your Crow dashboard
 - Text-to-Speech settings live at `Settings → Text-to-Speech` in your Crow dashboard
