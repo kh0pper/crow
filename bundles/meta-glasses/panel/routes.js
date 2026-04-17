@@ -1417,7 +1417,60 @@ export function setupWebSocket(server) {
   return { openSessionCount: () => _sessions.size };
 }
 
-/* ---------- Phase 5: photo library insert + caption ---------- */
+/* ---------- Phase 5: photo library insert + caption + OCR ---------- */
+
+// Per-device daily OCR cap. Guards against unbounded vision spend on a
+// device that captures continuously. At 200 OCRs/device/day, even a
+// 3-device household stays under ~600 vision calls/day. Exceeding the
+// cap silently skips OCR for the remainder of the day; the caption
+// pipeline still runs. Tuned conservatively; raise if real usage
+// warrants it. There's a known micro-race: two concurrent captures at
+// count 199 can both pass the check and produce 201 writes. Acceptable
+// slop — the cap is a budget guard, not a billing-strict limit.
+const OCR_DAILY_CAP_PER_DEVICE = 200;
+
+// PII redaction patterns applied to OCR text before it lands in the
+// FTS index. Best-effort by design: the settings disclaimer makes
+// clear we can't redact names, addresses, account numbers, or any
+// format that doesn't match one of these four. The CC regex is Luhn-
+// loose — it false-positives on long digit runs (timestamps, CSV
+// numeric columns) which is the safe direction for privacy but a
+// minor search-quality cost.
+const PII_PATTERNS = [
+  /\b\d{3}-\d{2}-\d{4}\b/g,                                   // SSN
+  /\b(?:\d[ -]*?){13,19}\b/g,                                 // CC (Luhn-loose)
+  /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,      // email
+  /\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g, // US phone
+];
+
+function redactPII(text) {
+  let t = text;
+  for (const re of PII_PATTERNS) t = t.replace(re, "[REDACTED]");
+  return t;
+}
+
+// Vision models don't reliably honor the literal "." sentinel prompt —
+// they emit "No text.", "There is no text in this image.", "I can't
+// read this.", etc. Anything under 3 characters (just "." or stray
+// whitespace) or matching one of the common no-text/refusal phrases is
+// treated as empty. Downside of a false-empty is a missing search
+// hit; downside of a false-positive-text is searchable garbage, so we
+// err toward dropping.
+const EMPTY_OCR_PATTERNS = [
+  /^[\s.,\-–—]*$/,                                        // whitespace/punct only
+  /^\s*(no[\s_-]?text|none|empty|n\/a)\s*\.?\s*$/i,
+  /^\s*there\s+is\s+no\s+text/i,
+  /^\s*the\s+image\s+(contains|has)\s+no\s+(legible\s+)?text/i,
+  /^\s*i\s+(can'?t|cannot|am\s+unable)/i,                 // refusals
+  /^\s*i'?m\s+(sorry|unable)/i,
+];
+
+function cleanOcrResponse(raw) {
+  const t = (raw || "").trim();
+  if (t.length < 3) return "";
+  for (const re of EMPTY_OCR_PATTERNS) if (re.test(t)) return "";
+  return t;
+}
 
 async function recordGlassesPhoto({ deviceId, diskPath, fname, mime, size }) {
   const { createDbClient } = await loadDb();
@@ -1500,10 +1553,11 @@ async function recordGlassesPhoto({ deviceId, diskPath, fname, mime, size }) {
 
       const { analyzeImage } = await loadVision();
       const { readFileSync } = await import("node:fs");
+      const imageBytes = readFileSync(diskPath);
       const { description } = await analyzeImage({
         providerConfig,
         prompt: "Briefly describe what's in this image (1 sentence). This is a searchable library caption.",
-        imageBytes: readFileSync(diskPath),
+        imageBytes,
         mime,
         timeoutMs: 30_000,
         maxTokens: 100,
@@ -1512,6 +1566,48 @@ async function recordGlassesPhoto({ deviceId, diskPath, fname, mime, size }) {
         sql: `UPDATE glasses_photos SET caption = ? WHERE id = ?`,
         args: [description || null, photoId],
       });
+
+      // Phase 5 B.2: opt-in OCR with per-device daily cap + PII redaction.
+      // Off by default. Enabling runs a SECOND analyzeImage call with an
+      // OCR prompt; the response passes through cleanOcrResponse (to
+      // reject model hallucinations / refusals / empty sentinels) and
+      // then through redactPII (a small regex set) before it's written
+      // to the FTS-indexed ocr_text column.
+      try {
+        const { findDevice } = await loadDeviceStore();
+        const device = await findDevice(db2, deviceId);
+        if (device?.ocr_enabled) {
+          const today = new Date().toISOString().slice(0, 10);
+          const { rows: cap } = await db2.execute({
+            sql: `SELECT COUNT(*) AS n FROM glasses_photos
+                  WHERE device_id = ? AND DATE(captured_at) = ? AND ocr_text IS NOT NULL`,
+            args: [deviceId, today],
+          });
+          const used = Number(cap?.[0]?.n ?? 0);
+          if (used < OCR_DAILY_CAP_PER_DEVICE) {
+            const { description: rawOcr } = await analyzeImage({
+              providerConfig,
+              prompt: "Extract all legible text from this image verbatim, line by line. If no legible text is present, respond with a single period character '.'",
+              imageBytes,
+              mime,
+              timeoutMs: 30_000,
+              maxTokens: 500,
+            });
+            const cleaned = cleanOcrResponse(rawOcr);
+            if (cleaned) {
+              const redacted = redactPII(cleaned);
+              await db2.execute({
+                sql: `UPDATE glasses_photos SET ocr_text = ? WHERE id = ?`,
+                args: [redacted, photoId],
+              });
+            }
+          } else {
+            console.log(`[meta-glasses] OCR daily cap reached for device=${deviceId} (${used}/${OCR_DAILY_CAP_PER_DEVICE}); skipping photo ${photoId}`);
+          }
+        }
+      } catch (err) {
+        console.warn(`[meta-glasses] OCR pipeline error for photo ${photoId}: ${err.message}`);
+      }
     } finally {
       try { db2.close(); } catch {}
     }
