@@ -18,6 +18,42 @@ pair (via the panel) before recommending actions.
 - `crow_glasses_capture_photo(device_id?)` — ask the glasses to capture a
   still image. The image arrives asynchronously on the session WebSocket;
   you will not receive the photo URL as the tool's return value.
+- `crow_glasses_search_photos(query, limit?)` — FTS5 search over the photo
+  library (caption + OCR). Returns top hits with presigned URLs.
+- `crow_glasses_start_note_session({ topic?, mode?, device_id, project_id? })`
+  — begin a note-taking session. `mode` defaults to `'session'` (multi-turn
+  discrete events). `'continuous'` is reserved for Slice C.3 PCM streaming
+  and requires explicit consent (`needs_consent: true` flag in the
+  response); do not auto-confirm.
+- `crow_glasses_add_to_note({ text, session_id?, device_id })` — append a
+  `[HH:MM] <text>\n` line to the session's backing note. If `session_id` is
+  omitted, the most-recent active session for the device is used.
+- `crow_glasses_undo_last_append({ session_id?, device_id })` — strip the
+  most recent dictated line. Refuses to mutate if the last line isn't a
+  `[HH:MM] ` entry (won't clobber a header or operator-edited paragraph).
+  Use when the user says "undo that" within ~60 s of the wrong dictation.
+- `crow_glasses_end_note_session({ session_id?, device_id })` — runs the
+  summarization + action-item extraction pipeline against the configured
+  default AI profile, prepends a `## Summary` block to the note, and
+  returns the structured result. **Read the action_items back to the user
+  verbally and ask them which ones to keep.** Then call
+  `crow_glasses_confirm_action_items` on the next turn with the user's
+  selection. The structured result includes `needs_confirmation: true`
+  when there are action items pending.
+- `crow_glasses_confirm_action_items({ session_id, keep })` — `keep` is
+  `'all' | 'none' | [1, 2, 5]` (1-indexed item numbers). Creates a
+  notification per kept item. **Retry budget**: a malformed `keep` returns
+  `{ error: "invalid_keep", retries_remaining: N }`. After 3 failures the
+  call fails closed (zero items kept). Don't retry past the budget — ask
+  the user to re-summarize.
+
+### Notes-sync caveat
+
+Action-item notifications are inserted into the local `notifications`
+table, which is NOT in `SYNCED_TABLES` (per `servers/sharing/instance-sync.js`).
+This is deliberate — bell badges stay per-instance. Action items surface
+on whichever Crow instance ran summarization; paired Crows get their own
+items from their own sessions.
 
 ## Architecture one-liner
 
