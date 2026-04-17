@@ -965,6 +965,23 @@ export default function metaGlassesRouter(dashboardAuth) {
     res.redirectAfterPost("/dashboard/meta-glasses?tab=library");
   });
 
+  // Library: run the daily retention pipeline now (operator-triggered).
+  // Useful for verifying the cron without waiting until 03:00. Returns a
+  // JSON summary so the UI can show what changed.
+  router.post("/dashboard/meta-glasses/library/retention-run", dashboardAuth, async (req, res) => {
+    const { createDbClient } = await loadDb();
+    const db = createDbClient();
+    try {
+      const summary = await runPhotoRetention(db);
+      res.json({ ok: true, summary });
+    } catch (err) {
+      console.warn(`[meta-glasses] retention-run failed: ${err.message}`);
+      res.status(500).json({ ok: false, error: err.message });
+    } finally {
+      try { db.close(); } catch {}
+    }
+  });
+
   // Operator endpoint: push an audio stream (compressed media) to a paired
   // device. Useful for diagnostics, testing the Phase 4 MediaCodec path, or
   // playing arbitrary content from the Nest without going through the LLM.
@@ -1743,6 +1760,205 @@ export async function searchGlassesPhotos(query, { limit = 10 } = {}) {
   } finally {
     try { db.close(); } catch {}
   }
+}
+
+/* ---------- Phase 5 B.4: photo retention cron + disk backfill ----------
+ *
+ * Three helpers + one public entry point:
+ *   - backfillGlassesPhoto(db, row)          — migrate one disk-only row into MinIO
+ *   - reclaimBackfilledDiskCopies(db)        — unlink disk copies past the grace window
+ *   - pruneGlassesPhotos(db)                 — per-device retention + orphan sweep
+ *   - runPhotoRetention(db, { budgetMs })    — exported, called by scheduler/admin
+ *
+ * Disk-only rows are NEVER pruned — doing so during a MinIO outage is
+ * unrecoverable data loss. Orphan sweep TTL is measured from the unpair
+ * timestamp recorded in `dashboard_settings` (keyed
+ * `meta_glasses_device_unpaired.<device_id>` by unpairDevice).
+ */
+
+async function backfillGlassesPhoto(db, row) {
+  const { isAvailable, uploadObject, deleteObject } = await loadS3();
+  if (!(await isAvailable())) return { skipped: "no-storage" };
+  const { existsSync, readFileSync } = await import("node:fs");
+  if (!row.disk_path || !existsSync(row.disk_path)) {
+    return { skipped: "disk-missing" };
+  }
+  const ext = (row.mime?.split("/")[1] || "jpg").split("+")[0];
+  const key = `meta-glasses/${row.device_id}/backfill-${row.id}-${Date.now()}.${ext}`;
+  try {
+    await uploadObject(key, readFileSync(row.disk_path), { contentType: row.mime });
+    const upd = await db.execute({
+      sql: `UPDATE glasses_photos SET minio_key = ? WHERE id = ? AND minio_key IS NULL`,
+      args: [key, row.id],
+    });
+    if (Number(upd.rowsAffected || 0) === 0) {
+      // Lost a race — the row was updated/deleted between SELECT and UPDATE.
+      // Remove the orphan we just uploaded (idempotent on 404).
+      try { await deleteObject(key); } catch {}
+      return { skipped: "already-migrated" };
+    }
+    return { migrated: key };
+  } catch (err) {
+    try { await deleteObject(key); } catch {}
+    return { failed: err.message };
+  }
+}
+
+async function reclaimBackfilledDiskCopies(db) {
+  const { unlinkSync } = await import("node:fs");
+  const DISK_GRACE_DAYS = 7;
+  const { rows } = await db.execute({
+    sql: `SELECT id, disk_path FROM glasses_photos
+          WHERE minio_key IS NOT NULL AND disk_path IS NOT NULL
+            AND captured_at < datetime('now', ?)`,
+    args: [`-${DISK_GRACE_DAYS} days`],
+  });
+  let reclaimed = 0;
+  for (const row of rows) {
+    if (row.disk_path) { try { unlinkSync(row.disk_path); } catch {} }
+    await db.execute({
+      sql: `UPDATE glasses_photos SET disk_path = NULL WHERE id = ?`,
+      args: [row.id],
+    });
+    reclaimed++;
+  }
+  return { reclaimed };
+}
+
+async function pruneGlassesPhotos(db) {
+  const { listDevices } = await loadDeviceStore();
+  const { deleteObject } = await loadS3();
+  const { unlinkSync } = await import("node:fs");
+  const devices = await listDevices(db);
+  const activeIds = new Set(devices.map(d => d.id));
+  let prunedTotal = 0;
+
+  // Per-device retention prune (MinIO-backed rows only — disk-only
+  // rows are preserved indefinitely until backfilled).
+  for (const d of devices) {
+    const retention = d.photo_retention || "never";
+    if (retention === "never") continue;
+    const days = retention === "30d" ? 30 : retention === "1y" ? 365 : 0;
+    if (!days) continue;
+    const { rows } = await db.execute({
+      sql: `SELECT id, minio_key, disk_path FROM glasses_photos
+            WHERE device_id = ? AND captured_at < datetime('now', ?)
+              AND minio_key IS NOT NULL`,
+      args: [d.id, `-${days} days`],
+    });
+    for (const row of rows) {
+      try { await deleteObject(row.minio_key); } catch {}
+      if (row.disk_path) { try { unlinkSync(row.disk_path); } catch {} }
+      await db.execute({ sql: `DELETE FROM glasses_photos WHERE id = ?`, args: [row.id] });
+      prunedTotal++;
+    }
+  }
+
+  // Orphan sweep. TTL measured from unpair time, not captured_at.
+  const ORPHAN_GRACE_DAYS = 7;
+  const { rows: unpairRows } = await db.execute({
+    sql: `SELECT key, value FROM dashboard_settings
+          WHERE key LIKE 'meta_glasses_device_unpaired.%'`,
+    args: [],
+  });
+  for (const urow of unpairRows) {
+    const unpairedDeviceId = String(urow.key).replace(/^meta_glasses_device_unpaired\./, "");
+    if (activeIds.has(unpairedDeviceId)) {
+      // Re-paired — clear the marker. (pairDevice also clears it; this is
+      // a belt-and-suspenders cleanup for markers that pre-dated the
+      // pair-side delete.)
+      await db.execute({
+        sql: `DELETE FROM dashboard_settings WHERE key = ?`,
+        args: [urow.key],
+      });
+      continue;
+    }
+    const unpairedAt = new Date(urow.value).getTime();
+    if (Number.isNaN(unpairedAt)) continue;
+    const ageDays = (Date.now() - unpairedAt) / 86_400_000;
+    if (ageDays < ORPHAN_GRACE_DAYS) continue;
+    const { rows: orphanRows } = await db.execute({
+      sql: `SELECT id, minio_key, disk_path FROM glasses_photos
+            WHERE device_id = ? AND minio_key IS NOT NULL`,
+      args: [unpairedDeviceId],
+    });
+    for (const row of orphanRows) {
+      try { await deleteObject(row.minio_key); } catch {}
+      if (row.disk_path) { try { unlinkSync(row.disk_path); } catch {} }
+      await db.execute({ sql: `DELETE FROM glasses_photos WHERE id = ?`, args: [row.id] });
+      prunedTotal++;
+    }
+    const { rows: rem } = await db.execute({
+      sql: `SELECT COUNT(*) AS n FROM glasses_photos WHERE device_id = ?`,
+      args: [unpairedDeviceId],
+    });
+    if (Number(rem?.[0]?.n ?? 0) === 0) {
+      await db.execute({
+        sql: `DELETE FROM dashboard_settings WHERE key = ?`,
+        args: [urow.key],
+      });
+    }
+  }
+
+  return { prunedTotal };
+}
+
+export async function runPhotoRetention(db, { budgetMs = 60_000 } = {}) {
+  const started = Date.now();
+  const summary = { backfilled: 0, backfill_skipped: 0, backfill_failed: 0, reclaimed: 0, pruned: 0 };
+  const BATCH_SIZE = 50;
+  // 1. Backfill disk-only rows in batches until queue drains OR budget exhausts.
+  // Pre-flight: skip the entire backfill loop if MinIO is unavailable.
+  // Without this guard the SELECT keeps re-finding the same skipped rows
+  // forever, burning the time budget on no-ops.
+  let s3Ready = false;
+  try {
+    const { isAvailable } = await loadS3();
+    s3Ready = await isAvailable();
+  } catch {}
+  if (!s3Ready) {
+    summary.backfill_skipped_no_storage = true;
+  } else {
+    // Track IDs that returned a non-fatal skip (e.g. disk-missing ghost
+    // rows) so the next SELECT doesn't re-fetch them and stall the loop.
+    const skippedIds = new Set();
+    while (Date.now() - started < budgetMs) {
+      const placeholders = skippedIds.size > 0 ? `AND id NOT IN (${[...skippedIds].map(() => "?").join(",")})` : "";
+      const { rows: pending } = await db.execute({
+        sql: `SELECT id, device_id, disk_path, mime FROM glasses_photos
+              WHERE minio_key IS NULL AND disk_path IS NOT NULL ${placeholders} LIMIT ?`,
+        args: [...skippedIds, BATCH_SIZE],
+      });
+      if (pending.length === 0) break;
+      for (const row of pending) {
+        try {
+          const r = await backfillGlassesPhoto(db, row);
+          if (r.migrated) summary.backfilled++;
+          else if (r.failed) { summary.backfill_failed++; skippedIds.add(row.id); }
+          else { summary.backfill_skipped++; skippedIds.add(row.id); }
+        } catch {
+          summary.backfill_failed++;
+          skippedIds.add(row.id);
+        }
+      }
+    }
+  }
+  // 2. Reclaim disk copies past the grace window.
+  try {
+    const r = await reclaimBackfilledDiskCopies(db);
+    summary.reclaimed = r.reclaimed || 0;
+  } catch (err) {
+    console.warn(`[meta-glasses] reclaim failed: ${err.message}`);
+  }
+  // 3. Prune per-device retention + orphan sweep.
+  try {
+    const r = await pruneGlassesPhotos(db);
+    summary.pruned = r.prunedTotal || 0;
+  } catch (err) {
+    console.warn(`[meta-glasses] prune failed: ${err.message}`);
+  }
+  summary.elapsed_ms = Date.now() - started;
+  return summary;
 }
 
 /* ---------- Phase 4: audio_stream proxy (Android MediaCodec pending) ----------
