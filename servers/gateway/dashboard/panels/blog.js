@@ -121,10 +121,25 @@ export default {
       </form>
     </div>`;
 
-    // Post list
-    const posts = await db.execute({
-      sql: "SELECT id, slug, title, status, visibility, tags, published_at, created_at, cover_image_key FROM blog_posts ORDER BY created_at DESC LIMIT 50",
+    // Post list (paginated). Page size stays 50 — that's what the
+    // pre-pagination code rendered per page, so existing blogs don't
+    // see a scroll-position shift on first nav.
+    const POSTS_PER_PAGE = 50;
+    const blogPage = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const blogOffset = (blogPage - 1) * POSTS_PER_PAGE;
+
+    const postCountRow = await db.execute({
+      sql: "SELECT COUNT(*) AS c FROM blog_posts",
       args: [],
+    });
+    const totalPostCount = postCountRow.rows[0]?.c || 0;
+    const totalPostPages = Math.max(1, Math.ceil(totalPostCount / POSTS_PER_PAGE));
+    const boundedPage = Math.min(blogPage, totalPostPages);
+    const boundedOffset = (boundedPage - 1) * POSTS_PER_PAGE;
+
+    const posts = await db.execute({
+      sql: "SELECT id, slug, title, status, visibility, tags, published_at, created_at, cover_image_key FROM blog_posts ORDER BY created_at DESC LIMIT ? OFFSET ?",
+      args: [POSTS_PER_PAGE, boundedOffset],
     });
 
     let postTable;
@@ -157,6 +172,32 @@ export default {
       });
       postTable = dataTable([t("blog.tableTitle", lang), t("blog.tableStatus", lang), t("blog.tableSlug", lang), t("blog.tableDate", lang), t("blog.tableActions", lang)], rows);
     }
+
+    // Pagination controls. Omitted when only one page exists.
+    let postPagination = "";
+    if (totalPostPages > 1) {
+      const pLinks = [];
+      if (boundedPage > 1) {
+        pLinks.push(`<a href="?page=${boundedPage - 1}" class="btn btn-sm btn-secondary">${t("memory.previous", lang)}</a>`);
+      }
+      pLinks.push(`<span style="color:var(--crow-text-muted);font-size:0.85rem">${boundedPage} / ${totalPostPages} (${totalPostCount})</span>`);
+      if (boundedPage < totalPostPages) {
+        pLinks.push(`<a href="?page=${boundedPage + 1}" class="btn btn-sm btn-secondary">${t("memory.next", lang)}</a>`);
+      }
+      postPagination = `<div style="display:flex;align-items:center;justify-content:center;gap:1rem;margin-top:1rem">${pLinks.join("")}</div>`;
+    }
+
+    // Wrap the list + pagination in a Turbo Frame so page clicks swap
+    // the table without rebuilding the post-form below (which may have
+    // cover-image + markdown-editor state the user is in the middle of
+    // editing). data-turbo-action="advance" keeps the URL in sync for
+    // back/forward + bookmarks.
+    const framedPostList = `
+      <turbo-frame id="blog-post-list" data-turbo-action="advance">
+        ${postTable}
+        ${postPagination}
+      </turbo-frame>
+    `;
 
     // Post form (create or edit)
     const isEdit = !!editPost;
@@ -222,7 +263,7 @@ export default {
 
     const content = `
       ${blogLink}
-      ${section(t("blog.postsSection", lang), postTable, { delay: 150 })}
+      ${section(t("blog.postsSection", lang), framedPostList, { delay: 150 })}
       ${section(formTitle, postForm, { delay: 200 })}
       <script>
       (function() {
