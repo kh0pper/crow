@@ -808,21 +808,28 @@ public class GlassesService extends Service {
     }
 
     private synchronized void closeMusicTrack() {
+        // Signal the decoder loop to exit. Earlier versions flipped the flag
+        // and detached a join thread, but that let closeMusicTrack return
+        // while the prior decoder was still releasing its MediaCodec/AudioTrack.
+        // When a new audio_stream_start followed immediately, two decoders
+        // could overlap on the same C2 codec slot / A2DP sink, producing
+        // static. We now interrupt the pause-sleep so the loop wakes right
+        // away, then bounded-join on the decoder thread so the codec and
+        // extractor finish releasing before we return. Field teardown then
+        // happens in a well-defined, quiesced state.
         streamDecoding = false;
         musicPaused = false;
         Thread t = streamDecoderThread;
         streamDecoderThread = null;
-        // The decoder thread will stop + release its own AudioTrack when
-        // streamDecoding flips to false. Give it a brief moment to exit so
-        // overlapping begin/end calls don't race; don't block the WS thread.
+        if (t != null) {
+            try { t.interrupt(); } catch (Exception ignored) {}
+            try { t.join(1500); } catch (InterruptedException ignored) {}
+        }
         AudioTrack mt = musicTrack;
         musicTrack = null;
         if (mt != null) {
             try { mt.stop(); } catch (Exception ignored) {}
             try { mt.release(); } catch (Exception ignored) {}
-        }
-        if (t != null) {
-            new Thread(() -> { try { t.join(500); } catch (InterruptedException ignored) {} }, "stream-decoder-join").start();
         }
         currentTrackTitle = null;
         currentTrackArtist = null;

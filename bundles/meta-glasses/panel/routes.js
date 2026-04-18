@@ -696,6 +696,12 @@ LONG WORK via the orchestrator. For research, multi-step analysis, code work, or
       }
       const remoteResults = remoteCalls.length ? await toolExecutor.executeToolCalls(remoteCalls) : [];
       const results = [...localResults, ...remoteResults];
+      // Only one _audio_stream envelope per turn may actually dispatch to the
+      // device — a prior bug allowed two concurrent pushAudioStream invocations
+      // (LLM calling fw_play twice in one turn) to interleave their MP3 bytes
+      // over the single WebSocket, corrupting Android's temp file and producing
+      // static. Collect envelopes during the loop and dispatch only the last.
+      let latestAudioStream = null;
       for (const r of results) {
         // Intercept `_audio_stream` envelopes: trigger pushAudioStream to the
         // paired device and replace the LLM-visible result with a short prose
@@ -748,41 +754,18 @@ LONG WORK via the orchestrator. For research, multi-step analysis, code work, or
             const parsed = JSON.parse(piped);
             const env = parsed?._audio_stream;
             if (env && env.url && env.codec) {
-              // Set up the queue (if any) BEFORE pushing the first stream so
-              // that pushAudioStream's chaining sees it. Empty queue = single
-              // track. Each queue item is {url, codec, auth, sampleRate?, channels?}.
-              setAudioQueue(device.id, Array.isArray(env.queue) ? env.queue : []);
-              _devicePlaybackState.set(device.id, "playing");
-              _nowPlaying.set(device.id, {
-                title: parsed.title || null,
-                artist: parsed.artist || null,
-                artworkUrl: parsed.artwork_url || null,
-                queueLength: (Array.isArray(env.queue) ? env.queue.length : 0) + 1,
-              });
-              emitGlassesMediaState(device.id);
-              // Fire-and-forget: don't await pushAudioStream so the voice turn
-              // can finish speaking the prose immediately. The stream runs in
-              // the background; failures are handled silently.
-              pushAudioStream(device.id, {
-                url: env.url,
-                codec: env.codec,
-                sampleRate: env.sample_rate,
-                channels: env.channels,
-                auth: env.auth,
-                title: parsed.title || null,
-                artist: parsed.artist || null,
-                artworkUrl: parsed.artwork_url || null,
-              }).then(outcome => {
-                if (!outcome?.delivered) {
-                  _devicePlaybackState.set(device.id, "idle");
-                  _nowPlaying.delete(device.id);
-                  emitGlassesMediaState(device.id);
-                }
-              }).catch(() => {
-                _devicePlaybackState.set(device.id, "idle");
-                _nowPlaying.delete(device.id);
-                emitGlassesMediaState(device.id);
-              });
+              // Capture the envelope for deferred dispatch after the loop.
+              // Do NOT fire pushAudioStream here: if the LLM emitted multiple
+              // _audio_stream tool results in this turn, firing each would
+              // race on the single WebSocket (see latestAudioStream comment
+              // above the loop). Earlier envelopes are logged as dropped.
+              if (latestAudioStream) {
+                console.warn(
+                  `[meta-glasses] dropping earlier _audio_stream envelope for ${device.id} ` +
+                  `(url=${latestAudioStream.env.url}) — superseded by later tool result in same turn`,
+                );
+              }
+              latestAudioStream = { env, parsed };
               piped = parsed.prose || `Started playback (${env.codec}).`;
             }
           } catch {
@@ -808,6 +791,38 @@ LONG WORK via the orchestrator. For research, multi-step analysis, code work, or
         }
         messages.push({ role: "tool", content: piped, tool_call_id: r.id, tool_name: r.name });
         if (typeof piped === "string" && piped.length > 500) nextMaxTokens = 4000;
+      }
+      if (latestAudioStream) {
+        const { env, parsed } = latestAudioStream;
+        setAudioQueue(device.id, Array.isArray(env.queue) ? env.queue : []);
+        _devicePlaybackState.set(device.id, "playing");
+        _nowPlaying.set(device.id, {
+          title: parsed.title || null,
+          artist: parsed.artist || null,
+          artworkUrl: parsed.artwork_url || null,
+          queueLength: (Array.isArray(env.queue) ? env.queue.length : 0) + 1,
+        });
+        emitGlassesMediaState(device.id);
+        pushAudioStream(device.id, {
+          url: env.url,
+          codec: env.codec,
+          sampleRate: env.sample_rate,
+          channels: env.channels,
+          auth: env.auth,
+          title: parsed.title || null,
+          artist: parsed.artist || null,
+          artworkUrl: parsed.artwork_url || null,
+        }).then(outcome => {
+          if (!outcome?.delivered) {
+            _devicePlaybackState.set(device.id, "idle");
+            _nowPlaying.delete(device.id);
+            emitGlassesMediaState(device.id);
+          }
+        }).catch(() => {
+          _devicePlaybackState.set(device.id, "idle");
+          _nowPlaying.delete(device.id);
+          emitGlassesMediaState(device.id);
+        });
       }
     }
     await drainBuffer(true);
