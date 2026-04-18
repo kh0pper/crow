@@ -75,6 +75,9 @@ public class GlassesService extends Service {
     public static final String ACTION_MEDIA_TOGGLE = "press.maestro.crow.MEDIA_TOGGLE";
     public static final String ACTION_MEDIA_STOP = "press.maestro.crow.MEDIA_STOP";
     public static final String ACTION_MEDIA_NEXT = "press.maestro.crow.MEDIA_NEXT";
+    // Phase 6 C.3: user-initiated stop for an active continuous-recording
+    // session. Wired into the notification "Stop Recording" button.
+    public static final String ACTION_STOP_NOTE_STREAM = "press.maestro.crow.STOP_NOTE_STREAM";
 
     private static final String TAG = "GlassesService";
     private static final String CHANNEL_ID = "glasses_service";
@@ -250,6 +253,13 @@ public class GlassesService extends Service {
         if (ACTION_MEDIA_TOGGLE.equals(action)) { handleMediaToggle(); return START_STICKY; }
         if (ACTION_MEDIA_STOP.equals(action))   { handleMediaStop();   return START_STICKY; }
         if (ACTION_MEDIA_NEXT.equals(action))   { handleMediaNext();   return START_STICKY; }
+        if (ACTION_STOP_NOTE_STREAM.equals(action)) {
+            if (noteStreamRunning) {
+                sendNoteStreamEnd("user_stop");
+                stopNoteStreamPump("user_stop");
+            }
+            return START_STICKY;
+        }
         if (ws == null) connectWebSocket();
         return START_STICKY;
     }
@@ -569,6 +579,9 @@ public class GlassesService extends Service {
         }
         noteStreamRecord.startRecording();
         noteStreamRunning = true;
+        // Re-render notification now that noteStreamRunning=true so the
+        // button flips to "Stop Recording" (was PTT "Ask Crow" before).
+        updateNotification("\uD83D\uDD34 Recording meeting — tap to stop");
         final int samplesPerChunk = NOTE_STREAM_SAMPLES_PER_CHUNK;
         noteStreamThread = new Thread(() -> {
             short[] chunk = new short[samplesPerChunk];
@@ -1358,8 +1371,10 @@ public class GlassesService extends Service {
         int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
         Intent beginIntent = new Intent(this, GlassesService.class).setAction(ACTION_BEGIN_TURN);
         Intent endIntent = new Intent(this, GlassesService.class).setAction(ACTION_END_TURN);
+        Intent stopNoteIntent = new Intent(this, GlassesService.class).setAction(ACTION_STOP_NOTE_STREAM);
         PendingIntent beginPi = PendingIntent.getForegroundService(this, 1, beginIntent, flags);
         PendingIntent endPi = PendingIntent.getForegroundService(this, 2, endIntent, flags);
+        PendingIntent stopNotePi = PendingIntent.getForegroundService(this, 3, stopNoteIntent, flags);
 
         NotificationCompat.Builder b = new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("Crow Glasses")
@@ -1367,7 +1382,13 @@ public class GlassesService extends Service {
                 .setSmallIcon(android.R.drawable.ic_menu_compass)
                 .setOngoing(true)
                 .setPriority(NotificationCompat.PRIORITY_LOW);
-        if (inTurn) {
+        if (noteStreamRunning) {
+            // Phase 6 C.3: while continuous recording is active, the
+            // notification tap and the explicit "Stop Recording" action
+            // both send ACTION_STOP_NOTE_STREAM. PTT is rejected anyway.
+            b.setContentIntent(stopNotePi);
+            b.addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop Recording", stopNotePi);
+        } else if (inTurn) {
             b.addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", endPi);
         } else {
             b.addAction(android.R.drawable.ic_btn_speak_now, "Ask Crow", beginPi);
