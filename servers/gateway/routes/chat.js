@@ -25,6 +25,7 @@ import { openStream } from "../streams/sse.js";
 import { resolveProviderConfig } from "../ai/resolve-profile.js";
 import { checkVendorSwitch } from "../ai/vendor-guard.js";
 import { listProvidersAll } from "../../orchestrator/providers-db.js";
+import { chooseProvider as smartRoute, stripSlashCommand, SmartChatDisabled } from "../ai/smart-router.js";
 
 /** Sliding window: max messages to send to AI */
 const CONTEXT_WINDOW = 20;
@@ -398,12 +399,54 @@ export default function chatRouter(dashboardAuth) {
         effectiveProvider = bodyProvider.trim();
       }
 
+      // Path C — Smart Crow Chat: when the conversation's profile has
+      // kind="auto" and the operator has enabled feature_flags.smart_chat,
+      // run smart-router.chooseProvider() to pick the route for THIS
+      // message. Overrides any Path A body.model (the plan's compose-bar
+      // picker is disabled for auto profiles anyway). Gracefully no-ops
+      // via SmartChatDisabled when the flag is off.
+      let smartRoute_result = null;
+      if (conversation.profile_id) {
+        try {
+          const profilesLookup = await getAiProfiles(db);
+          const pf = profilesLookup.find((p) => p.id === conversation.profile_id);
+          if (pf?.kind === "auto") {
+            const all = await listProvidersAll(db);
+            smartRoute_result = await smartRoute({
+              db,
+              convId,
+              content: messageText,
+              attachments: attachments || null,
+              currentProvider: conversation.provider,
+              currentModel: conversation.model,
+              autoRules: pf.auto_rules || null,
+              providers: all,
+            });
+            if (smartRoute_result.provider_id) effectiveProvider = smartRoute_result.provider_id;
+            if (smartRoute_result.model_id) effectiveModel = smartRoute_result.model_id;
+            sendEvent("smart_route", {
+              provider_id: smartRoute_result.provider_id,
+              model_id: smartRoute_result.model_id,
+              reason: smartRoute_result.reason,
+            });
+          }
+        } catch (err) {
+          if (err instanceof SmartChatDisabled) {
+            // Flag off — stay on conversation.model / profile defaults. No-op.
+          } else {
+            console.warn(`[chat] smart-router failed for conv ${convId}:`, err.message);
+          }
+        }
+      }
+
       // Get provider adapter (profile-aware; per-message overrides honored)
       let adapter;
       try {
-        if (bodyProvider && bodyProvider !== conversation.provider) {
-          // Quick-Chat per-message vendor override — resolve by provider_id OR
-          // by provider_type via the DB-first resolver. Falls back to
+        const providerDiffers = effectiveProvider && effectiveProvider !== conversation.provider;
+        if (providerDiffers) {
+          // Path B per-message override OR Path C smart-route picked a
+          // different provider — resolve via the DB-first resolver
+          // (accepts provider_id or provider_type), fall back to
           // models.json if no DB row matches.
           const cfg = await resolveProviderConfig(db, effectiveProvider, effectiveModel).catch(() => null);
           if (cfg) {
@@ -502,10 +545,27 @@ export default function chatRouter(dashboardAuth) {
           }
         }
 
-        // Build messages array for AI
+        // Build messages array for AI. When the smart-router matched on
+        // a slash-command, strip the `/code`/`/vision`/etc. prefix from
+        // the current user message before it reaches the adapter —
+        // the raw prefix stays in chat_messages.content for
+        // transparency in the chat log, but the model should see the
+        // clean prompt.
         const aiMessages = [
           { role: "system", content: systemPrompt },
-          ...recentMessages,
+          ...recentMessages.map((m) => {
+            if (
+              smartRoute_result
+              && typeof smartRoute_result.reason === "string"
+              && /matched \//.test(smartRoute_result.reason)
+              && m.role === "user"
+              && typeof m.content === "string"
+              && m === recentMessages[recentMessages.length - 1]
+            ) {
+              return { ...m, content: stripSlashCommand(m.content) };
+            }
+            return m;
+          }),
         ];
 
         // Stream response from AI
