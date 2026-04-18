@@ -124,12 +124,20 @@ function getProvider(name) {
   return cfg.providers?.[name] || null;
 }
 
+// mutexGroup may be declared at the provider top-level (grackle-* convention)
+// OR nested inside models[0] (crow-swap-* convention). Accept both.
+function mutexGroupOf(provider) {
+  if (!provider) return null;
+  return provider.mutexGroup ?? provider.models?.[0]?.mutexGroup ?? null;
+}
+
 function getMutexSiblings(name) {
   const p = getProvider(name);
-  if (!p?.mutexGroup) return [];
+  const group = mutexGroupOf(p);
+  if (!group) return [];
   const cfg = loadProviders();
   return Object.entries(cfg.providers || {})
-    .filter(([n, v]) => n !== name && v.mutexGroup === p.mutexGroup)
+    .filter(([n, v]) => n !== name && mutexGroupOf(v) === group)
     .map(([n]) => n);
 }
 
@@ -145,9 +153,10 @@ function getMutexGroups() {
   const cfg = loadProviders();
   const groups = new Map();
   for (const [name, v] of Object.entries(cfg.providers || {})) {
-    if (!v.mutexGroup) continue;
-    if (!groups.has(v.mutexGroup)) groups.set(v.mutexGroup, { default: null, members: [] });
-    const g = groups.get(v.mutexGroup);
+    const group = mutexGroupOf(v);
+    if (!group) continue;
+    if (!groups.has(group)) groups.set(group, { default: null, members: [] });
+    const g = groups.get(group);
     g.members.push({ name, baseUrl: v.baseUrl, bundleId: v.bundleId });
     if (v.defaultMember === true) g.default = name;
   }
@@ -167,6 +176,33 @@ export async function isProviderReady(providerName) {
   if (!p?.baseUrl) return false;
   return probeReady(p.baseUrl);
 }
+
+/**
+ * Chat-path safe acquire. Returns:
+ *   - `null`   if `providerName` is unknown, has no `bundleId`, or its
+ *              `host` is not "local" (i.e. the bundle belongs to a peer
+ *              instance, not this crow). No-op; caller proceeds.
+ *   - `true`   on success (ready or warmed in time).
+ *   - `false`  if readiness timed out.
+ *
+ * Never throws — caller should fall through to the adapter on error.
+ */
+export async function maybeAcquireLocalProvider(providerName) {
+  if (!providerName) return null;
+  const p = getProvider(providerName);
+  if (!p?.bundleId) return null;
+  // host unset defaults to local (matches resolveFromModelsJson).
+  if (p.host && p.host !== "local") return null;
+  try {
+    return await acquireProvider(providerName);
+  } catch (err) {
+    console.warn(`[gpu-orchestrator] maybeAcquireLocalProvider(${providerName}) failed: ${err.message}`);
+    return false;
+  }
+}
+
+// Test/introspection helpers — exported for smoke scripts.
+export const _internals = { getProvider, getMutexSiblings, getMutexGroups, mutexGroupOf };
 
 /**
  * Ensure `providerName` is resident and responsive. Stops mutex siblings
