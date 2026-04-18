@@ -107,6 +107,8 @@ function readVisionModelConfig(configDir) {
 
 /**
  * Resolve the API base URL and key for a vision model provider using Crow's AI profiles.
+ * Handles both legacy direct-mode profiles (embedded baseUrl/apiKey) and pointer-mode
+ * profiles migrated to the providers DB (resolves via resolveProfileToConfig).
  */
 async function resolveVisionApiConfig(provider) {
   const db = createDbClient();
@@ -121,10 +123,22 @@ async function resolveVisionApiConfig(provider) {
     const providerMap = { zai: "Z.AI", "qwen-portal": "Dashscope", meta: "Meta AI" };
     const profileName = providerMap[provider] || provider;
     const profile = profiles.find(p => p.name === profileName || p.name?.toLowerCase() === provider);
-    if (!profile?.baseUrl || !profile?.apiKey) return null;
-    return { baseUrl: profile.baseUrl, apiKey: profile.apiKey };
+    if (!profile) return null;
+    if (profile.baseUrl && profile.apiKey) {
+      return { baseUrl: profile.baseUrl, apiKey: profile.apiKey };
+    }
+    if (profile.provider_id) {
+      const { resolveProfileToConfig } = await import("../ai/resolve-profile.js");
+      const cfg = await resolveProfileToConfig(profile, db).catch(() => null);
+      if (cfg?.baseUrl && cfg?.apiKey && cfg.apiKey !== "none") {
+        return { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey };
+      }
+    }
+    return null;
   } catch {
     return null;
+  } finally {
+    db.close();
   }
 }
 

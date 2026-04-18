@@ -494,7 +494,7 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
       sendText(ws, { type: "error", code: "no_ai_profile", recoverable: false });
       return;
     }
-    const { adapter: chatAdapter } = await createAdapterFromProfile(aiProfile, aiProfile.defaultModel);
+    const { adapter: chatAdapter } = await createAdapterFromProfile(aiProfile, aiProfile.defaultModel, db);
 
     // 3. TTS
     const ttsProfile = device.tts_profile_id

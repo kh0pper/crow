@@ -50,7 +50,7 @@ async function summarizeSession({ noteId, topic }, db) {
     if (!profile) {
       return { summary: null, action_items: [], parse_error: "No AI profile configured." };
     }
-    ({ adapter } = await createAdapterFromProfile(profile, profile.defaultModel));
+    ({ adapter } = await createAdapterFromProfile(profile, profile.defaultModel, db));
   } catch (err) {
     return { summary: null, action_items: [], parse_error: `AI provider unavailable: ${err.message}` };
   }
