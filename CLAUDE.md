@@ -495,10 +495,19 @@ servers/gateway/dashboard/
   settings/
     registry.js                   — Section registry, group definitions, dispatchAction, upsertSetting
     menu-renderer.js              — iOS-style grouped menu HTML + CSS
+    migrations/
+      llm-settings-migration.js   — One-time ai_profiles → provider_id pointer migration (phase 3); also adds profile shape v2 fields (kind/system_prompt/temperature)
     sections/
-      theme.js, language.js, notifications.js, ai-provider.js, ai-profiles.js,
-      connections.js, help-setup.js, integrations.js, blog.js, discovery.js,
-      updates.js, device-context.js, identity.js, password.js
+      theme.js, language.js, notifications.js, connections.js, help-setup.js,
+      integrations.js, blog.js, discovery.js, updates.js, device-context.js,
+      identity.js, password.js
+      llm.js                      — Consolidated LLM Orchestrator section (phase 5); 4 internal tabs: providers / roles / profiles / health
+      llm/
+        providers-tab.js          — DB-backed provider registry + Add cloud provider form + Sync bundle providers
+        roles-tab.js              — 12 preset-agent rows with compat()-colored dropdowns + Tier-2 warning banners
+        profiles-tab.js           — Subtab switcher; composes ai-profiles / tts-profiles / stt-profiles / vision-profiles sections (not registered in main menu; phase 9)
+        health-tab.js             — /api/providers/health matrix + Re-probe
+      ai-profiles.js, tts-profiles.js, stt-profiles.js, vision-profiles.js — existing profile editors; imported by llm/profiles-tab.js but not registered standalone
 ```
 
 ### Add-on system

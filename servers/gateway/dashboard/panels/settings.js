@@ -20,14 +20,11 @@ import { renderSettingsMenu } from "../settings/menu-renderer.js";
 import themeSection from "../settings/sections/theme.js";
 import languageSection from "../settings/sections/language.js";
 import notificationsSection from "../settings/sections/notifications.js";
-import aiProviderSection from "../settings/sections/ai-provider.js";
-import providersSection from "../settings/sections/providers.js";
 import pairedInstancesSection from "../settings/sections/paired-instances.js";
 import syncProfilesSection from "../settings/sections/sync-profiles.js";
 import sharedStorageSection from "../settings/sections/shared-storage.js";
 import auditLogSection from "../settings/sections/audit-log.js";
 import sharedContextSection from "../settings/sections/shared-context.js";
-import aiProfilesSection from "../settings/sections/ai-profiles.js";
 import connectionsSection from "../settings/sections/connections.js";
 import helpSetupSection from "../settings/sections/help-setup.js";
 import integrationsSection from "../settings/sections/integrations.js";
@@ -39,28 +36,25 @@ import identitySection from "../settings/sections/identity.js";
 import passwordSection from "../settings/sections/password.js";
 import twoFactorSection from "../settings/sections/two-factor.js";
 import navGroupsSection from "../settings/sections/nav-groups.js";
-import ttsProfilesSection from "../settings/sections/tts-profiles.js";
-import sttProfilesSection from "../settings/sections/stt-profiles.js";
-import visionProfilesSection from "../settings/sections/vision-profiles.js";
 import llmSection from "../settings/sections/llm.js";
+// NOTE: ai-provider.js + providers.js deleted; their responsibilities are
+// absorbed by llmSection.providers-tab (cloud add + registry view). The
+// four remaining profile sections (ai-profiles, tts-profiles, stt-profiles,
+// vision-profiles) still exist as files but are no longer registered
+// here — llmSection.profiles-tab composes them so there's ONE AI entry
+// in the Settings menu per the plan's verification target.
 
 // Register built-in sections
 registerSettingsSection(navGroupsSection);
 registerSettingsSection(themeSection);
 registerSettingsSection(languageSection);
 registerSettingsSection(llmSection);
-registerSettingsSection(ttsProfilesSection);
-registerSettingsSection(sttProfilesSection);
-registerSettingsSection(visionProfilesSection);
 registerSettingsSection(notificationsSection);
-registerSettingsSection(aiProviderSection);
-registerSettingsSection(providersSection);
 registerSettingsSection(pairedInstancesSection);
 registerSettingsSection(syncProfilesSection);
 registerSettingsSection(sharedStorageSection);
 registerSettingsSection(auditLogSection);
 registerSettingsSection(sharedContextSection);
-registerSettingsSection(aiProfilesSection);
 registerSettingsSection(connectionsSection);
 registerSettingsSection(helpSetupSection);
 registerSettingsSection(integrationsSection);
