@@ -45,7 +45,7 @@ await deleteLocalSetting(db, "feature_flags"); // clean slate
 let threw = false;
 try {
   await chooseProvider({
-    db, convId: 1, content: "hello", currentProvider: "crow-chat", currentModel: "qwen3-32b",
+    db, convId: 1, content: "hello", currentProvider: "crow-chat", currentModel: "qwen3.6-35b-a3b",
     providers: [], autoRules: null,
   });
 } catch (err) { threw = err instanceof SmartChatDisabled; }
@@ -64,7 +64,7 @@ async function pick(content, { attachments, autoRules } = {}) {
   return chooseProvider({
     db, convId, content, attachments,
     currentProvider: "crow-chat",
-    currentModel: "qwen3-32b",
+    currentModel: "qwen3.6-35b-a3b",
     autoRules: autoRules || null,
     providers,
   });
@@ -72,7 +72,7 @@ async function pick(content, { attachments, autoRules } = {}) {
 
 // slash > everything
 const r1 = await pick("/code write me a function");
-checkTrue("slash /code → crow-swap-agentic", r1.provider_id === "crow-swap-agentic");
+checkTrue("slash /code → crow-swap-coder", r1.provider_id === "crow-swap-coder");
 checkTrue("slash reason includes /code", r1.reason.includes("matched /code"));
 
 const r2 = await pick("/vision what is this");
@@ -85,15 +85,15 @@ checkTrue("attachment reason", r3.reason.includes("image attachment"));
 
 // slash BEATS attachment
 const r4 = await pick("/code hello", { attachments: [{ mime_type: "image/jpeg" }] });
-checkTrue("slash /code > attachment", r4.provider_id === "crow-swap-agentic");
+checkTrue("slash /code > attachment", r4.provider_id === "crow-swap-coder");
 
 // keyword: code-fence
 const r5 = await pick("please debug this:\n```js\nfoo()\n```\nwhy broken");
-checkTrue("code-fence → crow-swap-agentic", r5.provider_id === "crow-swap-agentic");
+checkTrue("code-fence → crow-swap-coder", r5.provider_id === "crow-swap-coder");
 
 // keyword: write-a-X
 const r6 = await pick("write a function that reverses a string");
-checkTrue("write-a → crow-swap-agentic", r6.provider_id === "crow-swap-agentic");
+checkTrue("write-a → crow-swap-coder", r6.provider_id === "crow-swap-coder");
 
 // keyword: deep — requires >=200 chars
 const deepMsg = "summarize the following long passage: " + "x".repeat(220);
@@ -113,9 +113,11 @@ checkTrue("plain reason is default route", r9.reason.includes("default route"));
 const r10 = await pick("/code ignored", { autoRules: { disabled: ["slash"] } });
 checkTrue("disabled:slash ignores /code", r10.provider_id === "crow-chat");
 
-// autoRules.overrides — point /code at a different provider
-const r11 = await pick("/code foo", { autoRules: { overrides: { code: "crow-swap-coder" } } });
-checkTrue("overrides.code honored", r11.provider_id === "crow-swap-coder");
+// autoRules.overrides — point /code at a different provider than the baked-in
+// default (which is crow-swap-coder since Apr 2026). Override to crow-chat
+// (the default route) so we can observe the override actually takes effect.
+const r11 = await pick("/code foo", { autoRules: { overrides: { code: "crow-chat" } } });
+checkTrue("overrides.code honored", r11.provider_id === "crow-chat");
 
 // cross-vendor tool-lock: insert a tool_calls row to force hasActiveToolCalls=true
 await db.execute({

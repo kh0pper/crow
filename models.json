@@ -19,16 +19,16 @@
       ]
     },
     "crow-chat": {
-      "$description": "Daily-driver mid-tier reasoning/synthesis. Strix Halo gfx1151 via vLLM-ROCm.",
-      "baseUrl": "http://100.118.41.122:8002/v1",
+      "$description": "Daily-driver mid-tier reasoning/synthesis + VLM. Qwen3.6-35B-A3B UD-Q6_K MoE (3B active per token) via llama.cpp Vulkan AMDVLK on Strix Halo — retired the Qwen3-32B bf16 bundle Apr 2026 (memory-bandwidth ceiling 3.6 tok/s; MoE same-weight-class runs ~25 tok/s).",
+      "baseUrl": "http://100.118.41.122:8003/v1",
       "apiKey": "none",
       "host": "local",
-      "bundleId": "vllm-rocm-qwen3-32b",
+      "bundleId": "llamacpp-vulkan-qwen36-35b-a3b",
       "mutexGroup": "crow-strix-vram",
       "defaultMember": true,
       "models": [
         {
-          "id": "qwen3-32b",
+          "id": "qwen3.6-35b-a3b",
           "contextLen": 32768,
           "warm": true,
           "priority": "interactive"
@@ -67,23 +67,6 @@
           "onDemand": true,
           "conflictsWith": ["crow-chat"],
           "priority": "batch"
-        }
-      ]
-    },
-    "crow-swap-agentic": {
-      "$description": "On-demand agentic-coding + VLM specialist. Qwen3.6-35B-A3B UD-Q6_K MoE via llama.cpp Vulkan AMDVLK on Strix Halo. Mutexed with all other crow-* bundles on Strix Halo's unified 124 GB pool.",
-      "baseUrl": "http://100.118.41.122:8003/v1",
-      "apiKey": "none",
-      "host": "local",
-      "bundleId": "llamacpp-vulkan-qwen36-35b-a3b",
-      "mutexGroup": "crow-strix-vram",
-      "models": [
-        {
-          "id": "qwen3.6-35b-a3b",
-          "contextLen": 32768,
-          "warm": false,
-          "onDemand": true,
-          "priority": "interactive"
         }
       ]
     },

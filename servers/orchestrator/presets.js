@@ -179,8 +179,10 @@ export const presets = {
       },
       {
         name: "coder",
-        // On-demand agentic-coding specialist (Qwen3.6-35B-A3B, Apr 2026)
-        provider: "crow-swap-agentic",
+        // Purpose-built coder specialist (Qwen3-coder-30B-A3B MoE). Apr 2026:
+        // was crow-swap-agentic; retired when crow-chat itself became the
+        // Qwen3.6-35B-A3B MoE and crow-swap-agentic collapsed into crow-chat.
+        provider: "crow-swap-coder",
         systemPrompt:
           "You are a code specialist. Write clean, well-tested code following the project's " +
           "conventions. Reference memories/sources provided by the researcher. Output code " +

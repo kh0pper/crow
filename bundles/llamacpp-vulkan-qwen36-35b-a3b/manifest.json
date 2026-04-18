@@ -3,7 +3,7 @@
   "type": "bundle",
   "name": "llama.cpp Qwen3.6-35B-A3B UD-Q6_K + Vision (Vulkan AMDVLK)",
   "category": "ai",
-  "description": "On-demand agentic-coding + vision-language specialist — Qwen3.6-35B-A3B (35B total / 3B active) UD-Q6_K MoE via llama.cpp on Strix Halo gfx1151, with mmproj-F16 vision encoder. Joins the :8003 swap group (coder, glm-45-air, qwen36).",
+  "description": "Daily-driver conversational + VLM bundle. Qwen3.6-35B-A3B (35B total / 3B active) UD-Q6_K MoE via llama.cpp on Strix Halo gfx1151, with mmproj-F16 vision encoder. Registers as crow-chat on the shared crow-strix-vram mutex group.",
   "host": "local",
   "requires": {
     "gpu": true,
@@ -15,17 +15,15 @@
   "port": 8003,
   "providers": [
     {
-      "id": "crow-swap-agentic",
+      "id": "crow-chat",
       "baseUrlTemplate": "http://{host_ip}:{port}/v1",
       "apiKey": "none",
-      "description": "Agentic-coding + VLM specialist (Qwen3.6-35B-A3B UD-Q6_K + mmproj-F16, on-demand)",
+      "description": "Daily-driver chat + VLM (Qwen3.6-35B-A3B UD-Q6_K + mmproj-F16)",
       "models": [
         {
           "id": "qwen3.6-35b-a3b",
           "contextLen": 32768,
-          "warm": false,
-          "onDemand": true,
-          "mutexGroup": "8003-swap",
+          "warm": true,
           "priority": "interactive"
         }
       ]

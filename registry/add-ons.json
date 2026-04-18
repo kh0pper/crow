@@ -4549,15 +4549,15 @@
       "port": 8003,
       "providers": [
         {
-          "id": "crow-swap-agentic",
+          "id": "crow-chat",
           "baseUrlTemplate": "http://{host_ip}:{port}/v1",
           "apiKey": "none",
           "models": [
-            { "id": "qwen3.6-35b-a3b", "contextLen": 32768, "warm": false, "onDemand": true, "mutexGroup": "8003-swap", "priority": "interactive" }
+            { "id": "qwen3.6-35b-a3b", "contextLen": 32768, "warm": true, "priority": "interactive" }
           ]
         }
       ],
-      "notes": "On-demand. First start requires ~30GB pre-download (unsloth UD-Q6_K + mmproj-F16). Shares :8003 with coder + GLM via mutex — only one runs at a time. Vision: pass image_url or base64 data URL in chat completions."
+      "notes": "Daily-driver chat + VLM. First start requires ~30GB pre-download (unsloth UD-Q6_K + mmproj-F16). Mutexed with other crow-* bundles via crow-strix-vram. Vision: pass image_url or base64 data URL in chat completions."
     }
   ]
 }

@@ -77,7 +77,7 @@ check("embed-on-chat has capability_mismatch", containsCode(bad1.blockers, "capa
 // --- compat: vision-required role with non-vision provider ---
 const bad2 = compat(
   { preset_name: "vision_team", agent_name: "viewer" },
-  { id: "crow-chat", host: "local", provider_type: null, models: [{ id: "qwen3-32b" }], disabled: 0 },
+  { id: "crow-chat", host: "local", provider_type: null, models: [{ id: "qwen3.6-35b-a3b" }], disabled: 0 },
 );
 check("vision role with non-vision blocked", bad2.ok, false);
 check("vision_required emitted", containsCode(bad2.blockers, "vision_required"), true);
