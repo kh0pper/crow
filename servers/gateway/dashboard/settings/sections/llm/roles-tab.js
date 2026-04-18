@@ -117,6 +117,7 @@ export default {
           : `<span class="llm-role-pill llm-role-pill-default">Preset default</span>`;
 
         const tagText = shape?.tag_text ? `<span class="llm-role-tag">${escapeHtml(shape.tag_text)}</span>` : "";
+        const initialModel = ov?.model_id || "";
 
         return `<div class="llm-role-row${isOverridden ? " llm-role-row-overridden" : ""}">
           <div class="llm-role-head">
@@ -124,7 +125,7 @@ export default {
             ${tagText}
             ${overrideBadge}
           </div>
-          <form method="post" class="llm-role-form">
+          <form method="post" class="llm-role-form" data-initial-model="${escapeHtml(initialModel)}">
             <input type="hidden" name="action" value="llm_role_override">
             <input type="hidden" name="preset_name" value="${escapeHtml(r.preset_name)}">
             <input type="hidden" name="agent_name" value="${escapeHtml(r.agent_name)}">
@@ -132,7 +133,10 @@ export default {
               <option value="">— ${escapeHtml(defaultLabel)} —</option>
               ${pOptions}
             </select>
-            <input type="text" name="model_id" placeholder="model (optional)" value="${escapeHtml(ov?.model_id || "")}">
+            <select name="model_id" aria-label="Model for ${escapeHtml(r.agent_name)}" class="llm-role-model-select">
+              <option value="">— provider default —</option>
+            </select>
+            <input type="text" name="model_id_custom" class="llm-role-model-custom" placeholder="custom model id" value="" aria-label="Custom model id" style="display:none">
             <button type="submit" class="btn btn-primary btn-xs">Save</button>
           </form>
           ${isOverridden ? `<form method="post" class="llm-role-reset"><input type="hidden" name="action" value="llm_role_reset"><input type="hidden" name="preset_name" value="${escapeHtml(r.preset_name)}"><input type="hidden" name="agent_name" value="${escapeHtml(r.agent_name)}"><button type="submit" class="btn btn-secondary btn-xs">Reset to preset default</button></form>` : ``}
@@ -158,6 +162,22 @@ export default {
           ${activeWarnings.length > 5 ? `<li style="color:var(--crow-text-muted)">…and ${activeWarnings.length - 5} more</li>` : ""}
         </ul>
       </div>` : "";
+
+    // Build a provider_id → [model ids] map for the client-side model-picker
+    // script. Matches the shape the resolver accepts (string or {id:...}).
+    const providerModelsMap = Object.fromEntries(
+      providers.map((p) => {
+        let models = [];
+        if (Array.isArray(p.models)) models = p.models;
+        else if (typeof p.models === "string") {
+          try { models = JSON.parse(p.models || "[]"); } catch {}
+        }
+        const ids = models
+          .map((m) => (typeof m === "string" ? m : m?.id))
+          .filter(Boolean);
+        return [p.id, ids];
+      }),
+    );
 
     return `<style>
       .llm-preset-card {
@@ -262,20 +282,130 @@ export default {
         font-size:0.78rem;
         color:var(--crow-text-primary);
       }
+      .llm-role-explainer {
+        border:1px solid var(--crow-border);
+        border-radius:var(--crow-radius-card);
+        background:var(--crow-bg-surface);
+        padding:0.5rem 1rem;
+        margin-bottom:0.9rem;
+        font-size:0.84rem;
+        color:var(--crow-text-secondary);
+        line-height:1.5;
+      }
+      .llm-role-explainer summary {
+        cursor:pointer;
+        color:var(--crow-text-primary);
+        font-weight:500;
+        font-size:0.85rem;
+        padding:0.25rem 0;
+      }
+      .llm-role-explainer p { margin:0.5rem 0; }
+      .llm-role-explainer code {
+        background:var(--crow-bg-elevated);
+        padding:1px 5px;
+        border-radius:4px;
+        font-family:'JetBrains Mono',monospace;
+        font-size:0.78rem;
+        color:var(--crow-text-primary);
+      }
+      .llm-role-toolbar {
+        display:flex;
+        align-items:center;
+        gap:0.7rem;
+        margin:0 0 0.9rem 0;
+      }
+      .llm-role-toolbar-hint { font-size:0.78rem; color:var(--crow-text-muted); }
+      .llm-role-model-select { flex:0 1 180px; font-family:'JetBrains Mono',monospace; }
+      .llm-role-model-custom { flex:0 1 140px; font-family:'JetBrains Mono',monospace; }
     </style>
 
-    <p class="llm-section-hint">
-      ${roles.length} agent roles across ${byPreset.size} presets. Leaving the dropdown on "preset default" deletes the override row (reverts to <code>presets.js</code>). Dropdown marks: <strong style="color:var(--crow-success)">●</strong> compatible · <strong style="color:var(--crow-brand-gold)">⚠</strong> warning · <strong style="color:var(--crow-error)">✗</strong> blocker. Hover any option for details.
-    </p>
+    <details class="llm-role-explainer">
+      <summary>How overrides work</summary>
+      <p>Each row below is one <strong>agent</strong> inside a <strong>preset</strong> (a team of agents defined in <code>servers/orchestrator/presets.js</code>). Each agent has a baked-in <strong>preset default</strong> provider — the hardcoded choice that ships with this codebase (local-first).</p>
+      <p>An <strong>override</strong> replaces that default just for this one agent. Leave the provider dropdown on <em>— preset default —</em> to delete the override and fall back to <code>presets.js</code>.</p>
+      <p>The <strong>model</strong> dropdown pins a specific model ID from the chosen provider; leave it on <em>— provider default —</em> to let the resolver pick the provider's first model. Choose <em>(custom model id...)</em> to type a model name that isn't in the provider's advertised list (e.g. a newly-released cloud model).</p>
+      <p>Dropdown marks on the provider picker: <strong style="color:var(--crow-success)">●</strong> compatible · <strong style="color:var(--crow-brand-gold)">⚠</strong> warning · <strong style="color:var(--crow-error)">✗</strong> blocker. Hover any option for details.</p>
+    </details>
+
+    <div class="llm-role-toolbar">
+      <form method="post" class="llm-role-sane-defaults-form" onsubmit="return confirm('Clear all ${roles.length} role overrides and revert to preset defaults?');">
+        <input type="hidden" name="action" value="llm_role_sane_defaults">
+        <button type="submit" class="btn btn-secondary btn-xs" title="Delete every override row — every agent reverts to its preset default (local-first as shipped)">Sane defaults</button>
+      </form>
+      <span class="llm-role-toolbar-hint">${roles.length} roles across ${byPreset.size} presets</span>
+    </div>
 
     ${warningsBanner}
 
-    ${blocks.join("")}`;
+    ${blocks.join("")}
+
+    <script>
+    (function () {
+      window.__llmProviderModels = ${JSON.stringify(providerModelsMap)};
+      const map = window.__llmProviderModels;
+      function sync(form) {
+        const provSel = form.querySelector('select[name="provider_id"]');
+        const modSel = form.querySelector('select[name="model_id"]');
+        const modInput = form.querySelector('input[name="model_id_custom"]');
+        if (!provSel || !modSel || !modInput) return;
+        const provId = provSel.value;
+        const stored = form.dataset.initialModel || '';
+        const models = (provId && map[provId]) ? map[provId] : [];
+        const blank = document.createElement('option');
+        blank.value = ''; blank.textContent = '— provider default —';
+        const optNodes = [blank];
+        for (const m of models) {
+          const opt = document.createElement('option');
+          opt.value = m; opt.textContent = m;
+          optNodes.push(opt);
+        }
+        const customOpt = document.createElement('option');
+        customOpt.value = '__custom__'; customOpt.textContent = '(custom model id...)';
+        optNodes.push(customOpt);
+        modSel.replaceChildren(...optNodes);
+        if (stored && models.includes(stored)) {
+          modSel.value = stored;
+          modInput.style.display = 'none';
+          modInput.value = '';
+        } else if (stored) {
+          modSel.value = '__custom__';
+          modInput.style.display = '';
+          modInput.value = stored;
+        } else {
+          modSel.value = '';
+          modInput.style.display = 'none';
+          modInput.value = '';
+        }
+        form.dataset.initialModel = '';
+      }
+      function attach(form) {
+        const provSel = form.querySelector('select[name="provider_id"]');
+        const modSel = form.querySelector('select[name="model_id"]');
+        const modInput = form.querySelector('input[name="model_id_custom"]');
+        if (!provSel || !modSel || !modInput) return;
+        provSel.addEventListener('change', () => sync(form));
+        modSel.addEventListener('change', () => {
+          if (modSel.value === '__custom__') {
+            modInput.style.display = '';
+            modInput.focus();
+          } else {
+            modInput.style.display = 'none';
+          }
+        });
+        sync(form);
+      }
+      document.querySelectorAll('form.llm-role-form').forEach(attach);
+    })();
+    </script>`;
   },
 
   async handleAction({ req, res, db, action }) {
     if (action === "llm_role_override") {
-      const { preset_name, agent_name, provider_id, model_id } = req.body;
+      const { preset_name, agent_name, provider_id } = req.body;
+      // `model_id` comes from the dropdown; `__custom__` means "see model_id_custom".
+      let rawModel = (req.body.model_id || "").trim();
+      if (rawModel === "__custom__") rawModel = (req.body.model_id_custom || "").trim();
+      const model_id = rawModel;
       if (!preset_name || !agent_name) {
         res.status(400).type("text/plain").send("preset_name + agent_name required");
         return true;
@@ -336,6 +466,22 @@ export default {
         return true;
       }
       await clearRoleOverride(db, preset_name, agent_name);
+      res.redirectAfterPost(BACK);
+      return true;
+    }
+
+    if (action === "llm_role_sane_defaults") {
+      // Bulk-clear every override row. Preset defaults in presets.js are
+      // already the "sane" local-first config, so clearing overrides is the
+      // one-click reset path. Users can re-override individually afterward.
+      const roles = listAllRoles();
+      for (const r of roles) {
+        try {
+          await clearRoleOverride(db, r.preset_name, r.agent_name);
+        } catch (err) {
+          console.warn(`[roles-tab] clear ${r.preset_name}:${r.agent_name} failed: ${err.message}`);
+        }
+      }
       res.redirectAfterPost(BACK);
       return true;
     }
