@@ -36,8 +36,18 @@ services:
       - -fa
       - "on"
       - --no-mmap
+      # 128K single-slot. Qwen3.6 is trained NATIVELY at 256K
+      # (n_ctx_train=262144 per the GGUF metadata), so no YaRN/RoPE
+      # scaling is needed — the model can use any -c up to 131072 cleanly
+      # and could go to 262144 if we want the full native window (trading
+      # ~25 GB more KV cache). --parallel 1 because Crow's tool-heavy
+      # conversations consume context depth faster than they benefit from
+      # slot concurrency; KV cache ~25 GB on top of the 33 GB weights fits
+      # comfortably in Strix Halo's 124 GB unified pool.
       - -c
-      - "32768"
+      - "131072"
+      - --parallel
+      - "1"
       - --jinja
     restart: "no"
     ipc: host
