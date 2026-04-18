@@ -1,114 +1,67 @@
 /**
- * Profiles tab — compact read-only summary of each profile type
- * (chat / tts / stt / vision) with inline counts and links into the
- * legacy sections where full CRUD still lives.
+ * Profiles tab — unifies the chat / TTS / STT / vision profile editors
+ * behind a single subtab switcher. The underlying section modules
+ * (ai-profiles, tts-profiles, stt-profiles, vision-profiles) are
+ * imported here rather than re-registered in the main Settings menu
+ * — that way the LLM section presents the single "AI Profiles" UX the
+ * consolidation plan targets while keeping the existing sections'
+ * render + handleAction logic as the source of truth. When a POST
+ * reaches llm.handleAction we delegate down this chain in order; each
+ * profile section's action handler is namespaced by a distinct `action`
+ * value (save_ai_profile, save_tts_profile, etc.) so there's no
+ * ambiguity over who handles what.
  *
- * v1 scope: the legacy sections (ai-profiles, tts-profiles, stt-profiles,
- * vision-profiles) handle create/edit/delete today; wiring equivalent
- * forms into the llm section is phase 6's UI polish work. This tab is
- * therefore a nav hub, not a full editor — but it DOES read profile
- * shape from dashboard_settings so migrations show up immediately.
+ * All four profile sections respond with res.json(...), not redirects,
+ * so there's no URL rewriting to do — existing client-side fetch +
+ * reload flows keep working unchanged under the new URL.
  */
 
 import { escapeHtml } from "../../../shared/components.js";
+import aiProfilesSection from "../ai-profiles.js";
+import ttsProfilesSection from "../tts-profiles.js";
+import sttProfilesSection from "../stt-profiles.js";
+import visionProfilesSection from "../vision-profiles.js";
 
-async function readJson(db, key) {
-  try {
-    const { rows } = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [key] });
-    if (!rows[0]?.value) return [];
-    const v = JSON.parse(rows[0].value);
-    return Array.isArray(v) ? v : [];
-  } catch { return []; }
-}
+const SUBTABS = [
+  { id: "chat",   label: "Chat",   section: aiProfilesSection },
+  { id: "tts",    label: "TTS",    section: ttsProfilesSection },
+  { id: "stt",    label: "STT",    section: sttProfilesSection },
+  { id: "vision", label: "Vision", section: visionProfilesSection },
+];
 
-function profileBadge(p) {
-  const base = `font-size:0.68rem;padding:1px 8px;border-radius:var(--crow-radius-pill);letter-spacing:0.02em;font-family:'JetBrains Mono',monospace`;
-  if (p?.provider_id) {
-    const label = `→ ${escapeHtml(p.provider_id)}${p.model_id ? " · " + escapeHtml(p.model_id) : ""}`;
-    return `<span style="${base};background:var(--crow-accent-muted);color:var(--crow-accent)" title="${label}">pointer</span>`;
-  }
-  if (p?.baseUrl) {
-    return `<span style="${base};background:var(--crow-bg-elevated);color:var(--crow-text-muted);border:1px solid var(--crow-border)">direct</span>`;
-  }
-  return "";
-}
-
-function profileRow(p) {
-  return `<li class="llm-profile-row">
-    <span class="llm-profile-name">${escapeHtml(p.name || p.id || "(unnamed)")}</span>
-    ${profileBadge(p)}
-  </li>`;
-}
-
-function block(title, section, profiles) {
-  const body = profiles.length
-    ? `<ul class="llm-profile-list">${profiles.map(profileRow).join("")}</ul>`
-    : `<div class="llm-profile-empty">No profiles yet.</div>`;
-  return `
-    <section class="llm-profile-block">
-      <header class="llm-profile-header">
-        <h3>${escapeHtml(title)}</h3>
-        <a href="?section=${escapeHtml(section)}" class="llm-profile-link">Manage &rsaquo;</a>
-      </header>
-      ${body}
-    </section>
-  `;
+function resolveSubtab(req) {
+  const id = (req?.query?.subtab || "chat").toLowerCase();
+  return SUBTABS.find((s) => s.id === id) || SUBTABS[0];
 }
 
 export default {
-  async render({ db }) {
-    const [chat, tts, stt, vision] = await Promise.all([
-      readJson(db, "ai_profiles"),
-      readJson(db, "tts_profiles"),
-      readJson(db, "stt_profiles"),
-      readJson(db, "vision_profiles"),
-    ]);
+  async render({ req, db, lang }) {
+    const active = resolveSubtab(req);
+    const tabs = SUBTABS.map((s) => {
+      const isActive = s.id === active.id;
+      const style = `padding:0.4rem 0.8rem;display:inline-block;text-decoration:none;font-size:0.82rem;border-bottom:2px solid ${isActive ? "var(--crow-accent)" : "transparent"};color:${isActive ? "var(--crow-text-primary)" : "var(--crow-text-secondary)"};font-weight:${isActive ? "600" : "normal"};margin-bottom:-1px`;
+      return `<a href="?section=llm&tab=profiles&subtab=${s.id}" data-turbo-frame="_top" style="${style}">${escapeHtml(s.label)}</a>`;
+    }).join("");
 
-    return `<style>
-      .llm-profile-grid {
-        display:grid;
-        grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
-        gap:0.85rem;
-      }
-      .llm-profile-block {
-        border:1px solid var(--crow-border);
-        border-radius:var(--crow-radius-card);
-        background:var(--crow-bg-surface);
-        padding:0.85rem 1rem;
-      }
-      .llm-profile-header {
-        display:flex; justify-content:space-between; align-items:baseline;
-        margin-bottom:0.65rem;
-        padding-bottom:0.45rem;
-        border-bottom:1px solid var(--crow-border);
-      }
-      .llm-profile-header h3 { margin:0; font-size:0.88rem; color:var(--crow-text-primary); }
-      .llm-profile-link { font-size:0.75rem; color:var(--crow-accent); text-decoration:none; }
-      .llm-profile-link:hover { text-decoration:underline; }
-      .llm-profile-list { list-style:none; padding:0; margin:0; }
-      .llm-profile-row {
-        display:flex; justify-content:space-between; align-items:center; gap:0.5rem;
-        padding:0.35rem 0;
-        border-bottom:1px dashed var(--crow-border);
-      }
-      .llm-profile-row:last-child { border-bottom:none; }
-      .llm-profile-name { font-size:0.85rem; color:var(--crow-text-primary); font-weight:500; }
-      .llm-profile-empty { font-size:0.8rem; color:var(--crow-text-muted); padding:0.3rem 0; }
-    </style>
+    const innerBody = await active.section.render({ req, db, lang });
 
-    <p class="llm-section-hint">
-      Profile summaries — the <strong>pointer</strong> badge means the profile resolves via the providers DB (preferred). <strong>direct</strong> profiles carry their own <code>baseUrl</code> + <code>apiKey</code> (legacy; migration rewrites them on startup). Full editors live on the legacy per-type sections for now — polish merges them here in a follow-up.
-    </p>
-    <div class="llm-profile-grid">
-      ${block("Chat profiles", "ai-profiles", chat)}
-      ${block("TTS profiles", "tts-profiles", tts)}
-      ${block("STT profiles", "stt-profiles", stt)}
-      ${block("Vision profiles", "vision-profiles", vision)}
-    </div>`;
+    return `
+      <nav style="display:flex;gap:0.25rem;border-bottom:1px solid var(--crow-border);margin-bottom:1rem;padding-left:0.25rem">
+        ${tabs}
+      </nav>
+      <div class="llm-profiles-body">${innerBody}</div>
+    `;
   },
 
-  async handleAction() {
-    // v1: no write actions; delegate to legacy sections via the "Manage →" links.
+  async handleAction({ req, res, db, action }) {
+    // Delegate to each wrapped section's action handler in turn. Each
+    // section's actions have distinct names (save_ai_profile,
+    // save_tts_profile, etc.) so the first match wins cleanly.
+    for (const { section } of SUBTABS) {
+      if (typeof section.handleAction !== "function") continue;
+      const handled = await section.handleAction({ req, res, db, action });
+      if (handled) return true;
+    }
     return false;
   },
 };
