@@ -14,6 +14,7 @@
  */
 
 import { readEnvFile, resolveEnvPath } from "../env-manager.js";
+import { resolveProviderConfig } from "./resolve-profile.js";
 
 // Lazy-loaded adapter modules
 const ADAPTER_LOADERS = {
@@ -170,44 +171,64 @@ export async function getAiProfiles(db, { includeKeys = false } = {}) {
 /**
  * Create a provider adapter from a profile config (bypasses .env).
  * Returns { adapter, config } — same shape as createProviderAdapter().
+ *
+ * Pointer-mode profiles (those with `provider_id` set) resolve via the
+ * DB-first resolver when `db` is supplied. Legacy direct-mode profiles
+ * use the profile's embedded apiKey/baseUrl/provider fields. After the
+ * llm-settings migration strips direct fields from migrated profiles,
+ * callers MUST pass `db` to reach their credentials.
  */
-export async function createAdapterFromProfile(profile, model) {
-  const adapterKey = resolveAdapterKey(profile.provider);
+export async function createAdapterFromProfile(profile, model, db = null) {
+  let providerLabel = profile.provider;
+  let apiKey = profile.apiKey;
+  let baseUrl = profile.baseUrl;
+  let resolvedModel = model || profile.model_id || profile.defaultModel || "";
+
+  if (profile.provider_id && db) {
+    const cfg = await resolveProviderConfig(db, profile.provider_id, resolvedModel || null);
+    providerLabel = cfg.provider_type || providerLabel || "openai";
+    apiKey = cfg.apiKey === "none" ? "" : cfg.apiKey;
+    baseUrl = cfg.baseUrl;
+    resolvedModel = cfg.model || resolvedModel;
+  }
+
+  const adapterKey = resolveAdapterKey(providerLabel);
   const loader = adapterKey ? ADAPTER_LOADERS[adapterKey] : null;
   if (!loader) {
-    throw Object.assign(new Error(`Unknown provider: ${profile.provider}`), { code: "invalid_provider" });
+    throw Object.assign(new Error(`Unknown provider: ${providerLabel || "(missing)"}`), { code: "invalid_provider" });
   }
 
   const info = PROVIDER_INFO[adapterKey];
-  if (info?.requiresKey && !profile.apiKey) {
+  if (info?.requiresKey && !apiKey) {
     throw Object.assign(new Error("API key required"), { code: "missing_key" });
   }
 
   const mod = await loader();
-  const resolvedModel = model || profile.defaultModel || info?.defaultModel || "";
+  resolvedModel = resolvedModel || info?.defaultModel || "";
   const adapterConfig = {
-    apiKey: profile.apiKey,
+    apiKey,
     model: resolvedModel,
-    baseUrl: profile.baseUrl || undefined,
+    baseUrl: baseUrl || undefined,
   };
-  // OpenRouter default base URL (mirrors createProviderAdapter logic)
-  if (profile.provider === "openrouter" && !profile.baseUrl) {
+  // OpenRouter / Meta default base URLs (mirrors createProviderAdapter logic)
+  if (providerLabel === "openrouter" && !baseUrl) {
     adapterConfig.baseUrl = "https://openrouter.ai/api/v1";
   }
-  if (profile.provider === "meta" && !profile.baseUrl) {
+  if (providerLabel === "meta" && !baseUrl) {
     adapterConfig.baseUrl = "https://api.llama.com/compat/v1/";
   }
 
   const adapter = mod.default(adapterConfig);
-  return { adapter, config: { provider: profile.provider, model: resolvedModel, baseUrl: profile.baseUrl } };
+  return { adapter, config: { provider: providerLabel, model: resolvedModel, baseUrl } };
 }
 
 /**
  * Test a specific AI profile by sending a minimal request.
+ * Pass `db` so pointer-mode profiles can resolve via the providers DB.
  */
-export async function testProfileConnection(profile) {
+export async function testProfileConnection(profile, db = null) {
   try {
-    const { adapter } = await createAdapterFromProfile(profile, profile.defaultModel);
+    const { adapter } = await createAdapterFromProfile(profile, profile.defaultModel, db);
     const messages = [{ role: "user", content: "Say 'ok'" }];
     let gotContent = false;
     for await (const event of adapter.chatStream(messages, [], { maxTokens: 10, temperature: 0 })) {

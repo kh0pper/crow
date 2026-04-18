@@ -25,6 +25,37 @@ export default {
     let aiProfiles = [];
     try { aiProfiles = JSON.parse(profilesResult.rows[0]?.value || "[]"); } catch {}
 
+    // Enrich pointer-mode profiles with provider row data (post-v3-strip).
+    // Renderer and Edit form read `p.provider/baseUrl/models/apiKey`; for
+    // profiles whose direct fields were stripped by the migration, pull
+    // them back from the providers DB row so the display stays accurate.
+    const pointerIds = Array.from(new Set(aiProfiles.map((p) => p?.provider_id).filter(Boolean)));
+    if (pointerIds.length > 0) {
+      const placeholders = pointerIds.map(() => "?").join(",");
+      const { rows: providerRows } = await db.execute({
+        sql: `SELECT id, provider_type, base_url, api_key, models FROM providers WHERE id IN (${placeholders})`,
+        args: pointerIds,
+      });
+      const byId = new Map(providerRows.map((r) => [r.id, r]));
+      aiProfiles = aiProfiles.map((p) => {
+        if (!p?.provider_id) return p;
+        const reg = byId.get(p.provider_id);
+        if (!reg) return p;
+        let regModels = [];
+        try {
+          const parsed = JSON.parse(reg.models || "[]");
+          regModels = parsed.map((m) => (typeof m === "string" ? m : m?.id)).filter(Boolean);
+        } catch {}
+        return {
+          ...p,
+          provider: p.provider || reg.provider_type || null,
+          baseUrl: p.baseUrl || reg.base_url || "",
+          apiKey: p.apiKey || reg.api_key || "",
+          models: (Array.isArray(p.models) && p.models.length) ? p.models : regModels,
+        };
+      });
+    }
+
     const scopeToggle = await renderScopeToggle(db, "ai_profiles", { lang });
 
     let html = scopeToggle + scopeToggleScript() + `<style>
@@ -197,12 +228,21 @@ export default {
         const idx = profiles.findIndex(p => p.id === profile_id);
         if (idx === -1) { res.json({ ok: false, error: "Profile not found" }); return true; }
         profiles[idx].name = profile_name;
-        profiles[idx].provider = profile_provider;
-        if (profile_api_key) profiles[idx].apiKey = profile_api_key;
-        profiles[idx].baseUrl = (profile_base_url || "").trim();
-        profiles[idx].models = models;
         profiles[idx].defaultModel = defaultModel;
         if (vision_profile_id !== undefined) profiles[idx].vision_profile_id = vision_profile_id || null;
+        if (profiles[idx].provider_id) {
+          // Pointer-mode profile: provider/apiKey/baseUrl/models live on
+          // the providers DB row (edit them in the Providers tab). The
+          // Edit form fields are display-only for these; don't rewrite
+          // them back into the profile or we'll reintroduce the legacy
+          // shape that the v3 migration stripped.
+          if (defaultModel) profiles[idx].model_id = defaultModel;
+        } else {
+          profiles[idx].provider = profile_provider;
+          if (profile_api_key) profiles[idx].apiKey = profile_api_key;
+          profiles[idx].baseUrl = (profile_base_url || "").trim();
+          profiles[idx].models = models;
+        }
       } else {
         const { randomBytes } = await import("node:crypto");
         const id = randomBytes(4).toString("hex");
@@ -248,7 +288,7 @@ export default {
 
       try {
         const { testProfileConnection } = await import("../../../ai/provider.js");
-        const result = await testProfileConnection(profile);
+        const result = await testProfileConnection(profile, db);
         res.json(result);
       } catch (err) {
         res.json({ ok: false, error: err.message });

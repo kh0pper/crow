@@ -106,9 +106,29 @@ export default function chatRouter(dashboardAuth) {
     const db = createDbClient();
     try {
       const profiles = await getAiProfiles(db);
+      // Enrich pointer-mode profiles with the DB provider row's models list
+      // and provider_type, so the client compose-bar picker + profile UI
+      // can render the model dropdown without looking up the provider
+      // separately. Migrated profiles have `provider` / `models` stripped.
+      const registry = await listProvidersAll(db).catch(() => []);
+      const byId = new Map(registry.map((p) => [p.id, p]));
+      const enriched = profiles.map((p) => {
+        if (!p?.provider_id) return p;
+        const reg = byId.get(p.provider_id);
+        if (!reg) return p;
+        const models = Array.isArray(p.models) && p.models.length
+          ? p.models
+          : (reg.models || []).map((m) => (typeof m === "string" ? m : m?.id)).filter(Boolean);
+        return {
+          ...p,
+          provider: p.provider || reg.provider_type || null,
+          baseUrl: p.baseUrl || reg.base_url || null,
+          models,
+        };
+      });
       const envConfig = getProviderConfig();
       res.json({
-        profiles,
+        profiles: enriched,
         envConfig: envConfig ? { provider: envConfig.provider, model: envConfig.model, baseUrl: envConfig.baseUrl } : null,
       });
     } catch (err) {
@@ -126,7 +146,7 @@ export default function chatRouter(dashboardAuth) {
       const profiles = await getAiProfiles(db, { includeKeys: true });
       const profile = profiles.find(p => p.id === profile_id);
       if (!profile) return res.status(404).json({ error: "Profile not found" });
-      const result = await testProfileConnection(profile);
+      const result = await testProfileConnection(profile, db);
       res.json(result);
     } finally {
       db.close();
@@ -143,12 +163,21 @@ export default function chatRouter(dashboardAuth) {
       let provider, convModel, profileId = null;
 
       if (profile_id) {
-        // Path A — Profile-based conversation
+        // Path A — Profile-based conversation. Pointer-mode profiles have
+        // no direct `provider` field; resolve via DB so conversation.provider
+        // carries a vendor label (openai / anthropic / …) that the vendor
+        // guard + adapter dispatch can use.
         const profiles = await getAiProfiles(db);
         const profile = profiles.find(p => p.id === profile_id);
         if (!profile) return res.status(400).json({ error: "Unknown profile" });
-        provider = profile.provider;
         convModel = model || profile.model_id || profile.defaultModel || "";
+        if (profile.provider_id) {
+          const cfg = await resolveProviderConfig(db, profile.provider_id, convModel || null).catch(() => null);
+          provider = cfg?.provider_type || profile.provider || null;
+          if (cfg && !convModel) convModel = cfg.model || "";
+        } else {
+          provider = profile.provider;
+        }
         profileId = profile_id;
       } else if (bodyProvider) {
         // Path B — Quick Chat: body carries provider + model (+ optional system_prompt).
@@ -297,7 +326,27 @@ export default function chatRouter(dashboardAuth) {
       if (conv.rows[0].profile_id) {
         const profiles = await getAiProfiles(db);
         const profile = profiles.find(p => p.id === conv.rows[0].profile_id);
-        if (profile?.models && !profile.models.includes(model)) {
+        // Pointer-mode profiles carry no direct `models`; validate against
+        // the DB provider row instead. Missing row / empty list ⇒ skip the
+        // guard (resolveProviderConfig honors explicit model IDs not in the
+        // stored list, matching its tolerant behavior).
+        let allowed = Array.isArray(profile?.models) ? profile.models : null;
+        if (!allowed && profile?.provider_id) {
+          const cfg = await resolveProviderConfig(db, profile.provider_id).catch(() => null);
+          // resolveProviderConfig only returns the picked model; fetch the
+          // full list via a direct query so the guard can still enforce.
+          if (cfg) {
+            const { rows: rrows } = await db.execute({
+              sql: "SELECT models FROM providers WHERE id = ? AND disabled = 0",
+              args: [profile.provider_id],
+            });
+            try {
+              const parsed = JSON.parse(rrows[0]?.models || "[]");
+              allowed = parsed.map((m) => (typeof m === "string" ? m : m?.id)).filter(Boolean);
+            } catch { allowed = null; }
+          }
+        }
+        if (allowed && allowed.length && !allowed.includes(model)) {
           return res.status(400).json({ error: "Model not available in this profile" });
         }
       }
@@ -471,7 +520,10 @@ export default function chatRouter(dashboardAuth) {
             const result = await createProviderAdapter();
             adapter = result.adapter;
           } else {
-            const result = await createAdapterFromProfile(profile, effectiveModel);
+            // Pass db so pointer-mode profiles (migrated to provider_id)
+            // resolve baseUrl/apiKey from the providers DB table. Direct-
+            // mode profiles ignore the db arg and use embedded fields.
+            const result = await createAdapterFromProfile(profile, effectiveModel, db);
             adapter = result.adapter;
           }
         } else {
