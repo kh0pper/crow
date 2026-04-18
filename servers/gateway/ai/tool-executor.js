@@ -357,8 +357,11 @@ function formatResult(mcpResult) {
     }
   }
 
-  // Truncate long results
-  if (text.length > MAX_RESULT_LENGTH) {
+  // Truncate long results — but skip for _audio_stream envelopes since the
+  // meta-glasses interceptor replaces them with brief prose before the LLM
+  // sees them. Truncating here would corrupt the JSON and break playback.
+  const hasAudioEnvelope = text.includes('"_audio_stream"') || text.includes('"_audio_stream_control"');
+  if (text.length > MAX_RESULT_LENGTH && !hasAudioEnvelope) {
     text = text.slice(0, MAX_RESULT_LENGTH) + "\n...[truncated]";
   }
 
