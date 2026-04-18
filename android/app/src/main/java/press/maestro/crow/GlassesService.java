@@ -145,6 +145,25 @@ public class GlassesService extends Service {
     private final java.util.concurrent.atomic.AtomicInteger pendingTtsDucks =
         new java.util.concurrent.atomic.AtomicInteger(0);
 
+    // Phase 6 C.3: continuous recording (note_stream). Mutually exclusive
+    // with PTT — beginTurn rejects while noteStreamRunning. Each chunk is
+    // 10 s × 16 kHz mono s16 PCM (320 000 bytes) prefixed with a 4-byte LE
+    // chunk index, sent as a single binary WS frame (320 004 bytes).
+    private static final int NOTE_STREAM_SAMPLES_PER_CHUNK = 160_000;
+    private static final int NOTE_STREAM_CHUNK_BYTES       = 320_000;
+    private static final long NOTE_STREAM_CAP_MS           = 2L * 60L * 60L * 1000L;
+    private static final long NOTE_STREAM_SCO_WAIT_MS      = 3000L;
+    private AudioRecord noteStreamRecord;
+    private Thread noteStreamThread;
+    private volatile boolean noteStreamRunning = false;
+    private volatile long noteStreamStartedAt = 0;
+    private volatile int noteStreamSessionId = 0;
+    private volatile boolean noteStreamScoConnected = false;
+    private android.content.BroadcastReceiver noteStreamScoReceiver;
+    private Handler noteStreamHandler;
+    private Runnable noteStreamScoWatchdog;
+    private Runnable noteStreamCapTimer;
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -239,6 +258,17 @@ public class GlassesService extends Service {
     public void beginTurn() {
         if (ws == null) { Log.w(TAG, "beginTurn: ws is null"); return; }
         if (inTurn) { Log.w(TAG, "beginTurn: already in turn"); return; }
+        if (noteStreamRunning) {
+            Log.w(TAG, "beginTurn: rejected — note_stream active");
+            try {
+                JSONObject err = new JSONObject();
+                err.put("type", "error");
+                err.put("code", "note_session_active");
+                err.put("message", "Stop recording before taking a voice turn.");
+                if (ws != null) ws.send(err.toString());
+            } catch (Exception ignored) {}
+            return;
+        }
         Log.i(TAG, "beginTurn");
         inTurn = true;
         updateNotification("Listening...");
@@ -423,6 +453,218 @@ public class GlassesService extends Service {
         }
     }
 
+    /**
+     * Phase 6 C.3: begin a continuous-recording session in response to the
+     * server's `note_stream_begin` envelope. Registers an SCO state receiver
+     * and kicks the pump once STATE_CONNECTED arrives. If SCO doesn't
+     * connect within NOTE_STREAM_SCO_WAIT_MS, sends note_stream_end
+     * { reason: "sco_not_connected" } and tears down.
+     */
+    private void beginNoteStream(int sessionId) {
+        if (noteStreamRunning) { Log.w(TAG, "beginNoteStream: already running"); return; }
+        if (inTurn) {
+            Log.w(TAG, "beginNoteStream: rejected — inTurn");
+            sendNoteStreamEnd("ptt_active");
+            return;
+        }
+        noteStreamSessionId = sessionId;
+        noteStreamStartedAt = System.currentTimeMillis();
+        noteStreamScoConnected = false;
+        if (noteStreamHandler == null) noteStreamHandler = new Handler(getMainLooper());
+        updateNotification("\uD83D\uDD34 Recording meeting — tap to stop");
+        Log.i(TAG, "beginNoteStream session=" + sessionId);
+
+        noteStreamScoReceiver = new android.content.BroadcastReceiver() {
+            @Override public void onReceive(Context ctx, Intent intent) {
+                int state = intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, -1);
+                Log.i(TAG, "noteStream SCO state=" + state);
+                if (state == AudioManager.SCO_AUDIO_STATE_CONNECTED && !noteStreamScoConnected) {
+                    noteStreamScoConnected = true;
+                    if (noteStreamScoWatchdog != null) {
+                        noteStreamHandler.removeCallbacks(noteStreamScoWatchdog);
+                        noteStreamScoWatchdog = null;
+                    }
+                    startNoteStreamPump();
+                } else if (state == AudioManager.SCO_AUDIO_STATE_DISCONNECTED && noteStreamRunning) {
+                    Log.w(TAG, "noteStream SCO dropped mid-session");
+                    sendNoteStreamEnd("sco_dropped");
+                    stopNoteStreamPump("sco_dropped");
+                }
+            }
+        };
+        android.content.IntentFilter filter =
+            new android.content.IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED);
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(noteStreamScoReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(noteStreamScoReceiver, filter);
+        }
+
+        try {
+            audioManager.startBluetoothSco();
+            audioManager.setBluetoothScoOn(true);
+        } catch (Exception e) {
+            Log.w(TAG, "noteStream SCO start failed: " + e.getMessage());
+        }
+
+        noteStreamScoWatchdog = new Runnable() {
+            @Override public void run() {
+                if (!noteStreamScoConnected) {
+                    Log.w(TAG, "noteStream SCO handshake timeout");
+                    sendNoteStreamEnd("sco_not_connected");
+                    stopNoteStreamPump("sco_not_connected");
+                }
+            }
+        };
+        noteStreamHandler.postDelayed(noteStreamScoWatchdog, NOTE_STREAM_SCO_WAIT_MS);
+
+        noteStreamCapTimer = new Runnable() {
+            @Override public void run() {
+                if (noteStreamRunning) {
+                    Log.i(TAG, "noteStream 2-hour cap reached");
+                    sendNoteStreamEnd("timeout");
+                    stopNoteStreamPump("timeout");
+                }
+            }
+        };
+        noteStreamHandler.postDelayed(noteStreamCapTimer, NOTE_STREAM_CAP_MS);
+    }
+
+    /**
+     * Phase 6 C.3: open an AudioRecord on the SCO mic and run the 10-s
+     * chunk pump. Each frame = 4-byte LE chunk index + 320 000 bytes PCM
+     * s16 mono @ 16 kHz sent as a single binary WS frame.
+     */
+    private void startNoteStreamPump() {
+        if (noteStreamRunning) return;
+        int minBuf = AudioRecord.getMinBufferSize(MIC_SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+        if (minBuf <= 0) {
+            Log.w(TAG, "noteStream AudioRecord.getMinBufferSize=" + minBuf);
+            sendNoteStreamEnd("audio_init_failed");
+            stopNoteStreamPump("audio_init_failed");
+            return;
+        }
+        int bufSize = Math.min(minBuf * 2, 640 * 1024);
+        try {
+            noteStreamRecord = new AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    MIC_SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    bufSize);
+        } catch (SecurityException e) {
+            Log.w(TAG, "noteStream AudioRecord denied (RECORD_AUDIO): " + e.getMessage());
+            sendNoteStreamEnd("permission_denied");
+            stopNoteStreamPump("permission_denied");
+            return;
+        }
+        if (noteStreamRecord.getState() != AudioRecord.STATE_INITIALIZED) {
+            Log.w(TAG, "noteStream AudioRecord not initialized");
+            try { noteStreamRecord.release(); } catch (Exception ignored) {}
+            noteStreamRecord = null;
+            sendNoteStreamEnd("audio_init_failed");
+            stopNoteStreamPump("audio_init_failed");
+            return;
+        }
+        noteStreamRecord.startRecording();
+        noteStreamRunning = true;
+        final int samplesPerChunk = NOTE_STREAM_SAMPLES_PER_CHUNK;
+        noteStreamThread = new Thread(() -> {
+            short[] chunk = new short[samplesPerChunk];
+            int chunkIdx = 0;
+            long totalFrames = 0;
+            while (noteStreamRunning) {
+                int filled = 0;
+                while (filled < samplesPerChunk && noteStreamRunning) {
+                    int n = noteStreamRecord.read(chunk, filled, samplesPerChunk - filled);
+                    if (n == AudioRecord.ERROR_INVALID_OPERATION || n == AudioRecord.ERROR_BAD_VALUE) {
+                        Log.w(TAG, "noteStream read err=" + n);
+                        noteStreamRunning = false;
+                        break;
+                    }
+                    if (n > 0) filled += n;
+                }
+                if (!noteStreamRunning) break;
+                if (filled < samplesPerChunk) continue;
+                ByteBuffer frame = ByteBuffer.allocate(4 + NOTE_STREAM_CHUNK_BYTES);
+                frame.order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                frame.putInt(chunkIdx);
+                for (int i = 0; i < samplesPerChunk; i++) frame.putShort(chunk[i]);
+                byte[] bytes = frame.array();
+                if (ws != null) {
+                    try {
+                        ws.send(ByteString.of(bytes));
+                        chunkIdx++;
+                        totalFrames++;
+                    } catch (Exception e) {
+                        Log.w(TAG, "noteStream ws.send err=" + e.getMessage());
+                    }
+                }
+            }
+            Log.i(TAG, "noteStream pump stopped, chunks=" + totalFrames);
+        }, "note-stream-pump");
+        noteStreamThread.start();
+        Log.i(TAG, "noteStream pump started (10 s × 16 kHz mono s16 chunks)");
+    }
+
+    /**
+     * Phase 6 C.3: tear down the note-stream pump. Safe to call multiple
+     * times. Does NOT send a note_stream_end envelope — callers that need
+     * the server to know should call sendNoteStreamEnd() FIRST.
+     */
+    private synchronized void stopNoteStreamPump(String reason) {
+        boolean wasRunning = noteStreamRunning;
+        noteStreamRunning = false;
+        Thread t = noteStreamThread;
+        noteStreamThread = null;
+        if (t != null) {
+            try { t.join(1500); } catch (InterruptedException ignored) {}
+        }
+        if (noteStreamRecord != null) {
+            try { noteStreamRecord.stop(); } catch (Exception ignored) {}
+            try { noteStreamRecord.release(); } catch (Exception ignored) {}
+            noteStreamRecord = null;
+        }
+        if (noteStreamHandler != null) {
+            if (noteStreamScoWatchdog != null) {
+                noteStreamHandler.removeCallbacks(noteStreamScoWatchdog);
+                noteStreamScoWatchdog = null;
+            }
+            if (noteStreamCapTimer != null) {
+                noteStreamHandler.removeCallbacks(noteStreamCapTimer);
+                noteStreamCapTimer = null;
+            }
+        }
+        if (noteStreamScoReceiver != null) {
+            try { unregisterReceiver(noteStreamScoReceiver); } catch (Exception ignored) {}
+            noteStreamScoReceiver = null;
+        }
+        // Only release SCO if no voice turn is holding it.
+        if (!inTurn) {
+            try { audioManager.setBluetoothScoOn(false); } catch (Exception ignored) {}
+            try { audioManager.stopBluetoothSco(); } catch (Exception ignored) {}
+        }
+        noteStreamScoConnected = false;
+        noteStreamSessionId = 0;
+        if (wasRunning) updateNotification("Connected");
+        Log.i(TAG, "noteStream stopped reason=" + reason);
+    }
+
+    /** Phase 6 C.3: send a note_stream_end envelope back to the server. */
+    private void sendNoteStreamEnd(String reason) {
+        if (ws == null) return;
+        try {
+            JSONObject msg = new JSONObject();
+            msg.put("type", "note_stream_end");
+            if (noteStreamSessionId > 0) msg.put("session_id", noteStreamSessionId);
+            msg.put("reason", reason);
+            ws.send(msg.toString());
+        } catch (Exception e) {
+            Log.w(TAG, "sendNoteStreamEnd failed: " + e.getMessage());
+        }
+    }
+
     private synchronized void connectWebSocket() {
         if (stopping) return;
         if (connecting) { Log.i(TAG, "connectWebSocket: already connecting"); return; }
@@ -522,6 +764,17 @@ public class GlassesService extends Service {
                             }
                             break;
                         }
+                        case "note_stream_begin": {
+                            int sid = msg.optInt("session_id", 0);
+                            beginNoteStream(sid);
+                            break;
+                        }
+                        case "note_stream_end":
+                            // Server initiated end — clean up, don't echo back.
+                            if (noteStreamRunning || noteStreamScoReceiver != null) {
+                                stopNoteStreamPump("server_end");
+                            }
+                            break;
                         case "error":
                             Log.w(TAG, "server error: " + msg.optString("code") + " " + msg.optString("message"));
                             break;
@@ -557,6 +810,12 @@ public class GlassesService extends Service {
             @Override public void onClosed(WebSocket webSocket, int code, String reason) {
                 Log.i(TAG, "WebSocket closed: " + code + " " + reason);
                 if (ws == webSocket) ws = null;
+                // Phase 6 C.3: WS gone → stop pump (server-side 2-min grace
+                // covers the reconnect window; the new WS will carry a fresh
+                // note_stream_begin if the server still thinks we should stream).
+                if (noteStreamRunning || noteStreamScoReceiver != null) {
+                    stopNoteStreamPump("ws_closed");
+                }
                 // Gateway restart triggers a clean 1000 close — OkHttp
                 // doesn't re-establish, so we must. Skip if we're shutting
                 // down ourselves.
@@ -568,6 +827,9 @@ public class GlassesService extends Service {
                 Log.w(TAG, "WebSocket failed: " + t.getMessage());
                 updateNotification("Disconnected — retrying");
                 if (ws == webSocket) ws = null;
+                if (noteStreamRunning || noteStreamScoReceiver != null) {
+                    stopNoteStreamPump("ws_failed");
+                }
                 scheduleReconnect(5000);
             }
         });
@@ -1134,6 +1396,9 @@ public class GlassesService extends Service {
         super.onDestroy();
         stopping = true;
         stopMicPump();
+        if (noteStreamRunning || noteStreamScoReceiver != null) {
+            stopNoteStreamPump("service_destroyed");
+        }
         try { if (ws != null) ws.close(1000, "service_stop"); } catch (Exception ignored) {}
         ws = null;
         closeAudioTrack();

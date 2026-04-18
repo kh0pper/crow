@@ -30,7 +30,7 @@ function robustJsonExtract(text) {
 // with NO tools (a one-shot completion). Returns parse_error +
 // raw_excerpt so the caller can persist diagnostics on extraction
 // failure instead of silently returning empty.
-async function summarizeSession({ noteId, topic }, db) {
+export async function summarizeSession({ noteId, topic }, db) {
   const { rows } = await db.execute({
     sql: "SELECT content FROM research_notes WHERE id = ?",
     args: [noteId],
@@ -192,10 +192,10 @@ export function createMetaGlassesServer(options = {}) {
 
   server.tool(
     "crow_glasses_start_note_session",
-    "Begin a note-taking session. Returns a session id. Use mode='dictation' for one-shot, 'session' for multi-turn discrete events.",
+    "Begin a note-taking session. Returns a session id. Use mode='dictation' for one-shot, 'session' for multi-turn discrete events, 'continuous' for up-to-2-hour streaming transcription (requires explicit user consent on the NEXT voice turn via crow_glasses_confirm_continuous_recording).",
     {
       topic: z.string().max(200).optional(),
-      mode: z.enum(["dictation", "session", "continuous"]).optional().describe("Default: 'session'. 'continuous' is reserved; use 'session' unless you know the phone supports continuous streaming."),
+      mode: z.enum(["dictation", "session", "continuous"]).optional().describe("Default: 'session'. 'continuous' marks the session awaiting-consent — you MUST read the returned consent_prompt aloud; the user confirms on the next voice turn via crow_glasses_confirm_continuous_recording. If you call start with continuous twice in a row without the user confirming, the second call will be rejected with consent_pending."),
       device_id: z.string().min(1).max(200).describe("The glasses device id taking notes."),
       project_id: z.number().int().optional(),
     },
@@ -204,6 +204,35 @@ export function createMetaGlassesServer(options = {}) {
         const { createDbClient } = await loadDb();
         const db = createDbClient();
         try {
+          // Phase 6 C.3: continuous mode is consent-gated. Before creating
+          // a new awaiting-consent session, reject if the device already
+          // has one active — otherwise the LLM could roll the 120-s
+          // freshness timer by calling start_note_session twice.
+          if (mode === "continuous") {
+            const existing = await db.execute({
+              sql: `SELECT id FROM glasses_note_sessions
+                    WHERE device_id = ?
+                      AND status = 'active'
+                      AND COALESCE(awaiting_consent, 0) = 1
+                      AND consent_expires_at > datetime('now')
+                    LIMIT 1`,
+              args: [device_id],
+            });
+            if (existing.rows[0]) {
+              return {
+                content: [{
+                  type: "text",
+                  text: JSON.stringify({
+                    error: "consent_pending",
+                    existing_session_id: Number(existing.rows[0].id),
+                    message: "Another continuous-mode session is awaiting consent. Wait for the user to confirm, or call crow_glasses_end_note_session on the existing session first.",
+                  }, null, 2),
+                }],
+                isError: true,
+              };
+            }
+          }
+
           const pid = project_id || await getOrCreateDefaultProject(db);
           const noteIns = await db.execute({
             sql: `INSERT INTO research_notes (project_id, content, created_at, updated_at)
@@ -211,18 +240,118 @@ export function createMetaGlassesServer(options = {}) {
             args: [pid, topic ? `# ${topic}\n\n` : ""],
           });
           const note_id = Number(noteIns.lastInsertRowid);
+          const isContinuous = mode === "continuous";
           const sessIns = await db.execute({
-            sql: `INSERT INTO glasses_note_sessions (device_id, topic, mode, project_id, note_id, status)
-                  VALUES (?, ?, ?, ?, ?, 'active')`,
-            args: [device_id, topic || null, mode, pid, note_id],
+            sql: `INSERT INTO glasses_note_sessions (device_id, topic, mode, project_id, note_id, status, awaiting_consent, consent_expires_at)
+                  VALUES (?, ?, ?, ?, ?, 'active', ?, ${isContinuous ? "datetime('now', '+120 seconds')" : "NULL"})`,
+            args: [device_id, topic || null, mode, pid, note_id, isContinuous ? 1 : 0],
+          });
+          const session_id = Number(sessIns.lastInsertRowid);
+          const payload = {
+            session_id, note_id, project_id: pid, mode, topic,
+            needs_consent: isContinuous,
+          };
+          if (isContinuous) {
+            payload.consent_prompt = "I'll record and transcribe continuously for up to 2 hours. Confirm by saying 'yes, record' or 'cancel'.";
+            payload.consent_expires_in_seconds = 120;
+          }
+          return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
+        } finally {
+          try { db.close(); } catch {}
+        }
+      } catch (err) {
+        return { content: [{ type: "text", text: `Failed: ${err.message}` }], isError: true };
+      }
+    },
+  );
+
+  // Phase 6 C.3: user explicitly authorizes continuous recording. The MCP
+  // tool only validates DB state + clears the awaiting_consent flag; the
+  // panel layer (runVoiceTurn) intercepts the _note_stream_begin sentinel
+  // and actually sends the WebSocket envelope. This keeps the stdio MCP
+  // process free of WS/session access, same pattern as
+  // crow_glasses_capture_and_attach_photo.
+  server.tool(
+    "crow_glasses_confirm_continuous_recording",
+    "Confirm the user's explicit consent to start continuous recording. MUST only be called when the user affirmatively responds to the consent prompt returned by crow_glasses_start_note_session({ mode: 'continuous' }). REJECTS if no matching awaiting-consent session exists, if the 120-second freshness window has expired, or if the session is no longer active. On any rejection, DO NOT retry — the user must re-initiate by starting a new session.",
+    {
+      session_id: z.number().int().describe("The session_id returned by the preceding crow_glasses_start_note_session({ mode: 'continuous' }) call."),
+      device_id: z.string().min(1).max(200).describe("The glasses device id that will record."),
+    },
+    async ({ session_id, device_id }) => {
+      try {
+        const { createDbClient } = await loadDb();
+        const db = createDbClient();
+        try {
+          // Fetch session state atomically with freshness check in SQL.
+          const { rows } = await db.execute({
+            sql: `SELECT id, mode, status, COALESCE(awaiting_consent, 0) AS awaiting_consent,
+                         consent_expires_at, note_id, topic, project_id
+                    FROM glasses_note_sessions
+                   WHERE id = ? AND device_id = ?
+                   LIMIT 1`,
+            args: [session_id, device_id],
+          });
+          const sess = rows[0];
+          if (!sess) {
+            return { content: [{ type: "text", text: JSON.stringify({ error: "not_found", message: "Session not found or belongs to a different device." }, null, 2) }], isError: true };
+          }
+          if (sess.status !== "active") {
+            return { content: [{ type: "text", text: JSON.stringify({ error: "not_active", status: sess.status, message: "Session is no longer active. Start a new one." }, null, 2) }], isError: true };
+          }
+          if (sess.mode !== "continuous") {
+            return { content: [{ type: "text", text: JSON.stringify({ error: "wrong_mode", mode: sess.mode, message: "This tool only confirms continuous-mode sessions." }, null, 2) }], isError: true };
+          }
+          if (Number(sess.awaiting_consent) !== 1) {
+            return { content: [{ type: "text", text: JSON.stringify({ error: "already_confirmed_or_not_awaiting", message: "This session is not awaiting consent (already confirmed, or was never started in continuous mode)." }, null, 2) }], isError: true };
+          }
+          // Freshness check — 120-second window from start_note_session.
+          const fresh = await db.execute({
+            sql: `SELECT (consent_expires_at > datetime('now')) AS fresh FROM glasses_note_sessions WHERE id = ?`,
+            args: [session_id],
+          });
+          if (!Number(fresh.rows[0]?.fresh)) {
+            // Consent window elapsed — force-cancel the stale session so the
+            // device isn't blocked by a lingering awaiting_consent row.
+            await db.execute({
+              sql: `UPDATE glasses_note_sessions
+                       SET status = 'cancelled', ended_at = datetime('now'),
+                           awaiting_consent = 0, consent_expires_at = NULL
+                     WHERE id = ?`,
+              args: [session_id],
+            });
+            return { content: [{ type: "text", text: JSON.stringify({ error: "consent_expired", message: "The 120-second consent window elapsed. Session cancelled — ask the user to re-initiate." }, null, 2) }], isError: true };
+          }
+          // Accept: clear this session's consent flag and cancel any sibling
+          // awaiting-consent sessions for the same device (defensive cleanup
+          // in case the LLM created duplicates).
+          await db.execute({
+            sql: `UPDATE glasses_note_sessions
+                     SET awaiting_consent = 0, consent_expires_at = NULL
+                   WHERE id = ?`,
+            args: [session_id],
+          });
+          await db.execute({
+            sql: `UPDATE glasses_note_sessions
+                     SET status = 'cancelled', ended_at = datetime('now'),
+                         awaiting_consent = 0, consent_expires_at = NULL
+                   WHERE device_id = ?
+                     AND id != ?
+                     AND status = 'active'
+                     AND COALESCE(awaiting_consent, 0) = 1`,
+            args: [device_id, session_id],
           });
           return {
             content: [{
               type: "text",
               text: JSON.stringify({
-                session_id: Number(sessIns.lastInsertRowid),
-                note_id, project_id: pid, mode, topic,
-                needs_consent: mode === "continuous",
+                _note_stream_begin: {
+                  device_id,
+                  session_id: Number(session_id),
+                  note_id: sess.note_id ? Number(sess.note_id) : null,
+                  topic: sess.topic || null,
+                },
+                prose: "Recording started. I'll transcribe continuously until you say 'stop recording' or the 2-hour cap is reached.",
               }, null, 2),
             }],
           };
@@ -232,7 +361,7 @@ export function createMetaGlassesServer(options = {}) {
       } catch (err) {
         return { content: [{ type: "text", text: `Failed: ${err.message}` }], isError: true };
       }
-    },
+    }
   );
 
   server.tool(
@@ -303,11 +432,12 @@ export function createMetaGlassesServer(options = {}) {
           }
           // Look up note + topic before flipping status, so we can summarize.
           const meta = await db.execute({
-            sql: `SELECT note_id, topic FROM glasses_note_sessions WHERE id = ?`,
+            sql: `SELECT note_id, topic, mode FROM glasses_note_sessions WHERE id = ?`,
             args: [sid],
           });
           const noteId = meta.rows[0]?.note_id;
           const topic = meta.rows[0]?.topic;
+          const mode = meta.rows[0]?.mode;
           if (!noteId) {
             await db.execute({
               sql: `UPDATE glasses_note_sessions SET status = 'ended', ended_at = datetime('now') WHERE id = ?`,
@@ -361,6 +491,17 @@ export function createMetaGlassesServer(options = {}) {
           if (result.parse_error) {
             out.parse_error = result.parse_error;
             out.raw_excerpt = result.raw_excerpt;
+          }
+          // Phase 6 C.3: if this was a continuous-mode session, emit the
+          // _note_stream_end sentinel so the panel (runVoiceTurn) tears down
+          // the server-side note_stream state + WS envelope on the next
+          // tool-result iteration. Non-continuous modes ignore this.
+          if (mode === "continuous") {
+            out._note_stream_end = {
+              device_id,
+              session_id: Number(sid),
+              reason: "user_stop",
+            };
           }
           return { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] };
         } finally {

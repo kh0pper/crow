@@ -470,6 +470,13 @@ await initTable("glasses_note_sessions index", `
 await addColumnIfMissing("glasses_note_sessions", "confirm_retry_count", "INTEGER DEFAULT 0");
 await addColumnIfMissing("glasses_note_sessions", "summary_raw", "TEXT");
 
+// Phase 6 C.3: continuous-mode consent gate. Start tool sets
+// awaiting_consent=1 + consent_expires_at=now+120s; confirm tool
+// requires both. addColumnIfMissing leaves old rows NULL — read sites
+// MUST use COALESCE(awaiting_consent, 0) = 1.
+await addColumnIfMissing("glasses_note_sessions", "awaiting_consent", "INTEGER DEFAULT 0");
+await addColumnIfMissing("glasses_note_sessions", "consent_expires_at", "TEXT");
+
 // Phase 6 C.1: research_notes.updated_at was referenced by Phase 6
 // crow_glasses_add_to_note (commit 9783a8b) but the column was never
 // added to the schema, so the UPDATE silently errored under the
