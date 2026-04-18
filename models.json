@@ -8,6 +8,7 @@
       "apiKey": "none",
       "host": "local",
       "bundleId": "vllm-rocm-qwen3",
+      "mutexGroup": "crow-strix-vram",
       "models": [
         {
           "id": "qwen3-4b",
@@ -23,6 +24,8 @@
       "apiKey": "none",
       "host": "local",
       "bundleId": "vllm-rocm-qwen3-32b",
+      "mutexGroup": "crow-strix-vram",
+      "defaultMember": true,
       "models": [
         {
           "id": "qwen3-32b",
@@ -33,53 +36,53 @@
       ]
     },
     "crow-swap-coder": {
-      "$description": "On-demand coder specialist. MoE via llama.cpp Vulkan AMDVLK on Strix Halo. Mutex with crow-swap-deep.",
+      "$description": "On-demand coder specialist. MoE via llama.cpp Vulkan AMDVLK on Strix Halo. Mutexed with all other crow-* bundles on Strix Halo's unified 124 GB pool.",
       "baseUrl": "http://100.118.41.122:8003/v1",
       "apiKey": "none",
       "host": "local",
       "bundleId": "llamacpp-vulkan-qwen3-coder",
+      "mutexGroup": "crow-strix-vram",
       "models": [
         {
           "id": "qwen3-coder-30b-a3b",
           "contextLen": 32768,
           "warm": false,
           "onDemand": true,
-          "mutexGroup": "8003-swap",
           "priority": "interactive"
         }
       ]
     },
     "crow-swap-deep": {
-      "$description": "On-demand deep-reasoning specialist. GLM-4.5-Air 106B/12B MoE via llama.cpp Vulkan AMDVLK. Mutex with crow-swap-coder. Conflicts with crow-chat (forces :8002 unload).",
+      "$description": "On-demand deep-reasoning specialist. GLM-4.5-Air 106B/12B MoE via llama.cpp Vulkan AMDVLK. Mutexed with all other crow-* bundles on Strix Halo's unified 124 GB pool.",
       "baseUrl": "http://100.118.41.122:8003/v1",
       "apiKey": "none",
       "host": "local",
       "bundleId": "llamacpp-vulkan-glm-45-air",
+      "mutexGroup": "crow-strix-vram",
       "models": [
         {
           "id": "glm-4.5-air",
           "contextLen": 16384,
           "warm": false,
           "onDemand": true,
-          "mutexGroup": "8003-swap",
           "conflictsWith": ["crow-chat"],
           "priority": "batch"
         }
       ]
     },
     "crow-swap-agentic": {
-      "$description": "On-demand agentic-coding + VLM specialist. Qwen3.6-35B-A3B UD-Q6_K MoE via llama.cpp Vulkan AMDVLK on Strix Halo. Mutex with crow-swap-coder + crow-swap-deep.",
+      "$description": "On-demand agentic-coding + VLM specialist. Qwen3.6-35B-A3B UD-Q6_K MoE via llama.cpp Vulkan AMDVLK on Strix Halo. Mutexed with all other crow-* bundles on Strix Halo's unified 124 GB pool.",
       "baseUrl": "http://100.118.41.122:8003/v1",
       "apiKey": "none",
       "host": "local",
       "bundleId": "llamacpp-vulkan-qwen36-35b-a3b",
+      "mutexGroup": "crow-strix-vram",
       "models": [
         {
           "id": "qwen3.6-35b-a3b",
           "contextLen": 32768,
           "warm": false,
           "onDemand": true,
-          "mutexGroup": "8003-swap",
           "priority": "interactive"
         }
       ]

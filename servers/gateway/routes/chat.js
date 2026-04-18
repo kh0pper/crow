@@ -170,13 +170,22 @@ export default function chatRouter(dashboardAuth) {
         const profiles = await getAiProfiles(db);
         const profile = profiles.find(p => p.id === profile_id);
         if (!profile) return res.status(400).json({ error: "Unknown profile" });
-        convModel = model || profile.model_id || profile.defaultModel || "";
-        if (profile.provider_id) {
-          const cfg = await resolveProviderConfig(db, profile.provider_id, convModel || null).catch(() => null);
-          provider = cfg?.provider_type || profile.provider || null;
-          if (cfg && !convModel) convModel = cfg.model || "";
+        if (profile.kind === "auto") {
+          // Auto profiles don't carry a provider or model — smart-router
+          // resolves both per-message. chat_conversations.{provider,model}
+          // are NOT NULL, so write sentinel + empty string; the message-send
+          // path's smart_route branch overrides them before adapter dispatch.
+          provider = "auto";
+          convModel = "";
         } else {
-          provider = profile.provider;
+          convModel = model || profile.model_id || profile.defaultModel || "";
+          if (profile.provider_id) {
+            const cfg = await resolveProviderConfig(db, profile.provider_id, convModel || null).catch(() => null);
+            provider = cfg?.provider_type || profile.provider || null;
+            if (cfg && !convModel) convModel = cfg.model || "";
+          } else {
+            provider = profile.provider;
+          }
         }
         profileId = profile_id;
       } else if (bodyProvider) {

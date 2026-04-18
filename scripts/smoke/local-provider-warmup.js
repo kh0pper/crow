@@ -33,16 +33,18 @@ function expect(label, actual, expected) {
 
 // -------- 1. mutexGroup lookup --------
 
-// crow-swap-* declare mutexGroup on models[0]; the pre-fix code read it from
-// the provider top-level and returned [] siblings, which would have caused a
-// :8003 port collision the first time two swap members were acquired.
+// All five crow-* providers share the Strix Halo unified 124 GB VRAM pool
+// and collide under load (a 32B weight + KV cache leaves no room for another
+// weight). One provider-level group ties them all together so acquiring any
+// one evicts the others via bundleStop.
 const agentic = getProvider("crow-swap-agentic");
-expect("crow-swap-agentic has models[0].mutexGroup=8003-swap",
-  mutexGroupOf(agentic), "8003-swap");
+expect("crow-swap-agentic has provider-level mutexGroup=crow-strix-vram",
+  mutexGroupOf(agentic), "crow-strix-vram");
 
-const swapSiblings = getMutexSiblings("crow-swap-agentic").sort();
-expect("crow-swap-agentic sees coder+deep as siblings",
-  swapSiblings, ["crow-swap-coder", "crow-swap-deep"]);
+const agenticSiblings = getMutexSiblings("crow-swap-agentic").sort();
+expect("crow-swap-agentic sees all 4 other crow-* providers as siblings",
+  agenticSiblings,
+  ["crow-chat", "crow-dispatch", "crow-swap-coder", "crow-swap-deep"]);
 
 // grackle-rerank's mutexGroup is at provider-level; make sure the fallback
 // didn't regress the original case.
@@ -50,14 +52,15 @@ const rerankSiblings = getMutexSiblings("grackle-rerank");
 expect("grackle-rerank sees grackle-vision as sibling",
   rerankSiblings, ["grackle-vision"]);
 
-// All three :8003 members show up in the group, with no declared default.
+// All 5 crow-* members show up in the group, with crow-chat as default
+// (idle auto-revert restores it when a specialist times out).
 const groups = getMutexGroups();
-const swap = groups.get("8003-swap");
-expect("8003-swap group has 3 members",
-  swap?.members?.map((m) => m.name).sort(),
-  ["crow-swap-agentic", "crow-swap-coder", "crow-swap-deep"]);
-expect("8003-swap group has no default member",
-  swap?.default, null);
+const vram = groups.get("crow-strix-vram");
+expect("crow-strix-vram group has 5 members",
+  vram?.members?.map((m) => m.name).sort(),
+  ["crow-chat", "crow-dispatch", "crow-swap-agentic", "crow-swap-coder", "crow-swap-deep"]);
+expect("crow-strix-vram group defaultMember=crow-chat",
+  vram?.default, "crow-chat");
 
 // -------- 2. maybeAcquireLocalProvider safety --------
 
