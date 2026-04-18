@@ -75,7 +75,13 @@ services:
       # Docker network.
       - "${FUNKWHALE_NGINX_BIND_ADDR:-127.0.0.1}:${FUNKWHALE_NGINX_BIND_PORT:-8600}:80"
     init: true
-    mem_limit: 2g
+    # 8g (up from 2g default): bulk `import_files` on a large library OOMs
+    # under 2g — scanner alone rss peaks ~1.2 GB, plus Celery workers +
+    # Postgres + Redis + gunicorn share the budget. 8g gives headroom for a
+    # ~30k-file import without the OOM-killer reaping the scanner mid-run.
+    # Steady-state idle is ~60 MB; the extra ceiling is only touched during
+    # bursty work. Operators on memory-constrained hosts may tune down.
+    mem_limit: 8g
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/api/v1/instance/nodeinfo/2.0/ >/dev/null 2>&1 || exit 1"]
