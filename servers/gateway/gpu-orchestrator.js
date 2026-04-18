@@ -12,6 +12,30 @@
  *
  * Single-flight: only one swap can run at a time (`_swapInFlight` promise).
  * Callers queue behind it via `acquireProvider(name)`.
+ *
+ * --- Declaring a mutex group ---
+ *
+ * A `mutexGroup` models SHARED-RESOURCE CONTENTION between bundles. Declare
+ * one whenever two bundles cannot both be resident on the same machine at
+ * the same time, for ANY reason:
+ *
+ *   - Same listening port (two containers binding :8003 is a hard conflict).
+ *   - Same GPU memory pool (e.g., Strix Halo's 124 GB unified pool — two
+ *     65 GB models can't co-exist even if their ports differ).
+ *   - Same NUMA domain, same thermal envelope, same PCIe device, etc.
+ *
+ * Port collision is the obvious case but typically subsumed by the memory
+ * case on single-GPU hosts — if two bundles fit in VRAM together but bind
+ * the same port, they already can't co-exist. The reverse is NOT true:
+ * different-port bundles can still blow out VRAM. Declare the group on
+ * the BROADEST shared resource (Apr 2026 hindsight: the original
+ * `8003-swap` group on the crow-swap-* providers was too narrow and
+ * caused a VRAM exhaustion when crow-chat (:8002) tried to load Qwen3-32B
+ * on top of an already-resident :8003 bundle. Now all five crow-*
+ * providers share `crow-strix-vram`).
+ *
+ * Keep `defaultMember: true` on exactly one provider per group if you
+ * want idle auto-revert to restore it after a specialist times out.
  */
 
 import { spawn } from "node:child_process";

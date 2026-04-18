@@ -177,6 +177,14 @@ export async function getAiProfiles(db, { includeKeys = false } = {}) {
  * use the profile's embedded apiKey/baseUrl/provider fields. After the
  * llm-settings migration strips direct fields from migrated profiles,
  * callers MUST pass `db` to reach their credentials.
+ *
+ * `apiKey` sentinel contract: bundle-registered providers (crow-*, grackle-*)
+ * store `apiKey: "none"` in the providers DB row. The OpenAI-compat adapter's
+ * `requiresKey` guard throws "API key required" on falsy apiKey, so code
+ * paths that hydrate a profile from cfg MUST pass "none" through as a
+ * truthy sentinel — do NOT strip to "" or null. Local vLLM/llama.cpp
+ * endpoints ignore the Bearer value but still need a non-empty string.
+ * See commits 85611fc / 8c56bef for the bug this fixed.
  */
 export async function createAdapterFromProfile(profile, model, db = null) {
   let providerLabel = profile.provider;
