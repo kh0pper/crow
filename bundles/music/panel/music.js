@@ -42,6 +42,7 @@ const CLIENT_SCRIPT = `
     searchQuery: '',
     searchAbort: null,
     searchTimer: null,
+    browseAbort: null,    // paginate() AbortController — one at a time
   };
 
   function root() { return document.getElementById('music-root'); }
@@ -70,12 +71,122 @@ const CLIENT_SCRIPT = `
   // ---------- View switch ----------
 
   function setView(v) {
+    // Clicking the active tab is a no-op — preserves scroll + in-flight
+    // pagination state.
+    if (state.view === v) return;
+    if (state.view === 'browse' && state.browseAbort) {
+      try { state.browseAbort.abort(); } catch (_) {}
+      state.browseAbort = null;
+    }
+    if (state.view === 'search' && state.searchAbort) {
+      try { state.searchAbort.abort(); } catch (_) {}
+      state.searchAbort = null;
+    }
     state.view = v;
     var tabs = document.querySelectorAll('.music-tab');
     tabs.forEach(function(t) { t.classList.toggle('active', t.getAttribute('data-view') === v); });
     if (v === 'browse') renderBrowse();
     else if (v === 'recent') renderRecent();
     else if (v === 'search') renderSearchResults();
+  }
+
+  // Shared pagination helper. Per-invocation local observer + AbortController;
+  // no globals. Hard cap at 50 pages guards against malformed upstream.
+  // Observer arming is INSIDE loadPage's first-page success branch to prevent
+  // the auto-retry loop that would otherwise trigger on persistent 401/500
+  // (IntersectionObserver fires an initial callback for intersecting targets).
+  async function paginate(r, urlBase, pageSize, appendRows) {
+    if (state.browseAbort) { try { state.browseAbort.abort(); } catch (_) {} }
+    var ctrl = new AbortController();
+    state.browseAbort = ctrl;
+
+    var page = 1;
+    var loadedCount = 0;
+    var isLoading = false;
+    var listContainer = null;
+    var sentinel = null;
+    var observer = null;
+    var MAX_PAGES = 50;
+
+    // Sentinel attached BEFORE any fetch so a first-page failure has a retry
+    // affordance (same code path as N-th-page failure).
+    sentinel = el('div', { className: 'music-load-more' }, 'Loading...');
+    r.appendChild(sentinel);
+
+    async function loadPage() {
+      if (ctrl.signal.aborted || page > MAX_PAGES) return;
+      isLoading = true;
+      var wasFirstPage = (listContainer === null);
+      try {
+        var sep = urlBase.indexOf('?') >= 0 ? '&' : '?';
+        var url = urlBase + sep + 'page=' + page + '&page_size=' + pageSize;
+        var res = await fetch(url, { credentials: 'same-origin', signal: ctrl.signal });
+        if (ctrl.signal.aborted) return;
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        var data = await res.json();
+        if (ctrl.signal.aborted) return;
+        var results = Array.isArray(data.results) ? data.results : [];
+        var count = typeof data.count === 'number' ? data.count : null;
+
+        if (wasFirstPage) {
+          if (results.length === 0) {
+            sentinel.remove();
+            sentinel = null;
+            r.appendChild(el('div', { className: 'music-empty' }, 'Nothing to show.'));
+            return;
+          }
+          listContainer = appendRows(r, results, true, sentinel);
+        } else {
+          appendRows(listContainer, results, false, sentinel);
+        }
+        loadedCount += results.length;
+        page += 1;
+
+        var capHit = (page > MAX_PAGES);
+        var more = (results.length >= pageSize)
+          && (count === null || loadedCount < count)
+          && !capHit;
+
+        if (!more) {
+          if (observer) { observer.disconnect(); observer = null; }
+          sentinel.textContent = capHit
+            ? 'Too many results - use search to find specific items.'
+            : 'End of library';
+          sentinel.onclick = null;
+        } else if (wasFirstPage) {
+          // Arm observer only after first-page success. At this point
+          // isLoading is STILL true (finally runs after this block), so
+          // IntersectionObserver's initial-callback-on-observe for an
+          // intersecting sentinel is rejected by the guard below. Do not
+          // move this block to a post-loadPage helper without preserving
+          // that sequencing.
+          observer = new IntersectionObserver(function(entries) {
+            if (!entries[0].isIntersecting) return;
+            if (isLoading || ctrl.signal.aborted) return;
+            loadPage();
+          }, { rootMargin: '200px' });
+          observer.observe(sentinel);
+        }
+      } catch (err) {
+        if (err && err.name === 'AbortError') return;
+        if (observer) { observer.disconnect(); observer = null; }
+        if (sentinel) {
+          sentinel.textContent = 'Failed to load. Tap to retry.';
+          sentinel.classList.add('music-error');
+          sentinel.onclick = function() {
+            sentinel.onclick = null;
+            sentinel.textContent = 'Retrying...';
+            // renderBrowse's first line is clear(r), which discards the
+            // stale sentinel before a fresh paginate() attaches a new one.
+            renderBrowse();
+          };
+        }
+      } finally {
+        isLoading = false;
+      }
+    }
+
+    await loadPage();
   }
 
   // ---------- Browse view ----------
@@ -122,97 +233,109 @@ const CLIENT_SCRIPT = `
   }
 
   async function renderArtists(r, loading) {
-    var res = await fetch('/api/funkwhale/browse/artists?page_size=100', { credentials: 'same-origin' });
-    var data = await res.json();
     loading.remove();
-    if (!data.results || data.results.length === 0) {
-      r.appendChild(el('div', { className: 'music-empty' }, 'No artists found.'));
-      return;
-    }
-    var list = el('div', { className: 'music-list' });
-    data.results.forEach(function(a) {
-      var row = el('div', { className: 'music-row music-row-clickable' });
-      row.appendChild(el('div', { className: 'music-avatar' }, (a.name || '?').charAt(0).toUpperCase()));
-      var meta = el('div', { className: 'music-row-meta' });
-      meta.appendChild(el('div', { className: 'music-row-title' }, a.name));
-      if (a.tracks_count) meta.appendChild(el('div', { className: 'music-row-sub' }, a.tracks_count + ' tracks'));
-      row.appendChild(meta);
-      row.addEventListener('click', function() {
-        state.browse = { level: 'albums', artistId: a.id, artistName: a.name, albumId: null, albumTitle: '', albumArtist: '' };
-        renderBrowse();
+    await paginate(r, '/api/funkwhale/browse/artists', 100, function(dest, rows, first, sentinel) {
+      var list;
+      if (first) {
+        list = el('div', { className: 'music-list' });
+        r.insertBefore(list, sentinel);
+      } else {
+        list = dest;
+      }
+      rows.forEach(function(a) {
+        var row = el('div', { className: 'music-row music-row-clickable' });
+        row.appendChild(el('div', { className: 'music-avatar' }, (a.name || '?').charAt(0).toUpperCase()));
+        var meta = el('div', { className: 'music-row-meta' });
+        meta.appendChild(el('div', { className: 'music-row-title' }, a.name));
+        if (a.tracks_count) meta.appendChild(el('div', { className: 'music-row-sub' }, a.tracks_count + ' tracks'));
+        row.appendChild(meta);
+        row.addEventListener('click', function() {
+          state.browse = { level: 'albums', artistId: a.id, artistName: a.name, albumId: null, albumTitle: '', albumArtist: '' };
+          renderBrowse();
+        });
+        list.appendChild(row);
       });
-      list.appendChild(row);
+      return list;
     });
-    r.appendChild(list);
   }
 
   async function renderAlbums(r, loading) {
-    var res = await fetch('/api/funkwhale/browse/albums?artist=' + encodeURIComponent(state.browse.artistId) + '&page_size=100', { credentials: 'same-origin' });
-    var data = await res.json();
     loading.remove();
-    if (!data.results || data.results.length === 0) {
-      r.appendChild(el('div', { className: 'music-empty' }, 'No albums found.'));
-      return;
-    }
-    var grid = el('div', { className: 'music-album-grid' });
-    data.results.forEach(function(a) {
-      var card = el('div', { className: 'music-album-card' });
-      var cover = el('div', { className: 'music-album-cover' });
-      if (a.artwork_url) {
-        cover.style.backgroundImage = 'url(' + "'/api/funkwhale/artwork?src=" + encodeURIComponent(a.artwork_url) + "'" + ')';
+    var url = '/api/funkwhale/browse/albums?artist=' + encodeURIComponent(state.browse.artistId);
+    await paginate(r, url, 100, function(dest, rows, first, sentinel) {
+      var grid;
+      if (first) {
+        grid = el('div', { className: 'music-album-grid' });
+        r.insertBefore(grid, sentinel);
       } else {
-        cover.textContent = (a.title || '?').charAt(0).toUpperCase();
-        cover.classList.add('music-album-cover-placeholder');
+        grid = dest;
       }
-      card.appendChild(cover);
-      card.appendChild(el('div', { className: 'music-album-title' }, a.title));
-      if (a.year) card.appendChild(el('div', { className: 'music-album-sub' }, a.year));
-      card.addEventListener('click', function() {
-        state.browse = {
-          level: 'tracks',
-          artistId: state.browse.artistId,
-          artistName: state.browse.artistName,
-          albumId: a.id,
-          albumTitle: a.title,
-          albumArtist: a.artist || state.browse.artistName,
-          albumArtwork: a.artwork_url,
-        };
-        renderBrowse();
+      rows.forEach(function(a) {
+        var card = el('div', { className: 'music-album-card' });
+        var cover = el('div', { className: 'music-album-cover' });
+        if (a.artwork_url) {
+          cover.style.backgroundImage = "url('/api/funkwhale/artwork?src=" + encodeURIComponent(a.artwork_url) + "')";
+        } else {
+          cover.textContent = (a.title || '?').charAt(0).toUpperCase();
+          cover.classList.add('music-album-cover-placeholder');
+        }
+        card.appendChild(cover);
+        card.appendChild(el('div', { className: 'music-album-title' }, a.title));
+        if (a.year) card.appendChild(el('div', { className: 'music-album-sub' }, a.year));
+        card.addEventListener('click', function() {
+          state.browse = {
+            level: 'tracks',
+            artistId: state.browse.artistId,
+            artistName: state.browse.artistName,
+            albumId: a.id,
+            albumTitle: a.title,
+            albumArtist: a.artist || state.browse.artistName,
+            albumArtwork: a.artwork_url,
+          };
+          renderBrowse();
+        });
+        grid.appendChild(card);
       });
-      grid.appendChild(card);
+      return grid;
     });
-    r.appendChild(grid);
   }
 
   async function renderTracks(r, loading) {
-    var res = await fetch('/api/funkwhale/browse/tracks?album=' + encodeURIComponent(state.browse.albumId) + '&page_size=100', { credentials: 'same-origin' });
-    var data = await res.json();
     loading.remove();
-    if (!data.results || data.results.length === 0) {
-      r.appendChild(el('div', { className: 'music-empty' }, 'No tracks found.'));
-      return;
-    }
-    // Album header with Play All button
-    var header = el('div', { className: 'music-album-header' });
-    if (state.browse.albumArtwork) {
-      var thumb = el('div', { className: 'music-album-cover-sm' });
-      thumb.style.backgroundImage = 'url(' + "'/api/funkwhale/artwork?src=" + encodeURIComponent(state.browse.albumArtwork) + "'" + ')';
-      header.appendChild(thumb);
-    }
-    var info = el('div', { className: 'music-album-header-info' });
-    info.appendChild(el('div', { className: 'music-album-header-title' }, state.browse.albumTitle));
-    info.appendChild(el('div', { className: 'music-album-header-sub' }, state.browse.albumArtist));
-    header.appendChild(info);
-    var playAllBtn = el('button', { className: 'btn btn-primary btn-sm' }, '\\u25B6 Play All');
-    playAllBtn.addEventListener('click', function() { playAll(data.results); });
-    header.appendChild(playAllBtn);
-    r.appendChild(header);
-
-    var list = el('div', { className: 'music-list' });
-    data.results.forEach(function(t) {
-      list.appendChild(renderTrackRow(t));
+    // Accumulator for Play All — grows across pages so Play-All dispatches
+    // the entire album, not just the first 100 tracks.
+    var allTracks = [];
+    var url = '/api/funkwhale/browse/tracks?album=' + encodeURIComponent(state.browse.albumId);
+    await paginate(r, url, 100, function(dest, rows, first, sentinel) {
+      var list;
+      if (first) {
+        // Album header + Play All, then the track list. All direct children
+        // of r so sentinel stays at the end of r below the list.
+        var header = el('div', { className: 'music-album-header' });
+        if (state.browse.albumArtwork) {
+          var thumb = el('div', { className: 'music-album-cover-sm' });
+          thumb.style.backgroundImage = "url('/api/funkwhale/artwork?src=" + encodeURIComponent(state.browse.albumArtwork) + "')";
+          header.appendChild(thumb);
+        }
+        var info = el('div', { className: 'music-album-header-info' });
+        info.appendChild(el('div', { className: 'music-album-header-title' }, state.browse.albumTitle));
+        info.appendChild(el('div', { className: 'music-album-header-sub' }, state.browse.albumArtist));
+        header.appendChild(info);
+        var playAllBtn = el('button', { className: 'btn btn-primary btn-sm' }, '\u25B6 Play All');
+        playAllBtn.addEventListener('click', function() { playAll(allTracks); });
+        header.appendChild(playAllBtn);
+        r.insertBefore(header, sentinel);
+        list = el('div', { className: 'music-list' });
+        r.insertBefore(list, sentinel);
+      } else {
+        list = dest;
+      }
+      rows.forEach(function(t) {
+        allTracks.push(t);
+        list.appendChild(renderTrackRow(t));
+      });
+      return list;
     });
-    r.appendChild(list);
   }
 
   // ---------- Recent view ----------
