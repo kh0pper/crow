@@ -6,21 +6,11 @@
  * Add-cloud-provider form. Local-bundle rows leave the column NULL — callers
  * infer the adapter from `bundle_id` + models.json in that case.
  *
- * Alias collapse:
- *   openrouter → openai (OpenRouter speaks the OpenAI chat/completions API)
- *   openai-compat → openai (vLLM, LocalAI, llama.cpp, Meta, etc.)
- *   meta → openai (legacy alias; new rows should use openai-compat)
+ * Delegates to provider.js::resolveAdapterKey so the
+ * openrouter/meta/openai-compat → openai aliasing lives in exactly one place.
  */
 
-const TYPE_TO_ADAPTER = {
-  openai: "openai",
-  openrouter: "openai",
-  "openai-compat": "openai",
-  meta: "openai",
-  anthropic: "anthropic",
-  google: "google",
-  ollama: "ollama",
-};
+import { resolveAdapterKey } from "../gateway/ai/provider.js";
 
 /**
  * Return the adapter key (openai|anthropic|google|ollama) for a given
@@ -31,8 +21,7 @@ const TYPE_TO_ADAPTER = {
  * @returns {string|null}
  */
 export function adapterKeyForType(providerType) {
-  if (!providerType) return null;
-  return TYPE_TO_ADAPTER[String(providerType).toLowerCase()] || null;
+  return resolveAdapterKey(providerType);
 }
 
 /**

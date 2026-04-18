@@ -31,6 +31,26 @@ export const PROVIDER_INFO = {
   ollama: { name: "Ollama", defaultModel: "llama3.1", requiresKey: false },
 };
 
+/**
+ * Collapse any provider-ish label (AI_PROVIDER env, profile.provider,
+ * providers.provider_type column) into the canonical adapter loader key.
+ * Handles the openrouter / meta / openai-compat → openai aliases in one
+ * place so call sites don't drift.
+ *
+ * Returns null for unknown/missing labels — caller decides whether to
+ * throw (adapter creation) or fall back (local-bundle inference).
+ *
+ * @param {string|null|undefined} label
+ * @returns {"openai"|"anthropic"|"google"|"ollama"|null}
+ */
+export function resolveAdapterKey(label) {
+  if (!label) return null;
+  const lower = String(label).toLowerCase().trim();
+  if (lower === "openrouter" || lower === "meta" || lower === "openai-compat") return "openai";
+  if (ADAPTER_LOADERS[lower]) return lower;
+  return null;
+}
+
 // Config cache (5-second TTL)
 let _cachedConfig = null;
 let _cacheTimestamp = 0;
@@ -89,12 +109,8 @@ export async function createProviderAdapter() {
 
   const { provider, apiKey, model, baseUrl } = config;
 
-  // Resolve provider to adapter loader (support aliases)
-  let adapterKey = provider;
-  if (provider === "openrouter") adapterKey = "openai";
-  if (provider === "meta") adapterKey = "openai";
-
-  const loader = ADAPTER_LOADERS[adapterKey];
+  const adapterKey = resolveAdapterKey(provider);
+  const loader = adapterKey ? ADAPTER_LOADERS[adapterKey] : null;
   if (!loader) {
     throw Object.assign(
       new Error(`Unknown AI provider: "${provider}". Supported: ${Object.keys(PROVIDER_INFO).join(", ")}`),
@@ -156,8 +172,8 @@ export async function getAiProfiles(db, { includeKeys = false } = {}) {
  * Returns { adapter, config } — same shape as createProviderAdapter().
  */
 export async function createAdapterFromProfile(profile, model) {
-  const adapterKey = ["openrouter", "meta"].includes(profile.provider) ? "openai" : profile.provider;
-  const loader = ADAPTER_LOADERS[adapterKey];
+  const adapterKey = resolveAdapterKey(profile.provider);
+  const loader = adapterKey ? ADAPTER_LOADERS[adapterKey] : null;
   if (!loader) {
     throw Object.assign(new Error(`Unknown provider: ${profile.provider}`), { code: "invalid_provider" });
   }
