@@ -70,10 +70,12 @@ const CLIENT_SCRIPT = `
 
   // ---------- View switch ----------
 
+  var viewRendered = false;
   function setView(v) {
-    // Clicking the active tab is a no-op — preserves scroll + in-flight
-    // pagination state.
-    if (state.view === v) return;
+    // Clicking an already-rendered active tab is a no-op (preserves scroll
+    // + in-flight pagination). But the first call still needs to render
+    // even though state.view starts at 'browse'.
+    if (state.view === v && viewRendered) return;
     if (state.view === 'browse' && state.browseAbort) {
       try { state.browseAbort.abort(); } catch (_) {}
       state.browseAbort = null;
@@ -83,6 +85,7 @@ const CLIENT_SCRIPT = `
       state.searchAbort = null;
     }
     state.view = v;
+    viewRendered = true;
     var tabs = document.querySelectorAll('.music-tab');
     tabs.forEach(function(t) { t.classList.toggle('active', t.getAttribute('data-view') === v); });
     if (v === 'browse') renderBrowse();
@@ -234,7 +237,7 @@ const CLIENT_SCRIPT = `
 
   async function renderArtists(r, loading) {
     loading.remove();
-    await paginate(r, '/api/funkwhale/browse/artists', 100, function(dest, rows, first, sentinel) {
+    await paginate(r, '/api/funkwhale/browse/artists', 50, function(dest, rows, first, sentinel) {
       var list;
       if (first) {
         list = el('div', { className: 'music-list' });
@@ -262,7 +265,7 @@ const CLIENT_SCRIPT = `
   async function renderAlbums(r, loading) {
     loading.remove();
     var url = '/api/funkwhale/browse/albums?artist=' + encodeURIComponent(state.browse.artistId);
-    await paginate(r, url, 100, function(dest, rows, first, sentinel) {
+    await paginate(r, url, 50, function(dest, rows, first, sentinel) {
       var grid;
       if (first) {
         grid = el('div', { className: 'music-album-grid' });
@@ -306,7 +309,7 @@ const CLIENT_SCRIPT = `
     // the entire album, not just the first 100 tracks.
     var allTracks = [];
     var url = '/api/funkwhale/browse/tracks?album=' + encodeURIComponent(state.browse.albumId);
-    await paginate(r, url, 100, function(dest, rows, first, sentinel) {
+    await paginate(r, url, 50, function(dest, rows, first, sentinel) {
       var list;
       if (first) {
         // Album header + Play All, then the track list. All direct children
