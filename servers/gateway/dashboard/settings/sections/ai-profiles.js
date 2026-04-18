@@ -165,7 +165,7 @@ export default {
       <div class="pf-auto-block" id="pf-auto-block" style="display:none">
         <h4>Auto-routing rules</h4>
         <div style="font-size:0.78rem;color:var(--crow-text-secondary);margin-bottom:0.65rem;line-height:1.45">
-          Per-route provider override. Leave blank to use the baked-in default (<code>code</code>→crow-swap-agentic, <code>vision</code>→grackle-vision, <code>fast</code>→crow-dispatch, <code>deep</code>→crow-swap-deep, <code>default</code>→crow-chat). Precedence: slash-command &gt; attachment &gt; keyword &gt; default.
+          Per-route provider override. Leave blank to use the baked-in default (<code>code</code>→crow-swap-coder, <code>vision</code>→grackle-vision, <code>fast</code>→crow-dispatch, <code>deep</code>→crow-swap-deep, <code>default</code>→crow-chat). Precedence: slash-command &gt; attachment &gt; keyword &gt; default.
         </div>
         ${AUTO_ROUTES.map((r) => `
           <div class="pf-route-row">

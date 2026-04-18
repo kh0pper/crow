@@ -37,7 +37,6 @@ services:
       - --enable-auto-tool-choice
       - --tool-call-parser
       - hermes
-      - --enforce-eager
     restart: unless-stopped
     ipc: host
     shm_size: 16g

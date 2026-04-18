@@ -37,14 +37,14 @@ function expect(label, actual, expected) {
 // and collide under load (a 32B weight + KV cache leaves no room for another
 // weight). One provider-level group ties them all together so acquiring any
 // one evicts the others via bundleStop.
-const agentic = getProvider("crow-swap-agentic");
-expect("crow-swap-agentic has provider-level mutexGroup=crow-strix-vram",
-  mutexGroupOf(agentic), "crow-strix-vram");
+const chat = getProvider("crow-chat");
+expect("crow-chat has provider-level mutexGroup=crow-strix-vram",
+  mutexGroupOf(chat), "crow-strix-vram");
 
-const agenticSiblings = getMutexSiblings("crow-swap-agentic").sort();
-expect("crow-swap-agentic sees all 4 other crow-* providers as siblings",
-  agenticSiblings,
-  ["crow-chat", "crow-dispatch", "crow-swap-coder", "crow-swap-deep"]);
+const chatSiblings = getMutexSiblings("crow-chat").sort();
+expect("crow-chat sees all 3 other crow-* providers as siblings",
+  chatSiblings,
+  ["crow-dispatch", "crow-swap-coder", "crow-swap-deep"]);
 
 // grackle-rerank's mutexGroup is at provider-level; make sure the fallback
 // didn't regress the original case.
@@ -52,13 +52,15 @@ const rerankSiblings = getMutexSiblings("grackle-rerank");
 expect("grackle-rerank sees grackle-vision as sibling",
   rerankSiblings, ["grackle-vision"]);
 
-// All 5 crow-* members show up in the group, with crow-chat as default
+// All 4 crow-* members show up in the group, with crow-chat as default
 // (idle auto-revert restores it when a specialist times out).
+// crow-swap-agentic was retired Apr 2026 when crow-chat adopted the
+// Qwen3.6-35B-A3B MoE bundle — the two would have been duplicate aliases.
 const groups = getMutexGroups();
 const vram = groups.get("crow-strix-vram");
-expect("crow-strix-vram group has 5 members",
+expect("crow-strix-vram group has 4 members",
   vram?.members?.map((m) => m.name).sort(),
-  ["crow-chat", "crow-dispatch", "crow-swap-agentic", "crow-swap-coder", "crow-swap-deep"]);
+  ["crow-chat", "crow-dispatch", "crow-swap-coder", "crow-swap-deep"]);
 expect("crow-strix-vram group defaultMember=crow-chat",
   vram?.default, "crow-chat");
 

@@ -14,11 +14,11 @@
  * with a baked-in default fallback. An empty overrides map means "pick
  * the best-known local provider for this route" — the defaults are:
  *
- *   code    → crow-swap-agentic (Qwen3.6-35B-A3B agentic coder)
+ *   code    → crow-swap-coder (Qwen3-coder-30B-A3B — purpose-built coder)
  *   vision  → grackle-vision
  *   fast    → crow-dispatch
  *   deep    → crow-swap-deep
- *   default → crow-chat (also the final fallback)
+ *   default → crow-chat (also the final fallback; Qwen3.6-35B-A3B as of Apr 2026)
  *
  * Feature-flag gating: chooseProvider() first reads
  * dashboard_settings.feature_flags.smart_chat (local-only via
@@ -40,7 +40,7 @@ export class SmartChatDisabled extends Error {
 }
 
 const DEFAULT_ROUTES = {
-  code:    "crow-swap-agentic",
+  code:    "crow-swap-coder",
   vision:  "grackle-vision",
   fast:    "crow-dispatch",
   deep:    "crow-swap-deep",

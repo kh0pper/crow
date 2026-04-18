@@ -14,7 +14,6 @@ const EXPECTED_PROVIDERS = [
   "crow-chat",
   "crow-swap-coder",
   "crow-swap-deep",
-  "crow-swap-agentic",
   "grackle-embed",
   "grackle-rerank",
   "grackle-vision",
@@ -49,14 +48,18 @@ for (const expected of EXPECTED_PROVIDERS) {
   }
 }
 
-// Verify mutex groups / conflicts are consistent
-const swapCoder = providers["crow-swap-coder"].models[0];
-const swapDeep = providers["crow-swap-deep"].models[0];
+// Verify mutex groups / conflicts are consistent. mutexGroup is declared at
+// provider level (crow-strix-vram for all five Strix Halo-local bundles);
+// the port-level :8003 subset collapsed into the broader VRAM-level mutex
+// when crow-chat moved off vLLM's :8002 and onto the :8003 llama.cpp bundle.
+const swapCoder = providers["crow-swap-coder"];
+const swapDeep = providers["crow-swap-deep"];
 if (swapCoder.mutexGroup !== swapDeep.mutexGroup) {
-  fail("crow-swap-coder and crow-swap-deep must share a mutexGroup (both live on :8003)");
+  fail("crow-swap-coder and crow-swap-deep must share a mutexGroup");
 }
-if (!Array.isArray(swapDeep.conflictsWith) || !swapDeep.conflictsWith.includes("crow-chat")) {
-  fail("crow-swap-deep must declare conflictsWith: [crow-chat] (GLM forces :8002 unload)");
+const swapDeepFirst = swapDeep.models[0];
+if (!Array.isArray(swapDeepFirst.conflictsWith) || !swapDeepFirst.conflictsWith.includes("crow-chat")) {
+  fail("crow-swap-deep must declare conflictsWith: [crow-chat] (mutex redundancy for GLM)");
 }
 
 // Verify Maker Lab priority pin
