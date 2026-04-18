@@ -550,6 +550,26 @@ export default function chatRouter(dashboardAuth) {
         return;
       }
 
+      // Warm up on-demand local bundles (vLLM / llama.cpp swap groups).
+      // Fast path if already resident; returns null for cloud + peer-hosted
+      // providers (no-op). Swap-siblings on the same port are stopped first.
+      try {
+        const { maybeAcquireLocalProvider } = await import("../gpu-orchestrator.js");
+        sendEvent("provider_warming", { provider_id: effectiveProvider });
+        const warmed = await maybeAcquireLocalProvider(effectiveProvider);
+        if (warmed === false) {
+          sendEvent("error", {
+            message: `Local provider "${effectiveProvider}" did not become ready in time. Check "docker compose logs" for its bundle.`,
+            code: "provider_not_ready",
+          });
+          closeStream();
+          return;
+        }
+      } catch (err) {
+        console.warn(`[chat] gpu-orchestrator acquire(${effectiveProvider}) failed: ${err.message}`);
+        // fall through — adapter will surface the real connection error.
+      }
+
       // Build system prompt
       const systemPrompt = await generateSystemPrompt({
         customPrompt: conversation.system_prompt || undefined,
