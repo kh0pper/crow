@@ -624,6 +624,30 @@ try {
   setProviderSyncManager(syncManager);
 } catch {}
 
+// CRITICAL: open outFeeds for every paired peer BEFORE any emitChange can
+// fire. Without this, emissions before the first WebSocket handshake land
+// on an empty outFeeds map and are silently dropped while _localCounter
+// still advances — leaving replication permanently ahead of the on-disk
+// feed. See InstanceSyncManager.eagerInitPairedPeers() for the why.
+try {
+  if (syncManager?.eagerInitPairedPeers) {
+    await syncManager.eagerInitPairedPeers();
+  }
+} catch (err) {
+  console.warn(`[instance-sync] eagerInitPairedPeers at boot failed: ${err.message}`);
+}
+
+// One-shot backfill: re-emit sync-allowlisted dashboard_settings so peers
+// whose pre-fix outFeed silently dropped entries can catch up. Guarded by
+// a flag row; idempotent on subsequent boots.
+try {
+  if (syncManager?.reemitSyncableSettingsOnce) {
+    await syncManager.reemitSyncableSettingsOnce();
+  }
+} catch (err) {
+  console.warn(`[instance-sync] reemitSyncableSettingsOnce failed: ${err.message}`);
+}
+
 // Scoped-settings sync: wire the registry's writeSetting to emitChange so
 // operator edits on one instance propagate to paired peers.
 try {

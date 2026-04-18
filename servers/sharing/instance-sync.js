@@ -222,6 +222,131 @@ export class InstanceSyncManager {
   }
 
   /**
+   * Eagerly open outbound feeds for every paired peer in `crow_instances`.
+   * MUST be called at gateway boot BEFORE any `emitChange` can fire — otherwise
+   * early emissions (memory stores, settings writes at startup, bundle
+   * registrations) vanish silently: `emitChange` iterates `outFeeds`, which is
+   * empty until a peer WebSocket lands, so its `feed.append` loop has zero
+   * iterations while `_localCounter` advances anyway.
+   *
+   * Safe to re-call; `initInstance` no-ops if the out-feed already exists.
+   * In-feeds are also pre-opened if the peer's `sync_url` (their outbound
+   * feed key) is already cached — this lets startup `_processNewEntries`
+   * catch up entries that mirrored during a previous session.
+   */
+  async eagerInitPairedPeers() {
+    let rows = [];
+    try {
+      const r = await this.db.execute({
+        sql: "SELECT id, sync_url FROM crow_instances WHERE status IN ('active','offline') AND id != ?",
+        args: [this.localInstanceId],
+      });
+      rows = r.rows || [];
+    } catch (err) {
+      console.warn(`[instance-sync] eagerInitPairedPeers: db query failed: ${err.message}`);
+      return 0;
+    }
+    let opened = 0;
+    for (const peer of rows) {
+      try {
+        const theirKey = peer.sync_url ? Buffer.from(peer.sync_url, "hex") : null;
+        await this.initInstance(peer.id, theirKey);
+        // Catch up any in-feed entries that arrived during a past session
+        // but were never processed because `append` only fires on NEW
+        // replicated blocks, not on re-opening an existing feed.
+        const inFeed = this.inFeeds.get(peer.id);
+        if (inFeed && inFeed.length > 0) {
+          this._processNewEntries(peer.id, inFeed).catch((err) =>
+            console.warn(`[instance-sync] eager catch-up failed for ${peer.id.slice(0,12)}…: ${err.message}`),
+          );
+        }
+        opened++;
+      } catch (err) {
+        console.warn(`[instance-sync] eager init failed for ${peer.id.slice(0,12)}…: ${err.message}`);
+      }
+    }
+    if (opened > 0) {
+      console.log(`[instance-sync] eagerly opened ${opened} peer feed(s) — emit pipeline armed`);
+    }
+    return opened;
+  }
+
+  /**
+   * One-shot reconciliation: re-emit every sync-allowlisted dashboard_settings
+   * row so that peers whose pre-fix outFeed dropped entries can catch up.
+   * Guarded by a flag row so it runs once per instance lifetime (post-fix).
+   *
+   * Called at boot AFTER eagerInitPairedPeers. Idempotent: re-running is a
+   * no-op. On the peer side, `_applyDashboardSetting` skips rows whose
+   * lamport_ts is stale or whose value is unchanged, so the re-emit is
+   * safe even when the peer already has current data.
+   */
+  async reemitSyncableSettingsOnce() {
+    const FLAG_KEY = "__sync_reemit_allowlist_v1";
+    let alreadyRan = false;
+    try {
+      const { rows } = await this.db.execute({
+        sql: "SELECT value FROM dashboard_settings WHERE key = ?",
+        args: [FLAG_KEY],
+      });
+      alreadyRan = rows?.length > 0;
+    } catch {}
+    if (alreadyRan) return 0;
+
+    if (this.outFeeds.size === 0) {
+      // No paired peers — nothing to reconcile with. Still mark done so we
+      // don't keep checking on every boot.
+      try {
+        await this.db.execute({
+          sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, 'no-peers', datetime('now')) ON CONFLICT(key) DO NOTHING",
+          args: [FLAG_KEY],
+        });
+      } catch {}
+      return 0;
+    }
+
+    // dashboard_settings is the global scope only — per-instance scopes live
+    // in dashboard_settings_overrides (never synced). No instance_id column.
+    let rows;
+    try {
+      const r = await this.db.execute({
+        sql: "SELECT key, value, lamport_ts FROM dashboard_settings",
+      });
+      rows = r.rows || [];
+    } catch (err) {
+      console.warn(`[instance-sync] reemit read failed: ${err.message}`);
+      return 0;
+    }
+
+    let emitted = 0;
+    for (const row of rows) {
+      if (!isSyncable(row.key)) continue;
+      try {
+        await this.emitChange("dashboard_settings", "update", {
+          key: row.key,
+          value: row.value,
+          instance_id: null,
+        });
+        emitted++;
+      } catch (err) {
+        console.warn(`[instance-sync] reemit ${row.key} failed: ${err.message}`);
+      }
+    }
+
+    try {
+      await this.db.execute({
+        sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO NOTHING",
+        args: [FLAG_KEY, `done:${emitted}`],
+      });
+    } catch {}
+
+    if (emitted > 0) {
+      console.log(`[instance-sync] one-shot re-emit: ${emitted} sync-allowlisted setting(s) → peers will reconcile`);
+    }
+    return emitted;
+  }
+
+  /**
    * Get the local outgoing feed key for a remote instance.
    * Used during instance handshake so the remote knows our feed key.
    */
