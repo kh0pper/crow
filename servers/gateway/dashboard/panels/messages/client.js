@@ -418,6 +418,7 @@ export function messagesClientJS(opts) {
     var assistantDiv = null;
     var assistantContent = '';
     var currentEventType = null;
+    var pendingRoute = null; // Path C routing info from SSE smart_route event
 
     try {
       // Compose-bar model picker (Path A): one-shot override by default;
@@ -469,14 +470,39 @@ export function messagesClientJS(opts) {
           try { eventData = JSON.parse(line.slice(6)); } catch(e) { continue; }
           if (!currentEventType) continue;
 
+          if (currentEventType === 'smart_route') {
+            // Path C: show a small pill at the top of the incoming
+            // assistant bubble indicating which model was routed-to and
+            // why. assistantDiv may not exist yet — stash on a local
+            // var and attach at bubble creation.
+            pendingRoute = {
+              provider_id: eventData.provider_id || null,
+              model_id: eventData.model_id || null,
+              reason: eventData.reason || null,
+            };
+          }
+
           if (currentEventType === 'content') {
             if (!assistantDiv) {
               if (typing.parentNode) typing.remove();
               assistantDiv = el('div', { className: 'msg-bubble received' });
+              // Attach routing badge BEFORE streaming content begins so
+              // the user sees the route decision immediately.
+              if (pendingRoute && (pendingRoute.model_id || pendingRoute.reason)) {
+                var liveBadge = el('div', { className: 'msg-route-badge', css: 'display:inline-flex;align-items:center;gap:4px;margin-bottom:0.25rem;padding:2px 8px;background:var(--crow-accent-muted);color:var(--crow-accent);border-radius:var(--crow-radius-pill,8px);font-size:0.68rem;font-family:\\'JetBrains Mono\\',monospace;letter-spacing:0.02em' });
+                liveBadge.textContent = (pendingRoute.model_id || '') + (pendingRoute.reason ? ' · ' + pendingRoute.reason : '');
+                assistantDiv.appendChild(liveBadge);
+              }
               viewport.appendChild(assistantDiv);
             }
             assistantContent += eventData.delta || '';
-            assistantDiv.innerHTML = renderMd(assistantContent);
+            // Preserve the badge at the top — replace only the text node.
+            var prefixBadge = assistantDiv.firstChild && assistantDiv.firstChild.className === 'msg-route-badge' ? assistantDiv.firstChild : null;
+            assistantDiv.innerHTML = '';
+            if (prefixBadge) assistantDiv.appendChild(prefixBadge);
+            var bodyDiv = document.createElement('span');
+            bodyDiv.innerHTML = renderMd(assistantContent);
+            assistantDiv.appendChild(bodyDiv);
             viewport.scrollTop = viewport.scrollHeight;
           }
 
@@ -1000,6 +1026,15 @@ export function messagesClientJS(opts) {
     // Content (render markdown for assistant messages, plain text for user)
     if (msg.content) {
       if (!isSent && msg.role === 'assistant') {
+        // Routing badge (Path C): small pill showing which model answered
+        // and why. msg.model_id comes from chat_messages.model_id;
+        // msg._route_reason is transiently set on freshly-sent messages
+        // from the SSE smart_route event (not persisted).
+        if (msg.model_id || msg._route_reason) {
+          var badge = el('div', { className: 'msg-route-badge', css: 'display:inline-flex;align-items:center;gap:4px;margin-bottom:0.25rem;padding:2px 8px;background:var(--crow-accent-muted);color:var(--crow-accent);border-radius:var(--crow-radius-pill,8px);font-size:0.68rem;font-family:\\'JetBrains Mono\\',monospace;letter-spacing:0.02em' });
+          badge.textContent = (msg.model_id || '') + (msg._route_reason ? ' · ' + msg._route_reason : '');
+          div.appendChild(badge);
+        }
         var contentSpan = document.createElement('span');
         contentSpan.innerHTML = renderMd(msg.content);
         div.appendChild(contentSpan);
