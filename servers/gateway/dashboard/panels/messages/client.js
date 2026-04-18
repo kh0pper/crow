@@ -220,6 +220,17 @@ export function messagesClientJS(opts) {
         modelSelect.textContent = '';
         var pid = profileSelect.value;
         var p = profiles.find(function(x){return x.id===pid});
+        // kind:"auto" profiles don't pick a model up front — smart-router
+        // chooses per-message. Show a single non-selectable placeholder so
+        // the picker doesn't look broken, and disable the dropdown.
+        if (p && p.kind === 'auto') {
+          var placeholder = el('option', { value: '', text: '— auto-routed per message —' });
+          placeholder.selected = true;
+          modelSelect.appendChild(placeholder);
+          modelSelect.disabled = true;
+          return;
+        }
+        modelSelect.disabled = false;
         if (p && p.models) {
           p.models.forEach(function(m) {
             var opt = el('option', { value: m, text: m });
