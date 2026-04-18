@@ -36,20 +36,25 @@ services:
       - -fa
       - "on"
       - --no-mmap
-      # 256K single-slot — the full native training context of Qwen3.6.
-      # n_ctx_train=262144 per the GGUF metadata, so no YaRN/RoPE scaling
-      # needed. --parallel 1 keeps all KV cache available to the one
-      # in-flight conversation. KV cache is allocated lazily per-slot as
-      # tokens arrive, so the 50 GB ceiling is not an always-resident
-      # cost — short conversations pay ~0 extra VRAM. Ceiling math:
-      #   33 GB weights + 50 GB KV (at fill) = 83 GB of 124 GB unified
-      # Second in-flight request queues. Prefill time scales linearly with
-      # input length (~0.5 ms/tok), so a near-full prompt can take ~90s to
-      # prefill before the first output token; rare in practice.
+      # 4 slots × 256K each (full native Qwen3.6 window per slot).
+      # n_ctx_train=262144 per the GGUF metadata, so no YaRN needed.
+      # `-c` is TOTAL KV budget divided across slots — 1048576 / 4 = 262144
+      # per slot.
+      #
+      # Sparse attention makes this cheap: only ~10 layers cache full KV,
+      # so 262144 cells × 10 layers × 2 (K+V) × fp16 = 5 GB per slot.
+      # 4 slots × 5 GB = 20 GB KV. Plus 27 GB weights ≈ 47 GB total of
+      # the 124 GB unified pool, 77 GB headroom.
+      #
+      # Concurrent throughput measured:
+      #   solo:       44.6 tok/s
+      #   2 parallel: 35 tok/s each, 67 tok/s aggregate (1.5× over solo)
+      # Some batching overhead is normal; aggregate keeps climbing up to
+      # compute saturation (well above 4 streams on this hardware).
       - -c
-      - "262144"
+      - "1048576"
       - --parallel
-      - "1"
+      - "4"
       - --jinja
     restart: "no"
     ipc: host
