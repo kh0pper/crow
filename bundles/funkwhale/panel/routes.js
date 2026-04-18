@@ -224,7 +224,9 @@ export default function funkwhaleRouter(authMiddleware) {
         return res.json({ artists: [], albums: [], tracks: [] });
       }
       const pageSize = Math.max(1, Math.min(parseInt(req.query.page_size, 10) || 20, 50));
-      const out = await fw("/api/v1/search/", { query: { query: q, page_size: pageSize } });
+      // Funkwhale's search endpoint is `/api/v1/search` (no trailing slash);
+      // the trailing-slash variant 404s. Accepts either `q=` or `query=`.
+      const out = await fw("/api/v1/search", { query: { query: q, page_size: pageSize } });
       res.json({
         artists: (out.artists || []).map((a) => ({
           id: a.id,
