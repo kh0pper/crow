@@ -218,10 +218,10 @@ export function createMetaGlassesServer(options = {}) {
 
   server.tool(
     "crow_glasses_start_note_session",
-    "Begin a note-taking session. Returns a session id. Use mode='dictation' for one-shot, 'session' for multi-turn discrete events, 'continuous' for up-to-2-hour streaming transcription (requires explicit user consent on the NEXT voice turn via crow_glasses_confirm_continuous_recording).",
+    "Begin a note-taking session. Mode selection is NOT optional — pick based on user intent: 'dictation' for one-shot dictation, 'session' for multi-turn discrete `crow_glasses_add_to_note` calls, 'continuous' for hands-free streaming transcription. **If the user says anything like 'record this meeting', 'record the conversation', 'start recording', 'take notes on this conversation' — you MUST pass mode='continuous'.** Continuous mode requires a TWO-TURN consent flow (see the mode parameter description).",
     {
       topic: z.string().max(200).optional(),
-      mode: z.enum(["dictation", "session", "continuous"]).optional().describe("Default: 'session'. 'continuous' marks the session awaiting-consent — you MUST read the returned consent_prompt aloud; the user confirms on the next voice turn via crow_glasses_confirm_continuous_recording. If you call start with continuous twice in a row without the user confirming, the second call will be rejected with consent_pending."),
+      mode: z.enum(["dictation", "session", "continuous"]).optional().describe("REQUIRED when the user asks to 'record a meeting', 'record the conversation', or 'start recording' — pass 'continuous'. The tool returns needs_consent=true + a consent_prompt string; YOU MUST recite the consent_prompt verbatim and END YOUR TURN. On the user's next voice turn, if they say yes/confirm/go ahead, call crow_glasses_confirm_continuous_recording. If they say cancel/no, call crow_glasses_end_note_session. DO NOT announce that recording has started until crow_glasses_confirm_continuous_recording has been called successfully — the microphone is NOT actually streaming until then."),
       device_id: z.string().min(1).max(200).describe("The glasses device id taking notes."),
       project_id: z.number().int().optional(),
     },
@@ -278,8 +278,17 @@ export function createMetaGlassesServer(options = {}) {
             needs_consent: isContinuous,
           };
           if (isContinuous) {
-            payload.consent_prompt = "I'll record and transcribe continuously for up to 2 hours. Confirm by saying 'yes, record' or 'cancel'.";
+            const prompt = "I'll record and transcribe continuously for up to 2 hours. Confirm by saying 'yes, record' or 'cancel'.";
+            payload.consent_prompt = prompt;
             payload.consent_expires_in_seconds = 120;
+            payload.next_action = "RECITE the consent_prompt verbatim and END your turn. Do NOT announce recording has started. Do NOT call any other tool this turn. Wait for the user's next voice turn; if affirmative, call crow_glasses_confirm_continuous_recording.";
+            // <audio_friendly> tag tells the voice-turn system prompt to
+            // read the wrapped string verbatim instead of letting the LLM
+            // paraphrase. Prepending this to the JSON response keeps both
+            // the recitation signal AND the structured fields the LLM
+            // needs for the confirm call.
+            const text = `<audio_friendly>${prompt}</audio_friendly>\n\n${JSON.stringify(payload, null, 2)}`;
+            return { content: [{ type: "text", text }] };
           }
           return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
         } finally {
