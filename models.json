@@ -29,7 +29,7 @@
       "models": [
         {
           "id": "qwen3.6-35b-a3b",
-          "contextLen": 131072,
+          "contextLen": 262144,
           "warm": true,
           "priority": "interactive"
         }

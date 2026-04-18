@@ -4553,7 +4553,7 @@
           "baseUrlTemplate": "http://{host_ip}:{port}/v1",
           "apiKey": "none",
           "models": [
-            { "id": "qwen3.6-35b-a3b", "contextLen": 131072, "warm": true, "priority": "interactive" }
+            { "id": "qwen3.6-35b-a3b", "contextLen": 262144, "warm": true, "priority": "interactive" }
           ]
         }
       ],

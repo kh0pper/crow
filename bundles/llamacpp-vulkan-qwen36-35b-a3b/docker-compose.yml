@@ -36,16 +36,18 @@ services:
       - -fa
       - "on"
       - --no-mmap
-      # 128K single-slot. Qwen3.6 is trained NATIVELY at 256K
-      # (n_ctx_train=262144 per the GGUF metadata), so no YaRN/RoPE
-      # scaling is needed — the model can use any -c up to 131072 cleanly
-      # and could go to 262144 if we want the full native window (trading
-      # ~25 GB more KV cache). --parallel 1 because Crow's tool-heavy
-      # conversations consume context depth faster than they benefit from
-      # slot concurrency; KV cache ~25 GB on top of the 33 GB weights fits
-      # comfortably in Strix Halo's 124 GB unified pool.
+      # 256K single-slot — the full native training context of Qwen3.6.
+      # n_ctx_train=262144 per the GGUF metadata, so no YaRN/RoPE scaling
+      # needed. --parallel 1 keeps all KV cache available to the one
+      # in-flight conversation. KV cache is allocated lazily per-slot as
+      # tokens arrive, so the 50 GB ceiling is not an always-resident
+      # cost — short conversations pay ~0 extra VRAM. Ceiling math:
+      #   33 GB weights + 50 GB KV (at fill) = 83 GB of 124 GB unified
+      # Second in-flight request queues. Prefill time scales linearly with
+      # input length (~0.5 ms/tok), so a near-full prompt can take ~90s to
+      # prefill before the first output token; rare in practice.
       - -c
-      - "131072"
+      - "262144"
       - --parallel
       - "1"
       - --jinja
