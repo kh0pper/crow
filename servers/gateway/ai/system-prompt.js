@@ -125,6 +125,20 @@ export async function generateSystemPrompt(options = {}) {
     buildAddonGuidance(),
   ];
 
+  // When a voice turn originates from a paired meta-glasses device, stamp
+  // the device_id into the prompt so the LLM doesn't stop to ask the user
+  // for it before calling crow_glasses_* tools. The LLM should pass this
+  // value verbatim to any tool that takes a `device_id` parameter.
+  if (deviceId) {
+    parts.push(
+      "",
+      "## Active Device",
+      `The current voice turn originated from glasses device_id \`${deviceId}\`. ` +
+      `Pass this value to any crow_glasses_* tool call that accepts a device_id parameter; ` +
+      `do NOT ask the user to confirm or re-enter it.`,
+    );
+  }
+
   if (customPrompt) {
     parts.push("", "## Custom Instructions", customPrompt);
   }

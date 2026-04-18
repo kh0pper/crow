@@ -9,6 +9,32 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+
+// When this server.js is CP'd into ~/.crow/bundles/meta-glasses/server/
+// (the bundle-install deploy path), its relative `../../../servers/db.js`
+// import resolves to ~/.crow/servers/db.js which does NOT exist — the
+// repo's servers/ live under ~/crow/servers/. resolveGatewayRoot() picks
+// the correct root by probing for servers/db.js in likely locations.
+function resolveGatewayRoot() {
+  const candidates = [
+    // Preferred: co-located with this server.js in repo layout
+    join(import.meta.dirname, "..", "..", ".."),
+    // Fallback: classic home-layout repo root
+    join(homedir(), "crow"),
+  ];
+  for (const root of candidates) {
+    if (existsSync(join(root, "servers", "db.js"))) return root;
+  }
+  throw new Error("Cannot locate Crow gateway root (servers/db.js) from meta-glasses bundle.");
+}
+const _gatewayRoot = resolveGatewayRoot();
+const _dbPath = pathToFileURL(join(_gatewayRoot, "servers", "db.js")).href;
+const _settingsRegPath = pathToFileURL(join(_gatewayRoot, "servers", "gateway", "dashboard", "settings", "registry.js")).href;
+const _providerPath = pathToFileURL(join(_gatewayRoot, "servers", "gateway", "ai", "provider.js")).href;
 
 // Phase 6 C.1: tolerate three JSON output shapes from the summarization
 // LLM call: bare `{...}`, fenced ```json {...} ```, or surrounding prose
@@ -44,7 +70,7 @@ export async function summarizeSession({ noteId, topic }, db) {
   // Profiles UI. Mirrors recordGlassesPhoto's vision-profile lookup.
   let adapter;
   try {
-    const { getAiProfiles, createAdapterFromProfile } = await import("../../../servers/gateway/ai/provider.js");
+    const { getAiProfiles, createAdapterFromProfile } = await import(_providerPath);
     const profiles = await getAiProfiles(db, { includeKeys: true });
     const profile = profiles.find(p => p.isDefault) || profiles[0];
     if (!profile) {
@@ -142,7 +168,7 @@ export function createMetaGlassesServer(options = {}) {
     },
     async ({ query, limit = 10 }) => {
       try {
-        const { createDbClient, sanitizeFtsQuery } = await import("../../../servers/db.js");
+        const { createDbClient, sanitizeFtsQuery } = await import(_dbPath);
         const db = createDbClient();
         try {
           const q = sanitizeFtsQuery ? sanitizeFtsQuery(query) : query.replace(/['"]/g, " ");
@@ -173,11 +199,11 @@ export function createMetaGlassesServer(options = {}) {
   // ---- Phase 6: note sessions ----
 
   async function loadDb() {
-    return import("../../../servers/db.js");
+    return import(_dbPath);
   }
 
   async function getOrCreateDefaultProject(db) {
-    const { readSetting, writeSetting } = await import("../../../servers/gateway/dashboard/settings/registry.js");
+    const { readSetting, writeSetting } = await import(_settingsRegPath);
     const cached = await readSetting(db, "meta_glasses_default_project_id");
     if (cached && /^\d+$/.test(cached)) return Number(cached);
     const ins = await db.execute({
@@ -659,7 +685,7 @@ export function createMetaGlassesServer(options = {}) {
           // notifications is NOT in SYNCED_TABLES — action items surface
           // on whichever instance ran summarization; paired Crows get
           // their own from their own sessions.
-          const { createNotification } = await import("../../../servers/shared/notifications.js");
+          const { createNotification } = await import(pathToFileURL(join(_gatewayRoot, "servers", "shared", "notifications.js")).href);
           let created = 0;
           const failures = [];
           for (const it of toKeep) {
