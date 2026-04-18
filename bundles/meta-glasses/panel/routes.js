@@ -324,6 +324,346 @@ function wrapPcmAsWav(pcm, sampleRate) {
   return Buffer.concat([header, pcm]);
 }
 
+
+/* ---------- Phase 6 C.3: continuous recording (note_stream) ---------- */
+
+// Per-device note-stream state. Parallel to _turnLocks but independent — a
+// note_stream session can run for up to 2 hours; PTT is rejected by the
+// phone while streaming. Server-side we also ignore turn_start envelopes
+// arriving from a ws in note_stream mode (belt + suspenders).
+const _noteStreams = new Map(); // deviceId -> state
+
+const NOTE_STREAM_CODEC = "pcm_s16le";
+const NOTE_STREAM_SAMPLE_RATE = 16000;
+const NOTE_STREAM_CHUNK_BYTES = 320_000;       // 10 s × 16 kHz mono s16
+const NOTE_STREAM_INDEX_HEADER = 4;            // 4-byte LE chunk index prefix
+const NOTE_STREAM_SESSION_CAP_MS = 2 * 60 * 60 * 1000;
+const NOTE_STREAM_NO_AUDIO_MS   = 30_000;
+const NOTE_STREAM_DISCONNECT_GRACE_MS = 2 * 60 * 1000;
+const NOTE_STREAM_BACKPRESSURE_CAP = 6;        // in-flight chunks
+const NOTE_STREAM_INAUDIBLE_TIMEOUT_MS = 30_000;
+const NOTE_STREAM_MAX_CONSECUTIVE_DROPS = 3;
+const NOTE_STREAM_DRAIN_TICK_MS = 5_000;       // recheck stalled gaps
+
+function _hhmm(d) {
+  const h = String(d.getHours()).padStart(2, "0");
+  const m = String(d.getMinutes()).padStart(2, "0");
+  return `${h}:${m}`;
+}
+
+async function _appendLine(db, noteId, text) {
+  const line = text.endsWith("\n") ? text : `${text}\n`;
+  try {
+    await db.execute({
+      sql: `UPDATE research_notes
+               SET content = COALESCE(content, '') || ?,
+                   updated_at = datetime('now')
+             WHERE id = ?`,
+      args: [line, noteId],
+    });
+  } catch (err) {
+    console.warn(`[meta-glasses] note_stream append failed note=${noteId}: ${err.message}`);
+  }
+}
+
+// In-order pump: emit pendingBuffer[nextExpectedIdx] if present; otherwise
+// check whether ANY later idx has been waiting > 30s — if so, insert
+// [… inaudible …] for the missing idx and advance. Loop until nothing
+// further can be emitted.
+async function _drainInOrder(deviceId) {
+  const state = _noteStreams.get(deviceId);
+  if (!state || !state.noteId) return;
+  if (state.draining) return;  // reentrancy guard
+  state.draining = true;
+  const db = (await loadDb()).createDbClient();
+  try {
+    while (true) {
+      const idx = state.nextExpectedIdx;
+      const ready = state.pendingBuffer.get(idx);
+      if (ready) {
+        const ts = _hhmm(new Date());
+        const text = ready.text && ready.text.length > 0 ? ready.text : "[… inaudible …]";
+        await _appendLine(db, state.noteId, `[${ts}] ${text}`);
+        state.pendingBuffer.delete(idx);
+        state.nextExpectedIdx += 1;
+        if (!ready.inaudible) state.consecutiveDrops = 0;
+        continue;
+      }
+      // Nothing for the next idx yet. Check if a LATER idx has been waiting
+      // > 30s — that implies idx is stalled and we should fill inaudible.
+      let forceAdvance = false;
+      for (const [laterIdx, laterEntry] of state.pendingBuffer) {
+        if (laterIdx > idx && Date.now() - laterEntry.completedAt > NOTE_STREAM_INAUDIBLE_TIMEOUT_MS) {
+          forceAdvance = true;
+          break;
+        }
+      }
+      if (!forceAdvance) break;
+      const ts = _hhmm(new Date());
+      await _appendLine(db, state.noteId, `[${ts}] [… inaudible …]`);
+      state.nextExpectedIdx += 1;
+    }
+  } finally {
+    state.draining = false;
+    try { db.close(); } catch {}
+  }
+}
+
+// Called from the WS binary-frame dispatcher when currentInboundMode ===
+// "note_stream" and a binary frame arrives.
+function processNoteStreamChunk(deviceId, raw) {
+  const state = _noteStreams.get(deviceId);
+  if (!state) return;
+  if (!Buffer.isBuffer(raw) || raw.length < NOTE_STREAM_INDEX_HEADER + 2) {
+    console.warn(`[meta-glasses] note_stream dropped malformed frame len=${raw?.length}`);
+    return;
+  }
+
+  // Clear no-audio watchdog on FIRST chunk.
+  if (state.lastChunkAt === 0 && state.noAudioWatchdog) {
+    clearTimeout(state.noAudioWatchdog);
+    state.noAudioWatchdog = null;
+  }
+  state.lastChunkAt = Date.now();
+
+  const idx = raw.readUInt32LE(0);
+  const pcm = Buffer.from(raw.subarray(NOTE_STREAM_INDEX_HEADER));
+
+  // Backpressure: if inflight queue is full, drop the OLDEST chunk and
+  // record [… inaudible …] in its slot. Sustained overflow escalates.
+  if (state.inflightQueue.length >= NOTE_STREAM_BACKPRESSURE_CAP) {
+    const dropped = state.inflightQueue.shift();
+    state.pendingBuffer.set(dropped.idx, {
+      text: "[… inaudible …]",
+      completedAt: Date.now(),
+      inaudible: true,
+    });
+    state.consecutiveDrops += 1;
+    if (state.consecutiveDrops >= NOTE_STREAM_MAX_CONSECUTIVE_DROPS) {
+      endNoteStream(deviceId, "stt_overloaded").catch(() => {});
+      return;
+    }
+  }
+
+  const item = { idx, startedAt: Date.now() };
+  state.inflightQueue.push(item);
+
+  // Fire-and-forget STT. Each chunk is independent; failures → inaudible
+  // (not session end — one bad 10-s slice shouldn't kill a 2-hour meeting).
+  (async () => {
+    try {
+      const { createSttAdapter } = await loadStt();
+      const { adapter } = await createSttAdapter(state.sttProfile);
+      const wav = wrapPcmAsWav(pcm, NOTE_STREAM_SAMPLE_RATE);
+      const stt = await adapter.transcribe(wav, {
+        filename: "chunk.wav",
+        contentType: "audio/wav",
+      });
+      const text = (stt.text || "").trim();
+      state.pendingBuffer.set(idx, { text, completedAt: Date.now() });
+    } catch (err) {
+      console.warn(`[meta-glasses] note_stream STT idx=${idx}: ${err.message}`);
+      state.pendingBuffer.set(idx, {
+        text: "[… inaudible …]",
+        completedAt: Date.now(),
+        inaudible: true,
+      });
+    } finally {
+      state.inflightQueue = state.inflightQueue.filter(x => x.idx !== idx);
+      _drainInOrder(deviceId).catch(() => {});
+    }
+  })();
+}
+
+// Called from runVoiceTurn when a tool result contains the
+// { _note_stream_begin: {...} } sentinel. Opens state + timers + envelope.
+async function handleNoteStreamBegin(env, db) {
+  const { device_id, session_id, note_id, topic } = env || {};
+  if (!device_id || !session_id || !note_id) {
+    return "Cannot begin continuous recording — missing required fields.";
+  }
+  const sess = _sessions.get(device_id);
+  if (!sess?.ws) return "Cannot begin continuous recording — no paired glasses session.";
+
+  // Defensive: end any prior note_stream for this device silently.
+  if (_noteStreams.has(device_id)) {
+    await endNoteStream(device_id, "superseded", { silent: true }).catch(() => {});
+  }
+
+  let sttProfile;
+  try {
+    const { getDefaultSttProfile, getSttProfiles } = await loadStt();
+    sttProfile = sess.device?.stt_profile_id
+      ? (await getSttProfiles(db, { includeKeys: true })).find(p => p.id === sess.device.stt_profile_id)
+      : await getDefaultSttProfile(db, { includeKeys: true });
+  } catch (err) {
+    return `Cannot begin continuous recording — STT load failed: ${err.message}`;
+  }
+  if (!sttProfile) {
+    return "Cannot begin continuous recording — no STT profile configured.";
+  }
+
+  const state = {
+    sessionId: Number(session_id),
+    noteId: Number(note_id),
+    topic: topic || null,
+    sttProfile,
+    nextExpectedIdx: 0,
+    inflightQueue: [],
+    pendingBuffer: new Map(),
+    consecutiveDrops: 0,
+    startedAt: Date.now(),
+    lastChunkAt: 0,
+    wsRef: sess.ws,
+    draining: false,
+  };
+  state.sessionCapTimer = setTimeout(() => {
+    endNoteStream(device_id, "timeout").catch(() => {});
+  }, NOTE_STREAM_SESSION_CAP_MS);
+  state.noAudioWatchdog = setTimeout(() => {
+    const cur = _noteStreams.get(device_id);
+    if (cur && cur.lastChunkAt === 0) {
+      endNoteStream(device_id, "no_audio").catch(() => {});
+    }
+  }, NOTE_STREAM_NO_AUDIO_MS);
+  // Periodic drain tick catches gaps that arrive quietly (no new STT event
+  // to trigger _drainInOrder).
+  state.drainTicker = setInterval(() => {
+    _drainInOrder(device_id).catch(() => {});
+  }, NOTE_STREAM_DRAIN_TICK_MS);
+  _noteStreams.set(device_id, state);
+
+  // Mark WS inbound mode so the binary-frame router dispatches to the
+  // note-stream pipeline instead of the voice-turn buffer.
+  sess.inboundMode = "note_stream";
+
+  sendText(sess.ws, {
+    type: "note_stream_begin",
+    session_id: state.sessionId,
+    codec: NOTE_STREAM_CODEC,
+    sample_rate: NOTE_STREAM_SAMPLE_RATE,
+    channels: 1,
+    chunk_bytes: NOTE_STREAM_CHUNK_BYTES,
+    index_header_bytes: NOTE_STREAM_INDEX_HEADER,
+  });
+
+  return "Continuous recording started. I'll transcribe until you say 'stop recording' or the 2-hour cap is reached.";
+}
+
+// Tear down the note stream. Reasons: "user_stop", "timeout", "disconnect",
+// "no_audio", "stt_overloaded", "superseded", "sco_not_connected".
+async function endNoteStream(deviceId, reason, opts = {}) {
+  const state = _noteStreams.get(deviceId);
+  if (!state) return;
+  // Idempotency — prevent double-end from timer + WS close racing.
+  if (state.ending) return;
+  state.ending = true;
+
+  clearTimeout(state.sessionCapTimer);
+  clearTimeout(state.noAudioWatchdog);
+  clearInterval(state.drainTicker);
+  clearTimeout(state.disconnectGraceTimer);
+
+  // Give any in-flight STT a brief moment to complete (up to 5 s) so the
+  // final drain doesn't write [… inaudible …] for chunks that were about
+  // to come back.
+  const flushDeadline = Date.now() + 5_000;
+  while (state.inflightQueue.length > 0 && Date.now() < flushDeadline) {
+    await new Promise(r => setTimeout(r, 250));
+  }
+  // For anything still in flight, mark inaudible.
+  for (const item of state.inflightQueue) {
+    if (!state.pendingBuffer.has(item.idx)) {
+      state.pendingBuffer.set(item.idx, {
+        text: "[… inaudible …]",
+        completedAt: Date.now(),
+        inaudible: true,
+      });
+    }
+  }
+  state.inflightQueue = [];
+
+  // Final in-order drain: consume anything remaining, in order. We set the
+  // inaudible-completedAt to the past so _drainInOrder advances through gaps.
+  for (const [idx, entry] of state.pendingBuffer) {
+    if (idx > state.nextExpectedIdx) entry.completedAt = 0;
+  }
+  await _drainInOrder(deviceId).catch(() => {});
+
+  // Clear WS inbound mode + state map BEFORE DB/summary work so subsequent
+  // envelopes on the same WS get voice-turn semantics again.
+  const sess = _sessions.get(deviceId);
+  if (sess && sess.inboundMode === "note_stream") sess.inboundMode = "turn";
+  _noteStreams.delete(deviceId);
+
+  // Send note_stream_end envelope (unless suppressed by caller).
+  if (!opts.silent && sess?.ws) {
+    try {
+      sendText(sess.ws, {
+        type: "note_stream_end",
+        session_id: state.sessionId,
+        reason: reason || "user_stop",
+      });
+    } catch {}
+  }
+
+  // Finalize DB state + trigger summarization.
+  try {
+    const db = (await loadDb()).createDbClient();
+    try {
+      // Short-circuit if the session was already ended (e.g. MCP tool fired
+      // end_note_session before our teardown raced in).
+      const { rows } = await db.execute({
+        sql: `SELECT status, note_id, topic FROM glasses_note_sessions WHERE id = ?`,
+        args: [state.sessionId],
+      });
+      if (rows[0] && rows[0].status === "active") {
+        const { summarizeSession } = await import(pathToFileURL(join(serverDir, "server.js")).href);
+        const result = await summarizeSession({ noteId: state.noteId, topic: state.topic }, db);
+        const actionItemsJson = JSON.stringify(result.action_items || []);
+        if (result.parse_error && result.raw_full) {
+          await db.execute({
+            sql: `UPDATE glasses_note_sessions
+                     SET status = 'ended', ended_at = datetime('now'),
+                         summary = NULL, action_items_json = '[]', summary_raw = ?
+                   WHERE id = ?`,
+            args: [String(result.raw_full).slice(0, 50_000), state.sessionId],
+          });
+        } else {
+          await db.execute({
+            sql: `UPDATE glasses_note_sessions
+                     SET status = 'ended', ended_at = datetime('now'),
+                         summary = ?, action_items_json = ?
+                   WHERE id = ?`,
+            args: [result.summary, actionItemsJson, state.sessionId],
+          });
+          if (result.summary) {
+            await db.execute({
+              sql: `UPDATE research_notes
+                       SET content = ? || COALESCE(content, ''), updated_at = datetime('now')
+                     WHERE id = ?`,
+              args: [`## Summary\n${result.summary}\n\n`, state.noteId],
+            });
+          }
+        }
+      }
+    } finally { try { db.close(); } catch {} }
+  } catch (err) {
+    console.warn(`[meta-glasses] note_stream end summarization failed: ${err.message}`);
+  }
+
+  // User-audible escalation TTS for abnormal termination reasons.
+  const spokenReasons = {
+    stt_overloaded: "Recording stopped — transcription can't keep up with real-time speech.",
+    no_audio:       "Can't hear you — check the glasses mic.",
+    sco_not_connected: "Can't record — the glasses mic isn't connected.",
+    timeout:        "Recording stopped — 2-hour cap reached.",
+  };
+  if (spokenReasons[reason] && !opts.silent) {
+    pushTtsToDevice(deviceId, spokenReasons[reason]).catch(() => {});
+  }
+}
+
 /* ---------- TTS codec negotiation ----------
  *
  * The Android client opens an AudioTrack configured for raw 16-bit signed
@@ -787,6 +1127,39 @@ LONG WORK via the orchestrator. For research, multi-step analysis, code work, or
             }
           } catch (err) {
             piped = `Capture-and-attach failed: ${err.message}`;
+          }
+        }
+        // Phase 6 C.3: note-stream-begin sentinel. crow_glasses_confirm_continuous_recording
+        // returns { _note_stream_begin: { device_id, session_id, note_id, topic }, prose }
+        // — we open server-side state + timers and send the WS envelope.
+        // The `prose` field is what the LLM speaks back; collapse piped to that.
+        if (typeof piped === "string" && piped.includes('"_note_stream_begin"')) {
+          try {
+            const parsed = JSON.parse(piped);
+            const env = parsed?._note_stream_begin;
+            if (env && env.device_id === device.id) {
+              const result = await handleNoteStreamBegin(env, db);
+              piped = parsed.prose || result;
+            }
+          } catch (err) {
+            piped = `Continuous recording start failed: ${err.message}`;
+          }
+        }
+        // Phase 6 C.3: note-stream-end sentinel. crow_glasses_end_note_session
+        // emits this when mode=continuous. Fire-and-forget teardown — the DB
+        // is already updated by the MCP tool; endNoteStream skips re-summary
+        // when status != 'active' and just clears server state + timers +
+        // sends the note_stream_end envelope to the phone.
+        if (typeof piped === "string" && piped.includes('"_note_stream_end"')) {
+          try {
+            const parsed = JSON.parse(piped);
+            const env = parsed?._note_stream_end;
+            if (env && env.device_id === device.id) {
+              endNoteStream(device.id, env.reason || "user_stop").catch(() => {});
+            }
+          } catch {
+            // Malformed sentinel — log-and-swallow; the MCP tool already
+            // succeeded, so don't rewrite piped.
           }
         }
         messages.push({ role: "tool", content: piped, tool_call_id: r.id, tool_name: r.name });
@@ -1638,6 +2011,14 @@ export function setupWebSocket(server) {
 
       ws.on("message", (raw, isBinary) => {
         if (isBinary) {
+          // Phase 6 C.3: route binary frames to the note-stream pipeline
+          // when the device is in continuous-recording mode. Otherwise
+          // fall through to the voice-turn buffer (existing behavior).
+          const sessCur = _sessions.get(device.id);
+          if (sessCur?.inboundMode === "note_stream") {
+            processNoteStreamChunk(device.id, raw);
+            return;
+          }
           if (inTurn) turnBuffer.push(raw);
           return;
         }
@@ -1653,6 +2034,19 @@ export function setupWebSocket(server) {
             };
             break;
           case "turn_start":
+            // Phase 6 C.3: reject PTT while a note_stream is active. The
+            // phone is also supposed to enforce this (APK 1.4.7+) but we
+            // belt-and-suspender here so an older phone can't accidentally
+            // corrupt a running note stream.
+            if (_noteStreams.has(device.id)) {
+              sendText(ws, {
+                type: "error",
+                code: "note_session_active",
+                recoverable: true,
+                message: "Stop recording before taking a voice turn.",
+              });
+              break;
+            }
             inTurn = true;
             turnBuffer = [];
             break;
@@ -1671,6 +2065,14 @@ export function setupWebSocket(server) {
                 sendText(ws, { type: "error", code: "turn_failed", recoverable: true, message: err.message });
               })
               .finally(() => releaseTurnLock(device.id, ws));
+            break;
+          }
+          case "note_stream_end": {
+            // Phone-initiated end (user stop button on the notification,
+            // BT SCO drop, app background kill-chain, etc.).
+            if (_noteStreams.has(device.id)) {
+              endNoteStream(device.id, msg.reason || "user_stop").catch(() => {});
+            }
             break;
           }
           case "audio_stream_done": {
@@ -1742,6 +2144,25 @@ export function setupWebSocket(server) {
         _nowPlaying.delete(deviceId);
         emitGlassesMediaState(deviceId);
         releaseTurnLock(deviceId, ws);
+
+        // Phase 6 C.3: WS disconnect while a note_stream is running starts
+        // a 2-min grace timer. If a new session (same deviceId) registers
+        // before the timer fires, we cancel it — the user is mid-reconnect
+        // after a network blip. Otherwise the stream ends with "disconnect".
+        const ns = _noteStreams.get(deviceId);
+        if (ns && !ns.disconnectGraceTimer && !ns.ending) {
+          ns.disconnectGraceTimer = setTimeout(() => {
+            const cur = _noteStreams.get(deviceId);
+            const newSess = _sessions.get(deviceId);
+            // If a fresh WS is present AND it's different from the closed one,
+            // the user reconnected in time — leave the stream running.
+            if (cur && newSess?.ws && newSess.ws !== ws) {
+              cur.disconnectGraceTimer = null;
+              return;
+            }
+            endNoteStream(deviceId, "disconnect").catch(() => {});
+          }, NOTE_STREAM_DISCONNECT_GRACE_MS);
+        }
       });
       ws.on("error", () => { /* close follows */ });
     });
