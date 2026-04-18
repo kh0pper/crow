@@ -187,7 +187,10 @@ export async function createAdapterFromProfile(profile, model, db = null) {
   if (profile.provider_id && db) {
     const cfg = await resolveProviderConfig(db, profile.provider_id, resolvedModel || null);
     providerLabel = cfg.provider_type || providerLabel || "openai";
-    apiKey = cfg.apiKey === "none" ? "" : cfg.apiKey;
+    // "none" is the bundle-registered sentinel for local OpenAI-compatible
+    // endpoints (vLLM / llama.cpp) that ignore the Bearer token. Pass it
+    // through as a truthy value so the requiresKey check doesn't trip.
+    apiKey = cfg.apiKey || "none";
     baseUrl = cfg.baseUrl;
     resolvedModel = cfg.model || resolvedModel;
   }
