@@ -26,6 +26,7 @@ import { fileURLToPath } from "url";
 import { OpenMultiAgent, ToolRegistry, registerBuiltInTools } from "open-multi-agent";
 import { registerCrowTools, registerRemoteTools } from "./mcp-bridge.js";
 import { presets } from "./presets.js";
+import { resolvePreset } from "./preset-resolver.js";
 import { pipelines } from "./pipelines.js";
 import { startPipelineRunner } from "./pipeline-runner.js";
 import { createDbClient } from "../db.js";
@@ -475,12 +476,16 @@ export function createOrchestratorServer(dbPath, options = {}) {
       preset: z.string().optional().describe('Team preset name (default: "research"). Use crow_list_presets to see options.'),
     },
     async ({ goal, preset: presetName }) => {
-      const preset = presets[presetName || "research"];
+      const name = presetName || "research";
+      const presetDb = createDbClient();
+      let preset;
+      try { preset = await resolvePreset(presetDb, name); }
+      finally { presetDb.close(); }
       if (!preset) {
         return {
           content: [{
             type: "text",
-            text: `Unknown preset: "${presetName}". Available: ${Object.keys(presets).join(", ")}`,
+            text: `Unknown preset: "${name}". Available: ${Object.keys(presets).join(", ")}`,
           }],
           isError: true,
         };
@@ -559,7 +564,10 @@ export function createOrchestratorServer(dbPath, options = {}) {
         };
       }
 
-      const preset = presets[pipeline.preset];
+      const presetDb = createDbClient();
+      let preset;
+      try { preset = await resolvePreset(presetDb, pipeline.preset); }
+      finally { presetDb.close(); }
       if (!preset) {
         return {
           content: [{ type: "text", text: `Pipeline "${pipelineName}" references unknown preset: "${pipeline.preset}"` }],
@@ -776,7 +784,10 @@ export function startOrchestratorPipelines(db, options = {}) {
   }
 
   async function runOrchestrationSync(goal, presetName) {
-    const preset = presets[presetName];
+    const presetDb = createDbClient();
+    let preset;
+    try { preset = await resolvePreset(presetDb, presetName); }
+    finally { presetDb.close(); }
     if (!preset) {
       return { status: "failed", error: `Unknown preset: "${presetName}"` };
     }
