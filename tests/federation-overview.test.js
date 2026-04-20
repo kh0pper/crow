@@ -30,6 +30,7 @@ process.env.CROW_PEER_TOKENS_PATH = peerTokensPath;
 // Import AFTER the env var is set.
 const { signRequest, _resetNonceCache } = await import("../servers/shared/cross-host-auth.js");
 const { default: federationRouterFactory } = await import("../servers/gateway/routes/federation.js");
+const { PUBLIC_FUNNEL_PREFIXES, rejectFunneledMiddleware } = await import("../servers/gateway/funnel.js");
 
 function fakeDb() {
   return {
@@ -50,6 +51,10 @@ let baseUrl;
 before(async () => {
   const app = express();
   app.use(express.json());
+  // Funnel reject BEFORE the dashboard mount — matches the production
+  // layout in servers/gateway/index.js so these tests exercise the real
+  // middleware ordering, not a synthetic convenience.
+  app.use(rejectFunneledMiddleware());
   app.use("/dashboard", federationRouterFactory({ createDbClient: fakeDb }));
   await new Promise((resolve) => {
     server = app.listen(0, () => {
@@ -178,4 +183,54 @@ test("federation: mismatched signature → 401 hmac_mismatch", async () => {
   assert.equal(r.status, 401);
   const body = await r.json();
   assert.equal(body.error, "hmac_mismatch");
+});
+
+// ─── Funnel rejection invariants ─────────────────────────────────────
+// These tests guard the Network Exposure invariant documented in CLAUDE.md:
+// the Nest dashboard + every federation route must be unreachable via
+// Tailscale Funnel. A regression here is the exact bug class that shipped
+// before the PUBLIC_FUNNEL_PREFIXES hardening — re-exposing /dashboard
+// to the open internet.
+
+test("funnel: /dashboard/overview with Tailscale-Funnel-Request → 403", async () => {
+  const path = "/dashboard/overview";
+  const headers = signedHeaders({ method: "GET", path, body: "" });
+  headers["Tailscale-Funnel-Request"] = "1";
+  const r = await fetch(`${baseUrl}${path}`, { headers });
+  assert.equal(r.status, 403, "funneled federation overview must 403");
+  const text = await r.text();
+  assert.match(text, /Forbidden/i);
+});
+
+test("funnel: /dashboard/federation/companion-overview with Tailscale-Funnel-Request → 403", async () => {
+  // We're not mounting the companion router here, but the funnel middleware
+  // runs first and MUST short-circuit before the router ever sees the request.
+  const r = await fetch(`${baseUrl}/dashboard/federation/companion-overview`, {
+    headers: { "Tailscale-Funnel-Request": "1" },
+  });
+  assert.equal(r.status, 403);
+});
+
+test("funnel: programmatic allowlist — neither federation route is in PUBLIC_FUNNEL_PREFIXES", async () => {
+  // Guards against a well-meaning contributor adding /dashboard/overview
+  // or the companion overview to the public prefix list. Every entry MUST
+  // be in the tight blog/sitemap/.well-known set.
+  const forbiddenPublic = [
+    "/dashboard",
+    "/dashboard/overview",
+    "/dashboard/federation",
+    "/dashboard/federation/companion-overview",
+    "/dashboard/nest",
+  ];
+  for (const forbidden of forbiddenPublic) {
+    for (const allowed of PUBLIC_FUNNEL_PREFIXES) {
+      assert.ok(
+        !forbidden.startsWith(allowed),
+        `PUBLIC_FUNNEL_PREFIXES entry "${allowed}" would open up private path "${forbidden}"`
+      );
+    }
+  }
+  // Positive sanity: the allowlist is non-trivial and bounded.
+  assert.ok(PUBLIC_FUNNEL_PREFIXES.length > 0);
+  assert.ok(PUBLIC_FUNNEL_PREFIXES.length < 10, "allowlist drift — new entry needs review");
 });
