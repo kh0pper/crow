@@ -11,14 +11,25 @@ import { nestClientJS } from "./nest/client.js";
 import { getNestData, getTrustedInstances } from "./nest/data-queries.js";
 import { getPeerOverview } from "../overview-cache.js";
 import { readSetting } from "../settings/registry.js";
+import { getInstance, getOrCreateLocalInstanceId } from "../../instance-registry.js";
 import { t } from "../shared/i18n.js";
 
+async function resolveLocalInstanceName(db, lang) {
+  try {
+    const id = getOrCreateLocalInstanceId();
+    const inst = await getInstance(db, id);
+    if (inst && inst.name) return inst.name;
+  } catch { /* fall through */ }
+  return t("nest.thisCrow", lang) || "This Crow";
+}
+
 /**
- * Build the per-instance tabs strip model. Local tab first, then each
- * trusted peer. Offline/unavailable peers get aria-disabled.
+ * Build the per-instance tabs strip model. Local tab first (labeled with
+ * the local instance's own name), then each trusted peer. Offline or
+ * unavailable peers get aria-disabled.
  */
-function buildInstanceTabs(trustedInstances, peerOverviews) {
-  const tabs = [{ id: "local", name: "This Crow", status: "online", isLocal: true }];
+function buildInstanceTabs(trustedInstances, peerOverviews, localName) {
+  const tabs = [{ id: "local", name: localName, status: "online", isLocal: true }];
   for (let i = 0; i < trustedInstances.length; i++) {
     const inst = trustedInstances[i];
     const overview = peerOverviews[i];
@@ -130,8 +141,11 @@ export default {
     // at least one trusted peer exists. Otherwise strip stays hidden via
     // body.unified-off CSS.
     const hasTrustedPeers = Array.isArray(nestOpts.trustedInstances) && nestOpts.trustedInstances.length > 0;
+    const localName = nestOpts.unifiedOn && hasTrustedPeers
+      ? await resolveLocalInstanceName(db, lang)
+      : null;
     const instanceTabs = nestOpts.unifiedOn && hasTrustedPeers
-      ? buildInstanceTabs(nestOpts.trustedInstances, nestOpts.peerOverviews || [])
+      ? buildInstanceTabs(nestOpts.trustedInstances, nestOpts.peerOverviews || [], localName)
       : null;
 
     return layout({ title: t("health.pageTitle", lang), content, instanceTabs });
