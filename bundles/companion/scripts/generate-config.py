@@ -212,19 +212,76 @@ def get_crow_db_path():
 
 
 def get_ai_profiles(db_path):
-    """Read AI profiles from Crow's dashboard_settings table."""
+    """Read AI profiles from Crow's dashboard_settings table.
+
+    Profile shape evolution:
+      LEGACY (pre-2026): each profile has inline `baseUrl`, `apiKey`,
+        `models` fields — fully self-contained.
+      CURRENT: each profile has a `provider_id` pointer into the
+        `providers` table. `baseUrl` / `apiKey` / `models` live on the
+        provider row, not the profile.
+
+    The rest of this script expects the LEGACY shape. To stay backward-
+    compatible with both schemas we JOIN to the providers table and
+    populate the legacy fields from there when `provider_id` is set.
+    Keeps every downstream consumer working without changes.
+    """
     try:
         conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+
+        # Load profiles JSON.
         cursor = conn.execute(
             "SELECT value FROM dashboard_settings WHERE key = 'ai_profiles'"
         )
         row = cursor.fetchone()
+        profiles = json.loads(row[0]) if row else []
+
+        # Load providers keyed by id, if the table exists.
+        providers_by_id = {}
+        try:
+            p_cursor = conn.execute(
+                "SELECT id, base_url, api_key, models, disabled FROM providers"
+            )
+            for p_row in p_cursor.fetchall():
+                if p_row["disabled"]:
+                    continue
+                try:
+                    models = json.loads(p_row["models"] or "[]")
+                except Exception:
+                    models = []
+                providers_by_id[p_row["id"]] = {
+                    "baseUrl": p_row["base_url"],
+                    "apiKey": p_row["api_key"],
+                    "models": models,
+                }
+        except sqlite3.OperationalError:
+            # providers table doesn't exist → legacy schema, nothing to merge.
+            pass
+
         conn.close()
-        if row:
-            return json.loads(row[0])
+
+        # Enrich each profile in-place with provider fields when missing.
+        enriched = []
+        for p in profiles:
+            if not isinstance(p, dict):
+                continue
+            prov = providers_by_id.get(p.get("provider_id"))
+            if prov:
+                # Don't clobber a legacy inline field if it's already present.
+                p.setdefault("baseUrl", prov["baseUrl"])
+                p.setdefault("apiKey", prov["apiKey"])
+                p.setdefault("models", prov["models"])
+            # Skip profiles that still don't have a baseUrl — they can't
+            # drive the companion's LLM. A profile with kind=auto (router)
+            # has no provider and is filtered here.
+            if not p.get("baseUrl"):
+                continue
+            enriched.append(p)
+        return enriched
     except Exception as e:
         print(f"Warning: Could not read AI profiles: {e}", file=sys.stderr)
-    return []
+        return []
 
 
 def get_tts_profiles(db_path):
