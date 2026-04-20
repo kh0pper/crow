@@ -113,6 +113,35 @@ test("nest-xss: peer hostname cannot break out of href — safeHost strips non-D
   assert.ok(!/href="javascript:/i.test(html), "javascript: scheme must never be emitted");
 });
 
+test("nest-xss: peer tile href prefers gateway_url over bare hostname", () => {
+  // Regression guard for the post-deploy bug where bare hostname "crow"
+  // rendered as https://crow/... (unreachable). The gateway_url column
+  // holds the operator-configured canonical base URL and MUST win.
+  const html = buildNestHTML(baseData({
+    trustedInstances: [{
+      id: "peer-g",
+      name: "crow",
+      hostname: "crow",                                // bare, unresolvable
+      gateway_url: "http://100.118.41.122:3001",        // canonical
+    }],
+    peerOverviews: [{
+      status: "ok",
+      instance: { id: "peer-g", name: "crow", hostname: "crow" },
+      tiles: [
+        { id: "memory", name: "Memory", icon: "memory", pathname: "/dashboard/memory", port: null, category: "local-panel" },
+      ],
+    }],
+  }), "en");
+  assert.ok(
+    html.includes('href="http://100.118.41.122:3001/dashboard/memory"'),
+    "tile href should be derived from gateway_url, not bare hostname. Hrefs found: " + (html.match(/href="[^"]+"/g) || []).join(", ")
+  );
+  assert.ok(
+    !/href="https:\/\/crow\/dashboard/.test(html),
+    "unreachable https://crow/... URL must NOT be emitted"
+  );
+});
+
 test("nest-xss: tile icon allowlist — unknown icon key with HTML-looking content maps to 'default'", () => {
   // overview-cache should reject this before it reaches the renderer, but
   // defence-in-depth: the renderer's resolvePeerIcon() also allowlists.
