@@ -318,6 +318,9 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
       setTimeout(function() {
         if (loaded || !overlay.classList.contains('active')) return;
         try { iframe.remove(); } catch (e) {}
+        // Surface the error state — this reveals the .kiosk-exit-btn as a
+        // fallback since the companion's own Nest button never rendered.
+        overlay.classList.add('kiosk-overlay--error');
         var host;
         try { host = new URL(companionUrl).host; } catch (e) { host = companionUrl; }
         var err = document.createElement('div');
@@ -341,6 +344,8 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
       var overlay = document.getElementById('kiosk-overlay');
       if (!overlay) return;
       overlay.classList.remove('active');
+      overlay.classList.remove('kiosk-overlay--error');
+      overlay.classList.remove('kiosk-overlay--show-exit');
       // Remove every child EXCEPT the exit button (it's a permanent escape
       // hatch — teardown would leave the overlay unusable on re-entry).
       var kids = Array.prototype.slice.call(overlay.children);
