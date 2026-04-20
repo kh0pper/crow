@@ -44,6 +44,7 @@ import { resolveNavGroups } from "./nav-registry.js";
 import { readSetting, readSettings } from "./settings/registry.js";
 import { csrfMiddleware } from "./shared/csrf.js";
 import federationRouterFactory from "../routes/federation.js";
+import federationCompanionRouterFactory from "../routes/federation-companion.js";
 import { getTrustedInstances } from "./panels/nest/data-queries.js";
 import { getPeerOverview } from "./overview-cache.js";
 import { createDbClient } from "../../db.js";
@@ -471,6 +472,14 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // Skips: GET/HEAD/OPTIONS, HMAC-signed peer calls (handled above),
   // pre-auth flows (no session cookie yet), and CROW_CSRF_STRICT=0 rollback.
   router.use("/dashboard", csrfMiddleware);
+
+  // Federation companion router (Phase 3) — session-authed, under dashboard
+  // auth. Mounted AFTER dashboardAuth so session cookies are validated.
+  // /dashboard/federation/companion-overview → merged local+peer WM registry.
+  if (federationEnabled) {
+    const federationCompanionRouter = federationCompanionRouterFactory({ createDbClient });
+    router.use("/dashboard", federationCompanionRouter);
+  }
 
   // Normal mount (session-cookie-authenticated path)
   router.use("/dashboard", bundlesRouter);

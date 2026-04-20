@@ -29,7 +29,8 @@
     "test:auth": "node --test tests/auth-network.test.js",
     "test:csrf": "node --test tests/csrf-middleware.test.js",
     "test:federation": "node --test tests/federation-overview.test.js",
-    "test:overview-cache": "node --test tests/overview-cache.test.js"
+    "test:overview-cache": "node --test tests/overview-cache.test.js",
+    "test:federation-companion": "node --test tests/federation-companion.test.js"
   },
   "dependencies": {
     "@libsql/client": "^0.14.0",
