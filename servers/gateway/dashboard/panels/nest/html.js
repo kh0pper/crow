@@ -117,16 +117,42 @@ function disambiguatePeerNames(peerOverviews, trustedInstances) {
   });
 }
 
-function buildPeerTileHref(hostname, pathname, port) {
-  // NEVER trust a peer-supplied URL. Build server-side from the LOCAL
-  // crow_instances.hostname + the pathname that already passed regex
-  // validation in overview-cache.js. Hostname is escaped as a URL
-  // component (not HTML) — we trust it's tailnet-shaped since it comes
-  // from our own DB row, but fall back gracefully.
-  const safeHost = String(hostname || "").replace(/[^a-zA-Z0-9._-]/g, "");
-  if (!safeHost) return null;
-  const portPart = port && Number.isInteger(port) ? `:${port}` : "";
-  return `https://${safeHost}${portPart}${pathname}`;
+function buildPeerTileHref(gatewayUrl, hostname, pathname, port) {
+  // NEVER trust a peer-supplied URL. All base-URL material comes from the
+  // LOCAL crow_instances row — gateway_url is operator-configured at pair
+  // time and is the canonical way to reach the peer. pathname has already
+  // passed regex validation in overview-cache.js.
+  //
+  // Construction rules:
+  //  - Bundle-direct (port != null)      → scheme+host from gateway_url,
+  //                                         tile's port, tile's pathname.
+  //  - Everything else (port == null)    → gateway_url's scheme+host+port,
+  //                                         tile's pathname (replaces
+  //                                         gateway_url's path component).
+  //  - gateway_url missing or malformed  → fall back to https://<hostname>
+  //                                         (pre-gateway_url behavior).
+  const fallback = () => {
+    const safeHost = String(hostname || "").replace(/[^a-zA-Z0-9._-]/g, "");
+    if (!safeHost) return null;
+    const portPart = port && Number.isInteger(port) ? `:${port}` : "";
+    return `https://${safeHost}${portPart}${pathname}`;
+  };
+
+  if (gatewayUrl) {
+    try {
+      const u = new URL(gatewayUrl);
+      if (port && Number.isInteger(port)) {
+        u.port = String(port);
+      }
+      u.pathname = pathname;
+      u.search = "";
+      u.hash = "";
+      return u.toString();
+    } catch {
+      return fallback();
+    }
+  }
+  return fallback();
 }
 
 export function buildNestHTML(data, lang) {
@@ -279,8 +305,9 @@ export function buildNestHTML(data, lang) {
       }
 
       const peerHostname = ti.hostname || peer.instance?.hostname || "";
+      const peerGatewayUrl = ti.gateway_url || null;
       const peerTiles = peer.tiles.map(tile => {
-        const href = buildPeerTileHref(peerHostname, tile.pathname, tile.port);
+        const href = buildPeerTileHref(peerGatewayUrl, peerHostname, tile.pathname, tile.port);
         if (!href) return "";
         const icon = resolvePeerIcon(tile.icon);
         const klass = tile.category === "bundle" ? "nest-app nest-app--bundle" : "nest-app nest-app--panel";
