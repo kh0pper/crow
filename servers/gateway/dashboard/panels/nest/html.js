@@ -272,10 +272,12 @@ export function buildNestHTML(data, lang) {
     const disambiguated = disambiguatePeerNames(peerOverviews, trustedInstances || []);
 
     const sections = [];
-    // Local section first.
+    // Local section first. In carousel mode we INTENTIONALLY skip the
+    // legacy instancesHtml — the tabs strip + per-instance sections ARE
+    // the multi-instance view; rendering both is redundant and confusing.
     sections.push(
       `<section class="nest-instance-section" data-instance="local" role="tabpanel" aria-labelledby="crow-instance-tab-local">
-        ${instancesHtml}${gridHtml}
+        ${gridHtml}
       </section>`
     );
 
