@@ -44,6 +44,8 @@ import { resolveNavGroups } from "./nav-registry.js";
 import { readSetting, readSettings } from "./settings/registry.js";
 import { csrfMiddleware } from "./shared/csrf.js";
 import federationRouterFactory from "../routes/federation.js";
+import { getTrustedInstances } from "./panels/nest/data-queries.js";
+import { getPeerOverview } from "./overview-cache.js";
 import { createDbClient } from "../../db.js";
 
 /** Check if companion bundle is installed and its container is running */
@@ -473,13 +475,64 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // Normal mount (session-cookie-authenticated path)
   router.use("/dashboard", bundlesRouter);
 
-  // Dashboard home — redirect to first visible panel
-  router.get("/dashboard", (req, res) => {
-    const visible = getVisiblePanels();
-    if (visible.length > 0) {
-      res.redirect(visible[0].route);
-    } else {
-      res.redirect("/dashboard/settings");
+  // Dashboard home — unified carousel when enabled + peers trusted; else
+  // falls back to the first visible panel (today's behavior).
+  router.get("/dashboard", async (req, res, next) => {
+    const db = createDbClient();
+    try {
+      const unifiedEnvOn = process.env.CROW_UNIFIED_DASHBOARD !== "0";
+      const setting = await readSetting(db, "unified_dashboard_enabled");
+      // Default ON when the env switch is on and no explicit setting exists.
+      const unifiedOn = unifiedEnvOn && setting !== "false";
+
+      if (unifiedOn) {
+        const trusted = await getTrustedInstances(db);
+        if (trusted.length > 0) {
+          // Fan out peer overviews with a cold-cache budget. allSettled so
+          // one slow/broken peer never blocks the page. 2s per peer (via
+          // overview-cache.FETCH_TIMEOUT_MS) + ~1500ms aggregate budget.
+          const overall = new Promise((resolve) => setTimeout(() => resolve("__budget_exceeded__"), 1500));
+          const fan = Promise.allSettled(trusted.map(i => getPeerOverview(db, i.id)));
+          const settled = await Promise.race([fan, overall]);
+          const peerOverviews = Array.isArray(settled)
+            ? settled.map((s, i) => s.status === "fulfilled" ? s.value : {
+                instanceId: trusted[i].id,
+                status: "unavailable",
+                reason: s.reason?.message || "rejected",
+                tiles: [],
+              })
+            : trusted.map(i => ({
+                instanceId: i.id,
+                status: "unavailable",
+                reason: "budget_exceeded",
+                tiles: [],
+              }));
+
+          // Stash for the nest panel handler; reroute through the normal
+          // panel dispatch so session/layout/header wiring is unchanged.
+          req._crowNest = { trustedInstances: trusted, peerOverviews, unifiedOn: true };
+          req.url = "/dashboard/nest";
+          return next();
+        }
+      }
+
+      // Fallback — pre-Phase-2 behavior.
+      const visible = getVisiblePanels();
+      if (visible.length > 0) {
+        res.redirect(visible[0].route);
+      } else {
+        res.redirect("/dashboard/settings");
+      }
+    } catch (err) {
+      console.warn("[dashboard] unified home wrapper failed, falling back:", err.message);
+      const visible = getVisiblePanels();
+      if (visible.length > 0) {
+        res.redirect(visible[0].route);
+      } else {
+        res.redirect("/dashboard/settings");
+      }
+    } finally {
+      db.close();
     }
   });
 

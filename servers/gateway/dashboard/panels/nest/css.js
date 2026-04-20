@@ -305,67 +305,8 @@ export function nestCSS() {
     outline-offset: 2px;
   }
 
-  /* ─── Instance Tabs Strip (rendered by shared/layout.js) ─── */
-  .crow-instance-tabs {
-    display: flex;
-    gap: 0.25rem;
-    padding: 0.5rem 1rem;
-    border-bottom: 1px solid var(--crow-border);
-    overflow-x: auto;
-    scrollbar-width: none;
-    background: var(--crow-bg-deep);
-  }
-  .crow-instance-tabs::-webkit-scrollbar { display: none; }
-
-  .crow-instance-tab {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-    padding: 0.4rem 0.85rem;
-    border-radius: 8px;
-    font-size: 0.75rem;
-    font-weight: 500;
-    color: var(--crow-text-secondary);
-    text-decoration: none;
-    cursor: pointer;
-    background: transparent;
-    border: 1px solid transparent;
-    white-space: nowrap;
-    transition: background 0.15s, border-color 0.15s, color 0.15s;
-  }
-  .crow-instance-tab:hover {
-    background: rgba(99,102,241,0.08);
-    color: var(--crow-text-primary);
-  }
-  .crow-instance-tab:focus-visible {
-    outline: 2px solid var(--crow-accent);
-    outline-offset: 2px;
-  }
-  .crow-instance-tab.active,
-  .crow-instance-tab[aria-selected="true"] {
-    background: rgba(99,102,241,0.15);
-    border-color: rgba(99,102,241,0.3);
-    color: var(--crow-text-primary);
-  }
-  .crow-instance-tab[aria-disabled="true"],
-  .crow-instance-tab.tab--offline {
-    opacity: 0.5;
-    cursor: default;
-  }
-  .crow-instance-tab-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--crow-text-muted);
-  }
-  .crow-instance-tab.tab--online .crow-instance-tab-dot {
-    background: var(--crow-success);
-  }
-  .crow-instance-tab.tab--offline .crow-instance-tab-dot {
-    background: var(--crow-text-muted);
-  }
-
-  body.unified-off #crow-instance-tabs { display: none; }
+  /* Instance-tabs strip styles live in shared/layout.js (dashboardCss)
+   * so they survive Turbo panel nav when the strip is data-turbo-permanent. */
 
 </style>`;
 }

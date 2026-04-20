@@ -11,6 +11,26 @@ import { nestClientJS } from "./nest/client.js";
 import { getNestData } from "./nest/data-queries.js";
 import { t } from "../shared/i18n.js";
 
+/**
+ * Build the per-instance tabs strip model. Local tab first, then each
+ * trusted peer. Offline/unavailable peers get aria-disabled.
+ */
+function buildInstanceTabs(trustedInstances, peerOverviews) {
+  const tabs = [{ id: "local", name: "This Crow", status: "online", isLocal: true }];
+  for (let i = 0; i < trustedInstances.length; i++) {
+    const inst = trustedInstances[i];
+    const overview = peerOverviews[i];
+    const online = overview && overview.status === "ok";
+    tabs.push({
+      id: inst.id,
+      name: inst.name || "peer",
+      status: online ? "online" : "offline",
+      isLocal: false,
+    });
+  }
+  return tabs;
+}
+
 export default {
   id: "nest",
   name: "Crow's Nest",
@@ -56,12 +76,21 @@ export default {
       }
     }
 
-    const data = await getNestData(db, lang);
+    // If the /dashboard wrapper stashed unified data, thread it through to
+    // the nest data query + renderer. Otherwise the single-instance code
+    // path is unchanged.
+    const nestOpts = req._crowNest || {};
+    const data = await getNestData(db, lang, nestOpts);
     const css = nestCSS();
     const html = buildNestHTML(data, lang);
     const js = nestClientJS(lang);
     const content = css + html + js;
 
-    return layout({ title: t("health.pageTitle", lang), content });
+    // Build instance tabs strip data for the layout when unified is on.
+    const instanceTabs = nestOpts.unifiedOn && Array.isArray(nestOpts.trustedInstances)
+      ? buildInstanceTabs(nestOpts.trustedInstances, nestOpts.peerOverviews || [])
+      : null;
+
+    return layout({ title: t("health.pageTitle", lang), content, instanceTabs });
   },
 };

@@ -129,14 +129,45 @@ function turboDiagScript() {
  * @param {string} [opts.afterContent] - HTML rendered after </main> inside .dashboard (e.g. persistent player bar)
  * @param {string} [opts.headerIcons] - HTML rendered inside .content-header, right of title (e.g. notification bell, health icon)
  * @param {Array} [opts.navGroups] - Grouped nav: [{ id, name, collapsed, panels: [{ id, name, icon, route, navOrder }] }]
+ * @param {Array|null} [opts.instanceTabs] - Unified multi-instance tabs: [{ id, name, status, isLocal }]. When null, strip is rendered hidden (body.unified-off).
  */
-export function renderLayout({ title, content, activePanel, panels, theme, glass, serif, scripts, afterContent, headerIcons, lang, navGroups }) {
+export function renderLayout({ title, content, activePanel, panels, theme, glass, serif, scripts, afterContent, headerIcons, lang, navGroups, instanceTabs }) {
   const themeClass = [
     theme === "light" ? "theme-light" : "",
     glass ? "theme-glass" : "",
     serif ? "theme-serif" : "",
+    // Unified-off class gates the permanent tabs strip visibility via CSS.
+    // The strip is ALWAYS rendered (for Turbo permanence across panel nav)
+    // but hidden when the unified flag is off or no peers are trusted.
+    (Array.isArray(instanceTabs) && instanceTabs.length > 1) ? "" : "unified-off",
   ].filter(Boolean).join(" ");
   const sortedPanels = [...panels].sort((a, b) => (a.navOrder || 0) - (b.navOrder || 0));
+
+  // Render the instance tabs strip. Populated with local + peer tabs when
+  // `instanceTabs` is provided; otherwise empty shell for Turbo permanence.
+  // ARIA role varies by path — tablist on /dashboard (tabpanels exist),
+  // navigation elsewhere (plain links). Since we don't have the active path
+  // here, we go with role="tablist" on the nest panel (activePanel === 'nest')
+  // and role="navigation" otherwise, using activePanel as a proxy.
+  const isNestPanel = activePanel === "nest";
+  const stripRole = isNestPanel ? "tablist" : "navigation";
+  const stripAriaLabel = "Instances";
+  let stripInner = "";
+  if (Array.isArray(instanceTabs) && instanceTabs.length > 0) {
+    stripInner = instanceTabs.map(tab => {
+      const isLocalTab = tab.isLocal === true;
+      const hash = isLocalTab ? "" : `#i/${encodeURIComponent(tab.id)}`;
+      const href = `/dashboard${hash}`;
+      const online = tab.status === "online";
+      const tabRole = isNestPanel ? ' role="tab"' : '';
+      const ariaDisabled = !online ? ' aria-disabled="true"' : '';
+      const ariaSelected = isNestPanel ? ` aria-selected="${isLocalTab ? "true" : "false"}"` : '';
+      const tabIndex = isNestPanel ? ` tabindex="${isLocalTab ? "0" : "-1"}"` : '';
+      const klass = `crow-instance-tab ${online ? "tab--online" : "tab--offline"}${isLocalTab ? " active" : ""}`;
+      return `<a href="${href}" class="${klass}"${tabRole}${ariaDisabled}${ariaSelected}${tabIndex} data-instance-id="${escapeHtml(tab.id)}"><span class="crow-instance-tab-dot"></span>${escapeHtml(tab.name)}</a>`;
+    }).join("");
+  }
+  const instanceTabsStrip = `<nav id="crow-instance-tabs" class="crow-instance-tabs" role="${stripRole}" aria-label="${stripAriaLabel}" data-turbo-permanent>${stripInner}</nav>`;
 
   let navItems;
   if (navGroups && navGroups.length > 0) {
@@ -214,6 +245,7 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
         <h2>${escapeHtml(title)}</h2>
         ${headerIcons ? `<div class="header-icons">${headerIcons}</div>` : ""}
       </header>
+      ${instanceTabsStrip}
       <div class="content-body">
         ${content}
       </div>
@@ -1151,5 +1183,68 @@ function dashboardCss() {
       height: 100dvh;
     }
   }
+
+  /* ─── Instance Tabs Strip (unified multi-instance; permanent across Turbo nav) ─── */
+  .crow-instance-tabs {
+    display: flex;
+    gap: 0.25rem;
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid var(--crow-border);
+    overflow-x: auto;
+    scrollbar-width: none;
+    background: var(--crow-bg-deep);
+    flex-shrink: 0;
+  }
+  .crow-instance-tabs::-webkit-scrollbar { display: none; }
+
+  .crow-instance-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.85rem;
+    border-radius: 8px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--crow-text-secondary);
+    text-decoration: none;
+    cursor: pointer;
+    background: transparent;
+    border: 1px solid transparent;
+    white-space: nowrap;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+  }
+  .crow-instance-tab:hover {
+    background: rgba(99,102,241,0.08);
+    color: var(--crow-text-primary);
+  }
+  .crow-instance-tab:focus-visible {
+    outline: 2px solid var(--crow-accent);
+    outline-offset: 2px;
+  }
+  .crow-instance-tab.active,
+  .crow-instance-tab[aria-selected="true"] {
+    background: rgba(99,102,241,0.15);
+    border-color: rgba(99,102,241,0.3);
+    color: var(--crow-text-primary);
+  }
+  .crow-instance-tab[aria-disabled="true"],
+  .crow-instance-tab.tab--offline {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .crow-instance-tab-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--crow-text-muted);
+  }
+  .crow-instance-tab.tab--online .crow-instance-tab-dot {
+    background: var(--crow-success);
+  }
+  .crow-instance-tab.tab--offline .crow-instance-tab-dot {
+    background: var(--crow-text-muted);
+  }
+
+  body.unified-off #crow-instance-tabs { display: none; }
 </style>`;
 }
