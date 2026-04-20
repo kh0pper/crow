@@ -27,7 +27,8 @@
     "reset-password": "node scripts/reset-password.js",
     "test:claude-ai": "node scripts/test-claude-ai.js",
     "test:auth": "node --test tests/auth-network.test.js",
-    "test:csrf": "node --test tests/csrf-middleware.test.js"
+    "test:csrf": "node --test tests/csrf-middleware.test.js",
+    "test:federation": "node --test tests/federation-overview.test.js"
   },
   "dependencies": {
     "@libsql/client": "^0.14.0",
