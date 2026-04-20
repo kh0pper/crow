@@ -14,6 +14,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { resolve } from "path";
 import { homedir } from "os";
 import { hostname as osHostname } from "os";
+import bus from "../shared/event-bus.js";
 
 const INSTANCES_JSON_PATH = resolve(homedir(), ".crow", "instances.json");
 
@@ -195,6 +196,23 @@ export async function updateInstance(db, id, fields) {
     sql: `UPDATE crow_instances SET ${sets.join(", ")} WHERE id = ?`,
     args,
   });
+
+  // Emit an event so downstream caches (e.g. overview-cache) can
+  // invalidate synchronously. Only fires when trust- or status-relevant
+  // fields changed — avoids noise when an operator renames a peer.
+  // Wrapped in try/catch per bus emit discipline; a subscriber error
+  // must not fail the primary DB write.
+  const trustRelevantKeys = new Set(["trusted", "status"]);
+  const changed = [];
+  for (const [key] of Object.entries(fields)) {
+    const dbKey = key.replace(/([A-Z])/g, "_$1").toLowerCase();
+    if (trustRelevantKeys.has(dbKey)) changed.push(dbKey);
+  }
+  if (changed.length > 0) {
+    try {
+      bus.emit("crow_instances:row_updated", { id, changed, fields });
+    } catch { /* subscriber failures are not primary-write failures */ }
+  }
 }
 
 /**
@@ -208,6 +226,11 @@ export async function revokeInstance(db, id) {
 
   // Remove from local instances.json
   removeFromLocalInstancesJson(id);
+
+  // Tell downstream caches the peer is gone NOW, not in 30s.
+  try {
+    bus.emit("crow_instances:row_updated", { id, changed: ["status"], fields: { status: "revoked" } });
+  } catch {}
 }
 
 /**
