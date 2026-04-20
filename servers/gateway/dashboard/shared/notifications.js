@@ -444,9 +444,13 @@ export const headerIconsCss = `
     height: 100%;
     border: none;
   }
-  /* Close button — always above the iframe. If the iframe fails to load
-   * (companion host unreachable, refused-to-connect, CSP block) the user
-   * must still be able to exit without hunting for Escape. */
+  /* Close button — HIDDEN by default. The companion app renders its own
+   * 'Nest' button inside the iframe for the happy path. We only show this
+   * fallback when the iframe FAILS to load (companion host unreachable,
+   * refused-to-connect, CSP block) so the user isn't stranded with no way
+   * back. Two visibility triggers:
+   *   (a) .kiosk-overlay--error — set in JS after the 6s load timeout.
+   *   (b) .kiosk-overlay--show-exit — reserved for future manual toggle. */
   .kiosk-exit-btn {
     position: absolute;
     top: 0.75rem;
@@ -473,7 +477,8 @@ export const headerIconsCss = `
     outline: 2px solid var(--crow-accent);
     outline-offset: 2px;
   }
-  .kiosk-overlay.active .kiosk-exit-btn { display: flex; }
+  .kiosk-overlay--error .kiosk-exit-btn,
+  .kiosk-overlay--show-exit .kiosk-exit-btn { display: flex; }
   /* Inline error message replaces the iframe slot when load fails. */
   .kiosk-error-msg {
     position: absolute;
