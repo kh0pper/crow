@@ -156,15 +156,19 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
   if (Array.isArray(instanceTabs) && instanceTabs.length > 0) {
     stripInner = instanceTabs.map(tab => {
       const isLocalTab = tab.isLocal === true;
-      const hash = isLocalTab ? "" : `#i/${encodeURIComponent(tab.id)}`;
-      const href = `/dashboard${hash}`;
+      // Hash-only href (relative to current path) — the browser treats the
+      // click as a same-document fragment change and fires `hashchange`.
+      // Using /dashboard#i/... would be a PATH change from /dashboard/nest
+      // and Turbo would fight our JS click handler. data-turbo="false" is
+      // belt-and-suspenders.
+      const href = isLocalTab ? "#" : `#i/${encodeURIComponent(tab.id)}`;
       const online = tab.status === "online";
       const tabRole = isNestPanel ? ' role="tab"' : '';
       const ariaDisabled = !online ? ' aria-disabled="true"' : '';
       const ariaSelected = isNestPanel ? ` aria-selected="${isLocalTab ? "true" : "false"}"` : '';
       const tabIndex = isNestPanel ? ` tabindex="${isLocalTab ? "0" : "-1"}"` : '';
       const klass = `crow-instance-tab ${online ? "tab--online" : "tab--offline"}${isLocalTab ? " active" : ""}`;
-      return `<a href="${href}" class="${klass}"${tabRole}${ariaDisabled}${ariaSelected}${tabIndex} data-instance-id="${escapeHtml(tab.id)}"><span class="crow-instance-tab-dot"></span>${escapeHtml(tab.name)}</a>`;
+      return `<a href="${href}" class="${klass}" data-turbo="false"${tabRole}${ariaDisabled}${ariaSelected}${tabIndex} data-instance-id="${escapeHtml(tab.id)}"><span class="crow-instance-tab-dot"></span>${escapeHtml(tab.name)}</a>`;
     }).join("");
   }
   const instanceTabsStrip = `<nav id="crow-instance-tabs" class="crow-instance-tabs" role="${stripRole}" aria-label="${stripAriaLabel}" data-turbo-permanent>${stripInner}</nav>`;
