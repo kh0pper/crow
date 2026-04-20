@@ -43,6 +43,7 @@ import { registerPanel, loadExternalPanels, getAllPanels, getVisiblePanels, getP
 import { resolveNavGroups } from "./nav-registry.js";
 import { readSetting, readSettings } from "./settings/registry.js";
 import { csrfMiddleware } from "./shared/csrf.js";
+import federationRouterFactory from "../routes/federation.js";
 import { createDbClient } from "../../db.js";
 
 /** Check if companion bundle is installed and its container is running */
@@ -440,14 +441,25 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // dashboard-auth mount both dispatch to the same routes.
   const bundlesRouter = bundlesRouterFactory();
 
-  // Cross-host bypass: signed peer-to-peer calls go straight to bundlesRouter,
-  // skipping dashboardAuth. Authentication is handled by bundlesRouter's own
-  // HMAC middleware (servers/gateway/routes/bundles.js crossHostVerifyMiddleware).
+  // Federation router — HMAC-gated only, no session-auth path. Mount behind
+  // a kill-switch so operators can disable federation without redeploying
+  // the dashboard. Defaults on; set CROW_UNIFIED_DASHBOARD=0 to disable.
+  const federationEnabled = process.env.CROW_UNIFIED_DASHBOARD !== "0";
+  const federationRouter = federationEnabled
+    ? federationRouterFactory({ createDbClient })
+    : null;
+
+  // Cross-host bypass: signed peer-to-peer calls route to the appropriate
+  // HMAC-authenticated router based on path, skipping dashboardAuth. Each
+  // target router runs its own HMAC verification middleware.
   router.use("/dashboard", (req, res, next) => {
-    if (req.headers["x-crow-signature"]) {
-      return bundlesRouter(req, res, next);
+    if (!req.headers["x-crow-signature"]) return next();
+    // /dashboard/overview → federationRouter (Phase 1)
+    if (federationRouter && req.path.startsWith("/overview")) {
+      return federationRouter(req, res, next);
     }
-    return next();
+    // Everything else (bundles) → bundlesRouter (existing behavior)
+    return bundlesRouter(req, res, next);
   });
 
   // Auth middleware for all other dashboard routes
