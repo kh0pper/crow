@@ -130,35 +130,25 @@ export function nestClientJS(lang) {
     tabs.addEventListener('click', function(e) {
       var a = e.target.closest('.crow-instance-tab');
       if (!a) return;
-      if (a.getAttribute('aria-disabled') === 'true') {
-        // Offline tab: refuse the hash change so the URL stays on the
-        // previously-active section. Other tabs let the browser handle
-        // the hash update and hashchange fires applyHashState naturally.
-        e.preventDefault();
-        return;
-      }
+      // ALWAYS preventDefault. Turbo has an aggressive document-level
+      // click listener that sometimes swallows <a> clicks even when
+      // data-turbo="false" is set (the attribute is honored for
+      // fetch-request navs but native hash-only <a> handling still gets
+      // caught in certain build configs). Doing the full hash + scroll
+      // update imperatively is the only reliable path.
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (a.getAttribute('aria-disabled') === 'true') return;
       var id = a.getAttribute('data-instance-id');
       if (!id) return;
-      // Local tab click: href is "#" which the browser treats as
-      // "go to top / clear hash" and does NOT emit hashchange if hash
-      // was already empty. Normalize so applyHashState runs.
-      if (id === 'local') {
-        e.preventDefault();
-        if (location.hash) {
-          history.pushState(null, '', location.pathname + location.search);
-        }
-        applyHashState();
-        return;
+
+      var newHash = id === 'local' ? '' : '#i/' + id;
+      var newUrl = location.pathname + location.search + newHash;
+      if (location.hash !== newHash) {
+        try { history.pushState(null, '', newUrl); } catch (err) { /* cross-origin or restricted: ignore */ }
       }
-      // Non-local: let the browser set the new hash; hashchange fires
-      // applyHashState via the window listener installed below.
-      // (Defence: if hashchange *doesn't* fire because the hash is already
-      // equal to the click target, still re-run applyHashState so the
-      // active class update isn't skipped.)
-      var target = '#i/' + id;
-      if (location.hash === target) {
-        applyHashState();
-      }
+      applyHashState();
     });
 
     document.addEventListener('keydown', onKeydown);
