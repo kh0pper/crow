@@ -42,6 +42,7 @@ import { execFileSync } from "node:child_process";
 import { registerPanel, loadExternalPanels, getAllPanels, getVisiblePanels, getPanel } from "./panel-registry.js";
 import { resolveNavGroups } from "./nav-registry.js";
 import { readSetting, readSettings } from "./settings/registry.js";
+import { csrfMiddleware } from "./shared/csrf.js";
 import { createDbClient } from "../../db.js";
 
 /** Check if companion bundle is installed and its container is running */
@@ -451,6 +452,11 @@ export default function dashboardRouter(mcpAuthMiddleware) {
 
   // Auth middleware for all other dashboard routes
   router.use("/dashboard", dashboardAuth);
+
+  // CSRF double-submit validation for state-changing requests.
+  // Skips: GET/HEAD/OPTIONS, HMAC-signed peer calls (handled above),
+  // pre-auth flows (no session cookie yet), and CROW_CSRF_STRICT=0 rollback.
+  router.use("/dashboard", csrfMiddleware);
 
   // Normal mount (session-cookie-authenticated path)
   router.use("/dashboard", bundlesRouter);
