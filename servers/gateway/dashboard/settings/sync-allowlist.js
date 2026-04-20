@@ -21,7 +21,9 @@ export const SYNC_ALLOWLIST = {
   nav_panel_assignments:     "Panel-to-group assignments",
   "storage.shared.*":        "Shared MinIO / S3 object-store config (secrets sealed via secret-box)",
   unified_dashboard_enabled: "Unified multi-instance dashboard opt-in",
-  companion_wm_federation:   "Companion kiosk WM cross-instance app launching",
+  // companion_wm_federation removed — the kiosk button's federation is
+  // driven by real-time overview availability now, not a separate opt-in
+  // flag. Rollback to local-only kiosk is CROW_UNIFIED_DASHBOARD=0.
 };
 
 /**
