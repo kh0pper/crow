@@ -132,17 +132,18 @@ export function nestClientJS(lang) {
       if (!a) return;
       // ALWAYS preventDefault. Turbo has an aggressive document-level
       // click listener that sometimes swallows <a> clicks even when
-      // data-turbo="false" is set (the attribute is honored for
-      // fetch-request navs but native hash-only <a> handling still gets
-      // caught in certain build configs). Doing the full hash + scroll
-      // update imperatively is the only reliable path.
+      // data-turbo="false" is set — the imperative path is the reliable
+      // one.
       e.preventDefault();
       e.stopPropagation();
 
-      if (a.getAttribute('aria-disabled') === 'true') return;
       var id = a.getAttribute('data-instance-id');
       if (!id) return;
 
+      // Offline / aria-disabled tabs still scroll the carousel to their
+      // offline-placeholder section (where the Retry button lives). The
+      // visual "disabled" cue stays via CSS — only keyboard-Tab ordering
+      // skips the tab via tabindex=-1 (handled server-side).
       var newHash = id === 'local' ? '' : '#i/' + id;
       var newUrl = location.pathname + location.search + newHash;
       if (location.hash !== newHash) {
