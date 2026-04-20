@@ -444,6 +444,58 @@ export const headerIconsCss = `
     height: 100%;
     border: none;
   }
+  /* Close button — always above the iframe. If the iframe fails to load
+   * (companion host unreachable, refused-to-connect, CSP block) the user
+   * must still be able to exit without hunting for Escape. */
+  .kiosk-exit-btn {
+    position: absolute;
+    top: 0.75rem;
+    right: 0.75rem;
+    z-index: 10001;
+    display: none;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: 1px solid rgba(255,255,255,0.25);
+    background: rgba(0,0,0,0.6);
+    color: #fff;
+    cursor: pointer;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(4px);
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .kiosk-exit-btn:hover {
+    background: rgba(0,0,0,0.85);
+    border-color: rgba(255,255,255,0.5);
+  }
+  .kiosk-exit-btn:focus-visible {
+    outline: 2px solid var(--crow-accent);
+    outline-offset: 2px;
+  }
+  .kiosk-overlay.active .kiosk-exit-btn { display: flex; }
+  /* Inline error message replaces the iframe slot when load fails. */
+  .kiosk-error-msg {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-family: 'DM Sans', sans-serif;
+    text-align: center;
+    padding: 2rem;
+    gap: 1rem;
+  }
+  .kiosk-error-msg h3 { font-size: 1.2rem; margin: 0; }
+  .kiosk-error-msg p { margin: 0; opacity: 0.7; font-size: 0.9rem; max-width: 520px; }
+  .kiosk-error-msg button {
+    background: transparent; border: 1px solid rgba(255,255,255,0.4);
+    color: #fff; padding: 0.5rem 1.25rem; border-radius: 8px;
+    cursor: pointer; font-size: 0.85rem;
+  }
+  .kiosk-error-msg button:hover { background: rgba(255,255,255,0.1); }
   /* ─── Incoming Call Toast ─── */
   .crow-call-toast {
     position: fixed;
