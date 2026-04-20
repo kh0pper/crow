@@ -998,13 +998,80 @@
     return Object.keys(layouts);
   }
 
+  // ─── Federation registry (Phase 3) ───
+  // Populated from GET /dashboard/federation/companion-overview. When
+  // present, the WM can open apps hosted on any trusted paired instance.
+  // Absent when the endpoint returns 503 (companion not installed) or the
+  // fetch fails — in which case the WM silently falls back to local-only
+  // behavior. Refreshed every 60s.
+  var federation = {
+    local: { static: [], bundles: [] },
+    peers: {},
+    lastFetchedAt: 0,
+  };
+
+  function urlForPeerApp(instanceId, appId) {
+    var peer = federation.peers[instanceId];
+    if (!peer || peer.status !== "ok") return null;
+    var tile = null;
+    for (var i = 0; i < peer.tiles.length; i++) {
+      if (peer.tiles[i].id === appId) { tile = peer.tiles[i]; break; }
+    }
+    if (!tile || !tile.pathname) return null;
+    // Mirror the server-side build: https://<peer-host>[:port]<pathname>
+    var host = (peer.hostname || "").replace(/[^a-zA-Z0-9._-]/g, "");
+    if (!host) return null;
+    var portPart = tile.port ? ":" + tile.port : "";
+    return "https://" + host + portPart + tile.pathname;
+  }
+
+  function refreshFederation() {
+    fetch("/dashboard/federation/companion-overview", {
+      credentials: "same-origin",
+      headers: { "Accept": "application/json" },
+    }).then(function(r) {
+      if (!r.ok) return null; // 503 or other — stay local-only
+      return r.json();
+    }).then(function(data) {
+      if (!data) return;
+      federation.local = data.local || { static: [], bundles: [] };
+      federation.peers = data.peers || {};
+      federation.lastFetchedAt = Date.now();
+    }).catch(function() { /* silent — federation is opt-in, stay local */ });
+  }
+
+  // Fire first fetch on next tick so the rest of the WM bootstraps; retry
+  // every 60s. Bundles a peer installs after startup will show up on the
+  // next refresh (or kiosk reload).
+  setTimeout(refreshFederation, 0);
+  setInterval(refreshFederation, 60_000);
+
   // ─── WS Message Handler ───
   window.CrowWM = {
     store: store,
+    federation: federation,
+    urlForPeerApp: urlForPeerApp,
+    refreshFederation: refreshFederation,
     handleToolResult: function(msg) {
       if (!msg.content) return;
       var data;
       try { data = JSON.parse(msg.content); } catch(e) { return; }
+
+      // Phase 3: optional `instance` field on the tool payload. When set
+      // and not "local", rewrite the URL to target the named peer. The
+      // companion tool schema exposes this as an optional "instance"
+      // parameter documented in skills/companion.md.
+      var instanceId = data.instance && data.instance !== "local" ? data.instance : null;
+      if (instanceId && data.action === "open" && data.app) {
+        var peerUrl = urlForPeerApp(instanceId, data.app);
+        if (peerUrl) {
+          data.url = peerUrl;
+        } else if (!data.url) {
+          // Peer unknown / app unavailable on peer / federation not loaded
+          // yet. Silently fall back to local-host URL construction in the
+          // switch below; user-facing explanation is the companion's job.
+        }
+      }
 
       switch (data.action) {
         case "open":
