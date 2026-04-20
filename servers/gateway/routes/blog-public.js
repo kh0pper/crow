@@ -36,7 +36,7 @@ function getSiteUrl(req) {
 /**
  * Get blog settings from dashboard_settings table.
  */
-async function getBlogSettings(db) {
+export async function getBlogSettings(db) {
   const result = await db.execute({
     sql: "SELECT key, value FROM dashboard_settings WHERE key LIKE 'blog_%'",
     args: [],
@@ -301,7 +301,7 @@ function designCss(settings) {
 /**
  * HTML page shell.
  */
-function pageShell(settings, { title, content, ogMeta }) {
+export function pageShell(settings, { title, content, ogMeta }) {
   const effectiveMode = settings.themeBlogMode || settings.themeMode || "dark";
   const themeClass = [
     effectiveMode === "light" ? "theme-light" : "",

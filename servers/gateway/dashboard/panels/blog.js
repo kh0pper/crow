@@ -5,6 +5,8 @@
 import { escapeHtml, dataTable, section, formField, badge, actionBar, formatDate } from "../shared/components.js";
 import { ICON_DEPLOY } from "../shared/empty-state-icons.js";
 import { t, tJs } from "../shared/i18n.js";
+import { getBlogSettings, pageShell } from "../../routes/blog-public.js";
+import { renderMarkdown } from "../../../blog/renderer.js";
 
 export default {
   id: "blog",
@@ -38,8 +40,12 @@ export default {
       }
 
       if (action === "publish") {
+        // Publishing a private post promotes it to public. Private+published
+        // is almost always a trap: the post looks published in the list yet
+        // the public blog filter (status=published AND visibility=public)
+        // hides it. Posts explicitly set to "peers" keep that setting.
         await db.execute({
-          sql: "UPDATE blog_posts SET status = 'published', published_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
+          sql: "UPDATE blog_posts SET status = 'published', published_at = datetime('now'), updated_at = datetime('now'), visibility = CASE WHEN visibility = 'private' THEN 'public' ELSE visibility END WHERE id = ?",
           args: [req.body.id],
         });
         res.redirectAfterPost("/dashboard/blog");
@@ -87,7 +93,43 @@ export default {
       }
     }
 
-    // GET — show post list
+    // GET — show post list (or a draft preview)
+    // Preview renders a draft/private post exactly as it would appear on
+    // the public blog, so authors can review before publishing. Auth is
+    // already enforced by the dashboard middleware stack.
+    const previewId = req.query.preview;
+    if (previewId) {
+      const previewResult = await db.execute({
+        sql: "SELECT * FROM blog_posts WHERE id = ?",
+        args: [parseInt(previewId, 10)],
+      });
+      const post = previewResult.rows[0];
+      if (!post) {
+        return layout({ title: "Preview", content: `<div class="alert alert-error">Post not found</div>` });
+      }
+      const previewSettings = await getBlogSettings(db);
+      const postBody = renderMarkdown(post.content);
+      const previewTags = (post.tags || "").split(",").map((x) => x.trim()).filter(Boolean);
+      const previewTagsHtml = previewTags.length > 0
+        ? `<div class="tags" style="margin-top:0.5rem">${previewTags.map((x) => `<span>${escapeHtml(x)}</span>`).join(" ")}</div>`
+        : "";
+      const banner = `<div style="background:#fff3cd;border:1px solid #856404;border-radius:8px;padding:0.75rem 1rem;margin-bottom:1.5rem;color:#856404;font-weight:600">
+        Draft preview. Status: ${escapeHtml(post.status)}. Visibility: ${escapeHtml(post.visibility)}. This view is authenticated and not public.
+        <a href="/dashboard/blog?edit=${post.id}" style="margin-left:1rem">Edit</a>
+        <a href="/dashboard/blog" style="margin-left:0.75rem">Back to list</a>
+      </div>`;
+      const previewContent = `${banner}<article class="post-single">
+        <h1>${escapeHtml(post.title)}</h1>
+        <div class="meta">
+          <span class="date">${formatDate(post.published_at || post.created_at, lang)}</span>
+          ${previewTagsHtml}
+        </div>
+        <div class="body">${postBody}</div>
+      </article>`;
+      res.type("html").send(pageShell(previewSettings, { title: `${post.title} (preview)`, content: previewContent }));
+      return;
+    }
+
     // Check if editing a post
     let editPost = null;
     const editId = req.query.edit;
@@ -156,18 +198,22 @@ export default {
         const actions = p.status === "published"
           ? `<form method="POST" style="display:inline"><input type="hidden" name="action" value="unpublish"><input type="hidden" name="id" value="${p.id}"><button class="btn btn-sm btn-secondary" type="submit">${t("blog.unpublish", lang)}</button></form>`
           : `<form method="POST" style="display:inline"><input type="hidden" name="action" value="publish"><input type="hidden" name="id" value="${p.id}"><button class="btn btn-sm btn-primary" type="submit">${t("blog.publish", lang)}</button></form>`;
-        const editBtn = `<a href="?edit=${p.id}" class="btn btn-sm btn-secondary">${t("blog.edit", lang)}</a>`;
+        // data-turbo-frame="_top" breaks out of #blog-post-list; the edit
+        // form sits outside the frame and Turbo would otherwise only swap
+        // the list contents.
+        const editBtn = `<a href="?edit=${p.id}" data-turbo-frame="_top" class="btn btn-sm btn-secondary">${t("blog.edit", lang)}</a>`;
+        const previewBtn = `<a href="?preview=${p.id}" target="_blank" rel="noopener" data-turbo="false" class="btn btn-sm btn-secondary">Preview</a>`;
         const deleteBtn = `<form method="POST" style="display:inline;margin-left:0.25rem" onsubmit="return confirm('${tJs("blog.deleteConfirm", lang)}')"><input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="${p.id}"><button class="btn btn-sm btn-danger" type="submit">${t("blog.delete", lang)}</button></form>`;
 
         const thumb = p.cover_image_key
           ? `<img src="/blog/media/${escapeHtml(p.cover_image_key)}" style="width:40px;height:40px;object-fit:cover;border-radius:4px;vertical-align:middle;margin-right:0.5rem">`
           : "";
         return [
-          `${thumb}<a href="?edit=${p.id}" style="color:var(--crow-text-primary);text-decoration:none">${escapeHtml(p.title)}</a>`,
+          `${thumb}<a href="?edit=${p.id}" data-turbo-frame="_top" style="color:var(--crow-text-primary);text-decoration:none">${escapeHtml(p.title)}</a>`,
           `${statusBadge}${visBadge}`,
           `<span class="mono">${escapeHtml(p.slug)}</span>`,
           `<span class="mono">${formatDate(p.published_at || p.created_at, lang)}</span>`,
-          `${editBtn} ${actions} ${deleteBtn}`,
+          `${editBtn} ${previewBtn} ${actions} ${deleteBtn}`,
         ];
       });
       postTable = dataTable([t("blog.tableTitle", lang), t("blog.tableStatus", lang), t("blog.tableSlug", lang), t("blog.tableDate", lang), t("blog.tableActions", lang)], rows);
