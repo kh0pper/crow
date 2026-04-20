@@ -32,6 +32,7 @@
 
 import { forwardSignedRequest } from "../../shared/peer-forward.js";
 import { getOrCreateLocalInstanceId } from "../instance-registry.js";
+import bus from "../../shared/event-bus.js";
 
 const TTL_SUCCESS_MS = 30_000;
 const TTL_SCHEMA_VIOLATION_MS = 60_000;
@@ -229,11 +230,32 @@ export async function prefetchPeerOverviews(db, instanceIds, opts = {}) {
 
 /**
  * Synchronous cache-drop. Call after a trust/status mutation on a peer.
- * No-op when the peer isn't cached.
+ * No-op when the peer isn't cached. Drops ALL source namespaces for the
+ * instance id — a trust flip invalidates dashboard + companion + any
+ * future source consistently.
  */
-export function invalidatePeerCache(instanceId, { source = "dashboard" } = {}) {
-  _cache.delete(cacheKey(instanceId, source));
+export function invalidatePeerCache(instanceId, { source = null } = {}) {
+  if (source) {
+    _cache.delete(cacheKey(instanceId, source));
+    return;
+  }
+  // Drop all source-namespaced entries for this instance.
+  const prefix = `::${instanceId}`;
+  for (const key of _cache.keys()) {
+    if (key.endsWith(prefix)) _cache.delete(key);
+  }
 }
+
+// Subscribe to instance-registry trust/status mutations. Any change to
+// `trusted` or `status` invalidates the cache for that peer immediately,
+// closing the up-to-30s residual trust-revocation window that the TTL
+// alone leaves open. Wrapped in try/catch per bus subscriber discipline.
+bus.on("crow_instances:row_updated", (evt) => {
+  try {
+    if (!evt || !evt.id) return;
+    invalidatePeerCache(evt.id);
+  } catch { /* never let a listener error bubble back to the emit site */ }
+});
 
 /**
  * Test helper: wipe the cache. Not exported from the public surface, just

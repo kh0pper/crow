@@ -31,7 +31,8 @@
     "test:federation": "node --test tests/federation-overview.test.js",
     "test:overview-cache": "node --test tests/overview-cache.test.js",
     "test:federation-companion": "node --test tests/federation-companion.test.js",
-    "test:nest-xss": "node --test tests/nest-xss.test.js"
+    "test:nest-xss": "node --test tests/nest-xss.test.js",
+    "test:trust-gate": "node --test tests/peer-forward-trust-gate.test.js"
   },
   "dependencies": {
     "@libsql/client": "^0.14.0",

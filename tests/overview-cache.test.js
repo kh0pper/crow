@@ -198,3 +198,49 @@ test("overview-cache: prefetchPeerOverviews fetches in parallel", async () => {
   assert.equal(calls, 3);
   for (const r of results) assert.equal(r.status, "ok");
 });
+
+// ---------------------------------------------------------------------------
+// Event-bus invalidation (closes the trust-revocation window)
+// ---------------------------------------------------------------------------
+
+test("overview-cache: crow_instances:row_updated event invalidates cached peer", async () => {
+  let calls = 0;
+  _setFetchImpl(async () => { calls++; return okEnvelope(); });
+
+  await getPeerOverview(fakeDb, "peer-evt1");
+  assert.equal(calls, 1);
+
+  // Subscriber is module-level. Import the bus here to emit.
+  const { default: bus } = await import("../servers/shared/event-bus.js");
+  bus.emit("crow_instances:row_updated", { id: "peer-evt1", changed: ["trusted"], fields: { trusted: 0 } });
+
+  await getPeerOverview(fakeDb, "peer-evt1");
+  assert.equal(calls, 2, "event must force refetch");
+});
+
+test("overview-cache: bus emit for unrelated id does NOT invalidate other peers", async () => {
+  let calls = 0;
+  _setFetchImpl(async () => { calls++; return okEnvelope(); });
+
+  await getPeerOverview(fakeDb, "peer-evt2");
+  await getPeerOverview(fakeDb, "peer-evt3");
+  assert.equal(calls, 2);
+
+  const { default: bus } = await import("../servers/shared/event-bus.js");
+  bus.emit("crow_instances:row_updated", { id: "peer-evt2", changed: ["status"], fields: {} });
+
+  await getPeerOverview(fakeDb, "peer-evt2"); // cache dropped → refetch
+  await getPeerOverview(fakeDb, "peer-evt3"); // still cached
+  assert.equal(calls, 3, "only the evicted peer should refetch");
+});
+
+test("overview-cache: malformed event (missing id) is tolerated", async () => {
+  const { default: bus } = await import("../servers/shared/event-bus.js");
+  // Should NOT throw. Prior versions that bubbled subscriber errors would
+  // crash emit callers — this test is the canary.
+  assert.doesNotThrow(() => {
+    bus.emit("crow_instances:row_updated", {});
+    bus.emit("crow_instances:row_updated", null);
+    bus.emit("crow_instances:row_updated", { id: null });
+  });
+});
