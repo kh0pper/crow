@@ -224,7 +224,19 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
   ${turboHead()}
 </head>
 <body class="${themeClass}">
-  <div id="kiosk-overlay" class="kiosk-overlay"></div>
+  <div id="kiosk-overlay" class="kiosk-overlay">
+    <!-- Always-present close button so a broken/unreachable companion iframe
+         never strands the user with no way back to the dashboard. The iframe
+         is inserted AFTER this element so it can't cover it (z-index + right
+         alignment in CSS). Escape also still works when the OUTER document
+         has focus. -->
+    <button type="button" id="kiosk-exit-btn" class="kiosk-exit-btn" onclick="exitKioskMode()" title="Exit kiosk (Esc)">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="18" y1="6" x2="6" y2="18"/>
+        <line x1="6" y1="6" x2="18" y2="18"/>
+      </svg>
+    </button>
+  </div>
   <div class="dashboard">
     <aside class="sidebar">
       <div class="sidebar-header">
@@ -277,30 +289,64 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
         exitKioskMode();
         return;
       }
-      // Federated companion: the server's dashboard handler sets
-      // window.__crowCompanionUrl to either the local companion URL
-      // (if the bundle runs on this host) OR a trusted peer's URL (if
-      // it lives there instead). Falls back to local construction for
-      // legacy bookmarks of old session pages.
       var companionUrl = window.__crowCompanionUrl
         || ('https://' + location.hostname + ':12393/');
-      var iframe = document.createElement('iframe');
-      iframe.src = companionUrl;
-      iframe.setAttribute('allow', 'microphone; camera; autoplay; fullscreen');
-      iframe.setAttribute('allowfullscreen', '');
-      iframe.style.cssText = 'width:100%;height:100%;border:none';
-      overlay.appendChild(iframe);
+
       overlay.classList.add('active');
       fetch('/dashboard/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'action=set_kiosk&kiosk=true'
       });
+
+      var iframe = document.createElement('iframe');
+      iframe.src = companionUrl;
+      iframe.setAttribute('allow', 'microphone; camera; autoplay; fullscreen');
+      iframe.setAttribute('allowfullscreen', '');
+      iframe.style.cssText = 'width:100%;height:100%;border:none';
+
+      // Load-failure detection. Cross-origin iframes don't fire 'error' on
+      // HTTP failures — the browser blocks that channel. We use a 6-second
+      // timeout: if the iframe hasn't fired 'load' by then, the host is
+      // assumed unreachable and we replace the blank iframe with a visible
+      // error message. The kiosk-exit button is already in the DOM so the
+      // user can always get out, regardless of iframe state.
+      var loaded = false;
+      iframe.addEventListener('load', function() { loaded = true; });
+      overlay.appendChild(iframe);
+
+      setTimeout(function() {
+        if (loaded || !overlay.classList.contains('active')) return;
+        try { iframe.remove(); } catch (e) {}
+        var host;
+        try { host = new URL(companionUrl).host; } catch (e) { host = companionUrl; }
+        var err = document.createElement('div');
+        err.className = 'kiosk-error-msg';
+        var h3 = document.createElement('h3');
+        h3.textContent = 'Companion unreachable';
+        var p = document.createElement('p');
+        p.textContent = 'Tried to connect to ' + host + ' but got no response. ' +
+          'The companion container may be stopped or its port not open.';
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = 'Close';
+        btn.addEventListener('click', exitKioskMode);
+        err.appendChild(h3);
+        err.appendChild(p);
+        err.appendChild(btn);
+        overlay.appendChild(err);
+      }, 6000);
     }
     function exitKioskMode() {
       var overlay = document.getElementById('kiosk-overlay');
+      if (!overlay) return;
       overlay.classList.remove('active');
-      while (overlay.firstChild) overlay.removeChild(overlay.firstChild);
+      // Remove every child EXCEPT the exit button (it's a permanent escape
+      // hatch — teardown would leave the overlay unusable on re-entry).
+      var kids = Array.prototype.slice.call(overlay.children);
+      for (var i = 0; i < kids.length; i++) {
+        if (kids[i].id !== 'kiosk-exit-btn') overlay.removeChild(kids[i]);
+      }
       fetch('/dashboard/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
