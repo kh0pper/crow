@@ -45,24 +45,11 @@ import { readSetting, readSettings } from "./settings/registry.js";
 import { csrfMiddleware } from "./shared/csrf.js";
 import federationRouterFactory from "../routes/federation.js";
 import federationCompanionRouterFactory from "../routes/federation-companion.js";
+import federationResolveRouterFactory from "../routes/federation-resolve.js";
 import { getTrustedInstances } from "./panels/nest/data-queries.js";
 import { getPeerOverview } from "./overview-cache.js";
+import { resolveCompanionTarget } from "./companion-target.js";
 import { createDbClient } from "../../db.js";
-
-/** Check if companion bundle is installed and its container is running */
-function isCompanionAvailable() {
-  try {
-    const installedPath = resolve(homedir(), ".crow", "installed.json");
-    if (!existsSync(installedPath)) return false;
-    const installed = JSON.parse(readFileSync(installedPath, "utf-8"));
-    const list = Array.isArray(installed) ? installed : Object.values(installed);
-    if (!list.some(e => e.id === "companion")) return false;
-    const status = execFileSync("docker", ["ps", "--filter", "name=crow-companion", "--format", "{{.Status}}"], {
-      encoding: "utf-8", timeout: 3000,
-    }).trim();
-    return status.toLowerCase().startsWith("up");
-  } catch { return false; }
-}
 
 // Import built-in panels
 import messagesPanel from "./panels/messages.js";
@@ -476,9 +463,12 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // Federation companion router (Phase 3) — session-authed, under dashboard
   // auth. Mounted AFTER dashboardAuth so session cookies are validated.
   // /dashboard/federation/companion-overview → merged local+peer WM registry.
+  // /dashboard/federation/resolve-instance  → name-to-id resolver for AI.
   if (federationEnabled) {
     const federationCompanionRouter = federationCompanionRouterFactory({ createDbClient });
+    const federationResolveRouter = federationResolveRouterFactory({ createDbClient });
     router.use("/dashboard", federationCompanionRouter);
+    router.use("/dashboard", federationResolveRouter);
   }
 
   // Normal mount (session-cookie-authenticated path)
@@ -587,10 +577,28 @@ export default function dashboardRouter(mcpAuthMiddleware) {
       const tamaEnabled = tamaVal !== "false";
       lang = langVal || "en";
 
-      const companionAvailable = isCompanionAvailable();
+      // Companion target resolution — checks LOCAL first (bundle installed
+      // + docker up), falls back to any TRUSTED PEER whose cached overview
+      // includes a companion tile. If any path succeeds, the header icon
+      // renders and clicking it launches the companion iframe at whichever
+      // host the resolver picked. This lets a kiosk running on grackle
+      // open the companion hosted on crow (or vice versa) without the
+      // user having to know where it lives.
+      const companionTarget = await resolveCompanionTarget({ db, origin: req.headers.host });
+      const companionAvailable = companionTarget.available;
       const headerOpts = { companionAvailable };
       const activeHeaderHtml = tamaEnabled ? tamagotchiHtml(lang, headerOpts) : headerIconsHtml(lang, headerOpts);
       const activeHeaderJs = tamaEnabled ? tamagotchiJs(lang) : headerIconsJs(lang);
+
+      // Expose the resolved URL to the kiosk-toggle inline JS. The layout
+      // reads window.__crowCompanionUrl; if the host isn't "local" we also
+      // pass the host name for aria/title text. Stringified safely — URL
+      // is already constructed server-side from validated gateway_url.
+      const companionConfigJs = `<script>
+        window.__crowCompanionUrl = ${JSON.stringify(companionTarget.url || "")};
+        window.__crowCompanionHost = ${JSON.stringify(companionTarget.host || "")};
+        window.__crowCompanionHostName = ${JSON.stringify(companionTarget.name || "")};
+      </script>`;
 
       // Auto-restore kiosk mode if it was active
       let kioskAutoStart = "";
@@ -614,7 +622,11 @@ export default function dashboardRouter(mcpAuthMiddleware) {
           serif,
           lang,
           headerIcons: activeHeaderHtml,
-          afterContent: playerBarHtml(lang),
+          // companionConfigJs sets window.__crowCompanionUrl before any
+          // kiosk-button click can fire. Placing it in afterContent puts
+          // it inside <body>, ensuring globals are set even for a user
+          // who clicks before the layout's inline scripts run.
+          afterContent: companionConfigJs + playerBarHtml(lang),
           scripts: (opts.scripts || "") + playerBarJs(lang) + activeHeaderJs + kioskAutoStart,
         }),
       });
