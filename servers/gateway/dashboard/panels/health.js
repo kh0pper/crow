@@ -8,7 +8,9 @@
 import { nestCSS } from "./nest/css.js";
 import { buildNestHTML } from "./nest/html.js";
 import { nestClientJS } from "./nest/client.js";
-import { getNestData } from "./nest/data-queries.js";
+import { getNestData, getTrustedInstances } from "./nest/data-queries.js";
+import { getPeerOverview } from "../overview-cache.js";
+import { readSetting } from "../settings/registry.js";
 import { t } from "../shared/i18n.js";
 
 /**
@@ -76,18 +78,59 @@ export default {
       }
     }
 
-    // If the /dashboard wrapper stashed unified data, thread it through to
-    // the nest data query + renderer. Otherwise the single-instance code
-    // path is unchanged.
-    const nestOpts = req._crowNest || {};
+    // Resolve unified-dashboard opts. Two entry paths lead here:
+    //   1. /dashboard  → wrapper in dashboard/index.js prefetches + stashes
+    //      req._crowNest and reroutes. We inherit that data.
+    //   2. /dashboard/nest  → direct nav (bookmarks, cross-instance links).
+    //      The wrapper didn't run; we must fetch here ourselves.
+    // Falling through to branch 2 is the common case on an already-running
+    // deployment — /dashboard/nest is the typical bookmark target.
+    let nestOpts = req._crowNest;
+    if (!nestOpts) {
+      const unifiedEnvOn = process.env.CROW_UNIFIED_DASHBOARD !== "0";
+      const setting = await readSetting(db, "unified_dashboard_enabled");
+      const unifiedOn = unifiedEnvOn && setting !== "false";
+      nestOpts = { unifiedOn, trustedInstances: [], peerOverviews: [] };
+      if (unifiedOn) {
+        try {
+          const trusted = await getTrustedInstances(db);
+          if (trusted.length > 0) {
+            const budget = new Promise((r) => setTimeout(() => r("__budget__"), 1500));
+            const fan = Promise.allSettled(trusted.map(i => getPeerOverview(db, i.id)));
+            const settled = await Promise.race([fan, budget]);
+            const peerOverviews = Array.isArray(settled)
+              ? settled.map((s, i) => s.status === "fulfilled" ? s.value : {
+                  instanceId: trusted[i].id,
+                  status: "unavailable",
+                  reason: s.reason?.message || "rejected",
+                  tiles: [],
+                })
+              : trusted.map(i => ({
+                  instanceId: i.id,
+                  status: "unavailable",
+                  reason: "budget_exceeded",
+                  tiles: [],
+                }));
+            nestOpts.trustedInstances = trusted;
+            nestOpts.peerOverviews = peerOverviews;
+          }
+        } catch (err) {
+          console.warn("[nest] unified fetch failed, falling back to single-instance:", err.message);
+        }
+      }
+    }
+
     const data = await getNestData(db, lang, nestOpts);
     const css = nestCSS();
     const html = buildNestHTML(data, lang);
     const js = nestClientJS(lang);
     const content = css + html + js;
 
-    // Build instance tabs strip data for the layout when unified is on.
-    const instanceTabs = nestOpts.unifiedOn && Array.isArray(nestOpts.trustedInstances)
+    // Build instance tabs strip data for the layout when unified is on AND
+    // at least one trusted peer exists. Otherwise strip stays hidden via
+    // body.unified-off CSS.
+    const hasTrustedPeers = Array.isArray(nestOpts.trustedInstances) && nestOpts.trustedInstances.length > 0;
+    const instanceTabs = nestOpts.unifiedOn && hasTrustedPeers
       ? buildInstanceTabs(nestOpts.trustedInstances, nestOpts.peerOverviews || [])
       : null;
 
