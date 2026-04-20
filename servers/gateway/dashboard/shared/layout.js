@@ -303,6 +303,80 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
           window.location.href = url || '/dashboard/login';
         }
       });
+
+      // CSRF double-submit: attach the crow_csrf cookie value as
+      // X-Crow-Csrf on every state-changing same-origin request.
+      //   - Turbo form submissions: turbo:submit-start hook.
+      //   - Turbo.visit / link prefetch: turbo:before-fetch-request hook.
+      //   - Raw window.fetch() from panel code: wrapped below.
+      //   - Classic <form data-turbo="false"> submissions: carry a server-
+      //     rendered <input name="_csrf"> via csrfInput().
+      function readCookie(name) {
+        var cookies = document.cookie.split(';');
+        for (var i = 0; i < cookies.length; i++) {
+          var p = cookies[i].trim().split('=');
+          if (p[0] === name) return decodeURIComponent(p.slice(1).join('='));
+        }
+        return '';
+      }
+      document.addEventListener('turbo:submit-start', function(event) {
+        var token = readCookie('crow_csrf');
+        if (!token) return;
+        var fetchReq = event.detail && event.detail.formSubmission &&
+                       event.detail.formSubmission.fetchRequest;
+        if (fetchReq && fetchReq.headers) {
+          fetchReq.headers['X-Crow-Csrf'] = token;
+        }
+      });
+      document.addEventListener('turbo:before-fetch-request', function(event) {
+        var token = readCookie('crow_csrf');
+        if (!token) return;
+        var method = (event.detail && event.detail.fetchOptions && event.detail.fetchOptions.method || '').toUpperCase();
+        if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS' || method === '') return;
+        var headers = event.detail.fetchOptions.headers;
+        if (headers) {
+          if (typeof headers.set === 'function') headers.set('X-Crow-Csrf', token);
+          else headers['X-Crow-Csrf'] = token;
+        }
+      });
+
+      // Wrap window.fetch so raw fetch() POST/PUT/DELETE/PATCH calls also
+      // carry the CSRF header. Same-origin only (never leak token to
+      // third-party origins). Idempotent: guarded by a flag so repeated
+      // layout inclusions (Turbo page navs) don't double-wrap.
+      if (!window.__crowFetchWrapped) {
+        window.__crowFetchWrapped = true;
+        var origFetch = window.fetch.bind(window);
+        window.fetch = function(input, init) {
+          try {
+            var token = readCookie('crow_csrf');
+            if (!token) return origFetch(input, init);
+            var url = typeof input === 'string' ? input : (input && input.url) || '';
+            var method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+            if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+              return origFetch(input, init);
+            }
+            // Same-origin check: relative URL (starts with '/') OR matches current origin.
+            var sameOrigin = false;
+            if (url.charAt(0) === '/' && !url.startsWith('//')) {
+              sameOrigin = true;
+            } else {
+              try {
+                var u = new URL(url, window.location.href);
+                sameOrigin = (u.origin === window.location.origin);
+              } catch (e) { sameOrigin = false; }
+            }
+            if (!sameOrigin) return origFetch(input, init);
+            var newInit = Object.assign({}, init || {});
+            var hdrs = new Headers(newInit.headers || (typeof input !== 'string' ? input.headers : undefined) || {});
+            if (!hdrs.has('X-Crow-Csrf')) hdrs.set('X-Crow-Csrf', token);
+            newInit.headers = hdrs;
+            return origFetch(input, newInit);
+          } catch (err) {
+            return origFetch(input, init);
+          }
+        };
+      }
     }
 
     function toggleSidebar() {
