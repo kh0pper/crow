@@ -40,7 +40,10 @@ const MAX_RESPONSE_BYTES = 64 * 1024;
 const FETCH_TIMEOUT_MS = 2_000;
 
 const ID_REGEX = /^[a-z][a-z0-9_-]{0,63}$/;
-const PATHNAME_REGEX = /^\/[a-zA-Z0-9_\-./]+$/;
+// Pathname must start with / and contain only URL-safe chars. The trailing
+// `*` (not `+`) means bare `/` is valid — bundles with webUI.path="/" (the
+// common case) emit `pathname: "/"` and we must accept it.
+const PATHNAME_REGEX = /^\/[a-zA-Z0-9_\-./]*$/;
 const CATEGORY_ENUM = new Set(["local-panel", "bundle", "instance"]);
 
 // Icon key allowlist. Must match keys advertised by panels/nest/html.js. We

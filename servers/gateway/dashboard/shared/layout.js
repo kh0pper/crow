@@ -277,7 +277,13 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
         exitKioskMode();
         return;
       }
-      var companionUrl = 'https://' + location.hostname + ':12393/';
+      // Federated companion: the server's dashboard handler sets
+      // window.__crowCompanionUrl to either the local companion URL
+      // (if the bundle runs on this host) OR a trusted peer's URL (if
+      // it lives there instead). Falls back to local construction for
+      // legacy bookmarks of old session pages.
+      var companionUrl = window.__crowCompanionUrl
+        || ('https://' + location.hostname + ':12393/');
       var iframe = document.createElement('iframe');
       iframe.src = companionUrl;
       iframe.setAttribute('allow', 'microphone; camera; autoplay; fullscreen');
