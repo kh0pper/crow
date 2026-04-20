@@ -76,8 +76,62 @@ function getAddonIcon(iconKey) {
   return ADDON_ICON_MAP[iconKey] || null;
 }
 
+// Icon allowlist for peer-advertised tiles. Composed from the three icon
+// maps in this file so there's exactly one place to audit which icon keys
+// are renderable. Unknown icon keys from peer responses fall back to
+// "default" via `resolvePeerIcon()`. Matches the allowlist in
+// servers/gateway/dashboard/overview-cache.js.
+const ICON_ALLOWLIST = new Set([
+  ...Object.keys(TILE_ICONS),
+  ...Object.keys(PANEL_ICON_MAP),
+  ...Object.keys(ADDON_ICON_MAP),
+]);
+
+function resolvePeerIcon(iconKey) {
+  if (typeof iconKey !== "string" || !ICON_ALLOWLIST.has(iconKey)) return TILE_ICONS.default;
+  // iconKey may map through any of the three tables; try tile → panel-map → addon-map
+  if (TILE_ICONS[iconKey]) return TILE_ICONS[iconKey];
+  const panelKey = PANEL_ICON_MAP[iconKey];
+  if (panelKey && TILE_ICONS[panelKey]) return TILE_ICONS[panelKey];
+  const addonSvg = ADDON_ICON_MAP[iconKey];
+  if (addonSvg) return addonSvg;
+  return TILE_ICONS.default;
+}
+
+/**
+ * Disambiguate colliding peer names by appending a short hostname suffix.
+ * Two peers both named "crow" → "crow (grackle-a)" and "crow (node-b21)".
+ */
+function disambiguatePeerNames(peerOverviews, trustedInstances) {
+  const nameCounts = new Map();
+  for (const p of peerOverviews) {
+    const n = p?.instance?.name || "peer";
+    nameCounts.set(n, (nameCounts.get(n) || 0) + 1);
+  }
+  return peerOverviews.map((p, i) => {
+    const name = p?.instance?.name || trustedInstances[i]?.name || "peer";
+    if (nameCounts.get(name) <= 1) return { ...p, displayName: name };
+    const hostname = p?.instance?.hostname || trustedInstances[i]?.hostname || "";
+    const suffix = hostname.split(".")[0].slice(0, 8);
+    return { ...p, displayName: suffix ? `${name} (${suffix})` : name };
+  });
+}
+
+function buildPeerTileHref(hostname, pathname, port) {
+  // NEVER trust a peer-supplied URL. Build server-side from the LOCAL
+  // crow_instances.hostname + the pathname that already passed regex
+  // validation in overview-cache.js. Hostname is escaped as a URL
+  // component (not HTML) — we trust it's tailnet-shaped since it comes
+  // from our own DB row, but fall back gracefully.
+  const safeHost = String(hostname || "").replace(/[^a-zA-Z0-9._-]/g, "");
+  if (!safeHost) return null;
+  const portPart = port && Number.isInteger(port) ? `:${port}` : "";
+  return `https://${safeHost}${portPart}${pathname}`;
+}
+
 export function buildNestHTML(data, lang) {
-  const { pinnedItems, bundles, instances } = data;
+  const { pinnedItems, bundles, instances, trustedInstances, peerOverviews } = data;
+  const carouselMode = Array.isArray(peerOverviews) && peerOverviews.length > 0;
 
   let tileIndex = 0;
 
@@ -181,6 +235,73 @@ export function buildNestHTML(data, lang) {
   const gridHtml = `<div class="nest-grid">
     ${panelTiles}${bundleTiles}
   </div>`;
+
+  // --- Unified carousel (Phase 2) ---
+  // Active when the handler wrapper has passed peer overviews. One
+  // `<section>` per trusted peer + one for the local instance (the local
+  // section is the existing panel/bundle grid above, wrapped). Remote tiles
+  // are absolute cross-origin links to the peer's own hostname — no
+  // fragment-embedding, no POST-forwarding.
+  if (carouselMode) {
+    const disambiguated = disambiguatePeerNames(peerOverviews, trustedInstances || []);
+
+    const sections = [];
+    // Local section first.
+    sections.push(
+      `<section class="nest-instance-section" data-instance="local" role="tabpanel" aria-labelledby="crow-instance-tab-local">
+        ${instancesHtml}${gridHtml}
+      </section>`
+    );
+
+    for (let i = 0; i < disambiguated.length; i++) {
+      const peer = disambiguated[i];
+      const ti = trustedInstances?.[i] || {};
+      const sectionId = escapeHtml(ti.id || `peer-${i}`);
+      const displayName = escapeHtml(peer.displayName || ti.name || "peer");
+
+      if (peer.status !== "ok") {
+        const lastSeen = ti.last_seen_at
+          ? new Date(ti.last_seen_at).toLocaleString(lang === "es" ? "es-ES" : "en-US")
+          : null;
+        const msg = lastSeen
+          ? `${t("nest.offlineSince", lang) || "offline since"} ${escapeHtml(lastSeen)}`
+          : (t("nest.offline", lang) || "offline");
+        sections.push(
+          `<section class="nest-instance-section nest-instance-section--offline" data-instance="${sectionId}" role="tabpanel" aria-labelledby="crow-instance-tab-${sectionId}">
+            <div class="nest-section-label" style="padding:0.5rem 1rem 0;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;color:var(--crow-text-muted);font-weight:600">${displayName}</div>
+            <div class="nest-instance-offline">
+              <p>${msg}</p>
+              <button type="button" class="nest-instance-retry" data-instance-id="${sectionId}">${escapeHtml(t("nest.retry", lang) || "Retry")}</button>
+            </div>
+          </section>`
+        );
+        continue;
+      }
+
+      const peerHostname = ti.hostname || peer.instance?.hostname || "";
+      const peerTiles = peer.tiles.map(tile => {
+        const href = buildPeerTileHref(peerHostname, tile.pathname, tile.port);
+        if (!href) return "";
+        const icon = resolvePeerIcon(tile.icon);
+        const klass = tile.category === "bundle" ? "nest-app nest-app--bundle" : "nest-app nest-app--panel";
+        const delay = tileIndex++ * 40;
+        return `<a href="${escapeHtml(href)}" class="${klass}" target="_blank" rel="noopener noreferrer" style="animation-delay:${delay}ms">
+          <div class="nest-app-icon">${icon}</div>
+          <div class="nest-app-label">${escapeHtml(tile.name)}</div>
+        </a>`;
+      }).join("");
+
+      sections.push(
+        `<section class="nest-instance-section" data-instance="${sectionId}" role="tabpanel" aria-labelledby="crow-instance-tab-${sectionId}">
+          <div class="nest-section-label" style="padding:0.5rem 1rem 0;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;color:var(--crow-text-muted);font-weight:600">${displayName}</div>
+          <div class="nest-grid">${peerTiles}</div>
+        </section>`
+      );
+    }
+
+    const carousel = `<div class="nest-instance-carousel" role="region" aria-live="polite">${sections.join("")}</div>`;
+    return `${welcomeHtml}${pinnedHtml}${carousel}`;
+  }
 
   return `${welcomeHtml}${pinnedHtml}${instancesHtml}${gridHtml}`;
 }

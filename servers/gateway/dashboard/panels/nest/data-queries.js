@@ -28,7 +28,22 @@ function getBundleDockerStatus(bundleId) {
   return status;
 }
 
-export async function getNestData(db, lang) {
+/**
+ * Fetch all data the nest panel needs to render.
+ *
+ * @param {object} db    libsql client
+ * @param {string} lang  user language
+ * @param {object} [opts] Optional — unified-dashboard extensions (Phase 2)
+ * @param {Array<object>} [opts.trustedInstances] Trusted peers (trusted=1,
+ *   status IN ('active','offline')), ORDER BY is_home DESC, name ASC. When
+ *   present and non-empty, the renderer builds the per-instance carousel.
+ * @param {Array<object>} [opts.peerOverviews] Overview envelopes from
+ *   `overview-cache.js::getPeerOverview` — one per trusted peer, in the
+ *   same order as `trustedInstances`. Each entry is either a success
+ *   `{status: "ok", instance, tiles, ...}` or a sentinel
+ *   `{status: "unavailable", reason}`.
+ */
+export async function getNestData(db, lang, opts = {}) {
   // Pinned items
   let pinnedItems = [];
   try {
@@ -154,5 +169,33 @@ export async function getNestData(db, lang) {
     instances = rows;
   } catch {}
 
-  return { pinnedItems, bundles, dockerInfo, dbStats, recentChats, recentSessions, instances };
+  // Unified-dashboard (Phase 2) extensions. Handler wrapper fetches peer
+  // overviews in parallel upstream; we just thread them through. The
+  // `instances` field (legacy) stays untouched for the non-unified path.
+  const trustedInstances = Array.isArray(opts.trustedInstances) ? opts.trustedInstances : [];
+  const peerOverviews = Array.isArray(opts.peerOverviews) ? opts.peerOverviews : [];
+
+  return {
+    pinnedItems, bundles, dockerInfo, dbStats, recentChats, recentSessions, instances,
+    trustedInstances, peerOverviews,
+  };
+}
+
+/**
+ * Query trusted paired instances. Used by the handler wrapper in
+ * dashboard/index.js to drive the Phase 2 carousel. Kept separate from the
+ * legacy `instances` query so single-instance behavior remains untouched.
+ *
+ * Filter: `trusted = 1 AND status IN ('active','offline')`. Revoked or
+ * untrusted rows never surface, independent of overview-cache behavior.
+ */
+export async function getTrustedInstances(db) {
+  try {
+    const { rows } = await db.execute(
+      "SELECT * FROM crow_instances WHERE trusted = 1 AND status IN ('active','offline') ORDER BY is_home DESC, name ASC"
+    );
+    return rows;
+  } catch {
+    return [];
+  }
 }
