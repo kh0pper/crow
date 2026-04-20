@@ -37,6 +37,7 @@ import passwordSection from "../settings/sections/password.js";
 import twoFactorSection from "../settings/sections/two-factor.js";
 import navGroupsSection from "../settings/sections/nav-groups.js";
 import llmSection from "../settings/sections/llm.js";
+import unifiedDashboardSection from "../settings/sections/unified-dashboard.js";
 // NOTE: ai-provider.js + providers.js deleted; their responsibilities are
 // absorbed by llmSection.providers-tab (cloud add + registry view). The
 // four remaining profile sections (ai-profiles, tts-profiles, stt-profiles,
@@ -50,6 +51,7 @@ registerSettingsSection(themeSection);
 registerSettingsSection(languageSection);
 registerSettingsSection(llmSection);
 registerSettingsSection(notificationsSection);
+registerSettingsSection(unifiedDashboardSection);
 registerSettingsSection(pairedInstancesSection);
 registerSettingsSection(syncProfilesSection);
 registerSettingsSection(sharedStorageSection);
