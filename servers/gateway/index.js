@@ -57,6 +57,7 @@ import express from "express";
 import rateLimit from "express-rate-limit";
 import cors from "cors";
 import { crowdsecMiddleware } from "./middleware/crowdsec.js";
+import { rejectFunneledMiddleware } from "./funnel.js";
 
 import { createMemoryServer } from "../memory/server.js";
 import { createProjectServer } from "../research/server.js";
@@ -244,20 +245,10 @@ app.use(async (req, res, next) => {
 // and intentionally NOT in PUBLIC_FUNNEL_PREFIXES. Adding any /dashboard
 // prefix here would expose all stream-emitted data (unread counts,
 // media state, orchestrator events) to the public internet.
-const PUBLIC_FUNNEL_PREFIXES = [
-  "/blog",
-  "/robots.txt",
-  "/sitemap.xml",
-  "/.well-known/",
-  "/favicon.ico",
-  "/manifest.json",
-];
-app.use((req, res, next) => {
-  if (!req.headers["tailscale-funnel-request"]) return next();
-  if (process.env.CROW_DASHBOARD_PUBLIC === "true") return next();
-  if (PUBLIC_FUNNEL_PREFIXES.some((p) => req.path === p || req.path.startsWith(p))) return next();
-  res.status(403).type("text/plain").send("Forbidden: private path not reachable via Tailscale Funnel.");
-});
+// Allowlist + middleware live in ./funnel.js so tests can import
+// PUBLIC_FUNNEL_PREFIXES and assert new routes never slip into the public
+// surface by accident.
+app.use(rejectFunneledMiddleware());
 
 // PR 0: CrowdSec gateway-middleware bouncer (no-op when CROW_CROWDSEC_BOUNCER_KEY is unset).
 // Mounted after security headers, before CORS/rate-limit so banned IPs get a fast 403
