@@ -508,6 +508,41 @@ export function createMemoryServer(dbPath, options = {}) {
   );
 
   server.tool(
+    "crow_get_memory",
+    "Fetch a single memory by ID. Returns a compact JSON blob with id, content, category, importance, tags, and timestamps. Used by the dashboard's federated memory view so primary can render a memory that lives on a paired instance.",
+    {
+      id: z.number().describe("Memory ID"),
+    },
+    async ({ id }) => {
+      const { rows } = await db.execute({
+        sql: "SELECT id, content, category, importance, tags, source, created_at, updated_at, accessed_at, access_count, context, instance_id, project_id FROM memories WHERE id = ?",
+        args: [id],
+      });
+      if (rows.length === 0) {
+        return { content: [{ type: "text", text: `{"error":"not_found","id":${id}}` }] };
+      }
+      const r = rows[0];
+      // Serialize numeric fields explicitly — libsql may return BigInt for INTEGER columns.
+      const payload = {
+        id: Number(r.id),
+        content: r.content,
+        category: r.category,
+        importance: Number(r.importance),
+        tags: r.tags,
+        source: r.source,
+        context: r.context,
+        instance_id: r.instance_id,
+        project_id: r.project_id != null ? Number(r.project_id) : null,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+        accessed_at: r.accessed_at,
+        access_count: Number(r.access_count || 0),
+      };
+      return { content: [{ type: "text", text: JSON.stringify(payload) }] };
+    }
+  );
+
+  server.tool(
     "crow_list_memories",
     "List memories with optional filtering by category, tags, or importance. Good for browsing what's stored.",
     {

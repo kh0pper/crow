@@ -51,6 +51,7 @@ export async function registerInstance(db, {
   name,
   crowId,
   directory,
+  dataDir,
   hostname,
   tailscaleIp,
   gatewayUrl,
@@ -68,13 +69,19 @@ export async function registerInstance(db, {
     });
   }
 
+  // data_dir stores CROW_DATA_DIR so same-host peers (e.g. primary + MPA
+  // on the same grackle filesystem) can read each other's DB files
+  // directly rather than going through MCP federation. MCP reads on MPA
+  // are blocked by a chronic libsql WAL wedge (Day 1 gotcha) — direct
+  // SQL from a fresh libsql client sidesteps the wedge cleanly.
   await db.execute({
-    sql: `INSERT INTO crow_instances (id, name, crow_id, directory, hostname, tailscale_ip, gateway_url, sync_url, sync_profile, topics, is_home, auth_token_hash, last_seen_at, status)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 'active')
+    sql: `INSERT INTO crow_instances (id, name, crow_id, directory, data_dir, hostname, tailscale_ip, gateway_url, sync_url, sync_profile, topics, is_home, auth_token_hash, last_seen_at, status)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 'active')
           ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             crow_id = excluded.crow_id,
             directory = excluded.directory,
+            data_dir = COALESCE(excluded.data_dir, crow_instances.data_dir),
             hostname = excluded.hostname,
             tailscale_ip = excluded.tailscale_ip,
             gateway_url = excluded.gateway_url,
@@ -87,7 +94,7 @@ export async function registerInstance(db, {
             status = 'active',
             updated_at = datetime('now')`,
     args: [
-      id, name, crowId, directory || null, hostname || null,
+      id, name, crowId, directory || null, dataDir || null, hostname || null,
       tailscaleIp || null, gatewayUrl || null, syncUrl || null,
       syncProfile, topics || null, isHome ? 1 : 0, authTokenHash || null,
     ],
@@ -370,12 +377,17 @@ export async function ensureLocalInstanceRegistered(db, { crowId, gatewayUrl, na
   const hn = osHostname();
   const cwd = process.cwd();
   const instanceName = name || `${hn}:${cwd}`;
+  // Prefer CROW_DATA_DIR (the directory that actually holds crow.db) over
+  // cwd so same-host peers can find this instance's DB file without
+  // guessing.
+  const dataDir = process.env.CROW_DATA_DIR || null;
 
   await registerInstance(db, {
     id: instanceId,
     name: instanceName,
     crowId: crowId || "unknown",
     directory: cwd,
+    dataDir,
     hostname: hn,
     gatewayUrl: gatewayUrl || null,
   });

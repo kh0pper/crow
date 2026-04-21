@@ -207,11 +207,36 @@ export function mountMcpServer(router, prefix, createServer, sessionManager, aut
   };
 
   if (authMiddleware) {
-    router.post(mcpPath, authMiddleware, toolTrackMiddleware, handlers.postHandler);
-    router.get(mcpPath, authMiddleware, handlers.getHandler);
-    router.delete(mcpPath, authMiddleware, handlers.deleteHandler);
-    router.get(ssePath, authMiddleware, sseHandlers.sseHandler);
-    router.post(messagesPath, authMiddleware, sseHandlers.messagesHandler);
+    // Skip OAuth when the request has already been authenticated as a
+    // paired Crow instance (instanceAuthMiddleware at index.js ran before
+    // us and set req.instanceAuth). Without this bypass, federated MCP
+    // calls from paired instances were failing: the peer bearer token
+    // passes the instance check but isn't recognised by OAuth's verifier,
+    // so OAuth would reject the request with 401 despite it being a
+    // trusted peer.
+    //
+    // We synthesize a req.auth compatible with what requireBearerAuth
+    // would have set — downstream MCP handlers (tool executor, session
+    // manager) read fields off req.auth and error out with a generic 500
+    // "Internal Server Error" when it's missing. Using the paired
+    // instance's id as clientId keeps audit trails meaningful.
+    const skipAuthForInstance = (req, res, next) => {
+      if (req.instanceAuth?.instance) {
+        req.auth = {
+          token: "peer-instance",
+          clientId: `instance:${req.instanceAuth.instance.id}`,
+          scopes: ["mcp:tools"],
+          expiresAt: Math.floor(Date.now() / 1000) + 300,
+        };
+        return next();
+      }
+      return authMiddleware(req, res, next);
+    };
+    router.post(mcpPath, skipAuthForInstance, toolTrackMiddleware, handlers.postHandler);
+    router.get(mcpPath, skipAuthForInstance, handlers.getHandler);
+    router.delete(mcpPath, skipAuthForInstance, handlers.deleteHandler);
+    router.get(ssePath, skipAuthForInstance, sseHandlers.sseHandler);
+    router.post(messagesPath, skipAuthForInstance, sseHandlers.messagesHandler);
   } else {
     router.post(mcpPath, toolTrackMiddleware, handlers.postHandler);
     router.get(mcpPath, handlers.getHandler);
