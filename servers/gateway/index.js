@@ -705,6 +705,18 @@ try {
   const { default: songbookRouter } = await import("./routes/songbook.js");
   app.use(songbookRouter());
 
+  // Blog embed API (public, read-only, hydrates case-study figures).
+  // MUST mount BEFORE blogPublicRouter — /blog/api/* and /blog/figures/*
+  // would otherwise collide with blog-public.js's /blog/:slug catch-all.
+  // blog-public.js also has a defensive slug guard for this.
+  try {
+    const { blogEmbedApiRouter } = await import("./routes/blog-embed-api.js");
+    app.use(blogEmbedApiRouter());
+    console.log("Blog embed API mounted at /blog/api/* and /blog/figures/*");
+  } catch (embedErr) {
+    console.warn("[blog-embed-api] Failed to mount:", embedErr.message);
+  }
+
   // Public blog routes (no auth)
   const { default: blogPublicRouter } = await import("./routes/blog-public.js");
   app.use(blogPublicRouter());
@@ -781,6 +793,28 @@ try {
   // Knowledge Base bundle not installed — skip silently
   if (err.code !== "ERR_MODULE_NOT_FOUND") {
     console.warn("[knowledge-base] Failed to mount public routes:", err.message);
+  }
+}
+
+// Mount tea-maps public routes (capstone choropleth bundle; no auth required)
+try {
+  const { existsSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { pathToFileURL } = await import("node:url");
+  const { homedir } = await import("node:os");
+  const installed = join(homedir(), ".crow", "bundles", "tea-maps", "routes", "tea-maps-public.js");
+  const repo = join(import.meta.dirname, "../../bundles/tea-maps/routes/tea-maps-public.js");
+  const routesPath = existsSync(installed) ? installed : repo;
+  if (existsSync(routesPath)) {
+    const { teaMapsRouter } = await import(pathToFileURL(routesPath).href);
+    if (teaMapsRouter) {
+      app.use(teaMapsRouter(createDbClient));
+      console.log("tea-maps public routes mounted at /bundles/tea-maps/*");
+    }
+  }
+} catch (err) {
+  if (err.code !== "ERR_MODULE_NOT_FOUND") {
+    console.warn("[tea-maps] Failed to mount public routes:", err.message);
   }
 }
 
@@ -1240,10 +1274,18 @@ const server = app.listen(PORT, "0.0.0.0", (error) => {
     console.error("[proxy] Failed to initialize:", err.message);
   });
 
-  // Probe and connect to remote Crow instances (federation)
-  loadRemoteInstances().catch((err) => {
+  // Probe and connect to remote Crow instances (federation). Run once at
+  // startup, then every 60s — the re-probe refreshes each instance's
+  // `last_seen_at` and heals stale-session cases after a peer restarts
+  // (cached mcp-session-id becomes invalid on the other side). For
+  // already-connected instances loadRemoteInstances is effectively a
+  // no-op (the status='connected' guard in the loop short-circuits it),
+  // so re-running is cheap.
+  const runRemoteProbe = () => loadRemoteInstances().catch((err) => {
     console.warn("[proxy] Remote instance loading:", err.message);
   });
+  runRemoteProbe();
+  setInterval(runRemoteProbe, 60_000).unref();
 
   // Start auto-update checker
   startAutoUpdate(createDbClient()).catch((err) => {
