@@ -295,12 +295,18 @@ app.use("/register", authLimiter);
 // Funnel traffic all appears as 127.0.0.1 and would otherwise share one
 // bucket with the legit operator. rejectFunneled blocks Funnel before this
 // fires, but this is defense in depth if that middleware is ever bypassed.
+//
+// Only count POST requests (actual credential submissions). GET requests
+// to /dashboard/login are page loads — the browser re-fetches the form on
+// every redirect-from-unauth-dashboard-route, and counting those burns
+// the 10/15min budget within a normal browsing session.
 const dashboardLoginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => `${req.ip}:${req.headers["tailscale-user-login"] || ""}`,
+  skip: (req) => req.method !== "POST",
   message: { error: "Too many login attempts, please try again later" },
 });
 app.use("/dashboard/login", dashboardLoginLimiter);
