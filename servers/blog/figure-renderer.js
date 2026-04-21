@@ -156,6 +156,24 @@ function toNum(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Chart.js clears the plot area on each draw (clearRect inside its
+// canvas bounds), so a one-shot fillRect before `new Chart()` gets
+// wiped. This plugin paints the background every frame, keeping the
+// PNG opaque end-to-end. Without it the plot area is transparent and
+// the browser's page background shows through — axis labels on a
+// light page become unreadable if they're light-on-light.
+const BG_PLUGIN = {
+  id: "blog_figure_background",
+  beforeDraw: (chart) => {
+    const { ctx, width: w, height: h } = chart;
+    ctx.save();
+    ctx.globalCompositeOperation = "destination-over";
+    ctx.fillStyle = COLORS.chart_bg;
+    ctx.fillRect(0, 0, w, h);
+    ctx.restore();
+  },
+};
+
 /**
  * Render a chart section to a PNG Buffer.
  * @param {object} args
@@ -167,17 +185,13 @@ function toNum(v) {
  */
 export async function renderChart({ config, rows, width = DEFAULT_W, height = DEFAULT_H }) {
   if (!Array.isArray(rows) || rows.length === 0) {
-    // Empty-state PNG — still produce something so <img> doesn't 404.
     return placeholderPng(width, height, "No data", COLORS.chart_panel, COLORS.chart_text);
   }
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext("2d");
-  ctx.fillStyle = COLORS.chart_bg;
-  ctx.fillRect(0, 0, width, height);
   const chartConfig = buildChartJsConfig(config, rows);
+  chartConfig.plugins = [BG_PLUGIN];
   const chart = new Chart(ctx, chartConfig);
-  // Chart.js renders synchronously on first construction with animation:false.
-  // Take the buffer, then destroy so the instance doesn't hold handles.
   const buf = canvas.toBuffer("image/png");
   chart.destroy();
   return buf;
