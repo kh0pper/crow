@@ -270,6 +270,7 @@ const translations = {
   // ─── Memory Panel ───
   "memory.pageTitle": { en: "Memory", es: "Memoria" },
   "memory.editPageTitle": { en: "Edit Memory", es: "Editar memoria" },
+  "memory.viewPageTitle": { en: "View Memory", es: "Ver memoria" },
   "memory.totalMemories": { en: "Total Memories", es: "Total de memorias" },
   "memory.searchPlaceholder": { en: "Search memories...", es: "Buscar memorias..." },
   "memory.search": { en: "Search", es: "Buscar" },
@@ -279,6 +280,7 @@ const translations = {
   "memory.noMemoriesYet": { en: "No memories yet", es: "Aún no hay memorias" },
   "memory.askAiToRemember": { en: "Ask your AI to remember something to get started.", es: "Pídele a tu IA que recuerde algo para comenzar." },
   "memory.categoryLabel": { en: "Category", es: "Categoría" },
+  "memory.allCategories": { en: "All categories", es: "Todas las categorías" },
   "memory.importanceLabel": { en: "Importance", es: "Importancia" },
   "memory.contentLabel": { en: "Content", es: "Contenido" },
   "memory.updatedLabel": { en: "Updated", es: "Actualizado" },
