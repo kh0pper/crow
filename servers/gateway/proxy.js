@@ -23,6 +23,16 @@ const connectedServers = new Map(); // id → { client, process, tools }
 export { connectedServers };
 
 /**
+ * Resolve the Crow instance home directory. Primary gateway leaves this
+ * unset and falls back to ~/.crow; alternate instances (MPA, etc.) set
+ * CROW_HOME in their systemd env so bundle installs, mcp-addons.json, and
+ * skills/panels stay per-instance instead of bleeding into primary's state.
+ */
+function resolveCrowHome() {
+  return process.env.CROW_HOME || join(homedir(), ".crow");
+}
+
+/**
  * Convert a JSON Schema property definition to a Zod schema.
  * Handles the common types MCP tools use.
  */
@@ -150,7 +160,7 @@ async function connectToServer(integration) {
  * Unlike connectToServer(), this takes a flat env dict instead of using getSpawnEnv().
  */
 async function connectAddonServer(id, config) {
-  const cwd = config.cwd || join(homedir(), ".crow", "bundles", id);
+  const cwd = config.cwd || join(resolveCrowHome(), "bundles", id);
   const env = { ...process.env, ...(config.env || {}) };
 
   const CONNECT_TIMEOUT_MS = 60_000;
@@ -242,7 +252,7 @@ export async function shutdownAll() {
 function cleanupStaleAddonProcesses() {
   let cleaned = 0;
   try {
-    const bundleDir = join(homedir(), ".crow", "bundles");
+    const bundleDir = join(resolveCrowHome(), "bundles");
     // Match "node server/index.js" — the cwd check below narrows to bundles only
     const output = execFileSync(
       "pgrep", ["-a", "-f", "node server/index\\.js"],
@@ -321,15 +331,17 @@ export async function initProxyServers() {
   // Load dynamic backends from data_backends table
   await loadDynamicBackends();
 
-  // Load bundle-installed MCP servers from ~/.crow/mcp-addons.json
+  // Load bundle-installed MCP servers from <crow-home>/mcp-addons.json
   await loadAddonServers();
 }
 
 /**
- * Load MCP servers registered by bundle installs (from ~/.crow/mcp-addons.json).
+ * Load MCP servers registered by bundle installs. Reads from the active
+ * instance's mcp-addons.json (primary: ~/.crow/, MPA and other alternate
+ * instances: $CROW_HOME/).
  */
 async function loadAddonServers() {
-  const mcpAddonsPath = join(homedir(), ".crow", "mcp-addons.json");
+  const mcpAddonsPath = join(resolveCrowHome(), "mcp-addons.json");
   if (!existsSync(mcpAddonsPath)) return;
 
   let addons;
@@ -500,8 +512,13 @@ export async function loadRemoteInstances() {
     const { getOrCreateLocalInstanceId } = await import("./instance-registry.js");
     const localId = getOrCreateLocalInstanceId();
 
+    // Probe every non-revoked instance — not just those currently marked
+    // 'active'. When a sibling restarts its /health window can miss a probe
+    // and get flipped to 'offline', and if we only probed active rows we'd
+    // never re-discover it. The probe itself flips status back to 'active'
+    // on success, so transient offline states heal automatically.
     const { rows } = await db.execute({
-      sql: "SELECT * FROM crow_instances WHERE status = 'active' AND gateway_url IS NOT NULL AND id != ?",
+      sql: "SELECT * FROM crow_instances WHERE status != 'revoked' AND gateway_url IS NOT NULL AND id != ?",
       args: [localId],
     });
 
@@ -512,9 +529,16 @@ export async function loadRemoteInstances() {
     for (const inst of rows) {
       const instanceKey = `instance-${inst.id}`;
 
-      // Skip if already connected
+      // Skip if already connected — but refresh last_seen_at so the
+      // dashboard doesn't drift into "offline since X" for live peers.
       const existing = connectedServers.get(instanceKey);
-      if (existing && existing.status === "connected") continue;
+      if (existing && existing.status === "connected") {
+        await db.execute({
+          sql: "UPDATE crow_instances SET last_seen_at = datetime('now') WHERE id = ?",
+          args: [inst.id],
+        });
+        continue;
+      }
 
       try {
         // Probe health endpoint with timeout
@@ -595,11 +619,25 @@ export async function loadRemoteInstances() {
  */
 async function createRemoteInstanceClient(instance) {
   const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+  const { getPeerCreds } = await import("../shared/peer-credentials.js");
 
   const baseUrl = instance.gateway_url.replace(/\/$/, "");
   const mcpUrl = new URL(`${baseUrl}/memory/mcp`);
 
-  const transport = new StreamableHTTPClientTransport(mcpUrl);
+  // Attach the pre-shared peer bearer token so the remote gateway's
+  // instanceAuthMiddleware (servers/gateway/instance-registry.js:427)
+  // recognises the request. Without this, federated MCP calls were
+  // hitting the peer's OAuth middleware and failing with
+  // `invalid_token / Missing Authorization header` even for correctly
+  // paired instances. The peer-tokens.json store is the source of truth
+  // for these tokens (populated during instance-pair).
+  const creds = getPeerCreds(instance.id);
+  console.log(`  [proxy] federation auth for "${instance.name}" (${instance.id.slice(0,8)}…): ${creds?.auth_token ? "token=present" : "token=MISSING"}`);
+  const requestInit = creds?.auth_token
+    ? { headers: { Authorization: `Bearer ${creds.auth_token}` } }
+    : undefined;
+
+  const transport = new StreamableHTTPClientTransport(mcpUrl, requestInit ? { requestInit } : undefined);
 
   const client = new Client({
     name: `crow-federation-${instance.id}`,
