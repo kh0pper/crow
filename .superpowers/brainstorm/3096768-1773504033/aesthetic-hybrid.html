@@ -1,0 +1,136 @@
+<h2>Hybrid: Clean Sans + Editorial Details</h2>
+<p class="subtitle">Sans-serif conversation text (C's readability) with B's structural details (status badges, monospace metadata, clean borders)</p>
+
+<div class="cards">
+  <div class="card" data-choice="hybrid" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:0;overflow:hidden">
+      <div style="display:flex;height:400px;background:#0a0a10;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">
+        <!-- Avatar strip -->
+        <div style="width:56px;background:#08080e;display:flex;flex-direction:column;align-items:center;padding-top:14px;gap:6px;border-right:1px solid #1e1e2a">
+          <div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#6366f1,#818cf8);display:flex;align-items:center;justify-content:center;font-size:11px;color:white;font-weight:600;border:2px solid #6366f1;box-shadow:0 0 12px rgba(99,102,241,0.2)">AI</div>
+          <div style="position:relative;width:36px;height:36px;border-radius:10px;background:#22c55e;display:flex;align-items:center;justify-content:center;font-size:12px;color:white;font-weight:500">M<div style="position:absolute;top:-3px;right:-3px;min-width:14px;height:14px;border-radius:7px;background:#fbbf24;border:2px solid #08080e;font-size:8px;color:#000;font-weight:700;display:flex;align-items:center;justify-content:center;padding:0 2px">2</div></div>
+          <div style="width:36px;height:36px;border-radius:10px;background:#f59e0b;display:flex;align-items:center;justify-content:center;font-size:12px;color:white;font-weight:500;opacity:0.6">J</div>
+          <div style="margin-top:auto;margin-bottom:14px;width:30px;height:30px;border-radius:8px;background:#12121e;border:1px solid #1e1e2a;display:flex;align-items:center;justify-content:center;font-size:14px;color:#555;cursor:pointer">+</div>
+        </div>
+        <!-- Chat area -->
+        <div style="flex:1;display:flex;flex-direction:column;background:#0f0f17;min-width:0">
+          <!-- Header -->
+          <div style="padding:12px 18px;border-bottom:1px solid #1e1e2a;display:flex;align-items:center;gap:10px">
+            <div style="font-size:14px;font-weight:600;color:#fafaf9;letter-spacing:-0.01em">Claude</div>
+            <div style="font-size:10px;color:#4ade80">&#9679; active</div>
+            <div style="margin-left:auto;font-size:10px;font-family:'JetBrains Mono',monospace;color:#555;padding:3px 8px;background:#12121e;border-radius:4px">claude-sonnet</div>
+          </div>
+          <!-- Messages -->
+          <div style="flex:1;padding:16px 18px;display:flex;flex-direction:column;justify-content:flex-end;gap:6px;overflow:hidden">
+            <!-- Received -->
+            <div style="align-self:flex-start;max-width:78%">
+              <div style="background:#161622;border-radius:16px 16px 16px 4px;padding:10px 14px;font-size:13px;color:#d4d4d8;line-height:1.55;letter-spacing:0.005em">Here are the citations in APA format. I've verified each source against the DOI registry.</div>
+              <div style="font-size:10px;color:#444;margin-top:3px;padding-left:4px;font-family:'JetBrains Mono',monospace">2:34 PM</div>
+            </div>
+            <!-- Tool call -->
+            <div style="align-self:flex-start;max-width:85%">
+              <div style="background:rgba(99,102,241,0.06);border:1px solid rgba(99,102,241,0.12);border-radius:8px;padding:7px 12px;display:flex;gap:6px;align-items:center;font-size:11px;font-family:'JetBrains Mono',monospace;color:#818cf8">
+                <span style="opacity:0.5">&#9654;</span>
+                <span>crow_search_memories</span>
+                <span style="color:#555;margin-left:4px">→ 3 results</span>
+              </div>
+            </div>
+            <!-- File attachment -->
+            <div style="align-self:flex-start;max-width:70%">
+              <div style="background:#161622;border:1px solid #1e1e2a;border-radius:10px;padding:10px 12px;display:flex;gap:10px;align-items:center;cursor:pointer">
+                <div style="width:36px;height:36px;border-radius:8px;background:rgba(99,102,241,0.1);display:flex;align-items:center;justify-content:center;font-size:14px">&#128196;</div>
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:12px;color:#d4d4d8;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">research-sources.pdf</div>
+                  <div style="font-size:10px;color:#555;font-family:'JetBrains Mono',monospace">PDF &middot; 2.4 MB</div>
+                </div>
+                <div style="font-size:12px;color:#818cf8">&#8595;</div>
+              </div>
+            </div>
+            <!-- Sent -->
+            <div style="align-self:flex-end;max-width:75%">
+              <div style="background:#6366f1;border-radius:16px 16px 4px 16px;padding:10px 14px;font-size:13px;color:white;line-height:1.5">Perfect, can you also check the 2024 revision?</div>
+              <div style="font-size:10px;color:#444;margin-top:3px;text-align:right;padding-right:4px;font-family:'JetBrains Mono',monospace">2:35 PM &middot; &#10003;&#10003;</div>
+            </div>
+            <!-- Thread reply indicator -->
+            <div style="align-self:flex-start;max-width:80%">
+              <div style="border-left:2px solid #818cf8;padding-left:10px;margin-left:4px">
+                <div style="font-size:10px;color:#818cf8;margin-bottom:4px;font-weight:500">Replying to you</div>
+                <div style="background:#161622;border-radius:16px 16px 16px 4px;padding:10px 14px;font-size:13px;color:#d4d4d8;line-height:1.55">Checking the 2024 edition now. Found an updated meta-analysis that replaces two of the original sources.</div>
+              </div>
+              <div style="font-size:10px;color:#444;margin-top:3px;padding-left:4px;font-family:'JetBrains Mono',monospace">2:36 PM</div>
+            </div>
+          </div>
+          <!-- Input -->
+          <div style="padding:10px 18px;border-top:1px solid #1e1e2a;display:flex;gap:8px;align-items:flex-end">
+            <div style="width:32px;height:32px;border-radius:8px;background:#12121e;border:1px solid #1e1e2a;display:flex;align-items:center;justify-content:center;font-size:14px;color:#555;cursor:pointer;flex-shrink:0">&#128206;</div>
+            <div style="flex:1;background:#12121e;border:1px solid #1e1e2a;border-radius:20px;padding:8px 16px;font-size:13px;color:#555;min-height:20px">Message Claude...</div>
+            <div style="width:32px;height:32px;border-radius:50%;background:#6366f1;display:flex;align-items:center;justify-content:center;color:white;font-size:14px;flex-shrink:0;cursor:pointer;box-shadow:0 2px 8px rgba(99,102,241,0.3)">&#8593;</div>
+          </div>
+        </div>
+        <!-- Info panel -->
+        <div style="width:200px;background:#0c0c14;border-left:1px solid #1e1e2a;padding:16px;display:flex;flex-direction:column;gap:14px;overflow:hidden">
+          <!-- Contact info -->
+          <div style="text-align:center;padding-bottom:12px;border-bottom:1px solid #1e1e2a">
+            <div style="width:52px;height:52px;border-radius:14px;background:linear-gradient(135deg,#6366f1,#818cf8);display:flex;align-items:center;justify-content:center;font-size:18px;color:white;font-weight:600;margin:0 auto 10px">AI</div>
+            <div style="font-size:14px;font-weight:600;color:#fafaf9">Claude</div>
+            <div style="font-size:11px;color:#555;font-family:'JetBrains Mono',monospace;margin-top:2px">AI Provider</div>
+          </div>
+          <!-- Encryption -->
+          <div>
+            <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:0.08em;font-weight:600;margin-bottom:6px">Security</div>
+            <div style="font-size:11px;color:#4ade80;display:flex;align-items:center;gap:5px">&#128274; E2E Encrypted</div>
+            <div style="font-size:10px;color:#444;margin-top:4px;font-family:'JetBrains Mono',monospace;word-break:break-all;line-height:1.4">Safety #: 42901 38271 50192 73019 29184</div>
+          </div>
+          <!-- Shared files -->
+          <div>
+            <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:0.08em;font-weight:600;margin-bottom:6px">Shared Files</div>
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <div style="font-size:11px;color:#a8a29e;display:flex;gap:6px;align-items:center;padding:4px 0"><span style="opacity:0.5">&#128196;</span> research-sources.pdf</div>
+              <div style="font-size:11px;color:#a8a29e;display:flex;gap:6px;align-items:center;padding:4px 0"><span style="opacity:0.5">&#128196;</span> notes-march.md</div>
+              <div style="font-size:11px;color:#818cf8;cursor:pointer;padding:4px 0">View all (5)</div>
+            </div>
+          </div>
+          <!-- Shared items -->
+          <div>
+            <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:0.08em;font-weight:600;margin-bottom:6px">Shared With</div>
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <div style="font-size:11px;color:#a8a29e;display:flex;gap:6px;align-items:center;padding:4px 0"><span style="font-size:9px;background:#2a2a3a;padding:1px 5px;border-radius:3px;color:#888">memory</span> Research preferences</div>
+              <div style="font-size:11px;color:#a8a29e;display:flex;gap:6px;align-items:center;padding:4px 0"><span style="font-size:9px;background:#2a2a3a;padding:1px 5px;border-radius:3px;color:#888">project</span> Distributed Systems</div>
+            </div>
+          </div>
+          <!-- Actions -->
+          <div style="margin-top:auto;display:flex;flex-direction:column;gap:6px">
+            <div style="font-size:11px;color:#818cf8;cursor:pointer;padding:4px 0">&#128279; Share item...</div>
+            <div style="font-size:11px;color:#ef4444;cursor:pointer;padding:4px 0;opacity:0.7">Block contact</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Hybrid: Clean Sans + Editorial Details</h3>
+      <p>Sans-serif message text for clean readability. Monospace for metadata (timestamps, model names, file sizes). Subtle borders for structure. Rounded squircle avatars. Status badges. File attachments with preview. Thread replies with left-border indicator. Double-check delivery status.</p>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:2rem">
+  <h3>Key Design Decisions in This Mockup</h3>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:1rem">
+    <div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:8px;padding:12px 16px">
+      <div style="font-size:11px;color:#818cf8;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Typography</div>
+      <div style="font-size:12px;color:#aaa;line-height:1.5">System sans-serif for messages (optimized for reading). JetBrains Mono for timestamps, model info, file sizes. Fraunces serif stays on panel titles only.</div>
+    </div>
+    <div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:8px;padding:12px 16px">
+      <div style="font-size:11px;color:#818cf8;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Color System</div>
+      <div style="font-size:12px;color:#aaa;line-height:1.5">Indigo (#6366f1) for sent messages + accents. Green for online status. Gold for unread badges. Red for destructive actions. Muted grays for metadata.</div>
+    </div>
+    <div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:8px;padding:12px 16px">
+      <div style="font-size:11px;color:#818cf8;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Avatars</div>
+      <div style="font-size:12px;color:#aaa;line-height:1.5">Squircle (rounded-square) instead of circles — more modern, like iOS/Telegram. Gradient for AI contacts. Solid colors for people. Active border glow on selected.</div>
+    </div>
+    <div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:8px;padding:12px 16px">
+      <div style="font-size:11px;color:#818cf8;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Info Panel</div>
+      <div style="font-size:12px;color:#aaa;line-height:1.5">E2E encryption status + safety number. Shared files list. Shared items (memories, projects). Quick actions (share, block). Collapsible on mobile.</div>
+    </div>
+  </div>
+</div>

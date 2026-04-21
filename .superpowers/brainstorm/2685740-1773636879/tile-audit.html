@@ -1,0 +1,80 @@
+<h2>Current Home Screen Tiles</h2>
+<p class="subtitle">Click any tiles you think should be removed or consolidated</p>
+
+<div class="options" data-multiselect>
+  <div class="option" data-choice="messages" onclick="toggleSelect(this)">
+    <div class="letter" style="font-size:1.2rem">💬</div>
+    <div class="content">
+      <h3>Messages</h3>
+      <p><code>/dashboard/messages</code> — AI Chat + Peer Messages + Contacts tab. This is the main comms hub.</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="contacts" onclick="toggleSelect(this)" style="border-color: #ef4444; background: rgba(239,68,68,0.05)">
+    <div class="letter" style="font-size:1.2rem">👥</div>
+    <div class="content">
+      <h3>Contacts <span style="color:#ef4444;font-size:0.75rem">REDIRECTS TO MESSAGES</span></h3>
+      <p><code>/dashboard/contacts</code> → redirects to <code>/dashboard/messages</code>. Pure duplicate — already absorbed into Messages panel.</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="memory" onclick="toggleSelect(this)">
+    <div class="letter" style="font-size:1.2rem">💡</div>
+    <div class="content">
+      <h3>Memory</h3>
+      <p><code>/dashboard/memory</code> — Browse, search, edit memories. Unique function, no overlap.</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="blog" onclick="toggleSelect(this)">
+    <div class="letter" style="font-size:1.2rem">✏️</div>
+    <div class="content">
+      <h3>Blog</h3>
+      <p><code>/dashboard/blog</code> — Create, edit, publish posts. Includes "new post" action inside. Unique panel.</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="files" onclick="toggleSelect(this)">
+    <div class="letter" style="font-size:1.2rem">📄</div>
+    <div class="content">
+      <h3>Files</h3>
+      <p><code>/dashboard/files</code> — S3/MinIO file storage browser. Upload, download, manage. Unique panel.</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="skills" onclick="toggleSelect(this)">
+    <div class="letter" style="font-size:1.2rem">📖</div>
+    <div class="content">
+      <h3>Skills</h3>
+      <p><code>/dashboard/skills</code> — View and manage AI skills. Read-only reference, doesn't overlap with Extensions.</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="extensions" onclick="toggleSelect(this)">
+    <div class="letter" style="font-size:1.2rem">🧩</div>
+    <div class="content">
+      <h3>Extensions</h3>
+      <p><code>/dashboard/extensions</code> — Browse, install, manage add-ons and bundles. This is the "app store".</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="settings" onclick="toggleSelect(this)">
+    <div class="letter" style="font-size:1.2rem">⚙️</div>
+    <div class="content">
+      <h3>Settings</h3>
+      <p><code>/dashboard/settings</code> — API keys, theme, language, blog config. Unique panel.</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="health" onclick="toggleSelect(this)">
+    <div class="letter" style="font-size:1.2rem">🏠</div>
+    <div class="content">
+      <h3>Health</h3>
+      <p><code>/dashboard/health</code> — Docker status, DB stats, system info. This is where the removed snapshot data lives now.</p>
+    </div>
+  </div>
+</div>
+
+<div style="margin-top:1.5rem; padding:1rem; border-radius:8px; background:rgba(99,102,241,0.08); border:1px solid rgba(99,102,241,0.2)">
+  <strong>Known issue:</strong> Contacts is a confirmed duplicate (redirects to Messages). Select any others you want to remove or consolidate.
+</div>

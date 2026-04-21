@@ -1,0 +1,120 @@
+<h2>Modular Home Screen — Tile Architecture</h2>
+<p class="subtitle">How tiles flow from installation to the home screen</p>
+
+<div class="section">
+  <h3>Tile Sources & Rendering Order</h3>
+  <div class="mockup">
+    <div class="mockup-header">Home Screen Grid Layout</div>
+    <div class="mockup-body" style="padding:1.5rem">
+      <!-- Built-in panels -->
+      <div style="margin-bottom:1.5rem">
+        <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:0.1em;color:#6366f1;margin-bottom:0.75rem;font-weight:600">Built-in Panels <span style="opacity:0.5">(sorted by navOrder)</span></div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:0.75rem">
+          <div style="text-align:center">
+            <div style="width:48px;height:48px;border-radius:12px;background:rgba(99,102,241,0.15);margin:0 auto 0.4rem;display:flex;align-items:center;justify-content:center;font-size:1.2rem">💬</div>
+            <div style="font-size:0.7rem;color:#a1a1aa">Messages</div>
+          </div>
+          <div style="text-align:center">
+            <div style="width:48px;height:48px;border-radius:12px;background:rgba(99,102,241,0.15);margin:0 auto 0.4rem;display:flex;align-items:center;justify-content:center;font-size:1.2rem">💡</div>
+            <div style="font-size:0.7rem;color:#a1a1aa">Memory</div>
+          </div>
+          <div style="text-align:center">
+            <div style="width:48px;height:48px;border-radius:12px;background:rgba(99,102,241,0.15);margin:0 auto 0.4rem;display:flex;align-items:center;justify-content:center;font-size:1.2rem">✏️</div>
+            <div style="font-size:0.7rem;color:#a1a1aa">Blog</div>
+          </div>
+          <div style="text-align:center">
+            <div style="width:48px;height:48px;border-radius:12px;background:rgba(99,102,241,0.15);margin:0 auto 0.4rem;display:flex;align-items:center;justify-content:center;font-size:1.2rem">📄</div>
+            <div style="font-size:0.7rem;color:#a1a1aa">Files</div>
+          </div>
+          <div style="text-align:center">
+            <div style="width:48px;height:48px;border-radius:12px;background:rgba(99,102,241,0.15);margin:0 auto 0.4rem;display:flex;align-items:center;justify-content:center;font-size:1.2rem">📖</div>
+            <div style="font-size:0.7rem;color:#a1a1aa">Skills</div>
+          </div>
+          <div style="text-align:center">
+            <div style="width:48px;height:48px;border-radius:12px;background:rgba(99,102,241,0.15);margin:0 auto 0.4rem;display:flex;align-items:center;justify-content:center;font-size:1.2rem">🧩</div>
+            <div style="font-size:0.7rem;color:#a1a1aa">Extensions</div>
+          </div>
+          <div style="text-align:center">
+            <div style="width:48px;height:48px;border-radius:12px;background:rgba(99,102,241,0.15);margin:0 auto 0.4rem;display:flex;align-items:center;justify-content:center;font-size:1.2rem">⚙️</div>
+            <div style="font-size:0.7rem;color:#a1a1aa">Settings</div>
+          </div>
+          <div style="text-align:center;opacity:0.3;text-decoration:line-through">
+            <div style="width:48px;height:48px;border-radius:12px;background:rgba(239,68,68,0.1);margin:0 auto 0.4rem;display:flex;align-items:center;justify-content:center;font-size:1.2rem">👥</div>
+            <div style="font-size:0.7rem;color:#ef4444">Contacts</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Add-on tiles -->
+      <div style="border-top:1px solid rgba(255,255,255,0.08);padding-top:1rem">
+        <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:0.1em;color:#a855f7;margin-bottom:0.75rem;font-weight:600">Installed Add-ons <span style="opacity:0.5">(sorted by install date)</span></div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:0.75rem">
+          <div style="text-align:center">
+            <div style="width:48px;height:48px;border-radius:12px;background:rgba(168,85,247,0.12);margin:0 auto 0.4rem;display:flex;align-items:center;justify-content:center;position:relative">
+              <span style="font-size:0.85rem;font-weight:700;color:#a855f7">🦙</span>
+              <span style="position:absolute;top:-2px;right:-2px;width:8px;height:8px;border-radius:50%;background:#22c55e;border:2px solid #1a1a2e"></span>
+            </div>
+            <div style="font-size:0.7rem;color:#a1a1aa">Ollama</div>
+          </div>
+          <div style="text-align:center">
+            <div style="width:48px;height:48px;border-radius:12px;background:rgba(168,85,247,0.12);margin:0 auto 0.4rem;display:flex;align-items:center;justify-content:center">
+              <span style="font-size:0.85rem;font-weight:700;color:#a855f7">📚</span>
+            </div>
+            <div style="font-size:0.7rem;color:#a1a1aa">Obsidian</div>
+          </div>
+          <div style="text-align:center">
+            <div style="width:48px;height:48px;border-radius:12px;background:rgba(168,85,247,0.12);margin:0 auto 0.4rem;display:flex;align-items:center;justify-content:center;position:relative">
+              <span style="font-size:0.85rem;font-weight:700;color:#a855f7">☁️</span>
+              <span style="position:absolute;top:-2px;right:-2px;width:8px;height:8px;border-radius:50%;background:#22c55e;border:2px solid #1a1a2e"></span>
+            </div>
+            <div style="font-size:0.7rem;color:#a1a1aa">Nextcloud</div>
+          </div>
+          <div style="text-align:center;border:1px dashed rgba(168,85,247,0.3);border-radius:12px;padding:0.5rem 0.25rem">
+            <div style="width:48px;height:48px;border-radius:12px;background:rgba(168,85,247,0.06);margin:0 auto 0.4rem;display:flex;align-items:center;justify-content:center">
+              <span style="font-size:1.2rem;color:rgba(168,85,247,0.4)">+</span>
+            </div>
+            <div style="font-size:0.65rem;color:rgba(168,85,247,0.5);font-style:italic">auto on install</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Data Flow</h3>
+  <div style="font-family:monospace;font-size:0.8rem;line-height:1.8;padding:1rem;background:rgba(0,0,0,0.2);border-radius:8px;overflow-x:auto">
+    <div><span style="color:#6366f1">Panel Registry</span> ─── getVisiblePanels() ──┐</div>
+    <div style="padding-left:3rem">│</div>
+    <div><span style="color:#a855f7">~/.crow/installed.json</span> ─── getNestData() ──┤</div>
+    <div style="padding-left:3rem">│</div>
+    <div style="padding-left:2rem">┌──────────────────────┘</div>
+    <div style="padding-left:2rem">▼</div>
+    <div style="padding-left:1rem"><span style="color:#fbbf24">buildNestHTML()</span></div>
+    <div style="padding-left:2rem">├─ Panel tiles (indigo, by navOrder)</div>
+    <div style="padding-left:2rem">├─ Bundle tiles (purple, by installDate)</div>
+    <div style="padding-left:2rem">└─ MCP server tiles (purple, by installDate)</div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Tile Type Rules</h3>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem">
+    <div style="padding:0.75rem;border-radius:8px;background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.15)">
+      <div style="font-weight:600;color:#6366f1;margin-bottom:0.3rem">Panels (built-in)</div>
+      <div style="font-size:0.8rem;color:#a1a1aa">Always shown. Sorted by navOrder. Link to <code>/dashboard/&lt;id&gt;</code>. Can be hidden via <code>hidden: true</code>.</div>
+    </div>
+    <div style="padding:0.75rem;border-radius:8px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.15)">
+      <div style="font-weight:600;color:#a855f7;margin-bottom:0.3rem">Bundles (Docker)</div>
+      <div style="font-size:0.8rem;color:#a1a1aa">Auto from installed.json. Status dot (running/stopped). Link to webUI or Extensions.</div>
+    </div>
+    <div style="padding:0.75rem;border-radius:8px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.15)">
+      <div style="font-weight:600;color:#a855f7;margin-bottom:0.3rem">MCP Servers</div>
+      <div style="font-size:0.8rem;color:#a1a1aa">Auto from installed.json. No status dot (not Docker). Link to Extensions panel.</div>
+    </div>
+    <div style="padding:0.75rem;border-radius:8px;background:rgba(63,63,70,0.3);border:1px solid rgba(63,63,70,0.4)">
+      <div style="font-weight:600;color:#71717a;margin-bottom:0.3rem">Skills (no tile)</div>
+      <div style="font-size:0.8rem;color:#52525b">Pure markdown, no UI. Visible in Skills panel only.</div>
+    </div>
+  </div>
+</div>

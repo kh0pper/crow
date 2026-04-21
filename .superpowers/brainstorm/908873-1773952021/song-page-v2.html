@@ -1,0 +1,1235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crow Songbook — Apple-inspired Dark</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #000000;
+    color: #f5f5f7;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  .page {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  /* Nav bar — frosted glass */
+  .nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    background: rgba(0,0,0,0.72);
+    border-bottom: 0.5px solid rgba(255,255,255,0.08);
+    padding: 12px 24px;
+    margin: 0 -24px;
+  }
+
+  .nav-inner {
+    max-width: 800px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .nav-brand {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    color: rgba(255,255,255,0.5);
+  }
+
+  .nav-crumb {
+    font-size: 13px;
+    color: rgba(255,255,255,0.35);
+  }
+
+  .nav-crumb a {
+    color: #2997ff;
+    text-decoration: none;
+  }
+
+  /* Hero section */
+  .hero {
+    padding: 48px 0 40px;
+    display: flex;
+    gap: 32px;
+    align-items: flex-start;
+  }
+
+  .album-art {
+    width: 180px;
+    height: 180px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+    flex-shrink: 0;
+    box-shadow:
+      0 8px 32px rgba(0,0,0,0.5),
+      0 2px 8px rgba(0,0,0,0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .album-art::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, transparent 40%, rgba(255,255,255,0.03) 100%);
+  }
+
+  .album-art-text {
+    font-size: 48px;
+    opacity: 0.15;
+    font-weight: 700;
+    letter-spacing: -2px;
+  }
+
+  .hero-info {
+    padding-top: 8px;
+    flex: 1;
+  }
+
+  .hero-info .label {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: #2997ff;
+    margin-bottom: 6px;
+  }
+
+  .song-title {
+    font-size: 2.2rem;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    color: #f5f5f7;
+    line-height: 1.15;
+    margin-bottom: 6px;
+  }
+
+  .song-artist {
+    font-size: 1.15rem;
+    font-weight: 400;
+    color: rgba(255,255,255,0.55);
+    margin-bottom: 20px;
+  }
+
+  .meta-pills {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: rgba(255,255,255,0.06);
+    backdrop-filter: blur(8px);
+    border-radius: 100px;
+    padding: 5px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(255,255,255,0.7);
+    border: 0.5px solid rgba(255,255,255,0.08);
+  }
+
+  .pill .val {
+    color: #f5f5f7;
+    font-weight: 600;
+  }
+
+  /* Toolbar — frosted glass card */
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+    background: rgba(255,255,255,0.04);
+    border-radius: 12px;
+    border: 0.5px solid rgba(255,255,255,0.08);
+    overflow: hidden;
+    margin-bottom: 32px;
+  }
+
+  .tool-group {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+  }
+
+  .tool-btn {
+    background: transparent;
+    border: none;
+    color: rgba(255,255,255,0.55);
+    padding: 10px 16px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.2s;
+    border-right: 0.5px solid rgba(255,255,255,0.06);
+  }
+
+  .tool-btn:hover { background: rgba(255,255,255,0.06); color: #f5f5f7; }
+  .tool-btn.active { background: rgba(41,151,255,0.1); color: #2997ff; }
+
+  .tool-divider {
+    width: 1px;
+    height: 24px;
+    background: rgba(255,255,255,0.08);
+    margin: 0 4px;
+  }
+
+  /* Transpose section */
+  .transpose-section {
+    margin-bottom: 28px;
+  }
+
+  .transpose-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .transpose-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(255,255,255,0.4);
+    margin-right: 8px;
+    min-width: 60px;
+  }
+
+  .key-chip {
+    width: 36px;
+    height: 32px;
+    border-radius: 8px;
+    border: none;
+    background: rgba(255,255,255,0.06);
+    color: rgba(255,255,255,0.5);
+    font-size: 13px;
+    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .key-chip:hover { background: rgba(255,255,255,0.1); color: #f5f5f7; }
+
+  .key-chip.active {
+    background: rgba(41,151,255,0.15);
+    color: #2997ff;
+    box-shadow: 0 0 0 1.5px rgba(41,151,255,0.4);
+  }
+
+  .step-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    border: none;
+    background: rgba(255,255,255,0.06);
+    color: rgba(255,255,255,0.5);
+    font-size: 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 8px;
+  }
+
+  /* Chord diagrams — glass card */
+  .diagrams-card {
+    background: rgba(255,255,255,0.03);
+    backdrop-filter: blur(12px);
+    border-radius: 16px;
+    border: 0.5px solid rgba(255,255,255,0.06);
+    padding: 20px 24px;
+    margin-bottom: 32px;
+  }
+
+  .diagrams-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+  }
+
+  .diagrams-header h3 {
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: rgba(255,255,255,0.35);
+  }
+
+  .instrument-tabs {
+    display: flex;
+    background: rgba(255,255,255,0.06);
+    border-radius: 8px;
+    padding: 2px;
+    gap: 2px;
+  }
+
+  .inst-tab {
+    padding: 4px 14px;
+    border-radius: 6px;
+    border: none;
+    background: transparent;
+    color: rgba(255,255,255,0.5);
+    font-size: 12px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  .inst-tab.active {
+    background: rgba(255,255,255,0.12);
+    color: #f5f5f7;
+  }
+
+  .diagrams-grid {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .diagram {
+    text-align: center;
+  }
+
+  .diagram .name {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    font-weight: 600;
+    color: rgba(255,255,255,0.7);
+    margin-bottom: 8px;
+  }
+
+  /* SVG-style guitar chord grid */
+  .fretbox {
+    width: 44px;
+    height: 54px;
+    position: relative;
+    margin: 0 auto;
+  }
+
+  .fretbox svg {
+    width: 100%;
+    height: 100%;
+  }
+
+  /* Chord chart */
+  .chart-section {
+    margin-bottom: 40px;
+  }
+
+  .section-heading {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: rgba(255,255,255,0.2);
+    margin: 32px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 0.5px solid rgba(255,255,255,0.06);
+  }
+
+  .section-heading:first-child { margin-top: 0; }
+
+  .chart-line {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    line-height: 1.3;
+  }
+
+  .chords-row {
+    color: #2997ff;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    margin-bottom: 1px;
+    user-select: none;
+  }
+
+  .lyrics-row {
+    color: rgba(255,255,255,0.75);
+    font-weight: 400;
+    margin-bottom: 16px;
+  }
+
+  .lyrics-row:last-child { margin-bottom: 0; }
+
+  /* Audio player — premium card */
+  .player-card {
+    background: rgba(255,255,255,0.03);
+    backdrop-filter: blur(20px);
+    border-radius: 16px;
+    border: 0.5px solid rgba(255,255,255,0.06);
+    padding: 24px;
+    margin-bottom: 32px;
+  }
+
+  .player-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: rgba(255,255,255,0.2);
+    margin-bottom: 16px;
+  }
+
+  .waveform {
+    height: 56px;
+    display: flex;
+    align-items: center;
+    gap: 1.5px;
+    margin-bottom: 12px;
+    padding: 0 4px;
+  }
+
+  .wbar {
+    flex: 1;
+    border-radius: 1px;
+    transition: background 0.15s;
+    min-width: 2px;
+  }
+
+  .wbar.played { background: #30d158; }
+  .wbar.unplayed { background: rgba(255,255,255,0.08); }
+
+  .player-controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .play-button {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: #f5f5f7;
+    border: none;
+    color: #000;
+    font-size: 15px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    transition: transform 0.15s;
+  }
+
+  .play-button:hover { transform: scale(1.06); }
+
+  .time {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: rgba(255,255,255,0.35);
+    font-weight: 500;
+  }
+
+  .download-link {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: #2997ff;
+    font-size: 13px;
+    font-weight: 500;
+    text-decoration: none;
+    padding: 8px 16px;
+    border-radius: 100px;
+    background: rgba(41,151,255,0.08);
+    transition: background 0.2s;
+    cursor: pointer;
+    border: none;
+    font-family: inherit;
+  }
+
+  .download-link:hover { background: rgba(41,151,255,0.15); }
+
+  /* Tags */
+  .tags {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 32px;
+  }
+
+  .tag {
+    background: rgba(255,255,255,0.04);
+    border-radius: 100px;
+    padding: 4px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    color: rgba(255,255,255,0.4);
+    border: 0.5px solid rgba(255,255,255,0.06);
+  }
+
+  /* Comments */
+  .comments {
+    border-top: 0.5px solid rgba(255,255,255,0.06);
+    padding-top: 28px;
+    margin-bottom: 40px;
+  }
+
+  .comments h3 {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: rgba(255,255,255,0.2);
+    margin-bottom: 16px;
+  }
+
+  .comment {
+    padding: 16px;
+    background: rgba(255,255,255,0.02);
+    border-radius: 12px;
+    border: 0.5px solid rgba(255,255,255,0.04);
+    margin-bottom: 8px;
+  }
+
+  .comment-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #2997ff, #5856d6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    color: white;
+  }
+
+  .comment-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: rgba(255,255,255,0.8);
+  }
+
+  .comment-time {
+    font-size: 11px;
+    color: rgba(255,255,255,0.2);
+    margin-left: auto;
+  }
+
+  .comment-body {
+    font-size: 14px;
+    color: rgba(255,255,255,0.6);
+    line-height: 1.5;
+    padding-left: 36px;
+  }
+
+  /* Dividers */
+  .section-divider {
+    height: 0.5px;
+    background: rgba(255,255,255,0.06);
+    margin: 40px 0;
+  }
+
+  /* ===== SONGBOOK INDEX ===== */
+  .mockup-divider {
+    text-align: center;
+    padding: 60px 0 20px;
+    margin-top: 40px;
+    border-top: 2px dashed rgba(255,255,255,0.06);
+  }
+
+  .mockup-divider span {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 3px;
+    color: rgba(255,255,255,0.15);
+  }
+
+  .index-hero {
+    padding: 32px 0 28px;
+  }
+
+  .index-hero h2 {
+    font-size: 2rem;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    margin-bottom: 4px;
+  }
+
+  .index-hero p {
+    color: rgba(255,255,255,0.4);
+    font-size: 15px;
+  }
+
+  .filter-bar {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+
+  .filter-chip {
+    padding: 6px 16px;
+    border-radius: 100px;
+    border: none;
+    background: rgba(255,255,255,0.06);
+    color: rgba(255,255,255,0.5);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.2s;
+  }
+
+  .filter-chip:hover { background: rgba(255,255,255,0.1); color: #f5f5f7; }
+  .filter-chip.active { background: rgba(41,151,255,0.12); color: #2997ff; }
+
+  .song-list {
+    border-radius: 12px;
+    overflow: hidden;
+    border: 0.5px solid rgba(255,255,255,0.06);
+  }
+
+  .song-row {
+    display: flex;
+    align-items: center;
+    padding: 14px 20px;
+    border-bottom: 0.5px solid rgba(255,255,255,0.04);
+    transition: background 0.15s;
+    cursor: pointer;
+  }
+
+  .song-row:hover { background: rgba(255,255,255,0.03); }
+  .song-row:last-child { border-bottom: none; }
+
+  .song-row .num {
+    width: 28px;
+    font-size: 13px;
+    color: rgba(255,255,255,0.2);
+    font-weight: 500;
+  }
+
+  .song-row .info {
+    flex: 1;
+  }
+
+  .song-row .info .name {
+    font-size: 15px;
+    font-weight: 500;
+    color: #f5f5f7;
+  }
+
+  .song-row .info .artist {
+    font-size: 13px;
+    color: rgba(255,255,255,0.35);
+  }
+
+  .song-row .info .artist.original {
+    color: #2997ff;
+    font-style: italic;
+  }
+
+  .song-row .key-badge {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-weight: 600;
+    color: rgba(255,255,255,0.5);
+    width: 48px;
+    text-align: center;
+  }
+
+  .song-row .genre {
+    font-size: 12px;
+    color: rgba(255,255,255,0.25);
+    width: 100px;
+    text-align: right;
+  }
+
+  .song-row .audio-indicator {
+    width: 32px;
+    text-align: center;
+    font-size: 13px;
+    color: #30d158;
+  }
+
+  /* ===== SETLIST ===== */
+  .setlist-card {
+    background: rgba(255,255,255,0.02);
+    border-radius: 16px;
+    border: 0.5px solid rgba(255,255,255,0.06);
+    padding: 24px;
+    margin-bottom: 20px;
+  }
+
+  .setlist-header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    margin-bottom: 20px;
+  }
+
+  .setlist-header h2 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+  }
+
+  .setlist-header .stats {
+    font-size: 13px;
+    color: rgba(255,255,255,0.3);
+  }
+
+  .setlist-row {
+    display: flex;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 0.5px solid rgba(255,255,255,0.04);
+  }
+
+  .setlist-row:last-child { border-bottom: none; }
+
+  .setlist-row .order {
+    width: 28px;
+    font-size: 14px;
+    font-weight: 600;
+    color: rgba(255,255,255,0.15);
+  }
+
+  .setlist-row .song-name {
+    flex: 1;
+    font-size: 15px;
+    font-weight: 500;
+  }
+
+  .setlist-row .setlist-key {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-weight: 600;
+    width: 80px;
+    text-align: center;
+  }
+
+  .setlist-row .setlist-key .transposed {
+    color: #30d158;
+  }
+
+  .setlist-row .setlist-key .original-key {
+    font-size: 10px;
+    color: rgba(255,255,255,0.2);
+  }
+
+  .setlist-row .duration {
+    width: 48px;
+    text-align: right;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: rgba(255,255,255,0.3);
+  }
+
+  .setlist-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 0.5px solid rgba(255,255,255,0.04);
+  }
+
+  .action-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 18px;
+    border-radius: 100px;
+    border: none;
+    font-size: 13px;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .action-btn.primary {
+    background: #2997ff;
+    color: white;
+  }
+
+  .action-btn.secondary {
+    background: rgba(255,255,255,0.06);
+    color: rgba(255,255,255,0.6);
+  }
+
+  .action-btn:hover { opacity: 0.85; }
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <div class="nav-inner">
+    <span class="nav-brand">Crow</span>
+    <span class="nav-crumb"><a href="#">Songbook</a> / Alone Again (Naturally)</span>
+  </div>
+</div>
+
+<div class="page">
+
+  <!-- HERO -->
+  <div class="hero">
+    <div class="album-art">
+      <span class="album-art-text">GO'S</span>
+    </div>
+    <div class="hero-info">
+      <div class="label">Songbook</div>
+      <h1 class="song-title">Alone Again<br/>(Naturally)</h1>
+      <div class="song-artist">Gilbert O'Sullivan</div>
+      <div class="meta-pills">
+        <span class="pill">Key <span class="val">D</span></span>
+        <span class="pill">Capo <span class="val">4</span></span>
+        <span class="pill">3/4 time</span>
+        <span class="pill">112 bpm</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOOLBAR -->
+  <div class="toolbar">
+    <button class="tool-btn active">Chart</button>
+    <button class="tool-btn">Lyrics</button>
+    <div class="tool-divider"></div>
+    <button class="tool-btn">Print</button>
+    <button class="tool-btn">PDF</button>
+    <button class="tool-btn">Share</button>
+  </div>
+
+  <!-- TRANSPOSE -->
+  <div class="transpose-section">
+    <div class="transpose-row">
+      <span class="transpose-label">Transpose</span>
+      <button class="key-chip">C</button>
+      <button class="key-chip">Db</button>
+      <button class="key-chip active">D</button>
+      <button class="key-chip">Eb</button>
+      <button class="key-chip">E</button>
+      <button class="key-chip">F</button>
+      <button class="key-chip">Gb</button>
+      <button class="key-chip">G</button>
+      <button class="key-chip">Ab</button>
+      <button class="key-chip">A</button>
+      <button class="key-chip">Bb</button>
+      <button class="key-chip">B</button>
+      <span style="margin-left: 12px;"></span>
+      <button class="step-btn">&#8722;</button>
+      <button class="step-btn">+</button>
+    </div>
+  </div>
+
+  <!-- CHORD DIAGRAMS -->
+  <div class="diagrams-card">
+    <div class="diagrams-header">
+      <h3>Chord Voicings</h3>
+      <div class="instrument-tabs">
+        <button class="inst-tab active">Guitar</button>
+        <button class="inst-tab">Piano</button>
+      </div>
+    </div>
+    <div class="diagrams-grid">
+      <div class="diagram">
+        <div class="name">Dmaj7</div>
+        <div class="fretbox">
+          <svg viewBox="0 0 42 52">
+            <rect x="0" y="6" width="42" height="1.5" fill="white" rx="0.5"/>
+            <line x1="0" y1="17" x2="42" y2="17" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="28" x2="42" y2="28" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="39" x2="42" y2="39" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="50" x2="42" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="6" x2="0" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="8.4" y1="6" x2="8.4" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="16.8" y1="6" x2="16.8" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="25.2" y1="6" x2="25.2" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="33.6" y1="6" x2="33.6" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="42" y1="6" x2="42" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <text x="0" y="4" fill="rgba(255,255,255,0.3)" font-size="6" text-anchor="middle">x</text>
+            <text x="8.4" y="4" fill="rgba(255,255,255,0.3)" font-size="6" text-anchor="middle">x</text>
+            <circle cx="16.8" cy="11.5" r="3" fill="#2997ff"/>
+            <circle cx="25.2" cy="22.5" r="3" fill="#2997ff"/>
+            <circle cx="33.6" cy="22.5" r="3" fill="#2997ff"/>
+            <circle cx="42" cy="22.5" r="3" fill="#2997ff"/>
+          </svg>
+        </div>
+      </div>
+      <div class="diagram">
+        <div class="name">D6</div>
+        <div class="fretbox">
+          <svg viewBox="0 0 42 52">
+            <rect x="0" y="6" width="42" height="1.5" fill="white" rx="0.5"/>
+            <line x1="0" y1="17" x2="42" y2="17" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="28" x2="42" y2="28" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="39" x2="42" y2="39" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="50" x2="42" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="6" x2="0" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="8.4" y1="6" x2="8.4" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="16.8" y1="6" x2="16.8" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="25.2" y1="6" x2="25.2" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="33.6" y1="6" x2="33.6" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="42" y1="6" x2="42" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <text x="0" y="4" fill="rgba(255,255,255,0.3)" font-size="6" text-anchor="middle">x</text>
+            <circle cx="16.8" cy="22.5" r="3" fill="#2997ff"/>
+            <circle cx="25.2" cy="22.5" r="3" fill="#2997ff"/>
+            <circle cx="33.6" cy="22.5" r="3" fill="#2997ff"/>
+            <circle cx="42" cy="22.5" r="3" fill="#2997ff"/>
+          </svg>
+        </div>
+      </div>
+      <div class="diagram">
+        <div class="name">F#m7</div>
+        <div class="fretbox">
+          <svg viewBox="0 0 42 52">
+            <rect x="0" y="6" width="42" height="1.5" fill="white" rx="0.5"/>
+            <line x1="0" y1="17" x2="42" y2="17" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="28" x2="42" y2="28" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="39" x2="42" y2="39" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="50" x2="42" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="6" x2="0" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="8.4" y1="6" x2="8.4" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="16.8" y1="6" x2="16.8" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="25.2" y1="6" x2="25.2" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="33.6" y1="6" x2="33.6" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="42" y1="6" x2="42" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <circle cx="8.4" cy="22.5" r="3" fill="#2997ff"/>
+            <circle cx="25.2" cy="22.5" r="3" fill="#2997ff"/>
+            <circle cx="42" cy="22.5" r="3" fill="#2997ff"/>
+            <circle cx="16.8" cy="11.5" r="3" fill="#2997ff"/>
+          </svg>
+        </div>
+      </div>
+      <div class="diagram">
+        <div class="name">Em7b5</div>
+        <div class="fretbox">
+          <svg viewBox="0 0 42 52">
+            <rect x="0" y="6" width="42" height="1.5" fill="white" rx="0.5"/>
+            <line x1="0" y1="17" x2="42" y2="17" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="28" x2="42" y2="28" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="39" x2="42" y2="39" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="50" x2="42" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="6" x2="0" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="8.4" y1="6" x2="8.4" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="16.8" y1="6" x2="16.8" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="25.2" y1="6" x2="25.2" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="33.6" y1="6" x2="33.6" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="42" y1="6" x2="42" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <circle cx="0" cy="11.5" r="3" fill="#2997ff"/>
+            <circle cx="8.4" cy="11.5" r="3" fill="#2997ff"/>
+            <circle cx="25.2" cy="33.5" r="3" fill="#2997ff"/>
+          </svg>
+        </div>
+      </div>
+      <div class="diagram">
+        <div class="name">Gm6</div>
+        <div class="fretbox">
+          <svg viewBox="0 0 42 52">
+            <rect x="0" y="6" width="42" height="1.5" fill="white" rx="0.5"/>
+            <line x1="0" y1="17" x2="42" y2="17" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="28" x2="42" y2="28" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="39" x2="42" y2="39" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="50" x2="42" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="6" x2="0" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="8.4" y1="6" x2="8.4" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="16.8" y1="6" x2="16.8" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="25.2" y1="6" x2="25.2" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="33.6" y1="6" x2="33.6" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="42" y1="6" x2="42" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <circle cx="16.8" cy="22.5" r="3" fill="#2997ff"/>
+            <circle cx="25.2" cy="22.5" r="3" fill="#2997ff"/>
+            <circle cx="33.6" cy="11.5" r="3" fill="#2997ff"/>
+          </svg>
+        </div>
+      </div>
+      <div class="diagram">
+        <div class="name">A7b9</div>
+        <div class="fretbox">
+          <svg viewBox="0 0 42 52">
+            <rect x="0" y="6" width="42" height="1.5" fill="white" rx="0.5"/>
+            <line x1="0" y1="17" x2="42" y2="17" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="28" x2="42" y2="28" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="39" x2="42" y2="39" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="50" x2="42" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="0" y1="6" x2="0" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="8.4" y1="6" x2="8.4" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="16.8" y1="6" x2="16.8" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="25.2" y1="6" x2="25.2" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="33.6" y1="6" x2="33.6" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <line x1="42" y1="6" x2="42" y2="50" stroke="rgba(255,255,255,0.15)" stroke-width="0.8"/>
+            <circle cx="8.4" cy="22.5" r="3" fill="#2997ff"/>
+            <circle cx="16.8" cy="11.5" r="3" fill="#2997ff"/>
+            <circle cx="33.6" cy="22.5" r="3" fill="#2997ff"/>
+            <circle cx="42" cy="33.5" r="3" fill="#2997ff"/>
+          </svg>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CHORD CHART -->
+  <div class="chart-section">
+    <div class="section-heading">Intro</div>
+    <div class="chart-line chords-row">Dmaj7    D6</div>
+    <div class="chart-line chords-row">F#m7    F#7sus4    F#m7</div>
+    <div class="chart-line chords-row">Em7    A7b9       D</div>
+    <div class="chart-line lyrics-row">&nbsp;</div>
+
+    <div class="section-heading">Verse 1</div>
+    <div class="chart-line chords-row">Dmaj7                        D6</div>
+    <div class="chart-line lyrics-row">In a little while from now,</div>
+    <div class="chart-line chords-row">      F#m7                     F#7sus4</div>
+    <div class="chart-line lyrics-row">If I'm not feeling any less sour</div>
+    <div class="chart-line chords-row">  Am</div>
+    <div class="chart-line lyrics-row">I promised myself to treat myself</div>
+    <div class="chart-line chords-row">      F#m7b5          B7</div>
+    <div class="chart-line lyrics-row">And visit a nearby tower,</div>
+    <div class="chart-line chords-row">      Em7</div>
+    <div class="chart-line lyrics-row">And climbing to the top,</div>
+    <div class="chart-line chords-row">      Em7b5            Gm6</div>
+    <div class="chart-line lyrics-row">Will throw myself off</div>
+    <div class="chart-line chords-row">        D                 Daug</div>
+    <div class="chart-line lyrics-row">In an effort to make it clear to who-</div>
+    <div class="chart-line chords-row">      D6              C#7</div>
+    <div class="chart-line lyrics-row">ever what it's like when you're shattered</div>
+    <div class="chart-line chords-row">F#m                                      Am</div>
+    <div class="chart-line lyrics-row">Left standing in the lurch, at a church where people're say___ing,</div>
+    <div class="chart-line chords-row">      B7b9  B7</div>
+    <div class="chart-line lyrics-row">"My God that's tough, she stood him up!</div>
+    <div class="chart-line chords-row">  Em</div>
+    <div class="chart-line lyrics-row">No point in us remaining.</div>
+    <div class="chart-line chords-row">  Em7b5              Gm6</div>
+    <div class="chart-line lyrics-row">We may as well go home."</div>
+    <div class="chart-line chords-row">  Dmaj7              D6</div>
+    <div class="chart-line lyrics-row">As I did on my own,</div>
+    <div class="chart-line chords-row">      F#m  F#m7  B7</div>
+    <div class="chart-line lyrics-row">Alone again, naturally</div>
+    <div class="chart-line chords-row">  Em          A7b9        D</div>
+    <div class="chart-line lyrics-row">Alone again, naturally</div>
+  </div>
+
+  <!-- AUDIO PLAYER -->
+  <div class="player-card">
+    <div class="player-title">Recording</div>
+    <div class="waveform">
+      <div class="wbar played" style="height: 25%"></div>
+      <div class="wbar played" style="height: 40%"></div>
+      <div class="wbar played" style="height: 55%"></div>
+      <div class="wbar played" style="height: 35%"></div>
+      <div class="wbar played" style="height: 70%"></div>
+      <div class="wbar played" style="height: 50%"></div>
+      <div class="wbar played" style="height: 30%"></div>
+      <div class="wbar played" style="height: 60%"></div>
+      <div class="wbar played" style="height: 80%"></div>
+      <div class="wbar played" style="height: 45%"></div>
+      <div class="wbar played" style="height: 65%"></div>
+      <div class="wbar unplayed" style="height: 50%"></div>
+      <div class="wbar unplayed" style="height: 75%"></div>
+      <div class="wbar unplayed" style="height: 90%"></div>
+      <div class="wbar unplayed" style="height: 60%"></div>
+      <div class="wbar unplayed" style="height: 40%"></div>
+      <div class="wbar unplayed" style="height: 70%"></div>
+      <div class="wbar unplayed" style="height: 55%"></div>
+      <div class="wbar unplayed" style="height: 85%"></div>
+      <div class="wbar unplayed" style="height: 35%"></div>
+      <div class="wbar unplayed" style="height: 65%"></div>
+      <div class="wbar unplayed" style="height: 50%"></div>
+      <div class="wbar unplayed" style="height: 75%"></div>
+      <div class="wbar unplayed" style="height: 40%"></div>
+      <div class="wbar unplayed" style="height: 60%"></div>
+      <div class="wbar unplayed" style="height: 45%"></div>
+      <div class="wbar unplayed" style="height: 80%"></div>
+      <div class="wbar unplayed" style="height: 30%"></div>
+      <div class="wbar unplayed" style="height: 55%"></div>
+      <div class="wbar unplayed" style="height: 70%"></div>
+    </div>
+    <div class="player-controls">
+      <button class="play-button">&#9654;</button>
+      <span class="time">1:23 / 3:41</span>
+      <button class="download-link">&#8595; Download MP3</button>
+    </div>
+  </div>
+
+  <!-- TAGS -->
+  <div class="tags">
+    <span class="tag">songbook</span>
+    <span class="tag">pop</span>
+    <span class="tag">1970s</span>
+    <span class="tag">jazz-influenced</span>
+    <span class="tag">advanced</span>
+  </div>
+
+  <!-- COMMENTS -->
+  <div class="comments">
+    <h3>Peer Comments</h3>
+    <div class="comment">
+      <div class="comment-header">
+        <div class="avatar">M</div>
+        <span class="comment-name">maria@crow</span>
+        <span class="comment-time">2 hours ago</span>
+      </div>
+      <div class="comment-body">That Em7b5 to Gm6 movement is gorgeous. Have you tried substituting a Bbmaj7 for the Gm6? Similar function but smoother voice leading.</div>
+    </div>
+    <div class="comment">
+      <div class="comment-header">
+        <div class="avatar" style="background: linear-gradient(135deg, #30d158, #34c759);">J</div>
+        <span class="comment-name">jake@crow</span>
+        <span class="comment-time">Yesterday</span>
+      </div>
+      <div class="comment-body">Can you transpose this to C for me? The F#m7b5 is brutal on guitar in D. Also, great recording!</div>
+    </div>
+  </div>
+
+  <!-- === SONGBOOK INDEX === -->
+  <div class="mockup-divider"><span>Songbook Index — /blog/songbook/</span></div>
+
+  <div class="index-hero">
+    <h2>Songbook</h2>
+    <p>A personal collection of chords, lyrics, and recordings</p>
+  </div>
+
+  <div class="filter-bar">
+    <button class="filter-chip active">All</button>
+    <button class="filter-chip">Jazz Standards</button>
+    <button class="filter-chip">Dylan</button>
+    <button class="filter-chip">Originals</button>
+    <button class="filter-chip">Pop</button>
+  </div>
+
+  <div class="song-list">
+    <div class="song-row">
+      <span class="num">1</span>
+      <div class="info">
+        <div class="name">Alone Again (Naturally)</div>
+        <div class="artist">Gilbert O'Sullivan</div>
+      </div>
+      <span class="key-badge">D</span>
+      <span class="genre">jazz-influenced</span>
+      <span class="audio-indicator">&#9835;</span>
+    </div>
+    <div class="song-row">
+      <span class="num">2</span>
+      <div class="info">
+        <div class="name">To Ramona</div>
+        <div class="artist">Bob Dylan</div>
+      </div>
+      <span class="key-badge">G</span>
+      <span class="genre">folk</span>
+      <span class="audio-indicator"></span>
+    </div>
+    <div class="song-row">
+      <span class="num">3</span>
+      <div class="info">
+        <div class="name">Autumn Leaves</div>
+        <div class="artist">Joseph Kosma</div>
+      </div>
+      <span class="key-badge">Em</span>
+      <span class="genre">jazz standard</span>
+      <span class="audio-indicator"></span>
+    </div>
+    <div class="song-row">
+      <span class="num">4</span>
+      <div class="info">
+        <div class="name">Something I Wrote</div>
+        <div class="artist original">Original</div>
+      </div>
+      <span class="key-badge">Am</span>
+      <span class="genre">original</span>
+      <span class="audio-indicator">&#9835;</span>
+    </div>
+    <div class="song-row">
+      <span class="num">5</span>
+      <div class="info">
+        <div class="name">All The Things You Are</div>
+        <div class="artist">Jerome Kern</div>
+      </div>
+      <span class="key-badge">Ab</span>
+      <span class="genre">jazz standard</span>
+      <span class="audio-indicator"></span>
+    </div>
+  </div>
+
+  <!-- === SETLIST === -->
+  <div class="mockup-divider"><span>Setlist View</span></div>
+
+  <div class="setlist-card">
+    <div class="setlist-header">
+      <div>
+        <h2>Friday Night Set</h2>
+        <div class="stats">6 songs &middot; ~45 min &middot; Mar 19, 2026</div>
+      </div>
+    </div>
+
+    <div class="setlist-row">
+      <span class="order">1</span>
+      <span class="song-name">Autumn Leaves</span>
+      <span class="setlist-key"><span class="transposed">Gm</span> <span class="original-key">from Em</span></span>
+      <span class="duration">6:30</span>
+    </div>
+    <div class="setlist-row">
+      <span class="order">2</span>
+      <span class="song-name">All The Things You Are</span>
+      <span class="setlist-key">Ab</span>
+      <span class="duration">7:00</span>
+    </div>
+    <div class="setlist-row">
+      <span class="order">3</span>
+      <span class="song-name">To Ramona</span>
+      <span class="setlist-key"><span class="transposed">G</span> <span class="original-key">from C</span></span>
+      <span class="duration">5:45</span>
+    </div>
+    <div class="setlist-row">
+      <span class="order">4</span>
+      <span class="song-name">Something I Wrote</span>
+      <span class="setlist-key">Am</span>
+      <span class="duration">4:20</span>
+    </div>
+    <div class="setlist-row">
+      <span class="order">5</span>
+      <span class="song-name">Alone Again (Naturally)</span>
+      <span class="setlist-key">D</span>
+      <span class="duration">3:41</span>
+    </div>
+    <div class="setlist-row">
+      <span class="order">6</span>
+      <span class="song-name">Fly Me to the Moon</span>
+      <span class="setlist-key"><span class="transposed">C</span> <span class="original-key">from Am</span></span>
+      <span class="duration">5:10</span>
+    </div>
+
+    <div class="setlist-actions">
+      <button class="action-btn primary">Print Setlist</button>
+      <button class="action-btn secondary">Share with Band</button>
+      <button class="action-btn secondary">Export PDF</button>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

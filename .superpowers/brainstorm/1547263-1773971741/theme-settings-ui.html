@@ -1,0 +1,119 @@
+<h2>Theme Settings UI</h2>
+<p class="subtitle">How users control themes — one global selector with optional per-surface overrides</p>
+
+<div class="mockup">
+  <div class="mockup-header">Settings Panel — Theme Section</div>
+  <div class="mockup-body" style="padding:0;overflow:hidden">
+    <div style="background:#0f0f17;color:#fafaf9;padding:32px;font-family:'DM Sans',sans-serif;min-height:350px">
+
+      <div style="font-family:Georgia,serif;font-size:18px;font-weight:600;margin-bottom:20px">Appearance</div>
+
+      <!-- Global theme -->
+      <div style="background:#1a1a2e;border:1px solid #3d3d4d;border-radius:12px;padding:20px;margin-bottom:16px">
+        <div style="font-size:11px;color:#78716c;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px">Global Theme</div>
+
+        <div style="display:flex;gap:12px;margin-bottom:16px">
+          <!-- Dark -->
+          <div style="flex:1;background:#0f0f17;border:2px solid #6366f1;border-radius:10px;padding:12px;text-align:center;cursor:pointer">
+            <div style="width:100%;height:40px;background:#1a1a2e;border:1px solid #3d3d4d;border-radius:6px;margin-bottom:8px"></div>
+            <div style="font-size:12px;font-weight:600;color:#6366f1">Dark</div>
+          </div>
+          <!-- Light -->
+          <div style="flex:1;background:#fafaf9;border:2px solid transparent;border-color:#3d3d4d;border-radius:10px;padding:12px;text-align:center;cursor:pointer">
+            <div style="width:100%;height:40px;background:#fff;border:1px solid #e7e5e4;border-radius:6px;margin-bottom:8px"></div>
+            <div style="font-size:12px;font-weight:600;color:#57534e">Light</div>
+          </div>
+        </div>
+
+        <!-- Glass toggle -->
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-top:1px solid #3d3d4d">
+          <div>
+            <div style="font-size:14px;font-weight:500">Glass style</div>
+            <div style="font-size:12px;color:#78716c">Frosted glass cards, blur effects, iOS-style accent colors</div>
+          </div>
+          <div style="width:44px;height:24px;background:#6366f1;border-radius:12px;position:relative;cursor:pointer">
+            <div style="width:20px;height:20px;background:white;border-radius:50%;position:absolute;right:2px;top:2px"></div>
+          </div>
+        </div>
+
+        <!-- Serif toggle -->
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-top:1px solid #3d3d4d">
+          <div>
+            <div style="font-size:14px;font-weight:500">Serif headings</div>
+            <div style="font-size:12px;color:#78716c">Use Fraunces serif font for headings (default: on)</div>
+          </div>
+          <div style="width:44px;height:24px;background:#6366f1;border-radius:12px;position:relative;cursor:pointer">
+            <div style="width:20px;height:20px;background:white;border-radius:50%;position:absolute;right:2px;top:2px"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Per-surface overrides -->
+      <div style="background:#1a1a2e;border:1px solid #3d3d4d;border-radius:12px;padding:20px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <div style="font-size:11px;color:#78716c;text-transform:uppercase;letter-spacing:1px">Per-Surface Overrides</div>
+          <div style="font-size:11px;color:#a8a29e;font-style:italic">Optional — leave blank to use global</div>
+        </div>
+
+        <div style="display:flex;gap:12px">
+          <div style="flex:1">
+            <div style="font-size:12px;color:#a8a29e;margin-bottom:4px">Dashboard</div>
+            <select style="width:100%;padding:8px;background:#2d2d3d;color:#fafaf9;border:1px solid #3d3d4d;border-radius:6px;font-size:13px">
+              <option>— Use global —</option>
+              <option>Dark</option>
+              <option>Light</option>
+            </select>
+          </div>
+          <div style="flex:1">
+            <div style="font-size:12px;color:#a8a29e;margin-bottom:4px">Blog</div>
+            <select style="width:100%;padding:8px;background:#2d2d3d;color:#fafaf9;border:1px solid #3d3d4d;border-radius:6px;font-size:13px">
+              <option>— Use global —</option>
+              <option>Dark</option>
+              <option>Light</option>
+            </select>
+          </div>
+          <div style="flex:1">
+            <div style="font-size:12px;color:#a8a29e;margin-bottom:4px">Songbook</div>
+            <select style="width:100%;padding:8px;background:#2d2d3d;color:#fafaf9;border:1px solid #3d3d4d;border-radius:6px;font-size:13px">
+              <option>— Use global —</option>
+              <option>Dark</option>
+              <option>Light</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div style="margin-top:20px">
+  <h3>How It Composes</h3>
+  <table style="width:100%;border-collapse:collapse;margin-top:12px;font-size:14px">
+    <tr style="border-bottom:1px solid rgba(255,255,255,0.1)">
+      <td style="padding:8px;color:rgba(255,255,255,0.5);width:200px">Setting</td>
+      <td style="padding:8px;color:rgba(255,255,255,0.5)">Stored as</td>
+      <td style="padding:8px;color:rgba(255,255,255,0.5)">Effect</td>
+    </tr>
+    <tr style="border-bottom:1px solid rgba(255,255,255,0.1)">
+      <td style="padding:8px">Color mode</td>
+      <td style="padding:8px;font-family:monospace;font-size:12px">theme_mode: "dark" | "light"</td>
+      <td style="padding:8px">Switches all color tokens</td>
+    </tr>
+    <tr style="border-bottom:1px solid rgba(255,255,255,0.1)">
+      <td style="padding:8px">Glass style</td>
+      <td style="padding:8px;font-family:monospace;font-size:12px">theme_glass: "true" | "false"</td>
+      <td style="padding:8px">Adds .theme-glass class → blur, rgba surfaces, iOS accents, pill shapes</td>
+    </tr>
+    <tr style="border-bottom:1px solid rgba(255,255,255,0.1)">
+      <td style="padding:8px">Serif headings</td>
+      <td style="padding:8px;font-family:monospace;font-size:12px">theme_serif: "true" | "false"</td>
+      <td style="padding:8px">Adds .theme-serif class → Fraunces for headings</td>
+    </tr>
+    <tr>
+      <td style="padding:8px">Per-surface override</td>
+      <td style="padding:8px;font-family:monospace;font-size:12px">theme_blog_mode, theme_dashboard_mode</td>
+      <td style="padding:8px">Override color mode for one surface only</td>
+    </tr>
+  </table>
+</div>

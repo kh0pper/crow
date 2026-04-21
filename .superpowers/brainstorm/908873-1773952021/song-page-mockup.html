@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Song Page Mockup — Crow Songbook</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0d0d0d;
+    color: #e0e0e0;
+    font-family: 'DM Sans', sans-serif;
+    line-height: 1.6;
+    padding: 20px;
+  }
+
+  .page-container {
+    max-width: 780px;
+    margin: 0 auto;
+  }
+
+  .blog-header {
+    text-align: center;
+    padding: 20px 0 30px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    margin-bottom: 30px;
+  }
+
+  .blog-header h1 {
+    font-family: 'Fraunces', serif;
+    font-size: 14px;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 3px;
+  }
+
+  /* Song header */
+  .song-header {
+    margin-bottom: 30px;
+  }
+
+  .song-title {
+    font-family: 'Fraunces', serif;
+    font-size: 2.4rem;
+    font-weight: 700;
+    color: #f0f0f0;
+    margin-bottom: 4px;
+  }
+
+  .song-artist {
+    font-size: 1.1rem;
+    color: #999;
+    margin-bottom: 16px;
+  }
+
+  .song-meta {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+  }
+
+  .meta-tag {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 13px;
+    color: #bbb;
+  }
+
+  .meta-tag strong {
+    color: #e8b4b8;
+  }
+
+  /* Transpose bar */
+  .transpose-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    padding: 10px 16px;
+    margin-bottom: 24px;
+  }
+
+  .transpose-bar label {
+    font-size: 13px;
+    color: #999;
+    font-weight: 500;
+  }
+
+  .key-btn {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 4px;
+    color: #ccc;
+    padding: 4px 10px;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .key-btn.active {
+    background: rgba(232,180,184,0.15);
+    border-color: #e8b4b8;
+    color: #e8b4b8;
+  }
+
+  .transpose-arrows {
+    display: flex;
+    gap: 4px;
+    margin-left: auto;
+  }
+
+  .transpose-arrows button {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 4px;
+    color: #ccc;
+    padding: 4px 10px;
+    cursor: pointer;
+    font-size: 14px;
+  }
+
+  /* Chord diagrams */
+  .chord-diagrams {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 28px;
+    padding: 16px;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 8px;
+  }
+
+  .chord-diagram {
+    text-align: center;
+    min-width: 60px;
+  }
+
+  .chord-diagram .chord-name {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-weight: 600;
+    color: #e8b4b8;
+    margin-bottom: 6px;
+  }
+
+  .guitar-grid {
+    width: 48px;
+    height: 56px;
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 2px;
+    position: relative;
+    background:
+      linear-gradient(rgba(255,255,255,0.1) 1px, transparent 1px) 0 0 / 100% 20%,
+      linear-gradient(90deg, rgba(255,255,255,0.1) 1px, transparent 1px) 0 0 / 20% 100%;
+    margin: 0 auto;
+  }
+
+  .piano-mini {
+    width: 56px;
+    height: 32px;
+    display: flex;
+    position: relative;
+    margin: 0 auto;
+    border-radius: 0 0 3px 3px;
+    overflow: hidden;
+  }
+
+  .white-key {
+    flex: 1;
+    background: #ddd;
+    border: 1px solid #999;
+    border-top: none;
+  }
+
+  .white-key.pressed {
+    background: #b4d8e8;
+  }
+
+  .instrument-toggle {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .instrument-toggle button {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 4px;
+    color: #888;
+    padding: 4px 12px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .instrument-toggle button.active {
+    background: rgba(180,216,232,0.12);
+    border-color: #b4d8e8;
+    color: #b4d8e8;
+  }
+
+  /* Chord chart (chords over lyrics) */
+  .chord-chart {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    line-height: 1.4;
+    margin-bottom: 30px;
+  }
+
+  .section-label {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: #666;
+    margin: 24px 0 12px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+
+  .chord-line {
+    margin-bottom: 2px;
+  }
+
+  .lyric-line {
+    margin-bottom: 14px;
+    color: #ccc;
+  }
+
+  .chord {
+    color: #e8b4b8;
+    font-weight: 600;
+    cursor: help;
+  }
+
+  /* Audio player */
+  .audio-section {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 24px;
+  }
+
+  .audio-section h3 {
+    font-family: 'Fraunces', serif;
+    font-size: 16px;
+    color: #ccc;
+    margin-bottom: 14px;
+  }
+
+  .waveform {
+    height: 48px;
+    background: rgba(168,216,168,0.06);
+    border-radius: 6px;
+    margin-bottom: 12px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .waveform-bars {
+    display: flex;
+    align-items: center;
+    height: 100%;
+    gap: 2px;
+    padding: 8px;
+  }
+
+  .waveform-bar {
+    flex: 1;
+    background: rgba(168,216,168,0.3);
+    border-radius: 1px;
+    min-width: 2px;
+  }
+
+  .waveform-bar.played {
+    background: #a8d8a8;
+  }
+
+  .audio-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .play-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: #a8d8a8;
+    border: none;
+    color: #0d0d0d;
+    font-size: 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .time-display {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: #888;
+  }
+
+  .download-btn {
+    margin-left: auto;
+    background: rgba(168,216,168,0.1);
+    border: 1px solid rgba(168,216,168,0.3);
+    border-radius: 6px;
+    color: #a8d8a8;
+    padding: 6px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: 'DM Sans', sans-serif;
+  }
+
+  /* Comments */
+  .comments-section {
+    border-top: 1px solid rgba(255,255,255,0.08);
+    padding-top: 24px;
+    margin-top: 30px;
+  }
+
+  .comments-section h3 {
+    font-family: 'Fraunces', serif;
+    font-size: 16px;
+    color: #ccc;
+    margin-bottom: 16px;
+  }
+
+  .comment {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 10px;
+  }
+
+  .comment-author {
+    font-weight: 600;
+    color: #b4d8e8;
+    font-size: 13px;
+    margin-bottom: 4px;
+  }
+
+  .comment-text {
+    font-size: 14px;
+    color: #bbb;
+  }
+
+  .comment-time {
+    font-size: 11px;
+    color: #666;
+    margin-top: 6px;
+  }
+
+  /* Tags */
+  .song-tags {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid rgba(255,255,255,0.06);
+  }
+
+  .song-tag {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    padding: 3px 10px;
+    font-size: 12px;
+    color: #888;
+  }
+
+  /* Print */
+  .print-btn {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 6px;
+    color: #999;
+    padding: 6px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: 'DM Sans', sans-serif;
+  }
+
+  .toolbar {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 24px;
+  }
+
+  /* Mockup label */
+  .mockup-label {
+    text-align: center;
+    color: #666;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    padding: 30px 0 10px;
+    border-top: 2px dashed rgba(255,255,255,0.08);
+    margin-top: 40px;
+  }
+
+  @media print {
+    body { background: white; color: black; }
+    .blog-header, .transpose-bar, .audio-section, .comments-section, .toolbar, .instrument-toggle { display: none; }
+    .chord { color: black; }
+    .chord-chart { font-size: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="page-container">
+
+  <div class="blog-header">
+    <h1>The Crow's Nest</h1>
+  </div>
+
+  <!-- SONG HEADER -->
+  <div class="song-header">
+    <div class="song-title">Alone Again (Naturally)</div>
+    <div class="song-artist">Gilbert O'Sullivan</div>
+    <div class="song-meta">
+      <span class="meta-tag"><strong>Key:</strong> D (capo 4)</span>
+      <span class="meta-tag"><strong>Time:</strong> 3/4</span>
+      <span class="meta-tag"><strong>Tempo:</strong> 112 bpm</span>
+      <span class="meta-tag"><strong>Album:</strong> Himself (1972)</span>
+    </div>
+  </div>
+
+  <!-- TRANSPOSE BAR -->
+  <div class="transpose-bar">
+    <label>Key:</label>
+    <button class="key-btn">C</button>
+    <button class="key-btn active">D</button>
+    <button class="key-btn">E</button>
+    <button class="key-btn">F</button>
+    <button class="key-btn">G</button>
+    <button class="key-btn">A</button>
+    <button class="key-btn">Bb</button>
+    <div class="transpose-arrows">
+      <button>-1</button>
+      <button>+1</button>
+    </div>
+  </div>
+
+  <!-- TOOLBAR -->
+  <div class="toolbar">
+    <button class="print-btn">&#128424; Print</button>
+    <button class="print-btn">&#128229; PDF</button>
+    <button class="print-btn">&#128279; Share</button>
+  </div>
+
+  <!-- CHORD DIAGRAMS -->
+  <div class="instrument-toggle">
+    <button class="active">Guitar</button>
+    <button>Piano</button>
+  </div>
+  <div class="chord-diagrams">
+    <div class="chord-diagram">
+      <div class="chord-name">Dmaj7</div>
+      <div class="guitar-grid"></div>
+    </div>
+    <div class="chord-diagram">
+      <div class="chord-name">D6</div>
+      <div class="guitar-grid"></div>
+    </div>
+    <div class="chord-diagram">
+      <div class="chord-name">F#m7</div>
+      <div class="guitar-grid"></div>
+    </div>
+    <div class="chord-diagram">
+      <div class="chord-name">F#7sus4</div>
+      <div class="guitar-grid"></div>
+    </div>
+    <div class="chord-diagram">
+      <div class="chord-name">Am</div>
+      <div class="guitar-grid"></div>
+    </div>
+    <div class="chord-diagram">
+      <div class="chord-name">F#m7b5</div>
+      <div class="guitar-grid"></div>
+    </div>
+    <div class="chord-diagram">
+      <div class="chord-name">B7</div>
+      <div class="guitar-grid"></div>
+    </div>
+    <div class="chord-diagram">
+      <div class="chord-name">Em7</div>
+      <div class="guitar-grid"></div>
+    </div>
+    <div class="chord-diagram">
+      <div class="chord-name">Em7b5</div>
+      <div class="guitar-grid"></div>
+    </div>
+    <div class="chord-diagram">
+      <div class="chord-name">Gm6</div>
+      <div class="guitar-grid"></div>
+    </div>
+    <div class="chord-diagram">
+      <div class="chord-name">A7b9</div>
+      <div class="guitar-grid"></div>
+    </div>
+  </div>
+
+  <!-- CHORD CHART -->
+  <div class="chord-chart">
+    <div class="section-label">Intro</div>
+    <div class="chord-line"><span class="chord">Dmaj7</span>&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">D6</span></div>
+    <div class="chord-line"><span class="chord">F#m7</span>&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">F#7sus4</span>&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">F#m7</span></div>
+    <div class="lyric-line">&nbsp;</div>
+
+    <div class="section-label">Verse 1</div>
+    <div class="chord-line"><span class="chord">Dmaj7</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">D6</span></div>
+    <div class="lyric-line">In a little while from now,</div>
+
+    <div class="chord-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">F#m7</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">F#7sus4</span></div>
+    <div class="lyric-line">If I'm not feeling any less sour</div>
+
+    <div class="chord-line">&nbsp;&nbsp;<span class="chord">Am</span></div>
+    <div class="lyric-line">I promised myself to treat myself</div>
+
+    <div class="chord-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">F#m7b5</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">B7</span></div>
+    <div class="lyric-line">And visit a nearby tower,</div>
+
+    <div class="chord-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">Em7</span></div>
+    <div class="lyric-line">And climbing to the top,</div>
+
+    <div class="chord-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">Em7b5</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">Gm6</span></div>
+    <div class="lyric-line">Will throw myself off</div>
+
+    <div class="chord-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">D</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">Daug</span></div>
+    <div class="lyric-line">In an effort to make it clear to who-</div>
+
+    <div class="chord-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">D6</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">C#7</span></div>
+    <div class="lyric-line">ever what it's like when you're shattered</div>
+
+    <div class="chord-line"><span class="chord">F#m</span></div>
+    <div class="lyric-line">Left standing in the lurch, at a church</div>
+
+    <div class="chord-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">Am</span></div>
+    <div class="lyric-line">Where people're saying,</div>
+
+    <div class="chord-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">B7b9</span>&nbsp;&nbsp;<span class="chord">B7</span></div>
+    <div class="lyric-line">"My God that's tough, she stood him up!</div>
+
+    <div class="chord-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">Em</span></div>
+    <div class="lyric-line">No point in us remaining.</div>
+
+    <div class="chord-line">&nbsp;&nbsp;<span class="chord">Em7b5</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">Gm6</span></div>
+    <div class="lyric-line">We may as well go home."</div>
+
+    <div class="chord-line">&nbsp;&nbsp;<span class="chord">Dmaj7</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">D6</span></div>
+    <div class="lyric-line">As I did on my own,</div>
+
+    <div class="chord-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">F#m</span>&nbsp;&nbsp;<span class="chord">F#m7</span>&nbsp;&nbsp;<span class="chord">B7</span></div>
+    <div class="lyric-line">Alone again, naturally</div>
+
+    <div class="chord-line">&nbsp;&nbsp;<span class="chord">Em</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">A7b9</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="chord">D</span></div>
+    <div class="lyric-line">Alone again, naturally</div>
+  </div>
+
+  <!-- AUDIO PLAYER -->
+  <div class="audio-section">
+    <h3>Recording</h3>
+    <div class="waveform">
+      <div class="waveform-bars">
+        <div class="waveform-bar played" style="height: 30%"></div>
+        <div class="waveform-bar played" style="height: 50%"></div>
+        <div class="waveform-bar played" style="height: 70%"></div>
+        <div class="waveform-bar played" style="height: 45%"></div>
+        <div class="waveform-bar played" style="height: 80%"></div>
+        <div class="waveform-bar played" style="height: 60%"></div>
+        <div class="waveform-bar played" style="height: 40%"></div>
+        <div class="waveform-bar" style="height: 55%"></div>
+        <div class="waveform-bar" style="height: 75%"></div>
+        <div class="waveform-bar" style="height: 90%"></div>
+        <div class="waveform-bar" style="height: 65%"></div>
+        <div class="waveform-bar" style="height: 45%"></div>
+        <div class="waveform-bar" style="height: 80%"></div>
+        <div class="waveform-bar" style="height: 50%"></div>
+        <div class="waveform-bar" style="height: 70%"></div>
+        <div class="waveform-bar" style="height: 35%"></div>
+        <div class="waveform-bar" style="height: 60%"></div>
+        <div class="waveform-bar" style="height: 85%"></div>
+        <div class="waveform-bar" style="height: 40%"></div>
+        <div class="waveform-bar" style="height: 55%"></div>
+        <div class="waveform-bar" style="height: 70%"></div>
+        <div class="waveform-bar" style="height: 50%"></div>
+        <div class="waveform-bar" style="height: 65%"></div>
+        <div class="waveform-bar" style="height: 30%"></div>
+        <div class="waveform-bar" style="height: 45%"></div>
+        <div class="waveform-bar" style="height: 75%"></div>
+        <div class="waveform-bar" style="height: 60%"></div>
+        <div class="waveform-bar" style="height: 40%"></div>
+        <div class="waveform-bar" style="height: 55%"></div>
+        <div class="waveform-bar" style="height: 80%"></div>
+      </div>
+    </div>
+    <div class="audio-controls">
+      <button class="play-btn">&#9654;</button>
+      <span class="time-display">1:23 / 3:41</span>
+      <button class="download-btn">&#11015; Download MP3</button>
+    </div>
+  </div>
+
+  <!-- TAGS -->
+  <div class="song-tags">
+    <span class="song-tag">songbook</span>
+    <span class="song-tag">pop</span>
+    <span class="song-tag">1970s</span>
+    <span class="song-tag">jazz-influenced</span>
+    <span class="song-tag">advanced</span>
+  </div>
+
+  <!-- PEER COMMENTS -->
+  <div class="comments-section">
+    <h3>Comments from peers</h3>
+    <div class="comment">
+      <div class="comment-author">maria@crow</div>
+      <div class="comment-text">That Em7b5 to Gm6 movement is so nice. Have you tried substituting a Bbmaj7 for the Gm6? Similar function but smoother voice leading.</div>
+      <div class="comment-time">2 hours ago</div>
+    </div>
+    <div class="comment">
+      <div class="comment-author">jake@crow</div>
+      <div class="comment-text">Can you transpose this to C for me? The F#m7b5 is brutal on guitar in D. Also, great recording!</div>
+      <div class="comment-time">Yesterday</div>
+    </div>
+  </div>
+
+  <!-- SECOND MOCKUP: SONGBOOK INDEX -->
+  <div class="mockup-label">Songbook Index Page (/blog/songbook/)</div>
+
+  <div style="margin-top: 20px;">
+    <h2 style="font-family: 'Fraunces', serif; margin-bottom: 4px;">My Songbook</h2>
+    <p style="color: #888; margin-bottom: 20px;">A personal collection of chords, lyrics, and recordings</p>
+
+    <div style="display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap;">
+      <button class="key-btn active">All</button>
+      <button class="key-btn">Jazz Standards</button>
+      <button class="key-btn">Dylan</button>
+      <button class="key-btn">Originals</button>
+      <button class="key-btn">Pop</button>
+    </div>
+
+    <div style="border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; overflow: hidden;">
+      <div style="display: flex; padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.06); align-items: center;">
+        <div style="flex: 2;">
+          <div style="font-weight: 600; color: #e0e0e0;">Alone Again (Naturally)</div>
+          <div style="font-size: 13px; color: #888;">Gilbert O'Sullivan</div>
+        </div>
+        <div style="flex: 1; text-align: center;"><span class="meta-tag" style="font-size: 11px;"><strong>D</strong></span></div>
+        <div style="flex: 1; text-align: center; color: #888; font-size: 13px;">jazz-influenced</div>
+        <div style="flex: 0.5; text-align: center; font-size: 13px; color: #a8d8a8;">&#127925;</div>
+      </div>
+      <div style="display: flex; padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.06); align-items: center;">
+        <div style="flex: 2;">
+          <div style="font-weight: 600; color: #e0e0e0;">To Ramona</div>
+          <div style="font-size: 13px; color: #888;">Bob Dylan</div>
+        </div>
+        <div style="flex: 1; text-align: center;"><span class="meta-tag" style="font-size: 11px;"><strong>G</strong></span></div>
+        <div style="flex: 1; text-align: center; color: #888; font-size: 13px;">folk</div>
+        <div style="flex: 0.5; text-align: center;"></div>
+      </div>
+      <div style="display: flex; padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.06); align-items: center;">
+        <div style="flex: 2;">
+          <div style="font-weight: 600; color: #e0e0e0;">Autumn Leaves</div>
+          <div style="font-size: 13px; color: #888;">Joseph Kosma</div>
+        </div>
+        <div style="flex: 1; text-align: center;"><span class="meta-tag" style="font-size: 11px;"><strong>Em</strong></span></div>
+        <div style="flex: 1; text-align: center; color: #888; font-size: 13px;">jazz standard</div>
+        <div style="flex: 0.5; text-align: center;"></div>
+      </div>
+      <div style="display: flex; padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.06); align-items: center;">
+        <div style="flex: 2;">
+          <div style="font-weight: 600; color: #e0e0e0;">Something I Wrote</div>
+          <div style="font-size: 13px; color: #b4d8e8; font-style: italic;">Original</div>
+        </div>
+        <div style="flex: 1; text-align: center;"><span class="meta-tag" style="font-size: 11px;"><strong>Am</strong></span></div>
+        <div style="flex: 1; text-align: center; color: #888; font-size: 13px;">original</div>
+        <div style="flex: 0.5; text-align: center; font-size: 13px; color: #a8d8a8;">&#127925;</div>
+      </div>
+      <div style="display: flex; padding: 12px 16px; align-items: center;">
+        <div style="flex: 2;">
+          <div style="font-weight: 600; color: #e0e0e0;">All The Things You Are</div>
+          <div style="font-size: 13px; color: #888;">Jerome Kern</div>
+        </div>
+        <div style="flex: 1; text-align: center;"><span class="meta-tag" style="font-size: 11px;"><strong>Ab</strong></span></div>
+        <div style="flex: 1; text-align: center; color: #888; font-size: 13px;">jazz standard</div>
+        <div style="flex: 0.5; text-align: center;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- THIRD MOCKUP: SETLIST -->
+  <div class="mockup-label">Setlist View</div>
+
+  <div style="margin-top: 20px;">
+    <h2 style="font-family: 'Fraunces', serif; margin-bottom: 4px;">Friday Night Set</h2>
+    <p style="color: #888; margin-bottom: 16px;">6 songs &middot; ~45 min &middot; Created Mar 19, 2026</p>
+
+    <div style="border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; overflow: hidden;">
+      <div style="display: flex; padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.06); align-items: center; background: rgba(168,216,168,0.04);">
+        <div style="width: 24px; color: #666; font-size: 13px;">1</div>
+        <div style="flex: 2; font-weight: 500;">Autumn Leaves</div>
+        <div style="width: 60px; text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 13px; color: #e8b4b8;">Gm</div>
+        <div style="width: 50px; text-align: right; color: #888; font-size: 13px;">6:30</div>
+      </div>
+      <div style="display: flex; padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.06); align-items: center;">
+        <div style="width: 24px; color: #666; font-size: 13px;">2</div>
+        <div style="flex: 2; font-weight: 500;">All The Things You Are</div>
+        <div style="width: 60px; text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 13px; color: #e8b4b8;">Ab</div>
+        <div style="width: 50px; text-align: right; color: #888; font-size: 13px;">7:00</div>
+      </div>
+      <div style="display: flex; padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.06); align-items: center;">
+        <div style="width: 24px; color: #666; font-size: 13px;">3</div>
+        <div style="flex: 2; font-weight: 500;">To Ramona</div>
+        <div style="width: 60px; text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 13px; color: #a8d8a8;">G <span style="font-size: 10px; color: #666;">(from C)</span></div>
+        <div style="width: 50px; text-align: right; color: #888; font-size: 13px;">5:45</div>
+      </div>
+      <div style="display: flex; padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.06); align-items: center;">
+        <div style="width: 24px; color: #666; font-size: 13px;">4</div>
+        <div style="flex: 2; font-weight: 500;">Something I Wrote</div>
+        <div style="width: 60px; text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 13px; color: #e8b4b8;">Am</div>
+        <div style="width: 50px; text-align: right; color: #888; font-size: 13px;">4:20</div>
+      </div>
+      <div style="display: flex; padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.06); align-items: center;">
+        <div style="width: 24px; color: #666; font-size: 13px;">5</div>
+        <div style="flex: 2; font-weight: 500;">Alone Again (Naturally)</div>
+        <div style="width: 60px; text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 13px; color: #e8b4b8;">D</div>
+        <div style="width: 50px; text-align: right; color: #888; font-size: 13px;">3:41</div>
+      </div>
+      <div style="display: flex; padding: 10px 16px; align-items: center;">
+        <div style="width: 24px; color: #666; font-size: 13px;">6</div>
+        <div style="flex: 2; font-weight: 500;">Fly Me to the Moon</div>
+        <div style="width: 60px; text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 13px; color: #a8d8a8;">C <span style="font-size: 10px; color: #666;">(from Am)</span></div>
+        <div style="width: 50px; text-align: right; color: #888; font-size: 13px;">5:10</div>
+      </div>
+    </div>
+    <div style="margin-top: 12px; display: flex; gap: 8px;">
+      <button class="print-btn">&#128424; Print Setlist</button>
+      <button class="print-btn">&#128279; Share with Band</button>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

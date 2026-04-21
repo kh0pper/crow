@@ -1,0 +1,176 @@
+<h2>Messaging Layout Direction</h2>
+<p class="subtitle">How should the unified conversation list + chat area be arranged?</p>
+
+<div class="cards">
+  <!-- Option A: Classic sidebar -->
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:1rem;background:#111118">
+      <div style="display:flex;height:320px;gap:0;border-radius:8px;overflow:hidden;border:1px solid #2a2a3a">
+        <!-- Sidebar -->
+        <div style="width:35%;background:#15151f;border-right:1px solid #2a2a3a;display:flex;flex-direction:column">
+          <div style="padding:12px;border-bottom:1px solid #2a2a3a;font-size:11px;color:#888;display:flex;justify-content:space-between;align-items:center">
+            <span style="font-weight:600;color:#e0e0e0;font-size:12px">Messages</span>
+            <div style="width:20px;height:20px;border-radius:50%;background:#6366f1;display:flex;align-items:center;justify-content:center;font-size:9px;color:white">+</div>
+          </div>
+          <div style="padding:8px 12px;background:#1a1a2e">
+            <div style="background:#0f0f17;border-radius:6px;padding:6px 10px;font-size:10px;color:#666">Search...</div>
+          </div>
+          <div style="flex:1;overflow:hidden">
+            <div style="padding:10px 12px;background:rgba(99,102,241,0.08);border-left:3px solid #6366f1;display:flex;gap:8px;align-items:center">
+              <div style="width:32px;height:32px;border-radius:50%;background:#6366f1;display:flex;align-items:center;justify-content:center;font-size:11px;color:white">AI</div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:11px;font-weight:600;color:#e0e0e0">Claude</div>
+                <div style="font-size:10px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Analyzed your research project...</div>
+              </div>
+              <div style="font-size:9px;color:#555">2m</div>
+            </div>
+            <div style="padding:10px 12px;display:flex;gap:8px;align-items:center;border-bottom:1px solid rgba(255,255,255,0.03)">
+              <div style="width:32px;height:32px;border-radius:50%;background:#22c55e;display:flex;align-items:center;justify-content:center;font-size:12px;color:white">M</div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:11px;font-weight:600;color:#e0e0e0">Maria <span style="font-size:8px;background:#fbbf24;color:#000;padding:1px 4px;border-radius:3px;margin-left:4px">2</span></div>
+                <div style="font-size:10px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Can you share that paper?</div>
+              </div>
+              <div style="font-size:9px;color:#555">1h</div>
+            </div>
+            <div style="padding:10px 12px;display:flex;gap:8px;align-items:center">
+              <div style="width:32px;height:32px;border-radius:50%;background:#f59e0b;display:flex;align-items:center;justify-content:center;font-size:12px;color:white">J</div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:11px;color:#aaa">James</div>
+                <div style="font-size:10px;color:#555">Thanks for the invite!</div>
+              </div>
+              <div style="font-size:9px;color:#555">3d</div>
+            </div>
+          </div>
+        </div>
+        <!-- Chat area -->
+        <div style="flex:1;background:#0f0f17;display:flex;flex-direction:column">
+          <div style="padding:12px 16px;border-bottom:1px solid #2a2a3a;display:flex;align-items:center;gap:10px">
+            <div style="width:28px;height:28px;border-radius:50%;background:#6366f1;display:flex;align-items:center;justify-content:center;font-size:10px;color:white">AI</div>
+            <div><div style="font-size:12px;font-weight:600;color:#e0e0e0">Claude</div><div style="font-size:9px;color:#22c55e">Online</div></div>
+          </div>
+          <div style="flex:1;padding:16px;display:flex;flex-direction:column;justify-content:flex-end;gap:8px">
+            <div style="align-self:flex-start;background:#1a1a2e;border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:75%;font-size:10px;color:#ccc;line-height:1.4">I found 3 relevant sources for your research on distributed systems...</div>
+            <div style="align-self:flex-start;background:rgba(99,102,241,0.1);border:1px solid #2a2a3a;border-radius:8px;padding:6px 10px;font-size:9px;color:#6366f1">&#9654; crow_search_memories (3 results)</div>
+            <div style="align-self:flex-end;background:#6366f1;border-radius:12px 12px 4px 12px;padding:8px 12px;max-width:75%;font-size:10px;color:white">Thanks! Can you cite them in APA?</div>
+          </div>
+          <div style="padding:10px 16px;border-top:1px solid #2a2a3a;display:flex;gap:8px;align-items:center">
+            <div style="width:24px;height:24px;border-radius:6px;background:#1a1a2e;display:flex;align-items:center;justify-content:center;font-size:12px;cursor:pointer">+</div>
+            <div style="flex:1;background:#1a1a2e;border-radius:20px;padding:8px 14px;font-size:10px;color:#555">Type a message...</div>
+            <div style="width:28px;height:28px;border-radius:50%;background:#6366f1;display:flex;align-items:center;justify-content:center;font-size:11px;color:white">&#8593;</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. Classic Sidebar</h3>
+      <p>WhatsApp/Telegram style — conversation list on left, active chat on right. Clean and familiar. Works at all screen sizes with sidebar collapse.</p>
+    </div>
+  </div>
+
+  <!-- Option B: Full-width threads -->
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:1rem;background:#111118">
+      <div style="height:320px;border-radius:8px;overflow:hidden;border:1px solid #2a2a3a;background:#0f0f17;display:flex;flex-direction:column">
+        <div style="padding:12px 20px;border-bottom:1px solid #2a2a3a;display:flex;justify-content:space-between;align-items:center">
+          <span style="font-weight:600;color:#e0e0e0;font-size:13px">Messages</span>
+          <div style="display:flex;gap:6px">
+            <div style="padding:4px 10px;border-radius:20px;background:#6366f1;font-size:10px;color:white">All</div>
+            <div style="padding:4px 10px;border-radius:20px;background:#1a1a2e;font-size:10px;color:#888">AI</div>
+            <div style="padding:4px 10px;border-radius:20px;background:#1a1a2e;font-size:10px;color:#888">People</div>
+          </div>
+        </div>
+        <div style="flex:1;overflow:hidden">
+          <div style="padding:14px 20px;background:rgba(99,102,241,0.05);border-left:3px solid #6366f1;display:flex;gap:12px;align-items:center;border-bottom:1px solid rgba(255,255,255,0.03)">
+            <div style="width:44px;height:44px;border-radius:50%;background:#6366f1;display:flex;align-items:center;justify-content:center;font-size:14px;color:white">AI</div>
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;justify-content:space-between"><span style="font-size:13px;font-weight:600;color:#e0e0e0">Claude</span><span style="font-size:10px;color:#555">2 min ago</span></div>
+              <div style="font-size:11px;color:#888;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">I found 3 relevant sources for your research on distributed systems. Here are the APA citations...</div>
+            </div>
+          </div>
+          <div style="padding:14px 20px;display:flex;gap:12px;align-items:center;border-bottom:1px solid rgba(255,255,255,0.03)">
+            <div style="position:relative;width:44px;height:44px">
+              <div style="width:44px;height:44px;border-radius:50%;background:#22c55e;display:flex;align-items:center;justify-content:center;font-size:15px;color:white">M</div>
+              <div style="position:absolute;bottom:-1px;right:-1px;width:12px;height:12px;border-radius:50%;background:#22c55e;border:2px solid #0f0f17"></div>
+            </div>
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;justify-content:space-between"><span style="font-size:13px;font-weight:600;color:#e0e0e0">Maria</span><span style="font-size:10px;color:#555">1 hour ago</span></div>
+              <div style="font-size:11px;color:#888;margin-top:2px">Can you share that paper about CAP theorem?</div>
+            </div>
+            <div style="min-width:20px;height:20px;border-radius:10px;background:#fbbf24;color:#000;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;padding:0 6px">2</div>
+          </div>
+          <div style="padding:14px 20px;display:flex;gap:12px;align-items:center;border-bottom:1px solid rgba(255,255,255,0.03)">
+            <div style="width:44px;height:44px;border-radius:50%;background:#f59e0b;display:flex;align-items:center;justify-content:center;font-size:15px;color:white">J</div>
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;justify-content:space-between"><span style="font-size:13px;color:#aaa">James</span><span style="font-size:10px;color:#555">3 days ago</span></div>
+              <div style="font-size:11px;color:#666;margin-top:2px">Thanks for the invite!</div>
+            </div>
+          </div>
+          <div style="padding:14px 20px;display:flex;gap:12px;align-items:center;opacity:0.5">
+            <div style="width:44px;height:44px;border-radius:50%;background:#3d3d4d;display:flex;align-items:center;justify-content:center;font-size:15px;color:#888">R</div>
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;justify-content:space-between"><span style="font-size:13px;color:#666">Research Bot</span><span style="font-size:10px;color:#555">1 week ago</span></div>
+              <div style="font-size:11px;color:#555;margin-top:2px">Project summary exported successfully</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. Full-Width Threads</h3>
+      <p>Signal-style — conversation list takes full width. Tapping a thread navigates into it (back button to return). Filter tabs for All/AI/People. Maximizes space on mobile.</p>
+    </div>
+  </div>
+
+  <!-- Option C: Three-panel -->
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:1rem;background:#111118">
+      <div style="display:flex;height:320px;gap:0;border-radius:8px;overflow:hidden;border:1px solid #2a2a3a">
+        <!-- Narrow contact strip -->
+        <div style="width:60px;background:#0a0a12;display:flex;flex-direction:column;align-items:center;padding-top:12px;gap:8px;border-right:1px solid #2a2a3a">
+          <div style="width:36px;height:36px;border-radius:50%;background:#6366f1;display:flex;align-items:center;justify-content:center;font-size:10px;color:white;border:2px solid #818cf8">AI</div>
+          <div style="width:36px;height:36px;border-radius:50%;background:#22c55e;display:flex;align-items:center;justify-content:center;font-size:11px;color:white;position:relative">M<div style="position:absolute;top:-2px;right:-2px;width:10px;height:10px;border-radius:50%;background:#fbbf24;border:2px solid #0a0a12;font-size:6px;display:flex;align-items:center;justify-content:center;color:#000;font-weight:700">2</div></div>
+          <div style="width:36px;height:36px;border-radius:50%;background:#f59e0b;display:flex;align-items:center;justify-content:center;font-size:11px;color:white">J</div>
+          <div style="width:36px;height:36px;border-radius:50%;background:#3d3d4d;display:flex;align-items:center;justify-content:center;font-size:11px;color:#888">R</div>
+          <div style="margin-top:auto;margin-bottom:12px;width:28px;height:28px;border-radius:50%;background:#1a1a2e;display:flex;align-items:center;justify-content:center;font-size:12px;color:#666">+</div>
+        </div>
+        <!-- Chat area -->
+        <div style="flex:1;background:#0f0f17;display:flex;flex-direction:column">
+          <div style="padding:12px 16px;border-bottom:1px solid #2a2a3a;display:flex;align-items:center;gap:10px">
+            <div style="font-size:13px;font-weight:600;color:#e0e0e0">Claude</div>
+            <div style="font-size:9px;color:#22c55e">● Online</div>
+            <div style="margin-left:auto;font-size:10px;color:#555">Anthropic / claude-sonnet</div>
+          </div>
+          <div style="flex:1;padding:16px;display:flex;flex-direction:column;justify-content:flex-end;gap:8px">
+            <div style="align-self:flex-start;background:#1a1a2e;border-radius:12px 12px 12px 4px;padding:8px 12px;max-width:80%;font-size:10px;color:#ccc;line-height:1.4">I found 3 relevant sources for your research...</div>
+            <div style="align-self:flex-end;background:#6366f1;border-radius:12px 12px 4px 12px;padding:8px 12px;max-width:75%;font-size:10px;color:white">Thanks! Can you cite them?</div>
+          </div>
+          <div style="padding:10px 16px;border-top:1px solid #2a2a3a;display:flex;gap:8px;align-items:center">
+            <div style="flex:1;background:#1a1a2e;border-radius:20px;padding:8px 14px;font-size:10px;color:#555">Type a message...</div>
+            <div style="width:28px;height:28px;border-radius:50%;background:#6366f1;display:flex;align-items:center;justify-content:center;font-size:11px;color:white">&#8593;</div>
+          </div>
+        </div>
+        <!-- Info sidebar -->
+        <div style="width:180px;background:#15151f;border-left:1px solid #2a2a3a;padding:16px;display:flex;flex-direction:column;gap:12px">
+          <div style="text-align:center">
+            <div style="width:48px;height:48px;border-radius:50%;background:#6366f1;display:flex;align-items:center;justify-content:center;font-size:16px;color:white;margin:0 auto 8px">AI</div>
+            <div style="font-size:12px;font-weight:600;color:#e0e0e0">Claude</div>
+            <div style="font-size:10px;color:#666">AI Provider</div>
+          </div>
+          <div style="border-top:1px solid #2a2a3a;padding-top:10px">
+            <div style="font-size:9px;color:#555;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Shared Files</div>
+            <div style="font-size:10px;color:#888;padding:4px 0">research.pdf</div>
+            <div style="font-size:10px;color:#888;padding:4px 0">notes.md</div>
+          </div>
+          <div style="border-top:1px solid #2a2a3a;padding-top:10px">
+            <div style="font-size:9px;color:#555;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Encryption</div>
+            <div style="font-size:10px;color:#22c55e">&#128274; End-to-end encrypted</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. Three-Panel (Discord-like)</h3>
+      <p>Narrow avatar strip + chat + contact info sidebar. Dense, information-rich. Shows encryption status, shared files, contact details alongside the conversation.</p>
+    </div>
+  </div>
+</div>

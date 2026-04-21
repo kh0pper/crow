@@ -1,0 +1,92 @@
+<h2>Header Icons: Notifications + Health</h2>
+<p class="subtitle">Two compact icons in the header bar, each with its own dropdown</p>
+
+<div class="cards">
+  <div class="card" data-choice="dual-icons" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding: 0;">
+      <div style="background: #1a1a2e; border-radius: 8px 8px 0 0; overflow: hidden; font-family: 'DM Sans', system-ui, sans-serif;">
+        <div style="display: flex; min-height: 120px;">
+          <div style="width: 60px; background: #16162a; border-right: 1px solid #2a2a3e; display: flex; flex-direction: column; padding: 12px 0; align-items: center;">
+            <div style="font-family: serif; font-size: 14px; font-weight: 700; color: #e2e8f0; padding-bottom: 8px; border-bottom: 1px solid #2a2a3e; width: 100%; text-align: center;">Crow</div>
+          </div>
+          <div style="flex: 1;">
+            <div style="display: flex; align-items: center; padding: 10px 16px; border-bottom: 1px solid #2a2a3e; gap: 4px;">
+              <div style="font-family: serif; font-size: 15px; font-weight: 600; color: #e2e8f0; flex: 1;">Media</div>
+              <!-- Health icon -->
+              <div style="position: relative; cursor: pointer; padding: 4px 6px; border-radius: 6px; background: rgba(34,197,94,0.08); display: flex; align-items: center; gap: 4px; margin-right: 6px;">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                <span style="font-size: 9px; color: #22c55e; font-family: monospace; font-weight: 500;">OK</span>
+              </div>
+              <!-- Bell icon with badge -->
+              <div style="position: relative; cursor: pointer; padding: 4px;">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#999" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                <span style="position: absolute; top: 0px; right: -2px; background: #fbbf24; color: #000; font-size: 8px; font-weight: 700; min-width: 13px; height: 13px; border-radius: 7px; display: flex; align-items: center; justify-content: center; padding: 0 2px;">3</span>
+              </div>
+              <!-- Theme toggle -->
+              <div style="font-size: 11px; color: #666; padding: 4px; margin-left: 4px;">&#9788;</div>
+            </div>
+            <div style="padding: 16px; color: #555; font-size: 11px; text-align: center;">Panel content area...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A: Header Bar (closed state)</h3>
+      <p>Left to right: Page title | Health pulse (green = OK, amber = warning, red = error) | Notification bell with badge | Theme toggle. Compact, always visible.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="health-dropdown" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding: 0;">
+      <div style="background: #1a1a2e; border-radius: 8px 8px 0 0; overflow: hidden; font-family: 'DM Sans', system-ui, sans-serif;">
+        <div style="display: flex; min-height: 300px;">
+          <div style="width: 60px; background: #16162a; border-right: 1px solid #2a2a3e;"></div>
+          <div style="flex: 1; position: relative;">
+            <div style="display: flex; align-items: center; padding: 10px 16px; border-bottom: 1px solid #2a2a3e; gap: 4px;">
+              <div style="font-family: serif; font-size: 15px; font-weight: 600; color: #e2e8f0; flex: 1;">Media</div>
+              <div style="position: relative; cursor: pointer; padding: 4px 6px; border-radius: 6px; background: rgba(34,197,94,0.15); display: flex; align-items: center; gap: 4px;">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                <span style="font-size: 9px; color: #22c55e; font-family: monospace; font-weight: 500;">OK</span>
+              </div>
+              <div style="padding: 4px;">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#999" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+              </div>
+              <div style="font-size: 11px; color: #666; padding: 4px; margin-left: 4px;">&#9788;</div>
+            </div>
+            <!-- Health dropdown -->
+            <div style="position: absolute; top: 44px; right: 60px; width: 260px; background: #16162a; border: 1px solid #2a2a3e; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); z-index: 10; overflow: hidden;">
+              <div style="padding: 10px 14px; border-bottom: 1px solid #2a2a3e;">
+                <span style="font-size: 13px; font-weight: 600; color: #e2e8f0;">Server Health</span>
+              </div>
+              <div style="padding: 10px 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                <div>
+                  <div style="font-size: 9px; color: #666; text-transform: uppercase; letter-spacing: 0.06em;">CPU</div>
+                  <div style="font-size: 18px; color: #22c55e; font-family: 'JetBrains Mono', monospace; font-weight: 500;">11%</div>
+                </div>
+                <div>
+                  <div style="font-size: 9px; color: #666; text-transform: uppercase; letter-spacing: 0.06em;">RAM</div>
+                  <div style="font-size: 18px; color: #22c55e; font-family: 'JetBrains Mono', monospace; font-weight: 500;">43%</div>
+                </div>
+                <div>
+                  <div style="font-size: 9px; color: #666; text-transform: uppercase; letter-spacing: 0.06em;">Disk</div>
+                  <div style="font-size: 18px; color: #fbbf24; font-family: 'JetBrains Mono', monospace; font-weight: 500;">76%</div>
+                </div>
+                <div>
+                  <div style="font-size: 9px; color: #666; text-transform: uppercase; letter-spacing: 0.06em;">Uptime</div>
+                  <div style="font-size: 14px; color: #888; font-family: 'JetBrains Mono', monospace; font-weight: 500;">4d 11h</div>
+                </div>
+              </div>
+              <div style="padding: 6px 14px 10px; border-top: 1px solid #2a2a3e;">
+                <a href="#" style="font-size: 11px; color: #6366f1; text-decoration: none;">View full dashboard &rarr;</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B: Health Dropdown (open)</h3>
+      <p>Click the pulse icon to see CPU, RAM, Disk, Uptime at a glance. Color-coded: green = healthy, amber = warning (>70%), red = critical (>90%). Link to full Health panel for details.</p>
+    </div>
+  </div>
+</div>

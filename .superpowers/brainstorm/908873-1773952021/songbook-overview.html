@@ -1,0 +1,144 @@
+<h2>Crow Songbook Extension — Architecture Overview</h2>
+<p class="subtitle">Blog-integrated music platform with ChordPro, audio, and self-publishing</p>
+
+<div class="section">
+  <h3>How It Works</h3>
+  <div class="mockup">
+    <div class="mockup-header">Content Type Extension Pattern (Songbook is first instance)</div>
+    <div class="mockup-body" style="font-family: monospace; font-size: 13px; line-height: 1.6; padding: 20px;">
+      <div style="display: flex; gap: 30px; flex-wrap: wrap;">
+        <div style="flex: 1; min-width: 280px;">
+          <div style="color: #e8b4b8; font-weight: bold; margin-bottom: 8px;">STORAGE (blog_posts table)</div>
+          <div style="background: rgba(232,180,184,0.1); padding: 12px; border-radius: 6px; border: 1px solid rgba(232,180,184,0.2);">
+            <div>content: <span style="color: #a8d8a8;">ChordPro markup</span></div>
+            <div>tags: <span style="color: #a8d8a8;">"songbook, jazz, original"</span></div>
+            <div>status: <span style="color: #a8d8a8;">draft | published | archived</span></div>
+            <div>visibility: <span style="color: #a8d8a8;">private | peers | public</span></div>
+            <div style="margin-top: 8px; color: #888;">+ metadata in content header:</div>
+            <div>&nbsp; key, tempo, time_sig, capo,</div>
+            <div>&nbsp; artist, audio_url, instrument</div>
+          </div>
+        </div>
+        <div style="flex: 1; min-width: 280px;">
+          <div style="color: #b4d8e8; font-weight: bold; margin-bottom: 8px;">RENDERING PIPELINE</div>
+          <div style="background: rgba(180,216,232,0.1); padding: 12px; border-radius: 6px; border: 1px solid rgba(180,216,232,0.2);">
+            <div>1. Parse ChordPro → AST</div>
+            <div>2. Apply transposition (if requested)</div>
+            <div>3. Render chords-over-lyrics HTML</div>
+            <div>4. Generate chord diagrams (SVG)</div>
+            <div>&nbsp;&nbsp;&nbsp;- Guitar fretboard boxes</div>
+            <div>&nbsp;&nbsp;&nbsp;- Piano keyboard diagrams</div>
+            <div>5. Embed audio player (if audio_url)</div>
+            <div>6. Print-friendly CSS @media print</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Sharing Model</h3>
+  <div style="display: flex; gap: 16px; flex-wrap: wrap;">
+    <div style="flex: 1; min-width: 200px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 16px;">
+      <div style="font-size: 24px; margin-bottom: 8px;">&#128274;</div>
+      <h4 style="margin: 0 0 6px 0;">Private</h4>
+      <p style="color: #999; margin: 0; font-size: 13px;">Your personal chord book. Draft status, only you see it. Sketch songs, collect charts.</p>
+    </div>
+    <div style="flex: 1; min-width: 200px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 16px;">
+      <div style="font-size: 24px; margin-bottom: 8px;">&#128101;</div>
+      <h4 style="margin: 0 0 6px 0;">Peers</h4>
+      <p style="color: #999; margin: 0; font-size: 13px;">Share with Crow contacts via P2P. Collaborate on arrangements, share sketches with bandmates.</p>
+    </div>
+    <div style="flex: 1; min-width: 200px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 16px;">
+      <div style="font-size: 24px; margin-bottom: 8px;">&#127758;</div>
+      <h4 style="margin: 0 0 6px 0;">Public</h4>
+      <p style="color: #999; margin: 0; font-size: 13px;">Published to your blog. Podcast feed for distribution. Download button for audio. Your own Bandcamp.</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Sample ChordPro Source (stored in blog post content)</h3>
+  <div class="mockup">
+    <div class="mockup-header">To Ramona — as ChordPro</div>
+    <div class="mockup-body" style="font-family: monospace; font-size: 13px; line-height: 1.8; padding: 20px; white-space: pre;">{title: To Ramona}
+{artist: Bob Dylan}
+{album: Another Side of Bob Dylan}
+{key: C}
+{tempo: 120}
+{capo: 0}
+
+{start_of_verse: Verse 1}
+Ra-[C]mona, come [G]closer,
+Shut [G6]softly your [G7]watery eyes
+The [F]pangs of your sadness
+Shall [C]pass as your [G]senses will rise
+{end_of_verse}
+
+{start_of_verse: Verse 2}
+I've [C]heard you say [G]many times
+That you're [G6]better than [G7]no one
+And [F]no one is better than [C]all
+{end_of_verse}</div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Key Features</h3>
+  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;">
+    <div style="background: rgba(168,216,168,0.08); border: 1px solid rgba(168,216,168,0.2); border-radius: 6px; padding: 12px;">
+      <strong style="color: #a8d8a8;">ChordPro Parser</strong><br/>
+      <span style="color: #999; font-size: 13px;">Parse, validate, and render ChordPro format. Import from plain text sources.</span>
+    </div>
+    <div style="background: rgba(168,216,168,0.08); border: 1px solid rgba(168,216,168,0.2); border-radius: 6px; padding: 12px;">
+      <strong style="color: #a8d8a8;">Auto-Transpose</strong><br/>
+      <span style="color: #999; font-size: 13px;">Transpose to any key. URL param: /blog/to-ramona?key=G. Nashville numbers optional.</span>
+    </div>
+    <div style="background: rgba(168,216,168,0.08); border: 1px solid rgba(168,216,168,0.2); border-radius: 6px; padding: 12px;">
+      <strong style="color: #a8d8a8;">Chord Diagrams</strong><br/>
+      <span style="color: #999; font-size: 13px;">SVG guitar fretboard + piano keyboard. Auto-generated from chord names. Voicing library.</span>
+    </div>
+    <div style="background: rgba(168,216,168,0.08); border: 1px solid rgba(168,216,168,0.2); border-radius: 6px; padding: 12px;">
+      <strong style="color: #a8d8a8;">Audio Player</strong><br/>
+      <span style="color: #999; font-size: 13px;">Embedded player for recordings. Upload via storage server. Waveform visualization.</span>
+    </div>
+    <div style="background: rgba(168,216,168,0.08); border: 1px solid rgba(168,216,168,0.2); border-radius: 6px; padding: 12px;">
+      <strong style="color: #a8d8a8;">Podcast Feed</strong><br/>
+      <span style="color: #999; font-size: 13px;">Original music as podcast episodes. Apple/Spotify distribution via existing podcast RSS.</span>
+    </div>
+    <div style="background: rgba(168,216,168,0.08); border: 1px solid rgba(168,216,168,0.2); border-radius: 6px; padding: 12px;">
+      <strong style="color: #a8d8a8;">Setlist Builder</strong><br/>
+      <span style="color: #999; font-size: 13px;">Organize songs into setlists. Print-optimized. Quick transpose per setlist.</span>
+    </div>
+    <div style="background: rgba(168,216,168,0.08); border: 1px solid rgba(168,216,168,0.2); border-radius: 6px; padding: 12px;">
+      <strong style="color: #a8d8a8;">Print Layout</strong><br/>
+      <span style="color: #999; font-size: 13px;">@media print CSS. Clean chord charts on paper. Setlist printing. No chrome.</span>
+    </div>
+    <div style="background: rgba(168,216,168,0.08); border: 1px solid rgba(168,216,168,0.2); border-radius: 6px; padding: 12px;">
+      <strong style="color: #a8d8a8;">Downloads</strong><br/>
+      <span style="color: #999; font-size: 13px;">Download audio files + PDF chord charts. Self-hosted Bandcamp-style release pages.</span>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Extension Pattern for Future Content Types</h3>
+  <div class="mockup">
+    <div class="mockup-header">Blog Content Type Extensions (reusable pattern)</div>
+    <div class="mockup-body" style="font-family: monospace; font-size: 13px; line-height: 1.6; padding: 20px;">
+<span style="color: #e8b4b8;">Songbook</span>    → tag: "songbook"  → ChordPro renderer  → /blog/songbook/*
+<span style="color: #b4d8e8;">Podcast</span>     → tag: "podcast"   → audio metadata     → /blog/podcast.xml  <span style="color: #666;">(exists)</span>
+<span style="color: #d8d4b4;">Recipes</span>     → tag: "recipe"    → recipe renderer    → /blog/recipes/*   <span style="color: #666;">(future)</span>
+<span style="color: #d4b4d8;">Data Viz</span>    → tag: "dataviz"   → chart renderer     → /blog/data/*      <span style="color: #666;">(future)</span>
+
+Each content type provides:
+  1. A custom renderer (markdown extension or post-processor)
+  2. Tag-based filtering routes (/blog/songbook/, /blog/recipes/)
+  3. Optional specialized RSS feed
+  4. A Nest panel for creation/management
+  5. MCP tools for AI-assisted creation
+  6. A skill file for behavioral guidance
+    </div>
+  </div>
+</div>

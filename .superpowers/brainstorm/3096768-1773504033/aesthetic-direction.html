@@ -1,0 +1,85 @@
+<h2>Aesthetic Direction</h2>
+<p class="subtitle">The three-panel layout stays the same — this is about the visual personality of the messaging interface</p>
+
+<div class="cards">
+  <!-- Option A: Dark Refined -->
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:0;overflow:hidden">
+      <div style="height:260px;background:linear-gradient(135deg, #0a0a12 0%, #12121e 50%, #0f0f1a 100%);padding:24px;display:flex;flex-direction:column;gap:12px;font-family:system-ui">
+        <div style="display:flex;gap:12px;align-items:center;margin-bottom:8px">
+          <div style="width:40px;height:40px;border-radius:12px;background:linear-gradient(135deg,#6366f1,#818cf8);display:flex;align-items:center;justify-content:center;font-size:14px;color:white;font-weight:600">AI</div>
+          <div><div style="font-size:14px;color:#fafaf9;font-weight:500;letter-spacing:-0.01em">Claude</div><div style="font-size:11px;color:#4ade80;letter-spacing:0.02em">active now</div></div>
+        </div>
+        <div style="align-self:flex-start;background:rgba(255,255,255,0.04);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.06);border-radius:16px 16px 16px 4px;padding:12px 16px;max-width:80%;font-size:13px;color:#d4d4d8;line-height:1.55;letter-spacing:0.01em">Here are the citations in APA format. I've verified each source against the DOI registry.</div>
+        <div style="align-self:flex-end;background:linear-gradient(135deg,#4f46e5,#6366f1);border-radius:16px 16px 4px 16px;padding:12px 16px;max-width:70%;font-size:13px;color:white;line-height:1.5;box-shadow:0 4px 16px rgba(99,102,241,0.3)">Perfect, can you also check the 2024 revision?</div>
+        <div style="align-self:flex-start;display:flex;gap:8px;align-items:center">
+          <div style="background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.15);border-radius:10px;padding:8px 12px;display:flex;gap:6px;align-items:center;font-size:11px;color:#818cf8">
+            <span style="opacity:0.6">&#128206;</span>
+            <span>research-sources.pdf</span>
+            <span style="font-size:10px;color:#555;margin-left:4px">2.4 MB</span>
+          </div>
+        </div>
+        <div style="margin-top:auto;display:flex;gap:8px;align-items:center;padding:10px 14px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:24px">
+          <span style="font-size:16px;opacity:0.4">+</span>
+          <span style="flex:1;font-size:12px;color:#555;letter-spacing:0.01em">Message Claude...</span>
+          <div style="width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,#4f46e5,#6366f1);display:flex;align-items:center;justify-content:center;color:white;font-size:13px;box-shadow:0 2px 8px rgba(99,102,241,0.4)">&#8593;</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. Dark Refined</h3>
+      <p>Glassmorphism + gradients. Elegant, modern, premium feel. Inspired by Arc browser and Linear. Frosted glass effects, subtle glow on interactive elements, smooth rounded corners.</p>
+    </div>
+  </div>
+
+  <!-- Option B: Dark Editorial (current Crow brand) -->
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:0;overflow:hidden">
+      <div style="height:260px;background:#0f0f17;padding:24px;display:flex;flex-direction:column;gap:10px;font-family:system-ui">
+        <div style="display:flex;gap:10px;align-items:center;margin-bottom:6px;padding-bottom:10px;border-bottom:1px solid #2a2a3a">
+          <div style="width:36px;height:36px;border-radius:50%;background:#6366f1;display:flex;align-items:center;justify-content:center;font-size:12px;color:white;font-weight:600">AI</div>
+          <div><div style="font-size:13px;color:#fafaf9;font-weight:600;font-family:Georgia,serif">Claude</div><div style="font-size:10px;color:#78716c;font-family:monospace">Anthropic / claude-sonnet</div></div>
+          <div style="margin-left:auto;font-size:10px;padding:3px 8px;border:1px solid #2a2a3a;border-radius:4px;color:#22c55e">&#9679; Online</div>
+        </div>
+        <div style="align-self:flex-start;background:#1a1a2e;border-radius:8px;padding:10px 14px;max-width:80%;font-size:12px;color:#a8a29e;line-height:1.5;border:1px solid #2a2a3a">Here are the citations in APA format. I've verified each source against the DOI registry.</div>
+        <div style="align-self:flex-start;background:rgba(99,102,241,0.06);border:1px solid rgba(99,102,241,0.15);border-radius:6px;padding:6px 10px;font-size:10px;font-family:monospace;color:#6366f1">&#9654; crow_search_memories → 3 results</div>
+        <div style="align-self:flex-end;background:#6366f1;border-radius:8px;padding:10px 14px;max-width:70%;font-size:12px;color:white;line-height:1.5">Perfect, can you also check the 2024 revision?</div>
+        <div style="margin-top:auto;display:flex;gap:8px;align-items:center">
+          <div style="width:28px;height:28px;border-radius:4px;background:#1a1a2e;border:1px solid #2a2a3a;display:flex;align-items:center;justify-content:center;font-size:14px;color:#78716c">+</div>
+          <div style="flex:1;background:#1a1a2e;border:1px solid #2a2a3a;border-radius:6px;padding:8px 12px;font-size:11px;color:#555">Type a message...</div>
+          <div style="padding:6px 14px;background:#6366f1;border-radius:6px;font-size:11px;color:white;font-weight:600">Send</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. Dark Editorial (Enhanced)</h3>
+      <p>Evolves the existing Crow Dark Editorial design — serif headers, monospace metadata, sharp borders. Clean and functional. Stays consistent with the rest of the Crow's Nest but elevated.</p>
+    </div>
+  </div>
+
+  <!-- Option C: Minimal Signal -->
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:0;overflow:hidden">
+      <div style="height:260px;background:#111111;padding:24px;display:flex;flex-direction:column;gap:12px;font-family:-apple-system,system-ui,sans-serif">
+        <div style="display:flex;gap:10px;align-items:center;margin-bottom:4px">
+          <div style="width:38px;height:38px;border-radius:50%;background:#3b82f6;display:flex;align-items:center;justify-content:center;font-size:13px;color:white">AI</div>
+          <div style="flex:1"><div style="font-size:14px;color:#e5e5e5;font-weight:500">Claude</div></div>
+          <div style="font-size:10px;color:#4ade80">&#9679;</div>
+        </div>
+        <div style="width:100%;height:1px;background:#222"></div>
+        <div style="align-self:flex-start;background:#1c1c1c;border-radius:18px 18px 18px 6px;padding:10px 16px;max-width:80%;font-size:13px;color:#ccc;line-height:1.5">Here are the citations in APA format.</div>
+        <div style="align-self:flex-end;background:#3b82f6;border-radius:18px 18px 6px 18px;padding:10px 16px;max-width:70%;font-size:13px;color:white;line-height:1.5">Can you check the 2024 revision?</div>
+        <div style="align-self:flex-start;background:#1c1c1c;border-radius:18px 18px 18px 6px;padding:10px 16px;font-size:13px;color:#ccc;line-height:1.5">Checking now...</div>
+        <div style="margin-top:auto;display:flex;gap:10px;align-items:center">
+          <div style="font-size:20px;color:#555">+</div>
+          <div style="flex:1;background:#1a1a1a;border:1px solid #333;border-radius:22px;padding:10px 16px;font-size:12px;color:#555">Message...</div>
+          <div style="width:34px;height:34px;border-radius:50%;background:#3b82f6;display:flex;align-items:center;justify-content:center;color:white;font-size:14px">&#8593;</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. Minimal Signal</h3>
+      <p>Ultra-clean, almost invisible chrome. Maximum focus on the conversation. No borders, no decorations — just content. Like Signal's desktop app but darker.</p>
+    </div>
+  </div>
+</div>
