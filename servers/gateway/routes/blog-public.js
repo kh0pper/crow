@@ -753,7 +753,7 @@ export default function blogPublicRouter() {
       // off a single origin.
       const hasFigures = /<figure\s+class="crow-(chart|map)"/i.test(html);
       const hydrateScript = hasFigures
-        ? `\n<script defer data-hydrate-entry="1" data-bundle-version="1" src="/bundles/tea-maps/shared/blog-hydrate.js"></script>`
+        ? `\n<script defer data-hydrate-entry="1" data-bundle-version="1" src="/blog/assets/shared/blog-hydrate.js"></script>`
         : "";
       const tags = (post.tags || "").split(",").map((t) => t.trim()).filter(Boolean);
       const tagsHtml = tags.length > 0

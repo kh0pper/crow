@@ -20,7 +20,7 @@
  * Keyed via ipKeyGenerator for IPv6 correctness.
  */
 
-import { Router } from "express";
+import express, { Router } from "express";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { createClient } from "@libsql/client";
 import { resolve } from "node:path";
@@ -28,6 +28,27 @@ import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import { createDbClient } from "../../db.js";
 import { getObject } from "../../storage/s3-client.js";
+
+// Tailscale Serve only exposes /blog/* to the funnel (per the April
+// 2026 security fix that narrowed the public surface). The blog-hydrate
+// script + its vendored deps (Chart.js, Leaflet, shared renderer) must
+// therefore live under /blog/* too — the /bundles/* path works inside
+// the tailnet but 404s over the public URL. We static-mount the
+// tea-maps bundle's client assets under /blog/assets/* here.
+const TEA_MAPS_REPO = resolve(
+  homedir(),
+  "research-bundles",
+  "tea-maps",
+);
+const TEA_MAPS_INSTALLED = resolve(
+  homedir(),
+  ".crow",
+  "bundles",
+  "tea-maps",
+);
+const TEA_MAPS_DIR = existsSync(TEA_MAPS_INSTALLED)
+  ? TEA_MAPS_INSTALLED
+  : TEA_MAPS_REPO;
 
 const MAX_ROWS = 5000;
 const QUERY_TIMEOUT_MS = 10_000;
@@ -135,6 +156,23 @@ export function blogEmbedApiRouter() {
 
   router.use("/blog/api", embedLimiter);
   router.use("/blog/figures", embedLimiter);
+
+  // Static hydration assets — served under /blog/* so they ride the
+  // Tailscale Serve path allowlist. Files are public by design (read-only
+  // JS + CSS + image sprites). The underlying bundle dirs are on disk;
+  // express.static sets proper Content-Type.
+  const staticOpts = { maxAge: "1h", index: false, dotfiles: "deny" };
+  router.use(
+    "/blog/assets/shared",
+    express.static(resolve(TEA_MAPS_DIR, "shared"), staticOpts),
+  );
+  router.use(
+    "/blog/assets/leaflet",
+    express.static(
+      resolve(TEA_MAPS_DIR, "panel", "vendor", "leaflet-1.9.4"),
+      staticOpts,
+    ),
+  );
 
   router.get("/blog/api/chart/:section_id(\\d+).json", async (req, res) => {
     const db = createDbClient();
