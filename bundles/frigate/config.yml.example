@@ -1,0 +1,69 @@
+# Frigate configuration example — copy to config/config.yml inside the Frigate container
+# Docs: https://docs.frigate.video/configuration/
+
+# MQTT is not required for Crow — the Crow-side MCP tools poll Frigate's REST API.
+# Enable this only if you also install an MQTT broker bundle and want Home Assistant integration.
+mqtt:
+  enabled: false
+
+# TLS on :8971. Frigate ships a self-signed cert by default, which provides
+# no real security on loopback/tailnet and forces every API client to disable
+# cert validation. Safer default for Crow: disable internal TLS and rely on
+# the Crow gateway's auth + Tailscale tailnet for the real security boundary.
+# Re-enable (and mount a real cert) ONLY if exposing :8971 directly to an
+# untrusted network (not recommended — go through the Crow panel instead).
+tls:
+  enabled: false
+
+# JWT auth on :8971. See https://docs.frigate.video/configuration/authentication/
+# Disable ONLY for local-only / reverse-proxy setups.
+auth:
+  enabled: true
+  # Rate limit login attempts to deter brute force.
+  failed_login_rate_limit: "1/second;5/minute;20/hour"
+  # 24h session token; Frigate refreshes the cookie automatically on use.
+  session_length: 86400
+
+# CPU detector works out of the box. To use a Coral TPU, see skills/frigate.md "Future work".
+detectors:
+  cpu1:
+    type: cpu
+    num_threads: 3
+
+# Disk discipline — 7-day retention default. Raise at your own disk-pressure risk.
+# On grackle the baseline is 85-90% disk usage — see ~/.crow/CLAUDE.md.
+record:
+  enabled: true
+  retain:
+    days: 7
+    mode: motion
+  events:
+    retain:
+      default: 14
+      mode: motion
+
+# Snapshot capture on detection events (thumbnails visible in the Crow Nest panel).
+snapshots:
+  enabled: true
+  retain:
+    default: 14
+
+# Example camera — replace with your RTSP stream. Frigate supports ONVIF and rtsp:// sources.
+# See https://docs.frigate.video/configuration/cameras
+cameras:
+  example_cam:
+    enabled: false  # set to true once the rtsp source is filled in
+    ffmpeg:
+      inputs:
+        - path: rtsp://user:pass@camera-ip:554/stream
+          roles:
+            - detect
+            - record
+    detect:
+      width: 1280
+      height: 720
+      fps: 5
+    objects:
+      track:
+        - person
+        - car

@@ -4558,6 +4558,28 @@
         }
       ],
       "notes": "Daily-driver chat + VLM. First start requires ~30GB pre-download (unsloth UD-Q6_K + mmproj-F16). Mutexed with other crow-* bundles via crow-strix-vram. Vision: pass image_url or base64 data URL in chat completions."
+    },
+    {
+      "id": "frigate",
+      "name": "Frigate NVR",
+      "version": "1.0.0",
+      "description": "Self-hosted NVR with AI object detection. RTSP/ONVIF cameras, local CPU detection (optional Coral TPU), 7-day motion-triggered recordings by default. JWT auth on :8971; internal port 5000 intentionally not published.",
+      "type": "bundle",
+      "author": "Crow",
+      "category": "cameras",
+      "tags": ["cameras", "nvr", "surveillance", "motion", "ai-detection", "rtsp", "self-hosted"],
+      "icon": "phone-video",
+      "webUI": { "port": 8971, "path": "/", "label": "Frigate" },
+      "requires": { "env": [], "min_ram_mb": 2048, "recommended_ram_mb": 4096, "min_disk_mb": 10000, "recommended_disk_mb": 50000 },
+      "env_vars": [
+        { "name": "FRIGATE_URL", "description": "Frigate base URL (authenticated UI+API on :8971). Use http:// when config.yml has tls.enabled=false (recommended on loopback).", "default": "http://localhost:8971", "required": true },
+        { "name": "FRIGATE_USER", "description": "Admin user for JWT login. Omit with FRIGATE_PASSWORD if auth.enabled=false.", "required": false },
+        { "name": "FRIGATE_PASSWORD", "description": "Password for FRIGATE_USER.", "required": false, "secret": true },
+        { "name": "FRIGATE_CONFIG_PATH", "description": "Host path for Frigate config directory.", "default": "~/.crow/data/frigate/config", "required": false },
+        { "name": "FRIGATE_MEDIA_PATH", "description": "Host path for recordings and snapshots.", "default": "~/.crow/data/frigate/media", "required": false },
+        { "name": "FRIGATE_RTSP_PASSWORD", "description": "Password for Frigate's internal RTSP restreamer.", "required": false, "secret": true }
+      ],
+      "notes": "Recordings default to 7-day retention (config.yml.example). Port 5000 (internal unauthenticated API) intentionally not published. First-run admin password appears in docker logs; rotate immediately."
     }
   ]
 }

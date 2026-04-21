@@ -120,7 +120,7 @@ test("rejectFunneled middleware: private paths blocked with Funnel header", asyn
   const server = await startTestApp();
   try {
     const port = server.address().port;
-    for (const path of ["/dashboard/nest", "/router/mcp", "/api/chat/conversations", "/storage/upload", "/"]) {
+    for (const path of ["/dashboard/nest", "/router/mcp", "/api/chat/conversations", "/storage/upload", "/dashboard/frigate", "/api/frigate/cameras", "/frigate/", "/"]) {
       const r = await request(port, path, { "tailscale-funnel-request": "?1" });
       assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
     }

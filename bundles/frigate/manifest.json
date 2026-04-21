@@ -1,0 +1,28 @@
+{
+  "id": "frigate",
+  "name": "Frigate NVR",
+  "version": "1.0.0",
+  "description": "Self-hosted NVR with AI object detection — cameras, events, clips. RTSP/ONVIF cameras, local CPU detection, optional Coral TPU.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "cameras",
+  "tags": ["cameras", "nvr", "surveillance", "motion", "ai-detection", "rtsp", "self-hosted"],
+  "icon": "phone-video",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["FRIGATE_URL", "FRIGATE_USER", "FRIGATE_PASSWORD"] },
+  "panel": "panel/frigate.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/frigate.md"],
+  "requires": { "env": [], "min_ram_mb": 2048, "recommended_ram_mb": 4096, "min_disk_mb": 10000, "recommended_disk_mb": 50000 },
+  "env_vars": [
+    { "name": "FRIGATE_URL", "description": "Frigate base URL (authenticated UI+API on :8971). Use http:// when config.yml has tls.enabled=false (recommended on loopback).", "default": "http://localhost:8971", "required": true },
+    { "name": "FRIGATE_USER", "description": "Admin user for JWT login (POST /api/login). Omit with FRIGATE_PASSWORD if auth.enabled=false in config.yml.", "required": false },
+    { "name": "FRIGATE_PASSWORD", "description": "Password for FRIGATE_USER.", "required": false, "secret": true },
+    { "name": "FRIGATE_CONFIG_PATH", "description": "Host path for Frigate config directory.", "default": "~/.crow/data/frigate/config", "required": false },
+    { "name": "FRIGATE_MEDIA_PATH", "description": "Host path for recordings and snapshots.", "default": "~/.crow/data/frigate/media", "required": false },
+    { "name": "FRIGATE_RTSP_PASSWORD", "description": "Password for Frigate's internal RTSP restreamer.", "required": false, "secret": true }
+  ],
+  "ports": [8971, 8554, 8555],
+  "webUI": { "port": 8971, "path": "/", "label": "Frigate" },
+  "notes": "Recordings default to 7-day retention per config.yml.example. Increase retain.days at your own disk risk — grackle baseline is already tight. Port 5000 (internal unauthenticated API) is intentionally NOT exposed."
+}
