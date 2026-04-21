@@ -4580,6 +4580,27 @@
         { "name": "FRIGATE_RTSP_PASSWORD", "description": "Password for Frigate's internal RTSP restreamer.", "required": false, "secret": true }
       ],
       "notes": "Recordings default to 7-day retention (config.yml.example). Port 5000 (internal unauthenticated API) intentionally not published. First-run admin password appears in docker logs; rotate immediately."
+    },
+    {
+      "id": "motioneye",
+      "name": "motionEye",
+      "version": "0.43.1",
+      "description": "Lightweight web frontend for the Motion daemon. Pi-friendly camera recording + motion detection. No AI — install the Frigate bundle if you want object detection or MCP-callable camera ops.",
+      "type": "bundle",
+      "author": "Crow",
+      "category": "cameras",
+      "tags": ["cameras", "motion", "pi", "rtsp", "usb-webcam", "self-hosted", "lightweight"],
+      "icon": "phone-video",
+      "webUI": { "port": 8765, "path": "/", "label": "motionEye" },
+      "requires": { "env": [], "min_ram_mb": 256, "recommended_ram_mb": 512, "min_disk_mb": 5000, "recommended_disk_mb": 20000 },
+      "env_vars": [
+        { "name": "MOTIONEYE_URL", "description": "motionEye base URL (defaults to loopback :8765)", "default": "http://localhost:8765", "required": false },
+        { "name": "MOTIONEYE_CONFIG_PATH", "description": "Host path for motionEye config.", "default": "~/.crow/data/motioneye/config", "required": false },
+        { "name": "MOTIONEYE_MEDIA_PATH", "description": "Host path for recordings.", "default": "~/.crow/data/motioneye/media", "required": false },
+        { "name": "MOTIONEYE_UID", "description": "Host UID for file ownership (run `id -u`).", "default": "1000", "required": false },
+        { "name": "MOTIONEYE_GID", "description": "Host GID for file ownership (run `id -g`).", "default": "1000", "required": false }
+      ],
+      "notes": "Default admin login: 'admin' / empty password — rotate immediately via Settings → General. Iframe-only bundle (no MCP tools). Pair with the Frigate bundle if you want AI detection or list_cameras / list_events MCP tools."
     }
   ]
 }

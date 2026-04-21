@@ -1,0 +1,29 @@
+services:
+  motioneye:
+    image: ghcr.io/motioneye-project/motioneye:latest
+    container_name: crow-motioneye
+    ports:
+      # Loopback-only — Nest panel iframes this from the same host.
+      - "127.0.0.1:8765:8765"
+      # Motion's raw camera streams (ports 8081+). Uncomment per camera if you
+      # want direct stream access on the LAN; not required for the Nest iframe.
+      # - "127.0.0.1:8081:8081"
+    volumes:
+      - ${MOTIONEYE_CONFIG_PATH:-motioneye-config}:/etc/motioneye
+      - ${MOTIONEYE_MEDIA_PATH:-motioneye-media}:/var/lib/motioneye
+    environment:
+      - PUID=${MOTIONEYE_UID:-1000}
+      - PGID=${MOTIONEYE_GID:-1000}
+      - TZ=${TZ:-UTC}
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8765/ > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  motioneye-config:
+  motioneye-media:
