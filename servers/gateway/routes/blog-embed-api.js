@@ -65,9 +65,15 @@ function embedApiKey(req) {
 }
 
 function embedApiMax(req) {
-  if (req.headers["tailscale-user-login"]) return 60;
-  if (req.headers["tailscale-funnel-request"]) return 20;
-  return 240;
+  // Budget per 60-second window. Each chapter hydrate fetches
+  // config.json + data.json for every chart (~2× chart count) + 1
+  // geojson per map — Ch 4D Cleveland alone is 30 × 2 + 5 = 65 calls
+  // on a fresh load. Previous 60/min ceiling caused widespread 429s
+  // and alt-text-only rendering. Numbers below accommodate 1–2 chapter
+  // loads per minute comfortably.
+  if (req.headers["tailscale-user-login"]) return 600;
+  if (req.headers["tailscale-funnel-request"]) return 200;
+  return 1200;
 }
 
 const embedLimiter = rateLimit({
@@ -155,7 +161,11 @@ export function blogEmbedApiRouter() {
   const router = Router();
 
   router.use("/blog/api", embedLimiter);
-  router.use("/blog/figures", embedLimiter);
+  // /blog/figures/* is NOT rate-limited: the PNGs are immutable,
+  // hash-keyed, cache-control=immutable, and only reachable for
+  // published+public posts (loadPublishedSection gate runs per request).
+  // A single Ch 4D page load embeds 35 figures; a 60/min ceiling
+  // broke cross-chapter navigation entirely.
 
   // Static hydration assets — served under /blog/* so they ride the
   // Tailscale Serve path allowlist. Files are public by design (read-only
