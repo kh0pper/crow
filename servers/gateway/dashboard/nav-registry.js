@@ -47,6 +47,7 @@ const CATEGORY_TO_GROUP = {
   "federated-social": "core",
   "federated-media": "media",
   "federated-comms": "core",
+  cameras: "media",
 };
 
 /**

@@ -417,6 +417,7 @@ const translations = {
   "extensions.categoryFederatedSocial": { en: "Federated (Social)", es: "Federado (Social)" },
   "extensions.categoryFederatedMedia": { en: "Federated (Media)", es: "Federado (Medios)" },
   "extensions.categoryFederatedComms": { en: "Federated (Chat)", es: "Federado (Chat)" },
+  "extensions.categoryCameras": { en: "Cameras", es: "Cámaras" },
   "extensions.categoryOther": { en: "Other", es: "Otros" },
 
   // ─── Skills Panel ───

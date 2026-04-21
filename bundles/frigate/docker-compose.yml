@@ -1,0 +1,34 @@
+services:
+  frigate:
+    image: ghcr.io/blakeblackshear/frigate:stable
+    container_name: crow-frigate
+    ports:
+      # Authenticated UI + REST API — exposed on loopback; proxied through Crow gateway routes.js
+      - "127.0.0.1:8971:8971"
+      # RTSP restreamer (cameras pull from this for multi-consumer restreaming)
+      - "127.0.0.1:8554:8554"
+      # WebRTC (low-latency live view). Both TCP and UDP needed; bind to all interfaces for LAN access
+      - "8555:8555/tcp"
+      - "8555:8555/udp"
+      # Port 5000 (internal unauthenticated API) intentionally NOT published — would bypass auth.
+    volumes:
+      - ${FRIGATE_CONFIG_PATH:-frigate-config}:/config
+      - ${FRIGATE_MEDIA_PATH:-frigate-media}:/media/frigate
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - FRIGATE_RTSP_PASSWORD=${FRIGATE_RTSP_PASSWORD:-changeme}
+    shm_size: "512mb"
+    mem_limit: 4g
+    # NOTE: init: true breaks Frigate — its s6-overlay supervisor must run as PID 1.
+    restart: unless-stopped
+    # Frigate reports healthy only once the detector has initialized and at least one frame has been processed
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:5000/api/stats > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+volumes:
+  frigate-config:
+  frigate-media:

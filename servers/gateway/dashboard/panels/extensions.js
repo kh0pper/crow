@@ -73,6 +73,7 @@ const CATEGORY_COLORS = {
   "federated-social": { bg: "rgba(217,70,239,0.12)",  color: "#d946ef" },
   "federated-media":  { bg: "rgba(236,72,153,0.12)",  color: "#f472b6" },
   "federated-comms":  { bg: "rgba(167,139,250,0.12)", color: "#a78bfa" },
+  cameras:        { bg: "rgba(239,68,68,0.12)",   color: "#ef4444" },
   other:          { bg: "rgba(161,161,170,0.12)", color: "#a1a1aa" },
 };
 
@@ -93,6 +94,7 @@ const CATEGORY_LABELS = {
   "federated-social": "extensions.categoryFederatedSocial",
   "federated-media": "extensions.categoryFederatedMedia",
   "federated-comms": "extensions.categoryFederatedComms",
+  cameras: "extensions.categoryCameras",
   other: "extensions.categoryOther",
 };
 
