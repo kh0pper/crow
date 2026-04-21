@@ -41,11 +41,21 @@ export function renderMarkdown(markdown) {
       input: ["type", "checked", "disabled"],
       th: ["align"],
       td: ["align"],
+      // Phase 8: case-study figure wrappers carry class + data-* that
+      // blog-hydrate.js reads to swap the static PNG for a live widget,
+      // and schema.org microdata for SEO.
+      figure: ["class", "data-section-id", "data-backend-id", "data-metric", "data-field"],
+      article: ["class", "itemscope", "itemtype"],
+      h1: ["itemprop"],
+      h2: ["itemprop"],
+      p: ["itemprop"],
     },
     allowedClasses: {
       code: ["language-*"],
       span: ["*"],
       pre: ["*"],
+      figure: ["crow-chart", "crow-map", "crow-hydrated"],
+      article: ["*"],
     },
     selfClosing: ["img", "br", "hr", "input"],
   });

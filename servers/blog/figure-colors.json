@@ -1,19 +1,20 @@
 {
-  "description": "Shared color palette for blog figure rendering. Both the Node chart renderer (figure-renderer.js) and the Python map renderer (build_section_map.py) read this file so static PNG fallbacks stay visually consistent with the browser's interactive widgets. Update in one place; both paths pick it up.",
+  "description": "Shared color palette for blog figure rendering. Both the Node chart renderer (figure-renderer.js) and the Python map renderer (build_section_map.py) read this file so static PNG fallbacks stay visually consistent with the browser's interactive widgets. Update in one place; both paths pick it up. Uses a LIGHT palette because the blog page is light-themed — dark chart backgrounds would jar against the surrounding prose and axis labels would need to flip color between static and hydrated views.",
   "choropleth_stops": ["#3b82f6", "#06b6d4", "#22c55e", "#f59e0b", "#ef4444"],
   "neutral": "#9ca3af",
   "chart_palette": [
-    "rgba(59, 130, 246, 0.8)",
-    "rgba(239, 68, 68, 0.8)",
-    "rgba(34, 197, 94, 0.8)",
-    "rgba(249, 115, 22, 0.8)",
-    "rgba(168, 85, 247, 0.8)",
-    "rgba(236, 72, 153, 0.8)",
-    "rgba(20, 184, 166, 0.8)",
-    "rgba(234, 179, 8, 0.8)"
+    "rgba(37, 99, 235, 0.85)",
+    "rgba(220, 38, 38, 0.85)",
+    "rgba(22, 163, 74, 0.85)",
+    "rgba(234, 88, 12, 0.85)",
+    "rgba(147, 51, 234, 0.85)",
+    "rgba(219, 39, 119, 0.85)",
+    "rgba(13, 148, 136, 0.85)",
+    "rgba(202, 138, 4, 0.85)"
   ],
-  "chart_bg": "#0f172a",
-  "chart_panel": "#1e293b",
-  "chart_text": "#e2e8f0",
-  "chart_grid": "#334155"
+  "chart_bg": "#ffffff",
+  "chart_panel": "#f8fafc",
+  "chart_text": "#0f172a",
+  "chart_grid": "rgba(15, 23, 42, 0.1)",
+  "chart_border": "#e2e8f0"
 }
