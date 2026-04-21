@@ -15,6 +15,7 @@ export const TOOL_MANIFESTS = {
     tools: {
       crow_store_memory: { params: "content, category?, context?, tags?, source?, importance?", desc: "Store a memory" },
       crow_search_memories: { params: "query, category?, min_importance?, limit?", desc: "Search memories (FTS5)" },
+      crow_get_memory: { params: "id", desc: "Fetch a single memory by ID (returns JSON payload; used by federated dashboard memory view)" },
       crow_recall_by_context: { params: "context, limit?", desc: "Retrieve memories by context" },
       crow_list_memories: { params: "category?, tag?, min_importance?, sort_by?, limit?", desc: "List memories with filters" },
       crow_update_memory: { params: "id, content?, category?, tags?, importance?, context?", desc: "Update a memory" },
