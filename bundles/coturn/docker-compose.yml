@@ -1,0 +1,19 @@
+services:
+  coturn:
+    image: coturn/coturn:4.6.3-r0
+    container_name: crow-coturn
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./turnserver.conf:/etc/turnserver.conf:ro
+    environment:
+      - TURN_SECRET=${TURN_SECRET}
+      - TURN_REALM=${TURN_REALM:-crow.local}
+      - TURN_EXTERNAL_IP=${TURN_EXTERNAL_IP:-}
+    command: >
+      turnserver
+      -c /etc/turnserver.conf
+      --static-auth-secret=${TURN_SECRET}
+      --realm=${TURN_REALM:-crow.local}
+      ${TURN_EXTERNAL_IP:+--external-ip=${TURN_EXTERNAL_IP}}
+    mem_limit: 128m
