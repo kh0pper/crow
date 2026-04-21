@@ -19,12 +19,13 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { spawn } from "node:child_process";
 import { readFileSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 
 import { OpenMultiAgent, ToolRegistry, registerBuiltInTools } from "open-multi-agent";
-import { registerCrowTools, registerRemoteTools } from "./mcp-bridge.js";
+import { registerCrowTools, registerRemoteTools, registerAddonTools } from "./mcp-bridge.js";
 import { presets } from "./presets.js";
 import { resolvePreset } from "./preset-resolver.js";
 import { pipelines } from "./pipelines.js";
@@ -180,11 +181,13 @@ const registryCache = new Map();
  */
 async function getRegistryForCategories(categories, connectedServers) {
   const hasRemote = categories.includes("remote");
-  const localCategories = categories.filter((c) => c !== "remote");
+  const hasAddons = categories.includes("addons");
+  const localCategories = categories.filter((c) => c !== "remote" && c !== "addons");
   const key = [...localCategories].sort().join(",");
+  const cacheable = !hasRemote && !hasAddons;
 
   let registry;
-  if (!hasRemote && registryCache.has(key)) {
+  if (cacheable && registryCache.has(key)) {
     registry = registryCache.get(key);
   } else {
     registry = new ToolRegistry();
@@ -195,7 +198,14 @@ async function getRegistryForCategories(categories, connectedServers) {
       console.log(`[orchestrator] Registry [${key}]: ${toolCount} Crow tools + built-ins`);
     }
 
-    if (!hasRemote) {
+    if (hasAddons) {
+      const { toolCount: addonCount } = await registerAddonTools(registry);
+      if (addonCount > 0) {
+        console.log(`[orchestrator] Registry [${key}+addons]: +${addonCount} addon tools`);
+      }
+    }
+
+    if (cacheable) {
       registryCache.set(key, registry);
     }
   }
@@ -766,6 +776,230 @@ export function createOrchestratorServer(dbPath, options = {}) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Run one orchestration team to completion, returning the result.
+ *
+ * Extracted from the closure previously embedded in startOrchestratorPipelines
+ * so it can also be invoked from a clean child process (see
+ * scripts/run-pipeline-subprocess.mjs). That subprocess pathway is the
+ * workaround for MPA, whose long-lived gateway process has wedged libsql
+ * state (see servers/sharing/peer-pull-sync.js:9-17) — every fresh libsql
+ * client opened inside MPA's gateway fails with SQLITE_IOERR_SHORT_READ on
+ * write, so the whole pipeline has to run in a fresh process.
+ *
+ * @param {string} goal - Orchestrator goal text
+ * @param {string} presetName - Preset key (presets.js)
+ * @param {object} [options]
+ * @param {object} [options.modelsConfig] - Parsed models.json (loaded if omitted)
+ * @param {Map}    [options.connectedServers] - Remote instance connections (null when run as subprocess)
+ * @param {object} [options.pipelineDefaults] - Default provider/model config
+ */
+export async function runOrchestrationStandalone(goal, presetName, options = {}) {
+  const modelsConfig = options.modelsConfig || loadModelsConfig();
+  const connectedServers = options.connectedServers || null;
+
+  let pipelineDefaults = options.pipelineDefaults;
+  if (!pipelineDefaults) {
+    try { pipelineDefaults = resolveDefaultOrchestratorConfig(modelsConfig); }
+    catch { pipelineDefaults = { provider: null, model: null, baseURL: null, apiKey: null }; }
+  }
+
+  const presetDb = createDbClient();
+  let preset;
+  try { preset = await resolvePreset(presetDb, presetName); }
+  finally { presetDb.close(); }
+  if (!preset) {
+    return { status: "failed", error: `Unknown preset: "${presetName}"` };
+  }
+
+  const providerName = preset.provider || pipelineDefaults.provider;
+  if (!providerName) {
+    return { status: "failed", error: "No LLM provider configured" };
+  }
+
+  let pc;
+  try {
+    pc = resolveProvider(modelsConfig, providerName);
+  } catch (err) {
+    return { status: "failed", error: err.message };
+  }
+
+  if (pc.baseURL) {
+    const healthy = await checkLlmHealth(pc.baseURL);
+    if (!healthy) {
+      return { status: "failed", error: `LLM not reachable at ${pc.baseURL}` };
+    }
+  }
+
+  const jobId = generateJobId();
+  jobs.set(jobId, { status: "running", startedAt: Date.now() });
+
+  const categories = preset.categories || ["memory", "projects"];
+  const registry = await getRegistryForCategories(categories, connectedServers);
+
+  const presetModel = preset.model || pipelineDefaults.model;
+  const agentConfigs = preset.agents.map((a) => {
+    const agentProvider = a.provider || preset.provider || pipelineDefaults.provider;
+    const agentModel = a.model || preset.model || pipelineDefaults.model;
+    const agentPC = resolveProvider(modelsConfig, agentProvider);
+    return {
+      name: a.name,
+      model: agentModel,
+      provider: "openai",
+      apiKey: agentPC.apiKey,
+      baseURL: agentPC.baseURL,
+      systemPrompt: a.systemPrompt,
+      tools: a.tools,
+      maxTurns: a.maxTurns || 6,
+      maxTokens: a.maxTokens || preset.maxTokens || 8192,
+    };
+  });
+
+  const presetPC = resolveProvider(modelsConfig, providerName);
+
+  try {
+    const orchestrator = new OpenMultiAgent({
+      maxConcurrency: preset.maxConcurrency || 1,
+      defaultModel: presetModel,
+      defaultProvider: "openai",
+      defaultApiKey: presetPC.apiKey,
+      defaultBaseURL: presetPC.baseURL,
+      toolRegistry: registry,
+      onProgress: (event) => {
+        if (event.type === "error") {
+          const d = event.data;
+          const msg = d?.message || d?.output || String(d);
+          console.log(`[pipeline-runner] ${event.type} ${event.agent || ""} error="${msg.slice(0, 200)}"`);
+        } else if (process.env.CROW_PIPELINE_TRACE === "1") {
+          const d = event.data;
+          const summary = typeof d === "string" ? d : d?.tool || d?.message || JSON.stringify(d).slice(0, 200);
+          console.log(`[pipeline-runner] ${event.type} ${event.agent || ""} ${summary}`);
+        }
+      },
+    });
+
+    // Linear single-agent presets (one entry in agents[]) skip the coordinator
+    // decomposition and run via runAgent — OpenMultiAgent's runTeam keeps the
+    // agent's turn budget across multiple decomposed tasks but empirically
+    // dispatches only the first task before synthesising the rest in prose
+    // (never firing the follow-up tool calls the goal specifies). For
+    // linear tool chains (retrieve → format → store → notify) the direct
+    // conversation-loop path gets every tool called as instructed.
+    let runResult;
+    if (agentConfigs.length === 1) {
+      const single = agentConfigs[0];
+      const agentResult = await Promise.race([
+        orchestrator.runAgent(single, goal),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Pipeline timed out after 5 minutes")), 300000)
+        ),
+      ]);
+      runResult = {
+        success: !agentResult.error,
+        output: agentResult.output || "(no agent output)",
+        totalTokenUsage: agentResult.tokenUsage || { input_tokens: 0, output_tokens: 0 },
+      };
+    } else {
+      const team = orchestrator.createTeam("team", {
+        name: "team",
+        agents: agentConfigs,
+        sharedMemory: true,
+        maxConcurrency: preset.maxConcurrency || 1,
+      });
+
+      const teamResult = await Promise.race([
+        orchestrator.runTeam(team, goal),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Pipeline timed out after 5 minutes")), 300000)
+        ),
+      ]);
+      const coordinatorResult = teamResult.agentResults.get("coordinator");
+      runResult = {
+        success: teamResult.success,
+        output: coordinatorResult?.output || "(no coordinator output)",
+        totalTokenUsage: teamResult.totalTokenUsage,
+      };
+    }
+
+    await orchestrator.shutdown();
+
+    return {
+      status: "completed",
+      result: [
+        runResult.output,
+        "",
+        "---",
+        `Pipeline completed: ${runResult.success ? "success" : "partial failure"}`,
+        `Total tokens: ${runResult.totalTokenUsage.input_tokens} in / ${runResult.totalTokenUsage.output_tokens} out`,
+      ].join("\n"),
+    };
+  } catch (err) {
+    return { status: "failed", error: err.message || String(err) };
+  }
+}
+
+// Path to the subprocess CLI. Set once via fileURLToPath to keep ESM pathing sane.
+const SUBPROCESS_SCRIPT = resolve(__dirname, "../../scripts/run-pipeline-subprocess.mjs");
+// Matches the 5-minute orchestrator internal timeout with a small buffer so
+// the subprocess kill isn't racing orchestrator.shutdown().
+const SUBPROCESS_TIMEOUT_MS = 6 * 60 * 1000;
+
+/**
+ * Dispatch one orchestration to a child process. The child runs
+ * runOrchestrationStandalone inside its own Node instance, writes JSON to
+ * stdout, and exits. Called from the gateway's runOrchestrationSync when
+ * CROW_PIPELINE_SUBPROCESS=1 is set (MPA's systemd drop-in).
+ *
+ * Primary doesn't set the flag and keeps the in-process path unchanged.
+ */
+function runOrchestrationInSubprocess(goal, presetName) {
+  return new Promise((resolveP) => {
+    const payload = JSON.stringify({ goal, presetName });
+    const child = spawn(
+      process.execPath,
+      [SUBPROCESS_SCRIPT, "--from-stdin"],
+      { stdio: ["pipe", "pipe", "pipe"], env: process.env }
+    );
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { child.kill("SIGKILL"); } catch {}
+      resolveP({ status: "failed", error: `pipeline subprocess timed out after ${SUBPROCESS_TIMEOUT_MS}ms` });
+    }, SUBPROCESS_TIMEOUT_MS);
+
+    child.stdout.on("data", (d) => { stdout += d.toString(); });
+    child.stderr.on("data", (d) => { stderr += d.toString(); });
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveP({ status: "failed", error: `pipeline subprocess spawn failed: ${err.message}` });
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const lastLine = stdout.trim().split("\n").filter(Boolean).pop() || "";
+      try {
+        resolveP(JSON.parse(lastLine));
+      } catch {
+        resolveP({
+          status: "failed",
+          error: `pipeline subprocess exit ${code}, stdout did not contain a JSON result line. stderr=${stderr.slice(0, 400)}`,
+        });
+      }
+    });
+
+    child.stdin.write(payload);
+    child.stdin.end();
+  });
+}
+
+/**
  * Start the background pipeline runner. Call from gateway startup.
  *
  * @param {object} db - libsql database client
@@ -784,112 +1018,14 @@ export function startOrchestratorPipelines(db, options = {}) {
   }
 
   async function runOrchestrationSync(goal, presetName) {
-    const presetDb = createDbClient();
-    let preset;
-    try { preset = await resolvePreset(presetDb, presetName); }
-    finally { presetDb.close(); }
-    if (!preset) {
-      return { status: "failed", error: `Unknown preset: "${presetName}"` };
+    if (process.env.CROW_PIPELINE_SUBPROCESS === "1") {
+      return runOrchestrationInSubprocess(goal, presetName);
     }
-
-    const providerName = preset.provider || pipelineDefaults.provider;
-    if (!providerName) {
-      return { status: "failed", error: "No LLM provider configured" };
-    }
-
-    let pc;
-    try {
-      pc = resolveProvider(modelsConfig, providerName);
-    } catch (err) {
-      return { status: "failed", error: err.message };
-    }
-
-    if (pc.baseURL) {
-      const healthy = await checkLlmHealth(pc.baseURL);
-      if (!healthy) {
-        return { status: "failed", error: `LLM not reachable at ${pc.baseURL}` };
-      }
-    }
-
-    // Build a temporary orchestrator server to reuse runOrchestration
-    const tempServer = createOrchestratorServer(undefined, { connectedServers });
-
-    const jobId = generateJobId();
-    jobs.set(jobId, { status: "running", startedAt: Date.now() });
-
-    // Run orchestration using the registry from getRegistryForCategories
-    const categories = preset.categories || ["memory", "projects"];
-    const registry = await getRegistryForCategories(categories, connectedServers);
-
-    const presetModel = preset.model || pipelineDefaults.model;
-    const agentConfigs = preset.agents.map((a) => {
-      const agentProvider = a.provider || preset.provider || pipelineDefaults.provider;
-      const agentModel = a.model || preset.model || pipelineDefaults.model;
-      const agentPC = resolveProvider(modelsConfig, agentProvider);
-      return {
-        name: a.name,
-        model: agentModel,
-        provider: "openai",
-        apiKey: agentPC.apiKey,
-        baseURL: agentPC.baseURL,
-        systemPrompt: a.systemPrompt,
-        tools: a.tools,
-        maxTurns: a.maxTurns || 6,
-        maxTokens: a.maxTokens || preset.maxTokens || 8192,
-      };
+    return runOrchestrationStandalone(goal, presetName, {
+      modelsConfig,
+      connectedServers,
+      pipelineDefaults,
     });
-
-    const presetPC = resolveProvider(modelsConfig, providerName);
-
-    try {
-      const orchestrator = new OpenMultiAgent({
-        maxConcurrency: preset.maxConcurrency || 1,
-        defaultModel: presetModel,
-        defaultProvider: "openai",
-        defaultApiKey: presetPC.apiKey,
-        defaultBaseURL: presetPC.baseURL,
-        toolRegistry: registry,
-        onProgress: (event) => {
-          if (event.type === "error") {
-            const d = event.data;
-            const msg = d?.message || d?.output || String(d);
-            console.log(`[pipeline-runner] ${event.type} ${event.agent || ""} error="${msg.slice(0, 200)}"`);
-          }
-        },
-      });
-
-      const team = orchestrator.createTeam("team", {
-        name: "team",
-        agents: agentConfigs,
-        sharedMemory: true,
-        maxConcurrency: preset.maxConcurrency || 1,
-      });
-
-      const result = await Promise.race([
-        orchestrator.runTeam(team, goal),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("Pipeline timed out after 5 minutes")), 300000)
-        ),
-      ]);
-
-      const coordinatorResult = result.agentResults.get("coordinator");
-      const output = coordinatorResult?.output || "(no coordinator output)";
-
-      await orchestrator.shutdown();
-
-      return {
-        status: "completed",
-        result: [
-          output,
-          "",
-          "---",
-          `Pipeline completed: ${result.success ? "success" : "partial failure"}`,
-          `Total tokens: ${result.totalTokenUsage.input_tokens} in / ${result.totalTokenUsage.output_tokens} out`,
-        ].join("\n"),
-      };
-    } catch (err) {
-      return { status: "failed", error: err.message || String(err) };
-    }
   }
 
   async function storeResultAsMemory(title, content, category) {

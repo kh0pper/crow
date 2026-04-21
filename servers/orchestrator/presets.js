@@ -154,6 +154,31 @@ export const presets = {
     ],
   },
 
+  briefing: {
+    description:
+      "Single-agent briefing worker. Runs on crow-chat end-to-end so it never blocks on mutex-group GPU swaps the gpu-orchestrator cannot currently perform cross-machine. Deliberately one agent instead of a coordinator+workers team — empirically the coordinator dispatches the first step and then synthesizes the rest itself, so multi-step tool calls get described in prose but never fired. Categories include `addons` so the tasks_* tools from the tasks bundle are bridged into the registry.",
+    categories: ["memory", "addons"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "briefer",
+        systemPrompt:
+          "You are the daily-briefing worker. Execute the goal exactly, calling the listed tools in " +
+          "order. You MUST invoke every tool call the goal specifies — do not merely describe what " +
+          "you would do. After calling tasks_store_briefing, you MUST call crow_create_notification " +
+          "with the returned briefing id. Your final text output should confirm the tools you " +
+          "called and include the briefing id returned by tasks_store_briefing.",
+        tools: [
+          "tasks_briefing_snapshot",
+          "tasks_store_briefing",
+          "tasks_list",
+          "crow_create_notification",
+        ],
+        maxTurns: 8,
+      },
+    ],
+  },
+
   // -- Phase 5-full new presets --
 
   code_team: {

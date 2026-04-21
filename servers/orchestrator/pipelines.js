@@ -53,4 +53,36 @@ export const pipelines = {
     storeResult: true,
     resultCategory: "project",
   },
+
+  "mpa-daily-briefing": {
+    name: "MPA: Daily Briefing",
+    description:
+      "Maestro Press morning nudge — computes today's briefing from the tasks bundle, stores it in tasks_briefings, and pushes a ntfy notification that deep-links to the Tasks panel.",
+    goal:
+      "Compose Kevin's morning briefing by making exactly three tool calls in this order. " +
+      "Substitute ${TODAY} below with today's date in America/Chicago in ISO format " +
+      "(YYYY-MM-DD). Do not substitute any other values — the literals shown are mandatory.\n\n" +
+      "CALL 1 — tasks_briefing_snapshot with these exact arguments:\n" +
+      "  today = \"${TODAY}\"\n" +
+      "  window_days = 3\n" +
+      "The response is a JSON payload with a `content` field (pre-rendered markdown) and a " +
+      "`counts` field. Capture the `content` string verbatim as ${BRIEFING_CONTENT}.\n\n" +
+      "CALL 2 — tasks_store_briefing with these exact arguments:\n" +
+      "  briefing_date = \"${TODAY}\"\n" +
+      "  content = ${BRIEFING_CONTENT}\n" +
+      "Capture the returned `id` field as ${BRIEFING_ID}.\n\n" +
+      "CALL 3 — crow_create_notification with these exact arguments:\n" +
+      "  title = \"MPA daily briefing - ${TODAY}\"\n" +
+      "  body = <first 200 characters of ${BRIEFING_CONTENT}>\n" +
+      "  type = \"briefing\"\n" +
+      "  priority = \"normal\"\n" +
+      "  action_url = \"/dashboard/tasks?briefing=${BRIEFING_ID}&instance=${INSTANCE_ID}\"\n\n" +
+      "After all three tool calls have succeeded, respond with a single short confirmation " +
+      "line containing ${BRIEFING_ID}. Do not describe what you would do — actually call " +
+      "every tool listed above.",
+    preset: "briefing",
+    defaultCron: "0 7 * * 1-5",
+    storeResult: false,
+    resultCategory: null,
+  },
 };

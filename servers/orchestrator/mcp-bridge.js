@@ -12,6 +12,10 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { z } from "zod";
 
 // Crow server factories
@@ -19,6 +23,10 @@ import { createMemoryServer } from "../memory/server.js";
 import { createProjectServer } from "../research/server.js";
 import { createSharingServer } from "../sharing/server.js";
 import { createBlogServer } from "../blog/server.js";
+
+function resolveCrowHome() {
+  return process.env.CROW_HOME || join(homedir(), ".crow");
+}
 
 /**
  * Server factories to bridge.  Matches the gateway's SERVER_FACTORIES.
@@ -213,4 +221,97 @@ export async function registerRemoteTools(registry, connectedServers, options = 
   }
 
   return { toolCount };
+}
+
+/**
+ * Register MCP addon bundles (from <crow-home>/mcp-addons.json) into the
+ * same ToolRegistry that registerCrowTools populates. Each addon is spawned
+ * as a stdio child; its listTools() output is bridged one tool at a time.
+ *
+ * Used by the subprocess pipeline runner so bundle tools (e.g. tasks_*) are
+ * reachable to single-agent presets that would otherwise only see crow_*
+ * tools. Mirrors connectAddonServer() in gateway/proxy.js but registers
+ * into open-multi-agent's ToolRegistry instead of the gateway's proxy map.
+ *
+ * @param {import('open-multi-agent').ToolRegistry} registry
+ * @param {Object} [options]
+ * @param {string[]} [options.include] - Only bridge these addon ids. Omit for all.
+ * @returns {{ clients: Map<string, Client>, transports: Map<string, StdioClientTransport>, toolCount: number }}
+ */
+export async function registerAddonTools(registry, options = {}) {
+  const mcpAddonsPath = join(resolveCrowHome(), "mcp-addons.json");
+  const clients = new Map();
+  const transports = new Map();
+  let toolCount = 0;
+
+  if (!existsSync(mcpAddonsPath)) return { clients, transports, toolCount };
+
+  let addons;
+  try {
+    addons = JSON.parse(readFileSync(mcpAddonsPath, "utf8"));
+  } catch (err) {
+    console.warn(`[mcp-bridge] addons: unreadable mcp-addons.json — ${err.message}`);
+    return { clients, transports, toolCount };
+  }
+
+  const entries = Object.entries(addons).filter(
+    ([id]) => !options.include || options.include.includes(id)
+  );
+
+  for (const [id, config] of entries) {
+    const cwd = config.cwd || join(resolveCrowHome(), "bundles", id);
+    const env = { ...process.env, ...(config.env || {}) };
+    try {
+      const transport = new StdioClientTransport({
+        command: config.command,
+        args: config.args || [],
+        env,
+        cwd,
+      });
+      const client = new Client({ name: `bridge-addon-${id}`, version: "0.1.0" });
+      await Promise.race([
+        client.connect(transport),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("connect timeout (30s)")), 30_000)
+        ),
+      ]);
+
+      const { tools } = await client.listTools();
+      clients.set(id, client);
+      transports.set(id, transport);
+
+      for (const tool of tools) {
+        const toolName = tool.name;
+        const description = tool.description || `${id} tool: ${toolName}`;
+        const rawSchema = tool.inputSchema || { type: "object", properties: {} };
+        registry.register({
+          name: toolName,
+          description,
+          inputSchema: z.any(),
+          rawInputSchema: rawSchema,
+          execute: async (input) => {
+            try {
+              const result = await client.callTool({ name: toolName, arguments: input || {} });
+              let text = "";
+              if (result.content) {
+                for (const block of result.content) {
+                  if (block.type === "text") text += block.text;
+                }
+              }
+              return { data: text || "(empty result)", isError: result.isError || false };
+            } catch (err) {
+              return { data: `Addon tool error (${id}): ${err.message}`, isError: true };
+            }
+          },
+        });
+        toolCount++;
+      }
+
+      console.log(`[mcp-bridge] addon ${id}: ${tools.length} tools registered`);
+    } catch (err) {
+      console.warn(`[mcp-bridge] addon ${id}: failed — ${err.message}`);
+    }
+  }
+
+  return { clients, transports, toolCount };
 }
