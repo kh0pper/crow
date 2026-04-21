@@ -41,6 +41,14 @@ public class NtfyListenerService extends Service {
     private static final String KEY_NTFY_TOPIC = "ntfy_cached_topic";
     private static final String KEY_NTFY_CACHED_AT = "ntfy_cached_at";
     private static final String KEY_NTFY_LAST_ID = "ntfy_last_message_id";
+    /**
+     * Tracks the last APK versionCode that wrote ntfy config cache. When the
+     * running versionCode differs (upgrade), we invalidate the cache so the
+     * new build always re-fetches once. Without this, any change to the
+     * config shape (e.g. single-topic → topics array) waits up to the cache
+     * TTL (24h) before taking effect on a running installation.
+     */
+    private static final String KEY_NTFY_CACHE_BUILT_FOR = "ntfy_cache_built_for_version";
     private static final String ENCRYPTED_PREFS_NAME = "CrowSecurePrefs";
     private static final String KEY_NTFY_AUTH = "ntfy_auth_token";
     private static final long CONFIG_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -140,11 +148,42 @@ public class NtfyListenerService extends Service {
     }
 
     /**
+     * Read this app's current versionCode at runtime. Used to detect
+     * upgrades and drop stale ntfy config cache (see getConfig).
+     */
+    private int getCurrentVersionCode() {
+        try {
+            android.content.pm.PackageInfo info = getPackageManager()
+                    .getPackageInfo(getPackageName(), 0);
+            return (int) (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                    ? info.getLongVersionCode()
+                    : info.versionCode);
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    /**
      * Get ntfy config: try cache first, then fetch from gateway.
      * Returns [url, topic, authToken] or null if ntfy is not available.
      */
     private String[] getConfig() {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+
+        // Version-bump cache bust: if the cached config was written by an
+        // older APK, drop it so we always fetch fresh once per upgrade.
+        int currentVersion = getCurrentVersionCode();
+        int cachedForVersion = prefs.getInt(KEY_NTFY_CACHE_BUILT_FOR, 0);
+        if (cachedForVersion != currentVersion) {
+            Log.i(TAG, "APK upgrade detected (cache from v" + cachedForVersion +
+                    ", running v" + currentVersion + ") — invalidating ntfy config cache");
+            prefs.edit()
+                    .remove(KEY_NTFY_URL)
+                    .remove(KEY_NTFY_TOPIC)
+                    .remove(KEY_NTFY_CACHED_AT)
+                    .putInt(KEY_NTFY_CACHE_BUILT_FOR, currentVersion)
+                    .apply();
+        }
 
         // Try cached config
         String cachedUrl = prefs.getString(KEY_NTFY_URL, null);
@@ -201,22 +240,40 @@ public class NtfyListenerService extends Service {
             if (!json.optBoolean("enabled", false)) return null;
 
             String url = json.getString("url");
-            String topic = json.getString("topic");
             String authToken = json.optString("authToken", null);
             if ("null".equals(authToken)) authToken = null;
+
+            // Prefer the `topics` array (multi-topic gateways, PR 4+); fall back
+            // to `topic` (single-topic gateways). The resulting string is joined
+            // with commas — ntfy server natively handles multi-topic subscriptions
+            // on a single HTTP connection via the `/topic1,topic2/json` URL form.
+            String topicPath;
+            JSONArray topicsArray = json.optJSONArray("topics");
+            if (topicsArray != null && topicsArray.length() > 0) {
+                StringBuilder tb = new StringBuilder();
+                for (int i = 0; i < topicsArray.length(); i++) {
+                    String t = topicsArray.optString(i, "").trim();
+                    if (t.isEmpty()) continue;
+                    if (tb.length() > 0) tb.append(",");
+                    tb.append(t);
+                }
+                topicPath = tb.toString();
+            } else {
+                topicPath = json.getString("topic");
+            }
 
             // Cache config
             prefs.edit()
                     .putString(KEY_NTFY_URL, url)
-                    .putString(KEY_NTFY_TOPIC, topic)
+                    .putString(KEY_NTFY_TOPIC, topicPath)
                     .putLong(KEY_NTFY_CACHED_AT, System.currentTimeMillis())
                     .apply();
 
             // Cache auth token securely
             saveEncryptedAuthToken(authToken);
 
-            Log.i(TAG, "Fetched ntfy config: " + url + "/" + topic);
-            return new String[]{url, topic, authToken};
+            Log.i(TAG, "Fetched ntfy config: " + url + "/" + topicPath);
+            return new String[]{url, topicPath, authToken};
 
         } catch (Exception e) {
             Log.w(TAG, "Failed to fetch ntfy config: " + e.getMessage());
