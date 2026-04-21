@@ -102,7 +102,23 @@ export default function pushRouter(authMiddleware) {
     }
   });
 
-  // GET /api/push/ntfy-config — connection parameters for Android ntfy client
+  // GET /api/push/ntfy-config — connection parameters for Android ntfy client.
+  //
+  // Returns:
+  //   { enabled: true, url, topic, topics, authToken }
+  //
+  // `topic` is the primary NTFY_TOPIC (kept for old APK builds that expect a
+  // single string). `topics` is the deduplicated array of every topic the
+  // APK should subscribe to — primary + anything in NTFY_EXTRA_TOPICS. The
+  // APK joins `topics` with commas in its stream URL; ntfy's server natively
+  // handles multi-topic subscriptions on a single HTTP connection via the
+  // `/topic1,topic2/json` syntax, so this does not multiply connections.
+  //
+  // NTFY_EXTRA_TOPICS is a comma-separated env list set on primary's systemd
+  // (via a drop-in) to include paired-instance topics — e.g. MPA publishes
+  // to `kevin-mpa`, so primary's response includes that in `topics` so the
+  // phone paired to primary receives MPA pushes too without a per-instance
+  // pairing rotation.
   router.get("/api/push/ntfy-config", authMiddleware, (req, res) => {
     const topic = process.env.NTFY_TOPIC;
     if (!topic) {
@@ -129,7 +145,15 @@ export default function pushRouter(authMiddleware) {
       }
     }
 
-    res.json({ enabled: true, url, topic, authToken });
+    // Build the topics list: primary first, then extras (deduplicated).
+    const extraRaw = process.env.NTFY_EXTRA_TOPICS || "";
+    const extras = extraRaw
+      .split(",")
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0 && t !== topic);
+    const topics = [topic, ...new Set(extras)];
+
+    res.json({ enabled: true, url, topic, topics, authToken });
   });
 
   return router;
