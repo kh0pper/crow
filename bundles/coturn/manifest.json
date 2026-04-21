@@ -1,0 +1,47 @@
+{
+  "id": "coturn",
+  "name": "TURN Server (coturn)",
+  "version": "1.0.0",
+  "description": "Self-hosted TURN relay for WebRTC voice chat. Enables NAT traversal for remote companion access when STUN alone is not sufficient.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "infrastructure",
+  "tags": ["webrtc", "turn", "nat", "voice", "relay", "infrastructure"],
+  "icon": "radio",
+  "docker": {
+    "composefile": "docker-compose.yml"
+  },
+  "skills": [],
+  "requires": {
+    "env": ["TURN_SECRET"],
+    "min_ram_mb": 64,
+    "min_disk_mb": 50
+  },
+  "env_vars": [
+    {
+      "name": "TURN_SECRET",
+      "description": "Shared secret for generating time-limited TURN credentials (HMAC-based)",
+      "required": true
+    },
+    {
+      "name": "TURN_REALM",
+      "description": "TURN server realm (usually your domain)",
+      "default": "crow.local",
+      "required": false
+    },
+    {
+      "name": "TURN_EXTERNAL_IP",
+      "description": "Public IP address of this machine (required for NAT traversal). Leave empty for LAN-only use.",
+      "required": false
+    },
+    {
+      "name": "TURN_PORT",
+      "description": "TURN listening port",
+      "default": "3478",
+      "required": false
+    }
+  ],
+  "ports": [3478, 5349],
+  "webUI": null,
+  "notes": "Optional for Tailscale-only deployments (STUN is sufficient). Required when users connect from restrictive networks (corporate NAT, mobile carriers). The companion gateway generates time-limited credentials via /api/turn-credentials using the shared secret."
+}
