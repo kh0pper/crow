@@ -30,6 +30,7 @@ const RESERVED_BLOG_SLUGS = new Set([
   "feed.atom",
   "podcast.xml",
   "sitemap.xml",
+  "research",
 ]);
 
 /**
@@ -338,6 +339,7 @@ export function pageShell(settings, { title, content, ogMeta }) {
     ${settings.tagline ? `<p>${escapeHtml(settings.tagline)}</p>` : ""}
     <nav>
       <a href="/blog">Posts</a>
+      <a href="/blog/research">Research</a>
       <a href="/blog/songbook">Songbook</a>
       <a href="/blog/feed.xml">RSS</a>
     </nav>
@@ -711,6 +713,66 @@ export default function blogPublicRouter() {
     }
   });
 
+  // GET /blog/research — Capstone research publications landing page
+  router.get("/blog/research", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const settings = await getBlogSettings(db);
+      // Chapters are ordered by data_case_studies.display_order (1..9) so
+      // the reader navigates Ch 1 → Ch 5 regardless of published_at order
+      // on the main /blog index.
+      const { rows } = await db.execute({
+        sql: `
+          SELECT cs.id AS cs_id, cs.title AS cs_title, cs.description, cs.display_order,
+                 bp.slug, bp.title AS bp_title, bp.excerpt, bp.published_at
+          FROM data_case_studies cs
+          JOIN blog_posts bp ON bp.id = cs.blog_post_id
+          WHERE cs.project_id = 6
+            AND bp.status = 'published'
+            AND bp.visibility = 'public'
+          ORDER BY cs.display_order ASC, cs.id ASC
+        `,
+      });
+
+      const reportTitle = `An "Efficient System"? Constitutional Analysis of Charter School Duplication, Bond Election Dependence, and Needs-Based Funding in the Texas School Finance System`;
+      const reportBlurb = `Capstone research for INSD 5940-41 (UNT). Constitutional evaluation of post-${'’'}16 Texas school finance against <em>Edgewood v. Kirby</em> (1989) and <em>Morath v. Texas Taxpayer and Student Fairness Coalition</em> (2016), with an original campus-level At-Risk Coefficient (ARC) regression model (8,674 campuses, 1,203 districts).`;
+
+      const chaptersHtml = rows.map((r) => `
+        <li style="margin:1rem 0;">
+          <a href="/blog/${escapeHtml(r.slug)}" style="font-weight:600;font-size:1.05em;text-decoration:none;">
+            ${escapeHtml(r.bp_title)}
+          </a>
+          ${r.excerpt ? `<div style="color:var(--crow-text-secondary,#64748b);font-size:0.9em;margin-top:0.2rem">${escapeHtml(r.excerpt)}</div>` : ""}
+        </li>
+      `).join("");
+
+      const content = `
+<article class="post-single" style="max-width:48rem;margin:0 auto;">
+  <h1>Research Publications</h1>
+  <p style="color:var(--crow-text-secondary,#64748b);font-size:0.95em;">
+    Long-form research from the Maestro Press capstone.
+  </p>
+
+  <section style="margin-top:2rem;padding:1.5rem;border-radius:8px;background:var(--crow-bg-elevated,#f8fafc);border:1px solid var(--crow-border,#e2e8f0);">
+    <h2 style="margin-top:0;font-size:1.25em;">${escapeHtml(reportTitle)}</h2>
+    <p style="margin-bottom:0;">${reportBlurb}</p>
+  </section>
+
+  <h2 style="margin-top:2rem;">Chapters</h2>
+  <ol style="list-style:none;padding-left:0;">
+    ${chaptersHtml || "<li><em>No chapters published yet.</em></li>"}
+  </ol>
+</article>`;
+
+      res.type("html").send(pageShell(settings, { title: "Research", content }));
+    } catch (err) {
+      console.error("[blog] /research error:", err);
+      res.status(500).send("Error loading research page");
+    } finally {
+      db.close();
+    }
+  });
+
   // GET /blog/:slug — Single post (must be last to avoid matching feed/tag routes)
   router.get("/blog/:slug", async (req, res, next) => {
     // Belt-and-suspenders guard: /blog/api/* and /blog/figures/* are
@@ -760,6 +822,54 @@ export default function blogPublicRouter() {
         ? `<div class="tags" style="margin-top:0.5rem">${tags.map((t) => `<a href="/blog/tag/${encodeURIComponent(t)}">${escapeHtml(t)}</a>`).join(" ")}</div>`
         : "";
 
+      // Chapter navigation for case-study posts. Looks up neighbors by
+      // data_case_studies.display_order within project 6 so the reader
+      // can walk Ch 1 → Ch 5 without returning to the index.
+      let chapterNavHtml = "";
+      if (tags.includes("case-study")) {
+        const { rows: selfRow } = await db.execute({
+          sql: "SELECT cs.display_order FROM data_case_studies cs WHERE cs.blog_post_id = ? AND cs.project_id = 6",
+          args: [post.id],
+        });
+        const order = selfRow[0]?.display_order;
+        if (order != null) {
+          const prevQ = await db.execute({
+            sql: `SELECT cs.display_order, bp.slug, bp.title
+                    FROM data_case_studies cs JOIN blog_posts bp ON bp.id = cs.blog_post_id
+                   WHERE cs.project_id = 6 AND cs.display_order < ?
+                     AND bp.status = 'published' AND bp.visibility = 'public'
+                   ORDER BY cs.display_order DESC LIMIT 1`,
+            args: [order],
+          });
+          const nextQ = await db.execute({
+            sql: `SELECT cs.display_order, bp.slug, bp.title
+                    FROM data_case_studies cs JOIN blog_posts bp ON bp.id = cs.blog_post_id
+                   WHERE cs.project_id = 6 AND cs.display_order > ?
+                     AND bp.status = 'published' AND bp.visibility = 'public'
+                   ORDER BY cs.display_order ASC LIMIT 1`,
+            args: [order],
+          });
+          const prev = prevQ.rows[0];
+          const next = nextQ.rows[0];
+          if (prev || next) {
+            chapterNavHtml = `
+  <nav class="chapter-nav" style="margin-top:3rem;padding-top:1.5rem;border-top:1px solid var(--crow-border,#e2e8f0);display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap">
+    ${prev ? `<a href="/blog/${escapeHtml(prev.slug)}" style="flex:1 1 45%;text-decoration:none;padding:0.75rem 1rem;border-radius:6px;border:1px solid var(--crow-border,#e2e8f0);">
+      <div style="font-size:0.75em;color:var(--crow-text-secondary,#64748b);text-transform:uppercase;letter-spacing:0.05em">← Previous</div>
+      <div style="font-weight:600;margin-top:0.15rem">${escapeHtml(prev.title)}</div>
+    </a>` : '<span style="flex:1 1 45%"></span>'}
+    ${next ? `<a href="/blog/${escapeHtml(next.slug)}" style="flex:1 1 45%;text-decoration:none;padding:0.75rem 1rem;border-radius:6px;border:1px solid var(--crow-border,#e2e8f0);text-align:right;">
+      <div style="font-size:0.75em;color:var(--crow-text-secondary,#64748b);text-transform:uppercase;letter-spacing:0.05em">Next →</div>
+      <div style="font-weight:600;margin-top:0.15rem">${escapeHtml(next.title)}</div>
+    </a>` : '<span style="flex:1 1 45%"></span>'}
+  </nav>
+  <div style="text-align:center;margin-top:1rem;">
+    <a href="/blog/research" style="font-size:0.85em;color:var(--crow-text-secondary,#64748b);">All chapters →</a>
+  </div>`;
+          }
+        }
+      }
+
       const coverHtml = post.cover_image_key
         ? `<figure style="margin:-0.5rem 0 2rem"><img src="/blog/media/${encodeURIComponent(post.cover_image_key)}" alt="${escapeHtml(post.title)}" style="width:100%;border-radius:12px;max-height:400px;object-fit:cover"></figure>`
         : "";
@@ -783,6 +893,7 @@ export default function blogPublicRouter() {
     ${tagsHtml}
   </div>
   <div class="body">${html}</div>
+  ${chapterNavHtml}
   <div class="post-footer">
     <a href="/blog">← Back to all posts</a>
   </div>
