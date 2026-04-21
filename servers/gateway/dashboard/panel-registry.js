@@ -33,10 +33,11 @@ export function registerPanel(manifest) {
 }
 
 /**
- * Load third-party panels from ~/.crow/panels/ (if enabled in panels.json).
+ * Load third-party panels from <crow-home>/panels/ (if enabled in panels.json).
+ * Honors CROW_HOME so alternate instances (MPA) load their own panels.
  */
 export async function loadExternalPanels() {
-  const crowDir = join(homedir(), ".crow");
+  const crowDir = process.env.CROW_HOME || join(homedir(), ".crow");
   const panelsDir = join(crowDir, "panels");
   const configPath = join(crowDir, "panels.json");
 
