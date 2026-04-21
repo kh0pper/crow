@@ -37,7 +37,7 @@
     "test:federation-resolve": "node --test tests/federation-resolve.test.js"
   },
   "dependencies": {
-    "@libsql/client": "^0.14.0",
+    "@libsql/client": "^0.17.2",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "@mozilla/readability": "^0.6.0",
     "@napi-rs/canvas": "^0.1.99",
