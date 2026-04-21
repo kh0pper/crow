@@ -19,6 +19,16 @@ import {
 } from "./query-engine.js";
 import { resolve } from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
+import {
+  renderChart,
+  renderMap,
+  cacheKey,
+  s3KeyFor,
+} from "../../../servers/blog/figure-renderer.js";
+import { uploadObject, getClient as getStorageClient } from "../../../servers/storage/s3-client.js";
+
+const FIGURES_BUCKET = "capstone-research";
+const GATEWAY_INTERNAL_URL = process.env.BLOG_FIGURE_GATEWAY_URL || "http://127.0.0.1:3002";
 
 let _tablesInitialized = false;
 
@@ -343,11 +353,14 @@ export function createDataDashboardServer(dbPath, options = {}) {
   // --- Tool: crow_data_case_study_publish ---
   server.tool(
     "crow_data_case_study_publish",
-    "Publish a case study as a Crow blog post. Converts sections to markdown with embedded chart configs.",
+    "Publish a case study as a Crow blog post. Emits <figure> HTML with static PNG fallbacks for charts and maps; the interactive hydration layer (blog-hydrate) swaps in live widgets client-side.",
     {
       case_study_id: z.number().describe("Case study ID to publish"),
+      overwrite: z.boolean().optional().describe(
+        "Re-emit content for an already-published post. If false (default) and blog_post_id is set, returns early without changes. If true and blog_post_id is set, UPDATE the existing row (content + updated_at); blog_post_id stays stable. If true and blog_post_id is NULL, INSERT as usual (idempotent)."
+      ),
     },
-    async ({ case_study_id }) => {
+    async ({ case_study_id, overwrite }) => {
       const { rows: studies } = await db.execute({
         sql: "SELECT * FROM data_case_studies WHERE id = ?",
         args: [case_study_id],
@@ -357,58 +370,261 @@ export function createDataDashboardServer(dbPath, options = {}) {
       }
 
       const study = studies[0];
-      if (study.blog_post_id) {
-        return { content: [{ type: "text", text: `Already published as blog post #${study.blog_post_id}.` }] };
+      const alreadyPublished = study.blog_post_id != null;
+      if (alreadyPublished && !overwrite) {
+        return { content: [{ type: "text", text: `Already published as blog post #${study.blog_post_id}. Pass overwrite=true to re-emit content.` }] };
       }
 
-      // Get sections
       const { rows: sections } = await db.execute({
         sql: "SELECT * FROM data_case_study_sections WHERE case_study_id = ? ORDER BY sort_order",
         args: [case_study_id],
       });
 
-      // Build blog post content from sections
-      const parts = [];
-      if (study.description) parts.push(study.description);
-      parts.push("");
-
-      for (const s of sections) {
-        if (s.title) parts.push(`## ${s.title}\n`);
-        if (s.section_type === "text" && s.content) {
-          parts.push(s.content);
-        } else if (s.section_type === "chart") {
-          parts.push(`*Chart: ${s.title || "Visualization"}*`);
-          if (s.sql) parts.push(`\`\`\`sql\n${s.sql}\n\`\`\``);
-        } else if (s.section_type === "map") {
-          parts.push(`*Map: ${s.title || "Geographic visualization"}*`);
-        }
-        parts.push("");
+      const articleParts = [`<article itemscope itemtype="https://schema.org/Article">`];
+      articleParts.push(`<h1 itemprop="headline">${escapeHtml(study.title)}</h1>`);
+      if (study.description) {
+        articleParts.push(`<p itemprop="description">${escapeHtml(study.description)}</p>`);
       }
 
-      const content = parts.join("\n");
+      let figuresRendered = 0;
+      const failures = [];
+
+      for (const s of sections) {
+        const titleHtml = s.title ? `<h2>${escapeHtml(s.title)}</h2>` : "";
+        articleParts.push(titleHtml);
+
+        if (s.section_type === "text") {
+          if (s.content) articleParts.push(s.content);
+        } else if (s.section_type === "chart" || s.section_type === "map") {
+          try {
+            const result = await renderSectionFigure(s, study, { skipIfCached: true });
+            articleParts.push(result.html);
+            figuresRendered += 1;
+          } catch (err) {
+            failures.push(`section #${s.id} (${s.section_type}): ${err.message}`);
+            articleParts.push(`<figure class="crow-${s.section_type}"><figcaption>${escapeHtml(s.title || s.section_type)} — render failed</figcaption></figure>`);
+          }
+        }
+      }
+
+      articleParts.push(`</article>`);
+
+      if (failures.length > 0) {
+        return {
+          content: [{
+            type: "text",
+            text: `Publish aborted — ${failures.length} figure(s) failed to render:\n${failures.join("\n")}`,
+          }],
+          isError: true,
+        };
+      }
+
+      const content = articleParts.join("\n\n");
       const slug = study.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
-      // Create blog post
-      const postResult = await db.execute({
-        sql: "INSERT INTO blog_posts (title, slug, content, status, visibility, tags) VALUES (?, ?, ?, 'draft', 'public', 'case-study')",
-        args: [study.title, slug, content],
-      });
-      const postId = Number(postResult.lastInsertRowid);
-
-      // Link case study to blog post
-      await db.execute({
-        sql: "UPDATE data_case_studies SET blog_post_id = ?, updated_at = datetime('now') WHERE id = ?",
-        args: [postId, case_study_id],
-      });
+      let postId;
+      let action;
+      if (alreadyPublished && overwrite) {
+        await db.execute({
+          sql: "UPDATE blog_posts SET title = ?, slug = ?, content = ?, updated_at = datetime('now') WHERE id = ?",
+          args: [study.title, slug, content, study.blog_post_id],
+        });
+        postId = study.blog_post_id;
+        action = "updated";
+      } else {
+        const postResult = await db.execute({
+          sql: "INSERT INTO blog_posts (title, slug, content, status, visibility, tags) VALUES (?, ?, ?, 'draft', 'public', 'case-study')",
+          args: [study.title, slug, content],
+        });
+        postId = Number(postResult.lastInsertRowid);
+        await db.execute({
+          sql: "UPDATE data_case_studies SET blog_post_id = ?, updated_at = datetime('now') WHERE id = ?",
+          args: [postId, case_study_id],
+        });
+        action = "inserted";
+      }
 
       return {
         content: [{
           type: "text",
-          text: `Published as blog post #${postId} (draft).\n\nTitle: ${study.title}\nSlug: ${slug}\nSections: ${sections.length}\n\nUse crow_publish_post to make it live.`,
+          text: `Blog post #${postId} (draft) ${action}.\n\nTitle: ${study.title}\nSlug: ${slug}\nSections: ${sections.length}\nFigures rendered: ${figuresRendered}\n\nStatus stays 'draft' until crow_publish_post flips it. Visibility stays 'public' by default.`,
         }],
       };
     }
   );
 
+  // --- Tool: crow_data_case_study_rerender_figures ---
+  // Re-renders the PNG fallbacks for a case study without touching the
+  // blog post's markdown content. Used when tea_data.db is refreshed and
+  // the static images need to reflect new data.
+  server.tool(
+    "crow_data_case_study_rerender_figures",
+    "Re-render PNG fallbacks for a case study's chart and map sections. Does not modify the published markdown (which carries stable /blog/figures/... URLs); the next page load reflects new PNGs via cache-busted filenames. Honors figure_cache_key so unchanged data skips by default.",
+    {
+      case_study_id: z.number().int().positive().describe("data_case_studies.id"),
+      force: z.boolean().optional().describe(
+        "Force re-render even when the cache key matches an existing MinIO object. Default false."
+      ),
+    },
+    async ({ case_study_id, force }) => {
+      const { rows: studies } = await db.execute({
+        sql: "SELECT * FROM data_case_studies WHERE id = ?",
+        args: [case_study_id],
+      });
+      if (studies.length === 0) {
+        return { content: [{ type: "text", text: `Case study #${case_study_id} not found.` }], isError: true };
+      }
+      const study = studies[0];
+
+      const { rows: sections } = await db.execute({
+        sql: "SELECT * FROM data_case_study_sections WHERE case_study_id = ? AND section_type IN ('chart','map') ORDER BY sort_order",
+        args: [case_study_id],
+      });
+
+      let rendered = 0, cached = 0;
+      const failures = [];
+      const details = [];
+
+      for (const s of sections) {
+        try {
+          const outcome = await renderSectionFigure(s, study, { skipIfCached: !force });
+          if (outcome.cached) {
+            cached += 1;
+            details.push(`#${s.id} (${s.section_type}) cached → ${outcome.s3Key}`);
+          } else {
+            rendered += 1;
+            details.push(`#${s.id} (${s.section_type}) rendered → ${outcome.s3Key}`);
+          }
+        } catch (err) {
+          failures.push(`#${s.id} (${s.section_type}): ${err.message}`);
+        }
+      }
+
+      // Bump updated_at on the linked post so RSS readers re-fetch.
+      if (rendered > 0 && study.blog_post_id) {
+        await db.execute({
+          sql: "UPDATE blog_posts SET updated_at = datetime('now') WHERE id = ?",
+          args: [study.blog_post_id],
+        });
+      }
+
+      const summary = [
+        `Case study #${case_study_id}: ${study.title}`,
+        `Chart/map sections: ${sections.length}`,
+        `Rendered: ${rendered} · Cached (unchanged): ${cached} · Failed: ${failures.length}`,
+        failures.length > 0 ? `\nFailures:\n${failures.join("\n")}` : "",
+        `\n${details.join("\n")}`,
+      ].filter(Boolean).join("\n");
+
+      return {
+        content: [{ type: "text", text: summary }],
+        isError: failures.length > 0,
+      };
+    }
+  );
+
   return server;
+
+  // ── Helpers scoped to the publish transform ──────────────────────
+
+  function escapeHtml(s) {
+    return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+
+  /**
+   * Compute the cache key for a chart/map section, skip upload if the
+   * cache-keyed object already exists (when opts.skipIfCached), else
+   * render the PNG and upload to MinIO. Always returns the <figure>
+   * HTML + s3 key + whether a cache hit was taken.
+   */
+  async function renderSectionFigure(section, study, opts = {}) {
+    const skipIfCached = opts.skipIfCached === true;
+    const config = section.config ? JSON.parse(section.config) : {};
+    const backendId = config.backend_id ?? null;
+
+    let digestInput, geojson, rows;
+    if (section.section_type === "chart") {
+      if (!section.sql) throw new Error("chart section missing sql");
+      if (!backendId) throw new Error("chart section missing config.backend_id");
+      const dbPath = await resolveDbPath(backendId);
+      const result = await executeReadQuery(dbPath, section.sql);
+      rows = result.rows;
+      digestInput = rows;
+    } else if (section.section_type === "map") {
+      geojson = await fetchGeojsonForSection(config);
+      digestInput = (geojson.features || []).map((f) => f.properties?.metric_data ?? null);
+    } else {
+      throw new Error(`unsupported section_type ${section.section_type}`);
+    }
+
+    const key = cacheKey({
+      sectionId: section.id,
+      config,
+      sql: section.sql || "",
+      dataDigestInput: digestInput,
+    });
+    const s3Key = s3KeyFor(section.id, key);
+
+    let cached = false;
+    if (skipIfCached && (await figureObjectExists(s3Key))) {
+      cached = true;
+    } else {
+      const buffer = section.section_type === "chart"
+        ? await renderChart({ config: { ...config, title: section.title }, rows })
+        : await renderMap({ config: { ...config, title: section.title }, title: section.title || "", geojson });
+      await uploadObject(s3Key, buffer, {
+        bucket: FIGURES_BUCKET,
+        contentType: "image/png",
+      });
+    }
+
+    const html = buildFigureHtml(section, config, backendId, s3Key);
+    return { s3Key, cached, html };
+  }
+
+  async function figureObjectExists(s3Key) {
+    try {
+      const client = getStorageClient();
+      if (!client) return false;
+      await client.statObject(FIGURES_BUCKET, s3Key);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function buildFigureHtml(section, config, backendId, s3Key) {
+    const cls = section.section_type === "chart" ? "crow-chart" : "crow-map";
+    const imgUrl = `/blog/${s3Key}`;
+    const dataBackend = backendId ? ` data-backend-id="${backendId}"` : "";
+    let mapData = "";
+    if (section.section_type === "map") {
+      if (config.metric) mapData += ` data-metric="${escapeHtml(config.metric)}"`;
+      if (config.field) mapData += ` data-field="${escapeHtml(config.field)}"`;
+    }
+    const caption = section.caption || "";
+    const figcaption = [section.title, caption].filter(Boolean).map(escapeHtml).join(". ");
+
+    return [
+      `<figure class="${cls}" data-section-id="${section.id}"${dataBackend}${mapData}>`,
+      `  <img src="${imgUrl}" alt="${escapeHtml(section.title || section.section_type)}" loading="lazy" width="1200" height="800">`,
+      figcaption ? `  <figcaption>${figcaption}</figcaption>` : "",
+      `</figure>`,
+    ].filter(Boolean).join("\n");
+  }
+
+  async function fetchGeojsonForSection(config) {
+    const params = new URLSearchParams();
+    if (config.backend_id != null) params.set("backend_id", String(config.backend_id));
+    if (config.metric) params.set("metric", config.metric);
+    if (config.year) params.set("year", config.year);
+    if (config.region) params.set("region", String(config.region));
+    if (config.county) params.set("county", config.county);
+    const url = `${GATEWAY_INTERNAL_URL}/bundles/tea-maps/api/geojson?${params.toString()}`;
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`tea-maps geojson fetch failed: ${resp.status} ${resp.statusText}`);
+    return resp.json();
+  }
 }

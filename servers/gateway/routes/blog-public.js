@@ -20,6 +20,18 @@ import { generatePodcastFeed } from "../../blog/podcast-rss.js";
 import { FONT_IMPORT, designTokensCss } from "../dashboard/shared/design-tokens.js";
 import { isAvailable, getObject } from "../../storage/s3-client.js";
 
+// Slugs under /blog/* that other routers (or earlier routes in this
+// router) handle. Guards /blog/:slug from swallowing them if the mount
+// order is ever perturbed by a refactor.
+const RESERVED_BLOG_SLUGS = new Set([
+  "api",
+  "figures",
+  "feed.xml",
+  "feed.atom",
+  "podcast.xml",
+  "sitemap.xml",
+]);
+
 /**
  * Derive site URL from request (respects X-Forwarded-Host when behind proxy).
  * Falls back to CROW_GATEWAY_URL env var, then localhost.
@@ -700,7 +712,11 @@ export default function blogPublicRouter() {
   });
 
   // GET /blog/:slug — Single post (must be last to avoid matching feed/tag routes)
-  router.get("/blog/:slug", async (req, res) => {
+  router.get("/blog/:slug", async (req, res, next) => {
+    // Belt-and-suspenders guard: /blog/api/* and /blog/figures/* are
+    // handled by blogEmbedApiRouter which mounts BEFORE this router.
+    // The guard protects against a future refactor that reorders app.use.
+    if (RESERVED_BLOG_SLUGS.has(req.params.slug)) return next();
     const db = createDbClient();
     try {
       const settings = await getBlogSettings(db);
@@ -728,6 +744,17 @@ export default function blogPublicRouter() {
       }
 
       const html = renderMarkdown(post.content);
+      // Phase 8.5: inject blog-hydrate.js on posts that contain
+      // case-study figures, so static <img> fallbacks become live
+      // Chart.js/Leaflet widgets. Inspected on the rendered content to
+      // avoid loading the hydrate script + vendored Chart.js/Leaflet on
+      // non-case-study posts. Served from the tea-maps bundle's shared
+      // mount so everything (vendored deps + shared renderer) resolves
+      // off a single origin.
+      const hasFigures = /<figure\s+class="crow-(chart|map)"/i.test(html);
+      const hydrateScript = hasFigures
+        ? `\n<script defer data-hydrate-entry="1" data-bundle-version="1" src="/bundles/tea-maps/shared/blog-hydrate.js"></script>`
+        : "";
       const tags = (post.tags || "").split(",").map((t) => t.trim()).filter(Boolean);
       const tagsHtml = tags.length > 0
         ? `<div class="tags" style="margin-top:0.5rem">${tags.map((t) => `<a href="/blog/tag/${encodeURIComponent(t)}">${escapeHtml(t)}</a>`).join(" ")}</div>`
@@ -759,7 +786,7 @@ export default function blogPublicRouter() {
   <div class="post-footer">
     <a href="/blog">← Back to all posts</a>
   </div>
-</article>`;
+</article>${hydrateScript}`;
 
       res.type("html").send(pageShell(settings, { title: post.title, content, ogMeta }));
     } catch (err) {
