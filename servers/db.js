@@ -124,14 +124,106 @@ export async function ensureColumn(db, table, column, type) {
   }
 }
 
-export function createDbClient(dbPath) {
-  const filePath = dbPath || process.env.CROW_DB_PATH || resolve(resolveDataDir(), "crow.db");
-  const client = createClient({ url: `file:${filePath}` });
-  client.execute("PRAGMA journal_mode = WAL").catch(err =>
+/**
+ * Classify an error as a libsql-client wedge (file is healthy but the
+ * long-lived in-process client has poisoned its page cache). Recognises
+ * both the SQLITE_CORRUPT "disk image is malformed" variant and the
+ * SQLITE_IOERR "disk I/O error" variant that have been observed on MPA.
+ *
+ * See the MPA wedge investigation 2026-04-21 — sqlite3 CLI reads the
+ * same file cleanly while the long-lived gateway client returns these
+ * errors. Recreating the client clears the poisoned state.
+ */
+function isWedgeError(err) {
+  const blob = String(err?.message || err) + " " + String(err?.code || "");
+  return /SQLITE_CORRUPT|SQLITE_IOERR|disk image is malformed|disk I\/O error/i.test(blob);
+}
+
+function openUnwrappedClient(filePath) {
+  const c = createClient({ url: `file:${filePath}` });
+  c.execute("PRAGMA journal_mode = WAL").catch(err =>
     console.warn("[db] Failed to set WAL mode:", err.message)
   );
-  client.execute("PRAGMA busy_timeout = 30000").catch(err =>
+  c.execute("PRAGMA busy_timeout = 30000").catch(err =>
     console.warn("[db] Failed to set busy_timeout:", err.message)
   );
-  return client;
+  return c;
+}
+
+/**
+ * Create a libsql client wrapped with self-healing retry for the MPA
+ * wedge class of errors. On SQLITE_CORRUPT / SQLITE_IOERR from execute()
+ * or batch(), the wrapper closes the poisoned underlying client, opens
+ * a fresh one against the same file, and retries the operation once.
+ *
+ * Transactions are NOT auto-retried — mid-transaction state can't be
+ * safely replayed. Callers that need transaction-level resilience must
+ * restart the transaction themselves.
+ *
+ * Recoveries are logged with an incrementing count so operators can
+ * gauge wedge frequency without trawling logs for error text.
+ */
+export function createDbClient(dbPath) {
+  const filePath = dbPath || process.env.CROW_DB_PATH || resolve(resolveDataDir(), "crow.db");
+
+  let client = openUnwrappedClient(filePath);
+  let closed = false;
+  let recoveryCount = 0;
+  let lastRecoveryAt = 0;
+
+  async function tryRecover() {
+    if (closed) return false;
+    const now = Date.now();
+    // Throttle: at most one recovery per 500ms per wrapper. Parallel
+    // operations that all see the wedge converge on this throttle so we
+    // don't thrash close/open cycles.
+    if (now - lastRecoveryAt < 500) return false;
+    lastRecoveryAt = now;
+    recoveryCount++;
+    console.warn(`[db] libsql wedge on ${filePath} — recreating client (recovery #${recoveryCount})`);
+    try { client.close(); } catch {}
+    client = openUnwrappedClient(filePath);
+    return true;
+  }
+
+  async function withRetry(method, args) {
+    try {
+      return await client[method](...args);
+    } catch (err) {
+      if (!isWedgeError(err)) throw err;
+      const recovered = await tryRecover();
+      if (!recovered) throw err;
+      // Single retry on the fresh client. If this also wedges, propagate.
+      return await client[method](...args);
+    }
+  }
+
+  // Explicit wrappers for the retryable methods. Other libsql client
+  // methods fall through to the current underlying client via the Proxy
+  // below — future API additions won't silently break callers, at the
+  // cost of not getting auto-retry (transactions intentionally fall
+  // through since mid-transaction state can't be safely replayed).
+  const wrapped = {
+    execute: (...args) => withRetry("execute", args),
+    batch: (...args) => withRetry("batch", args),
+    executeMultiple: (...args) => withRetry("executeMultiple", args),
+    transaction: (...args) => client.transaction(...args),
+    close: () => {
+      closed = true;
+      try { client.close(); } catch {}
+    },
+    get _recoveryCount() { return recoveryCount; },
+  };
+
+  return new Proxy(wrapped, {
+    get(target, prop) {
+      if (prop in target) return target[prop];
+      // Fall through to the live underlying client for any unwrapped
+      // method (migrate, sync, etc.). `client` is captured by closure
+      // and updated on recovery, so even a fallthrough call sees the
+      // freshest client.
+      const v = client[prop];
+      return typeof v === "function" ? v.bind(client) : v;
+    },
+  });
 }
