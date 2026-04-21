@@ -79,6 +79,7 @@ This is the master routing skill. Consult this **before every task** to determin
 | "nextcloud", "nextcloud files" | "nextcloud", "archivos nextcloud" | nextcloud | filesystem |
 | "photos", "pictures", "album", "immich" | "fotos", "imágenes", "álbum" | immich | immich |
 | "camera", "security cam", "motion", "doorbell", "NVR", "who was at", "surveillance", "frigate" | "cámara", "vigilancia", "movimiento", "timbre", "quién estuvo en" | frigate (add-on) | crow-frigate |
+| "motioneye", "motion daemon", "pi camera", "usb webcam", "lightweight camera" | "motioneye", "cámara de pi", "webcam usb", "cámara ligera" | motioneye (add-on) | (iframe-only, no MCP) |
 | "back up", "backup", "restore data", "export data" | "respaldar", "backup", "restaurar datos", "exportar datos" | backup | filesystem |
 | "delete", "remove", "bulk delete", "is this safe" | "eliminar", "borrar", "eliminar en masa", "es seguro" | safety-guardrails | (depends on action) |
 | "test round", "run tests on", "test on claude.ai", "iterative testing" | "ronda de pruebas", "probar en claude.ai", "pruebas iterativas" | iterative-testing | crow-memory |

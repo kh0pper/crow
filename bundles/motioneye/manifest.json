@@ -1,0 +1,25 @@
+{
+  "id": "motioneye",
+  "name": "motionEye",
+  "version": "0.43.1",
+  "description": "Lightweight web frontend for the Motion daemon. Pi-friendly camera recording + motion detection. No AI — use the Frigate bundle if you want object detection.",
+  "type": "bundle",
+  "author": "Crow",
+  "category": "cameras",
+  "tags": ["cameras", "motion", "pi", "rtsp", "usb-webcam", "self-hosted", "lightweight"],
+  "icon": "phone-video",
+  "docker": { "composefile": "docker-compose.yml" },
+  "panel": "panel/motioneye.js",
+  "skills": ["skills/motioneye.md"],
+  "requires": { "env": [], "min_ram_mb": 256, "recommended_ram_mb": 512, "min_disk_mb": 5000, "recommended_disk_mb": 20000 },
+  "env_vars": [
+    { "name": "MOTIONEYE_URL", "description": "motionEye base URL (defaults to loopback :8765)", "default": "http://localhost:8765", "required": false },
+    { "name": "MOTIONEYE_CONFIG_PATH", "description": "Host path for motionEye config.", "default": "~/.crow/data/motioneye/config", "required": false },
+    { "name": "MOTIONEYE_MEDIA_PATH", "description": "Host path for recordings.", "default": "~/.crow/data/motioneye/media", "required": false },
+    { "name": "MOTIONEYE_UID", "description": "Host UID for file ownership (run `id -u`).", "default": "1000", "required": false },
+    { "name": "MOTIONEYE_GID", "description": "Host GID for file ownership (run `id -g`).", "default": "1000", "required": false }
+  ],
+  "ports": [8765],
+  "webUI": { "port": 8765, "path": "/", "label": "motionEye" },
+  "notes": "Default admin login on first start: username 'admin', password empty. Rotate immediately via Settings → General. No MCP tools — iframe-only bundle. Use the Frigate bundle if you need MCP-callable camera/event tools or AI object detection."
+}

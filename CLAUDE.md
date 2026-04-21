@@ -167,6 +167,7 @@ bundles/scratch-offline/       → Scratch block-based coding (Dockerfile builds
 bundles/vllm/                  → vLLM GPU inference server (OpenAI-compatible endpoint; Linux x86_64 + NVIDIA only; recommended classroom engine for Maker Lab)
 bundles/maker-lab-advanced/    → Maker Lab Advanced (Phase 5): JupyterHub for 9+ learners, kid-safe kernel defaults, AI pair-programmer at tween/teen reading level
 bundles/frigate/               → Frigate NVR: self-hosted camera system with AI object detection. RTSP/ONVIF cameras, JWT auth on :8971, internal port 5000 not exposed. MCP tools: crow_frigate_list_cameras (stub v1; full event/snapshot/clip tools in Milestone B)
+bundles/motioneye/             → motionEye: lightweight web frontend for the Motion daemon. Pi-friendly, USB webcam + RTSP support, motion-triggered recording. Iframe-only (no MCP tools in v1); install alongside Frigate if you also want AI detection
 android/                       → Android WebView shell app (Crow's Nest mobile client)
 servers/gateway/public/        → PWA assets (manifest.json, service worker, icons)
 servers/gateway/push/          → Web Push notification infrastructure (VAPID)
@@ -606,6 +607,7 @@ Add-on skills (activated when corresponding add-on is installed):
 - `vikunja.md` — Vikunja tasks: projects, tasks, labels, due dates, kanban
 - `actual-budget.md` — Actual Budget: accounts, transactions, budgets, spending reports
 - `frigate.md` — Frigate NVR: list cameras, list events (Milestone B), snapshots, clips, enable/disable detect with safety confirm. JWT auth via FRIGATE_USER/FRIGATE_PASSWORD; 30s response cache on chatty polls.
+- `motioneye.md` — motionEye: lightweight Motion daemon frontend. No MCP tools — routes user to the iframe Web UI at /dashboard/motioneye, and redirects to frigate.md if the user needs AI detection or MCP-callable camera ops.
 
 ### Maintaining CLAUDE.md vs crow.md
 
