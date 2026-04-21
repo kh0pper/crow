@@ -1,0 +1,31 @@
+{
+  "id": "campaigns",
+  "name": "Campaigns",
+  "version": "1.0.0",
+  "description": "Social media campaign manager — draft, schedule, and publish posts across platforms (starting with Reddit)",
+  "type": "mcp-server",
+  "author": "Crow",
+  "category": "social",
+  "tags": ["campaigns", "reddit", "social-media", "scheduling", "publishing"],
+  "icon": "megaphone",
+  "server": {
+    "command": "node",
+    "args": ["server/index.js"],
+    "envKeys": ["CROW_CAMPAIGNS_ENCRYPTION_KEY"]
+  },
+  "panel": "panel/campaigns.js",
+  "panelRoutes": "panel/routes.js",
+  "skills": ["skills/campaigns.md"],
+  "requires": {
+    "env": ["CROW_CAMPAIGNS_ENCRYPTION_KEY"]
+  },
+  "env_vars": [
+    {
+      "name": "CROW_CAMPAIGNS_ENCRYPTION_KEY",
+      "description": "AES-256-GCM encryption key for Reddit credentials (generate with: openssl rand -base64 32)",
+      "required": true,
+      "secret": true
+    }
+  ],
+  "notes": "12 MCP tools for social media campaign management. Reddit support via snoowrap. Credentials encrypted at rest with AES-256-GCM. Dashboard panel with approval workflow."
+}
