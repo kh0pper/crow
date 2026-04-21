@@ -2,6 +2,10 @@ node_modules/
 data/*.db
 data/*.db-wal
 data/*.db-shm
+data/*.db.bak-*
+data/*.corrupt
+data/*.sql
+data/claude-ai-test-results.md
 .env
 .mcp.json
 *.log
@@ -9,6 +13,19 @@ data/*.db-shm
 .claude/skills/
 tests/claude-ai/results/*.json
 tests/claude-ai/screenshots/
+
+# Brainstorm runtime state (.superpowers)
+.superpowers/brainstorm/*/.server.pid
+.superpowers/brainstorm/*/.server-info
+.superpowers/brainstorm/*/.server-stopped
+.superpowers/brainstorm/*/.server-info.tmp
+
+# Per-machine tool configs that embed runtime API tokens (GitHub PAT,
+# Trello token, etc.). The skills/ symlinks next to these are safe to
+# track; the settings.json files are not.
+.gemini/settings.json
+.qwen/settings.json
+.claude/settings.local.json
 
 # CrowClaw runtime config (contains API keys, tokens)
 bundles/crowclaw/config/
