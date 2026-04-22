@@ -201,10 +201,14 @@ async function tick() {
 export async function startScheduler(database) {
   db = database;
 
-  // Compute next_run for all enabled schedules on startup
+  // Compute next_run for all enabled schedules on startup. Skip
+  // pipeline: prefix rows so we don't overwrite a manual override that
+  // was set between runs — pipeline-runner maintains its own
+  // last_run/next_run on dispatch, and recomputing here would clobber
+  // e.g. a test-fire next_run an operator set via CLI.
   try {
     const { rows } = await db.execute({
-      sql: "SELECT id, cron_expression FROM schedules WHERE enabled = 1",
+      sql: "SELECT id, cron_expression FROM schedules WHERE enabled = 1 AND task NOT LIKE 'pipeline:%'",
       args: [],
     });
 
