@@ -256,3 +256,20 @@ export function createDbClient(dbPath) {
     },
   };
 }
+
+/**
+ * Perform an online backup of a crow.db file to destPath using the keeper
+ * handle's better-sqlite3 `.backup()`. Runs the SQLite online backup API
+ * from inside the gateway process so no external process ever opens the
+ * DB file directly — which would, under WAL mode, orphan the gateway's
+ * -wal/-shm FDs on close.
+ *
+ * Returns { totalPages, remainingPages } from better-sqlite3, so callers
+ * can confirm completion.
+ */
+export async function performBackup(dbPath, destPath) {
+  const filePath = dbPath || process.env.CROW_DB_PATH || resolve(resolveDataDir(), "crow.db");
+  ensureKeeper(filePath);
+  const keeper = _dbKeepers.get(filePath);
+  return keeper.backup(destPath);
+}
