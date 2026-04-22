@@ -516,7 +516,9 @@ servers/gateway/dashboard/
 
 Crow supports installable add-ons (panels, MCP servers, skills, bundles). The registry lives in `registry/add-ons.json`. Users install add-ons by asking their AI ("install the todo add-on") or via the Extensions panel in the Crow's Nest. Installed add-ons are tracked in `~/.crow/installed.json`. Type-specific artifacts:
 - **bundle**: Docker Compose files in `~/.crow/bundles/<id>/`
-- **mcp-server**: Registered in `~/.crow/mcp-addons.json` (command, args, env)
+- **mcp-server**: Registered in `~/.crow/mcp-addons.json`. Two transport shapes supported:
+  - **stdio (default)**: `{"command": "node", "args": [...], "env": {...}, "cwd": "..."}` — spawns a local subprocess over stdio. This is how local bundle servers (tasks, media, etc.) mount.
+  - **http**: `{"transport": "http", "url": "https://...", "oauth": {"credentials_file": "...", "token_file": "...", "scopes": [...]}}` — connects to a remote MCP server over StreamableHTTP. Used for Google's managed MCP endpoints (`gmailmcp.googleapis.com/mcp/v1`, `calendarmcp.googleapis.com/mcp/v1`). The `oauth` block wires `servers/orchestrator/oauth-client-provider.js` so the SDK handles token refresh on 401. Operators seed the token file once via `scripts/google-mcp-auth.mjs`.
 - **skill**: Copied to `~/.crow/skills/` (takes precedence over repo `skills/`)
 - **panel**: Copied to `~/.crow/panels/`, registered in `~/.crow/panels.json`
 
