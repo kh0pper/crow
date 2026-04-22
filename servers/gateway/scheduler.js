@@ -76,9 +76,14 @@ async function tick() {
   try {
     const now = new Date().toISOString();
 
-    // Find enabled schedules that are due (next_run <= now) or have no next_run computed yet
+    // Find enabled schedules that are due. Exclude `pipeline:` prefix rows
+    // — those are owned by the orchestrator pipeline-runner, which needs
+    // to see them as still-due when it polls. If this scheduler advanced
+    // next_run first, pipeline-runner would observe next_run in the
+    // future and silently skip, losing the pipeline run (see the
+    // 2026-04-22 MPA briefing miss).
     const { rows } = await db.execute({
-      sql: "SELECT id, cron_expression, task, next_run FROM schedules WHERE enabled = 1 AND (next_run IS NOT NULL AND next_run <= ?)",
+      sql: "SELECT id, cron_expression, task, next_run FROM schedules WHERE enabled = 1 AND (next_run IS NOT NULL AND next_run <= ?) AND task NOT LIKE 'pipeline:%'",
       args: [now],
     });
 
