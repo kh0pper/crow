@@ -793,13 +793,25 @@ try {
       app.use(kbPublicRouter());
       console.log("Knowledge Base public routes mounted at /kb/*");
 
-      // Start LAN discovery (mDNS) for KB collections with lan_enabled = 1
+      // Start LAN discovery (mDNS) for KB collections with lan_enabled = 1.
+      // The stdio bundle entrypoint (server/index.js) calls initKbTables on
+      // startup, but the in-process LAN-discovery path bypasses that entry,
+      // so on a gateway whose crow.db has never hosted the KB bundle (MPA,
+      // finance) the kb_collections table is absent and startLanDiscovery
+      // logs SQLITE_ERROR. Initialize the tables first — CREATE TABLE IF
+      // NOT EXISTS makes this idempotent on the gateway that already has
+      // them (primary).
       try {
         const lanPath = routesPath.replace(/routes[/\\]kb-public\.js$/, "server/lan-discovery.js");
         const dbPath = routesPath.replace(/routes[/\\]kb-public\.js$/, "server/db.js");
+        const initPath = routesPath.replace(/routes[/\\]kb-public\.js$/, "server/init-tables.js");
         if (existsSync(lanPath) && existsSync(dbPath)) {
-          const { startLanDiscovery } = await import(pathToFileURL(lanPath).href);
           const { createDbClient: createKbDb } = await import(pathToFileURL(dbPath).href);
+          if (existsSync(initPath)) {
+            const { initKbTables } = await import(pathToFileURL(initPath).href);
+            await initKbTables(createKbDb());
+          }
+          const { startLanDiscovery } = await import(pathToFileURL(lanPath).href);
           await startLanDiscovery(createKbDb(), PORT);
         }
       } catch (lanErr) {
