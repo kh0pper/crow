@@ -54,6 +54,31 @@ export const pipelines = {
     resultCategory: "project",
   },
 
+  "mpa-gmail-digest": {
+    name: "MPA: Gmail Inbox Digest",
+    description:
+      "Read-only smoke-test pipeline for the google-workspace addon. Lists recent unread Gmail threads, produces a concise digest, stores it as a memory tagged `mpa,gmail`. Proves the full chain (scheduler → orchestrator → crow-chat → addon stdio → local MCP → Gmail REST) works end-to-end. Not scheduled by default — trigger manually via crow_schedule_pipeline or the dashboard.",
+    goal:
+      "Produce a concise digest of recent unread Gmail activity by making these tool calls in order:\n\n" +
+      "CALL 1 — gmail_search_threads with arguments:\n" +
+      "  query = \"label:inbox is:unread newer_than:1d\"\n" +
+      "  max_results = 10\n" +
+      "Capture the response's `data.threads` array.\n\n" +
+      "CALL 2 — crow_remember with arguments:\n" +
+      "  content = a short bulleted summary of those threads — one line each in the form\n" +
+      "    \"- <sender>: <subject>\" (or \"- (empty inbox)\" if the result had zero threads)\n" +
+      "  category = \"briefing\"\n" +
+      "  importance = 4\n" +
+      "  tags = \"mpa,gmail,digest\"\n\n" +
+      "After both tool calls succeed, respond with a single short confirmation line containing the " +
+      "stored memory id and the count of threads summarized. Do not fabricate threads — only " +
+      "include what gmail_search_threads actually returned.",
+    preset: "mpa-gmail",
+    defaultCron: null,
+    storeResult: false,
+    resultCategory: null,
+  },
+
   "mpa-daily-briefing": {
     name: "MPA: Daily Briefing",
     description:
