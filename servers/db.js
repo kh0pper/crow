@@ -178,6 +178,34 @@ function executeOne(db, sql, rawArgs) {
 }
 
 /**
+ * Per-path keeper handles. SQLite in WAL mode unlinks the -wal/-shm files
+ * when the last active connection to a file closes. The gateway has many
+ * transient createDbClient() open/close cycles (startup migrations, the
+ * per-minute loadRemoteInstances probe, etc.) and if any of them happens
+ * to be the last active connection at close time, the unlink orphans the
+ * FDs held by peer modules, which then fail reads with
+ * "disk I/O error" (SQLite surfacing EBADF on the unlinked inode).
+ *
+ * Holding one never-closed keeper per DB path guarantees there's always
+ * another reader registered in the WAL index, so close() on transient
+ * clients can't drop the count to zero.
+ */
+const VALID_JOURNAL_MODES = new Set(["WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "OFF"]);
+function resolveJournalMode() {
+  const raw = (process.env.CROW_JOURNAL_MODE || "WAL").toUpperCase();
+  return VALID_JOURNAL_MODES.has(raw) ? raw : "WAL";
+}
+
+const _dbKeepers = new Map();
+function ensureKeeper(filePath) {
+  if (_dbKeepers.has(filePath)) return;
+  const keeper = new Database(filePath);
+  try { keeper.pragma(`journal_mode = ${resolveJournalMode()}`); } catch {}
+  try { keeper.pragma("busy_timeout = 30000"); } catch {}
+  _dbKeepers.set(filePath, keeper);
+}
+
+/**
  * Create a database client for the given (or inferred) SQLite file.
  * The returned object mirrors @libsql/client's surface (async .execute,
  * .batch, .executeMultiple, .close) so existing call sites don't have
@@ -190,11 +218,14 @@ function executeOne(db, sql, rawArgs) {
 export function createDbClient(dbPath) {
   const filePath = dbPath || process.env.CROW_DB_PATH || resolve(resolveDataDir(), "crow.db");
 
+  ensureKeeper(filePath);
+
   const db = new Database(filePath);
   try {
-    db.pragma("journal_mode = WAL");
+    const mode = resolveJournalMode();
+    db.pragma(`journal_mode = ${mode}`);
   } catch (err) {
-    console.warn("[db] Failed to set WAL mode:", err.message);
+    console.warn("[db] Failed to set journal_mode:", err.message);
   }
   try {
     db.pragma("busy_timeout = 30000");
