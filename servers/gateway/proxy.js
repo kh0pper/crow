@@ -14,9 +14,11 @@ import { homedir } from "node:os";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
 import { INTEGRATIONS, isIntegrationConfigured, getSpawnEnv } from "./integrations.js";
 import { createDbClient } from "../db.js";
+import { createGoogleOAuthProvider } from "../orchestrator/oauth-client-provider.js";
 
 // Track connected servers for health checks and router access
 const connectedServers = new Map(); // id → { client, process, tools }
@@ -160,18 +162,47 @@ async function connectToServer(integration) {
  * Unlike connectToServer(), this takes a flat env dict instead of using getSpawnEnv().
  */
 async function connectAddonServer(id, config) {
-  const cwd = config.cwd || join(resolveCrowHome(), "bundles", id);
-  const env = { ...process.env, ...(config.env || {}) };
-
   const CONNECT_TIMEOUT_MS = 60_000;
+  const transportMode = (config.transport || "stdio").toLowerCase();
 
   try {
-    const transport = new StdioClientTransport({
-      command: config.command,
-      args: config.args || [],
-      env,
-      cwd,
-    });
+    let transport;
+    if (transportMode === "http") {
+      // Remote HTTP MCP server (e.g. Google's gmailmcp.googleapis.com).
+      // OAuth flow is handled by the SDK via authProvider; see
+      // orchestrator/oauth-client-provider.js for the token file shape.
+      if (!config.url) {
+        throw new Error(`addon ${id}: transport=http requires a "url" field`);
+      }
+      let authProvider;
+      if (config.oauth) {
+        const { credentials_file, token_file, scopes } = config.oauth;
+        if (!credentials_file || !token_file || !Array.isArray(scopes)) {
+          throw new Error(
+            `addon ${id}: oauth block requires credentials_file, token_file, scopes[]`,
+          );
+        }
+        authProvider = createGoogleOAuthProvider({
+          credentialsFile: credentials_file,
+          tokenFile: token_file,
+          scopes,
+          label: id,
+        });
+      }
+      transport = new StreamableHTTPClientTransport(new URL(config.url), {
+        authProvider,
+      });
+    } else {
+      // stdio (default, backward-compatible)
+      const cwd = config.cwd || join(resolveCrowHome(), "bundles", id);
+      const env = { ...process.env, ...(config.env || {}) };
+      transport = new StdioClientTransport({
+        command: config.command,
+        args: config.args || [],
+        env,
+        cwd,
+      });
+    }
 
     const client = new Client({
       name: `crow-addon-${id}`,
