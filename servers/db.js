@@ -1,12 +1,28 @@
 /**
  * Crow Database Client Factory
  *
- * Creates a @libsql/client instance for local SQLite files.
+ * Opens a SQLite file via better-sqlite3 and exposes a libsql-shaped
+ * async API so existing callers keep working unchanged. Results carry
+ * the {rows, columns, rowsAffected, lastInsertRowid} shape libsql
+ * returned.
  *
- * Shared by memory server, research server, gateway auth, and init-db.
+ * Previously backed by @libsql/client, which had two bugs that made it
+ * unsuitable for our workload:
+ *   - Silent cross-process stale reads: a client never observed writes
+ *     made by a separate process (sqlite3 CLI, other gateway instance)
+ *     to the same file. No error thrown, just stale snapshot forever.
+ *   - Chronic SQLITE_IOERR on healthy files: reads would begin failing
+ *     with "disk I/O error" even when PRAGMA integrity_check = ok.
+ *     Closing and reopening the client did not recover.
+ *
+ * See 2026-04-22 MPA pipeline-runner investigation.
+ *
+ * Shared by memory server, research server, gateway auth, sharing,
+ * orchestrator, scheduler, and init-db. Used by all three gateway
+ * instances (primary, MPA, finance) running off this tree.
  */
 
-import { createClient } from "@libsql/client";
+import Database from "better-sqlite3";
 import { existsSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -66,7 +82,6 @@ export function resolveDataDir() {
 
 /**
  * Verify database is accessible and schema is initialized.
- * Eagerly probes the DB (libsql connections are lazy).
  * Throws descriptive errors on failure.
  */
 export async function verifyDb(db) {
@@ -125,105 +140,88 @@ export async function ensureColumn(db, table, column, type) {
 }
 
 /**
- * Classify an error as a libsql-client wedge (file is healthy but the
- * long-lived in-process client has poisoned its page cache). Recognises
- * both the SQLITE_CORRUPT "disk image is malformed" variant and the
- * SQLITE_IOERR "disk I/O error" variant that have been observed on MPA.
- *
- * See the MPA wedge investigation 2026-04-21 — sqlite3 CLI reads the
- * same file cleanly while the long-lived gateway client returns these
- * errors. Recreating the client clears the poisoned state.
+ * Normalize the args payload callers pass through libsql-shape APIs.
+ * libsql accepts arrays (positional) and objects (named via :foo/@foo/$foo);
+ * better-sqlite3 accepts the same via stmt.run(...args) for positional
+ * and stmt.run(namedObject) for named.
  */
-function isWedgeError(err) {
-  const blob = String(err?.message || err) + " " + String(err?.code || "");
-  return /SQLITE_CORRUPT|SQLITE_IOERR|disk image is malformed|disk I\/O error/i.test(blob);
-}
-
-function openUnwrappedClient(filePath) {
-  const c = createClient({ url: `file:${filePath}` });
-  c.execute("PRAGMA journal_mode = WAL").catch(err =>
-    console.warn("[db] Failed to set WAL mode:", err.message)
-  );
-  c.execute("PRAGMA busy_timeout = 30000").catch(err =>
-    console.warn("[db] Failed to set busy_timeout:", err.message)
-  );
-  return c;
+function spreadArgs(args) {
+  if (args == null) return [];
+  return Array.isArray(args) ? args : [args];
 }
 
 /**
- * Create a libsql client wrapped with self-healing retry for the MPA
- * wedge class of errors. On SQLITE_CORRUPT / SQLITE_IOERR from execute()
- * or batch(), the wrapper closes the poisoned underlying client, opens
- * a fresh one against the same file, and retries the operation once.
+ * Execute a single statement on a better-sqlite3 handle and return a
+ * libsql-shaped ResultSet. Reader statements (SELECT, PRAGMA that
+ * returns rows, WITH, etc.) go through .all(); others through .run()
+ * so we collect changes / lastInsertRowid.
+ */
+function executeOne(db, sql, rawArgs) {
+  const stmt = db.prepare(sql);
+  const args = spreadArgs(rawArgs);
+  if (stmt.reader) {
+    const rows = stmt.all(...args);
+    return {
+      rows,
+      columns: rows.length > 0 ? Object.keys(rows[0]) : [],
+      rowsAffected: 0,
+      lastInsertRowid: 0,
+    };
+  }
+  const info = stmt.run(...args);
+  return {
+    rows: [],
+    columns: [],
+    rowsAffected: info.changes,
+    lastInsertRowid: info.lastInsertRowid,
+  };
+}
+
+/**
+ * Create a database client for the given (or inferred) SQLite file.
+ * The returned object mirrors @libsql/client's surface (async .execute,
+ * .batch, .executeMultiple, .close) so existing call sites don't have
+ * to change.
  *
- * Transactions are NOT auto-retried — mid-transaction state can't be
- * safely replayed. Callers that need transaction-level resilience must
- * restart the transaction themselves.
- *
- * Recoveries are logged with an incrementing count so operators can
- * gauge wedge frequency without trawling logs for error text.
+ * The async signatures are retained; the underlying work is synchronous
+ * because better-sqlite3 is synchronous, but promise-returning keeps
+ * callers that use await correct.
  */
 export function createDbClient(dbPath) {
   const filePath = dbPath || process.env.CROW_DB_PATH || resolve(resolveDataDir(), "crow.db");
 
-  let client = openUnwrappedClient(filePath);
-  let closed = false;
-  let recoveryCount = 0;
-  let lastRecoveryAt = 0;
-
-  async function tryRecover() {
-    if (closed) return false;
-    const now = Date.now();
-    // Throttle: at most one recovery per 500ms per wrapper. Parallel
-    // operations that all see the wedge converge on this throttle so we
-    // don't thrash close/open cycles.
-    if (now - lastRecoveryAt < 500) return false;
-    lastRecoveryAt = now;
-    recoveryCount++;
-    console.warn(`[db] libsql wedge on ${filePath} — recreating client (recovery #${recoveryCount})`);
-    try { client.close(); } catch {}
-    client = openUnwrappedClient(filePath);
-    return true;
+  const db = new Database(filePath);
+  try {
+    db.pragma("journal_mode = WAL");
+  } catch (err) {
+    console.warn("[db] Failed to set WAL mode:", err.message);
+  }
+  try {
+    db.pragma("busy_timeout = 30000");
+  } catch (err) {
+    console.warn("[db] Failed to set busy_timeout:", err.message);
   }
 
-  async function withRetry(method, args) {
-    try {
-      return await client[method](...args);
-    } catch (err) {
-      if (!isWedgeError(err)) throw err;
-      const recovered = await tryRecover();
-      if (!recovered) throw err;
-      // Single retry on the fresh client. If this also wedges, propagate.
-      return await client[method](...args);
-    }
-  }
-
-  // Explicit wrappers for the retryable methods. Other libsql client
-  // methods fall through to the current underlying client via the Proxy
-  // below — future API additions won't silently break callers, at the
-  // cost of not getting auto-retry (transactions intentionally fall
-  // through since mid-transaction state can't be safely replayed).
-  const wrapped = {
-    execute: (...args) => withRetry("execute", args),
-    batch: (...args) => withRetry("batch", args),
-    executeMultiple: (...args) => withRetry("executeMultiple", args),
-    transaction: (...args) => client.transaction(...args),
-    close: () => {
-      closed = true;
-      try { client.close(); } catch {}
+  return {
+    async execute(arg) {
+      if (typeof arg === "string") return executeOne(db, arg, []);
+      return executeOne(db, arg.sql, arg.args);
     },
-    get _recoveryCount() { return recoveryCount; },
+    async batch(statements) {
+      // Wrap in a single transaction so all statements commit atomically,
+      // matching libsql's batch() semantics.
+      const txn = db.transaction((stmts) => stmts.map((s) => {
+        if (typeof s === "string") return executeOne(db, s, []);
+        return executeOne(db, s.sql, s.args);
+      }));
+      return txn(statements);
+    },
+    async executeMultiple(sql) {
+      db.exec(sql);
+      return [];
+    },
+    close() {
+      try { db.close(); } catch {}
+    },
   };
-
-  return new Proxy(wrapped, {
-    get(target, prop) {
-      if (prop in target) return target[prop];
-      // Fall through to the live underlying client for any unwrapped
-      // method (migrate, sync, etc.). `client` is captured by closure
-      // and updated on recovery, so even a fallthrough call sees the
-      // freshest client.
-      const v = client[prop];
-      return typeof v === "function" ? v.bind(client) : v;
-    },
-  });
 }

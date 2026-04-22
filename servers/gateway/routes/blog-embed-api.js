@@ -22,7 +22,6 @@
 
 import express, { Router } from "express";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
-import { createClient } from "@libsql/client";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
@@ -136,7 +135,7 @@ async function runSectionSql(dbPath, sql) {
   if (!isReadOnlySql(sql)) throw new Error("Section SQL is not read-only");
   if (!isPathSafe(dbPath)) throw new Error("Backend path outside allowed directory");
   if (!existsSync(dbPath)) throw new Error("Backend database not found");
-  const userDb = createClient({ url: `file:${dbPath}` });
+  const userDb = createDbClient(dbPath);
   try {
     let safeSql = sql.trim();
     if (!/\bLIMIT\b/i.test(safeSql)) safeSql = `${safeSql} LIMIT ${MAX_ROWS}`;
