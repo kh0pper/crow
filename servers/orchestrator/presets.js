@@ -156,7 +156,7 @@ export const presets = {
 
   briefing: {
     description:
-      "Single-agent briefing worker. Runs on crow-chat end-to-end so it never blocks on mutex-group GPU swaps the gpu-orchestrator cannot currently perform cross-machine. Deliberately one agent instead of a coordinator+workers team — empirically the coordinator dispatches the first step and then synthesizes the rest itself, so multi-step tool calls get described in prose but never fired. Categories include `addons` so the tasks_* tools from the tasks bundle are bridged into the registry.",
+      "Single-agent briefing worker. Runs on crow-chat end-to-end so it never blocks on mutex-group GPU swaps the gpu-orchestrator cannot currently perform cross-machine. Deliberately one agent instead of a coordinator+workers team — empirically the coordinator dispatches the first step and then synthesizes the rest itself, so multi-step tool calls get described in prose but never fired. Categories include `addons` so the tasks_* + google-workspace tools from the tasks bundle / google-workspace addon are bridged into the registry.",
     categories: ["memory", "addons"],
     provider: "crow-chat",
     agents: [
@@ -172,9 +172,11 @@ export const presets = {
           "tasks_briefing_snapshot",
           "tasks_store_briefing",
           "tasks_list",
+          "gcal_list_events",
+          "gmail_search_threads",
           "crow_create_notification",
         ],
-        maxTurns: 8,
+        maxTurns: 12,
       },
     ],
   },
@@ -203,10 +205,38 @@ export const presets = {
           "gcal_list_events",
           "gcal_get_event",
           "gcal_create_event",
-          "crow_remember",
+          "crow_store_memory",
           "crow_create_notification",
         ],
         maxTurns: 10,
+      },
+    ],
+  },
+
+  "mpa-triage": {
+    description:
+      "Single-agent Gmail triage worker for MPA. Classifies recent unread threads into action buckets, auto-archives pure noise, and records a compact summary as a memory. Tier-0 safety: only write action is gmail_archive on newsletter-noise threads; no drafts, no sends, no replies.",
+    categories: ["memory", "addons"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "triage-worker",
+        systemPrompt:
+          "You are the Maestro Press triage worker. Execute the goal exactly, calling the listed " +
+          "tools in order. You MUST invoke tools — do not merely describe what you would do. " +
+          "Classify each thread using only the subject/from/snippet returned by gmail_search_threads; " +
+          "do not call gmail_get_thread unless the goal tells you to. Be conservative: only archive " +
+          "a thread if you are highly confident it is newsletter-noise — marketing blasts, digest " +
+          "emails, promotional offers, automated platform digests with no action item. When in " +
+          "doubt, do NOT archive. Never fabricate subjects, senders, or classifications.",
+        tools: [
+          "gmail_search_threads",
+          "gmail_list_labels",
+          "gmail_label_thread",
+          "gmail_archive",
+          "crow_store_memory",
+        ],
+        maxTurns: 30,
       },
     ],
   },
