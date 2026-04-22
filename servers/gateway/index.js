@@ -685,6 +685,18 @@ if (process.env.CROW_DISABLE_ROUTER !== "1") {
   console.log("Router server mounted (8 tools instead of 58+)");
 }
 
+// --- Mount Admin Backup Endpoint ---
+// In-process SQLite backup (localhost-only). Replaces the external sqlite3
+// .backup cron we removed on 2026-04-22 because that process's close was
+// unlinking -wal/-shm and orphaning the gateway's FDs under WAL mode.
+try {
+  const { default: adminBackupRouter } = await import("./routes/admin-backup.js");
+  app.use(adminBackupRouter());
+  console.log("Admin backup endpoint mounted at POST /api/admin/backup");
+} catch (err) {
+  console.warn("[admin-backup] Failed to mount:", err.message);
+}
+
 // --- Mount Storage Server (conditional) ---
 try {
   const { createStorageServer } = await import("../storage/server.js");
