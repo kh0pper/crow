@@ -179,6 +179,38 @@ export const presets = {
     ],
   },
 
+  "mpa-gmail": {
+    description:
+      "Single-agent Gmail/Calendar worker for MPA pipelines. Same single-agent pattern as the briefing preset (local crow-chat, avoids coordinator-dispatch issues). Categories include `addons` so the google-workspace tools from ~/.crow-mpa/mcp-addons.json are bridged into the registry. Read-only + write-to-drafts tools only — no send, no delete.",
+    categories: ["memory", "addons"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "gmail-worker",
+        systemPrompt:
+          "You are a Gmail/Calendar worker for Maestro Press Assistant. Execute the goal exactly, " +
+          "calling the listed tools as needed. You MUST invoke tools — do not merely describe what " +
+          "you would do. If asked to summarize, call the listed tools first, then produce a short " +
+          "summary from the actual returned data. Never fabricate email subjects, senders, or dates.",
+        tools: [
+          "gmail_search_threads",
+          "gmail_get_thread",
+          "gmail_list_labels",
+          "gmail_label_thread",
+          "gmail_archive",
+          "gmail_create_draft",
+          "gcal_list_calendars",
+          "gcal_list_events",
+          "gcal_get_event",
+          "gcal_create_event",
+          "crow_remember",
+          "crow_create_notification",
+        ],
+        maxTurns: 10,
+      },
+    ],
+  },
+
   // -- Phase 5-full new presets --
 
   code_team: {
