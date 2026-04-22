@@ -798,9 +798,15 @@ try {
       // startup, but the in-process LAN-discovery path bypasses that entry,
       // so on a gateway whose crow.db has never hosted the KB bundle (MPA,
       // finance) the kb_collections table is absent and startLanDiscovery
-      // logs SQLITE_ERROR. Initialize the tables first — CREATE TABLE IF
-      // NOT EXISTS makes this idempotent on the gateway that already has
-      // them (primary).
+      // logs SQLITE_ERROR.
+      //
+      // Initialize the tables ONLY if kb_collections is missing — running
+      // initKbTables unconditionally on a DB that already has the tables
+      // can trip on partial-init states (e.g. FTS5 shadow tables present
+      // but the main virtual table gone) that are cosmetic on their own
+      // but can cascade into downstream "database disk image is malformed"
+      // errors during peer/instance-sync handling. Primary's crow.db has
+      // these partials; MPA and finance are fresh and need real init.
       try {
         const lanPath = routesPath.replace(/routes[/\\]kb-public\.js$/, "server/lan-discovery.js");
         const dbPath = routesPath.replace(/routes[/\\]kb-public\.js$/, "server/db.js");
@@ -808,8 +814,19 @@ try {
         if (existsSync(lanPath) && existsSync(dbPath)) {
           const { createDbClient: createKbDb } = await import(pathToFileURL(dbPath).href);
           if (existsSync(initPath)) {
-            const { initKbTables } = await import(pathToFileURL(initPath).href);
-            await initKbTables(createKbDb());
+            const kbDb = createKbDb();
+            try {
+              const { rows } = await kbDb.execute({
+                sql: "SELECT name FROM sqlite_master WHERE type='table' AND name='kb_collections' LIMIT 1",
+                args: [],
+              });
+              if (rows.length === 0) {
+                const { initKbTables } = await import(pathToFileURL(initPath).href);
+                await initKbTables(kbDb);
+              }
+            } catch (initErr) {
+              console.warn("[knowledge-base] table init skipped:", initErr.message);
+            }
           }
           const { startLanDiscovery } = await import(pathToFileURL(lanPath).href);
           await startLanDiscovery(createKbDb(), PORT);
