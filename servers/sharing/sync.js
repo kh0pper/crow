@@ -32,12 +32,37 @@ export class SyncManager {
     this.outFeeds = new Map(); // contactId -> Hypercore (our outgoing feed)
     this.inFeeds = new Map(); // contactId -> Hypercore (their incoming feed)
     this.onEntry = null; // callback(contactId, entry)
+    this._initLocks = new Map(); // contactId -> tail Promise (see initContact)
   }
 
   /**
    * Initialize feeds for a contact. Creates outgoing feed if needed.
+   *
+   * Serialized per contact: the boot contacts loop (server.js:439), the
+   * Nostr-invite auto-add path (server.js:481), and tool handlers (~:993)
+   * can all call this for the same contactId. The outFeeds.has() /
+   * inFeeds.has() guards are not atomic across the await in
+   * Hypercore.ready(), so concurrent callers would otherwise race to
+   * construct two Hypercores on the same on-disk feed and the loser
+   * would throw "File descriptor could not be locked" from fd-lock.
+   * See InstanceSyncManager.initInstance() for the same pattern.
    */
   async initContact(contactId, theirFeedKey) {
+    const prior = this._initLocks.get(contactId) || Promise.resolve();
+    const next = prior
+      .catch(() => {}) // a failed prior turn shouldn't block our attempt
+      .then(() => this._initContactInner(contactId, theirFeedKey));
+    this._initLocks.set(contactId, next);
+    try {
+      return await next;
+    } finally {
+      if (this._initLocks.get(contactId) === next) {
+        this._initLocks.delete(contactId);
+      }
+    }
+  }
+
+  async _initContactInner(contactId, theirFeedKey) {
     const dir = contactDir(contactId);
 
     // Our outgoing feed for this contact
