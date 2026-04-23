@@ -32,7 +32,6 @@ import { Relay } from "nostr-tools/relay";
 const DEFAULT_RELAYS = [
   "wss://relay.damus.io",
   "wss://nos.lol",
-  "wss://relay.nostr.band",
 ];
 
 export class NostrManager {
