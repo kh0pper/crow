@@ -14,6 +14,7 @@
 
 import { CronExpressionParser } from "cron-parser";
 import { pipelines } from "./pipelines.js";
+import { substituteGoalPlaceholders } from "./pipeline-vars.js";
 
 const POLL_INTERVAL_MS = 60 * 1000; // Check every 60 seconds
 const PIPELINE_PREFIX = "pipeline:";
@@ -105,7 +106,8 @@ async function tick() {
  * Execute a single pipeline: run orchestration and optionally store results.
  */
 async function executePipeline(scheduleId, pipelineName, pipeline) {
-  const result = await runOrchestrationFn(pipeline.goal, pipeline.preset);
+  const goal = substituteGoalPlaceholders(pipeline.goal);
+  const result = await runOrchestrationFn(goal, pipeline.preset);
 
   if (result.status === "completed" && result.result && pipeline.storeResult && storeResultFn) {
     try {
@@ -181,7 +183,8 @@ export async function runPipelineNow(pipelineName) {
 
   console.log(`[pipeline-runner] Running pipeline "${pipelineName}" (manual trigger)`);
 
-  const result = await runOrchestrationFn(pipeline.goal, pipeline.preset);
+  const goal = substituteGoalPlaceholders(pipeline.goal);
+  const result = await runOrchestrationFn(goal, pipeline.preset);
 
   if (result.status === "completed" && result.result && pipeline.storeResult && storeResultFn) {
     try {
