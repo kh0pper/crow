@@ -89,38 +89,12 @@ async function resolveInvocation() {
   return { goal: pipeline.goal, presetName: pipeline.preset };
 }
 
-/**
- * Substitute well-known placeholders in a pipeline goal. Keeps
- * deterministic values (date, local instance id) out of the LLM's lap —
- * empirically qwen3.6-35b-a3b will happily ignore explicit "substitute
- * ${X}" instructions and leave the placeholder in its tool calls.
- * Pre-substituting here guarantees the tool args carry the right values.
- *
- * Currently handles:
- *   ${TODAY}       — today's date in America/Chicago as YYYY-MM-DD
- *   ${INSTANCE_ID} — this instance's local UUID (so notifications can
- *                    carry &instance=<id> and primary knows to federate
- *                    the memory lookup)
- */
-async function substituteGoalPlaceholders(goal) {
-  const today = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/Chicago",
-    year: "numeric", month: "2-digit", day: "2-digit",
-  }).format(new Date());
-
-  const { getOrCreateLocalInstanceId } = await import(
-    resolve(__dirname, "../servers/gateway/instance-registry.js")
-  );
-  const instanceId = getOrCreateLocalInstanceId();
-
-  return goal
-    .replaceAll("${TODAY}", today)
-    .replaceAll("${INSTANCE_ID}", instanceId);
-}
-
 async function main() {
   const { goal, presetName } = await resolveInvocation();
-  const expandedGoal = await substituteGoalPlaceholders(goal);
+  const { substituteGoalPlaceholders } = await import(
+    resolve(__dirname, "../servers/orchestrator/pipeline-vars.js")
+  );
+  const expandedGoal = substituteGoalPlaceholders(goal);
   const { runOrchestrationStandalone } = await import(
     resolve(__dirname, "../servers/orchestrator/server.js")
   );

@@ -30,6 +30,7 @@ import { presets } from "./presets.js";
 import { resolvePreset } from "./preset-resolver.js";
 import { pipelines } from "./pipelines.js";
 import { startPipelineRunner } from "./pipeline-runner.js";
+import { substituteGoalPlaceholders } from "./pipeline-vars.js";
 import { createDbClient } from "../db.js";
 import { ensureModelWarm, releaseModel, getLifecycleSnapshot, resetAllRefcounts } from "./lifecycle.js";
 import { attachEventLogger, logEvent } from "./events.js";
@@ -593,7 +594,8 @@ export function createOrchestratorServer(dbPath, options = {}) {
       const jobId = generateJobId();
       jobs.set(jobId, { status: "running", startedAt: Date.now(), pipeline: pipelineName });
 
-      runOrchestration(jobId, pipeline.goal, preset, null).catch((err) => {
+      const expandedGoal = substituteGoalPlaceholders(pipeline.goal);
+      runOrchestration(jobId, expandedGoal, preset, null).catch((err) => {
         console.error(`[orchestrator] Pipeline job ${jobId} error:`, err);
         const job = jobs.get(jobId);
         if (job && job.status === "running") {
@@ -605,7 +607,7 @@ export function createOrchestratorServer(dbPath, options = {}) {
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({ jobId, status: "running", pipeline: pipelineName, goal: pipeline.goal }),
+          text: JSON.stringify({ jobId, status: "running", pipeline: pipelineName, goal: expandedGoal }),
         }],
       };
     }

@@ -89,7 +89,7 @@ export const pipelines = {
       "is any doubt about the classification.\n\n" +
       "FINAL — crow_store_memory with these exact arguments:\n" +
       "  content = a short markdown summary of the triage run, formatted exactly as:\n" +
-      "    \"Triage YYYY-MM-DDTHH:MM (total: N)\\n\" +\n" +
+      "    \"Triage ${TODAY} (total: N)\\n\" +\n" +
       "    \"- client-action-needed (K):\\n\" +\n" +
       "    \"  - <from>: <subject>\" (one per thread in that bucket; omit the bucket " +
       "    header entirely when K = 0)\\n\" +\n" +
