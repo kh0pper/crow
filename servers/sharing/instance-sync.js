@@ -117,6 +117,9 @@ export class InstanceSyncManager {
     this.outFeeds = new Map(); // remoteInstanceId → Hypercore (we write)
     this.inFeeds = new Map();  // remoteInstanceId → Hypercore (they write)
 
+    // Per-peer serialization for initInstance() — see initInstance() for why.
+    this._initLocks = new Map(); // remoteInstanceId → tail Promise
+
     // Local Lamport counter (monotonically increasing)
     this._localCounter = 0;
     this._counterLoaded = false;
@@ -190,6 +193,38 @@ export class InstanceSyncManager {
    * @param {Buffer|null} theirFeedKey - The remote instance's outgoing feed key (null if unknown yet)
    */
   async initInstance(remoteInstanceId, theirFeedKey) {
+    // Serialize per-peer to prevent concurrent fd-lock contention on
+    // <feed-dir>/db/LOCK. Multiple startup paths converge here for the
+    // same peer (boot loop at server.js, eagerInitPairedPeers, the
+    // onInstanceConnected callback when Hyperswarm connects, tailnet-sync,
+    // onInstanceKeyReceived after the handshake). The outFeeds.has()/
+    // inFeeds.has() guards alone are not atomic across the await in
+    // Hypercore.ready(), so two concurrent callers would each construct
+    // a second Hypercore on the same on-disk feed, and the loser would
+    // throw "File descriptor could not be locked".
+    //
+    // We can't cache the first call's promise and short-circuit subsequent
+    // calls, because a later caller may arrive with a real theirFeedKey
+    // that a prior null-key call skipped — we need to open the inFeed on
+    // the later turn. So we strictly chain instead: each call awaits the
+    // prior call, then re-evaluates state.
+    const prior = this._initLocks.get(remoteInstanceId) || Promise.resolve();
+    const next = prior
+      .catch(() => {}) // a failed prior turn shouldn't block our attempt
+      .then(() => this._initInstanceInner(remoteInstanceId, theirFeedKey));
+    this._initLocks.set(remoteInstanceId, next);
+    try {
+      return await next;
+    } finally {
+      // If we're still the tail, drop the entry so the Map doesn't retain
+      // a settled promise per peer over the process lifetime.
+      if (this._initLocks.get(remoteInstanceId) === next) {
+        this._initLocks.delete(remoteInstanceId);
+      }
+    }
+  }
+
+  async _initInstanceInner(remoteInstanceId, theirFeedKey) {
     const dir = resolve(this.dataDir, remoteInstanceId);
     mkdirSync(resolve(dir, "out"), { recursive: true });
     mkdirSync(resolve(dir, "in"), { recursive: true });
