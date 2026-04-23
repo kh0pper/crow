@@ -174,6 +174,8 @@ export const presets = {
           "tasks_list",
           "gcal_list_events",
           "gmail_search_threads",
+          "crow_search_memories",
+          "crow_store_memory",
           "crow_create_notification",
         ],
         maxTurns: 12,
@@ -241,6 +243,59 @@ export const presets = {
           "crow_store_memory",
         ],
         maxTurns: 30,
+      },
+    ],
+  },
+
+  "mpa-cfp-monitor": {
+    description:
+      "Single-agent conference CFP monitor for MPA. Runs three narrow brave_web_search queries against Maestro Press topics (Texas school finance, AI in K-12, education equity), filters hits for call-for-papers / submission / abstract signals, stores a summary memory, and pushes a notification when any plausible CFP is found. Tier-0 safety: only writes a memory + notification; no drafts, sends, or external posts.",
+    categories: ["memory", "addons"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "cfp-scout",
+        systemPrompt:
+          "You are the Maestro Press conference-CFP scout. Execute the goal exactly, calling " +
+          "the listed tools in order. You MUST invoke tools — do not merely describe what you " +
+          "would do. Call tools FIRST, then compose the summary from the returned data. Be " +
+          "conservative: only surface hits whose title or description explicitly mentions one " +
+          "of the CFP signals listed in the goal. Never fabricate a URL, title, conference " +
+          "name, or deadline — if brave_web_search returns no qualifying hits for a topic, " +
+          "write \"(none)\" for that topic.",
+        tools: [
+          "brave_web_search",
+          "crow_store_memory",
+          "crow_create_notification",
+        ],
+        maxTurns: 12,
+      },
+    ],
+  },
+
+  "mpa-memory-review": {
+    description:
+      "Single-agent nightly memory review worker for MPA. Scans recent MPA-tagged memories for duplicates, drift, and consolidation candidates, then stores a single review report memory. Tier-0 safety: deliberately NO crow_update_memory or crow_delete_memory in the allowlist — review-only. Widen the allowlist later once the review reports are reliably actionable.",
+    categories: ["memory"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "memory-reviewer",
+        systemPrompt:
+          "You are the Maestro Press memory-review worker. Execute the goal exactly, calling " +
+          "the listed tools in order. You MUST invoke tools — do not merely describe what you " +
+          "would do. You are read-only except for the single crow_store_memory call at the end; " +
+          "do NOT attempt to update or delete any memory. Your job is to flag consolidation " +
+          "candidates for a human reviewer, not to act on them. Be concrete: every flagged pair " +
+          "or cluster must cite specific memory IDs the human can look up. Never fabricate " +
+          "memory IDs or contents — only reference what the list/search tools actually returned.",
+        tools: [
+          "crow_list_memories",
+          "crow_search_memories",
+          "crow_memory_stats",
+          "crow_store_memory",
+        ],
+        maxTurns: 12,
       },
     ],
   },

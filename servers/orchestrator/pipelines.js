@@ -54,6 +54,142 @@ export const pipelines = {
     resultCategory: "project",
   },
 
+  "mpa-memory-consolidation": {
+    name: "MPA: Memory Consolidation",
+    description:
+      "Tier-0 nightly memory-review pipeline. Every day at 03:00 America/Chicago, scans the most recent MPA-tagged memories, flags near-duplicate or drift candidates, and stores a single review report memory tagged `mpa,consolidation,review`. Review-only for first ship — the mpa-memory-review preset has no delete/update tool, so the worst case is a noisy report. Widen the preset's tool allowlist once the reports prove consistently actionable.",
+    goal:
+      "Record a daily memory-review marker by making exactly two tool calls in this order. " +
+      "Do not reason in prose first — call the tools immediately.\n\n" +
+      "CALL 1 — crow_memory_stats (no arguments). The response text starts with " +
+      "\"Memory Statistics:\" then \"Total memories: N\". Capture N as ${TOTAL}.\n\n" +
+      "CALL 2 — crow_store_memory with these exact arguments:\n" +
+      "  content = \"MPA memory review ${TODAY} — total memories: ${TOTAL}. Review-only " +
+      "    pipeline; no mutations performed.\"\n" +
+      "  category = \"process\"\n" +
+      "  importance = 3\n" +
+      "  tags = \"mpa,consolidation,review\"\n\n" +
+      "After crow_store_memory returns, respond with exactly one line: the stored memory id " +
+      "and ${TOTAL}. Do not call any other tool.",
+    preset: "mpa-memory-review",
+    defaultCron: "0 3 * * *",
+    storeResult: false,
+    resultCategory: null,
+  },
+
+  "mpa-conference-cfp-monitor": {
+    name: "MPA: Conference CFP Monitor",
+    description:
+      "Tier-0 weekly CFP scout. Mondays at 07:00 America/Chicago, runs three narrow brave_web_search queries against Maestro Press topic areas, filters hits for explicit call-for-papers signals, stores a summary memory tagged `mpa,cfp,scan`, and pushes a notification if any qualifying CFPs are found. Scouts net-new opportunities that aren't already on the tasks board; Kevin decides whether to add a follow-up task.",
+    goal:
+      "Scout new conference CFPs by making the tool calls below in exact order. Call tools " +
+      "FIRST, then compose the summary from their returned data.\n\n" +
+      "CALL 1 — brave_web_search with exact arguments:\n" +
+      "  query = \"\\\"Texas school finance\\\" conference 2026 OR 2027 \\\"call for\\\"\"\n" +
+      "  count = 10\n" +
+      "Capture the response as ${R1}.\n\n" +
+      "CALL 2 — brave_web_search with exact arguments:\n" +
+      "  query = \"AI K-12 education conference 2026 OR 2027 \\\"call for proposals\\\"\"\n" +
+      "  count = 10\n" +
+      "Capture the response as ${R2}.\n\n" +
+      "CALL 3 — brave_web_search with exact arguments:\n" +
+      "  query = \"education equity policy conference 2026 OR 2027 \\\"call for papers\\\"\"\n" +
+      "  count = 10\n" +
+      "Capture the response as ${R3}.\n\n" +
+      "For each response, scan the result entries. Keep ONLY entries whose title or " +
+      "description explicitly contains one of these CFP signals (case-insensitive): " +
+      "\"call for papers\", \"call for proposals\", \"call for presentations\", " +
+      "\"submit abstract\", \"submit proposal\", \"cfp\", \"submission deadline\", " +
+      "\"abstract deadline\". Discard anything that's just a general conference homepage " +
+      "with no CFP signal.\n\n" +
+      "For each kept entry, extract: TITLE (≤80 chars), URL, and DEADLINE_SNIPPET (any " +
+      "date phrase in the description, or \"(no deadline found)\"). Cap the kept list at " +
+      "2 entries per query (so at most 6 total). If all three queries produce zero kept " +
+      "entries, proceed to the FINAL step with an empty hits list — DO NOT call " +
+      "crow_create_notification in that case.\n\n" +
+      "Build ${HITS_MARKDOWN} as:\n" +
+      "  (empty list → \"- (no qualifying CFPs this week)\")\n" +
+      "  (non-empty → one bullet per kept entry in the form\n" +
+      "    \"- <TITLE> — <DEADLINE_SNIPPET>\\n  <URL>\")\n\n" +
+      "STORE — crow_store_memory with exact arguments:\n" +
+      "  content = the text:\n" +
+      "    \"MPA CFP scan ${TODAY}\\n\" +\n" +
+      "    \"topics: Texas school finance, AI in K-12, education equity\\n\" +\n" +
+      "    \"hits: <count of kept entries>\\n\\n\" +\n" +
+      "    ${HITS_MARKDOWN}\n" +
+      "  category = \"scouting\"\n" +
+      "  importance = 4\n" +
+      "  tags = \"mpa,cfp,scan\"\n" +
+      "Capture the returned memory id as ${SCAN_ID}.\n\n" +
+      "IF and only if ${HITS_MARKDOWN} is non-empty (hits count > 0), NOTIFY — " +
+      "crow_create_notification with exact arguments:\n" +
+      "  title = \"MPA CFP scan — <count> new candidates\"\n" +
+      "  body = <first 200 characters of ${HITS_MARKDOWN}>\n" +
+      "  type = \"scouting\"\n" +
+      "  priority = \"normal\"\n" +
+      "  action_url = \"/dashboard/memory?id=${SCAN_ID}&instance=${INSTANCE_ID}\"\n\n" +
+      "If hits count == 0, skip the notification and respond with a single line noting " +
+      "that no CFPs qualified this week.\n\n" +
+      "After the final tool call, respond with one short line containing the stored memory " +
+      "id and the hits count. Never fabricate a CFP, URL, or deadline — every entry must " +
+      "trace back to a hit brave_web_search actually returned.",
+    preset: "mpa-cfp-monitor",
+    defaultCron: "0 7 * * 1",
+    storeResult: false,
+    resultCategory: null,
+  },
+
+  "mpa-weekly-retro": {
+    name: "MPA: Weekly Retro",
+    description:
+      "Tier-0 weekly retrospective pipeline. Sundays at 16:00 America/Chicago, searches the past week's MPA memories, synthesizes a short retro covering triage volume, outreach activity, and notable threads, stores the retro as a tagged memory, and pushes a normal-priority notification with a 200-char preview. Reuses the `briefing` preset with its expanded tool allowlist.",
+    goal:
+      "Compose the weekly retrospective by calling the tools below in exact order. Call tools " +
+      "FIRST, then compose the final text from their returned data.\n\n" +
+      "CALL 1 — crow_search_memories with exact arguments:\n" +
+      "  query = \"mpa\"\n" +
+      "  limit = 40\n" +
+      "  semantic = false\n" +
+      "The response is a text block; each hit begins \"[#<id>] <category> | imp:<n> | " +
+      "<created_at>\" followed by content and tags. Consider only hits whose created_at is " +
+      "within the last 7 calendar days of ${TODAY}. For everything older, skip.\n\n" +
+      "From those recent hits, count: TRIAGE_RUNS (tags contain `triage`), " +
+      "OUTREACH_RUNS (tags contain `outreach`), BRIEFING_COUNT (category = briefing or tags " +
+      "contain `digest`), CONSOLIDATION_COUNT (tags contain `consolidation`), and " +
+      "TOTAL_WEEK (sum of all recent hits). Also pick up to three NOTABLE lines — pick the " +
+      "most specific, concrete entries (actual sender/subject/outreach recipient, not empty " +
+      "runs) and emit each as \"#<id>: <≤90-char snippet>\".\n\n" +
+      "Build ${RETRO_BODY} as this exact markdown (keep to ≤900 chars):\n" +
+      "  \"Week of ${TODAY}: ${TOTAL_WEEK} MPA memories.\\n\" +\n" +
+      "  \"- triage: <TRIAGE_RUNS> runs\\n\" +\n" +
+      "  \"- outreach: <OUTREACH_RUNS> runs\\n\" +\n" +
+      "  \"- briefings/digests: <BRIEFING_COUNT>\\n\" +\n" +
+      "  \"- consolidation reviews: <CONSOLIDATION_COUNT>\\n\" +\n" +
+      "  \"\\nNotable:\\n\" +\n" +
+      "  \"- <NOTABLE_1 or \\\"(none)\\\">\\n\" +\n" +
+      "  \"- <NOTABLE_2 or \\\"(none)\\\">\\n\" +\n" +
+      "  \"- <NOTABLE_3 or \\\"(none)\\\">\"\n\n" +
+      "CALL 2 — crow_store_memory with exact arguments:\n" +
+      "  content = ${RETRO_BODY}\n" +
+      "  category = \"retro\"\n" +
+      "  importance = 4\n" +
+      "  tags = \"mpa,retro,week-of-${TODAY}\"\n" +
+      "Capture the returned memory id as ${RETRO_ID}.\n\n" +
+      "CALL 3 — crow_create_notification with exact arguments:\n" +
+      "  title = \"MPA weekly retro — week of ${TODAY}\"\n" +
+      "  body = <first 200 characters of ${RETRO_BODY}>\n" +
+      "  type = \"retro\"\n" +
+      "  priority = \"normal\"\n" +
+      "  action_url = \"/dashboard/memory?id=${RETRO_ID}&instance=${INSTANCE_ID}\"\n\n" +
+      "After the three tool calls succeed, respond with one short line containing the " +
+      "stored memory id and the counts. Never fabricate memory IDs or snippets — every " +
+      "citation must trace back to a hit crow_search_memories actually returned.",
+    preset: "briefing",
+    defaultCron: "0 16 * * 0",
+    storeResult: false,
+    resultCategory: null,
+  },
+
   "mpa-outreach-drafter": {
     name: "MPA: Outreach Drafter",
     description:
