@@ -213,6 +213,38 @@ export const presets = {
     ],
   },
 
+  "mpa-outreach": {
+    description:
+      "Single-agent outreach drafter for MPA. Finds Gmail threads where Kevin sent the last message a week or more ago with no reply, writes polite follow-up drafts to the Gmail Drafts folder, and stores a summary as an MPA memory. Tier-1 safety: only write action is gmail_create_draft — drafts are NEVER sent automatically; Kevin reviews each one in Gmail Drafts and sends manually.",
+    categories: ["memory", "addons"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "outreach-worker",
+        systemPrompt:
+          "You are the Maestro Press outreach worker. Execute the goal exactly, calling the listed " +
+          "tools in order. You MUST invoke tools — do not merely describe what you would do. " +
+          "Safety rules, absolute: (1) You will ONLY create drafts via gmail_create_draft — you " +
+          "MUST NEVER send a message. gmail_create_draft leaves the message in the Drafts folder " +
+          "for Kevin to review and send manually. (2) Skip any thread where the most recent " +
+          "message is NOT from Kevin himself (kevin.hopper@maestro.press or kevin.hopper1@gmail.com " +
+          "or derivatives) — if the other side already replied, there is nothing to nudge. " +
+          "(3) Skip transactional senders: auto-replies, receipts, invoices, calendar invites, " +
+          "newsletters, mailing lists, no-reply addresses, domains like stripe/quickbooks/" +
+          "docusign/mailgun/digitalocean/github. (4) Every draft body must be short (under 120 " +
+          "words), polite, and reference the thread's actual subject — no generic template prose. " +
+          "Never fabricate a prior commitment, quote, or agreement that isn't in the thread.",
+        tools: [
+          "gmail_search_threads",
+          "gmail_get_thread",
+          "gmail_create_draft",
+          "crow_store_memory",
+        ],
+        maxTurns: 30,
+      },
+    ],
+  },
+
   "mpa-triage": {
     description:
       "Single-agent Gmail triage worker for MPA. Classifies recent unread threads into action buckets, auto-archives pure noise, and records a compact summary as a memory. Tier-0 safety: only write action is gmail_archive on newsletter-noise threads; no drafts, no sends, no replies.",

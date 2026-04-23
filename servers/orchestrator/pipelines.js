@@ -54,6 +54,103 @@ export const pipelines = {
     resultCategory: "project",
   },
 
+  "mpa-outreach-drafter": {
+    name: "MPA: Outreach Drafter",
+    description:
+      "Tier-1 Gmail outreach drafter. Weekdays at 18:00 CDT, finds threads where Kevin sent the last message 7+ days ago without a reply, writes a short polite nudge as a draft in Gmail Drafts (thread-scoped so it shows up as a reply in context). Never sends — Kevin reviews each draft and sends manually from Gmail. Scoped to 'people already in the inbox', so no external contact list is required.",
+    goal:
+      "Draft polite follow-up messages for stalled outbound threads by making the tool calls " +
+      "below in order.\n\n" +
+      "CALL 1 — gmail_search_threads with these exact arguments:\n" +
+      "  query = \"in:sent older_than:7d newer_than:30d -subject:invoice -subject:receipt " +
+      "-subject:digest -subject:newsletter\"\n" +
+      "  max_results = 5\n" +
+      "Capture the response's `data.threads` array as ${SENT_THREADS}. If it is empty, skip " +
+      "straight to the FINAL step below with zero drafts.\n\n" +
+      "For each thread in ${SENT_THREADS}:\n\n" +
+      "CALL — gmail_get_thread with thread_id = <that thread's thread_id>. The response has " +
+      "`data.messages` (ordered oldest → newest) with per-message headers.from, headers.to, " +
+      "headers.date, and body_text.\n\n" +
+      "Inspect the LAST message in the thread (data.messages[-1]). Decide whether to draft a " +
+      "nudge using these rules:\n" +
+      "  - SKIP if headers.from does NOT contain \"kevin.hopper@maestro.press\", " +
+      "\"kevin.hopper1@gmail.com\", or \"kevin hopper\" — only nudge when Kevin's message is " +
+      "the last one (i.e. the other side hasn't replied).\n" +
+      "  - SKIP transactional/automated senders based on the original recipient " +
+      "(data.messages[0].headers.to): addresses containing \"no-reply\", \"noreply\", " +
+      "\"notifications@\", \"billing@\", \"receipts@\", or domains stripe/quickbooks/docusign/" +
+      "mailgun/github/digitalocean/tailscale/anthropic/openai.\n" +
+      "  - SKIP if the thread subject starts with \"Re:\" AND the first message's from is NOT " +
+      "Kevin (reply chain Kevin didn't originate).\n" +
+      "  - SKIP if there is any thread label suggesting automated content (CATEGORY_PROMOTIONS, " +
+      "CATEGORY_SOCIAL, CATEGORY_UPDATES, CATEGORY_FORUMS).\n\n" +
+      "For each thread that passes the filters, extract the recipient from data.messages[-1]." +
+      "headers.to. If that field has multiple addresses, use the first one. Strip any display-" +
+      "name wrapper and keep only the bare email.\n\n" +
+      "CALL — gmail_create_draft with these exact arguments:\n" +
+      "  to = <extracted recipient email>\n" +
+      "  subject = \"Re: \" + <thread's first-message subject without existing 'Re:' prefix>\n" +
+      "  body = a short polite nudge (UNDER 120 words) that references the actual thread " +
+      "subject in one line, acknowledges that some time has passed since your last message, " +
+      "and asks a clear single question or offers a specific next step. Sign as \"Kevin\". " +
+      "Example shape only (substitute the actual subject and ask):\n" +
+      "    \"Hi <first-name>,\\n\\nCircling back on <subject-snippet> — I realize it's been a " +
+      "few weeks since I last wrote.\\n\\n<one specific question or next-step sentence>.\\n\\n" +
+      "No pressure if this has fallen off the priority list; happy to revive whenever works.\\n\\n" +
+      "Kevin\"\n" +
+      "  thread_id = <that thread's thread_id>   (so the draft threads as a reply to the " +
+      "existing conversation)\n" +
+      "Never fabricate a prior commitment or quote. Only refer to what the actual thread " +
+      "contains.\n\n" +
+      "Track the count of drafts you successfully created as ${DRAFT_COUNT} and the list of " +
+      "(recipient, subject) pairs as ${DRAFT_SUMMARY}.\n\n" +
+      "FINAL — crow_store_memory with these exact arguments:\n" +
+      "  content = a short markdown summary of this run, formatted exactly as:\n" +
+      "    \"Outreach drafter ${TODAY} — drafted: ${DRAFT_COUNT}, skipped: <count>\\n\" +\n" +
+      "    \"- <recipient>: <subject>\" (one line per draft created; omit the list " +
+      "if ${DRAFT_COUNT} == 0)\n" +
+      "  category = \"outreach\"\n" +
+      "  importance = 3\n" +
+      "  tags = \"mpa,outreach,draft\"\n\n" +
+      "After the final tool call succeeds, respond with a single short confirmation line " +
+      "containing the stored memory id and the draft count. Do not send any email — " +
+      "gmail_create_draft only leaves the draft for Kevin's manual review.",
+    preset: "mpa-outreach",
+    defaultCron: "0 18 * * 1-5",
+    storeResult: false,
+    resultCategory: null,
+  },
+
+  "mpa-deadline-watcher": {
+    name: "MPA: Deadline Watcher",
+    description:
+      "Tier-0 deadline watcher. Every 3 hours during the workday, pulls the 24h + overdue task buckets from the tasks bundle and pushes a ntfy notification if anything is due soon or overdue. Complements the 07:00 daily briefing by catching mid-day slippage and giving Kevin multiple shots at noticing critical items. No LLM reasoning beyond reading the bucket counts.",
+    goal:
+      "Check Kevin's tight-window deadlines by making at most two tool calls in order.\n\n" +
+      "CALL 1 — tasks_briefing_snapshot with these exact arguments:\n" +
+      "  today = \"${TODAY}\"\n" +
+      "  window_days = 1\n" +
+      "The response is {\"success\": true, \"data\": {\"content\": \"...\", \"counts\": {\"within\": N, \"overdue\": M}}}. " +
+      "Capture counts.within as ${WITHIN_COUNT}, counts.overdue as ${OVERDUE_COUNT}, and the " +
+      "content string as ${BUCKET_MARKDOWN}.\n\n" +
+      "If ${WITHIN_COUNT} == 0 AND ${OVERDUE_COUNT} == 0: do not call any more tools. " +
+      "Respond with the single line \"No deadlines within 24h and no overdue items; skipped notification.\" " +
+      "and stop.\n\n" +
+      "Otherwise, CALL 2 — crow_create_notification with these exact arguments:\n" +
+      "  title = \"MPA deadlines: ${WITHIN_COUNT} due within 24h, ${OVERDUE_COUNT} overdue\"\n" +
+      "  body = <first 240 characters of ${BUCKET_MARKDOWN}>\n" +
+      "  type = \"deadline\"\n" +
+      "  priority = \"high\"\n" +
+      "  action_url = \"/dashboard/tasks?instance=${INSTANCE_ID}\"\n\n" +
+      "After the notification is created, respond with a single short confirmation line containing " +
+      "the counts and the notification id. Do not fabricate tasks — only echo what " +
+      "tasks_briefing_snapshot returned.",
+    preset: "briefing",
+    defaultCron: "0 9,12,15,18 * * 1-5",
+    storeResult: false,
+    resultCategory: null,
+  },
+
   "mpa-email-triage": {
     name: "MPA: Email Triage",
     description:
