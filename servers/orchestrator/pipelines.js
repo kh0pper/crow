@@ -127,7 +127,7 @@ export const pipelines = {
       "  body = <first 200 characters of ${HITS_MARKDOWN}>\n" +
       "  type = \"scouting\"\n" +
       "  priority = \"normal\"\n" +
-      "  action_url = \"/dashboard/memory?id=${SCAN_ID}&instance=${INSTANCE_ID}\"\n\n" +
+      "  action_url = \"/dashboard/memory?edit=${SCAN_ID}&instance=${INSTANCE_ID}\"\n\n" +
       "If hits count == 0, skip the notification and respond with a single line noting " +
       "that no CFPs qualified this week.\n\n" +
       "After the final tool call, respond with one short line containing the stored memory " +
@@ -180,7 +180,7 @@ export const pipelines = {
       "  body = <first 200 characters of ${RETRO_BODY}>\n" +
       "  type = \"retro\"\n" +
       "  priority = \"normal\"\n" +
-      "  action_url = \"/dashboard/memory?id=${RETRO_ID}&instance=${INSTANCE_ID}\"\n\n" +
+      "  action_url = \"/dashboard/memory?edit=${RETRO_ID}&instance=${INSTANCE_ID}\"\n\n" +
       "After the three tool calls succeed, respond with one short line containing the " +
       "stored memory id and the counts. Never fabricate memory IDs or snippets — every " +
       "citation must trace back to a hit crow_search_memories actually returned.",
