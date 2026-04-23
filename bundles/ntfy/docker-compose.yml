@@ -7,7 +7,11 @@ services:
     volumes:
       - ntfy-cache:/var/cache/ntfy
     ports:
-      - "${NTFY_PORT:-2586}:80"
+      # Bind only to 127.0.0.1 so Docker's publish doesn't collide with
+      # Tailscale's serve rule on the tailnet IP (100.121.254.89:2586).
+      # External/tailnet access is routed by `tailscale serve 2586` ->
+      # http://localhost:2586 with HTTPS termination at the tailnet edge.
+      - "127.0.0.1:${NTFY_PORT:-2586}:80"
     mem_limit: 128m
 
 volumes:

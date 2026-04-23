@@ -303,7 +303,17 @@ public class NtfyListenerService extends Service {
         conn.setRequestMethod("GET");
         conn.setRequestProperty("Accept", "application/json");
         conn.setConnectTimeout(15000);
-        conn.setReadTimeout(0); // No read timeout — stream is long-lived
+        // ntfy's JSON stream pushes a "keepalive" frame roughly every 45s.
+        // Setting readTimeout=0 (wait forever) turns out to be a trap: when
+        // the TCP socket goes zombie (carrier NAT timeout, Wi-Fi<->cellular
+        // handoff, router idle kill), the app-side end still thinks the
+        // connection is alive and readLine() blocks forever — the outer
+        // connectLoop reconnect at line ~137 never fires, and messages
+        // only arrive when some external event wakes the socket (e.g. the
+        // user reopening the app). A 90s timeout is ~2x the keepalive
+        // cadence, so a healthy connection never trips it but a zombie
+        // connection throws SocketTimeoutException -> caught -> reconnect.
+        conn.setReadTimeout(90_000);
 
         if (authToken != null && !authToken.isEmpty()) {
             conn.setRequestProperty("Authorization", "Bearer " + authToken);
