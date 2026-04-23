@@ -426,4 +426,115 @@ export const pipelines = {
     storeResult: false,
     resultCategory: null,
   },
+
+  "mpa-follow-up-nudger": {
+    name: "MPA: Follow-Up Nudger",
+    description:
+      "Tier-1 Gmail follow-up nudger, complement to mpa-outreach-drafter. Weekdays at 14:00 CDT, finds INBOUND-originated inbox threads (someone else wrote Kevin first) where Kevin replied and the other party has gone quiet for 5+ days. Writes a gentle \"just following up\" draft in Gmail Drafts (thread-scoped). Never sends. The outreach-drafter at 18:00 covers the mirror case (Kevin initiated, no reply); this one covers inbound threads Kevin is waiting on. Filters exclude each other so nothing gets double-nudged in a given day: outreach-drafter queries `in:sent`, this pipeline queries `in:inbox` and only acts when the thread's FIRST message is NOT from Kevin.",
+    goal:
+      "Draft gentle follow-up nudges for stalled INBOUND-originated threads by making the " +
+      "tool calls below in order.\n\n" +
+      "CALL 1 — gmail_search_threads with these exact arguments:\n" +
+      "  query = \"in:inbox older_than:5d newer_than:60d -subject:invoice -subject:receipt " +
+      "-subject:digest -subject:newsletter -category:promotions -category:social " +
+      "-category:updates -category:forums\"\n" +
+      "  max_results = 10\n" +
+      "Capture the response's `data.threads` array as ${INBOX_THREADS}. If it is empty, skip " +
+      "straight to the FINAL step below with zero drafts.\n\n" +
+      "For each thread in ${INBOX_THREADS}:\n\n" +
+      "CALL — gmail_get_thread with thread_id = <that thread's thread_id>. The response has " +
+      "`data.messages` (ordered oldest → newest) with per-message headers.from, headers.to, " +
+      "headers.date, and body_text.\n\n" +
+      "Decide whether to draft a follow-up using these rules in order:\n" +
+      "  - SKIP if data.messages.length < 2 — need at least one inbound + one Kevin reply.\n" +
+      "  - SKIP if data.messages[0].headers.from CONTAINS " +
+      "\"kevin.hopper@maestro.press\", \"kevin.hopper1@gmail.com\", or \"kevin hopper\" " +
+      "— that's an outbound-originated thread and belongs to the 18:00 outreach-drafter.\n" +
+      "  - SKIP if data.messages[-1].headers.from does NOT contain " +
+      "\"kevin.hopper@maestro.press\", \"kevin.hopper1@gmail.com\", or \"kevin hopper\" " +
+      "— the other side already replied; nothing to nudge yet.\n" +
+      "  - SKIP transactional/automated inbound senders based on " +
+      "data.messages[0].headers.from: addresses containing \"no-reply\", \"noreply\", " +
+      "\"notifications@\", \"billing@\", \"receipts@\", \"support@\", \"hello@\", or " +
+      "domains stripe/quickbooks/docusign/mailgun/github/digitalocean/tailscale/anthropic/" +
+      "openai/substack/medium.\n" +
+      "  - SKIP if there is any thread label suggesting automated content " +
+      "(CATEGORY_PROMOTIONS, CATEGORY_SOCIAL, CATEGORY_UPDATES, CATEGORY_FORUMS).\n\n" +
+      "For each thread that passes the filters, the recipient is the sender of the FIRST " +
+      "inbound message — data.messages[0].headers.from. Strip any display-name wrapper and " +
+      "keep only the bare email.\n\n" +
+      "CALL — gmail_create_draft with these exact arguments:\n" +
+      "  to = <extracted recipient email from data.messages[0].headers.from>\n" +
+      "  subject = \"Re: \" + <thread's first-message subject without existing 'Re:' prefix>\n" +
+      "  body = a short polite follow-up (UNDER 100 words) referencing the actual thread " +
+      "topic in one line, acknowledging that it's been a few days since your reply, and " +
+      "asking a single clarifying question or offering a concrete next step drawn from the " +
+      "thread. Sign as \"Kevin\". Example shape only (substitute the actual subject and ask):\n" +
+      "    \"Hi <first-name>,\\n\\nJust following up on <subject-snippet> — I realize it's " +
+      "been a few days since my reply.\\n\\n<one clarifying question or concrete next " +
+      "step>.\\n\\nHappy to wait if this needs more time on your end.\\n\\nKevin\"\n" +
+      "  thread_id = <that thread's thread_id>   (so the draft threads as a reply to the " +
+      "existing conversation)\n" +
+      "Never fabricate a prior commitment, quote, or agreement — only reference what the " +
+      "actual thread contains.\n\n" +
+      "Track the count of drafts you successfully created as ${DRAFT_COUNT} and the list of " +
+      "(recipient, subject) pairs as ${DRAFT_SUMMARY}.\n\n" +
+      "FINAL — crow_store_memory with these exact arguments:\n" +
+      "  content = a short markdown summary of this run, formatted exactly as:\n" +
+      "    \"Follow-up nudger ${TODAY} — drafted: ${DRAFT_COUNT}, skipped: <count>\\n\" +\n" +
+      "    \"- <recipient>: <subject>\" (one line per draft created; omit the list " +
+      "if ${DRAFT_COUNT} == 0)\n" +
+      "  category = \"outreach\"\n" +
+      "  importance = 3\n" +
+      "  tags = \"mpa,outreach,follow-up,draft\"\n\n" +
+      "After the final tool call succeeds, respond with a single short confirmation line " +
+      "containing the stored memory id and the draft count. Do not send any email — " +
+      "gmail_create_draft only leaves the draft for Kevin's manual review.",
+    preset: "mpa-outreach",
+    defaultCron: "0 14 * * 1-5",
+    storeResult: false,
+    resultCategory: null,
+  },
+
+  "mpa-project-help-ethics-tracker": {
+    name: "MPA: Project Help Ethics Tracker",
+    description:
+      "Tier-0 watcher for replies from Austin ISD Office of the General Counsel on the Project Help / conflict-of-interest clearance thread. Every 6 hours, runs one Gmail search for unread inbound from austinisd.org in the last 14 days. If anything matches, pushes a HIGH-priority ntfy notification and stores a short audit memory. Narrow read-only + notification/memory writes — no drafts, no replies, no archives. Rationale: AISD ethics clearance is a prerequisite for any Project Help consulting work; a reply must surface fast rather than waiting for the next scheduled triage pass.",
+    goal:
+      "Scan Kevin's inbox for new AISD ethics / Project Help correspondence by making at most three " +
+      "tool calls in order.\n\n" +
+      "CALL 1 — gmail_search_threads with these exact arguments:\n" +
+      "  query = \"from:austinisd.org is:unread newer_than:14d\"\n" +
+      "  max_results = 10\n" +
+      "The response is {\"success\": true, \"data\": {\"threads\": [...]}}. Capture the threads " +
+      "array as ${AISD_THREADS} and its length as ${AISD_COUNT}. Each thread object has " +
+      "`from`, `subject`, and `snippet` fields.\n\n" +
+      "If ${AISD_COUNT} == 0: do not call any more tools. Respond with the single line " +
+      "\"No unread AISD threads in the last 14 days; skipped notification.\" and stop.\n\n" +
+      "Otherwise, build ${THREAD_LINES} as a newline-joined list, one line per thread in " +
+      "${AISD_THREADS}, in this exact shape:\n" +
+      "    \"- <from>: <subject>\"\n" +
+      "where <from> is the thread.from field (preserve its display-name/email form exactly " +
+      "as returned) and <subject> is thread.subject trimmed to 100 characters.\n\n" +
+      "CALL 2 — crow_store_memory with these exact arguments:\n" +
+      "  content = \"AISD ethics tracker ${TODAY} — unread from austinisd.org: ${AISD_COUNT}\\n\" + " +
+      "${THREAD_LINES}\n" +
+      "  category = \"triage\"\n" +
+      "  importance = 5\n" +
+      "  tags = \"mpa,ethics,aisd,project-help\"\n" +
+      "Capture the returned memory id as ${MEMORY_ID}.\n\n" +
+      "CALL 3 — crow_create_notification with these exact arguments:\n" +
+      "  title = \"AISD ethics tracker — ${AISD_COUNT} new from austinisd.org\"\n" +
+      "  body = <first 240 characters of ${THREAD_LINES}>\n" +
+      "  type = \"ethics\"\n" +
+      "  priority = \"high\"\n" +
+      "  action_url = \"/dashboard/memory?edit=${MEMORY_ID}&instance=${INSTANCE_ID}\"\n\n" +
+      "After the notification is created, respond with a single short confirmation line " +
+      "containing ${AISD_COUNT}, ${MEMORY_ID}, and the notification id. Do not fabricate " +
+      "threads, subjects, or senders — only echo what gmail_search_threads actually returned.",
+    preset: "mpa-gmail",
+    defaultCron: "0 */6 * * *",
+    storeResult: false,
+    resultCategory: null,
+  },
 };
