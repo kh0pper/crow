@@ -80,59 +80,59 @@ export const pipelines = {
   "mpa-conference-cfp-monitor": {
     name: "MPA: Conference CFP Monitor",
     description:
-      "Tier-0 weekly CFP scout. Mondays at 07:00 America/Chicago, runs three narrow brave_web_search queries against Maestro Press topic areas, filters hits for explicit call-for-papers signals, stores a summary memory tagged `mpa,cfp,scan`, and pushes a notification if any qualifying CFPs are found. Scouts net-new opportunities that aren't already on the tasks board; Kevin decides whether to add a follow-up task.",
+      "Tier-0 weekly CFP scout. Mondays at 07:00 America/Chicago, runs three narrow brave_web_search queries against Maestro Press topic areas, filters hits for explicit call-for-papers signals, dedupes against existing tasks by URL, and creates one task per fresh hit in the MPA tasks panel. Pushes a notification when any NEW tasks were created; silent when everything surfaced is already a known task.",
     goal:
-      "Scout new conference CFPs by making the tool calls below in exact order. Call tools " +
-      "FIRST, then compose the summary from their returned data.\n\n" +
-      "CALL 1 — brave_web_search with exact arguments:\n" +
+      "Scout new conference CFPs and turn each fresh hit into a task. Emit ONE tool call " +
+      "per response — never batch tool calls into one message.\n\n" +
+      "STEP 1 — Call brave_web_search with:\n" +
       "  query = \"\\\"Texas school finance\\\" conference 2026 OR 2027 \\\"call for\\\"\"\n" +
-      "  count = 10\n" +
-      "Capture the response as ${R1}.\n\n" +
-      "CALL 2 — brave_web_search with exact arguments:\n" +
+      "  count = 10\n\n" +
+      "STEP 2 — Call brave_web_search with:\n" +
       "  query = \"AI K-12 education conference 2026 OR 2027 \\\"call for proposals\\\"\"\n" +
-      "  count = 10\n" +
-      "Capture the response as ${R2}.\n\n" +
-      "CALL 3 — brave_web_search with exact arguments:\n" +
+      "  count = 10\n\n" +
+      "STEP 3 — Call brave_web_search with:\n" +
       "  query = \"education equity policy conference 2026 OR 2027 \\\"call for papers\\\"\"\n" +
-      "  count = 10\n" +
-      "Capture the response as ${R3}.\n\n" +
-      "For each response, scan the result entries. Keep ONLY entries whose title or " +
-      "description explicitly contains one of these CFP signals (case-insensitive): " +
-      "\"call for papers\", \"call for proposals\", \"call for presentations\", " +
-      "\"submit abstract\", \"submit proposal\", \"cfp\", \"submission deadline\", " +
-      "\"abstract deadline\". Discard anything that's just a general conference homepage " +
-      "with no CFP signal.\n\n" +
-      "For each kept entry, extract: TITLE (≤80 chars), URL, and DEADLINE_SNIPPET (any " +
-      "date phrase in the description, or \"(no deadline found)\"). Cap the kept list at " +
-      "2 entries per query (so at most 6 total). If all three queries produce zero kept " +
-      "entries, proceed to the FINAL step with an empty hits list — DO NOT call " +
-      "crow_create_notification in that case.\n\n" +
-      "Build ${HITS_MARKDOWN} as:\n" +
-      "  (empty list → \"- (no qualifying CFPs this week)\")\n" +
-      "  (non-empty → one bullet per kept entry in the form\n" +
-      "    \"- <TITLE> — <DEADLINE_SNIPPET>\\n  <URL>\")\n\n" +
-      "STORE — crow_store_memory with exact arguments:\n" +
-      "  content = the text:\n" +
-      "    \"MPA CFP scan ${TODAY}\\n\" +\n" +
-      "    \"topics: Texas school finance, AI in K-12, education equity\\n\" +\n" +
-      "    \"hits: <count of kept entries>\\n\\n\" +\n" +
-      "    ${HITS_MARKDOWN}\n" +
-      "  category = \"scouting\"\n" +
-      "  importance = 4\n" +
-      "  tags = \"mpa,cfp,scan\"\n" +
-      "Capture the returned memory id as ${SCAN_ID}.\n\n" +
-      "IF and only if ${HITS_MARKDOWN} is non-empty (hits count > 0), NOTIFY — " +
-      "crow_create_notification with exact arguments:\n" +
-      "  title = \"MPA CFP scan — <count> new candidates\"\n" +
-      "  body = <first 200 characters of ${HITS_MARKDOWN}>\n" +
+      "  count = 10\n\n" +
+      "After STEP 3, from ALL three responses keep only entries whose title or description " +
+      "explicitly contains one of (case-insensitive): \"call for papers\", \"call for " +
+      "proposals\", \"call for presentations\", \"submit abstract\", \"submit proposal\", " +
+      "\"cfp\", \"submission deadline\", \"abstract deadline\". Cap at 2 kept per query, 6 " +
+      "total. For each, note TITLE (≤70 chars), URL, DEADLINE_SNIPPET (date phrase from " +
+      "description or \"(no deadline found)\"), and TOPIC (\"Texas school finance\", \"AI " +
+      "K-12\", or \"education equity\").\n\n" +
+      "STEP 4..N — For each kept entry, one at a time (one tool call per response):\n" +
+      "  (a) Call tasks_search with query=<that URL>, status=\"any\", limit=1. If the " +
+      "      response's data.count > 0, the URL is already tracked — skip to the next " +
+      "      entry.\n" +
+      "  (b) If count == 0, the entry is fresh. Try to parse DEADLINE_SNIPPET into YYYY-MM-" +
+      "      DD. Only keep a parsed due_date when the snippet is an unambiguous full " +
+      "      calendar date (e.g. \"March 2, 2027\" → 2027-03-02). If only month/year, " +
+      "      omit due_date entirely.\n" +
+      "  (c) Call tasks_create with:\n" +
+      "        title = \"CFP: \" + <TITLE>\n" +
+      "        description = (multiline)\n" +
+      "            \"URL: <URL>\\n\" +\n" +
+      "            \"Topic: <TOPIC>\\n\" +\n" +
+      "            \"Deadline (raw): <DEADLINE_SNIPPET>\\n\" +\n" +
+      "            \"Discovered: ${TODAY}\"\n" +
+      "        priority = 2\n" +
+      "        due_date = <parsed YYYY-MM-DD, or OMITTED>\n" +
+      "        phase = \"scouting\"\n" +
+      "        tags = \"mpa,cfp,scouting\"\n" +
+      "      Track the running list of created tasks as ${NEW_SUMMARY} (one line each: " +
+      "      \"- <TITLE> (<due or raw deadline>)\") and increment ${NEW_COUNT}.\n\n" +
+      "FINAL — If ${NEW_COUNT} == 0, do NOT call crow_create_notification. Respond with one " +
+      "line saying no new CFPs qualified.\n\n" +
+      "Otherwise, call crow_create_notification with:\n" +
+      "  title = \"MPA: ${NEW_COUNT} new CFP candidate(s)\"\n" +
+      "  body = <first 200 chars of ${NEW_SUMMARY}>\n" +
       "  type = \"scouting\"\n" +
       "  priority = \"normal\"\n" +
-      "  action_url = \"/dashboard/memory?edit=${SCAN_ID}&instance=${INSTANCE_ID}\"\n\n" +
-      "If hits count == 0, skip the notification and respond with a single line noting " +
-      "that no CFPs qualified this week.\n\n" +
-      "After the final tool call, respond with one short line containing the stored memory " +
-      "id and the hits count. Never fabricate a CFP, URL, or deadline — every entry must " +
-      "trace back to a hit brave_web_search actually returned.",
+      "  action_url = \"https://grackle.dachshund-chromatic.ts.net:8447/dashboard/tasks?view=all\"\n" +
+      "Absolute URL points at MPA's own dashboard (port 8447) so clicks land where the " +
+      "tasks live.\n\n" +
+      "Then respond with one short line: ${NEW_COUNT} new CFP(s), total hits scanned. " +
+      "Never fabricate a URL, title, or deadline.",
     preset: "mpa-cfp-monitor",
     defaultCron: "0 7 * * 1",
     storeResult: false,

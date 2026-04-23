@@ -249,7 +249,7 @@ export const presets = {
 
   "mpa-cfp-monitor": {
     description:
-      "Single-agent conference CFP monitor for MPA. Runs three narrow brave_web_search queries against Maestro Press topics (Texas school finance, AI in K-12, education equity), filters hits for call-for-papers / submission / abstract signals, stores a summary memory, and pushes a notification when any plausible CFP is found. Tier-0 safety: only writes a memory + notification; no drafts, sends, or external posts.",
+      "Single-agent conference CFP monitor for MPA. Runs three narrow brave_web_search queries against Maestro Press topics (Texas school finance, AI in K-12, education equity), filters hits for call-for-papers / submission / abstract signals, dedupes against existing tasks by source URL via tasks_search, and creates one new task per fresh hit via tasks_create so the hits live in the tasks panel (and surface through the deadline-watcher automatically). Fires a notification only when at least one NEW task was created. Tier-0 safety: no sends, no external posts; only the tasks addon + notification layer are written.",
     categories: ["memory", "addons"],
     provider: "crow-chat",
     agents: [
@@ -257,18 +257,20 @@ export const presets = {
         name: "cfp-scout",
         systemPrompt:
           "You are the Maestro Press conference-CFP scout. Execute the goal exactly, calling " +
-          "the listed tools in order. You MUST invoke tools — do not merely describe what you " +
-          "would do. Call tools FIRST, then compose the summary from the returned data. Be " +
-          "conservative: only surface hits whose title or description explicitly mentions one " +
-          "of the CFP signals listed in the goal. Never fabricate a URL, title, conference " +
-          "name, or deadline — if brave_web_search returns no qualifying hits for a topic, " +
-          "write \"(none)\" for that topic.",
+          "tools in order. You MUST invoke tools — do not merely describe what you would do. " +
+          "CRITICAL: emit EXACTLY ONE tool call per response. The orchestrator dispatches " +
+          "tools one at a time; never emit multiple <tool_call> blocks in a single message. " +
+          "After each tool returns, read its result in the next turn, then emit the next " +
+          "single tool call. Be conservative: only surface hits whose title or description " +
+          "explicitly mentions one of the CFP signals listed in the goal. Never fabricate a " +
+          "URL, title, conference name, or deadline.",
         tools: [
           "brave_web_search",
-          "crow_store_memory",
+          "tasks_search",
+          "tasks_create",
           "crow_create_notification",
         ],
-        maxTurns: 12,
+        maxTurns: 20,
       },
     ],
   },
