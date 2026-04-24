@@ -102,6 +102,17 @@ export async function createNotification(db, opts) {
     // ntfy module not available or not configured — skip silently
   }
 
+  // Send email notification. The helper has its own predicate
+  // (priority=high OR type=briefing) and a hard gate on RESEND_API_KEY +
+  // MPA_EMAIL_FROM + MPA_EMAIL_TO, so primary and any non-MPA gateway
+  // that inherits this code never sends unless explicitly configured.
+  try {
+    const { sendEmailNotification } = await import("../gateway/push/email.js");
+    await sendEmailNotification({ title, body: body || title, url: action_url, priority, type });
+  } catch {
+    // email module not available or not configured — skip silently
+  }
+
   return { id: Number(result.lastInsertRowid) };
 }
 
