@@ -25,6 +25,7 @@ import { createMemoryServer } from "../memory/server.js";
 import { createProjectServer } from "../research/server.js";
 import { createSharingServer } from "../sharing/server.js";
 import { createBlogServer } from "../blog/server.js";
+import { createConsultingServer } from "../consulting/server.js";
 
 function resolveCrowHome() {
   return process.env.CROW_HOME || join(homedir(), ".crow");
@@ -39,6 +40,7 @@ const SERVER_FACTORIES = {
   projects: createProjectServer,
   sharing: createSharingServer,
   blog: createBlogServer,
+  consulting: createConsultingServer,
 };
 
 /**

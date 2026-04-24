@@ -14,7 +14,7 @@
 
 import { CronExpressionParser } from "cron-parser";
 import { pipelines } from "./pipelines.js";
-import { substituteGoalPlaceholders } from "./pipeline-vars.js";
+import { substituteGoalPlaceholders, substituteGoalPlaceholdersAsync } from "./pipeline-vars.js";
 
 const POLL_INTERVAL_MS = 60 * 1000; // Check every 60 seconds
 const PIPELINE_PREFIX = "pipeline:";
@@ -103,10 +103,55 @@ async function tick() {
 }
 
 /**
+ * Idempotent creation of the pipeline_runs table. Called lazily on the first
+ * execution so primary Crow installs that never run pipelines stay untouched.
+ */
+let _pipelineRunsReady = false;
+async function ensurePipelineRunsTable() {
+  if (_pipelineRunsReady || !db) return;
+  try {
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS pipeline_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pipeline_name TEXT NOT NULL,
+        schedule_id INTEGER,
+        status TEXT NOT NULL,
+        error_message TEXT,
+        started_at TEXT NOT NULL,
+        ended_at TEXT NOT NULL
+      )
+    `);
+    await db.execute(
+      `CREATE INDEX IF NOT EXISTS idx_pipeline_runs_name ON pipeline_runs(pipeline_name, ended_at DESC)`
+    );
+    _pipelineRunsReady = true;
+  } catch (err) {
+    console.warn("[pipeline-runner] pipeline_runs table creation failed:", err.message);
+  }
+}
+
+async function recordPipelineRun({ pipelineName, scheduleId, status, errorMessage, startedAt }) {
+  if (!db) return;
+  await ensurePipelineRunsTable();
+  if (!_pipelineRunsReady) return;
+  try {
+    await db.execute({
+      sql: `INSERT INTO pipeline_runs
+            (pipeline_name, schedule_id, status, error_message, started_at, ended_at)
+            VALUES (?, ?, ?, ?, ?, datetime('now'))`,
+      args: [pipelineName, scheduleId ?? null, status, errorMessage ?? null, startedAt],
+    });
+  } catch (err) {
+    console.warn("[pipeline-runner] pipeline_runs insert failed:", err.message);
+  }
+}
+
+/**
  * Execute a single pipeline: run orchestration and optionally store results.
  */
 async function executePipeline(scheduleId, pipelineName, pipeline) {
-  const goal = substituteGoalPlaceholders(pipeline.goal);
+  const startedAt = new Date().toISOString();
+  const goal = await substituteGoalPlaceholdersAsync(pipeline.goal);
   const result = await runOrchestrationFn(goal, pipeline.preset);
 
   if (result.status === "completed" && result.result && pipeline.storeResult && storeResultFn) {
@@ -122,6 +167,14 @@ async function executePipeline(scheduleId, pipelineName, pipeline) {
   if (result.status === "failed") {
     console.error(`[pipeline-runner] Pipeline "${pipelineName}" failed: ${result.error}`);
   }
+
+  await recordPipelineRun({
+    pipelineName,
+    scheduleId,
+    status: result.status,
+    errorMessage: result.status === "failed" ? (result.error || "unknown") : null,
+    startedAt,
+  });
 
   console.log(
     `[pipeline-runner] Pipeline "${pipelineName}" finished — ` +
@@ -183,7 +236,7 @@ export async function runPipelineNow(pipelineName) {
 
   console.log(`[pipeline-runner] Running pipeline "${pipelineName}" (manual trigger)`);
 
-  const goal = substituteGoalPlaceholders(pipeline.goal);
+  const goal = await substituteGoalPlaceholdersAsync(pipeline.goal);
   const result = await runOrchestrationFn(goal, pipeline.preset);
 
   if (result.status === "completed" && result.result && pipeline.storeResult && storeResultFn) {
