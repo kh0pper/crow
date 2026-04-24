@@ -537,4 +537,129 @@ export const pipelines = {
     storeResult: false,
     resultCategory: null,
   },
+
+  "mpa-pipeline-reliability": {
+    name: "MPA: Pipeline Reliability Tracker",
+    description:
+      "Tier-0 nightly reliability tracker. Every day at 03:30 America/Chicago, reads aggregated pipeline_runs data (pre-computed and injected into the goal via ${RELIABILITY_SUMMARY} placeholder), stores a memory tagged `pipeline_reliability,summary,${TODAY}` with the run table, and calls out any Tier-1 pipelines with 10+ consecutive clean runs as promotion candidates for the next weekly retro.",
+    goal:
+      "Store the pipeline reliability summary as a memory by making exactly ONE tool call.\n\n" +
+      "The reliability table has already been computed for you (the pipeline-runner injected " +
+      "the aggregated pipeline_runs data below). Your job is only to wrap it in the memory " +
+      "content and call crow_store_memory once.\n\n" +
+      "RELIABILITY TABLE:\n\n" +
+      "${RELIABILITY_SUMMARY}\n\n" +
+      "CALL — crow_store_memory with these exact arguments:\n" +
+      "  content = a short memory body, formatted exactly as:\n" +
+      "    \"Pipeline reliability summary ${TODAY}\\n\\n\" +\n" +
+      "    <the RELIABILITY TABLE content shown above, verbatim>\n" +
+      "  category = \"process\"\n" +
+      "  importance = 4\n" +
+      "  tags = \"mpa,pipeline_reliability,summary\"\n\n" +
+      "After the tool call succeeds, respond with a single short confirmation line containing " +
+      "the stored memory id. Never fabricate pipeline names or counts — only include what the " +
+      "pre-computed table shows.",
+    preset: "mpa-reliability",
+    defaultCron: "30 3 * * *",
+    storeResult: false,
+    resultCategory: null,
+  },
+
+  "mpa-consulting-prospectus-generator": {
+    name: "MPA: Consulting Prospectus Generator",
+    description:
+      "Tier-1 consulting prospectus generator. Weekdays at 09:00 America/Chicago, pulls up to 3 pending prospects from the consulting_pipeline table (stage='prospect' AND last_pipeline_action IS NULL, capstone-analyzed districts first), fetches district profile + ARC + FSP + STAAR + bond + per-pupil data from the texas-gov-data MCP addon, drafts a 2-3 page personalized markdown prospectus for each, and drops the markdown into ~/maestro-press-assistant/prospectuses/inbox/ where the render-prospectus.path systemd watcher converts it to PDF within a few seconds. Silent no-op when the queue is empty. Writes one summary memory + one normal-priority ntfy per run.",
+    goal:
+      "Generate consulting prospectuses for pending prospects by making the tool calls below " +
+      "in order. Emit EXACTLY ONE tool call per response — never multiple in a single message.\n\n" +
+      "CALL 1 — crow_consulting_list_pending with these exact arguments:\n" +
+      "  limit = 3\n" +
+      "Response shape: {\"count\": N, \"items\": [{tea_id, name, org_type, esc_region, county, " +
+      "total_students, charter_status, has_capstone_analysis, notes}, ...]}. Capture items as " +
+      "${PENDING}. If ${PENDING} is empty (count == 0), skip straight to the FINAL memory/" +
+      "notification steps below with ${GENERATED_COUNT} = 0 and ${GENERATED_LIST} = \"\".\n\n" +
+      "For each prospect in ${PENDING}, in order, do the following sequence (one tool call per " +
+      "turn; wait for each response before emitting the next call):\n\n" +
+      "CALL — tea_get_district with district_id = <prospect.tea_id>. Skip this call for orgs " +
+      "whose tea_id starts with \"ESC\" or \"NTO:\" (those are ESCs or non-TEA orgs and the " +
+      "TEA tools won't know them). For skipped orgs, write a minimal prospectus body using " +
+      "only the fields already in the consulting_pipeline row and proceed directly to the " +
+      "crow_consulting_write_prospectus call. Capture the response's district profile as " +
+      "${DISTRICT}.\n\n" +
+      "CALL — tea_get_arc_factors with district_id = <tea_id>. Capture as ${ARC}. If the call " +
+      "errors, continue — the prospectus can still be drafted from the data you have.\n\n" +
+      "CALL — tea_get_fsp_data with district_id = <tea_id>. Capture as ${FSP}. Optional; " +
+      "skip on error.\n\n" +
+      "CALL — tea_get_per_pupil_expenditure with district_id = <tea_id>. Capture as ${PPE}. " +
+      "Optional; skip on error.\n\n" +
+      "CALL — tea_get_bond_summary with district_id = <tea_id>. Capture as ${BOND}. Optional; " +
+      "skip on error. Only meaningful for ISDs (not charters).\n\n" +
+      "CALL — tea_get_staar_scores_longitudinal with district_id = <tea_id>. Capture as " +
+      "${STAAR}. Optional; skip on error.\n\n" +
+      "Now draft the prospectus markdown. Use EXACTLY this structure (substitute bracketed " +
+      "values with real data from the tool responses — never fabricate, and always cite the " +
+      "school year for each metric):\n\n" +
+      "    # Maestro Press — <DISTRICT.name> Engagement Prospectus\n" +
+      "    *<today's date in Month D, YYYY format> · Prepared for district leadership*\n\n" +
+      "    ## District snapshot (<school year>)\n" +
+      "    - Enrollment: <total students>\n" +
+      "    - ESC region: <region>, County: <county>\n" +
+      "    - Type: <ISD | charter | ESC | ...>\n" +
+      "    - Accountability rating: <rating if available>\n\n" +
+      "    ## ARC factor profile\n" +
+      "    <2-3 sentences citing specific ARC percentages with year, referencing at-risk, " +
+      "    economically disadvantaged, ELL, special ed, homeless, and/or foster-care counts " +
+      "    that came back from tea_get_arc_factors>\n\n" +
+      "    ## Fiscal profile\n" +
+      "    <2-3 sentences citing FSP category totals and per-pupil expenditure with year, " +
+      "    only if those tool calls succeeded>\n\n" +
+      "    ## Bond history\n" +
+      "    <2-3 sentences citing bond proposition totals and pass/fail outcomes from " +
+      "    tea_get_bond_summary, only if the call succeeded and the org is an ISD>\n\n" +
+      "    <IF prospect.has_capstone_analysis == 1, add this section:>\n" +
+      "    ## Published Maestro Press analysis of your district\n" +
+      "    <one short paragraph acknowledging that Maestro Press has already published a " +
+      "    constitutional-efficiency case study of this district — do not attempt to quote " +
+      "    the case study; reference it by title framing only>\n\n" +
+      "    ## How Maestro Press can help\n" +
+      "    Three bullets tying the specific numbers above to one of:\n" +
+      "    1. ARC-based needs-based funding analysis — empirical weights vs. frozen 0.20\n" +
+      "    2. Bond election efficacy review for fast-growth or historically-failed districts\n" +
+      "    3. Constitutional-efficiency gap analysis under the Edgewood/Morath standard\n\n" +
+      "    ## Next step\n" +
+      "    A 20-minute discovery call to review the data above and identify one actionable " +
+      "    analysis Maestro Press can deliver within a 4-6 week engagement.\n\n" +
+      "    Kevin Hopper · Maestro Press · kevin.hopper@maestro.press\n\n" +
+      "Capture the completed markdown as ${PROSPECTUS_MD}.\n\n" +
+      "CALL — crow_consulting_write_prospectus with these exact arguments:\n" +
+      "  tea_id = <prospect.tea_id>\n" +
+      "  markdown = ${PROSPECTUS_MD}\n" +
+      "The response has {tea_id, name, md_path, expected_pdf_path, bytes}. Append " +
+      "\"<name> → <expected_pdf_path>\" to ${GENERATED_LIST} (newline-delimited). Increment " +
+      "${GENERATED_COUNT}.\n\n" +
+      "After you have processed every prospect in ${PENDING} (or if ${PENDING} was empty):\n\n" +
+      "FINAL — crow_store_memory with these exact arguments:\n" +
+      "  content = a short markdown summary, formatted exactly as:\n" +
+      "    \"Consulting prospectus generator ${TODAY} — generated: ${GENERATED_COUNT}\\n\" +\n" +
+      "    ${GENERATED_LIST}\n" +
+      "  category = \"consulting\"\n" +
+      "  importance = 4\n" +
+      "  tags = \"mpa,consulting,prospectus,generator\"\n" +
+      "Capture the returned memory id as ${MEMORY_ID}.\n\n" +
+      "FINAL — crow_create_notification with these exact arguments (skip this step only if " +
+      "${GENERATED_COUNT} == 0):\n" +
+      "  title = \"MPA prospectus generator — ${GENERATED_COUNT} prospectus${GENERATED_COUNT_PLURAL} ready\"\n" +
+      "  body = <first 240 characters of ${GENERATED_LIST}>\n" +
+      "  type = \"consulting\"\n" +
+      "  priority = \"normal\"\n" +
+      "  action_url = \"/dashboard/memory?edit=${MEMORY_ID}&instance=${INSTANCE_ID}\"\n\n" +
+      "After all tool calls succeed, respond with a single short confirmation line containing " +
+      "${GENERATED_COUNT} and ${MEMORY_ID}. Never fabricate district data — only cite numbers " +
+      "the TEA tool responses actually returned. If a TEA tool errors, omit that section from " +
+      "the prospectus rather than filling in a guess.",
+    preset: "mpa-prospectus",
+    defaultCron: "0 9 * * 1-5",
+    storeResult: false,
+    resultCategory: null,
+  },
 };

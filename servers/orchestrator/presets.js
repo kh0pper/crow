@@ -302,6 +302,83 @@ export const presets = {
     ],
   },
 
+  "mpa-reliability": {
+    description:
+      "Single-agent pipeline reliability tracker for MPA. Nightly, pulls rows from the pipeline_runs table via a small memory-layer query, computes per-pipeline consecutive_clean_runs over the most recent 20 runs, and stores/updates a memory tagged `pipeline_reliability,<name>` per pipeline. When a Tier-1 pipeline hits 10+ consecutive clean runs, flags it for promotion candidacy in the weekly retro. Tier-0 safety: read-only against pipeline_runs, memory write only.",
+    categories: ["memory"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "reliability-tracker",
+        systemPrompt:
+          "You are the Maestro Press pipeline-reliability tracker. Execute the goal exactly, " +
+          "calling tools in order. You MUST invoke tools — do not merely describe what you would " +
+          "do. CRITICAL: emit EXACTLY ONE tool call per response. Be conservative: only flag a " +
+          "pipeline as promotion-ready if you have 10 consecutive 'completed' entries in the " +
+          "most recent pipeline_runs rows you were given. Never fabricate pipeline names or " +
+          "counts — only cite what the input data contains.",
+        tools: [
+          "crow_store_memory",
+          "crow_search_memories",
+          "crow_update_memory",
+          "crow_list_memories",
+        ],
+        maxTurns: 15,
+      },
+    ],
+  },
+
+  "mpa-prospectus": {
+    description:
+      "Single-agent consulting prospectus generator for MPA. Pulls one pending prospect from the consulting_pipeline table, fetches district profile + ARC + FSP + STAAR + bond + per-pupil data from the texas-gov-data MCP bundle, drafts a 2-3 page personalized markdown prospectus, and writes it into the prospectus inbox where the systemd render-prospectus.path watcher converts it to PDF. Tier-1 safety: reads are TEA tools + consulting state; writes are consulting_write_prospectus (drops markdown + marks row generated) + crow_store_memory + crow_create_notification. No sends, no external posts.",
+    categories: ["memory", "addons", "consulting"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "prospectus-writer",
+        systemPrompt:
+          "You are the Maestro Press consulting prospectus writer. Execute the goal exactly, " +
+          "calling tools in order. You MUST invoke tools — do not merely describe what you would " +
+          "do. CRITICAL: emit EXACTLY ONE tool call per response. The orchestrator dispatches " +
+          "tools one at a time; never emit multiple <tool_call> blocks in a single message. " +
+          "After each tool returns, read its result in the next turn, then emit the next single " +
+          "tool call. Draft the prospectus markdown from the actual TEA data returned by the " +
+          "texas-gov-data tools — never fabricate enrollment, ARC percentages, bond totals, " +
+          "STAAR scores, or demographic counts. Cite the school year (e.g., SY 2023-2024) for " +
+          "every metric. Keep the prospectus 2-3 pages (target 800-1200 words); no marketing " +
+          "fluff, no speculative claims. When a district has has_capstone_analysis=1, reference " +
+          "the published Maestro Press analysis in one paragraph. The single crow_consulting_" +
+          "write_prospectus tool at the end both writes the markdown file and marks the row " +
+          "generated — do not call any other write tool for that step.",
+        tools: [
+          // Consulting pipeline state
+          "crow_consulting_list_pending",
+          "crow_consulting_get",
+          "crow_consulting_write_prospectus",
+          // TEA data via the texas-gov-data addon
+          "tea_get_district",
+          "tea_get_district_demographics",
+          "tea_get_arc_factors",
+          "tea_get_arc_factors_longitudinal",
+          "tea_get_fsp_data",
+          "tea_get_fsp_data_longitudinal",
+          "tea_get_staar_scores",
+          "tea_get_staar_scores_longitudinal",
+          "tea_get_per_pupil_expenditure",
+          "tea_get_bond_summary",
+          "tea_get_accountability_rating",
+          "tea_get_graduation_rates",
+          "tea_get_idra_equity_profile",
+          "tea_get_campuses_in_district",
+          // Memory + notification fan-out
+          "crow_store_memory",
+          "crow_create_notification",
+        ],
+        maxTurns: 40,
+      },
+    ],
+  },
+
   "mpa-triage": {
     description:
       "Single-agent Gmail triage worker for MPA. Classifies recent unread threads into action buckets, auto-archives pure noise, and records a compact summary as a memory. Tier-0 safety: only write action is gmail_archive on newsletter-noise threads; no drafts, no sends, no replies.",

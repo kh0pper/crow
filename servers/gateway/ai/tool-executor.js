@@ -15,6 +15,7 @@ import { createMemoryServer } from "../../memory/server.js";
 import { createProjectServer } from "../../research/server.js";
 import { createSharingServer } from "../../sharing/server.js";
 import { createBlogServer } from "../../blog/server.js";
+import { createConsultingServer } from "../../consulting/server.js";
 import { TOOL_MANIFESTS } from "../tool-manifests.js";
 import { connectedServers } from "../proxy.js";
 
@@ -42,6 +43,7 @@ const SERVER_FACTORIES = {
   projects: createProjectServer,
   sharing: createSharingServer,
   blog: createBlogServer,
+  consulting: createConsultingServer,
   ...(createOrchestratorServer
     ? { orchestrator: () => createOrchestratorServer(undefined, { connectedServers }) }
     : {}),
