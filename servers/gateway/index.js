@@ -66,7 +66,7 @@ import { createRelayHandlers } from "../sharing/relay.js";
 import { generateCrowContext } from "../memory/crow-context.js";
 import { createDbClient } from "../db.js";
 import { createOAuthProvider, initOAuthTables } from "./auth.js";
-import { initProxyServers, createProxyServer, getProxyStatus, loadDynamicBackends, loadRemoteInstances } from "./proxy.js";
+import { initProxyServers, createProxyServer, getProxyStatus, loadDynamicBackends, loadRemoteInstances, resolveCrowHome } from "./proxy.js";
 import { createRouterServer } from "./router.js";
 import { setupPageHandler } from "./setup-page.js";
 import { dashboardAuth } from "./dashboard/auth.js";
@@ -83,6 +83,7 @@ import { initWebPush } from "./push/web-push.js";
 import { join } from "node:path";
 
 const PORT = parseInt(process.env.PORT || process.env.CROW_GATEWAY_PORT || "3001", 10);
+const BIND = process.env.CROW_GATEWAY_BIND || "0.0.0.0";
 const noAuth = process.argv.includes("--no-auth");
 
 if (noAuth && process.env.NODE_ENV === "production") {
@@ -532,7 +533,7 @@ if (!noAuth) {
   const publicUrl = process.env.CROW_GATEWAY_URL || process.env.RENDER_EXTERNAL_URL;
   const serverUrl = publicUrl
     ? new URL(publicUrl)
-    : new URL(`http://0.0.0.0:${PORT}`);
+    : new URL(`http://${BIND}:${PORT}`);
 
   // Auth routes (register, authorize, token)
   app.use(mcpAuthRouter({
@@ -674,6 +675,36 @@ mountMcpServer(app, "/projects", projectServerFactory, sessionManager, authMiddl
 // Legacy alias — existing remote clients use /research/mcp
 mountMcpServer(app, "/research", projectServerFactory, sessionManager, authMiddleware);
 mountMcpServer(app, "/sharing", () => createSharingServer(undefined, { instructions }), sessionManager, authMiddleware);
+
+// --- Per-client filtered proxy mounts (driven by ~/.crow/clients.json) ---
+// Each entry { name: filter } in clients.json mounts /tools-${name}/mcp with
+// the filter applied by createProxyServer. The unfiltered /tools mount stays
+// for admin / diagnostic use.
+const CLIENT_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
+const CLIENT_NAME_RESERVED = new Set([
+  "tools", "memory", "projects", "research", "sharing", "storage", "router", "blog-mcp", "wm",
+]);
+try {
+  const clientsPath = join(resolveCrowHome(), "clients.json");
+  if (existsSync(clientsPath)) {
+    const clients = JSON.parse(readFileSync(clientsPath, "utf8"));
+    for (const [name, filter] of Object.entries(clients)) {
+      if (!CLIENT_NAME_RE.test(name)) {
+        console.warn(`[gateway] clients.json: skipping invalid name ${JSON.stringify(name)}`);
+        continue;
+      }
+      if (CLIENT_NAME_RESERVED.has(name)) {
+        console.warn(`[gateway] clients.json: skipping reserved name ${JSON.stringify(name)}`);
+        continue;
+      }
+      mountMcpServer(app, `/tools-${name}`, () => createProxyServer(filter), sessionManager, authMiddleware);
+      console.log(`[gateway] mount /tools-${name}/mcp (filter: ${JSON.stringify(filter)})`);
+    }
+  }
+} catch (err) {
+  console.warn(`[gateway] clients.json: load failed: ${err.message}`);
+}
+
 mountMcpServer(app, "/tools", createProxyServer, sessionManager, authMiddleware);
 
 // Also mount at /mcp for single-server compatibility (uses memory)
@@ -1207,7 +1238,7 @@ try {
   }
 }
 
-const server = app.listen(PORT, "0.0.0.0", (error) => {
+const server = app.listen(PORT, BIND, (error) => {
   if (error) {
     console.error("Failed to start gateway:", error);
     process.exit(1);
@@ -1278,7 +1309,7 @@ const server = app.listen(PORT, "0.0.0.0", (error) => {
     server.close();
   });
 
-  console.log(`Crow Gateway listening on http://0.0.0.0:${PORT}`);
+  console.log(`Crow Gateway listening on http://${BIND}:${PORT}`);
   console.log(`  Streamable HTTP (2025-03-26):`);
   console.log(`    Memory:   POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/memory/mcp`);
   console.log(`    Projects: POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/projects/mcp`);

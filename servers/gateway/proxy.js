@@ -30,7 +30,7 @@ export { connectedServers };
  * CROW_HOME in their systemd env so bundle installs, mcp-addons.json, and
  * skills/panels stay per-instance instead of bleeding into primary's state.
  */
-function resolveCrowHome() {
+export function resolveCrowHome() {
   return process.env.CROW_HOME || join(homedir(), ".crow");
 }
 
@@ -485,8 +485,14 @@ export async function loadDynamicBackends() {
 /**
  * Create a new McpServer instance with proxy tools for all connected servers.
  * Called per-session by the gateway's MCP handler.
+ *
+ * @param {object} [filter] Optional client-scoped tool filter.
+ * @param {string[]} [filter.allowSources] If set, only these source ids are exposed.
+ * @param {string[]} [filter.denySources] If set, these source ids are excluded.
+ * @param {string[]} [filter.allowTools] If set, only these tool names are exposed.
+ * @param {string[]} [filter.denyTools] Tool names to exclude.
  */
-export function createProxyServer() {
+export function createProxyServer(filter) {
   const server = new McpServer({
     name: "crow-tools",
     version: "0.1.0",
@@ -495,8 +501,17 @@ export function createProxyServer() {
   // Register proxy tools for each connected server
   for (const [integrationId, entry] of connectedServers) {
     if (entry.status !== "connected" || !entry.client) continue;
+    if (filter?.allowSources && !filter.allowSources.includes(integrationId)) continue;
+    if (filter?.denySources?.includes(integrationId)) continue;
 
     for (const tool of entry.tools) {
+      // Tools surface under their upstream name. Sources already self-namespace
+      // (crow_browser_*, brave_web_search, etc.). If two sources ever do collide
+      // on a tool name, the second server.tool() call throws — surface the bug
+      // instead of papering over it with prefixes.
+      if (filter?.allowTools && !filter.allowTools.includes(tool.name)) continue;
+      if (filter?.denyTools?.includes(tool.name)) continue;
+
       const zodShape = jsonSchemaPropertiesToZod(tool.inputSchema);
 
       server.tool(
