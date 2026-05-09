@@ -638,6 +638,11 @@ export function createMemoryServer(dbPath, options = {}) {
 
       await db.execute({ sql: `UPDATE memories SET ${updates.join(", ")} WHERE id = ?`, args: params });
 
+      // Re-embed if content changed (non-blocking)
+      if (content !== undefined) {
+        storeEmbedding(id, content);
+      }
+
       // Emit sync entry
       if (syncManager) {
         const updated = { id, content, category, tags, importance, context };
@@ -647,6 +652,51 @@ export function createMemoryServer(dbPath, options = {}) {
       }
 
       return { content: [{ type: "text", text: `Memory #${id} updated.` }] };
+    }
+  );
+
+  server.tool(
+    "crow_regenerate_embeddings",
+    "Re-embed memories to fix stale embeddings (e.g. after content updates or after enabling semantic search). Optionally filter by category, id list, or re-embed all memories.",
+    {
+      category: z.string().max(500).optional().describe("Filter by category (omit = all)"),
+      id_list: z.array(z.number()).optional().describe("Specific memory IDs to re-embed (omit = all)"),
+    },
+    async ({ category, id_list }) => {
+      const info = await phase4ProviderHealthy();
+      if (!info.ok) {
+        return { content: [{ type: "text", text: `Embedding provider not available: ${info.error}.` }] };
+      }
+
+      let sql = "SELECT id, content FROM memories WHERE 1=1";
+      const params = [];
+      if (category) { sql += " AND category = ?"; params.push(category); }
+      if (id_list && id_list.length > 0) { sql += " AND id IN (" + id_list.map(() => "?").join(",") + ")"; params.push(...id_list); }
+      sql += " ORDER BY id";
+
+      const { rows } = await db.execute({ sql, args: params });
+      if (rows.length === 0) {
+        return { content: [{ type: "text", text: "No memories to re-embed." }] };
+      }
+
+      let succeeded = 0, failed = 0;
+      for (const m of rows) {
+        try {
+          const vec = await phase4EmbedText(m.content);
+          if (vec && vec.length > 0) {
+            await upsertMemoryEmbedding(db, m.id, vec, { model: info.model, dim: vec.length });
+            succeeded++;
+          } else {
+            failed++;
+          }
+        } catch {
+          failed++;
+        }
+      }
+
+      return {
+        content: [{ type: "text", text: `Re-embedded ${succeeded} memories${failed > 0 ? `, ${failed} failed` : ""}. Total processed: ${rows.length}.` }],
+      };
     }
   );
 
