@@ -756,4 +756,49 @@ export const pipelines = {
     storeResult: false,
     resultCategory: null,
   },
+
+  // Phase 8.4-A (2026-05-12) — drafter pipeline.
+  // Generates Google Docs (resume + cover letter) for shortlisted candidates
+  // that don't yet have an application_id. Idempotent — re-running does
+  // nothing for already-drafted candidates because the agent filters on
+  // application_id IS NULL.
+  "bot:job-search:draft-applications": {
+    name: "Bot: job-search drafter (Phase 8.4-A)",
+    description:
+      "Phase 8.4-A drafter. For each shortlisted job_candidates row missing application_id, generates a tailored resume + cover letter Google Doc, records the doc in bot_conversations, and links the candidate. Tier-1 safety: Gmail drafts only, never sends; never invents experience.",
+    goal:
+      "Run the application-drafter agent. It will: (1) query shortlisted candidates without an " +
+      "application_id, (2) read master-resume.md and relevant tailored variants from the " +
+      "jobsearch-notes mirror, (3) for each candidate (up to 3 per tick) generate a Google Doc " +
+      "in the 'Job Search Drafts' folder containing a tailored resume + cover letter, (4) " +
+      "upsert a bot_conversations row with status='awaiting-user' and the google_doc_id, (5) " +
+      "link the candidate via job_candidates_set_application, and (6) emit ONE Gmail draft " +
+      "linking to all newly-drafted docs.\n\n" +
+      "ABSOLUTE RULES: Drafts only. Never invent experience. Never re-draft the same candidate " +
+      "(application_id filter is the contract).",
+    preset: "bot-job-search-drafter",
+    defaultCron: "30 7 * * MON",
+    storeResult: false,
+    resultCategory: null,
+  },
+
+  // Phase 8.4-A.5 (2026-05-12) — drafts notifier pipeline.
+  // Composes a single Gmail digest naming all newly-drafted application docs.
+  // Idempotent — re-running emits nothing if no rows are in current_step='draft-created'.
+  "bot:job-search:notify-drafts": {
+    name: "Bot: job-search drafts notifier (Phase 8.4-A.5)",
+    description:
+      "Phase 8.4-A.5. Single-purpose pipeline that emits a Gmail digest naming all bot_conversations rows with status='awaiting-user' AND current_step='draft-created'. Advances each row to current_step='pending-review' with the new gmail_thread_id, so the next notifier run only picks up genuinely-new drafts.",
+    goal:
+      "Run the drafts-notifier agent. It will: (1) list bot_conversations at status='awaiting-user' " +
+      "and current_step='draft-created', (2) compose one markdown digest naming each drafted " +
+      "document, (3) call gmail_create_draft exactly once, (4) patch each conversation to " +
+      "current_step='pending-review' with the new gmail_thread_id.\n\n" +
+      "ABSOLUTE RULES: One Gmail draft per run. Never gmail_send. Idempotent — zero work if " +
+      "no rows are pending notification.",
+    preset: "bot-job-search-notifier",
+    defaultCron: "35 7 * * MON",
+    storeResult: false,
+    resultCategory: null,
+  },
 };
