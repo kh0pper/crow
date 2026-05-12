@@ -76,6 +76,7 @@ corpus to crow, set `CAPSTONE_ROOT` to override. All scripts honor:
 |---|---|
 | `index_drafts_to_kb.py` | Phase 6.3 bulk indexer — walks `$CAPSTONE_ROOT/insd-5941/drafts/*.md` and registers each via `kb_register_draft` (knowledge-base-mcp). |
 | `register_data_backends.py` | Phase 6.4 — registers `tea_data` + `fed_gov_data` as named `data_backends` rows for the project. Idempotent. Per-host paths via `--host {grackle,crow}`. |
+| `build_research_index.py` | Phase 6.6 — generates static HTML for `https://maestro.press/research`. Run with `--deploy` to rsync to the droplet. Re-run after each `publish_chapter.mjs` to refresh. |
 
 ## Conventions
 
