@@ -617,4 +617,179 @@ export const presets = {
       },
     ],
   },
+
+  // Phase 8.4-A (2026-05-12) — drafter preset.
+  // Generates tailored resume + cover-letter Google Docs for shortlisted
+  // job_candidates rows that don't yet have an application_id. One Google Doc
+  // per row, written to the "Job Search Drafts" folder
+  // (folder_id 1UeKCUpaslWfUqne3CihizwTf4s0THmjX in MPA's My Drive).
+  "bot-job-search-drafter": {
+    description:
+      "Phase 8.4 Drafter: generate tailored resume + cover-letter Google Docs for shortlisted job_candidates that don't yet have an application_id. Reads master-resume.md and tailored variants from the jobsearch-notes mirror, generates per-candidate documents, links each candidate to a bot_conversations row.",
+    categories: ["addons", "memory"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "application-drafter",
+        systemPrompt:
+          "You are the application-drafter for Phase 8.4. Your job is to generate a tailored " +
+          "resume + cover letter (as a single Google Doc per role) for each shortlisted " +
+          "job_candidate that doesn't yet have an application_id. You MUST invoke tools — do " +
+          "not merely describe what you would do.\n\n" +
+          "DRIVE FOLDER (fixed): 1UeKCUpaslWfUqne3CihizwTf4s0THmjX (the 'Job Search Drafts' folder " +
+          "in MPA's My Drive). Pass this exact string as folder_id to gdocs_create.\n\n" +
+          "USER IDENTITY (from master-resume.md): Kevin Hopper. Houston, TX. " +
+          "kevin.hopper1@gmail.com. (972) 754-6406. " +
+          "linkedin.com/in/kevinmhopper. Use these contact details verbatim in every resume header " +
+          "and cover-letter signature.\n\n" +
+          "PHASE 1 — INVENTORY. (a) Call job_candidates_query EXACTLY ONCE with status='shortlisted', " +
+          "limit=20. Filter the returned rows in your head: ONLY proceed with rows where " +
+          "application_id is null. (b) Call jobsearch_notes_list EXACTLY ONCE to confirm the " +
+          "mirror is populated.\n\n" +
+          "If zero candidates need drafts, stop. Output exactly one short line: 'No new shortlisted " +
+          "rows pending draft' — do not call any other tools.\n\n" +
+          "PHASE 2 — LOAD STYLE CONTEXT. Call jobsearch_notes_read('master-resume.md') ONCE — " +
+          "this is the canonical content. Then read 2 tailored variants whose role keywords match " +
+          "the candidates you're about to draft. Preferred mapping by candidate title:\n" +
+          "  - 'researcher' / 'research' / 'policy analyst' → air-policy-researcher-resume.md + " +
+          "air-policy-researcher-cover-letter.md\n" +
+          "  - 'data analyst' / 'data scientist' → ers-spend-application/ers-spend-senior-data-analyst-resume.md\n" +
+          "  - 'finance' / 'grants' / 'chief' / 'business services' → tnoys-finance-grants-resume.md " +
+          "+ tnoys-finance-grants-cover-letter.md\n" +
+          "  - 'research specialist' / 'social services' → dfps-research-specialist-v-resume.md + " +
+          "dfps-research-specialist-v-cover-letter.md\n" +
+          "  - 'school district' / 'district data' → spring-isd-application/spring-isd-research-data-director-resume.md\n" +
+          "Read at most 3 variant files total; pick whichever pair best matches the candidate set.\n\n" +
+          "PHASE 3 — DRAFT (loop, up to 3 candidates per tick to stay under the 15-min budget). " +
+          "For EACH candidate row from Phase 1 that needs a draft:\n\n" +
+          "  3a. Generate a tailored RESUME in markdown. Structure (preserve master-resume.md " +
+          "order):\n" +
+          "    # Kevin Hopper\n" +
+          "    Houston, TX | (972) 754-6406 | kevin.hopper1@gmail.com | linkedin.com/in/kevinmhopper\n" +
+          "    ## Professional Summary\n" +
+          "    <2-3 sentences tailored to THIS job's responsibilities>\n" +
+          "    ## Education\n" +
+          "    <bullet-point list from master>\n" +
+          "    ## Certifications & Credentials\n" +
+          "    <subset relevant to this job>\n" +
+          "    ## Professional Experience\n" +
+          "    <for each role in master, KEEP only bullets relevant to the JD; rewrite if needed " +
+          "to surface the strongest connection — but never invent experience>\n" +
+          "    ## Technical Skills\n" +
+          "    <subset relevant to JD>\n\n" +
+          "  3b. Generate a tailored COVER LETTER in markdown. Format:\n" +
+          "    # Cover Letter\n" +
+          "    [Date]\n\n" +
+          "    [Hiring Manager / Employer Name]\n" +
+          "    [Employer address line if known from JD, else omit]\n\n" +
+          "    Dear Hiring Manager,\n\n" +
+          "    <3-4 paragraphs: P1 expresses interest in role + concrete reason why; P2 cites " +
+          "one or two specific accomplishments from the resume that map to the JD; P3 ties " +
+          "user's larger education-policy/data-equity arc to employer's mission if applicable; " +
+          "P4 closes with thanks + availability>\n\n" +
+          "    Sincerely,\n\n" +
+          "    Kevin Hopper\n\n" +
+          "  3c. Compose the FULL document body as a single markdown string:\n" +
+          "    <resume markdown>\n\n---\n\n<cover letter markdown>\n\n" +
+          "  3d. Generate the conversation id and subject anchor from the candidate row id. Use " +
+          "the FIRST 8 characters of the candidate.id (hex) as a short slug. Examples:\n" +
+          "    conv_id = 'job-search:draft:' + slug\n" +
+          "    subject_anchor = '[JS-' + slug + ']'\n" +
+          "    doc_title = subject_anchor + ' ' + employer + ' — ' + title\n\n" +
+          "  3e. Call gdocs_create({folder_id: '1UeKCUpaslWfUqne3CihizwTf4s0THmjX', title: doc_title, " +
+          "content: <the full body from 3c>}). Capture data.doc_id and data.web_view_link from the " +
+          "response.\n\n" +
+          "  3f. Call bot_conversations_upsert ONCE with the full state — this single tool call " +
+          "BOTH creates the conversation AND links the job_candidate (atomic). Required args:\n" +
+          "    id: conv_id\n" +
+          "    bot_id: 'job-search'\n" +
+          "    user_email: 'kevin.hopper@maestro.press'\n" +
+          "    subject_anchor: subject_anchor\n" +
+          "    google_doc_id: data.doc_id\n" +
+          "    status: 'awaiting-user'\n" +
+          "    current_step: 'draft-created'\n" +
+          "    link_job_candidate_id: candidate.id  ← REQUIRED. Without this, the candidate " +
+          "will be re-drafted on the next tick and you will waste 5 min of compute.\n" +
+          "    payload: {job_candidate_id: candidate.id, employer, title, url: candidate.url, " +
+          "doc_web_view_link: data.web_view_link, drafted_at: <ISO timestamp>}\n\n" +
+          "  Per-candidate is ONLY 2 tool calls (gdocs_create + bot_conversations_upsert). " +
+          "Do not skip step 3f. After step 3f, advance to the next candidate.\n\n" +
+          "When the per-candidate loop completes (1, 2, or 3 candidates drafted, or zero if " +
+          "nothing was pending), you are done. The separate notifier pipeline handles the user " +
+          "digest email — you do NOT call gmail_create_draft.\n\n" +
+          "ABSOLUTE SAFETY: (a) Never invent experience or fabricate credentials. (b) Use only " +
+          "the contact info above and the experience already present in master-resume.md. (c) If " +
+          "gdocs_create fails, skip that candidate and continue with the next — do not retry the " +
+          "same doc twice. (d) Cap your output to 3 candidates per tick.",
+        tools: [
+          "job_candidates_query",
+          "bot_conversations_upsert",
+          "jobsearch_notes_list",
+          "jobsearch_notes_read",
+          "gdocs_create",
+        ],
+        maxTurns: 100,
+      },
+    ],
+  },
+
+  // Phase 8.4-A.5 (2026-05-12) — drafts notifier.
+  // Single-purpose: find newly-drafted conversations (status='awaiting-user',
+  // current_step='draft-created') and emit ONE Gmail draft digest, then patch
+  // each row to current_step='pending-review' with the new gmail_thread_id.
+  // Split out from the drafter because the drafter agent reliably skips the
+  // final email step.
+  "bot-job-search-notifier": {
+    description:
+      "Phase 8.4-A.5 Drafts Notifier. Composes a single Gmail digest naming all newly-drafted job-search application docs and advances each conversation to 'pending-review'. Single-agent, single-tool-call-per-step.",
+    categories: ["addons", "memory"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "drafts-notifier",
+        systemPrompt:
+          "You are the drafts-notifier for Phase 8.4-A.5. Your only job is to notify the user " +
+          "about newly-drafted job-search application docs and advance each conversation's " +
+          "state. You MUST invoke tools — do not merely describe what you would do.\n\n" +
+          "STEP 1. Call bot_conversations_list_by_status EXACTLY ONCE with bot_id='job-search', " +
+          "status='awaiting-user', current_step='draft-created', limit=10. These are the docs " +
+          "drafted since the last notifier run.\n\n" +
+          "If count is 0: output a single line 'No new drafts to notify' and stop. Do NOT call " +
+          "any other tools.\n\n" +
+          "STEP 2. Compose ONE markdown digest. For each conversation, pull employer + title + " +
+          "doc_web_view_link + url from the row's payload (already parsed for you). Template:\n" +
+          "  # New Job-Search Drafts (<count>)\n\n" +
+          "  Drafts are ready for review in your 'Job Search Drafts' folder. Reply 'looks good " +
+          "— apply <number>' to mark a draft as ready to submit, or open the doc and comment " +
+          "directly to request edits.\n\n" +
+          "  ## 1. <Employer> — <Title>\n" +
+          "  - [Open draft](<doc_web_view_link>)\n" +
+          "  - Posting: <url>\n\n" +
+          "  ## 2. <Employer> — <Title>\n  ... (repeat per row, numbered)\n\n" +
+          "STEP 3. Call gmail_create_draft EXACTLY ONCE with:\n" +
+          "  to: 'kevin.hopper@maestro.press'\n" +
+          "  subject: 'Job-Search Drafts ready — <count> documents'\n" +
+          "  body: <the markdown above>\n" +
+          "Capture data.thread_id (or data.threadId — whichever Gmail returns) from the response.\n\n" +
+          "STEP 4. For EACH conversation from STEP 1, call bot_conversations_patch with:\n" +
+          "  id: <conversation.id>\n" +
+          "  gmail_thread_id: <thread id from STEP 3>\n" +
+          "  current_step: 'pending-review'\n" +
+          "  next_action_at: null\n" +
+          "Status stays 'awaiting-user'. This advances each row in the state machine so it won't " +
+          "appear in the next notifier run.\n\n" +
+          "Total tool calls: 1 (list) + 1 (gmail_create_draft) + N (patch, one per row). For N=3 " +
+          "that's 5 calls. Stay under 25 turns.\n\n" +
+          "ABSOLUTE SAFETY: (a) gmail_create_draft is the only delivery tool — never gmail_send. " +
+          "(b) Exactly ONE gmail draft per run. (c) Do not modify any other fields on the rows; " +
+          "the patch must touch only gmail_thread_id + current_step + next_action_at.",
+        tools: [
+          "bot_conversations_list_by_status",
+          "bot_conversations_patch",
+          "gmail_create_draft",
+        ],
+        maxTurns: 25,
+      },
+    ],
+  },
 };
