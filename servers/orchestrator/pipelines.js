@@ -722,4 +722,33 @@ export const pipelines = {
     storeResult: false,
     resultCategory: null,
   },
+
+  // Phase 8.2 (2026-05-12) — weekly digest tick. SCAFFOLDING ONLY.
+  // The goal text below is a placeholder; the scout + digest-writer agents
+  // it references do not yet have SQL tooling (see bot-job-search preset).
+  // The bot_registry row for job-search is enabled=0 until Phase 8.3 lands
+  // the job-search MCP bundle. This pipeline is registered so the framework
+  // can resolve the schedule, but no schedule row points at it yet.
+  "bot:job-search:tick": {
+    name: "Bot: job-search weekly tick",
+    description:
+      "Phase 8 Job Search Bot weekly digest. Runs scout (scores job_candidates against bot_preferences) then digest-writer (composes Mon-morning Gmail draft). Tier-1: drafts only, no sends. Pathway A (ed-jobs ingest) populates job_candidates continuously via mpa-edjobs-sync.timer; this tick is the LLM-driven scoring + delivery step.",
+    goal:
+      "STEP 1 — Scout pass. Read job_candidates rows with status='new' from MPA's crow.db, " +
+      "join against bot_preferences for the user, and assign match_score (0-1) plus match_notes " +
+      "to each. Mark the top 25 as status='shown-to-user'; mark the rest as status='filtered'.\n\n" +
+      "STEP 2 — Digest. Read the 25 shown-to-user rows, group into three tiers (high-confidence " +
+      "= match_score >= 0.75, interesting = 0.5-0.74, longshots = below 0.5 if user explicitly " +
+      "asked for them), and call gmail_create_draft once with a single weekly digest message " +
+      "to kevin.hopper@maestro.press. Subject: 'Job-search digest — week of <Monday date>'. " +
+      "Body: markdown sections per tier, one line per role.\n\n" +
+      "ABSOLUTE RULES: (a) gmail_create_draft is the only delivery tool; never send. (b) Mark " +
+      "every row you used with shown_in_digest_id = <this tick's bot_runs.run_id>. (c) Never " +
+      "re-pick a candidate that already has status='applied' or appears in bot_preferences " +
+      "applied_already.",
+    preset: "bot-job-search",
+    defaultCron: "0 7 * * MON",
+    storeResult: false,
+    resultCategory: null,
+  },
 };

@@ -540,4 +540,53 @@ export const presets = {
       },
     ],
   },
+
+  // Phase 8.2 (2026-05-12) — job-search bot. Status: SCAFFOLDING ONLY.
+  // The two agents below have placeholder tool whitelists. There is no
+  // SQL-against-MPA-crow.db tool available yet (none of the four current
+  // addons — tasks, google-workspace, brave-search, texas-gov-data —
+  // exposes one). Until a job-search MCP bundle is added in a follow-up
+  // session, the scout agent cannot read job_candidates / bot_preferences,
+  // so the registry row is enabled=0 to prevent the weekly tick from
+  // firing with broken tooling. The pipeline goal text is also a stub.
+  "bot-job-search": {
+    description:
+      "Phase 8 Job Search Bot. Multi-channel ingestion (ed-jobs scraper, Gmail alerts, direct site scrapes) feeds job_candidates; scout scores candidates against bot_preferences; digest-writer composes weekly email. Tier-1 safety: drafts only.",
+    categories: ["addons", "memory"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "scout",
+        systemPrompt:
+          "You are the scout agent for the job-search bot. Your job is to read job_candidates " +
+          "with status='new', score each against the user's criteria stored in bot_preferences " +
+          "(salary floor/target, geo, role focus, applied_already exclusions), and update each " +
+          "row with match_score (0-1), match_notes (one-paragraph rationale), and status " +
+          "('filtered' for low scores, 'shown-to-user' for top-N). Tier-0 safety: never mutate " +
+          "any other column; never touch application_id or shown_in_digest_id; never INSERT.",
+        tools: [
+          // TODO Phase 8.3: replace with the job-search MCP bundle's SQL tools
+          // (job_candidates_query, job_candidates_score). Until then this agent
+          // has no functional tools — bot_registry.enabled=0 prevents firing.
+        ],
+        maxTurns: 12,
+      },
+      {
+        name: "digest-writer",
+        systemPrompt:
+          "You are the digest-writer agent for the job-search bot. Read the top-N scout-scored " +
+          "candidates from job_candidates (status='shown-to-user'), group them by tier (high " +
+          "confidence, interesting, longshots), and draft a single Gmail message to " +
+          "kevin.hopper@maestro.press with a scannable digest. Format: markdown-style sections " +
+          "with one line per candidate (Employer — Title — Location — match score — short " +
+          "rationale — apply URL). Tier-1 safety: only gmail_create_draft (never send); only " +
+          "one draft per tick.",
+        tools: [
+          "gmail_create_draft",
+          // TODO Phase 8.3: + job_candidates_top tool for fetching the scored list.
+        ],
+        maxTurns: 8,
+      },
+    ],
+  },
 };
