@@ -892,7 +892,7 @@ export async function runOrchestrationStandalone(goal, presetName, options = {})
       const agentResult = await Promise.race([
         orchestrator.runAgent(single, goal),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("Pipeline timed out after 5 minutes")), 300000)
+          setTimeout(() => reject(new Error("Pipeline timed out after 15 minutes")), 900000)
         ),
       ]);
       runResult = {
@@ -911,7 +911,7 @@ export async function runOrchestrationStandalone(goal, presetName, options = {})
       const teamResult = await Promise.race([
         orchestrator.runTeam(team, goal),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("Pipeline timed out after 5 minutes")), 300000)
+          setTimeout(() => reject(new Error("Pipeline timed out after 15 minutes")), 900000)
         ),
       ]);
       const coordinatorResult = teamResult.agentResults.get("coordinator");
