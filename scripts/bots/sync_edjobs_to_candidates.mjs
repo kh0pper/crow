@@ -169,6 +169,21 @@ function isRemote(r) {
   return 0;
 }
 
+// K-12 noise titles the scout would reject anyway. Mirrors the scout agent's
+// title_excludes list in presets.js bot-job-search systemPrompt. Skip-on-insert
+// reduces the 'new' backlog so each tick scores fresher rows. If the agent's
+// exclude list changes, update this list to match.
+const TITLE_EXCLUDES = [
+  "teacher", "paraprofessional", "coach", "bus driver", "cafeteria",
+  "janitor", "custodian", "maintenance", "aide", "secretary",
+  "clerk", "substitute", "nurse", "food service", "cook", "librarian",
+];
+
+function isNoise(title) {
+  const t = (title || "").toLowerCase();
+  return TITLE_EXCLUDES.some((kw) => t.includes(kw));
+}
+
 function main() {
   console.error(`[sync-edjobs] starting at ${new Date().toISOString()}`);
 
@@ -211,8 +226,14 @@ function main() {
 
   const before = db.prepare("SELECT COUNT(*) AS c FROM job_candidates WHERE source = 'ed-jobs-scraper'").get().c;
 
+  let filtered = 0;
+
   const tx = db.transaction((batch) => {
     for (const r of batch) {
+      if (isNoise(r.title)) {
+        filtered++;
+        continue;
+      }
       const id = candidateId(r.employer, r.title, r.url);
       const payload = {
         platform: r.platform,
@@ -254,8 +275,8 @@ function main() {
 
   const after = db.prepare("SELECT COUNT(*) AS c FROM job_candidates WHERE source = 'ed-jobs-scraper'").get().c;
   const inserted = after - before;
-  const updated = rows.length - inserted;
-  console.error(`[sync-edjobs] done: ${inserted} new, ${updated} updated, ${after} total ed-jobs candidates`);
+  const updated = rows.length - inserted - filtered;
+  console.error(`[sync-edjobs] done: ${inserted} new, ${updated} updated, ${filtered} filtered (noise), ${after} total ed-jobs candidates`);
 
   db.close();
 }
