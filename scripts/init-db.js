@@ -1658,5 +1658,70 @@ await initTable("bot_runs table", `
 `);
 
 
+
+// --- Phase 8 job-search bot tables (2026-05-12) ---
+// job_candidates: dedup'd normalized job postings from all three ingestion
+//   pathways (ed-jobs-scraper, gmail, direct site scrapes). The id is
+//   sha256(normalize(employer) + '|' + normalize(title) + '|' + normalize(url)).
+// job_search_sites: registry of direct-scrape source pages (Tier 1/2/3),
+//   their scrape strategy, and last-run health. Auto-disables after 3
+//   consecutive errors (handled by the ingest-sites pipeline).
+
+await initTable("job_candidates table", `
+  CREATE TABLE IF NOT EXISTS job_candidates (
+    id              TEXT PRIMARY KEY,
+    source          TEXT NOT NULL,
+    source_ref      TEXT,
+    employer        TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    url             TEXT NOT NULL,
+    location        TEXT,
+    remote          INTEGER,
+    salary_min      INTEGER,
+    salary_max      INTEGER,
+    posted_at       TEXT,
+    description     TEXT,
+    raw_payload     TEXT,
+    status          TEXT NOT NULL DEFAULT 'new',
+    match_score     REAL,
+    match_notes     TEXT,
+    shown_in_digest_id TEXT,
+    application_id  TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_job_cand_status_score
+    ON job_candidates(status, match_score DESC);
+
+  CREATE INDEX IF NOT EXISTS idx_job_cand_employer
+    ON job_candidates(employer);
+
+  CREATE INDEX IF NOT EXISTS idx_job_cand_source
+    ON job_candidates(source, created_at DESC);
+`);
+
+await initTable("job_search_sites table", `
+  CREATE TABLE IF NOT EXISTS job_search_sites (
+    id              TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    source_type     TEXT NOT NULL,
+    url             TEXT NOT NULL,
+    scrape_strategy TEXT NOT NULL,
+    tier            INTEGER NOT NULL,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    last_run_at     TEXT,
+    last_status     TEXT,
+    consecutive_errors INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_job_sites_tier_enabled
+    ON job_search_sites(tier, enabled);
+`);
+
+
+
 console.log("Database initialized successfully (local file)");
 db.close();
