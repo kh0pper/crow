@@ -541,51 +541,79 @@ export const presets = {
     ],
   },
 
-  // Phase 8.2 (2026-05-12) — job-search bot. Status: SCAFFOLDING ONLY.
-  // The two agents below have placeholder tool whitelists. There is no
-  // SQL-against-MPA-crow.db tool available yet (none of the four current
-  // addons — tasks, google-workspace, brave-search, texas-gov-data —
-  // exposes one). Until a job-search MCP bundle is added in a follow-up
-  // session, the scout agent cannot read job_candidates / bot_preferences,
-  // so the registry row is enabled=0 to prevent the weekly tick from
-  // firing with broken tooling. The pipeline goal text is also a stub.
+  // Phase 8.3 (2026-05-12) — job-search bot. Single-agent preset following
+  // bot-echo's pattern: the multi-agent coordinator-dispatch path hangs on
+  // this stack (see preset bot-mpa-mail-worker line 188 comment). One worker
+  // does scout-style scoring + digest composition in a single conversation.
+  // Bundles used: bots-sql-mcp (job_candidates_*, bot_preferences_get) and
+  // google-workspace (gmail_create_draft). Status enum values 'shortlisted'
+  // / 'rejected' / 'applied' must stay in sync with bots-sql-mcp's
+  // SCORE_UPDATE_STATUSES set.
   "bot-job-search": {
     description:
-      "Phase 8 Job Search Bot. Multi-channel ingestion (ed-jobs scraper, Gmail alerts, direct site scrapes) feeds job_candidates; scout scores candidates against bot_preferences; digest-writer composes weekly email. Tier-1 safety: drafts only.",
+      "Phase 8 Job Search Bot. Pathway A ingests ed-jobs postings into job_candidates nightly; this worker scores fresh rows against bot_preferences (geo, role focus, salary floor, applied_already) and drafts a weekly Gmail digest. Single-agent preset, Tier-1 safety: drafts only, single email per tick.",
     categories: ["addons", "memory"],
     provider: "crow-chat",
     agents: [
       {
-        name: "scout",
+        name: "job-search-worker",
         systemPrompt:
-          "You are the scout agent for the job-search bot. Your job is to read job_candidates " +
-          "with status='new', score each against the user's criteria stored in bot_preferences " +
-          "(salary floor/target, geo, role focus, applied_already exclusions), and update each " +
-          "row with match_score (0-1), match_notes (one-paragraph rationale), and status " +
-          "('filtered' for low scores, 'shown-to-user' for top-N). Tier-0 safety: never mutate " +
-          "any other column; never touch application_id or shown_in_digest_id; never INSERT.",
+          "You are the job-search worker for Phase 8. You score fresh job_candidates rows against " +
+          "the user's stored preferences and then draft a weekly digest email. You MUST invoke " +
+          "tools — do not merely describe what you would do.\n\n" +
+          "PHASE 1 — PREFERENCES. Call bot_preferences_get({bot_id:'job-search', " +
+          "user_email:'kevin.hopper@maestro.press'}) ONCE. The returned `prefs` map has:\n" +
+          "  - salary_floor / salary_target_min / salary_target_max (string ints)\n" +
+          "  - geo_primary='Houston, TX', geo_secondary='US Remote', geo_tertiary='Austin / DFW'\n" +
+          "  - role_focus: free-text list of preferred role areas\n" +
+          "  - applied_already: ARRAY of {employer, role, ...} — never recommend these\n" +
+          "  - inflight_planned: ARRAY of role names already on the user's radar — score higher\n" +
+          "  - avoid_aisd_admins='1': drop AISD-administration roles\n\n" +
+          "PHASE 2 — SCORE ONE BATCH (no loop). Call job_candidates_query EXACTLY ONCE with " +
+          "status='new', limit=10, and title_excludes=['teacher','paraprofessional','coach'," +
+          "'bus driver','cafeteria','janitor','custodian','maintenance','aide','secretary'," +
+          "'clerk','substitute','nurse','food service','cook','librarian']. CRITICAL: do NOT " +
+          "call job_candidates_query with status='new' a second time. After this single batch, " +
+          "you immediately move to Phase 3 — additional batches would burn the 15-minute budget.\n\n" +
+          "For each row in that single response, score on a 0.0-1.0 scale:\n" +
+          "  - Role fit (0-0.5): title/employer matches role_focus? Education research, policy " +
+          "analysis, data analysis, school finance, journalism, grants/finance for nonprofits → " +
+          "high. K-12 admin / support → low.\n" +
+          "  - Geo fit (0-0.3): Houston > Austin/DFW > remote > other TX > other US.\n" +
+          "  - Salary (0-0.1): salary_min/max is NULL for ~all Pathway-A rows; do NOT penalize " +
+          "nulls. Award the bonus only when a non-null salary clears salary_floor.\n" +
+          "  - inflight_planned bonus: +0.1 if role matches.\n" +
+          "  - applied_already: if employer+role appears, call job_candidates_score_update with " +
+          "status='applied' and match_notes='already applied'. Don't set match_score.\n" +
+          "  - AISD admin: AUSTIN ISD + principal/director/superintendent/administrator title → " +
+          "status='rejected' with explanatory note.\n\n" +
+          "For every other row, call job_candidates_score_update({id, match_score, match_notes, " +
+          "status}) where status='shortlisted' if score >= 0.55 else 'rejected'. match_notes is " +
+          "1-2 sentences (≤280 chars) stating the dominant factor.\n\n" +
+          "PHASE 3 — DRAFT THE DIGEST. Call job_candidates_query with status='shortlisted', " +
+          "limit=20. Compose ONE markdown email body:\n\n" +
+          "  # Job-Search Digest — <today's Monday date>\n" +
+          "  Scored N new postings this week; X shortlisted.\n\n" +
+          "  ## High-confidence (score ≥ 0.75)\n" +
+          "  - **<Employer>** — <Title> — <Location> — score X.XX — <short rationale> — " +
+          "[apply](<url>)\n\n" +
+          "  ## Worth a closer look (0.55 ≤ score < 0.75)\n" +
+          "  - <same row format>\n\n" +
+          "  ## Longshots\n" +
+          "  - <any remaining shortlisted rows>\n\n" +
+          "Then call gmail_create_draft EXACTLY ONCE with to='kevin.hopper@maestro.press', " +
+          "subject='Job-Search Digest — <Monday date>', body=<the markdown above>. If the " +
+          "shortlist is empty, draft a single-line email confirming the run still happened.\n\n" +
+          "ABSOLUTE SAFETY RULES: (a) gmail_create_draft is the only delivery tool — never " +
+          "gmail_send, never label, never delete. (b) Exactly ONE draft per tick. (c) Never " +
+          "INSERT into job_candidates; the bundle whitelists which columns you can mutate.",
         tools: [
-          // TODO Phase 8.3: replace with the job-search MCP bundle's SQL tools
-          // (job_candidates_query, job_candidates_score). Until then this agent
-          // has no functional tools — bot_registry.enabled=0 prevents firing.
-        ],
-        maxTurns: 12,
-      },
-      {
-        name: "digest-writer",
-        systemPrompt:
-          "You are the digest-writer agent for the job-search bot. Read the top-N scout-scored " +
-          "candidates from job_candidates (status='shown-to-user'), group them by tier (high " +
-          "confidence, interesting, longshots), and draft a single Gmail message to " +
-          "kevin.hopper@maestro.press with a scannable digest. Format: markdown-style sections " +
-          "with one line per candidate (Employer — Title — Location — match score — short " +
-          "rationale — apply URL). Tier-1 safety: only gmail_create_draft (never send); only " +
-          "one draft per tick.",
-        tools: [
+          "bot_preferences_get",
+          "job_candidates_query",
+          "job_candidates_score_update",
           "gmail_create_draft",
-          // TODO Phase 8.3: + job_candidates_top tool for fetching the scored list.
         ],
-        maxTurns: 8,
+        maxTurns: 60,
       },
     ],
   },

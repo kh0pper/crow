@@ -723,29 +723,34 @@ export const pipelines = {
     resultCategory: null,
   },
 
-  // Phase 8.2 (2026-05-12) — weekly digest tick. SCAFFOLDING ONLY.
-  // The goal text below is a placeholder; the scout + digest-writer agents
-  // it references do not yet have SQL tooling (see bot-job-search preset).
-  // The bot_registry row for job-search is enabled=0 until Phase 8.3 lands
-  // the job-search MCP bundle. This pipeline is registered so the framework
-  // can resolve the schedule, but no schedule row points at it yet.
+  // Phase 8.3 (2026-05-12) — weekly digest tick.
+  // bots-sql-mcp now exposes job_candidates_query / job_candidates_score_update
+  // / bot_preferences_get; the preset's scout + digest-writer agents reference
+  // those tools directly. Enabling this pipeline requires bot_registry.enabled=1
+  // for 'job-search' AND a row in `schedules` pointing at 'pipeline:bot:job-search:tick'
+  // with cron '0 7 * * MON'.
   "bot:job-search:tick": {
     name: "Bot: job-search weekly tick",
     description:
       "Phase 8 Job Search Bot weekly digest. Runs scout (scores job_candidates against bot_preferences) then digest-writer (composes Mon-morning Gmail draft). Tier-1: drafts only, no sends. Pathway A (ed-jobs ingest) populates job_candidates continuously via mpa-edjobs-sync.timer; this tick is the LLM-driven scoring + delivery step.",
     goal:
-      "STEP 1 — Scout pass. Read job_candidates rows with status='new' from MPA's crow.db, " +
-      "join against bot_preferences for the user, and assign match_score (0-1) plus match_notes " +
-      "to each. Mark the top 25 as status='shown-to-user'; mark the rest as status='filtered'.\n\n" +
-      "STEP 2 — Digest. Read the 25 shown-to-user rows, group into three tiers (high-confidence " +
-      "= match_score >= 0.75, interesting = 0.5-0.74, longshots = below 0.5 if user explicitly " +
-      "asked for them), and call gmail_create_draft once with a single weekly digest message " +
-      "to kevin.hopper@maestro.press. Subject: 'Job-search digest — week of <Monday date>'. " +
-      "Body: markdown sections per tier, one line per role.\n\n" +
-      "ABSOLUTE RULES: (a) gmail_create_draft is the only delivery tool; never send. (b) Mark " +
-      "every row you used with shown_in_digest_id = <this tick's bot_runs.run_id>. (c) Never " +
-      "re-pick a candidate that already has status='applied' or appears in bot_preferences " +
-      "applied_already.",
+      "Single-agent weekly job-search digest. The job-search-worker agent does scoring + " +
+      "digest composition in one conversation (multi-agent coordinator-dispatch hangs; see " +
+      "presets.js comment).\n\n" +
+      "STEP 1 — score the batch. Read bot_preferences once, then job_candidates_query for a " +
+      "small batch of status='new' rows (limit set in the agent's prompt; small while we " +
+      "iterate, will grow once timing is trusted). Apply the rubric in the agent's prompt and " +
+      "call job_candidates_score_update on each row, transitioning to 'shortlisted' or " +
+      "'rejected' (or 'applied' for already-applied roles).\n\n" +
+      "STEP 2 — draft the digest. Pull the shortlist via job_candidates_query({status:'shortlisted'}), " +
+      "compose ONE markdown digest grouped into three tiers (≥0.75 / 0.55-0.74 / longshots), " +
+      "and call gmail_create_draft exactly once to kevin.hopper@maestro.press with subject " +
+      "'Job-Search Digest — <Monday date>'.\n\n" +
+      "ABSOLUTE RULES: (a) gmail_create_draft is the only delivery tool — never gmail_send. " +
+      "(b) Never re-pick a row whose employer+role appears in bot_preferences.applied_already; " +
+      "the agent marks those as 'applied' on first sight. (c) Always emit exactly one draft " +
+      "per tick even when the shortlist is empty (a one-line 'no shortlisted candidates this " +
+      "week' email is acceptable).",
     preset: "bot-job-search",
     defaultCron: "0 7 * * MON",
     storeResult: false,
