@@ -801,4 +801,27 @@ export const pipelines = {
     storeResult: false,
     resultCategory: null,
   },
+
+  // Phase 8.4-B (2026-05-12) — reply reader.
+  // Scans user replies on draft-digest threads every 15 min. Advances
+  // conversations to status='applied' (ready-to-submit) or 'archived'
+  // (user-rejected). Idempotent via last_user_msg_at watermark.
+  "bot:job-search:process-replies": {
+    name: "Bot: job-search reply reader (Phase 8.4-B)",
+    description:
+      "Phase 8.4-B reply reader. Polls user replies on draft-digest threads, parses apply/skip/looks-good actions, and advances bot_conversations rows. Idempotent: skips messages older than last_user_msg_at.",
+    goal:
+      "Run the reply-reader agent. It will: (1) list bot_conversations at status='awaiting-user' " +
+      "and current_step='pending-review', (2) group by gmail_thread_id, (3) for each thread " +
+      "fetch messages and parse user actions (apply/skip/looks-good with numbers or employer " +
+      "names), (4) patch each matched conversation to status='applied' or 'archived', and (5) " +
+      "for skipped rows, also clear job_candidates.application_id so the candidate is eligible " +
+      "for re-shortlisting.\n\n" +
+      "ABSOLUTE RULES: Read-only on Gmail (no draft, no send). Only write conversation state and " +
+      "(on skip) clear application_id. Idempotent — safe to run every 15 min.",
+    preset: "bot-job-search-replyreader",
+    defaultCron: "*/15 * * * *",
+    storeResult: false,
+    resultCategory: null,
+  },
 };
