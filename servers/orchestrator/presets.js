@@ -570,7 +570,7 @@ export const presets = {
           "  - inflight_planned: ARRAY of role names already on the user's radar — score higher\n" +
           "  - avoid_aisd_admins='1': drop AISD-administration roles\n\n" +
           "PHASE 2 — SCORE ONE BATCH (no loop). Call job_candidates_query EXACTLY ONCE with " +
-          "status='new', limit=10, and title_excludes=['teacher','paraprofessional','coach'," +
+          "status='new', limit=20, and title_excludes=['teacher','paraprofessional','coach'," +
           "'bus driver','cafeteria','janitor','custodian','maintenance','aide','secretary'," +
           "'clerk','substitute','nurse','food service','cook','librarian']. CRITICAL: do NOT " +
           "call job_candidates_query with status='new' a second time. After this single batch, " +
