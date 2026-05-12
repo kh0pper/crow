@@ -15,7 +15,7 @@
     "route": "/dashboard/data-dashboard",
     "navOrder": 16
   },
-  "skills": ["skills/data-dashboard.md", "skills/data-scraping.md"],
+  "skills": ["skills/data-dashboard.md", "skills/data-scraping.md", "skills/capstone-research-workflow.md"],
   "server": {
     "command": "node",
     "args": ["server/index.js"],
