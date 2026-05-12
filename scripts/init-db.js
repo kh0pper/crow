@@ -1577,5 +1577,86 @@ try {
   console.warn("Theme migration skipped:", err.message);
 }
 
+
+// --- Bot framework tables (Phase 7.2 + 7.4 + 7.5 + 7.6) ---
+// 2026-05-12: state surface for the bot framework that lives inside the
+// MPA orchestrator. bot_conversations holds per-conversation state-machine
+// rows; bot_registry is the single source of truth for what bots exist;
+// bot_preferences is per-user-per-bot config; bot_runs is the audit trail.
+// All four tables are MPA-scoped — primary instances on grackle/crow will
+// also create them (IF NOT EXISTS), but only MPA's gateway will populate them.
+
+await initTable("bot_conversations table", `
+  CREATE TABLE IF NOT EXISTS bot_conversations (
+    id              TEXT PRIMARY KEY,
+    bot_id          TEXT NOT NULL,
+    user_email      TEXT NOT NULL,
+    subject_anchor  TEXT NOT NULL,
+    gmail_thread_id TEXT,
+    gmail_label     TEXT,
+    google_doc_id   TEXT,
+    status          TEXT NOT NULL,
+    current_step    TEXT NOT NULL,
+    payload         TEXT NOT NULL,
+    last_user_msg_at TEXT,
+    next_action_at  TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_bot_conv_next_action
+    ON bot_conversations(bot_id, next_action_at)
+    WHERE status IN ('pending','awaiting-user','drafting');
+
+  CREATE INDEX IF NOT EXISTS idx_bot_conv_thread
+    ON bot_conversations(gmail_thread_id);
+`);
+
+await initTable("bot_registry table", `
+  CREATE TABLE IF NOT EXISTS bot_registry (
+    bot_id          TEXT PRIMARY KEY,
+    display_name    TEXT NOT NULL,
+    description     TEXT,
+    email_alias     TEXT NOT NULL,
+    gmail_label     TEXT NOT NULL,
+    tick_cron       TEXT NOT NULL,
+    preset_name     TEXT NOT NULL,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+`);
+
+await initTable("bot_preferences table", `
+  CREATE TABLE IF NOT EXISTS bot_preferences (
+    bot_id      TEXT NOT NULL,
+    user_email  TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (bot_id, user_email, key)
+  );
+`);
+
+await initTable("bot_runs table", `
+  CREATE TABLE IF NOT EXISTS bot_runs (
+    run_id          TEXT PRIMARY KEY,
+    bot_id          TEXT NOT NULL,
+    conversation_id TEXT,
+    started_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    ended_at        TEXT,
+    status          TEXT NOT NULL,
+    error           TEXT,
+    tokens_used     INTEGER,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_bot_runs_bot
+    ON bot_runs(bot_id, started_at DESC);
+
+  CREATE INDEX IF NOT EXISTS idx_bot_runs_conv
+    ON bot_runs(conversation_id);
+`);
+
+
 console.log("Database initialized successfully (local file)");
 db.close();

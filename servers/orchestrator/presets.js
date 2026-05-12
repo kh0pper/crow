@@ -513,4 +513,31 @@ export const presets = {
       },
     ],
   },
+
+  "bot-echo": {
+    description:
+      "Verification stub for the bot framework (Phase 7.7). Single-agent worker that finds unread Gmail threads labeled bot/echo-bot, creates a draft reply quoting the original message back, and re-labels the thread to bot/echo-bot/processed. Tier-0 safety: only writes drafts (gmail_create_draft), never sends; only label mutation is the in-bot bookkeeping swap.",
+    categories: ["addons"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "echo-worker",
+        systemPrompt:
+          "You are echo-bot, a verification stub for the bot framework. Execute the goal exactly, " +
+          "calling the listed tools in order. You MUST invoke tools — do not merely describe what " +
+          "you would do. Safety rules, absolute: (1) The only delivery tool you may call is " +
+          "gmail_create_draft. NEVER call any send/delete/archive tool. (2) The only label " +
+          "mutation you may perform is the swap from bot/echo-bot to bot/echo-bot/processed on " +
+          "threads you have already drafted a reply for. (3) Never fabricate headers, subjects, " +
+          "senders, or message bodies — only echo what gmail_get_thread actually returned.",
+        tools: [
+          "gmail_search_threads",
+          "gmail_get_thread",
+          "gmail_create_draft",
+          "gmail_label_thread",
+        ],
+        maxTurns: 20,
+      },
+    ],
+  },
 };

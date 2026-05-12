@@ -12,12 +12,15 @@
  * schedules; this runner only triggers execution for pipeline: entries.
  */
 
+import crypto from "node:crypto";
 import { CronExpressionParser } from "cron-parser";
 import { pipelines } from "./pipelines.js";
 import { substituteGoalPlaceholders, substituteGoalPlaceholdersAsync } from "./pipeline-vars.js";
 
 const POLL_INTERVAL_MS = 60 * 1000; // Check every 60 seconds
 const PIPELINE_PREFIX = "pipeline:";
+// Phase 7.7: pipelines named bot:<bot_id>:<phase> also log to bot_runs.
+const BOT_PIPELINE_RE = /^bot:([^:]+):/;
 
 let timer = null;
 let db = null;
@@ -146,6 +149,24 @@ async function recordPipelineRun({ pipelineName, scheduleId, status, errorMessag
   }
 }
 
+async function recordBotRun({ pipelineName, status, errorMessage, startedAt }) {
+  if (!db) return;
+  const m = pipelineName.match(BOT_PIPELINE_RE);
+  if (!m) return;
+  const botId = m[1];
+  try {
+    await db.execute({
+      sql: `INSERT INTO bot_runs
+            (run_id, bot_id, status, error, started_at, ended_at)
+            VALUES (?, ?, ?, ?, ?, datetime('now'))`,
+      args: [crypto.randomUUID(), botId, status, errorMessage ?? null, startedAt],
+    });
+  } catch (err) {
+    // bot_runs may not exist on non-MPA Crow installs; log once and move on.
+    console.warn("[pipeline-runner] bot_runs insert failed:", err.message);
+  }
+}
+
 /**
  * Execute a single pipeline: run orchestration and optionally store results.
  */
@@ -171,6 +192,12 @@ async function executePipeline(scheduleId, pipelineName, pipeline) {
   await recordPipelineRun({
     pipelineName,
     scheduleId,
+    status: result.status,
+    errorMessage: result.status === "failed" ? (result.error || "unknown") : null,
+    startedAt,
+  });
+  await recordBotRun({
+    pipelineName,
     status: result.status,
     errorMessage: result.status === "failed" ? (result.error || "unknown") : null,
     startedAt,
