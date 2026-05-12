@@ -45,6 +45,13 @@ services:
       - "32768"
       - --parallel
       - "8"
+      # 500-word chunks hit ~650 tokens; raise the physical batch + ubatch
+      # so a single chunk fits in one forward pass. 4096 leaves headroom
+      # for occasional longer chunks without OOM at 0.6B params.
+      - -b
+      - "4096"
+      - -ub
+      - "4096"
     restart: unless-stopped
     ipc: host
     shm_size: 2g
