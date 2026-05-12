@@ -128,7 +128,7 @@ export const pipelines = {
       "  body = <first 200 chars of ${NEW_SUMMARY}>\n" +
       "  type = \"scouting\"\n" +
       "  priority = \"normal\"\n" +
-      "  action_url = \"https://grackle.dachshund-chromatic.ts.net:8447/dashboard/tasks?view=all\"\n" +
+      "  action_url = \"https://crow.dachshund-chromatic.ts.net:8447/dashboard/tasks?view=all\"\n" +
       "Absolute URL points at MPA's own dashboard (port 8447) so clicks land where the " +
       "tasks live.\n\n" +
       "Then respond with one short line: ${NEW_COUNT} new CFP(s), total hits scanned. " +
@@ -659,6 +659,66 @@ export const pipelines = {
       "the prospectus rather than filling in a guess.",
     preset: "mpa-prospectus",
     defaultCron: "0 9 * * 1-5",
+    storeResult: false,
+    resultCategory: null,
+  },
+
+  "bot:echo-bot:tick": {
+    name: "Bot: echo-bot tick",
+    description:
+      "Phase 7.7 verification stub. Polls Gmail for unread bot/echo-bot threads, drafts an ECHO: reply that quotes the original message, and re-labels the thread to bot/echo-bot/processed. Tier-0 safety: drafts only, no sends.",
+    goal:
+      "Process unread bot/echo-bot Gmail threads by drafting an echo reply for each. The whole " +
+      "pipeline is ONE PASS — call gmail_search_threads exactly once at the start, iterate over " +
+      "its results once, then emit the final response and stop.\n\n" +
+      "STEP 1 — call gmail_search_threads ONCE with arguments:\n" +
+      "  query: label:bot/echo-bot is:unread -label:bot/echo-bot/processed\n" +
+      "  max_results: 5\n\n" +
+      "Capture the threads array from the response. Let DRAFTED start at 0. If the threads " +
+      "array is empty, skip to the FINAL RESPONSE step immediately — do NOT call gmail_search_threads " +
+      "again, ever.\n\n" +
+      "STEP 2 — for EACH thread T in the threads array (process them in order, then move on; " +
+      "do not revisit a thread), perform exactly three tool calls:\n\n" +
+      "  2a. gmail_get_thread with:\n" +
+      "      thread_id: <the literal string from T.thread_id — pass the raw value, NEVER wrap " +
+      "      it in extra quotes>\n" +
+      "  From the response, extract the most recent message's Subject, From, and Date headers " +
+      "and its snippet.\n\n" +
+      "  2b. gmail_create_draft with:\n" +
+      "      to: <From header of the most recent message; if it is in the form \"Name <addr>\", " +
+      "      use only the addr part>\n" +
+      "      subject: if the original Subject already begins with \"ECHO:\" use it verbatim, " +
+      "      otherwise prepend \"ECHO: \" to it\n" +
+      "      body: a plain-text echo with this exact shape (literal text, including the leading " +
+      "      \"Echo-bot received your message.\" line and the \"--- Original snippet ---\" divider; " +
+      "      substitute the actual header values inline):\n" +
+      "        Echo-bot received your message.\n\n" +
+      "        Original subject: <Subject>\n" +
+      "        Original from: <From>\n" +
+      "        Original date: <Date>\n\n" +
+      "        --- Original snippet ---\n" +
+      "        <snippet>\n" +
+      "      thread_id: <the literal T.thread_id value, raw, no extra quotes>\n" +
+      "  If gmail_create_draft returns success: true, increment DRAFTED by 1.\n\n" +
+      "  2c. gmail_label_thread with:\n" +
+      "      thread_id: <the literal T.thread_id value, raw, no extra quotes>\n" +
+      "      add_labels: [\"bot/echo-bot/processed\"]\n" +
+      "      remove_labels: [\"bot/echo-bot\", \"UNREAD\"]\n\n" +
+      "FINAL RESPONSE — after STEP 2 has run once for every thread in the original search result " +
+      "(or immediately if the search returned zero threads), respond with EXACTLY one line and " +
+      "nothing else:\n" +
+      "  echo-bot drafted DRAFTED reply(ies)\n" +
+      "where DRAFTED is the literal counter value. Do not call any tool after emitting the final " +
+      "line.\n\n" +
+      "ABSOLUTE RULES:\n" +
+      "  (a) Call gmail_search_threads at most once per run — never re-search.\n" +
+      "  (b) Never call any send/forward/delete tool. The only delivery tool is gmail_create_draft.\n" +
+      "  (c) Never fabricate header values; only use what gmail_get_thread returned.\n" +
+      "  (d) When passing thread_id as a tool argument, pass the raw id string returned by the " +
+      "      search — do NOT wrap it in additional quote characters and do NOT pass the literal " +
+      "      string \"null\".",
+    preset: "bot-echo",
+    defaultCron: "*/5 * * * *",
     storeResult: false,
     resultCategory: null,
   },
