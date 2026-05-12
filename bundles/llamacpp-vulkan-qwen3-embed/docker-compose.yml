@@ -1,0 +1,56 @@
+services:
+  llamacpp-vulkan-qwen3-embed:
+    image: kyuz0/amd-strix-halo-toolboxes:rocm-7.2.1
+    container_name: llamacpp-vulkan-qwen3-embed
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "${VIDEO_GID}"
+      - "${RENDER_GID}"
+    env_file:
+      - ${HOME}/.crow/env/rocm.env
+    volumes:
+      - ${LLM_CACHE}:/models
+    ports:
+      - "${CROW_TAILSCALE_IP}:8004:8000"
+    entrypoint: ["llama-server"]
+    command:
+      # Qwen3-Embedding-0.6B Q8_0 GGUF (~640 MB).
+      # Pre-download once:
+      #   mkdir -p /home/kh0pp/llm/hf-cache/qwen3-embedding-0.6b/
+      #   curl -L \
+      #     -o /home/kh0pp/llm/hf-cache/qwen3-embedding-0.6b/Qwen3-Embedding-0.6B-Q8_0.gguf \
+      #     https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/main/Qwen3-Embedding-0.6B-Q8_0.gguf
+      - -m
+      - /models/qwen3-embedding-0.6b/Qwen3-Embedding-0.6B-Q8_0.gguf
+      - --alias
+      - qwen3-embedding-0.6b
+      - --embedding
+      - --pooling
+      - "mean"
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - -ngl
+      - "999"
+      - -fa
+      - "on"
+      - --no-mmap
+      # 0.6B encoder model with 32K context. We don't need a giant KV budget
+      # for embeddings (one forward pass, no decoded tokens), but allow plenty
+      # of concurrent embedding requests via --parallel for batch indexing.
+      - -c
+      - "32768"
+      - --parallel
+      - "8"
+    restart: unless-stopped
+    ipc: host
+    shm_size: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/v1/models >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
