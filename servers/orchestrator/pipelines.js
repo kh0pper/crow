@@ -847,4 +847,27 @@ export const pipelines = {
     storeResult: false,
     resultCategory: null,
   },
+
+  // Phase 8.4-D (2026-05-12) — finalizer.
+  // Emits a 'ready to submit' Gmail digest for each batch of approved-but-
+  // not-finalized conversations and advances state. PDF rendering deferred
+  // to 8.5; tracker file mutation (applications-2026-summer.md on grackle)
+  // deferred to 8.7. Idempotent via current_step='ready-to-submit' filter.
+  "bot:job-search:finalize": {
+    name: "Bot: job-search finalizer (Phase 8.4-D)",
+    description:
+      "Phase 8.4-D finalizer. Picks up bot_conversations at status='applied' AND current_step='ready-to-submit' (set by reply-parser). Emits one Gmail digest with a copy-paste tracker row per row, transitions each conversation to current_step='finalized', and sets job_candidates.status='applied'. Idempotent.",
+    goal:
+      "Run the application-finalizer agent. It will: (1) list bot_conversations ready to " +
+      "finalize, (2) emit a single 'Ready to submit' Gmail draft listing each application with " +
+      "a copy-paste tracker row, (3) patch each conversation to current_step='finalized' and " +
+      "set job_candidates.status='applied'. PDF rendering and grackle-side tracker append are " +
+      "out of scope (Phases 8.5 and 8.7 respectively).\n\n" +
+      "ABSOLUTE RULES: One Gmail draft per run. Never gmail_send. Atomic per-row " +
+      "(bot_conversations + job_candidates both updated).",
+    preset: "bot-job-search-finalizer",
+    defaultCron: "*/15 * * * *",
+    storeResult: false,
+    resultCategory: null,
+  },
 };
