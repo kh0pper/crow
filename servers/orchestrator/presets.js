@@ -1679,15 +1679,32 @@ export const presets = {
           "'send follow-up to <pir>' → call pir_get(pir_number=<pir>) to fetch full row. " +
           "Compose a polite follow-up email body (3-5 sentences) referencing the request's " +
           "filed_date, reference_number, and description head.\n" +
-          "    THEN find the original PIR thread in the user's PERSONAL inbox " +
-          "(kevin.hopper1@gmail.com — where canvas-companion sends PIRs from, so the " +
-          "responses also arrive there). Call gmail_search_threads_personal with:\n" +
-          "      query: '(to:<row.recipient_email> OR from:<row.recipient_email>) newer_than:120d'\n" +
-          "      max_results: 5\n" +
-          "    Pick the most recent thread (data.threads[0]). If no threads found, the PIR " +
-          "may have been filed via canvas-companion's portal-based form without leaving a " +
-          "Gmail thread — in that case omit thread_id from the next call (a new thread will " +
-          "be created in the user's inbox).\n" +
+          "    THEN find ALL related threads in the user's PERSONAL inbox " +
+          "(kevin.hopper1@gmail.com — where canvas-companion sends PIRs from, and where " +
+          "TEA / ISD / portal responses arrive). Many entities respond via portal systems " +
+          "(mycusthelp.net for FWISD/Dallas, govqa.us for Austin ISD, securerelease.us for " +
+          "ICE, etc.) which use DIFFERENT sender addresses than the original recipient_email " +
+          "AND open new threads per message. So the search must be broad enough to catch all " +
+          "related threads. Call gmail_search_threads_personal with:\n" +
+          "      query: build it as the OR of every available identifier on the row:\n" +
+          "        - if row.reference_number is set and non-empty: subject:\"<reference_number>\"\n" +
+          "        - subject:\"<pir_number>\" (always)\n" +
+          "        - (to:<row.recipient_email> OR from:<row.recipient_email>) (always)\n" +
+          "      Combine with OR and append newer_than:180d. Example for FWISD with " +
+          "reference_number='W012170-042726', pir_number='PENDING-FWISD-TAKEOVER-2026-04-25', " +
+          "recipient_email='openrecords@fwisd.org':\n" +
+          "        (subject:\"W012170-042726\" OR subject:\"PENDING-FWISD-TAKEOVER-2026-04-25\" " +
+          "OR to:openrecords@fwisd.org OR from:openrecords@fwisd.org) newer_than:180d\n" +
+          "      max_results: 10\n" +
+          "    From the returned threads, PICK THE MOST RECENT one by date (data.threads " +
+          "sorted desc by latest message). This is usually the live conversation point — " +
+          "if the entity sent a portal-system clarification, replying there keeps the " +
+          "conversation in context. SKIP any thread whose latest message is FROM the user " +
+          "(kevin.hopper1@gmail.com) — those are outbound-only threads with no entity " +
+          "response yet; reply on a thread that has an inbound entity message if available.\n" +
+          "    If no threads found, the PIR may have been filed via a portal-based form " +
+          "without leaving a Gmail thread — in that case omit thread_id from the next call " +
+          "(a new thread will be created in the user's inbox).\n" +
           "    Then call gmail_create_draft_personal (NOT gmail_create_draft, NOT " +
           "gmail_send_to_self — the recipient is TEA/ISD/AG and the draft must live in the " +
           "user's PERSONAL inbox so they can review + send without logging into the bot " +
