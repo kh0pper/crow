@@ -1737,6 +1737,19 @@ export const presets = {
           "'send follow-up to <pir>' → call pir_get(pir_number=<pir>) to fetch full row. " +
           "Compose a polite follow-up email body (3-5 sentences) referencing the request's " +
           "filed_date, reference_number, and description head.\n" +
+          "    CRITICAL — DO NOT FALSELY ACKNOWLEDGE RECEIPT. Before composing language like " +
+          "'thank you for releasing X' or 'thank you for the attached', VERIFY the user " +
+          "actually received the file. Check (a) row.status_notes for an inventory line " +
+          "like '[YYYY-MM-DD] received N attachments:', and (b) cross-reference the entity's " +
+          "claimed release against the actual attachments saved on disk at " +
+          "~/spring-2026/insd-5941/sources/pir-incoming/<pir_number>/. Many portal systems " +
+          "(mycusthelp.net, govqa.us, securerelease.us) say 'released' or 'enclosed' in the " +
+          "email body but deliver the file via portal login rather than email attachment — " +
+          "in those cases the file is NOT in the user's inbox. If you cannot confirm receipt, " +
+          "the draft should ASK the entity: 'I do not see X attached to your <date> email. " +
+          "Please confirm whether it was intended as an email attachment (and resend if so) " +
+          "or whether it has been released to the portal for retrieval; confirm the access " +
+          "path if the latter.'\n" +
           "    THEN find ALL related threads in the user's PERSONAL inbox " +
           "(kevin.hopper1@gmail.com — where canvas-companion sends PIRs from, and where " +
           "TEA / ISD / portal responses arrive). Many entities respond via portal systems " +
