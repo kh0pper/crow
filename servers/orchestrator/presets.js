@@ -1272,4 +1272,119 @@ export const presets = {
       },
     ],
   },
+
+  // Phase 8.6.B (2026-05-12) — Post-finalize completion ack.
+  // Watches for bot_conversations rows that have completed every step of the
+  // job-search pipeline (finalize + PDF render + ATS Q&A draft) and emits a
+  // single per-row acknowledgment Gmail draft to the user, threaded on the
+  // existing application thread. Idempotent via payload.ack_emailed_at.
+  // Status/current_step are NOT changed — this is purely a notification step.
+  "bot-job-search-ack-complete": {
+    description:
+      "Phase 8.6.B completion-acknowledgment drafter. For rows where the finalizer, the PDF render timer, and the ATS Q&A drafter have all stamped their idempotency tokens, emits a single Gmail digest summarizing the artifacts produced (tracker row, PDFs, ATS Q&A, source Doc) on the application's existing thread. Single-agent; idempotent via payload.ack_emailed_at.",
+    categories: ["addons", "memory"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "ack-complete",
+        systemPrompt:
+          "You are the completion-acknowledgment agent for Phase 8.6.B. For each job " +
+          "application where every downstream step has completed, you emit ONE Gmail " +
+          "draft summarizing what the bot has produced, threaded on the existing " +
+          "application conversation. You MUST invoke tools — do not merely describe " +
+          "what you would do.\n\n" +
+
+          "STEP 1. Call bot_conversations_list_by_status EXACTLY ONCE with bot_id='job-search', " +
+          "status='applied', current_step='finalized', limit=10. These rows have had the " +
+          "tracker row appended by the finalizer (current_step='finalized' is the canonical " +
+          "tracker-append-succeeded signal). You will then FILTER in-memory to only rows " +
+          "where ALL THREE of the following are true:\n" +
+          "  - row.payload.pdf_rendered_at is a non-empty string (PDF render systemd timer fired)\n" +
+          "  - row.payload.ats_qa_drafted_at is a non-empty string (platform-prep fired)\n" +
+          "  - row.payload.ack_emailed_at is NULL or missing (this ack not yet sent)\n\n" +
+
+          "If the filtered set is empty: output 'No applications pending completion-ack' and " +
+          "stop. Do NOT call any other tools.\n\n" +
+
+          "STEP 2. Compose ONE markdown digest covering all filtered rows. Use this template:\n\n" +
+          "  # ✓ Bot work complete — <count> application<plural>\n\n" +
+          "  Every step of the job-search bot's pipeline has finished for the application<plural> " +
+          "below. The tracker row<plural> have been appended, PDFs rendered and uploaded, and " +
+          "ATS-platform-specific Q&A drafted on the original Gmail thread<plural>. No further " +
+          "bot action is pending — the next move is yours when you're ready to submit on the " +
+          "platform.\n\n" +
+          "  ---\n\n" +
+          "  ## 1. <row.payload.employer> — <row.payload.title>\n\n" +
+          "  - **Posting:** <row.payload.url>\n" +
+          "  - **Source Doc (resume + cover letter):** <row.payload.doc_web_view_link>\n" +
+          "  - **Resume PDF:** <row.payload.pdf_resume_view_link>\n" +
+          "  - **Cover-letter PDF:** <row.payload.pdf_cover_view_link>\n" +
+          "  - **Tracker row appended:** ✓ (current_step=finalized)\n" +
+          "  - **PDFs rendered:** <row.payload.pdf_rendered_at>\n" +
+          "  - **ATS Q&A drafted:** <row.payload.ats_qa_drafted_at>" +
+          " (platform: <row.payload.ats_platform || 'detected'>)\n\n" +
+          "  See the existing thread on this conversation for the platform-specific Q&A " +
+          "draft. When you're ready to submit, copy the answers from there into the " +
+          "platform's application form.\n\n" +
+          "  ---\n\n" +
+          "  (repeat per filtered row, then end the digest)\n\n" +
+
+          "Composition rules:\n" +
+          "  - Use the row.payload fields verbatim — do not paraphrase URLs, timestamps, " +
+          "or employer/title strings.\n" +
+          "  - <plural> is empty if count=1 and 's' otherwise. Apply consistently in the " +
+          "header and the intro paragraph (e.g. '1 application' vs '3 applications').\n" +
+          "  - If any of pdf_resume_view_link / pdf_cover_view_link / doc_web_view_link is " +
+          "missing or empty for a row, replace its bullet line with '- **<label>:** (not " +
+          "available)' rather than emitting a broken link. Other fields are guaranteed " +
+          "present by the STEP 1 filter.\n" +
+          "  - Keep the digest concise; do NOT restate the Q&A or PDF contents — link " +
+          "to them instead.\n\n" +
+
+          "STEP 3. Call gmail_create_threaded_reply EXACTLY ONCE. This tool has four " +
+          "REQUIRED parameters; the schema enforces them, so the call will fail if " +
+          "thread_id is missing.\n" +
+          "  Parameters (all required):\n" +
+          "    to: 'kevin.hopper1@gmail.com'\n" +
+          "    subject: '✓ Bot work complete — <count> application<plural>'\n" +
+          "    body: <the markdown above>\n" +
+          "    thread_id: <the gmail_thread_id COLUMN of the first filtered row>\n\n" +
+          "Threading guidance: if all filtered rows share the same gmail_thread_id, use " +
+          "that one. If they have different thread_ids, use the FIRST row's " +
+          "gmail_thread_id — the digest naturally bundles them all so threading on one " +
+          "of the chains is acceptable. DO NOT call this tool once per row. Use " +
+          "row.gmail_thread_id (the COLUMN), not row.payload.gmail_thread_id (which " +
+          "does not exist).\n\n" +
+
+          "STEP 4. For EACH filtered row, call bot_conversations_patch with:\n" +
+          "  id: <conversation.id>\n" +
+          "  payload_merge: true   ← critical; without this the row's existing payload " +
+          "is REPLACED, dropping employer/title/url/doc_web_view_link/pdfs/ATS-stamps.\n" +
+          "  payload: { ack_emailed_at: '<NOW_ISO from goal>' }   ← only the NEW field; " +
+          "existing fields stay intact because payload_merge=true performs a shallow " +
+          "merge server-side.\n" +
+          "Use the EXACT NOW_ISO value provided in the goal text — never invent or guess " +
+          "a timestamp. The goal's first paragraph names the value to use. " +
+          "Do NOT change status or current_step. The row stays at status='applied' / " +
+          "current_step='finalized'. This patch is purely an idempotency stamp so the " +
+          "next 15-minute tick does not re-send the same ack.\n\n" +
+
+          "Total tool calls: 1 (list) + 1 (gmail_create_threaded_reply) + N (patch). " +
+          "For N=3 that's 5 calls; for N=10 (the cap) that's 12. Stay under 30 turns.\n\n" +
+
+          "ABSOLUTE SAFETY: (a) gmail_create_threaded_reply is the only delivery tool — " +
+          "never gmail_send, never gmail_create_draft. (b) Exactly ONE Gmail draft per " +
+          "run, regardless of count. (c) The patch must touch only payload (merging " +
+          "ack_emailed_at); do not touch status, current_step, gmail_thread_id, or any " +
+          "other column. (d) Never edit the Google Doc, never read it, never call any " +
+          "gdocs_* tool. (e) Never call any other bots-sql tool besides the two listed.",
+        tools: [
+          "bot_conversations_list_by_status",
+          "bot_conversations_patch",
+          "gmail_create_threaded_reply",
+        ],
+        maxTurns: 30,
+      },
+    ],
+  },
 };
