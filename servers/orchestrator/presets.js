@@ -952,6 +952,13 @@ export const presets = {
           "    The user may target multiple in one reply: 'apply 1 and 3, skip 2' — handle each.\n" +
           "    The user may say 'apply all' or 'skip all' — apply to every conversation in this " +
           "thread group.\n" +
+          "    APPLY-ALL informal signals (no target — treat as 'apply all' for the thread): " +
+          "'i left comments', 'comments are in', 'comments are ready', 'comments ready', " +
+          "'look at the doc', 'see the doc', 'check the doc', 'doc has comments', 'see my " +
+          "comments', 'my comments are in', 'comments are on the doc', 'comments on the doc'. " +
+          "These mean the user has reviewed the Google Doc(s) and left feedback; the comment-" +
+          "applier pipeline will pick up the suggestions. The reply-reader's job here is just to " +
+          "flip every pending-review row in this thread to status='applied'.\n" +
           "    If you can't parse intent for a message, skip it (don't error, don't guess).\n\n" +
           "  2e. For each parsed action, find the matching conversation:\n" +
           "    - If user said a NUMBER (e.g. 'apply 1'): MATCH FIRST by payload.digest_position " +
@@ -1738,18 +1745,32 @@ export const presets = {
           "Compose a polite follow-up email body (3-5 sentences) referencing the request's " +
           "filed_date, reference_number, and description head.\n" +
           "    CRITICAL — DO NOT FALSELY ACKNOWLEDGE RECEIPT. Before composing language like " +
-          "'thank you for releasing X' or 'thank you for the attached', VERIFY the user " +
-          "actually received the file. Check (a) row.status_notes for an inventory line " +
-          "like '[YYYY-MM-DD] received N attachments:', and (b) cross-reference the entity's " +
-          "claimed release against the actual attachments saved on disk at " +
-          "~/spring-2026/insd-5941/sources/pir-incoming/<pir_number>/. Many portal systems " +
-          "(mycusthelp.net, govqa.us, securerelease.us) say 'released' or 'enclosed' in the " +
-          "email body but deliver the file via portal login rather than email attachment — " +
-          "in those cases the file is NOT in the user's inbox. If you cannot confirm receipt, " +
-          "the draft should ASK the entity: 'I do not see X attached to your <date> email. " +
-          "Please confirm whether it was intended as an email attachment (and resend if so) " +
-          "or whether it has been released to the portal for retrieval; confirm the access " +
-          "path if the latter.'\n" +
+          "'thank you for releasing X' or 'thank you for the attached', verify the user " +
+          "actually received the file. The ONLY agent-checkable signal is " +
+          "row.status_notes — scan it for an inventory line matching the pattern " +
+          "'[YYYY-MM-DD] received N attachments:' (the Gmail ingest helper writes one of " +
+          "these every time it lands files in pir-incoming/<pir>/). Decision rule:\n" +
+          "      - status_notes has an inventory line AND N >= 1 AND the line's date is " +
+          "ON OR AFTER the entity's most recent claimed-release email → receipt CONFIRMED. " +
+          "Compose acknowledgment language; the follow-up should ask about what's still " +
+          "missing, not whether anything was delivered.\n" +
+          "      - status_notes has NO inventory line, OR the inventory N is 0, OR the " +
+          "inventory line predates the entity's most recent release email → receipt " +
+          "UNCONFIRMED. Do NOT thank for anything. The draft body MUST explicitly ask " +
+          "the entity for the delivery method, using this template (adapt wording to " +
+          "match the entity's tone but keep all three options):\n" +
+          "        'I want to confirm the delivery channel for the records you referenced " +
+          "in your <date> message. I do not see them attached to the email. Could you " +
+          "confirm whether (a) they were intended as an email attachment and need to be " +
+          "resent, (b) they have been posted to a portal — if so, please share the URL " +
+          "and any login details I need — or (c) they will arrive by physical mail? Once " +
+          "I have a path to retrieve them I can close out the request promptly.'\n" +
+          "      Why this matters: many portal systems (mycusthelp.net for FWISD/Dallas, " +
+          "govqa.us for Austin ISD, securerelease.us for ICE, ShareFile, OneDrive share " +
+          "notifications from IDEA/KIPP/ILTexas) say 'released' or 'enclosed' in the " +
+          "email body but deliver via portal login rather than email attachment. The " +
+          "status_notes inventory line is the lab's source of truth for what actually " +
+          "landed locally; trust it over any claim in the entity's message body.\n" +
           "    THEN find ALL related threads in the user's PERSONAL inbox " +
           "(kevin.hopper1@gmail.com — where canvas-companion sends PIRs from, and where " +
           "TEA / ISD / portal responses arrive). Many entities respond via portal systems " +
@@ -1787,7 +1808,19 @@ export const presets = {
           "above; OMIT if the search returned 0 threads)\n" +
           "    Then pir_update_state with all 5 checklist fields, setting " +
           "next_followup_date=<today + 5 business days YYYY-MM-DD> and action_needed='Awaiting " +
-          "response after follow-up'.\n\n" +
+          "response after follow-up'.\n" +
+          "    THEN send a brief CONFIRMATION to the user via gmail_send_to_self, threaded on " +
+          "the DIGEST thread (the gmail_thread_id from the PHASE 1 / PHASE 2 row you're " +
+          "processing) — NOT on the follow-up draft's thread, NOT on a new thread. Call " +
+          "gmail_send_to_self with: to='kevin.hopper1@gmail.com', thread_id=<digest row's " +
+          "gmail_thread_id>, subject='Re: PIR Tracker Digest — follow-up drafted for " +
+          "<pir_number>', body=<2-3 sentence summary covering: which PIR, the personal-account " +
+          "thread the draft landed on (linkify as https://mail.google.com/mail/u/0/#inbox/" +
+          "<thread_id>), the new next_followup_date, and a one-line 'reply mark received " +
+          "<pir>' nudge>. The thread_id parameter is REQUIRED so the confirmation stays in " +
+          "the digest conversation. If for some reason the digest row has no gmail_thread_id " +
+          "(should not happen), omit thread_id rather than send on a new thread; log a warning " +
+          "in your final output.\n\n" +
           "  QUESTION / STATUS QUERY — produces a Q&A reply TO USER:\n" +
           "    - 'what's the status of <pir>?' / 'show <pir>' / 'tell me about <pir>' / " +
           "'where are we on <pir>?' / 'what's pending for <pir>?' → call pir_get for the " +
