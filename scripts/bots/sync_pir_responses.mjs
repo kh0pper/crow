@@ -1,0 +1,487 @@
+#!/usr/bin/env node
+// sync_pir_responses.mjs — Phase 9.1 PIR attachment ingest
+//
+// Pulls PIR response emails labeled `bot/pir-management` from the bot's Gmail
+// account, matches each to a pir_requests row in canvas-companion's canvas.db
+// (deterministic match on reference_number / pir_number / sender), downloads
+// any attachments to a holding-pen directory under
+// ~/spring-2026/insd-5941/sources/pir-incoming/<pir_number>/, and appends an
+// inventory line to the row's status_notes. Idempotent — once a thread is
+// labeled `bot/pir-management/ingested` we skip it.
+//
+// Implementation notes:
+//   - Attachment download uses gmail.users.messages.attachments.get() from
+//     googleapis. The SKILL.md says "Gmail MCP doesn't support attachment
+//     download" — that's a constraint of the gmail-mcp tool surface, not the
+//     underlying Gmail API. Using the API directly is cleaner than the IMAP
+//     fallback the skill prescribes for the manual workflow.
+//   - This helper does NOT advance pir_requests.status, parse data, or move
+//     files to canonical org-slug dirs. Those decisions stay with the user.
+//     The helper's job is: get the bytes off Gmail, log what was received,
+//     surface for review.
+//   - On match failure (no PIR number in subject AND no unique sender match),
+//     the thread is labeled `bot/pir-management/ingest-failed` so it won't
+//     infinite-retry.
+//
+// Schedule: systemd timer mpa-pir-response-sync.timer, every 30 min,
+// OnBootSec=8min (offset 1 min from Pathway B at OnBootSec=7min).
+//
+// Exit codes: 0 success, 1 setup/connectivity error, 2 batch failure.
+
+import fs from "node:fs";
+import path from "node:path";
+import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import { google } from "/home/kh0pp/crow/node_modules/googleapis/build/src/index.js";
+
+const MPA_DB = "/home/kh0pp/.crow-mpa/data/crow.db";
+const CANVAS_DB = "/home/kh0pp/spring-2026/canvas-companion/db/canvas.db";
+const TOKEN_PATH = "/home/kh0pp/.config/google-workspace-mcp-mpa/gws-token.json";
+const CREDS_PATH = "/home/kh0pp/.config/google-workspace-mcp-mpa/credentials.json";
+
+const SOURCES_ROOT = "/home/kh0pp/spring-2026/insd-5941/sources";
+const INCOMING_DIR = path.join(SOURCES_ROOT, "pir-incoming");
+const UNMATCHED_DIR = path.join(INCOMING_DIR, "_unmatched");
+
+const SOURCE_LABEL = "bot/pir-management";
+const MARKER_INGESTED = "bot/pir-management/ingested";
+const MARKER_FAILED = "bot/pir-management/ingest-failed";
+
+const MAX_MESSAGES_PER_RUN = 50;
+const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024; // 50MB per file; Gmail caps at 25MB but allow headroom
+
+// PIR number patterns we recognize in subject lines.
+// 1. "PIR # 2503540" / "PIR #2503540" / "PIR-2503540" (TEA & ours)
+// 2. Reference number "R027038-020926" or similar
+// 3. Bare 7-digit numeric (TEA central tracking)
+const PIR_NUMBER_RES = [
+  /PIR\s*#?\s*([A-Z0-9][\w-]{2,30})/i,
+  /\b([A-Z]\d{3,}-\d{4,}[\w-]*)\b/, // R027038-020926
+  /\b(2[5-9]\d{5})\b/, // 7-digit numeric starting 25-29 (TEA tracking)
+];
+
+function makeAuth() {
+  const tk = JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
+  const cr = JSON.parse(fs.readFileSync(CREDS_PATH, "utf8")).installed;
+  const auth = new google.auth.OAuth2(cr.client_id, cr.client_secret);
+  auth.setCredentials({
+    access_token: tk.token,
+    refresh_token: tk.refresh_token,
+    expiry_date: new Date(tk.expiry).getTime(),
+  });
+  // Do NOT write the refreshed token back — let gws-mcp own the token file.
+  return auth;
+}
+
+async function ensureLabels(gmail) {
+  const existing = (await gmail.users.labels.list({ userId: "me" })).data.labels || [];
+  const byName = new Map(existing.map((l) => [l.name, l.id]));
+  const want = [SOURCE_LABEL, MARKER_INGESTED, MARKER_FAILED];
+  const created = [];
+  for (const name of want) {
+    if (byName.has(name)) continue;
+    const res = await gmail.users.labels.create({
+      userId: "me",
+      requestBody: {
+        name,
+        labelListVisibility: "labelShow",
+        messageListVisibility: "show",
+      },
+    });
+    byName.set(name, res.data.id);
+    created.push(name);
+  }
+  if (created.length) {
+    console.error(`[pir-ingest] created ${created.length} missing label(s): ${created.join(", ")}`);
+  }
+  return byName;
+}
+
+function getHeader(msg, name) {
+  const headers = msg.payload?.headers || [];
+  const h = headers.find((x) => x.name.toLowerCase() === name.toLowerCase());
+  return h ? h.value : "";
+}
+
+function extractSenderEmail(fromHeader) {
+  const m = fromHeader.match(/<([^>]+)>/);
+  return (m ? m[1] : fromHeader).trim().toLowerCase();
+}
+
+function walkPartsForAttachments(payload, out, partPath = []) {
+  if (!payload) return;
+  const here = [...partPath];
+  if (
+    payload.filename &&
+    payload.filename.length > 0 &&
+    payload.body?.attachmentId
+  ) {
+    out.push({
+      filename: payload.filename,
+      mimeType: payload.mimeType || "application/octet-stream",
+      size: payload.body.size || 0,
+      attachmentId: payload.body.attachmentId,
+    });
+  }
+  if (payload.parts) {
+    for (let i = 0; i < payload.parts.length; i++) {
+      walkPartsForAttachments(payload.parts[i], out, [...here, i]);
+    }
+  }
+}
+
+function findPirCandidates(canvasDb, { subject, senderEmail }) {
+  const candidates = new Set();
+
+  // Pattern matching on subject.
+  for (const re of PIR_NUMBER_RES) {
+    const m = subject.match(re);
+    if (!m) continue;
+    const token = m[1];
+    // Try exact pir_number match first.
+    const byPir = canvasDb
+      .prepare("SELECT id, pir_number FROM pir_requests WHERE pir_number = ?")
+      .get(token);
+    if (byPir) candidates.add(byPir.id);
+    // Then try reference_number match (TEA control numbers).
+    const byRef = canvasDb
+      .prepare(
+        "SELECT id, pir_number FROM pir_requests WHERE reference_number = ? OR reference_number LIKE ?",
+      )
+      .all(token, `%${token}%`);
+    for (const r of byRef) candidates.add(r.id);
+  }
+
+  if (candidates.size === 1) {
+    return canvasDb
+      .prepare(
+        "SELECT id, pir_number, status, recipient_email FROM pir_requests WHERE id = ?",
+      )
+      .get([...candidates][0]);
+  }
+
+  // Fall back to sender-email match: if exactly one ACTIVE row has this
+  // recipient_email, use that.
+  const senderRows = canvasDb
+    .prepare(
+      `SELECT id, pir_number, status, recipient_email
+       FROM pir_requests
+       WHERE LOWER(recipient_email) = ?
+         AND status IN ('pending','processing','clarification')`,
+    )
+    .all(senderEmail);
+  if (senderRows.length === 1) return senderRows[0];
+
+  // Sender + any of the subject candidates → ambiguous, return null and let
+  // the message go to ingest-failed.
+  return null;
+}
+
+function ensureDir(p) {
+  fs.mkdirSync(p, { recursive: true });
+}
+
+function safeFilename(name) {
+  // Strip any path separators or null bytes from the Gmail-supplied filename.
+  return name.replace(/[\x00/\\]/g, "_").slice(0, 240);
+}
+
+function formatBytes(n) {
+  if (n == null) return "unknown size";
+  if (n < 1024) return `${n}B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+async function downloadAttachments({ gmail, messageId, attachments, destDir }) {
+  ensureDir(destDir);
+  const saved = [];
+  for (const att of attachments) {
+    if (att.size > MAX_ATTACHMENT_BYTES) {
+      console.error(
+        `[pir-ingest]   skip ${att.filename}: size ${att.size} exceeds cap ${MAX_ATTACHMENT_BYTES}`,
+      );
+      continue;
+    }
+    const resp = await gmail.users.messages.attachments.get({
+      userId: "me",
+      messageId,
+      id: att.attachmentId,
+    });
+    const raw = resp.data?.data;
+    if (!raw) {
+      console.error(`[pir-ingest]   ${att.filename}: empty body`);
+      continue;
+    }
+    const buf = Buffer.from(raw.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+    const filename = safeFilename(att.filename);
+    let destPath = path.join(destDir, filename);
+    // Don't clobber: if a file with this name already exists, append a counter.
+    if (fs.existsSync(destPath)) {
+      const ext = path.extname(filename);
+      const base = filename.slice(0, filename.length - ext.length);
+      for (let i = 1; i < 100; i++) {
+        const candidate = path.join(destDir, `${base}-${i}${ext}`);
+        if (!fs.existsSync(candidate)) {
+          destPath = candidate;
+          break;
+        }
+      }
+    }
+    fs.writeFileSync(destPath, buf);
+    saved.push({ filename: path.basename(destPath), size: buf.length, path: destPath });
+    console.error(
+      `[pir-ingest]   saved ${path.basename(destPath)} (${formatBytes(buf.length)}) → ${destDir}`,
+    );
+  }
+  return saved;
+}
+
+function appendInventoryToStatusNotes(canvasDb, { pirId, savedFiles }) {
+  if (!savedFiles.length) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const fileList = savedFiles
+    .map((f) => `${f.filename} (${formatBytes(f.size)})`)
+    .join(", ");
+  const line = `[${today}] received ${savedFiles.length} attachment${
+    savedFiles.length === 1 ? "" : "s"
+  }: ${fileList}`;
+  const row = canvasDb
+    .prepare("SELECT status_notes FROM pir_requests WHERE id = ?")
+    .get(pirId);
+  if (!row) return;
+  const next =
+    row.status_notes && row.status_notes.trim().length
+      ? `${row.status_notes.replace(/\s+$/, "")}\n${line}`
+      : line;
+  canvasDb
+    .prepare(
+      "UPDATE pir_requests SET status_notes = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .run(next, pirId);
+}
+
+function upsertBotConversation(mpaDb, { pirRow, msg, savedFiles, holdingDir }) {
+  const convId = `pir-tracker:${pirRow.pir_number}:${msg.threadId}`;
+  const payload = {
+    pir_number: pirRow.pir_number,
+    pir_id: pirRow.id,
+    gmail_message_id: msg.id,
+    gmail_thread_id: msg.threadId,
+    sender: getHeader(msg, "From"),
+    subject: getHeader(msg, "Subject"),
+    internal_date: msg.internalDate
+      ? new Date(Number(msg.internalDate)).toISOString()
+      : null,
+    attachments: savedFiles.map((f) => ({
+      filename: f.filename,
+      size: f.size,
+      path: f.path,
+    })),
+    holding_dir: holdingDir,
+    status_at_arrival: pirRow.status,
+  };
+  mpaDb
+    .prepare(
+      `
+      INSERT INTO bot_conversations
+        (id, bot_id, user_email, subject_anchor, gmail_thread_id, gmail_label,
+         google_doc_id, status, current_step, payload, last_user_msg_at,
+         next_action_at, created_at, updated_at)
+      VALUES
+        (?, 'pir-tracker', 'kevin.hopper@maestro.press', ?, ?, ?,
+         NULL, 'awaiting-user', 'response-arrived', ?, ?,
+         NULL, datetime('now'), datetime('now'))
+      ON CONFLICT(id) DO UPDATE SET
+        gmail_thread_id  = excluded.gmail_thread_id,
+        gmail_label      = excluded.gmail_label,
+        status           = excluded.status,
+        current_step     = excluded.current_step,
+        payload          = excluded.payload,
+        last_user_msg_at = excluded.last_user_msg_at,
+        updated_at       = datetime('now')
+    `,
+    )
+    .run(
+      convId,
+      `[PIR-${pirRow.pir_number}]`,
+      msg.threadId,
+      SOURCE_LABEL,
+      JSON.stringify(payload),
+      payload.internal_date,
+    );
+  return convId;
+}
+
+async function processMessage({ gmail, canvasDb, mpaDb, msgMeta, labelIds }) {
+  const msg = (
+    await gmail.users.messages.get({
+      userId: "me",
+      id: msgMeta.id,
+      format: "full",
+    })
+  ).data;
+
+  const fromHeader = getHeader(msg, "From");
+  const subject = getHeader(msg, "Subject");
+  const senderEmail = extractSenderEmail(fromHeader);
+
+  const attachments = [];
+  walkPartsForAttachments(msg.payload, attachments);
+
+  const pirRow = findPirCandidates(canvasDb, { subject, senderEmail });
+  if (!pirRow) {
+    console.error(
+      `[pir-ingest]   ${msg.id}: no PIR match (subject="${subject.slice(0, 80)}" sender="${senderEmail}") — failed`,
+    );
+    const unmatchedDir = path.join(
+      UNMATCHED_DIR,
+      `${new Date().toISOString().slice(0, 10)}_${msg.id}`,
+    );
+    if (attachments.length) {
+      try {
+        await downloadAttachments({
+          gmail,
+          messageId: msg.id,
+          attachments,
+          destDir: unmatchedDir,
+        });
+        // Drop a sidecar with the original subject + sender for triage.
+        fs.writeFileSync(
+          path.join(unmatchedDir, "_meta.txt"),
+          `subject: ${subject}\nfrom: ${fromHeader}\nthreadId: ${msg.threadId}\n`,
+        );
+      } catch (e) {
+        console.error(`[pir-ingest]   download to _unmatched failed: ${e.message}`);
+      }
+    }
+    return { matched: false, savedCount: 0 };
+  }
+
+  if (!attachments.length) {
+    console.error(
+      `[pir-ingest]   ${msg.id}: matched PIR ${pirRow.pir_number} but no attachments`,
+    );
+    // Still write a bot_conversations row so the tick can summarize.
+    upsertBotConversation(mpaDb, {
+      pirRow,
+      msg,
+      savedFiles: [],
+      holdingDir: null,
+    });
+    return { matched: true, savedCount: 0, pirNumber: pirRow.pir_number };
+  }
+
+  const holdingDir = path.join(INCOMING_DIR, pirRow.pir_number);
+  const savedFiles = await downloadAttachments({
+    gmail,
+    messageId: msg.id,
+    attachments,
+    destDir: holdingDir,
+  });
+  if (savedFiles.length) {
+    appendInventoryToStatusNotes(canvasDb, {
+      pirId: pirRow.id,
+      savedFiles,
+    });
+    upsertBotConversation(mpaDb, {
+      pirRow,
+      msg,
+      savedFiles,
+      holdingDir,
+    });
+  }
+  return {
+    matched: true,
+    savedCount: savedFiles.length,
+    pirNumber: pirRow.pir_number,
+  };
+}
+
+async function processLabel({ gmail, canvasDb, mpaDb, labelIds }) {
+  const q = `label:${SOURCE_LABEL} -label:${MARKER_INGESTED} -label:${MARKER_FAILED}`;
+  const listResp = await gmail.users.messages.list({
+    userId: "me",
+    q,
+    maxResults: MAX_MESSAGES_PER_RUN,
+  });
+  const msgs = listResp.data.messages || [];
+  if (!msgs.length) {
+    console.error(`[pir-ingest] 0 unprocessed messages on ${SOURCE_LABEL}`);
+    return { matched: 0, unmatched: 0, errors: 0, savedFiles: 0, msgs: 0 };
+  }
+  console.error(`[pir-ingest] ${msgs.length} message(s) to process`);
+
+  const ingestedLabelId = labelIds.get(MARKER_INGESTED);
+  const failedLabelId = labelIds.get(MARKER_FAILED);
+
+  let matched = 0, unmatched = 0, errors = 0, savedFiles = 0;
+  for (const meta of msgs) {
+    try {
+      const r = await processMessage({ gmail, canvasDb, mpaDb, msgMeta: meta, labelIds });
+      if (r.matched) {
+        matched++;
+        savedFiles += r.savedCount;
+        await gmail.users.messages.modify({
+          userId: "me",
+          id: meta.id,
+          requestBody: { addLabelIds: [ingestedLabelId] },
+        });
+        console.error(
+          `[pir-ingest]   ${meta.id}: matched PIR ${r.pirNumber}, saved=${r.savedCount}`,
+        );
+      } else {
+        unmatched++;
+        await gmail.users.messages.modify({
+          userId: "me",
+          id: meta.id,
+          requestBody: { addLabelIds: [failedLabelId] },
+        });
+      }
+    } catch (err) {
+      errors++;
+      console.error(`[pir-ingest]   ${meta.id}: failed: ${err.stack || err.message}`);
+      try {
+        await gmail.users.messages.modify({
+          userId: "me",
+          id: meta.id,
+          requestBody: { addLabelIds: [failedLabelId] },
+        });
+      } catch {
+        // swallow
+      }
+    }
+  }
+  return { matched, unmatched, errors, savedFiles, msgs: msgs.length };
+}
+
+async function main() {
+  console.error(`[pir-ingest] starting at ${new Date().toISOString()}`);
+  ensureDir(INCOMING_DIR);
+  ensureDir(UNMATCHED_DIR);
+
+  const auth = makeAuth();
+  const gmail = google.gmail({ version: "v1", auth });
+  const labelIds = await ensureLabels(gmail);
+
+  const canvasDb = new Database(CANVAS_DB);
+  canvasDb.pragma("busy_timeout = 5000");
+
+  const mpaDb = new Database(MPA_DB);
+  mpaDb.pragma("journal_mode = DELETE");
+  mpaDb.pragma("busy_timeout = 5000");
+
+  const r = await processLabel({ gmail, canvasDb, mpaDb, labelIds });
+
+  canvasDb.close();
+  mpaDb.close();
+  console.error(
+    `[pir-ingest] done: ${r.msgs} message(s), ${r.matched} matched, ` +
+      `${r.unmatched} unmatched, ${r.savedFiles} attachment(s) saved, ${r.errors} error(s)`,
+  );
+  if (r.errors > 0) process.exit(2);
+}
+
+main().catch((err) => {
+  console.error(`[pir-ingest] fatal: ${err.stack || err.message}`);
+  process.exit(1);
+});
