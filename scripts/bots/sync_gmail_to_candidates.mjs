@@ -44,7 +44,9 @@ const MPA_DB = "/home/kh0pp/.crow-mpa/data/crow.db";
 const TOKEN_PATH = "/home/kh0pp/.config/google-workspace-mcp-mpa/gws-token.json";
 const CREDS_PATH = "/home/kh0pp/.config/google-workspace-mcp-mpa/credentials.json";
 
-const LLAMA_URL = "http://localhost:8003/v1/chat/completions";
+// Note: llamacpp Docker container binds to the tailnet IP, not loopback.
+// See `docker inspect llamacpp-vulkan-qwen36-35b-a3b` HostConfig.PortBindings.
+const LLAMA_URL = "http://100.118.41.122:8003/v1/chat/completions";
 const LLM_MODEL = "qwen3.6-35b-a3b";
 
 const LABEL_TO_SOURCE = {
