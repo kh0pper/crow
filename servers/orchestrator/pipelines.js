@@ -935,4 +935,43 @@ export const pipelines = {
     storeResult: false,
     resultCategory: null,
   },
+
+  // Phase 9.1 (2026-05-13) — PIR Tracker Bot daily tick.
+  // Pairs with the bot-pir-tracker preset. Triggered by a row in the
+  // schedules table at cron '0 7 * * *' (daily 7am CDT). The Gmail
+  // attachment-ingest helper (mpa-pir-response-sync.timer, every 30 min on
+  // crow) populates bot_conversations rows that this tick consumes.
+  "bot:pir-tracker:tick": {
+    name: "Bot: pir-tracker daily tick",
+    description:
+      "Phase 9.1 PIR Tracker Bot daily 7am tick. Lists active PIRs, drafts a polite follow-up Gmail per overdue row (and stamps next_followup_date = today + 5 business days via pir_update_state), summarizes attachment-ingest results since the last tick, and emits ONE markdown digest to kevin.hopper@maestro.press. Single-agent, Tier-1: drafts only. Mutates pir_requests only via pir_update_state (Step 2.5 checklist enforced at the tool boundary).",
+    goal:
+      "Today's date is ${TODAY}. The NOW_ISO timestamp for this run is ${NOW_ISO} — " +
+      "use this EXACT string as the value of digested_at when you patch each ingested " +
+      "conversation in PHASE 3. Use ${TODAY} verbatim in the digest subject line and in " +
+      "any 'today' wording in the body. Never invent or guess dates.\n\n" +
+      "Run the pir-tracker-worker agent through its four phases:\n" +
+      "  PHASE 1 — pir_list_active (no args). Build a mental inventory of the active queue.\n" +
+      "  PHASE 2 — pir_list_overdue (defaults to today UTC). For each overdue row, draft " +
+      "ONE polite follow-up via gmail_create_draft, then call pir_update_state with all " +
+      "five mandatory checklist fields explicitly restated and next_followup_date set to " +
+      "today + 5 business days.\n" +
+      "  PHASE 3 — bot_conversations_list_by_status({bot_id:'pir-tracker', " +
+      "status:'awaiting-user', current_step:'response-arrived'}). Summarize for the " +
+      "digest, then bot_conversations_patch each to current_step='digest-included' with " +
+      "payload_merge:true and payload.digested_at=${NOW_ISO}.\n" +
+      "  PHASE 4 — compose and gmail_create_draft ONE markdown digest to " +
+      "kevin.hopper@maestro.press, subject 'PIR Tracker Digest — ${TODAY}'. Sections " +
+      "are skipped when empty.\n\n" +
+      "ABSOLUTE RULES: (a) gmail_create_draft is the only delivery tool — never " +
+      "gmail_send, never any other Gmail-emitting tool. (b) pir_update_state is the only " +
+      "tool that mutates pir_requests; raw SQL is not in the tool list anyway. (c) Never " +
+      "auto-advance status to 'received' or 'partial' when attachments arrive — surface " +
+      "as TODO in the digest. (d) Don't propose specific data-load SQL or TEA " +
+      "cross-references in the draft content — flag the human work in the digest TODOs.",
+    preset: "bot-pir-tracker",
+    defaultCron: "0 7 * * *",
+    storeResult: false,
+    resultCategory: null,
+  },
 };
