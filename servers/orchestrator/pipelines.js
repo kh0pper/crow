@@ -844,14 +844,21 @@ export const pipelines = {
     description:
       "Phase 8.4-C comment applier. Polls Google Docs for unresolved user comments on the bot's applied draft documents, applies inline edits via find_replace on the highlighted text, replies with a summary, and resolves the comment. Idempotent via comment.resolved + skip-on-bot-reply.",
     goal:
+      "Today's date is ${TODAY}. The NOW_ISO timestamp for this run is ${NOW_ISO} — " +
+      "use this EXACT string as the value of last_comment_applied_at when you patch " +
+      "each notified conversation in STEP 3c. Never invent or guess a timestamp.\n\n" +
       "Run the comment-applier agent. It will: (1) list bot_conversations at status='applied', " +
       "(2) for each, gdocs_list_comments to find unresolved comments authored by the user, " +
-      "(3) for each actionable comment (has quotedFileContent + interpretable instruction), " +
-      "apply the edit via gdocs_find_replace, reply with a summary, and resolve the comment. " +
-      "Conservative: vague comments are skipped, not guessed.\n\n" +
-      "ABSOLUTE RULES: Only gdocs_find_replace (no append/replace_section). Never edit " +
-      "outside the user's highlighted text. Never reply+resolve without applying. Skip-on-" +
-      "bot-reply ensures idempotency.",
+      "(3) for each actionable comment, apply the edit via gdocs_apply_comment_edit (Path A) " +
+      "or reply+resolve (Path B), (4) for each conversation where at least one comment was " +
+      "applied this run, send ONE notification email via gmail_send_to_self threaded on the " +
+      "conversation's gmail_thread_id, then patch payload.last_comment_applied_at as the " +
+      "idempotency stamp.\n\n" +
+      "ABSOLUTE RULES: Tool routing — gmail_send_to_self for notifications TO USER " +
+      "(allowlist enforces). Never gmail_send, never gmail_create_draft. Doc edits stay " +
+      "inside the user's highlighted text. Silent runs (no comments applied) are correct — " +
+      "no notification fires. Idempotent: re-runs on the same Doc skip comments the bot " +
+      "already replied to (skip-on-bot-reply check at top of step 2).",
     preset: "bot-job-search-commentapplier",
     defaultCron: "*/15 * * * *",
     storeResult: false,
