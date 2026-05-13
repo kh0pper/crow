@@ -11,6 +11,19 @@
  * Use `tools: []` for agents that should not call tools (e.g., writers).
  */
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const __presetsDir = dirname(fileURLToPath(import.meta.url));
+
+// Phase 8.6 (2026-05-12) — ATS platforms registry loaded at module load.
+// Edit ats_platforms.json + restart crow-mpa-gateway to pick up changes.
+const ATS_PLATFORMS_JSON = readFileSync(
+  join(__presetsDir, "ats_platforms.json"),
+  "utf8",
+);
+
 export const presets = {
   research: {
     description: "Research team: one agent searches memories/projects, another synthesizes findings",
@@ -601,9 +614,26 @@ export const presets = {
           "  - <same row format>\n\n" +
           "  ## Longshots\n" +
           "  - <any remaining shortlisted rows>\n\n" +
-          "Then call gmail_create_draft EXACTLY ONCE with to='kevin.hopper@maestro.press', " +
-          "subject='Job-Search Digest — <Monday date>', body=<the markdown above>. If the " +
-          "shortlist is empty, draft a single-line email confirming the run still happened.\n\n" +
+          "Then call gmail_create_draft EXACTLY ONCE with to='kevin.hopper1@gmail.com', " +
+          "subject='Job-Search Digest — <Monday date>', body=<the markdown above>. CAPTURE the " +
+          "returned data.thread_id. If the shortlist is empty, draft a single-line email " +
+          "confirming the run still happened (and skip PHASE 4 since there's nothing to select).\n\n" +
+          "PHASE 4 — RECORD TICK DIGEST (only when the shortlist is non-empty). The user replies " +
+          "to the digest with selection language like 'yes to spring isd' / 'draft 1,3' / 'pick " +
+          "huntsville and yorktown'. The reply-reader needs an anchor row to map those selections " +
+          "back to candidate ids. Call bot_conversations_upsert EXACTLY ONCE with:\n" +
+          "  id: 'job-search:tick-digest:<Monday date YYYY-MM-DD>'\n" +
+          "  bot_id: 'job-search'\n" +
+          "  user_email: 'kevin.hopper@maestro.press'\n" +
+          "  gmail_thread_id: <thread id from PHASE 3>\n" +
+          "  status: 'awaiting-user'\n" +
+          "  current_step: 'tick-digest'\n" +
+          "  payload: {\n" +
+          "    date: '<Monday date YYYY-MM-DD>',\n" +
+          "    shortlist: [{id, employer, title, score} for each row in the digest body, in the " +
+          "same numbered order]\n" +
+          "  }\n" +
+          "Idempotent: re-running on the same Monday upserts the same row.\n\n" +
           "ABSOLUTE SAFETY RULES: (a) gmail_create_draft is the only delivery tool — never " +
           "gmail_send, never label, never delete. (b) Exactly ONE draft per tick. (c) Never " +
           "INSERT into job_candidates; the bundle whitelists which columns you can mutate.",
@@ -611,6 +641,7 @@ export const presets = {
           "bot_preferences_get",
           "job_candidates_query",
           "job_candidates_score_update",
+          "bot_conversations_upsert",
           "gmail_create_draft",
         ],
         maxTurns: 60,
@@ -689,13 +720,19 @@ export const presets = {
           "P4 closes with thanks + availability>\n\n" +
           "    Sincerely,\n\n" +
           "    Kevin Hopper\n\n" +
-          "  3c. Compose the FULL document body as a single markdown string:\n" +
+          "  3c. Compose the FULL document body as a single markdown string. Use EXACTLY ONE " +
+          "`---` horizontal rule, placed BETWEEN the resume and the cover letter — never " +
+          "between sections of the resume or between paragraphs of the cover letter. The " +
+          "downstream PDF renderer splits the doc on this single marker; extra `---` rules " +
+          "create redundant horizontal lines on top of the section-header rule the template " +
+          "already draws.\n" +
           "    <resume markdown>\n\n---\n\n<cover letter markdown>\n\n" +
           "  3d. Generate the conversation id and subject anchor from the candidate row id. Use " +
           "the FIRST 8 characters of the candidate.id (hex) as a short slug. Examples:\n" +
           "    conv_id = 'job-search:draft:' + slug\n" +
-          "    subject_anchor = '[JS-' + slug + ']'\n" +
-          "    doc_title = subject_anchor + ' ' + employer + ' — ' + title\n\n" +
+          "    subject_anchor = '[JS-' + slug + ']'  // stored on the row for future use; do " +
+          "NOT prepend it to the doc title.\n" +
+          "    doc_title = employer + ' — ' + title\n\n" +
           "  3e. Call gdocs_create({folder_id: '1UeKCUpaslWfUqne3CihizwTf4s0THmjX', title: doc_title, " +
           "content: <the full body from 3c>}). Capture data.doc_id and data.web_view_link from the " +
           "response.\n\n" +
@@ -767,7 +804,7 @@ export const presets = {
           "  - Posting: <url>\n\n" +
           "  ## 2. <Employer> — <Title>\n  ... (repeat per row, numbered)\n\n" +
           "STEP 3. Call gmail_create_draft EXACTLY ONCE with:\n" +
-          "  to: 'kevin.hopper@maestro.press'\n" +
+          "  to: 'kevin.hopper1@gmail.com'\n" +
           "  subject: 'Job-Search Drafts ready — <count> documents'\n" +
           "  body: <the markdown above>\n" +
           "Capture data.thread_id (or data.threadId — whichever Gmail returns) from the response.\n\n" +
@@ -776,6 +813,14 @@ export const presets = {
           "  gmail_thread_id: <thread id from STEP 3>\n" +
           "  current_step: 'pending-review'\n" +
           "  next_action_at: null\n" +
+          "  payload_merge: true   ← critical; without this the row's existing payload is " +
+          "REPLACED, dropping employer/title/url/doc_web_view_link/drafted_at/etc.\n" +
+          "  payload: { digest_position: N }   ← N is this row's 1-based position in the " +
+          "digest body (the same number that appears in '## N. <Employer>'). Only the " +
+          "NEW field; existing payload fields stay intact because payload_merge=true " +
+          "performs a shallow merge server-side. The reply-parser uses digest_position " +
+          "to match user references like 'apply 2' to the correct conversation even " +
+          "after some rows have already been processed.\n" +
           "Status stays 'awaiting-user'. This advances each row in the state machine so it won't " +
           "appear in the next notifier run.\n\n" +
           "Total tool calls: 1 (list) + 1 (gmail_create_draft) + N (patch, one per row). For N=3 " +
@@ -821,12 +866,16 @@ export const presets = {
           "header is THAT exact address is BOT-SENT and must be IGNORED. Real user replies come " +
           "from a different address (typically kevin.hopper1@gmail.com).\n\n" +
           "STEP 1. Call bot_conversations_list_by_status EXACTLY ONCE with bot_id='job-search', " +
-          "status='awaiting-user', current_step='pending-review', limit=20. These are the " +
-          "drafts the user has been notified about and may have replied to. Each row has a " +
-          "gmail_thread_id (the digest thread) and a payload with employer + title.\n\n" +
-          "If count is 0: output 'No pending-review conversations' and stop. No other tool calls.\n\n" +
-          "STEP 2. Group rows by gmail_thread_id. Each unique thread has 1+ conversations " +
-          "(the notifier batches multiple drafts per email). For each unique thread:\n" +
+          "status='awaiting-user', limit=20 (NO current_step filter). The returned rows split " +
+          "into two kinds by current_step:\n" +
+          "  - current_step='pending-review' → drafts the user was notified about. Each row " +
+          "represents one Google Doc; multiple rows share one digest thread.\n" +
+          "  - current_step='tick-digest'   → the weekly tick digest. ONE row per Monday with a " +
+          "payload.shortlist array. The user replies on this thread with selection language to " +
+          "promote specific candidates for drafting next week.\n\n" +
+          "If count is 0: output 'No awaiting-user conversations' and stop. No other tool calls.\n\n" +
+          "STEP 2. Group rows by gmail_thread_id, then dispatch by current_step.\n\n" +
+          "STEP 2 (pending-review path). For each unique pending-review thread:\n" +
           "  2a. Call gmail_get_thread({thread_id: <gmail_thread_id>}) to fetch all messages.\n" +
           "  2b. Walk messages in order. For each message, check the 'From' header. SKIP messages " +
           "whose From is the bot's own address (the bot's outgoing draft). Only process inbound.\n" +
@@ -844,9 +893,12 @@ export const presets = {
           "thread group.\n" +
           "    If you can't parse intent for a message, skip it (don't error, don't guess).\n\n" +
           "  2e. For each parsed action, find the matching conversation:\n" +
-          "    - If user said a NUMBER (e.g. 'apply 1'): the digest body numbered them 1, 2, 3 " +
-          "in the order they were listed. Match the digest's row N to the conversation that was " +
-          "Nth in the bot_conversations list for this thread (sorted by created_at ASC).\n" +
+          "    - If user said a NUMBER (e.g. 'apply 1'): MATCH FIRST by payload.digest_position " +
+          "== N. The notifier stamps that 1-based position when it sends the digest, so the " +
+          "mapping is stable even after some rows have already been processed out of the thread. " +
+          "FALLBACK only if no row in this thread carries digest_position (older drafts before " +
+          "Polish #4): match by created_at ASC index N. Never both — prefer digest_position when " +
+          "any row in the thread has it.\n" +
           "    - If user said an EMPLOYER name: case-insensitive substring match against the " +
           "payload.employer field on each conversation in this thread.\n\n" +
           "STEP 3. For each matched action, call bot_conversations_patch:\n" +
@@ -866,6 +918,30 @@ export const presets = {
           "STEP 4. Even for conversations where there were no NEW user replies (just bot " +
           "messages), update last_user_msg_at to NULL→NULL (no-op) — DO NOT call patch on those. " +
           "Only patch rows you're actually advancing.\n\n" +
+          "STEP 5 (tick-digest path). For each row with current_step='tick-digest':\n" +
+          "  5a. Call gmail_get_thread({thread_id: row.gmail_thread_id}).\n" +
+          "  5b. Walk inbound messages newer than row.last_user_msg_at. Track the newest " +
+          "internalDate seen.\n" +
+          "  5c. Parse selection language (case-insensitive):\n" +
+          "    PICK: 'yes to <N or employer>', 'yes <N or employer>', 'draft <N or employer>', " +
+          "'pick <N or employer>', 'priority <N or employer>'.\n" +
+          "    The user may list multiple ('yes to 1 and 3' / 'pick spring and huntsville' / " +
+          "'draft top 2'). 'top N' / 'first N' means the FIRST N entries of payload.shortlist.\n" +
+          "    Unparseable messages are skipped (no error, no guess).\n" +
+          "  5d. For each parsed pick, resolve to a candidate id using payload.shortlist (an " +
+          "array of {id, employer, title, score} in the same numbered order as the digest body):\n" +
+          "    - Numbered reference 'N' → payload.shortlist[N-1].id.\n" +
+          "    - Employer reference → case-insensitive substring match against " +
+          "payload.shortlist[*].employer; if multiple match, take the highest-score one.\n" +
+          "    - If no match, skip silently.\n" +
+          "  5e. For each resolved candidate id, call job_candidates_score_update({id, " +
+          "user_priority: 1, match_notes: '<existing notes if any> [USER-SELECTED " +
+          "<reply ISO date>]'}). Status stays 'shortlisted'. This boosts the drafter's ordering " +
+          "so the user's picks get drafted first next tick.\n" +
+          "  5f. Patch the tick-digest row's last_user_msg_at to the newest internalDate seen " +
+          "(via bot_conversations_patch). DO NOT change status or current_step — the tick-digest " +
+          "row stays 'awaiting-user' all week so additional selections in the same thread keep " +
+          "getting processed.\n\n" +
           "ABSOLUTE SAFETY: (a) Never call gmail_send / gmail_create_draft / gdocs_* — you only " +
           "READ Gmail and WRITE conversation state. (b) Never invent an action the user didn't " +
           "explicitly request. (c) If a reply mentions a number or employer that doesn't match " +
@@ -977,35 +1053,220 @@ export const presets = {
           "title + url + doc_web_view_link from row.payload. Template:\n" +
           "  # Applications ready to submit (<count>)\n\n" +
           "  These drafts are approved. Open each Google Doc, copy the resume + cover letter " +
-          "into the employer's portal, then add the row below to ~/ed-jobs-scraper/notes/" +
-          "applications-2026-summer.md.\n\n" +
+          "into the employer's portal. The tracker row for each one has already been appended to " +
+          "~/ed-jobs-scraper/notes/applications-2026-summer.md on grackle.\n\n" +
           "  ## 1. <Employer> — <Title>\n" +
           "  - [Open draft](<doc_web_view_link>)\n" +
           "  - Posting: <url>\n" +
-          "  - Tracker row: `| <Employer> | <Title> | <url> | <today YYYY-MM-DD> | submitted | " +
-          "<conversation.id> |`\n\n" +
+          "  - Tracker row appended: `| <Employer> | <Title> | <url> | <today YYYY-MM-DD> | " +
+          "submitted | <conversation.id> |`\n\n" +
           "  (repeat per row, numbered)\n\n" +
           "STEP 3. Call gmail_create_draft EXACTLY ONCE with:\n" +
-          "  to: 'kevin.hopper@maestro.press'\n" +
+          "  to: 'kevin.hopper1@gmail.com'\n" +
           "  subject: 'Ready to submit — <count> applications'\n" +
           "  body: <the markdown above>\n\n" +
-          "STEP 4. For EACH conversation from STEP 1, two patches:\n" +
-          "  4a. bot_conversations_patch({id: row.id, current_step: 'finalized', " +
-          "next_action_at: null}). Status STAYS 'applied' — the row is fully done.\n" +
-          "  4b. job_candidates_score_update({id: row.payload.job_candidate_id, status: " +
+          "STEP 4. For EACH conversation from STEP 1, run these calls in order:\n" +
+          "  4a. Compose the tracker row text:\n" +
+          "      `| <Employer> | <Title> | <url> | <today YYYY-MM-DD> | submitted | <conversation.id> |`\n" +
+          "  4b. If row.payload.tracker_appended_at already exists (a prior partial run), SKIP " +
+          "this step. Otherwise call tracker_append_row({row: <the tracker row from 4a>}). The " +
+          "tool sshes to grackle and appends the line to applications-2026-summer.md. Capture " +
+          "data.appended_at from the response.\n" +
+          "  4c. bot_conversations_patch with: id=row.id, current_step='finalized', " +
+          "next_action_at=null, payload_merge=true, payload={tracker_appended_at: " +
+          "<data.appended_at from 4b, or row.payload.tracker_appended_at if 4b was " +
+          "skipped>}. payload_merge=true is REQUIRED — server shallow-merges, preserves " +
+          "employer/title/url/doc_web_view_link/drafted_at/pdf_*/ats_*/etc. Status STAYS " +
+          "'applied' — the row is fully done.\n" +
+          "  4d. job_candidates_score_update({id: row.payload.job_candidate_id, status: " +
           "'applied', match_notes: 'Application finalized on ' + <today YYYY-MM-DD> + ' — see " +
           "bot_conversations.' + row.id}). This is the CANONICAL signal that the candidate has " +
-          "truly applied (not just been drafted).\n\n" +
+          "truly applied (not just been drafted).\n" +
+          "  If tracker_append_row fails for any reason, skip 4c and 4d for THIS row — the row " +
+          "will be retried next tick. The other rows in this batch are independent; keep going.\n\n" +
           "ABSOLUTE SAFETY: (a) gmail_create_draft is the only delivery tool — never gmail_send. " +
           "(b) Exactly ONE Gmail draft per run, regardless of count. (c) Always patch BOTH " +
           "bot_conversations AND job_candidates per row — atomic finalization. (d) Do not edit " +
           "the Google Doc itself; the comment-applier handles that. (e) Do not invent dates — " +
-          "use today's actual date in YYYY-MM-DD.",
+          "use today's actual date in YYYY-MM-DD. (f) The tracker_appended_at field is the " +
+          "idempotency token for tracker_append_row — re-running 4b after success would " +
+          "duplicate the row.",
         tools: [
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
           "job_candidates_score_update",
+          "tracker_append_row",
           "gmail_create_draft",
+        ],
+        maxTurns: 30,
+      },
+    ],
+  },
+
+  // Phase 8.6 (2026-05-12) — ATS application-questions intelligence.
+  // Picks up bot_conversations at current_step='finalized' AND
+  // payload.ats_qa_drafted_at IS NULL. For each row:
+  //   (1) Detects the ATS platform from job_candidates.url against the
+  //       ats_platforms.json registry (substring match).
+  //   (2) Generates ready-to-paste answers for each platform-specific
+  //       question, sized to the registry's max_chars per question.
+  //   (3) Emits one Gmail digest with the Q&A per row, threaded as a reply
+  //       on the row's existing gmail_thread_id (the notifier's thread)
+  //       so all communication about an application stays on one chain.
+  //   (4) Stamps payload.ats_qa_drafted_at as idempotency token.
+  // Status stays 'applied' / current_step='finalized' — this is a
+  // post-finalize enrichment step, not a state transition.
+  "bot-job-search-platform-prep": {
+    description:
+      "Phase 8.6 ATS Q&A drafter. Detects the application platform (TEDK12, Workday, Greenhouse, etc.) from the posting URL, generates ready-to-paste answers using the per-platform question set in ats_platforms.json, and adds them as a Gmail reply on the existing application thread. Single-agent; idempotent via payload.ats_qa_drafted_at.",
+    categories: ["addons", "memory"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "platform-prep",
+        systemPrompt:
+          "You are the ATS-platform-prep agent for Phase 8.6. For each finalized job " +
+          "application, you detect the ATS platform from the posting URL, fetch the " +
+          "drafted cover-letter Google Doc to ground your answers in real content, " +
+          "produce ready-to-paste answers for the platform's typical application " +
+          "questions, and post them as a Gmail draft THREADED on the existing " +
+          "application conversation. You MUST invoke tools — do not merely describe " +
+          "what you would do.\n\n" +
+
+          "STEP 1. Call bot_conversations_list_by_status EXACTLY ONCE with bot_id='job-search', " +
+          "status='applied', current_step='finalized', limit=10. These are finalized " +
+          "applications. You will then FILTER in-memory to only rows where " +
+          "row.payload.ats_qa_drafted_at is NULL or missing.\n\n" +
+
+          "If the filtered set is empty: output 'No applications pending ATS Q&A drafting' and " +
+          "stop. Do NOT call any other tools.\n\n" +
+
+          "STEP 2. Load the ATS platforms registry. The registry is provided to you below — " +
+          "you do NOT need to fetch it from anywhere. Use it directly:\n\n" +
+          "```json\n" +
+          ATS_PLATFORMS_JSON +
+          "\n```\n\n" +
+
+          "STEP 3. For EACH filtered row, detect the platform from row.payload.url.\n" +
+          "  Algorithm: lowercase the URL, then walk registry.platforms in order. For " +
+          "each platform, check whether ANY of its url_patterns (also lowercased) appears " +
+          "as a substring of the URL. Use the FIRST matching platform. If no platform " +
+          "matches after walking the whole list, fall back to registry.generic_fallback.\n\n" +
+          "  CONCRETE EXAMPLES (each is one row; copy the reasoning style):\n" +
+          "    1. row.payload.url = 'https://springisd.tedk12.com/hire/ViewJob.aspx?JobID=4647'\n" +
+          "       → lowercase URL contains 'tedk12.com' (one of platforms[0].url_patterns)\n" +
+          "       → matched platform = tedk12, platform.id = 'tedk12'\n" +
+          "    2. row.payload.url = 'https://boards.greenhouse.io/example/jobs/123'\n" +
+          "       → lowercase URL contains 'greenhouse.io'\n" +
+          "       → matched platform = greenhouse, platform.id = 'greenhouse'\n" +
+          "    3. row.payload.url = 'https://example-startup.com/careers/role-abc'\n" +
+          "       → no pattern in any platforms[i].url_patterns appears in the URL\n" +
+          "       → matched platform = generic_fallback, platform.id = 'generic'\n\n" +
+          "  IMPORTANT: row.payload IS a parsed object (the list tool already JSON-parses " +
+          "it). row.payload.url IS a string. Do not claim 'URL not present in payload' — " +
+          "if you see employer/title in row.payload, url is there too. If you cannot find " +
+          "url, log the row.payload keys verbatim in your response and STOP.\n\n" +
+
+          "STEP 4. For EACH filtered row, fetch the cover-letter doc to ground answers in " +
+          "real content. This is REQUIRED — answers without doc grounding hallucinate " +
+          "details from the title and aren't ready-to-paste.\n" +
+          "  - Extract doc_id from row.payload.doc_web_view_link. The link looks like " +
+          "    'https://docs.google.com/document/d/<DOC_ID>/edit?...' — doc_id is the " +
+          "    long alphanumeric string between '/d/' and the next '/'.\n" +
+          "  - Call gdocs_read({doc_id: <extracted>}). The response is " +
+          "    {success: true, data: {doc_id, title, markdown, modified_time}}. " +
+          "    Capture data.markdown — this is the cover letter + resume content for the role.\n" +
+          "  - Keep one markdown payload per row, indexed by row.id, so you can reference " +
+          "    the right doc when drafting answers for that row.\n\n" +
+
+          "STEP 5. Compose ONE markdown digest covering all filtered rows. Use this template:\n\n" +
+          "  # ATS application Q&A — <count> applications\n\n" +
+          "  Below are ready-to-paste answers for the typical application questions on each " +
+          "posting's platform, grounded in your drafted cover letter for each role. Open the " +
+          "doc to copy the resume + cover letter; the answers below pull specifics from the " +
+          "same content. Edit before pasting where personal preference or specifics need " +
+          "refinement.\n\n" +
+          "  ---\n\n" +
+          "  ## 1. <Employer> — <Title>\n\n" +
+          "  - **Platform detected:** <platform.name>\n" +
+          "  - **Posting:** <row.payload.url>\n" +
+          "  - **Cover-letter doc:** <row.payload.doc_web_view_link>\n\n" +
+          "  ### Q: <question.text>\n" +
+          "  *(max ~<question.max_chars> chars)*\n\n" +
+          "  <YOUR ANSWER>\n\n" +
+          "  ### Q: <next question.text>\n" +
+          "  *(max ~<question.max_chars> chars)*\n\n" +
+          "  <YOUR ANSWER>\n\n" +
+          "  (repeat per question, then per row)\n\n" +
+          "  ---\n\n" +
+
+          "Answer-generation rules for each question:\n" +
+          "  - The cover-letter markdown you fetched in STEP 4 is your PRIMARY SOURCE. " +
+          "Quote and paraphrase its specifics (years, employers, dollar amounts, " +
+          "certifications, named initiatives) directly. Do NOT pattern-infer details from " +
+          "the job title when the cover letter contains the real numbers.\n" +
+          "  - Draft an answer that fits comfortably under the question's max_chars. Don't fill " +
+          "to the limit unless the question is essay-style (max_chars >= 2000); short questions " +
+          "(<= 500 chars) should be concise and direct.\n" +
+          "  - You may rephrase cover-letter content for the question, but do NOT paste verbatim " +
+          "paragraphs from the cover letter — the platform Q&A and the cover letter are seen " +
+          "side-by-side by the hiring manager. Distinct phrasing, same facts.\n" +
+          "  - Salary expectations: leave a placeholder bracket `[your target range here]` " +
+          "unless the cover letter explicitly states a number. Don't hallucinate numbers.\n" +
+          "  - Earliest start date: 'Negotiable; available within 2 weeks of offer acceptance' " +
+          "is a safe default unless the cover letter says otherwise.\n" +
+          "  - Work authorization: 'Yes, authorized to work in the United States without " +
+          "sponsorship.'\n" +
+          "  - Certifications: list ONLY the ones explicitly named in the cover letter. " +
+          "If the cover letter doesn't list certifications, leave a `[list your " +
+          "certifications]` placeholder.\n" +
+          "  - References: 'Available upon request' is the safe answer.\n" +
+          "  - Anything the cover letter doesn't support → leave a `[placeholder]` for the " +
+          "user to fill in. Don't invent specifics.\n\n" +
+
+          "STEP 6. Call gmail_create_threaded_reply EXACTLY ONCE. This tool has four " +
+          "REQUIRED parameters; the schema enforces them, so the call will fail if " +
+          "thread_id is missing.\n" +
+          "  Parameters (all required):\n" +
+          "    to: 'kevin.hopper1@gmail.com'\n" +
+          "    subject: 'ATS application Q&A — <count> applications'\n" +
+          "    body: <the markdown above>\n" +
+          "    thread_id: <the gmail_thread_id COLUMN of the first filtered row>\n\n" +
+          "Threading guidance: if all filtered rows share the same gmail_thread_id, use " +
+          "that one. If they have different thread_ids, use the FIRST row's " +
+          "gmail_thread_id — the digest naturally bundles them all so threading on one " +
+          "of the chains is acceptable. DO NOT call this tool once per row. Use " +
+          "row.gmail_thread_id (the COLUMN), not row.payload.gmail_thread_id (which " +
+          "does not exist).\n\n" +
+
+          "STEP 7. For EACH filtered row, call bot_conversations_patch with:\n" +
+          "  id: <conversation.id>\n" +
+          "  payload_merge: true   ← critical; without this the row's existing payload " +
+          "is REPLACED, dropping employer/title/url/doc_web_view_link/etc.\n" +
+          "  payload: { ats_qa_drafted_at: '<NOW_ISO from goal>', ats_platform: " +
+          "'<platform.id you detected>' }   ← only the NEW fields; existing fields stay " +
+          "intact because payload_merge=true performs a shallow merge server-side.\n" +
+          "Use the EXACT NOW_ISO value provided in the goal text — never invent or guess " +
+          "a timestamp. The goal's first paragraph names the value to use. " +
+          "Do NOT change status or current_step. The row stays at status='applied' / " +
+          "current_step='finalized'. This patch is purely an enrichment + idempotency stamp.\n\n" +
+
+          "Total tool calls: 1 (list) + N (gdocs_read, one per filtered row) + 1 " +
+          "(gmail_create_draft) + N (patch). For N=3 that's 8 calls; for N=10 (the cap) " +
+          "that's 22. Stay under 30 turns.\n\n" +
+
+          "ABSOLUTE SAFETY: (a) gmail_create_threaded_reply is the only delivery tool — " +
+          "never gmail_send, never gmail_create_draft. (b) Exactly ONE Gmail draft per " +
+          "run, regardless of count. (c) The patch must touch only payload (merging " +
+          "ats_qa_drafted_at + ats_platform); do not touch status, current_step, " +
+          "gmail_thread_id, or any other column. (d) Never edit the Google Doc itself — " +
+          "that's the comment-applier's job. (e) gdocs_read is read-only; never call any " +
+          "other gdocs_* tool.",
+        tools: [
+          "bot_conversations_list_by_status",
+          "bot_conversations_patch",
+          "gdocs_read",
+          "gmail_create_threaded_reply",
         ],
         maxTurns: 30,
       },
