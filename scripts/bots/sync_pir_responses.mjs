@@ -32,6 +32,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
 import { google } from "/home/kh0pp/crow/node_modules/googleapis/build/src/index.js";
+import { findPirCandidates } from "./pir_match.mjs";
 
 const MPA_DB = "/home/kh0pp/.crow-mpa/data/crow.db";
 const CANVAS_DB = "/home/kh0pp/spring-2026/canvas-companion/db/canvas.db";
@@ -56,15 +57,9 @@ const MARKER_FAILED = "bot/pir-management/ingest-failed";
 const MAX_MESSAGES_PER_RUN = 50;
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024; // 50MB per file; Gmail caps at 25MB but allow headroom
 
-// PIR number patterns we recognize in subject lines.
-// 1. "PIR # 2503540" / "PIR #2503540" / "PIR-2503540" (TEA & ours)
-// 2. Reference number "R027038-020926" or similar
-// 3. Bare 7-digit numeric (TEA central tracking)
-const PIR_NUMBER_RES = [
-  /PIR\s*#?\s*([A-Z0-9][\w-]{2,30})/i,
-  /\b([A-Z]\d{3,}-\d{4,}[\w-]*)\b/, // R027038-020926
-  /\b(2[5-9]\d{5})\b/, // 7-digit numeric starting 25-29 (TEA tracking)
-];
+// Subject-token regex set + findPirCandidates ladder live in ./pir_match.mjs
+// so the standalone rematch helper can re-apply the same logic to the
+// _unmatched/ backlog without going through Gmail.
 
 function makeAuth() {
   const tk = JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
@@ -134,53 +129,6 @@ function walkPartsForAttachments(payload, out, partPath = []) {
       walkPartsForAttachments(payload.parts[i], out, [...here, i]);
     }
   }
-}
-
-function findPirCandidates(canvasDb, { subject, senderEmail }) {
-  const candidates = new Set();
-
-  // Pattern matching on subject.
-  for (const re of PIR_NUMBER_RES) {
-    const m = subject.match(re);
-    if (!m) continue;
-    const token = m[1];
-    // Try exact pir_number match first.
-    const byPir = canvasDb
-      .prepare("SELECT id, pir_number FROM pir_requests WHERE pir_number = ?")
-      .get(token);
-    if (byPir) candidates.add(byPir.id);
-    // Then try reference_number match (TEA control numbers).
-    const byRef = canvasDb
-      .prepare(
-        "SELECT id, pir_number FROM pir_requests WHERE reference_number = ? OR reference_number LIKE ?",
-      )
-      .all(token, `%${token}%`);
-    for (const r of byRef) candidates.add(r.id);
-  }
-
-  if (candidates.size === 1) {
-    return canvasDb
-      .prepare(
-        "SELECT id, pir_number, status, recipient_email FROM pir_requests WHERE id = ?",
-      )
-      .get([...candidates][0]);
-  }
-
-  // Fall back to sender-email match: if exactly one ACTIVE row has this
-  // recipient_email, use that.
-  const senderRows = canvasDb
-    .prepare(
-      `SELECT id, pir_number, status, recipient_email
-       FROM pir_requests
-       WHERE LOWER(recipient_email) = ?
-         AND status IN ('pending','processing','clarification')`,
-    )
-    .all(senderEmail);
-  if (senderRows.length === 1) return senderRows[0];
-
-  // Sender + any of the subject candidates → ambiguous, return null and let
-  // the message go to ingest-failed.
-  return null;
 }
 
 function ensureDir(p) {
