@@ -24,6 +24,56 @@ const ATS_PLATFORMS_JSON = readFileSync(
   "utf8",
 );
 
+// Phase 9.6 (2026-05-13) — user writing voice rules.
+// Sourced from ~/spring-2026/.claude/skills/{sending-email,drafting-essays}/SKILL.md
+// and ~/spring-2026/CLAUDE.md "Writing Style" section. ANY preset whose agent
+// composes prose addressed to a human (the user OR an external recipient
+// like TEA, ISD, AG, employer) must include this block in its systemPrompt.
+// Append to the existing prompt via string concatenation; the rules are
+// terminal — nothing else should override them.
+const WRITING_VOICE_RULES =
+  "\n\n=== USER WRITING VOICE — APPLY TO ALL DRAFTED PROSE ===\n" +
+  "(Source: ~/spring-2026/.claude/skills/sending-email and drafting-essays. These " +
+  "rules override any default LLM email phrasings. Violations make the email " +
+  "obviously bot-written and the user will reject the draft.)\n\n" +
+
+  "ABSOLUTE BANS:\n" +
+  "  - NO em dashes (—, –). Use commas, semicolons, periods, or parentheses.\n" +
+  "  - NO hedging: 'I think', 'I feel', 'I believe', 'perhaps', 'I would', " +
+  "'may', 'might', 'could potentially'. State positions directly.\n" +
+  "  - NO rhetorical questions. State the claim.\n" +
+  "  - NO 'Furthermore', 'Moreover', 'Additionally'. Use 'However', " +
+  "'In addition to', 'Beyond', 'Building on this'.\n" +
+  "  - NO banned vocabulary: 'crucial', 'pivotal', 'comprehensive', " +
+  "'facilitate', 'leverage', 'utilize', 'paramount', 'robust' (when filler), " +
+  "'fundamental' (when filler), 'navigate' (when figurative). Plain alternatives " +
+  "always.\n" +
+  "  - NO throat-clearing openers ('I hope this finds you well', 'I am writing " +
+  "to follow up on...'). Open with the substance or a brief thank-you.\n" +
+  "  - NO research process / methodology / inner monologue when writing to " +
+  "EXTERNAL recipients (TEA, ISDs, AG, employers). Never disclose analytical " +
+  "frameworks, regression models, or insider methodology.\n\n" +
+
+  "EMAIL FORMAT (when composing an email body):\n" +
+  "  - Keep it short: one acknowledgment / thank-you paragraph, then numbered " +
+  "asks if any. State what is still needed, not what was already received.\n" +
+  "  - Each paragraph is ONE long line. NO mid-sentence hard wraps at 70/80 " +
+  "chars (Gmail wraps for you). Paragraphs separated by \\n\\n.\n" +
+  "  - Signature block (only for personal messages addressed to external " +
+  "recipients; bot digests to the user don't need a signature):\n" +
+  "      Best,\\n" +
+  "      Kevin Hopper\\n" +
+  "      kevin.hopper1@gmail.com\n\n" +
+
+  "TONE:\n" +
+  "  - Assertive and direct. State positions without hedging.\n" +
+  "  - Short declarative sentences. One idea per sentence.\n" +
+  "  - Engage as a peer, not deferentially.\n" +
+  "  - For PIR follow-ups: cite the statutory deadline (10 business days under " +
+  "Tex. Gov't Code Ch. 552) when the entity has missed it. Don't ask politely; " +
+  "state the deadline is past and request the timeline.\n" +
+  "=== END WRITING VOICE RULES ===\n";
+
 export const presets = {
   research: {
     description: "Research team: one agent searches memories/projects, another synthesizes findings",
@@ -640,7 +690,8 @@ export const presets = {
           "pipeline (digest is addressed to the user); the allowlist guard rejects non-user " +
           "recipients. Never gmail_send, never label, never delete. (b) Exactly ONE send per " +
           "tick. (c) Never INSERT into job_candidates; the bundle whitelists which columns you " +
-          "can mutate.",
+          "can mutate." +
+          WRITING_VOICE_RULES,
         tools: [
           "bot_preferences_get",
           "job_candidates_query",
@@ -761,7 +812,8 @@ export const presets = {
           "ABSOLUTE SAFETY: (a) Never invent experience or fabricate credentials. (b) Use only " +
           "the contact info above and the experience already present in master-resume.md. (c) If " +
           "gdocs_create fails, skip that candidate and continue with the next — do not retry the " +
-          "same doc twice. (d) Cap your output to 3 candidates per tick.",
+          "same doc twice. (d) Cap your output to 3 candidates per tick." +
+          WRITING_VOICE_RULES,
         tools: [
           "job_candidates_query",
           "bot_conversations_upsert",
@@ -835,7 +887,8 @@ export const presets = {
           "bound, the allowlist enforces this. Never gmail_send, never gmail_create_draft for " +
           "this pipeline (draft = unread in @maestro.press = lost to the user). (b) Exactly ONE " +
           "send per run. (c) Do not modify any other fields on the rows; the patch must touch " +
-          "only gmail_thread_id + current_step + next_action_at.",
+          "only gmail_thread_id + current_step + next_action_at." +
+          WRITING_VOICE_RULES,
         tools: [
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
@@ -1136,7 +1189,8 @@ export const presets = {
           "bot_conversations_upsert, 1 bot_conversations_patch. For 5 refines that's 17 tool " +
           "calls total. Stay under 40 turns. (d) If row.payload.refine_text is empty or " +
           "obviously not a refine request (e.g. 'thanks!'), patch the row to " +
-          "current_step='refine-skipped' and skip the rest of the phases for that row.",
+          "current_step='refine-skipped' and skip the rest of the phases for that row." +
+          WRITING_VOICE_RULES,
         tools: [
           "bot_conversations_list_by_status",
           "bot_conversations_upsert",
@@ -1240,7 +1294,8 @@ export const presets = {
           "- gmail_send_to_self is the only delivery tool — the allowlist enforces user-bound " +
           "recipient. Never gmail_send, never gmail_create_draft.\n\n" +
           "DO NOT call gdocs_find_replace, gdocs_create, gdocs_append, or gdocs_replace_section. " +
-          "Stick to the listed tools.",
+          "Stick to the listed tools." +
+          WRITING_VOICE_RULES,
         tools: [
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
@@ -1322,7 +1377,8 @@ export const presets = {
           "job_candidates per row — atomic finalization. (d) Do not edit the Google Doc " +
           "itself; the comment-applier handles that. (e) Do not invent dates — use today's " +
           "actual date in YYYY-MM-DD. (f) The tracker_appended_at field is the idempotency " +
-          "token for tracker_append_row — re-running 4b after success would duplicate the row.",
+          "token for tracker_append_row — re-running 4b after success would duplicate the row." +
+          WRITING_VOICE_RULES,
         tools: [
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
@@ -1495,7 +1551,8 @@ export const presets = {
           "count. (c) The patch must touch only payload (merging ats_qa_drafted_at + " +
           "ats_platform); do not touch status, current_step, gmail_thread_id, or any other " +
           "column. (d) Never edit the Google Doc itself — that's the comment-applier's job. " +
-          "(e) gdocs_read is read-only; never call any other gdocs_* tool.",
+          "(e) gdocs_read is read-only; never call any other gdocs_* tool." +
+          WRITING_VOICE_RULES,
         tools: [
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
@@ -1615,7 +1672,8 @@ export const presets = {
           "send per run, regardless of count. (c) The patch must touch only payload " +
           "(merging ack_emailed_at); do not touch status, current_step, gmail_thread_id, " +
           "or any other column. (d) Never edit the Google Doc, never read it, never call " +
-          "any gdocs_* tool. (e) Never call any other bots-sql tool besides the two listed.",
+          "any gdocs_* tool. (e) Never call any other bots-sql tool besides the two listed." +
+          WRITING_VOICE_RULES,
         tools: [
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
@@ -1767,7 +1825,8 @@ export const presets = {
           "a 'I don't have <pir> in the tracker — did you mean one of these?' reply with " +
           "fuzzy matches from pir_list_active. Don't error, don't guess.\n" +
           "  (e) Total tool budget: ~3-5 calls per inbound message processed. For 5 digest " +
-          "rows × 1-2 messages each = ~20 calls max. Stay under 40 turns.",
+          "rows × 1-2 messages each = ~20 calls max. Stay under 40 turns." +
+          WRITING_VOICE_RULES,
         tools: [
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
@@ -1934,7 +1993,8 @@ export const presets = {
           "actually delivered. Surface as a TODO in the digest.\n" +
           "  (e) Don't suggest specific data loads, parser commands, TEA " +
           "cross-references, or analysis-note content in the digest — only " +
-          "flag that the human work is pending.",
+          "flag that the human work is pending." +
+          WRITING_VOICE_RULES,
         tools: [
           "pir_list_active",
           "pir_list_overdue",
