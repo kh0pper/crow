@@ -62,7 +62,10 @@ const MARKER_FAILED = "job-alerts/ingest-failed";
 const MAX_MESSAGES_PER_LABEL_PER_RUN = 50;
 const HTTP_REDIRECT_TIMEOUT_MS = 5000;
 const HTTP_REDIRECT_MAX_HOPS = 5;
-const LLM_TIMEOUT_MS = 60_000;
+// Local llama-server (qwen3.6-35b-a3b on Strix Halo) is ~50s cold per call,
+// 5-6s warm. With 14KB email body + 20 LinkedIn listings this can comfortably
+// stretch — give it a generous ceiling. See feedback_mpa_pipeline_timeout_raised_15min.
+const LLM_TIMEOUT_MS = 180_000;
 
 function normalize(s) {
   return (s ?? "").toString().trim().toLowerCase().replace(/\s+/g, " ");
