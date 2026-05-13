@@ -1195,21 +1195,60 @@ export const presets = {
           "Every unresolved comment must hit Path A or Path B. NEVER skip silently. NEVER " +
           "leave a comment in any state other than (a) resolved by you, or (b) unresolved with " +
           "your reply added.\n\n" +
+
+          "STEP 3 — NOTIFY USER. For EACH conversation in step 1 where you applied at least " +
+          "ONE comment in step 2 (count Path A + Path B applies; if zero, skip this " +
+          "conversation's notification entirely), send ONE notification email so the user " +
+          "knows to come back and re-review.\n\n" +
+          "  3a. Compose the notification body in markdown:\n\n" +
+          "    # Comments applied on <conversation.payload.employer> — <conversation.payload.title>\n\n" +
+          "    Processed <N> comment<plural> on your draft:\n\n" +
+          "    - <one-line summary per applied comment, in the same order you applied them. " +
+          "Use the summary string you composed for Path A; for Path B reply this is the " +
+          "first 80 chars of your reply content>\n\n" +
+          "    Doc: <conversation.payload.doc_web_view_link>\n\n" +
+          "    Next step: open the doc, review the changes, then either drop more comments " +
+          "to keep iterating, or reply to this email with `looks good — apply 1` to mark " +
+          "the application ready to submit.\n\n" +
+          "  3b. Call gmail_send_to_self EXACTLY ONCE per notified conversation with:\n" +
+          "    to: 'kevin.hopper1@gmail.com'\n" +
+          "    subject: 'Re: Job-Search Drafts ready — Comments applied'\n" +
+          "    body: <the markdown above>\n" +
+          "    thread_id: <conversation.gmail_thread_id>   ← REQUIRED so the email lands on " +
+          "the original notifier thread the user already knows.\n\n" +
+          "  3c. Call bot_conversations_patch with:\n" +
+          "    id: <conversation.id>\n" +
+          "    payload_merge: true   ← critical; without this the row's existing payload is " +
+          "REPLACED, dropping employer/title/url/doc_web_view_link.\n" +
+          "    payload: { last_comment_applied_at: '<NOW_ISO from goal>', " +
+          "last_comment_count: <N from step 2 — your applied-in-this-run count> }\n" +
+          "  Status and current_step stay 'applied' / 'applying' — this is purely an " +
+          "idempotency stamp + cumulative counter.\n\n" +
+          "  If zero comments applied for a conversation (none unresolved, or all skipped by " +
+          "idempotency check at start of step 2), do NOT call gmail_send_to_self or " +
+          "bot_conversations_patch for that conversation. Silent runs are correct — there's " +
+          "nothing for the user to review.\n\n" +
+
           "TOOL CONTRACTS:\n" +
           "- gdocs_apply_comment_edit handles find/replace + reply + resolve atomically. You " +
           "supply only replace_text + summary. The tool fetches the authoritative quoted_text " +
           "from Drive itself — you don't pass it. If data.applied is false, it already left a " +
-          "'could not locate' reply and resolved — move on.\n" +
+          "'could not locate' reply and resolved — move on, and do NOT count this as an " +
+          "applied comment for step 3 (the user's edit didn't actually land).\n" +
           "- gdocs_reply_comment + gdocs_resolve_comment is the fallback for questions / " +
-          "vague comments. Always call both, in that order.\n\n" +
+          "vague comments. Always call both, in that order. These DO count toward step 3.\n" +
+          "- gmail_send_to_self is the only delivery tool — the allowlist enforces user-bound " +
+          "recipient. Never gmail_send, never gmail_create_draft.\n\n" +
           "DO NOT call gdocs_find_replace, gdocs_create, gdocs_append, or gdocs_replace_section. " +
-          "Stick to the four tools above.",
+          "Stick to the listed tools.",
         tools: [
           "bot_conversations_list_by_status",
+          "bot_conversations_patch",
           "gdocs_list_comments",
           "gdocs_apply_comment_edit",
           "gdocs_reply_comment",
           "gdocs_resolve_comment",
+          "gmail_send_to_self",
         ],
         maxTurns: 60,
       },
@@ -1639,11 +1678,25 @@ export const presets = {
           "    - 'draft follow-up for <pir>' / 'follow up on <pir>' / 'nudge <pir>' / " +
           "'send follow-up to <pir>' → call pir_get(pir_number=<pir>) to fetch full row. " +
           "Compose a polite follow-up email body (3-5 sentences) referencing the request's " +
-          "filed_date, reference_number, and description head. Then call gmail_create_draft " +
-          "(NOT gmail_send_to_self — the recipient is TEA/ISD/AG, not the user) with:\n" +
+          "filed_date, reference_number, and description head.\n" +
+          "    THEN find the original PIR thread in the user's PERSONAL inbox " +
+          "(kevin.hopper1@gmail.com — where canvas-companion sends PIRs from, so the " +
+          "responses also arrive there). Call gmail_search_threads_personal with:\n" +
+          "      query: '(to:<row.recipient_email> OR from:<row.recipient_email>) newer_than:120d'\n" +
+          "      max_results: 5\n" +
+          "    Pick the most recent thread (data.threads[0]). If no threads found, the PIR " +
+          "may have been filed via canvas-companion's portal-based form without leaving a " +
+          "Gmail thread — in that case omit thread_id from the next call (a new thread will " +
+          "be created in the user's inbox).\n" +
+          "    Then call gmail_create_draft_personal (NOT gmail_create_draft, NOT " +
+          "gmail_send_to_self — the recipient is TEA/ISD/AG and the draft must live in the " +
+          "user's PERSONAL inbox so they can review + send without logging into the bot " +
+          "account):\n" +
           "      to: <row.recipient_email>\n" +
           "      subject: 'Following up — PIR <pir_number>'\n" +
           "      body: <polite follow-up>\n" +
+          "      thread_id: <data.threads[0].thread_id> (from the personal-account search " +
+          "above; OMIT if the search returned 0 threads)\n" +
           "    Then pir_update_state with all 5 checklist fields, setting " +
           "next_followup_date=<today + 5 business days YYYY-MM-DD> and action_needed='Awaiting " +
           "response after follow-up'.\n\n" +
@@ -1678,11 +1731,15 @@ export const presets = {
           "fields). This prevents re-processing on next tick.\n\n" +
 
           "ABSOLUTE SAFETY:\n" +
-          "  (a) Tool routing by recipient:\n" +
-          "      - gmail_send_to_self for replies TO USER (Q&A, summaries, status queries). " +
-          "Allowlist enforces user-bound recipient.\n" +
-          "      - gmail_create_draft for follow-ups TO PIR SENDERS (TEA, ISDs, AG). NEVER " +
-          "auto-send to them; the user reviews drafts manually.\n" +
+          "  (a) Tool routing by recipient AND account:\n" +
+          "      - gmail_send_to_self → replies TO USER (Q&A, summaries, status queries). " +
+          "Allowlist enforces user-bound recipient. Sends from primary (@maestro.press).\n" +
+          "      - gmail_create_draft_personal → follow-up drafts TO PIR SENDERS (TEA, ISDs, " +
+          "AG, etc.). Lives in the user's personal Gmail (kevin.hopper1) so they can see + " +
+          "send. Use gmail_search_threads_personal first to find the original thread.\n" +
+          "      - gmail_create_draft (primary account) → only if the PIR was originally " +
+          "filed FROM @maestro.press (future PIRs, not legacy). For now ALL existing PIRs in " +
+          "canvas.db were filed from kevin.hopper1, so always use *_personal for follow-ups.\n" +
           "      - Never call gmail_send (raw send to arbitrary recipients).\n" +
           "  (b) pir_update_state is the only tool that mutates pir_requests. Always restate " +
           "all five checklist fields per Step 2.5.\n" +
@@ -1703,6 +1760,8 @@ export const presets = {
           "gmail_get_thread",
           "gmail_send_to_self",
           "gmail_create_draft",
+          "gmail_search_threads_personal",
+          "gmail_create_draft_personal",
         ],
         maxTurns: 40,
       },
