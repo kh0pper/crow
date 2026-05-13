@@ -949,4 +949,66 @@ export const presets = {
       },
     ],
   },
+
+  // Phase 8.4-D (2026-05-12) — finalizer.
+  // Picks up conversations at status='applied' / current_step='ready-to-submit'
+  // (set by reply-parser when user replied 'apply N'), composes a single
+  // 'ready to submit' Gmail draft per batch with a copy-paste tracker row,
+  // transitions each row to current_step='finalized', and marks the linked
+  // job_candidate as status='applied'.
+  // PDF rendering: deferred to Phase 8.5. Tracker file write-back: deferred
+  // to Phase 8.7 (file lives on grackle; needs cross-host hook).
+  "bot-job-search-finalizer": {
+    description:
+      "Phase 8.4-D Finalizer. Picks up conversations at status='applied' AND current_step='ready-to-submit', emits a Gmail draft listing each ready application with a copy-paste tracker row, advances state to 'finalized' and marks job_candidates.status='applied'.",
+    categories: ["addons", "memory"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "application-finalizer",
+        systemPrompt:
+          "You finalize approved job applications. You MUST call tools — never describe.\n\n" +
+          "STEP 1. Call bot_conversations_list_by_status({bot_id:'job-search', status:'applied', " +
+          "current_step:'ready-to-submit', limit:20}). data.rows are the applications the user " +
+          "approved (via reply-parser) but haven't been finalized yet.\n\n" +
+          "If data.count is 0: output 'No applications to finalize' and stop. NO other tool " +
+          "calls.\n\n" +
+          "STEP 2. Compose ONE markdown summary email body. For each row, pull employer + " +
+          "title + url + doc_web_view_link from row.payload. Template:\n" +
+          "  # Applications ready to submit (<count>)\n\n" +
+          "  These drafts are approved. Open each Google Doc, copy the resume + cover letter " +
+          "into the employer's portal, then add the row below to ~/ed-jobs-scraper/notes/" +
+          "applications-2026-summer.md.\n\n" +
+          "  ## 1. <Employer> — <Title>\n" +
+          "  - [Open draft](<doc_web_view_link>)\n" +
+          "  - Posting: <url>\n" +
+          "  - Tracker row: `| <Employer> | <Title> | <url> | <today YYYY-MM-DD> | submitted | " +
+          "<conversation.id> |`\n\n" +
+          "  (repeat per row, numbered)\n\n" +
+          "STEP 3. Call gmail_create_draft EXACTLY ONCE with:\n" +
+          "  to: 'kevin.hopper@maestro.press'\n" +
+          "  subject: 'Ready to submit — <count> applications'\n" +
+          "  body: <the markdown above>\n\n" +
+          "STEP 4. For EACH conversation from STEP 1, two patches:\n" +
+          "  4a. bot_conversations_patch({id: row.id, current_step: 'finalized', " +
+          "next_action_at: null}). Status STAYS 'applied' — the row is fully done.\n" +
+          "  4b. job_candidates_score_update({id: row.payload.job_candidate_id, status: " +
+          "'applied', match_notes: 'Application finalized on ' + <today YYYY-MM-DD> + ' — see " +
+          "bot_conversations.' + row.id}). This is the CANONICAL signal that the candidate has " +
+          "truly applied (not just been drafted).\n\n" +
+          "ABSOLUTE SAFETY: (a) gmail_create_draft is the only delivery tool — never gmail_send. " +
+          "(b) Exactly ONE Gmail draft per run, regardless of count. (c) Always patch BOTH " +
+          "bot_conversations AND job_candidates per row — atomic finalization. (d) Do not edit " +
+          "the Google Doc itself; the comment-applier handles that. (e) Do not invent dates — " +
+          "use today's actual date in YYYY-MM-DD.",
+        tools: [
+          "bot_conversations_list_by_status",
+          "bot_conversations_patch",
+          "job_candidates_score_update",
+          "gmail_create_draft",
+        ],
+        maxTurns: 30,
+      },
+    ],
+  },
 };
