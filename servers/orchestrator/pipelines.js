@@ -744,15 +744,18 @@ export const pipelines = {
       "iterate, will grow once timing is trusted). Apply the rubric in the agent's prompt and " +
       "call job_candidates_score_update on each row, transitioning to 'shortlisted' or " +
       "'rejected' (or 'applied' for already-applied roles).\n\n" +
-      "STEP 2 — draft the digest. Pull the shortlist via job_candidates_query({status:'shortlisted'}), " +
+      "STEP 2 — send the digest. Pull the shortlist via job_candidates_query({status:'shortlisted'}), " +
       "compose ONE markdown digest grouped into three tiers (≥0.75 / 0.55-0.74 / longshots), " +
-      "and call gmail_create_draft exactly once to kevin.hopper@maestro.press with subject " +
-      "'Job-Search Digest — <Monday date>'.\n\n" +
-      "ABSOLUTE RULES: (a) gmail_create_draft is the only delivery tool — never gmail_send. " +
-      "(b) Never re-pick a row whose employer+role appears in bot_preferences.applied_already; " +
-      "the agent marks those as 'applied' on first sight. (c) Always emit exactly one draft " +
-      "per tick even when the shortlist is empty (a one-line 'no shortlisted candidates this " +
-      "week' email is acceptable).",
+      "and call gmail_send_to_self exactly once to kevin.hopper1@gmail.com with subject " +
+      "'Job-Search Digest — <Monday date>'. gmail_send_to_self actually delivers (not drafts) " +
+      "and renders the markdown as HTML so the user sees a formatted digest in their inbox.\n\n" +
+      "ABSOLUTE RULES: (a) gmail_send_to_self is the only delivery tool — the allowlist " +
+      "enforces user-bound recipient. Never gmail_send, never gmail_create_draft (the latter " +
+      "lands in the bot account's Drafts folder where the user never sees it). (b) Never " +
+      "re-pick a row whose employer+role appears in bot_preferences.applied_already; the agent " +
+      "marks those as 'applied' on first sight. (c) Always emit exactly one send per tick even " +
+      "when the shortlist is empty (a one-line 'no shortlisted candidates this week' email is " +
+      "acceptable).",
     preset: "bot-job-search",
     defaultCron: "0 7 * * MON",
     storeResult: false,
@@ -796,10 +799,12 @@ export const pipelines = {
     goal:
       "Run the drafts-notifier agent. It will: (1) list bot_conversations at status='awaiting-user' " +
       "and current_step='draft-created', (2) compose one markdown digest naming each drafted " +
-      "document, (3) call gmail_create_draft exactly once, (4) patch each conversation to " +
+      "document, (3) call gmail_send_to_self exactly once (which actually delivers to the user's " +
+      "inbox with HTML-rendered markdown), (4) patch each conversation to " +
       "current_step='pending-review' with the new gmail_thread_id.\n\n" +
-      "ABSOLUTE RULES: One Gmail draft per run. Never gmail_send. Idempotent — zero work if " +
-      "no rows are pending notification.",
+      "ABSOLUTE RULES: One Gmail send per run. Never gmail_send, never gmail_create_draft " +
+      "(the allowlist on gmail_send_to_self enforces user-bound recipient). Idempotent — zero " +
+      "work if no rows are pending notification.",
     preset: "bot-job-search-notifier",
     defaultCron: "35 7 * * MON",
     storeResult: false,
@@ -897,10 +902,11 @@ export const pipelines = {
       "drafted cover-letter content for grounding, (4) compose ONE Gmail digest threaded " +
       "on the row's gmail_thread_id with platform-specific Q&A per row, (5) patch each row " +
       "with payload.ats_qa_drafted_at + ats_platform as idempotency stamps.\n\n" +
-      "ABSOLUTE RULES: One Gmail draft per run, and it MUST be threaded (pass thread_id " +
-      "to gmail_create_draft). Never gmail_send. Status/current_step are NOT changed — " +
-      "this is post-finalize enrichment. Idempotent — zero work if no rows lack " +
-      "ats_qa_drafted_at.",
+      "ABSOLUTE RULES: One Gmail send per run, and it MUST be threaded (pass thread_id " +
+      "to gmail_send_to_self). Never gmail_send, never gmail_create_draft, never " +
+      "gmail_create_threaded_reply (the latter two still draft and would not appear in " +
+      "the user's inbox). Status/current_step are NOT changed — this is post-finalize " +
+      "enrichment. Idempotent — zero work if no rows lack ats_qa_drafted_at.",
     preset: "bot-job-search-platform-prep",
     defaultCron: "*/15 * * * *",
     storeResult: false,
@@ -927,8 +933,10 @@ export const pipelines = {
       "ack_emailed_at is null, (2) compose ONE Gmail digest summarizing the artifacts " +
       "for each row, (3) post it threaded on the first row's gmail_thread_id, (4) patch " +
       "each row with payload.ack_emailed_at as the idempotency stamp.\n\n" +
-      "ABSOLUTE RULES: One Gmail draft per run, and it MUST be threaded. Never " +
-      "gmail_send. Status/current_step are NOT changed — this is a notification, not a " +
+      "ABSOLUTE RULES: One Gmail send per run, and it MUST be threaded (gmail_send_to_self " +
+      "with thread_id). Never gmail_send, never gmail_create_draft, never " +
+      "gmail_create_threaded_reply (the latter two still draft and would not appear in the " +
+      "user's inbox). Status/current_step are NOT changed — this is a notification, not a " +
       "state transition. Idempotent — zero work if no rows lack ack_emailed_at.",
     preset: "bot-job-search-ack-complete",
     defaultCron: "*/15 * * * *",
@@ -944,7 +952,7 @@ export const pipelines = {
   "bot:pir-tracker:tick": {
     name: "Bot: pir-tracker daily tick",
     description:
-      "Phase 9.1 PIR Tracker Bot daily 7am tick. Lists active PIRs, drafts a polite follow-up Gmail per overdue row (and stamps next_followup_date = today + 5 business days via pir_update_state), summarizes attachment-ingest results since the last tick, and emits ONE markdown digest to kevin.hopper@maestro.press. Single-agent, Tier-1: drafts only. Mutates pir_requests only via pir_update_state (Step 2.5 checklist enforced at the tool boundary).",
+      "Phase 9.1 PIR Tracker Bot daily 7am tick. Lists active PIRs, drafts a polite follow-up Gmail per overdue row (and stamps next_followup_date = today + 5 business days via pir_update_state), summarizes attachment-ingest results since the last tick, and SENDS one markdown digest to kevin.hopper1@gmail.com via gmail_send_to_self (renders markdown as HTML in the user's inbox). Follow-up drafts to PIR senders stay drafts. Single-agent, Tier-1: drafts for external recipients, sends only for the user-bound digest. Mutates pir_requests only via pir_update_state (Step 2.5 checklist enforced at the tool boundary).",
     goal:
       "Today's date is ${TODAY}. The NOW_ISO timestamp for this run is ${NOW_ISO} — " +
       "use this EXACT string as the value of digested_at when you patch each ingested " +
@@ -953,22 +961,26 @@ export const pipelines = {
       "Run the pir-tracker-worker agent through its four phases:\n" +
       "  PHASE 1 — pir_list_active (no args). Build a mental inventory of the active queue.\n" +
       "  PHASE 2 — pir_list_overdue (defaults to today UTC). For each overdue row, draft " +
-      "ONE polite follow-up via gmail_create_draft, then call pir_update_state with all " +
-      "five mandatory checklist fields explicitly restated and next_followup_date set to " +
-      "today + 5 business days.\n" +
+      "ONE polite follow-up via gmail_create_draft (addressed to the PIR recipient — TEA, " +
+      "ISD, etc. — drafts only, never sent), then call pir_update_state with all five " +
+      "mandatory checklist fields explicitly restated and next_followup_date set to today " +
+      "+ 5 business days.\n" +
       "  PHASE 3 — bot_conversations_list_by_status({bot_id:'pir-tracker', " +
       "status:'awaiting-user', current_step:'response-arrived'}). Summarize for the " +
       "digest, then bot_conversations_patch each to current_step='digest-included' with " +
       "payload_merge:true and payload.digested_at=${NOW_ISO}.\n" +
-      "  PHASE 4 — compose and gmail_create_draft ONE markdown digest to " +
-      "kevin.hopper@maestro.press, subject 'PIR Tracker Digest — ${TODAY}'. Sections " +
-      "are skipped when empty.\n\n" +
-      "ABSOLUTE RULES: (a) gmail_create_draft is the only delivery tool — never " +
-      "gmail_send, never any other Gmail-emitting tool. (b) pir_update_state is the only " +
-      "tool that mutates pir_requests; raw SQL is not in the tool list anyway. (c) Never " +
-      "auto-advance status to 'received' or 'partial' when attachments arrive — surface " +
-      "as TODO in the digest. (d) Don't propose specific data-load SQL or TEA " +
-      "cross-references in the draft content — flag the human work in the digest TODOs.",
+      "  PHASE 4 — compose and gmail_send_to_self ONE markdown digest to " +
+      "kevin.hopper1@gmail.com, subject 'PIR Tracker Digest — ${TODAY}'. The send_to_self " +
+      "path actually delivers (not a draft) and renders markdown as HTML so the user gets " +
+      "a formatted digest in their inbox. Sections are skipped when empty.\n\n" +
+      "ABSOLUTE RULES: (a) Tool routing by recipient: gmail_send_to_self for the user's " +
+      "digest (kevin.hopper1@gmail.com only — allowlist enforces this); gmail_create_draft " +
+      "for PIR follow-ups (TEA, ISDs, AG, etc. — drafts only, NEVER auto-sent). Never call " +
+      "gmail_send. (b) pir_update_state is the only tool that mutates pir_requests; raw " +
+      "SQL is not in the tool list anyway. (c) Never auto-advance status to 'received' or " +
+      "'partial' when attachments arrive — surface as TODO in the digest. (d) Don't " +
+      "propose specific data-load SQL or TEA cross-references in the draft content — flag " +
+      "the human work in the digest TODOs.",
     preset: "bot-pir-tracker",
     defaultCron: "0 7 * * *",
     storeResult: false,

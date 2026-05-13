@@ -614,10 +614,12 @@ export const presets = {
           "  - <same row format>\n\n" +
           "  ## Longshots\n" +
           "  - <any remaining shortlisted rows>\n\n" +
-          "Then call gmail_create_draft EXACTLY ONCE with to='kevin.hopper1@gmail.com', " +
+          "Then call gmail_send_to_self EXACTLY ONCE with to='kevin.hopper1@gmail.com', " +
           "subject='Job-Search Digest — <Monday date>', body=<the markdown above>. CAPTURE the " +
-          "returned data.thread_id. If the shortlist is empty, draft a single-line email " +
-          "confirming the run still happened (and skip PHASE 4 since there's nothing to select).\n\n" +
+          "returned data.thread_id. gmail_send_to_self actually delivers (not drafts) and " +
+          "renders the markdown as HTML — exactly what the user needs to see. If the shortlist " +
+          "is empty, send a single-line email confirming the run still happened (and skip " +
+          "PHASE 4 since there's nothing to select).\n\n" +
           "PHASE 4 — RECORD TICK DIGEST (only when the shortlist is non-empty). The user replies " +
           "to the digest with selection language like 'yes to spring isd' / 'draft 1,3' / 'pick " +
           "huntsville and yorktown'. The reply-reader needs an anchor row to map those selections " +
@@ -634,15 +636,17 @@ export const presets = {
           "same numbered order]\n" +
           "  }\n" +
           "Idempotent: re-running on the same Monday upserts the same row.\n\n" +
-          "ABSOLUTE SAFETY RULES: (a) gmail_create_draft is the only delivery tool — never " +
-          "gmail_send, never label, never delete. (b) Exactly ONE draft per tick. (c) Never " +
-          "INSERT into job_candidates; the bundle whitelists which columns you can mutate.",
+          "ABSOLUTE SAFETY RULES: (a) gmail_send_to_self is the only delivery tool for THIS " +
+          "pipeline (digest is addressed to the user); the allowlist guard rejects non-user " +
+          "recipients. Never gmail_send, never label, never delete. (b) Exactly ONE send per " +
+          "tick. (c) Never INSERT into job_candidates; the bundle whitelists which columns you " +
+          "can mutate.",
         tools: [
           "bot_preferences_get",
           "job_candidates_query",
           "job_candidates_score_update",
           "bot_conversations_upsert",
-          "gmail_create_draft",
+          "gmail_send_to_self",
         ],
         maxTurns: 60,
       },
@@ -803,11 +807,13 @@ export const presets = {
           "  - [Open draft](<doc_web_view_link>)\n" +
           "  - Posting: <url>\n\n" +
           "  ## 2. <Employer> — <Title>\n  ... (repeat per row, numbered)\n\n" +
-          "STEP 3. Call gmail_create_draft EXACTLY ONCE with:\n" +
+          "STEP 3. Call gmail_send_to_self EXACTLY ONCE with:\n" +
           "  to: 'kevin.hopper1@gmail.com'\n" +
           "  subject: 'Job-Search Drafts ready — <count> documents'\n" +
           "  body: <the markdown above>\n" +
-          "Capture data.thread_id (or data.threadId — whichever Gmail returns) from the response.\n\n" +
+          "gmail_send_to_self actually delivers (not drafts) and renders markdown as HTML, so " +
+          "the digest lands in the user's inbox properly formatted. Capture the returned " +
+          "data.thread_id from the response.\n\n" +
           "STEP 4. For EACH conversation from STEP 1, call bot_conversations_patch with:\n" +
           "  id: <conversation.id>\n" +
           "  gmail_thread_id: <thread id from STEP 3>\n" +
@@ -823,15 +829,17 @@ export const presets = {
           "after some rows have already been processed.\n" +
           "Status stays 'awaiting-user'. This advances each row in the state machine so it won't " +
           "appear in the next notifier run.\n\n" +
-          "Total tool calls: 1 (list) + 1 (gmail_create_draft) + N (patch, one per row). For N=3 " +
+          "Total tool calls: 1 (list) + 1 (gmail_send_to_self) + N (patch, one per row). For N=3 " +
           "that's 5 calls. Stay under 25 turns.\n\n" +
-          "ABSOLUTE SAFETY: (a) gmail_create_draft is the only delivery tool — never gmail_send. " +
-          "(b) Exactly ONE gmail draft per run. (c) Do not modify any other fields on the rows; " +
-          "the patch must touch only gmail_thread_id + current_step + next_action_at.",
+          "ABSOLUTE SAFETY: (a) gmail_send_to_self is the only delivery tool — digest is user-" +
+          "bound, the allowlist enforces this. Never gmail_send, never gmail_create_draft for " +
+          "this pipeline (draft = unread in @maestro.press = lost to the user). (b) Exactly ONE " +
+          "send per run. (c) Do not modify any other fields on the rows; the patch must touch " +
+          "only gmail_thread_id + current_step + next_action_at.",
         tools: [
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
-          "gmail_create_draft",
+          "gmail_send_to_self",
         ],
         maxTurns: 25,
       },
@@ -1061,10 +1069,12 @@ export const presets = {
           "  - Tracker row appended: `| <Employer> | <Title> | <url> | <today YYYY-MM-DD> | " +
           "submitted | <conversation.id> |`\n\n" +
           "  (repeat per row, numbered)\n\n" +
-          "STEP 3. Call gmail_create_draft EXACTLY ONCE with:\n" +
+          "STEP 3. Call gmail_send_to_self EXACTLY ONCE with:\n" +
           "  to: 'kevin.hopper1@gmail.com'\n" +
           "  subject: 'Ready to submit — <count> applications'\n" +
-          "  body: <the markdown above>\n\n" +
+          "  body: <the markdown above>\n" +
+          "gmail_send_to_self actually delivers (not drafts) and renders markdown as HTML — " +
+          "the digest is user-bound, so it must land in the inbox.\n\n" +
           "STEP 4. For EACH conversation from STEP 1, run these calls in order:\n" +
           "  4a. Compose the tracker row text:\n" +
           "      `| <Employer> | <Title> | <url> | <today YYYY-MM-DD> | submitted | <conversation.id> |`\n" +
@@ -1084,19 +1094,20 @@ export const presets = {
           "truly applied (not just been drafted).\n" +
           "  If tracker_append_row fails for any reason, skip 4c and 4d for THIS row — the row " +
           "will be retried next tick. The other rows in this batch are independent; keep going.\n\n" +
-          "ABSOLUTE SAFETY: (a) gmail_create_draft is the only delivery tool — never gmail_send. " +
-          "(b) Exactly ONE Gmail draft per run, regardless of count. (c) Always patch BOTH " +
-          "bot_conversations AND job_candidates per row — atomic finalization. (d) Do not edit " +
-          "the Google Doc itself; the comment-applier handles that. (e) Do not invent dates — " +
-          "use today's actual date in YYYY-MM-DD. (f) The tracker_appended_at field is the " +
-          "idempotency token for tracker_append_row — re-running 4b after success would " +
-          "duplicate the row.",
+          "ABSOLUTE SAFETY: (a) gmail_send_to_self is the only delivery tool here — digest is " +
+          "user-bound, the allowlist enforces it. Never gmail_send, never gmail_create_draft " +
+          "(drafts vanish into @maestro.press's unread Drafts folder). (b) Exactly ONE Gmail " +
+          "send per run, regardless of count. (c) Always patch BOTH bot_conversations AND " +
+          "job_candidates per row — atomic finalization. (d) Do not edit the Google Doc " +
+          "itself; the comment-applier handles that. (e) Do not invent dates — use today's " +
+          "actual date in YYYY-MM-DD. (f) The tracker_appended_at field is the idempotency " +
+          "token for tracker_append_row — re-running 4b after success would duplicate the row.",
         tools: [
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
           "job_candidates_score_update",
           "tracker_append_row",
-          "gmail_create_draft",
+          "gmail_send_to_self",
         ],
         maxTurns: 30,
       },
@@ -1224,10 +1235,10 @@ export const presets = {
           "  - Anything the cover letter doesn't support → leave a `[placeholder]` for the " +
           "user to fill in. Don't invent specifics.\n\n" +
 
-          "STEP 6. Call gmail_create_threaded_reply EXACTLY ONCE. This tool has four " +
-          "REQUIRED parameters; the schema enforces them, so the call will fail if " +
-          "thread_id is missing.\n" +
-          "  Parameters (all required):\n" +
+          "STEP 6. Call gmail_send_to_self EXACTLY ONCE. The Q&A digest is user-bound (the " +
+          "allowlist enforces this) and delivers as a threaded reply on the application's " +
+          "existing Gmail thread.\n" +
+          "  Parameters:\n" +
           "    to: 'kevin.hopper1@gmail.com'\n" +
           "    subject: 'ATS application Q&A — <count> applications'\n" +
           "    body: <the markdown above>\n" +
@@ -1237,7 +1248,8 @@ export const presets = {
           "gmail_thread_id — the digest naturally bundles them all so threading on one " +
           "of the chains is acceptable. DO NOT call this tool once per row. Use " +
           "row.gmail_thread_id (the COLUMN), not row.payload.gmail_thread_id (which " +
-          "does not exist).\n\n" +
+          "does not exist). gmail_send_to_self actually delivers (not drafts) and renders " +
+          "markdown as HTML — required since the user reads in kevin.hopper1's inbox.\n\n" +
 
           "STEP 7. For EACH filtered row, call bot_conversations_patch with:\n" +
           "  id: <conversation.id>\n" +
@@ -1252,21 +1264,22 @@ export const presets = {
           "current_step='finalized'. This patch is purely an enrichment + idempotency stamp.\n\n" +
 
           "Total tool calls: 1 (list) + N (gdocs_read, one per filtered row) + 1 " +
-          "(gmail_create_draft) + N (patch). For N=3 that's 8 calls; for N=10 (the cap) " +
+          "(gmail_send_to_self) + N (patch). For N=3 that's 8 calls; for N=10 (the cap) " +
           "that's 22. Stay under 30 turns.\n\n" +
 
-          "ABSOLUTE SAFETY: (a) gmail_create_threaded_reply is the only delivery tool — " +
-          "never gmail_send, never gmail_create_draft. (b) Exactly ONE Gmail draft per " +
-          "run, regardless of count. (c) The patch must touch only payload (merging " +
-          "ats_qa_drafted_at + ats_platform); do not touch status, current_step, " +
-          "gmail_thread_id, or any other column. (d) Never edit the Google Doc itself — " +
-          "that's the comment-applier's job. (e) gdocs_read is read-only; never call any " +
-          "other gdocs_* tool.",
+          "ABSOLUTE SAFETY: (a) gmail_send_to_self is the only delivery tool — Q&A digest " +
+          "is user-bound. Never gmail_send, never gmail_create_draft, never " +
+          "gmail_create_threaded_reply (the latter still drafts and would re-introduce the " +
+          "inbox-visibility regression). (b) Exactly ONE Gmail send per run, regardless of " +
+          "count. (c) The patch must touch only payload (merging ats_qa_drafted_at + " +
+          "ats_platform); do not touch status, current_step, gmail_thread_id, or any other " +
+          "column. (d) Never edit the Google Doc itself — that's the comment-applier's job. " +
+          "(e) gdocs_read is read-only; never call any other gdocs_* tool.",
         tools: [
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
           "gdocs_read",
-          "gmail_create_threaded_reply",
+          "gmail_send_to_self",
         ],
         maxTurns: 30,
       },
@@ -1341,10 +1354,10 @@ export const presets = {
           "  - Keep the digest concise; do NOT restate the Q&A or PDF contents — link " +
           "to them instead.\n\n" +
 
-          "STEP 3. Call gmail_create_threaded_reply EXACTLY ONCE. This tool has four " +
-          "REQUIRED parameters; the schema enforces them, so the call will fail if " +
-          "thread_id is missing.\n" +
-          "  Parameters (all required):\n" +
+          "STEP 3. Call gmail_send_to_self EXACTLY ONCE. The recipient is user-bound (the " +
+          "allowlist enforces this) and the digest delivers as a threaded reply on the " +
+          "application's existing Gmail thread.\n" +
+          "  Parameters:\n" +
           "    to: 'kevin.hopper1@gmail.com'\n" +
           "    subject: '✓ Bot work complete — <count> application<plural>'\n" +
           "    body: <the markdown above>\n" +
@@ -1354,7 +1367,9 @@ export const presets = {
           "gmail_thread_id — the digest naturally bundles them all so threading on one " +
           "of the chains is acceptable. DO NOT call this tool once per row. Use " +
           "row.gmail_thread_id (the COLUMN), not row.payload.gmail_thread_id (which " +
-          "does not exist).\n\n" +
+          "does not exist). gmail_send_to_self actually delivers (not drafts) and renders " +
+          "markdown as HTML — required since the user reads in kevin.hopper1's inbox, not " +
+          "the bot account's Drafts folder.\n\n" +
 
           "STEP 4. For EACH filtered row, call bot_conversations_patch with:\n" +
           "  id: <conversation.id>\n" +
@@ -1369,19 +1384,21 @@ export const presets = {
           "current_step='finalized'. This patch is purely an idempotency stamp so the " +
           "next 15-minute tick does not re-send the same ack.\n\n" +
 
-          "Total tool calls: 1 (list) + 1 (gmail_create_threaded_reply) + N (patch). " +
+          "Total tool calls: 1 (list) + 1 (gmail_send_to_self) + N (patch). " +
           "For N=3 that's 5 calls; for N=10 (the cap) that's 12. Stay under 30 turns.\n\n" +
 
-          "ABSOLUTE SAFETY: (a) gmail_create_threaded_reply is the only delivery tool — " +
-          "never gmail_send, never gmail_create_draft. (b) Exactly ONE Gmail draft per " +
-          "run, regardless of count. (c) The patch must touch only payload (merging " +
-          "ack_emailed_at); do not touch status, current_step, gmail_thread_id, or any " +
-          "other column. (d) Never edit the Google Doc, never read it, never call any " +
-          "gdocs_* tool. (e) Never call any other bots-sql tool besides the two listed.",
+          "ABSOLUTE SAFETY: (a) gmail_send_to_self is the only delivery tool — digest is " +
+          "user-bound, the allowlist enforces this. Never gmail_send, never " +
+          "gmail_create_draft, never gmail_create_threaded_reply (the latter still drafts " +
+          "and would re-introduce the inbox-visibility regression). (b) Exactly ONE Gmail " +
+          "send per run, regardless of count. (c) The patch must touch only payload " +
+          "(merging ack_emailed_at); do not touch status, current_step, gmail_thread_id, " +
+          "or any other column. (d) Never edit the Google Doc, never read it, never call " +
+          "any gdocs_* tool. (e) Never call any other bots-sql tool besides the two listed.",
         tools: [
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
-          "gmail_create_threaded_reply",
+          "gmail_send_to_self",
         ],
         maxTurns: 30,
       },
@@ -1510,17 +1527,23 @@ export const presets = {
           "are more, add a final line '+ <N> more — see canvas-companion UI'.\n" +
           "  - Status counts come from PHASE 1's row list (count by status).\n\n" +
 
-          "Then call gmail_create_draft EXACTLY ONCE with:\n" +
-          "  to: 'kevin.hopper@maestro.press'\n" +
+          "Then call gmail_send_to_self EXACTLY ONCE with:\n" +
+          "  to: 'kevin.hopper1@gmail.com'\n" +
           "  subject: 'PIR Tracker Digest — <today YYYY-MM-DD>'\n" +
           "  body: <the markdown above>\n" +
-          "Exactly ONE digest draft per tick, regardless of how many overdue " +
-          "rows or new responses exist.\n\n" +
+          "Exactly ONE digest per tick, regardless of how many overdue rows or " +
+          "new responses exist. gmail_send_to_self actually delivers the email " +
+          "(not a draft) and renders the markdown as HTML — that's correct here " +
+          "because the digest is addressed to the user, not to a PIR recipient.\n\n" +
 
           "ABSOLUTE SAFETY RULES:\n" +
-          "  (a) gmail_create_draft is the only delivery tool — never " +
-          "gmail_send, never gmail_create_threaded_reply, never any other " +
-          "Gmail-emitting tool.\n" +
+          "  (a) Tool routing by recipient: gmail_send_to_self for the user " +
+          "(kevin.hopper1@gmail.com only) — actually delivers, renders markdown. " +
+          "gmail_create_draft for PIR senders (TEA, ISDs, AG, etc.) — drafts " +
+          "only, never sent automatically. NEVER use gmail_send_to_self with a " +
+          "recipient_email pulled from pir_requests; the allowlist will reject " +
+          "it. NEVER use gmail_create_draft to email the user — they don't " +
+          "check the bot's Drafts folder.\n" +
           "  (b) pir_update_state is the only tool that mutates pir_requests. " +
           "Never call bots_sql_exec or any raw-SQL surface (it isn't in your " +
           "tool list anyway).\n" +
@@ -1540,6 +1563,7 @@ export const presets = {
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
           "gmail_create_draft",
+          "gmail_send_to_self",
         ],
         maxTurns: 60,
       },
