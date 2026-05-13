@@ -979,6 +979,38 @@ export const pipelines = {
     resultCategory: null,
   },
 
+  // Phase 9.4 (2026-05-13) — PIR conversational layer.
+  // Polls every 15 min for user replies on PIR digest threads
+  // (bot_conversations rows at bot_id='pir-tracker', status='awaiting-user',
+  // current_step='tick-digest'). Parses commands like 'mark received 2503540',
+  // 'draft follow-up for HARM-PPE-2', 'what's the status of 2504156?' and
+  // either executes bounded actions (status update via pir_update_state) or
+  // composes a Q&A reply via gmail_send_to_self. Follow-up emails TO PIR
+  // senders stay as drafts (gmail_create_draft).
+  "bot:pir-tracker:converse": {
+    name: "Bot: pir-tracker conversational layer (Phase 9.4)",
+    description:
+      "Phase 9.4 PIR conversational layer. Polls user replies on PIR digest threads every 15 min. Parses natural-language commands (mark received, withdraw, draft follow-up) or questions (show me status, list PIRs by recipient) and either executes bounded pir_update_state actions or composes a contextualized Q&A reply via gmail_send_to_self threaded on the digest. Follow-up drafts TO PIR senders stay as gmail_create_draft.",
+    goal:
+      "Today's date is ${TODAY}. The NOW_ISO timestamp for this run is ${NOW_ISO}.\n\n" +
+      "Run the pir-converse-worker agent. It will: (1) list pir-tracker digest rows at " +
+      "status='awaiting-user' / current_step='tick-digest', (2) for each, fetch the Gmail " +
+      "thread and walk new inbound messages since row.last_user_msg_at, (3) parse each " +
+      "message's intent — status update / follow-up draft / status query / list / unparseable, " +
+      "(4) execute the action (pir_update_state for status changes, gmail_create_draft for " +
+      "follow-up drafts TO TEA/districts, gmail_send_to_self for Q&A replies TO the user), " +
+      "(5) update each digest row's last_user_msg_at watermark.\n\n" +
+      "ABSOLUTE RULES: (a) Tool routing by recipient — gmail_send_to_self for user replies, " +
+      "gmail_create_draft for PIR senders, never gmail_send. (b) pir_update_state is the " +
+      "only mutator of pir_requests; all five Step 2.5 checklist fields must be restated on " +
+      "every call. (c) Never auto-advance status to 'received' without explicit user command. " +
+      "(d) Idempotent: re-runs on the same thread skip messages older than last_user_msg_at.",
+    preset: "bot-pir-tracker-converse",
+    defaultCron: "*/15 * * * *",
+    storeResult: false,
+    resultCategory: null,
+  },
+
   // Phase 9.1 (2026-05-13) — PIR Tracker Bot daily tick.
   // Pairs with the bot-pir-tracker preset. Triggered by a row in the
   // schedules table at cron '0 7 * * *' (daily 7am CDT). The Gmail
