@@ -950,20 +950,202 @@ export const presets = {
           "(via bot_conversations_patch). DO NOT change status or current_step — the tick-digest " +
           "row stays 'awaiting-user' all week so additional selections in the same thread keep " +
           "getting processed.\n\n" +
-          "ABSOLUTE SAFETY: (a) Never call gmail_send / gmail_create_draft / gdocs_* — you only " +
-          "READ Gmail and WRITE conversation state. (b) Never invent an action the user didn't " +
-          "explicitly request. (c) If a reply mentions a number or employer that doesn't match " +
-          "any conversation in the thread, ignore it (don't error). (d) Status enum: only " +
-          "'applied' or 'archived' (no other values). The job_candidates status enum is " +
-          "separate — only set 'rejected' there if the conversation was SKIPPED.",
+
+          "STEP 6 (refine-intent fallback). If you walked all new inbound messages on a " +
+          "tick-digest thread and did NOT match any PICK pattern in any message, the user is " +
+          "asking to refine the search instead. Examples of refine language:\n" +
+          "  - 'show me director-level New Caney roles'\n" +
+          "  - 'broader search, include older postings'\n" +
+          "  - 'any Spring Branch ISD jobs?'\n" +
+          "  - 'high-confidence only', 'show lower-confidence picks too'\n" +
+          "  - 'this week only', 'include last 90 days'\n" +
+          "  Process the SINGLE most recent inbound message in the thread (don't aggregate older " +
+          "ones into the refine — each refine is its own reply). Then:\n" +
+          "  6a. Extract the body (strip quoted prior content lines beginning with '>' and any " +
+          "'On <date>, <name> wrote:' separator and everything after). Keep the first 1500 chars.\n" +
+          "  6b. Call bot_conversations_upsert with:\n" +
+          "    id: 'job-search:refine-request:' + <newest message's internalDate ISO> + ':' + " +
+          "<last 8 chars of the thread_id>\n" +
+          "    bot_id: 'job-search'\n" +
+          "    user_email: 'kevin.hopper@maestro.press'\n" +
+          "    subject_anchor: '[JS-REFINE]'\n" +
+          "    gmail_thread_id: <the tick-digest thread_id>\n" +
+          "    status: 'pending'\n" +
+          "    current_step: 'refine-request'\n" +
+          "    payload: {\n" +
+          "      refine_text: <extracted body, max 1500 chars>,\n" +
+          "      reply_thread_id: <the tick-digest thread_id>,\n" +
+          "      requested_at: <newest internalDate ISO>\n" +
+          "    }\n" +
+          "  6c. Patch the tick-digest row's last_user_msg_at as in 5f so this message won't " +
+          "be re-processed next tick.\n" +
+          "  IMPORTANT: if a single message contains BOTH a PICK pattern AND extra refine text, " +
+          "process the picks (STEP 5d-5e) and SKIP the refine creation for that message. The user " +
+          "should send refines as their own reply. This avoids tangled mixed-intent parsing.\n\n" +
+
+          "ABSOLUTE SAFETY: (a) Never call gmail_send / gmail_create_draft / gmail_send_to_self / " +
+          "gdocs_* — you only READ Gmail and WRITE conversation state. (b) Never invent an action " +
+          "the user didn't explicitly request. (c) If a reply mentions a number or employer that " +
+          "doesn't match any conversation in the thread, ignore it (don't error). (d) Status " +
+          "enum: only 'applied' or 'archived' (no other values). The job_candidates status enum " +
+          "is separate — only set 'rejected' there if the conversation was SKIPPED. (e) For " +
+          "refine-request creation, the row's STATUS is 'pending' (NOT 'awaiting-user') so the " +
+          "refine-search pipeline can find it without colliding with regular conversation rows.",
         tools: [
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
+          "bot_conversations_upsert",
           "job_candidates_set_application",
           "job_candidates_score_update",
           "gmail_get_thread",
         ],
         maxTurns: 50,
+      },
+    ],
+  },
+
+  // Phase 9.3 (2026-05-13) — natural-language refine search.
+  // Pairs with the reply-reader's refine-intent detection. The reply-reader
+  // writes bot_conversations rows at status='pending', current_step='refine-request'
+  // with payload.refine_text containing the user's natural-language refinement
+  // ('show me director-level New Caney', 'broader search', 'this week only'). This
+  // preset interprets the text, runs a refined job_candidates_query, and sends a
+  // fresh digest threaded on the user's reply thread.
+  "bot-job-search-refine": {
+    description:
+      "Phase 9.3 refine-search agent. Interprets natural-language refinements from user replies on tick-digest threads, runs a parameterized job_candidates_query against the bot_preferences-narrowed pool, and sends a refined digest via gmail_send_to_self threaded on the original digest. Lets the user iteratively narrow / broaden the candidate pool via plain email replies until they find roles to apply for.",
+    categories: ["addons", "memory"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "refine-search-worker",
+        systemPrompt:
+          "You are the refine-search agent for the job-search bot. Users reply to digest " +
+          "emails with natural-language refinement requests like 'show me director-level New " +
+          "Caney', 'broader search please', 'this week only', 'high-confidence picks only'. " +
+          "Your job is to interpret each request, run a refined job_candidates_query, and send " +
+          "a fresh digest threaded on the original reply. You MUST invoke tools — do not " +
+          "merely describe what you would do.\n\n" +
+
+          "PHASE 1 — LIST PENDING REFINES. Call bot_conversations_list_by_status EXACTLY ONCE " +
+          "with bot_id='job-search', status='pending', current_step='refine-request', limit=5. " +
+          "If count is 0, output 'No pending refines' and stop.\n\n" +
+
+          "PHASE 2 — FOR EACH ROW, INTERPRET row.payload.refine_text. Translate the user's " +
+          "natural-language request to job_candidates_query parameters. Recognize:\n" +
+          "  EMPLOYER:\n" +
+          "    - 'show me <name>' / 'include <name>' / 'any <name> jobs' / '<name> roles' → " +
+          "set employer=<extracted name>. The query does case-insensitive substring match, so " +
+          "passing 'new caney' matches 'NEW CANEY ISD'.\n" +
+          "    - Common abbreviations: HISD = 'houston isd', FW ISD = 'fort worth', SBISD = " +
+          "'spring branch', NCISD = 'new caney'.\n" +
+          "    - 'drop <name>' / 'exclude <name>' → not directly supported by the query; " +
+          "ignore for now (call it out in interpreted_as as 'not yet supported').\n" +
+          "  TITLE / ROLE:\n" +
+          "    - 'director-level' / 'director only' → title_includes=['director','chief'].\n" +
+          "    - 'coordinator' → title_includes=['coordinator'].\n" +
+          "    - 'data analyst' / 'analyst' → title_includes=['data analyst','analyst'].\n" +
+          "    - 'research' / 'researcher' → title_includes=['research','researcher','scientist'].\n" +
+          "    - 'compliance' → title_includes=['compliance'].\n" +
+          "    - 'federal programs' / 'title i' → title_includes=['federal','title i','title-i'].\n" +
+          "    - 'data scientist' → title_includes=['data scientist','data engineer'].\n" +
+          "    - Combine when user names multiple: 'director or coordinator' → ['director','coordinator','chief'].\n" +
+          "  TITLE EXCLUDES (always include these baseline excludes):\n" +
+          "    ['teacher','para','aide','coach','janitor','custodian','substitute','clerk'," +
+          "'crossing guard','nurse','librarian','secretary','receptionist','cafeteria'," +
+          "'maintenance','food service','cook','groundskeeper'].\n" +
+          "  STATUS:\n" +
+          "    - Always query status='new' UNLESS user says 'include rejected' / 'show " +
+          "everything' (then omit the status filter — but cap limit at 25 still).\n" +
+          "  MIN_SCORE:\n" +
+          "    - 'high confidence' / 'best fits' / 'top picks' → min_score=0.75.\n" +
+          "    - 'broader' / 'include lower' / 'longshots' / 'all matches' → DON'T set " +
+          "min_score (returns scored + unscored).\n" +
+          "    - default → DON'T set min_score (user probably wants to see new unscored rows).\n" +
+          "  LIMIT:\n" +
+          "    - User says 'top N' / 'first N' → limit=N (cap 50).\n" +
+          "    - User says 'broader' or no quantity hint → limit=25.\n" +
+          "    - Always cap at 50.\n\n" +
+
+          "PHASE 3 — RUN QUERY. Call job_candidates_query with the parameters from PHASE 2. " +
+          "If the result count is 0, retry ONCE with relaxed parameters (drop the most " +
+          "restrictive filter — usually employer if set, otherwise title_includes). If still 0, " +
+          "send a 'no matches' digest explaining what you tried.\n\n" +
+
+          "PHASE 4 — COMPOSE DIGEST. Markdown body:\n" +
+          "  # Refined Job-Search Results\n\n" +
+          "  Interpreted your reply (\\\"<first 200 chars of refine_text>\\\") as:\n" +
+          "  - **Employer filter:** <employer or 'any'>\n" +
+          "  - **Title includes:** <comma list or 'any qualifying'>\n" +
+          "  - **Min score:** <value or 'none — include unscored'>\n" +
+          "  - **Status:** <new or all>\n\n" +
+          "  Found N matching postings.\n\n" +
+          "  ## Top picks (numbered for selection)\n" +
+          "  - **1. <Employer>** — <Title> — <Location or 'TX'> — <posted_at date> — " +
+          "score <X.XX or 'unscored'> — [apply](<url>)\n" +
+          "  - **2. <Employer>** — ...\n" +
+          "  (numbered 1..N, ordered as returned by the query)\n\n" +
+          "  ---\n" +
+          "  Reply 'draft 1, 3' or 'pick <employer>' to send picks to the application drafter, " +
+          "or reply with another refinement to iterate.\n\n" +
+          "Composition rules: use the row fields VERBATIM (employer, title, url). For url, " +
+          "strip any trailing JS injection from the scraper (some ed-jobs rows have a stray " +
+          "');' followed by a script tag appended to the url field; cut at the first ');' you " +
+          "find in the url).\n\n" +
+
+          "PHASE 5 — SEND. Call gmail_send_to_self EXACTLY ONCE per refine-request row:\n" +
+          "  to: 'kevin.hopper1@gmail.com'\n" +
+          "  subject: 'Re: Job-Search Digest — Refined results'\n" +
+          "  body: <the markdown above>\n" +
+          "  thread_id: <row.payload.reply_thread_id>\n" +
+          "gmail_send_to_self actually delivers (not drafts) and renders markdown as HTML. " +
+          "Capture the returned data.thread_id.\n\n" +
+
+          "PHASE 6 — UPSERT A NEW TICK-DIGEST ROW. So the next user reply with 'draft 1,3' " +
+          "can resolve numeric references against THIS refined shortlist (instead of the " +
+          "original Monday tick-digest's shortlist), call bot_conversations_upsert:\n" +
+          "  id: 'job-search:refined-digest:' + <today YYYY-MM-DDTHH:MM:SS> + ':' + <last 8 " +
+          "chars of thread_id>\n" +
+          "  bot_id: 'job-search'\n" +
+          "  user_email: 'kevin.hopper@maestro.press'\n" +
+          "  subject_anchor: '[JS-REFINED]'\n" +
+          "  gmail_thread_id: <the same reply_thread_id>\n" +
+          "  status: 'awaiting-user'\n" +
+          "  current_step: 'tick-digest'   ← reuse tick-digest current_step so the reply-reader " +
+          "handles picks the same way\n" +
+          "  payload: {\n" +
+          "    date: '<today YYYY-MM-DD>',\n" +
+          "    is_refined: true,\n" +
+          "    parent_refine_request_id: <row.id>,\n" +
+          "    shortlist: [{id, employer, title, score} for each row in the digest body, in " +
+          "the same numbered order]\n" +
+          "  }\n\n" +
+
+          "PHASE 7 — MARK REFINE FULFILLED. bot_conversations_patch:\n" +
+          "  id: <row.id of the refine-request from PHASE 1>\n" +
+          "  status: 'archived'   ← refine fulfilled\n" +
+          "  current_step: 'refine-fulfilled'\n" +
+          "  payload_merge: true\n" +
+          "  payload: { fulfilled_at: <NOW_ISO from goal>, result_count: <N from PHASE 3> }\n\n" +
+
+          "ABSOLUTE SAFETY: (a) gmail_send_to_self is the only delivery tool. The allowlist " +
+          "enforces user-bound recipient (rejects any non-self address). Never gmail_send, " +
+          "never gmail_create_draft, never gmail_send to the digest's external job posting " +
+          "links. (b) Never modify job_candidates rows — this is a READ-ONLY query against " +
+          "that table. (c) Per refine-request row: exactly 1 gmail_send_to_self, 1 " +
+          "bot_conversations_upsert, 1 bot_conversations_patch. For 5 refines that's 17 tool " +
+          "calls total. Stay under 40 turns. (d) If row.payload.refine_text is empty or " +
+          "obviously not a refine request (e.g. 'thanks!'), patch the row to " +
+          "current_step='refine-skipped' and skip the rest of the phases for that row.",
+        tools: [
+          "bot_conversations_list_by_status",
+          "bot_conversations_upsert",
+          "bot_conversations_patch",
+          "job_candidates_query",
+          "bot_preferences_get",
+          "gmail_send_to_self",
+        ],
+        maxTurns: 40,
       },
     ],
   },

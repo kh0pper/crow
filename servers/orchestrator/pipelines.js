@@ -944,6 +944,41 @@ export const pipelines = {
     resultCategory: null,
   },
 
+  // Phase 9.3 (2026-05-13) — natural-language refine-search.
+  // Polls every 15 min for refine-request rows the reply-reader has written
+  // (status='pending', current_step='refine-request'). For each: interprets
+  // the user's natural-language refine_text into a parameterized
+  // job_candidates_query, runs it, and SENDS a refined digest via
+  // gmail_send_to_self threaded on the user's reply thread. Lets the user
+  // iteratively narrow / broaden the candidate pool until they find roles
+  // they want to apply for.
+  "bot:job-search:refine-search": {
+    name: "Bot: job-search refine search (Phase 9.3)",
+    description:
+      "Phase 9.3 refine-search. Polls bot_conversations at status='pending' AND current_step='refine-request' (written by the reply-reader when it detects a non-PICK reply on a tick-digest thread). Interprets the natural-language refine_text into job_candidates_query parameters, runs the query, and SENDS a refined digest via gmail_send_to_self threaded on the original reply. Lets the user iteratively narrow / broaden the candidate pool via plain email replies until they find roles to apply for.",
+    goal:
+      "Today's date is ${TODAY}. The NOW_ISO timestamp for this run is ${NOW_ISO} — use " +
+      "this EXACT string as the value of fulfilled_at when you patch each refine-request " +
+      "row in PHASE 7. Never invent or guess a timestamp.\n\n" +
+      "Run the refine-search-worker agent. It will: (1) list pending refine-request rows " +
+      "(up to 5), (2) interpret each row's natural-language refine_text into query " +
+      "parameters (employer, title_includes, min_score, limit, etc.), (3) run " +
+      "job_candidates_query, (4) compose a numbered digest of matching postings, (5) SEND " +
+      "the digest threaded on the user's reply via gmail_send_to_self, (6) upsert a new " +
+      "tick-digest-style bot_conversations row with the refined shortlist so the " +
+      "reply-reader can resolve numeric picks ('draft 1, 3') against the refined results, " +
+      "(7) mark the refine-request row as fulfilled.\n\n" +
+      "ABSOLUTE RULES: (a) gmail_send_to_self is the only delivery tool — the allowlist " +
+      "enforces user-bound recipient. Never gmail_send, never gmail_create_draft. (b) " +
+      "job_candidates is READ-ONLY for this pipeline; never write to it. (c) Exactly one " +
+      "Gmail send per refine-request row. (d) If the query returns 0 rows, send a " +
+      "'no matches' digest explaining the interpreted filters so the user can adjust.",
+    preset: "bot-job-search-refine",
+    defaultCron: "*/15 * * * *",
+    storeResult: false,
+    resultCategory: null,
+  },
+
   // Phase 9.1 (2026-05-13) — PIR Tracker Bot daily tick.
   // Pairs with the bot-pir-tracker preset. Triggered by a row in the
   // schedules table at cron '0 7 * * *' (daily 7am CDT). The Gmail
