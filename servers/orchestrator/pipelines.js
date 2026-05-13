@@ -906,4 +906,33 @@ export const pipelines = {
     storeResult: false,
     resultCategory: null,
   },
+
+  // Phase 8.6.B (2026-05-12) — Post-finalize completion acknowledgment.
+  // For each bot_conversations row that has reached current_step='finalized'
+  // AND has both payload.pdf_rendered_at and payload.ats_qa_drafted_at
+  // stamped (meaning every downstream step — finalizer, PDF render, and
+  // ATS Q&A draft — has completed), emits a single Gmail digest summarizing
+  // the artifacts produced and threaded on the existing application thread.
+  // Idempotent via payload.ack_emailed_at.
+  "bot:job-search:ack-complete": {
+    name: "Bot: job-search completion ack (Phase 8.6.B)",
+    description:
+      "Phase 8.6.B completion-acknowledgment. Picks up bot_conversations at current_step='finalized' where both payload.pdf_rendered_at and payload.ats_qa_drafted_at are stamped AND payload.ack_emailed_at is still null. Drafts a single Gmail digest threaded on the application's existing gmail_thread_id summarizing the source Doc, PDFs, tracker append, and ATS Q&A draft. Idempotent via payload.ack_emailed_at stamp.",
+    goal:
+      "Today's date is ${TODAY}. The NOW_ISO timestamp for this run is ${NOW_ISO} — " +
+      "use this EXACT string as the value of ack_emailed_at when you patch each " +
+      "conversation in STEP 4. Never invent or guess a timestamp.\n\n" +
+      "Run the ack-complete agent. It will: (1) list finalized bot_conversations and " +
+      "filter to those where pdf_rendered_at + ats_qa_drafted_at are present but " +
+      "ack_emailed_at is null, (2) compose ONE Gmail digest summarizing the artifacts " +
+      "for each row, (3) post it threaded on the first row's gmail_thread_id, (4) patch " +
+      "each row with payload.ack_emailed_at as the idempotency stamp.\n\n" +
+      "ABSOLUTE RULES: One Gmail draft per run, and it MUST be threaded. Never " +
+      "gmail_send. Status/current_step are NOT changed — this is a notification, not a " +
+      "state transition. Idempotent — zero work if no rows lack ack_emailed_at.",
+    preset: "bot-job-search-ack-complete",
+    defaultCron: "*/15 * * * *",
+    storeResult: false,
+    resultCategory: null,
+  },
 };
