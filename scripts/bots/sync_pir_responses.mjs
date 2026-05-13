@@ -35,8 +35,15 @@ import { google } from "/home/kh0pp/crow/node_modules/googleapis/build/src/index
 
 const MPA_DB = "/home/kh0pp/.crow-mpa/data/crow.db";
 const CANVAS_DB = "/home/kh0pp/spring-2026/canvas-companion/db/canvas.db";
-const TOKEN_PATH = "/home/kh0pp/.config/google-workspace-mcp-mpa/gws-token.json";
-const CREDS_PATH = "/home/kh0pp/.config/google-workspace-mcp-mpa/credentials.json";
+// OAuth defaults to kevin.hopper1@gmail.com (the account canvas-companion sends
+// PIRs from, so PIR responses arrive there). Override via env vars for testing
+// against the @maestro.press account.
+const TOKEN_PATH =
+  process.env.PIR_GMAIL_TOKEN_PATH
+  || "/home/kh0pp/.config/google-workspace-mcp/token.json";
+const CREDS_PATH =
+  process.env.PIR_GMAIL_CREDS_PATH
+  || "/home/kh0pp/.config/google-workspace-mcp/credentials.json";
 
 const SOURCES_ROOT = "/home/kh0pp/spring-2026/insd-5941/sources";
 const INCOMING_DIR = path.join(SOURCES_ROOT, "pir-incoming");
