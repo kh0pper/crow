@@ -1235,10 +1235,57 @@ export const presets = {
           "data.comments:\n\n" +
           "    Skip if comment.replies array is non-empty and ANY reply.author == 'Kevin Hopper' " +
           "(idempotency: the bot already responded).\n\n" +
-          "    For every other comment, you MUST call exactly one tool sequence. Choose:\n\n" +
-          "    Path A — comment has comment.quoted_text AND content asks for an edit:\n" +
-          "      Compose replace_text (the new text the highlighted region should become). Apply " +
-          "the user's instruction:\n" +
+          "    For every other comment, you MUST call exactly one tool sequence. Decide which " +
+          "path based on comment.content (case-insensitive). Check Path C FIRST since it can " +
+          "match comments that also have quoted_text:\n\n" +
+
+          "    Path C — RULE-APPLICATION intent. The comment is asking the bot to apply a " +
+          "global writing rule across the doc rather than do a narrow find/replace. Trigger " +
+          "phrases include: 'no em dash', 'no emdash', 'remove em dash', 'remove dash', 'fix " +
+          "em dash', 'no dashes', 'rewrite per rules', 'rewrite per the rules', 'per the " +
+          "writing rules', 'per our writing rules', 'follow the writing rules', 'apply the " +
+          "rules', 'no hedging', 'remove hedging', 'no banned vocab', 'plain language', " +
+          "'tighten everything', 'tighten the whole', 'fix the whole letter', 'fix the cover " +
+          "letter', 'rewrite the cover letter'. (Substring match — 'no emdashes - per our " +
+          "writing rules' matches both 'no emdash' and 'per our writing rules'.)\n\n" +
+          "      C1. Call gdocs_read({doc_id}) ONCE to fetch the full doc body as markdown.\n" +
+          "      C2. Identify each violation of the rule(s) the user invoked. For em-dashes: " +
+          "every '—' (U+2014); also catch '–' (U+2013) when it's used between words rather " +
+          "than between numeric date ranges (e.g. 'February 2023 – Present' is a date range, " +
+          "keep it; 'McKinney-Vento – the district's program' is an en-dash being used as a " +
+          "dash, replace it). For banned vocab: each instance of 'crucial', 'pivotal', " +
+          "'comprehensive', 'facilitate', 'leverage', 'utilize', 'paramount', 'robust', " +
+          "'fundamental', 'navigate' (figurative). For hedging: 'I think', 'I believe', " +
+          "'I feel', 'perhaps', 'may', 'might', 'could potentially', 'I would'. For throat-" +
+          "clearing openers: 'I hope this finds you well', 'I am writing to follow up on'.\n" +
+          "      C3. For EACH violation, build a (find, replace) pair where `find` is the " +
+          "violating string PLUS enough surrounding context (5-12 words on each side) to make " +
+          "it unique in the doc, and `replace` is the corrected version. Decide replacement " +
+          "punctuation by context: em-dash separating clauses → comma or semicolon; em-dash " +
+          "introducing a parenthetical → parentheses (open + close, so the pair becomes two " +
+          "finds — one for the opening dash, one for the closing dash); em-dash before a " +
+          "list item → colon. Keep the surrounding context VERBATIM (same words, same " +
+          "punctuation, same casing) so the find string matches the doc text exactly.\n" +
+          "      C4. Call gdocs_find_replace({doc_id, pairs: [<all the (find, replace) " +
+          "pairs from C3>]}) ONCE as a single batch. The tool returns total_changes + per-pair " +
+          "occurrences. Note pairs with occurrences=0 — those didn't match (usually because " +
+          "the surrounding context wasn't unique). Don't retry; just count what landed.\n" +
+          "      C5. Compose summary: '<N> change<plural> applied per <rule cited by user>. " +
+          "<short detail of largest cluster, e.g. \"6 em-dashes replaced with commas in the " +
+          "summary and cover letter paragraphs\">.' If any pairs returned occurrences=0, " +
+          "append: 'Note: <K> change<plural> did not land — the surrounding context may " +
+          "have shifted; comment again with a more specific highlight if needed.'\n" +
+          "      C6. Call gdocs_reply_comment({doc_id, comment_id: comment.id, content: " +
+          "<summary>}) THEN gdocs_resolve_comment({doc_id, comment_id: comment.id}). DONE. " +
+          "Move to next comment.\n\n" +
+
+          "    Path A — TARGETED EDIT. Comment has comment.quoted_text AND content asks for a " +
+          "narrow change to that specific region (not a global rule). Trigger phrases: " +
+          "'tighten' (when the highlight is short, 1-3 lines), 'concise', 'shorter', 'drop', " +
+          "'remove', 'delete', 'replace with X', 'change to X', 'add X', 'mention X', and " +
+          "anything else that targets the visible highlight.\n" +
+          "      Compose replace_text (the new text the highlighted region should become). " +
+          "Apply the user's instruction:\n" +
           "        'tighten' / 'concise' / 'shorter' → cut 30-50%, keep concrete nouns/verbs.\n" +
           "        'drop' / 'remove' / 'delete' → '' (empty string).\n" +
           "        'replace with X' / 'change to X' → use X.\n" +
@@ -1246,27 +1293,34 @@ export const presets = {
           "      Compose a one-sentence summary (e.g. 'Tightened the degree line, dropped the " +
           "parenthetical').\n" +
           "      Call gdocs_apply_comment_edit({doc_id, comment_id: comment.id, replace_text, " +
-          "summary}). DONE. Move to next comment.\n\n" +
+          "summary}). The tool now leaves the comment UNRESOLVED if it can't find the quoted " +
+          "text (truncated or doc-edited); next tick the idempotency check will skip it because " +
+          "of the bot's own reply. data.applied=false means the edit didn't land. Move to next " +
+          "comment.\n\n" +
+
           "    Path B — comment is a question or untargeted (no quoted_text, or content is just " +
           "asking why):\n" +
           "      Call gdocs_reply_comment({doc_id, comment_id: comment.id, content: '<your " +
           "answer>'}).\n" +
           "      Call gdocs_resolve_comment({doc_id, comment_id: comment.id}).\n" +
           "      DONE. Move to next comment.\n\n" +
-          "Every unresolved comment must hit Path A or Path B. NEVER skip silently. NEVER " +
+
+          "Every unresolved comment must hit Path A, B, or C. NEVER skip silently. NEVER " +
           "leave a comment in any state other than (a) resolved by you, or (b) unresolved with " +
-          "your reply added.\n\n" +
+          "your reply added (Path A failures and Path C don't both happen — C resolves itself).\n\n" +
 
           "STEP 3 — NOTIFY USER. For EACH conversation in step 1 where you applied at least " +
-          "ONE comment in step 2 (count Path A + Path B applies; if zero, skip this " +
-          "conversation's notification entirely), send ONE notification email so the user " +
-          "knows to come back and re-review.\n\n" +
+          "ONE comment in step 2 (count Path A successful applies + Path B replies + Path C " +
+          "rule-applications; if zero, skip this conversation's notification entirely), send " +
+          "ONE notification email so the user knows to come back and re-review. Path A " +
+          "failures (data.applied=false) do NOT count — the bot's reply on the doc is the " +
+          "user's notification path for those.\n\n" +
           "  3a. Compose the notification body in markdown:\n\n" +
           "    # Comments applied on <conversation.payload.employer> — <conversation.payload.title>\n\n" +
           "    Processed <N> comment<plural> on your draft:\n\n" +
           "    - <one-line summary per applied comment, in the same order you applied them. " +
-          "Use the summary string you composed for Path A; for Path B reply this is the " +
-          "first 80 chars of your reply content>\n\n" +
+          "Use the summary string you composed for Path A and Path C; for Path B reply this " +
+          "is the first 80 chars of your reply content>\n\n" +
           "    Doc: <conversation.payload.doc_web_view_link>\n\n" +
           "    Next step: open the doc, review the changes, then either drop more comments " +
           "to keep iterating, or reply to this email with `looks good — apply 1` to mark " +
@@ -1291,23 +1345,30 @@ export const presets = {
           "nothing for the user to review.\n\n" +
 
           "TOOL CONTRACTS:\n" +
-          "- gdocs_apply_comment_edit handles find/replace + reply + resolve atomically. You " +
-          "supply only replace_text + summary. The tool fetches the authoritative quoted_text " +
-          "from Drive itself — you don't pass it. If data.applied is false, it already left a " +
-          "'could not locate' reply and resolved — move on, and do NOT count this as an " +
-          "applied comment for step 3 (the user's edit didn't actually land).\n" +
+          "- gdocs_apply_comment_edit handles find/replace + reply + (formerly resolve) for " +
+          "Path A. You supply only replace_text + summary; the tool fetches authoritative " +
+          "quoted_text from Drive itself. If data.applied is false, the tool left an " +
+          "UNRESOLVED reply explaining the failure mode (truncated highlight vs doc edited). " +
+          "data.reason tells you which: 'truncated_quote' or 'no_match'. Move on and do NOT " +
+          "count this as an applied comment for step 3 — the user's edit didn't land.\n" +
+          "- gdocs_read returns the full doc body as markdown. Use it in Path C step C1.\n" +
+          "- gdocs_find_replace takes pairs:[{find, replace}, ...] and returns per-pair " +
+          "occurrences plus total_changes. Use it in Path C step C4 as a single batch. Each " +
+          "find must have enough surrounding context to be UNIQUE in the doc; otherwise it " +
+          "replaces the wrong instance or returns occurrences=0.\n" +
           "- gdocs_reply_comment + gdocs_resolve_comment is the fallback for questions / " +
-          "vague comments. Always call both, in that order. These DO count toward step 3.\n" +
+          "vague comments (Path B) and the closer for Path C. Always call both, in that order.\n" +
           "- gmail_send_to_self is the only delivery tool — the allowlist enforces user-bound " +
           "recipient. Never gmail_send, never gmail_create_draft.\n\n" +
-          "DO NOT call gdocs_find_replace, gdocs_create, gdocs_append, or gdocs_replace_section. " +
-          "Stick to the listed tools." +
+          "DO NOT call gdocs_create, gdocs_append, or gdocs_replace_section." +
           WRITING_VOICE_RULES,
         tools: [
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
           "gdocs_list_comments",
+          "gdocs_read",
           "gdocs_apply_comment_edit",
+          "gdocs_find_replace",
           "gdocs_reply_comment",
           "gdocs_resolve_comment",
           "gmail_send_to_self",
@@ -1356,8 +1417,14 @@ export const presets = {
           "  to: 'kevin.hopper1@gmail.com'\n" +
           "  subject: 'Ready to submit — <count> applications'\n" +
           "  body: <the markdown above>\n" +
+          "  thread_id: <the gmail_thread_id COLUMN of the first row from STEP 1>\n" +
           "gmail_send_to_self actually delivers (not drafts) and renders markdown as HTML — " +
-          "the digest is user-bound, so it must land in the inbox.\n\n" +
+          "the digest is user-bound, so it must land in the inbox. Threading note: all rows " +
+          "approved in the same digest share the notifier's thread_id, so picking the first " +
+          "row's gmail_thread_id keeps the entire approval-to-finalize conversation on ONE " +
+          "thread. If the first row has no gmail_thread_id (legacy data), omit thread_id and " +
+          "log a warning in your final output — but the current finalizer queue should always " +
+          "carry a thread_id since the notifier stamps it.\n\n" +
           "STEP 4. For EACH conversation from STEP 1, run these calls in order:\n" +
           "  4a. Compose the tracker row text:\n" +
           "      `| <Employer> | <Title> | <url> | <today YYYY-MM-DD> | submitted | <conversation.id> |`\n" +
@@ -1834,14 +1901,19 @@ export const presets = {
           "links to https://mail.google.com/mail/u/0/#inbox/<thread_id> — emit that)\n" +
           "      - suggested next actions (e.g. 'Want me to draft a follow-up? Reply " +
           "\\\"draft follow-up for <pir>\\\". Or mark received: \\\"mark received <pir>\\\"')\n" +
-          "    Then call gmail_send_to_self threaded on the digest's gmail_thread_id with " +
+          "    Then call gmail_send_to_self with REQUIRED parameters: " +
           "to='kevin.hopper1@gmail.com', subject='Re: PIR Tracker Digest — <pir>', body=<the " +
-          "markdown summary>.\n\n" +
+          "markdown summary>, thread_id=<the gmail_thread_id of the PHASE 1 / PHASE 2 digest " +
+          "row you're currently processing>. The thread_id MUST be present — NEVER let this " +
+          "reply land on a new thread, the user expects all PIR conversational replies to stay " +
+          "on the digest thread.\n\n" +
           "  LIST / BROWSE — produces a Q&A reply enumerating PIRs:\n" +
           "    - 'show me <recipient_domain>' / 'list HISD PIRs' / 'what's pending with TEA?' " +
           "→ call pir_list_active (no args) then filter in-memory by recipient_email " +
           "substring match against the user's request. Compose a markdown table grouped by " +
-          "status. Send via gmail_send_to_self threaded.\n\n" +
+          "status. Call gmail_send_to_self with: to='kevin.hopper1@gmail.com', subject='Re: " +
+          "PIR Tracker Digest — <filter>', body=<the markdown table>, thread_id=<the " +
+          "gmail_thread_id of the digest row you're processing>. thread_id is REQUIRED.\n\n" +
           "  UNPARSEABLE — message doesn't match any pattern:\n" +
           "    - Skip the message. Don't error. Don't guess. The next reply will give the " +
           "user another chance.\n\n" +
