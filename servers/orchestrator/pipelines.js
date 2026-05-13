@@ -734,6 +734,8 @@ export const pipelines = {
     description:
       "Phase 8 Job Search Bot weekly digest. Runs scout (scores job_candidates against bot_preferences) then digest-writer (composes Mon-morning Gmail draft). Tier-1: drafts only, no sends. Pathway A (ed-jobs ingest) populates job_candidates continuously via mpa-edjobs-sync.timer; this tick is the LLM-driven scoring + delivery step.",
     goal:
+      "Today's date is ${TODAY}. Use this for any date you need to write (subject line, body) — " +
+      "never invent or infer dates from training data.\n\n" +
       "Single-agent weekly job-search digest. The job-search-worker agent does scoring + " +
       "digest composition in one conversation (multi-agent coordinator-dispatch hangs; see " +
       "presets.js comment).\n\n" +
@@ -767,6 +769,8 @@ export const pipelines = {
     description:
       "Phase 8.4-A drafter. For each shortlisted job_candidates row missing application_id, generates a tailored resume + cover letter Google Doc, records the doc in bot_conversations, and links the candidate. Tier-1 safety: Gmail drafts only, never sends; never invents experience.",
     goal:
+      "Today's date is ${TODAY}. Use this for the cover-letter [Date] header — never invent or " +
+      "infer dates from training data.\n\n" +
       "Run the application-drafter agent. It will: (1) query shortlisted candidates without an " +
       "application_id, (2) read master-resume.md and relevant tailored variants from the " +
       "jobsearch-notes mirror, (3) for each candidate (up to 3 per tick) generate a Google Doc " +
@@ -807,18 +811,19 @@ export const pipelines = {
   // conversations to status='applied' (ready-to-submit) or 'archived'
   // (user-rejected). Idempotent via last_user_msg_at watermark.
   "bot:job-search:process-replies": {
-    name: "Bot: job-search reply reader (Phase 8.4-B)",
+    name: "Bot: job-search reply reader (Phase 8.4-B + Polish #2 tick-digest path)",
     description:
-      "Phase 8.4-B reply reader. Polls user replies on draft-digest threads, parses apply/skip/looks-good actions, and advances bot_conversations rows. Idempotent: skips messages older than last_user_msg_at.",
+      "Phase 8.4-B reply reader. Polls user replies on BOTH draft-digest threads (current_step='pending-review') and weekly tick-digest threads (current_step='tick-digest'). Parses apply/skip/looks-good on draft threads, parses yes-to/draft/pick on tick threads (sets user_priority). Idempotent: skips messages older than last_user_msg_at.",
     goal:
       "Run the reply-reader agent. It will: (1) list bot_conversations at status='awaiting-user' " +
-      "and current_step='pending-review', (2) group by gmail_thread_id, (3) for each thread " +
-      "fetch messages and parse user actions (apply/skip/looks-good with numbers or employer " +
-      "names), (4) patch each matched conversation to status='applied' or 'archived', and (5) " +
-      "for skipped rows, also clear job_candidates.application_id so the candidate is eligible " +
-      "for re-shortlisting.\n\n" +
-      "ABSOLUTE RULES: Read-only on Gmail (no draft, no send). Only write conversation state and " +
-      "(on skip) clear application_id. Idempotent — safe to run every 15 min.",
+      "(both pending-review and tick-digest), (2) group by gmail_thread_id and dispatch by " +
+      "current_step, (3a) for pending-review threads, parse apply/skip/looks-good and advance " +
+      "each matched conversation, clearing application_id + flipping candidate status on skip, " +
+      "(3b) for tick-digest threads, parse 'yes to <N|employer>' / 'draft <…>' / 'pick <…>' / " +
+      "'top N' and call job_candidates_score_update with user_priority=1 for each resolved " +
+      "candidate id (the drafter then picks user-priority rows first next tick).\n\n" +
+      "ABSOLUTE RULES: Read-only on Gmail (no draft, no send). Only write conversation state, " +
+      "candidate user_priority/match_notes/status. Idempotent — safe to run every 15 min.",
     preset: "bot-job-search-replyreader",
     defaultCron: "*/15 * * * *",
     storeResult: false,
@@ -858,6 +863,8 @@ export const pipelines = {
     description:
       "Phase 8.4-D finalizer. Picks up bot_conversations at status='applied' AND current_step='ready-to-submit' (set by reply-parser). Emits one Gmail digest with a copy-paste tracker row per row, transitions each conversation to current_step='finalized', and sets job_candidates.status='applied'. Idempotent.",
     goal:
+      "Today's date is ${TODAY}. Use this exact YYYY-MM-DD value in every tracker row and in " +
+      "match_notes — never invent or infer dates.\n\n" +
       "Run the application-finalizer agent. It will: (1) list bot_conversations ready to " +
       "finalize, (2) emit a single 'Ready to submit' Gmail draft listing each application with " +
       "a copy-paste tracker row, (3) patch each conversation to current_step='finalized' and " +
@@ -866,6 +873,35 @@ export const pipelines = {
       "ABSOLUTE RULES: One Gmail draft per run. Never gmail_send. Atomic per-row " +
       "(bot_conversations + job_candidates both updated).",
     preset: "bot-job-search-finalizer",
+    defaultCron: "*/15 * * * *",
+    storeResult: false,
+    resultCategory: null,
+  },
+
+  // Phase 8.6 (2026-05-12) — ATS application-questions intelligence.
+  // For each finalized application, detects the ATS platform from the posting
+  // URL and emits a Gmail reply with ready-to-paste answers to the platform's
+  // typical application questions. Idempotent via payload.ats_qa_drafted_at.
+  // Threads on the row's existing gmail_thread_id (the notifier's thread).
+  "bot:job-search:platform-prep": {
+    name: "Bot: job-search ATS platform-prep (Phase 8.6)",
+    description:
+      "Phase 8.6 ATS Q&A drafter. Picks up bot_conversations at current_step='finalized' AND payload.ats_qa_drafted_at IS NULL. Detects the ATS platform (TEDK12, Workday, Greenhouse, etc.) from row.payload.url via ats_platforms.json substring matching, generates ready-to-paste answers per the registry's question set, and drafts a Gmail reply on the existing thread. Idempotent via payload.ats_qa_drafted_at stamp.",
+    goal:
+      "Today's date is ${TODAY}. The NOW_ISO timestamp for this run is ${NOW_ISO} — " +
+      "use this EXACT string as the value of ats_qa_drafted_at when you patch each " +
+      "conversation in STEP 7. Never invent or guess a timestamp.\n\n" +
+      "Run the platform-prep agent. It will: (1) list finalized bot_conversations whose " +
+      "payload.ats_qa_drafted_at is still null, (2) detect the ATS platform for each from the " +
+      "embedded ats_platforms.json registry, (3) call gdocs_read per row to fetch the " +
+      "drafted cover-letter content for grounding, (4) compose ONE Gmail digest threaded " +
+      "on the row's gmail_thread_id with platform-specific Q&A per row, (5) patch each row " +
+      "with payload.ats_qa_drafted_at + ats_platform as idempotency stamps.\n\n" +
+      "ABSOLUTE RULES: One Gmail draft per run, and it MUST be threaded (pass thread_id " +
+      "to gmail_create_draft). Never gmail_send. Status/current_step are NOT changed — " +
+      "this is post-finalize enrichment. Idempotent — zero work if no rows lack " +
+      "ats_qa_drafted_at.",
+    preset: "bot-job-search-platform-prep",
     defaultCron: "*/15 * * * *",
     storeResult: false,
     resultCategory: null,

@@ -15,6 +15,9 @@
  *
  * Supported placeholders:
  *   ${TODAY}       today's date in America/Chicago as YYYY-MM-DD
+ *   ${NOW_ISO}     current wall-clock as full ISO-8601 with milliseconds and Z
+ *                  (e.g. 2026-05-13T02:33:00.000Z). Sync — resolved at dispatch
+ *                  time, same instant for every reference within one goal.
  *   ${INSTANCE_ID} this gateway's local instance UUID
  *
  * LLM-scoped capture variables like ${EVENTS}, ${THREADS}, ${BRIEFING_ID}
@@ -77,15 +80,18 @@ async function buildReliabilitySummary() {
 
 /** Substitute only the sync placeholders (${TODAY}, ${INSTANCE_ID}). */
 export function substituteGoalPlaceholders(goal) {
+  const now = new Date();
   const today = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Chicago",
     year: "numeric", month: "2-digit", day: "2-digit",
-  }).format(new Date());
+  }).format(now);
+  const nowIso = now.toISOString();
 
   const instanceId = getOrCreateLocalInstanceId();
 
   return goal
     .replaceAll("${TODAY}", today)
+    .replaceAll("${NOW_ISO}", nowIso)
     .replaceAll("${INSTANCE_ID}", instanceId);
 }
 

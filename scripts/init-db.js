@@ -163,6 +163,10 @@ await addColumnIfMissing("glasses_photos", "minio_key", "TEXT");
 // LLM consolidation (Phase 1): cloud-provider tag + per-message model recording.
 await addColumnIfMissing("providers", "provider_type", "TEXT");
 await addColumnIfMissing("chat_messages", "model_id", "TEXT");
+// Polish #2 (2026-05-12): user_priority gates the drafter's per-tick choice
+// when the user replies "yes to spring isd" on a Monday digest. NULL = no
+// explicit pick; convention is `1 = user-picked this week`.
+await addColumnIfMissing("job_candidates", "user_priority", "INTEGER");
 
 await initTable("sources FTS index", `
   CREATE VIRTUAL TABLE IF NOT EXISTS sources_fts USING fts5(
@@ -1685,6 +1689,7 @@ await initTable("job_candidates table", `
     status          TEXT NOT NULL DEFAULT 'new',
     match_score     REAL,
     match_notes     TEXT,
+    user_priority   INTEGER,
     shown_in_digest_id TEXT,
     application_id  TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
