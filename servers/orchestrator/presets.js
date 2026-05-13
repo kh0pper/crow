@@ -883,4 +883,70 @@ export const presets = {
       },
     ],
   },
+
+  // Phase 8.4-C (2026-05-12) — comment-applier.
+  // Polls Google Docs for unresolved user comments on active drafts, applies
+  // the requested edits via gdocs_find_replace, replies with a summary, and
+  // resolves the comment. Conservative defaults: only acts on comments with
+  // explicit quoted context; vague comments are flagged in a reply but not
+  // acted on.
+  "bot-job-search-commentapplier": {
+    description:
+      "Phase 8.4-C Comment Applier. Polls Google Docs for unresolved user comments on the bot's draft application docs, applies inline edits, replies with a summary, and resolves the comment.",
+    categories: ["addons", "memory"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "comment-applier",
+        systemPrompt:
+          "You apply user comments on Google Docs. You MUST call tools — never describe.\n\n" +
+          "STEP 1. Call bot_conversations_list_by_status({bot_id:'job-search', status:'applied', " +
+          "limit:20}). For each row in data.rows, take its google_doc_id (used in step 2).\n\n" +
+          "If data.count is 0: output 'No applied conversations' and stop.\n\n" +
+          "STEP 2. For EACH google_doc_id from step 1:\n\n" +
+          "  Call gdocs_list_comments({doc_id, include_resolved:false}). For each comment in " +
+          "data.comments:\n\n" +
+          "    Skip if comment.replies array is non-empty and ANY reply.author == 'Kevin Hopper' " +
+          "(idempotency: the bot already responded).\n\n" +
+          "    For every other comment, you MUST call exactly one tool sequence. Choose:\n\n" +
+          "    Path A — comment has comment.quoted_text AND content asks for an edit:\n" +
+          "      Compose replace_text (the new text the highlighted region should become). Apply " +
+          "the user's instruction:\n" +
+          "        'tighten' / 'concise' / 'shorter' → cut 30-50%, keep concrete nouns/verbs.\n" +
+          "        'drop' / 'remove' / 'delete' → '' (empty string).\n" +
+          "        'replace with X' / 'change to X' → use X.\n" +
+          "        'add X' / 'mention X' → keep original + append X naturally.\n" +
+          "      Compose a one-sentence summary (e.g. 'Tightened the degree line, dropped the " +
+          "parenthetical').\n" +
+          "      Call gdocs_apply_comment_edit({doc_id, comment_id: comment.id, replace_text, " +
+          "summary}). DONE. Move to next comment.\n\n" +
+          "    Path B — comment is a question or untargeted (no quoted_text, or content is just " +
+          "asking why):\n" +
+          "      Call gdocs_reply_comment({doc_id, comment_id: comment.id, content: '<your " +
+          "answer>'}).\n" +
+          "      Call gdocs_resolve_comment({doc_id, comment_id: comment.id}).\n" +
+          "      DONE. Move to next comment.\n\n" +
+          "Every unresolved comment must hit Path A or Path B. NEVER skip silently. NEVER " +
+          "leave a comment in any state other than (a) resolved by you, or (b) unresolved with " +
+          "your reply added.\n\n" +
+          "TOOL CONTRACTS:\n" +
+          "- gdocs_apply_comment_edit handles find/replace + reply + resolve atomically. You " +
+          "supply only replace_text + summary. The tool fetches the authoritative quoted_text " +
+          "from Drive itself — you don't pass it. If data.applied is false, it already left a " +
+          "'could not locate' reply and resolved — move on.\n" +
+          "- gdocs_reply_comment + gdocs_resolve_comment is the fallback for questions / " +
+          "vague comments. Always call both, in that order.\n\n" +
+          "DO NOT call gdocs_find_replace, gdocs_create, gdocs_append, or gdocs_replace_section. " +
+          "Stick to the four tools above.",
+        tools: [
+          "bot_conversations_list_by_status",
+          "gdocs_list_comments",
+          "gdocs_apply_comment_edit",
+          "gdocs_reply_comment",
+          "gdocs_resolve_comment",
+        ],
+        maxTurns: 60,
+      },
+    ],
+  },
 };

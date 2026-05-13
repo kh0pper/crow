@@ -824,4 +824,27 @@ export const pipelines = {
     storeResult: false,
     resultCategory: null,
   },
+
+  // Phase 8.4-C (2026-05-12) — comment applier.
+  // Polls Google Docs every 15 min for unresolved user comments on 'applied'
+  // conversations. Applies inline edits via gdocs_find_replace. Conservative:
+  // only acts on comments with explicit quoted context, skips vague requests.
+  "bot:job-search:apply-feedback": {
+    name: "Bot: job-search comment applier (Phase 8.4-C)",
+    description:
+      "Phase 8.4-C comment applier. Polls Google Docs for unresolved user comments on the bot's applied draft documents, applies inline edits via find_replace on the highlighted text, replies with a summary, and resolves the comment. Idempotent via comment.resolved + skip-on-bot-reply.",
+    goal:
+      "Run the comment-applier agent. It will: (1) list bot_conversations at status='applied', " +
+      "(2) for each, gdocs_list_comments to find unresolved comments authored by the user, " +
+      "(3) for each actionable comment (has quotedFileContent + interpretable instruction), " +
+      "apply the edit via gdocs_find_replace, reply with a summary, and resolve the comment. " +
+      "Conservative: vague comments are skipped, not guessed.\n\n" +
+      "ABSOLUTE RULES: Only gdocs_find_replace (no append/replace_section). Never edit " +
+      "outside the user's highlighted text. Never reply+resolve without applying. Skip-on-" +
+      "bot-reply ensures idempotency.",
+    preset: "bot-job-search-commentapplier",
+    defaultCron: "*/15 * * * *",
+    storeResult: false,
+    resultCategory: null,
+  },
 };
