@@ -151,6 +151,41 @@ async function dispatch(action) {
   throw new Error(`unknown action.kind: ${action.kind}`);
 }
 
+// --- Freeform handoff (Phase 3) ---
+function handoffToImprovise({ threadId, msgId, sender, subject, body }) {
+  // Idempotent: same thread = same conversation row. Phase 2 will treat replies on
+  // an existing thread as continuation; for now Phase 3 just re-flags the row as
+  // queued and lets the agent reprocess.
+  const convId = `router:thread:${threadId}`;
+  const db = new Database(MPA_DB);
+  db.pragma("journal_mode = DELETE");
+  db.pragma("busy_timeout = 5000");
+  const payload = JSON.stringify({
+    latest_message_id: msgId,
+    sender_addr: sender,
+    subject,
+    body: body.slice(0, 8000),
+    received_at: new Date().toISOString(),
+  });
+  db.prepare(
+    `INSERT INTO bot_conversations
+       (id, bot_id, user_email, subject_anchor, gmail_thread_id, status, current_step, payload, created_at, updated_at)
+     VALUES (?, 'router', ?, ?, ?, 'awaiting-improvise', 'queued', ?, datetime('now'), datetime('now'))
+     ON CONFLICT(id) DO UPDATE SET
+       status='awaiting-improvise',
+       current_step='queued',
+       gmail_thread_id=excluded.gmail_thread_id,
+       payload=excluded.payload,
+       updated_at=datetime('now')`
+  ).run(convId, sender, subject.slice(0, 200) || "(no subject)", threadId, payload);
+  // Bump the improvise pipeline so it fires within seconds instead of waiting up to a minute
+  const r = db.prepare(
+    "UPDATE schedules SET next_run = datetime('now', '-1 second') WHERE task = ?"
+  ).run("pipeline:bot:router:improvise");
+  db.close();
+  return { convId, bumped: r.changes > 0 };
+}
+
 // --- Gmail helpers ---
 function getHeader(msg, name) {
   const h = (msg.payload?.headers || []).find(x => x.name.toLowerCase() === name.toLowerCase());
@@ -265,11 +300,23 @@ async function main() {
 
       let replyBody;
       if (!intent) {
-        replyBody = `I didn't recognize that request.
-
-Subject: ${subject}
-
-Send "help" for a list of commands.`;
+        // Phase 3 freeform handoff: queue the row and let the LLM-agent pipeline handle it
+        const sender = (getHeader(full.data, "From").match(/<([^>]+)>/) || [, getHeader(full.data, "From")])[1];
+        const h = handoffToImprovise({
+          threadId: full.data.threadId,
+          msgId: meta.id,
+          sender,
+          subject,
+          body,
+        });
+        console.error(`[router]   ${meta.id} -> handoff conv=${h.convId} bumped=${h.bumped}`);
+        await gmail.users.messages.modify({
+          userId: "me",
+          id: meta.id,
+          requestBody: { addLabelIds: [processedLabelId] },
+        });
+        // No direct reply here — the improvise pipeline will reply when done
+        continue;
       } else if (intent.action.kind === "help") {
         replyBody = HELP_TEXT;
       } else {

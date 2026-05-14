@@ -1074,4 +1074,37 @@ export const pipelines = {
     storeResult: false,
     resultCategory: null,
   },
+  // Phase 3 (2026-05-14) — Email router freeform improvise pipeline.
+  // Picks up bot_conversations rows where bot_id='router', status='awaiting-improvise',
+  // current_step='queued' (written by ~/crow/scripts/bots/router_dispatch.mjs when an
+  // inbound email at kevin.hopper+bot@maestro.press doesn't match a known intent).
+  // Runs the bot-router-improvise preset, which has broad tool access (job_candidates_query,
+  // pir_list_active, bots_sql_query, gmail_send_threaded_to_self) and figures out what the
+  // user wants based on the latest message body, then replies threaded.
+  "bot:router:improvise": {
+    name: "Bot: router improvise (Phase 3)",
+    description:
+      "Phase 3 freeform email-router agent. Reads bot_conversations rows queued by the router script when the inbound email didn't match a known intent, interprets the request, takes action(s), and replies threaded via gmail_send_threaded_to_self.",
+    goal:
+      "Today's date is ${TODAY}. The NOW_ISO timestamp for this run is ${NOW_ISO}.\n\n" +
+      "Run the router-improvise-worker agent. It will: (1) list bot_conversations at " +
+      "bot_id='router', current_step='queued' (limit 5), (2) for each row, read " +
+      "payload.body to understand the user's request, (3) take appropriate action(s) using " +
+      "the available read-only tools (job_candidates_query, pir_list_*, etc.), (4) send a " +
+      "threaded reply via gmail_send_threaded_to_self summarizing what the bot did or " +
+      "answering the user's question, (5) patch the row to status='completed' / " +
+      "current_step='completed' (payload_merge:true).\n\n" +
+      "ABSOLUTE RULES: (a) gmail_send_threaded_to_self is the only delivery tool — never " +
+      "gmail_send, never gmail_create_draft (external email is always Tier-1 drafts in " +
+      "this lab; the router only emails the user). (b) READ-ONLY on every DB table; never " +
+      "mutate job_candidates, pir_requests, or any other bot table. The only write is the " +
+      "bot_conversations_patch at the end. (c) If the request asks for an action the bot " +
+      "can't take (send external email, run a destructive op, etc.), respond with a clear " +
+      "explanation of why and what the user should do instead. (d) Keep replies concise: " +
+      "150-400 words for a typical answer; lists/tables only when listing >3 items.",
+    preset: "bot-router-improvise",
+    defaultCron: "* * * * *",
+    storeResult: false,
+    resultCategory: null,
+  },
 };
