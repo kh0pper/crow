@@ -722,8 +722,12 @@ export const presets = {
           "resume + cover letter (as a single Google Doc per role) for each shortlisted " +
           "job_candidate that doesn't yet have an application_id. You MUST invoke tools — do " +
           "not merely describe what you would do.\n\n" +
-          "DRIVE FOLDER (fixed): 1UeKCUpaslWfUqne3CihizwTf4s0THmjX (the 'Job Search Drafts' folder " +
-          "in MPA's My Drive). Pass this exact string as folder_id to gdocs_create.\n\n" +
+          "DRIVE LAYOUT: the parent 'Job Search Drafts' folder is " +
+          "1UeKCUpaslWfUqne3CihizwTf4s0THmjX (MPA's My Drive). Each application gets " +
+          "its OWN subfolder inside that parent, named '<Employer> — <Title>' (em-dash " +
+          "U+2014). The source Doc you create AND the PDFs that the render timer uploads " +
+          "later both live in that subfolder. You will create the subfolder per candidate " +
+          "in step 3d.5 below and pass its id as folder_id to gdocs_create.\n\n" +
           "USER IDENTITY (from master-resume.md): Kevin Hopper. Houston, TX. " +
           "kevin.hopper1@gmail.com. (972) 754-6406. " +
           "linkedin.com/in/kevinmhopper. Use these contact details verbatim in every resume header " +
@@ -788,9 +792,15 @@ export const presets = {
           "    subject_anchor = '[JS-' + slug + ']'  // stored on the row for future use; do " +
           "NOT prepend it to the doc title.\n" +
           "    doc_title = employer + ' — ' + title\n\n" +
-          "  3e. Call gdocs_create({folder_id: '1UeKCUpaslWfUqne3CihizwTf4s0THmjX', title: doc_title, " +
+          "  3d.5. Call gdrive_create_folder({name: doc_title, parent_id: " +
+          "'1UeKCUpaslWfUqne3CihizwTf4s0THmjX'}). This tool is idempotent — if a folder with " +
+          "the same name already exists in the parent (e.g. a re-tick after a previous draft " +
+          "attempt), it returns the existing folder id instead of creating a duplicate. " +
+          "Capture data.folder_id; call it subfolder_id.\n\n" +
+
+          "  3e. Call gdocs_create({folder_id: subfolder_id, title: doc_title, " +
           "content: <the full body from 3c>}). Capture data.doc_id and data.web_view_link from the " +
-          "response.\n\n" +
+          "response. The Doc now lives inside the per-application subfolder, not the parent root.\n\n" +
           "  3f. Call bot_conversations_upsert ONCE with the full state — this single tool call " +
           "BOTH creates the conversation AND links the job_candidate (atomic). Required args:\n" +
           "    id: conv_id\n" +
@@ -803,8 +813,9 @@ export const presets = {
           "    link_job_candidate_id: candidate.id  ← REQUIRED. Without this, the candidate " +
           "will be re-drafted on the next tick and you will waste 5 min of compute.\n" +
           "    payload: {job_candidate_id: candidate.id, employer, title, url: candidate.url, " +
-          "doc_web_view_link: data.web_view_link, drafted_at: <ISO timestamp>}\n\n" +
-          "  Per-candidate is ONLY 2 tool calls (gdocs_create + bot_conversations_upsert). " +
+          "doc_web_view_link: data.web_view_link, drive_folder_id: subfolder_id, drafted_at: <ISO timestamp>}\n\n" +
+          "  Per-candidate is ONLY 3 tool calls (gdrive_create_folder + gdocs_create + " +
+          "bot_conversations_upsert). " +
           "Do not skip step 3f. After step 3f, advance to the next candidate.\n\n" +
           "When the per-candidate loop completes (1, 2, or 3 candidates drafted, or zero if " +
           "nothing was pending), you are done. The separate notifier pipeline handles the user " +
@@ -820,6 +831,7 @@ export const presets = {
           "jobsearch_notes_list",
           "jobsearch_notes_read",
           "gdocs_create",
+          "gdrive_create_folder",
         ],
         maxTurns: 100,
       },
