@@ -97,8 +97,25 @@ Phase 2 will let you reply to my confirmations to refine the action ("actually d
 
 — router`;
 
+function stripQuotedReply(body) {
+  if (!body) return "";
+  // Drop standard "On <date>, <person> wrote:" preamble and everything after
+  // (Gmail / iOS Mail / Outlook quote style).
+  const onWrote = body.search(/^On .+wrote:\s*$/im);
+  let fresh = onWrote >= 0 ? body.slice(0, onWrote) : body;
+  // Drop lines beginning with '>' (manual quote markers).
+  fresh = fresh.split("\n").filter(line => !/^\s*>/.test(line)).join("\n");
+  // Drop the user's signature delimiter and below ("-- \n" is the RFC 3676 sig).
+  const sigIdx = fresh.search(/^-- \s*$/m);
+  if (sigIdx >= 0) fresh = fresh.slice(0, sigIdx);
+  return fresh.trim();
+}
+
 function classify(subject, body) {
-  const text = `${subject || ""}\n\n${body || ""}`;
+  // Match against ONLY the fresh (non-quoted) content so historical bot output
+  // in a reply chain doesn't trigger spurious dispatches.
+  const fresh = stripQuotedReply(body);
+  const text = `${subject || ""}\n\n${fresh}`;
   for (const intent of INTENTS) {
     for (const pat of intent.patterns) {
       if (pat.test(text)) return intent;
@@ -208,9 +225,10 @@ function extractBody(payload) {
   return "";
 }
 
-function buildRfc822({ to, from, subject, inReplyTo, references, body }) {
+function buildRfc822({ to, from, subject, inReplyTo, references, body, replyTo }) {
   const headers = [
     `From: ${from}`,
+    `Reply-To: ${replyTo || "kevin.hopper+bot@maestro.press"}`,
     `To: ${to}`,
     `Subject: ${subject}`,
     `In-Reply-To: ${inReplyTo}`,
@@ -219,7 +237,7 @@ function buildRfc822({ to, from, subject, inReplyTo, references, body }) {
     'Content-Type: text/plain; charset="UTF-8"',
     "",
   ].join("\r\n");
-  return headers + body;
+  return headers + "\r\n" + body;
 }
 
 function b64url(s) {
@@ -279,15 +297,49 @@ async function main() {
     process.exit(1);
   }
 
-  // List unprocessed mail on label
-  const q = `label:${SOURCE_LABEL} -label:${MARKER_PROCESSED} -label:${MARKER_FAILED}`;
-  const lres = await gmail.users.messages.list({ userId: "me", q, maxResults: MAX_MESSAGES_PER_RUN });
-  const msgs = lres.data.messages || [];
+  // Two-step scan:
+  // 1) DIRECT — new messages explicitly carrying the bot/router-inbox label
+  //    (the Gmail filter on To:kevin.hopper+bot@maestro.press fires here)
+  // 2) THREAD — user replies on threads where the router has previously been
+  //    involved (so the user doesn't have to remember +bot). Replies use
+  //    Gmail's "Reply" button which auto-addresses to the bot's plain From.
+  //    The bot's Reply-To header now also nudges the recipient client toward
+  //    +bot, but that depends on client behavior — the thread-scan catches
+  //    everything regardless.
+  const directQ = `label:${SOURCE_LABEL} -label:${MARKER_PROCESSED} -label:${MARKER_FAILED}`;
+  const directRes = await gmail.users.messages.list({ userId: "me", q: directQ, maxResults: MAX_MESSAGES_PER_RUN });
+  const direct = directRes.data.messages || [];
+
+  const threadQ = `label:${SOURCE_LABEL} -label:${MARKER_FAILED} newer_than:14d`;
+  const tres = await gmail.users.threads.list({ userId: "me", q: threadQ, maxResults: 30 });
+  const threadHits = [];
+  for (const th of (tres.data.threads || [])) {
+    const full = await gmail.users.threads.get({
+      userId: "me", id: th.id, format: "minimal",
+    });
+    for (const m of full.data.messages || []) {
+      const lids = m.labelIds || [];
+      if (lids.includes(processedLabelId)) continue;
+      if (lids.includes(failedLabelId)) continue;
+      if (lids.includes("SENT")) continue;
+      threadHits.push({ id: m.id });
+    }
+  }
+
+  // Merge + dedupe by id
+  const seen = new Set();
+  const msgs = [];
+  for (const m of [...direct, ...threadHits]) {
+    if (seen.has(m.id)) continue;
+    seen.add(m.id);
+    msgs.push(m);
+  }
+
   if (!msgs.length) {
-    console.error(`[router] 0 unprocessed messages on ${SOURCE_LABEL}`);
+    console.error(`[router] 0 unprocessed messages (${direct.length} direct, ${threadHits.length} thread-scan after dedupe)`);
     return;
   }
-  console.error(`[router] ${msgs.length} message(s) to process`);
+  console.error(`[router] ${msgs.length} message(s) to process (${direct.length} direct + ${threadHits.length} via thread-scan, dedupe applied)`);
 
   for (const meta of msgs) {
     try {
