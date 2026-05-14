@@ -1786,21 +1786,28 @@ export const presets = {
           "  - Anything the cover letter doesn't support → leave a `[placeholder]` for the " +
           "user to fill in. Don't invent specifics.\n\n" +
 
-          "STEP 6. Call gmail_send_to_self EXACTLY ONCE. The Q&A digest is user-bound (the " +
-          "allowlist enforces this) and delivers as a threaded reply on the application's " +
-          "existing Gmail thread.\n" +
-          "  Parameters:\n" +
+          "STEP 6. Call gmail_send_to_self EXACTLY ONCE. ALL FOUR PARAMETERS BELOW ARE " +
+          "REQUIRED — including thread_id. Omitting thread_id causes the Q&A digest to " +
+          "open a brand-new Gmail thread, which is a user-visible bug: the user has " +
+          "explicitly required the bot to reply on the same thread, not start new threads. " +
+          "Pass thread_id every time:\n" +
           "    to: 'kevin.hopper1@gmail.com'\n" +
           "    subject: 'ATS application Q&A — <count> applications'\n" +
-          "    body: <the markdown above>\n" +
-          "    thread_id: <the gmail_thread_id COLUMN of the first filtered row>\n\n" +
-          "Threading guidance: if all filtered rows share the same gmail_thread_id, use " +
-          "that one. If they have different thread_ids, use the FIRST row's " +
-          "gmail_thread_id — the digest naturally bundles them all so threading on one " +
-          "of the chains is acceptable. DO NOT call this tool once per row. Use " +
-          "row.gmail_thread_id (the COLUMN), not row.payload.gmail_thread_id (which " +
-          "does not exist). gmail_send_to_self actually delivers (not drafts) and renders " +
-          "markdown as HTML — required since the user reads in kevin.hopper1's inbox.\n\n" +
+          "    body: <the markdown body composed above>\n" +
+          "    thread_id: <data.rows[0].gmail_thread_id from the STEP 1 list call — " +
+          "gmail_thread_id is a TOP-LEVEL field on the row object returned by " +
+          "bot_conversations_list_by_status, NOT inside row.payload. Example: if STEP 1 " +
+          "returns {count:1, rows:[{id:'...', gmail_thread_id:'19e22dbf1d1315f5', " +
+          "payload:{...}, ...}]}, pass thread_id: '19e22dbf1d1315f5'>\n\n" +
+          "Threading guidance: if multiple filtered rows share the same gmail_thread_id " +
+          "(typical when one digest batch yielded multiple drafts), use that one. If they " +
+          "have different thread_ids, use the FIRST row's gmail_thread_id — the digest " +
+          "naturally bundles them all, so threading on one of the chains is acceptable. " +
+          "DO NOT call gmail_send_to_self once per row. gmail_send_to_self actually " +
+          "delivers (not drafts) and renders markdown as HTML — required since the user " +
+          "reads in kevin.hopper1's inbox. If data.rows[0].gmail_thread_id is null or " +
+          "absent (legacy data), only then omit thread_id and log a warning. For the " +
+          "current bot queue every row has gmail_thread_id — omitting it is a bug.\n\n" +
 
           "STEP 7. For EACH filtered row, call bot_conversations_patch with:\n" +
           "  id: <conversation.id>\n" +
@@ -1906,22 +1913,28 @@ export const presets = {
           "  - Keep the digest concise; do NOT restate the Q&A or PDF contents — link " +
           "to them instead.\n\n" +
 
-          "STEP 3. Call gmail_send_to_self EXACTLY ONCE. The recipient is user-bound (the " +
-          "allowlist enforces this) and the digest delivers as a threaded reply on the " +
-          "application's existing Gmail thread.\n" +
-          "  Parameters:\n" +
+          "STEP 3. Call gmail_send_to_self EXACTLY ONCE. ALL FOUR PARAMETERS BELOW ARE " +
+          "REQUIRED — including thread_id. Omitting thread_id causes the ack digest to " +
+          "open a brand-new Gmail thread, which is a user-visible bug. The user has " +
+          "explicitly required the bot to reply on the same thread, not start new threads. " +
+          "Pass thread_id every time:\n" +
           "    to: 'kevin.hopper1@gmail.com'\n" +
           "    subject: '✓ Bot work complete — <count> application<plural>'\n" +
-          "    body: <the markdown above>\n" +
-          "    thread_id: <the gmail_thread_id COLUMN of the first filtered row>\n\n" +
-          "Threading guidance: if all filtered rows share the same gmail_thread_id, use " +
-          "that one. If they have different thread_ids, use the FIRST row's " +
-          "gmail_thread_id — the digest naturally bundles them all so threading on one " +
-          "of the chains is acceptable. DO NOT call this tool once per row. Use " +
-          "row.gmail_thread_id (the COLUMN), not row.payload.gmail_thread_id (which " +
-          "does not exist). gmail_send_to_self actually delivers (not drafts) and renders " +
-          "markdown as HTML — required since the user reads in kevin.hopper1's inbox, not " +
-          "the bot account's Drafts folder.\n\n" +
+          "    body: <the markdown body composed above>\n" +
+          "    thread_id: <data.rows[0].gmail_thread_id from the STEP 1 list call — " +
+          "gmail_thread_id is a TOP-LEVEL field on the row object returned by " +
+          "bot_conversations_list_by_status, NOT inside row.payload. Example: if STEP 1 " +
+          "returns {count:1, rows:[{id:'...', gmail_thread_id:'19e22dbf1d1315f5', " +
+          "payload:{...}, ...}]}, pass thread_id: '19e22dbf1d1315f5'>\n\n" +
+          "Threading guidance: if multiple filtered rows share the same gmail_thread_id " +
+          "(typical when one digest batch yielded multiple drafts), use that one. If they " +
+          "have different thread_ids, use the FIRST row's gmail_thread_id — the digest " +
+          "naturally bundles them all, so threading on one of the chains is acceptable. " +
+          "DO NOT call gmail_send_to_self once per row. gmail_send_to_self actually " +
+          "delivers (not drafts) and renders markdown as HTML — required since the user " +
+          "reads in kevin.hopper1's inbox. If data.rows[0].gmail_thread_id is null or " +
+          "absent (legacy data), only then omit thread_id and log a warning. For the " +
+          "current bot queue every row has gmail_thread_id — omitting it is a bug.\n\n" +
 
           "STEP 4. For EACH filtered row, call bot_conversations_patch with:\n" +
           "  id: <conversation.id>\n" +
