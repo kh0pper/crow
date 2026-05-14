@@ -2420,6 +2420,29 @@ export const presets = {
           "those tools are wired.' Then patch the row to current_step='completed' / " +
           "intent_bucket='ingest-confirmed-deferred'. This is temporary; Phase 2B will replace it.\n\n" +
 
+          "    APPLICATION PREP — user asks the bot to draft applications / cover letters / " +
+          "resumes for specific job postings discussed in this thread or named in the latest " +
+          "message ('draft cover letters for the Sheldon and Klein roles', 'prepare " +
+          "applications for these', 'draft resumes too', 'help me apply'). Do NOT compose " +
+          "plain-text drafts inline in the email — the lab has a dedicated " +
+          "bot-job-search-drafter pipeline that creates tailored Google Docs with " +
+          "master-resume.md + per-role variants, drops each Doc into a per-application Drive " +
+          "subfolder named '<Employer> — <Title>', and registers a bot_conversations row. " +
+          "That is the correct delivery channel for application materials.\n" +
+          "  Action: (1) call job_candidates_query with employer/title filters to locate the " +
+          "exact rows the user is referencing — capture their .id values; (2) for each, call " +
+          "job_candidates_score_update with status='shortlisted' and user_priority='high'; " +
+          "(3) reply via gmail_send_threaded_to_self: 'Shortlisted N candidate(s): " +
+          "<employer1>/<title1>, <employer2>/<title2>. The drafter pipeline " +
+          "(bot:job-search:draft-applications) runs Mon 7:30 AM on schedule — to fire it NOW, " +
+          "send a new email to kevin.hopper+bot@maestro.press with subject \"start job " +
+          "search\". You will get a separate Drafts ready email with Google Doc links once " +
+          "the drafter finishes (5-15 min).' Then bot_conversations_patch this row to " +
+          "status='completed' / intent_bucket='application-prep'. DO NOT draft cover letters " +
+          "or resumes inline — the user wants the proper Google Docs workflow, not " +
+          "email-body text. If a candidate cannot be located, surface it as a TODO and do " +
+          "NOT make up application content for it.\n\n" +
+
           "    JOB-SEARCH QUERY — body mentions job hunting, finding roles, employers, " +
           "specific titles or geographies, e.g. 'find me director jobs in Houston', 'are " +
           "there any TEA postings open?', 'show me my shortlist for federal-programs roles'. " +
@@ -2485,10 +2508,19 @@ export const presets = {
           "ABSOLUTE RULES: (a) gmail_send_threaded_to_self is the ONLY delivery tool — " +
           "never gmail_send, never gmail_create_draft, never external recipients. The " +
           "allowlist enforces user-bound delivery. (b) READ-ONLY on every DB table; the " +
-          "only write is bot_conversations_patch on the row you're processing. NEVER " +
-          "mutate pir_requests, job_candidates, schedules, or other bot tables. (c) If " +
+          "only writes are: (i) bot_conversations_patch on the row you're processing, " +
+          "(ii) job_candidates_score_update for APPLICATION PREP shortlisting (writes only " +
+          "the LLM-writable subset: status, user_priority, match_score, match_notes). NEVER " +
+          "mutate pir_requests directly (use pir_update_state if needed), and never write " +
+          "raw SQL. (c) If " +
           "the user asks for something the router truly can't do, explain why and suggest " +
-          "the right alternative in your reply — do NOT silently skip. (d) Don't fabricate: " +
+          "the right alternative in your reply — do NOT silently skip. NEVER fabricate an " +
+          "inability the lab does NOT actually have: gdocs_create EXISTS (the " +
+          "bot-job-search-drafter preset uses it routinely); gdrive_create_folder EXISTS; the " +
+          "application-prep flow (Google Docs in per-app Drive subfolders) is wired and " +
+          "standard. If the user asks for application drafts, delegate via APPLICATION PREP — " +
+          "do NOT excuse with 'I can only do plain text'. (d) Don't fabricate other-direction " +
+          "either: " +
           "if a query returns 0 rows, say so. If you don't know an employer name's exact " +
           "spelling in the DB, do a broad LIKE-style query first." +
           WRITING_VOICE_RULES,
@@ -2499,6 +2531,7 @@ export const presets = {
           "pir_list_active",
           "pir_list_overdue",
           "pir_get",
+          "job_candidates_score_update",
           "gmail_get_thread",
           "gmail_send_threaded_to_self",
         ],
