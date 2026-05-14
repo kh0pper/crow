@@ -36,6 +36,27 @@ const MARKER_PROCESSED = "bot/router-inbox/processed";
 const MARKER_FAILED = "bot/router-inbox/failed";
 const MAX_MESSAGES_PER_RUN = 10;
 
+// USER ALLOWLIST — messages from any OTHER sender are ignored entirely.
+// This is the hard wall against the bot ever replying to (or processing
+// requests from) third parties on threads where the bot has been involved.
+// If a Public Information Officer or anyone else lands on a router-tracked
+// thread, the router treats their message as non-existent.
+const USER_SENDER_ALLOWLIST = new Set([
+  "kevin.hopper1@gmail.com",
+  "kevin.hopper@maestro.press",
+]);
+// USER REPLY-TO TARGET — every router-direct reply goes here regardless of
+// who the original From was. The agent path (gmail_send_threaded_to_self)
+// has its own allowlist at the tool layer — this is the router-script half.
+const USER_REPLY_TO = "kevin.hopper1@gmail.com";
+
+function senderFrom(fromHeader) {
+  if (!fromHeader) return "";
+  const m = fromHeader.match(/<([^>]+)>/);
+  return (m ? m[1] : fromHeader).trim().toLowerCase();
+}
+
+
 // --- Auth ---
 function makeAuth() {
   const tk = JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
@@ -256,8 +277,12 @@ async function sendThreadedReply({ gmail, originalMsgId, threadId, bodyText }) {
   const origMsgId = getHeader(orig.data, "Message-ID") || getHeader(orig.data, "Message-Id");
   const origRefs = getHeader(orig.data, "References");
 
-  // Reply-to address = original sender
-  const toAddr = origFrom.match(/<([^>]+)>/)?.[1] || origFrom;
+  // Reply-to address — HARDCODED to user-bound. NEVER reply to a third-party
+  // sender even if the original From was external. This is the router-script
+  // half of the user-only reply guard; the agent's gmail_send_threaded_to_self
+  // tool enforces the same constraint on the LLM path.
+  const toAddr = USER_REPLY_TO;
+  void origFrom;  // origFrom is used only for the threading lookups below; recipient is fixed
   const replySubj = origSubject.toLowerCase().startsWith("re:") ? origSubject : `Re: ${origSubject}`;
   const refs = origRefs ? `${origRefs} ${origMsgId}` : origMsgId;
 
@@ -344,6 +369,20 @@ async function main() {
   for (const meta of msgs) {
     try {
       const full = await gmail.users.messages.get({ userId: "me", id: meta.id, format: "full" });
+      const senderAddr = senderFrom(getHeader(full.data, "From"));
+      if (!USER_SENDER_ALLOWLIST.has(senderAddr)) {
+        // Non-user sender on a router-tracked thread (e.g. a Public Information
+        // Officer replying to a PIR follow-up the user sent). Mark processed
+        // (so we don't keep evaluating) but take NO further action: no reply,
+        // no agent dispatch, no DB write. The bot is invisible on this leg.
+        await gmail.users.messages.modify({
+          userId: "me",
+          id: meta.id,
+          requestBody: { addLabelIds: [processedLabelId] },
+        });
+        console.error(`[router]   ${meta.id} sender=${senderAddr} not in allowlist — ignored + marked processed`);
+        continue;
+      }
       const subject = getHeader(full.data, "Subject");
       const body = extractBody(full.data.payload);
       const intent = classify(subject, body);
