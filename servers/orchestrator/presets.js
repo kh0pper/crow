@@ -962,13 +962,22 @@ export const presets = {
           "  2d. Parse the message body. Three intents. Per message, pick AT MOST one intent. " +
           "If a message has both APPLY-FINALIZE and PROCESS-COMMENTS phrases, take the LATER " +
           "one literally in the text — the user typed it that way intentionally:\n" +
-          "    APPLY-FINALIZE — user is approving the draft for submission. Phrases: " +
-          "'apply <N or employer>', 'submit <N or employer>', 'go with <N or employer>', " +
-          "'finalize <N or employer>', 'looks good <N or employer>'. Bare 'apply all' / " +
-          "'submit all' / 'finalize all' apply to every pending-review + applied/applying " +
-          "row in the thread. STANDALONE 'looks good' (no target, no other intent word) is " +
-          "ambiguous — skip silently rather than guess between APPLY-FINALIZE and " +
-          "PROCESS-COMMENTS.\n" +
+          "    APPLY-FINALIZE — user is approving the draft for submission. Phrases " +
+          "(substring, case-insensitive):\n" +
+          "      Targeted: 'apply <N or employer>', 'submit <N or employer>', 'go with " +
+          "<N or employer>', 'finalize <N or employer>', 'looks good <N or employer>', " +
+          "'let's finalize <N or employer>', 'send <N or employer>'.\n" +
+          "      Untargeted but unambiguous — applies to every pending-review + applied/" +
+          "applying row in the thread (works even when only one row exists in the thread, " +
+          "which is the typical case): 'apply all', 'submit all', 'finalize all', " +
+          "'apply it', 'submit it', 'finalize it', 'send it', 'let's finalize it', " +
+          "'let's submit', 'let's finalize', 'ready to submit', 'send the application', " +
+          "'send this', 'submit this', 'finalize this', 'go ahead and submit', 'go ahead " +
+          "and finalize', 'lets finalize it' (no apostrophe variant), 'looks good lets " +
+          "finalize', 'looks good let's finalize', 'looks good, finalize it', 'looks good, " +
+          "submit it'. STANDALONE 'looks good' WITH NO accompanying finalize/submit/apply " +
+          "verb is ambiguous — skip silently. But 'looks good. let's finalize it.' has " +
+          "BOTH 'looks good' AND 'finalize' — that's APPLY-FINALIZE, not ambiguous.\n" +
           "    PROCESS-COMMENTS — user wants the comment-applier to incorporate feedback. " +
           "The user does NOT want this triggered by comments alone; only this email signal " +
           "opens the gate. Phrases (substring, case-insensitive): 'process my comments', " +
