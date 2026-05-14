@@ -926,66 +926,130 @@ export const presets = {
           "BOT EMAIL: kevin.hopper@maestro.press is the bot's own address. Any message whose 'From' " +
           "header is THAT exact address is BOT-SENT and must be IGNORED. Real user replies come " +
           "from a different address (typically kevin.hopper1@gmail.com).\n\n" +
-          "STEP 1. Call bot_conversations_list_by_status EXACTLY ONCE with bot_id='job-search', " +
-          "status='awaiting-user', limit=20 (NO current_step filter). The returned rows split " +
-          "into two kinds by current_step:\n" +
-          "  - current_step='pending-review' → drafts the user was notified about. Each row " +
-          "represents one Google Doc; multiple rows share one digest thread.\n" +
-          "  - current_step='tick-digest'   → the weekly tick digest. ONE row per Monday with a " +
-          "payload.shortlist array. The user replies on this thread with selection language to " +
-          "promote specific candidates for drafting next week.\n\n" +
-          "If count is 0: output 'No awaiting-user conversations' and stop. No other tool calls.\n\n" +
-          "STEP 2. Group rows by gmail_thread_id, then dispatch by current_step.\n\n" +
-          "STEP 2 (pending-review path). For each unique pending-review thread:\n" +
+          "STEP 1. Call bot_conversations_list_by_status TWICE in sequence (no current_step " +
+          "filter on either call):\n" +
+          "  (a) bot_id='job-search', status='awaiting-user', limit=20. Rows the user is " +
+          "actively reviewing. Split by current_step:\n" +
+          "    - 'pending-review' → drafts the user was notified about. Each row is one " +
+          "Google Doc; multiple rows share one digest thread.\n" +
+          "    - 'tick-digest'   → weekly tick digest. ONE row per Monday with a " +
+          "payload.shortlist array. User replies with selection language.\n" +
+          "  (b) bot_id='job-search', status='applied', limit=20. Rows the user already " +
+          "approved at least once. Split by current_step:\n" +
+          "    - 'applying'        → comment-applier has run on this row OR the user wants " +
+          "comments processed. The user may now (1) email another PROCESS-COMMENTS to " +
+          "request another round, or (2) email APPLY-FINALIZE to push to finalizer.\n" +
+          "    - 'ready-to-submit' → user already said apply; finalizer will pick up next " +
+          "tick. No action from reply-reader.\n" +
+          "    - 'finalized'       → done, no action.\n\n" +
+          "If both calls return data.count=0: output 'No active conversations' and stop. " +
+          "No other tool calls.\n\n" +
+          "STEP 2. Combine both result sets and group by gmail_thread_id. Each thread can " +
+          "have a mix of pending-review (from call a) and applied/applying (from call b) " +
+          "rows — the notifier put them on the same thread, and the user replies on that " +
+          "thread regardless of state.\n\n" +
+          "STEP 2 (pending-review + applied/applying path — shared). For each unique thread that " +
+          "has at least one pending-review or applied/applying row:\n" +
           "  2a. Call gmail_get_thread({thread_id: <gmail_thread_id>}) to fetch all messages.\n" +
-          "  2b. Walk messages in order. For each message, check the 'From' header. SKIP messages " +
-          "whose From is the bot's own address (the bot's outgoing draft). Only process inbound.\n" +
-          "  2c. For each inbound message, also skip if its internalDate is OLDER than the row's " +
-          "last_user_msg_at (already processed). Track the newest internalDate you see — you'll " +
-          "write that back at the end.\n" +
-          "  2d. Parse the message body. Look for these patterns (case-insensitive, the user may " +
-          "use any of them):\n" +
-          "    APPLY: 'apply <N or employer>', 'looks good <N or employer>', 'go with <N or " +
-          "employer>', 'submit <N or employer>'\n" +
-          "    SKIP:  'skip <N or employer>', 'reject <N or employer>', 'no <N or employer>', " +
-          "'pass on <N or employer>'\n" +
-          "    The user may target multiple in one reply: 'apply 1 and 3, skip 2' — handle each.\n" +
-          "    The user may say 'apply all' or 'skip all' — apply to every conversation in this " +
-          "thread group.\n" +
-          "    APPLY-ALL informal signals (no target — treat as 'apply all' for the thread): " +
-          "'i left comments', 'comments are in', 'comments are ready', 'comments ready', " +
-          "'look at the doc', 'see the doc', 'check the doc', 'doc has comments', 'see my " +
-          "comments', 'my comments are in', 'comments are on the doc', 'comments on the doc'. " +
-          "These mean the user has reviewed the Google Doc(s) and left feedback; the comment-" +
-          "applier pipeline will pick up the suggestions. The reply-reader's job here is just to " +
-          "flip every pending-review row in this thread to status='applied'.\n" +
+          "  2b. Walk messages in order. For each message, check the 'From' header. SKIP " +
+          "messages whose From is the bot's own address (the bot's outgoing draft). Only " +
+          "process inbound.\n" +
+          "  2c. For each inbound message, also skip if its internalDate is OLDER than the " +
+          "row's last_user_msg_at (already processed). For threads with rows in BOTH " +
+          "current_steps, use the MAX of all rows' last_user_msg_at as the watermark for " +
+          "the message walk, but write back per-row later. Track the newest internalDate you " +
+          "see — you'll write that back at the end.\n" +
+          "  2d. Parse the message body. Three intents. Per message, pick AT MOST one intent. " +
+          "If a message has both APPLY-FINALIZE and PROCESS-COMMENTS phrases, take the LATER " +
+          "one literally in the text — the user typed it that way intentionally:\n" +
+          "    APPLY-FINALIZE — user is approving the draft for submission. Phrases: " +
+          "'apply <N or employer>', 'submit <N or employer>', 'go with <N or employer>', " +
+          "'finalize <N or employer>', 'looks good <N or employer>'. Bare 'apply all' / " +
+          "'submit all' / 'finalize all' apply to every pending-review + applied/applying " +
+          "row in the thread. STANDALONE 'looks good' (no target, no other intent word) is " +
+          "ambiguous — skip silently rather than guess between APPLY-FINALIZE and " +
+          "PROCESS-COMMENTS.\n" +
+          "    PROCESS-COMMENTS — user wants the comment-applier to incorporate feedback. " +
+          "The user does NOT want this triggered by comments alone; only this email signal " +
+          "opens the gate. Phrases (substring, case-insensitive): 'process my comments', " +
+          "'process the comments', 'incorporate my comments', 'incorporate the comments', " +
+          "'apply my feedback', 'apply my comments', 'apply the comments', 'apply the " +
+          "feedback', 'use my feedback', 'use my comments', 'process the feedback', " +
+          "'rewrite per my comments', 'rewrite the cover letter', 'rewrite the cover " +
+          "letter per the rules', 'redo the cover letter', 'redo per the rules', " +
+          "'rewrite per the rules', 'rewrite per the writing rules', 'rewrite per rules', " +
+          "'fix per the rules', 'fix the cover letter per the rules', 'apply the rules', " +
+          "'apply the writing rules', 'i left comments', 'comments are in', 'comments are " +
+          "ready', 'comments ready', 'look at the doc', 'see the doc', 'check the doc', " +
+          "'doc has comments', 'see my comments', 'my comments are in', 'comments are on " +
+          "the doc', 'comments on the doc', 'comments are done'. Targeting: same as " +
+          "APPLY-FINALIZE — 'process comments for 1', 'incorporate feedback for spring', " +
+          "or no target → ALL pending-review + applied/applying rows in this thread.\n" +
+          "    SKIP — user is rejecting the draft. Phrases: 'skip <N or employer>', " +
+          "'reject <N or employer>', 'no <N or employer>', 'pass on <N or employer>', " +
+          "'skip all'.\n" +
+          "    The user may combine in one reply: 'apply 1 and 3, skip 2' or 'process " +
+          "comments for 1, apply 3' — handle each parsed action separately.\n" +
           "    If you can't parse intent for a message, skip it (don't error, don't guess).\n\n" +
           "  2e. For each parsed action, find the matching conversation:\n" +
           "    - If user said a NUMBER (e.g. 'apply 1'): MATCH FIRST by payload.digest_position " +
-          "== N. The notifier stamps that 1-based position when it sends the digest, so the " +
-          "mapping is stable even after some rows have already been processed out of the thread. " +
-          "FALLBACK only if no row in this thread carries digest_position (older drafts before " +
-          "Polish #4): match by created_at ASC index N. Never both — prefer digest_position when " +
-          "any row in the thread has it.\n" +
+          "== N across BOTH pending-review and applied/applying rows in the thread. The " +
+          "notifier stamps that 1-based position when it sends the digest, so the mapping is " +
+          "stable across state transitions. FALLBACK only if no row in this thread carries " +
+          "digest_position: match by created_at ASC index N. Never both — prefer " +
+          "digest_position when any row in the thread has it.\n" +
           "    - If user said an EMPLOYER name: case-insensitive substring match against the " +
-          "payload.employer field on each conversation in this thread.\n\n" +
-          "STEP 3. For each matched action, call bot_conversations_patch:\n" +
-          "  APPLY: bot_conversations_patch({id: conv.id, status: 'applied', current_step: " +
-          "'ready-to-submit', last_user_msg_at: <newest internalDate ISO>})\n" +
-          "  SKIP:  bot_conversations_patch({id: conv.id, status: 'archived', current_step: " +
-          "'user-rejected', last_user_msg_at: <newest internalDate ISO>})\n" +
-          "  For SKIP, two additional calls (BOTH required so the candidate doesn't get " +
-          "re-drafted on the next drafter tick):\n" +
+          "payload.employer field on every conversation in this thread (both current_steps).\n" +
+          "    - If no target (bare 'apply all' / 'process my comments' / etc.): the action " +
+          "applies to every pending-review and applied/applying row in this thread.\n\n" +
+          "STEP 3. For each matched action, call bot_conversations_patch. The patch shape " +
+          "depends on the row's CURRENT state and the intent:\n\n" +
+          "  APPLY-FINALIZE on pending-review (status='awaiting-user'): " +
+          "bot_conversations_patch({id: conv.id, status: 'applied', current_step: " +
+          "'ready-to-submit', last_user_msg_at: <newest internalDate ISO>}). The finalizer " +
+          "will pick it up on its next */15-minute tick.\n\n" +
+
+          "  APPLY-FINALIZE on applied/applying (status='applied'): " +
+          "bot_conversations_patch({id: conv.id, status: 'applied', current_step: " +
+          "'ready-to-submit', last_user_msg_at: <newest internalDate ISO>}). Re-opens the " +
+          "finalizer path after one or more rounds of comment processing. The comment-" +
+          "applier's gate (process_comments_requested_at vs last_comment_applied_at) will " +
+          "no longer matter since the finalizer doesn't filter on it.\n\n" +
+
+          "  PROCESS-COMMENTS on pending-review (status='awaiting-user'): " +
+          "bot_conversations_patch({id: conv.id, status: 'applied', current_step: " +
+          "'applying', last_user_msg_at: <newest internalDate ISO>, payload_merge: true, " +
+          "payload: {process_comments_requested_at: <newest internalDate ISO>}}). This " +
+          "(a) moves the row into the comment-applier's status filter, and (b) sets the " +
+          "gate so the comment-applier acts on its next minute tick. NEVER set the gate " +
+          "without also moving status to 'applied' on a pending-review row, or the gate " +
+          "is invisible to the comment-applier.\n\n" +
+
+          "  PROCESS-COMMENTS on applied/applying (status='applied'): " +
+          "bot_conversations_patch({id: conv.id, last_user_msg_at: <newest internalDate " +
+          "ISO>, payload_merge: true, payload: {process_comments_requested_at: <newest " +
+          "internalDate ISO>}}). Status and current_step unchanged. This re-opens the " +
+          "gate for another round of comment processing — the user has left more comments " +
+          "since the last apply and wants the bot to incorporate them. payload_merge=true " +
+          "is REQUIRED to preserve employer/title/url/doc_web_view_link/digest_position/" +
+          "last_comment_applied_at — without it the merge nukes everything else.\n\n" +
+
+          "  SKIP on either state: bot_conversations_patch({id: conv.id, status: " +
+          "'archived', current_step: 'user-rejected', last_user_msg_at: <newest " +
+          "internalDate ISO>}). Plus the two job_candidates calls (BOTH required so the " +
+          "candidate doesn't get re-drafted on the next drafter tick):\n" +
           "    (i) job_candidates_set_application({id: conv.payload.job_candidate_id, " +
           "application_id: null}) — clear the link.\n" +
-          "    (ii) job_candidates_score_update({id: conv.payload.job_candidate_id, status: " +
-          "'rejected', match_notes: 'User skipped draft on ' + <reply ISO date>}) — mark the " +
-          "candidate as user-rejected so the drafter's `status='shortlisted' AND " +
-          "application_id IS NULL` filter no longer catches it. (Future scoring runs CAN flip " +
-          "it back to 'shortlisted' if the user's preferences change — that's by design.)\n\n" +
+          "    (ii) job_candidates_score_update({id: conv.payload.job_candidate_id, " +
+          "status: 'rejected', match_notes: 'User skipped draft on ' + <reply ISO date>}) " +
+          "— mark the candidate as user-rejected so the drafter's `status='shortlisted' " +
+          "AND application_id IS NULL` filter no longer catches it. (Future scoring runs " +
+          "CAN flip it back to 'shortlisted' if the user's preferences change — that's by " +
+          "design.)\n\n" +
+
           "STEP 4. Even for conversations where there were no NEW user replies (just bot " +
-          "messages), update last_user_msg_at to NULL→NULL (no-op) — DO NOT call patch on those. " +
-          "Only patch rows you're actually advancing.\n\n" +
+          "messages), DO NOT call patch on those. Only patch rows you're actually " +
+          "advancing.\n\n" +
           "STEP 5 (tick-digest path). For each row with current_step='tick-digest':\n" +
           "  5a. Call gmail_get_thread({thread_id: row.gmail_thread_id}).\n" +
           "  5b. Walk inbound messages newer than row.last_user_msg_at. Track the newest " +
@@ -1047,10 +1111,18 @@ export const presets = {
           "gdocs_* — you only READ Gmail and WRITE conversation state. (b) Never invent an action " +
           "the user didn't explicitly request. (c) If a reply mentions a number or employer that " +
           "doesn't match any conversation in the thread, ignore it (don't error). (d) Status " +
-          "enum: only 'applied' or 'archived' (no other values). The job_candidates status enum " +
-          "is separate — only set 'rejected' there if the conversation was SKIPPED. (e) For " +
-          "refine-request creation, the row's STATUS is 'pending' (NOT 'awaiting-user') so the " +
-          "refine-search pipeline can find it without colliding with regular conversation rows.",
+          "enum for bot_conversations: 'applied' (APPLY-FINALIZE and PROCESS-COMMENTS both " +
+          "end here) or 'archived' (SKIP). The current_step enum used here: 'ready-to-submit' " +
+          "(APPLY-FINALIZE — triggers finalizer), 'applying' (PROCESS-COMMENTS — triggers " +
+          "comment-applier via the gate), 'user-rejected' (SKIP). The job_candidates status " +
+          "enum is separate — only set 'rejected' there if the conversation was SKIPPED. (e) " +
+          "For refine-request creation, the row's STATUS is 'pending' (NOT 'awaiting-user') " +
+          "so the refine-search pipeline can find it without colliding with regular " +
+          "conversation rows. (f) PROCESS-COMMENTS must include payload.process_comments_" +
+          "requested_at = <newest internalDate ISO> on the patch. WITHOUT this field set, " +
+          "the comment-applier's STEP 1.5 gate stays closed and the user's email is " +
+          "effectively ignored. payload_merge:true is also REQUIRED — without it the patch " +
+          "wipes employer/title/url/doc_web_view_link/digest_position/last_comment_applied_at.",
         tools: [
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
@@ -1228,9 +1300,28 @@ export const presets = {
         systemPrompt:
           "You apply user comments on Google Docs. You MUST call tools — never describe.\n\n" +
           "STEP 1. Call bot_conversations_list_by_status({bot_id:'job-search', status:'applied', " +
-          "limit:20}). For each row in data.rows, take its google_doc_id (used in step 2).\n\n" +
+          "limit:20}). For each row in data.rows, capture its id, google_doc_id, payload, and " +
+          "gmail_thread_id.\n\n" +
           "If data.count is 0: output 'No applied conversations' and stop.\n\n" +
-          "STEP 2. For EACH google_doc_id from step 1:\n\n" +
+
+          "STEP 1.5 — GATE ON USER SIGNAL. Comment processing is GATED. The user explicitly " +
+          "asked for this: comments accumulate freely on the doc, and ONLY an explicit email " +
+          "trigger (parsed by the reply-reader into payload.process_comments_requested_at) " +
+          "opens the gate. For each row from STEP 1, evaluate:\n" +
+          "  let trig = row.payload.process_comments_requested_at  (ISO timestamp or absent)\n" +
+          "  let last = row.payload.last_comment_applied_at         (ISO timestamp or absent)\n" +
+          "  GATE OPEN if trig is present AND (last is absent OR trig > last).\n" +
+          "  GATE CLOSED otherwise.\n" +
+          "Drop every GATE-CLOSED row from further processing — do NOT call gdocs_list_comments " +
+          "for it, do NOT include it in STEP 3 notifications, do NOT patch it. The gate closure " +
+          "is silent: it represents the user's intent to keep adding comments without the bot " +
+          "interrupting. The reply-reader's PROCESS-COMMENTS intent is the only legitimate path " +
+          "to open the gate.\n\n" +
+          "After this filter, if zero rows remain GATE-OPEN, output 'No conversations with a " +
+          "fresh process-comments trigger' and stop. Otherwise proceed to STEP 2 only for " +
+          "GATE-OPEN rows.\n\n" +
+
+          "STEP 2. For EACH GATE-OPEN google_doc_id from step 1.5:\n\n" +
           "  Call gdocs_list_comments({doc_id, include_resolved:false}). For each comment in " +
           "data.comments:\n\n" +
           "    Skip if comment.replies array is non-empty and ANY reply.author == 'Kevin Hopper' " +
@@ -1334,11 +1425,13 @@ export const presets = {
           "  3c. Call bot_conversations_patch with:\n" +
           "    id: <conversation.id>\n" +
           "    payload_merge: true   ← critical; without this the row's existing payload is " +
-          "REPLACED, dropping employer/title/url/doc_web_view_link.\n" +
+          "REPLACED, dropping employer/title/url/doc_web_view_link AND the gate's " +
+          "process_comments_requested_at field.\n" +
           "    payload: { last_comment_applied_at: '<NOW_ISO from goal>', " +
           "last_comment_count: <N from step 2 — your applied-in-this-run count> }\n" +
-          "  Status and current_step stay 'applied' / 'applying' — this is purely an " +
-          "idempotency stamp + cumulative counter.\n\n" +
+          "  Status and current_step stay 'applied' / 'applying'. After this patch, the gate " +
+          "(STEP 1.5) will be CLOSED on this row because last_comment_applied_at now exceeds " +
+          "process_comments_requested_at. The user re-opens the gate by emailing again.\n\n" +
           "  If zero comments applied for a conversation (none unresolved, or all skipped by " +
           "idempotency check at start of step 2), do NOT call gmail_send_to_self or " +
           "bot_conversations_patch for that conversation. Silent runs are correct — there's " +
