@@ -352,6 +352,41 @@ async function processMessage({ gmail, canvasDb, mpaDb, msgMeta, labelIds }) {
   };
 }
 
+async function backstopApplyLabel({ gmail, labelIds }) {
+  // Safety-net: if the Gmail filter didn't fire for some reason, scan inbox for
+  // PIR-shaped mail that lacks bot/pir-management* labels and apply
+  // bot/pir-management ourselves. The downstream processLabel() handles them
+  // on the next iteration.
+  // Keeps the script self-sufficient even if the user's Gmail filter is broken
+  // or removed.
+  const sourceId = labelIds.get(SOURCE_LABEL);
+  const q =
+    'from:mycusthelp.net newer_than:7d ' +
+    `-label:"${SOURCE_LABEL}" ` +
+    `-label:"${MARKER_INGESTED}" ` +
+    `-label:"${MARKER_FAILED}"`;
+  const res = await gmail.users.messages.list({
+    userId: "me", q, maxResults: 25,
+  });
+  const msgs = res.data.messages || [];
+  if (!msgs.length) return 0;
+  let applied = 0;
+  for (const m of msgs) {
+    try {
+      await gmail.users.messages.modify({
+        userId: "me",
+        id: m.id,
+        requestBody: { addLabelIds: [sourceId] },
+      });
+      applied++;
+    } catch (err) {
+      console.error(`[pir-ingest]   backstop: failed to label ${m.id}: ${err.message}`);
+    }
+  }
+  console.error(`[pir-ingest] backstop: labeled ${applied}/${msgs.length} unlabeled PIR mail(s)`);
+  return applied;
+}
+
 async function processLabel({ gmail, canvasDb, mpaDb, labelIds }) {
   const q = `label:${SOURCE_LABEL} -label:${MARKER_INGESTED} -label:${MARKER_FAILED}`;
   const listResp = await gmail.users.messages.list({
@@ -425,6 +460,7 @@ async function main() {
   mpaDb.pragma("journal_mode = DELETE");
   mpaDb.pragma("busy_timeout = 5000");
 
+  await backstopApplyLabel({ gmail, labelIds });
   const r = await processLabel({ gmail, canvasDb, mpaDb, labelIds });
 
   canvasDb.close();
