@@ -846,19 +846,33 @@ export const pipelines = {
     goal:
       "Today's date is ${TODAY}. The NOW_ISO timestamp for this run is ${NOW_ISO} — " +
       "use this EXACT string as the value of last_comment_applied_at when you patch " +
-      "each notified conversation in STEP 3c. Never invent or guess a timestamp.\n\n" +
-      "Run the comment-applier agent. It will: (1) list bot_conversations at status='applied', " +
-      "(2) for each, gdocs_list_comments to find unresolved comments authored by the user, " +
-      "(3) for each actionable comment, apply the edit via gdocs_apply_comment_edit (Path A) " +
-      "or reply+resolve (Path B), (4) for each conversation where at least one comment was " +
-      "applied this run, send ONE notification email via gmail_send_to_self threaded on the " +
-      "conversation's gmail_thread_id, then patch payload.last_comment_applied_at as the " +
-      "idempotency stamp.\n\n" +
+      "each conversation in STEP 3c (or in the zero-unit close-the-gate patch). Never " +
+      "invent or guess a timestamp.\n\n" +
+      "Run the comment-applier agent. It will: (1) list bot_conversations at " +
+      "status='applied'. (1.5) GATE — drop rows whose payload.process_comments_requested_at " +
+      "is absent or older than payload.last_comment_applied_at. The gate is the user's " +
+      "explicit email signal (parsed by the reply-reader's PROCESS-COMMENTS intent); " +
+      "comments accumulate freely without it. (2) For each GATE-OPEN row, " +
+      "gdocs_list_comments → process each unresolved user comment via Path A (targeted edit " +
+      "via gdocs_apply_comment_edit), Path B (question reply + resolve), or Path C " +
+      "(rule-application via gdocs_read + gdocs_find_replace batch). (2.5) For each " +
+      "GATE-OPEN row, ALSO inspect payload.process_comments_request_body for rule-" +
+      "application phrases (e.g. 'rewrite per the rules', 'no em dashes', 'apply the " +
+      "writing rules'). If matched, run the email-path version of Path C using the email " +
+      "body as the directive — even when zero doc comments exist. (3) For each conversation " +
+      "that produced at least one applied unit across step 2 + step 2.5, send ONE " +
+      "notification email via gmail_send_to_self threaded on the conversation's " +
+      "gmail_thread_id, then patch payload.last_comment_applied_at as the idempotency stamp. " +
+      "(3-zero-unit) For each GATE-OPEN conversation that produced ZERO applied units, " +
+      "STILL patch payload.last_comment_applied_at (to close the gate) but SKIP the " +
+      "notification — without the patch the gate stays open and the agent loops every " +
+      "minute.\n\n" +
       "ABSOLUTE RULES: Tool routing — gmail_send_to_self for notifications TO USER " +
-      "(allowlist enforces). Never gmail_send, never gmail_create_draft. Doc edits stay " +
-      "inside the user's highlighted text. Silent runs (no comments applied) are correct — " +
-      "no notification fires. Idempotent: re-runs on the same Doc skip comments the bot " +
-      "already replied to (skip-on-bot-reply check at top of step 2).",
+      "(allowlist enforces). Never gmail_send, never gmail_create_draft. Path A edits stay " +
+      "inside the user's highlighted text; Path C and STEP 2.5 apply rules globally via " +
+      "find_replace batches. GATE-CLOSED rows are skipped silently (no list_comments, no " +
+      "patch). Idempotent: re-runs on the same Doc skip comments the bot already replied to " +
+      "(skip-on-bot-reply check at top of step 2).",
     preset: "bot-job-search-commentapplier",
     defaultCron: "*/15 * * * *",
     storeResult: false,
