@@ -1019,20 +1019,26 @@ export const presets = {
           "  PROCESS-COMMENTS on pending-review (status='awaiting-user'): " +
           "bot_conversations_patch({id: conv.id, status: 'applied', current_step: " +
           "'applying', last_user_msg_at: <newest internalDate ISO>, payload_merge: true, " +
-          "payload: {process_comments_requested_at: <newest internalDate ISO>}}). This " +
-          "(a) moves the row into the comment-applier's status filter, and (b) sets the " +
-          "gate so the comment-applier acts on its next minute tick. NEVER set the gate " +
-          "without also moving status to 'applied' on a pending-review row, or the gate " +
-          "is invisible to the comment-applier.\n\n" +
+          "payload: {process_comments_requested_at: <newest internalDate ISO>, " +
+          "process_comments_request_body: <first 800 chars of the message's plain-text " +
+          "body, stripped of quoted prior content (lines beginning with '>' and the " +
+          "'On <date>, <name> wrote:' separator and everything after)>}}). This " +
+          "(a) moves the row into the comment-applier's status filter, (b) sets the " +
+          "gate, and (c) records the user's email body so the comment-applier can apply " +
+          "rule-based instructions even when no unresolved doc comments exist. NEVER " +
+          "set the gate without also moving status to 'applied' on a pending-review " +
+          "row, or the gate is invisible to the comment-applier.\n\n" +
 
           "  PROCESS-COMMENTS on applied/applying (status='applied'): " +
           "bot_conversations_patch({id: conv.id, last_user_msg_at: <newest internalDate " +
           "ISO>, payload_merge: true, payload: {process_comments_requested_at: <newest " +
-          "internalDate ISO>}}). Status and current_step unchanged. This re-opens the " +
-          "gate for another round of comment processing — the user has left more comments " +
-          "since the last apply and wants the bot to incorporate them. payload_merge=true " +
+          "internalDate ISO>, process_comments_request_body: <first 800 chars of the " +
+          "message's plain-text body, stripped of quoted prior content>}}). Status and " +
+          "current_step unchanged. Re-opens the gate AND refreshes the recorded email " +
+          "body so the comment-applier uses the LATEST user instruction (even if the " +
+          "row carried an older request_body from a prior round). payload_merge=true " +
           "is REQUIRED to preserve employer/title/url/doc_web_view_link/digest_position/" +
-          "last_comment_applied_at — without it the merge nukes everything else.\n\n" +
+          "last_comment_applied_at.\n\n" +
 
           "  SKIP on either state: bot_conversations_patch({id: conv.id, status: " +
           "'archived', current_step: 'user-rejected', last_user_msg_at: <newest " +
@@ -1340,32 +1346,51 @@ export const presets = {
           "letter', 'rewrite the cover letter'. (Substring match — 'no emdashes - per our " +
           "writing rules' matches both 'no emdash' and 'per our writing rules'.)\n\n" +
           "      C1. Call gdocs_read({doc_id}) ONCE to fetch the full doc body as markdown.\n" +
-          "      C2. Identify each violation of the rule(s) the user invoked. For em-dashes: " +
-          "every '—' (U+2014); also catch '–' (U+2013) when it's used between words rather " +
-          "than between numeric date ranges (e.g. 'February 2023 – Present' is a date range, " +
-          "keep it; 'McKinney-Vento – the district's program' is an en-dash being used as a " +
-          "dash, replace it). For banned vocab: each instance of 'crucial', 'pivotal', " +
-          "'comprehensive', 'facilitate', 'leverage', 'utilize', 'paramount', 'robust', " +
-          "'fundamental', 'navigate' (figurative). For hedging: 'I think', 'I believe', " +
-          "'I feel', 'perhaps', 'may', 'might', 'could potentially', 'I would'. For throat-" +
-          "clearing openers: 'I hope this finds you well', 'I am writing to follow up on'.\n" +
-          "      C3. For EACH violation, build a (find, replace) pair where `find` is the " +
-          "violating string PLUS enough surrounding context (5-12 words on each side) to make " +
-          "it unique in the doc, and `replace` is the corrected version. Decide replacement " +
-          "punctuation by context: em-dash separating clauses → comma or semicolon; em-dash " +
-          "introducing a parenthetical → parentheses (open + close, so the pair becomes two " +
-          "finds — one for the opening dash, one for the closing dash); em-dash before a " +
-          "list item → colon. Keep the surrounding context VERBATIM (same words, same " +
-          "punctuation, same casing) so the find string matches the doc text exactly.\n" +
-          "      C4. Call gdocs_find_replace({doc_id, pairs: [<all the (find, replace) " +
-          "pairs from C3>]}) ONCE as a single batch. The tool returns total_changes + per-pair " +
-          "occurrences. Note pairs with occurrences=0 — those didn't match (usually because " +
-          "the surrounding context wasn't unique). Don't retry; just count what landed.\n" +
-          "      C5. Compose summary: '<N> change<plural> applied per <rule cited by user>. " +
-          "<short detail of largest cluster, e.g. \"6 em-dashes replaced with commas in the " +
-          "summary and cover letter paragraphs\">.' If any pairs returned occurrences=0, " +
-          "append: 'Note: <K> change<plural> did not land — the surrounding context may " +
-          "have shifted; comment again with a more specific highlight if needed.'\n" +
+          "      C2. Identify each PARAGRAPH that contains a rule violation. Work at the " +
+          "PARAGRAPH level, not the word level — em-dash removal in particular means " +
+          "REWRITING the sentence to avoid em-dashes ALTOGETHER (the user does not want " +
+          "comma substitution; they want the prose to read naturally without dashes). The " +
+          "rules to enforce:\n" +
+          "        em-dashes: every '—' (U+2014) in prose. Catch '–' (U+2013) when used as " +
+          "a dash between words rather than between numeric date ranges (e.g. 'February " +
+          "2023 – Present' is a date range — keep it; 'McKinney-Vento – the district's " +
+          "program' is dash usage — rewrite the sentence). Skip date-range paragraphs in " +
+          "experience headers.\n" +
+          "        banned vocab: 'crucial', 'pivotal', 'comprehensive', 'facilitate', " +
+          "'leverage', 'utilize', 'paramount', 'robust' (filler use), 'fundamental' " +
+          "(filler use), 'navigate' (figurative use).\n" +
+          "        hedging: 'I think', 'I believe', 'I feel', 'perhaps', 'may', 'might', " +
+          "'could potentially', 'I would'.\n" +
+          "        throat-clearing openers: 'I hope this finds you well', 'I am writing " +
+          "to follow up on'.\n" +
+          "      C3. For each violating paragraph, write a REWRITTEN version of the whole " +
+          "paragraph that preserves the meaning, uses the user's voice (assertive, direct, " +
+          "concrete nouns and verbs), and obeys ALL WRITING_VOICE_RULES — not just the " +
+          "specific rule cited. The rewrite typically means restructuring sentence " +
+          "boundaries (split a long em-dash sentence into two periods; convert a paired " +
+          "em-dash parenthetical into a separate sentence or a 'which/that' clause; " +
+          "convert a list-introducing em-dash into a colon or a complete sentence). Do " +
+          "NOT just substitute punctuation — the user explicitly does not want that; they " +
+          "want prose that reads naturally without dashes.\n" +
+          "      C4. Call gdocs_rewrite_passages({doc_id, passages: [<one item per " +
+          "rewritten paragraph>]}) ONCE as a single batch. Each item has:\n" +
+          "        - match_prefix: the first 60-90 characters of the ORIGINAL paragraph " +
+          "(verbatim, including any leading punctuation like '## ' if present; do NOT " +
+          "trim).\n" +
+          "        - new_text: your rewritten paragraph. Do NOT include a trailing " +
+          "newline — the tool preserves the paragraph break.\n" +
+          "      The tool finds each paragraph by anchored start-text match (lstrip + " +
+          "startswith), replaces the entire paragraph via deleteContentRange + insertText " +
+          "in a single atomic batchUpdate, and returns per-passage matched/unmatched. " +
+          "FAR more reliable than the prior gdocs_find_replace + context-window approach. " +
+          "Trade-off: bold/italic/link formatting INSIDE the rewritten paragraph is lost " +
+          "(plain text replacement). This is acceptable for prose paragraphs.\n" +
+          "      C5. Compose summary: '<N> paragraph<plural> rewritten per " +
+          "<rule cited by user>. <short detail of the largest cluster, e.g. \"5 " +
+          "paragraphs in the cover letter and the summary section restructured to remove " +
+          "em-dashes\">.' If gdocs_rewrite_passages reports any unmatched passages, " +
+          "append: 'Note: <K> paragraph<plural> did not match — the doc may have been " +
+          "edited mid-run; comment again or email to re-trigger.'\n" +
           "      C6. Call gdocs_reply_comment({doc_id, comment_id: comment.id, content: " +
           "<summary>}) THEN gdocs_resolve_comment({doc_id, comment_id: comment.id}). DONE. " +
           "Move to next comment.\n\n" +
@@ -1400,22 +1425,73 @@ export const presets = {
           "leave a comment in any state other than (a) resolved by you, or (b) unresolved with " +
           "your reply added (Path A failures and Path C don't both happen — C resolves itself).\n\n" +
 
+          "STEP 2.5 — EMAIL-TRIGGERED RULE APPLICATION (per row, after the per-comment loop). " +
+          "The gate was opened by an email reply (reply-reader's PROCESS-COMMENTS intent). That " +
+          "email's body is stored in row.payload.process_comments_request_body. The email body " +
+          "itself can contain a rule-application directive even when zero doc comments exist " +
+          "or when none of the existing comments matched Path C. Check the request body " +
+          "(case-insensitive substring) for any Path C trigger phrase: 'no em dash', " +
+          "'no emdash', 'remove em dash', 'no dashes', 'rewrite per rules', 'rewrite per the " +
+          "rules', 'per the writing rules', 'per our writing rules', 'follow the writing " +
+          "rules', 'apply the rules', 'apply my writing rules', 'apply the writing rules', " +
+          "'applying my writing rules', 'applying the writing rules', 'no hedging', " +
+          "'remove hedging', 'no banned vocab', 'plain language', 'tighten everything', " +
+          "'tighten the whole', 'fix the whole letter', 'fix the cover letter', 'rewrite the " +
+          "cover letter', 'redo the cover letter', 'redo per the rules', 'fix per the rules'.\n\n" +
+
+          "  If NO match: skip STEP 2.5 for this row.\n\n" +
+
+          "  If match: run the email-path Path C. Same paragraph-level rewrite as C1-C5 " +
+          "above, with these differences:\n" +
+          "    EC1. gdocs_read({doc_id}) — same. (Skip if you ALREADY called it on this " +
+          "row during the per-comment loop above; reuse that response.)\n" +
+          "    EC2. Identify paragraphs to rewrite based on the rule(s) named in " +
+          "process_comments_request_body. If the body says 'no em dashes' → rewrite ONLY " +
+          "paragraphs containing em-dashes (and skip date-range headers). If it says " +
+          "'rewrite per (the/my) (writing )?rules' → rewrite EVERY paragraph that " +
+          "violates ANY rule in WRITING_VOICE_RULES (em-dashes, banned vocab, hedging, " +
+          "throat-clearing openers). The narrower rule set applies when the body is " +
+          "specific.\n" +
+          "    EC3. For each paragraph to rewrite, generate a properly rewritten version " +
+          "that restructures sentences to AVOID the violating construct entirely — see " +
+          "the C3 guidance above. Do NOT just substitute punctuation.\n" +
+          "    EC4. Call gdocs_rewrite_passages({doc_id, passages: [<items>]}) ONCE as a " +
+          "single batch (or merge with the per-comment Path C batch if you ran one; one " +
+          "combined batch is fine and cheaper). Match prefix = first 60-90 chars of " +
+          "the ORIGINAL paragraph, new_text = the rewritten paragraph.\n" +
+          "    EC5. Compose summary: 'Email rule-application: <N> paragraph<plural> " +
+          "rewritten per <quote of the user's rule phrasing>. <short detail of the " +
+          "largest cluster>. (Triggered by your email reply, not a doc comment.)' If " +
+          "gdocs_rewrite_passages reports unmatched passages, append: 'Note: <K> " +
+          "paragraph<plural> did not match — the doc may have been edited mid-run.'\n" +
+          "    EC6. There's no comment to reply on — instead, include the EC5 summary in " +
+          "the STEP 3 notification email. This counts as ONE applied unit for STEP 3.\n\n" +
+
+          "Why STEP 2.5 exists: the user explicitly does not want comments alone to trigger " +
+          "rewrites. The gate is the user signal. When the gate is open AND the email body " +
+          "asks for a rule application (e.g. 'Rewrite the cover letter applying my writing " +
+          "rules'), the user expects the bot to apply the rule globally regardless of " +
+          "whether they left targeted doc comments — the email body IS the directive.\n\n" +
+
           "STEP 3 — NOTIFY USER. For EACH conversation in step 1 where you applied at least " +
-          "ONE comment in step 2 (count Path A successful applies + Path B replies + Path C " +
-          "rule-applications; if zero, skip this conversation's notification entirely), send " +
-          "ONE notification email so the user knows to come back and re-review. Path A " +
-          "failures (data.applied=false) do NOT count — the bot's reply on the doc is the " +
-          "user's notification path for those.\n\n" +
+          "ONE unit in step 2 OR step 2.5 (count Path A successful applies + Path B replies + " +
+          "Path C rule-applications + STEP 2.5 email-path rule-applications; if zero, skip " +
+          "this conversation's notification entirely), send ONE notification email so the " +
+          "user knows to come back and re-review. Path A failures (data.applied=false) do " +
+          "NOT count — the bot's reply on the doc is the user's notification path for those.\n\n" +
           "  3a. Compose the notification body in markdown:\n\n" +
           "    # Comments applied on <conversation.payload.employer> — <conversation.payload.title>\n\n" +
           "    Processed <N> comment<plural> on your draft:\n\n" +
-          "    - <one-line summary per applied comment, in the same order you applied them. " +
+          "    - <one-line summary per applied unit, in the same order you applied them. " +
           "Use the summary string you composed for Path A and Path C; for Path B reply this " +
-          "is the first 80 chars of your reply content>\n\n" +
+          "is the first 80 chars of your reply content; for STEP 2.5 email-path use the EC5 " +
+          "summary you composed and prefix it with '(email-trigger)'>\n\n" +
           "    Doc: <conversation.payload.doc_web_view_link>\n\n" +
-          "    Next step: open the doc, review the changes, then either drop more comments " +
-          "to keep iterating, or reply to this email with `looks good — apply 1` to mark " +
-          "the application ready to submit.\n\n" +
+          "    Next step: open the doc, review the changes, then either reply to this email " +
+          "with another rule-application request (`apply my writing rules`, `no em dashes`, " +
+          "etc.) for more rounds, leave more doc comments and reply with `process my " +
+          "comments` when ready, or reply `apply 1` / `submit 1` to send this draft to the " +
+          "finalizer.\n\n" +
           "  3b. Call gmail_send_to_self EXACTLY ONCE per notified conversation with:\n" +
           "    to: 'kevin.hopper1@gmail.com'\n" +
           "    subject: 'Re: Job-Search Drafts ready — Comments applied'\n" +
@@ -1426,16 +1502,19 @@ export const presets = {
           "    id: <conversation.id>\n" +
           "    payload_merge: true   ← critical; without this the row's existing payload is " +
           "REPLACED, dropping employer/title/url/doc_web_view_link AND the gate's " +
-          "process_comments_requested_at field.\n" +
+          "process_comments_requested_at + process_comments_request_body fields.\n" +
           "    payload: { last_comment_applied_at: '<NOW_ISO from goal>', " +
-          "last_comment_count: <N from step 2 — your applied-in-this-run count> }\n" +
+          "last_comment_count: <N from step 2 + step 2.5 — your applied-in-this-run count> }\n" +
           "  Status and current_step stay 'applied' / 'applying'. After this patch, the gate " +
           "(STEP 1.5) will be CLOSED on this row because last_comment_applied_at now exceeds " +
           "process_comments_requested_at. The user re-opens the gate by emailing again.\n\n" +
-          "  If zero comments applied for a conversation (none unresolved, or all skipped by " +
-          "idempotency check at start of step 2), do NOT call gmail_send_to_self or " +
-          "bot_conversations_patch for that conversation. Silent runs are correct — there's " +
-          "nothing for the user to review.\n\n" +
+          "  ZERO-UNIT BEHAVIOR. If a conversation passed the STEP 1.5 gate but yielded zero " +
+          "applied units (no unresolved comments survived idempotency AND step 2.5 found no " +
+          "email-path rule match), still call bot_conversations_patch to close the gate (same " +
+          "fields as 3c — last_comment_applied_at + last_comment_count: 0) but SKIP " +
+          "gmail_send_to_self. Without the patch, the gate stays open and the agent will " +
+          "reconsider this row every minute forever, wasting LLM calls. The lack of a " +
+          "notification is correct — there's nothing for the user to review yet.\n\n" +
 
           "TOOL CONTRACTS:\n" +
           "- gdocs_apply_comment_edit handles find/replace + reply + (formerly resolve) for " +
@@ -1444,11 +1523,21 @@ export const presets = {
           "UNRESOLVED reply explaining the failure mode (truncated highlight vs doc edited). " +
           "data.reason tells you which: 'truncated_quote' or 'no_match'. Move on and do NOT " +
           "count this as an applied comment for step 3 — the user's edit didn't land.\n" +
-          "- gdocs_read returns the full doc body as markdown. Use it in Path C step C1.\n" +
-          "- gdocs_find_replace takes pairs:[{find, replace}, ...] and returns per-pair " +
-          "occurrences plus total_changes. Use it in Path C step C4 as a single batch. Each " +
-          "find must have enough surrounding context to be UNIQUE in the doc; otherwise it " +
-          "replaces the wrong instance or returns occurrences=0.\n" +
+          "- gdocs_read returns the full doc body as markdown. Use it in Path C step C1 and " +
+          "STEP 2.5 step EC1.\n" +
+          "- gdocs_rewrite_passages takes passages:[{match_prefix, new_text}, ...] and " +
+          "atomically replaces each matched paragraph via Docs API deleteContentRange + " +
+          "insertText (batched, reverse-order, single API call). Use it in Path C step C4 " +
+          "and STEP 2.5 step EC4. match_prefix must be the first 60-90 characters of the " +
+          "ORIGINAL paragraph VERBATIM — the tool lstrips the paragraph and checks " +
+          "startswith(prefix). Returns data.matched (count of paragraphs that landed) and " +
+          "per-passage results. Far more reliable than the older gdocs_find_replace + " +
+          "context-window approach: matching anchored at paragraph start is robust to " +
+          "internal whitespace/punctuation variation, and atomic batch replacement avoids " +
+          "the iterative-retry burn that exhausted the prior maxTurns budget.\n" +
+          "- gdocs_find_replace exists but is NOT preferred for prose-scale rewrites — " +
+          "context-window matching is brittle. Use it only for truly small substitutions " +
+          "where the exact surrounding text is known (rare). Default to rewrite_passages.\n" +
           "- gdocs_reply_comment + gdocs_resolve_comment is the fallback for questions / " +
           "vague comments (Path B) and the closer for Path C. Always call both, in that order.\n" +
           "- gmail_send_to_self is the only delivery tool — the allowlist enforces user-bound " +
@@ -1461,12 +1550,13 @@ export const presets = {
           "gdocs_list_comments",
           "gdocs_read",
           "gdocs_apply_comment_edit",
+          "gdocs_rewrite_passages",
           "gdocs_find_replace",
           "gdocs_reply_comment",
           "gdocs_resolve_comment",
           "gmail_send_to_self",
         ],
-        maxTurns: 60,
+        maxTurns: 100,
       },
     ],
   },
