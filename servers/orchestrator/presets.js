@@ -808,12 +808,26 @@ export const presets = {
           "    user_email: 'kevin.hopper@maestro.press'\n" +
           "    subject_anchor: subject_anchor\n" +
           "    google_doc_id: data.doc_id\n" +
+          "    gmail_thread_id: <SOURCE-THREAD HANDLING — see note below>\n" +
           "    status: 'awaiting-user'\n" +
           "    current_step: 'draft-created'\n" +
           "    link_job_candidate_id: candidate.id  ← REQUIRED. Without this, the candidate " +
           "will be re-drafted on the next tick and you will waste 5 min of compute.\n" +
           "    payload: {job_candidate_id: candidate.id, employer, title, url: candidate.url, " +
           "doc_web_view_link: data.web_view_link, drive_folder_id: subfolder_id, drafted_at: <ISO timestamp>}\n\n" +
+
+          "    SOURCE-THREAD HANDLING for the gmail_thread_id arg: examine candidate.match_notes " +
+          "(it is a free-form string column readable from the Phase 1 row). Look for a marker " +
+          "of the form '__source_router_thread:<thread_id>__' (the router-improvise " +
+          "APPLICATION PREP branch writes this when shortlisting candidates that originated " +
+          "from a user email at kevin.hopper+bot@maestro.press). If found, extract the " +
+          "<thread_id> and pass it as gmail_thread_id on the upsert. If NOT found (e.g. the " +
+          "candidate was shortlisted by the regular Monday tick or via the UI), OMIT " +
+          "gmail_thread_id from the upsert — the downstream notifier will fill it in after " +
+          "it sends a fresh-thread digest. The point: when a router conversation triggered " +
+          "this draft, every downstream pipeline (notifier, comment-applier, finalize, " +
+          "platform-prep, ack-complete) replies on THAT router thread automatically because " +
+          "they all use row.gmail_thread_id. End-to-end conversation stays in ONE thread.\n\n" +
           "  Per-candidate is ONLY 3 tool calls (gdrive_create_folder + gdocs_create + " +
           "bot_conversations_upsert). " +
           "Do not skip step 3f. After step 3f, advance to the next candidate.\n\n" +
@@ -871,16 +885,29 @@ export const presets = {
           "  - [Open draft](<doc_web_view_link>)\n" +
           "  - Posting: <url>\n\n" +
           "  ## 2. <Employer> — <Title>\n  ... (repeat per row, numbered)\n\n" +
-          "STEP 3. Call gmail_send_to_self EXACTLY ONCE with:\n" +
-          "  to: 'kevin.hopper1@gmail.com'\n" +
-          "  subject: 'Job-Search Drafts ready — <count> documents'\n" +
-          "  body: <the markdown above>\n" +
-          "gmail_send_to_self actually delivers (not drafts) and renders markdown as HTML, so " +
-          "the digest lands in the user's inbox properly formatted. Capture the returned " +
-          "data.thread_id from the response.\n\n" +
-          "STEP 4. For EACH conversation from STEP 1, call bot_conversations_patch with:\n" +
+          "STEP 3. SOURCE-THREAD-AWARE DELIVERY. Examine the gmail_thread_id field on each row " +
+          "from STEP 1 (it's a TOP-LEVEL field on the bot_conversations row, NOT inside " +
+          "payload). Three cases:\n" +
+          "  CASE A — all rows share the SAME non-null gmail_thread_id: the rows came from a " +
+          "router-triggered APPLICATION PREP. The digest must thread on that router " +
+          "conversation, NOT open a new one. Call gmail_send_threaded_to_self with " +
+          "to='kevin.hopper1@gmail.com', subject='Drafts ready — <count> documents' (the tool " +
+          "will auto-override to 'Re: <original router subject>'), body=<markdown>, " +
+          "thread_id=<the shared gmail_thread_id>. Capture data.thread_id from the response " +
+          "(it'll be the same router thread_id you passed in). End-to-end conversation stays " +
+          "in ONE thread this way.\n" +
+          "  CASE B — rows have a MIX of gmail_thread_id values (some null, some set, or " +
+          "multiple distinct values): degrade to fresh-thread behavior. Call gmail_send_to_self " +
+          "with to='kevin.hopper1@gmail.com', subject='Job-Search Drafts ready — <count> " +
+          "documents', body=<markdown>. Capture the returned data.thread_id.\n" +
+          "  CASE C — no rows have gmail_thread_id (legacy / weekly-tick path): call " +
+          "gmail_send_to_self exactly like CASE B. Same call, same args, same capture.\n\n" +
+          "STEP 4. For EACH conversation from STEP 1, call bot_conversations_patch:\n" +
           "  id: <conversation.id>\n" +
-          "  gmail_thread_id: <thread id from STEP 3>\n" +
+          "  gmail_thread_id: <PRESERVE-OR-FILL: if conversation.gmail_thread_id is already " +
+          "set (CASE A above), pass that SAME value back to preserve it. If it was null " +
+          "(CASE B or C), pass the data.thread_id captured from STEP 3. NEVER overwrite a " +
+          "non-null gmail_thread_id with a different value — that would break threading.>\n" +
           "  current_step: 'pending-review'\n" +
           "  next_action_at: null\n" +
           "  payload_merge: true   ← critical; without this the row's existing payload is " +
@@ -905,6 +932,7 @@ export const presets = {
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
           "gmail_send_to_self",
+          "gmail_send_threaded_to_self",
         ],
         maxTurns: 25,
       },
@@ -2431,7 +2459,15 @@ export const presets = {
           "That is the correct delivery channel for application materials.\n" +
           "  Action: (1) call job_candidates_query with employer/title filters to locate the " +
           "exact rows the user is referencing — capture their .id values; (2) for each, call " +
-          "job_candidates_score_update with status='shortlisted' and user_priority='high'; " +
+          "job_candidates_score_update with status='shortlisted', user_priority='high', " +
+          "AND match_notes='__source_router_thread:<row.gmail_thread_id>__' where " +
+          "row.gmail_thread_id is the TOP-LEVEL gmail_thread_id from THIS conversation row " +
+          "(the same one you used for gmail_get_thread in step 2a-PLUS). This marker lets the " +
+          "downstream drafter set each new bot_conversations row's gmail_thread_id to YOUR " +
+          "router thread, so the drafts-ready digest and all subsequent finalize / " +
+          "platform-prep / ack-complete replies land back here instead of opening a new thread. " +
+          "If match_notes was already populated for this candidate, append the marker on a new " +
+          "line — do not clobber existing notes. " +
           "(3) reply via gmail_send_threaded_to_self: 'Shortlisted N candidate(s): " +
           "<employer1>/<title1>, <employer2>/<title2>. The drafter pipeline " +
           "(bot:job-search:draft-applications) runs Mon 7:30 AM on schedule — to fire it NOW, " +
