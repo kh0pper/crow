@@ -1605,18 +1605,26 @@ export const presets = {
           "  - Tracker row appended: `| <Employer> | <Title> | <url> | <today YYYY-MM-DD> | " +
           "submitted | <conversation.id> |`\n\n" +
           "  (repeat per row, numbered)\n\n" +
-          "STEP 3. Call gmail_send_to_self EXACTLY ONCE with:\n" +
+          "STEP 3. Call gmail_send_to_self EXACTLY ONCE. ALL FOUR PARAMETERS BELOW ARE " +
+          "REQUIRED — including thread_id. Omitting thread_id causes the notification to " +
+          "open a brand-new Gmail thread, which is the user-visible bug the Tier 1 threading " +
+          "fix was supposed to eliminate. Pass thread_id every time:\n" +
           "  to: 'kevin.hopper1@gmail.com'\n" +
           "  subject: 'Ready to submit — <count> applications'\n" +
-          "  body: <the markdown above>\n" +
-          "  thread_id: <the gmail_thread_id COLUMN of the first row from STEP 1>\n" +
+          "  body: <the markdown body composed in STEP 2>\n" +
+          "  thread_id: <data.rows[0].gmail_thread_id from the STEP 1 list call — " +
+          "gmail_thread_id is a TOP-LEVEL field on the row object returned by " +
+          "bot_conversations_list_by_status, NOT inside row.payload. Example: if STEP 1 " +
+          "returns {count:1, rows:[{id:'...', gmail_thread_id:'19e22dbf1d1315f5', " +
+          "payload:{...}, ...}]}, pass thread_id: '19e22dbf1d1315f5'>\n" +
           "gmail_send_to_self actually delivers (not drafts) and renders markdown as HTML — " +
-          "the digest is user-bound, so it must land in the inbox. Threading note: all rows " +
-          "approved in the same digest share the notifier's thread_id, so picking the first " +
-          "row's gmail_thread_id keeps the entire approval-to-finalize conversation on ONE " +
-          "thread. If the first row has no gmail_thread_id (legacy data), omit thread_id and " +
-          "log a warning in your final output — but the current finalizer queue should always " +
-          "carry a thread_id since the notifier stamps it.\n\n" +
+          "the digest is user-bound, so it must land in the inbox. ALL rows approved in the " +
+          "same digest share the notifier's thread_id, so picking the first row's " +
+          "gmail_thread_id keeps the entire approval-to-finalize conversation on ONE thread. " +
+          "If data.rows[0].gmail_thread_id is null or absent (legacy data), then and ONLY " +
+          "then omit thread_id and log a warning in your final output. For the current bot " +
+          "queue every row has gmail_thread_id — there should be no case where omitting it " +
+          "is correct.\n\n" +
           "STEP 4. For EACH conversation from STEP 1, run these calls in order:\n" +
           "  4a. Compose the tracker row text:\n" +
           "      `| <Employer> | <Title> | <url> | <today YYYY-MM-DD> | submitted | <conversation.id> |`\n" +
