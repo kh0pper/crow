@@ -72,40 +72,77 @@ function makeAuth() {
 }
 
 // --- Intent classification ---
+//
+// Patterns are anchored to ^...$ and tested against the SUBJECT or the FIRST
+// non-empty line of the (quote-stripped) body — separately, never concatenated.
+// This prevents NL requests like "Please draft applications for both: ..."
+// from short-circuiting the improvise pipeline. Optional trailing words (now /
+// please / asap) and trailing punctuation are tolerated; anything else (a long
+// sentence, multi-clause request, etc.) routes to improvise instead.
 const INTENTS = [
   {
     name: "run-pir-sync",
-    patterns: [/\brun\s*pir\s*sync\b/i, /\bingest\s*pir\b/i, /\bpir\s*ingest\b/i, /\bsync\s*pir(\s*responses)?\b/i],
+    patterns: [
+      /^\s*run\s+pir\s+sync(\s+(now|please|asap))*\s*[!.?]*\s*$/i,
+      /^\s*ingest\s+pir(\s+(now|please|asap))*\s*[!.?]*\s*$/i,
+      /^\s*pir\s+ingest(\s+(now|please|asap))*\s*[!.?]*\s*$/i,
+      /^\s*sync\s+pir(\s+responses)?(\s+(now|please|asap))*\s*[!.?]*\s*$/i,
+    ],
     summary: "Run PIR ingest sync now",
     action: { kind: "systemctl-start", unit: "mpa-pir-response-sync.service" },
   },
   {
     name: "show-pir-digest",
-    patterns: [/\bshow\s*pir\s*digest\b/i, /\bpir\s*digest\s*(now|please)?\b/i, /\brun\s*pir\s*tracker\b/i, /\bpir\s*tracker\s*tick\b/i],
+    patterns: [
+      /^\s*show\s+pir\s+digest(\s+(now|please|asap))*\s*[!.?]*\s*$/i,
+      /^\s*pir\s+digest(\s+(now|please|asap))*\s*[!.?]*\s*$/i,
+      /^\s*run\s+pir\s+tracker(\s+(now|please|asap))*\s*[!.?]*\s*$/i,
+      /^\s*pir\s+tracker\s+tick\s*[!.?]*\s*$/i,
+    ],
     summary: "Send the PIR daily digest now (pipeline:bot:pir-tracker:tick)",
     action: { kind: "mpa-schedule-bump", task: "pipeline:bot:pir-tracker:tick" },
   },
   {
     name: "start-job-search",
-    patterns: [/\bstart\s*job\s*search\b/i, /\brun\s*job\s*search(\s*now)?\b/i, /\bsearch\s*for\s*jobs(\s*now)?\b/i, /\bjob\s*search\s*tick\b/i],
+    patterns: [
+      /^\s*start\s+job\s+search(\s+(now|please|asap))*\s*[!.?]*\s*$/i,
+      /^\s*run\s+job\s+search(\s+(now|please|asap))*\s*[!.?]*\s*$/i,
+      /^\s*search\s+for\s+jobs(\s+(now|please|asap))*\s*[!.?]*\s*$/i,
+      /^\s*job\s+search\s+tick\s*[!.?]*\s*$/i,
+    ],
     summary: "Start the weekly job-search chain now (pipeline:bot:job-search:tick)",
     action: { kind: "mpa-schedule-bump", task: "pipeline:bot:job-search:tick" },
   },
   {
     name: "draft-applications",
-    patterns: [/\bdraft\s*applications?\s*(now)?\b/i, /\bstart\s*drafter\b/i, /\brun\s*drafter\b/i, /\bdraft\s*now\b/i, /\bdraft\s*these\s*(now)?\b/i],
+    patterns: [
+      /^\s*draft\s+applications?(\s+(now|please|asap))*\s*[!.?]*\s*$/i,
+      /^\s*start\s+drafter(\s+(now|please|asap))*\s*[!.?]*\s*$/i,
+      /^\s*run\s+drafter(\s+(now|please|asap))*\s*[!.?]*\s*$/i,
+      /^\s*draft\s+now(\s+please)?\s*[!.?]*\s*$/i,
+      /^\s*draft\s+these(\s+(now|please|asap))*\s*[!.?]*\s*$/i,
+    ],
     summary: "Run the application drafter NOW (pipeline:bot:job-search:draft-applications)",
     action: { kind: "mpa-schedule-bump", task: "pipeline:bot:job-search:draft-applications" },
   },
   {
     name: "rematch-pir",
-    patterns: [/\brematch\s*pir\b/i, /\brematch\s*unmatched\b/i, /\bre-?match\b/i],
+    patterns: [
+      /^\s*rematch\s+pir(\s+(now|please|asap))*\s*[!.?]*\s*$/i,
+      /^\s*rematch\s+unmatched(\s+(now|please|asap))*\s*[!.?]*\s*$/i,
+      /^\s*re-?match(\s+(now|please|asap))*\s*[!.?]*\s*$/i,
+    ],
     summary: "Re-run PIR matcher against the _unmatched/ backlog",
     action: { kind: "exec-node", script: "/home/kh0pp/crow/scripts/bots/rematch_unmatched.mjs" },
   },
   {
     name: "help",
-    patterns: [/^\s*help\b/i, /\bwhat\s*can\s*you\s*do\b/i, /\bcommands\??\s*$/i, /\bhow\s*do\s*i\s*use\b/i],
+    patterns: [
+      /^\s*help\s*[!.?]*\s*$/i,
+      /^\s*what\s+can\s+you\s+do\s*[!.?]*\s*$/i,
+      /^\s*commands\s*[!.?]*\s*$/i,
+      /^\s*how\s+do\s+i\s+use(\s+this)?\s*[!.?]*\s*$/i,
+    ],
     summary: "Send the help text",
     action: { kind: "help" },
   },
@@ -141,16 +178,21 @@ function stripQuotedReply(body) {
 }
 
 function classify(subject, body) {
-  // Match against ONLY the fresh (non-quoted) content so historical bot output
-  // in a reply chain doesn't trigger spurious dispatches.
+  // Test patterns against SUBJECT and FIRST non-empty body line separately,
+  // never concatenated. Patterns are anchored ^...$, so a NL request like
+  // "Please draft applications for both: ..." (which happens to contain the
+  // command words) won't trigger a deterministic dispatch — it routes to
+  // the improvise pipeline instead.
   const fresh = stripQuotedReply(body);
-  const text = `${subject || ""}\n\n${fresh}`;
+  const subjTest = (subject || "").trim();
+  const firstBodyLine = fresh.split("\n").map(s => s.trim()).find(s => s.length > 0) || "";
+  const candidates = [subjTest, firstBodyLine].filter(s => s.length > 0);
   for (const intent of INTENTS) {
     for (const pat of intent.patterns) {
-      if (pat.test(text)) return intent;
+      if (candidates.some(c => pat.test(c))) return intent;
     }
   }
-  return null; // fallback
+  return null; // fallback → improvise
 }
 
 // --- Dispatch actions ---
