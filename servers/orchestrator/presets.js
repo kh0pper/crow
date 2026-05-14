@@ -1240,13 +1240,15 @@ export const presets = {
           "');' followed by a script tag appended to the url field; cut at the first ');' you " +
           "find in the url).\n\n" +
 
-          "PHASE 5 — SEND. Call gmail_send_to_self EXACTLY ONCE per refine-request row:\n" +
+          "PHASE 5 — SEND. Call gmail_send_threaded_to_self EXACTLY ONCE per refine-request " +
+          "row. This tool requires thread_id at the schema level (errors if omitted), so " +
+          "threading on the user's reply thread is impossible to skip:\n" +
           "  to: 'kevin.hopper1@gmail.com'\n" +
           "  subject: 'Re: Job-Search Digest — Refined results'\n" +
           "  body: <the markdown above>\n" +
           "  thread_id: <row.payload.reply_thread_id>\n" +
-          "gmail_send_to_self actually delivers (not drafts) and renders markdown as HTML. " +
-          "Capture the returned data.thread_id.\n\n" +
+          "Tool actually delivers (not drafts) and renders markdown as HTML. Capture the " +
+          "returned data.thread_id.\n\n" +
 
           "PHASE 6 — UPSERT A NEW TICK-DIGEST ROW. So the next user reply with 'draft 1,3' " +
           "can resolve numeric references against THIS refined shortlist (instead of the " +
@@ -1291,7 +1293,7 @@ export const presets = {
           "bot_conversations_patch",
           "job_candidates_query",
           "bot_preferences_get",
-          "gmail_send_to_self",
+          "gmail_send_threaded_to_self",
         ],
         maxTurns: 40,
       },
@@ -1501,12 +1503,13 @@ export const presets = {
           "etc.) for more rounds, leave more doc comments and reply with `process my " +
           "comments` when ready, or reply `apply 1` / `submit 1` to send this draft to the " +
           "finalizer.\n\n" +
-          "  3b. Call gmail_send_to_self EXACTLY ONCE per notified conversation with:\n" +
+          "  3b. Call gmail_send_threaded_to_self EXACTLY ONCE per notified conversation. " +
+          "This tool requires thread_id at the schema level — the call errors if omitted, " +
+          "so threading on the original notifier conversation is impossible to skip:\n" +
           "    to: 'kevin.hopper1@gmail.com'\n" +
           "    subject: 'Re: Job-Search Drafts ready — Comments applied'\n" +
           "    body: <the markdown above>\n" +
-          "    thread_id: <conversation.gmail_thread_id>   ← REQUIRED so the email lands on " +
-          "the original notifier thread the user already knows.\n\n" +
+          "    thread_id: <conversation.gmail_thread_id>\n\n" +
           "  3c. Call bot_conversations_patch with:\n" +
           "    id: <conversation.id>\n" +
           "    payload_merge: true   ← critical; without this the row's existing payload is " +
@@ -1563,7 +1566,7 @@ export const presets = {
           "gdocs_find_replace",
           "gdocs_reply_comment",
           "gdocs_resolve_comment",
-          "gmail_send_to_self",
+          "gmail_send_threaded_to_self",
         ],
         maxTurns: 100,
       },
@@ -1605,10 +1608,10 @@ export const presets = {
           "  - Tracker row appended: `| <Employer> | <Title> | <url> | <today YYYY-MM-DD> | " +
           "submitted | <conversation.id> |`\n\n" +
           "  (repeat per row, numbered)\n\n" +
-          "STEP 3. Call gmail_send_to_self EXACTLY ONCE. ALL FOUR PARAMETERS BELOW ARE " +
-          "REQUIRED — including thread_id. Omitting thread_id causes the notification to " +
-          "open a brand-new Gmail thread, which is the user-visible bug the Tier 1 threading " +
-          "fix was supposed to eliminate. Pass thread_id every time:\n" +
+          "STEP 3. Call gmail_send_threaded_to_self EXACTLY ONCE. This tool requires " +
+          "thread_id at the schema level — the call will error if omitted, so threading " +
+          "is impossible to skip. Use this tool (NOT gmail_send_to_self) because the " +
+          "notification must thread on the original notifier conversation. Pass:\n" +
           "  to: 'kevin.hopper1@gmail.com'\n" +
           "  subject: 'Ready to submit — <count> applications'\n" +
           "  body: <the markdown body composed in STEP 2>\n" +
@@ -1658,7 +1661,7 @@ export const presets = {
           "bot_conversations_patch",
           "job_candidates_score_update",
           "tracker_append_row",
-          "gmail_send_to_self",
+          "gmail_send_threaded_to_self",
         ],
         maxTurns: 30,
       },
@@ -1786,11 +1789,10 @@ export const presets = {
           "  - Anything the cover letter doesn't support → leave a `[placeholder]` for the " +
           "user to fill in. Don't invent specifics.\n\n" +
 
-          "STEP 6. Call gmail_send_to_self EXACTLY ONCE. ALL FOUR PARAMETERS BELOW ARE " +
-          "REQUIRED — including thread_id. Omitting thread_id causes the Q&A digest to " +
-          "open a brand-new Gmail thread, which is a user-visible bug: the user has " +
-          "explicitly required the bot to reply on the same thread, not start new threads. " +
-          "Pass thread_id every time:\n" +
+          "STEP 6. Call gmail_send_threaded_to_self EXACTLY ONCE. This tool requires " +
+          "thread_id at the schema level — the call errors if omitted, so threading is " +
+          "impossible to skip. Use this tool (NOT gmail_send_to_self) because the Q&A " +
+          "digest must thread on the original notifier conversation. Pass:\n" +
           "    to: 'kevin.hopper1@gmail.com'\n" +
           "    subject: 'ATS application Q&A — <count> applications'\n" +
           "    body: <the markdown body composed above>\n" +
@@ -1838,7 +1840,7 @@ export const presets = {
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
           "gdocs_read",
-          "gmail_send_to_self",
+          "gmail_send_threaded_to_self",
         ],
         maxTurns: 30,
       },
@@ -1913,11 +1915,10 @@ export const presets = {
           "  - Keep the digest concise; do NOT restate the Q&A or PDF contents — link " +
           "to them instead.\n\n" +
 
-          "STEP 3. Call gmail_send_to_self EXACTLY ONCE. ALL FOUR PARAMETERS BELOW ARE " +
-          "REQUIRED — including thread_id. Omitting thread_id causes the ack digest to " +
-          "open a brand-new Gmail thread, which is a user-visible bug. The user has " +
-          "explicitly required the bot to reply on the same thread, not start new threads. " +
-          "Pass thread_id every time:\n" +
+          "STEP 3. Call gmail_send_threaded_to_self EXACTLY ONCE. This tool requires " +
+          "thread_id at the schema level — the call errors if omitted, so threading is " +
+          "impossible to skip. Use this tool (NOT gmail_send_to_self) because the ack " +
+          "digest must thread on the original notifier conversation. Pass:\n" +
           "    to: 'kevin.hopper1@gmail.com'\n" +
           "    subject: '✓ Bot work complete — <count> application<plural>'\n" +
           "    body: <the markdown body composed above>\n" +
@@ -1964,7 +1965,7 @@ export const presets = {
         tools: [
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
-          "gmail_send_to_self",
+          "gmail_send_threaded_to_self",
         ],
         maxTurns: 30,
       },
@@ -2089,18 +2090,16 @@ export const presets = {
           "    Then pir_update_state with all 5 checklist fields, setting " +
           "next_followup_date=<today + 5 business days YYYY-MM-DD> and action_needed='Awaiting " +
           "response after follow-up'.\n" +
-          "    THEN send a brief CONFIRMATION to the user via gmail_send_to_self, threaded on " +
-          "the DIGEST thread (the gmail_thread_id from the PHASE 1 / PHASE 2 row you're " +
-          "processing) — NOT on the follow-up draft's thread, NOT on a new thread. Call " +
-          "gmail_send_to_self with: to='kevin.hopper1@gmail.com', thread_id=<digest row's " +
-          "gmail_thread_id>, subject='Re: PIR Tracker Digest — follow-up drafted for " +
-          "<pir_number>', body=<2-3 sentence summary covering: which PIR, the personal-account " +
-          "thread the draft landed on (linkify as https://mail.google.com/mail/u/0/#inbox/" +
-          "<thread_id>), the new next_followup_date, and a one-line 'reply mark received " +
-          "<pir>' nudge>. The thread_id parameter is REQUIRED so the confirmation stays in " +
-          "the digest conversation. If for some reason the digest row has no gmail_thread_id " +
-          "(should not happen), omit thread_id rather than send on a new thread; log a warning " +
-          "in your final output.\n\n" +
+          "    THEN send a brief CONFIRMATION to the user via gmail_send_threaded_to_self, " +
+          "threaded on the DIGEST thread (the gmail_thread_id from the PHASE 1 / PHASE 2 " +
+          "row you're processing) — NOT on the follow-up draft's thread, NOT on a new " +
+          "thread. The tool requires thread_id at the schema level, so threading is " +
+          "impossible to skip. Call gmail_send_threaded_to_self with: " +
+          "to='kevin.hopper1@gmail.com', thread_id=<digest row's gmail_thread_id>, " +
+          "subject='Re: PIR Tracker Digest — follow-up drafted for <pir_number>', " +
+          "body=<2-3 sentence summary covering: which PIR, the personal-account thread the " +
+          "draft landed on (linkify as https://mail.google.com/mail/u/0/#inbox/<thread_id>), " +
+          "the new next_followup_date, and a one-line 'reply mark received <pir>' nudge>.\n\n" +
           "  QUESTION / STATUS QUERY — produces a Q&A reply TO USER:\n" +
           "    - 'what's the status of <pir>?' / 'show <pir>' / 'tell me about <pir>' / " +
           "'where are we on <pir>?' / 'what's pending for <pir>?' → call pir_get for the " +
@@ -2114,19 +2113,19 @@ export const presets = {
           "links to https://mail.google.com/mail/u/0/#inbox/<thread_id> — emit that)\n" +
           "      - suggested next actions (e.g. 'Want me to draft a follow-up? Reply " +
           "\\\"draft follow-up for <pir>\\\". Or mark received: \\\"mark received <pir>\\\"')\n" +
-          "    Then call gmail_send_to_self with REQUIRED parameters: " +
-          "to='kevin.hopper1@gmail.com', subject='Re: PIR Tracker Digest — <pir>', body=<the " +
-          "markdown summary>, thread_id=<the gmail_thread_id of the PHASE 1 / PHASE 2 digest " +
-          "row you're currently processing>. The thread_id MUST be present — NEVER let this " +
-          "reply land on a new thread, the user expects all PIR conversational replies to stay " +
-          "on the digest thread.\n\n" +
+          "    Then call gmail_send_threaded_to_self (the tool requires thread_id at the " +
+          "schema level so threading is impossible to skip): to='kevin.hopper1@gmail.com', " +
+          "subject='Re: PIR Tracker Digest — <pir>', body=<the markdown summary>, " +
+          "thread_id=<the gmail_thread_id of the PHASE 1 / PHASE 2 digest row you're " +
+          "currently processing>.\n\n" +
           "  LIST / BROWSE — produces a Q&A reply enumerating PIRs:\n" +
           "    - 'show me <recipient_domain>' / 'list HISD PIRs' / 'what's pending with TEA?' " +
           "→ call pir_list_active (no args) then filter in-memory by recipient_email " +
           "substring match against the user's request. Compose a markdown table grouped by " +
-          "status. Call gmail_send_to_self with: to='kevin.hopper1@gmail.com', subject='Re: " +
-          "PIR Tracker Digest — <filter>', body=<the markdown table>, thread_id=<the " +
-          "gmail_thread_id of the digest row you're processing>. thread_id is REQUIRED.\n\n" +
+          "status. Call gmail_send_threaded_to_self (tool requires thread_id at the schema " +
+          "level so threading is impossible to skip) with: to='kevin.hopper1@gmail.com', " +
+          "subject='Re: PIR Tracker Digest — <filter>', body=<the markdown table>, " +
+          "thread_id=<the gmail_thread_id of the digest row you're processing>.\n\n" +
           "  UNPARSEABLE — message doesn't match any pattern:\n" +
           "    - Skip the message. Don't error. Don't guess. The next reply will give the " +
           "user another chance.\n\n" +
@@ -2138,8 +2137,10 @@ export const presets = {
 
           "ABSOLUTE SAFETY:\n" +
           "  (a) Tool routing by recipient AND account:\n" +
-          "      - gmail_send_to_self → replies TO USER (Q&A, summaries, status queries). " +
-          "Allowlist enforces user-bound recipient. Sends from primary (@maestro.press).\n" +
+          "      - gmail_send_threaded_to_self → replies TO USER (Q&A, summaries, status " +
+          "queries, confirmations). REQUIRES thread_id at the schema level so the reply " +
+          "always lands on the digest thread. Allowlist enforces user-bound recipient. " +
+          "Sends from primary (@maestro.press).\n" +
           "      - gmail_create_draft_personal → follow-up drafts TO PIR SENDERS (TEA, ISDs, " +
           "AG, etc.). Lives in the user's personal Gmail (kevin.hopper1) so they can see + " +
           "send. Use gmail_search_threads_personal first to find the original thread.\n" +
@@ -2165,7 +2166,7 @@ export const presets = {
           "pir_list_active",
           "pir_update_state",
           "gmail_get_thread",
-          "gmail_send_to_self",
+          "gmail_send_threaded_to_self",
           "gmail_create_draft",
           "gmail_search_threads_personal",
           "gmail_create_draft_personal",
