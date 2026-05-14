@@ -2471,9 +2471,11 @@ export const presets = {
           "(3) reply via gmail_send_threaded_to_self: 'Shortlisted N candidate(s): " +
           "<employer1>/<title1>, <employer2>/<title2>. The drafter pipeline " +
           "(bot:job-search:draft-applications) runs Mon 7:30 AM on schedule — to fire it NOW, " +
-          "send a new email to kevin.hopper+bot@maestro.press with subject \"start job " +
-          "search\". You will get a separate Drafts ready email with Google Doc links once " +
-          "the drafter finishes (5-15 min).' Then bot_conversations_patch this row to " +
+          "reply to this thread with \"draft applications\" (any of: draft applications / " +
+          "draft now / start drafter / run drafter). You will get a separate Drafts ready " +
+          "email with Google Doc links once the drafter finishes (5-15 min); because the " +
+          "router-thread marker is set, that digest will land BACK on this thread.' Then " +
+          "bot_conversations_patch this row to " +
           "status='completed' / intent_bucket='application-prep'. DO NOT draft cover letters " +
           "or resumes inline — the user wants the proper Google Docs workflow, not " +
           "email-body text. If a candidate cannot be located, surface it as a TODO and do " +
@@ -2500,8 +2502,8 @@ export const presets = {
 
           "    HELP / META — 'what can you do?', 'how do I use this?', etc. " +
           "  Action: send a short reply pointing them to the known commands (run pir " +
-          "sync / show pir digest / start job search / rematch pir) and explain that " +
-          "freeform questions also work for read-only data lookups.\n\n" +
+          "sync / show pir digest / start job search / draft applications / rematch pir) and " +
+          "explain that freeform questions also work for read-only data lookups.\n\n" +
 
           "    OUT OF SCOPE — request asks for an action the router can't take: send " +
           "external email, run a destructive operation, modify pir_requests directly, " +

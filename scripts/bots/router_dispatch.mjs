@@ -10,6 +10,7 @@
 //   - "run pir sync"            → systemctl start mpa-pir-response-sync.service
 //   - "show pir digest"         → bump pipeline:bot:pir-tracker:tick next_run
 //   - "start job search"        → bump pipeline:bot:job-search:tick next_run
+//   - "draft applications"      → bump pipeline:bot:job-search:draft-applications next_run
 //   - "rematch pir"             → exec ~/crow/scripts/bots/rematch_unmatched.mjs
 //   - "help" / fallback         → reply with usage
 //
@@ -91,6 +92,12 @@ const INTENTS = [
     action: { kind: "mpa-schedule-bump", task: "pipeline:bot:job-search:tick" },
   },
   {
+    name: "draft-applications",
+    patterns: [/\bdraft\s*applications?\s*(now)?\b/i, /\bstart\s*drafter\b/i, /\brun\s*drafter\b/i, /\bdraft\s*now\b/i, /\bdraft\s*these\s*(now)?\b/i],
+    summary: "Run the application drafter NOW (pipeline:bot:job-search:draft-applications)",
+    action: { kind: "mpa-schedule-bump", task: "pipeline:bot:job-search:draft-applications" },
+  },
+  {
     name: "rematch-pir",
     patterns: [/\brematch\s*pir\b/i, /\brematch\s*unmatched\b/i, /\bre-?match\b/i],
     summary: "Re-run PIR matcher against the _unmatched/ backlog",
@@ -111,6 +118,7 @@ You can send this address (kevin.hopper+bot@maestro.press) a short request and I
   run pir sync          — ingest any newly-labeled PIR responses now
   show pir digest       — send the daily PIR digest immediately
   start job search      — run the weekly job-search chain (search → shortlist → draft → notify)
+  draft applications    — run the drafter NOW for already-shortlisted candidates (skip the weekly tick)
   rematch pir           — re-run the PIR matcher against the _unmatched/ backlog
   help                  — show this list
 
