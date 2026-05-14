@@ -1307,7 +1307,7 @@ export const presets = {
           "bot_preferences_get",
           "gmail_send_threaded_to_self",
         ],
-        maxTurns: 40,
+        maxTurns: 50,
       },
     ],
   },
@@ -2382,7 +2382,43 @@ export const presets = {
           "  2a. Read row.payload.body — that's the user's request in plain text. The body " +
           "may include quoted prior messages (lines starting with '>') from earlier in the " +
           "thread; you can ignore the quoted parts and focus on the FRESH text at the top.\n" +
-          "  2b. Classify the intent into one of these buckets and act:\n\n" +
+          "  2a-PLUS. FETCH THREAD HISTORY (Phase 2A memory). Call gmail_get_thread(row.gmail_thread_id) " +
+          "ONCE. Read every message in the thread (sorted by internalDate). For each message, note: " +
+          "From, Date, Subject, plain-text body, and any attachments (parts with filename + " +
+          "body.attachmentId). Build a mental timeline of: (i) what the user originally asked, " +
+          "(ii) what prior bot replies (if any) said, (iii) the LATEST user message that hasn't " +
+          "been responded to. Skip messages from kevin.hopper@maestro.press — those are the bot " +
+          "itself.\n\n" +
+
+          "  2b. Classify the intent of the LATEST USER MESSAGE into one of these buckets and act:\n\n" +
+
+          "    PIR DOC INGEST — the latest user message either (i) has email attachments, OR " +
+          "(ii) contains a Google Drive link (drive.google.com/drive/folders/* or " +
+          "drive.google.com/file/d/*), OR (iii) explicitly asks the bot to ingest PIR docs " +
+          "('here are the FWISD docs', 'I downloaded W012170 attachments', 'ingest these for " +
+          "R027470', etc.). Match the target PIR by (in priority order): (1) an explicit " +
+          "pir_number or reference_number string in subject or body — call pir_get with the " +
+          "candidate to confirm, (2) a clear district name + the timeframe + the active PIR " +
+          "set from pir_list_active, (3) prior thread context if this is a continuation.\n" +
+          "  PHASE 2A behavior: do NOT actually move files yet. Compose a CONFIRMATION reply: " +
+          "'# PIR doc ingest — proposed' followed by what you would ingest (N attachments named X/Y/Z, " +
+          "or N Drive files at folder F), the proposed target PIR (with employer + label + " +
+          "pir_number), and 'Reply with go or confirm to proceed, or specify a different PIR.' " +
+          "If the match is ambiguous (3+ candidates with similar weight), reply with a numbered " +
+          "list of candidate PIRs and ask the user to pick. Do NOT call any file-movement tool. " +
+          "After replying, patch the row to current_step='awaiting-ingest-confirm' so the next " +
+          "tick recognizes this conversation is in confirmation state — NOT 'completed'.\n" +
+          "  PHASE 2B handler (not yet wired — coming next): on the NEXT improvise tick after " +
+          "the user replies with go/confirm/yes, do the actual file movement. The 2B preset " +
+          "will replace this branch — for now, just compose the proposal.\n\n" +
+
+          "    INGEST CONFIRMATION (Phase 2A holding pattern) — if the latest user message is " +
+          "a short affirmation ('yes', 'go', 'confirm', 'proceed', 'do it') AND the row's " +
+          "current_step is 'awaiting-ingest-confirm', reply: 'Ingest tooling is shipping in " +
+          "Phase 2B; for now I have logged your confirmation but the actual file movement " +
+          "needs Phase 2B to land. The proposal in my prior reply will be picked up the moment " +
+          "those tools are wired.' Then patch the row to current_step='completed' / " +
+          "intent_bucket='ingest-confirmed-deferred'. This is temporary; Phase 2B will replace it.\n\n" +
 
           "    JOB-SEARCH QUERY — body mentions job hunting, finding roles, employers, " +
           "specific titles or geographies, e.g. 'find me director jobs in Houston', 'are " +
@@ -2463,9 +2499,10 @@ export const presets = {
           "pir_list_active",
           "pir_list_overdue",
           "pir_get",
+          "gmail_get_thread",
           "gmail_send_threaded_to_self",
         ],
-        maxTurns: 40,
+        maxTurns: 50,
       },
     ],
   },
