@@ -184,8 +184,20 @@ async function getRegistryForCategories(categories, connectedServers) {
   const hasRemote = categories.includes("remote");
   const hasAddons = categories.includes("addons");
   const localCategories = categories.filter((c) => c !== "remote" && c !== "addons");
-  const key = [...localCategories].sort().join(",");
-  const cacheable = !hasRemote && !hasAddons;
+  // Addons MUST be in the cache key so an "with-addons" registry is not
+  // returned to a "without-addons" caller (and vice-versa). Without the
+  // suffix, two callers with the same localCategories but different
+  // hasAddons values would collide.
+  const key = [...localCategories, ...(hasAddons ? ["+addons"] : [])].sort().join(",");
+  // Addons CAN be cached: the addon set is loaded from a static
+  // mcp-addons.json and the StdioClientTransport children stay alive
+  // as long as the parent gateway lives. Pre-fix (commit 45563ec,
+  // 2026-04-21), addons were treated like remote (un-cacheable) and
+  // every pipeline run re-spawned every addon child without closing
+  // the previous ones — a process leak that grew ~8 MCP children/min
+  // in the bot pipeline era. Only "remote" connections are genuinely
+  // dynamic and stay un-cacheable.
+  const cacheable = !hasRemote;
 
   let registry;
   if (cacheable && registryCache.has(key)) {
@@ -892,7 +904,7 @@ export async function runOrchestrationStandalone(goal, presetName, options = {})
       const agentResult = await Promise.race([
         orchestrator.runAgent(single, goal),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("Pipeline timed out after 15 minutes")), 900000)
+          setTimeout(() => reject(new Error("Pipeline timed out after 30 minutes")), 1800000)
         ),
       ]);
       runResult = {
@@ -911,7 +923,7 @@ export async function runOrchestrationStandalone(goal, presetName, options = {})
       const teamResult = await Promise.race([
         orchestrator.runTeam(team, goal),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("Pipeline timed out after 15 minutes")), 900000)
+          setTimeout(() => reject(new Error("Pipeline timed out after 30 minutes")), 1800000)
         ),
       ]);
       const coordinatorResult = teamResult.agentResults.get("coordinator");
