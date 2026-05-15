@@ -20,7 +20,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { spawn } from "node:child_process";
-import { readFileSync } from "fs";
+import { readFileSync, appendFileSync, mkdirSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -807,6 +807,84 @@ export function createOrchestratorServer(dbPath, options = {}) {
  * @param {Map}    [options.connectedServers] - Remote instance connections (null when run as subprocess)
  * @param {object} [options.pipelineDefaults] - Default provider/model config
  */
+
+// ---------------------------------------------------------------------------
+// Watermark rescue
+// ---------------------------------------------------------------------------
+// When a bot preset sends a Gmail threaded reply but the agent runs out of
+// turns/tokens before calling bot_conversations_patch, the next tick re-reads
+// the same user message and double-replies. This hook inspects the toolCalls
+// captured during the run, detects "reply sent but no watermark patch", and
+// patches bot_conversations.last_user_msg_at directly. Idempotent and only
+// advances the watermark forward; safe to invoke after every run.
+
+const WATERMARK_RESCUE_REPLY_TOOLS = new Set(["gmail_send_threaded_to_self"]);
+
+async function rescueBotWatermark(toolCalls) {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) return;
+
+  const sentReplies = toolCalls.filter((tc) => {
+    if (!tc || !WATERMARK_RESCUE_REPLY_TOOLS.has(tc.toolName)) return false;
+    const threadId = tc?.input?.thread_id;
+    if (!threadId) return false;
+    try {
+      const out = typeof tc.output === "string" ? JSON.parse(tc.output) : tc.output;
+      return out?.success === true && out?.data?.sent === true;
+    } catch {
+      return false;
+    }
+  });
+  if (sentReplies.length === 0) return;
+
+  const alreadyPatched = toolCalls.some(
+    (tc) => tc?.toolName === "bot_conversations_patch" && tc?.input?.last_user_msg_at,
+  );
+  if (alreadyPatched) return;
+
+  const db = createDbClient();
+  try {
+    for (const reply of sentReplies) {
+      const threadId = reply.input.thread_id;
+
+      let watermark = null;
+      for (const tc of toolCalls) {
+        if (tc?.toolName !== "gmail_get_thread") continue;
+        if (tc?.input?.thread_id !== threadId) continue;
+        try {
+          const parsed = typeof tc.output === "string" ? JSON.parse(tc.output) : tc.output;
+          const msgs = parsed?.data?.messages || [];
+          let latestMs = 0;
+          for (const m of msgs) {
+            const ts = parseInt(m?.internal_date, 10);
+            if (Number.isFinite(ts) && ts > latestMs) latestMs = ts;
+          }
+          if (latestMs > 0) watermark = new Date(latestMs).toISOString();
+        } catch {}
+      }
+      if (!watermark) watermark = new Date().toISOString();
+
+      try {
+        const res = await db.execute({
+          sql: `UPDATE bot_conversations
+                SET last_user_msg_at = ?, updated_at = datetime('now')
+                WHERE gmail_thread_id = ?
+                  AND (last_user_msg_at IS NULL OR last_user_msg_at < ?)`,
+          args: [watermark, threadId, watermark],
+        });
+        if (res.rowsAffected > 0) {
+          console.log(
+            `[watermark-rescue] thread=${threadId} watermark=${watermark} rows=${res.rowsAffected}`,
+          );
+        }
+      } catch (err) {
+        console.warn(`[watermark-rescue] UPDATE failed for thread=${threadId}: ${err.message}`);
+      }
+    }
+  } finally {
+    try { db.close(); } catch {}
+  }
+}
+
 export async function runOrchestrationStandalone(goal, presetName, options = {}) {
   const modelsConfig = options.modelsConfig || loadModelsConfig();
   const connectedServers = options.connectedServers || null;
@@ -870,6 +948,9 @@ export async function runOrchestrationStandalone(goal, presetName, options = {})
 
   const presetPC = resolveProvider(modelsConfig, providerName);
 
+  // Captured for the post-run watermark rescue (see rescueBotWatermark above).
+  const _collectedToolCalls = [];
+
   try {
     const orchestrator = new OpenMultiAgent({
       maxConcurrency: preset.maxConcurrency || 1,
@@ -879,6 +960,32 @@ export async function runOrchestrationStandalone(goal, presetName, options = {})
       defaultBaseURL: presetPC.baseURL,
       toolRegistry: registry,
       onProgress: (event) => {
+        // Always persist the full event to a daily JSONL trace file. This is
+        // the only place we capture agent reasoning, tool calls, and tool
+        // results — the journal log truncates at 200 chars per line so
+        // long agent outputs are unreadable there. Trace files live next
+        // to the MPA db and rotate daily.
+        try {
+          const traceDir = `${process.env.CROW_HOME || "/home/kh0pp/.crow-mpa"}/data/agent-traces`;
+          mkdirSync(traceDir, { recursive: true });
+          const day = new Date().toISOString().slice(0, 10);
+          const line = JSON.stringify({
+            at: new Date().toISOString(),
+            run_id: jobId,
+            preset: presetName,
+            event_type: event.type,
+            agent: event.agent || null,
+            data: event.data,
+          }) + "\n";
+          appendFileSync(`${traceDir}/agent-trace-${day}.jsonl`, line);
+        } catch (err) {
+          console.warn(`[pipeline-runner] trace write failed: ${err.message}`);
+        }
+
+        if (event.type === "agent_complete" && Array.isArray(event.data?.toolCalls)) {
+          for (const tc of event.data.toolCalls) _collectedToolCalls.push(tc);
+        }
+
         if (event.type === "error") {
           const d = event.data;
           const msg = d?.message || d?.output || String(d);
@@ -935,6 +1042,12 @@ export async function runOrchestrationStandalone(goal, presetName, options = {})
     }
 
     await orchestrator.shutdown();
+
+    try {
+      await rescueBotWatermark(_collectedToolCalls);
+    } catch (err) {
+      console.warn(`[watermark-rescue] failed: ${err.message}`);
+    }
 
     return {
       status: "completed",

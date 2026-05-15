@@ -994,11 +994,20 @@ export const presets = {
           "  2b. Walk messages in order. For each message, check the 'From' header. SKIP " +
           "messages whose From is the bot's own address (the bot's outgoing draft). Only " +
           "process inbound.\n" +
-          "  2c. For each inbound message, also skip if its internalDate is OLDER than the " +
-          "row's last_user_msg_at (already processed). For threads with rows in BOTH " +
-          "current_steps, use the MAX of all rows' last_user_msg_at as the watermark for " +
-          "the message walk, but write back per-row later. Track the newest internalDate you " +
-          "see — you'll write that back at the end.\n" +
+          "  2c. For each inbound message, also skip if it was already processed. The Gmail " +
+          "tool returns each message's `internal_date` field as a STRING of Unix milliseconds " +
+          "(e.g. '1747246462000'). The row's `last_user_msg_at` is an ISO 8601 string " +
+          "(e.g. '2026-05-14T15:34:22.000Z'). Compare them by parsing BOTH to numbers: " +
+          "msgMs = parseInt(message.internal_date, 10); " +
+          "watermarkMs = Date.parse(row.last_user_msg_at || '1970-01-01T00:00:00Z'); " +
+          "skip if msgMs <= watermarkMs. For threads with rows in BOTH current_steps, use " +
+          "the MAX of all rows' last_user_msg_at as the watermark for the message walk, but " +
+          "write back per-row later. Track the newest inbound message's internal_date — at " +
+          "the end you'll write that back as ISO via " +
+          "new Date(parseInt(internal_date, 10)).toISOString().\n" +
+          "  NOTE: throughout the rest of this prompt, '<newest internal_date ISO>' means " +
+          "the result of that conversion — never paste the raw Unix-ms string into " +
+          "last_user_msg_at.\n" +
           "  2d. Parse the message body. Three intents. Per message, pick AT MOST one intent. " +
           "If a message has both APPLY-FINALIZE and PROCESS-COMMENTS phrases, take the LATER " +
           "one literally in the text — the user typed it that way intentionally:\n" +
@@ -1055,20 +1064,20 @@ export const presets = {
           "depends on the row's CURRENT state and the intent:\n\n" +
           "  APPLY-FINALIZE on pending-review (status='awaiting-user'): " +
           "bot_conversations_patch({id: conv.id, status: 'applied', current_step: " +
-          "'ready-to-submit', last_user_msg_at: <newest internalDate ISO>}). The finalizer " +
+          "'ready-to-submit', last_user_msg_at: <newest internal_date ISO>}). The finalizer " +
           "will pick it up on its next */15-minute tick.\n\n" +
 
           "  APPLY-FINALIZE on applied/applying (status='applied'): " +
           "bot_conversations_patch({id: conv.id, status: 'applied', current_step: " +
-          "'ready-to-submit', last_user_msg_at: <newest internalDate ISO>}). Re-opens the " +
+          "'ready-to-submit', last_user_msg_at: <newest internal_date ISO>}). Re-opens the " +
           "finalizer path after one or more rounds of comment processing. The comment-" +
           "applier's gate (process_comments_requested_at vs last_comment_applied_at) will " +
           "no longer matter since the finalizer doesn't filter on it.\n\n" +
 
           "  PROCESS-COMMENTS on pending-review (status='awaiting-user'): " +
           "bot_conversations_patch({id: conv.id, status: 'applied', current_step: " +
-          "'applying', last_user_msg_at: <newest internalDate ISO>, payload_merge: true, " +
-          "payload: {process_comments_requested_at: <newest internalDate ISO>, " +
+          "'applying', last_user_msg_at: <newest internal_date ISO>, payload_merge: true, " +
+          "payload: {process_comments_requested_at: <newest internal_date ISO>, " +
           "process_comments_request_body: <first 800 chars of the message's plain-text " +
           "body, stripped of quoted prior content (lines beginning with '>' and the " +
           "'On <date>, <name> wrote:' separator and everything after)>}}). This " +
@@ -1079,9 +1088,9 @@ export const presets = {
           "row, or the gate is invisible to the comment-applier.\n\n" +
 
           "  PROCESS-COMMENTS on applied/applying (status='applied'): " +
-          "bot_conversations_patch({id: conv.id, last_user_msg_at: <newest internalDate " +
+          "bot_conversations_patch({id: conv.id, last_user_msg_at: <newest internal_date " +
           "ISO>, payload_merge: true, payload: {process_comments_requested_at: <newest " +
-          "internalDate ISO>, process_comments_request_body: <first 800 chars of the " +
+          "internal_date ISO>, process_comments_request_body: <first 800 chars of the " +
           "message's plain-text body, stripped of quoted prior content>}}). Status and " +
           "current_step unchanged. Re-opens the gate AND refreshes the recorded email " +
           "body so the comment-applier uses the LATEST user instruction (even if the " +
@@ -1091,7 +1100,7 @@ export const presets = {
 
           "  SKIP on either state: bot_conversations_patch({id: conv.id, status: " +
           "'archived', current_step: 'user-rejected', last_user_msg_at: <newest " +
-          "internalDate ISO>}). Plus the two job_candidates calls (BOTH required so the " +
+          "internal_date ISO>}). Plus the two job_candidates calls (BOTH required so the " +
           "candidate doesn't get re-drafted on the next drafter tick):\n" +
           "    (i) job_candidates_set_application({id: conv.payload.job_candidate_id, " +
           "application_id: null}) — clear the link.\n" +
@@ -1108,7 +1117,7 @@ export const presets = {
           "STEP 5 (tick-digest path). For each row with current_step='tick-digest':\n" +
           "  5a. Call gmail_get_thread({thread_id: row.gmail_thread_id}).\n" +
           "  5b. Walk inbound messages newer than row.last_user_msg_at. Track the newest " +
-          "internalDate seen.\n" +
+          "internal_date seen.\n" +
           "  5c. Parse selection language (case-insensitive):\n" +
           "    PICK: 'yes to <N or employer>', 'yes <N or employer>', 'draft <N or employer>', " +
           "'pick <N or employer>', 'priority <N or employer>'.\n" +
@@ -1125,7 +1134,7 @@ export const presets = {
           "user_priority: 1, match_notes: '<existing notes if any> [USER-SELECTED " +
           "<reply ISO date>]'}). Status stays 'shortlisted'. This boosts the drafter's ordering " +
           "so the user's picks get drafted first next tick.\n" +
-          "  5f. Patch the tick-digest row's last_user_msg_at to the newest internalDate seen " +
+          "  5f. Patch the tick-digest row's last_user_msg_at to the newest internal_date seen " +
           "(via bot_conversations_patch). DO NOT change status or current_step — the tick-digest " +
           "row stays 'awaiting-user' all week so additional selections in the same thread keep " +
           "getting processed.\n\n" +
@@ -1143,7 +1152,7 @@ export const presets = {
           "  6a. Extract the body (strip quoted prior content lines beginning with '>' and any " +
           "'On <date>, <name> wrote:' separator and everything after). Keep the first 1500 chars.\n" +
           "  6b. Call bot_conversations_upsert with:\n" +
-          "    id: 'job-search:refine-request:' + <newest message's internalDate ISO> + ':' + " +
+          "    id: 'job-search:refine-request:' + <newest message's internal_date ISO> + ':' + " +
           "<last 8 chars of the thread_id>\n" +
           "    bot_id: 'job-search'\n" +
           "    user_email: 'kevin.hopper@maestro.press'\n" +
@@ -1154,7 +1163,7 @@ export const presets = {
           "    payload: {\n" +
           "      refine_text: <extracted body, max 1500 chars>,\n" +
           "      reply_thread_id: <the tick-digest thread_id>,\n" +
-          "      requested_at: <newest internalDate ISO>\n" +
+          "      requested_at: <newest internal_date ISO>\n" +
           "    }\n" +
           "  6c. Patch the tick-digest row's last_user_msg_at as in 5f so this message won't " +
           "be re-processed next tick.\n" +
@@ -1174,7 +1183,7 @@ export const presets = {
           "For refine-request creation, the row's STATUS is 'pending' (NOT 'awaiting-user') " +
           "so the refine-search pipeline can find it without colliding with regular " +
           "conversation rows. (f) PROCESS-COMMENTS must include payload.process_comments_" +
-          "requested_at = <newest internalDate ISO> on the patch. WITHOUT this field set, " +
+          "requested_at = <newest internal_date ISO> on the patch. WITHOUT this field set, " +
           "the comment-applier's STEP 1.5 gate stays closed and the user's email is " +
           "effectively ignored. payload_merge:true is also REQUIRED — without it the patch " +
           "wipes employer/title/url/doc_web_view_link/digest_position/last_comment_applied_at.",
@@ -2043,9 +2052,15 @@ export const presets = {
 
           "PHASE 2 — FOR EACH DIGEST ROW: call gmail_get_thread(row.gmail_thread_id) to " +
           "fetch all messages. Walk messages in order. For each message:\n" +
-          "  - Skip if From is the bot's address.\n" +
-          "  - Skip if internalDate is <= row.last_user_msg_at (already processed).\n" +
-          "  - Track the newest unprocessed internalDate; you'll write that back at the end.\n\n" +
+          "  - Skip if headers.from is or contains the bot's address (kevin.hopper@maestro.press).\n" +
+          "  - Each message has a `internal_date` field — a STRING of milliseconds since " +
+          "epoch (Unix ms), e.g. '1747246462000'. The row's `last_user_msg_at` is an ISO " +
+          "8601 string, e.g. '2026-05-14T15:34:22.000Z'. To compare them, parse BOTH to " +
+          "Date numbers: msgMs = parseInt(message.internal_date, 10); " +
+          "watermarkMs = Date.parse(row.last_user_msg_at || '1970-01-01T00:00:00Z'). " +
+          "Skip the message if msgMs <= watermarkMs (already processed).\n" +
+          "  - Track the newest unprocessed internal_date; you'll write that back at the end " +
+          "as an ISO string via new Date(parseInt(internal_date, 10)).toISOString().\n\n" +
 
           "PHASE 3 — PARSE EACH NEW INBOUND MESSAGE. Patterns (case-insensitive):\n" +
           "  STATUS UPDATE — bounded direct action:\n" +
@@ -2166,14 +2181,47 @@ export const presets = {
           "level so threading is impossible to skip) with: to='kevin.hopper1@gmail.com', " +
           "subject='Re: PIR Tracker Digest — <filter>', body=<the markdown table>, " +
           "thread_id=<the gmail_thread_id of the digest row you're processing>.\n\n" +
-          "  UNPARSEABLE — message doesn't match any pattern:\n" +
-          "    - Skip the message. Don't error. Don't guess. The next reply will give the " +
-          "user another chance.\n\n" +
+          "  FREEFORM — message doesn't match any of the four fixed patterns above:\n" +
+          "    Treat this as a conversational question. The user is iterating with you on " +
+          "PIR work and may ask for things like statute lookups (TAC sections, Texas Gov't " +
+          "Code chapters, AG opinions), interpretation help on agency replies, drafting " +
+          "advice, or anything else that fits the PIA / PIR domain. Do NOT silently drop.\n" +
+          "\n" +
+          "    MANDATORY EXECUTION ORDER — every FREEFORM message takes EXACTLY this path:\n" +
+          "      1. (optional, max once) ONE brave_web_search call with a focused query, " +
+          "         only if external info is needed. If the question is about TAC rules, " +
+          "         try `site:texreg.sos.state.tx.us \"1 TAC\" \"70.<sec>\" <topic>` first.\n" +
+          "      2. (optional, max once more) If the first result is not enough, ONE more " +
+          "         brave_web_search with a different angle. After 2 searches, STOP — do " +
+          "         not search again under any circumstance.\n" +
+          "      3. gmail_send_threaded_to_self — this is NOT optional. Every FREEFORM " +
+          "         message MUST end with this call. The body parameter is your reply; " +
+          "         the run's final text output goes nowhere visible to the user. If you " +
+          "         skip this call, the user does not see your answer.\n" +
+          "      4. bot_conversations_patch to advance the watermark (Phase 4 below).\n" +
+          "\n" +
+          "    Reply body content: 150-400 words, markdown. Answer the actual question, " +
+          "    quote any rule subsection or source URL you found, and end with one or two " +
+          "    concrete next-step bullets (e.g. 'reply mark received <pir>', 'I can draft " +
+          "    a §552.269 overcharge complaint — say the word'). If brave_web_search did " +
+          "    not return a clean answer, send a short honest reply saying what you tried " +
+          "    and what's still unknown — partial information is better than silence.\n" +
+          "\n" +
+          "    gmail_send_threaded_to_self arguments: to='kevin.hopper1@gmail.com', " +
+          "    thread_id=<digest row's gmail_thread_id from PHASE 1>, " +
+          "    subject='Re: PIR Tracker Digest — <short topic>', body=<the markdown reply>.\n" +
+          "\n" +
+          "    Hard limits for this tier: at most 2 brave_web_search calls per message, " +
+          "    EXACTLY 1 gmail_send_threaded_to_self call per message, never call " +
+          "    gmail_create_draft or gmail_send.\n\n" +
 
           "PHASE 4 — UPDATE WATERMARK. After processing all new inbound messages for a digest " +
-          "row, call bot_conversations_patch with id=<digest row id>, " +
-          "last_user_msg_at=<newest internalDate ISO seen>, payload_merge=true (no other " +
-          "fields). This prevents re-processing on next tick.\n\n" +
+          "row, convert the newest unprocessed internal_date (Unix ms string) to an ISO " +
+          "string via new Date(parseInt(internal_date, 10)).toISOString() and call " +
+          "bot_conversations_patch with id=<digest row id>, last_user_msg_at=<that ISO " +
+          "string>, payload_merge=true (no other fields). This prevents re-processing on " +
+          "next tick. ALWAYS perform this patch — even when you skip all messages or reply " +
+          "via FREEFORM — so the watermark advances and we don't loop.\n\n" +
 
           "ABSOLUTE SAFETY:\n" +
           "  (a) Tool routing by recipient AND account:\n" +
@@ -2210,6 +2258,7 @@ export const presets = {
           "gmail_create_draft",
           "gmail_search_threads_personal",
           "gmail_create_draft_personal",
+          "brave_web_search",
         ],
         maxTurns: 40,
       },
@@ -2411,7 +2460,7 @@ export const presets = {
           "may include quoted prior messages (lines starting with '>') from earlier in the " +
           "thread; you can ignore the quoted parts and focus on the FRESH text at the top.\n" +
           "  2a-PLUS. FETCH THREAD HISTORY (Phase 2A memory). Call gmail_get_thread(row.gmail_thread_id) " +
-          "ONCE. Read every message in the thread (sorted by internalDate). For each message, note: " +
+          "ONCE. Read every message in the thread (sorted by internal_date). For each message, note: " +
           "From, Date, Subject, plain-text body, and any attachments (parts with filename + " +
           "body.attachmentId). Build a mental timeline of: (i) what the user originally asked, " +
           "(ii) what prior bot replies (if any) said, (iii) the LATEST user message that hasn't " +
