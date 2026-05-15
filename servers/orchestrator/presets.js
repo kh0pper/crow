@@ -2483,19 +2483,82 @@ export const presets = {
           "pir_number), and 'Reply with go or confirm to proceed, or specify a different PIR.' " +
           "If the match is ambiguous (3+ candidates with similar weight), reply with a numbered " +
           "list of candidate PIRs and ask the user to pick. Do NOT call any file-movement tool. " +
-          "After replying, patch the row to current_step='awaiting-ingest-confirm' so the next " +
-          "tick recognizes this conversation is in confirmation state — NOT 'completed'.\n" +
-          "  PHASE 2B handler (not yet wired — coming next): on the NEXT improvise tick after " +
-          "the user replies with go/confirm/yes, do the actual file movement. The 2B preset " +
-          "will replace this branch — for now, just compose the proposal.\n\n" +
+          "After replying, call bot_conversations_patch with payload_merge=true to persist the " +
+          "proposed pir_number in the payload AND advance current_step. The exact call (use " +
+          "DOUBLE QUOTES on all JSON strings — the patch JSON is parsed strictly):\n" +
+          "  bot_conversations_patch({\n" +
+          "    \"id\": row.id,\n" +
+          "    \"current_step\": \"awaiting-ingest-confirm\",\n" +
+          "    \"payload_merge\": true,\n" +
+          "    \"payload\": {\n" +
+          "      \"proposed_pir_number\": \"<your-chosen-pir_number>\",\n" +
+          "      \"proposed_at\": \"<NOW_ISO from goal>\"\n" +
+          "    }\n" +
+          "  })\n" +
+          "This is the contract the INGEST CONFIRMATION branch reads on the user's 'go' reply. " +
+          "If you pick alternatives (ambiguous match), also include " +
+          "\"proposed_alternatives\": [\"<pirA>\", \"<pirB>\"] in payload so the user can override " +
+          "by replying 'use pirA'.\n" +
+          "NOTE: proposed_files is intentionally NOT persisted — the INGEST CONFIRMATION executor " +
+          "re-discovers attachments from the Gmail thread via sync_pir_responses.mjs, so writing a " +
+          "per-file inventory here would be write-only audit data with naming-convention drift risk.\n" +
+          "NOTE: <NOW_ISO from goal> means LITERALLY copy the NOW_ISO timestamp the orchestrator " +
+          "provides in the goal text (e.g. 'The NOW_ISO timestamp for this run is 2026-05-15T...'). " +
+          "Do NOT invent or guess a timestamp. Do not write the placeholder string verbatim.\n\n" +
 
-          "    INGEST CONFIRMATION (Phase 2A holding pattern) — if the latest user message is " +
-          "a short affirmation ('yes', 'go', 'confirm', 'proceed', 'do it') AND the row's " +
-          "current_step is 'awaiting-ingest-confirm', reply: 'Ingest tooling is shipping in " +
-          "Phase 2B; for now I have logged your confirmation but the actual file movement " +
-          "needs Phase 2B to land. The proposal in my prior reply will be picked up the moment " +
-          "those tools are wired.' Then patch the row to current_step='completed' / " +
-          "intent_bucket='ingest-confirmed-deferred'. This is temporary; Phase 2B will replace it.\n\n" +
+          "    INGEST CONFIRMATION (Phase 2B executor) — fires when ALL THREE hold: " +
+          "(i) row.current_step === 'awaiting-ingest-confirm', " +
+          "(ii) latest user message is EITHER an exact-match affirmation (the entire stripped " +
+          "message body matches the regex /^(yes|go|confirm|proceed|do it|sure|ok)\\s*[!.?]*$/i) " +
+          "OR an explicit override starting the message (regex /^(use|match)\\s+([A-Z0-9-]+)\\s*$/i), " +
+          "(iii) we have a target PIR (see Step (a)).\n" +
+          "  REJECT MIXED PROSE: messages like 'I don't want to use X' or 'no, don't use X, " +
+          "use Y instead' contain the literal token 'use X' but are negative-context — they " +
+          "MUST NOT be parsed as overrides. Only act on the strict regex above. If the message " +
+          "is mixed prose, reply via gmail_send_threaded_to_self asking the user to confirm with " +
+          "a one-word reply ('go' / 'use <PIR>' / 'cancel') and STOP.\n" +
+          "  Step (a): determine the target pir_number. If the user message matches the override " +
+          "regex, capture group 2 is the new pir_number; call pir_get({pir_number: X}) to verify " +
+          "it exists. If not found, reply with the suggestion list from pir_get's error (or run " +
+          "pir_list_active) and STOP. Otherwise default = row.payload.proposed_pir_number from " +
+          "the PHASE 2A proposal. If both are absent (row.payload corrupt / never written), reply " +
+          "asking the user to forward the original attachment email again and STOP.\n" +
+          "  Step (b): call pir_ingest_thread({gmail_thread_id: row.gmail_thread_id, pir_number: <from step a>}). " +
+          "This shells to sync_pir_responses.mjs in single-thread mode. Wait for the result — " +
+          "the tool returns {success, files_landed:[{filename, size, path}, ...], saved_files, " +
+          "errors, error?, already_ingested?, ingested_at?}.\n" +
+          "  Step (c) — SUCCESS PATH: if success=true OR already_ingested=true, look up the " +
+          "pir_requests row (pir_get) to get pir_row.recipient for the ack. Compose ack body: " +
+          "'✓ Ingested N file(s) into PIR <pir_number>:' followed by a bulleted list `- <filename> " +
+          "(<size>)` for each entry in files_landed, then '\\nLanded at <dirname(files_landed[0].path)>/" +
+          ".\\n\\nWant me to draft a response to ' + pir_row.recipient + '?'. " +
+          "Send via gmail_send_threaded_to_self({to: 'kevin.hopper1@gmail.com', " +
+          "subject: 'Re: ' + (row.subject_anchor || 'PIR doc ingest'), " +
+          "body: <ack>, thread_id: row.gmail_thread_id}). " +
+          "ALL FOUR args are REQUIRED by the tool schema — `to` + `subject` + `body` + `thread_id`. " +
+          "The tool allowlist enforces `to` is kevin.hopper1@gmail.com or kevin.hopper@maestro.press " +
+          "(use the former — replies go to the user's actual inbox). " +
+          "Then call bot_conversations_patch with: " +
+          "{id: row.id, status: 'completed', current_step: 'ingested', payload_merge: true, " +
+          "payload: {ingested_pir_number: <pir>, ingested_at: <NOW_ISO from goal>, " +
+          "ingested_files: result.files_landed, intent_bucket: 'pir-docs-ingested', " +
+          "proposed_pir_number: null, proposed_files: null, proposed_at: null}}. " +
+          "Setting the proposed_* keys to null cleans stale metadata so future reviewers don't " +
+          "misread them as active state.\n" +
+          "  Step (d) — FAILURE PATH: if success=false AND already_ingested is not true, compose " +
+          "error reply: '⚠️ Ingest did not complete: ' + (result.error || 'no files saved') + '. " +
+          "<if files_landed has any:> Partial: ' + files_landed.length + ' file(s) landed before " +
+          "the failure: <list>.\\nReply \"go\" to retry, or \"use <other-pir>\" to redirect.' " +
+          "Send via gmail_send_threaded_to_self with all four args (same to/subject/body/thread_id " +
+          "shape as Step c). Do NOT patch row to completed — keep it at awaiting-ingest-confirm " +
+          "so retry works. Patch only payload.last_error and payload.last_attempt_at " +
+          "(via payload_merge=true).\n" +
+          "  Step (e): NEVER call pir_ingest_thread without an awaiting-ingest-confirm row " +
+          "(the tool's guards will refuse, but don't waste the call). If row.current_step is " +
+          "anything else (e.g., 'ingested', 'queued'), the user reply is on a stale thread — reply " +
+          "via gmail_send_threaded_to_self (all four args) saying 'No pending ingest on this thread. " +
+          "Send a new email with attachments to start one.' and patch row to status='completed' / " +
+          "intent_bucket='ingest-skip-stale' / payload_merge=true.\n\n" +
 
           "    APPLICATION PREP — user asks the bot to draft applications / cover letters / " +
           "resumes for specific job postings discussed in this thread or named in the latest " +
