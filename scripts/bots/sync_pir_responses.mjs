@@ -267,7 +267,7 @@ function upsertBotConversation(mpaDb, { pirRow, msg, savedFiles, holdingDir }) {
   return convId;
 }
 
-async function processMessage({ gmail, canvasDb, mpaDb, msgMeta, labelIds }) {
+async function processMessage({ gmail, canvasDb, mpaDb, msgMeta, labelIds, pirOverride = null, savedFilesOut = null }) {
   const msg = (
     await gmail.users.messages.get({
       userId: "me",
@@ -283,7 +283,17 @@ async function processMessage({ gmail, canvasDb, mpaDb, msgMeta, labelIds }) {
   const attachments = [];
   walkPartsForAttachments(msg.payload, attachments);
 
-  const pirRow = findPirCandidates(canvasDb, { subject, senderEmail });
+  let pirRow;
+  if (pirOverride) {
+    pirRow = canvasDb.prepare(
+      "SELECT * FROM pir_requests WHERE pir_number = ? OR reference_number = ?",
+    ).get(pirOverride, pirOverride);
+    if (!pirRow) {
+      throw new Error(`pir_override='${pirOverride}' not found in pir_requests`);
+    }
+  } else {
+    pirRow = findPirCandidates(canvasDb, { subject, senderEmail });
+  }
   if (!pirRow) {
     console.error(
       `[pir-ingest]   ${msg.id}: no PIR match (subject="${subject.slice(0, 80)}" sender="${senderEmail}") — failed`,
@@ -344,6 +354,10 @@ async function processMessage({ gmail, canvasDb, mpaDb, msgMeta, labelIds }) {
       savedFiles,
       holdingDir,
     });
+  }
+  // Phase 2B: expose the per-file inventory to the caller if requested.
+  if (savedFilesOut) {
+    for (const f of savedFiles) savedFilesOut.push(f);
   }
   return {
     matched: true,
@@ -444,8 +458,85 @@ async function processLabel({ gmail, canvasDb, mpaDb, labelIds }) {
   return { matched, unmatched, errors, savedFiles, msgs: msgs.length };
 }
 
+// CLI args. Default mode (no args) runs the autoload batch (processLabel).
+// Single-thread mode (--thread <id>) processes one specified Gmail thread.
+// Optional --pir <pir_number> overrides matcher output (used by Phase 2B's
+// router INGEST CONFIRMATION branch where the user has already named the PIR).
+// --json prints a single-line JSON result to stdout instead of plain logging.
+function parseArgs(argv) {
+  const out = { thread: null, pir: null, json: false };
+  for (let i = 2; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--thread") out.thread = argv[++i] || null;
+    else if (a === "--pir") out.pir = argv[++i] || null;
+    else if (a === "--json") out.json = true;
+    else if (a === "--help" || a === "-h") {
+      process.stdout.write("Usage: sync_pir_responses.mjs [--thread <id> [--pir <num>] [--json]]\n");
+      process.exit(0);
+    } else {
+      process.stderr.write(`[pir-ingest] unknown flag: ${a}\n`);
+      process.exit(1);
+    }
+  }
+  return out;
+}
+
+// Phase 2B (2026-05-15). Single-thread variant of processLabel. Fetches one
+// Gmail thread, runs each message through processMessage, applies the same
+// MARKER_INGESTED / MARKER_FAILED labels as processLabel so the autoload
+// timer skips the same thread on its next pass. If pirOverride is provided,
+// the matcher is short-circuited per-message (the user has named the PIR
+// explicitly via the router INGEST CONFIRMATION branch).
+async function processSingleThread({ gmail, canvasDb, mpaDb, labelIds, threadId, pirOverride }) {
+  const thread = await gmail.users.threads.get({ userId: "me", id: threadId, format: "full" });
+  const msgs = thread.data.messages || [];
+  let matched = 0, unmatched = 0, errors = 0, savedFiles = 0;
+  const filesLanded = [];
+  for (const m of msgs) {
+    let r = null;
+    try {
+      r = await processMessage({
+        gmail, canvasDb, mpaDb,
+        msgMeta: { id: m.id, threadId },
+        labelIds,
+        pirOverride: pirOverride || null,
+        savedFilesOut: filesLanded,
+      });
+      if (r.matched) matched++;
+      else unmatched++;
+      savedFiles += r.savedCount || 0;
+    } catch (e) {
+      errors++;
+      process.stderr.write(`[pir-ingest:single] msg ${m.id} error: ${e.stack || e.message}\n`);
+    }
+    // Apply MARKER_INGESTED on success or MARKER_FAILED on failure - mirrors
+    // processLabel lines ~404-428. Skipping this causes the next autoload tick
+    // (mpa-pir-response-sync.timer every 30 min) to re-process the same thread
+    // without the override, duplicating status_notes and possibly mis-routing.
+    // ensureLabels() returns a Map<labelName, labelId> (NOT an object), so
+    // access via .get(MARKER_INGESTED) / .get(MARKER_FAILED) matching the
+    // pattern at processLabel:404-405.
+    try {
+      const addLabelId = (r && r.matched)
+        ? labelIds.get(MARKER_INGESTED)
+        : labelIds.get(MARKER_FAILED);
+      if (addLabelId) {
+        await gmail.users.messages.modify({
+          userId: "me",
+          id: m.id,
+          requestBody: { addLabelIds: [addLabelId] },
+        });
+      }
+    } catch (e) {
+      process.stderr.write(`[pir-ingest:single] label-apply failed for msg ${m.id}: ${e.message}\n`);
+    }
+  }
+  return { matched, unmatched, errors, savedFiles, msgs: msgs.length, filesLanded };
+}
+
 async function main() {
-  console.error(`[pir-ingest] starting at ${new Date().toISOString()}`);
+  const args = parseArgs(process.argv);
+  console.error(`[pir-ingest] starting at ${new Date().toISOString()}${args.thread ? ` (single-thread mode: ${args.thread})` : ""}`);
   ensureDir(INCOMING_DIR);
   ensureDir(UNMATCHED_DIR);
 
@@ -460,15 +551,39 @@ async function main() {
   mpaDb.pragma("journal_mode = DELETE");
   mpaDb.pragma("busy_timeout = 5000");
 
-  await backstopApplyLabel({ gmail, labelIds });
-  const r = await processLabel({ gmail, canvasDb, mpaDb, labelIds });
+  let r;
+  if (args.thread) {
+    r = await processSingleThread({
+      gmail, canvasDb, mpaDb, labelIds,
+      threadId: args.thread, pirOverride: args.pir,
+    });
+  } else {
+    await backstopApplyLabel({ gmail, labelIds });
+    r = await processLabel({ gmail, canvasDb, mpaDb, labelIds });
+  }
 
   canvasDb.close();
   mpaDb.close();
-  console.error(
-    `[pir-ingest] done: ${r.msgs} message(s), ${r.matched} matched, ` +
-      `${r.unmatched} unmatched, ${r.savedFiles} attachment(s) saved, ${r.errors} error(s)`,
-  );
+
+  if (args.json) {
+    process.stdout.write(JSON.stringify({
+      success: r.errors === 0,
+      mode: args.thread ? "single-thread" : "label-batch",
+      thread_id: args.thread || null,
+      pir_override: args.pir || null,
+      matched: r.matched,
+      unmatched: r.unmatched,
+      errors: r.errors,
+      saved_files: r.savedFiles,
+      msgs_seen: r.msgs,
+      files_landed: r.filesLanded || [],
+    }) + "\n");
+  } else {
+    console.error(
+      `[pir-ingest] done: ${r.msgs} message(s), ${r.matched} matched, ` +
+        `${r.unmatched} unmatched, ${r.savedFiles} attachment(s) saved, ${r.errors} error(s)`,
+    );
+  }
   if (r.errors > 0) process.exit(2);
 }
 
