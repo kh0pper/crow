@@ -263,7 +263,7 @@ function handoffToImprovise({ threadId, msgId, sender, subject, body }) {
        status='awaiting-improvise',
        current_step='queued',
        gmail_thread_id=excluded.gmail_thread_id,
-       payload=excluded.payload,
+       payload=json_patch(IFNULL(payload, '{}'), excluded.payload),
        updated_at=datetime('now')`
   ).run(convId, sender, subject.slice(0, 200) || "(no subject)", threadId, payload);
   // Bump the improvise pipeline so it fires within seconds instead of waiting up to a minute
