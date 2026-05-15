@@ -2681,6 +2681,7 @@ export const presets = {
           "pir_list_active",
           "pir_list_overdue",
           "pir_get",
+          "pir_ingest_thread",
           "job_candidates_score_update",
           "gmail_get_thread",
           "gmail_send_threaded_to_self",
