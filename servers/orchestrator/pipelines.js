@@ -1177,4 +1177,80 @@ export const pipelines = {
     storeResult: false,
     resultCategory: null,
   },
+
+  // Phase 3 (2026-05-15) — mpa-tasks autonomous artifact producer. Picks up
+  // rows the converse pipeline flagged current_step='awaiting-work' (or
+  // 'queued' with payload.work_task_id surviving a user-reply json_patch
+  // merge). Conservative tiering: research+draft only; NEVER sends external
+  // email, NEVER files/pays, NEVER marks a task 'done'. Terminal current_step
+  // ='work-done' (rev 3) so completed work leaves BOTH the 'queued' and
+  // 'awaiting-work' selectors. Single-agent. gdocs_create artifacts land in
+  // the fixed "MPA Task Artifacts" Drive folder (Task 0.3 gap A).
+  "bot:mpa-tasks:work": {
+    name: "MPA Tasks: Work",
+    description:
+      "Autonomous artifact producer for tasks the user asked the bot to TAKE. Every 15 min, picks up mpa-tasks rows flagged for work, does bounded research + drafting per a conservative tiering, links the artifact, advances the task to in_progress (NEVER done), and replies on the same thread. Single-agent. Tier: research + draft only; NEVER sends external email, NEVER files/pays, NEVER marks a task done.",
+    goal:
+      "The NOW_ISO timestamp for this run is ${NOW_ISO}. Produce the artifact for " +
+      "queued task-work, making tool calls in order. Actually call every tool.\n\n" +
+      "PHASE 1 — FIND WORK. Call bot_conversations_list_by_status ONCE with " +
+      "bot_id='mpa-tasks', current_step='awaiting-work', limit=3. Also note: a row " +
+      "whose current_step is 'queued' but whose payload.work_task_id is set is ALSO " +
+      "valid work (a user reply reset current_step; the work_task_id survived the " +
+      "json_patch merge). If you cannot get 'queued+work_task_id' rows from the " +
+      "status filter, you may additionally call it with current_step='queued', " +
+      "limit=5 and keep only rows where payload.work_task_id is a number. If no " +
+      "work rows, output 'No mpa-tasks work queued' and STOP.\n\n" +
+      "PHASE 2 — For the FIRST work row only (one task per run to respect the " +
+      "15-min budget):\n" +
+      "  2a. IDEMPOTENCY: if payload.work_completed_at is already set, skip work, " +
+      "go straight to PHASE 4 with the existing payload.artifact_url.\n" +
+      "  2b. Call tasks_get({id: payload.work_task_id}). Read title, description, " +
+      "tags.\n" +
+      "  2c. TIER the task by tags + title:\n" +
+      "    EXTERNAL-EMAIL (tags contain outreach/research-partner, or title says " +
+      "email/contact/queue … emails): research the target with at most 2 " +
+      "brave_web_search calls, then call gmail_create_draft (DRAFT ONLY — never " +
+      "send; to=the external party, subject, body a short on-voice message). The " +
+      "artifact is the draft; record 'Gmail draft created (subject: …)'.\n" +
+      "    FILING/PAYMENT/LEGAL (tags contain legal/trademark/vendor/banking/" +
+      "insurance/pbc/nonprofit/501c3/ip, or title says file/register/obtain/open " +
+      "account/bind): with at most 2 brave_web_search calls, assemble a " +
+      "required-fields + step checklist. Create it as a Google Doc via " +
+      "gdocs_create({folder_id: '107euDQCgp--MIB7oy8VkG9ryaTJRu2Iv', title: " +
+      "'TASK <id> — <task title> — prep', content: <the checklist markdown>}). " +
+      "The artifact is the returned Doc URL. Do NOT file or pay anything.\n" +
+      "    RESEARCH/WRITE-UP (everything else — narrative/blog/research/ARC/" +
+      "assets/one-pager): with at most 3 brave_web_search calls, draft the " +
+      "deliverable as a Google Doc via gdocs_create({folder_id: " +
+      "'107euDQCgp--MIB7oy8VkG9ryaTJRu2Iv', title: 'TASK <id> — <task title>', " +
+      "content: <the drafted deliverable markdown>}). The artifact is the Doc " +
+      "URL. (texas-gov-data tools are intentionally NOT available in v1; " +
+      "brave_web_search is the only research tool.)\n" +
+      "  2d. Call tasks_update({id: payload.work_task_id, status:'in_progress', " +
+      "description: <existing description + an appended line 'Artifact: <url or " +
+      "draft subject> (mpa-tasks ${NOW_ISO})'>}). NEVER pass status:'done'.\n\n" +
+      "PHASE 3 — RECORD. Call bot_conversations_patch with DOUBLE-QUOTED JSON " +
+      "(current_step MUST become 'work-done' so this row leaves BOTH the " +
+      "'awaiting-work' and 'queued' selectors and is never re-worked):\n" +
+      "  bot_conversations_patch({\n" +
+      "    \"id\": row.id,\n" +
+      "    \"status\": \"idle\",\n" +
+      "    \"current_step\": \"work-done\",\n" +
+      "    \"payload_merge\": true,\n" +
+      "    \"payload\": { \"work_completed_at\": \"${NOW_ISO}\", \"artifact_url\": " +
+      "\"<doc url or 'draft:'+subject>\" }\n" +
+      "  })\n\n" +
+      "PHASE 4 — NOTIFY. Call gmail_send_threaded_to_self with EXACTLY: " +
+      "to='kevin.hopper1@gmail.com' (REQUIRED), subject = the row's inbound " +
+      "thread Subject (or 'Re: your task' if empty), thread_id = " +
+      "row.gmail_thread_id (REQUIRED — TOP-LEVEL field, not payload), body = a " +
+      "concise markdown summary: what you produced, the artifact link/subject, " +
+      "that the task is now in_progress, and that the user reviews and marks it " +
+      "done (the bot will not). One reply.",
+    preset: "bot-mpa-tasks-work",
+    defaultCron: "*/15 * * * *",
+    storeResult: false,
+    resultCategory: null,
+  },
 };
