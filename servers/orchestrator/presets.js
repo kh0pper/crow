@@ -2732,7 +2732,6 @@ export const presets = {
         tools: [
           "bot_conversations_list_by_status",
           "bot_conversations_patch",
-          "gmail_get_thread",
           "gmail_send_threaded_to_self",
           "tasks_list",
           "tasks_search",
@@ -2787,7 +2786,6 @@ export const presets = {
           "bot_conversations_patch",
           "tasks_get",
           "tasks_update",
-          "gmail_get_thread",
           "gmail_create_draft",
           "gmail_send_threaded_to_self",
           "gdocs_create",

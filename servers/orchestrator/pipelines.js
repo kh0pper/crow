@@ -1125,9 +1125,10 @@ export const pipelines = {
       "PHASE 1 — LIST. Call bot_conversations_list_by_status EXACTLY ONCE with " +
       "bot_id='mpa-tasks', current_step='queued', limit=5. If count=0, output " +
       "'No queued mpa-tasks requests' and STOP.\n\n" +
-      "PHASE 2 — For each row: read row.payload.body (strip lines starting with " +
-      "'>'). Call gmail_get_thread(row.gmail_thread_id) ONCE; the LATEST message " +
-      "not from kevin.hopper@maestro.press is the user's current request.\n\n" +
+      "PHASE 2 — For each row, the user's current request IS row.payload.body " +
+      "(the router already extracted the inbound message text into it). Strip " +
+      "any quoted reply lines starting with '>'. Do NOT call gmail_get_thread — " +
+      "payload.body is authoritative and complete for task management.\n\n" +
       "PHASE 3 — Classify the request into ONE action and execute it against the " +
       "tasks list (the tasks_* tools operate on the live to-do list):\n" +
       "  LIST/QUERY ('what's on my list', 'show overdue', 'what's due this week') " +
