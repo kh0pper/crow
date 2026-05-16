@@ -1107,4 +1107,74 @@ export const pipelines = {
     storeResult: false,
     resultCategory: null,
   },
+
+  // Phase 2 (2026-05-15) — mpa-tasks bidirectional task-assistant: inbound
+  // converse handler. Picks up bot_conversations rows written by
+  // router_dispatch.mjs (bot_id='mpa-tasks', current_step='queued') for
+  // list-management / "take task N" requests. Single-agent (coordinator-
+  // dispatch hangs). Terminal current_step leaves 'queued' (rev 2) so the
+  // every-minute selector does not reprocess — mirrors bot:router:improvise.
+  "bot:mpa-tasks:converse": {
+    name: "MPA Tasks: Converse",
+    description:
+      "Bidirectional task-assistant inbound handler. Every minute, processes queued mpa-tasks conversation rows: CRUD the Maestro-Press task list via the tasks_* tools, answer list questions, and when the user asks the bot to TAKE a task, flag it for the work pipeline. Single-agent (coordinator-dispatch hangs — see feedback_mpa_orchestrator_single_agent_required). Tier: reads + tasks_* writes + user-bound threaded replies only; NEVER sends external email, NEVER marks a task done autonomously.",
+    goal:
+      "The NOW_ISO timestamp for this run is ${NOW_ISO}. Process queued mpa-tasks " +
+      "conversations by making tool calls in order. Do not describe what you would " +
+      "do — actually call every tool.\n\n" +
+      "PHASE 1 — LIST. Call bot_conversations_list_by_status EXACTLY ONCE with " +
+      "bot_id='mpa-tasks', current_step='queued', limit=5. If count=0, output " +
+      "'No queued mpa-tasks requests' and STOP.\n\n" +
+      "PHASE 2 — For each row: read row.payload.body (strip lines starting with " +
+      "'>'). Call gmail_get_thread(row.gmail_thread_id) ONCE; the LATEST message " +
+      "not from kevin.hopper@maestro.press is the user's current request.\n\n" +
+      "PHASE 3 — Classify the request into ONE action and execute it against the " +
+      "tasks list (the tasks_* tools operate on the live to-do list):\n" +
+      "  LIST/QUERY ('what's on my list', 'show overdue', 'what's due this week') " +
+      "→ tasks_list (status default 'open'; use overdue=true or due_within_days=N " +
+      "as asked). Summarize the returned items as a numbered markdown list " +
+      "(id, title, priority, due_date, status).\n" +
+      "  CREATE ('add a task …', 'create a task …') → tasks_create with title " +
+      "(required) and any due_date (YYYY-MM-DD), priority (1-5), tags the user " +
+      "stated. Confirm with the new task id.\n" +
+      "  UPDATE ('reschedule task N', 'change priority of N', 'retag N', 'rename " +
+      "N') → tasks_update({id:N, …only the changed fields}).\n" +
+      "  COMPLETE ('mark N done', 'close N', 'finished N') → tasks_complete({id:N}). " +
+      "(This is USER-DIRECTED completion and is allowed; the bot still never marks " +
+      "a task done on its OWN initiative.)\n" +
+      "  REOPEN ('reopen N') → tasks_reopen({id:N}).\n" +
+      "  SUBTASK ('add a subtask under N: …') → tasks_add_subtask({parent_id:N, " +
+      "title:…}).\n" +
+      "  TAKE ('take task N', 'work on N', 'you do N', 'research N and write it " +
+      "up', 'draft N for me') → DO NOT do the work now. Call bot_conversations_patch " +
+      "with DOUBLE-QUOTED JSON:\n" +
+      "    bot_conversations_patch({\n" +
+      "      \"id\": row.id,\n" +
+      "      \"current_step\": \"awaiting-work\",\n" +
+      "      \"payload_merge\": true,\n" +
+      "      \"payload\": { \"work_task_id\": N, \"work_requested_at\": \"${NOW_ISO}\" }\n" +
+      "    })\n" +
+      "  then reply (next phase) that you've queued task N and will follow up on " +
+      "this thread when the artifact is ready.\n" +
+      "  AMBIGUOUS / not a task request → reply asking the user to clarify, listing " +
+      "the actions you support.\n\n" +
+      "PHASE 4 — REPLY. Call gmail_send_threaded_to_self with EXACTLY these args: " +
+      "to='kevin.hopper1@gmail.com' (REQUIRED — the user's allowlisted self " +
+      "address), subject = the inbound thread's Subject (or 'Re: your task " +
+      "request' if the Subject is empty), thread_id = row.gmail_thread_id " +
+      "(REQUIRED — sourced from the row's TOP-LEVEL gmail_thread_id field, NOT " +
+      "payload), and body = a concise markdown statement of exactly what you did " +
+      "(ids affected, the list if asked, or the queued-task confirmation). One " +
+      "reply per row.\n\n" +
+      "PHASE 5 — CLOSE. For every row you fully handled INLINE (everything except " +
+      "TAKE), call bot_conversations_patch({\"id\": row.id, \"status\": \"idle\", " +
+      "\"current_step\": \"completed\"}) — current_step MUST leave 'queued' or the " +
+      "every-minute loop reprocesses it forever. For TAKE rows leave status and " +
+      "current_step exactly as set in PHASE 3 (current_step='awaiting-work'). Then " +
+      "output a one-line summary per row.",
+    preset: "bot-mpa-tasks-converse",
+    defaultCron: "* * * * *",
+    storeResult: false,
+    resultCategory: null,
+  },
 };
