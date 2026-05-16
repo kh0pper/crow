@@ -2820,6 +2820,12 @@ export const presets = {
           "(2 for external-email/filing, 3 for research). Stay within maxTurns.\n" +
           "  - Use ${NOW_ISO} from the goal verbatim for timestamps.\n" +
           "  - All tool-arg JSON uses DOUBLE QUOTES, parsed strictly.\n" +
+          "  - ONE-SHOT DISCIPLINE: call each tool the minimum times. NEVER " +
+          "re-call a tool that already returned success this run — especially " +
+          "tasks_update. After the PHASE 4 reply, STOP: emit one summary line, no " +
+          "more tool calls. If research cannot yield a real deliverable, do NOT " +
+          "loop — produce the Doc with a '## NEEDS CLARIFICATION' section and " +
+          "finish PHASES 2d/3/4 so the row leaves the queue.\n" +
           "  - TOOL-CALL FORMAT (CRITICAL): emit every tool call ONLY as a native " +
           "JSON function call via the function-calling interface. NEVER wrap a tool " +
           "call in XML or pseudo-XML — do NOT output <tool_call>, <function=...>, " +

@@ -1240,9 +1240,18 @@ export const pipelines = {
       "content: <the drafted deliverable markdown>}). The artifact is the Doc " +
       "URL. (texas-gov-data tools are intentionally NOT available in v1; " +
       "brave_web_search is the only research tool.)\n" +
-      "  2d. Call tasks_update({id: payload.work_task_id, status:'in_progress', " +
-      "description: <existing description + an appended line 'Artifact: <url or " +
-      "draft subject> (mpa-tasks ${NOW_ISO})'>}). NEVER pass status:'done'.\n\n" +
+      "  2d. Call tasks_update EXACTLY ONCE: tasks_update({id: payload.work_task_id, " +
+      "status:'in_progress', description: <the task's existing description + a " +
+      "newline + 'Artifact: <url or draft subject> (mpa-tasks ${NOW_ISO})'; if the " +
+      "existing description is null/empty, description is JUST that Artifact line — " +
+      "NEVER the literal string 'null'>}). NEVER pass status:'done'. Do NOT call " +
+      "tasks_update again once it has succeeded.\n" +
+      "  2e. AMBIGUITY FALLBACK: if research cannot yield a meaningful deliverable " +
+      "(e.g. the task uses an internal acronym/term you cannot resolve from " +
+      "title+tags+search), do NOT retry or loop — still gdocs_create the Doc " +
+      "(same folder_id) with a top '## NEEDS CLARIFICATION' section stating exactly " +
+      "what you need from Kevin, then do 2d and continue PHASE 3/4 so the row leaves " +
+      "the queue and Kevin is notified.\n\n" +
       "PHASE 3 — RECORD. Call bot_conversations_patch with DOUBLE-QUOTED JSON " +
       "(current_step MUST become 'work-done' so this row leaves BOTH the " +
       "'awaiting-work' and 'queued' selectors and is never re-worked):\n" +
@@ -1260,7 +1269,10 @@ export const pipelines = {
       "row.gmail_thread_id (REQUIRED — TOP-LEVEL field, not payload), body = a " +
       "concise markdown summary: what you produced, the artifact link/subject, " +
       "that the task is now in_progress, and that the user reviews and marks it " +
-      "done (the bot will not). One reply.",
+      "done (the bot will not). One reply.\n\n" +
+      "STOP DISCIPLINE: after the single PHASE 4 reply, you are DONE — output one " +
+      "summary line and make NO further tool calls. Re-calling any tool that already " +
+      "succeeded (especially tasks_update) is a failure that wastes the run budget.",
     preset: "bot-mpa-tasks-work",
     defaultCron: "*/15 * * * *",
     storeResult: false,
