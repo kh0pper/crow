@@ -1,0 +1,103 @@
+#!/usr/bin/env node
+/**
+ * Crow Bot Builder — Phase 1 substrate migration.
+ *
+ * Creates the TWO NEW tables the Bot Builder owns. This is deliberately a
+ * SEPARATE script (NOT scripts/init-db.js) so it can never touch the 3
+ * production MPA bots (bot_registry / presets / pipelines / schedules /
+ * bot_conversations). Idempotent — safe to re-run.
+ *
+ *   pi_bot_defs  — GUI-defined pi bot definitions (engine, models, tools,
+ *                  gateways, project_id, permission_policy, triggers, prompt)
+ *   bot_sessions — one row per (bot, gateway thread) live pi session; the
+ *                  bridge's runtime authority for status + stop control
+ *
+ * Single-authority-per-fact (plan §1): bot_sessions.status = runtime state
+ * (owner: bridge), tasks_items.status = board state (owner: tasks tool),
+ * the plan file = work content. No triple source of truth.
+ *
+ * DB: the live MPA crow.db. We open with better-sqlite3 directly (like
+ * router_dispatch.mjs / router_tasks_smoke.mjs) and set ONLY busy_timeout —
+ * we deliberately DO NOT touch journal_mode (the gateway keeps crow.db in
+ * DELETE; a stray journal_mode pragma from a transient connection is exactly
+ * the WAL-flip / SQLITE_BUSY trap, see memory crowdb-wal-flip-new-consumers).
+ *
+ * Usage:  node scripts/init-pi-bots.mjs            (apply)
+ *         node scripts/init-pi-bots.mjs --check     (report only, no DDL)
+ */
+
+import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+
+const DB_PATH = process.env.CROW_DB_PATH || "/home/kh0pp/.crow-mpa/data/crow.db";
+const CHECK_ONLY = process.argv.includes("--check");
+
+const db = new Database(DB_PATH);
+db.pragma("busy_timeout = 10000");
+db.pragma("foreign_keys = ON");
+
+const tableExists = (name) =>
+  !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
+
+// --- Guard: never run if the production substrate looks wrong ---
+const prodBots = db.prepare("SELECT count(*) c FROM bot_registry").get().c;
+if (prodBots < 1) {
+  console.error(`REFUSING: bot_registry has ${prodBots} rows — not the live MPA db? (DB_PATH=${DB_PATH})`);
+  process.exit(2);
+}
+
+const before = { pi_bot_defs: tableExists("pi_bot_defs"), bot_sessions: tableExists("bot_sessions") };
+
+if (CHECK_ONLY) {
+  console.log(`[init-pi-bots] CHECK DB=${DB_PATH} bot_registry=${prodBots}`);
+  console.log(`  pi_bot_defs exists=${before.pi_bot_defs}  bot_sessions exists=${before.bot_sessions}`);
+  process.exit(0);
+}
+
+const DDL = [
+  `CREATE TABLE IF NOT EXISTS pi_bot_defs (
+     bot_id        TEXT PRIMARY KEY,
+     display_name  TEXT NOT NULL,
+     definition    TEXT,                 -- JSON: engine/models/tools/gateways/project_id/permission_policy/triggers/system_prompt/skills/session_dir
+     enabled       INTEGER NOT NULL DEFAULT 1,
+     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+   )`,
+  `CREATE TABLE IF NOT EXISTS bot_sessions (
+     id                INTEGER PRIMARY KEY AUTOINCREMENT,
+     bot_id            TEXT NOT NULL,
+     pi_session_id     TEXT,
+     pi_session_dir    TEXT,
+     gateway_type      TEXT,
+     gateway_thread_id TEXT,
+     project_id        INTEGER,
+     card_id           INTEGER,
+     plan_path         TEXT,
+     status            TEXT NOT NULL DEFAULT 'active'
+                          CHECK (status IN ('active','waiting-user','stopped','done','error')),
+     control           TEXT NOT NULL DEFAULT 'run'
+                          CHECK (control IN ('run','stop')),
+     created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+   )`,
+  // Resolve a session by (bot, gateway thread) — the bridge's hot path.
+  `CREATE INDEX IF NOT EXISTS idx_bot_sessions_bot_thread
+     ON bot_sessions (bot_id, gateway_thread_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_bot_sessions_status
+     ON bot_sessions (status)`,
+  `CREATE INDEX IF NOT EXISTS idx_pi_bot_defs_enabled
+     ON pi_bot_defs (enabled)`,
+];
+
+const tx = db.transaction(() => { for (const sql of DDL) db.prepare(sql).run(); });
+tx();
+
+const after = { pi_bot_defs: tableExists("pi_bot_defs"), bot_sessions: tableExists("bot_sessions") };
+const cols = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name).join(",");
+
+console.log(`[init-pi-bots] DB=${DB_PATH}  bot_registry=${prodBots} (production untouched)`);
+console.log(`  pi_bot_defs : ${before.pi_bot_defs ? "existed" : "CREATED"}  cols=[${cols("pi_bot_defs")}]`);
+console.log(`  bot_sessions: ${before.bot_sessions ? "existed" : "CREATED"}  cols=[${cols("bot_sessions")}]`);
+console.log(`  rows: pi_bot_defs=${db.prepare("SELECT count(*) c FROM pi_bot_defs").get().c}` +
+            ` bot_sessions=${db.prepare("SELECT count(*) c FROM bot_sessions").get().c}`);
+console.log("INIT-PI-BOTS OK");
+db.close();
