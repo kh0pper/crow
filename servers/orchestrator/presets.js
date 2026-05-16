@@ -2727,7 +2727,12 @@ export const presets = {
           "value (zod rejects it and the tool call fails opaquely).\n" +
           "  - Use ${NOW_ISO} from the goal verbatim for any timestamp. Never invent " +
           "a timestamp.\n" +
-          "  - All JSON in tool args uses DOUBLE QUOTES and is parsed strictly." +
+          "  - All JSON in tool args uses DOUBLE QUOTES and is parsed strictly.\n" +
+          "  - TOOL-CALL FORMAT (CRITICAL): emit every tool call ONLY as a native " +
+          "JSON function call via the function-calling interface. NEVER wrap a tool " +
+          "call in XML or pseudo-XML — do NOT output <tool_call>, <function=...>, " +
+          "</function>, <parameter=...> or </parameter> tags, and never write the " +
+          "call out as plain text. One structured JSON tool call per step." +
           WRITING_VOICE_RULES,
         tools: [
           "bot_conversations_list_by_status",
@@ -2779,7 +2784,12 @@ export const presets = {
           "  - Respect the brave_web_search call caps stated per tier in the goal " +
           "(2 for external-email/filing, 3 for research). Stay within maxTurns.\n" +
           "  - Use ${NOW_ISO} from the goal verbatim for timestamps.\n" +
-          "  - All tool-arg JSON uses DOUBLE QUOTES, parsed strictly." +
+          "  - All tool-arg JSON uses DOUBLE QUOTES, parsed strictly.\n" +
+          "  - TOOL-CALL FORMAT (CRITICAL): emit every tool call ONLY as a native " +
+          "JSON function call via the function-calling interface. NEVER wrap a tool " +
+          "call in XML or pseudo-XML — do NOT output <tool_call>, <function=...>, " +
+          "</function>, <parameter=...> or </parameter> tags, and never write the " +
+          "call out as plain text. One structured JSON tool call per step." +
           WRITING_VOICE_RULES,
         tools: [
           "bot_conversations_list_by_status",
