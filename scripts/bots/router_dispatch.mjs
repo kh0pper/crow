@@ -22,6 +22,7 @@ import { spawn } from "node:child_process";
 import { promisify } from "node:util";
 import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
 import { google } from "/home/kh0pp/crow/node_modules/googleapis/build/src/index.js";
+import { classifyTasks } from "./tasks_classifier.mjs";
 
 const MPA_DB = "/home/kh0pp/.crow-mpa/data/crow.db";
 const TOKEN_PATH =
@@ -274,6 +275,39 @@ function handoffToImprovise({ threadId, msgId, sender, subject, body }) {
   return { convId, bumped: r.changes > 0 };
 }
 
+function handoffToTasks({ threadId, msgId, sender, subject, body }) {
+  // Sibling of handoffToImprovise for the mpa-tasks bot. Same idempotent
+  // json_patch UPSERT (Phase 9.7) so payload.work_task_id survives user
+  // replies even though current_step resets to 'queued'.
+  const convId = `mpa-tasks:thread:${threadId}`;
+  const db = new Database(MPA_DB);
+  db.pragma("journal_mode = DELETE");
+  db.pragma("busy_timeout = 5000");
+  const payload = JSON.stringify({
+    latest_message_id: msgId,
+    sender_addr: sender,
+    subject,
+    body: body.slice(0, 8000),
+    received_at: new Date().toISOString(),
+  });
+  db.prepare(
+    `INSERT INTO bot_conversations
+       (id, bot_id, user_email, subject_anchor, gmail_thread_id, status, current_step, payload, created_at, updated_at)
+     VALUES (?, 'mpa-tasks', ?, ?, ?, 'awaiting-improvise', 'queued', ?, datetime('now'), datetime('now'))
+     ON CONFLICT(id) DO UPDATE SET
+       status='awaiting-improvise',
+       current_step='queued',
+       gmail_thread_id=excluded.gmail_thread_id,
+       payload=json_patch(IFNULL(payload, '{}'), excluded.payload),
+       updated_at=datetime('now')`
+  ).run(convId, sender, subject.slice(0, 200) || "(no subject)", threadId, payload);
+  const r = db.prepare(
+    "UPDATE schedules SET next_run = datetime('now', '-1 second') WHERE task = ?"
+  ).run("pipeline:bot:mpa-tasks:converse");
+  db.close();
+  return { convId, bumped: r.changes > 0 };
+}
+
 // --- Gmail helpers ---
 function getHeader(msg, name) {
   const h = (msg.payload?.headers || []).find(x => x.name.toLowerCase() === name.toLowerCase());
@@ -496,7 +530,11 @@ async function main() {
   console.error(`[router] done`);
 }
 
-main().catch(err => {
-  console.error(`[router] fatal: ${err.stack || err.message}`);
-  process.exit(1);
-});
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch(err => {
+    console.error(`[router] fatal: ${err.stack || err.message}`);
+    process.exit(1);
+  });
+}
+
+export { classify, handoffToImprovise, handoffToTasks };
