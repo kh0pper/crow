@@ -80,4 +80,42 @@ t("ordering: anchored INTENTS win over TASKS", () => {
   assert.equal(classifyTasks("", "add a task to call the attorney"), true);
 });
 
+t("regression: disambiguation contract (PIR/jobs vs tasks) + real E2E phrasings", () => {
+  // TASKS-true: every tasks_* action verb + the exact phrasings the Phase 2/3
+  // E2E actually exercised against the live bot.
+  const YES = [
+    ["", "what's on my task list?"],
+    ["", "show my overdue tasks"],
+    ["", "add a task: smoke-plan verification task, priority 2, due 2026-05-20"],
+    ["", "add a task: regex-fix verification task, priority 3, due 2026-05-22"],
+    ["", "mark task 81 done"],
+    ["", "take task 2 and write up the findings"],
+    ["", "take task 11 and write it up"],
+    ["", "complete task #3"],
+    ["", "reopen task 5"],
+    ["", "reprioritize task 5 to priority 5"],
+    ["", "update task 9 due date to 2026-06-01"],
+    ["", "add a subtask under 7: call the vendor"],
+    ["", "create a new task: draft the founding narrative, due 2026-05-30"],
+    // explicit task word beats PIR/job context (saysTaskWord wins)
+    ["", "add a task to follow up on the FWISD PIR"],
+    ["", "add a task to email the candidate about the job posting"],
+  ];
+  // TASKS-false: PIR/job freeform (no task word), affirmations, generic.
+  const NO = [
+    ["", "what is the status of my FWISD PIR?"],
+    ["", "find me director-level federal-programs jobs in Houston"],
+    ["", "any update on the open records request?"],
+    ["", "thanks, that looks good"],
+    ["", "ok sounds good"],
+    ["", "can you summarize the latest education news?"],
+  ];
+  for (const [s2, b] of YES) assert.equal(classifyTasks(s2, b), true, `expected TASKS: ${JSON.stringify(b)}`);
+  for (const [s2, b] of NO) assert.equal(classifyTasks(s2, b), false, `expected NOT TASKS: ${JSON.stringify(b)}`);
+  // anchored INTENTS still win (must classify()!=null, never reach classifyTasks)
+  for (const b of ["run pir sync", "draft applications", "help", "show pir digest", "rematch pir", "start job search"]) {
+    assert.notEqual(classify("", b), null, `expected anchored INTENT: ${b}`);
+  }
+});
+
 console.log(`\nROUTER-TASKS SMOKE OK (${pass} groups)`);
