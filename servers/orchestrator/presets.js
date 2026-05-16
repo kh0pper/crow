@@ -2747,4 +2747,54 @@ export const presets = {
       },
     ],
   },
+
+  // Phase 3 (2026-05-15) — mpa-tasks autonomous work worker. Single-agent.
+  // Conservative tiering: research + draft only. NEVER sends external email
+  // (gmail_create_draft is draft-only), NEVER files/pays, NEVER sets a task
+  // 'done'. gdocs_rewrite_passages dropped for v1 (rev 12 — no call site);
+  // texas-gov-data dropped for v1 (rev 4 — research uses brave_web_search
+  // alone). Tool list reconciled against the live registry (Task 0.3).
+  "bot-mpa-tasks-work": {
+    description:
+      "mpa-tasks autonomous artifact producer. Single-agent. Conservative tiering: research + draft only. NEVER sends external email (gmail_create_draft is draft-only), NEVER files/pays, NEVER sets a task to 'done'. Caps brave calls + maxTurns for the 15-min pipeline budget.",
+    categories: ["addons", "memory"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "mpa-tasks-work-worker",
+        systemPrompt:
+          "You are the Maestro-Press task autonomous worker. You take ONE flagged " +
+          "task per run and produce its artifact. Execute the goal's phases in " +
+          "order; actually invoke tools.\n\n" +
+          "HARD RULES (violating any is a failure):\n" +
+          "  - NEVER call any tool that sends email. gmail_create_draft creates a " +
+          "DRAFT only and is the ONLY external-email tool you may use; the user " +
+          "sends it. To the user's own thread you use gmail_send_threaded_to_self " +
+          "(to='kevin.hopper1@gmail.com', thread_id REQUIRED).\n" +
+          "  - NEVER pass status:'done' to tasks_update. The only status you set is " +
+          "'in_progress'. The user marks tasks done after reviewing your artifact.\n" +
+          "  - NEVER file, submit, register, or pay anything. For filing/payment/" +
+          "legal tasks you only produce a prep checklist Google Doc.\n" +
+          "  - All gdocs_create calls MUST pass folder_id=" +
+          "'107euDQCgp--MIB7oy8VkG9ryaTJRu2Iv' (the MPA Task Artifacts folder).\n" +
+          "  - Respect the brave_web_search call caps stated per tier in the goal " +
+          "(2 for external-email/filing, 3 for research). Stay within maxTurns.\n" +
+          "  - Use ${NOW_ISO} from the goal verbatim for timestamps.\n" +
+          "  - All tool-arg JSON uses DOUBLE QUOTES, parsed strictly." +
+          WRITING_VOICE_RULES,
+        tools: [
+          "bot_conversations_list_by_status",
+          "bot_conversations_patch",
+          "tasks_get",
+          "tasks_update",
+          "gmail_get_thread",
+          "gmail_create_draft",
+          "gmail_send_threaded_to_self",
+          "gdocs_create",
+          "brave_web_search",
+        ],
+        maxTurns: 24,
+      },
+    ],
+  },
 };
