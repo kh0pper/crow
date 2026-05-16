@@ -2690,4 +2690,61 @@ export const presets = {
       },
     ],
   },
+
+  // Phase 2 (2026-05-15) — mpa-tasks converse worker. Single-agent
+  // (coordinator-dispatch hangs — feedback_mpa_orchestrator_single_agent_required).
+  // Tier: tasks_* CRUD + user-bound gmail_send_threaded_to_self only; NO
+  // external send, NO autonomous task completion. Tool list reconciled
+  // against the live gateway registry (Task 0.3 Verified Claims, 2026-05-15).
+  "bot-mpa-tasks-converse": {
+    description:
+      "mpa-tasks inbound conversational handler. Single-agent (coordinator-dispatch hangs). Categories include `addons` so tasks_* + google-workspace + bots-sql-mcp are bridged. Tier: tasks_* CRUD + user-bound gmail_send_threaded_to_self only; NO external send, NO autonomous task completion.",
+    categories: ["addons", "memory"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "mpa-tasks-converse-worker",
+        systemPrompt:
+          "You are the Maestro-Press task-list assistant inbound handler. The user " +
+          "emails kevin.hopper+bot@maestro.press in plain English to manage their " +
+          "to-do list. Execute the goal's phases in order. You MUST invoke tools — " +
+          "never merely describe what you would do.\n\n" +
+          "HARD RULES:\n" +
+          "  - The tasks_* tools act on the live to-do list. tasks_complete is " +
+          "ALLOWED only when the user EXPLICITLY asked to complete/close a specific " +
+          "task id in THIS message. You NEVER mark a task done on your own judgement.\n" +
+          "  - You NEVER send email to anyone except via gmail_send_threaded_to_self " +
+          "to the user's own thread (to='kevin.hopper1@gmail.com', thread_id REQUIRED). " +
+          "No gmail_create_draft, no external send here.\n" +
+          "  - For a TAKE request, you DO NOT do the work — you only set " +
+          "current_step='awaiting-work' + payload.work_task_id via " +
+          "bot_conversations_patch (payload_merge=true) and confirm. The separate " +
+          "work pipeline does the research/drafting.\n" +
+          "  - Legal task fields: status is one of {pending,in_progress,done,cancelled}; " +
+          "priority is an integer 1..5 (5=highest); due_date strictly YYYY-MM-DD. If " +
+          "the user asks for a value outside these, map to the nearest legal value or " +
+          "ask for clarification — NEVER call tasks_update/tasks_create with an illegal " +
+          "value (zod rejects it and the tool call fails opaquely).\n" +
+          "  - Use ${NOW_ISO} from the goal verbatim for any timestamp. Never invent " +
+          "a timestamp.\n" +
+          "  - All JSON in tool args uses DOUBLE QUOTES and is parsed strictly." +
+          WRITING_VOICE_RULES,
+        tools: [
+          "bot_conversations_list_by_status",
+          "bot_conversations_patch",
+          "gmail_get_thread",
+          "gmail_send_threaded_to_self",
+          "tasks_list",
+          "tasks_search",
+          "tasks_get",
+          "tasks_create",
+          "tasks_update",
+          "tasks_complete",
+          "tasks_reopen",
+          "tasks_add_subtask",
+        ],
+        maxTurns: 18,
+      },
+    ],
+  },
 };
