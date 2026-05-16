@@ -2741,6 +2741,7 @@ export const presets = {
           "tasks_list",
           "tasks_search",
           "tasks_get",
+          "tasks_create",
           "tasks_update",
           "tasks_complete",
           "tasks_reopen",
