@@ -477,20 +477,35 @@ async function main() {
       if (!intent) {
         // Phase 3 freeform handoff: queue the row and let the LLM-agent pipeline handle it
         const sender = (getHeader(full.data, "From").match(/<([^>]+)>/) || [, getHeader(full.data, "From")])[1];
-        const h = handoffToImprovise({
-          threadId: full.data.threadId,
-          msgId: meta.id,
-          sender,
-          subject,
-          body,
-        });
-        console.error(`[router]   ${meta.id} -> handoff conv=${h.convId} bumped=${h.bumped}`);
+        if (classifyTasks(subject, body)) {
+          // mpa-tasks: list-management / "take task N" request. Queue an
+          // mpa-tasks row; mpa-tasks:converse replies (no immediate reply
+          // here). Anchored INTENTS already won above (we are inside !intent),
+          // so TASKS only beats the improvise fallback.
+          const h = handoffToTasks({
+            threadId: full.data.threadId,
+            msgId: meta.id,
+            sender,
+            subject,
+            body,
+          });
+          console.error(`[router]   ${meta.id} -> mpa-tasks conv=${h.convId} bumped=${h.bumped}`);
+        } else {
+          const h = handoffToImprovise({
+            threadId: full.data.threadId,
+            msgId: meta.id,
+            sender,
+            subject,
+            body,
+          });
+          console.error(`[router]   ${meta.id} -> handoff conv=${h.convId} bumped=${h.bumped}`);
+        }
         await gmail.users.messages.modify({
           userId: "me",
           id: meta.id,
           requestBody: { addLabelIds: [processedLabelId] },
         });
-        // No direct reply here — the improvise pipeline will reply when done
+        // No direct reply here — the converse/improvise pipeline will reply when done
         continue;
       } else if (intent.action.kind === "help") {
         replyBody = HELP_TEXT;

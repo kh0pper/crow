@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
 import { classifyTasks } from "./tasks_classifier.mjs";
-import { handoffToTasks } from "./router_dispatch.mjs";
+import { classify, handoffToTasks } from "./router_dispatch.mjs";
 
 let pass = 0;
 function t(name, fn) { fn(); pass++; console.log("ok -", name); }
@@ -67,6 +67,17 @@ t("handoffToTasks writes an mpa-tasks row + json_patch merge keeps work_task_id"
   assert.equal(p2.work_task_id, 99);          // survived the json_patch merge
   db.prepare("DELETE FROM bot_conversations WHERE id = ?").run(convId);
   db.close();
+});
+
+t("ordering: anchored INTENTS win over TASKS", () => {
+  // Exact commands must still anchored-match (classify != null), so the TASKS
+  // branch is never reached for them (it lives inside the !intent fallback).
+  for (const b of ["run pir sync", "draft applications", "help", "show pir digest"]) {
+    assert.notEqual(classify("", b), null, `expected anchored INTENT for: ${b}`);
+  }
+  // A freeform task request does NOT anchored-match, so it reaches classifyTasks.
+  assert.equal(classify("", "add a task to call the attorney"), null);
+  assert.equal(classifyTasks("", "add a task to call the attorney"), true);
 });
 
 console.log(`\nROUTER-TASKS SMOKE OK (${pass} groups)`);
