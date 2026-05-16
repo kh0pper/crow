@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "crow-memory":     { "command": "/home/kh0pp/.nvm/versions/node/v20.20.2/bin/node", "args": ["servers/memory/index.js"],   "cwd": "/home/kh0pp/crow", "env": { "CROW_DB_PATH": "/home/kh0pp/.crow-mpa/data/crow.db" } },
+    "crow-projects":   { "command": "/home/kh0pp/.nvm/versions/node/v20.20.2/bin/node", "args": ["servers/research/index.js"], "cwd": "/home/kh0pp/crow", "env": { "CROW_DB_PATH": "/home/kh0pp/.crow-mpa/data/crow.db" } },
+    "crow-blog":       { "command": "/home/kh0pp/.nvm/versions/node/v20.20.2/bin/node", "args": ["servers/blog/index.js"],     "cwd": "/home/kh0pp/crow", "env": { "CROW_DB_PATH": "/home/kh0pp/.crow-mpa/data/crow.db" } },
+    "crow-storage":    { "command": "/home/kh0pp/.nvm/versions/node/v20.20.2/bin/node", "args": ["servers/storage/index.js"],  "cwd": "/home/kh0pp/crow", "env": { "CROW_DB_PATH": "/home/kh0pp/.crow-mpa/data/crow.db" } },
+    "crow-tasks":      { "command": "/home/kh0pp/.nvm/versions/node/v20.20.2/bin/node", "args": ["server/index.js"], "cwd": "/home/kh0pp/.crow-mpa/bundles/tasks", "env": { "CROW_TASKS_DB_PATH": "/home/kh0pp/.crow-mpa/data/tasks.db" } },
+    "crow-bots-sql":   { "command": "/home/kh0pp/.nvm/versions/node/v20.20.2/bin/node", "args": ["server/index.js"], "cwd": "/home/kh0pp/.crow-mpa/bundles/bots-sql-mcp", "env": { "CROW_DB_PATH": "/home/kh0pp/.crow-mpa/data/crow.db" } },
+    "google-workspace": { "command": "/home/kh0pp/spring-2026/google-workspace-mcp/.venv/bin/google-workspace-mcp", "args": [], "cwd": "/home/kh0pp/spring-2026/google-workspace-mcp", "env": { "GOOGLE_CREDENTIALS_FILE": "/home/kh0pp/.config/google-workspace-mcp-mpa/credentials.json", "GOOGLE_TOKEN_FILE": "/home/kh0pp/.config/google-workspace-mcp-mpa/gws-token.json", "GOOGLE_PERSONAL_CREDENTIALS_FILE": "/home/kh0pp/.config/google-workspace-mcp/credentials.json", "GOOGLE_PERSONAL_TOKEN_FILE": "/home/kh0pp/.config/google-workspace-mcp/token.json" } }
+  }
+}
