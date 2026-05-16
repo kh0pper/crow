@@ -262,7 +262,7 @@ export const pipelines = {
     description:
       "Tier-0 deadline watcher. Every 3 hours during the workday, pulls the 24h + overdue task buckets from the tasks bundle and pushes a ntfy notification if anything is due soon or overdue. Complements the 07:00 daily briefing by catching mid-day slippage and giving Kevin multiple shots at noticing critical items. No LLM reasoning beyond reading the bucket counts.",
     goal:
-      "Check Kevin's tight-window deadlines by making at most two tool calls in order.\n\n" +
+      "Check Kevin's tight-window deadlines by making the tool calls below in order.\n\n" +
       "CALL 1 — tasks_briefing_snapshot with these exact arguments:\n" +
       "  today = \"${TODAY}\"\n" +
       "  window_days = 1\n" +
@@ -278,10 +278,16 @@ export const pipelines = {
       "  type = \"deadline\"\n" +
       "  priority = \"high\"\n" +
       "  action_url = \"/dashboard/tasks?instance=${INSTANCE_ID}\"\n\n" +
-      "After the notification is created, respond with a single short confirmation line containing " +
+      "Then CALL 3 — gmail_send_to_self with these exact arguments (opens a replyable " +
+      "task-management thread in Kevin's inbox):\n" +
+      "  to = \"kevin.hopper1@gmail.com\"\n" +
+      "  subject = \"MPA deadlines: ${WITHIN_COUNT} due within 24h, ${OVERDUE_COUNT} overdue\"\n" +
+      "  body = <first 1500 characters of ${BUCKET_MARKDOWN}> + \"\\n\\n---\\nReply to this email to manage your task list: e.g. \\\"add a task: …\\\", \\\"show my overdue tasks\\\", \\\"mark 12 done\\\", \\\"take task 5 and write it up\\\".\"\n" +
+      "  reply_to = \"kevin.hopper+bot@maestro.press\"\n\n" +
+      "After the notification AND CALL 3 are done, respond with a single short confirmation line containing " +
       "the counts and the notification id. Do not fabricate tasks — only echo what " +
       "tasks_briefing_snapshot returned.",
-    preset: "briefing",
+    preset: "briefing-bidirectional",
     defaultCron: "0 9,12,15,18 * * 1-5",
     storeResult: false,
     resultCategory: null,
@@ -371,7 +377,7 @@ export const pipelines = {
     description:
       "Maestro Press morning nudge — pulls today's calendar events and recent unread email via the google-workspace addon, combines them with the tasks briefing, stores the result in tasks_briefings, and pushes a ntfy notification that deep-links to the Tasks panel.",
     goal:
-      "Compose Kevin's morning briefing by making exactly five tool calls in this order. " +
+      "Compose Kevin's morning briefing by making exactly six tool calls in this order. " +
       "Substitute ${TODAY} below with today's date in America/Chicago in ISO format " +
       "(YYYY-MM-DD). The -05:00 timezone offset is America/Chicago during Daylight Saving Time " +
       "(mid-March through early November). Do not substitute any other values — the literals " +
@@ -417,11 +423,17 @@ export const pipelines = {
       "  type = \"briefing\"\n" +
       "  priority = \"normal\"\n" +
       "  action_url = \"/dashboard/tasks?briefing=${BRIEFING_ID}&instance=${INSTANCE_ID}\"\n\n" +
-      "After all five tool calls have succeeded, respond with a single short confirmation " +
+      "CALL 6 — gmail_send_to_self with these exact arguments (opens a replyable " +
+      "task-management thread in Kevin's inbox):\n" +
+      "  to = \"kevin.hopper1@gmail.com\"\n" +
+      "  subject = \"MPA daily briefing - ${TODAY}\"\n" +
+      "  body = ${BRIEFING_CONTENT} + \"\\n\\n---\\nReply to this email to manage your task list: e.g. \\\"add a task: …\\\", \\\"show my overdue tasks\\\", \\\"mark 12 done\\\", \\\"take task 5 and write it up\\\".\"\n" +
+      "  reply_to = \"kevin.hopper+bot@maestro.press\"\n\n" +
+      "After all six tool calls have succeeded, respond with a single short confirmation " +
       "line containing ${BRIEFING_ID} and the counts (events: N, unread: N). Do not describe " +
       "what you would do — actually call every tool listed above. Do not fabricate events, " +
       "senders, or subjects — only include what the tools actually returned.",
-    preset: "briefing",
+    preset: "briefing-bidirectional",
     defaultCron: "0 7 * * 1-5",
     storeResult: false,
     resultCategory: null,

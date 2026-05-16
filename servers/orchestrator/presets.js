@@ -246,6 +246,41 @@ export const presets = {
     ],
   },
 
+  // Phase 4 (2026-05-16) — dedicated clone of `briefing` that ALSO opens a
+  // replyable +bot digest thread (gmail_send_to_self). Used ONLY by
+  // mpa-daily-briefing + mpa-deadline-watcher; shared `briefing` (and
+  // mpa-weekly-retro, which uses it) stays untouched (rev 8).
+  "briefing-bidirectional": {
+    description:
+      "Like `briefing` but also SENDS the digest to Kevin's inbox via gmail_send_to_self with Reply-To kevin.hopper+bot@maestro.press, so a plain-English reply round-trips through the router into mpa-tasks. Single-agent crow-chat. Used only by mpa-daily-briefing + mpa-deadline-watcher.",
+    categories: ["memory", "addons"],
+    provider: "crow-chat",
+    agents: [
+      {
+        name: "briefer",
+        systemPrompt:
+          "You are the daily-briefing worker. Execute the goal exactly, calling the listed tools in " +
+          "order. You MUST invoke every tool call the goal specifies — do not merely describe what " +
+          "you would do. After calling tasks_store_briefing, you MUST call crow_create_notification " +
+          "with the returned briefing id, and then the gmail_send_to_self digest call the goal " +
+          "specifies. Your final text output should confirm the tools you called and include the " +
+          "briefing id returned by tasks_store_briefing.",
+        tools: [
+          "tasks_briefing_snapshot",
+          "tasks_store_briefing",
+          "tasks_list",
+          "gcal_list_events",
+          "gmail_search_threads",
+          "gmail_send_to_self",
+          "crow_search_memories",
+          "crow_store_memory",
+          "crow_create_notification",
+        ],
+        maxTurns: 18,
+      },
+    ],
+  },
+
   "mpa-gmail": {
     description:
       "Single-agent Gmail/Calendar worker for MPA pipelines. Same single-agent pattern as the briefing preset (local crow-chat, avoids coordinator-dispatch issues). Categories include `addons` so the google-workspace tools from ~/.crow-mpa/mcp-addons.json are bridged into the registry. Read-only + write-to-drafts tools only — no send, no delete.",
