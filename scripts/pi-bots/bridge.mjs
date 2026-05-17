@@ -51,8 +51,14 @@ class PiRpc {
     if (tools) args.push("--tools", tools);
     if (opts.appendSystemPromptFile) args.push("--append-system-prompt", opts.appendSystemPromptFile);
     if (opts.piSessionId) args.push("--session", opts.piSessionId);
+    // PI_BOT_PERMISSION_POLICY drives the per-bot gate in pi-lab's
+    // permission-gating.ts (Phase 2.2). Absent => that extension is a no-op
+    // (non-bot pi unaffected); present => deny/allowlist bash, confine
+    // write/edit to write_paths, draft-only external send, confirm[] block.
     const env = Object.assign({}, process.env,
-      { PATH: HOME + "/.nvm/versions/node/v20.20.2/bin:" + (process.env.PATH || ""), PI_PROVIDER: "crow-local" },
+      { PATH: HOME + "/.nvm/versions/node/v20.20.2/bin:" + (process.env.PATH || ""),
+        PI_PROVIDER: "crow-local",
+        PI_BOT_PERMISSION_POLICY: JSON.stringify(def.permission_policy || { bash: "deny", write_paths: [] }) },
       def.spawn_env || {});
     this.proc = spawn(NODE, args, { cwd: sessionDir, env, stdio: ["pipe", "pipe", "pipe"] });
     this.events = []; this.responses = []; this.stderr = ""; this._b = ""; this._w = []; this.badStdout = 0;
