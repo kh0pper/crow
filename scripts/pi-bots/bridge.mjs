@@ -25,6 +25,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
+import { validateExtensions } from "./pi_extensions_allowlist.mjs";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
@@ -165,6 +166,16 @@ export async function handleInbound(opts) {
     if (w.journalGuarded.length) log("mcp.json journal-guarded: " + w.journalGuarded.join(","));
   } catch (e) {
     log("per-bot mcp.json write skipped (non-fatal): " + (e && e.message || e));
+  }
+
+  // Install-approval gate (Phase 2.4): refuse non-allowlisted pi_extensions
+  // that reached pi_bot_defs via an out-of-band DB edit (the GUI only offers
+  // allowlisted ones). The bridge NEVER runs `pi install`; pi-lab is the
+  // fixed package set. This is an audit/refusal surface, not a turn-killer.
+  const extCheck = validateExtensions((def.tools && def.tools.pi_extensions) || []);
+  if (extCheck.rejected.length) {
+    log("REFUSED non-allowlisted pi_extensions: " + extCheck.rejected.join(", ") +
+      " — Bot Builder never runs `pi install`; add via the pi-lab repo + scripts/pi-bots/pi_extensions_allowlist.mjs");
   }
 
   let session = getSession(bot_id, gateway_thread_id);
