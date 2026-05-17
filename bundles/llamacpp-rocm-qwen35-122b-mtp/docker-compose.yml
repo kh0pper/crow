@@ -1,0 +1,55 @@
+services:
+  llamacpp-rocm-qwen35-122b-mtp:
+    # MTP (multi-token prediction) requires llama.cpp >= build 9189, which is
+    # ONLY in the rocm-7.2.3 toolbox — NOT the rocm-7.2.1 image the other
+    # crow llama.cpp bundles pin. Do not downgrade this image.
+    image: kyuz0/amd-strix-halo-toolboxes:rocm-7.2.3
+    container_name: llamacpp-rocm-qwen35-122b-mtp
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "${VIDEO_GID}"
+      - "${RENDER_GID}"
+    env_file:
+      - ${HOME}/.crow/env/rocm.env
+    volumes:
+      - ${LLM_CACHE}:/models
+    ports:
+      - "${CROW_TAILSCALE_IP}:8003:8000"
+    entrypoint: ["llama-server"]
+    command:
+      # Pre-downloaded (~94GB across 3 shards; llama.cpp auto-loads 2 & 3) to
+      #   /home/kh0pp/llm/hf-cache/qwen35-122b-a10b-mtp/
+      # from unsloth/Qwen3.5-122B-A10B-MTP-GGUF (subdir UD-Q5_K_M/, see
+      # reference_crow_bigmodel_benchmarks: flat shard URLs 404).
+      #
+      # Measured on this Strix Halo (rocm-7.2.3, -np 1, uncontended):
+      #   MTP off ~19.5 tok/s ; --spec-draft-n-max 3 ~25-27 tok/s (1.3-1.4x).
+      # MoE 122B / 10B active. MTP constraints: -np 1 only (NO --parallel),
+      # and NO --mmproj (MTP is incompatible with the vision projector).
+      - -m
+      - /models/qwen35-122b-a10b-mtp/Qwen3.5-122B-A10B-UD-Q5_K_M-00001-of-00003.gguf
+      - --alias
+      - qwen3.5-122b-a10b
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - -ngl
+      - "999"
+      - -fa
+      - "on"
+      - --no-mmap
+      - -np
+      - "1"
+      - -c
+      - "262144"
+      - --spec-type
+      - draft-mtp
+      - --spec-draft-n-max
+      - "3"
+      - --jinja
+    restart: "no"
+    ipc: host
+    shm_size: 16g

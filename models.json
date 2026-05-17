@@ -70,6 +70,24 @@
         }
       ]
     },
+    "crow-swap-highend": {
+      "$description": "On-demand high-end reasoning specialist. Qwen3.5-122B-A10B MoE (122B total / 10B active) Q5_K_M + MTP (--spec-type draft-mtp --spec-draft-n-max 3) via llama.cpp ROCm 7.2.3. Mutexed with all other crow-* bundles on Strix Halo's unified 124 GB pool; conflicts with crow-chat. Measured ~19.5 tok/s off / ~27 tok/s with MTP, single-stream, uncontended.",
+      "baseUrl": "http://100.118.41.122:8003/v1",
+      "apiKey": "none",
+      "host": "local",
+      "bundleId": "llamacpp-rocm-qwen35-122b-mtp",
+      "mutexGroup": "crow-strix-vram",
+      "models": [
+        {
+          "id": "qwen3.5-122b-a10b",
+          "contextLen": 262144,
+          "warm": false,
+          "onDemand": true,
+          "conflictsWith": ["crow-chat"],
+          "priority": "batch"
+        }
+      ]
+    },
     "grackle-embed": {
       "$description": "Text embeddings for semantic memory/research/blog search. Qwen3-Embedding-0.6B BF16 via vLLM-CUDA on grackle. Always-resident (kept up by gpu-orchestrator) because embed outages silently break memory stores.",
       "baseUrl": "http://100.121.254.89:9100/v1",
