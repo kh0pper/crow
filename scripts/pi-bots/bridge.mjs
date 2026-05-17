@@ -26,6 +26,7 @@ import { join } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
 import { validateExtensions } from "./pi_extensions_allowlist.mjs";
+import { resolveModel, escalateRequested, stripEscalateToken } from "./model_resolver.mjs";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
@@ -45,8 +46,11 @@ function toolAllowlist(def) {
 class PiRpc {
   constructor(opts) {
     const def = opts.def, sessionDir = opts.sessionDir;
-    const modelKey = (def.models && def.models.default ? def.models.default : "crow-local/qwen3.6-35b-a3b").split("/").pop();
-    const args = [PI_CLI, "--mode", "rpc", "--provider", "crow-local", "--model", modelKey,
+    // Phase 3.0 (R3): provider+model are resolved per-turn by
+    // model_resolver.resolveModel() and passed in via opts.resolved — there
+    // is NO hardcoded crow-local anywhere in the spawn path anymore.
+    const resolved = opts.resolved;
+    const args = [PI_CLI, "--mode", "rpc", "--provider", resolved.provider, "--model", resolved.model,
       "--session-dir", sessionDir + "/sessions"];
     const tools = toolAllowlist(def);
     if (tools) args.push("--tools", tools);
@@ -58,7 +62,7 @@ class PiRpc {
     // write/edit to write_paths, draft-only external send, confirm[] block.
     const env = Object.assign({}, process.env,
       { PATH: HOME + "/.nvm/versions/node/v20.20.2/bin:" + (process.env.PATH || ""),
-        PI_PROVIDER: "crow-local",
+        PI_PROVIDER: resolved.provider,
         PI_BOT_PERMISSION_POLICY: JSON.stringify(def.permission_policy || { bash: "deny", write_paths: [] }) },
       def.spawn_env || {});
     this.proc = spawn(NODE, args, { cwd: sessionDir, env, stdio: ["pipe", "pipe", "pipe"] });
@@ -134,11 +138,11 @@ function getSession(botId, threadId) {
 function upsertSession(s) {
   const c = db(CROW_DB);
   if (s.id) {
-    c.prepare("UPDATE bot_sessions SET pi_session_id=?, pi_session_dir=?, project_id=?, card_id=?, plan_path=?, status=?, control=?, updated_at=datetime('now') WHERE id=?")
-      .run(s.pi_session_id == null ? null : s.pi_session_id, s.pi_session_dir == null ? null : s.pi_session_dir, s.project_id == null ? null : s.project_id, s.card_id == null ? null : s.card_id, s.plan_path == null ? null : s.plan_path, s.status, s.control, s.id);
+    c.prepare("UPDATE bot_sessions SET pi_session_id=?, pi_session_dir=?, project_id=?, card_id=?, plan_path=?, status=?, control=?, model=?, escalated=?, updated_at=datetime('now') WHERE id=?")
+      .run(s.pi_session_id == null ? null : s.pi_session_id, s.pi_session_dir == null ? null : s.pi_session_dir, s.project_id == null ? null : s.project_id, s.card_id == null ? null : s.card_id, s.plan_path == null ? null : s.plan_path, s.status, s.control, s.model == null ? null : s.model, s.escalated == null ? 0 : (s.escalated ? 1 : 0), s.id);
   } else {
-    const info = c.prepare("INSERT INTO bot_sessions (bot_id,pi_session_id,pi_session_dir,gateway_type,gateway_thread_id,project_id,card_id,plan_path,status,control) VALUES (?,?,?,?,?,?,?,?,?,?)")
-      .run(s.bot_id, s.pi_session_id == null ? null : s.pi_session_id, s.pi_session_dir == null ? null : s.pi_session_dir, s.gateway_type || "gmail", s.gateway_thread_id, s.project_id == null ? null : s.project_id, s.card_id == null ? null : s.card_id, s.plan_path == null ? null : s.plan_path, s.status, s.control || "run");
+    const info = c.prepare("INSERT INTO bot_sessions (bot_id,pi_session_id,pi_session_dir,gateway_type,gateway_thread_id,project_id,card_id,plan_path,status,control,model,escalated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(s.bot_id, s.pi_session_id == null ? null : s.pi_session_id, s.pi_session_dir == null ? null : s.pi_session_dir, s.gateway_type || "gmail", s.gateway_thread_id, s.project_id == null ? null : s.project_id, s.card_id == null ? null : s.card_id, s.plan_path == null ? null : s.plan_path, s.status, s.control || "run", s.model == null ? null : s.model, s.escalated == null ? 0 : (s.escalated ? 1 : 0));
     s.id = info.lastInsertRowid;
   }
   c.close(); return s;
@@ -151,6 +155,11 @@ function parseCardIntent(msg) {
 export async function handleInbound(opts) {
   const bot_id = opts.bot_id, gateway_thread_id = opts.gateway_thread_id, user_message = opts.user_message;
   const sendReply = opts.sendReply, log = opts.log || function () {};
+  // Phase 3.0 (R4): operator-driven escalation via a bounded, inbound-only
+  // `!escalate` token. Detect on the RAW inbound, then strip it so it never
+  // reaches the model prompt or persists in the pi session transcript.
+  const escalate = escalateRequested(user_message);
+  const cleanMsg = stripEscalateToken(user_message);
   const bot = loadBot(bot_id);
   const def = bot.def;
   const projectId = def.project_id == null ? null : def.project_id;
@@ -185,7 +194,7 @@ export async function handleInbound(opts) {
     return { action: "stopped" };
   }
 
-  const wantCard = parseCardIntent(user_message);
+  const wantCard = parseCardIntent(cleanMsg);
   const resume = !!(session && session.pi_session_id);
 
   if (wantCard != null) {
@@ -217,48 +226,75 @@ export async function handleInbound(opts) {
   let promptText;
   if (wantCard == null && !resume) {
     promptText = "A user messaged you over the gateway. Project #" + projectId + " Kanban:\n" +
-      kanbanText(projectId) + "\n\nUser said: \"" + user_message + "\"\n\n" +
+      kanbanText(projectId) + "\n\nUser said: \"" + cleanMsg + "\"\n\n" +
       "Reply briefly: greet, list the card numbers above, and ask which card to do. Do NOT call any tool yet.";
   } else if (cardId != null) {
     promptText = "Work the following card for project #" + projectId + ".\n\nCARD #" + cardId +
       " (current board status: " + cardStatus(cardId) + ").\nPLAN FILE (" + plan.path + "):\n---\n" +
-      (plan.text || "(plan file missing)") + "\n---\n\nUser said: \"" + user_message + "\"\n\n" +
+      (plan.text || "(plan file missing)") + "\n---\n\nUser said: \"" + cleanMsg + "\"\n\n" +
       "Do the work the plan describes. Use the tasks_* tools (scoped to project " + projectId +
       ") to set this card in_progress, then done. Use the write/edit tools to record your result " +
       "under the plan file's \"## Result\" section. When finished, reply with a short summary for " +
       "the gateway thread. One card only.";
   } else {
     promptText = "Project #" + projectId + " Kanban:\n" + kanbanText(projectId) + "\n\nUser said: \"" +
-      user_message + "\"\n\nReply briefly and ask which card number to do. Do NOT call any tool.";
+      cleanMsg + "\"\n\nReply briefly and ask which card number to do. Do NOT call any tool.";
   }
+
+  // Phase 3.0 (R3/R4/R5): resolve provider/model for THIS turn. R4: if an
+  // escalation flips the model vs the session's recorded one, force a FRESH
+  // pi session — resuming a session created under a different provider/model
+  // is an unproven pi path. `resume` still shapes the prompt (conversation
+  // continuity); `effectiveResume` alone decides pi's `--session`.
+  const resolved = resolveModel(def, { escalate });
+  const forceNew = escalate && resume && ((session && session.model) || null) !== resolved.key;
+  const effectiveResume = resume && !forceNew;
+  // R5: the ONE deterministic escalation-proof observable (get_state does NOT
+  // echo the model — it returns sessionId/messageCount only).
+  log("model-resolve bot=" + bot_id + " provider=" + resolved.provider + " model=" + resolved.model +
+    " escalated=" + resolved.escalated + " source=" + resolved.source +
+    " session=" + (effectiveResume ? "resume" : "new") + (forceNew ? " (forced-new: model changed)" : ""));
 
   session = upsertSession(Object.assign({}, session || {}, {
     bot_id, gateway_thread_id, project_id: projectId,
     card_id: cardId == null ? null : cardId, plan_path: plan.path,
     pi_session_dir: def.session_dir + "/sessions", status: "active", control: "run",
+    model: resolved.key, escalated: resolved.escalated ? 1 : 0,
   }));
 
-  const pi = new PiRpc({ def, sessionDir: def.session_dir, piSessionId: resume ? session.pi_session_id : null, appendSystemPromptFile: sysFile });
+  const pi = new PiRpc({ def, sessionDir: def.session_dir, resolved,
+    piSessionId: effectiveResume ? session.pi_session_id : null, appendSystemPromptFile: sysFile });
   let result;
   try {
     const st0 = await pi.getState().catch(() => null);
     await pi.prompt(promptText, TURN_TIMEOUT_MS);
     const st1 = await pi.getState().catch(() => null);
-    const piSessionId = (st1 && st1.data && st1.data.sessionId) || (st0 && st0.data && st0.data.sessionId) || session.pi_session_id || null;
+    const piSessionId = (st1 && st1.data && st1.data.sessionId) || (st0 && st0.data && st0.data.sessionId) || (effectiveResume ? session.pi_session_id : null) || null;
     const text = pi.assistantText() || "(no reply)";
     const calls = pi.toolCalls();
     const newCardStatus = cardId != null ? cardStatus(cardId) : null;
     const status = newCardStatus === "done" ? "done" : "waiting-user";
     session.pi_session_id = piSessionId;
     session.status = status; session.control = "run";
+    session.model = resolved.key; session.escalated = resolved.escalated ? 1 : 0;
     upsertSession(session);
-    await sendReply(text);
+    // R12: the Gmail operator never sees stderr — if escalation was asked
+    // for but no escalation model is configured, say so in-band.
+    const notice = resolved.escalationRequestedButUnavailable
+      ? "(note: escalation requested but no escalation model is configured for this bot; ran on " + resolved.key + ")\n\n"
+      : "";
+    await sendReply(notice + text);
     result = { action: cardId != null ? "executed" : "asked", cardId, cardStatus: newCardStatus,
       piSessionId, toolCalls: calls, replyPreview: text.slice(0, 120), stdoutClean: pi.badStdout === 0 };
     log("turn done: action=" + result.action + " card=" + cardId + " status=" + newCardStatus + " tools=" + calls.length + " clean=" + result.stdoutClean);
   } catch (e) {
-    session.status = "error"; upsertSession(session);
-    await sendReply("(bridge error: " + e.message + ")");
+    session.status = "error";
+    session.model = resolved.key; session.escalated = resolved.escalated ? 1 : 0;
+    upsertSession(session);
+    const notice = resolved.escalationRequestedButUnavailable
+      ? "(note: escalation requested but no escalation model is configured for this bot; ran on " + resolved.key + ")\n\n"
+      : "";
+    await sendReply(notice + "(bridge error: " + e.message + ")");
     result = { action: "error", error: e.message };
   } finally {
     await pi.close();

@@ -50,6 +50,10 @@ const before = { pi_bot_defs: tableExists("pi_bot_defs"), bot_sessions: tableExi
 if (CHECK_ONLY) {
   console.log(`[init-pi-bots] CHECK DB=${DB_PATH} bot_registry=${prodBots}`);
   console.log(`  pi_bot_defs exists=${before.pi_bot_defs}  bot_sessions exists=${before.bot_sessions}`);
+  if (before.bot_sessions) {
+    const c = db.prepare("PRAGMA table_info(bot_sessions)").all().map((x) => x.name);
+    console.log(`  bot_sessions.model=${c.includes("model")} bot_sessions.escalated=${c.includes("escalated")}`);
+  }
   process.exit(0);
 }
 
@@ -90,6 +94,31 @@ const DDL = [
 
 const tx = db.transaction(() => { for (const sql of DDL) db.prepare(sql).run(); });
 tx();
+
+// --- Phase 3.0 migration (plan POST-REVIEW REVISIONS, Round 1 — R1).
+// Additive, idempotent, and run OUTSIDE the DDL transaction above so a benign
+// re-run (this script runs on every deploy) can NEVER roll back the
+// CREATE/INDEX block. SQLite has no `ADD COLUMN IF NOT EXISTS`, so each
+// column is guarded by a PRAGMA table_info presence check. The
+// `CREATE TABLE IF NOT EXISTS bot_sessions` body is intentionally left
+// UNCHANGED — fresh and pre-existing installs converge through this same
+// guarded ALTER (schema evolution is ALTER-driven going forward). Opened
+// busy_timeout-only (no journal_mode pragma); ADD COLUMN does not rebuild
+// the table so the status/control CHECK constraints + foreign_keys=ON are
+// unaffected.
+const migAdded = [];
+if (tableExists("bot_sessions")) {
+  const have = db.prepare("PRAGMA table_info(bot_sessions)").all().map((c) => c.name);
+  if (!have.includes("model")) {
+    db.prepare("ALTER TABLE bot_sessions ADD COLUMN model TEXT").run();
+    migAdded.push("model");
+  }
+  if (!have.includes("escalated")) {
+    db.prepare("ALTER TABLE bot_sessions ADD COLUMN escalated INTEGER DEFAULT 0").run();
+    migAdded.push("escalated");
+  }
+}
+console.log(`  bot_sessions migration: ${migAdded.length ? "added [" + migAdded.join(",") + "]" : "no-op (model,escalated already present)"}`);
 
 const after = { pi_bot_defs: tableExists("pi_bot_defs"), bot_sessions: tableExists("bot_sessions") };
 const cols = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name).join(",");
