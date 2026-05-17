@@ -29,14 +29,15 @@ import {
   serversForBot,
   writeBotMcp,
 } from "../../../../scripts/pi-bots/mcp_writer.mjs";
+import { PI_EXT_ALLOWLIST } from "../../../../scripts/pi-bots/pi_extensions_allowlist.mjs";
 
 const HOME = "/home/kh0pp";
 const MODELS_JSON = HOME + "/.pi/agent/models.json";
 const SKILLS_DIR = HOME + "/.crow/skills";
 const PI_BUILTIN = ["read", "edit", "write", "bash", "list", "glob", "grep"];
-// Curated, reviewed pi extensions a bot may select from the GUI. Anything
-// outside this list requires interactive install-approval (Phase 2.4).
-const PI_EXT_ALLOWLIST = ["plan-mode", "todo", "subagent"];
+// PI_EXT_ALLOWLIST is imported from the single-source module (Phase 2.4):
+// scripts/pi-bots/pi_extensions_allowlist.mjs — the panel only OFFERS these;
+// the bridge REFUSES anything else (no Bot Builder code ever runs `pi install`).
 const TABS = [
   ["ai", "AI / Models"],
   ["tools", "Tools & Extensions"],
@@ -426,10 +427,11 @@ export default {
     }
 
     // ---- list + create ----
-    let bots = [], sessions = [];
+    let bots = [], sessions = [], sessRows = [];
     try {
       bots = (await db.execute({ sql: "SELECT bot_id, display_name, enabled, definition, datetime(updated_at) AS updated_at FROM pi_bot_defs ORDER BY bot_id", args: [] })).rows;
       sessions = (await db.execute({ sql: "SELECT bot_id, status, count(*) AS n FROM bot_sessions GROUP BY bot_id, status", args: [] })).rows;
+      sessRows = (await db.execute({ sql: "SELECT id, bot_id, status, control, card_id, gateway_thread_id, datetime(updated_at) AS updated_at FROM bot_sessions ORDER BY updated_at DESC LIMIT 50", args: [] })).rows;
     } catch { /* defensive */ }
     const sessSummary = (id) => sessions.filter((s) => s.bot_id === id).map((s) => `${escapeHtml(s.status)}:${s.n}`).join(" ") || "—";
     const rows = bots.map((bt) => {
@@ -458,6 +460,32 @@ export default {
       formField("Model", "model", { value: "crow-local/qwen3.6-35b-a3b" }) +
       actionBar(`<button type="submit">Create</button>`) + `</form>` +
       `<p style="opacity:.7;font-size:.9em">Creates a v0.1 bot with safe defaults; then use the tabbed editor (AI · Tools · Gateways · Project · Skills · Permissions · Triggers · Review).</p>`);
-    return res.send(layout({ title: "Bot Builder", content: list + form }));
+    // Run monitor — live bot_sessions (the bridge's runtime authority).
+    // Initial server render + a poll-based SSE source (the bridge is a
+    // separate process; /dashboard/streams/bot-sessions replaces the tbody
+    // every 5s). #pibot-sessions-tbody is the Turbo replace target.
+    const COLOR = { active: "#1a7f37", "waiting-user": "#b8860b", stopped: "#888", done: "#2d6cdf", error: "#c0392b" };
+    const monRows = sessRows.length
+      ? sessRows.map((s) => {
+          const c = COLOR[s.status] || "#333";
+          return `<tr>` +
+            `<td style="padding:4px 8px">${escapeHtml(String(s.id))}</td>` +
+            `<td style="padding:4px 8px">${escapeHtml(String(s.bot_id || ""))}</td>` +
+            `<td style="padding:4px 8px;color:${c};font-weight:600">${escapeHtml(String(s.status || ""))}</td>` +
+            `<td style="padding:4px 8px">${escapeHtml(String(s.control || ""))}</td>` +
+            `<td style="padding:4px 8px">${s.card_id == null ? "—" : escapeHtml(String(s.card_id))}</td>` +
+            `<td style="padding:4px 8px;font-family:monospace;font-size:.8rem">${escapeHtml(String(s.gateway_thread_id || "").slice(0, 18))}</td>` +
+            `<td style="padding:4px 8px;color:#888">${escapeHtml(String(s.updated_at || ""))}</td>` +
+            `</tr>`;
+        }).join("")
+      : `<tr><td colspan="7" style="padding:8px;color:#888">No bot sessions yet.</td></tr>`;
+    const monitor = section("Run monitor (bot_sessions — live, 5s)",
+      `<turbo-stream-source src="/dashboard/streams/bot-sessions"></turbo-stream-source>` +
+      `<table style="width:100%;border-collapse:collapse"><thead><tr style="text-align:left;border-bottom:1px solid #ddd">` +
+      `<th style="padding:4px 8px">id</th><th style="padding:4px 8px">bot</th><th style="padding:4px 8px">status</th>` +
+      `<th style="padding:4px 8px">control</th><th style="padding:4px 8px">card</th><th style="padding:4px 8px">thread</th>` +
+      `<th style="padding:4px 8px">updated</th></tr></thead>` +
+      `<tbody id="pibot-sessions-tbody">${monRows}</tbody></table>`);
+    return res.send(layout({ title: "Bot Builder", content: list + monitor + form }));
   },
 };
