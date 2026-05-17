@@ -23,6 +23,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, readFileSync, existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
@@ -165,6 +166,16 @@ export async function handleInbound(opts) {
       await sendReply("Card #" + wantCard + " is already done — nothing to do.");
       return { action: "noop-done", cardId: wantCard };
     }
+  }
+
+  // Global pi concurrency gate (plan §10 risk #4). Spawn-per-turn normally
+  // keeps <=1 live pi; refuse to pile on past the cap. Return WITHOUT mutating
+  // bot_sessions so the next bridge tick reprocesses this same inbound (the
+  // tick keys "processed" off bot_sessions.updated_at, which we leave stale).
+  const livePi = countLivePi();
+  if (livePi >= LIFECYCLE_DEFAULTS.maxPi) {
+    log("pi capacity reached (" + livePi + "/" + LIFECYCLE_DEFAULTS.maxPi + ") — deferring; tick will retry");
+    return { action: "deferred", reason: "pi-capacity", livePi };
   }
 
   const sysFile = join(mkdtempSync(join(tmpdir(), "pibot-")), "sys.md");

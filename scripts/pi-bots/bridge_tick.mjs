@@ -17,6 +17,7 @@ import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js"
 import { execFile } from "node:child_process";
 import { openSync, closeSync, existsSync, statSync, unlinkSync } from "node:fs";
 import { handleInbound } from "./bridge.mjs";
+import { reapStalePi } from "./pi_lifecycle.mjs";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
@@ -50,6 +51,14 @@ function acquireLock() {
 
 (async () => {
   if (!acquireLock()) { console.log("[tick] another tick holds the lock — skip"); process.exit(0); }
+  // Pre-flight: reap any abandoned/stuck/runaway pi from a previously crashed
+  // tick before doing more work (plan §10 risk #4). Runs every ~1 min via the
+  // existing timer — no extra systemd unit. The pure-bash backstop in
+  // ~/bin/memory-watchdog.sh is the independent 5-min safety net.
+  try {
+    const sweep = reapStalePi({ log: (m) => console.log("[tick] " + m) });
+    if (sweep.reaped.length) console.log(`[tick] reaped ${sweep.reaped.length} stale pi (scanned ${sweep.scanned})`);
+  } catch (e) { console.error("[tick] reaper error (non-fatal): " + (e && e.message || e)); }
   const d = db();
   let defs = [];
   try {
