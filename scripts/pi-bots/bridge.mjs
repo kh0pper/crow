@@ -25,7 +25,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
-import { validateExtensions } from "./pi_extensions_allowlist.mjs";
+import { validateExtensions, isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
 import { resolveModel, escalateRequested, stripEscalateToken } from "./model_resolver.mjs";
 
 const HOME = "/home/kh0pp";
@@ -52,18 +52,40 @@ class PiRpc {
     const resolved = opts.resolved;
     const args = [PI_CLI, "--mode", "rpc", "--provider", resolved.provider, "--model", resolved.model,
       "--session-dir", sessionDir + "/sessions"];
-    const tools = toolAllowlist(def);
+    // Phase 3.1 (R9/R11): multi-agent is allowed iff the operator opted in
+    // (def.permission_policy.multi_agent) AND the POST-resolution model is
+    // capability-listed. Both flow into PI_BOT_PERMISSION_POLICY for the
+    // pi-lab gate (the hard backstop, fail-closed on absence) and gate the
+    // `subagent` belt below.
+    const maOptIn = !!(def.permission_policy && def.permission_policy.multi_agent === true);
+    const maCapable = isMultiAgentCapable(resolved.provider, resolved.model);
+    // Belt (R7 — pi `--tools` provably filters extension-registered tools
+    // too: dist/cli/args.js:220-221 "Applies to built-in, extension, and
+    // custom tools"). Only expose `subagent` to the model when capable+
+    // opted-in; otherwise pi never offers it. The gate is the backstop if a
+    // hand DB-edit bypasses this.
+    let tools = toolAllowlist(def);
+    if (maOptIn && maCapable) tools = [tools, "subagent"].filter(Boolean).join(",");
     if (tools) args.push("--tools", tools);
     if (opts.appendSystemPromptFile) args.push("--append-system-prompt", opts.appendSystemPromptFile);
     if (opts.piSessionId) args.push("--session", opts.piSessionId);
     // PI_BOT_PERMISSION_POLICY drives the per-bot gate in pi-lab's
-    // permission-gating.ts (Phase 2.2). Absent => that extension is a no-op
-    // (non-bot pi unaffected); present => deny/allowlist bash, confine
-    // write/edit to write_paths, draft-only external send, confirm[] block.
+    // permission-gating.ts (Phase 2.2 + 3.1). Absent => that extension is a
+    // no-op (non-bot pi unaffected); present => deny/allowlist bash, confine
+    // write/edit to write_paths, draft-only external send, confirm[] block,
+    // and (3.1) subagent gated on multi_agent && model_capable. We MERGE the
+    // computed flags onto a COPY of def.permission_policy (never mutate the
+    // stored def). PIBOT_SUBAGENT_DEPTH=0: this is the top-level bot pi; the
+    // subagent extension bumps the counter for any child it spawns so the
+    // gate blocks sub-agents-spawning-sub-agents.
+    const piPolicy = Object.assign(
+      {}, def.permission_policy || { bash: "deny", write_paths: [] },
+      { multi_agent: maOptIn, model_capable: maCapable });
     const env = Object.assign({}, process.env,
       { PATH: HOME + "/.nvm/versions/node/v20.20.2/bin:" + (process.env.PATH || ""),
         PI_PROVIDER: resolved.provider,
-        PI_BOT_PERMISSION_POLICY: JSON.stringify(def.permission_policy || { bash: "deny", write_paths: [] }) },
+        PIBOT_SUBAGENT_DEPTH: "0",
+        PI_BOT_PERMISSION_POLICY: JSON.stringify(piPolicy) },
       def.spawn_env || {});
     this.proc = spawn(NODE, args, { cwd: sessionDir, env, stdio: ["pipe", "pipe", "pipe"] });
     this.events = []; this.responses = []; this.stderr = ""; this._b = ""; this._w = []; this.badStdout = 0;
