@@ -235,5 +235,81 @@ export default function streamsRouter(dashboardAuth) {
     res.on("error", () => bus.off("jobs:changed", handler));
   });
 
+  // --- Bot Builder run monitor (Crow Bot Builder Phase 2.5) ---
+  //
+  // POLL-based, unlike the bus-driven streams above: the Bot Session Bridge
+  // runs in a SEPARATE process (pibot-bridge.timer oneshot), so the gateway's
+  // in-process event bus never sees its turns. bot_sessions in crow.db is the
+  // runtime authority the bridge persists every turn — we stream that.
+  //
+  // ONE createDbClient() per SSE connection (NOT per tick): inside the gateway
+  // process it inherits CROW_JOURNAL_MODE=DELETE + ensureKeeper(), the same
+  // WAL-scar-safe path the gateway already uses everywhere — reused each tick,
+  // closed on teardown. Defensive: bot_sessions is absent on the primary
+  // gateway's crow.db, so a failed query just emits nothing that tick.
+  router.get("/dashboard/streams/bot-sessions", (req, res) => {
+    const { sendRaw } = openAuthedStream(req, res);
+    let db;
+    try {
+      db = createDbClient();
+    } catch {
+      db = null;
+    }
+    let timer = null;
+    const COLOR = { active: "#1a7f37", "waiting-user": "#b8860b", stopped: "#888", done: "#2d6cdf", error: "#c0392b" };
+    const tick = async () => {
+      try {
+        if (!db) return;
+        const r = await db.execute({
+          sql:
+            "SELECT id, bot_id, status, control, card_id, gateway_thread_id, datetime(updated_at) AS updated_at " +
+            "FROM bot_sessions ORDER BY updated_at DESC LIMIT 50",
+          args: [],
+        });
+        const rows = r.rows || [];
+        const trs = rows.length
+          ? rows
+              .map((s) => {
+                const c = COLOR[s.status] || "#333";
+                return html`<tr>
+                  <td style="padding:4px 8px">${String(s.id)}</td>
+                  <td style="padding:4px 8px">${String(s.bot_id || "")}</td>
+                  <td style="padding:4px 8px;color:${c};font-weight:600">${String(s.status || "")}</td>
+                  <td style="padding:4px 8px">${String(s.control || "")}</td>
+                  <td style="padding:4px 8px">${s.card_id == null ? "—" : String(s.card_id)}</td>
+                  <td style="padding:4px 8px;font-family:monospace;font-size:.8rem">${String(s.gateway_thread_id || "").slice(0, 18)}</td>
+                  <td style="padding:4px 8px;color:#888">${String(s.updated_at || "")}</td>
+                </tr>`;
+              })
+              .join("")
+          : html`<tr><td colspan="7" style="padding:8px;color:#888">No bot sessions yet.</td></tr>`;
+        sseTurbo(
+          sendRaw,
+          "replace",
+          "pibot-sessions-tbody",
+          html`<tbody id="pibot-sessions-tbody">${raw(trs)}</tbody>`,
+        );
+      } catch {
+        // table absent (primary gateway) / transient — emit nothing this tick.
+      }
+    };
+    tick();
+    timer = setInterval(tick, 5000);
+    const cleanup = () => {
+      if (timer) clearInterval(timer);
+      timer = null;
+      if (db) {
+        try {
+          db.close();
+        } catch {
+          /* already closed */
+        }
+        db = null;
+      }
+    };
+    res.on("close", cleanup);
+    res.on("error", cleanup);
+  });
+
   return router;
 }
