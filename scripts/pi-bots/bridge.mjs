@@ -24,6 +24,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, mkdtempSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
+import { writeBotMcp } from "./mcp_writer.mjs";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
@@ -147,6 +148,18 @@ export async function handleInbound(opts) {
   const def = bot.def;
   const projectId = def.project_id == null ? null : def.project_id;
   mkdirSync(def.session_dir + "/sessions", { recursive: true });
+
+  // Keep the per-bot <session_dir>/.mcp.json in sync with the def on every
+  // turn (best-effort; additive merge — homedir ~/.pi/agent/mcp.json still
+  // wins on collision, so a writer hiccup can never break a turn). Primary
+  // writer is the GUI save handler; this is the defensive backstop.
+  try {
+    const w = writeBotMcp(def);
+    if (w.warnings.length) log("mcp.json warnings: " + w.warnings.join("; "));
+    if (w.journalGuarded.length) log("mcp.json journal-guarded: " + w.journalGuarded.join(","));
+  } catch (e) {
+    log("per-bot mcp.json write skipped (non-fatal): " + (e && e.message || e));
+  }
 
   let session = getSession(bot_id, gateway_thread_id);
   if (session && session.control === "stop") {
