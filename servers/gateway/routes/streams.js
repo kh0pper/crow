@@ -262,7 +262,7 @@ export default function streamsRouter(dashboardAuth) {
         if (!db) return;
         const r = await db.execute({
           sql:
-            "SELECT id, bot_id, status, control, card_id, gateway_thread_id, datetime(updated_at) AS updated_at " +
+            "SELECT id, bot_id, status, model, escalated, control, card_id, gateway_thread_id, datetime(updated_at) AS updated_at " +
             "FROM bot_sessions ORDER BY updated_at DESC LIMIT 50",
           args: [],
         });
@@ -275,6 +275,8 @@ export default function streamsRouter(dashboardAuth) {
                   <td style="padding:4px 8px">${String(s.id)}</td>
                   <td style="padding:4px 8px">${String(s.bot_id || "")}</td>
                   <td style="padding:4px 8px;color:${c};font-weight:600">${String(s.status || "")}</td>
+                  <td style="padding:4px 8px;font-family:monospace;font-size:.8rem">${String(s.model || "—")}</td>
+                  <td style="padding:4px 8px">${Number(s.escalated) ? "yes" : "—"}</td>
                   <td style="padding:4px 8px">${String(s.control || "")}</td>
                   <td style="padding:4px 8px">${s.card_id == null ? "—" : String(s.card_id)}</td>
                   <td style="padding:4px 8px;font-family:monospace;font-size:.8rem">${String(s.gateway_thread_id || "").slice(0, 18)}</td>
@@ -282,7 +284,7 @@ export default function streamsRouter(dashboardAuth) {
                 </tr>`;
               })
               .join("")
-          : html`<tr><td colspan="7" style="padding:8px;color:#888">No bot sessions yet.</td></tr>`;
+          : html`<tr><td colspan="9" style="padding:8px;color:#888">No bot sessions yet.</td></tr>`;
         sseTurbo(
           sendRaw,
           "replace",

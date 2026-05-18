@@ -29,7 +29,16 @@ import {
   serversForBot,
   writeBotMcp,
 } from "../../../../scripts/pi-bots/mcp_writer.mjs";
-import { PI_EXT_ALLOWLIST } from "../../../../scripts/pi-bots/pi_extensions_allowlist.mjs";
+import {
+  PI_EXT_ALLOWLIST,
+  MULTI_AGENT_CAPABLE,
+  isMultiAgentCapable,
+} from "../../../../scripts/pi-bots/pi_extensions_allowlist.mjs";
+import {
+  loadModels as loadModelsJson,
+  validateModelKey,
+  resolveModel,
+} from "../../../../scripts/pi-bots/model_resolver.mjs";
 
 const HOME = "/home/kh0pp";
 const MODELS_JSON = HOME + "/.pi/agent/models.json";
@@ -77,20 +86,38 @@ async function probeAll() {
   return out;
 }
 
-function loadModels() {
-  try {
-    const j = JSON.parse(readFileSync(MODELS_JSON, "utf8"));
-    const provs = j.providers || {};
-    const opts = [];
-    for (const p of Object.keys(provs)) {
-      for (const m of provs[p].models || []) {
-        opts.push({ key: `${p}/${m.id}`, label: `${m.name || m.id} — ${p}` });
-      }
-    }
-    return opts;
-  } catch {
-    return [{ key: "crow-local/qwen3.6-35b-a3b", label: "crow-local/qwen3.6-35b-a3b" }];
+// R14 (Phase 3.2): models.json read goes through the 3.0 resolver's
+// loadModels() — the SINGLE source for "is models.json readable" (it returns
+// null on ANY missing/parse failure). Returns { opts, error }: a malformed or
+// missing models.json yields a soft inline `error` string + a crow-local
+// fallback option so the AI tab still renders and a Save never 500s.
+const MODEL_FALLBACK_OPT = {
+  provider: "crow-local",
+  key: "crow-local/qwen3.6-35b-a3b",
+  label: "qwen3.6-35b-a3b",
+};
+function loadModelOptions() {
+  const j = loadModelsJson();
+  if (!j) {
+    return {
+      error: "~/.pi/agent/models.json is missing or malformed — showing the crow-local fallback only.",
+      opts: [MODEL_FALLBACK_OPT],
+    };
   }
+  const provs = j.providers || {};
+  const opts = [];
+  for (const p of Object.keys(provs)) {
+    for (const m of provs[p].models || []) {
+      opts.push({ provider: p, key: `${p}/${m.id}`, label: `${m.name || m.id}` });
+    }
+  }
+  if (!opts.length) {
+    return {
+      error: "~/.pi/agent/models.json has no providers/models — showing the crow-local fallback only.",
+      opts: [MODEL_FALLBACK_OPT],
+    };
+  }
+  return { error: null, opts };
 }
 
 function loadSkills() {
@@ -211,12 +238,37 @@ export default {
         def.permission_policy = def.permission_policy || {};
         def.triggers = def.triggers || {};
         const tab = action.slice(5);
+        // Extra query suffix carried into the post-save redirect (e.g. a soft
+        // validation warning for the AI tab). Never blocks the save.
+        let extraQ = "";
 
         if (tab === "ai") {
           def.models = def.models || {};
           def.models.default = (b.model_default || def.models.default || "").trim();
           const esc = (b.model_escalation || "").trim();
           if (esc) def.models.escalation = esc; else delete def.models.escalation;
+          // R13/R14: validate the saved pair via the 3.0 resolver's validator
+          // (single source). Non-blocking and never throws: a bad value can't
+          // break the bot (resolveModel() fails closed to crow-local at
+          // runtime), so we persist the operator's choice and only surface a
+          // soft warning — a Save never 500s nor clobbers other tabs.
+          try {
+            const mj = loadModelsJson();
+            if (!mj) {
+              extraQ = "&warn=" + encodeURIComponent(
+                "models.json unreadable — could not validate the model pair; saved anyway (runtime fails closed to crow-local).");
+            } else {
+              const bad = [];
+              if (def.models.default && !validateModelKey(mj, def.models.default).ok) bad.push("default (" + def.models.default + ")");
+              if (def.models.escalation && !validateModelKey(mj, def.models.escalation).ok) bad.push("escalation (" + def.models.escalation + ")");
+              if (bad.length) {
+                extraQ = "&warn=" + encodeURIComponent(
+                  "not in models.json: " + bad.join(", ") + " — saved anyway (runtime fails closed to crow-local).");
+              }
+            }
+          } catch {
+            /* validation must never 500 the save (R14) */
+          }
         } else if (tab === "tools") {
           const builtin = PI_BUILTIN.filter((t) => b["builtin_" + t]);
           const mcp = [].concat(b.crow_mcp || []).filter(Boolean);
@@ -244,6 +296,10 @@ export default {
           def.permission_policy.write_paths = lines(b.pp_write_paths);
           def.permission_policy.external_send = b.pp_external_send || "draft_only";
           def.permission_policy.confirm = lines(b.pp_confirm);
+          // R13 (Phase 3.2): multi-agent opt-in. The pi-lab gate (Phase 3.1)
+          // only ALLOWS the `subagent` tool when policy.multi_agent===true AND
+          // the resolved model is MULTI_AGENT_CAPABLE; default false.
+          def.permission_policy.multi_agent = !!b.pp_multi_agent;
         } else if (tab === "triggers") {
           def.triggers.gateway = !!b.tr_gateway;
           def.triggers.cron = (b.tr_cron || "").trim();
@@ -257,7 +313,7 @@ export default {
         } catch (e) {
           return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${tab}&error=` + encodeURIComponent(String(e.message || e)));
         }
-        return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${tab}&saved=1`);
+        return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${tab}&saved=1${extraQ}`);
       }
 
       if (action === "regen_mcp") {
@@ -289,9 +345,13 @@ export default {
     }
 
     const q = req.query || {};
-    const notice = q.saved ? `<p style="color:#1a7f37">✅ Saved.</p>`
+    const baseNotice = q.saved ? `<p style="color:#1a7f37">✅ Saved.</p>`
       : q.created ? `<p style="color:#1a7f37">✅ Created <code>${escapeHtml(String(q.created))}</code>.</p>`
       : q.error ? `<p style="color:#c0392b">⚠️ ${escapeHtml(String(q.error))}</p>` : "";
+    // Soft, non-blocking warning (e.g. AI-tab model pair not in models.json).
+    // Independent of the base notice so it can ride alongside a ✅ Saved.
+    const warnNotice = q.warn ? `<p style="color:#b8860b">⚠️ ${escapeHtml(String(q.warn))}</p>` : "";
+    const notice = baseNotice + warnNotice;
 
     // ---- editor for one bot ----
     if (q.bot) {
@@ -314,12 +374,29 @@ export default {
       let body = "";
 
       if (tabId === "ai") {
-        const models = loadModels();
-        const opt = (sel) => models.map((m) => `<option value="${escapeHtml(m.key)}"${m.key === sel ? " selected" : ""}>${escapeHtml(m.label)}</option>`).join("");
+        // Provider→model picker, grouped by provider via <optgroup> (the
+        // server-rendered "cascading" shape — no client JS, Phase-2.3 style).
+        const { opts: mOpts, error: mErr } = loadModelOptions();
+        const byProv = {};
+        for (const o of mOpts) (byProv[o.provider] = byProv[o.provider] || []).push(o);
+        const optGroups = (sel) =>
+          Object.keys(byProv)
+            .map(
+              (p) =>
+                `<optgroup label="${escapeHtml(p)}">` +
+                byProv[p]
+                  .map((m) => `<option value="${escapeHtml(m.key)}"${m.key === sel ? " selected" : ""}>${escapeHtml(m.label)}</option>`)
+                  .join("") +
+                `</optgroup>`
+            )
+            .join("");
+        const mErrHtml = mErr ? `<p style="color:#b8860b">⚠️ ${escapeHtml(mErr)}</p>` : "";
         body =
           `<form method="POST">${hidden("ai")}` +
-          `<label>Default model<br><select name="model_default">${opt((def.models || {}).default)}</select></label><br><br>` +
-          `<label>Escalation model (optional, cloud)<br><select name="model_escalation"><option value="">— none —</option>${opt((def.models || {}).escalation)}</select></label>` +
+          mErrHtml +
+          `<label>Default model<br><select name="model_default">${optGroups((def.models || {}).default)}</select></label><br><br>` +
+          `<label>Escalation model (optional, cloud)<br><select name="model_escalation"><option value="">— none —</option>${optGroups((def.models || {}).escalation)}</select></label>` +
+          `<p style="opacity:.7;font-size:.9em">Escalation only applies when an inbound message contains the <code>!escalate</code> token (operator-driven, per-turn). Otherwise the bot always runs on its Default model. The token is stripped before the model sees the message.</p>` +
           actionBar(`<button type="submit">Save AI</button>`) + `</form>`;
       } else if (tabId === "tools") {
         const probe = await probeAll();
@@ -347,11 +424,19 @@ export default {
         const extBoxes = PI_EXT_ALLOWLIST.map((e) =>
           `<label style="margin-right:14px"><input type="checkbox" name="ext_${e}"${selExt.has(e) ? " checked" : ""}> ${e}</label>`
         ).join("");
+        // R13 (Phase 3.2): non-blocking SOFT-WARN for `subagent` (Phase-2.3 /
+        // S4 pattern — never fail-closed in the UI; the pi-lab gate is the
+        // hard runtime backstop). Selecting it here does nothing unless the
+        // bot's resolved model is MULTI_AGENT_CAPABLE AND Permissions →
+        // Multi-agent is on.
+        const subWarn = PI_EXT_ALLOWLIST.includes("subagent")
+          ? `<p style="color:#b8860b;font-size:.9em;margin-top:6px">⚠ <code>subagent</code> is runtime-blocked unless this bot's resolved model is in MULTI_AGENT_CAPABLE <em>and</em> Permissions → Multi-agent is on. Capable models: <code>${escapeHtml(MULTI_AGENT_CAPABLE.join(", "))}</code>.</p>`
+          : "";
         body =
           `<form method="POST">${hidden("tools")}` +
           `<p><b>pi builtin</b></p>${builtinBoxes}` +
           `<p style="margin-top:14px"><b>Crow MCP tools</b> (live tools/list; ⚠ regex = non-blocking soft-warn, S4)</p>${mcpHtml}` +
-          `<p style="margin-top:14px"><b>pi extensions</b> (curated allowlist only; others need install-approval)</p>${extBoxes}` +
+          `<p style="margin-top:14px"><b>pi extensions</b> (curated allowlist only; others need install-approval)</p>${extBoxes}${subWarn}` +
           actionBar(`<button type="submit">Save Tools</button>`) + `</form>`;
       } else if (tabId === "gateways") {
         const gw = (def.gateways && def.gateways[0]) || {};
@@ -391,7 +476,9 @@ export default {
           `<label>bash_allow prefixes (one per line; allowlist mode)<br><textarea name="pp_bash_allow" rows="3" style="width:420px">${escapeHtml((pp.bash_allow || []).join("\n"))}</textarea></label><br><br>` +
           `<label>write_paths (one per line)<br><textarea name="pp_write_paths" rows="3" style="width:420px">${escapeHtml((pp.write_paths || []).join("\n"))}</textarea></label><br><br>` +
           `<label>external_send<br><select name="pp_external_send"><option${esSel("draft_only")}>draft_only</option><option${esSel("allow")}>allow</option></select></label><br><br>` +
-          `<label>confirm tools (one per line; blocked unattended)<br><textarea name="pp_confirm" rows="3" style="width:420px">${escapeHtml((pp.confirm || []).join("\n"))}</textarea></label>` +
+          `<label>confirm tools (one per line; blocked unattended)<br><textarea name="pp_confirm" rows="3" style="width:420px">${escapeHtml((pp.confirm || []).join("\n"))}</textarea></label><br><br>` +
+          `<label><input type="checkbox" name="pp_multi_agent"${pp.multi_agent ? " checked" : ""}> Multi-agent (allow the <code>subagent</code> tool)</label>` +
+          `<p style="opacity:.7;font-size:.9em">Multi-agent is gated by pi-lab/permission-gating.ts (Phase 3.1): <code>subagent</code> is allowed only when this is on AND the bot's resolved model is MULTI_AGENT_CAPABLE; recursion is depth-capped. Off by default.</p>` +
           `<p style="opacity:.7;font-size:.9em">Enforced by pi-lab/permission-gating.ts via PI_BOT_PERMISSION_POLICY (Phase 2.2). Default-deny for safety.</p>` +
           actionBar(`<button type="submit">Save Permissions</button>`) + `</form>`;
       } else if (tabId === "triggers") {
@@ -404,8 +491,40 @@ export default {
           actionBar(`<button type="submit">Save Triggers</button>`) + `</form>`;
       } else if (tabId === "review") {
         const mcpMsg = q.mcp ? `<p style="color:#1a7f37">${escapeHtml(String(q.mcp))}</p>` : "";
+        // R13/R14 (Phase 3.2): show the EFFECTIVE runtime decision the bridge
+        // will make — resolved default/escalation provider/model (via the 3.0
+        // resolver, fail-closed, never throws), the multi_agent flag, and the
+        // computed isMultiAgentCapable verdict for the default-resolved pair.
+        let effHtml;
+        try {
+          const rDef = resolveModel(def, { escalate: false });
+          const rEsc = resolveModel(def, { escalate: true });
+          const maOn = !!(def.permission_policy && def.permission_policy.multi_agent);
+          const capable = isMultiAgentCapable(rDef.provider, rDef.model);
+          const escConfigured = !!(def.models && def.models.escalation);
+          const fb = (r) => (r.source === "fallback" ? ` <span style="color:#b8860b">(fail-closed fallback)</span>` : "");
+          const subAllowed = maOn && capable;
+          effHtml =
+            `<p><b>Effective runtime decision</b> (computed via model_resolver.mjs + pi_extensions_allowlist.mjs)</p>` +
+            `<table style="border-collapse:collapse;font-size:.92em">` +
+            `<tr><td style="padding:3px 12px 3px 0;opacity:.7">Default model</td><td><code>${escapeHtml(rDef.key)}</code> <span style="opacity:.6">source=${escapeHtml(rDef.source)}</span>${fb(rDef)}</td></tr>` +
+            `<tr><td style="padding:3px 12px 3px 0;opacity:.7">Escalation model</td><td>` +
+              (escConfigured
+                ? `<code>${escapeHtml(rEsc.key)}</code> <span style="opacity:.6">source=${escapeHtml(rEsc.source)}</span>` +
+                  (rEsc.escalationRequestedButUnavailable ? ` <span style="color:#b8860b">(configured value not in models.json — would fall back + notice)</span>` : "")
+                : `<span style="opacity:.6">— none (escalation disabled; <code>!escalate</code> is a no-op)</span>`) +
+            `</td></tr>` +
+            `<tr><td style="padding:3px 12px 3px 0;opacity:.7">multi_agent flag</td><td>${maOn ? `<b style="color:#1a7f37">on</b>` : `<span style="opacity:.6">off</span>`}</td></tr>` +
+            `<tr><td style="padding:3px 12px 3px 0;opacity:.7">isMultiAgentCapable(default)</td><td>${capable ? `<b style="color:#1a7f37">true</b>` : `<span style="color:#c0392b">false</span>`}</td></tr>` +
+            `<tr><td style="padding:3px 12px 3px 0;opacity:.7">→ <code>subagent</code> at runtime</td><td>${subAllowed ? `<b style="color:#1a7f37">ALLOWED</b>` : `<b style="color:#c0392b">BLOCKED</b> <span style="opacity:.6">(${escapeHtml(!maOn ? "multi_agent off" : "model not MULTI_AGENT_CAPABLE")})</span>`}</td></tr>` +
+            `</table>` +
+            `<p style="opacity:.7;font-size:.85em">This mirrors the pi-lab gate (Phase 3.1): the bridge only offers <code>subagent</code> when both are true; the gate is the hard backstop. Escalation is per-turn via <code>!escalate</code> only.</p>`;
+        } catch (e) {
+          effHtml = `<p style="color:#b8860b">⚠️ Could not compute the effective runtime decision: ${escapeHtml(String(e.message || e))}</p>`;
+        }
         body =
           mcpMsg +
+          effHtml +
           `<p><b>Computed definition</b> (pi_bot_defs.definition)</p>` +
           `<pre style="background:#f6f8fa;padding:12px;border-radius:6px;overflow:auto;max-height:420px">${escapeHtml(JSON.stringify(def, null, 2))}</pre>` +
           `<p>Per-bot MCP servers from selection: <code>${escapeHtml(serversForBot(def).join(", ") || "(none)")}</code></p>` +
@@ -431,7 +550,7 @@ export default {
     try {
       bots = (await db.execute({ sql: "SELECT bot_id, display_name, enabled, definition, datetime(updated_at) AS updated_at FROM pi_bot_defs ORDER BY bot_id", args: [] })).rows;
       sessions = (await db.execute({ sql: "SELECT bot_id, status, count(*) AS n FROM bot_sessions GROUP BY bot_id, status", args: [] })).rows;
-      sessRows = (await db.execute({ sql: "SELECT id, bot_id, status, control, card_id, gateway_thread_id, datetime(updated_at) AS updated_at FROM bot_sessions ORDER BY updated_at DESC LIMIT 50", args: [] })).rows;
+      sessRows = (await db.execute({ sql: "SELECT id, bot_id, status, model, escalated, control, card_id, gateway_thread_id, datetime(updated_at) AS updated_at FROM bot_sessions ORDER BY updated_at DESC LIMIT 50", args: [] })).rows;
     } catch { /* defensive */ }
     const sessSummary = (id) => sessions.filter((s) => s.bot_id === id).map((s) => `${escapeHtml(s.status)}:${s.n}`).join(" ") || "—";
     const rows = bots.map((bt) => {
@@ -472,17 +591,20 @@ export default {
             `<td style="padding:4px 8px">${escapeHtml(String(s.id))}</td>` +
             `<td style="padding:4px 8px">${escapeHtml(String(s.bot_id || ""))}</td>` +
             `<td style="padding:4px 8px;color:${c};font-weight:600">${escapeHtml(String(s.status || ""))}</td>` +
+            `<td style="padding:4px 8px;font-family:monospace;font-size:.8rem">${escapeHtml(String(s.model || "—"))}</td>` +
+            `<td style="padding:4px 8px">${Number(s.escalated) ? "yes" : "—"}</td>` +
             `<td style="padding:4px 8px">${escapeHtml(String(s.control || ""))}</td>` +
             `<td style="padding:4px 8px">${s.card_id == null ? "—" : escapeHtml(String(s.card_id))}</td>` +
             `<td style="padding:4px 8px;font-family:monospace;font-size:.8rem">${escapeHtml(String(s.gateway_thread_id || "").slice(0, 18))}</td>` +
             `<td style="padding:4px 8px;color:#888">${escapeHtml(String(s.updated_at || ""))}</td>` +
             `</tr>`;
         }).join("")
-      : `<tr><td colspan="7" style="padding:8px;color:#888">No bot sessions yet.</td></tr>`;
+      : `<tr><td colspan="9" style="padding:8px;color:#888">No bot sessions yet.</td></tr>`;
     const monitor = section("Run monitor (bot_sessions — live, 5s)",
       `<turbo-stream-source src="/dashboard/streams/bot-sessions"></turbo-stream-source>` +
       `<table style="width:100%;border-collapse:collapse"><thead><tr style="text-align:left;border-bottom:1px solid #ddd">` +
       `<th style="padding:4px 8px">id</th><th style="padding:4px 8px">bot</th><th style="padding:4px 8px">status</th>` +
+      `<th style="padding:4px 8px">model</th><th style="padding:4px 8px">esc</th>` +
       `<th style="padding:4px 8px">control</th><th style="padding:4px 8px">card</th><th style="padding:4px 8px">thread</th>` +
       `<th style="padding:4px 8px">updated</th></tr></thead>` +
       `<tbody id="pibot-sessions-tbody">${monRows}</tbody></table>`);
