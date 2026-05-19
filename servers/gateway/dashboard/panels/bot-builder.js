@@ -470,11 +470,11 @@ export default {
             const total = c.pending + c.in_progress + c.done + c.cancelled;
             const href = "/dashboard/bot-board?project=" + encodeURIComponent(String(pid));
             snap =
-              `<div style="margin:10px 0;padding:10px;background:#f6f8fa;border-radius:6px;font-size:.9em">` +
+              `<div style="margin:10px 0;padding:10px;background:var(--crow-bg-elevated);color:var(--crow-text-primary);border:1px solid var(--crow-border);border-radius:6px;font-size:.9em">` +
               `<b>Kanban snapshot</b> (project #${escapeHtml(String(pid))}, ${total} cards): ` +
               `pending <b>${c.pending}</b> · in_progress <b>${c.in_progress}</b> · ` +
               `done <b>${c.done}</b> · cancelled <b>${c.cancelled}</b>` +
-              `<br><a href="${href}" style="color:#2d6cdf;font-weight:600">Open board ↗</a>` +
+              `<br><a href="${href}" style="color:var(--crow-accent);font-weight:600">Open board ↗</a>` +
               `</div>`;
           } catch {
             snap = `<p style="opacity:.7;font-size:.85em">(Kanban snapshot unavailable — tasks.db not reachable on this instance.)</p>`;
@@ -560,7 +560,7 @@ export default {
           mcpMsg +
           effHtml +
           `<p><b>Computed definition</b> (pi_bot_defs.definition)</p>` +
-          `<pre style="background:#f6f8fa;padding:12px;border-radius:6px;overflow:auto;max-height:420px">${escapeHtml(JSON.stringify(def, null, 2))}</pre>` +
+          `<pre style="background:var(--crow-bg-elevated);color:var(--crow-text-primary);border:1px solid var(--crow-border);padding:12px;border-radius:6px;overflow:auto;max-height:420px">${escapeHtml(JSON.stringify(def, null, 2))}</pre>` +
           `<p>Per-bot MCP servers from selection: <code>${escapeHtml(serversForBot(def).join(", ") || "(none)")}</code></p>` +
           `<form method="POST" style="display:inline"><input type="hidden" name="action" value="regen_mcp"><input type="hidden" name="bot_id" value="${escapeHtml(botId)}">` +
           `<button type="submit">Regenerate &lt;session_dir&gt;/.mcp.json</button></form> ` +
