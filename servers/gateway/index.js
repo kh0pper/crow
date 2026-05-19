@@ -944,6 +944,18 @@ try {
   console.warn("[streams] Failed to mount:", err.message);
 }
 
+// Crow Bot Builder Phase 4 — board mutation API. Mounted EXACTLY as
+// streamsRouter above (dynamic import + app.use(...(dashboardAuth))),
+// adjacent to it, so it inherits the global rejectFunneledMiddleware()
+// and the router's own first-line dashboardAuth gate on its prefix.
+try {
+  const { default: botBoardApiRouter } = await import("./routes/bot-board-api.js");
+  app.use(botBoardApiRouter(dashboardAuth));
+  console.log("Bot Board API mounted at /dashboard/bot-board-api");
+} catch (err) {
+  console.warn("[bot-board-api] Failed to mount:", err.message);
+}
+
 // --- Mount Push Subscription API ---
 try {
   const { default: pushRouter } = await import("./routes/push.js");

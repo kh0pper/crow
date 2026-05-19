@@ -28,6 +28,7 @@ const DEFAULT_NAV_PANEL_ASSIGNMENTS = {
   files: "tools",
   extensions: "tools",
   skills: "tools",
+  "bot-board": "tools",
   settings: "system",
 };
 
