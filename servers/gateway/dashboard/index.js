@@ -64,6 +64,7 @@ import settingsPanel from "./panels/settings.js";
 import contactsPanel from "./panels/contacts.js";
 import orchestratorPanel from "./panels/orchestrator.js";
 import botBuilderPanel from "./panels/bot-builder.js";
+import botBoardPanel from "./panels/bot-board.js";
 import bundlesRouterFactory from "../routes/bundles.js";
 
 /**
@@ -89,6 +90,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   registerPanel(contactsPanel);
   registerPanel(orchestratorPanel);
   registerPanel(botBuilderPanel);
+  registerPanel(botBoardPanel);
 
   // Load third-party panels (async, non-blocking)
   loadExternalPanels().catch((err) => {
