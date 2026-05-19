@@ -77,10 +77,15 @@ export function badge(text, type = "draft") {
 
 /**
  * Action bar with buttons.
- * @param {string[]} buttons - Array of button HTML strings
+ * @param {string[]|string} buttons - Array of button HTML strings, OR a
+ *   single pre-built button-HTML string. Tolerant of both: bot-builder.js
+ *   (the only caller) has always passed a bare string, which previously
+ *   threw `buttons.join is not a function` on every authed render. Arrays
+ *   keep their exact prior behavior (backward-compatible).
  */
 export function actionBar(buttons) {
-  return `<div style="display:flex;gap:0.5rem;margin-bottom:1.5rem;flex-wrap:wrap">${buttons.join("")}</div>`;
+  const arr = Array.isArray(buttons) ? buttons : [buttons == null ? "" : buttons];
+  return `<div style="display:flex;gap:0.5rem;margin-bottom:1.5rem;flex-wrap:wrap">${arr.join("")}</div>`;
 }
 
 /**
