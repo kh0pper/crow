@@ -23,6 +23,7 @@
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { escapeHtml, section, badge, dataTable, formField, actionBar } from "../shared/components.js";
+import { createDbClient } from "../../../db.js";
 import {
   readCanonicalMcp,
   probeServerTools,
@@ -41,6 +42,7 @@ import {
 } from "../../../../scripts/pi-bots/model_resolver.mjs";
 
 const HOME = "/home/kh0pp";
+const TASKS_DB = process.env.CROW_TASKS_DB_PATH || HOME + "/.crow-mpa/data/tasks.db";
 const MODELS_JSON = HOME + "/.pi/agent/models.json";
 const SKILLS_DIR = HOME + "/.crow/skills";
 const PI_BUILTIN = ["read", "edit", "write", "bash", "list", "glob", "grep"];
@@ -449,10 +451,42 @@ export default {
         let projects = [];
         try { projects = (await db.execute({ sql: "SELECT id, name FROM research_projects ORDER BY id", args: [] })).rows; } catch {}
         const opts = projects.map((p) => `<option value="${p.id}"${Number(def.project_id) === Number(p.id) ? " selected" : ""}>#${p.id} — ${escapeHtml(p.name || "")}</option>`).join("");
+        // Phase 4: compact READ-ONLY Kanban snapshot for the linked project
+        // + a link to the dedicated full board. Read-only, never throws,
+        // POSTs nothing — the Phase-2.3 invariant (this tab saves ONLY
+        // def.project_id via save_project) is unchanged.
+        let snap = "";
+        const pid = def.project_id;
+        if (pid != null && pid !== "") {
+          let tdb;
+          try {
+            tdb = createDbClient(TASKS_DB);
+            const rows = (await tdb.execute({
+              sql: "SELECT status, COUNT(*) AS n FROM tasks_items WHERE project_id=? GROUP BY status",
+              args: [Number(pid)],
+            })).rows || [];
+            const c = { pending: 0, in_progress: 0, done: 0, cancelled: 0 };
+            for (const r of rows) c[r.status] = Number(r.n);
+            const total = c.pending + c.in_progress + c.done + c.cancelled;
+            const href = "/dashboard/bot-board?project=" + encodeURIComponent(String(pid));
+            snap =
+              `<div style="margin:10px 0;padding:10px;background:#f6f8fa;border-radius:6px;font-size:.9em">` +
+              `<b>Kanban snapshot</b> (project #${escapeHtml(String(pid))}, ${total} cards): ` +
+              `pending <b>${c.pending}</b> · in_progress <b>${c.in_progress}</b> · ` +
+              `done <b>${c.done}</b> · cancelled <b>${c.cancelled}</b>` +
+              `<br><a href="${href}" style="color:#2d6cdf;font-weight:600">Open board ↗</a>` +
+              `</div>`;
+          } catch {
+            snap = `<p style="opacity:.7;font-size:.85em">(Kanban snapshot unavailable — tasks.db not reachable on this instance.)</p>`;
+          } finally {
+            if (tdb) { try { tdb.close(); } catch { /* already closed */ } }
+          }
+        }
         body =
           `<form method="POST">${hidden("project")}` +
           `<label>Linked project (crow.db research_projects)<br><select name="project_id"><option value="">— none —</option>${opts}</select></label>` +
           `<p style="opacity:.7;font-size:.9em">Kanban = tasks.db tasks_items filtered by this project_id (cross-DB app-level soft link).</p>` +
+          snap +
           actionBar(`<button type="submit">Save Project</button>`) + `</form>`;
       } else if (tabId === "skills") {
         const skills = loadSkills();
