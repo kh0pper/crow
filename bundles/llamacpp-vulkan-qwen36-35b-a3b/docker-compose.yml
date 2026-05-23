@@ -1,6 +1,13 @@
 services:
   llamacpp-vulkan-qwen36-35b-a3b:
-    image: kyuz0/amd-strix-halo-toolboxes:rocm-7.2.1
+    # Everyday driver: Qwen3.6-35B-A3B (MoE ~3B active) + vision, MTP-accelerated.
+    # Phase-1 benchmark (2026-05-23) chose Vulkan (RADV) + MTP draft-n2 + vision:
+    #   ~66.6 tok/s single-stream (code) vs ~47 for the old non-MTP parallel-4 path;
+    #   KLD vs BF16 = 0.012 (near-lossless). MTP + --mmproj DO co-load on this build
+    #   (verified §1.A gate). MTP requires the vulkan-radv-mtp toolbox and -np 1
+    #   (no --parallel) — so this is single-stream (no 4-way concurrency), chosen
+    #   for interactive use. Backend split is model-specific: 35B→Vulkan, 122B→ROCm.
+    image: kyuz0/amd-strix-halo-toolboxes:vulkan-radv-mtp
     container_name: llamacpp-vulkan-qwen36-35b-a3b
     devices:
       - /dev/kfd
@@ -16,15 +23,12 @@ services:
       - "${CROW_TAILSCALE_IP}:8003:8000"
     entrypoint: ["llama-server"]
     command:
-      # Pre-downloaded to /home/kh0pp/llm/hf-cache/qwen36-35b-a3b/ by:
-      #   curl -L -o /home/kh0pp/llm/hf-cache/qwen36-35b-a3b/Qwen3.6-35B-A3B-UD-Q6_K.gguf \
-      #        https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q6_K.gguf
-      #   curl -L -o /home/kh0pp/llm/hf-cache/qwen36-35b-a3b/mmproj-F16.gguf \
-      #        https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/mmproj-F16.gguf
+      # MTP GGUF + mmproj pre-downloaded to /home/kh0pp/llm/hf-cache/qwen36-35b-a3b-mtp/
+      # from unsloth/Qwen3.6-35B-A3B-MTP-GGUF (UD-Q6_K + mmproj-F16).
       - -m
-      - /models/qwen36-35b-a3b/Qwen3.6-35B-A3B-UD-Q6_K.gguf
+      - /models/qwen36-35b-a3b-mtp/Qwen3.6-35B-A3B-UD-Q6_K.gguf
       - --mmproj
-      - /models/qwen36-35b-a3b/mmproj-F16.gguf
+      - /models/qwen36-35b-a3b-mtp/mmproj-F16.gguf
       - --alias
       - qwen3.6-35b-a3b
       - --host
@@ -36,25 +40,15 @@ services:
       - -fa
       - "on"
       - --no-mmap
-      # 4 slots × 256K each (full native Qwen3.6 window per slot).
-      # n_ctx_train=262144 per the GGUF metadata, so no YaRN needed.
-      # `-c` is TOTAL KV budget divided across slots — 1048576 / 4 = 262144
-      # per slot.
-      #
-      # Sparse attention makes this cheap: only ~10 layers cache full KV,
-      # so 262144 cells × 10 layers × 2 (K+V) × fp16 = 5 GB per slot.
-      # 4 slots × 5 GB = 20 GB KV. Plus 27 GB weights ≈ 47 GB total of
-      # the 124 GB unified pool, 77 GB headroom.
-      #
-      # Concurrent throughput measured:
-      #   solo:       44.6 tok/s
-      #   2 parallel: 35 tok/s each, 67 tok/s aggregate (1.5× over solo)
-      # Some batching overhead is normal; aggregate keeps climbing up to
-      # compute saturation (well above 4 streams on this hardware).
+      # Single 256K native window (np 1; MTP is incompatible with --parallel >1).
       - -c
-      - "1048576"
-      - --parallel
-      - "4"
+      - "262144"
+      - -np
+      - "1"
+      - --spec-type
+      - draft-mtp
+      - --spec-draft-n-max
+      - "2"
       - --jinja
     restart: always
     ipc: host

@@ -19,7 +19,7 @@
       ]
     },
     "crow-chat": {
-      "$description": "Daily-driver mid-tier reasoning/synthesis + VLM. Qwen3.6-35B-A3B UD-Q6_K MoE (3B active per token) via llama.cpp Vulkan AMDVLK on Strix Halo — retired the Qwen3-32B bf16 bundle Apr 2026 (memory-bandwidth ceiling 3.6 tok/s; MoE same-weight-class runs ~25 tok/s).",
+      "$description": "Daily-driver MoE (3B active) + vision. Qwen3.6-35B-A3B UD-Q6_K + MTP (--spec-type draft-mtp --spec-draft-n-max 2) + mmproj-F16 via llama.cpp Vulkan RADV (vulkan-radv-mtp toolbox) on Strix Halo. Benchmarked 2026-05-23: ~66 tok/s single-stream (MTP forces -np 1), KLD 0.012 vs BF16 (near-lossless); 35B is faster on Vulkan than ROCm. Vision + MTP co-load (verified).",
       "baseUrl": "http://100.118.41.122:8003/v1",
       "apiKey": "none",
       "host": "local",
@@ -71,7 +71,7 @@
       ]
     },
     "crow-swap-highend": {
-      "$description": "On-demand high-end reasoning specialist. Qwen3.5-122B-A10B MoE (122B total / 10B active) Q5_K_M + MTP (--spec-type draft-mtp --spec-draft-n-max 3) via llama.cpp ROCm 7.2.3. Mutexed with all other crow-* bundles on Strix Halo's unified 124 GB pool; conflicts with crow-chat. Measured ~19.5 tok/s off / ~27 tok/s with MTP, single-stream, uncontended.",
+      "$description": "On-demand high-end reasoning specialist (escalation). Qwen3.5-122B-A10B MoE (122B total / 10B active) Q4_K_XL + MTP (--spec-type draft-mtp --spec-draft-n-max 3) via llama.cpp ROCm 7.2.3, text-only. Benchmarked 2026-05-23: ~34 tok/s single-stream (+37% over Q5_K_M at equal quality, PPL +0.3%); 122B is faster on ROCm than Vulkan. Mutexed with all crow-* bundles on Strix Halo's unified 124 GB pool; conflicts with crow-chat.",
       "baseUrl": "http://100.118.41.122:8003/v1",
       "apiKey": "none",
       "host": "local",
