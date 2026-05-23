@@ -37,3 +37,6 @@ __pycache__/
 
 # Credential backups
 .env.bak
+
+# benchmark KLD logit bases (large, regenerable)
+scripts/bench/results/quality/*.dat
