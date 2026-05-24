@@ -1,3 +1,12 @@
+# ============================================================================
+# DECOMMISSIONED 2026-05-24 — TEMPLATE ONLY. The Qwen3.5-122B-A10B escalation
+# model was dropped (the everyday Qwen3.6-35B matches it on quality, is 2-4x
+# faster, half the memory, full-context-capable). The GGUFs were deleted.
+# This file is RETAINED as a stabilized-config template for reviving a FUTURE
+# 122B-class model: re-download GGUFs, update the -m/--mmproj paths, then start.
+# Hard-won settings below (do not lose): --ctx-checkpoints 0 (unified-mem OOM fix),
+# q8_0 KV, oom_score_adj 800. Full rationale: scripts/bench/results/122B-EVALUATION-20260524.md
+# ============================================================================
 services:
   llamacpp-rocm-qwen35-122b-mtp:
     # MTP (multi-token prediction) requires llama.cpp >= build 9189, which is
