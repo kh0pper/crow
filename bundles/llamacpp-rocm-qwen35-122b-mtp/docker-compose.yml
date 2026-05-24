@@ -43,10 +43,26 @@ services:
       - "1"
       - -c
       - "262144"
+      # STABILIZE 2026-05-23: ctx-checkpoints disabled. The default 32 checkpoints
+      # (~404 MiB each at depth, ~13 GB total) ACCUMULATED across multi-turn at ~129K
+      # and exhausted the 124 GB UNIFIED memory pool (vram=0, gtt=124) -> kernel OOM
+      # (exit 137) or HIP segfault in libamdhip64 (exit 139). Verified on :8013: with
+      # checkpoints off, memory stays flat through a 143K fill (zero checkpoints) and
+      # survives the prompt_save spike. See ~/HANDOFF-122b-stability.md.
+      - --ctx-checkpoints
+      - "0"
+      - --checkpoint-every-n-tokens
+      - "-1"
+      # KV cache q8_0 (near-lossless) for extra headroom + smaller idle-cache state.
+      - -ctk
+      - q8_0
+      - -ctv
+      - q8_0
       - --spec-type
       - draft-mtp
+      # n-max 2 (was 3): #23302 determinism bug at 3.
       - --spec-draft-n-max
-      - "3"
+      - "2"
       - --jinja
     restart: "no"
     ipc: host
