@@ -25,9 +25,14 @@ services:
       # Q4_K_XL (3 shards; llama.cpp auto-loads 2 & 3) pre-downloaded to
       #   /home/kh0pp/llm/hf-cache/qwen35-122b-a10b-mtp/UD-Q4_K_XL/
       # from unsloth/Qwen3.5-122B-A10B-MTP-GGUF. MoE 122B / 10B active.
-      # MTP constraints: -np 1 only (NO --parallel), text-only (no --mmproj).
+      # MTP constraints: -np 1 only (NO --parallel). Vision via --mmproj added 2026-05-24.
       - -m
       - /models/qwen35-122b-a10b-mtp/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf
+      # Vision: mmproj-F16 (~866 MiB), quant-independent (shared across Q4/Q5). MTP+vision
+      # co-load works (the 35B runs both). Caveat: vision adds ~1 GB+ to the already-thin
+      # deep-context headroom — avoid sending images during a >100K-token session.
+      - --mmproj
+      - /models/qwen35-122b-a10b-mtp/mmproj-F16.gguf
       - --alias
       - qwen3.5-122b-a10b
       - --host
