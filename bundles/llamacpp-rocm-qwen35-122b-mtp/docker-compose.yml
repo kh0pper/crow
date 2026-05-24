@@ -70,5 +70,11 @@ services:
       - "2"
       - --jinja
     restart: "no"
+    # OOM safety net (2026-05-24): make THIS 122B container the kernel's preferred OOM
+    # victim. On the 124 GB unified box it's by far the biggest allocation, so if a deep-
+    # context spike exhausts the pool the kernel kills it (freeing ~108 GB instantly) FIRST,
+    # instead of taking out sshd/postgres/gateway and wedging the box. sshd is already at
+    # oom_score_adj=-1000. Restart with crow-swap-122 if it gets reaped.
+    oom_score_adj: 800
     ipc: host
     shm_size: 16g
