@@ -1,0 +1,7 @@
+SELECT c.name, COUNT(o.id) AS order_count, SUM(o.total) AS total_spend
+FROM customers c
+JOIN orders o ON c.id = o.customer_id
+WHERE o.created_at >= NOW() - INTERVAL '30 days'
+GROUP BY c.id, c.name
+ORDER BY total_spend DESC
+LIMIT 5;

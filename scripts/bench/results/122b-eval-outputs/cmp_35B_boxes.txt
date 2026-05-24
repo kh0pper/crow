@@ -1,0 +1,72 @@
+This is a classic logic puzzle. Here is the step-by-step deduction to solve it.
+
+### The Setup
+You have three boxes:
+1.  **Box A**: Labeled "Apples"
+2.  **Box B**: Labeled "Oranges"
+3.  **Box C**: Labeled "Apples & Oranges"
+
+**Crucial Rule:** **ALL labels are wrong.**
+
+### The Solution
+You need to pick **ONE fruit from ONE box**. Which box should you choose, and how do you relabel all three?
+
+#### Step 1: Choose the correct box to draw from
+You should draw from the box labeled **"Apples & Oranges"**.
+
+**Why?**
+Because the label is wrong, this box **cannot** contain both fruits. It must contain **only Apples** or **only Oranges**.
+*   If you pull out an Apple, you know this box contains **only Apples**.
+*   If you pull out an Orange, you know this box contains **only Oranges**.
+
+Let's assume you pull out an **Apple**.
+*   Therefore, the box labeled "Apples & Oranges" actually contains **only Apples**.
+
+#### Step 2: Relabel the remaining boxes
+Now you have two boxes left:
+*   Box labeled "Apples"
+*   Box labeled "Oranges"
+
+And two contents left:
+*   Only Oranges
+*   Apples & Oranges
+
+**Remember:** All labels are still wrong.
+
+1.  Look at the box labeled **"Apples"**.
+    *   It cannot contain only Apples (because the label is wrong).
+    *   It cannot contain only Apples (because we already found the "only Apples" box).
+    *   Wait, let's look at the contents. We know the "only Apples" box is the one we just opened.
+    *   The box labeled "Apples" cannot contain "only Apples" (label is wrong).
+    *   The box labeled "Apples" cannot contain "only Oranges"? Let's check the other box.
+
+Let's use a more systematic approach for the remaining two boxes:
+
+*   **Box labeled "Apples"**:
+    *   It cannot contain "only Apples" (label is wrong).
+    *   It cannot contain "only Apples" (already found).
+    *   So it must contain either "only Oranges" or "Apples & Oranges".
+
+*   **Box labeled "Oranges"**:
+    *   It cannot contain "only Oranges" (label is wrong).
+    *   So it must contain either "only Apples" (already found) or "Apples & Oranges".
+
+Since we already identified the "only Apples" box, the box labeled "Oranges" **cannot** contain "only Oranges" (label is wrong) and **cannot** contain "only Apples" (already found). Therefore, the box labeled "Oranges" **must contain "Apples & Oranges"**.
+
+Finally, the last box, labeled "Apples", **must contain "only Oranges"**.
+
+### Summary of Relabeling
+If you drew an **Apple** from the box labeled "Apples & Oranges":
+
+1.  **Box labeled "Apples & Oranges"** → Contains **only Apples**
+2.  **Box labeled "Oranges"** → Contains **Apples & Oranges**
+3.  **Box labeled "Apples"** → Contains **only Oranges**
+
+If you had drawn an **Orange** instead:
+
+1.  **Box labeled "Apples & Oranges"** → Contains **only Oranges**
+2.  **Box labeled "Apples"** → Contains **Apples & Oranges**
+3.  **Box labeled "Oranges"** → Contains **only Apples**
+
+### Final Answer
+You should draw from the box labeled **"Apples & Oranges"**. Because the label is wrong, you immediately know the contents of that box (either only Apples or only Oranges). Then, using the fact that all other labels are also wrong, you can logically deduce the contents of the remaining two boxes without drawing

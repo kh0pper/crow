@@ -1,0 +1,13 @@
+The bug is that when `a[mid] < t`, `lo` is set to `mid` instead of `mid + 1`, which can cause an infinite loop if `lo` and `hi` are adjacent (e.g., `lo=0, hi=1`, `mid=0`, `a[0] < t` → `lo` stays `0`).
+
+**One-line fix:**
+```python
+def bsearch(a,t):
+    lo,hi=0,len(a)
+    while lo<hi:
+        mid=(lo+hi)//2
+        if a[mid]==t: return mid
+        elif a[mid]<t: lo=mid+1
+        else: hi=mid
+    return -1
+```

@@ -1,0 +1,52 @@
+```python
+def kth_smallest(matrix, k):
+    """
+    Find the kth smallest element in an n x n matrix where rows and columns are sorted in ascending order.
+    
+    Uses binary search on the value range.
+    
+    Args:
+        matrix: List[List[int]] - An n x n matrix with rows and columns sorted ascending.
+        k: int - The 1-based index of the smallest element to find.
+        
+    Returns:
+        int - The kth smallest element in the matrix.
+    """
+    if not matrix or not matrix[0]:
+        raise ValueError("Matrix is empty")
+    
+    n = len(matrix)
+    
+    # Helper function to count elements <= target
+    def count_less_equal(target):
+        """
+        Count the number of elements in the matrix that are less than or equal to target.
+        Uses the sorted property to traverse efficiently in O(n) time.
+        """
+        count = 0
+        row = n - 1
+        col = 0
+        while row >= 0 and col < n:
+            if matrix[row][col] <= target:
+                # All elements in column col from row 0 to row are <= target
+                count += row + 1
+                col += 1
+            else:
+                # matrix[row][col] > target, move up
+                row -= 1
+        return count
+    
+    # Binary search on the value range
+    low = matrix[0][0]
+    high = matrix[n - 1][n - 1]
+    
+    while low < high:
+        mid = low + (high - low) // 2
+        cnt = count_less_equal(mid)
+        if cnt < k:
+            low = mid + 1
+        else:
+            high = mid
+    
+    return low
+```

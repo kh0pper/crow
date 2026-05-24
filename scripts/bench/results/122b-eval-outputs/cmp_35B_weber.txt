@@ -1,0 +1,42 @@
+Here is the step-by-step breakdown regarding the SI unit of magnetic flux.
+
+### 1. The SI Unit and Its Name
+The SI unit of magnetic flux is the **weber**.
+*   **Symbol:** $\text{Wb}$
+*   **Named After:** It is named after the German physicist and mathematician **Wilhelm Eduard Weber** (1804–1891), who made significant contributions to the study of electromagnetism.
+
+### 2. Derivation in SI Base Units
+To express the weber in terms of SI base units, we can use the definition of magnetic flux ($\Phi_B$) related to Faraday's Law of Induction.
+
+**Step 1: Relate Flux to Voltage and Time**
+According to Faraday's Law, the induced electromotive force (voltage, $V$) is equal to the rate of change of magnetic flux ($\Phi_B$) over time ($t$):
+$$ V = \frac{d\Phi_B}{dt} \implies \Phi_B = V \cdot t $$
+Therefore, the unit of magnetic flux is the **Volt-second** ($\text{V} \cdot \text{s}$).
+
+**Step 2: Break down the Volt ($\text{V}$)**
+The volt is a derived unit defined as energy per unit charge:
+$$ 1 \, \text{V} = 1 \, \frac{\text{Joule}}{\text{Coulomb}} = \frac{\text{J}}{\text{C}} $$
+
+**Step 3: Break down the Joule ($\text{J}$) and Coulomb ($\text{C}$)**
+*   **Joule (Energy):** Work is force times distance.
+    $$ 1 \, \text{J} = 1 \, \text{N} \cdot \text{m} = (1 \, \text{kg} \cdot \text{m}/\text{s}^2) \cdot \text{m} = 1 \, \text{kg} \cdot \text{m}^2 \cdot \text{s}^{-2} $$
+*   **Coulomb (Charge):** Charge is current times time.
+    $$ 1 \, \text{C} = 1 \, \text{A} \cdot \text{s} $$
+
+**Step 4: Combine to find the Volt**
+Substitute the base units back into the expression for the Volt:
+$$ 1 \, \text{V} = \frac{1 \, \text{kg} \cdot \text{m}^2 \cdot \text{s}^{-2}}{1 \, \text{A} \cdot \text{s}} = 1 \, \text{kg} \cdot \text{m}^2 \cdot \text{s}^{-3} \cdot \text{A}^{-1} $$
+
+**Step 5: Calculate the Weber ($\text{V} \cdot \text{s}$)**
+Finally, multiply the Volt by the second ($\text{s}$) to get the Weber:
+$$ 1 \, \text{Wb} = 1 \, \text{V} \cdot \text{s} = (\text{kg} \cdot \text{m}^2 \cdot \text{s}^{-3} \cdot \text{A}^{-1}) \cdot \text{s} $$
+$$ 1 \, \text{Wb} = \text{kg} \cdot \text{m}^2 \cdot \text{s}^{-2} \cdot \text{A}^{-1} $$
+
+***
+
+### Final Conclusion
+
+*   **SI Unit:** Weber ($\text{Wb}$)
+*   **Named After:** Wilhelm Eduard Weber
+*   **SI Base Units:**
+    $$ \text{kg} \cdot \text{m}^2 \cdot \text{s}^{-2} \cdot \text{A}^{-1} $$

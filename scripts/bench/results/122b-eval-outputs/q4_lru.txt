@@ -1,0 +1,89 @@
+```python
+import threading
+import time
+from collections import OrderedDict
+from typing import Any, Dict, Optional, Tuple
+
+class TTLNode:
+    __slots__ = ('value', 'expiry', 'key')
+    def __init__(self, key: Any, value: Any, ttl: float):
+        self.key = key
+        self.value = value
+        self.expiry = time.time() + ttl
+
+class ThreadSafeLRUCache:
+    def __init__(self, max_size: int, default_ttl: float = 60.0):
+        if max_size <= 0:
+            raise ValueError("max_size must be positive")
+        self._max_size = max_size
+        self._default_ttl = default_ttl
+        self._cache: OrderedDict[Any, TTLNode] = OrderedDict()
+        self._lock = threading.RLock()
+
+    def get(self, key: Any) -> Optional[Any]:
+        with self._lock:
+            if key not in self._cache:
+                return None
+            
+            node = self._cache[key]
+            if time.time() > node.expiry:
+                del self._cache[key]
+                return None
+            
+            self._cache.move_to_end(key)
+            return node.value
+
+    def put(self, key: Any, value: Any, ttl: Optional[float] = None) -> None:
+        if ttl is None:
+            ttl = self._default_ttl
+        
+        with self._lock:
+            if key in self._cache:
+                self._cache[key] = TTLNode(key, value, ttl)
+                self._cache.move_to_end(key)
+            else:
+                if len(self._cache) >= self._max_size:
+                    self._cache.popitem(last=False)
+                self._cache[key] = TTLNode(key, value, ttl)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._cache.clear()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._cache)
+
+    def __contains__(self, key: Any) -> bool:
+        with self._lock:
+            if key not in self._cache:
+                return False
+            if time.time() > self._cache[key].expiry:
+                del self._cache[key]
+                return False
+            return True
+
+import pytest
+import time
+
+def test_basic_lru_behavior():
+    cache = ThreadSafeLRUCache(max_size=2)
+    cache.put("a", 1)
+    cache.put("b", 2)
+    assert cache.get("a") == 1
+    cache.put("c", 3)
+    assert cache.get("b") is None
+    assert cache.get("c") == 3
+
+def test_ttl_expiration():
+    cache = ThreadSafeLRUCache(max_size=10, default_ttl=0.1)
+    cache.put("x", 100)
+    assert cache.get("x") == 100
+    time.sleep(0.15)
+    assert cache.get("x") is None
+
+def test_thread_safety():
+    cache = ThreadSafeLRUCache(max_size=100)
+    threads = []
+    
+   

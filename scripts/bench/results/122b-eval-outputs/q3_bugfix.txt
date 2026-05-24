@@ -1,0 +1,1 @@
+Replace the `for...of` loop with `Promise.all(urls.map(u => fetch(u).then(r => r.json())))` to execute all fetch requests concurrently instead of waiting for each one to finish before starting the next.

@@ -1,0 +1,7 @@
+The bug is that when `a[mid] < t`, setting `lo = mid` can cause an infinite loop if `lo` and `hi` are adjacent (e.g., `lo = 0`, `hi = 1`, `mid = 0`), because `lo` remains unchanged.
+
+**One-line fix:** Change `lo=mid` to `lo=mid+1`.
+
+```python
+elif a[mid]<t: lo=mid+1
+```

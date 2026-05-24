@@ -1,0 +1,28 @@
+To determine the number of prime numbers strictly between 90 and 100, we must examine each integer in that range and check for primality.
+
+The integers strictly between 90 and 100 are:
+91, 92, 93, 94, 95, 96, 97, 98, 99.
+
+Let's analyze each number:
+
+1.  **91**: Not prime. It is divisible by 7 and 13 ($7 \times 13 = 91$).
+2.  **92**: Not prime. It is an even number greater than 2, so it is divisible by 2.
+3.  **93**: Not prime. The sum of its digits is $9 + 3 = 12$, which is divisible by 3, so 93 is divisible by 3 ($3 \times 31 = 93$).
+4.  **94**: Not prime. It is an even number, divisible by 2.
+5.  **95**: Not prime. It ends in 5, so it is divisible by 5 ($5 \times 19 = 95$).
+6.  **96**: Not prime. It is an even number, divisible by 2.
+7.  **97**: **Prime**. To verify, we check for divisibility by prime numbers up to $\sqrt{97} \approx 9.8$. The primes to check are 2, 3, 5, and 7.
+    *   Not divisible by 2 (it is odd).
+    *   Not divisible by 3 (sum of digits $9+7=16$, not divisible by 3).
+    *   Not divisible by 5 (does not end in 0 or 5).
+    *   Not divisible by 7 ($7 \times 13 = 91$, $7 \times 14 = 98$).
+    *   Therefore, 97 is prime.
+8.  **98**: Not prime. It is an even number, divisible by 2.
+9.  **99**: Not prime. It is divisible by 3, 9, 11, etc. ($9 \times 11 = 99$).
+
+**Conclusion:**
+
+There is only **1** prime number strictly between 90 and 100.
+
+The prime number is:
+**97**

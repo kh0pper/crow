@@ -1,0 +1,41 @@
+To find the number of trailing zeros in $100!$ (100 factorial), we need to determine how many times the number $10$ is a factor in the product $1 \times 2 \times 3 \times \dots \times 100$.
+
+### Logical Deduction
+
+1.  **Prime Factorization of 10**:
+    A trailing zero is produced by a factor of $10$. Since $10 = 2 \times 5$, we need to count the number of pairs of prime factors $(2, 5)$ in the prime factorization of $100!$.
+
+2.  **Counting Factors of 2 and 5**:
+    In any factorial $n!$, the prime factor $2$ appears much more frequently than the prime factor $5$ (because every even number contributes a factor of 2, while only multiples of 5 contribute a factor of 5). Therefore, the number of pairs of $(2, 5)$ is limited by the number of factors of $5$.
+    
+    To find the number of trailing zeros, we simply need to count the total number of times the prime factor $5$ appears in the prime factorization of $100!$.
+
+3.  **Legendre's Formula**:
+    The number of times a prime $p$ divides $n!$ is given by Legendre's Formula:
+    $$ E_p(n!) = \sum_{k=1}^{\infty} \left\lfloor \frac{n}{p^k} \right\rfloor $$
+    Where $\lfloor x \rfloor$ is the floor function (the greatest integer less than or equal to $x$).
+
+    Here, $n = 100$ and $p = 5$. We calculate the terms until $5^k > 100$.
+
+### Step-by-Step Calculation
+
+*   **Step 1**: Count multiples of $5^1 = 5$.
+    $$ \left\lfloor \frac{100}{5} \right\rfloor = 20 $$
+    (These are 5, 10, 15, ..., 100. There are 20 such numbers.)
+
+*   **Step 2**: Count multiples of $5^2 = 25$.
+    $$ \left\lfloor \frac{100}{25} \right\rfloor = 4 $$
+    (These are 25, 50, 75, 100. These numbers contribute an *additional* factor of 5 because they are divisible by 25.)
+
+*   **Step 3**: Count multiples of $5^3 = 125$.
+    $$ \left\lfloor \frac{100}{125} \right\rfloor = 0 $$
+    (Since $125 > 100$, there are no multiples of 125 in the range.)
+
+*   **Step 4**: Sum the counts.
+    $$ \text{Total factors of 5} = 20 + 4 + 0 = 24 $$
+
+Since there are 24 factors of 5 and plenty of factors of 2 to pair with them, there are exactly 24 pairs of $(2, 5)$, resulting in 24 trailing zeros.
+
+### Final Conclusion
+
+The number of trailing zeros in $100!$ is **24**.

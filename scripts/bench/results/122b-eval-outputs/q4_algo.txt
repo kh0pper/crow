@@ -1,0 +1,67 @@
+```python
+def longest_palindromic_substring(s: str) -> str:
+    """
+    Returns the longest palindromic substring in the input string s using Manacher's algorithm.
+    Time Complexity: O(n)
+    Space Complexity: O(n)
+    
+    Args:
+        s (str): The input string.
+        
+    Returns:
+        str: The longest palindromic substring.
+    """
+    if not s:
+        return ""
+    
+    # Transform string to handle even and odd length palindromes uniformly
+    # Example: "aba" -> "^#a#b#a#$"
+    t = ['#']
+    for char in s:
+        t.append(char)
+        t.append('#')
+    t.insert(0, '^')
+    t.append('$')
+    
+    n = len(t)
+    p = [0] * n
+    center = 0
+    right = 0
+    
+    for i in range(1, n - 1):
+        mirror = 2 * center - i
+        
+        if i < right:
+            p[i] = min(right - i, p[mirror])
+        
+        # Attempt to expand palindrome centered at i
+        while t[i + 1 + p[i]] == t[i - 1 - p[i]]:
+            p[i] += 1
+        
+        # If palindrome centered at i expands past right,
+        # adjust center based on expanded palindrome.
+        if i + p[i] > right:
+            center = i
+            right = i + p[i]
+    
+    # Find the maximum element in p
+    max_len = 0
+    center_index = 0
+    for i in range(1, n - 1):
+        if p[i] > max_len:
+            max_len = p[i]
+            center_index = i
+    
+    # Extract the longest palindrome from the original string
+    start = (center_index - max_len) // 2
+    return s[start:start + max_len]
+
+
+# Edge-case tests
+if __name__ == "__main__":
+    # Test 1: Single character string
+    assert longest_palindromic_substring("a") == "a"
+    
+    # Test 2: String with no repeated characters (all palindromes are length 1)
+    assert longest_palindromic_substring("abcdef") == "a"
+```

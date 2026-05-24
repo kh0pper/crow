@@ -1,0 +1,46 @@
+To solve this puzzle, you must draw a fruit from the box labeled **"Apples & Oranges"**.
+
+Here is the step-by-step logical deduction:
+
+### 1. The Strategy
+Since **all** labels are wrong, the box labeled "Apples & Oranges" cannot actually contain a mix of both fruits. It must contain **only Apples** or **only Oranges**. This is the only box where a single draw guarantees you know the entire contents of that specific box.
+
+### 2. The Execution
+Draw one fruit from the box labeled **"Apples & Oranges"**.
+
+#### Scenario A: You pull out an Apple
+1.  **Identify the first box**: Since the label "Apples & Oranges" is wrong, and you pulled an Apple, this box must contain **only Apples**.
+2.  **Identify the second box**: Look at the box labeled **"Oranges"**.
+    *   It cannot contain Oranges (because the label is wrong).
+    *   It cannot contain Apples (because we already identified the box with only Apples).
+    *   Therefore, the box labeled "Oranges" must contain **Apples & Oranges**.
+3.  **Identify the third box**: The remaining box is labeled **"Apples"**.
+    *   It cannot contain Apples (label is wrong).
+    *   It cannot contain Apples & Oranges (we found that box).
+    *   Therefore, the box labeled "Apples" must contain **only Oranges**.
+
+#### Scenario B: You pull out an Orange
+1.  **Identify the first box**: Since the label "Apples & Oranges" is wrong, and you pulled an Orange, this box must contain **only Oranges**.
+2.  **Identify the second box**: Look at the box labeled **"Apples"**.
+    *   It cannot contain Apples (because the label is wrong).
+    *   It cannot contain Oranges (because we already identified the box with only Oranges).
+    *   Therefore, the box labeled "Apples" must contain **Apples & Oranges**.
+3.  **Identify the third box**: The remaining box is labeled **"Oranges"**.
+    *   It cannot contain Oranges (label is wrong).
+    *   It cannot contain Apples & Oranges (we found that box).
+    *   Therefore, the box labeled "Oranges" must contain **only Apples**.
+
+### Final Conclusion
+**Which box to choose?**
+You must draw from the box labeled **"Apples & Oranges"**.
+
+**How to relabel?**
+*   If you draw an **Apple**:
+    *   "Apples & Oranges" $\rightarrow$ **Apples**
+    *   "Oranges" $\rightarrow$ **Apples & Oranges**
+    *   "Apples" $\rightarrow$ **Oranges**
+
+*   If you draw an **Orange**:
+    *   "Apples & Oranges" $\rightarrow$ **Oranges**
+    *   "Apples" $\rightarrow$ **Apples & Oranges**
+    *   "Oranges" $\rightarrow$ **Apples**
