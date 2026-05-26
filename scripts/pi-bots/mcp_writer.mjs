@@ -106,13 +106,20 @@ export function buildBotMcp(def, canonical) {
  * Write `<session_dir>/.mcp.json` for a bot. Idempotent (full rewrite each
  * call). Throws only on a missing session_dir in the def or an unreadable
  * canonical; a selected-but-absent server is a soft warning (returned).
+ *
+ * M3b: callers may override session_dir via opts.sessionDir — the bridge
+ * uses this when a project_space workspace resolves to a different path
+ * than the legacy def.session_dir. Without the override, mcp.json drifts
+ * out of sync with the actual pi cwd and the bot relies solely on the
+ * canonical ~/.pi/agent/mcp.json fallback.
  */
 export function writeBotMcp(def, opts = {}) {
-  if (!def || !def.session_dir) throw new Error("bot def has no session_dir");
+  const sessionDir = opts.sessionDir || (def && def.session_dir);
+  if (!sessionDir) throw new Error("bot def has no session_dir (and no opts.sessionDir override)");
   const canonical = opts.canonical || readCanonicalMcp(opts.canonicalPath);
   const built = buildBotMcp(def, canonical);
-  mkdirSync(def.session_dir, { recursive: true });
-  const path = join(def.session_dir, ".mcp.json");
+  mkdirSync(sessionDir, { recursive: true });
+  const path = join(sessionDir, ".mcp.json");
   writeFileSync(path, JSON.stringify(built.json, null, 2) + "\n", { mode: 0o600 });
   return {
     path,

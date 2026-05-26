@@ -35,7 +35,7 @@ import { isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
-const PI_CLI = HOME + "/.nvm/versions/node/v20.20.2/lib/node_modules/@mariozechner/pi-coding-agent/dist/cli.js";
+const PI_CLI = HOME + "/.nvm/versions/node/v20.20.2/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js";
 const CROW_DB = process.env.CROW_DB_PATH || HOME + "/.crow-mpa/data/crow.db";
 const TASKS_DB = process.env.CROW_TASKS_DB_PATH || HOME + "/.crow-mpa/data/tasks.db";
 const CAPABLE = "alibaba-coding/qwen3.6-plus"; // on MULTI_AGENT_CAPABLE

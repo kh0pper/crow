@@ -30,7 +30,9 @@ import { resolveModel, escalateRequested, stripEscalateToken } from "./model_res
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
-const PI_CLI = HOME + "/.nvm/versions/node/v20.20.2/lib/node_modules/@mariozechner/pi-coding-agent/dist/cli.js";
+// Package was renamed from @mariozechner/pi-coding-agent to
+// @earendil-works/pi-coding-agent (still 'pi' binary; v0.74.2 verified).
+const PI_CLI = HOME + "/.nvm/versions/node/v20.20.2/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js";
 const CROW_DB = process.env.CROW_DB_PATH || HOME + "/.crow-mpa/data/crow.db";
 const TASKS_DB = process.env.CROW_TASKS_DB_PATH || HOME + "/.crow-mpa/data/tasks.db";
 const TURN_TIMEOUT_MS = Number(process.env.PIBOT_TURN_TIMEOUT_MS || 600000);
@@ -281,12 +283,15 @@ export async function handleInbound(opts) {
   const tasksDbPath = (projectSpace && projectSpace.tasks_db_uri) || TASKS_DB;
   mkdirSync(sessionDir + "/sessions", { recursive: true });
 
-  // Keep the per-bot <session_dir>/.mcp.json in sync with the def on every
+  // Keep the per-bot <sessionDir>/.mcp.json in sync with the def on every
   // turn (best-effort; additive merge — homedir ~/.pi/agent/mcp.json still
   // wins on collision, so a writer hiccup can never break a turn). Primary
   // writer is the GUI save handler; this is the defensive backstop.
+  // M3b: pass the resolved sessionDir (which may differ from def.session_dir
+  // when the bot has a project_space workspace) so the .mcp.json lives next
+  // to where pi actually runs.
   try {
-    const w = writeBotMcp(def);
+    const w = writeBotMcp(def, { sessionDir });
     if (w.warnings.length) log("mcp.json warnings: " + w.warnings.join("; "));
     if (w.journalGuarded.length) log("mcp.json journal-guarded: " + w.journalGuarded.join(","));
   } catch (e) {

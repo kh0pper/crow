@@ -26,7 +26,7 @@ import { spawn } from "node:child_process";
 
 const HOME = "/home/kh0pp";
 const NODE = `${HOME}/.nvm/versions/node/v20.20.2/bin/node`;
-const PI_CLI = `${HOME}/.nvm/versions/node/v20.20.2/lib/node_modules/@mariozechner/pi-coding-agent/dist/cli.js`;
+const PI_CLI = `${HOME}/.nvm/versions/node/v20.20.2/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js`;
 const SPK = `${HOME}/.pi-spike`;
 const PINNED_CWD = `${SPK}/cwd`;
 const SESSION_DIR = `${SPK}/sessions-s2`;
