@@ -122,7 +122,14 @@ function acquireLock() {
         const r = await handleInbound({
           bot_id: row.bot_id, gateway_thread_id: tid, user_message: body,
           sendReply: async (text) => {
+            // --reply-to <alias> sets the Reply-To: header on the outbound
+            // so when the user clicks Reply in Gmail, it routes back to the
+            // bot's +alias (which bridge_tick monitors) rather than the
+            // bot's bare From: address (which nothing monitors). Without
+            // this, the user's reply lands at kevin.hopper@maestro.press
+            // and the bot never sees the follow-up.
             await gio(["reply", "--to", replyTo,
+              "--reply-to", alias,
               "--subject", "Re: " + (newest.subject || (newest.headers && newest.headers.subject) || "pibot"),
               "--thread", tid, "--body", text]);
           },
