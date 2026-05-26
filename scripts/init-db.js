@@ -168,6 +168,31 @@ await addColumnIfMissing("chat_messages", "model_id", "TEXT");
 // explicit pick; convention is `1 = user-picked this week`.
 await addColumnIfMissing("job_candidates", "user_priority", "INTEGER");
 
+// --- Project Space redesign Phase 1, M0 (2026-05-26) ---
+// Stable opaque identifiers + origin tracking for every project-scoped row.
+// `uuid` survives a future per-project DB split and cross-peer share.
+// `origin_instance_id` is the instance that first wrote the row; immutable.
+// Added now as nullable + backfilled, then indexed UNIQUE — SQLite ADD COLUMN
+// cannot accept a non-constant default expression like randomblob(16) nor a
+// column-level UNIQUE constraint, so this is the only safe shape.
+async function addUuidColumn(table) {
+  await addColumnIfMissing(table, "uuid", "TEXT");
+  await addColumnIfMissing(table, "origin_instance_id", "TEXT");
+  try {
+    await db.execute({
+      sql: `UPDATE ${table} SET uuid = lower(hex(randomblob(16))) WHERE uuid IS NULL`,
+    });
+    await db.execute({
+      sql: `CREATE UNIQUE INDEX IF NOT EXISTS idx_${table}_uuid ON ${table}(uuid)`,
+    });
+  } catch (err) {
+    console.warn(`Warning: could not backfill/index ${table}.uuid: ${err.message}`);
+  }
+}
+for (const t of ["research_projects", "research_sources", "research_notes", "data_backends", "storage_files"]) {
+  await addUuidColumn(t);
+}
+
 await initTable("sources FTS index", `
   CREATE VIRTUAL TABLE IF NOT EXISTS sources_fts USING fts5(
     title, authors, abstract, content_summary, full_text, tags, citation_apa,
