@@ -1,19 +1,25 @@
 ---
 title: Data Sharing
-description: Share databases between Crow users using clone, federated read, or subscription modes.
+description: Share databases and project spaces between Crow users using clone, federated read, or subscription modes.
 ---
 
 # Data Sharing
 
-Share databases with other Crow users. Three modes give you control over how much data travels and who can access it.
+Share project spaces and databases with other Crow users. Three modes give you control over how much data travels and who can access it.
+
+::: info Current shipping status (Phase 1)
+**Clone mode is the only mode shipping today** for project-space sharing (`crow_share` with `share_type: "project"`, `mode: "clone"`). The bundle includes the project metadata, sources, notes, audit log, data-backend manifests (env-var names only — no secrets), and a storage-file manifest with 24-hour presigned URLs. The recipient gets an independent project with a `-clone-N` slug; further changes on either side do not sync.
+
+**Subscription** and **federated read** are planned follow-on milestones — they require new infrastructure (per-project Hypercore feed with row-level filtering for subscription; gateway proxy auth + query routing for federated read). The descriptions below are the design target, not the current implementation.
+:::
 
 ## Sharing Modes
 
-| Mode | What Happens | Best For |
-|---|---|---|
-| **Clone** | Full copy of the database is sent to the recipient. They get an independent snapshot. | One-time handoffs, small datasets, offline access |
-| **Federated Read** | Recipient queries your database remotely through the gateway proxy. No data is copied. | Large datasets, live data, controlled access |
-| **Subscription** | Recipient receives ongoing updates as you modify the source database. | Collaborative projects, shared reference data |
+| Mode | Status | What Happens | Best For |
+|---|---|---|---|
+| **Clone** | **Shipping (Phase 1)** | Full copy of the database / project is sent to the recipient. They get an independent snapshot. | One-time handoffs, small datasets, offline access |
+| **Federated Read** | *Planned (Phase 2+)* | Recipient queries your database remotely through the gateway proxy. No data is copied. | Large datasets, live data, controlled access |
+| **Subscription** | *Planned (Phase 2+)* | Recipient receives ongoing updates as you modify the source database. | Collaborative projects, shared reference data |
 
 ## Clone
 
