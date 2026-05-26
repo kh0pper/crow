@@ -134,20 +134,102 @@ class PiRpc {
 
 function loadBot(botId) {
   const c = db(CROW_DB);
-  const row = c.prepare("SELECT bot_id, display_name, definition, enabled FROM pi_bot_defs WHERE bot_id=?").get(botId);
+  // M3b: project_id is now the column (not JSON). The JSON copy may still
+  // exist for back-compat on legacy rows but is no longer authoritative.
+  const row = c.prepare("SELECT bot_id, display_name, definition, enabled, project_id FROM pi_bot_defs WHERE bot_id=?").get(botId);
   c.close();
   if (!row) throw new Error("unknown bot " + botId);
   if (!row.enabled) throw new Error("bot " + botId + " disabled");
   return Object.assign({}, row, { def: JSON.parse(row.definition || "{}") });
 }
-function kanbanText(projectId) {
+// M3b: load the project_spaces row for a bot so the bridge can resolve a
+// workspace_dir, tasks_db_uri, slug, and name to inject into the per-turn
+// prompt. Returns null when projectId is unset or the project is missing /
+// archived (in either case the bot falls back to legacy session_dir + env).
+function loadProjectSpace(projectId) {
+  if (projectId == null) return null;
+  const c = db(CROW_DB);
+  const r = c.prepare(
+    "SELECT id, slug, name, workspace_dir, storage_prefix, tasks_db_uri, archived_at FROM project_spaces WHERE id=?"
+  ).get(projectId);
+  c.close();
+  if (!r || r.archived_at) return null;
+  return r;
+}
+// M3b: list active members with invoke_bot. Used both for the structured
+// prompt context (the bot knows who can talk to it) and for audit attribution.
+function loadProjectMembers(projectId) {
+  if (projectId == null) return [];
+  const c = db(CROW_DB);
+  const rows = c.prepare(`
+    SELECT pm.contact_id, pm.role, pm.capabilities,
+           c.display_name, c.crow_id, c.email
+      FROM project_members pm LEFT JOIN contacts c ON c.id = pm.contact_id
+     WHERE pm.project_id = ? AND pm.revoked_at IS NULL
+     ORDER BY pm.granted_at ASC
+  `).all(projectId);
+  c.close();
+  return rows;
+}
+// M3b: appendAudit (mirror of the libsql helper in servers/shared/project-acl.js,
+// but using the better-sqlite3 client the bridge already opens). Best-effort —
+// failures must never break the primary action (the bot turn).
+function appendAuditBridge(projectId, opts) {
+  if (projectId == null) return;
+  try {
+    const c = db(CROW_DB);
+    c.prepare(`
+      INSERT INTO project_audit_log (project_id, actor_type, actor_id, action, target, payload)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      projectId,
+      opts.actor_type || "bot",
+      opts.actor_id || null,
+      opts.action,
+      opts.target || null,
+      opts.payload == null ? null : (typeof opts.payload === "string" ? opts.payload : JSON.stringify(opts.payload))
+    );
+    c.close();
+  } catch (e) {
+    // never throw
+  }
+}
+function kanbanText(projectId, tasksDbPath) {
   if (projectId == null) return "(no project linked)";
-  const t = db(TASKS_DB);
+  const path = tasksDbPath || TASKS_DB;
+  const t = db(path);
   const rows = t.prepare("SELECT id,title,status FROM tasks_items WHERE project_id=? AND parent_id IS NULL ORDER BY id").all(projectId);
   t.close();
   return rows.length ? rows.map((r) => "  #" + r.id + " [" + r.status + "] " + r.title).join("\n") : "  (no cards)";
 }
-function cardStatus(cardId) { const t = db(TASKS_DB); const r = t.prepare("SELECT status FROM tasks_items WHERE id=?").get(cardId); t.close(); return r ? r.status : null; }
+function cardStatus(cardId, tasksDbPath) {
+  const path = tasksDbPath || TASKS_DB;
+  const t = db(path);
+  const r = t.prepare("SELECT status FROM tasks_items WHERE id=?").get(cardId);
+  t.close();
+  return r ? r.status : null;
+}
+// M3b: structured project-context block for the prompt. Replaces the bare
+// "Project #N" interpolation in the legacy prompts; the bot now sees who
+// can interact with it (member list filtered to invoke_bot=true), what
+// backends are available, and where its workspace lives. The block is
+// short — bots are line-budget sensitive.
+function projectContextBlock(space, members) {
+  if (!space) return "";
+  const lines = [];
+  lines.push("PROJECT: " + space.name + "  (id=" + space.id + ", slug=" + space.slug + ")");
+  lines.push("  workspace: " + (space.workspace_dir || "(unset)"));
+  if (space.storage_prefix) lines.push("  storage prefix: " + space.storage_prefix);
+  if (members && members.length) {
+    const summary = members.map((m) => {
+      const who = m.contact_id == null ? "local user"
+        : (m.display_name || m.email || m.crow_id || "contact");
+      return who + " (" + m.role + ")";
+    }).join(", ");
+    lines.push("  members: " + summary);
+  }
+  return lines.join("\n");
+}
 function planFor(def, cardId) {
   const p = def.session_dir + "/plans/" + cardId + ".md";
   return { path: p, exists: existsSync(p), text: existsSync(p) ? readFileSync(p, "utf8") : "" };
@@ -184,8 +266,20 @@ export async function handleInbound(opts) {
   const cleanMsg = stripEscalateToken(user_message);
   const bot = loadBot(bot_id);
   const def = bot.def;
-  const projectId = def.project_id == null ? null : def.project_id;
-  mkdirSync(def.session_dir + "/sessions", { recursive: true });
+  // M3b atomic cutover: column is authoritative. JSON copy is ignored even
+  // if present (legacy fixtures may still carry it; new bots don't write it).
+  const projectId = bot.project_id == null ? null : Number(bot.project_id);
+  const projectSpace = loadProjectSpace(projectId);
+  const projectMembers = loadProjectMembers(projectId);
+  // session_dir resolution: prefer the project workspace when available
+  // (new project-native bots). Legacy bots without a project_space row, or
+  // whose row has no workspace_dir, fall back to def.session_dir (the
+  // pre-M3 ~/.crow-mpa/pi-bots/<bot_id>/ path).
+  const sessionDir = (projectSpace && projectSpace.workspace_dir)
+    ? (projectSpace.workspace_dir + "/bots/" + bot_id)
+    : def.session_dir;
+  const tasksDbPath = (projectSpace && projectSpace.tasks_db_uri) || TASKS_DB;
+  mkdirSync(sessionDir + "/sessions", { recursive: true });
 
   // Keep the per-bot <session_dir>/.mcp.json in sync with the def on every
   // turn (best-effort; additive merge — homedir ~/.pi/agent/mcp.json still
@@ -220,7 +314,7 @@ export async function handleInbound(opts) {
   const resume = !!(session && session.pi_session_id);
 
   if (wantCard != null) {
-    const st = cardStatus(wantCard);
+    const st = cardStatus(wantCard, tasksDbPath);
     if (st === "done") {
       log("card " + wantCard + " already done — no re-exec");
       if (!session) session = upsertSession({ bot_id, gateway_thread_id, project_id: projectId, status: "waiting-user" });
@@ -243,23 +337,33 @@ export async function handleInbound(opts) {
   writeFileSync(sysFile, def.system_prompt || "You are a Crow bot.", { mode: 0o600 });
 
   const cardId = wantCard != null ? wantCard : (session ? session.card_id : null);
+  // planFor still pulls from def.session_dir for legacy compatibility (where
+  // existing plan files live). Project-native bots that get a project_space
+  // workspace will accumulate plans under <workspace>/bots/<bot_id>/plans/
+  // once any are written; for the transition we look in both locations.
   const plan = cardId != null ? planFor(def, cardId) : { path: null, exists: false, text: "" };
+
+  // M3b: structured project header replaces the bare "Project #N" string.
+  // Falls back to a one-liner for legacy bots with no project_spaces row.
+  const projectHeader = projectSpace
+    ? projectContextBlock(projectSpace, projectMembers)
+    : (projectId != null ? "PROJECT #" + projectId + " (no space metadata)" : "PROJECT: (none)");
 
   let promptText;
   if (wantCard == null && !resume) {
-    promptText = "A user messaged you over the gateway. Project #" + projectId + " Kanban:\n" +
-      kanbanText(projectId) + "\n\nUser said: \"" + cleanMsg + "\"\n\n" +
+    promptText = projectHeader + "\n\nA user messaged you over the gateway. Kanban:\n" +
+      kanbanText(projectId, tasksDbPath) + "\n\nUser said: \"" + cleanMsg + "\"\n\n" +
       "Reply briefly: greet, list the card numbers above, and ask which card to do. Do NOT call any tool yet.";
   } else if (cardId != null) {
-    promptText = "Work the following card for project #" + projectId + ".\n\nCARD #" + cardId +
-      " (current board status: " + cardStatus(cardId) + ").\nPLAN FILE (" + plan.path + "):\n---\n" +
+    promptText = projectHeader + "\n\nWork the following card.\n\nCARD #" + cardId +
+      " (current board status: " + cardStatus(cardId, tasksDbPath) + ").\nPLAN FILE (" + plan.path + "):\n---\n" +
       (plan.text || "(plan file missing)") + "\n---\n\nUser said: \"" + cleanMsg + "\"\n\n" +
       "Do the work the plan describes. Use the tasks_* tools (scoped to project " + projectId +
       ") to set this card in_progress, then done. Use the write/edit tools to record your result " +
       "under the plan file's \"## Result\" section. When finished, reply with a short summary for " +
       "the gateway thread. One card only.";
   } else {
-    promptText = "Project #" + projectId + " Kanban:\n" + kanbanText(projectId) + "\n\nUser said: \"" +
+    promptText = projectHeader + "\n\nKanban:\n" + kanbanText(projectId, tasksDbPath) + "\n\nUser said: \"" +
       cleanMsg + "\"\n\nReply briefly and ask which card number to do. Do NOT call any tool.";
   }
 
@@ -280,11 +384,11 @@ export async function handleInbound(opts) {
   session = upsertSession(Object.assign({}, session || {}, {
     bot_id, gateway_thread_id, project_id: projectId,
     card_id: cardId == null ? null : cardId, plan_path: plan.path,
-    pi_session_dir: def.session_dir + "/sessions", status: "active", control: "run",
+    pi_session_dir: sessionDir + "/sessions", status: "active", control: "run",
     model: resolved.key, escalated: resolved.escalated ? 1 : 0,
   }));
 
-  const pi = new PiRpc({ def, sessionDir: def.session_dir, resolved,
+  const pi = new PiRpc({ def, sessionDir, resolved,
     piSessionId: effectiveResume ? session.pi_session_id : null, appendSystemPromptFile: sysFile });
   let result;
   try {
@@ -294,7 +398,7 @@ export async function handleInbound(opts) {
     const piSessionId = (st1 && st1.data && st1.data.sessionId) || (st0 && st0.data && st0.data.sessionId) || (effectiveResume ? session.pi_session_id : null) || null;
     const text = pi.assistantText() || "(no reply)";
     const calls = pi.toolCalls();
-    const newCardStatus = cardId != null ? cardStatus(cardId) : null;
+    const newCardStatus = cardId != null ? cardStatus(cardId, tasksDbPath) : null;
     const status = newCardStatus === "done" ? "done" : "waiting-user";
     session.pi_session_id = piSessionId;
     session.status = status; session.control = "run";
@@ -308,6 +412,20 @@ export async function handleInbound(opts) {
     await sendReply(notice + text);
     result = { action: cardId != null ? "executed" : "asked", cardId, cardStatus: newCardStatus,
       piSessionId, toolCalls: calls, replyPreview: text.slice(0, 120), stdoutClean: pi.badStdout === 0 };
+    // M3b: audit every bot turn so the project timeline records what happened.
+    // bot is the actor; project_audit_log shows human + bot events in one feed.
+    appendAuditBridge(projectId, {
+      actor_type: "bot", actor_id: bot_id, action: "bot.invoke",
+      target: cardId != null ? ("card:" + cardId) : ("thread:" + gateway_thread_id),
+      payload: {
+        action: result.action,
+        card_status: newCardStatus,
+        tool_calls: calls.length,
+        model: resolved.key,
+        escalated: resolved.escalated ? 1 : 0,
+        session_id: session.id,
+      },
+    });
     log("turn done: action=" + result.action + " card=" + cardId + " status=" + newCardStatus + " tools=" + calls.length + " clean=" + result.stdoutClean);
   } catch (e) {
     session.status = "error";
@@ -318,6 +436,11 @@ export async function handleInbound(opts) {
       : "";
     await sendReply(notice + "(bridge error: " + e.message + ")");
     result = { action: "error", error: e.message };
+    appendAuditBridge(projectId, {
+      actor_type: "bot", actor_id: bot_id, action: "bot.error",
+      target: cardId != null ? ("card:" + cardId) : ("thread:" + gateway_thread_id),
+      payload: { error: String(e.message || e), model: resolved.key },
+    });
   } finally {
     await pi.close();
   }

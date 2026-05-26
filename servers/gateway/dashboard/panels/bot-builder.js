@@ -142,6 +142,11 @@ async function tableMissing(db) {
 }
 
 function defaultDefinition(botId, projectId, model) {
+  // M3b: project_id is no longer a field in this returned object — the
+  // pi_bot_defs.project_id column is authoritative. We still take projectId
+  // as a parameter so the system_prompt template can baked-reference the
+  // project number at creation time (it's just a string in the prompt; the
+  // runtime project context block in bridge.mjs supersedes it).
   const sessionDir = `${HOME}/.crow-mpa/pi-bots/${botId}`;
   return {
     engine: "pi",
@@ -165,7 +170,6 @@ function defaultDefinition(botId, projectId, model) {
         allowlist: ["kevin.hopper1@gmail.com", "kevin.hopper@maestro.press"],
       },
     ],
-    project_id: projectId,
     permission_policy: { bash: "deny", bash_allow: [], write_paths: [sessionDir], external_send: "draft_only", confirm: [] },
     triggers: { gateway: true, cron: "" },
     system_prompt:
@@ -206,12 +210,14 @@ export default {
         const model = (b.model || "crow-local/qwen3.6-35b-a3b").trim();
         if (!botId || !display) return res.redirectAfterPost("/dashboard/bot-builder?error=name_required");
         try {
+          // M3b: project_id goes in the column, not the JSON. defaultDefinition
+          // no longer includes it.
           await db.execute({
             sql:
-              "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?,?,?,1) " +
+              "INSERT INTO pi_bot_defs (bot_id, display_name, definition, project_id, enabled) VALUES (?,?,?,?,1) " +
               "ON CONFLICT(bot_id) DO UPDATE SET display_name=excluded.display_name, " +
-              "definition=excluded.definition, updated_at=datetime('now')",
-            args: [botId, display, JSON.stringify(defaultDefinition(botId, projectId, model))],
+              "definition=excluded.definition, project_id=excluded.project_id, updated_at=datetime('now')",
+            args: [botId, display, JSON.stringify(defaultDefinition(botId, projectId, model)), projectId],
           });
         } catch (e) {
           return res.redirectAfterPost("/dashboard/bot-builder?error=" + encodeURIComponent(String(e.message || e)));
@@ -231,7 +237,10 @@ export default {
         const botId = b.bot_id;
         let row;
         try {
-          row = (await db.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0];
+          // M3b: also fetch project_id column (authoritative). After parsing
+          // the JSON we set def.project_id from the column so the rest of
+          // this handler can keep reading `def.project_id` transparently.
+          row = (await db.execute({ sql: "SELECT definition, project_id FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0];
         } catch { row = null; }
         if (!row) return res.redirectAfterPost("/dashboard/bot-builder?error=unknown_bot");
         let def;
@@ -239,6 +248,10 @@ export default {
         def.tools = def.tools || {};
         def.permission_policy = def.permission_policy || {};
         def.triggers = def.triggers || {};
+        // M3b: column wins over JSON. Stale JSON copies of project_id will
+        // never be re-baked because we don't read them anywhere downstream.
+        def.project_id = row.project_id == null ? null : Number(row.project_id);
+        let columnProjectIdUpdate = null;  // set when the project tab is saved
         const tab = action.slice(5);
         // Extra query suffix carried into the post-save redirect (e.g. a soft
         // validation warning for the AI tab). Never blocks the save.
@@ -287,7 +300,13 @@ export default {
             },
           ];
         } else if (tab === "project") {
-          def.project_id = b.project_id ? Number(b.project_id) : null;
+          // M3b: project_id is owned by the column now. We still set def.project_id
+          // so the snapshot below renders the new selection immediately, but the
+          // authoritative write is the columnProjectIdUpdate UPDATE in the save
+          // block below.
+          const next = b.project_id ? Number(b.project_id) : null;
+          def.project_id = next;
+          columnProjectIdUpdate = next;
         } else if (tab === "skills") {
           def.skills = [].concat(b.skills || []).filter(Boolean);
           def.tools.skills = def.skills;
@@ -308,10 +327,20 @@ export default {
         }
 
         try {
-          await db.execute({
-            sql: "UPDATE pi_bot_defs SET definition=?, updated_at=datetime('now') WHERE bot_id=?",
-            args: [JSON.stringify(def), botId],
-          });
+          // M3b: when the project tab is saved, the project_id column gets
+          // updated alongside definition JSON — column is authoritative for
+          // every downstream reader (bridge.mjs, bot-board, bot-board-api).
+          if (columnProjectIdUpdate !== null) {
+            await db.execute({
+              sql: "UPDATE pi_bot_defs SET definition=?, project_id=?, updated_at=datetime('now') WHERE bot_id=?",
+              args: [JSON.stringify(def), columnProjectIdUpdate, botId],
+            });
+          } else {
+            await db.execute({
+              sql: "UPDATE pi_bot_defs SET definition=?, updated_at=datetime('now') WHERE bot_id=?",
+              args: [JSON.stringify(def), botId],
+            });
+          }
         } catch (e) {
           return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=${tab}&error=` + encodeURIComponent(String(e.message || e)));
         }
@@ -360,10 +389,12 @@ export default {
       const botId = String(q.bot);
       let bot;
       try {
-        bot = (await db.execute({ sql: "SELECT bot_id, display_name, enabled, definition FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0];
+        bot = (await db.execute({ sql: "SELECT bot_id, display_name, enabled, definition, project_id FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0];
       } catch { bot = null; }
       if (!bot) return res.send(layout({ title: "Bot Builder", content: section("Bot Builder", `<p>Unknown bot.</p><p><a href="/dashboard/bot-builder">← back</a></p>`) }));
       let def; try { def = JSON.parse(bot.definition || "{}"); } catch { def = {}; }
+      // M3b: column is authoritative — overwrite any stale JSON copy of project_id.
+      def.project_id = bot.project_id == null ? null : Number(bot.project_id);
       const tabId = TABS.find((t) => t[0] === (q.tab || "ai")) ? String(q.tab || "ai") : "ai";
 
       const nav = TABS.map(([id, lbl]) =>
@@ -582,14 +613,16 @@ export default {
     // ---- list + create ----
     let bots = [], sessions = [], sessRows = [];
     try {
-      bots = (await db.execute({ sql: "SELECT bot_id, display_name, enabled, definition, datetime(updated_at) AS updated_at FROM pi_bot_defs ORDER BY bot_id", args: [] })).rows;
+      bots = (await db.execute({ sql: "SELECT bot_id, display_name, enabled, definition, project_id, datetime(updated_at) AS updated_at FROM pi_bot_defs ORDER BY bot_id", args: [] })).rows;
       sessions = (await db.execute({ sql: "SELECT bot_id, status, count(*) AS n FROM bot_sessions GROUP BY bot_id, status", args: [] })).rows;
       sessRows = (await db.execute({ sql: "SELECT id, bot_id, status, model, escalated, control, card_id, gateway_thread_id, datetime(updated_at) AS updated_at FROM bot_sessions ORDER BY updated_at DESC LIMIT 50", args: [] })).rows;
     } catch { /* defensive */ }
     const sessSummary = (id) => sessions.filter((s) => s.bot_id === id).map((s) => `${escapeHtml(s.status)}:${s.n}`).join(" ") || "—";
     const rows = bots.map((bt) => {
-      let proj = "—", model = "—";
-      try { const d = JSON.parse(bt.definition || "{}"); proj = d.project_id ?? "—"; model = (d.models && d.models.default) || "—"; } catch {}
+      let model = "—";
+      try { const d = JSON.parse(bt.definition || "{}"); model = (d.models && d.models.default) || "—"; } catch {}
+      // M3b: project_id from the column (not JSON).
+      const proj = bt.project_id == null ? "—" : bt.project_id;
       return [
         `<a href="/dashboard/bot-builder?bot=${encodeURIComponent(bt.bot_id)}&tab=ai">${escapeHtml(bt.bot_id)}</a>`,
         escapeHtml(bt.display_name || ""),

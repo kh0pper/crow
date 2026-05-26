@@ -93,11 +93,14 @@ const escBot = mkBot("esc", { default: LOCAL, escalation: CLOUD });
 // on a slow cold local turn — turn1 default, turn2 same-thread !escalate.
 const fnBot = mkBot("fn", { default: CLOUD, escalation: CLOUD2 });
 for (const b of [cloudBot, escBot, fnBot]) {
-  b.def.project_id = projectId;
+  // M3b: project_id is now the column, not the JSON. Setting def.project_id
+  // here is a no-op (bridge.mjs reads the column). Kept commented as a
+  // breadcrumb in case a follow-on test needs the def field.
+  // b.def.project_id = projectId;
   c.prepare(
-    "INSERT INTO pi_bot_defs (bot_id,display_name,definition,enabled,created_at,updated_at) " +
-    "VALUES (?,?,?,1,datetime('now'),datetime('now'))"
-  ).run(b.botId, "P3.0 " + b.botId, JSON.stringify(b.def));
+    "INSERT INTO pi_bot_defs (bot_id,display_name,definition,project_id,enabled,created_at,updated_at) " +
+    "VALUES (?,?,?,?,1,datetime('now'),datetime('now'))"
+  ).run(b.botId, "P3.0 " + b.botId, JSON.stringify(b.def), projectId);
 }
 const planBody = (cid) =>
   "# Card " + cid + "\n\n## Task\nReply with the single word OK. Use the tasks tool to set this card " +
