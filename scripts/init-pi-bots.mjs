@@ -120,6 +120,38 @@ if (tableExists("bot_sessions")) {
 }
 console.log(`  bot_sessions migration: ${migAdded.length ? "added [" + migAdded.join(",") + "]" : "no-op (model,escalated already present)"}`);
 
+// --- Project Space Phase 1, M3 migration (2026-05-26) ---
+// Promote pi_bot_defs.definition.project_id (JSON field) to a real column.
+// One backfill from JSON, then new code paths read/write the column directly
+// (no dual-write window — see plan §M3). Same guarded-ALTER pattern as
+// model/escalated above. NULL = no project linked (matches existing JSON
+// semantics for legacy bots with project_id absent).
+const piBotDefsMigAdded = [];
+if (tableExists("pi_bot_defs")) {
+  const have = db.prepare("PRAGMA table_info(pi_bot_defs)").all().map((c) => c.name);
+  if (!have.includes("project_id")) {
+    db.prepare("ALTER TABLE pi_bot_defs ADD COLUMN project_id INTEGER").run();
+    piBotDefsMigAdded.push("project_id");
+  }
+  // Backfill the column from JSON for any rows where the column is NULL
+  // but the JSON has a project_id. Idempotent: SET WHERE column IS NULL.
+  // If a row was already migrated (column set), this is a no-op for that row.
+  // If a bot was hand-edited to remove project_id from JSON, the column
+  // stays at whatever it had — that's intentional (column is now authoritative).
+  const backfill = db.prepare(`
+    UPDATE pi_bot_defs
+       SET project_id = CAST(json_extract(definition, '$.project_id') AS INTEGER)
+     WHERE project_id IS NULL
+       AND definition IS NOT NULL
+       AND json_extract(definition, '$.project_id') IS NOT NULL
+  `).run();
+  if (backfill.changes > 0) piBotDefsMigAdded.push(`backfill:${backfill.changes}`);
+  if (!have.includes("idx_pi_bot_defs_project")) {
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_pi_bot_defs_project ON pi_bot_defs(project_id)").run();
+  }
+}
+console.log(`  pi_bot_defs migration: ${piBotDefsMigAdded.length ? "applied [" + piBotDefsMigAdded.join(",") + "]" : "no-op (project_id column + backfill already present)"}`);
+
 const after = { pi_bot_defs: tableExists("pi_bot_defs"), bot_sessions: tableExists("bot_sessions") };
 const cols = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name).join(",");
 
