@@ -31,12 +31,14 @@ The crow-sharing MCP server provides:
 1. User says "share this with \<contact\>" or "send \<item\> to \<contact\>"
 2. Identify the item to share:
    - Memory: use the memory ID from `crow_search_memories`
-   - Project: use the project ID from `crow_list_projects`
+   - Project: use the project ID from `crow_list_projects` (note: project shares operate on `project_spaces` — the new shareable workspace)
    - Source: use the source ID from `crow_list_sources`
    - Note: use the note ID from a project
 3. Call `crow_list_contacts` to find the contact
-4. Call `crow_share` with the item type, ID, contact, and permissions
-5. Confirm delivery status to the user
+4. Call `crow_share`:
+   - **Project shares**: `share_type: "project"`, `mode: "clone"` (the only mode in Phase 1), optional `role` (defaults to viewer), optional `capabilities` JSON overriding role defaults (e.g., `{"invoke_bot": false}`). The recipient gets an independent project with a `-clone-N` slug. Sender must have `manage_members` on the project.
+   - **Other shares** (memory, source, note, kb_article): pass item type, ID, contact, and permissions (read / read-write / one-time)
+5. Confirm delivery status + bundle summary (sources / notes / backend manifest / file manifest counts) to the user
 6. *[crow: shared \<type\> "\<title\>" with \<contact\> — \<status\>]*
 
 ## Workflow: Check Inbox

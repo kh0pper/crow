@@ -307,12 +307,13 @@ async function renderDetailView(db, projectId, layout, lang) {
 
   const project = projRows[0];
 
-  // Fetch related data in parallel (incl. M2 project_spaces extras + members)
-  const [sourcesResult, notesResult, backendsResult, spaceResult, membersResult, contactsResult] = await Promise.all([
+  // Fetch related data in parallel (incl. M2 project_spaces extras + members,
+  // M5 audit log).
+  const [sourcesResult, notesResult, backendsResult, spaceResult, membersResult, contactsResult, auditResult] = await Promise.all([
     db.execute({ sql: "SELECT id, title, source_type, url, verified, created_at FROM research_sources WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", args: [projectId] }),
     db.execute({ sql: "SELECT id, note_type, substr(content, 1, 200) as preview, created_at FROM research_notes WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", args: [projectId] }),
     db.execute({ sql: "SELECT id, name, backend_type, status FROM data_backends WHERE project_id = ?", args: [projectId] }),
-    db.execute({ sql: "SELECT slug, workspace_dir, storage_prefix FROM project_spaces WHERE id = ?", args: [projectId] }),
+    db.execute({ sql: "SELECT slug, workspace_dir, storage_prefix, archived_at FROM project_spaces WHERE id = ?", args: [projectId] }),
     db.execute({
       sql: `SELECT pm.id, pm.contact_id, pm.role, pm.capabilities, pm.mode, pm.granted_at, pm.revoked_at,
                    c.display_name, c.crow_id
@@ -322,6 +323,12 @@ async function renderDetailView(db, projectId, layout, lang) {
       args: [projectId],
     }),
     db.execute({ sql: "SELECT id, display_name, crow_id FROM contacts WHERE is_blocked = 0 ORDER BY display_name, id LIMIT 200" }),
+    db.execute({
+      sql: `SELECT created_at, actor_type, actor_id, action, target, payload
+              FROM project_audit_log WHERE project_id = ?
+             ORDER BY created_at DESC LIMIT 50`,
+      args: [projectId],
+    }),
   ]);
 
   const sources = sourcesResult.rows;
@@ -330,6 +337,7 @@ async function renderDetailView(db, projectId, layout, lang) {
   const space = spaceResult.rows[0] || {};
   const members = membersResult.rows;
   const contacts = contactsResult.rows;
+  const auditEntries = auditResult.rows;
 
   // Back link + status controls
   const backLink = `<a href="/dashboard/projects" style="color:var(--crow-accent);text-decoration:none;font-size:0.85rem">← All Projects</a>`;
@@ -468,12 +476,69 @@ async function renderDetailView(db, projectId, layout, lang) {
       ${space.storage_prefix ? `<div><span style="color:var(--crow-text-muted)">storage prefix:</span> <code style="font-size:0.8rem">${escapeHtml(space.storage_prefix)}</code></div>` : ""}
     </div>` : "";
 
+  // M5: audit log viewer. Read-only timeline (newest first). Each row shows
+  // when, who (local / bot / contact / system), what action, and which target.
+  // Payload is rendered as a small <details> when present so the row stays scannable.
+  let auditHtml;
+  if (auditEntries.length === 0) {
+    auditHtml = `<p style="color:var(--crow-text-muted);font-size:0.85rem">No audit entries yet. Member changes, source/note/file writes, bot turns, and shares will appear here.</p>`;
+  } else {
+    const actorBadge = (t) => {
+      const colorMap = { local: "info", bot: "connected", contact: "info", system: "draft" };
+      return badge(t, colorMap[t] || "draft");
+    };
+    auditHtml = `<table style="width:100%;border-collapse:collapse;font-size:0.85rem">
+      <thead><tr style="color:var(--crow-text-muted);text-align:left;border-bottom:1px solid var(--crow-border)">
+        <th style="padding:0.25rem 0.5rem;width:170px">When</th>
+        <th style="padding:0.25rem 0.5rem;width:90px">Actor</th>
+        <th style="padding:0.25rem 0.5rem">Action</th>
+        <th style="padding:0.25rem 0.5rem">Target</th>
+      </tr></thead>
+      <tbody>
+      ${auditEntries.map((a) => {
+        const actorLabel = a.actor_id
+          ? `<span title="${escapeHtml(String(a.actor_id))}">${actorBadge(a.actor_type)}<br><span style="font-size:0.7rem;color:var(--crow-text-muted)">${escapeHtml(String(a.actor_id).slice(0, 18))}</span></span>`
+          : actorBadge(a.actor_type);
+        const detail = a.payload
+          ? `<details style="display:inline-block;margin-left:0.5rem"><summary style="cursor:pointer;font-size:0.7rem;color:var(--crow-text-muted)">payload</summary><pre style="margin:0.25rem 0 0 0;font-size:0.7rem;background:var(--crow-bg-elevated);padding:0.25rem 0.5rem;border-radius:4px;max-width:400px;overflow:auto">${escapeHtml(String(a.payload).slice(0, 600))}</pre></details>`
+          : "";
+        return `<tr style="border-bottom:1px solid var(--crow-border)">
+          <td style="padding:0.4rem 0.5rem;color:var(--crow-text-muted);font-family:monospace;font-size:0.75rem">${escapeHtml(a.created_at)}</td>
+          <td style="padding:0.4rem 0.5rem">${actorLabel}</td>
+          <td style="padding:0.4rem 0.5rem"><code style="font-size:0.8rem">${escapeHtml(a.action)}</code>${detail}</td>
+          <td style="padding:0.4rem 0.5rem;color:var(--crow-text-secondary);font-family:monospace;font-size:0.75rem">${escapeHtml(a.target || "")}</td>
+        </tr>`;
+      }).join("")}
+      </tbody>
+    </table>
+    ${auditEntries.length === 50 ? `<p style="font-size:0.75rem;color:var(--crow-text-muted);margin-top:0.5rem">Showing latest 50 entries. Use the <code>crow_audit_log</code> MCP tool for filtering / older entries.</p>` : ""}`;
+  }
+
+  // M5: soft-archive control — a banner when project is archived, plus an
+  // "Archive" action on active projects. Archive writes status='archived'
+  // via the existing update_status path; we add a corresponding "Unarchive"
+  // action that reverses it. Sources/notes/files remain attached but
+  // hidden from the active list (the existing list view filters on status).
+  const archiveBanner = space.archived_at
+    ? `<div style="margin-bottom:1rem;padding:0.5rem 0.75rem;background:var(--crow-bg-surface);border:1px solid var(--crow-accent-muted);border-radius:var(--crow-radius-card);font-size:0.85rem;color:var(--crow-text-secondary)">
+         <b>Archived</b> ${escapeHtml(space.archived_at)} — content is preserved; the project no longer appears in the active list.
+         <form method="POST" style="display:inline;margin-left:0.5rem">
+           <input type="hidden" name="action" value="update_status">
+           <input type="hidden" name="id" value="${project.id}">
+           <input type="hidden" name="status" value="active">
+           <button type="submit" style="padding:0.2rem 0.5rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-primary);cursor:pointer;font-size:0.75rem">Unarchive</button>
+         </form>
+       </div>`
+    : "";
+
   const content = `
+    ${archiveBanner}
     ${section("Overview", overviewHtml + workspaceInfo)}
     ${section(`Members (${members.length})`, membersHtml + addMemberForm, { delay: 50 })}
     ${section(`Sources (${sources.length})`, sourcesHtml, { delay: 100 })}
     ${section(`Notes (${notes.length})`, notesHtml, { delay: 200 })}
     ${backendsHtml}
+    ${section(`Audit log (${auditEntries.length})`, auditHtml, { delay: 350 })}
   `;
 
   return layout({ title: project.name, content });
