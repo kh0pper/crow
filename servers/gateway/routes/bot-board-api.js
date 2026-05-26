@@ -80,21 +80,24 @@ async function lockState(cdb, cardId) {
 }
 
 // Resolve the plan-file path for a card exactly as the bridge does
-// (bridge.mjs:151-152): the first pi_bot_defs row whose definition.project_id
-// matches the card's project → `<def.session_dir>/plans/<cardId>.md`.
-// Returns { path, sessionDir } or null.
+// (bridge.mjs:151-152): the first pi_bot_defs row whose project_id column
+// (M3b — was: definition.project_id JSON) matches the card's project →
+// `<def.session_dir>/plans/<cardId>.md`. Returns { path, sessionDir } or null.
 async function derivePlanPath(cdb, card) {
   if (card.project_id == null) return null;
   let defs = [];
   try {
-    defs = (await cdb.execute({ sql: "SELECT definition FROM pi_bot_defs ORDER BY bot_id", args: [] })).rows || [];
+    defs = (await cdb.execute({
+      sql: "SELECT definition, project_id FROM pi_bot_defs WHERE project_id = ? ORDER BY bot_id",
+      args: [Number(card.project_id)],
+    })).rows || [];
   } catch {
     return null;
   }
   for (const row of defs) {
     let def;
     try { def = JSON.parse(row.definition || "{}"); } catch { continue; }
-    if (def && def.session_dir && Number(def.project_id) === Number(card.project_id)) {
+    if (def && def.session_dir) {
       const sessionDir = String(def.session_dir);
       return { path: sessionDir + "/plans/" + Number(card.id) + ".md", sessionDir };
     }

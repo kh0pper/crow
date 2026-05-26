@@ -80,19 +80,20 @@ async function lockMapFor(db, cardIds) {
 
 // Derive the plan-file path for a card the same way the bridge does
 // (bridge.mjs:151-152 — `def.session_dir + "/plans/" + cardId + ".md"`),
-// resolving the owning bot as the first pi_bot_defs row whose
-// definition.project_id matches the card's project (single-bot-per-project
-// is the live reality; deterministic lowest-bot_id pick otherwise). Returns
-// { path, sessionDir } or null. Read-only here; the realpath-containment
-// assertion is enforced (cardId is integer-cast, session_dir from trusted
-// DB) so a crafted route param cannot escape the workspace.
+// resolving the owning bot as the first pi_bot_defs row whose project_id
+// (column, M3b — was: definition.project_id JSON) matches the card's
+// project. Single-bot-per-project is the live reality; deterministic
+// lowest-bot_id pick otherwise. Returns { path, sessionDir } or null.
+// Read-only here; the realpath-containment assertion is enforced (cardId
+// is integer-cast, session_dir from trusted DB) so a crafted route param
+// cannot escape the workspace.
 async function derivePlanPath(db, card) {
   if (card.project_id == null) return null;
   let defs = [];
   try {
     defs = (await db.execute({
-      sql: "SELECT definition FROM pi_bot_defs ORDER BY bot_id",
-      args: [],
+      sql: "SELECT definition, project_id FROM pi_bot_defs WHERE project_id = ? ORDER BY bot_id",
+      args: [Number(card.project_id)],
     })).rows || [];
   } catch {
     return null;
@@ -100,7 +101,7 @@ async function derivePlanPath(db, card) {
   for (const row of defs) {
     let def;
     try { def = JSON.parse(row.definition || "{}"); } catch { continue; }
-    if (def && def.session_dir && Number(def.project_id) === Number(card.project_id)) {
+    if (def && def.session_dir) {
       const sessionDir = String(def.session_dir);
       const path = sessionDir + "/plans/" + Number(card.id) + ".md";
       return { path, sessionDir };
