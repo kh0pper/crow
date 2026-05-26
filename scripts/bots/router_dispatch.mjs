@@ -43,10 +43,53 @@ const MAX_MESSAGES_PER_RUN = 10;
 // requests from) third parties on threads where the bot has been involved.
 // If a Public Information Officer or anyone else lands on a router-tracked
 // thread, the router treats their message as non-existent.
-const USER_SENDER_ALLOWLIST = new Set([
+//
+// M3b: this STATIC set is the fallback. The effective allowlist is computed
+// at run-start by computeAllowlist() below as the union of the static set
+// AND every contacts.email belonging to a project_member with invoke_bot=true
+// on a project that owns at least one enabled bot. Adding a teammate to a
+// bot-hosting project (via the Bot Builder Members section or crow_add_member)
+// gives them inbox access to the bot — no static config change needed.
+const STATIC_USER_SENDER_ALLOWLIST = new Set([
   "kevin.hopper1@gmail.com",
   "kevin.hopper@maestro.press",
 ]);
+
+let USER_SENDER_ALLOWLIST = new Set(STATIC_USER_SENDER_ALLOWLIST);
+
+async function computeAllowlist(db) {
+  const merged = new Set(STATIC_USER_SENDER_ALLOWLIST);
+  try {
+    // Pull active members with capabilities resolved to include invoke_bot
+    // (true by default for editor/owner; explicit false overrides) AND a
+    // contacts.email value, AND the project hosts at least one enabled bot.
+    const rows = db.prepare(`
+      SELECT DISTINCT lower(c.email) AS email, pm.role, pm.capabilities
+        FROM project_members pm
+        JOIN contacts c ON c.id = pm.contact_id
+       WHERE pm.revoked_at IS NULL
+         AND c.email IS NOT NULL AND c.email != ''
+         AND EXISTS (
+           SELECT 1 FROM pi_bot_defs pbd WHERE pbd.project_id = pm.project_id AND pbd.enabled = 1
+         )
+    `).all();
+    for (const r of rows) {
+      // Default capabilities by role: editor / owner get invoke_bot; viewer /
+      // guest do not. JSON override per-member can flip either way.
+      let allow = r.role === "owner" || r.role === "editor";
+      if (r.capabilities) {
+        try {
+          const ov = JSON.parse(r.capabilities);
+          if (typeof ov.invoke_bot === "boolean") allow = ov.invoke_bot;
+        } catch {}
+      }
+      if (allow && r.email) merged.add(r.email);
+    }
+  } catch (err) {
+    console.error(`[router] computeAllowlist failed — falling back to static: ${err.message}`);
+  }
+  return merged;
+}
 // USER REPLY-TO TARGET — every router-direct reply goes here regardless of
 // who the original From was. The agent path (gmail_send_threaded_to_self)
 // has its own allowlist at the tool layer — this is the router-script half.
@@ -394,6 +437,22 @@ async function main() {
   console.error(`[router] starting at ${new Date().toISOString()}`);
   const auth = makeAuth();
   const gmail = google.gmail({ version: "v1", auth });
+
+  // M3b: recompute the dynamic sender allowlist at run-start (union of
+  // STATIC list + project_members.invoke_bot=true on bot-hosting projects).
+  // Adding teammates via the Bot Builder Members section / crow_add_member
+  // is enough — no static config change required. Cached for the run.
+  try {
+    const allowDb = new Database(MPA_DB);
+    allowDb.pragma("busy_timeout = 10000");
+    USER_SENDER_ALLOWLIST = await computeAllowlist(allowDb);
+    allowDb.close();
+    const dyn = USER_SENDER_ALLOWLIST.size - STATIC_USER_SENDER_ALLOWLIST.size;
+    console.error(`[router] allowlist: ${USER_SENDER_ALLOWLIST.size} entries (${STATIC_USER_SENDER_ALLOWLIST.size} static + ${dyn} dynamic from project_members)`);
+  } catch (err) {
+    console.error(`[router] allowlist init failed — using STATIC only: ${err.message}`);
+    USER_SENDER_ALLOWLIST = new Set(STATIC_USER_SENDER_ALLOWLIST);
+  }
 
   // Resolve label ids
   const labels = (await gmail.users.labels.list({ userId: "me" })).data.labels || [];
