@@ -350,9 +350,14 @@ export async function handleInbound(opts) {
 
   // M3b: structured project header replaces the bare "Project #N" string.
   // Falls back to a one-liner for legacy bots with no project_spaces row.
-  const projectHeader = projectSpace
+  // M4 (job-searcher Step 0): also surface the gateway_thread_id so the bot
+  // can pass it verbatim to gmail_create_draft and stay threaded with the
+  // user. Without this line the bot has no way to discover its own thread.
+  const projectHeader = (projectSpace
     ? projectContextBlock(projectSpace, projectMembers)
-    : (projectId != null ? "PROJECT #" + projectId + " (no space metadata)" : "PROJECT: (none)");
+    : (projectId != null ? "PROJECT #" + projectId + " (no space metadata)" : "PROJECT: (none)"))
+    + "\nGATEWAY THREAD: gmail thread_id=" + gateway_thread_id
+    + " — pass this verbatim as thread_id when drafting your reply via gmail_create_draft.";
 
   let promptText;
   if (wantCard == null && !resume) {
@@ -419,6 +424,9 @@ export async function handleInbound(opts) {
       piSessionId, toolCalls: calls, replyPreview: text.slice(0, 120), stdoutClean: pi.badStdout === 0 };
     // M3b: audit every bot turn so the project timeline records what happened.
     // bot is the actor; project_audit_log shows human + bot events in one feed.
+    // M4 (job-searcher Step 0): also record the LIST of tool names invoked
+    // (not just the count) so the audit row is inspectable without tailing the
+    // pi session JSONL — verification check #10 reads payload.tool_names.
     appendAuditBridge(projectId, {
       actor_type: "bot", actor_id: bot_id, action: "bot.invoke",
       target: cardId != null ? ("card:" + cardId) : ("thread:" + gateway_thread_id),
@@ -426,6 +434,7 @@ export async function handleInbound(opts) {
         action: result.action,
         card_status: newCardStatus,
         tool_calls: calls.length,
+        tool_names: calls.map((c) => c.tool),
         model: resolved.key,
         escalated: resolved.escalated ? 1 : 0,
         session_id: session.id,
