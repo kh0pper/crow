@@ -64,8 +64,15 @@ function notify(method, params) { child.stdin.write(JSON.stringify({ jsonrpc: "2
       if (arg("thread")) args.thread_id = arg("thread");
       if (arg("reply-to")) args.reply_to = arg("reply-to");
     } else if (cmd === "reply") {
-      tool = "gmail_send_threaded_to_self";
+      // Use gmail_send_to_self (with thread_id) instead of gmail_send_threaded_to_self
+      // — functionally identical when thread_id is passed, but gmail_send_to_self
+      // ALSO supports reply_to (gmail_send_threaded_to_self does not). Reply-To
+      // routes the user's Gmail "Reply" click back to the bot's +alias so the
+      // bridge_tick keeps seeing follow-ups. Without it, user replies default to
+      // the bot's bare maestro.press address and the bot never sees them.
+      tool = "gmail_send_to_self";
       args = { to: arg("to"), subject: arg("subject"), body: arg("body"), thread_id: arg("thread") };
+      if (arg("reply-to")) args.reply_to = arg("reply-to");
     } else if (cmd === "search") {
       tool = "gmail_search_threads";
       args = { query: arg("query"), max_results: Number(arg("max", "5")) };
