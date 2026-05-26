@@ -12,6 +12,12 @@ import { z } from "zod";
 import { createDbClient } from "../db.js";
 import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
 import {
+  AclError,
+  assertLocalCapability,
+  assertProjectExists,
+  appendAudit,
+} from "../shared/project-acl.js";
+import {
   isAvailable,
   uploadObject,
   getPresignedUrl,
@@ -20,6 +26,43 @@ import {
   getBucketStats,
   isAllowedMimeType,
 } from "./s3-client.js";
+
+// M2b: when an upload claims a reference_id (e.g., source/note/blog_post), the
+// referenced row must belong to the same project_id (or both be project-less).
+// Otherwise file ACL and content ACL silently disagree.
+const REFERENCE_PROJECT_LOOKUP = {
+  research_source: "SELECT project_id FROM research_sources WHERE id = ?",
+  research_note:   "SELECT project_id FROM research_notes   WHERE id = ?",
+  // blog_posts has no project_id today (kept user-global); accept any.
+  blog_post:       null,
+};
+
+async function assertReferenceTargetProjectMatches(db, project_id, reference_type, reference_id) {
+  if (!reference_type || reference_id == null) return;
+  const sql = REFERENCE_PROJECT_LOOKUP[reference_type];
+  if (sql === undefined) return;  // unknown reference_type — no check (forward compat)
+  if (sql === null) return;        // explicit "no project on this target" pass-through
+  const { rows } = await db.execute({ sql, args: [reference_id] });
+  if (rows.length === 0) {
+    throw new AclError(
+      `Referenced ${reference_type}:${reference_id} does not exist`,
+      "ref_not_found"
+    );
+  }
+  const refProjectId = rows[0].project_id;
+  if (refProjectId != null && project_id != null && Number(refProjectId) !== Number(project_id)) {
+    throw new AclError(
+      `Referenced ${reference_type}:${reference_id} belongs to project #${refProjectId}, not #${project_id}`,
+      "ref_project_mismatch"
+    );
+  }
+  if (refProjectId != null && project_id == null) {
+    throw new AclError(
+      `Referenced ${reference_type}:${reference_id} belongs to project #${refProjectId} — set project_id to upload here`,
+      "ref_project_required"
+    );
+  }
+}
 
 const MAX_BASE64_SIZE = 1 * 1024 * 1024; // 1MB for base64 uploads
 const MAX_UPLOAD_SIZE = parseInt(process.env.MAX_UPLOAD_SIZE || "104857600", 10); // 100MB
@@ -46,16 +89,17 @@ export function createStorageServer(dbPath, options = {}) {
   // --- crow_upload_file ---
   server.tool(
     "crow_upload_file",
-    "Upload a small file (base64, <1MB) or get an HTTP upload URL for larger files",
+    "Upload a small file (base64, <1MB) or get an HTTP upload URL for larger files. When project_id is set, the upload is gated on write_files capability and the s3 key is scoped under the project's storage_prefix.",
     {
       file_name: z.string().max(500).describe("Original file name"),
       mime_type: z.string().max(200).optional().describe("MIME type (e.g. image/png)"),
       data_base64: z.string().max(1500000).optional().describe("Base64-encoded file data (for files <1MB)"),
       bucket: z.string().max(100).optional().describe("Target bucket (default: crow-files)"),
-      reference_type: z.string().max(100).optional().describe("What this file is attached to (e.g. blog_post, research_source)"),
+      reference_type: z.string().max(100).optional().describe("What this file is attached to (e.g. blog_post, research_source, research_note)"),
       reference_id: z.number().optional().describe("ID of the referenced item"),
+      project_id: z.number().optional().describe("Associate with a project space (M2). Caller must have write_files capability."),
     },
-    async ({ file_name, mime_type, data_base64, bucket, reference_type, reference_id }) => {
+    async ({ file_name, mime_type, data_base64, bucket, reference_type, reference_id, project_id }) => {
       if (!(await isAvailable())) return notConfiguredError();
 
       if (mime_type && !isAllowedMimeType(mime_type)) {
@@ -63,6 +107,33 @@ export function createStorageServer(dbPath, options = {}) {
           content: [{ type: "text", text: `Blocked: executable MIME type "${mime_type}" is not allowed.` }],
           isError: true,
         };
+      }
+
+      // M2b ACL: when uploading to a project, gate on write_files capability.
+      // Reference target must belong to the same project (no cross-project leaks).
+      let storagePrefix = null;
+      if (project_id != null) {
+        try {
+          await assertLocalCapability(db, project_id, "write_files");
+          await assertReferenceTargetProjectMatches(db, project_id, reference_type, reference_id);
+          const r = (await db.execute({
+            sql: "SELECT storage_prefix FROM project_spaces WHERE id = ?",
+            args: [project_id],
+          })).rows[0];
+          storagePrefix = r?.storage_prefix || null;
+        } catch (err) {
+          if (err instanceof AclError) return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
+          throw err;
+        }
+      } else {
+        // No project_id but a reference is given — still verify the target isn't
+        // pinned to a project we'd be silently bypassing.
+        try {
+          await assertReferenceTargetProjectMatches(db, null, reference_type, reference_id);
+        } catch (err) {
+          if (err instanceof AclError) return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
+          throw err;
+        }
       }
 
       // Check quota
@@ -76,7 +147,10 @@ export function createStorageServer(dbPath, options = {}) {
       }
 
       const timestamp = Date.now();
-      const s3Key = `${timestamp}-${file_name.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
+      const sanitizedName = file_name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const s3Key = storagePrefix
+        ? `${storagePrefix}${timestamp}-${sanitizedName}`
+        : `${timestamp}-${sanitizedName}`;
 
       if (data_base64) {
         // Direct base64 upload (small files only)
@@ -92,14 +166,22 @@ export function createStorageServer(dbPath, options = {}) {
 
         // Record in database
         await db.execute({
-          sql: `INSERT INTO storage_files (s3_key, original_name, mime_type, size_bytes, bucket, reference_type, reference_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          args: [s3Key, file_name, mime_type || null, buffer.length, bucket || "crow-files", reference_type || null, reference_id || null],
+          sql: `INSERT INTO storage_files (s3_key, original_name, mime_type, size_bytes, bucket, reference_type, reference_id, project_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [s3Key, file_name, mime_type || null, buffer.length, bucket || "crow-files", reference_type || null, reference_id || null, project_id ?? null],
         });
+
+        if (project_id != null) {
+          await appendAudit(db, {
+            project_id, actor_type: "local", action: "file.upload",
+            target: `file:${s3Key}`,
+            payload: { file_name, size_bytes: buffer.length, mime_type: mime_type || null },
+          });
+        }
 
         const url = await getPresignedUrl(s3Key, { bucket });
         return {
-          content: [{ type: "text", text: `Uploaded "${file_name}" (${(buffer.length / 1024).toFixed(1)}KB)\nKey: ${s3Key}\nDownload URL (1hr): ${url}` }],
+          content: [{ type: "text", text: `Uploaded "${file_name}" (${(buffer.length / 1024).toFixed(1)}KB)${project_id != null ? ` to project #${project_id}` : ""}\nKey: ${s3Key}\nDownload URL (1hr): ${url}` }],
         };
       } else {
         // Return presigned upload URL for larger files
@@ -107,13 +189,21 @@ export function createStorageServer(dbPath, options = {}) {
 
         // Pre-register in database (size will be updated after upload)
         await db.execute({
-          sql: `INSERT INTO storage_files (s3_key, original_name, mime_type, size_bytes, bucket, reference_type, reference_id)
-                VALUES (?, ?, ?, 0, ?, ?, ?)`,
-          args: [s3Key, file_name, mime_type || null, bucket || "crow-files", reference_type || null, reference_id || null],
+          sql: `INSERT INTO storage_files (s3_key, original_name, mime_type, size_bytes, bucket, reference_type, reference_id, project_id)
+                VALUES (?, ?, ?, 0, ?, ?, ?, ?)`,
+          args: [s3Key, file_name, mime_type || null, bucket || "crow-files", reference_type || null, reference_id || null, project_id ?? null],
         });
 
+        if (project_id != null) {
+          await appendAudit(db, {
+            project_id, actor_type: "local", action: "file.upload.presign",
+            target: `file:${s3Key}`,
+            payload: { file_name, mime_type: mime_type || null },
+          });
+        }
+
         return {
-          content: [{ type: "text", text: `Upload URL generated for "${file_name}":\n\nPUT ${uploadUrl}\n\nContent-Type: ${mime_type || "application/octet-stream"}\nMax size: ${(MAX_UPLOAD_SIZE / 1024 / 1024).toFixed(0)}MB\nExpires in 1 hour.\n\nAlternatively, use POST /storage/upload with multipart form data.` }],
+          content: [{ type: "text", text: `Upload URL generated for "${file_name}"${project_id != null ? ` (project #${project_id})` : ""}:\n\nPUT ${uploadUrl}\n\nContent-Type: ${mime_type || "application/octet-stream"}\nMax size: ${(MAX_UPLOAD_SIZE / 1024 / 1024).toFixed(0)}MB\nExpires in 1 hour.\n\nAlternatively, use POST /storage/upload with multipart form data.` }],
         };
       }
     }

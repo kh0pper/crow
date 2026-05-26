@@ -280,6 +280,16 @@ export function createProjectServer(dbPath, options = {}) {
       relevance_score: z.number().min(1).max(10).default(5).describe("How relevant to the project (1-10)"),
     },
     async (params) => {
+      // M2b ACL: writes to a project require write_sources on the project_spaces row.
+      // Sources with no project_id stay project-less (legacy / personal scope).
+      if (params.project_id != null) {
+        try {
+          await assertLocalCapability(db, params.project_id, "write_sources");
+        } catch (err) {
+          if (err instanceof AclError) return aclErrorToToolResult(err);
+          throw err;
+        }
+      }
       const generator = CITATION_GENERATORS[params.citation_format] || generateAPA;
       const primaryCitation = params.citation_apa || generator(params);
 
@@ -300,11 +310,22 @@ export function createProjectServer(dbPath, options = {}) {
         ],
       });
 
+      const sourceId = Number(result.lastInsertRowid);
+      if (params.project_id != null) {
+        await appendAudit(db, {
+          project_id: params.project_id,
+          actor_type: "local",
+          action: "source.add",
+          target: `source:${sourceId}`,
+          payload: { title: params.title, source_type: params.source_type },
+        });
+      }
+
       return {
         content: [
           {
             type: "text",
-            text: `Source added (id: ${Number(result.lastInsertRowid)}):\n  Title: ${params.title}\n  Type: ${params.source_type}\n  Citation (${params.citation_format}): ${primaryCitation}`,
+            text: `Source added (id: ${sourceId}):\n  Title: ${params.title}\n  Type: ${params.source_type}\n  Citation (${params.citation_format}): ${primaryCitation}`,
           },
         ],
       };
@@ -475,12 +496,28 @@ export function createProjectServer(dbPath, options = {}) {
       tags: z.string().max(500).optional().describe("Comma-separated tags"),
     },
     async ({ content, note_type, project_id, source_id, title, tags }) => {
+      // M2b ACL: writes to a project require write_notes capability.
+      if (project_id != null) {
+        try {
+          await assertLocalCapability(db, project_id, "write_notes");
+        } catch (err) {
+          if (err instanceof AclError) return aclErrorToToolResult(err);
+          throw err;
+        }
+      }
       const result = await db.execute({
         sql: "INSERT INTO research_notes (content, note_type, project_id, source_id, title, tags) VALUES (?, ?, ?, ?, ?, ?)",
         args: [content, note_type, project_id ?? null, source_id ?? null, title ?? null, tags ?? null],
       });
+      const noteId = Number(result.lastInsertRowid);
+      if (project_id != null) {
+        await appendAudit(db, {
+          project_id, actor_type: "local", action: "note.add",
+          target: `note:${noteId}`, payload: { note_type, source_id: source_id ?? null },
+        });
+      }
       return {
-        content: [{ type: "text", text: `Note added (id: ${Number(result.lastInsertRowid)}, type: ${note_type})` }],
+        content: [{ type: "text", text: `Note added (id: ${noteId}, type: ${note_type})` }],
       };
     }
   );
