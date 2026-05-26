@@ -275,6 +275,16 @@ await initTable("project_audit_log table", `
   CREATE INDEX IF NOT EXISTS idx_project_audit_project ON project_audit_log(project_id, created_at DESC);
 `);
 
+// Project-scoping for storage files: M2 ACL gates uploads on this column,
+// and crow_project_get joins on it for file counts. Added after the
+// project_spaces table exists (FK target). project_id = NULL means the
+// file is global / unscoped (legacy behavior preserved for existing rows).
+await addColumnIfMissing(
+  "storage_files",
+  "project_id",
+  "INTEGER REFERENCES project_spaces(id) ON DELETE SET NULL"
+);
+
 // One-shot migration: copy any research_projects rows that aren't already in
 // project_spaces. Idempotent — re-running init-db.js doesn't duplicate rows.
 // Computes the rich slug in JS (instead of via a SQLite UDF, which would have
