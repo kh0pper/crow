@@ -10,6 +10,17 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createDbClient, sanitizeFtsQuery, escapeLikePattern } from "../db.js";
 import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
+import {
+  AclError,
+  ROLES,
+  resolveCapabilities,
+  effectiveCapabilities,
+  assertCapability,
+  assertLocalCapability,
+  assertProjectExists,
+  appendAudit,
+} from "../shared/project-acl.js";
+import { slugify } from "../shared/slugify.js";
 
 const SOURCE_TYPES = [
   "web_article", "academic_paper", "book", "interview",
@@ -773,6 +784,336 @@ export function createProjectServer(dbPath, options = {}) {
       ],
     };
   });
+
+  // --- Project Space tools (Phase 1, M2: 2026-05-26) ---
+  //
+  // These tools operate on project_spaces (the new shareable space concept)
+  // not the legacy research_projects table. Existing tools (crow_create_project
+  // etc.) keep using research_projects; the M1 forward triggers mirror those
+  // writes into project_spaces, so legacy projects show up here automatically.
+
+  function aclErrorToToolResult(err) {
+    return {
+      content: [{ type: "text", text: `Error: ${err.message}` }],
+      isError: true,
+    };
+  }
+
+  server.tool(
+    "crow_workspace_dir",
+    "Returns the absolute filesystem workspace path for a project space. Bots and agents call this before writing artifacts. Returns the storage prefix (MinIO key prefix) too.",
+    {
+      project_id: z.number().describe("Project ID"),
+    },
+    async ({ project_id }) => {
+      try {
+        const project = await assertProjectExists(db, project_id);
+        const { rows } = await db.execute({
+          sql: "SELECT workspace_dir, storage_prefix FROM project_spaces WHERE id = ?",
+          args: [project_id],
+        });
+        const r = rows[0] || {};
+        return {
+          content: [{
+            type: "text",
+            text: `Project #${project_id} (${project.slug}):\n  workspace_dir: ${r.workspace_dir || "(unset)"}\n  storage_prefix: ${r.storage_prefix || "(unset)"}`,
+          }],
+        };
+      } catch (err) {
+        if (err instanceof AclError) return aclErrorToToolResult(err);
+        throw err;
+      }
+    }
+  );
+
+  server.tool(
+    "crow_project_get",
+    "Get full details for a project space: metadata, members (with capabilities), attached backends, source/note/file counts, and recent audit log entries.",
+    {
+      project_id: z.number().describe("Project ID"),
+    },
+    async ({ project_id }) => {
+      try {
+        await assertProjectExists(db, project_id, { allowArchived: true });
+
+        const projectRow = (await db.execute({
+          sql: `SELECT id, uuid, slug, name, description, type, status,
+                       workspace_dir, storage_prefix, tasks_db_uri, archived_at,
+                       created_at, updated_at, tags
+                  FROM project_spaces WHERE id = ?`,
+          args: [project_id],
+        })).rows[0];
+
+        const members = (await db.execute({
+          sql: `SELECT pm.id, pm.contact_id, pm.role, pm.capabilities, pm.mode,
+                       pm.granted_at, pm.revoked_at,
+                       c.display_name AS contact_name, c.crow_id
+                  FROM project_members pm
+                  LEFT JOIN contacts c ON c.id = pm.contact_id
+                 WHERE pm.project_id = ?
+                 ORDER BY pm.granted_at ASC`,
+          args: [project_id],
+        })).rows;
+
+        const backends = (await db.execute({
+          sql: `SELECT id, name, backend_type, status FROM data_backends WHERE project_id = ?`,
+          args: [project_id],
+        })).rows;
+
+        const counts = {
+          sources: (await db.execute({
+            sql: "SELECT COUNT(*) AS n FROM research_sources WHERE project_id = ?",
+            args: [project_id],
+          })).rows[0]?.n ?? 0,
+          notes: (await db.execute({
+            sql: "SELECT COUNT(*) AS n FROM research_notes WHERE project_id = ?",
+            args: [project_id],
+          })).rows[0]?.n ?? 0,
+          files: (await db.execute({
+            sql: "SELECT COUNT(*) AS n FROM storage_files WHERE project_id = ?",
+            args: [project_id],
+          })).rows[0]?.n ?? 0,
+        };
+
+        const recentAudit = (await db.execute({
+          sql: `SELECT created_at, actor_type, actor_id, action, target
+                  FROM project_audit_log
+                 WHERE project_id = ?
+                 ORDER BY created_at DESC LIMIT 10`,
+          args: [project_id],
+        })).rows;
+
+        let text = `Project #${projectRow.id}: ${projectRow.name}\n`;
+        text += `  slug: ${projectRow.slug}\n`;
+        text += `  uuid: ${projectRow.uuid}\n`;
+        text += `  type: ${projectRow.type}, status: ${projectRow.status}${projectRow.archived_at ? ` (archived ${projectRow.archived_at})` : ""}\n`;
+        if (projectRow.description) text += `  description: ${projectRow.description}\n`;
+        if (projectRow.tags) text += `  tags: ${projectRow.tags}\n`;
+        text += `  workspace_dir: ${projectRow.workspace_dir || "(unset)"}\n`;
+        text += `  storage_prefix: ${projectRow.storage_prefix || "(unset)"}\n`;
+        text += `  counts: ${counts.sources} sources, ${counts.notes} notes, ${counts.files} files\n`;
+        text += `\nMembers (${members.length}):\n`;
+        for (const m of members) {
+          const who = m.contact_id == null ? "local user" : (m.contact_name || `contact #${m.contact_id}`);
+          const status = m.revoked_at ? `revoked ${m.revoked_at}` : "active";
+          text += `  - ${who} — ${m.role} (${status})${m.mode ? ` [${m.mode}]` : ""}\n`;
+        }
+        text += `\nData backends (${backends.length}):\n`;
+        for (const b of backends) {
+          text += `  - #${b.id} ${b.name} (${b.backend_type}, ${b.status})\n`;
+        }
+        text += `\nRecent audit (${recentAudit.length}):\n`;
+        for (const a of recentAudit) {
+          text += `  ${a.created_at}  ${a.actor_type}${a.actor_id ? `:${a.actor_id}` : ""}  ${a.action}${a.target ? `  ${a.target}` : ""}\n`;
+        }
+
+        return { content: [{ type: "text", text }] };
+      } catch (err) {
+        if (err instanceof AclError) return aclErrorToToolResult(err);
+        throw err;
+      }
+    }
+  );
+
+  server.tool(
+    "crow_project_capabilities",
+    "Return the effective capability set for a member of a project space. Defaults to the local user; pass contact_id to ask about a specific contact.",
+    {
+      project_id: z.number().describe("Project ID"),
+      contact_id: z.number().optional().describe("Contact ID (omit for local user)"),
+    },
+    async ({ project_id, contact_id }) => {
+      try {
+        await assertProjectExists(db, project_id, { allowArchived: true });
+        const eff = await effectiveCapabilities(db, project_id, contact_id ?? null);
+        if (!eff) {
+          const who = contact_id == null ? "local user" : `contact #${contact_id}`;
+          return {
+            content: [{ type: "text", text: `${who} is not an active member of project #${project_id}.` }],
+          };
+        }
+        const lines = [`role: ${eff.role}`, "capabilities:"];
+        for (const [k, v] of Object.entries(eff.capabilities)) {
+          lines.push(`  ${k}: ${v ? "✓" : "✗"}`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      } catch (err) {
+        if (err instanceof AclError) return aclErrorToToolResult(err);
+        throw err;
+      }
+    }
+  );
+
+  server.tool(
+    "crow_list_members",
+    "List active members of a project space with their roles and resolved capabilities.",
+    {
+      project_id: z.number().describe("Project ID"),
+      include_revoked: z.boolean().optional().describe("Include revoked members (default false)"),
+    },
+    async ({ project_id, include_revoked }) => {
+      try {
+        await assertProjectExists(db, project_id, { allowArchived: true });
+        const sql = include_revoked
+          ? `SELECT pm.id, pm.contact_id, pm.role, pm.capabilities, pm.mode,
+                    pm.granted_at, pm.revoked_at, c.display_name, c.crow_id
+               FROM project_members pm LEFT JOIN contacts c ON c.id = pm.contact_id
+              WHERE pm.project_id = ? ORDER BY pm.granted_at ASC`
+          : `SELECT pm.id, pm.contact_id, pm.role, pm.capabilities, pm.mode,
+                    pm.granted_at, pm.revoked_at, c.display_name, c.crow_id
+               FROM project_members pm LEFT JOIN contacts c ON c.id = pm.contact_id
+              WHERE pm.project_id = ? AND pm.revoked_at IS NULL ORDER BY pm.granted_at ASC`;
+        const { rows } = await db.execute({ sql, args: [project_id] });
+        if (rows.length === 0) {
+          return { content: [{ type: "text", text: `No members on project #${project_id}.` }] };
+        }
+        const lines = rows.map((m) => {
+          const who = m.contact_id == null ? "local user" : (m.display_name || `contact #${m.contact_id}`);
+          const status = m.revoked_at ? ` (revoked ${m.revoked_at})` : "";
+          const caps = resolveCapabilities(m.role, m.capabilities);
+          const grants = Object.entries(caps).filter(([, v]) => v).map(([k]) => k).join(", ");
+          return `  #${m.id} ${who} — ${m.role}${m.mode ? ` [${m.mode}]` : ""}${status}\n        capabilities: ${grants || "(none)"}`;
+        });
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      } catch (err) {
+        if (err instanceof AclError) return aclErrorToToolResult(err);
+        throw err;
+      }
+    }
+  );
+
+  server.tool(
+    "crow_add_member",
+    "Add or update a member of a project space. Upsert: if the contact already has an active membership, the role/capabilities are updated. Requires manage_members capability on the project. Pass contact_id=null to set the local-user owner (typically only used at project create time).",
+    {
+      project_id: z.number().describe("Project ID"),
+      contact_id: z.number().nullable().optional().describe("Contact ID (omit/null = local user, owner-only)"),
+      role: z.enum(ROLES).describe("Role: owner | editor | viewer | guest"),
+      capabilities: z.string().max(2000).optional().describe("JSON object overriding role defaults, e.g. {\"invoke_bot\":false,\"query_backend:tea-data\":true}"),
+      mode: z.enum(["clone", "subscription"]).optional().describe("Share mode for remote members (Phase 1 ships clone)"),
+    },
+    async ({ project_id, contact_id, role, capabilities, mode }) => {
+      try {
+        await assertProjectExists(db, project_id);
+        // Require manage_members on the project from the local user UNLESS the
+        // caller is bootstrapping the local owner row (contact_id null + no
+        // existing local-owner row) — that's the create-project case.
+        const isLocalOwnerBootstrap = (contact_id == null);
+        if (!isLocalOwnerBootstrap) {
+          await assertLocalCapability(db, project_id, "manage_members");
+        }
+
+        if (capabilities) {
+          try { JSON.parse(capabilities); }
+          catch { return { content: [{ type: "text", text: "Error: capabilities must be valid JSON" }], isError: true }; }
+        }
+
+        // Upsert: look for an existing active row (matching the partial UNIQUE indexes).
+        const existing = (await db.execute({
+          sql: contact_id == null
+            ? `SELECT id FROM project_members WHERE project_id = ? AND contact_id IS NULL AND revoked_at IS NULL`
+            : `SELECT id FROM project_members WHERE project_id = ? AND contact_id = ? AND revoked_at IS NULL`,
+          args: contact_id == null ? [project_id] : [project_id, contact_id],
+        })).rows[0];
+
+        let memberId;
+        let action;
+        if (existing) {
+          await db.execute({
+            sql: `UPDATE project_members SET role = ?, capabilities = ?, mode = ? WHERE id = ?`,
+            args: [role, capabilities ?? null, mode ?? null, existing.id],
+          });
+          memberId = existing.id;
+          action = "member.update";
+        } else {
+          const r = await db.execute({
+            sql: `INSERT INTO project_members (project_id, contact_id, role, capabilities, mode)
+                  VALUES (?, ?, ?, ?, ?)`,
+            args: [project_id, contact_id ?? null, role, capabilities ?? null, mode ?? null],
+          });
+          memberId = Number(r.lastInsertRowid);
+          action = "member.add";
+        }
+
+        await appendAudit(db, {
+          project_id, actor_type: "local", action,
+          target: `member:${memberId}`,
+          payload: { role, contact_id: contact_id ?? null, mode: mode ?? null, capabilities_set: !!capabilities },
+        });
+
+        return { content: [{ type: "text", text: `${action === "member.add" ? "Added" : "Updated"} member #${memberId} (role: ${role}) on project #${project_id}.` }] };
+      } catch (err) {
+        if (err instanceof AclError) return aclErrorToToolResult(err);
+        throw err;
+      }
+    }
+  );
+
+  server.tool(
+    "crow_remove_member",
+    "Soft-revoke a member from a project space (sets revoked_at; does not delete the row). Requires manage_members. Cannot remove the local owner.",
+    {
+      project_id: z.number().describe("Project ID"),
+      contact_id: z.number().describe("Contact ID of the member to revoke"),
+    },
+    async ({ project_id, contact_id }) => {
+      try {
+        await assertProjectExists(db, project_id);
+        await assertLocalCapability(db, project_id, "manage_members");
+
+        const r = await db.execute({
+          sql: `UPDATE project_members
+                   SET revoked_at = datetime('now')
+                 WHERE project_id = ? AND contact_id = ? AND revoked_at IS NULL`,
+          args: [project_id, contact_id],
+        });
+        if (r.rowsAffected === 0) {
+          return { content: [{ type: "text", text: `No active membership for contact #${contact_id} on project #${project_id}.` }] };
+        }
+        await appendAudit(db, {
+          project_id, actor_type: "local", action: "member.revoke",
+          target: `contact:${contact_id}`,
+        });
+        return { content: [{ type: "text", text: `Revoked contact #${contact_id} from project #${project_id}.` }] };
+      } catch (err) {
+        if (err instanceof AclError) return aclErrorToToolResult(err);
+        throw err;
+      }
+    }
+  );
+
+  server.tool(
+    "crow_audit_log",
+    "Return recent audit log entries for a project space, ordered newest first.",
+    {
+      project_id: z.number().describe("Project ID"),
+      limit: z.number().max(500).default(50).describe("Max entries (default 50)"),
+      action: z.string().max(100).optional().describe("Filter by action (e.g., 'bot.invoke', 'member.add')"),
+    },
+    async ({ project_id, limit, action }) => {
+      try {
+        await assertProjectExists(db, project_id, { allowArchived: true });
+        let sql = `SELECT created_at, actor_type, actor_id, action, target, payload
+                     FROM project_audit_log WHERE project_id = ?`;
+        const args = [project_id];
+        if (action) { sql += " AND action = ?"; args.push(action); }
+        sql += " ORDER BY created_at DESC LIMIT ?";
+        args.push(limit);
+        const { rows } = await db.execute({ sql, args });
+        if (rows.length === 0) {
+          return { content: [{ type: "text", text: `No audit entries for project #${project_id}.` }] };
+        }
+        const lines = rows.map((a) => {
+          const actor = a.actor_id ? `${a.actor_type}:${a.actor_id}` : a.actor_type;
+          return `${a.created_at}  ${actor.padEnd(20)} ${a.action}${a.target ? `  ${a.target}` : ""}${a.payload ? `  ${a.payload}` : ""}`;
+        });
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      } catch (err) {
+        if (err instanceof AclError) return aclErrorToToolResult(err);
+        throw err;
+      }
+    }
+  );
 
   // --- Prompts ---
 
