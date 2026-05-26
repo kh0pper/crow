@@ -90,6 +90,25 @@ function acquireLock() {
       const body = (newest.plaintext_body || newest.snippet || "").trim();
       const msgDate = Date.parse(newest.date || (newest.headers && newest.headers.date) || "") || Date.now();
 
+      // Reply-recipient = actual sender of `newest` (so the bot's reply lands
+      // back in the user's inbox, not the bot's own mailbox). Was previously
+      // hardcoded to kevin.hopper@maestro.press which routed replies to the
+      // bot itself. The send-allowlist on gmail_send_threaded_to_self is also
+      // enforced here at the bridge level so we never even attempt to send to
+      // a non-allowlisted sender — that's the safety wall against a third
+      // party emailing the +alias and getting a bot reply.
+      const SENDER_ALLOWLIST = new Set([
+        "kevin.hopper1@gmail.com",
+        "kevin.hopper@maestro.press",
+      ]);
+      const fromHeader = String(newest.from || (newest.headers && newest.headers.from) || "");
+      const fromMatch = fromHeader.match(/<([^>]+)>/);
+      const replyTo = (fromMatch ? fromMatch[1] : fromHeader).trim().toLowerCase();
+      if (!SENDER_ALLOWLIST.has(replyTo)) {
+        console.log(`[tick] skip thread=${tid} — sender '${replyTo}' not in allowlist`);
+        continue;
+      }
+
       const sess = d.prepare("SELECT updated_at, status FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1").get(row.bot_id, tid);
       const sessTs = sess ? Date.parse(sess.updated_at + "Z") || 0 : 0;
       if (sess && sess.status !== "stopped" && sessTs >= msgDate) continue; // already processed this inbound
@@ -98,12 +117,12 @@ function acquireLock() {
         continue;
       }
 
-      console.log(`[tick] bot=${row.bot_id} thread=${tid} -> handleInbound (${body.slice(0, 50)})`);
+      console.log(`[tick] bot=${row.bot_id} thread=${tid} from=${replyTo} -> handleInbound (${body.slice(0, 50)})`);
       try {
         const r = await handleInbound({
           bot_id: row.bot_id, gateway_thread_id: tid, user_message: body,
           sendReply: async (text) => {
-            await gio(["reply", "--to", "kevin.hopper@maestro.press",
+            await gio(["reply", "--to", replyTo,
               "--subject", "Re: " + (newest.subject || (newest.headers && newest.headers.subject) || "pibot"),
               "--thread", tid, "--body", text]);
           },
