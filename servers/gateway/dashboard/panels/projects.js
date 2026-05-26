@@ -10,6 +10,13 @@
 import { escapeHtml, section, badge, dataTable, formField, actionBar, formatDate } from "../shared/components.js";
 import { t } from "../shared/i18n.js";
 import { sanitizeFtsQuery, escapeLikePattern } from "../../../db.js";
+import {
+  AclError,
+  ROLES,
+  resolveCapabilities,
+  assertLocalCapability,
+  appendAudit,
+} from "../../../shared/project-acl.js";
 
 const PAGE_SIZE = 20;
 
@@ -65,6 +72,64 @@ export default {
           });
         }
         return res.redirectAfterPost(`/dashboard/projects?view=${id}`);
+      }
+
+      // M2c: project members — add/update + remove. Both gated by ACL via the
+      // project-acl helper so the panel can't bypass capability checks.
+      if (action === "add_member") {
+        const id = parseInt(req.body.id, 10);
+        const contactId = req.body.contact_id ? parseInt(req.body.contact_id, 10) : null;
+        const role = req.body.role;
+        const capabilities = req.body.capabilities?.trim() || null;
+        if (!id || !contactId || !role) {
+          return res.redirectAfterPost(`/dashboard/projects?view=${id || ""}&error=add_member_missing_fields`);
+        }
+        try {
+          await assertLocalCapability(db, id, "manage_members");
+          if (capabilities) JSON.parse(capabilities);
+          const existing = (await db.execute({
+            sql: `SELECT id FROM project_members WHERE project_id = ? AND contact_id = ? AND revoked_at IS NULL`,
+            args: [id, contactId],
+          })).rows[0];
+          if (existing) {
+            await db.execute({
+              sql: `UPDATE project_members SET role = ?, capabilities = ? WHERE id = ?`,
+              args: [role, capabilities, existing.id],
+            });
+            await appendAudit(db, { project_id: id, actor_type: "local", action: "member.update", target: `member:${existing.id}`, payload: { role, contact_id: contactId, capabilities_set: !!capabilities } });
+          } else {
+            const r = await db.execute({
+              sql: `INSERT INTO project_members (project_id, contact_id, role, capabilities) VALUES (?, ?, ?, ?)`,
+              args: [id, contactId, role, capabilities],
+            });
+            await appendAudit(db, { project_id: id, actor_type: "local", action: "member.add", target: `member:${Number(r.lastInsertRowid)}`, payload: { role, contact_id: contactId, capabilities_set: !!capabilities } });
+          }
+        } catch (err) {
+          const msg = err instanceof AclError ? err.message : (err instanceof SyntaxError ? "invalid_capabilities_json" : err.message);
+          return res.redirectAfterPost(`/dashboard/projects?view=${id}&error=${encodeURIComponent(msg)}`);
+        }
+        return res.redirectAfterPost(`/dashboard/projects?view=${id}&tab=members`);
+      }
+
+      if (action === "remove_member") {
+        const id = parseInt(req.body.id, 10);
+        const contactId = parseInt(req.body.contact_id, 10);
+        if (!id || !contactId) {
+          return res.redirectAfterPost(`/dashboard/projects?view=${id || ""}&error=remove_member_missing_fields`);
+        }
+        try {
+          await assertLocalCapability(db, id, "manage_members");
+          await db.execute({
+            sql: `UPDATE project_members SET revoked_at = datetime('now')
+                  WHERE project_id = ? AND contact_id = ? AND revoked_at IS NULL`,
+            args: [id, contactId],
+          });
+          await appendAudit(db, { project_id: id, actor_type: "local", action: "member.revoke", target: `contact:${contactId}` });
+        } catch (err) {
+          const msg = err instanceof AclError ? err.message : err.message;
+          return res.redirectAfterPost(`/dashboard/projects?view=${id}&error=${encodeURIComponent(msg)}`);
+        }
+        return res.redirectAfterPost(`/dashboard/projects?view=${id}&tab=members`);
       }
     }
 
@@ -242,16 +307,29 @@ async function renderDetailView(db, projectId, layout, lang) {
 
   const project = projRows[0];
 
-  // Fetch related data in parallel
-  const [sourcesResult, notesResult, backendsResult] = await Promise.all([
+  // Fetch related data in parallel (incl. M2 project_spaces extras + members)
+  const [sourcesResult, notesResult, backendsResult, spaceResult, membersResult, contactsResult] = await Promise.all([
     db.execute({ sql: "SELECT id, title, source_type, url, verified, created_at FROM research_sources WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", args: [projectId] }),
     db.execute({ sql: "SELECT id, note_type, substr(content, 1, 200) as preview, created_at FROM research_notes WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", args: [projectId] }),
     db.execute({ sql: "SELECT id, name, backend_type, status FROM data_backends WHERE project_id = ?", args: [projectId] }),
+    db.execute({ sql: "SELECT slug, workspace_dir, storage_prefix FROM project_spaces WHERE id = ?", args: [projectId] }),
+    db.execute({
+      sql: `SELECT pm.id, pm.contact_id, pm.role, pm.capabilities, pm.mode, pm.granted_at, pm.revoked_at,
+                   c.display_name, c.crow_id
+              FROM project_members pm LEFT JOIN contacts c ON c.id = pm.contact_id
+             WHERE pm.project_id = ? AND pm.revoked_at IS NULL
+             ORDER BY pm.granted_at ASC`,
+      args: [projectId],
+    }),
+    db.execute({ sql: "SELECT id, display_name, crow_id FROM contacts WHERE is_blocked = 0 ORDER BY display_name, id LIMIT 200" }),
   ]);
 
   const sources = sourcesResult.rows;
   const notes = notesResult.rows;
   const backends = backendsResult.rows;
+  const space = spaceResult.rows[0] || {};
+  const members = membersResult.rows;
+  const contacts = contactsResult.rows;
 
   // Back link + status controls
   const backLink = `<a href="/dashboard/projects" style="color:var(--crow-accent);text-decoration:none;font-size:0.85rem">← All Projects</a>`;
@@ -321,8 +399,78 @@ async function renderDetailView(db, projectId, layout, lang) {
     backendsHtml = section(`Data Backends (${backends.length})`, dataTable(["Name", "Type", "Status"], rows), { delay: 300 });
   }
 
+  // M2c: Members section. Shows active members with role + resolved capabilities,
+  // plus a small "Add member" form (contacts dropdown + role select).
+  // Per-member capability override JSON is rendered as a textarea — M5 will
+  // promote this to a proper editor.
+  let membersHtml;
+  if (members.length === 0) {
+    membersHtml = `<p style="color:var(--crow-text-muted);font-size:0.85rem">No members yet. Add one below.</p>`;
+  } else {
+    const rows = members.map(m => {
+      const who = m.contact_id == null
+        ? "<i>local user</i>"
+        : escapeHtml(m.display_name || m.crow_id || `contact #${m.contact_id}`);
+      const caps = resolveCapabilities(m.role, m.capabilities);
+      const granted = Object.entries(caps).filter(([, v]) => v).map(([k]) => k);
+      const capLabel = granted.length === Object.keys(caps).length
+        ? `<span style="color:var(--crow-text-muted);font-size:0.75rem">all (${granted.length})</span>`
+        : `<span style="font-size:0.75rem;color:var(--crow-text-secondary)" title="${escapeHtml(granted.join(', '))}">${granted.length} of ${Object.keys(caps).length}</span>`;
+      const removeForm = m.contact_id == null
+        ? `<span style="color:var(--crow-text-muted);font-size:0.75rem">—</span>`
+        : `<form method="POST" style="display:inline" onsubmit="return confirm('Revoke ${escapeHtml(who).replace(/'/g, "&#39;")}?')">
+             <input type="hidden" name="action" value="remove_member">
+             <input type="hidden" name="id" value="${project.id}">
+             <input type="hidden" name="contact_id" value="${m.contact_id}">
+             <button type="submit" style="padding:0.2rem 0.5rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-secondary);cursor:pointer;font-size:0.7rem">revoke</button>
+           </form>`;
+      return [
+        who,
+        badge(m.role, "info"),
+        capLabel,
+        m.mode ? badge(m.mode, "draft") : `<span style="color:var(--crow-text-muted);font-size:0.75rem">local</span>`,
+        `<span style="font-size:0.75rem">${formatDate(m.granted_at, lang)}</span>`,
+        removeForm,
+      ];
+    });
+    membersHtml = dataTable(["Who", "Role", "Capabilities", "Mode", "Since", ""], rows);
+  }
+
+  const contactOptions = contacts.map(c =>
+    `<option value="${c.id}">${escapeHtml(c.display_name || c.crow_id || `contact #${c.id}`)}</option>`
+  ).join("");
+  const roleOptions = ROLES.map(r => `<option value="${r}"${r === "viewer" ? " selected" : ""}>${r}</option>`).join("");
+
+  const addMemberForm = `
+    <form method="POST" style="margin-top:0.75rem;padding:0.75rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-card);display:flex;gap:0.5rem;flex-wrap:wrap;align-items:end">
+      <input type="hidden" name="action" value="add_member">
+      <input type="hidden" name="id" value="${project.id}">
+      <label style="display:flex;flex-direction:column;font-size:0.75rem;color:var(--crow-text-secondary)">Contact
+        <select name="contact_id" required style="padding:0.4rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-primary);min-width:180px">
+          <option value="">— pick contact —</option>
+          ${contactOptions}
+        </select>
+      </label>
+      <label style="display:flex;flex-direction:column;font-size:0.75rem;color:var(--crow-text-secondary)">Role
+        <select name="role" required style="padding:0.4rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-primary)">${roleOptions}</select>
+      </label>
+      <label style="display:flex;flex-direction:column;font-size:0.75rem;color:var(--crow-text-secondary);flex:1;min-width:220px">Capability overrides (JSON, optional)
+        <input type="text" name="capabilities" placeholder='{"invoke_bot":false}' style="padding:0.4rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-primary);font-family:monospace;font-size:0.8rem">
+      </label>
+      <button type="submit" style="padding:0.5rem 1rem;background:var(--crow-accent);border:none;border-radius:var(--crow-radius-pill);color:white;cursor:pointer">Add</button>
+    </form>`;
+
+  // Workspace info (slug, dir, prefix) from project_spaces — shown next to overview.
+  const workspaceInfo = (space.slug || space.workspace_dir) ? `
+    <div style="margin-bottom:1rem;padding:0.5rem 0.75rem;background:var(--crow-bg-surface);border:1px solid var(--crow-border);border-radius:var(--crow-radius-card);font-size:0.8rem;color:var(--crow-text-secondary)">
+      ${space.slug ? `<div><span style="color:var(--crow-text-muted)">slug:</span> <code style="font-size:0.8rem">${escapeHtml(space.slug)}</code></div>` : ""}
+      ${space.workspace_dir ? `<div><span style="color:var(--crow-text-muted)">workspace:</span> <code style="font-size:0.8rem">${escapeHtml(space.workspace_dir)}</code></div>` : ""}
+      ${space.storage_prefix ? `<div><span style="color:var(--crow-text-muted)">storage prefix:</span> <code style="font-size:0.8rem">${escapeHtml(space.storage_prefix)}</code></div>` : ""}
+    </div>` : "";
+
   const content = `
-    ${section("Overview", overviewHtml)}
+    ${section("Overview", overviewHtml + workspaceInfo)}
+    ${section(`Members (${members.length})`, membersHtml + addMemberForm, { delay: 50 })}
     ${section(`Sources (${sources.length})`, sourcesHtml, { delay: 100 })}
     ${section(`Notes (${notes.length})`, notesHtml, { delay: 200 })}
     ${backendsHtml}
