@@ -1,6 +1,7 @@
 import { createDbClient, resolveDataDir, isSqliteVecAvailable } from "../servers/db.js";
 import { mkdirSync } from "fs";
 import { resolve } from "path";
+import { slugify, workspacePathFor, storagePrefixFor } from "../servers/shared/slugify.js";
 
 // Ensure data directory exists
 const dataDir = process.env.CROW_DB_PATH
@@ -192,6 +193,211 @@ async function addUuidColumn(table) {
 for (const t of ["research_projects", "research_sources", "research_notes", "data_backends", "storage_files"]) {
   await addUuidColumn(t);
 }
+
+// --- Project Space redesign Phase 1, M1 (2026-05-26) ---
+// Promote `research_projects` (which is overloaded across research / data_connector
+// / learner_profile / bot scope / Kanban container) into a first-class shareable
+// space with members, capabilities, workspace dir, audit log.
+//
+// Design constraints (see ~/.claude/plans/yeah-let-s-do-some-shimmering-key.md):
+//   - `research_projects` stays a real, writable table. `project_spaces` sits
+//     alongside it. Triggers mirror rp → ps so legacy callers (12+ INSERT sites)
+//     keep working with zero coordination during the transition window.
+//   - `type` is NOT CHECK-constrained: maker-lab uses 'learner_profile' today;
+//     the constraint lands when the maker-lab split happens.
+//   - Two partial UNIQUE indexes on project_members instead of one composite —
+//     SQLite UNIQUE treats NULLs as distinct, so `UNIQUE(project_id, contact_id)`
+//     does NOT prevent two NULL-contact (local owner) rows.
+//   - Trigger uses a SQL-only fallback slug. New code paths (M2+) compute the
+//     richer slugify() in JS before writing directly to project_spaces.
+await initTable("project_spaces table", `
+  CREATE TABLE IF NOT EXISTS project_spaces (
+    id                   INTEGER PRIMARY KEY,
+    uuid                 TEXT NOT NULL UNIQUE DEFAULT (lower(hex(randomblob(16)))),
+    slug                 TEXT NOT NULL UNIQUE,
+    name                 TEXT NOT NULL,
+    description          TEXT,
+    type                 TEXT NOT NULL DEFAULT 'general',
+    status               TEXT NOT NULL DEFAULT 'active'
+                           CHECK (status IN ('active','paused','completed','archived')),
+    owner_contact_id     INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
+    workspace_dir        TEXT,
+    storage_prefix       TEXT,
+    tasks_db_uri         TEXT,
+    db_path              TEXT,
+    origin_instance_id   TEXT,
+    tags                 TEXT,
+    archived_at          TEXT,
+    created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_project_spaces_slug   ON project_spaces(slug);
+  CREATE INDEX IF NOT EXISTS idx_project_spaces_status ON project_spaces(status);
+  CREATE INDEX IF NOT EXISTS idx_project_spaces_type   ON project_spaces(type);
+`);
+
+await initTable("project_members table", `
+  CREATE TABLE IF NOT EXISTS project_members (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid                     TEXT NOT NULL UNIQUE DEFAULT (lower(hex(randomblob(16)))),
+    project_id               INTEGER NOT NULL REFERENCES project_spaces(id) ON DELETE CASCADE,
+    contact_id               INTEGER REFERENCES contacts(id) ON DELETE CASCADE,
+    role                     TEXT NOT NULL CHECK (role IN ('owner','editor','viewer','guest')),
+    capabilities             TEXT,
+    mode                     TEXT,
+    granted_at               TEXT NOT NULL DEFAULT (datetime('now')),
+    granted_by_contact_id    INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
+    revoked_at               TEXT,
+    origin_instance_id       TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_project_members_project ON project_members(project_id);
+  CREATE INDEX IF NOT EXISTS idx_project_members_contact ON project_members(contact_id);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_project_members_local_owner
+    ON project_members(project_id) WHERE contact_id IS NULL AND revoked_at IS NULL;
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_project_members_remote
+    ON project_members(project_id, contact_id) WHERE contact_id IS NOT NULL AND revoked_at IS NULL;
+`);
+
+await initTable("project_audit_log table", `
+  CREATE TABLE IF NOT EXISTS project_audit_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id    INTEGER NOT NULL REFERENCES project_spaces(id) ON DELETE CASCADE,
+    actor_type    TEXT NOT NULL CHECK (actor_type IN ('local','contact','bot','system')),
+    actor_id      TEXT,
+    action        TEXT NOT NULL,
+    target        TEXT,
+    payload       TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_project_audit_project ON project_audit_log(project_id, created_at DESC);
+`);
+
+// One-shot migration: copy any research_projects rows that aren't already in
+// project_spaces. Idempotent — re-running init-db.js doesn't duplicate rows.
+// Computes the rich slug in JS (instead of via a SQLite UDF, which would have
+// to be registered on every libsql connection).
+async function migrateLegacyProjectsToSpaces() {
+  const dataDir = process.env.CROW_DB_PATH
+    ? resolve(process.env.CROW_DB_PATH, "..")
+    : resolveDataDir();
+
+  const { rows: legacy } = await db.execute({
+    sql: `SELECT rp.id, rp.uuid, rp.name, rp.description, rp.type, rp.status, rp.tags, rp.created_at, rp.updated_at
+            FROM research_projects rp
+            LEFT JOIN project_spaces ps ON ps.id = rp.id
+           WHERE ps.id IS NULL`,
+  });
+  if (legacy.length === 0) return;
+
+  for (const r of legacy) {
+    const slug = slugify(r.name, r.id);
+    const workspaceDir = workspacePathFor(dataDir, slug);
+    const storagePrefix = storagePrefixFor(slug);
+
+    try {
+      mkdirSync(workspaceDir, { recursive: true });
+    } catch (err) {
+      console.warn(`Warning: could not create workspace dir ${workspaceDir}: ${err.message}`);
+    }
+
+    try {
+      await db.execute({
+        sql: `INSERT INTO project_spaces
+                (id, uuid, slug, name, description, type, status, tags,
+                 workspace_dir, storage_prefix, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          r.id,
+          r.uuid ?? null,
+          slug,
+          r.name,
+          r.description ?? null,
+          r.type ?? "general",
+          r.status ?? "active",
+          r.tags ?? null,
+          workspaceDir,
+          storagePrefix,
+          r.created_at ?? null,
+          r.updated_at ?? null,
+        ],
+      });
+      await db.execute({
+        sql: `INSERT INTO project_members (project_id, contact_id, role, granted_at)
+              VALUES (?, NULL, 'owner', ?)`,
+        args: [r.id, r.created_at ?? null],
+      });
+      console.log(`Migrated research_project #${r.id} → project_spaces (slug: ${slug})`);
+    } catch (err) {
+      console.warn(`Warning: could not migrate research_project #${r.id}: ${err.message}`);
+    }
+  }
+}
+await migrateLegacyProjectsToSpaces();
+
+// Forward triggers: research_projects → project_spaces.
+//
+// Legacy INSERT callers (12+ in tree as of M1) keep working transparently.
+// The trigger generates a SQL-only fallback slug — close enough for the legacy
+// path. New code (M2+) writes to project_spaces directly using slugify().
+//
+// SQL slug: lowercase, replace common separators with `-`, suffix with id.
+// Doesn't strip every Unicode oddity but the trailing -<id> guarantees uniqueness.
+//
+// Triggers do NOT fire on INSERT … ON CONFLICT DO NOTHING when the conflict
+// triggers (SQLite UPSERT doc), so the trigger's ON CONFLICT clause is safe
+// from recursing in either direction.
+await initTable("project_spaces forward triggers", `
+  CREATE TRIGGER IF NOT EXISTS tr_rp_to_ps_ins
+  AFTER INSERT ON research_projects FOR EACH ROW
+  BEGIN
+    INSERT INTO project_spaces (id, uuid, slug, name, description, type, status, tags, created_at, updated_at)
+    VALUES (
+      NEW.id,
+      COALESCE(NEW.uuid, lower(hex(randomblob(16)))),
+      lower(replace(replace(replace(replace(replace(COALESCE(NEW.name,'project'),' ','-'),'_','-'),'/','-'),'.','-'),'—','-')) || '-' || NEW.id,
+      NEW.name,
+      NEW.description,
+      COALESCE(NEW.type, 'general'),
+      COALESCE(NEW.status, 'active'),
+      NEW.tags,
+      COALESCE(NEW.created_at, datetime('now')),
+      COALESCE(NEW.updated_at, datetime('now'))
+    )
+    ON CONFLICT(id) DO NOTHING;
+
+    INSERT INTO project_members (project_id, contact_id, role, granted_at)
+    SELECT NEW.id, NULL, 'owner', COALESCE(NEW.created_at, datetime('now'))
+    WHERE NOT EXISTS (
+      SELECT 1 FROM project_members
+       WHERE project_id = NEW.id AND contact_id IS NULL AND revoked_at IS NULL
+    );
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS tr_rp_to_ps_upd
+  AFTER UPDATE ON research_projects FOR EACH ROW
+  BEGIN
+    UPDATE project_spaces
+       SET name        = NEW.name,
+           description = NEW.description,
+           type        = COALESCE(NEW.type, type),
+           status      = COALESCE(NEW.status, status),
+           tags        = NEW.tags,
+           updated_at  = COALESCE(NEW.updated_at, datetime('now'))
+     WHERE id = NEW.id;
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS tr_rp_to_ps_del
+  AFTER DELETE ON research_projects FOR EACH ROW
+  BEGIN
+    UPDATE project_spaces
+       SET archived_at = datetime('now'),
+           updated_at  = datetime('now')
+     WHERE id = OLD.id AND archived_at IS NULL;
+  END;
+`);
 
 await initTable("sources FTS index", `
   CREATE VIRTUAL TABLE IF NOT EXISTS sources_fts USING fts5(
