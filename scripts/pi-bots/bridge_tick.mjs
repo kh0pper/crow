@@ -87,7 +87,13 @@ function acquireLock() {
       const to = String(newest.to || (newest.headers && newest.headers.to) || "");
       const isUserInbound = to.includes("+" + plus + "@");
       if (!isUserInbound) continue;                   // newest is a bot reply -> nothing to do
-      const body = (newest.plaintext_body || newest.snippet || "").trim();
+      // Gmail MCP returns the full plain-text body under `body_text` (current
+       // field name) or `plaintext_body` (legacy). Both ~unlimited length.
+       // `snippet` is Gmail's 200-char preview — last-resort fallback ONLY
+       // when both full-body fields are absent. Previously this read
+       // plaintext_body || snippet, which silently truncated EVERY inbound to
+       // ~200 chars (bot only saw the message preview, not what the user typed).
+      const body = (newest.body_text || newest.plaintext_body || newest.snippet || "").trim();
       const msgDate = Date.parse(newest.date || (newest.headers && newest.headers.date) || "") || Date.now();
 
       // Reply-recipient = actual sender of `newest` (so the bot's reply lands
