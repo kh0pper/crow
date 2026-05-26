@@ -351,9 +351,25 @@ export default {
         const botId = b.bot_id;
         let msg;
         try {
-          const row = (await db.execute({ sql: "SELECT definition FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0];
+          // M3b: also fetch project_id so we can resolve the actual sessionDir
+          // (workspace path) the bridge will use; the .mcp.json must live next
+          // to where pi runs, not at the legacy def.session_dir.
+          const row = (await db.execute({
+            sql: "SELECT definition, project_id FROM pi_bot_defs WHERE bot_id=?",
+            args: [botId],
+          })).rows[0];
           const def = JSON.parse(row.definition || "{}");
-          const r = writeBotMcp(def);
+          let sessionDir = def.session_dir;
+          if (row.project_id != null) {
+            const ws = (await db.execute({
+              sql: "SELECT workspace_dir FROM project_spaces WHERE id=?",
+              args: [row.project_id],
+            })).rows[0];
+            if (ws && ws.workspace_dir) {
+              sessionDir = ws.workspace_dir + "/bots/" + botId;
+            }
+          }
+          const r = writeBotMcp(def, { sessionDir });
           msg = `wrote ${r.path} (servers: ${r.servers.join(", ") || "none"}` +
             (r.warnings.length ? `; ⚠ ${r.warnings.join("; ")}` : "") +
             (r.journalGuarded.length ? `; journal-guarded: ${r.journalGuarded.join(",")}` : "") + ")";

@@ -27,7 +27,11 @@
  */
 import { execFileSync, spawnSync } from "node:child_process";
 
-const PI_CLI_MARK = "@mariozechner/pi-coding-agent/dist/cli.js";
+// Package was renamed from @mariozechner/pi-coding-agent to
+// @earendil-works/pi-coding-agent. countLivePi() greps process command lines
+// for this marker — getting it wrong means the concurrency gate always reads
+// 0 live pi processes and could fan out unbounded.
+const PI_CLI_MARK = "@earendil-works/pi-coding-agent/dist/cli.js";
 
 export const LIFECYCLE_DEFAULTS = {
   maxPi: Number(process.env.PIBOT_MAX_PI || 2), // global concurrency cap
