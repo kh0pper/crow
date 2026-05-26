@@ -52,6 +52,16 @@ import { InstanceSyncManager } from "./instance-sync.js";
 import { NostrManager } from "./nostr.js";
 import { createNotification } from "../shared/notifications.js";
 import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
+import {
+  AclError,
+  ROLES,
+  assertLocalCapability,
+  appendAudit,
+} from "../shared/project-acl.js";
+import { slugify, workspacePathFor, storagePrefixFor } from "../shared/slugify.js";
+import { mkdirSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
+import { resolveDataDir } from "../db.js";
 
 // Singleton sharing managers — Hyperswarm and Nostr connections are shared across
 // all McpServer instances (stdio, gateway per-session, router dispatch).
@@ -841,6 +851,22 @@ export function createSharingServer(dbPath, options = {}) {
             args: [payload.payload.content || ""],
           });
           importedItemId = Number(result.lastInsertRowid);
+        } else if (payload.share_type === "project" && payload.mode === "clone" && payload.payload) {
+          // M4: clone-bundle ingestion. Creates a new project_spaces row
+          // with `-clone-N` slug + carries sources/notes/audit. Owner is
+          // the local user (the operator who received it). Returns the
+          // new project_id and a summary for the inbox row.
+          try {
+            const summary = await applyProjectCloneBundle(payload.payload, c.id);
+            importedItemId = summary.project_id;
+            console.log(
+              `[sharing] Received project clone from ${crowId} → new project_spaces #${summary.project_id} (slug: ${summary.slug}, ` +
+              `${summary.sources_imported} sources, ${summary.notes_imported} notes, ${summary.audit_imported} audit, ` +
+              `${summary.backends_in_manifest} backend manifests, ${summary.files_in_manifest} file manifests)`
+            );
+          } catch (cloneErr) {
+            console.warn(`[sharing] Failed to import project clone from ${crowId}: ${cloneErr.message}`);
+          }
         } else if (payload.share_type === "kb_article") {
           try {
             const p = payload.payload;
@@ -1107,19 +1133,234 @@ export function createSharingServer(dbPath, options = {}) {
     }
   );
 
+  // --- Project clone-share helpers (Phase 1, M4: 2026-05-26) ---
+
+  // Build a point-in-time clone bundle for a project. The bundle is the
+  // entire payload that travels over Hyperswarm to the recipient. Includes:
+  //   - project metadata (project_spaces row, minus instance-specific fields)
+  //   - all research_sources + research_notes belonging to the project
+  //   - data_backends MANIFESTS (env-var names only; secrets never leave the
+  //     origin)
+  //   - storage_files manifest (key + size + presigned URL valid 24h);
+  //     receivers can pull these out-of-band if they want the blobs
+  //   - audit log up to the snapshot timestamp
+  // Note: subscription (per-project Hypercore feed) is deferred to a later
+  // milestone. Clone is one-shot and stays a frozen snapshot on the receiver.
+  async function buildProjectCloneBundle(projectId) {
+    const project = (await db.execute({
+      sql: `SELECT id, uuid, slug, name, description, type, tags, created_at, updated_at,
+                   workspace_dir, storage_prefix
+              FROM project_spaces WHERE id = ?`,
+      args: [projectId],
+    })).rows[0];
+    if (!project) throw new Error(`project #${projectId} not found in project_spaces`);
+
+    const sources = (await db.execute({
+      sql: `SELECT * FROM research_sources WHERE project_id = ?`,
+      args: [projectId],
+    })).rows;
+
+    const notes = (await db.execute({
+      sql: `SELECT * FROM research_notes WHERE project_id = ?`,
+      args: [projectId],
+    })).rows;
+
+    const backends = (await db.execute({
+      sql: `SELECT id, uuid, name, backend_type, connection_ref, tags FROM data_backends WHERE project_id = ?`,
+      args: [projectId],
+    })).rows;
+
+    const auditLog = (await db.execute({
+      sql: `SELECT actor_type, actor_id, action, target, payload, created_at
+              FROM project_audit_log
+             WHERE project_id = ?
+             ORDER BY created_at ASC`,
+      args: [projectId],
+    })).rows;
+
+    const files = (await db.execute({
+      sql: `SELECT s3_key, original_name, mime_type, size_bytes, bucket, reference_type, reference_id, uuid
+              FROM storage_files WHERE project_id = ?`,
+      args: [projectId],
+    })).rows;
+
+    return {
+      bundle_version: 1,
+      snapshot_at: new Date().toISOString(),
+      origin_instance_id: localInstanceId,
+      project,        // includes uuid + slug
+      sources,
+      notes,
+      backends,       // env var names only — no secrets
+      audit_log: auditLog,
+      file_manifest: files,
+    };
+  }
+
+  // Apply an incoming clone bundle. Creates a new project_spaces row with a
+  // distinct local id + a `-clone-N` slug suffix, then inserts the carried
+  // sources/notes/audit with NEW local int IDs (UUIDs preserved). Does NOT
+  // open data_backends or transfer files (manifests only — operator action
+  // required for backends; files can be pulled out-of-band via the manifest).
+  async function applyProjectCloneBundle(bundle, originContactId) {
+    if (!bundle || bundle.bundle_version !== 1) {
+      throw new Error("incompatible bundle version");
+    }
+    const orig = bundle.project;
+
+    // Compute next -clone-N slug suffix
+    const baseSlug = orig.slug || slugify(orig.name || "imported");
+    let suffix = 1;
+    let candidate = `${baseSlug}-clone-${suffix}`;
+    while (true) {
+      const hit = (await db.execute({
+        sql: "SELECT 1 FROM project_spaces WHERE slug = ?",
+        args: [candidate],
+      })).rows[0];
+      if (!hit) break;
+      suffix += 1;
+      candidate = `${baseSlug}-clone-${suffix}`;
+    }
+    const newSlug = candidate;
+
+    // Compute workspace dir + storage prefix for the new clone
+    const dataDir = process.env.CROW_DB_PATH
+      ? resolvePath(process.env.CROW_DB_PATH, "..")
+      : resolveDataDir();
+    const workspaceDir = workspacePathFor(dataDir, newSlug);
+    const storagePref = storagePrefixFor(newSlug);
+    try { mkdirSync(workspaceDir, { recursive: true }); } catch {}
+
+    // Insert the new project_spaces row. New local id (autoincremented),
+    // new local UUID, name suffixed to disambiguate. origin_instance_id
+    // = the bundle's origin so paired-instance sync can dedupe later.
+    const insProject = await db.execute({
+      sql: `INSERT INTO project_spaces
+              (uuid, slug, name, description, type, status, tags,
+               workspace_dir, storage_prefix, origin_instance_id, created_at, updated_at)
+            VALUES (lower(hex(randomblob(16))), ?, ?, ?, ?, 'active', ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+      args: [
+        newSlug,
+        `${orig.name} (clone)`,
+        orig.description ?? null,
+        orig.type ?? "general",
+        orig.tags ?? null,
+        workspaceDir,
+        storagePref,
+        bundle.origin_instance_id ?? null,
+      ],
+    });
+    const newProjectId = Number(insProject.lastInsertRowid);
+
+    // Owner row for the local user on this clone.
+    await db.execute({
+      sql: `INSERT INTO project_members (project_id, contact_id, role, mode, granted_by_contact_id)
+            VALUES (?, NULL, 'owner', 'clone', ?)`,
+      args: [newProjectId, originContactId ?? null],
+    });
+
+    // Source id remap so notes that reference a source still point at the
+    // right (newly inserted) row.
+    const sourceIdMap = new Map();
+    for (const s of bundle.sources || []) {
+      const r = await db.execute({
+        sql: `INSERT INTO research_sources
+                (project_id, title, source_type, url, authors, publication_date, publisher,
+                 doi, isbn, abstract, content_summary, full_text, citation_apa,
+                 retrieval_date, retrieval_method, verified, verification_notes,
+                 tags, relevance_score, uuid, origin_instance_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          newProjectId,
+          s.title ?? "(untitled)",
+          s.source_type ?? "other",
+          s.url ?? null, s.authors ?? null, s.publication_date ?? null, s.publisher ?? null,
+          s.doi ?? null, s.isbn ?? null, s.abstract ?? null, s.content_summary ?? null,
+          s.full_text ?? null, s.citation_apa ?? "(no citation)",
+          s.retrieval_date ?? null, s.retrieval_method ?? null,
+          s.verified ?? 0, s.verification_notes ?? null,
+          s.tags ?? null, s.relevance_score ?? 5,
+          s.uuid ?? null, bundle.origin_instance_id ?? null,
+        ],
+      });
+      if (s.id != null) sourceIdMap.set(s.id, Number(r.lastInsertRowid));
+    }
+
+    for (const n of bundle.notes || []) {
+      const remappedSourceId = (n.source_id != null && sourceIdMap.has(n.source_id))
+        ? sourceIdMap.get(n.source_id)
+        : null;
+      await db.execute({
+        sql: `INSERT INTO research_notes
+                (project_id, source_id, title, content, note_type, tags, uuid, origin_instance_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          newProjectId, remappedSourceId,
+          n.title ?? null, n.content ?? "",
+          n.note_type ?? "note",
+          n.tags ?? null,
+          n.uuid ?? null, bundle.origin_instance_id ?? null,
+        ],
+      });
+    }
+
+    // Audit log entries from the origin's timeline, then append the local
+    // share.received entry to mark the boundary.
+    for (const a of bundle.audit_log || []) {
+      await db.execute({
+        sql: `INSERT INTO project_audit_log (project_id, actor_type, actor_id, action, target, payload, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          newProjectId,
+          a.actor_type ?? "system",
+          a.actor_id ?? null,
+          a.action ?? "(unknown)",
+          a.target ?? null,
+          a.payload ?? null,
+          a.created_at ?? new Date().toISOString(),
+        ],
+      });
+    }
+    await appendAudit(db, {
+      project_id: newProjectId, actor_type: "system",
+      action: "share.received",
+      target: originContactId ? `contact:${originContactId}` : null,
+      payload: {
+        bundle_version: bundle.bundle_version,
+        snapshot_at: bundle.snapshot_at,
+        origin_instance_id: bundle.origin_instance_id ?? null,
+        backends_in_manifest: (bundle.backends || []).length,
+        files_in_manifest: (bundle.file_manifest || []).length,
+      },
+    });
+
+    return {
+      project_id: newProjectId,
+      slug: newSlug,
+      sources_imported: bundle.sources?.length || 0,
+      notes_imported: bundle.notes?.length || 0,
+      audit_imported: bundle.audit_log?.length || 0,
+      backends_in_manifest: bundle.backends?.length || 0,
+      files_in_manifest: bundle.file_manifest?.length || 0,
+    };
+  }
+
   // --- Tool: crow_share ---
 
   server.tool(
     "crow_share",
-    "Share a memory, research project, source, or note with a connected contact. The data is encrypted end-to-end. Returns a preview and confirmation token on first call; pass the token back to execute.",
+    "Share a memory, research project, source, or note with a connected contact. The data is encrypted end-to-end. Returns a preview and confirmation token on first call; pass the token back to execute.\n\nFor share_type=\"project\", mode=\"clone\" delivers a one-shot snapshot bundle (project metadata + sources + notes + audit log + data-backend manifests + storage manifest). The recipient creates an independent copy with a -clone-N slug; further changes on either side do NOT sync. Subscription mode (live one-way sync) is planned for a follow-on milestone.",
     {
       contact: z.string().max(500).describe("Crow ID or display name of the contact"),
       share_type: z.enum(["memory", "project", "source", "note", "kb_article"]).describe("Type of item to share"),
       item_id: z.number().describe("ID of the item to share"),
-      permissions: z.enum(["read", "read-write", "one-time"]).default("read").describe("Permission level"),
+      permissions: z.enum(["read", "read-write", "one-time"]).default("read").describe("Permission level (event-style shares only — ignored for share_type=project)"),
+      mode: z.enum(["clone"]).optional().describe("For share_type=project: 'clone' delivers a one-shot snapshot bundle. Omit for non-project shares (legacy event-style)."),
+      role: z.enum(ROLES).optional().describe("For share_type=project: role to record on the origin-side project_members audit row (default viewer)"),
+      capabilities: z.string().max(2000).optional().describe("For share_type=project: JSON object overriding role default capabilities (recorded for audit, not enforced on the receiver clone)"),
       confirm_token: z.string().max(100).describe('Confirmation token — pass "" on first call to get a preview, then pass the returned token to execute'),
     },
-    async ({ contact, share_type, item_id, permissions, confirm_token }) => {
+    async ({ contact, share_type, item_id, permissions, mode, role, capabilities, confirm_token }) => {
       if (await isKioskActive(db)) return kioskBlockedResponse("crow_share");
       // Find contact
       const result = await db.execute({
@@ -1135,6 +1376,160 @@ export function createSharingServer(dbPath, options = {}) {
       }
 
       const contactRow = result.rows[0];
+
+      // M4: project-clone path. Different lifecycle from event-style shares:
+      // build a bundle, gate behind manage_members, write a project_members
+      // row recording the share, and ride the same Hyperswarm channel.
+      if (share_type === "project" && (mode === "clone" || mode === undefined)) {
+        // For projects we ALWAYS use the new project_spaces row (not the legacy
+        // research_projects view of it) — the bundle needs slug, workspace_dir,
+        // storage_prefix, etc.
+        const projectExists = (await db.execute({
+          sql: "SELECT id, name, slug, archived_at FROM project_spaces WHERE id = ?",
+          args: [item_id],
+        })).rows[0];
+        if (!projectExists) {
+          return { content: [{ type: "text", text: `Project #${item_id} not found in project_spaces` }], isError: true };
+        }
+        if (projectExists.archived_at) {
+          return { content: [{ type: "text", text: `Project #${item_id} is archived and cannot be shared` }], isError: true };
+        }
+
+        // ACL: the local user must have manage_members to share a project.
+        // Owners get this by default; editors don't.
+        try {
+          await assertLocalCapability(db, item_id, "manage_members");
+        } catch (err) {
+          if (err instanceof AclError) {
+            return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
+          }
+          throw err;
+        }
+
+        // Capabilities JSON validation
+        if (capabilities) {
+          try { JSON.parse(capabilities); }
+          catch { return { content: [{ type: "text", text: "Error: capabilities must be valid JSON" }], isError: true }; }
+        }
+
+        // Confirmation gate — preview shows what the bundle will contain
+        const effectiveRole = role || "viewer";
+        const tokenKey = `share_project_clone_${item_id}_${contactRow.id}_${effectiveRole}`;
+        if (!shouldSkipGates()) {
+          if (confirm_token) {
+            if (!validateToken(confirm_token, "share", tokenKey)) {
+              return { content: [{ type: "text", text: "Invalid or expired confirmation token. Pass confirm_token: \"\" to get a new preview." }], isError: true };
+            }
+          } else {
+            const sCount = (await db.execute({ sql: "SELECT COUNT(*) AS n FROM research_sources WHERE project_id=?", args: [item_id] })).rows[0]?.n ?? 0;
+            const nCount = (await db.execute({ sql: "SELECT COUNT(*) AS n FROM research_notes WHERE project_id=?", args: [item_id] })).rows[0]?.n ?? 0;
+            const bCount = (await db.execute({ sql: "SELECT COUNT(*) AS n FROM data_backends WHERE project_id=?", args: [item_id] })).rows[0]?.n ?? 0;
+            const fCount = (await db.execute({ sql: "SELECT COUNT(*) AS n FROM storage_files WHERE project_id=?", args: [item_id] })).rows[0]?.n ?? 0;
+            const token = generateToken("share", tokenKey);
+            return {
+              content: [{
+                type: "text",
+                text: `⚠️ Clone-share project to ${contactRow.display_name || contactRow.crow_id}:\n` +
+                      `  Project: #${item_id} "${projectExists.name}" (slug: ${projectExists.slug})\n` +
+                      `  Mode: clone (one-shot snapshot; no further sync)\n` +
+                      `  Recipient role on their clone: ${effectiveRole}\n` +
+                      `  Bundle: ${sCount} sources, ${nCount} notes, ${bCount} backend manifests, ${fCount} file manifests\n` +
+                      `  Backends carry env-var NAMES only — secrets stay on origin; operator must reconnect on recipient.\n` +
+                      `  Files are MANIFEST only (presigned URLs valid 24h) — receiver pulls blobs out-of-band if needed.\n\n` +
+                      `To proceed, call again with confirm_token: "${token}"`,
+              }],
+            };
+          }
+        }
+
+        // Build the bundle
+        let bundle;
+        try {
+          bundle = await buildProjectCloneBundle(item_id);
+        } catch (err) {
+          return { content: [{ type: "text", text: `Failed to build bundle: ${err.message}` }], isError: true };
+        }
+
+        // Record the share in shared_items (event-style row for inbox listing)
+        // AND in project_members (mode='clone') so the origin retains an audit
+        // trail of which clones were sent to whom.
+        await db.execute({
+          sql: `INSERT INTO shared_items (contact_id, share_type, item_id, permissions, direction, delivery_status)
+                VALUES (?, 'project', ?, ?, 'sent', ?)`,
+          args: [
+            contactRow.id, item_id, "read",
+            peerManager.isConnected(contactRow.crow_id) ? "delivered" : "pending",
+          ],
+        });
+
+        // project_members row: contact_id + role + mode='clone' so revoke
+        // can find the same record later. Upsert: if the same contact got
+        // another clone of the same project, update the role.
+        try {
+          const existing = (await db.execute({
+            sql: `SELECT id FROM project_members WHERE project_id = ? AND contact_id = ? AND mode = 'clone' AND revoked_at IS NULL`,
+            args: [item_id, contactRow.id],
+          })).rows[0];
+          if (existing) {
+            await db.execute({
+              sql: `UPDATE project_members SET role = ?, capabilities = ? WHERE id = ?`,
+              args: [effectiveRole, capabilities ?? null, existing.id],
+            });
+          } else {
+            await db.execute({
+              sql: `INSERT INTO project_members (project_id, contact_id, role, capabilities, mode)
+                    VALUES (?, ?, ?, ?, 'clone')`,
+              args: [item_id, contactRow.id, effectiveRole, capabilities ?? null],
+            });
+          }
+        } catch (memberErr) {
+          // Non-fatal — the share itself proceeds.
+          console.warn(`[sharing] could not record project_members clone row: ${memberErr.message}`);
+        }
+
+        // Deliver via Hyperswarm if peer online; queue otherwise.
+        let deliveryStatus = "pending";
+        if (peerManager.isConnected(contactRow.crow_id)) {
+          try {
+            peerManager.send(contactRow.crow_id, {
+              type: "share",
+              share_type: "project",
+              mode: "clone",
+              payload: bundle,
+              role: effectiveRole,
+              capabilities: capabilities ?? null,
+              sender: identity.crowId,
+              timestamp: new Date().toISOString(),
+            });
+            deliveryStatus = "delivered";
+          } catch (err) {
+            deliveryStatus = "pending";
+            console.warn(`[sharing] project clone send failed: ${err.message}`);
+          }
+        }
+
+        await appendAudit(db, {
+          project_id: item_id, actor_type: "local",
+          action: "share.send",
+          target: `contact:${contactRow.id}`,
+          payload: {
+            mode: "clone", role: effectiveRole,
+            recipient_crow_id: contactRow.crow_id,
+            delivery_status: deliveryStatus,
+            sources: bundle.sources.length, notes: bundle.notes.length,
+            backends: bundle.backends.length, files: bundle.file_manifest.length,
+          },
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: `Clone-shared project #${item_id} "${projectExists.name}" with ${contactRow.display_name || contactRow.crow_id} as ${effectiveRole}. ` +
+                  `Bundle: ${bundle.sources.length} sources, ${bundle.notes.length} notes, ${bundle.backends.length} backend manifests, ${bundle.file_manifest.length} file manifests. ` +
+                  `Delivery: ${deliveryStatus === "delivered" ? "delivered" : "queued (will deliver when peer comes online)"}.`,
+          }],
+        };
+      }
 
       // Verify the item exists
       const tableMap = {
@@ -1535,6 +1930,30 @@ export function createSharingServer(dbPath, options = {}) {
               WHERE contact_id = ? AND share_type = ? AND item_id = ? AND direction = 'sent'`,
         args: [contactRow.id, share_type, item_id],
       });
+
+      // M4: project shares also soft-revoke any matching project_members row
+      // (mode='clone' or 'subscription'). The recipient's local copy persists
+      // — clone semantics. Append an audit entry on the origin so the project
+      // timeline reflects the revocation.
+      if (share_type === "project") {
+        try {
+          await db.execute({
+            sql: `UPDATE project_members
+                     SET revoked_at = datetime('now')
+                   WHERE project_id = ? AND contact_id = ?
+                     AND mode IN ('clone','subscription') AND revoked_at IS NULL`,
+            args: [item_id, contactRow.id],
+          });
+          await appendAudit(db, {
+            project_id: item_id, actor_type: "local",
+            action: "share.revoke",
+            target: `contact:${contactRow.id}`,
+            payload: { recipient_crow_id: contactRow.crow_id },
+          });
+        } catch (revokeErr) {
+          console.warn(`[sharing] project_members revoke / audit failed: ${revokeErr.message}`);
+        }
+      }
 
       // Send revocation notice via data channel
       if (peerManager.isConnected(contactRow.crow_id)) {
