@@ -360,11 +360,8 @@ export async function handleInbound(opts) {
     + " — pass this verbatim as thread_id when drafting your reply via gmail_create_draft.";
 
   let promptText;
-  if (wantCard == null && !resume) {
-    promptText = projectHeader + "\n\nA user messaged you over the gateway. Kanban:\n" +
-      kanbanText(projectId, tasksDbPath) + "\n\nUser said: \"" + cleanMsg + "\"\n\n" +
-      "Reply briefly: greet, list the card numbers above, and ask which card to do. Do NOT call any tool yet.";
-  } else if (cardId != null) {
+  if (cardId != null) {
+    // Explicit card reference — full work-the-card workflow.
     promptText = projectHeader + "\n\nWork the following card.\n\nCARD #" + cardId +
       " (current board status: " + cardStatus(cardId, tasksDbPath) + ").\nPLAN FILE (" + plan.path + "):\n---\n" +
       (plan.text || "(plan file missing)") + "\n---\n\nUser said: \"" + cleanMsg + "\"\n\n" +
@@ -373,8 +370,21 @@ export async function handleInbound(opts) {
       "under the plan file's \"## Result\" section. When finished, reply with a short summary for " +
       "the gateway thread. One card only.";
   } else {
-    promptText = projectHeader + "\n\nKanban:\n" + kanbanText(projectId, tasksDbPath) + "\n\nUser said: \"" +
-      cleanMsg + "\"\n\nReply briefly and ask which card number to do. Do NOT call any tool.";
+    // No card reference — let the bot DECIDE based on its system prompt
+    // whether to (a) answer briefly without tools (greet, list cards, simple
+    // chit-chat), or (b) call appropriate tools to answer a substantive
+    // question (e.g. "what's my criteria?" → call bot_preferences_get; "any
+    // shortlisted candidates?" → call job_candidates_query; "do a scout
+    // pass" → run the full workflow). Previous template hard-banned tool
+    // use here which made the bot useless for anything except "do card N".
+    promptText = projectHeader + "\n\nKanban:\n" + kanbanText(projectId, tasksDbPath) + "\n\n" +
+      "User said: \"" + cleanMsg + "\"\n\n" +
+      "Reply on the gateway thread. Use tools as needed per your system " +
+      "prompt: if the user asks a simple question (criteria, status, " +
+      "specific employer), call the appropriate query tools and answer; " +
+      "if the user asks for work to be done, run the workflow; if they're " +
+      "just saying hi, reply briefly without tools. Don't ask 'which card?' " +
+      "unless their message is genuinely ambiguous.";
   }
 
   // Phase 3.0 (R3/R4/R5): resolve provider/model for THIS turn. R4: if an
