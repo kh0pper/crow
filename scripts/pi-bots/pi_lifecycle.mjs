@@ -155,137 +155,13 @@ function isAlive(pid) {
   }
 }
 
-// MCP child markers. Matches the per-bot servers the bridge config wires up.
-// Path fragments are deliberately specific (full venv / bundle path) so this
-// can never match someone's interactive Claude Code MCP, an unrelated
-// google-workspace install, or a global npx mcp-server-* run.
-const MCP_DESCENDANT_MARKERS = [
-  "spring-2026/google-workspace-mcp/.venv/bin/google-workspace-mcp",
-  "/.crow-mpa/bundles/bots-sql-mcp/server",
-  "/.crow/bundles/bots-sql-mcp/server",
-  "/.npm/_npx/be9bcbed6978f068/node_modules/.bin/mcp-server-brave-search",
-  "/.npm/_npx/3dfbf5a9eea4a1b3/node_modules/.bin/mcp-server-github",
-];
-
-/**
- * Reap leaked MCP servers — children of a dead pi.
- *
- * Each bot pi spawns 4-5 MCP servers (brave-search, github, google-workspace,
- * crow-bots-sql). bridge.mjs::PiRpc.close() now SIGTERMs the whole pgroup so
- * these die cleanly on normal exit. This is the backstop: if pi gets
- * OOM-killed or systemd SIGKILLs it past TimeoutStartSec, MCPs orphan to
- * systemd's subreaper (PID 1 or a slice supervisor) and keep running, holding
- * ~80-100MB each. Over hours these accumulate into GBs of phantom RSS.
- *
- * Safe identification rule: process matches an MCP marker path AND its parent
- * is either (a) no longer alive or (b) not a live bridge pi. Live MCP children
- * of a healthy in-progress turn are never touched because their parent IS a
- * live pi (or a live npx/sh shim under one — we check ancestry one hop deep
- * for shims).
- */
-export function reapLeakedMcp(opts = {}) {
-  const cfg = Object.assign({}, LIFECYCLE_DEFAULTS, opts);
-  const minAgeSec = Number(opts.minMcpAgeSec || cfg.orphanGraceSec);
-  const log = opts.log || function () {};
-
-  // Live pi pids are sacred — never reap an MCP child of one of these.
-  const livePiPids = new Set(listBridgePi().map((p) => p.pid));
-
-  // Scan all processes once.
-  let out = "";
-  try {
-    out = execFileSync(
-      "ps",
-      ["-eo", "pid=,ppid=,etimes=,args="],
-      { encoding: "utf8", maxBuffer: 8e6 }
-    );
-  } catch {
-    return { scanned: 0, reaped: [] };
-  }
-
-  // Build pid -> ppid map for ancestor walk (cheap, one pass).
-  const ppidOf = new Map();
-  const argsOf = new Map();
-  const etimeOf = new Map();
-  for (const line of out.split("\n")) {
-    const s = line.trim();
-    if (!s) continue;
-    const m = s.match(/^(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/);
-    if (!m) continue;
-    const pid = Number(m[1]);
-    ppidOf.set(pid, Number(m[2]));
-    etimeOf.set(pid, Number(m[3]));
-    argsOf.set(pid, m[4]);
-  }
-
-  // Returns true if any ancestor (within 4 hops) is in livePiPids.
-  function hasLivePiAncestor(pid) {
-    let cur = ppidOf.get(pid);
-    for (let i = 0; i < 4 && cur && cur !== 1; i++) {
-      if (livePiPids.has(cur)) return true;
-      cur = ppidOf.get(cur);
-    }
-    return false;
-  }
-
-  const candidates = [];
-  for (const [pid, args] of argsOf) {
-    if (!MCP_DESCENDANT_MARKERS.some((mark) => args.includes(mark))) continue;
-    candidates.push({ pid, args, etimes: etimeOf.get(pid), ppid: ppidOf.get(pid) });
-  }
-
-  const victims = [];
-  for (const c of candidates) {
-    if (c.etimes < minAgeSec) continue;
-    if (hasLivePiAncestor(c.pid)) continue;
-    victims.push({
-      pid: c.pid,
-      reason: `mcp-leak ppid=${c.ppid} etime=${c.etimes}s>${minAgeSec}`,
-    });
-    const msg = `REAP mcp pid=${c.pid} (mcp-leak ppid=${c.ppid} etime=${c.etimes}s)`;
-    log(msg);
-    syslog(msg);
-    try {
-      process.kill(c.pid, "SIGTERM");
-    } catch {
-      /* already gone */
-    }
-  }
-  if (victims.length) {
-    const deadline = Date.now() + 3000;
-    while (Date.now() < deadline) {
-      try { execFileSync("sleep", ["0.2"]); } catch { break; }
-      if (!victims.some((v) => isAlive(v.pid))) break;
-    }
-    for (const v of victims) {
-      if (isAlive(v.pid)) {
-        try {
-          process.kill(v.pid, "SIGKILL");
-          const m = `SIGKILL mcp pid=${v.pid} (survived SIGTERM)`;
-          log(m);
-          syslog(m);
-        } catch {
-          /* gone between checks */
-        }
-      }
-    }
-  }
-  return { scanned: candidates.length, reaped: victims };
-}
-
-// CLI: `node pi_lifecycle.mjs reap` (manual sweep) | `node pi_lifecycle.mjs count` | `reap-mcp`
+// CLI: `node pi_lifecycle.mjs reap` (manual sweep) | `node pi_lifecycle.mjs count`
 if (import.meta.url === "file://" + process.argv[1]) {
   const cmd = process.argv[2] || "count";
   if (cmd === "reap") {
     const r = reapStalePi({ log: (m) => console.log("[pi-reaper] " + m) });
     console.log(
       `[pi-reaper] scanned=${r.scanned} reaped=${r.reaped.length} ` +
-        JSON.stringify(r.reaped)
-    );
-  } else if (cmd === "reap-mcp") {
-    const r = reapLeakedMcp({ log: (m) => console.log("[mcp-reaper] " + m) });
-    console.log(
-      `[mcp-reaper] scanned=${r.scanned} reaped=${r.reaped.length} ` +
         JSON.stringify(r.reaped)
     );
   } else {

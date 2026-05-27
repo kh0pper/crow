@@ -17,7 +17,7 @@ import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js"
 import { execFile } from "node:child_process";
 import { openSync, closeSync, existsSync, statSync, unlinkSync } from "node:fs";
 import { handleInbound } from "./bridge.mjs";
-import { reapStalePi, reapLeakedMcp } from "./pi_lifecycle.mjs";
+import { reapStalePi } from "./pi_lifecycle.mjs";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
@@ -59,12 +59,6 @@ function acquireLock() {
     const sweep = reapStalePi({ log: (m) => console.log("[tick] " + m) });
     if (sweep.reaped.length) console.log(`[tick] reaped ${sweep.reaped.length} stale pi (scanned ${sweep.scanned})`);
   } catch (e) { console.error("[tick] reaper error (non-fatal): " + (e && e.message || e)); }
-  // Backstop for leaked MCP descendants (a healthy bridge close() now SIGTERMs
-  // the whole pgroup; this only catches MCPs orphaned by OOM-killed pi).
-  try {
-    const sweep = reapLeakedMcp({ log: (m) => console.log("[tick] " + m) });
-    if (sweep.reaped.length) console.log(`[tick] reaped ${sweep.reaped.length} leaked mcp (scanned ${sweep.scanned})`);
-  } catch (e) { console.error("[tick] mcp-reaper error (non-fatal): " + (e && e.message || e)); }
   const d = db();
   let defs = [];
   try {
