@@ -36,6 +36,7 @@ const PI_CLI = HOME + "/.nvm/versions/node/v20.20.2/lib/node_modules/@earendil-w
 const CROW_DB = process.env.CROW_DB_PATH || HOME + "/.crow-mpa/data/crow.db";
 const TASKS_DB = process.env.CROW_TASKS_DB_PATH || HOME + "/.crow-mpa/data/tasks.db";
 const TURN_TIMEOUT_MS = Number(process.env.PIBOT_TURN_TIMEOUT_MS || 600000);
+const PROMPT_ACK_TIMEOUT_MS = Number(process.env.PIBOT_PROMPT_ACK_TIMEOUT_MS || 60000);
 
 function db(p) { const d = new Database(p); d.pragma("busy_timeout = 10000"); return d; }
 
@@ -89,7 +90,11 @@ class PiRpc {
         PIBOT_SUBAGENT_DEPTH: "0",
         PI_BOT_PERMISSION_POLICY: JSON.stringify(piPolicy) },
       def.spawn_env || {});
-    this.proc = spawn(NODE, args, { cwd: sessionDir, env, stdio: ["pipe", "pipe", "pipe"] });
+    // detached:true puts pi in its own process group so close() can SIGTERM
+    // the whole tree (pi + its MCP children). Without this, killing pi leaves
+    // its MCP server children (brave-search, google-workspace, github, etc.)
+    // running indefinitely — observed leak of ~5 MCP procs per turn.
+    this.proc = spawn(NODE, args, { cwd: sessionDir, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
     this.events = []; this.responses = []; this.stderr = ""; this._b = ""; this._w = []; this.badStdout = 0;
     this.proc.stdout.on("data", (c) => {
       this._b += c.toString("utf8");
@@ -117,7 +122,7 @@ class PiRpc {
   }
   async prompt(message, ms) {
     this.send({ type: "prompt", message });
-    await this.waitFor((m) => m.type === "response" && m.command === "prompt", 20000, "prompt-ack");
+    await this.waitFor((m) => m.type === "response" && m.command === "prompt", PROMPT_ACK_TIMEOUT_MS, "prompt-ack");
     return this.waitFor((m) => m.type === "agent_end", ms, "agent_end");
   }
   async getState() { this.send({ type: "get_state" }); return this.waitFor((m) => m.type === "response" && m.command === "get_state", 15000, "get_state"); }
@@ -130,8 +135,19 @@ class PiRpc {
     return t.trim();
   }
   toolCalls() { return this.events.filter((e) => e.type === "tool_execution_end").map((e) => ({ tool: e.toolName, isError: !!e.isError })); }
-  async close() { try { this.proc.stdin.end(); } catch (e) {} this.proc.kill("SIGTERM");
-    const k = setTimeout(() => { try { this.proc.kill("SIGKILL"); } catch (e) {} }, 5000); await this.exited; clearTimeout(k); }
+  async close() {
+    try { this.proc.stdin.end(); } catch (e) {}
+    const pid = this.proc.pid;
+    // Kill the whole process group (pi + MCP children). Falls back to a
+    // direct pi-only kill if the pgroup is already gone (e.g. pi crashed
+    // before its children spawned, leaving no group to address).
+    try { process.kill(-pid, "SIGTERM"); } catch (e) { try { this.proc.kill("SIGTERM"); } catch {} }
+    const k = setTimeout(() => {
+      try { process.kill(-pid, "SIGKILL"); } catch (e) { try { this.proc.kill("SIGKILL"); } catch {} }
+    }, 5000);
+    await this.exited;
+    clearTimeout(k);
+  }
 }
 
 function loadBot(botId) {
