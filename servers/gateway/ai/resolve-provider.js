@@ -13,24 +13,8 @@
 import {
   resolveProviderConfig as _resolveProviderConfig,
 } from "./resolve-profile.js";
-import { readFileSync, statSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { createDbClient } from "../../db.js";
-
-const MODELS_JSON_URL = new URL("../../../models.json", import.meta.url);
-const MODELS_JSON_PATH = fileURLToPath(MODELS_JSON_URL);
-
-let _cache = { mtimeMs: 0, data: null };
-function loadModelsJson() {
-  let st;
-  try { st = statSync(MODELS_JSON_PATH); }
-  catch { return { providers: {} }; }
-  if (_cache.data && _cache.mtimeMs === st.mtimeMs) return _cache.data;
-  const raw = readFileSync(MODELS_JSON_PATH, "utf8");
-  const data = JSON.parse(raw);
-  _cache = { mtimeMs: st.mtimeMs, data };
-  return data;
-}
+import { loadProviders as loadCachedProviders } from "../../orchestrator/providers.js";
 
 /**
  * Resolve (provider_id, model_id) → adapter config. Async + DB-first.
@@ -47,13 +31,8 @@ export async function resolveProvider(providerId, modelId, db) {
   return _resolveProviderConfig(client, providerId, modelId);
 }
 
-/**
- * List provider+model IDs for UI dropdowns (models.json view).
- * Stays sync — consumers that need the DB-augmented list use listProvidersAll
- * from providers-db.js directly.
- */
 export function listProviders() {
-  const cfg = loadModelsJson();
+  const cfg = loadCachedProviders();
   const out = [];
   for (const [id, p] of Object.entries(cfg?.providers || {})) {
     out.push({
@@ -65,19 +44,14 @@ export function listProviders() {
   return out;
 }
 
-/**
- * Orchestrator-default fallback. Honors CROW_ORCHESTRATOR_PROVIDER and
- * CROW_ORCHESTRATOR_MODEL. Stays sync (models.json-only) because the
- * orchestrator's hot path can't easily tolerate a DB round-trip here.
- */
 export function resolveOrchestratorDefault() {
-  const cfg = loadModelsJson();
+  const cfg = loadCachedProviders();
   const providers = cfg?.providers || {};
   const envProvider = process.env.CROW_ORCHESTRATOR_PROVIDER;
   const providerId = envProvider && providers[envProvider]
     ? envProvider
     : Object.keys(providers)[0];
-  if (!providerId) throw new Error("models.json has no providers");
+  if (!providerId) throw new Error("provider registry has no providers");
   const provider = providers[providerId];
   let modelId;
   if (providerId === envProvider && process.env.CROW_ORCHESTRATOR_MODEL) {
@@ -88,7 +62,7 @@ export function resolveOrchestratorDefault() {
     const warm = (provider.models || []).find(m => m.warm);
     modelId = (warm || provider.models?.[0])?.id;
   }
-  if (!modelId) throw new Error(`models.json: provider "${providerId}" has no models`);
+  if (!modelId) throw new Error(`provider registry: provider "${providerId}" has no models`);
   return {
     baseUrl: provider.baseUrl,
     apiKey: provider.apiKey || "none",

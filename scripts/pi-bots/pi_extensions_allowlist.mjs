@@ -80,8 +80,8 @@ export function isMultiAgentCapable(provider, model) {
  * non-existent model. Returns entries NOT present (empty array = OK). If
  * models.json can't be read, treats ALL as drift (loud, fail-closed).
  */
-export function multiAgentCapableDrift() {
-  const models = loadModels();
+export async function multiAgentCapableDrift() {
+  const models = await loadModels();
   if (!models) return MULTI_AGENT_CAPABLE.slice();
   return MULTI_AGENT_CAPABLE.filter((k) => !validateModelKey(models, k).ok);
 }
@@ -99,7 +99,7 @@ if (import.meta.url === "file://" + process.argv[1]) {
     process.exit(0);
   }
   if (arg === "capable-drift") {
-    const d = multiAgentCapableDrift();
+    const d = await multiAgentCapableDrift();
     console.log(d.length ? "DRIFT: " + d.join(", ") : "OK: all MULTI_AGENT_CAPABLE present in models.json");
     process.exit(d.length ? 1 : 0);
   }

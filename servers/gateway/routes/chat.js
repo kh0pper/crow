@@ -100,6 +100,30 @@ export default function chatRouter(dashboardAuth) {
     }
   });
 
+  // --- Unified model registry ---
+
+  router.get("/api/models", dashboardAuth, async (req, res) => {
+    const db = createDbClient();
+    try {
+      const all = await listProvidersAll(db);
+      const providers = {};
+      for (const p of all) {
+        if (p.disabled) continue;
+        providers[p.id] = {
+          baseUrl: p.baseUrl,
+          host: p.host,
+          providerType: p.provider_type,
+          models: p.models,
+        };
+      }
+      res.json({ providers });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
   // --- AI Profiles ---
 
   router.get("/api/chat/profiles", async (req, res) => {

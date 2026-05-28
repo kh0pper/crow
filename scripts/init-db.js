@@ -163,6 +163,7 @@ await addColumnIfMissing("contacts", "feed_key", "TEXT");
 await addColumnIfMissing("glasses_photos", "minio_key", "TEXT");
 // LLM consolidation (Phase 1): cloud-provider tag + per-message model recording.
 await addColumnIfMissing("providers", "provider_type", "TEXT");
+await addColumnIfMissing("providers", "gpu_policy", "TEXT");
 await addColumnIfMissing("chat_messages", "model_id", "TEXT");
 // Polish #2 (2026-05-12): user_priority gates the drafter's per-tick choice
 // when the user replies "yes to spring isd" on a Monday digest. NULL = no

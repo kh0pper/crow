@@ -81,6 +81,9 @@ function loadFromModelsJson() {
       const providers = {};
       for (const [k, v] of Object.entries(cfg.providers || {})) {
         if (k.startsWith("$")) continue;
+        const gpuPolicy = (v.mutexGroup || v.alwaysResident || v.defaultMember)
+          ? { mutexGroup: v.mutexGroup ?? null, alwaysResident: !!v.alwaysResident, defaultMember: !!v.defaultMember }
+          : null;
         providers[k] = {
           baseUrl: v.baseUrl,
           apiKey: v.apiKey,
@@ -88,6 +91,7 @@ function loadFromModelsJson() {
           bundleId: v.bundleId,
           description: v.$description || v.description,
           models: v.models || [],
+          gpuPolicy,
         };
       }
       return { providers, _source: p };

@@ -20,7 +20,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { spawn } from "node:child_process";
-import { readFileSync, appendFileSync, mkdirSync } from "fs";
+import { appendFileSync, mkdirSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -34,6 +34,7 @@ import { substituteGoalPlaceholders } from "./pipeline-vars.js";
 import { createDbClient } from "../db.js";
 import { ensureModelWarm, releaseModel, getLifecycleSnapshot, resetAllRefcounts } from "./lifecycle.js";
 import { attachEventLogger, logEvent } from "./events.js";
+import { loadProviders } from "./providers.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -42,23 +43,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // ---------------------------------------------------------------------------
 
 function loadModelsConfig() {
-  const searchPaths = [
-    resolve(__dirname, "../../models.json"),
-    resolve(__dirname, "../../bundles/crowclaw/config/agents/main/models.json"),
-    resolve(__dirname, "../../config/models.json"),
-  ];
-
-  for (const p of searchPaths) {
-    try {
-      const raw = readFileSync(p, "utf-8");
-      return JSON.parse(raw);
-    } catch {
-      // Try next path
-    }
-  }
-
-  console.warn("[orchestrator] models.json not found, using defaults");
-  return { providers: {} };
+  return loadProviders();
 }
 
 /**
@@ -69,7 +54,7 @@ function resolveProvider(modelsConfig, providerName) {
   const provider = modelsConfig.providers?.[providerName];
   if (!provider) {
     throw new Error(
-      `Provider "${providerName}" not found in models.json. ` +
+      `Provider "${providerName}" not found in provider registry. ` +
       `Available: ${Object.keys(modelsConfig.providers || {}).join(", ")}`
     );
   }
@@ -91,7 +76,7 @@ function resolveDefaultOrchestratorConfig(modelsConfig) {
   const envProvider = process.env.CROW_ORCHESTRATOR_PROVIDER;
   const providerName = (envProvider && providers[envProvider]) ? envProvider : providerKeys[0];
   if (!providerName) {
-    throw new Error("No LLM providers configured in models.json");
+    throw new Error("No LLM providers configured in provider registry");
   }
 
   const provider = providers[providerName];
@@ -272,7 +257,7 @@ export function createOrchestratorServer(dbPath, options = {}) {
     const agentProvider = agent.provider || preset.provider || defaults.provider;
     const agentModel = agent.model || preset.model || defaults.model;
     if (!agentProvider) {
-      throw new Error("No LLM provider configured. Set CROW_ORCHESTRATOR_PROVIDER or add a provider to models.json.");
+      throw new Error("No LLM provider configured. Set CROW_ORCHESTRATOR_PROVIDER or add a provider to the provider registry.");
     }
     const pc = resolveProvider(modelsConfig, agentProvider);
     return {

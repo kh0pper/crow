@@ -6,6 +6,7 @@ ENV DISPLAY=:99
 # System deps: Xvfb, VNC, noVNC, browser libs
 RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb x11vnc novnc websockify \
+    x11-utils xauth \
     curl ca-certificates \
     fonts-liberation fonts-noto-color-emoji \
     libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 \
