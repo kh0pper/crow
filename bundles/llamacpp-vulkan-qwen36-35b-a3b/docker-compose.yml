@@ -1,9 +1,14 @@
 services:
   llamacpp-vulkan-qwen36-35b-a3b:
     # Everyday driver: Qwen3.6-35B-A3B (MoE ~3B active) + vision, MTP-accelerated.
+    # QUANT = UD-Q5_K_XL (2026-05-24): quant-ladder bench (scripts/bench/results/
+    #   35B-QUANT-LADDER-20260524.md) showed Q5_K_XL is statistically tied with Q6 on
+    #   quality (KLD vs BF16 0.015 vs 0.012, same-top-token 97.8% vs 98.1%) but ~5% faster
+    #   (69.6 vs 66.2 code tok/s) and 3 GB smaller. Q8 not worth it (15% slower, no gain);
+    #   Q3 crosses a quality cliff (+10.6% PPL). Q6_K kept on disk as a fallback.
     # Phase-1 benchmark (2026-05-23) chose Vulkan (RADV) + MTP draft-n2 + vision:
-    #   ~66.6 tok/s single-stream (code) vs ~47 for the old non-MTP parallel-4 path;
-    #   KLD vs BF16 = 0.012 (near-lossless). MTP + --mmproj DO co-load on this build
+    #   ~70 tok/s single-stream (code) vs ~47 for the old non-MTP parallel-4 path;
+    #   KLD vs BF16 = 0.015 (near-lossless). MTP + --mmproj DO co-load on this build
     #   (verified §1.A gate). MTP requires the vulkan-radv-mtp toolbox and -np 1
     #   (no --parallel) — so this is single-stream (no 4-way concurrency), chosen
     #   for interactive use. Backend split is model-specific: 35B→Vulkan, 122B→ROCm.
@@ -24,9 +29,9 @@ services:
     entrypoint: ["llama-server"]
     command:
       # MTP GGUF + mmproj pre-downloaded to /home/kh0pp/llm/hf-cache/qwen36-35b-a3b-mtp/
-      # from unsloth/Qwen3.6-35B-A3B-MTP-GGUF (UD-Q6_K + mmproj-F16).
+      # from unsloth/Qwen3.6-35B-A3B-MTP-GGUF (UD-Q5_K_XL + mmproj-F16; Q6_K kept as fallback).
       - -m
-      - /models/qwen36-35b-a3b-mtp/Qwen3.6-35B-A3B-UD-Q6_K.gguf
+      - /models/qwen36-35b-a3b-mtp/Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf
       - --mmproj
       - /models/qwen36-35b-a3b-mtp/mmproj-F16.gguf
       - --alias

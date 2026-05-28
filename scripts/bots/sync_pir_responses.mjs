@@ -354,6 +354,9 @@ async function processMessage({ gmail, canvasDb, mpaDb, msgMeta, labelIds, pirOv
       savedFiles,
       holdingDir,
     });
+    canvasDb.prepare(`UPDATE pir_requests SET processing_lease_status = 'queued'
+      WHERE id = ? AND processing_lease IS NULL
+      AND (processing_lease_status IS NULL OR processing_lease_status = 'done')`).run(pirRow.id);
   }
   // Phase 2B: expose the per-file inventory to the caller if requested.
   if (savedFilesOut) {

@@ -45,14 +45,38 @@ export function splitKey(key) {
   return { provider: s.slice(0, i), model: s.slice(i + 1) };
 }
 
-/** Load+parse ~/.pi/agent/models.json. Returns null on ANY failure. */
-export function loadModels() {
+function loadModelsFromFile() {
   try {
     const j = JSON.parse(readFileSync(MODELS_JSON, "utf8"));
     return j && j.providers && typeof j.providers === "object" ? j : null;
   } catch {
     return null;
   }
+}
+
+async function loadModelsFromDb() {
+  try {
+    const { default: Database } = await import("/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js");
+    const CROW_DB = process.env.CROW_DB_PATH || HOME + "/.crow-mpa/data/crow.db";
+    const d = new Database(CROW_DB);
+    d.pragma("busy_timeout = 10000");
+    const rows = d.prepare("SELECT id, models FROM providers WHERE disabled=0").all();
+    d.close();
+    if (!rows.length) return null;
+    const providers = {};
+    for (const r of rows) {
+      try { providers[r.id] = { models: JSON.parse(r.models || "[]") }; } catch {}
+    }
+    return { providers };
+  } catch {
+    return null;
+  }
+}
+
+export async function loadModels() {
+  const db = await loadModelsFromDb();
+  if (db && db.providers && Object.keys(db.providers).length) return db;
+  return loadModelsFromFile();
 }
 
 /**
@@ -81,9 +105,9 @@ export function validateModelKey(models, key) {
  *            source:"default"|"escalation"|"fallback",
  *            escalationRequestedButUnavailable:boolean}}
  */
-export function resolveModel(def, opts) {
+export async function resolveModel(def, opts) {
   const escalate = !!(opts && opts.escalate);
-  const models = loadModels();
+  const models = await loadModels();
   const fb = splitKey(LOCAL_FALLBACK);
   const out = (provider, model, escalated, source, unavailable) => ({
     provider,
@@ -148,6 +172,6 @@ if (import.meta.url === "file://" + process.argv[1]) {
     process.exit(1);
   }
   const def = JSON.parse(row.definition || "{}");
-  console.log(JSON.stringify(resolveModel(def, { escalate }), null, 2));
+  console.log(JSON.stringify(await resolveModel(def, { escalate }), null, 2));
   process.exit(0);
 }

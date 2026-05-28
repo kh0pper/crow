@@ -11,26 +11,7 @@
  * is kept as a thin backwards-compat wrapper during the phased rollout.
  */
 
-import { readFileSync, statSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-
-const MODELS_JSON_URL = new URL("../../../models.json", import.meta.url);
-const MODELS_JSON_PATH = fileURLToPath(MODELS_JSON_URL);
-
-let _cache = { mtimeMs: 0, data: null };
-
-function loadModelsJson() {
-  let st;
-  try { st = statSync(MODELS_JSON_PATH); }
-  catch { return { providers: {} }; }
-  if (_cache.data && _cache.mtimeMs === st.mtimeMs) return _cache.data;
-  try {
-    const raw = readFileSync(MODELS_JSON_PATH, "utf8");
-    const data = JSON.parse(raw);
-    _cache = { mtimeMs: st.mtimeMs, data };
-    return data;
-  } catch { return { providers: {} }; }
-}
+import { loadProviders as loadCachedProviders } from "../../orchestrator/providers.js";
 
 function firstModelId(models) {
   if (!Array.isArray(models)) return null;
@@ -72,7 +53,7 @@ async function resolveFromDb(db, providerId, modelId) {
 }
 
 function resolveFromModelsJson(providerId, modelId) {
-  const cfg = loadModelsJson();
+  const cfg = loadCachedProviders();
   const provider = cfg?.providers?.[providerId];
   if (!provider) return null;
   let pickedModel = modelId;
@@ -102,7 +83,7 @@ export async function resolveProviderConfig(db, providerId, modelId) {
   if (fromDb) return fromDb;
   const fromJson = resolveFromModelsJson(providerId, modelId);
   if (fromJson) return fromJson;
-  throw new Error(`provider "${providerId}" not found in DB or models.json`);
+  throw new Error(`provider "${providerId}" not found in provider registry`);
 }
 
 /**

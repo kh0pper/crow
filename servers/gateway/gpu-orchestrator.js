@@ -39,25 +39,15 @@
  */
 
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname, resolve } from "node:path";
+import { loadProviders as loadCachedProviders } from "../orchestrator/providers.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const BUNDLES_DIR = resolve(dirname(__filename), "..", "..", "bundles");
-const MODELS_JSON = resolve(dirname(__filename), "..", "..", "models.json");
 
-// loadProviders() in ../orchestrator/providers.js strips unknown fields like
-// mutexGroup + alwaysResident. Read models.json directly so the policy
-// annotations are visible.
 function loadProviders() {
-  try {
-    const raw = readFileSync(MODELS_JSON, "utf-8");
-    return JSON.parse(raw);
-  } catch (err) {
-    console.warn(`[gpu-orchestrator] failed to read ${MODELS_JSON}: ${err.message}`);
-    return { providers: {} };
-  }
+  return loadCachedProviders();
 }
 
 const READINESS_TIMEOUT_MS = 240_000;  // vLLM VL warm takes 2.5-3.5 min on 16 GB
@@ -148,11 +138,9 @@ function getProvider(name) {
   return cfg.providers?.[name] || null;
 }
 
-// mutexGroup may be declared at the provider top-level (grackle-* convention)
-// OR nested inside models[0] (crow-swap-* convention). Accept both.
 function mutexGroupOf(provider) {
   if (!provider) return null;
-  return provider.mutexGroup ?? provider.models?.[0]?.mutexGroup ?? null;
+  return provider.gpuPolicy?.mutexGroup ?? provider.mutexGroup ?? provider.models?.[0]?.mutexGroup ?? null;
 }
 
 function getMutexSiblings(name) {
@@ -168,7 +156,7 @@ function getMutexSiblings(name) {
 function alwaysResidentProviders() {
   const cfg = loadProviders();
   return Object.entries(cfg.providers || {})
-    .filter(([, v]) => v.alwaysResident === true)
+    .filter(([, v]) => v.gpuPolicy?.alwaysResident === true || v.alwaysResident === true)
     .map(([n]) => n);
 }
 
@@ -182,7 +170,7 @@ function getMutexGroups() {
     if (!groups.has(group)) groups.set(group, { default: null, members: [] });
     const g = groups.get(group);
     g.members.push({ name, baseUrl: v.baseUrl, bundleId: v.bundleId });
-    if (v.defaultMember === true) g.default = name;
+    if (v.gpuPolicy?.defaultMember === true || v.defaultMember === true) g.default = name;
   }
   return groups;
 }

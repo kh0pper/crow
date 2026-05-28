@@ -46,6 +46,7 @@
 import { Router } from "express";
 import { existsSync, readFileSync, writeFileSync, realpathSync, statSync, readdirSync } from "node:fs";
 import { createDbClient } from "../../db.js";
+import { listProvidersAll } from "../../orchestrator/providers-db.js";
 
 const HOME = "/home/kh0pp";
 const TASKS_DB = process.env.CROW_TASKS_DB_PATH || HOME + "/.crow-mpa/data/tasks.db";
@@ -192,7 +193,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       cdb = createDbClient();
       let projects = [];
       try {
-        projects = (await cdb.execute({ sql: "SELECT id, name FROM research_projects ORDER BY id", args: [] })).rows || [];
+        projects = (await cdb.execute({ sql: "SELECT id, name, slug FROM project_spaces WHERE archived_at IS NULL ORDER BY id", args: [] })).rows || [];
       } catch { projects = []; }
       const { locked } = await lockState(cdb, id);
       return res.json({ card, projects, locked });
@@ -476,11 +477,15 @@ export default function botBoardApiRouter(dashboardAuth) {
     let cdb;
     try {
       cdb = createDbClient();
+      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 50);
       const r = await cdb.execute({
-        sql: "INSERT INTO research_projects (name, description) VALUES (?, ?)",
-        args: [name, b.description ? String(b.description) : null],
+        sql: "INSERT INTO project_spaces (name, slug, description) VALUES (?, ?, ?)",
+        args: [name, slug + "-" + Date.now(), b.description ? String(b.description) : null],
       });
-      return res.json({ ok: true, id: r.lastInsertRowid });
+      const newId = Number(r.lastInsertRowid);
+      const wsDir = HOME + "/.crow-mpa/data/projects/" + slug + "-" + newId + "/workspace";
+      await cdb.execute({ sql: "UPDATE project_spaces SET slug=?, workspace_dir=? WHERE id=?", args: [slug + "-" + newId, wsDir, newId] });
+      return res.json({ ok: true, id: newId });
     } catch (e) {
       return jerr(res, 500, { error: String(e.message || e) });
     } finally {
@@ -501,7 +506,7 @@ export default function botBoardApiRouter(dashboardAuth) {
     let cdb;
     try {
       cdb = createDbClient();
-      const cur = (await cdb.execute({ sql: "SELECT id FROM research_projects WHERE id=?", args: [id] })).rows[0];
+      const cur = (await cdb.execute({ sql: "SELECT id FROM project_spaces WHERE id=?", args: [id] })).rows[0];
       if (!cur) return jerr(res, 404, { error: "project not found" });
       const sets = [], args = [];
       if (b.name != null) { sets.push("name=?"); args.push(name); }
@@ -510,7 +515,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       if (!sets.length) return jerr(res, 400, { error: "nothing to update" });
       sets.push("updated_at=datetime('now')");
       args.push(id);
-      await cdb.execute({ sql: `UPDATE research_projects SET ${sets.join(", ")} WHERE id=?`, args });
+      await cdb.execute({ sql: `UPDATE project_spaces SET ${sets.join(", ")} WHERE id=?`, args });
       return res.json({ ok: true });
     } catch (e) {
       return jerr(res, 500, { error: String(e.message || e) });
@@ -592,6 +597,347 @@ export default function botBoardApiRouter(dashboardAuth) {
       return jerr(res, 500, { error: String(e.message || e) });
     } finally {
       if (tdb) { try { tdb.close(); } catch {} }
+      if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  // ---- session stop (S3: session resume UX) ----
+  router.post(P + "/session/stop", async (req, res) => {
+    const b = req.body || {};
+    const botId = b.bot_id, threadId = b.gateway_thread_id;
+    if (!botId || !threadId) return jerr(res, 400, { error: "bot_id and gateway_thread_id required" });
+    let cdb;
+    try {
+      cdb = createDbClient();
+      const sess = (await cdb.execute({
+        sql: "SELECT id, status FROM bot_sessions WHERE bot_id=? AND gateway_thread_id=? ORDER BY id DESC LIMIT 1",
+        args: [botId, threadId],
+      })).rows[0];
+      if (!sess) return res.json({ ok: false, reason: "no session" });
+      await cdb.execute({
+        sql: "UPDATE bot_sessions SET control='stop', status='stopped', updated_at=datetime('now') WHERE id=?",
+        args: [sess.id],
+      });
+      return res.json({ ok: true, sessionId: sess.id });
+    } catch (e) {
+      return jerr(res, 500, { error: String(e.message || e) });
+    } finally {
+      if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  // ---- session send message (S3: dispatches via bridge --inject) ----
+  router.post(P + "/session/send", async (req, res) => {
+    const b = req.body || {};
+    const botId = b.bot_id, threadId = b.gateway_thread_id, message = b.message;
+    if (!botId || !threadId || !message) return jerr(res, 400, { error: "bot_id, gateway_thread_id, and message required" });
+    const { spawn } = await import("node:child_process");
+    const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
+    const BRIDGE = HOME + "/crow/scripts/pi-bots/bridge.mjs";
+    const payload = JSON.stringify({ bot_id: botId, gateway_thread_id: threadId, user_message: message });
+    const child = spawn(NODE, [BRIDGE, "--inject", payload], {
+      cwd: HOME, stdio: ["ignore", "pipe", "pipe"], detached: true,
+    });
+    child.unref();
+    return res.json({ ok: true, message: "Dispatch started (background)" });
+  });
+
+  // ---- session transcript (S3: raw JSONL viewer) ----
+  router.get(P + "/session/:id/transcript", async (req, res) => {
+    const sessId = Number(req.params.id);
+    if (!Number.isInteger(sessId)) return jerr(res, 400, { error: "bad session id" });
+    let cdb;
+    try {
+      cdb = createDbClient();
+      const sess = (await cdb.execute({
+        sql: "SELECT pi_session_id, pi_session_dir FROM bot_sessions WHERE id=?",
+        args: [sessId],
+      })).rows[0];
+      if (!sess || !sess.pi_session_id || !sess.pi_session_dir) {
+        return res.status(404).send("<pre>No transcript available (session has no pi_session_id or dir).</pre>");
+      }
+      const tPath = sess.pi_session_dir + "/" + sess.pi_session_id + "/transcript.jsonl";
+      if (!existsSync(tPath)) {
+        return res.status(404).send("<pre>Transcript file not found: " + tPath + "</pre>");
+      }
+      const content = readFileSync(tPath, "utf8");
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      return res.send(content);
+    } catch (e) {
+      return jerr(res, 500, { error: String(e.message || e) });
+    } finally {
+      if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  router.get(P + "/models", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const all = await listProvidersAll(db);
+      const models = [];
+      for (const row of all) {
+        if (row.disabled) continue;
+        for (const m of row.models || []) {
+          const mid = typeof m === "string" ? m : m.id;
+          if (!mid) continue;
+          models.push({ provider: row.id, id: mid, name: m.name || mid, key: `${row.id}/${mid}` });
+        }
+      }
+      return res.json({ models });
+    } catch (err) {
+      return res.json({ models: [], error: err.message });
+    } finally {
+      db.close();
+    }
+  });
+
+  // ---- create tracker def ----
+  router.post(P + "/tracker", async (req, res) => {
+    const b = req.body || {};
+    const slug = typeof b.slug === "string" ? b.slug.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-") : "";
+    const displayName = typeof b.display_name === "string" ? b.display_name.trim() : "";
+    if (!slug || !displayName) return jerr(res, 400, { error: "slug and display_name are required" });
+    let cdb;
+    try {
+      cdb = createDbClient();
+      const existing = (await cdb.execute({ sql: "SELECT id FROM tracker_defs WHERE slug=?", args: [slug] })).rows[0];
+      if (existing) return jerr(res, 409, { error: "tracker slug already exists: " + slug });
+      const statusValues = Array.isArray(b.status_values) ? b.status_values : ["pending"];
+      const columnsJson = Array.isArray(b.columns_json) ? b.columns_json : [];
+      const r = await cdb.execute({
+        sql: "INSERT INTO tracker_defs (slug, display_name, columns_json, status_values) VALUES (?, ?, ?, ?)",
+        args: [slug, displayName, JSON.stringify(columnsJson), JSON.stringify(statusValues)],
+      });
+      return res.json({ ok: true, id: Number(r.lastInsertRowid), slug });
+    } catch (e) {
+      return jerr(res, 500, { error: String(e.message || e) });
+    } finally {
+      if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  // ---- update tracker def ----
+  router.post(P + "/tracker/:slug", async (req, res) => {
+    const b = req.body || {};
+    let cdb;
+    try {
+      cdb = createDbClient();
+      const cur = (await cdb.execute({ sql: "SELECT id FROM tracker_defs WHERE slug=?", args: [req.params.slug] })).rows[0];
+      if (!cur) return jerr(res, 404, { error: "tracker not found" });
+      const sets = [], args = [];
+      if (b.display_name != null) { sets.push("display_name=?"); args.push(String(b.display_name).trim()); }
+      if (b.status_values != null) { sets.push("status_values=?"); args.push(JSON.stringify(Array.isArray(b.status_values) ? b.status_values : [])); }
+      if (b.columns_json != null) { sets.push("columns_json=?"); args.push(JSON.stringify(Array.isArray(b.columns_json) ? b.columns_json : [])); }
+      if (!sets.length) return jerr(res, 400, { error: "nothing to update" });
+      sets.push("updated_at=datetime('now')");
+      args.push(cur.id);
+      await cdb.execute({ sql: `UPDATE tracker_defs SET ${sets.join(", ")} WHERE id=?`, args });
+      return res.json({ ok: true });
+    } catch (e) {
+      return jerr(res, 500, { error: String(e.message || e) });
+    } finally {
+      if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  // ---- tracker defs list (S3: for custom tracker selector) ----
+  router.get(P + "/trackers", async (req, res) => {
+    let cdb;
+    try {
+      cdb = createDbClient();
+      const rows = (await cdb.execute({
+        sql: "SELECT id, slug, display_name, columns_json, status_values FROM tracker_defs ORDER BY slug",
+        args: [],
+      })).rows || [];
+      return res.json({ trackers: rows });
+    } catch (e) {
+      return jerr(res, 500, { error: String(e.message || e) });
+    } finally {
+      if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  // ── Phase 2: tracker item CRUD (unified bot board) ──────────────────
+
+  function parseDataJson(raw) {
+    try { return JSON.parse(raw || "{}"); } catch { return {}; }
+  }
+
+  function trackerItemLocked(item) {
+    return String(item.processing_lease_status) === "in-progress";
+  }
+
+  router.get(P + "/tracker/:slug/items", async (req, res) => {
+    let cdb;
+    try {
+      cdb = createDbClient();
+      const def = (await cdb.execute({
+        sql: "SELECT id, display_name, columns_json, status_values FROM tracker_defs WHERE slug=?",
+        args: [req.params.slug],
+      })).rows[0];
+      if (!def) return jerr(res, 404, { error: "tracker not found" });
+      const clauses = ["tracker_id = ?"];
+      const params = [def.id];
+      if (req.query.status) { clauses.push("status = ?"); params.push(String(req.query.status)); }
+      if (req.query.bot_id) { clauses.push("bot_id = ?"); params.push(String(req.query.bot_id)); }
+      const rows = (await cdb.execute({
+        sql: `SELECT id, tracker_id, bot_id, status, priority, label, data_json, action_needed,
+                next_followup_date, processing_lease, processing_lease_status, created_at, updated_at
+              FROM tracker_items WHERE ${clauses.join(" AND ")}
+              ORDER BY priority ASC, id ASC LIMIT 500`,
+        args: params,
+      })).rows || [];
+      const locks = {};
+      const items = rows.map((r) => {
+        if (trackerItemLocked(r)) locks[r.id] = true;
+        return { ...r, data: parseDataJson(r.data_json) };
+      });
+      return res.json({
+        tracker: { slug: req.params.slug, display_name: def.display_name, columns_json: def.columns_json, status_values: def.status_values },
+        items, locks,
+      });
+    } catch (e) {
+      return jerr(res, 500, { error: String(e.message || e) });
+    } finally {
+      if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  router.get(P + "/tracker-item/:id", async (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId)) return jerr(res, 400, { error: "bad id" });
+    let cdb;
+    try {
+      cdb = createDbClient();
+      const r = (await cdb.execute({
+        sql: "SELECT * FROM tracker_items WHERE id=?", args: [itemId],
+      })).rows[0];
+      if (!r) return jerr(res, 404, { error: "item not found" });
+      const def = (await cdb.execute({
+        sql: "SELECT slug, display_name, columns_json, status_values FROM tracker_defs WHERE id=?",
+        args: [r.tracker_id],
+      })).rows[0];
+      return res.json({
+        item: { ...r, data: parseDataJson(r.data_json) },
+        tracker: def || null,
+        locked: trackerItemLocked(r),
+      });
+    } catch (e) {
+      return jerr(res, 500, { error: String(e.message || e) });
+    } finally {
+      if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  router.post(P + "/tracker-item/:id", async (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId)) return jerr(res, 400, { error: "bad id" });
+    const b = req.body || {};
+    let cdb;
+    try {
+      cdb = createDbClient();
+      const cur = (await cdb.execute({ sql: "SELECT * FROM tracker_items WHERE id=?", args: [itemId] })).rows[0];
+      if (!cur) return jerr(res, 404, { error: "item not found" });
+      if (trackerItemLocked(cur)) return jerr(res, 409, { reason: "item is being processed by a bot" });
+      if (b.status != null) {
+        const def = (await cdb.execute({ sql: "SELECT status_values FROM tracker_defs WHERE id=?", args: [cur.tracker_id] })).rows[0];
+        if (def) {
+          const allowed = JSON.parse(def.status_values || "[]");
+          if (!allowed.includes(String(b.status))) return jerr(res, 400, { error: "invalid status: " + b.status });
+        }
+      }
+      const sets = [], args = [];
+      if (b.status != null) { sets.push("status=?"); args.push(String(b.status)); }
+      if (b.priority != null) { sets.push("priority=?"); args.push(Number(b.priority)); }
+      if (b.label != null) { sets.push("label=?"); args.push(String(b.label)); }
+      if (b.action_needed !== undefined) { sets.push("action_needed=?"); args.push(b.action_needed); }
+      if (b.data && typeof b.data === "object") {
+        const merged = { ...parseDataJson(cur.data_json), ...b.data };
+        sets.push("data_json=?"); args.push(JSON.stringify(merged));
+      }
+      if (!sets.length) return jerr(res, 400, { error: "nothing to update" });
+      sets.push("updated_at=datetime('now')");
+      args.push(itemId);
+      await cdb.execute({ sql: `UPDATE tracker_items SET ${sets.join(", ")} WHERE id=?`, args });
+      return res.json({ ok: true });
+    } catch (e) {
+      return jerr(res, 500, { error: String(e.message || e) });
+    } finally {
+      if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  router.post(P + "/tracker-item/:id/move", async (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId)) return jerr(res, 400, { error: "bad id" });
+    const status = String((req.body || {}).status || "");
+    if (!status) return jerr(res, 400, { error: "status required" });
+    let cdb;
+    try {
+      cdb = createDbClient();
+      const cur = (await cdb.execute({ sql: "SELECT * FROM tracker_items WHERE id=?", args: [itemId] })).rows[0];
+      if (!cur) return jerr(res, 404, { error: "item not found" });
+      if (trackerItemLocked(cur)) return jerr(res, 409, { reason: "item is being processed by a bot" });
+      const def = (await cdb.execute({ sql: "SELECT status_values FROM tracker_defs WHERE id=?", args: [cur.tracker_id] })).rows[0];
+      if (def) {
+        const allowed = JSON.parse(def.status_values || "[]");
+        if (!allowed.includes(status)) return jerr(res, 400, { error: "invalid status: " + status });
+      }
+      await cdb.execute({ sql: "UPDATE tracker_items SET status=?, updated_at=datetime('now') WHERE id=?", args: [status, itemId] });
+      return res.json({ ok: true });
+    } catch (e) {
+      return jerr(res, 500, { error: String(e.message || e) });
+    } finally {
+      if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  // ---- create tracker item ----
+  router.post(P + "/tracker-item", async (req, res) => {
+    const b = req.body || {};
+    const slug = String(b.tracker_slug || "");
+    const label = typeof b.label === "string" ? b.label.trim() : "";
+    if (!slug || !label) return jerr(res, 400, { error: "tracker_slug and label are required" });
+    let cdb;
+    try {
+      cdb = createDbClient();
+      const def = (await cdb.execute({ sql: "SELECT id, status_values FROM tracker_defs WHERE slug=?", args: [slug] })).rows[0];
+      if (!def) return jerr(res, 404, { error: "tracker not found: " + slug });
+      const status = b.status ? String(b.status) : JSON.parse(def.status_values || "[]")[0] || "pending";
+      const allowed = JSON.parse(def.status_values || "[]");
+      if (!allowed.includes(status)) return jerr(res, 400, { error: "invalid status: " + status });
+      const priority = b.priority != null ? Number(b.priority) : 3;
+      const dataJson = b.data && typeof b.data === "object" ? JSON.stringify(b.data) : "{}";
+      const r = await cdb.execute({
+        sql: `INSERT INTO tracker_items (tracker_id, bot_id, status, priority, label, data_json, action_needed)
+              VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        args: [def.id, b.bot_id || null, status, priority, label, dataJson, b.action_needed || null],
+      });
+      return res.json({ ok: true, id: Number(r.lastInsertRowid) });
+    } catch (e) {
+      return jerr(res, 500, { error: String(e.message || e) });
+    } finally {
+      if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  router.post(P + "/tracker-item/:id/force-clear-lease", async (req, res) => {
+    const itemId = Number(req.params.id);
+    if (!Number.isInteger(itemId)) return jerr(res, 400, { error: "bad id" });
+    let cdb;
+    try {
+      cdb = createDbClient();
+      const cur = (await cdb.execute({ sql: "SELECT processing_lease_status FROM tracker_items WHERE id=?", args: [itemId] })).rows[0];
+      if (!cur) return jerr(res, 404, { error: "item not found" });
+      if (!trackerItemLocked(cur)) return res.json({ ok: true, message: "already unlocked" });
+      await cdb.execute({
+        sql: "UPDATE tracker_items SET processing_lease=NULL, processing_lease_status=NULL, updated_at=datetime('now') WHERE id=?",
+        args: [itemId],
+      });
+      return res.json({ ok: true });
+    } catch (e) {
+      return jerr(res, 500, { error: String(e.message || e) });
+    } finally {
       if (cdb) { try { cdb.close(); } catch {} }
     }
   });

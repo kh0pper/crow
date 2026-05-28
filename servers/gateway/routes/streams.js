@@ -335,87 +335,114 @@ export default function streamsRouter(dashboardAuth) {
   // WAL flip); no direct better-sqlite3 constructor here. Defensive: on the
   // primary gateway the tables are absent, so the first tick errors, is
   // swallowed (stderr-only), the last snapshot is kept, the stream stays up.
-  router.get("/dashboard/streams/bot-board", (req, res) => {
+  router.get("/dashboard/streams/bot-board", async (req, res) => {
     const { sendRaw } = openAuthedStream(req, res);
     const TASKS_DB = process.env.CROW_TASKS_DB_PATH || "/home/kh0pp/.crow-mpa/data/tasks.db";
     const LOCK = new Set(["active", "waiting-user"]);
-    const projectId = Number(req.query.project);
 
-    // Open both clients; a throw closes whichever already opened.
+    // Resolve bot or project at connection time (once, not per tick)
+    const botId = req.query.bot || null;
+    const projectId = req.query.project != null ? Number(req.query.project) : null;
+    let trackerType = "kanban";
+    let trackerDefId = null;
+    let resolvedProjectId = projectId;
+
     let tdb = null;
     let cdb = null;
     try {
-      tdb = createDbClient(TASKS_DB);
       cdb = createDbClient();
+      if (botId) {
+        const botRow = (await cdb.execute({ sql: "SELECT definition, project_id FROM pi_bot_defs WHERE bot_id=?", args: [botId] })).rows[0];
+        if (botRow) {
+          let def; try { def = JSON.parse(botRow.definition || "{}"); } catch { def = {}; }
+          const tc = def.tracker_config || {};
+          trackerType = tc.type || "kanban";
+          resolvedProjectId = botRow.project_id != null ? Number(botRow.project_id) : null;
+          if (trackerType === "custom" && tc.tracker_slug) {
+            const tdef = (await cdb.execute({ sql: "SELECT id FROM tracker_defs WHERE slug=?", args: [tc.tracker_slug] })).rows[0];
+            if (tdef) trackerDefId = tdef.id;
+          }
+        }
+      }
+      if (trackerType === "kanban" || trackerType === "task-list") {
+        tdb = createDbClient(TASKS_DB);
+      }
     } catch {
-      if (tdb) { try { tdb.close(); } catch { /* noop */ } tdb = null; }
-      if (cdb) { try { cdb.close(); } catch { /* noop */ } cdb = null; }
-      return; // cannot stream; openAuthedStream keeps the SSE open + idle
+      if (tdb) { try { tdb.close(); } catch {} tdb = null; }
+      if (cdb) { try { cdb.close(); } catch {} cdb = null; }
+      return;
     }
 
     let closed = false;
     let tickInFlight = false;
     let timer = null;
-    let last = null; // JSON of the last pushed snapshot (diff gate)
+    let last = null;
 
     const closeClients = () => {
-      if (tdb) { try { tdb.close(); } catch { /* noop */ } tdb = null; }
-      if (cdb) { try { cdb.close(); } catch { /* noop */ } cdb = null; }
+      if (tdb) { try { tdb.close(); } catch {} tdb = null; }
+      if (cdb) { try { cdb.close(); } catch {} cdb = null; }
     };
-    // Idempotent (Executor note #3): the `closed` flag short-circuits a
-    // double invoke across the res 'close' + 'error' paths.
     const cleanup = () => {
       if (closed) return;
       closed = true;
       if (timer) { clearInterval(timer); timer = null; }
-      if (!tickInFlight) closeClients(); // else the tick's finally closes
+      if (!tickInFlight) closeClients();
     };
 
     const tick = async () => {
-      if (closed || tickInFlight) return; // re-entrancy guard
+      if (closed || tickInFlight) return;
       tickInFlight = true;
       try {
-        if (!Number.isInteger(projectId)) return; // nothing to stream
-        const cards = (await tdb.execute({
-          sql: "SELECT id, status FROM tasks_items WHERE project_id=? ORDER BY priority ASC, id ASC",
-          args: [projectId],
-        })).rows || [];
-        const ids = cards.map((c) => Number(c.id)).filter((n) => Number.isInteger(n));
-        const locks = {};
-        if (ids.length) {
-          const ph = ids.map(() => "?").join(",");
-          const lrows = (await cdb.execute({
-            sql:
-              `SELECT card_id, status FROM bot_sessions ` +
-              `WHERE id IN (SELECT MAX(id) FROM bot_sessions WHERE card_id IN (${ph}) GROUP BY card_id)`,
-            args: ids,
+        let cards = [];
+        let locks = {};
+
+        if (trackerType === "custom" && trackerDefId) {
+          const rows = (await cdb.execute({
+            sql: "SELECT id, status, processing_lease_status FROM tracker_items WHERE tracker_id=? ORDER BY priority ASC, id ASC",
+            args: [trackerDefId],
           })).rows || [];
-          for (const r of lrows) {
-            if (LOCK.has(String(r.status))) locks[Number(r.card_id)] = true;
+          cards = rows.map((r) => ({ id: Number(r.id), status: String(r.status) }));
+          for (const r of rows) {
+            if (String(r.processing_lease_status) === "in-progress") locks[Number(r.id)] = true;
           }
+        } else if ((trackerType === "kanban" || trackerType === "task-list") && tdb && Number.isInteger(resolvedProjectId)) {
+          const rows = (await tdb.execute({
+            sql: "SELECT id, status FROM tasks_items WHERE project_id=? ORDER BY priority ASC, id ASC",
+            args: [resolvedProjectId],
+          })).rows || [];
+          cards = rows.map((c) => ({ id: Number(c.id), status: String(c.status) }));
+          const ids = cards.map((c) => c.id).filter((n) => Number.isInteger(n));
+          if (ids.length) {
+            const ph = ids.map(() => "?").join(",");
+            const lrows = (await cdb.execute({
+              sql: `SELECT card_id, status FROM bot_sessions WHERE id IN (SELECT MAX(id) FROM bot_sessions WHERE card_id IN (${ph}) GROUP BY card_id)`,
+              args: ids,
+            })).rows || [];
+            for (const r of lrows) {
+              if (LOCK.has(String(r.status))) locks[Number(r.card_id)] = true;
+            }
+          }
+        } else {
+          return;
         }
-        const json = JSON.stringify({
-          cards: cards.map((c) => ({ id: Number(c.id), status: String(c.status) })),
-          locks,
-        });
+
+        const json = JSON.stringify({ cards, locks });
         if (json !== last && !closed) {
-          last = json; // full snapshot on (re)connect, then change-gated
+          last = json;
           sendRaw(`data: ${json}\n\n`);
         }
       } catch (e) {
-        // poll read error → skip tick, keep last snapshot, stderr-only.
         process.stderr.write(`[bot-board-stream] tick error: ${e && e.message}\n`);
       } finally {
         tickInFlight = false;
-        if (closed) closeClients(); // deferred close (cleanup ran mid-await)
+        if (closed) closeClients();
       }
     };
 
-    // Register teardown BEFORE arming the interval (plan Step 4 item 1).
     res.on("close", cleanup);
     res.on("error", cleanup);
     timer = setInterval(tick, 5000);
-    tick(); // immediate first snapshot (re-entrancy-guarded)
+    tick();
   });
 
   return router;

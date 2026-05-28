@@ -31,17 +31,49 @@ import { createDbClient } from "../db.js";
 import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const HOME = process.env.HOME || "/home/kh0pp";
 const MODELS_JSON_SEARCH_PATHS = [
   resolve(__dirname, "../../models.json"),
   resolve(__dirname, "../../bundles/crowclaw/config/agents/main/models.json"),
   resolve(__dirname, "../../config/models.json"),
+  resolve(HOME, ".pi/agent/models.json"),
 ];
 
 function readModelsJson() {
+  const merged = { providers: {} };
+  const paths = [];
   for (const p of MODELS_JSON_SEARCH_PATHS) {
-    try { return { path: p, config: JSON.parse(readFileSync(p, "utf-8")) }; } catch {}
+    try {
+      const j = JSON.parse(readFileSync(p, "utf-8"));
+      if (j && j.providers) {
+        Object.assign(merged.providers, j.providers);
+        paths.push(p);
+      }
+    } catch {}
   }
-  return { path: null, config: { providers: {} } };
+  return { path: paths.join(", ") || null, config: merged };
+}
+
+function inferHost(baseUrl, existingHost) {
+  if (existingHost) return existingHost;
+  if (!baseUrl) return "local";
+  try {
+    const h = new URL(baseUrl).hostname;
+    if (h === "localhost" || h.startsWith("127.") || h.startsWith("10.") ||
+        h.startsWith("192.168.") || h.startsWith("100.")) return "local";
+    return "cloud";
+  } catch { return "local"; }
+}
+
+const API_TO_PROVIDER_TYPE = {
+  "openai-completions": "openai-compat",
+  "anthropic-messages": "anthropic",
+  "google-generative": "google",
+  "ollama": "ollama",
+};
+function inferProviderType(apiField) {
+  if (!apiField) return null;
+  return API_TO_PROVIDER_TYPE[apiField] || "openai-compat";
 }
 
 /**
@@ -100,6 +132,8 @@ export async function loadProvidersFromDb(db) {
   for (const r of rows) {
     let models = [];
     try { models = JSON.parse(r.models || "[]"); } catch {}
+    let gpuPolicy = null;
+    try { gpuPolicy = r.gpu_policy ? JSON.parse(r.gpu_policy) : null; } catch {}
     providers[r.id] = {
       baseUrl: r.base_url,
       apiKey: r.api_key,
@@ -107,6 +141,7 @@ export async function loadProvidersFromDb(db) {
       bundleId: r.bundle_id,
       description: r.description,
       models,
+      gpuPolicy,
     };
   }
   return { providers, _source: "db:providers" };
@@ -144,11 +179,12 @@ export async function upsertProvider(db, provider) {
   const existed = rows.length > 0;
   const newTs = Math.max(Number(currentTs), Number(provider.lamport_ts || 0)) + 1;
   const providerType = provider.providerType ?? provider.provider_type ?? null;
+  const gpuPolicy = provider.gpuPolicy != null ? JSON.stringify(provider.gpuPolicy) : (provider.gpu_policy ?? null);
 
   await db.execute({
     sql: `INSERT INTO providers
-          (id, base_url, api_key, host, bundle_id, description, models, disabled, lamport_ts, instance_id, provider_type, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          (id, base_url, api_key, host, bundle_id, description, models, disabled, lamport_ts, instance_id, provider_type, gpu_policy, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
           ON CONFLICT(id) DO UPDATE SET
             base_url = excluded.base_url,
             api_key = excluded.api_key,
@@ -160,6 +196,7 @@ export async function upsertProvider(db, provider) {
             lamport_ts = excluded.lamport_ts,
             instance_id = excluded.instance_id,
             provider_type = excluded.provider_type,
+            gpu_policy = COALESCE(excluded.gpu_policy, providers.gpu_policy),
             updated_at = datetime('now')`,
     args: [
       provider.id,
@@ -173,6 +210,7 @@ export async function upsertProvider(db, provider) {
       newTs,
       instanceId,
       providerType,
+      gpuPolicy,
     ],
   });
 
@@ -188,6 +226,7 @@ export async function upsertProvider(db, provider) {
     lamport_ts: newTs,
     instance_id: instanceId,
     provider_type: providerType,
+    gpu_policy: gpuPolicy,
   });
 
   return { id: provider.id, lamport_ts: newTs };
@@ -221,14 +260,18 @@ export async function listProvidersAll(db) {
   return rows.map((r) => {
     let models = [];
     try { models = JSON.parse(r.models || "[]"); } catch {}
+    let gpuPolicy = null;
+    try { gpuPolicy = r.gpu_policy ? JSON.parse(r.gpu_policy) : null; } catch {}
     return {
       id: r.id,
       baseUrl: r.base_url,
       apiKey: r.api_key,
       host: r.host,
       bundleId: r.bundle_id,
+      provider_type: r.provider_type || null,
       description: r.description,
       models,
+      gpuPolicy,
       disabled: !!r.disabled,
       lamport_ts: r.lamport_ts,
       instance_id: r.instance_id,
@@ -315,15 +358,20 @@ export async function syncProvidersFromModelsJson(db, { force = false } = {}) {
   let skippedDisabled = 0;
   for (const [id, p] of entries) {
     if (!force && disabledIds.has(id)) { skippedDisabled++; continue; }
+    const gpuPolicy = (p.mutexGroup || p.alwaysResident || p.defaultMember)
+      ? { mutexGroup: p.mutexGroup ?? null, alwaysResident: !!p.alwaysResident, defaultMember: !!p.defaultMember }
+      : null;
     await upsertProvider(dbClient, {
       id,
       baseUrl: p.baseUrl || "",
       apiKey: p.apiKey ?? null,
-      host: p.host || "local",
+      host: inferHost(p.baseUrl, p.host),
       bundleId: p.bundleId ?? null,
       description: p.$description || p.description || null,
       models: p.models || [],
       disabled: false,
+      providerType: inferProviderType(p.api) || p.providerType || null,
+      gpuPolicy,
     });
     upserted++;
   }

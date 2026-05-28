@@ -27,6 +27,7 @@ import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
 import { validateExtensions, isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
 import { resolveModel, escalateRequested, stripEscalateToken } from "./model_resolver.mjs";
+import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType } from "./tracker.mjs";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
@@ -212,21 +213,7 @@ function appendAuditBridge(projectId, opts) {
     // never throw
   }
 }
-function kanbanText(projectId, tasksDbPath) {
-  if (projectId == null) return "(no project linked)";
-  const path = tasksDbPath || TASKS_DB;
-  const t = db(path);
-  const rows = t.prepare("SELECT id,title,status FROM tasks_items WHERE project_id=? AND parent_id IS NULL ORDER BY id").all(projectId);
-  t.close();
-  return rows.length ? rows.map((r) => "  #" + r.id + " [" + r.status + "] " + r.title).join("\n") : "  (no cards)";
-}
-function cardStatus(cardId, tasksDbPath) {
-  const path = tasksDbPath || TASKS_DB;
-  const t = db(path);
-  const r = t.prepare("SELECT status FROM tasks_items WHERE id=?").get(cardId);
-  t.close();
-  return r ? r.status : null;
-}
+// kanbanText, cardStatus, getTrackerContext, resolveTrackerType — imported from tracker.mjs (S3)
 // M3b: structured project-context block for the prompt. Replaces the bare
 // "Project #N" interpolation in the legacy prompts; the bot now sees who
 // can interact with it (member list filtered to invoke_bot=true), what
@@ -393,7 +380,8 @@ export async function handleInbound(opts) {
     // shortlisted candidates?" → call job_candidates_query; "do a scout
     // pass" → run the full workflow). Previous template hard-banned tool
     // use here which made the bot useless for anything except "do card N".
-    promptText = projectHeader + "\n\nKanban:\n" + kanbanText(projectId, tasksDbPath) + "\n\n" +
+    const trackerBlock = getTrackerContext(def, projectId, tasksDbPath);
+    promptText = projectHeader + (trackerBlock ? "\n\n" + trackerBlock : "") + "\n\n" +
       "User said: \"" + cleanMsg + "\"\n\n" +
       "Reply on the gateway thread. Use tools as needed per your system " +
       "prompt: if the user asks a simple question (criteria, status, " +
@@ -408,7 +396,7 @@ export async function handleInbound(opts) {
   // pi session — resuming a session created under a different provider/model
   // is an unproven pi path. `resume` still shapes the prompt (conversation
   // continuity); `effectiveResume` alone decides pi's `--session`.
-  const resolved = resolveModel(def, { escalate });
+  const resolved = await resolveModel(def, { escalate });
   const forceNew = escalate && resume && ((session && session.model) || null) !== resolved.key;
   const effectiveResume = resume && !forceNew;
   // R5: the ONE deterministic escalation-proof observable (get_state does NOT
