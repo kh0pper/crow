@@ -147,6 +147,54 @@ function formatBytes(n) {
   return `${(n / (1024 * 1024)).toFixed(1)}MB`;
 }
 
+// ── Correspondence body extraction (Phase 1: no-attachment PIR mail) ──────────
+// GovQA/mycusthelp portal mail is HTML-only; extract a plain-text body so the
+// dispatcher can pass it to the bot as a file (avoids feeding raw HTML to the
+// local model). Prefer text/plain; fall back to stripped text/html.
+function decodeB64Url(d) {
+  return Buffer.from(d.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+}
+function collectBodyParts(payload, out) {
+  if (!payload) return;
+  if (payload.body?.data && /^text\//.test(payload.mimeType || "")) {
+    out.push({ mt: payload.mimeType, data: decodeB64Url(payload.body.data) });
+  }
+  if (payload.parts) for (const p of payload.parts) collectBodyParts(p, out);
+}
+function stripHtml(h) {
+  return h
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<\/(p|div|tr|li|h[1-6])>/gi, "\n")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+function extractPlainBody(payload) {
+  const parts = [];
+  collectBodyParts(payload, parts);
+  const txt = parts.find((p) => p.mt === "text/plain");
+  if (txt && txt.data.trim()) return txt.data.trim();
+  const html = parts.find((p) => p.mt === "text/html");
+  if (html) return stripHtml(html.data);
+  return "";
+}
+
+// Subject-driven case classification, mirroring the bot prompt's FIRST-STEP
+// TRIAGE interim signals. correspondence is the catch-all (decision-forcing
+// messages with a generic portal subject, e.g. R000873).
+function classifyCaseType(subject) {
+  const s = (subject || "").toLowerCase();
+  if (/no documents found|no responsive|no records/.test(s)) return "no-responsive";
+  if (/cost estimate|clarification/.test(s)) return "cost-estimate";
+  return "correspondence";
+}
+
 async function downloadAttachments({ gmail, messageId, attachments, destDir }) {
   ensureDir(destDir);
   const saved = [];
@@ -323,17 +371,46 @@ async function processMessage({ gmail, canvasDb, mpaDb, msgMeta, labelIds, pirOv
   }
 
   if (!attachments.length) {
-    console.error(
-      `[pir-ingest]   ${msg.id}: matched PIR ${pirRow.pir_number} but no attachments`,
+    // Phase 1 (correspondence): a matched PIR with no data attachments is a
+    // decision-forcing / interim message (e.g. R000873 "decide on the #9b cost
+    // estimate or we close"). Persist the body + metadata into the holding dir
+    // and queue it with a case_type so the dispatcher can route it to the bot's
+    // reply-drafting path. The dispatcher reads email_body.txt + case_type.
+    const caseType = classifyCaseType(subject);
+    const holdingDir = path.join(INCOMING_DIR, pirRow.pir_number);
+    ensureDir(holdingDir);
+    const body = extractPlainBody(msg.payload);
+    fs.writeFileSync(path.join(holdingDir, "email_body.txt"), body || "(empty body)");
+    fs.writeFileSync(
+      path.join(holdingDir, "inbound.json"),
+      JSON.stringify({
+        message_id: msg.id,
+        thread_id: msg.threadId,
+        subject,
+        from: fromHeader,
+        date: msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : null,
+        case_type: caseType,
+      }, null, 2),
     );
-    // Still write a bot_conversations row so the tick can summarize.
+    console.error(
+      `[pir-ingest]   ${msg.id}: matched PIR ${pirRow.pir_number}, no attachments — ` +
+        `case_type=${caseType}, body=${(body || "").length} chars → ${holdingDir}`,
+    );
     upsertBotConversation(mpaDb, {
       pirRow,
       msg,
       savedFiles: [],
-      holdingDir: null,
+      holdingDir,
     });
-    return { matched: true, savedCount: 0, pirNumber: pirRow.pir_number };
+    // Queue + record case_type. Tolerate NULL or '' lease/lease-status (some
+    // legacy rows carry empty strings rather than NULL).
+    canvasDb.prepare(`UPDATE pir_requests
+      SET processing_lease_status = 'queued', case_type = ?, updated_at = datetime('now')
+      WHERE id = ?
+        AND (processing_lease IS NULL OR processing_lease = '')
+        AND (processing_lease_status IS NULL OR processing_lease_status IN ('', 'done'))`)
+      .run(caseType, pirRow.id);
+    return { matched: true, savedCount: 0, pirNumber: pirRow.pir_number, caseType };
   }
 
   const holdingDir = path.join(INCOMING_DIR, pirRow.pir_number);
@@ -354,7 +431,7 @@ async function processMessage({ gmail, canvasDb, mpaDb, msgMeta, labelIds, pirOv
       savedFiles,
       holdingDir,
     });
-    canvasDb.prepare(`UPDATE pir_requests SET processing_lease_status = 'queued'
+    canvasDb.prepare(`UPDATE pir_requests SET processing_lease_status = 'queued', case_type = 'delivery'
       WHERE id = ? AND processing_lease IS NULL
       AND (processing_lease_status IS NULL OR processing_lease_status = 'done')`).run(pirRow.id);
   }
