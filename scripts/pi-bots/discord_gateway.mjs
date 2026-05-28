@@ -35,6 +35,8 @@ const MAX_QUEUE = 5;
 const CHUNK_LIMIT = 1990;        // safe margin under Discord's 2000-char hard limit
 const CHUNK_DELAY_MS = 200;      // courtesy delay between message chunks
 const TYPING_INTERVAL_MS = 9000; // re-trigger typing before its 10s expiry
+const MAX_IMAGES = 4;            // cap images per turn
+const MAX_IMAGE_BYTES = 12 * 1024 * 1024; // skip attachments larger than this
 
 function log(msg) {
   // journal captures stdout; prefix mirrors bridge_tick's "[tick]" convention.
@@ -101,6 +103,30 @@ async function postReply(channel, text) {
   }
 }
 
+function guessMime(name) {
+  const m = (name || "").toLowerCase().match(/\.(png|jpe?g|webp|gif|bmp)$/);
+  if (!m) return "image/png";
+  return { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", bmp: "image/bmp" }[m[1]] || "image/png";
+}
+
+// Download Discord image attachments into pi ImageContent blocks
+// ({type:"image", data:<base64>, mimeType}). Best-effort: a failed/oversize
+// image is skipped (logged), never throws.
+async function downloadImages(atts) {
+  const out = [];
+  for (const a of atts.slice(0, MAX_IMAGES)) {
+    try {
+      if (a.size && a.size > MAX_IMAGE_BYTES) { log("skip oversize image " + (a.name || "") + " (" + a.size + "b)"); continue; }
+      const res = await fetch(a.url);
+      if (!res.ok) { log("image fetch failed " + res.status + " " + (a.name || "")); continue; }
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length > MAX_IMAGE_BYTES) { log("skip oversize image post-fetch " + (a.name || "")); continue; }
+      out.push({ type: "image", data: buf.toString("base64"), mimeType: a.contentType || guessMime(a.name || a.url) });
+    } catch (e) { log("image download error " + (a.name || "") + ": " + (e && e.message || e)); }
+  }
+  return out;
+}
+
 const clients = [];
 
 function startBot(bot) {
@@ -136,11 +162,19 @@ function startBot(bot) {
     const stopTyping = () => { if (typing) { clearInterval(typing); typing = null; } };
     startTyping();
     try {
+      // Download any image attachments and pass them as pi ImageContent so the
+      // vision model can read them (e.g. receipts). Non-fatal on failure.
+      let images;
+      if (job.imgAtts && job.imgAtts.length) {
+        images = await downloadImages(job.imgAtts);
+        if (images.length) log("attached " + images.length + " image(s) to turn bot=" + bot.bot_id);
+      }
       const r = await handleInbound({
         bot_id: bot.bot_id,
         gateway_thread_id,
         user_message: job.content,
         gateway_type: "discord",
+        images: images && images.length ? images : undefined,
         sendReply: async (text) => { stopTyping(); await postReply(channel, text); },
         log: (m) => log("  [bridge:" + bot.bot_id + "] " + m),
       });
@@ -177,15 +211,36 @@ function startBot(bot) {
       if (bot.channel_ids.length && !bot.channel_ids.includes(message.channelId)) {
         return;                                               // restricted to specific channels
       }
-      const content = (message.content || "").trim();
-      if (!content) return;                                   // attachments/embeds with no text
+      let content = (message.content || "").trim();
+      const atts = message.attachments ? [...message.attachments.values()] : [];
+      const imgAtts = atts.filter((a) =>
+        /^image\//.test(a.contentType || "") || /\.(png|jpe?g|webp|gif|bmp)$/i.test(a.name || a.url || ""));
+      if (!content) {
+        // No text body. A receipt photo (image attachment, no caption) lands
+        // here — the model is vision-capable, so pass the image through (below)
+        // and give it a sensible default instruction.
+        if (imgAtts.length) {
+          content = "(The user sent " + imgAtts.length + " image(s) with no caption. If it is a receipt, "
+            + "read it and log the expense + stock the pantry per the household-kitchen skill; otherwise "
+            + "describe what you see and ask what they'd like done.)";
+        } else if (atts.length) {
+          const names = atts.map((a) => a.name || a.url).join(", ");
+          log("non-image attachment-only message bot=" + bot.bot_id + " from=" + senderId + " atts=[" + names + "]");
+          content = "[The user sent attachment(s) you cannot read (not images): " + names
+            + ". Ask them to type the details.]";
+        } else {
+          log("empty message dropped bot=" + bot.bot_id + " from=" + senderId + " (no text, no attachments)");
+          return;
+        }
+      }
+      if (imgAtts.length) log("image message bot=" + bot.bot_id + " from=" + senderId + " images=" + imgAtts.length);
 
       if (queue.length >= MAX_QUEUE) {
         log("queue full bot=" + bot.bot_id + " — dropping inbound");
         message.channel.send("I'm still working on something — try again in a minute.").catch(() => {});
         return;
       }
-      queue.push({ message, content });
+      queue.push({ message, content, imgAtts });
       drain();
     } catch (e) {
       log("messageCreate handler error bot=" + bot.bot_id + ": " + (e && e.message || e));
