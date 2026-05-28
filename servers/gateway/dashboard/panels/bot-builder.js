@@ -376,6 +376,16 @@ export default {
           const gwType = (b.gw_type || "gmail").trim();
           if (gwType === "none") {
             def.gateways = [];
+          } else if (gwType === "discord") {
+            def.gateways = [
+              {
+                type: "discord",
+                token: (b.gw_token || "").trim(),
+                guild_id: (b.gw_guild_id || "").trim() || undefined,
+                channel_ids: lines(b.gw_channel_ids),
+                allowlist: lines(b.gw_allowlist),
+              },
+            ];
           } else {
             def.gateways = [
               {
@@ -607,22 +617,43 @@ export default {
         const gwType = gw.type || "gmail";
         const gwTypes = [
           { value: "gmail", label: "Gmail", available: true },
+          { value: "discord", label: "Discord", available: true },
           { value: "crow-messages", label: "Crow Messages", available: false },
-          { value: "discord", label: "Discord", available: false },
           { value: "signal", label: "Signal", available: false },
           { value: "none", label: "None (no gateway)", available: true },
         ];
         const typeOpts = gwTypes.map((t) =>
           `<option value="${t.value}"${gwType === t.value ? " selected" : ""}>${escapeHtml(t.label)}${t.available ? "" : " — coming soon"}</option>`
         ).join("");
+        // Server-rendered, type-aware fields. Changing the type auto-submits so
+        // the form re-renders with the right fields for that gateway (any
+        // not-yet-filled values save empty — a harmless draft until completed).
+        let gwFields, gwHint;
+        if (gwType === "discord") {
+          gwFields =
+            `<div class="btb-group"><label>Bot token</label>` +
+            `<input type="password" name="gw_token" class="btb-input" autocomplete="off" value="${escapeHtml(gw.token || "")}"></div>` +
+            formField("Guild ID (optional)", "gw_guild_id", { value: gw.guild_id || "" }) +
+            `<div class="btb-group"><label>Channel IDs (one per line, optional — blank = any channel)</label>` +
+            `<textarea name="gw_channel_ids" rows="3" class="btb-textarea">${escapeHtml((gw.channel_ids || []).join("\n"))}</textarea></div>` +
+            `<div class="btb-group"><label>Allowlist — Discord user IDs (one per line)</label>` +
+            `<textarea name="gw_allowlist" rows="4" class="btb-textarea">${escapeHtml((gw.allowlist || []).join("\n"))}</textarea></div>`;
+          gwHint = `<p class="btb-hint">Discord runs via the long-lived <code>pibot-discord.service</code> (discord_gateway.mjs holds a WebSocket per bot). The <code>MessageContent</code> privileged intent must be enabled in the Discord Developer Portal. After changing token/guild/channel config, restart the service: <code>sudo systemctl restart pibot-discord</code>.</p>`;
+        } else if (gwType === "none") {
+          gwFields = "";
+          gwHint = `<p class="btb-hint">No gateway — this bot is driven only by direct injection / cards, not inbound messages.</p>`;
+        } else {
+          gwFields =
+            formField("Gmail address (+alias)", "gw_address", { value: gw.address || "" }) +
+            `<div class="btb-group"><label>Allowlist (one address per line)</label>` +
+            `<textarea name="gw_allowlist" rows="4" class="btb-textarea">${escapeHtml((gw.allowlist || []).join("\n"))}</textarea></div>`;
+          gwHint = `<p class="btb-hint">Gmail polls <code>to:&lt;+alias&gt;@maestro.press</code> via bridge_tick.mjs (pibot-bridge.timer, ~1 min).</p>`;
+        }
         body =
           `<form method="POST" class="btb-form">${hidden("gateways")}` +
           `<div class="btb-group"><label>Gateway type</label>` +
-          `<select name="gw_type" class="btb-select">${typeOpts}</select></div>` +
-          formField("Gmail address (+alias)", "gw_address", { value: gw.address || "" }) +
-          `<div class="btb-group"><label>Allowlist (one address per line)</label>` +
-          `<textarea name="gw_allowlist" rows="4" class="btb-textarea">${escapeHtml((gw.allowlist || []).join("\n"))}</textarea></div>` +
-          `<p class="btb-hint">The gateways array supports multiple types. Only Gmail is currently implemented (bridge_tick.mjs polls <code>to:&lt;+alias&gt;@maestro.press</code>). Crow Messages, Discord, and Signal gateways are planned.</p>` +
+          `<select name="gw_type" class="btb-select" onchange="this.form.submit()">${typeOpts}</select></div>` +
+          gwFields + gwHint +
           actionBar(`<button type="submit" class="btb-btn">Save Gateways</button>`) + `</form>`;
       } else if (tabId === "tracker") {
         let projects = [];
