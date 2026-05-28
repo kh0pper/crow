@@ -126,8 +126,8 @@ class PiRpc {
       setTimeout(() => { const i = this._w.indexOf(w); if (i >= 0) { this._w.splice(i, 1); reject(new Error("timeout:" + label + " (stderr " + this.stderr.slice(-200) + ")")); } }, ms);
     });
   }
-  async prompt(message, ms) {
-    this.send({ type: "prompt", message });
+  async prompt(message, ms, images) {
+    this.send(Object.assign({ type: "prompt", message }, (images && images.length) ? { images } : {}));
     await this.waitFor((m) => m.type === "response" && m.command === "prompt", PROMPT_ACK_TIMEOUT_MS, "prompt-ack");
     return this.waitFor((m) => m.type === "agent_end", ms, "agent_end");
   }
@@ -456,7 +456,7 @@ export async function handleInbound(opts) {
   let result;
   try {
     const st0 = await pi.getState().catch(() => null);
-    await pi.prompt(promptText, TURN_TIMEOUT_MS);
+    await pi.prompt(promptText, TURN_TIMEOUT_MS, opts.images);
     const st1 = await pi.getState().catch(() => null);
     const piSessionId = (st1 && st1.data && st1.data.sessionId) || (st0 && st0.data && st0.data.sessionId) || (effectiveResume ? session.pi_session_id : null) || null;
     const text = pi.assistantText() || "(no reply)";
