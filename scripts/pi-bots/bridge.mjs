@@ -20,7 +20,7 @@
  */
 import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync, readFileSync, existsSync, mkdtempSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, appendFileSync, existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { countLivePi, LIFECYCLE_DEFAULTS } from "./pi_lifecycle.mjs";
@@ -35,6 +35,11 @@ const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
 // @earendil-works/pi-coding-agent (still 'pi' binary; v0.74.2 verified).
 const PI_CLI = HOME + "/.nvm/versions/node/v20.20.2/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js";
 const CROW_DB = process.env.CROW_DB_PATH || HOME + "/.crow-mpa/data/crow.db";
+// Skill-file roots (same convention as bot-builder.js): operator skills in
+// ~/.crow/skills, bundled repo skills in ~/crow/skills. def.skills[] names
+// are resolved against these in order.
+const SKILLS_DIR = HOME + "/.crow/skills";
+const REPO_SKILLS_DIR = HOME + "/crow/skills";
 const TASKS_DB = process.env.CROW_TASKS_DB_PATH || HOME + "/.crow-mpa/data/tasks.db";
 const TURN_TIMEOUT_MS = Number(process.env.PIBOT_TURN_TIMEOUT_MS || 600000);
 const PROMPT_ACK_TIMEOUT_MS = Number(process.env.PIBOT_PROMPT_ACK_TIMEOUT_MS || 60000);
@@ -263,6 +268,9 @@ function parseCardIntent(msg) {
 
 export async function handleInbound(opts) {
   const bot_id = opts.bot_id, gateway_thread_id = opts.gateway_thread_id, user_message = opts.user_message;
+  // Gateway-agnostic: the inbound adapter (gmail bridge_tick, discord_gateway)
+  // declares its transport. Defaults to gmail for legacy callers that omit it.
+  const gateway_type = opts.gateway_type || "gmail";
   const sendReply = opts.sendReply, log = opts.log || function () {};
   // Phase 3.0 (R4): operator-driven escalation via a bounded, inbound-only
   // `!escalate` token. Detect on the RAW inbound, then strip it so it never
@@ -325,7 +333,7 @@ export async function handleInbound(opts) {
     const st = cardStatus(wantCard, tasksDbPath);
     if (st === "done") {
       log("card " + wantCard + " already done — no re-exec");
-      if (!session) session = upsertSession({ bot_id, gateway_thread_id, project_id: projectId, status: "waiting-user" });
+      if (!session) session = upsertSession({ bot_id, gateway_thread_id, gateway_type, project_id: projectId, status: "waiting-user" });
       await sendReply("Card #" + wantCard + " is already done — nothing to do.");
       return { action: "noop-done", cardId: wantCard };
     }
@@ -344,6 +352,23 @@ export async function handleInbound(opts) {
   const sysFile = join(mkdtempSync(join(tmpdir(), "pibot-")), "sys.md");
   writeFileSync(sysFile, def.system_prompt || "You are a Crow bot.", { mode: 0o600 });
 
+  // Append the content of each configured skill file to the system prompt.
+  // def.skills[] is saved by the Bot Builder but was never consumed here —
+  // bots with skills (e.g. pir-portal-runner: govqa-portal, oag-portal) ran
+  // without them. Resolve each name against ~/.crow/skills then ~/crow/skills.
+  for (const skillName of (def.skills || [])) {
+    let injected = false;
+    for (const dir of [SKILLS_DIR, REPO_SKILLS_DIR]) {
+      const p = join(dir, skillName + (skillName.endsWith(".md") ? "" : ".md"));
+      if (existsSync(p)) {
+        appendFileSync(sysFile, "\n\n" + readFileSync(p, "utf8"));
+        injected = true;
+        break;
+      }
+    }
+    if (!injected) log("skill file not found for '" + skillName + "' in " + SKILLS_DIR + " or " + REPO_SKILLS_DIR);
+  }
+
   const cardId = wantCard != null ? wantCard : (session ? session.card_id : null);
   // planFor still pulls from def.session_dir for legacy compatibility (where
   // existing plan files live). Project-native bots that get a project_space
@@ -356,11 +381,25 @@ export async function handleInbound(opts) {
   // M4 (job-searcher Step 0): also surface the gateway_thread_id so the bot
   // can pass it verbatim to gmail_create_draft and stay threaded with the
   // user. Without this line the bot has no way to discover its own thread.
+  // Gateway-type-aware reply hint. Gmail bots draft into a thread via
+  // gmail_create_draft and must echo the thread_id; Discord bots have their
+  // reply auto-posted by discord_gateway's sendReply, so they must NOT reach
+  // for gmail tools.
+  let gatewayHint;
+  if (gateway_type === "discord") {
+    gatewayHint = "\nGATEWAY: discord — your reply text is sent to the Discord channel automatically. "
+      + "Do NOT use gmail tools. (thread ref: " + gateway_thread_id + ")";
+  } else if (gateway_type === "gmail") {
+    gatewayHint = "\nGATEWAY THREAD: gmail thread_id=" + gateway_thread_id
+      + " — pass this verbatim as thread_id when drafting your reply via gmail_create_draft.";
+  } else {
+    gatewayHint = "\nGATEWAY: " + gateway_type + " (thread ref: " + gateway_thread_id
+      + ") — your reply text is delivered automatically.";
+  }
   const projectHeader = (projectSpace
     ? projectContextBlock(projectSpace, projectMembers)
     : (projectId != null ? "PROJECT #" + projectId + " (no space metadata)" : "PROJECT: (none)"))
-    + "\nGATEWAY THREAD: gmail thread_id=" + gateway_thread_id
-    + " — pass this verbatim as thread_id when drafting your reply via gmail_create_draft.";
+    + gatewayHint;
 
   let promptText;
   if (cardId != null) {
@@ -406,7 +445,7 @@ export async function handleInbound(opts) {
     " session=" + (effectiveResume ? "resume" : "new") + (forceNew ? " (forced-new: model changed)" : ""));
 
   session = upsertSession(Object.assign({}, session || {}, {
-    bot_id, gateway_thread_id, project_id: projectId,
+    bot_id, gateway_thread_id, gateway_type, project_id: projectId,
     card_id: cardId == null ? null : cardId, plan_path: plan.path,
     pi_session_dir: sessionDir + "/sessions", status: "active", control: "run",
     model: resolved.key, escalated: resolved.escalated ? 1 : 0,

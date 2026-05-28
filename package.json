@@ -49,6 +49,7 @@
     "chrome-remote-interface": "^0.34.0",
     "cors": "^2.8.6",
     "cron-parser": "^5.5.0",
+    "discord.js": "^14.26.4",
     "express": "^4.21.0",
     "express-rate-limit": "^8.3.0",
     "googleapis": "^171.4.0",
