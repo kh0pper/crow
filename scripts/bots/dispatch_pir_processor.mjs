@@ -293,8 +293,11 @@ async function sendReviewEmail(_gmail, pir, threadId) {
 // any other em/en dash -> comma (collapsing surrounding whitespace).
 function normalizeVoice(text) {
   return text
-    .replace(/(\d)\s*[–—]\s*(\d)/g, "$1-$2")   // 2021–22 -> 2021-22
-    .replace(/\s*[—–]\s*/g, ", ")               // clause — clause -> clause, clause
+    .replace(/(\d)\s*[–—]\s*(\d)/g, "$1-$2")     // 2021–22 -> 2021-22 (unicode range)
+    .replace(/\s*[—–]\s*/g, ", ")                 // unicode em/en dash -> comma
+    .replace(/(\S) +-{2,} +(\S)/g, "$1, $2")      // ASCII em-dash substitute "word -- word"
+                                                  // (literal spaces required: leaves
+                                                  // markdown --- rules and |---| tables alone)
     .replace(/ +,/g, ",")
     .replace(/,\s*,/g, ",");
 }
@@ -586,7 +589,10 @@ function dispatch(pir, trigger, leaseToken, gatewayThreadId) {
 
   try {
     const result = execFileSync(
-      "node",
+      // Use the running node's absolute path, not bare "node": the systemd
+      // unit's PATH does not include nvm's node, so bare "node" → spawn ENOENT
+      // and the timer-driven dispatch could never spawn the bridge.
+      process.execPath,
       [BRIDGE_PATH, "--inject", payload],
       { timeout: 30 * 60 * 1000, stdio: ["pipe", "pipe", "pipe"], maxBuffer: 10 * 1024 * 1024 }
     );
