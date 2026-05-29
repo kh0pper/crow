@@ -7,7 +7,8 @@
  */
 
 import { generateInstructions, STATIC_INSTRUCTIONS } from "../../shared/instructions.js";
-import { connectedServers } from "../proxy.js";
+import { connectedServers, resolveCrowHome } from "../proxy.js";
+import { resolveSkillText } from "../../../scripts/pi-bots/skill_resolver.mjs";
 
 function buildPreamble() {
   const now = new Date();
@@ -103,10 +104,45 @@ ${sections.join("\n\n")}
  * @param {object} [options]
  * @param {string} [options.customPrompt] - User's custom system prompt (appended)
  * @param {string} [options.deviceId] - Device ID for per-device context
+ * @param {object} [options.botDef] - Slice B: bound bot definition. When set,
+ *   the bot's persona + resolved skills DRIVE the prompt (superseding the
+ *   generic Crow identity / tool guidance); the device stamp is still appended.
+ *   The caller adds the voice-style addendum (concise/destructive/orchestrator)
+ *   after this, verbatim.
  * @returns {Promise<string>}
  */
 export async function generateSystemPrompt(options = {}) {
-  const { customPrompt, deviceId } = options;
+  const { customPrompt, deviceId, botDef } = options;
+
+  // Slice B (B3): a bound bot's own system_prompt + skills define behavior.
+  // We deliberately OMIT the generic Crow identity and the static TOOL_GUIDANCE
+  // (which advertises categories the bound bot may not have) — the scoped tool
+  // schemas + the bot persona are authoritative; tools come from getChatTools({botDef}).
+  if (botDef) {
+    const parts = [];
+    if (botDef.system_prompt) parts.push(String(botDef.system_prompt));
+    const skills = Array.isArray(botDef.skills) ? botDef.skills : [];
+    if (skills.length) {
+      try {
+        const { text, missing } = resolveSkillText(skills, { crowHome: resolveCrowHome() });
+        if (text) parts.push(text);
+        if (missing.length) console.warn(`[meta-glasses] bound bot skills not found: ${missing.join(", ")}`);
+      } catch (err) {
+        console.warn(`[meta-glasses] skill resolution failed: ${err.message}`);
+      }
+    }
+    if (deviceId) {
+      parts.push(
+        "",
+        "## Active Device",
+        `The current voice turn originated from glasses device_id \`${deviceId}\`. ` +
+        `Pass this value to any tool call that accepts a device_id parameter; ` +
+        `do NOT ask the user to confirm or re-enter it.`,
+      );
+    }
+    if (customPrompt) parts.push("", "## Custom Instructions", customPrompt);
+    return parts.join("\n");
+  }
 
   // Get condensed crow.md context (identity, protocols, transparency)
   let crowContext;

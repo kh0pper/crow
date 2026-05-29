@@ -14,6 +14,12 @@
  *     stt_profile_id: string | null,    // override (else default)
  *     ai_profile_slug: string | null,   // override (else default)
  *     tts_profile_id: string | null,    // override (else default)
+ *     bound_bot_id: string | null,      // Slice B: pi_bot_defs.bot_id this
+ *                                        // device binds to. When set, the bound
+ *                                        // bot drives the fast voice turn and
+ *                                        // SUPERSEDES ai_profile_slug; the
+ *                                        // tts/stt/vision_profile_id remain the
+ *                                        // voice plumbing. One device → one bot.
  *     generation: "gen2" | "unknown"    // pairing-time capability probe
  *   }
  *
@@ -170,7 +176,7 @@ export async function updateDeviceProfiles(db, id, patch) {
   const devices = await readAll(db);
   const idx = devices.findIndex(d => d.id === id);
   if (idx === -1) return null;
-  const allow = ["household_profile", "stt_profile_id", "ai_profile_slug", "tts_profile_id", "vision_profile_id", "ocr_enabled", "photo_retention", "name"];
+  const allow = ["household_profile", "stt_profile_id", "ai_profile_slug", "tts_profile_id", "vision_profile_id", "ocr_enabled", "photo_retention", "name", "bound_bot_id"];
   for (const k of allow) {
     if (k in patch) {
       // ocr_enabled is a boolean; coerce HTML-form strings "true"/"false"/"on".

@@ -18,6 +18,97 @@ import { createBlogServer } from "../../blog/server.js";
 import { createConsultingServer } from "../../consulting/server.js";
 import { TOOL_MANIFESTS } from "../tool-manifests.js";
 import { connectedServers } from "../proxy.js";
+import { voiceCategoryFor } from "../../../scripts/pi-bots/ext_registry.mjs";
+
+/**
+ * Category proxies the chat tool-executor can actually dispatch. Mirrors the
+ * regex in executeTool() (`^crow_(memory|projects|blog|sharing|storage|media)$`).
+ * `orchestrator`/`consulting` are advertised in TOOL_MANIFESTS but the executor
+ * regex omits them, so their category proxies are NOT executable — a bound bot
+ * must not be handed them (Slice B B3 / plan D4). Deep work instead rides the
+ * explicit crow_orchestrate / crow_orchestrate_status schemas added below.
+ */
+const EXECUTABLE_CATEGORIES = new Set(["memory", "projects", "blog", "sharing", "storage", "media"]);
+
+/**
+ * Slice B (B3): compute the voice-path tool scope for a bound bot from its
+ * def.tools.crow_mcp ("<canonical-server>/<tool>" entries). Returns null when
+ * unbound — callers then fall back to the full, unscoped tool set / no policy
+ * enforcement (the pre-Slice-B behavior, byte-for-byte).
+ *
+ *   selectedToolNames  bare tool names the bot picked (match addon tools by name)
+ *   selectedServers    canonical server ids the bot picked under
+ *   coreCategories     voice categories (A4 map) the bot has ANY selection under;
+ *                      core crow_<category> proxies are all-or-nothing (decision 4)
+ */
+export function botVoiceScope(botDef) {
+  if (!botDef) return null;
+  const crowMcp = (botDef.tools && botDef.tools.crow_mcp) || [];
+  const selectedToolNames = new Set();
+  const selectedServers = new Set();
+  const coreCategories = new Set();
+  for (const sel of crowMcp) {
+    const s = String(sel);
+    const slash = s.indexOf("/");
+    if (slash < 0) continue;
+    const server = s.slice(0, slash);
+    const tool = s.slice(slash + 1);
+    if (!tool) continue;
+    selectedServers.add(server);
+    selectedToolNames.add(tool);
+    const cat = voiceCategoryFor(server);
+    if (cat) coreCategories.add(cat);
+  }
+  return { selectedToolNames, selectedServers, coreCategories };
+}
+
+/** Set of tool names currently advertised by connected addon servers. */
+function connectedAddonToolNames() {
+  const names = new Set();
+  if (!connectedServers) return names;
+  for (const [, entry] of connectedServers) {
+    if (entry.status !== "connected") continue;
+    for (const t of entry.tools || []) names.add(t.name);
+  }
+  return names;
+}
+
+/**
+ * True iff `name` is a tool exposed by a currently CONNECTED addon server (as
+ * opposed to a core-category action, crow_discover, or a device-native tool).
+ * The policy wrapper uses this to enforce a bound bot's addon allowlist: an
+ * addon tool the bot did not select must not run even if force-called via the
+ * crow_tools proxy (advertised-set scoping alone wouldn't stop that).
+ */
+export function isConnectedAddonTool(name) {
+  return connectedAddonToolNames().has(name);
+}
+
+/**
+ * Slice B (B3/B4 + Q3): bot tool selections that have NO voice equivalent —
+ * neither a core voice category (A4 map) NOR a tool exposed by a currently
+ * connected addon server. These work under the pi runtime but cannot be driven
+ * by the fast voice turn, so B4 WARNS about them (we omit them from the
+ * advertised voice tools rather than advertise an unrunnable tool). Returns the
+ * verbatim "<server>/<tool>" selection strings.
+ */
+export function voiceUnavailableSelections(botDef) {
+  if (!botDef) return [];
+  const crowMcp = (botDef.tools && botDef.tools.crow_mcp) || [];
+  const addonTools = connectedAddonToolNames();
+  const out = [];
+  for (const sel of crowMcp) {
+    const s = String(sel);
+    const slash = s.indexOf("/");
+    if (slash < 0) continue;
+    const server = s.slice(0, slash);
+    const tool = s.slice(slash + 1);
+    if (!tool) continue;
+    const reachable = voiceCategoryFor(server) || addonTools.has(tool);
+    if (!reachable) out.push(s);
+  }
+  return out;
+}
 
 // See router.js for rationale — orchestrator is optional when the
 // open-multi-agent sibling repo isn't installed.
@@ -370,14 +461,82 @@ function formatResult(mcpResult) {
   return { result: text, isError };
 }
 
+const CATEGORY_PROXY_RE = /^crow_(memory|projects|blog|sharing|storage|media|orchestrator|consulting)$/;
+
+/**
+ * Slice B (B3, decision 5): resolve a tool call to the EFFECTIVE tool it will
+ * actually run, unwrapping the two proxy forms a model can hide an action
+ * behind. The permission wrapper must enforce policy on THIS name, not on
+ * tc.name (which is bypassable via crow_tools / a category proxy):
+ *   crow_tools         { action: "fw_play" }            -> "fw_play"
+ *   crow_blog          { action: "publish_post" }       -> "crow_publish_post"
+ *   crow_blog          { action: "crow_publish_post" }  -> "crow_publish_post"
+ *   crow_publish_post  (direct)                          -> "crow_publish_post"
+ */
+export function effectiveToolName(tc) {
+  const name = tc?.name || "";
+  const args = tc?.arguments || {};
+  if (name === "crow_tools") {
+    return typeof args.action === "string" && args.action ? args.action : name;
+  }
+  if (CATEGORY_PROXY_RE.test(name) && typeof args.action === "string" && args.action) {
+    return args.action.startsWith("crow_") ? args.action : "crow_" + args.action;
+  }
+  return name;
+}
+
+/**
+ * Voice-reachable tools that transmit content to an external party. Under a
+ * bound bot's permission_policy.external_send === "draft_only", these are
+ * blocked on the fast voice turn (spoken explanation) instead of executed
+ * (Slice B B3 / Q2). Drafts (crow_create_post, crow_create_song,
+ * gmail_create_draft*) are NOT sends and stay allowed.
+ */
+const EXTERNAL_SEND_TOOLS = new Set([
+  "crow_publish_post",       // blog: publishes a draft live
+  "crow_share_post",         // blog: shares a post to a peer
+  "crow_send_message",       // sharing: encrypted DM (cannot be retracted)
+  "crow_send_group_message", // sharing: fan-out encrypted DMs
+  "crow_voice_memo",         // sharing: spoken memo to a contact
+  "crow_share",              // sharing: share an item with a contact
+  "crow_relay",              // sharing: relay a task to a remote instance
+]);
+export function isExternalSendTool(name) {
+  if (!name) return false;
+  if (EXTERNAL_SEND_TOOLS.has(name)) return true;
+  // Addon email sends (gmail_send, gmail_send_to_self, ...); gmail_create_draft* are drafts.
+  if (/^gmail_send/.test(name) || /_send_to_self$/.test(name)) return true;
+  return false;
+}
+
 /**
  * Build the MCP tool schemas for the AI provider.
- * Returns the 7 category tools + discover in MCP tool format.
+ *
+ * Unbound (no opts.botDef): returns the full category proxies + discover + all
+ * connected addon tools — the pre-Slice-B behavior, unchanged.
+ *
+ * Bound (opts.botDef set — Slice B B3): SCOPES the advertised set to the bot's
+ * selection. Core crow_<category> proxies are included only for EXECUTABLE
+ * categories the bot selected under (all-or-nothing, decision 4); addon tools
+ * only for the bot's selected tool names; orchestrator/consulting category
+ * proxies are dropped in favor of explicit crow_orchestrate / _status schemas
+ * (D4); device-native tools (capture, discover) are always unioned. Tool
+ * selections with no voice equivalent are simply omitted here — B4 surfaces a
+ * warning for them (see voiceUnavailableSelections / Q3).
+ *
+ * @param {object} [opts]
+ * @param {object} [opts.botDef] - bound bot definition (pi_bot_defs.definition)
  */
-export function getChatTools() {
+export function getChatTools(opts = {}) {
+  const scope = botVoiceScope(opts.botDef);   // null ⇒ unbound, no scoping
   const tools = [];
 
   for (const [category, manifest] of Object.entries(TOOL_MANIFESTS)) {
+    if (scope) {
+      // Bound: only executable categories the bot actually selected under.
+      if (!EXECUTABLE_CATEGORIES.has(category)) continue;
+      if (!scope.coreCategories.has(category)) continue;
+    }
     const actionLines = Object.entries(manifest.tools)
       .map(([name, info]) => `- ${name.replace(/^crow_/, "")}(${info.params}): ${info.desc}`)
       .join("\n");
@@ -415,6 +574,44 @@ export function getChatTools() {
     },
   });
 
+  // Bound bots: device-native + deep-work tools advertised as explicit schemas.
+  // crow_orchestrate/_status — the advertised crow_orchestrator category proxy is
+  // NOT executable (executeTool's regex omits orchestrator); naming them as real
+  // tools lets strict providers call them (deep work rides crow_orchestrate, B5).
+  // crow_glasses_capture_photo — intercepted in the meta-glasses panel and never
+  // reaches an MCP server, but must be advertised so the model can take photos.
+  if (scope) {
+    tools.push({
+      name: "crow_orchestrate",
+      description: "Start a multi-agent team on a complex goal (research, multi-step analysis, code work). Runs in the BACKGROUND and returns a job id immediately — ack to the user, then check crow_orchestrate_status on a later turn.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          goal: { type: "string", description: "The goal for the agent team" },
+          preset: { type: "string", description: "Team preset (research, memory_ops, full, ...). Optional." },
+        },
+        required: ["goal"],
+      },
+    });
+    tools.push({
+      name: "crow_orchestrate_status",
+      description: "Check status / retrieve the result of an orchestration job by its job id. Returns running, completed (with summary), or failed.",
+      inputSchema: {
+        type: "object",
+        properties: { jobId: { type: "string", description: "Job id returned by crow_orchestrate" } },
+        required: ["jobId"],
+      },
+    });
+    tools.push({
+      name: "crow_glasses_capture_photo",
+      description: "Capture a photo from the paired glasses camera (and, when a vision profile is set, describe it). Use when the user asks what you see or to take a picture.",
+      inputSchema: {
+        type: "object",
+        properties: { device_id: { type: "string", description: "Glasses device id (use the active device)" } },
+      },
+    });
+  }
+
   // Addon tools (from installed extensions)
   if (connectedServers && connectedServers.size > 0) {
     // Promote high-level "entry point" tools as direct tools (no crow_tools wrapper needed).
@@ -445,6 +642,8 @@ export function getChatTools() {
       const toolNames = [];
 
       for (const tool of entry.tools) {
+        // Bound: advertise only addon tools the bot selected (scoped, by name).
+        if (scope && !scope.selectedToolNames.has(tool.name)) continue;
         const isPromoted = PROMOTED_PATTERNS.some((p) => p.test(tool.name));
         if (isPromoted) {
           // Expose as direct tool with real schema — no wrapper needed
@@ -457,22 +656,25 @@ export function getChatTools() {
         }
         toolNames.push(tool.name);
       }
-      allAddonLines.push(`[${id}]: ${toolNames.join(", ")}`);
+      if (toolNames.length) allAddonLines.push(`[${id}]: ${toolNames.join(", ")}`);
     }
 
-    // Also keep crow_tools for accessing granular tools that aren't promoted
-    tools.push({
-      name: "crow_tools",
-      description: `Call any installed extension tool. Use: { action: "tool_name", params: { ... } }.\n\nAll tools by extension:\n${allAddonLines.join("\n")}${promotedTools.length ? `\n\nNote: These tools can also be called directly (no crow_tools wrapper): ${promotedTools.join(", ")}` : ""}`,
-      inputSchema: {
-        type: "object",
-        properties: {
-          action: { type: "string", description: "Tool name" },
-          params: { type: "object", description: "Parameters for the tool" },
+    // Also keep crow_tools for accessing granular tools that aren't promoted.
+    // When bound with no selected addon tools, there is nothing to call — omit it.
+    if (allAddonLines.length) {
+      tools.push({
+        name: "crow_tools",
+        description: `Call any installed extension tool. Use: { action: "tool_name", params: { ... } }.\n\nAll tools by extension:\n${allAddonLines.join("\n")}${promotedTools.length ? `\n\nNote: These tools can also be called directly (no crow_tools wrapper): ${promotedTools.join(", ")}` : ""}`,
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", description: "Tool name" },
+            params: { type: "object", description: "Parameters for the tool" },
+          },
+          required: ["action"],
         },
-        required: ["action"],
-      },
-    });
+      });
+    }
   }
 
   return tools;

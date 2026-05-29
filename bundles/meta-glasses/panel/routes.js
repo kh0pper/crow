@@ -104,7 +104,10 @@ function triggerCapture(sess) {
   return p;
 }
 // Where uploaded photos live. Crow data dir has a "uploads" convention.
-const _photoDir = join(homedir(), ".crow", "data", "glasses-photos");
+// CROW_HOME-aware so an alternate instance (MPA, CROW_HOME=~/.crow-mpa) writes
+// captures into ITS OWN data dir instead of the primary's. Matches the
+// resolveCrowHome() convention in proxy.js / ext_registry.mjs.
+const _photoDir = join(process.env.CROW_HOME || join(homedir(), ".crow"), "data", "glasses-photos");
 try { mkdirSync(_photoDir, { recursive: true }); } catch {}
 
 /* ---------- Per-device turn mutex (Phase 2) ----------
@@ -735,6 +738,41 @@ async function* pcmStream(adapter, text, voice, negotiation, extraOpts = {}) {
   }
 }
 
+/* ---------- Bound-bot resolution (Slice B) ---------- */
+
+// Cache parsed pi_bot_defs per bound_bot_id so the fast voice turn doesn't hit
+// the DB every turn. Short TTL — a Bot Builder save should take effect quickly.
+const _boundBotCache = new Map(); // botId → { def, at }
+const BOUND_BOT_TTL_MS = 30_000;
+
+/**
+ * Load a bound bot's parsed definition from pi_bot_defs, or null. The returned
+ * object is the def JSON with `bot_id` attached. Disabled bots resolve to null
+ * (the device falls back to its ai_profile path). Cached with a short TTL.
+ */
+async function loadBoundBotDef(db, botId) {
+  if (!botId) return null;
+  const cached = _boundBotCache.get(botId);
+  if (cached && (Date.now() - cached.at) < BOUND_BOT_TTL_MS) return cached.def;
+  let def = null;
+  try {
+    const res = await db.execute({
+      sql: "SELECT bot_id, definition, enabled FROM pi_bot_defs WHERE bot_id = ?",
+      args: [botId],
+    });
+    const row = res.rows[0];
+    if (row && row.enabled) {
+      try { def = JSON.parse(row.definition); } catch { def = null; }
+      if (def) def.bot_id = row.bot_id;
+    }
+  } catch (err) {
+    console.warn(`[meta-glasses] loadBoundBotDef failed for ${botId}: ${err.message}`);
+    def = null;
+  }
+  _boundBotCache.set(botId, { def, at: Date.now() });
+  return def;
+}
+
 /* ---------- Voice-turn pipeline ---------- */
 
 async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
@@ -744,7 +782,7 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
     const { getDefaultSttProfile, createSttAdapter, getSttProfiles } = await loadStt();
     const { getTtsProfiles, createTtsAdapter, getDefaultTtsProfile } = await loadTts();
     const { createAdapterFromProfile, getAiProfiles } = await loadProvider();
-    const { createToolExecutor, getChatTools, MAX_TOOL_ROUNDS } = await loadToolExec();
+    const { createToolExecutor, getChatTools, MAX_TOOL_ROUNDS, effectiveToolName, isExternalSendTool, isConnectedAddonTool, botVoiceScope } = await loadToolExec();
     const { generateSystemPrompt } = await loadSystemPrompt();
 
     // 1. STT
@@ -824,17 +862,41 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
       return;
     }
 
-    // 2. BYOAI chat
+    // 2. BYOAI chat — a bound bot (device.bound_bot_id, Slice B) supersedes the
+    // device's ai_profile_slug: its persona+skills drive the prompt, its tool
+    // selection scopes the tools, its permission_policy is enforced, and its
+    // fast_voice_model drives THIS turn (never bot.models.default — that's the pi
+    // model). aiProfile is still resolved for the vision-capture fallback below.
+    const boundBot = await loadBoundBotDef(db, device.bound_bot_id);
     const aiProfiles = await getAiProfiles(db, { includeKeys: true });
     const slugOf = (n) => n.toLowerCase().replace(/\s+/g, "_").replace(/\./g, "_");
     const aiProfile = device.ai_profile_slug
       ? aiProfiles.find(p => slugOf(p.name) === device.ai_profile_slug)
       : aiProfiles[0];
-    if (!aiProfile) {
-      sendText(ws, { type: "error", code: "no_ai_profile", recoverable: false });
-      return;
+    let chatAdapter, chatLabel;
+    if (boundBot && boundBot.fast_voice_model) {
+      // Resolve the "provider_id/model_id" key via a synthesized pointer profile
+      // (resolve-profile.js handles the bare ref — plan S5, lowest risk).
+      const fvm = String(boundBot.fast_voice_model);
+      const slash = fvm.indexOf("/");
+      const provider_id = slash >= 0 ? fvm.slice(0, slash) : fvm;
+      const model_id = slash >= 0 ? fvm.slice(slash + 1) : "";
+      try {
+        ({ adapter: chatAdapter } = await createAdapterFromProfile({ provider_id, model_id }, null, db));
+      } catch (err) {
+        sendText(ws, { type: "error", code: "fast_voice_model_unresolved", recoverable: false, message: err.message });
+        return;
+      }
+      chatLabel = `bot:${boundBot.bot_id}/${fvm}`;
+    } else {
+      // Unbound, or bound with no fast_voice_model: fall back to the device profile.
+      if (!aiProfile) {
+        sendText(ws, { type: "error", code: "no_ai_profile", recoverable: false });
+        return;
+      }
+      ({ adapter: chatAdapter } = await createAdapterFromProfile(aiProfile, aiProfile.defaultModel, db));
+      chatLabel = boundBot ? `bot:${boundBot.bot_id}/profile:${aiProfile.name}` : `${aiProfile.name}/${aiProfile.defaultModel}`;
     }
-    const { adapter: chatAdapter } = await createAdapterFromProfile(aiProfile, aiProfile.defaultModel, db);
 
     // 3. TTS
     const ttsProfile = device.tts_profile_id
@@ -873,9 +935,9 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
     }
 
     toolExecutor = createToolExecutor();
-    const tools = getChatTools();
-    const systemPrompt = await generateSystemPrompt({ deviceId: device.id });
-    console.log(`[meta-glasses] voice turn: transcript=${JSON.stringify(transcript)} ai=${aiProfile.name}/${aiProfile.defaultModel} tools=${tools.length}`);
+    const tools = getChatTools({ botDef: boundBot });
+    const systemPrompt = await generateSystemPrompt({ deviceId: device.id, botDef: boundBot });
+    console.log(`[meta-glasses] voice turn: transcript=${JSON.stringify(transcript)} ai=${chatLabel} bound=${boundBot ? boundBot.bot_id : "none"} tools=${tools.length}`);
 
     const priorMessages = getConvo(device.id);
     const messages = [
@@ -948,43 +1010,66 @@ LONG WORK via the orchestrator. For research, multi-step analysis, code work, or
       const isCaptureTool = (tc) =>
         tc.name === "crow_glasses_capture_photo" ||
         (tc.name === "crow_tools" && tc.arguments?.action === "crow_glasses_capture_photo");
-      // Destructive-tool spoken confirmation. If the LLM calls a destructive
-      // tool, the FIRST call is intercepted — we store the pending state and
-      // return a "confirmation required" tool-result. The LLM is expected to
-      // speak the confirmation question and end the turn. On the NEXT turn,
-      // if the LLM retries the same tool+args AND the user's transcript
-      // starts with an affirmative within 60s, it executes. Anything else
-      // clears the pending state.
-      const confirmNow = (tc) => {
-        if (!isDestructiveTool(tc.name)) return false;
+      // Policy-aware dispatch gate (Slice B B3, decision 5). UNWRAPS the call to
+      // its EFFECTIVE tool first (effectiveToolName: crow_tools / category proxy
+      // -> real tool) so policy can't be bypassed by hiding an action behind a
+      // proxy, then enforces, in order:
+      //   (1) a bound bot's external_send:draft_only -> BLOCK true sends/publishes
+      //       on the voice turn (Q2: publish stays a draft; sends are refused).
+      //   (2) a bound bot's permission_policy.deny -> BLOCK.
+      //   (3) destructive (by EFFECTIVE name) OR the bot's permission_policy.confirm
+      //       -> two-turn spoken confirmation (the existing UX): first call stores
+      //       pending + returns the gate message; the LLM speaks it and ends the
+      //       turn; on the next turn the SAME effective tool+args plus an
+      //       affirmative transcript within 60s executes. Anything else clears it.
+      // Unbound (boundBot null): policy is empty, so this reduces to the prior
+      // destructive-confirm behavior — now also catching proxy-wrapped destructive
+      // calls that the old name-only gate let through.
+      const shortName = (n) => String(n || "").replace(/^crow_/, "").replace(/_/g, " ");
+      const policy = (boundBot && boundBot.permission_policy) || {};
+      const voiceScope = botVoiceScope(boundBot); // null when unbound
+      const policyGate = (tc) => {
+        const eff = effectiveToolName(tc);
+        // Addon allowlist: a bound bot may only run addon tools it selected, even
+        // if force-called via the crow_tools proxy (closes the gap that scoping
+        // the advertised set alone leaves open). Core-category actions, capture,
+        // discover, and orchestrate are not connected-addon tools, so unaffected.
+        if (voiceScope && isConnectedAddonTool(eff) && !voiceScope.selectedToolNames.has(eff)) {
+          return { decision: "block", say: `This assistant isn't allowed to use "${shortName(eff)}" by voice. Tell the user and end your turn — do not call another tool.` };
+        }
+        if (policy.external_send === "draft_only" && isExternalSendTool(eff)) {
+          const say = eff === "crow_publish_post"
+            ? `This assistant is draft-only by voice. Tell the user the post was saved as a draft and can be published from the dashboard. Then end your turn — do not call another tool.`
+            : `This assistant is draft-only by voice and cannot send "${shortName(eff)}" externally. Tell the user it was not sent and they can do it from the dashboard. Then end your turn — do not call another tool.`;
+          return { decision: "block", say };
+        }
+        if (Array.isArray(policy.deny) && policy.deny.includes(eff)) {
+          return { decision: "block", say: `This assistant is not permitted to use "${shortName(eff)}" by voice. Tell the user and end your turn — do not call another tool.` };
+        }
+        const needsConfirm = isDestructiveTool(eff) || (Array.isArray(policy.confirm) && policy.confirm.includes(eff));
+        if (!needsConfirm) return { decision: "allow" };
         const pending = _pendingConfirms.get(device.id);
         const hash = canonicalArgsHash(tc.arguments);
         const transcriptOk = AFFIRMATIVE_STARTS.test(transcript || "");
         const transcriptNo = NEGATIVE_STARTS.test(transcript || "");
         if (pending
-            && pending.toolName === tc.name
+            && pending.toolName === eff
             && pending.argsHash === hash
             && (Date.now() - pending.at) < CONFIRM_TTL_MS
             && transcriptOk
             && !transcriptNo) {
           _pendingConfirms.delete(device.id);
-          return true; // proceed to execute
+          return { decision: "allow" };
         }
-        // Fresh — store and return gate message. Clear any stale entry.
-        _pendingConfirms.set(device.id, { toolName: tc.name, argsHash: hash, at: Date.now() });
-        return "gated";
+        _pendingConfirms.set(device.id, { toolName: eff, argsHash: hash, at: Date.now() });
+        return { decision: "confirm", say: `Confirmation required. Tell the user: "Are you sure you want to ${describeDestructiveAction({ name: eff, arguments: tc.arguments })}? Say yes to proceed." Then end your turn — do not call another tool.` };
       };
       const localResults = [];
       const remoteCalls = [];
       for (const tc of toolCalls) {
-        const gate = confirmNow(tc);
-        if (gate === "gated") {
-          localResults.push({
-            id: tc.id,
-            name: tc.name,
-            result: `Confirmation required. Tell the user: "Are you sure you want to ${describeDestructiveAction(tc)}? Say yes to proceed." Then end your turn — do not call another tool.`,
-            isError: false,
-          });
+        const gate = policyGate(tc);
+        if (gate.decision === "block" || gate.decision === "confirm") {
+          localResults.push({ id: tc.id, name: tc.name, result: gate.say, isError: false });
           continue;
         }
         if (isCaptureTool(tc)) {
