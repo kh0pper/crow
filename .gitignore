@@ -40,3 +40,19 @@ __pycache__/
 
 # benchmark KLD logit bases (large, regenerable)
 scripts/bench/results/quality/*.dat
+
+# --- Anti-drift: machine-local / runtime / generated / backups (2026-05-29) ---
+# These accumulated as untracked working-tree drift and the auto-updater would
+# stash+discard them; keep them out of git entirely. See memory
+# crow-autoupdate-pull-only.
+/crow.db
+/crow.db-*
+/data/
+servers/gateway/public/blog/
+bundles/.env.cuda
+bundles/*/.env
+bundles/*/docker-compose.override.yml
+.claude/scheduled_tasks.lock
+# Manual backup snapshots (PRE-*.bak, *.bak-DATE, etc.)
+*.bak
+*.bak-*
