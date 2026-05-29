@@ -10,6 +10,7 @@ import { t } from "../../shared/i18n.js";
 import { getVisiblePanels } from "../../panel-registry.js";
 import { CROW_HERO_SVG } from "../../shared/crow-hero.js";
 import { getAddonLogo } from "../../shared/logos.js";
+import { isSafeDestPath } from "../../../../shared/sso-ticket.js";
 
 // ─── SVG Icons (stroke-style, matching sidebar nav) ───
 
@@ -156,7 +157,7 @@ function buildPeerTileHref(gatewayUrl, hostname, pathname, port) {
 }
 
 export function buildNestHTML(data, lang) {
-  const { pinnedItems, bundles, instances, trustedInstances, peerOverviews } = data;
+  const { pinnedItems, bundles, instances, trustedInstances, peerOverviews, ssoEnabled } = data;
   const carouselMode = Array.isArray(peerOverviews) && peerOverviews.length > 0;
 
   let tileIndex = 0;
@@ -244,9 +245,17 @@ export function buildNestHTML(data, lang) {
         : "var(--crow-text-muted)";
       const homeLabel = inst.is_home ? ` <span style="font-size:0.6rem;opacity:0.7;text-transform:uppercase;letter-spacing:0.05em">home</span>` : "";
       const statusDot = `<span class="nest-app-status" style="background:${statusColor}" title="${escapeHtml(inst.status)}"></span>`;
-      const href = inst.gateway_url ? `${inst.gateway_url}/dashboard/nest` : "#";
+      // Route through local SSO launch when enabled + the peer is trusted and
+      // paired; otherwise the legacy direct cross-origin link (prompts for the
+      // peer's password). SSO navigates same-tab so the destination session
+      // cookie lands in this (PWA/WebView) cookie jar.
+      const useSso = ssoEnabled && Number(inst.trusted) === 1 && inst.paired && inst.gateway_url;
+      const href = useSso
+        ? `/dashboard/sso/launch?target=${encodeURIComponent(inst.id)}&to=${encodeURIComponent("/dashboard/nest")}`
+        : (inst.gateway_url ? `${inst.gateway_url}/dashboard/nest` : "#");
+      const targetAttr = useSso ? "" : (inst.gateway_url ? ` target="_blank"` : "");
       const delay = tileIndex++ * 40;
-      return `<a href="${escapeHtml(href)}" class="nest-app nest-app--instance" style="animation-delay:${delay}ms"${inst.gateway_url ? ` target="_blank"` : ""}>
+      return `<a href="${escapeHtml(href)}" class="nest-app nest-app--instance" style="animation-delay:${delay}ms"${targetAttr}>
         <div class="nest-app-icon">${statusDot}${instanceIcon}</div>
         <div class="nest-app-label">${escapeHtml(inst.name)}${homeLabel}</div>
         <div class="nest-app-meta" style="font-size:0.6rem;color:var(--crow-text-muted);margin-top:2px">${escapeHtml(inst.hostname || "")}</div>
@@ -308,13 +317,25 @@ export function buildNestHTML(data, lang) {
 
       const peerHostname = ti.hostname || peer.instance?.hostname || "";
       const peerGatewayUrl = ti.gateway_url || null;
+      // SSO is only useful for tiles served on the peer's gateway origin
+      // (no custom port → it shares the cookie the SSO accept sets). Direct
+      // cross-port bundles bypass the gateway session entirely, so leave them
+      // as plain new-tab links.
+      const peerSsoOk = ssoEnabled && ti.paired && peerGatewayUrl;
       const peerTiles = peer.tiles.map(tile => {
-        const href = buildPeerTileHref(peerGatewayUrl, peerHostname, tile.pathname, tile.port);
-        if (!href) return "";
+        let href, attrs;
+        if (peerSsoOk && !tile.port && isSafeDestPath(tile.pathname)) {
+          href = `/dashboard/sso/launch?target=${encodeURIComponent(ti.id)}&to=${encodeURIComponent(tile.pathname)}`;
+          attrs = ""; // same-tab so the SSO session cookie lands in this jar
+        } else {
+          href = buildPeerTileHref(peerGatewayUrl, peerHostname, tile.pathname, tile.port);
+          if (!href) return "";
+          attrs = ` target="_blank" rel="noopener noreferrer"`;
+        }
         const icon = resolvePeerIcon(tile.icon);
         const klass = tile.category === "bundle" ? "nest-app nest-app--bundle" : "nest-app nest-app--panel";
         const delay = tileIndex++ * 40;
-        return `<a href="${escapeHtml(href)}" class="${klass}" target="_blank" rel="noopener noreferrer" style="animation-delay:${delay}ms">
+        return `<a href="${escapeHtml(href)}" class="${klass}"${attrs} style="animation-delay:${delay}ms">
           <div class="nest-app-icon">${icon}</div>
           <div class="nest-app-label">${escapeHtml(tile.name)}</div>
         </a>`;
