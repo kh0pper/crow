@@ -56,6 +56,16 @@ export async function getBlogSettings(db) {
   });
   const s = {};
   for (const r of result.rows) s[r.key.replace("blog_", "")] = r.value;
+
+  const songbookEscaped = escapeLikePattern("songbook");
+  const songbookCount = await db.execute({
+    sql: `SELECT COUNT(*) AS n FROM blog_posts
+          WHERE status = 'published' AND visibility = 'public'
+          AND tags LIKE ? ESCAPE '\\'`,
+    args: [`%${songbookEscaped}%`],
+  });
+  const hasSongbookPosts = Number(songbookCount.rows[0]?.n || 0) > 0;
+
   return {
     title: s.title || "Crow Blog",
     tagline: s.tagline || "",
@@ -68,6 +78,7 @@ export async function getBlogSettings(db) {
     podcastCoverUrl: s.podcast_cover_url || "",
     podcastLanguage: s.podcast_language || "en",
     songbookOnIndex: s.songbook_on_index !== "false",
+    hasSongbookPosts,
     themeMode: s.theme_mode || "dark",
     themeGlass: s.theme_glass === "true",
     themeSerif: s.theme_serif !== "false",
@@ -340,7 +351,7 @@ export function pageShell(settings, { title, content, ogMeta }) {
     <nav>
       <a href="/blog">Posts</a>
       <a href="/blog/research">Research</a>
-      <a href="/blog/songbook">Songbook</a>
+      ${settings.hasSongbookPosts ? `<a href="/blog/songbook">Songbook</a>` : ""}
       <a href="/blog/feed.xml">RSS</a>
     </nav>
   </header>
@@ -734,6 +745,21 @@ export default function blogPublicRouter() {
         `,
       });
 
+      // Policy briefs and one-pagers derived from the capstone, surfaced
+      // separately so legislator-facing entry points are not buried inside
+      // the chapter list. Filter by the 'policy-brief' tag set in the
+      // blog_posts.tags column on insertion.
+      const { rows: briefs } = await db.execute({
+        sql: `
+          SELECT slug, title, excerpt, tags, published_at
+          FROM blog_posts
+          WHERE status = 'published'
+            AND visibility = 'public'
+            AND tags LIKE '%policy-brief%'
+          ORDER BY published_at DESC
+        `,
+      });
+
       const reportTitle = `An "Efficient System"? Constitutional Analysis of Charter School Duplication, Bond Election Dependence, and Needs-Based Funding in the Texas School Finance System`;
       const reportBlurb = `Capstone research for INSD 5940-41 (UNT). Constitutional evaluation of post-${'’'}16 Texas school finance against <em>Edgewood v. Kirby</em> (1989) and <em>Morath v. Texas Taxpayer and Student Fairness Coalition</em> (2016), with an original campus-level At-Risk Coefficient (ARC) regression model (8,674 campuses, 1,203 districts).`;
 
@@ -745,6 +771,22 @@ export default function blogPublicRouter() {
           ${r.excerpt ? `<div style="color:var(--crow-text-secondary,#64748b);font-size:0.9em;margin-top:0.2rem">${escapeHtml(r.excerpt)}</div>` : ""}
         </li>
       `).join("");
+
+      const briefsHtml = briefs.map((r) => {
+        const docSlug = r.slug.includes("one-pager") ? "one-pager" : "policy-brief";
+        return `
+        <li style="margin:1rem 0;">
+          <a href="/blog/${escapeHtml(r.slug)}" style="font-weight:600;font-size:1.05em;text-decoration:none;">
+            ${escapeHtml(r.title)}
+          </a>
+          ${r.excerpt ? `<div style="color:var(--crow-text-secondary,#64748b);font-size:0.9em;margin-top:0.2rem">${escapeHtml(r.excerpt)}</div>` : ""}
+          <div style="margin-top:0.4rem;font-size:0.85em;color:var(--crow-text-secondary,#64748b);">
+            <a href="/blog/research-docs/${docSlug}.html" style="margin-right:0.8rem;">Standalone HTML</a>
+            <a href="/blog/research-docs/${docSlug}.pdf">Download PDF</a>
+          </div>
+        </li>
+      `;
+      }).join("");
 
       const content = `
 <article class="post-single" style="max-width:48rem;margin:0 auto;">
@@ -762,12 +804,180 @@ export default function blogPublicRouter() {
   <ol style="list-style:none;padding-left:0;">
     ${chaptersHtml || "<li><em>No chapters published yet.</em></li>"}
   </ol>
+
+  ${briefs.length > 0 ? `
+  <h2 style="margin-top:2.5rem;">Policy Briefs</h2>
+  <p style="color:var(--crow-text-secondary,#64748b);font-size:0.9em;margin-bottom:0.8rem;">
+    Legislator- and coalition-facing distillations of the capstone research.
+  </p>
+  <ul style="list-style:none;padding-left:0;">
+    ${briefsHtml}
+  </ul>` : ""}
 </article>`;
 
       res.type("html").send(pageShell(settings, { title: "Research", content }));
     } catch (err) {
       console.error("[blog] /research error:", err);
       res.status(500).send("Error loading research page");
+    } finally {
+      db.close();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // PIR archive (/blog/sources/pirs, /blog/sources/pirs/files/:id)
+  //
+  // These routes expose user-owned Public Information Request responses from
+  // Texas school districts. They live under /blog/* but are EXPLICITLY
+  // tailnet-only: /blog IS on the Funnel public-path allowlist, so a bare
+  // handler would be reachable from the public internet whenever the Funnel
+  // is enabled. `blockFunnelForPir` rejects any Tailscale-Funnel-Request.
+  //
+  // Downloads are server-proxied via storage/s3-client.getObject(); the
+  // MinIO `capstone-archive` bucket stays authenticated and no presigned
+  // URLs are exposed. Only rows with review_status='approved' are shown or
+  // downloadable; see ~/spring-2026/pir-responses/manifest.yaml for the
+  // approval gate.
+  // -------------------------------------------------------------------------
+  function blockFunnelForPir(req, res, next) {
+    if (req.headers["tailscale-funnel-request"]) {
+      return res.status(403).type("text/plain").send("Forbidden: PIR archive is tailnet-only.");
+    }
+    next();
+  }
+
+  // Archive collections served at /blog/sources/<collection>.
+  // Collection codes in the DB: 'pir', 'legislative', 'research'.
+  const ARCHIVE_COLLECTIONS = {
+    pirs: { code: "pir", title: "Public Information Request Archive", description: "User-owned PIR responses from Texas school districts, charter networks, and the Texas Education Agency. Files here passed an explicit privacy/FERPA review before publication." },
+    legislative: { code: "legislative", title: "Legislative & Commission Archive", description: "Public Texas legislative and state-commission records: HB 72 (1984), LBB school-finance studies (1990s), and the 2018 Commission on Public School Finance working papers." },
+    research: { code: "research", title: "Research & Analysis Archive", description: "Research artifacts, TEA program documents, and researcher analysis notes used in the capstone. Copyrighted journal articles are linked (not hosted) — see Appendix A: References for DOIs." },
+  };
+
+  async function renderArchive(req, res, urlSegment) {
+    const def = ARCHIVE_COLLECTIONS[urlSegment];
+    if (!def) return res.status(404).type("text/plain").send("Not found");
+    const db = createDbClient();
+    try {
+      const settings = await getBlogSettings(db);
+      const district = typeof req.query.district === "string" ? req.query.district : "";
+      const args = [def.code];
+      let where = "WHERE review_status='approved' AND project_id=6 AND collection=?";
+      if (district) {
+        where += " AND district_slug=?";
+        args.push(district);
+      }
+      const { rows } = await db.execute({
+        sql: `
+          SELECT id, district, district_slug, pir_number, file_name, title,
+                 content_type, size_bytes, received_date, notes
+          FROM capstone_pir_files
+          ${where}
+          ORDER BY district_slug ASC, received_date ASC, file_name ASC
+        `,
+        args,
+      });
+
+      const grouped = new Map();
+      for (const r of rows) {
+        if (!grouped.has(r.district_slug)) {
+          grouped.set(r.district_slug, { district: r.district, files: [] });
+        }
+        grouped.get(r.district_slug).files.push(r);
+      }
+
+      const fmt = (n) => {
+        if (!n) return "";
+        const mb = n / 1048576;
+        if (mb >= 1) return `${mb.toFixed(1)} MB`;
+        return `${Math.max(1, Math.round(n / 1024))} KB`;
+      };
+
+      const groupsHtml = Array.from(grouped.entries()).map(([slug, g]) => {
+        const items = g.files.map((r) => {
+          const meta = [
+            r.pir_number ? `PIR #${escapeHtml(r.pir_number)}` : "",
+            r.received_date ? escapeHtml(r.received_date) : "",
+            fmt(r.size_bytes),
+          ].filter(Boolean).join(" · ");
+          const notes = r.notes ? `<div style="font-size:0.85em;color:var(--crow-text-secondary,#64748b);margin-top:0.2rem;">${escapeHtml(r.notes)}</div>` : "";
+          return `
+            <li style="margin:0.6rem 0;">
+              <a href="/blog/sources/files/${r.id}" style="font-weight:600;text-decoration:none;">
+                ${escapeHtml(r.title)}
+              </a>
+              ${meta ? `<div style="font-size:0.85em;color:var(--crow-text-secondary,#64748b);">${meta}</div>` : ""}
+              ${notes}
+            </li>`;
+        }).join("");
+        return `
+          <section style="margin:1.5rem 0;">
+            <h2 style="font-size:1.2em;margin-bottom:0.4rem;">${escapeHtml(g.district)}</h2>
+            <ul style="list-style:none;padding-left:0;">${items}</ul>
+          </section>`;
+      }).join("");
+
+      const filterLinks = Array.from(grouped.keys()).map((slug) =>
+        `<a href="/blog/sources/${urlSegment}?district=${encodeURIComponent(slug)}" style="margin-right:0.5rem;">${escapeHtml(slug)}</a>`
+      ).join(" ");
+
+      const content = `
+<article class="post-single" style="max-width:48rem;margin:0 auto;">
+  <h1>${escapeHtml(def.title)}</h1>
+  <p style="color:var(--crow-text-secondary,#64748b);font-size:0.95em;">
+    ${def.description} Contact details for additional access are in
+    <a href="/blog/appendix-c-invitation-to-researchers">Appendix C</a>.
+  </p>
+  ${district ? `<p><a href="/blog/sources/${urlSegment}">← All groups</a></p>` : (filterLinks ? `<p style="font-size:0.9em;">Filter: ${filterLinks}</p>` : "")}
+  ${groupsHtml || `<p><em>No ${escapeHtml(urlSegment)} files have been approved for public posting yet.</em></p>`}
+</article>`;
+
+      res.type("html").send(pageShell(settings, { title: def.title, content }));
+    } catch (err) {
+      console.error(`[blog] /sources/${urlSegment} error:`, err);
+      res.status(500).send(`Error loading ${urlSegment} archive`);
+    } finally {
+      db.close();
+    }
+  }
+
+  router.get("/blog/sources/pirs",        blockFunnelForPir, (req, res) => renderArchive(req, res, "pirs"));
+  router.get("/blog/sources/legislative", blockFunnelForPir, (req, res) => renderArchive(req, res, "legislative"));
+  router.get("/blog/sources/research",    blockFunnelForPir, (req, res) => renderArchive(req, res, "research"));
+
+  // Generic download — any collection. The id already scopes to a specific
+  // row so a pretty URL-segment is not needed for correctness.
+  router.get("/blog/sources/files/:id", blockFunnelForPir, async (req, res) => {
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(404).type("text/plain").send("Not found");
+    }
+    const db = createDbClient();
+    try {
+      const { rows } = await db.execute({
+        sql: `
+          SELECT minio_key, minio_bucket, content_type, file_name, size_bytes
+          FROM capstone_pir_files
+          WHERE id=? AND review_status='approved' AND project_id=6
+        `,
+        args: [id],
+      });
+      if (rows.length === 0) {
+        return res.status(404).type("text/plain").send("Not found");
+      }
+      const row = rows[0];
+      if (!(await isAvailable())) {
+        return res.status(503).type("text/plain").send("Storage unavailable");
+      }
+      const { stream, stat } = await getObject(row.minio_key, { bucket: row.minio_bucket });
+      res.set("Content-Type", row.content_type || stat.metaData?.["content-type"] || "application/octet-stream");
+      if (row.size_bytes) res.set("Content-Length", String(row.size_bytes));
+      res.set("Content-Disposition", `inline; filename="${row.file_name.replace(/"/g, '')}"`);
+      res.set("Cache-Control", "public, max-age=3600");
+      stream.pipe(res);
+    } catch (err) {
+      console.error("[blog] /sources/files error:", err);
+      res.status(404).type("text/plain").send("Not found");
     } finally {
       db.close();
     }
@@ -815,7 +1025,7 @@ export default function blogPublicRouter() {
       // off a single origin.
       const hasFigures = /<figure\s+class="crow-(chart|map)"/i.test(html);
       const hydrateScript = hasFigures
-        ? `\n<script defer data-hydrate-entry="1" data-bundle-version="1" src="/blog/assets/shared/blog-hydrate.js"></script>`
+        ? `\n<script defer data-hydrate-entry="1" data-bundle-version="3" src="/blog/assets/shared/blog-hydrate.js?v=3"></script>`
         : "";
       const tags = (post.tags || "").split(",").map((t) => t.trim()).filter(Boolean);
       const tagsHtml = tags.length > 0

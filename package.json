@@ -1,7 +1,7 @@
 {
   "name": "crow-platform",
   "version": "0.1.0",
-  "description": "Self-hosted AI platform with persistent memory, encrypted P2P sharing, and 20+ integrations — works with Claude, ChatGPT, Gemini, and any MCP client",
+  "description": "Self-hosted AI platform with persistent memory, encrypted P2P sharing, and 20+ integrations \u2014 works with Claude, ChatGPT, Gemini, and any MCP client",
   "type": "module",
   "scripts": {
     "setup": "node scripts/setup.js",
@@ -34,7 +34,8 @@
     "test:nest-xss": "node --test tests/nest-xss.test.js",
     "test:trust-gate": "node --test tests/peer-forward-trust-gate.test.js",
     "test:companion-target": "node --test tests/companion-target.test.js",
-    "test:federation-resolve": "node --test tests/federation-resolve.test.js"
+    "test:federation-resolve": "node --test tests/federation-resolve.test.js",
+    "test:pir-routes": "node --test tests/pir-routes.test.js"
   },
   "dependencies": {
     "@libsql/client": "^0.17.2",

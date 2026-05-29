@@ -15,6 +15,6 @@
   "chart_bg": "#ffffff",
   "chart_panel": "#f8fafc",
   "chart_text": "#0f172a",
-  "chart_grid": "rgba(15, 23, 42, 0.1)",
-  "chart_border": "#e2e8f0"
+  "chart_grid": "#e2e8f0",
+  "chart_border": "#cbd5e1"
 }

@@ -99,6 +99,10 @@ export default function songbookRouter() {
         args: [`%${escaped}%`],
       });
 
+      if (posts.rows.length === 0) {
+        return res.status(404).send("Not found");
+      }
+
       const html = renderSongbookIndex(posts.rows, { blogSettings: settings });
       res.type("html").send(html);
     } catch (err) {

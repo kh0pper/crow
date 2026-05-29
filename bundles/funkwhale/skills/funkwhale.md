@@ -17,6 +17,11 @@ tools:
   - fw_follow
   - fw_unfollow
   - fw_playlists
+  - fw_create_playlist
+  - fw_get_playlist_tracks
+  - fw_add_to_playlist
+  - fw_remove_from_playlist
+  - fw_delete_playlist
   - fw_now_playing
   - fw_block_user
   - fw_mute_user
@@ -100,6 +105,45 @@ fw_follow {
 ```
 
 For libraries, use the library UUID shown on the remote pod's library page. First federation fetch can take 30+ seconds while Celery pulls the library contents.
+
+### Building playlists
+
+Five tools cover the full lifecycle: `fw_playlists` (list), `fw_create_playlist`, `fw_get_playlist_tracks`, `fw_add_to_playlist`, `fw_remove_from_playlist`, `fw_delete_playlist`. Track IDs are integers from `fw_search` with `type: "tracks"` (not UUIDs).
+
+Canonical create-and-fill sequence:
+
+```
+1. fw_search { "q": "vashti bunyan", "type": "tracks", "page_size": 5 }
+   → collect ids from results[].id
+
+2. fw_create_playlist { "name": "Folk Sunday", "privacy_level": "me" }
+   → returns { id: 7, name, privacy_level, ... }
+
+3. fw_add_to_playlist {
+     "playlist_id": 7,
+     "track_ids": [18488, 18487, 18486]
+   }
+   → returns { added_count, added: [{ index, track_id, title }, ...] }
+
+4. (optional) fw_get_playlist_tracks { "playlist_id": 7 }
+   → reads back the playlist in order so you can confirm before reporting to the user
+```
+
+**privacy_level** must be one of `me` / `followers` / `instance` / `everyone`. Default to `"me"` (private). Only escalate when the user explicitly says "share with my followers", "let everyone on the pod see this", or "make it federated/public" — privacy upgrades on a personal music collection are sticky and embarrassing to undo.
+
+**allow_duplicates** on `fw_add_to_playlist` defaults to `true` because Funkwhale 1.2.x returns 500 on duplicate tracks when the flag is unset. If the user explicitly says "don't add tracks that are already in there", call `fw_get_playlist_tracks` first, filter the new IDs against the existing `track_id`s, and pass `allow_duplicates: false`.
+
+**Removing a track:** indices are 0-based and re-pack after each removal. Re-read with `fw_get_playlist_tracks` between removes if you're removing more than one — don't trust cached indices.
+
+```
+fw_remove_from_playlist { "playlist_id": 7, "index": 1 }
+```
+
+**Deleting a playlist** is permanent and requires `confirm: true` plus explicit conversational confirmation. Don't call this just because the user said "clear my playlist" — they may mean remove all tracks, not delete the playlist itself.
+
+```
+fw_delete_playlist { "playlist_id": 7, "confirm": true }
+```
 
 ### Moderation
 

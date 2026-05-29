@@ -189,7 +189,41 @@ export function playerBarJs(lang) {
       }
     } catch (e) {}
   });
+  // Continuous-playback recovery: the original 'ended' handler only fires
+  // on a clean end-of-stream. Buffer underruns, stream-side closes, and
+  // 4xx/5xx responses leave the audio element silently stuck. Add a
+  // retry-once-then-skip watchdog so an album of N tracks reliably plays
+  // through end-to-end on flaky networks.
+  var stallTimer = null;
+  var retriedThisTrack = false;
+  function clearStall() {
+    if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
+  }
+  function armStall() {
+    clearStall();
+    stallTimer = setTimeout(function() {
+      if (!retriedThisTrack) {
+        retriedThisTrack = true;
+        try { audio.load(); var p = audio.play(); if (p && p.catch) p.catch(function(){}); } catch (e) {}
+      } else if (queueIndex < queue.length - 1) {
+        try { console.warn('[crowPlayer] stall watchdog: skipping track', queueIndex); } catch (e) {}
+        window.crowPlayer.next();
+      }
+    }, 8000);
+  }
+  audio.addEventListener('error', function() {
+    try { console.warn('[crowPlayer] audio error', audio.error && audio.error.code); } catch (e) {}
+    if (queueIndex < queue.length - 1) {
+      setTimeout(function() { window.crowPlayer.next(); }, 500);
+    }
+  });
+  audio.addEventListener('stalled', armStall);
+  audio.addEventListener('waiting', armStall);
+  audio.addEventListener('playing', function() { clearStall(); retriedThisTrack = false; });
+  audio.addEventListener('loadstart', function() { clearStall(); retriedThisTrack = false; });
+
   audio.addEventListener('ended', function() {
+    clearStall();
     if (queueIndex < queue.length - 1) {
       window.crowPlayer.next();
     } else {
