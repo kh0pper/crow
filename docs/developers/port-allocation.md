@@ -75,6 +75,10 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 8097 | 127.0.0.1 | vaultwarden | MVP PR 5 |
 | 8098 | 127.0.0.1 | searxng | MVP PR 5 |
 | 8530 | 127.0.0.1 | adguard-home (DNS-over-TLS) | MVP PR 3 |
+| 8554 | 127.0.0.1 | frigate (RTSP restream) | existing |
+| 8555 | 127.0.0.1 | frigate (WebRTC) | existing |
+| 8765 | 127.0.0.1 | motioneye | existing |
+| 8971 | 127.0.0.1 | frigate (authenticated UI) | existing |
 | 9000 | 127.0.0.1 | minio (S3 API, existing) | existing |
 | 9001 | 127.0.0.1 | minio (console, existing) | existing |
 | 9090 | 127.0.0.1 | linkding (existing) | existing |
