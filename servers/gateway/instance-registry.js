@@ -421,8 +421,15 @@ export async function validateInstanceToken(db, token) {
   const tokenHash = createHash("sha256").update(token).digest("hex");
 
   try {
+    // Authenticate any paired, non-revoked peer regardless of liveness.
+    // Filtering on status='active' created a deadlock: a peer marked
+    // 'offline' (after any probe failure — a restart, network blip, or the
+    // downtime that originally flipped it) could never re-authenticate to
+    // prove it was back, so federated MCP calls 500'd forever. `offline` is a
+    // liveness signal, not a trust gate; trust is the token-hash match plus
+    // not being revoked. Mirrors getTrustedInstances' predicate.
     const { rows } = await db.execute({
-      sql: "SELECT * FROM crow_instances WHERE auth_token_hash = ? AND status = 'active'",
+      sql: "SELECT * FROM crow_instances WHERE auth_token_hash = ? AND status IN ('active','offline')",
       args: [tokenHash],
     });
     return rows[0] || null;
