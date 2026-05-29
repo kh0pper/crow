@@ -6,12 +6,11 @@ This repo (`git@gitea:kh0pp/crowclaw.git`) stores configuration templates, works
 
 | Directory | Purpose |
 |-----------|---------|
-| `~/casa-nueva/` | Skill source code (English + Spanish). Deploy with `bash deploy.sh`. See its CLAUDE.md for skill conventions. |
+| `~/casa-nueva/` | Skill source code. Deploy with `bash deploy.sh`. See its CLAUDE.md for skill conventions. |
 | `~/.openclaw/` | **Grackle** (Kevin's bot) runtime — config, deployed skills, workspace, memory |
-| `~/.openclaw-dayane/` | **Frankenstein** (Dayane's bot) runtime — same structure, Spanish |
 | `~/crowclaw/` | This repo — config templates, patches, scripts, workspace templates |
 
-**Runtime dirs (`~/.openclaw*`) are NOT checked into git.** This repo holds the canonical templates that get deployed there.
+**Runtime dir (`~/.openclaw/`) is NOT checked into git.** This repo holds the canonical templates that get deployed there.
 
 ## Repo Structure
 
@@ -46,28 +45,23 @@ workspace/
 └── home-assistant/        # HA skill workspace copy
 ```
 
-## Two Bots, One Machine
+## Service
 
-Both bots run as systemd user services on grackle:
+Grackle runs as a systemd user service on grackle:
 
 | Bot | Service | Port | Language |
 |-----|---------|------|----------|
 | Grackle (Kevin) | `openclaw-gateway.service` | 18789 | English (en-US-BrianNeural) |
-| Frankenstein (Dayane) | `openclaw-gateway-dayane.service` | 18790 | Spanish (es-MX-DaliaNeural) |
 
 ```bash
-# Restart services
 systemctl --user restart openclaw-gateway.service
-systemctl --user restart openclaw-gateway-dayane.service
-
-# Check status
 systemctl --user status openclaw-gateway.service
-systemctl --user status openclaw-gateway-dayane.service
-
-# View logs
 journalctl --user -u openclaw-gateway.service -f
-journalctl --user -u openclaw-gateway-dayane.service -f
 ```
+
+### Retired / historical
+
+**Frankenstein** (Dayane's Spanish bot) was deprecated; no systemd unit exists, no `crowclaw_bots` DB row, no running process. The `~/.openclaw-dayane/` config directory was removed on 2026-04-24. Re-creating Frankenstein requires registering a new bot row via the CrowClaw panel, creating a `openclaw-gateway-dayane.service` unit, and running `bash ~/casa-nueva/deploy.sh` to rsync skills into the new config dir.
 
 ## Google Workspace CLI (gog)
 
@@ -158,16 +152,14 @@ If it lists calendars, auth is working. The systemd services set `GOG_ACCOUNT` a
 
 ## Skill Deployment
 
-Skills are developed in `~/casa-nueva/` and deployed to both bot runtime dirs:
+Skills are developed in `~/casa-nueva/` and deployed to grackle's runtime dir:
 
 ```bash
 cd ~/casa-nueva
-bash deploy.sh              # rsync to ~/.openclaw/skills/ and ~/.openclaw-dayane/skills/
+bash deploy.sh              # rsync to ~/.openclaw/skills/
 bash deploy.sh --dry-run    # preview only
 
-# Then restart both gateways
 systemctl --user restart openclaw-gateway.service
-systemctl --user restart openclaw-gateway-dayane.service
 ```
 
 ## Exec Approvals
@@ -185,12 +177,12 @@ Editing the JSON file alone does NOT work — the gateway caches the config.
 | Entity | ID |
 |--------|-----|
 | Grackle bot | `1477391103320920273` |
-| Frankenstein bot | `1477713526154985683` |
 | Casa Nueva guild | `1039041607296618598` |
 | #bot-relay | `1477740671891804355` |
 | Kevin (Discord) | `857700998370033704` |
 | Dayane (Discord) | `1066168340629950464` |
 | Household spreadsheet | `18Wba1fyeRcnDJ1bBseEil7G0RwN1Jr3Xx3rI8ro5caw` |
+| Frankenstein bot (retired) | `1477713526154985683` |
 
 ## Google Sheets
 
