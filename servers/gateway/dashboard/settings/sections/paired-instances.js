@@ -11,6 +11,7 @@
  */
 
 import { escapeHtml } from "../../shared/components.js";
+import { readSetting, writeSetting } from "../registry.js";
 
 export default {
   id: "paired-instances",
@@ -29,7 +30,8 @@ export default {
     }
   },
 
-  async render({ db }) {
+  async render({ req, db }) {
+    const ssoOn = (await readSetting(db, "sso_enabled")) === "true";
     const { rows } = await db.execute({
       sql: "SELECT id, name, hostname, tailscale_ip, gateway_url, status, trusted, is_home, last_seen_at, created_at FROM crow_instances ORDER BY is_home DESC, status ASC, name",
       args: [],
@@ -76,6 +78,22 @@ export default {
       <tbody>${tableRows}</tbody>
     </table>
 
+    <form method="POST" action="/dashboard/settings" style="margin-top:1.25rem;padding:0.85rem 1rem;background:var(--crow-bg-deep);border-radius:6px">
+      <input type="hidden" name="_csrf" value="${req?.csrfToken || ""}" />
+      <input type="hidden" name="action" value="save_sso_enabled" />
+      <label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer;font-size:0.92rem">
+        <input type="checkbox" name="sso_enabled" value="1" ${ssoOn ? "checked" : ""} style="accent-color:var(--crow-accent)" />
+        <span><strong>Cross-instance single sign-on</strong></span>
+      </label>
+      <p style="margin:0.5rem 0 0.75rem 1.9rem;font-size:0.8rem;color:var(--crow-text-muted)">
+        When on, tapping a trusted, paired instance signs you in without re-entering its
+        password (2FA is still required if the destination has it). This setting is
+        <strong>per-instance</strong> — enable it on each instance you want to reach this way.
+        Off by default.
+      </p>
+      <button type="submit" class="btn btn-primary" style="margin-left:1.9rem">Save</button>
+    </form>
+
     <div style="margin-top:1.25rem;padding:0.75rem;background:var(--crow-bg-deep);border-radius:4px;font-size:0.82rem;color:var(--crow-text-muted)">
       <strong>To pair a new instance:</strong>
       <ol style="margin:0.5rem 0 0 1.25rem;padding:0">
@@ -85,5 +103,15 @@ export default {
       </ol>
     </div>
     `;
+  },
+
+  async handleAction({ req, res, db, action }) {
+    if (action !== "save_sso_enabled") return false;
+    const val = req.body.sso_enabled ? "true" : "false";
+    // Local scope only — never synced. B accepting SSO from A is B's decision;
+    // a synced toggle would let a peer flip this instance's acceptance policy.
+    await writeSetting(db, "sso_enabled", val, { scope: "local" });
+    res.redirectAfterPost("/dashboard/settings?section=paired-instances");
+    return true;
   },
 };

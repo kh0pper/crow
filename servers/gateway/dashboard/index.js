@@ -18,6 +18,9 @@ import {
   clearSessionCookie,
   parseCookies,
   validatePasswordStrength,
+  isAllowedNetwork,
+  mintSsoSession,
+  SSO_SESSION_MAX_AGE,
 } from "./auth.js";
 import {
   is2faEnabled,
@@ -25,6 +28,8 @@ import {
   verifyTotp,
   verifyRecoveryCode,
   verifyPending2faToken,
+  createPending2faToken,
+  getPending2faContext,
   getTotpSecret,
   generateTotpSecret,
   generateQrDataUri,
@@ -34,6 +39,10 @@ import {
   createDeviceTrust,
   DEVICE_TRUST_TTL,
 } from "./totp.js";
+import { getPeerCreds } from "../../shared/peer-credentials.js";
+import { signTicket, verifyTicket, isSafeDestPath } from "../../shared/sso-ticket.js";
+import { auditCrossHostCall } from "../../shared/cross-host-auth.js";
+import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { SUPPORTED_LANGS } from "./shared/i18n.js";
 import { resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
@@ -185,6 +194,9 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
     const pendingToken = cookies.crow_pending_2fa;
 
+    // Read any SSO context bound to this pending token BEFORE it is consumed.
+    const ssoCtx = (await getPending2faContext(pendingToken))?.sso || null;
+
     // Verify pending token
     const validPending = await verifyPending2faToken(pendingToken);
     if (!validPending) {
@@ -194,17 +206,22 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     const { totp_code, trust_device } = req.body;
     const secret = await getTotpSecret();
     if (!secret || !verifyTotp(totp_code, secret)) {
-      // Re-create pending token for retry
-      const { createPending2faToken } = await import("./totp.js");
-      const newToken = await createPending2faToken();
+      // Re-create pending token for retry, preserving any SSO context.
+      const newToken = await createPending2faToken(ssoCtx ? { sso: ssoCtx } : null);
       const secure = process.env.CROW_HOSTED || process.env.NODE_ENV === "production";
       const secureSuffix = secure ? "; Secure" : "";
       res.setHeader("Set-Cookie", `crow_pending_2fa=${newToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300${secureSuffix}`);
       return res.type("html").send(render2faVerify({ error: t("login.2faInvalidCode", lang), lang }));
     }
 
-    // 2FA verified — issue session
-    const result = await complete2faLogin(req.ip);
+    // 2FA verified. If this flow originated from cross-instance SSO (context
+    // bound to the pending token), mint a 24h SSO session and return to the
+    // SSO destination — NOT a normal 7d session.
+    const ssoSrc = ssoCtx?.src || null;
+    const ssoDest = ssoCtx?.dest || null;
+    const result = ssoSrc ? await mintSsoSession(ssoSrc) : await complete2faLogin(req.ip);
+    const sessionMaxAge = ssoSrc ? SSO_SESSION_MAX_AGE : undefined;
+    const redirectTo = (ssoSrc && ssoDest && isSafeDestPath(ssoDest)) ? ssoDest : "/dashboard";
 
     // Clear pending cookie
     const cookieHeaders = [`crow_pending_2fa=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`];
@@ -218,11 +235,11 @@ export default function dashboardRouter(mcpAuthMiddleware) {
       cookieHeaders.push(`crow_2fa_trusted=${trustToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secureSuffix}`);
     }
 
-    setSessionCookie(res, result.token);
+    setSessionCookie(res, result.token, sessionMaxAge);
     // Append our extra cookies
     const existing = res.getHeader("Set-Cookie") || [];
     res.setHeader("Set-Cookie", [...(Array.isArray(existing) ? existing : [existing]), ...cookieHeaders]);
-    res.redirectAfterPost("/dashboard");
+    res.redirectAfterPost(redirectTo);
   });
 
   // 2FA recovery code entry page
@@ -238,6 +255,9 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
     const pendingToken = cookies.crow_pending_2fa;
 
+    // Read SSO context bound to the pending token before it is consumed.
+    const ssoCtx = (await getPending2faContext(pendingToken))?.sso || null;
+
     const validPending = await verifyPending2faToken(pendingToken);
     if (!validPending) {
       return res.type("html").send(renderLogin({ error: t("login.2faSessionExpired", lang), lang }));
@@ -246,21 +266,27 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     const { recovery_code } = req.body;
     const valid = await verifyRecoveryCode(recovery_code);
     if (!valid) {
-      // Re-create pending token for retry
-      const { createPending2faToken } = await import("./totp.js");
-      const newToken = await createPending2faToken();
+      // Re-create pending token for retry, preserving any SSO context.
+      const newToken = await createPending2faToken(ssoCtx ? { sso: ssoCtx } : null);
       const secure = process.env.CROW_HOSTED || process.env.NODE_ENV === "production";
       const secureSuffix = secure ? "; Secure" : "";
       res.setHeader("Set-Cookie", `crow_pending_2fa=${newToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300${secureSuffix}`);
       return res.type("html").send(render2faRecovery({ error: t("login.2faInvalidCode", lang), lang }));
     }
 
-    const result = await complete2faLogin(req.ip);
-    res.setHeader("Set-Cookie", `crow_pending_2fa=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
-    setSessionCookie(res, result.token);
+    // Same SSO-origin handling as the TOTP path: a recovery-code login that
+    // came from cross-instance SSO gets a 24h SSO session + the SSO dest.
+    const ssoSrc = ssoCtx?.src || null;
+    const ssoDest = ssoCtx?.dest || null;
+    const result = ssoSrc ? await mintSsoSession(ssoSrc) : await complete2faLogin(req.ip);
+    const sessionMaxAge = ssoSrc ? SSO_SESSION_MAX_AGE : undefined;
+    const redirectTo = (ssoSrc && ssoDest && isSafeDestPath(ssoDest)) ? ssoDest : "/dashboard";
+
+    const cookieHeaders = [`crow_pending_2fa=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`];
+    setSessionCookie(res, result.token, sessionMaxAge);
     const existing = res.getHeader("Set-Cookie") || [];
-    res.setHeader("Set-Cookie", Array.isArray(existing) ? existing : [existing]);
-    res.redirectAfterPost("/dashboard");
+    res.setHeader("Set-Cookie", [...(Array.isArray(existing) ? existing : [existing]), ...cookieHeaders]);
+    res.redirectAfterPost(redirectTo);
   });
 
   // 2FA setup page (mandatory for managed hosting, optional access for self-hosted via settings)
@@ -429,6 +455,99 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     res.redirect("/dashboard/login");
   });
 
+  // SSO accept — PUBLIC route (no password). Authenticated by a single-use,
+  // HMAC-signed ticket minted by a paired+trusted source instance. Mounted
+  // BEFORE dashboardAuth, so it explicitly re-applies the tailnet-only guard
+  // (isAllowedNetwork) that dashboardAuth would otherwise provide. It is never
+  // reachable via Funnel — rejectFunneledMiddleware (global) 403s any
+  // /dashboard/* path that isn't in PUBLIC_FUNNEL_PREFIXES.
+  router.get("/dashboard/sso/accept", async (req, res) => {
+    if (!isAllowedNetwork(req)) {
+      return res.status(403).type("text/plain").send("Forbidden: local network or Tailscale only.");
+    }
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("Cache-Control", "no-store");
+
+    const db = createDbClient();
+    const localId = getOrCreateLocalInstanceId();
+    const src = String(req.query.src || "");
+    const audit = (extra) => auditCrossHostCall(db, {
+      sourceInstanceId: src || null,
+      targetInstanceId: localId,
+      direction: "inbound",
+      action: "sso.accept",
+      ...extra,
+    });
+    try {
+      const payloadB64 = String(req.query.t || "");
+      const sig = String(req.query.sig || "");
+      if (!src || !payloadB64 || !sig) {
+        await audit({ hmacValid: false, error: "missing_params" });
+        return res.status(400).type("text/plain").send("Bad request.");
+      }
+
+      // B-local opt-in. Default off.
+      if ((await readSetting(db, "sso_enabled")) !== "true") {
+        await audit({ hmacValid: false, error: "sso_disabled" });
+        return res.status(403).type("text/plain").send("Single sign-on is disabled on this instance.");
+      }
+
+      // Must be a paired peer (shared signing key) AND trusted locally.
+      const creds = getPeerCreds(src);
+      if (!creds || !creds.signing_key) {
+        await audit({ hmacValid: false, error: "unknown_peer" });
+        return res.status(401).type("text/plain").send("Unknown source instance.");
+      }
+      const { rows } = await db.execute({
+        sql: "SELECT trusted, status FROM crow_instances WHERE id = ?",
+        args: [src],
+      });
+      const peerRow = rows[0];
+      if (!peerRow || Number(peerRow.trusted) !== 1 || peerRow.status === "revoked") {
+        await audit({ hmacValid: false, error: "untrusted_peer" });
+        return res.status(403).type("text/plain").send("Source instance is not trusted.");
+      }
+
+      const result = verifyTicket({ payloadB64, sig, signingKey: creds.signing_key, expectedDst: localId });
+      if (!result.valid) {
+        await audit({ hmacValid: false, error: result.reason });
+        return res.status(401).type("text/plain").send("Invalid SSO ticket.");
+      }
+      // The signature already binds src (signed with that peer's key), but make
+      // the claimed query src and the signed src agree so the audit row is accurate.
+      if (result.ticket.src !== src) {
+        await audit({ hmacValid: true, nonce: result.ticket.nonce, error: "src_mismatch" });
+        return res.status(401).type("text/plain").send("Invalid SSO ticket.");
+      }
+      const dest = result.ticket.dest; // already validated by verifyTicket
+
+      // SSO replaces the password step only. If this instance has 2FA, send
+      // the user through its existing TOTP flow; the session is minted as a
+      // 24h SSO session after the second factor (see POST /dashboard/login/2fa).
+      const secure = process.env.CROW_HOSTED || process.env.NODE_ENV === "production";
+      const secureSuffix = secure ? "; Secure" : "";
+      if (await is2faEnabled()) {
+        // Bind the SSO context to the single-use pending-2FA token (not a
+        // separate cookie) so it can't bleed into a later normal login.
+        const pendingToken = await createPending2faToken({ sso: { src, dest } });
+        res.setHeader("Set-Cookie",
+          `crow_pending_2fa=${pendingToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300${secureSuffix}`);
+        await audit({ hmacValid: true, nonce: result.ticket.nonce, error: "2fa_required" });
+        return res.redirect(302, "/dashboard/login/2fa");
+      }
+
+      const { token } = await mintSsoSession(src);
+      setSessionCookie(res, token, SSO_SESSION_MAX_AGE);
+      await audit({ hmacValid: true, nonce: result.ticket.nonce });
+      return res.redirect(303, dest);
+    } catch (err) {
+      console.warn("[sso] accept failed:", err.message);
+      return res.status(500).type("text/plain").send("SSO error.");
+    } finally {
+      db.close();
+    }
+  });
+
   // --- Protected routes ---
 
   // Instantiate bundles router once so the cross-host bypass and the normal
@@ -477,6 +596,50 @@ export default function dashboardRouter(mcpAuthMiddleware) {
 
   // Normal mount (session-cookie-authenticated path)
   router.use("/dashboard", bundlesRouter);
+
+  // SSO launch — authenticated on THIS instance (after dashboardAuth). Mints a
+  // signed ticket for a paired+trusted target and 302s the browser to the
+  // target's /dashboard/sso/accept. Falls back to a direct link (which will
+  // prompt for the target's password) when SSO isn't possible.
+  router.get("/dashboard/sso/launch", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const target = String(req.query.target || "");
+      let dest = String(req.query.to || "/dashboard/nest");
+      if (!isSafeDestPath(dest)) dest = "/dashboard/nest";
+      if (!target) return res.status(400).type("text/plain").send("Missing target.");
+
+      const { rows } = await db.execute({
+        sql: "SELECT id, gateway_url, trusted, status FROM crow_instances WHERE id = ?",
+        args: [target],
+      });
+      const row = rows[0];
+      const base = row?.gateway_url ? String(row.gateway_url).replace(/\/+$/, "") : null;
+      const ssoOn = (await readSetting(db, "sso_enabled")) === "true";
+      const eligible = ssoOn && row && Number(row.trusted) === 1 && row.status !== "revoked" && base;
+      const creds = eligible ? getPeerCreds(target) : null;
+
+      if (!eligible || !creds || !creds.signing_key) {
+        // Not SSO-eligible — fall back to a direct link (prompts for password)
+        // if we at least have a gateway URL; otherwise back to the local nest.
+        if (base) return res.redirect(302, `${base}${dest}`);
+        return res.redirect(302, "/dashboard/nest");
+      }
+
+      const localId = getOrCreateLocalInstanceId();
+      const { payloadB64, sig } = signTicket({ src: localId, dst: target, dest, signingKey: creds.signing_key });
+      const url = new URL(`${base}/dashboard/sso/accept`);
+      url.searchParams.set("src", localId);
+      url.searchParams.set("t", payloadB64);
+      url.searchParams.set("sig", sig);
+      return res.redirect(302, url.toString());
+    } catch (err) {
+      console.warn("[sso] launch failed:", err.message);
+      return res.status(500).type("text/plain").send("SSO error.");
+    } finally {
+      db.close();
+    }
+  });
 
   // Dashboard home — unified carousel when enabled + peers trusted; else
   // falls back to the first visible panel (today's behavior).
