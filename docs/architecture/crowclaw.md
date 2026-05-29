@@ -4,6 +4,10 @@ title: CrowClaw Architecture
 
 # CrowClaw
 
+::: info Legacy engine
+CrowClaw wraps the external [OpenClaw](/platforms/openclaw) engine and is Crow's earlier approach to bots. It still ships. The native, first-class agent platform is the **[Bot Builder](/architecture/bot-builder)**, which runs agents directly on Crow with email, Discord, and glasses gateways, scoped and permissioned tools, and operator-approved self-authoring.
+:::
+
 CrowClaw is a Crow bundle (`type: "mcp-server"`) that provides bot management through 20 MCP tools and a dashboard panel. It runs as a child process of the Crow gateway, sharing the same `crow.db` database.
 
 ## Architecture

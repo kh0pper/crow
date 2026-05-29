@@ -1,5 +1,9 @@
 # OpenClaw
 
+::: info Native agents vs OpenClaw
+OpenClaw is a supported external bot engine, connected through the legacy [CrowClaw](/guide/bot-management) bundle. If you want to build agents that run natively on Crow, with Gmail, Discord, and glasses gateways, scoped and permissioned tools, and opt-in self-authoring, use the **[Bot Builder](/guide/bot-builder)** instead. This page covers the OpenClaw integration.
+:::
+
 Connect Crow to [OpenClaw](https://openclaw.ai), the open-source personal AI assistant that runs on WhatsApp, Telegram, Discord, Slack, Signal, iMessage, and more.
 
 ## Recommended: Install CrowClaw
