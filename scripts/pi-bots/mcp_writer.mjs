@@ -71,24 +71,92 @@ function touchesCrowDb(block) {
   return !!(block && block.env && block.env.CROW_DB_PATH);
 }
 
+// ---- A5: extension addon servers -> minted per-bot pi blocks ---------------
+// A bot may select an MCP server that lives in <crowHome>/mcp-addons.json but
+// is ABSENT from the canonical ~/.pi/agent/mcp.json (e.g. texas-gov-data,
+// bots-sql-mcp, tasks on MPA). pi-lab's additive merge (CONFIRMED against the
+// installed v0.74.2: extensions/mcp-client.ts reverses the path list so homedir
+// is Object.assign'd LAST and wins on key collision; the per-bot sessionDir
+// /.mcp.json is a cwd-self entry and is the SOLE source for absent-from-homedir
+// servers) means we can safely ADD such servers in the per-bot file — never
+// mutating the canonical homedir config. We mint a pi-compatible block from the
+// addon block, defaulting cwd exactly as the gateway proxy and pi-lab require.
+//
+// kept local (no ext_registry import) so the lower-level writer has no cycle.
+const _HOME_FOR_CROW = HOME;
+function resolveCrowHome() {
+  return process.env.CROW_HOME || _HOME_FOR_CROW + "/.crow";
+}
+function readAddons(crowHome) {
+  try {
+    return JSON.parse(readFileSync(join(crowHome, "mcp-addons.json"), "utf8")) || {};
+  } catch {
+    return {};
+  }
+}
 /**
- * Build the per-bot `.mcp.json` object from the bot def + canonical config.
- * @returns {{ json:object, servers:string[], warnings:string[], journalGuarded:string[] }}
+ * Default an addon block's cwd the SAME way the gateway proxy does
+ * (proxy.js:197) and pi-lab requires (mcp-client spawns `cwd: cfg.cwd` with NO
+ * default — a cwd-less addon would run `node server/index.js` from the bot's
+ * sessionDir and MODULE_NOT_FOUND). Returns a shallow copy with cwd filled.
  */
-export function buildBotMcp(def, canonical) {
+function addonSpawnBlock(serverId, block, crowHome) {
+  return { ...block, cwd: block.cwd || join(crowHome, "bundles", serverId) };
+}
+
+/**
+ * Mint pi-compatible blocks for the bot's selected servers that are ABSENT from
+ * canonical but present in <crowHome>/mcp-addons.json. Returns a
+ * {name: block} map (cwd defaulted; the journal guard is applied later by
+ * buildBotMcp on the clone). Servers absent from BOTH canonical and addons are
+ * left out here so buildBotMcp surfaces them as a warning.
+ *
+ * @param {object} opts.canonical  pre-read canonical (avoids a second read)
+ */
+export function extraServersFromExtensions(def, crowHome = resolveCrowHome(), opts = {}) {
   const want = serversForBot(def);
+  const canonical = opts.canonical || readCanonicalMcp(opts.canonicalPath);
+  const addons = readAddons(crowHome);
+  const servers = {};
+  for (const name of want) {
+    if (canonical.mcpServers[name]) continue; // canonical present -> homedir wins, no mint
+    const addon = addons[name];
+    if (!addon) continue; // absent from both -> buildBotMcp warns
+    servers[name] = addonSpawnBlock(name, addon, crowHome);
+  }
+  return servers;
+}
+
+/**
+ * Build the per-bot `.mcp.json` object from the bot def + canonical config,
+ * plus any minted extension addon blocks (A5). Canonical wins on name collision
+ * (matches pi-lab's homedir-wins merge); extension blocks only fill servers
+ * absent from canonical. A selected server present in NEITHER is a warning.
+ * @param {object} opts.extraServers  {name: block} minted from mcp-addons.json
+ * @returns {{ json, servers, warnings, journalGuarded, minted }}
+ */
+export function buildBotMcp(def, canonical, opts = {}) {
+  const want = serversForBot(def);
+  const extra = opts.extraServers || {};
   const out = { mcpServers: {} };
   const warnings = [];
   const journalGuarded = [];
+  const minted = [];
   for (const name of want) {
-    const block = canonical.mcpServers[name];
+    let block = canonical.mcpServers[name];
+    let isExtra = false;
+    if (!block && extra[name]) {
+      block = extra[name];
+      isExtra = true;
+    }
     if (!block) {
       warnings.push(
-        "server '" + name + "' is selected but absent from canonical mcp.json — pi will NOT have it"
+        "server '" + name + "' is selected but absent from canonical mcp.json AND " +
+        "mcp-addons.json — pi will NOT have it"
       );
       continue;
     }
-    // deep clone so we never mutate the canonical in memory
+    // deep clone so we never mutate the canonical/addon block in memory
     const clone = JSON.parse(JSON.stringify(block));
     if (touchesCrowDb(clone)) {
       clone.env = clone.env || {};
@@ -98,8 +166,9 @@ export function buildBotMcp(def, canonical) {
       }
     }
     out.mcpServers[name] = clone;
+    if (isExtra) minted.push(name);
   }
-  return { json: out, servers: Object.keys(out.mcpServers), warnings, journalGuarded };
+  return { json: out, servers: Object.keys(out.mcpServers), warnings, journalGuarded, minted };
 }
 
 /**
@@ -117,7 +186,12 @@ export function writeBotMcp(def, opts = {}) {
   const sessionDir = opts.sessionDir || (def && def.session_dir);
   if (!sessionDir) throw new Error("bot def has no session_dir (and no opts.sessionDir override)");
   const canonical = opts.canonical || readCanonicalMcp(opts.canonicalPath);
-  const built = buildBotMcp(def, canonical);
+  // A5: resolve the active instance + mint addon blocks for selected servers
+  // absent from canonical. opts.crowHome lets the bridge/GUI/CLI pin the
+  // instance explicitly; otherwise CROW_HOME env (MPA service) or ~/.crow.
+  const crowHome = opts.crowHome || resolveCrowHome();
+  const extraServers = opts.extraServers || extraServersFromExtensions(def, crowHome, { canonical });
+  const built = buildBotMcp(def, canonical, { extraServers });
   mkdirSync(sessionDir, { recursive: true });
   const path = join(sessionDir, ".mcp.json");
   writeFileSync(path, JSON.stringify(built.json, null, 2) + "\n", { mode: 0o600 });
@@ -126,6 +200,7 @@ export function writeBotMcp(def, opts = {}) {
     servers: built.servers,
     warnings: built.warnings,
     journalGuarded: built.journalGuarded,
+    minted: built.minted,
   };
 }
 
@@ -283,7 +358,9 @@ if (import.meta.url === "file://" + process.argv[1]) {
         process.exit(2);
       }
       const def = JSON.parse(row.definition || "{}");
-      const res = writeBotMcp(def);
+      // A5: thread the active instance (CROW_HOME env -> ~/.crow-mpa on MPA)
+      // so minted addon blocks resolve against the same instance as CROW_DB.
+      const res = writeBotMcp(def, { crowHome: resolveCrowHome() });
       console.log(JSON.stringify(res, null, 2));
       process.exit(0);
     });

@@ -16,6 +16,25 @@
   "panel": "panel/meta-glasses.js",
   "panelRoutes": "panel/routes.js",
   "skills": ["skills/meta-glasses.md"],
+  "capabilities": {
+    "mcp_server_id": "meta-glasses",
+    "group": "Glasses",
+    "skills": ["meta-glasses"],
+    "runtimes": { "pi": true, "glasses": true },
+    "tools": [
+      { "name": "crow_glasses_status", "label": "Status", "subgroup": "Voice" },
+      { "name": "crow_glasses_speak", "label": "Speak", "subgroup": "Voice" },
+      { "name": "crow_glasses_capture_photo", "label": "Capture photo", "subgroup": "Capture" },
+      { "name": "crow_glasses_capture_and_attach_photo", "label": "Capture + attach", "subgroup": "Capture" },
+      { "name": "crow_glasses_search_photos", "label": "Search photos", "subgroup": "Capture" },
+      { "name": "crow_glasses_start_note_session", "label": "Start note", "subgroup": "Notes" },
+      { "name": "crow_glasses_add_to_note", "label": "Add to note", "subgroup": "Notes" },
+      { "name": "crow_glasses_end_note_session", "label": "End note", "subgroup": "Notes" },
+      { "name": "crow_glasses_undo_last_append", "label": "Undo last append", "subgroup": "Notes" },
+      { "name": "crow_glasses_confirm_continuous_recording", "label": "Confirm recording", "subgroup": "Notes" },
+      { "name": "crow_glasses_confirm_action_items", "label": "Confirm action items", "subgroup": "Notes" }
+    ]
+  },
   "requires": {
     "min_ram_mb": 128,
     "min_disk_mb": 20,
