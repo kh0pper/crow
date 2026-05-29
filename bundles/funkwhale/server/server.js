@@ -446,6 +446,126 @@ export async function createFunkwhaleServer(options = {}) {
     },
   );
 
+  // --- fw_create_playlist ---
+  server.tool(
+    "fw_create_playlist",
+    "Create a new empty playlist owned by the authenticated user. privacy_level defaults to 'me' (private). Use fw_add_to_playlist with the returned id to populate it.",
+    {
+      name: z.string().min(1).max(50),
+      privacy_level: z.enum(["me", "followers", "instance", "everyone"]).optional(),
+    },
+    limiter("fw_create_playlist", async ({ name, privacy_level }) => {
+      try {
+        const authErr = requireAuth(); if (authErr) return authErr;
+        const body = { name, privacy_level: privacy_level || "me" };
+        const out = await fwFetch("/api/v1/playlists/", { method: "POST", body });
+        return textResponse({
+          id: out.id,
+          name: out.name,
+          privacy_level: out.privacy_level,
+          tracks_count: out.tracks_count ?? 0,
+          creation_date: out.creation_date,
+        });
+      } catch (err) {
+        return errResponse(err);
+      }
+    }),
+  );
+
+  // --- fw_get_playlist_tracks ---
+  server.tool(
+    "fw_get_playlist_tracks",
+    "List the tracks in a playlist by id, in playlist order. Each entry has a 0-based 'index' usable with fw_remove_from_playlist.",
+    {
+      playlist_id: z.number().int().positive(),
+      page: z.number().int().min(1).max(1000).optional(),
+      page_size: z.number().int().min(1).max(100).optional(),
+    },
+    async ({ playlist_id, page, page_size }) => {
+      try {
+        const authErr = requireAuth(); if (authErr) return authErr;
+        const out = await fwFetch(`/api/v1/playlists/${playlist_id}/tracks/`, { query: { page, page_size } });
+        const tracks = (out.results || []).map((entry) => ({
+          index: entry.index,
+          track_id: entry.track?.id,
+          title: entry.track?.title,
+          artist: entry.track?.artist?.name,
+          album: entry.track?.album?.title,
+        }));
+        return textResponse({ count: out.count, tracks });
+      } catch (err) {
+        return errResponse(err);
+      }
+    },
+  );
+
+  // --- fw_add_to_playlist ---
+  server.tool(
+    "fw_add_to_playlist",
+    "Append tracks to an existing playlist. track_ids are integer Funkwhale track IDs (from fw_search type='tracks'). allow_duplicates defaults to true because Funkwhale 1.2.x returns 500 when duplicates are present and allow_duplicates is unset; pass false only when you've verified the playlist contents first via fw_get_playlist_tracks.",
+    {
+      playlist_id: z.number().int().positive(),
+      track_ids: z.array(z.number().int().positive()).min(1).max(100),
+      allow_duplicates: z.boolean().optional(),
+    },
+    limiter("fw_add_to_playlist", async ({ playlist_id, track_ids, allow_duplicates }) => {
+      try {
+        const authErr = requireAuth(); if (authErr) return authErr;
+        const body = {
+          tracks: track_ids,
+          allow_duplicates: allow_duplicates !== false,
+        };
+        const out = await fwFetch(`/api/v1/playlists/${playlist_id}/add/`, { method: "POST", body });
+        const added = (out.results || []).map((entry) => ({
+          index: entry.index,
+          track_id: entry.track?.id,
+          title: entry.track?.title,
+        }));
+        return textResponse({ added_count: out.count ?? added.length, added });
+      } catch (err) {
+        return errResponse(err);
+      }
+    }),
+  );
+
+  // --- fw_remove_from_playlist ---
+  server.tool(
+    "fw_remove_from_playlist",
+    "Remove a single track from a playlist by its 0-based position (use fw_get_playlist_tracks to find the right index first). Funkwhale uses POST /remove/ with body {index} — not DELETE.",
+    {
+      playlist_id: z.number().int().positive(),
+      index: z.number().int().min(0),
+    },
+    limiter("fw_remove_from_playlist", async ({ playlist_id, index }) => {
+      try {
+        const authErr = requireAuth(); if (authErr) return authErr;
+        await fwFetch(`/api/v1/playlists/${playlist_id}/remove/`, { method: "POST", body: { index } });
+        return textResponse({ removed: true, playlist_id, index });
+      } catch (err) {
+        return errResponse(err);
+      }
+    }),
+  );
+
+  // --- fw_delete_playlist ---
+  server.tool(
+    "fw_delete_playlist",
+    "Permanently delete an entire playlist. Requires confirm:true and is irreversible — get explicit user confirmation in the conversation before calling.",
+    {
+      playlist_id: z.number().int().positive(),
+      confirm: z.literal(true),
+    },
+    limiter("fw_delete_playlist", async ({ playlist_id }) => {
+      try {
+        const authErr = requireAuth(); if (authErr) return authErr;
+        await fwFetch(`/api/v1/playlists/${playlist_id}/`, { method: "DELETE" });
+        return textResponse({ deleted: true, playlist_id });
+      } catch (err) {
+        return errResponse(err);
+      }
+    }),
+  );
+
   // --- fw_now_playing ---
   server.tool(
     "fw_now_playing",
@@ -520,6 +640,13 @@ export async function createFunkwhaleServer(options = {}) {
           if (m?.[1]) listenId = m[1];
         }
         const url = `${FUNKWHALE_URL}/api/v1/listen/${encodeURIComponent(listenId)}/?to=${codec}`;
+        // Fire-and-forget listen record — glasses stream the audio directly
+        // from Funkwhale, bypassing the panel's stream proxy that would
+        // otherwise post here. Without this, fw_now_playing always returns 0.
+        if (meta.id) {
+          fwFetch("/api/v1/history/listenings/", { method: "POST", body: { track: meta.id } })
+            .catch(() => { /* best-effort */ });
+        }
         return textResponse({
           ok: true,
           title,
@@ -576,6 +703,15 @@ export async function createFunkwhaleServer(options = {}) {
         }).filter(Boolean);
         if (streams.length === 0) {
           return textResponse({ ok: false, prose: `Couldn't resolve any playable URLs for ${albumTitle}.` });
+        }
+        // Fire-and-forget: record one listen per track so the album shows up
+        // in fw_now_playing history. Glasses stream direct from Funkwhale and
+        // skip the panel proxy that would otherwise record this.
+        for (const t of tracks) {
+          if (t.id) {
+            fwFetch("/api/v1/history/listenings/", { method: "POST", body: { track: t.id } })
+              .catch(() => {});
+          }
         }
         const [first, ...rest] = streams;
         return textResponse({

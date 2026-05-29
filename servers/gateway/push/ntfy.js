@@ -2,7 +2,7 @@
  * ntfy Push — Self-hosted push notification sender
  *
  * Publishes notifications to a local ntfy server instance.
- * Requires NTFY_TOPIC env var. NTFY_PORT defaults to 2586.
+ * Requires NTFY_TOPIC env var. NTFY_HOST defaults to localhost; NTFY_PORT defaults to 2586.
  * NTFY_AUTH_TOKEN is optional (for private topics).
  */
 
@@ -49,9 +49,10 @@ export async function sendNtfyNotification({ title, body, url, priority = "norma
   const topic = process.env.NTFY_TOPIC;
   if (!topic) return;
 
+  const host = process.env.NTFY_HOST || "localhost";
   const port = process.env.NTFY_PORT || "2586";
   const authToken = process.env.NTFY_AUTH_TOKEN;
-  const ntfyUrl = `http://localhost:${port}/${encodeURIComponent(topic)}`;
+  const ntfyUrl = `http://${host}:${port}/${encodeURIComponent(topic)}`;
 
   const headers = {
     "X-Title": encodeNtfyHeader(title),

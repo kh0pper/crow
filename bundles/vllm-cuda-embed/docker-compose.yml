@@ -28,7 +28,7 @@ services:
     ipc: host
     shm_size: 2g
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/models', timeout=3).read()"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/models', timeout=3).read()"]
       interval: 30s
       timeout: 5s
       retries: 3

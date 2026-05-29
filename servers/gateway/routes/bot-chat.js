@@ -120,18 +120,18 @@ async function resolveVisionApiConfig(provider) {
     if (!rows[0]) return null;
     const profiles = JSON.parse(rows[0].value);
     // Match provider name to profile (zai → Z.AI, etc.)
-    const providerMap = { zai: "Z.AI", "qwen-portal": "Dashscope", meta: "Meta AI" };
+    const providerMap = { zai: "Z.AI", "qwen-portal": "Dashscope", meta: "Meta AI", vllm: "Crow Local" };
     const profileName = providerMap[provider] || provider;
     const profile = profiles.find(p => p.name === profileName || p.name?.toLowerCase() === provider);
     if (!profile) return null;
-    if (profile.baseUrl && profile.apiKey) {
-      return { baseUrl: profile.baseUrl, apiKey: profile.apiKey };
+    if (profile.baseUrl) {
+      return { baseUrl: profile.baseUrl, apiKey: profile.apiKey || "none" };
     }
     if (profile.provider_id) {
       const { resolveProfileToConfig } = await import("../ai/resolve-profile.js");
       const cfg = await resolveProfileToConfig(profile, db).catch(() => null);
-      if (cfg?.baseUrl && cfg?.apiKey && cfg.apiKey !== "none") {
-        return { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey };
+      if (cfg?.baseUrl) {
+        return { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey || "none" };
       }
     }
     return null;

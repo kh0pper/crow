@@ -57,6 +57,13 @@ const PY_BIN = (() => {
 // For charts: pass the row array from the SQL execution.
 // For maps: pass the GeoJSON feature array (same idea — it's what the
 // browser renders and matches the snapshot in time).
+// Bump when the chart-rendering algorithm changes in a way that affects
+// the PNG output for existing configs/data. Browsers cache /blog/figures/*
+// with Cache-Control: immutable for a year, so without a new filename
+// readers keep seeing stale PNGs. Changing this string forces a new
+// cacheKey → new s3 filename → fresh fetch.
+const RENDERER_VERSION = "v3-colorfield-2026-04-24";
+
 export function cacheKey({ sectionId, config, sql, dataDigestInput }) {
   const h = createHash("sha256");
   h.update(String(sectionId));
@@ -66,6 +73,8 @@ export function cacheKey({ sectionId, config, sql, dataDigestInput }) {
   h.update(sql || "");
   h.update("\x1f");
   h.update(typeof dataDigestInput === "string" ? dataDigestInput : JSON.stringify(dataDigestInput ?? null));
+  h.update("\x1f");
+  h.update(RENDERER_VERSION);
   return h.digest("hex").slice(0, 16);
 }
 
@@ -93,11 +102,103 @@ function buildChartJsConfig(sectionConfig, rows) {
       options: buildChartOptions(sectionConfig, { grouped: true }),
     };
   }
-  // variant 1 — bar or scatter
-  const type = sectionConfig?.type === "scatter" ? "scatter" : "bar";
-  const xCol = sectionConfig?.xCol;
-  const yCol = sectionConfig?.yCol;
-  if (!xCol || !yCol) throw new Error("figure-renderer: chart config missing xCol/yCol");
+  // variant 1 — bar or scatter. Config shapes encountered in the wild:
+  //   {type: 'bar',     xCol,    yCol}         (early-2026 sync)
+  //   {type: 'bar',     xField,  yField}       (dashboard-builder)
+  //   {chartType: 'bar', ...}                  (later builder; no explicit axis)
+  //   {type: 'scatter', xCol,    yCol}
+  // For configs without explicit axis fields, infer from the SQL result's
+  // column order: first column is the x-axis label, first numeric column
+  // after that is the y-axis value. Fallback PNGs don't need the full
+  // colorField/colorMap grouping machinery — a simple single-series chart
+  // conveys the shape; the hydrated widget can render the richer form if
+  // needed later.
+  const rawType = sectionConfig?.type || sectionConfig?.chartType || "bar";
+  // Dashboard's data-case-study-present.js renders bar|line|scatter when
+  // `groupCol` is present, pivoting rows into one dataset per group value.
+  // Mirror that here so PNGs match the hydrated widget.
+  const type =
+    rawType === "scatter" ? "scatter" : rawType === "line" ? "line" : "bar";
+  let xCol = sectionConfig?.xCol ?? sectionConfig?.xField;
+  let yCol = sectionConfig?.yCol ?? sectionConfig?.yField;
+  // `colorField` is an older dashboard-builder schema where the field acts
+  // as a color dimension. It's structurally equivalent to `groupCol` — one
+  // dataset per distinct value — so treat them as aliases. `colorMap`
+  // (if present) gives explicit per-group colors.
+  const groupCol = sectionConfig?.groupCol ?? sectionConfig?.groupField ?? sectionConfig?.colorField ?? null;
+  if ((!xCol || !yCol) && rows.length > 0) {
+    const keys = Object.keys(rows[0]);
+    if (!xCol) xCol = keys[0];
+    if (!yCol) yCol = keys.find((k) => k !== xCol && k !== groupCol && Number.isFinite(Number(rows[0][k]))) ?? keys[1];
+  }
+  if (!xCol || !yCol) throw new Error("figure-renderer: chart config missing xCol/yCol and rows empty");
+  const customColor = typeof sectionConfig?.color === "string" ? sectionConfig.color : null;
+  const colorMap = (sectionConfig?.colorMap && typeof sectionConfig.colorMap === "object")
+    ? sectionConfig.colorMap : null;
+  const colorFor = (groupName, idx) => {
+    if (colorMap && Object.prototype.hasOwnProperty.call(colorMap, groupName)) {
+      return colorMap[groupName];
+    }
+    return COLORS.chart_palette[idx % COLORS.chart_palette.length];
+  };
+  if (groupCol && rows.length > 0 && Object.prototype.hasOwnProperty.call(rows[0], groupCol)) {
+    const palette = COLORS.chart_palette;
+    const groupKey = (r) => (r[groupCol] == null ? "(null)" : String(r[groupCol]));
+    if (type === "scatter") {
+      const groups = {};
+      const groupOrder = [];
+      for (const r of rows) {
+        const g = groupKey(r);
+        if (!groups[g]) { groups[g] = []; groupOrder.push(g); }
+        groups[g].push({ x: toNum(r[xCol]), y: toNum(r[yCol]) });
+      }
+      return {
+        type: "scatter",
+        data: {
+          datasets: groupOrder.map((name, i) => {
+            const c = colorFor(name, i);
+            return {
+              label: name,
+              data: groups[name],
+              backgroundColor: c,
+              borderColor: typeof c === "string" ? c.replace(/0\.85\)$/, "1)") : c,
+            };
+          }),
+        },
+        options: buildChartOptions(sectionConfig, { scatter: true, grouped: true }),
+      };
+    }
+    const groups = {};
+    const groupOrder = [];
+    const labels = [];
+    const labelSeen = new Set();
+    for (const r of rows) {
+      const x = r[xCol] == null ? "" : String(r[xCol]);
+      const g = groupKey(r);
+      if (!labelSeen.has(x)) { labelSeen.add(x); labels.push(x); }
+      if (!groups[g]) { groups[g] = {}; groupOrder.push(g); }
+      groups[g][x] = toNum(r[yCol]);
+    }
+    return {
+      type,
+      data: {
+        labels,
+        datasets: groupOrder.map((name, i) => {
+          const bg = colorFor(name, i);
+          return {
+            label: name,
+            data: labels.map((l) => (Object.prototype.hasOwnProperty.call(groups[name], l) ? groups[name][l] : null)),
+            backgroundColor: bg,
+            borderColor: typeof bg === "string" ? bg.replace(/0\.85\)$/, "1)") : bg,
+            borderWidth: type === "line" ? 2 : 1,
+            fill: false,
+            tension: 0.1,
+          };
+        }),
+      },
+      options: buildChartOptions(sectionConfig, { grouped: true }),
+    };
+  }
   if (type === "scatter") {
     return {
       type: "scatter",
@@ -112,14 +213,19 @@ function buildChartJsConfig(sectionConfig, rows) {
       options: buildChartOptions(sectionConfig, { scatter: true }),
     };
   }
+  const bg = customColor || COLORS.chart_palette[0];
   return {
-    type: "bar",
+    type,
     data: {
       labels: rows.map((r) => String(r[xCol])),
       datasets: [{
         label: yCol,
         data: rows.map((r) => toNum(r[yCol])),
-        backgroundColor: COLORS.chart_palette[0],
+        backgroundColor: bg,
+        borderColor: typeof bg === "string" ? bg.replace(/0\.85\)$/, "1)") : bg,
+        borderWidth: type === "line" ? 2 : 1,
+        fill: false,
+        tension: 0.1,
       }],
     },
     options: buildChartOptions(sectionConfig, {}),
