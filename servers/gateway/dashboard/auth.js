@@ -18,6 +18,10 @@ const SESSION_COOKIE = "crow_session";
 const CSRF_COOKIE = "crow_csrf";
 const isHosted = !!process.env.CROW_HOSTED;
 const SESSION_MAX_AGE = isHosted ? 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+// SSO-granted sessions are deliberately short-lived (24h) regardless of host
+// mode: a session authorized transitively (by being logged into another
+// instance) should not become a week-long standing credential.
+export const SSO_SESSION_MAX_AGE = 24 * 60 * 60 * 1000;
 const LOCKOUT_THRESHOLD = 5;
 const LOCKOUT_DURATION = 15 * 60 * 1000; // 15 min
 
@@ -257,6 +261,33 @@ export async function complete2faLogin(ip) {
 }
 
 /**
+ * Mint a dashboard session authorized via cross-instance SSO.
+ *
+ * Identical storage to a normal session (oauth_tokens, client_id='dashboard'
+ * so verifySession accepts it) but with a 24h lifetime and a distinct
+ * `scopes='dashboard sso'` tag for auditing / independent revocation. The
+ * caller is responsible for having validated the SSO ticket first.
+ *
+ * @param {string} srcInstanceId  The issuing (source) instance id, for audit.
+ * @returns {Promise<{token: string}>}
+ */
+export async function mintSsoSession(srcInstanceId) {
+  const db = createDbClient();
+  try {
+    const token = randomBytes(32).toString("hex");
+    const expiresAt = new Date(Date.now() + SSO_SESSION_MAX_AGE).toISOString();
+    await db.execute({
+      sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'access', 'dashboard', 'dashboard sso', ?)",
+      args: [hashToken(token), expiresAt],
+    });
+    await auditLog(db, 'auth_sso_login', { src: srcInstanceId || null });
+    return { token };
+  } finally {
+    db.close();
+  }
+}
+
+/**
  * Verify a session token.
  */
 export async function verifySession(token) {
@@ -387,8 +418,8 @@ export function dashboardAuth(req, res, next) {
 /**
  * Set session cookie on response.
  */
-export function setSessionCookie(res, token) {
-  const maxAge = SESSION_MAX_AGE / 1000;
+export function setSessionCookie(res, token, maxAgeMs = SESSION_MAX_AGE) {
+  const maxAge = maxAgeMs / 1000;
   const secure = process.env.CROW_HOSTED || process.env.NODE_ENV === 'production';
   const secureSuffix = secure ? '; Secure' : '';
   res.setHeader("Set-Cookie", [

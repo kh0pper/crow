@@ -223,14 +223,19 @@ export async function getRecoveryCodeCount() {
  * Create a pending 2FA token after successful password verification.
  * @returns {string} Plain-text token (set as cookie)
  */
-export async function createPending2faToken() {
+export async function createPending2faToken(meta = null) {
   const token = randomBytes(32).toString("hex");
   const expiresAt = new Date(Date.now() + PENDING_2FA_TTL).toISOString();
+  // Optional context (e.g. cross-instance SSO {src, dest}) bound to THIS
+  // single-use token, stashed in the otherwise-unused `resource` column. This
+  // ties the SSO handoff to the specific 2FA flow so a stale cookie can't make
+  // a later normal login look like SSO.
+  const resource = meta ? JSON.stringify(meta) : null;
   const db = createDbClient();
   try {
     await db.execute({
-      sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at) VALUES (?, 'pending_2fa', 'dashboard', '2fa', ?)",
-      args: [sha256(token), expiresAt],
+      sql: "INSERT INTO oauth_tokens (token, token_type, client_id, scopes, resource, expires_at) VALUES (?, 'pending_2fa', 'dashboard', '2fa', ?, ?)",
+      args: [sha256(token), resource, expiresAt],
     });
     // Clean up expired pending tokens
     await db.execute({
@@ -238,6 +243,28 @@ export async function createPending2faToken() {
       args: [],
     });
     return token;
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Read the context bound to a pending 2FA token WITHOUT consuming it.
+ * Returns the parsed `meta` object (e.g. SSO {src, dest}) or null. Call this
+ * before verifyPending2faToken (which deletes the row on success).
+ * @returns {Promise<object|null>}
+ */
+export async function getPending2faContext(token) {
+  if (!token) return null;
+  const db = createDbClient();
+  try {
+    const result = await db.execute({
+      sql: "SELECT resource FROM oauth_tokens WHERE token = ? AND token_type = 'pending_2fa' AND expires_at > datetime('now')",
+      args: [sha256(token)],
+    });
+    const raw = result.rows[0]?.resource;
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch { return null; }
   } finally {
     db.close();
   }

@@ -9,6 +9,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
+import { getPeerCreds } from "../../../../shared/peer-credentials.js";
+import { readSetting } from "../../settings/registry.js";
 
 // Docker status cache
 const _dockerCache = new Map();
@@ -175,9 +177,21 @@ export async function getNestData(db, lang, opts = {}) {
   const trustedInstances = Array.isArray(opts.trustedInstances) ? opts.trustedInstances : [];
   const peerOverviews = Array.isArray(opts.peerOverviews) ? opts.peerOverviews : [];
 
+  // Cross-instance SSO eligibility. Decorate every instance row (both the
+  // legacy `instances` list and the unified `trustedInstances` list — they are
+  // distinct arrays) with `paired` = a shared signing key exists for it. The
+  // renderer routes a tile through /dashboard/sso/launch only when SSO is on
+  // AND the row is trusted AND paired AND has a gateway_url.
+  let ssoEnabled = false;
+  try { ssoEnabled = (await readSetting(db, "sso_enabled")) === "true"; } catch {}
+  const withPaired = (arr) => arr.map((r) => ({ ...r, paired: !!(getPeerCreds(r.id)?.signing_key) }));
+
   return {
-    pinnedItems, bundles, dockerInfo, dbStats, recentChats, recentSessions, instances,
-    trustedInstances, peerOverviews,
+    pinnedItems, bundles, dockerInfo, dbStats, recentChats, recentSessions,
+    instances: withPaired(instances),
+    trustedInstances: withPaired(trustedInstances),
+    peerOverviews,
+    ssoEnabled,
   };
 }
 

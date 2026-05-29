@@ -129,6 +129,30 @@ test("rejectFunneled middleware: private paths blocked with Funnel header", asyn
   }
 });
 
+test("rejectFunneled middleware: SSO routes are never reachable via Funnel", async () => {
+  const server = await startTestApp();
+  try {
+    const port = server.address().port;
+    // The SSO accept route bypasses password dashboardAuth, so its only
+    // network defenses are isAllowedNetwork (tested above) + this Funnel guard.
+    for (const path of ["/dashboard/sso/accept", "/dashboard/sso/launch", "/dashboard/sso/accept?src=x&t=y&sig=z"]) {
+      const r = await request(port, path, { "tailscale-funnel-request": "?1" });
+      assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
+    }
+  } finally {
+    server.close();
+  }
+});
+
+test("isAllowedNetwork: SSO accept on a tailnet IP is still rejected over Funnel", () => {
+  // The accept handler calls isAllowedNetwork() explicitly; a Funnel request
+  // must fail even though the source IP is in the Tailscale CGNAT range.
+  assert.equal(
+    isAllowedNetwork(mkReq({ ip: "100.96.0.7", headers: { "tailscale-funnel-request": "?1" } })),
+    false,
+  );
+});
+
 test("rejectFunneled middleware: public paths pass with Funnel header", async () => {
   const server = await startTestApp();
   try {
