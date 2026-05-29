@@ -1208,8 +1208,16 @@ export function createSharingServer(dbPath, options = {}) {
     }
     const orig = bundle.project;
 
-    // Compute next -clone-N slug suffix
-    const baseSlug = orig.slug || slugify(orig.name || "imported");
+    // Compute next -clone-N slug suffix.
+    // SECURITY: never trust the peer's slug verbatim — it flows into a
+    // filesystem path (workspacePathFor) and a storage key (storagePrefixFor),
+    // so a hostile bundle with slug "../../etc/x" could escape the data dir.
+    // Always re-derive locally via slugify (emits only [a-z0-9-]) and assert
+    // the shape before using it.
+    const baseSlug = slugify(orig.name || orig.slug || "imported");
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(baseSlug) || baseSlug.length > 60) {
+      throw new Error("invalid project slug derived from clone bundle");
+    }
     let suffix = 1;
     let candidate = `${baseSlug}-clone-${suffix}`;
     while (true) {
@@ -1229,7 +1237,14 @@ export function createSharingServer(dbPath, options = {}) {
       : resolveDataDir();
     const workspaceDir = workspacePathFor(dataDir, newSlug);
     const storagePref = storagePrefixFor(newSlug);
-    try { mkdirSync(workspaceDir, { recursive: true }); } catch {}
+    // Defense in depth: the derived slug is already sanitized, but confirm the
+    // resolved workspace path stays inside dataDir before creating it.
+    const resolvedRoot = resolvePath(dataDir);
+    const resolvedWs = resolvePath(workspaceDir);
+    if (resolvedWs !== resolvedRoot && !resolvedWs.startsWith(resolvedRoot + "/")) {
+      throw new Error("clone workspace path escaped data dir");
+    }
+    try { mkdirSync(resolvedWs, { recursive: true }); } catch {}
 
     // Insert the new project_spaces row. New local id (autoincremented),
     // new local UUID, name suffixed to disambiguate. origin_instance_id
