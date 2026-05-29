@@ -98,6 +98,9 @@ const CLIENT_SCRIPT = `
       var lastSeen = d.last_seen ? new Date(d.last_seen).toLocaleString() : 'never';
       meta.appendChild(document.createTextNode('paired ' + pairedAt + ' · last seen ' + lastSeen));
       if (d.household_profile) meta.appendChild(document.createTextNode(' · profile: ' + d.household_profile));
+      // Slice B (B6): surface the bound bot, if any, so it's clear which
+      // assistant drives this device's voice turn. Bind/unbind in Bot Builder.
+      if (d.bound_bot_id) meta.appendChild(document.createTextNode(' · bot: ' + d.bound_bot_id));
       card.appendChild(meta);
 
       // Per-device OCR toggle (Phase 5 B.2). Off by default; enabling

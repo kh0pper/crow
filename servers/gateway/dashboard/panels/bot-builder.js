@@ -435,6 +435,42 @@ export default {
                 allowlist: lines(b.gw_allowlist),
               },
             ];
+          } else if (gwType === "glasses") {
+            // Slice B (B4): bind this bot to a meta-glasses device. The device's
+            // bound_bot_id is the source of truth the voice turn reads; the
+            // gateway record mirrors it for the UI. One bot <-> one device.
+            const deviceId = (b.gw_device_id || "").trim();
+            const fvm = (b.gw_fast_voice_model || "").trim();
+            const prior = (def.gateways || []).find((g) => g && g.type === "glasses");
+            const priorDeviceId = prior && prior.device_id ? String(prior.device_id) : "";
+            def.gateways = deviceId
+              ? [{ type: "glasses", device_id: deviceId, ...(fvm ? { fast_voice_model: fvm } : {}) }]
+              : [];
+            // Keep def.fast_voice_model (read by the voice turn) in sync.
+            if (fvm) def.fast_voice_model = fvm;
+            try {
+              const { listDevices, updateDeviceProfiles } = await import("../../../../bundles/meta-glasses/server/device-store.js");
+              // Unbind any OTHER device currently bound to this bot, and the
+              // prior device if the binding moved ("" -> null via the store).
+              const devices = await listDevices(db).catch(() => []);
+              for (const d of devices) {
+                if (d.bound_bot_id === botId && d.id !== deviceId) {
+                  await updateDeviceProfiles(db, d.id, { bound_bot_id: "" });
+                }
+              }
+              if (priorDeviceId && priorDeviceId !== deviceId) {
+                await updateDeviceProfiles(db, priorDeviceId, { bound_bot_id: "" });
+              }
+              if (deviceId) {
+                const patch = { bound_bot_id: botId };
+                if ("gw_tts_profile_id" in b) patch.tts_profile_id = (b.gw_tts_profile_id || "").trim();
+                if ("gw_stt_profile_id" in b) patch.stt_profile_id = (b.gw_stt_profile_id || "").trim();
+                if ("gw_vision_profile_id" in b) patch.vision_profile_id = (b.gw_vision_profile_id || "").trim();
+                await updateDeviceProfiles(db, deviceId, patch);
+              }
+            } catch (err) {
+              extraQ = "&warn=" + encodeURIComponent("device binding incomplete: " + err.message);
+            }
           } else {
             def.gateways = [
               {
@@ -720,6 +756,7 @@ export default {
         const gwTypes = [
           { value: "gmail", label: "Gmail", available: true },
           { value: "discord", label: "Discord", available: true },
+          { value: "glasses", label: "Meta Glasses", available: true },
           { value: "crow-messages", label: "Crow Messages", available: false },
           { value: "signal", label: "Signal", available: false },
           { value: "none", label: "None (no gateway)", available: true },
@@ -741,6 +778,75 @@ export default {
             `<div class="btb-group"><label>Allowlist — Discord user IDs (one per line)</label>` +
             `<textarea name="gw_allowlist" rows="4" class="btb-textarea">${escapeHtml((gw.allowlist || []).join("\n"))}</textarea></div>`;
           gwHint = `<p class="btb-hint">Discord runs via the long-lived <code>pibot-discord.service</code> (discord_gateway.mjs holds a WebSocket per bot). The <code>MessageContent</code> privileged intent must be enabled in the Discord Developer Portal. After changing token/guild/channel config, restart the service: <code>sudo systemctl restart pibot-discord</code>.</p>`;
+        } else if (gwType === "glasses") {
+          // Slice B (B4): bind this bot to a paired meta-glasses device. Saving
+          // sets the device's bound_bot_id (the voice turn reads it) + the voice
+          // plumbing (STT/TTS/Vision), and mirrors {device_id, fast_voice_model}
+          // onto the gateway record.
+          let devices = [];
+          try {
+            const { listDevices } = await import("../../../../bundles/meta-glasses/server/device-store.js");
+            devices = await listDevices(db).catch(() => []);
+          } catch { devices = []; }
+          const selDev = devices.find((d) => String(d.id) === String(gw.device_id || "")) || null;
+          const devOpts = `<option value="">&mdash; select a paired device &mdash;</option>` +
+            devices.map((d) => {
+              const boundElse = d.bound_bot_id && d.bound_bot_id !== botId ? ` — bound to ${escapeHtml(d.bound_bot_id)}` : "";
+              return `<option value="${escapeHtml(String(d.id))}"${String(d.id) === String(gw.device_id || "") ? " selected" : ""}>${escapeHtml(d.name || String(d.id))}${boundElse}</option>`;
+            }).join("");
+
+          // fast_voice_model picker (provider/model optgroups, same as the AI tab).
+          let fvmOpts = "";
+          try {
+            const { opts: mOpts } = await loadModelOptions(db);
+            const byProv = {};
+            for (const o of mOpts) (byProv[o.provider] = byProv[o.provider] || []).push(o);
+            const cur = gw.fast_voice_model || def.fast_voice_model || "";
+            fvmOpts = `<option value="">&mdash; (use the bot's AI-tab Fast voice model) &mdash;</option>` +
+              Object.keys(byProv).map((p) =>
+                `<optgroup label="${escapeHtml(p)}">` +
+                byProv[p].map((m) => `<option value="${escapeHtml(m.key)}"${m.key === cur ? " selected" : ""}>${escapeHtml(m.label)}</option>`).join("") +
+                `</optgroup>`).join("");
+          } catch { fvmOpts = `<option value="">&mdash; (use the bot's AI-tab Fast voice model) &mdash;</option>`; }
+
+          // Editable STT/TTS/Vision selects, pre-filled from the selected device.
+          const [ttsP, sttP, visionP] = await Promise.all([
+            getTtsProfiles(db).catch(() => []),
+            getSttProfiles(db).catch(() => []),
+            loadVisionProfiles(db),
+          ]);
+          const profileSel = (name, profiles, selId) =>
+            `<select name="${name}" class="btb-select"><option value="">&mdash; device / platform default &mdash;</option>` +
+            profiles.map((p) => `<option value="${escapeHtml(String(p.id))}"${String(p.id) === String(selId || "") ? " selected" : ""}>${escapeHtml(p.name || String(p.id))}</option>`).join("") +
+            `</select>`;
+
+          // Q3: warn about selected tools with no voice equivalent (omitted from
+          // the voice tool set rather than advertised as unrunnable).
+          let noVoiceWarn = "";
+          try {
+            const { voiceUnavailableSelections } = await import("../../ai/tool-executor.js");
+            const unavailable = voiceUnavailableSelections(def);
+            if (unavailable.length) {
+              noVoiceWarn =
+                `<p class="btb-notice-warn">These selected tools have no voice equivalent and will NOT be available when driving this bot by voice (they still work under the pi runtime): ` +
+                `<code>${unavailable.map(escapeHtml).join("</code>, <code>")}</code>.</p>`;
+            }
+          } catch { /* tool-executor unavailable: skip the warning */ }
+
+          gwFields =
+            `<div class="btb-group"><label>Paired device</label>` +
+            `<select name="gw_device_id" class="btb-select">${devOpts}</select></div>` +
+            (devices.length ? "" : `<p class="btb-hint">No paired glasses devices yet. Pair one in the Meta Glasses panel first.</p>`) +
+            `<div class="btb-group"><label>Fast voice model (overrides the AI tab for this binding)</label>` +
+            `<select name="gw_fast_voice_model" class="btb-select">${fvmOpts}</select></div>` +
+            `<div class="btb-group"><label>Voice plumbing (bound to the device)</label>` +
+            `<div class="btb-checkbox-group">` +
+            `<label>STT&nbsp;${profileSel("gw_stt_profile_id", sttP, selDev && selDev.stt_profile_id)}</label>` +
+            `<label>TTS&nbsp;${profileSel("gw_tts_profile_id", ttsP, selDev && selDev.tts_profile_id)}</label>` +
+            `<label>Vision&nbsp;${profileSel("gw_vision_profile_id", visionP, selDev && selDev.vision_profile_id)}</label>` +
+            `</div></div>` +
+            noVoiceWarn;
+          gwHint = `<p class="btb-hint">Saving binds the device (<code>bound_bot_id</code>) so the meta-glasses fast voice turn runs THIS bot's persona, skills, scoped tools, and permissions. One bot &harr; one device; re-binding unbinds the prior device. No gateway restart needed — the voice turn reads the binding live (30s cache).</p>`;
         } else if (gwType === "none") {
           gwFields = "";
           gwHint = `<p class="btb-hint">No gateway — this bot is driven only by direct injection / cards, not inbound messages.</p>`;

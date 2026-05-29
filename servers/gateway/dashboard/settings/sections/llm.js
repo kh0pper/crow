@@ -77,6 +77,7 @@ export default {
       }
     </style>
     <nav class="llm-tabs">${tabsHtml}</nav>
+    <p class="llm-section-hint">Providers, models, and profiles here are shared plumbing. To build an <strong>assistant</strong> (persona + skills + scoped tools + gateways like Gmail, Discord, or Meta glasses) that references them, use the <a href="/dashboard/bot-builder" data-turbo-frame="_top">Bot Builder</a>.</p>
     <div class="llm-tab-body">${body}</div>`;
   },
 
