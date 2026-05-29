@@ -39,6 +39,19 @@ Match consent intent in **any language** — these are examples, not an exhausti
 
 ---
 
+## Crow bot staging flow (self-authoring bots)
+
+If you are a **Crow bot** running with **self-authoring** enabled (your system prompt will name a `proposed-skills/` staging directory), you cannot write to `~/.crow/skills` directly — that is intentional. Instead:
+
+1. **Draft** the skill as ONE markdown file written into your `<session_dir>/proposed-skills/` staging directory (use the write tool with a kebab-case filename).
+2. The file is **inert**: it never loads and never reaches `~/.crow/skills` until your **operator approves** it in the Bot Builder (Skills & Prompt tab). Approval copies the (operator-reviewed) text into `~/.crow/skills/<name>.md` and attaches it to your `def.skills`.
+3. **Tell the operator** in your reply that you drafted a proposal awaiting approval; do not assume it is active.
+4. Keep guardrail-affecting phrasing out of proposals — the approval UI flags phrasing that tries to weaken safety (e.g. "ignore previous instructions", "send without confirmation") so the operator can sanitize it before approving. Skills are pure prompt text and can never grant tools or change permissions; the operator gate is the safety boundary.
+
+The consent protocol above still applies to the human-facing assistant flow (Claude.ai, the CLI, etc.) where writing directly to `~/.crow/skills/` after explicit consent is appropriate. The staging flow is specific to gateway bots that operate unattended.
+
+---
+
 ## Skill File Structure
 
 Every skill file in `skills/` should follow this template. **Skill files are always written in English** (canonical source). Claude translates on the fly when communicating with the user.

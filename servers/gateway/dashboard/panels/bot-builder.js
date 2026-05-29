@@ -45,6 +45,7 @@ import {
   extensionSkills,
 } from "../../../../scripts/pi-bots/ext_registry.mjs";
 import { skillDirs } from "../../../../scripts/pi-bots/skill_resolver.mjs";
+import { listProposals } from "../../../../scripts/pi-bots/skill_proposals.mjs";
 import { getTtsProfiles } from "../../ai/tts/index.js";
 import { getSttProfiles } from "../../ai/stt/index.js";
 import { listProvidersAll } from "../../../orchestrator/providers-db.js";
@@ -303,7 +304,7 @@ function defaultDefinition(botId, projectId, model) {
         allowlist: ["kevin.hopper1@gmail.com", "kevin.hopper@maestro.press"],
       },
     ],
-    permission_policy: { bash: "deny", bash_allow: [], write_paths: [sessionDir], external_send: "draft_only", confirm: [] },
+    permission_policy: { bash: "deny", bash_allow: [], write_paths: [sessionDir], external_send: "draft_only", confirm: [], self_authoring: false },
     triggers: { gateway: true, cron: "" },
     system_prompt:
       `You are ${botId}, a single-purpose Crow bot. Operate ONLY within ` +
@@ -519,6 +520,10 @@ export default {
           // only ALLOWS the `subagent` tool when policy.multi_agent===true AND
           // the resolved model is MULTI_AGENT_CAPABLE; default false.
           def.permission_policy.multi_agent = !!b.pp_multi_agent;
+          // Slice C: opt-in self-authoring. When true, the bridge lets the bot
+          // DRAFT skill proposals into its confined staging dir (inert until an
+          // operator approves them on the Skills tab). Default false.
+          def.permission_policy.self_authoring = !!b.pp_self_authoring;
         } else if (tab === "triggers") {
           def.triggers.gateway = !!b.tr_gateway;
           def.triggers.cron = (b.tr_cron || "").trim();
@@ -1050,20 +1055,90 @@ export default {
           names.forEach((n) => claimed.add(n));
           groupsHtml += `<div class="btb-group"><label>${escapeHtml(ext.group || ext.id)}</label>${renderBoxes(names)}</div>`;
         }
-        const general = allSkills.filter((n) => !claimed.has(n));
+        // Slice C: `skill-writing` is FEATURED in its own card (one-click
+        // attach), so exclude it from the General group to avoid a duplicate
+        // checkbox with the same name="skills" value.
+        const featured = allSkills.includes("skill-writing") ? "skill-writing" : null;
+        const general = allSkills.filter((n) => !claimed.has(n) && n !== featured);
         if (general.length) {
           groupsHtml += `<div class="btb-group"><label>General</label>` +
             `<p class="btb-hint">${escapeHtml(skillDirs(skCrowHome).join(", "))}</p>${renderBoxes(general)}</div>`;
-        } else if (!groupsHtml) {
-          groupsHtml = `<p class="btb-muted">No skills found in ${escapeHtml(skillDirs(skCrowHome).join(", "))}.</p>`;
         }
+        // Slice C: prominent "Skill authoring" card.
+        const ppSelf = !!(def.permission_policy && def.permission_policy.self_authoring);
+        const featuredCard =
+          `<div style="border:1px solid var(--crow-accent);border-radius:8px;padding:.75rem 1rem;margin-bottom:1rem;background:var(--crow-bg-elevated)">` +
+          `<div style="font-weight:600;margin-bottom:.35rem">&#9997; Skill authoring</div>` +
+          `<p class="btb-hint">Attach <code>skill-writing</code> to teach this bot how to design skills. To let it ` +
+          `<strong>propose</strong> new skills on its own (drafted into a staging dir for your approval), enable ` +
+          `<strong>Self-authoring skills</strong> on the ` +
+          `<a href="/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&amp;tab=permissions">Permissions</a> tab — ` +
+          `currently <strong>${ppSelf ? "ON" : "OFF"}</strong>. Proposals stay inert until you approve them below.</p>` +
+          (featured
+            ? `<label class="btb-checkbox"><input type="checkbox" name="skills" value="skill-writing"${sel.has("skill-writing") ? " checked" : ""}> Attach <code>skill-writing</code> (one-click)</label>`
+            : `<p class="btb-muted">skill-writing.md not found in ${escapeHtml(skillDirs(skCrowHome).join(", "))}.</p>`) +
+          `</div>`;
+        // Slice C: proposed-skills review (drafted by a self_authoring bot into
+        // <def.session_dir>/proposed-skills). Operator reviews/edits, then
+        // Approve (promote to ~/.crow/skills + attach) or Reject (discard).
+        const proposals = listProposals(def.session_dir);
+        const proposalsHtml = proposals.length
+          ? proposals.map((p) => {
+              const badges = p.flags.length
+                ? p.flags.map((f) => `<span title="${escapeHtml(f.snippet)}" style="display:inline-block;background:#5c1a1a;color:#ffd9d9;border-radius:4px;padding:.1rem .4rem;font-size:.72rem;margin:0 .25rem .25rem 0">&#9888; ${escapeHtml(f.label)}</span>`).join("")
+                : `<span style="color:var(--crow-text-muted);font-size:.78rem">No guardrail phrases flagged</span>`;
+              const ta = `bb-prop-${escapeHtml(p.name)}`;
+              return `<div style="border:1px solid var(--crow-border);border-radius:6px;padding:.6rem;margin:.5rem 0">` +
+                `<div style="margin-bottom:.3rem"><code>${escapeHtml(p.name)}.md</code> ${badges}</div>` +
+                `<textarea id="${ta}" class="btb-textarea btb-textarea-wide" rows="12">${escapeHtml(p.text)}</textarea>` +
+                `<div style="margin-top:.4rem;display:flex;gap:.5rem;align-items:center">` +
+                `<button class="btb-btn bb-prop-approve" data-name="${escapeHtml(p.name)}" data-ta="${ta}">Approve &rarr; ~/.crow/skills</button>` +
+                `<button class="btb-btn bb-prop-reject" data-name="${escapeHtml(p.name)}">Reject</button>` +
+                `<span class="bb-prop-status btb-send-status"></span>` +
+                `</div></div>`;
+            }).join("")
+          : `<p class="btb-muted">No proposed skills awaiting review.</p>`;
+        const propScript = `<script>(function(){
+          var API='/dashboard/bot-board-api';
+          var bot=${JSON.stringify(botId)};
+          function post(url,body,el,onok){
+            el.textContent='Working...';
+            fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),credentials:'same-origin'})
+              .then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});})
+              .then(function(x){ if(x.ok&&x.j&&x.j.ok){ onok(); } else { el.textContent=(x.j&&(x.j.error||x.j.reason))||'failed'; } })
+              .catch(function(e){ el.textContent='Error: '+e.message; });
+          }
+          document.querySelectorAll('.bb-prop-approve').forEach(function(btn){
+            btn.onclick=function(){
+              var name=this.getAttribute('data-name');
+              var ta=document.getElementById(this.getAttribute('data-ta'));
+              var st=this.parentNode.querySelector('.bb-prop-status');
+              if(!confirm('Approve and promote "'+name+'" into ~/.crow/skills and attach it to this bot?')) return;
+              post(API+'/bot/'+encodeURIComponent(bot)+'/proposed-skill/approve',{name:name,content:ta.value},st,function(){ st.textContent='Approved.'; location.reload(); });
+            };
+          });
+          document.querySelectorAll('.bb-prop-reject').forEach(function(btn){
+            btn.onclick=function(){
+              var name=this.getAttribute('data-name');
+              var st=this.parentNode.querySelector('.bb-prop-status');
+              if(!confirm('Discard the proposed skill "'+name+'"? This deletes the staged file.')) return;
+              post(API+'/bot/'+encodeURIComponent(bot)+'/proposed-skill/reject',{name:name},st,function(){ st.textContent='Rejected.'; location.reload(); });
+            };
+          });
+        })();</script>`;
         body =
           `<form method="POST" class="btb-form">${hidden("skills")}` +
+          featuredCard +
           groupsHtml +
           `<hr class="btb-divider">` +
           `<div class="btb-group"><label>System prompt</label>` +
           `<textarea name="system_prompt" rows="10" class="btb-textarea btb-textarea-wide">${escapeHtml(def.system_prompt || "")}</textarea></div>` +
-          actionBar(`<button type="submit" class="btb-btn">Save Skills &amp; Prompt</button>`) + `</form>`;
+          actionBar(`<button type="submit" class="btb-btn">Save Skills &amp; Prompt</button>`) + `</form>` +
+          `<hr class="btb-divider">` +
+          `<div class="btb-group"><label>Proposed skills (pending review)</label>` +
+          `<p class="btb-hint">Drafted by this bot into <code>&lt;session_dir&gt;/proposed-skills/</code>. Review and edit (sanitize any &#9888; flagged phrasing), then Approve to copy into <code>~/.crow/skills</code> and attach, or Reject to discard. Inert until approved.</p>` +
+          proposalsHtml +
+          `</div>` + propScript;
       } else if (tabId === "permissions") {
         const pp = def.permission_policy || {};
         const bashSel = (v) => (pp.bash || "deny") === v ? " selected" : "";
@@ -1082,6 +1157,8 @@ export default {
           `<textarea name="pp_confirm" rows="3" class="btb-textarea">${escapeHtml((pp.confirm || []).join("\n"))}</textarea></div>` +
           `<div class="btb-group"><label class="btb-checkbox"><input type="checkbox" name="pp_multi_agent"${pp.multi_agent ? " checked" : ""}> Multi-agent (allow the <code>subagent</code> tool)</label></div>` +
           `<p class="btb-hint">Multi-agent is gated by pi-lab/permission-gating.ts (Phase 3.1): <code>subagent</code> is allowed only when this is on AND the bot's resolved model is MULTI_AGENT_CAPABLE; recursion is depth-capped. Off by default.</p>` +
+          `<div class="btb-group"><label class="btb-checkbox"><input type="checkbox" name="pp_self_authoring"${pp.self_authoring ? " checked" : ""}> Self-authoring skills (let this bot <strong>propose</strong> new skills)</label></div>` +
+          `<p class="btb-hint">When on, the bot may DRAFT a skill file into its confined staging dir (<code>&lt;session_dir&gt;/proposed-skills/</code>). Proposals are <strong>inert</strong> — they never load and never reach <code>~/.crow/skills</code> until you approve them on the <strong>Skills &amp; Prompt</strong> tab. Skills are pure prompt text; approving one can never grant a tool or change this policy. Off by default.</p>` +
           `<p class="btb-hint">Enforced by pi-lab/permission-gating.ts via PI_BOT_PERMISSION_POLICY (Phase 2.2). Default-deny for safety.</p>` +
           actionBar(`<button type="submit" class="btb-btn">Save Permissions</button>`) + `</form>`;
       } else if (tabId === "triggers") {

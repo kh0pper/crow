@@ -44,9 +44,15 @@
  * Zero new npm deps. No bridge/pi edits. Never touches the 3 prod MPA bots.
  */
 import { Router } from "express";
-import { existsSync, readFileSync, writeFileSync, realpathSync, statSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, realpathSync, statSync, readdirSync, unlinkSync, mkdirSync, lstatSync } from "node:fs";
+import { join } from "node:path";
 import { createDbClient } from "../../db.js";
 import { listProvidersAll } from "../../orchestrator/providers-db.js";
+import { proposalsDir, normalizeSkillName, listProposals } from "../../../scripts/pi-bots/skill_proposals.mjs";
+
+// Slice C: operator-approved promotion target (the PRIMARY skills dir both the
+// pi bridge and the glasses voice path search via skill_resolver).
+const CROW_USER_SKILLS = "/home/kh0pp/.crow/skills";
 
 const HOME = "/home/kh0pp";
 const TASKS_DB = process.env.CROW_TASKS_DB_PATH || HOME + "/.crow-mpa/data/tasks.db";
@@ -934,6 +940,130 @@ export default function botBoardApiRouter(dashboardAuth) {
         sql: "UPDATE tracker_items SET processing_lease=NULL, processing_lease_status=NULL, updated_at=datetime('now') WHERE id=?",
         args: [itemId],
       });
+      return res.json({ ok: true });
+    } catch (e) {
+      return jerr(res, 500, { error: String(e.message || e) });
+    } finally {
+      if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  // ── Slice C: opt-in self-authoring skill proposals ──────────────────
+  // A self_authoring bot drafts proposals into <def.session_dir>/proposed-skills
+  // (the bridge confines it there). These endpoints let the operator review and
+  // either APPROVE (copy the reviewed text into ~/.crow/skills + attach to
+  // def.skills) or REJECT (discard). normalizeSkillName is the ONLY name source
+  // for any path — it strips .md and rejects traversal/slashes, so join() cannot
+  // escape. We additionally refuse symlinks and never overwrite an existing skill.
+
+  async function loadBotDef(cdb, botId) {
+    const row = (await cdb.execute({
+      sql: "SELECT definition, updated_at FROM pi_bot_defs WHERE bot_id=?",
+      args: [botId],
+    })).rows[0];
+    if (!row) return null;
+    let def; try { def = JSON.parse(row.definition || "{}"); } catch { def = {}; }
+    return { def, updatedAt: row.updated_at == null ? null : String(row.updated_at) };
+  }
+
+  // ---- list a bot's staged proposals (name, text, guardrail flags) ----
+  router.get(P + "/bot/:botId/proposed-skills", async (req, res) => {
+    const botId = String(req.params.botId || "");
+    let cdb;
+    try {
+      cdb = createDbClient();
+      const b = await loadBotDef(cdb, botId);
+      if (!b) return jerr(res, 404, { error: "unknown bot" });
+      const proposals = listProposals(b.def.session_dir)
+        .map((p) => ({ name: p.name, text: p.text, flags: p.flags, mtime: p.mtime }));
+      return res.json({ proposals });
+    } catch (e) {
+      return jerr(res, 500, { error: String(e.message || e) });
+    } finally {
+      if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  // ---- approve: promote a proposal to ~/.crow/skills + attach to def.skills ----
+  router.post(P + "/bot/:botId/proposed-skill/approve", async (req, res) => {
+    const botId = String(req.params.botId || "");
+    const body = req.body || {};
+    const name = normalizeSkillName(body.name);
+    if (!name) return jerr(res, 400, { error: "invalid skill name" }); // BEFORE any path use
+    const content = typeof body.content === "string" ? body.content : "";
+    if (!content.trim()) return jerr(res, 400, { error: "content (non-empty reviewed text) required" });
+    let cdb;
+    try {
+      cdb = createDbClient();
+      const b = await loadBotDef(cdb, botId);
+      if (!b) return jerr(res, 404, { error: "unknown bot" });
+      const sessionDir = b.def.session_dir;
+      if (!sessionDir) return jerr(res, 400, { error: "bot has no session_dir" });
+
+      // staged source must exist + be a regular file (no symlink-follow)
+      const stagedPath = join(proposalsDir(sessionDir), name + ".md");
+      if (!existsSync(stagedPath)) return jerr(res, 404, { error: "no staged proposal named " + name });
+      if (lstatSync(stagedPath).isSymbolicLink()) return jerr(res, 400, { error: "staged proposal is a symlink — refusing" });
+
+      // target in ~/.crow/skills — never overwrite, never follow a symlink
+      mkdirSync(CROW_USER_SKILLS, { recursive: true });
+      const target = join(CROW_USER_SKILLS, name + ".md");
+      if (existsSync(target)) {
+        return jerr(res, 409, { error: "a skill named '" + name + "' already exists in ~/.crow/skills; rename or remove it first (refusing to overwrite)" });
+      }
+      // containment: the resolved skills root must be a prefix of the target
+      const realRoot = realpathSync(CROW_USER_SKILLS);
+      if (!join(realRoot, name + ".md").startsWith(realRoot + "/")) {
+        return jerr(res, 400, { error: "target escapes the skills dir" });
+      }
+
+      // write the OPERATOR-REVIEWED content (Q4 edits apply), then attach.
+      writeFileSync(target, content, "utf8");
+
+      const def = b.def;
+      def.skills = Array.isArray(def.skills) ? def.skills : [];
+      if (!def.skills.includes(name)) def.skills.push(name);
+      def.tools = def.tools || {};
+      def.tools.skills = Array.isArray(def.tools.skills) ? def.tools.skills : [];
+      if (!def.tools.skills.includes(name)) def.tools.skills.push(name);
+
+      // Optimistic-concurrency guard (the SSR save path has no lock): only write
+      // if updated_at is unchanged since we read it. 0 rows ⇒ a concurrent save
+      // happened ⇒ roll back the file write + 409.
+      const guarded = b.updatedAt == null
+        ? { sql: "UPDATE pi_bot_defs SET definition=?, updated_at=datetime('now') WHERE bot_id=? AND updated_at IS NULL", args: [JSON.stringify(def), botId] }
+        : { sql: "UPDATE pi_bot_defs SET definition=?, updated_at=datetime('now') WHERE bot_id=? AND updated_at=?", args: [JSON.stringify(def), botId, b.updatedAt] };
+      const upd = await cdb.execute(guarded);
+      if (Number(upd.rowsAffected) !== 1) {
+        try { unlinkSync(target); } catch {}
+        return jerr(res, 409, { error: "bot changed since you loaded it; reload and re-approve" });
+      }
+      // success — remove the staged file
+      try { unlinkSync(stagedPath); } catch {}
+      return res.json({ ok: true, promoted: name });
+    } catch (e) {
+      return jerr(res, 500, { error: String(e.message || e) });
+    } finally {
+      if (cdb) { try { cdb.close(); } catch {} }
+    }
+  });
+
+  // ---- reject: discard a staged proposal (operator confirms first) ----
+  router.post(P + "/bot/:botId/proposed-skill/reject", async (req, res) => {
+    const botId = String(req.params.botId || "");
+    const name = normalizeSkillName((req.body || {}).name);
+    if (!name) return jerr(res, 400, { error: "invalid skill name" });
+    let cdb;
+    try {
+      cdb = createDbClient();
+      const b = await loadBotDef(cdb, botId);
+      if (!b) return jerr(res, 404, { error: "unknown bot" });
+      if (!b.def.session_dir) return jerr(res, 400, { error: "bot has no session_dir" });
+      const stagedPath = join(proposalsDir(b.def.session_dir), name + ".md");
+      if (existsSync(stagedPath)) {
+        if (lstatSync(stagedPath).isSymbolicLink()) return jerr(res, 400, { error: "staged proposal is a symlink — refusing" });
+        unlinkSync(stagedPath);
+      }
       return res.json({ ok: true });
     } catch (e) {
       return jerr(res, 500, { error: String(e.message || e) });

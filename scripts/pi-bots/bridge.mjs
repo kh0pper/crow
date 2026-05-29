@@ -28,8 +28,9 @@ import { writeBotMcp } from "./mcp_writer.mjs";
 import { validateExtensions, isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
 import { resolveModel, escalateRequested, stripEscalateToken } from "./model_resolver.mjs";
 import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType } from "./tracker.mjs";
-import { resolveSkills, skillDirs } from "./skill_resolver.mjs";
+import { resolveSkills, resolveSkill, skillDirs } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
+import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
@@ -89,6 +90,14 @@ class PiRpc {
     const piPolicy = Object.assign(
       {}, def.permission_policy || { bash: "deny", write_paths: [] },
       { multi_agent: maOptIn, model_capable: maCapable });
+    // Slice C: a self_authoring bot must be able to write into its staging dir
+    // even when its cwd/sessionDir is a project workspace. Append the absolute
+    // staging dir to the write_paths COPY (create the array if absent — pi-lab's
+    // underAnyRoot fail-closes on a non-array). Never mutates the stored def.
+    if (opts.selfAuthoringDir) {
+      piPolicy.write_paths = (Array.isArray(piPolicy.write_paths) ? piPolicy.write_paths.slice() : [])
+        .concat(opts.selfAuthoringDir);
+    }
     const env = Object.assign({}, process.env,
       { PATH: HOME + "/.nvm/versions/node/v20.20.2/bin:" + (process.env.PATH || ""),
         PI_PROVIDER: resolved.provider,
@@ -368,6 +377,39 @@ export async function handleInbound(opts) {
     log("skill file not found for '" + name + "' in " + skillDirs(crowHome).join(", "));
   }
 
+  // Slice C — opt-in self-authoring. When permission_policy.self_authoring is
+  // true, the bot MAY draft a new skill into a CONFINED staging dir. The dir is
+  // keyed on def.session_dir (NOT the resolved sessionDir, which for a
+  // project-native bot is <workspace>/bots/<id>) so it is the exact location the
+  // Bot Builder review UI scans — no write-here/scan-there split. We mkdir it,
+  // make it writable for the write tool (PiRpc augments write_paths below), and
+  // inject the directive + full skill-writing guidance into the system prompt.
+  // A staged file stays INERT (skill_resolver loads only by name from the skill
+  // dirs, never from the staging dir; not in def.skills) until an operator
+  // approves it. OFF => none of this happens; the bot is neither told nor tooled
+  // to propose.
+  let selfAuthoringDir = null;
+  if (def.permission_policy && def.permission_policy.self_authoring === true && def.session_dir) {
+    const stagingDir = proposalsDir(def.session_dir);
+    // Safety: a staging dir that coincided with a real skill dir would make a
+    // raw proposal loadable. Under defaults they never collide; refuse if they would.
+    const dirs = skillDirs(crowHome);
+    const collides = dirs.some((d) => stagingDir === d || stagingDir.startsWith(d + "/") || d.startsWith(stagingDir + "/"));
+    if (collides) {
+      log("self_authoring: refusing — staging dir " + stagingDir + " collides with a skill dir; skipped");
+    } else {
+      mkdirSync(stagingDir, { recursive: true });
+      selfAuthoringDir = stagingDir;
+      // Full skill-writing guidance once (dedupe if the operator also attached it).
+      if (!(def.skills || []).includes("skill-writing")) {
+        const sw = resolveSkill("skill-writing", { crowHome });
+        if (sw) appendFileSync(sysFile, "\n\n" + sw.text);
+        else log("self_authoring: skill-writing.md not found in " + dirs.join(", "));
+      }
+      appendFileSync(sysFile, "\n\n" + selfAuthoringPromptBlock(stagingDir));
+    }
+  }
+
   const cardId = wantCard != null ? wantCard : (session ? session.card_id : null);
   // planFor still pulls from def.session_dir for legacy compatibility (where
   // existing plan files live). Project-native bots that get a project_space
@@ -450,7 +492,7 @@ export async function handleInbound(opts) {
     model: resolved.key, escalated: resolved.escalated ? 1 : 0,
   }));
 
-  const pi = new PiRpc({ def, sessionDir, resolved,
+  const pi = new PiRpc({ def, sessionDir, resolved, selfAuthoringDir,
     piSessionId: effectiveResume ? session.pi_session_id : null, appendSystemPromptFile: sysFile });
   let result;
   try {
