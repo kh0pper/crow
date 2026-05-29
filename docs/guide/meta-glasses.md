@@ -9,6 +9,13 @@ and drive them with your own BYOAI. Voice turns captured on the glasses flow
 through the Crow Android app → your configured STT → AI → TTS profiles →
 back to the glasses' speakers.
 
+You can take this further by **binding the glasses to a [Bot Builder](/guide/bot-builder)
+agent**. When a device is bound to an agent, that agent drives the voice turn:
+its persona, its skills, its scoped tools, and its permission policy, spoken
+through the device's voices. An unbound device falls back to a plain AI profile,
+described below. Binding is the richer path and is set from the Bot Builder's
+Gateways tab.
+
 No firmware jailbreak. No reverse engineering. The integration uses Meta's
 official [**Wearables Device Access Toolkit**](https://wearables.developer.meta.com/docs)
 (DAT), which gives a companion Android app camera + audio access to paired
@@ -68,8 +75,11 @@ For voice turns to feel responsive, prefer:
 - **faster-whisper** on your grackle / local GPU — fully local
 
 **AI Profiles (BYOAI)** — You already have this if you've used Crow's
-Messages feature. The glasses will use your default AI profile unless you
-override per-device.
+Messages feature. An unbound device uses your default AI profile unless you
+override per-device. If you bind the device to an agent (see
+[Bind the glasses to an agent](#bind-the-glasses-to-an-agent) below), the
+agent supersedes this profile and supplies the model, persona, scoped tools,
+and permissions for the voice turn.
 
 **Text-to-Speech** — Open `Settings → Text-to-Speech` and pick a provider.
 
@@ -132,6 +142,27 @@ AI + TTS latency. Groq Whisper + a fast chat model + OpenAI TTS lands
 near 1.5 s.
 
 ## Using the glasses
+
+### Bind the glasses to an agent
+
+Open the [Bot Builder](/guide/bot-builder), pick or create an agent, and on its
+**Gateways** tab choose the **Meta Glasses** gateway and select your paired
+device. Pick the agent's fast voice model and its speech, text-to-speech, and
+vision profiles, then save. The device is now bound to that agent.
+
+From then on, a voice turn on those glasses is driven by the agent:
+
+- It speaks in the agent's **persona** and follows the agent's **skills**.
+- It can call only the **tools the agent selected**. A tool the agent did not
+  select is absent, and a selected tool that has no voice equivalent is flagged
+  in the editor when you save.
+- It enforces the agent's **permission policy** before any tool runs. A publish
+  is downgraded to a draft, a true send is blocked, and a confirm-required or
+  denied action is spoken back to you rather than carried out silently.
+
+Binding is one device to one agent. Choosing a new agent for a device releases
+the previous binding. To go back to the plain profile-driven behavior, clear the
+device's binding.
 
 ### Ask a question
 
@@ -266,6 +297,11 @@ memory scope.
 
 On the Meta Glasses panel, click **Edit** next to a paired device and
 pick a household profile + per-device STT / AI / TTS overrides.
+
+For a full per-person assistant, bind each person's glasses to their own
+[Bot Builder](/guide/bot-builder) agent. Each member then gets a distinct
+persona, skill set, scoped tools, and permission policy on top of their own
+voice, all from one shared Crow.
 
 ## Troubleshooting
 

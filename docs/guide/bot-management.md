@@ -1,5 +1,9 @@
 # Bot Management
 
+::: info Legacy engine
+This page describes **CrowClaw**, Crow's earlier bot engine built on [OpenClaw](/platforms/openclaw). It still ships and still works. For new agents, the first-class path is the native **[Bot Builder](/guide/bot-builder)**, which adds Gmail, Discord, and glasses gateways, scoped tools, enforced permissions, and opt-in self-authoring.
+:::
+
 Crow manages AI bots natively through the CrowClaw extension. Create, deploy, configure, and monitor bots directly from the Crow's Nest dashboard — no manual config files, no separate admin tools.
 
 ## What CrowClaw Does
