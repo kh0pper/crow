@@ -20,6 +20,14 @@ const args = process.argv.slice(2);
 const DRY_RUN = args.includes("--dry-run");
 const STDOUT = args.includes("--stdout");
 const COMBINED = args.includes("--combined");
+// --http: instead of spawning per-server stdio MCP processes (each of which
+// opens the production crow.db — multiple Claude sessions then pile up WAL
+// openers and stale ones wedge the DB with "disk I/O error"), point the client
+// at the already-running gateway's /router/mcp over HTTP. Zero per-session DB
+// openers; the gateway is the sole owner. Needs CROW_LOCAL_MCP_TOKEN in env/.env
+// (a local-MCP bearer token, see docs) and optionally CROW_MCP_URL to target a
+// non-default gateway (e.g. grackle's :3002).
+const HTTP = args.includes("--http");
 
 function log(msg) {
   if (!STDOUT) console.log(`  ${msg}`);
@@ -43,8 +51,23 @@ function generate() {
     return args.map((a) => resolveEnvValue(a, env));
   }
 
-  // Core servers — combined or individual
-  if (COMBINED) {
+  // Core servers — HTTP (single gateway connection), combined, or individual
+  if (HTTP) {
+    // One HTTP server to the running gateway's router. No stdio, no per-session
+    // DB openers. Token + URL come from env (.env), resolved at generation time;
+    // the output .mcp.json is gitignored (per-machine), so the token isn't shared.
+    const token = env.CROW_LOCAL_MCP_TOKEN || "";
+    const url = env.CROW_MCP_URL || "http://localhost:3001/router/mcp";
+    config.mcpServers["crow-core"] = {
+      type: "http",
+      url,
+      headers: { Authorization: `Bearer ${token}` },
+    };
+    included.push("crow-core (http)");
+    if (!token) {
+      skipped.push({ name: "crow-core token", missing: ["CROW_LOCAL_MCP_TOKEN"] });
+    }
+  } else if (COMBINED) {
     // Single crow-core server replaces all individual core servers
     const resolvedEnv = COMBINED_SERVER.mcpEnv ? resolveEnvObj(COMBINED_SERVER.mcpEnv) : {};
     config.mcpServers[COMBINED_SERVER.name] = {
@@ -67,6 +90,9 @@ function generate() {
 
   // Conditional core servers + external servers — include only if all envKeys are present
   for (const server of [...CONDITIONAL_SERVERS, ...EXTERNAL_SERVERS]) {
+    // In --http mode the crow-owned servers (e.g. crow-storage) are reached via
+    // the gateway router, not spawned as DB-opening stdio processes — skip them.
+    if (HTTP && server.name.startsWith("crow-")) continue;
     const missingKeys = server.envKeys.filter((key) => !env[key]);
 
     if (missingKeys.length > 0) {

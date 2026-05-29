@@ -166,7 +166,11 @@ export async function getNestData(db, lang, opts = {}) {
   let instances = [];
   try {
     const { rows } = await db.execute(
-      "SELECT * FROM crow_instances WHERE status != 'revoked' ORDER BY is_home DESC, name ASC"
+      // Exclude the local-MCP access pseudo-instance (crow_id='__local_mcp__'):
+      // it's a bearer-token holder so local Claude sessions can reach the
+      // gateway's HTTP MCP endpoint instead of spawning their own DB-opening
+      // stdio servers — not a real peer, shouldn't render as a tile.
+      "SELECT * FROM crow_instances WHERE status != 'revoked' AND (crow_id IS NULL OR crow_id != '__local_mcp__') ORDER BY is_home DESC, name ASC"
     );
     instances = rows;
   } catch {}
