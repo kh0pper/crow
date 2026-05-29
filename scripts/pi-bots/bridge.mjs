@@ -28,6 +28,8 @@ import { writeBotMcp } from "./mcp_writer.mjs";
 import { validateExtensions, isMultiAgentCapable } from "./pi_extensions_allowlist.mjs";
 import { resolveModel, escalateRequested, stripEscalateToken } from "./model_resolver.mjs";
 import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType } from "./tracker.mjs";
+import { resolveSkills, skillDirs } from "./skill_resolver.mjs";
+import { resolveCrowHome } from "./ext_registry.mjs";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
@@ -35,11 +37,8 @@ const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
 // @earendil-works/pi-coding-agent (still 'pi' binary; v0.74.2 verified).
 const PI_CLI = HOME + "/.nvm/versions/node/v20.20.2/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js";
 const CROW_DB = process.env.CROW_DB_PATH || HOME + "/.crow-mpa/data/crow.db";
-// Skill-file roots (same convention as bot-builder.js): operator skills in
-// ~/.crow/skills, bundled repo skills in ~/crow/skills. def.skills[] names
-// are resolved against these in order.
-const SKILLS_DIR = HOME + "/.crow/skills";
-const REPO_SKILLS_DIR = HOME + "/crow/skills";
+// Skill-file roots are resolved per-instance by skill_resolver (A3):
+// <crowHome>/skills, then ~/.crow/skills, then the repo ~/crow/skills.
 const TASKS_DB = process.env.CROW_TASKS_DB_PATH || HOME + "/.crow-mpa/data/tasks.db";
 const TURN_TIMEOUT_MS = Number(process.env.PIBOT_TURN_TIMEOUT_MS || 600000);
 const PROMPT_ACK_TIMEOUT_MS = Number(process.env.PIBOT_PROMPT_ACK_TIMEOUT_MS || 60000);
@@ -279,6 +278,10 @@ export async function handleInbound(opts) {
   const cleanMsg = stripEscalateToken(user_message);
   const bot = loadBot(bot_id);
   const def = bot.def;
+  // Active Crow instance home (CROW_HOME env -> ~/.crow-mpa on MPA, else
+  // ~/.crow). Governs per-instance skills + mcp-addons resolution; the DB
+  // still routes on CROW_DB_PATH (above), independent of this.
+  const crowHome = resolveCrowHome();
   // M3b atomic cutover: column is authoritative. JSON copy is ignored even
   // if present (legacy fixtures may still carry it; new bots don't write it).
   const projectId = bot.project_id == null ? null : Number(bot.project_id);
@@ -302,9 +305,10 @@ export async function handleInbound(opts) {
   // when the bot has a project_space workspace) so the .mcp.json lives next
   // to where pi actually runs.
   try {
-    const w = writeBotMcp(def, { sessionDir });
+    const w = writeBotMcp(def, { sessionDir, crowHome });
     if (w.warnings.length) log("mcp.json warnings: " + w.warnings.join("; "));
     if (w.journalGuarded.length) log("mcp.json journal-guarded: " + w.journalGuarded.join(","));
+    if (w.minted && w.minted.length) log("mcp.json minted from extensions: " + w.minted.join(","));
   } catch (e) {
     log("per-bot mcp.json write skipped (non-fatal): " + (e && e.message || e));
   }
@@ -355,18 +359,13 @@ export async function handleInbound(opts) {
   // Append the content of each configured skill file to the system prompt.
   // def.skills[] is saved by the Bot Builder but was never consumed here —
   // bots with skills (e.g. pir-portal-runner: govqa-portal, oag-portal) ran
-  // without them. Resolve each name against ~/.crow/skills then ~/crow/skills.
-  for (const skillName of (def.skills || [])) {
-    let injected = false;
-    for (const dir of [SKILLS_DIR, REPO_SKILLS_DIR]) {
-      const p = join(dir, skillName + (skillName.endsWith(".md") ? "" : ".md"));
-      if (existsSync(p)) {
-        appendFileSync(sysFile, "\n\n" + readFileSync(p, "utf8"));
-        injected = true;
-        break;
-      }
-    }
-    if (!injected) log("skill file not found for '" + skillName + "' in " + SKILLS_DIR + " or " + REPO_SKILLS_DIR);
+  // without them. A3: resolved per-instance via skill_resolver — first match
+  // across <crowHome>/skills, ~/.crow/skills, ~/crow/skills wins.
+  const { sections: skillSections, missing: missingSkills } =
+    resolveSkills(def.skills || [], { crowHome });
+  for (const s of skillSections) appendFileSync(sysFile, "\n\n" + s.text);
+  for (const name of missingSkills) {
+    log("skill file not found for '" + name + "' in " + skillDirs(crowHome).join(", "));
   }
 
   const cardId = wantCard != null ? wantCard : (session ? session.card_id : null);

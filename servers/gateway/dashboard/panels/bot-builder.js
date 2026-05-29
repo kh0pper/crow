@@ -38,12 +38,21 @@ import {
 import {
   resolveModel,
 } from "../../../../scripts/pi-bots/model_resolver.mjs";
+import {
+  resolveCrowHome,
+  listInstalledExtensions,
+  extensionTools,
+  extensionSkills,
+} from "../../../../scripts/pi-bots/ext_registry.mjs";
+import { skillDirs } from "../../../../scripts/pi-bots/skill_resolver.mjs";
+import { getTtsProfiles } from "../../ai/tts/index.js";
+import { getSttProfiles } from "../../ai/stt/index.js";
 import { listProvidersAll } from "../../../orchestrator/providers-db.js";
 
 const HOME = "/home/kh0pp";
 const TASKS_DB = process.env.CROW_TASKS_DB_PATH || HOME + "/.crow-mpa/data/tasks.db";
-const SKILLS_DIR = HOME + "/.crow/skills";
-const REPO_SKILLS_DIR = HOME + "/crow/skills";
+// Skill dirs are resolved per-instance by skill_resolver.skillDirs() (A6):
+// <crowHome>/skills, ~/.crow/skills, ~/crow/skills.
 const PI_BUILTIN = ["read", "edit", "write", "bash", "list", "glob", "grep"];
 // PI_EXT_ALLOWLIST is imported from the single-source module (Phase 2.4):
 // scripts/pi-bots/pi_extensions_allowlist.mjs — the panel only OFFERS these;
@@ -190,6 +199,38 @@ async function probeAll() {
   return out;
 }
 
+// A6: live tool probe for installed EXTENSIONS (addon servers absent from
+// canonical — the canonical ones already render under probeAll above). Cached
+// 5-min like probeAll since each entry spawns its MCP server.
+let _extCache = null;
+let _extAt = 0;
+async function probeExtensions(crowHome) {
+  if (_extCache && Date.now() - _extAt < 300000) return _extCache;
+  const exts = listInstalledExtensions(crowHome).filter((e) => e.needsMint);
+  const out = [];
+  for (const ext of exts) {
+    out.push({ ext, probe: await extensionTools(ext, { crowHome }) });
+  }
+  _extCache = out;
+  _extAt = Date.now();
+  return out;
+}
+
+// A6: vision profiles have no dedicated getter (unlike tts/stt) — read the
+// dashboard_settings row directly, same storage shape, apiKey stripped.
+async function loadVisionProfiles(db) {
+  try {
+    const r = await db.execute({
+      sql: "SELECT value FROM dashboard_settings WHERE key = 'vision_profiles'",
+      args: [],
+    });
+    if (!r.rows[0]?.value) return [];
+    return JSON.parse(r.rows[0].value).map(({ apiKey, ...rest }) => rest);
+  } catch {
+    return [];
+  }
+}
+
 // R14 (Phase 3.2): models.json read goes through the 3.0 resolver's
 async function loadModelOptions(db) {
   try {
@@ -210,9 +251,11 @@ async function loadModelOptions(db) {
   }
 }
 
-function loadSkills() {
+// A6: instance-aware — scans <crowHome>/skills, ~/.crow/skills, ~/crow/skills
+// (the same order skill_resolver resolves), not the old hardcoded pair.
+function loadSkills(crowHome) {
   const names = new Set();
-  for (const dir of [SKILLS_DIR, REPO_SKILLS_DIR]) {
+  for (const dir of skillDirs(crowHome)) {
     try {
       for (const f of readdirSync(dir)) {
         if (f.endsWith(".md")) names.add(f.replace(/\.md$/, ""));
@@ -352,12 +395,18 @@ export default {
           def.models.default = (b.model_default || def.models.default || "").trim();
           const esc = (b.model_escalation || "").trim();
           if (esc) def.models.escalation = esc; else delete def.models.escalation;
+          // A6: fast voice model for the glasses fast turn (Slice B). Stored as
+          // a provider_id/model_id key (same vocabulary as default/escalation),
+          // resolved later via resolve-profile.js. Empty -> bot uses its default.
+          const fvm = (b.fast_voice_model || "").trim();
+          if (fvm) def.fast_voice_model = fvm; else delete def.fast_voice_model;
           try {
             const { opts } = await loadModelOptions(db);
             const validKeys = new Set(opts.map((o) => o.key));
             const bad = [];
             if (def.models.default && !validKeys.has(def.models.default)) bad.push("default (" + def.models.default + ")");
             if (def.models.escalation && !validKeys.has(def.models.escalation)) bad.push("escalation (" + def.models.escalation + ")");
+            if (def.fast_voice_model && !validKeys.has(def.fast_voice_model)) bad.push("fast_voice_model (" + def.fast_voice_model + ")");
             if (bad.length) {
               extraQ = "&warn=" + encodeURIComponent(
                 "not in provider registry: " + bad.join(", ") + " — saved anyway (runtime fails closed to crow-local).");
@@ -482,8 +531,9 @@ export default {
               sessionDir = ws.workspace_dir + "/bots/" + botId;
             }
           }
-          const r = writeBotMcp(def, { sessionDir });
+          const r = writeBotMcp(def, { sessionDir, crowHome: resolveCrowHome() });
           msg = `wrote ${r.path} (servers: ${r.servers.join(", ") || "none"}` +
+            (r.minted && r.minted.length ? `; minted: ${r.minted.join(",")}` : "") +
             (r.warnings.length ? `; ⚠ ${r.warnings.join("; ")}` : "") +
             (r.journalGuarded.length ? `; journal-guarded: ${r.journalGuarded.join(",")}` : "") + ")";
         } catch (e) {
@@ -554,6 +604,21 @@ export default {
             )
             .join("");
         const mErrHtml = mErr ? `<p class="btb-warn">${escapeHtml(mErr)}</p>` : "";
+        // A6: reference Settings plumbing. Voice profiles come from Settings ->
+        // LLM (dashboard_settings); read-only here — the actual per-device bind
+        // happens in the glasses gateway tab (Slice B B4).
+        const [ttsProfiles, sttProfiles, visionProfiles] = await Promise.all([
+          getTtsProfiles(db).catch(() => []),
+          getSttProfiles(db).catch(() => []),
+          loadVisionProfiles(db),
+        ]);
+        const profileSelect = (name, profiles) =>
+          `<select name="${name}" class="btb-select" disabled>` +
+          `<option value="">&mdash; platform default &mdash;</option>` +
+          profiles
+            .map((p) => `<option value="${escapeHtml(String(p.id))}">${escapeHtml(p.name || String(p.id))}</option>`)
+            .join("") +
+          `</select>`;
         body =
           `<form method="POST" class="btb-form">${hidden("ai")}` +
           mErrHtml +
@@ -562,6 +627,17 @@ export default {
           `<div class="btb-group"><label>Escalation model (optional, cloud)</label>` +
           `<select name="model_escalation" class="btb-select"><option value="">&mdash; none &mdash;</option>${optGroups((def.models || {}).escalation)}</select></div>` +
           `<p class="btb-hint">Escalation only applies when an inbound message contains the <code>!escalate</code> token (operator-driven, per-turn). Otherwise the bot always runs on its Default model. The token is stripped before the model sees the message.</p>` +
+          `<hr class="btb-divider">` +
+          `<div class="btb-group"><label>Fast voice model (glasses)</label>` +
+          `<select name="fast_voice_model" class="btb-select"><option value="">&mdash; (use Default model) &mdash;</option>${optGroups(def.fast_voice_model)}</select></div>` +
+          `<p class="btb-hint">Stored as a <code>provider_id/model_id</code> key. Drives the fast glasses voice turn when this bot is bound to a device (Slice B); resolved via <code>resolve-profile.js</code>.</p>` +
+          `<div class="btb-group"><label>Voice profiles (reference, read-only)</label>` +
+          `<p class="btb-hint">STT/TTS/Vision plumbing from Settings &rarr; LLM. Bound per device in the glasses gateway (Slice B) — shown here so a bot's voice stack is visible while building.</p>` +
+          `<div class="btb-checkbox-group">` +
+          `<label>STT&nbsp;${profileSelect("stt_profile_ref", sttProfiles)}</label>` +
+          `<label>TTS&nbsp;${profileSelect("tts_profile_ref", ttsProfiles)}</label>` +
+          `<label>Vision&nbsp;${profileSelect("vision_profile_ref", visionProfiles)}</label>` +
+          `</div></div>` +
           actionBar(`<button type="submit" class="btb-btn">Save AI</button>`) + `</form>`;
       } else if (tabId === "tools") {
         const probe = await probeAll();
@@ -590,6 +666,31 @@ export default {
             }).join("") + `</div>`;
           }
         }
+        // A6: installed extensions (addon servers absent from canonical) folded
+        // in as their own group with an install-state badge. Checkboxes share
+        // the `crow_mcp` field (value = serverId/tool) so the save handler and
+        // A5 minting key on the addon id identically.
+        const extProbes = await probeExtensions(resolveCrowHome());
+        let extToolsHtml = "";
+        if (extProbes.length) {
+          extToolsHtml += `<hr class="btb-divider"><div class="btb-group"><label>Extensions</label>` +
+            `<p class="btb-hint">Add-on MCP servers (mcp-addons.json) minted into this bot's <code>.mcp.json</code>. Work under pi (Slice A); voice availability is mapped in Slice B.</p>`;
+          for (const { ext, probe } of extProbes) {
+            const cap = ext.capabilities ? `, ${escapeHtml(ext.group)}` : "";
+            const badge = `<span class="btb-mcp-count">[installed: addon${cap}]</span>`;
+            if (!probe.ok) {
+              extToolsHtml += `<p class="btb-mcp-section"><b>${escapeHtml(ext.id)}</b> ${badge} <span class="btb-err">(probe failed: ${escapeHtml(String(probe.error || "").slice(0, 80))})</span></p>`;
+              continue;
+            }
+            extToolsHtml += `<p class="btb-mcp-section"><b>${escapeHtml(ext.id)}</b> <span class="btb-mcp-count">(${probe.tools.length} tools)</span> ${badge}</p>`;
+            extToolsHtml += `<div class="btb-mcp-grid">` + probe.tools.map((t) => {
+              const v = `${ext.id}/${t.name}`;
+              const warn = t.hasPattern ? ` <span title="schema has a pattern/regex — pi tolerates it (S4), operator awareness only" class="btb-mcp-regex">&#9888; regex</span>` : "";
+              return `<label class="btb-mcp-tool"><input type="checkbox" name="crow_mcp" value="${escapeHtml(v)}"${selMcp.has(v) ? " checked" : ""}> ${escapeHtml(t.label || t.name)}${warn}</label>`;
+            }).join("") + `</div>`;
+          }
+          extToolsHtml += `</div>`;
+        }
         const extBoxes = `<div class="btb-checkbox-group">` +
           PI_EXT_ALLOWLIST.map((e) =>
             `<label class="btb-checkbox"><input type="checkbox" name="ext_${e}"${selExt.has(e) ? " checked" : ""}> ${e}</label>`
@@ -608,6 +709,7 @@ export default {
           `<hr class="btb-divider">` +
           `<div class="btb-group"><label>Crow MCP tools</label>` +
           `<p class="btb-hint">Live tools/list; &#9888; regex = non-blocking soft-warn, S4</p>${mcpHtml}</div>` +
+          extToolsHtml +
           `<hr class="btb-divider">` +
           `<div class="btb-group"><label>pi extensions</label>` +
           `<p class="btb-hint">Curated allowlist only; others need install-approval</p>${extBoxes}${subWarn}</div>` +
@@ -822,17 +924,36 @@ export default {
               })();</script>`;
           })();
       } else if (tabId === "skills") {
-        const skills = loadSkills();
+        // A6: group skills by contributing extension. An installed extension
+        // with a capabilities.skills list (Slice B once bundles are installed)
+        // gets its own group; everything else falls under "General". On MPA in
+        // Slice A no installed addon declares skills, so this renders as the
+        // General group over <crowHome>/skills, ~/.crow/skills, ~/crow/skills.
+        const skCrowHome = resolveCrowHome();
+        const allSkills = loadSkills(skCrowHome);
         const sel = new Set((def.skills || []));
-        const boxes = skills.length
-          ? `<div class="btb-checkbox-group">` +
-            skills.map((s) => `<label class="btb-checkbox"><input type="checkbox" name="skills" value="${escapeHtml(s)}"${sel.has(s) ? " checked" : ""}> ${escapeHtml(s)}</label>`).join("") +
-            `</div>`
-          : `<p class="btb-muted">No skills in ~/.crow/skills.</p>`;
+        const renderBoxes = (names) =>
+          `<div class="btb-checkbox-group">` +
+          names.map((s) => `<label class="btb-checkbox"><input type="checkbox" name="skills" value="${escapeHtml(s)}"${sel.has(s) ? " checked" : ""}> ${escapeHtml(s)}</label>`).join("") +
+          `</div>`;
+        const claimed = new Set();
+        let groupsHtml = "";
+        for (const ext of listInstalledExtensions(skCrowHome)) {
+          const names = extensionSkills(ext).filter((n) => allSkills.includes(n));
+          if (!names.length) continue;
+          names.forEach((n) => claimed.add(n));
+          groupsHtml += `<div class="btb-group"><label>${escapeHtml(ext.group || ext.id)}</label>${renderBoxes(names)}</div>`;
+        }
+        const general = allSkills.filter((n) => !claimed.has(n));
+        if (general.length) {
+          groupsHtml += `<div class="btb-group"><label>General</label>` +
+            `<p class="btb-hint">${escapeHtml(skillDirs(skCrowHome).join(", "))}</p>${renderBoxes(general)}</div>`;
+        } else if (!groupsHtml) {
+          groupsHtml = `<p class="btb-muted">No skills found in ${escapeHtml(skillDirs(skCrowHome).join(", "))}.</p>`;
+        }
         body =
           `<form method="POST" class="btb-form">${hidden("skills")}` +
-          `<div class="btb-group"><label>Skills</label>` +
-          `<p class="btb-hint">~/.crow/skills</p>${boxes}</div>` +
+          groupsHtml +
           `<hr class="btb-divider">` +
           `<div class="btb-group"><label>System prompt</label>` +
           `<textarea name="system_prompt" rows="10" class="btb-textarea btb-textarea-wide">${escapeHtml(def.system_prompt || "")}</textarea></div>` +

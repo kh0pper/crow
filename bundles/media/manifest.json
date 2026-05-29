@@ -16,6 +16,31 @@
   "panel": "panel/media.js",
   "panelRoutes": "panel/routes.js",
   "skills": ["skills/media.md"],
+  "capabilities": {
+    "mcp_server_id": "media",
+    "group": "Media",
+    "skills": ["media"],
+    "runtimes": { "pi": true, "glasses": true },
+    "tools": [
+      { "name": "crow_media_add_source", "label": "Add source", "subgroup": "Feeds" },
+      { "name": "crow_media_list_sources", "label": "List sources", "subgroup": "Feeds" },
+      { "name": "crow_media_remove_source", "label": "Remove source", "subgroup": "Feeds" },
+      { "name": "crow_media_feed", "label": "Browse feed", "subgroup": "Feeds" },
+      { "name": "crow_media_get_article", "label": "Get article", "subgroup": "Feeds" },
+      { "name": "crow_media_search", "label": "Search articles", "subgroup": "Feeds" },
+      { "name": "crow_media_refresh", "label": "Refresh feeds", "subgroup": "Feeds" },
+      { "name": "crow_media_article_action", "label": "Article action", "subgroup": "Feeds" },
+      { "name": "crow_media_stats", "label": "Stats", "subgroup": "Feeds" },
+      { "name": "crow_media_listen", "label": "Listen (TTS)", "subgroup": "Audio" },
+      { "name": "crow_media_briefing", "label": "Briefing", "subgroup": "Audio" },
+      { "name": "crow_media_schedule_briefing", "label": "Schedule briefing", "subgroup": "Audio" },
+      { "name": "crow_media_playlist", "label": "Manage playlists", "subgroup": "Playlists" },
+      { "name": "crow_media_playlist_items", "label": "Playlist items", "subgroup": "Playlists" },
+      { "name": "crow_media_smart_folders", "label": "Smart folders", "subgroup": "Playlists" },
+      { "name": "crow_media_digest_preview", "label": "Digest preview", "subgroup": "Digests" },
+      { "name": "crow_media_digest_settings", "label": "Digest settings", "subgroup": "Digests" }
+    ]
+  },
   "requires": { "min_ram_mb": 256, "min_disk_mb": 200 },
   "env_vars": [
     { "name": "CROW_MEDIA_TASKS", "description": "Enable background tasks (feed fetch, cleanup)", "default": "1" },
