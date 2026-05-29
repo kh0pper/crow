@@ -91,6 +91,17 @@ crow_store_memory({
 })
 ```
 
+## Self-authoring Crow bots (opt-in)
+
+If your operator has enabled **self-authoring** (you will see a "Self-authoring skills" section in your system prompt naming a `proposed-skills/` staging directory), reflection can do more than write a fix plan: when a friction point is best solved by a NEW or revised skill, you MAY **draft a proposed skill** by writing ONE markdown file into that staging directory.
+
+- The proposal is **inert**: it does nothing, is not loaded by anyone, and never reaches `~/.crow/skills` until your operator reviews and approves it in the Bot Builder.
+- Write ONLY into the staging directory — never into `~/.crow/skills` or any other skills folder (you do not have permission to and it will be blocked).
+- After drafting, surface it in your reply: tell the operator you drafted a skill proposal and it is awaiting their approval. Do not assume it is active.
+- Follow the structure in `skill-writing.md`. Keep guardrail-affecting phrasing out of it (the approval UI flags such phrasing for the operator).
+
+If self-authoring is NOT enabled, do not write skill files; present the fix plan and let the operator decide.
+
 ## Key Principles
 
 - **Plan before act.** Never apply fixes without presenting a plan and getting approval.
