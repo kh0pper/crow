@@ -50,6 +50,7 @@ function parseCli() {
       credentials: { type: "string" },
       token: { type: "string" },
       scopes: { type: "string" },
+      port: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
     allowPositionals: false,
@@ -58,10 +59,18 @@ function parseCli() {
   if (!values.credentials) usage("--credentials is required");
   if (!values.token) usage("--token is required");
   if (!values.scopes) usage("--scopes is required (comma-separated)");
+  let port = 0;
+  if (values.port) {
+    port = parseInt(String(values.port), 10);
+    if (!Number.isFinite(port) || port < 0 || port > 65535) {
+      usage("--port must be 0-65535");
+    }
+  }
   return {
     credentialsFile: resolve(String(values.credentials)),
     tokenFile: resolve(String(values.token)),
     scopes: String(values.scopes).split(",").map(s => s.trim()).filter(Boolean),
+    port,
   };
 }
 
@@ -124,7 +133,7 @@ async function exchangeCodeForTokens({ clientId, clientSecret }, code, redirectU
 }
 
 async function main() {
-  const { credentialsFile, tokenFile, scopes } = parseCli();
+  const { credentialsFile, tokenFile, scopes, port } = parseCli();
   const creds = readCredentials(credentialsFile);
 
   // Loopback server on an OS-assigned port.
@@ -174,7 +183,7 @@ async function main() {
     resolveCode(code);
   });
 
-  await new Promise((res) => server.listen(0, "127.0.0.1", res));
+  await new Promise((res) => server.listen(port, "127.0.0.1", res));
   const address = server.address();
   if (!address || typeof address === "string") {
     throw new Error("failed to bind loopback server");
