@@ -35,10 +35,12 @@ services:
       # MCP bearer token, /wm is open. (The old 3004 default pointed at nothing.)
       - CROW_MCP_BRIDGE_PORT=${CROW_MCP_BRIDGE_PORT:-3001}
       - CROW_LOCAL_MCP_TOKEN=${CROW_LOCAL_MCP_TOKEN:-}
-      # Model-routing proxy: OLVV's LLM base_url. Routes fast (Qwen3.5-4B) ->
-      # escalation (35B) and forwards tools verbatim. Host network → localhost.
+      # Model-routing: OLVV's LLM base_url points at the gateway's in-process
+      # LLM-router (/llm), which routes fast (Qwen3.5-4B) -> escalation (35B) and
+      # forwards tools verbatim. Host network → localhost:3001 reaches the gateway.
+      # (Replaced the standalone companion-model-proxy.service on :11435.)
       # Unset to talk to a model directly (Part 0 fallback).
-      - COMPANION_PROXY_URL=${COMPANION_PROXY_URL:-http://localhost:11435/v1}
+      - COMPANION_PROXY_URL=${COMPANION_PROXY_URL:-http://localhost:3001/llm/v1}
       - SDXL_HOST=${SDXL_HOST:-localhost}
       - SDXL_PORT=${SDXL_PORT:-3005}
       - CROW_GATEWAY_URL=${CROW_GATEWAY_URL:-}

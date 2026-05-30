@@ -18,6 +18,26 @@
         }
       ]
     },
+    "crow-llm": {
+      "$description": "Gateway LLM-router endpoint (servers/gateway/routes/llm-router.js, POST /llm/v1). A virtual provider: the AI Companion and Meta Glasses point their LLM base_url here, and the route picks fast (crow-voice/4B) vs escalate (crow-chat/35B) per turn, warming the cold model first. NOT backed by a bundle (no bundleId) so the gpu-orchestrator never manages it; nothing auto-routes to it (smart-router/presets resolve by provider_id, never crow-llm), so there is no loop — the route resolves to crow-voice/crow-chat, never back to crow-llm. Advertises both model ids for client model-selector probes.",
+      "baseUrl": "http://localhost:3001/llm/v1",
+      "apiKey": "none",
+      "host": "local",
+      "models": [
+        {
+          "id": "qwen3.5-4b",
+          "contextLen": 8192,
+          "warm": true,
+          "priority": "voice"
+        },
+        {
+          "id": "qwen3.6-35b-a3b",
+          "contextLen": 262144,
+          "warm": false,
+          "priority": "interactive"
+        }
+      ]
+    },
     "crow-dispatch": {
       "$description": "Fast tool-dispatch + Maker Lab classroom endpoint. Strix Halo gfx1151 via vLLM-ROCm.",
       "baseUrl": "http://100.118.41.122:8001/v1",

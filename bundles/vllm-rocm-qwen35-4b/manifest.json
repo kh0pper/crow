@@ -15,7 +15,7 @@
   "port": 8011,
   "providers": [
     {
-      "id": "crow-dispatch",
+      "id": "crow-voice",
       "baseUrlTemplate": "http://{host_ip}:{port}/v1",
       "apiKey": "none",
       "description": "Fast tool-dispatch + Maker Lab classroom endpoint (Qwen3.5-4B BF16)",
@@ -24,7 +24,7 @@
           "id": "qwen3.5-4b",
           "contextLen": 32768,
           "warm": true,
-          "priority": "maker_lab"
+          "priority": "voice"
         }
       ]
     }

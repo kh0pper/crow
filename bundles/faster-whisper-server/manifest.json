@@ -1,0 +1,20 @@
+{
+  "id": "faster-whisper-server",
+  "type": "bundle",
+  "name": "Faster-Whisper Server (local)",
+  "category": "ai",
+  "description": "Local OpenAI-compatible speech-to-text (faster-whisper / CTranslate2, large-v3) for the Meta Glasses and AI-chat voice input. Runs on crow CPU; loopback :8004 only. The AI Companion keeps its own in-container faster-whisper and does not use this server.",
+  "host": "local",
+  "requires": {
+    "platform": "linux-x86_64"
+  },
+  "env_vars": [],
+  "port": 8004,
+  "sttProfileSeed": {
+    "name": "Faster-Whisper (local)",
+    "provider": "fasterwhisper",
+    "baseUrl": "http://localhost:8004/v1",
+    "defaultModel": "Systran/faster-whisper-large-v3",
+    "language": ""
+  }
+}
