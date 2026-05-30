@@ -48,6 +48,10 @@ bash /app/scripts/inject-webrtc.sh
 echo "Injecting voice panel..."
 bash /app/scripts/inject-voice-panel.sh
 
+# Inject per-device kiosk config applier (Part 3): ?device= -> bot preset + features
+echo "Injecting per-device kiosk config applier..."
+bash /app/scripts/inject-device-config.sh
+
 # Inject face tracking (MediaPipe Face Mesh → Live2D, optional toggle)
 echo "Injecting face tracking..."
 bash /app/scripts/inject-face-tracking.sh

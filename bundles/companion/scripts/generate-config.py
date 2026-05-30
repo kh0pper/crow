@@ -10,6 +10,8 @@ import json
 import os
 import sqlite3
 import sys
+from urllib.parse import urlparse
+
 import yaml
 
 
@@ -436,12 +438,58 @@ def resolve_ai_profile(profiles, env_vars):
                     selected["_model"] = model_override
                 return selected
 
-    # Auto mode: prefer local profiles (faster inference for voice chat)
+    # Auto mode: prefer local profiles (faster inference for voice chat).
+    # "Local" includes loopback, RFC1918 LAN, the Docker bridge, AND Tailscale
+    # CGNAT (100.64.0.0/10) — Crow's own endpoints are commonly addressed by
+    # their Tailscale IP (e.g. http://100.118.41.122:8003/v1), which the old
+    # substring check missed, causing a silent fall-through to a cloud profile.
     for p in profiles:
-        base = p.get("baseUrl", "")
-        if "localhost" in base or "172.17" in base or "127.0.0.1" in base:
+        if is_local_base(p.get("baseUrl", "")):
             return p
     return profiles[0] if profiles else None
+
+
+def is_local_base(url):
+    """True if a base_url points at a host reachable on the local machine/LAN.
+
+    Matches loopback (localhost/127.x/0.0.0.0), the Docker bridge (172.17.x),
+    RFC1918 private ranges (10.x, 192.168.x, 172.16-31.x), and Tailscale
+    CGNAT (100.64.0.0/10 == 100.64-100.127). Used to prefer local inference
+    for the companion's voice turns.
+    """
+    if not url:
+        return False
+    try:
+        host = urlparse(url).hostname or ""
+    except Exception:
+        return False
+    if host in ("localhost", "0.0.0.0"):
+        return True
+    if host.endswith(".local"):
+        return True
+    parts = host.split(".")
+    if len(parts) != 4 or not all(p.isdigit() for p in parts):
+        return False
+    try:
+        o = [int(p) for p in parts]
+    except ValueError:
+        return False
+    if not all(0 <= n <= 255 for n in o):
+        return False
+    # loopback / link-local-ish
+    if o[0] == 127:
+        return True
+    # RFC1918
+    if o[0] == 10:
+        return True
+    if o[0] == 192 and o[1] == 168:
+        return True
+    if o[0] == 172 and 16 <= o[1] <= 31:
+        return True
+    # Tailscale CGNAT 100.64.0.0/10
+    if o[0] == 100 and 64 <= o[1] <= 127:
+        return True
+    return False
 
 
 def generate_config(profiles, env_vars, tts_profiles=None):
@@ -479,15 +527,24 @@ def generate_config(profiles, env_vars, tts_profiles=None):
 
     default_profile = resolve_ai_profile(profiles, env_vars)
 
-    if default_profile:
+    if default_profile and default_profile.get("baseUrl"):
         # Rewrite Docker bridge IPs to localhost (for host network mode)
         base_url = default_profile["baseUrl"]
         if "172.17.0.1" in base_url:
             base_url = base_url.replace("172.17.0.1", "localhost")
+        # Resolve the model name defensively: a profile may carry _model (an
+        # explicit override), defaultModel, or a models[] list — guard each so
+        # a profile with a null key or empty models list can't crash config gen.
+        models_list = default_profile.get("models") or []
+        model_name = (
+            default_profile.get("_model")
+            or default_profile.get("defaultModel")
+            or (models_list[0] if models_list else None)
+        )
         llm_config = {
             "base_url": base_url,
-            "llm_api_key": default_profile["apiKey"],
-            "model": default_profile.get("_model") or default_profile.get("defaultModel", default_profile["models"][0]),
+            "llm_api_key": default_profile.get("apiKey") or "not-needed",
+            "model": model_name or "qwen3.6-35b-a3b",
             "temperature": 0.8,
         }
     else:
@@ -497,6 +554,22 @@ def generate_config(profiles, env_vars, tts_profiles=None):
             "model": "qwen2.5:latest",
             "temperature": 0.8,
         }
+
+    # Companion model-routing proxy: when COMPANION_PROXY_URL is set, OLVV talks to
+    # the proxy instead of a model directly. The proxy routes each turn to the fast
+    # model (Qwen3.5-4B) by default, escalating to the 35B on a "!escalate" prefix,
+    # and forwards messages + tools verbatim so OLVV's own tool loop / crow_wm /
+    # streaming all keep working. The `model` field is a placeholder — the proxy
+    # rewrites it per chosen upstream. (Host network → localhost reaches the proxy.)
+    proxy_url = os.environ.get("COMPANION_PROXY_URL", "")
+    if proxy_url:
+        llm_config = {
+            "base_url": proxy_url.rstrip("/"),
+            "llm_api_key": "not-needed",
+            "model": os.environ.get("COMPANION_PROXY_MODEL", "qwen3.5-4b"),
+            "temperature": 0.8,
+        }
+        print(f"Companion LLM routed through model proxy: {proxy_url}", file=sys.stderr)
 
     config = {
         "system_config": {
@@ -606,6 +679,52 @@ def get_household_profiles():
             "voice": voice or "en-US-AvaMultilingualNeural",
         })
     return profiles
+
+
+def get_companion_bots(db_path):
+    """Read pi_bot_defs for bots bound to a companion gateway (Part 3).
+
+    Each returned bot gets its own OLVV character preset (crow_bot_<slug>) so a
+    kiosk can select its bound bot's persona + avatar per device via ?device=.
+    The model pair stays global (the model proxy) — presets only carry
+    persona/avatar/voice, never an llm_config.
+    """
+    if not db_path:
+        return []
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE enabled = 1"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = conn.execute(
+                "SELECT bot_id, display_name, definition FROM pi_bot_defs"
+            ).fetchall()
+        conn.close()
+    except Exception as e:
+        print(f"Warning: could not read pi_bot_defs: {e}", file=sys.stderr)
+        return []
+    bots = []
+    for r in rows:
+        try:
+            d = json.loads(r["definition"] or "{}")
+        except Exception:
+            continue
+        gws = d.get("gateways") or []
+        if not any((g or {}).get("type") == "companion" for g in gws):
+            continue
+        feats = d.get("companion_features") or {}
+        bots.append({
+            "slug": slugify(r["bot_id"]),
+            "bot_id": r["bot_id"],
+            "name": d.get("display_name") or r["display_name"] or r["bot_id"],
+            "persona": d.get("system_prompt") or "",
+            "avatar": feats.get("avatar_model") or None,
+            "features": feats,
+        })
+    return bots
 
 
 def generate_character_configs(all_models, default_avatar, tts_profiles=None):
@@ -749,33 +868,34 @@ def main():
     # - "crow-storage" connects directly to the storage server for background generation
     #   (exposes crow_generate_background etc. as individual tools the LLM can call by name)
     mcp_bridge_host = os.environ.get("CROW_MCP_BRIDGE_HOST", "localhost")
-    mcp_bridge_port = os.environ.get("CROW_MCP_BRIDGE_PORT", "3004")
+    # The Crow gateway listens on 3001 by default (the prior 3004 default pointed
+    # at no running process, so every MCP bridge failed to connect). /router and
+    # /storage require bearer auth; /wm is open. We pass the local MCP token as an
+    # Authorization header to all three — harmless for /wm, required for the rest.
+    mcp_bridge_port = os.environ.get("CROW_MCP_BRIDGE_PORT", "3001")
+    mcp_token = os.environ.get("CROW_LOCAL_MCP_TOKEN", "")
+    if not mcp_token:
+        print(
+            "Warning: CROW_LOCAL_MCP_TOKEN is unset — crow/crow-storage MCP bridges "
+            "will get 401 from the gateway (crow-wm is open and still works).",
+            file=sys.stderr,
+        )
+
+    def _mcp_proxy_args(path):
+        args = [
+            "run", "mcp-proxy",
+            f"http://{mcp_bridge_host}:{mcp_bridge_port}{path}",
+            "--transport", "streamablehttp",
+        ]
+        if mcp_token:
+            args += ["--headers", "Authorization", f"Bearer {mcp_token}"]
+        return args
+
     mcp_config = {
         "mcp_servers": {
-            "crow": {
-                "command": "uv",
-                "args": [
-                    "run", "mcp-proxy",
-                    f"http://{mcp_bridge_host}:{mcp_bridge_port}/router/mcp",
-                    "--transport", "streamablehttp",
-                ],
-            },
-            "crow-storage": {
-                "command": "uv",
-                "args": [
-                    "run", "mcp-proxy",
-                    f"http://{mcp_bridge_host}:{mcp_bridge_port}/storage/mcp",
-                    "--transport", "streamablehttp",
-                ],
-            },
-            "crow-wm": {
-                "command": "uv",
-                "args": [
-                    "run", "mcp-proxy",
-                    f"http://{mcp_bridge_host}:{mcp_bridge_port}/wm/mcp",
-                    "--transport", "streamablehttp",
-                ],
-            },
+            "crow": {"command": "uv", "args": _mcp_proxy_args("/router/mcp")},
+            "crow-storage": {"command": "uv", "args": _mcp_proxy_args("/storage/mcp")},
+            "crow-wm": {"command": "uv", "args": _mcp_proxy_args("/wm/mcp")},
         }
     }
     mcp_path = os.path.join(app_dir, "mcp_servers.json")
@@ -811,6 +931,29 @@ def main():
 
     total_chars = len(char_configs)
     print(f"Generated {total_chars} avatar character preset(s) ({len(all_avatar_models)} total avatars, default: {default_avatar})")
+
+    # Part 3: per-companion-bot character presets. A kiosk device bound to a bot
+    # selects crow_bot_<slug> (persona + avatar) via ?device=. No llm_config here —
+    # the model pair is the global model proxy.
+    bot_presets = 0
+    for bot in get_companion_bots(db_path):
+        avatar = bot["avatar"] if bot["avatar"] in all_avatar_models else default_avatar
+        cc = {
+            "conf_name": f"crow_bot_{bot['slug']}",
+            "conf_uid": f"crow_bot_{bot['slug']}_001",
+            "character_name": bot["name"],
+            "human_name": bot["name"],
+            "live2d_model_name": avatar,
+        }
+        if bot["persona"]:
+            cc["persona_prompt"] = bot["persona"]
+        path = os.path.join(characters_dir, f"crow_bot_{bot['slug']}.yaml")
+        with open(path, "w") as f:
+            yaml.dump({"character_config": cc}, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        bot_presets += 1
+        print(f"  Bot preset: {path}")
+    if bot_presets:
+        print(f"Generated {bot_presets} companion-bot character preset(s)")
     print("Config generation complete.")
 
 
