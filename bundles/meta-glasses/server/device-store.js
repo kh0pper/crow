@@ -85,6 +85,11 @@ export async function pairDevice(db, {
   ai_profile_slug = null, tts_profile_id = null, vision_profile_id = null,
   ocr_enabled = false,
   photo_retention = "never",
+  // device_kind distinguishes a meta-glasses device from a companion kiosk so
+  // each gateway only claims its own devices. companion_features holds the
+  // per-device companion toggles (avatar/voice/social) that drive the kiosk UI.
+  device_kind = "glasses",
+  companion_features = null,
 }) {
   if (!id) throw new Error("device id required");
   const token = randomBytes(32).toString("hex");
@@ -113,6 +118,9 @@ export async function pairDevice(db, {
     ocr_enabled: !!(ocr_enabled || priorOcr),
     photo_retention: retention,
     generation,
+    device_kind: device_kind === "companion" ? "companion" : "glasses",
+    companion_features:
+      companion_features ?? (existing >= 0 ? devices[existing].companion_features ?? null : null),
   };
   if (existing >= 0) devices[existing] = record;
   else devices.push(record);
@@ -176,13 +184,20 @@ export async function updateDeviceProfiles(db, id, patch) {
   const devices = await readAll(db);
   const idx = devices.findIndex(d => d.id === id);
   if (idx === -1) return null;
-  const allow = ["household_profile", "stt_profile_id", "ai_profile_slug", "tts_profile_id", "vision_profile_id", "ocr_enabled", "photo_retention", "name", "bound_bot_id"];
+  const allow = ["household_profile", "stt_profile_id", "ai_profile_slug", "tts_profile_id", "vision_profile_id", "ocr_enabled", "photo_retention", "name", "bound_bot_id", "device_kind", "companion_features"];
   for (const k of allow) {
     if (k in patch) {
       // ocr_enabled is a boolean; coerce HTML-form strings "true"/"false"/"on".
       if (k === "ocr_enabled") {
         const v = patch[k];
         devices[idx][k] = v === true || v === "true" || v === "on" || v === 1;
+      } else if (k === "device_kind") {
+        devices[idx][k] = patch[k] === "companion" ? "companion" : "glasses";
+      } else if (k === "companion_features") {
+        // Accept an object directly or a JSON string (HTML form). null clears.
+        let v = patch[k];
+        if (typeof v === "string") { try { v = v ? JSON.parse(v) : null; } catch { v = devices[idx][k] ?? null; } }
+        devices[idx][k] = v ?? null;
       } else if (k === "photo_retention") {
         // Reject unknown retention values; leave prior value untouched.
         if (RETENTION_VALUES.has(patch[k])) devices[idx][k] = patch[k];

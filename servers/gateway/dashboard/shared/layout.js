@@ -292,6 +292,16 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
       var companionUrl = window.__crowCompanionUrl
         || ('https://' + location.hostname + ':12393/');
 
+      // Per-device kiosk (Part 3): this display's device id (set once via the
+      // URL ?kiosk_device=<id>, then remembered) is passed to the companion as
+      // ?device=<id> so it shows the bound bot's preset + feature toggles.
+      try {
+        var kd = new URLSearchParams(location.search).get('kiosk_device');
+        if (kd) localStorage.setItem('crow_kiosk_device', kd);
+        kd = kd || localStorage.getItem('crow_kiosk_device');
+        if (kd) companionUrl += (companionUrl.indexOf('?') < 0 ? '?' : '&') + 'device=' + encodeURIComponent(kd);
+      } catch (e) {}
+
       overlay.classList.add('active');
       fetch('/dashboard/settings', {
         method: 'POST',

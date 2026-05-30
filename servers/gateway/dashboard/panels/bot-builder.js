@@ -472,6 +472,48 @@ export default {
             } catch (err) {
               extraQ = "&warn=" + encodeURIComponent("device binding incomplete: " + err.message);
             }
+          } else if (gwType === "companion") {
+            // Bind this bot to a companion kiosk device. Mirrors the glasses
+            // binding (device.bound_bot_id is the source of truth) but tags the
+            // device device_kind:"companion" so the companion path claims it, and
+            // stores per-device companion_features that drive the kiosk UI.
+            // The model pair (fast 4B -> 35B) is global (the model proxy), not
+            // per device — see docs/architecture/companion.md.
+            const deviceId = (b.gw_device_id || "").trim();
+            const features = {
+              avatar_model: (b.gw_avatar_model || "").trim() || undefined,
+              avatar_animation: b.gw_avatar_animation === "on" || b.gw_avatar_animation === "true",
+              pet_mode: b.gw_pet_mode === "on" || b.gw_pet_mode === "true",
+              social_chat: b.gw_social_chat === "on" || b.gw_social_chat === "true",
+              memory_integration: b.gw_memory_integration === "on" || b.gw_memory_integration === "true",
+              hearing_style: (b.gw_hearing_style || "push_to_talk").trim(),
+              voice_idle_timeout: Number(b.gw_voice_idle_timeout || 30) || 30,
+            };
+            const prior = (def.gateways || []).find((g) => g && g.type === "companion");
+            const priorDeviceId = prior && prior.device_id ? String(prior.device_id) : "";
+            def.gateways = deviceId ? [{ type: "companion", device_id: deviceId }] : [];
+            def.companion_features = features;
+            try {
+              const { listDevices, updateDeviceProfiles } = await import("../../../../bundles/meta-glasses/server/device-store.js");
+              const devices = await listDevices(db).catch(() => []);
+              for (const d of devices) {
+                if (d.bound_bot_id === botId && d.id !== deviceId) {
+                  await updateDeviceProfiles(db, d.id, { bound_bot_id: "" });
+                }
+              }
+              if (priorDeviceId && priorDeviceId !== deviceId) {
+                await updateDeviceProfiles(db, priorDeviceId, { bound_bot_id: "" });
+              }
+              if (deviceId) {
+                await updateDeviceProfiles(db, deviceId, {
+                  bound_bot_id: botId,
+                  device_kind: "companion",
+                  companion_features: features,
+                });
+              }
+            } catch (err) {
+              extraQ = "&warn=" + encodeURIComponent("companion binding incomplete: " + err.message);
+            }
           } else {
             def.gateways = [
               {
@@ -762,6 +804,7 @@ export default {
           { value: "gmail", label: "Gmail", available: true },
           { value: "discord", label: "Discord", available: true },
           { value: "glasses", label: "Meta Glasses", available: true },
+          { value: "companion", label: "AI Companion (kiosk)", available: true },
           { value: "crow-messages", label: "Crow Messages", available: false },
           { value: "signal", label: "Signal", available: false },
           { value: "none", label: "None (no gateway)", available: true },
@@ -852,6 +895,46 @@ export default {
             `</div></div>` +
             noVoiceWarn;
           gwHint = `<p class="btb-hint">Saving binds the device (<code>bound_bot_id</code>) so the meta-glasses fast voice turn runs THIS bot's persona, skills, scoped tools, and permissions. One bot &harr; one device; re-binding unbinds the prior device. No gateway restart needed — the voice turn reads the binding live (30s cache).</p>`;
+        } else if (gwType === "companion") {
+          // Bind this bot to a companion kiosk device (tablet/room). Reuses the
+          // glasses device-store; the device is tagged device_kind:"companion".
+          // The companion_features here drive the kiosk UI (avatar/voice/social).
+          // The fast->escalate model pair is global (the model proxy), so it's NOT
+          // configured per device here — see the AI tab / docs/architecture/companion.md.
+          let devices = [];
+          try {
+            const { listDevices } = await import("../../../../bundles/meta-glasses/server/device-store.js");
+            // Any paired device can be bound as a companion kiosk; binding tags it
+            // device_kind:"companion". Show all so a fresh device can be claimed.
+            devices = await listDevices(db).catch(() => []);
+          } catch { devices = []; }
+          const devOpts = `<option value="">&mdash; select a paired device &mdash;</option>` +
+            devices.map((d) => {
+              const boundElse = d.bound_bot_id && d.bound_bot_id !== botId ? ` — bound to ${escapeHtml(d.bound_bot_id)}` : "";
+              const kind = (d.device_kind || "glasses") === "companion" ? "" : " [glasses]";
+              return `<option value="${escapeHtml(String(d.id))}"${String(d.id) === String(gw.device_id || "") ? " selected" : ""}>${escapeHtml(d.name || String(d.id))}${kind}${boundElse}</option>`;
+            }).join("");
+          const cf = def.companion_features || {};
+          const chk = (v) => (v ? " checked" : "");
+          const hs = cf.hearing_style || "push_to_talk";
+          const hsOpt = (v, l) => `<option value="${v}"${hs === v ? " selected" : ""}>${l}</option>`;
+          gwFields =
+            `<div class="btb-group"><label>Paired kiosk device</label>` +
+            `<select name="gw_device_id" class="btb-select">${devOpts}</select></div>` +
+            (devices.length ? "" : `<p class="btb-hint">No paired devices yet. Pair a kiosk/companion device first (Meta Glasses panel pairs devices; kiosks reuse that store).</p>`) +
+            `<div class="btb-group"><label>Avatar (Live2D model name, blank = bot/default)</label>` +
+            `<input type="text" name="gw_avatar_model" class="btb-input" value="${escapeHtml(cf.avatar_model || "")}"></div>` +
+            `<div class="btb-group"><label>Hearing style</label>` +
+            `<select name="gw_hearing_style" class="btb-select">${hsOpt("push_to_talk", "Push to talk")}${hsOpt("wake_word", "Wake word")}${hsOpt("always_listening", "Always listening")}</select></div>` +
+            `<div class="btb-group"><label>Voice idle timeout (seconds before pet/idle)</label>` +
+            `<input type="number" name="gw_voice_idle_timeout" class="btb-input" value="${escapeHtml(String(cf.voice_idle_timeout ?? 30))}"></div>` +
+            `<div class="btb-group"><label>Features</label><div class="btb-checkbox-group">` +
+            `<label><input type="checkbox" name="gw_avatar_animation"${chk(cf.avatar_animation)}> Avatar animation / lip-sync</label>` +
+            `<label><input type="checkbox" name="gw_pet_mode"${chk(cf.pet_mode)}> Pet / idle animation</label>` +
+            `<label><input type="checkbox" name="gw_social_chat"${chk(cf.social_chat)}> Social / chatroom &amp; DM features</label>` +
+            `<label><input type="checkbox" name="gw_memory_integration"${chk(cf.memory_integration)}> Auto memory integration</label>` +
+            `</div></div>`;
+          gwHint = `<p class="btb-hint">Saving binds the device (<code>bound_bot_id</code>, <code>device_kind:companion</code>) so this kiosk shows THIS bot's persona/avatar and the feature toggles above. The fast&rarr;escalate model pair is global to the companion container (the model proxy). Changing avatar/persona takes effect on the next kiosk session; toggles apply live. See <code>docs/guide/kiosk-mode.md</code>.</p>`;
         } else if (gwType === "none") {
           gwFields = "";
           gwHint = `<p class="btb-hint">No gateway — this bot is driven only by direct injection / cards, not inbound messages.</p>`;
