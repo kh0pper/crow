@@ -38,6 +38,14 @@ services:
       - --tool-call-parser
       - hermes
       - --enforce-eager
+      # Text-only. Qwen3.5-4B is natively vision-language, but its ViT encoder's
+      # worst-case multimodal profiling (preprocessor longest_edge=16.7M px →
+      # ~65k ViT patches → a 65k² attention matrix) triggers a 256 GiB HIP OOM on
+      # gfx1151 (no flash-attn ViT kernel on ROCm). Disabling image/video input
+      # skips that profiling so the text tower serves. Vision-bearing turns route
+      # to the multimodal 35B (crow-chat, llama.cpp Vulkan) or grackle-vision.
+      - --limit-mm-per-prompt
+      - '{"image":0,"video":0}'
     restart: unless-stopped
     ipc: host
     shm_size: 8g

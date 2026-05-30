@@ -2,6 +2,22 @@
   "$comment": "Provider registry for Crow's multi-agent orchestrator. See docs/plans/cached-nibbling-clover.md.",
   "$schemaVersion": "1.0",
   "providers": {
+    "crow-voice": {
+      "$description": "Fast voice/dispatch model for the AI Companion. Qwen3.5-4B (text-only) BF16 via vLLM-ROCm on Strix Halo gfx1151, :8011. Text-only: the model is natively vision-language but its ViT encoder OOMs (256 GiB) during vLLM-ROCm multimodal profiling on gfx1151, so image/video input is disabled (--limit-mm-per-prompt). Vision-bearing turns escalate to crow-chat (35B, multimodal) or grackle-vision. NO mutexGroup + alwaysResident so it co-resides with the warm 35B and never evicts it.",
+      "baseUrl": "http://100.118.41.122:8011/v1",
+      "apiKey": "none",
+      "host": "local",
+      "bundleId": "vllm-rocm-qwen35-4b",
+      "alwaysResident": true,
+      "models": [
+        {
+          "id": "qwen3.5-4b",
+          "contextLen": 8192,
+          "warm": true,
+          "priority": "voice"
+        }
+      ]
+    },
     "crow-dispatch": {
       "$description": "Fast tool-dispatch + Maker Lab classroom endpoint. Strix Halo gfx1151 via vLLM-ROCm.",
       "baseUrl": "http://100.118.41.122:8001/v1",
