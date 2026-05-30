@@ -20,6 +20,10 @@ if [ -f /app/scripts/patch-tutor-event.py ]; then
   python3 /app/scripts/patch-tutor-event.py || echo "  (patch failed; companion will continue without tutor-event support)"
 fi
 
+# Patch openai_tts for per-language (EN/ES) voice selection (bilingual companion)
+echo "Applying bilingual TTS voice patch..."
+python3 /app/scripts/patch-tts-language-voice.py || echo "  (patch failed; companion will continue with a single TTS voice)"
+
 # Generate conf.yaml from Crow's AI profiles
 echo "Generating config from Crow AI profiles..."
 APP_DIR=/app uv run python3 /app/scripts/generate-config.py

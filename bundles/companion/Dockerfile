@@ -22,7 +22,9 @@ RUN git clone --recursive https://github.com/Open-LLM-VTuber/Open-LLM-VTuber.git
     && git submodule update --init --recursive
 
 # Install Python dependencies + mcp-proxy for Crow MCP bridge
-RUN uv sync --no-dev && uv pip install pyyaml mcp-proxy
+# faster-whisper (CTranslate2) powers the in-container bilingual EN/ES STT — runs
+# on crow's idle CPU; pulls ctranslate2 + onnxruntime + av.
+RUN uv sync --no-dev && uv pip install pyyaml mcp-proxy faster-whisper
 
 # Copy config generator, notify bridge, bg refresh, window manager, and entrypoint
 COPY scripts/generate-config.py /app/scripts/generate-config.py
@@ -34,6 +36,7 @@ COPY scripts/crow-wm.js /app/scripts/crow-wm.js
 COPY scripts/patch-tool-calling.py /app/scripts/patch-tool-calling.py
 COPY scripts/patch-auto-group.py /app/scripts/patch-auto-group.py
 COPY scripts/patch-tutor-event.py /app/scripts/patch-tutor-event.py
+COPY scripts/patch-tts-language-voice.py /app/scripts/patch-tts-language-voice.py
 COPY scripts/crow-webrtc.js /app/scripts/crow-webrtc.js
 COPY scripts/inject-webrtc.sh /app/scripts/inject-webrtc.sh
 COPY scripts/crow-voice-panel.js /app/scripts/crow-voice-panel.js
