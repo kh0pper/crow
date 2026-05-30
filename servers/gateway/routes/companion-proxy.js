@@ -47,6 +47,39 @@ export default function setupCompanionProxy(app, server) {
     },
   });
 
+  // Per-device kiosk config (Part 3). The injected companion frontend calls this
+  // with ?device=<id> to learn which bot/avatar/persona preset to show and which
+  // companion_features to toggle. Registered BEFORE the proxy so it isn't
+  // forwarded to OLVV. Read-only; the device registry lives in dashboard_settings.
+  app.get("/companion/device-config", async (req, res) => {
+    const deviceId = String(req.query.device || "").trim();
+    if (!deviceId) return res.status(400).json({ error: "device query param required" });
+    try {
+      const { default: Database } = await import("better-sqlite3");
+      const dbPath = process.env.CROW_DB_PATH || `${process.env.HOME}/.crow/data/crow.db`;
+      const db = new Database(dbPath, { readonly: true });
+      let devices = [];
+      try {
+        const row = db.prepare("SELECT value FROM dashboard_settings WHERE key = ?").get("meta_glasses_devices");
+        devices = row ? JSON.parse(row.value || "[]") : [];
+      } catch { devices = []; }
+      const dev = devices.find((d) => String(d.id) === deviceId) || null;
+      db.close();
+      if (!dev) return res.status(404).json({ error: "device not found" });
+      const botId = dev.bound_bot_id || null;
+      const slug = botId ? String(botId).toLowerCase().replace(/ /g, "_").replace(/\./g, "_") : null;
+      res.json({
+        device_id: dev.id,
+        device_kind: dev.device_kind || "glasses",
+        bot_id: botId,
+        character_preset: slug ? `crow_bot_${slug}` : null,
+        companion_features: dev.companion_features || null,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // HTTP proxy for companion frontend
   app.use("/companion", httpProxy);
 
