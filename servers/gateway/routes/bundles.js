@@ -37,6 +37,72 @@ import {
   unregisterProvidersByBundle,
 } from "../../orchestrator/providers-db.js";
 import { invalidateProvidersCache } from "../../orchestrator/providers.js";
+import { writeSetting } from "../dashboard/settings/registry.js";
+
+/**
+ * Seed an STT/TTS profile from a bundle manifest's {stt,tts}ProfileSeed into the
+ * dashboard_settings `{stt,tts}_profiles` array, via the settings sync layer.
+ *
+ * Idempotent: skips when a profile with the same provider+baseUrl already exists.
+ * Does NOT force isDefault (only the first profile of an empty list becomes the
+ * default, matching the settings-page add handler).
+ *
+ * @param {object} db         libsql client
+ * @param {"stt"|"tts"} kind
+ * @param {object} seed       manifest.{stt,tts}ProfileSeed
+ * @param {(msg:string)=>void} log
+ */
+async function seedProfile(db, kind, seed, log) {
+  if (!seed || !seed.provider) return;
+  const key = `${kind}_profiles`;
+  const { rows } = await db.execute({
+    sql: "SELECT value FROM dashboard_settings WHERE key = ?",
+    args: [key],
+  });
+  let profiles = [];
+  try { profiles = JSON.parse(rows[0]?.value || "[]"); } catch {}
+  const baseUrl = (seed.baseUrl || "").trim();
+  if (profiles.some((p) => p.provider === seed.provider && (p.baseUrl || "").trim() === baseUrl)) {
+    log(`${kind.toUpperCase()} profile already present (${seed.provider} ${baseUrl}); skipping seed`);
+    return;
+  }
+  const profile = {
+    id: randomBytes(4).toString("hex"),
+    name: seed.name || `${seed.provider} (local)`,
+    provider: seed.provider,
+    apiKey: seed.apiKey || "",
+    baseUrl,
+    isDefault: profiles.length === 0,
+  };
+  if (kind === "tts") profile.defaultVoice = seed.defaultVoice || "";
+  else profile.defaultModel = seed.defaultModel || "";
+  if (seed.language !== undefined) profile.language = seed.language;
+  profiles.push(profile);
+  await writeSetting(db, key, JSON.stringify(profiles));
+  log(`Seeded ${kind.toUpperCase()} profile: ${profile.name} (${seed.provider} ${baseUrl})`);
+}
+
+/**
+ * Reverse seedProfile on uninstall: remove the profile(s) this bundle's manifest
+ * seeded (matched by provider+baseUrl). Keeps a default if any remain.
+ */
+async function unseedProfile(db, kind, seed, log) {
+  if (!seed || !seed.provider) return;
+  const key = `${kind}_profiles`;
+  const { rows } = await db.execute({
+    sql: "SELECT value FROM dashboard_settings WHERE key = ?",
+    args: [key],
+  });
+  let profiles = [];
+  try { profiles = JSON.parse(rows[0]?.value || "[]"); } catch {}
+  const baseUrl = (seed.baseUrl || "").trim();
+  const before = profiles.length;
+  profiles = profiles.filter((p) => !(p.provider === seed.provider && (p.baseUrl || "").trim() === baseUrl));
+  if (profiles.length === before) return;
+  if (profiles.length && !profiles.some((p) => p.isDefault)) profiles[0].isDefault = true;
+  await writeSetting(db, key, JSON.stringify(profiles));
+  log(`Removed ${before - profiles.length} ${kind.toUpperCase()} profile(s) seeded by bundle`);
+}
 
 // PR 0: Consent token configuration (server-validated, race-safe install consent)
 const CONSENT_TOKEN_TTL_SECONDS = 15 * 60; // 15 min — covers slow image pulls
@@ -1438,6 +1504,18 @@ export default function bundlesRouter() {
           appendLog(job, `Provider auto-register skipped: ${err.message}`);
         }
 
+        // Seed STT/TTS profiles declared in manifest.{stt,tts}ProfileSeed.
+        try {
+          const manifest = getManifest(addon.id);
+          if (manifest?.sttProfileSeed || manifest?.ttsProfileSeed) {
+            const seedDb = createDbClient();
+            if (manifest.sttProfileSeed) await seedProfile(seedDb, "stt", manifest.sttProfileSeed, (m) => appendLog(job, m));
+            if (manifest.ttsProfileSeed) await seedProfile(seedDb, "tts", manifest.ttsProfileSeed, (m) => appendLog(job, m));
+          }
+        } catch (err) {
+          appendLog(job, `Profile seed skipped: ${err.message}`);
+        }
+
         finishJob(job, needsRestart ? "complete_restart" : "complete");
 
         // Auto-restart gateway if panels or MCP servers were added
@@ -1633,6 +1711,18 @@ export default function bundlesRouter() {
           }
         } catch (err) {
           appendLog(job, `Provider unregister skipped: ${err.message}`);
+        }
+
+        // Reverse STT/TTS profile seeding from this bundle's manifest. Use the
+        // in-scope `manifest` (read before the bundle dir was removed above).
+        try {
+          if (manifest?.sttProfileSeed || manifest?.ttsProfileSeed) {
+            const seedDb = createDbClient();
+            if (manifest.sttProfileSeed) await unseedProfile(seedDb, "stt", manifest.sttProfileSeed, (m) => appendLog(job, m));
+            if (manifest.ttsProfileSeed) await unseedProfile(seedDb, "tts", manifest.ttsProfileSeed, (m) => appendLog(job, m));
+          }
+        } catch (err) {
+          appendLog(job, `Profile unseed skipped: ${err.message}`);
         }
 
         finishJob(job, needsRestart ? "complete_restart" : "complete");

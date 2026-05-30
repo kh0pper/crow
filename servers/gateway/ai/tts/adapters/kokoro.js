@@ -10,7 +10,13 @@
  */
 
 export default function createKokoroTtsAdapter(config) {
-  const baseUrl = (config.baseUrl || "http://localhost:8880").replace(/\/+$/, "");
+  // Normalize: strip trailing slashes AND a trailing `/v1` so the same profile
+  // works whether its baseUrl includes /v1 or not. The companion (OLVV) needs
+  // /v1 in the profile baseUrl, but this adapter appends /v1/audio/speech itself
+  // — without this strip, a shared /v1 profile would hit /v1/v1/audio/speech.
+  const baseUrl = (config.baseUrl || "http://localhost:8880")
+    .replace(/\/+$/, "")
+    .replace(/\/v1$/, "");
   const apiKey = config.apiKey || "not-needed";
 
   return {

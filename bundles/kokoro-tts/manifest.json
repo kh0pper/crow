@@ -1,0 +1,19 @@
+{
+  "id": "kokoro-tts",
+  "type": "bundle",
+  "name": "Kokoro TTS (local)",
+  "category": "ai",
+  "description": "Local OpenAI-compatible text-to-speech (Kokoro-82M) served by kokoro-fastapi on CPU. Powers the AI Companion and Meta Glasses voices (af_heart EN / ef_dora ES). Light enough to run on crow alongside the model stack; loopback :8880 only.",
+  "host": "local",
+  "requires": {
+    "platform": "linux-x86_64"
+  },
+  "env_vars": [],
+  "port": 8880,
+  "ttsProfileSeed": {
+    "name": "Kokoro (local)",
+    "provider": "kokoro",
+    "baseUrl": "http://localhost:8880/v1",
+    "defaultVoice": "af_heart"
+  }
+}

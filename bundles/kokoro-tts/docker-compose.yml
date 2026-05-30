@@ -1,0 +1,13 @@
+services:
+  kokoro-tts:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    container_name: kokoro-tts
+    environment:
+      USE_GPU: "false"
+      DEVICE: cpu
+    # Loopback-only: TTS is an internal service reached by the gateway / companion
+    # over localhost (companion is host-networked) and by the glasses via the
+    # gateway. Never published on the tailnet or LAN (network-exposure invariant).
+    ports:
+      - "127.0.0.1:8880:8880"
+    restart: unless-stopped

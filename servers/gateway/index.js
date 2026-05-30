@@ -276,7 +276,7 @@ if (!noAuth) {
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: "Too many requests, please try again later" },
-    skip: (req) => req.path.startsWith("/dashboard") || req.path.startsWith("/api/meta-glasses/"),
+    skip: (req) => req.path.startsWith("/dashboard") || req.path.startsWith("/api/meta-glasses/") || req.path.startsWith("/llm"),
   }));
 }
 
@@ -312,8 +312,12 @@ const dashboardLoginLimiter = rateLimit({
 });
 app.use("/dashboard/login", dashboardLoginLimiter);
 
-// Body parsing with size limit
-app.use(express.json({ limit: "1mb" }));
+// Body parsing with size limit. The /llm LLM-router has its own route-scoped
+// 10mb parser (multi-turn voice transcripts with tool history + image parts
+// exceed 1mb), so skip the global 1mb parser there — otherwise it 413s a large
+// turn before the route is reached.
+const _jsonParser = express.json({ limit: "1mb" });
+app.use((req, res, next) => (req.path.startsWith("/llm") ? next() : _jsonParser(req, res, next)));
 
 // --- Static files (PWA manifest, service worker, icons) ---
 app.use(express.static(join(__gatewayDir, "public"), {
@@ -1223,6 +1227,20 @@ if (process.env.CROW_CALLS_ENABLED === "1") {
     if (err.code !== "ERR_MODULE_NOT_FOUND") {
       console.warn("[calls] Failed to mount:", err.message);
     }
+  }
+}
+
+// --- Mount LLM-router (folds the standalone companion model-proxy into the
+// gateway). No dashboardAuth: the host-networked companion arrives as loopback,
+// which isAllowedNetwork() rejects; protected instead by rejectFunneledMiddleware
+// (mounted above) + tailnet/loopback-only exposure. See routes/llm-router.js. ---
+try {
+  const { default: llmRouterRouter } = await import("./routes/llm-router.js");
+  app.use(llmRouterRouter());
+  console.log("  [llm-router] mounted: POST /llm/v1/chat/completions, GET /llm/v1/models");
+} catch (err) {
+  if (err.code !== "ERR_MODULE_NOT_FOUND") {
+    console.warn("[llm-router] Failed to mount:", err.message);
   }
 }
 

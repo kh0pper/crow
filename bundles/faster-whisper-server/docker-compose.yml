@@ -1,0 +1,22 @@
+services:
+  faster-whisper-server:
+    image: fedirz/faster-whisper-server:latest-cpu
+    container_name: faster-whisper-server
+    environment:
+      # Preload + default model. OpenAI-compatible /v1/audio/transcriptions.
+      WHISPER__MODEL: Systran/faster-whisper-large-v3
+      WHISPER__INFERENCE_DEVICE: cpu
+      WHISPER__COMPUTE_TYPE: int8
+      ENABLE_UI: "false"
+    volumes:
+      # Persist the downloaded CTranslate2 weights across recreates (~3 GB).
+      - faster-whisper-cache:/root/.cache/huggingface
+    # Loopback only. The OpenAI-compatible Whisper endpoint is consumed by the
+    # gateway STT adapter (glasses + AI-chat); the companion keeps faster-whisper
+    # in-container. :8002 is taken by edjobs_backend on crow → use :8004.
+    ports:
+      - "127.0.0.1:8004:8000"
+    restart: unless-stopped
+
+volumes:
+  faster-whisper-cache:
