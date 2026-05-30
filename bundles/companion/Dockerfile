@@ -38,6 +38,8 @@ COPY scripts/crow-webrtc.js /app/scripts/crow-webrtc.js
 COPY scripts/inject-webrtc.sh /app/scripts/inject-webrtc.sh
 COPY scripts/crow-voice-panel.js /app/scripts/crow-voice-panel.js
 COPY scripts/inject-voice-panel.sh /app/scripts/inject-voice-panel.sh
+COPY scripts/crow-device-config.js /app/scripts/crow-device-config.js
+COPY scripts/inject-device-config.sh /app/scripts/inject-device-config.sh
 COPY scripts/crow-face-tracking.js /app/scripts/crow-face-tracking.js
 COPY scripts/inject-face-tracking.sh /app/scripts/inject-face-tracking.sh
 COPY scripts/inject-call-enhancements.sh /app/scripts/inject-call-enhancements.sh

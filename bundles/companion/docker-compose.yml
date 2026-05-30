@@ -23,6 +23,15 @@ services:
       - COMPANION_AI_MODEL=${COMPANION_AI_MODEL:-}
       - COMPANION_BIND_HOST=${COMPANION_BIND_HOST:-127.0.0.1}
       - CROW_DB_PATH=/crow-data/crow.db
+      # MCP bridge to the local Crow gateway (host network → localhost). The
+      # gateway listens on 3001 by default; /router and /storage need the local
+      # MCP bearer token, /wm is open. (The old 3004 default pointed at nothing.)
+      - CROW_MCP_BRIDGE_PORT=${CROW_MCP_BRIDGE_PORT:-3001}
+      - CROW_LOCAL_MCP_TOKEN=${CROW_LOCAL_MCP_TOKEN:-}
+      # Model-routing proxy: OLVV's LLM base_url. Routes fast (Qwen3.5-4B) ->
+      # escalation (35B) and forwards tools verbatim. Host network → localhost.
+      # Unset to talk to a model directly (Part 0 fallback).
+      - COMPANION_PROXY_URL=${COMPANION_PROXY_URL:-http://localhost:11435/v1}
       - SDXL_HOST=${SDXL_HOST:-localhost}
       - SDXL_PORT=${SDXL_PORT:-3005}
       - CROW_GATEWAY_URL=${CROW_GATEWAY_URL:-}
