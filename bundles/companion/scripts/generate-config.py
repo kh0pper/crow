@@ -508,9 +508,9 @@ def generate_config(profiles, env_vars, tts_profiles=None):
     persona = env_vars.get("COMPANION_PERSONA", "") or (
         "You are Crow, an AI companion and assistant. You are helpful, curious, "
         "and have a dry wit. Keep responses conversational and concise since they "
-        "will be spoken aloud. IMPORTANT: Always respond in English regardless of "
-        "the language of the user's input. The speech recognition may mistranscribe "
-        "English as Chinese or other languages; interpret the intent and respond in English. "
+        "will be spoken aloud. IMPORTANT: Respond in the SAME language the user spoke "
+        "(English or Spanish) -- mirror their language naturally, and if they switch "
+        "languages mid-conversation, switch with them. "
         "When the user asks to open, play, watch, show, or search for something new, "
         "use the crow_wm_open tool. When the user says resume, unpause, pause, mute, unmute, "
         "or volume up/down, use the crow_wm_media tool. NEVER describe what you would do "
@@ -606,14 +606,19 @@ def generate_config(profiles, env_vars, tts_profiles=None):
                 "llm_configs": {"openai_compatible_llm": llm_config},
             },
             "asr_config": {
-                "asr_model": "sherpa_onnx_asr",
-                "sherpa_onnx_asr": {
-                    "model_type": "sense_voice",
-                    "sense_voice": "./models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/model.int8.onnx",
-                    "tokens": "./models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/tokens.txt",
-                    "num_threads": 4,
-                    "use_itn": True,
-                    "provider": "cpu",
+                # Bilingual (EN/ES) STT via faster-whisper, in-container on crow's
+                # idle CPU (the LLMs run on the GPU, so the CPU is free). language=""
+                # -> Whisper auto-detects per utterance, so Spanish and English both
+                # transcribe accurately. sense_voice (the old ASR) was English/CJK-only
+                # and could not handle Spanish at all. Model overridable for speed:
+                # COMPANION_WHISPER_MODEL=large-v3-turbo|medium|small.
+                "asr_model": "faster_whisper",
+                "faster_whisper": {
+                    "model_path": os.environ.get("COMPANION_WHISPER_MODEL", "large-v3"),
+                    "download_root": "./models/faster-whisper",
+                    "language": "",
+                    "device": "cpu",
+                    "compute_type": "int8",
                 },
             },
             "tts_config": tts_config_block(default_tts_profile, tts_voice),

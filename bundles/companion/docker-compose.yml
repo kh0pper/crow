@@ -15,8 +15,15 @@ services:
       - ${CROW_DB_PATH:-~/.crow/data/crow.db}:/crow-data/crow.db:ro
       - ${HOME}/.crow/bundles:/crow-bundles:ro
     environment:
-      - COMPANION_TTS_VOICE=${COMPANION_TTS_VOICE:-en-US-AvaMultilingualNeural}
-      - COMPANION_PERSONA=${COMPANION_PERSONA:-You are Crow, an AI companion and assistant. You are helpful, curious, and have a dry wit. Keep responses conversational and concise since they will be spoken aloud.}
+      # Legacy per-container voice override. Leave EMPTY so the active TTS
+      # profile's defaultVoice drives the voice (a non-empty value here is
+      # applied verbatim onto whatever provider the default profile selects —
+      # e.g. an Edge voice forced onto the OpenAI backend, which 400s and
+      # silently kills all audio). Set only to pin a single voice deliberately.
+      - COMPANION_TTS_VOICE=${COMPANION_TTS_VOICE:-}
+      # Quoted: the value contains a colon-space ("IMPORTANT: ...") which YAML would
+      # otherwise parse as a mapping and drop the var.
+      - "COMPANION_PERSONA=${COMPANION_PERSONA:-You are Crow, an AI companion and assistant. You are helpful, curious, and have a dry wit. Keep responses conversational and concise since they will be spoken aloud. IMPORTANT: Respond in the SAME language the user spoke (English or Spanish) -- mirror their language naturally, and if they switch languages mid-conversation, switch with them.}"
       - COMPANION_CHARACTER_NAME=${COMPANION_CHARACTER_NAME:-Crow}
       - COMPANION_AVATAR=${COMPANION_AVATAR:-mao_pro}
       - COMPANION_AI_PROFILE=${COMPANION_AI_PROFILE:-}
@@ -37,7 +44,7 @@ services:
       - CROW_GATEWAY_URL=${CROW_GATEWAY_URL:-}
       - COMPANION_PROFILE_1_NAME=${COMPANION_PROFILE_1_NAME:-}
       - COMPANION_PROFILE_1_COLOR=${COMPANION_PROFILE_1_COLOR:-#818cf8}
-    mem_limit: 2g
+    mem_limit: 6g  # raised from 2g to fit the faster-whisper large-v3 model (in-container EN/ES STT)
 
 volumes:
   companion-models:
