@@ -45,6 +45,33 @@ const FAST_DISABLE_THINKING = (process.env.COMPANION_FAST_DISABLE_THINKING || "1
 // Leading tokens that force escalation to the big model. Stripped before forward.
 const ESCALATE_RE = /^\s*!escalate\b[:,]?\s*/i;
 
+// Smart tool-intent escalation. The fast 4B reliably chats but tends to NARRATE
+// tool use ("I'll search your music") instead of emitting a tool call, and
+// !escalate can't survive speech-to-text. So when tools are on the table and the
+// user's message reads like an action request, route to the big model (a far
+// better tool-caller). Set COMPANION_TOOL_ESCALATION=0 to disable.
+const TOOL_ESCALATION = (process.env.COMPANION_TOOL_ESCALATION || "1") !== "0";
+// Action verbs/targets that map to the companion's crow_wm + storage tools
+// (open/play media, transport control, search, files, image gen, calls). Word-
+// boundary, case-insensitive. False positives only cost a slower (still-correct)
+// turn; false negatives look like a hang — so this leans toward escalating.
+const TOOL_INTENT_RE = new RegExp(
+  "\\b(" +
+    [
+      "open", "launch", "play", "pause", "unpause", "resume", "stop",
+      "mute", "unmute", "skip", "rewind", "volume", "louder", "quieter",
+      "turn it (up|down)", "turn (up|down)",
+      "watch", "show me", "pull up", "bring up", "go to", "navigate", "browse",
+      "search", "look up", "look for", "find me", "google",
+      "youtube", "jellyfin", "plex", "playlist",
+      "upload", "download", "list (my )?files",
+      "wallpaper", "background", "generate (an? )?(image|picture|background)",
+      "video call", "start a call", "set (the )?background",
+    ].join("|") +
+    ")\\b",
+  "i"
+);
+
 function splitKey(key) {
   const i = key.indexOf("/");
   return i < 0 ? [key, undefined] : [key.slice(0, i), key.slice(i + 1)];
@@ -87,20 +114,56 @@ function authHeaders(apiKey) {
   return apiKey && apiKey !== "none" ? { Authorization: `Bearer ${apiKey}` } : {};
 }
 
-function wantsEscalation(body) {
+// Flatten the latest user message to plain text (string or multi-part content).
+function lastUserText(body) {
   const msgs = Array.isArray(body?.messages) ? body.messages : [];
   for (let i = msgs.length - 1; i >= 0; i--) {
     if (msgs[i]?.role === "user") {
       const c = msgs[i].content;
-      const text = typeof c === "string"
+      return typeof c === "string"
         ? c
         : Array.isArray(c)
           ? c.map((p) => (typeof p === "string" ? p : p?.text || "")).join(" ")
           : "";
-      return ESCALATE_RE.test(text);
     }
   }
+  return "";
+}
+
+function wantsEscalation(body) {
+  return ESCALATE_RE.test(lastUserText(body));
+}
+
+// How many trailing messages count as "recent" for sticky escalation. A tool turn
+// leaves an assistant{tool_calls} + tool-result + assistant-reply in history (~3
+// msgs); a plain turn adds ~2. A window of 8 keeps the next ~2-3 conversational
+// follow-ups on the big model, then reverts to the fast model for pure chat.
+const TOOL_CONTEXT_LOOKBACK = parseInt(process.env.COMPANION_TOOL_CONTEXT_LOOKBACK || "8", 10);
+
+// True when there's tool activity in the recent message window: a mid-loop tool
+// result, OR a prior assistant turn that called a tool. The latter catches
+// conversational FOLLOW-UPS that continue an action ("Josh Johnson stand-up
+// comedy" after "play Josh Johnson on YouTube") which carry no action verb of
+// their own and would otherwise fall back to the tool-weak fast model.
+function recentToolContext(body) {
+  const msgs = Array.isArray(body?.messages) ? body.messages : [];
+  const start = Math.max(0, msgs.length - TOOL_CONTEXT_LOOKBACK);
+  for (let i = msgs.length - 1; i >= start; i--) {
+    const m = msgs[i];
+    if (m?.role === "tool") return true;
+    if (m?.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length) return true;
+  }
   return false;
+}
+
+// Escalate when tools are available AND either there's recent tool context or the
+// user's message reads like an action request the fast model would only narrate.
+function wantsToolEscalation(body) {
+  if (!TOOL_ESCALATION) return false;
+  const tools = body?.tools;
+  if (!Array.isArray(tools) || tools.length === 0) return false;
+  if (recentToolContext(body)) return true;
+  return TOOL_INTENT_RE.test(lastUserText(body));
 }
 
 // Strip the !escalate token from the latest user message in-place (so the model
@@ -150,8 +213,11 @@ async function handleChat(req, res, raw) {
     return sendJson(res, 400, { error: { message: "invalid JSON body" } });
   }
 
-  const escalate = wantsEscalation(body);
-  if (escalate) stripEscalate(body);
+  const manualEsc = wantsEscalation(body);
+  if (manualEsc) stripEscalate(body); // only the typed token is stripped
+  const toolEsc = !manualEsc && wantsToolEscalation(body);
+  const escalate = manualEsc || toolEsc;
+  const escReason = manualEsc ? "manual" : toolEsc ? "tool-intent" : null;
   const key = escalate ? ESC_KEY : FAST_KEY;
 
   // Voice quality: the fast model (Qwen3.5-4B) emits its chain-of-thought as
@@ -172,7 +238,7 @@ async function handleChat(req, res, raw) {
   body.model = up.model;
   const url = `${up.baseUrl}/chat/completions`;
   const t0 = nowMs();
-  console.log(`[companion-proxy] route=${escalate ? "escalate" : "fast"} -> ${key} (${up.model}) stream=${!!body.stream}`);
+  console.log(`[companion-proxy] route=${escalate ? `escalate(${escReason})` : "fast"} -> ${key} (${up.model}) stream=${!!body.stream}`);
 
   let upstream;
   try {
