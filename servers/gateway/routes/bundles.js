@@ -1477,7 +1477,7 @@ export default function bundlesRouter() {
 
         // Phase 5-full: auto-register providers declared in manifest.providers[]
         try {
-          const manifest = getManifest(addon.id);
+          const manifest = getManifest(bundle_id);
           if (manifest?.providers?.length) {
             const providerDb = createDbClient();
             let hostIp = "127.0.0.1";
@@ -1506,7 +1506,7 @@ export default function bundlesRouter() {
 
         // Seed STT/TTS profiles declared in manifest.{stt,tts}ProfileSeed.
         try {
-          const manifest = getManifest(addon.id);
+          const manifest = getManifest(bundle_id);
           if (manifest?.sttProfileSeed || manifest?.ttsProfileSeed) {
             const seedDb = createDbClient();
             if (manifest.sttProfileSeed) await seedProfile(seedDb, "stt", manifest.sttProfileSeed, (m) => appendLog(job, m));
