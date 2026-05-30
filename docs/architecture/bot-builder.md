@@ -42,7 +42,7 @@ Each row in `pi_bot_defs` is a JSON definition with these parts:
 - **persona**: the system prompt
 - **skills**: names resolved to skill text at run time
 - **tools**: the allowed tool set: Crow's core tool categories plus selected extension tools
-- **gateways**: the channels the agent runs on (`gmail`, `discord`, `glasses`)
+- **gateways**: the channels the agent runs on (`gmail`, `discord`, `glasses`, `companion`)
 - **permission_policy**: confirm / deny sets, `external_send` mode, and the `self_authoring` switch
 - **model** and an optional `fast_voice_model`
 
@@ -65,6 +65,9 @@ When an agent selects a tool from an extension that is not part of Crow's canoni
 | **Gmail** | `bridge_tick.mjs` | Polls a connected mailbox, drafts or sends replies subject to policy |
 | **Discord** | `discord_gateway.mjs` | A long-lived Discord WebSocket that drives the runtime, with a per-agent user allowlist |
 | **Meta Glasses** | `bundles/meta-glasses/` | A paired device binds to an agent and drives the fast voice turn |
+| **AI Companion** | `bundles/companion/` + `scripts/companion/model-proxy.mjs` | A kiosk device binds to an agent; the [companion](/architecture/companion)'s OLVV loop runs that agent's persona/avatar/tools, with a model proxy routing fast (4B) → escalate (35B) |
+
+> The Meta Glasses and AI Companion channels run their own voice loop (the glasses voice turn; OLVV for the companion) rather than the pi `bridge.mjs` runtime — so the bound agent's persona/skills/tools drive the turn, but the engine is the voice front end, not pi. See [AI Companion](/architecture/companion).
 
 ## The voice path
 
