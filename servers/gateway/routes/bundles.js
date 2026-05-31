@@ -1215,8 +1215,14 @@ export default function bundlesRouter() {
                 if (v.default && !env[v.name]) env[v.name] = v.default;
               }
             }
-            // Add CROW_DB_PATH if not set
-            if (!env.CROW_DB_PATH) env.CROW_DB_PATH = join(APP_ROOT, "data", "crow.db");
+            // Do NOT bake an absolute CROW_DB_PATH here. mcp-addons.json can be
+            // shared by more than one gateway on a host (e.g. grackle runs a
+            // main gateway + a separate-DB instance off the same ~/.crow), so a
+            // hard-coded path is correct for one and a cross-instance DB leak for
+            // the other — which crash-loops the wrong gateway on "database is
+            // locked". The MCP child instead inherits the SPAWNING gateway's
+            // CROW_DB_PATH via process.env at launch (its own default otherwise),
+            // so each gateway's children always use that gateway's DB.
             mcpAddons[bundle_id] = {
               command: manifest.server.command,
               args: manifest.server.args || [],
