@@ -109,7 +109,11 @@ const CONSENT_TOKEN_TTL_SECONDS = 15 * 60; // 15 min — covers slow image pulls
 const CONSENT_TOKEN_SCHEMA_VERSION = 1;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const CROW_HOME = join(homedir(), ".crow");
+// Respect the instance's CROW_HOME (matches proxy.js resolveCrowHome). Without
+// this, installs on an alternate instance (CROW_HOME=~/.crow-mpa, ~/.crow-finance)
+// wrote bundle files + mcp-addons.json into the MAIN ~/.crow, re-coupling the
+// instances. Falls back to ~/.crow when unset (the main instance).
+const CROW_HOME = process.env.CROW_HOME || join(homedir(), ".crow");
 const BUNDLES_DIR = join(CROW_HOME, "bundles");
 const SKILLS_DIR = join(CROW_HOME, "skills");
 const PANELS_DIR = join(CROW_HOME, "panels");
