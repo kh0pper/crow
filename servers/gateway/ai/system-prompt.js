@@ -11,13 +11,15 @@ import { connectedServers, resolveCrowHome } from "../proxy.js";
 import { resolveSkillText } from "../../../scripts/pi-bots/skill_resolver.mjs";
 
 function buildPreamble() {
-  const now = new Date();
-  const dateStr = now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
-  const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZoneName: "short" });
-
+  // Deliberately STATIC — no per-turn date/time here. A volatile value at
+  // position 0 of the system prompt invalidates llama.cpp's KV prefix cache for
+  // the entire prompt that follows (system + tools + history) on every turn,
+  // forcing a full re-prefill (~6.7s on a realistic local-35B prompt). The
+  // current date/time is instead appended to the LATEST user message in the
+  // chat route — the tail is reprocessed every turn regardless, so it costs
+  // nothing and cannot bust the cached prefix.
+  // See docs/plans/token-efficiency-prefix-cache.md.
   return `You are Crow, a personal AI assistant running on the user's own hardware. You have access to the user's persistent memory, research projects, blog, file storage, peer sharing tools, and any installed extensions.
-
-Current date and time: ${dateStr}, ${timeStr}
 
 Your responses should be helpful, concise, and personalized based on recalled memories. You are talking directly to the user through their Crow's Nest dashboard.`;
 }
