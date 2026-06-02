@@ -660,26 +660,34 @@ export default function chatRouter(dashboardAuth) {
           }
         }
 
-        // Build messages array for AI. When the smart-router matched on
-        // a slash-command, strip the `/code`/`/vision`/etc. prefix from
-        // the current user message before it reaches the adapter —
-        // the raw prefix stays in chat_messages.content for
-        // transparency in the chat log, but the model should see the
-        // clean prompt.
+        // Build messages array for AI. Two rewrites apply ONLY to the latest
+        // user turn (the tail), never to historical messages, so the cached
+        // KV prefix (system + tools + prior turns) is never disturbed:
+        //   1. Slash-command strip — when the smart-router matched on a
+        //      `/code`/`/vision`/etc. prefix, the model sees the clean prompt
+        //      (the raw prefix stays in chat_messages.content for transparency).
+        //   2. Current date/time stamp — moved off the static system preamble
+        //      (see buildPreamble in ai/system-prompt.js) to here, where it is
+        //      reprocessed every turn anyway and cannot bust the prefix cache.
+        const lastMsg = recentMessages[recentMessages.length - 1];
+        const now = new Date();
+        const nowLine = `Current date and time: ${now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}, ${now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZoneName: "short" })}`;
         const aiMessages = [
           { role: "system", content: systemPrompt },
           ...recentMessages.map((m) => {
+            if (m !== lastMsg || m.role !== "user" || typeof m.content !== "string") {
+              return m;
+            }
+            let content = m.content;
             if (
               smartRoute_result
               && typeof smartRoute_result.reason === "string"
               && /matched \//.test(smartRoute_result.reason)
-              && m.role === "user"
-              && typeof m.content === "string"
-              && m === recentMessages[recentMessages.length - 1]
             ) {
-              return { ...m, content: stripSlashCommand(m.content) };
+              content = stripSlashCommand(content);
             }
-            return m;
+            content = `${content}\n\n[${nowLine}]`;
+            return { ...m, content };
           }),
         ];
 

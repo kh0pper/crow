@@ -10,6 +10,27 @@
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 
 /**
+ * True if baseUrl points at a local/LAN/Tailscale host — i.e. a self-hosted
+ * llama.cpp / vLLM endpoint. Used to gate the llama.cpp-specific
+ * `timings_per_token` request field so it is NEVER sent to a public cloud API
+ * (which could reject an unknown body field). `stream_options.include_usage`
+ * is OpenAI-standard and is sent to everyone.
+ */
+function isLocalBase(baseUrl) {
+  try {
+    const host = new URL(baseUrl).hostname;
+    if (host === "localhost" || host === "127.0.0.1" || host === "::1") return true;
+    if (/^10\./.test(host) || /^192\.168\./.test(host)) return true;
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
+    const p = host.split(".").map(Number);
+    if (p.length === 4 && p[0] === 100 && p[1] >= 64 && p[1] <= 127) return true; // Tailscale CGNAT
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Convert MCP tool schemas to OpenAI function-calling format.
  */
 function mcpToolsToOpenAI(tools) {
@@ -100,15 +121,24 @@ export default function createOpenAIAdapter(config) {
 
       const openaiTools = mcpToolsToOpenAI(tools);
 
+      const localBase = isLocalBase(baseUrl);
       const body = {
         model,
         messages: toOpenAIMessages(messages, tools),
         temperature,
         max_tokens: maxTokens,
         stream: true,
+        // Ask for token usage in the stream (standard OpenAI) so we can observe
+        // prefix-cache reuse via prompt_tokens_details.cached_tokens.
+        stream_options: { include_usage: true },
       };
       if (openaiTools) {
         body.tools = openaiTools;
+      }
+      // llama.cpp-only: surfaces timings.cache_n (KV prefix reuse). Gated to
+      // local endpoints so it is never sent to a public cloud API.
+      if (localBase) {
+        body.timings_per_token = true;
       }
 
       const headers = {
@@ -147,6 +177,8 @@ export default function createOpenAIAdapter(config) {
       const pendingToolCalls = new Map(); // index → { id, name, arguments }
       let inputTokens = 0;
       let outputTokens = 0;
+      let cachedTokens = 0;   // prompt_tokens_details.cached_tokens (OpenAI-standard)
+      let cacheN = null;      // timings.cache_n (llama.cpp KV prefix reuse)
 
       try {
         while (true) {
@@ -173,6 +205,13 @@ export default function createOpenAIAdapter(config) {
             if (data.usage) {
               inputTokens = data.usage.prompt_tokens || 0;
               outputTokens = data.usage.completion_tokens || 0;
+              if (data.usage.prompt_tokens_details?.cached_tokens != null) {
+                cachedTokens = data.usage.prompt_tokens_details.cached_tokens;
+              }
+            }
+            // llama.cpp prefix-cache observability (gated on local endpoints).
+            if (data.timings && typeof data.timings.cache_n === "number") {
+              cacheN = data.timings.cache_n;
             }
 
             const choice = data.choices?.[0];
@@ -221,7 +260,24 @@ export default function createOpenAIAdapter(config) {
         reader.releaseLock();
       }
 
-      yield { type: "done", usage: { input_tokens: inputTokens, output_tokens: outputTokens } };
+      // Prefix-cache observability: one concise line per assistant turn. cacheN
+      // is the llama.cpp reused-token count; cachedTokens is the OpenAI-standard
+      // equivalent. Either being a large fraction of inputTokens => prefix hit.
+      if (localBase && inputTokens > 0) {
+        const reused = cacheN != null ? cacheN : cachedTokens;
+        const pct = inputTokens > 0 ? Math.round((reused / inputTokens) * 100) : 0;
+        console.log(`[chat-cache] model=${model} prompt_tokens=${inputTokens} reused=${reused} (${pct}%)`);
+      }
+
+      yield {
+        type: "done",
+        usage: {
+          input_tokens: inputTokens,
+          output_tokens: outputTokens,
+          cached_tokens: cachedTokens,
+          cache_n: cacheN,
+        },
+      };
     },
   };
 }
