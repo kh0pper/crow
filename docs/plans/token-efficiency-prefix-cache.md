@@ -182,34 +182,33 @@ self-consistency (0.731>0.588, 0.595>0.498) → no regression. Persona em-dash u
 **Status:** fix committed to local `main` (`897d439`). Gateway restarts clean and serves chats.
 **Push to origin = fleet deploy** (instances auto-pull `main`) — done per operator decision.
 
-### Phase 2 INVESTIGATION (2026-06-03 — image-history buster: DISPROVEN; plus a regression fix)
+### Phase 2 INVESTIGATION (2026-06-03 — image-history buster: DISPROVEN end-to-end; plus a regression fix)
 
 Investigated the "per-request presigned image URL busts the prefix" hypothesis because the operator
-uses vision heavily. Findings:
-- **The image-URL buster does NOT exist.** A presigned URL is *fetch metadata* — it is never in the
-  model's token sequence. The KV cache is keyed on the resulting tokens (text + image embeddings),
-  which are identical for the same image no matter how often the URL is re-signed. Verified on `:8003`:
-  with a stable image in history, turn-2 reused **524/528** tokens (system + the image-bearing turn);
-  image tokens cache exactly like text. So re-signing cannot bust the prefix. **No fix needed.**
-- **Vision routing reality (corrects a plan assumption):** dashboard image messages route via the
-  smart-router to **`grackle-vision`** (vLLM), not `:8003`. `:8003`'s llama.cpp build has **no curl
-  support** (`error: cannot make GET request`) — it only accepts base64 `data:` URLs. The
-  companion/glasses vision path (`servers/gateway/ai/vision.js`) already sends base64 (stable). So the
-  `:8003` prefix is never touched by a remote image URL.
+uses mixed image+text heavily. Findings:
+- **The image-URL buster does NOT exist — verified end-to-end through the real gateway.** A presigned
+  URL is *fetch metadata*; it is never in the model's token sequence. The KV cache is keyed on the
+  resulting tokens (text + image embeddings), identical for the same image no matter how often the URL
+  is re-signed. Two confirmations: (a) base64 image in history on `:8003` reused **524/528** tokens;
+  (b) a full gateway round-trip — image attachment (real MinIO presigned URL, re-signed every turn) in
+  history, then a **text** follow-up to `crow-chat`/`:8003` — reused **10841/11044 (98%)** and the
+  model correctly **read text embedded only in the image** (a control string present nowhere in the
+  chat), proving the image is delivered AND the prefix reuses. **No fix needed.**
+- **Mixed image+text multi-turn WORKS on `crow-chat`/`:8003` — no error, no 500.** The earlier worry
+  that a text follow-up would choke on the historical image was **disproven**.
+- **CORRECTION to an earlier note in this doc:** `:8003` (llama.cpp) **can** fetch remote image URLs
+  (it fetched the MinIO `:9000` presigned URL fine). The earlier "no curl / `cannot make GET request`"
+  observation was a **ufw artifact** — the throwaway test image server was on a port (`8799`) blocked
+  by the host's default-deny firewall, not a llama.cpp limitation. Dashboard vision may route to
+  `grackle-vision` (auto profile) or be handled directly by `crow-chat` (pinned/default); both work.
 - **REGRESSION FIXED (`1c97247`):** the Phase-1 observability added `timings_per_token` to *all* local
   endpoints by IP — which includes the **vLLM** providers (`grackle-vision`, `crow-dispatch`). To
   avoid any chance of breaking the vision chat path on an unknown request field, dropped
   `timings_per_token` entirely and rely on the OpenAI-standard `stream_options.include_usage` →
   `cached_tokens` (verified: llama.cpp reports it without the flag — 0 cold → 293 warm; `[chat-cache]`
-  still logs 99% reuse on `:8003`).
-- **Adjacent open question (NOT cache, possible functional edge — unverified):** a multi-turn dashboard
-  conversation that mixes an image turn (→ `grackle-vision`) with a later text-only follow-up
-  (→ `crow-chat`/`:8003`) would send the historical image to `:8003` as a remote URL it cannot fetch.
-  Whether this errors in practice depends on storage availability + routing and was not confirmed
-  (dashboard image chat appears lightly used). Worth a separate look if multi-turn dashboard vision is
-  used; out of scope for the prefix-cache effort.
+  still logs 98–99% reuse on `:8003`). This is the one durable change from the Phase 2 investigation.
 
-Phase 2 cache work (history busters, dedicated slot) **closed — current data does not warrant it.**
+Phase 2 cache work (history busters, dedicated slot) **closed — verified not needed.**
 
 ### Phase 1 — apply the date fix, measure under realistic conditions, gate on accuracy (NEXT SESSION / after approval)
 4. Make the `buildPreamble` change (+ optional latest-turn timestamp).
