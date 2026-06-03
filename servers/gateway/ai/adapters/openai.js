@@ -128,17 +128,16 @@ export default function createOpenAIAdapter(config) {
         temperature,
         max_tokens: maxTokens,
         stream: true,
-        // Ask for token usage in the stream (standard OpenAI) so we can observe
-        // prefix-cache reuse via prompt_tokens_details.cached_tokens.
+        // Ask for token usage in the stream (standard OpenAI, accepted by
+        // llama.cpp AND vLLM) so we can observe prefix-cache reuse via
+        // prompt_tokens_details.cached_tokens. We deliberately do NOT send the
+        // llama.cpp-specific `timings_per_token` field — it is unnecessary
+        // (llama.cpp reports cached_tokens from include_usage alone) and would
+        // be an unknown field to vLLM endpoints (grackle-vision, crow-dispatch).
         stream_options: { include_usage: true },
       };
       if (openaiTools) {
         body.tools = openaiTools;
-      }
-      // llama.cpp-only: surfaces timings.cache_n (KV prefix reuse). Gated to
-      // local endpoints so it is never sent to a public cloud API.
-      if (localBase) {
-        body.timings_per_token = true;
       }
 
       const headers = {
