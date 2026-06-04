@@ -1,0 +1,356 @@
+{
+  "id": "19e8ef81b6a2ef34",
+  "threadId": "19e4755c32284563",
+  "labelIds": [
+    "UNREAD",
+    "Label_16",
+    "Label_17",
+    "IMPORTANT",
+    "CATEGORY_PERSONAL",
+    "INBOX"
+  ],
+  "snippet": "Mr. Hopper, I have checked with the area regarding your inquiry below and here is the response along with the attached documents. Texas Education Code (TEC) §12.1101 states that the commissioner shall",
+  "payload": {
+    "partId": "",
+    "mimeType": "multipart/mixed",
+    "filename": "",
+    "headers": [
+      {
+        "name": "Delivered-To",
+        "value": "kevin.hopper1@gmail.com"
+      },
+      {
+        "name": "Received",
+        "value": "by 2002:a05:66bc:a817:b0:310:d82:9b46 with SMTP id n23csp1928005geb;        Wed, 3 Jun 2026 12:31:25 -0700 (PDT)"
+      },
+      {
+        "name": "X-Received",
+        "value": "by 2002:a05:690c:c14f:b0:7bd:a94b:5df5 with SMTP id 00721157ae682-7eb8ae904ddmr6791237b3.8.1780515085170;        Wed, 03 Jun 2026 12:31:25 -0700 (PDT)"
+      },
+      {
+        "name": "ARC-Seal",
+        "value": "i=2; a=rsa-sha256; t=1780515085; cv=pass;        d=google.com; s=arc-20240605;        b=DQMcpnD4siNmkWUy7geLUihV+i6q3+XTCc/zZRf7nef1l5GK1zn6WiLciQAel3Ecpf         bdZc618t8dfWKCvZaiGfJMyp4uy0epiyhHKuxP7xoFwppszNjOSQbtO/GDN+7StEjNW3         LG6L5v2AUcaykLag8tfxPJlklwiZyYot+eYvFfI+vqwk57zPg4p1YGIXjjIz6ktbwwpd         vAAZFL1g44JYsX2EU95JZnF6LiHL9U+o/0rAVEULTk3KCkzy0SMWUj252LlEGx2jodPv         dYKz74b7iJnINFqE8mE0/KKADINwR3PvjUOsCNWsHSYTGml8bMcEYRvDj5TMMis17qoq         yhtA=="
+      },
+      {
+        "name": "ARC-Message-Signature",
+        "value": "i=2; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20240605;        h=mime-version:content-language:accept-language:in-reply-to         :references:message-id:date:return-receipt-to:thread-index         :thread-topic:subject:to:from:dkim-signature;        bh=4vk8+fKjmb6w9bZRFaBb60Sa1Hx8SBMRDll8kbwwaVE=;        fh=xsIRVf5ysdMDh9z359XH0nCErOe4PdHUBrCavlBo+l4=;        b=ezeqT/7dluAjIrh60o8/8dUobW9iTCaBHuNKeXUPq390lNqBmpYJJMoipIiLE3gh1R         kbNv6fiiSsoNNuSnbfqbAoAp0y0LIlyDxn4CNCdbQqHSWNk8U+J9+uzq6QIv9e+04+XY         tpZd7ci3zV2kwKru75NU2EYEtLo4Fym1PfDjjRxPkhBHbzkD5/XGjC5bfMnSQR5l6HOt         aSKsuUiMkDsZcWA5aU/s0WQcbdXtqDylT8B+cBa3KpuH+dcOLI3SkxY71K2uDRwq1hLY         M29WRS6G1hUpNdQ8T2p4B3uNFdUwoZf9ZPHh3ptkJgRQ6llvSbDECndqs3MQGhRx3UTs         KutA==;        dara=google.com"
+      },
+      {
+        "name": "ARC-Authentication-Results",
+        "value": "i=2; mx.google.com;       dkim=pass header.i=@tea.texas.gov header.s=selector1 header.b=ZpRT673b;       arc=pass (i=1 spf=pass spfdomain=tea.texas.gov dkim=pass dkdomain=tea.texas.gov dmarc=pass fromdomain=tea.texas.gov);       spf=pass (google.com: domain of pir@tea.texas.gov designates 2a01:111:f403:c107::3 as permitted sender) smtp.mailfrom=PIR@tea.texas.gov;       dmarc=pass (p=QUARANTINE sp=QUARANTINE dis=NONE) header.from=tea.texas.gov"
+      },
+      {
+        "name": "Return-Path",
+        "value": "<PIR@tea.texas.gov>"
+      },
+      {
+        "name": "Received",
+        "value": "from PH0PR06CU001.outbound.protection.outlook.com (mail-westus3azlp170110003.outbound.protection.outlook.com. [2a01:111:f403:c107::3])        by mx.google.com with ESMTPS id 00721157ae682-7ea2597689csi32238987b3.166.2026.06.03.12.31.24        for <kevin.hopper1@gmail.com>        (version=TLS1_3 cipher=TLS_AES_256_GCM_SHA384 bits=256/256);        Wed, 03 Jun 2026 12:31:25 -0700 (PDT)"
+      },
+      {
+        "name": "Received-SPF",
+        "value": "pass (google.com: domain of pir@tea.texas.gov designates 2a01:111:f403:c107::3 as permitted sender) client-ip=2a01:111:f403:c107::3;"
+      },
+      {
+        "name": "Authentication-Results",
+        "value": "mx.google.com;       dkim=pass header.i=@tea.texas.gov header.s=selector1 header.b=ZpRT673b;       arc=pass (i=1 spf=pass spfdomain=tea.texas.gov dkim=pass dkdomain=tea.texas.gov dmarc=pass fromdomain=tea.texas.gov);       spf=pass (google.com: domain of pir@tea.texas.gov designates 2a01:111:f403:c107::3 as permitted sender) smtp.mailfrom=PIR@tea.texas.gov;       dmarc=pass (p=QUARANTINE sp=QUARANTINE dis=NONE) header.from=tea.texas.gov"
+      },
+      {
+        "name": "ARC-Seal",
+        "value": "i=1; a=rsa-sha256; s=arcselector10001; d=microsoft.com; cv=none; b=bcHQCrPmXNAHaPsi74vwVhpY7nxoIXa4fuvFyYIcmNREH0IwKf4Zy9DMUGkBYnfgVEYuZA+1uWl3KkZtqyH6gjDgyA2+fnUfm9f+GPN4MzLCSrVDtkCANr9LLIT0PtsMgQk0oavZE7zPJwX+88iRVXUBo98mNs0oDh69/kt+jhIVarA+QlryvtjGuG6bTJqQwIuTDPn/pFfutjy5YNFSROkHSSpQ+e0RhlPPXeGRtt8fI+4/16Qho+rWOQtettBFWSGw0FUn3oDIgGMsG+NohKQ0j2idLTiRoG88YIzlrLJlSeKU8HarBCm98qO36hEyem34MEdP+lh86JCC+s67Yg=="
+      },
+      {
+        "name": "ARC-Message-Signature",
+        "value": "i=1; a=rsa-sha256; c=relaxed/relaxed; d=microsoft.com; s=arcselector10001; h=From:Date:Subject:Message-ID:Content-Type:MIME-Version:X-MS-Exchange-AntiSpam-MessageData-ChunkCount:X-MS-Exchange-AntiSpam-MessageData-0:X-MS-Exchange-AntiSpam-MessageData-1; bh=4vk8+fKjmb6w9bZRFaBb60Sa1Hx8SBMRDll8kbwwaVE=; b=wwSSFLFhVRcpcC5jjPhxu2VOi2zRazfmjL2N/kzeApuE1yw5MIpK/nySJ+y6Q8ULBJcgcz65Y3UOAaOvbL6s1bb4cyNGBaJJdPs9k6lumud2h4PYYtCdFTzDbPuibpp2ojSJ6zGaYFJmQGVKiHnU49ygnS6M2xYBKUtxqZD1381gRGptWa2B04kELSF+hKcoJpWyciHgLc2c1gDMcIa9Gh6QsZ0BC8JWKB3ejuZ8MBxnK4ujDK7MF94tfrdymdca3ZsK9tFfzhs5h/4koakNxJ1NUvah25ITJ/HkmX13o5SiNgOksOJbdEXOsLqcoNM7EQTpjQC5f+iclMSOUzPzjQ=="
+      },
+      {
+        "name": "ARC-Authentication-Results",
+        "value": "i=1; mx.microsoft.com 1; spf=pass smtp.mailfrom=tea.texas.gov; dmarc=pass action=none header.from=tea.texas.gov; dkim=pass header.d=tea.texas.gov; arc=none"
+      },
+      {
+        "name": "DKIM-Signature",
+        "value": "v=1; a=rsa-sha256; c=relaxed/relaxed; d=tea.texas.gov; s=selector1; h=From:Date:Subject:Message-ID:Content-Type:MIME-Version:X-MS-Exchange-SenderADCheck; bh=4vk8+fKjmb6w9bZRFaBb60Sa1Hx8SBMRDll8kbwwaVE=; b=ZpRT673buNFxI6QCzT6FJh87T2kfu+JqXpwJ7Jlek3gf48EHmK3I2gT+BCFamGHMY2wgBIXy6wmJbCvFV7OSgnk6JpqEkre2AhXgsFwNFLZ8vxodpnv58jCearTNzQ20TJF1Cf9d4s5PZSnceJGaHMYr8egOCS84t40rVL3GJys7twwiLbo2i4qhsHbGdHpm1aeZ5Y8IWCtqFEiEqIzoPQUfG7gWmMKRunt8g9Tgg1Fm3xQDiV1JhR9RaJML1uibVhmWrye9BqNwZAFVyrLV+9RVk836cMkO0Y8oGnjygb2kh+zHeMYsYqLL3CJdLp7q/viT0cZkDBS8eVt3qFSyxA=="
+      },
+      {
+        "name": "Received",
+        "value": "from MW6PR22MB4252.namprd22.prod.outlook.com (2603:10b6:303:247::6) by MW6PR22MB4152.namprd22.prod.outlook.com (2603:10b6:303:242::7) with Microsoft SMTP Server (version=TLS1_2, cipher=TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384) id 15.21.71.15; Wed, 3 Jun 2026 19:31:20 +0000"
+      },
+      {
+        "name": "Received",
+        "value": "from MW6PR22MB4252.namprd22.prod.outlook.com ([fe80::d504:75c8:2de7:83b8]) by MW6PR22MB4252.namprd22.prod.outlook.com ([fe80::d504:75c8:2de7:83b8%5]) with mapi id 15.21.0092.006; Wed, 3 Jun 2026 19:31:20 +0000"
+      },
+      {
+        "name": "From",
+        "value": "PIR <PIR@tea.texas.gov>"
+      },
+      {
+        "name": "To",
+        "value": "Kevin Hopper <kevin.hopper1@gmail.com>"
+      },
+      {
+        "name": "Subject",
+        "value": "RE: PIR 2503540 (Hopper) Release Documents with Invoice and Documents at No Charge"
+      },
+      {
+        "name": "Thread-Topic",
+        "value": "PIR 2503540 (Hopper) Release Documents with Invoice and Documents at No Charge"
+      },
+      {
+        "name": "Thread-Index",
+        "value": "Adzonv+FfCth5npaSzGCo+mpNwG3qrYtSZgQ"
+      },
+      {
+        "name": "Return-Receipt-To",
+        "value": "<PIR@tea.texas.gov>"
+      },
+      {
+        "name": "Date",
+        "value": "Wed, 3 Jun 2026 19:31:20 +0000"
+      },
+      {
+        "name": "Message-ID",
+        "value": "<MW6PR22MB4252EE642326754DB6EDCB54C3132@MW6PR22MB4252.namprd22.prod.outlook.com>"
+      },
+      {
+        "name": "References",
+        "value": "<MW6PR22MB425244DB8C4E6DD6117CE602C3012@MW6PR22MB4252.namprd22.prod.outlook.com> <CAAuyrpoKFU-_wZuahP-MAMmVrpP1NZztw2Wi=QM8ghUqfa6Sog@mail.gmail.com>"
+      },
+      {
+        "name": "In-Reply-To",
+        "value": "<CAAuyrpoKFU-_wZuahP-MAMmVrpP1NZztw2Wi=QM8ghUqfa6Sog@mail.gmail.com>"
+      },
+      {
+        "name": "Accept-Language",
+        "value": "en-US"
+      },
+      {
+        "name": "Content-Language",
+        "value": "en-US"
+      },
+      {
+        "name": "X-MS-Has-Attach",
+        "value": "yes"
+      },
+      {
+        "name": "X-MS-TNEF-Correlator",
+        "value": ""
+      },
+      {
+        "name": "authentication-results",
+        "value": "dkim=none (message not signed) header.d=none;dmarc=none action=none header.from=tea.texas.gov;"
+      },
+      {
+        "name": "x-ms-exchange-messagesentrepresentingtype",
+        "value": "1"
+      },
+      {
+        "name": "x-ms-publictraffictype",
+        "value": "Email"
+      },
+      {
+        "name": "x-ms-traffictypediagnostic",
+        "value": "MW6PR22MB4252:EE_|MW6PR22MB4152:EE_"
+      },
+      {
+        "name": "x-ms-office365-filtering-correlation-id",
+        "value": "18d6e1f4-e9f1-438d-3a75-08dec1a6b0a6"
+      },
+      {
+        "name": "x-ms-reactions",
+        "value": "disallow"
+      },
+      {
+        "name": "x-ms-exchange-senderadcheck",
+        "value": "1"
+      },
+      {
+        "name": "x-ms-exchange-antispam-relay",
+        "value": "0"
+      },
+      {
+        "name": "x-microsoft-antispam",
+        "value": "BCL:0;ARA:13230040|366016|6049299003|376014|786006|1800799024|19033499003|38070700021|56012099006|4143699003|11063799006|8096899003|22082099003|18002099003|4053099003|4013099003|3613699012;"
+      },
+      {
+        "name": "x-microsoft-antispam-message-info",
+        "value": "CHVLt0o8QQNGsOji64jRp6DgnJM3jzn9SOF3mxkP95UB3VxeQH2uSjsTG8guvCqEqT7rwcxdYV+DphaXvanTsW6/ObsP9+U+ozkO4Rc917vNo9B3hWF0aHrrylLg6qKqB407N3dwrCbLj4KrAzpJTCqxc1u5OLull1GRyRXArzFQfsIlHhV7iIaxYdqFKx4Jk9z9p1w31ovbD5EnOfCzVHrKFGxfvCBQUduf8jfFexR6lhOzhCsxpkzN/a0Yf1UgaBdSRIdCX14H0F19gpi0QSQr/ZDae7yCBft0uIirTDBnfaee7SGmQlI04OHD4MCXSkqotXMKuPC1HiWqofAa67UIR56ZEBLMt5tVJruuJdR/6iCSezUlhcfwdr8jzZ4FASzTsRnecbSJj6psEKgNC1SiMLoBPb6Qu6TZjTTKjw12qbiS7J0oqJ563Xc6qvi+ygYN7zK0wJn+JmzclCCnMo3e3YMmebF0WKlOvVrv2PF3owXcXBE7yxplkcfSrMl+3W64hNtPZypjpL+U1v+0rmV5jhyWxC7FhhAu2idaeSYfA6VXnIQGLEe3FCIM+IVusJEgTOXVEUPO9umb+dyy8fzElhzhxBqvI5oiyZeckcKnzoV8vmrA3foExaC4eDtrpJKVnzU6q2IwsasGEWCXxcW2kFljRJ1iSiNyU+WZxw4="
+      },
+      {
+        "name": "x-forefront-antispam-report",
+        "value": "CIP:255.255.255.255;CTRY:;LANG:en;SCL:1;SRV:;IPV:NLI;SFV:NSPM;H:MW6PR22MB4252.namprd22.prod.outlook.com;PTR:;CAT:NONE;SFS:(13230040)(366016)(6049299003)(376014)(786006)(1800799024)(19033499003)(38070700021)(56012099006)(4143699003)(11063799006)(8096899003)(22082099003)(18002099003)(4053099003)(4013099003)(3613699012);DIR:OUT;SFP:1101;"
+      },
+      {
+        "name": "x-ms-exchange-antispam-messagedata-chunkcount",
+        "value": "1"
+      },
+      {
+        "name": "x-ms-exchange-antispam-messagedata-0",
+        "value": "yLcmGw4et2owFuYqh+6JYMRPGCtelEg7dgsKeyeDNCaX+5VCdUY7tE5wlYCPFCMSe7z8VtNTin/HsXHC1JT4Izt4GvXwTONP7gzcgB79OhtWwkX9VxpOCio/wFOXJUzCFMmvf1gAZN4c2XMjTtbvRQ5wJPqSJoQDEhWJug40umt00/hHjvStizrdL3qlx1vhC3qjvrhZXoTOh/Z/rFgZa8jXe3zlpZMRjeiLpEVOBwaguXI3cb1rqg5+9sJZrZAunM78g8QlePvZIUUXNyqabgbDQ3T8CS4/bQwdjNvNF0SoRoGsTMXzV2/ZMV73cqPodLZiHP6/PSXBYSJKOi5y9e6qSXSwZW/4kk098l/S9NkPxmDlght/9p0eVYtc+62ayw2sXNw2fGesRs1TVvoO9m/KrW/ySDn4O6uEHnbVzMC8cyRAwV2Oynu1IVl7C9GF147Lbei9pVkO+yXoX/WQaXh5KyK5PvoIZUwl45aFgSJ44ulJxM2OGoJ+bfBkdmbplbovcI2estJWb0bPkfoQahFGZwrClo+DfChyWLw5AOmtNU/Ym3BATSfH1O4eVwcSgLOiv1d9TkRGrPCKKSYeNb9JmtjK3J38Z6IDGWWxNqK0JcJQMcU1Z6od4efuxMoTwBKhxzINhSOxOQY4408mZ1eUbNblMJpDg18mAg3/nMybnkVMFVZb6D9tE7d5uNl3mmWihJn4EUIVol19qeW6/GStvSSBI1VtKNR9i+gUTGNfWAoy8pTRnBaqKi8bansz8bMfcWz0BDcJDCfYv9z5waMn4JB/NtgXhzidoy7gVOiiKa01JSyGm8Oga8TdFMRj3hhTM8Oz2FEuEAJs9D+E5Fj2mxuRQ/YMVMRmuOP162I2mNfxXISJkAVmcQzOFKz89h/9nj420sS//tGk8M7jlDMQDAQzRWNW9QsI5x0qF2J4noxs6JaevJoqexIgbdb6pmXDv01KcBhaDSWWmP3FgfnG7kZpfyJqaz5qBPellqRyG39a4gGNJqzzNbWop1XED8k3S5Az3ON7cpOEUdBhg486umoDh67w1/xRQXjXTouGuKjfAVXwhxukU1SE9UlSCj87KSPG4udP/Zev0BDfYVuwd4xluH0etoey2apTeu7+bk0h6fEXerjdkvOuwuNI2FTL5xPiWR9snhDyboOVx4AyBoDD/l062phF6jp1nTXGTyAbbfF1gnUG8O2tWVEBf3FGiZaUZ8ZZrQVqMHZXLIlBJTa5iOvm/0ZaSoKHVgxQGe24+awj+wWYZ0iD5k8sIG+QEJk48vEX2V842sJG+X6TWSq1gi8tLUiwnDzGupbelvsn1HGsVN9xXsqAeLslh7MA+7dsNBug8DlYJbqmFQjFXJOSxFFscZBM0/UWTsHjbpJpSzBuxLYoN5rbYEj4OnJmMJxR9MW1CTG9t79r83i1h9UA81atvplUwFAzq4AfIWxABeRzYdeZr7sKvl3jAtQeXIWh+kN84CVCZnGHbMNkJLuxSESVmxqxrokbG5t0q5JH7giIOVx1FyQhGbfNgzJcH8qog/NEEqqEryj1JptY6/QgoPKdlk48yUEAnkw1MfMoeFniLLLPpp9edzVoxVk1LT+attgiAqwv7Yx2qTCWQKjN6/kV0UvOzZYyhJaNlZqQldCsiTahLor8gKkKuzsy9BI6G14dOdr7b33eHabFTDhm7KAMJ2YsINxTmP9PfOFgS/VDeGWNGUpPYtfrlAts3D4wwCH3GB1YmTi8hCK+siHRTfX8qR8qMS15w1Q="
+      },
+      {
+        "name": "Content-Type",
+        "value": "multipart/mixed; boundary=\"_005_MW6PR22MB4252EE642326754DB6EDCB54C3132MW6PR22MB4252namp_\""
+      },
+      {
+        "name": "MIME-Version",
+        "value": "1.0"
+      },
+      {
+        "name": "X-OriginatorOrg",
+        "value": "tea.texas.gov"
+      },
+      {
+        "name": "X-MS-Exchange-CrossTenant-AuthAs",
+        "value": "Internal"
+      },
+      {
+        "name": "X-MS-Exchange-CrossTenant-AuthSource",
+        "value": "MW6PR22MB4252.namprd22.prod.outlook.com"
+      },
+      {
+        "name": "X-MS-Exchange-CrossTenant-Network-Message-Id",
+        "value": "18d6e1f4-e9f1-438d-3a75-08dec1a6b0a6"
+      },
+      {
+        "name": "X-MS-Exchange-CrossTenant-originalarrivaltime",
+        "value": "03 Jun 2026 19:31:20.5388 (UTC)"
+      },
+      {
+        "name": "X-MS-Exchange-CrossTenant-fromentityheader",
+        "value": "Hosted"
+      },
+      {
+        "name": "X-MS-Exchange-CrossTenant-id",
+        "value": "65d6b3c3-7236-4818-9613-248dbd713a6f"
+      },
+      {
+        "name": "X-MS-Exchange-CrossTenant-mailboxtype",
+        "value": "HOSTED"
+      },
+      {
+        "name": "X-MS-Exchange-CrossTenant-userprincipalname",
+        "value": "05TqZJbtdY660nGjfk2lpGWD9HqJs8cqIHeVKepNLJ26Cp3g0c1tfWlSxOUQWH3iIM3CwC+ay2vm6jlsa0A94PkSdIlM8p42khCjuAJszUIqdHwSxxdQNYQy82ml81qU"
+      },
+      {
+        "name": "X-MS-Exchange-Transport-CrossTenantHeadersStamped",
+        "value": "MW6PR22MB4152"
+      }
+    ],
+    "body": {
+      "size": 0
+    },
+    "parts": [
+      {
+        "partId": "0",
+        "mimeType": "multipart/alternative",
+        "filename": "",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "multipart/alternative; boundary=\"_000_MW6PR22MB4252EE642326754DB6EDCB54C3132MW6PR22MB4252namp_\""
+          }
+        ],
+        "body": {
+          "size": 0
+        },
+        "parts": [
+          {
+            "partId": "0.0",
+            "mimeType": "text/plain",
+            "filename": "",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "text/plain; charset=\"utf-8\""
+              },
+              {
+                "name": "Content-Transfer-Encoding",
+                "value": "base64"
+              }
+            ],
+            "body": {
+              "size": 2317,
+              "data": "TXIuIEhvcHBlciwNCg0KSSBoYXZlIGNoZWNrZWQgd2l0aCB0aGUgYXJlYSByZWdhcmRpbmcgeW91ciBpbnF1aXJ5IGJlbG93IGFuZCBoZXJlIGlzIHRoZSByZXNwb25zZSBhbG9uZyB3aXRoIHRoZSBhdHRhY2hlZCBkb2N1bWVudHMuDQoNClRleGFzIEVkdWNhdGlvbiBDb2RlIChURUMpIMKnMTIuMTEwMSBzdGF0ZXMgdGhhdCB0aGUgY29tbWlzc2lvbmVyIHNoYWxsIGFkb3B0IGEgcHJvY2VkdXJlIGZvciBwcm92aWRpbmcgbm90aWNlIG9mIHRoZSBlc3RhYmxpc2htZW50IG9mIGEgY2FtcHVzIHVuZGVyIFRFQyDCpzEyLjEwMSAoYi00KS4NCg0KDQoNCk5vbmUgb2YgdGhlIGV4cGFuc2lvbiBhbWVuZG1lbnQgcmVxdWVzdHMgc291Z2h0IGJ5IFRleGFzIENvbGxlZ2UgUHJlcGFyYXRvcnkgQWNhZGVtaWVzIChUQ1BBKSBxdWFsaWZpZWQgZm9yIGV4cGFuc2lvbiB1bmRlciBURUMgwqcxMi4xMDEgKGItNCksIHNvIG5vIG5vdGlmaWNhdGlvbnMgYXMgdG8gVENQQSB3ZXJlIGluY2x1ZGVkIGluIHRoaXMgcmVzcG9uc2UuIEFuIGF0dGFjaGVkIGRvY3VtZW50IHN0YXRlcyB0aGlzLg0KDQoNCg0KV2UgY29uZmlybSB0aGF0IHRoZSAiSW50ZXJuYXRpb25hbCBMZWFkZXJzaGlwIEFjYWRlbXkiIHN1bW1hcnkgZG9jdW1lbnRzIGNvdmVyIEludGVybmF0aW9uYWwgTGVhZGVyc2hpcCBvZiBUZXhhcyAoSUxUZXhhcywgQ0ROIDA1Ny04NDgpLg0KDQoNCg0KQWxlamFuZHJhIEdhbGxlZ29zDQoNCg0KDQpQdWJsaWMgSW5mb3JtYXRpb24gQ29vcmRpbmF0b3INCk9mZmljZSBvZiBHZW5lcmFsIENvdW5zZWwNCg0KNTEyLTQ2My0zNDY0DQoNCnd3dy50ZWEudGV4YXMuZ292DQoNCg0KDQoNCg0KDQoNCg0KDQotLS0tLU9yaWdpbmFsIE1lc3NhZ2UtLS0tLQ0KRnJvbTogS2V2aW4gSG9wcGVyIDxrZXZpbi5ob3BwZXIxQGdtYWlsLmNvbT4NClNlbnQ6IEZyaWRheSwgTWF5IDIyLCAyMDI2IDY6MDAgUE0NClRvOiBQSVIgPFBJUkB0ZWEudGV4YXMuZ292Pg0KU3ViamVjdDogUmU6IFBJUiAyNTAzNTQwIChIb3BwZXIpIFJlbGVhc2UgRG9jdW1lbnRzIHdpdGggSW52b2ljZSBhbmQgRG9jdW1lbnRzIGF0IE5vIENoYXJnZQ0KDQoNCg0KRGVhciBNcy4gR2FsbGVnb3MsDQoNCg0KDQpUaGFuayB5b3UgZm9yIHRoZSBNYXkgMjAgcmVsZWFzZSBvZiByZWNvcmRzIGZvciBQSVIgMjUwMzU0MCBhbmQgZm9yIHRoZSBmaW5hbCBpbnZvaWNlLiBJIHdpbGwgZHJvcCB0aGUgJDgxLjAwIG1vbmV5IG9yZGVyIGluIHRoZSBvdXRib3VuZCBtYWlsIHRoaXMgd2Vla2VuZC4NCg0KDQoNCkkgaGF2ZSBvbmUgaXRlbSB0byBmbGFnIG9uIEl0ZW0gNCAoSVNEIEltcGFjdCBOb3RpZmljYXRpb25zIHVuZGVyIFRFQyDCpzEyLjExMDEpLiBUaGUgcHJvZHVjdGlvbiBpbmNsdWRlcyBub3RpZmljYXRpb25zIGZvciBJREVBLCBLSVBQLCBVcGxpZnQsIGFuZCBIYXJtb255LCBhbmQgc3VtbWFyeSBkb2N1bWVudHMgZm9yIEludGVybmF0aW9uYWwgTGVhZGVyc2hpcC4gSXQgZG9lcyBub3QgaW5jbHVkZSBub3RpZmljYXRpb25zIGZvciBUZXhhcyBDb2xsZWdlIFByZXBhcmF0b3J5IEFjYWRlbWllcyAoQ0ROIDIyMS04MDEpLCBvbmUgb2YgdGhlIHNpeCBjaGFydGVyIGhvbGRlcnMgaW4gbXkgcmVxdWVzdCwgYW5kIEkgZGlkIG5vdCBmaW5kIGEgc3RhdGVtZW50IHRoYXQgbm8gc3VjaCByZWNvcmRzIGFyZSByZXRhaW5lZC4gUGxlYXNlIHByb2R1Y2UgdGhlIFRleGFzIENvbGxlZ2UgUHJlcGFyYXRvcnkgQWNhZGVtaWVzIG5vdGlmaWNhdGlvbnMsIG9yIGNvbmZpcm0gaW4gd3JpdGluZyB0aGF0IFRFQSBkb2VzIG5vdCByZXRhaW4gVEVDDQoNCsKnMTIuMTEwMSBub3RpZmljYXRpb25zIGZvciB0aGF0IGNoYXJ0ZXIgaG9sZGVyLiBQbGVhc2UgYWxzbyBjb25maXJtIHRoYXQgdGhlICJJbnRlcm5hdGlvbmFsIExlYWRlcnNoaXAgQWNhZGVteSIgc3VtbWFyeSBkb2N1bWVudHMgY292ZXIgSW50ZXJuYXRpb25hbCBMZWFkZXJzaGlwIG9mIFRleGFzIChJTFRleGFzLCBDRE4gMDU3LTg0OCkuDQoNCg0KDQpJIHVuZGVyc3RhbmQgdGhlIEl0ZW0gMyBmaW5hbmNpYWwgbW9uaXRvcmluZyByZWNvcmRzIHJlbWFpbiBzdWJqZWN0IHRvIHRoZSBBdHRvcm5leSBHZW5lcmFsJ3MgcGVuZGluZyBydWxpbmcsIGFuZCBJIGxvb2sgZm9yd2FyZCB0byB0aGF0IGRldGVybWluYXRpb24uDQoNCg0KDQpUaGFuayB5b3UgYWdhaW4gZm9yIHlvdXIgd29yayBvbiB0aGlzIHJlcXVlc3QuDQoNCg0KDQoNCg0KS2V2aW4gSG9wcGVyDQoNCmtldmluLmhvcHBlcjFAZ21haWwuY29tPG1haWx0bzprZXZpbi5ob3BwZXIxQGdtYWlsLmNvbT4NCg0KKDk3MikgNzU0LTY0MDYNCg=="
+            }
+          },
+          {
+            "partId": "0.1",
+            "mimeType": "text/html",
+            "filename": "",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=\"utf-8\""
+              },
+              {
+                "name": "Content-Transfer-Encoding",
+                "value": "base64"
+              }
+            ],
+            "body": {
+              "size": 5923,
+              "data": "PGh0bWwgeG1sbnM6dj0idXJuOnNjaGVtYXMtbWljcm9zb2Z0LWNvbTp2bWwiIHhtbG5zOm89InVybjpzY2hlbWFzLW1pY3Jvc29mdC1jb206b2ZmaWNlOm9mZmljZSIgeG1sbnM6dz0idXJuOnNjaGVtYXMtbWljcm9zb2Z0LWNvbTpvZmZpY2U6d29yZCIgeG1sbnM6bT0iaHR0cDovL3NjaGVtYXMubWljcm9zb2Z0LmNvbS9vZmZpY2UvMjAwNC8xMi9vbW1sIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvVFIvUkVDLWh0bWw0MCI-DQo8aGVhZD4NCjxtZXRhIGh0dHAtZXF1aXY9IkNvbnRlbnQtVHlwZSIgY29udGVudD0idGV4dC9odG1sOyBjaGFyc2V0PXV0Zi04Ij4NCjxtZXRhIG5hbWU9IkdlbmVyYXRvciIgY29udGVudD0iTWljcm9zb2Z0IFdvcmQgMTUgKGZpbHRlcmVkIG1lZGl1bSkiPg0KPHN0eWxlPjwhLS0NCi8qIEZvbnQgRGVmaW5pdGlvbnMgKi8NCkBmb250LWZhY2UNCgl7Zm9udC1mYW1pbHk6IkNhbWJyaWEgTWF0aCI7DQoJcGFub3NlLTE6MiA0IDUgMyA1IDQgNiAzIDIgNDt9DQpAZm9udC1mYWNlDQoJe2ZvbnQtZmFtaWx5OkNhbGlicmk7DQoJcGFub3NlLTE6MiAxNSA1IDIgMiAyIDQgMyAyIDQ7fQ0KLyogU3R5bGUgRGVmaW5pdGlvbnMgKi8NCnAuTXNvUGxhaW5UZXh0LCBsaS5Nc29QbGFpblRleHQsIGRpdi5Nc29QbGFpblRleHQNCgl7bXNvLXN0eWxlLXByaW9yaXR5Ojk5Ow0KCW1zby1zdHlsZS1saW5rOiJQbGFpbiBUZXh0IENoYXIiOw0KCW1hcmdpbjowaW47DQoJZm9udC1zaXplOjExLjBwdDsNCglmb250LWZhbWlseToiQ2FsaWJyaSIsc2Fucy1zZXJpZjsNCgltc28tbGlnYXR1cmVzOnN0YW5kYXJkY29udGV4dHVhbDt9DQpzcGFuLlBsYWluVGV4dENoYXINCgl7bXNvLXN0eWxlLW5hbWU6IlBsYWluIFRleHQgQ2hhciI7DQoJbXNvLXN0eWxlLXByaW9yaXR5Ojk5Ow0KCW1zby1zdHlsZS1saW5rOiJQbGFpbiBUZXh0IjsNCglmb250LWZhbWlseToiQ2FsaWJyaSIsc2Fucy1zZXJpZjt9DQouTXNvQ2hwRGVmYXVsdA0KCXttc28tc3R5bGUtdHlwZTpleHBvcnQtb25seTt9DQpAcGFnZSBXb3JkU2VjdGlvbjENCgl7c2l6ZTo4LjVpbiAxMS4waW47DQoJbWFyZ2luOjEuMGluIDEuMGluIDEuMGluIDEuMGluO30NCmRpdi5Xb3JkU2VjdGlvbjENCgl7cGFnZTpXb3JkU2VjdGlvbjE7fQ0KLS0-PC9zdHlsZT48IS0tW2lmIGd0ZSBtc28gOV0-PHhtbD4NCjxvOnNoYXBlZGVmYXVsdHMgdjpleHQ9ImVkaXQiIHNwaWRtYXg9IjEwMjYiIC8-DQo8L3htbD48IVtlbmRpZl0tLT48IS0tW2lmIGd0ZSBtc28gOV0-PHhtbD4NCjxvOnNoYXBlbGF5b3V0IHY6ZXh0PSJlZGl0Ij4NCjxvOmlkbWFwIHY6ZXh0PSJlZGl0IiBkYXRhPSIxIiAvPg0KPC9vOnNoYXBlbGF5b3V0PjwveG1sPjwhW2VuZGlmXS0tPg0KPC9oZWFkPg0KPGJvZHkgbGFuZz0iRU4tVVMiIGxpbms9IiM0Njc4ODYiIHZsaW5rPSIjOTY2MDdEIiBzdHlsZT0id29yZC13cmFwOmJyZWFrLXdvcmQiPg0KPGRpdiBjbGFzcz0iV29yZFNlY3Rpb24xIj4NCjxwIGNsYXNzPSJNc29QbGFpblRleHQiPjxzcGFuIHN0eWxlPSJmb250LWZhbWlseTomcXVvdDtBcmlhbCZxdW90OyxzYW5zLXNlcmlmIj5Nci4gSG9wcGVyLDxicj4NCjxicj4NCkkgaGF2ZSBjaGVja2VkIHdpdGggdGhlIGFyZWEgcmVnYXJkaW5nIHlvdXIgaW5xdWlyeSBiZWxvdyBhbmQgaGVyZSBpcyB0aGUgcmVzcG9uc2UgYWxvbmcgd2l0aCB0aGUgYXR0YWNoZWQgZG9jdW1lbnRzLjxicj4NCjxicj4NClRleGFzIEVkdWNhdGlvbiBDb2RlIChURUMpIMKnMTIuMTEwMSBzdGF0ZXMgdGhhdCB0aGUgY29tbWlzc2lvbmVyIHNoYWxsIGFkb3B0IGEgcHJvY2VkdXJlIGZvciBwcm92aWRpbmcgbm90aWNlIG9mIHRoZSBlc3RhYmxpc2htZW50IG9mIGEgY2FtcHVzIHVuZGVyIFRFQyDCpzEyLjEwMSAoYi00KS48bzpwPjwvbzpwPjwvc3Bhbj48L3A-DQo8cCBjbGFzcz0iTXNvUGxhaW5UZXh0Ij48c3BhbiBzdHlsZT0iZm9udC1mYW1pbHk6JnF1b3Q7QXJpYWwmcXVvdDssc2Fucy1zZXJpZiI-PG86cD4mbmJzcDs8L286cD48L3NwYW4-PC9wPg0KPHAgY2xhc3M9Ik1zb1BsYWluVGV4dCI-PHNwYW4gc3R5bGU9ImZvbnQtZmFtaWx5OiZxdW90O0FyaWFsJnF1b3Q7LHNhbnMtc2VyaWYiPk5vbmUgb2YgdGhlIGV4cGFuc2lvbiBhbWVuZG1lbnQgcmVxdWVzdHMgc291Z2h0IGJ5IFRleGFzIENvbGxlZ2UgUHJlcGFyYXRvcnkgQWNhZGVtaWVzIChUQ1BBKSBxdWFsaWZpZWQgZm9yIGV4cGFuc2lvbiB1bmRlciBURUMgwqcxMi4xMDEgKGItNCksIHNvIG5vIG5vdGlmaWNhdGlvbnMgYXMgdG8gVENQQSB3ZXJlIGluY2x1ZGVkDQogaW4gdGhpcyByZXNwb25zZS4gQW4gYXR0YWNoZWQgZG9jdW1lbnQgc3RhdGVzIHRoaXMuPG86cD48L286cD48L3NwYW4-PC9wPg0KPHAgY2xhc3M9Ik1zb1BsYWluVGV4dCI-PHNwYW4gc3R5bGU9ImZvbnQtZmFtaWx5OiZxdW90O0FyaWFsJnF1b3Q7LHNhbnMtc2VyaWYiPjxvOnA-Jm5ic3A7PC9vOnA-PC9zcGFuPjwvcD4NCjxwIGNsYXNzPSJNc29QbGFpblRleHQiPjxzcGFuIHN0eWxlPSJmb250LWZhbWlseTomcXVvdDtBcmlhbCZxdW90OyxzYW5zLXNlcmlmIj5XZSBjb25maXJtIHRoYXQgdGhlICZxdW90O0ludGVybmF0aW9uYWwgTGVhZGVyc2hpcCBBY2FkZW15JnF1b3Q7IHN1bW1hcnkgZG9jdW1lbnRzIGNvdmVyIEludGVybmF0aW9uYWwgTGVhZGVyc2hpcCBvZiBUZXhhcyAoSUxUZXhhcywgQ0ROIDA1Ny04NDgpLjxvOnA-PC9vOnA-PC9zcGFuPjwvcD4NCjxwIGNsYXNzPSJNc29QbGFpblRleHQiPjxzcGFuIHN0eWxlPSJmb250LWZhbWlseTomcXVvdDtBcmlhbCZxdW90OyxzYW5zLXNlcmlmIj48bzpwPiZuYnNwOzwvbzpwPjwvc3Bhbj48L3A-DQo8cCBjbGFzcz0iTXNvUGxhaW5UZXh0Ij48c3BhbiBzdHlsZT0iZm9udC1mYW1pbHk6JnF1b3Q7QXJpYWwmcXVvdDssc2Fucy1zZXJpZiI-QWxlamFuZHJhIEdhbGxlZ29zPG86cD48L286cD48L3NwYW4-PC9wPg0KPHAgY2xhc3M9Ik1zb1BsYWluVGV4dCI-PHNwYW4gc3R5bGU9ImZvbnQtZmFtaWx5OiZxdW90O0FyaWFsJnF1b3Q7LHNhbnMtc2VyaWYiPjxvOnA-Jm5ic3A7PC9vOnA-PC9zcGFuPjwvcD4NCjxwIGNsYXNzPSJNc29QbGFpblRleHQiPjxzcGFuIHN0eWxlPSJmb250LWZhbWlseTomcXVvdDtBcmlhbCZxdW90OyxzYW5zLXNlcmlmIj5QdWJsaWMgSW5mb3JtYXRpb24gQ29vcmRpbmF0b3I8YnI-DQpPZmZpY2Ugb2YgR2VuZXJhbCBDb3Vuc2VsPG86cD48L286cD48L3NwYW4-PC9wPg0KPHAgY2xhc3M9Ik1zb1BsYWluVGV4dCI-PHNwYW4gc3R5bGU9ImZvbnQtZmFtaWx5OiZxdW90O0FyaWFsJnF1b3Q7LHNhbnMtc2VyaWYiPjUxMi00NjMtMzQ2NDxvOnA-PC9vOnA-PC9zcGFuPjwvcD4NCjxwIGNsYXNzPSJNc29QbGFpblRleHQiPjxzcGFuIHN0eWxlPSJmb250LWZhbWlseTomcXVvdDtBcmlhbCZxdW90OyxzYW5zLXNlcmlmIj53d3cudGVhLnRleGFzLmdvdjxvOnA-PC9vOnA-PC9zcGFuPjwvcD4NCjxwIGNsYXNzPSJNc29QbGFpblRleHQiPjxvOnA-Jm5ic3A7PC9vOnA-PC9wPg0KPHAgY2xhc3M9Ik1zb1BsYWluVGV4dCI-PG86cD4mbmJzcDs8L286cD48L3A-DQo8cCBjbGFzcz0iTXNvUGxhaW5UZXh0Ij48bzpwPiZuYnNwOzwvbzpwPjwvcD4NCjxwIGNsYXNzPSJNc29QbGFpblRleHQiPjxvOnA-Jm5ic3A7PC9vOnA-PC9wPg0KPHAgY2xhc3M9Ik1zb1BsYWluVGV4dCI-LS0tLS1PcmlnaW5hbCBNZXNzYWdlLS0tLS08YnI-DQpGcm9tOiBLZXZpbiBIb3BwZXIgJmx0O2tldmluLmhvcHBlcjFAZ21haWwuY29tJmd0OyA8YnI-DQpTZW50OiBGcmlkYXksIE1heSAyMiwgMjAyNiA2OjAwIFBNPGJyPg0KVG86IFBJUiAmbHQ7UElSQHRlYS50ZXhhcy5nb3YmZ3Q7PGJyPg0KU3ViamVjdDogUmU6IFBJUiAyNTAzNTQwIChIb3BwZXIpIFJlbGVhc2UgRG9jdW1lbnRzIHdpdGggSW52b2ljZSBhbmQgRG9jdW1lbnRzIGF0IE5vIENoYXJnZTwvcD4NCjxwIGNsYXNzPSJNc29QbGFpblRleHQiPjxvOnA-Jm5ic3A7PC9vOnA-PC9wPg0KPHAgY2xhc3M9Ik1zb1BsYWluVGV4dCI-RGVhciBNcy4gR2FsbGVnb3MsPG86cD48L286cD48L3A-DQo8cCBjbGFzcz0iTXNvUGxhaW5UZXh0Ij48bzpwPiZuYnNwOzwvbzpwPjwvcD4NCjxwIGNsYXNzPSJNc29QbGFpblRleHQiPlRoYW5rIHlvdSBmb3IgdGhlIE1heSAyMCByZWxlYXNlIG9mIHJlY29yZHMgZm9yIFBJUiAyNTAzNTQwIGFuZCBmb3IgdGhlIGZpbmFsIGludm9pY2UuIEkgd2lsbCBkcm9wIHRoZSAkODEuMDAgbW9uZXkgb3JkZXIgaW4gdGhlIG91dGJvdW5kIG1haWwgdGhpcyB3ZWVrZW5kLjxvOnA-PC9vOnA-PC9wPg0KPHAgY2xhc3M9Ik1zb1BsYWluVGV4dCI-PG86cD4mbmJzcDs8L286cD48L3A-DQo8cCBjbGFzcz0iTXNvUGxhaW5UZXh0Ij5JIGhhdmUgb25lIGl0ZW0gdG8gZmxhZyBvbiBJdGVtIDQgKElTRCBJbXBhY3QgTm90aWZpY2F0aW9ucyB1bmRlciBURUMgwqcxMi4xMTAxKS4gVGhlIHByb2R1Y3Rpb24gaW5jbHVkZXMgbm90aWZpY2F0aW9ucyBmb3IgSURFQSwgS0lQUCwgVXBsaWZ0LCBhbmQgSGFybW9ueSwgYW5kIHN1bW1hcnkgZG9jdW1lbnRzIGZvciBJbnRlcm5hdGlvbmFsIExlYWRlcnNoaXAuIEl0IGRvZXMgbm90IGluY2x1ZGUgbm90aWZpY2F0aW9ucw0KIGZvciBUZXhhcyBDb2xsZWdlIFByZXBhcmF0b3J5IEFjYWRlbWllcyAoQ0ROIDIyMS04MDEpLCBvbmUgb2YgdGhlIHNpeCBjaGFydGVyIGhvbGRlcnMgaW4gbXkgcmVxdWVzdCwgYW5kIEkgZGlkIG5vdCBmaW5kIGEgc3RhdGVtZW50IHRoYXQgbm8gc3VjaCByZWNvcmRzIGFyZSByZXRhaW5lZC4gUGxlYXNlIHByb2R1Y2UgdGhlIFRleGFzIENvbGxlZ2UgUHJlcGFyYXRvcnkgQWNhZGVtaWVzIG5vdGlmaWNhdGlvbnMsIG9yIGNvbmZpcm0gaW4gd3JpdGluZw0KIHRoYXQgVEVBIGRvZXMgbm90IHJldGFpbiBURUM8bzpwPjwvbzpwPjwvcD4NCjxwIGNsYXNzPSJNc29QbGFpblRleHQiPsKnMTIuMTEwMSBub3RpZmljYXRpb25zIGZvciB0aGF0IGNoYXJ0ZXIgaG9sZGVyLiBQbGVhc2UgYWxzbyBjb25maXJtIHRoYXQgdGhlICZxdW90O0ludGVybmF0aW9uYWwgTGVhZGVyc2hpcCBBY2FkZW15JnF1b3Q7IHN1bW1hcnkgZG9jdW1lbnRzIGNvdmVyIEludGVybmF0aW9uYWwgTGVhZGVyc2hpcCBvZiBUZXhhcyAoSUxUZXhhcywgQ0ROIDA1Ny04NDgpLjxvOnA-PC9vOnA-PC9wPg0KPHAgY2xhc3M9Ik1zb1BsYWluVGV4dCI-PG86cD4mbmJzcDs8L286cD48L3A-DQo8cCBjbGFzcz0iTXNvUGxhaW5UZXh0Ij5JIHVuZGVyc3RhbmQgdGhlIEl0ZW0gMyBmaW5hbmNpYWwgbW9uaXRvcmluZyByZWNvcmRzIHJlbWFpbiBzdWJqZWN0IHRvIHRoZSBBdHRvcm5leSBHZW5lcmFsJ3MgcGVuZGluZyBydWxpbmcsIGFuZCBJIGxvb2sgZm9yd2FyZCB0byB0aGF0IGRldGVybWluYXRpb24uPG86cD48L286cD48L3A-DQo8cCBjbGFzcz0iTXNvUGxhaW5UZXh0Ij48bzpwPiZuYnNwOzwvbzpwPjwvcD4NCjxwIGNsYXNzPSJNc29QbGFpblRleHQiPlRoYW5rIHlvdSBhZ2FpbiBmb3IgeW91ciB3b3JrIG9uIHRoaXMgcmVxdWVzdC48bzpwPjwvbzpwPjwvcD4NCjxwIGNsYXNzPSJNc29QbGFpblRleHQiPjxvOnA-Jm5ic3A7PC9vOnA-PC9wPg0KPHAgY2xhc3M9Ik1zb1BsYWluVGV4dCI-PG86cD4mbmJzcDs8L286cD48L3A-DQo8cCBjbGFzcz0iTXNvUGxhaW5UZXh0Ij5LZXZpbiBIb3BwZXI8bzpwPjwvbzpwPjwvcD4NCjxwIGNsYXNzPSJNc29QbGFpblRleHQiPjxhIGhyZWY9Im1haWx0bzprZXZpbi5ob3BwZXIxQGdtYWlsLmNvbSI-PHNwYW4gc3R5bGU9ImNvbG9yOndpbmRvd3RleHQ7dGV4dC1kZWNvcmF0aW9uOm5vbmUiPmtldmluLmhvcHBlcjFAZ21haWwuY29tPC9zcGFuPjwvYT48bzpwPjwvbzpwPjwvcD4NCjxwIGNsYXNzPSJNc29QbGFpblRleHQiPig5NzIpIDc1NC02NDA2PG86cD48L286cD48L3A-DQo8L2Rpdj4NCjwvYm9keT4NCjwvaHRtbD4NCg=="
+            }
+          }
+        ]
+      },
+      {
+        "partId": "1",
+        "mimeType": "application/pdf",
+        "filename": "International Leadership of Texas_Impact State Response Summary.pdf",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "application/pdf; name=\"International Leadership of Texas_Impact State Response Summary.pdf\""
+          },
+          {
+            "name": "Content-Description",
+            "value": "International Leadership of Texas_Impact State Response Summary.pdf"
+          },
+          {
+            "name": "Content-Disposition",
+            "value": "attachment; filename=\"International Leadership of Texas_Impact State Response Summary.pdf\"; size=54905; creation-date=\"Wed, 03 Jun 2026 19:31:19 GMT\"; modification-date=\"Wed, 03 Jun 2026 19:31:20 GMT\""
+          },
+          {
+            "name": "Content-Transfer-Encoding",
+            "value": "base64"
+          }
+        ],
+        "body": {
+          "attachmentId": "ANGjdJ8UgfNqmGEjfZ3H-PLP0U5U8A2yarL2NCSfuajOqyYHXFo9v3r9_A0z1PDyUOOWaT5X2qigcN2d2qf1QeR0GZ9X9I2f05ga58unMuAntNllVrUhqw8EQRHjZKdEETi1Ww0ggLWtUJUC_yIJs3wKb2BRl0TfT09MEnuY31BjjVOU5jsdqYtPAeDdsIHbE-MpnWBJOSUWRuTe9bYZOLeAVGCJVih4_PDniEDfHrDYGUMHq_tBlUqOIpxqNuvcIHUV1QA8zh8wI8FdOjQMNE3uLaOW1WksrC2UGJ1UYdRLYr6ouVkyL305C1wJBCQI2IOo5wTO0obgMNaSuszI5TNb6KDbkZmozmGIhvz6_wDK4_-7VxR-odF-01R7kbvFJLBmAfKrgQPglUDYaujA",
+          "size": 54905
+        }
+      },
+      {
+        "partId": "2",
+        "mimeType": "application/pdf",
+        "filename": "International Leadership of Texas_PIR Request Summary 4.6.26.pdf",
+        "headers": [
+          {
+            "name": "Content-Type",
+            "value": "application/pdf; name=\"International Leadership of Texas_PIR Request Summary 4.6.26.pdf\""
+          },
+          {
+            "name": "Content-Description",
+            "value": "International Leadership of Texas_PIR Request Summary 4.6.26.pdf"
+          },
+          {
+            "name": "Content-Disposition",
+            "value": "attachment; filename=\"International Leadership of Texas_PIR Request Summary 4.6.26.pdf\"; size=15008; creation-date=\"Wed, 03 Jun 2026 19:29:27 GMT\"; modification-date=\"Wed, 03 Jun 2026 19:31:20 GMT\""
+          },
+          {
+            "name": "Content-Transfer-Encoding",
+            "value": "base64"
+          }
+        ],
+        "body": {
+          "attachmentId": "ANGjdJ8__CuOspUR0jdrLJi_JXH26p0p_FqFY9HxAzW9EcpPt6n0gnZ-l1L4jTVo8ObT509S_siqqkuu0dFT0CxqbEj1n23W2cuItfWAaKWSPq0HHex4exaT5Mnwlesd6dlU7rgox7nnl-RVWW41uZoBFrfmQelfKLp9Jm2sAcpIAT12wpBP3FX1tMHi1Y24TmzwH19rBqrFS87hOVUOSUra0a-jklbMp8gUm5tHFMHnZDOsHN3i61vgv1gRluiYRlKL2h6ezxZJJsOLLx3KjADT2L9HuHBmVyBLU870lpTwiGT1Bkvlkhe3_DBh4ANKEKzbF5U15nt5PSx1sQKqcaCeFCWEoURqVViFxZOR4zJhZEIoS_049JnLzSKGNy8MJ0mJ38_D15vp0HPbeheL",
+          "size": 15008
+        }
+      }
+    ]
+  },
+  "sizeEstimate": 120714,
+  "historyId": "29676010",
+  "internalDate": "1780515080000"
+}

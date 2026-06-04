@@ -1,0 +1,23 @@
+{
+  "pir": "2503540",
+  "tag": "lockin",
+  "run": 2,
+  "case_type": "correspondence",
+  "exit": 0,
+  "wall_ms": 614327,
+  "reply_text": "I'll process this correspondence case following the REPLY-DRAFTING WORKFLOW. Let me start by reading the inbound message and gathering context.\n\nNow let me get the PIR tracker details and read the PDF attachments.\n\nLet me check the existing staging artifacts and read the PDF attachments.\n\nGood. I have all the context. TEA's response resolves both open items from Kevin's May 22 follow-up:\n1. **TCPA gap**: No qualifying expansion requests under TEC §12.101(b-4), so no notifications exist\n2. **ILTexas confirmation**: Confirmed the summary documents cover ILTexas (CDN 057-848)\n\nThe impact statement summary shows 27 districts with no significant impact and 8 with major impact (from `computed_facts`). Let me create the staging artifacts.\n\nNow I'll write all the staging artifacts.\n\nNow let me append the status note and PATCH the tracker.\n\nLet me verify all staging artifacts are in place.\n\nAll staging artifacts are in place and the tracker is updated. Here's the summary:\n\n**PIR #2503540 — Correspondence processed**\n\nTEA (Alejandra Gallegos) responded to the May 22 follow-up, resolving both open items:\n\n1. **TCPA gap** — No expansion amendment requests by TCPA qualified under TEC §12.101(b-4), so no §12.1101 notifications were generated\n2. **ILTexas confirmation** — Confirmed the \"International Leadership Academy\" summary documents cover ILTexas (CDN 057-848)\n\nThe ILTexas impact statement summary shows 27 districts with no significant impact and 8 with major impact.\n\n**Staging artifacts written:**\n- `_staging/2503540/correspondence_reply.txt` — acknowledgment reply\n- `_staging/2503540/review_email.md` — review email with preview link\n- `_staging/2503540/claims.json` — verified counts from computed_facts\n\n**Tracker state:** `processing_lease_status=awaiting-review`, `action_needed=Review drafted reply at _staging/2503540/`, lease kept.\n\nAwaiting your APPROVE/REVISE/REJECT on the review thread.",
+  "result_action": "asked",
+  "tool_calls": 13,
+  "tool_errors": 0,
+  "pi_session_id": "019e9469-a9e0-7f7b-98bc-30d5acd0d42e",
+  "model": "crow-local/qwen3.6-35b-a3b",
+  "tokens_in": 19702,
+  "tokens_out": 3838,
+  "gen_tok_s": 7.2,
+  "span_ms": 533055,
+  "staging_files": [
+    "claims.json",
+    "correspondence_reply.txt",
+    "review_email.md"
+  ]
+}

@@ -1,0 +1,379 @@
+#!/usr/bin/env node
+// pir-fullflow.mjs — full-flow PIR regression harness: email -> close, sandboxed.
+//
+// Extends pir-pipeline-bench.mjs to drive the WHOLE lifecycle per PIR and assert
+// a per-stage verdict (INGEST / BOT / VALIDATE / CLOSE) over N reps, isolated
+// from production so nothing real is mutated or sent.
+//
+//   node pir-fullflow.mjs --pir <pir_number> --runs <n> [--tag t] [flags]
+//   node pir-fullflow.mjs --all --runs <n>            # iterate the Tier-1 golden set
+//
+// Flags:
+//   --ingest-only   run the deterministic INGEST assert only (no model, no sandbox)
+//   --no-approve    run INGEST+BOT+VALIDATE, skip APPROVE->CLOSE
+//   --keep-sandbox  leave the sandbox canvas-companion running after the run
+//   --no-swap       do not call pir_model_swap.sh (use whatever is already served)
+//
+// ISOLATION MODEL (a maintenance window, like the model swap):
+//  * Tracker/notes: production canvas-companion-web MUST be stopped first; this
+//    harness launches a dedicated uvicorn on :8080 pointed at a COPY of canvas.db
+//    (CANVAS_DB_PATH override). The bot's hardcoded :8080 lands in throwaway state.
+//  * Loader commit: each rep exports TEA_DB=<fresh per-rep copy> so loader --commit
+//    writes to a throwaway tea_data.db (loader reads os.environ TEA_DB).
+//  * Filesystem: the bot's write_paths are fail-closed to the real _staging /
+//    pir-incoming, so we write to the REAL _staging and snapshot/restore it
+//    (the proven pir-pipeline-bench model); holding dirs are read-only inputs.
+//  * crow.db research_sources: delete rows added during each run (watermark).
+//  * Model serving: the harness owns pir_model_swap.sh (27B reply / 35B delivery)
+//    with a fail-safe restore to the 35B daily driver on exit.
+//
+// PRECONDITION: PIR systemd timers stopped AND canvas-companion-web stopped.
+// The harness refuses to run otherwise (it needs sole-writer + port :8080).
+
+import fs from "node:fs";
+import path from "node:path";
+import { execFileSync, spawn } from "node:child_process";
+import crypto from "node:crypto";
+import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import { ingestReplay } from "/home/kh0pp/crow/scripts/bots/sync_pir_responses.mjs";
+import * as A from "/home/kh0pp/crow/scripts/bench/pir-stage-assert.mjs";
+
+// ── paths ────────────────────────────────────────────────────────────────────
+const CROW = "/home/kh0pp/crow";
+const BRIDGE = `${CROW}/scripts/pi-bots/bridge.mjs`;
+const MODEL_SWAP = `${CROW}/scripts/bots/pir_model_swap.sh`;
+const COMPUTE_FACTS = `${CROW}/scripts/bots/pir_compute_facts.py`;
+const CANVAS_DB_PROD = "/home/kh0pp/spring-2026/canvas-companion/db/canvas.db";
+const CANVAS_APP_DIR = "/home/kh0pp/spring-2026/canvas-companion";
+const CANVAS_UVICORN = `${CANVAS_APP_DIR}/.venv/bin/uvicorn`;
+const TEA_DB_PROD = "/home/kh0pp/spring-2026/texas-gov-data-mcp/data/tea_data.db";
+const CROW_DB = "/home/kh0pp/.crow-mpa/data/crow.db";
+const SOURCES = "/home/kh0pp/spring-2026/insd-5941/sources";
+const FIXTURES = `${CROW}/scripts/bench/fixtures`;
+const GOLDEN = `${CROW}/scripts/bench/golden`;
+const RESULTS = `${CROW}/scripts/bench/results/pir-fullflow`;
+const SANDBOX = `${RESULTS}/_sandbox`;
+const UV_BIN = process.env.UV_BIN || "/home/kh0pp/.local/bin/uv";
+
+// ── args ──────────────────────────────────────────────────────────────────────
+function arg(name, def = null) { const i = process.argv.indexOf(`--${name}`); return i !== -1 ? process.argv[i + 1] : def; }
+function flag(name) { return process.argv.includes(`--${name}`); }
+const ALL = flag("all");
+const PIR_ARG = arg("pir");
+const RUNS = parseInt(arg("runs", "1"), 10);
+const TAG = arg("tag", "ff");
+const INGEST_ONLY = flag("ingest-only");
+const NO_APPROVE = flag("no-approve");
+const KEEP_SANDBOX = flag("keep-sandbox");
+const NO_SWAP = flag("no-swap");
+const TURN_TIMEOUT_MS = process.env.PIBOT_TURN_TIMEOUT_MS || String(25 * 60 * 1000);
+const RUN_TIMEOUT_MS = Number(process.env.PIR_FULLFLOW_RUN_TIMEOUT_MS || 30 * 60 * 1000);
+
+function log(m) { console.error(`[fullflow ${new Date().toISOString()}] ${m}`); }
+function die(m) { console.error(`FATAL: ${m}`); process.exit(1); }
+
+// ── preflight ──────────────────────────────────────────────────────────────────
+function timerActive(t) {
+  try { return execFileSync("systemctl", ["is-active", t], { stdio: "pipe" }).toString().trim() === "active"; }
+  catch { return false; }
+}
+function portListening() {
+  try { execFileSync("bash", ["-c", "curl -sf -o /dev/null -m 3 http://localhost:8080/api/pir/1 || curl -sf -o /dev/null -m 3 http://localhost:8080/"], { stdio: "pipe" }); return true; }
+  catch { return false; }
+}
+
+// ── model swap (harness-owned) ─────────────────────────────────────────────────
+let swapped = false;
+function swap(which) {
+  if (NO_SWAP) { log(`--no-swap: leaving served model as-is (wanted ${which})`); return true; }
+  try { execFileSync("bash", [MODEL_SWAP, which], { timeout: 6 * 60 * 1000, stdio: "pipe" }); swapped = (which === "27b"); log(`model -> ${which}`); return true; }
+  catch (e) { log(`MODEL SWAP -> ${which} FAILED: ${e.message}`); return false; }
+}
+function restoreModel() { if (!NO_SWAP) { try { execFileSync("bash", [MODEL_SWAP, "35b"], { timeout: 6 * 60 * 1000, stdio: "pipe" }); log("restored 35b daily driver"); } catch (e) { log(`WARNING restore 35b failed: ${e.message}`); } } }
+
+// ── sandbox canvas-companion ───────────────────────────────────────────────────
+let sandboxProc = null;
+const sandboxDb = `${SANDBOX}/canvas.sandbox.db`;
+function startSandbox() {
+  fs.mkdirSync(SANDBOX, { recursive: true });
+  for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(sandboxDb + ext, { force: true }); } catch { /* */ } }
+  // pristine copy of prod canvas.db (read prod via sqlite backup-style copy)
+  execFileSync("bash", ["-c", `sqlite3 ${CANVAS_DB_PROD} ".backup '${sandboxDb}'"`], { stdio: "pipe" });
+  log(`sandbox canvas.db copied -> ${sandboxDb}`);
+  const env = { ...process.env, CANVAS_DB_PATH: sandboxDb, PYTHONPATH: CANVAS_APP_DIR };
+  sandboxProc = spawn(CANVAS_UVICORN, ["src.web.app:app", "--host", "0.0.0.0", "--port", "8080"],
+    { cwd: CANVAS_APP_DIR, env, stdio: ["ignore", fs.openSync(`${SANDBOX}/uvicorn.log`, "w"), fs.openSync(`${SANDBOX}/uvicorn.err.log`, "w")] });
+  // wait for health
+  const t0 = Date.now();
+  while (Date.now() - t0 < 60000) {
+    if (portListening()) { log(`sandbox uvicorn up on :8080 (pid ${sandboxProc.pid}) -> ${sandboxDb}`); return true; }
+    execFileSync("sleep", ["1"]);
+  }
+  die("sandbox uvicorn did not become healthy on :8080 within 60s (see _sandbox/uvicorn.err.log)");
+}
+function stopSandbox() {
+  if (sandboxProc && !sandboxProc.killed) { try { process.kill(sandboxProc.pid, "SIGTERM"); } catch { /* */ } log("sandbox uvicorn stopped"); }
+}
+
+// ── crow.db helpers ─────────────────────────────────────────────────────────────
+function deleteBotSession(threadId) {
+  const c = new Database(CROW_DB); c.pragma("busy_timeout=8000");
+  c.prepare("DELETE FROM bot_sessions WHERE bot_id='pir-processor' AND gateway_thread_id=?").run(threadId); c.close();
+}
+function researchSourcesMax() {
+  try { const c = new Database(CROW_DB, { readonly: true }); const r = c.prepare("SELECT COALESCE(MAX(id),0) AS m FROM research_sources").get(); c.close(); return r.m; }
+  catch { return null; }
+}
+function researchSourcesCleanup(watermark) {
+  if (watermark == null) return;
+  try { const c = new Database(CROW_DB); c.pragma("busy_timeout=8000"); const n = c.prepare("DELETE FROM research_sources WHERE id > ?").run(watermark).changes; c.close(); if (n) log(`cleaned ${n} research_sources rows added during run`); }
+  catch (e) { log(`research_sources cleanup skipped: ${e.message}`); }
+}
+
+// ── sandbox row reset (per rep) ──────────────────────────────────────────────────
+function sandboxRow(pir) {
+  const db = new Database(sandboxDb, { readonly: true });
+  const r = db.prepare("SELECT id, pir_number, status, processing_lease_status, processing_lease, case_type, requested_items FROM pir_requests WHERE pir_number=?").get(pir);
+  db.close(); return r;
+}
+function resetSandboxRow(pir, golden, token) {
+  const db = new Database(sandboxDb); db.pragma("busy_timeout=8000");
+  const ks = golden.kickoff_state || {};
+  const row = db.prepare("SELECT id FROM pir_requests WHERE pir_number=?").get(pir);
+  if (!row) { db.close(); die(`PIR ${pir} not in sandbox canvas.db`); }
+  db.prepare(`UPDATE pir_requests SET status=COALESCE(?,status), processing_lease=?, processing_lease_status='in-progress', updated_at=datetime('now') WHERE id=?`)
+    .run(ks.status || null, token, row.id);
+  db.close(); return row.id;
+}
+
+// ── per-rep TEA_DB copy ──────────────────────────────────────────────────────────
+function freshTeaCopy(pir, n) {
+  const dst = `${SANDBOX}/tea_${pir}_${TAG}_${n}.db`;
+  for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dst + ext, { force: true }); } catch { /* */ } }
+  execFileSync("bash", ["-c", `sqlite3 ${TEA_DB_PROD} ".backup '${dst}'"`], { stdio: "pipe" });
+  // Drop any pre-existing research_pir<pir>_* tables so the loader's duplicate
+  // guard does NOT mask the commit — this rep must exercise a real fresh write.
+  const db = new Database(dst); db.pragma("busy_timeout=8000");
+  const tbls = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?").all(`research_pir${pir}_%`);
+  for (const t of tbls) db.prepare(`DROP TABLE IF EXISTS "${t.name}"`).run();
+  db.close();
+  if (tbls.length) log(`  dropped ${tbls.length} pre-existing research_pir${pir}_* table(s) from TEA copy`);
+  return dst;
+}
+function teaCommittedRows(teaDb, pir) {
+  try {
+    const db = new Database(teaDb, { readonly: true });
+    const tbls = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?").all(`research_pir${pir}_%`);
+    let total = 0;
+    for (const t of tbls) total += db.prepare(`SELECT COUNT(*) AS c FROM "${t.name}"`).get().c;
+    db.close(); return tbls.length ? total : null;
+  } catch { return null; }
+}
+
+// ── staging snapshot/restore (real _staging dir) ─────────────────────────────────
+function snapshotStaging(pir) {
+  const sdir = path.join(SOURCES, "_staging", pir);
+  const snap = `${SANDBOX}/_staging_snap_${pir}`;
+  try { fs.rmSync(snap, { recursive: true, force: true }); } catch { /* */ }
+  if (fs.existsSync(sdir)) fs.cpSync(sdir, snap, { recursive: true });
+  return { sdir, snap, existed: fs.existsSync(sdir) };
+}
+function restoreStaging(s) {
+  try { fs.rmSync(s.sdir, { recursive: true, force: true }); } catch { /* */ }
+  if (s.existed && fs.existsSync(s.snap)) fs.cpSync(s.snap, s.sdir, { recursive: true });
+}
+
+// ── fixtures / golden ─────────────────────────────────────────────────────────────
+function loadGolden(pir) { const p = `${GOLDEN}/${pir}.json`; return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : null; }
+function loadFixture(pir) { const p = `${FIXTURES}/${pir}.json`; return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : null; }
+
+function computeFacts(holdingDir) {
+  try {
+    execFileSync(UV_BIN, ["run", "--with", "openpyxl", "python3", COMPUTE_FACTS, holdingDir], { timeout: 120000, stdio: "pipe" });
+    const p = `${holdingDir}/computed_facts.json`;
+    return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : null;
+  } catch (e) { log(`computeFacts failed: ${e.message}`); return null; }
+}
+
+// drive bridge --inject; returns {stdout, exit, reply, result}
+function bridgeInject(threadId, userMessage, env) {
+  const payload = JSON.stringify({ bot_id: "pir-processor", gateway_thread_id: threadId, user_message: userMessage });
+  let stdout = "", exit = 0;
+  try {
+    stdout = execFileSync(process.execPath, [BRIDGE, "--inject", payload],
+      { timeout: RUN_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, PIBOT_TURN_TIMEOUT_MS: TURN_TIMEOUT_MS, ...env } }).toString();
+  } catch (e) { exit = e.status ?? 1; stdout = (e.stdout ? e.stdout.toString() : "") + "\n[STDERR]\n" + (e.stderr ? e.stderr.toString() : ""); }
+  const replyM = stdout.match(/REPLY>>>\n([\s\S]*?)\n<<<REPLY/);
+  const resultM = stdout.match(/RESULT (\{[\s\S]*\})\s*$/m);
+  let result = null; try { result = resultM ? JSON.parse(resultM[1]) : null; } catch { /* */ }
+  return { stdout, exit, reply: replyM ? replyM[1] : null, result };
+}
+
+// ── one rep ────────────────────────────────────────────────────────────────────────
+function runRep(pir, golden, fixture, caseType, n) {
+  const threadId = `ff-${pir}-${TAG}-${n}-${crypto.randomUUID().slice(0, 8)}`;
+  const token = `ff-${crypto.randomUUID()}`;
+  const outDir = `${RESULTS}/${TAG}/${pir}/run${n}`;
+  fs.mkdirSync(outDir, { recursive: true });
+  const holdingDir = path.join(SOURCES, "pir-incoming", pir);
+  const stagingDir = path.join(SOURCES, "_staging", pir);
+  const stages = [];
+
+  // INGEST (deterministic, no model)
+  const replay = fixture ? ingestReplay(fixture) : null;
+  stages.push(A.assertIngest({ golden, replay }));
+
+  if (INGEST_ONLY) {
+    const verdict = A.rollup(stages);
+    fs.writeFileSync(path.join(outDir, "meta.json"), JSON.stringify({ pir, tag: TAG, run: n, case_type: caseType, stages, verdict, ingest_only: true }, null, 2));
+    return { pir, run: n, stages, verdict };
+  }
+
+  // sandbox + fs reset
+  const sSnap = snapshotStaging(pir);
+  fs.rmSync(stagingDir, { recursive: true, force: true });
+  const pirId = resetSandboxRow(pir, golden, token);
+  deleteBotSession(threadId);
+  const teaDb = caseType === "delivery" ? freshTeaCopy(pir, n) : null;
+  const rsWatermark = researchSourcesMax();
+  const facts = computeFacts(holdingDir);
+
+  // DISPATCH + BOT (kickoff)
+  let requestedItems = null;
+  try { const r = sandboxRow(pir); requestedItems = r && r.requested_items ? JSON.parse(r.requested_items) : null; } catch { /* */ }
+  const bodyFile = fs.existsSync(`${holdingDir}/email_body.txt`) ? `${holdingDir}/email_body.txt` : null;
+  const kickoff = JSON.stringify({
+    pir_id: pirId, pir_number: pir, holding_dir: holdingDir, trigger: "queued",
+    case_type: caseType, body_file: bodyFile, requested_items: requestedItems,
+    computed_facts: facts, lease_token: token,
+  });
+  const t0 = Date.now();
+  const kEnv = teaDb ? { TEA_DB: teaDb } : {};
+  const k = bridgeInject(threadId, kickoff, kEnv);
+  const kickoffWall = Date.now() - t0;
+  fs.writeFileSync(path.join(outDir, "kickoff.log"), k.stdout);
+  if (fs.existsSync(stagingDir)) fs.cpSync(stagingDir, path.join(outDir, "staging"), { recursive: true });
+  stages.push(A.assertBot({ golden, stagingDir, botResult: k.result }));
+
+  // VALIDATE (count gate, mirrors production validateClaims + golden cross-check)
+  stages.push(A.assertValidate({ golden, stagingDir, computedFacts: facts }));
+
+  // APPROVE -> CLOSE
+  let approveWall = null, committed = null, rowAfter = null;
+  if (!NO_APPROVE) {
+    const ta = Date.now();
+    const a = bridgeInject(threadId, "APPROVE", kEnv);
+    approveWall = Date.now() - ta;
+    fs.writeFileSync(path.join(outDir, "approve.log"), a.stdout);
+    if (fs.existsSync(stagingDir)) fs.cpSync(stagingDir, path.join(outDir, "staging_after_approve"), { recursive: true });
+    if (teaDb) committed = teaCommittedRows(teaDb, pir);
+    rowAfter = sandboxRow(pir);
+    stages.push(A.assertClose({ golden, stagingDir, dbRowAfter: rowAfter, teaCommittedRows: committed }));
+  }
+
+  const verdict = A.rollup(stages);
+  const meta = {
+    pir, tag: TAG, run: n, case_type: caseType, thread_id: threadId, verdict,
+    kickoff_exit: k.exit, kickoff_wall_ms: kickoffWall, approve_wall_ms: approveWall,
+    committed_rows: committed, row_after: rowAfter, stages,
+    staging_files: fs.existsSync(stagingDir) ? fs.readdirSync(stagingDir) : [],
+  };
+  fs.writeFileSync(path.join(outDir, "meta.json"), JSON.stringify(meta, null, 2));
+
+  // per-rep cleanup
+  researchSourcesCleanup(rsWatermark);
+  deleteBotSession(threadId);
+  restoreStaging(sSnap);
+  if (teaDb) for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(teaDb + ext, { force: true }); } catch { /* */ } }
+  log(`  rep ${n} verdict=${verdict} [${stages.map((s) => `${s.stage}:${s.verdict}`).join(" ")}] kwall=${(kickoffWall / 1000).toFixed(0)}s`);
+  return { pir, run: n, stages, verdict };
+}
+
+// ── per PIR ──────────────────────────────────────────────────────────────────────
+function runPir(pir) {
+  const golden = loadGolden(pir);
+  if (!golden) { log(`SKIP ${pir}: no golden ref at ${GOLDEN}/${pir}.json`); return []; }
+  const fixture = loadFixture(pir);
+  if (!fixture) log(`WARN ${pir}: no fixture at ${FIXTURES}/${pir}.json — INGEST will FAIL`);
+  const caseType = golden.case_type || (golden.close && golden.close.type === "delivery" ? "delivery" : "correspondence");
+  if (!INGEST_ONLY) {
+    const want = caseType === "delivery" ? "35b" : "27b";
+    if (!swap(want)) { log(`SKIP ${pir}: model swap to ${want} failed`); return []; }
+  }
+  log(`PIR ${pir} (case_type=${caseType}) x${RUNS} rep(s)`);
+  const reps = [];
+  for (let n = 1; n <= RUNS; n++) reps.push(runRep(pir, golden, fixture, caseType, n));
+  return reps;
+}
+
+// ── verdict matrix report ────────────────────────────────────────────────────────
+function writeReport(allReps) {
+  fs.mkdirSync(RESULTS, { recursive: true });
+  const byPir = {};
+  for (const r of allReps) { (byPir[r.pir] ||= []).push(r); }
+  const lines = [];
+  lines.push(`# PIR full-flow verdict matrix — tag=${TAG}`);
+  lines.push("");
+  lines.push(`Generated for ${Object.keys(byPir).length} PIR(s), ${RUNS} rep(s) each. Bar: zero FAIL; deterministic stages all PASS; model stages PASS-or-ESCALATE; identical verdict across reps.`);
+  lines.push("");
+  lines.push("| PIR | reps | INGEST | BOT | VALIDATE | CLOSE | run-verdict | stable? |");
+  lines.push("|---|---|---|---|---|---|---|---|");
+  const STAGES = ["ingest", "bot", "validate", "close"];
+  let anyFail = false, anyUnstable = false;
+  for (const [pir, reps] of Object.entries(byPir)) {
+    const cell = (stg) => {
+      const vs = reps.map((r) => (r.stages.find((s) => s.stage === stg) || {}).verdict || "-");
+      const uniq = [...new Set(vs)];
+      return uniq.length === 1 ? uniq[0] : `FLAP(${vs.join("/")})`;
+    };
+    const rv = [...new Set(reps.map((r) => r.verdict))];
+    const stable = rv.length === 1 && !STAGES.some((s) => cell(s).startsWith("FLAP"));
+    if (reps.some((r) => r.verdict === A.FAIL)) anyFail = true;
+    if (!stable) anyUnstable = true;
+    lines.push(`| ${pir} | ${reps.length} | ${cell("ingest")} | ${cell("bot")} | ${cell("validate")} | ${cell("close")} | ${rv.join("/")} | ${stable ? "yes" : "NO"} |`);
+  }
+  lines.push("");
+  lines.push(`**Result:** ${anyFail ? "❌ FAIL present" : "✅ zero FAIL"}; ${anyUnstable ? "⚠️ unstable verdicts present" : "✅ all verdicts stable across reps"}.`);
+  const out = `${RESULTS}/REPORT.md`;
+  fs.writeFileSync(out, lines.join("\n") + "\n");
+  log(`report -> ${out}`);
+  console.log("\n" + lines.join("\n"));
+}
+
+// ── main ─────────────────────────────────────────────────────────────────────────
+function tier1Pirs() {
+  if (!fs.existsSync(GOLDEN)) return [];
+  return fs.readdirSync(GOLDEN).filter((f) => f.endsWith(".json")).map((f) => f.replace(/\.json$/, "")).sort();
+}
+
+async function main() {
+  if (!ALL && !PIR_ARG) die("need --pir <pir_number> or --all");
+  const pirs = ALL ? tier1Pirs() : [PIR_ARG];
+  if (!pirs.length) die("no PIRs to run (no golden refs?)");
+
+  if (!INGEST_ONLY) {
+    // preflight: sole-writer + port :8080 free
+    for (const t of ["mpa-pir-response-sync.timer", "mpa-pir-processor-dispatch.timer"]) {
+      if (timerActive(t)) die(`${t} is active — stop the PIR timers before a harness window`);
+    }
+    if (portListening()) die("something is already listening on :8080 — stop canvas-companion-web before a harness window");
+    startSandbox();
+  }
+
+  const allReps = [];
+  try {
+    for (const pir of pirs) allReps.push(...runPir(pir));
+  } finally {
+    if (!INGEST_ONLY) { stopSandbox(); restoreModel(); }
+  }
+  writeReport(allReps);
+  const anyFail = allReps.some((r) => r.verdict === A.FAIL);
+  if (!KEEP_SANDBOX) { try { fs.rmSync(`${SANDBOX}/canvas.sandbox.db`, { force: true }); } catch { /* */ } }
+  log(`done: ${allReps.length} rep(s); ${anyFail ? "FAIL present" : "zero FAIL"}`);
+  process.exit(anyFail ? 1 : 0);
+}
+
+process.on("SIGINT", () => { stopSandbox(); restoreModel(); process.exit(1); });
+process.on("SIGTERM", () => { stopSandbox(); restoreModel(); process.exit(1); });
+main();

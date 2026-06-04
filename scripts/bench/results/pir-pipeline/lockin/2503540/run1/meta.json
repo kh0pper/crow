@@ -1,0 +1,23 @@
+{
+  "pir": "2503540",
+  "tag": "lockin",
+  "run": 1,
+  "case_type": "correspondence",
+  "exit": 0,
+  "wall_ms": 615489,
+  "reply_text": "I'll process this correspondence case following the REPLY-DRAFTING WORKFLOW. Let me start by reading the inbound message and gathering context.\n\nNow let me get the PIR tracker details and read the PDF attachments.\n\nLease matches. Now let me read the PDF attachments for substantive content.\n\nGood. I have all the context. TEA resolved both open items from the May 22 follow-up:\n1. TCPA gap: no qualifying expansion requests under TEC §12.101(b-4), so no §12.1101 notifications\n2. ILTexas confirmation: confirmed the summary docs cover ILTexas (CDN 057-848)\n\nLet me create the staging artifacts.\n\nNow let me write all the staging artifacts.\n\nNow let me append the note and PATCH the tracker.\n\nAll staging artifacts written and tracker updated. Here's the summary:\n\n**PIR #2503540 — TEA Correspondence Processed**\n\nTEA's response resolves both open items from the May 22 follow-up:\n1. **TCPA gap**: None of TCPA's expansion amendment requests qualified under TEC §12.101(b-4), so no §12.1101 notifications were generated\n2. **ILTexas confirmation**: The \"International Leadership Academy\" summary documents do cover ILTexas (CDN 057-848)\n\n**Staging artifacts:**\n- `_staging/2503540/correspondence_reply.txt` — acknowledgment reply drafted\n- `_staging/2503540/review_email.md` — review email with inline reply and preview link\n- `_staging/2503540/claims.json` — empty (no numeric tallies asserted)\n\n**Tracker state:** `processing_lease_status=awaiting-review`, lease kept, status unchanged (`partial`).\n\nReview email is ready for the dispatcher to send. Awaiting your APPROVE/REVISE/REJECT.",
+  "result_action": "asked",
+  "tool_calls": 10,
+  "tool_errors": 0,
+  "pi_session_id": "019e9460-4556-74d4-a93f-04abecabc344",
+  "model": "crow-local/qwen3.6-35b-a3b",
+  "tokens_in": 35695,
+  "tokens_out": 3395,
+  "gen_tok_s": 6.45,
+  "span_ms": 526161,
+  "staging_files": [
+    "claims.json",
+    "correspondence_reply.txt",
+    "review_email.md"
+  ]
+}

@@ -1,0 +1,13 @@
+Dear Texas Education Agency Public Information Office,
+
+I acknowledge receipt of your response to PIR #2502592, including the five CSV files containing district-level PEIMS data for Pregnancy Related Services covering school years 2020-21 through 2024-25. Thank you for providing the data at no charge.
+
+I note that E1012 PEP-INDICATOR-CODE is not responsive as the field was deleted in 2012. The data delivered covers the two remaining requested elements: SINGLEPAR_CTE_STUDENTS and ELIG_PREG_REL_SVCS_DAYS.
+
+I have a follow-up request filed separately (PIR #2502803) for years 2016-17 through 2019-20, which is due April 15, 2026.
+
+Thank you for your assistance.
+
+Sincerely,
+Kevin Hopper
+kevin.hopper1@gmail.com

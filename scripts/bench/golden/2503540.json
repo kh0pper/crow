@@ -1,0 +1,27 @@
+{
+  "pir_number": "2503540",
+  "label": "TEA — ILTexas charter expansion impact / TCPA notifications",
+  "case_type": "correspondence",
+  "attachments": [
+    "International Leadership of Texas_Impact State Response Summary.pdf",
+    "International Leadership of Texas_PIR Request Summary 4.6.26.pdf"
+  ],
+  "body_contains": ["Release Documents"],
+  "counts": {
+    "verified_set": [27, 8, 35],
+    "require_present": [27, 8],
+    "note": "Impact PDF lists 27 no-significant-impact and 8 major-impact entities (direct PDF re-read, human-verified). 35 = bullet_total. A correct reply states 27/8 in claims.json or omits the tally; any other impact tally is a fabrication."
+  },
+  "kickoff_state": { "status": "partial" },
+  "close": {
+    "type": "reply",
+    "expect_files": ["correspondence_reply.txt"],
+    "final_lease_status": "done"
+  },
+  "provenance": {
+    "case_type": "human-verified",
+    "attachments": "human-verified",
+    "counts": "human-verified (direct PDF re-read: 27 / 8)",
+    "close": "human-verified workflow contract"
+  }
+}

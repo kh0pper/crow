@@ -30,9 +30,15 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
 import { google } from "/home/kh0pp/crow/node_modules/googleapis/build/src/index.js";
 import { findPirCandidates } from "./pir_match.mjs";
+
+// Pure ingest functions (classifyCaseType / extractPlainBody /
+// walkPartsForAttachments) are exported at the bottom so the full-flow bench can
+// replay them on a captured Gmail message without touching Gmail. The module's
+// main() runs ONLY when executed directly (import-guard at the bottom).
 
 const MPA_DB = "/home/kh0pp/.crow-mpa/data/crow.db";
 const CANVAS_DB = "/home/kh0pp/spring-2026/canvas-companion/db/canvas.db";
@@ -203,6 +209,24 @@ function classifyCaseType(subject) {
   if (/no documents found|no responsive|no records/.test(s)) return "no-responsive";
   if (/cost estimate|clarification/.test(s)) return "cost-estimate";
   return "correspondence";
+}
+
+// ── Pure ingest-classification replay (full-flow bench) ──────────────────────
+// Derives subject / sender / attachments / case_type / body from a captured
+// Gmail `format:full` message, using the EXACT logic processMessage applies
+// (lines ~415-421): tabular attachment => delivery, else subject-classified.
+// Pure (no Gmail, no DB, no FS). Keep in lock-step with processMessage; the
+// INGEST stage of pir-fullflow.mjs asserts this against golden.
+function ingestReplay(msg) {
+  const subject = getHeader(msg, "Subject");
+  const fromHeader = getHeader(msg, "From");
+  const senderEmail = extractSenderEmail(fromHeader);
+  const attachments = [];
+  walkPartsForAttachments(msg.payload, attachments);
+  const hasTabular = attachments.some((a) => TABULAR_RE.test(a.filename));
+  const caseType = hasTabular ? "delivery" : classifyCaseType(subject);
+  const body = extractPlainBody(msg.payload);
+  return { subject, senderEmail, attachments, hasTabular, caseType, body };
 }
 
 async function downloadAttachments({ gmail, messageId, attachments, destDir }) {
@@ -688,7 +712,17 @@ async function main() {
   if (r.errors > 0) process.exit(2);
 }
 
-main().catch((err) => {
-  console.error(`[pir-ingest] fatal: ${err.stack || err.message}`);
-  process.exit(1);
-});
+// Named exports for the full-flow bench (INGEST replay). getHeader is exported
+// too so the harness can pull the subject from a captured message the same way
+// the live path does.
+export { classifyCaseType, extractPlainBody, walkPartsForAttachments, getHeader, ingestReplay };
+
+// Import-guard: run the batch ingest ONLY when invoked as a script, never on
+// import (the bench imports the pure functions above).
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1]);
+if (isMain) {
+  main().catch((err) => {
+    console.error(`[pir-ingest] fatal: ${err.stack || err.message}`);
+    process.exit(1);
+  });
+}

@@ -1,0 +1,31 @@
+{
+  "pir_number": "2502592",
+  "label": "TEA — District-Level Pregnancy Related Services Data (PEIMS)",
+  "case_type": "delivery",
+  "attachments": [
+    "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS).eml",
+    "PRU_11507_21.csv",
+    "PRU_11507_22.csv",
+    "PRU_11507_23.csv",
+    "PRU_11507_24.csv",
+    "PRU_11507_25.csv"
+  ],
+  "counts": {
+    "verified_set": [4742, 1043, 1070, 1069, 1063, 497],
+    "per_file": { "PRU_11507_21.csv": 1043, "PRU_11507_22.csv": 1070, "PRU_11507_23.csv": 1069, "PRU_11507_24.csv": 1063, "PRU_11507_25.csv": 497 },
+    "note": "Grand total 4742 data rows across 5 CSVs (direct csv.reader, header-excluded, human-verified). Loader must commit exactly 4742 rows to the TEA_DB copy."
+  },
+  "kickoff_state": { "status": "requested" },
+  "close": {
+    "type": "delivery",
+    "grand_total": 4742,
+    "final_status": "received",
+    "final_lease_status": "done"
+  },
+  "provenance": {
+    "case_type": "human-verified (tabular delivery)",
+    "attachments": "human-verified (from captured fixture)",
+    "counts": "human-verified (direct csv.reader on source CSVs, not the bot's row_counts.json)",
+    "close": "human-verified workflow contract"
+  }
+}

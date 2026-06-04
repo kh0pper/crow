@@ -1,0 +1,77 @@
+{
+  "pir_number": "2502592",
+  "recipient": "Texas Education Agency",
+  "response_date": "2026-02-26",
+  "case_type": "delivery",
+  "description": "District-level PEIMS data for Pregnancy Related Services: PREGNANT_CTE_STUDENTS, SINGLEPAR_CTE_STUDENTS, ELIG_PREG_REL_SVCS_DAYS for years 2020-21 through 2024-25",
+  "files": [
+    {
+      "filename": "PRU_11507_21.csv",
+      "kind": "csv",
+      "year": "2020-21",
+      "size_bytes": 45200,
+      "rows": 1043,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"]
+    },
+    {
+      "filename": "PRU_11507_22.csv",
+      "kind": "csv",
+      "year": "2021-22",
+      "size_bytes": 46488,
+      "rows": 1070,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"]
+    },
+    {
+      "filename": "PRU_11507_23.csv",
+      "kind": "csv",
+      "year": "2022-23",
+      "size_bytes": 46234,
+      "rows": 1069,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"]
+    },
+    {
+      "filename": "PRU_11507_24.csv",
+      "kind": "csv",
+      "year": "2023-24",
+      "size_bytes": 45916,
+      "rows": 1063,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"]
+    },
+    {
+      "filename": "PRU_11507_25.csv",
+      "kind": "csv",
+      "year": "2024-25",
+      "size_bytes": 22048,
+      "rows": 497,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"]
+    },
+    {
+      "filename": "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS).eml",
+      "kind": "eml",
+      "size_bytes": 6674,
+      "role": "original_request_cover"
+    },
+    {
+      "filename": "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS)-1.eml",
+      "kind": "eml",
+      "size_bytes": 15594,
+      "role": "original_request_cover_copy"
+    }
+  ],
+  "total_csv_files": 5,
+  "total_csv_rows": 4742,
+  "eml_files": 2,
+  "data_items_requested": [
+    "E1012 PEP-INDICATOR-CODE (PEP_ATTEND) - DELETED 2012, no responsive records",
+    "E0829 SGL-PARENT-PREG-TEEN-CODE - delivered as SINGLEPAR_CTE_STUDENTS",
+    "E0939 TOTAL-ELIG-PREG-REL-SVCS-DAYS-PRESENT - delivered as ELIG_PREG_REL_SVCS_DAYS"
+  ],
+  "data_quality_notes": "FERPA masking: counts less than 10 replaced with -999. Data aggregated at district level. 2024-25 partial year (497 rows vs ~1070 for full years).",
+  "cross_reference": {
+    "year_2020_21": {"file": "PRU_11507_21.csv", "rows": 1043, "status": "delivered"},
+    "year_2021_22": {"file": "PRU_11507_22.csv", "rows": 1070, "status": "delivered"},
+    "year_2022_23": {"file": "PRU_11507_23.csv", "rows": 1069, "status": "delivered"},
+    "year_2023_24": {"file": "PRU_11507_24.csv", "rows": 1063, "status": "delivered"},
+    "year_2024_25": {"file": "PRU_11507_25.csv", "rows": 497, "status": "delivered (partial year)"}
+  }
+}

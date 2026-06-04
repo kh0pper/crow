@@ -1,0 +1,48 @@
+{
+  "pir": "2503540",
+  "tag": "proof",
+  "run": 1,
+  "case_type": "correspondence",
+  "thread_id": "ff-2503540-proof-1-513a5b8e",
+  "verdict": "PASS",
+  "kickoff_exit": 0,
+  "kickoff_wall_ms": 808209,
+  "approve_wall_ms": 100693,
+  "committed_rows": null,
+  "row_after": {
+    "id": 43,
+    "pir_number": "2503540",
+    "status": "partial",
+    "processing_lease_status": "done",
+    "processing_lease": null,
+    "case_type": "correspondence",
+    "requested_items": null
+  },
+  "stages": [
+    {
+      "stage": "ingest",
+      "verdict": "PASS",
+      "detail": "case_type=correspondence attachments=2"
+    },
+    {
+      "stage": "bot",
+      "verdict": "PASS",
+      "detail": "artifacts ok action=asked"
+    },
+    {
+      "stage": "validate",
+      "verdict": "PASS",
+      "detail": "gate clean; claims={27,8,35}; impact_nums=[27,8,35]"
+    },
+    {
+      "stage": "close",
+      "verdict": "PASS",
+      "detail": "reply staged, lease=done"
+    }
+  ],
+  "staging_files": [
+    "claims.json",
+    "correspondence_reply.txt",
+    "review_email.md"
+  ]
+}
