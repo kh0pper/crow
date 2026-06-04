@@ -1,0 +1,81 @@
+{
+  "pir_id": 41,
+  "pir_number": "2502592",
+  "received_date": "2026-05-29",
+  "recipient": "Texas Education Agency (PIR)",
+  "recipient_email": "pir@tea.texas.gov",
+  "request_description": "District-level PEIMS data for Pregnancy Related Services: E1012 (PEP-INDICATOR-CODE), E0829 (SGL-PARENT-PREG-TEEN-CODE), E0939 (TOTAL-ELIG-PREG-REL-SVCS-DAYS-PRESENT). Scope: all Texas school districts, 2020-21 through 2024-25, aggregated counts.",
+  "files": [
+    {
+      "filename": "PRU_11507_21.csv",
+      "kind": "csv",
+      "size_bytes": 45200,
+      "rows": 1043,
+      "school_year": "2020-2021",
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "ferpa_masked": true,
+      "masks_column": "SINGLEPAR_CTE_STUDENTS (and others via -999)"
+    },
+    {
+      "filename": "PRU_11507_22.csv",
+      "kind": "csv",
+      "size_bytes": 46488,
+      "rows": 1070,
+      "school_year": "2021-2022",
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "ferpa_masked": true,
+      "masks_column": "SINGLEPAR_CTE_STUDENTS (and others via -999)"
+    },
+    {
+      "filename": "PRU_11507_23.csv",
+      "kind": "csv",
+      "size_bytes": 46234,
+      "rows": 1069,
+      "school_year": "2022-2023",
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "ferpa_masked": true,
+      "masks_column": "SINGLEPAR_CTE_STUDENTS (and others via -999)"
+    },
+    {
+      "filename": "PRU_11507_24.csv",
+      "kind": "csv",
+      "size_bytes": 45916,
+      "rows": 1063,
+      "school_year": "2023-2024",
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "ferpa_masked": true,
+      "masks_column": "SINGLEPAR_CTE_STUDENTS (and others via -999)"
+    },
+    {
+      "filename": "PRU_11507_25.csv",
+      "kind": "csv",
+      "size_bytes": 22048,
+      "rows": 497,
+      "school_year": "2024-2025",
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "ferpa_masked": true,
+      "masks_column": "SINGLEPAR_CTE_STUDENTS (and others via -999)"
+    },
+    {
+      "filename": "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS).eml",
+      "kind": "eml",
+      "size_bytes": 6674,
+      "description": "Original PIR request from Kevin Hopper to PIR@tea.texas.gov, sent 2026-01-29"
+    },
+    {
+      "filename": "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS)-1.eml",
+      "kind": "eml",
+      "size_bytes": 15594,
+      "description": "Duplicate/original PIR request (full headers)"
+    }
+  ],
+  "total_csv_files": 5,
+  "total_csv_rows": 4742,
+  "total_eml_files": 2,
+  "data_quality": {
+    "ferpa_masking": "All CSVs use -999 for masked values per FERPA compliance",
+    "completeness": "All 5 requested school years (2020-21 through 2024-25) delivered",
+    "format": "CSV with consistent 6-column schema across all years",
+    "notes": "2024-25 file has fewer rows (497) possibly indicating partial data or districts with no records in any category"
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "pir": "2503540",
+  "tag": "phase3",
+  "run": 3,
+  "case_type": "correspondence",
+  "thread_id": "ff-2503540-phase3-3-4f83d8c0",
+  "verdict": "FAIL",
+  "kickoff_exit": 0,
+  "kickoff_wall_ms": 735438,
+  "approve_wall_ms": 107267,
+  "committed_rows": null,
+  "row_after": {
+    "id": 43,
+    "pir_number": "2503540",
+    "status": "partial",
+    "processing_lease_status": "done",
+    "processing_lease": null,
+    "case_type": "correspondence",
+    "requested_items": null
+  },
+  "stages": [
+    {
+      "stage": "ingest",
+      "verdict": "PASS",
+      "detail": "case_type=correspondence attachments=2"
+    },
+    {
+      "stage": "bot",
+      "verdict": "PASS",
+      "detail": "artifacts ok action=asked"
+    },
+    {
+      "stage": "validate",
+      "verdict": "FAIL",
+      "detail": "prose states impact tally 6 (not verified, absent from claims.json) -> silently wrong, gate bypassed"
+    },
+    {
+      "stage": "close",
+      "verdict": "PASS",
+      "detail": "reply staged, lease=done"
+    }
+  ],
+  "staging_files": [
+    "claims.json",
+    "correspondence_reply.txt",
+    "review_email.md"
+  ]
+}

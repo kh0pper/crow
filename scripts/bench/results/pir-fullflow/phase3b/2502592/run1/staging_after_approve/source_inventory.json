@@ -1,0 +1,86 @@
+{
+  "pir_id": 41,
+  "pir_number": "2502592",
+  "holding_dir": "/home/kh0pp/spring-2026/insd-5941/sources/pir-incoming/2502592",
+  "received_date": "2026-02-26",
+  "recipient": "Texas Education Agency",
+  "case_type": "delivery",
+  "files": [
+    {
+      "filename": "PRU_11507_21.csv",
+      "kind": "csv",
+      "size_bytes": 45200,
+      "school_year": "2020-2021",
+      "data_rows": 1043,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "ferpa_masked": true,
+      "cross_reference": "Matches requested item: PREGNANT_CTE_STUDENTS, SINGLEPAR_CTE_STUDENTS, ELIG_PREG_REL_SVCS_DAYS for 2020-21"
+    },
+    {
+      "filename": "PRU_11507_22.csv",
+      "kind": "csv",
+      "size_bytes": 46488,
+      "school_year": "2021-2022",
+      "data_rows": 1070,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "ferpa_masked": true,
+      "cross_reference": "Matches requested item: PREGNANT_CTE_STUDENTS, SINGLEPAR_CTE_STUDENTS, ELIG_PREG_REL_SVCS_DAYS for 2021-22"
+    },
+    {
+      "filename": "PRU_11507_23.csv",
+      "kind": "csv",
+      "size_bytes": 46234,
+      "school_year": "2022-2023",
+      "data_rows": 1069,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "ferpa_masked": true,
+      "cross_reference": "Matches requested item: PREGNANT_CTE_STUDENTS, SINGLEPAR_CTE_STUDENTS, ELIG_PREG_REL_SVCS_DAYS for 2022-23"
+    },
+    {
+      "filename": "PRU_11507_24.csv",
+      "kind": "csv",
+      "size_bytes": 45916,
+      "school_year": "2023-2024",
+      "data_rows": 1063,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "ferpa_masked": true,
+      "cross_reference": "Matches requested item: PREGNANT_CTE_STUDENTS, SINGLEPAR_CTE_STUDENTS, ELIG_PREG_REL_SVCS_DAYS for 2023-24"
+    },
+    {
+      "filename": "PRU_11507_25.csv",
+      "kind": "csv",
+      "size_bytes": 22048,
+      "school_year": "2024-2025",
+      "data_rows": 497,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "ferpa_masked": true,
+      "cross_reference": "Matches requested item: PREGNANT_CTE_STUDENTS, SINGLEPAR_CTE_STUDENTS, ELIG_PREG_REL_SVCS_DAYS for 2024-25"
+    },
+    {
+      "filename": "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS).eml",
+      "kind": "eml",
+      "size_bytes": 6674,
+      "cross_reference": "Transmittal email from TEA covering all 5 CSVs"
+    },
+    {
+      "filename": "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS)-1.eml",
+      "kind": "eml",
+      "size_bytes": 15594,
+      "cross_reference": "Follow-up correspondence email"
+    }
+  ],
+  "total_data_files": 5,
+  "total_csv_rows": 4742,
+  "total_email_files": 2,
+  "requested_items_status": {
+    "PREGNANT_CTE_STUDENTS": "Delivered (all years 2020-25)",
+    "SINGLEPAR_CTE_STUDENTS": "Delivered (all years 2020-25)",
+    "ELIG_PREG_REL_SVCS_DAYS": "Delivered (all years 2020-25)",
+    "E1012_PEP_INDICATOR": "No responsive records (deleted 2012, noted by TEA)"
+  },
+  "data_quality_notes": [
+    "FERPA masking: counts below 10 replaced with -999",
+    "PRU_11507_25.csv (2024-25) has only 497 districts vs ~1070 for other years - likely partial or interim data",
+    "All CSVs share identical column structure"
+  ]
+}

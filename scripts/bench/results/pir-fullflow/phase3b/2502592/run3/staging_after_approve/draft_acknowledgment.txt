@@ -1,0 +1,14 @@
+Jenny Eaton
+PIR Contact
+Texas Education Agency
+pir@tea.texas.gov
+
+Dear Ms. Eaton,
+
+Thank you for releasing the five CSV files with district-level pregnancy and parenting PEIMS data (2020-21 through 2024-25) in response to my Public Information Request #2502592. I confirm receipt of PRU_11507_21.csv through PRU_11507_25.csv, totaling 4,742 rows of data. I also note that the E1012 PEP_ATTEND item was not responsive, having been deleted from PEIMS in 2012.
+
+Thank you for providing this data at no charge.
+
+Sincerely,
+Kevin Hopper
+kevin.hopper1@gmail.com

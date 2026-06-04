@@ -1,0 +1,71 @@
+{
+  "pir_number": "2502592",
+  "received_date": "2026-06-04",
+  "source_type": "delivery",
+  "classification": "delivery",
+  "delivery_signals": {
+    "data_files": true,
+    "data_file_types": [".csv"],
+    "subject_keywords": null
+  },
+  "files": [
+    {
+      "filename": "PRU_11507_21.csv",
+      "kind": "csv",
+      "rows": 1043,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "school_year": "2020-2021",
+      "description": "PEIMS pregnancy-related services data, 2020-2021 school year"
+    },
+    {
+      "filename": "PRU_11507_22.csv",
+      "kind": "csv",
+      "rows": 1070,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "school_year": "2021-2022",
+      "description": "PEIMS pregnancy-related services data, 2021-2022 school year"
+    },
+    {
+      "filename": "PRU_11507_23.csv",
+      "kind": "csv",
+      "rows": 1069,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "school_year": "2022-2023",
+      "description": "PEIMS pregnancy-related services data, 2022-2023 school year"
+    },
+    {
+      "filename": "PRU_11507_24.csv",
+      "kind": "csv",
+      "rows": 1063,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "school_year": "2023-2024",
+      "description": "PEIMS pregnancy-related services data, 2023-2024 school year"
+    },
+    {
+      "filename": "PRU_11507_25.csv",
+      "kind": "csv",
+      "rows": 497,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "school_year": "2024-2025",
+      "description": "PEIMS pregnancy-related services data, 2024-2025 school year (partial year)"
+    },
+    {
+      "filename": "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS).eml",
+      "kind": "eml",
+      "description": "Original PIR email from Kevin Hopper to PIR@tea.texas.gov, dated 2026-01-30"
+    },
+    {
+      "filename": "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS)-1.eml",
+      "kind": "eml",
+      "description": "Duplicate/copy of original PIR email"
+    }
+  ],
+  "total_files": 7,
+  "total_csv_rows": 4742,
+  "requested_elements": {
+    "E1012": "PEP-INDICATOR-CODE - Pregnancy, Education, and Parenting program participation indicator",
+    "E0829": "SGL-PARENT-PREG-TEEN-CODE - Single Parent / Pregnant Teen indicator for CTE students",
+    "E0939": "TOTAL-ELIG-PREG-REL-SVCS-DAYS-PRESENT - Total days present while eligible for pregnancy related services"
+  },
+  "data_columns_provided": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"]
+}

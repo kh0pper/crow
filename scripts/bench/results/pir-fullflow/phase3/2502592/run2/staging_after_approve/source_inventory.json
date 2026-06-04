@@ -1,0 +1,71 @@
+{
+  "pir_number": "2502592",
+  "recipient": "Texas Education Agency",
+  "received_date": "2026-06-04",
+  "description": "District-level PEIMS data: PREGNANT_CTE_STUDENTS, SINGLEPAR_CTE_STUDENTS, ELIG_PREG_REL_SVCS_DAYS for years 2020-21 through 2024-25.",
+  "files": [
+    {
+      "filename": "PRU_11507_21.csv",
+      "kind": "csv",
+      "rows": 1043,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "year_range": "2020-2021",
+      "masked_rows": 385
+    },
+    {
+      "filename": "PRU_11507_22.csv",
+      "kind": "csv",
+      "rows": 1070,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "year_range": "2021-2022",
+      "masked_rows": 344
+    },
+    {
+      "filename": "PRU_11507_23.csv",
+      "kind": "csv",
+      "rows": 1069,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "year_range": "2022-2023",
+      "masked_rows": 299
+    },
+    {
+      "filename": "PRU_11507_24.csv",
+      "kind": "csv",
+      "rows": 1063,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "year_range": "2023-2024",
+      "masked_rows": 295
+    },
+    {
+      "filename": "PRU_11507_25.csv",
+      "kind": "csv",
+      "rows": 497,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "year_range": "2024-2025",
+      "masked_rows": 203
+    },
+    {
+      "filename": "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS).eml",
+      "kind": "eml",
+      "rows": null,
+      "columns": null,
+      "note": "Cover email from TEA"
+    },
+    {
+      "filename": "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS)-1.eml",
+      "kind": "eml",
+      "rows": null,
+      "columns": null,
+      "note": "Secondary email attachment"
+    }
+  ],
+  "total_csv_rows": 4742,
+  "total_masked_rows": 1526,
+  "masking_rate_pct": 32.2,
+  "notes": [
+    "FERPA masking: counts below 10 replaced with -999",
+    "ELIG_PREG_REL_SVCS_DAYS uses decimal values (days)",
+    "Data covers all Texas districts across 5 school years",
+    "Year 2024-25 has fewer rows (497) likely because it is the current year with partial reporting"
+  ]
+}

@@ -1,0 +1,74 @@
+{
+  "pir_id": 41,
+  "pir_number": "2502592",
+  "recipient": "Texas Education Agency",
+  "received_date": "2026-06-04",
+  "files": [
+    {
+      "filename": "PRU_11507_21.csv",
+      "kind": "csv",
+      "rows": 1043,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "year": "2020-21",
+      "size_bytes": 45200
+    },
+    {
+      "filename": "PRU_11507_22.csv",
+      "kind": "csv",
+      "rows": 1070,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "year": "2021-22",
+      "size_bytes": 46488
+    },
+    {
+      "filename": "PRU_11507_23.csv",
+      "kind": "csv",
+      "rows": 1069,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "year": "2022-23",
+      "size_bytes": 46234
+    },
+    {
+      "filename": "PRU_11507_24.csv",
+      "kind": "csv",
+      "rows": 1063,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "year": "2023-24",
+      "size_bytes": 45916
+    },
+    {
+      "filename": "PRU_11507_25.csv",
+      "kind": "csv",
+      "rows": 497,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "year": "2024-25",
+      "size_bytes": 22048
+    },
+    {
+      "filename": "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS).eml",
+      "kind": "eml",
+      "size_bytes": 6674,
+      "note": "Original PIR email to TEA (outgoing)"
+    },
+    {
+      "filename": "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS)-1.eml",
+      "kind": "eml",
+      "size_bytes": 15594,
+      "note": "Original PIR email to TEA (outgoing, forwarded copy)"
+    }
+  ],
+  "total_csv_files": 5,
+  "total_data_rows": 4742,
+  "total_eml_files": 2,
+  "requested_elements": ["PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+  "not_provided": ["E1012 PEP-INDICATOR-CODE (deleted in 2012 per TEA)"],
+  "cross_reference": {
+    "E1012 PEP_ATTEND": "No responsive records - deleted in 2012",
+    "PREGNANT_CTE_STUDENTS": "Delivered",
+    "SINGLEPAR_CTE_STUDENTS": "Delivered",
+    "ELIG_PREG_REL_SVCS_DAYS": "Delivered",
+    "SINGLEPAR_CTE_STUDENTS (repeat)": "Delivered",
+    "PREGNANT_CTE_STUDENTS (repeat)": "Delivered",
+    "ELIG_PREG_REL_SVCS_DAYS (repeat)": "Delivered"
+  }
+}

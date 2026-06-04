@@ -1,0 +1,16 @@
+{
+  "research_pir2502592_2020_2021": 1043,
+  "research_pir2502592_2021_2022": 1070,
+  "research_pir2502592_2022_2023": 1069,
+  "research_pir2502592_2023_2024": 1063,
+  "research_pir2502592_2024_2025": 497,
+  "total_rows": 4742,
+  "total_tables": 5,
+  "source_files": {
+    "PRU_11507_21.csv": 1043,
+    "PRU_11507_22.csv": 1070,
+    "PRU_11507_23.csv": 1069,
+    "PRU_11507_24.csv": 1063,
+    "PRU_11507_25.csv": 497
+  }
+}

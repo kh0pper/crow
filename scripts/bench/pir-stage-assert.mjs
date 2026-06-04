@@ -80,21 +80,28 @@ export function proseCountNumbers(text) {
 // §/$/year exclusions keep this from firing on quoted cohort ids (the S3 trap).
 export function impactTallyNumbers(text) {
   const out = new Set();
-  const IMPACT = "(?:no[- ]?significant(?:ly)?|not expected to adversely|significant degree|major[- ]?impact|no[- ]?impact)";
+  const IMPACT = "(?:no[- ]?significant(?:ly)?(?: impact)?|not expected to adversely|significant degree|major[- ]?impact|no[- ]?impact)";
   const NOUN = "(?:districts?|charters?|entit\\w+|campuses|schools?)";
+  const MONTH = /(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+$/i;
   const pats = [
-    new RegExp(`(\\d{1,4})\\s+(?:${NOUN}[^.]{0,40}?)?${IMPACT}`, "gi"),  // 27 districts ... no significant impact
-    new RegExp(`${IMPACT}[^.]{0,40}?(\\d{1,4})\\b`, "gi"),               // major impact ... 8
+    // "<n> [noun/words] <impact>" — number leads; the gap stays on ONE line (no
+    // newline, stops at a period) so it can't reach across a bullet boundary.
+    new RegExp(`(\\d{1,4})[ \\t]+(?:${NOUN}[^.\\n]{0,40}?)?${IMPACT}`, "gi"),
+    // "<impact>[ ,:;] <n>" — number DIRECTLY follows the impact phrase (tight
+    // adjacency); avoids catching an unrelated later number such as a date
+    // ("major impact\n- ... dated April 6").
+    new RegExp(`${IMPACT}[ \\t,:;]{1,3}(\\d{1,4})\\b`, "gi"),
   ];
   for (const re of pats) {
     let m;
     while ((m = re.exec(text)) !== null) {
       const n = +m[1];
       const idx = m.index + m[0].indexOf(m[1]);
-      const pre = text.slice(Math.max(0, idx - 12), idx);
-      if (/generation\s*$/i.test(pre)) continue;
-      if (/[§$#]/.test(pre.slice(-2))) continue;
-      if (n >= 1900 && n <= 2100) continue;
+      const pre = text.slice(Math.max(0, idx - 14), idx);
+      if (/generation\s*$/i.test(pre)) continue;   // "Generation 17" cohort id
+      if (MONTH.test(pre)) continue;               // "April 6", "May 22" dates
+      if (/[§$#]/.test(pre.slice(-2))) continue;   // §12, $5, #3
+      if (n >= 1900 && n <= 2100) continue;        // years
       if (n >= 1 && n <= 99999) out.add(n);
     }
   }

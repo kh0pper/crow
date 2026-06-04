@@ -1,0 +1,60 @@
+{
+  "pir_number": "2502592",
+  "recipient": "Texas Education Agency",
+  "received_date": "2026-06-04",
+  "cover_email": "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS).eml",
+  "outgoing_email": "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS)-1.eml",
+  "attachments": [
+    {
+      "filename": "PRU_11507_21.csv",
+      "kind": "csv",
+      "year": "2020-2021",
+      "rows": 1043,
+      "columns": ["YEAR","DISTRICT","DISTNAME","PREGNANT_CTE_STUDENTS","SINGLEPAR_CTE_STUDENTS","ELIG_PREG_REL_SVCS_DAYS"],
+      "size_bytes": 45200
+    },
+    {
+      "filename": "PRU_11507_22.csv",
+      "kind": "csv",
+      "year": "2021-2022",
+      "rows": 1070,
+      "columns": ["YEAR","DISTRICT","DISTNAME","PREGNANT_CTE_STUDENTS","SINGLEPAR_CTE_STUDENTS","ELIG_PREG_REL_SVCS_DAYS"],
+      "size_bytes": 46488
+    },
+    {
+      "filename": "PRU_11507_23.csv",
+      "kind": "csv",
+      "year": "2022-2023",
+      "rows": 1069,
+      "columns": ["YEAR","DISTRICT","DISTNAME","PREGNANT_CTE_STUDENTS","SINGLEPAR_CTE_STUDENTS","ELIG_PREG_REL_SVCS_DAYS"],
+      "size_bytes": 46234
+    },
+    {
+      "filename": "PRU_11507_24.csv",
+      "kind": "csv",
+      "year": "2023-2024",
+      "rows": 1063,
+      "columns": ["YEAR","DISTRICT","DISTNAME","PREGNANT_CTE_STUDENTS","SINGLEPAR_CTE_STUDENTS","ELIG_PREG_REL_SVCS_DAYS"],
+      "size_bytes": 45916
+    },
+    {
+      "filename": "PRU_11507_25.csv",
+      "kind": "csv",
+      "year": "2024-2025",
+      "rows": 497,
+      "columns": ["YEAR","DISTRICT","DISTNAME","PREGNANT_CTE_STUDENTS","SINGLEPAR_CTE_STUDENTS","ELIG_PREG_REL_SVCS_DAYS"],
+      "size_bytes": 22048
+    }
+  ],
+  "total_files": 7,
+  "total_data_files": 5,
+  "total_csv_rows": 4742,
+  "requested_items": {
+    "PREGNANT_CTE_STUDENTS": "Delivered",
+    "SINGLEPAR_CTE_STUDENTS": "Delivered",
+    "ELIG_PREG_REL_SVCS_DAYS": "Delivered",
+    "E1012_PEP_INDICATOR_CODE": "No responsive records (deleted in 2012)"
+  },
+  "data_years_covered": ["2020-21","2021-22","2022-23","2023-24","2024-25"],
+  "ferpa_masking": "Counts below 10 replaced with -999"
+}

@@ -1,0 +1,11 @@
+Dear Jenny Eaton and the TEA Public Information Office,
+
+Thank you for releasing the Pregnancy Related Services PEIMS data for PIR #2502592. I have received the five CSV files covering school years 2020-21 through 2024-25, along with your correspondence noting that E1012 (PEP_ATTEND) was deleted from PEIMS in 2012.
+
+I note that the 2024-2025 file contains 497 records, consistent with a partial-year snapshot. The data for E0829 and E0939 across the other four years totals 4,245 district-year records.
+
+I appreciate the prompt delivery at no charge.
+
+Sincerely,
+Kevin Hopper
+kevin.hopper1@gmail.com

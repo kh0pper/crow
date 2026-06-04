@@ -1,0 +1,53 @@
+{
+  "pir": "2502592",
+  "tag": "phase3",
+  "run": 1,
+  "case_type": "delivery",
+  "thread_id": "ff-2502592-phase3-1-9c0f6c44",
+  "verdict": "ESCALATE",
+  "kickoff_exit": 0,
+  "kickoff_wall_ms": 286299,
+  "approve_wall_ms": 42667,
+  "committed_rows": 4742,
+  "row_after": {
+    "id": 41,
+    "pir_number": "2502592",
+    "status": "received",
+    "processing_lease_status": "done",
+    "processing_lease": null,
+    "case_type": null,
+    "requested_items": null
+  },
+  "stages": [
+    {
+      "stage": "ingest",
+      "verdict": "PASS",
+      "detail": "case_type=delivery attachments=6"
+    },
+    {
+      "stage": "bot",
+      "verdict": "PASS",
+      "detail": "artifacts ok action=asked"
+    },
+    {
+      "stage": "validate",
+      "verdict": "ESCALATE",
+      "detail": "claims.json states 5 not in verified set {4742,1043,1070,1069,1063,497} -> gate escalates (needs-human)"
+    },
+    {
+      "stage": "close",
+      "verdict": "PASS",
+      "detail": "committed 4742 rows, status=received"
+    }
+  ],
+  "staging_files": [
+    "README.md",
+    "approved_reply.txt",
+    "claims.json",
+    "draft_acknowledgment.txt",
+    "loader.py",
+    "review_email.md",
+    "row_counts.json",
+    "source_inventory.json"
+  ]
+}
