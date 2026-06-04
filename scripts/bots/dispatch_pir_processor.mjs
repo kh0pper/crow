@@ -37,6 +37,70 @@ const CREDS_PATH = process.env.PIR_GMAIL_CREDS_PATH
 const REVIEW_REPLY_TO = "kevin.hopper+pir-processor@maestro.press";
 const USER_EMAIL = "kevin.hopper1@gmail.com";
 
+// ── On-demand model swap ──────────────────────────────────────────────────────
+// The PIR bot runs on the dense 27B (better reliability on PIR reasoning), which
+// cannot co-reside with the 35B daily driver (crow-chat) on the Strix Halo. So
+// when this tick will run the bot, we borrow :8003 for the 27B and hand it back
+// to the 35B afterward. Fail-safe: an exit/signal hook restores the 35B even on
+// crash/SIGTERM so the daily driver is never left down.
+const MODEL_SWAP = "/home/kh0pp/crow/scripts/bots/pir_model_swap.sh";
+const MODEL_SWAP_TIMEOUT = Number(process.env.PIR_MODEL_SWAP_TIMEOUT_MS || 6 * 60 * 1000);
+let swappedToPir = false;
+function ensurePirModel() {
+  try { execFileSync("bash", [MODEL_SWAP, "27b"], { timeout: MODEL_SWAP_TIMEOUT, stdio: "pipe" }); swappedToPir = true; return true; }
+  catch (e) { log(`MODEL SWAP -> 27b FAILED: ${e.message}`); swappedToPir = false; return false; }
+}
+function restoreDailyModel() {
+  if (!swappedToPir) return;
+  try { execFileSync("bash", [MODEL_SWAP, "35b"], { timeout: MODEL_SWAP_TIMEOUT, stdio: "pipe" }); log("Restored 35b daily driver on :8003."); }
+  catch (e) { log(`WARNING: restore 35b FAILED: ${e.message}`); }
+  swappedToPir = false;
+}
+process.on("exit", () => { if (swappedToPir) { try { execFileSync("bash", [MODEL_SWAP, "35b"], { timeout: MODEL_SWAP_TIMEOUT, stdio: "ignore" }); } catch { /* best effort */ } } });
+for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { restoreDailyModel(); process.exit(1); });
+
+// HYBRID model policy: the 27B helps on reply REASONING (correspondence /
+// cost-estimate / no-responsive — where the miscount/redundant-reply bug lived);
+// the 35B does data DELIVERIES faster (~5 min) and with exact CSV counts. So we
+// borrow :8003 for the 27B only on reply cases and keep deliveries on the 35B.
+// To make the bot use the 27B for EVERYTHING instead, change this to `return true`.
+function prepareModelFor(pir) {
+  if (isReplyCase(pir)) return ensurePirModel();   // swap in the 27B (may fail)
+  restoreDailyModel();                             // delivery: ensure 35B (no-op if resident)
+  return true;
+}
+
+// ── Deterministic advisory facts (the count guardrail) ───────────────────────
+// Compute verifiable counts (CSV rows, parseable PDF entity tallies) BEFORE the
+// bot runs so it never eyeballs a number. Advisory only — validateClaims escalates
+// on disagreement, never overrides the model with a possibly-wrong computed value.
+const COMPUTE_FACTS = "/home/kh0pp/crow/scripts/bots/pir_compute_facts.py";
+function computeFacts(holdingDir) {
+  if (!fs.existsSync(holdingDir)) return null;
+  try {
+    execFileSync("python3", [COMPUTE_FACTS, holdingDir], { timeout: 120000, stdio: "pipe" });
+    const p = `${holdingDir}/computed_facts.json`;
+    return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : null;
+  } catch (e) { log(`computeFacts failed for ${holdingDir}: ${e.message}`); return null; }
+}
+// Flatten computed_facts into the set of numeric tallies a reply may legitimately
+// state (CSV row counts + total, PDF labeled/bullet counts). Used by validateClaims.
+function verifiedCounts(facts) {
+  const s = new Set();
+  if (!facts) return s;
+  if (typeof facts.csv_row_total === "number") s.add(facts.csv_row_total);
+  for (const f of facts.files || []) {
+    if (typeof f.rows === "number") s.add(f.rows);
+    const pl = f.pdf_list;
+    if (pl && !pl.unparseable) {
+      if (typeof pl.bullet_total === "number") s.add(pl.bullet_total);
+      for (const v of Object.values(pl.labeled_counts || {})) s.add(v);
+      for (const sec of pl.sections || []) if (typeof sec.count === "number") s.add(sec.count);
+    }
+  }
+  return s;
+}
+
 // Phase 2 — GovQA portal driver invocation.
 // uv is NOT on the systemd unit's PATH, so invoke it by absolute path.
 const UV_BIN = process.env.UV_BIN || "/home/kh0pp/.local/bin/uv";
@@ -493,8 +557,71 @@ function validateCorrespondence(pir, db) {
   return true;
 }
 
-// Route to the right validator based on case_type.
+// Recursively collect numeric values from a JSON value (for claims.json).
+function collectNumbers(v, out = []) {
+  if (typeof v === "number") out.push(v);
+  else if (Array.isArray(v)) v.forEach((x) => collectNumbers(x, out));
+  else if (v && typeof v === "object") Object.values(v).forEach((x) => collectNumbers(x, out));
+  return out;
+}
+// Numbers in count CONTEXT (near entity/record language), excluding years / §cites /
+// item-or-section numbers / dollars — a soft fabrication warning (NOT a hard gate; nearInt
+// is too loose to gate on per review S3).
+function proseCountNumbers(text) {
+  const out = [];
+  const re = /(\d{1,4})\s*(?:districts?|charters?|entit\w+|campuses|records?|rows|no[- ]?significant|major[- ]?impact|no[- ]?impact)/gi;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const n = +m[1];
+    const pre = text.slice(Math.max(0, m.index - 2), m.index);
+    if (/[§$#]/.test(pre)) continue;            // §12, $5, #3
+    if (n >= 1900 && n <= 2100) continue;        // years
+    if (n >= 1 && n <= 99999) out.push(n);
+  }
+  return out;
+}
+// CLAIMS GATE (the count guarantee): every tally the bot DECLARES in claims.json must
+// equal a deterministically-verified count; otherwise escalate (never override the model).
+// A prose count not in the verified set is logged as a warning to surface in iteration.
+function validateClaims(pir) {
+  const holdingDir = `${SOURCES_ROOT}/pir-incoming/${pir.pir_number}`;
+  const stagingDir = `${SOURCES_ROOT}/_staging/${pir.pir_number}`;
+  let facts = null;
+  const fp = `${holdingDir}/computed_facts.json`;
+  if (fs.existsSync(fp)) { try { facts = JSON.parse(fs.readFileSync(fp, "utf8")); } catch { /* */ } }
+  const verified = verifiedCounts(facts);
+  const cp = `${stagingDir}/claims.json`;
+  if (fs.existsSync(cp)) {
+    let claims; try { claims = JSON.parse(fs.readFileSync(cp, "utf8")); }
+    catch { return { ok: false, reason: "claims.json is unparseable" }; }
+    for (const n of collectNumbers(claims)) {
+      if (!verified.has(n)) return { ok: false, reason: `claims.json states ${n}, not a verified count (verified: ${[...verified].join(",") || "none"})` };
+    }
+  }
+  const prose = ["review_email.md", "correspondence_reply.txt", "draft_acknowledgment.txt"]
+    .map((n) => `${stagingDir}/${n}`).filter((p) => fs.existsSync(p))
+    .map((p) => fs.readFileSync(p, "utf8")).join("\n");
+  for (const n of proseCountNumbers(prose)) {
+    if (!verified.has(n)) log(`VALIDATE(claims): WARNING — reply states count-like ${n} not in verified set for PIR #${pir.pir_number}`);
+  }
+  return { ok: true };
+}
+
+// Route to the right validator based on case_type, then apply the claims gate.
 function validateForReview(pir, db) {
+  const baseOk = isReplyCase(pir) ? validateCorrespondence(pir, db) : validateStaging(pir, db);
+  if (!baseOk) return false;
+  const claims = validateClaims(pir);
+  if (!claims.ok) {
+    db.prepare("UPDATE pir_requests SET processing_lease_status='needs-human', updated_at=datetime('now') WHERE pir_number=?").run(pir.pir_number);
+    log(`VALIDATE(claims): ESCALATE PIR #${pir.pir_number} — ${claims.reason}`);
+    return false;
+  }
+  return true;
+}
+
+// (original router retained below as _validateForReviewBase for reference)
+function _validateForReviewBase(pir, db) {
   return isReplyCase(pir) ? validateCorrespondence(pir, db) : validateStaging(pir, db);
 }
 
@@ -568,14 +695,22 @@ function dispatch(pir, trigger, leaseToken, gatewayThreadId) {
     try { requestedItems = JSON.parse(pir.requested_items); } catch { requestedItems = null; }
   }
 
+  // Precompute deterministic counts and hand them to the bot (the count guardrail).
+  const computedFacts = computeFacts(holdingDir);
+
   const kickoff = JSON.stringify({
     pir_id: pir.id,
     pir_number: pir.pir_number,
     holding_dir: holdingDir,
     trigger,
     case_type: caseType,
-    body_file: replyCase ? bodyFile : null,
+    // Pass the cover-letter body whenever sync captured it — delivery cases too.
+    // The body frequently carries the substantive answer that is not in the
+    // attachments (the 2026-06-03 #2503540 miss).
+    body_file: fs.existsSync(bodyFile) ? bodyFile : null,
     requested_items: requestedItems,
+    // Verified counts the bot MUST use (computed_facts.json is also in holding_dir).
+    computed_facts: computedFacts,
     lease_token: leaseToken,
   });
 
@@ -659,6 +794,11 @@ async function main() {
       }
     }
 
+    if (!prepareModelFor(pir)) {
+      db.prepare(`UPDATE pir_requests SET processing_lease_status='needs-human', updated_at=datetime('now') WHERE id = ? AND processing_lease = ?`).run(pir.id, token);
+      log(`Model swap to 27b failed; set needs-human on PIR #${pir.pir_number}.`);
+      return;
+    }
     const ok = dispatch(pir, args.trigger, token, threadId);
     if (args.trigger === "queued") {
       const valid = validateForReview(pir, db);
@@ -694,6 +834,11 @@ async function main() {
         continue;
       }
       log(`Claimed lease ${token} on PIR #${pir.pir_number}`);
+      if (!prepareModelFor(pir)) {
+        db.prepare(`UPDATE pir_requests SET processing_lease_status='needs-human', updated_at=datetime('now') WHERE id = ? AND processing_lease = ?`).run(pir.id, token);
+        log(`Model swap to 27b failed; needs-human on PIR #${pir.pir_number}.`);
+        continue;
+      }
 
       let threadId = `pir-${pir.pir_number}`;
       if (gmail) {
@@ -727,6 +872,10 @@ async function main() {
     }
     }
   }
+
+  // Bot work for this tick is done — hand :8003 back to the 35b daily driver
+  // before the (LLM-free) post-approval Gmail-draft steps.
+  restoreDailyModel();
 
   // Post-approval draft creation: check for PIRs that are done with an approved reply file
   const doneWithDraft = db.prepare(`

@@ -57,6 +57,16 @@ const MARKER_FAILED = "bot/pir-management/ingest-failed";
 const MAX_MESSAGES_PER_RUN = 50;
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024; // 50MB per file; Gmail caps at 25MB but allow headroom
 
+// The account this bot reads from. Mail sent FROM this address is never an
+// inbound entity response — it is either the dispatcher's "[PIR #N] Review -"
+// self-thread or Kevin's own sent reply. Both must be excluded from ingest
+// (see processMessage self-mail guard). Mirrors dispatch_pir_processor.mjs.
+const USER_EMAIL = "kevin.hopper1@gmail.com";
+
+// File extensions that indicate a real DATA delivery (loader path). Anything
+// else (PDF/DOCX letters, summaries, images) is a reply case, not a data load.
+const TABULAR_RE = /\.(xlsx?|csv|zip|accdb|mdb)$/i;
+
 // Subject-token regex set + findPirCandidates ladder live in ./pir_match.mjs
 // so the standalone rematch helper can re-apply the same logic to the
 // _unmatched/ backlog without going through Gmail.
@@ -328,6 +338,18 @@ async function processMessage({ gmail, canvasDb, mpaDb, msgMeta, labelIds, pirOv
   const subject = getHeader(msg, "Subject");
   const senderEmail = extractSenderEmail(fromHeader);
 
+  // Self-mail guard: NEVER ingest our own mail. The dispatcher's
+  // "[PIR #N] Review -" review threads AND Kevin's own sent replies match the
+  // PIR-number subject regex and (via the Gmail filter) carry bot/pir-management,
+  // so without this guard processLabel re-ingests them, overwrites
+  // inbound.json/email_body.txt with our own text, and re-queues the PIR — the
+  // 2026-06-03 #2503540 corruption. Mark seen (ingested), do not treat as a
+  // match or a failure. Caller maps skipped -> MARKER_INGESTED.
+  if (senderEmail === USER_EMAIL) {
+    console.error(`[pir-ingest]   ${msg.id}: self-sent (${senderEmail}) — skip`);
+    return { matched: false, skipped: true };
+  }
+
   const attachments = [];
   walkPartsForAttachments(msg.payload, attachments);
 
@@ -370,71 +392,60 @@ async function processMessage({ gmail, canvasDb, mpaDb, msgMeta, labelIds, pirOv
     return { matched: false, savedCount: 0 };
   }
 
-  if (!attachments.length) {
-    // Phase 1 (correspondence): a matched PIR with no data attachments is a
-    // decision-forcing / interim message (e.g. R000873 "decide on the #9b cost
-    // estimate or we close"). Persist the body + metadata into the holding dir
-    // and queue it with a case_type so the dispatcher can route it to the bot's
-    // reply-drafting path. The dispatcher reads email_body.txt + case_type.
-    const caseType = classifyCaseType(subject);
-    const holdingDir = path.join(INCOMING_DIR, pirRow.pir_number);
-    ensureDir(holdingDir);
-    const body = extractPlainBody(msg.payload);
-    fs.writeFileSync(path.join(holdingDir, "email_body.txt"), body || "(empty body)");
-    fs.writeFileSync(
-      path.join(holdingDir, "inbound.json"),
-      JSON.stringify({
-        message_id: msg.id,
-        thread_id: msg.threadId,
-        subject,
-        from: fromHeader,
-        date: msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : null,
-        case_type: caseType,
-      }, null, 2),
-    );
-    console.error(
-      `[pir-ingest]   ${msg.id}: matched PIR ${pirRow.pir_number}, no attachments — ` +
-        `case_type=${caseType}, body=${(body || "").length} chars → ${holdingDir}`,
-    );
-    upsertBotConversation(mpaDb, {
-      pirRow,
-      msg,
-      savedFiles: [],
-      holdingDir,
-    });
-    // Queue + record case_type. Tolerate NULL or '' lease/lease-status (some
-    // legacy rows carry empty strings rather than NULL).
-    canvasDb.prepare(`UPDATE pir_requests
-      SET processing_lease_status = 'queued', case_type = ?, updated_at = datetime('now')
-      WHERE id = ?
-        AND (processing_lease IS NULL OR processing_lease = '')
-        AND (processing_lease_status IS NULL OR processing_lease_status IN ('', 'done'))`)
-      .run(caseType, pirRow.id);
-    return { matched: true, savedCount: 0, pirNumber: pirRow.pir_number, caseType };
-  }
-
+  // Unified ingest (classify by attachment TYPE, not presence).
   const holdingDir = path.join(INCOMING_DIR, pirRow.pir_number);
-  const savedFiles = await downloadAttachments({
-    gmail,
-    messageId: msg.id,
-    attachments,
-    destDir: holdingDir,
-  });
+  ensureDir(holdingDir);
+
+  // Download any attachments — PDFs/DOCX included — so the bot can read and
+  // quote them even when the response is qualitative (not a data load).
+  const savedFiles = attachments.length
+    ? await downloadAttachments({ gmail, messageId: msg.id, attachments, destDir: holdingDir })
+    : [];
+
+  // Only true tabular data files (xlsx/csv/zip/accdb/mdb) are a "delivery"
+  // (loader path). A cover letter with PDF/DOCX summaries — or no attachments —
+  // is a reply case routed to the bot's reply-drafting workflow via
+  // classifyCaseType (correspondence / cost-estimate / no-responsive).
+  const hasTabular = attachments.some((a) => TABULAR_RE.test(a.filename));
+  const caseType = hasTabular ? "delivery" : classifyCaseType(subject);
+
+  // Always persist the cover-letter body + inbound metadata. The substantive
+  // answer (per-item "no records", confirmations, denials, scope notes) is
+  // often ONLY in the body, not the attachments — the 2026-06-03 #2503540 miss.
+  const body = extractPlainBody(msg.payload);
+  fs.writeFileSync(path.join(holdingDir, "email_body.txt"), body || "(empty body)");
+  fs.writeFileSync(
+    path.join(holdingDir, "inbound.json"),
+    JSON.stringify({
+      message_id: msg.id,
+      thread_id: msg.threadId,
+      subject,
+      from: fromHeader,
+      date: msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : null,
+      case_type: caseType,
+    }, null, 2),
+  );
+
   if (savedFiles.length) {
-    appendInventoryToStatusNotes(canvasDb, {
-      pirId: pirRow.id,
-      savedFiles,
-    });
-    upsertBotConversation(mpaDb, {
-      pirRow,
-      msg,
-      savedFiles,
-      holdingDir,
-    });
-    canvasDb.prepare(`UPDATE pir_requests SET processing_lease_status = 'queued', case_type = 'delivery'
-      WHERE id = ? AND processing_lease IS NULL
-      AND (processing_lease_status IS NULL OR processing_lease_status = 'done')`).run(pirRow.id);
+    appendInventoryToStatusNotes(canvasDb, { pirId: pirRow.id, savedFiles });
   }
+  upsertBotConversation(mpaDb, { pirRow, msg, savedFiles, holdingDir });
+
+  console.error(
+    `[pir-ingest]   ${msg.id}: matched PIR ${pirRow.pir_number} — ` +
+      `case_type=${caseType}, attachments=${savedFiles.length}, ` +
+      `body=${(body || "").length} chars → ${holdingDir}`,
+  );
+
+  // Queue + record case_type. Tolerate NULL or '' lease/lease-status (some
+  // legacy rows carry empty strings rather than NULL).
+  canvasDb.prepare(`UPDATE pir_requests
+    SET processing_lease_status = 'queued', case_type = ?, updated_at = datetime('now')
+    WHERE id = ?
+      AND (processing_lease IS NULL OR processing_lease = '')
+      AND (processing_lease_status IS NULL OR processing_lease_status IN ('', 'done'))`)
+    .run(caseType, pirRow.id);
+
   // Phase 2B: expose the per-file inventory to the caller if requested.
   if (savedFilesOut) {
     for (const f of savedFiles) savedFilesOut.push(f);
@@ -443,6 +454,7 @@ async function processMessage({ gmail, canvasDb, mpaDb, msgMeta, labelIds, pirOv
     matched: true,
     savedCount: savedFiles.length,
     pirNumber: pirRow.pir_number,
+    caseType,
   };
 }
 
@@ -502,7 +514,15 @@ async function processLabel({ gmail, canvasDb, mpaDb, labelIds }) {
   for (const meta of msgs) {
     try {
       const r = await processMessage({ gmail, canvasDb, mpaDb, msgMeta: meta, labelIds });
-      if (r.matched) {
+      if (r.skipped) {
+        // Our own mail (review thread / sent reply). Mark ingested so it is not
+        // rescanned; do NOT count as matched or failed.
+        await gmail.users.messages.modify({
+          userId: "me",
+          id: meta.id,
+          requestBody: { addLabelIds: [ingestedLabelId] },
+        });
+      } else if (r.matched) {
         matched++;
         savedFiles += r.savedCount;
         await gmail.users.messages.modify({
@@ -582,7 +602,8 @@ async function processSingleThread({ gmail, canvasDb, mpaDb, labelIds, threadId,
         pirOverride: pirOverride || null,
         savedFilesOut: filesLanded,
       });
-      if (r.matched) matched++;
+      if (r.skipped) { /* our own mail — neither matched nor failed */ }
+      else if (r.matched) matched++;
       else unmatched++;
       savedFiles += r.savedCount || 0;
     } catch (e) {
@@ -597,7 +618,7 @@ async function processSingleThread({ gmail, canvasDb, mpaDb, labelIds, threadId,
     // access via .get(MARKER_INGESTED) / .get(MARKER_FAILED) matching the
     // pattern at processLabel:404-405.
     try {
-      const addLabelId = (r && r.matched)
+      const addLabelId = (r && (r.matched || r.skipped))
         ? labelIds.get(MARKER_INGESTED)
         : labelIds.get(MARKER_FAILED);
       if (addLabelId) {
