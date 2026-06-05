@@ -68,9 +68,52 @@ const KEEP_SANDBOX = flag("keep-sandbox");
 const NO_SWAP = flag("no-swap");
 const TURN_TIMEOUT_MS = process.env.PIBOT_TURN_TIMEOUT_MS || String(25 * 60 * 1000);
 const RUN_TIMEOUT_MS = Number(process.env.PIR_FULLFLOW_RUN_TIMEOUT_MS || 30 * 60 * 1000);
+// Hard window cap: the maintenance window (canvas-web down, tea_data.db read-only)
+// can NEVER stay open longer than this. An out-of-process deadman enforces it even
+// if this harness's event loop is blocked in a hung subprocess. Default 2h; size it
+// to your run but keep it bounded. Set generously above a legit run, never "off".
+const WINDOW_CAP_MS = Number(process.env.PIR_FULLFLOW_WINDOW_CAP_MS || 2 * 60 * 60 * 1000);
+const DEADMAN_SCRIPT = `${CROW}/scripts/bench/pir-fullflow-deadman.sh`;
+// Optional: if set, the harness OWNS the canvas-web/timers lifecycle (stops them at
+// start, restarts at teardown) so the window is fully self-contained and the deadman
+// can restart them too. If unset, services must be pre-stopped by the operator and
+// the deadman only restores the kh0pp-owned bits (tea unlock + :8080) on a runaway.
+const SUDO_PASS = process.env.LAB_SUDO_PASS || "";
 
 function log(m) { console.error(`[fullflow ${new Date().toISOString()}] ${m}`); }
 function die(m) { console.error(`FATAL: ${m}`); process.exit(1); }
+
+// ── service lifecycle (optional, when LAB_SUDO_PASS is provided) ───────────────
+const PROD_SERVICES = ["canvas-companion-web.service", "mpa-pir-response-sync.timer", "mpa-pir-processor-dispatch.timer"];
+function sudoSystemctl(action) {
+  if (!SUDO_PASS) return false;
+  try {
+    execFileSync("bash", ["-c", `echo "$LAB_SUDO_PASS" | sudo -S systemctl ${action} ${PROD_SERVICES.join(" ")}`],
+      { env: { ...process.env, LAB_SUDO_PASS: SUDO_PASS }, timeout: 60000, stdio: "pipe" });
+    log(`systemctl ${action} ${PROD_SERVICES.length} prod service(s)`);
+    return true;
+  } catch (e) { log(`WARNING: systemctl ${action} failed: ${e.message}`); return false; }
+}
+
+// ── deadman watchdog (out-of-process hard window cap) ─────────────────────────
+let deadmanProc = null;
+function armDeadman() {
+  const cap = Math.floor(WINDOW_CAP_MS / 1000);
+  try {
+    fs.mkdirSync(RESULTS, { recursive: true });
+    const logfd = fs.openSync(`${RESULTS}/deadman.log`, "a");
+    deadmanProc = spawn("bash", [DEADMAN_SCRIPT, String(cap), String(process.pid), TEA_DB_PROD],
+      { detached: true, stdio: ["ignore", logfd, logfd], env: { ...process.env, LAB_SUDO_PASS: SUDO_PASS } });
+    deadmanProc.unref();
+    log(`deadman armed: ${cap}s hard window cap (pid ${deadmanProc.pid}) -> ${RESULTS}/deadman.log`);
+  } catch (e) { log(`WARNING: could not arm deadman: ${e.message}`); }
+}
+function disarmDeadman() {
+  if (deadmanProc && deadmanProc.pid) {
+    try { process.kill(-deadmanProc.pid, "SIGKILL"); } catch { try { process.kill(deadmanProc.pid, "SIGKILL"); } catch { /* */ } }
+    deadmanProc = null;
+  }
+}
 
 // ── preflight ──────────────────────────────────────────────────────────────────
 function timerActive(t) {
@@ -400,11 +443,19 @@ async function main() {
   if (!pirs.length) die("no PIRs to run (no golden refs?)");
 
   if (!INGEST_ONLY) {
-    // preflight: sole-writer + port :8080 free
-    for (const t of ["mpa-pir-response-sync.timer", "mpa-pir-processor-dispatch.timer"]) {
-      if (timerActive(t)) die(`${t} is active — stop the PIR timers before a harness window`);
+    if (SUDO_PASS) {
+      // Harness owns the window: stop prod services itself (and the deadman will
+      // restart them on a runaway). Wait for :8080 to free.
+      sudoSystemctl("stop");
+      for (let i = 0; i < 10 && portListening(); i++) execFileSync("sleep", ["1"]);
+    } else {
+      // Operator-managed window: require sole-writer + free port.
+      for (const t of ["mpa-pir-response-sync.timer", "mpa-pir-processor-dispatch.timer"]) {
+        if (timerActive(t)) die(`${t} is active — stop the PIR timers (or set LAB_SUDO_PASS to self-manage the window)`);
+      }
     }
-    if (portListening()) die("something is already listening on :8080 — stop canvas-companion-web before a harness window");
+    if (portListening()) die("something is already listening on :8080 — stop canvas-companion-web (or set LAB_SUDO_PASS)");
+    armDeadman();   // hard window cap is now active (out-of-process)
     startSandbox();
   }
 
@@ -412,7 +463,7 @@ async function main() {
   try {
     for (const pir of pirs) allReps.push(...runPir(pir));
   } finally {
-    if (!INGEST_ONLY) { stopSandbox(); restoreModel(); }
+    if (!INGEST_ONLY) teardown();
   }
   writeReport(allReps);
   const anyFail = allReps.some((r) => r.verdict === A.FAIL);
@@ -421,8 +472,11 @@ async function main() {
   process.exit(anyFail ? 1 : 0);
 }
 
-process.on("SIGINT", () => { stopSandbox(); restoreModel(); process.exit(1); });
-process.on("SIGTERM", () => { stopSandbox(); restoreModel(); process.exit(1); });
-// Guarantee prod tea_data.db is never left read-only, even on a hard exit.
-process.on("exit", () => { try { unlockProdTea(); } catch { /* */ } });
+// Full restore: disarm the deadman, free :8080 + unlock tea (stopSandbox), restore
+// the 35B, and restart prod services if the harness owns them.
+function teardown() { disarmDeadman(); stopSandbox(); restoreModel(); if (SUDO_PASS) sudoSystemctl("start"); }
+process.on("SIGINT", () => { teardown(); process.exit(1); });
+process.on("SIGTERM", () => { teardown(); process.exit(1); });
+// Last-resort: never leave prod tea_data.db read-only or the deadman armed.
+process.on("exit", () => { try { disarmDeadman(); unlockProdTea(); } catch { /* */ } });
 main();
