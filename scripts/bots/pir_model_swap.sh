@@ -55,10 +55,16 @@ case "$WANT" in
       -m "$GGUF_27B" --alias qwen3.6-27b \
       --host 0.0.0.0 --port 8000 \
       -ngl 999 -fa on --no-mmap -c 65536 --parallel 1 --jinja \
-      --temp 0 --seed 42 --top-k 1 >/dev/null 2>&1
-      # --temp 0 --seed --top-k 1: greedy, seeded server-side defaults (pi sends
-      # no sampling params, so these apply) -> verdict-reproducible model stages.
-      # Only on the PIR 27B; the shared 35B daily driver keeps its sampling.
+      --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0 --seed 42 >/dev/null 2>&1
+      # Qwen3-family RECOMMENDED sampling, non-thinking preset (these bots run
+      # with thinking disabled): temp 0.7 / top-p 0.8 / top-k 20 / min-p 0. Qwen
+      # explicitly warns AGAINST greedy (temp 0) for these reasoning models
+      # (repetition / quality loss) — we previously forced greedy only to make
+      # the test VERDICTS reproducible, which hurt the bot's actual quality and
+      # was only partly attainable on an agentic tool-loop anyway. Correctness is
+      # now guaranteed by the validate-or-escalate layer, not by greedy decoding.
+      # --seed 42 keeps a little run-to-run stability without changing the
+      # distribution. pi sends no sampling params, so these launch flags apply.
     if wait_ready qwen3.6-27b; then echo "27b ready"; exit 0; fi
     echo "27b FAILED to warm — restoring 35b"; docker rm -f "$C27" >/dev/null 2>&1 || true
     ( cd "$BUNDLE_35B" && docker compose up -d ) >/dev/null 2>&1; exit 1

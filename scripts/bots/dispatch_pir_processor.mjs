@@ -26,6 +26,9 @@ import { marked } from "/home/kh0pp/crow/node_modules/marked/lib/marked.esm.js";
 const CANVAS_DB = "/home/kh0pp/spring-2026/canvas-companion/db/canvas.db";
 const BRIDGE_PATH = "/home/kh0pp/crow/scripts/pi-bots/bridge.mjs";
 const SOURCES_ROOT = "/home/kh0pp/spring-2026/insd-5941/sources";
+// Where the loader actually writes (TEA_DB env override mirrors the loader template
+// + test harness). Used to VERIFY a delivery truly committed before finalizing.
+const TEA_DB_PATH = process.env.TEA_DB || "/home/kh0pp/spring-2026/texas-gov-data-mcp/data/tea_data.db";
 const STALE_MINUTES = 35;
 const API_BASE = "http://localhost:8080";
 
@@ -620,6 +623,32 @@ function validateForReview(pir, db) {
   return true;
 }
 
+// COMMIT VERIFICATION (delivery): a delivery may finalize status='received' ONLY if
+// the loader ACTUALLY wrote the rows it claimed. The local model occasionally skips
+// `loader.py --commit` on APPROVE yet still marks received — which would silently
+// leave the tracker 'received' with no data loaded. Read row_counts.json (claimed
+// total) and confirm tea_data.db has research_pir<N>_* tables summing to it; if not,
+// the caller escalates to needs-human instead of finalizing. (Validate-don't-trust:
+// the bot's reply text claiming success is not proof — the DB is.)
+function verifyDeliveryCommit(pirNumber, teaDbPath = TEA_DB_PATH) {
+  const rcPath = `${SOURCES_ROOT}/_staging/${pirNumber}/row_counts.json`;
+  if (!fs.existsSync(rcPath)) return { ok: false, reason: "row_counts.json missing" };
+  let expected;
+  try { expected = JSON.parse(fs.readFileSync(rcPath, "utf8")).total; } catch { return { ok: false, reason: "row_counts.json unparseable" }; }
+  if (typeof expected !== "number" || expected <= 0) return { ok: false, reason: `no positive total in row_counts.json (got ${expected})` };
+  let actual = 0, tableCount = 0;
+  try {
+    const tdb = new Database(teaDbPath, { readonly: true });
+    const tbls = tdb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?").all(`research_pir${pirNumber}_%`);
+    tableCount = tbls.length;
+    for (const t of tbls) actual += tdb.prepare(`SELECT COUNT(*) AS c FROM "${t.name}"`).get().c;
+    tdb.close();
+  } catch (e) { return { ok: false, reason: `tea_data.db read failed: ${e.message}` }; }
+  if (tableCount === 0) return { ok: false, reason: `no research_pir${pirNumber}_* tables in tea_data.db — loader did not commit` };
+  if (actual !== expected) return { ok: false, reason: `committed ${actual} rows != claimed ${expected}` };
+  return { ok: true, actual, expected };
+}
+
 // (original router retained below as _validateForReviewBase for reference)
 function _validateForReviewBase(pir, db) {
   return isReplyCase(pir) ? validateCorrespondence(pir, db) : validateStaging(pir, db);
@@ -888,6 +917,18 @@ async function main() {
     const fallback = `${SOURCES_ROOT}/_staging/${pir.pir_number}/draft_acknowledgment.txt`;
     const sentMarker = `${SOURCES_ROOT}/_staging/${pir.pir_number}/.draft_created`;
     if (fs.existsSync(sentMarker)) continue;
+    // COMMIT GATE: never trust 'received' without proof the data actually loaded.
+    // If the loader did not commit the claimed rows, revert + escalate (the bot
+    // sometimes skips the commit but still marks received).
+    const cv = verifyDeliveryCommit(pir.pir_number);
+    if (!cv.ok) {
+      db.prepare(`UPDATE pir_requests SET status='processing', processing_lease_status='needs-human',
+                  action_needed=?, updated_at=datetime('now') WHERE id=?`)
+        .run(`Commit not verified: ${cv.reason}. Re-run loader --commit.`, pir.id);
+      log(`COMMIT GATE: ESCALATE PIR #${pir.pir_number} — ${cv.reason} (reverted received -> processing/needs-human)`);
+      continue;
+    }
+    log(`COMMIT GATE: PIR #${pir.pir_number} verified ${cv.actual} rows in tea_data.db.`);
     if (!fs.existsSync(draftPath) && !fs.existsSync(fallback)) continue;
     if (!gmail) { log(`Skipping draft for PIR #${pir.pir_number} — no Gmail auth.`); continue; }
     try {

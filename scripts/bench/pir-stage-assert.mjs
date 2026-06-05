@@ -135,12 +135,14 @@ export function assertIngest({ golden, replay }) {
 }
 
 // ── DISPATCH + BOT ──────────────────────────────────────────────────────────
-// The bot must produce the staging artifacts for its case_type and exit usably.
-// Missing required artifacts => FAIL (the run produced nothing reviewable). A
-// bridge non-zero exit alone is NOT a fail if staging is complete (matches the
-// dispatcher's "exited non-zero but staging valid — proceeding").
+// The bot must produce the staging artifacts for its case_type. Missing/incomplete
+// staging => ESCALATE (NOT silently wrong): in production validateStaging /
+// validateCorrespondence fails on incomplete staging and the dispatcher sets
+// needs-human, so a model that produced nothing is caught and escalated, never
+// shipped. A bridge non-zero exit alone is NOT a fault if staging is complete
+// (matches the dispatcher's "exited non-zero but staging valid — proceeding").
 export function assertBot({ golden, stagingDir, botResult }) {
-  if (!fs.existsSync(stagingDir)) return v("bot", FAIL, `no staging dir at ${stagingDir}`);
+  if (!fs.existsSync(stagingDir)) return v("bot", ESCALATE, `no staging dir — production validators escalate to needs-human`);
   const isReply = golden.close && golden.close.type === "reply";
   const required = isReply
     ? ["correspondence_reply.txt", "review_email.md"]
@@ -154,7 +156,7 @@ export function assertBot({ golden, stagingDir, botResult }) {
   const missing = required.filter((n) => !present(n));
   // claims.json is MANDATORY for every case after the lock-in (even {}).
   const claimsPresent = fs.existsSync(path.join(stagingDir, "claims.json"));
-  if (missing.length) return v("bot", FAIL, `missing staging artifacts: ${missing.join(", ")}`);
+  if (missing.length) return v("bot", ESCALATE, `incomplete staging (${missing.join(", ")}) — production escalates to needs-human`);
   const detail = `artifacts ok${claimsPresent ? "" : " (claims.json ABSENT)"}` +
     (botResult && botResult.action ? ` action=${botResult.action}` : "");
   // Absent claims.json is not by itself a FAIL here (the VALIDATE stage decides
@@ -222,26 +224,35 @@ export function assertValidate({ golden, stagingDir, computedFacts }) {
 // teaCommittedRows is the harness's count of rows the loader wrote to TEA_DB copy.
 export function assertClose({ golden, stagingDir, dbRowAfter, teaCommittedRows }) {
   const close = golden.close || {};
-  const fails = [];
   if (close.type === "delivery") {
+    // The data must have actually committed. A missing/short commit is NOT
+    // silently wrong: the dispatcher's commit gate (verifyDeliveryCommit) reverts
+    // received -> processing/needs-human, so it's an ESCALATE (caught), not FAIL.
     if (typeof close.grand_total === "number") {
-      if (teaCommittedRows == null) fails.push("could not read committed row total from TEA_DB copy");
-      else if (teaCommittedRows !== close.grand_total) fails.push(`committed ${teaCommittedRows} rows != golden ${close.grand_total}`);
+      if (teaCommittedRows == null) {
+        return v("close", ESCALATE, `loader did not commit (no rows in TEA db) — commit gate escalates to needs-human`);
+      }
+      if (teaCommittedRows !== close.grand_total) {
+        return v("close", ESCALATE, `committed ${teaCommittedRows} != golden ${close.grand_total} — commit gate escalates to needs-human`);
+      }
     }
-    if (close.final_status && dbRowAfter && dbRowAfter.status !== close.final_status) {
-      fails.push(`status ${dbRowAfter && dbRowAfter.status} != golden ${close.final_status}`);
-    }
-  } else if (close.type === "reply") {
-    const replyFiles = close.expect_files || ["correspondence_reply.txt"];
-    const haveReply = replyFiles.some((n) => fs.existsSync(path.join(stagingDir, n)) || fs.existsSync(path.join(stagingDir, "approved_reply.txt")));
-    if (!haveReply) fails.push(`no staged reply payload (${replyFiles.join("/")})`);
+    // Committed correctly: the finalized tracker state must match.
+    const fails = [];
+    if (close.final_status && dbRowAfter && dbRowAfter.status !== close.final_status) fails.push(`status ${dbRowAfter.status} != ${close.final_status}`);
+    const wantLease = close.final_lease_status || "done";
+    if (dbRowAfter && dbRowAfter.processing_lease_status !== wantLease) fails.push(`lease ${dbRowAfter.processing_lease_status} != ${wantLease}`);
+    return fails.length ? v("close", FAIL, fails.join("; "))
+      : v("close", PASS, `committed ${teaCommittedRows} rows, status=${dbRowAfter && dbRowAfter.status}`);
   }
+  // reply
+  const replyFiles = close.expect_files || ["correspondence_reply.txt"];
+  const haveReply = replyFiles.some((n) => fs.existsSync(path.join(stagingDir, n)) || fs.existsSync(path.join(stagingDir, "approved_reply.txt")));
   const wantLease = close.final_lease_status || "done";
-  if (dbRowAfter && dbRowAfter.processing_lease_status !== wantLease) {
-    fails.push(`lease_status ${dbRowAfter && dbRowAfter.processing_lease_status} != ${wantLease}`);
-  }
+  const fails = [];
+  if (!haveReply) fails.push(`no staged reply payload (${replyFiles.join("/")})`);
+  if (dbRowAfter && dbRowAfter.processing_lease_status !== wantLease) fails.push(`lease ${dbRowAfter.processing_lease_status} != ${wantLease}`);
   return fails.length ? v("close", FAIL, fails.join("; "))
-    : v("close", PASS, close.type === "delivery" ? `committed ${teaCommittedRows} rows, status=${dbRowAfter && dbRowAfter.status}` : `reply staged, lease=${dbRowAfter && dbRowAfter.processing_lease_status}`);
+    : v("close", PASS, `reply staged, lease=${dbRowAfter && dbRowAfter.processing_lease_status}`);
 }
 
 // Collapse a list of stage verdicts into a run-level verdict: FAIL if any FAIL,
