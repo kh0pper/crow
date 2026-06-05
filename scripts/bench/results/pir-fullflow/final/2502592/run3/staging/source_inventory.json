@@ -1,0 +1,65 @@
+{
+  "pir_number": "2502592",
+  "holding_dir": "/home/kh0pp/spring-2026/insd-5941/sources/pir-incoming/2502592",
+  "received_date": "2026-05-13",
+  "entity": "Texas Education Agency (TEA)",
+  "contact": "pir@tea.texas.gov (Jenny Eaton)",
+  "files": [
+    {
+      "filename": "PRU_11507_21.csv",
+      "kind": "csv",
+      "rows": 1043,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "year": "2020-2021",
+      "size_bytes": 45200
+    },
+    {
+      "filename": "PRU_11507_22.csv",
+      "kind": "csv",
+      "rows": 1070,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "year": "2021-2022",
+      "size_bytes": 46488
+    },
+    {
+      "filename": "PRU_11507_23.csv",
+      "kind": "csv",
+      "rows": 1069,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "year": "2022-2023",
+      "size_bytes": 46234
+    },
+    {
+      "filename": "PRU_11507_24.csv",
+      "kind": "csv",
+      "rows": 1063,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "year": "2023-2024",
+      "size_bytes": 45916
+    },
+    {
+      "filename": "PRU_11507_25.csv",
+      "kind": "csv",
+      "rows": 497,
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "year": "2024-2025",
+      "size_bytes": 22048
+    },
+    {
+      "filename": "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS).eml",
+      "kind": "eml",
+      "size_bytes": 6674,
+      "note": "Cover email from TEA"
+    },
+    {
+      "filename": "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS)-1.eml",
+      "kind": "eml",
+      "size_bytes": 15594,
+      "note": "Additional correspondence"
+    }
+  ],
+  "total_rows": 4742,
+  "total_files": 7,
+  "csv_files": 5,
+  "eml_files": 2
+}

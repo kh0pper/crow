@@ -1,0 +1,9 @@
+Dear Jenny Eaton,
+
+Thank you for providing the responsive records for PIR #2502592. I have received the five CSV files covering district-level PEIMS data for school years 2020-21 through 2024-25, including counts for PREGNANT_CTE_STUDENTS, SINGLEPAR_CTE_STUDENTS, and ELIG_PREG_REL_SVCS_DAYS. I note that the E1012 PEP_INDICATOR_CODE is not available due to its deletion in 2012.
+
+I appreciate the prompt response and that the records were released at no charge.
+
+Sincerely,
+Kevin Hopper
+kevin.hopper1@gmail.com

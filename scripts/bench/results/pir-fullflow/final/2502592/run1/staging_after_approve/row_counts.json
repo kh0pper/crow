@@ -1,0 +1,32 @@
+{
+  "PRU_11507_21": {
+    "table": "research_pir2502592_PRU_11507_21",
+    "year": "2020-2021",
+    "rows": 1043,
+    "file": "PRU_11507_21.csv"
+  },
+  "PRU_11507_22": {
+    "table": "research_pir2502592_PRU_11507_22",
+    "year": "2021-2022",
+    "rows": 1070,
+    "file": "PRU_11507_22.csv"
+  },
+  "PRU_11507_23": {
+    "table": "research_pir2502592_PRU_11507_23",
+    "year": "2022-2023",
+    "rows": 1069,
+    "file": "PRU_11507_23.csv"
+  },
+  "PRU_11507_24": {
+    "table": "research_pir2502592_PRU_11507_24",
+    "year": "2023-2024",
+    "rows": 1063,
+    "file": "PRU_11507_24.csv"
+  },
+  "PRU_11507_25": {
+    "table": "research_pir2502592_PRU_11507_25",
+    "year": "2024-2025",
+    "rows": 497,
+    "file": "PRU_11507_25.csv"
+  }
+}

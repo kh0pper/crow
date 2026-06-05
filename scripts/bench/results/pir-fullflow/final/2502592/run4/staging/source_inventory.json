@@ -1,0 +1,47 @@
+{
+  "pir_number": "2502592",
+  "received_date": "2026-05-13",
+  "recipient": "TEA (Texas Education Agency)",
+  "total_files": 7,
+  "data_files": {
+    "csv": [
+      {
+        "filename": "PRU_11507_21.csv",
+        "rows": 1043,
+        "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"]
+      },
+      {
+        "filename": "PRU_11507_22.csv",
+        "rows": 1070,
+        "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"]
+      },
+      {
+        "filename": "PRU_11507_23.csv",
+        "rows": 1069,
+        "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"]
+      },
+      {
+        "filename": "PRU_11507_24.csv",
+        "rows": 1063,
+        "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"]
+      },
+      {
+        "filename": "PRU_11507_25.csv",
+        "rows": 497,
+        "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"]
+      }
+    ]
+  },
+  "email_attachments": [
+    {
+      "filename": "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS).eml",
+      "kind": "eml"
+    },
+    {
+      "filename": "Public Information Request - District-Level Pregnancy Related Services Data (PEIMS)-1.eml",
+      "kind": "eml"
+    }
+  ],
+  "total_csv_rows": 4742,
+  "cross_reference_notes": "Five CSV files organized by year/period (PRU_11507_21 through _25). Each contains the same 6 columns: YEAR, DISTRICT, DISTNAME, PREGNANT_CTE_STUDENTS, SINGLEPAR_CTE_STUDENTS, ELIG_PREG_REL_SVCS_DAYS. Data covers district-level CTE student counts for pregnant students, single-parent students, and eligible pregnancy-related services days. The .eml files appear to be the original PIR correspondence (sent and received copies)."
+}
