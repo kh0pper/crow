@@ -24,7 +24,8 @@ kill -0 "$HPID" 2>/dev/null || exit 0
 echo "[deadman $(date -Is)] CAP ${CAP}s exceeded — force-restoring prod, killing harness $HPID" >&2
 
 # 1) Restore the resources the harness locks (no sudo needed; kh0pp-owned).
-chmod 644 "$TEA" 2>/dev/null || true                       # unlock prod tea_data.db
+chmod 775 "$(dirname "$TEA")" 2>/dev/null || true          # unlock prod tea DIRECTORY (orig mode; the real net)
+chmod 644 "$TEA" 2>/dev/null || true                       # belt: ensure the file itself is writable too
 pkill -9 -f "uvicorn .*--port 8080" 2>/dev/null || true    # free :8080 (sandbox uvicorn)
 timeout 360 bash /home/kh0pp/crow/scripts/bots/pir_model_swap.sh 35b >/dev/null 2>&1 || true
 

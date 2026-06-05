@@ -144,21 +144,32 @@ function restoreModel() { if (!NO_SWAP) { try { execFileSync("bash", [MODEL_SWAP
 // ── sandbox canvas-companion ───────────────────────────────────────────────────
 let sandboxProc = null;
 const sandboxDb = `${SANDBOX}/canvas.sandbox.db`;
-// Safety net: make prod tea_data.db READ-ONLY for the whole window so a loader
-// that ever resolves the prod default path (TEA_DB env not honored) FAILS LOUDLY
-// instead of silently leaking rows into production. The per-rep copy is writable;
-// only prod is locked. (A real isolation breach happened at N=5 before this:
-// some reps' loaders wrote 4742 rows to prod because the env override didn't
-// reach the bot's subprocess. Read-only converts any such miss into a CLOSE FAIL.)
-let teaProdLocked = false;
+// Leak safety net — lock the prod tea_data.db DIRECTORY read-only for the window.
+// The agentic bot sometimes IMPROVISES a write to the prod tea_data.db path it
+// knows from its prompt (bypassing the staged loader AND the env redirect), so the
+// only reliable defense is to make that path physically unwritable. A file-level
+// `chmod 444` is INSUFFICIENT: tea_data.db is WAL-mode, so writes land in -wal/-shm
+// created in the still-writable directory (and the file mode itself got changed) —
+// this leaked 4742 rows to prod 3x before. Locking the DIRECTORY (555) blocks the
+// db file, -wal, -shm, and any recreated file — verified to return SQLITE_READONLY.
+// Legit redirected writes go to the SEPARATE sandbox dir (writable), so they still
+// work; only writes to the prod tea dir are blocked.
+import { dirname } from "node:path";
+const TEA_DB_DIR = dirname(TEA_DB_PROD);
+let teaDirLocked = false;
+let teaDirOrigMode = null;
 function lockProdTea() {
-  try { fs.chmodSync(TEA_DB_PROD, 0o444); teaProdLocked = true; log(`prod tea_data.db locked READ-ONLY (leak safety net)`); }
-  catch (e) { log(`WARNING: could not lock prod tea_data.db read-only: ${e.message}`); }
+  try {
+    teaDirOrigMode = fs.statSync(TEA_DB_DIR).mode & 0o777;
+    fs.chmodSync(TEA_DB_DIR, 0o555);
+    teaDirLocked = true;
+    log(`prod tea dir locked READ-ONLY (${TEA_DB_DIR}, was ${teaDirOrigMode.toString(8)}) — leak safety net`);
+  } catch (e) { log(`WARNING: could not lock prod tea dir read-only: ${e.message}`); }
 }
 function unlockProdTea() {
-  if (!teaProdLocked) return;
-  try { fs.chmodSync(TEA_DB_PROD, 0o644); teaProdLocked = false; log(`prod tea_data.db restored writable`); }
-  catch (e) { log(`WARNING: could not restore prod tea_data.db writable: ${e.message}`); }
+  if (!teaDirLocked) return;
+  try { fs.chmodSync(TEA_DB_DIR, teaDirOrigMode || 0o755); teaDirLocked = false; log(`prod tea dir restored writable`); }
+  catch (e) { log(`WARNING: could not restore prod tea dir writable: ${e.message}`); }
 }
 
 function startSandbox() {
