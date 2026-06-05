@@ -94,11 +94,29 @@ function restoreModel() { if (!NO_SWAP) { try { execFileSync("bash", [MODEL_SWAP
 // ── sandbox canvas-companion ───────────────────────────────────────────────────
 let sandboxProc = null;
 const sandboxDb = `${SANDBOX}/canvas.sandbox.db`;
+// Safety net: make prod tea_data.db READ-ONLY for the whole window so a loader
+// that ever resolves the prod default path (TEA_DB env not honored) FAILS LOUDLY
+// instead of silently leaking rows into production. The per-rep copy is writable;
+// only prod is locked. (A real isolation breach happened at N=5 before this:
+// some reps' loaders wrote 4742 rows to prod because the env override didn't
+// reach the bot's subprocess. Read-only converts any such miss into a CLOSE FAIL.)
+let teaProdLocked = false;
+function lockProdTea() {
+  try { fs.chmodSync(TEA_DB_PROD, 0o444); teaProdLocked = true; log(`prod tea_data.db locked READ-ONLY (leak safety net)`); }
+  catch (e) { log(`WARNING: could not lock prod tea_data.db read-only: ${e.message}`); }
+}
+function unlockProdTea() {
+  if (!teaProdLocked) return;
+  try { fs.chmodSync(TEA_DB_PROD, 0o644); teaProdLocked = false; log(`prod tea_data.db restored writable`); }
+  catch (e) { log(`WARNING: could not restore prod tea_data.db writable: ${e.message}`); }
+}
+
 function startSandbox() {
   fs.mkdirSync(SANDBOX, { recursive: true });
   for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(sandboxDb + ext, { force: true }); } catch { /* */ } }
+  lockProdTea();
   // pristine copy of prod canvas.db (read prod via sqlite backup-style copy)
-  execFileSync("bash", ["-c", `sqlite3 ${CANVAS_DB_PROD} ".backup '${sandboxDb}'"`], { stdio: "pipe" });
+  execFileSync("bash", ["-c", `sqlite3 ${CANVAS_DB_PROD} ".backup '${sandboxDb}'"`], { stdio: "pipe", timeout: 120000, killSignal: "SIGKILL" });
   log(`sandbox canvas.db copied -> ${sandboxDb}`);
   const env = { ...process.env, CANVAS_DB_PATH: sandboxDb, PYTHONPATH: CANVAS_APP_DIR };
   sandboxProc = spawn(CANVAS_UVICORN, ["src.web.app:app", "--host", "0.0.0.0", "--port", "8080"],
@@ -113,6 +131,31 @@ function startSandbox() {
 }
 function stopSandbox() {
   if (sandboxProc && !sandboxProc.killed) { try { process.kill(sandboxProc.pid, "SIGTERM"); } catch { /* */ } log("sandbox uvicorn stopped"); }
+  unlockProdTea();
+}
+
+// Deterministically point a generated loader.py at the per-rep TEA_DB copy,
+// regardless of whether the bot honored the TEA_DB env override. Rewrites any
+// hardcoded prod tea_data.db path (incl. the os.environ.get default) to the copy.
+// Belt to the read-only safety net's suspenders: this makes reps actually PASS
+// (write to the copy) instead of merely failing safely.
+function redirectLoaderToCopy(stagingDir, teaCopy) {
+  const lp = path.join(stagingDir, "loader.py");
+  if (!fs.existsSync(lp)) return false;
+  const src = fs.readFileSync(lp, "utf8");
+  if (src.includes("__FF_TEA_REDIRECT__")) return true;  // idempotent
+  // FORCE the TEA_DB env var to the per-rep copy before the loader's own
+  // os.environ.get("TEA_DB", <prod default>) reads it at module load. Prepended
+  // with its own os import so it runs first regardless of how the loader formats
+  // its path definition (single- or multi-line). Covers every observed loader
+  // (all use os.environ.get("TEA_DB")); the read-only prod safety net catches any
+  // that hardcode the path instead.
+  const inject = `import os as _ff_os  # __FF_TEA_REDIRECT__\n_ff_os.environ["TEA_DB"] = ${JSON.stringify(teaCopy)}\n`;
+  let out;
+  if (src.startsWith("#!")) { const nl = src.indexOf("\n"); out = src.slice(0, nl + 1) + inject + src.slice(nl + 1); }
+  else out = inject + src;
+  fs.writeFileSync(lp, out);
+  return true;
 }
 
 // ── crow.db helpers ─────────────────────────────────────────────────────────────
@@ -150,7 +193,7 @@ function resetSandboxRow(pir, golden, token) {
 function freshTeaCopy(pir, n) {
   const dst = `${SANDBOX}/tea_${pir}_${TAG}_${n}.db`;
   for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dst + ext, { force: true }); } catch { /* */ } }
-  execFileSync("bash", ["-c", `sqlite3 ${TEA_DB_PROD} ".backup '${dst}'"`], { stdio: "pipe" });
+  execFileSync("bash", ["-c", `sqlite3 ${TEA_DB_PROD} ".backup '${dst}'"`], { stdio: "pipe", timeout: 120000, killSignal: "SIGKILL" });
   // Drop any pre-existing research_pir<pir>_* tables so the loader's duplicate
   // guard does NOT mask the commit — this rep must exercise a real fresh write.
   const db = new Database(dst); db.pragma("busy_timeout=8000");
@@ -201,7 +244,7 @@ function bridgeInject(threadId, userMessage, env) {
   let stdout = "", exit = 0;
   try {
     stdout = execFileSync(process.execPath, [BRIDGE, "--inject", payload],
-      { timeout: RUN_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"],
+      { timeout: RUN_TIMEOUT_MS, killSignal: "SIGKILL", maxBuffer: 64 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"],
         env: { ...process.env, PIBOT_TURN_TIMEOUT_MS: TURN_TIMEOUT_MS, ...env } }).toString();
   } catch (e) { exit = e.status ?? 1; stdout = (e.stdout ? e.stdout.toString() : "") + "\n[STDERR]\n" + (e.stderr ? e.stderr.toString() : ""); }
   const replyM = stdout.match(/REPLY>>>\n([\s\S]*?)\n<<<REPLY/);
@@ -262,6 +305,10 @@ function runRep(pir, golden, fixture, caseType, n) {
   // APPROVE -> CLOSE
   let approveWall = null, committed = null, rowAfter = null;
   if (!NO_APPROVE) {
+    // Force the staged loader to write to the per-rep TEA_DB copy regardless of
+    // whether the bot honored the TEA_DB env override (the env did not reliably
+    // reach the bot's subprocess at N=5, causing a real prod leak before this).
+    if (teaDb) { const r = redirectLoaderToCopy(stagingDir, teaDb); if (r) log(`  redirected loader.py -> TEA_DB copy`); }
     const ta = Date.now();
     const a = bridgeInject(threadId, "APPROVE", kEnv);
     approveWall = Date.now() - ta;
@@ -376,4 +423,6 @@ async function main() {
 
 process.on("SIGINT", () => { stopSandbox(); restoreModel(); process.exit(1); });
 process.on("SIGTERM", () => { stopSandbox(); restoreModel(); process.exit(1); });
+// Guarantee prod tea_data.db is never left read-only, even on a hard exit.
+process.on("exit", () => { try { unlockProdTea(); } catch { /* */ } });
 main();

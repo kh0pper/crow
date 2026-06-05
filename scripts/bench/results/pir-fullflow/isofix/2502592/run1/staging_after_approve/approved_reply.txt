@@ -1,0 +1,10 @@
+Dear TEA Public Information Office,
+
+I have received the five CSV files (PRU_11507_21 through PRU_11507_25) containing district-level PEIMS data for pregnancy and parenting services, covering school years 2020-21 through 2024-25. Thank you for providing this data at no charge.
+
+I note that E1012 (PEP-INDICATOR-CODE) was not produced, consistent with your prior notice that this element was deleted in 2012.
+
+I will review the data and reach out if I have follow-up questions.
+
+Kevin Hopper
+kevin.hopper1@gmail.com
