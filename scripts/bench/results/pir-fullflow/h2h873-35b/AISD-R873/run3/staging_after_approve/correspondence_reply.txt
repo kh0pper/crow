@@ -1,0 +1,15 @@
+Hi AISD PIA Team:
+
+Thank you for your June 5 response. I am writing to address two remaining points.
+
+**Item 9b — Between-campus transfer records.** Your FERPA argument does not apply to the format I requested. The data you would be producing consists of aggregated campus-level counts (originating campus, receiving campus, school year, count per pair) — not individually identifiable student records. TEA itself publishes PEIMS data at the campus level, including free/reduced lunch eligibility, OOD enrollment, and special education counts. All of these are aggregated by campus and do not violate FERPA. I am asking for the same type of aggregated data for inter-campus transfers. If the District maintains enrollment movement data in the SIS (which you acknowledge it does), the requested format is simply a cross-tabulation of campus pairs by year, which contains no student-level identifiers. I do not need a cost estimate to produce aggregated counts.
+
+**Item 4c — Statutory basis.** Your statement that the cost estimates for items 4a and 4b "answered" this question is incorrect. Item 4c asks specifically for the statutory basis under which the District is refusing to produce per-pupil expenditure by campus. A cost estimate is not a legal citation. If the District is relying on any exception to disclosure (such as 552.108, 552.110, or any other provision), please cite it directly. The requester is entitled to a clear statement of the legal basis for any withholding.
+
+**Unilateral closure.** I note your statement that the request will be closed if no cost estimate is accepted for item 9b. The District cannot unilaterally close an open item while a dispute is pending under 552.2615. The requester has the right to contest a cost estimate or refusal within the statutory period. I am contesting the refusal on item 9b (FERPA does not bar aggregated data) and the evasion on item 4c (cost estimates do not constitute a statutory citation).
+
+Please provide a direct statutory citation for item 4c and produce the aggregated transfer data for item 9b in the format described.
+
+Thank you,
+
+Kevin Hopper

@@ -1,0 +1,15 @@
+Dear Austin ISD PIA Team,
+
+Thank you for your email. I am responding to three points in your correspondence.
+
+Regarding item #9(b): your FERPA claim is incorrect. Aggregated transfer counts by campus and school year contain no student-identifiable information. FERPA protects individually identifiable student records, not enrollment totals. If the District maintains a summary dataset showing originating campus, receiving campus, school year, and student count, that data is not subject to FERPA redaction. If the District only has raw SIS enrollment data, that data is already reported publicly through PEIMS and does not require redaction. Please produce the record you maintain or confirm in writing that no such record exists. I will not accept a cost estimate for programming and redactions of data that is not FERPA-protected.
+
+Regarding item #4(c): your response did not answer the question. I asked whether the District maintains campus-level expenditure detail within its financial accounting system. The cost estimates for items #4(a) and #4(b) are not an answer to this question. Please confirm or deny whether the District maintains such data internally. This is a confirmation request, not a data production request.
+
+Regarding your statement that the request will be closed if I do not proceed with a cost estimate for #9(b): the District may not unilaterally close a pending PIR while items remain unanswered. If the District determines it cannot comply with #9(b), please issue a formal written determination with the legal basis for the denial. I will review the determination and decide on next steps.
+
+Sincerely,
+
+Kevin Hopper
+kevin.hopper1@gmail.com
+(972) 754-6406

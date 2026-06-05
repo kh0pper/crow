@@ -1,0 +1,48 @@
+{
+  "pir": "AISD-R873",
+  "tag": "h2h873-35b",
+  "run": 5,
+  "case_type": "correspondence",
+  "thread_id": "ff-AISD-R873-h2h873-35b-5-62e8ae12",
+  "verdict": "PASS",
+  "kickoff_exit": 0,
+  "kickoff_wall_ms": 127918,
+  "approve_wall_ms": 48045,
+  "committed_rows": null,
+  "row_after": {
+    "id": 60,
+    "pir_number": "AISD-R873",
+    "status": "processing",
+    "processing_lease_status": "done",
+    "processing_lease": null,
+    "case_type": "correspondence",
+    "requested_items": null
+  },
+  "stages": [
+    {
+      "stage": "ingest",
+      "verdict": "PASS",
+      "detail": "case_type=correspondence attachments=0"
+    },
+    {
+      "stage": "bot",
+      "verdict": "PASS",
+      "detail": "artifacts ok action=asked"
+    },
+    {
+      "stage": "validate",
+      "verdict": "PASS",
+      "detail": "gate clean; claims={}; impact_nums=[]"
+    },
+    {
+      "stage": "close",
+      "verdict": "PASS",
+      "detail": "reply staged, lease=done"
+    }
+  ],
+  "staging_files": [
+    "claims.json",
+    "correspondence_reply.txt",
+    "review_email.md"
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "pir_number": "AISD-R873",
+  "label": "Austin ISD — PIA R000873 (#9b transfer data / #4c cost / SII withholding)",
+  "case_type": "correspondence",
+  "attachments": [],
+  "body_contains": ["9b"],
+  "counts": {
+    "note": "Reasoning-heavy correspondence, NO entity tally to verify. claims.json should be {} (no count). The comparison is qualitative: does the reply correctly handle #9b (proceed with a cost estimate vs close), rebut/accept the 'not maintained in requested format' + SII/FERPA claims, and address #4c — in Kevin's voice."
+  },
+  "kickoff_state": { "status": "processing" },
+  "close": {
+    "type": "reply",
+    "expect_files": ["correspondence_reply.txt"],
+    "final_lease_status": "done"
+  },
+  "provenance": {
+    "case_type": "human-verified (correspondence)",
+    "attachments": "human-verified (GovQA portal message, no attachments)",
+    "close": "human-verified workflow contract",
+    "content": "qualitative — judged by reading, not asserted by the harness"
+  }
+}

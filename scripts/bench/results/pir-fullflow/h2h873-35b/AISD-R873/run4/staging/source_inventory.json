@@ -1,0 +1,33 @@
+{
+  "pir_number": "AISD-R873",
+  "holding_dir": "/home/kh0pp/spring-2026/insd-5941/sources/pir-incoming/AISD-R873",
+  "case_type": "correspondence",
+  "files": [
+    {
+      "filename": "2026-04-23-followup-AISD-R000873-gaps.pdf",
+      "kind": "pdf",
+      "size_bytes": 111917,
+      "parseable": false,
+      "notes": "User follow-up letter (April 23). Not parseable as structured data. Reference artifact."
+    },
+    {
+      "filename": "email_body.txt",
+      "kind": "email_body",
+      "size_bytes": 1948,
+      "notes": "AISD June 5 response — #9b FERPA refusal + cost estimate offer, #4c claimed answered by #4a/#4b cost estimates, closure threat."
+    },
+    {
+      "filename": "_rematch-meta-2026-05-13_19dbb25eb57309e2.txt",
+      "kind": "meta",
+      "size_bytes": 134,
+      "notes": "Rematch metadata from prior session."
+    },
+    {
+      "filename": "govqa_drive.py",
+      "kind": "utility",
+      "size_bytes": 6936,
+      "notes": "GovQA portal driver script."
+    }
+  ],
+  "data_rows": 0
+}
