@@ -97,20 +97,27 @@ function sudoSystemctl(action) {
 
 // ── deadman watchdog (out-of-process hard window cap) ─────────────────────────
 let deadmanProc = null;
+const DEADMAN_SENTINEL = `${SANDBOX}/.deadman_disarmed`;
 function armDeadman() {
   const cap = Math.floor(WINDOW_CAP_MS / 1000);
   try {
-    fs.mkdirSync(RESULTS, { recursive: true });
+    fs.mkdirSync(SANDBOX, { recursive: true });
+    try { fs.rmSync(DEADMAN_SENTINEL, { force: true }); } catch { /* */ }
     const logfd = fs.openSync(`${RESULTS}/deadman.log`, "a");
-    deadmanProc = spawn("bash", [DEADMAN_SCRIPT, String(cap), String(process.pid), TEA_DB_PROD],
+    // Pass the sentinel path so the deadman can no-op if we disarmed but the kill
+    // didn't land (belt-and-suspenders against a missed process-group kill).
+    deadmanProc = spawn("bash", [DEADMAN_SCRIPT, String(cap), String(process.pid), TEA_DB_PROD, DEADMAN_SENTINEL],
       { detached: true, stdio: ["ignore", logfd, logfd], env: { ...process.env, LAB_SUDO_PASS: SUDO_PASS } });
     deadmanProc.unref();
     log(`deadman armed: ${cap}s hard window cap (pid ${deadmanProc.pid}) -> ${RESULTS}/deadman.log`);
   } catch (e) { log(`WARNING: could not arm deadman: ${e.message}`); }
 }
 function disarmDeadman() {
+  // 1) sentinel first (works even if the kill misses).
+  try { fs.mkdirSync(SANDBOX, { recursive: true }); fs.writeFileSync(DEADMAN_SENTINEL, "disarmed"); } catch { /* */ }
+  // 2) kill the watchdog: its own pid AND its process group.
   if (deadmanProc && deadmanProc.pid) {
-    try { process.kill(-deadmanProc.pid, "SIGKILL"); } catch { try { process.kill(deadmanProc.pid, "SIGKILL"); } catch { /* */ } }
+    for (const target of [deadmanProc.pid, -deadmanProc.pid]) { try { process.kill(target, "SIGKILL"); } catch { /* */ } }
     deadmanProc = null;
   }
 }
@@ -157,10 +164,14 @@ function unlockProdTea() {
 function startSandbox() {
   fs.mkdirSync(SANDBOX, { recursive: true });
   for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(sandboxDb + ext, { force: true }); } catch { /* */ } }
-  lockProdTea();
-  // pristine copy of prod canvas.db (read prod via sqlite backup-style copy)
+  // Copy prod canvas.db (small, no live holder during the window). Do NOT copy prod
+  // tea_data.db: it is large (338MB, WAL) and held open by the texas-gov-data MCP
+  // server, so `.backup` contends and hangs. The loader only CREATES research_pir*
+  // tables and never reads existing tea data, so each rep gets a FRESH EMPTY tea db
+  // instead (see freshTeaCopy) — faster and strictly more isolated.
   execFileSync("bash", ["-c", `sqlite3 ${CANVAS_DB_PROD} ".backup '${sandboxDb}'"`], { stdio: "pipe", timeout: 120000, killSignal: "SIGKILL" });
-  log(`sandbox canvas.db copied -> ${sandboxDb}`);
+  lockProdTea();
+  log(`sandbox canvas.db copied (prod tea now read-only; per-rep tea = fresh empty db)`);
   const env = { ...process.env, CANVAS_DB_PATH: sandboxDb, PYTHONPATH: CANVAS_APP_DIR };
   sandboxProc = spawn(CANVAS_UVICORN, ["src.web.app:app", "--host", "0.0.0.0", "--port", "8080"],
     { cwd: CANVAS_APP_DIR, env, stdio: ["ignore", fs.openSync(`${SANDBOX}/uvicorn.log`, "w"), fs.openSync(`${SANDBOX}/uvicorn.err.log`, "w")] });
@@ -170,7 +181,7 @@ function startSandbox() {
     if (portListening()) { log(`sandbox uvicorn up on :8080 (pid ${sandboxProc.pid}) -> ${sandboxDb}`); return true; }
     execFileSync("sleep", ["1"]);
   }
-  die("sandbox uvicorn did not become healthy on :8080 within 60s (see _sandbox/uvicorn.err.log)");
+  throw new Error("sandbox uvicorn did not become healthy on :8080 within 60s (see _sandbox/uvicorn.err.log)");
 }
 function stopSandbox() {
   if (sandboxProc && !sandboxProc.killed) { try { process.kill(sandboxProc.pid, "SIGTERM"); } catch { /* */ } log("sandbox uvicorn stopped"); }
@@ -236,14 +247,10 @@ function resetSandboxRow(pir, golden, token) {
 function freshTeaCopy(pir, n) {
   const dst = `${SANDBOX}/tea_${pir}_${TAG}_${n}.db`;
   for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dst + ext, { force: true }); } catch { /* */ } }
-  execFileSync("bash", ["-c", `sqlite3 ${TEA_DB_PROD} ".backup '${dst}'"`], { stdio: "pipe", timeout: 120000, killSignal: "SIGKILL" });
-  // Drop any pre-existing research_pir<pir>_* tables so the loader's duplicate
-  // guard does NOT mask the commit — this rep must exercise a real fresh write.
-  const db = new Database(dst); db.pragma("busy_timeout=8000");
-  const tbls = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?").all(`research_pir${pir}_%`);
-  for (const t of tbls) db.prepare(`DROP TABLE IF EXISTS "${t.name}"`).run();
-  db.close();
-  if (tbls.length) log(`  dropped ${tbls.length} pre-existing research_pir${pir}_* table(s) from TEA copy`);
+  // Fresh EMPTY tea db (not a copy of prod). The loader CREATEs research_pir*
+  // tables here and reads no existing tea data, so an empty db is sufficient and
+  // strictly isolated — and there are no pre-existing tables to mask the commit.
+  const db = new Database(dst); db.pragma("journal_mode = WAL"); db.close();
   return dst;
 }
 function teaCommittedRows(teaDb, pir) {
@@ -442,25 +449,27 @@ async function main() {
   const pirs = ALL ? tier1Pirs() : [PIR_ARG];
   if (!pirs.length) die("no PIRs to run (no golden refs?)");
 
-  if (!INGEST_ONLY) {
-    if (SUDO_PASS) {
-      // Harness owns the window: stop prod services itself (and the deadman will
-      // restart them on a runaway). Wait for :8080 to free.
-      sudoSystemctl("stop");
-      for (let i = 0; i < 10 && portListening(); i++) execFileSync("sleep", ["1"]);
-    } else {
-      // Operator-managed window: require sole-writer + free port.
-      for (const t of ["mpa-pir-response-sync.timer", "mpa-pir-processor-dispatch.timer"]) {
-        if (timerActive(t)) die(`${t} is active — stop the PIR timers (or set LAB_SUDO_PASS to self-manage the window)`);
-      }
+  // Preflight that must refuse BEFORE opening the window (no prod mutation yet).
+  if (!INGEST_ONLY && !SUDO_PASS) {
+    for (const t of ["mpa-pir-response-sync.timer", "mpa-pir-processor-dispatch.timer"]) {
+      if (timerActive(t)) die(`${t} is active — stop the PIR timers (or set LAB_SUDO_PASS to self-manage the window)`);
     }
     if (portListening()) die("something is already listening on :8080 — stop canvas-companion-web (or set LAB_SUDO_PASS)");
-    armDeadman();   // hard window cap is now active (out-of-process)
-    startSandbox();
   }
 
   const allReps = [];
   try {
+    // Open the window INSIDE the try so any setup failure still hits teardown()
+    // (restart services, disarm deadman, unlock tea). Errors here throw, never die().
+    if (!INGEST_ONLY) {
+      if (SUDO_PASS) {
+        sudoSystemctl("stop");
+        for (let i = 0; i < 10 && portListening(); i++) execFileSync("sleep", ["1"]);
+        if (portListening()) throw new Error(":8080 still occupied after stopping prod services");
+      }
+      armDeadman();   // hard window cap is now active (out-of-process)
+      startSandbox();
+    }
     for (const pir of pirs) allReps.push(...runPir(pir));
   } finally {
     if (!INGEST_ONLY) teardown();
@@ -479,4 +488,4 @@ process.on("SIGINT", () => { teardown(); process.exit(1); });
 process.on("SIGTERM", () => { teardown(); process.exit(1); });
 // Last-resort: never leave prod tea_data.db read-only or the deadman armed.
 process.on("exit", () => { try { disarmDeadman(); unlockProdTea(); } catch { /* */ } });
-main();
+main().catch((e) => { log("FATAL: " + (e && e.message || e)); process.exit(1); });

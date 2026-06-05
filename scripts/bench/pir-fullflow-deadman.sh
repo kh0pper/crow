@@ -9,13 +9,15 @@
 # (canvas-web down, tea_data.db read-only) longer than CAP. The harness kills this
 # watchdog on its own clean exit.
 #
-# Args: <cap_seconds> <harness_pid> <tea_db_path>
+# Args: <cap_seconds> <harness_pid> <tea_db_path> [disarm_sentinel_path]
 # Env:  LAB_SUDO_PASS  (optional) — needed to restart the systemd services.
 set -uo pipefail
-CAP="${1:?cap_seconds}"; HPID="${2:?harness_pid}"; TEA="${3:?tea_db_path}"
+CAP="${1:?cap_seconds}"; HPID="${2:?harness_pid}"; TEA="${3:?tea_db_path}"; SENTINEL="${4:-}"
 
 sleep "$CAP"
 
+# Disarmed by the harness on clean exit (sentinel survives a missed kill)? no-op.
+[ -n "$SENTINEL" ] && [ -f "$SENTINEL" ] && exit 0
 # Harness already gone (clean exit normally kills us first)? nothing to do.
 kill -0 "$HPID" 2>/dev/null || exit 0
 
