@@ -66,6 +66,7 @@ const INGEST_ONLY = flag("ingest-only");
 const NO_APPROVE = flag("no-approve");
 const KEEP_SANDBOX = flag("keep-sandbox");
 const NO_SWAP = flag("no-swap");
+const MODEL_OVERRIDE = arg("model", null);  // force 27b|35b for a head-to-head A/B (overrides the case_type role split)
 const TURN_TIMEOUT_MS = process.env.PIBOT_TURN_TIMEOUT_MS || String(25 * 60 * 1000);
 const RUN_TIMEOUT_MS = Number(process.env.PIR_FULLFLOW_RUN_TIMEOUT_MS || 30 * 60 * 1000);
 // Hard window cap: the maintenance window (canvas-web down, tea_data.db read-only)
@@ -406,10 +407,12 @@ function runPir(pir) {
   if (!fixture) log(`WARN ${pir}: no fixture at ${FIXTURES}/${pir}.json — INGEST will FAIL`);
   const caseType = golden.case_type || (golden.close && golden.close.type === "delivery" ? "delivery" : "correspondence");
   if (!INGEST_ONLY) {
-    const want = caseType === "delivery" ? "35b" : "27b";
+    // --model 27b|35b forces the model regardless of case_type (head-to-head A/B);
+    // otherwise the default role split: delivery -> 35B, reply -> 27B.
+    const want = MODEL_OVERRIDE || (caseType === "delivery" ? "35b" : "27b");
     if (!swap(want)) { log(`SKIP ${pir}: model swap to ${want} failed`); return []; }
   }
-  log(`PIR ${pir} (case_type=${caseType}) x${RUNS} rep(s)`);
+  log(`PIR ${pir} (case_type=${caseType}, model=${MODEL_OVERRIDE || (caseType === "delivery" ? "35b" : "27b")}) x${RUNS} rep(s)`);
   const reps = [];
   for (let n = 1; n <= RUNS; n++) reps.push(runRep(pir, golden, fixture, caseType, n));
   return reps;
