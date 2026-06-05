@@ -1,0 +1,30 @@
+{
+  "pir_number": "2502803",
+  "label": "TEA — District-Level Pregnancy Related Services Data (PEIMS) 2016-17 to 2019-20",
+  "case_type": "delivery",
+  "attachments": [
+    "PRU_11576_17.csv",
+    "PRU_11576_18.csv",
+    "PRU_11576_19.csv",
+    "PRU_11576_20.csv",
+    "Re: PIR # 2502592 Extend Fulfillment Date & Partial No Documents Found.eml"
+  ],
+  "counts": {
+    "verified_set": [4374, 1087, 1092, 1095, 1100],
+    "per_file": { "PRU_11576_17.csv": 1087, "PRU_11576_18.csv": 1092, "PRU_11576_19.csv": 1095, "PRU_11576_20.csv": 1100 },
+    "note": "Grand total 4374 data rows across 4 CSVs (direct csv.reader, header-excluded, human-verified). Sibling of 2502592 (earlier years)."
+  },
+  "kickoff_state": { "status": "requested" },
+  "close": {
+    "type": "delivery",
+    "grand_total": 4374,
+    "final_status": "received",
+    "final_lease_status": "done"
+  },
+  "provenance": {
+    "case_type": "human-verified (tabular delivery)",
+    "attachments": "human-verified (from captured fixture)",
+    "counts": "human-verified (direct csv.reader on source CSVs)",
+    "close": "human-verified workflow contract"
+  }
+}

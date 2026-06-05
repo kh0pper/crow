@@ -1,0 +1,54 @@
+{
+  "pir": "2502803",
+  "tag": "scale",
+  "run": 1,
+  "case_type": "delivery",
+  "thread_id": "ff-2502803-scale-1-b4d3f514",
+  "verdict": "PASS",
+  "kickoff_exit": 0,
+  "kickoff_wall_ms": 334254,
+  "approve_wall_ms": 31483,
+  "committed_rows": 4374,
+  "row_after": {
+    "id": 42,
+    "pir_number": "2502803",
+    "status": "received",
+    "processing_lease_status": "done",
+    "processing_lease": null,
+    "case_type": null,
+    "requested_items": null
+  },
+  "stages": [
+    {
+      "stage": "ingest",
+      "verdict": "PASS",
+      "detail": "case_type=delivery attachments=5"
+    },
+    {
+      "stage": "bot",
+      "verdict": "PASS",
+      "detail": "artifacts ok action=asked"
+    },
+    {
+      "stage": "validate",
+      "verdict": "PASS",
+      "detail": "gate clean; claims={1087,1092,1095,1100,4374}; impact_nums=[]"
+    },
+    {
+      "stage": "close",
+      "verdict": "PASS",
+      "detail": "committed 4374 rows, status=received"
+    }
+  ],
+  "staging_files": [
+    "README.md",
+    "analysis_note.json",
+    "approved_reply.txt",
+    "claims.json",
+    "draft_acknowledgment.txt",
+    "loader.py",
+    "review_email.md",
+    "row_counts.json",
+    "source_inventory.json"
+  ]
+}

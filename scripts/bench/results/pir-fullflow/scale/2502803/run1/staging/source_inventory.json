@@ -1,0 +1,76 @@
+{
+  "pir_number": "2502803",
+  "label": "TEA Pregnancy/Parenting PEIMS (2016-20)",
+  "recipient": "Texas Education Agency",
+  "received_date": "2026-03-23",
+  "holding_dir": "/home/kh0pp/spring-2026/insd-5941/sources/pir-incoming/2502803",
+  "attachments": [
+    {
+      "filename": "PRU_11576_17.csv",
+      "kind": "csv",
+      "rows": 1087,
+      "year": "2016-2017",
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "size_bytes": 47190,
+      "masked_pregnant": 268,
+      "masked_singlepar": 284,
+      "masked_days": 0,
+      "description": "District-level PEIMS data for 2016-17: pregnant CTE students, single-parent CTE students, eligible pregnancy-related services days. FERPA masked."
+    },
+    {
+      "filename": "PRU_11576_18.csv",
+      "kind": "csv",
+      "rows": 1092,
+      "year": "2017-2018",
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "size_bytes": 47325,
+      "masked_pregnant": 240,
+      "masked_singlepar": 291,
+      "masked_days": 0,
+      "description": "District-level PEIMS data for 2017-18."
+    },
+    {
+      "filename": "PRU_11576_19.csv",
+      "kind": "csv",
+      "rows": 1095,
+      "year": "2018-2019",
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "size_bytes": 47269,
+      "masked_pregnant": 223,
+      "masked_singlepar": 250,
+      "masked_days": 0,
+      "description": "District-level PEIMS data for 2018-19."
+    },
+    {
+      "filename": "PRU_11576_20.csv",
+      "kind": "csv",
+      "rows": 1100,
+      "year": "2019-2020",
+      "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"],
+      "size_bytes": 47476,
+      "masked_pregnant": 222,
+      "masked_singlepar": 246,
+      "masked_days": 0,
+      "description": "District-level PEIMS data for 2019-20."
+    }
+  ],
+  "correspondence": [
+    {
+      "filename": "Re: PIR # 2502592 Extend Fulfillment Date & Partial No Documents Found.eml",
+      "kind": "eml",
+      "description": "Amendment letter requesting extension of date range from 2020-21 through 2024-25 to 2016-17 through 2024-25."
+    }
+  ],
+  "total_data_rows": 4374,
+  "total_masked_pregnant": 953,
+  "total_masked_singlepar": 1071,
+  "total_masked_days": 0,
+  "cross_reference": {
+    "requested_items": [
+      {"item": "PREGNANT_CTE_STUDENTS by district, years 2016-20", "status": "Delivered", "notes": "4 CSV files, 4374 rows total. FERPA masked (-999 for counts <10)."},
+      {"item": "SINGLEPAR_CTE_STUDENTS by district, years 2016-20", "status": "Delivered", "notes": "Included in same files. FERPA masked."},
+      {"item": "ELIG_PREG_REL_SVCS_DAYS by district, years 2016-20", "status": "Delivered", "notes": "Included in same files. No masked values found."},
+      {"item": "Years 2016-17 through 2019-20", "status": "Delivered", "notes": "This PIR covers 2016-17 through 2019-20. Years 2020-21 through 2024-25 are under separate PIR #2502592."}
+    ]
+  }
+}

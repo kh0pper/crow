@@ -15,6 +15,7 @@ needs-human, never shipped — acceptable) · **FAIL** (silently wrong — forbi
 |---|---|---|---|---|---|---|---|
 | 2503540 | reply | 27B @ temp 0.7 | PASS×5 | PASS×5 | PASS×5 | PASS×5 | ✅ **PASS×5** |
 | 2502592 | delivery | 35B | PASS×5 | PASS×5 | PASS×4 / ESC×1 | PASS×5 | ✅ **zero FAIL** (4 PASS / 1 ESCALATE) |
+| 2502803 | delivery | 35B | PASS×2 | PASS×2 | PASS×2 | PASS×2 | ✅ **PASS×2** (committed 4374; scale add) |
 
 **Both paths meet the bar: zero FAIL.** No silently-wrong output on either, across
 10 model runs. Production was verified leak-free after every window (`leak=0`).

@@ -1,0 +1,1 @@
+{"table": "research_pir2502803_pregnancy_services", "files": {"PRU_11576_17.csv": 1087, "PRU_11576_18.csv": 1092, "PRU_11576_19.csv": 1095, "PRU_11576_20.csv": 1100}, "total_rows": 4374, "masked_pregnant": 953, "masked_singlepar": 1071, "masked_days": 0, "columns": ["YEAR", "DISTRICT", "DISTNAME", "PREGNANT_CTE_STUDENTS", "SINGLEPAR_CTE_STUDENTS", "ELIG_PREG_REL_SVCS_DAYS"]}
