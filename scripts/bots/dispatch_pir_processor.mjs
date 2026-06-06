@@ -368,15 +368,44 @@ function normalizeVoice(text) {
     .replace(/ +,/g, ",")
     .replace(/,\s*,/g, ",");
 }
+// ── Fabrication / PII guard (local-model output safety net) ──────────────────
+// The local model occasionally INVENTS contact info or adds markdown to outbound
+// drafts (the 35B fabricated a phone number and used markdown headers in the
+// AISD-R873 head-to-head). The approved signature is name + email ONLY
+// (kevin.hopper1@gmail.com); the requestor has no phone/fax/address in the voice
+// profile, so ANY phone number is fabricated PII and must never go out. Strip it
+// (the human still reviews before send) and log loudly. Also strip markdown
+// emphasis/headers (emails are plain text). Returns {text, hits}.
+const SIGN_EMAIL = "kevin.hopper1@gmail.com";
+function stripFabrications(text) {
+  const hits = [];
+  let out = text;
+  // phone numbers (3-3-4 with separators / parens) — none exist in the profile, so
+  // any is fabricated PII. Strip (the human still reviews before send).
+  out = out.replace(/\(?\b\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}\b/g, (m) => { hits.push(`phone:${m.trim()}`); return ""; });
+  const hadFab = hits.length > 0;
+  // markdown emphasis + ATX headers (outbound mail is plain text) — cosmetic, so
+  // this runs regardless and is not counted as a fabrication hit.
+  out = out.replace(/\*\*(.+?)\*\*/gs, "$1").replace(/(^|\n)#{1,6}\s+/g, "$1");
+  // A non-signature email is only FLAGGED (for human review), never rewritten —
+  // it may be a legitimate reference to the recipient's address.
+  for (const m of out.match(/\b[\w.+\-]+@[\w.\-]+\.\w{2,}\b/g) || []) {
+    if (m.toLowerCase() !== SIGN_EMAIL) hits.push(`email?:${m}`);
+  }
+  if (hadFab) out = out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/\(\s*\)/g, "");
+  return { text: out, hits };
+}
 function normalizeStagingFiles(stagingDir, names) {
   for (const name of names) {
     const p = `${stagingDir}/${name}`;
     if (!fs.existsSync(p)) continue;
     const before = fs.readFileSync(p, "utf8");
-    const after = normalizeVoice(before);
+    let after = normalizeVoice(before);
+    const fab = stripFabrications(after);
+    after = fab.text;
     if (after !== before) {
       fs.writeFileSync(p, after);
-      log(`VOICE: normalized em/en dashes in ${name}`);
+      log(`VOICE: normalized ${name}${fab.hits.length ? ` — STRIPPED FABRICATIONS: ${fab.hits.join(", ")}` : ""}`);
     }
   }
 }
