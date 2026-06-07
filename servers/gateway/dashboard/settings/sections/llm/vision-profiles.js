@@ -11,11 +11,11 @@
  * profiles track orchestrator/models.json changes automatically.
  */
 
-import { escapeHtml } from "../../shared/components.js";
-import { readSetting, writeSetting, getSettingScope } from "../registry.js";
-import { renderScopeToggle, scopeToggleScript } from "../../shared/scope-toggle.js";
-import { listProviders, resolveProvider } from "../../../ai/resolve-provider.js";
-import { analyzeImage } from "../../../ai/vision.js";
+import { escapeHtml } from "../../../shared/components.js";
+import { readSetting, writeSetting, getSettingScope } from "../../registry.js";
+import { renderScopeToggle, scopeToggleScript } from "../../../shared/scope-toggle.js";
+import { listProviders, resolveProvider } from "../../../../ai/resolve-provider.js";
+import { analyzeImage } from "../../../../ai/vision.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve as resolvePath } from "node:path";
@@ -413,7 +413,7 @@ export default {
         let bytes;
         const fixturePath = resolvePath(
           dirname(fileURLToPath(import.meta.url)),
-          "../../../../..",
+          "../../../../../..",
           "bundles/meta-glasses/assets/test-fixture.jpg",
         );
         try { bytes = readFileSync(fixturePath); }
