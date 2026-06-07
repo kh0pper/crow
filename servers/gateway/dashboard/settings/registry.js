@@ -23,6 +23,26 @@ export const GROUPS = {
 
 /**
  * Register a settings section.
+ *
+ * Section manifest contract (a section module's default export):
+ *   Required:
+ *     - id:        string — unique section id (used in ?section=<id>)
+ *     - group:     string — one of GROUPS (serves as the section's category)
+ *     - labelKey:  string — i18n key for the menu label
+ *     - render({ req, res, db, lang }): Promise<string>
+ *   Optional:
+ *     - navOrder:  number — order within the group
+ *     - icon:      string — inline SVG markup
+ *     - getPreview({ db, lang }): Promise<string> — menu subtitle
+ *     - handleAction({ req, res, db, action }): Promise<boolean>
+ *     - scope:     "global" | "local" | "mixed" — declares whether the
+ *                  section's settings are operator-global (synced), strictly
+ *                  per-instance, or a mix. Advisory metadata for the UI /
+ *                  future tooling; enforcement still lives in writeSetting.
+ *     - syncKeys:  string[] — the dashboard_settings keys this section writes
+ *                  that are MEANT to replicate. Validated against
+ *                  SYNC_ALLOWLIST at boot by checkSyncKeyDrift() (advisory).
+ *
  * @param {object} manifest - Section module default export
  */
 export function registerSettingsSection(manifest) {

@@ -52,3 +52,34 @@ export function isSyncable(key) {
 export function listSyncableKeys() {
   return Object.entries(SYNC_ALLOWLIST).map(([pattern, description]) => ({ pattern, description }));
 }
+
+/**
+ * Advisory drift check. Verifies that every settings section's declared
+ * `syncKeys` is actually covered by SYNC_ALLOWLIST. The allowlist stays the
+ * single ENFORCEMENT source of truth — `writeSetting` consults `isSyncable`,
+ * not this function. This only catches the "a section declares a synced key
+ * but nobody added it to the allowlist" class of bug, logging it once at
+ * boot so the operator notices a key that silently won't replicate. Never
+ * throws; returns the drift list for tests.
+ *
+ * @param {Array<{id?:string, syncKeys?:string[]}>} sections
+ * @returns {Array<{section:string, key:string}>}
+ */
+export function checkSyncKeyDrift(sections) {
+  const drift = [];
+  for (const s of sections || []) {
+    const keys = Array.isArray(s?.syncKeys) ? s.syncKeys : [];
+    for (const key of keys) {
+      if (!isSyncable(key)) drift.push({ section: s?.id || "(unknown)", key });
+    }
+  }
+  if (drift.length) {
+    const lines = drift.map((d) => `  - ${d.section}: "${d.key}"`).join("\n");
+    console.warn(
+      "[settings] sync-allowlist drift — section(s) declare syncKeys absent from " +
+        "SYNC_ALLOWLIST; these keys will NOT replicate to paired instances:\n" +
+        lines,
+    );
+  }
+  return drift;
+}
