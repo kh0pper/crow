@@ -14,6 +14,7 @@ import {
   dispatchAction,
   loadAddonSettings,
 } from "../settings/registry.js";
+import { checkSyncKeyDrift } from "../settings/sync-allowlist.js";
 import { renderSettingsMenu } from "../settings/menu-renderer.js";
 
 // Import all built-in sections
@@ -70,8 +71,16 @@ registerSettingsSection(identitySection);
 registerSettingsSection(passwordSection);
 registerSettingsSection(twoFactorSection);
 
-// Load add-on settings (async, non-blocking)
-loadAddonSettings().catch(err => console.warn("[settings] Add-on settings load error:", err.message));
+// Load add-on settings (async, non-blocking), then run the advisory
+// sync-allowlist drift check once every section (built-in + add-on) is
+// registered. Advisory only — never blocks startup.
+loadAddonSettings()
+  .catch(err => console.warn("[settings] Add-on settings load error:", err.message))
+  .finally(() => {
+    try { checkSyncKeyDrift(getSettingsSections()); } catch (err) {
+      console.warn("[settings] sync-allowlist drift check failed:", err.message);
+    }
+  });
 
 export default {
   id: "settings",
