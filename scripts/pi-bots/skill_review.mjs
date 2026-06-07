@@ -118,6 +118,19 @@ function buildPrompt(transcript) {
   ].join("\n");
 }
 
+// Plan §B2 guardrail #2: auto-mode is disallowed by default for HIGH-BLAST-RADIUS
+// bots — those that can send externally unsupervised, run non-deny bash, or spawn
+// sub-agents. For these, auto silently degrades to propose (operator-gated). An
+// explicit per-bot override (skill_learning_auto_override:true) opts back in.
+export function isHighBlastRadius(pp) {
+  if (!pp) return false;
+  const es = pp.external_send;
+  if (es && es !== "draft_only" && es !== "deny") return true; // e.g. "allow"
+  if (pp.bash && pp.bash !== "deny") return true;              // allowlist/sandbox/open
+  if (pp.multi_agent === true) return true;
+  return false;
+}
+
 // Route one review-written skill file by mode. Never throws. Exported for tests.
 export function routeOne({ bot_id, def, crowHome, name, text, mode, model, log }) {
   const staging = proposalsDir(def.session_dir);
@@ -164,9 +177,17 @@ export async function runSkillReview(opts) {
   const log = opts.log || (() => {});
   let reviewDir = null;
   try {
-    const mode = def && def.permission_policy && def.permission_policy.skill_learning;
-    if (mode !== "propose" && mode !== "auto") return { skipped: "mode-off" };
+    const pp = (def && def.permission_policy) || {};
+    const requestedMode = pp.skill_learning;
+    if (requestedMode !== "propose" && requestedMode !== "auto") return { skipped: "mode-off" };
     if (!def.session_dir) return { skipped: "no-session-dir" };
+    // Guardrail #2: degrade auto -> propose for high-blast-radius bots (unless
+    // the operator explicitly overrode). effectiveMode drives all routing below.
+    let mode = requestedMode;
+    if (mode === "auto" && isHighBlastRadius(pp) && pp.skill_learning_auto_override !== true) {
+      mode = "propose";
+      log("auto degraded to propose — high-blast-radius bot (external_send/bash/multi_agent)");
+    }
     // IDLE-ONLY gate (C1): only when no pi is live, so we never take the last slot.
     if (countLivePi() !== 0) { log("skill-review skipped — node busy"); return { skipped: "busy" }; }
 
