@@ -623,6 +623,7 @@ const translations = {
   "settings.section.theme": { en: "Theme", es: "Tema" },
   "settings.section.language": { en: "Language", es: "Idioma" },
   "settings.section.notifications": { en: "Notifications", es: "Notificaciones" },
+  "settings.section.ports": { en: "Ports", es: "Puertos" },
   "settings.section.llm": { en: "LLM Orchestrator", es: "Orquestador LLM" },
   "settings.section.connections": { en: "Connection URLs", es: "URLs de conexión" },
   "settings.section.helpSetup": { en: "Help & Setup", es: "Ayuda y configuración" },
