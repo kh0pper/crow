@@ -697,7 +697,7 @@ export default {
         } else if (!gpuCompat.ok) {
           const tip = `${gpuCompat.reason || "Incompatible GPU arch."}`;
           const label = gpuCompat.kind === "vram" ? "insufficient VRAM" : "incompatible host";
-          installButton = `<span class="ext-card__badge ext-card__badge--type" title="${escapeHtml(tip)}" style="opacity:0.85">${label}</span>`;
+          installButton = `<span class="ext-card__badge ext-card__badge--type" title="${escapeHtml(tip)}" style="opacity:0.85">${escapeHtml(label)}</span>`;
         } else {
           const envVarsAttr = escapeHtml(JSON.stringify(addon.env_vars || []));
           const minRam = addon.requires?.min_ram_mb || 0;
