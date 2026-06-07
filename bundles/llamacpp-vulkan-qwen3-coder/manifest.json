@@ -9,7 +9,7 @@
     "gpu": true,
     "min_vram_gb": 40,
     "platform": "linux-x86_64",
-    "gpu_arch": ["rocm"]
+    "gpu_arch": ["gfx1151"]
   },
   "env_vars": [],
   "port": 8003,
