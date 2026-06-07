@@ -109,6 +109,7 @@ function addrId(a) {
   if (a == null) return "*";
   const s = String(a).replace(/%.*$/, ""); // strip %iface (e.g. 127.0.0.53%lo)
   if (s === "0.0.0.0" || s === "::" || s === "[::]" || s === "*") return "*";
+  if (s === "::1" || s === "[::1]") return "::1";
   return s;
 }
 const overlap = (x, y) => x === "*" || y === "*" || x === y;
@@ -174,7 +175,7 @@ export function attributeAndDetect(endpoints, listeners, coreSet) {
       rows.push({
         port, bundleId: null, bundleName: null, declaredBind: null,
         boundAddr: liveAddr, kind: "foreign", listening: true, status: "up",
-        shared: false, conflict: false, conflictReason: null,
+        shared: false, conflict, conflictReason: conflict ? `Port ${port} has multiple overlapping listeners` : null,
       });
     }
   }
