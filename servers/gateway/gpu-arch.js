@@ -229,21 +229,26 @@ export function detectGpuArch({ refresh = false } = {}) {
 }
 
 /**
- * Arch-only compatibility (the pre-VRAM logic). Internal.
+ * Arch-only compatibility check — the logic extracted from the pre-VRAM
+ * checkGpuArchCompatible. Returns the same shape (ok, reason, required,
+ * detected) but never carries kind/vram fields. Internal — not exported.
  */
 function checkArchOnly(manifest, hostArches) {
   const required = manifest?.requires?.gpu_arch;
   const requiresGpu = Boolean(manifest?.requires?.gpu);
 
+  // No GPU requirement → always compatible.
   if (!requiresGpu && (!required || required.length === 0)) {
     return { ok: true };
   }
+  // requires.gpu: true with no specific arch → need any GPU (non-cpu host).
   if (requiresGpu && (!required || required.length === 0)) {
     const hasGpu = hostArches.some((t) => t !== "cpu");
     return hasGpu
       ? { ok: true }
       : { ok: false, reason: "Bundle requires a GPU, but none was detected.", detected: hostArches };
   }
+  // Explicit gpu_arch list — at least one tag must match (with family expansion).
   const hostSet = new Set(hostArches);
   for (const tag of required) {
     if (hostSet.has(tag)) return { ok: true };
@@ -269,7 +274,7 @@ export function checkGpuArchCompatible(manifest, hostArches = detectGpuArch(), h
   if (!archResult.ok) return archResult;
 
   const minVram = manifest?.requires?.min_vram_gb;
-  if (minVram && typeof hostVramGb === "number" && hostVramGb < minVram) {
+  if (typeof minVram === "number" && typeof hostVramGb === "number" && hostVramGb < minVram) {
     return {
       ok: false,
       kind: "vram",
