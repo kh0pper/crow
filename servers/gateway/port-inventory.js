@@ -103,3 +103,81 @@ export function parseSsListeners(text) {
   }
   return out;
 }
+
+/** Normalize an ss bound address to an overlap identity (wildcard-aware). */
+function addrId(a) {
+  if (a == null) return "*";
+  const s = String(a).replace(/%.*$/, ""); // strip %iface (e.g. 127.0.0.53%lo)
+  if (s === "0.0.0.0" || s === "::" || s === "[::]" || s === "*") return "*";
+  return s;
+}
+const overlap = (x, y) => x === "*" || y === "*" || x === y;
+
+/**
+ * Build one row per port. STATUS is "up" when the port has any ss listener
+ * (correct even for tailscale-bound bundles whose resolved addr can't be
+ * predicted from the compose template). CONFLICT is flagged only when 2+
+ * LISTENERS on the same port have overlapping addresses (a genuine OS
+ * double-bind); two listeners on different specific addrs (the :8004 case) do
+ * not overlap. Multiple bundles merely declaring a port -> `shared` (info).
+ * Foreign listeners -> informational. The displayed bound address is the actual
+ * ss address when listening, else the declared bind.
+ *
+ * @param {Array<{bundleId,bundleName,port:number,bind:string,bindKind:string,proto:string,source:string,portEnvVar?:string}>} endpoints
+ * @param {Array<{port:number,boundAddr:string}>} listeners
+ * @param {Map<number,string>} coreSet
+ */
+export function attributeAndDetect(endpoints, listeners, coreSet) {
+  const ports = new Set([
+    ...endpoints.map((e) => e.port).filter((p) => p != null),
+    ...listeners.map((l) => l.port),
+    ...coreSet.keys(),
+  ]);
+  const rows = [];
+  for (const port of ports) {
+    const eps = endpoints.filter((e) => e.port === port);
+    const lis = listeners.filter((l) => l.port === port);
+    const listening = lis.length > 0;
+    // Conflict = two listeners on this port whose addresses overlap.
+    let conflict = false;
+    for (let i = 0; i < lis.length && !conflict; i++) {
+      for (let j = i + 1; j < lis.length; j++) {
+        if (overlap(addrId(lis[i].boundAddr), addrId(lis[j].boundAddr))) { conflict = true; break; }
+      }
+    }
+    const liveAddr = [...new Set(lis.map((l) => l.boundAddr))].join(", ") || null;
+
+    if (eps.length) {
+      const bundleIds = [...new Set(eps.map((e) => e.bundleId))];
+      const declaredBind = [...new Set(eps.map((e) => e.bind))].join(", ");
+      const isManaged = eps.every((e) => e.source === "manifest");
+      rows.push({
+        port,
+        bundleId: bundleIds.join(", "),
+        bundleName: [...new Set(eps.map((e) => e.bundleName))].join(" / "),
+        declaredBind,
+        boundAddr: listening ? liveAddr : declaredBind,
+        kind: isManaged ? "managed" : (eps.some((e) => e.portEnvVar) ? "parameterized" : "hardcoded"),
+        listening,
+        status: listening ? "up" : "down",
+        shared: bundleIds.length > 1,
+        conflict,
+        conflictReason: conflict ? `Port ${port} has multiple overlapping listeners` : null,
+      });
+    } else if (coreSet.has(port)) {
+      rows.push({
+        port, bundleId: null, bundleName: coreSet.get(port), declaredBind: null,
+        boundAddr: liveAddr, kind: "core", listening, status: listening ? "up" : "down",
+        shared: false, conflict, conflictReason: conflict ? `Port ${port} has multiple overlapping listeners` : null,
+      });
+    } else {
+      rows.push({
+        port, bundleId: null, bundleName: null, declaredBind: null,
+        boundAddr: liveAddr, kind: "foreign", listening: true, status: "up",
+        shared: false, conflict: false, conflictReason: null,
+      });
+    }
+  }
+  rows.sort((a, b) => a.port - b.port);
+  return rows;
+}
