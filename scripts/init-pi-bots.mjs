@@ -45,11 +45,11 @@ if (prodBots < 1) {
   process.exit(2);
 }
 
-const before = { pi_bot_defs: tableExists("pi_bot_defs"), bot_sessions: tableExists("bot_sessions") };
+const before = { pi_bot_defs: tableExists("pi_bot_defs"), bot_sessions: tableExists("bot_sessions"), bot_skill_events: tableExists("bot_skill_events") };
 
 if (CHECK_ONLY) {
   console.log(`[init-pi-bots] CHECK DB=${DB_PATH} bot_registry=${prodBots}`);
-  console.log(`  pi_bot_defs exists=${before.pi_bot_defs}  bot_sessions exists=${before.bot_sessions}`);
+  console.log(`  pi_bot_defs exists=${before.pi_bot_defs}  bot_sessions exists=${before.bot_sessions}  bot_skill_events exists=${before.bot_skill_events}`);
   if (before.bot_sessions) {
     const c = db.prepare("PRAGMA table_info(bot_sessions)").all().map((x) => x.name);
     console.log(`  bot_sessions.model=${c.includes("model")} bot_sessions.escalated=${c.includes("escalated")}`);
@@ -90,6 +90,27 @@ const DDL = [
      ON bot_sessions (status)`,
   `CREATE INDEX IF NOT EXISTS idx_pi_bot_defs_enabled
      ON pi_bot_defs (enabled)`,
+  // Self-learning provenance + guaranteed audit sink (plan §B5). This is the
+  // SOURCE OF TRUTH for "which bot authored which skill" — auto-mode patch
+  // eligibility (a bot may only patch a skill it created) reads it. It is also
+  // the audit record that works for NULL-project bots, where the project
+  // audit_log helper no-ops. One row per propose/create/patch/reject/downgrade.
+  `CREATE TABLE IF NOT EXISTS bot_skill_events (
+     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+     bot_id      TEXT NOT NULL,
+     skill_name  TEXT NOT NULL,
+     action      TEXT NOT NULL
+                   CHECK (action IN ('propose','create','patch','reject','downgrade')),
+     mode        TEXT,                 -- 'propose' | 'auto' | 'operator'
+     model       TEXT,                 -- model the review pass ran on, if any
+     flags_json  TEXT,                 -- JSON array of guardrail-phrase flags, if any
+     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+   )`,
+  // Authorship + history lookups: "did bot X author skill Y?" and the per-bot feed.
+  `CREATE INDEX IF NOT EXISTS idx_bot_skill_events_bot_skill
+     ON bot_skill_events (bot_id, skill_name)`,
+  `CREATE INDEX IF NOT EXISTS idx_bot_skill_events_bot_time
+     ON bot_skill_events (bot_id, created_at)`,
 ];
 
 const tx = db.transaction(() => { for (const sql of DDL) db.prepare(sql).run(); });
@@ -152,12 +173,13 @@ if (tableExists("pi_bot_defs")) {
 }
 console.log(`  pi_bot_defs migration: ${piBotDefsMigAdded.length ? "applied [" + piBotDefsMigAdded.join(",") + "]" : "no-op (project_id column + backfill already present)"}`);
 
-const after = { pi_bot_defs: tableExists("pi_bot_defs"), bot_sessions: tableExists("bot_sessions") };
+const after = { pi_bot_defs: tableExists("pi_bot_defs"), bot_sessions: tableExists("bot_sessions"), bot_skill_events: tableExists("bot_skill_events") };
 const cols = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name).join(",");
 
 console.log(`[init-pi-bots] DB=${DB_PATH}  bot_registry=${prodBots} (production untouched)`);
 console.log(`  pi_bot_defs : ${before.pi_bot_defs ? "existed" : "CREATED"}  cols=[${cols("pi_bot_defs")}]`);
 console.log(`  bot_sessions: ${before.bot_sessions ? "existed" : "CREATED"}  cols=[${cols("bot_sessions")}]`);
+console.log(`  bot_skill_events: ${before.bot_skill_events ? "existed" : "CREATED"}  cols=[${cols("bot_skill_events")}]`);
 console.log(`  rows: pi_bot_defs=${db.prepare("SELECT count(*) c FROM pi_bot_defs").get().c}` +
             ` bot_sessions=${db.prepare("SELECT count(*) c FROM bot_sessions").get().c}`);
 console.log("INIT-PI-BOTS OK");

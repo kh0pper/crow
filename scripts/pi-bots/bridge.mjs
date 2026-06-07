@@ -32,6 +32,7 @@ import { resolveSkills, resolveSkill, skillDirs } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
+import { runSkillReview } from "./skill_review.mjs";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
@@ -53,7 +54,7 @@ function toolAllowlist(def) {
   return [...builtin, ...mcp].join(",");
 }
 
-class PiRpc {
+export class PiRpc {
   constructor(opts) {
     const def = opts.def, sessionDir = opts.sessionDir;
     // Phase 3.0 (R3): provider+model are resolved per-turn by
@@ -489,6 +490,9 @@ export async function handleInbound(opts) {
   const pi = new PiRpc({ def, sessionDir, resolved, selfAuthoringDir,
     piSessionId: effectiveResume ? session.pi_session_id : null, appendSystemPromptFile: sysFile });
   let result;
+  // B1: captured on a successful turn so the post-turn skill review (fired AFTER
+  // pi.close(), so the idle-only gate sees a clean slate) has the transcript.
+  let postTurn = null;
   try {
     const st0 = await pi.getState().catch(() => null);
     await pi.prompt(promptText, TURN_TIMEOUT_MS, opts.images);
@@ -496,6 +500,7 @@ export async function handleInbound(opts) {
     const piSessionId = (st1 && st1.data && st1.data.sessionId) || (st0 && st0.data && st0.data.sessionId) || (effectiveResume ? session.pi_session_id : null) || null;
     const text = pi.assistantText() || "(no reply)";
     const calls = pi.toolCalls();
+    postTurn = { user: cleanMsg, assistant: text, toolNames: calls.map((c) => c.tool) };
     const newCardStatus = cardId != null ? cardStatus(cardId, tasksDbPath) : null;
     const status = newCardStatus === "done" ? "done" : "waiting-user";
     session.pi_session_id = piSessionId;
@@ -545,6 +550,15 @@ export async function handleInbound(opts) {
     });
   } finally {
     await pi.close();
+  }
+  // B1: post-turn self-learning review. Fire-and-forget — do NOT await (it must
+  // never delay this turn's return or the next queued turn). It self-gates on
+  // skill_learning mode + the idle-only countLivePi()===0 check, so a no-op turn
+  // costs nothing. pi is already closed, so on an otherwise-idle node the gate
+  // sees 0 live pi. Errors are swallowed inside runSkillReview.
+  if (postTurn && (result.action === "asked" || result.action === "executed")) {
+    runSkillReview({ bot_id, def, crowHome, sessionDir, transcript: postTurn,
+      log: (m) => log("[skill-review] " + m) }).catch(() => {});
   }
   return result;
 }
