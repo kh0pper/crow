@@ -182,3 +182,72 @@ export function attributeAndDetect(endpoints, listeners, coreSet) {
   rows.sort((a, b) => a.port - b.port);
   return rows;
 }
+
+/** Read installed bundle ids and their declared endpoints from ~/.crow/bundles. */
+export function listInstalledBundles() {
+  if (!existsSync(INSTALLED_PATH)) return [];
+  let installed;
+  try { installed = JSON.parse(readFileSync(INSTALLED_PATH, "utf8")); } catch { return []; }
+  if (!Array.isArray(installed)) return [];
+
+  const endpoints = [];
+  for (const entry of installed) {
+    const id = typeof entry === "string" ? entry : entry?.id;
+    if (!id) continue;
+    const dir = join(BUNDLES_DIR, id);
+    const composePath = join(dir, "docker-compose.yml");
+    const manifestPath = join(dir, "manifest.json");
+
+    let name = id, manifestPort = null;
+    if (existsSync(manifestPath)) {
+      try {
+        const m = JSON.parse(readFileSync(manifestPath, "utf8"));
+        if (m.name) name = m.name;
+        if (typeof m.port === "number") manifestPort = m.port;
+      } catch { /* keep defaults */ }
+    }
+
+    let mappings = [];
+    if (existsSync(composePath)) {
+      mappings = parseComposeHostPorts(readFileSync(composePath, "utf8"));
+      // Overlay the bundle's .env for any port-position env var (reflects config).
+      const envPath = join(dir, ".env");
+      if (existsSync(envPath)) {
+        const env = readFileSync(envPath, "utf8");
+        for (const mp of mappings) {
+          if (mp.portEnvVar) {
+            const em = env.match(new RegExp(`^${mp.portEnvVar}=(\\d+)\\s*$`, "m"));
+            if (em) mp.port = parseInt(em[1], 10);
+          }
+        }
+      }
+    }
+
+    if (mappings.length) {
+      for (const mp of mappings) {
+        endpoints.push({ bundleId: id, bundleName: name, port: mp.port, bind: mp.bind, bindKind: mp.bindKind, proto: mp.proto, portEnvVar: mp.portEnvVar, source: "compose" });
+      }
+    } else if (manifestPort != null) {
+      // Containerless / orchestrator-managed: attribute by manifest port only.
+      endpoints.push({ bundleId: id, bundleName: name, port: manifestPort, bind: "0.0.0.0", bindKind: "all", proto: "tcp", portEnvVar: null, source: "manifest" });
+    }
+  }
+  return endpoints;
+}
+
+/** Run `ss -tlnH`; empty array if unavailable. */
+export async function readListeners() {
+  try {
+    const { stdout } = await execFileP("ss", ["-tlnH"], { timeout: 5000 });
+    return parseSsListeners(stdout);
+  } catch { return []; }
+}
+
+let _cache = null; // { at:number, rows }
+/** Build the inventory; `ttlMs`>0 returns a recent cached result (for getPreview). */
+export async function buildPortInventory({ ttlMs = 0, now = 0 } = {}) {
+  if (ttlMs > 0 && _cache && now - _cache.at < ttlMs) return _cache.rows;
+  const rows = attributeAndDetect(listInstalledBundles(), await readListeners(), coreServices());
+  if (ttlMs > 0) _cache = { at: now, rows };
+  return rows;
+}
