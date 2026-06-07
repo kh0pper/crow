@@ -34,6 +34,10 @@ export default {
   id: "llm",
   group: "ai",
   navOrder: 5, // above ai-provider (10) during the dual-ship window
+  // F2.2 metadata: providers are local/per-instance config; the profile
+  // blobs (ai/tts/stt/vision) replicate to paired instances.
+  scope: "mixed",
+  syncKeys: ["ai_profiles", "tts_profiles", "stt_profiles", "vision_profiles"],
   icon: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>`,
   labelKey: "settings.section.llm",
 

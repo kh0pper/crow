@@ -18,10 +18,10 @@
 
 import { escapeHtml } from "../../../shared/components.js";
 import { readSetting, upsertSetting } from "../../registry.js";
-import aiProfilesSection from "../ai-profiles.js";
-import ttsProfilesSection from "../tts-profiles.js";
-import sttProfilesSection from "../stt-profiles.js";
-import visionProfilesSection from "../vision-profiles.js";
+import aiProfilesSection from "./ai-profiles.js";
+import ttsProfilesSection from "./tts-profiles.js";
+import sttProfilesSection from "./stt-profiles.js";
+import visionProfilesSection from "./vision-profiles.js";
 
 const SUBTABS = [
   { id: "chat",   label: "Chat",   section: aiProfilesSection },

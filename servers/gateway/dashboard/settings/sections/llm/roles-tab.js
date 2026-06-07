@@ -17,8 +17,38 @@ import { listAllRoles, roleShape } from "../../../../../orchestrator/role-shape.
 import { listProvidersAll, listRoleOverrides, setRoleOverride, clearRoleOverride } from "../../../../../orchestrator/providers-db.js";
 import { compat } from "../../../../../orchestrator/compat.js";
 import { presets } from "../../../../../orchestrator/presets.js";
+import { readSetting } from "../../registry.js";
 
 const BACK = "?section=llm&tab=roles";
+
+// Maestro-Press (MPA) presets are workflow-specific to the MPA host and read
+// as "stale" on a general install. We hide them from the Roles tab unless
+// this is the MPA host or the operator explicitly opts in. This is a UI-only
+// filter — runtime preset resolution (presets[name]) is untouched, so the
+// live MPA pipelines keep resolving these presets regardless of this flag.
+function isMpaPreset(presetName) {
+  return presetName.startsWith("mpa-") || presetName.startsWith("bot-mpa-");
+}
+
+// Auto-detect the MPA host from its data-dir convention (the MPA gateway runs
+// with CROW_HOME / CROW_DATA_DIR under ~/.crow-mpa). General installs use
+// ~/.crow and won't match.
+function isMpaHost() {
+  const probe = `${process.env.CROW_HOME || ""}|${process.env.CROW_DATA_DIR || ""}`;
+  return /\.crow-mpa(\/|\b|$)/.test(probe);
+}
+
+// feature_flags is a local-only (non-synced) settings blob. An explicit
+// boolean mpa_presets wins; otherwise default to the auto-detected host.
+async function showMpaPresets(db) {
+  let flags = {};
+  try {
+    const raw = await readSetting(db, "feature_flags");
+    if (raw) flags = JSON.parse(raw) || {};
+  } catch { /* ignore malformed flags */ }
+  if (typeof flags.mpa_presets === "boolean") return flags.mpa_presets;
+  return isMpaHost();
+}
 
 function presetAgentDefault(presetName, agentName) {
   const p = presets[presetName];
@@ -46,7 +76,8 @@ function optionLabel(role, provider, otherAssignments) {
 
 export default {
   async render({ db }) {
-    const roles = listAllRoles();
+    const showMpa = await showMpaPresets(db);
+    const roles = listAllRoles().filter((r) => showMpa || !isMpaPreset(r.preset_name));
     const providers = await listProvidersAll(db);
     const overrides = await listRoleOverrides(db);
     const ovByAgent = new Map(

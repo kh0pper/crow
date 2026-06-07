@@ -17,8 +17,11 @@ function check(desc, actual, expected) {
 function containsCode(arr, code) { return Array.isArray(arr) && arr.some((e) => e.code === code); }
 
 // --- role-shape sanity ---
+// The preset roster grows as presets are added (incl. the mpa-* family), so
+// assert a sane lower bound rather than a brittle exact count.
 const roles = listAllRoles();
-check("12 preset-agent rows", roles.length, 12);
+if (roles.length >= 12) { console.log(`  ok: ${roles.length} preset-agent rows (>= 12)`); }
+else { failed++; console.error(`FAIL: preset-agent rows — expected >= 12, got ${roles.length}`); }
 
 const viewer = roleShape("vision_team", "viewer");
 check("vision_team.viewer.needs_vision", viewer.needs_vision, true);
