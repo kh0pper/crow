@@ -9,7 +9,7 @@
 import { escapeHtml, badge, formatDate } from "../shared/components.js";
 import { t, tJs } from "../shared/i18n.js";
 import { getAddonLogo } from "../shared/logos.js";
-import { detectGpuArch, checkGpuArchCompatible } from "../../gpu-arch.js";
+import { detectGpuArch, checkGpuArchCompatible, detectGpuVramGb } from "../../gpu-arch.js";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { execFileSync } from "child_process";
 import { join, dirname } from "path";
@@ -175,6 +175,9 @@ function formatResources(requires) {
       ? `${(requires.min_disk_mb / 1024).toFixed(0)}GB`
       : `${requires.min_disk_mb}MB`;
     parts.push(`${disk} disk`);
+  }
+  if (requires.min_vram_gb) {
+    parts.push(`${requires.min_vram_gb}GB VRAM`);
   }
   return parts.length > 0
     ? `<span class="ext-card__resources">${parts.join(" · ")}</span>`
@@ -673,6 +676,7 @@ export default {
       </div>`;
     } else {
       const hostArches = detectGpuArch();
+      const hostVramGb = detectGpuVramGb();
             const cards = available.map((addon, i) => {
         const isInstalled = installed[addon.id];
         const cat = addon.category || "other";
@@ -687,12 +691,13 @@ export default {
         const resources = formatResources(addon.requires);
 
         let installButton;
-        const gpuCompat = checkGpuArchCompatible(addon, hostArches);
+        const gpuCompat = checkGpuArchCompatible(addon, hostArches, hostVramGb);
         if (isInstalled) {
           installButton = badge(t("extensions.installedBadge", lang), "published");
         } else if (!gpuCompat.ok) {
           const tip = `${gpuCompat.reason || "Incompatible GPU arch."}`;
-          installButton = `<span class="ext-card__badge ext-card__badge--type" title="${escapeHtml(tip)}" style="opacity:0.85">incompatible host</span>`;
+          const label = gpuCompat.kind === "vram" ? "insufficient VRAM" : "incompatible host";
+          installButton = `<span class="ext-card__badge ext-card__badge--type" title="${escapeHtml(tip)}" style="opacity:0.85">${label}</span>`;
         } else {
           const envVarsAttr = escapeHtml(JSON.stringify(addon.env_vars || []));
           const minRam = addon.requires?.min_ram_mb || 0;
@@ -1432,7 +1437,7 @@ export default {
 
           // Requirements
           var req = addon.requires || {};
-          if (req.min_ram_mb || req.min_disk_mb || req.gpu) {
+          if (req.min_ram_mb || req.min_disk_mb || req.gpu || req.min_vram_gb) {
             var reqSection = document.createElement("div");
             reqSection.className = "ext-detail__section";
             var reqTitle = document.createElement("div");
@@ -1452,6 +1457,12 @@ export default {
               diskChip.className = "ext-detail__req-chip";
               diskChip.textContent = (req.min_disk_mb >= 1024 ? Math.floor(req.min_disk_mb / 1024) + "GB" : req.min_disk_mb + "MB") + " disk";
               reqWrap.appendChild(diskChip);
+            }
+            if (req.min_vram_gb) {
+              var vramChip = document.createElement("span");
+              vramChip.className = "ext-detail__req-chip";
+              vramChip.textContent = req.min_vram_gb + "GB VRAM";
+              reqWrap.appendChild(vramChip);
             }
             if (req.gpu) {
               var gpuChip = document.createElement("span");
