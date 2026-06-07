@@ -1,0 +1,19 @@
+[Unit]
+Description=Crow Bot Builder — gateway host (Telegram + Slack adapters, dial-out)
+After=network-online.target crow-mpa-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kh0pp
+WorkingDirectory=/home/kh0pp/crow
+Environment=PATH=/home/kh0pp/.nvm/versions/node/v20.20.2/bin:/usr/local/bin:/usr/bin:/bin
+Environment=CROW_DB_PATH=/home/kh0pp/.crow-mpa/data/crow.db
+ExecStart=/home/kh0pp/.nvm/versions/node/v20.20.2/bin/node /home/kh0pp/crow/scripts/pi-bots/gateways/gateway_runner.mjs
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

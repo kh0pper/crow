@@ -28,6 +28,9 @@
 import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
 import { Client, GatewayIntentBits, Partials, Options } from "discord.js";
 import { handleInbound } from "./bridge.mjs";
+// A1: shared gateway helpers (one definition, one test surface). These were
+// extracted verbatim from this file, so importing them is behavior-preserving.
+import { chunkedSend, downloadImages, passesAllowlist, SerialQueue, typingHeartbeat } from "./gateways/base.mjs";
 
 const HOME = "/home/kh0pp";
 const CROW_DB = process.env.CROW_DB_PATH || HOME + "/.crow-mpa/data/crow.db";
@@ -72,59 +75,12 @@ function loadDiscordBots() {
   return bots;
 }
 
-// Split a long reply on newline boundaries, falling back to hard slicing for
-// any single line that itself exceeds the chunk limit.
-function splitMessage(text) {
-  const out = [];
-  let buf = "";
-  for (const line of String(text).split("\n")) {
-    if (line.length > CHUNK_LIMIT) {
-      if (buf) { out.push(buf); buf = ""; }
-      for (let i = 0; i < line.length; i += CHUNK_LIMIT) out.push(line.slice(i, i + CHUNK_LIMIT));
-      continue;
-    }
-    if (buf.length + line.length + 1 > CHUNK_LIMIT) { out.push(buf); buf = line; }
-    else { buf = buf ? buf + "\n" + line : line; }
-  }
-  if (buf) out.push(buf);
-  return out.length ? out : [""];
-}
-
-async function postReply(channel, text) {
-  const chunks = splitMessage(text);
-  for (let i = 0; i < chunks.length; i++) {
-    const c = chunks[i].length ? chunks[i] : "(no content)";
-    try {
-      await channel.send(c);
-    } catch (e) {
-      log("send failed: " + (e && e.message || e));
-    }
-    if (i < chunks.length - 1) await new Promise((r) => setTimeout(r, CHUNK_DELAY_MS));
-  }
-}
-
-function guessMime(name) {
-  const m = (name || "").toLowerCase().match(/\.(png|jpe?g|webp|gif|bmp)$/);
-  if (!m) return "image/png";
-  return { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", bmp: "image/bmp" }[m[1]] || "image/png";
-}
-
-// Download Discord image attachments into pi ImageContent blocks
-// ({type:"image", data:<base64>, mimeType}). Best-effort: a failed/oversize
-// image is skipped (logged), never throws.
-async function downloadImages(atts) {
-  const out = [];
-  for (const a of atts.slice(0, MAX_IMAGES)) {
-    try {
-      if (a.size && a.size > MAX_IMAGE_BYTES) { log("skip oversize image " + (a.name || "") + " (" + a.size + "b)"); continue; }
-      const res = await fetch(a.url);
-      if (!res.ok) { log("image fetch failed " + res.status + " " + (a.name || "")); continue; }
-      const buf = Buffer.from(await res.arrayBuffer());
-      if (buf.length > MAX_IMAGE_BYTES) { log("skip oversize image post-fetch " + (a.name || "")); continue; }
-      out.push({ type: "image", data: buf.toString("base64"), mimeType: a.contentType || guessMime(a.name || a.url) });
-    } catch (e) { log("image download error " + (a.name || "") + ": " + (e && e.message || e)); }
-  }
-  return out;
+// splitMessage / postReply / guessMime / downloadImages were extracted to
+// gateways/base.mjs (A1). postReply is now chunkedSend over channel.send;
+// downloadImages takes Discord attachment objects directly (their {url,size,
+// name,contentType} fields match the normalized shape base expects).
+function postReply(channel, text) {
+  return chunkedSend((c) => channel.send(c), text, { limit: CHUNK_LIMIT, delayMs: CHUNK_DELAY_MS, log });
 }
 
 const clients = [];
@@ -145,28 +101,19 @@ function startBot(bot) {
   });
   client._botId = bot.bot_id;
 
-  // Per-bot serial queue: at most one pi turn at a time for this bot.
-  const queue = [];
-  let draining = false;
-
+  // Per-bot serial queue: at most one pi turn at a time for this bot (A1:
+  // SerialQueue from gateways/base.mjs; runTurn is its handler).
   async function runTurn(job) {
     const { message } = job;
     const channel = message.channel;
     const gateway_thread_id = "discord:" + message.channelId; // thread channels carry their own id
-    let typing = null;
-    const startTyping = () => {
-      const tick = () => { channel.sendTyping().catch(() => {}); };
-      tick();
-      typing = setInterval(tick, TYPING_INTERVAL_MS);
-    };
-    const stopTyping = () => { if (typing) { clearInterval(typing); typing = null; } };
-    startTyping();
+    const beat = typingHeartbeat(() => { channel.sendTyping().catch(() => {}); }, TYPING_INTERVAL_MS);
     try {
       // Download any image attachments and pass them as pi ImageContent so the
       // vision model can read them (e.g. receipts). Non-fatal on failure.
       let images;
       if (job.imgAtts && job.imgAtts.length) {
-        images = await downloadImages(job.imgAtts);
+        images = await downloadImages(job.imgAtts, { max: MAX_IMAGES, maxBytes: MAX_IMAGE_BYTES, log });
         if (images.length) log("attached " + images.length + " image(s) to turn bot=" + bot.bot_id);
       }
       const r = await handleInbound({
@@ -175,7 +122,7 @@ function startBot(bot) {
         user_message: job.content,
         gateway_type: "discord",
         images: images && images.length ? images : undefined,
-        sendReply: async (text) => { stopTyping(); await postReply(channel, text); },
+        sendReply: async (text) => { beat.stop(); await postReply(channel, text); },
         log: (m) => log("  [bridge:" + bot.bot_id + "] " + m),
       });
       log("turn done bot=" + bot.bot_id + " thread=" + gateway_thread_id + " action=" + (r && r.action));
@@ -183,28 +130,25 @@ function startBot(bot) {
       log("handleInbound failed bot=" + bot.bot_id + " thread=" + gateway_thread_id + ": " + (e && e.message || e));
       try { await postReply(channel, "Something went wrong on my end. Try again in a moment."); } catch {}
     } finally {
-      stopTyping();
+      beat.stop();
     }
   }
 
-  async function drain() {
-    if (draining) return;
-    draining = true;
-    try {
-      while (queue.length) {
-        const job = queue.shift();
-        await runTurn(job);
-      }
-    } finally {
-      draining = false;
-    }
-  }
+  const queue = new SerialQueue({
+    maxDepth: MAX_QUEUE,
+    handler: runTurn,
+    log: (m) => log("bot=" + bot.bot_id + " " + m),
+    onFull: (job) => {
+      log("queue full bot=" + bot.bot_id + " — dropping inbound");
+      job.message.channel.send("I'm still working on something — try again in a minute.").catch(() => {});
+    },
+  });
 
   client.on("messageCreate", (message) => {
     try {
       if (message.author.bot) return;                         // ignore bots (incl. self)
       const senderId = message.author.id;
-      if (bot.allowlist.length && !bot.allowlist.includes(senderId)) {
+      if (!passesAllowlist(senderId, bot.allowlist)) {
         log("drop bot=" + bot.bot_id + " sender=" + senderId + " not in allowlist");
         return;
       }
@@ -235,13 +179,8 @@ function startBot(bot) {
       }
       if (imgAtts.length) log("image message bot=" + bot.bot_id + " from=" + senderId + " images=" + imgAtts.length);
 
-      if (queue.length >= MAX_QUEUE) {
-        log("queue full bot=" + bot.bot_id + " — dropping inbound");
-        message.channel.send("I'm still working on something — try again in a minute.").catch(() => {});
-        return;
-      }
+      // SerialQueue enforces MAX_QUEUE + the "still working" onFull reply.
       queue.push({ message, content, imgAtts });
-      drain();
     } catch (e) {
       log("messageCreate handler error bot=" + bot.bot_id + ": " + (e && e.message || e));
     }

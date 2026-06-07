@@ -31,6 +31,7 @@ import { getTrackerContext, kanbanText, cardStatus, resolveTrackerType } from ".
 import { resolveSkills, resolveSkill, skillDirs } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
+import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
@@ -426,17 +427,10 @@ export async function handleInbound(opts) {
   // gmail_create_draft and must echo the thread_id; Discord bots have their
   // reply auto-posted by discord_gateway's sendReply, so they must NOT reach
   // for gmail tools.
-  let gatewayHint;
-  if (gateway_type === "discord") {
-    gatewayHint = "\nGATEWAY: discord — your reply text is sent to the Discord channel automatically. "
-      + "Do NOT use gmail tools. (thread ref: " + gateway_thread_id + ")";
-  } else if (gateway_type === "gmail") {
-    gatewayHint = "\nGATEWAY THREAD: gmail thread_id=" + gateway_thread_id
-      + " — pass this verbatim as thread_id when drafting your reply via gmail_create_draft.";
-  } else {
-    gatewayHint = "\nGATEWAY: " + gateway_type + " (thread ref: " + gateway_thread_id
-      + ") — your reply text is delivered automatically.";
-  }
+  // A1.3: gateway hints now come from the registry (gateways/index.mjs), which
+  // reproduces the gmail/discord strings byte-for-byte (verified — cache-prefix
+  // stability) and serves telegram/slack/fallback hints for the new adapters.
+  const gatewayHint = resolveGatewayHint(gateway_type, gateway_thread_id);
   const projectHeader = (projectSpace
     ? projectContextBlock(projectSpace, projectMembers)
     : (projectId != null ? "PROJECT #" + projectId + " (no space metadata)" : "PROJECT: (none)"))
