@@ -51,7 +51,7 @@ function parseMapping(str) {
   // Mask ${...} so its internal ':' doesn't break the split.
   const toks = [];
   const masked = str.replace(/\$\{[^}]*\}/g, (m) => { toks.push(m); return ` ${toks.length - 1} `; });
-  const unmask = (x) => x.replace(/ (\d+) /g, (_, i) => toks[Number(i)]);
+  const unmask = (x) => x.replace(/ (\d+) /g, (_, i) => { const n = Number(i); return n < toks.length ? toks[n] : ` ${i} `; });
   const segs = masked.split(":").map(unmask);
   if (segs.length < 2) return null;
   const hostSeg = segs[segs.length - 2];
@@ -66,7 +66,11 @@ function parseMapping(str) {
  * Parse ALL published host-port mappings from a docker-compose.yml.
  * Limitation (acceptable for v1 — no current bundle uses these): bracketed IPv6
  * binds (`[::1]:8080:80`) and port ranges (`8000-8010:8000-8010`) are not parsed
- * and are silently skipped; revisit if a bundle adopts either form.
+ * and are silently skipped; revisit if a bundle adopts either form; the inline-array
+ * `ports: ["8080:80"]` form is also skipped.
+ * @returns {Array<{port:number|null, portEnvVar:string|null, bind:string, bindKind:string, proto:string}>}
+ *   `port` is null only when the host port is an env var with no default (e.g.
+ *   `${VAR}`); callers must tolerate null (such entries carry no usable port).
  */
 export function parseComposeHostPorts(text) {
   const lines = text.split("\n");
