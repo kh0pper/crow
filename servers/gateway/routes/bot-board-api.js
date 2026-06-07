@@ -49,6 +49,9 @@ import { join } from "node:path";
 import { createDbClient } from "../../db.js";
 import { listProvidersAll } from "../../orchestrator/providers-db.js";
 import { proposalsDir, normalizeSkillName, listProposals } from "../../../scripts/pi-bots/skill_proposals.mjs";
+// B4: shared write+attach helper (one code path with the auto review pass).
+import { promoteSkill } from "../../../scripts/pi-bots/skill_promote.mjs";
+import { listBotSkillEvents } from "../../../scripts/pi-bots/skill_provenance.mjs";
 
 // Slice C: operator-approved promotion target (the PRIMARY skills dir both the
 // pi bridge and the glasses voice path search via skill_resolver).
@@ -1005,38 +1008,15 @@ export default function botBoardApiRouter(dashboardAuth) {
       if (!existsSync(stagedPath)) return jerr(res, 404, { error: "no staged proposal named " + name });
       if (lstatSync(stagedPath).isSymbolicLink()) return jerr(res, 400, { error: "staged proposal is a symlink — refusing" });
 
-      // target in ~/.crow/skills — never overwrite, never follow a symlink
-      mkdirSync(CROW_USER_SKILLS, { recursive: true });
-      const target = join(CROW_USER_SKILLS, name + ".md");
-      if (existsSync(target)) {
-        return jerr(res, 409, { error: "a skill named '" + name + "' already exists in ~/.crow/skills; rename or remove it first (refusing to overwrite)" });
-      }
-      // containment: the resolved skills root must be a prefix of the target
-      const realRoot = realpathSync(CROW_USER_SKILLS);
-      if (!join(realRoot, name + ".md").startsWith(realRoot + "/")) {
-        return jerr(res, 400, { error: "target escapes the skills dir" });
-      }
-
-      // write the OPERATOR-REVIEWED content (Q4 edits apply), then attach.
-      writeFileSync(target, content, "utf8");
-
-      const def = b.def;
-      def.skills = Array.isArray(def.skills) ? def.skills : [];
-      if (!def.skills.includes(name)) def.skills.push(name);
-      def.tools = def.tools || {};
-      def.tools.skills = Array.isArray(def.tools.skills) ? def.tools.skills : [];
-      if (!def.tools.skills.includes(name)) def.tools.skills.push(name);
-
-      // Optimistic-concurrency guard (the SSR save path has no lock): only write
-      // if updated_at is unchanged since we read it. 0 rows ⇒ a concurrent save
-      // happened ⇒ roll back the file write + 409.
-      const guarded = b.updatedAt == null
-        ? { sql: "UPDATE pi_bot_defs SET definition=?, updated_at=datetime('now') WHERE bot_id=? AND updated_at IS NULL", args: [JSON.stringify(def), botId] }
-        : { sql: "UPDATE pi_bot_defs SET definition=?, updated_at=datetime('now') WHERE bot_id=? AND updated_at=?", args: [JSON.stringify(def), botId, b.updatedAt] };
-      const upd = await cdb.execute(guarded);
-      if (Number(upd.rowsAffected) !== 1) {
-        try { unlinkSync(target); } catch {}
-        return jerr(res, 409, { error: "bot changed since you loaded it; reload and re-approve" });
+      // B4: write the OPERATOR-REVIEWED content (Q4 edits apply) + attach to the
+      // def via the shared promoteSkill helper — the SAME code path the auto
+      // review pass uses, so containment/no-overwrite/transaction live in one
+      // place. mode:"operator" keeps the never-overwrite-an-existing-skill rule.
+      const r = promoteSkill({ bot_id: botId, name, text: content, mode: "operator" });
+      if (!r.ok) {
+        const status = r.code === "exists" ? 409 : r.code === "unknown-bot" ? 404
+          : (r.code === "invalid-name" || r.code === "empty" || r.code === "escape") ? 400 : 500;
+        return jerr(res, status, { error: r.message });
       }
       // success — remove the staged file
       try { unlinkSync(stagedPath); } catch {}
