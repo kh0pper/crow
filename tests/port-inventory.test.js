@@ -136,3 +136,9 @@ test("genuine double-bind: two overlapping listeners on a port -> conflict", () 
   const r = rows.find(x => x.port === 7000);
   assert.equal(r.conflict, true);
 });
+
+test("dual-stack wildcard (0.0.0.0 + [::]) on same port -> NOT a conflict", () => {
+  const rows = attributeAndDetect([], [{ port: 22, boundAddr: "0.0.0.0" }, { port: 22, boundAddr: "[::]" }], core);
+  const r = rows.find(x => x.port === 22);
+  assert.equal(r.conflict, false);
+});

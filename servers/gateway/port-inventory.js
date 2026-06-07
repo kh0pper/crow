@@ -112,7 +112,6 @@ function addrId(a) {
   if (s === "::1" || s === "[::1]") return "::1";
   return s;
 }
-const overlap = (x, y) => x === "*" || y === "*" || x === y;
 
 /**
  * Build one row per port. STATUS is "up" when the port has any ss listener
@@ -139,13 +138,13 @@ export function attributeAndDetect(endpoints, listeners, coreSet) {
     const eps = endpoints.filter((e) => e.port === port);
     const lis = listeners.filter((l) => l.port === port);
     const listening = lis.length > 0;
-    // Conflict = two listeners on this port whose addresses overlap.
-    let conflict = false;
-    for (let i = 0; i < lis.length && !conflict; i++) {
-      for (let j = i + 1; j < lis.length; j++) {
-        if (overlap(addrId(lis[i].boundAddr), addrId(lis[j].boundAddr))) { conflict = true; break; }
-      }
-    }
+    // Conflict = a wildcard listener AND a distinct specific listener on the
+    // same port (a genuine collision). Multiple listeners that share one addrId
+    // (dual-stack 0.0.0.0 + [::], or SO_REUSEPORT) are ONE logical service, not
+    // a conflict; two different *specific* addrs (e.g. 127.0.0.1 + a tailscale
+    // IP) do not collide either.
+    const ids = new Set(lis.map((l) => addrId(l.boundAddr)));
+    const conflict = ids.has("*") && ids.size > 1;
     const liveAddr = [...new Set(lis.map((l) => l.boundAddr))].join(", ") || null;
 
     if (eps.length) {
