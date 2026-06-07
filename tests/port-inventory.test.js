@@ -121,6 +121,14 @@ test("core service port shown, not conflict", () => {
   assert.equal(rows.find(x => x.port === 3001).kind, "core");
 });
 
+test("manifest-only endpoint (no compose publish) -> kind managed", () => {
+  const rows = attributeAndDetect(
+    [{ bundleId: "x", bundleName: "X", port: 9100, bind: "0.0.0.0", bindKind: "all", proto: "tcp", source: "manifest" }],
+    [{ port: 9100, boundAddr: "100.118.41.122" }], core);
+  const r = rows.find(x => x.port === 9100);
+  assert.equal(r.kind, "managed");
+});
+
 test("genuine double-bind: two overlapping listeners on a port -> conflict", () => {
   const rows = attributeAndDetect(
     [ep("a", 7000, "all")],
