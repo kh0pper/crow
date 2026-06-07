@@ -4507,7 +4507,7 @@
         "gpu": true,
         "min_vram_gb": 40,
         "platform": "linux-x86_64",
-        "gpu_arch": ["rocm"]
+        "gpu_arch": ["gfx1151"]
       },
       "env_vars": [],
       "port": 8003,
@@ -4537,7 +4537,7 @@
         "gpu": true,
         "min_vram_gb": 80,
         "platform": "linux-x86_64",
-        "gpu_arch": ["rocm"]
+        "gpu_arch": ["gfx1151"]
       },
       "env_vars": [],
       "port": 8003,
@@ -4567,7 +4567,7 @@
         "gpu": true,
         "min_vram_gb": 105,
         "platform": "linux-x86_64",
-        "gpu_arch": ["rocm"]
+        "gpu_arch": ["gfx1151"]
       },
       "env_vars": [],
       "port": 8003,
@@ -4597,7 +4597,7 @@
         "gpu": true,
         "min_vram_gb": 40,
         "platform": "linux-x86_64",
-        "gpu_arch": ["rocm"]
+        "gpu_arch": ["gfx1151"]
       },
       "env_vars": [],
       "port": 8003,
@@ -4655,6 +4655,226 @@
         { "name": "MOTIONEYE_GID", "description": "Host GID for file ownership (run `id -g`).", "default": "1000", "required": false }
       ],
       "notes": "Default admin login: 'admin' / empty password — rotate immediately via Settings → General. Iframe-only bundle (no MCP tools). Pair with the Frigate bundle if you want AI detection or list_cameras / list_events MCP tools."
+    },
+    {
+      "id": "kokoro-tts",
+      "name": "Kokoro TTS (local)",
+      "version": "1.0.0",
+      "description": "Local OpenAI-compatible text-to-speech (Kokoro-82M) on CPU. Powers the AI Companion and Meta Glasses voices (af_heart EN / ef_dora ES). Loopback :8880 only.",
+      "type": "bundle",
+      "author": "Crow",
+      "category": "ai",
+      "tags": ["ai", "tts", "voice", "speech", "kokoro", "cpu", "local"],
+      "icon": "cpu",
+      "host": "local",
+      "port": 8880,
+      "requires": {
+        "platform": "linux-x86_64",
+        "min_ram_mb": 1024,
+        "min_disk_mb": 2000
+      },
+      "env_vars": [],
+      "notes": "CPU-only — compatible on any linux-x86_64 host. RAM/disk are derived estimates (Kokoro-82M weights + image), not vendor specs. Seeds a 'Kokoro (local)' TTS profile on install."
+    },
+    {
+      "id": "faster-whisper-server",
+      "name": "Faster-Whisper Server (local)",
+      "version": "1.0.0",
+      "description": "Local OpenAI-compatible speech-to-text (faster-whisper / CTranslate2, large-v3) for Meta Glasses and AI-chat voice input. Runs on CPU; loopback :8004 only. The AI Companion keeps its own in-container STT.",
+      "type": "bundle",
+      "author": "Crow",
+      "category": "ai",
+      "tags": ["ai", "stt", "voice", "speech", "whisper", "transcription", "cpu", "local"],
+      "icon": "cpu",
+      "host": "local",
+      "port": 8004,
+      "requires": {
+        "platform": "linux-x86_64",
+        "min_ram_mb": 2048,
+        "min_disk_mb": 4000
+      },
+      "env_vars": [],
+      "notes": "CPU-only — compatible on any linux-x86_64 host. RAM/disk are derived estimates (large-v3 int8 ~3GB weights + image), not vendor specs. Seeds a 'Faster-Whisper (local)' STT profile on install."
+    },
+    {
+      "id": "vllm-rocm-qwen3",
+      "name": "vLLM Qwen3-4B (ROCm gfx1151)",
+      "version": "1.0.0",
+      "description": "Fast tool-dispatch LLM (Qwen3-4B BF16) served via vLLM on AMD Strix Halo (gfx1151). Part of crow's tiered Mode A.",
+      "type": "bundle",
+      "author": "Crow",
+      "category": "ai",
+      "tags": ["ai", "llm", "vllm", "qwen3", "rocm", "gfx1151"],
+      "icon": "cpu",
+      "host": "local",
+      "port": 8001,
+      "requires": {
+        "gpu": true,
+        "gpu_arch": ["gfx1151"],
+        "min_vram_gb": 12,
+        "platform": "linux-x86_64"
+      },
+      "env_vars": [],
+      "notes": "Orchestrator-managed; participates in the crow-strix-vram swap group. Built for AMD Strix Halo gfx1151."
+    },
+    {
+      "id": "vllm-rocm-qwen35-4b",
+      "name": "vLLM Qwen3.5-4B (ROCm gfx1151)",
+      "version": "1.0.0",
+      "description": "Fast tool-dispatch + Maker Lab classroom endpoint (Qwen3.5-4B BF16) served via vLLM-ROCm on AMD Strix Halo (gfx1151).",
+      "type": "bundle",
+      "author": "Crow",
+      "category": "ai",
+      "tags": ["ai", "llm", "vllm", "qwen3.5", "rocm", "gfx1151", "voice"],
+      "icon": "cpu",
+      "host": "local",
+      "port": 8011,
+      "requires": {
+        "gpu": true,
+        "gpu_arch": ["gfx1151"],
+        "min_vram_gb": 12,
+        "platform": "linux-x86_64"
+      },
+      "env_vars": [],
+      "providers": [
+        {
+          "id": "crow-voice",
+          "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+          "apiKey": "none",
+          "description": "Fast tool-dispatch + Maker Lab classroom endpoint (Qwen3.5-4B BF16)",
+          "models": [
+            { "id": "qwen3.5-4b", "contextLen": 32768, "warm": true, "priority": "voice" }
+          ]
+        }
+      ],
+      "notes": "Orchestrator-managed; registers the crow-voice provider. Built for AMD Strix Halo gfx1151."
+    },
+    {
+      "id": "vllm-rocm-qwen3-32b",
+      "name": "vLLM Qwen3-32B (ROCm gfx1151)",
+      "version": "1.0.0",
+      "description": "Mid-tier reasoning/synthesis LLM (Qwen3-32B dense BF16) on AMD Strix Halo. Part of crow's tiered Mode A.",
+      "type": "bundle",
+      "author": "Crow",
+      "category": "ai",
+      "tags": ["ai", "llm", "vllm", "qwen3", "rocm", "gfx1151"],
+      "icon": "cpu",
+      "host": "local",
+      "port": 8002,
+      "requires": {
+        "gpu": true,
+        "gpu_arch": ["gfx1151"],
+        "min_vram_gb": 80,
+        "platform": "linux-x86_64"
+      },
+      "env_vars": [],
+      "notes": "Orchestrator-managed; participates in the crow-strix-vram swap group. Built for AMD Strix Halo gfx1151."
+    },
+    {
+      "id": "vllm-rocm-qwen35-27b",
+      "name": "vLLM Qwen3.5-27B (ROCm gfx1151)",
+      "version": "1.0.0",
+      "description": "Daily-driver mid-tier reasoning/synthesis (Qwen3.5-27B BF16, ~54GB resident) served via vLLM-ROCm on AMD Strix Halo (gfx1151).",
+      "type": "bundle",
+      "author": "Crow",
+      "category": "ai",
+      "tags": ["ai", "llm", "vllm", "qwen3.5", "rocm", "gfx1151"],
+      "icon": "cpu",
+      "host": "local",
+      "port": 8012,
+      "requires": {
+        "gpu": true,
+        "gpu_arch": ["gfx1151"],
+        "min_vram_gb": 80,
+        "platform": "linux-x86_64"
+      },
+      "env_vars": [],
+      "providers": [
+        {
+          "id": "crow-chat",
+          "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+          "apiKey": "none",
+          "description": "Daily-driver mid-tier reasoning/synthesis (Qwen3.5-27B BF16)",
+          "models": [
+            { "id": "qwen3.5-27b", "contextLen": 32768, "warm": true, "priority": "interactive" }
+          ]
+        }
+      ],
+      "notes": "Orchestrator-managed; registers the crow-chat provider. Built for AMD Strix Halo gfx1151."
+    },
+    {
+      "id": "llamacpp-vulkan-qwen3-embed",
+      "name": "llama.cpp Qwen3-Embedding-0.6B (gfx1151)",
+      "version": "1.0.0",
+      "description": "Dedicated OpenAI-compatible embedding endpoint (Qwen3-Embedding-0.6B Q8_0, 1024-dim) via llama.cpp on AMD Strix Halo gfx1151. Registers as the crow-embed provider for KB MCP and other consumers.",
+      "type": "bundle",
+      "author": "Crow",
+      "category": "ai",
+      "tags": ["ai", "embeddings", "llama.cpp", "qwen3", "rocm", "gfx1151"],
+      "icon": "cpu",
+      "host": "local",
+      "port": 8004,
+      "requires": {
+        "gpu": true,
+        "gpu_arch": ["gfx1151"],
+        "min_vram_gb": 2,
+        "platform": "linux-x86_64"
+      },
+      "env_vars": [],
+      "providers": [
+        {
+          "id": "crow-embed",
+          "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+          "apiKey": "none",
+          "description": "OpenAI-compatible embedding endpoint (Qwen3-Embedding-0.6B Q8_0)",
+          "models": [
+            { "id": "qwen3-embedding-0.6b", "contextLen": 32768, "dimensions": 1024, "warm": true, "priority": "background" }
+          ]
+        }
+      ],
+      "notes": "Built for AMD Strix Halo gfx1151. NOTE: its service port 8004 overlaps faster-whisper-server's published host port 8004 — they cannot both run; to be reconciled by the port-registry sub-project."
+    },
+    {
+      "id": "llamacpp-qwen72b",
+      "name": "llama.cpp Qwen2.5-72B Q4_K_M (ROCm gfx1151)",
+      "version": "1.0.0",
+      "description": "Top-tier reasoning (Qwen2.5-72B-Instruct Q4_K_M via llama.cpp-ROCm), 64K context. Tiered Mode B on AMD Strix Halo gfx1151.",
+      "type": "bundle",
+      "author": "Crow",
+      "category": "ai",
+      "tags": ["ai", "llm", "llama.cpp", "qwen2.5", "rocm", "gfx1151"],
+      "icon": "cpu",
+      "host": "local",
+      "port": 8003,
+      "requires": {
+        "gpu": true,
+        "gpu_arch": ["gfx1151"],
+        "min_vram_gb": 60,
+        "platform": "linux-x86_64"
+      },
+      "env_vars": [],
+      "notes": "Orchestrator-managed; participates in the crow-strix-vram swap group (shares service port 8003). Built for AMD Strix Halo gfx1151."
+    },
+    {
+      "id": "vllm-rocm-kimi",
+      "name": "vLLM Kimi-Linear-48B (ROCm gfx1151)",
+      "version": "1.0.0",
+      "description": "Top-tier long-context planner (Kimi-Linear-48B-A3B-Instruct, MoE, 1M context, BF16). Tiered Mode B; manual start via crow-mode-big on AMD Strix Halo gfx1151.",
+      "type": "bundle",
+      "author": "Crow",
+      "category": "ai",
+      "tags": ["ai", "llm", "vllm", "kimi", "moe", "rocm", "gfx1151"],
+      "icon": "cpu",
+      "host": "local",
+      "port": 8003,
+      "requires": {
+        "gpu": true,
+        "gpu_arch": ["gfx1151"],
+        "min_vram_gb": 110,
+        "platform": "linux-x86_64"
+      },
+      "env_vars": [],
+      "notes": "Orchestrator-managed; participates in the crow-strix-vram swap group (shares service port 8003). Built for AMD Strix Halo gfx1151."
     }
   ]
 }
