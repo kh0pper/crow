@@ -4,6 +4,7 @@
 
 import { GROUPS, readSettings } from "./registry.js";
 import { t } from "../shared/i18n.js";
+import { escapeHtml } from "../shared/components.js";
 
 /**
  * Render the grouped settings menu.
@@ -35,6 +36,16 @@ export async function renderSettingsMenu(sections, db, lang) {
   );
 
   let html = `<style>${menuCss()}</style>`;
+  // Client-side filter box — the "where do I change X?" entry point. Filters
+  // the already-rendered rows by label/group text; no server round-trip, so
+  // no new route and the network-exposure invariant is untouched.
+  const searchPlaceholder = escapeHtml(t("settings.searchPlaceholder", lang) || "Search settings");
+  html += `<div class="settings-search">
+    <svg class="settings-search-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+    <input type="search" id="settings-search-input" class="settings-search-input"
+      placeholder="${searchPlaceholder}" autocomplete="off" spellcheck="false"
+      oninput="window.crowSettingsFilter && window.crowSettingsFilter(this.value)">
+  </div>`;
   html += `<div class="settings-menu">`;
 
   for (const groupKey of sortedGroups) {
@@ -42,7 +53,9 @@ export async function renderSettingsMenu(sections, db, lang) {
     if (!items || items.length === 0) continue;
 
     const groupDef = GROUPS[groupKey];
-    html += `<div class="settings-group-label">${t(groupDef.labelKey, lang)}</div>`;
+    const groupLabel = t(groupDef.labelKey, lang);
+    html += `<div class="settings-group">`;
+    html += `<div class="settings-group-label">${groupLabel}</div>`;
     html += `<div class="settings-group-card">`;
 
     for (let i = 0; i < items.length; i++) {
@@ -56,24 +69,97 @@ export async function renderSettingsMenu(sections, db, lang) {
 
       const isLast = i === items.length - 1;
       const borderClass = isLast ? "" : " settings-row-bordered";
+      const label = t(section.labelKey, lang);
+      // Haystack for the filter: section label + group label + id, lowercased.
+      const hay = escapeHtml(`${label} ${groupLabel} ${section.id}`.toLowerCase());
 
-      html += `<a href="/dashboard/settings?section=${section.id}" class="settings-row${borderClass}">
+      html += `<a href="/dashboard/settings?section=${section.id}" class="settings-row${borderClass}" data-search="${hay}">
         <span class="settings-row-icon">${section.icon || ""}</span>
-        <span class="settings-row-label">${t(section.labelKey, lang)}</span>
+        <span class="settings-row-label">${label}</span>
         <span class="settings-row-preview">${preview}</span>
         <span class="settings-row-chevron">&rsaquo;</span>
       </a>`;
     }
 
-    html += `</div>`;
+    html += `</div></div>`;
   }
 
   html += `</div>`;
+  const noResults = escapeHtml(t("settings.searchNoResults", lang) || "No settings match your search.");
+  html += `<div id="settings-no-results" class="settings-no-results" style="display:none">${noResults}</div>`;
+  html += menuFilterScript();
   return html;
+}
+
+/**
+ * Client-side filter: hides non-matching rows and any group with no visible
+ * rows; toggles the empty-state message. Bound via the input's `oninput`
+ * attribute so it survives Turbo Drive body swaps (no script-timing reliance).
+ */
+function menuFilterScript() {
+  return `<script>
+  window.crowSettingsFilter = function (q) {
+    q = (q || "").trim().toLowerCase();
+    var menu = document.querySelector(".settings-menu");
+    if (!menu) return;
+    var anyVisible = false;
+    menu.querySelectorAll(".settings-group").forEach(function (g) {
+      var groupVisible = false;
+      g.querySelectorAll(".settings-row").forEach(function (r) {
+        var hay = r.getAttribute("data-search") || "";
+        var match = !q || hay.indexOf(q) !== -1;
+        r.style.display = match ? "" : "none";
+        if (match) groupVisible = true;
+      });
+      g.style.display = groupVisible ? "" : "none";
+      if (groupVisible) anyVisible = true;
+    });
+    var empty = document.getElementById("settings-no-results");
+    if (empty) empty.style.display = anyVisible ? "none" : "";
+  };
+  </script>`;
 }
 
 function menuCss() {
   return `
+  .settings-search {
+    max-width: 640px;
+    position: relative;
+    margin-bottom: 0.75rem;
+  }
+  .settings-search-icon {
+    position: absolute;
+    left: 0.7rem;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 16px;
+    height: 16px;
+    color: var(--crow-text-muted);
+    pointer-events: none;
+  }
+  .settings-search-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.6rem 0.8rem 0.6rem 2.1rem;
+    font-size: 0.9rem;
+    color: var(--crow-text-primary);
+    background: var(--crow-bg-surface);
+    border: 1px solid var(--crow-border);
+    border-radius: var(--crow-radius-card, 12px);
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .settings-search-input:focus {
+    border-color: var(--crow-accent);
+  }
+  .settings-search-input::placeholder { color: var(--crow-text-muted); }
+  .settings-no-results {
+    max-width: 640px;
+    padding: 1rem;
+    color: var(--crow-text-muted);
+    font-size: 0.9rem;
+    text-align: center;
+  }
   .settings-menu { max-width: 640px; }
   .settings-group-label {
     font-size: 0.75rem;

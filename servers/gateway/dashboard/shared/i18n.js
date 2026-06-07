@@ -461,6 +461,8 @@ const translations = {
 
   // ─── Settings Panel ───
   "settings.pageTitle": { en: "Settings", es: "Ajustes" },
+  "settings.searchPlaceholder": { en: "Search settings", es: "Buscar ajustes" },
+  "settings.searchNoResults": { en: "No settings match your search.", es: "Ningún ajuste coincide con tu búsqueda." },
   "settings.passwordUpdated": { en: "Password updated.", es: "Contraseña actualizada." },
   "settings.passwordTooShort": { en: "Password must be at least 12 characters.", es: "La contraseña debe tener al menos 12 caracteres." },
   "settings.passwordMismatch": { en: "Passwords don't match.", es: "Las contraseñas no coinciden." },
