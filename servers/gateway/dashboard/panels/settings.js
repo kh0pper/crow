@@ -7,6 +7,7 @@
  */
 
 import { t } from "../shared/i18n.js";
+import { escapeHtml } from "../shared/components.js";
 import {
   registerSettingsSection,
   getSettingsSections,
@@ -112,8 +113,22 @@ export default {
       const section = getSettingsSection(resolvedId);
       if (!section) return res.redirect("/dashboard/settings");
       const html = await section.render({ req, res, db, lang });
-      const back = `<a href="/dashboard/settings" class="settings-back">&larr; ${t("settings.backToSettings", lang)}</a>`;
-      return layout({ title: t(section.labelKey, lang), content: back + html });
+      const sectionLabel = t(section.labelKey, lang);
+      // Breadcrumb: "← Settings / <Section>" so the active location is obvious
+      // on every sub-page (self-contained styles; no dependency on the menu CSS).
+      const crumb = `<style>
+        .settings-breadcrumb { display:flex; align-items:center; gap:0.4rem; font-size:0.9rem; margin-bottom:1rem; }
+        .settings-breadcrumb a { color:var(--crow-accent); text-decoration:none; display:inline-flex; align-items:center; gap:0.3rem; }
+        .settings-breadcrumb a:hover { text-decoration:underline; }
+        .settings-breadcrumb-sep { color:var(--crow-text-muted); }
+        .settings-breadcrumb-current { color:var(--crow-text-muted); }
+      </style>
+      <nav class="settings-breadcrumb" aria-label="Breadcrumb">
+        <a href="/dashboard/settings">&larr; ${escapeHtml(t("settings.backToSettings", lang))}</a>
+        <span class="settings-breadcrumb-sep">/</span>
+        <span class="settings-breadcrumb-current">${escapeHtml(sectionLabel)}</span>
+      </nav>`;
+      return layout({ title: sectionLabel, content: crumb + html });
     }
 
     // Main menu: grouped menu rows
