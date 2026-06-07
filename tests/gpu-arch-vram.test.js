@@ -84,6 +84,7 @@ test("compat: arch fails -> not ok, no vram kind (arch checked first)", () => {
   const r = checkGpuArchCompatible(m, ["sm_86", "cuda", "cpu"], 8);
   assert.equal(r.ok, false);
   assert.notEqual(r.kind, "vram");
+  assert.ok(r.required !== undefined, "arch failure should carry required[]");
 });
 
 test("compat: VRAM unknown (null) -> fail open", () => {
