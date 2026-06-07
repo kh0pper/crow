@@ -61,3 +61,37 @@ test("parseNvidiaSmiVramGb: MiB rows -> max GB", () => {
 test("parseNvidiaSmiVramGb: empty -> null", () => {
   assert.equal(parseNvidiaSmiVramGb(""), null);
 });
+
+import { checkGpuArchCompatible } from "../servers/gateway/gpu-arch.js";
+
+const ROCM_HOST = ["gfx1151", "rocm", "cpu"];
+
+test("compat: arch ok + VRAM fits -> ok", () => {
+  const m = { requires: { gpu: true, gpu_arch: ["gfx1151"], min_vram_gb: 12 } };
+  assert.equal(checkGpuArchCompatible(m, ROCM_HOST, 124).ok, true);
+});
+
+test("compat: arch ok + VRAM too small -> not ok, kind vram", () => {
+  const m = { requires: { gpu: true, gpu_arch: ["gfx1151"], min_vram_gb: 200 } };
+  const r = checkGpuArchCompatible(m, ROCM_HOST, 124);
+  assert.equal(r.ok, false);
+  assert.equal(r.kind, "vram");
+  assert.match(r.reason, /200 GB/);
+});
+
+test("compat: arch fails -> not ok, no vram kind (arch checked first)", () => {
+  const m = { requires: { gpu: true, gpu_arch: ["gfx1151"], min_vram_gb: 8 } };
+  const r = checkGpuArchCompatible(m, ["sm_86", "cuda", "cpu"], 8);
+  assert.equal(r.ok, false);
+  assert.notEqual(r.kind, "vram");
+});
+
+test("compat: VRAM unknown (null) -> fail open", () => {
+  const m = { requires: { gpu: true, gpu_arch: ["gfx1151"], min_vram_gb: 999 } };
+  assert.equal(checkGpuArchCompatible(m, ROCM_HOST, null).ok, true);
+});
+
+test("compat: CPU bundle (no gpu requirement) -> always ok", () => {
+  const m = { requires: { platform: "linux-x86_64" } };
+  assert.equal(checkGpuArchCompatible(m, ["cpu"], null).ok, true);
+});

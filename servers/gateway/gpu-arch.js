@@ -229,29 +229,21 @@ export function detectGpuArch({ refresh = false } = {}) {
 }
 
 /**
- * Check whether a manifest's GPU arch requirement is satisfiable on this host.
- * Returns { ok: bool, reason?: string, required?: string[], detected?: string[] }.
+ * Arch-only compatibility (the pre-VRAM logic). Internal.
  */
-export function checkGpuArchCompatible(manifest, hostArches = detectGpuArch()) {
+function checkArchOnly(manifest, hostArches) {
   const required = manifest?.requires?.gpu_arch;
   const requiresGpu = Boolean(manifest?.requires?.gpu);
 
-  // No GPU requirement → always compatible.
   if (!requiresGpu && (!required || required.length === 0)) {
     return { ok: true };
   }
-
-  // requires.gpu: true with no specific arch → just need any GPU (anything but
-  // a cpu-only host).
   if (requiresGpu && (!required || required.length === 0)) {
     const hasGpu = hostArches.some((t) => t !== "cpu");
     return hasGpu
       ? { ok: true }
       : { ok: false, reason: "Bundle requires a GPU, but none was detected.", detected: hostArches };
   }
-
-  // Explicit gpu_arch list — at least one entry must match a host tag, with
-  // family-tag expansion.
   const hostSet = new Set(hostArches);
   for (const tag of required) {
     if (hostSet.has(tag)) return { ok: true };
@@ -264,4 +256,27 @@ export function checkGpuArchCompatible(manifest, hostArches = detectGpuArch()) {
     required,
     detected: hostArches,
   };
+}
+
+/**
+ * Check whether a manifest's GPU requirements are satisfiable on this host.
+ * Arch is checked first; only on an arch match is VRAM considered. When host
+ * VRAM is unknown (null), VRAM gating is skipped (fail open).
+ * Returns { ok: bool, reason?, kind?, required?, detected?, requiredVramGb?, detectedVramGb? }.
+ */
+export function checkGpuArchCompatible(manifest, hostArches = detectGpuArch(), hostVramGb = detectGpuVramGb()) {
+  const archResult = checkArchOnly(manifest, hostArches);
+  if (!archResult.ok) return archResult;
+
+  const minVram = manifest?.requires?.min_vram_gb;
+  if (minVram && typeof hostVramGb === "number" && hostVramGb < minVram) {
+    return {
+      ok: false,
+      kind: "vram",
+      reason: `Requires ~${minVram} GB VRAM; host has ~${hostVramGb} GB.`,
+      requiredVramGb: minVram,
+      detectedVramGb: hostVramGb,
+    };
+  }
+  return { ok: true };
 }
