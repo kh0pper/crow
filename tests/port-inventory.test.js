@@ -46,6 +46,15 @@ test("host-network / no ports -> empty array", () => {
   assert.deepEqual(parseComposeHostPorts(`services:\n  a:\n    network_mode: host\n`), []);
 });
 
+test("port-env with no default -> port null, portEnvVar set", () => {
+  assert.deepEqual(one(`services:\n  a:\n    ports:\n      - "\${SOME_PORT}:80"\n`),
+    { port: null, portEnvVar: "SOME_PORT", bind: "0.0.0.0", bindKind: "all", proto: "tcp" });
+});
+
+test("container-only short form -> skipped (no host port)", () => {
+  assert.deepEqual(parseComposeHostPorts(`services:\n  a:\n    ports:\n      - "80"\n`), []);
+});
+
 test("parseSsListeners parses addr:port incl ipv6 + %iface", () => {
   const out = `LISTEN 0 511    127.0.0.1:3001 0.0.0.0:*\nLISTEN 0 4096   100.118.41.122:8003 0.0.0.0:*\nLISTEN 0 128    [::]:8880 [::]:*\nLISTEN 0 4096   127.0.0.53%lo:53 0.0.0.0:*`;
   assert.deepEqual(parseSsListeners(out), [
