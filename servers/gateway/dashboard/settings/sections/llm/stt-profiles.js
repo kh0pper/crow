@@ -9,10 +9,10 @@
  * bundle). PR 3 flips the flag to make it visible.
  */
 
-import { escapeHtml } from "../../shared/components.js";
-import { upsertSetting } from "../registry.js";
-import { PROVIDER_INFO } from "../../../ai/stt/index.js";
-import { renderScopeToggle, scopeToggleScript } from "../../shared/scope-toggle.js";
+import { escapeHtml } from "../../../shared/components.js";
+import { upsertSetting } from "../../registry.js";
+import { PROVIDER_INFO } from "../../../../ai/stt/index.js";
+import { renderScopeToggle, scopeToggleScript } from "../../../shared/scope-toggle.js";
 
 export default {
   id: "stt-profiles",
@@ -320,7 +320,7 @@ export default {
       const profile = profiles.find(p => p.id === profile_id);
       if (!profile) { res.json({ ok: false, error: "Profile not found" }); return true; }
       try {
-        const { testSttProfile } = await import("../../../ai/stt/index.js");
+        const { testSttProfile } = await import("../../../../ai/stt/index.js");
         const result = await testSttProfile(profile);
         res.json(result);
       } catch (err) {
