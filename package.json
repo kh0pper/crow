@@ -36,7 +36,8 @@
     "test:companion-target": "node --test tests/companion-target.test.js",
     "test:federation-resolve": "node --test tests/federation-resolve.test.js",
     "test:pir-routes": "node --test tests/pir-routes.test.js",
-    "test:sso-ticket": "node --test tests/sso-ticket.test.js"
+    "test:sso-ticket": "node --test tests/sso-ticket.test.js",
+    "test:gpu-vram": "node --test tests/gpu-arch-vram.test.js"
   },
   "dependencies": {
     "@libsql/client": "^0.17.2",

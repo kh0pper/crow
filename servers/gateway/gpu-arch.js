@@ -64,6 +64,103 @@ const FAMILY_MEMBERS = {
   cpu: (tag) => tag === "cpu",
 };
 
+/**
+ * Pure parser: extract gfxNNNN arch tags from rocminfo text. CPU agents carry a
+ * marketing name (no gfx token), so a bare `Name: gfxNNNN` match is unambiguous.
+ */
+export function parseRocminfoArches(text) {
+  const tags = new Set();
+  for (const line of text.split("\n")) {
+    const m = line.match(/^\s*Name:\s*(gfx[0-9a-f]+)\s*$/);
+    if (m) tags.add(m[1]);
+  }
+  return [...tags];
+}
+
+/**
+ * Pure parser: total GPU VRAM in GB from rocminfo text. Per-agent state machine
+ * that captures the largest `Segment: GLOBAL` pool size ONLY for GPU agents
+ * (those whose `Name:` is gfxNNNN), so the CPU agent's (often larger) system-RAM
+ * pool is never mistaken for VRAM. On a unified-memory APU this is the GTT/UMA
+ * ceiling. Returns null if no GPU agent is found.
+ */
+export function parseRocminfoVramGb(text) {
+  let inGpuAgent = false;
+  let inGlobalSegment = false;
+  let maxKb = 0;
+  for (const line of text.split("\n")) {
+    if (/^\s*Agent\s+\d+/.test(line)) {
+      inGpuAgent = false;
+      inGlobalSegment = false;
+      continue;
+    }
+    if (/^\s*Name:\s*gfx[0-9a-f]+\s*$/.test(line)) {
+      inGpuAgent = true;
+      continue;
+    }
+    if (!inGpuAgent) continue;
+    if (/^\s*Segment:\s*GLOBAL/.test(line)) {
+      inGlobalSegment = true;
+      continue;
+    }
+    if (/^\s*Segment:/.test(line)) {
+      inGlobalSegment = false;
+      continue;
+    }
+    if (inGlobalSegment) {
+      const m = line.match(/^\s*Size:\s*(\d+)\b.*KB/);
+      if (m) maxKb = Math.max(maxKb, parseInt(m[1], 10));
+    }
+  }
+  if (maxKb <= 0) return null;
+  return Math.round(maxKb / 1024 / 1024); // KB -> GB
+}
+
+/**
+ * Pure parser: max GPU memory in GB from `nvidia-smi --query-gpu=memory.total
+ * --format=csv,noheader,nounits` output (one integer MiB per GPU line).
+ */
+export function parseNvidiaSmiVramGb(text) {
+  let maxMib = 0;
+  for (const line of text.split("\n")) {
+    const m = line.trim().match(/^(\d+)$/);
+    if (m) maxMib = Math.max(maxMib, parseInt(m[1], 10));
+  }
+  if (maxMib <= 0) return null;
+  return Math.round(maxMib / 1024); // MiB -> GB
+}
+
+/** Cached host VRAM (GB), populated on first call. null = no GPU / unknown. */
+let cachedVramGb = null;
+let vramProbed = false;
+
+/**
+ * Detect total host GPU VRAM in GB (ROCm first, then NVIDIA). Returns null when
+ * no GPU is present or detection fails — callers MUST treat null as "unknown"
+ * and fail open (do not block install on a probe miss).
+ */
+export function detectGpuVramGb({ refresh = false } = {}) {
+  if (vramProbed && !refresh) return cachedVramGb;
+  let gb = null;
+  try {
+    const out = execFileSync(ROCMINFO, [], { stdio: ["ignore", "pipe", "ignore"], timeout: 5000, encoding: "utf8" });
+    gb = parseRocminfoVramGb(out);
+  } catch { /* rocminfo missing or no AMD GPU */ }
+  if (gb == null) {
+    try {
+      const out = execFileSync(
+        NVIDIASMI,
+        ["--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+        { stdio: ["ignore", "pipe", "ignore"], timeout: 5000, encoding: "utf8" },
+      );
+      gb = parseNvidiaSmiVramGb(out);
+    } catch { /* nvidia-smi missing or no NVIDIA GPU */ }
+  }
+  cachedVramGb = gb;
+  vramProbed = true;
+  return cachedVramGb;
+}
+
 /** Cached host arches, populated on first call. */
 let cachedHostArches = null;
 
