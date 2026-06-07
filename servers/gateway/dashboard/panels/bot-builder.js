@@ -46,6 +46,7 @@ import {
 } from "../../../../scripts/pi-bots/ext_registry.mjs";
 import { skillDirs } from "../../../../scripts/pi-bots/skill_resolver.mjs";
 import { listProposals } from "../../../../scripts/pi-bots/skill_proposals.mjs";
+import { listBotSkillEvents } from "../../../../scripts/pi-bots/skill_provenance.mjs";
 import { getTtsProfiles } from "../../ai/tts/index.js";
 import { getSttProfiles } from "../../ai/stt/index.js";
 import { listProvidersAll } from "../../../orchestrator/providers-db.js";
@@ -304,7 +305,7 @@ function defaultDefinition(botId, projectId, model) {
         allowlist: ["kevin.hopper1@gmail.com", "kevin.hopper@maestro.press"],
       },
     ],
-    permission_policy: { bash: "deny", bash_allow: [], write_paths: [sessionDir], external_send: "draft_only", confirm: [], self_authoring: false },
+    permission_policy: { bash: "deny", bash_allow: [], write_paths: [sessionDir], external_send: "draft_only", confirm: [], self_authoring: false, skill_learning: "off" },
     triggers: { gateway: true, cron: "" },
     system_prompt:
       `You are ${botId}, a single-purpose Crow bot. Operate ONLY within ` +
@@ -434,6 +435,30 @@ export default {
                 guild_id: (b.gw_guild_id || "").trim() || undefined,
                 channel_ids: lines(b.gw_channel_ids),
                 allowlist: lines(b.gw_allowlist),
+              },
+            ];
+          } else if (gwType === "telegram") {
+            // Telegram long-poll adapter (gateways/telegram.mjs), run by the
+            // pibot-gateways host. allowlist = Telegram numeric user IDs.
+            def.gateways = [
+              {
+                type: "telegram",
+                token: (b.gw_token || "").trim(),
+                allowlist: lines(b.gw_allowlist),
+                chat_ids: lines(b.gw_chat_ids),
+              },
+            ];
+          } else if (gwType === "slack") {
+            // Slack socket-mode adapter (gateways/slack.mjs), run by the
+            // pibot-gateways host. Needs BOTH a bot token (xoxb-) and an
+            // app-level token (xapp-, connections:write).
+            def.gateways = [
+              {
+                type: "slack",
+                bot_token: (b.gw_bot_token || "").trim(),
+                app_token: (b.gw_app_token || "").trim(),
+                allowlist: lines(b.gw_allowlist),
+                channel_ids: lines(b.gw_channel_ids),
               },
             ];
           } else if (gwType === "glasses") {
@@ -566,6 +591,13 @@ export default {
           // DRAFT skill proposals into its confined staging dir (inert until an
           // operator approves them on the Skills tab). Default false.
           def.permission_policy.self_authoring = !!b.pp_self_authoring;
+          // Plan §B2: post-turn self-learning. off (default) | propose | auto.
+          //   propose = auto-trigger the operator-gated staging flow.
+          //   auto    = write/patch directly, behind the §B2 guardrails (guardrail
+          //             phrases hard-block to a draft; high-blast-radius bots degrade
+          //             to propose; patch only this bot's own auto-authored skills).
+          const sl = (b.pp_skill_learning || "off").trim();
+          def.permission_policy.skill_learning = ["off", "propose", "auto"].includes(sl) ? sl : "off";
         } else if (tab === "triggers") {
           def.triggers.gateway = !!b.tr_gateway;
           def.triggers.cron = (b.tr_cron || "").trim();
@@ -803,6 +835,8 @@ export default {
         const gwTypes = [
           { value: "gmail", label: "Gmail", available: true },
           { value: "discord", label: "Discord", available: true },
+          { value: "telegram", label: "Telegram", available: true },
+          { value: "slack", label: "Slack", available: true },
           { value: "glasses", label: "Meta Glasses", available: true },
           { value: "companion", label: "AI Companion (kiosk)", available: true },
           { value: "crow-messages", label: "Crow Messages", available: false },
@@ -826,6 +860,26 @@ export default {
             `<div class="btb-group"><label>Allowlist — Discord user IDs (one per line)</label>` +
             `<textarea name="gw_allowlist" rows="4" class="btb-textarea">${escapeHtml((gw.allowlist || []).join("\n"))}</textarea></div>`;
           gwHint = `<p class="btb-hint">Discord runs via the long-lived <code>pibot-discord.service</code> (discord_gateway.mjs holds a WebSocket per bot). The <code>MessageContent</code> privileged intent must be enabled in the Discord Developer Portal. After changing token/guild/channel config, restart the service: <code>sudo systemctl restart pibot-discord</code>.</p>`;
+        } else if (gwType === "telegram") {
+          gwFields =
+            `<div class="btb-group"><label>Bot token (from @BotFather)</label>` +
+            `<input type="password" name="gw_token" class="btb-input" autocomplete="off" value="${escapeHtml(gw.token || "")}"></div>` +
+            `<div class="btb-group"><label>Allowlist — Telegram user IDs (one per line, blank = anyone)</label>` +
+            `<textarea name="gw_allowlist" rows="4" class="btb-textarea">${escapeHtml((gw.allowlist || []).join("\n"))}</textarea></div>` +
+            `<div class="btb-group"><label>Restrict to chat IDs (one per line, optional)</label>` +
+            `<textarea name="gw_chat_ids" rows="3" class="btb-textarea">${escapeHtml((gw.chat_ids || []).join("\n"))}</textarea></div>`;
+          gwHint = `<p class="btb-hint">Telegram runs via the long-lived <code>pibot-gateways.service</code> (gateways/telegram.mjs, long-poll — dials out, no inbound port). After changing config, restart: <code>sudo systemctl restart pibot-gateways</code>.</p>`;
+        } else if (gwType === "slack") {
+          gwFields =
+            `<div class="btb-group"><label>Bot token (xoxb-…)</label>` +
+            `<input type="password" name="gw_bot_token" class="btb-input" autocomplete="off" value="${escapeHtml(gw.bot_token || "")}"></div>` +
+            `<div class="btb-group"><label>App-level token (xapp-…, connections:write)</label>` +
+            `<input type="password" name="gw_app_token" class="btb-input" autocomplete="off" value="${escapeHtml(gw.app_token || "")}"></div>` +
+            `<div class="btb-group"><label>Allowlist — Slack user IDs (one per line, blank = anyone)</label>` +
+            `<textarea name="gw_allowlist" rows="4" class="btb-textarea">${escapeHtml((gw.allowlist || []).join("\n"))}</textarea></div>` +
+            `<div class="btb-group"><label>Restrict to channel IDs (one per line, optional)</label>` +
+            `<textarea name="gw_channel_ids" rows="3" class="btb-textarea">${escapeHtml((gw.channel_ids || []).join("\n"))}</textarea></div>`;
+          gwHint = `<p class="btb-hint">Slack runs via the long-lived <code>pibot-gateways.service</code> (gateways/slack.mjs, Socket Mode — dials out, no inbound port). Needs Socket Mode enabled + an app-level token with <code>connections:write</code>. After changing config, restart: <code>sudo systemctl restart pibot-gateways</code>.</p>`;
         } else if (gwType === "glasses") {
           // Slice B (B4): bind this bot to a paired meta-glasses device. Saving
           // sets the device's bound_bot_id (the voice turn reads it) + the voice
@@ -1221,11 +1275,31 @@ export default {
           `<div class="btb-group"><label>Proposed skills (pending review)</label>` +
           `<p class="btb-hint">Drafted by this bot into <code>&lt;session_dir&gt;/proposed-skills/</code>. Review and edit (sanitize any &#9888; flagged phrasing), then Approve to copy into <code>~/.crow/skills</code> and attach, or Reject to discard. Inert until approved.</p>` +
           proposalsHtml +
-          `</div>` + propScript;
+          `</div>` + propScript +
+          // Plan §B5: self-learning provenance/audit feed — what the post-turn
+          // review pass has written/proposed/downgraded for this bot.
+          (() => {
+            let events = [];
+            try { events = listBotSkillEvents(botId, 25); } catch { events = []; }
+            const badgeFor = (a) => a === "create" ? "✍ auto-create" : a === "patch" ? "✎ auto-patch"
+              : a === "propose" ? "✉ proposed" : a === "downgrade" ? "⚠ downgraded" : a === "reject" ? "✗ rejected" : a;
+            const rows = events.map((e) =>
+              `<tr><td>${escapeHtml(e.created_at || "")}</td><td>${escapeHtml(badgeFor(e.action))}</td>` +
+              `<td><code>${escapeHtml(e.skill_name || "")}</code></td><td>${escapeHtml(e.mode || "")}</td>` +
+              `<td>${e.flags_json && e.flags_json !== "null" ? "&#9888;" : ""}</td></tr>`).join("");
+            return `<hr class="btb-divider">` +
+              `<div class="btb-group"><label>Self-learning history (last 25)</label>` +
+              `<p class="btb-hint">Post-turn review activity for this bot (<code>bot_skill_events</code>). <strong>auto-create/auto-patch</strong> went live in <code>~/.crow/skills</code>; <strong>proposed/downgraded</strong> are waiting for you above. &#9888; = guardrail phrasing was flagged.</p>` +
+              (events.length
+                ? `<table class="btb-table"><thead><tr><th>when</th><th>action</th><th>skill</th><th>mode</th><th>&#9888;</th></tr></thead><tbody>${rows}</tbody></table>`
+                : `<p class="btb-hint">No self-learning activity yet (enable it on the <strong>Permissions</strong> tab).</p>`) +
+              `</div>`;
+          })();
       } else if (tabId === "permissions") {
         const pp = def.permission_policy || {};
         const bashSel = (v) => (pp.bash || "deny") === v ? " selected" : "";
         const esSel = (v) => (pp.external_send || "draft_only") === v ? " selected" : "";
+        const slSel = (v) => (pp.skill_learning || "off") === v ? " selected" : "";
         body =
           `<form method="POST" class="btb-form">${hidden("permissions")}` +
           `<div class="btb-group"><label>bash</label>` +
@@ -1242,6 +1316,9 @@ export default {
           `<p class="btb-hint">Multi-agent is gated by pi-lab/permission-gating.ts (Phase 3.1): <code>subagent</code> is allowed only when this is on AND the bot's resolved model is MULTI_AGENT_CAPABLE; recursion is depth-capped. Off by default.</p>` +
           `<div class="btb-group"><label class="btb-checkbox"><input type="checkbox" name="pp_self_authoring"${pp.self_authoring ? " checked" : ""}> Self-authoring skills (let this bot <strong>propose</strong> new skills)</label></div>` +
           `<p class="btb-hint">When on, the bot may DRAFT a skill file into its confined staging dir (<code>&lt;session_dir&gt;/proposed-skills/</code>). Proposals are <strong>inert</strong> — they never load and never reach <code>~/.crow/skills</code> until you approve them on the <strong>Skills &amp; Prompt</strong> tab. Skills are pure prompt text; approving one can never grant a tool or change this policy. Off by default.</p>` +
+          `<div class="btb-group"><label>Self-learning — post-turn skill review</label>` +
+          `<select name="pp_skill_learning" class="btb-select"><option${slSel("off")}>off</option><option${slSel("propose")}>propose</option><option${slSel("auto")}>auto</option></select></div>` +
+          `<p class="btb-hint">After each turn, an idle-only, cheap-model review decides whether to write or improve a skill (Hermes-style). <strong>propose</strong> drafts into the staging dir for your approval (same flow as self-authoring, but auto-triggered). <strong>auto</strong> writes/patches directly, behind guardrails: guardrail-phrase drafts are blocked to a proposal; high-blast-radius bots (open <code>external_send</code>, non-<code>deny</code> bash, or multi-agent) silently degrade to propose; a bot may only patch skills it itself auto-authored, never operator- or repo-authored ones. Runs ONLY when no pi turn is live, so it never starves real turns. Off by default. Auto-written skills appear under <strong>Skills &amp; Prompt</strong>.</p>` +
           `<p class="btb-hint">Enforced by pi-lab/permission-gating.ts via PI_BOT_PERMISSION_POLICY (Phase 2.2). Default-deny for safety.</p>` +
           actionBar(`<button type="submit" class="btb-btn">Save Permissions</button>`) + `</form>`;
       } else if (tabId === "triggers") {
