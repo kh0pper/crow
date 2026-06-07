@@ -60,6 +60,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 6080 | 127.0.0.1 | browser (noVNC, existing) | existing |
 | 6875 | 127.0.0.1 | bookstack (existing) | existing |
 | 8000 | 127.0.0.1 | paperless (existing) | existing |
+| 8004 | 127.0.0.1 | faster-whisper-server (local STT) | existing |
 | 8080 | 127.0.0.1 | localai (existing) — **also nextcloud, conflict** | existing |
 | 8081 | 127.0.0.1 | calibre-server (existing) | existing |
 | 8083 | 127.0.0.1 | calibre-web (existing) | existing |
@@ -67,6 +68,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 8085 | 127.0.0.1 | miniflux (existing) | existing |
 | 8086 | 127.0.0.1 | shiori (existing) | existing |
 | 8088 | 127.0.0.1 | trilium (existing) | existing |
+| 8880 | 127.0.0.1 | kokoro-tts (local TTS) | existing |
 | 8091 | 127.0.0.1 | crowdsec (LAPI) | MVP PR 4 |
 | 8092 | 127.0.0.1 | stirling-pdf | MVP PR 1 |
 | 8094 | 127.0.0.1 | gatus | MVP PR 2 |
