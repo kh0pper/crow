@@ -78,7 +78,7 @@ export function parseRocminfoArches(text) {
 }
 
 /**
- * Pure parser: total GPU VRAM in GB from rocminfo text. Per-agent state machine
+ * Pure parser: largest single GPU agent's VRAM pool in GB from rocminfo text. Per-agent state machine
  * that captures the largest `Segment: GLOBAL` pool size ONLY for GPU agents
  * (those whose `Name:` is gfxNNNN), so the CPU agent's (often larger) system-RAM
  * pool is never mistaken for VRAM. On a unified-memory APU this is the GTT/UMA
@@ -113,7 +113,7 @@ export function parseRocminfoVramGb(text) {
     }
   }
   if (maxKb <= 0) return null;
-  return Math.round(maxKb / 1024 / 1024); // KB -> GB
+  return Math.round(maxKb / 1024 / 1024); // KB -> GB (largest single agent pool)
 }
 
 /**
@@ -146,7 +146,7 @@ export function detectGpuVramGb({ refresh = false } = {}) {
     const out = execFileSync(ROCMINFO, [], { stdio: ["ignore", "pipe", "ignore"], timeout: 5000, encoding: "utf8" });
     gb = parseRocminfoVramGb(out);
   } catch { /* rocminfo missing or no AMD GPU */ }
-  if (gb == null) {
+  if (gb === null) {
     try {
       const out = execFileSync(
         NVIDIASMI,
@@ -181,12 +181,9 @@ export function detectGpuArch({ refresh = false } = {}) {
   // text match for `Name: gfxNNNN` is unambiguous and avoids state machines.
   try {
     const out = execFileSync(ROCMINFO, [], { stdio: ["ignore", "pipe", "ignore"], timeout: 5000, encoding: "utf8" });
-    for (const line of out.split("\n")) {
-      const m = line.match(/^\s*Name:\s*(gfx[0-9a-f]+)\s*$/);
-      if (m) {
-        tags.add(m[1]);
-        tags.add("rocm");
-      }
+    for (const tag of parseRocminfoArches(out)) {
+      tags.add(tag);
+      tags.add("rocm");
     }
   } catch {
     // rocminfo missing or no AMD GPU — fine, fall through.
