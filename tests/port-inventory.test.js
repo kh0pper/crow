@@ -64,3 +64,67 @@ test("parseSsListeners parses addr:port incl ipv6 + %iface", () => {
     { port: 53, boundAddr: "127.0.0.53%lo" },
   ]);
 });
+
+import { attributeAndDetect } from "../servers/gateway/port-inventory.js";
+
+// endpoint: { bundleId, bundleName, port, bind, bindKind, proto, source }
+const ep = (bundleId, port, bindKind, extra = {}) =>
+  ({ bundleId, bundleName: bundleId, port, bind: bindKind === "loopback" ? "127.0.0.1" : bindKind === "template" ? "${IP}" : "0.0.0.0", bindKind, proto: "tcp", source: "compose", ...extra });
+const core = new Map([[3001, "Crow gateway"]]);
+
+test("parameterized endpoint listening -> up, not conflict, shows bound addr", () => {
+  const rows = attributeAndDetect([ep("kolibri", 8085, "loopback", { portEnvVar: "KOLIBRI_HTTP_PORT" })],
+    [{ port: 8085, boundAddr: "127.0.0.1" }], core);
+  const r = rows.find(x => x.port === 8085);
+  assert.equal(r.kind, "parameterized");
+  assert.equal(r.status, "up");
+  assert.equal(r.conflict, false);
+  assert.equal(r.boundAddr, "127.0.0.1");
+});
+
+test("template-bound model bundle listening on resolved addr -> status up (not down)", () => {
+  const rows = attributeAndDetect([ep("vllm-rocm-qwen3", 8001, "template")],
+    [{ port: 8001, boundAddr: "100.118.41.122" }], core);
+  const r = rows.find(x => x.port === 8001);
+  assert.equal(r.status, "up");
+  assert.equal(r.conflict, false);
+});
+
+test(":8004 two listeners on different specific addrs -> NOT a conflict", () => {
+  const rows = attributeAndDetect(
+    [ep("faster-whisper-server", 8004, "loopback"), ep("llamacpp-vulkan-qwen3-embed", 8004, "template")],
+    [{ port: 8004, boundAddr: "127.0.0.1" }, { port: 8004, boundAddr: "100.118.41.122" }], core);
+  const r = rows.find(x => x.port === 8004);
+  assert.equal(r.conflict, false);
+  assert.equal(r.shared, true);
+});
+
+test("swap-group: two declared, one live listener -> shared, up, not conflict", () => {
+  const rows = attributeAndDetect(
+    [ep("vllm-rocm-kimi", 8003, "template"), ep("llamacpp-qwen72b", 8003, "template")],
+    [{ port: 8003, boundAddr: "100.118.41.122" }], core);
+  const r = rows.find(x => x.port === 8003);
+  assert.equal(r.shared, true);
+  assert.equal(r.status, "up");
+  assert.equal(r.conflict, false);
+});
+
+test("foreign listener (no Crow declaration) -> informational, not conflict", () => {
+  const rows = attributeAndDetect([], [{ port: 22, boundAddr: "0.0.0.0" }], core);
+  const r = rows.find(x => x.port === 22);
+  assert.equal(r.kind, "foreign");
+  assert.equal(r.conflict, false);
+});
+
+test("core service port shown, not conflict", () => {
+  const rows = attributeAndDetect([], [{ port: 3001, boundAddr: "127.0.0.1" }], core);
+  assert.equal(rows.find(x => x.port === 3001).kind, "core");
+});
+
+test("genuine double-bind: two overlapping listeners on a port -> conflict", () => {
+  const rows = attributeAndDetect(
+    [ep("a", 7000, "all")],
+    [{ port: 7000, boundAddr: "0.0.0.0" }, { port: 7000, boundAddr: "127.0.0.1" }], core);
+  const r = rows.find(x => x.port === 7000);
+  assert.equal(r.conflict, true);
+});
