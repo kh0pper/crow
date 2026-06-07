@@ -2,11 +2,11 @@
  * Settings Section: AI Profiles
  */
 
-import { escapeHtml } from "../../shared/components.js";
-import { t, tJs } from "../../shared/i18n.js";
-import { upsertSetting } from "../registry.js";
-import { renderScopeToggle, scopeToggleScript } from "../../shared/scope-toggle.js";
-import { listProvidersAll } from "../../../../orchestrator/providers-db.js";
+import { escapeHtml } from "../../../shared/components.js";
+import { t, tJs } from "../../../shared/i18n.js";
+import { upsertSetting } from "../../registry.js";
+import { renderScopeToggle, scopeToggleScript } from "../../../shared/scope-toggle.js";
+import { listProvidersAll } from "../../../../../orchestrator/providers-db.js";
 
 // Canonical route ids the Smart Chat router dispatches to. Keep in sync
 // with DEFAULT_ROUTES in servers/gateway/ai/smart-router.js.
@@ -496,7 +496,7 @@ export default {
       if (!profile) { res.json({ ok: false, error: "Profile not found" }); return true; }
 
       try {
-        const { testProfileConnection } = await import("../../../ai/provider.js");
+        const { testProfileConnection } = await import("../../../../ai/provider.js");
         const result = await testProfileConnection(profile, db);
         res.json(result);
       } catch (err) {

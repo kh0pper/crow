@@ -13,10 +13,10 @@
  * the third-pass review decision in the plan).
  */
 
-import { escapeHtml } from "../../shared/components.js";
-import { upsertSetting } from "../registry.js";
-import { PROVIDER_INFO } from "../../../ai/tts/index.js";
-import { renderScopeToggle, scopeToggleScript } from "../../shared/scope-toggle.js";
+import { escapeHtml } from "../../../shared/components.js";
+import { upsertSetting } from "../../registry.js";
+import { PROVIDER_INFO } from "../../../../ai/tts/index.js";
+import { renderScopeToggle, scopeToggleScript } from "../../../shared/scope-toggle.js";
 
 /** Write a profile's voice into the compat mirror. */
 async function mirrorVoice(db, voice) {
@@ -345,7 +345,7 @@ export default {
       const profile = profiles.find(p => p.id === profile_id);
       if (!profile) { res.json({ ok: false, error: "Profile not found" }); return true; }
       try {
-        const { testTtsProfile } = await import("../../../ai/tts/index.js");
+        const { testTtsProfile } = await import("../../../../ai/tts/index.js");
         const result = await testTtsProfile(profile);
         res.json(result);
       } catch (err) {
