@@ -624,6 +624,7 @@ const translations = {
   "settings.section.language": { en: "Language", es: "Idioma" },
   "settings.section.notifications": { en: "Notifications", es: "Notificaciones" },
   "settings.section.ports": { en: "Ports", es: "Puertos" },
+  "settings.ports.description": { en: "Host ports used by installed bundles and core services, with live status. Read-only.", es: "Puertos del host usados por los paquetes instalados y los servicios principales, con estado en vivo. Solo lectura." },
   "settings.section.llm": { en: "LLM Orchestrator", es: "Orquestador LLM" },
   "settings.section.connections": { en: "Connection URLs", es: "URLs de conexión" },
   "settings.section.helpSetup": { en: "Help & Setup", es: "Ayuda y configuración" },

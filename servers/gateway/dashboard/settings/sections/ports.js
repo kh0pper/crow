@@ -29,13 +29,16 @@ export default {
   labelKey: "settings.section.ports",
   navOrder: 55,
 
-  async getPreview() {
+  async getPreview({ lang } = {}) {
     try {
       const rows = await buildPortInventory({ ttlMs: 15000, now: Date.now() });
       const conflicts = rows.filter((r) => r.conflict).length;
       const crow = rows.filter((r) => r.kind !== "foreign").length;
       return conflicts ? `${crow} ports · ${conflicts} conflict${conflicts > 1 ? "s" : ""}` : `${crow} ports`;
-    } catch { return ""; }
+    } catch (err) {
+      console.warn("[settings:ports] getPreview failed:", err.message);
+      return "";
+    }
   },
 
   async render({ lang }) {
@@ -51,19 +54,22 @@ export default {
       <td style="color:var(--crow-text-muted)">${escapeHtml(KIND_LABEL[r.kind] || r.kind)}</td>
     </tr>`;
 
+    const crowBody = crow.length
+      ? crow.map(rowHtml).join("")
+      : `<tr><td colspan="5" style="text-align:center;color:var(--crow-text-muted);padding:1rem">No ports registered.</td></tr>`;
     const crowTable = `<table class="settings-table" style="width:100%;border-collapse:collapse">
       <thead><tr style="text-align:left;border-bottom:1px solid var(--crow-border)">
         <th>Port</th><th>App / Service</th><th>Bind</th><th>Status</th><th>Type</th>
-      </tr></thead><tbody>${crow.map(rowHtml).join("")}</tbody></table>`;
+      </tr></thead><tbody>${crowBody}</tbody></table>`;
 
     const foreignTable = foreign.length
       ? `<details style="margin-top:1rem"><summary style="cursor:pointer;color:var(--crow-text-muted)">Other host listeners (${foreign.length})</summary>
          <table class="settings-table" style="width:100%;border-collapse:collapse;margin-top:.5rem"><tbody>
-         ${foreign.map((r) => `<tr><td style="font-variant-numeric:tabular-nums">${r.port}</td><td style="color:var(--crow-text-muted)">${escapeHtml(r.boundAddr || "")}</td></tr>`).join("")}
+         ${foreign.map((r) => `<tr><td style="font-variant-numeric:tabular-nums">${r.port ?? ""}</td><td style="color:var(--crow-text-muted)">${escapeHtml(r.boundAddr || "")}</td></tr>`).join("")}
          </tbody></table></details>`
       : "";
 
-    return `<p style="color:var(--crow-text-muted);margin:.2rem 0 1rem">${t("settings.section.ports", lang)} — host ports used by installed bundles and core services, with live status. Read-only.</p>
+    return `<p style="color:var(--crow-text-muted);margin:.2rem 0 1rem">${t("settings.ports.description", lang)}</p>
       ${crowTable}${foreignTable}`;
   },
 };
