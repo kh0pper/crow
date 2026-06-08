@@ -45,6 +45,9 @@ import {
   extensionSkills,
 } from "../../../../scripts/pi-bots/ext_registry.mjs";
 import { skillDirs } from "../../../../scripts/pi-bots/skill_resolver.mjs";
+import { tasksDbPath, botsWorkspaceRoot } from "../../../../scripts/pi-bots/instance-paths.mjs";
+import { join as pathJoin } from "node:path";
+import { botRuntimeActive } from "./bot-runtime-flag.js";
 import { listProposals } from "../../../../scripts/pi-bots/skill_proposals.mjs";
 import { listBotSkillEvents } from "../../../../scripts/pi-bots/skill_provenance.mjs";
 import { getTtsProfiles } from "../../ai/tts/index.js";
@@ -52,7 +55,7 @@ import { getSttProfiles } from "../../ai/stt/index.js";
 import { listProvidersAll } from "../../../orchestrator/providers-db.js";
 
 const HOME = "/home/kh0pp";
-const TASKS_DB = process.env.CROW_TASKS_DB_PATH || HOME + "/.crow-mpa/data/tasks.db";
+const TASKS_DB = tasksDbPath();
 // Skill dirs are resolved per-instance by skill_resolver.skillDirs() (A6):
 // <crowHome>/skills, ~/.crow/skills, ~/crow/skills.
 const PI_BUILTIN = ["read", "edit", "write", "bash", "list", "glob", "grep"];
@@ -282,7 +285,7 @@ function defaultDefinition(botId, projectId, model) {
   // as a parameter so the system_prompt template can baked-reference the
   // project number at creation time (it's just a string in the prompt; the
   // runtime project context block in bridge.mjs supersedes it).
-  const sessionDir = `${HOME}/.crow-mpa/pi-bots/${botId}`;
+  const sessionDir = pathJoin(botsWorkspaceRoot(), botId);
   return {
     engine: "pi",
     models: { default: model || "crow-local/qwen3.6-35b-a3b" },
@@ -662,12 +665,15 @@ export default {
       return res.send(layout({
         title: "Bot Builder",
         content: section("Bot Builder",
-          `<p>The <code>pi_bot_defs</code> table is not present on this instance.</p>` +
-          `<p>Bot Builder runs on the MPA instance. Initialize with ` +
-          `<code>node ~/crow/scripts/init-pi-bots.mjs</code> on the host whose ` +
-          `crow.db this gateway uses.</p>`),
+          `<p>The Bot Builder tables are not initialized on this instance.</p>` +
+          `<p>Run <code>npm run init-db</code> on the host whose crow.db this gateway uses, then reload.</p>`),
       }));
     }
+
+    const runtimeActive = await botRuntimeActive(db);
+    const runtimeBanner = runtimeActive ? "" :
+      `<p class="btb-notice-warn">Bot definitions are stored on this instance. ` +
+      `The bot runtime (Gmail/Telegram/Discord gateways) is enabled per-instance and is not active here yet.</p>`;
 
     const q = req.query || {};
     const baseNotice = q.saved ? `<p class="btb-notice-ok">Saved.</p>`
@@ -676,7 +682,7 @@ export default {
     // Soft, non-blocking warning (e.g. AI-tab model pair not in models.json).
     // Independent of the base notice so it can ride alongside a Saved.
     const warnNotice = q.warn ? `<p class="btb-notice-warn">${escapeHtml(String(q.warn))}</p>` : "";
-    const notice = baseNotice + warnNotice;
+    const notice = runtimeBanner + baseNotice + warnNotice;
 
     // ---- editor for one bot ----
     if (q.bot) {

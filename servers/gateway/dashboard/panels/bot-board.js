@@ -25,6 +25,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { escapeHtml, section, badge } from "../shared/components.js";
 import { createDbClient } from "../../../db.js";
+import { botRuntimeActive } from "./bot-runtime-flag.js";
 
 const HOME = "/home/kh0pp";
 const TASKS_DB = process.env.CROW_TASKS_DB_PATH || HOME + "/.crow-mpa/data/tasks.db";
@@ -390,9 +391,8 @@ export default {
       return layout({
         title: "Bot Board",
         content: section("Bot Board",
-          `<p>The <code>pi_bot_defs</code> / <code>bot_sessions</code> tables are not present on this instance.</p>` +
-          `<p>The Bot Builder Kanban board runs on the MPA instance. Initialize with ` +
-          `<code>node ~/crow/scripts/init-pi-bots.mjs</code> on the host whose crow.db this gateway uses.</p>`),
+          `<p>The Bot Builder tables (<code>pi_bot_defs</code> / <code>bot_sessions</code>) are not initialized on this instance.</p>` +
+          `<p>Run <code>npm run init-db</code> on the host whose crow.db this gateway uses, then reload.</p>`),
       });
     }
 
@@ -438,6 +438,9 @@ export default {
     else if (q.err === "move_failed") noticeBits.push(`<p class="bb-msg err">⚠️ Move failed.</p>`);
     if (reqBot != null && !selBot) {
       noticeBits.push(`<p class="bb-msg err">⚠️ Bot <code>${escapeHtml(reqBot)}</code> not found or disabled.</p>`);
+    }
+    if (!(await botRuntimeActive(db))) {
+      noticeBits.unshift(`<p class="bb-msg">Bot runtime is not active on this instance — board reflects definitions only.</p>`);
     }
     const notice = noticeBits.join("");
 
