@@ -1,8 +1,9 @@
 /**
  * Federation router — cross-instance dashboard overview.
  *
- * Mounts a single HMAC-gated route:
- *   GET /dashboard/overview
+ * Mounts HMAC-gated federation routes:
+ *   GET /dashboard/overview      — instance overview + tiles + peer roster
+ *   GET /dashboard/capabilities  — capability + bot catalog (F4a Layer 1)
  *
  * Returns JSON describing the responding instance + its available tiles
  * (panels + installed bundles). Paired peers call this to populate their
