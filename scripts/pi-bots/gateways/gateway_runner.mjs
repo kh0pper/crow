@@ -23,9 +23,9 @@
 import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
 import { hostAdapters, getAdapter, isHostManaged } from "./index.mjs";
 import { reapStalePi } from "../pi_lifecycle.mjs";
+import { botsDbPath } from "../instance-paths.mjs";
 
-const HOME = "/home/kh0pp";
-const CROW_DB = process.env.CROW_DB_PATH || HOME + "/.crow-mpa/data/crow.db";
+const CROW_DB = botsDbPath();
 const REAP_INTERVAL_MS = Number(process.env.PIBOT_REAP_INTERVAL_MS || 60000);
 
 function log(msg) { console.log("[gateways] " + msg); }

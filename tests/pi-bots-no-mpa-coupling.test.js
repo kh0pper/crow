@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 const MODULES = [
   "bridge.mjs", "bridge_tick.mjs", "tracker.mjs", "skill_promote.mjs",
   "skill_provenance.mjs", "model_resolver.mjs", "mcp_writer.mjs",
-  "discord_gateway.mjs",
+  "discord_gateway.mjs", "gateways/gateway_runner.mjs",
 ];
 
 for (const m of MODULES) {
