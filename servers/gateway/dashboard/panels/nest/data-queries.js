@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { getPeerCreds } from "../../../../shared/peer-credentials.js";
+import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
 import { readSetting } from "../../settings/registry.js";
 
 // Docker status cache
@@ -181,6 +182,17 @@ export async function getNestData(db, lang, opts = {}) {
   const trustedInstances = Array.isArray(opts.trustedInstances) ? opts.trustedInstances : [];
   const peerOverviews = Array.isArray(opts.peerOverviews) ? opts.peerOverviews : [];
 
+  // Full-mesh visibility (F5): fold gossip-discovered instances (from each
+  // trusted peer's roster) into the carousel set as link-only sections. Kept
+  // index-aligned: append to both arrays in the same order.
+  let localInstanceId = "";
+  try { localInstanceId = getOrCreateLocalInstanceId(); } catch {}
+  const { discoveredInstances, discoveredOverviews } = mergeDiscoveredPeers(
+    trustedInstances, peerOverviews, localInstanceId
+  );
+  const allTrustedInstances = [...trustedInstances, ...discoveredInstances];
+  const allPeerOverviews = [...peerOverviews, ...discoveredOverviews];
+
   // Cross-instance SSO eligibility. Decorate every instance row (both the
   // legacy `instances` list and the unified `trustedInstances` list — they are
   // distinct arrays) with `paired` = a shared signing key exists for it. The
@@ -193,8 +205,8 @@ export async function getNestData(db, lang, opts = {}) {
   return {
     pinnedItems, bundles, dockerInfo, dbStats, recentChats, recentSessions,
     instances: withPaired(instances),
-    trustedInstances: withPaired(trustedInstances),
-    peerOverviews,
+    trustedInstances: withPaired(allTrustedInstances),
+    peerOverviews: allPeerOverviews,
     ssoEnabled,
   };
 }
@@ -216,4 +228,47 @@ export async function getTrustedInstances(db) {
   } catch {
     return [];
   }
+}
+
+/**
+ * Full-mesh visibility (F5). Each trusted peer's overview carries a gossip
+ * `peers` roster (the instances IT knows about). Merge any roster entry this
+ * node doesn't already render — not self, not an already-trusted peer, not a
+ * duplicate — into the carousel as a link-only "discovered" instance. We
+ * never have credentials for these, so they get no tile fetch and no SSO:
+ * just an "open" link to their gateway_url. This is what makes every node
+ * converge to the full mesh regardless of who paired with whom.
+ *
+ * Pure function (no I/O) so it's unit-testable. Returns parallel arrays that
+ * the caller appends to trustedInstances / peerOverviews (kept index-aligned).
+ *
+ * @param {Array<{id:string}>} trustedInstances
+ * @param {Array<{status:string, peers?:Array}>} peerOverviews
+ * @param {string} localId
+ * @returns {{ discoveredInstances: Array, discoveredOverviews: Array }}
+ */
+export function mergeDiscoveredPeers(trustedInstances, peerOverviews, localId) {
+  const known = new Set([localId, ...(trustedInstances || []).map((i) => i?.id).filter(Boolean)]);
+  const seen = new Set();
+  const discoveredInstances = [];
+  const discoveredOverviews = [];
+  for (const ov of peerOverviews || []) {
+    if (!ov || ov.status !== "ok" || !Array.isArray(ov.peers)) continue;
+    for (const pr of ov.peers) {
+      if (!pr || !pr.id || !pr.gateway_url) continue;
+      if (known.has(pr.id) || seen.has(pr.id)) continue;
+      seen.add(pr.id);
+      discoveredInstances.push({
+        id: pr.id,
+        name: pr.name || null,
+        gateway_url: pr.gateway_url,
+        hostname: pr.hostname || null,
+        is_home: pr.is_home ? 1 : 0,
+        status: "active",
+        discovered: true,
+      });
+      discoveredOverviews.push({ instanceId: pr.id, status: "discovered", tiles: [], reason: "gossip" });
+    }
+  }
+  return { discoveredInstances, discoveredOverviews };
 }
