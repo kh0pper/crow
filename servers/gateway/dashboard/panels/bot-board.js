@@ -47,7 +47,7 @@ async function gatherPeerBots(db) {
     if (s.status !== "fulfilled" || !s.value || s.value.status !== "ok") continue;
     const inst = s.value.instance || {};
     for (const b of (s.value.capabilities?.bots || [])) {
-      out.push({ ...b, instanceId: s.value.instanceId, instanceName: inst.name || s.value.instanceId });
+      out.push({ ...b, instanceId: s.value.instanceId, instanceName: inst.name || s.value.instanceId || "(unknown)" });
     }
   }
   return out;
