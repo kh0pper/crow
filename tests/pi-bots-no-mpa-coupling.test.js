@@ -16,3 +16,12 @@ for (const m of MODULES) {
     assert.ok(src.includes("instance-paths.mjs"), `${m} must import the resolver`);
   });
 }
+
+const PANELS = ["bot-builder.js", "bot-board.js"];
+for (const p of PANELS) {
+  test(`panel ${p} has no hardcoded ~/.crow-mpa DB literal`, () => {
+    const src = readFileSync(new URL(`../servers/gateway/dashboard/panels/${p}`, import.meta.url), "utf8");
+    assert.ok(!src.includes(".crow-mpa/data/tasks.db"), `${p} still hardcodes tasks.db`);
+    assert.ok(!src.includes(".crow-mpa/data/crow.db"), `${p} still hardcodes crow.db`);
+  });
+}

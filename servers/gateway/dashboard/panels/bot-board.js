@@ -26,9 +26,9 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { escapeHtml, section, badge } from "../shared/components.js";
 import { createDbClient } from "../../../db.js";
 import { botRuntimeActive } from "./bot-runtime-flag.js";
+import { tasksDbPath } from "../../../../scripts/pi-bots/instance-paths.mjs";
 
-const HOME = "/home/kh0pp";
-const TASKS_DB = process.env.CROW_TASKS_DB_PATH || HOME + "/.crow-mpa/data/tasks.db";
+const TASKS_DB = tasksDbPath();
 const CARD_STATUSES = ["pending", "in_progress", "done", "cancelled"];
 const STATUS_LABEL = { pending: "Pending", in_progress: "In Progress", done: "Done", cancelled: "Cancelled" };
 const STATUS_BADGE = { pending: "draft", in_progress: "info", done: "connected", cancelled: "draft" };

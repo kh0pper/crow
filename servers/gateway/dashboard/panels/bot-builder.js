@@ -54,7 +54,6 @@ import { getTtsProfiles } from "../../ai/tts/index.js";
 import { getSttProfiles } from "../../ai/stt/index.js";
 import { listProvidersAll } from "../../../orchestrator/providers-db.js";
 
-const HOME = "/home/kh0pp";
 const TASKS_DB = tasksDbPath();
 // Skill dirs are resolved per-instance by skill_resolver.skillDirs() (A6):
 // <crowHome>/skills, ~/.crow/skills, ~/crow/skills.
