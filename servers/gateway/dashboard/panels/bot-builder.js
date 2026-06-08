@@ -53,6 +53,9 @@ import { listBotSkillEvents } from "../../../../scripts/pi-bots/skill_provenance
 import { getTtsProfiles } from "../../ai/tts/index.js";
 import { getSttProfiles } from "../../ai/stt/index.js";
 import { listProvidersAll } from "../../../orchestrator/providers-db.js";
+import { getPeerCapabilities } from "../capabilities-cache.js";
+import { getTrustedInstances } from "./nest/data-queries.js";
+import { getOrCreateLocalInstanceId } from "../../instance-registry.js";
 
 const TASKS_DB = tasksDbPath();
 // Skill dirs are resolved per-instance by skill_resolver.skillDirs() (A6):
@@ -233,6 +236,26 @@ async function loadVisionProfiles(db) {
   } catch {
     return [];
   }
+}
+
+// F4a: best-effort federated peer tools (read-only display). Budgeted; offline peers skipped.
+async function gatherPeerTools(db) {
+  let peers = [];
+  try { peers = await getTrustedInstances(db); } catch { return []; }
+  if (!peers.length) return [];
+  const localId = getOrCreateLocalInstanceId();
+  const settled = await Promise.allSettled(
+    peers.filter((p) => p.id !== localId).map((p) => getPeerCapabilities(db, p.id, { source: "bot-builder" }))
+  );
+  const out = [];
+  for (const s of settled) {
+    if (s.status !== "fulfilled" || !s.value || s.value.status !== "ok") continue;
+    const inst = s.value.instance || {};
+    for (const t of (s.value.capabilities?.tools || [])) {
+      out.push({ ...t, instanceName: inst.name || s.value.instanceId || "(unknown)" });
+    }
+  }
+  return out;
 }
 
 // R14 (Phase 3.2): models.json read goes through the 3.0 resolver's
@@ -823,6 +846,13 @@ export default {
         const subWarn = PI_EXT_ALLOWLIST.includes("subagent")
           ? `<p class="btb-warn">&#9888; <code>subagent</code> is runtime-blocked unless this bot's resolved model is in MULTI_AGENT_CAPABLE <em>and</em> Permissions &rarr; Multi-agent is on. Capable models: <code>${escapeHtml(MULTI_AGENT_CAPABLE.join(", "))}</code>.</p>`
           : "";
+        const peerTools = await gatherPeerTools(db);
+        const peerToolsHtml = peerTools.length === 0 ? "" :
+          `<details class="btb-remote-caps"><summary>Available on ${new Set(peerTools.map((t) => t.instanceName)).size} peer instance(s) &#9656;</summary>` +
+          `<p class="btb-hint">Read-only — these tools live on other instances. Usable from a bot here once cross-instance calling lands (F4a Layer 2).</p>` +
+          `<ul>` + peerTools.map((t) =>
+            `<li>${escapeHtml(t.name)} <span class="btb-muted">(${escapeHtml(t.category)} · ${escapeHtml(t.instanceName)})</span></li>`
+          ).join("") + `</ul></details>`;
         body =
           `<form method="POST" class="btb-form">${hidden("tools")}` +
           `<div class="btb-group"><label>pi builtin</label>${builtinBoxes}</div>` +
@@ -833,6 +863,7 @@ export default {
           `<hr class="btb-divider">` +
           `<div class="btb-group"><label>pi extensions</label>` +
           `<p class="btb-hint">Curated allowlist only; others need install-approval</p>${extBoxes}${subWarn}</div>` +
+          peerToolsHtml +
           actionBar(`<button type="submit" class="btb-btn">Save Tools</button>`) + `</form>`;
       } else if (tabId === "gateways") {
         const gw = (def.gateways && def.gateways[0]) || {};
