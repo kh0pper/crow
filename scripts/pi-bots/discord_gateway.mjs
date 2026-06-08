@@ -31,9 +31,10 @@ import { handleInbound } from "./bridge.mjs";
 // A1: shared gateway helpers (one definition, one test surface). These were
 // extracted verbatim from this file, so importing them is behavior-preserving.
 import { chunkedSend, downloadImages, passesAllowlist, SerialQueue, typingHeartbeat } from "./gateways/base.mjs";
+import { botsDbPath } from "./instance-paths.mjs";
 
 const HOME = "/home/kh0pp";
-const CROW_DB = process.env.CROW_DB_PATH || HOME + "/.crow-mpa/data/crow.db";
+const CROW_DB = botsDbPath();
 const MAX_QUEUE = 5;
 const CHUNK_LIMIT = 1990;        // safe margin under Discord's 2000-char hard limit
 const CHUNK_DELAY_MS = 200;      // courtesy delay between message chunks
