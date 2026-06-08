@@ -1968,7 +1968,71 @@ await initTable("job_search_sites table", `
     ON job_search_sites(tier, enabled);
 `);
 
+// --- Bot Builder tables (F3: moved from scripts/init-pi-bots.mjs) ---
+// Full current shape: pi_bot_defs.project_id and bot_sessions.model/escalated
+// are in the CREATE body here (init-pi-bots.mjs adds them via guarded ALTER on
+// pre-F3 DBs). CREATE ... IF NOT EXISTS — a no-op on the live MPA crow.db.
+// init-pi-bots.mjs remains the MPA-only JSON->column project_id backfill + guard.
+await initTable("pi_bot_defs table", `
+  CREATE TABLE IF NOT EXISTS pi_bot_defs (
+    bot_id        TEXT PRIMARY KEY,
+    display_name  TEXT NOT NULL,
+    definition    TEXT,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    project_id    INTEGER,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 
+  CREATE INDEX IF NOT EXISTS idx_pi_bot_defs_enabled ON pi_bot_defs (enabled);
+  CREATE INDEX IF NOT EXISTS idx_pi_bot_defs_project ON pi_bot_defs (project_id);
+`);
+
+await initTable("bot_sessions table", `
+  CREATE TABLE IF NOT EXISTS bot_sessions (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id            TEXT NOT NULL,
+    pi_session_id     TEXT,
+    pi_session_dir    TEXT,
+    gateway_type      TEXT,
+    gateway_thread_id TEXT,
+    project_id        INTEGER,
+    card_id           INTEGER,
+    plan_path         TEXT,
+    status            TEXT NOT NULL DEFAULT 'active'
+                        CHECK (status IN ('active','waiting-user','stopped','done','error')),
+    control           TEXT NOT NULL DEFAULT 'run'
+                        CHECK (control IN ('run','stop')),
+    model             TEXT,
+    escalated         INTEGER DEFAULT 0,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_bot_sessions_bot_thread
+    ON bot_sessions (bot_id, gateway_thread_id);
+  CREATE INDEX IF NOT EXISTS idx_bot_sessions_status
+    ON bot_sessions (status);
+`);
+
+await initTable("bot_skill_events table", `
+  CREATE TABLE IF NOT EXISTS bot_skill_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id      TEXT NOT NULL,
+    skill_name  TEXT NOT NULL,
+    action      TEXT NOT NULL
+                  CHECK (action IN ('propose','create','patch','reject','downgrade')),
+    mode        TEXT,
+    model       TEXT,
+    flags_json  TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_bot_skill_events_bot_skill
+    ON bot_skill_events (bot_id, skill_name);
+  CREATE INDEX IF NOT EXISTS idx_bot_skill_events_bot_time
+    ON bot_skill_events (bot_id, created_at);
+`);
 
 console.log("Database initialized successfully (local file)");
 db.close();

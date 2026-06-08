@@ -57,6 +57,11 @@ if (CHECK_ONLY) {
   process.exit(0);
 }
 
+// F3 NOTE (2026-06-08): The CANONICAL DDL for these tables now lives in
+// scripts/init-db.js (full shape, run on every instance init). This script is
+// retained as the MPA-only maintenance path: the prod-bot guard above + the
+// JSON->column project_id backfill below. Keep the CREATE bodies here in sync
+// with init-db.js if either changes.
 const DDL = [
   `CREATE TABLE IF NOT EXISTS pi_bot_defs (
      bot_id        TEXT PRIMARY KEY,
