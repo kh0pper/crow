@@ -628,6 +628,7 @@ const translations = {
   "settings.section.notifications": { en: "Notifications", es: "Notificaciones" },
   "settings.section.ports": { en: "Ports", es: "Puertos" },
   "settings.section.remoteExposure": { en: "Remote Tool Exposure", es: "Exposición de herramientas remotas" },
+  "settings.section.remoteInvocation": { en: "Remote Tool Invocation", es: "Invocación de herramientas remotas" },
   "settings.ports.description": { en: "Host ports used by installed bundles and core services, with live status. Read-only.", es: "Puertos del host usados por los paquetes instalados y los servicios principales, con estado en vivo. Solo lectura." },
   "settings.section.llm": { en: "LLM Orchestrator", es: "Orquestador LLM" },
   "settings.section.connections": { en: "Connection URLs", es: "URLs de conexión" },
