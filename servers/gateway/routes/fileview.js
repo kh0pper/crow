@@ -24,6 +24,11 @@ import { renderMarkdown } from "../../blog/renderer.js";
 import { escapeHtml } from "../dashboard/shared/components.js";
 
 const DEFAULT_ROOT = process.env.CROW_FILEVIEW_ROOT || "/home/kh0pp";
+if (process.env.CROW_FILEVIEW_ROOT && !DEFAULT_ROOT.startsWith("/home/")) {
+  // CROW_FILEVIEW_ROOT is intended for tests. A production root outside /home
+  // (e.g. "/") would let any authenticated dashboard user read any .md on disk.
+  console.warn("[fileview] CROW_FILEVIEW_ROOT is set outside /home — intended for tests only");
+}
 
 /**
  * Canonicalize rawPath and return its real path iff it is a readable regular
