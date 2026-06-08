@@ -7,7 +7,6 @@ import { join } from "node:path";
 import Database from "../node_modules/better-sqlite3/lib/index.js";
 
 const dir = mkdtempSync(join(tmpdir(), "f3-initdb-"));
-after(() => rmSync(dir, { recursive: true, force: true }));
 
 // Run the real init-db.js against a throwaway data dir.
 execFileSync(process.execPath, ["scripts/init-db.js"], {
@@ -16,6 +15,10 @@ execFileSync(process.execPath, ["scripts/init-db.js"], {
 });
 
 const db = new Database(join(dir, "crow.db"), { readonly: true });
+after(() => {
+  db.close();
+  rmSync(dir, { recursive: true, force: true });
+});
 const cols = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
 
 test("pi_bot_defs exists with project_id column", () => {

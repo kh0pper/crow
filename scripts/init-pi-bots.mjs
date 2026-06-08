@@ -60,8 +60,10 @@ if (CHECK_ONLY) {
 // F3 NOTE (2026-06-08): The CANONICAL DDL for these tables now lives in
 // scripts/init-db.js (full shape, run on every instance init). This script is
 // retained as the MPA-only maintenance path: the prod-bot guard above + the
-// JSON->column project_id backfill below. Keep the CREATE bodies here in sync
-// with init-db.js if either changes.
+// JSON->column project_id backfill below. The CREATE bodies below are the
+// pre-F3 baseline; pi_bot_defs.project_id and bot_sessions.model/escalated
+// are intentionally absent here (added via the guarded ALTERs below). Do not
+// "sync" those columns back into this file — ALTER is the MPA migration path.
 const DDL = [
   `CREATE TABLE IF NOT EXISTS pi_bot_defs (
      bot_id        TEXT PRIMARY KEY,
