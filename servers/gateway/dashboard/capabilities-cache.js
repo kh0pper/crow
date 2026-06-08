@@ -24,7 +24,14 @@ function vTool(t) {
   const canonicalId = str(t.canonicalId);
   const name = str(t.name);
   if (!canonicalId || !name) return null;
-  return { canonicalId, category: str(t.category), name, bundleId: t.bundleId == null ? null : str(t.bundleId), toolCount: num(t.toolCount) };
+  return {
+    canonicalId,
+    category: str(t.category),
+    name,
+    bundleId: t.bundleId == null ? null : str(t.bundleId),
+    toolCount: num(t.toolCount),
+    exposed: !!t.exposed,
+  };
 }
 
 function vSkill(s) {

@@ -9,6 +9,7 @@ import { TOOL_MANIFESTS } from "./tool-manifests.js";
 import { listInstalledExtensions, voiceCategoryFor, resolveCrowHome } from "../../scripts/pi-bots/ext_registry.mjs";
 import { skillDirs } from "../../scripts/pi-bots/skill_resolver.mjs";
 import { readdirSync } from "node:fs";
+import { getExposedCapabilities } from "./peer-exposure.js";
 
 /** Canonical server id for a core manifest category (crow-memory, etc.). */
 export function canonicalForCategory(category) {
@@ -17,13 +18,15 @@ export function canonicalForCategory(category) {
 
 // ---- public-safe projectors (security boundary) ----
 
-export function toPublicTool(entry) {
+export function toPublicTool(entry, exposedSet) {
+  const canonicalId = entry.canonicalId;
   return {
-    canonicalId: entry.canonicalId,
+    canonicalId,
     category: entry.category,
     name: entry.name,
     bundleId: entry.bundleId ?? null,
     toolCount: entry.toolCount ?? null,
+    exposed: exposedSet instanceof Set ? exposedSet.has(canonicalId) : false,
   };
 }
 
@@ -99,7 +102,8 @@ async function localBots(db) {
  * The local, vocab-normalized catalog with everything projected public-safe.
  */
 export async function getLocalCatalog(db, { crowHome = resolveCrowHome(), instanceId = null, instanceName = null } = {}) {
-  const tools = [...coreTools(), ...addonTools(crowHome)].map(toPublicTool);
+  const exposedSet = await getExposedCapabilities(db);
+  const tools = [...coreTools(), ...addonTools(crowHome)].map((e) => toPublicTool(e, exposedSet));
   const skills = localSkills(crowHome).map(toPublicSkill);
   const bots = (await localBots(db)).map(toPublicBot);
   return { instanceId, instanceName, tools, skills, bots };
