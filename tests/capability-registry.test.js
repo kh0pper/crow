@@ -5,7 +5,7 @@ import { getLocalCatalog, canonicalForCategory } from "../servers/gateway/capabi
 const db = {
   async execute() {
     return { rows: [
-      { bot_id: "a", display_name: "A", enabled: 1, project_id: null, definition: JSON.stringify({ models: { default: "m1" }, tools: { crow_mcp: ["crow-memory/x"] } }) },
+      { bot_id: "a", display_name: "A", enabled: 1, project_id: null, definition: JSON.stringify({ models: { default: "m1" }, tools: { crow_mcp: ["crow-memory/x"] }, system_prompt: "SENTINEL_SECRET_LEAK" }) },
       { bot_id: "b", display_name: "B", enabled: 0, project_id: 3, definition: "{}" },
     ] };
   },
@@ -25,5 +25,6 @@ test("catalog projects bots public-safe (no definition leak)", async () => {
   assert.equal(cat.bots[0].model, "m1");
   assert.equal(cat.bots[0].tool_count, 1);
   assert.ok(!JSON.stringify(cat.bots).includes("definition"));
+  assert.ok(!JSON.stringify(cat.bots).includes("SENTINEL_SECRET_LEAK"), "system_prompt must not leak");
   assert.equal(cat.instanceId, "self");
 });

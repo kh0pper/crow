@@ -6,7 +6,7 @@
  * wire. Never emit a raw bot definition, addon block, env, or secret.
  */
 import { TOOL_MANIFESTS } from "./tool-manifests.js";
-import { listInstalledExtensions, extensionSkills, voiceCategoryFor, resolveCrowHome } from "../../scripts/pi-bots/ext_registry.mjs";
+import { listInstalledExtensions, voiceCategoryFor, resolveCrowHome } from "../../scripts/pi-bots/ext_registry.mjs";
 import { skillDirs } from "../../scripts/pi-bots/skill_resolver.mjs";
 import { readdirSync } from "node:fs";
 
@@ -38,8 +38,8 @@ export function toPublicBot(row) {
   return {
     bot_id: row.bot_id,
     display_name: row.display_name,
-    enabled: row.enabled === 1 || row.enabled === true,
-    project_id: row.project_id ?? null,
+    enabled: !!Number(row.enabled),
+    project_id: row.project_id != null && Number.isFinite(Number(row.project_id)) ? Number(row.project_id) : null,
     tracker_type: (def.triggers && def.triggers.tracker_type) || "none",
     model: (def.models && def.models.default) || null,
     tool_count: crowMcp.length,
