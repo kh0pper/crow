@@ -182,7 +182,7 @@ function createSseHandler(sessions, createServer, messagesPath, serverName) {
  * @param {import("../session-manager.js").SessionManager} sessionManager
  * @param {Function|null} authMiddleware - Optional auth middleware
  */
-export function mountMcpServer(router, prefix, createServer, sessionManager, authMiddleware) {
+export function mountMcpServer(router, prefix, createServer, sessionManager, authMiddleware, peerGate) {
   const serverName = prefix.replace("/", "");
   const streamableSessions = sessionManager.getStore(serverName, "streamable");
   const sseSessions = sessionManager.getStore(serverName, "sse");
@@ -220,8 +220,25 @@ export function mountMcpServer(router, prefix, createServer, sessionManager, aut
     // manager) read fields off req.auth and error out with a generic 500
     // "Internal Server Error" when it's missing. Using the paired
     // instance's id as clientId keeps audit trails meaningful.
-    const skipAuthForInstance = (req, res, next) => {
+    const skipAuthForInstance = async (req, res, next) => {
       if (req.instanceAuth?.instance) {
+        // F4a Layer 2a: default-deny exposure gate. A trusted peer may invoke
+        // only capabilities this instance has exposed. Runs only for peer
+        // callers; local-operator calls take the authMiddleware branch below
+        // and are never gated here. The gate writes its own JSON-RPC error on
+        // deny, so we just stop.
+        if (peerGate) {
+          let allowed = true;
+          try { allowed = await peerGate(prefix, req, res); }
+          catch (err) {
+            console.warn(`[mcp] peer exposure gate error (${prefix}):`, err.message);
+            allowed = false; // fail closed
+            if (!res.headersSent) {
+              res.status(403).json({ jsonrpc: "2.0", id: req.body?.id ?? null, error: { code: -32001, message: "Exposure check failed" } });
+            }
+          }
+          if (!allowed) return;
+        }
         req.auth = {
           token: "peer-instance",
           clientId: `instance:${req.instanceAuth.instance.id}`,

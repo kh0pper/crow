@@ -79,6 +79,7 @@ import { startScheduler } from "./scheduler.js";
 // dependency is a sibling-repo path dep that may not be installed on
 // every deployment (hosted relays don't need orchestrator).
 import { connectedServers } from "./proxy.js";
+import { enforcePeerExposure } from "./peer-exposure.js";
 import { initWebPush } from "./push/web-push.js";
 import { join } from "node:path";
 
@@ -673,12 +674,24 @@ try {
   console.warn("[bundles] Asset repair failed:", err.message);
 }
 
-mountMcpServer(app, "/memory", () => createMemoryServer(undefined, { instructions, syncManager }), sessionManager, authMiddleware);
+// F4a Layer 2a: shared default-deny exposure gate for all peer-instance MCP
+// calls. Bound once; mountMcpServer passes the mount prefix per call.
+const peerExposureGate = async (prefix, req, res) => {
+  if (!req.instanceAuth?.instance) return true; // fast path: not a peer call
+  const db = createDbClient();
+  try {
+    return await enforcePeerExposure({ prefix, req, res, db, connectedServers });
+  } finally {
+    try { db.close(); } catch {}
+  }
+};
+
+mountMcpServer(app, "/memory", () => createMemoryServer(undefined, { instructions, syncManager }), sessionManager, authMiddleware, peerExposureGate);
 const projectServerFactory = () => createProjectServer(undefined, { instructions });
-mountMcpServer(app, "/projects", projectServerFactory, sessionManager, authMiddleware);
+mountMcpServer(app, "/projects", projectServerFactory, sessionManager, authMiddleware, peerExposureGate);
 // Legacy alias — existing remote clients use /research/mcp
-mountMcpServer(app, "/research", projectServerFactory, sessionManager, authMiddleware);
-mountMcpServer(app, "/sharing", () => createSharingServer(undefined, { instructions }), sessionManager, authMiddleware);
+mountMcpServer(app, "/research", projectServerFactory, sessionManager, authMiddleware, peerExposureGate);
+mountMcpServer(app, "/sharing", () => createSharingServer(undefined, { instructions }), sessionManager, authMiddleware, peerExposureGate);
 
 // --- Per-client filtered proxy mounts (driven by ~/.crow/clients.json) ---
 // Each entry { name: filter } in clients.json mounts /tools-${name}/mcp with
@@ -701,7 +714,7 @@ try {
         console.warn(`[gateway] clients.json: skipping reserved name ${JSON.stringify(name)}`);
         continue;
       }
-      mountMcpServer(app, `/tools-${name}`, () => createProxyServer(filter), sessionManager, authMiddleware);
+      mountMcpServer(app, `/tools-${name}`, () => createProxyServer(filter), sessionManager, authMiddleware, peerExposureGate);
       console.log(`[gateway] mount /tools-${name}/mcp (filter: ${JSON.stringify(filter)})`);
     }
   }
@@ -709,14 +722,14 @@ try {
   console.warn(`[gateway] clients.json: load failed: ${err.message}`);
 }
 
-mountMcpServer(app, "/tools", createProxyServer, sessionManager, authMiddleware);
+mountMcpServer(app, "/tools", createProxyServer, sessionManager, authMiddleware, peerExposureGate);
 
 // Also mount at /mcp for single-server compatibility (uses memory)
-mountMcpServer(app, "", () => createMemoryServer(undefined, { instructions, syncManager }), sessionManager, authMiddleware);
+mountMcpServer(app, "", () => createMemoryServer(undefined, { instructions, syncManager }), sessionManager, authMiddleware, peerExposureGate);
 
 // --- Mount Router (consolidated endpoint, ~75% context reduction) ---
 if (process.env.CROW_DISABLE_ROUTER !== "1") {
-  mountMcpServer(app, "/router", () => createRouterServer({ instructions: routerInstructions }), sessionManager, authMiddleware);
+  mountMcpServer(app, "/router", () => createRouterServer({ instructions: routerInstructions }), sessionManager, authMiddleware, peerExposureGate);
   console.log("Router server mounted (8 tools instead of 58+)");
 }
 
@@ -735,7 +748,7 @@ try {
 // --- Mount Storage Server (conditional) ---
 try {
   const { createStorageServer } = await import("../storage/server.js");
-  mountMcpServer(app, "/storage", () => createStorageServer(undefined, { instructions }), sessionManager, authMiddleware);
+  mountMcpServer(app, "/storage", () => createStorageServer(undefined, { instructions }), sessionManager, authMiddleware, peerExposureGate);
 
   // Storage HTTP routes (upload/download)
   const { default: storageHttpRouter } = await import("./routes/storage-http.js");
@@ -752,7 +765,7 @@ try {
 // --- Mount Blog Server ---
 try {
   const { createBlogServer } = await import("../blog/server.js");
-  mountMcpServer(app, "/blog-mcp", () => createBlogServer(undefined, { instructions }), sessionManager, authMiddleware);
+  mountMcpServer(app, "/blog-mcp", () => createBlogServer(undefined, { instructions }), sessionManager, authMiddleware, peerExposureGate);
 
   // Songbook routes (must mount before blog's /:slug catch-all)
   const { default: songbookRouter } = await import("./routes/songbook.js");
