@@ -296,6 +296,27 @@ export function buildNestHTML(data, lang) {
       const sectionId = escapeHtml(ti.id || `peer-${i}`);
       const displayName = escapeHtml(peer.displayName || ti.name || "peer");
 
+      // Full-mesh visibility (F5): an instance we learned about via a trusted
+      // peer's gossip roster, but for which we hold no credentials. We can't
+      // fetch its tiles or SSO into it — render a single link-out to its
+      // public gateway so the operator can still reach it from any node.
+      if (peer.status === "discovered") {
+        const openUrl = ti.gateway_url || "";
+        const openLabel = escapeHtml(t("nest.openInstance", lang) || "Open");
+        sections.push(
+          `<section class="nest-instance-section nest-instance-section--discovered" data-instance="${sectionId}" role="tabpanel" aria-labelledby="crow-instance-tab-${sectionId}">
+            <div class="nest-section-label" style="padding:0.5rem 1rem 0;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;color:var(--crow-text-muted);font-weight:600">${displayName}</div>
+            <div class="nest-grid">
+              ${openUrl ? `<a href="${escapeHtml(openUrl)}" target="_blank" rel="noopener noreferrer" class="nest-app nest-app--instance">
+                <div class="nest-app-icon">${resolvePeerIcon("instance")}</div>
+                <div class="nest-app-label">${openLabel} ${displayName}</div>
+              </a>` : ""}
+            </div>
+          </section>`
+        );
+        continue;
+      }
+
       if (peer.status !== "ok") {
         const lastSeen = ti.last_seen_at
           ? new Date(ti.last_seen_at).toLocaleString(lang === "es" ? "es-ES" : "en-US")

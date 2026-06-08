@@ -159,6 +159,7 @@ const translations = {
   // ─── Nest Panel ───
   "nest.pinned": { en: "Pinned", es: "Fijados" },
   "nest.instances": { en: "Instances", es: "Instancias" },
+  "nest.openInstance": { en: "Open", es: "Abrir" },
 
   // ─── Messages Panel ───
   "messages.pageTitle": { en: "Messages", es: "Mensajes" },

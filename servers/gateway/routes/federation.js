@@ -24,6 +24,14 @@
  *       port:     number|null,
  *       category: "local-panel"|"bundle"|"instance"
  *     }>,
+ *     peers: Array<{          // gossip roster: instances THIS node knows about,
+ *       id:          string,  // so a fetcher converges to the full mesh (F5).
+ *       name:        string|null,
+ *       gateway_url: string|null,  // public https URL; the only way to "open" it
+ *       hostname:    string|null,
+ *       is_home:     boolean,
+ *       status:      "active"|"offline"|"paused"
+ *     }>,                      // metadata only — NO credentials. Capped at 50.
  *     health: { status: "ok"|"degraded", checkedAt: string }
  *   }
  *
@@ -200,6 +208,35 @@ function buildTiles() {
 }
 
 /**
+ * Build the gossip roster: every instance THIS node knows about (active /
+ * offline / paused, not revoked, not the local-MCP pseudo-instance, not
+ * self). A fetching peer merges these into its own carousel so visibility
+ * converges to the full mesh regardless of who paired with whom. Metadata
+ * only — never any credential. Capped so a misbehaving peer can't bloat
+ * the response.
+ */
+async function buildPeerRoster(db, localId) {
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT id, name, gateway_url, hostname, is_home, status FROM crow_instances "
+        + "WHERE status != 'revoked' AND (crow_id IS NULL OR crow_id != '__local_mcp__') "
+        + "AND id != ? ORDER BY is_home DESC, name ASC LIMIT 50",
+      args: [localId],
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name || null,
+      gateway_url: r.gateway_url || null,
+      hostname: r.hostname || null,
+      is_home: r.is_home === 1,
+      status: r.status || "active",
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Factory: returns an Express router with GET /dashboard/overview mounted.
  *
  * @param {object} args
@@ -224,6 +261,7 @@ export default function federationRouter({ createDbClient }) {
           is_home: inst?.is_home === 1,
         },
         tiles: buildTiles(),
+        peers: await buildPeerRoster(db, localId),
         health: {
           status: "ok",
           checkedAt: new Date().toISOString(),

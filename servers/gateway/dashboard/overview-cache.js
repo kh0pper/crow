@@ -94,6 +94,38 @@ function validateTile(tile) {
   };
 }
 
+const HEX_ID_REGEX = /^[a-f0-9]{8,64}$/i;
+const PEER_STATUS_ENUM = new Set(["active", "offline", "paused"]);
+const MAX_PEERS = 50;
+
+/**
+ * Validate one gossip-roster peer entry (F5). Returns the sanitized peer or
+ * `null` to drop it. A peer with no safe gateway_url is dropped — it can't be
+ * opened, so it has no display value. URL must be absolute http(s); this is a
+ * link the renderer puts in an href, so reject anything that could smuggle a
+ * javascript:/data: scheme.
+ */
+function validatePeerEntry(p) {
+  if (!p || typeof p !== "object") return null;
+  if (typeof p.id !== "string" || !HEX_ID_REGEX.test(p.id)) return null;
+  let gateway_url = null;
+  if (typeof p.gateway_url === "string" && p.gateway_url) {
+    try {
+      const u = new URL(p.gateway_url);
+      if (u.protocol === "https:" || u.protocol === "http:") gateway_url = u.href;
+    } catch { /* invalid URL → drop */ }
+  }
+  if (!gateway_url) return null;
+  return {
+    id: p.id,
+    name: typeof p.name === "string" ? p.name.slice(0, 256) : null,
+    gateway_url,
+    hostname: typeof p.hostname === "string" ? p.hostname.slice(0, 256) : null,
+    is_home: p.is_home === true,
+    status: PEER_STATUS_ENUM.has(p.status) ? p.status : "active",
+  };
+}
+
 /**
  * Validate the outer overview envelope. Returns the sanitized envelope or
  * `null` when the response is structurally invalid.
@@ -113,6 +145,9 @@ function validateEnvelope(body) {
     if (t) tiles.push(t);
     // silently drop invalid entries; entire-envelope invalid case is caught above
   }
+  const peers = Array.isArray(body.peers)
+    ? body.peers.map(validatePeerEntry).filter(Boolean).slice(0, MAX_PEERS)
+    : [];
   return {
     instance: {
       id: body.instance.id,
@@ -121,6 +156,7 @@ function validateEnvelope(body) {
       is_home: body.instance.is_home === true,
     },
     tiles,
+    peers,
     health: body.health && typeof body.health === "object" ? {
       status: body.health.status === "ok" ? "ok" : "degraded",
       checkedAt: typeof body.health.checkedAt === "string" ? body.health.checkedAt : null,
@@ -182,6 +218,7 @@ async function doFetch(db, instanceId) {
       status: "ok",
       instance: sanitized.instance,
       tiles: sanitized.tiles,
+      peers: sanitized.peers,
       health: sanitized.health,
       fetchedAt: new Date().toISOString(),
     },
