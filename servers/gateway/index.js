@@ -960,6 +960,17 @@ try {
   console.warn("[bot-board-api] Failed to mount:", err.message);
 }
 
+// Markdown file viewer — read-only, auth-gated, tailnet-only. Under /dashboard/
+// so rejectFunneledMiddleware() blocks Funnel; renders allowlisted local .md
+// files (default root /home/kh0pp) as sanitized HTML. NOT in PUBLIC_FUNNEL_PREFIXES.
+try {
+  const { default: fileviewRouter } = await import("./routes/fileview.js");
+  app.use(fileviewRouter(dashboardAuth));
+  console.log("Markdown file viewer mounted at /dashboard/fileview");
+} catch (err) {
+  console.warn("[fileview] Failed to mount:", err.message);
+}
+
 // --- Mount Push Subscription API ---
 try {
   const { default: pushRouter } = await import("./routes/push.js");
