@@ -1,8 +1,9 @@
-import { test, beforeEach } from "node:test";
+import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { getPeerCapabilities, _setFetchImpl, _resetCache, validateCapabilitiesEnvelope } from "../servers/gateway/dashboard/capabilities-cache.js";
 
 beforeEach(() => _resetCache());
+afterEach(() => _setFetchImpl(null)); // restore the real defaultFetchImpl between tests
 
 test("validateCapabilitiesEnvelope accepts a well-formed payload", () => {
   const ok = validateCapabilitiesEnvelope({
