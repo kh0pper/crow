@@ -82,7 +82,8 @@ export function readRemoteInvocationEnabled(conn) {
   } catch { return false; }
 }
 
-// instanceId -> gateway_url for trusted, non-revoked peers with a URL.
+// instanceId -> gateway_url for non-revoked peers with a URL. (The peer's L2a
+// exposure gate is the trust boundary; this is just URL resolution.)
 export function readPeerGatewayUrls(conn) {
   try {
     const rows = conn.prepare("SELECT id, gateway_url FROM crow_instances WHERE status != 'revoked' AND gateway_url IS NOT NULL").all();
