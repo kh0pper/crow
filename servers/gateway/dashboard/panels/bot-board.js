@@ -27,8 +27,31 @@ import { escapeHtml, section, badge } from "../shared/components.js";
 import { createDbClient } from "../../../db.js";
 import { botRuntimeActive } from "./bot-runtime-flag.js";
 import { tasksDbPath } from "../../../../scripts/pi-bots/instance-paths.mjs";
+import { getPeerCapabilities } from "../capabilities-cache.js";
+import { getTrustedInstances } from "./nest/data-queries.js";
+import { getOrCreateLocalInstanceId } from "../../instance-registry.js";
 
 const TASKS_DB = tasksDbPath();
+
+// F4a: best-effort federated peer bots. Budgeted; a slow/offline peer is skipped.
+async function gatherPeerBots(db) {
+  let peers = [];
+  try { peers = await getTrustedInstances(db); } catch { return []; }
+  if (!peers.length) return [];
+  const localId = getOrCreateLocalInstanceId();
+  const settled = await Promise.allSettled(
+    peers.filter((p) => p.id !== localId).map((p) => getPeerCapabilities(db, p.id, { source: "bot-board" }))
+  );
+  const out = [];
+  for (const s of settled) {
+    if (s.status !== "fulfilled" || !s.value || s.value.status !== "ok") continue;
+    const inst = s.value.instance || {};
+    for (const b of (s.value.capabilities?.bots || [])) {
+      out.push({ ...b, instanceId: s.value.instanceId, instanceName: inst.name || s.value.instanceId });
+    }
+  }
+  return out;
+}
 const CARD_STATUSES = ["pending", "in_progress", "done", "cancelled"];
 const STATUS_LABEL = { pending: "Pending", in_progress: "In Progress", done: "Done", cancelled: "Cancelled" };
 const STATUS_BADGE = { pending: "draft", in_progress: "info", done: "connected", cancelled: "draft" };
@@ -483,11 +506,22 @@ export default {
 
     // ---- No bot selected ----
     if (!selBot) {
+      const peerBots = await gatherPeerBots(db);
+      const peerBotsHtml = peerBots.length === 0 ? "" :
+        section("Bots on other instances",
+          `<table class="bb-list-table"><thead><tr><th>Bot</th><th>Instance</th><th>Model</th></tr></thead><tbody>` +
+          peerBots.map((b) =>
+            `<tr><td>${escapeHtml(b.display_name || b.bot_id)}</td>` +
+            `<td>${escapeHtml(b.instanceName)}</td>` +
+            `<td>${escapeHtml(b.model || "—")}</td></tr>`
+          ).join("") +
+          `</tbody></table><p class="bb-msg">Read-only — these bots live on other instances. Open that instance's dashboard to edit or run them.</p>`);
       return layout({
         title: "Bot Board",
         content: PAGE_CSS + section("Bot Board",
           notice + switcher +
           `<p style="margin-top:1rem;color:var(--crow-text-muted)">No enabled bots found. Create a bot in Bot Builder to start a board.</p>`) +
+          peerBotsHtml +
           drawerMarkup() + clientJs(null, "none", null),
       });
     }
