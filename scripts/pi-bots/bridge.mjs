@@ -34,6 +34,8 @@ import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 import { runSkillReview } from "./skill_review.mjs";
 import { botsDbPath, tasksDbPath as resolveTasksDbPath } from "./instance-paths.mjs";
+import { remoteServersForBot, parseRemoteInvocationFlag } from "./remote-blocks.mjs";
+import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
@@ -49,10 +51,45 @@ const PROMPT_ACK_TIMEOUT_MS = Number(process.env.PIBOT_PROMPT_ACK_TIMEOUT_MS || 
 
 function db(p) { const d = new Database(p); d.pragma("busy_timeout = 10000"); return d; }
 
-function toolAllowlist(def) {
+export function toolAllowlist(def, { remoteEnabled = false } = {}) {
   const builtin = (def.tools && def.tools.pi_builtin) || [];
   const mcp = ((def.tools && def.tools.crow_mcp) || []).map((s) => "mcp__" + s.replace("/", "__"));
-  return [...builtin, ...mcp].join(",");
+  const out = [...builtin, ...mcp];
+  if (remoteEnabled) {
+    // Server-level allow per remote capability (= all that capability's tools;
+    // the peer's L2a gate is the per-call enforcement). Block names mirror
+    // mintRemoteBlocks: crow-remote-<instanceId8>-<canonicalId>.
+    for (const { instanceId, canonicalId } of remoteServersForBot(def)) {
+      out.push(`mcp__crow-remote-${instanceId.slice(0, 8)}-${canonicalId}`);
+    }
+  }
+  return out.join(",");
+}
+
+// F4a L2b: read feature_flags.remote_invocation with the same scope resolution
+// as readSetting (this-instance override first, then global), synchronously
+// over better-sqlite3. Local-only flag; default off. Never throws.
+export function readRemoteInvocationEnabled(conn) {
+  try {
+    let localId = null;
+    try { localId = getOrCreateLocalInstanceId(); } catch {}
+    let row = null;
+    if (localId) {
+      row = conn.prepare("SELECT value FROM dashboard_settings_overrides WHERE key='feature_flags' AND instance_id=?").get(localId);
+    }
+    if (!row) row = conn.prepare("SELECT value FROM dashboard_settings WHERE key='feature_flags'").get();
+    return parseRemoteInvocationFlag(row ? row.value : null);
+  } catch { return false; }
+}
+
+// instanceId -> gateway_url for trusted, non-revoked peers with a URL.
+export function readPeerGatewayUrls(conn) {
+  try {
+    const rows = conn.prepare("SELECT id, gateway_url FROM crow_instances WHERE status != 'revoked' AND gateway_url IS NOT NULL").all();
+    const map = {};
+    for (const r of rows) map[r.id] = r.gateway_url;
+    return map;
+  } catch { return {}; }
 }
 
 export class PiRpc {
@@ -76,7 +113,7 @@ export class PiRpc {
     // custom tools"). Only expose `subagent` to the model when capable+
     // opted-in; otherwise pi never offers it. The gate is the backstop if a
     // hand DB-edit bypasses this.
-    let tools = toolAllowlist(def);
+    let tools = toolAllowlist(def, { remoteEnabled: opts.remoteEnabled });
     if (maOptIn && maCapable) tools = [tools, "subagent"].filter(Boolean).join(",");
     if (tools) args.push("--tools", tools);
     if (opts.appendSystemPromptFile) args.push("--append-system-prompt", opts.appendSystemPromptFile);
@@ -316,9 +353,22 @@ export async function handleInbound(opts) {
   // M3b: pass the resolved sessionDir (which may differ from def.session_dir
   // when the bot has a project_space workspace) so the .mcp.json lives next
   // to where pi actually runs.
+  // F4a L2b: read the remote_invocation flag + trusted peer gateway URLs once
+  // (local-only, default off). With the flag off, remoteEnabled=false ⇒
+  // writeBotMcp mints no remote blocks and toolAllowlist adds no remote entries
+  // ⇒ live bots are byte-identical to today. Reads never throw.
+  const _conn = db(CROW_DB);
+  let remoteEnabled = false, peerGatewayUrls = {};
   try {
-    const w = writeBotMcp(def, { sessionDir, crowHome });
+    remoteEnabled = readRemoteInvocationEnabled(_conn);
+    if (remoteEnabled) peerGatewayUrls = readPeerGatewayUrls(_conn);
+  } finally { _conn.close(); }
+  try {
+    const w = writeBotMcp(def, { sessionDir, crowHome, remoteEnabled, peerGatewayUrls });
     if (w.warnings.length) log("mcp.json warnings: " + w.warnings.join("; "));
+    if (w.remoteWarnings && w.remoteWarnings.length) {
+      for (const warn of w.remoteWarnings) log("remote-tool: " + warn);
+    }
     if (w.journalGuarded.length) log("mcp.json journal-guarded: " + w.journalGuarded.join(","));
     if (w.minted && w.minted.length) log("mcp.json minted from extensions: " + w.minted.join(","));
   } catch (e) {
@@ -488,7 +538,7 @@ export async function handleInbound(opts) {
     model: resolved.key, escalated: resolved.escalated ? 1 : 0,
   }));
 
-  const pi = new PiRpc({ def, sessionDir, resolved, selfAuthoringDir,
+  const pi = new PiRpc({ def, sessionDir, resolved, selfAuthoringDir, remoteEnabled,
     piSessionId: effectiveResume ? session.pi_session_id : null, appendSystemPromptFile: sysFile });
   let result;
   // B1: captured on a successful turn so the post-turn skill review (fired AFTER
