@@ -568,7 +568,8 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   router.use("/dashboard", (req, res, next) => {
     if (!req.headers["x-crow-signature"]) return next();
     // /dashboard/overview → federationRouter (Phase 1)
-    if (federationRouter && req.path.startsWith("/overview")) {
+    // /dashboard/capabilities → federationRouter (F4a Layer 1)
+    if (federationRouter && (req.path.startsWith("/overview") || req.path.startsWith("/capabilities"))) {
       return federationRouter(req, res, next);
     }
     // Everything else (bundles) → bundlesRouter (existing behavior)
