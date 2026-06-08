@@ -64,8 +64,12 @@ function resolveProxyTool(toolName, connectedServers) {
 export function resolveCalledCanonicalId(prefix, body, connectedServers) {
   if (!body || body.method !== "tools/call") return "__allow__";
   const toolName = body.params?.name;
-  const p = String(prefix || "").replace(/^\//, "");
+  const p = String(prefix || "").replace(/^\/+/, "");
 
+  // For these single-capability mounts the tool name is intentionally NOT
+  // consulted: the whole mount maps to exactly one capability, and the
+  // underlying MCP server validates the tool name downstream — so an
+  // un-exposed tool cannot ride in on a single-capability mount.
   if (Object.prototype.hasOwnProperty.call(PREFIX_CANON, p)) return PREFIX_CANON[p];
 
   if (p === "router") {
