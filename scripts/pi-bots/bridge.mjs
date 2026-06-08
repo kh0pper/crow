@@ -33,7 +33,7 @@ import { resolveCrowHome } from "./ext_registry.mjs";
 import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 import { runSkillReview } from "./skill_review.mjs";
-import { botsDbPath, tasksDbPath } from "./instance-paths.mjs";
+import { botsDbPath, tasksDbPath as resolveTasksDbPath } from "./instance-paths.mjs";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
@@ -43,7 +43,7 @@ const PI_CLI = HOME + "/.nvm/versions/node/v20.20.2/lib/node_modules/@earendil-w
 const CROW_DB = botsDbPath();
 // Skill-file roots are resolved per-instance by skill_resolver (A3):
 // <crowHome>/skills, then ~/.crow/skills, then the repo ~/crow/skills.
-const TASKS_DB = tasksDbPath();
+const TASKS_DB = resolveTasksDbPath();
 const TURN_TIMEOUT_MS = Number(process.env.PIBOT_TURN_TIMEOUT_MS || 600000);
 const PROMPT_ACK_TIMEOUT_MS = Number(process.env.PIBOT_PROMPT_ACK_TIMEOUT_MS || 60000);
 
