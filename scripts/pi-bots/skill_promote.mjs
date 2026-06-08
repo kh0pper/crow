@@ -35,9 +35,10 @@ import { homedir } from "node:os";
 import { normalizeSkillName } from "./skill_proposals.mjs";
 import { resolveSkill } from "./skill_resolver.mjs";
 import { botAuthoredSkill, recordSkillEvent } from "./skill_provenance.mjs";
+import { botsDbPath } from "./instance-paths.mjs";
 
 const HOME = homedir();
-const CROW_DB = process.env.CROW_DB_PATH || HOME + "/.crow-mpa/data/crow.db";
+const CROW_DB = botsDbPath();
 const CROW_USER_SKILLS = join(HOME, ".crow", "skills");   // sole write target (matches approve handler)
 const REPO_SKILLS = join(HOME, "crow", "skills");         // protected (shipped) — never written
 

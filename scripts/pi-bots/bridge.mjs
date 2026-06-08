@@ -33,16 +33,17 @@ import { resolveCrowHome } from "./ext_registry.mjs";
 import { proposalsDir, selfAuthoringPromptBlock } from "./skill_proposals.mjs";
 import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 import { runSkillReview } from "./skill_review.mjs";
+import { botsDbPath, tasksDbPath } from "./instance-paths.mjs";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
 // Package was renamed from @mariozechner/pi-coding-agent to
 // @earendil-works/pi-coding-agent (still 'pi' binary; v0.74.2 verified).
 const PI_CLI = HOME + "/.nvm/versions/node/v20.20.2/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js";
-const CROW_DB = process.env.CROW_DB_PATH || HOME + "/.crow-mpa/data/crow.db";
+const CROW_DB = botsDbPath();
 // Skill-file roots are resolved per-instance by skill_resolver (A3):
 // <crowHome>/skills, then ~/.crow/skills, then the repo ~/crow/skills.
-const TASKS_DB = process.env.CROW_TASKS_DB_PATH || HOME + "/.crow-mpa/data/tasks.db";
+const TASKS_DB = tasksDbPath();
 const TURN_TIMEOUT_MS = Number(process.env.PIBOT_TURN_TIMEOUT_MS || 600000);
 const PROMPT_ACK_TIMEOUT_MS = Number(process.env.PIBOT_PROMPT_ACK_TIMEOUT_MS || 60000);
 

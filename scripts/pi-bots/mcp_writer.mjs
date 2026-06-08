@@ -31,6 +31,7 @@
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { botsDbPath } from "./instance-paths.mjs";
 
 const HOME = "/home/kh0pp";
 export const CANONICAL_MCP_PATH = HOME + "/.pi/agent/mcp.json";
@@ -326,7 +327,7 @@ export function probeServerTools(block, opts = {}) {
 if (import.meta.url === "file://" + process.argv[1]) {
   const cmd = process.argv[2];
   const arg = process.argv[3];
-  const CROW_DB = process.env.CROW_DB_PATH || HOME + "/.crow-mpa/data/crow.db";
+  const CROW_DB = botsDbPath();
   if (cmd === "list-servers") {
     const c = readCanonicalMcp();
     console.log(Object.keys(c.mcpServers).join("\n"));

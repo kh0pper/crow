@@ -32,6 +32,7 @@
  * crowdb-wal-flip-new-consumers), same as bridge.mjs.
  */
 import { readFileSync } from "node:fs";
+import { botsDbPath } from "./instance-paths.mjs";
 
 const HOME = "/home/kh0pp";
 const MODELS_JSON = process.env.PI_MODELS_JSON || HOME + "/.pi/agent/models.json";
@@ -57,7 +58,7 @@ function loadModelsFromFile() {
 async function loadModelsFromDb() {
   try {
     const { default: Database } = await import("/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js");
-    const CROW_DB = process.env.CROW_DB_PATH || HOME + "/.crow-mpa/data/crow.db";
+    const CROW_DB = botsDbPath();
     const d = new Database(CROW_DB);
     d.pragma("busy_timeout = 10000");
     const rows = d.prepare("SELECT id, models FROM providers WHERE disabled=0").all();
@@ -162,7 +163,7 @@ if (import.meta.url === "file://" + process.argv[1]) {
   const botId = a[1];
   const escalate = a.includes("--escalate");
   const { default: Database } = await import("/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js");
-  const CROW_DB = process.env.CROW_DB_PATH || HOME + "/.crow-mpa/data/crow.db";
+  const CROW_DB = botsDbPath();
   const d = new Database(CROW_DB);
   d.pragma("busy_timeout = 10000");
   const row = d.prepare("SELECT definition FROM pi_bot_defs WHERE bot_id=?").get(botId);

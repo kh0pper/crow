@@ -18,11 +18,12 @@ import { execFile } from "node:child_process";
 import { openSync, closeSync, existsSync, statSync, unlinkSync } from "node:fs";
 import { handleInbound } from "./bridge.mjs";
 import { reapStalePi } from "./pi_lifecycle.mjs";
+import { botsDbPath } from "./instance-paths.mjs";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
 const GIO = HOME + "/crow/scripts/pi-bots/gmail_io.mjs";
-const CROW_DB = HOME + "/.crow-mpa/data/crow.db";
+const CROW_DB = botsDbPath();
 const LOCK = "/tmp/pibot-bridge-tick.lock";
 
 function db() { const d = new Database(CROW_DB); d.pragma("busy_timeout = 10000"); return d; }

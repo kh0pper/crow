@@ -15,9 +15,10 @@
  * write must never break a turn); read helpers fail closed (return [] / false / 0).
  */
 import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import { botsDbPath } from "./instance-paths.mjs";
 
 const HOME = "/home/kh0pp";
-const CROW_DB = process.env.CROW_DB_PATH || HOME + "/.crow-mpa/data/crow.db";
+const CROW_DB = botsDbPath();
 
 function db() { const d = new Database(CROW_DB); d.pragma("busy_timeout = 10000"); return d; }
 
