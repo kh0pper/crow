@@ -181,6 +181,7 @@ function createSseHandler(sessions, createServer, messagesPath, serverName) {
  * @param {Function} createServer - Server factory
  * @param {import("../session-manager.js").SessionManager} sessionManager
  * @param {Function|null} authMiddleware - Optional auth middleware
+ * @param {Function} [peerGate] - Optional default-deny peer-exposure gate: async (prefix, req, res) => boolean. Returns false (and writes its own JSON-RPC error) to reject a peer-instance call to a non-exposed capability.
  */
 export function mountMcpServer(router, prefix, createServer, sessionManager, authMiddleware, peerGate) {
   const serverName = prefix.replace("/", "");
@@ -234,7 +235,7 @@ export function mountMcpServer(router, prefix, createServer, sessionManager, aut
             console.warn(`[mcp] peer exposure gate error (${prefix}):`, err.message);
             allowed = false; // fail closed
             if (!res.headersSent) {
-              res.status(403).json({ jsonrpc: "2.0", id: req.body?.id ?? null, error: { code: -32001, message: "Exposure check failed" } });
+              res.status(403).json({ jsonrpc: "2.0", id: req.body?.id ?? null, error: { code: -32002, message: "Exposure check failed" } });
             }
           }
           if (!allowed) return;
