@@ -56,6 +56,7 @@ import { listProvidersAll } from "../../../orchestrator/providers-db.js";
 import { getPeerCapabilities } from "../capabilities-cache.js";
 import { getTrustedInstances } from "./nest/data-queries.js";
 import { getOrCreateLocalInstanceId } from "../../instance-registry.js";
+import { readSetting } from "../settings/registry.js";
 
 const TASKS_DB = tasksDbPath();
 // Skill dirs are resolved per-instance by skill_resolver.skillDirs() (A6):
@@ -264,6 +265,14 @@ async function gatherPeerTools(db) {
   return out;
 }
 
+// F4a L2b: is cross-instance invocation enabled on THIS instance?
+async function remoteInvocationOn(db) {
+  try {
+    const raw = await readSetting(db, "feature_flags");
+    return !!raw && JSON.parse(raw)?.remote_invocation === true;
+  } catch { return false; }
+}
+
 // R14 (Phase 3.2): models.json read goes through the 3.0 resolver's
 async function loadModelOptions(db) {
   try {
@@ -454,6 +463,14 @@ export default {
           def.tools.pi_builtin = builtin.length ? builtin : ["read"];
           def.tools.crow_mcp = Array.isArray(mcp) ? mcp : [mcp];
           def.tools.pi_extensions = exts;
+          // F4a L2b: persist remote capability selections (only when enabled).
+          if (await remoteInvocationOn(db)) {
+            let rsel = b.remote_mcp;
+            if (rsel == null) rsel = [];
+            else if (!Array.isArray(rsel)) rsel = [rsel];
+            def.tools.remote_mcp = [...new Set(rsel.filter((x) => typeof x === "string" && x.includes("::")))];
+          }
+          // flag off: leave any existing def.tools.remote_mcp untouched (don't wipe a prior selection)
         } else if (tab === "gateways") {
           const gwType = (b.gw_type || "gmail").trim();
           if (gwType === "none") {
@@ -853,12 +870,33 @@ export default {
           ? `<p class="btb-warn">&#9888; <code>subagent</code> is runtime-blocked unless this bot's resolved model is in MULTI_AGENT_CAPABLE <em>and</em> Permissions &rarr; Multi-agent is on. Capable models: <code>${escapeHtml(MULTI_AGENT_CAPABLE.join(", "))}</code>.</p>`
           : "";
         const peerTools = await gatherPeerTools(db);
-        const peerToolsHtml = peerTools.length === 0 ? "" :
-          `<details class="btb-remote-caps"><summary>Available on ${new Set(peerTools.map((t) => t.instanceId)).size} peer instance(s) &#9656;</summary>` +
-          `<p class="btb-hint">Read-only — these tools live on other instances. Usable from a bot here once cross-instance calling lands (F4a Layer 2).</p>` +
-          `<ul>` + peerTools.map((t) =>
-            `<li>${escapeHtml(t.name)} <span class="btb-muted">(${escapeHtml(t.category)} · ${escapeHtml(t.instanceName)})</span></li>`
-          ).join("") + `</ul></details>`;
+        const remoteOn = await remoteInvocationOn(db);
+        // De-dup to one row per (instance, capability).
+        const seenRemote = new Set();
+        const remoteCaps = [];
+        for (const t of peerTools) {
+          const key = `${t.instanceId}::${t.canonicalId}`;
+          if (!t.canonicalId || seenRemote.has(key)) continue;
+          seenRemote.add(key);
+          remoteCaps.push(t);
+        }
+        const selectedRemote = new Set((def.tools && def.tools.remote_mcp) || []);
+        const peerToolsHtml = remoteCaps.length === 0 ? "" :
+          `<details class="btb-remote-caps"><summary>Peer instance capabilities (${new Set(remoteCaps.map((t) => t.instanceId)).size}) &#9656;</summary>` +
+          (remoteOn
+            ? `<p class="btb-hint">Exposed peer capabilities are selectable. The peer enforces what's allowed (F4a Layer 2a).</p>`
+            : `<p class="btb-hint">Read-only — enable <strong>Settings &rarr; Remote Tool Invocation</strong> to wire these into a bot.</p>`) +
+          `<ul style="list-style:none;padding-left:0">` + remoteCaps.map((t) => {
+            const key = `${t.instanceId}::${t.canonicalId}`;
+            const selectable = remoteOn && t.exposed === true;
+            const checked = selectedRemote.has(key) ? " checked" : "";
+            const label = `${escapeHtml(t.name)} <span class="btb-muted">(${escapeHtml(t.category)} · ${escapeHtml(t.instanceName)})</span>`;
+            if (selectable) {
+              return `<li><label><input type="checkbox" name="remote_mcp" value="${escapeHtml(key)}"${checked}> ${label}</label></li>`;
+            }
+            const why = remoteOn ? "not exposed by that instance" : "invocation disabled";
+            return `<li><label style="opacity:.55"><input type="checkbox" disabled> ${label} <span class="btb-muted">— ${why}</span></label></li>`;
+          }).join("") + `</ul></details>`;
         body =
           `<form method="POST" class="btb-form">${hidden("tools")}` +
           `<div class="btb-group"><label>pi builtin</label>${builtinBoxes}</div>` +
