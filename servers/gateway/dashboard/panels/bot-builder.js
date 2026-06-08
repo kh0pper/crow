@@ -176,6 +176,12 @@ const PAGE_CSS = `<style>
   /* Session action buttons */
   .btb-sess-btn{font-size:.75rem;padding:.15rem .4rem;cursor:pointer;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text-primary)}
   .btb-sess-link{font-size:.75rem;color:var(--crow-accent)}
+
+  /* Remote capabilities group */
+  .btb-remote-caps{margin:.75rem 0;padding:.5rem .75rem;border:1px solid var(--crow-border);border-radius:6px}
+  .btb-remote-caps summary{cursor:pointer;font-size:.88rem;font-weight:500}
+  .btb-remote-caps ul{margin:.35rem 0 0 1rem;padding:0;font-size:.85rem}
+  .btb-remote-caps .btb-muted{opacity:.7}
 </style>`;
 
 // in-process probe cache (per gateway process), 5-min TTL — probing spawns
@@ -252,7 +258,7 @@ async function gatherPeerTools(db) {
     if (s.status !== "fulfilled" || !s.value || s.value.status !== "ok") continue;
     const inst = s.value.instance || {};
     for (const t of (s.value.capabilities?.tools || [])) {
-      out.push({ ...t, instanceName: inst.name || s.value.instanceId || "(unknown)" });
+      out.push({ ...t, instanceId: s.value.instanceId, instanceName: inst.name || s.value.instanceId || "(unknown)" });
     }
   }
   return out;
@@ -848,7 +854,7 @@ export default {
           : "";
         const peerTools = await gatherPeerTools(db);
         const peerToolsHtml = peerTools.length === 0 ? "" :
-          `<details class="btb-remote-caps"><summary>Available on ${new Set(peerTools.map((t) => t.instanceName)).size} peer instance(s) &#9656;</summary>` +
+          `<details class="btb-remote-caps"><summary>Available on ${new Set(peerTools.map((t) => t.instanceId)).size} peer instance(s) &#9656;</summary>` +
           `<p class="btb-hint">Read-only — these tools live on other instances. Usable from a bot here once cross-instance calling lands (F4a Layer 2).</p>` +
           `<ul>` + peerTools.map((t) =>
             `<li>${escapeHtml(t.name)} <span class="btb-muted">(${escapeHtml(t.category)} · ${escapeHtml(t.instanceName)})</span></li>`
