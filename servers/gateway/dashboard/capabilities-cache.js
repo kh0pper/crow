@@ -21,13 +21,10 @@ const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
 function vTool(t) {
   if (!t || typeof t !== "object") return null;
-  return {
-    canonicalId: str(t.canonicalId),
-    category: str(t.category),
-    name: str(t.name),
-    bundleId: t.bundleId == null ? null : str(t.bundleId),
-    toolCount: num(t.toolCount),
-  };
+  const canonicalId = str(t.canonicalId);
+  const name = str(t.name);
+  if (!canonicalId || !name) return null;
+  return { canonicalId, category: str(t.category), name, bundleId: t.bundleId == null ? null : str(t.bundleId), toolCount: num(t.toolCount) };
 }
 
 function vSkill(s) {
@@ -69,12 +66,7 @@ export function validateCapabilitiesEnvelope(body) {
 }
 
 function errorSentinel(instanceId, reason) {
-  return {
-    instanceId,
-    status: reason === "ok" ? "ok" : "unavailable",
-    reason,
-    capabilities: { tools: [], skills: [], bots: [] },
-  };
+  return { instanceId, status: "unavailable", reason, capabilities: { tools: [], skills: [], bots: [] } };
 }
 
 let _fetchImpl = defaultFetchImpl;
@@ -121,6 +113,7 @@ async function defaultFetchImpl(db, instanceId) {
 }
 
 export async function getPeerCapabilities(db, instanceId, { source = "dashboard" } = {}) {
+  if (!instanceId) throw new Error("instanceId required");
   const key = cacheKey(instanceId, source);
   const hit = _cache.get(key);
   if (hit && hit.expiresAt > now()) return hit.inflight ? hit.inflight : hit.data;
