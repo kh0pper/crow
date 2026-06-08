@@ -46,6 +46,7 @@ import { verifyRequest, auditCrossHostCall } from "../../shared/cross-host-auth.
 import { getPeerCreds } from "../../shared/peer-credentials.js";
 import { getInstance, getOrCreateLocalInstanceId } from "../instance-registry.js";
 import { getVisiblePanels } from "../dashboard/panel-registry.js";
+import { getLocalCatalog } from "../capability-registry.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -271,6 +272,29 @@ export default function federationRouter({ createDbClient }) {
     } catch (err) {
       console.warn("[federation] overview render failed:", err.message);
       res.status(500).json({ error: "overview_render_failed" });
+    } finally {
+      db.close();
+    }
+  });
+
+  // F4a Layer 1: capability + bot catalog. Same HMAC gate as /overview, separate
+  // endpoint so the hot overview stays lean and this larger payload is pulled
+  // lazily (only when the Bot Builder/Board panels render). Funnel-blocked via
+  // the /dashboard mount; never add to PUBLIC_FUNNEL_PREFIXES.
+  router.get("/capabilities", federationVerifyMiddleware(dbForAudit), async (req, res) => {
+    const db = createDbClient();
+    try {
+      const localId = getOrCreateLocalInstanceId();
+      const inst = await getInstance(db, localId);
+      const catalog = await getLocalCatalog(db, { instanceId: localId, instanceName: inst?.name || null });
+      res.type("application/json").send(JSON.stringify({
+        instance: { id: localId, name: inst?.name || null },
+        capabilities: { tools: catalog.tools, skills: catalog.skills, bots: catalog.bots },
+        generatedAt: new Date().toISOString(),
+      }));
+    } catch (err) {
+      console.warn("[federation] capabilities render failed:", err.message);
+      res.status(500).json({ error: "capabilities_render_failed" });
     } finally {
       db.close();
     }
