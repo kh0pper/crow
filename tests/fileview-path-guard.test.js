@@ -2,6 +2,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, symlinkSync, rmSync, realpathSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { homedir, tmpdir } from "node:os";
 import { resolveSafeMarkdownPath } from "../servers/gateway/routes/fileview.js";
 
@@ -57,8 +58,11 @@ test("rejects empty / non-string input", () => {
 });
 
 test("default root is /home/alex (a repo .md resolves)", () => {
-  // Uses the real default allowRoot; the F3 plan lives under /home/alex/crow.
-  const planMd = "/home/alex/crow/docs/superpowers/plans/2026-06-08-f3-bot-builder-to-core.md";
-  const r = resolveSafeMarkdownPath(planMd);
-  assert.equal(r, realpathSync(planMd));
+  // Uses the real default allowRoot. The repo's own CLAUDE.md is a stable,
+  // always-present .md under /home/alex/crow (skip if the repo is checked out
+  // elsewhere, since the default root is hardcoded to /home/alex).
+  const repoMd = join(fileURLToPath(new URL("..", import.meta.url)), "CLAUDE.md");
+  if (!repoMd.startsWith("/home/alex/")) return; // not on the target layout
+  const r = resolveSafeMarkdownPath(repoMd);
+  assert.equal(r, realpathSync(repoMd));
 });
