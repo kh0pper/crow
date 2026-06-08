@@ -32,6 +32,7 @@ import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { botsDbPath } from "./instance-paths.mjs";
+import { mintRemoteBlocks } from "./remote-blocks.mjs";
 
 const HOME = "/home/kh0pp";
 export const CANONICAL_MCP_PATH = HOME + "/.pi/agent/mcp.json";
@@ -193,6 +194,22 @@ export function writeBotMcp(def, opts = {}) {
   const crowHome = opts.crowHome || resolveCrowHome();
   const extraServers = opts.extraServers || extraServersFromExtensions(def, crowHome, { canonical });
   const built = buildBotMcp(def, canonical, { extraServers });
+  // F4a L2b: merge cross-instance forward-proxy blocks when the caller has
+  // confirmed feature_flags.remote_invocation is on (the DB read is done by the
+  // caller — bridge/panel/CLI — since this module is DB-agnostic). Default
+  // off: callers that don't pass remoteEnabled get byte-identical output.
+  let remoteWarnings = [];
+  if (opts.remoteEnabled) {
+    const node = opts.node || process.execPath;
+    const proxyPath = opts.proxyPath || join(import.meta.dirname, "crow-remote-proxy.mjs");
+    const { blocks, warnings } = mintRemoteBlocks(def, {
+      peerGatewayUrls: opts.peerGatewayUrls || {},
+      proxyPath,
+      node,
+    });
+    remoteWarnings = warnings;
+    for (const [name, block] of Object.entries(blocks)) built.json.mcpServers[name] = block;
+  }
   mkdirSync(sessionDir, { recursive: true });
   const path = join(sessionDir, ".mcp.json");
   writeFileSync(path, JSON.stringify(built.json, null, 2) + "\n", { mode: 0o600 });
@@ -202,6 +219,7 @@ export function writeBotMcp(def, opts = {}) {
     warnings: built.warnings,
     journalGuarded: built.journalGuarded,
     minted: built.minted,
+    remoteWarnings,
   };
 }
 
