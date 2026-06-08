@@ -67,3 +67,19 @@ test("server name uses 8-char instance prefix and hyphens (no __)", () => {
   assert.equal(name, "crow-remote-01234567-crow-storage");
   assert.ok(!name.includes("__"));
 });
+
+test("mintRemoteBlocks warns + keeps the first on an 8-char-prefix block-name collision", () => {
+  // Two distinct peers sharing the first 8 hex chars, same capability → same block name.
+  const a = "abcdef12" + "0000000000000000"; // 24 hex
+  const b = "abcdef12" + "ffffffffffffffff";
+  const def = { tools: { remote_mcp: [`${a}::crow-memory`, `${b}::crow-memory`] } };
+  const { blocks, warnings } = mintRemoteBlocks(def, {
+    peerGatewayUrls: { [a]: "https://a:8444", [b]: "https://b:8444" },
+    proxyPath: "/p", node: "/n",
+  });
+  assert.equal(Object.keys(blocks).length, 1, "only one block (collision)");
+  const name = "crow-remote-abcdef12-crow-memory";
+  assert.ok(blocks[name], "the first peer's block is kept");
+  assert.equal(blocks[name].env.CROW_REMOTE_GATEWAY_URL, "https://a:8444", "first wins, not clobbered by second");
+  assert.ok(warnings.some((w) => w.includes("collides")), "a collision warning was emitted");
+});
