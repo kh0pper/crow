@@ -10,19 +10,10 @@
  * writeSetting downgrades it to local scope automatically — each instance is
  * sovereign over what it exposes.
  */
-import { readSetting, writeSetting } from "../registry.js";
+import { writeSetting } from "../registry.js";
 import { getLocalCatalog } from "../../../capability-registry.js";
 import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
 import { escapeHtml } from "../../shared/components.js";
-
-async function readExposed(db) {
-  const raw = await readSetting(db, "remote_exposed_tools");
-  if (raw == null) return new Set();
-  try {
-    const arr = JSON.parse(raw);
-    return new Set(Array.isArray(arr) ? arr.filter((x) => typeof x === "string") : []);
-  } catch { return new Set(); }
-}
 
 export default {
   id: "remote-exposure",
@@ -31,13 +22,16 @@ export default {
   labelKey: "settings.section.remoteExposure",
   navOrder: 6,
 
-  async getPreview({ db }) {
-    const exposed = await readExposed(db);
-    return exposed.size === 0 ? "none exposed" : `${exposed.size} exposed`;
+  async getPreview({ settings }) {
+    let n = 0;
+    try {
+      const arr = JSON.parse(settings?.remote_exposed_tools || "[]");
+      n = Array.isArray(arr) ? arr.filter((x) => typeof x === "string" && x.length > 0).length : 0;
+    } catch { n = 0; }
+    return n === 0 ? "none exposed" : `${n} exposed`;
   },
 
   async render({ db }) {
-    const exposed = await readExposed(db);
     const catalog = await getLocalCatalog(db, { instanceId: getOrCreateLocalInstanceId() });
     // Distinct capabilities by canonicalId (core categories + installed addons).
     const seen = new Set();
@@ -50,7 +44,7 @@ export default {
     caps.sort((a, b) => String(a.name).localeCompare(String(b.name)));
 
     const rows = caps.map((c) => {
-      const on = exposed.has(c.canonicalId);
+      const on = c.exposed === true;
       return `<label style="display:flex;align-items:center;gap:0.6rem;padding:0.4rem 0;border-bottom:1px solid var(--crow-border,#2222)">
         <input type="checkbox" name="cap" value="${escapeHtml(c.canonicalId)}" ${on ? "checked" : ""}>
         <span style="flex:1">${escapeHtml(c.name)} <span style="color:var(--crow-text-muted);font-size:0.85rem">(${escapeHtml(c.category)}${c.bundleId ? " · addon" : ""})</span></span>
