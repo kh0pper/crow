@@ -66,6 +66,10 @@ export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node })
       continue;
     }
     const name = `crow-remote-${instanceId.slice(0, 8)}-${canonicalId}`;
+    if (blocks[name]) {
+      warnings.push(`remote '${instanceId}::${canonicalId}' skipped — block name '${name}' collides with another selected peer (8-char instanceId prefix clash); keeping the first`);
+      continue;
+    }
     blocks[name] = {
       command: node,
       args: [proxyPath],
