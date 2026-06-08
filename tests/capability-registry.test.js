@@ -28,3 +28,19 @@ test("catalog projects bots public-safe (no definition leak)", async () => {
   assert.ok(!JSON.stringify(cat.bots).includes("SENTINEL_SECRET_LEAK"), "system_prompt must not leak");
   assert.equal(cat.instanceId, "self");
 });
+
+test("catalog reflects the exposure set on tool entries", async () => {
+  // db stub: exposure setting returns ["crow-memory"]; bot query returns [].
+  const exposingDb = {
+    async execute({ sql }) {
+      if (/dashboard_settings_overrides/.test(sql)) return { rows: [] };
+      if (/FROM dashboard_settings\b/.test(sql)) return { rows: [{ value: JSON.stringify(["crow-memory"]) }] };
+      return { rows: [] }; // pi_bot_defs
+    },
+  };
+  const cat = await getLocalCatalog(exposingDb, { crowHome: "/tmp/nonexistent-crowhome", instanceId: "self" });
+  const mem = cat.tools.find((t) => t.canonicalId === canonicalForCategory("memory"));
+  assert.equal(mem.exposed, true);
+  const others = cat.tools.filter((t) => t.canonicalId !== "crow-memory");
+  assert.ok(others.every((t) => t.exposed === false), "non-exposed tools are exposed:false");
+});

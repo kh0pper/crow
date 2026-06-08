@@ -43,3 +43,19 @@ test("getPeerCapabilities caches a successful fetch", async () => {
   assert.equal(a.status, "ok");
   assert.equal(b.status, "ok");
 });
+
+test("validateCapabilitiesEnvelope preserves the exposed boolean (producer↔validator parity)", () => {
+  const ok = validateCapabilitiesEnvelope({
+    instance: { id: "abc", name: "Crow" },
+    capabilities: {
+      tools: [
+        { canonicalId: "crow-memory", category: "memory", name: "Memory", bundleId: null, toolCount: 5, exposed: true },
+        { canonicalId: "crow-blog", category: "blog", name: "Blog", bundleId: null, toolCount: 3 }, // missing → false
+      ],
+      skills: [], bots: [],
+    },
+    generatedAt: "t",
+  });
+  assert.equal(ok.capabilities.tools[0].exposed, true);
+  assert.equal(ok.capabilities.tools[1].exposed, false);
+});

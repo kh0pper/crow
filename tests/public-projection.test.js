@@ -32,9 +32,18 @@ test("toPublicTool drops env/keys/command/args", () => {
     canonicalId: "texas-gov-data", category: "tools", name: "texas-gov-data", bundleId: "texas-gov-data", toolCount: 5,
     block: { command: "/usr/bin/uv", args: ["run", "x"], env: { API_KEY: "sekret" } },
   });
-  assert.deepEqual(Object.keys(pub).sort(), ["bundleId", "canonicalId", "category", "name", "toolCount"].sort());
+  assert.deepEqual(Object.keys(pub).sort(), ["bundleId", "canonicalId", "category", "exposed", "name", "toolCount"].sort());
+  assert.equal(pub.exposed, false, "default exposed:false when no exposure set passed");
   assert.ok(!JSON.stringify(pub).includes("sekret"));
   assert.ok(!JSON.stringify(pub).includes("API_KEY"));
+});
+
+test("toPublicTool sets exposed:true when canonicalId is in the exposure set", () => {
+  const set = new Set(["texas-gov-data"]);
+  const pub = toPublicTool({ canonicalId: "texas-gov-data", category: "tools", name: "T", bundleId: "texas-gov-data", toolCount: 5 }, set);
+  assert.equal(pub.exposed, true);
+  const other = toPublicTool({ canonicalId: "crow-memory", category: "memory", name: "Memory", bundleId: null, toolCount: 9 }, set);
+  assert.equal(other.exposed, false);
 });
 
 test("toPublicSkill is just a name", () => {
