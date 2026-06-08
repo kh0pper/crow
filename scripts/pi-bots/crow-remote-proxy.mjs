@@ -16,6 +16,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { getPeerCreds } from "../../servers/shared/peer-credentials.js";
+import { jsonSchemaPropertiesToZod } from "../../servers/shared/json-schema-to-zod.js";
 
 const CONNECT_TIMEOUT_MS = 15000;
 
@@ -31,10 +32,15 @@ async function defaultClientFactory() {
   const requestInit = { headers: { Authorization: `Bearer ${creds.auth_token}` } };
   const transport = new StreamableHTTPClientTransport(url, { requestInit });
   const client = new Client({ name: "crow-remote-proxy", version: "0.1.0" });
-  await Promise.race([
-    client.connect(transport),
-    new Promise((_, rej) => setTimeout(() => rej(new Error("connect timeout")), CONNECT_TIMEOUT_MS)),
-  ]);
+  let timer;
+  try {
+    await Promise.race([
+      client.connect(transport),
+      new Promise((_, rej) => { timer = setTimeout(() => rej(new Error("connect timeout")), CONNECT_TIMEOUT_MS); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
   return client;
 }
 
@@ -66,9 +72,8 @@ export async function buildRemoteProxyServer({ clientFactory = defaultClientFact
   const server = new McpServer({ name: "crow-remote-proxy", version: "0.1.0" });
   const { tools } = await listTools();
   for (const t of tools) {
-    server.tool(t.name, t.description || "", t.inputSchema?.properties || {}, async (args) => {
-      const r = await callTool({ name: t.name, arguments: args || {} });
-      return r;
+    server.tool(t.name, t.description || "", jsonSchemaPropertiesToZod(t.inputSchema), async (args) => {
+      return callTool({ name: t.name, arguments: args || {} });
     });
   }
   return { server, listTools, callTool };
