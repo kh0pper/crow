@@ -1290,6 +1290,13 @@ await initTable("sync_state table", `
 // an operator promotes them (e.g. via `crow instance pair`).
 await addColumnIfMissing("crow_instances", "trusted", "INTEGER DEFAULT 0");
 
+// data_dir stores a peer's CROW_DATA_DIR so same-host instances (e.g. primary +
+// MPA) can locate each other's DB files. registerInstance() writes this column,
+// but it was never added to the schema — so new-instance registration (the
+// instance-pair enroll INSERT path) failed fleet-wide with "no column named
+// data_dir". Added here as an idempotent migration.
+await addColumnIfMissing("crow_instances", "data_dir", "TEXT");
+
 await initTable("cross_host_calls audit table", `
   CREATE TABLE IF NOT EXISTS cross_host_calls (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
