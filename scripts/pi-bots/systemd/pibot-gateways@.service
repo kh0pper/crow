@@ -1,0 +1,18 @@
+[Unit]
+Description=Crow Bot Builder — gateway host (Telegram/Slack) [%i]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kh0pp
+WorkingDirectory=/home/alex/crow
+EnvironmentFile=/etc/crow/pibot-%i.env
+ExecStart=/home/alex/.nvm/versions/node/v20.20.2/bin/node /home/alex/crow/scripts/pi-bots/gateways/gateway_runner.mjs
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
