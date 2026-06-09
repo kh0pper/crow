@@ -39,6 +39,7 @@ test("flag ON: mints the forward-proxy block alongside local servers", () => {
   assert.ok(remote, "remote forward-proxy block minted");
   assert.equal(remote.env.CROW_REMOTE_GATEWAY_URL, "https://g1:8444");
   assert.equal(remote.env.CROW_REMOTE_MOUNT, "/memory");
+  assert.equal(remote.env.CROW_PEER_TOKENS_PATH, "/tmp/none/peer-tokens.json", "proxy pinned to this instance's token store");
   assert.ok(Array.isArray(res.remoteWarnings));
 });
 

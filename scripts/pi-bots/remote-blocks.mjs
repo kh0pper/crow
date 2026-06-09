@@ -49,9 +49,13 @@ export function remoteServersForBot(def) {
  * @param {Record<string,string>} o.peerGatewayUrls  instanceId -> gateway_url (caller-supplied)
  * @param {string} o.proxyPath  absolute path to crow-remote-proxy.mjs
  * @param {string} o.node       absolute node binary
+ * @param {string} [o.peerTokensPath]  absolute path to THIS instance's
+ *   peer-tokens.json. Set so the spawned proxy reads the right per-instance
+ *   token store (peer-credentials.js otherwise hardcodes ~/.crow, ignoring
+ *   CROW_HOME — wrong for the MPA instance whose tokens live in ~/.crow-mpa).
  * @returns {{ blocks: Record<string,object>, warnings: string[] }}
  */
-export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node }) {
+export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node, peerTokensPath }) {
   const blocks = {};
   const warnings = [];
   for (const { instanceId, canonicalId } of remoteServersForBot(def)) {
@@ -77,6 +81,7 @@ export function mintRemoteBlocks(def, { peerGatewayUrls = {}, proxyPath, node })
         CROW_REMOTE_INSTANCE_ID: instanceId,
         CROW_REMOTE_GATEWAY_URL: gatewayUrl,
         CROW_REMOTE_MOUNT: mount,
+        ...(peerTokensPath ? { CROW_PEER_TOKENS_PATH: peerTokensPath } : {}),
       },
     };
   }

@@ -83,3 +83,21 @@ test("mintRemoteBlocks warns + keeps the first on an 8-char-prefix block-name co
   assert.equal(blocks[name].env.CROW_REMOTE_GATEWAY_URL, "https://a:8444", "first wins, not clobbered by second");
   assert.ok(warnings.some((w) => w.includes("collides")), "a collision warning was emitted");
 });
+
+test("mintRemoteBlocks sets CROW_PEER_TOKENS_PATH when peerTokensPath given (per-instance token store)", () => {
+  const def = { tools: { remote_mcp: ["abc12345deadbeef::crow-memory"] } };
+  const { blocks } = mintRemoteBlocks(def, {
+    peerGatewayUrls: { "abc12345deadbeef": "https://g:8444" },
+    proxyPath: "/p", node: "/n",
+    peerTokensPath: "/home/kh0pp/.crow-mpa/peer-tokens.json",
+  });
+  const b = blocks["crow-remote-abc12345-crow-memory"];
+  assert.equal(b.env.CROW_PEER_TOKENS_PATH, "/home/kh0pp/.crow-mpa/peer-tokens.json");
+});
+
+test("mintRemoteBlocks omits CROW_PEER_TOKENS_PATH when not given (proxy falls back to default)", () => {
+  const def = { tools: { remote_mcp: ["abc12345deadbeef::crow-memory"] } };
+  const { blocks } = mintRemoteBlocks(def, { peerGatewayUrls: { "abc12345deadbeef": "https://g:8444" }, proxyPath: "/p", node: "/n" });
+  const b = blocks["crow-remote-abc12345-crow-memory"];
+  assert.ok(!("CROW_PEER_TOKENS_PATH" in b.env));
+});
