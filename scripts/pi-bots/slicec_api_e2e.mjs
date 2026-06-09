@@ -18,7 +18,7 @@
  * Run: CROW_DB_PATH=~/.crow-mpa/data/crow.db node scripts/pi-bots/slicec_api_e2e.mjs
  */
 import express from "/home/kh0pp/crow/node_modules/express/index.js";
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, symlinkSync, unlinkSync } from "node:fs";
 import mkRouter from "../../servers/gateway/routes/bot-board-api.js";
 import { resolveSkill } from "./skill_resolver.mjs";

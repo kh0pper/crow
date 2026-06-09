@@ -19,7 +19,7 @@
  *
  * Usage: node scripts/pi-bots-phase1-setup.mjs [--check]
  */
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 

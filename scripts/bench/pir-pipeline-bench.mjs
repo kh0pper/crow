@@ -17,7 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 
 const BRIDGE = "/home/kh0pp/crow/scripts/pi-bots/bridge.mjs";
 const CANVAS_DB = "/home/kh0pp/spring-2026/canvas-companion/db/canvas.db";

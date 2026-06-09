@@ -2,7 +2,7 @@
 // Run on crow: /home/kh0pp/.nvm/versions/node/v20.20.2/bin/node \
 //   ~/crow/scripts/bots/router_tasks_smoke.mjs
 import assert from "node:assert/strict";
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 import { classifyTasks } from "./tasks_classifier.mjs";
 import { classify, handoffToTasks } from "./router_dispatch.mjs";
 

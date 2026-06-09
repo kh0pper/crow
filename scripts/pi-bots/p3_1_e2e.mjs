@@ -27,7 +27,7 @@
  * No Gmail; namespaced p31-e2e-* artifacts torn down; production untouched;
  * crow.db busy_timeout-only.
  */
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { handleInbound } from "./bridge.mjs";

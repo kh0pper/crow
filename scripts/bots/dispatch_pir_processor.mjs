@@ -19,7 +19,7 @@
 import { execSync, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import crypto from "node:crypto";
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 import { google } from "/home/kh0pp/crow/node_modules/googleapis/build/src/index.js";
 import { marked } from "/home/kh0pp/crow/node_modules/marked/lib/marked.esm.js";
 

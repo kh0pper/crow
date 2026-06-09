@@ -14,7 +14,7 @@
 
 import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 
 const MPA_DB = "/home/kh0pp/.crow-mpa/data/crow.db";
 const PG_CONTAINER = "edjobs_postgres";

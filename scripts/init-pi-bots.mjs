@@ -26,7 +26,7 @@
  *         node scripts/init-pi-bots.mjs --check     (report only, no DDL)
  */
 
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 
 const DB_PATH = process.env.CROW_DB_PATH || "/home/kh0pp/.crow-mpa/data/crow.db";
 const CHECK_ONLY = process.argv.includes("--check");

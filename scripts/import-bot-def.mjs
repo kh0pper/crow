@@ -4,7 +4,7 @@
 // the expanded `definition` object. created_at/updated_at default in-DB.
 //
 // Usage: node scripts/import-bot-def.mjs <bot_id> [--check]
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";

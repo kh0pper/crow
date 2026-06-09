@@ -14,7 +14,7 @@
  * SQLITE_BUSY trap). recordSkillEvent is best-effort and never throws (an audit
  * write must never break a turn); read helpers fail closed (return [] / false / 0).
  */
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 import { botsDbPath } from "./instance-paths.mjs";
 
 const HOME = "/home/kh0pp";

@@ -5,7 +5,7 @@
 // object so prompt edits diff cleanly in git. Round-trips via import-bot-def.mjs.
 //
 // Usage: node scripts/export-bot-def.mjs <bot_id>
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";

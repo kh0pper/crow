@@ -57,7 +57,7 @@ function loadModelsFromFile() {
 
 async function loadModelsFromDb() {
   try {
-    const { default: Database } = await import("/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js");
+    const { default: Database } = await import("better-sqlite3");
     const CROW_DB = botsDbPath();
     const d = new Database(CROW_DB);
     d.pragma("busy_timeout = 10000");
@@ -162,7 +162,7 @@ if (import.meta.url === "file://" + process.argv[1]) {
   }
   const botId = a[1];
   const escalate = a.includes("--escalate");
-  const { default: Database } = await import("/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js");
+  const { default: Database } = await import("better-sqlite3");
   const CROW_DB = botsDbPath();
   const d = new Database(CROW_DB);
   d.pragma("busy_timeout = 10000");

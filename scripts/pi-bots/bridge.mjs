@@ -18,7 +18,7 @@
  * work content. crow.db opened with busy_timeout only, NO journal_mode pragma;
  * pi spawned with CROW_JOURNAL_MODE=DELETE (memory crowdb-wal-flip-new-consumers).
  */
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, readFileSync, appendFileSync, existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";

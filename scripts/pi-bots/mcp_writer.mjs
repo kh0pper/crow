@@ -368,7 +368,7 @@ if (import.meta.url === "file://" + process.argv[1]) {
     });
   } else if (cmd === "write" && arg) {
     // load the bot def from crow.db
-    import("/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js").then((m) => {
+    import("better-sqlite3").then((m) => {
       const Database = m.default;
       const d = new Database(CROW_DB);
       d.pragma("busy_timeout = 10000");

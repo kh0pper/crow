@@ -20,7 +20,7 @@
  * crow.db opened with busy_timeout only, NO journal_mode pragma (established
  * pattern; pi is spawned by the bridge with CROW_JOURNAL_MODE=DELETE).
  */
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 import { hostAdapters, getAdapter, isHostManaged } from "./index.mjs";
 import { reapStalePi } from "../pi_lifecycle.mjs";
 import { botsDbPath } from "../instance-paths.mjs";

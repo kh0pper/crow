@@ -34,7 +34,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 import { ingestReplay } from "/home/kh0pp/crow/scripts/bots/sync_pir_responses.mjs";
 import * as A from "/home/kh0pp/crow/scripts/bench/pir-stage-assert.mjs";
 

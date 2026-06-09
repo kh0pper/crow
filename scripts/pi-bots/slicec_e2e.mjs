@@ -22,7 +22,7 @@
  *
  * No Gmail. crow.db untouched outside the namespaced rows. Local model only.
  */
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 import { mkdirSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { handleInbound } from "./bridge.mjs";
 import { resolveSkill } from "./skill_resolver.mjs";

@@ -25,7 +25,7 @@
  *  - MessageManager cache capped at 50 to bound memory
  *  - Graceful SIGTERM: destroy all clients
  */
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 import { Client, GatewayIntentBits, Partials, Options } from "discord.js";
 import { handleInbound } from "./bridge.mjs";
 // A1: shared gateway helpers (one definition, one test surface). These were

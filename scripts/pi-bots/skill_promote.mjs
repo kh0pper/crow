@@ -28,7 +28,7 @@
  * symlink | exists | protected | not-author | unknown-bot | write-failed |
  * db-failed. The caller maps these (operator → HTTP status; auto → downgrade).
  */
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, lstatSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";

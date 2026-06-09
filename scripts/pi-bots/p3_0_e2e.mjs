@@ -24,7 +24,7 @@
  * Usage: node scripts/pi-bots/p3_0_e2e.mjs            (setup→A→B→assert→teardown)
  *        node scripts/pi-bots/p3_0_e2e.mjs --keep     (skip teardown, for debug)
  */
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { handleInbound } from "./bridge.mjs";
 

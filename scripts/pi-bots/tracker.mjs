@@ -12,7 +12,7 @@
  *   "custom"    — tracker_defs + tracker_items in crow.db
  *   "none"      — no tracker context injected
  */
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 import { botsDbPath, tasksDbPath } from "./instance-paths.mjs";
 
 const HOME = "/home/kh0pp";

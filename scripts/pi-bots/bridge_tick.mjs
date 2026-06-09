@@ -13,7 +13,7 @@
  * skips until a NEWER user reply arrives. flock guards against overlap.
  * No Gmail filter/label needed (search-based); a label is a Phase-2 optim.
  */
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 import { execFile } from "node:child_process";
 import { openSync, closeSync, existsSync, statSync, unlinkSync } from "node:fs";
 import { handleInbound } from "./bridge.mjs";

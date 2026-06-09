@@ -36,7 +36,7 @@
 
 import crypto from "node:crypto";
 import fs from "node:fs";
-import Database from "/home/kh0pp/crow/node_modules/better-sqlite3/lib/index.js";
+import Database from "better-sqlite3";
 import { google } from "/home/kh0pp/crow/node_modules/googleapis/build/src/index.js";
 import { parseHTML } from "/home/kh0pp/crow/node_modules/linkedom/esm/index.js";
 
