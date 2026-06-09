@@ -12,7 +12,9 @@ The refoundation architecture states the modular unit is the **bundle = service 
 1. **Two drifted sources of truth.** Each bundle has a rich `bundles/<id>/manifest.json` (authoritative — e.g. jellyfin/plex/obsidian/trilium/nominatim/browser all declare `server` + `panel` + `skills`). But `registry/add-ons.json` is a **hand-maintained, stale, lossy copy**: its entries for those same bundles omit `server`/`skills`. There is **no generator** (only `scripts/sync-skills.js` exists, for the skills index). The handoff's framing of F4b as "backfill any bundle missing its MCP server/skills" is therefore largely a false alarm — most "missing" capabilities are *registry drift*, not bundle gaps.
 2. **No formal or enforced contract.** Manifest fields vary; the only doc (`docs/developers/bundles.md`) is stale and describes a docker-compose-with-`crow-gateway` model that no current bundle uses.
 3. **`type` is overloaded.** `type: "bundle"` covers both pure-docker services (jellyfin, minio, the `vllm-*`/`llamacpp-*` model servers — legitimately no MCP server/skills) and capability bundles (which should have them). Any contract must be *type-/surface-aware*, not a rigid per-type required-field table.
-4. **Concrete drift to resolve.** As of 2026-06-09: 94 bundle dirs vs 90 registry entries. Two registry entries point at non-existent dirs (`tasks`, `developer-kit`). Six dirs are unregistered: `campaigns` (tracked) plus five uncommitted WIP dirs (`capstone-tracker`, `fed-gov-data`, `knowledge-base-mcp`, `research-integration`, `texas-gov-data`) flagged "leave alone" at session start.
+4. **Concrete drift to resolve.** As of 2026-06-09: **94 bundle dirs, 93 manifests (research-integration has none), 89 git-tracked manifests, 90 registry entries.** Two registry entries point at non-existent dirs (`tasks`, `developer-kit`). Six dirs are unregistered: `campaigns` (tracked) plus five uncommitted WIP dirs (`capstone-tracker`, `fed-gov-data`, `knowledge-base-mcp`, `research-integration`, `texas-gov-data`) flagged "leave alone" at session start. Against the (revised) contract, exactly **one** tracked manifest has a genuine data bug: `browser` references a deleted skill `skills/ffff-filing.md` (the file was intentionally removed for PII in commit `709dfa7`); the fix is to drop the dangling reference, not restore the file.
+
+**Registry consumers** (must not regress when entries gain `server`/`skills`/`panel` fields or when orphans vanish): `servers/gateway/dashboard/panels/extensions.js` (renders install cards by iterating the registry — dropping a published bundle here is a user-facing regression, which is why the version/author relaxation matters), `servers/gateway/routes/bundles.js` (install-check + `resolvePanelPath` + `resolveManifestHost` trust lookup), and `servers/gateway/dashboard/panels/nest/html.js` (comment-only reference to icon strings — no runtime read). (Reviewer C4/C5.)
 
 ## Goals
 
@@ -43,11 +45,11 @@ A manifest declares the **surfaces** it provides by the presence of keys. The co
 |---|---|
 | `id` | string; **must equal the bundle directory name** |
 | `name` | non-empty string |
-| `version` | semver string (`x.y.z`, optionally with prerelease/build) |
 | `description` | non-empty string |
 | `type` | enum: `bundle` \| `mcp-server` \| `skill` |
-| `author` | non-empty string |
 | `category` | non-empty string |
+
+**Optional but shape-checked when present** (`version` semver `x.y.z`; `author` non-empty string). These are *not* required: 16 currently-published model/media bundles (`vllm-*`, `llamacpp-*`, `kokoro-tts`, `faster-whisper-server`, `calls`, …) legitimately ship without a `version`/`author`, and requiring them would either drop those bundles from the install catalog or force fabricated version numbers (forbidden by the no-fake-data rule). Decision: keep both optional. (Reviewer C1/C2.)
 
 **Surfaces** (each validated only if its key is present), checked against the bundle dir:
 
@@ -55,8 +57,8 @@ A manifest declares the **surfaces** it provides by the presence of keys. The co
 |---|---|---|
 | `docker` | `{ composefile: string }` | `composefile` resolves to an existing file under the bundle dir |
 | `ports` / `port` / `webUI.port` | integers (`ports` is an int array) | each is a positive integer ≤ 65535 |
-| `server` | `{ command: string, args: string[], envKeys?: string[] }` | the entry file `args[0]` (resolved relative to the bundle dir) exists; `envKeys` entries are strings |
-| `panel` | string (`.js` path) | file exists under the bundle dir |
+| `server` | `{ command: string, args?: string[], envKeys?: string[] }` **or `null`** | entry-file existence is checked **only when `command === "node"` and `args[0]` is a path (not a flag)** — external-command MCP servers (`npx -y hass-mcp`, `uv …`) have no local entry file (reviewer C1: home-assistant, obsidian). `server: null` is tolerated (reviewer C1: matrix-bridges). |
+| `panel` | **string OR object** | string form: the `.js` file exists. **Object form** (`{ id, name, extends, … }`) is runtime-supported by `resolvePanelPath` (`servers/gateway/routes/bundles.js`) and is **shape-checked only, no file check** (resolution + `extends` are runtime concerns) — reviewer C1: data-dashboard, nominatim. |
 | `panelRoutes` | string (`.js` path) | file exists under the bundle dir |
 | `skills` | `string[]` | every path resolves to an existing file under the bundle dir |
 | `requires.bundles` | `string[]` | each id exists as a `bundles/<id>` directory |
@@ -150,7 +152,16 @@ A manifest declares the **surfaces** it provides by the presence of keys. The co
 - **Sweeping WIP into the committed registry** → untracked = implicit-draft rule + explicit per-dir reporting; WIP files untouched.
 - **Lossy verbatim copy** → field-union analysis confirmed `official` is the only registry-only field; injected by the generator. Re-verify at build time before committing the regenerated registry.
 - **Adding a dependency** → `ajv` (+`ajv-formats` if needed) approved 2026-06-09; added as a devDependency, used only by the build/test tooling (not shipped into the gateway runtime).
-- **Non-deterministic diffs** → entries sorted by `id`; stable JSON formatting (2-space, trailing newline) matching the existing file style.
+- **Non-deterministic diffs** → entries sorted by `id`; `JSON.stringify` is deterministic (insertion key order, literal UTF-8) across Node 20/22, so the no-drift test is machine-independent. The **first** regeneration is a one-time normalization (the hand-maintained file mixes literal `—` and `—`; the generator emits literal UTF-8 throughout) — review that commit's diff as normalization + the semantic gains (thin entries regaining `server`/`skills`), then it is byte-stable.
+
+## Reviewer-driven revisions (2026-06-09)
+
+A staff-engineer plan review (REJECT → addressed) corrected the original contract, which would have dropped 17 published bundles and rejected several valid manifests:
+- `version`/`author` made optional (C2) — see universal-fields note above.
+- `panel` accepts string **or** object; object form is file-check-exempt (C1).
+- `server` entry-file check gated on `command === "node"` + non-flag `args[0]`; `server: null` tolerated (C1).
+- Counts corrected (C); determinism risk was misframed and is dropped (the original spec worried about `\uXXXX` escaping — `JSON.stringify` never emits it).
+- The audit/no-drift integration gate **lands green in the same step as its fixes** — the plan never commits a known-failing test into the shared tree (reviewer's ordering note). Net genuine data fix: one (`browser`).
 
 ## Resolved decisions (2026-06-09)
 
