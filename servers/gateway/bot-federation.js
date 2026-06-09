@@ -13,7 +13,9 @@
 const REDACT = (v) => ({ __redacted: true, set: v != null && v !== "" });
 
 // Secret keys inside a gateway object.
-const GATEWAY_SECRET_KEYS = new Set(["token", "bot_token", "app_token", "password", "secret"]);
+export const GATEWAY_SECRET_KEYS = new Set(["token", "bot_token", "app_token", "password", "secret"]);
+// Path segments that must never appear in a patch path (prototype-pollution guard).
+const FORBIDDEN_SEGMENTS = new Set(["__proto__", "prototype", "constructor"]);
 // Secret-looking spawn_env keys.
 const ENV_SECRET_RE = /(TOKEN|KEY|SECRET|PASSWORD|CRED)/i;
 
@@ -59,6 +61,7 @@ export const PATCHABLE_FIELDS = [
 ];
 
 function isPatchable(path) {
+  if (path.split(".").some((p) => FORBIDDEN_SEGMENTS.has(p))) return false;
   for (const allowed of PATCHABLE_FIELDS) {
     if (allowed === path) return true;
     if (allowed.endsWith(".*")) {
@@ -71,6 +74,7 @@ function isPatchable(path) {
 
 function setByPath(obj, path, value) {
   const parts = path.split(".");
+  if (parts.some((p) => FORBIDDEN_SEGMENTS.has(p))) throw new Error("forbidden path segment: " + path);
   let cur = obj;
   for (let i = 0; i < parts.length - 1; i++) {
     if (cur[parts[i]] == null || typeof cur[parts[i]] !== "object") cur[parts[i]] = {};
