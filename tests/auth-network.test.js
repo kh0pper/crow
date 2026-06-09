@@ -153,6 +153,19 @@ test("isAllowedNetwork: SSO accept on a tailnet IP is still rejected over Funnel
   );
 });
 
+test("rejectFunneled middleware: bot-federation endpoints are never funnel-exposed", async () => {
+  const server = await startTestApp();
+  try {
+    const port = server.address().port;
+    for (const path of ["/dashboard/bot-federation/def/x", "/dashboard/bot-federation/patch/x", "/dashboard/bot-federation/enabled/x"]) {
+      const r = await request(port, path, { "tailscale-funnel-request": "?1" });
+      assert.equal(r.status, 403, `expected 403 on ${path}, got ${r.status}`);
+    }
+  } finally {
+    server.close();
+  }
+});
+
 test("rejectFunneled middleware: public paths pass with Funnel header", async () => {
   const server = await startTestApp();
   try {

@@ -629,6 +629,7 @@ const translations = {
   "settings.section.ports": { en: "Ports", es: "Puertos" },
   "settings.section.remoteExposure": { en: "Remote Tool Exposure", es: "Exposición de herramientas remotas" },
   "settings.section.remoteInvocation": { en: "Remote Tool Invocation", es: "Invocación de herramientas remotas" },
+  "settings.section.remoteBotManagement": { en: "Remote Bot Management", es: "Gestión remota de bots" },
   "settings.section.botRuntime": { en: "Bot Runtime", es: "Ejecución de bots" },
   "settings.ports.description": { en: "Host ports used by installed bundles and core services, with live status. Read-only.", es: "Puertos del host usados por los paquetes instalados y los servicios principales, con estado en vivo. Solo lectura." },
   "settings.section.llm": { en: "LLM Orchestrator", es: "Orquestador LLM" },
