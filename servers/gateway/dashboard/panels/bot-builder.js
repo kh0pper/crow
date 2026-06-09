@@ -28,7 +28,6 @@ import {
   readCanonicalMcp,
   probeServerTools,
   serversForBot,
-  writeBotMcp,
 } from "../../../../scripts/pi-bots/mcp_writer.mjs";
 import {
   PI_EXT_ALLOWLIST,
@@ -57,6 +56,7 @@ import { getPeerCapabilities } from "../capabilities-cache.js";
 import { getTrustedInstances } from "./nest/data-queries.js";
 import { getOrCreateLocalInstanceId } from "../../instance-registry.js";
 import { readSetting } from "../settings/registry.js";
+import { regenerateBotMcp } from "./bot-mcp-regen.js";
 
 const TASKS_DB = tasksDbPath();
 // Skill dirs are resolved per-instance by skill_resolver.skillDirs() (A6):
@@ -676,25 +676,7 @@ export default {
         const botId = b.bot_id;
         let msg;
         try {
-          // M3b: also fetch project_id so we can resolve the actual sessionDir
-          // (workspace path) the bridge will use; the .mcp.json must live next
-          // to where pi runs, not at the legacy def.session_dir.
-          const row = (await db.execute({
-            sql: "SELECT definition, project_id FROM pi_bot_defs WHERE bot_id=?",
-            args: [botId],
-          })).rows[0];
-          const def = JSON.parse(row.definition || "{}");
-          let sessionDir = def.session_dir;
-          if (row.project_id != null) {
-            const ws = (await db.execute({
-              sql: "SELECT workspace_dir FROM project_spaces WHERE id=?",
-              args: [row.project_id],
-            })).rows[0];
-            if (ws && ws.workspace_dir) {
-              sessionDir = ws.workspace_dir + "/bots/" + botId;
-            }
-          }
-          const r = writeBotMcp(def, { sessionDir, crowHome: resolveCrowHome() });
+          const r = await regenerateBotMcp(db, botId);
           msg = `wrote ${r.path} (servers: ${r.servers.join(", ") || "none"}` +
             (r.minted && r.minted.length ? `; minted: ${r.minted.join(",")}` : "") +
             (r.warnings.length ? `; ⚠ ${r.warnings.join("; ")}` : "") +
