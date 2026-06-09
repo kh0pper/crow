@@ -7,15 +7,10 @@
  * Runners use better-sqlite3 (sync). The async panel reader
  * (bot-runtime-flag.js botRuntimeActive) mirrors this same resolve rule;
  * they're intentionally kept as two tiny readers (no cross-layer/async-sync
- * coupling) — the future mpa-detect.js dedup unifies isMpaHost.
+ * coupling). isMpaHost is now shared via mpa-detect.js.
  */
 import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
-
-/** Mirror of bot-runtime-flag.js isMpaHost() — auto-detect the MPA host. */
-function isMpaHost() {
-  const probe = `${process.env.CROW_HOME || ""}|${process.env.CROW_DATA_DIR || ""}`;
-  return /\.crow-mpa(\/|\b|$)/.test(probe);
-}
+import { isMpaHost } from "../../servers/shared/mpa-detect.js";
 
 /** Resolve the rule from a parsed feature_flags object (shared with the panel). */
 function resolveBotRuntime(flags) {
