@@ -72,3 +72,15 @@ test("exposes setting key + flag name constants", () => {
   assert.equal(MANAGED_BOTS_SETTING_KEY, "remote_managed_bots");
   assert.equal(REMOTE_BOT_MGMT_FLAG, "remote_bot_management");
 });
+
+test("truthy-but-not-true flag value does NOT enable (guards === true strictness)", async () => {
+  for (const v of ["true", 1, "1", {}]) {
+    const db = dbWith({
+      feature_flags: JSON.stringify({ remote_bot_management: v }),
+      remote_managed_bots: JSON.stringify(["scout"]),
+    });
+    assert.equal(await remoteBotManagementEnabled(db), false);
+    assert.equal((await getPeerManagedBots(db)).size, 0);
+    assert.equal(await botPeerManageable(db, "scout"), false);
+  }
+});
