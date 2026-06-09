@@ -17,6 +17,10 @@ test("service units are instance-portable (no hardcoded ~/.crow-mpa, use Environ
     assert.ok(!/\.crow-mpa/.test(s), `${u} hardcodes ~/.crow-mpa`);
     assert.ok(/EnvironmentFile=\/etc\/crow\/pibot-%i\.env/.test(s), `${u} missing per-instance EnvironmentFile`);
     assert.ok(!/After=.*crow-mpa-gateway/.test(s), `${u} still depends on crow-mpa-gateway`);
+    // node must resolve via the per-host EnvironmentFile PATH (portable across
+    // hosts whose node lives at different paths/versions), NOT a hardcoded nvm path.
+    assert.ok(/ExecStart=\/usr\/bin\/env node /.test(s), `${u} ExecStart should use /usr/bin/env node, not a hardcoded node path`);
+    assert.ok(!/\.nvm\/versions\/node/.test(s), `${u} hardcodes an nvm node path (not portable)`);
   }
 });
 

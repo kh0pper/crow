@@ -9,7 +9,22 @@ NAME="${1:?usage: install-runtime.sh <instance-name> [CROW_HOME]}"
 CROW_HOME="${2:-$HOME/.crow}"
 DATA_DIR="$CROW_HOME/data"
 DB_PATH="$DATA_DIR/crow.db"
-NODE_BIN="$HOME/.nvm/versions/node/v20.20.2/bin"
+# Node bin dir for this host's PATH. Defaults to the node currently in PATH
+# (run the installer as the user who owns this host's node_modules so the
+# native-module ABI matches), overridable via CROW_NODE_BIN; falls back to
+# probing common locations. The units invoke `/usr/bin/env node`, so this PATH
+# is what selects the node binary per host (crow nvm v20, grackle /usr/bin v22).
+NODE_BIN="${CROW_NODE_BIN:-}"
+if [ -z "$NODE_BIN" ]; then
+  _n="$(command -v node 2>/dev/null || true)"
+  if [ -z "$_n" ]; then
+    for _c in "$HOME"/.nvm/versions/node/*/bin/node /usr/local/bin/node /usr/bin/node; do
+      [ -x "$_c" ] && { _n="$_c"; break; }
+    done
+  fi
+  NODE_BIN="$(dirname "$_n" 2>/dev/null || true)"
+fi
+[ -x "$NODE_BIN/node" ] || { echo "ERROR: node not found (set CROW_NODE_BIN to its bin dir)" >&2; exit 1; }
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 UNIT_SRC="$REPO/scripts/pi-bots/systemd"
 ENV_FILE="/etc/crow/pibot-$NAME.env"
