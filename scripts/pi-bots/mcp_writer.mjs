@@ -202,10 +202,14 @@ export function writeBotMcp(def, opts = {}) {
   if (opts.remoteEnabled) {
     const node = opts.node || process.execPath;
     const proxyPath = opts.proxyPath || join(import.meta.dirname, "crow-remote-proxy.mjs");
+    // Pin the spawned proxy to THIS instance's peer-tokens.json (peer-credentials.js
+    // hardcodes ~/.crow otherwise — wrong for ~/.crow-mpa where the bot runtime lives).
+    const peerTokensPath = opts.peerTokensPath || join(crowHome, "peer-tokens.json");
     const { blocks, warnings } = mintRemoteBlocks(def, {
       peerGatewayUrls: opts.peerGatewayUrls || {},
       proxyPath,
       node,
+      peerTokensPath,
     });
     remoteWarnings = warnings;
     for (const [name, block] of Object.entries(blocks)) built.json.mcpServers[name] = block;
