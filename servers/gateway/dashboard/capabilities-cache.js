@@ -48,6 +48,7 @@ function vBot(b) {
     tracker_type: str(b.tracker_type) || "none",
     model: b.model == null ? null : str(b.model),
     tool_count: num(b.tool_count) ?? 0,
+    peer_manageable: !!b.peer_manageable,
   };
 }
 
