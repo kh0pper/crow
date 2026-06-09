@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { redactDefForPeer, applyPeerPatch, PATCHABLE_FIELDS } from "../servers/gateway/bot-federation.js";
+import { redactDefForPeer, applyPeerPatch, PATCHABLE_FIELDS, GATEWAY_SECRET_KEYS } from "../servers/gateway/bot-federation.js";
+import gateways from "../scripts/pi-bots/gateways/index.mjs";
 
 function sampleDef() {
   return {
@@ -86,5 +87,30 @@ test("applyPeerPatch: does not mutate the input def", () => {
 test("PATCHABLE_FIELDS includes the locked non-secret edit surface only", () => {
   for (const f of ["display_name", "system_prompt", "models.default", "tools.skills", "tools.crow_mcp", "permission_policy.external_send", "triggers.cron", "enabled"]) {
     assert.ok(PATCHABLE_FIELDS.some((p) => p === f || (p.endsWith(".*") && f.startsWith(p.slice(0, -1)))), `missing ${f}`);
+  }
+});
+
+test("applyPeerPatch: rejects prototype-pollution paths and does NOT pollute", () => {
+  for (const bad of ["permission_policy.__proto__.polluted", "models.__proto__.evil", "tracker_config.constructor.x", "triggers.prototype.y"]) {
+    assert.throws(() => applyPeerPatch({}, { [bad]: "yes" }), /not patchable/i, `should reject ${bad}`);
+  }
+  assert.equal(({}).polluted, undefined);
+  assert.equal(({}).evil, undefined);
+});
+
+test("applyPeerPatch: rejects a bare parent and near-miss siblings", () => {
+  assert.throws(() => applyPeerPatch({}, { "models": {} }), /not patchable/i);
+  assert.throws(() => applyPeerPatch({}, { "triggersX": 1 }), /not patchable/i);
+  assert.throws(() => applyPeerPatch({}, { "models_evil": 1 }), /not patchable/i);
+});
+
+test("redaction covers every secret gateway field declared in the registry (drift guard)", () => {
+  const registrySecrets = new Set();
+  for (const cap of gateways.capabilitiesForUI()) {
+    for (const f of (cap.configFields || [])) if (f.secret) registrySecrets.add(f.key);
+  }
+  assert.ok(registrySecrets.size > 0, "expected the registry to declare at least one secret field");
+  for (const k of registrySecrets) {
+    assert.ok(GATEWAY_SECRET_KEYS.has(k), `registry secret field "${k}" not in GATEWAY_SECRET_KEYS — redaction would leak it`);
   }
 });
