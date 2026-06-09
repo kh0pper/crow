@@ -19,6 +19,7 @@ import { openSync, closeSync, existsSync, statSync, unlinkSync } from "node:fs";
 import { handleInbound } from "./bridge.mjs";
 import { reapStalePi } from "./pi_lifecycle.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
+import { botRuntimeEnabledSync } from "./runtime-gate.mjs";
 
 const HOME = "/home/kh0pp";
 const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
@@ -52,6 +53,14 @@ function acquireLock() {
 
 (async () => {
   if (!acquireLock()) { console.log("[tick] another tick holds the lock — skip"); process.exit(0); }
+  // F3b: respect the per-instance runtime toggle. Timer keeps firing; when the
+  // operator has bot_runtime off, the tick is a no-op (release lock + exit).
+  {
+    const _g = db();
+    let on = false;
+    try { on = botRuntimeEnabledSync(_g); } finally { _g.close(); }
+    if (!on) { try { unlinkSync(LOCK); } catch {} console.log("[tick] bot_runtime off — skip"); process.exit(0); }
+  }
   // Pre-flight: reap any abandoned/stuck/runaway pi from a previously crashed
   // tick before doing more work (plan §10 risk #4). Runs every ~1 min via the
   // existing timer — no extra systemd unit. The pure-bash backstop in

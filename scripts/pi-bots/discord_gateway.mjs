@@ -32,6 +32,7 @@ import { handleInbound } from "./bridge.mjs";
 // extracted verbatim from this file, so importing them is behavior-preserving.
 import { chunkedSend, downloadImages, passesAllowlist, SerialQueue, typingHeartbeat } from "./gateways/base.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
+import { runtimeGate } from "./runtime-gate.mjs";
 
 const HOME = "/home/kh0pp";
 const CROW_DB = botsDbPath();
@@ -197,8 +198,20 @@ function startBot(bot) {
   clients.push(client);
 }
 
+function startAllDiscord() {
+  const bots = loadDiscordBots();
+  if (!bots.length) { log("no enabled bots with a discord gateway — idle"); return; }
+  log("starting " + bots.length + " discord bot(s): " + bots.map((b) => b.bot_id).join(", "));
+  for (const b of bots) startBot(b);
+}
+function stopAllDiscord() {
+  for (const c of clients.splice(0)) { try { c.destroy(); } catch {} }
+}
+
+let _gate = null;
 function shutdown() {
   log("SIGTERM — destroying " + clients.length + " client(s)");
+  if (_gate) { try { _gate.dispose(); } catch {} }
   for (const c of clients) { try { c.destroy(); } catch {} }
   process.exit(0);
 }
@@ -206,14 +219,6 @@ process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
 (function main() {
-  const bots = loadDiscordBots();
-  if (!bots.length) {
-    log("no enabled bots with a discord gateway — idle (service stays up; restart after adding one)");
-    // Stay alive so systemd doesn't flap on Restart=on-failure; a config change
-    // + service restart picks up new bots (Phase 1 hot-reload = restart).
-    setInterval(() => {}, 1 << 30);
-    return;
-  }
-  log("starting " + bots.length + " discord bot(s): " + bots.map((b) => b.bot_id).join(", "));
-  for (const b of bots) startBot(b);
+  _gate = runtimeGate(db(), { start: () => { startAllDiscord(); }, stop: () => { stopAllDiscord(); }, logTag: "discord" });
+  setInterval(() => {}, 1 << 30);
 })();
