@@ -569,7 +569,8 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     if (!req.headers["x-crow-signature"]) return next();
     // /dashboard/overview → federationRouter (Phase 1)
     // /dashboard/capabilities → federationRouter (F4a Layer 1)
-    if (federationRouter && (req.path === "/overview" || req.path === "/capabilities")) {
+    // /dashboard/bot-federation/* → federationRouter (F4a Layer 3, parameterized paths)
+    if (federationRouter && (req.path === "/overview" || req.path === "/capabilities" || req.path.startsWith("/bot-federation/"))) {
       return federationRouter(req, res, next);
     }
     // Everything else (bundles) → bundlesRouter (existing behavior)
