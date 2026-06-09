@@ -101,3 +101,37 @@ test("POST enabled: not manageable → 403", async () => {
   await h.setEnabled({ params: { botId: "scout" }, headers: {}, body: { enabled: 0 } }, res);
   assert.equal(res._status, 403);
 });
+
+test("patch success is audited as federation.bot.patch with httpStatus 200", async () => {
+  const db = makeDb({ manageable: ["scout"], def: sampleDef() });
+  const calls = [];
+  const h = makeBotFederationHandlers({ db, regenerateBotMcp: async () => ({}), auditFn: async (_db, row) => { calls.push(row); } });
+  await h.patch({ params: { botId: "scout" }, headers: { "x-crow-source": "peerX" }, body: { patch: { "system_prompt": "n" } } }, makeRes());
+  const row = calls.find((c) => c.action === "federation.bot.patch");
+  assert.ok(row, "expected a federation.bot.patch audit row");
+  assert.equal(row.direction, "inbound");
+  assert.equal(row.bundleId, "scout");
+  assert.equal(row.httpStatus, 200);
+  assert.equal(row.sourceInstanceId, "peerX");
+});
+
+test("patch denial (not manageable) is audited with httpStatus 403", async () => {
+  const db = makeDb({ manageable: [], def: sampleDef() });
+  const calls = [];
+  const h = makeBotFederationHandlers({ db, regenerateBotMcp: async () => ({}), auditFn: async (_db, row) => { calls.push(row); } });
+  await h.patch({ params: { botId: "scout" }, headers: { "x-crow-source": "peerX" }, body: { patch: { "system_prompt": "n" } } }, makeRes());
+  const row = calls.find((c) => c.action === "federation.bot.patch");
+  assert.ok(row);
+  assert.equal(row.httpStatus, 403);
+  assert.equal(row.error, "not_manageable");
+});
+
+test("setEnabled success is audited as federation.bot.enabled", async () => {
+  const db = makeDb({ manageable: ["scout"], def: sampleDef() });
+  const calls = [];
+  const h = makeBotFederationHandlers({ db, regenerateBotMcp: async () => ({}), auditFn: async (_db, row) => { calls.push(row); } });
+  await h.setEnabled({ params: { botId: "scout" }, headers: { "x-crow-source": "peerX" }, body: { enabled: 0 } }, makeRes());
+  const row = calls.find((c) => c.action === "federation.bot.enabled");
+  assert.ok(row);
+  assert.equal(row.httpStatus, 200);
+});
