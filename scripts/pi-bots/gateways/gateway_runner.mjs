@@ -24,6 +24,7 @@ import Database from "better-sqlite3";
 import { hostAdapters, getAdapter, isHostManaged } from "./index.mjs";
 import { reapStalePi } from "../pi_lifecycle.mjs";
 import { botsDbPath } from "../instance-paths.mjs";
+import { runtimeGate } from "../runtime-gate.mjs";
 
 const CROW_DB = botsDbPath();
 const REAP_INTERVAL_MS = Number(process.env.PIBOT_REAP_INTERVAL_MS || 60000);
@@ -52,6 +53,7 @@ function loadGatewayJobs() {
 
 const handles = [];   // { stop } for each started adapter
 let reaper = null;
+let _gate = null;
 
 async function startAll() {
   const jobs = loadGatewayJobs();
@@ -80,6 +82,10 @@ async function startAll() {
   log("started " + handles.length + " gateway adapter(s) across " + jobs.length + " configured entr(y/ies)");
 }
 
+async function stopAdapters() {
+  for (const h of handles.splice(0)) { try { await h.stop(); } catch {} }
+}
+
 function startReaper() {
   const sweep = () => {
     try {
@@ -93,7 +99,8 @@ function startReaper() {
 }
 
 async function shutdown() {
-  log("SIGTERM — stopping " + handles.length + " adapter(s)");
+  log("SIGTERM — stopping");
+  if (_gate) { try { _gate.dispose(); } catch {} }
   if (reaper) { clearInterval(reaper); reaper = null; }
   for (const h of handles) { try { await h.stop(); } catch {} }
   process.exit(0);
@@ -101,9 +108,10 @@ async function shutdown() {
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
-(async function main() {
+(function main() {
   startReaper();
-  await startAll();
-  // Stay alive even with zero adapters so systemd doesn't flap on Restart.
-  setInterval(() => {}, 1 << 30);
+  // F3b: self-gate on feature_flags.bot_runtime — start/stop adapters on the
+  // toggle without a restart. Off = idle (service up, no adapters connected).
+  _gate = runtimeGate(db(), { start: () => { startAll(); }, stop: () => { stopAdapters(); }, logTag: "gateways" });
+  setInterval(() => {}, 1 << 30); // keep the process alive across idle periods
 })();
