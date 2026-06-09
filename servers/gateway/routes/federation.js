@@ -51,6 +51,7 @@ import { getLocalCatalog } from "../capability-registry.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { botFederationRouter } from "./bot-federation-routes.js";
 
 const OVERVIEW_ACTION = "federation.overview";
 
@@ -300,6 +301,10 @@ export default function federationRouter({ createDbClient }) {
       db.close();
     }
   });
+
+  // F4a Layer 3: cross-instance bot edit/run. Same HMAC gate; gate-checked per
+  // request by botPeerManageable. Under /dashboard → Funnel-blocked.
+  router.use("/", botFederationRouter({ createDbClient, verifyMiddleware: federationVerifyMiddleware(dbForAudit) }));
 
   return router;
 }
