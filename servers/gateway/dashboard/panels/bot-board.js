@@ -540,7 +540,8 @@ export default {
                 `<input type="hidden" name="bot_id" value="${escapeHtml(String(b.bot_id || ""))}">` +
                 `<input type="hidden" name="enabled" value="${b.enabled ? 0 : 1}">` +
                 `<button type="submit" class="bb-btn bb-sec" style="margin:0;font-size:.72rem;padding:.2rem .6rem">${b.enabled ? "Disable" : "Enable"}</button>` +
-                `</form>`
+                `</form>` +
+                ` <a class="bb-btn bb-sec" style="margin:0;font-size:.72rem;padding:.2rem .6rem" href="/dashboard/bot-builder?peer=${encodeURIComponent(b.instanceId)}&bot=${encodeURIComponent(b.bot_id)}">Edit</a>`
               : `<span style="font-size:.72rem;color:var(--crow-text-muted)">read-only — open on owner</span>`}</td></tr>`
           ).join("") +
           `</tbody></table><p class="bb-msg">Manageable bots can be enabled/disabled from here. Others are read-only — open that instance's dashboard to edit or run them.</p>`);
