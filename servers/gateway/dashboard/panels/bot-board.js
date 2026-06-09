@@ -30,6 +30,7 @@ import { tasksDbPath } from "../../../../scripts/pi-bots/instance-paths.mjs";
 import { getPeerCapabilities } from "../capabilities-cache.js";
 import { getTrustedInstances } from "./nest/data-queries.js";
 import { getOrCreateLocalInstanceId } from "../../instance-registry.js";
+import { setPeerBotEnabled } from "../../bot-federation-client.js";
 
 const TASKS_DB = tasksDbPath();
 
@@ -405,6 +406,17 @@ export default {
         return res.redirectAfterPost(`/dashboard/bot-board${botQ}`);
       }
 
+      // ---- F4a L3: remote enable/disable a manageable peer bot ----
+      if (b.action === "peer_toggle") {
+        const instanceId = b.instance_id, botId = b.bot_id;
+        const r = await setPeerBotEnabled({
+          db, sourceInstanceId: getOrCreateLocalInstanceId(), instanceId, botId,
+          enabled: b.enabled === "1" ? 1 : 0, actor: "dashboard",
+        });
+        const msg = r.ok ? "ok" : (r.error || (r.body && r.body.error) || "failed");
+        return res.redirectAfterPost(`/dashboard/bot-board?peer=${encodeURIComponent(msg)}`);
+      }
+
       // Fallback redirect for unknown POST actions
       const fallbackQ = b.bot ? `?bot=${encodeURIComponent(String(b.bot))}` : "";
       return res.redirectAfterPost(`/dashboard/bot-board${fallbackQ}`);
@@ -507,15 +519,32 @@ export default {
     // ---- No bot selected ----
     if (!selBot) {
       const peerBots = await gatherPeerBots(db);
+      const peerStatus = q.peer != null && q.peer !== ""
+        ? `<p class="bb-msg ${q.peer === "ok" ? "ok" : "err"}">${q.peer === "ok"
+            ? "✅ Peer bot updated."
+            : "⚠️ Peer bot update failed: " + escapeHtml(String(q.peer))}</p>`
+        : "";
       const peerBotsHtml = peerBots.length === 0 ? "" :
         section("Bots on other instances",
-          `<table class="bb-list-table"><thead><tr><th>Bot</th><th>Instance</th><th>Model</th></tr></thead><tbody>` +
+          peerStatus +
+          `<table class="bb-list-table"><thead><tr><th>Bot</th><th>Instance</th><th>Model</th><th>Status</th><th></th></tr></thead><tbody>` +
           peerBots.map((b) =>
             `<tr><td>${escapeHtml(b.display_name || b.bot_id)}</td>` +
             `<td>${escapeHtml(b.instanceName)}</td>` +
-            `<td>${escapeHtml(b.model || "—")}</td></tr>`
+            `<td>${escapeHtml(b.model || "—")}</td>` +
+            `<td>${b.enabled ? "enabled" : "disabled"}</td>` +
+            `<td>${b.peer_manageable
+              ? `<form method="POST" action="/dashboard/bot-board" style="display:inline">` +
+                `<input type="hidden" name="action" value="peer_toggle">` +
+                `<input type="hidden" name="instance_id" value="${escapeHtml(String(b.instanceId || ""))}">` +
+                `<input type="hidden" name="bot_id" value="${escapeHtml(String(b.bot_id || ""))}">` +
+                `<input type="hidden" name="enabled" value="${b.enabled ? 0 : 1}">` +
+                `<button type="submit" class="bb-btn bb-sec" style="margin:0;font-size:.72rem;padding:.2rem .6rem">${b.enabled ? "Disable" : "Enable"}</button>` +
+                `</form>` +
+                ` <a class="bb-btn bb-sec" style="margin:0;font-size:.72rem;padding:.2rem .6rem" href="/dashboard/bot-builder?peer=${encodeURIComponent(b.instanceId)}&bot=${encodeURIComponent(b.bot_id)}">Edit</a>`
+              : `<span style="font-size:.72rem;color:var(--crow-text-muted)">read-only — open on owner</span>`}</td></tr>`
           ).join("") +
-          `</tbody></table><p class="bb-msg">Read-only — these bots live on other instances. Open that instance's dashboard to edit or run them.</p>`);
+          `</tbody></table><p class="bb-msg">Manageable bots can be enabled/disabled from here. Others are read-only — open that instance's dashboard to edit or run them.</p>`);
       return layout({
         title: "Bot Board",
         content: PAGE_CSS + section("Bot Board",

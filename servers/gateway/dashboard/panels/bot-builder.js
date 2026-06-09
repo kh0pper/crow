@@ -28,7 +28,6 @@ import {
   readCanonicalMcp,
   probeServerTools,
   serversForBot,
-  writeBotMcp,
 } from "../../../../scripts/pi-bots/mcp_writer.mjs";
 import {
   PI_EXT_ALLOWLIST,
@@ -56,7 +55,9 @@ import { listProvidersAll } from "../../../orchestrator/providers-db.js";
 import { getPeerCapabilities } from "../capabilities-cache.js";
 import { getTrustedInstances } from "./nest/data-queries.js";
 import { getOrCreateLocalInstanceId } from "../../instance-registry.js";
-import { readSetting } from "../settings/registry.js";
+import { readSetting, writeSetting } from "../settings/registry.js";
+import { regenerateBotMcp } from "./bot-mcp-regen.js";
+import { fetchPeerBotDef, patchPeerBot } from "../../bot-federation-client.js";
 
 const TASKS_DB = tasksDbPath();
 // Skill dirs are resolved per-instance by skill_resolver.skillDirs() (A6):
@@ -373,6 +374,66 @@ export default {
   async handler(req, res, { db, layout }) {
     const notAvail = await tableMissing(db);
 
+    // ---- F4a L3: remote edit of a TRUSTED PEER's bot (?peer=<instanceId>&bot=<botId>) ----
+    // Additive, early-return branch: when ?peer= is absent this is skipped entirely and
+    // the normal local Bot Builder rendering below is untouched. The owner-side gate +
+    // applyPeerPatch allowlist are the security authority; this is only the editing UI.
+    {
+      const q = req.query || {};
+      const peerId = q.peer;
+      if (peerId) {
+        const b = req.body || {};
+        const botId = q.bot;
+        // POST: apply a field-scoped patch to the peer
+        if (req.method === "POST" && b.peer) {
+          const patch = {};
+          if (typeof b.display_name === "string") patch["display_name"] = b.display_name;
+          if (typeof b.system_prompt === "string") patch["system_prompt"] = b.system_prompt;
+          if (typeof b.model === "string" && b.model) patch["models.default"] = b.model;
+          if (typeof b.skills === "string") patch["tools.skills"] = lines(b.skills);
+          const r = await patchPeerBot({ db, sourceInstanceId: getOrCreateLocalInstanceId(), instanceId: peerId, botId, patch, actor: "dashboard" });
+          const msg = r.ok ? "saved" : ((r.body && r.body.error) || r.error || "failed");
+          return res.redirectAfterPost(`/dashboard/bot-builder?peer=${encodeURIComponent(peerId)}&bot=${encodeURIComponent(botId)}&status=${encodeURIComponent(msg)}`);
+        }
+        // GET: load the redacted def and render the bounded editor
+        const r = await fetchPeerBotDef({ db, sourceInstanceId: getOrCreateLocalInstanceId(), instanceId: peerId, botId, actor: "dashboard" });
+        if (!r.ok) {
+          return res.send(layout({ title: "Edit peer bot", content: section("Edit peer bot",
+            `<p>Could not reach the owner instance (${escapeHtml(String(r.error || "offline"))}). Try again later.</p>
+             <p><a href="/dashboard/bot-board">&larr; Back to Bot Board</a></p>`) }));
+        }
+        const def = (r.body && r.body.definition) || {};
+        const models = await loadModelOptions(db);
+        const status = q.status ? `<div class="muted" style="margin-bottom:1rem">Status: ${escapeHtml(String(q.status))}</div>` : "";
+        // disabled "•••• set" indicators for redacted gateway credentials
+        const credLines = [];
+        for (const gw of (Array.isArray(def.gateways) ? def.gateways : [])) {
+          for (const [k, v] of Object.entries(gw || {})) {
+            if (v && typeof v === "object" && v.__redacted) {
+              credLines.push(`<div class="muted">${escapeHtml(gw.type || "gateway")}.${escapeHtml(k)}: ${v.set ? "•••• set (edit on owner)" : "not set"}</div>`);
+            }
+          }
+        }
+        const modelOpts = (models.opts || []).map((o) =>
+          `<option value="${escapeHtml(o.key)}" ${def.models && def.models.default === o.key ? "selected" : ""}>${escapeHtml(o.label)}</option>`).join("");
+        const content = `
+          ${status}
+          <p class="muted">Editing <strong>${escapeHtml(botId)}</strong> on instance <strong>${escapeHtml(peerId)}</strong>. Non-secret fields only; this bot runs on its owner.</p>
+          <form method="POST">
+            <input type="hidden" name="peer" value="${escapeHtml(peerId)}">
+            <input type="hidden" name="bot_id" value="${escapeHtml(botId)}">
+            <label>Display name<br><input type="text" name="display_name" value="${escapeHtml(def.display_name || "")}" style="width:100%"></label>
+            <label style="display:block;margin-top:1rem">Model<br><select name="model" style="width:100%"><option value="">(unchanged)</option>${modelOpts}</select></label>
+            <label style="display:block;margin-top:1rem">System prompt<br><textarea name="system_prompt" rows="8" style="width:100%">${escapeHtml(def.system_prompt || "")}</textarea></label>
+            <label style="display:block;margin-top:1rem">Skills (one per line)<br><textarea name="skills" rows="4" style="width:100%">${escapeHtml(((def.tools && def.tools.skills) || []).join("\n"))}</textarea></label>
+            <div style="margin-top:1rem">${credLines.length ? "<strong>Gateway credentials (managed on owner):</strong>" + credLines.join("") : ""}</div>
+            <div style="margin-top:1.5rem"><button type="submit" class="btn btn-primary">Save to peer</button>
+              <a href="/dashboard/bot-board" class="btn btn-secondary">Cancel</a></div>
+          </form>`;
+        return res.send(layout({ title: "Edit peer bot", content: section(`Edit ${escapeHtml(botId)} @ ${escapeHtml(peerId)}`, content) }));
+      }
+    }
+
     // ---- POST ----
     if (req.method === "POST" && !notAvail) {
       const b = req.body || {};
@@ -405,6 +466,18 @@ export default {
           await db.execute({ sql: "UPDATE pi_bot_defs SET enabled = 1 - enabled, updated_at=datetime('now') WHERE bot_id=?", args: [b.bot_id] });
         } catch { /* ignore */ }
         return res.redirectAfterPost("/dashboard/bot-builder");
+      }
+
+      if (action === "toggle_peer_managed") {
+        const botId = (b.bot_id || "").trim();
+        const raw = await readSetting(db, "remote_managed_bots");
+        let list = [];
+        try { list = raw ? JSON.parse(raw) : []; } catch { list = []; }
+        if (!Array.isArray(list)) list = [];
+        const set = new Set(list.filter((x) => typeof x === "string" && x));
+        if (b.managed === "on") set.add(botId); else set.delete(botId);
+        await writeSetting(db, "remote_managed_bots", JSON.stringify([...set]), { scope: "local" });
+        return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=permissions`);
       }
 
       // tab saves — merge only that tab's fields into the existing definition
@@ -676,25 +749,7 @@ export default {
         const botId = b.bot_id;
         let msg;
         try {
-          // M3b: also fetch project_id so we can resolve the actual sessionDir
-          // (workspace path) the bridge will use; the .mcp.json must live next
-          // to where pi runs, not at the legacy def.session_dir.
-          const row = (await db.execute({
-            sql: "SELECT definition, project_id FROM pi_bot_defs WHERE bot_id=?",
-            args: [botId],
-          })).rows[0];
-          const def = JSON.parse(row.definition || "{}");
-          let sessionDir = def.session_dir;
-          if (row.project_id != null) {
-            const ws = (await db.execute({
-              sql: "SELECT workspace_dir FROM project_spaces WHERE id=?",
-              args: [row.project_id],
-            })).rows[0];
-            if (ws && ws.workspace_dir) {
-              sessionDir = ws.workspace_dir + "/bots/" + botId;
-            }
-          }
-          const r = writeBotMcp(def, { sessionDir, crowHome: resolveCrowHome() });
+          const r = await regenerateBotMcp(db, botId);
           msg = `wrote ${r.path} (servers: ${r.servers.join(", ") || "none"}` +
             (r.minted && r.minted.length ? `; minted: ${r.minted.join(",")}` : "") +
             (r.warnings.length ? `; ⚠ ${r.warnings.join("; ")}` : "") +
@@ -1380,6 +1435,9 @@ export default {
         const bashSel = (v) => (pp.bash || "deny") === v ? " selected" : "";
         const esSel = (v) => (pp.external_send || "draft_only") === v ? " selected" : "";
         const slSel = (v) => (pp.skill_learning || "off") === v ? " selected" : "";
+        const managedRaw = await readSetting(db, "remote_managed_bots");
+        let isManaged = false;
+        try { const a = JSON.parse(managedRaw || "[]"); if (Array.isArray(a)) isManaged = a.includes(botId); } catch {}
         body =
           `<form method="POST" class="btb-form">${hidden("permissions")}` +
           `<div class="btb-group"><label>bash</label>` +
@@ -1400,7 +1458,14 @@ export default {
           `<select name="pp_skill_learning" class="btb-select"><option${slSel("off")}>off</option><option${slSel("propose")}>propose</option><option${slSel("auto")}>auto</option></select></div>` +
           `<p class="btb-hint">After each turn, an idle-only, cheap-model review decides whether to write or improve a skill (Hermes-style). <strong>propose</strong> drafts into the staging dir for your approval (same flow as self-authoring, but auto-triggered). <strong>auto</strong> writes/patches directly, behind guardrails: guardrail-phrase drafts are blocked to a proposal; high-blast-radius bots (open <code>external_send</code>, non-<code>deny</code> bash, or multi-agent) silently degrade to propose; a bot may only patch skills it itself auto-authored, never operator- or repo-authored ones. Runs ONLY when no pi turn is live, so it never starves real turns. Off by default. Auto-written skills appear under <strong>Skills &amp; Prompt</strong>.</p>` +
           `<p class="btb-hint">Enforced by pi-lab/permission-gating.ts via PI_BOT_PERMISSION_POLICY (Phase 2.2). Default-deny for safety.</p>` +
-          actionBar(`<button type="submit" class="btb-btn">Save Permissions</button>`) + `</form>`;
+          actionBar(`<button type="submit" class="btb-btn">Save Permissions</button>`) + `</form>` +
+          `<form method="POST" style="margin-top:1rem">` +
+          `<input type="hidden" name="action" value="toggle_peer_managed">` +
+          `<input type="hidden" name="bot_id" value="${escapeHtml(botId)}">` +
+          `<label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer">` +
+          `<input type="checkbox" name="managed" ${isManaged ? "checked" : ""} onchange="this.form.submit()">` +
+          `<span>Manageable by trusted peers (cross-instance edit/run — requires the master toggle in Settings &rarr; Remote Bot Management)</span>` +
+          `</label></form>`;
       } else if (tabId === "triggers") {
         const tr = def.triggers || {};
         body =

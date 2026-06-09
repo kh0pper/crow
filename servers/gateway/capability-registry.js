@@ -10,6 +10,7 @@ import { listInstalledExtensions, voiceCategoryFor, resolveCrowHome } from "../.
 import { skillDirs } from "../../scripts/pi-bots/skill_resolver.mjs";
 import { readdirSync } from "node:fs";
 import { getExposedCapabilities } from "./peer-exposure.js";
+import { getPeerManagedBots } from "./bot-management-exposure.js";
 
 /** Canonical server id for a core manifest category (crow-memory, etc.). */
 export function canonicalForCategory(category) {
@@ -34,7 +35,7 @@ export function toPublicSkill(s) {
   return { name: typeof s === "string" ? s : s.name };
 }
 
-export function toPublicBot(row) {
+export function toPublicBot(row, managedSet) {
   let def = {};
   try { def = JSON.parse(row.definition || "{}"); } catch { def = {}; }
   const crowMcp = (def.tools && Array.isArray(def.tools.crow_mcp)) ? def.tools.crow_mcp : [];
@@ -46,6 +47,7 @@ export function toPublicBot(row) {
     tracker_type: (def.triggers && def.triggers.tracker_type) || "none",
     model: (def.models && def.models.default) || null,
     tool_count: crowMcp.length,
+    peer_manageable: managedSet instanceof Set ? managedSet.has(row.bot_id) : false,
   };
 }
 
@@ -103,8 +105,9 @@ async function localBots(db) {
  */
 export async function getLocalCatalog(db, { crowHome = resolveCrowHome(), instanceId = null, instanceName = null } = {}) {
   const exposedSet = await getExposedCapabilities(db);
+  const managedSet = await getPeerManagedBots(db);
   const tools = [...coreTools(), ...addonTools(crowHome)].map((e) => toPublicTool(e, exposedSet));
   const skills = localSkills(crowHome).map(toPublicSkill);
-  const bots = (await localBots(db)).map(toPublicBot);
+  const bots = (await localBots(db)).map((r) => toPublicBot(r, managedSet));
   return { instanceId, instanceName, tools, skills, bots };
 }
