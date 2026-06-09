@@ -70,9 +70,9 @@ A manifest declares the **surfaces** it provides by the presence of keys. The co
 **Artifacts:**
 
 - `registry/manifest.schema.json` — JSON Schema (Draft 2020-12) covering field shapes. Shape-only; it cannot express filesystem existence.
-- `scripts/lib/bundle-contract.mjs` — exports `validateManifest(manifest, bundleDir) → { ok: boolean, errors: string[] }`. Performs (a) JSON Schema validation of shape, and (b) programmatic referential-integrity checks (file existence, `id == dirname`, dependency-dir existence). This is the **single source of validation logic**, imported by both the generator and the test. Also exports a small `detectSurfaces(manifest) → string[]` helper for the audit table.
+- `scripts/lib/bundle-contract.mjs` — exports `validateManifest(manifest, bundleDir) → { ok: boolean, errors: string[] }`. Performs (a) JSON Schema validation of shape via **ajv** against `manifest.schema.json`, and (b) programmatic referential-integrity checks (file existence, `id == dirname`, dependency-dir existence). This is the **single source of validation logic**, imported by both the generator and the test. Also exports a small `detectSurfaces(manifest) → string[]` helper for the audit table.
 
-> JSON Schema validation uses a dependency-free approach. The repo has no JSON-schema validator dependency today; rather than add `ajv` (which requires asking permission per the global package-install rule), the validator implements the small set of shape checks directly in `bundle-contract.mjs` and treats `manifest.schema.json` as the human-readable spec of record. If the user prefers `ajv`-backed validation against the schema file, that is a one-line dependency decision to raise before build — the schema file is authored either way.
+> **Dependency (approved 2026-06-09):** add `ajv` (and `ajv-formats` if needed for the semver/format checks) as a devDependency. The schema file `manifest.schema.json` is the spec of record and ajv validates manifests against it, so the schema and the enforced rules cannot drift. Referential integrity (filesystem existence, `id == dirname`, dependency-dir existence) stays in code since JSON Schema cannot express it.
 
 ### 2. Validator + audit + test
 
@@ -123,7 +123,7 @@ A manifest declares the **surfaces** it provides by the presence of keys. The co
 | Unit | Purpose | Depends on | Consumers |
 |---|---|---|---|
 | `registry/manifest.schema.json` | Human-readable shape spec of record | — | doc readers, (optional) ajv |
-| `scripts/lib/bundle-contract.mjs` | Validate one manifest (shape + filesystem integrity); detect surfaces | `fs`, schema rules | generator, test |
+| `scripts/lib/bundle-contract.mjs` | Validate one manifest (shape + filesystem integrity); detect surfaces | `ajv` + `manifest.schema.json`, `fs` | generator, test |
 | `scripts/build-registry.mjs` | Scan + validate + (write \| `--check`) the registry | `bundle-contract.mjs`, git for tracked-status | `npm run build-registry`, test, humans |
 | `tests/bundle-contract.test.js` | Fail on invalid manifest or registry drift | `bundle-contract.mjs`, `build-registry.mjs` | `node --test` |
 | `registry/add-ons.json` | Generated install catalog (committed) | manifests | `extensions.js`, `bundles.js` |
@@ -149,10 +149,10 @@ A manifest declares the **surfaces** it provides by the presence of keys. The co
 
 - **Sweeping WIP into the committed registry** → untracked = implicit-draft rule + explicit per-dir reporting; WIP files untouched.
 - **Lossy verbatim copy** → field-union analysis confirmed `official` is the only registry-only field; injected by the generator. Re-verify at build time before committing the regenerated registry.
-- **Adding a dependency without permission** → validator is dependency-free by default; `ajv` adoption is raised as an explicit decision, not assumed.
+- **Adding a dependency** → `ajv` (+`ajv-formats` if needed) approved 2026-06-09; added as a devDependency, used only by the build/test tooling (not shipped into the gateway runtime).
 - **Non-deterministic diffs** → entries sorted by `id`; stable JSON formatting (2-space, trailing newline) matching the existing file style.
 
-## Open questions (resolve before/at build)
+## Resolved decisions (2026-06-09)
 
-1. **ajv vs hand-rolled validation** — default is dependency-free hand-rolled checks against the documented schema. Confirm, or approve adding `ajv`.
-2. **`draft`/WIP outcomes** — the five uncommitted WIP dirs and `campaigns` get reported with validation status during the backfill phase; the register/draft/leave decision is the user's at that point (not pre-decided here).
+1. **ajv approved** — validate manifests against `manifest.schema.json` with `ajv` (devDependency); referential integrity stays in code.
+2. **`draft`/WIP outcomes deferred to backfill** — the five uncommitted WIP dirs and `campaigns` are reported with validation status during the backfill phase; the register/draft/leave decision is the user's at that point (not pre-decided here).
