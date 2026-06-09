@@ -55,7 +55,7 @@ import { listProvidersAll } from "../../../orchestrator/providers-db.js";
 import { getPeerCapabilities } from "../capabilities-cache.js";
 import { getTrustedInstances } from "./nest/data-queries.js";
 import { getOrCreateLocalInstanceId } from "../../instance-registry.js";
-import { readSetting } from "../settings/registry.js";
+import { readSetting, writeSetting } from "../settings/registry.js";
 import { regenerateBotMcp } from "./bot-mcp-regen.js";
 
 const TASKS_DB = tasksDbPath();
@@ -405,6 +405,18 @@ export default {
           await db.execute({ sql: "UPDATE pi_bot_defs SET enabled = 1 - enabled, updated_at=datetime('now') WHERE bot_id=?", args: [b.bot_id] });
         } catch { /* ignore */ }
         return res.redirectAfterPost("/dashboard/bot-builder");
+      }
+
+      if (action === "toggle_peer_managed") {
+        const botId = (b.bot_id || "").trim();
+        const raw = await readSetting(db, "remote_managed_bots");
+        let list = [];
+        try { list = raw ? JSON.parse(raw) : []; } catch { list = []; }
+        if (!Array.isArray(list)) list = [];
+        const set = new Set(list.filter((x) => typeof x === "string" && x));
+        if (b.managed === "on") set.add(botId); else set.delete(botId);
+        await writeSetting(db, "remote_managed_bots", JSON.stringify([...set]), { scope: "local" });
+        return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=permissions`);
       }
 
       // tab saves — merge only that tab's fields into the existing definition
@@ -1362,6 +1374,9 @@ export default {
         const bashSel = (v) => (pp.bash || "deny") === v ? " selected" : "";
         const esSel = (v) => (pp.external_send || "draft_only") === v ? " selected" : "";
         const slSel = (v) => (pp.skill_learning || "off") === v ? " selected" : "";
+        const managedRaw = await readSetting(db, "remote_managed_bots");
+        let isManaged = false;
+        try { const a = JSON.parse(managedRaw || "[]"); if (Array.isArray(a)) isManaged = a.includes(botId); } catch {}
         body =
           `<form method="POST" class="btb-form">${hidden("permissions")}` +
           `<div class="btb-group"><label>bash</label>` +
@@ -1382,7 +1397,14 @@ export default {
           `<select name="pp_skill_learning" class="btb-select"><option${slSel("off")}>off</option><option${slSel("propose")}>propose</option><option${slSel("auto")}>auto</option></select></div>` +
           `<p class="btb-hint">After each turn, an idle-only, cheap-model review decides whether to write or improve a skill (Hermes-style). <strong>propose</strong> drafts into the staging dir for your approval (same flow as self-authoring, but auto-triggered). <strong>auto</strong> writes/patches directly, behind guardrails: guardrail-phrase drafts are blocked to a proposal; high-blast-radius bots (open <code>external_send</code>, non-<code>deny</code> bash, or multi-agent) silently degrade to propose; a bot may only patch skills it itself auto-authored, never operator- or repo-authored ones. Runs ONLY when no pi turn is live, so it never starves real turns. Off by default. Auto-written skills appear under <strong>Skills &amp; Prompt</strong>.</p>` +
           `<p class="btb-hint">Enforced by pi-lab/permission-gating.ts via PI_BOT_PERMISSION_POLICY (Phase 2.2). Default-deny for safety.</p>` +
-          actionBar(`<button type="submit" class="btb-btn">Save Permissions</button>`) + `</form>`;
+          actionBar(`<button type="submit" class="btb-btn">Save Permissions</button>`) + `</form>` +
+          `<form method="POST" style="margin-top:1rem">` +
+          `<input type="hidden" name="action" value="toggle_peer_managed">` +
+          `<input type="hidden" name="bot_id" value="${escapeHtml(botId)}">` +
+          `<label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer">` +
+          `<input type="checkbox" name="managed" ${isManaged ? "checked" : ""} onchange="this.form.submit()">` +
+          `<span>Manageable by trusted peers (cross-instance edit/run — requires the master toggle in Settings &rarr; Remote Bot Management)</span>` +
+          `</label></form>`;
       } else if (tabId === "triggers") {
         const tr = def.triggers || {};
         body =
