@@ -9,16 +9,12 @@
  * so it never replicates (genuinely per-instance).
  */
 import { readSetting } from "../settings/registry.js";
+import { isMpaHost } from "../../../shared/mpa-detect.js";
 
-/** Auto-detect the MPA host from its data-dir convention (~/.crow-mpa). */
-// NOTE: mirrored as a SYNC reader in scripts/pi-bots/runtime-gate.mjs
-// (botRuntimeEnabledSync) for the bot runners. Keep the resolve rule + this
-// isMpaHost regex identical in both, or the dashboard banner and the actual
-// runtime gate will disagree. Future dedup target: a shared mpa-detect.js.
-function isMpaHost() {
-  const probe = `${process.env.CROW_HOME || ""}|${process.env.CROW_DATA_DIR || ""}`;
-  return /\.crow-mpa(\/|\b|$)/.test(probe);
-}
+// NOTE: the resolve rule below is mirrored as a SYNC reader in
+// scripts/pi-bots/runtime-gate.mjs (botRuntimeEnabledSync) for the bot
+// runners. isMpaHost is now shared (mpa-detect.js); keep the bot_runtime
+// resolve rule in step with runtime-gate.mjs's resolveBotRuntime.
 
 export async function botRuntimeActive(db) {
   let flags = {};

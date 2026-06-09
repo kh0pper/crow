@@ -18,6 +18,7 @@ import { listProvidersAll, listRoleOverrides, setRoleOverride, clearRoleOverride
 import { compat } from "../../../../../orchestrator/compat.js";
 import { presets } from "../../../../../orchestrator/presets.js";
 import { readSetting } from "../../registry.js";
+import { isMpaHost } from "../../../../../shared/mpa-detect.js";
 
 const BACK = "?section=llm&tab=roles";
 
@@ -28,14 +29,6 @@ const BACK = "?section=llm&tab=roles";
 // live MPA pipelines keep resolving these presets regardless of this flag.
 function isMpaPreset(presetName) {
   return presetName.startsWith("mpa-") || presetName.startsWith("bot-mpa-");
-}
-
-// Auto-detect the MPA host from its data-dir convention (the MPA gateway runs
-// with CROW_HOME / CROW_DATA_DIR under ~/.crow-mpa). General installs use
-// ~/.crow and won't match.
-function isMpaHost() {
-  const probe = `${process.env.CROW_HOME || ""}|${process.env.CROW_DATA_DIR || ""}`;
-  return /\.crow-mpa(\/|\b|$)/.test(probe);
 }
 
 // feature_flags is a local-only (non-synced) settings blob. An explicit
