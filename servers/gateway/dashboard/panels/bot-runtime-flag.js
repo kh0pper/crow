@@ -11,6 +11,10 @@
 import { readSetting } from "../settings/registry.js";
 
 /** Auto-detect the MPA host from its data-dir convention (~/.crow-mpa). */
+// NOTE: mirrored as a SYNC reader in scripts/pi-bots/runtime-gate.mjs
+// (botRuntimeEnabledSync) for the bot runners. Keep the resolve rule + this
+// isMpaHost regex identical in both, or the dashboard banner and the actual
+// runtime gate will disagree. Future dedup target: a shared mpa-detect.js.
 function isMpaHost() {
   const probe = `${process.env.CROW_HOME || ""}|${process.env.CROW_DATA_DIR || ""}`;
   return /\.crow-mpa(\/|\b|$)/.test(probe);
