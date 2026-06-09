@@ -49,28 +49,38 @@ export function botRuntimeEnabledSync(conn) {
 }
 
 /**
- * Drive start()/stop() on bot_runtime transitions. Returns { dispose() }.
+ * Drive start()/stop() on bot_runtime transitions. start()/stop() MAY be async;
+ * transitions are awaited and serialized (a `busy` guard prevents a stop from
+ * overlapping an in-flight start — which would orphan half-connected adapters).
+ * `running` flips to true only AFTER start() resolves, so a rejected start is
+ * caught (never an unhandled rejection) and retried on the next poll.
+ * Returns { dispose() }.
  * @param {object} db better-sqlite3 connection (re-read each poll)
  * @param {object} o { start, stop, pollMs=30000, logTag, _isActive? }
  */
 export function runtimeGate(db, { start, stop, pollMs = 30000, logTag = "runtime-gate", _isActive } = {}) {
   const isActive = _isActive || (() => botRuntimeEnabledSync(db));
   let running = false;
+  let busy = false; // serialize transitions: never stop while a start is in flight (or vice-versa)
   const log = (m) => console.log(`[${logTag}] ${m}`);
 
-  const tick = () => {
+  const tick = async () => {
+    if (busy) return; // a transition is in flight — let it finish; re-evaluate next poll
     let active;
     try { active = !!isActive(); } catch { active = false; }
     if (active && !running) {
-      try { start(); running = true; log("bot_runtime ON — adapters started"); }
-      catch (e) { log("start failed (will retry): " + ((e && e.message) || e)); }
+      busy = true;
+      try { await start(); running = true; log("bot_runtime ON — adapters started"); }
+      catch (e) { running = false; log("start failed (will retry): " + ((e && e.message) || e)); }
+      finally { busy = false; }
     } else if (!active && running) {
-      try { stop(); } catch (e) { log("stop error (non-fatal): " + ((e && e.message) || e)); }
-      running = false; log("bot_runtime OFF — adapters stopped (idle)");
+      busy = true;
+      try { await stop(); } catch (e) { log("stop error (non-fatal): " + ((e && e.message) || e)); }
+      finally { running = false; busy = false; log("bot_runtime OFF — adapters stopped (idle)"); }
     }
   };
 
-  tick(); // boot
+  tick(); // boot (async, fire-and-forget; errors handled inside tick)
   const timer = setInterval(tick, pollMs);
   if (timer.unref) timer.unref();
   return { dispose() { clearInterval(timer); } };

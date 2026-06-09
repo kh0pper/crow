@@ -219,6 +219,7 @@ process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
 (function main() {
-  _gate = runtimeGate(db(), { start: () => { startAllDiscord(); }, stop: () => { stopAllDiscord(); }, logTag: "discord" });
+  // NOTE: this db() connection is intentionally long-lived — the gate re-reads it every poll; do not close it.
+  _gate = runtimeGate(db(), { start: startAllDiscord, stop: stopAllDiscord, logTag: "discord" });
   setInterval(() => {}, 1 << 30);
 })();
