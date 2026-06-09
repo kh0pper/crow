@@ -1,0 +1,18 @@
+[Unit]
+Description=Crow Bot Builder — Discord gateway [%i]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kh0pp
+WorkingDirectory=/home/kh0pp/crow
+EnvironmentFile=/etc/crow/pibot-%i.env
+ExecStart=/home/kh0pp/.nvm/versions/node/v20.20.2/bin/node /home/kh0pp/crow/scripts/pi-bots/discord_gateway.mjs
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
