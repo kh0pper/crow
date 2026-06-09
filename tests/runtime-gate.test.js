@@ -65,3 +65,36 @@ test("runtimeGate: a throwing start() does not crash the gate (retries next poll
   assert.ok(n >= 2, "start retried after throwing");
   handle.dispose();
 });
+
+test("runtimeGate: awaits an async start() and sets running only after it resolves (no overlap with stop)", async () => {
+  let active = true;
+  const events = [];
+  let resolveStart;
+  const handle = runtimeGate({}, {
+    start: () => new Promise((r) => { resolveStart = r; events.push("start:begin"); }),
+    stop: () => { events.push("stop"); },
+    pollMs: 10,
+    _isActive: () => active,
+  });
+  await new Promise((r) => setTimeout(r, 25));        // start in flight, not resolved
+  active = false;                                      // toggle off WHILE start is in flight
+  await new Promise((r) => setTimeout(r, 25));         // ticks fire but must NOT stop (busy)
+  assert.deepEqual(events, ["start:begin"], "stop did NOT run while start was in flight (serialized)");
+  resolveStart();                                      // let start finish
+  await new Promise((r) => setTimeout(r, 30));         // now off is observed → stop runs
+  assert.deepEqual(events, ["start:begin", "stop"], "stop runs only after the in-flight start settled");
+  handle.dispose();
+});
+
+test("runtimeGate: a rejected async start() is caught (no unhandled rejection) and retried", async () => {
+  let active = true, n = 0;
+  const handle = runtimeGate({}, {
+    start: async () => { n++; if (n === 1) throw new Error("async start fails once"); },
+    stop: async () => {},
+    pollMs: 10,
+    _isActive: () => active,
+  });
+  await new Promise((r) => setTimeout(r, 40));
+  assert.ok(n >= 2, "rejected async start retried on a later poll");
+  handle.dispose();
+});

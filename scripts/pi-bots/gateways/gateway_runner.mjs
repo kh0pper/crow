@@ -99,7 +99,7 @@ function startReaper() {
 }
 
 async function shutdown() {
-  log("SIGTERM — stopping");
+  log("SIGTERM — stopping " + handles.length + " adapter(s)");
   if (_gate) { try { _gate.dispose(); } catch {} }
   if (reaper) { clearInterval(reaper); reaper = null; }
   for (const h of handles) { try { await h.stop(); } catch {} }
@@ -112,6 +112,7 @@ process.on("SIGINT", shutdown);
   startReaper();
   // F3b: self-gate on feature_flags.bot_runtime — start/stop adapters on the
   // toggle without a restart. Off = idle (service up, no adapters connected).
-  _gate = runtimeGate(db(), { start: () => { startAll(); }, stop: () => { stopAdapters(); }, logTag: "gateways" });
+  // NOTE: this db() connection is intentionally long-lived — the gate re-reads it every poll; do not close it.
+  _gate = runtimeGate(db(), { start: startAll, stop: stopAdapters, logTag: "gateways" });
   setInterval(() => {}, 1 << 30); // keep the process alive across idle periods
 })();
