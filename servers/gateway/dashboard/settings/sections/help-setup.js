@@ -14,7 +14,7 @@ export default {
   navOrder: 20,
 
   async getPreview() {
-    return "8 platforms";
+    return "Connect a client";
   },
 
   async render({ req, db, lang }) {
@@ -27,55 +27,29 @@ export default {
 
     const helpT = {
       en: {
-        platformSetup: "Quick Setup by Platform",
+        connectGuide: "Connect a client",
+        connectPointer: "Set up Claude Code, Cursor, Gemini CLI, and other clients with copy-paste config.",
+        openWizard: "Open the connect wizard",
         contextUsage: "Context Usage",
         toolsLoaded: "tools loaded",
         core: "core", external: "external",
         tokensOfContext: "tokens of context",
         routerAvailable: "Router available",
         contextDoc: 'Learn more about <a href="https://maestro.press/software/crow/guide/cross-platform" style="color:var(--crow-accent);text-decoration:none">context management and the router</a>.',
-        claudeWebInstr: "Settings &rarr; Integrations &rarr; Add Custom &rarr; paste <code>/mcp</code> URL",
-        claudeDesktopInstr: "Use stdio transport (see docs)",
-        chatgptInstr: "Settings &rarr; Apps &rarr; Create &rarr; paste <code>/sse</code> URL",
-        geminiInstr: "Add to <code>~/.gemini/settings.json</code> with <code>url</code> property",
-        cursorInstr: "Add to <code>.cursor/mcp.json</code> with <code>url</code> property",
-        windsurfInstr: "Add to <code>~/.codeium/windsurf/mcp_config.json</code>",
-        clineInstr: "VS Code MCP settings &rarr; add server URL",
-        claudeCodeInstr: "Add to <code>.mcp.json</code> or <code>~/.claude/mcp.json</code>",
       },
       es: {
-        platformSetup: "Configuración Rápida por Plataforma",
+        connectGuide: "Conecta un cliente",
+        connectPointer: "Configura Claude Code, Cursor, Gemini CLI y otros clientes con configuración lista para copiar.",
+        openWizard: "Abrir el asistente de conexión",
         contextUsage: "Uso de Contexto",
         toolsLoaded: "herramientas cargadas",
         core: "base", external: "externas",
         tokensOfContext: "tokens de contexto",
         routerAvailable: "Router disponible",
         contextDoc: 'Aprende más sobre <a href="https://maestro.press/software/crow/guide/cross-platform" style="color:var(--crow-accent);text-decoration:none">gestión de contexto y el router</a>.',
-        claudeWebInstr: "Settings &rarr; Integrations &rarr; Add Custom &rarr; pega la URL <code>/mcp</code>",
-        claudeDesktopInstr: "Usa transporte stdio (ver docs)",
-        chatgptInstr: "Settings &rarr; Apps &rarr; Create &rarr; pega la URL <code>/sse</code>",
-        geminiInstr: "Agrega a <code>~/.gemini/settings.json</code> con la propiedad <code>url</code>",
-        cursorInstr: "Agrega a <code>.cursor/mcp.json</code> con la propiedad <code>url</code>",
-        windsurfInstr: "Agrega a <code>~/.codeium/windsurf/mcp_config.json</code>",
-        clineInstr: "VS Code MCP settings &rarr; agrega la URL del servidor",
-        claudeCodeInstr: "Agrega a <code>.mcp.json</code> o <code>~/.claude/mcp.json</code>",
       },
     };
     const ht = helpT[currentLang] || helpT.en;
-    const docsBase = "https://maestro.press/software/crow/platforms";
-    const platforms = [
-      { name: "Claude Web/Mobile", slug: "claude", instr: ht.claudeWebInstr },
-      { name: "Claude Desktop", slug: "claude-desktop", instr: ht.claudeDesktopInstr },
-      { name: "ChatGPT", slug: "chatgpt", instr: ht.chatgptInstr },
-      { name: "Gemini CLI", slug: "gemini-cli", instr: ht.geminiInstr },
-      { name: "Cursor", slug: "cursor", instr: ht.cursorInstr },
-      { name: "Windsurf", slug: "windsurf", instr: ht.windsurfInstr },
-      { name: "Cline", slug: "cline", instr: ht.clineInstr },
-      { name: "Claude Code", slug: "claude-code", instr: ht.claudeCodeInstr },
-    ];
-    const platformListHtml = platforms.map(p =>
-      `<li><a href="${docsBase}/${p.slug}" target="_blank" rel="noopener" style="color:var(--crow-accent);text-decoration:none;font-weight:600">${escapeHtml(p.name)}</a> &mdash; ${p.instr}</li>`
-    ).join("\n");
 
     const proxyStatus = getProxyStatus();
     const coreTools = 49;
@@ -90,10 +64,9 @@ export default {
     const replayHtml = `<p style="margin-bottom:1rem"><a href="/dashboard/onboarding?step=0" style="color:var(--crow-accent);text-decoration:none;font-weight:600"><span aria-hidden="true">&#8635;</span> ${escapeHtml(t("onboarding.replayLink", currentLang))}</a></p>`;
     return `
       ${replayHtml}
-      <h4 style="font-size:0.9rem;color:var(--crow-text-muted);margin-bottom:0.5rem">${ht.platformSetup}</h4>
-      <ul style="font-size:0.85rem;padding-left:1.2rem;list-style:disc;line-height:1.8">
-        ${platformListHtml}
-      </ul>
+      <h4 style="font-size:0.9rem;color:var(--crow-text-muted);margin-bottom:0.5rem">${ht.connectGuide}</h4>
+      <p style="font-size:0.85rem;line-height:1.6;margin-bottom:0.75rem">${ht.connectPointer}</p>
+      <p><a href="/dashboard/connect" style="color:var(--crow-accent);text-decoration:none;font-weight:600">${ht.openWizard} &rarr;</a></p>
       <h4 style="font-size:0.9rem;color:var(--crow-text-muted);margin:1.25rem 0 0.5rem">${ht.contextUsage}</h4>
       <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
         <span style="font-size:0.95rem;font-weight:600">${totalTools} ${ht.toolsLoaded}</span>

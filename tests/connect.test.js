@@ -81,3 +81,23 @@ test("honors the crow_lang=es cookie for Spanish copy", async () => {
   assert.ok(es.includes(i18n.t("connect.intro", "es")), "ES intro present");
   assert.ok(en.includes(i18n.t("connect.intro", "en")), "EN intro present");
 });
+
+import helpSetupSection from "../servers/gateway/dashboard/settings/sections/help-setup.js";
+
+test("Help & Setup points at the connect wizard and keeps context stats", async () => {
+  const db = { execute: async () => ({ rows: [] }) }; // default English
+  const req = { headers: {} };
+  const html = await helpSetupSection.render({ req, db, lang: "en" });
+  assert.ok(html.includes("/dashboard/connect"), "links to the connect wizard");
+  assert.ok(html.includes("Context Usage"), "still shows the context-usage stats heading");
+  assert.ok(!html.includes("maestro.press/software/crow/platforms"),
+    "the old per-platform docs list is gone");
+});
+
+test("Help & Setup wizard pointer honors Spanish (DB language = es)", async () => {
+  const db = { execute: async () => ({ rows: [{ value: "es" }] }) };
+  const req = { headers: {} };
+  const html = await helpSetupSection.render({ req, db, lang: "en" });
+  assert.ok(html.includes("/dashboard/connect"), "links to the connect wizard in ES");
+  assert.ok(html.includes("Uso de Contexto"), "ES context-usage heading present");
+});
