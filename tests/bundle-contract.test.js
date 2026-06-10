@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateManifest, detectSurfaces } from "../scripts/lib/bundle-contract.mjs";
@@ -199,4 +199,19 @@ test("buildRegistry: requires.bundles satisfied by a manifest-backed sibling; mi
   const root2 = fakeBundlesRoot({ orphandep: mk("orphandep", { requires: { bundles: ["ghost"] } }) });
   const { audit } = buildRegistry({ bundlesRoot: root2, tracked: null });
   assert.equal(audit.find((a) => a.id === "orphandep").status, "invalid");
+});
+
+// --- Integration: the real bundles + committed registry (no fixtures) ---
+
+test("all tracked real bundle manifests are valid", () => {
+  const { audit } = buildRegistry(); // real BUNDLES_ROOT + git tracked-set
+  const invalid = audit.filter((a) => a.status === "invalid");
+  assert.equal(invalid.length, 0, "invalid manifests: " + invalid.map((a) => `${a.id} [${a.errors.join(", ")}]`).join(" | "));
+});
+
+test("committed registry/add-ons.json matches generated (no drift)", () => {
+  const { registry } = buildRegistry();
+  const generated = formatRegistry(registry);
+  const current = readFileSync(new URL("../registry/add-ons.json", import.meta.url), "utf8");
+  assert.equal(current, generated, "registry drift — run `npm run build-registry`");
 });
