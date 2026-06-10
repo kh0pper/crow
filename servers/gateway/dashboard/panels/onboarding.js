@@ -6,7 +6,7 @@
  * Step navigation is a ?step=N query param (no client JS; refresh/back safe).
  */
 import { stepper, section, callout, button } from "../shared/components.js";
-import { t } from "../shared/i18n.js";
+import { t, SUPPORTED_LANGS } from "../shared/i18n.js";
 import { parseCookies } from "../auth.js";
 
 const STEP_KEYS = ["welcome", "integrations", "bot", "connect", "done"];
@@ -19,7 +19,8 @@ const STEP_KEYS = ["welcome", "integrations", "bot", "connect", "done"];
  * what settings/sections/help-setup.js already does).
  */
 function resolveLang(req) {
-  return parseCookies(req).crow_lang === "es" ? "es" : "en";
+  const lang = parseCookies(req).crow_lang;
+  return SUPPORTED_LANGS.includes(lang) ? lang : "en";
 }
 
 /** A secondary button that opens an existing surface in a new tab so the tour
@@ -73,6 +74,11 @@ export default {
   hidden: true,              // reachable by URL + first-run redirect, not in the sidebar
 
   async handler(req, res, { layout }) {
+    // Cookie-first: the dispatcher-provided context lang derives from the DB
+    // "language" setting, which defaults to "en" for a brand-new user who has
+    // not saved a preference yet. resolveLang() reads the crow_lang cookie set
+    // by the setup/login pages instead, so a user who chose Spanish at setup
+    // gets Spanish onboarding. We deliberately do not use the context lang.
     const lang = resolveLang(req);
 
     // Clamp step into [0, last]; non-numeric or out-of-range falls to a valid page.
