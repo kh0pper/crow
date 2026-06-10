@@ -30,15 +30,18 @@ import connectPanel from "../servers/gateway/dashboard/panels/connect.js";
 // Invoke the panel handler with a stubbed layout (returns content for assertions).
 // connections.js-style base URL needs req.protocol + req.get("host").
 // parseCookies reads req.headers.cookie, so headers must always be an object.
+// Minimal stub db: getLocalTokenMeta reads mcp_local_token_hash; returning no
+// rows yields the empty-token state, which is what these UI tests expect.
+const noTokenDb = { execute: async () => ({ rows: [] }) };
 function render(host = "crow.example.ts.net:8444", cookie = "") {
   const layout = ({ content }) => content;
   const res = { send() {}, setHeader() {} };
   const req = {
     method: "GET", query: {}, headers: cookie ? { cookie } : {},
-    protocol: "https",
+    protocol: "https", csrfToken: "csrf-x",
     get(h) { return h.toLowerCase() === "host" ? host : ""; },
   };
-  return connectPanel.handler(req, res, { layout });
+  return connectPanel.handler(req, res, { layout, db: noTokenDb });
 }
 
 test("panel identity: id / route / hidden", () => {
@@ -68,10 +71,12 @@ test("cloud web clients get an honest warning, not a config", async () => {
   assert.ok(html.includes(i18n.t("connect.cloud.warning", "en")), "cloud warning text present");
 });
 
-test("no token is surfaced anywhere (F6c-2 boundary)", async () => {
+test("empty-token state reveals no token and offers Generate", async () => {
   const html = await render();
-  assert.ok(!/CROW_LOCAL_MCP_TOKEN/.test(html), "does not name the token env var");
-  assert.ok(!/Bearer/i.test(html), "does not show a Bearer header");
+  // In the no-token state the wizard shows a Generate control and reveals
+  // nothing. A raw token only appears after an explicit generate/rotate POST.
+  assert.ok(!/Bearer\s+[0-9a-f]{64}/.test(html), "no raw token revealed at rest");
+  assert.ok(html.includes('value="generate_token"'), "offers a Generate control");
 });
 
 test("honors the crow_lang=es cookie for Spanish copy", async () => {

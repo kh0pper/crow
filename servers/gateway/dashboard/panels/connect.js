@@ -7,9 +7,10 @@
  * invariant. Token surfacing + server-side validation are deferred to F6c-2.
  * No client JS beyond the shared tabs/copy handlers in componentsJs().
  */
-import { section, tabs, codeBlock, callout, button } from "../shared/components.js";
+import { section, tabs, codeBlock, callout, button, escapeHtml } from "../shared/components.js";
 import { t, SUPPORTED_LANGS } from "../shared/i18n.js";
 import { parseCookies } from "../auth.js";
+import { generateLocalToken, revokeLocalToken, getLocalTokenMeta } from "../../local-token.js";
 
 /**
  * Resolve language cookie-first. The dispatcher-provided lang derives from the DB
@@ -41,6 +42,54 @@ function block({ heading, lead, code, codeLang, note, noteType = "info" }) {
     + (lead ? `<p style="${P_STYLE}">${lead}</p>` : "")
     + (code ? codeBlock(code, codeLang ? { lang: codeLang } : {}) : "")
     + (note ? callout(note, noteType) : "");
+}
+
+// Remote-HTTP config for a header-capable client. `token` is either the raw
+// token (one-time reveal) or the literal "<YOUR-TOKEN>" placeholder.
+function tokenConfig(endpoint, token) {
+  return `{\n  "mcpServers": {\n    "crow": {\n      "type": "http",\n      "url": "${endpoint}",\n      "headers": { "Authorization": "Bearer ${token}" }\n    }\n  }\n}`;
+}
+
+function tokenForm(action, label, variant, csrf) {
+  return `<form method="POST" action="/dashboard/connect" style="display:inline-block;margin:0">`
+    + `<input type="hidden" name="_csrf" value="${escapeHtml(csrf || "")}">`
+    + `<input type="hidden" name="action" value="${escapeHtml(action)}">`
+    + button(label, { variant, type: "submit" })
+    + `</form>`;
+}
+
+function tokenActions({ lang, present, csrf }) {
+  const wrap = (inner) => `<div style="display:flex;gap:var(--crow-space-3);flex-wrap:wrap;margin-top:var(--crow-space-3)">${inner}</div>`;
+  if (!present) {
+    return wrap(tokenForm("generate_token", t("connect.token.generate", lang), "primary", csrf));
+  }
+  return wrap(
+    tokenForm("rotate_token", t("connect.token.rotate", lang), "secondary", csrf)
+    + tokenForm("revoke_token", t("connect.token.revoke", lang), "secondary", csrf),
+  );
+}
+
+// Returns the token section BODY only (no heading element). The caller wraps it
+// in section(t("connect.token.heading", lang), ...), so the section title is the
+// single heading; the body adds no heading of its own (avoids a double label).
+// `reveal` is the raw token immediately after generate/rotate (show once);
+// otherwise null. `meta` is getLocalTokenMeta() output.
+function tokenSection({ endpoint, lang, meta, reveal, csrf }) {
+  if (reveal) {
+    return callout(`<strong>${t("connect.token.revealHeading", lang)}</strong><br>${t("connect.token.revealWarning", lang)}`, "warning")
+      + codeBlock(reveal)
+      + `<p style="${P_STYLE}">${t("connect.token.configLead", lang)}</p>`
+      + codeBlock(tokenConfig(endpoint, reveal), { lang: "json" })
+      + tokenActions({ lang, present: true, csrf });
+  }
+  if (meta.present) {
+    return `<p style="${P_STYLE}">${t("connect.token.activeSince", lang)} ${escapeHtml(meta.createdAt || "")}</p>`
+      + callout(t("connect.token.placeholderNote", lang), "info")
+      + codeBlock(tokenConfig(endpoint, "<YOUR-TOKEN>"), { lang: "json" })
+      + tokenActions({ lang, present: true, csrf });
+  }
+  return `<p style="${P_STYLE}">${t("connect.token.intro", lang)}</p>`
+    + tokenActions({ lang, present: false, csrf });
 }
 
 function clientTabs(baseUrl, lang) {
@@ -105,13 +154,36 @@ export default {
   category: "tools",
   hidden: true,              // reachable by URL + deep-link, not in the sidebar
 
-  async handler(req, res, { layout }) {
+  async handler(req, res, ctx) {
+    const { layout, db } = ctx;
     const lang = resolveLang(req);
     const baseUrl = `${req.protocol}://${req.get("host")}`;
+
+    let meta = { present: false, createdAt: null };
+    let reveal = null;
+    if (req.method === "POST" && db) {
+      const action = req.body?.action;
+      try {
+        if (action === "generate_token" || action === "rotate_token") {
+          reveal = await generateLocalToken(db);
+          meta = await getLocalTokenMeta(db);
+        } else if (action === "revoke_token") {
+          await revokeLocalToken(db);
+        } else {
+          meta = await getLocalTokenMeta(db);
+        }
+      } catch (err) {
+        console.warn("[connect] token action failed:", err.message);
+      }
+    } else if (db) {
+      try { meta = await getLocalTokenMeta(db); } catch { /* treat as no token */ }
+    }
+
     const content =
       // Intro deliberately uses space-4 (more breathing room) vs P_STYLE's space-2 mid-block leads.
       `<p style="font-size:var(--crow-text-base);line-height:var(--crow-leading-relaxed);color:var(--crow-text-secondary);margin-bottom:var(--crow-space-4)">${t("connect.intro", lang)}</p>` +
       section(t("connect.title", lang), clientTabs(baseUrl, lang)) +
+      section(t("connect.token.heading", lang), tokenSection({ endpoint: `${baseUrl}/router/mcp`, lang, meta, reveal, csrf: req.csrfToken })) +
       section(t("connect.moreHeading", lang), moreLinks(lang));
     return layout({ title: t("connect.title", lang), content });
   },

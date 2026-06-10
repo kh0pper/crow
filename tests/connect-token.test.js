@@ -201,3 +201,58 @@ test("token UI copy obeys crow.md style (no em dash, no 'not X, but Y')", () => 
     }
   }
 });
+
+import connectPanel from "../servers/gateway/dashboard/panels/connect.js";
+
+const HOST = "crow.example.ts.net:8444";
+function mkReq({ method = "GET", body = null, db, csrf = "csrf-x", cookie = "" } = {}) {
+  return {
+    method, body, csrfToken: csrf,
+    query: {}, headers: cookie ? { cookie } : {},
+    protocol: "https",
+    get(h) { return h.toLowerCase() === "host" ? HOST : ""; },
+  };
+}
+function ctx(db) {
+  return { db, layout: ({ content }) => content };
+}
+
+test("GET with no token: shows the token heading + a Generate control, reveals nothing", async () => {
+  const db = memDb();
+  const html = await connectPanel.handler(mkReq({ db }), { send() {}, setHeader() {} }, ctx(db));
+  assert.ok(html.includes(i18n.t("connect.token.heading", "en")), "token section heading present");
+  assert.ok(html.includes('value="generate_token"'), "Generate form present");
+  assert.ok(!html.includes('value="revoke_token"'), "no Revoke control when no token");
+  assert.ok(!/Bearer\s+[0-9a-f]{64}/.test(html), "no raw token revealed");
+});
+
+test("GET with a token present: masked state, placeholder config, Rotate + Revoke", async () => {
+  const db = memDb();
+  await generateLocalToken(db);
+  const html = await connectPanel.handler(mkReq({ db }), { send() {}, setHeader() {} }, ctx(db));
+  assert.ok(html.includes(i18n.t("connect.token.activeSince", "en")), "masked active state");
+  assert.ok(html.includes("&lt;YOUR-TOKEN&gt;"), "config shows an escaped placeholder, not a real token");
+  assert.ok(html.includes('value="rotate_token"') && html.includes('value="revoke_token"'), "Rotate + Revoke present");
+  assert.ok(!/Bearer\s+[0-9a-f]{64}/.test(html), "real token not shown in masked state");
+});
+
+test("POST generate_token: reveals the raw token once + a Bearer config", async () => {
+  const db = memDb();
+  const html = await connectPanel.handler(
+    mkReq({ method: "POST", body: { action: "generate_token" }, db }),
+    { send() {}, setHeader() {} }, ctx(db));
+  const m = html.match(/Bearer ([0-9a-f]{64})/);
+  assert.ok(m, "reveals a Bearer token in the config");
+  assert.equal(await validateLocalToken(db, m[1]), true, "the revealed token is the one that was stored");
+  assert.ok(html.includes(i18n.t("connect.token.revealWarning", "en")), "shows the one-time warning");
+});
+
+test("POST revoke_token: clears the token and returns to the empty state", async () => {
+  const db = memDb();
+  await generateLocalToken(db);
+  const html = await connectPanel.handler(
+    mkReq({ method: "POST", body: { action: "revoke_token" }, db }),
+    { send() {}, setHeader() {} }, ctx(db));
+  assert.equal((await getLocalTokenMeta(db)).present, false, "token cleared");
+  assert.ok(html.includes('value="generate_token"'), "back to the Generate control");
+});
