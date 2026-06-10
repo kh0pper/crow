@@ -106,6 +106,31 @@ test("middleware skips the DB read on non-MCP paths (cost guard)", async () => {
   assert.equal(req.localTokenAuth, undefined);
 });
 
+test("middleware does NOT match unrelated routes ending in /messages", async () => {
+  const db = memDb();
+  await generateLocalToken(db);
+  let reads = 0;
+  const spyDb = { execute: (...a) => { reads++; return db.execute(...a); } };
+  // Real non-MCP routes that end in /messages (2+ segments deep) must not be
+  // treated as MCP transport paths. MCP paths are at most one prefix segment deep.
+  for (const path of ["/dashboard/streams/messages", "/api/chat/conversations/abc/messages", "/api/bot-chat/bot1/messages"]) {
+    const req = { path, headers: { authorization: "Bearer whatever" } };
+    await run(localTokenAuthMiddleware(spyDb), req);
+    assert.equal(req.localTokenAuth, undefined, `${path} must not authenticate`);
+  }
+  assert.equal(reads, 0, "no settings read for any non-MCP /messages route");
+});
+
+test("middleware matches real MCP mount paths (single-segment prefix or root)", async () => {
+  const db = memDb();
+  const token = await generateLocalToken(db);
+  for (const path of ["/mcp", "/router/mcp", "/memory/sse", "/tools-cursor/messages", "/blog-mcp/mcp"]) {
+    const req = { path, headers: { authorization: `Bearer ${token}` } };
+    await run(localTokenAuthMiddleware(db), req);
+    assert.deepEqual(req.localTokenAuth, { token: "local-mcp" }, `${path} authenticates`);
+  }
+});
+
 test("middleware ignores a wrong token (falls through, no flag)", async () => {
   const db = memDb();
   await generateLocalToken(db);

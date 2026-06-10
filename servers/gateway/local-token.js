@@ -75,11 +75,16 @@ export function applyLocalTokenAuth(req) {
   return true;
 }
 
-// MCP transport path suffixes (see mcp.js:194-196). req.localTokenAuth is only
-// consumed on these, so the middleware reads the DB only for these paths.
+// MCP transport paths are `/mcp`, `/sse`, `/messages`, optionally under ONE
+// server-prefix segment (e.g. /router/mcp, /memory/sse, /tools-x/messages,
+// /blog-mcp/mcp; see mcp.js:194-196 and the single-segment mountMcpServer
+// prefixes in index.js). req.localTokenAuth is only consumed on these, so the
+// middleware reads the DB only for them. Anchoring to this exact shape avoids
+// matching unrelated routes that merely end in /messages (e.g.
+// /dashboard/streams/messages, /api/chat/.../messages, /api/bot-chat/.../messages).
+const MCP_PATH_RE = /^(?:\/[a-z0-9-]+)?\/(?:mcp|sse|messages)$/;
 function isMcpPath(p) {
-  return typeof p === "string"
-    && (p === "/mcp" || p.endsWith("/mcp") || p.endsWith("/sse") || p.endsWith("/messages"));
+  return typeof p === "string" && MCP_PATH_RE.test(p);
 }
 
 /** Express middleware. Mounted globally right after instanceAuthMiddleware, but
@@ -98,8 +103,9 @@ export function localTokenAuthMiddleware(db) {
         req.localTokenAuth = { token: "local-mcp" };
       }
     } catch (err) {
-      // Fail open to other auth methods on a read error, mirroring how
-      // instanceAuthMiddleware never rejects here.
+      // Treat a DB/read error as non-fatal: log and fall through to the other
+      // auth methods (OAuth) rather than propagating a 500. A transient settings
+      // read must never block a legitimate OAuth-authenticated MCP request.
       console.warn("[local-token] auth check error:", err.message);
     }
     return next();

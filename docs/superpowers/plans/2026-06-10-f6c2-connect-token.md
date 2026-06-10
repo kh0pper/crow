@@ -329,11 +329,14 @@ export function applyLocalTokenAuth(req) {
   return true;
 }
 
-// MCP transport path suffixes (see mcp.js:194-196). req.localTokenAuth is only
-// consumed on these, so the middleware reads the DB only for these paths.
+// MCP transport paths are `/mcp`, `/sse`, `/messages`, optionally under ONE
+// server-prefix segment (e.g. /router/mcp, /memory/sse, /tools-x/messages,
+// /blog-mcp/mcp; see mcp.js:194-196 and the single-segment mountMcpServer
+// prefixes in index.js). Anchoring to this exact shape avoids matching unrelated
+// routes that merely end in /messages (e.g. /dashboard/streams/messages).
+const MCP_PATH_RE = /^(?:\/[a-z0-9-]+)?\/(?:mcp|sse|messages)$/;
 function isMcpPath(p) {
-  return typeof p === "string"
-    && (p === "/mcp" || p.endsWith("/mcp") || p.endsWith("/sse") || p.endsWith("/messages"));
+  return typeof p === "string" && MCP_PATH_RE.test(p);
 }
 
 /** Express middleware. Mounted globally right after instanceAuthMiddleware, but
