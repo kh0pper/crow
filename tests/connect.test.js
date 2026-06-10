@@ -24,3 +24,60 @@ test("every connect.* key has a non-empty en AND es value", () => {
     assert.ok(entry.es && entry.es.trim(), `missing/empty es value for ${k}`);
   }
 });
+
+import connectPanel from "../servers/gateway/dashboard/panels/connect.js";
+
+// Invoke the panel handler with a stubbed layout (returns content for assertions).
+// connections.js-style base URL needs req.protocol + req.get("host").
+// parseCookies reads req.headers.cookie, so headers must always be an object.
+function render(host = "crow.example.ts.net:8444", cookie = "") {
+  const layout = ({ content }) => content;
+  const res = { send() {}, setHeader() {} };
+  const req = {
+    method: "GET", query: {}, headers: cookie ? { cookie } : {},
+    protocol: "https",
+    get(h) { return h.toLowerCase() === "host" ? host : ""; },
+  };
+  return connectPanel.handler(req, res, { layout });
+}
+
+test("panel identity: id / route / hidden", () => {
+  assert.equal(connectPanel.id, "connect");
+  assert.equal(connectPanel.route, "/dashboard/connect");
+  assert.equal(connectPanel.hidden, true);
+});
+
+test("renders a tab per local client", async () => {
+  const html = await render();
+  for (const label of ["Claude Code", "Cursor", "Cline", "Gemini CLI", "Claude Desktop"]) {
+    assert.ok(html.includes(label), `renders a ${label} tab`);
+  }
+  assert.ok(html.includes("tab-trigger"), "uses the tabs component");
+});
+
+test("embeds the request host in the MCP endpoint, not localhost", async () => {
+  const html = await render("crow.example.ts.net:8444");
+  assert.ok(html.includes("https://crow.example.ts.net:8444/router/mcp"),
+    "embeds the request-host /router/mcp endpoint");
+  assert.ok(!html.includes("localhost"), "no hardcoded localhost in the page");
+});
+
+test("cloud web clients get an honest warning, not a config", async () => {
+  const html = await render();
+  assert.ok(html.includes("callout-warning"), "renders a warning callout");
+  assert.ok(html.includes(i18n.t("connect.cloud.warning", "en")), "cloud warning text present");
+});
+
+test("no token is surfaced anywhere (F6c-2 boundary)", async () => {
+  const html = await render();
+  assert.ok(!/CROW_LOCAL_MCP_TOKEN/.test(html), "does not name the token env var");
+  assert.ok(!/Bearer/i.test(html), "does not show a Bearer header");
+});
+
+test("honors the crow_lang=es cookie for Spanish copy", async () => {
+  const es = await render("h.example:8444", "crow_lang=es");
+  const en = await render("h.example:8444", "crow_lang=en");
+  assert.notEqual(es, en, "ES and EN render differently");
+  assert.ok(es.includes(i18n.t("connect.intro", "es")), "ES intro present");
+  assert.ok(en.includes(i18n.t("connect.intro", "en")), "EN intro present");
+});
