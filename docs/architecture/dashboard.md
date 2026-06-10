@@ -341,3 +341,11 @@ CSS uses custom properties for theming (see the full [Brand Identity](#brand-ide
   --crow-text-primary: #1c1917;
 }
 ```
+
+## First-run onboarding (F6b)
+
+`panels/onboarding.js` is a hidden dashboard panel (`hidden: true`, route `/dashboard/onboarding`) that renders a 5-step guided tour (Welcome, Integrations, Bot, Connect, Done) driven by a `?step=N` query param — server-rendered, no client JS. It is **orient-and-route**: each step explains one thing and deep-links (new tab) to the surface that does the work (Settings → Integrations, Bot Builder, Settings → Help & Setup). It writes nothing.
+
+It is shown automatically once: `POST /dashboard/login` redirects to it the first time a password is set (`wasFirstSetup` branch in `index.js`); normal logins go straight to `/dashboard`. It is replayable anytime via the "Replay setup guide" link in Settings → Help & Setup.
+
+Copy is bilingual (EN/ES) via the `onboarding.*` keys in `shared/i18n.js`; the handler resolves language cookie-first (`crow_lang`) so a user who chose Spanish at setup gets Spanish onboarding. Tests: `tests/onboarding.test.js`.
