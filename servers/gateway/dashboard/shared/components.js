@@ -121,3 +121,80 @@ export function formatBytes(bytes) {
   const i = Math.floor(Math.log(bytes) / Math.log(1024));
   return `${(bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
 }
+
+/**
+ * Button. Renders <button> by default, or <a class="btn"> when opts.href is set.
+ * @param {string} label
+ * @param {{variant?: "primary"|"secondary"|"danger"|"ghost", size?: "sm"|"md",
+ *   href?: string, type?: string, name?: string, value?: string, attrs?: string}} [opts]
+ */
+export function button(label, opts = {}) {
+  const variant = opts.variant || "primary";
+  const size = opts.size || "md";
+  const cls = `btn btn-${variant} btn-${size}`;
+  const extra = opts.attrs ? " " + opts.attrs : "";
+  if (opts.href) {
+    return `<a class="${cls}" href="${escapeHtml(opts.href)}"${extra}>${escapeHtml(label)}</a>`;
+  }
+  const type = opts.type || "button";
+  const name = opts.name ? ` name="${escapeHtml(opts.name)}"` : "";
+  const value = opts.value != null ? ` value="${escapeHtml(String(opts.value))}"` : "";
+  return `<button class="${cls}" type="${escapeHtml(type)}"${name}${value}${extra}>${escapeHtml(label)}</button>`;
+}
+
+/**
+ * Code block with a copy-to-clipboard button. Text is escaped.
+ * @param {string} text
+ * @param {{lang?: string}} [opts]
+ */
+export function codeBlock(text, opts = {}) {
+  const raw = String(text == null ? "" : text);
+  const langLabel = opts.lang ? `<span class="code-lang">${escapeHtml(opts.lang)}</span>` : "";
+  // data-copy carries the raw text (escaped as an attribute) for the delegated
+  // copy handler in componentsJs(); the visible <code> is escaped for display.
+  return `<div class="code-block">
+  <div class="code-block-bar">${langLabel}<button type="button" class="code-copy" data-copy="${escapeHtml(raw)}">Copy</button></div>
+  <pre><code>${escapeHtml(raw)}</code></pre>
+</div>`;
+}
+
+/**
+ * Callout / notice. content is caller-supplied HTML (not escaped — matches
+ * section()/dataTable() convention; callers escape user data).
+ * @param {string} content
+ * @param {"info"|"success"|"warning"|"error"} [type="info"]
+ */
+export function callout(content, type = "info") {
+  const t = ["info", "success", "warning", "error"].includes(type) ? type : "info";
+  return `<div class="callout callout-${t}">${content}</div>`;
+}
+
+/**
+ * Stepper (display-only). 0-based current index.
+ * @param {{label: string}[]} steps
+ * @param {number} current
+ */
+export function stepper(steps, current = 0) {
+  const items = (steps || []).map((s, i) => {
+    const state = i < current ? "step-done" : i === current ? "step-active" : "step-upcoming";
+    return `<li class="step ${state}"><span class="step-num">${i + 1}</span><span class="step-label">${escapeHtml(s.label || "")}</span></li>`;
+  }).join("");
+  return `<ol class="stepper">${items}</ol>`;
+}
+
+/**
+ * Tabs. Switching handled by the delegated handler in componentsJs().
+ * @param {{id: string, label: string, content: string}[]} items - content is HTML (caller-escaped)
+ * @param {{active?: number}} [opts]
+ */
+export function tabs(items, opts = {}) {
+  const list = items || [];
+  const active = opts.active || 0;
+  const triggers = list.map((it, i) =>
+    `<button type="button" class="tab-trigger ${i === active ? "tab-active" : ""}" data-tab="${escapeHtml(it.id)}">${escapeHtml(it.label)}</button>`
+  ).join("");
+  const panels = list.map((it, i) =>
+    `<div class="tab-panel ${i === active ? "tab-active" : ""}" data-tab-panel="${escapeHtml(it.id)}">${it.content}</div>`
+  ).join("");
+  return `<div class="tabs"><div class="tab-list">${triggers}</div><div class="tab-panels">${panels}</div></div>`;
+}
