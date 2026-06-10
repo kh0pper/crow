@@ -50,4 +50,60 @@ export async function validateLocalToken(db, token) {
   return timingSafeEqual(a, b);
 }
 
+/** Synthesized req.auth for a validated local-operator token request. Full
+ *  tool access, identical surface to an OAuth client (scopes ["mcp:tools"]).
+ *  The 300s expiry is NOT a session lifetime: skipAuthForInstance re-runs and
+ *  re-synthesizes per request, exactly like the peer branch (mcp.js:247).
+ *  Nothing downstream re-checks expiresAt. */
+export function localOperatorAuth() {
+  return {
+    token: "local-mcp",
+    clientId: "local-mcp",
+    scopes: ["mcp:tools"],
+    expiresAt: Math.floor(Date.now() / 1000) + 300,
+  };
+}
+
+/** Turn a validated local-token flag into a full-access req.auth. Returns true
+ *  when it handled the request (caller should next()), false to fall through to
+ *  OAuth. Deliberately takes ONLY req: it has no peerGate dependency, so a local
+ *  token is never run through the peer exposure gate. Called by
+ *  skipAuthForInstance in routes/mcp.js, after the instance branch. */
+export function applyLocalTokenAuth(req) {
+  if (!req.localTokenAuth) return false;
+  req.auth = localOperatorAuth();
+  return true;
+}
+
+// MCP transport path suffixes (see mcp.js:194-196). req.localTokenAuth is only
+// consumed on these, so the middleware reads the DB only for these paths.
+function isMcpPath(p) {
+  return typeof p === "string"
+    && (p === "/mcp" || p.endsWith("/mcp") || p.endsWith("/sse") || p.endsWith("/messages"));
+}
+
+/** Express middleware. Mounted globally right after instanceAuthMiddleware, but
+ *  it only reads the DB for MCP-path requests (cost guard). Sets
+ *  req.localTokenAuth on a valid local token. Yields to instance auth, never
+ *  hard-rejects (falls through to OAuth), and fast-exits with no Bearer header,
+ *  no token configured, or a non-MCP path. */
+export function localTokenAuthMiddleware(db) {
+  return async (req, res, next) => {
+    try {
+      if (req.instanceAuth) return next();
+      if (!isMcpPath(req.path)) return next();
+      const h = req.headers?.authorization;
+      if (!h || !h.startsWith("Bearer ")) return next();
+      if (await validateLocalToken(db, h.slice(7))) {
+        req.localTokenAuth = { token: "local-mcp" };
+      }
+    } catch (err) {
+      // Fail open to other auth methods on a read error, mirroring how
+      // instanceAuthMiddleware never rejects here.
+      console.warn("[local-token] auth check error:", err.message);
+    }
+    return next();
+  };
+}
+
 export const LOCAL_TOKEN_KEYS = { HASH_KEY, CREATED_KEY };
