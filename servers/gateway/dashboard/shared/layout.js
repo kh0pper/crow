@@ -1319,6 +1319,6 @@ function dashboardCss() {
   }
 
   body.unified-off #crow-instance-tabs { display: none; }
-  // primitives' delegated copy/tabs JS rides with the CSS so it also loads on the login/2FA/setup pages, which call dashboardCss() directly and bypass renderLayout's scripts slot.
+  /* primitives' delegated copy/tabs JS (componentsJs) is appended after </style> so it also loads on the login/2FA/setup pages, which call dashboardCss() directly and bypass renderLayout's scripts slot */
   </style>${componentsJs()}`;
 }
