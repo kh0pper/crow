@@ -21,6 +21,8 @@ This is **content/marketing work, not server code.** No gateway code changes, no
 >
 > Each integration installs as a **bundle** — a service + its MCP tools + its skills (the formal contract landed in F4b). Install once and its capabilities reach every way you use Crow: your agents, your connected AI clients, and the dashboard (Crow's Nest).
 >
+> It's also an **all-in-one self-hosted home server** — install apps from an app store (file sync, photos, smart home, media, local AI) the way you would on any home-server OS. The difference: because every app installs as a bundle, what you self-host isn't just an app — it's a capability your agents and AI clients can use. AI-driven, not just AI-adjacent.
+>
 > Crow also lets you **share** — memories, projects, and messages move directly between Crow users over an encrypted peer-to-peer layer, with no central server — and **spans your devices**, pulling multiple instances into one private interface.
 >
 > Set it up in minutes with the first-run and connect wizards. Your data stays on your hardware; only what you choose to send a cloud provider leaves.
@@ -31,6 +33,7 @@ This is **content/marketing work, not server code.** No gateway code changes, no
 2. **Local *or* cloud.** Crow is not a local-only privacy rig. It works with a local model, a cloud assistant, or both (BYOAI). Do not frame "your data stays yours" as requiring local-only.
 3. **Modular.** Keep "modular" in the identity — the bundle system is the modularity.
 4. **Sharing is a first-class pillar**, not a downstream feature: encrypted P2P sharing of memories/projects/messages between Crow users, plus multi-instance sync (F4a/F5: P2P sync, federated discovery + invocation, cross-instance SSO) spanning your devices.
+5. **All-in-one home server.** Crow is also a self-hosted home-server platform with an app store (Crow OS + the self-hosting bundles: Ollama, Nextcloud, Immich, Home Assistant, Jellyfin, etc.). Position it as "an all-in-one self-hosted home server, AI-driven" — **do NOT name Umbrel** (or other home-server OSes) on the public surfaces. The AI-driven twist is the differentiator: every self-hosted app installs as a bundle, so it's also an agent/AI-client capability, not just an app behind a web UI.
 
 The privacy / data-ownership story is reframed (local-or-cloud, system of record is yours), not dropped.
 
@@ -43,10 +46,11 @@ Chosen over targeted realignment. Each long-form surface (README, docs landing, 
 3. **The three reach-points** (agents / connected MCP clients / dashboard) as supporting structure under that headline — how a bundle's capabilities reach you, not a named "three surfaces" abstraction.
 4. **Bundles = service + tools + skills** as the unit of capability, explicitly defined (today they're described loosely as "add-ons"), tied to "integrates with the services you already use."
 5. Existing feature inventory ("What Crow does" table, "Crow for your field" cuts) **repositioned as capabilities** reachable every way you use Crow — kept, not discarded.
-6. **Sharing + multi-instance** as a first-class pillar section (encrypted P2P sharing; multi-device sync).
-7. **Privacy/data-ownership** reframed as local-*or*-cloud (BYOAI), system-of-record-is-yours — not local-only.
-8. **Onboarding/Quick Start** updated to foreground the first-run wizard (F6b: Welcome → Integrations → Bot → Connect → Done) and the connect wizard (F6c-1).
-9. Developer Program retained.
+6. **All-in-one home server** as a pillar section — elevate the existing "Crow OS & Self-Hosting" content; AI-driven app store, every app also a bundle/capability (unnamed Umbrel analogy).
+7. **Sharing + multi-instance** as a first-class pillar section (encrypted P2P sharing; multi-device sync).
+8. **Privacy/data-ownership** reframed as local-*or*-cloud (BYOAI), system-of-record-is-yours — not local-only.
+9. **Onboarding/Quick Start** updated to foreground the first-run wizard (F6b: Welcome → Integrations → Bot → Connect → Done) and the connect wizard (F6c-1).
+10. Developer Program retained.
 
 Voice: match each surface's existing register. README/docs are prose — em dashes are fine (the crow.md "no em dash / no not-X-but-Y" rules are **exempt** for developer/marketing docs). Keep claims to capabilities Crow ships today (the existing copy is careful about this — preserve that discipline; e.g. "live one-way subscription is a planned follow-on").
 
