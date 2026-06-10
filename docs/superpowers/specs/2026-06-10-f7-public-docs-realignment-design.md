@@ -12,27 +12,41 @@ This is **content/marketing work, not server code.** No gateway code changes, no
 
 ## The spine (the through-line every surface is rewritten around)
 
-> **Crow is one capability layer exposed through three surfaces.**
-> Install a **bundle** — a self-contained unit of *a service + its MCP tools + its skills* (the formal contract landed in F4b) — once, and its capabilities become available to all three surfaces at once:
-> 1. **Internal bots** (the Bot Builder) — agents you compose and run over email, Discord, and voice.
-> 2. **External MCP clients** — claude.ai, Claude Code, Cursor, opencode, ChatGPT, Gemini, and any MCP-speaking tool.
-> 3. **The dashboard** (Crow's Nest) — the web UI you operate it all from.
+> **Crow is a modular, agentic framework and MCP platform that integrates with the services and AI tools you already use.**
+> You run it on hardware you own, paired with the models you choose — a local model on your own machine, a cloud assistant (Claude, ChatGPT, Gemini), or both.
 >
-> You **set it up in minutes**: the first-run wizard walks you through integrations, your first bot, and connecting a client; the connect wizard hands each AI client its config. Everything runs on **hardware you own**, and the system of record never has to leave your network.
+> **Use it two ways, or both at once:**
+> - **As an agentic framework** — build and run your own agents (the Bot Builder) over email, Discord, and voice, local and operator-gated.
+> - **As an MCP platform** — connect it to the AI client you already pay for (Claude Code, claude.ai, Cursor, opencode…) as a native MCP server. It rides your existing subscription as a first-class connector — the supported extension point, not a third-party harness you run *instead* of your client.
+>
+> Each integration installs as a **bundle** — a service + its MCP tools + its skills (the formal contract landed in F4b). Install once and its capabilities reach every way you use Crow: your agents, your connected AI clients, and the dashboard (Crow's Nest).
+>
+> Crow also lets you **share** — memories, projects, and messages move directly between Crow users over an encrypted peer-to-peer layer, with no central server — and **spans your devices**, pulling multiple instances into one private interface.
+>
+> Set it up in minutes with the first-run and connect wizards. Your data stays on your hardware; only what you choose to send a cloud provider leaves.
 
-The spine sits *on top of* Crow's existing strengths (privacy / data ownership, multi-instance resource sharing, encrypted P2P) — it reframes them, it does not replace them. Multi-instance (P2P sync, federated discovery + invocation, cross-instance SSO — F4a/F5) is presented as "the capability layer spanning all your devices."
+### Load-bearing positioning points (must land prominently, not be buried)
+
+1. **Dual nature.** Crow is *both* an agent engine *and* a native MCP connector. The MCP-connector half is the differentiator: it rides your existing AI subscription as a first-class, supported extension point — **not** a third-party harness you run instead of your client. Agent-only engines can't plug into your Claude Code/claude.ai subscription this way. **Make this point by capability — do NOT name specific competitors** (OpenClaw/Hermes) on the public marketing surfaces. The existing README Bot Builder paragraph currently *names* them; reframe that to the unnamed, capability-based contrast during the restructure.
+2. **Local *or* cloud.** Crow is not a local-only privacy rig. It works with a local model, a cloud assistant, or both (BYOAI). Do not frame "your data stays yours" as requiring local-only.
+3. **Modular.** Keep "modular" in the identity — the bundle system is the modularity.
+4. **Sharing is a first-class pillar**, not a downstream feature: encrypted P2P sharing of memories/projects/messages between Crow users, plus multi-instance sync (F4a/F5: P2P sync, federated discovery + invocation, cross-instance SSO) spanning your devices.
+
+The privacy / data-ownership story is reframed (local-or-cloud, system of record is yours), not dropped.
 
 ## Approach: fuller restructure
 
-Chosen over targeted realignment. Each long-form surface (README, docs landing, maestro.press page) is **reorganized so the three-surfaces frame is the organizing principle**, not merely an added block:
+Chosen over targeted realignment. Each long-form surface (README, docs landing, maestro.press page) is **reorganized so the identity sentence is the lead and the "two ways to use Crow" frame is the organizing principle**, not merely an added block:
 
-1. **Lead** with the capability-layer idea (what Crow is).
-2. **The three surfaces** as the primary structural section — bots / MCP clients / dashboard, each a facet of the one layer.
-3. **Bundles = service + tools + skills** as the unit of capability, explicitly defined (today they're described loosely as "add-ons").
-4. Existing feature inventory ("What Crow does" table, "Crow for your field" cuts) **repositioned as capabilities of the layer** surfaced *through* the three surfaces — kept, not discarded.
-5. Cross-cutting pillars (privacy/data-ownership, multi-instance, encrypted P2P) as their own section.
-6. **Onboarding/Quick Start** updated to foreground the first-run wizard (F6b: Welcome → Integrations → Bot → Connect → Done) and the connect wizard (F6c-1).
-7. Developer Program retained.
+1. **Lead** with the identity: *modular, agentic framework and MCP platform that integrates with the services and AI tools you already use.*
+2. **"Use it two ways" as the primary structural section** — (a) agentic framework / Bot Builder, (b) MCP platform / native connector that rides your existing subscription. The MCP-connector differentiator (first-class connector, not a third-party harness) lands here, prominently and unnamed.
+3. **The three reach-points** (agents / connected MCP clients / dashboard) as supporting structure under that headline — how a bundle's capabilities reach you, not a named "three surfaces" abstraction.
+4. **Bundles = service + tools + skills** as the unit of capability, explicitly defined (today they're described loosely as "add-ons"), tied to "integrates with the services you already use."
+5. Existing feature inventory ("What Crow does" table, "Crow for your field" cuts) **repositioned as capabilities** reachable every way you use Crow — kept, not discarded.
+6. **Sharing + multi-instance** as a first-class pillar section (encrypted P2P sharing; multi-device sync).
+7. **Privacy/data-ownership** reframed as local-*or*-cloud (BYOAI), system-of-record-is-yours — not local-only.
+8. **Onboarding/Quick Start** updated to foreground the first-run wizard (F6b: Welcome → Integrations → Bot → Connect → Done) and the connect wizard (F6c-1).
+9. Developer Program retained.
 
 Voice: match each surface's existing register. README/docs are prose — em dashes are fine (the crow.md "no em dash / no not-X-but-Y" rules are **exempt** for developer/marketing docs). Keep claims to capabilities Crow ships today (the existing copy is careful about this — preserve that discipline; e.g. "live one-way subscription is a planned follow-on").
 
@@ -40,17 +54,18 @@ Voice: match each surface's existing register. README/docs are prose — em dash
 
 ### Surface 1 — Repo README (`README.md`, EN)
 Restructure around the spine. Concretely:
-- Rewrite the opener + add a short **"How Crow works"** narrative establishing the capability-layer / three-surfaces / bundle frame.
-- Reorganize the body so **the three surfaces** is the spine; fold the existing *Bot Builder*, *Works With*, *Crow's Nest*, *AI Chat Gateway* sections under it as the three facets.
+- Rewrite the opener to the identity sentence + add a short **"Use it two ways"** narrative (agentic framework / MCP connector) with the differentiator line landing prominently.
+- Reorganize the body so **"use it two ways"** is the lead frame and the three reach-points (agents / connected MCP clients / dashboard) are supporting structure; fold the existing *Bot Builder*, *Works With*, *Crow's Nest*, *AI Chat Gateway* sections under it.
+- **Reframe the existing named OpenClaw/Hermes contrast** in the Bot Builder paragraph to the unnamed, capability-based version (per load-bearing point 1).
 - Add an explicit **bundle = service + MCP tools + skills** definition where add-ons/Crow OS are described.
 - Update **Quick Start** to mention the first-run wizard + connect wizard.
-- Keep: the "What Crow does" capability table, "Crow for your field" cuts, P2P section, Developer Program, license. Reposition, don't delete.
+- Keep: the "What Crow does" capability table, "Crow for your field" cuts, P2P/sharing section (elevated), Developer Program, license. Reposition, don't delete.
 - Preserve all working outbound links (maestro.press docs deep-links, MCP, CONTRIBUTING, SECURITY).
 - **Deploy:** none — live on GitHub the moment it's pushed to `main`.
 
 ### Surface 2 — VitePress docs landing (`docs/index.md` EN + `docs/es/index.md` ES)
-- Rewrite the **hero** (`text`/`tagline`) to state the spine in one line.
-- Restructure the **feature cards** so they group under the three-surfaces narrative (e.g. lead cards = "Build Your Own Agents" (bots) / "Works With Every AI Client" (MCP clients) / "Crow's Nest" (dashboard); supporting cards = memory, projects, P2P, integrations, data-ownership, deploy).
+- Rewrite the **hero** (`text`/`tagline`) to the identity sentence — modular agentic framework + MCP platform that integrates with what you already use; the "first-class MCP connector, not a third-party harness" line gets a visible beat.
+- Restructure the **feature cards** so the two lead cards are the dual-use frame — "Build & Run Your Own Agents" (framework) and "Connect Your AI Client over MCP" (the native-connector differentiator) — followed by "Crow's Nest" (dashboard); supporting cards = memory, projects, P2P/sharing, integrations, local-or-cloud data-ownership, deploy.
 - Reuse existing brand icons in `docs/public/` (`icon-*.svg`); no new icon assets required for the cards.
 - **ES parity:** apply the same hero + card restructure to `docs/es/index.md`. Scope is the **landing page only** — the partial ES mirror has no architecture/developers pages and F7 does not expand it.
 - **Deploy:** GitHub Pages via `.github/workflows/deploy-docs.yml` — triggers automatically on push to `main` touching `docs/**`. No manual step, no gateway restart.
