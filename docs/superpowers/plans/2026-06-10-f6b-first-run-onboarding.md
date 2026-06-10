@@ -218,6 +218,10 @@ test("clamps out-of-range / non-numeric step to a valid page without throwing", 
   }
   const noParam = await render({});
   assert.ok(noParam.includes("stepper"), "missing step param renders step 0");
+  // Express parses ?step=1&step=2 into an array; parseInt stringifies it and
+  // reads the leading int, so it must clamp/render rather than throw.
+  const arrayStep = await render({ step: ["1", "2"] });
+  assert.ok(arrayStep.includes("stepper"), "array step param still renders");
 });
 
 test("honors the crow_lang=es cookie for Spanish copy", async () => {
@@ -428,19 +432,21 @@ Expected: `syntax ok`; onboarding tests still PASS.
 
 - [ ] **Step 6: Boot smoke test (panel registers, gateway starts clean)**
 
-Run the gateway in the background, confirm health, confirm the onboarding route is registered (it redirects unauthenticated requests to login rather than 404'ing), then stop it:
+Run the gateway in the background against a **throwaway data dir on a free port** (never the prod 3001 / dev state), confirm health, confirm the onboarding route is registered (it redirects unauthenticated requests to login rather than 404'ing), then stop it:
 
 ```bash
-node servers/gateway/index.js --no-auth >/tmp/f6b-boot.log 2>&1 &
+export CROW_DATA_DIR=$(mktemp -d)
+PORT=3999 node servers/gateway/index.js --no-auth >/tmp/f6b-boot.log 2>&1 &
 BOOT_PID=$!
 sleep 4
-curl -s -o /dev/null -w "health:%{http_code}\n" http://localhost:3001/health
-curl -s -o /dev/null -w "onboarding:%{http_code}\n" http://localhost:3001/dashboard/onboarding
+curl -s -o /dev/null -w "health:%{http_code}\n" http://localhost:3999/health
+curl -s -o /dev/null -w "onboarding:%{http_code}\n" http://localhost:3999/dashboard/onboarding
 kill $BOOT_PID 2>/dev/null
 grep -iE "error|throw|undefined is not" /tmp/f6b-boot.log || echo "no boot errors"
+rm -rf "$CROW_DATA_DIR"; unset CROW_DATA_DIR
 ```
 
-Expected: `health:200`; `onboarding:` a 200 or 3xx (route exists, not 404); `no boot errors`. (Port 3001 is crow's primary gateway node port; if it is occupied by the running prod gateway, run with `CROW_DATA_DIR=$(mktemp -d) PORT=3999` and curl `:3999` instead.)
+Expected: `health:200`; `onboarding:` a 200 or 3xx (route exists, not 404); `no boot errors`. (Using a `mktemp -d` data dir + `PORT=3999` keeps this fully isolated from the running prod gateway on 3001 and from real dev data. If the gateway needs an initialized DB to boot, run `CROW_DATA_DIR=$CROW_DATA_DIR node scripts/init-db.js` first.)
 
 - [ ] **Step 7: Commit**
 
@@ -474,6 +480,16 @@ test("Help & Setup renders a replay link to the onboarding tour", async () => {
   const html = await helpSetupSection.render({ req, db, lang: "en" });
   assert.ok(html.includes("/dashboard/onboarding?step=0"), "links to onboarding step 0");
   assert.ok(html.includes(i18n.t("onboarding.replayLink", "en")), "uses the replay link label");
+});
+
+test("Help & Setup replay link honors Spanish (DB language = es)", async () => {
+  // render() resolves language DB-first; lock that the ES label is emitted so a
+  // future refactor that drops cookie/DB resolution is caught.
+  const db = { execute: async () => ({ rows: [{ value: "es" }] }) };
+  const req = { headers: {} };
+  const html = await helpSetupSection.render({ req, db, lang: "en" });
+  assert.ok(html.includes("/dashboard/onboarding?step=0"), "links to onboarding step 0");
+  assert.ok(html.includes(i18n.t("onboarding.replayLink", "es")), "uses the ES replay label");
 });
 ```
 
@@ -582,3 +598,20 @@ Stop here for the holistic review (subagent-driven-development's final review, t
 **Type/name consistency:** `STEP_KEYS`, `resolveLang`, `deepLink`, `renderStepBody`, `renderNav` used consistently between panel and tests; i18n keys identical between Task 1 block, the panel, and the `ONBOARDING_KEYS` test list. Deep-link URLs identical between panel (`renderStepBody`) and the test's `deepLinkPerStep`. ✓
 
 **Em-dash / writing-rule check:** all `onboarding.*` copy uses periods/commas/parentheses, no em dashes, no "not X but Y". (The `dashboard.md` doc prose may use em dashes — that is developer docs, not Crow-authored UI copy, so the crow.md rule does not apply.) ✓
+
+---
+
+## Review
+
+**Reviewer:** adversarial staff-engineer subagent (Plan agent), verifying every claim against the live tree.
+**Date:** 2026-06-10
+**Verdict:** APPROVE (no critical issues).
+
+The review confirmed against the actual code: the redirect edit is safe (all first-run early-return paths at `index.js:137/140/145/171/174/183` correctly leave `wasFirstSetup` irrelevant or land on the documented 2FA non-goal; `redirectAfterPost` is defined at `servers/gateway/index.js:182`; fixed-string target → no open-redirect); the hidden-panel manifest mirrors the proven `design-system.js` and routes via `getPanel` while `getVisiblePanels` (`panel-registry.js:100-103`) keeps it out of the sidebar/home-redirect; the i18n block inserts validly before the `};` at `i18n.js:740` and `t()` returns the key when missing (parity logic valid); the help-setup edit has `escapeHtml`/`t`/`currentLang` in scope and the `db.execute(...).rows` stub matches; `escapeHtml` (`components.js:5-7`) escapes only `& < > "`, and no deep-link href contains `&`, so the `includes()` assertions survive; all panel tokens (`--crow-text-base/-secondary`, `--crow-leading-relaxed`, `--crow-space-3/4/5`, `--crow-accent`) are defined and the F6a tree-walk test covers the new panel; and `?step` as an array does not throw.
+
+**Suggestions adopted (all three):**
+1. Added a second help-setup test asserting the Spanish replay label when DB `language = es` (locks cookie/DB-first resolution against future refactors) — Task 4.
+2. Added a `?step=["1","2"]` array edge assertion to the clamping test — Task 2.
+3. Made the boot smoke test default to a throwaway `mktemp -d` `CROW_DATA_DIR` + `PORT=3999` (never prod 3001 / real dev state) — Task 3 Step 6.
+
+**Open UX note (intentional, not a defect):** step 2's "Open Bot Builder" deep-link uses `target="_blank"` even though Bot Builder is an in-app panel. This is the deliberate "keep the tour open behind you" behavior from the spec, applied uniformly to all deep-links.
