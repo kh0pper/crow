@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import designSystemPanel from "../servers/gateway/dashboard/panels/design-system.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -108,4 +109,18 @@ test("tabs: one panel per item, active marked, ids wired", () => {
   assert.ok((html.match(/data-tab=/g) || []).length === 2, "two tab triggers");
   assert.ok(html.includes("AA") && html.includes("BB"));
   assert.ok(html.includes("tab-active"));
+});
+
+test("design-system gallery panel renders all primitives without throwing", async () => {
+  const layout = ({ content }) => content; // stub: return content for assertions
+  let captured = "";
+  const res = { send(html) { captured = html; }, setHeader() {} };
+  const out = await designSystemPanel.handler({ method: "GET", body: {} }, res, { db: null, layout, lang: "en" });
+  const html = typeof out === "string" ? out : captured;
+  assert.ok(html && html.length > 0, "panel rendered HTML");
+  for (const marker of ["btn-primary", "code-block", "callout-warning", "stepper", "tab-list"]) {
+    assert.ok(html.includes(marker), `gallery includes ${marker}`);
+  }
+  assert.equal(designSystemPanel.id, "design-system");
+  assert.equal(designSystemPanel.route, "/dashboard/design-system");
 });
