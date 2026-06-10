@@ -4,11 +4,30 @@
 
 **Goal:** Formalize a surface-based bundle contract, validate every bundle manifest against it, and regenerate `registry/add-ons.json` from per-bundle manifests as a committed, drift-checked artifact.
 
-**Architecture:** A JSON Schema (`registry/manifest.schema.json`) defines manifest shape; a dependency-light validator (`scripts/lib/bundle-contract.mjs`) layers filesystem referential-integrity checks on top via `ajv`; a generator (`scripts/build-registry.mjs`) scans `bundles/*/manifest.json`, validates, excludes drafts + untracked dirs, injects `official: true`, sorts by id, and writes the registry; a `node:test` suite gates shape, integrity, and registry no-drift.
+**Architecture:** A JSON Schema (`registry/manifest.schema.json`) defines manifest shape; a validator (`scripts/lib/bundle-contract.mjs`) layers filesystem referential-integrity on top via `ajv`; a generator (`scripts/build-registry.mjs`) scans `bundles/*/manifest.json`, validates, excludes drafts + untracked dirs, injects `official: true`, sorts by id, and writes the registry; a `node:test` suite gates shape, integrity, and registry no-drift.
 
 **Tech Stack:** Node ESM (`type: module`), `ajv` (new devDependency, approved), `node:test`, `node:fs`, `git ls-files`.
 
 **Spec:** `docs/superpowers/specs/2026-06-09-f4b-bundle-contract-extensions-audit-design.md`
+
+**Ground truth (2026-06-09):** 94 bundle dirs, 93 manifests (`research-integration` has none), **89 git-tracked manifests**, 90 current registry entries. Against the contract below, exactly **one** tracked manifest has a genuine data bug (`browser` → deleted skill `skills/ffff-filing.md`). 16 model/media bundles ship without `version`/`author` (intentionally — those fields are optional). This plan incorporates a staff-engineer plan review (see the Review section at the end).
+
+---
+
+## The contract (authoritative summary)
+
+**Universal required:** `id` (== dirname), `name`, `description`, `type` (`bundle`|`mcp-server`|`skill`), `category`.
+**Optional, shape-checked when present:** `version` (semver), `author`.
+**Surfaces (validated only when declared):**
+- `docker` → `composefile` exists.
+- `server` → object **or `null`**; entry-file existence checked **only when `command === "node"` and `args[0]` is a non-flag path** (external `npx`/`uv` servers have no local entry).
+- `panel` → string **or object**; file-checked **only** for the string form (object panels resolve at runtime via `resolvePanelPath`).
+- `panelRoutes` → string; file exists.
+- `skills[]` → every path exists.
+- `requires.bundles[]` / `optional_bundles[]` → each id is a `bundles/<id>` dir.
+- `env_vars[]` → each item has a `name`.
+- `ports`/`port`/`webUI.port` → integers 1–65535.
+Schema is lenient (`additionalProperties: true`). `draft: true` or an untracked dir → excluded from the registry.
 
 ---
 
@@ -16,7 +35,7 @@
 
 | File | Responsibility |
 |---|---|
-| `registry/manifest.schema.json` (create) | JSON Schema (draft-07) — manifest shape, the human-readable contract of record |
+| `registry/manifest.schema.json` (create) | JSON Schema (draft-07) — manifest shape, the contract of record |
 | `scripts/lib/bundle-contract.mjs` (create) | `validateManifest(manifest, dir, opts)` (shape via ajv + filesystem integrity) + `detectSurfaces()` — single source of validation logic |
 | `scripts/build-registry.mjs` (create) | Scan + validate + (write \| `--check`) the registry; audit table; `git ls-files` tracked detection |
 | `tests/bundle-contract.test.js` (create) | Unit tests (shape, integrity, generator) + integration tests (all real manifests valid, no registry drift) |
@@ -29,23 +48,16 @@
 
 ## Task 1: Add the `ajv` devDependency
 
-**Files:**
-- Modify: `package.json`, `package-lock.json`
+**Files:** Modify `package.json`, `package-lock.json`
 
 - [ ] **Step 1: Install ajv (approved package)**
 
-Run:
-```bash
-cd /home/kh0pp/crow && npm install --save-dev ajv
-```
-Expected: `package.json` `devDependencies` gains `ajv` (v8.x); `package-lock.json` updated.
+Run: `cd /home/kh0pp/crow && npm install --save-dev ajv`
+Expected: `devDependencies` gains `ajv` (v8.x); lockfile updated.
 
 - [ ] **Step 2: Verify it imports under ESM**
 
-Run:
-```bash
-cd /home/kh0pp/crow && node -e "import('ajv').then(m => console.log('ajv', typeof m.default))"
-```
+Run: `cd /home/kh0pp/crow && node -e "import('ajv').then(m => console.log('ajv', typeof m.default))"`
 Expected: `ajv function`
 
 - [ ] **Step 3: Commit**
@@ -58,14 +70,13 @@ git show --stat HEAD | head -6
 
 ---
 
-## Task 2: Manifest schema + shape validation
+## Task 2: Manifest schema + validator (shape + integrity) — TDD
 
 **Files:**
-- Create: `registry/manifest.schema.json`
-- Create: `scripts/lib/bundle-contract.mjs`
+- Create: `registry/manifest.schema.json`, `scripts/lib/bundle-contract.mjs`
 - Test: `tests/bundle-contract.test.js`
 
-- [ ] **Step 1: Write the failing shape tests**
+- [ ] **Step 1: Write the full failing test suite for `validateManifest`/`detectSurfaces`**
 
 Create `tests/bundle-contract.test.js`:
 
@@ -90,12 +101,10 @@ function tmpBundle(id, files = {}) {
   return { root, dir };
 }
 
-const VALID = {
-  id: "demo", name: "Demo", version: "1.0.0", description: "d",
-  type: "bundle", author: "Crow", category: "misc",
-};
+// Minimal valid manifest: only the 5 universal-required fields (no version/author).
+const VALID = { id: "demo", name: "Demo", description: "d", type: "bundle", category: "misc" };
 
-test("valid minimal manifest passes", () => {
+test("minimal manifest (no version/author) passes", () => {
   const { dir } = tmpBundle("demo");
   const r = validateManifest(VALID, dir);
   assert.equal(r.ok, true, r.errors.join("; "));
@@ -103,21 +112,86 @@ test("valid minimal manifest passes", () => {
 
 test("missing each universal field fails", () => {
   const { dir } = tmpBundle("demo");
-  for (const f of ["id", "name", "version", "description", "type", "author", "category"]) {
+  for (const f of ["id", "name", "description", "type", "category"]) {
     const m = { ...VALID }; delete m[f];
     assert.equal(validateManifest(m, dir).ok, false, `expected fail without ${f}`);
   }
 });
 
-test("bad type enum and bad semver fail", () => {
+test("version/author are optional but shape-checked when present", () => {
+  const { dir } = tmpBundle("demo");
+  assert.equal(validateManifest({ ...VALID, version: "1.2.3", author: "Crow" }, dir).ok, true);
+  assert.equal(validateManifest({ ...VALID, version: "v1" }, dir).ok, false, "bad semver must fail");
+  assert.equal(validateManifest({ ...VALID, author: "" }, dir).ok, false, "empty author must fail");
+});
+
+test("bad type enum fails", () => {
   const { dir } = tmpBundle("demo");
   assert.equal(validateManifest({ ...VALID, type: "weird" }, dir).ok, false);
-  assert.equal(validateManifest({ ...VALID, version: "v1" }, dir).ok, false);
 });
 
 test("unknown top-level field is allowed (lenient)", () => {
   const { dir } = tmpBundle("demo");
   assert.equal(validateManifest({ ...VALID, sttProfileSeed: { x: 1 } }, dir).ok, true);
+});
+
+test("id must equal dirname", () => {
+  const { dir } = tmpBundle("demo");
+  assert.equal(validateManifest({ ...VALID, id: "other" }, dir).ok, false);
+});
+
+test("declared skill file must exist", () => {
+  const withFile = tmpBundle("demo", { "skills/x.md": "# x" });
+  assert.equal(validateManifest({ ...VALID, skills: ["skills/x.md"] }, withFile.dir).ok, true);
+  const without = tmpBundle("demo");
+  assert.equal(validateManifest({ ...VALID, skills: ["skills/missing.md"] }, without.dir).ok, false);
+});
+
+test("docker composefile must exist", () => {
+  const b = tmpBundle("demo", { "docker-compose.yml": "x" });
+  assert.equal(validateManifest({ ...VALID, docker: { composefile: "docker-compose.yml" } }, b.dir).ok, true);
+  const b2 = tmpBundle("demo");
+  assert.equal(validateManifest({ ...VALID, docker: { composefile: "docker-compose.yml" } }, b2.dir).ok, false);
+});
+
+test("node server entry-file must exist", () => {
+  const b = tmpBundle("demo", { "server/index.js": "//" });
+  assert.equal(validateManifest({ ...VALID, server: { command: "node", args: ["server/index.js"] } }, b.dir).ok, true);
+  const b2 = tmpBundle("demo");
+  assert.equal(validateManifest({ ...VALID, server: { command: "node", args: ["server/index.js"] } }, b2.dir).ok, false);
+});
+
+test("external-command server is NOT file-checked (npx -y pkg)", () => {
+  const { dir } = tmpBundle("demo"); // no local entry file on purpose
+  const m = { ...VALID, type: "mcp-server", server: { command: "npx", args: ["-y", "hass-mcp"] } };
+  assert.equal(validateManifest(m, dir).ok, true, "external command must not require a local file");
+});
+
+test("server: null is tolerated", () => {
+  const { dir } = tmpBundle("demo");
+  assert.equal(validateManifest({ ...VALID, server: null }, dir).ok, true);
+});
+
+test("panel string is file-checked; panel object is shape-only", () => {
+  const withFile = tmpBundle("demo", { "panel/demo.js": "//" });
+  assert.equal(validateManifest({ ...VALID, panel: "panel/demo.js" }, withFile.dir).ok, true);
+  const missing = tmpBundle("demo");
+  assert.equal(validateManifest({ ...VALID, panel: "panel/demo.js" }, missing.dir).ok, false);
+  // object form: no file check (resolved at runtime by resolvePanelPath)
+  assert.equal(validateManifest({ ...VALID, panel: { id: "demo", extends: "homepage" } }, missing.dir).ok, true);
+});
+
+test("requires.bundles existence checked via resolver", () => {
+  const { dir } = tmpBundle("demo");
+  const m = { ...VALID, requires: { bundles: ["companion"] } };
+  assert.equal(validateManifest(m, dir, { bundleExists: (id) => id === "companion" }).ok, true);
+  assert.equal(validateManifest(m, dir, { bundleExists: () => false }).ok, false);
+});
+
+test("env_vars items must have a name", () => {
+  const { dir } = tmpBundle("demo");
+  assert.equal(validateManifest({ ...VALID, env_vars: [{ name: "X" }] }, dir).ok, true);
+  assert.equal(validateManifest({ ...VALID, env_vars: [{ description: "no name" }] }, dir).ok, false);
 });
 
 test("detectSurfaces reports declared surfaces", () => {
@@ -126,7 +200,7 @@ test("detectSurfaces reports declared surfaces", () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [ ] **Step 2: Run to verify failure**
 
 Run: `cd /home/kh0pp/crow && node --test tests/bundle-contract.test.js`
 Expected: FAIL — `Cannot find module '../scripts/lib/bundle-contract.mjs'`
@@ -141,22 +215,22 @@ Create `registry/manifest.schema.json`:
   "$id": "https://crow.local/registry/manifest.schema.json",
   "title": "Crow Bundle Manifest",
   "type": "object",
-  "required": ["id", "name", "version", "description", "type", "author", "category"],
+  "required": ["id", "name", "description", "type", "category"],
   "additionalProperties": true,
   "properties": {
     "id": { "type": "string", "minLength": 1 },
     "name": { "type": "string", "minLength": 1 },
-    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+([-+].+)?$" },
     "description": { "type": "string", "minLength": 1 },
     "type": { "type": "string", "enum": ["bundle", "mcp-server", "skill"] },
-    "author": { "type": "string", "minLength": 1 },
     "category": { "type": "string", "minLength": 1 },
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+([-+].+)?$" },
+    "author": { "type": "string", "minLength": 1 },
     "draft": { "type": "boolean" },
     "official": { "type": "boolean" },
     "icon": { "type": "string" },
     "tags": { "type": "array", "items": { "type": "string" } },
     "notes": { "type": "string" },
-    "panel": { "type": "string", "minLength": 1 },
+    "panel": { "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "object" }] },
     "panelRoutes": { "type": "string", "minLength": 1 },
     "skills": { "type": "array", "items": { "type": "string", "minLength": 1 } },
     "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
@@ -168,12 +242,12 @@ Create `registry/manifest.schema.json`:
       "properties": { "composefile": { "type": "string", "minLength": 1 } }
     },
     "server": {
-      "type": "object",
-      "required": ["command", "args"],
+      "type": ["object", "null"],
       "additionalProperties": true,
+      "required": ["command"],
       "properties": {
         "command": { "type": "string", "minLength": 1 },
-        "args": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "args": { "type": "array", "items": { "type": "string" } },
         "envKeys": { "type": "array", "items": { "type": "string" } }
       }
     },
@@ -207,7 +281,7 @@ Create `registry/manifest.schema.json`:
 }
 ```
 
-- [ ] **Step 4: Write `bundle-contract.mjs` (shape half + detectSurfaces)**
+- [ ] **Step 4: Write `bundle-contract.mjs`**
 
 Create `scripts/lib/bundle-contract.mjs`:
 
@@ -274,15 +348,20 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
   if (manifest && manifest.docker && !fileExists(bundleDir, manifest.docker.composefile)) {
     errors.push(`docker.composefile "${manifest.docker && manifest.docker.composefile}" not found`);
   }
-  if (manifest && manifest.server && Array.isArray(manifest.server.args) && manifest.server.args[0]) {
-    if (!fileExists(bundleDir, manifest.server.args[0])) {
-      errors.push(`server entry "${manifest.server.args[0]}" not found`);
+  // server entry-file: only local node scripts with a non-flag path arg.
+  // (typeof null === "object", so `manifest.server &&` correctly skips null.)
+  if (manifest && manifest.server && typeof manifest.server === "object") {
+    const command = manifest.server.command;
+    const arg0 = Array.isArray(manifest.server.args) ? manifest.server.args[0] : undefined;
+    if (command === "node" && typeof arg0 === "string" && !arg0.startsWith("-") && !fileExists(bundleDir, arg0)) {
+      errors.push(`server entry "${arg0}" not found`);
     }
   }
-  if (manifest && manifest.panel && !fileExists(bundleDir, manifest.panel)) {
+  // panel: file-check only the string form; object panels resolve at runtime.
+  if (manifest && typeof manifest.panel === "string" && !fileExists(bundleDir, manifest.panel)) {
     errors.push(`panel "${manifest.panel}" not found`);
   }
-  if (manifest && manifest.panelRoutes && !fileExists(bundleDir, manifest.panelRoutes)) {
+  if (manifest && typeof manifest.panelRoutes === "string" && !fileExists(bundleDir, manifest.panelRoutes)) {
     errors.push(`panelRoutes "${manifest.panelRoutes}" not found`);
   }
   if (manifest && Array.isArray(manifest.skills)) {
@@ -309,90 +388,26 @@ export function validateManifest(manifest, bundleDir, opts = {}) {
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `cd /home/kh0pp/crow && node --test tests/bundle-contract.test.js`
-Expected: PASS (5 tests)
+Expected: PASS (15 tests)
 
 - [ ] **Step 6: Commit**
 
 ```bash
 cd /home/kh0pp/crow
 git add registry/manifest.schema.json scripts/lib/bundle-contract.mjs tests/bundle-contract.test.js
-git commit registry/manifest.schema.json scripts/lib/bundle-contract.mjs tests/bundle-contract.test.js -m "F4b: manifest schema + shape validation (validateManifest, detectSurfaces)"
+git commit registry/manifest.schema.json scripts/lib/bundle-contract.mjs tests/bundle-contract.test.js -m "F4b: manifest schema + surface-based validator (validateManifest, detectSurfaces)"
 git show --stat HEAD | head -8
 ```
 
 ---
 
-## Task 3: Referential-integrity tests
-
-**Files:**
-- Modify: `tests/bundle-contract.test.js` (append tests — `bundle-contract.mjs` already implements integrity from Task 2)
-
-- [ ] **Step 1: Append the failing-then-passing integrity tests**
-
-Append to `tests/bundle-contract.test.js` (after the existing tests):
-
-```js
-test("id must equal dirname", () => {
-  const { dir } = tmpBundle("demo");
-  assert.equal(validateManifest({ ...VALID, id: "other" }, dir).ok, false);
-});
-
-test("declared skill file must exist", () => {
-  const withFile = tmpBundle("demo", { "skills/x.md": "# x" });
-  assert.equal(validateManifest({ ...VALID, skills: ["skills/x.md"] }, withFile.dir).ok, true);
-  const without = tmpBundle("demo");
-  assert.equal(validateManifest({ ...VALID, skills: ["skills/missing.md"] }, without.dir).ok, false);
-});
-
-test("declared server entry and docker composefile must exist", () => {
-  const b = tmpBundle("demo", { "server/index.js": "//", "docker-compose.yml": "x" });
-  const ok = validateManifest({
-    ...VALID,
-    server: { command: "node", args: ["server/index.js"] },
-    docker: { composefile: "docker-compose.yml" },
-  }, b.dir);
-  assert.equal(ok.ok, true, ok.errors.join("; "));
-  const b2 = tmpBundle("demo");
-  assert.equal(validateManifest({ ...VALID, server: { command: "node", args: ["server/index.js"] } }, b2.dir).ok, false);
-});
-
-test("declared panel files must exist", () => {
-  const b = tmpBundle("demo", { "panel/p.js": "//", "panel/routes.js": "//" });
-  assert.equal(validateManifest({ ...VALID, panel: "panel/p.js", panelRoutes: "panel/routes.js" }, b.dir).ok, true);
-  const b2 = tmpBundle("demo");
-  assert.equal(validateManifest({ ...VALID, panel: "panel/missing.js" }, b2.dir).ok, false);
-});
-
-test("requires.bundles existence checked via resolver", () => {
-  const { dir } = tmpBundle("demo");
-  const m = { ...VALID, requires: { bundles: ["companion"] } };
-  assert.equal(validateManifest(m, dir, { bundleExists: (id) => id === "companion" }).ok, true);
-  assert.equal(validateManifest(m, dir, { bundleExists: () => false }).ok, false);
-});
-```
-
-- [ ] **Step 2: Run the tests**
-
-Run: `cd /home/kh0pp/crow && node --test tests/bundle-contract.test.js`
-Expected: PASS (10 tests — these pass immediately because `bundle-contract.mjs` already implements integrity; the tests lock in that behavior)
-
-- [ ] **Step 3: Commit**
-
-```bash
-cd /home/kh0pp/crow
-git commit tests/bundle-contract.test.js -m "F4b: referential-integrity tests for surfaces + id/dirname + deps"
-git show --stat HEAD | head -6
-```
-
----
-
-## Task 4: Registry generator (`build-registry.mjs`)
+## Task 3: Registry generator (`build-registry.mjs`) — TDD
 
 **Files:**
 - Create: `scripts/build-registry.mjs`
-- Modify: `tests/bundle-contract.test.js` (append generator tests + imports)
+- Modify: `tests/bundle-contract.test.js` (append generator imports + tests)
 
-- [ ] **Step 1: Add generator imports + failing tests**
+- [ ] **Step 1: Add generator import + failing tests**
 
 At the TOP of `tests/bundle-contract.test.js`, add to the imports:
 
@@ -400,7 +415,7 @@ At the TOP of `tests/bundle-contract.test.js`, add to the imports:
 import { buildRegistry, formatRegistry } from "../scripts/build-registry.mjs";
 ```
 
-Append these tests at the end of the file:
+Append at the end of the file:
 
 ```js
 /** Build a fake bundles root from {id: manifestObject}; creates referenced skill files so they validate. */
@@ -421,8 +436,7 @@ function fakeBundlesRoot(manifests) {
 }
 
 const mk = (id, extra = {}) => ({
-  id, name: id.toUpperCase(), version: "1.0.0", description: "d",
-  type: "bundle", author: "Crow", category: "misc", ...extra,
+  id, name: id.toUpperCase(), description: "d", type: "bundle", category: "misc", ...extra,
 });
 
 test("buildRegistry: valid non-draft tracked entries, official injected, sorted by id", () => {
@@ -440,7 +454,7 @@ test("buildRegistry: untracked dir excluded", () => {
 });
 
 test("buildRegistry: invalid manifest excluded and flagged", () => {
-  const root = fakeBundlesRoot({ bad: mk("bad", { version: "nope" }) });
+  const root = fakeBundlesRoot({ bad: mk("bad", { type: "weird" }) });
   const { registry, audit } = buildRegistry({ bundlesRoot: root, tracked: null });
   assert.equal(registry["add-ons"].length, 0);
   assert.equal(audit.find((a) => a.id === "bad").status, "invalid");
@@ -581,7 +595,7 @@ if (import.meta.url === `file://${process.argv[1]}`) main();
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd /home/kh0pp/crow && node --test tests/bundle-contract.test.js`
-Expected: PASS (14 tests)
+Expected: PASS (19 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -594,10 +608,9 @@ git show --stat HEAD | head -8
 
 ---
 
-## Task 5: Wire npm scripts
+## Task 4: Wire npm scripts
 
-**Files:**
-- Modify: `package.json`
+**Files:** Modify `package.json`
 
 - [ ] **Step 1: Add the two scripts**
 
@@ -610,17 +623,11 @@ In `package.json` `scripts`, add (after `"sync-skills": ...`):
 
 - [ ] **Step 2: Verify both run**
 
-Run:
-```bash
-cd /home/kh0pp/crow && npm run test:bundle-contract 2>&1 | tail -5
-```
-Expected: tests pass (14 tests).
+Run: `cd /home/kh0pp/crow && npm run test:bundle-contract 2>&1 | tail -5`
+Expected: tests pass (19 tests).
 
-Run:
-```bash
-cd /home/kh0pp/crow && npm run build-registry -- --check 2>&1 | tail -8
-```
-Expected: prints the audit table for the REAL bundles. This will likely report DRIFT and possibly INVALID manifests — that is expected and is resolved in Tasks 6–7. (Exit code nonzero is fine here.)
+Run: `cd /home/kh0pp/crow && npm run build-registry -- --check 2>&1 | tail -8`
+Expected: prints the audit table for the REAL bundles. It will report exactly **one INVALID** (`browser :: skill "skills/ffff-filing.md" not found`) plus **DRIFT** (the committed registry is the old hand-maintained file). Exit code nonzero is expected here; both are resolved in Task 5.
 
 - [ ] **Step 3: Commit**
 
@@ -632,20 +639,78 @@ git show --stat HEAD | head -6
 
 ---
 
-## Task 6: Integration tests over the real bundles (failing gate)
+## Task 5: Audit-fix + regenerate + integration gate (lands green)
+
+> **Ordering (per plan review):** the tree must never be committed-red. So the genuine manifest fix and the regenerated registry land FIRST (each commit green — no integration test asserting them yet), and the integration tests are added LAST, when `--check` is already green. The whole task is verified green before its final commit.
 
 **Files:**
-- Modify: `tests/bundle-contract.test.js` (append integration tests + `readFileSync` import)
+- Modify: `bundles/browser/manifest.json` (the one genuine data bug)
+- Regenerate: `registry/add-ons.json`
+- Modify: `tests/bundle-contract.test.js` (append integration tests, last)
 
-- [ ] **Step 1: Add the integration tests**
+- [ ] **Step 1: Capture the audit**
 
-Ensure `readFileSync` is imported at the top of `tests/bundle-contract.test.js`:
+Run: `cd /home/kh0pp/crow && node scripts/build-registry.mjs --check 2>&1 | grep -E "^INVALID|^UNTRACKED|^DRAFT"`
+Expected: one `INVALID browser ... :: skill "skills/ffff-filing.md" not found`; several `UNTRACKED` (the WIP dirs — leave untouched); zero `DRAFT`. **If any INVALID other than `browser` appears, STOP and report it** (the contract was simulated to yield only `browser`; a new one means a manifest changed or an unforeseen case — surface it, do not blanket-edit).
 
+- [ ] **Step 2: Fix the `browser` manifest (remove the dangling skill)**
+
+`skills/ffff-filing.md` was intentionally deleted for PII (commit `709dfa7`); do NOT restore it. In `bundles/browser/manifest.json`, change the skills array from:
+```json
+  "skills": ["skills/crow-browser.md", "skills/ffff-filing.md"],
+```
+to:
+```json
+  "skills": ["skills/crow-browser.md"],
+```
+
+- [ ] **Step 3: Verify only drift remains (no invalids)**
+
+Run: `cd /home/kh0pp/crow && node scripts/build-registry.mjs --check 2>&1 | grep -E "^INVALID" ; echo "exit: invalids above (should be none)"`
+Expected: no `INVALID` lines.
+
+- [ ] **Step 4: Commit the manifest fix**
+
+```bash
+cd /home/kh0pp/crow
+git commit bundles/browser/manifest.json -m "F4b: drop dangling browser skill ref (ffff-filing.md removed for PII in 709dfa7)"
+```
+
+- [ ] **Step 5: Regenerate the registry**
+
+Run: `cd /home/kh0pp/crow && node scripts/build-registry.mjs 2>&1 | tail -4`
+Expected: `Wrote .../registry/add-ons.json`.
+
+- [ ] **Step 6: Review the diff (normalization + semantic gains, nothing wrongly dropped)**
+
+Run:
+```bash
+cd /home/kh0pp/crow
+git show HEAD:registry/add-ons.json | node -e '
+const fs=require("fs"); let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+  const before=new Set(JSON.parse(s)["add-ons"].map(e=>e.id));
+  const after=new Set(JSON.parse(fs.readFileSync("/home/kh0pp/crow/registry/add-ons.json","utf8"))["add-ons"].map(e=>e.id));
+  console.log("dropped:", [...before].filter(x=>!after.has(x)).join(", ")||"(none)");
+  console.log("added:", [...after].filter(x=>!before.has(x)).join(", ")||"(none)");
+});'
+git diff --stat registry/add-ons.json
+```
+Expected: `dropped:` is exactly `tasks, developer-kit` (the two orphans). `added:` includes `campaigns` (tracked, now registered) and any of the 16 model bundles that were missing from the old registry. **If `dropped:` contains anything else — especially any `vllm-*`/`llamacpp-*`/`kokoro`/`calls` — STOP and investigate before committing** (that would mean a published bundle is being lost).
+
+- [ ] **Step 7: Commit the regenerated registry**
+
+```bash
+cd /home/kh0pp/crow
+git commit registry/add-ons.json -m "F4b: regenerate add-ons.json from manifests (drops orphans tasks/developer-kit, restores server/skills/panel)"
+```
+
+- [ ] **Step 8: Add the integration tests (now green) — ensure `readFileSync` is imported**
+
+In `tests/bundle-contract.test.js`, update the fs import to include `readFileSync`:
 ```js
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 ```
-
-Append at the end of `tests/bundle-contract.test.js`:
+Append at the end of the file:
 
 ```js
 // --- Integration: the real bundles + committed registry (no fixtures) ---
@@ -664,99 +729,30 @@ test("committed registry/add-ons.json matches generated (no drift)", () => {
 });
 ```
 
-- [ ] **Step 2: Run — expect these two to FAIL**
-
-Run: `cd /home/kh0pp/crow && node --test tests/bundle-contract.test.js 2>&1 | tail -20`
-Expected: the 14 unit tests pass; the 2 integration tests FAIL (drift, because the committed registry is the old hand-maintained file; possibly also invalid-manifest failures). This documents the pre-fix state.
-
-- [ ] **Step 3: Commit the failing gate**
-
-```bash
-cd /home/kh0pp/crow
-git commit tests/bundle-contract.test.js -m "F4b: integration gate — all real manifests valid + registry no-drift (currently failing, fixed next)"
-git show --stat HEAD | head -6
-```
-
----
-
-## Task 7: Audit-fix + regenerate the registry
-
-**Files:**
-- Modify: any nonconformant `bundles/<id>/manifest.json` (data-driven; see below)
-- Regenerate: `registry/add-ons.json`
-
-- [ ] **Step 1: Capture the audit**
-
-Run:
-```bash
-cd /home/kh0pp/crow && node scripts/build-registry.mjs --check 2>&1 | tee /tmp/f4b-audit.txt | grep -E "^INVALID|^UNTRACKED|^DRAFT" 
-```
-Expected: a list of INVALID (must fix), UNTRACKED (the 5 WIP dirs — leave their files untouched), DRAFT (none yet).
-
-- [ ] **Step 2: Fix each INVALID tracked manifest**
-
-For every line tagged `INVALID`, read the `:: <error>` reason and fix the **manifest** (not the contract):
-- Missing universal field (e.g. `category`) → add the correct value (read the bundle's README/description; never fabricate — if genuinely unknown, use the bundle's existing `tags`/dir purpose to choose an accurate `category`).
-- `skill "..." not found` / `server entry "..." not found` / `panel "..." not found` → either the path is wrong (fix it to the real file) or the file was removed (remove the dangling reference). Verify against the actual dir contents with `ls bundles/<id>`.
-- `id must equal directory name` → fix the manifest `id` to match the dir.
-- `required bundle "X" does not exist` → fix or remove the dependency.
-
-Re-run `node scripts/build-registry.mjs --check 2>&1 | grep -E "^INVALID"` after each fix until zero INVALID remain. Commit manifest fixes with explicit paths, e.g.:
-```bash
-git commit bundles/<id>/manifest.json -m "F4b: fix <id> manifest — <what was wrong>"
-```
-
-> **STOP-AND-ASK:** If a fix would require a non-obvious judgement (a missing file that should arguably exist, a bundle that looks half-built, or `campaigns`/any tracked dir that fails), do NOT guess — surface it to the user with the audit line and proposed resolution (fix / mark `"draft": true` / leave). The UNTRACKED WIP dirs are reported only; their files are never edited.
-
-- [ ] **Step 3: Regenerate the registry**
-
-Run:
-```bash
-cd /home/kh0pp/crow && node scripts/build-registry.mjs 2>&1 | tail -4
-```
-Expected: `Wrote .../registry/add-ons.json`.
-
-- [ ] **Step 4: Review the diff (semantic vs normalization)**
-
-Run:
-```bash
-cd /home/kh0pp/crow && git diff --stat registry/add-ons.json && echo "--- sample semantic gains (server/skills now present) ---" && git diff registry/add-ons.json | grep -E '^\+' | grep -E '"server"|"skills"|"panel"' | head
-```
-Expected: a large diff. Two kinds of change, both expected: (a) **normalization** — non-ASCII `—` becomes literal `—` and ordering/formatting normalizes (the registry is now generated); (b) **semantic** — previously-thin entries (jellyfin, plex, obsidian, trilium, nominatim, browser, …) regain `server`/`skills`/`panel` from their manifests, and orphan entries `tasks`/`developer-kit` disappear. Confirm no published bundle was unexpectedly dropped:
-```bash
-cd /home/kh0pp/crow && node -e '
-const before = require("./registry/add-ons.json"); // already regenerated; compare against HEAD via git
-' ; git show HEAD:registry/add-ons.json | node -e '
-const fs=require("fs"); let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
-  const before=new Set(JSON.parse(s)["add-ons"].map(e=>e.id));
-  const after=new Set(require("/home/kh0pp/crow/registry/add-ons.json")["add-ons"].map(e=>e.id));
-  console.log("dropped:", [...before].filter(x=>!after.has(x)).join(", ")||"(none)");
-  console.log("added:", [...after].filter(x=>!before.has(x)).join(", ")||"(none)");
-});'
-```
-Expected `dropped:` to contain only `tasks, developer-kit` (orphans) plus any dir you intentionally marked draft; `added:` may include `campaigns` if it validated. If anything else dropped, investigate before committing.
-
-- [ ] **Step 5: Run the full suite to verify the gate is green**
+- [ ] **Step 9: Run the full suite + `--check` — both green**
 
 Run: `cd /home/kh0pp/crow && node --test tests/bundle-contract.test.js 2>&1 | tail -6`
-Expected: PASS (16 tests — including the two integration tests now green).
+Expected: PASS (21 tests).
 
-- [ ] **Step 6: Confirm no regression in the gateway-facing tests**
+Run: `cd /home/kh0pp/crow && npm run build-registry -- --check 2>&1 | tail -3`
+Expected: `OK: all manifests valid, registry in sync.` (exit 0).
+
+- [ ] **Step 10: Guard — gateway-facing tests still pass**
 
 Run: `cd /home/kh0pp/crow && node --test tests/auth-network.test.js 2>&1 | tail -4`
-Expected: PASS (this work touches no routes/auth; this is a guard).
+Expected: PASS (this work touches no routes/auth).
 
-- [ ] **Step 7: Commit the regenerated registry**
+- [ ] **Step 11: Commit the integration tests**
 
 ```bash
 cd /home/kh0pp/crow
-git commit registry/add-ons.json -m "F4b: regenerate add-ons.json from manifests (drops orphans, restores server/skills)"
+git commit tests/bundle-contract.test.js -m "F4b: integration gate — all real manifests valid + registry no-drift (green)"
 git show --stat HEAD | head -6
 ```
 
 ---
 
-## Task 8: Documentation
+## Task 6: Documentation
 
 **Files:**
 - Rewrite: `docs/developers/bundles.md`
@@ -784,11 +780,11 @@ Every manifest must have:
 |---|---|
 | `id` | must equal the directory name |
 | `name` | non-empty |
-| `version` | semver (`x.y.z`) |
 | `description` | non-empty |
 | `type` | `bundle` \| `mcp-server` \| `skill` (a coarse category tag, not what drives required fields) |
-| `author` | non-empty |
 | `category` | non-empty |
+
+`version` (semver) and `author` are **optional** but shape-checked when present (some first-party model/media bundles ship without them).
 
 ## Surfaces (declare what you provide)
 
@@ -797,8 +793,9 @@ A surface is "declared" by the presence of its key. Each declared surface is val
 | Surface | Shape | Integrity |
 |---|---|---|
 | `docker` | `{ "composefile": "docker-compose.yml" }` | the composefile exists |
-| `server` | `{ "command": "node", "args": ["server/index.js"], "envKeys": [...] }` | `args[0]` exists |
-| `panel` / `panelRoutes` | `"panel/<id>.js"` | the file exists |
+| `server` | `{ "command": "node", "args": ["server/index.js"], "envKeys": [...] }`, or `null` | entry file checked **only** when `command` is `node` and `args[0]` is a path (external `npx`/`uv` servers are exempt) |
+| `panel` | `"panel/<id>.js"` **or** `{ "id": "...", "extends": "..." }` | string form: the file exists; object form: shape-only (resolved at runtime) |
+| `panelRoutes` | `"panel/routes.js"` | the file exists |
 | `skills` | `["skills/<id>.md", ...]` | every path exists |
 | `ports` / `port` / `webUI.port` | integers (1–65535) | — |
 | `requires.bundles` / `optional_bundles` | `["<bundle-id>", ...]` | each id exists as a `bundles/<id>` dir |
@@ -863,13 +860,10 @@ cd /home/kh0pp/crow && grep -n "add-ons.json\|manifest.json\|bundle" docs/develo
 ```
 For any line that tells authors to hand-edit `registry/add-ons.json`, change it to: author `bundles/<id>/manifest.json` then run `npm run build-registry` (the registry is generated). Add a one-line pointer near the top of each: `> The bundle contract is documented in [bundles.md](./bundles.md).` Make only these targeted edits — do not rewrite these files.
 
-- [ ] **Step 3: Verify docs build (if VitePress dev is quick) or at least lint links**
+- [ ] **Step 3: Sanity-check the rewrite landed**
 
-Run:
-```bash
-cd /home/kh0pp/crow && grep -c "Surfaces" docs/developers/bundles.md
-```
-Expected: `1` (sanity check the rewrite landed).
+Run: `cd /home/kh0pp/crow && grep -c "Surfaces (declare what you provide)" docs/developers/bundles.md`
+Expected: `1`
 
 - [ ] **Step 4: Commit**
 
@@ -883,15 +877,20 @@ git show --stat HEAD | head -8
 
 ## Final verification
 
-- [ ] **Run the full bundle-contract suite + a gateway smoke test**
+- [ ] **Run the full bundle-contract suite + `--check` + a gateway smoke test**
 
 ```bash
 cd /home/kh0pp/crow
-node --test tests/bundle-contract.test.js 2>&1 | tail -6      # expect 16 pass
+node --test tests/bundle-contract.test.js 2>&1 | tail -6      # expect 21 pass
 npm run build-registry -- --check 2>&1 | tail -3              # expect "OK: ... in sync." exit 0
-timeout 8 node servers/gateway/index.js --no-auth 2>&1 | tail -15 || true   # boots clean, extensions panel reads regenerated registry
+timeout 8 node servers/gateway/index.js --no-auth 2>&1 | tail -15 || true   # boots clean; Extensions panel reads regenerated registry
 ```
 Expected: all bundle-contract tests pass; `--check` reports OK and exits 0; gateway boots without errors referencing the registry.
+
+- [ ] **Confirm the Extensions panel still lists the model bundles**
+
+Run: `cd /home/kh0pp/crow && node -e 'const r=require("./registry/add-ons.json")["add-ons"].map(e=>e.id); const want=["vllm-rocm-qwen35-4b","llamacpp-vulkan-qwen36-35b-a3b","kokoro-tts","calls"]; console.log(want.map(w=>w+":"+(r.includes(w)?"OK":"MISSING")).join("  "))'`
+Expected: all `OK` (the version/author relaxation kept them in the registry).
 
 - [ ] **Holistic review** — per subagent-driven-development, run the final holistic code review across all F4b commits before considering the branch done.
 
@@ -902,5 +901,20 @@ Expected: all bundle-contract tests pass; `--check` reports OK and exits 0; gate
 - **Commits:** always `git commit <explicit paths>` (parallel sessions share the tree); for new files `git add <path>` first. Verify with `git show --stat HEAD`. Never attribute Claude / add as co-author.
 - **No init-db:** this work adds no DB tables. Deploy (if/when) = pull + restart gateways; the registry is read from disk.
 - **Build resource note:** subagent-driven runs one subagent at a time and only `node --test` — no need to stop the model stack. Only stop `docker stop vllm-rocm-qwen35-4b llamacpp-vulkan-qwen36-35b-a3b llamacpp-vulkan-qwen3-embed crow-companion faster-whisper-server kokoro-tts` before genuinely parallel heavy fan-out.
-- **WIP safety:** the five uncommitted dirs (`capstone-tracker`, `fed-gov-data`, `knowledge-base-mcp`, `research-integration`, `texas-gov-data`) are untracked → auto-excluded. Never edit their files or `git add` them as part of F4b.
-```
+- **WIP safety:** the uncommitted WIP dirs (`capstone-tracker`, `fed-gov-data`, `knowledge-base-mcp`, `research-integration` [no manifest], `texas-gov-data`) are untracked → auto-excluded. Never edit their files or `git add` them as part of F4b.
+- **Never committed-red:** Task 5 lands the integration gate green in the same task as its fixes. If you must split work across sessions, do not commit a failing test.
+
+---
+
+## Review
+
+**Reviewer:** staff-engineer plan-reviewer subagent (adversarial). **Date:** 2026-06-09. **Initial verdict:** REJECT → **resolved to APPROVE-pending-revision**, revisions applied below.
+
+Critical issues raised and how each was resolved (all verified against the real repo):
+
+- **C1 — contract rejected valid manifests.** Fixed in the schema + validator: `panel` accepts string **or** object (object is file-check-exempt; runtime `resolvePanelPath` supports it — data-dashboard, nominatim); `server` entry-file check gated on `command === "node"` + non-flag `args[0]` (external `npx -y` servers home-assistant/obsidian no longer falsely fail); `server: null` tolerated (matrix-bridges).
+- **C2 — 17 published bundles would be dropped** (missing `version`/`author`). Resolved by the user decision to make `version` + `author` **optional** (avoids both the regression and fabricating version numbers). Simulation confirms all 16/17 now stay in the registry.
+- **C3 — Task 7 scope was large + conflated contract vs data bugs.** Resolved: after the contract fixes, a full simulation over the real tree shows exactly **one** genuine data bug (`browser` dangling skill). Task 5 fixes that single manifest; the "fix the manifest" instruction now applies only where it's correct, with a STOP-and-report guard for anything unexpected.
+- **C4 — third consumer unaccounted.** `nest/html.js` is a comment-only reference (static icon map, no runtime read); `bundles.js` `resolveManifestHost`/`resolvePanelPath` confirmed compatible. Documented in the spec's consumer note.
+- **Ordering / committed-red.** Tasks reordered: the integration gate now lands green in the same task as its fixes (Task 5), never committing a known-failing test into the shared tree. Old Task 3 (lock-in tests mislabeled as TDD) folded into Task 2.
+- **Counts corrected** (94 dirs / 93 manifests / 89 tracked / 90 entries). **Determinism risk dropped** — it was misframed (`JSON.stringify` never emits `\uXXXX`; output is deterministic across Node 20/22).
