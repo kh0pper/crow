@@ -281,3 +281,12 @@ test("POST generate_token with a failing DB: shows an error callout, reveals no 
   assert.ok(html.includes("callout-error"), "uses the error callout style");
   assert.ok(!/Bearer\s+[0-9a-f]{64}/.test(html), "no token revealed on failure");
 });
+
+import connectionsSection from "../servers/gateway/dashboard/settings/sections/connections.js";
+
+test("Connections section points at the connect wizard for token generation", async () => {
+  const req = { protocol: "https", headers: {}, get: (h) => (h.toLowerCase() === "host" ? HOST : "") };
+  const html = await connectionsSection.render({ req, lang: "en" });
+  assert.ok(html.includes("/dashboard/connect"), "links to the connect wizard");
+  assert.ok(html.includes(i18n.t("connect.token.connectionsPointer", "en")), "uses the token pointer copy");
+});

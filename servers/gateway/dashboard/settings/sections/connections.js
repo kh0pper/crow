@@ -62,7 +62,8 @@ export default {
       + `<div style="margin-top:1rem"><h4 style="font-size:0.9rem;color:var(--crow-text-muted);margin-bottom:0.5rem">${t("settings.mcpEndpoints", lang)}</h4>`
       + dataTable([t("settings.server", lang), t("settings.endpointUrl", lang), t("settings.scope", lang)], mcpRows)
       + `<p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.5rem">Use these Streamable HTTP endpoints to connect Gemini, Cursor, or other local MCP clients.</p>`
-      + `<p style="margin-top:0.75rem"><a href="/dashboard/connect" style="color:var(--crow-accent);text-decoration:none;font-weight:600">${t("connect.openWizard", lang)} &rarr;</a> <span style="color:var(--crow-text-muted);font-size:0.8rem">${t("connect.settingsPointer", lang)}</span></p></div>`;
+      + `<p style="margin-top:0.75rem"><a href="/dashboard/connect" style="color:var(--crow-accent);text-decoration:none;font-weight:600">${t("connect.openWizard", lang)} &rarr;</a> <span style="color:var(--crow-text-muted);font-size:0.8rem">${t("connect.settingsPointer", lang)}</span></p>`
+      + `<p style="font-size:0.85rem;color:var(--crow-text-muted);margin-top:var(--crow-space-2)">${t("connect.token.connectionsPointer", lang)}</p></div>`;
   },
 
   async handleAction() {
