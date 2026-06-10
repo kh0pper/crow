@@ -11,7 +11,7 @@
  *   tJs("notif.no_notifications", "es")  // → JS-safe escaped string (for JS string contexts)
  */
 
-const translations = {
+export const translations = {
   // ─── Nav & Layout ───
   "nav.logout": { en: "Logout", es: "Cerrar sesión" },
   "nav.toggleMenu": { en: "Toggle menu", es: "Alternar menú" },
