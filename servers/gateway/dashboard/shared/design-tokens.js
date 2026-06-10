@@ -24,6 +24,8 @@ export function designTokensCss() {
     --crow-success: #22c55e;
     --crow-error: #ef4444;
     --crow-info: #38bdf8;
+    --crow-warning: #f59e0b;
+    --crow-text-tertiary: #8b8680;
   }
 
   .theme-light {
@@ -37,6 +39,8 @@ export function designTokensCss() {
     --crow-accent: #4f46e5;
     --crow-accent-hover: #6366f1;
     --crow-accent-muted: #e0e7ff;
+    --crow-text-tertiary: #78716c;
+    --crow-warning: #d97706;
   }
 
   .theme-serif {
@@ -47,6 +51,30 @@ export function designTokensCss() {
   :root {
     --crow-radius-card: 12px;
     --crow-radius-pill: 8px;
+  }
+
+  /* Sizing scales (theme-independent) */
+  :root {
+    --crow-space-1: 4px;  --crow-space-2: 8px;  --crow-space-3: 12px;
+    --crow-space-4: 16px; --crow-space-5: 24px; --crow-space-6: 32px;
+    --crow-space-8: 48px; --crow-space-10: 64px;
+
+    --crow-text-xs: 0.75rem;  --crow-text-sm: 0.8125rem; --crow-text-base: 0.875rem;
+    --crow-text-md: 1rem;     --crow-text-lg: 1.125rem;  --crow-text-xl: 1.25rem;
+    --crow-text-2xl: 1.5rem;  --crow-text-3xl: 2rem;
+
+    --crow-leading-tight: 1.2; --crow-leading-normal: 1.5; --crow-leading-relaxed: 1.7;
+
+    /* Compatibility aliases — legacy names used across panels. Prefer the
+       canonical token (right side) in NEW code. These reference the canonical
+       custom properties, so they track theme overrides automatically. */
+    --crow-bg: var(--crow-bg-deep);
+    --crow-background: var(--crow-bg-deep);
+    --crow-surface: var(--crow-bg-surface);
+    --crow-bg-card: var(--crow-bg-surface);
+    --crow-text: var(--crow-text-primary);
+    --crow-border-subtle: var(--crow-border);
+    --crow-accent-bg: var(--crow-accent-muted);
   }
 
   /* Glass aesthetic — iOS-inspired blur/transparency */
@@ -70,6 +98,8 @@ export function designTokensCss() {
     --crow-radius-pill: 100px;
     --crow-bg-popup: rgba(30,30,30,0.85);
     --crow-border-popup: rgba(255,255,255,0.12);
+    --crow-text-tertiary: rgba(255,255,255,0.45);
+    --crow-warning: #ff9f0a;
   }
 
   .theme-glass.theme-light {
@@ -85,5 +115,6 @@ export function designTokensCss() {
     --crow-accent-muted: rgba(0,113,227,0.1);
     --crow-bg-popup: rgba(245,245,247,0.85);
     --crow-border-popup: rgba(0,0,0,0.12);
+    --crow-text-tertiary: rgba(0,0,0,0.45);
   }`;
 }
