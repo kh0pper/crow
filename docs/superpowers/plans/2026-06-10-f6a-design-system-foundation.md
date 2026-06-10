@@ -474,17 +474,15 @@ In `dashboardCss()` (the `<style>` block beginning ~line 775), add `${components
   ${componentsCss()}
 ```
 
-The `componentsJs()` `<script>` must be emitted once per page. `dashboardCss()` returns a `<style>` block, so emit the script right after the closing `</style>` of `dashboardCss()`. Find the end of `dashboardCss()`'s template (the final `</style>` before its closing backtick) and change it from:
+The `componentsJs()` `<script>` must be emitted once per page. `dashboardCss()` returns a `<style>` block, so emit the script right after that block's closing `</style>`. **The closing `</style>` is on `layout.js:1320`** — the line reads `  </style>\`;` (the function's closing `}` is on 1321). It is NOT next to `${tamagotchiCss}` (that's line 1163; the CSS continues ~157 lines past it). There is exactly one `</style>` in `dashboardCss()`. Change that one line from:
 ```js
-  ${tamagotchiCss}
   </style>`;
 ```
 to:
 ```js
-  ${tamagotchiCss}
   </style>${componentsJs()}`;
 ```
-(If `dashboardCss()` does not end with `${tamagotchiCss}\n  </style>`, locate its actual closing `</style>` and append `${componentsJs()}` immediately after it. There is exactly one `</style>` closing `dashboardCss()`.)
+Add a one-line comment just above that line explaining the layering: `// primitives' delegated copy/tabs JS rides with the CSS so it also loads on the login/2FA/setup pages, which call dashboardCss() directly and bypass renderLayout's scripts slot.` (`dashboardCss()` is interpolated once per page across 7 distinct render functions — verified — so the script injects once per page; the `window.__crowComponentsBound` guard makes it idempotent regardless.)
 
 - [ ] **Step 3: Verify the gateway module graph still loads + token test stays green**
 
@@ -520,6 +518,8 @@ Edit only the pre-existing functions (`statGrid`, `formField`, `actionBar`, and 
 - `font-size:0.8rem` → `font-size:var(--crow-text-sm)`
 - `margin-bottom:0.35rem` → `margin-bottom:var(--crow-space-1)`
 - `gap:0.5rem` → `gap:var(--crow-space-2)`
+
+**Not pixel-identical — this snaps legacy odd values onto the nearest scale step (a deliberate ≤2px shift, not "behavior-preserving"):** `0.35rem` (5.6px) → `space-1` (4px) is a −1.6px change on the `formField` label margin; `0.8rem` (12.8px) → `text-sm` (13px) is +0.2px. The other three (`1.5rem`/`1rem`/`0.5rem`) are exact. The snap is intentional (rhythm); no test asserts these pixel values.
 
 For example, `formField`'s label line becomes:
 ```js
@@ -599,7 +599,7 @@ Create `servers/gateway/dashboard/panels/design-system.js`:
  * primitive with the real layout + tokens. The living reference for F6b/F6c
  * and theme work.
  */
-import { escapeHtml, section, badge, statCard, statGrid, dataTable, formField,
+import { section, badge, statCard, statGrid, dataTable, formField,
   button, codeBlock, callout, stepper, tabs } from "../shared/components.js";
 
 const SPACES = ["1", "2", "3", "4", "5", "6", "8", "10"];
@@ -633,6 +633,7 @@ export default {
   route: "/dashboard/design-system",
   navOrder: 95,
   category: "tools",
+  hidden: true, // QA/reference surface — reachable by URL, not shown in every user's sidebar
 
   async handler(req, res, { layout }) {
     const content =
@@ -795,4 +796,21 @@ Expected: design-system tests all pass; auth-network unchanged; dashboard index 
 - **No init-db, no routes** beyond the standard read-only panel registration. Deploy (later) = pull + restart gateways so the new CSS/JS/panel load (CSS is injected at render, but `componentsJs()`/`componentsCss()` are imported at module load, and the panel registers at startup → a restart is needed for those, unlike F4b's per-request registry).
 - **Scope guard:** do NOT refactor other panels' `<style>` blocks or inline styles (explicit non-goal). Task 4 touches only the reusable helpers in `components.js`.
 - **CSS has no unit test** — the gallery panel + manual theme check (dark/light/glass) is the visual QA. The token-completeness test is the automated guard.
+- **Expected benign rendering changes during manual QA (not regressions):** resolving the 7 aliases in Task 1 changes a few panels that today rely on inline fallbacks — e.g. `integrations.js` input bg (`var(--crow-background,#111)` → theme `bg-deep`, which *fixes* a wrong dark `#111` in light theme), `files.js` `--crow-bg-card`, `nav-groups.js` `--crow-border-subtle`, `extensions.js` `--crow-warning`. All map to theme-correct tokens; verify they look right across themes but don't treat the shift as a bug.
 ```
+
+---
+
+## Review
+
+**Reviewer:** staff-engineer plan-reviewer subagent (adversarial). **Date:** 2026-06-10. **Verdict:** APPROVE (with minor fixes) — fixes applied below.
+
+The reviewer independently re-verified the load-bearing claims against the real repo: the token-completeness algorithm works; the 9-undefined-token list is exactly correct (re-scanned: 9, simulated post-Task-1: 0); the alias regex defines `--crow-bg` without mis-counting the inner `var(--crow-bg-deep)`; `blog-public.js` defines zero tokens (no false positives); `componentsCss()` uses 23 tokens all defined by Task 1 (no committed-red); `dashboardCss()` injects once per page across 7 distinct render functions; the panel handler contract (`return layout({title,content})` + dispatcher at index.js:780-806) matches; and `data-copy` is XSS-safe (escaped attribute, value read as plain string).
+
+Fixes applied:
+- **C1** — Task 3 Step 2 injection instruction corrected: the real closing `</style>` is `layout.js:1320`, not next to `${tamagotchiCss}` (1163); added the explanatory comment (S1).
+- **C2** — corrected the false "behavior-preserving" claim (spec + Task 4): the migration snaps two legacy odd values (`0.35rem`→space-1, `0.8rem`→text-sm) with a deliberate ≤2px shift; the other three are exact.
+- **S2** — gallery panel set `hidden: true` (QA surface, URL-reachable, not in every sidebar).
+- **S4** — added a manual-QA note listing the benign alias-resolution rendering changes (integrations input bg, files card, nav-groups border, extensions warning) so they aren't mistaken for regressions.
+- **Q1** — dropped the unused `escapeHtml` import from the gallery panel.
+- **S3** (icon collision with Skills panel) — accepted as-is: cosmetic only, and reusing the known-valid `"skills"` icon avoids risking an invalid icon key.

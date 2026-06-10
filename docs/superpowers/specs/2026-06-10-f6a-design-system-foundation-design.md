@@ -72,7 +72,7 @@ Add HTML template functions to `components.js`. Their CSS goes in a **new focuse
 
 ### 3. Migrate `components.js` to tokens
 
-Replace hardcoded inline spacing/sizing **within `components.js`** with the new tokens (e.g. `margin-bottom:1rem` → `var(--crow-space-4)`, `font-size:0.8rem` → `var(--crow-text-sm)`). Behavior-preserving (the px values map to the equivalent token). Scope is `components.js` only — no other files' inline styles are touched.
+Replace hardcoded inline spacing/sizing **within `components.js`** with the new tokens (e.g. `margin-bottom:1rem` → `var(--crow-space-4)`, `font-size:0.8rem` → `var(--crow-text-sm)`). Mostly exact (1.5/1/0.5rem map 1:1); two legacy odd values snap to the nearest scale step with a deliberate ≤2px shift (`0.35rem`→`space-1`, `0.8rem`→`text-sm`). Scope is `components.js` only — no other files' inline styles are touched.
 
 ### 4. Gallery panel — `dashboard/panels/design-system.js`
 
