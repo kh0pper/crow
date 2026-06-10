@@ -40,7 +40,7 @@ function renderStepBody(stem, lang) {
       return body + linkWrap(deepLink(t("onboarding.openBotBuilder", lang), "/dashboard/bot-builder"));
     case "connect":
       return body + callout(t("onboarding.connectNote", lang), "info")
-        + linkWrap(deepLink(t("onboarding.openConnections", lang), "/dashboard/settings?section=help-setup"));
+        + linkWrap(deepLink(t("onboarding.openConnections", lang), "/dashboard/connect"));
     case "done":
       return body + callout(t("onboarding.doneNote", lang), "success");
     case "welcome":
