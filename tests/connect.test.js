@@ -101,3 +101,12 @@ test("Help & Setup wizard pointer honors Spanish (DB language = es)", async () =
   assert.ok(html.includes("/dashboard/connect"), "links to the connect wizard in ES");
   assert.ok(html.includes("Uso de Contexto"), "ES context-usage heading present");
 });
+
+import connectionsSection from "../servers/gateway/dashboard/settings/sections/connections.js";
+
+test("Connections section points at the connect wizard", async () => {
+  const req = { protocol: "https", get: (h) => (h.toLowerCase() === "host" ? "crow.example.ts.net:8444" : ""), headers: {} };
+  const html = await connectionsSection.render({ req, lang: "en" });
+  assert.ok(html.includes("/dashboard/connect"), "links to the connect wizard");
+  assert.ok(html.includes(i18n.t("connect.openWizard", "en")), "uses the wizard link label");
+});
