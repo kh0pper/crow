@@ -131,7 +131,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
     const { password, confirm } = req.body;
     const hasPassword = await isPasswordSet();
-    const wasFirstSetup = !hasPassword;
+    const wasFirstSetup = !hasPassword; // capture before setPassword() runs below
 
     if (!hasPassword) {
       // First-time setup
