@@ -737,6 +737,54 @@ const translations = {
   "contacts.importPaste": { en: "Or paste content", es: "O pegar contenido" },
   "contacts.importPastePlaceholder": { en: "Paste vCard or CSV content here...", es: "Pega el contenido vCard o CSV aqui..." },
   "contacts.importButton": { en: "Import", es: "Importar" },
+
+  // ─── Onboarding (first-run guided tour) ───
+  "onboarding.title": { en: "Welcome to Crow", es: "Bienvenido a Crow" },
+  "onboarding.welcome.title": { en: "Welcome", es: "Bienvenido" },
+  "onboarding.welcome.body": {
+    en: "Crow is your persistent memory and research assistant. It remembers what matters and works across the AI clients you already use. This short tour points you to the few things worth setting up.",
+    es: "Crow es tu asistente de memoria persistente e investigación. Recuerda lo importante y funciona con los clientes de IA que ya usas. Este breve recorrido te muestra las pocas cosas que vale la pena configurar.",
+  },
+  "onboarding.integrations.title": { en: "Connect your tools", es: "Conecta tus herramientas" },
+  "onboarding.integrations.body": {
+    en: "Link services like Google, Slack, and GitHub so Crow can act on them for you. You add API keys in Settings, where each integration explains what it needs.",
+    es: "Conecta servicios como Google, Slack y GitHub para que Crow pueda actuar en ellos por ti. Agrega las claves API en Ajustes, donde cada integración explica lo que necesita.",
+  },
+  "onboarding.integrationsNote": {
+    en: "Some integrations need a gateway restart to take effect after you add their keys.",
+    es: "Algunas integraciones requieren reiniciar el gateway para activarse después de agregar sus claves.",
+  },
+  "onboarding.openIntegrations": { en: "Open Integrations", es: "Abrir Integraciones" },
+  "onboarding.bot.title": { en: "Set up a bot", es: "Configura un bot" },
+  "onboarding.bot.body": {
+    en: "Crow can run bots on channels like Gmail and Discord, each with its own persona, skills, and tools. Create one in the Bot Builder.",
+    es: "Crow puede ejecutar bots en canales como Gmail y Discord, cada uno con su propia personalidad, habilidades y herramientas. Crea uno en el Bot Builder.",
+  },
+  "onboarding.openBotBuilder": { en: "Open Bot Builder", es: "Abrir Bot Builder" },
+  "onboarding.connect.title": { en: "Connect an AI client", es: "Conecta un cliente de IA" },
+  "onboarding.connect.body": {
+    en: "Use Crow's memory and tools from Claude Code, claude.ai, and other clients over MCP.",
+    es: "Usa la memoria y herramientas de Crow desde Claude Code, claude.ai y otros clientes mediante MCP.",
+  },
+  "onboarding.connectNote": {
+    en: "A guided connect wizard is on the way. For now, the connection URLs and per-platform steps live in Settings, Help and Setup.",
+    es: "Un asistente de conexión guiado está en camino. Por ahora, las URLs de conexión y los pasos por plataforma están en Ajustes, Ayuda y configuración.",
+  },
+  "onboarding.openConnections": { en: "View connection URLs", es: "Ver URLs de conexión" },
+  "onboarding.done.title": { en: "You're all set", es: "Todo listo" },
+  "onboarding.done.body": {
+    en: "That's the tour. Explore the dashboard at your own pace. Everything here is available from the sidebar.",
+    es: "Eso es todo. Explora el panel a tu ritmo. Todo está disponible en la barra lateral.",
+  },
+  "onboarding.doneNote": {
+    en: "You can replay this guide anytime from Settings, Help and Setup.",
+    es: "Puedes repetir esta guía cuando quieras desde Ajustes, Ayuda y configuración.",
+  },
+  "onboarding.btnNext": { en: "Next", es: "Siguiente" },
+  "onboarding.btnBack": { en: "Back", es: "Atrás" },
+  "onboarding.btnSkip": { en: "Skip to dashboard", es: "Ir al panel" },
+  "onboarding.btnGoDashboard": { en: "Go to the dashboard", es: "Ir al panel" },
+  "onboarding.replayLink": { en: "Replay setup guide", es: "Repetir guía de configuración" },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
