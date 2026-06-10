@@ -837,6 +837,32 @@ export const translations = {
     en: "Need step-by-step setup for a specific client? Open the guided connect wizard.",
     es: "¿Necesitas configuración paso a paso para un cliente específico? Abre el asistente de conexión guiado.",
   },
+  "connect.token.heading": { en: "Headless / no browser (token)", es: "Sin navegador (token)" },
+  "connect.token.intro": {
+    en: "For a client that has no browser to complete the OAuth sign-in, generate a token and paste it into the client config below. The token grants full access to this Crow, so treat it like a password.",
+    es: "Para un cliente que no tiene navegador para completar el inicio de sesión OAuth, genera un token y pégalo en la configuración del cliente. El token otorga acceso completo a este Crow, así que trátalo como una contraseña.",
+  },
+  "connect.token.generate": { en: "Generate token", es: "Generar token" },
+  "connect.token.rotate": { en: "Rotate token", es: "Rotar token" },
+  "connect.token.revoke": { en: "Revoke token", es: "Revocar token" },
+  "connect.token.activeSince": { en: "A token is active. Created:", es: "Hay un token activo. Creado:" },
+  "connect.token.revealHeading": { en: "Your new token", es: "Tu nuevo token" },
+  "connect.token.revealWarning": {
+    en: "Copy this token now. For your security it will not be shown again. If you lose it, rotate to get a new one.",
+    es: "Copia este token ahora. Por tu seguridad no se mostrará de nuevo. Si lo pierdes, rótalo para obtener uno nuevo.",
+  },
+  "connect.token.configLead": {
+    en: "Paste this into a client that supports an Authorization header (for example Claude Code):",
+    es: "Pega esto en un cliente que admita un encabezado de autorización (por ejemplo Claude Code):",
+  },
+  "connect.token.placeholderNote": {
+    en: "The token is stored hashed and cannot be shown again. The config below uses a placeholder. Rotate to issue a fresh token you can copy.",
+    es: "El token se guarda cifrado y no se puede volver a mostrar. La configuración de abajo usa un marcador. Rota para emitir un token nuevo que puedas copiar.",
+  },
+  "connect.token.connectionsPointer": {
+    en: "Generate a headless access token in the connect wizard.",
+    es: "Genera un token de acceso sin navegador en el asistente de conexión.",
+  },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];

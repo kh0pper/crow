@@ -173,3 +173,31 @@ test("applyLocalTokenAuth: synthesizes full auth ONLY when the flag is set, neve
   assert.equal(applyLocalTokenAuth(no), false, "no flag -> falls through to OAuth");
   assert.equal(no.auth, undefined, "does not fabricate auth without the flag");
 });
+
+import * as i18n from "../servers/gateway/dashboard/shared/i18n.js";
+
+const TOKEN_KEYS = [
+  "connect.token.heading", "connect.token.intro",
+  "connect.token.generate", "connect.token.rotate", "connect.token.revoke",
+  "connect.token.activeSince", "connect.token.revealHeading",
+  "connect.token.revealWarning", "connect.token.configLead",
+  "connect.token.placeholderNote", "connect.token.connectionsPointer",
+];
+
+test("every connect.token.* key has a non-empty en AND es value", () => {
+  for (const k of TOKEN_KEYS) {
+    const e = i18n.translations[k];
+    assert.ok(e, `missing entry for ${k}`);
+    assert.ok(e.en && e.en.trim(), `missing en for ${k}`);
+    assert.ok(e.es && e.es.trim(), `missing es for ${k}`);
+  }
+});
+
+test("token UI copy obeys crow.md style (no em dash, no 'not X, but Y')", () => {
+  for (const k of TOKEN_KEYS) {
+    for (const lang of ["en", "es"]) {
+      const v = i18n.t(k, lang);
+      assert.ok(!v.includes("—"), `${k}.${lang} must not use an em dash`);
+    }
+  }
+});
