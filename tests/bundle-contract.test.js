@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateManifest, detectSurfaces } from "../scripts/lib/bundle-contract.mjs";
+import { buildRegistry, formatRegistry } from "../scripts/build-registry.mjs";
 
 /** Make a throwaway bundle dir <root>/<id> with optional files {relpath: content}. */
 function tmpBundle(id, files = {}) {
@@ -130,4 +131,52 @@ test("surface field of wrong type (docker as string) fails on shape, not a confu
   // after the shape short-circuit, the error is a shape error, not 'docker.composefile "undefined" not found'
   assert.ok(r.errors.some((e) => e.startsWith("shape")), "expected a shape error, got: " + r.errors.join("; "));
   assert.ok(!r.errors.some((e) => e.includes("undefined")), "should not emit a spurious integrity error: " + r.errors.join("; "));
+});
+
+/** Build a fake bundles root from {id: manifestObject}; creates referenced skill files so they validate. */
+function fakeBundlesRoot(manifests) {
+  const root = mkdtempSync(join(tmpdir(), "crowreg-"));
+  for (const [id, manifest] of Object.entries(manifests)) {
+    const dir = join(root, id);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest));
+    if (Array.isArray(manifest.skills)) {
+      for (const s of manifest.skills) {
+        mkdirSync(join(dir, s, ".."), { recursive: true });
+        writeFileSync(join(dir, s), "x");
+      }
+    }
+  }
+  return root;
+}
+
+const mk = (id, extra = {}) => ({
+  id, name: id.toUpperCase(), description: "d", type: "bundle", category: "misc", ...extra,
+});
+
+test("buildRegistry: valid non-draft tracked entries, official injected, sorted by id", () => {
+  const root = fakeBundlesRoot({ zebra: mk("zebra"), alpha: mk("alpha"), draftone: mk("draftone", { draft: true }) });
+  const { registry } = buildRegistry({ bundlesRoot: root, tracked: null });
+  assert.deepEqual(registry["add-ons"].map((e) => e.id), ["alpha", "zebra"]);
+  assert.equal(registry["add-ons"][0].official, true);
+  assert.equal(registry.version, 2);
+});
+
+test("buildRegistry: untracked dir excluded", () => {
+  const root = fakeBundlesRoot({ keep: mk("keep"), wip: mk("wip") });
+  const { registry } = buildRegistry({ bundlesRoot: root, tracked: new Set(["keep"]) });
+  assert.deepEqual(registry["add-ons"].map((e) => e.id), ["keep"]);
+});
+
+test("buildRegistry: invalid manifest excluded and flagged", () => {
+  const root = fakeBundlesRoot({ bad: mk("bad", { type: "weird" }) });
+  const { registry, audit } = buildRegistry({ bundlesRoot: root, tracked: null });
+  assert.equal(registry["add-ons"].length, 0);
+  assert.equal(audit.find((a) => a.id === "bad").status, "invalid");
+});
+
+test("formatRegistry: 2-space indent + trailing newline", () => {
+  const out = formatRegistry({ version: 2, "add-ons": [] });
+  assert.ok(out.endsWith("}\n"));
+  assert.ok(out.includes('  "version": 2'));
 });
