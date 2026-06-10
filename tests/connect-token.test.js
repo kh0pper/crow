@@ -76,3 +76,75 @@ test("the token hash key is NOT syncable (per-instance, never replicated)", () =
   assert.equal(isSyncable(LOCAL_TOKEN_KEYS.HASH_KEY), false);
   assert.equal(isSyncable(LOCAL_TOKEN_KEYS.CREATED_KEY), false);
 });
+
+import {
+  localTokenAuthMiddleware, localOperatorAuth, applyLocalTokenAuth,
+} from "../servers/gateway/local-token.js";
+
+function run(mw, req) {
+  return new Promise((resolve) => {
+    mw(req, { status() { return this; }, json() {}, send() {} }, () => resolve(true));
+  });
+}
+
+test("middleware sets req.localTokenAuth for a valid token on an MCP path", async () => {
+  const db = memDb();
+  const token = await generateLocalToken(db);
+  const req = { path: "/router/mcp", headers: { authorization: `Bearer ${token}` } };
+  await run(localTokenAuthMiddleware(db), req);
+  assert.deepEqual(req.localTokenAuth, { token: "local-mcp" });
+});
+
+test("middleware skips the DB read on non-MCP paths (cost guard)", async () => {
+  const db = memDb();
+  await generateLocalToken(db);
+  let reads = 0;
+  const spyDb = { execute: (...a) => { reads++; return db.execute(...a); } };
+  const req = { path: "/dashboard/nest", headers: { authorization: "Bearer whatever" } };
+  await run(localTokenAuthMiddleware(spyDb), req);
+  assert.equal(reads, 0, "no settings read for a non-MCP request");
+  assert.equal(req.localTokenAuth, undefined);
+});
+
+test("middleware ignores a wrong token (falls through, no flag)", async () => {
+  const db = memDb();
+  await generateLocalToken(db);
+  const req = { path: "/router/mcp", headers: { authorization: "Bearer not-the-token" } };
+  await run(localTokenAuthMiddleware(db), req);
+  assert.equal(req.localTokenAuth, undefined);
+});
+
+test("middleware yields to instance auth (does not run when req.instanceAuth set)", async () => {
+  const db = memDb();
+  const token = await generateLocalToken(db);
+  const req = { path: "/router/mcp", headers: { authorization: `Bearer ${token}` }, instanceAuth: { instance: { id: "x" } } };
+  await run(localTokenAuthMiddleware(db), req);
+  assert.equal(req.localTokenAuth, undefined, "instance auth wins");
+});
+
+test("middleware no-ops without a Bearer header", async () => {
+  const db = memDb();
+  await generateLocalToken(db);
+  const req = { path: "/router/mcp", headers: {} };
+  const ok = await run(localTokenAuthMiddleware(db), req);
+  assert.equal(ok, true);
+  assert.equal(req.localTokenAuth, undefined);
+});
+
+test("localOperatorAuth() is a full-access mcp:tools credential", () => {
+  const a = localOperatorAuth();
+  assert.equal(a.clientId, "local-mcp");
+  assert.deepEqual(a.scopes, ["mcp:tools"]);
+  assert.ok(a.expiresAt > Math.floor(Date.now() / 1000), "expiry in the future");
+});
+
+test("applyLocalTokenAuth: synthesizes full auth ONLY when the flag is set, never touches a gate", () => {
+  const yes = { localTokenAuth: { token: "local-mcp" } };
+  assert.equal(applyLocalTokenAuth(yes), true);
+  assert.equal(yes.auth.clientId, "local-mcp");
+  assert.deepEqual(yes.auth.scopes, ["mcp:tools"]);
+
+  const no = {};
+  assert.equal(applyLocalTokenAuth(no), false, "no flag -> falls through to OAuth");
+  assert.equal(no.auth, undefined, "does not fabricate auth without the flag");
+});
