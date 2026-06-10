@@ -344,8 +344,18 @@ CSS uses custom properties for theming (see the full [Brand Identity](#brand-ide
 
 ## First-run onboarding (F6b)
 
-`panels/onboarding.js` is a hidden dashboard panel (`hidden: true`, route `/dashboard/onboarding`) that renders a 5-step guided tour (Welcome, Integrations, Bot, Connect, Done) driven by a `?step=N` query param — server-rendered, no client JS. It is **orient-and-route**: each step explains one thing and deep-links (new tab) to the surface that does the work (Settings → Integrations, Bot Builder, Settings → Help & Setup). It writes nothing.
+`panels/onboarding.js` is a hidden dashboard panel (`hidden: true`, route `/dashboard/onboarding`) that renders a 5-step guided tour (Welcome, Integrations, Bot, Connect, Done) driven by a `?step=N` query param — server-rendered, no client JS. It is **orient-and-route**: each step explains one thing and deep-links (new tab) to the surface that does the work (Settings → Integrations, Bot Builder, the Connect wizard). It writes nothing.
 
 It is shown automatically once: `POST /dashboard/login` redirects to it the first time a password is set (`wasFirstSetup` branch in `index.js`); normal logins go straight to `/dashboard`. It is replayable anytime via the "Replay setup guide" link in Settings → Help & Setup.
 
 Copy is bilingual (EN/ES) via the `onboarding.*` keys in `shared/i18n.js`; the handler resolves language cookie-first (`crow_lang`) so a user who chose Spanish at setup gets Spanish onboarding. Tests: `tests/onboarding.test.js`.
+
+## Connect wizard (F6c-1)
+
+`panels/connect.js` is a hidden dashboard panel (`hidden: true`, route `/dashboard/connect`) that gives per-client, copy-paste MCP config — server-rendered, no client JS beyond the shared tabs/copy handlers. A `tabs()` strip covers the local clients that can reach a private Crow (Claude Code, Cursor, Cline, Gemini CLI, Claude Desktop), each with the two connection styles that work today with no token: **local stdio** (`npm run mcp-config`) and **remote HTTP via OAuth** (paste an `http` server entry; the client runs the OAuth handshake on first use). Configs embed the request-host endpoint `${req.protocol}://${req.get("host")}/router/mcp` (same base-URL derivation as the Connections settings section), so the snippet shows the address the operator is actually browsing from.
+
+A sixth tab (claude.ai / ChatGPT) shows an honest reachability warning instead of a config: a private Crow is Tailnet-only and exposing MCP via Funnel is blocked by the network-exposure invariant, so cloud web clients cannot connect.
+
+It is reached from onboarding step 3, the Help & Setup settings section, and the Connections settings section (all of which now point here rather than duplicating per-platform setup). Copy is bilingual (EN/ES) via the `connect.*` keys in `shared/i18n.js`, resolved cookie-first like onboarding. Tests: `tests/connect.test.js`.
+
+**Deferred to F6c-2:** surfacing/generating the `CROW_LOCAL_MCP_TOKEN` bearer token. That token authenticates nothing server-side today (the gateway accepts only OAuth access tokens and paired-instance tokens on `/router/mcp`), so making a remote-HTTP bearer path work requires new server-side static-token validation, which lands with its own security review in F6c-2.
