@@ -61,7 +61,7 @@ A manifest declares the **surfaces** it provides by the presence of keys. The co
 | `panel` | **string OR object** | string form: the `.js` file exists. **Object form** (`{ id, name, extends, … }`) is runtime-supported by `resolvePanelPath` (`servers/gateway/routes/bundles.js`) and is **shape-checked only, no file check** (resolution + `extends` are runtime concerns) — reviewer C1: data-dashboard, nominatim. |
 | `panelRoutes` | string (`.js` path) | file exists under the bundle dir |
 | `skills` | `string[]` | every path resolves to an existing file under the bundle dir |
-| `requires.bundles` | `string[]` | each id exists as a `bundles/<id>` directory |
+| `requires.bundles` | `string[]` | each id is a `bundles/<id>` directory with a `manifest.json` (a real bundle, not a bare asset dir) |
 | `optional_bundles` | `string[]` | each id exists as a `bundles/<id>` directory |
 | `env_vars` | array of `{ name: string, description: string, required?: boolean, secret?: boolean, default?: string }` | each entry matches the shape |
 
