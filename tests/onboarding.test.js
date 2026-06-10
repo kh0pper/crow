@@ -50,7 +50,7 @@ test("renders all 5 steps with the stepper and step-specific deep links", async 
     null,
     "/dashboard/settings?section=integrations",
     "/dashboard/bot-builder",
-    "/dashboard/settings?section=help-setup",
+    "/dashboard/connect",
     null,
   ];
   const calloutSteps = [1, 3, 4]; // integrations, connect, done each render a callout
