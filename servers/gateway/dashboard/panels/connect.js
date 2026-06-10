@@ -31,6 +31,10 @@ const H_STYLE = "font-size:var(--crow-text-md);margin:var(--crow-space-4) 0 var(
  * then restart Y") rather than a numbered <ol>: the steps are one or two actions,
  * so a sentence reads cleaner and needs fewer i18n keys. (This is a deliberate
  * simplification of the spec's "numbered sequence" wording; see the spec note.)
+ *
+ * heading/lead/note are trusted HTML (here always t() output, never user input);
+ * escape before passing any user-derived text, matching the callout()/section()
+ * convention in components.js.
  */
 function block({ heading, lead, code, codeLang, note, noteType = "info" }) {
   return (heading ? `<h4 style="${H_STYLE}">${heading}</h4>` : "")
@@ -105,6 +109,7 @@ export default {
     const lang = resolveLang(req);
     const baseUrl = `${req.protocol}://${req.get("host")}`;
     const content =
+      // Intro deliberately uses space-4 (more breathing room) vs P_STYLE's space-2 mid-block leads.
       `<p style="font-size:var(--crow-text-base);line-height:var(--crow-leading-relaxed);color:var(--crow-text-secondary);margin-bottom:var(--crow-space-4)">${t("connect.intro", lang)}</p>` +
       section(t("connect.title", lang), clientTabs(baseUrl, lang)) +
       section(t("connect.moreHeading", lang), moreLinks(lang));
