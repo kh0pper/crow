@@ -6,11 +6,13 @@
 import { section, badge, statCard, statGrid, dataTable, formField,
   button, codeBlock, callout, stepper, tabs } from "../shared/components.js";
 
-// Spacing/type tokens as [name, fullVarRef] tuples so each token appears as a
-// complete literal — the token-completeness scanner's regex would read a
-// partial name from interpolation like var(--crow-space-${n}). (The COLORS
-// swatch list below interpolates var(--crow-${c}), which is safe: the regex
-// can't capture a partial there, and every color name resolves to a defined token.)
+// Spacing/type tokens are [name, fullVarRef] tuples so each token reference is a
+// complete literal in source. If a token var() were built by interpolating an
+// index into the middle of the name, the token-completeness test would capture a
+// truncated, undefined token name and fail. (The COLORS swatch list below does
+// interpolate the trailing segment, which is safe: the scanner regex cannot
+// capture a partial when the interpolation immediately follows the crow- prefix,
+// and every color name resolves to a defined token.)
 const SPACES = [
   ["1",  "var(--crow-space-1)"],
   ["2",  "var(--crow-space-2)"],
