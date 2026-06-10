@@ -50,7 +50,9 @@ test("generate returns a raw token, stores hash, validates", async () => {
   assert.equal(meta.present, true);
   assert.ok(meta.createdAt, "records a created timestamp");
   assert.equal(await validateLocalToken(db, token), true, "the issued token validates");
-  assert.equal(await validateLocalToken(db, token.replace(/.$/, "0")), false, "a tampered token fails");
+  // "x" is never a valid hex digit, so this is guaranteed != the real token
+  // (replacing the last char with a digit could collide when it already matches).
+  assert.equal(await validateLocalToken(db, token.slice(0, -1) + "x"), false, "a tampered token fails");
 });
 
 test("rotate (generate again) invalidates the old token", async () => {
