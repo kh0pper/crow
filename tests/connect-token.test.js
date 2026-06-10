@@ -290,3 +290,29 @@ test("Connections section points at the connect wizard for token generation", as
   assert.ok(html.includes("/dashboard/connect"), "links to the connect wizard");
   assert.ok(html.includes(i18n.t("connect.token.connectionsPointer", "en")), "uses the token pointer copy");
 });
+
+import { PUBLIC_FUNNEL_PREFIXES, rejectFunneledMiddleware } from "../servers/gateway/funnel.js";
+
+// Hermetic: rejectFunneledMiddleware early-returns next() when
+// CROW_DASHBOARD_PUBLIC === "true" (funnel.js:39). Clear it so this test
+// asserts code behavior, not the ambient environment.
+delete process.env.CROW_DASHBOARD_PUBLIC;
+
+test("MCP paths are never in the public Funnel allowlist", () => {
+  for (const p of PUBLIC_FUNNEL_PREFIXES) {
+    assert.ok(!p.includes("mcp"), `${p} must not expose an MCP path`);
+    assert.ok(!p.startsWith("/router"), `${p} must not expose the router`);
+  }
+});
+
+test("a token-bearing MCP request over Funnel is rejected before auth", () => {
+  const mw = rejectFunneledMiddleware();
+  let status = 0, sent = "";
+  const req = { headers: { "tailscale-funnel-request": "1", authorization: "Bearer deadbeef" }, path: "/router/mcp" };
+  const res = { status(c) { status = c; return this; }, type() { return this; }, send(b) { sent = b; } };
+  let nexted = false;
+  mw(req, res, () => { nexted = true; });
+  assert.equal(nexted, false, "must not call next for a funneled MCP request");
+  assert.equal(status, 403, "rejects with 403");
+  assert.match(sent, /Forbidden/, "explains the rejection");
+});
