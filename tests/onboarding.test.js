@@ -91,3 +91,24 @@ test("honors the crow_lang=es cookie for Spanish copy", async () => {
   assert.ok(es.includes(i18n.t("onboarding.welcome.body", "es")), "ES body present");
   assert.ok(en.includes(i18n.t("onboarding.welcome.body", "en")), "EN body present");
 });
+
+import helpSetupSection from "../servers/gateway/dashboard/settings/sections/help-setup.js";
+
+test("Help & Setup renders a replay link to the onboarding tour", async () => {
+  // Stub db.execute for the language lookup; no cookie => default English.
+  const db = { execute: async () => ({ rows: [] }) };
+  const req = { headers: {} };
+  const html = await helpSetupSection.render({ req, db, lang: "en" });
+  assert.ok(html.includes("/dashboard/onboarding?step=0"), "links to onboarding step 0");
+  assert.ok(html.includes(i18n.t("onboarding.replayLink", "en")), "uses the replay link label");
+});
+
+test("Help & Setup replay link honors Spanish (DB language = es)", async () => {
+  // render() resolves language DB-first; lock that the ES label is emitted so a
+  // future refactor that drops cookie/DB resolution is caught.
+  const db = { execute: async () => ({ rows: [{ value: "es" }] }) };
+  const req = { headers: {} };
+  const html = await helpSetupSection.render({ req, db, lang: "en" });
+  assert.ok(html.includes("/dashboard/onboarding?step=0"), "links to onboarding step 0");
+  assert.ok(html.includes(i18n.t("onboarding.replayLink", "es")), "uses the ES replay label");
+});
