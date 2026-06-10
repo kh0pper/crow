@@ -49,7 +49,7 @@ export function buildRegistry(opts = {}) {
     .filter((d) => d.isDirectory())
     .map((d) => d.name)
     .sort();
-  const bundleExists = (id) => existsSync(join(bundlesRoot, id, "manifest.json")) || dirs.includes(id);
+  const bundleExists = (id) => existsSync(join(bundlesRoot, id, "manifest.json"));
 
   const entries = [];
   const audit = [];
@@ -72,7 +72,10 @@ export function buildRegistry(opts = {}) {
     else if (isDraft) status = "draft";
     else if (!isTracked) status = "untracked";
     audit.push({ id, type: manifest.type, surfaces: detectSurfaces(manifest), ok, errors, status });
-    if (ok && !isDraft && isTracked) entries.push({ ...manifest, official: true });
+    if (ok && !isDraft && isTracked) {
+      const { official: _ignored, ...rest } = manifest;
+      entries.push({ ...rest, official: true });
+    }
   }
   entries.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return { registry: { version: 2, "add-ons": entries }, audit };
