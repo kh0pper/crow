@@ -61,7 +61,8 @@ export default {
       + `<p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.75rem">The Crow's Nest is private (local/Tailscale only). Set <code>CROW_GATEWAY_URL</code> in .env for public blog/podcast URLs.</p>`
       + `<div style="margin-top:1rem"><h4 style="font-size:0.9rem;color:var(--crow-text-muted);margin-bottom:0.5rem">${t("settings.mcpEndpoints", lang)}</h4>`
       + dataTable([t("settings.server", lang), t("settings.endpointUrl", lang), t("settings.scope", lang)], mcpRows)
-      + `<p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.5rem">Use these Streamable HTTP endpoints to connect Claude.ai, ChatGPT, Gemini, Cursor, or other MCP clients. See the Help &amp; Setup section for platform-specific instructions.</p></div>`;
+      + `<p style="color:var(--crow-text-muted);font-size:0.8rem;margin-top:0.5rem">Use these Streamable HTTP endpoints to connect Gemini, Cursor, or other local MCP clients.</p>`
+      + `<p style="margin-top:0.75rem"><a href="/dashboard/connect" style="color:var(--crow-accent);text-decoration:none;font-weight:600">${t("connect.openWizard", lang)} &rarr;</a> <span style="color:var(--crow-text-muted);font-size:0.8rem">${t("connect.settingsPointer", lang)}</span></p></div>`;
   },
 
   async handleAction() {
