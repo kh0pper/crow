@@ -518,6 +518,11 @@ const crowMdHandler = async (req, res) => {
 // This runs before OAuth and allows federated requests with pre-shared tokens.
 import { instanceAuthMiddleware } from "./instance-registry.js";
 app.use(instanceAuthMiddleware(createDbClient()));
+// F6c-2: local MCP token verifier. Runs AFTER instance auth (which wins) and
+// BEFORE OAuth. Sets req.localTokenAuth for a valid static token; the MCP
+// routes' skipAuthForInstance turns that into full local-operator access.
+import { localTokenAuthMiddleware } from "./local-token.js";
+app.use(localTokenAuthMiddleware(createDbClient()));
 
 // --- Instance enrollment (Phase 5-MVP peer pairing) ---
 // Off by default; set CROW_ENROLL_ENABLED=1 during the pairing ceremony.

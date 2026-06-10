@@ -12,6 +12,7 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { Router } from "express";
 import { recordSessionStart, recordToolCall, recordSessionEnd } from "../session-logger.js";
+import { applyLocalTokenAuth } from "../local-token.js";
 
 /**
  * Simple in-memory EventStore for StreamableHTTPServerTransport resumability.
@@ -248,6 +249,11 @@ export function mountMcpServer(router, prefix, createServer, sessionManager, aut
         };
         return next();
       }
+      // F6c-2: a validated local MCP token is a full local-operator credential
+      // (same access surface as an OAuth client). It is NOT a paired peer, so
+      // applyLocalTokenAuth deliberately does NOT run peerGate. Sits after the
+      // instance branch (instance auth wins) and before the OAuth fallback.
+      if (applyLocalTokenAuth(req)) return next();
       return authMiddleware(req, res, next);
     };
     router.post(mcpPath, skipAuthForInstance, toolTrackMiddleware, handlers.postHandler);
