@@ -87,7 +87,9 @@ export default {
     const estimatedTokens = totalTools * 200;
     const routerDisabled = process.env.CROW_DISABLE_ROUTER === "1";
 
+    const replayHtml = `<p style="margin-bottom:1rem"><a href="/dashboard/onboarding?step=0" style="color:var(--crow-accent);text-decoration:none;font-weight:600">&#8635; ${escapeHtml(t("onboarding.replayLink", currentLang))}</a></p>`;
     return `
+      ${replayHtml}
       <h4 style="font-size:0.9rem;color:var(--crow-text-muted);margin-bottom:0.5rem">${ht.platformSetup}</h4>
       <ul style="font-size:0.85rem;padding-left:1.2rem;list-style:disc;line-height:1.8">
         ${platformListHtml}
