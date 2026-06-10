@@ -41,17 +41,17 @@ function fileExists(bundleDir, rel) {
  * @returns {{ok: boolean, errors: string[]}}
  */
 export function validateManifest(manifest, bundleDir, opts = {}) {
-  const errors = [];
-
   // 1. Shape (ajv)
-  if (!validateShape(manifest)) {
-    for (const e of validateShape.errors || []) {
-      errors.push(`shape ${e.instancePath || "/"} ${e.message}`);
-    }
+  const shapeOk = validateShape(manifest);
+  if (!shapeOk) {
+    const errors = (validateShape.errors || []).map((e) => `shape ${e.instancePath || "/"} ${e.message}`);
+    return { ok: false, errors };
   }
 
+  const errors = [];
+
   // 2. id must equal dirname
-  const dirName = basename(bundleDir);
+  const dirName = basename(String(bundleDir).replace(/[/\\]+$/, ""));
   if (manifest && manifest.id && dirName && manifest.id !== dirName) {
     errors.push(`id "${manifest.id}" must equal directory name "${dirName}"`);
   }
