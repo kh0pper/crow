@@ -22,6 +22,8 @@
     "migrate-data": "node scripts/migrate-data-dir.js",
     "check": "node scripts/check.js",
     "sync-skills": "node scripts/sync-skills.js",
+    "build-registry": "node scripts/build-registry.mjs",
+    "test:bundle-contract": "node --test tests/bundle-contract.test.js",
     "backup": "bash scripts/backup.sh",
     "restore": "bash scripts/restore.sh",
     "reset-password": "node scripts/reset-password.js",
