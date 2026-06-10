@@ -83,6 +83,7 @@
   },
   "devDependencies": {
     "acorn": "^8.16.0",
-    "acorn-walk": "^8.3.5"
+    "acorn-walk": "^8.3.5",
+    "ajv": "^8.20.0"
   }
 }
