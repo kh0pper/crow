@@ -767,10 +767,10 @@ export const translations = {
     es: "Usa la memoria y herramientas de Crow desde Claude Code, claude.ai y otros clientes mediante MCP.",
   },
   "onboarding.connectNote": {
-    en: "A guided connect wizard is on the way. For now, the connection URLs and per-platform steps live in Settings, Help and Setup.",
-    es: "Un asistente de conexión guiado está en camino. Por ahora, las URLs de conexión y los pasos por plataforma están en Ajustes, Ayuda y configuración.",
+    en: "Open the guided connect wizard to set up Claude Code, Cursor, Gemini CLI, and other clients with copy-paste config.",
+    es: "Abre el asistente de conexión guiado para configurar Claude Code, Cursor, Gemini CLI y otros clientes con configuración lista para copiar.",
   },
-  "onboarding.openConnections": { en: "View connection URLs", es: "Ver URLs de conexión" },
+  "onboarding.openConnections": { en: "Open the connect wizard", es: "Abrir el asistente de conexión" },
   "onboarding.done.title": { en: "You're all set", es: "Todo listo" },
   "onboarding.done.body": {
     en: "That's the tour. Explore the dashboard at your own pace. Everything here is available from the sidebar.",
@@ -785,6 +785,58 @@ export const translations = {
   "onboarding.btnSkip": { en: "Skip to dashboard", es: "Ir al panel" },
   "onboarding.btnGoDashboard": { en: "Go to the dashboard", es: "Ir al panel" },
   "onboarding.replayLink": { en: "Replay setup guide", es: "Repetir guía de configuración" },
+
+  // F6c-1 connect wizard
+  "connect.title": { en: "Connect a client", es: "Conecta un cliente" },
+  "connect.intro": {
+    en: "Connect an MCP client to use Crow's memory and tools. Local clients (Claude Code, Cursor, and others on this machine or your Tailnet) connect directly. Pick your client below for copy-paste setup.",
+    es: "Conecta un cliente MCP para usar la memoria y las herramientas de Crow. Los clientes locales (Claude Code, Cursor y otros en esta máquina o tu Tailnet) se conectan directamente. Elige tu cliente abajo para una configuración lista para copiar.",
+  },
+  "connect.localStdioHeading": { en: "Local (stdio)", es: "Local (stdio)" },
+  "connect.remoteHttpHeading": { en: "Remote (HTTP)", es: "Remoto (HTTP)" },
+  "connect.stdioNote": {
+    en: "Local stdio needs the Crow repository checked out on this machine.",
+    es: "El stdio local necesita el repositorio de Crow descargado en esta máquina.",
+  },
+  "connect.oauthNote": {
+    en: "On first use the client opens a browser to authorize access. No token is needed.",
+    es: "En el primer uso el cliente abre un navegador para autorizar el acceso. No se necesita ningún token.",
+  },
+  "connect.cc.stdioLead": {
+    en: "In your Crow repo, run the config generator, then restart Claude Code:",
+    es: "En tu repo de Crow, ejecuta el generador de configuración y luego reinicia Claude Code:",
+  },
+  "connect.cc.remoteLead": {
+    en: "Or connect over HTTP from any Tailnet machine. Add this to ~/.claude/mcp.json (or .mcp.json in a project):",
+    es: "O conéctate por HTTP desde cualquier máquina del Tailnet. Agrega esto a ~/.claude/mcp.json (o a .mcp.json en un proyecto):",
+  },
+  "connect.cursor.lead": {
+    en: "Add this to .cursor/mcp.json, then reload Cursor:",
+    es: "Agrega esto a .cursor/mcp.json y luego recarga Cursor:",
+  },
+  "connect.cline.lead": {
+    en: "In VS Code, open Cline's MCP settings, add a remote (streamable HTTP) server, and paste this URL:",
+    es: "En VS Code, abre los ajustes MCP de Cline, agrega un servidor remoto (streamable HTTP) y pega esta URL:",
+  },
+  "connect.gemini.lead": {
+    en: "Add this MCP endpoint URL to your Gemini CLI settings (~/.gemini/settings.json), then restart Gemini CLI:",
+    es: "Agrega esta URL de endpoint MCP a tus ajustes de Gemini CLI (~/.gemini/settings.json) y luego reinicia Gemini CLI:",
+  },
+  "connect.desktop.lead": {
+    en: "Claude Desktop connects over local stdio. In your Crow repo, run the config generator, then restart Claude Desktop:",
+    es: "Claude Desktop se conecta por stdio local. En tu repo de Crow, ejecuta el generador de configuración y luego reinicia Claude Desktop:",
+  },
+  "connect.cloud.warning": {
+    en: "Cloud web clients (claude.ai, ChatGPT) cannot reach a private Crow. This instance is reachable on your Tailnet only, and exposing the MCP endpoints publicly is intentionally blocked. Use a local client instead.",
+    es: "Los clientes web en la nube (claude.ai, ChatGPT) no pueden alcanzar un Crow privado. Esta instancia es accesible solo en tu Tailnet, y exponer los endpoints MCP públicamente está bloqueado a propósito. Usa un cliente local en su lugar.",
+  },
+  "connect.moreHeading": { en: "More", es: "Más" },
+  "connect.openConnections": { en: "View raw connection URLs", es: "Ver URLs de conexión sin formato" },
+  "connect.openWizard": { en: "Open the connect wizard", es: "Abrir el asistente de conexión" },
+  "connect.settingsPointer": {
+    en: "Need step-by-step setup for a specific client? Open the guided connect wizard.",
+    es: "¿Necesitas configuración paso a paso para un cliente específico? Abre el asistente de conexión guiado.",
+  },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
