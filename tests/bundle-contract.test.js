@@ -115,3 +115,19 @@ test("detectSurfaces reports declared surfaces", () => {
   const s = detectSurfaces({ ...VALID, server: { command: "node", args: ["x"] }, skills: ["a.md"] });
   assert.deepEqual(s.sort(), ["server", "skills"]);
 });
+
+test("malformed manifest (null) returns ok:false, does not throw", () => {
+  const { dir } = tmpBundle("demo");
+  const r = validateManifest(null, dir);
+  assert.equal(r.ok, false);
+  assert.ok(Array.isArray(r.errors) && r.errors.length > 0);
+});
+
+test("surface field of wrong type (docker as string) fails on shape, not a confusing integrity error", () => {
+  const { dir } = tmpBundle("demo");
+  const r = validateManifest({ ...VALID, docker: "x" }, dir);
+  assert.equal(r.ok, false);
+  // after the shape short-circuit, the error is a shape error, not 'docker.composefile "undefined" not found'
+  assert.ok(r.errors.some((e) => e.startsWith("shape")), "expected a shape error, got: " + r.errors.join("; "));
+  assert.ok(!r.errors.some((e) => e.includes("undefined")), "should not emit a spurious integrity error: " + r.errors.join("; "));
+});
