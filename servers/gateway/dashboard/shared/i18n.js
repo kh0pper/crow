@@ -863,6 +863,10 @@ export const translations = {
     en: "Generate a headless access token in the connect wizard.",
     es: "Genera un token de acceso sin navegador en el asistente de conexión.",
   },
+  "connect.token.actionError": {
+    en: "Something went wrong with that action. Refresh the page and try again.",
+    es: "Algo salió mal con esa acción. Actualiza la página e inténtalo de nuevo.",
+  },
 };
 
 export const SUPPORTED_LANGS = ["en", "es"];
