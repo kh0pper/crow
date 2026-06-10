@@ -161,6 +161,7 @@ export default {
 
     let meta = { present: false, createdAt: null };
     let reveal = null;
+    let actionError = false;
     if (req.method === "POST" && db) {
       const action = req.body?.action;
       try {
@@ -173,17 +174,23 @@ export default {
           meta = await getLocalTokenMeta(db);
         }
       } catch (err) {
-        console.warn("[connect] token action failed:", err.message);
+        // A failed token mutation is a notable operator event (token state may
+        // be uncertain). Surface it instead of silently rendering the empty
+        // state, and re-read meta best-effort so the UI reflects real state.
+        actionError = true;
+        console.error("[connect] token action failed:", err.message);
+        try { meta = await getLocalTokenMeta(db); } catch { /* leave default */ }
       }
     } else if (db) {
       try { meta = await getLocalTokenMeta(db); } catch { /* treat as no token */ }
     }
 
+    const errorCallout = actionError ? callout(t("connect.token.actionError", lang), "error") : "";
     const content =
       // Intro deliberately uses space-4 (more breathing room) vs P_STYLE's space-2 mid-block leads.
       `<p style="font-size:var(--crow-text-base);line-height:var(--crow-leading-relaxed);color:var(--crow-text-secondary);margin-bottom:var(--crow-space-4)">${t("connect.intro", lang)}</p>` +
       section(t("connect.title", lang), clientTabs(baseUrl, lang)) +
-      section(t("connect.token.heading", lang), tokenSection({ endpoint: `${baseUrl}/router/mcp`, lang, meta, reveal, csrf: req.csrfToken })) +
+      section(t("connect.token.heading", lang), errorCallout + tokenSection({ endpoint: `${baseUrl}/router/mcp`, lang, meta, reveal, csrf: req.csrfToken })) +
       section(t("connect.moreHeading", lang), moreLinks(lang));
     return layout({ title: t("connect.title", lang), content });
   },

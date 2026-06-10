@@ -182,6 +182,7 @@ const TOKEN_KEYS = [
   "connect.token.activeSince", "connect.token.revealHeading",
   "connect.token.revealWarning", "connect.token.configLead",
   "connect.token.placeholderNote", "connect.token.connectionsPointer",
+  "connect.token.actionError",
 ];
 
 test("every connect.token.* key has a non-empty en AND es value", () => {
@@ -255,4 +256,28 @@ test("POST revoke_token: clears the token and returns to the empty state", async
     { send() {}, setHeader() {} }, ctx(db));
   assert.equal((await getLocalTokenMeta(db)).present, false, "token cleared");
   assert.ok(html.includes('value="generate_token"'), "back to the Generate control");
+});
+
+test("POST rotate_token: replaces an existing token; the new one is revealed and valid", async () => {
+  const db = memDb();
+  const first = await generateLocalToken(db);
+  const html = await connectPanel.handler(
+    mkReq({ method: "POST", body: { action: "rotate_token" }, db }),
+    { send() {}, setHeader() {} }, ctx(db));
+  const m = html.match(/Bearer ([0-9a-f]{64})/);
+  assert.ok(m, "rotate reveals a new Bearer token");
+  assert.notEqual(m[1], first, "the revealed token differs from the prior one");
+  assert.equal(await validateLocalToken(db, m[1]), true, "the new token validates");
+  assert.equal(await validateLocalToken(db, first), false, "the prior token is invalidated");
+});
+
+test("POST generate_token with a failing DB: shows an error callout, reveals no token", async () => {
+  // db whose write throws -> generateLocalToken rejects -> handler catch path.
+  const failingDb = { execute: async () => { throw new Error("disk error"); } };
+  const html = await connectPanel.handler(
+    mkReq({ method: "POST", body: { action: "generate_token" }, db: failingDb }),
+    { send() {}, setHeader() {} }, ctx(failingDb));
+  assert.ok(html.includes(i18n.t("connect.token.actionError", "en")), "renders the error callout");
+  assert.ok(html.includes("callout-error"), "uses the error callout style");
+  assert.ok(!/Bearer\s+[0-9a-f]{64}/.test(html), "no token revealed on failure");
 });
