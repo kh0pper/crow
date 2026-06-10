@@ -73,12 +73,17 @@ Mirrors the shape of `instance-registry.js`. Pure, db-injected functions plus on
   raw token or the hash.
 - `validateLocalToken(db, token)` → read stored hash; if none, `false`; else
   `crypto.timingSafeEqual(sha256(token), storedHash)`. Returns boolean.
-- `localTokenAuthMiddleware(db)` → Express middleware. Runs only when
-  `Authorization: Bearer …` is present **and** `req.instanceAuth` is unset (instance auth wins).
-  On a valid token, sets `req.localTokenAuth = { token: "local-mcp" }` and calls `next()`.
-  On no-token-configured or mismatch, calls `next()` without setting the flag (falls through to
-  OAuth, exactly like `instanceAuthMiddleware` falls through). Fast path: one cheap
-  `readSetting` returning `null` when no token is configured.
+- `applyLocalTokenAuth(req)` → if `req.localTokenAuth` is set, assign the full-access
+  `localOperatorAuth()` to `req.auth` and return `true`; else return `false`. Takes only `req`
+  (no `peerGate` dependency), which is what structurally proves a local token is never run
+  through the peer exposure gate. Called by `skipAuthForInstance`.
+- `localTokenAuthMiddleware(db)` → Express middleware. Mounted globally but reads the DB **only
+  for MCP-path requests** (`/mcp`, `/sse`, `/messages` suffixes; `req.localTokenAuth` is consumed
+  only on those routes), so non-MCP Bearer traffic (dashboard APIs, OAuth `/token`, `/blog`)
+  skips the read entirely. Runs the check only when `Authorization: Bearer …` is present **and**
+  `req.instanceAuth` is unset (instance auth wins). On a valid token, sets
+  `req.localTokenAuth = { token: "local-mcp" }`. On no-token-configured or mismatch, calls
+  `next()` without the flag (falls through to OAuth, like `instanceAuthMiddleware`).
 
 ### 3. Auth-chain wiring (the load-bearing fix)
 
@@ -89,23 +94,20 @@ Mirrors the shape of `instance-registry.js`. Pure, db-injected functions plus on
   **after** the instance branch and **before** the `authMiddleware` fallback:
 
   ```js
-  if (req.localTokenAuth) {
-    // Full local-operator credential — same access surface as an OAuth client.
-    // Deliberately NOT routed through peerGate: this is a local operator token,
-    // not a paired peer, so the default-deny exposure gate (which gates peers
-    // only) does not apply.
-    req.auth = {
-      token: "local-mcp",
-      clientId: "local-mcp",
-      scopes: ["mcp:tools"],
-      expiresAt: Math.floor(Date.now() / 1000) + 300,
-    };
-    return next();
-  }
+  // Full local-operator credential, same access surface as an OAuth client.
+  // applyLocalTokenAuth does NOT run peerGate (a local token is not a paired
+  // peer), and sits after the instance branch / before the OAuth fallback.
+  if (applyLocalTokenAuth(req)) return next();
   ```
 
   Mirrors the synthesized-`req.auth` shape the instance branch already uses (downstream MCP
   handlers read fields off `req.auth`).
+
+- **`--no-auth` mode (dev-only):** when `authMiddleware` is `null` (`index.js:599-600`),
+  `skipAuthForInstance` is not mounted at all (`mcp.js:258` `else` branch), so the token branch
+  never runs. This is correct and inert: in `--no-auth` every request is already unauthenticated,
+  so the token neither grants nor blocks anything beyond the mode's existing behavior. Matches the
+  instance branch, which is likewise inert in that mode.
 
 ### 4. Connect panel UI (`servers/gateway/dashboard/panels/connect.js`)
 

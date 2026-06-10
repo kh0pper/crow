@@ -16,7 +16,7 @@
 
 ## File map
 
-- **Create** `servers/gateway/local-token.js` — token store + validate + verifier middleware + `localOperatorAuth()` factory. One responsibility: the local MCP token.
+- **Create** `servers/gateway/local-token.js` — token store + validate + MCP-path-scoped verifier middleware + `localOperatorAuth()` / `applyLocalTokenAuth()` synthesis helpers. One responsibility: the local MCP token.
 - **Create** `tests/connect-token.test.js` — all F6c-2 unit tests.
 - **Modify** `servers/gateway/index.js` — mount the verifier middleware after `instanceAuthMiddleware` (~line 520).
 - **Modify** `servers/gateway/routes/mcp.js` — add the local-token branch in `skipAuthForInstance` (~line 243).
@@ -204,11 +204,15 @@ git show --stat HEAD | head -6
 
 ---
 
-### Task 2: verifier middleware + `localOperatorAuth()` factory
+### Task 2: verifier middleware + auth-synthesis helpers
 
 **Files:**
 - Modify: `servers/gateway/local-token.js`
 - Test: `tests/connect-token.test.js`
+
+Design notes addressing plan-review:
+- **C2 (hot-path cost):** `req.localTokenAuth` is only consumed on MCP routes (`skipAuthForInstance`). So the middleware does its DB read ONLY when the request path is an MCP path (`/mcp`, `/sse`, `/messages` suffix — see `mcp.js:194-196`). Every non-MCP Bearer request (dashboard APIs, OAuth `/token`, `/blog`) skips the read entirely via a cheap string check. This makes the global mount effectively MCP-scoped with no routing changes.
+- **S2 (testability of the security-critical branch):** the "not peer-gated" synthesis is extracted into `applyLocalTokenAuth(req)` so it is unit-tested directly (it has no `peerGate` dependency, which is exactly what proves it is not peer-gated).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -216,28 +220,38 @@ Append to `tests/connect-token.test.js`:
 
 ```js
 import {
-  localTokenAuthMiddleware, localOperatorAuth,
+  localTokenAuthMiddleware, localOperatorAuth, applyLocalTokenAuth,
 } from "../servers/gateway/local-token.js";
 
 function run(mw, req) {
   return new Promise((resolve) => {
-    let nexted = false;
-    mw(req, { status() { return this; }, json() {}, send() {} }, () => { nexted = true; resolve(nexted); });
+    mw(req, { status() { return this; }, json() {}, send() {} }, () => resolve(true));
   });
 }
 
-test("middleware sets req.localTokenAuth for a valid token", async () => {
+test("middleware sets req.localTokenAuth for a valid token on an MCP path", async () => {
   const db = memDb();
   const token = await generateLocalToken(db);
-  const req = { headers: { authorization: `Bearer ${token}` } };
+  const req = { path: "/router/mcp", headers: { authorization: `Bearer ${token}` } };
   await run(localTokenAuthMiddleware(db), req);
   assert.deepEqual(req.localTokenAuth, { token: "local-mcp" });
+});
+
+test("middleware skips the DB read on non-MCP paths (cost guard)", async () => {
+  const db = memDb();
+  await generateLocalToken(db);
+  let reads = 0;
+  const spyDb = { execute: (...a) => { reads++; return db.execute(...a); } };
+  const req = { path: "/dashboard/nest", headers: { authorization: "Bearer whatever" } };
+  await run(localTokenAuthMiddleware(spyDb), req);
+  assert.equal(reads, 0, "no settings read for a non-MCP request");
+  assert.equal(req.localTokenAuth, undefined);
 });
 
 test("middleware ignores a wrong token (falls through, no flag)", async () => {
   const db = memDb();
   await generateLocalToken(db);
-  const req = { headers: { authorization: "Bearer not-the-token" } };
+  const req = { path: "/router/mcp", headers: { authorization: "Bearer not-the-token" } };
   await run(localTokenAuthMiddleware(db), req);
   assert.equal(req.localTokenAuth, undefined);
 });
@@ -245,7 +259,7 @@ test("middleware ignores a wrong token (falls through, no flag)", async () => {
 test("middleware yields to instance auth (does not run when req.instanceAuth set)", async () => {
   const db = memDb();
   const token = await generateLocalToken(db);
-  const req = { headers: { authorization: `Bearer ${token}` }, instanceAuth: { instance: { id: "x" } } };
+  const req = { path: "/router/mcp", headers: { authorization: `Bearer ${token}` }, instanceAuth: { instance: { id: "x" } } };
   await run(localTokenAuthMiddleware(db), req);
   assert.equal(req.localTokenAuth, undefined, "instance auth wins");
 });
@@ -253,7 +267,7 @@ test("middleware yields to instance auth (does not run when req.instanceAuth set
 test("middleware no-ops without a Bearer header", async () => {
   const db = memDb();
   await generateLocalToken(db);
-  const req = { headers: {} };
+  const req = { path: "/router/mcp", headers: {} };
   const ok = await run(localTokenAuthMiddleware(db), req);
   assert.equal(ok, true);
   assert.equal(req.localTokenAuth, undefined);
@@ -265,12 +279,23 @@ test("localOperatorAuth() is a full-access mcp:tools credential", () => {
   assert.deepEqual(a.scopes, ["mcp:tools"]);
   assert.ok(a.expiresAt > Math.floor(Date.now() / 1000), "expiry in the future");
 });
+
+test("applyLocalTokenAuth: synthesizes full auth ONLY when the flag is set, never touches a gate", () => {
+  const yes = { localTokenAuth: { token: "local-mcp" } };
+  assert.equal(applyLocalTokenAuth(yes), true);
+  assert.equal(yes.auth.clientId, "local-mcp");
+  assert.deepEqual(yes.auth.scopes, ["mcp:tools"]);
+
+  const no = {};
+  assert.equal(applyLocalTokenAuth(no), false, "no flag -> falls through to OAuth");
+  assert.equal(no.auth, undefined, "does not fabricate auth without the flag");
+});
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `node --test tests/connect-token.test.js`
-Expected: FAIL — `localTokenAuthMiddleware` / `localOperatorAuth` are not exported.
+Expected: FAIL — `localTokenAuthMiddleware` / `localOperatorAuth` / `applyLocalTokenAuth` are not exported.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -278,8 +303,10 @@ Append to `servers/gateway/local-token.js` (before the `LOCAL_TOKEN_KEYS` export
 
 ```js
 /** Synthesized req.auth for a validated local-operator token request. Full
- *  tool access, identical surface to an OAuth client. Used by the
- *  skipAuthForInstance branch in routes/mcp.js. */
+ *  tool access, identical surface to an OAuth client (scopes ["mcp:tools"]).
+ *  The 300s expiry is NOT a session lifetime: skipAuthForInstance re-runs and
+ *  re-synthesizes per request, exactly like the peer branch (mcp.js:247).
+ *  Nothing downstream re-checks expiresAt. */
 export function localOperatorAuth() {
   return {
     token: "local-mcp",
@@ -289,14 +316,34 @@ export function localOperatorAuth() {
   };
 }
 
-/** Express middleware. Mounted right after instanceAuthMiddleware. Sets
+/** Turn a validated local-token flag into a full-access req.auth. Returns true
+ *  when it handled the request (caller should next()), false to fall through to
+ *  OAuth. Deliberately takes ONLY req: it has no peerGate dependency, so a local
+ *  token is never run through the peer exposure gate. Called by
+ *  skipAuthForInstance in routes/mcp.js, after the instance branch. */
+export function applyLocalTokenAuth(req) {
+  if (!req.localTokenAuth) return false;
+  req.auth = localOperatorAuth();
+  return true;
+}
+
+// MCP transport path suffixes (see mcp.js:194-196). req.localTokenAuth is only
+// consumed on these, so the middleware reads the DB only for these paths.
+function isMcpPath(p) {
+  return typeof p === "string"
+    && (p === "/mcp" || p.endsWith("/mcp") || p.endsWith("/sse") || p.endsWith("/messages"));
+}
+
+/** Express middleware. Mounted globally right after instanceAuthMiddleware, but
+ *  it only reads the DB for MCP-path requests (cost guard). Sets
  *  req.localTokenAuth on a valid local token. Yields to instance auth, never
- *  hard-rejects (falls through to OAuth), and fast-exits when no Bearer header
- *  is present or no token is configured. */
+ *  hard-rejects (falls through to OAuth), and fast-exits with no Bearer header,
+ *  no token configured, or a non-MCP path. */
 export function localTokenAuthMiddleware(db) {
   return async (req, res, next) => {
     try {
       if (req.instanceAuth) return next();
+      if (!isMcpPath(req.path)) return next();
       const h = req.headers?.authorization;
       if (!h || !h.startsWith("Bearer ")) return next();
       if (await validateLocalToken(db, h.slice(7))) {
@@ -315,12 +362,12 @@ export function localTokenAuthMiddleware(db) {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `node --test tests/connect-token.test.js`
-Expected: PASS (10 tests total).
+Expected: PASS (12 tests total).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit servers/gateway/local-token.js tests/connect-token.test.js -m "F6c-2: local token verifier middleware + operator-auth factory"
+git commit servers/gateway/local-token.js tests/connect-token.test.js -m "F6c-2: local token verifier middleware (MCP-path-scoped) + auth-synthesis helpers"
 git show --stat HEAD | head -6
 ```
 
@@ -332,7 +379,9 @@ git show --stat HEAD | head -6
 - Modify: `servers/gateway/index.js` (~line 519-520)
 - Modify: `servers/gateway/routes/mcp.js` (~line 243-250)
 
-No new automated test for the full HTTP chain (it requires booting the gateway). Correctness rests on Task 2's middleware/factory tests plus a documented post-deploy curl smoke (Step 4). The plan-review and final holistic review verify branch ordering.
+No new automated test for the full HTTP chain (it requires booting the gateway). The security-critical synthesis is covered by Task 2's `applyLocalTokenAuth` test (proves shape + not-peer-gated); this task only wires it in. A documented post-deploy curl smoke (Step 4) confirms the booted path.
+
+**`--no-auth` mode (C1, dev-only):** under `--no-auth`, `authMiddleware` is `null` (`index.js:599-600`), so `mcp.js:258` mounts handlers WITHOUT `skipAuthForInstance` and the token branch never runs. This is correct: in `--no-auth` everything is already unauthenticated, so the token is simply a no-op (it neither grants nor blocks anything beyond the mode's existing behavior). This matches the existing instance branch, which is also inert under `--no-auth`. No code handles this specially; the comment added in Step 2 states it.
 
 - [ ] **Step 1: Mount the middleware in `index.js`**
 
@@ -362,19 +411,17 @@ app.use(localTokenAuthMiddleware(createDbClient()));
 In `servers/gateway/routes/mcp.js`, add the import near the top of the file (with the other imports):
 
 ```js
-import { localOperatorAuth } from "../local-token.js";
+import { applyLocalTokenAuth } from "../local-token.js";
 ```
 
 Then inside `skipAuthForInstance` (currently `mcp.js:224`), add a branch AFTER the `if (req.instanceAuth?.instance) { ... }` block closes and BEFORE `return authMiddleware(req, res, next);`:
 
 ```js
-      // F6c-2: a validated local MCP token is a full local-operator
-      // credential (same access surface as an OAuth client). It is NOT a
-      // paired peer, so it is deliberately not routed through peerGate.
-      if (req.localTokenAuth) {
-        req.auth = localOperatorAuth();
-        return next();
-      }
+      // F6c-2: a validated local MCP token is a full local-operator credential
+      // (same access surface as an OAuth client). It is NOT a paired peer, so
+      // applyLocalTokenAuth deliberately does NOT run peerGate. Sits after the
+      // instance branch (instance auth wins) and before the OAuth fallback.
+      if (applyLocalTokenAuth(req)) return next();
 ```
 
 The resulting tail of `skipAuthForInstance` reads:
@@ -384,10 +431,7 @@ The resulting tail of `skipAuthForInstance` reads:
         // ... existing peerGate + synthesized peer req.auth ...
         return next();
       }
-      if (req.localTokenAuth) {
-        req.auth = localOperatorAuth();
-        return next();
-      }
+      if (applyLocalTokenAuth(req)) return next();
       return authMiddleware(req, res, next);
     };
 ```
@@ -395,7 +439,7 @@ The resulting tail of `skipAuthForInstance` reads:
 - [ ] **Step 3: Verify the gateway still imports/boots**
 
 Run: `node -e "import('./servers/gateway/local-token.js').then(m => console.log(Object.keys(m).join(',')))"`
-Expected: prints `generateLocalToken,revokeLocalToken,getLocalTokenMeta,validateLocalToken,localOperatorAuth,localTokenAuthMiddleware,LOCAL_TOKEN_KEYS` (order may vary).
+Expected: prints the module exports including `generateLocalToken,revokeLocalToken,getLocalTokenMeta,validateLocalToken,localOperatorAuth,applyLocalTokenAuth,localTokenAuthMiddleware,LOCAL_TOKEN_KEYS` (order may vary).
 
 Run: `node --check servers/gateway/index.js && node --check servers/gateway/routes/mcp.js`
 Expected: no output (syntax OK).
@@ -463,7 +507,7 @@ Expected: FAIL — `missing entry for connect.token.heading`.
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `servers/gateway/dashboard/shared/i18n.js`, immediately after the `"connect.settingsPointer": { ... }` entry (~line 836), insert:
+In `servers/gateway/dashboard/shared/i18n.js`, the `connect.*` entries are the last block inside the `translations` object; `"connect.settingsPointer"` is a multi-line entry that closes with `},`, and the `translations` object itself closes with `};` immediately before `export const SUPPORTED_LANGS` (~line 842). Insert the following entries AFTER the closing `},` of the `connect.settingsPointer` entry and BEFORE the `};` that closes the object (do not land inside the multi-line entry):
 
 ```js
   "connect.token.heading": { en: "Headless / no browser (token)", es: "Sin navegador (token)" },
@@ -622,27 +666,26 @@ function tokenActions({ lang, present, csrf }) {
   );
 }
 
+// Returns the token section BODY only (no heading). The caller wraps it in
+// section(t("connect.token.heading", lang), ...), so the section title is the
+// single heading (no inner <h4>, avoiding a double label).
 // `reveal` is the raw token immediately after generate/rotate (show once);
 // otherwise null. `meta` is getLocalTokenMeta() output.
 function tokenSection({ endpoint, lang, meta, reveal, csrf }) {
-  const heading = `<h4 style="${H_STYLE}">${t("connect.token.heading", lang)}</h4>`;
   if (reveal) {
-    return heading
-      + callout(`<strong>${t("connect.token.revealHeading", lang)}</strong><br>${t("connect.token.revealWarning", lang)}`, "warning")
+    return callout(`<strong>${t("connect.token.revealHeading", lang)}</strong><br>${t("connect.token.revealWarning", lang)}`, "warning")
       + codeBlock(reveal)
       + `<p style="${P_STYLE}">${t("connect.token.configLead", lang)}</p>`
       + codeBlock(tokenConfig(endpoint, reveal), { lang: "json" })
       + tokenActions({ lang, present: true, csrf });
   }
   if (meta.present) {
-    return heading
-      + `<p style="${P_STYLE}">${t("connect.token.activeSince", lang)} ${escapeHtml(meta.createdAt || "")}</p>`
+    return `<p style="${P_STYLE}">${t("connect.token.activeSince", lang)} ${escapeHtml(meta.createdAt || "")}</p>`
       + callout(t("connect.token.placeholderNote", lang), "info")
       + codeBlock(tokenConfig(endpoint, "<YOUR-TOKEN>"), { lang: "json" })
       + tokenActions({ lang, present: true, csrf });
   }
-  return heading
-    + `<p style="${P_STYLE}">${t("connect.token.intro", lang)}</p>`
+  return `<p style="${P_STYLE}">${t("connect.token.intro", lang)}</p>`
     + tokenActions({ lang, present: false, csrf });
 }
 ```
@@ -684,15 +727,7 @@ function tokenSection({ endpoint, lang, meta, reveal, csrf }) {
   },
 ```
 
-Note: `tokenSection` renders its own `<h4>` heading and the wrapping `section()` adds the section title; that double-labels. Drop the inner `<h4>` by changing `tokenSection`'s `heading` to an empty string OR (cleaner) wrap the token body WITHOUT a `section()` title. Use this exact form in `content` instead, which avoids the duplicate:
-
-```js
-      section(t("connect.title", lang), clientTabs(baseUrl, lang)) +
-      `<div class="dashboard-section">${tokenSection({ endpoint: `${baseUrl}/router/mcp`, lang, meta, reveal, csrf: req.csrfToken })}</div>` +
-      section(t("connect.moreHeading", lang), moreLinks(lang));
-```
-
-(`tokenSection` keeps its `<h4>` heading; it is the section's own title. This matches how `block()` already emits `<h4>` headings inside `clientTabs`.)
+Single heading: `tokenSection` returns the body WITHOUT a heading, and the `content` assembly above wraps it in `section(t("connect.token.heading", lang), ...)` (line shown in 3c). That is the one canonical form. Do not add an inner `<h4>` and do not use a bare `<div class="dashboard-section">`. The token section is thus visually consistent with the `clientTabs` and `moreLinks` sections, which are also wrapped by `section()`.
 
 - [ ] **Step 4: Update `tests/connect.test.js` so existing tests pass with the new ctx**
 
@@ -811,6 +846,11 @@ Append to `tests/connect-token.test.js`:
 ```js
 import { PUBLIC_FUNNEL_PREFIXES, rejectFunneledMiddleware } from "../servers/gateway/funnel.js";
 
+// Hermetic: rejectFunneledMiddleware early-returns next() when
+// CROW_DASHBOARD_PUBLIC === "true" (funnel.js:39). Clear it so this test
+// asserts code behavior, not the ambient environment.
+delete process.env.CROW_DASHBOARD_PUBLIC;
+
 test("MCP paths are never in the public Funnel allowlist", () => {
   for (const p of PUBLIC_FUNNEL_PREFIXES) {
     assert.ok(!p.includes("mcp"), `${p} must not expose an MCP path`);
@@ -902,3 +942,20 @@ Expected: no line that logs a raw token (only the `console.warn` error paths, wh
 - **Not covered by automated tests (by design):** the full booted-gateway HTTP path for Task 3 (curl smoke at deploy) and CSRF rejection of the POST forms (enforced by the already-tested `csrfMiddleware` mounted on `/dashboard`, see `tests/csrf-middleware.test.js`).
 - **Type/name consistency:** `LOCAL_TOKEN_KEYS.{HASH_KEY,CREATED_KEY}`, `req.localTokenAuth = { token: "local-mcp" }`, `localOperatorAuth()` shape, and the `generate_token|rotate_token|revoke_token` action strings are used identically across module, middleware, panel, and tests.
 - **Security pass:** after implementation, run `/security-review` (or an adversarial reviewer) on the diff before merge, per the spec.
+
+## Review
+
+**Reviewer:** adversarial staff-engineer subagent (Plan), verified every load-bearing claim against the tree.
+**Date:** 2026-06-10
+**Verdict:** REVISE → addressed; all critical issues resolved in this plan.
+
+| Issue | Resolution |
+|---|---|
+| **C1** — token is a no-op under `--no-auth` (authMiddleware null → `skipAuthForInstance` not mounted, `mcp.js:258`) | Documented in Task 3 + a code comment. Confirmed it is correct/inert (dev-only mode where everything is already unauthenticated); matches the existing instance branch. No code change. |
+| **C2** — global middleware read DB on every Bearer request to every path | Middleware now path-gates the DB read to MCP paths only (`isMcpPath`, suffixes `/mcp` `/sse` `/messages` per `mcp.js:194-196`). Non-MCP Bearer requests skip the read. New test asserts zero reads on `/dashboard/*`. Spec wording corrected. |
+| **C3 / Q1** — "never synced" rested on a possibly-misleading `isSyncable` assertion | Verified structurally: `dashboard_settings_overrides` is never replicated (`instance-sync.js:100,344`), `writeSetting{scope:"local"}` emits no sync event (`registry.js:201-211`), and `isSyncable("mcp_local_token_hash")===false` (not allowlisted; `sync-allowlist.js`). Three independent guarantees. The `isSyncable` test stays as a secondary check; a comment cites the structural one. |
+| **C4** — Task 5 shipped two contradictory panel forms (double-heading) | Collapsed to one canonical form: `tokenSection` returns the body with no heading; the handler wraps it in `section(t("connect.token.heading", lang), ...)`. The "OR" alternative was deleted. |
+| **C5** — funnel test could false-green if `CROW_DASHBOARD_PUBLIC=true` in env | Test now `delete process.env.CROW_DASHBOARD_PUBLIC` for hermeticity. |
+| **S2** — the security-critical "not peer-gated" branch had zero test coverage | Extracted `applyLocalTokenAuth(req)` (no `peerGate` parameter, which structurally proves it is not peer-gated) and added a direct unit test for it. `mcp.js` now calls it. |
+| **Q4** — imprecise i18n insertion line could land mid-entry | Task 4 now specifies inserting after the `connect.settingsPointer` entry's closing `},` and before the `translations` object's closing `};`. |
+| **S1, S3, S4, S5** (rationale notes) | Folded in as comments: 300s expiry rationale (`localOperatorAuth` doc), CSRF-then-dashboardAuth ordering, body-parser presence, no un-awaited token work before `db.close()`. |
