@@ -75,6 +75,7 @@ import orchestratorPanel from "./panels/orchestrator.js";
 import botBuilderPanel from "./panels/bot-builder.js";
 import botBoardPanel from "./panels/bot-board.js";
 import designSystemPanel from "./panels/design-system.js";
+import onboardingPanel from "./panels/onboarding.js";
 import bundlesRouterFactory from "../routes/bundles.js";
 
 /**
@@ -102,6 +103,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   registerPanel(botBuilderPanel);
   registerPanel(botBoardPanel);
   registerPanel(designSystemPanel);
+  registerPanel(onboardingPanel);
 
   // Load third-party panels (async, non-blocking)
   loadExternalPanels().catch((err) => {
@@ -129,6 +131,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     const lang = SUPPORTED_LANGS.includes(cookies.crow_lang) ? cookies.crow_lang : "en";
     const { password, confirm } = req.body;
     const hasPassword = await isPasswordSet();
+    const wasFirstSetup = !hasPassword;
 
     if (!hasPassword) {
       // First-time setup
@@ -187,7 +190,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     }
 
     setSessionCookie(res, result.token);
-    res.redirectAfterPost("/dashboard");
+    res.redirectAfterPost(wasFirstSetup ? "/dashboard/onboarding" : "/dashboard");
   });
 
   // 2FA verification (TOTP code entry after password)
