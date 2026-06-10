@@ -63,7 +63,7 @@ Header `section` ("Connect a client") + a one-line orienting sentence, then a `t
 | **Claude Desktop** | Local stdio via the generated config (needs the repo). | |
 | **claude.ai / ChatGPT (web)** | ⚠ `callout` only — no config. Explains a private Crow is Tailnet-only, unreachable from cloud servers, and Funnel-exposing MCP is forbidden by the network-exposure invariant. | Honesty over a dead config. |
 
-Each non-cloud tab = a short numbered sequence (plain `<ol>`) + one or more `codeBlock()` snippets (the copy-paste config, with the live base URL interpolated) + an optional `callout` for the key gotcha (e.g. "stdio needs the repo checked out on this machine"; "first HTTP use opens a browser for OAuth").
+Each non-cloud tab = a short lead sentence that folds the one-or-two steps inline ("run X, then restart Y") + one or more `codeBlock()` snippets (the copy-paste config, with the live base URL interpolated) + an optional `callout` for the key gotcha (e.g. "stdio needs the repo checked out on this machine"; "first HTTP use opens a browser for OAuth"). (The steps are short enough that a sentence reads cleaner than a numbered `<ol>` and needs fewer i18n keys.)
 
 A trailing `section` with `button`s deep-linking to the **Connections** section (raw URLs) and the maestro.press platform docs, for users who want more.
 

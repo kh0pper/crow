@@ -62,7 +62,7 @@ const CONNECT_KEYS = [
   "connect.cursor.lead", "connect.cline.lead",
   "connect.gemini.lead", "connect.desktop.lead",
   "connect.cloud.warning",
-  "connect.moreHeading", "connect.openConnections", "connect.openDocs",
+  "connect.moreHeading", "connect.openConnections",
   "connect.openWizard", "connect.settingsPointer",
 ];
 
@@ -141,7 +141,6 @@ to:
   },
   "connect.moreHeading": { en: "More", es: "Más" },
   "connect.openConnections": { en: "View raw connection URLs", es: "Ver URLs de conexión sin formato" },
-  "connect.openDocs": { en: "Per-platform setup docs", es: "Documentación por plataforma" },
   "connect.openWizard": { en: "Open the connect wizard", es: "Abrir el asistente de conexión" },
   "connect.settingsPointer": {
     en: "Need step-by-step setup for a specific client? Open the guided connect wizard.",
@@ -293,7 +292,13 @@ function resolveLang(req) {
 const P_STYLE = "font-size:var(--crow-text-base);line-height:var(--crow-leading-relaxed);color:var(--crow-text-secondary);margin-bottom:var(--crow-space-2)";
 const H_STYLE = "font-size:var(--crow-text-md);margin:var(--crow-space-4) 0 var(--crow-space-2)";
 
-/** One labelled config block: optional sub-heading, lead text, code snippet, note callout. */
+/**
+ * One labelled config block: optional sub-heading, lead text, code snippet, note
+ * callout. Each client's steps are folded into a single lead sentence ("run X,
+ * then restart Y") rather than a numbered <ol>: the steps are one or two actions,
+ * so a sentence reads cleaner and needs fewer i18n keys. (This is a deliberate
+ * simplification of the spec's "numbered sequence" wording; see the spec note.)
+ */
 function block({ heading, lead, code, codeLang, note, noteType = "info" }) {
   return (heading ? `<h4 style="${H_STYLE}">${heading}</h4>` : "")
     + (lead ? `<p style="${P_STYLE}">${lead}</p>` : "")
@@ -342,12 +347,15 @@ function clientTabs(baseUrl, lang) {
   ], { active: 0 });
 }
 
+// The wizard is the self-contained source of truth for client setup, so "More"
+// only links back to the raw-URL reference. We deliberately do NOT re-link the
+// external maestro.press per-platform docs here (Task 5 de-emphasizes that list
+// in Help & Setup; re-linking its parent page would be inconsistent and the page
+// is not verified live). Token surfacing lands in F6c-2.
 function moreLinks(lang) {
   return `<p style="${P_STYLE}">${t("connect.settingsPointer", lang)}</p>`
     + `<div style="display:flex;gap:var(--crow-space-3);flex-wrap:wrap;margin-top:var(--crow-space-3)">`
     + button(t("connect.openConnections", lang), { variant: "secondary", href: "/dashboard/settings?section=connections" })
-    + button(t("connect.openDocs", lang), { variant: "secondary",
-        href: "https://maestro.press/software/crow/platforms", attrs: 'target="_blank" rel="noopener"' })
     + `</div>`;
 }
 
@@ -687,3 +695,17 @@ Verify each: `systemctl is-active`, `NRestarts=0`, `ActiveEnterTimestamp` advanc
 **Placeholder scan:** every code step shows complete code; every run step has an exact command + expected result. No TBD/TODO.
 
 **Type/name consistency:** panel exports `{ id:"connect", route:"/dashboard/connect", hidden:true, handler }` — matches all test assertions. i18n key names in Task 1 exactly match the `CONNECT_KEYS` array (Task 1 test) and every `t("connect.*")` call in Task 2. `block({...})` option names (`heading,lead,code,codeLang,note,noteType`) are consistent between definition and all call sites. `connect.openWizard` is reused by Tasks 5 (help-setup, via local `helpT.openWizard` value) and 6 (connections, via global key) — note: Task 5 uses help-setup's in-file `helpT` object (its established pattern), Task 6 uses the global `t()` key; both are intentional and independent.
+
+---
+
+## Review
+
+**Reviewer:** adversarial staff-engineer subagent (Plan), verifying every claim against the real tree.
+**Date:** 2026-06-10.
+**Verdict:** APPROVE (no critical issues). All 10 review criteria + the Host-header-reflection security check verified against actual code. Key confirmations: the dashboard dispatcher routes hidden panels by **panel `id`** (`getPanel(panelId)`), so `/dashboard/connect` works with just the one `registerPanel` line (no route table / nav-registry / allow-list edit); the OAuth-on-first-use claim is repo-backed (`requireBearerAuth` + `/register` dynamic client registration are mounted on the gateway), and the plan correctly uses plain `npm run mcp-config` (stdio) rather than the broken `--http`/`CROW_LOCAL_MCP_TOKEN` mode; `req.get("host")` reflected into `codeBlock` is `escapeHtml`-escaped (incl. `"`), so no XSS; every identifier Task 5 removes exists and the kept strings ("Context Usage"/"Uso de Contexto") survive; no test asserts the old onboarding/getPreview values; all TDD commit boundaries are green.
+
+**Suggestions adopted:**
+1. **Dropped the external `connect.openDocs` button** — re-linking the maestro.press per-platform docs (which Task 5 de-emphasizes, and which is not verified live) would be inconsistent; the wizard is now self-contained. Removed the key from the Task 1 block, the `CONNECT_KEYS` test array, and `moreLinks()`.
+2. **Documented the `<ol>` decision** — the spec's "numbered sequence" is consciously folded into a single lead sentence per tab (one-or-two-step instructions); noted in `block()`'s doc comment and the spec aligned to match. Not a silent drop.
+
+**Suggestions noted but not changed (non-blocking):** bare endpoint URL in a `codeBlock` for Cline/Gemini (cosmetic; the copy button is useful for a URL); `getPreview()` returns English-only (no regression — the prior `"8 platforms"` was also English-only).
