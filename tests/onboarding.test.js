@@ -53,12 +53,18 @@ test("renders all 5 steps with the stepper and step-specific deep links", async 
     "/dashboard/settings?section=help-setup",
     null,
   ];
+  const calloutSteps = [1, 3, 4]; // integrations, connect, done each render a callout
   for (let step = 0; step < 5; step++) {
     const html = await render({ step: String(step) });
     assert.ok(html.includes("stepper"), `step ${step} renders the stepper`);
     assert.ok(html.includes("step-active"), `step ${step} marks the active step`);
     if (deepLinkPerStep[step]) {
       assert.ok(html.includes(deepLinkPerStep[step]), `step ${step} links to ${deepLinkPerStep[step]}`);
+      assert.ok(html.includes('target="_blank"'), `step ${step} deep-link opens in a new tab`);
+      assert.ok(html.includes('rel="noopener"'), `step ${step} deep-link sets rel=noopener`);
+    }
+    if (calloutSteps.includes(step)) {
+      assert.ok(html.includes("callout"), `step ${step} renders a callout`);
     }
   }
   const done = await render({ step: "4" });
