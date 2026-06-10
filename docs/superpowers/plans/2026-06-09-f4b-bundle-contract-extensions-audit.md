@@ -695,7 +695,7 @@ const fs=require("fs"); let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>
 });'
 git diff --stat registry/add-ons.json
 ```
-Expected: `dropped:` is exactly `tasks, developer-kit` (the two orphans). `added:` includes `campaigns` (tracked, now registered) and any of the 16 model bundles that were missing from the old registry. **If `dropped:` contains anything else — especially any `vllm-*`/`llamacpp-*`/`kokoro`/`calls` — STOP and investigate before committing** (that would mean a published bundle is being lost).
+Expected: `dropped:` is exactly `tasks, developer-kit` (the two orphans); `added:` is exactly `campaigns` (tracked, now registered — the 16 model bundles were already registered, so they do NOT appear as "added"); final published count 89. **If `dropped:` contains anything else — especially any `vllm-*`/`llamacpp-*`/`kokoro`/`calls` — STOP and investigate before committing** (that would mean a published bundle is being lost).
 
 - [ ] **Step 7: Commit the regenerated registry**
 
@@ -901,7 +901,7 @@ Expected: all `OK` (the version/author relaxation kept them in the registry).
 - **Commits:** always `git commit <explicit paths>` (parallel sessions share the tree); for new files `git add <path>` first. Verify with `git show --stat HEAD`. Never attribute Claude / add as co-author.
 - **No init-db:** this work adds no DB tables. Deploy (if/when) = pull + restart gateways; the registry is read from disk.
 - **Build resource note:** subagent-driven runs one subagent at a time and only `node --test` — no need to stop the model stack. Only stop `docker stop vllm-rocm-qwen35-4b llamacpp-vulkan-qwen36-35b-a3b llamacpp-vulkan-qwen3-embed crow-companion faster-whisper-server kokoro-tts` before genuinely parallel heavy fan-out.
-- **WIP safety:** the uncommitted WIP dirs (`capstone-tracker`, `fed-gov-data`, `knowledge-base-mcp`, `research-integration` [no manifest], `texas-gov-data`) are untracked → auto-excluded. Never edit their files or `git add` them as part of F4b.
+- **WIP safety:** the uncommitted WIP dirs (`capstone-tracker`, `fed-gov-data`, `knowledge-base-mcp`, `research-integration` [no manifest], `texas-gov-data`) are untracked → auto-excluded. Also `bundles/google-workspace` is a **symlink** to an out-of-repo dir — `readdirSync(...isDirectory())` returns false for symlinks, so the generator skips it silently (and it's untracked anyway); its absence from the audit table is expected. Never edit their files or `git add` them as part of F4b.
 - **Never committed-red:** Task 5 lands the integration gate green in the same task as its fixes. If you must split work across sessions, do not commit a failing test.
 
 ---

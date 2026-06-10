@@ -71,7 +71,7 @@ A manifest declares the **surfaces** it provides by the presence of keys. The co
 
 **Artifacts:**
 
-- `registry/manifest.schema.json` — JSON Schema (Draft 2020-12) covering field shapes. Shape-only; it cannot express filesystem existence.
+- `registry/manifest.schema.json` — JSON Schema (draft-07) covering field shapes. Shape-only; it cannot express filesystem existence.
 - `scripts/lib/bundle-contract.mjs` — exports `validateManifest(manifest, bundleDir) → { ok: boolean, errors: string[] }`. Performs (a) JSON Schema validation of shape via **ajv** against `manifest.schema.json`, and (b) programmatic referential-integrity checks (file existence, `id == dirname`, dependency-dir existence). This is the **single source of validation logic**, imported by both the generator and the test. Also exports a small `detectSurfaces(manifest) → string[]` helper for the audit table.
 
 > **Dependency (approved 2026-06-09):** add `ajv` (and `ajv-formats` if needed for the semver/format checks) as a devDependency. The schema file `manifest.schema.json` is the spec of record and ajv validates manifests against it, so the schema and the enforced rules cannot drift. Referential integrity (filesystem existence, `id == dirname`, dependency-dir existence) stays in code since JSON Schema cannot express it.
