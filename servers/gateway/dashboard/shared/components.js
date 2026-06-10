@@ -22,7 +22,7 @@ export function statCard(label, value, opts = {}) {
  * Stat card grid.
  */
 export function statGrid(cards) {
-  return `<div class="card-grid" style="margin-bottom:1.5rem">${cards.join("")}</div>`;
+  return `<div class="card-grid" style="margin-bottom:var(--crow-space-5)">${cards.join("")}</div>`;
 }
 
 /**
@@ -62,8 +62,8 @@ export function formField(label, name, opts = {}) {
     input = `<input type="${type}" name="${name}" id="${id}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" ${req}>`;
   }
 
-  return `<div style="margin-bottom:1rem">
-  <label for="${id}" style="display:block;font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:0.35rem;text-transform:uppercase;letter-spacing:0.05em">${escapeHtml(label)}</label>
+  return `<div style="margin-bottom:var(--crow-space-4)">
+  <label for="${id}" style="display:block;font-size:var(--crow-text-sm);color:var(--crow-text-muted);margin-bottom:var(--crow-space-1);text-transform:uppercase;letter-spacing:0.05em">${escapeHtml(label)}</label>
   ${input}
 </div>`;
 }
@@ -85,7 +85,7 @@ export function badge(text, type = "draft") {
  */
 export function actionBar(buttons) {
   const arr = Array.isArray(buttons) ? buttons : [buttons == null ? "" : buttons];
-  return `<div style="display:flex;gap:0.5rem;margin-bottom:1.5rem;flex-wrap:wrap">${arr.join("")}</div>`;
+  return `<div style="display:flex;gap:var(--crow-space-2);margin-bottom:var(--crow-space-5);flex-wrap:wrap">${arr.join("")}</div>`;
 }
 
 /**
@@ -93,8 +93,8 @@ export function actionBar(buttons) {
  */
 export function section(title, content, opts = {}) {
   const delay = opts.delay || 0;
-  return `<div class="card" style="margin-bottom:1.5rem;animation-delay:${delay}ms">
-  <h3 style="font-family:'Fraunces',serif;font-size:1.1rem;margin-bottom:1rem;padding-bottom:0.5rem;border-bottom:1px solid var(--crow-border)">${escapeHtml(title)}</h3>
+  return `<div class="card" style="margin-bottom:var(--crow-space-5);animation-delay:${delay}ms">
+  <h3 style="font-family:'Fraunces',serif;font-size:1.1rem;margin-bottom:var(--crow-space-4);padding-bottom:0.5rem;border-bottom:1px solid var(--crow-border)">${escapeHtml(title)}</h3>
   ${content}
 </div>`;
 }
