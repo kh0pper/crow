@@ -7,6 +7,7 @@
 
 import { CROW_HERO_SVG } from "./crow-hero.js";
 import { FONT_IMPORT, designTokensCss } from "./design-tokens.js";
+import { componentsCss, componentsJs } from "./components-css.js";
 import { headerIconsCss, tamagotchiCss } from "./notifications.js";
 import { t, SUPPORTED_LANGS } from "./i18n.js";
 
@@ -779,6 +780,7 @@ function dashboardCss() {
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   ${designTokensCss()}
+  ${componentsCss()}
 
   body {
     font-family: 'DM Sans', sans-serif;
@@ -1317,5 +1319,6 @@ function dashboardCss() {
   }
 
   body.unified-off #crow-instance-tabs { display: none; }
-</style>`;
+  // primitives' delegated copy/tabs JS rides with the CSS so it also loads on the login/2FA/setup pages, which call dashboardCss() directly and bypass renderLayout's scripts slot.
+  </style>${componentsJs()}`;
 }
