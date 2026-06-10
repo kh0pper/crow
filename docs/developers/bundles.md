@@ -33,7 +33,7 @@ A surface is "declared" by the presence of its key. Each declared surface is val
 | `panelRoutes` | `"panel/routes.js"` | the file exists |
 | `skills` | `["skills/<id>.md", ...]` | every path exists |
 | `ports` / `port` / `webUI.port` | integers (1–65535); `webUI` may also be `null` | — |
-| `requires.bundles` / `optional_bundles` | `["<bundle-id>", ...]` | each id exists as a `bundles/<id>` dir |
+| `requires.bundles` / `optional_bundles` | `["<bundle-id>", ...]` | each id is a `bundles/<id>` dir with a `manifest.json` (a real bundle) |
 | `env_vars` | `[{ "name": "X", "description": "...", "required": false, "secret": false, "default": "" }]` | each entry has a `name` |
 
 Unknown fields are allowed (the schema is lenient) — bundle-specific extras like `capabilities`, `companion`, `storage`, `providers`, `sttProfileSeed` pass through untouched. The canonical shape is `registry/manifest.schema.json`.
