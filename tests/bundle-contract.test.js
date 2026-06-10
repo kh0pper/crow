@@ -90,6 +90,13 @@ test("server: null is tolerated", () => {
   assert.equal(validateManifest({ ...VALID, server: null }, dir).ok, true);
 });
 
+test("webUI may be null (no web UI) or an object; a non-object fails", () => {
+  const { dir } = tmpBundle("demo");
+  assert.equal(validateManifest({ ...VALID, webUI: null }, dir).ok, true);
+  assert.equal(validateManifest({ ...VALID, webUI: { port: 8096 } }, dir).ok, true);
+  assert.equal(validateManifest({ ...VALID, webUI: "nope" }, dir).ok, false);
+});
+
 test("panel string is file-checked; panel object is shape-only", () => {
   const withFile = tmpBundle("demo", { "panel/demo.js": "//" });
   assert.equal(validateManifest({ ...VALID, panel: "panel/demo.js" }, withFile.dir).ok, true);
