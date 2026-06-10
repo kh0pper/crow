@@ -4,6 +4,8 @@ title: Creating Add-ons
 
 # Creating Add-ons
 
+> The bundle contract (manifest fields + surfaces) is documented in [bundles.md](./bundles.md).
+
 Build reusable extensions for the Crow platform. Add-ons package panels, MCP servers, skills, or combinations of these into installable units.
 
 ## What is this?
@@ -212,7 +214,7 @@ crow-media-manager/
 ## Testing Locally
 
 1. Create your add-on directory with a `manifest.json`
-2. Add the entry to `registry/add-ons.json` (required for the Extensions page to show it)
+2. Run `npm run build-registry` to regenerate `registry/add-ons.json` (never hand-edit it — the registry is generated from manifests)
 3. For panels: symlink or copy to `~/.crow/panels/` and add the ID to `~/.crow/panels.json`
 4. For servers: add to `scripts/server-registry.js` temporarily
 5. For skills: copy to `skills/`

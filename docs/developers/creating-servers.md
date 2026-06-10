@@ -4,6 +4,8 @@ title: Creating MCP Servers
 
 # Creating MCP Servers
 
+> The bundle contract (manifest fields + surfaces) is documented in [bundles.md](./bundles.md).
+
 Add a new MCP server to the Crow platform, following the same patterns used by the built-in memory, projects, sharing, storage, and blog servers.
 
 ## What is this?
