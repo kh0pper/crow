@@ -666,9 +666,9 @@ function tokenActions({ lang, present, csrf }) {
   );
 }
 
-// Returns the token section BODY only (no heading). The caller wraps it in
-// section(t("connect.token.heading", lang), ...), so the section title is the
-// single heading (no inner <h4>, avoiding a double label).
+// Returns the token section BODY only (no heading element). The caller wraps it
+// in section(t("connect.token.heading", lang), ...), so the section title is the
+// single heading; the body adds no heading of its own (avoids a double label).
 // `reveal` is the raw token immediately after generate/rotate (show once);
 // otherwise null. `meta` is getLocalTokenMeta() output.
 function tokenSection({ endpoint, lang, meta, reveal, csrf }) {
