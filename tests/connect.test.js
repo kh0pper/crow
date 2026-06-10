@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as i18n from "../servers/gateway/dashboard/shared/i18n.js";
 
+// The full set of connect.* keys the wizard depends on. t() returns the key
+// string unchanged when a key is missing, so "resolves" == "value present".
 const CONNECT_KEYS = [
   "connect.title", "connect.intro",
   "connect.localStdioHeading", "connect.remoteHttpHeading",
