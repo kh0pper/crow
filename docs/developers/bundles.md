@@ -1,126 +1,87 @@
-# Self-Hosted Bundles
+# Bundles — the Bundle Contract
 
-Bundles are pre-configured Docker Compose setups that package Crow with a curated set of integrations for a specific use case.
+A **bundle** is the modular unit of Crow's extension layer: a directory under `bundles/<id>/` described by a `manifest.json`. A bundle may provide any combination of surfaces — a containerized **service** (Docker), an **MCP server** (tools), a **dashboard panel**, and **skills** — hence "bundle = service + tools + skills". The contract is *surface-based*: a bundle is only required to satisfy the rules for the surfaces it actually declares.
 
-## What is a Bundle?
+## Where bundles come from
 
-A bundle is a `docker-compose.yml` file plus configuration that makes it easy to deploy Crow with specific integrations enabled. Instead of configuring each service individually, users deploy a bundle and get a working setup immediately.
+- Source of truth: each `bundles/<id>/manifest.json`.
+- Install catalog: `registry/add-ons.json` is **generated** from the manifests by `npm run build-registry` — never hand-edit it. It is committed (lockfile model) and a test fails if it drifts.
 
-## Built-in Bundles
+## Universal required fields
 
-Crow ships with several self-hosting add-on bundles in `bundles/`:
+Every manifest must have:
 
-| Bundle | Type | Description |
+| Field | Rule |
+|---|---|
+| `id` | must equal the directory name |
+| `name` | non-empty |
+| `description` | non-empty |
+| `type` | `bundle` \| `mcp-server` \| `skill` (a coarse category tag, not what drives required fields) |
+| `category` | non-empty |
+
+`version` (semver) and `author` are **optional** but shape-checked when present (some first-party model/media bundles ship without them).
+
+## Surfaces (declare what you provide)
+
+A surface is "declared" by the presence of its key. Each declared surface is validated for shape **and** that its referenced files exist under the bundle dir:
+
+| Surface | Shape | Integrity |
 |---|---|---|
-| `obsidian` | MCP server | Connect Obsidian vault via `mcp-obsidian` npm package |
-| `home-assistant` | MCP server | Smart home control via `hass-mcp` npm package |
-| `ollama` | Docker + skill | Local AI models for embeddings and summarization |
-| `nextcloud` | Docker + skill | File sync via WebDAV mount (v1: files only) |
-| `immich` | Docker + custom MCP | Photo library with custom `createImmichServer()` |
+| `docker` | `{ "composefile": "docker-compose.yml" }` | the composefile exists |
+| `server` | `{ "command": "node", "args": ["server/index.js"], "envKeys": [...] }`, or `null` | entry file checked **only** when `command` is `node` and `args[0]` is a path (external `npx`/`uv` servers are exempt) |
+| `panel` | `"panel/<id>.js"` **or** `{ "id": "...", "extends": "..." }` | string form: the file exists; object form: shape-only (resolved at runtime) |
+| `panelRoutes` | `"panel/routes.js"` | the file exists |
+| `skills` | `["skills/<id>.md", ...]` | every path exists |
+| `ports` / `port` / `webUI.port` | integers (1–65535); `webUI` may also be `null` | — |
+| `requires.bundles` / `optional_bundles` | `["<bundle-id>", ...]` | each id exists as a `bundles/<id>` dir |
+| `env_vars` | `[{ "name": "X", "description": "...", "required": false, "secret": false, "default": "" }]` | each entry has a `name` |
 
-Install with: `crow bundle install <id>`
+Unknown fields are allowed (the schema is lenient) — bundle-specific extras like `capabilities`, `companion`, `storage`, `providers`, `sttProfileSeed` pass through untouched. The canonical shape is `registry/manifest.schema.json`.
 
-## Example Use Cases
+## Draft / unpublished
 
-- **Academic Bundle** — Crow + arXiv + Zotero + Google Workspace + Canvas LMS
-- **Business Bundle** — Crow + Gmail + Calendar + Slack + Trello + Notion
-- **Creative Bundle** — Crow + Notion + filesystem + GitHub
-- **Minimal Bundle** — Crow core only (memory + projects + sharing)
+- `"draft": true` excludes a bundle from the generated registry.
+- An **untracked** bundle dir (not committed to git) is treated as an implicit draft — excluded and reported, never auto-published. This keeps work-in-progress out of the registry.
 
-## Creating a Bundle
+## Validate + generate
 
-### 1. Define the Integration Set
-
-Choose which integrations to include. Each integration needs its environment variables documented.
-
-### 2. Create docker-compose.yml
-
-Start from the existing `docker-compose.yml` in the Crow repo and customize:
-
-```yaml
-services:
-  crow-gateway:
-    build: .
-    ports:
-      - "3001:3001"
-    environment:
-      - NODE_ENV=production
-      # Bundle-specific integrations
-      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
-      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
-      - TRELLO_API_KEY=${TRELLO_API_KEY}
-      - TRELLO_TOKEN=${TRELLO_TOKEN}
+```bash
+npm run build-registry -- --check   # validate all manifests + drift-check (CI)
+npm run build-registry              # regenerate registry/add-ons.json
+npm run test:bundle-contract        # the node:test gate
 ```
 
-### 3. Create a .env.example
+`--check` prints a per-bundle audit (id, type, surfaces, status) and exits nonzero on any invalid manifest or if the committed registry is out of date.
 
-List all required environment variables with comments:
-
-```env
-# Database: Local SQLite is used automatically — no config needed.
-
-# Google Workspace
-GOOGLE_CLIENT_ID=         # From https://console.cloud.google.com
-GOOGLE_CLIENT_SECRET=
-
-# Trello
-TRELLO_API_KEY=           # From https://trello.com/power-ups/admin
-TRELLO_TOKEN=
-```
-
-### 4. Write a README
-
-Include:
-- What the bundle is for
-- Prerequisites (Docker, API keys)
-- Step-by-step setup instructions
-- Which integrations are included and what they enable
-
-### 5. Add a manifest.json
-
-```json
-{
-  "id": "your-bundle",
-  "name": "Your Bundle Name",
-  "version": "1.0.0",
-  "description": "What it does",
-  "type": "bundle",
-  "author": "Your Name",
-  "docker": { "composefile": "docker-compose.yml" },
-  "skills": ["skills/your-skill.md"],
-  "requires": { "env": ["REQUIRED_VAR"] }
-}
-```
-
-### 6. Structure
+## Minimal example
 
 ```
 bundles/your-bundle/
 ├── manifest.json
-├── docker-compose.yml
-├── .env.example
-├── skills/
-│   └── your-skill.md
-└── server/              (optional — for custom MCP servers)
-    ├── server.js
-    └── index.js
+├── docker-compose.yml      (if it ships a service)
+├── server/index.js         (if it provides MCP tools)
+├── panel/your-bundle.js    (if it adds a dashboard panel)
+└── skills/your-bundle.md   (if it adds skills)
 ```
 
-## Publishing
-
-1. Create a `bundles/your-bundle/` directory in your fork
-2. Submit a PR with the bundle
-3. Once merged, it will appear in the [Community Directory](./directory)
-
-Users can then deploy with:
-
-```bash
-cd bundles/your-bundle
-cp .env.example .env
-# Edit .env with API keys
-docker compose up -d
+```json
+{
+  "id": "your-bundle",
+  "name": "Your Bundle",
+  "version": "1.0.0",
+  "description": "What it does",
+  "type": "bundle",
+  "author": "You",
+  "category": "utilities",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["YOUR_API_KEY"] },
+  "panel": "panel/your-bundle.js",
+  "skills": ["skills/your-bundle.md"],
+  "requires": { "env": ["YOUR_API_KEY"] },
+  "env_vars": [
+    { "name": "YOUR_API_KEY", "description": "API key", "required": true, "secret": true }
+  ]
+}
 ```
 
-## Submit
-
-Fork the repo, create your bundle, and submit a PR.
+After adding or editing a bundle, run `npm run build-registry` and commit both the manifest and the regenerated `registry/add-ons.json`.
