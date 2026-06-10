@@ -180,3 +180,16 @@ test("formatRegistry: 2-space indent + trailing newline", () => {
   assert.ok(out.endsWith("}\n"));
   assert.ok(out.includes('  "version": 2'));
 });
+
+test("buildRegistry: requires.bundles satisfied by a manifest-backed sibling; missing dep → invalid", () => {
+  const root = fakeBundlesRoot({
+    needsdep: mk("needsdep", { requires: { bundles: ["sibling"] } }),
+    sibling: mk("sibling"),
+  });
+  const { registry } = buildRegistry({ bundlesRoot: root, tracked: null });
+  assert.ok(registry["add-ons"].map((e) => e.id).includes("needsdep"), "dep satisfied by manifest-backed sibling");
+
+  const root2 = fakeBundlesRoot({ orphandep: mk("orphandep", { requires: { bundles: ["ghost"] } }) });
+  const { audit } = buildRegistry({ bundlesRoot: root2, tracked: null });
+  assert.equal(audit.find((a) => a.id === "orphandep").status, "invalid");
+});
