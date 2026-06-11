@@ -10,7 +10,7 @@
  *
  * Routes:
  *   POST|GET|DELETE /{server}/mcp  — Streamable HTTP (memory, projects, sharing, storage, blog, tools)
- *   POST|GET|DELETE /router/mcp   — Consolidated router (7 tools instead of 49+, ~75% context reduction)
+ *   POST|GET|DELETE /router/mcp   — Consolidated router (category tools instead of the full raw tool surface; major context reduction)
  *   GET  /{server}/sse             — SSE transport init
  *   POST /{server}/messages        — SSE message handling
  *   POST /storage/upload           — Multipart file upload
@@ -735,7 +735,7 @@ mountMcpServer(app, "", () => createMemoryServer(undefined, { instructions, sync
 // --- Mount Router (consolidated endpoint, ~75% context reduction) ---
 if (process.env.CROW_DISABLE_ROUTER !== "1") {
   mountMcpServer(app, "/router", () => createRouterServer({ instructions: routerInstructions }), sessionManager, authMiddleware, peerExposureGate);
-  console.log("Router server mounted (8 tools instead of 58+)");
+  console.log("Router server mounted (category tools instead of the full raw tool surface)");
 }
 
 // --- Mount Admin Backup Endpoint ---
@@ -1375,7 +1375,7 @@ const server = app.listen(PORT, BIND, (error) => {
   console.log(`    Sharing:  POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/sharing/mcp`);
   console.log(`    Tools:    POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/tools/mcp`);
   if (process.env.CROW_DISABLE_ROUTER !== "1") {
-    console.log(`    Router:   POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/router/mcp  (7 tools, recommended)`);
+    console.log(`    Router:   POST ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/router/mcp  (category tools, recommended)`);
   }
   console.log(`  SSE (2024-11-05):`);
   console.log(`    Memory:   GET  ${noAuth ? "" : "[auth] "}http://localhost:${PORT}/memory/sse`);

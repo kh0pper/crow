@@ -6,7 +6,7 @@ Index for working on this repo. Load-bearing rules inline; deep reference is in 
 
 - **Always commit with a positional path arg**: `git commit <path> -m "..."`, not `git add <path> && git commit -m "..."`. Parallel Claude sessions modify the working tree concurrently; `git add` then a bare `git commit` will sweep in unrelated WIP. Verify with `git show --stat HEAD` after every commit. (See `~/.claude/CLAUDE.md` Learnings 2026-04-14.)
 - **Always `git pull --rebase` before pushing a branch** — parallel sessions commonly push to `main` between your fetch and your push.
-- **Tests**: no test framework. Verify a server starts cleanly with `node servers/<name>/index.js` (ctrl-C to exit) or `node servers/gateway/index.js --no-auth` for the gateway. Gateway tests live at `servers/gateway/__tests__/`.
+- **Tests**: Node built-in test runner, no third-party framework — `node --test tests/<file>.test.js` (all tests live in `tests/*.test.js`). Also verify a server starts cleanly: `node servers/<name>/index.js` (ctrl-C to exit) or `node servers/gateway/index.js --no-auth` for the gateway.
 
 ## Network exposure invariant
 
@@ -37,7 +37,7 @@ When the AI behavior (formatting, routing) changes → `crow.md` only. When the 
 - **DB schema (source of truth)**: `scripts/init-db.js`. FTS5 triggers are inline; if you change a table that has an FTS shadow (`memories`, `sources`, `blog_posts`, `kb_articles`), update the virtual table + insert/update/delete triggers in the same place.
 - **Dashboard / Turbo Drive / Turbo Streams**: `docs/architecture/dashboard.md`. Vendored Turbo at `servers/gateway/public/vendor/turbo-8.0.5.umd.js` (pinned). Opt out with systemd drop-in env `CROW_ENABLE_TURBO=0`.
 - **MCP config**: `.mcp.json` is generated — run `npm run mcp-config` after editing `.env`. Registry at `scripts/server-registry.js`. Use `npm run mcp-config -- --combined` for a single `crow-core` entry.
-- **Tool router (context reduction)**: gateway exposes 7 category tools at `/router/mcp` instead of 49+. Disable with `CROW_DISABLE_ROUTER=1`. See `servers/gateway/router.js`.
+- **Tool router (context reduction)**: gateway exposes one category tool per server at `/router/mcp` instead of the full raw tool surface. Disable with `CROW_DISABLE_ROUTER=1`. See `servers/gateway/router.js`.
 - **MCP instructions field**: every server delivers a condensed crow.md via `generateInstructions()` in `servers/shared/instructions.js`. Generated once at startup.
 - **Context scope overrides (device_id, project_id)**: handled by `mergeScopedSections()` in `servers/memory/crow-context.js`. Four scope levels, four partial unique indexes in `scripts/init-db.js`.
 - **Skills**: source markdown in `skills/`; auto-generated index at `docs/skills/index.md` (rebuild with `npm run sync-skills`).
