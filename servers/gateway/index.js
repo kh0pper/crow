@@ -1435,6 +1435,13 @@ const server = app.listen(PORT, BIND, (error) => {
     console.error("[scheduler] Failed to start:", err.message);
   });
 
+  // F.13: crosspost publish/GC scheduler (no-ops on an empty crosspost_log;
+  // kill switch CROW_DISABLE_CROSSPOST_SCHEDULER=1). Lazy import keeps boot
+  // resilient if the crossposting module is absent.
+  import("./crossposting/scheduler.js")
+    .then(({ startCrosspostScheduler }) => startCrosspostScheduler())
+    .catch((err) => console.warn("[crosspost-scheduler] not started:", err.message));
+
   // Start orchestrator pipeline runner (polls for pipeline: schedules).
   // Lazy import so deployments without the open-multi-agent sibling repo
   // (e.g. hosted relays) keep running.

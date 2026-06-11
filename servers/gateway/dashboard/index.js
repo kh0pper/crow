@@ -77,6 +77,7 @@ import botBoardPanel from "./panels/bot-board.js";
 import designSystemPanel from "./panels/design-system.js";
 import onboardingPanel from "./panels/onboarding.js";
 import connectPanel from "./panels/connect.js";
+import fediversePanel from "./panels/fediverse.js";
 import bundlesRouterFactory from "../routes/bundles.js";
 
 /**
@@ -106,6 +107,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   registerPanel(designSystemPanel);
   registerPanel(onboardingPanel);
   registerPanel(connectPanel);
+  registerPanel(fediversePanel);
 
   // Load third-party panels (async, non-blocking)
   loadExternalPanels().catch((err) => {
@@ -591,6 +593,16 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // Skips: GET/HEAD/OPTIONS, HMAC-signed peer calls (handled above),
   // pre-auth flows (no session cookie yet), and CROW_CSRF_STRICT=0 rollback.
   router.use("/dashboard", csrfMiddleware);
+
+  // F.14: Fediverse Admin action POSTs (confirm/reject moderation, cancel/retry crosspost)
+  router.post("/dashboard/fediverse/action", async (req, res) => {
+    const db = createDbClient();
+    try {
+      await fediversePanel.handleAction(req, res, { db });
+    } finally {
+      try { db.close(); } catch {}
+    }
+  });
 
   // Federation companion router (Phase 3) — session-authed, under dashboard
   // auth. Mounted AFTER dashboardAuth so session cookies are validated.
