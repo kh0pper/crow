@@ -8,6 +8,8 @@
  * config.defaultVoice
  */
 
+import { connectTimeout, composeSignals, TTS_TIMEOUT_MS } from "../../../../../shared/http-timeout.js";
+
 function escapeXml(s) {
   return String(s)
     .replace(/&/g, "&amp;")
@@ -37,7 +39,8 @@ export default function createAzureTtsAdapter(config) {
       const format = options.format || "audio-24khz-48kbitrate-mono-mp3";
       const ssml = `<speak version='1.0' xml:lang='${locale}'><voice xml:lang='${locale}' name='${escapeXml(v)}'>${escapeXml(text)}</voice></speak>`;
 
-      const res = await fetch(`${baseUrl}/cognitiveservices/v1`, {
+      const t = connectTimeout(TTS_TIMEOUT_MS);
+      const res = t.disarm(await fetch(`${baseUrl}/cognitiveservices/v1`, {
         method: "POST",
         headers: {
           "Ocp-Apim-Subscription-Key": apiKey || "",
@@ -46,8 +49,8 @@ export default function createAzureTtsAdapter(config) {
           "User-Agent": "crow-gateway",
         },
         body: ssml,
-        signal: options.signal,
-      });
+        signal: composeSignals(options.signal, t.signal),
+      }));
       if (!res.ok) {
         const err = await res.text().catch(() => "");
         throw Object.assign(new Error(`Azure TTS ${res.status}: ${err.slice(0, 200)}`), { code: "provider_error" });
