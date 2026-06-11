@@ -17,6 +17,7 @@ import {
   assertLocalCapability,
   appendAudit,
 } from "../../../shared/project-acl.js";
+import { createProjectSpace, updateProjectSpaceMeta } from "../../../shared/project-spaces.js";
 
 const PAGE_SIZE = 20;
 
@@ -45,9 +46,11 @@ export default {
         if (!name?.trim()) {
           return res.redirectAfterPost("/dashboard/projects?error=name_required");
         }
-        await db.execute({
-          sql: "INSERT INTO research_projects (name, description, type, tags) VALUES (?, ?, ?, ?)",
-          args: [name.trim(), description?.trim() || null, type || "research", tags?.trim() || null],
+        await createProjectSpace(db, {
+          name: name.trim(),
+          description: description?.trim() || null,
+          type: type || "research",
+          tags: tags?.trim() || null,
         });
         return res.redirectAfterPost("/dashboard/projects");
       }
@@ -55,10 +58,10 @@ export default {
       if (action === "update_status") {
         const { id, status } = req.body;
         if (id && status) {
-          await db.execute({
-            sql: "UPDATE research_projects SET status = ?, updated_at = datetime('now') WHERE id = ?",
-            args: [status, id],
-          });
+          const rowsAffected = await updateProjectSpaceMeta(db, Number(id), { status });
+          if (rowsAffected === 0) {
+            return res.redirectAfterPost(`/dashboard/projects?error=project_not_found`);
+          }
         }
         return res.redirectAfterPost(`/dashboard/projects?view=${id}`);
       }
@@ -66,10 +69,14 @@ export default {
       if (action === "update") {
         const { id, name, description, tags } = req.body;
         if (id && name?.trim()) {
-          await db.execute({
-            sql: "UPDATE research_projects SET name = ?, description = ?, tags = ?, updated_at = datetime('now') WHERE id = ?",
-            args: [name.trim(), description?.trim() || null, tags?.trim() || null, id],
+          const rowsAffected = await updateProjectSpaceMeta(db, Number(id), {
+            name: name.trim(),
+            description: description?.trim() || null,
+            tags: tags?.trim() || null,
           });
+          if (rowsAffected === 0) {
+            return res.redirectAfterPost(`/dashboard/projects?view=${id}&error=project_not_found`);
+          }
         }
         return res.redirectAfterPost(`/dashboard/projects?view=${id}`);
       }

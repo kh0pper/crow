@@ -21,6 +21,7 @@ import {
   appendAudit,
 } from "../shared/project-acl.js";
 import { slugify } from "../shared/slugify.js";
+import { createProjectSpace, updateProjectSpaceMeta } from "../shared/project-spaces.js";
 
 const SOURCE_TYPES = [
   "web_article", "academic_paper", "book", "interview",
@@ -156,11 +157,12 @@ export function createProjectServer(dbPath, options = {}) {
       tags: z.string().max(500).optional().describe("Comma-separated tags"),
     },
     async ({ name, description, type, tags }) => {
-      const result = await db.execute({
-        sql: "INSERT INTO research_projects (name, description, type, tags) VALUES (?, ?, ?, ?)",
-        args: [name, description ?? null, type, tags ?? null],
+      const { id: projectId } = await createProjectSpace(db, {
+        name,
+        description: description ?? null,
+        type,
+        tags: tags ?? null,
       });
-      const projectId = Number(result.lastInsertRowid);
       let text = `Project created: "${name}" (id: ${projectId}, type: ${type})`;
       if (type === "data_connector") {
         text += `\n\nNext step: Use crow_register_backend to connect an external MCP server to this project.`;
@@ -236,21 +238,26 @@ export function createProjectServer(dbPath, options = {}) {
       tags: z.string().max(500).optional(),
     },
     async ({ id, name, description, status, type, tags }) => {
-      const updates = [];
-      const params = [];
-      if (name !== undefined) { updates.push("name = ?"); params.push(name); }
-      if (description !== undefined) { updates.push("description = ?"); params.push(description); }
-      if (status !== undefined) { updates.push("status = ?"); params.push(status); }
-      if (type !== undefined) { updates.push("type = ?"); params.push(type); }
-      if (tags !== undefined) { updates.push("tags = ?"); params.push(tags); }
+      const patch = {};
+      if (name !== undefined) patch.name = name;
+      if (description !== undefined) patch.description = description;
+      if (status !== undefined) patch.status = status;
+      if (type !== undefined) patch.type = type;
+      if (tags !== undefined) patch.tags = tags;
 
-      if (updates.length === 0) {
+      if (Object.keys(patch).length === 0) {
         return { content: [{ type: "text", text: "No updates provided." }] };
       }
 
-      updates.push("updated_at = datetime('now')");
-      params.push(id);
-      await db.execute({ sql: `UPDATE research_projects SET ${updates.join(", ")} WHERE id = ?`, args: params });
+      let rowsAffected;
+      try {
+        rowsAffected = await updateProjectSpaceMeta(db, id, patch);
+      } catch (err) {
+        return { content: [{ type: "text", text: err.message }], isError: true };
+      }
+      if (rowsAffected === 0) {
+        return { content: [{ type: "text", text: `Project #${id} not found.` }], isError: true };
+      }
       return { content: [{ type: "text", text: `Project #${id} updated.` }] };
     }
   );
@@ -672,11 +679,13 @@ export function createProjectServer(dbPath, options = {}) {
       // Auto-create project if not provided
       let actualProjectId = project_id;
       if (!actualProjectId) {
-        const projectResult = await db.execute({
-          sql: "INSERT INTO research_projects (name, description, type, tags) VALUES (?, ?, 'data_connector', ?)",
-          args: [name, `Data backend: ${name}`, tags ?? null],
+        const { id: newProjectId } = await createProjectSpace(db, {
+          name,
+          description: `Data backend: ${name}`,
+          type: "data_connector",
+          tags: tags ?? null,
         });
-        actualProjectId = Number(projectResult.lastInsertRowid);
+        actualProjectId = newProjectId;
       }
 
       const result = await db.execute({

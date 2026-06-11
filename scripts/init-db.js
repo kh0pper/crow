@@ -110,7 +110,7 @@ await initTable("research tables", `
     tags TEXT,
     relevance_score INTEGER DEFAULT 5 CHECK(relevance_score BETWEEN 1 AND 10),
     created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (project_id) REFERENCES research_projects(id) ON DELETE SET NULL
+    FOREIGN KEY (project_id) REFERENCES project_spaces(id) ON DELETE SET NULL
   );
 
   CREATE INDEX IF NOT EXISTS idx_sources_project ON research_sources(project_id);
@@ -134,7 +134,7 @@ await initTable("data_backends table", `
     tags TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (project_id) REFERENCES research_projects(id) ON DELETE CASCADE
+    FOREIGN KEY (project_id) REFERENCES project_spaces(id) ON DELETE CASCADE
   );
 
   CREATE INDEX IF NOT EXISTS idx_backends_project ON data_backends(project_id);
@@ -487,7 +487,7 @@ await initTable("sources FTS triggers and notes table", `
     note_type TEXT DEFAULT 'note' CHECK(note_type IN ('note', 'quote', 'summary', 'analysis', 'question', 'insight')),
     tags TEXT,
     created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (project_id) REFERENCES research_projects(id) ON DELETE SET NULL,
+    FOREIGN KEY (project_id) REFERENCES project_spaces(id) ON DELETE SET NULL,
     FOREIGN KEY (source_id) REFERENCES research_sources(id) ON DELETE SET NULL
   );
 
@@ -771,6 +771,289 @@ await addColumnIfMissing("glasses_note_sessions", "consent_expires_at", "TEXT");
 // tool's try/catch. Adding it here makes the dictation append actually
 // persist its timestamp; legacy rows get NULL until first edit.
 await addColumnIfMissing("research_notes", "updated_at", "TEXT");
+
+// --- W2-5 B2: FK re-pointing (research_sources, research_notes, data_backends) ---
+//
+// SQLite cannot ALTER a foreign key — each affected table must be rebuilt.
+// This function is idempotent: it skips any table whose FK already targets
+// project_spaces (detected via PRAGMA foreign_key_list).
+//
+// Mandatory invariants (spec Part 1, rounds 1+2):
+//   - PRAGMA foreign_keys OFF/ON outside all transactions
+//   - Per-table BEGIN IMMEDIATE with explicit ROLLBACK on error
+//   - Index DDL snapshotted from sqlite_master (never hand-listed)
+//   - sqlite_sequence captured before DROP, restored via UPDATE then
+//     INSERT-only-on-0-changes after RENAME (AUTOINCREMENT id-reuse prevention)
+//   - Abort on unknown column (pre-DDL, old table intact)
+//   - FTS triggers recreated for research_sources; FTS integrity-check after
+//   - PRAGMA foreign_key_check per rebuilt table; abort on violations
+//
+async function rebuildMainFKsToProjectSpaces() {
+  // ------------------------------------------------------------------
+  // Canonical new DDL + per-table known live-extra columns
+  // (spec N1: enumerated per-table for ALL tables; abort on unknown)
+  // ------------------------------------------------------------------
+  const TABLE_SPECS = {
+    research_sources: {
+      isAutoincrement: true,
+      newDdl: `CREATE TABLE research_sources_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER,
+    title TEXT NOT NULL,
+    source_type TEXT NOT NULL CHECK(source_type IN (
+      'web_article', 'academic_paper', 'book', 'interview',
+      'web_search', 'web_scrape', 'api_data', 'document',
+      'video', 'podcast', 'social_media', 'government_doc',
+      'dataset', 'other'
+    )),
+    url TEXT,
+    authors TEXT,
+    publication_date TEXT,
+    publisher TEXT,
+    doi TEXT,
+    isbn TEXT,
+    abstract TEXT,
+    content_summary TEXT,
+    full_text TEXT,
+    citation_apa TEXT NOT NULL,
+    retrieval_date TEXT DEFAULT (date('now')),
+    retrieval_method TEXT,
+    verified INTEGER DEFAULT 0,
+    verification_notes TEXT,
+    tags TEXT,
+    relevance_score INTEGER DEFAULT 5 CHECK(relevance_score BETWEEN 1 AND 10),
+    created_at TEXT DEFAULT (datetime('now')),
+    backend_id INTEGER REFERENCES data_backends(id) ON DELETE SET NULL,
+    uuid TEXT,
+    origin_instance_id TEXT,
+    FOREIGN KEY (project_id) REFERENCES project_spaces(id) ON DELETE SET NULL
+  )`,
+      // columns known to be added via addColumnIfMissing / addUuidColumn
+      // (spec C2: backend_id would be silently lost if derived from PRAGMA table_info alone)
+      knownExtras: ["backend_id", "uuid", "origin_instance_id"],
+      canonicalColumns: [
+        "id", "project_id", "title", "source_type", "url", "authors",
+        "publication_date", "publisher", "doi", "isbn", "abstract",
+        "content_summary", "full_text", "citation_apa", "retrieval_date",
+        "retrieval_method", "verified", "verification_notes", "tags",
+        "relevance_score", "created_at",
+      ],
+    },
+    research_notes: {
+      isAutoincrement: true,
+      newDdl: `CREATE TABLE research_notes_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER,
+    source_id INTEGER,
+    title TEXT,
+    content TEXT NOT NULL,
+    note_type TEXT DEFAULT 'note' CHECK(note_type IN ('note', 'quote', 'summary', 'analysis', 'question', 'insight')),
+    tags TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    lamport_ts INTEGER DEFAULT 0,
+    updated_at TEXT,
+    uuid TEXT,
+    origin_instance_id TEXT,
+    FOREIGN KEY (project_id) REFERENCES project_spaces(id) ON DELETE SET NULL,
+    FOREIGN KEY (source_id) REFERENCES research_sources(id) ON DELETE SET NULL
+  )`,
+      knownExtras: ["lamport_ts", "updated_at", "uuid", "origin_instance_id"],
+      canonicalColumns: [
+        "id", "project_id", "source_id", "title", "content", "note_type",
+        "tags", "created_at",
+      ],
+    },
+    data_backends: {
+      isAutoincrement: true,
+      newDdl: `CREATE TABLE data_backends_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    backend_type TEXT DEFAULT 'mcp_server',
+    connection_ref TEXT NOT NULL,
+    schema_info TEXT,
+    status TEXT DEFAULT 'disconnected',
+    last_connected_at TEXT,
+    last_error TEXT,
+    tags TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    uuid TEXT,
+    origin_instance_id TEXT,
+    FOREIGN KEY (project_id) REFERENCES project_spaces(id) ON DELETE CASCADE
+  )`,
+      knownExtras: ["uuid", "origin_instance_id"],
+      canonicalColumns: [
+        "id", "project_id", "name", "backend_type", "connection_ref",
+        "schema_info", "status", "last_connected_at", "last_error", "tags",
+        "created_at", "updated_at",
+      ],
+    },
+  };
+
+  // PRAGMA foreign_keys OFF must be outside any transaction (spec step 2)
+  await db.execute("PRAGMA foreign_keys = OFF");
+
+  try {
+    for (const [tableName, spec] of Object.entries(TABLE_SPECS)) {
+      // Step 1: detect — skip if already points at project_spaces
+      const { rows: fkList } = await db.execute(
+        `PRAGMA foreign_key_list(${tableName})`
+      );
+      const hasRpRef = fkList.some(
+        (r) => r.table === "research_projects" && r.from === "project_id"
+      );
+      if (!hasRpRef) {
+        // Already rebuilt or never needed — skip
+        continue;
+      }
+
+      console.log(`[W2-5 B2] Rebuilding ${tableName} FK → project_spaces …`);
+
+      // Step 3: snapshot index DDL from sqlite_master (never hand-list — spec C3)
+      const { rows: idxRows } = await db.execute({
+        sql: `SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL`,
+        args: [tableName],
+      });
+
+      // Verify no unknown columns before any DDL (spec C2 + N1)
+      const { rows: colRows } = await db.execute(
+        `PRAGMA table_info(${tableName})`
+      );
+      // Per-table column set (spec D2 fix: a merged union across tables would
+      // let a column belonging to table A slip through unnoticed on table B)
+      const canonicalCols = new Set([...spec.canonicalColumns, ...spec.knownExtras]);
+      for (const col of colRows) {
+        if (!canonicalCols.has(col.name)) {
+          await db.execute("PRAGMA foreign_keys = ON");
+          throw new Error(
+            `[W2-5 B2] Unknown column ${tableName}.${col.name} — add it to the rebuild's extras list (and test fixture) or remove the column`
+          );
+        }
+      }
+
+      // Step 4: capture sqlite_sequence before DROP (spec C1)
+      let capturedSeq = null;
+      if (spec.isAutoincrement) {
+        const { rows: seqRows } = await db.execute({
+          sql: `SELECT seq FROM sqlite_sequence WHERE name = ?`,
+          args: [tableName],
+        });
+        capturedSeq = seqRows.length > 0 ? Number(seqRows[0].seq) : 0;
+      }
+
+      // Step 5: rebuild inside one BEGIN IMMEDIATE transaction (spec step 5)
+      // Explicit column lists — rowids preserved (FTS content_rowid + FK targets)
+      const colList = colRows.map((c) => c.name).join(", ");
+
+      try {
+        await db.executeMultiple(`BEGIN IMMEDIATE`);
+
+        await db.execute(`${spec.newDdl}`);
+
+        await db.execute({
+          sql: `INSERT INTO ${tableName}_new (${colList}) SELECT ${colList} FROM ${tableName}`,
+        });
+
+        await db.execute(`DROP TABLE ${tableName}`);
+        await db.execute(`ALTER TABLE ${tableName}_new RENAME TO ${tableName}`);
+
+        // Recreate all snapshotted indexes (spec C3)
+        for (const idx of idxRows) {
+          await db.execute(idx.sql);
+        }
+
+        // Restore sqlite_sequence (spec C1 + N2)
+        // RENAME carries t_new's row → a row always exists post-RENAME
+        // UPDATE first; INSERT only if 0 rows changed (N2: unconditional INSERT duplicates)
+        if (spec.isAutoincrement && capturedSeq !== null) {
+          const { rows: maxRows } = await db.execute(
+            `SELECT MAX(id) AS maxId FROM ${tableName}`
+          );
+          const maxId = maxRows[0]?.maxId != null ? Number(maxRows[0].maxId) : 0;
+          const restoreSeq = Math.max(capturedSeq, maxId);
+          const upd = await db.execute({
+            sql: `UPDATE sqlite_sequence SET seq = ? WHERE name = ?`,
+            args: [restoreSeq, tableName],
+          });
+          if (upd.rowsAffected === 0) {
+            await db.execute({
+              sql: `INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)`,
+              args: [tableName, restoreSeq],
+            });
+          }
+        }
+
+        // research_sources only: recreate FTS triggers (DROP TABLE killed them)
+        if (tableName === "research_sources") {
+          await db.execute(`
+            CREATE TRIGGER IF NOT EXISTS sources_ai AFTER INSERT ON research_sources BEGIN
+              INSERT INTO sources_fts(rowid, title, authors, abstract, content_summary, full_text, tags, citation_apa)
+              VALUES (new.id, new.title, new.authors, new.abstract, new.content_summary, new.full_text, new.tags, new.citation_apa);
+            END
+          `);
+          await db.execute(`
+            CREATE TRIGGER IF NOT EXISTS sources_ad AFTER DELETE ON research_sources BEGIN
+              INSERT INTO sources_fts(sources_fts, rowid, title, authors, abstract, content_summary, full_text, tags, citation_apa)
+              VALUES ('delete', old.id, old.title, old.authors, old.abstract, old.content_summary, old.full_text, old.tags, old.citation_apa);
+            END
+          `);
+          await db.execute(`
+            CREATE TRIGGER IF NOT EXISTS sources_au AFTER UPDATE ON research_sources BEGIN
+              INSERT INTO sources_fts(sources_fts, rowid, title, authors, abstract, content_summary, full_text, tags, citation_apa)
+              VALUES ('delete', old.id, old.title, old.authors, old.abstract, old.content_summary, old.full_text, old.tags, old.citation_apa);
+              INSERT INTO sources_fts(rowid, title, authors, abstract, content_summary, full_text, tags, citation_apa)
+              VALUES (new.id, new.title, new.authors, new.abstract, new.content_summary, new.full_text, new.tags, new.citation_apa);
+            END
+          `);
+        }
+
+        await db.executeMultiple(`COMMIT`);
+      } catch (err) {
+        // Explicit ROLLBACK on error (spec C5 — abandoned open txn holds the write lock)
+        try { await db.executeMultiple(`ROLLBACK`); } catch {}
+        await db.execute("PRAGMA foreign_keys = ON");
+        throw err;
+      }
+
+      // FTS integrity check for research_sources (after COMMIT — spec step 5)
+      if (tableName === "research_sources") {
+        try {
+          await db.execute(`INSERT INTO sources_fts(sources_fts) VALUES('integrity-check')`);
+        } catch (ftsErr) {
+          await db.execute("PRAGMA foreign_keys = ON");
+          throw new Error(`[W2-5 B2] sources_fts integrity-check failed after rebuild: ${ftsErr.message}`);
+        }
+      }
+
+      // Step 6: foreign_key_check per rebuilt table (spec step 6)
+      const { rows: fkViolations } = await db.execute(
+        `PRAGMA foreign_key_check(${tableName})`
+      );
+      if (fkViolations.length > 0) {
+        await db.execute("PRAGMA foreign_keys = ON");
+        throw new Error(
+          `[W2-5 B2] PRAGMA foreign_key_check(${tableName}) returned ${fkViolations.length} violation(s) after rebuild`
+        );
+      }
+
+      console.log(`[W2-5 B2] ${tableName} rebuilt successfully → project_spaces`);
+    }
+  } finally {
+    // PRAGMA foreign_keys ON must be outside any transaction (spec step 2)
+    await db.execute("PRAGMA foreign_keys = ON");
+  }
+}
+
+// Placement: after research_notes.updated_at (:773), after addUuidColumn (:194),
+// after migrateLegacyProjectsToSpaces (:349) — spec step 7.
+await rebuildMainFKsToProjectSpaces();
+
+// W2-5 B2: PII purge — archived learner ps rows are residue of pre-B2 parental
+// deletions whose data was meant to be gone (B1 privacy commitment). Idempotent.
+await db.execute(
+  `DELETE FROM project_spaces WHERE type = 'learner_profile' AND archived_at IS NOT NULL`
+);
 
 // Phase 6 C.2: caption fill-in tracking. crow_glasses_capture_and_attach_photo
 // inserts the markdown ref + a backfill row immediately; the scheduler's

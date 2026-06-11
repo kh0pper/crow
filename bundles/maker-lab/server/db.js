@@ -1,7 +1,7 @@
-import { createClient } from "@libsql/client";
 import { existsSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
+import { createDbClient as createSharedDbClient } from "../../../servers/db.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -37,9 +37,12 @@ export function resolveDataDir() {
 
 export function createDbClient(dbPath) {
   const filePath = dbPath || process.env.CROW_DB_PATH || resolve(resolveDataDir(), "crow.db");
-  const client = createClient({ url: `file:${filePath}` });
-  client.execute("PRAGMA busy_timeout = 5000").catch(err =>
-    console.warn("[maker-lab/db] busy_timeout:", err.message)
-  );
-  return client;
+  // Delegate to the shared better-sqlite3 wrapper (same libsql-shaped surface:
+  // execute/batch/executeMultiple/close). The raw @libsql/client this used to
+  // construct does NOT share a transaction across separate execute() calls, so
+  // the W2-5 B2 FK-rebuild's BEGIN IMMEDIATE … COMMIT bracketing silently ran
+  // autocommit and the trailing COMMIT threw — crashing bundle boot and
+  // voiding the rebuild's atomicity guarantee. The shared wrapper holds real
+  // transactions across calls (and is what data-dashboard already uses).
+  return createSharedDbClient(filePath);
 }
