@@ -34,7 +34,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const HOME = process.env.HOME || "/home/kh0pp";
 const MODELS_JSON_SEARCH_PATHS = [
   resolve(__dirname, "../../models.json"),
-  resolve(__dirname, "../../bundles/crowclaw/config/agents/main/models.json"),
   resolve(__dirname, "../../config/models.json"),
   resolve(HOME, ".pi/agent/models.json"),
 ];

@@ -113,7 +113,7 @@ test("middleware does NOT match unrelated routes ending in /messages", async () 
   const spyDb = { execute: (...a) => { reads++; return db.execute(...a); } };
   // Real non-MCP routes that end in /messages (2+ segments deep) must not be
   // treated as MCP transport paths. MCP paths are at most one prefix segment deep.
-  for (const path of ["/dashboard/streams/messages", "/api/chat/conversations/abc/messages", "/api/bot-chat/bot1/messages"]) {
+  for (const path of ["/dashboard/streams/messages", "/api/chat/conversations/abc/messages", "/api/peer-messages/contact1/messages"]) {
     const req = { path, headers: { authorization: "Bearer whatever" } };
     await run(localTokenAuthMiddleware(spyDb), req);
     assert.equal(req.localTokenAuth, undefined, `${path} must not authenticate`);
