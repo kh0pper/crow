@@ -6,6 +6,8 @@
  * config.defaultVoice — default voice_id
  */
 
+import { connectTimeout, composeSignals, TTS_TIMEOUT_MS } from "../../../../../shared/http-timeout.js";
+
 const DEFAULT_BASE_URL = "https://api.elevenlabs.io";
 
 export default function createElevenLabsTtsAdapter(config) {
@@ -21,7 +23,8 @@ export default function createElevenLabsTtsAdapter(config) {
       const model = options.model || "eleven_turbo_v2_5";
       const format = options.format || "mp3_44100_128";
       const url = `${baseUrl}/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream?output_format=${encodeURIComponent(format)}`;
-      const res = await fetch(url, {
+      const t = connectTimeout(TTS_TIMEOUT_MS);
+      const res = t.disarm(await fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -33,8 +36,8 @@ export default function createElevenLabsTtsAdapter(config) {
           model_id: model,
           voice_settings: options.voiceSettings || { stability: 0.5, similarity_boost: 0.75 },
         }),
-        signal: options.signal,
-      });
+        signal: composeSignals(options.signal, t.signal),
+      }));
       if (!res.ok) {
         const err = await res.text().catch(() => "");
         throw Object.assign(new Error(`ElevenLabs ${res.status}: ${err.slice(0, 200)}`), { code: "provider_error" });
