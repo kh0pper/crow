@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: Crow
-  text: A modular, agentic framework that runs on your hardware and answers to you
-  tagline: Build and run your own AI agents for assistance, research, projects, and home. Works with Claude, ChatGPT, Gemini, Cursor, and more. Your AI, your devices, your data.
+  text: A modular, agentic framework and MCP platform that runs on your hardware
+  tagline: Build and run your own AI agents, connect the AI client you already pay for as a native MCP connector, and self-host your apps — on hardware you own, with local or cloud models. Your AI, your devices, your data.
   image:
     src: /crow-hero.svg
     alt: Crow
@@ -24,39 +24,39 @@ hero:
 
 features:
   - icon:
-      src: /icon-platforms.svg
-    title: What is Crow?
-    details: A server you run on your own hardware that gives your AI assistant persistent memory, project management, agents, a blog, and file storage. It speaks the open Model Context Protocol, so every major AI platform understands it and you are never locked in.
-  - icon:
       src: /icon-mcp.svg
-    title: Build Your Own Agents
-    details: The Bot Builder lets you compose an agent from a persona, skills, tools, and permissions, then run it over Gmail, Discord, or Meta glasses. Each agent is scoped to the tools you grant it, and opt-in self-authoring stays behind an operator-approval gate.
+    title: Build & Run Your Own Agents
+    details: The Bot Builder lets you compose an agent from a persona, skills, tools, and permissions, then run it over email, Discord, or Meta glasses. Local and operator-gated; opt-in self-authoring stays behind an approval gate.
   - icon:
       src: /icon-platforms.svg
-    title: Hop Between Platforms
-    details: Use Claude for research, ChatGPT for writing, Cursor for code. Crow keeps your context synchronized across all of them. No more starting over.
+    title: Connect Your AI Client over MCP
+    details: Connect Crow to the AI client you already pay for — Claude Code, claude.ai, Cursor, opencode — as a native MCP server. It rides your existing subscription as a first-class connector, the supported extension point, not a third-party harness you run instead of your client.
+  - icon:
+      src: /icon-deploy.svg
+    title: All-in-One Home Server
+    details: An AI-driven self-hosted app store — file sync, photos, smart home, media, local AI. Because every app installs as a bundle, what you self-host is also a capability your agents and AI clients can use.
   - icon:
       src: /icon-memory.svg
     title: Persistent Memory
     details: Store and search memories across sessions and platforms. Full-text search, categories, importance scoring, and automatic context recall.
   - icon:
       src: /icon-research.svg
-    title: Project Management & Research
+    title: Projects & Research
     details: Organize work with typed project workflows. Research projects carry multi-format citations (APA, MLA, Chicago), bibliographies, and source verification, and data-connector projects bridge external databases and APIs. Every claim links to a stored, verified source.
   - icon:
       src: /icon-sharing.svg
     title: Encrypted P2P Sharing
-    details: Share memories, projects, and messages directly with other Crow users. End-to-end encrypted via Hypercore and Nostr, with no central server, no accounts, and no metadata leaks.
+    details: Share memories, projects, and messages directly with other Crow users — end-to-end encrypted via Hypercore and Nostr, with no central server and no metadata leaks. Access and control all your connected instances from the open-source Android app or the dashboard.
   - icon:
       src: /icon-integrations.svg
-    title: Extensible with Add-ons
-    details: 20+ integrations out of the box (Gmail, GitHub, Slack, and more) plus self-hosting add-ons (Obsidian, Home Assistant, Ollama, Nextcloud, Immich). Install by asking your AI, and any add-on's tools become available to your agents.
+    title: Integrations & Bundles
+    details: 20+ integrations (Gmail, GitHub, Slack, and more) plus self-hosting add-ons, each installed as a bundle — a service plus its MCP tools plus its skills — so every add-on's capabilities reach your agents and AI clients automatically.
   - icon:
       src: /icon-deploy.svg
     title: Your Data Stays Yours
-    details: Crow stores your data on infrastructure you control. Pair it with a local model and nothing ever leaves your network. Connect a cloud assistant and only what you send that provider goes out, on your terms.
+    details: Your data lives on infrastructure you control. Pair a local model and nothing leaves your network; connect a cloud assistant and only what you choose to send goes out. Either way, the system of record is yours.
   - icon:
-      src: /icon-deploy.svg
+      src: /icon-platforms.svg
     title: Managed, Cloud, or Self-Host
-    details: Self-host on Oracle Cloud for free, run on a Raspberry Pi, or use managed hosting. Multi-instance sync pulls all of your devices into one interface.
+    details: Self-host on Oracle Cloud for free, run on a Raspberry Pi, or use managed hosting. Multi-instance sync pulls all your devices into one interface. Crow is open source and developers are welcome.
 ---
