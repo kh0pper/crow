@@ -43,7 +43,6 @@ export default {
     } = buildExtensionsHTML({ installed, available, registrySource, communityStores, bundleStatus, lang });
 
     // ─── Modal + client-side JavaScript ───
-    // Modal JS preserved verbatim from original; filter + search JS rewritten
     const interactiveScript = extensionsClientJS(lang);
 
     const content = `
