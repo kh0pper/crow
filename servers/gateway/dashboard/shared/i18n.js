@@ -559,6 +559,7 @@ export const translations = {
   "botboard.btnCancelCard": { en: "Cancel card", es: "Cancelar tarjeta" },
   "botboard.btnForceUnlock": { en: "Force-unlock", es: "Forzar desbloqueo" },
   "botboard.planFileHeading": { en: "Plan file", es: "Archivo de plan" },
+  "botboard.btnSavePlan": { en: "Save plan", es: "Guardar plan" },
   "botboard.btnPreview": { en: "Preview", es: "Vista previa" },
   "botboard.drawerNewProject": { en: "New project", es: "Nuevo proyecto" },
   "botboard.labelName": { en: "Name", es: "Nombre" },

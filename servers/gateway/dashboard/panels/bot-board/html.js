@@ -136,7 +136,7 @@ export function drawerMarkup(lang) {
     <div id="bb-d-plan-msg" class="bb-msg"></div>
     <textarea id="bb-d-plan" rows="14" placeholder="${t("botboard.planFilePlaceholder", lang)}"></textarea>
     <div class="bb-pre" id="bb-d-plan-pre" style="display:none"></div>
-    <button type="button" class="bb-btn" id="bb-d-plan-save">${t("common.save", lang)} ${t("botboard.planFileHeading", lang)}</button>
+    <button type="button" class="bb-btn" id="bb-d-plan-save">${t("botboard.btnSavePlan", lang)}</button>
   </div>
   <div class="bb-drawer" id="bb-newproj" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
