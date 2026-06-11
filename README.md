@@ -6,13 +6,13 @@ Built on the open [Model Context Protocol](https://modelcontextprotocol.io) stan
 
 ## Use it two ways — or both at once
 
-Use it two ways, or both at once. As an **agentic framework**, build and run your own agents (the Bot Builder) over email, Discord, and voice — local and operator-gated. As an **MCP platform**, connect Crow to the AI client you already pay for (Claude Code, claude.ai, Cursor, opencode) as a native MCP server.
+As an **agentic framework**, build and run your own agents (the Bot Builder) over email, Discord, and voice — local and operator-gated. As an **MCP platform**, connect Crow to the AI client you already pay for (Claude Code, claude.ai, Cursor, opencode) as a native MCP server.
 
 **It rides your existing subscription as a first-class connector — the supported extension point, not a third-party harness you run instead of your client.**
 
 Both halves share the same memory, projects, files, and capabilities. Build an agent that runs autonomously on email, and your AI client in Claude Code still reaches the same memories that agent built up. That is the design: one system of record, two modes of access.
 
-Crow is also open source, and developers are welcome — build integrations, skills, core tools, panels, and self-hosting bundles for the ecosystem. See the **[Developer Program](#developer-program)** section below.
+Crow is open source — developers can build integrations, skills, tools, panels, and bundles for it.
 
 ## Your AI, your devices, your data
 
@@ -22,7 +22,7 @@ Privacy is honest here, not absolute marketing. The choice between local and clo
 
 ## Build and run your own agents
 
-The **Bot Builder** is the spine of Crow's agentic side. An agent (a "bot") is a persona plus the skills, tools, gateways, and permissions you give it, all configured from the dashboard with no config files to hand-edit.
+This is the agentic-framework side of Crow. The **Bot Builder** is the spine of Crow's agentic side. An agent (a "bot") is a persona plus the skills, tools, gateways, and permissions you give it, all configured from the dashboard with no config files to hand-edit.
 
 - **Compose an agent**: Give it a name and personality, pick its model, attach skills, and select exactly which tools it can use (Crow's own memory/projects/blog/storage tools, plus any installed extension's tools).
 - **Put it on a channel (gateways)**: The same agent can answer **email** (Gmail), chat on **Discord**, or run hands-free on **Meta Ray-Ban glasses** as a fast voice assistant. One agent, the channels you choose.
@@ -51,7 +51,7 @@ Unlike hosted, auto-authoring bot platforms, Crow keeps the engine on your hardw
 
 Crow is the first AI platform with built-in encrypted peer-to-peer sharing. No cloud middleman, no accounts to create, just your Crow ID.
 
-Share memories, projects, and messages directly with other Crow users over an encrypted peer-to-peer layer, with no central server. Crow spans your devices, pulling multiple instances into one private interface — access and control all of your connected instances from the open-source Android app, or from the dashboard in any browser.
+Crow spans your devices, pulling multiple instances into one private interface — access and control all of your connected instances from the open-source Android app, or from the dashboard in any browser.
 
 - **Share memories and projects**: Send a memory or an entire project space to a friend's Crow, encrypted end-to-end.
 - **Collaborate on project spaces**: Project spaces have members, roles (owner / editor / viewer / guest), and per-member capability overrides. Clone-share delivers a one-shot snapshot today; live one-way subscription is a planned follow-on.
@@ -82,13 +82,13 @@ Crow connects to the AI clients you already use as a native MCP server — not a
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | Web, Mobile, Desktop | Apps/Connectors | CLI, AI Studio | Remote MCP | IDE | IDE | VS Code | CLI |
 
-### Crow's Nest
+## Crow's Nest
 
 Server-rendered web UI with Dark Editorial design. Password-protected, session-based auth. Built-in panels for the Bot Builder, Messages, Blog, Files, Extensions, and Settings. Third-party panels can be installed from `~/.crow/panels/`.
 
 > **[Crow's Nest Guide](https://maestro.press/software/crow/guide/crows-nest)** · **[Architecture](https://maestro.press/software/crow/architecture/dashboard)**
 
-### AI Chat Gateway (BYOAI)
+## AI Chat Gateway (BYOAI)
 
 Use the Crow's Nest as a chat frontend with your own AI provider: OpenAI, Anthropic, Google, Ollama, or any OpenAI-compatible endpoint. Tool calling routes through Crow's MCP servers, so your AI can reach memories, projects, and files during conversations. No API keys leave your server.
 
@@ -96,7 +96,7 @@ Use the Crow's Nest as a chat frontend with your own AI provider: OpenAI, Anthro
 
 ## Quick Start
 
-The first-run wizard and the connect wizard (Settings → Connections) walk you through initial setup and connecting your first AI client — no config files required.
+For a guided setup instead of the CLI flows below: the first-run wizard and the connect wizard (Settings → Connections) walk you through initial setup and connecting your first AI client — no config files required.
 
 ### Managed Hosting
 
