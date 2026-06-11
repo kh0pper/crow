@@ -24,6 +24,7 @@
  */
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { escapeHtml, section, badge } from "../shared/components.js";
+import { tJs } from "../shared/i18n.js";
 import { createDbClient } from "../../../db.js";
 import { botRuntimeActive } from "./bot-runtime-flag.js";
 import { tasksDbPath } from "../../../../scripts/pi-bots/instance-paths.mjs";
@@ -322,7 +323,7 @@ export default {
   navOrder: 15,
   category: "tools",
 
-  async handler(req, res, { db, layout }) {
+  async handler(req, res, { db, layout, lang }) {
     const notAvail = await tableMissing(db);
 
     // ---- no-JS status-move: kanban (action=move) ----
@@ -551,7 +552,7 @@ export default {
           notice + switcher +
           `<p style="margin-top:1rem;color:var(--crow-text-muted)">No enabled bots found. Create a bot in Bot Builder to start a board.</p>`) +
           peerBotsHtml +
-          drawerMarkup() + clientJs(null, "none", null),
+          drawerMarkup(lang) + clientJs(null, "none", null, null, null, lang),
       });
     }
 
@@ -570,16 +571,16 @@ export default {
 
     if (trackerType === "custom") {
       // ---- Custom tracker rendering ----
-      return await renderCustomTracker(req, res, { db, layout, selBot, bots, notice, switcher, q });
+      return await renderCustomTracker(req, res, { db, layout, selBot, bots, notice, switcher, q, lang });
     }
 
     // ---- Kanban / task-list rendering (default) ----
-    return await renderKanbanBoard(req, res, { db, layout, selBot, bots, notice, switcher, q });
+    return await renderKanbanBoard(req, res, { db, layout, selBot, bots, notice, switcher, q, lang });
   },
 };
 
 // ---- Kanban board rendering ----
-async function renderKanbanBoard(req, res, { db, layout, selBot, bots, notice, switcher, q }) {
+async function renderKanbanBoard(req, res, { db, layout, selBot, bots, notice, switcher, q, lang }) {
   const projectId = selBot.projectId != null ? Number(selBot.projectId) : null;
 
   if (projectId == null) {
@@ -589,7 +590,7 @@ async function renderKanbanBoard(req, res, { db, layout, selBot, bots, notice, s
         `Board — ${escapeHtml(selBot.displayName)}`,
         notice + switcher +
         `<p style="margin-top:1rem;color:var(--crow-text-muted)">This bot has no project linked. Assign a project_id in Bot Builder.</p>`) +
-        drawerMarkup() + clientJs(selBot.botId, "kanban", null),
+        drawerMarkup(lang) + clientJs(selBot.botId, "kanban", null, null, null, lang),
     });
   }
 
@@ -678,13 +679,13 @@ async function renderKanbanBoard(req, res, { db, layout, selBot, bots, notice, s
   const content = PAGE_CSS + section(
     `Board — ${escapeHtml(selBot.displayName)}`,
     notice + switcher + boardHtml) +
-    drawerMarkup() + clientJs(selBot.botId, "kanban", projectId);
+    drawerMarkup(lang) + clientJs(selBot.botId, "kanban", projectId, null, null, lang);
 
   return layout({ title: `Bot Board — ${selBot.displayName}`, content });
 }
 
 // ---- Custom tracker rendering ----
-async function renderCustomTracker(req, res, { db, layout, selBot, bots, notice, switcher, q }) {
+async function renderCustomTracker(req, res, { db, layout, selBot, bots, notice, switcher, q, lang }) {
   const trackerSlug = selBot.trackerSlug;
   if (!trackerSlug) {
     return layout({
@@ -760,7 +761,7 @@ async function renderCustomTracker(req, res, { db, layout, selBot, bots, notice,
       : `<div style="color:var(--crow-text-muted);font-size:.78rem;padding:.4rem">—</div>`;
     return `<div class="bb-col" data-col="${escapeHtml(st)}">` +
       `<h4><span>${escapeHtml(st)}</span><span>${list.length}</span>` +
-      `<button type="button" class="bb-col-toggle" title="collapse column">−</button></h4>` +
+      `<button type="button" class="bb-col-toggle" title="collapse column" aria-label="Collapse ${escapeHtml(st)} column">−</button></h4>` +
       `<div class="bb-col-body" data-col-body="${escapeHtml(st)}">${cardsHtml}</div></div>`;
   }).join("");
 
@@ -782,7 +783,7 @@ async function renderCustomTracker(req, res, { db, layout, selBot, bots, notice,
   const content = PAGE_CSS + section(
     `Board — ${escapeHtml(selBot.displayName)} (${escapeHtml(trackerDef.display_name || trackerSlug)})`,
     notice + switcher + filterBarHtml + boardHtml) +
-    trackerDrawerMarkup() + drawerMarkup() + clientJs(selBot.botId, "custom", null, trackerSlug, contextFields);
+    trackerDrawerMarkup(lang) + drawerMarkup(lang) + clientJs(selBot.botId, "custom", null, trackerSlug, contextFields, lang);
 
   return layout({ title: `Bot Board — ${selBot.displayName}`, content });
 }
@@ -790,11 +791,11 @@ async function renderCustomTracker(req, res, { db, layout, selBot, bots, notice,
 // Right slide-over drawer (design D6) — populated client-side on card click;
 // the board stays visible + live behind it. Pure static markup (no dynamic
 // data interpolated here); no-JS users never see it (they get &card=M).
-function drawerMarkup() {
+function drawerMarkup(lang) {
   return `<div class="bb-drawer" id="bb-drawer" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 id="bb-d-title" style="font-family:'Fraunces',serif;margin:0">Card</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-d-close">✕ Close</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-d-close" aria-label="${tJs("common.close", lang)}">✕ Close</button>
     </div>
     <div class="bb-msg" id="bb-d-msg"></div>
     <div id="bb-d-lock" class="bb-msg warn"></div>
@@ -827,7 +828,7 @@ function drawerMarkup() {
   <div class="bb-drawer" id="bb-newproj" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 style="font-family:'Fraunces',serif;margin:0">New project</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-np-close">✕ Close</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-np-close" aria-label="${tJs("common.close", lang)}">✕ Close</button>
     </div>
     <div class="bb-msg" id="bb-np-msg"></div>
     <label>Name</label><input id="bb-np-name" type="text">
@@ -837,7 +838,7 @@ function drawerMarkup() {
   <div class="bb-drawer" id="bb-newcard" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 style="font-family:'Fraunces',serif;margin:0">New card</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-nc-close">✕ Close</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-nc-close" aria-label="${tJs("common.close", lang)}">✕ Close</button>
     </div>
     <div class="bb-msg" id="bb-nc-msg"></div>
     <p style="font-size:.8rem;color:var(--crow-text-muted)">Created in the current project, status <b>pending</b>.</p>
@@ -853,7 +854,7 @@ function drawerMarkup() {
   <div class="bb-drawer" id="bb-bulk" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 style="font-family:'Fraunces',serif;margin:0">Add unlinked cards</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-bk-close">✕ Close</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-bk-close" aria-label="${tJs("common.close", lang)}">✕ Close</button>
     </div>
     <div class="bb-msg" id="bb-bk-msg"></div>
     <p style="font-size:.82rem;color:var(--crow-text-muted)">Cards with no project (max 200 per assign).</p>
@@ -863,11 +864,11 @@ function drawerMarkup() {
 }
 
 // Tracker item drawer — for custom tracker bots
-function trackerDrawerMarkup() {
+function trackerDrawerMarkup(lang) {
   return `<div class="bb-drawer" id="bb-tracker-drawer" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 id="bb-td-title" style="font-family:'Fraunces',serif;margin:0">Item</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-td-close">✕ Close</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-td-close" aria-label="${tJs("common.close", lang)}">✕ Close</button>
     </div>
     <div class="bb-msg" id="bb-td-msg"></div>
     <div id="bb-td-lock" class="bb-msg warn"></div>
@@ -887,7 +888,7 @@ function trackerDrawerMarkup() {
   <div class="bb-drawer" id="bb-new-tracker-item" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 style="font-family:'Fraunces',serif;margin:0">New tracker item</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-nti-close">✕ Close</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-nti-close" aria-label="${tJs("common.close", lang)}">✕ Close</button>
     </div>
     <div class="bb-msg" id="bb-nti-msg"></div>
     <label>Label (title)</label><input id="bb-nti-label" type="text">
@@ -904,7 +905,7 @@ function trackerDrawerMarkup() {
 // Vanilla client (zero deps): native EventSource live overlay, native HTML5
 // drag-and-drop, slide-over drawers, all mutations via auth-gated JSON API.
 // Dynamic content is built with createElement/textContent — never innerHTML.
-function clientJs(botId, trackerType, projectId, trackerSlug, contextFields) {
+function clientJs(botId, trackerType, projectId, trackerSlug, contextFields, lang) {
   const bi = botId == null ? "null" : JSON.stringify(String(botId));
   const tt = JSON.stringify(String(trackerType || "none"));
   const pj = projectId == null ? "null" : JSON.stringify(Number(projectId));
@@ -965,8 +966,8 @@ function clientJs(botId, trackerType, projectId, trackerSlug, contextFields) {
         (r.j.projects||[]).forEach(function(p){
           ps.appendChild(optEl(String(p.id),'#'+p.id+' \\u2014 '+(p.name||''),Number(c.project_id)===Number(p.id)));
         });
-      }
-    });
+      } else if(!r.ok){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); }
+    }).catch(function(){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
     loadPlan();
     openDrawer(drawer);
   }
@@ -976,7 +977,7 @@ function clientJs(botId, trackerType, projectId, trackerSlug, contextFields) {
       if(r.ok&&r.j){ $('bb-d-plan').value=r.j.markdown||''; planMtime=r.j.mtime||null;
         msg(pm, r.j.exists?'':'(no plan yet)', ''); renderPre();
       } else { msg(pm, (r.j&&r.j.reason)||'plan unavailable','warn'); }
-    });
+    }).catch(function(){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
   }
   function renderPre(){ var el=$('bb-d-plan-pre'); if(el) el.textContent=$('bb-d-plan').value; }
 
@@ -993,7 +994,7 @@ function clientJs(botId, trackerType, projectId, trackerSlug, contextFields) {
     ['bb-td-label','bb-td-status','bb-td-prio','bb-td-action','bb-td-save']
       .forEach(function(i){ var e=$(i); if(e) e.disabled=cd.locked; });
     api('GET','/tracker-item/'+cd.id).then(function(r){
-      if(!r.ok||!r.j||!r.j.item) { msg($('bb-td-msg'),'Failed to load item.','err'); return; }
+      if(!r.ok||!r.j||!r.j.item) { msg($('bb-td-msg'),'Failed to load item.','err'); crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); return; }
       var item=r.j.item, tracker=r.j.tracker;
       $('bb-td-label').value=item.label||'';
       $('bb-td-prio').value=item.priority==null?'':String(item.priority);
@@ -1124,7 +1125,7 @@ function clientJs(botId, trackerType, projectId, trackerSlug, contextFields) {
     });
   };
   if($('bb-d-cancel')) $('bb-d-cancel').onclick=function(){
-    if(!cur||cur.locked||!confirm('Cancel card #'+cur.id+'?')) return;
+    if(!cur||cur.locked||!confirm('${tJs("botboard.confirmCancelCard", lang)}'.replace('#{id}',cur.id))) return;
     api('POST','/card/'+cur.id+'/cancel').then(function(r){
       if(r.ok){ msg($('bb-d-msg'),'Cancelled.','ok'); setTimeout(reload,400); }
       else if(r.status===409){ msg($('bb-d-msg'),'\\uD83D\\uDD12 locked','err'); }
@@ -1132,7 +1133,7 @@ function clientJs(botId, trackerType, projectId, trackerSlug, contextFields) {
     });
   };
   if($('bb-d-unlock')) $('bb-d-unlock').onclick=function(){
-    if(!cur||!confirm('Force-unlock card #'+cur.id+'? Only if the bot/pi is confirmed dead.')) return;
+    if(!cur||!confirm('${tJs("botboard.confirmForceUnlock", lang)}'.replace('#{id}',cur.id))) return;
     api('POST','/card/'+cur.id+'/force-unlock').then(function(r){
       if(r.ok){ msg($('bb-d-msg'),'Force-unlocked.','ok'); setTimeout(reload,500); }
       else msg($('bb-d-msg'),(r.j&&(r.j.reason||r.j.error))||'refused (fail-closed: pi not confirmed dead)','err');
@@ -1181,7 +1182,7 @@ function clientJs(botId, trackerType, projectId, trackerSlug, contextFields) {
     });
   };
   if($('bb-td-clear-lease')) $('bb-td-clear-lease').onclick=function(){
-    if(!cur||!confirm('Force-clear lease on item #'+cur.id+'?')) return;
+    if(!cur||!confirm('${tJs("botboard.confirmClearLease", lang)}'.replace('#{id}',cur.id))) return;
     api('POST','/tracker-item/'+cur.id+'/force-clear-lease').then(function(r){
       if(r.ok){ msg($('bb-td-msg'),'Lease cleared.','ok'); setTimeout(reload,500); }
       else msg($('bb-td-msg'),(r.j&&(r.j.reason||r.j.error))||'failed','err');
@@ -1208,14 +1209,14 @@ function clientJs(botId, trackerType, projectId, trackerSlug, contextFields) {
       if(dt==='tracker'){
         api('POST','/tracker-item/'+id+'/move',{status:st}).then(function(r){
           if(r.ok) reload();
-          else if(r.status===409) alert('\\uD83D\\uDD12 Item #'+id+' is being processed by a bot.');
-          else alert((r.j&&(r.j.error||r.j.reason))||'move failed');
+          else if(r.status===409) crowToast('${tJs("botboard.trackerItemLocked", lang)}'.replace('#{id}',id), {type:'error'});
+          else crowToast((r.j&&(r.j.error||r.j.reason))||'${tJs("botboard.moveItemFailed", lang)}', {type:'error'});
         });
       } else {
         api('POST','/card/'+id+'/move',{status:st}).then(function(r){
           if(r.ok) reload();
-          else if(r.status===409) alert('\\uD83D\\uDD12 Card #'+id+' is being worked by a bot.');
-          else alert((r.j&&(r.j.error||r.j.reason))||'move failed');
+          else if(r.status===409) crowToast('${tJs("botboard.cardLocked", lang)}'.replace('#{id}',id), {type:'error'});
+          else crowToast((r.j&&(r.j.error||r.j.reason))||'${tJs("botboard.moveFailed", lang)}', {type:'error'});
         });
       }
     });
@@ -1344,7 +1345,7 @@ function clientJs(botId, trackerType, projectId, trackerSlug, contextFields) {
     // Determine tracker_slug from the URL or bot definition
     var slugMatch=location.search.match(/bot=([^&]+)/);
     var botIdForCreate=slugMatch?decodeURIComponent(slugMatch[1]):BOT_ID;
-    api('GET','/tracker/'+encodeURIComponent(status)+'/items').catch(function(){});
+    api('GET','/tracker/'+encodeURIComponent(status)+'/items').catch(function(){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
     // We need the tracker_slug. Get it from the page title or fetch it.
     api('POST','/tracker-item',{
       tracker_slug:window._trackerSlug||'',
@@ -1357,7 +1358,7 @@ function clientJs(botId, trackerType, projectId, trackerSlug, contextFields) {
     }).then(function(r){
       if(r.ok){ msg($('bb-nti-msg'),'Created #'+(r.j&&r.j.id)+'.','ok'); setTimeout(reload,500); }
       else msg($('bb-nti-msg'),(r.j&&(r.j.error||r.j.reason))||'create failed','err');
-    });
+    }).catch(function(e){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error', details: e.message}); });
   };
 
   // ---- Search and filter (Feature 1) ----

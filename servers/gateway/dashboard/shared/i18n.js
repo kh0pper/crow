@@ -302,6 +302,9 @@ export const translations = {
   "blog.inlineCodeTitle": { en: "Inline Code", es: "Código en línea" },
   "blog.codeBlockTitle": { en: "Code Block", es: "Bloque de código" },
   "blog.horizontalRuleTitle": { en: "Horizontal Rule", es: "Línea horizontal" },
+  // W3-4: alert() → crowToast replacements (blog panel)
+  "blog.uploadFailed": { en: "Image upload failed", es: "Error al subir la imagen" },
+  "blog.uploadError": { en: "Upload error", es: "Error de carga" },
 
   // ─── Memory Panel ───
   "memory.pageTitle": { en: "Memory", es: "Memoria" },
@@ -494,6 +497,32 @@ export const translations = {
   "skills.skillPrefix": { en: "Skill:", es: "Habilidad:" },
   "skills.overrideConfirm": { en: "This will copy the built-in skill to your user skills directory (~/.crow/skills/) where you can customize it. The user version will take precedence over the built-in one. Continue?", es: "Esto copiará la habilidad integrada a tu directorio de habilidades de usuario (~/.crow/skills/) donde puedes personalizarla. La versión de usuario tendrá prioridad sobre la integrada. ¿Continuar?" },
   "skills.deleteUserSkillConfirm": { en: "Delete this user skill? The built-in version (if one exists) will be used instead.", es: "¿Eliminar esta habilidad de usuario? Se usará la versión integrada (si existe) en su lugar." },
+
+  // ─── Bot Builder Panel (W3-4) ───
+  "botbuilder.confirmApproveSkill": { en: "Approve and promote \"{name}\" into ~/.crow/skills and attach it to this bot?", es: "¿Aprobar y promover \"{name}\" en ~/.crow/skills y asociarlo a este bot?" },
+  "botbuilder.confirmRejectSkill": { en: "Discard the proposed skill \"{name}\"? This deletes the staged file.", es: "¿Descartar la habilidad propuesta \"{name}\"? Esto elimina el archivo en espera." },
+  "botbuilder.confirmStopSession": { en: "Stop this session?", es: "¿Detener esta sesión?" },
+  "botbuilder.stopSessionFailed": { en: "Couldn't stop session — try again", es: "No se pudo detener la sesión — intenta de nuevo" },
+
+  // ─── Bot Board Panel (W3-4) ───
+  "botboard.confirmCancelCard": { en: "Cancel card #{id}?", es: "¿Cancelar tarjeta #{id}?" },
+  "botboard.confirmForceUnlock": { en: "Force-unlock card #{id}? Only if the bot/pi is confirmed dead.", es: "¿Forzar desbloqueo de tarjeta #{id}? Solo si el bot/pi está confirmado como inactivo." },
+  "botboard.confirmClearLease": { en: "Force-clear lease on item #{id}?", es: "¿Forzar limpieza del lease en ítem #{id}?" },
+  "botboard.trackerItemLocked": { en: "🔒 Item #{id} is being processed by a bot.", es: "🔒 El ítem #{id} está siendo procesado por un bot." },
+  "botboard.cardLocked": { en: "🔒 Card #{id} is being worked by a bot.", es: "🔒 La tarjeta #{id} está siendo trabajada por un bot." },
+  "botboard.moveFailed": { en: "Move failed — try again", es: "Error al mover — intenta de nuevo" },
+  "botboard.moveItemFailed": { en: "Couldn't move item — try again", es: "No se pudo mover el ítem — intenta de nuevo" },
+  "botboard.loadFailed": { en: "Couldn't load — try again", es: "No se pudo cargar — intenta de nuevo" },
+
+  // ─── Projects Panel (W3-4) ───
+  "projects.confirmRevoke": { en: "Revoke {who}?", es: "¿Revocar a {who}?" },
+
+  // ─── Orchestrator Panel (W3-4) ───
+  "orchestrator.confirmResetRefcounts": { en: "Reset all lifecycle refcounts? This reconciles against live provider health.", es: "¿Restablecer todos los contadores de referencia? Esto concilia con el estado de los proveedores activos." },
+
+  // ─── Extensions Panel (W3-4) ───
+  "extensions.serviceUnavailable": { en: "Extensions service unavailable", es: "Servicio de extensiones no disponible" },
+  "extensions.serviceUnavailableDesc": { en: "Could not load the add-on registry. Check your connection and try again.", es: "No se pudo cargar el registro de complementos. Verifica tu conexión e intenta de nuevo." },
 
   // ─── Settings Panel ───
   "settings.pageTitle": { en: "Settings", es: "Ajustes" },

@@ -355,7 +355,7 @@ export default {
 
               if (!res.ok) {
                 var err = await res.json().catch(function() { return {}; });
-                alert('Image upload failed: ' + (err.error || 'Unknown error'));
+                crowToast('${tJs("blog.uploadFailed", lang)}', {type:'error', details: err.error || ''});
                 submitBtn.disabled = false;
                 submitBtn.textContent = '${tJs("blog.createDraft", lang)}';
                 return;
@@ -368,7 +368,7 @@ export default {
               submitBtn.textContent = 'Creating post...';
               form.submit();
             } catch (err) {
-              alert('Upload error: ' + err.message);
+              crowToast('${tJs("blog.uploadError", lang)}', {type:'error', details: err.message});
               submitBtn.disabled = false;
               submitBtn.textContent = '${tJs("blog.createDraft", lang)}';
             }
