@@ -13,6 +13,7 @@ import { existsSync, readFileSync, writeFileSync, unlinkSync, readdirSync, mkdir
 import { join, basename, dirname } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
+import { invalidateContextCache } from "../../../memory/crow-context.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_SKILLS_DIR = join(__dirname, "../../../../skills");
@@ -108,6 +109,7 @@ export default {
           sql: 'UPDATE crow_context SET content = ?, updated_at = datetime("now") WHERE section_key = ? AND device_id IS NULL AND project_id IS NULL',
           args: [content, "writing_style"],
         });
+        invalidateContextCache();
         res.redirectAfterPost("/dashboard/skills");
         return;
       }
@@ -127,6 +129,7 @@ export default {
           sql: 'UPDATE crow_context SET content = ?, updated_at = datetime("now") WHERE section_key = ? AND device_id IS NULL AND project_id IS NULL',
           args: [content, sectionKey],
         });
+        invalidateContextCache();
         res.redirectAfterPost("/dashboard/skills");
         return;
       }

@@ -10,6 +10,31 @@
  * - HTTP endpoint (GET /crow.md)
  */
 
+// 60s TTL cache: the full context is regenerated per crow_get_context/resource/HTTP
+// call and the condensed form per MCP handshake; content only changes on section
+// edits (invalidated in-process by the mutation handlers and instance-sync) or
+// slow-moving dynamic stats. Cross-PROCESS edits (memory-server stdio vs gateway)
+// are bounded by the TTL, not by invalidation — 60s staleness is the accepted
+// design. Key space is small (platform × device × project, all single-digit
+// cardinality here) and entries are ~2-15 KB, so no eviction is needed.
+const _ctxCache = new Map(); // key → { text, at }
+const CTX_CACHE_TTL_MS = 60_000;
+
+function _cacheGet(key) {
+  const hit = _ctxCache.get(key);
+  return hit && Date.now() - hit.at < CTX_CACHE_TTL_MS ? hit.text : null;
+}
+
+/** Store and pass through, so call sites can `return _cacheSet(key, text)`. */
+function _cacheSet(key, text) {
+  _ctxCache.set(key, { text, at: Date.now() });
+  return text;
+}
+
+export function invalidateContextCache() {
+  _ctxCache.clear();
+}
+
 /** Section keys that cannot be deleted (only updated or disabled) */
 export const PROTECTED_SECTIONS = [
   "identity",
@@ -33,6 +58,10 @@ export const PROTECTED_SECTIONS = [
  * @returns {Promise<string>} Assembled markdown document
  */
 export async function generateCrowContext(db, { includeDynamic = true, platform = "generic", deviceId = null, projectId = null } = {}) {
+  const cacheKey = JSON.stringify(["full", includeDynamic, platform, deviceId, projectId]);
+  const cached = _cacheGet(cacheKey);
+  if (cached !== null) return cached;
+
   let sections;
 
   try {
@@ -41,12 +70,14 @@ export async function generateCrowContext(db, { includeDynamic = true, platform 
     );
     sections = result.rows;
   } catch {
-    // Table doesn't exist — return static fallback
+    // Table doesn't exist — return static fallback. Deliberately NOT cached:
+    // this is a transient cold-start state (pre-init-db) that must not stick
+    // for a TTL once the table appears.
     return getFallbackDocument();
   }
 
   if (!sections || sections.length === 0) {
-    return getFallbackDocument();
+    return _cacheSet(cacheKey, getFallbackDocument());
   }
 
   // Merge global + device-specific + project-specific sections
@@ -80,7 +111,7 @@ export async function generateCrowContext(db, { includeDynamic = true, platform 
 
   parts.push(`---\n*Generated: ${new Date().toISOString()}*`);
 
-  return parts.join("\n");
+  return _cacheSet(cacheKey, parts.join("\n"));
 }
 
 /**
@@ -237,6 +268,10 @@ function getPlatformHint(platform) {
  * @returns {Promise<string|null>} Condensed context or null if unavailable
  */
 export async function generateCondensedContext(db, { routerStyle = false, deviceId = null, projectId = null } = {}) {
+  const cacheKey = JSON.stringify(["condensed", routerStyle, deviceId, projectId]);
+  const cached = _cacheGet(cacheKey);
+  if (cached !== null) return cached;
+
   const essentialKeys = [
     "identity",
     "memory_protocol",
@@ -276,7 +311,7 @@ export async function generateCondensedContext(db, { routerStyle = false, device
 
   parts.push("\nUse the session-start or crow-guide prompts for full guidance.");
 
-  return parts.join("\n");
+  return _cacheSet(cacheKey, parts.join("\n"));
 }
 
 /**
