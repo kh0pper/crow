@@ -1435,6 +1435,86 @@ const server = app.listen(PORT, BIND, (error) => {
     console.error("[scheduler] Failed to start:", err.message);
   });
 
+  // W3-3: Health monitor — 15-min interval, first run after 2-min boot delay.
+  // Kill switch: CROW_DISABLE_HEALTH_MONITOR=1. Never throws; each cycle is
+  // fully try/caught. Notifies (dashboard+ntfy path) for newly-degraded warn
+  // signals, using 24h dedupe persisted in dashboard_settings.
+  if (process.env.CROW_DISABLE_HEALTH_MONITOR !== "1") {
+    const HEALTH_MONITOR_BOOT_DELAY_MS = 2 * 60 * 1000;   // 2 min
+    const HEALTH_MONITOR_INTERVAL_MS   = 15 * 60 * 1000;  // 15 min
+    const runHealthMonitorCycle = async () => {
+      try {
+        const { collectHealthSignals, shouldNotify, invalidateHealthCache } =
+          await import("./dashboard/panels/nest/health-signals.js");
+        const { createNotification } = await import("../shared/notifications.js");
+        const { readSetting } = await import("./dashboard/settings/registry.js");
+        const { t } = await import("./dashboard/shared/i18n.js");
+
+        // Force fresh signals on each monitor cycle (bypass the render cache)
+        invalidateHealthCache();
+        const db = createDbClient();
+        try {
+          const signals = await collectHealthSignals(db);
+
+          // Load dedupe map
+          let lastMap = {};
+          try {
+            const raw = await readSetting(db, "health_last_notified");
+            if (raw) lastMap = JSON.parse(raw);
+          } catch {}
+
+          const nowMs = Date.now();
+          let mapDirty = false;
+
+          for (const issue of signals.issues) {
+            if (issue.severity !== "warn") continue; // info issues stay strip-only
+            if (!shouldNotify(lastMap, issue.id, nowMs)) continue;
+
+            try {
+              await createNotification(db, {
+                type: "system",
+                source: `health-monitor:${issue.id}`,
+                priority: "high",
+                title: issue.label,
+                body: issue.actionLabel ? `${issue.actionLabel} →` : undefined,
+                action_url: "/dashboard/nest",
+              });
+              lastMap[issue.id] = nowMs;
+              mapDirty = true;
+            } catch (notifErr) {
+              console.warn(`[health-monitor] notification failed for ${issue.id}:`, notifErr.message);
+            }
+          }
+
+          if (mapDirty) {
+            try {
+              const serialized = JSON.stringify(lastMap);
+              await db.execute({
+                sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('health_last_notified', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
+                args: [serialized, serialized],
+              });
+            } catch (persistErr) {
+              console.warn("[health-monitor] failed to persist lastMap:", persistErr.message);
+            }
+          }
+        } finally {
+          try { db.close(); } catch {}
+        }
+      } catch (err) {
+        console.warn("[health-monitor] cycle error:", err.message);
+      }
+    };
+
+    // Delay first run to avoid firing during startup churn
+    setTimeout(() => {
+      runHealthMonitorCycle();
+      const interval = setInterval(runHealthMonitorCycle, HEALTH_MONITOR_INTERVAL_MS);
+      interval.unref();
+    }, HEALTH_MONITOR_BOOT_DELAY_MS);
+
+    console.log("[health-monitor] armed (15-min interval, first run in 2 min)");
+  }
+
   // F.13: crosspost publish/GC scheduler (no-ops on an empty crosspost_log;
   // kill switch CROW_DISABLE_CROSSPOST_SCHEDULER=1). Lazy import keeps boot
   // resilient if the crossposting module is absent.
