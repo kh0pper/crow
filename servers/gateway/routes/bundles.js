@@ -979,7 +979,6 @@ export default function bundlesRouter() {
       const missing = requiredBundles.filter((id) => !installedIds.has(id));
       if (missing.length > 0) {
         return res.status(400).json({
-          ok: false,
           error: `Bundle '${bundle_id}' requires the following bundles to be installed first: ${missing.join(", ")}`,
           missing_dependencies: missing,
         });
@@ -1010,7 +1009,6 @@ export default function bundlesRouter() {
       });
       if (!gate.allow) {
         return res.status(400).json({
-          ok: false,
           error: gate.reason,
           hardware_gate: gate,
         });
@@ -1028,7 +1026,6 @@ export default function bundlesRouter() {
       const gpuCheck = checkGpuArchCompatible(manifestPre);
       if (!gpuCheck.ok) {
         return res.status(400).json({
-          ok: false,
           error: gpuCheck.reason,
           gpu_arch_gate: gpuCheck,
         });
@@ -1040,7 +1037,6 @@ export default function bundlesRouter() {
     if (manifestRequiresConsent(manifestPre)) {
       if (!consent_token) {
         return res.status(403).json({
-          ok: false,
           error: "Consent token required. Call GET /bundles/api/consent-challenge/:id to obtain one.",
           consent_required: true,
         });
@@ -1053,7 +1049,6 @@ export default function bundlesRouter() {
       }
       if (!consentVerified) {
         return res.status(403).json({
-          ok: false,
           error: "Consent token is invalid, expired, or already consumed. Mint a new one and retry.",
           consent_expired: true,
         });
@@ -1066,7 +1061,7 @@ export default function bundlesRouter() {
       if (existsSync(composePath)) {
         const composeContent = readFileSync(composePath, "utf8");
         if (/network_mode:\s*host/i.test(composeContent)) {
-          return res.status(403).json({ ok: false, error: "This bundle requires host networking and is not available on managed hosting." });
+          return res.status(403).json({ error: "This bundle requires host networking and is not available on managed hosting." });
         }
       }
     }
@@ -1557,7 +1552,6 @@ export default function bundlesRouter() {
     const dependents = findDependents(bundle_id);
     if (dependents.length > 0) {
       return res.status(409).json({
-        ok: false,
         error: `Cannot uninstall '${bundle_id}' — other installed bundles depend on it: ${dependents.join(", ")}. Uninstall the dependents first.`,
         dependents,
       });

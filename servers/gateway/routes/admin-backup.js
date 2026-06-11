@@ -101,7 +101,7 @@ export default function adminBackupRouter() {
       });
     } catch (err) {
       console.error("[admin-backup] FAILED:", err.message);
-      res.status(500).json({ ok: false, error: err.message });
+      res.status(500).json({ error: err.message });
     }
   });
 
