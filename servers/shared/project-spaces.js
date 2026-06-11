@@ -93,6 +93,24 @@ export async function createProjectSpace(db, opts = {}) {
           originInstanceId,
         ],
       },
+      // Keep rp's AUTOINCREMENT sequence ≥ max(ps.id) so that a subsequent
+      // legacy INSERT INTO research_projects cannot collide with a ps-only id.
+      // Seed MUST use WHERE NOT EXISTS — sqlite_sequence has no unique constraint
+      // so INSERT OR IGNORE would accumulate duplicate rows (undefined behavior).
+      // Guard is last: the seed INSERT resets last_insert_rowid(); placing it
+      // before any statement that consumes that value would silently corrupt it.
+      {
+        sql: `INSERT INTO sqlite_sequence(name, seq)
+              SELECT 'research_projects', 0
+              WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'research_projects')`,
+        args: [],
+      },
+      {
+        sql: `UPDATE sqlite_sequence
+                 SET seq = MAX(seq, COALESCE((SELECT MAX(id) FROM project_spaces), 0))
+               WHERE name = 'research_projects'`,
+        args: [],
+      },
     ];
 
     const [insResult] = await db.batch(stmts);
@@ -144,6 +162,28 @@ export async function createProjectSpace(db, opts = {}) {
       args: [ownerContactId],
     });
   }
+
+  // Keep rp's AUTOINCREMENT sequence ≥ max(ps.id) so that a subsequent
+  // legacy INSERT INTO research_projects cannot collide with a ps-only id.
+  // Seed MUST use WHERE NOT EXISTS — sqlite_sequence has no unique constraint
+  // so INSERT OR IGNORE would accumulate duplicate rows (undefined behavior).
+  // Guard is last: the seed INSERT resets last_insert_rowid(); placing it
+  // before the slug-finalize UPDATE or member INSERT above would silently
+  // corrupt the ids those statements consume.
+  statements.push(
+    {
+      sql: `INSERT INTO sqlite_sequence(name, seq)
+            SELECT 'research_projects', 0
+            WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'research_projects')`,
+      args: [],
+    },
+    {
+      sql: `UPDATE sqlite_sequence
+               SET seq = MAX(seq, COALESCE((SELECT MAX(id) FROM project_spaces), 0))
+             WHERE name = 'research_projects'`,
+      args: [],
+    }
+  );
 
   const results = await db.batch(statements);
   const id = Number(results[0].lastInsertRowid);

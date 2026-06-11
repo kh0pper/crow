@@ -153,14 +153,15 @@ async function renderListView(db, query, layout, lang) {
   // Count and fetch projects.
   // Exclude learner_profile rows — those are maker-lab learner profiles
   // and belong on the Maker Lab panel, not here.
-  let countSql = "SELECT COUNT(*) as c FROM research_projects WHERE (type IS NULL OR type != 'learner_profile')";
+  // archived_at IS NULL excludes trigger-archived (deleted) rows.
+  let countSql = "SELECT COUNT(*) as c FROM project_spaces WHERE (type IS NULL OR type != 'learner_profile') AND archived_at IS NULL";
   let fetchSql = `
     SELECT p.*,
       (SELECT COUNT(*) FROM research_sources WHERE project_id = p.id) as source_count,
       (SELECT COUNT(*) FROM research_notes WHERE project_id = p.id) as note_count,
       (SELECT COUNT(*) FROM data_backends WHERE project_id = p.id) as backend_count
-    FROM research_projects p
-    WHERE (p.type IS NULL OR p.type != 'learner_profile')
+    FROM project_spaces p
+    WHERE (p.type IS NULL OR p.type != 'learner_profile') AND p.archived_at IS NULL
   `;
   const countArgs = [];
   const fetchArgs = [];
@@ -295,8 +296,10 @@ async function renderListView(db, query, layout, lang) {
 }
 
 async function renderDetailView(db, projectId, layout, lang) {
+  // Read from project_spaces; archived_at IS NULL ensures trigger-archived rows
+  // are treated as Not Found exactly as a missing rp row was.
   const { rows: projRows } = await db.execute({
-    sql: "SELECT * FROM research_projects WHERE id = ? AND (type IS NULL OR type != 'learner_profile')",
+    sql: "SELECT * FROM project_spaces WHERE id = ? AND (type IS NULL OR type != 'learner_profile') AND archived_at IS NULL",
     args: [projectId],
   });
 
@@ -308,12 +311,11 @@ async function renderDetailView(db, projectId, layout, lang) {
   const project = projRows[0];
 
   // Fetch related data in parallel (incl. M2 project_spaces extras + members,
-  // M5 audit log).
-  const [sourcesResult, notesResult, backendsResult, spaceResult, membersResult, contactsResult, auditResult] = await Promise.all([
+  // M5 audit log). The ps row is already in `project` — no second fetch needed.
+  const [sourcesResult, notesResult, backendsResult, membersResult, contactsResult, auditResult] = await Promise.all([
     db.execute({ sql: "SELECT id, title, source_type, url, verified, created_at FROM research_sources WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", args: [projectId] }),
     db.execute({ sql: "SELECT id, note_type, substr(content, 1, 200) as preview, created_at FROM research_notes WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", args: [projectId] }),
     db.execute({ sql: "SELECT id, name, backend_type, status FROM data_backends WHERE project_id = ?", args: [projectId] }),
-    db.execute({ sql: "SELECT slug, workspace_dir, storage_prefix, archived_at FROM project_spaces WHERE id = ?", args: [projectId] }),
     db.execute({
       sql: `SELECT pm.id, pm.contact_id, pm.role, pm.capabilities, pm.mode, pm.granted_at, pm.revoked_at,
                    c.display_name, c.crow_id
@@ -334,7 +336,8 @@ async function renderDetailView(db, projectId, layout, lang) {
   const sources = sourcesResult.rows;
   const notes = notesResult.rows;
   const backends = backendsResult.rows;
-  const space = spaceResult.rows[0] || {};
+  // slug/workspace_dir/storage_prefix/archived_at are now in the ps row itself
+  const space = project;
   const members = membersResult.rows;
   const contacts = contactsResult.rows;
   const auditEntries = auditResult.rows;
@@ -521,25 +524,7 @@ async function renderDetailView(db, projectId, layout, lang) {
     ${auditEntries.length === 50 ? `<p style="font-size:0.75rem;color:var(--crow-text-muted);margin-top:0.5rem">Showing latest 50 entries. Use the <code>crow_audit_log</code> MCP tool for filtering / older entries.</p>` : ""}`;
   }
 
-  // M5: soft-archive control — a banner when project is archived, plus an
-  // "Archive" action on active projects. Archive writes status='archived'
-  // via the existing update_status path; we add a corresponding "Unarchive"
-  // action that reverses it. Sources/notes/files remain attached but
-  // hidden from the active list (the existing list view filters on status).
-  const archiveBanner = space.archived_at
-    ? `<div style="margin-bottom:1rem;padding:0.5rem 0.75rem;background:var(--crow-bg-surface);border:1px solid var(--crow-accent-muted);border-radius:var(--crow-radius-card);font-size:0.85rem;color:var(--crow-text-secondary)">
-         <b>Archived</b> ${escapeHtml(space.archived_at)} — content is preserved; the project no longer appears in the active list.
-         <form method="POST" style="display:inline;margin-left:0.5rem">
-           <input type="hidden" name="action" value="update_status">
-           <input type="hidden" name="id" value="${project.id}">
-           <input type="hidden" name="status" value="active">
-           <button type="submit" style="padding:0.2rem 0.5rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:var(--crow-radius-pill);color:var(--crow-text-primary);cursor:pointer;font-size:0.75rem">Unarchive</button>
-         </form>
-       </div>`
-    : "";
-
   const content = `
-    ${archiveBanner}
     ${section("Overview", overviewHtml + workspaceInfo)}
     ${section(`Members (${members.length})`, membersHtml + addMemberForm, { delay: 50 })}
     ${section(`Sources (${sources.length})`, sourcesHtml, { delay: 100 })}

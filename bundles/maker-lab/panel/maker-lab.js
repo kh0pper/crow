@@ -145,7 +145,7 @@ export default {
         if (["solo", "family", "classroom"].includes(mode)) {
           if (mode === "solo") {
             const c = await db.execute({
-              sql: "SELECT COUNT(*) AS n FROM research_projects WHERE type='learner_profile'",
+              sql: "SELECT COUNT(*) AS n FROM project_spaces WHERE type='learner_profile' AND archived_at IS NULL",
               args: [],
             });
             if (Number(c.rows[0].n) > 1) {
@@ -399,7 +399,7 @@ export default {
                      rp.name AS learner_name
               FROM maker_redemption_codes c
               JOIN maker_sessions s ON s.token = c.session_token
-              LEFT JOIN research_projects rp ON rp.id = s.learner_id
+              LEFT JOIN project_spaces rp ON rp.id = s.learner_id AND rp.archived_at IS NULL
               WHERE c.code = ?`,
         args: [code],
       });
@@ -482,9 +482,9 @@ export default {
       }
       const r = await db.execute({
         sql: `SELECT rp.id, rp.name, rp.created_at, mls.*
-              FROM research_projects rp
+              FROM project_spaces rp
               LEFT JOIN maker_learner_settings mls ON mls.learner_id = rp.id
-              WHERE rp.id = ? AND rp.type = 'learner_profile'`,
+              WHERE rp.id = ? AND rp.type = 'learner_profile' AND rp.archived_at IS NULL`,
         args: [lid],
       });
       if (!r.rows.length) {
@@ -505,7 +505,7 @@ export default {
         return layout({ title: "Not found", content: `<a href="/dashboard/maker-lab">Back</a>` });
       }
       const [learnerR, settingsR, transcriptsR] = await Promise.all([
-        db.execute({ sql: "SELECT id, name FROM research_projects WHERE id=? AND type='learner_profile'", args: [lid] }),
+        db.execute({ sql: "SELECT id, name FROM project_spaces WHERE id=? AND type='learner_profile' AND archived_at IS NULL", args: [lid] }),
         db.execute({ sql: "SELECT * FROM maker_learner_settings WHERE learner_id=?", args: [lid] }),
         db.execute({
           sql: `SELECT id, session_token, turn_no, role, content, created_at
@@ -541,7 +541,7 @@ export default {
                        rp.name AS learner_name
                 FROM maker_sessions s
                 JOIN maker_redemption_codes c ON c.session_token = s.token
-                LEFT JOIN research_projects rp ON rp.id = s.learner_id
+                LEFT JOIN project_spaces rp ON rp.id = s.learner_id AND rp.archived_at IS NULL
                 WHERE s.batch_id = ?
                 ORDER BY rp.name`,
           args: [batchId],
@@ -572,9 +572,9 @@ export default {
       sql: `SELECT rp.id, rp.name, rp.created_at,
                    mls.age, mls.avatar,
                    mls.transcripts_enabled, mls.consent_captured_at
-            FROM research_projects rp
+            FROM project_spaces rp
             LEFT JOIN maker_learner_settings mls ON mls.learner_id = rp.id
-            WHERE rp.type = 'learner_profile'
+            WHERE rp.type = 'learner_profile' AND rp.archived_at IS NULL
             ORDER BY rp.created_at DESC`,
       args: [],
     });
@@ -596,7 +596,7 @@ export default {
                    s.idle_locked_at, s.last_activity_at,
                    rp.name AS learner_name
             FROM maker_sessions s
-            LEFT JOIN research_projects rp ON rp.id = s.learner_id
+            LEFT JOIN project_spaces rp ON rp.id = s.learner_id AND rp.archived_at IS NULL
             WHERE s.state != 'revoked' AND s.expires_at > datetime('now')
             ORDER BY s.started_at DESC LIMIT 50`,
       args: [],

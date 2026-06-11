@@ -54,7 +54,7 @@ async function resolveSession(db, token) {
   const r = await db.execute({
     sql: `SELECT s.*, rp.name AS learner_name
           FROM maker_sessions s
-          LEFT JOIN research_projects rp ON rp.id = s.learner_id
+          LEFT JOIN project_spaces rp ON rp.id = s.learner_id AND rp.archived_at IS NULL
           WHERE s.token = ?`,
     args: [token],
   });
@@ -127,9 +127,9 @@ export function createMakerLabServer(db, options = {}) {
         sql: `SELECT rp.id, rp.name, rp.created_at,
                      mls.age, mls.avatar,
                      mls.transcripts_enabled, mls.consent_captured_at
-              FROM research_projects rp
+              FROM project_spaces rp
               LEFT JOIN maker_learner_settings mls ON mls.learner_id = rp.id
-              WHERE rp.type = 'learner_profile'
+              WHERE rp.type = 'learner_profile' AND rp.archived_at IS NULL
               ORDER BY rp.created_at DESC`,
         args: [],
       });
@@ -154,9 +154,9 @@ export function createMakerLabServer(db, options = {}) {
     async ({ learner_id }) => {
       const r = await db.execute({
         sql: `SELECT rp.id, rp.name, rp.created_at, mls.*
-              FROM research_projects rp
+              FROM project_spaces rp
               LEFT JOIN maker_learner_settings mls ON mls.learner_id = rp.id
-              WHERE rp.id = ? AND rp.type = 'learner_profile'`,
+              WHERE rp.id = ? AND rp.type = 'learner_profile' AND rp.archived_at IS NULL`,
         args: [learner_id],
       });
       if (!r.rows.length) return mcpError(`Learner ${learner_id} not found`);
@@ -195,7 +195,7 @@ export function createMakerLabServer(db, options = {}) {
     async (args) => {
       const { learner_id } = args;
       const r = await db.execute({
-        sql: `SELECT id FROM research_projects WHERE id=? AND type='learner_profile'`,
+        sql: `SELECT id FROM project_spaces WHERE id=? AND type='learner_profile' AND archived_at IS NULL`,
         args: [learner_id],
       });
       if (!r.rows.length) return mcpError(`Learner ${learner_id} not found`);
@@ -242,7 +242,7 @@ export function createMakerLabServer(db, options = {}) {
     },
     async ({ learner_id, reason }) => {
       const r = await db.execute({
-        sql: `SELECT name FROM research_projects WHERE id=? AND type='learner_profile'`,
+        sql: `SELECT name FROM project_spaces WHERE id=? AND type='learner_profile' AND archived_at IS NULL`,
         args: [learner_id],
       });
       if (!r.rows.length) return mcpError(`Learner ${learner_id} not found`);
@@ -270,7 +270,7 @@ export function createMakerLabServer(db, options = {}) {
     async ({ mode }) => {
       if (mode === "solo") {
         const r = await db.execute({
-          sql: `SELECT COUNT(*) AS n FROM research_projects WHERE type='learner_profile'`,
+          sql: `SELECT COUNT(*) AS n FROM project_spaces WHERE type='learner_profile' AND archived_at IS NULL`,
           args: [],
         });
         if (Number(r.rows[0].n) > 1) {
@@ -643,7 +643,7 @@ export function createMakerLabServer(db, options = {}) {
     { learner_id: z.number().int().positive() },
     async ({ learner_id }) => {
       const [profile, settings, sessions, transcripts, memories] = await Promise.all([
-        db.execute({ sql: `SELECT * FROM research_projects WHERE id=? AND type='learner_profile'`, args: [learner_id] }),
+        db.execute({ sql: `SELECT id, name, type, description, status, tags, created_at, updated_at FROM project_spaces WHERE id=? AND type='learner_profile' AND archived_at IS NULL`, args: [learner_id] }),
         db.execute({ sql: `SELECT * FROM maker_learner_settings WHERE learner_id=?`, args: [learner_id] }),
         db.execute({ sql: `SELECT token, started_at, expires_at, revoked_at, state, hints_used, batch_id FROM maker_sessions WHERE learner_id=?`, args: [learner_id] }),
         db.execute({ sql: `SELECT * FROM maker_transcripts WHERE learner_id=? ORDER BY created_at`, args: [learner_id] }),
