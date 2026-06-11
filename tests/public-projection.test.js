@@ -16,7 +16,7 @@ test("toPublicBot exposes only whitelisted fields, never the raw definition", ()
   };
   const pub = toPublicBot(row);
   assert.deepEqual(Object.keys(pub).sort(),
-    ["bot_id", "display_name", "enabled", "model", "project_id", "tool_count", "tracker_type"].sort());
+    ["bot_id", "display_name", "enabled", "model", "peer_manageable", "project_id", "tool_count", "tracker_type"].sort());
   assert.equal(pub.bot_id, "scout");
   assert.equal(pub.enabled, true);
   assert.equal(pub.model, "crow-local/qwen3.6-35b-a3b");

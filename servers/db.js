@@ -130,7 +130,13 @@ export async function isSqliteVecAvailable(db) {
  * SQLite doesn't support IF NOT EXISTS for ALTER TABLE ADD COLUMN,
  * so we catch the "duplicate column" error.
  */
+const SQL_IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const SQL_COLTYPE_RE = /^[A-Za-z0-9_() '"-]+$/;
+
 export async function ensureColumn(db, table, column, type) {
+  if (!SQL_IDENT_RE.test(table) || !SQL_IDENT_RE.test(column) || !SQL_COLTYPE_RE.test(type)) {
+    throw new Error(`ensureColumn: invalid identifier or type (${table}.${column} ${type})`);
+  }
   try {
     await db.execute({ sql: `ALTER TABLE ${table} ADD COLUMN ${column} ${type}`, args: [] });
   } catch (err) {

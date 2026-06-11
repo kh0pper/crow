@@ -164,12 +164,18 @@ export function createStorageServer(dbPath, options = {}) {
 
         await uploadObject(s3Key, buffer, { bucket, contentType: mime_type });
 
-        // Record in database
-        await db.execute({
-          sql: `INSERT INTO storage_files (s3_key, original_name, mime_type, size_bytes, bucket, reference_type, reference_id, project_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          args: [s3Key, file_name, mime_type || null, buffer.length, bucket || "crow-files", reference_type || null, reference_id || null, project_id ?? null],
-        });
+        try {
+          // Record in database
+          await db.execute({
+            sql: `INSERT INTO storage_files (s3_key, original_name, mime_type, size_bytes, bucket, reference_type, reference_id, project_id)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            args: [s3Key, file_name, mime_type || null, buffer.length, bucket || "crow-files", reference_type || null, reference_id || null, project_id ?? null],
+          });
+        } catch (err) {
+          // Don't leave an untracked orphan object behind
+          try { await deleteObject(s3Key, bucket || "crow-files"); } catch {}
+          throw err;
+        }
 
         if (project_id != null) {
           await appendAudit(db, {

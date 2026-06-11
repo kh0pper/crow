@@ -8,7 +8,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createDbClient, sanitizeFtsQuery, escapeLikePattern, isSqliteVecAvailable } from "../db.js";
-import { generateCrowContext, PROTECTED_SECTIONS } from "./crow-context.js";
+import { generateCrowContext, PROTECTED_SECTIONS, invalidateContextCache } from "./crow-context.js";
 import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
 import { createNotification, cleanupNotifications } from "../shared/notifications.js";
 import {
@@ -268,10 +268,10 @@ export function createMemoryServer(dbPath, options = {}) {
         rows = merged.slice(0, limit);
       }
 
-      for (const row of rows) {
+      if (rows.length > 0) {
         await db.execute({
-          sql: "UPDATE memories SET accessed_at = datetime('now'), access_count = access_count + 1 WHERE id = ?",
-          args: [row.id],
+          sql: `UPDATE memories SET accessed_at = datetime('now'), access_count = access_count + 1 WHERE id IN (${rows.map(() => "?").join(",")})`,
+          args: rows.map((r) => r.id),
         });
       }
 
@@ -377,10 +377,10 @@ export function createMemoryServer(dbPath, options = {}) {
             const { rows } = await db.execute({ sql, args: params });
 
             // Update access tracking for returned memories
-            for (const row of rows) {
+            if (rows.length > 0) {
               await db.execute({
-                sql: "UPDATE memories SET accessed_at = datetime('now'), access_count = access_count + 1 WHERE id = ?",
-                args: [row.id],
+                sql: `UPDATE memories SET accessed_at = datetime('now'), access_count = access_count + 1 WHERE id IN (${rows.map(() => "?").join(",")})`,
+                args: rows.map((r) => r.id),
               });
             }
 
@@ -976,6 +976,7 @@ export function createMemoryServer(dbPath, options = {}) {
         sql: `UPDATE crow_context SET ${updates.join(", ")} WHERE ${whereClause}`,
         args: params,
       });
+      invalidateContextCache();
 
       // Emit sync entry
       if (syncManager) {
@@ -1010,6 +1011,7 @@ export function createMemoryServer(dbPath, options = {}) {
           sql: "INSERT INTO crow_context (section_key, section_title, content, sort_order, device_id, project_id) VALUES (?, ?, ?, ?, ?, ?)",
           args: [section_key, section_title, content, sort_order, device_id ?? null, project_id ?? null],
         });
+        invalidateContextCache();
 
         // Emit sync entry
         if (syncManager) {
@@ -1098,6 +1100,7 @@ export function createMemoryServer(dbPath, options = {}) {
         sql: `DELETE FROM crow_context WHERE ${whereClause}`,
         args: whereArgs,
       });
+      invalidateContextCache();
 
       // Emit sync entry
       if (syncManager) {
@@ -1403,7 +1406,12 @@ export function createMemoryServer(dbPath, options = {}) {
         if (rows.length === 0) {
           return { content: [{ type: "text", text: 'Notification preferences: all types enabled (default)\n  Types: reminder, media, peer, system' }] };
         }
-        const prefs = JSON.parse(rows[0].value);
+        let prefs;
+        try {
+          prefs = JSON.parse(rows[0].value);
+        } catch {
+          prefs = {};
+        }
         return { content: [{ type: "text", text: `Notification preferences:\n  Enabled types: ${prefs.types_enabled?.join(", ") || "all"}` }] };
       }
 

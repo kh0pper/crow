@@ -51,7 +51,12 @@ export async function loadExternalPanels() {
     return;
   }
 
+  const PANEL_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
   for (const id of enabledIds) {
+    if (typeof id !== "string" || !PANEL_ID_RE.test(id)) {
+      console.warn(`[dashboard] Ignoring invalid third-party panel id: ${JSON.stringify(id)}`);
+      continue;
+    }
     const panelPath = join(panelsDir, `${id}.js`);
     if (!existsSync(panelPath)) continue;
 
