@@ -123,6 +123,22 @@ export async function restoreConflict(db, conflictId, { instanceSync = null } = 
   const table = conflict.table_name;
   const rowId = conflict.row_id;
 
+  // crow_context conflicts cannot be auto-restored: the row_id is a JSON composite
+  // key, not a numeric id, so the id-keyed stale-snapshot guard below would run
+  // SELECT … WHERE id = '{…}', find nothing, re-snapshot to 'null', and silently
+  // destroy the recorded local snapshot.  Use crow_update_context_section to apply
+  // the losing data manually.  (Placement BEFORE the stale guard is load-bearing —
+  // see spec §4 C3.)
+  if (table === "crow_context") {
+    return {
+      status: "refused",
+      message:
+        "This version cannot be restored automatically. crow_context rows are keyed " +
+        "by a composite key (section_key, device_id, project_id), not a single id. " +
+        "Use crow_update_context_section to apply the values shown below.",
+    };
+  }
+
   // ── 2. Validate table ─────────────────────────────────────────────────────
 
   if (!SYNCED_TABLES.includes(table)) {

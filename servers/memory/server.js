@@ -978,9 +978,20 @@ export function createMemoryServer(dbPath, options = {}) {
       });
       invalidateContextCache();
 
-      // Emit sync entry
+      // Emit sync entry — post-UPDATE re-select is MANDATORY so the emitted row
+      // carries the actual committed values (not the partial param set, which omits
+      // enabled/sort_order when not provided, and never carries the pre-update values).
       if (syncManager) {
-        syncManager.emitChange("crow_context", "update", { section_key, content, section_title, device_id: device_id ?? null, project_id: project_id ?? null }).catch(() => {});
+        const { buildCrowContextWireRow } = await import("../sharing/instance-sync.js").catch(() => ({}));
+        if (buildCrowContextWireRow) {
+          const { rows: emitRows } = await db.execute({
+            sql: `SELECT * FROM crow_context WHERE ${whereClause}`,
+            args: whereArgs,
+          });
+          if (emitRows.length > 0) {
+            syncManager.emitChange("crow_context", "update", buildCrowContextWireRow(emitRows[0])).catch(() => {});
+          }
+        }
       }
 
       const scope = [device_id ? `device: ${device_id}` : null, project_id ? `project: ${project_id}` : null].filter(Boolean).join(", ");
@@ -1013,9 +1024,19 @@ export function createMemoryServer(dbPath, options = {}) {
         });
         invalidateContextCache();
 
-        // Emit sync entry
+        // Emit sync entry — post-INSERT re-select captures enabled (DB default)
+        // so the wire row is always complete regardless of which fields the tool call provided.
         if (syncManager) {
-          syncManager.emitChange("crow_context", "insert", { section_key, section_title, content, sort_order, device_id: device_id ?? null, project_id: project_id ?? null }).catch(() => {});
+          const { buildCrowContextWireRow } = await import("../sharing/instance-sync.js").catch(() => ({}));
+          if (buildCrowContextWireRow) {
+            const { rows: emitRows } = await db.execute({
+              sql: "SELECT * FROM crow_context WHERE section_key = ? AND device_id IS ? AND project_id IS ?",
+              args: [section_key, device_id ?? null, project_id ?? null],
+            });
+            if (emitRows.length > 0) {
+              syncManager.emitChange("crow_context", "insert", buildCrowContextWireRow(emitRows[0])).catch(() => {});
+            }
+          }
         }
 
         const scope = [device_id ? `device: ${device_id}` : null, project_id ? `project: ${project_id}` : null].filter(Boolean).join(", ");
