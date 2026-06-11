@@ -81,6 +81,13 @@ cmd_status() {
     echo "  Gateway:     stopped"
   fi
 
+  # Gateway HTTP probe
+  if curl -fsS --max-time 3 http://localhost:3001/health >/dev/null 2>&1; then
+    echo "  Gateway:     responding on :3001"
+  else
+    echo "  Gateway:     not responding on :3001"
+  fi
+
   # Docker
   if command -v docker >/dev/null 2>&1; then
     CONTAINERS=$(docker ps --filter "label=com.docker.compose.project" --format "{{.Names}}" 2>/dev/null | wc -l)
