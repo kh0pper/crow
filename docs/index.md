@@ -34,11 +34,11 @@ features:
   - icon:
       src: /icon-deploy.svg
     title: All-in-One Home Server
-    details: An AI-driven self-hosted app store — file sync, photos, smart home, media, local AI. Because every app installs as a bundle, what you self-host is also a capability your agents and AI clients can use.
+    details: An AI-driven self-hosted app store — file sync, photos, smart home, media, local AI. Every app installs as a bundle — a service, its MCP tools, and its skills — so whatever you self-host is immediately available to your agents and AI clients.
   - icon:
       src: /icon-memory.svg
     title: Persistent Memory
-    details: Store and search memories across sessions and platforms. Full-text search, categories, importance scoring, and automatic context recall.
+    details: Your assistant remembers across every session and platform. Full-text search, categories, importance scoring, and automatic recall surface what matters without you re-explaining it.
   - icon:
       src: /icon-research.svg
     title: Projects & Research
@@ -46,7 +46,7 @@ features:
   - icon:
       src: /icon-sharing.svg
     title: Encrypted P2P Sharing
-    details: Share memories, projects, and messages directly with other Crow users — end-to-end encrypted via Hypercore and Nostr, with no central server and no metadata leaks. Access and control all your connected instances from the open-source Android app or the dashboard.
+    details: Share memories, projects, and messages directly with other Crow users — end-to-end encrypted via Hypercore and Nostr, with no central server and no metadata leaks.
   - icon:
       src: /icon-integrations.svg
     title: Integrations & Bundles
@@ -58,5 +58,5 @@ features:
   - icon:
       src: /icon-platforms.svg
     title: Managed, Cloud, or Self-Host
-    details: Self-host on Oracle Cloud for free, run on a Raspberry Pi, or use managed hosting. Multi-instance sync pulls all your devices into one interface. Crow is open source and developers are welcome.
+    details: Self-host on Oracle Cloud for free, run on a Raspberry Pi, or use managed hosting. Multi-instance sync pulls all your devices into one interface — access and control every connected instance from the open-source Android app or the dashboard. Open source, developers welcome.
 ---
