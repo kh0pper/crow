@@ -15,7 +15,7 @@
 - [x] Final code review, merge, deploy
 
 ### Phase 1: Documentation & Safety (Complete)
-- [x] 1A: OpenClaw P2P emphasis — already thorough in `docs/platforms/openclaw.md`
+- [x] 1A: OpenClaw P2P emphasis — documented in platforms section
 - [x] 1A: MCP connector cross-platform — documented in `docs/platforms/claude-code.md`
 - [x] 1A: Blog setup guide — `docs/guide/blog.md` has full public access section
 - [x] 1A: Storage MIME types — blocklist documented, docx/pptx/xlsx listed

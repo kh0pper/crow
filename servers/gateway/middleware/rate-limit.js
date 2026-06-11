@@ -5,7 +5,7 @@
  *   - tieredRateLimit: wraps express-rate-limit v8 with an ordered tier
  *     list (first matching tier wins) — extracted from blog-embed-api.js.
  *   - fixedWindowLimit: in-process Map-based fixed window with lazy reset —
- *     formalizes the hand-rolled limiters previously in chat.js/bot-chat.js.
+ *     formalizes the hand-rolled limiters previously in chat.js.
  *     Exact legacy semantics preserved: window resets when
  *     (now - windowStart) > windowMs (strictly greater), and the check is
  *     increment-then-compare (count <= max).
@@ -57,9 +57,9 @@ export function tieredRateLimit({ windowMs = 60 * 1000, tiers, message = { error
  * Fixed-window in-process limiter.
  *
  * Returns an Express middleware function that also exposes:
- *   .check(key)  — raw check for handlers that gate mid-route (chat,
- *                  bot-chat keep their original response ordering: 404/409
- *                  checks still run before the 429).
+ *   .check(key)  — raw check for handlers that gate mid-route (chat keeps
+ *                  its original response ordering: 404/409 checks still
+ *                  run before the 429).
  *   .prune()     — drop expired buckets (also runs on an interval unless
  *                  pruneIntervalMs is 0).
  *

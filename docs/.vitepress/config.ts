@@ -124,7 +124,7 @@ export default defineConfig({
           { text: 'Cline', link: '/platforms/cline' },
           { text: 'Qwen CLI', link: '/platforms/qwen-cli' },
           { text: 'Qwen Coder CLI', link: '/platforms/qwen-coder' },
-          { text: 'OpenClaw', link: '/platforms/openclaw' },
+
           { text: 'Android App', link: '/platforms/android' },
         ],
       },
@@ -186,7 +186,7 @@ export default defineConfig({
           { text: 'Multi-Instance Sync', link: '/architecture/instances' },
           { text: 'Bot Builder', link: '/architecture/bot-builder' },
           { text: 'AI Companion', link: '/architecture/companion' },
-          { text: 'CrowClaw (Legacy)', link: '/architecture/crowclaw' },
+
           { text: 'Data Dashboard', link: '/architecture/data-dashboard' },
           { text: 'Orchestrator', link: '/architecture/orchestrator' },
         ],
@@ -211,7 +211,7 @@ export default defineConfig({
           { text: 'Notifications & Push', link: '/guide/notifications' },
           { text: 'Contact Discovery', link: '/guide/contact-discovery' },
           { text: 'Bot Builder', link: '/guide/bot-builder' },
-          { text: 'Bot Management (Legacy)', link: '/guide/bot-management' },
+
           { text: 'Meta Glasses', link: '/guide/meta-glasses' },
           { text: 'Kiosk Mode', link: '/guide/kiosk-mode' },
           { text: 'Music', link: '/guide/music' },
