@@ -177,7 +177,17 @@ export default {
 
   async render({ req, db, lang }) {
     const csrfToken = req?.csrfToken || "";
-    const flash = req?.query?.syncConflictsMsg || "";
+    // Flash is a fixed status enum mapped to i18n — never free text from the
+    // URL (an authed user following a crafted link must not see arbitrary
+    // content in trusted UI chrome).
+    const FLASH_KEYS = {
+      applied: "syncConflicts.msgApplied",
+      stale: "syncConflicts.msgStale",
+      refused: "syncConflicts.msgRefused",
+      error: "syncConflicts.msgFailed",
+    };
+    const flashKey = FLASH_KEYS[req?.query?.syncConflictsMsg] || null;
+    const flash = flashKey ? t(flashKey, lang) : "";
 
     let unresolvedRows = [];
     let resolvedRows = [];
@@ -251,7 +261,7 @@ export default {
     const bulkResolveBtn = unresolvedRows.length > 0
       ? `<form method="POST" action="/dashboard/settings"
               style="margin-top:0.75rem"
-              onsubmit="return confirm(${JSON.stringify(t("syncConflicts.resolveAllConfirm", lang))})">
+              onsubmit="return confirm(${escapeHtml(JSON.stringify(t("syncConflicts.resolveAllConfirm", lang)))})">
            <input type="hidden" name="_csrf" value="${escapeHtml(csrfToken)}" />
            <input type="hidden" name="action" value="sync_conflicts_resolve_all" />
            <button type="submit" class="btn btn-secondary" style="font-size:0.82rem">
@@ -325,19 +335,11 @@ export default {
         return true;
       }
       const outcome = await restoreConflict(db, String(conflictId), { instanceSync });
-      let msg = "";
-      if (outcome.status === "applied") {
-        msg = outcome.message || "Version restored successfully.";
-      } else if (outcome.status === "stale") {
-        msg = outcome.message || "This item has changed since the conflict was recorded — please review and confirm again.";
-      } else if (outcome.status === "refused") {
-        msg = outcome.message || "Restore not available for this conflict type.";
-      } else {
-        msg = outcome.message || "Restore failed.";
-      }
-      // URL-encode the message so the flash survives the redirect.
-      const qs = `section=sync-conflicts&syncConflictsMsg=${encodeURIComponent(msg)}`;
-      res.redirectAfterPost(`/dashboard/settings?${qs}`);
+      // Pass only the status enum; render() maps it to an i18n'd flash.
+      const status = ["applied", "stale", "refused"].includes(outcome.status)
+        ? outcome.status
+        : "error";
+      res.redirectAfterPost(`/dashboard/settings?section=sync-conflicts&syncConflictsMsg=${status}`);
       return true;
     }
 
