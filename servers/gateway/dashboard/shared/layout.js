@@ -523,8 +523,60 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
       navigator.serviceWorker.register('/sw.js').catch(function() {});
     }
 
+    // ─── Global toast helper (W3-4) ─── idempotent under Turbo Drive navs
+    if (!window.__crowToastDefined) {
+      window.__crowToastDefined = true;
+      window.crowToast = function(message, opts) {
+        opts = opts || {};
+        var type = opts.type || 'success';
+        var details = opts.details || null;
+        var container = document.getElementById('crow-toasts');
+        if (!container) return;
+        var toast = document.createElement('div');
+        toast.className = 'crow-toast crow-toast--' + type;
+        toast.setAttribute('role', 'status');
+        var body = document.createElement('div');
+        body.className = 'crow-toast__body';
+        var msg = document.createElement('span');
+        msg.className = 'crow-toast__msg';
+        msg.textContent = message;
+        body.appendChild(msg);
+        if (details) {
+          var det = document.createElement('details');
+          det.className = 'crow-toast__details';
+          var sum = document.createElement('summary');
+          sum.textContent = 'Details';
+          det.appendChild(sum);
+          var pre = document.createElement('pre');
+          pre.className = 'crow-toast__details-pre';
+          pre.textContent = details;
+          det.appendChild(pre);
+          body.appendChild(det);
+        }
+        toast.appendChild(body);
+        var closeBtn = document.createElement('button');
+        closeBtn.className = 'crow-toast__close';
+        closeBtn.setAttribute('aria-label', 'Close notification');
+        closeBtn.textContent = '\\u00D7';
+        closeBtn.onclick = function() { dismiss(toast); };
+        toast.appendChild(closeBtn);
+        container.appendChild(toast);
+        var ms = type === 'error' ? 8000 : 6000;
+        var timer = setTimeout(function() { dismiss(toast); }, ms);
+        toast.addEventListener('click', function(e) {
+          if (e.target === closeBtn) return;
+          clearTimeout(timer);
+          dismiss(toast);
+        });
+        function dismiss(el) {
+          el.classList.add('crow-toast--out');
+          setTimeout(function() { if (el.parentNode) el.parentNode.removeChild(el); }, 300);
+        }
+      };
+    }
   </script>
   ${turboDiagScript()}
+  <div id="crow-toasts" class="crow-toasts" aria-live="polite" aria-atomic="false" data-turbo-permanent></div>
 </body>
 </html>`;
 }
@@ -1319,6 +1371,67 @@ function dashboardCss() {
   }
 
   body.unified-off #crow-instance-tabs { display: none; }
+
+  /* ─── Global toast container (W3-4) ─── */
+  .crow-toasts {
+    position: fixed;
+    bottom: 1.5rem;
+    right: 1.5rem;
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    max-width: 420px;
+    pointer-events: none;
+  }
+  .crow-toast {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    background: var(--crow-bg-surface);
+    border: 1px solid var(--crow-border);
+    box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+    font-size: 0.88rem;
+    line-height: 1.45;
+    pointer-events: all;
+    animation: crow-toast-in 0.22s ease-out both;
+  }
+  .crow-toast--error {
+    border-color: var(--crow-error);
+    background: rgba(239,68,68,0.08);
+    color: var(--crow-text-primary);
+  }
+  .crow-toast--success {
+    border-color: var(--crow-success);
+    background: rgba(34,197,94,0.08);
+    color: var(--crow-text-primary);
+  }
+  .crow-toast--out { animation: crow-toast-out 0.28s ease-in forwards; }
+  @keyframes crow-toast-in {
+    from { opacity:0; transform:translateY(8px); }
+    to   { opacity:1; transform:translateY(0); }
+  }
+  @keyframes crow-toast-out {
+    to { opacity:0; transform:translateY(8px); }
+  }
+  .crow-toast__body { flex:1; min-width:0; }
+  .crow-toast__msg { display:block; }
+  .crow-toast__details { margin-top:0.4rem; }
+  .crow-toast__details summary { cursor:pointer; font-size:0.78rem; color:var(--crow-text-muted); }
+  .crow-toast__details-pre {
+    margin-top:0.3rem; font-family:'JetBrains Mono',monospace; font-size:0.72rem;
+    white-space:pre-wrap; word-break:break-all; max-height:120px; overflow:auto;
+    color:var(--crow-text-secondary);
+  }
+  .crow-toast__close {
+    background:none; border:none; cursor:pointer; color:var(--crow-text-muted);
+    font-size:1.1rem; line-height:1; padding:0; flex-shrink:0;
+  }
+  .crow-toast__close:hover { color:var(--crow-text-primary); }
+  .crow-toast__close:focus-visible { outline:2px solid var(--crow-accent); outline-offset:2px; border-radius:2px; }
+
   /* primitives' delegated copy/tabs JS (componentsJs) is appended after </style> so it also loads on the login/2FA/setup pages, which call dashboardCss() directly and bypass renderLayout's scripts slot */
   </style>${componentsJs()}`;
 }

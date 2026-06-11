@@ -65,6 +65,22 @@ export function componentsCss() {
   .tab-trigger.tab-active { color:var(--crow-accent); border-bottom-color:var(--crow-accent); }
   .tab-panel { display:none; }
   .tab-panel.tab-active { display:block; }
+
+  /* ─── Focus-visible baseline (W3-5a) ─── */
+  .btn:focus-visible, .btn-primary:focus-visible, .btn-secondary:focus-visible,
+  .btn-danger:focus-visible, .btn-ghost:focus-visible, .btn-sm:focus-visible,
+  .btn-md:focus-visible {
+    outline: 2px solid var(--crow-accent);
+    outline-offset: 2px;
+  }
+  .sidebar-nav a.nav-item:focus-visible {
+    outline: 2px solid var(--crow-accent);
+    outline-offset: 2px;
+  }
+  input:focus-visible, select:focus-visible, textarea:focus-visible {
+    outline: 2px solid var(--crow-accent);
+    outline-offset: 2px;
+  }
   `;
 }
 
