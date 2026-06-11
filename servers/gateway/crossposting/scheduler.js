@@ -259,7 +259,19 @@ export function startCrosspostScheduler(opts = {}) {
   const runPublish = async () => {
     const db = createDbClient();
     try { await publishTick(db); }
-    catch (err) { console.warn(`[crosspost-scheduler] tick error: ${err.message}`); }
+    catch (err) {
+      console.warn(`[crosspost-scheduler] tick error: ${err.message}`);
+      // Schema missing (instance hasn't run init-db for F.13 yet): stop the
+      // loops instead of warning every 15s. The next gateway restart after
+      // init-db picks the scheduler back up.
+      if (/no such (table|column)/i.test(err.message || "")) {
+        console.warn("[crosspost-scheduler] stopping — run `npm run init-db` to enable crossposting");
+        if (publishTimer) clearInterval(publishTimer);
+        if (gcTimer) clearInterval(gcTimer);
+        publishTimer = null;
+        gcTimer = null;
+      }
+    }
     finally { try { db.close(); } catch {} }
   };
 
