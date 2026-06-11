@@ -1406,7 +1406,12 @@ export function createMemoryServer(dbPath, options = {}) {
         if (rows.length === 0) {
           return { content: [{ type: "text", text: 'Notification preferences: all types enabled (default)\n  Types: reminder, media, peer, system' }] };
         }
-        const prefs = JSON.parse(rows[0].value);
+        let prefs;
+        try {
+          prefs = JSON.parse(rows[0].value);
+        } catch {
+          prefs = {};
+        }
         return { content: [{ type: "text", text: `Notification preferences:\n  Enabled types: ${prefs.types_enabled?.join(", ") || "all"}` }] };
       }
 
