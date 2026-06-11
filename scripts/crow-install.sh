@@ -326,6 +326,34 @@ else
   echo ""
 fi
 
+# ─── Verification ─────────────────────────────────────────
+
+header "Verification"
+
+# (a) Gateway service check
+if systemctl is-active --quiet crow-gateway 2>/dev/null; then
+  log "Gateway service: running"
+else
+  error "Gateway service is not running — check: journalctl -u crow-gateway -n 50"
+fi
+
+# (b) HTTP health probe — up to 10 attempts, 2s apart
+GATEWAY_OK=false
+for attempt in $(seq 1 10); do
+  if curl -fsS -o /dev/null http://localhost:3001/health 2>/dev/null; then
+    GATEWAY_OK=true
+    break
+  fi
+  sleep 2
+done
+
+if [ "$GATEWAY_OK" = true ]; then
+  log "Gateway responding at http://localhost:3001"
+else
+  error "Gateway did not respond at http://localhost:3001 after 10 attempts"
+  error "Check the logs: journalctl -u crow-gateway -n 50"
+fi
+
 # ─── Done ─────────────────────────────────────────────────
 
 header "Installation Complete"
@@ -346,6 +374,8 @@ echo "  Useful commands:"
 echo "    crow status             — Platform status"
 echo "    crow bundle install <x> — Install an add-on"
 echo "    sudo systemctl status crow-gateway — Gateway logs"
+echo ""
+echo "  Tip: run 'crow status' to verify everything is healthy."
 echo ""
 
 # Add crow CLI to PATH if not already there
