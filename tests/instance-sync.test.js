@@ -27,10 +27,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
-import { InstanceSyncManager, SYNCED_TABLES, rowsEquivalent } from "../servers/sharing/instance-sync.js";
+import { InstanceSyncManager, SYNCED_TABLES, rowsEquivalent, buildCrowContextWireRow } from "../servers/sharing/instance-sync.js";
 import { resolveConflict, restoreConflict } from "../servers/sharing/sync-conflict-resolve.js";
 import { sign } from "../servers/sharing/identity.js";
 import * as ed from "../node_modules/@noble/ed25519/index.js";
+import { createMemoryServer } from "../servers/memory/server.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 
 // ── Shared setup ──────────────────────────────────────────────────────────────
 
@@ -1173,4 +1176,519 @@ test("14. Legacy DB without sync_conflicts.op: stale update still skipped AND co
 
   db.close();
   rmSync(legacyDir, { recursive: true, force: true });
+});
+
+// ── Tests 15-22: W4-1b crow_context replication ───────────────────────────────
+
+// Helper: seed a crow_context row for tests below.
+async function seedCtxRow(db, { section_key, section_title = "Test", content = "body", sort_order = 10, enabled = 1, device_id = null, project_id = null, lamport_ts = 0 } = {}) {
+  await db.execute({
+    sql: `INSERT OR REPLACE INTO crow_context
+            (section_key, section_title, content, sort_order, enabled, device_id, project_id, lamport_ts)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [section_key, section_title, content, sort_order, enabled, device_id, project_id, lamport_ts],
+  });
+}
+
+// ── Test 15: Update replicates ────────────────────────────────────────────────
+
+test("15. crow_context update replicates: full-row update applies content+enabled+sort_order; device-scoped row untouched; project-scoped (INTEGER IS ?) applies", async () => {
+  const INST = "inst-t15";
+  const REMOTE = "remote-t15";
+  const { mgr, db } = makeManager(INST);
+
+  // Global row
+  await seedCtxRow(db, { section_key: "identity", content: "old", enabled: 1, sort_order: 5, lamport_ts: 10 });
+  // Device-scoped row — must NOT be touched by a global update
+  await seedCtxRow(db, { section_key: "identity", content: "device-local", device_id: "dev-xyz", lamport_ts: 10 });
+  // Project-scoped row (INTEGER project_id — tests the fourth partial index)
+  await seedCtxRow(db, { section_key: "identity", content: "proj-old", project_id: 42, lamport_ts: 10 });
+
+  const feed = makeStubFeed();
+  // Global update (newer ts)
+  feed.push(signEntry({
+    table: "crow_context", op: "update",
+    row: { section_key: "identity", section_title: "Identity", content: "new-content", enabled: 0, sort_order: 99, device_id: null, project_id: null },
+    lamport_ts: 50, instance_id: REMOTE,
+  }));
+  // Project-scoped update (newer ts, INTEGER project_id)
+  feed.push(signEntry({
+    table: "crow_context", op: "update",
+    row: { section_key: "identity", section_title: "Identity", content: "proj-new", enabled: 1, sort_order: 10, device_id: null, project_id: 42 },
+    lamport_ts: 50, instance_id: REMOTE,
+  }));
+
+  await mgr._processNewEntries(REMOTE, feed);
+
+  // Global row updated
+  const { rows: globalRows } = await db.execute({
+    sql: "SELECT content, enabled, sort_order, lamport_ts FROM crow_context WHERE section_key = ? AND device_id IS NULL AND project_id IS NULL",
+    args: ["identity"],
+  });
+  assert.equal(globalRows[0].content, "new-content", "global content updated");
+  assert.equal(Number(globalRows[0].enabled), 0, "enabled updated (INTEGER 0)");
+  assert.equal(Number(globalRows[0].sort_order), 99, "sort_order updated");
+  assert.equal(Number(globalRows[0].lamport_ts), 50, "lamport_ts stamped to incomingTs");
+
+  // Device-scoped row untouched
+  const { rows: devRows } = await db.execute({
+    sql: "SELECT content FROM crow_context WHERE section_key = ? AND device_id = ?",
+    args: ["identity", "dev-xyz"],
+  });
+  assert.equal(devRows[0].content, "device-local", "device-scoped row must not be touched by global update");
+
+  // Project-scoped row updated
+  const { rows: projRows } = await db.execute({
+    sql: "SELECT content, lamport_ts FROM crow_context WHERE section_key = ? AND project_id IS 42",
+    args: ["identity"],
+  });
+  assert.equal(projRows[0].content, "proj-new", "project-scoped row updated via INTEGER IS ? path");
+  assert.equal(Number(projRows[0].lamport_ts), 50, "project-scoped lamport_ts stamped");
+
+  db.close();
+});
+
+// ── Test 16: Delete replicates + delete conflict ──────────────────────────────
+
+test("16. crow_context delete replicates: newer delete removes row; stale delete vs newer local → row survives + op=delete conflict", async () => {
+  const INST = "inst-t16";
+  const REMOTE = "remote-t16";
+  const { mgr, db } = makeManager(INST);
+
+  // Row A: will be deleted (newer incoming ts)
+  await seedCtxRow(db, { section_key: "custom_a", content: "bye", lamport_ts: 5 });
+  // Row B: will survive (stale incoming ts)
+  await seedCtxRow(db, { section_key: "custom_b", content: "stay", lamport_ts: 100 });
+
+  const feed = makeStubFeed();
+  feed.push(signEntry({
+    table: "crow_context", op: "delete",
+    row: { section_key: "custom_a", device_id: null, project_id: null },
+    lamport_ts: 50, instance_id: REMOTE,
+  }));
+  feed.push(signEntry({
+    table: "crow_context", op: "delete",
+    row: { section_key: "custom_b", device_id: null, project_id: null },
+    lamport_ts: 10, instance_id: REMOTE,  // stale: localTs=100
+  }));
+
+  await mgr._processNewEntries(REMOTE, feed);
+
+  // custom_a deleted
+  const { rows: rowA } = await db.execute({
+    sql: "SELECT id FROM crow_context WHERE section_key = 'custom_a' AND device_id IS NULL AND project_id IS NULL",
+    args: [],
+  });
+  assert.equal(rowA.length, 0, "custom_a should be deleted by newer delete");
+
+  // custom_b survives
+  const { rows: rowB } = await db.execute({
+    sql: "SELECT content FROM crow_context WHERE section_key = 'custom_b' AND device_id IS NULL AND project_id IS NULL",
+    args: [],
+  });
+  assert.equal(rowB.length, 1, "custom_b must survive stale delete");
+  assert.equal(rowB[0].content, "stay");
+
+  // Conflict row for custom_b with op='delete'
+  const expectedRowId = JSON.stringify({ section_key: "custom_b", device_id: null, project_id: null });
+  const { rows: conflicts } = await db.execute({
+    sql: "SELECT op FROM sync_conflicts WHERE row_id = ?",
+    args: [expectedRowId],
+  });
+  assert.equal(conflicts.length, 1, "conflict row logged for stale delete");
+  assert.equal(conflicts[0].op, "delete", "conflict op='delete'");
+
+  db.close();
+});
+
+// ── Test 17: Stale update + tie + re-delivery ────────────────────────────────
+
+test("17. crow_context stale update: non-equivalent → conflict; equivalent re-delivery → silent skip; tie + different data → conflict, local kept", async () => {
+  const INST = "inst-t17";
+  const REMOTE = "remote-t17";
+  const { mgr, db } = makeManager(INST);
+
+  await seedCtxRow(db, { section_key: "t17_section", content: "local-val", lamport_ts: 20 });
+
+  const feed = makeStubFeed();
+
+  // (a) Stale, non-equivalent → conflict
+  feed.push(signEntry({
+    table: "crow_context", op: "update",
+    row: { section_key: "t17_section", content: "stale-different", device_id: null, project_id: null },
+    lamport_ts: 5, instance_id: REMOTE,
+  }));
+
+  // (b) Stale, equivalent → silent skip (same content, same ts <= localTs)
+  feed.push(signEntry({
+    table: "crow_context", op: "update",
+    row: { section_key: "t17_section", content: "local-val", device_id: null, project_id: null },
+    lamport_ts: 10, instance_id: REMOTE,
+  }));
+
+  // (c) Tie (incomingTs == localTs=20) + different data → conflict, local kept
+  feed.push(signEntry({
+    table: "crow_context", op: "update",
+    row: { section_key: "t17_section", content: "tie-different", device_id: null, project_id: null },
+    lamport_ts: 20, instance_id: REMOTE,
+  }));
+
+  await mgr._processNewEntries(REMOTE, feed);
+
+  // Local content unchanged throughout (conflict = local kept)
+  const { rows } = await db.execute({
+    sql: "SELECT content FROM crow_context WHERE section_key = 't17_section' AND device_id IS NULL AND project_id IS NULL",
+    args: [],
+  });
+  assert.equal(rows[0].content, "local-val", "local content preserved after stale/conflict entries");
+
+  // Two conflict rows (stale-different and tie-different), zero for re-delivery
+  const rowIdJson = JSON.stringify({ section_key: "t17_section", device_id: null, project_id: null });
+  const { rows: conflicts } = await db.execute({
+    sql: "SELECT op FROM sync_conflicts WHERE row_id = ?",
+    args: [rowIdJson],
+  });
+  assert.equal(conflicts.length, 2, "two conflict rows (non-equiv stale + tie-different); equivalent re-delivery silent");
+
+  db.close();
+});
+
+// ── Test 18: Emit stamps local row ───────────────────────────────────────────
+
+test("18. crow_context emitChange stamps local row's lamport_ts (global and device-scoped); stamping is monotonic", async () => {
+  const INST = "inst-t18";
+  const { mgr, db } = makeManager(INST);
+
+  // Seed a global and device-scoped row both at lamport_ts=0
+  await seedCtxRow(db, { section_key: "t18_global", content: "g", lamport_ts: 0 });
+  await seedCtxRow(db, { section_key: "t18_dev", content: "d", device_id: "dev-t18", lamport_ts: 0 });
+
+  // emitChange for the global row
+  await mgr.emitChange("crow_context", "update", {
+    section_key: "t18_global", content: "g", device_id: null, project_id: null,
+  });
+
+  const { rows: gRows } = await db.execute({
+    sql: "SELECT lamport_ts FROM crow_context WHERE section_key = 't18_global' AND device_id IS NULL AND project_id IS NULL",
+    args: [],
+  });
+  const ts1 = Number(gRows[0].lamport_ts);
+  assert.ok(ts1 > 0, `global lamport_ts should be stamped > 0, got ${ts1}`);
+
+  // emitChange for the device-scoped row
+  await mgr.emitChange("crow_context", "update", {
+    section_key: "t18_dev", content: "d", device_id: "dev-t18", project_id: null,
+  });
+
+  const { rows: dRows } = await db.execute({
+    sql: "SELECT lamport_ts FROM crow_context WHERE section_key = 't18_dev' AND device_id = 'dev-t18'",
+    args: [],
+  });
+  const ts2 = Number(dRows[0].lamport_ts);
+  assert.ok(ts2 > 0, `device-scoped lamport_ts should be stamped > 0, got ${ts2}`);
+
+  // Monotonic guard: stamp the row STRICTLY ABOVE what the next emit will
+  // allocate (counter forced to 1 → next ts = 2), then emit. Under a plain
+  // `lamport_ts = ?` assignment the stamp would drop to 2; only
+  // MAX(COALESCE(lamport_ts,0), ?) keeps it at 50.
+  await db.execute({
+    sql: "UPDATE crow_context SET lamport_ts = 50 WHERE section_key = 't18_global' AND device_id IS NULL AND project_id IS NULL",
+    args: [],
+  });
+  await db.execute({
+    sql: "UPDATE sync_state SET local_counter = 1 WHERE instance_id = ?",
+    args: [INST],
+  });
+  await mgr.emitChange("crow_context", "update", {
+    section_key: "t18_global", content: "g", device_id: null, project_id: null,
+  });
+  const { rows: gRows2 } = await db.execute({
+    sql: "SELECT lamport_ts FROM crow_context WHERE section_key = 't18_global' AND device_id IS NULL AND project_id IS NULL",
+    args: [],
+  });
+  const ts3 = Number(gRows2[0].lamport_ts);
+  assert.equal(ts3, 50, `MAX guard: a lower fresh ts must not lower the existing stamp (got ${ts3})`);
+
+  db.close();
+});
+
+// ── Test 19: Upsert (update for missing row) ──────────────────────────────────
+
+test("19. crow_context upsert: update for absent section creates row with lamport_ts=incomingTs; stale follow-up → conflict/skip not applied; partial old-sender entry missing content → skipped; resurrection case", async () => {
+  const INST = "inst-t19";
+  const REMOTE = "remote-t19";
+  const { mgr, db } = makeManager(INST);
+
+  // (a) Update entry for a section absent locally → row created
+  const feed = makeStubFeed();
+  feed.push(signEntry({
+    table: "crow_context", op: "update",
+    row: { section_key: "t19_upsert", section_title: "T19", content: "born", enabled: 1, sort_order: 5, device_id: null, project_id: null },
+    lamport_ts: 30, instance_id: REMOTE,
+  }));
+
+  await mgr._processNewEntries(REMOTE, feed);
+
+  const { rows } = await db.execute({
+    sql: "SELECT content, lamport_ts FROM crow_context WHERE section_key = 't19_upsert' AND device_id IS NULL AND project_id IS NULL",
+    args: [],
+  });
+  assert.equal(rows.length, 1, "upsert created the row");
+  assert.equal(rows[0].content, "born");
+  assert.equal(Number(rows[0].lamport_ts), 30, "lamport_ts = incomingTs (C2 — not default 0)");
+
+  // (b) Stale follow-up with different data → conflict (not applied)
+  // Use a different remote id so the checkpoint doesn't skip it.
+  const REMOTE2 = "remote-t19b";
+  const feed2 = makeStubFeed();
+  feed2.push(signEntry({
+    table: "crow_context", op: "update",
+    row: { section_key: "t19_upsert", section_title: "T19", content: "stale-attempt", device_id: null, project_id: null },
+    lamport_ts: 10, instance_id: REMOTE2,
+  }));
+  await mgr._processNewEntries(REMOTE2, feed2);
+  const { rows: rows2 } = await db.execute({
+    sql: "SELECT content FROM crow_context WHERE section_key = 't19_upsert' AND device_id IS NULL AND project_id IS NULL",
+    args: [],
+  });
+  assert.equal(rows2[0].content, "born", "stale follow-up must not overwrite");
+  const rowIdJson = JSON.stringify({ section_key: "t19_upsert", device_id: null, project_id: null });
+  const { rows: conflicts } = await db.execute({
+    sql: "SELECT id FROM sync_conflicts WHERE row_id = ?",
+    args: [rowIdJson],
+  });
+  assert.ok(conflicts.length >= 1, "stale follow-up logs conflict");
+
+  // (c) Old-sender partial entry missing content for an absent section → skipped.
+  // Distinct remote: reusing REMOTE would no-op via its advanced checkpoint
+  // (lastSeq=1 vs a fresh feed's seq 0) and never exercise the guard.
+  const REMOTE_PARTIAL = "remote-t19-partial";
+  const feed3 = makeStubFeed();
+  feed3.push(signEntry({
+    table: "crow_context", op: "update",
+    row: { section_key: "t19_partial", section_title: "Partial", device_id: null, project_id: null },  // no content
+    lamport_ts: 40, instance_id: REMOTE_PARTIAL,
+  }));
+  await mgr._processNewEntries(REMOTE_PARTIAL, feed3);
+  const { rows: partialRows } = await db.execute({
+    sql: "SELECT id FROM crow_context WHERE section_key = 't19_partial'",
+    args: [],
+  });
+  assert.equal(partialRows.length, 0, "partial old-sender entry (missing content) must not create a row");
+
+  // (d) Resurrection: delete locally, re-deliver the older update → row recreated
+  await db.execute({
+    sql: "DELETE FROM crow_context WHERE section_key = 't19_upsert' AND device_id IS NULL AND project_id IS NULL",
+    args: [],
+  });
+  const { rows: afterDelete } = await db.execute({
+    sql: "SELECT id FROM crow_context WHERE section_key = 't19_upsert'",
+    args: [],
+  });
+  assert.equal(afterDelete.length, 0, "row deleted before resurrection test");
+
+  const REMOTE3 = "remote-t19c";
+  const feed4 = makeStubFeed();
+  feed4.push(signEntry({
+    table: "crow_context", op: "update",  // pre-delete update re-delivered
+    row: { section_key: "t19_upsert", section_title: "T19", content: "resurrected", enabled: 1, sort_order: 5, device_id: null, project_id: null },
+    lamport_ts: 30, instance_id: REMOTE3,
+  }));
+  await mgr._processNewEntries(REMOTE3, feed4);
+  const { rows: resurrected } = await db.execute({
+    sql: "SELECT content FROM crow_context WHERE section_key = 't19_upsert' AND device_id IS NULL AND project_id IS NULL",
+    args: [],
+  });
+  assert.equal(resurrected.length, 1, "row resurrected by re-delivered update (C4: resurrection-over-loss)");
+  assert.equal(resurrected[0].content, "resurrected");
+
+  db.close();
+});
+
+// ── Test 20: Insert LWW routing ───────────────────────────────────────────────
+
+test("20. crow_context insert LWW routing: insert colliding with older local row → applied as update (newer wins); colliding with newer local + different data → conflict, local kept", async () => {
+  const INST = "inst-t20";
+  const REMOTE = "remote-t20";
+  const { mgr, db } = makeManager(INST);
+
+  // Row with older local ts — incoming insert should win
+  await seedCtxRow(db, { section_key: "t20_lww_a", content: "old-local", lamport_ts: 5 });
+  // Row with newer local ts — local should win
+  await seedCtxRow(db, { section_key: "t20_lww_b", content: "newer-local", lamport_ts: 100 });
+
+  const feed = makeStubFeed();
+  // Insert for t20_lww_a (incomingTs=50 > localTs=5) → should apply
+  feed.push(signEntry({
+    table: "crow_context", op: "insert",
+    row: { section_key: "t20_lww_a", section_title: "A", content: "incoming-wins", enabled: 1, sort_order: 1, device_id: null, project_id: null },
+    lamport_ts: 50, instance_id: REMOTE,
+  }));
+  // Insert for t20_lww_b (incomingTs=10 < localTs=100, different data) → conflict
+  feed.push(signEntry({
+    table: "crow_context", op: "insert",
+    row: { section_key: "t20_lww_b", section_title: "B", content: "incoming-loses", enabled: 1, sort_order: 1, device_id: null, project_id: null },
+    lamport_ts: 10, instance_id: REMOTE,
+  }));
+
+  await mgr._processNewEntries(REMOTE, feed);
+
+  // t20_lww_a: incoming wins (newer ts)
+  const { rows: aRows } = await db.execute({
+    sql: "SELECT content FROM crow_context WHERE section_key = 't20_lww_a' AND device_id IS NULL AND project_id IS NULL",
+    args: [],
+  });
+  assert.equal(aRows[0].content, "incoming-wins", "newer incoming insert applied over older local");
+
+  // t20_lww_b: local kept (stale incoming)
+  const { rows: bRows } = await db.execute({
+    sql: "SELECT content FROM crow_context WHERE section_key = 't20_lww_b' AND device_id IS NULL AND project_id IS NULL",
+    args: [],
+  });
+  assert.equal(bRows[0].content, "newer-local", "local row wins against stale incoming insert");
+
+  // Conflict row for t20_lww_b
+  const rowIdJson = JSON.stringify({ section_key: "t20_lww_b", device_id: null, project_id: null });
+  const { rows: conflicts } = await db.execute({
+    sql: "SELECT op FROM sync_conflicts WHERE row_id = ?",
+    args: [rowIdJson],
+  });
+  assert.ok(conflicts.length >= 1, "conflict logged for stale insert vs newer local");
+
+  db.close();
+});
+
+// ── Test 21: Restore refused ─────────────────────────────────────────────────
+
+test("21. crow_context restore refused: restoreConflict returns refused AND winning_data is byte-identical before and after (C3)", async () => {
+  const INST = "inst-t21";
+  const REMOTE = "remote-t21";
+  const { mgr, db } = makeManager(INST);
+
+  const rowIdJson = JSON.stringify({ section_key: "t21_ctx", device_id: null, project_id: null });
+  const winningDataSnapshot = JSON.stringify({ section_key: "t21_ctx", content: "local-kept", lamport_ts: 50 });
+
+  await db.execute({
+    sql: `INSERT INTO sync_conflicts
+            (table_name, row_id, winning_instance_id, losing_instance_id,
+             winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, op)
+          VALUES ('crow_context', ?, ?, ?, 50, 10, ?, ?, 'update')`,
+    args: [rowIdJson, INST, REMOTE, winningDataSnapshot, JSON.stringify({ section_key: "t21_ctx", content: "remote-version" })],
+  });
+
+  const { rows: crows } = await db.execute({ sql: "SELECT id, winning_data FROM sync_conflicts WHERE row_id = ?", args: [rowIdJson] });
+  const conflictId = crows[0].id;
+  const winningDataBefore = crows[0].winning_data;
+
+  const outcome = await restoreConflict(db, conflictId, { instanceSync: null });
+  assert.equal(outcome.status, "refused", "crow_context restore must be refused");
+  assert.ok(outcome.message && outcome.message.includes("crow_context"), "refusal message mentions crow_context");
+
+  // winning_data must be byte-identical (C3: stale guard must not run first and destroy it)
+  const { rows: confRows } = await db.execute({
+    sql: "SELECT winning_data, resolved FROM sync_conflicts WHERE id = ?",
+    args: [conflictId],
+  });
+  assert.equal(confRows[0].winning_data, winningDataBefore, "winning_data byte-identical after refused restore (C3)");
+  assert.equal(Number(confRows[0].resolved), 0, "conflict stays unresolved after refused restore");
+
+  // resolveConflict must still work for crow_context conflicts
+  await resolveConflict(db, conflictId);
+  const { rows: confRows2 } = await db.execute({ sql: "SELECT resolved FROM sync_conflicts WHERE id = ?", args: [conflictId] });
+  assert.equal(Number(confRows2[0].resolved), 1, "resolveConflict must work for crow_context conflicts");
+
+  db.close();
+});
+
+// ── Test 22: Sender emits — VALUES, not just shape ───────────────────────────
+
+test("22a. buildCrowContextWireRow unit test: allowlist fields present; id/lamport_ts/updated_at absent; enabled is integer", () => {
+  const dbRow = {
+    id: 99,
+    section_key: "identity",
+    section_title: "Identity",
+    content: "some content",
+    sort_order: 10,
+    enabled: 0,       // INTEGER 0 from DB (must not be coerced to boolean)
+    device_id: null,
+    project_id: null,
+    lamport_ts: 42,
+    updated_at: "2026-06-11T00:00:00Z",
+    extra_future_col: "ignored",
+  };
+
+  const wire = buildCrowContextWireRow(dbRow);
+
+  // Allowlist fields present
+  assert.ok("section_key"   in wire, "section_key present");
+  assert.ok("section_title" in wire, "section_title present");
+  assert.ok("content"       in wire, "content present");
+  assert.ok("sort_order"    in wire, "sort_order present");
+  assert.ok("enabled"       in wire, "enabled present");
+  assert.ok("device_id"     in wire, "device_id present");
+  assert.ok("project_id"    in wire, "project_id present");
+
+  // Forbidden fields absent
+  assert.ok(!("id"          in wire), "id must not be in wire row");
+  assert.ok(!("lamport_ts"  in wire), "lamport_ts must not be in wire row");
+  assert.ok(!("updated_at"  in wire), "updated_at must not be in wire row");
+
+  // enabled is the INTEGER 0 from the DB (not boolean false)
+  assert.equal(wire.enabled, 0, "enabled is integer 0");
+  assert.strictEqual(typeof wire.enabled, "number", "enabled is a number not boolean");
+
+  // Values match source
+  assert.equal(wire.section_key, "identity");
+  assert.equal(wire.content, "some content");
+  assert.equal(wire.device_id, null);
+});
+
+test("22b. crow_update_context_section emits post-UPDATE values (not pre-update values)", async () => {
+  // Spin up a real memory server with an emitChange spy injected as syncManager.
+  // Call crow_update_context_section changing content AND enabled.
+  // Assert the captured emit carries the POST-update values:
+  //   a pre-update-SELECT emit has the same shape but different values → fails the assertion.
+  const testDir = mkdtempSync(join(tmpdir(), "crow-isync-t22b-"));
+  execFileSync(process.execPath, ["scripts/init-db.js"], {
+    env: { ...process.env, CROW_DATA_DIR: testDir },
+    stdio: "pipe",
+  });
+  const dbPath = join(testDir, "crow.db");
+
+  const emitted = [];
+  const spySync = {
+    emitChange: async (table, op, row) => { emitted.push({ table, op, row }); return 1; },
+  };
+
+  const memServer = createMemoryServer(dbPath, { syncManager: spySync });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await memServer.connect(serverTransport);
+  const client = new Client({ name: "test22b", version: "0" });
+  await client.connect(clientTransport);
+
+  // Seed the identity section so it exists to update
+  const seedDb = createDbClient(dbPath);
+  await seedCtxRow(seedDb, { section_key: "identity", section_title: "Identity", content: "original", enabled: 1, sort_order: 10 });
+  seedDb.close();
+
+  // Call the MCP tool to update content and enabled
+  await client.callTool({
+    name: "crow_update_context_section",
+    arguments: { section_key: "identity", content: "updated-content", enabled: false },
+  });
+
+  // Verify the emit was fired
+  const ctxEmits = emitted.filter((e) => e.table === "crow_context" && e.op === "update");
+  assert.ok(ctxEmits.length >= 1, "at least one crow_context update emit fired");
+
+  const emit = ctxEmits[ctxEmits.length - 1];
+  // Post-update values must be reflected in the wire row
+  assert.equal(emit.row.content, "updated-content", "emit carries POST-update content (not pre-update)");
+  assert.equal(Number(emit.row.enabled), 0, "emit carries POST-update enabled=0 (INTEGER, not boolean)");
+  // Allowlist enforced: no id or lamport_ts
+  assert.ok(!("id" in emit.row), "id must not be in emitted wire row");
+  assert.ok(!("lamport_ts" in emit.row), "lamport_ts must not be in emitted wire row");
+
+  await client.close();
+  rmSync(testDir, { recursive: true, force: true });
 });
