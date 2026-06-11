@@ -21,6 +21,7 @@
 
 export const PUBLIC_FUNNEL_PREFIXES = [
   "/blog",
+  "/blog/",
   "/robots.txt",
   "/sitemap.xml",
   "/.well-known/",
@@ -31,13 +32,26 @@ export const PUBLIC_FUNNEL_PREFIXES = [
 /**
  * Express middleware: reject funneled requests to any non-public path.
  *
+ * Entries ending with "/" are tree prefixes (subtree match only — path must
+ * start with the full prefix including the slash, e.g. "/.well-known/" allows
+ * "/.well-known/oauth-authorization-server" but not "/.well-known" bare).
+ * Entries without a trailing slash are exact-match only; this blocks lookalikes
+ * such as "/robots.txt/" or "/sitemap.xml.gz" from slipping through.
+ * Tree paths that also need an exact match carry both forms: "/blog" + "/blog/".
+ *
  * @returns {(req, res, next) => void}
  */
 export function rejectFunneledMiddleware() {
   return (req, res, next) => {
     if (!req.headers["tailscale-funnel-request"]) return next();
     if (process.env.CROW_DASHBOARD_PUBLIC === "true") return next();
-    if (PUBLIC_FUNNEL_PREFIXES.some((p) => req.path === p || req.path.startsWith(p))) return next();
+    if (
+      PUBLIC_FUNNEL_PREFIXES.some((p) => {
+        if (p.endsWith("/")) return req.path.startsWith(p);
+        return req.path === p;
+      })
+    )
+      return next();
     res.status(403).type("text/plain").send("Forbidden: private path not reachable via Tailscale Funnel.");
   };
 }

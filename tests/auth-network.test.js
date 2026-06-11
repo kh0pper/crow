@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import express from "express";
 import http from "node:http";
 import { isAllowedNetwork } from "../servers/gateway/dashboard/auth.js";
+import { rejectFunneledMiddleware } from "../servers/gateway/funnel.js";
 
 function mkReq({ ip = "127.0.0.1", headers = {} } = {}) {
   return { ip, headers, connection: { remoteAddress: ip } };
@@ -75,29 +76,11 @@ test("isAllowedNetwork: CROW_ALLOWED_IPS CIDR match", () => {
   }
 });
 
-// Integration test for the rejectFunneled middleware. We rebuild the
-// middleware inline so the test doesn't need to boot the full gateway
-// (which initializes DB, MCP servers, etc.).
-function makeFunnelMiddleware() {
-  const PUBLIC_FUNNEL_PREFIXES = [
-    "/blog",
-    "/robots.txt",
-    "/sitemap.xml",
-    "/.well-known/",
-    "/favicon.ico",
-    "/manifest.json",
-  ];
-  return (req, res, next) => {
-    if (!req.headers["tailscale-funnel-request"]) return next();
-    if (process.env.CROW_DASHBOARD_PUBLIC === "true") return next();
-    if (PUBLIC_FUNNEL_PREFIXES.some((p) => req.path === p || req.path.startsWith(p))) return next();
-    res.status(403).type("text/plain").send("Forbidden: private path not reachable via Tailscale Funnel.");
-  };
-}
-
+// Integration test for the rejectFunneled middleware. Uses the real import
+// so tests stay in sync with the live middleware automatically.
 function startTestApp() {
   const app = express();
-  app.use(makeFunnelMiddleware());
+  app.use(rejectFunneledMiddleware());
   app.get(/.*/, (req, res) => res.status(200).send("ok"));
   return new Promise((resolve) => {
     const server = app.listen(0, "127.0.0.1", () => resolve(server));
@@ -188,4 +171,38 @@ test("rejectFunneled middleware: no Funnel header, all paths pass", async () => 
   } finally {
     server.close();
   }
+});
+
+function runFunnelMw(path, { funnel = true } = {}) {
+  const mw = rejectFunneledMiddleware();
+  const req = { headers: funnel ? { "tailscale-funnel-request": "?1" } : {}, path };
+  let statusCode = null;
+  let nexted = false;
+  const res = {
+    status(c) { statusCode = c; return this; },
+    type() { return this; },
+    send() { return this; },
+  };
+  mw(req, res, () => { nexted = true; });
+  return { statusCode, nexted };
+}
+
+test("funnel: public prefixes pass, lookalike paths are rejected", () => {
+  assert.equal(runFunnelMw("/blog").nexted, true);
+  assert.equal(runFunnelMw("/blog/feed.xml").nexted, true);
+  assert.equal(runFunnelMw("/robots.txt").nexted, true);
+  assert.equal(runFunnelMw("/.well-known/oauth-authorization-server").nexted, true);
+  // segment-anchoring: a lookalike prefix must NOT pass
+  assert.equal(runFunnelMw("/blogX").statusCode, 403);
+  assert.equal(runFunnelMw("/robots.txt.bak").statusCode, 403);
+  assert.equal(runFunnelMw("/favicon.ico2").statusCode, 403);
+  // trailing-slash bypass and extension lookalikes must NOT pass
+  assert.equal(runFunnelMw("/robots.txt/").statusCode, 403);
+  assert.equal(runFunnelMw("/.well-known").statusCode, 403);
+  assert.equal(runFunnelMw("/blog.rss").statusCode, 403);
+  assert.equal(runFunnelMw("/sitemap.xml.gz").statusCode, 403);
+  // private paths still rejected
+  assert.equal(runFunnelMw("/dashboard").statusCode, 403);
+  // non-funnel requests always pass this middleware
+  assert.equal(runFunnelMw("/dashboard", { funnel: false }).nexted, true);
 });
