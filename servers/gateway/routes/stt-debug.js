@@ -7,7 +7,8 @@
  *     profile_id: optional — specific profile to use (defaults to the default)
  *     language: optional — ISO-639-1 code hint
  *
- * Returns: { ok, provider, text, language?, duration? } or { ok:false, error }
+ * Returns: { ok, provider, text, language?, duration? } on success,
+ * or { error, code? } on failure (canonical W2-1 error shape).
  *
  * Protected by dashboard session auth.
  */
@@ -16,6 +17,7 @@ import { Router } from "express";
 import multer from "multer";
 import { createDbClient } from "../../db.js";
 import { createSttAdapter, getSttProfiles, getDefaultSttProfile } from "../ai/stt/index.js";
+import { jsonError } from "./_error.js";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -28,7 +30,7 @@ export default function sttDebugRouter(dashboardAuth) {
 
   router.post("/api/stt/debug", upload.single("file"), async (req, res) => {
     if (!req.file) {
-      return res.status(400).json({ ok: false, error: "No audio file uploaded (use `file` field)" });
+      return jsonError(res, 400, "No audio file uploaded (use `file` field)");
     }
 
     const db = createDbClient();
@@ -38,12 +40,12 @@ export default function sttDebugRouter(dashboardAuth) {
         const profiles = await getSttProfiles(db, { includeKeys: true });
         profile = profiles.find(p => p.id === req.body.profile_id);
         if (!profile) {
-          return res.status(404).json({ ok: false, error: `No STT profile with id ${req.body.profile_id}` });
+          return jsonError(res, 404, `No STT profile with id ${req.body.profile_id}`);
         }
       } else {
         profile = await getDefaultSttProfile(db, { includeKeys: true });
         if (!profile) {
-          return res.status(400).json({ ok: false, error: "No STT profiles configured" });
+          return jsonError(res, 400, "No STT profiles configured");
         }
       }
 
@@ -66,11 +68,7 @@ export default function sttDebugRouter(dashboardAuth) {
         ...result,
       });
     } catch (err) {
-      res.status(500).json({
-        ok: false,
-        error: err.message,
-        code: err.code || "unknown",
-      });
+      jsonError(res, 500, err.message, { code: err.code || "unknown" });
     } finally {
       db.close();
     }
