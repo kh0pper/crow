@@ -41,7 +41,7 @@ import { SYNCED_TABLES, rowsEquivalent } from "./instance-sync.js";
 
 /**
  * Fetch live columns for a table via PRAGMA table_info.
- * Returns a Set of column names (lowercase for safety).
+ * Returns a Set of column names as declared in the schema.
  *
  * @param {object} db
  * @param {string} table — pre-validated against SYNCED_TABLES
