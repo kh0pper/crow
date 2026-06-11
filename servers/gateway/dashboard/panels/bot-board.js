@@ -761,7 +761,7 @@ async function renderCustomTracker(req, res, { db, layout, selBot, bots, notice,
       : `<div style="color:var(--crow-text-muted);font-size:.78rem;padding:.4rem">—</div>`;
     return `<div class="bb-col" data-col="${escapeHtml(st)}">` +
       `<h4><span>${escapeHtml(st)}</span><span>${list.length}</span>` +
-      `<button type="button" class="bb-col-toggle" title="collapse column">−</button></h4>` +
+      `<button type="button" class="bb-col-toggle" title="collapse column" aria-label="Collapse ${escapeHtml(st)} column">−</button></h4>` +
       `<div class="bb-col-body" data-col-body="${escapeHtml(st)}">${cardsHtml}</div></div>`;
   }).join("");
 

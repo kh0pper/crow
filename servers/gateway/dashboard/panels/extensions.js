@@ -1362,6 +1362,7 @@ export default {
           var closeBtn = document.createElement("button");
           closeBtn.className = "ext-detail__close";
           closeBtn.textContent = "\\u00D7";
+          closeBtn.setAttribute("aria-label", "${tJs("extensions.close", lang)}");
           closeBtn.addEventListener("click", hideModal);
           frag.appendChild(closeBtn);
 
