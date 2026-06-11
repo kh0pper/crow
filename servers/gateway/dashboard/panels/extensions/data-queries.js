@@ -138,7 +138,7 @@ export async function fetchRegistryData() {
 
 /**
  * Probe docker-compose status for installed bundles.
- * Returns { composeCmd, bundleStatus }.
+ * Returns { bundleStatus }.
  */
 export function fetchBundleStatus(installed) {
   // Detect docker compose command variant
@@ -186,5 +186,5 @@ export function fetchBundleStatus(installed) {
     } catch {}
   }
 
-  return { composeCmd, bundleStatus };
+  return { bundleStatus };
 }
