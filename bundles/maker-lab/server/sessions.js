@@ -41,9 +41,9 @@ export function addMinutesISO(min) {
 export async function mintSessionForLearner(db, { learnerId, durationMin = SESSION_DEFAULT_MIN, idleLockMin, batchId = null }) {
   const r = await db.execute({
     sql: `SELECT rp.id, rp.name, mls.transcripts_enabled, mls.idle_lock_default_min
-          FROM research_projects rp
+          FROM project_spaces rp
           LEFT JOIN maker_learner_settings mls ON mls.learner_id = rp.id
-          WHERE rp.id = ? AND rp.type = 'learner_profile'`,
+          WHERE rp.id = ? AND rp.type = 'learner_profile' AND rp.archived_at IS NULL`,
     args: [learnerId],
   });
   if (!r.rows.length) {

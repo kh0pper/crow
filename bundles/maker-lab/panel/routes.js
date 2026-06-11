@@ -114,7 +114,7 @@ async function resolveSessionRow(db, token) {
   const r = await db.execute({
     sql: `SELECT s.*, rp.name AS learner_name, mls.age AS learner_age
           FROM maker_sessions s
-          LEFT JOIN research_projects rp ON rp.id = s.learner_id
+          LEFT JOIN project_spaces rp ON rp.id = s.learner_id AND rp.archived_at IS NULL
           LEFT JOIN maker_learner_settings mls ON mls.learner_id = s.learner_id
           WHERE s.token = ?`,
     args: [token],

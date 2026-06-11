@@ -143,9 +143,9 @@ async function generateDynamicSections(db) {
       lines.push("");
     }
 
-    // Active research projects
+    // Active research projects — archived_at IS NULL excludes trigger-archived (deleted) rows
     const { rows: projects } = await db.execute(
-      "SELECT name, description, (SELECT COUNT(*) FROM research_sources WHERE project_id = research_projects.id) as source_count, (SELECT COUNT(*) FROM research_notes WHERE project_id = research_projects.id) as note_count FROM research_projects WHERE status = 'active' AND (type IS NULL OR type != 'learner_profile') ORDER BY updated_at DESC LIMIT 5"
+      "SELECT name, description, (SELECT COUNT(*) FROM research_sources WHERE project_id = p.id) as source_count, (SELECT COUNT(*) FROM research_notes WHERE project_id = p.id) as note_count FROM project_spaces p WHERE p.status = 'active' AND (p.type IS NULL OR p.type != 'learner_profile') AND p.archived_at IS NULL ORDER BY p.updated_at DESC LIMIT 5"
     );
     if (projects.length > 0) {
       lines.push("### Active Research Projects");
