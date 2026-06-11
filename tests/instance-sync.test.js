@@ -28,6 +28,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
 import { InstanceSyncManager, SYNCED_TABLES, rowsEquivalent } from "../servers/sharing/instance-sync.js";
+import { resolveConflict, restoreConflict } from "../servers/sharing/sync-conflict-resolve.js";
 import { sign } from "../servers/sharing/identity.js";
 import * as ed from "../node_modules/@noble/ed25519/index.js";
 
@@ -718,4 +719,399 @@ test("rowsEquivalent: key in b missing from a → not equal (one nullish)", () =
 test("rowsEquivalent: key only in a is ignored (a is partial local, b is wire row)", () => {
   // a has extra key that b doesn't carry — b is the wire row, its keys are authoritative
   assert.ok(rowsEquivalent({ a: "x", extraLocal: "ignored" }, { a: "x" }));
+});
+
+// ── Test 10: Restore path (happy) ────────────────────────────────────────────
+
+test("10. Restore path (happy): UPDATE-of-present-keys; absent columns untouched; FTS integrity; emitChange spy", async () => {
+  const INST = "inst-t10";
+  const REMOTE = "remote-t10";
+  const { mgr, db } = makeManager(INST);
+
+  // Seed a memories row with content and extra columns that losing_data will NOT carry.
+  // access_count and created_at are columns that must survive the restore untouched.
+  await db.execute({
+    sql: `INSERT INTO memories (id, category, content, importance, lamport_ts, access_count, created_at)
+          VALUES (800, 'general', 'original-content', 5, 50, 7, datetime('now'))`,
+    args: [],
+  });
+
+  // Manufacture a conflict row as if a remote edit with lower lamport_ts was received.
+  await db.execute({
+    sql: `INSERT INTO sync_conflicts
+            (table_name, row_id, winning_instance_id, losing_instance_id,
+             winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, op)
+          VALUES ('memories', '800', ?, ?, 50, 10, ?, ?, 'update')`,
+    args: [
+      INST, REMOTE,
+      JSON.stringify({ id: 800, category: "general", content: "original-content", importance: 5, lamport_ts: 50, access_count: 7 }),
+      JSON.stringify({ id: 800, content: "restoredversion", importance: 3 }),
+    ],
+  });
+
+  const { rows: crows } = await db.execute({ sql: "SELECT id FROM sync_conflicts WHERE row_id = '800'", args: [] });
+  const conflictId = crows[0].id;
+
+  // emitChange spy
+  const emitted = [];
+  const fakeSync = {
+    emitChange: async (table, op, row) => { emitted.push({ table, op, row }); },
+  };
+
+  const outcome = await restoreConflict(db, conflictId, { instanceSync: fakeSync });
+  assert.equal(outcome.status, "applied", "restore should succeed");
+
+  // content updated to losing side
+  const { rows: memRows } = await db.execute({
+    sql: "SELECT content, importance, access_count FROM memories WHERE id = 800",
+    args: [],
+  });
+  assert.equal(memRows[0].content, "restoredversion", "content should be restored");
+  assert.equal(Number(memRows[0].importance), 3, "importance should be restored");
+  // access_count not in losing_data — must be untouched
+  assert.equal(Number(memRows[0].access_count), 7, "access_count (absent from losing_data) must be untouched");
+
+  // conflict resolved
+  const { rows: confRows } = await db.execute({
+    sql: "SELECT resolved FROM sync_conflicts WHERE id = ?",
+    args: [conflictId],
+  });
+  assert.equal(Number(confRows[0].resolved), 1, "conflict should be resolved");
+
+  // emitChange called with "update"
+  assert.equal(emitted.length, 1, "emitChange called once");
+  assert.equal(emitted[0].op, "update", "emitChange op should be 'update'");
+  assert.equal(emitted[0].table, "memories", "emitChange table should be 'memories'");
+
+  // FTS integrity: after the UPDATE the memories_fts index must be consistent.
+  // An integrity-check passes if the shadow tables aren't corrupted.
+  let ftsOk = true;
+  try {
+    await db.execute({
+      sql: `INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')`,
+      args: [],
+    });
+  } catch (err) {
+    ftsOk = false;
+    assert.fail(`FTS integrity-check failed: ${err.message}`);
+  }
+  assert.ok(ftsOk, "FTS integrity-check should pass after restore");
+
+  // The restored row should be findable via FTS MATCH on the new content.
+  // (The FTS update trigger fires on UPDATE to memories — verify the OLD
+  // content is no longer the only match; we care that the index didn't corrupt.)
+  const { rows: ftsRows } = await db.execute({
+    sql: `SELECT rowid FROM memories_fts WHERE memories_fts MATCH 'restoredversion'`,
+    args: [],
+  });
+  assert.ok(ftsRows.length > 0, "restored content should be findable via FTS MATCH");
+
+  // FK survival: contacts → messages uses a similar pattern. Here we verify that
+  // restoring a memories row leaves it accessible (no cascade side effects).
+  const { rows: afterRestore } = await db.execute({
+    sql: "SELECT id FROM memories WHERE id = 800",
+    args: [],
+  });
+  assert.equal(afterRestore.length, 1, "memories row should still exist after restore");
+
+  db.close();
+});
+
+test("10b. Restore path (row-since-gone): plain INSERT + emitChange('insert')", async () => {
+  const INST = "inst-t10b";
+  const REMOTE = "remote-t10b";
+  const { mgr, db } = makeManager(INST);
+
+  // The "row-since-gone" INSERT path requires that:
+  //   - The live row does not exist
+  //   - The stale-snapshot guard passes (storedWinningData matches live state)
+  // When a prior stale-guard pass re-snapshots a gone row, it stores the JSON
+  // string 'null' in winning_data (to satisfy the NOT NULL constraint while still
+  // representing "no row"). We seed the conflict in that post-re-snapshot state:
+  //   winning_data = 'null' (JSON null), live row absent → guard: both null → pass.
+  await db.execute({
+    sql: `INSERT INTO sync_conflicts
+            (table_name, row_id, winning_instance_id, losing_instance_id,
+             winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, op)
+          VALUES ('memories', '801', ?, ?, 50, 10, 'null', ?, 'update')`,
+    args: [
+      INST, REMOTE,
+      // losing_data: full-ish row so INSERT has required NOT NULL columns.
+      JSON.stringify({ id: 801, category: "general", content: "re-inserted-content", importance: 2, lamport_ts: 10 }),
+    ],
+  });
+
+  const { rows: crows } = await db.execute({ sql: "SELECT id FROM sync_conflicts WHERE row_id = '801'", args: [] });
+  const conflictId = crows[0].id;
+
+  const emitted = [];
+  const fakeSync = {
+    emitChange: async (table, op, row) => { emitted.push({ table, op, row }); },
+  };
+
+  const outcome = await restoreConflict(db, conflictId, { instanceSync: fakeSync });
+  assert.equal(outcome.status, "applied", "restore of gone row should succeed");
+
+  const { rows: memRows } = await db.execute({
+    sql: "SELECT content FROM memories WHERE id = 801",
+    args: [],
+  });
+  assert.equal(memRows.length, 1, "row should be re-inserted");
+  assert.equal(memRows[0].content, "re-inserted-content");
+
+  // emitChange must use "insert" (not "update") so peers also lacking the row
+  // will receive and apply it correctly.
+  assert.equal(emitted.length, 1, "emitChange called once");
+  assert.equal(emitted[0].op, "insert", "emitChange op should be 'insert' for re-insert");
+
+  db.close();
+});
+
+// ── Test 11: Restore failure leaves conflict unresolved ───────────────────────
+
+test("11. Restore failure (partial losing_data + row gone → INSERT NOT NULL fail): error returned, conflict still unresolved", async () => {
+  const INST = "inst-t11";
+  const REMOTE = "remote-t11";
+  const { mgr, db } = makeManager(INST);
+
+  // memories.content has NOT NULL; losing_data is partial and omits it.
+  // winning_data = 'null' (JSON null string) so the stale guard treats it as
+  // "row was gone when last snapshotted", and since the live row is also absent,
+  // the guard passes (both null → not stale). The INSERT then fails on NOT NULL.
+  await db.execute({
+    sql: `INSERT INTO sync_conflicts
+            (table_name, row_id, winning_instance_id, losing_instance_id,
+             winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, op)
+          VALUES ('memories', '850', ?, ?, 0, 5, 'null', ?, 'update')`,
+    args: [
+      INST, REMOTE,
+      // partial: has id + tags but NOT content (which is NOT NULL in memories)
+      JSON.stringify({ id: 850, tags: "tag1" }),
+    ],
+  });
+
+  const { rows: crows } = await db.execute({ sql: "SELECT id FROM sync_conflicts WHERE row_id = '850'", args: [] });
+  const conflictId = crows[0].id;
+
+  const outcome = await restoreConflict(db, conflictId, { instanceSync: null });
+  assert.equal(outcome.status, "error", "should return error outcome");
+  assert.ok(outcome.message && outcome.message.length > 0, "should have a plain-language error message");
+
+  // Conflict must remain unresolved
+  const { rows: confRows } = await db.execute({
+    sql: "SELECT resolved FROM sync_conflicts WHERE id = ?",
+    args: [conflictId],
+  });
+  assert.equal(Number(confRows[0].resolved), 0, "conflict should remain unresolved after failure");
+
+  // No partial row inserted
+  const { rows: memRows } = await db.execute({
+    sql: "SELECT id FROM memories WHERE id = 850",
+    args: [],
+  });
+  assert.equal(memRows.length, 0, "no partial row should be inserted");
+
+  db.close();
+});
+
+// ── Test 12: Stale-snapshot guard ────────────────────────────────────────────
+
+test("12a. Stale-snapshot guard: live row changed after conflict logged → NOT applied, winning_data re-snapshotted, stale outcome", async () => {
+  const INST = "inst-t12a";
+  const REMOTE = "remote-t12a";
+  const { mgr, db } = makeManager(INST);
+
+  // Seed row
+  await db.execute({
+    sql: `INSERT INTO memories (id, category, content, lamport_ts) VALUES (860, 'general', 'at-conflict-time', 50)`,
+    args: [],
+  });
+
+  // Log conflict with snapshot of row as it was at conflict time.
+  await db.execute({
+    sql: `INSERT INTO sync_conflicts
+            (table_name, row_id, winning_instance_id, losing_instance_id,
+             winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, op)
+          VALUES ('memories', '860', ?, ?, 50, 10, ?, ?, 'update')`,
+    args: [
+      INST, REMOTE,
+      JSON.stringify({ id: 860, category: "general", content: "at-conflict-time", lamport_ts: 50 }),
+      JSON.stringify({ id: 860, content: "losing-version" }),
+    ],
+  });
+
+  const { rows: crows } = await db.execute({ sql: "SELECT id FROM sync_conflicts WHERE row_id = '860'", args: [] });
+  const conflictId = crows[0].id;
+
+  // NOW change the live row (operator edited it after the conflict was logged).
+  await db.execute({
+    sql: `UPDATE memories SET content = 'edited-after-conflict', lamport_ts = 99 WHERE id = 860`,
+    args: [],
+  });
+
+  const emitted = [];
+  const fakeSync = {
+    emitChange: async (table, op, row) => { emitted.push({ table, op, row }); },
+  };
+
+  // First confirm: should trip the stale guard.
+  const outcome1 = await restoreConflict(db, conflictId, { instanceSync: fakeSync });
+  assert.equal(outcome1.status, "stale", "should return stale outcome when live row has changed");
+  assert.ok(outcome1.message && outcome1.message.includes("changed"), "stale message should mention change");
+  assert.equal(emitted.length, 0, "emitChange should not be called on stale");
+
+  // winning_data should have been re-snapshotted to the current live content.
+  const { rows: confRows } = await db.execute({
+    sql: "SELECT winning_data, resolved FROM sync_conflicts WHERE id = ?",
+    args: [conflictId],
+  });
+  const resnapshot = JSON.parse(confRows[0].winning_data);
+  assert.equal(resnapshot.content, "edited-after-conflict", "winning_data should be re-snapshotted to current row");
+  assert.equal(Number(confRows[0].resolved), 0, "conflict should remain unresolved after stale guard");
+
+  // Live row content should NOT have been changed to the losing version.
+  const { rows: memRows } = await db.execute({ sql: "SELECT content FROM memories WHERE id = 860", args: [] });
+  assert.equal(memRows[0].content, "edited-after-conflict", "live row must not have been overwritten");
+
+  // Second confirm: snapshot now matches live row → stale guard passes → applies.
+  const outcome2 = await restoreConflict(db, conflictId, { instanceSync: fakeSync });
+  assert.equal(outcome2.status, "applied", "second confirm should apply after re-snapshot");
+  assert.equal(emitted.length, 1, "emitChange called on second confirm");
+
+  const { rows: memRows2 } = await db.execute({ sql: "SELECT content FROM memories WHERE id = 860", args: [] });
+  assert.equal(memRows2[0].content, "losing-version", "losing version applied on second confirm");
+
+  db.close();
+});
+
+test("12b. Stale-snapshot guard (delete variant): snapshot differs → guard blocks the DELETE", async () => {
+  const INST = "inst-t12b";
+  const REMOTE = "remote-t12b";
+  const { mgr, db } = makeManager(INST);
+
+  await db.execute({
+    sql: `INSERT INTO memories (id, category, content, lamport_ts) VALUES (861, 'general', 'guard-me', 50)`,
+    args: [],
+  });
+
+  // Log a delete conflict: losing_data = the delete marker, winning_data = snapshot of live row.
+  await db.execute({
+    sql: `INSERT INTO sync_conflicts
+            (table_name, row_id, winning_instance_id, losing_instance_id,
+             winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, op)
+          VALUES ('memories', '861', ?, ?, 50, 5, ?, ?, 'delete')`,
+    args: [
+      INST, REMOTE,
+      JSON.stringify({ id: 861, category: "general", content: "guard-me", lamport_ts: 50 }),
+      JSON.stringify({ id: 861 }),
+    ],
+  });
+
+  const { rows: crows } = await db.execute({ sql: "SELECT id FROM sync_conflicts WHERE row_id = '861'", args: [] });
+  const conflictId = crows[0].id;
+
+  // Edit the live row after the conflict was logged → stale guard should fire.
+  await db.execute({
+    sql: `UPDATE memories SET content = 'updated-after-conflict' WHERE id = 861`,
+    args: [],
+  });
+
+  const outcome = await restoreConflict(db, conflictId, { instanceSync: null });
+  assert.equal(outcome.status, "stale", "delete restore should trip stale guard when row changed");
+
+  // Row must still exist
+  const { rows: memRows } = await db.execute({ sql: "SELECT id FROM memories WHERE id = 861", args: [] });
+  assert.equal(memRows.length, 1, "row should still exist — delete was blocked by stale guard");
+
+  db.close();
+});
+
+// ── Test 13: Delete-restore + insert-restore-disabled ────────────────────────
+
+test("13a. Delete-restore: op=delete conflict with current snapshot → row deleted + emitChange('delete')", async () => {
+  const INST = "inst-t13a";
+  const REMOTE = "remote-t13a";
+  const { mgr, db } = makeManager(INST);
+
+  await db.execute({
+    sql: `INSERT INTO memories (id, category, content, lamport_ts) VALUES (870, 'general', 'to-be-deleted', 50)`,
+    args: [],
+  });
+
+  // Log a delete conflict: winning_data = current row, losing = delete marker.
+  // snapshot matches live row exactly so guard passes.
+  await db.execute({
+    sql: `INSERT INTO sync_conflicts
+            (table_name, row_id, winning_instance_id, losing_instance_id,
+             winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, op)
+          VALUES ('memories', '870', ?, ?, 50, 5, ?, ?, 'delete')`,
+    args: [
+      INST, REMOTE,
+      JSON.stringify({ id: 870, category: "general", content: "to-be-deleted", lamport_ts: 50 }),
+      JSON.stringify({ id: 870 }),
+    ],
+  });
+
+  const { rows: crows } = await db.execute({ sql: "SELECT id FROM sync_conflicts WHERE row_id = '870'", args: [] });
+  const conflictId = crows[0].id;
+
+  const emitted = [];
+  const fakeSync = {
+    emitChange: async (table, op, row) => { emitted.push({ table, op, row }); },
+  };
+
+  const outcome = await restoreConflict(db, conflictId, { instanceSync: fakeSync });
+  assert.equal(outcome.status, "applied", "delete-restore should succeed");
+
+  // Row should be gone
+  const { rows: memRows } = await db.execute({ sql: "SELECT id FROM memories WHERE id = 870", args: [] });
+  assert.equal(memRows.length, 0, "row should be deleted after delete-restore");
+
+  // emitChange with "delete"
+  assert.equal(emitted.length, 1, "emitChange called once");
+  assert.equal(emitted[0].op, "delete", "emitChange op should be 'delete'");
+
+  // Conflict resolved
+  const { rows: confRows } = await db.execute({ sql: "SELECT resolved FROM sync_conflicts WHERE id = ?", args: [conflictId] });
+  assert.equal(Number(confRows[0].resolved), 1, "conflict should be resolved after delete-restore");
+
+  db.close();
+});
+
+test("13b. Insert-restore-disabled: op=insert conflict → restore refused, resolve still works", async () => {
+  const INST = "inst-t13b";
+  const REMOTE = "remote-t13b";
+  const { mgr, db } = makeManager(INST);
+
+  // Log an insert-collision conflict (op='insert').
+  await db.execute({
+    sql: `INSERT INTO sync_conflicts
+            (table_name, row_id, winning_instance_id, losing_instance_id,
+             winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, op)
+          VALUES ('memories', '880', ?, ?, 50, 30, ?, ?, 'insert')`,
+    args: [
+      INST, REMOTE,
+      JSON.stringify({ id: 880, category: "general", content: "local-row", lamport_ts: 50 }),
+      JSON.stringify({ id: 880, category: "general", content: "remote-collision", lamport_ts: 30 }),
+    ],
+  });
+
+  const { rows: crows } = await db.execute({ sql: "SELECT id FROM sync_conflicts WHERE row_id = '880'", args: [] });
+  const conflictId = crows[0].id;
+
+  // Restore must be refused
+  const outcome = await restoreConflict(db, conflictId, { instanceSync: null });
+  assert.equal(outcome.status, "refused", "insert conflict restore should be refused");
+  assert.ok(outcome.message && outcome.message.length > 0, "should have explanatory message");
+
+  // Conflict still unresolved
+  const { rows: confRows } = await db.execute({ sql: "SELECT resolved FROM sync_conflicts WHERE id = ?", args: [conflictId] });
+  assert.equal(Number(confRows[0].resolved), 0, "conflict should remain unresolved after refused restore");
+
+  // resolveConflict (keep current) must still work
+  await resolveConflict(db, conflictId);
+  const { rows: confRows2 } = await db.execute({ sql: "SELECT resolved FROM sync_conflicts WHERE id = ?", args: [conflictId] });
+  assert.equal(Number(confRows2[0].resolved), 1, "resolveConflict should work for insert conflicts");
+
+  db.close();
 });
