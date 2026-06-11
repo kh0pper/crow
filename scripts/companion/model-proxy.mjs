@@ -32,6 +32,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { resolveProviderConfig } from "../../servers/gateway/ai/resolve-profile.js";
+import { connectTimeout, isTimeoutError, LLM_CONNECT_TIMEOUT_MS } from "../../servers/shared/http-timeout.js";
 
 const PORT = parseInt(process.env.COMPANION_PROXY_PORT || "11435", 10);
 const HOST = "127.0.0.1"; // loopback only — never exposed (network-exposure invariant)
@@ -242,13 +243,18 @@ async function handleChat(req, res, raw) {
 
   let upstream;
   try {
-    upstream = await fetch(url, {
+    const t = connectTimeout(LLM_CONNECT_TIMEOUT_MS);
+    upstream = t.disarm(await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...authHeaders(up.apiKey) },
       body: JSON.stringify(body),
-    });
+      signal: t.signal,
+    }));
   } catch (e) {
-    return sendJson(res, 502, { error: { message: `upstream ${url} unreachable: ${e.message}` } });
+    const msg = isTimeoutError(e)
+      ? `upstream connect timeout after ${Math.round(LLM_CONNECT_TIMEOUT_MS / 1000)}s`
+      : `upstream ${url} unreachable: ${e.message}`;
+    return sendJson(res, 502, { error: { message: msg } });
   }
 
   // Mirror status + content-type; stream the body straight through (SSE or JSON).

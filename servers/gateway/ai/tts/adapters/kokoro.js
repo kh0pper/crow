@@ -9,6 +9,8 @@
  * config.defaultVoice  — e.g. af_bella
  */
 
+import { connectTimeout, composeSignals, TTS_TIMEOUT_MS } from "../../../../../shared/http-timeout.js";
+
 export default function createKokoroTtsAdapter(config) {
   // Normalize: strip trailing slashes AND a trailing `/v1` so the same profile
   // works whether its baseUrl includes /v1 or not. The companion (OLVV) needs
@@ -33,15 +35,16 @@ export default function createKokoroTtsAdapter(config) {
         speed: options.speed || 1.0,
         stream: true,
       };
-      const res = await fetch(`${baseUrl}/v1/audio/speech`, {
+      const t = connectTimeout(TTS_TIMEOUT_MS);
+      const res = t.disarm(await fetch(`${baseUrl}/v1/audio/speech`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify(body),
-        signal: options.signal,
-      });
+        signal: composeSignals(options.signal, t.signal),
+      }));
       if (!res.ok) {
         const err = await res.text().catch(() => "");
         throw Object.assign(new Error(`Kokoro ${res.status}: ${err.slice(0, 200)}`), { code: "provider_error" });

@@ -34,6 +34,7 @@ import { Readable } from "node:stream";
 import { createDbClient } from "../../db.js";
 import { resolveProviderConfig } from "../ai/resolve-profile.js";
 import { maybeAcquireLocalProvider } from "../gpu-orchestrator.js";
+import { connectTimeout, isTimeoutError, LLM_CONNECT_TIMEOUT_MS } from "../../shared/http-timeout.js";
 
 const FAST_KEY = process.env.COMPANION_FAST_MODEL || "crow-voice/qwen3.5-4b";
 const ESC_KEY = process.env.COMPANION_ESCALATION_MODEL || "crow-chat/qwen3.6-35b-a3b";
@@ -218,13 +219,18 @@ async function handleChat(req, res) {
 
   let upstream;
   try {
-    upstream = await fetch(url, {
+    const t = connectTimeout(LLM_CONNECT_TIMEOUT_MS);
+    upstream = t.disarm(await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...authHeaders(up.apiKey) },
       body: JSON.stringify(body),
-    });
+      signal: t.signal,
+    }));
   } catch (e) {
-    return res.status(502).json({ error: { message: `upstream ${url} unreachable: ${e.message}` } });
+    const msg = isTimeoutError(e)
+      ? `upstream connect timeout after ${Math.round(LLM_CONNECT_TIMEOUT_MS / 1000)}s`
+      : `upstream ${url} unreachable: ${e.message}`;
+    return res.status(502).json({ error: { message: msg } });
   }
 
   // Mirror status + content-type; stream the body straight through (SSE or JSON).
