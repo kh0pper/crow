@@ -7,6 +7,7 @@
  */
 
 import { escapeHtml } from "../shared/components.js";
+import { tJs } from "../shared/i18n.js";
 
 function fmtTime(iso) {
   if (!iso) return "";
@@ -41,7 +42,7 @@ export default {
   hidden: false,
   category: "system",
 
-  async handler(req, res, { db, layout }) {
+  async handler(req, res, { db, layout, lang }) {
     if (req.method === "POST") {
       const { action } = req.body || {};
       if (action === "reset_refcounts") {
@@ -202,7 +203,7 @@ export default {
             Lifecycle refcounts + dispatch event timeline. Auto-refreshes every 5s.
           </p>
         </div>
-        <form method="POST" onsubmit="return confirm('Reset all lifecycle refcounts? This reconciles against live provider health.');" style="margin:0">
+        <form method="POST" onsubmit="return confirm('${tJs("orchestrator.confirmResetRefcounts", lang)}');" style="margin:0">
           <input type="hidden" name="action" value="reset_refcounts">
           <button type="submit" class="btn btn-secondary btn-sm">Reset Refcounts</button>
         </form>
