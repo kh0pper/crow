@@ -1435,6 +1435,10 @@ function dashboardCss() {
   .crow-toast__close:hover { color:var(--crow-text-primary); }
   .crow-toast__close:focus-visible { outline:2px solid var(--crow-accent); outline-offset:2px; border-radius:2px; }
 
-  /* primitives' delegated copy/tabs JS (componentsJs) is appended after </style> so it also loads on the login/2FA/setup pages, which call dashboardCss() directly and bypass renderLayout's scripts slot */
+  /* primitives' delegated copy/tabs JS (componentsJs) is appended right after
+     this style block closes, so it also loads on the login/2FA/setup pages,
+     which call dashboardCss() directly and bypass renderLayout's scripts slot.
+     NOTE: never write a literal closing style tag inside this comment — the
+     HTML parser would end the style element there and render the rest as text. */
   </style>${componentsJs()}`;
 }

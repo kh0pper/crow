@@ -166,6 +166,8 @@ export const translations = {
   "nest.pinned": { en: "Pinned", es: "Fijados" },
   "nest.instances": { en: "Instances", es: "Instancias" },
   "nest.openInstance": { en: "Open", es: "Abrir" },
+  "nest.offlineSince": { en: "Offline since", es: "Sin conexión desde" },
+  "nest.retry": { en: "Retry", es: "Reintentar" },
 
   // ─── Health strip (W3-3) ───
   "health.allgood": { en: "Everything looks good", es: "Todo funciona bien" },
