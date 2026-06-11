@@ -47,6 +47,7 @@ import { Router } from "express";
 import { existsSync, readFileSync, writeFileSync, realpathSync, statSync, readdirSync, unlinkSync, mkdirSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { createDbClient } from "../../db.js";
+import { jsonError } from "./_error.js";
 import { listProvidersAll } from "../../orchestrator/providers-db.js";
 import { proposalsDir, normalizeSkillName, listProposals } from "../../../scripts/pi-bots/skill_proposals.mjs";
 // B4: shared write+attach helper (one code path with the auto review pass).
@@ -65,8 +66,6 @@ const LOCK_STATUSES = new Set(["active", "waiting-user"]);
 const TERMINAL = new Set(["done", "cancelled"]);
 const STALE_SECONDS = 1800; // 30 min — force-unlock staleness threshold (D5)
 const BULK_CAP = 200;
-
-function jerr(res, code, obj) { return res.status(code).json(obj); }
 
 // D5 single-card lock re-check (the genuinely-single-card site). Returns
 // { locked, row } where row is the MAX(id) bot_sessions row for the card.
@@ -188,7 +187,7 @@ export default function botBoardApiRouter(dashboardAuth) {
   // ---- GET card (drawer hydration: card fields + project list + lock) ----
   router.get(P + "/card/:id", async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isInteger(id)) return jerr(res, 400, { error: "bad id" });
+    if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
     let tdb, cdb;
     try {
       tdb = createDbClient(TASKS_DB);
@@ -198,7 +197,7 @@ export default function botBoardApiRouter(dashboardAuth) {
           "datetime(updated_at) AS updated_at, completed_at FROM tasks_items WHERE id=?",
         args: [id],
       })).rows[0];
-      if (!card) return jerr(res, 404, { error: "card not found" });
+      if (!card) return jsonError(res, 404, "card not found");
       cdb = createDbClient();
       let projects = [];
       try {
@@ -207,7 +206,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       const { locked } = await lockState(cdb, id);
       return res.json({ card, projects, locked });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (tdb) { try { tdb.close(); } catch {} }
       if (cdb) { try { cdb.close(); } catch {} }
@@ -218,9 +217,9 @@ export default function botBoardApiRouter(dashboardAuth) {
   router.post(P + "/card", async (req, res) => {
     const b = req.body || {};
     const title = typeof b.title === "string" ? b.title.trim() : "";
-    if (!title) return jerr(res, 400, { error: "title is required" }); // BEFORE INSERT
+    if (!title) return jsonError(res, 400, "title is required"); // BEFORE INSERT
     const projectId = b.project_id == null || b.project_id === "" ? null : Number(b.project_id);
-    if (projectId != null && !Number.isInteger(projectId)) return jerr(res, 400, { error: "bad project_id" });
+    if (projectId != null && !Number.isInteger(projectId)) return jsonError(res, 400, "bad project_id");
     let tdb;
     try {
       tdb = createDbClient(TASKS_DB);
@@ -240,7 +239,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       });
       return res.json({ ok: true, id: r.lastInsertRowid });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (tdb) { try { tdb.close(); } catch {} }
     }
@@ -249,25 +248,25 @@ export default function botBoardApiRouter(dashboardAuth) {
   // ---- edit card fields ----
   router.post(P + "/card/:id", async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isInteger(id)) return jerr(res, 400, { error: "bad id" });
+    if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
     const b = req.body || {};
     if (b.status != null && !CARD_STATUSES.has(String(b.status))) {
-      return jerr(res, 400, { error: "invalid status" }); // BEFORE SQL
+      return jsonError(res, 400, "invalid status"); // BEFORE SQL
     }
     let prio = null, prioSet = false;
     if (b.priority != null && b.priority !== "") {
       prio = Number(b.priority);
-      if (!Number.isInteger(prio) || prio < 1 || prio > 5) return jerr(res, 400, { error: "priority must be 1-5" });
+      if (!Number.isInteger(prio) || prio < 1 || prio > 5) return jsonError(res, 400, "priority must be 1-5");
       prioSet = true;
     }
     let tdb, cdb;
     try {
       cdb = createDbClient();
       const { locked } = await lockState(cdb, id);
-      if (locked) return jerr(res, 409, { reason: "bot is working this card" });
+      if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
       const cur = (await tdb.execute({ sql: "SELECT status FROM tasks_items WHERE id=?", args: [id] })).rows[0];
-      if (!cur) return jerr(res, 404, { error: "card not found" });
+      if (!cur) return jsonError(res, 404, "card not found");
       const sets = ["title=?", "description=?", "due_date=?", "owner=?", "tags=?"];
       const args = [
         typeof b.title === "string" ? b.title.trim() : (b.title == null ? null : String(b.title)),
@@ -288,7 +287,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=?`, args });
       return res.json({ ok: true });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (tdb) { try { tdb.close(); } catch {} }
       if (cdb) { try { cdb.close(); } catch {} }
@@ -298,24 +297,24 @@ export default function botBoardApiRouter(dashboardAuth) {
   // ---- move card (status) ----
   router.post(P + "/card/:id/move", async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isInteger(id)) return jerr(res, 400, { error: "bad id" });
+    if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
     const status = String((req.body || {}).status || "");
-    if (!CARD_STATUSES.has(status)) return jerr(res, 400, { error: "invalid status" }); // BEFORE SQL
+    if (!CARD_STATUSES.has(status)) return jsonError(res, 400, "invalid status"); // BEFORE SQL
     let tdb, cdb;
     try {
       cdb = createDbClient();
       const { locked } = await lockState(cdb, id);
-      if (locked) return jerr(res, 409, { reason: "bot is working this card" });
+      if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
       const cur = (await tdb.execute({ sql: "SELECT status FROM tasks_items WHERE id=?", args: [id] })).rows[0];
-      if (!cur) return jerr(res, 404, { error: "card not found" });
+      if (!cur) return jsonError(res, 404, "card not found");
       const sets = ["status=?", "updated_at=datetime('now')"];
       if (TERMINAL.has(status) && !TERMINAL.has(String(cur.status))) sets.push("completed_at=datetime('now')");
       else if (!TERMINAL.has(status) && TERMINAL.has(String(cur.status))) sets.push("completed_at=NULL");
       await tdb.execute({ sql: `UPDATE tasks_items SET ${sets.join(", ")} WHERE id=?`, args: [status, id] });
       return res.json({ ok: true });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (tdb) { try { tdb.close(); } catch {} }
       if (cdb) { try { cdb.close(); } catch {} }
@@ -325,22 +324,22 @@ export default function botBoardApiRouter(dashboardAuth) {
   // ---- cancel card ----
   router.post(P + "/card/:id/cancel", async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isInteger(id)) return jerr(res, 400, { error: "bad id" });
+    if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
     let tdb, cdb;
     try {
       cdb = createDbClient();
       const { locked } = await lockState(cdb, id);
-      if (locked) return jerr(res, 409, { reason: "bot is working this card" });
+      if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
       const cur = (await tdb.execute({ sql: "SELECT id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
-      if (!cur) return jerr(res, 404, { error: "card not found" });
+      if (!cur) return jsonError(res, 404, "card not found");
       await tdb.execute({
         sql: "UPDATE tasks_items SET status='cancelled', completed_at=datetime('now'), updated_at=datetime('now') WHERE id=?",
         args: [id],
       });
       return res.json({ ok: true });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (tdb) { try { tdb.close(); } catch {} }
       if (cdb) { try { cdb.close(); } catch {} }
@@ -350,22 +349,22 @@ export default function botBoardApiRouter(dashboardAuth) {
   // ---- read plan file ----
   router.get(P + "/card/:id/plan", async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isInteger(id)) return jerr(res, 400, { error: "bad id" });
+    if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
     let tdb, cdb;
     try {
       tdb = createDbClient(TASKS_DB);
       const card = (await tdb.execute({ sql: "SELECT id, project_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
-      if (!card) return jerr(res, 404, { error: "card not found" });
+      if (!card) return jsonError(res, 404, "card not found");
       cdb = createDbClient();
       const info = await derivePlanPath(cdb, card);
       if (!info) return res.json({ exists: false, markdown: "", mtime: null, reason: "no bot is linked to this project" });
       const real = containedRealPath(info.path, info.sessionDir);
-      if (!real) return jerr(res, 400, { error: "plan path escapes the bot workspace" });
+      if (!real) return jsonError(res, 400, "plan path escapes the bot workspace");
       if (!existsSync(info.path)) return res.json({ exists: false, markdown: "", mtime: null });
       const mtime = String(statSync(info.path).mtimeMs);
       return res.json({ exists: true, markdown: readFileSync(info.path, "utf8"), mtime });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (tdb) { try { tdb.close(); } catch {} }
       if (cdb) { try { cdb.close(); } catch {} }
@@ -375,21 +374,21 @@ export default function botBoardApiRouter(dashboardAuth) {
   // ---- save plan file (mtime optimistic-concurrency; lock-checked) ----
   router.post(P + "/card/:id/plan", async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isInteger(id)) return jerr(res, 400, { error: "bad id" });
+    if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
     const b = req.body || {};
-    if (typeof b.markdown !== "string") return jerr(res, 400, { error: "markdown (string) required" });
+    if (typeof b.markdown !== "string") return jsonError(res, 400, "markdown (string) required");
     let tdb, cdb;
     try {
       cdb = createDbClient();
       const { locked } = await lockState(cdb, id);
-      if (locked) return jerr(res, 409, { reason: "bot is working this card" });
+      if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
       const card = (await tdb.execute({ sql: "SELECT id, project_id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
-      if (!card) return jerr(res, 404, { error: "card not found" });
+      if (!card) return jsonError(res, 404, "card not found");
       const info = await derivePlanPath(cdb, card);
-      if (!info) return jerr(res, 400, { error: "no bot is linked to this project — no plan path" });
+      if (!info) return jsonError(res, 400, "no bot is linked to this project — no plan path");
       const real = containedRealPath(info.path, info.sessionDir);
-      if (!real) return jerr(res, 400, { error: "plan path escapes the bot workspace" });
+      if (!real) return jsonError(res, 400, "plan path escapes the bot workspace");
       const exists = existsSync(info.path);
       if (exists) {
         // Optimistic concurrency: the client's mtime (from its GET) must
@@ -397,14 +396,14 @@ export default function botBoardApiRouter(dashboardAuth) {
         // content (no auto-merge in v1; Phase 5).
         const curMtime = String(statSync(info.path).mtimeMs);
         if (b.mtime != null && String(b.mtime) !== curMtime) {
-          return jerr(res, 409, { reason: "plan changed on disk since you opened it", mtime: curMtime });
+          return res.status(409).json({ reason: "plan changed on disk since you opened it", mtime: curMtime });
         }
       }
       writeFileSync(info.path, b.markdown, "utf8");
       const mtime = String(statSync(info.path).mtimeMs);
       return res.json({ ok: true, mtime });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (tdb) { try { tdb.close(); } catch {} }
       if (cdb) { try { cdb.close(); } catch {} }
@@ -414,25 +413,25 @@ export default function botBoardApiRouter(dashboardAuth) {
   // ---- assign / clear / reassign a card's project ----
   router.post(P + "/card/:id/project", async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isInteger(id)) return jerr(res, 400, { error: "bad id" });
+    if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
     const raw = (req.body || {}).project_id;
     const projectId = raw == null || raw === "" ? null : Number(raw);
-    if (projectId != null && !Number.isInteger(projectId)) return jerr(res, 400, { error: "bad project_id" });
+    if (projectId != null && !Number.isInteger(projectId)) return jsonError(res, 400, "bad project_id");
     let tdb, cdb;
     try {
       cdb = createDbClient();
       const { locked } = await lockState(cdb, id);
-      if (locked) return jerr(res, 409, { reason: "bot is working this card" });
+      if (locked) return res.status(409).json({ reason: "bot is working this card" });
       tdb = createDbClient(TASKS_DB);
       const cur = (await tdb.execute({ sql: "SELECT id FROM tasks_items WHERE id=?", args: [id] })).rows[0];
-      if (!cur) return jerr(res, 404, { error: "card not found" });
+      if (!cur) return jsonError(res, 404, "card not found");
       await tdb.execute({
         sql: "UPDATE tasks_items SET project_id=?, updated_at=datetime('now') WHERE id=?",
         args: [projectId, id],
       });
       return res.json({ ok: true });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (tdb) { try { tdb.close(); } catch {} }
       if (cdb) { try { cdb.close(); } catch {} }
@@ -442,23 +441,23 @@ export default function botBoardApiRouter(dashboardAuth) {
   // ---- force-unlock (D5 stale-lock recovery; FAIL-CLOSED) ----
   router.post(P + "/card/:id/force-unlock", async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isInteger(id)) return jerr(res, 400, { error: "bad id" });
+    if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
     let cdb;
     try {
       cdb = createDbClient();
       const { row } = await lockState(cdb, id);
-      if (!row) return jerr(res, 409, { reason: "no bot_sessions row for this card — nothing to unlock" });
+      if (!row) return res.status(409).json({ reason: "no bot_sessions row for this card — nothing to unlock" });
       if (!LOCK_STATUSES.has(String(row.status))) {
-        return jerr(res, 409, { reason: "card is not locked (latest session is " + String(row.status) + ")" });
+        return res.status(409).json({ reason: "card is not locked (latest session is " + String(row.status) + ")" });
       }
       const ageS = Number(row.age_s);
       if (!Number.isFinite(ageS) || ageS < STALE_SECONDS) {
-        return jerr(res, 409, { reason: "session is not stale yet (age " + (Number.isFinite(ageS) ? ageS + "s" : "unknown") + "; need ≥ " + STALE_SECONDS + "s)" });
+        return res.status(409).json({ reason: "session is not stale yet (age " + (Number.isFinite(ageS) ? ageS + "s" : "unknown") + "; need ≥ " + STALE_SECONDS + "s)" });
       }
       // FAIL-CLOSED liveness gate (Step-1 pinned pattern).
       const live = piLiveness(row.pi_session_dir);
       if (live !== "dead") {
-        return jerr(res, 409, {
+        return res.status(409).json({
           reason: live === "alive"
             ? "refused: a live pi process for this bot is still running"
             : "refused (fail-closed): could not positively confirm the pi is dead",
@@ -472,7 +471,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       });
       return res.json({ ok: true, cleared: Number(r.rowsAffected) || 0 });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
     }
@@ -482,7 +481,7 @@ export default function botBoardApiRouter(dashboardAuth) {
   router.post(P + "/project", async (req, res) => {
     const b = req.body || {};
     const name = typeof b.name === "string" ? b.name.trim() : "";
-    if (!name) return jerr(res, 400, { error: "name is required" }); // BEFORE INSERT
+    if (!name) return jsonError(res, 400, "name is required"); // BEFORE INSERT
     let cdb;
     try {
       cdb = createDbClient();
@@ -496,7 +495,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       await cdb.execute({ sql: "UPDATE project_spaces SET slug=?, workspace_dir=? WHERE id=?", args: [slug + "-" + newId, wsDir, newId] });
       return res.json({ ok: true, id: newId });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
     }
@@ -505,29 +504,29 @@ export default function botBoardApiRouter(dashboardAuth) {
   // ---- edit project metadata ----
   router.post(P + "/project/:id", async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isInteger(id)) return jerr(res, 400, { error: "bad id" });
+    if (!Number.isInteger(id)) return jsonError(res, 400, "bad id");
     const b = req.body || {};
     if (b.status != null && !PROJECT_STATUSES.has(String(b.status))) {
-      return jerr(res, 400, { error: "invalid project status" }); // BEFORE SQL
+      return jsonError(res, 400, "invalid project status"); // BEFORE SQL
     }
     const name = typeof b.name === "string" ? b.name.trim() : "";
-    if (b.name != null && !name) return jerr(res, 400, { error: "name cannot be empty" });
+    if (b.name != null && !name) return jsonError(res, 400, "name cannot be empty");
     let cdb;
     try {
       cdb = createDbClient();
       const cur = (await cdb.execute({ sql: "SELECT id FROM project_spaces WHERE id=?", args: [id] })).rows[0];
-      if (!cur) return jerr(res, 404, { error: "project not found" });
+      if (!cur) return jsonError(res, 404, "project not found");
       const sets = [], args = [];
       if (b.name != null) { sets.push("name=?"); args.push(name); }
       if (b.description != null) { sets.push("description=?"); args.push(String(b.description) || null); }
       if (b.status != null) { sets.push("status=?"); args.push(String(b.status)); }
-      if (!sets.length) return jerr(res, 400, { error: "nothing to update" });
+      if (!sets.length) return jsonError(res, 400, "nothing to update");
       sets.push("updated_at=datetime('now')");
       args.push(id);
       await cdb.execute({ sql: `UPDATE project_spaces SET ${sets.join(", ")} WHERE id=?`, args });
       return res.json({ ok: true });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
     }
@@ -544,7 +543,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       })).rows || [];
       return res.json({ cards });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (tdb) { try { tdb.close(); } catch {} }
     }
@@ -553,12 +552,12 @@ export default function botBoardApiRouter(dashboardAuth) {
   // ---- bulk-assign cards to a project (atomic; per-card report) ----
   router.post(P + "/project/:id/bulk-assign", async (req, res) => {
     const projectId = Number(req.params.id);
-    if (!Number.isInteger(projectId)) return jerr(res, 400, { error: "bad project id" });
+    if (!Number.isInteger(projectId)) return jsonError(res, 400, "bad project id");
     const ids = Array.isArray((req.body || {}).card_ids)
       ? req.body.card_ids.map(Number).filter((n) => Number.isInteger(n))
       : [];
-    if (!ids.length) return jerr(res, 400, { error: "card_ids[] required" });
-    if (ids.length > BULK_CAP) return jerr(res, 400, { error: `too many cards (max ${BULK_CAP})` });
+    if (!ids.length) return jsonError(res, 400, "card_ids[] required");
+    if (ids.length > BULK_CAP) return jsonError(res, 400, `too many cards (max ${BULK_CAP})`);
     let tdb, cdb;
     try {
       cdb = createDbClient();
@@ -603,7 +602,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       }
       return res.json({ ok: true, applied, skipped });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (tdb) { try { tdb.close(); } catch {} }
       if (cdb) { try { cdb.close(); } catch {} }
@@ -614,7 +613,7 @@ export default function botBoardApiRouter(dashboardAuth) {
   router.post(P + "/session/stop", async (req, res) => {
     const b = req.body || {};
     const botId = b.bot_id, threadId = b.gateway_thread_id;
-    if (!botId || !threadId) return jerr(res, 400, { error: "bot_id and gateway_thread_id required" });
+    if (!botId || !threadId) return jsonError(res, 400, "bot_id and gateway_thread_id required");
     let cdb;
     try {
       cdb = createDbClient();
@@ -629,7 +628,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       });
       return res.json({ ok: true, sessionId: sess.id });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
     }
@@ -639,7 +638,7 @@ export default function botBoardApiRouter(dashboardAuth) {
   router.post(P + "/session/send", async (req, res) => {
     const b = req.body || {};
     const botId = b.bot_id, threadId = b.gateway_thread_id, message = b.message;
-    if (!botId || !threadId || !message) return jerr(res, 400, { error: "bot_id, gateway_thread_id, and message required" });
+    if (!botId || !threadId || !message) return jsonError(res, 400, "bot_id, gateway_thread_id, and message required");
     const { spawn } = await import("node:child_process");
     const NODE = HOME + "/.nvm/versions/node/v20.20.2/bin/node";
     const BRIDGE = HOME + "/crow/scripts/pi-bots/bridge.mjs";
@@ -654,7 +653,7 @@ export default function botBoardApiRouter(dashboardAuth) {
   // ---- session transcript (S3: raw JSONL viewer) ----
   router.get(P + "/session/:id/transcript", async (req, res) => {
     const sessId = Number(req.params.id);
-    if (!Number.isInteger(sessId)) return jerr(res, 400, { error: "bad session id" });
+    if (!Number.isInteger(sessId)) return jsonError(res, 400, "bad session id");
     let cdb;
     try {
       cdb = createDbClient();
@@ -673,7 +672,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
       return res.send(content);
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
     }
@@ -705,12 +704,12 @@ export default function botBoardApiRouter(dashboardAuth) {
     const b = req.body || {};
     const slug = typeof b.slug === "string" ? b.slug.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-") : "";
     const displayName = typeof b.display_name === "string" ? b.display_name.trim() : "";
-    if (!slug || !displayName) return jerr(res, 400, { error: "slug and display_name are required" });
+    if (!slug || !displayName) return jsonError(res, 400, "slug and display_name are required");
     let cdb;
     try {
       cdb = createDbClient();
       const existing = (await cdb.execute({ sql: "SELECT id FROM tracker_defs WHERE slug=?", args: [slug] })).rows[0];
-      if (existing) return jerr(res, 409, { error: "tracker slug already exists: " + slug });
+      if (existing) return jsonError(res, 409, "tracker slug already exists: " + slug);
       const statusValues = Array.isArray(b.status_values) ? b.status_values : ["pending"];
       const columnsJson = Array.isArray(b.columns_json) ? b.columns_json : [];
       const r = await cdb.execute({
@@ -719,7 +718,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       });
       return res.json({ ok: true, id: Number(r.lastInsertRowid), slug });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
     }
@@ -732,18 +731,18 @@ export default function botBoardApiRouter(dashboardAuth) {
     try {
       cdb = createDbClient();
       const cur = (await cdb.execute({ sql: "SELECT id FROM tracker_defs WHERE slug=?", args: [req.params.slug] })).rows[0];
-      if (!cur) return jerr(res, 404, { error: "tracker not found" });
+      if (!cur) return jsonError(res, 404, "tracker not found");
       const sets = [], args = [];
       if (b.display_name != null) { sets.push("display_name=?"); args.push(String(b.display_name).trim()); }
       if (b.status_values != null) { sets.push("status_values=?"); args.push(JSON.stringify(Array.isArray(b.status_values) ? b.status_values : [])); }
       if (b.columns_json != null) { sets.push("columns_json=?"); args.push(JSON.stringify(Array.isArray(b.columns_json) ? b.columns_json : [])); }
-      if (!sets.length) return jerr(res, 400, { error: "nothing to update" });
+      if (!sets.length) return jsonError(res, 400, "nothing to update");
       sets.push("updated_at=datetime('now')");
       args.push(cur.id);
       await cdb.execute({ sql: `UPDATE tracker_defs SET ${sets.join(", ")} WHERE id=?`, args });
       return res.json({ ok: true });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
     }
@@ -760,7 +759,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       })).rows || [];
       return res.json({ trackers: rows });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
     }
@@ -784,7 +783,7 @@ export default function botBoardApiRouter(dashboardAuth) {
         sql: "SELECT id, display_name, columns_json, status_values FROM tracker_defs WHERE slug=?",
         args: [req.params.slug],
       })).rows[0];
-      if (!def) return jerr(res, 404, { error: "tracker not found" });
+      if (!def) return jsonError(res, 404, "tracker not found");
       const clauses = ["tracker_id = ?"];
       const params = [def.id];
       if (req.query.status) { clauses.push("status = ?"); params.push(String(req.query.status)); }
@@ -806,7 +805,7 @@ export default function botBoardApiRouter(dashboardAuth) {
         items, locks,
       });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
     }
@@ -814,14 +813,14 @@ export default function botBoardApiRouter(dashboardAuth) {
 
   router.get(P + "/tracker-item/:id", async (req, res) => {
     const itemId = Number(req.params.id);
-    if (!Number.isInteger(itemId)) return jerr(res, 400, { error: "bad id" });
+    if (!Number.isInteger(itemId)) return jsonError(res, 400, "bad id");
     let cdb;
     try {
       cdb = createDbClient();
       const r = (await cdb.execute({
         sql: "SELECT * FROM tracker_items WHERE id=?", args: [itemId],
       })).rows[0];
-      if (!r) return jerr(res, 404, { error: "item not found" });
+      if (!r) return jsonError(res, 404, "item not found");
       const def = (await cdb.execute({
         sql: "SELECT slug, display_name, columns_json, status_values FROM tracker_defs WHERE id=?",
         args: [r.tracker_id],
@@ -832,7 +831,7 @@ export default function botBoardApiRouter(dashboardAuth) {
         locked: trackerItemLocked(r),
       });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
     }
@@ -840,19 +839,19 @@ export default function botBoardApiRouter(dashboardAuth) {
 
   router.post(P + "/tracker-item/:id", async (req, res) => {
     const itemId = Number(req.params.id);
-    if (!Number.isInteger(itemId)) return jerr(res, 400, { error: "bad id" });
+    if (!Number.isInteger(itemId)) return jsonError(res, 400, "bad id");
     const b = req.body || {};
     let cdb;
     try {
       cdb = createDbClient();
       const cur = (await cdb.execute({ sql: "SELECT * FROM tracker_items WHERE id=?", args: [itemId] })).rows[0];
-      if (!cur) return jerr(res, 404, { error: "item not found" });
-      if (trackerItemLocked(cur)) return jerr(res, 409, { reason: "item is being processed by a bot" });
+      if (!cur) return jsonError(res, 404, "item not found");
+      if (trackerItemLocked(cur)) return res.status(409).json({ reason: "item is being processed by a bot" });
       if (b.status != null) {
         const def = (await cdb.execute({ sql: "SELECT status_values FROM tracker_defs WHERE id=?", args: [cur.tracker_id] })).rows[0];
         if (def) {
           const allowed = JSON.parse(def.status_values || "[]");
-          if (!allowed.includes(String(b.status))) return jerr(res, 400, { error: "invalid status: " + b.status });
+          if (!allowed.includes(String(b.status))) return jsonError(res, 400, "invalid status: " + b.status);
         }
       }
       const sets = [], args = [];
@@ -864,13 +863,13 @@ export default function botBoardApiRouter(dashboardAuth) {
         const merged = { ...parseDataJson(cur.data_json), ...b.data };
         sets.push("data_json=?"); args.push(JSON.stringify(merged));
       }
-      if (!sets.length) return jerr(res, 400, { error: "nothing to update" });
+      if (!sets.length) return jsonError(res, 400, "nothing to update");
       sets.push("updated_at=datetime('now')");
       args.push(itemId);
       await cdb.execute({ sql: `UPDATE tracker_items SET ${sets.join(", ")} WHERE id=?`, args });
       return res.json({ ok: true });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
     }
@@ -878,24 +877,24 @@ export default function botBoardApiRouter(dashboardAuth) {
 
   router.post(P + "/tracker-item/:id/move", async (req, res) => {
     const itemId = Number(req.params.id);
-    if (!Number.isInteger(itemId)) return jerr(res, 400, { error: "bad id" });
+    if (!Number.isInteger(itemId)) return jsonError(res, 400, "bad id");
     const status = String((req.body || {}).status || "");
-    if (!status) return jerr(res, 400, { error: "status required" });
+    if (!status) return jsonError(res, 400, "status required");
     let cdb;
     try {
       cdb = createDbClient();
       const cur = (await cdb.execute({ sql: "SELECT * FROM tracker_items WHERE id=?", args: [itemId] })).rows[0];
-      if (!cur) return jerr(res, 404, { error: "item not found" });
-      if (trackerItemLocked(cur)) return jerr(res, 409, { reason: "item is being processed by a bot" });
+      if (!cur) return jsonError(res, 404, "item not found");
+      if (trackerItemLocked(cur)) return res.status(409).json({ reason: "item is being processed by a bot" });
       const def = (await cdb.execute({ sql: "SELECT status_values FROM tracker_defs WHERE id=?", args: [cur.tracker_id] })).rows[0];
       if (def) {
         const allowed = JSON.parse(def.status_values || "[]");
-        if (!allowed.includes(status)) return jerr(res, 400, { error: "invalid status: " + status });
+        if (!allowed.includes(status)) return jsonError(res, 400, "invalid status: " + status);
       }
       await cdb.execute({ sql: "UPDATE tracker_items SET status=?, updated_at=datetime('now') WHERE id=?", args: [status, itemId] });
       return res.json({ ok: true });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
     }
@@ -906,15 +905,15 @@ export default function botBoardApiRouter(dashboardAuth) {
     const b = req.body || {};
     const slug = String(b.tracker_slug || "");
     const label = typeof b.label === "string" ? b.label.trim() : "";
-    if (!slug || !label) return jerr(res, 400, { error: "tracker_slug and label are required" });
+    if (!slug || !label) return jsonError(res, 400, "tracker_slug and label are required");
     let cdb;
     try {
       cdb = createDbClient();
       const def = (await cdb.execute({ sql: "SELECT id, status_values FROM tracker_defs WHERE slug=?", args: [slug] })).rows[0];
-      if (!def) return jerr(res, 404, { error: "tracker not found: " + slug });
+      if (!def) return jsonError(res, 404, "tracker not found: " + slug);
       const status = b.status ? String(b.status) : JSON.parse(def.status_values || "[]")[0] || "pending";
       const allowed = JSON.parse(def.status_values || "[]");
-      if (!allowed.includes(status)) return jerr(res, 400, { error: "invalid status: " + status });
+      if (!allowed.includes(status)) return jsonError(res, 400, "invalid status: " + status);
       const priority = b.priority != null ? Number(b.priority) : 3;
       const dataJson = b.data && typeof b.data === "object" ? JSON.stringify(b.data) : "{}";
       const r = await cdb.execute({
@@ -924,7 +923,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       });
       return res.json({ ok: true, id: Number(r.lastInsertRowid) });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
     }
@@ -932,12 +931,12 @@ export default function botBoardApiRouter(dashboardAuth) {
 
   router.post(P + "/tracker-item/:id/force-clear-lease", async (req, res) => {
     const itemId = Number(req.params.id);
-    if (!Number.isInteger(itemId)) return jerr(res, 400, { error: "bad id" });
+    if (!Number.isInteger(itemId)) return jsonError(res, 400, "bad id");
     let cdb;
     try {
       cdb = createDbClient();
       const cur = (await cdb.execute({ sql: "SELECT processing_lease_status FROM tracker_items WHERE id=?", args: [itemId] })).rows[0];
-      if (!cur) return jerr(res, 404, { error: "item not found" });
+      if (!cur) return jsonError(res, 404, "item not found");
       if (!trackerItemLocked(cur)) return res.json({ ok: true, message: "already unlocked" });
       await cdb.execute({
         sql: "UPDATE tracker_items SET processing_lease=NULL, processing_lease_status=NULL, updated_at=datetime('now') WHERE id=?",
@@ -945,7 +944,7 @@ export default function botBoardApiRouter(dashboardAuth) {
       });
       return res.json({ ok: true });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
     }
@@ -976,12 +975,12 @@ export default function botBoardApiRouter(dashboardAuth) {
     try {
       cdb = createDbClient();
       const b = await loadBotDef(cdb, botId);
-      if (!b) return jerr(res, 404, { error: "unknown bot" });
+      if (!b) return jsonError(res, 404, "unknown bot");
       const proposals = listProposals(b.def.session_dir)
         .map((p) => ({ name: p.name, text: p.text, flags: p.flags, mtime: p.mtime }));
       return res.json({ proposals });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
     }
@@ -992,21 +991,21 @@ export default function botBoardApiRouter(dashboardAuth) {
     const botId = String(req.params.botId || "");
     const body = req.body || {};
     const name = normalizeSkillName(body.name);
-    if (!name) return jerr(res, 400, { error: "invalid skill name" }); // BEFORE any path use
+    if (!name) return jsonError(res, 400, "invalid skill name"); // BEFORE any path use
     const content = typeof body.content === "string" ? body.content : "";
-    if (!content.trim()) return jerr(res, 400, { error: "content (non-empty reviewed text) required" });
+    if (!content.trim()) return jsonError(res, 400, "content (non-empty reviewed text) required");
     let cdb;
     try {
       cdb = createDbClient();
       const b = await loadBotDef(cdb, botId);
-      if (!b) return jerr(res, 404, { error: "unknown bot" });
+      if (!b) return jsonError(res, 404, "unknown bot");
       const sessionDir = b.def.session_dir;
-      if (!sessionDir) return jerr(res, 400, { error: "bot has no session_dir" });
+      if (!sessionDir) return jsonError(res, 400, "bot has no session_dir");
 
       // staged source must exist + be a regular file (no symlink-follow)
       const stagedPath = join(proposalsDir(sessionDir), name + ".md");
-      if (!existsSync(stagedPath)) return jerr(res, 404, { error: "no staged proposal named " + name });
-      if (lstatSync(stagedPath).isSymbolicLink()) return jerr(res, 400, { error: "staged proposal is a symlink — refusing" });
+      if (!existsSync(stagedPath)) return jsonError(res, 404, "no staged proposal named " + name);
+      if (lstatSync(stagedPath).isSymbolicLink()) return jsonError(res, 400, "staged proposal is a symlink — refusing");
 
       // B4: write the OPERATOR-REVIEWED content (Q4 edits apply) + attach to the
       // def via the shared promoteSkill helper — the SAME code path the auto
@@ -1016,13 +1015,13 @@ export default function botBoardApiRouter(dashboardAuth) {
       if (!r.ok) {
         const status = r.code === "exists" ? 409 : r.code === "unknown-bot" ? 404
           : (r.code === "invalid-name" || r.code === "empty" || r.code === "escape") ? 400 : 500;
-        return jerr(res, status, { error: r.message });
+        return jsonError(res, status, r.message);
       }
       // success — remove the staged file
       try { unlinkSync(stagedPath); } catch {}
       return res.json({ ok: true, promoted: name });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
     }
@@ -1032,21 +1031,21 @@ export default function botBoardApiRouter(dashboardAuth) {
   router.post(P + "/bot/:botId/proposed-skill/reject", async (req, res) => {
     const botId = String(req.params.botId || "");
     const name = normalizeSkillName((req.body || {}).name);
-    if (!name) return jerr(res, 400, { error: "invalid skill name" });
+    if (!name) return jsonError(res, 400, "invalid skill name");
     let cdb;
     try {
       cdb = createDbClient();
       const b = await loadBotDef(cdb, botId);
-      if (!b) return jerr(res, 404, { error: "unknown bot" });
-      if (!b.def.session_dir) return jerr(res, 400, { error: "bot has no session_dir" });
+      if (!b) return jsonError(res, 404, "unknown bot");
+      if (!b.def.session_dir) return jsonError(res, 400, "bot has no session_dir");
       const stagedPath = join(proposalsDir(b.def.session_dir), name + ".md");
       if (existsSync(stagedPath)) {
-        if (lstatSync(stagedPath).isSymbolicLink()) return jerr(res, 400, { error: "staged proposal is a symlink — refusing" });
+        if (lstatSync(stagedPath).isSymbolicLink()) return jsonError(res, 400, "staged proposal is a symlink — refusing");
         unlinkSync(stagedPath);
       }
       return res.json({ ok: true });
     } catch (e) {
-      return jerr(res, 500, { error: String(e.message || e) });
+      return jsonError(res, 500, String(e.message || e));
     } finally {
       if (cdb) { try { cdb.close(); } catch {} }
     }
