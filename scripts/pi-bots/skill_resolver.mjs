@@ -24,6 +24,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { normalizeSkillName } from "./skill_proposals.mjs";
 
 /** Ordered, deduped skill directories for an instance. */
 export function skillDirs(crowHome) {
@@ -37,7 +38,9 @@ export function skillDirs(crowHome) {
 
 /** Resolve one skill name to {name, path, text} or null (searched in order). */
 export function resolveSkill(name, opts = {}) {
-  const fname = name.endsWith(".md") ? name : name + ".md";
+  const base = normalizeSkillName(name);
+  if (!base) return null;
+  const fname = base + ".md";
   for (const dir of skillDirs(opts.crowHome)) {
     const p = join(dir, fname);
     if (existsSync(p)) return { name, path: p, text: readFileSync(p, "utf8") };
