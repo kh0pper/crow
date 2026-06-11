@@ -184,8 +184,9 @@ export function createProjectServer(dbPath, options = {}) {
       let sql = `
         SELECT p.*, COUNT(s.id) as source_count,
                (SELECT COUNT(*) FROM research_notes n WHERE n.project_id = p.id) as note_count
-        FROM research_projects p
+        FROM project_spaces p
         LEFT JOIN research_sources s ON s.project_id = p.id
+        WHERE p.archived_at IS NULL
       `;
       const params = [];
       const conditions = [];
@@ -202,7 +203,7 @@ export function createProjectServer(dbPath, options = {}) {
         conditions.push("(p.type IS NULL OR p.type != 'learner_profile')");
       }
       if (conditions.length > 0) {
-        sql += " WHERE " + conditions.join(" AND ");
+        sql += " AND " + conditions.join(" AND ");
       }
       sql += " GROUP BY p.id ORDER BY p.updated_at DESC LIMIT ? OFFSET ?";
       params.push(limit, offset);
@@ -606,13 +607,13 @@ export function createProjectServer(dbPath, options = {}) {
     "Get statistics about the project database.",
     {},
     async () => {
-      const projects = (await db.execute("SELECT COUNT(*) as count FROM research_projects WHERE (type IS NULL OR type != 'learner_profile')")).rows[0];
+      const projects = (await db.execute("SELECT COUNT(*) as count FROM project_spaces WHERE (type IS NULL OR type != 'learner_profile') AND archived_at IS NULL")).rows[0];
       const sources = (await db.execute("SELECT COUNT(*) as count FROM research_sources")).rows[0];
       const verified = (await db.execute("SELECT COUNT(*) as count FROM research_sources WHERE verified = 1")).rows[0];
       const byType = (await db.execute("SELECT source_type, COUNT(*) as count FROM research_sources GROUP BY source_type ORDER BY count DESC")).rows;
       const notes = (await db.execute("SELECT COUNT(*) as count FROM research_notes")).rows[0];
       const byNoteType = (await db.execute("SELECT note_type, COUNT(*) as count FROM research_notes GROUP BY note_type ORDER BY count DESC")).rows;
-      const byProjectType = (await db.execute("SELECT COALESCE(type, 'research') as type, COUNT(*) as count FROM research_projects GROUP BY type ORDER BY count DESC")).rows;
+      const byProjectType = (await db.execute("SELECT COALESCE(type, 'research') as type, COUNT(*) as count FROM project_spaces WHERE archived_at IS NULL GROUP BY type ORDER BY count DESC")).rows;
 
       let backends = { count: 0 };
       let connectedBackends = { count: 0 };
@@ -706,7 +707,7 @@ export function createProjectServer(dbPath, options = {}) {
       let sql = `
         SELECT b.*, p.name as project_name
         FROM data_backends b
-        JOIN research_projects p ON p.id = b.project_id
+        JOIN project_spaces p ON p.id = b.project_id AND p.archived_at IS NULL
         WHERE 1=1
       `;
       const params = [];
@@ -740,7 +741,7 @@ export function createProjectServer(dbPath, options = {}) {
       const { rows } = await db.execute({
         sql: `SELECT b.name, b.status, p.name as project_name
               FROM data_backends b
-              JOIN research_projects p ON p.id = b.project_id
+              JOIN project_spaces p ON p.id = b.project_id AND p.archived_at IS NULL
               WHERE b.id = ?`,
         args: [id],
       });
@@ -809,7 +810,7 @@ export function createProjectServer(dbPath, options = {}) {
 
   server.resource("projects", "projects://list", async (uri) => {
     const { rows: projects } = await db.execute(
-      "SELECT id, name, type, status, description FROM research_projects WHERE (type IS NULL OR type != 'learner_profile') ORDER BY updated_at DESC"
+      "SELECT id, name, type, status, description FROM project_spaces WHERE (type IS NULL OR type != 'learner_profile') AND archived_at IS NULL ORDER BY updated_at DESC"
     );
     return {
       contents: [
