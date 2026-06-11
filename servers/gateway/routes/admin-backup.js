@@ -73,32 +73,46 @@ function requireToken(req, res, next) {
   next();
 }
 
+/**
+ * Run a database backup. Exported for use by the dashboard "Run backup now"
+ * action (POST /dashboard/nest/backup). The localhost route below calls this
+ * same function — behavior is identical from both callers.
+ *
+ * @returns {Promise<{ok: boolean, instance: string, path: string, size_bytes: number,
+ *   duration_ms: number, pages_copied: number|null, pruned_older_than_days: number,
+ *   pruned_count: number}>}
+ */
+export async function runBackup() {
+  const dir = process.env.CROW_BACKUP_DIR || DEFAULT_DIR;
+  const keepDays = parseInt(process.env.CROW_BACKUP_KEEP_DAYS || "7", 10);
+  const label = getInstanceLabel();
+  const date = new Date().toISOString().split("T")[0];
+  const dest = path.join(dir, `${label}-${date}.db`);
+
+  fs.mkdirSync(dir, { recursive: true });
+  const started = Date.now();
+  const result = await performBackup(null, dest);
+  const size = fs.statSync(dest).size;
+  const prune = pruneOldBackups(dir, keepDays);
+  return {
+    ok: true,
+    instance: label,
+    path: dest,
+    size_bytes: size,
+    duration_ms: Date.now() - started,
+    pages_copied: result?.totalPages ?? null,
+    pruned_older_than_days: keepDays,
+    pruned_count: prune.pruned,
+  };
+}
+
 export default function adminBackupRouter() {
   const router = Router();
 
   router.post("/api/admin/backup", requireLocalhost, requireToken, async (req, res) => {
-    const dir = process.env.CROW_BACKUP_DIR || DEFAULT_DIR;
-    const keepDays = parseInt(process.env.CROW_BACKUP_KEEP_DAYS || "7", 10);
-    const label = getInstanceLabel();
-    const date = new Date().toISOString().split("T")[0];
-    const dest = path.join(dir, `${label}-${date}.db`);
-
     try {
-      fs.mkdirSync(dir, { recursive: true });
-      const started = Date.now();
-      const result = await performBackup(null, dest);
-      const size = fs.statSync(dest).size;
-      const prune = pruneOldBackups(dir, keepDays);
-      res.json({
-        ok: true,
-        instance: label,
-        path: dest,
-        size_bytes: size,
-        duration_ms: Date.now() - started,
-        pages_copied: result?.totalPages ?? null,
-        pruned_older_than_days: keepDays,
-        pruned_count: prune.pruned,
-      });
+      const info = await runBackup();
+      res.json(info);
     } catch (err) {
       console.error("[admin-backup] FAILED:", err.message);
       res.status(500).json({ error: err.message });
