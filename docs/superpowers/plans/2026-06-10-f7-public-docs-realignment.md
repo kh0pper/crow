@@ -316,6 +316,8 @@ cd ~/maestro-press-landing && git commit software/crow-overview/index.html softw
 
 ## Task 8: Droplet publish (public docs + social card + maestro landing) — ⚠ VERIFY BEFORE GO-LIVE
 
+> **⚠ EXECUTION ORDER (despite the number): Task 8 runs LAST — after Task 9's crow→main merge.** The droplet pulls the docs build from `main`, so the merge must land first. Sequence: Tasks 0-7 (build all surfaces) → Task 9 Steps 1-4 (verify, review, PNG gate, merge crow→main + GitHub metadata) → **Task 8 (droplet go-live, handed to the user).**
+
 **This is the SINGLE go-live task for everything served at `maestro.press`.** Per the verified deploy model, THREE things only become public when the droplet re-publishes: (a) the VitePress docs at `maestro.press/software/crow/` (Tasks 2-4), (b) the social-card PNG at `maestro.press/software/crow/crow-social-card.png` (Task 5, needed for the og:image to resolve), and (c) the maestro landing pages (Task 7). They share ONE droplet mechanism.
 
 **⚠ BLOCKER:** the droplet publish path is UNVERIFIED from this session (root SSH key-denied; no `maestro` alias in non-interactive shell). The maestro landing lives in gitea (`ssh://git@gitea:2222/kh0pp/maestro-press-landing.git`); the docs are built from the crow repo. Both are served by **nginx on droplet `67.205.133.238`**. **Do NOT claim the public surfaces shipped until the live URLs reflect the change.** Prerequisite: the crow-repo branch is already merged to `main` (Task 9) so the droplet can pull the new docs.
