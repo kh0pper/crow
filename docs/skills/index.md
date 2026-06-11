@@ -43,7 +43,8 @@ Skills are markdown files in `skills/` that define behavioral prompts for the AI
 
 | Skill | File | Purpose |
 |---|---|---|
-| **Crow Dream** | `crow-dream.md` | Consolidate and prune Crow memories — review stale, duplicate, and low-value memories |
+| **Crow Crosspost** | `crow-crosspost.md` | F.12 cross-app publishing — mirror a post from one federated bundle to another via pure-function transforms. |
+| **Crow Identity** | `crow-identity.md` | Identity attestations — link federated app handles to your Crow root identity with signed, publicly-verifiable proofs. |
 | **Developer Kit** | `developer-kit.md` | Guide third-party developers through building and submitting Crow extensions to the registry |
 | **Discord** | `discord.md` | Interact with Discord servers — channels, messages, threads — through the Discord MCP server. Monitor community discussi |
 | **Extension Dev** | `extension-dev.md` | Develop, test, and publish Crow extensions (bundles, panels, MCP servers, skills) |
