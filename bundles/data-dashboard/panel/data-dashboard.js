@@ -48,7 +48,7 @@ export default {
     let databases = [];
     try {
       const { rows } = await db.execute(
-        "SELECT db.id, db.name, db.project_id, p.name as project_name, db.connection_ref FROM data_backends db LEFT JOIN research_projects p ON db.project_id = p.id WHERE db.backend_type = 'sqlite' ORDER BY db.name"
+        "SELECT db.id, db.name, db.project_id, p.name as project_name, db.connection_ref FROM data_backends db LEFT JOIN project_spaces p ON db.project_id = p.id AND p.archived_at IS NULL WHERE db.backend_type = 'sqlite' ORDER BY db.name"
       );
       databases = rows;
     } catch {}

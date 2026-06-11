@@ -67,7 +67,7 @@ export function createDataDashboardServer(dbPath, options = {}) {
       project_id: z.number().optional().describe("Filter by project ID"),
     },
     async ({ project_id }) => {
-      let sql = "SELECT db.*, p.name as project_name FROM data_backends db LEFT JOIN research_projects p ON db.project_id = p.id WHERE db.backend_type = 'sqlite'";
+      let sql = "SELECT db.*, p.name as project_name FROM data_backends db LEFT JOIN project_spaces p ON db.project_id = p.id AND p.archived_at IS NULL WHERE db.backend_type = 'sqlite'";
       const args = [];
       if (project_id) {
         sql += " AND db.project_id = ?";

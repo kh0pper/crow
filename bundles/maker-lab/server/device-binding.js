@@ -110,7 +110,7 @@ export async function listBoundDevices(db) {
       sql: `SELECT bd.fingerprint, bd.learner_id, bd.label, bd.bound_at, bd.last_seen_at,
                    rp.name AS learner_name
             FROM maker_bound_devices bd
-            LEFT JOIN research_projects rp ON rp.id = bd.learner_id
+            LEFT JOIN project_spaces rp ON rp.id = bd.learner_id AND rp.archived_at IS NULL
             ORDER BY bd.last_seen_at DESC NULLS LAST`,
       args: [],
     });
@@ -152,7 +152,7 @@ function parseCookies(header) {
  */
 export async function ensureDefaultLearner(db) {
   const r = await db.execute({
-    sql: `SELECT id FROM research_projects WHERE type = 'learner_profile' ORDER BY id LIMIT 1`,
+    sql: `SELECT id FROM project_spaces WHERE type = 'learner_profile' AND archived_at IS NULL ORDER BY id LIMIT 1`,
     args: [],
   });
   if (r.rows.length) return Number(r.rows[0].id);
