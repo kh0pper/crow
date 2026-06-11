@@ -13,15 +13,16 @@
  * post back to private, these endpoints immediately return 404 for that
  * post's sections.
  *
- * Rate limits (express-rate-limit v7):
- *   - Tailscale-User-Login header present → 60 req/min per login
- *   - Tailscale-Funnel-Request header present → 20 req/min shared anonymous
- *   - Otherwise (direct tailnet / localhost) → 240 req/min per IP
+ * Rate limits (tieredRateLimit, 60s window). First matching tier wins:
+ *   - Tailscale-User-Login header present → 600 req/min per login
+ *   - Tailscale-Funnel-Request header present → 200 req/min shared anonymous
+ *   - Otherwise (direct tailnet / localhost) → 1200 req/min per IP
  * Keyed via ipKeyGenerator for IPv6 correctness.
  */
 
 import express, { Router } from "express";
-import rateLimit, { ipKeyGenerator } from "express-rate-limit";
+import { ipKeyGenerator } from "express-rate-limit";
+import { tieredRateLimit } from "../middleware/rate-limit.js";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
@@ -55,32 +56,27 @@ const FIGURES_BUCKET = "capstone-research";
 const GATEWAY_INTERNAL_URL =
   process.env.BLOG_FIGURE_GATEWAY_URL || "http://127.0.0.1:3002";
 
-function embedApiKey(req) {
-  const login = req.headers["tailscale-user-login"];
-  if (login) return `tsuser:${String(login).toLowerCase()}`;
-  const funnel = req.headers["tailscale-funnel-request"];
-  if (funnel) return "funnel:shared";
-  return `ip:${ipKeyGenerator(req.ip || "")}`;
-}
-
-function embedApiMax(req) {
-  // Budget per 60-second window. Each chapter hydrate fetches
-  // config.json + data.json for every chart (~2× chart count) + 1
-  // geojson per map — Ch 4D Cleveland alone is 30 × 2 + 5 = 65 calls
-  // on a fresh load. Previous 60/min ceiling caused widespread 429s
-  // and alt-text-only rendering. Numbers below accommodate 1–2 chapter
-  // loads per minute comfortably.
-  if (req.headers["tailscale-user-login"]) return 600;
-  if (req.headers["tailscale-funnel-request"]) return 200;
-  return 1200;
-}
-
-const embedLimiter = rateLimit({
+// Budget per 60-second window. Each chapter hydrate fetches
+// config.json + data.json for every chart (~2× chart count) + 1
+// geojson per map — Ch 4D Cleveland alone is 30 × 2 + 5 = 65 calls
+// on a fresh load. Previous 60/min ceiling caused widespread 429s
+// and alt-text-only rendering. Numbers below accommodate 1–2 chapter
+// loads per minute comfortably. First matching tier wins.
+const embedLimiter = tieredRateLimit({
   windowMs: 60 * 1000,
-  max: embedApiMax,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: embedApiKey,
+  tiers: [
+    {
+      match: (req) => !!req.headers["tailscale-user-login"],
+      key: (req) => `tsuser:${String(req.headers["tailscale-user-login"]).toLowerCase()}`,
+      max: 600,
+    },
+    {
+      match: (req) => !!req.headers["tailscale-funnel-request"],
+      key: () => "funnel:shared",
+      max: 200,
+    },
+    { key: (req) => `ip:${ipKeyGenerator(req.ip || "")}`, max: 1200 },
+  ],
   message: { error: "Too many requests" },
 });
 
