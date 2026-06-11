@@ -1,0 +1,166 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <!-- Brand gradients -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f0f17"/>
+      <stop offset="100%" style="stop-color:#1a1a2e"/>
+    </linearGradient>
+    <linearGradient id="crowBodyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#2d2d3d"/>
+      <stop offset="100%" style="stop-color:#1a1a2e"/>
+    </linearGradient>
+    <linearGradient id="crowSheen" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#4a4a6a;stop-opacity:0.6"/>
+      <stop offset="50%" style="stop-color:#6366f1;stop-opacity:0.35"/>
+      <stop offset="100%" style="stop-color:#4a4a6a;stop-opacity:0"/>
+    </linearGradient>
+    <linearGradient id="accentLine" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#818cf8;stop-opacity:0"/>
+    </linearGradient>
+    <linearGradient id="bottomAccent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:0"/>
+      <stop offset="30%" style="stop-color:#6366f1"/>
+      <stop offset="70%" style="stop-color:#818cf8"/>
+      <stop offset="100%" style="stop-color:#818cf8;stop-opacity:0"/>
+    </linearGradient>
+    <linearGradient id="featherSheen" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:0.12"/>
+      <stop offset="50%" style="stop-color:#8b5cf6;stop-opacity:0.07"/>
+      <stop offset="100%" style="stop-color:#06b6d4;stop-opacity:0.04"/>
+    </linearGradient>
+    <!-- Subtle glow behind the crow motif -->
+    <radialGradient id="crowGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:0.08"/>
+      <stop offset="100%" style="stop-color:#6366f1;stop-opacity:0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="630" fill="url(#bgGrad)"/>
+
+  <!-- Subtle surface panel left side -->
+  <rect x="0" y="0" width="680" height="630" fill="#1a1a2e" opacity="0.25"/>
+
+  <!-- Vertical divider line -->
+  <line x1="700" y1="60" x2="700" y2="570" stroke="#3d3d4d" stroke-width="1" opacity="0.4"/>
+
+  <!-- === GRACKLE FEATHER TEXTURE (top-right quadrant) === -->
+  <!-- Tile 1 -->
+  <g transform="translate(760, 30) scale(5)" opacity="0.55">
+    <path d="M10 5 Q20 15 15 30 Q12 20 10 5" fill="url(#featherSheen)"/>
+    <path d="M40 25 Q50 35 45 50 Q42 40 40 25" fill="url(#featherSheen)"/>
+    <path d="M25 40 Q35 50 30 58 Q28 50 25 40" fill="url(#featherSheen)"/>
+  </g>
+  <!-- Tile 2 -->
+  <g transform="translate(920, 10) scale(4.2)" opacity="0.4">
+    <path d="M10 5 Q20 15 15 30 Q12 20 10 5" fill="url(#featherSheen)"/>
+    <path d="M40 25 Q50 35 45 50 Q42 40 40 25" fill="url(#featherSheen)"/>
+    <path d="M25 40 Q35 50 30 58 Q28 50 25 40" fill="url(#featherSheen)"/>
+  </g>
+  <!-- Tile 3 -->
+  <g transform="translate(1060, 40) scale(3.8)" opacity="0.35">
+    <path d="M10 5 Q20 15 15 30 Q12 20 10 5" fill="url(#featherSheen)"/>
+    <path d="M40 25 Q50 35 45 50 Q42 40 40 25" fill="url(#featherSheen)"/>
+    <path d="M25 40 Q35 50 30 58 Q28 50 25 40" fill="url(#featherSheen)"/>
+  </g>
+  <!-- Tile 4 lower right -->
+  <g transform="translate(1080, 420) scale(4.5)" opacity="0.3">
+    <path d="M10 5 Q20 15 15 30 Q12 20 10 5" fill="url(#featherSheen)"/>
+    <path d="M25 40 Q35 50 30 58 Q28 50 25 40" fill="url(#featherSheen)"/>
+  </g>
+
+  <!-- === CROW MOTIF (right side, centered vertically) === -->
+  <!-- Glow -->
+  <ellipse cx="955" cy="315" rx="210" ry="200" fill="url(#crowGlow)"/>
+  <!-- Ring -->
+  <circle cx="955" cy="315" r="170" fill="none" stroke="#6366f1" stroke-width="0.8" opacity="0.25"/>
+
+  <!-- Crow scaled/translated: original viewBox 200x200, center at 100,100
+       Translate to card center-right: target center ~(955,315), scale 1.7 -->
+  <g transform="translate(955,315) scale(1.7) translate(-100,-100)">
+    <!-- Body -->
+    <path d="M75 155 Q60 130 55 110 Q50 90 60 75 Q70 60 85 55 Q95 52 105 55 Q115 58 120 65 Q130 50 145 55 Q155 60 150 72 Q145 80 135 78 Q140 85 140 95 Q140 110 130 130 Q125 140 115 150 Q105 158 90 158 Z" fill="url(#crowBodyGrad)"/>
+    <!-- Iridescent sheen on wing -->
+    <path d="M70 100 Q65 85 72 72 Q80 62 90 58 Q100 55 108 58 Q115 62 118 70 Q125 55 140 58 Q148 62 145 72 Q142 78 135 78 Q138 85 137 95 Q135 110 125 125 Q115 138 100 140 Z" fill="url(#crowSheen)"/>
+    <!-- Wing detail lines -->
+    <path d="M75 95 Q90 88 110 92" fill="none" stroke="#6366f1" stroke-width="0.8" opacity="0.5"/>
+    <path d="M78 105 Q93 98 112 102" fill="none" stroke="#6366f1" stroke-width="0.8" opacity="0.4"/>
+    <path d="M80 115 Q95 108 110 112" fill="none" stroke="#6366f1" stroke-width="0.8" opacity="0.3"/>
+    <!-- Eye -->
+    <circle cx="92" cy="70" r="5" fill="#1a1a2e"/>
+    <circle cx="92" cy="70" r="4" fill="#e0e0e0"/>
+    <circle cx="93" cy="69" r="2" fill="#1a1a2e"/>
+    <circle cx="94" cy="68" r="0.8" fill="#ffffff"/>
+    <!-- Beak -->
+    <path d="M78 72 L58 78 L62 82 L78 76 Z" fill="#3d3d4d"/>
+    <path d="M78 74 L60 80 L62 82 L78 76 Z" fill="#2d2d3d"/>
+    <!-- Tail feathers -->
+    <path d="M120 140 Q135 145 145 155" fill="none" stroke="#2d2d3d" stroke-width="3" stroke-linecap="round"/>
+    <path d="M118 142 Q130 150 138 162" fill="none" stroke="#2d2d3d" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M115 145 Q125 155 130 168" fill="none" stroke="#1a1a2e" stroke-width="2" stroke-linecap="round"/>
+    <!-- Feet -->
+    <path d="M95 155 L90 175 L82 180 M90 175 L90 182 M90 175 L97 180" fill="none" stroke="#3d3d4d" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M110 152 L108 172 L100 177 M108 172 L108 179 M108 172 L115 177" fill="none" stroke="#3d3d4d" stroke-width="1.5" stroke-linecap="round"/>
+    <!-- Sparkle accents -->
+    <circle cx="150" cy="45" r="1.5" fill="#6366f1" opacity="0.7"/>
+    <circle cx="45" cy="55" r="1" fill="#818cf8" opacity="0.5"/>
+    <circle cx="160" cy="90" r="1.2" fill="#818cf8" opacity="0.6"/>
+    <circle cx="40" cy="140" r="1" fill="#6366f1" opacity="0.4"/>
+  </g>
+
+  <!-- Extra sparkle dots near the crow -->
+  <circle cx="820" cy="175" r="2.5" fill="#818cf8" opacity="0.5"/>
+  <circle cx="1130" cy="220" r="2" fill="#6366f1" opacity="0.45"/>
+  <circle cx="805" cy="430" r="1.8" fill="#818cf8" opacity="0.35"/>
+  <circle cx="1145" cy="480" r="2.2" fill="#6366f1" opacity="0.4"/>
+
+  <!-- === LEFT SIDE: WORDMARK + TAGLINE === -->
+
+  <!-- "CROW" wordmark — very large, bold -->
+  <text
+    x="80"
+    y="310"
+    font-family="'Arial Black', 'Helvetica Neue', Arial, sans-serif"
+    font-weight="900"
+    font-size="172"
+    letter-spacing="-4"
+    fill="#fafaf9"
+  >Crow</text>
+
+  <!-- Indigo accent underline below wordmark -->
+  <rect x="80" y="336" width="420" height="4" rx="2" fill="url(#accentLine)"/>
+
+  <!-- Tagline -->
+  <text
+    x="80"
+    y="406"
+    font-family="'Helvetica Neue', Arial, Helvetica, sans-serif"
+    font-weight="400"
+    font-size="28"
+    fill="#a8a29e"
+    letter-spacing="0.3"
+  >Agentic framework + MCP platform you self-host</text>
+
+  <!-- Subtle sub-label / descriptor chips row -->
+  <!-- Chip: Memory -->
+  <rect x="80" y="450" width="116" height="36" rx="18" fill="#2d2854" opacity="0.9"/>
+  <text x="138" y="473" text-anchor="middle" font-family="'Helvetica Neue', Arial, Helvetica, sans-serif" font-weight="500" font-size="16" fill="#818cf8">Memory</text>
+  <!-- Chip: MCP -->
+  <rect x="208" y="450" width="88" height="36" rx="18" fill="#2d2854" opacity="0.9"/>
+  <text x="252" y="473" text-anchor="middle" font-family="'Helvetica Neue', Arial, Helvetica, sans-serif" font-weight="500" font-size="16" fill="#818cf8">MCP</text>
+  <!-- Chip: Research -->
+  <rect x="308" y="450" width="122" height="36" rx="18" fill="#2d2854" opacity="0.9"/>
+  <text x="369" y="473" text-anchor="middle" font-family="'Helvetica Neue', Arial, Helvetica, sans-serif" font-weight="500" font-size="16" fill="#818cf8">Research</text>
+  <!-- Chip: Blog -->
+  <rect x="442" y="450" width="80" height="36" rx="18" fill="#2d2854" opacity="0.9"/>
+  <text x="482" y="473" text-anchor="middle" font-family="'Helvetica Neue', Arial, Helvetica, sans-serif" font-weight="500" font-size="16" fill="#818cf8">Blog</text>
+
+  <!-- Bottom accent bar -->
+  <rect x="0" y="618" width="1200" height="12" rx="0" fill="url(#bottomAccent)" opacity="0.8"/>
+
+  <!-- Top-left corner accent dot cluster -->
+  <circle cx="38" cy="38" r="3" fill="#6366f1" opacity="0.5"/>
+  <circle cx="52" cy="28" r="1.8" fill="#818cf8" opacity="0.4"/>
+  <circle cx="28" cy="52" r="1.5" fill="#6366f1" opacity="0.3"/>
+</svg>
