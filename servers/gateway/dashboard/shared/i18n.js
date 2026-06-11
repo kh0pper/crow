@@ -462,6 +462,10 @@ export const translations = {
   "extensions.categoryFederatedComms": { en: "Federated (Chat)", es: "Federado (Chat)" },
   "extensions.categoryCameras": { en: "Cameras", es: "Cámaras" },
   "extensions.categoryOther": { en: "Other", es: "Otros" },
+  "extensions.incompatibleGpuArch": { en: "Incompatible GPU arch.", es: "Arquitectura GPU incompatible." },
+  "extensions.insufficientVram": { en: "insufficient VRAM", es: "VRAM insuficiente" },
+  "extensions.incompatibleHost": { en: "incompatible host", es: "host incompatible" },
+  "extensions.webUiFallback": { en: "Web UI", es: "Interfaz web" },
 
   // ─── Skills Panel ───
   "skills.pageTitle": { en: "Skills", es: "Habilidades" },
