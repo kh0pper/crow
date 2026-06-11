@@ -51,7 +51,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     $('bb-d-status').value=cur.status;
     msg($('bb-d-msg'),'','');
     var lk=$('bb-d-lock'), unlock=$('bb-d-unlock');
-    if(cur.locked){ lk.textContent='${tJs("botboard.jsCardLocked", lang)}';
+    if(cur.locked){ lk.textContent='\\uD83D\\uDD12 ${tJs("botboard.jsCardLockedPre", lang)}\\u2014 ${tJs("botboard.jsCardLockedPost", lang)}';
       unlock.style.display=''; } else { lk.textContent=''; unlock.style.display='none'; }
     ['bb-d-title-in','bb-d-status','bb-d-prio','bb-d-due','bb-d-owner','bb-d-tags','bb-d-desc','bb-d-project','bb-d-save','bb-d-cancel','bb-d-plan','bb-d-plan-save']
       .forEach(function(i){ var e=$(i); if(e) e.disabled=cur.locked; });
@@ -91,7 +91,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     $('bb-td-title').textContent='${tJs("botboard.jsItemPrefix", lang)}'+cd.id;
     msg($('bb-td-msg'),'','');
     var lk=$('bb-td-lock'), clBtn=$('bb-td-clear-lease');
-    if(cd.locked){ lk.textContent='${tJs("botboard.jsItemLocked", lang)}';
+    if(cd.locked){ lk.textContent='\\uD83D\\uDD12 ${tJs("botboard.jsItemLockedPre", lang)}\\u2014 ${tJs("botboard.jsItemLockedPost", lang)}';
       if(clBtn) clBtn.style.display=''; } else { lk.textContent=''; if(clBtn) clBtn.style.display='none'; }
     ['bb-td-label','bb-td-status','bb-td-prio','bb-td-action','bb-td-save']
       .forEach(function(i){ var e=$(i); if(e) e.disabled=cd.locked; });

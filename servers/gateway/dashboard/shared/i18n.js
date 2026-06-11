@@ -528,9 +528,14 @@ export const translations = {
   "botboard.trackerNotFound": { en: "Tracker definition <code>{slug}</code> not found.", es: "Definición de rastreador <code>{slug}</code> no encontrada." },
   // JS-context strings (client.js)
   "botboard.jsCardPrefix": { en: "Card #", es: "Tarjeta #" },
-  "botboard.jsCardLocked": { en: "🔒 A bot is working this card — fields & plan are read-only.", es: "🔒 Un bot está trabajando esta tarjeta — los campos y el plan son de solo lectura." },
+  // jsCardLocked / jsItemLocked: emoji prefix (🔒) and em-dash (—) are hardcoded
+  // in the template as \uXXXX escapes to preserve EN byte-identity; these keys
+  // cover only the text after the emoji prefix (split at the em-dash boundary).
+  "botboard.jsCardLockedPre": { en: "A bot is working this card ", es: "Un bot está trabajando esta tarjeta " },
+  "botboard.jsCardLockedPost": { en: "fields & plan are read-only.", es: "los campos y el plan son de solo lectura." },
   "botboard.jsItemPrefix": { en: "Item #", es: "Ítem #" },
-  "botboard.jsItemLocked": { en: "🔒 A bot is processing this item — read-only.", es: "🔒 Un bot está procesando este ítem — solo lectura." },
+  "botboard.jsItemLockedPre": { en: "A bot is processing this item ", es: "Un bot está procesando este ítem " },
+  "botboard.jsItemLockedPost": { en: "read-only.", es: "solo lectura." },
   "botboard.jsItemLoadFailed": { en: "Failed to load item.", es: "No se pudo cargar el ítem." },
   "botboard.jsSectionDataFields": { en: "Data Fields", es: "Campos de datos" },
   "botboard.jsSectionHistory": { en: "History", es: "Historial" },
