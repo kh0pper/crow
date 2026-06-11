@@ -194,7 +194,25 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     }
 
     setSessionCookie(res, result.token);
-    res.redirectAfterPost(wasFirstSetup ? "/dashboard/onboarding" : "/dashboard");
+
+    // W3-3: redirect to onboarding only on first-ever setup AND only when the
+    // completion flag has never been set (so existing operators who reset their
+    // password are never nagged).
+    if (wasFirstSetup) {
+      let onboardingDone = false;
+      const _loginDb = createDbClient();
+      try {
+        const { rows } = await _loginDb.execute({
+          sql: "SELECT value FROM dashboard_settings WHERE key='onboarding_completed_at'",
+          args: [],
+        });
+        onboardingDone = rows.length > 0 && !!rows[0].value;
+      } catch {} finally {
+        try { _loginDb.close(); } catch {}
+      }
+      return res.redirectAfterPost(onboardingDone ? "/dashboard" : "/dashboard/onboarding");
+    }
+    res.redirectAfterPost("/dashboard");
   });
 
   // 2FA verification (TOTP code entry after password)
@@ -593,6 +611,18 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // Skips: GET/HEAD/OPTIONS, HMAC-signed peer calls (handled above),
   // pre-auth flows (no session cookie yet), and CROW_CSRF_STRICT=0 rollback.
   router.use("/dashboard", csrfMiddleware);
+
+  // W3-3: "Run backup now" action — dashboard-authed, CSRF-protected
+  router.post("/dashboard/nest/backup", async (req, res) => {
+    try {
+      const { runBackup } = await import("../routes/admin-backup.js");
+      await runBackup();
+      res.redirectAfterPost("/dashboard/nest?flash=backup_ok");
+    } catch (err) {
+      console.error("[nest-backup] FAILED:", err.message);
+      res.redirectAfterPost("/dashboard/nest?flash=backup_fail");
+    }
+  });
 
   // F.14: Fediverse Admin action POSTs (confirm/reject moderation, cancel/retry crosspost)
   router.post("/dashboard/fediverse/action", async (req, res) => {

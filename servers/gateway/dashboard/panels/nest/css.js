@@ -308,5 +308,150 @@ export function nestCSS() {
   /* Instance-tabs strip styles live in shared/layout.js (dashboardCss)
    * so they survive Turbo panel nav when the strip is data-turbo-permanent. */
 
+  /* ─── Health Strip (W3-3) ─── */
+  .nest-health-strip {
+    margin: 0 1rem 0.75rem;
+    border-radius: 10px;
+    padding: 0.6rem 0.9rem;
+    font-size: 0.82rem;
+    border: 1px solid var(--crow-border);
+    background: var(--crow-bg-surface);
+  }
+  .nest-health-strip--ok {
+    border-color: rgba(34,197,94,0.25);
+    background: rgba(34,197,94,0.04);
+  }
+  .nest-health-strip--warn {
+    border-color: rgba(234,179,8,0.3);
+    background: rgba(234,179,8,0.05);
+  }
+  .nest-health-allgood {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    color: var(--crow-success);
+    font-weight: 500;
+  }
+  .nest-health-allgood-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--crow-success);
+    flex-shrink: 0;
+  }
+  .nest-health-issues {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+  .nest-health-issue {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .nest-health-issue-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .nest-health-issue-dot--warn { background: var(--crow-brand-gold); }
+  .nest-health-issue-dot--info { background: var(--crow-accent); }
+  .nest-health-issue-label {
+    flex: 1;
+    color: var(--crow-text-secondary);
+    min-width: 0;
+  }
+  .nest-health-issue-action {
+    font-size: 0.75rem;
+    color: var(--crow-accent);
+    text-decoration: none;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .nest-health-issue-action:hover { text-decoration: underline; }
+  .nest-health-backup-form {
+    display: inline;
+    margin: 0;
+    padding: 0;
+  }
+  .nest-health-backup-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 0;
+    font-size: 0.75rem;
+    color: var(--crow-accent);
+    cursor: pointer;
+    text-decoration: none;
+    font-family: inherit;
+  }
+  .nest-health-backup-btn:hover { text-decoration: underline; }
+  .nest-health-details {
+    margin-top: 0.5rem;
+    border-top: 1px solid var(--crow-border);
+  }
+  .nest-health-details summary {
+    cursor: pointer;
+    font-size: 0.75rem;
+    color: var(--crow-text-muted);
+    padding-top: 0.4rem;
+    user-select: none;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+  .nest-health-details summary::-webkit-details-marker { display: none; }
+  .nest-health-details[open] summary { color: var(--crow-text-secondary); }
+  .nest-health-detail-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    gap: 0.35rem 0.5rem;
+    margin-top: 0.5rem;
+  }
+  .nest-health-detail-card {
+    background: var(--crow-bg-elevated);
+    border: 1px solid var(--crow-border);
+    border-radius: 6px;
+    padding: 0.35rem 0.5rem;
+  }
+  .nest-health-detail-label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--crow-text-muted);
+    margin-bottom: 0.15rem;
+  }
+  .nest-health-detail-value {
+    font-size: 0.8rem;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 500;
+  }
+  .nest-health-detail-value--ok { color: var(--crow-success); }
+  .nest-health-detail-value--warn { color: var(--crow-brand-gold); }
+  .nest-health-detail-value--info { color: var(--crow-accent); }
+  .nest-health-detail-value--off { color: var(--crow-text-muted); }
+
+  /* flash banner (post-backup redirect) */
+  .nest-flash {
+    margin: 0 1rem 0.75rem;
+    border-radius: 8px;
+    padding: 0.5rem 0.85rem;
+    font-size: 0.82rem;
+    border: 1px solid transparent;
+  }
+  .nest-flash--success {
+    background: rgba(34,197,94,0.08);
+    border-color: rgba(34,197,94,0.25);
+    color: var(--crow-success);
+  }
+  .nest-flash--error {
+    background: rgba(239,68,68,0.08);
+    border-color: rgba(239,68,68,0.25);
+    color: var(--crow-error);
+  }
+
 </style>`;
 }
