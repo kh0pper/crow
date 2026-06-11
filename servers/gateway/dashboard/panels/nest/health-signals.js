@@ -105,7 +105,14 @@ async function storageSignal() {
   let available = false;
   try {
     const { isAvailable } = await import("../../../../storage/s3-client.js");
-    available = await isAvailable();
+    // The minio SDK has no connect timeout — a dead endpoint would otherwise
+    // hang the nest render for the kernel's TCP timeout. Cap it hard.
+    available = await Promise.race([
+      isAvailable(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("storage check timed out")), 2000).unref?.(),
+      ),
+    ]);
   } catch {}
 
   if (!available) {
