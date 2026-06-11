@@ -147,6 +147,26 @@ async function seedEdgeTtsProfile(db, stateBefore) {
 }
 
 /**
+ * Migration: ensure sync_conflicts has the `op` column (W4-1).
+ *
+ * init-db adds it via addColumnIfMissing, but a fleet host that pulls code
+ * and restarts WITHOUT running init-db would otherwise run conflict-logging
+ * INSERTs that name the column — and in _checkConflict a failed INSERT falls
+ * through to "apply", silently overwriting newer local data with a stale
+ * remote row. Closing that window at gateway boot keeps deploy ordering
+ * (pull → restart, init-db forgotten) safe.
+ *
+ * Idempotent by construction (PRAGMA check, no state marker needed).
+ */
+async function ensureSyncConflictsOpColumn(db) {
+  const { rows } = await db.execute({ sql: "PRAGMA table_info(sync_conflicts)", args: [] });
+  if (rows.length === 0) return { ran: false, reason: "no-table" }; // init-db never ran; core-table auto-init handles that case
+  if (rows.some((r) => r.name === "op")) return { ran: false, reason: "already-present" };
+  await db.execute({ sql: "ALTER TABLE sync_conflicts ADD COLUMN op TEXT DEFAULT 'update'", args: [] });
+  return { ran: true };
+}
+
+/**
  * Run all startup migrations. Safe to call multiple times (each migration
  * tracks its own run state and skips if already applied).
  */
@@ -157,6 +177,11 @@ export async function runGatewayMigrations(db) {
     results.push({ id: "2026-04-12_seed_edge_tts_profile", ...(await seedEdgeTtsProfile(db, state)) });
   } catch (err) {
     results.push({ id: "2026-04-12_seed_edge_tts_profile", error: err.message });
+  }
+  try {
+    results.push({ id: "2026-06-11_sync_conflicts_op_column", ...(await ensureSyncConflictsOpColumn(db)) });
+  } catch (err) {
+    results.push({ id: "2026-06-11_sync_conflicts_op_column", error: err.message });
   }
   return results;
 }
