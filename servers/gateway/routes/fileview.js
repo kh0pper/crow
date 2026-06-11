@@ -20,10 +20,11 @@
 import { Router } from "express";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { relative, isAbsolute, basename } from "node:path";
+import { homedir } from "node:os";
 import { renderMarkdown } from "../../blog/renderer.js";
 import { escapeHtml } from "../dashboard/shared/components.js";
 
-const DEFAULT_ROOT = process.env.CROW_FILEVIEW_ROOT || "/home/kh0pp";
+const DEFAULT_ROOT = process.env.CROW_FILEVIEW_ROOT || homedir();
 if (process.env.CROW_FILEVIEW_ROOT && !DEFAULT_ROOT.startsWith("/home/")) {
   // CROW_FILEVIEW_ROOT is intended for tests. A production root outside /home
   // (e.g. "/") would let any authenticated dashboard user read any .md on disk.

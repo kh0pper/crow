@@ -248,6 +248,7 @@ export default defineConfig({
           { text: 'Creating Servers', link: '/developers/creating-servers' },
           { text: 'Building Integrations', link: '/developers/integrations' },
           { text: 'Storage API', link: '/developers/storage-api' },
+          { text: 'Configuration Reference', link: '/developers/configuration' },
           { text: 'Writing Skills', link: '/developers/skills' },
           { text: 'Core Tools', link: '/developers/core-tools' },
           { text: 'Self-Hosted Bundles', link: '/developers/bundles' },
