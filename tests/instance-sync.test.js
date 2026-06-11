@@ -806,6 +806,15 @@ test("10. Restore path (happy): UPDATE-of-present-keys; absent columns untouched
   });
   assert.ok(ftsRows.length > 0, "restored content should be findable via FTS MATCH");
 
+  // And the PRE-restore content must be GONE from the index for this row —
+  // an orphaned old document here is exactly the INSERT OR REPLACE corruption
+  // the spec forbids (the memories_au trigger must have delete+reinserted).
+  const { rows: staleRows } = await db.execute({
+    sql: `SELECT rowid FROM memories_fts WHERE memories_fts MATCH '"original-content"' AND rowid = 800`,
+    args: [],
+  });
+  assert.equal(staleRows.length, 0, "pre-restore content must not remain in the FTS index");
+
   // FK survival: contacts → messages uses a similar pattern. Here we verify that
   // restoring a memories row leaves it accessible (no cascade side effects).
   const { rows: afterRestore } = await db.execute({
