@@ -191,7 +191,7 @@ curl -X POST http://localhost:3000/api/meta-glasses/say \
 
 ### Play music ("hands-free" Funkwhale)
 
-If you've installed the [Funkwhale bundle](/platforms/openclaw#funkwhale)
+If you've installed the Funkwhale bundle (available in Extensions)
 and configured shared MinIO/S3 storage, the glasses can play your library
 through their bone-conduction speakers without ever pulling out your phone.
 

@@ -190,16 +190,6 @@ The Messages panel uses the storage server for file attachments across all conve
 4. When messages are loaded, presigned URLs are generated from the stored `s3_key` for display
 5. Images render inline; other file types show as download links
 
-### Bot Vision Pipeline
-
-When an image is attached to a bot message:
-
-1. The image is downloaded from S3 to a temporary file
-2. A vision model (configured in the bot's `openclaw.json`) analyzes the image via direct API call
-3. The vision model's text description is injected as context before the user's message
-4. The temporary file is cleaned up after the bot responds
-
-This allows non-vision primary models (e.g., `glm-5`) to understand image content through a separate vision model (e.g., `glm-4.6v`).
 
 ### AI Chat Attachments
 
