@@ -19,6 +19,7 @@ import { Router } from "express";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { isAllowedNetwork, parseCookies, verifySession } from "../dashboard/auth.js";
 
 const CROW_HOME = join(homedir(), ".crow");
 const INSTALLED_PATH = join(CROW_HOME, "installed.json");
@@ -55,6 +56,36 @@ function getProxiedExtensions() {
     return proxied;
   } catch {
     return [];
+  }
+}
+
+/**
+ * Authorize a WebSocket upgrade for /proxy/<id> paths (W2-1 security fix).
+ *
+ * server.on("upgrade") bypasses Express entirely, so the dashboardAuth
+ * middleware mounted on the HTTP routes never runs for WS — previously an
+ * unauthenticated LAN/tailnet client could reach extension web UIs
+ * (including noVNC) over WS. Mirror the layers here:
+ *   1. Network gate — isAllowedNetwork (funnel reject + private-network
+ *      allowlist), exactly the layer the HTTP routes get via dashboardAuth.
+ *   2. Session check — the crow_session cookie must be a live dashboard
+ *      session (verifySession; DB-backed).
+ *
+ * @param {import('http').IncomingMessage} req  raw upgrade request
+ * @returns {Promise<boolean>} true only when the upgrade may proceed
+ */
+export async function authorizeExtensionUpgrade(req) {
+  // Layer parity with the HTTP gate: isAllowedNetwork covers the funnel
+  // reject AND the network allowlist (loopback reject, private-IP ranges,
+  // CROW_DASHBOARD_PUBLIC) — it reads req.headers + req.connection, both
+  // present on a raw upgrade request.
+  if (!isAllowedNetwork(req)) return false;
+  const token = parseCookies(req)["crow_session"];
+  if (!token) return false;
+  try {
+    return (await verifySession(token)) === true;
+  } catch {
+    return false;
   }
 }
 
@@ -139,13 +170,24 @@ export default function extensionProxyFactory(authMiddleware) {
     server.on("upgrade", (req, socket, head) => {
       for (const { proxyPath, proxyMiddleware } of proxyInstances) {
         if (req.url?.startsWith(proxyPath)) {
-          proxyMiddleware.upgrade(req, socket, head);
+          // W2-1: upgrades bypass Express, so enforce dashboard auth here.
+          authorizeExtensionUpgrade(req).then((ok) => {
+            if (!ok) {
+              socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+              socket.destroy();
+              return;
+            }
+            proxyMiddleware.upgrade(req, socket, head);
+          }).catch(() => {
+            socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+            socket.destroy();
+          });
           return;
         }
       }
     });
 
-    console.log(`  [proxy] WebSocket upgrade handler registered for ${proxyInstances.length} extension(s)`);
+    console.log(`  [proxy] WebSocket upgrade handler registered for ${proxyInstances.length} extension(s) (session-gated)`);
   }
 
   return { router, setupWebSocket };
