@@ -167,6 +167,35 @@ export const translations = {
   "nest.instances": { en: "Instances", es: "Instancias" },
   "nest.openInstance": { en: "Open", es: "Abrir" },
 
+  // ─── Health strip (W3-3) ───
+  "health.allgood": { en: "Everything looks good", es: "Todo funciona bien" },
+  "health.statusDetails": { en: "Status details", es: "Detalles de estado" },
+  "health.runBackupNow": { en: "Run backup now", es: "Hacer copia ahora" },
+  "health.backupDone": { en: "Backup complete", es: "Copia completada" },
+  "health.backupFailed": { en: "Backup failed", es: "Copia fallida" },
+  "health.stripLabel": { en: "System status", es: "Estado del sistema" },
+
+  // ─── Onboarding first-success (W3-3) ───
+  "onboarding.firstMemory.title": { en: "Store a memory", es: "Guarda un recuerdo" },
+  "onboarding.firstMemory.body": {
+    en: "Ask your AI to remember something, or browse the Memory panel.",
+    es: "Pídele a tu IA que recuerde algo, o explora el panel de Memoria.",
+  },
+  "onboarding.firstMemory.action": { en: "Open Memory", es: "Abrir Memoria" },
+  "onboarding.firstAgent.title": { en: "Create an agent", es: "Crea un agente" },
+  "onboarding.firstAgent.body": {
+    en: "Set up a bot to run on Gmail, Discord, or other channels.",
+    es: "Configura un bot para ejecutarse en Gmail, Discord u otros canales.",
+  },
+  "onboarding.firstAgent.action": { en: "Open Bot Builder", es: "Abrir Bot Builder" },
+  "onboarding.firstConnect.title": { en: "Connect an AI client", es: "Conecta un cliente de IA" },
+  "onboarding.firstConnect.body": {
+    en: "Use Crow's memory and tools from Claude Code, Cursor, and others.",
+    es: "Usa la memoria y herramientas de Crow desde Claude Code, Cursor y otros.",
+  },
+  "onboarding.firstConnect.action": { en: "Connect a client", es: "Conectar cliente" },
+  "onboarding.celebration": { en: "You're all set up", es: "Todo está listo" },
+
   // ─── Messages Panel ───
   "messages.pageTitle": { en: "Messages", es: "Mensajes" },
   "messages.noChats": { en: "No chats", es: "Sin chats" },

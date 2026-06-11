@@ -5,7 +5,7 @@
  * Phone-style — clean, breathable, focused on navigation.
  */
 
-import { escapeHtml } from "../../shared/components.js";
+import { escapeHtml, statCard, statGrid } from "../../shared/components.js";
 import { t } from "../../shared/i18n.js";
 import { getVisiblePanels } from "../../panel-registry.js";
 import { CROW_HERO_SVG } from "../../shared/crow-hero.js";
@@ -156,8 +156,84 @@ function buildPeerTileHref(gatewayUrl, hostname, pathname, port) {
   return fallback();
 }
 
+/**
+ * Render the health strip that appears above the panel grid.
+ * Shown only when healthSignals is provided.
+ *
+ * @param {{ok: boolean, issues: Array, details: Array}|null} health
+ * @param {string} lang
+ * @param {string|null} flash  — flash param from query string after backup action
+ */
+function buildHealthStrip(health, lang, flash) {
+  // Flash banner (shown after POST backup redirect)
+  let flashHtml = "";
+  if (flash === "backup_ok") {
+    flashHtml = `<div class="nest-flash nest-flash--success">${escapeHtml(t("health.backupDone", lang))}</div>`;
+  } else if (flash === "backup_fail") {
+    flashHtml = `<div class="nest-flash nest-flash--error">${escapeHtml(t("health.backupFailed", lang))}</div>`;
+  }
+
+  if (!health) return flashHtml;
+
+  // Detail cards
+  const detailCards = (health.details || []).map(d => {
+    const valClass = `nest-health-detail-value--${d.state || "off"}`;
+    return `<div class="nest-health-detail-card">
+      <div class="nest-health-detail-label">${escapeHtml(d.label)}</div>
+      <div class="nest-health-detail-value ${valClass}">${escapeHtml(String(d.value ?? ""))}</div>
+    </div>`;
+  }).join("");
+
+  const detailGrid = `<div class="nest-health-detail-grid">${detailCards}</div>`;
+  const detailsEl = `<details class="nest-health-details">
+    <summary>&#9654; ${escapeHtml(t("health.statusDetails", lang))}</summary>
+    ${detailGrid}
+  </details>`;
+
+  let bodyHtml;
+  if (health.ok) {
+    bodyHtml = `<div class="nest-health-allgood">
+      <span class="nest-health-allgood-dot" aria-hidden="true"></span>
+      ${escapeHtml(t("health.allgood", lang))}
+    </div>`;
+  } else {
+    const issueLines = (health.issues || []).map(issue => {
+      const dotClass = issue.severity === "warn"
+        ? "nest-health-issue-dot--warn"
+        : "nest-health-issue-dot--info";
+
+      let actionHtml = "";
+      if (issue.actionLabel && issue.actionHref) {
+        // Backup action gets a POST form; all others are simple links
+        if (issue.actionHref === "/dashboard/nest?action=backup") {
+          actionHtml = `<form class="nest-health-backup-form" method="POST" action="/dashboard/nest/backup">
+            <button class="nest-health-backup-btn" type="submit">${escapeHtml(issue.actionLabel)}</button>
+          </form>`;
+        } else {
+          actionHtml = `<a class="nest-health-issue-action" href="${escapeHtml(issue.actionHref)}">${escapeHtml(issue.actionLabel)}</a>`;
+        }
+      }
+
+      return `<div class="nest-health-issue">
+        <span class="nest-health-issue-dot ${dotClass}" aria-hidden="true"></span>
+        <span class="nest-health-issue-label">${escapeHtml(issue.label)}</span>
+        ${actionHtml}
+      </div>`;
+    }).join("");
+    bodyHtml = `<div class="nest-health-issues">${issueLines}</div>`;
+  }
+
+  const warnClass = health.ok ? "nest-health-strip--ok" : "nest-health-strip--warn";
+  const stripHtml = `<div class="nest-health-strip ${warnClass}" aria-live="polite" aria-label="${escapeHtml(t("health.stripLabel", lang))}">
+    ${bodyHtml}
+    ${detailsEl}
+  </div>`;
+
+  return flashHtml + stripHtml;
+}
+
 export function buildNestHTML(data, lang) {
-  const { pinnedItems, bundles, instances, trustedInstances, peerOverviews, ssoEnabled } = data;
+  const { pinnedItems, bundles, instances, trustedInstances, peerOverviews, ssoEnabled, healthSignals, flash } = data;
   const carouselMode = Array.isArray(peerOverviews) && peerOverviews.length > 0;
 
   let tileIndex = 0;
@@ -271,6 +347,9 @@ export function buildNestHTML(data, lang) {
     ${panelTiles}${bundleTiles}
   </div>`;
 
+  // --- Health Strip ---
+  const healthStripHtml = buildHealthStrip(healthSignals || null, lang, flash || null);
+
   // --- Unified carousel (Phase 2) ---
   // Active when the handler wrapper has passed peer overviews. One
   // `<section>` per trusted peer + one for the local instance (the local
@@ -371,8 +450,8 @@ export function buildNestHTML(data, lang) {
     }
 
     const carousel = `<div class="nest-instance-carousel" role="region" aria-live="polite">${sections.join("")}</div>`;
-    return `${welcomeHtml}${pinnedHtml}${carousel}`;
+    return `${welcomeHtml}${healthStripHtml}${pinnedHtml}${carousel}`;
   }
 
-  return `${welcomeHtml}${pinnedHtml}${instancesHtml}${gridHtml}`;
+  return `${welcomeHtml}${healthStripHtml}${pinnedHtml}${instancesHtml}${gridHtml}`;
 }
