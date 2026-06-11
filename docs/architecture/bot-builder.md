@@ -4,7 +4,7 @@ title: Bot Builder Architecture
 
 # Bot Builder
 
-The Bot Builder is Crow's native agent platform. It is the first-class path for building and running agents on Crow, and it is distinct from the earlier [CrowClaw](/architecture/crowclaw) bundle, which wraps the external OpenClaw engine and remains available as a legacy option.
+The Bot Builder is Crow's native agent platform — the first-class path for building and running agents on Crow.
 
 An agent is a definition stored in the `pi_bot_defs` table in Crow's `crow.db`. The dashboard edits that definition; a lightweight agent runtime executes it per turn; gateways feed turns in from email, Discord, and glasses.
 
@@ -94,6 +94,5 @@ A staged file is inert by construction. The skill resolver loads skills by name 
 
 - [Bot Builder Guide](/guide/bot-builder): The user-facing walkthrough
 - [Meta Glasses](/guide/meta-glasses): The glasses gateway in use
-- [CrowClaw](/architecture/crowclaw): The legacy OpenClaw-based bot engine
 - [Orchestrator](/architecture/orchestrator): Background deep-work execution
 - [Context Management](/architecture/context-management): How tools are advertised to keep context lean

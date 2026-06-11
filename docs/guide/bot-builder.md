@@ -85,4 +85,3 @@ The Review / Deploy tab summarizes the agent before you commit it. Once deployed
 - [Extensions](/guide/extensions): Install extensions that contribute tools and skills
 - [Writing Skills](/developers/skills): Author the behavioral prompts agents use
 - [AI Providers (BYOAI)](/guide/ai-providers): Configure the models agents run on
-- [Bot Management (legacy CrowClaw)](/guide/bot-management): The earlier OpenClaw-based bot engine
