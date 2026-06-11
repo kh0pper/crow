@@ -561,6 +561,16 @@ export class InstanceSyncManager {
       console.warn(`[instance-sync] Failed to apply ${op} on ${table}:`, err.message);
     }
 
+    // Peer-sync writes land in THIS process (the gateway hosts the sync
+    // manager), so clear the in-process context cache immediately instead of
+    // letting readers wait out its 60s TTL.
+    if (table === "crow_context") {
+      try {
+        const { invalidateContextCache } = await import("../memory/crow-context.js");
+        invalidateContextCache();
+      } catch {}
+    }
+
     // Broadcast a messages:changed event when a synced-in message row
     // lands locally. Without this, a paired Crow receiving a peer
     // message via Nostr forwards the row via InstanceSync but our
