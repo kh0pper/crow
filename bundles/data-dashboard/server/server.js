@@ -32,15 +32,16 @@ const GATEWAY_INTERNAL_URL = process.env.BLOG_FIGURE_GATEWAY_URL || "http://127.
 
 let _tablesInitialized = false;
 
-export function createDataDashboardServer(dbPath, options = {}) {
+export async function createDataDashboardServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
 
-  // Initialize bundle tables on first use
+  // Initialize bundle tables on first use — awaited+fatal (spec C5).
+  // rebuildDashboardFKsToProjectSpaces runs inside initDataDashboardTables;
+  // a mid-rebuild failure ROLLBACKs and rethrows so the server never starts
+  // with a partially-rebuilt table or an abandoned open transaction.
   if (!_tablesInitialized) {
     _tablesInitialized = true;
-    initDataDashboardTables(db).catch(err => {
-      console.warn("[data-dashboard] Table init failed:", err.message);
-    });
+    await initDataDashboardTables(db);
   }
 
   const server = new McpServer(
