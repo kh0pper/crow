@@ -41,6 +41,10 @@ async function rebuildDashboardFKsToProjectSpaces(db) {
       updated_at TEXT DEFAULT (datetime('now'))
     )`,
       knownExtras: [],
+      canonicalColumns: [
+        "id", "project_id", "backend_id", "name", "item_type", "sql", "config",
+        "description", "is_pinned", "created_at", "updated_at",
+      ],
     },
     data_case_studies: {
       isAutoincrement: true,
@@ -57,6 +61,10 @@ async function rebuildDashboardFKsToProjectSpaces(db) {
     )`,
       // default_voice + display_order added via addColumnIfMissing (spec N1)
       knownExtras: ["default_voice", "display_order"],
+      canonicalColumns: [
+        "id", "project_id", "title", "description", "blog_post_id",
+        "created_at", "updated_at",
+      ],
     },
   };
 
@@ -90,14 +98,9 @@ async function rebuildDashboardFKsToProjectSpaces(db) {
 
       // Verify no unknown columns (spec C2 + N1 — abort before any DDL)
       const { rows: colRows } = await db.execute({ sql: `PRAGMA table_info(${tableName})` });
-      const canonicalCols = new Set([
-        // data_dashboard_items columns
-        "id", "project_id", "backend_id", "name", "item_type", "sql", "config",
-        "description", "is_pinned", "created_at", "updated_at",
-        // data_case_studies columns
-        "title", "description", "blog_post_id",
-        ...spec.knownExtras,
-      ]);
+      // Per-table column set (spec D2 fix: a merged union across tables would
+      // let a column belonging to table A slip through unnoticed on table B)
+      const canonicalCols = new Set([...spec.canonicalColumns, ...spec.knownExtras]);
       for (const col of colRows) {
         if (!canonicalCols.has(col.name)) {
           await db.execute({ sql: "PRAGMA foreign_keys = ON" });

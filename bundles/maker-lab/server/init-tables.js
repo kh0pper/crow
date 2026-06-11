@@ -49,6 +49,12 @@ async function rebuildMakerLabFKsToProjectSpaces(db) {
           OR (is_guest = 0 AND learner_id IS NOT NULL))
     )`,
       knownExtras: [],
+      canonicalColumns: [
+        "token", "learner_id", "is_guest", "guest_age_band", "batch_id",
+        "started_at", "expires_at", "revoked_at", "state", "ending_started_at",
+        "idle_lock_min", "idle_locked_at", "last_activity_at", "kiosk_device_id",
+        "hints_used", "transcripts_enabled_snapshot",
+      ],
     },
     maker_bound_devices: {
       isAutoincrement: false, // TEXT PRIMARY KEY
@@ -60,6 +66,7 @@ async function rebuildMakerLabFKsToProjectSpaces(db) {
       last_seen_at TEXT
     )`,
       knownExtras: [],
+      canonicalColumns: ["fingerprint", "learner_id", "label", "bound_at", "last_seen_at"],
     },
     maker_transcripts: {
       isAutoincrement: true,
@@ -73,6 +80,7 @@ async function rebuildMakerLabFKsToProjectSpaces(db) {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )`,
       knownExtras: [],
+      canonicalColumns: ["id", "learner_id", "session_token", "turn_no", "role", "content", "created_at"],
     },
     maker_learner_settings: {
       isAutoincrement: false, // learner_id is PK, not AUTOINCREMENT
@@ -90,6 +98,11 @@ async function rebuildMakerLabFKsToProjectSpaces(db) {
     )`,
       // age + avatar added via addColumnIfMissing on pre-existing installs (spec N1)
       knownExtras: ["age", "avatar"],
+      canonicalColumns: [
+        "learner_id", "transcripts_enabled", "transcripts_retention_days",
+        "idle_lock_default_min", "auto_resume_min", "voice_input_enabled",
+        "consent_captured_at", "updated_at",
+      ],
     },
   };
 
@@ -124,21 +137,9 @@ async function rebuildMakerLabFKsToProjectSpaces(db) {
 
       // Verify no unknown columns (spec C2 + N1 — abort before any DDL)
       const { rows: colRows } = await db.execute(`PRAGMA table_info(${tableName})`);
-      const canonicalCols = new Set([
-        // maker_sessions columns
-        "token", "learner_id", "is_guest", "guest_age_band", "batch_id",
-        "started_at", "expires_at", "revoked_at", "state", "ending_started_at",
-        "idle_lock_min", "idle_locked_at", "last_activity_at", "kiosk_device_id",
-        "hints_used", "transcripts_enabled_snapshot",
-        // maker_bound_devices columns
-        "fingerprint", "label", "bound_at", "last_seen_at",
-        // maker_transcripts columns
-        "id", "session_token", "turn_no", "role", "content", "created_at",
-        // maker_learner_settings columns
-        "transcripts_enabled", "transcripts_retention_days", "idle_lock_default_min",
-        "auto_resume_min", "voice_input_enabled", "consent_captured_at", "updated_at",
-        ...spec.knownExtras,
-      ]);
+      // Per-table column set (spec D2 fix: a merged union across tables would
+      // let a column belonging to table A slip through unnoticed on table B)
+      const canonicalCols = new Set([...spec.canonicalColumns, ...spec.knownExtras]);
       for (const col of colRows) {
         if (!canonicalCols.has(col.name)) {
           await db.execute("PRAGMA foreign_keys = ON");

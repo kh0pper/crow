@@ -831,6 +831,13 @@ async function rebuildMainFKsToProjectSpaces() {
       // columns known to be added via addColumnIfMissing / addUuidColumn
       // (spec C2: backend_id would be silently lost if derived from PRAGMA table_info alone)
       knownExtras: ["backend_id", "uuid", "origin_instance_id"],
+      canonicalColumns: [
+        "id", "project_id", "title", "source_type", "url", "authors",
+        "publication_date", "publisher", "doi", "isbn", "abstract",
+        "content_summary", "full_text", "citation_apa", "retrieval_date",
+        "retrieval_method", "verified", "verification_notes", "tags",
+        "relevance_score", "created_at",
+      ],
     },
     research_notes: {
       isAutoincrement: true,
@@ -851,6 +858,10 @@ async function rebuildMainFKsToProjectSpaces() {
     FOREIGN KEY (source_id) REFERENCES research_sources(id) ON DELETE SET NULL
   )`,
       knownExtras: ["lamport_ts", "updated_at", "uuid", "origin_instance_id"],
+      canonicalColumns: [
+        "id", "project_id", "source_id", "title", "content", "note_type",
+        "tags", "created_at",
+      ],
     },
     data_backends: {
       isAutoincrement: true,
@@ -872,6 +883,11 @@ async function rebuildMainFKsToProjectSpaces() {
     FOREIGN KEY (project_id) REFERENCES project_spaces(id) ON DELETE CASCADE
   )`,
       knownExtras: ["uuid", "origin_instance_id"],
+      canonicalColumns: [
+        "id", "project_id", "name", "backend_type", "connection_ref",
+        "schema_info", "status", "last_connected_at", "last_error", "tags",
+        "created_at", "updated_at",
+      ],
     },
   };
 
@@ -904,21 +920,9 @@ async function rebuildMainFKsToProjectSpaces() {
       const { rows: colRows } = await db.execute(
         `PRAGMA table_info(${tableName})`
       );
-      const canonicalCols = new Set([
-        // columns from the original canonical CREATE block
-        "id", "project_id", "name", "backend_type", "connection_ref",
-        "schema_info", "status", "last_connected_at", "last_error", "tags",
-        "created_at", "updated_at",
-        // research_sources canonical columns
-        "title", "source_type", "url", "authors", "publication_date",
-        "publisher", "doi", "isbn", "abstract", "content_summary", "full_text",
-        "citation_apa", "retrieval_date", "retrieval_method", "verified",
-        "verification_notes", "relevance_score",
-        // research_notes canonical columns
-        "source_id", "note_type", "content",
-        // known extras for all three tables
-        ...spec.knownExtras,
-      ]);
+      // Per-table column set (spec D2 fix: a merged union across tables would
+      // let a column belonging to table A slip through unnoticed on table B)
+      const canonicalCols = new Set([...spec.canonicalColumns, ...spec.knownExtras]);
       for (const col of colRows) {
         if (!canonicalCols.has(col.name)) {
           await db.execute("PRAGMA foreign_keys = ON");
