@@ -754,26 +754,21 @@ export class InstanceSyncManager {
       }
 
       // Real conflict: log both versions and notify the operator.
-      const conflictOp = op || "update";
-      await this.db.execute({
-        sql: `INSERT INTO sync_conflicts
-                (table_name, row_id, winning_instance_id, losing_instance_id,
-                 winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, op)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        args: [
-          table,
-          String(rowId),
-          localRow.instance_id || this.localInstanceId,
-          incomingInstanceId,
-          localTs,
-          incomingTs,
-          JSON.stringify(localRow),
-          JSON.stringify(incomingRow),
-          conflictOp,
-        ],
-      });
-
-      await this._notifyConflict();
+      // The verdict is already determined here (local is newer and the data
+      // differs) — a failure to LOG must not flip it to "apply" and overwrite
+      // newer local data, so logging gets its own guard and we skip regardless.
+      try {
+        await this._insertConflictRow(
+          table, String(rowId),
+          localRow.instance_id || this.localInstanceId, incomingInstanceId,
+          localTs, incomingTs,
+          JSON.stringify(localRow), JSON.stringify(incomingRow),
+          op || "update",
+        );
+        await this._notifyConflict();
+      } catch (err) {
+        console.warn(`[instance-sync] Conflict LOGGING failed for ${table}:${rowId} (local data still preserved):`, err.message);
+      }
 
       return "skip"; // Local version wins
     } catch (err) {
@@ -781,6 +776,31 @@ export class InstanceSyncManager {
     }
 
     return "apply"; // Default to applying on error
+  }
+
+  /**
+   * Insert a sync_conflicts row, degrading gracefully when the `op` column
+   * doesn't exist yet (code pulled + gateway restarted before init-db ran —
+   * the gateway-boot migration also closes this, but a non-gateway host or a
+   * mid-boot race must not lose the conflict trace, and in _checkConflict a
+   * thrown INSERT must never cascade into applying a stale row).
+   */
+  async _insertConflictRow(tableName, rowId, winInst, loseInst, winTs, loseTs, winData, loseData, conflictOp) {
+    const legacyCols = `table_name, row_id, winning_instance_id, losing_instance_id,
+                 winning_lamport_ts, losing_lamport_ts, winning_data, losing_data`;
+    const legacyArgs = [tableName, rowId, winInst, loseInst, winTs, loseTs, winData, loseData];
+    try {
+      await this.db.execute({
+        sql: `INSERT INTO sync_conflicts (${legacyCols}, op) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [...legacyArgs, conflictOp],
+      });
+    } catch (err) {
+      if (!/no column named op/i.test(err.message || "")) throw err;
+      await this.db.execute({
+        sql: `INSERT INTO sync_conflicts (${legacyCols}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: legacyArgs,
+      });
+    }
   }
 
   /**
@@ -879,22 +899,13 @@ export class InstanceSyncManager {
 
       // Id collision with different data — surface it (D7 minimal fix).
       // The incoming insert is still not applied; the trace is preserved.
-      await this.db.execute({
-        sql: `INSERT INTO sync_conflicts
-                (table_name, row_id, winning_instance_id, losing_instance_id,
-                 winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, op)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'insert')`,
-        args: [
-          table,
-          String(row.id),
-          localRow.instance_id || this.localInstanceId,
-          instanceId,
-          localRow.lamport_ts || 0,
-          lamportTs,
-          JSON.stringify(localRow),
-          JSON.stringify(row),
-        ],
-      });
+      await this._insertConflictRow(
+        table, String(row.id),
+        localRow.instance_id || this.localInstanceId, instanceId,
+        localRow.lamport_ts || 0, lamportTs,
+        JSON.stringify(localRow), JSON.stringify(row),
+        "insert",
+      );
 
       await this._notifyConflict();
     }

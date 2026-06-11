@@ -1124,3 +1124,53 @@ test("13b. Insert-restore-disabled: op=insert conflict → restore refused, reso
 
   db.close();
 });
+
+// ── Test 14: Missing op column (pre-init-db host) — opus review F1 ────────────
+
+test("14. Legacy DB without sync_conflicts.op: stale update still skipped AND conflict still logged", async () => {
+  // Simulates a fleet host that pulled new code but never ran init-db: the
+  // conflict INSERT naming `op` throws there, and before the F1 fix that throw
+  // fell through _checkConflict's catch to "apply" — silently overwriting
+  // newer local data with a stale remote row.
+  const INST = "inst-t14";
+  const REMOTE = "remote-t14";
+  const legacyDir = mkdtempSync(join(tmpdir(), "crow-isync-legacy-"));
+  execFileSync(process.execPath, ["scripts/init-db.js"], {
+    env: { ...process.env, CROW_DATA_DIR: legacyDir },
+    stdio: "pipe",
+  });
+  const db = createDbClient(join(legacyDir, "crow.db"));
+  // Recreate the pre-W4-1 schema state
+  await db.execute({ sql: "ALTER TABLE sync_conflicts DROP COLUMN op", args: [] });
+
+  const mgr = new InstanceSyncManager(IDENTITY, db, INST);
+
+  await db.execute({
+    sql: "INSERT INTO memories (id, category, content, lamport_ts) VALUES (900, 'general', 'newer-local', 50)",
+    args: [],
+  });
+
+  const feed = makeStubFeed();
+  feed.push(signEntry({
+    table: "memories", op: "update",
+    row: { id: 900, content: "stale-remote", lamport_ts: 10 },
+    lamport_ts: 10, instance_id: REMOTE,
+  }));
+
+  await mgr._processNewEntries(REMOTE, feed);
+
+  // Local data preserved — the stale update must NOT have applied
+  const { rows: memRows } = await db.execute({
+    sql: "SELECT content FROM memories WHERE id = 900", args: [],
+  });
+  assert.equal(memRows[0].content, "newer-local", "stale remote update must not overwrite newer local data");
+
+  // Conflict trace preserved via the legacy column set
+  const { rows: confRows } = await db.execute({
+    sql: "SELECT * FROM sync_conflicts WHERE row_id = '900'", args: [],
+  });
+  assert.equal(confRows.length, 1, "conflict must still be logged without the op column");
+
+  db.close();
+  rmSync(legacyDir, { recursive: true, force: true });
+});
