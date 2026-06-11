@@ -47,7 +47,7 @@ import { skillDirs } from "../../../../scripts/pi-bots/skill_resolver.mjs";
 import { tasksDbPath, botsWorkspaceRoot } from "../../../../scripts/pi-bots/instance-paths.mjs";
 import { join as pathJoin } from "node:path";
 import { botRuntimeActive } from "./bot-runtime-flag.js";
-import { listProposals } from "../../../../scripts/pi-bots/skill_proposals.mjs";
+import { listProposals, normalizeSkillName } from "../../../../scripts/pi-bots/skill_proposals.mjs";
 import { listBotSkillEvents } from "../../../../scripts/pi-bots/skill_provenance.mjs";
 import { getTtsProfiles } from "../../ai/tts/index.js";
 import { getSttProfiles } from "../../ai/stt/index.js";
@@ -695,7 +695,12 @@ export default {
             delete def.tracker_config.queue_filter;
           }
         } else if (tab === "skills") {
-          def.skills = [].concat(b.skills || []).filter(Boolean);
+          const rawSkills = [].concat(b.skills || []).filter(Boolean);
+          def.skills = rawSkills.map((s) => normalizeSkillName(s)).filter(Boolean);
+          if (def.skills.length < rawSkills.length) {
+            const dropped = rawSkills.filter((s) => !normalizeSkillName(s));
+            console.warn(`[bot-builder] Dropped invalid skill name(s) on save: ${JSON.stringify(dropped)}`);
+          }
           def.tools.skills = def.skills;
           def.system_prompt = (b.system_prompt || "").trim();
         } else if (tab === "permissions") {
