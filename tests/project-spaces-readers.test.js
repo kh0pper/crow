@@ -198,12 +198,13 @@ test("3. archive invisibility: trigger-archived (deleted) learner hidden from mi
   });
   assert.ok(!listRows.some(r => Number(r.id) === lid), "archived learner absent from migrated learner-list query");
 
-  // Migrated learner-count query must not include it
+  // Migrated learner-count query must not include it (targeted form — the
+  // shared DB makes an absolute count brittle across tests)
   const { rows: countRows } = await db.execute({
-    sql: "SELECT COUNT(*) AS n FROM project_spaces WHERE type='learner_profile' AND archived_at IS NULL",
-    args: [],
+    sql: "SELECT COUNT(*) AS n FROM project_spaces WHERE type='learner_profile' AND archived_at IS NULL AND id = ?",
+    args: [lid],
   });
-  const countBefore = Number(countRows[0].n);
+  assert.equal(Number(countRows[0].n), 0, "archived learner excluded from migrated count query");
 
   // ensureDefaultLearner shape: must not return the archived id
   const { rows: ensureRows } = await db.execute({
@@ -229,19 +230,22 @@ test("3. archive invisibility: trigger-archived (deleted) learner hidden from mi
           VALUES ('ghost-backend', 'sqlite', 'disconnected', ?, '{}', datetime('now'), datetime('now'))`,
     args: [bhId],
   });
-  // Now archive the project (delete from rp, trigger sets archived_at in ps)
-  await db.execute({ sql: "DELETE FROM research_projects WHERE id=?", args: [bhId] });
-  // The data_backends row survives (ON DELETE CASCADE would remove it — but bhId was created just now,
-  // so we need to verify the LEFT JOIN returns NULL project_name for the archived ps row)
+  // Archive the ps row DIRECTLY (no rp delete): foreign_keys is ON by default
+  // in better-sqlite3, so deleting the rp row would CASCADE-delete the backend
+  // and leave the LEFT JOIN with zero rows — a vacuously-true assertion. The
+  // direct UPDATE keeps the backend alive and exercises the ON-condition
+  // filter for real.
+  await db.execute({
+    sql: "UPDATE project_spaces SET archived_at = datetime('now') WHERE id = ?",
+    args: [bhId],
+  });
   const { rows: ddRows } = await db.execute({
     sql: "SELECT db.name, p.name AS project_name FROM data_backends db LEFT JOIN project_spaces p ON db.project_id = p.id AND p.archived_at IS NULL WHERE db.name='ghost-backend'",
     args: [],
   });
-  // data_backends has ON DELETE CASCADE on research_projects, so the backend row is gone after deletion
-  // but our query should return empty or NULL project_name for any surviving rows.
-  // The key invariant: no project_name is returned for archived rows (archived_at IS NULL in ON clause)
-  assert.ok(ddRows.every(r => r.project_name === null || r.project_name === undefined),
-    "LEFT JOIN returns NULL project_name for archived/missing project");
+  assert.equal(ddRows.length, 1, "backend row must survive (no rp delete, no cascade)");
+  assert.equal(ddRows[0].project_name, null,
+    "LEFT JOIN ON-condition filter must blank the name for an archived project (without the filter it would read 'BackendHost Project')");
 
   db.close();
 });
