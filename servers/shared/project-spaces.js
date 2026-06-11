@@ -197,11 +197,11 @@ export async function createProjectSpace(db, opts = {}) {
 /**
  * Update metadata columns on an existing project_spaces row.
  * Does NOT re-slug — slug is stable after creation for helper-created rows.
- * Accepts any subset of { name, description, status, tags }.
+ * Accepts any subset of { name, description, status, tags, type }.
  *
  * @param {object} db
  * @param {number} id
- * @param {object} patch  — { name?, description?, status?, tags? }
+ * @param {object} patch  — { name?, description?, status?, tags?, type? }
  * @returns {number} rowsAffected
  */
 export async function updateProjectSpaceMeta(db, id, patch = {}) {
@@ -225,6 +225,10 @@ export async function updateProjectSpaceMeta(db, id, patch = {}) {
   if (patch.tags != null) {
     sets.push("tags = ?");
     args.push(String(patch.tags));
+  }
+  if (patch.type != null) {
+    sets.push("type = ?");
+    args.push(String(patch.type));
   }
 
   if (sets.length === 0) return 0;

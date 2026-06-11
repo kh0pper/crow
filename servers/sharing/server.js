@@ -764,19 +764,31 @@ export function createSharingServer(dbPath, options = {}) {
     for (const share of pending.rows) {
       try {
         const tableMap = {
-          memory: "memories",
-          project: "research_projects",
-          source: "research_sources",
-          note: "research_notes",
-          kb_article: "kb_articles",
+          memory: { table: "memories", query: null },
+          project: {
+            table: "project_spaces",
+            query: `SELECT id, uuid, name, description, type, status, tags, created_at, updated_at
+                    FROM project_spaces WHERE id = ? AND archived_at IS NULL`,
+          },
+          source: { table: "research_sources", query: null },
+          note: { table: "research_notes", query: null },
+          kb_article: { table: "kb_articles", query: null },
         };
-        const table = tableMap[share.share_type];
-        if (!table) continue;
+        const mapEntry = tableMap[share.share_type];
+        if (!mapEntry) continue;
 
-        const itemData = await db.execute({
-          sql: `SELECT * FROM ${table} WHERE id = ?`,
-          args: [share.item_id],
-        });
+        let itemDataRows;
+        if (mapEntry.query) {
+          const r = await db.execute({ sql: mapEntry.query, args: [share.item_id] });
+          itemDataRows = r.rows;
+        } else {
+          const r = await db.execute({
+            sql: `SELECT * FROM ${mapEntry.table} WHERE id = ?`,
+            args: [share.item_id],
+          });
+          itemDataRows = r.rows;
+        }
+        const itemData = { rows: itemDataRows };
         if (itemData.rows.length === 0) continue;
 
         peerManager.send(crowId, {
@@ -1149,8 +1161,7 @@ export function createSharingServer(dbPath, options = {}) {
   // milestone. Clone is one-shot and stays a frozen snapshot on the receiver.
   async function buildProjectCloneBundle(projectId) {
     const project = (await db.execute({
-      sql: `SELECT id, uuid, slug, name, description, type, tags, created_at, updated_at,
-                   workspace_dir, storage_prefix
+      sql: `SELECT id, uuid, slug, name, description, type, tags, created_at, updated_at
               FROM project_spaces WHERE id = ?`,
       args: [projectId],
     })).rows[0];
@@ -1544,16 +1555,25 @@ export function createSharingServer(dbPath, options = {}) {
 
       // Verify the item exists
       const tableMap = {
-        memory: "memories",
-        project: "research_projects",
-        source: "research_sources",
-        note: "research_notes",
+        memory: { table: "memories", query: null },
+        project: {
+          table: "project_spaces",
+          query: `SELECT id, uuid, name, description, type, status, tags, created_at, updated_at
+                  FROM project_spaces WHERE id = ? AND archived_at IS NULL`,
+        },
+        source: { table: "research_sources", query: null },
+        note: { table: "research_notes", query: null },
       };
-      const table = tableMap[share_type];
-      const item = await db.execute({
-        sql: `SELECT * FROM ${table} WHERE id = ?`,
-        args: [item_id],
-      });
+      const mapEntry = tableMap[share_type];
+      let item;
+      if (mapEntry?.query) {
+        item = await db.execute({ sql: mapEntry.query, args: [item_id] });
+      } else {
+        item = await db.execute({
+          sql: `SELECT * FROM ${mapEntry?.table || share_type} WHERE id = ?`,
+          args: [item_id],
+        });
+      }
 
       if (item.rows.length === 0) {
         return {

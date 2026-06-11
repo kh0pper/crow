@@ -7,6 +7,6 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createDataDashboardServer } from "./server.js";
 
-const server = createDataDashboardServer();
+const server = await createDataDashboardServer();
 const transport = new StdioServerTransport();
 await server.connect(transport);

@@ -35,6 +35,7 @@ const _gatewayRoot = resolveGatewayRoot();
 const _dbPath = pathToFileURL(join(_gatewayRoot, "servers", "db.js")).href;
 const _settingsRegPath = pathToFileURL(join(_gatewayRoot, "servers", "gateway", "dashboard", "settings", "registry.js")).href;
 const _providerPath = pathToFileURL(join(_gatewayRoot, "servers", "gateway", "ai", "provider.js")).href;
+const _projectSpacesPath = pathToFileURL(join(_gatewayRoot, "servers", "shared", "project-spaces.js")).href;
 
 // Phase 6 C.1: tolerate three JSON output shapes from the summarization
 // LLM call: bare `{...}`, fenced ```json {...} ```, or surrounding prose
@@ -206,12 +207,12 @@ export function createMetaGlassesServer(options = {}) {
     const { readSetting, writeSetting } = await import(_settingsRegPath);
     const cached = await readSetting(db, "meta_glasses_default_project_id");
     if (cached && /^\d+$/.test(cached)) return Number(cached);
-    const ins = await db.execute({
-      sql: `INSERT INTO research_projects (name, description, type, created_at)
-            VALUES ('Glasses Dictation', 'Auto-captured notes from Meta glasses', 'research', datetime('now'))`,
-      args: [],
+    const { createProjectSpace } = await import(_projectSpacesPath);
+    const { id } = await createProjectSpace(db, {
+      name: "Glasses Dictation",
+      description: "Auto-captured notes from Meta glasses",
+      type: "research",
     });
-    const id = Number(ins.lastInsertRowid);
     try { await writeSetting(db, "meta_glasses_default_project_id", String(id), { scope: "local" }); } catch {}
     return id;
   }
