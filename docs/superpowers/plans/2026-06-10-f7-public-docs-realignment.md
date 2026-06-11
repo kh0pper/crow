@@ -164,8 +164,9 @@ Keep the existing `image`, and the `actions` list (4 buttons) as-is (Get Started
 Run:
 ```bash
 cd ~/crow/docs && npm run build 2>&1 | tail -15
+echo "=== spine landed in the built EN landing? ===" ; grep -rci "agentic framework\|MCP platform\|all-in-one" .vitepress/dist/software/crow/index.html
 ```
-Expected: `build complete` (no errors). If `npm ci` needed first and `node_modules` present, build runs directly.
+Expected: `build complete` (no errors); the spine grep ≥1 (the new hero/cards rendered into the build). If `npm ci` needed first and `node_modules` present, build runs directly.
 
 - [ ] **Step 4: Commit.**
 ```bash
@@ -387,7 +388,9 @@ Expected: `PNG image data, 1200 x 630`. If missing, do NOT merge — finish Task
 
 ## Review
 
-**Reviewer:** Plan subagent (staff-engineer adversarial pass), against the live tree. **Date:** 2026-06-10. **Verdict:** REVISE → resolved.
+**Reviewer:** Plan subagent (staff-engineer adversarial pass), against the live tree. **Date:** 2026-06-10. **Verdict:** REVISE → resolved → **re-review APPROVE.**
+
+**Re-review (2026-06-10):** Focused adversarial re-pass confirmed all four critical issues genuinely resolved (re-verified live: `maestro.press/software/crow/crow-hero.svg`→200, `kh0pper.github.io/software/crow/`→404; [GH-DESC] measured 263 chars; PNG merge-gate correctly precedes the merge; Task 8→Task 9 dependency is linear, not circular). Topic count = 13 (< GitHub's 20 max). No critical issues remain ("Ship it"). Two non-blocking suggestions: (1) the Task 9 Step 3 gate guarantees "PNG committed," not "PNG live" — live-resolution is covered by Task 8 Step 4's 200-check; (2) added a built-output spine-phrase grep to Task 2 Step 3 for symmetry with Task 7. Both addressed/noted.
 
 The reviewer verified every line-number anchor in the plan against the live tree (all accurate) and confirmed the three ⚠ blockers are real (`gh` absent, no SVG→PNG rasterizer, GitHub MCP tools don't expose repo metadata). Four critical issues + suggestions raised; resolutions:
 
