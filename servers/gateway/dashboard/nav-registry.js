@@ -7,49 +7,82 @@
 
 import { upsertSetting } from "./settings/registry.js";
 
-/** Default nav groups seeded on first load */
+/**
+ * Old nav defaults (W3-6 2026-06-11 baseline) — used by the migration in init-db.js
+ * to detect an unmodified config and replace it with the new spine-aligned defaults.
+ * Exported so the migration and tests can reference the exact old shape.
+ */
+export const OLD_NAV_DEFAULTS_2026_06 = {
+  groups: [
+    { id: "core", name: "Core" },
+    { id: "content", name: "Content" },
+    { id: "media", name: "Media" },
+    { id: "education", name: "Education" },
+    { id: "tools", name: "Tools" },
+    { id: "system", name: "System" },
+  ],
+  assignments: {
+    nest: "core",
+    contacts: "core",
+    memory: "core",
+    messages: "core",
+    blog: "content",
+    projects: "content",
+    files: "tools",
+    extensions: "tools",
+    skills: "tools",
+    "bot-board": "tools",
+    settings: "system",
+  },
+};
+
+/** Default nav groups seeded on first load (W3-6 spine-aligned) */
 const DEFAULT_NAV_GROUPS = [
-  { id: "core", name: "Core", collapsed: false },
-  { id: "content", name: "Content", collapsed: false },
-  { id: "media", name: "Media", collapsed: false },
-  { id: "education", name: "Education", collapsed: false },
-  { id: "tools", name: "Tools", collapsed: false },
+  { id: "home", name: "Home", collapsed: false },
+  { id: "agents", name: "Agents", collapsed: false },
+  { id: "connections", name: "Connections", collapsed: false },
+  { id: "workspace", name: "Workspace", collapsed: false },
   { id: "system", name: "System", collapsed: true },
 ];
 
-/** Default panel-to-group assignments */
+/** Default panel-to-group assignments (W3-6 spine-aligned) */
 const DEFAULT_NAV_PANEL_ASSIGNMENTS = {
-  nest: "core",
-  contacts: "core",
-  memory: "core",
-  messages: "core",
-  blog: "content",
-  projects: "content",
-  files: "tools",
-  extensions: "tools",
-  skills: "tools",
-  "bot-board": "tools",
+  nest: "home",
+  "bot-builder": "agents",
+  "bot-board": "agents",
+  skills: "agents",
+  orchestrator: "agents",
+  connect: "connections",
+  contacts: "connections",
+  messages: "connections",
+  fediverse: "connections",
+  memory: "workspace",
+  projects: "workspace",
+  blog: "workspace",
+  files: "workspace",
+  extensions: "workspace",
   settings: "system",
+  "design-system": "system",
 };
 
-/** Category field on panel manifest → nav group id */
+/** Category field on panel manifest → nav group id (W3-6 spine-aligned) */
 const CATEGORY_TO_GROUP = {
-  core: "core",
-  content: "content",
-  media: "media",
-  ai: "tools",
-  social: "core",
-  productivity: "tools",
-  finance: "tools",
-  infrastructure: "tools",
-  automation: "tools",
-  education: "education",
+  core: "workspace",
+  content: "workspace",
+  media: "workspace",
+  ai: "agents",
+  social: "connections",
+  productivity: "workspace",
+  finance: "workspace",
+  infrastructure: "workspace",
+  automation: "workspace",
+  education: "workspace",
   system: "system",
-  "federated-social": "core",
-  "federated-media": "media",
-  "federated-comms": "core",
-  cameras: "media",
-  connections: "core",
+  "federated-social": "connections",
+  "federated-media": "connections",
+  "federated-comms": "connections",
+  cameras: "workspace",
+  connections: "connections",
 };
 
 /**
@@ -89,39 +122,26 @@ export async function resolveNavGroups(db, visiblePanels) {
     }
   }
 
-  // Auto-assign any panels not in assignments
+  // Auto-assign any panels not in assignments.
+  // For panels whose assignment points at a group id that no longer exists in
+  // the stored groups, re-assign via category fallback so panels are never orphaned
+  // (e.g. a customized config that kept old group ids while panels migrated).
   let assignmentsChanged = false;
+  const groupIds = new Set(groups.map((g) => g.id));
+
   for (const panel of visiblePanels) {
-    if (!(panel.id in assignments)) {
-      const groupId = CATEGORY_TO_GROUP[panel.category] || "tools";
-      // Make sure the group exists
-      if (!groups.find((g) => g.id === groupId)) {
+    const currentGroupId = assignments[panel.id];
+    if (!currentGroupId || !groupIds.has(currentGroupId)) {
+      // Panel is unassigned OR its assigned group no longer exists — auto-assign by category.
+      const groupId = CATEGORY_TO_GROUP[panel.category] || "workspace";
+      // Make sure the target group exists (may be a category not in the stored groups).
+      if (!groupIds.has(groupId)) {
         groups.push({ id: groupId, name: groupId.charAt(0).toUpperCase() + groupId.slice(1), collapsed: false });
+        groupIds.add(groupId);
       }
       assignments[panel.id] = groupId;
       assignmentsChanged = true;
     }
-  }
-
-  // One-time migration: move auto-assigned education panels out of
-  // whatever group they landed in (pre-change: "content") into the
-  // dedicated "education" group. Gated by a flag so we only do this
-  // once and don't fight subsequent user customization.
-  const migrationFlag = await db.execute({
-    sql: "SELECT value FROM dashboard_settings WHERE key = 'nav_migration_education_v1'",
-    args: [],
-  });
-  if (migrationFlag.rows.length === 0) {
-    if (!groups.find((g) => g.id === "education")) {
-      groups.push({ id: "education", name: "Education", collapsed: false });
-    }
-    for (const panel of visiblePanels) {
-      if (panel.category === "education" && assignments[panel.id] !== "education") {
-        assignments[panel.id] = "education";
-        assignmentsChanged = true;
-      }
-    }
-    await upsertSetting(db, "nav_migration_education_v1", "1");
   }
 
   if (needsSeed || assignmentsChanged) {
