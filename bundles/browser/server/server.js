@@ -13,7 +13,7 @@ import { z } from "zod";
 import { chromium } from "playwright";
 import { buildStealthScript, getContextOptions, humanType, humanClick, delay } from "./stealth.js";
 import { getRandomProfile } from "./profiles.js";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -46,6 +46,10 @@ export function createBrowserServer(options = {}) {
   // Pending user signal for wait_for_user
   let userWaitResolve = null;
 
+  // Stage B network state
+  let respCapture = null;  // { buffer, onResp, onFinish }
+  let blockState = null;   // { onPaused }
+
   // Ensure session directory exists
   if (!existsSync(sessionDir)) {
     mkdirSync(sessionDir, { recursive: true });
@@ -67,6 +71,25 @@ export function createBrowserServer(options = {}) {
     await cdpSession.send("Page.addScriptToEvaluateOnNewDocument", {
       source: buildStealthScript(),
     });
+
+    // Proxy auth (opt-in via env): answer 407 challenges with stored creds.
+    // Only enabled when CROW_BROWSER_PROXY_USER is set — otherwise Fetch stays
+    // untouched so crow_browser_block_requests can own it. (The two are
+    // mutually exclusive: don't use an authed proxy and block_requests together.)
+    if (process.env.CROW_BROWSER_PROXY_USER) {
+      try {
+        await cdpSession.send("Fetch.enable", { handleAuthRequests: true, patterns: [{ urlPattern: "*" }] });
+        cdpSession.on("Fetch.authRequired", async (e) => {
+          await cdpSession.send("Fetch.continueWithAuth", {
+            requestId: e.requestId,
+            authChallengeResponse: { response: "ProvideCredentials", username: process.env.CROW_BROWSER_PROXY_USER, password: process.env.CROW_BROWSER_PROXY_PASS || "" },
+          }).catch(() => {});
+        });
+        cdpSession.on("Fetch.requestPaused", async (e) => {
+          await cdpSession.send("Fetch.continueRequest", { requestId: e.requestId }).catch(() => {});
+        });
+      } catch { /* proxy auth best-effort */ }
+    }
   }
 
   /**
@@ -82,13 +105,40 @@ export function createBrowserServer(options = {}) {
   // ==========================================
   server.tool(
     "crow_browser_launch",
-    "Start or restart the browser container and connect via CDP. Returns VNC URL.",
+    "Start/restart the browser and connect via CDP. Returns the VNC URL. Pass proxy_url to route through a proxy (recreates the container — set BEFORE navigating; save sessions first).",
     {
       restart: z.boolean().optional().describe("Force restart the container"),
+      proxy_url: z.string().optional().describe("Proxy to route through, e.g. http://host:port or socks5://host:port. Empty string clears it. Recreates the container (loses the current page/session — save_session first)."),
     },
-    async ({ restart }) => {
+    async ({ restart, proxy_url }) => {
       try {
-        if (restart) {
+        const changingProxy = typeof proxy_url === "string";
+
+        if (changingProxy) {
+          // Proxy is a container-launch flag, so a new proxy needs a recreate (not just restart).
+          if (browser) { await browser.close().catch(() => {}); browser = null; context = null; page = null; cdpSession = null; }
+          let vncpw = "", composeFile = "";
+          try {
+            const env = execFileSync("docker", ["inspect", "crow-browser", "--format", "{{range .Config.Env}}{{println .}}{{end}}"], { timeout: 10000 }).toString();
+            vncpw = (env.split("\n").find((l) => l.startsWith("VNC_PASSWORD=")) || "").slice("VNC_PASSWORD=".length);
+            composeFile = execFileSync("docker", ["inspect", "crow-browser", "--format", '{{index .Config.Labels "com.docker.compose.project.config_files"}}'], { timeout: 10000 }).toString().trim();
+          } catch { /* fall through to error */ }
+          if (!vncpw) return { content: [{ type: "text", text: "Could not read VNC password from the running container — set CROW_BROWSER_PROXY in the environment and recreate the container manually." }], isError: true };
+          if (!composeFile) composeFile = "/home/kh0pp/crow/bundles/browser/docker-compose.yml";
+          try {
+            execFileSync("docker", ["compose", "-f", composeFile, "up", "-d", "--force-recreate"], {
+              timeout: 90000,
+              env: { ...process.env, CROW_BROWSER_VNC_PASSWORD: vncpw, CROW_BROWSER_PROXY: proxy_url },
+            });
+          } catch (e) {
+            return { content: [{ type: "text", text: `Failed to recreate container with proxy: ${e.message}` }], isError: true };
+          }
+          // Poll CDP readiness
+          for (let i = 0; i < 30; i++) {
+            try { const r = await fetch(`${cdpUrl}/json/version`); if (r.ok) break; } catch {}
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+        } else if (restart) {
           if (browser) {
             await browser.close().catch(() => {});
             browser = null;
@@ -119,6 +169,7 @@ export function createBrowserServer(options = {}) {
               cdp_url: cdpUrl,
               user_agent: profile.ua,
               page_url: page.url(),
+              ...(changingProxy ? { proxy: proxy_url || "(cleared)" } : {}),
             }, null, 2),
           }],
         };
@@ -645,11 +696,12 @@ export function createBrowserServer(options = {}) {
   // Tool: crow_browser_extract_text
   server.tool(
     "crow_browser_extract_text",
-    "Extract clean article text from the current page using Mozilla Readability. Strips ads, nav, and boilerplate.",
+    "Extract clean article text from the current page using Mozilla Readability. Strips ads, nav, and boilerplate. Set format='markdown' for structured Markdown.",
     {
       include_metadata: z.boolean().optional().describe("Include title, byline, excerpt (default: true)"),
+      format: z.enum(["text", "markdown"]).optional().describe("Output format (default: text)"),
     },
-    async ({ include_metadata }) => {
+    async ({ include_metadata, format }) => {
       try {
         const p = await getPage();
         const html = await p.content();
@@ -666,6 +718,14 @@ export function createBrowserServer(options = {}) {
           return { content: [{ type: "text", text: "Could not extract article content from this page." }] };
         }
 
+        let body = article.textContent;
+        if (format === "markdown" && article.content) {
+          try {
+            const Turndown = (await import("turndown")).default;
+            body = new Turndown({ headingStyle: "atx", codeBlockStyle: "fenced" }).turndown(article.content);
+          } catch { body = article.textContent; }
+        }
+
         const meta = include_metadata !== false ? {
           title: article.title,
           byline: article.byline,
@@ -675,8 +735,8 @@ export function createBrowserServer(options = {}) {
         } : null;
 
         const result = meta
-          ? `Title: ${article.title}\nByline: ${article.byline || "Unknown"}\nURL: ${url}\n\n${article.textContent}`
-          : article.textContent;
+          ? `Title: ${article.title}\nByline: ${article.byline || "Unknown"}\nURL: ${url}\n\n${body}`
+          : body;
 
         return { content: [{ type: "text", text: result }] };
       } catch (err) {
@@ -969,6 +1029,408 @@ export function createBrowserServer(options = {}) {
         };
       } catch (err) {
         return { content: [{ type: "text", text: `HAR capture failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // ==========================================
+  // Phase 2 — Stage A: waits, scroll, session, paywall, pdf
+  // ==========================================
+
+  // Tool: crow_browser_wait_for
+  server.tool(
+    "crow_browser_wait_for",
+    "Wait for an element to reach a state (appear, hide, attach, detach). Robust alternative to fixed sleeps for flaky/dynamic pages.",
+    {
+      selector: z.string().describe("CSS selector to wait on"),
+      timeout_ms: z.number().optional().describe("Max wait in ms (default: 10000)"),
+      state: z.enum(["visible", "hidden", "attached", "detached"]).optional().describe("Target state (default: visible)"),
+    },
+    async ({ selector, timeout_ms, state }) => {
+      try {
+        const p = await getPage();
+        await p.waitForSelector(selector, { timeout: timeout_ms || 10000, state: state || "visible" });
+        return { content: [{ type: "text", text: `Element '${selector}' reached state '${state || "visible"}'.` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `wait_for failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool: crow_browser_scroll_extract
+  server.tool(
+    "crow_browser_scroll_extract",
+    "Auto-scroll an infinite-scroll / lazy-load page, collecting items each pass. Stops when no new items load or max_scrolls is hit.",
+    {
+      extract_selector: z.string().describe("CSS selector for the repeating items to collect (textContent)"),
+      scroll_pause_ms: z.number().optional().describe("Pause between scrolls in ms (default: 1200)"),
+      max_scrolls: z.number().optional().describe("Max scroll iterations (default: 20)"),
+      container_selector: z.string().optional().describe("Scrollable container selector (default: window)"),
+    },
+    async ({ extract_selector, scroll_pause_ms, max_scrolls, container_selector }) => {
+      try {
+        const p = await getPage();
+        const pause = scroll_pause_ms || 1200;
+        const maxS = max_scrolls || 20;
+        const seen = new Set();
+        const items = [];
+        let stagnant = 0;
+
+        for (let i = 0; i < maxS; i++) {
+          const batch = await p.evaluate((sel) => {
+            return Array.from(document.querySelectorAll(sel)).map((e) => e.textContent.trim());
+          }, extract_selector);
+
+          let added = 0;
+          for (const t of batch) {
+            if (t && !seen.has(t)) { seen.add(t); items.push(t); added++; }
+          }
+
+          if (added === 0) { stagnant++; if (stagnant >= 2) break; } else { stagnant = 0; }
+
+          await p.evaluate((cSel) => {
+            const el = cSel ? document.querySelector(cSel) : null;
+            if (el) el.scrollTo(0, el.scrollHeight);
+            else window.scrollTo(0, document.body.scrollHeight);
+          }, container_selector || null);
+          await delay(pause, pause + 400);
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ items_collected: items.length, items }, null, 2),
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text", text: `scroll_extract failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool: crow_browser_set_headers
+  server.tool(
+    "crow_browser_set_headers",
+    "Set extra HTTP headers (e.g. User-Agent, Referer) for all subsequent requests in this context. Apply BEFORE navigating.",
+    {
+      headers: z.record(z.string(), z.string()).describe("Header name → value map"),
+    },
+    async ({ headers }) => {
+      try {
+        await getPage();
+        await context.setExtraHTTPHeaders(headers);
+        return { content: [{ type: "text", text: `Set ${Object.keys(headers).length} extra header(s). They apply to subsequent navigations.` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `set_headers failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool: crow_browser_add_cookies
+  server.tool(
+    "crow_browser_add_cookies",
+    "Inject cookies into the current context (e.g. a copied session). Each cookie needs name, value, and either url or domain+path.",
+    {
+      cookies: z.array(z.record(z.string(), z.any())).describe("Array of Playwright cookie objects"),
+    },
+    async ({ cookies }) => {
+      try {
+        await getPage();
+        await context.addCookies(cookies);
+        return { content: [{ type: "text", text: `Added ${cookies.length} cookie(s) to the context.` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `add_cookies failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool: crow_browser_extract_article
+  server.tool(
+    "crow_browser_extract_article",
+    "Extract a (possibly paywalled) article by trying a fallback ladder: live page → archive.today → Wayback → 12ft.io. Each candidate is loaded IN the stealth browser and parsed with Readability, then quality-gated. Returns the first clean result, tagged with the method that won.",
+    {
+      url: z.string().describe("Article URL to extract"),
+      methods: z.array(z.enum(["live", "archive", "wayback", "12ft"])).optional().describe("Ordered methods to try (default: all)"),
+      format: z.enum(["text", "markdown"]).optional().describe("Output format (default: markdown)"),
+      min_words: z.number().optional().describe("Min word count to accept a candidate (default: 120)"),
+    },
+    async ({ url, methods, format, min_words }) => {
+      const order = methods || ["live", "archive", "wayback", "12ft"];
+      const minW = min_words || 120;
+      const PAYWALL = [
+        "subscribe to continue", "subscription required", "free articles remaining",
+        "you've reached your limit", "create a free account", "sign in to read",
+        "this content is for subscribers", "become a member", "log in to continue",
+      ];
+      const candidateUrl = (m) => {
+        if (m === "live") return url;
+        if (m === "archive") return `https://archive.ph/newest/${url}`;
+        if (m === "wayback") return `https://web.archive.org/web/2/${encodeURI(url)}`;
+        if (m === "12ft") return `https://12ft.io/${url}`;
+        return url;
+      };
+      try {
+        const p = await getPage();
+        const { parseHTML } = await import("linkedom");
+        const { Readability } = await import("@mozilla/readability");
+        const attempts = [];
+
+        for (const m of order) {
+          try {
+            await p.goto(candidateUrl(m), { waitUntil: "domcontentloaded", timeout: 30000 });
+            await delay(800, 1600);
+            const html = await p.content();
+            const { document } = parseHTML(html);
+            const article = new Readability(document).parse();
+            if (!article || !article.textContent) { attempts.push(`${m}: no article`); continue; }
+
+            const text = article.textContent.trim();
+            const words = text.split(/\s+/).length;
+            const low = text.toLowerCase();
+            const paywalled = PAYWALL.some((ph) => low.includes(ph));
+
+            if (words < minW) { attempts.push(`${m}: too short (${words}w)`); continue; }
+            if (paywalled) { attempts.push(`${m}: paywall phrase`); continue; }
+
+            let body = text;
+            if ((format || "markdown") === "markdown" && article.content) {
+              try {
+                const Turndown = (await import("turndown")).default;
+                body = new Turndown({ headingStyle: "atx", codeBlockStyle: "fenced" }).turndown(article.content);
+              } catch { body = text; }
+            }
+
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  ok: true, method: m, words, title: article.title,
+                  byline: article.byline, url, format: format || "markdown",
+                }, null, 2) + "\n\n---\n\n" + body,
+              }],
+            };
+          } catch (e) {
+            attempts.push(`${m}: ${e.message}`);
+          }
+        }
+
+        return {
+          content: [{ type: "text", text: `All methods failed for ${url}:\n- ${attempts.join("\n- ")}` }],
+          isError: true,
+        };
+      } catch (err) {
+        return { content: [{ type: "text", text: `extract_article failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool: crow_browser_extract_pdf
+  server.tool(
+    "crow_browser_extract_pdf",
+    "Extract text (or metadata) from a PDF by URL or local path, using pdfjs-dist. Good for gov reports, papers, invoices.",
+    {
+      url_or_path: z.string().describe("PDF URL (http/https) or absolute local file path"),
+      type: z.enum(["text", "metadata"]).optional().describe("What to extract (default: text)"),
+      max_pages: z.number().optional().describe("Max pages to read (default: 100)"),
+    },
+    async ({ url_or_path, type, max_pages }) => {
+      try {
+        let data;
+        if (/^https?:\/\//i.test(url_or_path)) {
+          const res = await fetch(url_or_path);
+          if (!res.ok) return { content: [{ type: "text", text: `Fetch failed: HTTP ${res.status}` }], isError: true };
+          data = new Uint8Array(await res.arrayBuffer());
+        } else {
+          data = new Uint8Array(readFileSync(url_or_path));
+        }
+
+        const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+        const doc = await pdfjs.getDocument({ data, useWorkerFetch: false, isEvalSupported: false, useSystemFonts: true }).promise;
+
+        if (type === "metadata") {
+          const md = await doc.getMetadata().catch(() => ({ info: {} }));
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ pages: doc.numPages, info: md.info || {} }, null, 2),
+            }],
+          };
+        }
+
+        const limit = Math.min(doc.numPages, max_pages || 100);
+        const parts = [];
+        for (let i = 1; i <= limit; i++) {
+          const page = await doc.getPage(i);
+          const tc = await page.getTextContent();
+          const txt = tc.items.map((it) => (it.str || "")).join(" ").replace(/\s+/g, " ").trim();
+          parts.push(`[page ${i}]\n${txt}`);
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: `PDF: ${doc.numPages} pages (read ${limit})\n\n` + parts.join("\n\n"),
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text", text: `extract_pdf failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // ==========================================
+  // Phase 2 — Stage B: network capture, blocking, downloads
+  // ==========================================
+
+  // Tool: crow_browser_capture_responses
+  server.tool(
+    "crow_browser_capture_responses",
+    "Capture network responses (incl. JSON bodies) via raw CDP — the fastest way to find a site's hidden JSON API. start, then navigate/interact, then stop to get results.",
+    {
+      action: z.enum(["start", "stop"]).describe("Start or stop capturing"),
+      filter_url_pattern: z.string().optional().describe("Regex; only capture responses whose URL matches"),
+      include_response_body: z.boolean().optional().describe("Fetch response bodies (default: false — metadata only)"),
+    },
+    async ({ action, filter_url_pattern, include_response_body }) => {
+      try {
+        await getPage();
+        if (!cdpSession) return { content: [{ type: "text", text: "CDP session not available" }], isError: true };
+
+        if (action === "start") {
+          if (respCapture) {
+            cdpSession.off("Network.responseReceived", respCapture.onResp);
+            cdpSession.off("Network.loadingFinished", respCapture.onFinish);
+          }
+          let re = null;
+          if (filter_url_pattern) {
+            try { re = new RegExp(filter_url_pattern); } catch (e) { return { content: [{ type: "text", text: `Bad regex: ${e.message}` }], isError: true }; }
+          }
+          const buffer = [];
+          const meta = {};
+          const onResp = (p) => {
+            if (!re || re.test(p.response.url)) {
+              meta[p.requestId] = { url: p.response.url, status: p.response.status, mimeType: p.response.mimeType };
+            }
+          };
+          const onFinish = async (p) => {
+            const entry = meta[p.requestId];
+            if (!entry) return;
+            if (include_response_body) {
+              try {
+                const b = await cdpSession.send("Network.getResponseBody", { requestId: p.requestId });
+                entry.body = b.base64Encoded ? `(base64, ${(b.body || "").length} chars)` : (b.body || "").slice(0, 20000);
+              } catch (e) { entry.bodyError = e.message; }
+            }
+            buffer.push(entry);
+            delete meta[p.requestId];
+          };
+          await cdpSession.send("Network.enable");
+          cdpSession.on("Network.responseReceived", onResp);
+          cdpSession.on("Network.loadingFinished", onFinish);
+          respCapture = { buffer, onResp, onFinish };
+          return { content: [{ type: "text", text: `Response capture started${filter_url_pattern ? ` (filter: ${filter_url_pattern})` : ""}${include_response_body ? " with bodies" : ""}. Navigate/interact, then call with action='stop'.` }] };
+        }
+
+        // stop
+        if (!respCapture) return { content: [{ type: "text", text: "No capture in progress." }] };
+        cdpSession.off("Network.responseReceived", respCapture.onResp);
+        cdpSession.off("Network.loadingFinished", respCapture.onFinish);
+        const results = respCapture.buffer;
+        respCapture = null;
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ responses_captured: results.length, responses: results.slice(0, 100) }, null, 2),
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: "text", text: `capture_responses failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool: crow_browser_block_requests
+  server.tool(
+    "crow_browser_block_requests",
+    "Block requests whose URL contains any of the given substrings (ads/trackers/images) via raw CDP Fetch. Speeds pages up and lowers detection surface. Call with action='stop' to clear.",
+    {
+      action: z.enum(["start", "stop"]).describe("Start or stop blocking"),
+      patterns: z.array(z.string()).optional().describe("URL substrings to block (e.g. ['doubleclick','google-analytics','.jpg'])"),
+    },
+    async ({ action, patterns }) => {
+      try {
+        await getPage();
+        if (!cdpSession) return { content: [{ type: "text", text: "CDP session not available" }], isError: true };
+
+        if (action === "stop") {
+          if (blockState) {
+            cdpSession.off("Fetch.requestPaused", blockState.onPaused);
+            await cdpSession.send("Fetch.disable").catch(() => {});
+            blockState = null;
+          }
+          return { content: [{ type: "text", text: "Request blocking stopped." }] };
+        }
+
+        const pats = patterns || [];
+        if (blockState) cdpSession.off("Fetch.requestPaused", blockState.onPaused);
+        const onPaused = async (p) => {
+          try {
+            if (pats.some((x) => p.request.url.includes(x))) {
+              await cdpSession.send("Fetch.failRequest", { requestId: p.requestId, errorReason: "BlockedByClient" });
+            } else {
+              await cdpSession.send("Fetch.continueRequest", { requestId: p.requestId });
+            }
+          } catch { /* request may already be gone */ }
+        };
+        await cdpSession.send("Fetch.enable", { patterns: [{ urlPattern: "*" }] });
+        cdpSession.on("Fetch.requestPaused", onPaused);
+        blockState = { onPaused };
+        return { content: [{ type: "text", text: `Blocking ${pats.length} pattern(s): ${pats.join(", ") || "(none — all requests pass)"}. Call action='stop' to clear.` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `block_requests failed: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool: crow_browser_download
+  server.tool(
+    "crow_browser_download",
+    "Trigger a file download by clicking an element, and save it to the host at ~/.crow/browser-downloads/. Uses a container bind mount + CDP download behavior.",
+    {
+      selector: z.string().describe("CSS selector of the link/button that starts the download"),
+      timeout_ms: z.number().optional().describe("Max wait for the file to finish (default: 30000)"),
+    },
+    async ({ selector, timeout_ms }) => {
+      try {
+        const p = await getPage();
+        const hostDir = join(homedir(), ".crow", "browser-downloads");
+        if (!existsSync(hostDir)) mkdirSync(hostDir, { recursive: true });
+
+        // Container writes to /downloads, bind-mounted to hostDir.
+        await cdpSession.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: "/downloads" });
+
+        const before = new Set(existsSync(hostDir) ? readdirSync(hostDir) : []);
+        const el = await p.$(selector);
+        if (!el) return { content: [{ type: "text", text: `Selector not found: ${selector}` }], isError: true };
+        await el.click().catch(() => {});
+
+        const deadline = Date.now() + (timeout_ms || 30000);
+        let found = null;
+        while (Date.now() < deadline) {
+          const now = readdirSync(hostDir).filter((f) => !before.has(f) && !f.endsWith(".crdownload") && !f.endsWith(".part") && !f.endsWith(".tmp"));
+          if (now.length) {
+            const newest = now.map((f) => ({ f, m: statSync(join(hostDir, f)).mtimeMs })).sort((a, b) => b.m - a.m)[0];
+            found = newest.f;
+            break;
+          }
+          await delay(500, 700);
+        }
+        if (!found) return { content: [{ type: "text", text: "Download triggered but no completed file appeared (timeout). Check the bind mount and that the click started a download." }], isError: true };
+
+        const full = join(hostDir, found);
+        return { content: [{ type: "text", text: JSON.stringify({ downloaded: true, file: found, path: full, bytes: statSync(full).size }) }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `download failed: ${err.message}` }], isError: true };
       }
     }
   );

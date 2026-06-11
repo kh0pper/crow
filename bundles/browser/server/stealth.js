@@ -81,6 +81,62 @@ navigator.permissions.query = (p) => p.name === 'notifications'
 
 ${typeof opts.timezoneOffset === "number" ? `// Override timezone\nDate.prototype.getTimezoneOffset = function() { return ${opts.timezoneOffset}; };` : "// Timezone: using system default"}
 
+// WebRTC: strip private/local ICE candidates so the real LAN IP doesn't leak
+try {
+  const RTC = window.RTCPeerConnection || window.webkitRTCPeerConnection;
+  if (RTC) {
+    const isLocal = (cand) => /(\\b10\\.|\\b192\\.168\\.|\\b172\\.(1[6-9]|2[0-9]|3[01])\\.|\\.local\\b|host)/i.test(cand || "");
+    const Wrapped = function(cfg, ...rest) {
+      const pc = new RTC(cfg, ...rest);
+      const origAdd = pc.addEventListener.bind(pc);
+      pc.addEventListener = (type, fn, ...a) => {
+        if (type === "icecandidate") {
+          return origAdd(type, (e) => { if (e && e.candidate && isLocal(e.candidate.candidate)) return; return fn(e); }, ...a);
+        }
+        return origAdd(type, fn, ...a);
+      };
+      return pc;
+    };
+    Wrapped.prototype = RTC.prototype;
+    window.RTCPeerConnection = Wrapped;
+  }
+} catch (e) {}
+
+// Canvas: imperceptible, session-stable noise to defeat naive canvas fingerprinting
+try {
+  const seed = 0.0001;
+  const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+  HTMLCanvasElement.prototype.toDataURL = function(...a) {
+    try {
+      const ctx = this.getContext("2d");
+      if (ctx && this.width && this.height) {
+        const img = ctx.getImageData(0, 0, this.width, this.height);
+        // nudge a single channel of one pixel — invisible, breaks exact-hash matching
+        img.data[0] = (img.data[0] + 1) % 256;
+        ctx.putImageData(img, 0, 0);
+      }
+    } catch (e) {}
+    return origToDataURL.apply(this, a);
+  };
+} catch (e) {}
+
+// AudioContext: tiny jitter on frequency data (another passive fingerprint vector)
+try {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (AC && AC.prototype.createAnalyser) {
+    const origCreate = AC.prototype.createAnalyser;
+    AC.prototype.createAnalyser = function(...a) {
+      const an = origCreate.apply(this, a);
+      const origGet = an.getFloatFrequencyData.bind(an);
+      an.getFloatFrequencyData = function(arr) {
+        origGet(arr);
+        for (let i = 0; i < arr.length; i++) arr[i] += (Math.sin(i) * 1e-5);
+      };
+      return an;
+    };
+  }
+} catch (e) {}
+
 // === End Crow Browser Stealth Init ===
 `;
 }

@@ -66,6 +66,14 @@ kill -0 "$WEBSOCKIFY_PID" 2>/dev/null || die "websockify failed to start"
 # --- Chromium with CDP ---
 CHROME_PATH=$(find /root/.cache/ms-playwright -name "chrome" -type f 2>/dev/null | head -1)
 [ -n "$CHROME_PATH" ] || die "Chrome not found in Playwright cache"
+
+# Optional upstream proxy (http://host:port or socks5://host:port). Empty = direct.
+PROXY_FLAG=""
+if [ -n "${CHROME_PROXY:-}" ]; then
+  log "Routing through proxy: ${CHROME_PROXY}"
+  PROXY_FLAG="--proxy-server=${CHROME_PROXY}"
+fi
+
 log "Launching Chromium ($CHROME_PATH) with CDP on 127.0.0.1:${CDP_PORT}..."
 "$CHROME_PATH" \
   --no-sandbox --disable-setuid-sandbox \
@@ -77,6 +85,7 @@ log "Launching Chromium ($CHROME_PATH) with CDP on 127.0.0.1:${CDP_PORT}..."
   --no-first-run --no-default-browser-check \
   --disable-infobars --disable-extensions \
   --user-data-dir=/root/.config/chromium-crow \
+  ${PROXY_FLAG} \
   "about:blank" &
 CHROME_PID=$!
 

@@ -35,6 +35,36 @@ const USER_AGENTS = [
       { brand: "Not_A Brand", version: "24" },
     ],
   },
+  // Chrome 133 on Windows
+  {
+    ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+    platform: "Win32",
+    brands: [
+      { brand: "Google Chrome", version: "133" },
+      { brand: "Chromium", version: "133" },
+      { brand: "Not_A Brand", version: "24" },
+    ],
+  },
+  // Chrome 133 on macOS
+  {
+    ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+    platform: "MacIntel",
+    brands: [
+      { brand: "Google Chrome", version: "133" },
+      { brand: "Chromium", version: "133" },
+      { brand: "Not_A Brand", version: "24" },
+    ],
+  },
+  // Edge 132 on Windows
+  {
+    ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 Edg/132.0.0.0",
+    platform: "Win32",
+    brands: [
+      { brand: "Microsoft Edge", version: "132" },
+      { brand: "Chromium", version: "132" },
+      { brand: "Not_A Brand", version: "24" },
+    ],
+  },
 ];
 
 /**
