@@ -20,6 +20,31 @@ import { resolveDataDir } from "../db.js";
 import { isSyncable } from "../gateway/dashboard/settings/sync-allowlist.js";
 import bus from "../shared/event-bus.js";
 
+/**
+ * Build the canonical wire row for a crow_context DB row.
+ *
+ * Allowlist: {section_key, section_title, content, sort_order, enabled,
+ *   device_id, project_id}.  Never includes id (instance-local AUTOINCREMENT),
+ * lamport_ts, or updated_at.  enabled comes from the DB row as an INTEGER (0/1)
+ * — better-sqlite3 throws on boolean binds, so the caller must not coerce it.
+ *
+ * Used by every crow_context emit site so the allowlist is single-sourced.
+ *
+ * @param {object} dbRow — a row returned by a SELECT * FROM crow_context query
+ * @returns {object} wire object safe to pass to emitChange
+ */
+export function buildCrowContextWireRow(dbRow) {
+  return {
+    section_key:   dbRow.section_key,
+    section_title: dbRow.section_title,
+    content:       dbRow.content,
+    sort_order:    dbRow.sort_order,
+    enabled:       dbRow.enabled,  // INTEGER 0/1 from DB
+    device_id:     dbRow.device_id   ?? null,
+    project_id:    dbRow.project_id  ?? null,
+  };
+}
+
 // Tables that participate in core sync
 export const SYNCED_TABLES = [
   "memories",
@@ -499,6 +524,15 @@ export class InstanceSyncManager {
             sql: `UPDATE dashboard_settings SET lamport_ts = ? WHERE key = ?`,
             args: [lamportTs, row.key],
           });
+        } else if (table === "crow_context" && row.section_key !== undefined) {
+          // Composite-key stamp; MAX(COALESCE(...)) guards against out-of-order
+          // concurrent emitChange calls — plain MAX(NULL,x) is NULL in SQLite so
+          // the COALESCE is load-bearing.
+          await this.db.execute({
+            sql: `UPDATE crow_context SET lamport_ts = MAX(COALESCE(lamport_ts, 0), ?)
+                  WHERE section_key = ? AND device_id IS ? AND project_id IS ?`,
+            args: [lamportTs, row.section_key, row.device_id ?? null, row.project_id ?? null],
+          });
         } else if (row.id !== undefined) {
           await this.db.execute({
             sql: `UPDATE ${table} SET lamport_ts = ? WHERE id = ?`,
@@ -616,6 +650,24 @@ export class InstanceSyncManager {
       return;
     }
 
+    // crow_context is keyed by composite (section_key, device_id, project_id) — route
+    // ALL ops (insert/update/delete) through the composite-key handler so that:
+    //   • insert collisions get LWW upsert instead of the null-id warn dead-end
+    //   • updates and deletes are applied/conflicted by composite key rather than id
+    // The invalidateContextCache() call that previously lived below the switch now
+    // fires inside _applyCrowContext on every apply, which is the ONLY path reached
+    // (the return below prevents fall-through).  The old position was only reachable
+    // because id-less entries fell through _applyUpdate's early-return; that path
+    // becomes unreachable here for crow_context.
+    if (table === "crow_context") {
+      try {
+        await this._applyCrowContext(op, row, lamport_ts, instance_id);
+      } catch (err) {
+        console.warn(`[instance-sync] Failed to apply ${op} on crow_context:`, err.message);
+      }
+      return;
+    }
+
     // Conflict detection gates both updates and deletes — a stale remote delete
     // with a lower lamport_ts must not silently destroy a newer local edit (D6).
     if ((op === "update" || op === "delete") && row.id !== undefined) {
@@ -638,16 +690,6 @@ export class InstanceSyncManager {
       }
     } catch (err) {
       console.warn(`[instance-sync] Failed to apply ${op} on ${table}:`, err.message);
-    }
-
-    // Peer-sync writes land in THIS process (the gateway hosts the sync
-    // manager), so clear the in-process context cache immediately instead of
-    // letting readers wait out its 60s TTL.
-    if (table === "crow_context") {
-      try {
-        const { invalidateContextCache } = await import("../memory/crow-context.js");
-        invalidateContextCache();
-      } catch {}
     }
 
     // Broadcast a messages:changed event when a synced-in message row
@@ -704,6 +746,172 @@ export class InstanceSyncManager {
               value = excluded.value, updated_at = datetime('now'), lamport_ts = excluded.lamport_ts`,
       args: [row.key, row.value ?? "", lamportTs],
     });
+  }
+
+  /**
+   * Apply a crow_context mutation (insert / update / delete).
+   *
+   * crow_context is keyed by composite (section_key, device_id, project_id) with
+   * four NULL-aware partial unique indexes.  Standard _applyUpdate/_applyDelete early-
+   * return when row.id is undefined, so we route all ops here instead.
+   *
+   * Conflict rules follow _checkConflict (W4-1 standard):
+   *   incomingTs > localTs  → apply
+   *   incomingTs <= localTs, data equal → silent skip
+   *   incomingTs <= localTs, data differ (including tie) → conflict, local kept
+   *
+   * Upsert-on-missing applies to 'update' too (resurrection-over-loss, spec §3 C4):
+   * a re-delivered pre-delete update recreates the section rather than silently
+   * losing the edit.
+   *
+   * @param {"insert"|"update"|"delete"} op
+   * @param {object} row — wire row (no id, no lamport_ts)
+   * @param {number} lamportTs — incoming Lamport timestamp
+   * @param {string} instanceId — origin instance id
+   */
+  async _applyCrowContext(op, row, lamportTs, instanceId) {
+    if (!row || row.section_key == null) {
+      console.warn("[instance-sync] _applyCrowContext: missing section_key — skipping");
+      return;
+    }
+
+    const sk = row.section_key;
+    const devId = row.device_id ?? null;
+    const projId = row.project_id ?? null;
+
+    // Key-filter the incoming row: intersect with live PRAGMA columns; drop
+    // id, lamport_ts, instance_id, and updated_at so an unexpected wire key
+    // doesn't throw.  Cached per-process on the first crow_context apply.
+    if (!this._crowContextCols) {
+      try {
+        const { rows: pragma } = await this.db.execute({
+          sql: "PRAGMA table_info(crow_context)",
+          args: [],
+        });
+        this._crowContextCols = new Set(pragma.map((r) => r.name));
+      } catch {
+        this._crowContextCols = null;
+      }
+    }
+    const ALWAYS_DROP = new Set(["id", "lamport_ts", "instance_id", "updated_at"]);
+    let filteredRow = {};
+    for (const [k, v] of Object.entries(row)) {
+      if (ALWAYS_DROP.has(k)) continue;
+      if (this._crowContextCols && !this._crowContextCols.has(k)) continue;
+      filteredRow[k] = v;
+    }
+
+    // Read local row
+    const { rows: localRows } = await this.db.execute({
+      sql: "SELECT * FROM crow_context WHERE section_key = ? AND device_id IS ? AND project_id IS ?",
+      args: [sk, devId, projId],
+    });
+    const localRow = localRows[0] ?? null;
+    const localTs = localRow?.lamport_ts || 0;
+
+    // ── delete ────────────────────────────────────────────────────────────────
+    if (op === "delete") {
+      if (!localRow) return; // Nothing to delete
+      if (lamportTs > localTs) {
+        await this.db.execute({
+          sql: "DELETE FROM crow_context WHERE section_key = ? AND device_id IS ? AND project_id IS ?",
+          args: [sk, devId, projId],
+        });
+        try {
+          const { invalidateContextCache } = await import("../memory/crow-context.js");
+          invalidateContextCache();
+        } catch {}
+        return;
+      }
+      // stale delete → conflict, local kept
+      const rowIdJson = JSON.stringify({ section_key: sk, device_id: devId, project_id: projId });
+      try {
+        await this._insertConflictRow(
+          "crow_context", rowIdJson,
+          localRow.instance_id || this.localInstanceId, instanceId,
+          localTs, lamportTs,
+          JSON.stringify(localRow), JSON.stringify(filteredRow),
+          "delete",
+        );
+        await this._notifyConflict();
+      } catch (err) {
+        console.warn(`[instance-sync] crow_context conflict LOGGING failed (local data preserved):`, err.message);
+      }
+      return;
+    }
+
+    // ── insert / update ───────────────────────────────────────────────────────
+    if (!localRow) {
+      // No local row: upsert (covers both insert and update ops — resurrection
+      // of a deleted section is preferable to silently losing a catch-up edit).
+      const required = ["section_title", "content"];
+      const missing = required.filter((k) => filteredRow[k] == null);
+      if (missing.length > 0) {
+        console.warn(`[instance-sync] _applyCrowContext: upsert skipped — NOT NULL column(s) absent (${missing.join(", ")}); old-sender partial entry`);
+        return;
+      }
+      // Include composite key columns that may not be in filteredRow already
+      const insertFields = { ...filteredRow, section_key: sk, device_id: devId, project_id: projId, lamport_ts: lamportTs, updated_at: "datetime('now')" };
+      // Build the INSERT without updated_at as a bind param (it's an SQL expression)
+      const colsForInsert = Object.keys(insertFields).filter((k) => k !== "updated_at");
+      const placeholders = colsForInsert.map(() => "?").join(", ");
+      const values = colsForInsert.map((k) => insertFields[k]);
+      await this.db.execute({
+        sql: `INSERT INTO crow_context (${colsForInsert.join(", ")}, updated_at)
+              VALUES (${placeholders}, datetime('now'))`,
+        args: values,
+      });
+      try {
+        const { invalidateContextCache } = await import("../memory/crow-context.js");
+        invalidateContextCache();
+      } catch {}
+      return;
+    }
+
+    // Local row exists
+    if (lamportTs > localTs) {
+      // Newer incoming: UPDATE present filtered keys + lamport_ts + updated_at
+      const updateKeys = Object.keys(filteredRow).filter((k) => !["section_key", "device_id", "project_id"].includes(k));
+      if (updateKeys.length > 0) {
+        const setClauses = [...updateKeys.map((k) => `${k} = ?`), "lamport_ts = ?", "updated_at = datetime('now')"].join(", ");
+        const vals = [...updateKeys.map((k) => filteredRow[k] ?? null), lamportTs];
+        await this.db.execute({
+          sql: `UPDATE crow_context SET ${setClauses} WHERE section_key = ? AND device_id IS ? AND project_id IS ?`,
+          args: [...vals, sk, devId, projId],
+        });
+      } else {
+        // Nothing to update besides timestamps
+        await this.db.execute({
+          sql: `UPDATE crow_context SET lamport_ts = ?, updated_at = datetime('now') WHERE section_key = ? AND device_id IS ? AND project_id IS ?`,
+          args: [lamportTs, sk, devId, projId],
+        });
+      }
+      try {
+        const { invalidateContextCache } = await import("../memory/crow-context.js");
+        invalidateContextCache();
+      } catch {}
+      return;
+    }
+
+    // incomingTs <= localTs: check equivalence
+    if (rowsEquivalent(localRow, filteredRow)) {
+      return; // Re-delivery noise — silent skip
+    }
+
+    // Real conflict (includes tie + different data): local kept
+    const rowIdJson = JSON.stringify({ section_key: sk, device_id: devId, project_id: projId });
+    try {
+      await this._insertConflictRow(
+        "crow_context", rowIdJson,
+        localRow.instance_id || this.localInstanceId, instanceId,
+        localTs, lamportTs,
+        JSON.stringify(localRow), JSON.stringify(filteredRow),
+        op || "update",
+      );
+      await this._notifyConflict();
+    } catch (err) {
+      console.warn(`[instance-sync] crow_context conflict LOGGING failed (local data preserved):`, err.message);
+    }
   }
 
   /**

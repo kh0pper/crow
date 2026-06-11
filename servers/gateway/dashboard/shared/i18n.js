@@ -767,6 +767,10 @@ export const translations = {
     en: "Auto-restore not available (id collision — review data above and resolve manually).",
     es: "Restauración automática no disponible (colisión de id — revisa los datos arriba y resuélvelo manualmente).",
   },
+  "syncConflicts.compositeRestoreDisabled": {
+    en: "Auto-restore not available (composite key — use crow_update_context_section to apply the values shown).",
+    es: "Restauración automática no disponible (clave compuesta — usa crow_update_context_section para aplicar los valores mostrados).",
+  },
   "syncConflicts.resolveAll": { en: "Resolve all (keep current versions)", es: "Resolver todos (mantener versiones actuales)" },
   "syncConflicts.resolveAllConfirm": {
     en: "Mark all unresolved conflicts as resolved? The current (winning) version of each item will be kept.",
