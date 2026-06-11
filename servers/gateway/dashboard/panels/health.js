@@ -9,6 +9,7 @@ import { nestCSS } from "./nest/css.js";
 import { buildNestHTML } from "./nest/html.js";
 import { nestClientJS } from "./nest/client.js";
 import { getNestData, getTrustedInstances } from "./nest/data-queries.js";
+import { collectHealthSignals, invalidateHealthCache } from "./nest/health-signals.js";
 import { getPeerOverview } from "../overview-cache.js";
 import { readSetting } from "../settings/registry.js";
 import { getInstance, getOrCreateLocalInstanceId } from "../../instance-registry.js";
@@ -132,8 +133,21 @@ export default {
     }
 
     const data = await getNestData(db, lang, nestOpts);
+
+    // Collect health signals (30s cached; fails gracefully to null if throws)
+    let healthSignals = null;
+    try {
+      healthSignals = await collectHealthSignals(db);
+    } catch {}
+
+    // Flash param from post-backup redirect
+    const flash = (typeof req.query?.flash === "string" &&
+      ["backup_ok", "backup_fail"].includes(req.query.flash))
+      ? req.query.flash
+      : null;
+
     const css = nestCSS();
-    const html = buildNestHTML(data, lang);
+    const html = buildNestHTML({ ...data, healthSignals, flash }, lang);
     const js = nestClientJS(lang);
     const content = css + html + js;
 
