@@ -81,7 +81,7 @@ export function applyLocalTokenAuth(req) {
 // prefixes in index.js). req.localTokenAuth is only consumed on these, so the
 // middleware reads the DB only for them. Anchoring to this exact shape avoids
 // matching unrelated routes that merely end in /messages (e.g.
-// /dashboard/streams/messages, /api/chat/.../messages, /api/bot-chat/.../messages).
+// /dashboard/streams/messages, /api/chat/.../messages).
 const MCP_PATH_RE = /^(?:\/[a-z0-9-]+)?\/(?:mcp|sse|messages)$/;
 function isMcpPath(p) {
   return typeof p === "string" && MCP_PATH_RE.test(p);

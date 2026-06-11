@@ -1,5 +1,5 @@
 /**
- * Shared vision-model helper used by bot-chat, meta-glasses, and any future
+ * Shared vision-model helper used by meta-glasses and any future
  * vision-consumer. Performs one OpenAI-compatible /chat/completions call with
  * the image encoded as a data URL.
  *
