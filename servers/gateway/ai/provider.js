@@ -15,6 +15,7 @@
 
 import { readEnvFile, resolveEnvPath } from "../env-manager.js";
 import { resolveProviderConfig } from "./resolve-profile.js";
+import { timeoutSignal, AI_TIMEOUT_MS } from "../../shared/http-timeout.js";
 
 // Lazy-loaded adapter modules
 const ADAPTER_LOADERS = {
@@ -292,6 +293,7 @@ export async function getEmbedding(text) {
           model: "text-embedding-3-small",
           input: text,
         }),
+        signal: timeoutSignal(AI_TIMEOUT_MS),
       });
       if (!res.ok) return null;
       const data = await res.json();
@@ -307,6 +309,7 @@ export async function getEmbedding(text) {
           model: "nomic-embed-text",
           input: text,
         }),
+        signal: timeoutSignal(AI_TIMEOUT_MS),
       });
       if (!res.ok) return null;
       const data = await res.json();
@@ -322,6 +325,7 @@ export async function getEmbedding(text) {
           body: JSON.stringify({
             content: { parts: [{ text }] },
           }),
+          signal: timeoutSignal(AI_TIMEOUT_MS),
         }
       );
       if (!res.ok) return null;
