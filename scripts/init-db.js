@@ -2089,5 +2089,91 @@ await initTable("bot_skill_events table", `
     ON bot_skill_events (bot_id, created_at);
 `);
 
+// --- Nav groups migration (W3-6 2026-06-11: spine-aligned groups) ---
+// Replaces the old Core/Content/Media/Education/Tools/System defaults with the
+// new Home/Agents/Connections/Workspace/System spine. Only fires if the stored
+// nav_groups (id,name) pairs exactly match the old defaults — i.e. the user
+// never customized them. Customized configs are left untouched.
+try {
+  const { OLD_NAV_DEFAULTS_2026_06 } = await import(
+    "../servers/gateway/dashboard/nav-registry.js"
+  );
+
+  const storedGroupsRow = await db.execute({
+    sql: "SELECT value FROM dashboard_settings WHERE key = 'nav_groups'",
+    args: [],
+  });
+  const migrationFlagRow = await db.execute({
+    sql: "SELECT value FROM dashboard_settings WHERE key = 'nav_migration_w3_6_v1'",
+    args: [],
+  });
+
+  if (migrationFlagRow.rows.length === 0 && storedGroupsRow.rows.length > 0) {
+    const stored = JSON.parse(storedGroupsRow.rows[0].value);
+    // Deep-match on (id, name) pairs — ignoring collapsed and order.
+    const oldSet = new Map(OLD_NAV_DEFAULTS_2026_06.groups.map((g) => [g.id, g.name]));
+    const storedSet = new Map(stored.map((g) => [g.id, g.name]));
+    const isDefaultConfig =
+      oldSet.size === storedSet.size &&
+      [...oldSet.entries()].every(([id, name]) => storedSet.get(id) === name);
+
+    if (isDefaultConfig) {
+      // Unmodified config — replace both keys with new spine-aligned defaults.
+      const newGroups = [
+        { id: "home", name: "Home", collapsed: false },
+        { id: "agents", name: "Agents", collapsed: false },
+        { id: "connections", name: "Connections", collapsed: false },
+        { id: "workspace", name: "Workspace", collapsed: false },
+        { id: "system", name: "System", collapsed: true },
+      ];
+      const newAssignments = {
+        nest: "home",
+        "bot-builder": "agents",
+        "bot-board": "agents",
+        skills: "agents",
+        orchestrator: "agents",
+        connect: "connections",
+        contacts: "connections",
+        messages: "connections",
+        fediverse: "connections",
+        memory: "workspace",
+        projects: "workspace",
+        blog: "workspace",
+        files: "workspace",
+        extensions: "workspace",
+        settings: "system",
+        "design-system": "system",
+      };
+      await db.execute({
+        sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('nav_groups', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        args: [JSON.stringify(newGroups)],
+      });
+      await db.execute({
+        sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('nav_panel_assignments', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        args: [JSON.stringify(newAssignments)],
+      });
+      console.log("Nav migration W3-6: replaced default groups with spine-aligned defaults.");
+    } else {
+      console.log("Nav migration W3-6: customized nav config detected — leaving groups untouched.");
+    }
+
+    // Mark the migration as run regardless of outcome.
+    await db.execute({
+      sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('nav_migration_w3_6_v1', '1', datetime('now')) ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = excluded.updated_at",
+      args: [],
+    });
+  } else if (migrationFlagRow.rows.length > 0) {
+    // Migration already ran — nothing to do.
+  } else {
+    // No stored nav_groups yet — fresh install, new defaults seeded by resolveNavGroups.
+    await db.execute({
+      sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('nav_migration_w3_6_v1', '1', datetime('now')) ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = excluded.updated_at",
+      args: [],
+    });
+  }
+} catch (err) {
+  console.warn("Nav migration W3-6 skipped:", err.message);
+}
+
 console.log("Database initialized successfully (local file)");
 db.close();
