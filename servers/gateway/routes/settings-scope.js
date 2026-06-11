@@ -28,7 +28,10 @@ import { isSyncable } from "../dashboard/settings/sync-allowlist.js";
 export default function settingsScopeRouter(authMiddleware) {
   const router = Router();
 
-  router.get("/api/settings/scope", authMiddleware, async (req, res) => {
+  // Both routes are private — auth the whole prefix (W2-1 tidy).
+  router.use("/api/settings/scope", authMiddleware);
+
+  router.get("/api/settings/scope", async (req, res) => {
     const key = String(req.query.key || "");
     if (!key) return res.status(400).json({ error: "key required" });
 
@@ -44,7 +47,7 @@ export default function settingsScopeRouter(authMiddleware) {
     }
   });
 
-  router.post("/api/settings/scope", authMiddleware, async (req, res) => {
+  router.post("/api/settings/scope", async (req, res) => {
     const { key, scope } = req.body || {};
     if (!key || !scope) {
       return res.status(400).json({ error: "key and scope required" });
