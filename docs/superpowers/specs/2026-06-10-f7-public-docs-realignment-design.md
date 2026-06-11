@@ -23,9 +23,11 @@ This is **content/marketing work, not server code.** No gateway code changes, no
 >
 > It's also an **all-in-one self-hosted home server** — install apps from an app store (file sync, photos, smart home, media, local AI) the way you would on any home-server OS. The difference: because every app installs as a bundle, what you self-host isn't just an app — it's a capability your agents and AI clients can use. AI-driven, not just AI-adjacent.
 >
-> Crow also lets you **share** — memories, projects, and messages move directly between Crow users over an encrypted peer-to-peer layer, with no central server — and **spans your devices**, pulling multiple instances into one private interface.
+> Crow also lets you **share** — memories, projects, and messages move directly between Crow users over an encrypted peer-to-peer layer, with no central server — and **spans your devices**, pulling multiple instances into one private interface. Access and control all of your connected instances from the **open-source Android app**, or from the dashboard in any browser.
 >
 > Set it up in minutes with the first-run and connect wizards. Your data stays on your hardware; only what you choose to send a cloud provider leaves.
+>
+> Crow is **open source, and developers are welcome** — build integrations, skills, core tools, panels, and self-hosting bundles for the ecosystem.
 
 ### Load-bearing positioning points (must land prominently, not be buried)
 
@@ -47,10 +49,10 @@ Chosen over targeted realignment. Each long-form surface (README, docs landing, 
 4. **Bundles = service + tools + skills** as the unit of capability, explicitly defined (today they're described loosely as "add-ons"), tied to "integrates with the services you already use."
 5. Existing feature inventory ("What Crow does" table, "Crow for your field" cuts) **repositioned as capabilities** reachable every way you use Crow — kept, not discarded.
 6. **All-in-one home server** as a pillar section — elevate the existing "Crow OS & Self-Hosting" content; AI-driven app store, every app also a bundle/capability (unnamed Umbrel analogy).
-7. **Sharing + multi-instance** as a first-class pillar section (encrypted P2P sharing; multi-device sync).
+7. **Sharing + multi-instance** as a first-class pillar section (encrypted P2P sharing; multi-device sync). Call out the **open-source Android app** as a way to access and control all connected instances (today README omits it; docs `platforms/android` EN+ES exist).
 8. **Privacy/data-ownership** reframed as local-*or*-cloud (BYOAI), system-of-record-is-yours — not local-only.
 9. **Onboarding/Quick Start** updated to foreground the first-run wizard (F6b: Welcome → Integrations → Bot → Connect → Done) and the connect wizard (F6c-1).
-10. Developer Program retained.
+10. **Developer Program retained and foregrounded** — "open source, developers welcome" gets a visible beat near the top (not only the closing section): integrations, skills, core tools, panels, bundles.
 
 Voice: match each surface's existing register. README/docs are prose — em dashes are fine (the crow.md "no em dash / no not-X-but-Y" rules are **exempt** for developer/marketing docs). Keep claims to capabilities Crow ships today (the existing copy is careful about this — preserve that discipline; e.g. "live one-way subscription is a planned follow-on").
 
