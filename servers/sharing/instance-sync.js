@@ -179,10 +179,12 @@ export class InstanceSyncManager {
         sql: "INSERT OR IGNORE INTO sync_state (instance_id, local_counter) VALUES (?, 0)",
         args: [this.localInstanceId],
       });
+      // Only latch on success — a transient DB error must not permanently
+      // disable seeding (the writers would then no-op forever after recovery).
+      this._counterSeeded = true;
     } catch (err) {
       console.warn("[instance-sync] Failed to seed sync_state row:", err.message);
     }
-    this._counterSeeded = true;
   }
 
   /**
@@ -209,6 +211,11 @@ export class InstanceSyncManager {
               WHERE instance_id = ? RETURNING local_counter`,
         args: [this.localInstanceId],
       });
+      if (!retry.rows[0]) {
+        // Seed + retry both failed — the DB is genuinely unavailable. Throw
+        // with a real message instead of a bare TypeError out of emitChange.
+        throw new Error("[instance-sync] sync_state row missing after seed+retry — DB unavailable?");
+      }
       return Number(retry.rows[0].local_counter);
     }
     return Number(rows[0].local_counter);
@@ -678,6 +685,9 @@ export class InstanceSyncManager {
     const localTs = existing[0]?.lamport_ts || 0;
     if (lamportTs < localTs) return;
     if (lamportTs === localTs && existing[0]?.value === row.value) return;
+    // Tie + different value falls through: incoming wins silently (no conflict
+    // row — operator-only settings rarely diverge; asymmetric with _checkConflict
+    // by design, pre-existing behavior).
 
     if (op === "delete") {
       await this.db.execute({
