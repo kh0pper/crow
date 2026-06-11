@@ -27,13 +27,19 @@ export const translations = {
   "nav.settings": { en: "Settings", es: "Ajustes" },
   "nav.contacts": { en: "Contacts", es: "Contactos" },
   "nav.projects": { en: "Projects", es: "Proyectos" },
-  // Nav group headers
+  // Nav group headers — spine-aligned (W3-6)
+  "nav.group.home": { en: "Home", es: "Inicio" },
+  "nav.group.agents": { en: "Agents", es: "Agentes" },
+  "nav.group.connections": { en: "Connections", es: "Conexiones" },
+  "nav.group.workspace": { en: "Workspace", es: "Espacio de trabajo" },
+  "nav.group.system": { en: "System", es: "Sistema" },
+  // Legacy group header keys (kept so old customized configs that still reference
+  // these group ids render translated names rather than bare ids)
   "nav.group.core": { en: "Core", es: "Principal" },
   "nav.group.content": { en: "Content", es: "Contenido" },
   "nav.group.media": { en: "Media", es: "Medios" },
   "nav.group.education": { en: "Education", es: "Educación" },
   "nav.group.tools": { en: "Tools", es: "Herramientas" },
-  "nav.group.system": { en: "System", es: "Sistema" },
 
   // ─── Login ───
   "login.title": { en: "Login", es: "Iniciar sesión" },
