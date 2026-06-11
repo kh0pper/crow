@@ -481,7 +481,7 @@ async function renderDetailView(db, projectId, layout, lang) {
   // Payload is rendered as a small <details> when present so the row stays scannable.
   let auditHtml;
   if (auditEntries.length === 0) {
-    auditHtml = `<p style="color:var(--crow-text-muted);font-size:0.85rem">No audit entries yet. Member changes, source/note/file writes, bot turns, and shares will appear here.</p>`;
+    auditHtml = `<p style="color:var(--crow-text-muted);font-size:0.85rem">No audit entries yet. Member changes, source/note/file writes, agent turns, and shares will appear here.</p>`;
   } else {
     const actorBadge = (t) => {
       const colorMap = { local: "info", bot: "connected", contact: "info", system: "draft" };

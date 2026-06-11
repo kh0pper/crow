@@ -1660,7 +1660,7 @@ export default {
     const list = section("Bots (pi_bot_defs)",
       notice + (rows.length
         ? dataTable(["bot_id", "name", "state", "model", "project", "sessions", "updated", "board", ""], rows)
-        : "<p>No bots yet. Create one below.</p>"));
+        : "<p>No agents yet. Create one below.</p>"));
     // Create form: project + model dropdowns (Phase 1, S3 plan review)
     let createProjects = [];
     try { createProjects = (await db.execute({ sql: "SELECT id, name, slug FROM project_spaces WHERE archived_at IS NULL ORDER BY id", args: [] })).rows; } catch {}
@@ -1673,7 +1673,7 @@ export default {
       createByProv[p].map((m) => `<option value="${escapeHtml(m.key)}"${m.key === "crow-local/qwen3.6-35b-a3b" ? " selected" : ""}>${escapeHtml(m.label)}</option>`).join("") +
       `</optgroup>`
     ).join("");
-    const form = section("Create a bot",
+    const form = section("Create an agent",
       `<form method="POST" class="btb-form"><input type="hidden" name="action" value="create">` +
       formField("Bot id (slug)", "bot_id", { required: true, placeholder: "research-scout" }) +
       formField("Display name", "display_name", { required: true, placeholder: "Research Scout" }) +

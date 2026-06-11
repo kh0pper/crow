@@ -27,13 +27,19 @@ export const translations = {
   "nav.settings": { en: "Settings", es: "Ajustes" },
   "nav.contacts": { en: "Contacts", es: "Contactos" },
   "nav.projects": { en: "Projects", es: "Proyectos" },
-  // Nav group headers
+  // Nav group headers — spine-aligned (W3-6)
+  "nav.group.home": { en: "Home", es: "Inicio" },
+  "nav.group.agents": { en: "Agents", es: "Agentes" },
+  "nav.group.connections": { en: "Connections", es: "Conexiones" },
+  "nav.group.workspace": { en: "Workspace", es: "Espacio de trabajo" },
+  "nav.group.system": { en: "System", es: "Sistema" },
+  // Legacy group header keys (kept so old customized configs that still reference
+  // these group ids render translated names rather than bare ids)
   "nav.group.core": { en: "Core", es: "Principal" },
   "nav.group.content": { en: "Content", es: "Contenido" },
   "nav.group.media": { en: "Media", es: "Medios" },
   "nav.group.education": { en: "Education", es: "Educación" },
   "nav.group.tools": { en: "Tools", es: "Herramientas" },
-  "nav.group.system": { en: "System", es: "Sistema" },
 
   // ─── Login ───
   "login.title": { en: "Login", es: "Iniciar sesión" },
@@ -755,10 +761,10 @@ export const translations = {
     es: "Algunas integraciones requieren reiniciar el gateway para activarse después de agregar sus claves.",
   },
   "onboarding.openIntegrations": { en: "Open Integrations", es: "Abrir Integraciones" },
-  "onboarding.bot.title": { en: "Set up a bot", es: "Configura un bot" },
+  "onboarding.bot.title": { en: "Set up an agent", es: "Configura un agente" },
   "onboarding.bot.body": {
-    en: "Crow can run bots on channels like Gmail and Discord, each with its own persona, skills, and tools. Create one in the Bot Builder.",
-    es: "Crow puede ejecutar bots en canales como Gmail y Discord, cada uno con su propia personalidad, habilidades y herramientas. Crea uno en el Bot Builder.",
+    en: "Crow can run agents on channels like Gmail and Discord, each with its own persona, skills, and tools. Create one in the Bot Builder.",
+    es: "Crow puede ejecutar agentes en canales como Gmail y Discord, cada uno con su propia personalidad, habilidades y herramientas. Crea uno en el Bot Builder.",
   },
   "onboarding.openBotBuilder": { en: "Open Bot Builder", es: "Abrir Bot Builder" },
   "onboarding.connect.title": { en: "Connect an AI client", es: "Conecta un cliente de IA" },
