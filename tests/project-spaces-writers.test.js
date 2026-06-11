@@ -386,6 +386,112 @@ test("1. FK rebuild correctness — data-carrying path with adversarial seed", a
   db.close();
 });
 
+// ── Test 1b: mid-rebuild failure injection (spec test 1 sub-case / review D1) ──
+
+test("1b. mid-rebuild failure: old table intact, no abandoned transaction, recoverable", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-psw-t1b-"));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  const dbPath = join(dir, "crow.db");
+
+  // (a) MAIN rebuild, subprocess-level: minimal old-FK schema + an obstruction
+  // table named data_backends_new — the rebuild's CREATE TABLE fails inside
+  // BEGIN IMMEDIATE, must ROLLBACK and abort init-db (non-zero exit), leaving
+  // the old table + data + old FK untouched.
+  {
+    const raw = createDbClient(dbPath);
+    await raw.executeMultiple(`
+      CREATE TABLE research_projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+        description TEXT, type TEXT DEFAULT 'research', status TEXT DEFAULT 'active',
+        tags TEXT, uuid TEXT, origin_instance_id TEXT,
+        created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+      );
+      CREATE TABLE data_backends (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL,
+        name TEXT NOT NULL, backend_type TEXT DEFAULT 'mcp_server',
+        connection_ref TEXT NOT NULL, schema_info TEXT, status TEXT DEFAULT 'disconnected',
+        last_connected_at TEXT, last_error TEXT, tags TEXT,
+        created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
+        uuid TEXT, origin_instance_id TEXT,
+        FOREIGN KEY (project_id) REFERENCES research_projects(id) ON DELETE CASCADE
+      );
+      INSERT INTO research_projects (id, name) VALUES (1, 'P1');
+      INSERT INTO data_backends (project_id, name, connection_ref) VALUES (1, 'b1', '{}');
+      CREATE TABLE data_backends_new (poison INTEGER);
+    `);
+    raw.close();
+
+    assert.throws(
+      () => runInitDb(dir),
+      "init-db must exit non-zero when a rebuild fails mid-transaction",
+    );
+
+    const check = createDbClient(dbPath);
+    const { rows: oldFk } = await check.execute("PRAGMA foreign_key_list(data_backends)");
+    assert.ok(oldFk.some((r) => r.table === "research_projects"), "old FK intact after failed rebuild");
+    const { rows: dataRows } = await check.execute("SELECT name FROM data_backends");
+    assert.equal(dataRows.length, 1, "data intact after failed rebuild");
+    assert.equal(dataRows[0].name, "b1");
+
+    // Recoverable: remove the obstruction → init-db succeeds → FK re-pointed
+    await check.execute("DROP TABLE data_backends_new");
+    check.close();
+    runInitDb(dir);
+    const check2 = createDbClient(dbPath);
+    const { rows: newFk } = await check2.execute("PRAGMA foreign_key_list(data_backends)");
+    assert.ok(newFk.some((r) => r.table === "project_spaces"), "FK re-pointed after obstruction removed");
+    check2.close();
+  }
+
+  // (b) BUNDLE rebuild, in-process: the genuine no-abandoned-transaction
+  // assertion (a subprocess exit would mask a missing ROLLBACK — here the
+  // SAME long-lived handle keeps using the DB afterwards, like a gateway).
+  {
+    const dir2 = mkdtempSync(join(tmpdir(), "crow-psw-t1b2-"));
+    after(() => rmSync(dir2, { recursive: true, force: true }));
+    runInitDb(dir2);
+    runInitDb(dir2);
+    const db = createDbClient(join(dir2, "crow.db"));
+
+    // Old-FK maker_bound_devices (smallest maker table) + obstruction
+    await db.executeMultiple(`
+      DROP TABLE IF EXISTS maker_bound_devices;
+      CREATE TABLE maker_bound_devices (
+        fingerprint TEXT PRIMARY KEY,
+        learner_id INTEGER REFERENCES research_projects(id) ON DELETE CASCADE,
+        label TEXT, bound_at TEXT NOT NULL DEFAULT (datetime('now')), last_seen_at TEXT
+      );
+      CREATE INDEX idx_maker_bound_learner ON maker_bound_devices(learner_id);
+      INSERT INTO maker_bound_devices (fingerprint) VALUES ('fp-1');
+      CREATE TABLE maker_bound_devices_new (poison INTEGER);
+    `);
+
+    await assert.rejects(
+      () => initMakerLabTables(db),
+      "bundle init must rethrow on a mid-rebuild failure",
+    );
+
+    // No abandoned transaction: a BEGIN IMMEDIATE on a SECOND connection to the
+    // same file must succeed (an open write txn would hold the lock).
+    const probe = createDbClient(join(dir2, "crow.db"));
+    await probe.executeMultiple("BEGIN IMMEDIATE; ROLLBACK;");
+    probe.close();
+
+    // Old table + data intact
+    const { rows: oldFk } = await db.execute("PRAGMA foreign_key_list(maker_bound_devices)");
+    assert.ok(oldFk.some((r) => r.table === "research_projects"), "old bundle FK intact after failed rebuild");
+    const { rows: devRows } = await db.execute("SELECT fingerprint FROM maker_bound_devices");
+    assert.equal(devRows.length, 1, "bundle data intact after failed rebuild");
+
+    // Recoverable
+    await db.execute("DROP TABLE maker_bound_devices_new");
+    await initMakerLabTables(db);
+    const { rows: newFk } = await db.execute("PRAGMA foreign_key_list(maker_bound_devices)");
+    assert.ok(newFk.some((r) => r.table === "project_spaces"), "bundle FK re-pointed after recovery");
+    db.close();
+  }
+});
+
 // ── Test 2: FK enforcement direction ─────────────────────────────────────────
 
 test("2. FK enforcement direction — ps-only project_id accepted; ps DELETE cascades", async () => {
