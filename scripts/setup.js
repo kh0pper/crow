@@ -124,6 +124,13 @@ log("");
 log("Want a guided setup? Run: node scripts/wizard.js");
 log("Want to generate Claude Desktop config? Run: node scripts/generate-desktop-config.js");
 
+// Health check — run after all setup steps; warn on failure but never abort setup
+try {
+  execSync("node scripts/check.js", { cwd: ROOT, stdio: "inherit" });
+} catch {
+  log("Warning: Health check reported issues. Run 'npm run check' manually to review.");
+}
+
 header("Setup Complete");
 
 // Detect deployment type
