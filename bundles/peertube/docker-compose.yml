@@ -16,7 +16,7 @@
 # envelope to .env. Without S3 + aggressive pruning, a single active
 # channel can fill a 500 GB disk within months.
 #
-# Image: chocobozzz/peertube:production-bookworm (stable line; pin tag to
+# Image: chocobozzz/peertube:v8.1.5-bookworm (stable line; pin tag to
 # a specific release for production — we use the floating tag for the
 # roll-out, will pin before merge).
 
@@ -64,7 +64,7 @@ services:
       retries: 10
 
   peertube:
-    image: chocobozzz/peertube:production-bookworm
+    image: chocobozzz/peertube:v8.1.5-bookworm
     container_name: crow-peertube
     networks:
       - default
