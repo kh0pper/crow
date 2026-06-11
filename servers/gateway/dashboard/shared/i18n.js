@@ -531,6 +531,8 @@ export const translations = {
   // jsCardLocked / jsItemLocked: emoji prefix (🔒) and em-dash (—) are hardcoded
   // in the template as \uXXXX escapes to preserve EN byte-identity; these keys
   // cover only the text after the emoji prefix (split at the em-dash boundary).
+  // DO NOT merge Pre/Post into one key — combining would embed the emoji/dash
+  // as UTF-8 bytes instead of \uXXXX escapes and change the rendered EN bytes.
   "botboard.jsCardLockedPre": { en: "A bot is working this card ", es: "Un bot está trabajando esta tarjeta " },
   "botboard.jsCardLockedPost": { en: "fields & plan are read-only.", es: "los campos y el plan son de solo lectura." },
   "botboard.jsItemPrefix": { en: "Item #", es: "Ítem #" },

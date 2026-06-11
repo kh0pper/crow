@@ -12,7 +12,7 @@ import { createDbClient } from "../../../../db.js";
 import { botBoardStyles } from "./css.js";
 import { clientJs } from "./client.js";
 import {
-  TASKS_DB, CARD_STATUSES, STATUS_LABEL, STATUS_BADGE,
+  TASKS_DB, CARD_STATUSES, STATUS_BADGE,
   lockMapFor, derivePlanPath, readPlan, statusLabel,
 } from "./data-queries.js";
 

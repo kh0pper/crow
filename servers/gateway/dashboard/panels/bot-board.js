@@ -9,7 +9,7 @@ import { t } from "../shared/i18n.js";
 import { botBoardStyles } from "./bot-board/css.js";
 import {
   gatherPeerBots, tableMissing, parseBotDef,
-  CARD_STATUSES, STATUS_LABEL,
+  CARD_STATUSES,
 } from "./bot-board/data-queries.js";
 import { clientJs } from "./bot-board/client.js";
 import { handleBotBoardPost } from "./bot-board/api-handlers.js";
