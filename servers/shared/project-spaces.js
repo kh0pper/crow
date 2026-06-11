@@ -111,57 +111,45 @@ export async function createProjectSpace(db, opts = {}) {
   }
 
   // --- Default slug mode ---
-  // We don't know the id pre-insert, so we insert without a final slug,
-  // then set slug + workspace_dir in a second statement.  Both live in one
-  // db.batch() so they're wrapped in a single SQLite transaction.
+  // We don't know the id pre-insert, so the slug/workspace_dir/storage_prefix
+  // are composed IN SQL via last_insert_rowid() — all three statements run
+  // inside ONE db.batch() transaction, so no temp-slug state is ever visible
+  // to other connections and concurrent same-name creates cannot collide.
+  const base = slugify(name.trim());
   const statements = [
-    // Statement 0: insert the row with a placeholder slug (name-only base so
-    // the UNIQUE constraint doesn't collide with the final form).
+    // Statement 0: insert with the name-only base as a placeholder slug.
+    // It is finalized by statement 1 before the transaction commits.
     {
       sql: `INSERT INTO project_spaces
               (slug, name, description, type, status, tags,
                storage_prefix, origin_instance_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [
-        // Temp slug: name-only base; will be overwritten by statement 1.
-        slugify(name.trim()),
-        name.trim(),
-        description,
-        type,
-        status,
-        tags,
-        // storage_prefix placeholder — overwritten below once we have the id
-        `projects/tmp/`,
-        originInstanceId,
-      ],
+            VALUES (?, ?, ?, ?, ?, ?, 'projects/tmp/', ?)`,
+      args: [base, name.trim(), description, type, status, tags, originInstanceId],
+    },
+    // Statement 1: finalize slug + paths using the new row's id.
+    {
+      sql: `UPDATE project_spaces
+               SET slug = ? || '-' || id,
+                   workspace_dir = ? || '/projects/' || ? || '-' || id || '/workspace',
+                   storage_prefix = 'projects/' || ? || '-' || id || '/'
+             WHERE id = last_insert_rowid()`,
+      args: [base, dataDir, base, base],
     },
   ];
-
-  // Execute in a batch so both statements are atomic.
-  // Better-sqlite3's db.batch() wraps everything in one transaction.
-  const [insResult] = await db.batch(statements);
-  const id = Number(insResult.lastInsertRowid);
-
-  // Now we know the id — compute canonical slug + paths and update.
-  const slug = slugify(name.trim(), id);
-  const workspaceDir = workspacePathFor(dataDir, slug);
-  const storagePrefix = storagePrefixFor(slug);
-
-  await db.execute({
-    sql: `UPDATE project_spaces
-             SET slug = ?, workspace_dir = ?, storage_prefix = ?
-           WHERE id = ?`,
-    args: [slug, workspaceDir, storagePrefix, id],
-  });
-
   if (ownerMember) {
-    await db.execute({
+    statements.push({
       sql: `INSERT OR IGNORE INTO project_members
               (project_id, contact_id, role, granted_by_contact_id)
-            VALUES (?, ?, 'owner', NULL)`,
-      args: [id, ownerContactId],
+            VALUES (last_insert_rowid(), ?, 'owner', NULL)`,
+      args: [ownerContactId],
     });
   }
+
+  const results = await db.batch(statements);
+  const id = Number(results[0].lastInsertRowid);
+  const slug = `${base}-${id}`;
+  const workspaceDir = workspacePathFor(dataDir, slug);
+  const storagePrefix = storagePrefixFor(slug);
 
   return { id, slug, workspaceDir, storagePrefix };
 }

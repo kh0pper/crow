@@ -188,3 +188,19 @@ test("updateProjectSpaceMeta: rejects empty name string", async () => {
     /name cannot be empty/
   );
 });
+
+test("createProjectSpace: CONCURRENT same-name creates do not collide (atomic batch)", async () => {
+  // Regression for the temp-slug UNIQUE window: pre-fix, two interleaved
+  // same-name creates could race on the placeholder slug. The whole create
+  // now runs in one transaction, so this must always succeed.
+  const results = await Promise.all([
+    createProjectSpace(db, { name: "Race Case" }),
+    createProjectSpace(db, { name: "Race Case" }),
+    createProjectSpace(db, { name: "Race Case" }),
+  ]);
+  const slugs = results.map((r) => r.slug);
+  assert.equal(new Set(slugs).size, 3, "all three slugs distinct");
+  for (const r of results) {
+    assert.match(r.slug, /^race-case-\d+$/);
+  }
+});
