@@ -903,10 +903,6 @@ await initTable("identity_attestation_revocations table", `
 await addColumnIfMissing("contacts", "external_handle", "TEXT");
 await addColumnIfMissing("contacts", "external_source", "TEXT");
 
-// F.13: scheduler needs the transformed payload to publish. Earlier crosspost_log
-// rows (from F.12) will have NULL — scheduler treats NULL as "manually handled".
-await addColumnIfMissing("crosspost_log", "transformed_payload_json", "TEXT");
-
 // --- F.12: Crosspost rules + log ---
 // crosspost_rules holds the operator's opt-in config: "when a new post appears
 // in app X, publish a transformed copy to app Y". Triggers: on_publish (with
@@ -942,13 +938,19 @@ await initTable("crosspost_log table", `
     scheduled_at INTEGER NOT NULL,
     published_at INTEGER,
     cancelled_at INTEGER,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    transformed_payload_json TEXT
   );
 
   CREATE UNIQUE INDEX IF NOT EXISTS idx_crosspost_log_idem ON crosspost_log(idempotency_key, source_app, target_app);
   CREATE INDEX IF NOT EXISTS idx_crosspost_log_scheduled ON crosspost_log(status, scheduled_at);
   CREATE INDEX IF NOT EXISTS idx_crosspost_log_created ON crosspost_log(created_at DESC);
 `);
+
+// F.13: scheduler needs the transformed payload to publish. Pre-F.13 DBs have
+// the table without the column (fresh DBs get it in the CREATE above). Earlier
+// F.12 rows will have NULL — the scheduler treats NULL as "manually handled".
+await addColumnIfMissing("crosspost_log", "transformed_payload_json", "TEXT");
 
 // --- Per-Device Context Support ---
 // Existing installs have section_key UNIQUE constraint that blocks device overrides.
