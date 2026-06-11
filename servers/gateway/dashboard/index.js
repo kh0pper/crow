@@ -594,6 +594,18 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   // pre-auth flows (no session cookie yet), and CROW_CSRF_STRICT=0 rollback.
   router.use("/dashboard", csrfMiddleware);
 
+  // W3-3: "Run backup now" action — dashboard-authed, CSRF-protected
+  router.post("/dashboard/nest/backup", async (req, res) => {
+    try {
+      const { runBackup } = await import("../routes/admin-backup.js");
+      await runBackup();
+      res.redirectAfterPost("/dashboard/nest?flash=backup_ok");
+    } catch (err) {
+      console.error("[nest-backup] FAILED:", err.message);
+      res.redirectAfterPost("/dashboard/nest?flash=backup_fail");
+    }
+  });
+
   // F.14: Fediverse Admin action POSTs (confirm/reject moderation, cancel/retry crosspost)
   router.post("/dashboard/fediverse/action", async (req, res) => {
     const db = createDbClient();
