@@ -29,8 +29,7 @@ import { randomBytes, createHash } from "node:crypto";
 import { checkInstall as checkHardwareGate } from "../hardware-gate.js";
 import { checkGpuArchCompatible } from "../gpu-arch.js";
 import { forwardBundleAction } from "../../shared/peer-forward.js";
-import { verifyRequest, auditCrossHostCall } from "../../shared/cross-host-auth.js";
-import { getPeerCreds } from "../../shared/peer-credentials.js";
+import { auditCrossHostCall, crossHostVerifyMiddleware } from "../../shared/cross-host-auth.js";
 import { getOrCreateLocalInstanceId, getInstance } from "../instance-registry.js";
 import {
   registerProviderFromManifest,
@@ -197,72 +196,6 @@ function resolveManifestHost(bundleId) {
   if (allow.has(bundleId)) return { host, trusted: true, reason: "allowlist" };
 
   return { host, trusted: false, reason: "untrusted_manifest_host" };
-}
-
-/**
- * Express middleware that verifies an inbound cross-host signed request.
- * Mounted on bundle action routes so only cross-host peers can hit them
- * WITHOUT dashboardAuth — local (same-origin) callers continue to rely on
- * dashboardAuth or OAuth. Peer calls short-circuit those via HMAC.
- *
- * Sets req.crossHostAuth = { valid, sourceInstanceId, ... }.
- * Non-signed requests are passed through (next()) so existing auth paths apply.
- */
-function crossHostVerifyMiddleware(dbClient) {
-  return async (req, res, next) => {
-    const sig = req.headers["x-crow-signature"];
-    if (!sig) return next(); // not a peer call — pass through
-
-    const source = req.headers["x-crow-source"];
-    if (!source) {
-      return res.status(401).json({ error: "missing_x_crow_source" });
-    }
-
-    // Load shared signing_key from peer-tokens.json
-    const creds = getPeerCreds(source);
-    if (!creds || !creds.signing_key) {
-      await auditCrossHostCall(dbClient, {
-        sourceInstanceId: source,
-        direction: "inbound",
-        action: `bundle.${(req.path.split("/").pop() || "")}`,
-        error: "no_signing_key_for_source",
-      });
-      return res.status(401).json({ error: "unknown_peer" });
-    }
-
-    const rawBody = typeof req.body === "string" ? req.body : JSON.stringify(req.body || {});
-    const result = verifyRequest({
-      method: req.method,
-      path: req.originalUrl || req.url,
-      body: rawBody,
-      headers: Object.fromEntries(
-        Object.entries(req.headers).map(([k, v]) => [k.toLowerCase(), Array.isArray(v) ? v[0] : v])
-      ),
-      signingKey: creds.signing_key,
-    });
-
-    req.crossHostAuth = result;
-
-    // Audit the validation attempt regardless of outcome. Handler path may
-    // still fail (e.g. bundle missing) but the HMAC-validity fact is what
-    // matters for the security log.
-    await auditCrossHostCall(dbClient, {
-      sourceInstanceId: source,
-      direction: "inbound",
-      action: `bundle.${(req.path.split("/").pop() || "")}`,
-      bundleId: req.body?.bundle_id,
-      hmacValid: result.valid,
-      timestampSkewMs: result.timestampSkewMs,
-      nonce: result.nonce,
-      error: result.valid ? null : result.reason,
-    });
-
-    if (!result.valid) {
-      return res.status(401).json({ error: result.reason });
-    }
-
-    return next();
-  };
 }
 
 function resolvePanelPath(manifest, bundleId) {
@@ -979,7 +912,6 @@ export default function bundlesRouter() {
       const missing = requiredBundles.filter((id) => !installedIds.has(id));
       if (missing.length > 0) {
         return res.status(400).json({
-          ok: false,
           error: `Bundle '${bundle_id}' requires the following bundles to be installed first: ${missing.join(", ")}`,
           missing_dependencies: missing,
         });
@@ -1010,7 +942,6 @@ export default function bundlesRouter() {
       });
       if (!gate.allow) {
         return res.status(400).json({
-          ok: false,
           error: gate.reason,
           hardware_gate: gate,
         });
@@ -1028,7 +959,6 @@ export default function bundlesRouter() {
       const gpuCheck = checkGpuArchCompatible(manifestPre);
       if (!gpuCheck.ok) {
         return res.status(400).json({
-          ok: false,
           error: gpuCheck.reason,
           gpu_arch_gate: gpuCheck,
         });
@@ -1040,7 +970,6 @@ export default function bundlesRouter() {
     if (manifestRequiresConsent(manifestPre)) {
       if (!consent_token) {
         return res.status(403).json({
-          ok: false,
           error: "Consent token required. Call GET /bundles/api/consent-challenge/:id to obtain one.",
           consent_required: true,
         });
@@ -1053,7 +982,6 @@ export default function bundlesRouter() {
       }
       if (!consentVerified) {
         return res.status(403).json({
-          ok: false,
           error: "Consent token is invalid, expired, or already consumed. Mint a new one and retry.",
           consent_expired: true,
         });
@@ -1066,7 +994,7 @@ export default function bundlesRouter() {
       if (existsSync(composePath)) {
         const composeContent = readFileSync(composePath, "utf8");
         if (/network_mode:\s*host/i.test(composeContent)) {
-          return res.status(403).json({ ok: false, error: "This bundle requires host networking and is not available on managed hosting." });
+          return res.status(403).json({ error: "This bundle requires host networking and is not available on managed hosting." });
         }
       }
     }
@@ -1557,7 +1485,6 @@ export default function bundlesRouter() {
     const dependents = findDependents(bundle_id);
     if (dependents.length > 0) {
       return res.status(409).json({
-        ok: false,
         error: `Cannot uninstall '${bundle_id}' — other installed bundles depend on it: ${dependents.join(", ")}. Uninstall the dependents first.`,
         dependents,
       });
@@ -1751,7 +1678,12 @@ export default function bundlesRouter() {
   // Cross-host verification middleware — runs before start/stop, only acts if
   // X-Crow-Signature header is present (otherwise falls through to existing auth).
   const dbForXhost = createDbClient();
-  const xhostVerify = crossHostVerifyMiddleware(dbForXhost);
+  const xhostVerify = crossHostVerifyMiddleware(dbForXhost, {
+    optional: true, // non-signed requests fall through to dashboardAuth/OAuth
+    audit: (req) => `bundle.${(req.path.split("/").pop() || "")}`,
+    auditBundleId: true,
+    // emptyBodyString stays at the default "{}" — bundle signers hash JSON.stringify(body || {})
+  });
 
   /**
    * Unified bundle-action dispatcher: if the bundle manifest declares
