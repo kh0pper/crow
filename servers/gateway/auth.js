@@ -22,7 +22,12 @@ export class CrowOAuthClientsStore {
       args: [clientId],
     });
     if (rows.length === 0) return undefined;
-    return JSON.parse(rows[0].metadata);
+    try {
+      return JSON.parse(rows[0].metadata);
+    } catch {
+      console.error("[auth] Corrupt client metadata JSON for registered client; treating as unregistered");
+      return undefined;
+    }
   }
 
   async registerClient(clientMetadata) {

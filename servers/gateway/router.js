@@ -1,8 +1,8 @@
 /**
  * Gateway Tool Router — Consolidated MCP endpoint
  *
- * Exposes ~7 category tools instead of 49+ individual tools, reducing
- * context window usage by ~75-87%. Each category tool dispatches to the
+ * Exposes one category tool per server instead of the full raw tool surface.
+ * Each category tool dispatches to the
  * underlying server via an in-process MCP Client + InMemoryTransport pair.
  *
  * Tools:

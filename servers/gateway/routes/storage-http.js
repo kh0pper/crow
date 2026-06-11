@@ -16,6 +16,7 @@ import {
 import {
   isAvailable,
   uploadObject,
+  deleteObject,
   getPresignedUrl,
   isAllowedMimeType,
   getBucketStats,
@@ -132,6 +133,7 @@ export default function storageHttpRouter(authMiddleware) {
 
       await uploadObject(s3Key, buffer, { bucket, contentType: mimetype });
 
+      let inserted = false;
       try {
         await db.execute({
           sql: `INSERT INTO storage_files (s3_key, original_name, mime_type, size_bytes, bucket, reference_type, reference_id, project_id)
@@ -143,6 +145,7 @@ export default function storageHttpRouter(authMiddleware) {
             projectId,
           ],
         });
+        inserted = true;
         if (projectId != null) {
           await appendAudit(db, {
             project_id: projectId, actor_type: "local", action: "file.upload",
@@ -150,6 +153,13 @@ export default function storageHttpRouter(authMiddleware) {
             payload: { file_name: originalname, size_bytes: size, mime_type: mimetype },
           });
         }
+      } catch (err) {
+        // Only remove the object if the file was never recorded — deleting it
+        // after a successful insert would orphan the DB row instead.
+        if (!inserted) {
+          try { await deleteObject(s3Key, bucket); } catch {}
+        }
+        throw err;
       } finally {
         db.close();
       }
