@@ -303,7 +303,7 @@ export class InstanceSyncManager {
    * early emissions (memory stores, settings writes at startup, bundle
    * registrations) vanish silently: `emitChange` iterates `outFeeds`, which is
    * empty until a peer WebSocket lands, so its `feed.append` loop has zero
-   * iterations while `_localCounter` advances anyway.
+   * iterations while the Lamport counter advances anyway.
    *
    * Safe to re-call; `initInstance` no-ops if the out-feed already exists.
    * In-feeds are also pre-opened if the peer's `sync_url` (their outbound
