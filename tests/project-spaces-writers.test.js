@@ -492,6 +492,45 @@ test("1b. mid-rebuild failure: old table intact, no abandoned transaction, recov
   }
 });
 
+// ── Test 1c: bundle rebuild through the REAL maker-lab db client ──────────────
+// (opus review F1: the test-harness better-sqlite3 substitute masked that the
+// raw @libsql/client maker-lab used at boot does NOT hold a transaction across
+// separate execute() calls — the rebuild's trailing COMMIT threw and crashed
+// bundle boot. The fix delegates maker-lab's createDbClient to servers/db.js;
+// this test pins the REAL boot path so a regression to a raw client resurfaces.)
+
+test("1c. maker-lab rebuild via the bundle's own createDbClient (real boot path)", async () => {
+  const { createDbClient: makerCreateDbClient } = await import("../bundles/maker-lab/server/db.js");
+  const dir = mkdtempSync(join(tmpdir(), "crow-psw-t1c-"));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+  runInitDb(dir);
+  runInitDb(dir);
+
+  const db = makerCreateDbClient(join(dir, "crow.db"));
+
+  // Old-FK maker_bound_devices + a row, exactly like a pre-B2 host
+  await db.executeMultiple(`
+    DROP TABLE IF EXISTS maker_bound_devices;
+    CREATE TABLE maker_bound_devices (
+      fingerprint TEXT PRIMARY KEY,
+      learner_id INTEGER REFERENCES research_projects(id) ON DELETE CASCADE,
+      label TEXT, bound_at TEXT NOT NULL DEFAULT (datetime('now')), last_seen_at TEXT
+    );
+    CREATE INDEX idx_maker_bound_learner ON maker_bound_devices(learner_id);
+    INSERT INTO maker_bound_devices (fingerprint, label) VALUES ('fp-real', 'kiosk');
+  `);
+
+  // The exact boot call — must NOT throw (the F1 failure mode was a throw
+  // on the trailing COMMIT even though the data survived)
+  await initMakerLabTables(db);
+
+  const { rows: fk } = await db.execute("PRAGMA foreign_key_list(maker_bound_devices)");
+  assert.ok(fk.some((r) => r.table === "project_spaces"), "FK re-pointed via the real boot client");
+  const { rows } = await db.execute("SELECT label FROM maker_bound_devices WHERE fingerprint='fp-real'");
+  assert.equal(rows[0]?.label, "kiosk", "data intact through the real boot client");
+  db.close();
+});
+
 // ── Test 2: FK enforcement direction ─────────────────────────────────────────
 
 test("2. FK enforcement direction — ps-only project_id accepted; ps DELETE cascades", async () => {
