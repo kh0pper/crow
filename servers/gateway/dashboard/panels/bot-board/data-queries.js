@@ -20,7 +20,7 @@ export const CARD_STATUSES = ["pending", "in_progress", "done", "cancelled"];
 export const STATUS_LABEL = { pending: "Pending", in_progress: "In Progress", done: "Done", cancelled: "Cancelled" };
 export const STATUS_BADGE = { pending: "draft", in_progress: "info", done: "connected", cancelled: "draft" };
 
-const LOCK_STATUSES = new Set(["active", "waiting-user"]);
+export const LOCK_STATUSES = new Set(["active", "waiting-user"]);
 
 // F4a: best-effort federated peer bots. Budgeted; a slow/offline peer is skipped.
 export async function gatherPeerBots(db) {
