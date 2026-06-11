@@ -10,6 +10,7 @@
  */
 
 import { verifySession } from "../../../servers/gateway/dashboard/auth.js";
+import { createProjectSpace } from "../../../servers/shared/project-spaces.js";
 
 /**
  * Is the request coming from loopback (same-host)?
@@ -157,13 +158,11 @@ export async function ensureDefaultLearner(db) {
   });
   if (r.rows.length) return Number(r.rows[0].id);
   // Create with age null — admin can edit in the settings panel.
-  const ins = await db.execute({
-    sql: `INSERT INTO research_projects (name, type, created_at, updated_at)
-          VALUES ('Default learner', 'learner_profile', datetime('now'), datetime('now'))
-          RETURNING id`,
-    args: [],
+  const { id: lid } = await createProjectSpace(db, {
+    name: "Default learner",
+    type: "learner_profile",
+    ownerMember: false,
   });
-  const lid = Number(ins.rows[0].id);
   await db.execute({
     sql: `INSERT INTO maker_learner_settings (learner_id, age, consent_captured_at)
           VALUES (?, NULL, datetime('now'))`,

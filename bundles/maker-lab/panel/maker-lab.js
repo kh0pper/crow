@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import QRCode from "qrcode";
+import { createProjectSpace, updateProjectSpaceMeta } from "../../../servers/shared/project-spaces.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -168,12 +169,11 @@ export default {
         if (!consent) {
           return res.redirectAfterPost("/dashboard/maker-lab?err=consent_required");
         }
-        const ins = await db.execute({
-          sql: `INSERT INTO research_projects (name, type, description, created_at, updated_at)
-                VALUES (?, 'learner_profile', ?, datetime('now'), datetime('now')) RETURNING id`,
-          args: [name, null],
+        const { id: lid } = await createProjectSpace(db, {
+          name,
+          type: "learner_profile",
+          ownerMember: false,
         });
-        const lid = Number(ins.rows[0].id);
         await db.execute({
           sql: `INSERT INTO maker_learner_settings (learner_id, age, avatar, consent_captured_at)
                 VALUES (?, ?, ?, datetime('now'))`,
@@ -188,15 +188,22 @@ export default {
         if (req.body.confirm !== "DELETE") {
           return res.redirectAfterPost(`/dashboard/maker-lab?pending_delete=${lid}`);
         }
-        await db.execute({ sql: "DELETE FROM maker_sessions WHERE learner_id=?", args: [lid] });
-        await db.execute({ sql: "DELETE FROM maker_transcripts WHERE learner_id=?", args: [lid] });
-        await db.execute({ sql: "DELETE FROM maker_bound_devices WHERE learner_id=?", args: [lid] });
-        await db.execute({ sql: "DELETE FROM maker_learner_settings WHERE learner_id=?", args: [lid] });
+        // All deletes in one transactional batch (spec S1): child deletes BEFORE the ps
+        // delete so the maker_sessions CHECK constraint doesn't abort; legacy rp row cleaned.
+        const batchResult = await db.batch([
+          { sql: "DELETE FROM maker_sessions WHERE learner_id=?", args: [lid] },
+          { sql: "DELETE FROM maker_transcripts WHERE learner_id=?", args: [lid] },
+          { sql: "DELETE FROM maker_bound_devices WHERE learner_id=?", args: [lid] },
+          { sql: "DELETE FROM maker_learner_settings WHERE learner_id=?", args: [lid] },
+          { sql: "DELETE FROM research_projects WHERE id=? AND type='learner_profile'", args: [lid] },
+          { sql: "DELETE FROM project_spaces WHERE id=? AND type='learner_profile'", args: [lid] },
+        ]);
+        const psRowsAffected = Number(batchResult[5]?.rowsAffected ?? 0);
+        const rpRowsAffected = Number(batchResult[4]?.rowsAffected ?? 0);
+        if (psRowsAffected === 0 && rpRowsAffected === 0) {
+          return res.redirectAfterPost("/dashboard/maker-lab?err=learner_not_found");
+        }
         try { await db.execute({ sql: "DELETE FROM memories WHERE project_id=?", args: [lid] }); } catch {}
-        await db.execute({
-          sql: "DELETE FROM research_projects WHERE id=? AND type='learner_profile'",
-          args: [lid],
-        });
         return res.redirectAfterPost("/dashboard/maker-lab?deleted=1");
       }
 
@@ -276,11 +283,10 @@ export default {
         if (!name || !Number.isFinite(age) || age < 3 || age > 100) {
           return res.redirectAfterPost(`/dashboard/maker-lab?edit=${lid}&err=create_invalid`);
         }
-        await db.execute({
-          sql: `UPDATE research_projects SET name=?, updated_at=datetime('now')
-                WHERE id=? AND type='learner_profile'`,
-          args: [name, lid],
-        });
+        const nameRows = await updateProjectSpaceMeta(db, lid, { name });
+        if (nameRows === 0) {
+          return res.redirectAfterPost(`/dashboard/maker-lab?err=learner_not_found`);
+        }
         const transcripts = req.body.transcripts_enabled === "1" ? 1 : 0;
         const retention = Math.max(0, Math.min(3650, Number(req.body.transcripts_retention_days) || 30));
         const idleMin = req.body.idle_lock_default_min === "" ? null

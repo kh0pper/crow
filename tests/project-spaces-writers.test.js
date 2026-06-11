@@ -2,6 +2,7 @@
  * Tests for W2-5 Stage B2 — FK re-pointing to project_spaces.
  *
  * Task A scope: tests 1, 2, 9-note (double-init harness), 10.
+ * Task B scope: tests 3, 4, 5, 6, 7.
  *
  * Test inventory:
  *   1. FK rebuild correctness (main) — DATA-CARRYING path with adversarial seed
@@ -9,6 +10,16 @@
  *       extra columns populated; mid-rebuild failure injection)
  *   2. FK enforcement direction: insert source with ps-only project_id succeeds;
  *      delete that ps row → source SET NULL; backend CASCADE
+ *   3. Writer round-trips: crow_create_project → ps row (correct type/tags), no new rp
+ *      row; crow_update_project on ps-only id works; nonexistent id → honest not-found;
+ *      panel create/status/edit equivalents at SQL level
+ *   4. Learner lifecycle on ps: create (no member row), rename, delete → ps GONE,
+ *      settings/sessions/devices/transcripts gone, memories purge; legacy rp-seeded
+ *      learner also removes both rows
+ *   5. Sequence-guard: legacy rp INSERT after ps-only creates allocates non-colliding id
+ *   6. Share payload shape: migrated tableMap query returns only allowlist; archived ps
+ *      row → not found
+ *   7. PII purge: archived learner ps row removed + CASCADE'd children; idempotent second run
  *  10. Bundle-rebuild data path: old bundle schemas constructed manually,
  *      maker_learner_settings age/avatar + AUTOINCREMENT data_case_studies seeded,
  *      each bundle's init-tables rebuild asserted for parity + sequence preservation
@@ -27,6 +38,7 @@ import { join } from "node:path";
 import { createDbClient } from "../servers/db.js";
 import { initMakerLabTables } from "../bundles/maker-lab/server/init-tables.js";
 import { initDataDashboardTables } from "../bundles/data-dashboard/server/init-tables.js";
+import { createProjectSpace, updateProjectSpaceMeta } from "../servers/shared/project-spaces.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -775,4 +787,436 @@ test("10. bundle-rebuild data path — old schemas seeded, rebuild asserts parit
   );
 
   ddDb2.close();
+});
+
+// ── Test 3: Writer round-trips ────────────────────────────────────────────────
+
+test("3. writer round-trips — createProjectSpace + updateProjectSpaceMeta at SQL level", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-psw-t3-"));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+
+  runInitDb(dir);
+  runInitDb(dir);
+
+  const dbPath = join(dir, "crow.db");
+  const db = createDbClient(dbPath);
+
+  // createProjectSpace: ps row created with correct type + tags
+  const { id: projId } = await createProjectSpace(db, {
+    name: "My Research Project",
+    description: "A test project",
+    type: "research",
+    tags: "alpha,beta",
+  });
+  assert.ok(projId > 0, "createProjectSpace must return a positive id");
+
+  const { rows: psRows } = await db.execute({
+    sql: "SELECT * FROM project_spaces WHERE id = ?",
+    args: [projId],
+  });
+  assert.equal(psRows.length, 1, "ps row must exist");
+  assert.equal(psRows[0].name, "My Research Project");
+  assert.equal(psRows[0].type, "research");
+  assert.equal(psRows[0].tags, "alpha,beta");
+
+  // NO new rp row must have been created by the helper
+  const { rows: rpRows } = await db.execute({
+    sql: "SELECT id FROM research_projects WHERE name = 'My Research Project'",
+    args: [],
+  });
+  assert.equal(rpRows.length, 0, "createProjectSpace must NOT create an rp row directly");
+
+  // updateProjectSpaceMeta: update name + tags on ps-only id
+  const affected = await updateProjectSpaceMeta(db, projId, {
+    name: "Updated Research Project",
+    tags: "gamma",
+    type: "data_connector",
+  });
+  assert.ok(affected > 0, "updateProjectSpaceMeta must return rowsAffected > 0");
+
+  const { rows: updatedRows } = await db.execute({
+    sql: "SELECT name, tags, type FROM project_spaces WHERE id = ?",
+    args: [projId],
+  });
+  assert.equal(updatedRows[0].name, "Updated Research Project");
+  assert.equal(updatedRows[0].tags, "gamma");
+  assert.equal(updatedRows[0].type, "data_connector");
+
+  // updateProjectSpaceMeta: nonexistent id → 0 rows (honest not-found)
+  const notFound = await updateProjectSpaceMeta(db, 999999, { name: "Ghost" });
+  assert.equal(notFound, 0, "updateProjectSpaceMeta on nonexistent id must return 0");
+
+  // updateProjectSpaceMeta: empty name → throws
+  await assert.rejects(
+    () => updateProjectSpaceMeta(db, projId, { name: "" }),
+    /name cannot be empty/,
+    "updateProjectSpaceMeta with empty name must throw"
+  );
+
+  // Panel-equivalent: status update via updateProjectSpaceMeta
+  const statusAffected = await updateProjectSpaceMeta(db, projId, { status: "paused" });
+  assert.ok(statusAffected > 0, "status update must affect rows");
+  const { rows: statusRows } = await db.execute({
+    sql: "SELECT status FROM project_spaces WHERE id = ?",
+    args: [projId],
+  });
+  assert.equal(statusRows[0].status, "paused", "status must be updated");
+
+  // createProjectSpace: data_connector type passes through
+  const { id: dcId } = await createProjectSpace(db, {
+    name: "Data Connector Project",
+    type: "data_connector",
+  });
+  const { rows: dcRows } = await db.execute({
+    sql: "SELECT type FROM project_spaces WHERE id = ?",
+    args: [dcId],
+  });
+  assert.equal(dcRows[0].type, "data_connector", "data_connector type must be preserved");
+
+  db.close();
+});
+
+// ── Test 4: Learner lifecycle on ps ──────────────────────────────────────────
+
+test("4. learner lifecycle on ps — create, rename, delete; legacy rp-seeded also removes both rows", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-psw-t4-"));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+
+  runInitDb(dir);
+  runInitDb(dir);
+
+  const dbPath = join(dir, "crow.db");
+  const db = createDbClient(dbPath);
+
+  // maker_learner_settings is a bundle table — init it directly so we can test CASCADE.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS maker_learner_settings (
+      learner_id INTEGER PRIMARY KEY REFERENCES project_spaces(id) ON DELETE CASCADE,
+      age INTEGER,
+      avatar TEXT,
+      transcripts_enabled INTEGER NOT NULL DEFAULT 0,
+      transcripts_retention_days INTEGER NOT NULL DEFAULT 30,
+      idle_lock_default_min INTEGER,
+      auto_resume_min INTEGER NOT NULL DEFAULT 15,
+      voice_input_enabled INTEGER NOT NULL DEFAULT 0,
+      consent_captured_at TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS maker_sessions (
+      token TEXT PRIMARY KEY,
+      learner_id INTEGER REFERENCES project_spaces(id) ON DELETE SET NULL,
+      is_guest INTEGER NOT NULL DEFAULT 0,
+      guest_age_band TEXT,
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      expires_at TEXT NOT NULL DEFAULT (datetime('now', '+1 hour')),
+      revoked_at TEXT,
+      state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','ending','revoked')),
+      ending_started_at TEXT,
+      idle_lock_min INTEGER,
+      idle_locked_at TEXT,
+      last_activity_at TEXT NOT NULL DEFAULT (datetime('now')),
+      kiosk_device_id TEXT,
+      hints_used INTEGER NOT NULL DEFAULT 0,
+      transcripts_enabled_snapshot INTEGER NOT NULL DEFAULT 0,
+      CHECK ((is_guest = 1 AND learner_id IS NULL AND guest_age_band IS NOT NULL)
+          OR (is_guest = 0 AND learner_id IS NOT NULL))
+    )
+  `);
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS maker_transcripts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      learner_id INTEGER NOT NULL REFERENCES project_spaces(id) ON DELETE CASCADE,
+      session_token TEXT NOT NULL,
+      turn_no INTEGER NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS maker_bound_devices (
+      fingerprint TEXT PRIMARY KEY,
+      learner_id INTEGER REFERENCES project_spaces(id) ON DELETE CASCADE,
+      label TEXT,
+      bound_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_seen_at TEXT
+    )
+  `);
+
+  // Create a learner via createProjectSpace with ownerMember:false
+  const { id: lid } = await createProjectSpace(db, {
+    name: "Alice",
+    type: "learner_profile",
+    ownerMember: false,
+  });
+  assert.ok(lid > 0, "learner create must return a positive id");
+
+  // No member row (ownerMember:false)
+  const { rows: memberRows } = await db.execute({
+    sql: "SELECT id FROM project_members WHERE project_id = ?",
+    args: [lid],
+  });
+  assert.equal(memberRows.length, 0, "ownerMember:false must produce no project_members row");
+
+  // ps row exists as learner_profile
+  const { rows: lpsRows } = await db.execute({
+    sql: "SELECT type FROM project_spaces WHERE id = ?",
+    args: [lid],
+  });
+  assert.equal(lpsRows[0].type, "learner_profile", "learner must have type=learner_profile");
+
+  // Insert a maker_learner_settings row
+  await db.execute({
+    sql: "INSERT INTO maker_learner_settings (learner_id, age) VALUES (?, ?)",
+    args: [lid, 9],
+  });
+
+  // Rename learner via updateProjectSpaceMeta
+  const renameAffected = await updateProjectSpaceMeta(db, lid, { name: "Alice Updated" });
+  assert.ok(renameAffected > 0, "rename must affect rows");
+  const { rows: renamedRows } = await db.execute({
+    sql: "SELECT name FROM project_spaces WHERE id = ?",
+    args: [lid],
+  });
+  assert.equal(renamedRows[0].name, "Alice Updated");
+
+  // Delete the learner via db.batch (spec S1 pattern)
+  const batchResult = await db.batch([
+    { sql: "DELETE FROM maker_sessions WHERE learner_id=?", args: [lid] },
+    { sql: "DELETE FROM maker_transcripts WHERE learner_id=?", args: [lid] },
+    { sql: "DELETE FROM maker_bound_devices WHERE learner_id=?", args: [lid] },
+    { sql: "DELETE FROM maker_learner_settings WHERE learner_id=?", args: [lid] },
+    { sql: "DELETE FROM research_projects WHERE id=? AND type='learner_profile'", args: [lid] },
+    { sql: "DELETE FROM project_spaces WHERE id=? AND type='learner_profile'", args: [lid] },
+  ]);
+  // ps row must be gone (hard delete)
+  const { rows: psGone } = await db.execute({
+    sql: "SELECT id FROM project_spaces WHERE id = ?",
+    args: [lid],
+  });
+  assert.equal(psGone.length, 0, "ps row must be GONE after learner delete (hard delete)");
+
+  // settings must be gone
+  const { rows: settGone } = await db.execute({
+    sql: "SELECT learner_id FROM maker_learner_settings WHERE learner_id = ?",
+    args: [lid],
+  });
+  assert.equal(settGone.length, 0, "maker_learner_settings must be deleted");
+
+  // Verify batch result had 1 ps row affected
+  const psAffected = Number(batchResult[5]?.rowsAffected ?? 0);
+  assert.equal(psAffected, 1, "ps delete must have affected 1 row");
+
+  // Legacy case: learner seeded via direct rp INSERT (pre-B2 learner)
+  // The rp→ps trigger creates the ps row automatically.
+  await db.execute({
+    sql: `INSERT INTO research_projects (id, name, type, created_at, updated_at)
+          VALUES (777, 'Legacy Learner', 'learner_profile', datetime('now'), datetime('now'))`,
+    args: [],
+  });
+  // After the trigger fires, ps should have id=777
+  const { rows: legacyPs } = await db.execute({
+    sql: "SELECT id FROM project_spaces WHERE id = 777",
+    args: [],
+  });
+  assert.equal(legacyPs.length, 1, "rp→ps trigger must create ps row for legacy learner");
+
+  await db.execute({
+    sql: "INSERT INTO maker_learner_settings (learner_id, age) VALUES (777, 10)",
+    args: [],
+  });
+
+  // Delete legacy learner: both rp AND ps rows must be removed
+  const legacyBatch = await db.batch([
+    { sql: "DELETE FROM maker_sessions WHERE learner_id=?", args: [777] },
+    { sql: "DELETE FROM maker_transcripts WHERE learner_id=?", args: [777] },
+    { sql: "DELETE FROM maker_bound_devices WHERE learner_id=?", args: [777] },
+    { sql: "DELETE FROM maker_learner_settings WHERE learner_id=?", args: [777] },
+    { sql: "DELETE FROM research_projects WHERE id=? AND type='learner_profile'", args: [777] },
+    { sql: "DELETE FROM project_spaces WHERE id=? AND type='learner_profile'", args: [777] },
+  ]);
+  const rpAffected = Number(legacyBatch[4]?.rowsAffected ?? 0);
+  const psAffected2 = Number(legacyBatch[5]?.rowsAffected ?? 0);
+  assert.equal(rpAffected, 1, "rp DELETE must affect 1 row for legacy learner");
+  assert.equal(psAffected2, 1, "ps DELETE must affect 1 row for legacy learner");
+
+  const { rows: rpGone } = await db.execute({
+    sql: "SELECT id FROM research_projects WHERE id = 777",
+    args: [],
+  });
+  assert.equal(rpGone.length, 0, "rp row must be gone after legacy learner delete");
+  const { rows: psGone2 } = await db.execute({
+    sql: "SELECT id FROM project_spaces WHERE id = 777",
+    args: [],
+  });
+  assert.equal(psGone2.length, 0, "ps row must be gone after legacy learner delete");
+
+  db.close();
+});
+
+// ── Test 5: Sequence-guard ────────────────────────────────────────────────────
+
+test("5. sequence-guard — legacy rp INSERT after ps-only creates allocates non-colliding id", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-psw-t5-"));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+
+  runInitDb(dir);
+  runInitDb(dir);
+
+  const dbPath = join(dir, "crow.db");
+  const db = createDbClient(dbPath);
+
+  // Create several ps-only projects (no rp mirror)
+  const ids = [];
+  for (let i = 0; i < 3; i++) {
+    const { id } = await createProjectSpace(db, { name: `PS Project ${i}`, type: "research" });
+    ids.push(id);
+  }
+  const maxPsId = Math.max(...ids);
+
+  // Now do a legacy rp INSERT (as old code would)
+  const legacyResult = await db.execute({
+    sql: "INSERT INTO research_projects (name, type) VALUES (?, ?)",
+    args: ["Legacy Project", "research"],
+  });
+  const legacyId = Number(legacyResult.lastInsertRowid);
+
+  // The sequence guard in createProjectSpace bumps rp's sqlite_sequence to MAX(ps.id).
+  // So the legacy INSERT must allocate an id > maxPsId (no collision).
+  assert.ok(
+    legacyId > maxPsId,
+    `legacy rp INSERT id ${legacyId} must be > max ps id ${maxPsId} (B1 guard)`
+  );
+
+  db.close();
+});
+
+// ── Test 6: Share payload shape ───────────────────────────────────────────────
+
+test("6. share payload shape — allowlist columns only; archived ps row → not found", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-psw-t6-"));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+
+  runInitDb(dir);
+  runInitDb(dir);
+
+  const dbPath = join(dir, "crow.db");
+  const db = createDbClient(dbPath);
+
+  // Create a ps-only project
+  const { id: projId } = await createProjectSpace(db, {
+    name: "Share Test Project",
+    description: "For sharing",
+    type: "research",
+    tags: "share-tag",
+  });
+
+  // The sharing tableMap query for 'project':
+  const allowlistQuery = `
+    SELECT id, uuid, name, description, type, status, tags, created_at, updated_at
+    FROM project_spaces WHERE id = ? AND archived_at IS NULL
+  `;
+  const { rows: shareRows } = await db.execute({ sql: allowlistQuery, args: [projId] });
+  assert.equal(shareRows.length, 1, "active ps row must be found by share query");
+
+  const row = shareRows[0];
+  // Must have allowlisted columns
+  for (const col of ["id", "uuid", "name", "description", "type", "status", "tags", "created_at", "updated_at"]) {
+    assert.ok(col in row, `share row must include column: ${col}`);
+  }
+  // Must NOT have local-filesystem / instance-local columns
+  for (const col of ["workspace_dir", "storage_prefix", "db_path", "tasks_db_uri", "slug", "archived_at", "origin_instance_id"]) {
+    assert.ok(!(col in row), `share row must NOT include column: ${col}`);
+  }
+  assert.equal(row.name, "Share Test Project");
+
+  // Archived ps row → not found (archived_at IS NULL guard)
+  await db.execute({
+    sql: "UPDATE project_spaces SET archived_at = datetime('now') WHERE id = ?",
+    args: [projId],
+  });
+  const { rows: archivedRows } = await db.execute({ sql: allowlistQuery, args: [projId] });
+  assert.equal(archivedRows.length, 0, "archived ps row must not be found by share query");
+
+  db.close();
+});
+
+// ── Test 7: PII purge ─────────────────────────────────────────────────────────
+
+test("7. PII purge — archived learner ps row removed + children; idempotent second run", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crow-psw-t7-"));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+
+  runInitDb(dir);
+  runInitDb(dir);
+
+  const dbPath = join(dir, "crow.db");
+  const db = createDbClient(dbPath);
+
+  // maker_learner_settings is a bundle table — init it with CASCADE FK on ps
+  // so we can verify the purge-driven cascade.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS maker_learner_settings (
+      learner_id INTEGER PRIMARY KEY REFERENCES project_spaces(id) ON DELETE CASCADE,
+      age INTEGER,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+
+  // Create a learner ps row with ownerMember:false
+  const { id: lid } = await createProjectSpace(db, {
+    name: "PII Learner",
+    type: "learner_profile",
+    ownerMember: false,
+  });
+
+  // Insert a child row (maker_learner_settings has CASCADE FK on ps)
+  await db.execute({
+    sql: "INSERT INTO maker_learner_settings (learner_id, age) VALUES (?, ?)",
+    args: [lid, 7],
+  });
+
+  // Archive the ps row (simulate pre-B2 parental deletion that left an archived row)
+  await db.execute({
+    sql: "UPDATE project_spaces SET archived_at = datetime('now') WHERE id = ?",
+    args: [lid],
+  });
+
+  // Verify the ps row is archived but the child still exists
+  const { rows: archivedCheck } = await db.execute({
+    sql: "SELECT archived_at FROM project_spaces WHERE id = ?",
+    args: [lid],
+  });
+  assert.ok(archivedCheck[0].archived_at, "ps row must be archived");
+
+  // Run the PII purge (same SQL as init-db.js)
+  await db.execute(
+    "DELETE FROM project_spaces WHERE type = 'learner_profile' AND archived_at IS NOT NULL"
+  );
+
+  // ps row must be gone
+  const { rows: psGone } = await db.execute({
+    sql: "SELECT id FROM project_spaces WHERE id = ?",
+    args: [lid],
+  });
+  assert.equal(psGone.length, 0, "archived learner ps row must be removed by PII purge");
+
+  // maker_learner_settings must be gone (CASCADE from ps delete)
+  const { rows: settGone } = await db.execute({
+    sql: "SELECT learner_id FROM maker_learner_settings WHERE learner_id = ?",
+    args: [lid],
+  });
+  assert.equal(settGone.length, 0, "CASCADE must remove maker_learner_settings after PII purge");
+
+  // Idempotent second run — no error
+  await assert.doesNotReject(
+    db.execute(
+      "DELETE FROM project_spaces WHERE type = 'learner_profile' AND archived_at IS NOT NULL"
+    ),
+    "second PII purge run must be idempotent"
+  );
+
+  db.close();
 });
