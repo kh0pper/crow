@@ -1387,9 +1387,14 @@ test("18. crow_context emitChange stamps local row's lamport_ts (global and devi
   const ts2 = Number(dRows[0].lamport_ts);
   assert.ok(ts2 > 0, `device-scoped lamport_ts should be stamped > 0, got ${ts2}`);
 
-  // Monotonic guard: manually set sync_state counter BELOW ts1 and emit again —
-  // the stamp must not lower the already-stamped lamport_ts.
-  // Force the counter back by directly updating sync_state (simulates out-of-order apply).
+  // Monotonic guard: stamp the row STRICTLY ABOVE what the next emit will
+  // allocate (counter forced to 1 → next ts = 2), then emit. Under a plain
+  // `lamport_ts = ?` assignment the stamp would drop to 2; only
+  // MAX(COALESCE(lamport_ts,0), ?) keeps it at 50.
+  await db.execute({
+    sql: "UPDATE crow_context SET lamport_ts = 50 WHERE section_key = 't18_global' AND device_id IS NULL AND project_id IS NULL",
+    args: [],
+  });
   await db.execute({
     sql: "UPDATE sync_state SET local_counter = 1 WHERE instance_id = ?",
     args: [INST],
@@ -1402,7 +1407,7 @@ test("18. crow_context emitChange stamps local row's lamport_ts (global and devi
     args: [],
   });
   const ts3 = Number(gRows2[0].lamport_ts);
-  assert.ok(ts3 >= ts1, `MAX guard: lamport_ts ${ts3} must not go below previous ${ts1}`);
+  assert.equal(ts3, 50, `MAX guard: a lower fresh ts must not lower the existing stamp (got ${ts3})`);
 
   db.close();
 });
