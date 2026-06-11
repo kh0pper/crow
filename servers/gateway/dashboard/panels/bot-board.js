@@ -5,6 +5,7 @@
  */
 
 import { escapeHtml, section } from "../shared/components.js";
+import { t } from "../shared/i18n.js";
 import { botBoardStyles } from "./bot-board/css.js";
 import {
   gatherPeerBots, tableMissing, parseBotDef,
@@ -78,14 +79,14 @@ export default {
 
     // Error/notice messages
     const noticeBits = [];
-    if (q.err === "locked") noticeBits.push(`<p class="bb-msg err">⚠️ That item is being worked by a bot — read-only.</p>`);
-    else if (q.err === "bad_move") noticeBits.push(`<p class="bb-msg err">⚠️ Invalid status move.</p>`);
-    else if (q.err === "move_failed") noticeBits.push(`<p class="bb-msg err">⚠️ Move failed.</p>`);
+    if (q.err === "locked") noticeBits.push(`<p class="bb-msg err">${t("botboard.errLocked", lang)}</p>`);
+    else if (q.err === "bad_move") noticeBits.push(`<p class="bb-msg err">${t("botboard.errBadMove", lang)}</p>`);
+    else if (q.err === "move_failed") noticeBits.push(`<p class="bb-msg err">${t("botboard.errMoveFailed", lang)}</p>`);
     if (reqBot != null && !selBot) {
-      noticeBits.push(`<p class="bb-msg err">⚠️ Bot <code>${escapeHtml(reqBot)}</code> not found or disabled.</p>`);
+      noticeBits.push(`<p class="bb-msg err">⚠️ Bot <code>${escapeHtml(reqBot)}</code> ${t("botboard.botNotFound", lang)}</p>`);
     }
     if (!(await botRuntimeActive(db))) {
-      noticeBits.unshift(`<p class="bb-msg">Bot runtime is not active on this instance — board reflects definitions only.</p>`);
+      noticeBits.unshift(`<p class="bb-msg">${t("botboard.runtimeNotActive", lang)}</p>`);
     }
     const notice = noticeBits.join("");
 
@@ -98,7 +99,7 @@ export default {
           const selected = selBot && b.botId === selBot.botId ? " selected" : "";
           return `<option value="${escapeHtml(b.botId)}"${selected}>${escapeHtml(b.displayName)} (${typeLabel})</option>`;
         }).join("")
-      : `<option value="">-- no bots --</option>`;
+      : `<option value="">${t("botboard.noBotsOption", lang)}</option>`;
 
     const isKanban = selBot && (selBot.trackerType === "kanban" || selBot.trackerType === "task-list");
     const isCustom = selBot && selBot.trackerType === "custom";
@@ -113,12 +114,12 @@ export default {
     const editBotLink = selBot
       ? `<a href="/dashboard/bot-builder?bot=${encodeURIComponent(selBot.botId)}&tab=tracker" ` +
         `style="font-size:.78rem;color:var(--crow-text-muted);text-decoration:none;margin-left:.3rem" ` +
-        `title="Edit bot definition">Edit bot</a>`
+        `title="Edit bot definition">${t("botboard.editBotLink", lang)}</a>`
       : "";
 
     const switcher =
       `<form method="GET" action="/dashboard/bot-board" class="bb-switch">` +
-      `<label for="bb-bot" style="font-size:.8rem;color:var(--crow-text-muted)">Bot</label>` +
+      `<label for="bb-bot" style="font-size:.8rem;color:var(--crow-text-muted)">${t("botboard.labelBotSwitcher", lang)}</label>` +
       `<select id="bb-bot" name="bot" onchange="this.form.submit()">` +
       switcherOptions +
       `</select>` + editBotLink +
@@ -131,35 +132,35 @@ export default {
       const peerBots = await gatherPeerBots(db);
       const peerStatus = q.peer != null && q.peer !== ""
         ? `<p class="bb-msg ${q.peer === "ok" ? "ok" : "err"}">${q.peer === "ok"
-            ? "✅ Peer bot updated."
-            : "⚠️ Peer bot update failed: " + escapeHtml(String(q.peer))}</p>`
+            ? t("botboard.peerBotUpdated", lang)
+            : t("botboard.peerBotUpdateFailed", lang) + escapeHtml(String(q.peer))}</p>`
         : "";
       const peerBotsHtml = peerBots.length === 0 ? "" :
-        section("Bots on other instances",
+        section(t("botboard.peerBotsSection", lang),
           peerStatus +
-          `<table class="bb-list-table"><thead><tr><th>Bot</th><th>Instance</th><th>Model</th><th>Status</th><th></th></tr></thead><tbody>` +
+          `<table class="bb-list-table"><thead><tr><th>${t("botboard.colBot", lang)}</th><th>${t("botboard.colInstance", lang)}</th><th>${t("botboard.colModel", lang)}</th><th>${t("botboard.colStatus", lang)}</th><th></th></tr></thead><tbody>` +
           peerBots.map((b) =>
             `<tr><td>${escapeHtml(b.display_name || b.bot_id)}</td>` +
             `<td>${escapeHtml(b.instanceName)}</td>` +
             `<td>${escapeHtml(b.model || "—")}</td>` +
-            `<td>${b.enabled ? "enabled" : "disabled"}</td>` +
+            `<td>${b.enabled ? t("botboard.botEnabled", lang) : t("botboard.botDisabled", lang)}</td>` +
             `<td>${b.peer_manageable
               ? `<form method="POST" action="/dashboard/bot-board" style="display:inline">` +
                 `<input type="hidden" name="action" value="peer_toggle">` +
                 `<input type="hidden" name="instance_id" value="${escapeHtml(String(b.instanceId || ""))}">` +
                 `<input type="hidden" name="bot_id" value="${escapeHtml(String(b.bot_id || ""))}">` +
                 `<input type="hidden" name="enabled" value="${b.enabled ? 0 : 1}">` +
-                `<button type="submit" class="bb-btn bb-sec" style="margin:0;font-size:.72rem;padding:.2rem .6rem">${b.enabled ? "Disable" : "Enable"}</button>` +
+                `<button type="submit" class="bb-btn bb-sec" style="margin:0;font-size:.72rem;padding:.2rem .6rem">${b.enabled ? t("botboard.btnDisable", lang) : t("botboard.btnEnable", lang)}</button>` +
                 `</form>` +
-                ` <a class="bb-btn bb-sec" style="margin:0;font-size:.72rem;padding:.2rem .6rem" href="/dashboard/bot-builder?peer=${encodeURIComponent(b.instanceId)}&bot=${encodeURIComponent(b.bot_id)}">Edit</a>`
-              : `<span style="font-size:.72rem;color:var(--crow-text-muted)">read-only — open on owner</span>`}</td></tr>`
+                ` <a class="bb-btn bb-sec" style="margin:0;font-size:.72rem;padding:.2rem .6rem" href="/dashboard/bot-builder?peer=${encodeURIComponent(b.instanceId)}&bot=${encodeURIComponent(b.bot_id)}">${t("botboard.btnEdit", lang)}</a>`
+              : `<span style="font-size:.72rem;color:var(--crow-text-muted)">${t("botboard.peerReadOnly", lang)}</span>`}</td></tr>`
           ).join("") +
-          `</tbody></table><p class="bb-msg">Manageable bots can be enabled/disabled from here. Others are read-only — open that instance's dashboard to edit or run them.</p>`);
+          `</tbody></table><p class="bb-msg">${t("botboard.peerBotsHelp", lang)}</p>`);
       return layout({
         title: "Bot Board",
-        content: botBoardStyles() + section("Bot Board",
+        content: botBoardStyles() + section(t("botboard.notInitTitle", lang),
           notice + switcher +
-          `<p style="margin-top:1rem;color:var(--crow-text-muted)">No enabled bots found. Create a bot in Bot Builder to start a board.</p>`) +
+          `<p style="margin-top:1rem;color:var(--crow-text-muted)">${t("botboard.noBots", lang)}</p>`) +
           peerBotsHtml +
           drawerMarkup(lang) + clientJs(null, "none", null, null, null, lang),
       });
@@ -174,7 +175,7 @@ export default {
         content: botBoardStyles() + section(
           `Board — ${escapeHtml(selBot.displayName)}`,
           notice + switcher +
-          `<p style="margin-top:1rem;color:var(--crow-text-muted)">This bot has no tracker.</p>`),
+          `<p style="margin-top:1rem;color:var(--crow-text-muted)">${t("botboard.noTracker", lang)}</p>`),
       });
     }
 

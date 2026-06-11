@@ -7,7 +7,7 @@
  */
 
 import { escapeHtml, section, badge } from "../../../shared/components.js";
-import { tJs } from "../../../shared/i18n.js";
+import { t, tJs } from "../../../shared/i18n.js";
 import { createDbClient } from "../../../../db.js";
 import { botBoardStyles } from "./css.js";
 import { clientJs } from "./client.js";
@@ -107,72 +107,72 @@ export function trackerCardFaceHtml(item, contextFields, statusValues, locked) {
 export function drawerMarkup(lang) {
   return `<div class="bb-drawer" id="bb-drawer" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
-      <h3 id="bb-d-title" style="font-family:'Fraunces',serif;margin:0">Card</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-d-close" aria-label="${tJs("common.close", lang)}">✕ Close</button>
+      <h3 id="bb-d-title" style="font-family:'Fraunces',serif;margin:0">${t("botboard.drawerCardTitle", lang)}</h3>
+      <button type="button" class="bb-btn bb-sec" id="bb-d-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-d-msg"></div>
     <div id="bb-d-lock" class="bb-msg warn"></div>
-    <label>Title</label><input id="bb-d-title-in" type="text">
+    <label>${t("botboard.labelTitle", lang)}</label><input id="bb-d-title-in" type="text">
     <div class="bb-row">
-      <div><label>Status</label><select id="bb-d-status">${CARD_STATUSES.map((s) => `<option value="${s}">${STATUS_LABEL[s]}</option>`).join("")}</select></div>
-      <div><label>Priority</label><select id="bb-d-prio"><option value="">—</option>${[1, 2, 3, 4, 5].map((n) => `<option value="${n}">${n}</option>`).join("")}</select></div>
+      <div><label>${t("botboard.labelStatus", lang)}</label><select id="bb-d-status">${CARD_STATUSES.map((s) => `<option value="${s}">${STATUS_LABEL[s]}</option>`).join("")}</select></div>
+      <div><label>${t("botboard.labelPriority", lang)}</label><select id="bb-d-prio"><option value="">—</option>${[1, 2, 3, 4, 5].map((n) => `<option value="${n}">${n}</option>`).join("")}</select></div>
     </div>
     <div class="bb-row">
-      <div><label>Due date</label><input id="bb-d-due" type="text" placeholder="YYYY-MM-DD"></div>
-      <div><label>Owner</label><input id="bb-d-owner" type="text"></div>
+      <div><label>${t("botboard.labelDueDate", lang)}</label><input id="bb-d-due" type="text" placeholder="YYYY-MM-DD"></div>
+      <div><label>${t("botboard.labelOwner", lang)}</label><input id="bb-d-owner" type="text"></div>
     </div>
-    <label>Tags (comma-separated)</label><input id="bb-d-tags" type="text">
-    <label>Description</label><textarea id="bb-d-desc" rows="3" style="font-family:inherit"></textarea>
-    <label>Project</label><select id="bb-d-project"></select>
+    <label>${t("botboard.labelTags", lang)}</label><input id="bb-d-tags" type="text">
+    <label>${t("botboard.labelDescription", lang)}</label><textarea id="bb-d-desc" rows="3" style="font-family:inherit"></textarea>
+    <label>${t("botboard.labelProject", lang)}</label><select id="bb-d-project"></select>
     <div>
-      <button type="button" class="bb-btn" id="bb-d-save">Save card</button>
-      <button type="button" class="bb-btn bb-sec" id="bb-d-cancel">Cancel card</button>
-      <button type="button" class="bb-btn bb-sec" id="bb-d-unlock" style="display:none">Force-unlock</button>
+      <button type="button" class="bb-btn" id="bb-d-save">${t("botboard.btnSaveCard", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-d-cancel">${t("botboard.btnCancelCard", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-d-unlock" style="display:none">${t("botboard.btnForceUnlock", lang)}</button>
     </div>
     <h4 style="margin-top:1rem;display:flex;justify-content:space-between;align-items:center">
-      <span>Plan file</span>
-      <button type="button" class="bb-btn bb-sec" id="bb-d-plan-toggle" style="margin:0">Preview</button>
+      <span>${t("botboard.planFileHeading", lang)}</span>
+      <button type="button" class="bb-btn bb-sec" id="bb-d-plan-toggle" style="margin:0">${t("botboard.btnPreview", lang)}</button>
     </h4>
     <div id="bb-d-plan-msg" class="bb-msg"></div>
-    <textarea id="bb-d-plan" rows="14" placeholder="(no plan yet)"></textarea>
+    <textarea id="bb-d-plan" rows="14" placeholder="${t("botboard.planFilePlaceholder", lang)}"></textarea>
     <div class="bb-pre" id="bb-d-plan-pre" style="display:none"></div>
-    <button type="button" class="bb-btn" id="bb-d-plan-save">Save plan</button>
+    <button type="button" class="bb-btn" id="bb-d-plan-save">${t("common.save", lang)} ${t("botboard.planFileHeading", lang)}</button>
   </div>
   <div class="bb-drawer" id="bb-newproj" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
-      <h3 style="font-family:'Fraunces',serif;margin:0">New project</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-np-close" aria-label="${tJs("common.close", lang)}">✕ Close</button>
+      <h3 style="font-family:'Fraunces',serif;margin:0">${t("botboard.drawerNewProject", lang)}</h3>
+      <button type="button" class="bb-btn bb-sec" id="bb-np-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-np-msg"></div>
-    <label>Name</label><input id="bb-np-name" type="text">
-    <label>Description</label><textarea id="bb-np-desc" rows="3" style="font-family:inherit"></textarea>
-    <button type="button" class="bb-btn" id="bb-np-save">Create project</button>
+    <label>${t("botboard.labelName", lang)}</label><input id="bb-np-name" type="text">
+    <label>${t("botboard.labelDescription", lang)}</label><textarea id="bb-np-desc" rows="3" style="font-family:inherit"></textarea>
+    <button type="button" class="bb-btn" id="bb-np-save">${t("botboard.btnCreateProject", lang)}</button>
   </div>
   <div class="bb-drawer" id="bb-newcard" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
-      <h3 style="font-family:'Fraunces',serif;margin:0">New card</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-nc-close" aria-label="${tJs("common.close", lang)}">✕ Close</button>
+      <h3 style="font-family:'Fraunces',serif;margin:0">${t("botboard.drawerNewCard", lang)}</h3>
+      <button type="button" class="bb-btn bb-sec" id="bb-nc-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-nc-msg"></div>
-    <p style="font-size:.8rem;color:var(--crow-text-muted)">Created in the current project, status <b>pending</b>.</p>
-    <label>Title</label><input id="bb-nc-title" type="text">
-    <label>Description</label><textarea id="bb-nc-desc" rows="3" style="font-family:inherit"></textarea>
+    <p style="font-size:.8rem;color:var(--crow-text-muted)">${t("botboard.newCardHelp", lang)}</p>
+    <label>${t("botboard.labelTitle", lang)}</label><input id="bb-nc-title" type="text">
+    <label>${t("botboard.labelDescription", lang)}</label><textarea id="bb-nc-desc" rows="3" style="font-family:inherit"></textarea>
     <div class="bb-row">
-      <div><label>Due date</label><input id="bb-nc-due" type="text" placeholder="YYYY-MM-DD"></div>
-      <div><label>Owner</label><input id="bb-nc-owner" type="text"></div>
+      <div><label>${t("botboard.labelDueDate", lang)}</label><input id="bb-nc-due" type="text" placeholder="YYYY-MM-DD"></div>
+      <div><label>${t("botboard.labelOwner", lang)}</label><input id="bb-nc-owner" type="text"></div>
     </div>
-    <label>Tags (comma-separated)</label><input id="bb-nc-tags" type="text">
-    <button type="button" class="bb-btn" id="bb-nc-save">Create card</button>
+    <label>${t("botboard.labelTags", lang)}</label><input id="bb-nc-tags" type="text">
+    <button type="button" class="bb-btn" id="bb-nc-save">${t("botboard.btnCreateCard", lang)}</button>
   </div>
   <div class="bb-drawer" id="bb-bulk" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
-      <h3 style="font-family:'Fraunces',serif;margin:0">Add unlinked cards</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-bk-close" aria-label="${tJs("common.close", lang)}">✕ Close</button>
+      <h3 style="font-family:'Fraunces',serif;margin:0">${t("botboard.drawerBulkTitle", lang)}</h3>
+      <button type="button" class="bb-btn bb-sec" id="bb-bk-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-bk-msg"></div>
-    <p style="font-size:.82rem;color:var(--crow-text-muted)">Cards with no project (max 200 per assign).</p>
+    <p style="font-size:.82rem;color:var(--crow-text-muted)">${t("botboard.bulkHelp", lang)}</p>
     <div id="bb-bk-list" style="max-height:60vh;overflow:auto"></div>
-    <button type="button" class="bb-btn" id="bb-bk-save">Assign selected</button>
+    <button type="button" class="bb-btn" id="bb-bk-save">${t("botboard.btnAssign", lang)}</button>
   </div>`;
 }
 
@@ -180,38 +180,38 @@ export function drawerMarkup(lang) {
 export function trackerDrawerMarkup(lang) {
   return `<div class="bb-drawer" id="bb-tracker-drawer" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
-      <h3 id="bb-td-title" style="font-family:'Fraunces',serif;margin:0">Item</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-td-close" aria-label="${tJs("common.close", lang)}">✕ Close</button>
+      <h3 id="bb-td-title" style="font-family:'Fraunces',serif;margin:0">${t("botboard.drawerTrackerItem", lang)}</h3>
+      <button type="button" class="bb-btn bb-sec" id="bb-td-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-td-msg"></div>
     <div id="bb-td-lock" class="bb-msg warn"></div>
-    <label>Label</label><input id="bb-td-label" type="text">
+    <label>${t("botboard.labelLabel", lang)}</label><input id="bb-td-label" type="text">
     <div class="bb-row">
-      <div><label>Status</label><select id="bb-td-status"></select></div>
-      <div><label>Priority</label><select id="bb-td-prio"><option value="">—</option>${[1, 2, 3, 4, 5].map((n) => `<option value="${n}">${n}</option>`).join("")}</select></div>
+      <div><label>${t("botboard.labelStatus", lang)}</label><select id="bb-td-status"></select></div>
+      <div><label>${t("botboard.labelPriority", lang)}</label><select id="bb-td-prio"><option value="">—</option>${[1, 2, 3, 4, 5].map((n) => `<option value="${n}">${n}</option>`).join("")}</select></div>
     </div>
-    <label>Action needed</label><input id="bb-td-action" type="text">
+    <label>${t("botboard.labelActionNeeded", lang)}</label><input id="bb-td-action" type="text">
     <div id="bb-td-fields"></div>
     <div id="bb-td-lease" style="margin-top:.5rem;font-size:.78rem;color:var(--crow-text-muted)"></div>
     <div>
-      <button type="button" class="bb-btn" id="bb-td-save">Save item</button>
-      <button type="button" class="bb-btn bb-sec" id="bb-td-clear-lease" style="display:none">Force-clear lease</button>
+      <button type="button" class="bb-btn" id="bb-td-save">${t("botboard.btnSaveItem", lang)}</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-td-clear-lease" style="display:none">${t("botboard.btnForceClearLease", lang)}</button>
     </div>
   </div>
   <div class="bb-drawer" id="bb-new-tracker-item" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
-      <h3 style="font-family:'Fraunces',serif;margin:0">New tracker item</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-nti-close" aria-label="${tJs("common.close", lang)}">✕ Close</button>
+      <h3 style="font-family:'Fraunces',serif;margin:0">${t("botboard.drawerNewTrackerItem", lang)}</h3>
+      <button type="button" class="bb-btn bb-sec" id="bb-nti-close" aria-label="${tJs("common.close", lang)}">✕ ${t("common.close", lang)}</button>
     </div>
     <div class="bb-msg" id="bb-nti-msg"></div>
-    <label>Label (title)</label><input id="bb-nti-label" type="text">
+    <label>${t("botboard.labelLabelTitle", lang)}</label><input id="bb-nti-label" type="text">
     <div class="bb-row">
-      <div><label>Status</label><select id="bb-nti-status"></select></div>
-      <div><label>Priority</label><select id="bb-nti-prio"><option value="3" selected>3</option>${[1, 2, 4, 5].map((n) => `<option value="${n}">${n}</option>`).join("")}</select></div>
+      <div><label>${t("botboard.labelStatus", lang)}</label><select id="bb-nti-status"></select></div>
+      <div><label>${t("botboard.labelPriority", lang)}</label><select id="bb-nti-prio"><option value="3" selected>3</option>${[1, 2, 4, 5].map((n) => `<option value="${n}">${n}</option>`).join("")}</select></div>
     </div>
-    <label>Action needed</label><input id="bb-nti-action" type="text">
+    <label>${t("botboard.labelActionNeeded", lang)}</label><input id="bb-nti-action" type="text">
     <div id="bb-nti-fields"></div>
-    <button type="button" class="bb-btn" id="bb-nti-save">Create item</button>
+    <button type="button" class="bb-btn" id="bb-nti-save">${t("botboard.btnCreateItem", lang)}</button>
   </div>`;
 }
 
@@ -225,7 +225,7 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
       content: botBoardStyles() + section(
         `Board — ${escapeHtml(selBot.displayName)}`,
         notice + switcher +
-        `<p style="margin-top:1rem;color:var(--crow-text-muted)">This bot has no project linked. Assign a project_id in Bot Builder.</p>`) +
+        `<p style="margin-top:1rem;color:var(--crow-text-muted)">${t("botboard.noProjectLinked", lang)}</p>`) +
         drawerMarkup(lang) + clientJs(selBot.botId, "kanban", null, null, null, lang),
     });
   }
@@ -257,9 +257,9 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
     if (!card) {
       return layout({
         title: "Bot Board",
-        content: botBoardStyles() + section("Card not found",
+        content: botBoardStyles() + section(t("botboard.cardNotFound", lang),
           `<p>#${escapeHtml(String(q.card))} is not in this bot's project.</p>` +
-          `<p><a href="/dashboard/bot-board?bot=${escapeHtml(selBot.botId)}">← back to board</a></p>`),
+          `<p><a href="/dashboard/bot-board?bot=${escapeHtml(selBot.botId)}">${t("botboard.backToBoard", lang)}</a></p>`),
       });
     }
     const locked = !!lockMap.get(cid);
@@ -268,32 +268,32 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
     const fieldRow = (lbl, val) =>
       `<tr><td style="padding:3px 14px 3px 0;opacity:.7">${escapeHtml(lbl)}</td><td>${escapeHtml(String(val == null ? "—" : val))}</td></tr>`;
     const planBlock = !planInfo
-      ? `<p class="bb-msg warn">No bot is linked to this project, so there is no plan file path.</p>`
+      ? `<p class="bb-msg warn">${t("botboard.planNoBot", lang)}</p>`
       : `<p style="font-size:.8rem;color:var(--crow-text-muted)">${escapeHtml(planInfo.path)}</p>` +
-        `<div class="bb-pre">${escapeHtml(plan.text || "(no plan yet)")}</div>` +
+        `<div class="bb-pre">${escapeHtml(plan.text || t("botboard.planFilePlaceholder", lang))}</div>` +
         (locked
-          ? `<p class="bb-msg warn">🔒 A bot is working this card — the plan file is read-only.</p>`
-          : `<p class="bb-msg">Open this board with JavaScript enabled to edit the plan file in the card drawer.</p>`);
+          ? `<p class="bb-msg warn">${t("botboard.planLocked", lang)}</p>`
+          : `<p class="bb-msg">${t("botboard.planJsHint", lang)}</p>`);
     const moveForm =
       `<form method="POST" action="/dashboard/bot-board" style="margin:.6rem 0">` +
       `<input type="hidden" name="action" value="move">` +
       `<input type="hidden" name="card_id" value="${cid}">` +
       `<input type="hidden" name="bot" value="${escapeHtml(selBot.botId)}">` +
-      `Move: ` + CARD_STATUSES.filter((s) => s !== card.status).map((s) =>
+      t("botboard.moveLabel", lang) + CARD_STATUSES.filter((s) => s !== card.status).map((s) =>
         `<button type="submit" name="status" value="${s}" class="bb-btn bb-sec" ${locked ? "disabled" : ""}>${escapeHtml(STATUS_LABEL[s])}</button>`).join(" ") +
       `</form>`;
     return layout({
       title: `Card #${cid}`,
       content: botBoardStyles() + section(
         `Card #${cid} — ${escapeHtml(String(card.title || ""))} ${badge(card.status, STATUS_BADGE[card.status] || "draft")}${locked ? " " + badge("bot working", "info") : ""}`,
-        `<p><a href="/dashboard/bot-board?bot=${escapeHtml(selBot.botId)}">← back to board</a></p>` +
+        `<p><a href="/dashboard/bot-board?bot=${escapeHtml(selBot.botId)}">${t("botboard.backToBoard", lang)}</a></p>` +
         `<table style="font-size:.9rem;border-collapse:collapse">` +
-        fieldRow("Priority", card.priority) + fieldRow("Due", card.due_date) +
-        fieldRow("Owner", card.owner) + fieldRow("Tags", card.tags) +
-        fieldRow("Parent", card.parent_id) + fieldRow("Updated", card.updated_at) +
+        fieldRow(t("botboard.fieldPriority", lang), card.priority) + fieldRow(t("botboard.fieldDue", lang), card.due_date) +
+        fieldRow(t("botboard.fieldOwner", lang), card.owner) + fieldRow(t("botboard.fieldTags", lang), card.tags) +
+        fieldRow(t("botboard.fieldParent", lang), card.parent_id) + fieldRow(t("botboard.fieldUpdated", lang), card.updated_at) +
         `</table>` +
         (card.description ? `<p style="margin-top:.6rem">${escapeHtml(String(card.description))}</p>` : "") +
-        moveForm + `<h4 style="margin-top:1rem">Plan file</h4>` + planBlock),
+        moveForm + `<h4 style="margin-top:1rem">${t("botboard.planFileHeading", lang)}</h4>` + planBlock),
     });
   }
 
@@ -329,7 +329,7 @@ export async function renderCustomTracker(req, res, { db, layout, selBot, bots, 
       content: botBoardStyles() + section(
         `Board — ${escapeHtml(selBot.displayName)}`,
         notice + switcher +
-        `<p style="margin-top:1rem;color:var(--crow-text-muted)">Custom tracker type but no tracker_slug configured.</p>`),
+        `<p style="margin-top:1rem;color:var(--crow-text-muted)">${t("botboard.noTrackerSlug", lang)}</p>`),
     });
   }
 
@@ -409,11 +409,11 @@ export async function renderCustomTracker(req, res, { db, layout, selBot, bots, 
     `<input type="text" id="bb-search" class="bb-search" placeholder="Search items…">` +
     `<div class="bb-chips">` +
     statusValues.map((sv) => `<button type="button" class="bb-chip" data-status-filter="${escapeHtml(sv)}">${escapeHtml(sv)}</button>`).join("") +
-    `<button type="button" class="bb-chip bb-chip-action" data-filter="action-needed">action needed</button>` +
+    `<button type="button" class="bb-chip bb-chip-action" data-filter="action-needed">${t("botboard.filterActionNeeded", lang)}</button>` +
     `</div>` +
     `<div class="bb-view-toggle">` +
-    `<button type="button" class="bb-view-btn bb-view-btn-active" data-view="columns">Columns</button>` +
-    `<button type="button" class="bb-view-btn" data-view="list">List</button>` +
+    `<button type="button" class="bb-view-btn bb-view-btn-active" data-view="columns">${t("botboard.viewColumns", lang)}</button>` +
+    `<button type="button" class="bb-view-btn" data-view="list">${t("botboard.viewList", lang)}</button>` +
     `</div></div>`;
 
   const content = botBoardStyles() + section(
