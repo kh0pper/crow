@@ -175,3 +175,24 @@ test("valid signed POST in optional mode → 200, crossHostAuth carries source",
   assert.equal(body.crossHost.valid, true);
   assert.equal(body.crossHost.sourceInstanceId, TEST_SOURCE_ID);
 });
+
+test("optional mode: INVALID signature must 401, never fall through to the handler", async () => {
+  _resetNonceCache();
+  const rawBody = JSON.stringify({ bundle_id: "demo-bundle" });
+  const headers = signRequest({
+    method: "POST",
+    path: "/optional",
+    body: rawBody,
+    authToken: TEST_AUTH_TOKEN,
+    signingKey: TEST_SIGNING_KEY,
+    sourceInstanceId: TEST_SOURCE_ID,
+  });
+  // Tamper the query string after signing — canonical path no longer matches.
+  const r = await fetch(`${baseUrl}/optional?tampered=1`, {
+    method: "POST",
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: rawBody,
+  });
+  assert.equal(r.status, 401);
+  assert.equal((await r.json()).error, "hmac_mismatch");
+});
