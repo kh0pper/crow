@@ -1,6 +1,13 @@
 # Getting Started
 
-Crow can be set up in several ways depending on your use case:
+**Not sure where to start? Pick your situation:**
+
+- Zero technical setup, just want it working → [Managed Hosting](./managed-hosting)
+- Free always-on cloud server, okay with a one-time setup → [Oracle Cloud Free Tier](./oracle-cloud)
+- Own hardware (Raspberry Pi, NUC, old laptop) → [Home Server](./home-server)
+- Just my computer, local only, no server → [Desktop Install](./desktop-install)
+- Developer, prefer Docker → [Docker](./docker)
+- Already have Crow, adding a second instance → [Google Cloud](./google-cloud) + [multi-device guide](./multi-device)
 
 ## Choose Your Path
 

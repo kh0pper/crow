@@ -146,6 +146,8 @@ Installs Crow as a persistent service with the `crow` CLI for managing bundles a
 
 → **[Full setup guide](https://maestro.press/software/crow/getting-started/full-setup)**
 
+More paths (Google Cloud, Docker, full self-host) — [full getting-started guide](https://maestro.press/software/crow/getting-started/).
+
 ## Crow OS & Self-Hosting
 
 Crow is also an all-in-one self-hosted home server. Install apps from an app store — file sync, photos, smart home, media, local AI — the way you would on any home server. The difference: because every app installs as a bundle, what you self-host is not just an app, it is a capability your agents and AI clients can use.
