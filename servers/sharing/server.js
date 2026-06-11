@@ -59,6 +59,7 @@ import {
   appendAudit,
 } from "../shared/project-acl.js";
 import { slugify, workspacePathFor, storagePrefixFor } from "../shared/slugify.js";
+import { createProjectSpace } from "../shared/project-spaces.js";
 import { mkdirSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { resolveDataDir } from "../db.js";
@@ -1246,28 +1247,23 @@ export function createSharingServer(dbPath, options = {}) {
     }
     try { mkdirSync(resolvedWs, { recursive: true }); } catch {}
 
-    // Insert the new project_spaces row. New local id (autoincremented),
-    // new local UUID, name suffixed to disambiguate. origin_instance_id
-    // = the bundle's origin so paired-instance sync can dedupe later.
-    const insProject = await db.execute({
-      sql: `INSERT INTO project_spaces
-              (uuid, slug, name, description, type, status, tags,
-               workspace_dir, storage_prefix, origin_instance_id, created_at, updated_at)
-            VALUES (lower(hex(randomblob(16))), ?, ?, ?, ?, 'active', ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-      args: [
-        newSlug,
-        `${orig.name} (clone)`,
-        orig.description ?? null,
-        orig.type ?? "general",
-        orig.tags ?? null,
-        workspaceDir,
-        storagePref,
-        bundle.origin_instance_id ?? null,
-      ],
+    // Insert the new project_spaces row via the shared helper (explicitSlug
+    // mode: we own the -clone-N slug + path-containment assertion above;
+    // the helper computes workspace_dir/storage_prefix from the slug).
+    // ownerMember:false — clone path supplies its own richer member row below
+    // (role='owner', mode='clone', granted_by_contact_id=originContactId).
+    const { id: newProjectId } = await createProjectSpace(db, {
+      explicitSlug: newSlug,
+      name: `${orig.name} (clone)`,
+      description: orig.description ?? null,
+      type: orig.type ?? "general",
+      tags: orig.tags ?? null,
+      originInstanceId: bundle.origin_instance_id ?? null,
+      ownerMember: false,
     });
-    const newProjectId = Number(insProject.lastInsertRowid);
 
-    // Owner row for the local user on this clone.
+    // Owner row for the local user on this clone (richer than the helper default:
+    // mode='clone' records provenance; granted_by_contact_id links to sender).
     await db.execute({
       sql: `INSERT INTO project_members (project_id, contact_id, role, mode, granted_by_contact_id)
             VALUES (?, NULL, 'owner', 'clone', ?)`,
