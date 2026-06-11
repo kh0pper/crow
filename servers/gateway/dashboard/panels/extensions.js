@@ -670,10 +670,17 @@ export default {
     // ─── Available add-on cards (grid) ───
     let gridHtml;
     if (available.length === 0) {
-      gridHtml = `<div style="text-align:center;padding:2rem;color:var(--crow-text-muted)">
-        <h3>${t("extensions.registryUnavailable", lang)}</h3>
-        <p>${t("extensions.registryUnavailableDesc", lang)}</p>
-      </div>`;
+      // Double-failure banner: both remote and local registry unavailable.
+      const isDoubleFailure = registrySource === "none";
+      gridHtml = isDoubleFailure
+        ? `<div class="callout callout-error" role="status" style="margin:1rem 0">
+            <strong>${t("extensions.serviceUnavailable", lang)}</strong>
+            <p style="margin:0.25rem 0 0">${t("extensions.serviceUnavailableDesc", lang)}</p>
+          </div>`
+        : `<div style="text-align:center;padding:2rem;color:var(--crow-text-muted)">
+            <h3>${t("extensions.registryUnavailable", lang)}</h3>
+            <p>${t("extensions.registryUnavailableDesc", lang)}</p>
+          </div>`;
     } else {
       const hostArches = detectGpuArch();
       const hostVramGb = detectGpuVramGb();

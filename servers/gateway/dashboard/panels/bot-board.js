@@ -966,8 +966,8 @@ function clientJs(botId, trackerType, projectId, trackerSlug, contextFields, lan
         (r.j.projects||[]).forEach(function(p){
           ps.appendChild(optEl(String(p.id),'#'+p.id+' \\u2014 '+(p.name||''),Number(c.project_id)===Number(p.id)));
         });
-      }
-    });
+      } else if(!r.ok){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); }
+    }).catch(function(){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
     loadPlan();
     openDrawer(drawer);
   }
@@ -977,7 +977,7 @@ function clientJs(botId, trackerType, projectId, trackerSlug, contextFields, lan
       if(r.ok&&r.j){ $('bb-d-plan').value=r.j.markdown||''; planMtime=r.j.mtime||null;
         msg(pm, r.j.exists?'':'(no plan yet)', ''); renderPre();
       } else { msg(pm, (r.j&&r.j.reason)||'plan unavailable','warn'); }
-    });
+    }).catch(function(){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
   }
   function renderPre(){ var el=$('bb-d-plan-pre'); if(el) el.textContent=$('bb-d-plan').value; }
 
@@ -994,7 +994,7 @@ function clientJs(botId, trackerType, projectId, trackerSlug, contextFields, lan
     ['bb-td-label','bb-td-status','bb-td-prio','bb-td-action','bb-td-save']
       .forEach(function(i){ var e=$(i); if(e) e.disabled=cd.locked; });
     api('GET','/tracker-item/'+cd.id).then(function(r){
-      if(!r.ok||!r.j||!r.j.item) { msg($('bb-td-msg'),'Failed to load item.','err'); return; }
+      if(!r.ok||!r.j||!r.j.item) { msg($('bb-td-msg'),'Failed to load item.','err'); crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); return; }
       var item=r.j.item, tracker=r.j.tracker;
       $('bb-td-label').value=item.label||'';
       $('bb-td-prio').value=item.priority==null?'':String(item.priority);
@@ -1345,7 +1345,7 @@ function clientJs(botId, trackerType, projectId, trackerSlug, contextFields, lan
     // Determine tracker_slug from the URL or bot definition
     var slugMatch=location.search.match(/bot=([^&]+)/);
     var botIdForCreate=slugMatch?decodeURIComponent(slugMatch[1]):BOT_ID;
-    api('GET','/tracker/'+encodeURIComponent(status)+'/items').catch(function(){});
+    api('GET','/tracker/'+encodeURIComponent(status)+'/items').catch(function(){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); });
     // We need the tracker_slug. Get it from the page title or fetch it.
     api('POST','/tracker-item',{
       tracker_slug:window._trackerSlug||'',
@@ -1358,7 +1358,7 @@ function clientJs(botId, trackerType, projectId, trackerSlug, contextFields, lan
     }).then(function(r){
       if(r.ok){ msg($('bb-nti-msg'),'Created #'+(r.j&&r.j.id)+'.','ok'); setTimeout(reload,500); }
       else msg($('bb-nti-msg'),(r.j&&(r.j.error||r.j.reason))||'create failed','err');
-    });
+    }).catch(function(e){ crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error', details: e.message}); });
   };
 
   // ---- Search and filter (Feature 1) ----
