@@ -22,11 +22,10 @@ import { existsSync, readdirSync, mkdirSync, createWriteStream, readFileSync } f
 import { unlink } from "node:fs/promises";
 import { createDbClient } from "../../db.js";
 import { getObject } from "../../storage/s3-client.js";
+import { fixedWindowLimit } from "../middleware/rate-limit.js";
 
-/** Rate limiter: botId → { count, windowStart } */
-const rateLimits = new Map();
-const RATE_LIMIT_MAX = 10;
-const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+/** Rate limiter: 10 messages / 60s per botId */
+const botMessageRateLimit = fixedWindowLimit({ max: 10, windowMs: 60 * 1000 });
 const MAX_MESSAGE_BYTES = 10 * 1024;
 
 /** Resolve openclaw CLI path — may not be in systemd PATH */
@@ -168,16 +167,6 @@ async function analyzeImageWithVision(imagePath, mimeType, baseUrl, apiKey, mode
   return description || "Unable to analyze image.";
 }
 
-function checkRateLimit(botId) {
-  const now = Date.now();
-  let entry = rateLimits.get(botId);
-  if (!entry || (now - entry.windowStart) > RATE_LIMIT_WINDOW_MS) {
-    entry = { count: 0, windowStart: now };
-    rateLimits.set(botId, entry);
-  }
-  entry.count++;
-  return entry.count <= RATE_LIMIT_MAX;
-}
 
 function expandTilde(p) {
   if (p && p.startsWith("~/")) return resolve(process.env.HOME || "/home/kh0pp", p.slice(2));
@@ -257,7 +246,7 @@ export default function botChatRouter(dashboardAuth) {
       if (!bot) return res.status(404).json({ error: "Bot not found" });
       if (bot.status !== "running") return res.status(409).json({ error: "Bot is not running" });
 
-      if (!checkRateLimit(botId)) {
+      if (!botMessageRateLimit.check(botId)) {
         return res.status(429).json({ error: "Rate limit exceeded (10 msg/min)" });
       }
 

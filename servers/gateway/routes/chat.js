@@ -26,6 +26,7 @@ import { resolveProviderConfig } from "../ai/resolve-profile.js";
 import { checkVendorSwitch } from "../ai/vendor-guard.js";
 import { listProvidersAll } from "../../orchestrator/providers-db.js";
 import { chooseProvider as smartRoute, stripSlashCommand, SmartChatDisabled } from "../ai/smart-router.js";
+import { fixedWindowLimit } from "../middleware/rate-limit.js";
 
 /** Sliding window: max messages to send to AI */
 const CONTEXT_WINDOW = 20;
@@ -33,21 +34,8 @@ const CONTEXT_WINDOW = 20;
 /** Active generation controllers: conversationId → AbortController */
 const activeGenerations = new Map();
 
-/** Rate limiter state: sessionToken → { count, windowStart } */
-const rateLimits = new Map();
-const RATE_LIMIT_MAX = 10;
-const RATE_LIMIT_WINDOW_MS = 60 * 1000;
-
-function checkRateLimit(sessionToken) {
-  const now = Date.now();
-  let entry = rateLimits.get(sessionToken);
-  if (!entry || (now - entry.windowStart) > RATE_LIMIT_WINDOW_MS) {
-    entry = { count: 0, windowStart: now };
-    rateLimits.set(sessionToken, entry);
-  }
-  entry.count++;
-  return entry.count <= RATE_LIMIT_MAX;
-}
+/** Rate limiter: 10 messages / 60s, keyed by req.ip (legacy key name: sessionToken) */
+const messageRateLimit = fixedWindowLimit({ max: 10, windowMs: 60 * 1000 });
 
 export default function chatRouter(dashboardAuth) {
   const router = Router();
@@ -414,7 +402,7 @@ export default function chatRouter(dashboardAuth) {
 
     // Rate limiting
     const sessionToken = req.ip || "unknown";
-    if (!checkRateLimit(sessionToken)) {
+    if (!messageRateLimit.check(sessionToken)) {
       return res.status(429).json({ error: "Rate limited — max 10 messages per minute" });
     }
 

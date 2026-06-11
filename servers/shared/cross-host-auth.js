@@ -29,6 +29,7 @@
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
+import { getPeerCreds } from "./peer-credentials.js";
 
 const DEFAULT_SKEW_MS = 60_000;  // ±60s
 const NONCE_TTL_MS = 120_000;    // entries evicted after 120s
@@ -250,4 +251,107 @@ export async function auditCrossHostCall(db, record) {
     // Swallow — audit must not break the primary path
     console.warn(`[cross-host-auth] audit write failed: ${err.message}`);
   }
+}
+
+// -----------------------------------------------------------------------
+// Express middleware factory (W2-1) — single implementation of the
+// verify-signature-or-reject logic previously duplicated inline in
+// routes/bundles.js and routes/federation.js.
+// -----------------------------------------------------------------------
+
+/**
+ * Express middleware that verifies an inbound cross-host signed request.
+ *
+ * @param {object} dbClient  libsql client used ONLY for audit writes
+ * @param {object} [opts]
+ * @param {boolean} [opts.optional=false]
+ *   true  → requests without X-Crow-Signature pass through (next()) so
+ *           existing session/OAuth auth paths apply (bundles behavior).
+ *   false → requests without X-Crow-Signature get 401 {error:"signature_required"}
+ *           (federation behavior — the router is HMAC-only).
+ * @param {string|((req)=>string)} [opts.audit=""]  audit-log action; a constant
+ *   string ("federation.overview") or a per-request function
+ *   (req => `bundle.${req.path.split("/").pop() || ""}`).
+ * @param {boolean} [opts.auditBundleId=false]  when true, the post-verify
+ *   audit row also records bundleId (req.body?.bundle_id) and the request
+ *   nonce — bundles behavior. Federation rows leave both null.
+ * @param {string} [opts.emptyBodyString="{}"]  canonical serialization of an
+ *   empty/absent parsed JSON body. Bundles' signers hash "{}"; federation's
+ *   signers hash "" for body-less GETs. Must match the signer or HMACs of
+ *   empty-body requests fail.
+ *
+ * Behavior preserved exactly from both inline copies: status codes, error
+ * strings, audit rows, and req.crossHostAuth = verifyRequest(...) result.
+ */
+export function crossHostVerifyMiddleware(dbClient, {
+  optional = false,
+  audit = "",
+  auditBundleId = false,
+  emptyBodyString = "{}",
+} = {}) {
+  const actionFor = typeof audit === "function" ? audit : () => audit;
+  return async (req, res, next) => {
+    const sig = req.headers["x-crow-signature"];
+    if (!sig) {
+      if (optional) return next(); // not a peer call — pass through
+      return res.status(401).json({ error: "signature_required" });
+    }
+
+    const source = req.headers["x-crow-source"];
+    if (!source) {
+      return res.status(401).json({ error: "missing_x_crow_source" });
+    }
+
+    // Load shared signing_key from peer-tokens.json
+    const creds = getPeerCreds(source);
+    if (!creds || !creds.signing_key) {
+      await auditCrossHostCall(dbClient, {
+        sourceInstanceId: source,
+        direction: "inbound",
+        action: actionFor(req),
+        error: "no_signing_key_for_source",
+      });
+      return res.status(401).json({ error: "unknown_peer" });
+    }
+
+    // Canonical body must match what the signer used. express.json() sets
+    // req.body to {} for GETs with no body; emptyBodyString controls whether
+    // that canonicalizes to "{}" (bundles) or "" (federation).
+    const isEmptyObj = req.body && typeof req.body === "object"
+      && !Array.isArray(req.body) && Object.keys(req.body).length === 0;
+    const rawBody = typeof req.body === "string"
+      ? req.body
+      : (isEmptyObj || !req.body ? emptyBodyString : JSON.stringify(req.body));
+
+    const result = verifyRequest({
+      method: req.method,
+      path: req.originalUrl || req.url,
+      body: rawBody,
+      headers: Object.fromEntries(
+        Object.entries(req.headers).map(([k, v]) => [k.toLowerCase(), Array.isArray(v) ? v[0] : v])
+      ),
+      signingKey: creds.signing_key,
+    });
+
+    req.crossHostAuth = result;
+
+    // Audit the validation attempt regardless of outcome. Handler path may
+    // still fail (e.g. bundle missing) but the HMAC-validity fact is what
+    // matters for the security log.
+    await auditCrossHostCall(dbClient, {
+      sourceInstanceId: source,
+      direction: "inbound",
+      action: actionFor(req),
+      ...(auditBundleId ? { bundleId: req.body?.bundle_id, nonce: result.nonce } : {}),
+      hmacValid: result.valid,
+      timestampSkewMs: result.timestampSkewMs,
+      error: result.valid ? null : result.reason,
+    });
+
+    if (!result.valid) {
+      return res.status(401).json({ error: result.reason });
+    }
+
+    return next();
+  };
 }

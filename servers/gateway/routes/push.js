@@ -17,8 +17,11 @@ import { getVapidPublicKey } from "../push/web-push.js";
 export default function pushRouter(authMiddleware) {
   const router = Router();
 
+  // Every push route is private — auth the whole prefix (W2-1 tidy).
+  router.use("/api/push", authMiddleware);
+
   // GET /api/push/vapid-key — public key for PushManager.subscribe()
-  router.get("/api/push/vapid-key", authMiddleware, (req, res) => {
+  router.get("/api/push/vapid-key", (req, res) => {
     const key = getVapidPublicKey();
     if (!key) {
       return res.status(404).json({ error: "Push notifications not configured" });
@@ -27,7 +30,7 @@ export default function pushRouter(authMiddleware) {
   });
 
   // POST /api/push/register — save push subscription
-  router.post("/api/push/register", authMiddleware, async (req, res) => {
+  router.post("/api/push/register", async (req, res) => {
     const { endpoint, keys, deviceName, platform } = req.body;
 
     if (!endpoint || !keys || !keys.p256dh || !keys.auth) {
@@ -57,7 +60,7 @@ export default function pushRouter(authMiddleware) {
   });
 
   // DELETE /api/push/register — remove push subscription
-  router.delete("/api/push/register", authMiddleware, async (req, res) => {
+  router.delete("/api/push/register", async (req, res) => {
     const { endpoint } = req.body;
 
     if (!endpoint) {
@@ -80,7 +83,7 @@ export default function pushRouter(authMiddleware) {
   });
 
   // GET /api/push/notifications — poll for new notifications (used by Android app)
-  router.get("/api/push/notifications", authMiddleware, async (req, res) => {
+  router.get("/api/push/notifications", async (req, res) => {
     const since = req.query.since || "1970-01-01T00:00:00Z";
 
     const db = createDbClient();
@@ -119,7 +122,7 @@ export default function pushRouter(authMiddleware) {
   // to `kevin-mpa`, so primary's response includes that in `topics` so the
   // phone paired to primary receives MPA pushes too without a per-instance
   // pairing rotation.
-  router.get("/api/push/ntfy-config", authMiddleware, (req, res) => {
+  router.get("/api/push/ntfy-config", (req, res) => {
     const topic = process.env.NTFY_TOPIC;
     if (!topic) {
       return res.json({ enabled: false });
