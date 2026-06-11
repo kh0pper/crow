@@ -112,3 +112,36 @@ test("Help & Setup replay link honors Spanish (DB language = es)", async () => {
   assert.ok(html.includes("/dashboard/onboarding?step=0"), "links to onboarding step 0");
   assert.ok(html.includes(i18n.t("onboarding.replayLink", "es")), "uses the ES replay label");
 });
+
+test("done step sets onboarding_completed_at exactly once", async () => {
+  const calls = [];
+  const mkDb = (existingValue) => ({
+    async execute(q) {
+      const sql = typeof q === "string" ? q : q.sql;
+      calls.push(sql);
+      if (/SELECT/i.test(sql) && /onboarding_completed_at|dashboard_settings/i.test(sql)) {
+        return { rows: existingValue ? [{ value: existingValue }] : [] };
+      }
+      return { rows: [] };
+    },
+  });
+
+  // First visit to done: flag absent -> a write (INSERT/UPDATE/REPLACE) must happen.
+  const layout = ({ content }) => content;
+  const res = { send() {}, setHeader() {} };
+  const req = { method: "GET", query: { step: "4" }, headers: {} };
+  calls.length = 0;
+  await onboardingPanel.handler(req, res, { layout, lang: "en", db: mkDb(null) });
+  assert.ok(
+    calls.some((s) => /INSERT|UPDATE|REPLACE/i.test(s)),
+    "first done visit must persist onboarding_completed_at",
+  );
+
+  // Second visit: flag present -> no write.
+  calls.length = 0;
+  await onboardingPanel.handler(req, res, { layout, lang: "en", db: mkDb("2026-06-11T00:00:00Z") });
+  assert.ok(
+    !calls.some((s) => /INSERT|UPDATE|REPLACE/i.test(s)),
+    "subsequent done visits must not rewrite the flag",
+  );
+});
