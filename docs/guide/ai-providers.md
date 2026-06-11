@@ -6,7 +6,7 @@ Crow's built-in AI Chat lets you chat with any AI provider directly from the Cro
 
 BYOAI is one of [three ways AI connects to Crow](/guide/integration-overview). External platforms (Claude.ai, ChatGPT, Cursor) connect via MCP and bring their own AI. BYOAI flips that: Crow's gateway acts as the AI client, calling the provider API on your behalf and dispatching tool calls internally.
 
-This means BYOAI and external MCP connections share the same database. A memory stored from BYOAI Chat is instantly available in Claude.ai, and vice versa. If you also use [OpenClaw](/platforms/openclaw), the same applies — all three patterns read and write the same data.
+This means BYOAI and external MCP connections share the same database. A memory stored from BYOAI Chat is instantly available in Claude.ai, and vice versa. All connection patterns read and write the same data.
 
 ## How It Works
 

@@ -40,25 +40,25 @@ User ──► Crow's Nest ──► /api/chat ──► AI Provider API ──�
 
 **Setup:** See the [AI Providers (BYOAI) guide](/guide/ai-providers).
 
-### 3. Native Bots (CrowClaw)
+### 3. Native Bots (Bot Builder)
 
-AI bots that live on Discord, WhatsApp, Telegram, and other chat platforms — managed directly from the Crow dashboard. The [CrowClaw](/guide/bot-management) extension handles bot lifecycle, AI configuration, skill deployment, and monitoring.
+AI agents that live on Gmail, Discord, and Meta Glasses — built and managed directly from the Crow dashboard. The [Bot Builder](/guide/bot-builder) creates agents with scoped tools, enforced permissions, and opt-in self-authoring.
 
 ```
-Chat Platform ──► OpenClaw Engine ──► Crow MCP Servers ──► SQLite Database
-  (Discord,         (managed by            ▲
-   WhatsApp,         CrowClaw)             │
-   Telegram)                          CrowClaw Panel
-                                     (dashboard UI)
+Channel ──► Bot Builder Gateway ──► Crow MCP Servers ──► SQLite Database
+  (Gmail,     (agent runtime,            ▲
+   Discord,    skill dispatch)           │
+   Glasses)                         Bot Board Panel
+                                    (dashboard UI)
 ```
 
-**How it works:** Install the CrowClaw extension, create a bot from the dashboard, and deploy it. CrowClaw auto-configures the bot's AI provider from Crow's existing AI profiles (BYOAI bridge), deploys skills, and manages the bot's systemd service. The bot appears in the Messages panel alongside peers and AI chat — one inbox for everything.
+**How it works:** Create an agent from the dashboard, assign skills and tools, and deploy it. The agent connects via MCP, inherits your AI provider profiles, and appears in the Messages panel alongside peers and AI chat — one inbox for everything.
 
-Bots aren't just chat interfaces — they can **control Crow apps**. Since the bot connects via MCP, it has access to the same tool suite as Claude or ChatGPT: memory, projects, blog, sharing, storage, and extensions. A household bot can track expenses and manage a pantry. A research bot can monitor RSS feeds and store findings in projects. A blog bot can publish scheduled posts.
+Agents aren't just chat interfaces — since they connect via MCP, they have access to the same tool suite as Claude or ChatGPT: memory, projects, blog, sharing, storage, and extensions. A household agent can track expenses and manage a pantry. A research agent can monitor RSS feeds and store findings in projects.
 
 **Best for:** Accessing Crow from mobile chat apps, multi-platform presence, automated workflows, collaborative use through shared channels.
 
-**Setup:** See the [Bot Management guide](/guide/bot-management) or install CrowClaw from [Extensions](/guide/extensions).
+**Setup:** See the [Bot Builder guide](/guide/bot-builder).
 
 ## What They All Share
 
@@ -123,7 +123,7 @@ When a peer is offline, messages and shares can be held by an opt-in peer relay 
 |---|---|
 | Deep research session with Claude | External MCP (stdio) |
 | Quick memory lookup from your phone | BYOAI Chat (Crow's Nest) |
-| Team collaboration on Discord | Native Bots (CrowClaw) |
+| Team collaboration on Discord | Native Bots (Bot Builder) |
 | Code project with AI assistance | External MCP via Cursor or Claude Code |
 | Fully local, no cloud AI | BYOAI Chat with Ollama |
 | Access from multiple chat apps | Native Bots (Discord + WhatsApp + Telegram) |
@@ -133,8 +133,7 @@ When a peer is offline, messages and shares can be held by an opt-in peer relay 
 ## Next Steps
 
 - [AI Providers (BYOAI)](/guide/ai-providers) — Configure the built-in AI Chat
-- [Bot Management](/guide/bot-management) — Create and manage bots from the dashboard
+- [Bot Builder](/guide/bot-builder) — Create and manage native agents from the dashboard
 - [Cross-Platform Guide](/guide/cross-platform) — How behavioral context syncs across platforms
-- [OpenClaw](/platforms/openclaw) — Connect Crow to chat platform bots
 - [Platforms](/platforms/) — Per-platform setup guides for external MCP
 - [Context Management](/architecture/context-management) — Deep dive on the tool router
