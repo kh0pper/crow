@@ -113,6 +113,12 @@ test("1. Counter atomicity: 50 concurrent _nextLamport() → 50 unique strictly-
     assert.ok(Number.isInteger(v) && v > 0, `expected positive integer, got ${v}`);
   }
 
+  // Exactly 1..50, no gaps — a counter that skips values isn't atomic-increment
+  assert.deepEqual(
+    [...results].sort((a, b) => a - b),
+    Array.from({ length: 50 }, (_, i) => i + 1),
+  );
+
   // Persisted counter equals the max
   const { rows } = await db.execute({
     sql: "SELECT local_counter FROM sync_state WHERE instance_id = ?",
@@ -305,11 +311,22 @@ test("5. Per-peer serialization: two concurrent _processNewEntries on same feed 
     }));
   }
 
+  // Spy on _applyEntry: with LWW + the equivalence check, a double-applied
+  // batch converges to identical row state, so final state alone can't
+  // distinguish serialized from interleaved runs — the apply COUNT can.
+  let applyCalls = 0;
+  const origApply = mgr._applyEntry.bind(mgr);
+  mgr._applyEntry = async (...args) => { applyCalls++; return origApply(...args); };
+
   // Launch two concurrent process runs on the same feed
   await Promise.all([
     mgr._processNewEntries(REMOTE, feed),
     mgr._processNewEntries(REMOTE, feed),
   ]);
+
+  // The lock serializes the runs; the second re-reads the checkpoint inside
+  // the lock and finds nothing left to do — exactly feed.length applies total.
+  assert.equal(applyCalls, 6, "each entry applied exactly once across both runs");
 
   // Should have exactly 0 conflict rows (no duplicate applications)
   const { rows: conflicts } = await db.execute({
@@ -642,16 +659,28 @@ test("9d. Insert collision (D7-d): entry with row.id == null → warn branch, no
   const REMOTE = "remote-t9d";
   const { mgr, db } = makeManager(INST);
 
-  const feed = makeStubFeed();
-  // Push an entry with no id field
-  feed.push(signEntry({
-    table: "memories", op: "insert",
-    row: { category: "general", content: "no-id-entry" },
-    lamport_ts: 5, instance_id: REMOTE,
-  }));
+  // No id AND a NOT NULL violation (content: null) — OR IGNORE swallows the
+  // violation so rowsAffected === 0, which reaches the null-id guard. (A plain
+  // no-id insert would auto-assign an id and never enter the rowsAffected===0
+  // branch at all.) Call _applyInsert DIRECTLY: through _processNewEntries the
+  // outer catch in _applyEntry would swallow a missing-guard throw, making the
+  // test unable to tell guard from crash.
+  const row = { category: "general", content: null };
 
-  // Should not throw
-  await assert.doesNotReject(() => mgr._processNewEntries(REMOTE, feed));
+  // Shared DB across tests — assert deltas, not absolutes.
+  const countOf = async (table) => {
+    const { rows } = await db.execute({ sql: `SELECT COUNT(*) AS n FROM ${table}`, args: [] });
+    return Number(rows[0].n);
+  };
+  const conflictsBefore = await countOf("sync_conflicts");
+  const memsBefore = await countOf("memories");
+
+  // Without the guard this rejects (better-sqlite3 throws binding undefined id)
+  await assert.doesNotReject(() => mgr._applyInsert("memories", row, 5, REMOTE));
+
+  // Guard must not have logged a conflict or inserted anything
+  assert.equal(await countOf("sync_conflicts"), conflictsBefore, "null-id guard logs no conflict");
+  assert.equal(await countOf("memories"), memsBefore, "nothing inserted");
 
   db.close();
 });
