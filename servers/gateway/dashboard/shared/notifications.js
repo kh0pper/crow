@@ -106,6 +106,7 @@ export function sharedNotifJs(lang) {
         var dismiss = document.createElement('button');
         dismiss.className = 'notif-item-dismiss';
         dismiss.title = '${tJs("notif.dismiss", lang)}';
+        dismiss.setAttribute('aria-label', '${tJs("notif.dismiss", lang)}');
         dismiss.textContent = '\\u00D7';
         dismiss.onclick = function(e) { dismissNotification(e, n.id); };
         item.appendChild(dismiss);
@@ -260,7 +261,7 @@ ${kioskBtn}
   <turbo-stream-source src="/dashboard/streams/notifications"></turbo-stream-source>
   <div id="notif-dropdown" class="header-dropdown notif-dropdown" style="display:none">
     <div class="dropdown-title">${t("notif.notifications", lang)} <button class="btn btn-sm btn-secondary" onclick="dismissAllNotifications(event)">${t("notif.clearAll", lang)}</button></div>
-    <div id="notif-list" class="dropdown-body">${t("common.loading", lang)}</div>
+    <div id="notif-list" class="dropdown-body" aria-live="polite" aria-atomic="false">${t("common.loading", lang)}</div>
   </div>
 </div>
 `;
@@ -788,7 +789,7 @@ ${kioskBtn}
       <span class="crow-health-sep">&middot;</span>
       <span class="crow-health-metric" id="crow-uptime">--</span>
     </div>
-    <div id="notif-list" class="dropdown-body">${t("common.loading", lang)}</div>
+    <div id="notif-list" class="dropdown-body" aria-live="polite" aria-atomic="false">${t("common.loading", lang)}</div>
   </div>
 </div>
 `;

@@ -7,6 +7,7 @@
  */
 
 import { escapeHtml } from "../shared/components.js";
+import { tJs } from "../shared/i18n.js";
 
 function fmtTime(iso) {
   if (!iso) return "";
@@ -21,6 +22,43 @@ function fmtEventType(t) {
   if (t.startsWith("lifecycle.")) return t.slice("lifecycle.".length);
   if (t.startsWith("dispatch.")) return t.slice("dispatch.".length);
   return t;
+}
+
+// Known orchestrator event data fields with human-readable labels.
+const KNOWN_FIELDS = {
+  tokens_in:   (v) => `Tokens in: ${Number(v).toLocaleString()}`,
+  tokens_out:  (v) => `Tokens out: ${Number(v).toLocaleString()}`,
+  model:       (v) => `Model: ${v}`,
+  duration_ms: (v) => `Duration: ${Number(v) >= 1000 ? (Number(v) / 1000).toFixed(1) + "s" : v + "ms"}`,
+  preset:      (v) => `Preset: ${v}`,
+  bundle_id:   (v) => `Bundle: ${v}`,
+  error:       (v) => `Error: ${v}`,
+  reason:      (v) => `Reason: ${v}`,
+  status:      (v) => `Status: ${v}`,
+};
+
+/**
+ * Render an orchestrator event's data payload as human-readable text.
+ * Known fields get labelled lines; unknown objects get "key: value" lines
+ * (never raw JSON.stringify blobs).
+ */
+function humanizeData(dataStr) {
+  if (!dataStr) return "";
+  let parsed;
+  try { parsed = JSON.parse(dataStr); } catch { return dataStr; }
+  if (typeof parsed !== "object" || parsed === null) return String(parsed);
+  const lines = [];
+  for (const [k, v] of Object.entries(parsed)) {
+    if (v === null || v === undefined) continue;
+    if (k in KNOWN_FIELDS) {
+      lines.push(KNOWN_FIELDS[k](v));
+    } else if (typeof v === "object") {
+      lines.push(`${k}: ${JSON.stringify(v)}`);
+    } else {
+      lines.push(`${k}: ${v}`);
+    }
+  }
+  return lines.join(" · ");
 }
 
 function colorFor(t) {
@@ -41,7 +79,7 @@ export default {
   hidden: false,
   category: "system",
 
-  async handler(req, res, { db, layout }) {
+  async handler(req, res, { db, layout, lang }) {
     if (req.method === "POST") {
       const { action } = req.body || {};
       if (action === "reset_refcounts") {
@@ -100,14 +138,7 @@ export default {
       if (e.bundle_id) metaBits.push(`bundle=${e.bundle_id}`);
       if (typeof e.refs === "number") metaBits.push(`refs=${e.refs}`);
       const meta = metaBits.join(" · ");
-      let dataStr = "";
-      if (e.data) {
-        try {
-          const parsed = JSON.parse(e.data);
-          if (typeof parsed === "object" && parsed) dataStr = Object.entries(parsed).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(" ");
-          else dataStr = String(parsed);
-        } catch { dataStr = e.data; }
-      }
+      const dataStr = humanizeData(e.data);
       const runId = e.run_id ? `<a href="?run=${encodeURIComponent(e.run_id)}" style="color:var(--crow-accent);text-decoration:none">${escapeHtml(e.run_id.slice(0, 14))}</a>` : "-";
       return `
         <tr>
@@ -158,14 +189,7 @@ export default {
     const finalEventRows = req.query.run
       ? filteredEvents.map((e) => {
           const color = colorFor(e.event_type);
-          let dataStr = "";
-          if (e.data) {
-            try {
-              const parsed = JSON.parse(e.data);
-              if (typeof parsed === "object" && parsed) dataStr = Object.entries(parsed).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(" ");
-              else dataStr = String(parsed);
-            } catch { dataStr = e.data; }
-          }
+          const dataStr = humanizeData(e.data);
           return `
             <tr>
               <td style="padding:4px 8px;color:var(--crow-text-muted);font-family:'JetBrains Mono',monospace;font-size:0.78rem">${fmtTime(e.at)}</td>
@@ -202,7 +226,7 @@ export default {
             Lifecycle refcounts + dispatch event timeline. Auto-refreshes every 5s.
           </p>
         </div>
-        <form method="POST" onsubmit="return confirm('Reset all lifecycle refcounts? This reconciles against live provider health.');" style="margin:0">
+        <form method="POST" onsubmit="return confirm('${tJs("orchestrator.confirmResetRefcounts", lang)}');" style="margin:0">
           <input type="hidden" name="action" value="reset_refcounts">
           <button type="submit" class="btn btn-secondary btn-sm">Reset Refcounts</button>
         </form>

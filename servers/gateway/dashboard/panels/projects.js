@@ -8,7 +8,7 @@
  */
 
 import { escapeHtml, section, badge, dataTable, formField, actionBar, formatDate } from "../shared/components.js";
-import { t } from "../shared/i18n.js";
+import { t, tJs } from "../shared/i18n.js";
 import { sanitizeFtsQuery, escapeLikePattern } from "../../../db.js";
 import {
   AclError,
@@ -424,9 +424,16 @@ async function renderDetailView(db, projectId, layout, lang) {
       const capLabel = granted.length === Object.keys(caps).length
         ? `<span style="color:var(--crow-text-muted);font-size:0.75rem">all (${granted.length})</span>`
         : `<span style="font-size:0.75rem;color:var(--crow-text-secondary)" title="${escapeHtml(granted.join(', '))}">${granted.length} of ${Object.keys(caps).length}</span>`;
+      // Build the confirm() text from the RAW name, JS-escape it for the
+      // single-quoted JS string, then HTML-attribute-escape the WHOLE thing —
+      // the attribute context is what matters here (a raw `"` would break out).
+      const rawWho = m.display_name || m.crow_id || `contact #${m.contact_id}`;
+      const confirmAttr = escapeHtml(
+        t("projects.confirmRevoke", lang).replace("{who}", rawWho).replace(/\\/g, "\\\\").replace(/'/g, "\\'"),
+      );
       const removeForm = m.contact_id == null
         ? `<span style="color:var(--crow-text-muted);font-size:0.75rem">—</span>`
-        : `<form method="POST" style="display:inline" onsubmit="return confirm('Revoke ${escapeHtml(who).replace(/'/g, "&#39;")}?')">
+        : `<form method="POST" style="display:inline" onsubmit="return confirm('${confirmAttr}')">
              <input type="hidden" name="action" value="remove_member">
              <input type="hidden" name="id" value="${project.id}">
              <input type="hidden" name="contact_id" value="${m.contact_id}">
