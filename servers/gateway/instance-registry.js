@@ -36,14 +36,6 @@ export function generateAuthToken() {
 }
 
 /**
- * Verify a bearer token against a stored hash.
- */
-export function verifyAuthToken(token, hash) {
-  const computed = createHash("sha256").update(token).digest("hex");
-  return computed === hash;
-}
-
-/**
  * Register a new instance in the database and update ~/.crow/instances.json.
  */
 export async function registerInstance(db, {
