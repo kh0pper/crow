@@ -10,15 +10,25 @@ import { tasksDbPath } from "../../../../../scripts/pi-bots/instance-paths.mjs";
 import { getPeerCapabilities } from "../../capabilities-cache.js";
 import { getTrustedInstances } from "../nest/data-queries.js";
 import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
+import { t } from "../../shared/i18n.js";
 
 export const TASKS_DB = tasksDbPath();
 
 export const CARD_STATUSES = ["pending", "in_progress", "done", "cancelled"];
 
-// STATUS_LABEL: keys are logic/routing values (frozen); values are i18n keys
-// resolved via t() at use sites (spec rule 3 blessed shape — W4-3 i18n sweep).
+// STATUS_LABEL: keys are frozen logic/routing values; values are the EN display
+// strings used as i18n key lookup suffixes via statusLabel(status, lang).
+// DO NOT compare STATUS_LABEL values — compare CARD_STATUSES / status column values.
 export const STATUS_LABEL = { pending: "Pending", in_progress: "In Progress", done: "Done", cancelled: "Cancelled" };
 export const STATUS_BADGE = { pending: "draft", in_progress: "info", done: "connected", cancelled: "draft" };
+
+// Map a CARD_STATUSES value to its display label in the given language.
+// Falls back to the frozen EN string so callers are always safe.
+const STATUS_KEY = { pending: "botboard.statusPending", in_progress: "botboard.statusInProgress", done: "botboard.statusDone", cancelled: "botboard.statusCancelled" };
+export function statusLabel(status, lang) {
+  const key = STATUS_KEY[status];
+  return key ? t(key, lang) : (STATUS_LABEL[status] || status);
+}
 
 export const LOCK_STATUSES = new Set(["active", "waiting-user"]);
 
