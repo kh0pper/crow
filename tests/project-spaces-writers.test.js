@@ -164,6 +164,9 @@ test("1. FK rebuild correctness — data-carrying path with adversarial seed", a
   await rawDb.execute("ALTER TABLE research_sources ADD COLUMN uuid TEXT");
   await rawDb.execute("ALTER TABLE research_sources ADD COLUMN origin_instance_id TEXT");
   await rawDb.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_research_sources_uuid ON research_sources(uuid)");
+  // Legacy host-local columns found on grackle (real data) — the rebuild must carry them
+  await rawDb.execute("ALTER TABLE research_sources ADD COLUMN file_path TEXT");
+  await rawDb.execute("ALTER TABLE research_sources ADD COLUMN s3_key TEXT");
 
   // FTS for research_sources
   await rawDb.executeMultiple(`
@@ -236,6 +239,8 @@ test("1. FK rebuild correctness — data-carrying path with adversarial seed", a
     (id, project_id, title, source_type, citation_apa, full_text, backend_id, uuid, origin_instance_id)
     VALUES (1, 1, 'Searchable Source Alpha', 'web_article', 'Alpha (2024)', 'alpha content', 1,
       lower(hex(randomblob(16))), 'inst-a')`);
+  // Legacy-column data must survive the rebuild (the grackle case)
+  await rawDb.execute("UPDATE research_sources SET file_path = '/old/path/a.pdf', s3_key = 'bucket/a.pdf' WHERE id = 1");
 
   await rawDb.execute(`INSERT INTO research_sources
     (id, project_id, title, source_type, citation_apa, uuid)
@@ -356,9 +361,12 @@ test("1. FK rebuild correctness — data-carrying path with adversarial seed", a
   // PRAGMA table_info parity — extra columns still present
   const { rows: postColRows } = await db.execute("PRAGMA table_info(research_sources)");
   const postCols = new Set(postColRows.map((r) => r.name));
-  for (const col of ["backend_id", "uuid", "origin_instance_id"]) {
+  for (const col of ["backend_id", "uuid", "origin_instance_id", "file_path", "s3_key"]) {
     assert.ok(postCols.has(col), `extra column ${col} must survive rebuild`);
   }
+  const { rows: legacyVals } = await db.execute("SELECT file_path, s3_key FROM research_sources WHERE id = 1");
+  assert.equal(legacyVals[0].file_path, "/old/path/a.pdf", "legacy file_path data carried");
+  assert.equal(legacyVals[0].s3_key, "bucket/a.pdf", "legacy s3_key data carried");
 
   // Verify research_notes also rebuilt correctly
   const { rows: notesFkList } = await db.execute("PRAGMA foreign_key_list(research_notes)");

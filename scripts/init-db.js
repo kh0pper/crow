@@ -826,11 +826,16 @@ async function rebuildMainFKsToProjectSpaces() {
     backend_id INTEGER REFERENCES data_backends(id) ON DELETE SET NULL,
     uuid TEXT,
     origin_instance_id TEXT,
+    file_path TEXT,
+    s3_key TEXT,
     FOREIGN KEY (project_id) REFERENCES project_spaces(id) ON DELETE SET NULL
   )`,
       // columns known to be added via addColumnIfMissing / addUuidColumn
-      // (spec C2: backend_id would be silently lost if derived from PRAGMA table_info alone)
-      knownExtras: ["backend_id", "uuid", "origin_instance_id"],
+      // (spec C2: backend_id would be silently lost if derived from PRAGMA table_info alone).
+      // file_path + s3_key: legacy host-local columns (found on grackle at the
+      // 2026-06-11 deploy, 16 rows of real data each) — carried by the rebuild;
+      // NOT part of the canonical fresh-install schema.
+      knownExtras: ["backend_id", "uuid", "origin_instance_id", "file_path", "s3_key"],
       canonicalColumns: [
         "id", "project_id", "title", "source_type", "url", "authors",
         "publication_date", "publisher", "doi", "isbn", "abstract",
