@@ -23,6 +23,7 @@
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { escapeHtml, section, badge, dataTable, formField, actionBar } from "../shared/components.js";
+import { tJs } from "../shared/i18n.js";
 import { createDbClient } from "../../../db.js";
 import {
   readCanonicalMcp,
@@ -371,7 +372,7 @@ export default {
   navOrder: 14,
   category: "tools",
 
-  async handler(req, res, { db, layout }) {
+  async handler(req, res, { db, layout, lang }) {
     const notAvail = await tableMissing(db);
 
     // ---- F4a L3: remote edit of a TRUSTED PEER's bot (?peer=<instanceId>&bot=<botId>) ----
@@ -1390,7 +1391,7 @@ export default {
               var name=this.getAttribute('data-name');
               var ta=document.getElementById(this.getAttribute('data-ta'));
               var st=this.parentNode.querySelector('.bb-prop-status');
-              if(!confirm('Approve and promote "'+name+'" into ~/.crow/skills and attach it to this bot?')) return;
+              if(!confirm('${tJs("botbuilder.confirmApproveSkill", lang)}'.replace('{name}',name))) return;
               post(API+'/bot/'+encodeURIComponent(bot)+'/proposed-skill/approve',{name:name,content:ta.value},st,function(){ st.textContent='Approved.'; location.reload(); });
             };
           });
@@ -1398,7 +1399,7 @@ export default {
             btn.onclick=function(){
               var name=this.getAttribute('data-name');
               var st=this.parentNode.querySelector('.bb-prop-status');
-              if(!confirm('Discard the proposed skill "'+name+'"? This deletes the staged file.')) return;
+              if(!confirm('${tJs("botbuilder.confirmRejectSkill", lang)}'.replace('{name}',name))) return;
               post(API+'/bot/'+encodeURIComponent(bot)+'/proposed-skill/reject',{name:name},st,function(){ st.textContent='Rejected.'; location.reload(); });
             };
           });
@@ -1545,14 +1546,14 @@ export default {
           });
           document.querySelectorAll('.bb-sess-stop').forEach(function(btn){
             btn.onclick=function(){
-              if(!confirm('Stop this session?')) return;
+              if(!confirm('${tJs("botbuilder.confirmStopSession", lang)}')) return;
               var t=this.getAttribute('data-thread');
               fetch('/dashboard/bot-board-api/session/stop',{method:'POST',
                 headers:{'Content-Type':'application/json'},
                 body:JSON.stringify({bot_id:'${escapeHtml(botId)}',gateway_thread_id:t}),
                 credentials:'same-origin'})
               .then(function(r){return r.json();})
-              .then(function(j){ if(j.ok) location.reload(); else alert(j.reason||'failed'); });
+              .then(function(j){ if(j.ok) location.reload(); else crowToast('${tJs("botbuilder.stopSessionFailed", lang)}', {type:'error', details: j.reason||j.error||''}); });
             };
           });
           var sendBtn=document.getElementById('bb-sess-send-btn');

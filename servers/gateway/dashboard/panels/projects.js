@@ -8,7 +8,7 @@
  */
 
 import { escapeHtml, section, badge, dataTable, formField, actionBar, formatDate } from "../shared/components.js";
-import { t } from "../shared/i18n.js";
+import { t, tJs } from "../shared/i18n.js";
 import { sanitizeFtsQuery, escapeLikePattern } from "../../../db.js";
 import {
   AclError,
@@ -426,7 +426,7 @@ async function renderDetailView(db, projectId, layout, lang) {
         : `<span style="font-size:0.75rem;color:var(--crow-text-secondary)" title="${escapeHtml(granted.join(', '))}">${granted.length} of ${Object.keys(caps).length}</span>`;
       const removeForm = m.contact_id == null
         ? `<span style="color:var(--crow-text-muted);font-size:0.75rem">—</span>`
-        : `<form method="POST" style="display:inline" onsubmit="return confirm('Revoke ${escapeHtml(who).replace(/'/g, "&#39;")}?')">
+        : `<form method="POST" style="display:inline" onsubmit="return confirm('${t("projects.confirmRevoke", lang).replace("{who}", who).replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/`/g, "\\`")}')">
              <input type="hidden" name="action" value="remove_member">
              <input type="hidden" name="id" value="${project.id}">
              <input type="hidden" name="contact_id" value="${m.contact_id}">
