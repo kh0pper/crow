@@ -45,13 +45,13 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   }
   function fillDrawer(cardEl){
     cur=cardData(cardEl);
-    $('bb-d-title').textContent='Card #'+cur.id;
+    $('bb-d-title').textContent='${tJs("botboard.jsCardPrefix", lang)}'+cur.id;
     var t0=cardEl.querySelector('.bb-title');
     $('bb-d-title-in').value=t0?t0.textContent:'';
     $('bb-d-status').value=cur.status;
     msg($('bb-d-msg'),'','');
     var lk=$('bb-d-lock'), unlock=$('bb-d-unlock');
-    if(cur.locked){ lk.textContent='\\uD83D\\uDD12 A bot is working this card \\u2014 fields & plan are read-only.';
+    if(cur.locked){ lk.textContent='${tJs("botboard.jsCardLocked", lang)}';
       unlock.style.display=''; } else { lk.textContent=''; unlock.style.display='none'; }
     ['bb-d-title-in','bb-d-status','bb-d-prio','bb-d-due','bb-d-owner','bb-d-tags','bb-d-desc','bb-d-project','bb-d-save','bb-d-cancel','bb-d-plan','bb-d-plan-save']
       .forEach(function(i){ var e=$(i); if(e) e.disabled=cur.locked; });
@@ -88,15 +88,15 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     var cd=cardData(cardEl);
     cur=cd;
     var td=trackerDrawer; if(!td) return;
-    $('bb-td-title').textContent='Item #'+cd.id;
+    $('bb-td-title').textContent='${tJs("botboard.jsItemPrefix", lang)}'+cd.id;
     msg($('bb-td-msg'),'','');
     var lk=$('bb-td-lock'), clBtn=$('bb-td-clear-lease');
-    if(cd.locked){ lk.textContent='\\uD83D\\uDD12 A bot is processing this item \\u2014 read-only.';
+    if(cd.locked){ lk.textContent='${tJs("botboard.jsItemLocked", lang)}';
       if(clBtn) clBtn.style.display=''; } else { lk.textContent=''; if(clBtn) clBtn.style.display='none'; }
     ['bb-td-label','bb-td-status','bb-td-prio','bb-td-action','bb-td-save']
       .forEach(function(i){ var e=$(i); if(e) e.disabled=cd.locked; });
     api('GET','/tracker-item/'+cd.id).then(function(r){
-      if(!r.ok||!r.j||!r.j.item) { msg($('bb-td-msg'),'Failed to load item.','err'); crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); return; }
+      if(!r.ok||!r.j||!r.j.item) { msg($('bb-td-msg'),'${tJs("botboard.jsItemLoadFailed", lang)}','err'); crowToast('${tJs("botboard.loadFailed", lang)}', {type:'error'}); return; }
       var item=r.j.item, tracker=r.j.tracker;
       $('bb-td-label').value=item.label||'';
       $('bb-td-prio').value=item.priority==null?'':String(item.priority);
@@ -112,7 +112,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
       if(tracker&&tracker.columns_json){
         var cols=[]; try{cols=JSON.parse(tracker.columns_json||'[]');}catch(e){cols=[];}
         var data=item.data||{};
-        var secH=document.createElement('h4');secH.className='bb-td-section';secH.textContent='Data Fields';
+        var secH=document.createElement('h4');secH.className='bb-td-section';secH.textContent='${tJs("botboard.jsSectionDataFields", lang)}';
         fieldsDiv.appendChild(secH);
         cols.forEach(function(cf){
           var key=typeof cf==='string'?cf:(cf.key||cf.name||'');
@@ -157,17 +157,17 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
           fieldsDiv.appendChild(row);
         });
         // History section
-        var histH=document.createElement('h4');histH.className='bb-td-section';histH.textContent='History';
+        var histH=document.createElement('h4');histH.className='bb-td-section';histH.textContent='${tJs("botboard.jsSectionHistory", lang)}';
         fieldsDiv.appendChild(histH);
         var histDiv=document.createElement('div');histDiv.style.fontSize='.82rem';histDiv.style.color='var(--crow-text-secondary)';
-        if(item.updated_at){var up=document.createElement('div');up.textContent='Updated: '+item.updated_at;histDiv.appendChild(up);}
-        if(item.created_at){var cr=document.createElement('div');cr.textContent='Created: '+item.created_at;histDiv.appendChild(cr);}
+        if(item.updated_at){var up=document.createElement('div');up.textContent='${tJs("botboard.jsUpdatedPrefix", lang)}'+item.updated_at;histDiv.appendChild(up);}
+        if(item.created_at){var cr=document.createElement('div');cr.textContent='${tJs("botboard.jsCreatedPrefix", lang)}'+item.created_at;histDiv.appendChild(cr);}
         if(data.status_notes){var sn=document.createElement('div');sn.style.marginTop='.3rem';sn.style.whiteSpace='pre-wrap';sn.textContent=data.status_notes;histDiv.appendChild(sn);}
         fieldsDiv.appendChild(histDiv);
         // Related links section
         var hasLinks=data.note_id||data.review_thread_id||data.pir_number;
         if(hasLinks){
-          var linkH=document.createElement('h4');linkH.className='bb-td-section';linkH.textContent='Related';
+          var linkH=document.createElement('h4');linkH.className='bb-td-section';linkH.textContent='${tJs("botboard.jsSectionRelated", lang)}';
           fieldsDiv.appendChild(linkH);
           var linkDiv=document.createElement('div');
           if(data.pir_number){var pn=document.createElement('div');pn.style.fontWeight='600';pn.style.fontSize='.95rem';pn.textContent='PIR #'+data.pir_number;linkDiv.appendChild(pn);}
@@ -182,7 +182,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         clearEl(leaseDiv);
         if(item.processing_lease||item.processing_lease_status){
           var t=document.createElement('span');
-          t.textContent='Lease: '+(item.processing_lease_status||'none')+
+          t.textContent='${tJs("botboard.jsLeasePrefix", lang)}'+(item.processing_lease_status||'none')+
             (item.processing_lease?' ('+item.processing_lease+')':'');
           leaseDiv.appendChild(t);
         }
@@ -211,7 +211,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
       due_date:$('bb-d-due').value||null,owner:$('bb-d-owner').value||null,
       tags:$('bb-d-tags').value||null,description:$('bb-d-desc').value||null};
     api('POST','/card/'+cur.id,body).then(function(r){
-      if(r.ok){ msg($('bb-d-msg'),'Saved.','ok'); setTimeout(reload,400); }
+      if(r.ok){ msg($('bb-d-msg'),'${tJs("botboard.jsSaved", lang)}','ok'); setTimeout(reload,400); }
       else if(r.status===409){ msg($('bb-d-msg'),'\\uD83D\\uDD12 '+((r.j&&r.j.reason)||'locked by a bot'),'err'); }
       else { msg($('bb-d-msg'),(r.j&&(r.j.error||r.j.reason))||'save failed','err'); }
     });
@@ -221,7 +221,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     if(!cur||cur.locked) return;
     var v=projSel.value===''?null:Number(projSel.value);
     api('POST','/card/'+cur.id+'/project',{project_id:v}).then(function(r){
-      if(r.ok){ msg($('bb-d-msg'),'Project updated.','ok'); setTimeout(reload,400); }
+      if(r.ok){ msg($('bb-d-msg'),'${tJs("botboard.jsProjectUpdated", lang)}','ok'); setTimeout(reload,400); }
       else if(r.status===409){ msg($('bb-d-msg'),'\\uD83D\\uDD12 locked','err'); }
       else msg($('bb-d-msg'),(r.j&&(r.j.error||r.j.reason))||'failed','err');
     });
@@ -229,7 +229,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   if($('bb-d-cancel')) $('bb-d-cancel').onclick=function(){
     if(!cur||cur.locked||!confirm('${tJs("botboard.confirmCancelCard", lang)}'.replace('#{id}',cur.id))) return;
     api('POST','/card/'+cur.id+'/cancel').then(function(r){
-      if(r.ok){ msg($('bb-d-msg'),'Cancelled.','ok'); setTimeout(reload,400); }
+      if(r.ok){ msg($('bb-d-msg'),'${tJs("botboard.jsCancelled", lang)}','ok'); setTimeout(reload,400); }
       else if(r.status===409){ msg($('bb-d-msg'),'\\uD83D\\uDD12 locked','err'); }
       else msg($('bb-d-msg'),(r.j&&(r.j.error||r.j.reason))||'failed','err');
     });
@@ -237,7 +237,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   if($('bb-d-unlock')) $('bb-d-unlock').onclick=function(){
     if(!cur||!confirm('${tJs("botboard.confirmForceUnlock", lang)}'.replace('#{id}',cur.id))) return;
     api('POST','/card/'+cur.id+'/force-unlock').then(function(r){
-      if(r.ok){ msg($('bb-d-msg'),'Force-unlocked.','ok'); setTimeout(reload,500); }
+      if(r.ok){ msg($('bb-d-msg'),'${tJs("botboard.jsForceUnlocked", lang)}','ok'); setTimeout(reload,500); }
       else msg($('bb-d-msg'),(r.j&&(r.j.reason||r.j.error))||'refused (fail-closed: pi not confirmed dead)','err');
     });
   };
@@ -246,13 +246,13 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
     planToggled=!planToggled; renderPre();
     $('bb-d-plan').style.display=planToggled?'none':'';
     $('bb-d-plan-pre').style.display=planToggled?'':'none';
-    this.textContent=planToggled?'Edit':'Preview';
+    this.textContent=planToggled?'${tJs("botboard.jsToggleEdit", lang)}':'${tJs("botboard.jsTogglePreview", lang)}';
   };
   if($('bb-d-plan')) $('bb-d-plan').addEventListener('input',renderPre);
   if($('bb-d-plan-save')) $('bb-d-plan-save').onclick=function(){
     if(!cur||cur.locked) return;
     api('POST','/card/'+cur.id+'/plan',{markdown:$('bb-d-plan').value,mtime:planMtime}).then(function(r){
-      if(r.ok){ planMtime=(r.j&&r.j.mtime)||planMtime; msg($('bb-d-plan-msg'),'Plan saved.','ok'); }
+      if(r.ok){ planMtime=(r.j&&r.j.mtime)||planMtime; msg($('bb-d-plan-msg'),'${tJs("botboard.jsPlanSaved", lang)}','ok'); }
       else if(r.status===409){ msg($('bb-d-plan-msg'),'\\u26A0\\uFE0F Plan changed on disk \\u2014 reloading newer content.','warn'); loadPlan(); }
       else msg($('bb-d-plan-msg'),(r.j&&(r.j.error||r.j.reason))||'save failed','err');
     });
@@ -278,7 +278,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
       body.data=data;
     }
     api('POST','/tracker-item/'+cur.id,body).then(function(r){
-      if(r.ok){ msg($('bb-td-msg'),'Saved.','ok'); setTimeout(reload,400); }
+      if(r.ok){ msg($('bb-td-msg'),'${tJs("botboard.jsSaved", lang)}','ok'); setTimeout(reload,400); }
       else if(r.status===409){ msg($('bb-td-msg'),'\\uD83D\\uDD12 '+((r.j&&r.j.reason)||'locked by a bot'),'err'); }
       else { msg($('bb-td-msg'),(r.j&&(r.j.error||r.j.reason))||'save failed','err'); }
     });
@@ -286,7 +286,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   if($('bb-td-clear-lease')) $('bb-td-clear-lease').onclick=function(){
     if(!cur||!confirm('${tJs("botboard.confirmClearLease", lang)}'.replace('#{id}',cur.id))) return;
     api('POST','/tracker-item/'+cur.id+'/force-clear-lease').then(function(r){
-      if(r.ok){ msg($('bb-td-msg'),'Lease cleared.','ok'); setTimeout(reload,500); }
+      if(r.ok){ msg($('bb-td-msg'),'${tJs("botboard.jsLeaseCleared", lang)}','ok'); setTimeout(reload,500); }
       else msg($('bb-td-msg'),(r.j&&(r.j.reason||r.j.error))||'failed','err');
     });
   };
@@ -330,7 +330,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   if($('bb-np-close')) $('bb-np-close').onclick=function(){ closeDrawer(np); };
   if($('bb-np-save')) $('bb-np-save').onclick=function(){
     var name=$('bb-np-name').value.trim();
-    if(!name){ msg($('bb-np-msg'),'Name required.','err'); return; }
+    if(!name){ msg($('bb-np-msg'),'${tJs("botboard.jsNameRequired", lang)}','err'); return; }
     api('POST','/project',{name:name,description:$('bb-np-desc').value||null}).then(function(r){
       if(r.ok){ var id=r.j&&r.j.id; location.href='/dashboard/bot-board'+(BOT_ID?'?bot='+encodeURIComponent(BOT_ID):''); }
       else msg($('bb-np-msg'),(r.j&&(r.j.error||r.j.reason))||'create failed','err');
@@ -344,7 +344,7 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
   var ncSave=$('bb-nc-save');
   if(ncSave) ncSave.onclick=function(){
     var title=$('bb-nc-title').value.trim();
-    if(!title){ msg($('bb-nc-msg'),'Title required.','err'); return; }
+    if(!title){ msg($('bb-nc-msg'),'${tJs("botboard.jsTitleRequired", lang)}','err'); return; }
     api('POST','/card',{title:title,description:$('bb-nc-desc').value||null,
       due_date:$('bb-nc-due').value||null,owner:$('bb-nc-owner').value||null,
       tags:$('bb-nc-tags').value||null,project_id:PROJECT}).then(function(r){
@@ -369,15 +369,15 @@ export function clientJs(botId, trackerType, projectId, trackerSlug, contextFiel
         });
         msg($('bb-bk-msg'),'','');
       } else if(r.ok){ var p=document.createElement('p'); p.style.color='var(--crow-text-muted)';
-        p.textContent='No unlinked cards.'; L.appendChild(p); msg($('bb-bk-msg'),'','');
+        p.textContent='${tJs("botboard.jsNoUnlinkedCards", lang)}'; L.appendChild(p); msg($('bb-bk-msg'),'','');
       } else msg($('bb-bk-msg'),(r.j&&(r.j.error||r.j.reason))||'failed','err');
     });
   };
   if($('bb-bk-close')) $('bb-bk-close').onclick=function(){ closeDrawer(bk); };
   if($('bb-bk-save')) $('bb-bk-save').onclick=function(){
     var ids=[].slice.call($('bb-bk-list').querySelectorAll('input:checked')).map(function(x){return Number(x.value);});
-    if(!ids.length){ msg($('bb-bk-msg'),'Select at least one card.','err'); return; }
-    if(ids.length>200){ msg($('bb-bk-msg'),'Max 200 per assign.','err'); return; }
+    if(!ids.length){ msg($('bb-bk-msg'),'${tJs("botboard.jsSelectAtLeastOne", lang)}','err'); return; }
+    if(ids.length>200){ msg($('bb-bk-msg'),'${tJs("botboard.jsMaxPerAssign", lang)}','err'); return; }
     api('POST','/project/'+PROJECT+'/bulk-assign',{card_ids:ids}).then(function(r){
       if(r.ok){ var a=((r.j&&r.j.applied)||[]).length, s=((r.j&&r.j.skipped)||[]).length;
         msg($('bb-bk-msg'),'Applied '+a+', skipped '+s+'.','ok'); setTimeout(reload,800); }

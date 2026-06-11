@@ -13,12 +13,12 @@ import { botBoardStyles } from "./css.js";
 import { clientJs } from "./client.js";
 import {
   TASKS_DB, CARD_STATUSES, STATUS_LABEL, STATUS_BADGE,
-  lockMapFor, derivePlanPath, readPlan,
+  lockMapFor, derivePlanPath, readPlan, statusLabel,
 } from "./data-queries.js";
 
-export function cardFaceHtml(card, locked) {
+export function cardFaceHtml(card, locked, lang) {
   const prio = card.priority == null ? "" :
-    `<span class="bb-prio bb-prio-${escapeHtml(String(card.priority))}" title="priority ${escapeHtml(String(card.priority))}">P${escapeHtml(String(card.priority))}</span>`;
+    `<span class="bb-prio bb-prio-${escapeHtml(String(card.priority))}" title="${t("botboard.titlePriorityPrefix", lang)} ${escapeHtml(String(card.priority))}">P${escapeHtml(String(card.priority))}</span>`;
   const due = card.due_date ? `<span class="bb-meta">⏱ ${escapeHtml(String(card.due_date))}</span>` : "";
   const owner = card.owner ? `<span class="bb-meta">👤 ${escapeHtml(String(card.owner))}</span>` : "";
   const tags = card.tags
@@ -28,7 +28,7 @@ export function cardFaceHtml(card, locked) {
   const sub = card.parent_id != null
     ? `<div class="bb-sub">↳ subtask of #${escapeHtml(String(card.parent_id))}</div>` : "";
   const lockBadge = locked
-    ? `<span class="bb-lock" title="a bot is working this card — read-only">🔒 bot working</span>` : "";
+    ? `<span class="bb-lock" title="${t("botboard.cardWorking", lang)}">${t("botboard.cardWorkingBadge", lang)}</span>` : "";
   return `<div class="bb-card${locked ? " bb-locked" : ""}" draggable="${locked ? "false" : "true"}" ` +
     `data-card="${escapeHtml(String(card.id))}" data-status="${escapeHtml(String(card.status))}" ` +
     `data-locked="${locked ? "1" : "0"}" tabindex="0" role="button" ` +
@@ -42,15 +42,15 @@ export function cardFaceHtml(card, locked) {
     `<input type="hidden" name="project" value="${escapeHtml(String(card.project_id == null ? "" : card.project_id))}">` +
     CARD_STATUSES.filter((s) => s !== card.status).map((s) =>
       `<button type="submit" name="status" value="${s}" ${locked ? "disabled" : ""} ` +
-      `title="move to ${STATUS_LABEL[s]}">${escapeHtml(STATUS_LABEL[s])}</button>`).join("") +
+      `title="${t("botboard.moveTo", lang)}${statusLabel(s, lang)}">${escapeHtml(statusLabel(s, lang))}</button>`).join("") +
     `</form></div>`;
 }
 
-export function trackerCardFaceHtml(item, contextFields, statusValues, locked) {
+export function trackerCardFaceHtml(item, contextFields, statusValues, locked, lang) {
   const prio = item.priority == null ? "" :
-    `<span class="bb-prio bb-prio-${escapeHtml(String(item.priority))}" title="priority ${escapeHtml(String(item.priority))}">P${escapeHtml(String(item.priority))}</span>`;
+    `<span class="bb-prio bb-prio-${escapeHtml(String(item.priority))}" title="${t("botboard.titlePriorityPrefix", lang)} ${escapeHtml(String(item.priority))}">P${escapeHtml(String(item.priority))}</span>`;
   const lockBadge = locked
-    ? `<span class="bb-lock" title="a bot is processing this item — read-only">🔒 processing</span>` : "";
+    ? `<span class="bb-lock" title="${t("botboard.itemProcessing", lang)}">${t("botboard.itemProcessingBadge", lang)}</span>` : "";
 
   // Extract metadata from data_json for context fields (skip "label" and "status")
   let data = {};
@@ -80,7 +80,7 @@ export function trackerCardFaceHtml(item, contextFields, statusValues, locked) {
   // No-JS move buttons using dynamic statusValues
   const moveButtons = statusValues.filter((s) => s !== item.status).map((s) =>
     `<button type="submit" name="status" value="${escapeHtml(s)}" ${locked ? "disabled" : ""} ` +
-    `title="move to ${escapeHtml(s)}">${escapeHtml(s)}</button>`).join("");
+    `title="${t("botboard.moveTo", lang)}${escapeHtml(s)}">${escapeHtml(s)}</button>`).join("");
 
   return `<div class="bb-card${locked ? " bb-locked" : ""}" draggable="${locked ? "false" : "true"}" ` +
     `data-card="${escapeHtml(String(item.id))}" data-status="${escapeHtml(String(item.status))}" ` +
@@ -114,7 +114,7 @@ export function drawerMarkup(lang) {
     <div id="bb-d-lock" class="bb-msg warn"></div>
     <label>${t("botboard.labelTitle", lang)}</label><input id="bb-d-title-in" type="text">
     <div class="bb-row">
-      <div><label>${t("botboard.labelStatus", lang)}</label><select id="bb-d-status">${CARD_STATUSES.map((s) => `<option value="${s}">${STATUS_LABEL[s]}</option>`).join("")}</select></div>
+      <div><label>${t("botboard.labelStatus", lang)}</label><select id="bb-d-status">${CARD_STATUSES.map((s) => `<option value="${s}">${statusLabel(s, lang)}</option>`).join("")}</select></div>
       <div><label>${t("botboard.labelPriority", lang)}</label><select id="bb-d-prio"><option value="">—</option>${[1, 2, 3, 4, 5].map((n) => `<option value="${n}">${n}</option>`).join("")}</select></div>
     </div>
     <div class="bb-row">
@@ -280,7 +280,7 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
       `<input type="hidden" name="card_id" value="${cid}">` +
       `<input type="hidden" name="bot" value="${escapeHtml(selBot.botId)}">` +
       t("botboard.moveLabel", lang) + CARD_STATUSES.filter((s) => s !== card.status).map((s) =>
-        `<button type="submit" name="status" value="${s}" class="bb-btn bb-sec" ${locked ? "disabled" : ""}>${escapeHtml(STATUS_LABEL[s])}</button>`).join(" ") +
+        `<button type="submit" name="status" value="${s}" class="bb-btn bb-sec" ${locked ? "disabled" : ""}>${escapeHtml(statusLabel(s, lang))}</button>`).join(" ") +
       `</form>`;
     return layout({
       title: `Card #${cid}`,
@@ -303,10 +303,10 @@ export async function renderKanbanBoard(req, res, { db, layout, selBot, bots, no
   const columns = CARD_STATUSES.map((st) => {
     const list = byStatus[st] || [];
     const cardsHtml = list.length
-      ? list.map((c) => cardFaceHtml(c, !!lockMap.get(Number(c.id)))).join("")
+      ? list.map((c) => cardFaceHtml(c, !!lockMap.get(Number(c.id)), lang)).join("")
       : `<div style="color:var(--crow-text-muted);font-size:.78rem;padding:.4rem">—</div>`;
     return `<div class="bb-col" data-col="${st}">` +
-      `<h4><span>${escapeHtml(STATUS_LABEL[st])}</span><span>${list.length}</span></h4>` +
+      `<h4><span>${escapeHtml(statusLabel(st, lang))}</span><span>${list.length}</span></h4>` +
       `<div class="bb-col-body" data-col-body="${st}">${cardsHtml}</div></div>`;
   }).join("");
 
@@ -348,7 +348,7 @@ export async function renderCustomTracker(req, res, { db, layout, selBot, bots, 
       content: botBoardStyles() + section(
         `Board — ${escapeHtml(selBot.displayName)}`,
         notice + switcher +
-        `<p style="margin-top:1rem;color:var(--crow-text-muted)">Tracker definition <code>${escapeHtml(trackerSlug)}</code> not found.</p>`),
+        `<p style="margin-top:1rem;color:var(--crow-text-muted)">${t("botboard.trackerNotFound", lang).replace("{slug}", escapeHtml(trackerSlug))}</p>`),
     });
   }
 
@@ -392,12 +392,12 @@ export async function renderCustomTracker(req, res, { db, layout, selBot, bots, 
     const cardsHtml = list.length
       ? list.map((item) => {
           const locked = String(item.processing_lease_status) === "in-progress";
-          return trackerCardFaceHtml(item, contextFields, statusValues, locked);
+          return trackerCardFaceHtml(item, contextFields, statusValues, locked, lang);
         }).join("")
       : `<div style="color:var(--crow-text-muted);font-size:.78rem;padding:.4rem">—</div>`;
     return `<div class="bb-col" data-col="${escapeHtml(st)}">` +
       `<h4><span>${escapeHtml(st)}</span><span>${list.length}</span>` +
-      `<button type="button" class="bb-col-toggle" title="collapse column" aria-label="Collapse ${escapeHtml(st)} column">−</button></h4>` +
+      `<button type="button" class="bb-col-toggle" title="${t("botboard.collapseColumn", lang)}" aria-label="${t("botboard.collapseColumnAria", lang).replace("{col}", escapeHtml(st))}">−</button></h4>` +
       `<div class="bb-col-body" data-col-body="${escapeHtml(st)}">${cardsHtml}</div></div>`;
   }).join("");
 
