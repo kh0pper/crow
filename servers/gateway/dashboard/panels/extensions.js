@@ -11,8 +11,9 @@ import { t, tJs } from "../shared/i18n.js";
 import { getAddonLogo } from "../shared/logos.js";
 import { detectGpuArch, checkGpuArchCompatible, detectGpuVramGb } from "../../gpu-arch.js";
 import { extensionStyles } from "./extensions/css.js";
-import { getStores, saveStores, fetchRegistryData, fetchBundleStatus } from "./extensions/data-queries.js";
+import { fetchRegistryData, fetchBundleStatus } from "./extensions/data-queries.js";
 import { extensionsClientJS } from "./extensions/client.js";
+import { handleExtensionsPost } from "./extensions/api-handlers.js";
 
 const ICON_MAP = {
   brain: "\u{1F9E0}",
@@ -151,20 +152,8 @@ export default {
   async handler(req, res, { db, layout, lang }) {
     // Handle POST for store management
     if (req.method === "POST" && req.body) {
-      const { action, store_url } = req.body;
-      if (action === "add_store" && store_url) {
-        const stores = getStores();
-        if (!stores.find((s) => s.url === store_url)) {
-          stores.push({ url: store_url, addedAt: new Date().toISOString() });
-          saveStores(stores);
-        }
-        return res.redirectAfterPost("/dashboard/extensions");
-      }
-      if (action === "remove_store" && store_url) {
-        const stores = getStores().filter((s) => s.url !== store_url);
-        saveStores(stores);
-        return res.redirectAfterPost("/dashboard/extensions");
-      }
+      const handled = await handleExtensionsPost(req, res);
+      if (handled) return;
     }
 
     const { installed, available, registrySource, communityStores } = await fetchRegistryData();
