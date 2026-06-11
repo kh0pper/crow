@@ -1066,8 +1066,11 @@ function dashboardCss() {
     width: 100%;
     transition: border-color 0.15s;
   }
-  input:focus, textarea:focus, select:focus {
+  input:focus:not(:focus-visible), textarea:focus:not(:focus-visible), select:focus:not(:focus-visible) {
     outline: none;
+    border-color: var(--crow-accent);
+  }
+  input:focus-visible, textarea:focus-visible, select:focus-visible {
     border-color: var(--crow-accent);
   }
   textarea { resize: vertical; min-height: 120px; }

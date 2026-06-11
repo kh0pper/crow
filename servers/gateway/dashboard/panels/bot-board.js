@@ -552,7 +552,7 @@ export default {
           notice + switcher +
           `<p style="margin-top:1rem;color:var(--crow-text-muted)">No enabled bots found. Create a bot in Bot Builder to start a board.</p>`) +
           peerBotsHtml +
-          drawerMarkup() + clientJs(null, "none", null, null, null, lang),
+          drawerMarkup(lang) + clientJs(null, "none", null, null, null, lang),
       });
     }
 
@@ -590,7 +590,7 @@ async function renderKanbanBoard(req, res, { db, layout, selBot, bots, notice, s
         `Board — ${escapeHtml(selBot.displayName)}`,
         notice + switcher +
         `<p style="margin-top:1rem;color:var(--crow-text-muted)">This bot has no project linked. Assign a project_id in Bot Builder.</p>`) +
-        drawerMarkup() + clientJs(selBot.botId, "kanban", null, null, null, lang),
+        drawerMarkup(lang) + clientJs(selBot.botId, "kanban", null, null, null, lang),
     });
   }
 
@@ -679,7 +679,7 @@ async function renderKanbanBoard(req, res, { db, layout, selBot, bots, notice, s
   const content = PAGE_CSS + section(
     `Board — ${escapeHtml(selBot.displayName)}`,
     notice + switcher + boardHtml) +
-    drawerMarkup() + clientJs(selBot.botId, "kanban", projectId, null, null, lang);
+    drawerMarkup(lang) + clientJs(selBot.botId, "kanban", projectId, null, null, lang);
 
   return layout({ title: `Bot Board — ${selBot.displayName}`, content });
 }
@@ -783,7 +783,7 @@ async function renderCustomTracker(req, res, { db, layout, selBot, bots, notice,
   const content = PAGE_CSS + section(
     `Board — ${escapeHtml(selBot.displayName)} (${escapeHtml(trackerDef.display_name || trackerSlug)})`,
     notice + switcher + filterBarHtml + boardHtml) +
-    trackerDrawerMarkup() + drawerMarkup() + clientJs(selBot.botId, "custom", null, trackerSlug, contextFields, lang);
+    trackerDrawerMarkup(lang) + drawerMarkup(lang) + clientJs(selBot.botId, "custom", null, trackerSlug, contextFields, lang);
 
   return layout({ title: `Bot Board — ${selBot.displayName}`, content });
 }
@@ -791,11 +791,11 @@ async function renderCustomTracker(req, res, { db, layout, selBot, bots, notice,
 // Right slide-over drawer (design D6) — populated client-side on card click;
 // the board stays visible + live behind it. Pure static markup (no dynamic
 // data interpolated here); no-JS users never see it (they get &card=M).
-function drawerMarkup() {
+function drawerMarkup(lang) {
   return `<div class="bb-drawer" id="bb-drawer" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 id="bb-d-title" style="font-family:'Fraunces',serif;margin:0">Card</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-d-close">✕ Close</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-d-close" aria-label="${tJs("common.close", lang)}">✕ Close</button>
     </div>
     <div class="bb-msg" id="bb-d-msg"></div>
     <div id="bb-d-lock" class="bb-msg warn"></div>
@@ -828,7 +828,7 @@ function drawerMarkup() {
   <div class="bb-drawer" id="bb-newproj" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 style="font-family:'Fraunces',serif;margin:0">New project</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-np-close">✕ Close</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-np-close" aria-label="${tJs("common.close", lang)}">✕ Close</button>
     </div>
     <div class="bb-msg" id="bb-np-msg"></div>
     <label>Name</label><input id="bb-np-name" type="text">
@@ -838,7 +838,7 @@ function drawerMarkup() {
   <div class="bb-drawer" id="bb-newcard" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 style="font-family:'Fraunces',serif;margin:0">New card</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-nc-close">✕ Close</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-nc-close" aria-label="${tJs("common.close", lang)}">✕ Close</button>
     </div>
     <div class="bb-msg" id="bb-nc-msg"></div>
     <p style="font-size:.8rem;color:var(--crow-text-muted)">Created in the current project, status <b>pending</b>.</p>
@@ -854,7 +854,7 @@ function drawerMarkup() {
   <div class="bb-drawer" id="bb-bulk" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 style="font-family:'Fraunces',serif;margin:0">Add unlinked cards</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-bk-close">✕ Close</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-bk-close" aria-label="${tJs("common.close", lang)}">✕ Close</button>
     </div>
     <div class="bb-msg" id="bb-bk-msg"></div>
     <p style="font-size:.82rem;color:var(--crow-text-muted)">Cards with no project (max 200 per assign).</p>
@@ -864,11 +864,11 @@ function drawerMarkup() {
 }
 
 // Tracker item drawer — for custom tracker bots
-function trackerDrawerMarkup() {
+function trackerDrawerMarkup(lang) {
   return `<div class="bb-drawer" id="bb-tracker-drawer" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 id="bb-td-title" style="font-family:'Fraunces',serif;margin:0">Item</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-td-close">✕ Close</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-td-close" aria-label="${tJs("common.close", lang)}">✕ Close</button>
     </div>
     <div class="bb-msg" id="bb-td-msg"></div>
     <div id="bb-td-lock" class="bb-msg warn"></div>
@@ -888,7 +888,7 @@ function trackerDrawerMarkup() {
   <div class="bb-drawer" id="bb-new-tracker-item" aria-hidden="true">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h3 style="font-family:'Fraunces',serif;margin:0">New tracker item</h3>
-      <button type="button" class="bb-btn bb-sec" id="bb-nti-close">✕ Close</button>
+      <button type="button" class="bb-btn bb-sec" id="bb-nti-close" aria-label="${tJs("common.close", lang)}">✕ Close</button>
     </div>
     <div class="bb-msg" id="bb-nti-msg"></div>
     <label>Label (title)</label><input id="bb-nti-label" type="text">
