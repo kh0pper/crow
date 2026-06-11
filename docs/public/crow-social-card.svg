@@ -143,18 +143,18 @@
   >Agentic framework + MCP platform you self-host</text>
 
   <!-- Subtle sub-label / descriptor chips row -->
-  <!-- Chip: Memory -->
-  <rect x="80" y="450" width="116" height="36" rx="18" fill="#2d2854" opacity="0.9"/>
-  <text x="138" y="473" text-anchor="middle" font-family="'Helvetica Neue', Arial, Helvetica, sans-serif" font-weight="500" font-size="16" fill="#818cf8">Memory</text>
+  <!-- Chip: Agents -->
+  <rect x="80" y="450" width="100" height="36" rx="18" fill="#2d2854" opacity="0.9"/>
+  <text x="130" y="473" text-anchor="middle" font-family="'Helvetica Neue', Arial, Helvetica, sans-serif" font-weight="500" font-size="16" fill="#818cf8">Agents</text>
   <!-- Chip: MCP -->
-  <rect x="208" y="450" width="88" height="36" rx="18" fill="#2d2854" opacity="0.9"/>
-  <text x="252" y="473" text-anchor="middle" font-family="'Helvetica Neue', Arial, Helvetica, sans-serif" font-weight="500" font-size="16" fill="#818cf8">MCP</text>
-  <!-- Chip: Research -->
-  <rect x="308" y="450" width="122" height="36" rx="18" fill="#2d2854" opacity="0.9"/>
-  <text x="369" y="473" text-anchor="middle" font-family="'Helvetica Neue', Arial, Helvetica, sans-serif" font-weight="500" font-size="16" fill="#818cf8">Research</text>
-  <!-- Chip: Blog -->
-  <rect x="442" y="450" width="80" height="36" rx="18" fill="#2d2854" opacity="0.9"/>
-  <text x="482" y="473" text-anchor="middle" font-family="'Helvetica Neue', Arial, Helvetica, sans-serif" font-weight="500" font-size="16" fill="#818cf8">Blog</text>
+  <rect x="192" y="450" width="80" height="36" rx="18" fill="#2d2854" opacity="0.9"/>
+  <text x="232" y="473" text-anchor="middle" font-family="'Helvetica Neue', Arial, Helvetica, sans-serif" font-weight="500" font-size="16" fill="#818cf8">MCP</text>
+  <!-- Chip: Home Server -->
+  <rect x="284" y="450" width="150" height="36" rx="18" fill="#2d2854" opacity="0.9"/>
+  <text x="359" y="473" text-anchor="middle" font-family="'Helvetica Neue', Arial, Helvetica, sans-serif" font-weight="500" font-size="16" fill="#818cf8">Home Server</text>
+  <!-- Chip: Sharing -->
+  <rect x="446" y="450" width="110" height="36" rx="18" fill="#2d2854" opacity="0.9"/>
+  <text x="501" y="473" text-anchor="middle" font-family="'Helvetica Neue', Arial, Helvetica, sans-serif" font-weight="500" font-size="16" fill="#818cf8">Sharing</text>
 
   <!-- Bottom accent bar -->
   <rect x="0" y="618" width="1200" height="12" rx="0" fill="url(#bottomAccent)" opacity="0.8"/>
