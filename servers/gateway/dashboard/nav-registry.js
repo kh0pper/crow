@@ -49,6 +49,7 @@ const CATEGORY_TO_GROUP = {
   "federated-media": "media",
   "federated-comms": "core",
   cameras: "media",
+  connections: "core",
 };
 
 /**

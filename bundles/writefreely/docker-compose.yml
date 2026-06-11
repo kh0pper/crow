@@ -13,7 +13,7 @@ networks:
 
 services:
   writefreely:
-    image: writeas/writefreely:0.15
+    image: writeas/writefreely:0.12.0
     container_name: crow-writefreely
     networks:
       - default
