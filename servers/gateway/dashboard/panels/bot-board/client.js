@@ -5,7 +5,7 @@
  * Returns an inline <script> block; uses tJs() for JS-context strings.
  */
 
-import { tJs } from "../../../shared/i18n.js";
+import { tJs } from "../../shared/i18n.js";
 
 export function clientJs(botId, trackerType, projectId, trackerSlug, contextFields, lang) {
   const bi = botId == null ? "null" : JSON.stringify(String(botId));
