@@ -317,9 +317,11 @@ export default {
 
   // POST action handler wired via the main dashboardRouter below
   async handleAction(req, res, { db }) {
-    const { tab, action, id } = req.body || {};
+    const { tab: rawTab, action, id } = req.body || {};
+    // Whitelist before echoing into the redirect URL (federated input is untrusted).
+    const tab = rawTab === "crosspost" ? "crosspost" : "moderation";
     const idNum = Number(id);
-    if (!idNum) { res.redirect(`/dashboard/fediverse?tab=${tab || "moderation"}&flash=err_missing_id`); return; }
+    if (!idNum) { res.redirect(`/dashboard/fediverse?tab=${tab}&flash=err_missing_id`); return; }
     try {
       if (action === "confirm_moderation") {
         const now = Math.floor(Date.now() / 1000);
@@ -357,10 +359,10 @@ export default {
         res.redirect(`/dashboard/fediverse?tab=crosspost&flash=retried`);
         return;
       }
-      res.redirect(`/dashboard/fediverse?tab=${tab || "moderation"}&flash=err_unknown_action`);
+      res.redirect(`/dashboard/fediverse?tab=${tab}&flash=err_unknown_action`);
     } catch (err) {
       const msg = encodeURIComponent(String(err.message || err).slice(0, 80));
-      res.redirect(`/dashboard/fediverse?tab=${tab || "moderation"}&flash=err_${msg}`);
+      res.redirect(`/dashboard/fediverse?tab=${tab}&flash=err_${msg}`);
     }
   },
 };
