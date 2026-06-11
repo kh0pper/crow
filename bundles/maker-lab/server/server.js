@@ -31,6 +31,7 @@ import {
   mintGuestSession,
   mintBatchSessions,
 } from "./sessions.js";
+import { createProjectSpace, updateProjectSpaceMeta } from "../../../servers/shared/project-spaces.js";
 
 const ENDING_FLUSH_SEC = 5;
 
@@ -100,12 +101,12 @@ export function createMakerLabServer(db, options = {}) {
     },
     async ({ name, age, avatar, notes }) => {
       try {
-        const res = await db.execute({
-          sql: `INSERT INTO research_projects (name, type, description, created_at, updated_at)
-                VALUES (?, 'learner_profile', ?, datetime('now'), datetime('now')) RETURNING id`,
-          args: [name, notes || null],
+        const { id: learnerId } = await createProjectSpace(db, {
+          name,
+          description: notes || null,
+          type: "learner_profile",
+          ownerMember: false,
         });
-        const learnerId = Number(res.rows[0].id);
         await db.execute({
           sql: `INSERT INTO maker_learner_settings (learner_id, age, avatar, consent_captured_at)
                 VALUES (?, ?, ?, datetime('now'))`,
@@ -200,10 +201,8 @@ export function createMakerLabServer(db, options = {}) {
       });
       if (!r.rows.length) return mcpError(`Learner ${learner_id} not found`);
       if (args.name != null) {
-        await db.execute({
-          sql: `UPDATE research_projects SET name=?, updated_at=datetime('now') WHERE id=?`,
-          args: [args.name, learner_id],
-        });
+        const nameRows = await updateProjectSpaceMeta(db, learner_id, { name: args.name });
+        if (nameRows === 0) return mcpError(`Learner ${learner_id} not found`);
       }
 
       // Upsert settings row (includes age, avatar, and per-learner flags).
@@ -249,14 +248,24 @@ export function createMakerLabServer(db, options = {}) {
       const name = r.rows[0].name;
       // Cascade: sessions → transcripts (FK), codes (FK via session), bound_devices (FK),
       // settings (FK). Memories tagged source='maker-lab' with project_id = learner_id.
-      await db.execute({ sql: `DELETE FROM maker_sessions WHERE learner_id=?`, args: [learner_id] });
-      await db.execute({ sql: `DELETE FROM maker_transcripts WHERE learner_id=?`, args: [learner_id] });
-      await db.execute({ sql: `DELETE FROM maker_bound_devices WHERE learner_id=?`, args: [learner_id] });
-      await db.execute({ sql: `DELETE FROM maker_learner_settings WHERE learner_id=?`, args: [learner_id] });
+      // All deletes in one transactional batch (spec S1): child deletes BEFORE the ps
+      // delete so the maker_sessions CHECK constraint doesn't abort; legacy rp row cleaned.
+      const batchResult = await db.batch([
+        { sql: `DELETE FROM maker_sessions WHERE learner_id=?`, args: [learner_id] },
+        { sql: `DELETE FROM maker_transcripts WHERE learner_id=?`, args: [learner_id] },
+        { sql: `DELETE FROM maker_bound_devices WHERE learner_id=?`, args: [learner_id] },
+        { sql: `DELETE FROM maker_learner_settings WHERE learner_id=?`, args: [learner_id] },
+        { sql: `DELETE FROM research_projects WHERE id=? AND type='learner_profile'`, args: [learner_id] },
+        { sql: `DELETE FROM project_spaces WHERE id=? AND type='learner_profile'`, args: [learner_id] },
+      ]);
+      const psRowsAffected = Number(batchResult[5]?.rowsAffected ?? 0);
+      const rpRowsAffected = Number(batchResult[4]?.rowsAffected ?? 0);
+      if (psRowsAffected === 0 && rpRowsAffected === 0) {
+        return mcpError(`Learner ${learner_id} not found`);
+      }
       try {
         await db.execute({ sql: `DELETE FROM memories WHERE project_id=?`, args: [learner_id] });
       } catch {}
-      await db.execute({ sql: `DELETE FROM research_projects WHERE id=? AND type='learner_profile'`, args: [learner_id] });
       return mcpOk({ deleted: true, learner_id, name, reason: reason || null });
     }
   );
