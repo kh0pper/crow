@@ -1,17 +1,9 @@
 # Cloud Deploy
 
 ::: danger Archived — Legacy Deployment Path
-This page documents the Render + Turso deployment method, which is **no longer supported**. Turso cloud database support has been removed from Crow. Multi-device sync is now handled by Hypercore P2P replication with local SQLite.
+This page documents the Render + Turso deployment method, which is **no longer supported** and is kept for reference only. Turso cloud database support has been removed from Crow. Multi-device sync is now handled by Hypercore P2P replication with local SQLite. This guide is no longer maintained.
 
-For new deployments, use [Oracle Cloud Free Tier](./oracle-cloud), a [Home Server](./home-server), or [Managed Hosting](./managed-hosting).
-:::
-
-::: tip Recommended: Oracle Cloud Free Tier
-For new cloud deployments, we recommend **[Oracle Cloud Free Tier](./oracle-cloud)** — it never sleeps, uses local SQLite (no external database), and is genuinely permanent. The guide below is for Render, which is still supported but has significant limitations.
-:::
-
-::: tip Don't want to manage infrastructure?
-Try [managed hosting](./managed-hosting) — $15/mo, no setup required.
+For a permanent free server, use the [Oracle Cloud Free Tier guide](./oracle-cloud). For a managed option, see [managed hosting](https://maestro.press/hosting/).
 :::
 
 ---
