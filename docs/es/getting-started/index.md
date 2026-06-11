@@ -1,6 +1,13 @@
 # Primeros Pasos
 
-Crow se puede configurar de varias maneras dependiendo de tu caso de uso:
+**¿No sabes por dónde empezar? Elige tu situación:**
+
+- Sin configuración técnica, solo quiero que funcione → [Hosting Administrado](./managed-hosting)
+- Servidor en la nube gratuito y permanente, sin problema con una configuración inicial → [Oracle Cloud Nivel Gratuito](./oracle-cloud)
+- Tengo hardware propio (Raspberry Pi, NUC, laptop vieja) → [Servidor en Casa](./home-server)
+- Solo mi computadora, uso local, sin servidor → [Instalación de Escritorio](./desktop-install)
+- Desarrollador, prefiero Docker → [Docker](/getting-started/docker)
+- Ya tengo Crow y quiero agregar una segunda instancia → [Google Cloud](./google-cloud) + [guía multidispositivo](/getting-started/multi-device)
 
 ## Elige Tu Camino
 
