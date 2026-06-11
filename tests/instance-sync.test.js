@@ -1454,14 +1454,17 @@ test("19. crow_context upsert: update for absent section creates row with lampor
   });
   assert.ok(conflicts.length >= 1, "stale follow-up logs conflict");
 
-  // (c) Old-sender partial entry missing content for an absent section → skipped
+  // (c) Old-sender partial entry missing content for an absent section → skipped.
+  // Distinct remote: reusing REMOTE would no-op via its advanced checkpoint
+  // (lastSeq=1 vs a fresh feed's seq 0) and never exercise the guard.
+  const REMOTE_PARTIAL = "remote-t19-partial";
   const feed3 = makeStubFeed();
   feed3.push(signEntry({
     table: "crow_context", op: "update",
     row: { section_key: "t19_partial", section_title: "Partial", device_id: null, project_id: null },  // no content
-    lamport_ts: 40, instance_id: REMOTE,
+    lamport_ts: 40, instance_id: REMOTE_PARTIAL,
   }));
-  await mgr._processNewEntries(REMOTE, feed3);
+  await mgr._processNewEntries(REMOTE_PARTIAL, feed3);
   const { rows: partialRows } = await db.execute({
     sql: "SELECT id FROM crow_context WHERE section_key = 't19_partial'",
     args: [],
