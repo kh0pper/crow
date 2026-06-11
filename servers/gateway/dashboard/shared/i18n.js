@@ -761,10 +761,10 @@ export const translations = {
     es: "Algunas integraciones requieren reiniciar el gateway para activarse después de agregar sus claves.",
   },
   "onboarding.openIntegrations": { en: "Open Integrations", es: "Abrir Integraciones" },
-  "onboarding.bot.title": { en: "Set up a bot", es: "Configura un bot" },
+  "onboarding.bot.title": { en: "Set up an agent", es: "Configura un agente" },
   "onboarding.bot.body": {
-    en: "Crow can run bots on channels like Gmail and Discord, each with its own persona, skills, and tools. Create one in the Bot Builder.",
-    es: "Crow puede ejecutar bots en canales como Gmail y Discord, cada uno con su propia personalidad, habilidades y herramientas. Crea uno en el Bot Builder.",
+    en: "Crow can run agents on channels like Gmail and Discord, each with its own persona, skills, and tools. Create one in the Bot Builder.",
+    es: "Crow puede ejecutar agentes en canales como Gmail y Discord, cada uno con su propia personalidad, habilidades y herramientas. Crea uno en el Bot Builder.",
   },
   "onboarding.openBotBuilder": { en: "Open Bot Builder", es: "Abrir Bot Builder" },
   "onboarding.connect.title": { en: "Connect an AI client", es: "Conecta un cliente de IA" },

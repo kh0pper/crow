@@ -90,7 +90,7 @@ export default {
         { id: "oc", label: "opencode", content: "<p>opencode config snippet.</p>" },
       ])) +
       section("Existing primitives",
-        statGrid([statCard("Memories", "128"), statCard("Bots", "4")]) +
+        statGrid([statCard("Memories", "128"), statCard("Agents", "4")]) +
         `<div style="margin:var(--crow-space-4) 0">${badge("active", "active")} ${badge("draft", "draft")}</div>` +
         dataTable(["Name", "Type"], [["alpha", "bundle"], ["beta", "mcp-server"]]) +
         `<div style="margin-top:var(--crow-space-4)">${formField("Example field", "demo", { placeholder: "type here" })}</div>`);
