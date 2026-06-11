@@ -1322,6 +1322,10 @@ await initTable("sync_conflicts table", `
   CREATE INDEX IF NOT EXISTS idx_sync_conflicts_resolved ON sync_conflicts(resolved);
 `);
 
+// W4-1: surface the operation that caused the conflict so the recovery UI
+// can label delete-conflicts distinctly and disable restore for insert-collisions.
+await addColumnIfMissing("sync_conflicts", "op", "TEXT DEFAULT 'update'");
+
 await initTable("sync_state table", `
   CREATE TABLE IF NOT EXISTS sync_state (
     instance_id TEXT PRIMARY KEY,

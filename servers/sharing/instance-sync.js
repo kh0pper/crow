@@ -8,7 +8,8 @@
  * Entry format: { table, op, row, lamport_ts, instance_id, signature }
  *
  * Conflict resolution: if incoming.lamport_ts > local.lamport_ts → apply;
- * otherwise → log to sync_conflicts table preserving both versions.
+ * otherwise run the equivalence check — equal data → skip silently; differing
+ * data → log to sync_conflicts and notify the operator.
  */
 
 import Hypercore from "hypercore";
@@ -20,7 +21,7 @@ import { isSyncable } from "../gateway/dashboard/settings/sync-allowlist.js";
 import bus from "../shared/event-bus.js";
 
 // Tables that participate in core sync
-const SYNCED_TABLES = [
+export const SYNCED_TABLES = [
   "memories",
   "crow_context",
   "contacts",
@@ -64,6 +65,39 @@ const EXCLUDED_COLUMNS = {
 const OUTBOUND_TRANSFORMS = {
   research_notes: (row) => ({ ...row, project_id: null }),
 };
+
+/**
+ * Equivalence check: incoming row's values match the local row on every key
+ * present in the incoming row.
+ *
+ * Per-key rules: both null/undefined → equal; exactly one nullish → NOT equal
+ * (never alias null with ""); otherwise String(a) === String(b).
+ * lamport_ts and instance_id are ignored — sync metadata, not content.
+ *
+ * "a" is the LOCAL row (already passed through OUTBOUND_TRANSFORMS at the call
+ * site). "b" is the INCOMING (wire) row. Only keys in "b" are checked: wire
+ * entries are partial rows (only changed or relevant fields), so keys absent
+ * from the incoming row are not part of the equivalence judgement.
+ *
+ * @param {object} a - Local row (pre-transformed for wire comparison)
+ * @param {object} b - Incoming (wire) row
+ * @returns {boolean}
+ */
+export function rowsEquivalent(a, b) {
+  if (!a || !b) return false;
+  const IGNORE = new Set(["lamport_ts", "instance_id"]);
+  for (const k of Object.keys(b)) {
+    if (IGNORE.has(k)) continue;
+    const av = a[k] ?? null;
+    const bv = b[k] ?? null;
+    const aNullish = av === null || av === undefined;
+    const bNullish = bv === null || bv === undefined;
+    if (aNullish && bNullish) continue;            // both absent/null → equal
+    if (aNullish !== bNullish) return false;        // exactly one nullish → not equal
+    if (String(av) !== String(bv)) return false;
+  }
+  return true;
+}
 
 /**
  * Per-table filter: decide whether a mutated row should be broadcast (or an
@@ -120,71 +154,78 @@ export class InstanceSyncManager {
     // Per-peer serialization for initInstance() — see initInstance() for why.
     this._initLocks = new Map(); // remoteInstanceId → tail Promise
 
-    // Local Lamport counter (monotonically increasing)
-    this._localCounter = 0;
-    this._counterLoaded = false;
+    // Per-peer serialization for _processNewEntries — see D4 fix below.
+    this._processLocks = new Map(); // remoteInstanceId → tail Promise
+
+    // Flag that _ensureCounter has seeded the sync_state row at least once.
+    // The DB row is the authority; this is only a cheap short-circuit.
+    this._counterSeeded = false;
 
     // Whether the manager has been started
     this.started = false;
   }
 
   /**
-   * Load the local Lamport counter from the database.
+   * Idempotent seeder: ensure a sync_state row exists for this instance.
+   * INSERT OR IGNORE is atomic against concurrent first-callers; safe to race.
+   * All three sync_state writers call this before their UPDATE so that a fresh
+   * receive-only instance (which never calls _nextLamport) still has a row to
+   * UPDATE — without it the counter advances and checkpoints silently no-op.
    */
   async _ensureCounter() {
-    if (this._counterLoaded) return;
-
+    if (this._counterSeeded) return;
     try {
-      const { rows } = await this.db.execute({
-        sql: "SELECT local_counter FROM sync_state WHERE instance_id = ?",
+      await this.db.execute({
+        sql: "INSERT OR IGNORE INTO sync_state (instance_id, local_counter) VALUES (?, 0)",
         args: [this.localInstanceId],
       });
-
-      if (rows.length > 0) {
-        this._localCounter = rows[0].local_counter;
-      } else {
-        // First time — insert initial state
-        await this.db.execute({
-          sql: "INSERT OR IGNORE INTO sync_state (instance_id, local_counter) VALUES (?, 0)",
-          args: [this.localInstanceId],
-        });
-      }
     } catch (err) {
-      console.warn("[instance-sync] Failed to load counter:", err.message);
+      console.warn("[instance-sync] Failed to seed sync_state row:", err.message);
     }
-
-    this._counterLoaded = true;
+    this._counterSeeded = true;
   }
 
   /**
-   * Increment and persist the local Lamport counter.
-   * @returns {number} The new counter value
+   * Atomically increment and persist the local Lamport counter.
+   * Uses a single UPDATE ... RETURNING so no two concurrent callers can race
+   * on the same value — better-sqlite3 is synchronous, each statement is atomic
+   * with respect to all JS interleavings.
+   * @returns {Promise<number>} The new counter value
    */
   async _nextLamport() {
     await this._ensureCounter();
-    this._localCounter++;
-
-    await this.db.execute({
-      sql: "UPDATE sync_state SET local_counter = ?, updated_at = datetime('now') WHERE instance_id = ?",
-      args: [this._localCounter, this.localInstanceId],
+    const { rows } = await this.db.execute({
+      sql: `UPDATE sync_state SET local_counter = local_counter + 1, updated_at = datetime('now')
+            WHERE instance_id = ? RETURNING local_counter`,
+      args: [this.localInstanceId],
     });
-
-    return this._localCounter;
+    if (rows.length === 0) {
+      // Seed race: the INSERT OR IGNORE above ran but the UPDATE found no row
+      // (another caller's INSERT lost the race). Seed explicitly and retry once.
+      this._counterSeeded = false;
+      await this._ensureCounter();
+      const retry = await this.db.execute({
+        sql: `UPDATE sync_state SET local_counter = local_counter + 1, updated_at = datetime('now')
+              WHERE instance_id = ? RETURNING local_counter`,
+        args: [this.localInstanceId],
+      });
+      return Number(retry.rows[0].local_counter);
+    }
+    return Number(rows[0].local_counter);
   }
 
   /**
-   * Update the local counter to be at least as large as an incoming value.
+   * Advance the local counter so it is greater than an incoming Lamport value.
+   * Single atomic MAX(...) UPDATE — no read-check-write race across an await.
    * @param {number} incomingTs - Lamport timestamp from a remote entry
    */
   async _advanceCounter(incomingTs) {
     await this._ensureCounter();
-    if (incomingTs >= this._localCounter) {
-      this._localCounter = incomingTs + 1;
-      await this.db.execute({
-        sql: "UPDATE sync_state SET local_counter = ?, updated_at = datetime('now') WHERE instance_id = ?",
-        args: [this._localCounter, this.localInstanceId],
-      });
-    }
+    await this.db.execute({
+      sql: `UPDATE sync_state SET local_counter = MAX(local_counter, CAST(? AS INTEGER) + 1), updated_at = datetime('now')
+            WHERE instance_id = ?`,
+      args: [Number(incomingTs) || 0, this.localInstanceId],
+    });
   }
 
   /**
@@ -475,10 +516,39 @@ export class InstanceSyncManager {
   }
 
   /**
-   * Process new entries from a remote instance's incoming feed.
+   * Public wrapper: serialize per-peer to prevent overlapping runs (D4).
+   * Same promise-chain pattern as _initLocks — a failed run's .catch(() => {})
+   * ensures the next queued run is not blocked by a prior error.
+   * lastSeq is re-read INSIDE the inner run after acquiring the chain, so a
+   * queued run naturally no-ops the range the prior run already covered.
    */
   async _processNewEntries(remoteInstanceId, feed) {
-    // Get checkpoint: last applied sequence for this peer
+    const prior = this._processLocks.get(remoteInstanceId) || Promise.resolve();
+    const next = prior
+      .catch(() => {})
+      .then(() => this._processNewEntriesInner(remoteInstanceId, feed));
+    this._processLocks.set(remoteInstanceId, next);
+    try {
+      return await next;
+    } finally {
+      if (this._processLocks.get(remoteInstanceId) === next) {
+        this._processLocks.delete(remoteInstanceId);
+      }
+    }
+  }
+
+  /**
+   * Inner body: process new entries from a remote instance's incoming feed.
+   * lastSeq is read here (after acquiring the per-peer chain) so each
+   * queued run starts from where the prior run actually left off.
+   *
+   * Checkpoints AFTER every ATTEMPTED entry (seq + 1, outside the try-catch).
+   * This intentionally advances the checkpoint past failed entries — halting
+   * on a poison entry would freeze the entire peer feed, a worse outcome than
+   * skipping one bad entry. The trailing whole-batch checkpoint is removed.
+   */
+  async _processNewEntriesInner(remoteInstanceId, feed) {
+    // Re-read lastSeq inside the lock — the prior chained run may have advanced it.
     const lastSeq = await this._getLastAppliedSeq(remoteInstanceId);
 
     for (let seq = lastSeq; seq < feed.length; seq++) {
@@ -486,12 +556,13 @@ export class InstanceSyncManager {
         const entry = await feed.get(seq);
         await this._applyEntry(remoteInstanceId, entry);
       } catch (err) {
+        // Skip-and-continue: a poison entry must not freeze this peer's feed.
         console.warn(`[instance-sync] Failed to process entry ${seq} from ${remoteInstanceId}:`, err.message);
       }
+      // Checkpoint after every attempted entry — outside the try so it advances
+      // even when _applyEntry threw (intentional skip-log-advance semantics).
+      await this._setLastAppliedSeq(remoteInstanceId, seq + 1);
     }
-
-    // Update checkpoint
-    await this._setLastAppliedSeq(remoteInstanceId, feed.length);
   }
 
   /**
@@ -538,9 +609,10 @@ export class InstanceSyncManager {
       return;
     }
 
-    // Check for conflicts
-    if (op === "update" && row.id !== undefined) {
-      const conflict = await this._checkConflict(table, row.id, lamport_ts, instance_id, row);
+    // Conflict detection gates both updates and deletes — a stale remote delete
+    // with a lower lamport_ts must not silently destroy a newer local edit (D6).
+    if ((op === "update" || op === "delete") && row.id !== undefined) {
+      const conflict = await this._checkConflict(table, row.id, lamport_ts, instance_id, row, op);
       if (conflict === "skip") return; // Local version wins
     }
 
@@ -625,10 +697,23 @@ export class InstanceSyncManager {
   }
 
   /**
-   * Check if applying an update would conflict with a local version.
-   * @returns {"apply"|"skip"} Whether to apply the incoming change
+   * Check if applying an update or delete would conflict with a local version.
+   *
+   * Equivalence check (for updates): apply the table's OUTBOUND_TRANSFORMS to
+   * the local row before comparing, so a locally-assigned transformed column
+   * (e.g. research_notes.project_id) never manufactures a false conflict.
+   *
+   * Delete path: equivalence check is skipped — a delete vs a live row is never
+   * equivalent. Low incomingTs + local row → conflict op='delete'.
+   *
+   * NO same-author heuristic: row.instance_id is the ORIGIN instance, not the
+   * last editor. Treating same-origin as "safe stale re-order" would silently
+   * drop real concurrent edits of rows both instances received from one origin.
+   *
+   * @param {string} op - 'update' or 'delete' (caller gates before calling)
+   * @returns {Promise<"apply"|"skip">}
    */
-  async _checkConflict(table, rowId, incomingTs, incomingInstanceId, incomingRow) {
+  async _checkConflict(table, rowId, incomingTs, incomingInstanceId, incomingRow, op) {
     try {
       const { rows } = await this.db.execute({
         sql: `SELECT * FROM ${table} WHERE id = ?`,
@@ -644,24 +729,43 @@ export class InstanceSyncManager {
         return "apply"; // Incoming is newer
       }
 
-      if (incomingTs <= localTs) {
-        // Conflict — log both versions
-        await this.db.execute({
-          sql: `INSERT INTO sync_conflicts (table_name, row_id, winning_instance_id, losing_instance_id, winning_lamport_ts, losing_lamport_ts, winning_data, losing_data)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          args: [
-            table,
-            String(rowId),
-            localRow.instance_id || this.localInstanceId,
-            incomingInstanceId,
-            localTs,
-            incomingTs,
-            JSON.stringify(localRow),
-            JSON.stringify(incomingRow),
-          ],
-        });
-        return "skip"; // Local version wins
+      // incomingTs <= localTs: potential conflict.
+      // For updates: run equivalence check to filter re-delivery noise.
+      // For deletes: skip equivalence — a delete vs live row is never equivalent.
+      if (op !== "delete") {
+        // Apply OUTBOUND_TRANSFORMS to the local row before comparing so that a
+        // locally-assigned transformed column (e.g. project_id on research_notes)
+        // doesn't manufacture a false conflict for an otherwise-identical row.
+        const transform = OUTBOUND_TRANSFORMS[table];
+        const localForCompare = transform ? transform({ ...localRow }) : localRow;
+        if (rowsEquivalent(localForCompare, incomingRow)) {
+          return "skip"; // Re-delivery noise — no conflict row needed
+        }
       }
+
+      // Real conflict: log both versions and notify the operator.
+      const conflictOp = op || "update";
+      await this.db.execute({
+        sql: `INSERT INTO sync_conflicts
+                (table_name, row_id, winning_instance_id, losing_instance_id,
+                 winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, op)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          table,
+          String(rowId),
+          localRow.instance_id || this.localInstanceId,
+          incomingInstanceId,
+          localTs,
+          incomingTs,
+          JSON.stringify(localRow),
+          JSON.stringify(incomingRow),
+          conflictOp,
+        ],
+      });
+
+      await this._notifyConflict();
+
+      return "skip"; // Local version wins
     } catch (err) {
       console.warn(`[instance-sync] Conflict check failed for ${table}:${rowId}:`, err.message);
     }
@@ -670,7 +774,48 @@ export class InstanceSyncManager {
   }
 
   /**
+   * Fire an operator notification when a real conflict is logged.
+   * Deduped: if an unread+undismissed instance-sync notification already
+   * exists, skip creating another one. The SELECT-then-INSERT is TOCTOU-racy
+   * across peers (per-peer locks don't serialize across different peers), so a
+   * duplicate may slip through — that's acceptable (harmless extra bell item).
+   * Never throws into the apply loop.
+   */
+  async _notifyConflict() {
+    try {
+      const { rows: existing } = await this.db.execute({
+        sql: `SELECT id FROM notifications
+              WHERE source = 'instance-sync' AND is_read = 0 AND is_dismissed = 0
+              LIMIT 1`,
+        args: [],
+      });
+      if (existing.length > 0) return; // Standing notification already present
+
+      // Lazy dynamic import to avoid loading gateway push modules in
+      // non-gateway contexts (same pattern as crow-context.js import above).
+      const { createNotification } = await import("../shared/notifications.js");
+      await createNotification(this.db, {
+        type: "system",
+        source: "instance-sync",
+        priority: "high",
+        title: "Sync conflict recorded",
+        body: "A sync conflict was recorded — one version of an item was kept, the other saved for review.",
+        action_url: "/dashboard/settings?section=sync-conflicts",
+      });
+    } catch (err) {
+      console.warn("[instance-sync] Failed to send conflict notification:", err.message);
+    }
+  }
+
+  /**
    * Apply an insert operation from a remote instance.
+   * On INSERT OR IGNORE conflict (rowsAffected === 0): fetch the local row.
+   * - row.id == null → warn only (binding undefined to better-sqlite3 throws)
+   * - No local row at that id → secondary UNIQUE/NOT NULL/CHECK collision, not
+   *   an id collision; warn-log only, no conflict row (the dual-path messages
+   *   Nostr+sync delivery is the live example)
+   * - Local row equivalent → benign re-delivery, done
+   * - Local row differs → log conflict op='insert' + notify (D7 surfacing)
    */
   async _applyInsert(table, row, lamportTs, instanceId) {
     const cols = Object.keys(row);
@@ -687,10 +832,62 @@ export class InstanceSyncManager {
     const placeholders = cols.map(() => "?").join(", ");
     const colNames = cols.join(", ");
 
-    await this.db.execute({
+    const result = await this.db.execute({
       sql: `INSERT OR IGNORE INTO ${table} (${colNames}) VALUES (${placeholders})`,
       args: values,
     });
+
+    if (result.rowsAffected === 0) {
+      // INSERT OR IGNORE skipped — figure out why.
+      if (row.id == null) {
+        // Better-sqlite3 throws on undefined binds; null id is also not useful.
+        console.warn(`[instance-sync] _applyInsert: null/undefined id on ${table} — skipping`);
+        return;
+      }
+
+      const { rows: localRows } = await this.db.execute({
+        sql: `SELECT * FROM ${table} WHERE id = ?`,
+        args: [row.id],
+      });
+
+      if (localRows.length === 0) {
+        // No row at this id — secondary UNIQUE/NOT NULL/CHECK collision.
+        // Not an id collision; log and move on without a conflict row.
+        console.warn(`[instance-sync] _applyInsert: INSERT OR IGNORE on ${table} id=${row.id} skipped (secondary constraint); no conflict logged`);
+        return;
+      }
+
+      const localRow = localRows[0];
+      // Apply transform to the local row before equivalence comparison (same
+      // logic as _checkConflict) so a transformed column doesn't trigger
+      // a false insert-conflict for an otherwise-identical row.
+      const transform = OUTBOUND_TRANSFORMS[table];
+      const localForCompare = transform ? transform({ ...localRow }) : localRow;
+      if (rowsEquivalent(localForCompare, row)) {
+        return; // Benign re-delivery
+      }
+
+      // Id collision with different data — surface it (D7 minimal fix).
+      // The incoming insert is still not applied; the trace is preserved.
+      await this.db.execute({
+        sql: `INSERT INTO sync_conflicts
+                (table_name, row_id, winning_instance_id, losing_instance_id,
+                 winning_lamport_ts, losing_lamport_ts, winning_data, losing_data, op)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'insert')`,
+        args: [
+          table,
+          String(row.id),
+          localRow.instance_id || this.localInstanceId,
+          instanceId,
+          localRow.lamport_ts || 0,
+          lamportTs,
+          JSON.stringify(localRow),
+          JSON.stringify(row),
+        ],
+      });
+
+      await this._notifyConflict();
+    }
   }
 
   /**
@@ -752,25 +949,32 @@ export class InstanceSyncManager {
   }
 
   /**
-   * Update the last applied sequence number for a remote instance's feed.
+   * Atomically update the last applied sequence number for a remote peer.
+   *
+   * Uses json_set on the existing blob — a single atomic UPDATE that avoids
+   * the SELECT-then-UPDATE race (D3) where two peers checkpointing concurrently
+   * could lose one of the two writes. json_set accepts the path as a bound
+   * parameter; instance ids are UUIDs so they contain no `"` — but we
+   * defensively reject ids that would corrupt the JSON path.
+   *
+   * Semantics unchanged: `seq` is the NEXT unprocessed sequence number
+   * (i.e. the last successfully attempted seq + 1). getSyncStatus and
+   * _getLastAppliedSeq consume the same blob.
    */
   async _setLastAppliedSeq(remoteInstanceId, seq) {
+    // Guard: a `"` in the id would break the json_set path literal.
+    if (remoteInstanceId.includes('"')) {
+      console.warn(`[instance-sync] _setLastAppliedSeq: skipping id with quote char: ${remoteInstanceId}`);
+      return;
+    }
     try {
-      const { rows } = await this.db.execute({
-        sql: "SELECT last_applied_seq_per_peer FROM sync_state WHERE instance_id = ?",
-        args: [this.localInstanceId],
-      });
-
-      let seqs = {};
-      if (rows.length > 0 && rows[0].last_applied_seq_per_peer) {
-        seqs = JSON.parse(rows[0].last_applied_seq_per_peer);
-      }
-
-      seqs[remoteInstanceId] = seq;
-
+      await this._ensureCounter();
       await this.db.execute({
-        sql: "UPDATE sync_state SET last_applied_seq_per_peer = ?, updated_at = datetime('now') WHERE instance_id = ?",
-        args: [JSON.stringify(seqs), this.localInstanceId],
+        sql: `UPDATE sync_state
+              SET last_applied_seq_per_peer = json_set(COALESCE(last_applied_seq_per_peer, '{}'), ?, CAST(? AS INTEGER)),
+                  updated_at = datetime('now')
+              WHERE instance_id = ?`,
+        args: [`$."${remoteInstanceId}"`, seq, this.localInstanceId],
       });
     } catch (err) {
       console.warn(`[instance-sync] Failed to update checkpoint for ${remoteInstanceId}:`, err.message);
