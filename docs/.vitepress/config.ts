@@ -9,6 +9,10 @@ export default defineConfig({
 
   head: [
     ['meta', { name: 'theme-color', content: '#1d1d1f' }],
+    ['meta', { property: 'og:image', content: 'https://maestro.press/software/crow/crow-social-card.png' }],
+    ['meta', { property: 'og:title', content: 'Crow — modular agentic framework + MCP platform' }],
+    ['meta', { property: 'og:description', content: 'Self-host your own AI agents and apps. Connect Claude/ChatGPT/Cursor as a native MCP connector. Local or cloud models.' }],
+    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
   ],
 
   locales: {
