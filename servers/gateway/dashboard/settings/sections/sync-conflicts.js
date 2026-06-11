@@ -68,15 +68,21 @@ function renderConflictRow(r, lang, csrfToken) {
   const lId = shortId(r.losing_instance_id);
   const isInsert = (r.op === "insert");
   const isDelete = (r.op === "delete");
+  const isCrowContext = (r.table_name === "crow_context");
   const resolved = !!r.resolved;
 
   const winJson = prettyJson(r.winning_data);
   const loseJson = prettyJson(r.losing_data);
 
   // Restore button is disabled for op='insert' conflicts per spec §6.
+  // Also disabled for crow_context (composite key — spec §4).
   const restoreBtn = isInsert
     ? `<span style="font-size:0.78rem;color:var(--crow-text-muted);font-style:italic">
          ${escapeHtml(t("syncConflicts.insertRestoreDisabled", lang))}
+       </span>`
+    : isCrowContext
+    ? `<span style="font-size:0.78rem;color:var(--crow-text-muted);font-style:italic">
+         ${escapeHtml(t("syncConflicts.compositeRestoreDisabled", lang))}
        </span>`
     : `<form method="POST" action="/dashboard/settings" style="display:inline">
          <input type="hidden" name="_csrf" value="${escapeHtml(csrfToken)}" />
@@ -222,7 +228,7 @@ export default {
     const cols = `
       <colgroup>
         <col style="width:90px">
-        <col style="width:70px">
+        <col style="width:140px">
         <col style="width:120px">
         <col style="width:60px">
         <col>
