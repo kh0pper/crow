@@ -53,6 +53,7 @@ import { proposalsDir, normalizeSkillName, listProposals } from "../../../script
 // B4: shared write+attach helper (one code path with the auto review pass).
 import { promoteSkill } from "../../../scripts/pi-bots/skill_promote.mjs";
 import { listBotSkillEvents } from "../../../scripts/pi-bots/skill_provenance.mjs";
+import { createProjectSpace, updateProjectSpaceMeta } from "../../shared/project-spaces.js";
 
 // Slice C: operator-approved promotion target (the PRIMARY skills dir both the
 // pi bridge and the glasses voice path search via skill_resolver).
@@ -485,14 +486,10 @@ export default function botBoardApiRouter(dashboardAuth) {
     let cdb;
     try {
       cdb = createDbClient();
-      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 50);
-      const r = await cdb.execute({
-        sql: "INSERT INTO project_spaces (name, slug, description) VALUES (?, ?, ?)",
-        args: [name, slug + "-" + Date.now(), b.description ? String(b.description) : null],
+      const { id: newId } = await createProjectSpace(cdb, {
+        name,
+        description: b.description ? String(b.description) : null,
       });
-      const newId = Number(r.lastInsertRowid);
-      const wsDir = HOME + "/.crow-mpa/data/projects/" + slug + "-" + newId + "/workspace";
-      await cdb.execute({ sql: "UPDATE project_spaces SET slug=?, workspace_dir=? WHERE id=?", args: [slug + "-" + newId, wsDir, newId] });
       return res.json({ ok: true, id: newId });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));
@@ -511,19 +508,18 @@ export default function botBoardApiRouter(dashboardAuth) {
     }
     const name = typeof b.name === "string" ? b.name.trim() : "";
     if (b.name != null && !name) return jsonError(res, 400, "name cannot be empty");
+    // Collect the patch fields the caller provided.
+    const patch = {};
+    if (b.name != null) patch.name = name;
+    if (b.description != null) patch.description = String(b.description) || null;
+    if (b.status != null) patch.status = String(b.status);
+    if (!Object.keys(patch).length) return jsonError(res, 400, "nothing to update");
     let cdb;
     try {
       cdb = createDbClient();
       const cur = (await cdb.execute({ sql: "SELECT id FROM project_spaces WHERE id=?", args: [id] })).rows[0];
       if (!cur) return jsonError(res, 404, "project not found");
-      const sets = [], args = [];
-      if (b.name != null) { sets.push("name=?"); args.push(name); }
-      if (b.description != null) { sets.push("description=?"); args.push(String(b.description) || null); }
-      if (b.status != null) { sets.push("status=?"); args.push(String(b.status)); }
-      if (!sets.length) return jsonError(res, 400, "nothing to update");
-      sets.push("updated_at=datetime('now')");
-      args.push(id);
-      await cdb.execute({ sql: `UPDATE project_spaces SET ${sets.join(", ")} WHERE id=?`, args });
+      await updateProjectSpaceMeta(cdb, id, patch);
       return res.json({ ok: true });
     } catch (e) {
       return jsonError(res, 500, String(e.message || e));

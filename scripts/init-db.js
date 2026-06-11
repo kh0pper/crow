@@ -348,23 +348,65 @@ async function migrateLegacyProjectsToSpaces() {
 }
 await migrateLegacyProjectsToSpaces();
 
+// Canonical-slug normalization pass.
+//
+// For workspace-less project_spaces rows (workspace_dir IS NULL) whose slug
+// doesn't match slugify(name, id), update to canonical form. These are rows
+// created by the SQL trigger, which uses a simpler replace-chain that doesn't
+// strip diacritics (e.g. "Café Münze" → "café-münze-7" instead of
+// "cafe-munze-7"). Rows WITH a workspace_dir keep their slug — filesystem
+// coupling wins and the slug is stable after creation.
+//
+// Semantics: for workspace-less rows the slug intentionally follows the
+// current name (a renamed legacy project re-slugs on next init-db run).
+//
+// Idempotent: re-running init-db is a no-op when all slugs are canonical.
+(async function normalizeProjectSlugs() {
+  const { rows } = await db.execute({
+    sql: `SELECT id, name, slug FROM project_spaces WHERE workspace_dir IS NULL`,
+  });
+  for (const r of rows) {
+    const canonical = slugify(r.name, r.id);
+    if (r.slug !== canonical) {
+      await db.execute({
+        sql: `UPDATE project_spaces SET slug = ? WHERE id = ? AND workspace_dir IS NULL`,
+        args: [canonical, r.id],
+      });
+      console.log(`Normalized slug for project_spaces #${r.id}: "${r.slug}" → "${canonical}"`);
+    }
+  }
+})();
+
 // Forward triggers: research_projects → project_spaces.
 //
 // Legacy INSERT callers (12+ in tree as of M1) keep working transparently.
 // The trigger generates a SQL-only fallback slug — close enough for the legacy
-// path. New code (M2+) writes to project_spaces directly using slugify().
+// path. The canonical-slug normalization pass below (after the backstop) fixes
+// up any rows whose slug drifted from slugify(name, id) due to this SQL form.
 //
-// SQL slug: lowercase, replace common separators with `-`, suffix with id.
-// Doesn't strip every Unicode oddity but the trailing -<id> guarantees uniqueness.
+// SQL slug contract: the trailing '||'-'||NEW.id' guarantees uniqueness even
+// when two rows share a name. The normalization pass converts to the JS
+// slugify form for workspace-less rows on every init-db run.
 //
-// Triggers do NOT fire on INSERT … ON CONFLICT DO NOTHING when the conflict
-// triggers (SQLite UPSERT doc), so the trigger's ON CONFLICT clause is safe
-// from recursing in either direction.
+// INSERT OR IGNORE on the spaces row: if a slug or uuid UNIQUE conflict occurs
+// (possible if the row was already mirrored), we silently skip rather than
+// aborting the legacy writer's INSERT. The init-db backstop
+// (migrateLegacyProjectsToSpaces above) self-heals any missed mirrors.
+//
+// INSERT OR IGNORE on the members row: cheap insurance alongside the
+// WHERE NOT EXISTS guard (which already mirrors the partial unique index).
+//
+// The DROP + recreate is wrapped in BEGIN IMMEDIATE; ... COMMIT; so a
+// concurrent gateway (busy_timeout 30s) can't observe a window where the
+// trigger is absent. executeMultiple autocommits per statement, so we
+// supply the explicit transaction boundary in the DDL string.
 await initTable("project_spaces forward triggers", `
-  CREATE TRIGGER IF NOT EXISTS tr_rp_to_ps_ins
+  BEGIN IMMEDIATE;
+  DROP TRIGGER IF EXISTS tr_rp_to_ps_ins;
+  CREATE TRIGGER tr_rp_to_ps_ins
   AFTER INSERT ON research_projects FOR EACH ROW
   BEGIN
-    INSERT INTO project_spaces (id, uuid, slug, name, description, type, status, tags, created_at, updated_at)
+    INSERT OR IGNORE INTO project_spaces (id, uuid, slug, name, description, type, status, tags, created_at, updated_at)
     VALUES (
       NEW.id,
       COALESCE(NEW.uuid, lower(hex(randomblob(16)))),
@@ -376,16 +418,16 @@ await initTable("project_spaces forward triggers", `
       NEW.tags,
       COALESCE(NEW.created_at, datetime('now')),
       COALESCE(NEW.updated_at, datetime('now'))
-    )
-    ON CONFLICT(id) DO NOTHING;
+    );
 
-    INSERT INTO project_members (project_id, contact_id, role, granted_at)
+    INSERT OR IGNORE INTO project_members (project_id, contact_id, role, granted_at)
     SELECT NEW.id, NULL, 'owner', COALESCE(NEW.created_at, datetime('now'))
     WHERE NOT EXISTS (
       SELECT 1 FROM project_members
        WHERE project_id = NEW.id AND contact_id IS NULL AND revoked_at IS NULL
     );
   END;
+  COMMIT;
 
   CREATE TRIGGER IF NOT EXISTS tr_rp_to_ps_upd
   AFTER UPDATE ON research_projects FOR EACH ROW
