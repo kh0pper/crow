@@ -194,7 +194,25 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     }
 
     setSessionCookie(res, result.token);
-    res.redirectAfterPost(wasFirstSetup ? "/dashboard/onboarding" : "/dashboard");
+
+    // W3-3: redirect to onboarding only on first-ever setup AND only when the
+    // completion flag has never been set (so existing operators who reset their
+    // password are never nagged).
+    if (wasFirstSetup) {
+      let onboardingDone = false;
+      const _loginDb = createDbClient();
+      try {
+        const { rows } = await _loginDb.execute({
+          sql: "SELECT value FROM dashboard_settings WHERE key='onboarding_completed_at'",
+          args: [],
+        });
+        onboardingDone = rows.length > 0 && !!rows[0].value;
+      } catch {} finally {
+        try { _loginDb.close(); } catch {}
+      }
+      return res.redirectAfterPost(onboardingDone ? "/dashboard" : "/dashboard/onboarding");
+    }
+    res.redirectAfterPost("/dashboard");
   });
 
   // 2FA verification (TOTP code entry after password)
