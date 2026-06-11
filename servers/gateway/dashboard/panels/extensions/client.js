@@ -721,7 +721,7 @@ export function extensionsClientJS(lang) {
             uiSection.appendChild(uiTitle);
             var uiChip = document.createElement("span");
             uiChip.className = "ext-detail__req-chip";
-            uiChip.textContent = (addon.webUI.label || "Web UI") + " :" + (addon.webUI.port || "") + (addon.webUI.path || "/");
+            uiChip.textContent = (addon.webUI.label || "${tJs("extensions.webUiFallback", lang)}") + " :" + (addon.webUI.port || "") + (addon.webUI.path || "/");
             uiSection.appendChild(uiChip);
             frag.appendChild(uiSection);
           }
