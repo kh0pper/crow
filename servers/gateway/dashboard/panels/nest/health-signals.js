@@ -195,7 +195,7 @@ async function peersSignal(db) {
     value: `${issues.length} offline`,
     issueLabel: `Peer ${issues[0].name} hasn't been seen since ${issues[0].when}`,
     actionLabel: "View instances",
-    actionHref: "/dashboard/settings?section=pairedInstances",
+    actionHref: "/dashboard/settings?section=paired-instances",
   };
 }
 
@@ -233,6 +233,47 @@ async function updatesSignal(db) {
     issueLabel: "An update is available",
     actionLabel: "Check updates",
     actionHref: "/dashboard/settings?section=updates",
+  };
+}
+
+async function syncConflictsSignal(db) {
+  let count = 0;
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT COUNT(*) AS n FROM sync_conflicts WHERE resolved = 0",
+      args: [],
+    });
+    count = Number(rows[0]?.n ?? 0);
+  } catch {
+    // sync_conflicts table may not exist yet on older installs; treat as 0.
+    return {
+      id: "syncConflicts",
+      severity: null,
+      state: "ok",
+      label: "Sync conflicts",
+      value: "none",
+    };
+  }
+
+  if (count === 0) {
+    return {
+      id: "syncConflicts",
+      severity: null,
+      state: "ok",
+      label: "Sync conflicts",
+      value: "none",
+    };
+  }
+
+  return {
+    id: "syncConflicts",
+    severity: "warn",
+    state: "warn",
+    label: "Sync conflicts",
+    value: `${count} unresolved`,
+    issueLabel: `${count} sync conflict${count === 1 ? "" : "s"} need${count === 1 ? "s" : ""} review`,
+    actionLabel: "Review conflicts",
+    actionHref: "/dashboard/settings?section=sync-conflicts",
   };
 }
 
@@ -312,6 +353,7 @@ export async function collectHealthSignals(db, opts = {}) {
     peersSignal(db),
     updatesSignal(db),
     backupSignal(nowFn),
+    syncConflictsSignal(db),
   ].map(p => Promise.resolve(p).catch(err => ({
     id: "unknown",
     severity: null,

@@ -711,6 +711,7 @@ export const translations = {
   "settings.section.navGroups": { en: "Navigation", es: "Navegación" },
   // Multi-Instance group
   "settings.section.pairedInstances": { en: "Paired Instances", es: "Instancias emparejadas" },
+  "settings.section.syncConflicts": { en: "Sync Conflicts", es: "Conflictos de sincronización" },
   "settings.section.syncProfiles": { en: "Sync Profiles", es: "Perfiles de sincronización" },
   "settings.section.auditLog": { en: "Cross-Host Audit", es: "Auditoría entre hosts" },
   "settings.section.sharedContext": { en: "Shared Context (crow.md)", es: "Contexto compartido (crow.md)" },
@@ -739,6 +740,39 @@ export const translations = {
 
   // ─── Settings Navigation ───
   "settings.backToSettings": { en: "Settings", es: "Ajustes" },
+
+  // ─── Sync Conflicts Section (W4-1) ───
+  "syncConflicts.description": {
+    en: "When two instances edit the same item at the same time, the newer version is kept and the other is saved here for review. Unresolved conflicts are shown first.",
+    es: "Cuando dos instancias editan el mismo elemento al mismo tiempo, se guarda la versión más reciente y la otra se almacena aquí para revisión. Los conflictos sin resolver se muestran primero.",
+  },
+  "syncConflicts.unresolvedHeading": { en: "Unresolved conflicts", es: "Conflictos sin resolver" },
+  "syncConflicts.resolvedHeading": { en: "Recently resolved", es: "Resueltos recientemente" },
+  "syncConflicts.none": { en: "No unresolved conflicts — everything is in sync.", es: "Sin conflictos sin resolver — todo está sincronizado." },
+  "syncConflicts.noneResolved": { en: "No resolved conflicts.", es: "Sin conflictos resueltos." },
+  "syncConflicts.colTable": { en: "Table", es: "Tabla" },
+  "syncConflicts.colRowId": { en: "Row", es: "Fila" },
+  "syncConflicts.colWhen": { en: "When", es: "Cuándo" },
+  "syncConflicts.colOp": { en: "Op", es: "Op" },
+  "syncConflicts.colData": { en: "Data", es: "Datos" },
+  "syncConflicts.colActions": { en: "Actions", es: "Acciones" },
+  "syncConflicts.resolvedLabel": { en: "Resolved", es: "Resuelto" },
+  "syncConflicts.showData": { en: "View data", es: "Ver datos" },
+  "syncConflicts.winningData": { en: "Kept version (current)", es: "Versión guardada (actual)" },
+  "syncConflicts.losingDataFields": { en: "Fields in the other version", es: "Campos de la otra versión" },
+  "syncConflicts.losingDataDelete": { en: "Deleted version (other side)", es: "Versión eliminada (otro lado)" },
+  "syncConflicts.keepCurrent": { en: "Keep current", es: "Mantener actual" },
+  "syncConflicts.restoreOther": { en: "Restore other version", es: "Restaurar otra versión" },
+  "syncConflicts.insertRestoreDisabled": {
+    en: "Auto-restore not available (id collision — review data above and resolve manually).",
+    es: "Restauración automática no disponible (colisión de id — revisa los datos arriba y resuélvelo manualmente).",
+  },
+  "syncConflicts.resolveAll": { en: "Resolve all (keep current versions)", es: "Resolver todos (mantener versiones actuales)" },
+  "syncConflicts.resolveAllConfirm": {
+    en: "Mark all unresolved conflicts as resolved? The current (winning) version of each item will be kept.",
+    es: "¿Marcar todos los conflictos sin resolver como resueltos? Se mantendrá la versión actual (ganadora) de cada elemento.",
+  },
+  "syncConflicts.loadError": { en: "Failed to load conflicts", es: "Error al cargar conflictos" },
 
   // ─── Nav Groups Settings ───
   "navGroups.description": { en: "Organize your sidebar by creating groups and moving panels between them.", es: "Organiza tu barra lateral creando grupos y moviendo paneles entre ellos." },
