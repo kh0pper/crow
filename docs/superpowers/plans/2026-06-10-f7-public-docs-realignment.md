@@ -4,7 +4,13 @@
 
 **Goal:** Realign Crow's four public surfaces (repo README, VitePress docs landing EN+ES, GitHub repo metadata, maestro.press product page) around the approved v1 narrative spine, via a fuller restructure.
 
-**Architecture:** Content/marketing work only — no server code, no DB, no new gateway routes, funnel invariant untouched. Each long-form surface is reorganized so the identity sentence leads and the "use it two ways" frame is the organizing principle. One canonical set of copy blocks (defined once below) is reused across surfaces (DRY). README + docs auto-deploy on push (docs via GitHub Pages `deploy-docs.yml`); GitHub metadata and the maestro.press droplet have tooling/access gaps flagged as decision points.
+**Architecture:** Content/marketing work only — no server code, no DB, no new gateway routes, funnel invariant untouched. Each long-form surface is reorganized so the identity sentence leads and the "use it two ways" frame is the organizing principle. One canonical set of copy blocks (defined once below) is reused across surfaces (DRY).
+
+**Deploy model (VERIFIED 2026-06-10, corrects an earlier assumption):**
+- **README** — truly automatic: it's a repo file, live on GitHub the instant the branch merges to `main`.
+- **GitHub Pages** (`deploy-docs.yml`) fires on push, but the resulting `kh0pper.github.io/crow/` site is **base-mismatched** (VitePress `base: '/software/crow/'` makes its assets resolve at `/software/crow/…`, which 404s under `github.io/crow/`). So github.io is NOT the canonical public docs surface — do not use it for og:image or links.
+- **The canonical public docs URL `https://maestro.press/software/crow/` is served by nginx on the DigitalOcean droplet** (verified: `curl -sI` → `server: nginx`, and `…/software/crow/crow-hero.svg` → 200, proving the droplet serves the built `docs/public/` tree at that path). **Pushing to `main` does NOT auto-update this URL** — the droplet re-publishes via a separate mechanism (the SAME unverified path as the maestro.press landing repo). Therefore **the public docs, the social-card PNG, and the maestro.press landing page all share ONE droplet-publish dependency**, consolidated into the final deploy task (Task 8).
+- **GitHub metadata** and the **droplet publish** have tooling/access gaps flagged as ⚠ decision points (Tasks 5, 6, 8).
 
 **Tech Stack:** Markdown (README, VitePress `docs/`), VitePress `index.md` home layout (frontmatter `hero`/`features`), static HTML (maestro.press, separate gitea repo), GitHub repo settings.
 
@@ -54,7 +60,7 @@ These are the load-bearing lines. The exact identity/differentiator/home-server/
 
 > **ES translation note:** The implementer for the ES task should be Spanish-fluent; treat these as canonical anchors and keep the existing `docs/es/` register (informal "tú", the voice in the current `docs/es/index.md`). Translate the remaining EN blocks ([BUNDLE], [SHARE], [PRIVACY], [DEV]) consistently when writing the ES landing.
 
-**[GH-DESC] GitHub About/description (≤350 chars):**
+**[GH-DESC] GitHub About/description (263 chars — VERIFIED under GitHub's 350-char limit):**
 > Modular, agentic framework and MCP platform you self-host. Build and run your own AI agents, connect Claude/ChatGPT/Cursor as a native MCP connector, self-host your apps, and share over encrypted P2P — on hardware you own, with local or cloud models. Open source.
 
 **[GH-TOPICS] GitHub topics:**
@@ -94,6 +100,7 @@ Restructure around the spine. Target section order (reorganize existing content;
 1. **Opener** — replace the current single paragraph (`README.md:3`) with [ID] + 2-3 sentences expanding it.
 2. **Use it two ways** (NEW section) — [TWO-WAYS] with [MCP-DIFF] landing as its own emphasized line. This subsumes/leads the existing "Build and run your own agents" (Bot Builder) and "Works With" content.
 3. Fold existing **Bot Builder** section (`README.md:13-24`) under the "agentic framework" half. **Reframe the named OpenClaw/Hermes sentence** (`README.md:22`, "Where engines like OpenClaw or Hermes lean on auto-authoring and hosted control...") to the unnamed capability contrast (e.g. "Unlike hosted, auto-authoring bot platforms, Crow keeps the engine on your hardware with an operator-approval gate in front of anything an agent writes for itself.").
+   > **Scope note:** the OpenClaw/Hermes removal applies ONLY to this README marketing sentence. Do NOT touch the legitimate `/platforms/openclaw` doc page (`docs/.vitepress/config.ts:123`) or the `CrowClaw (Legacy)` entry (`config.ts:185`) — those are real reference pages, not competitor name-drops.
 4. Fold existing **Works With** table (`README.md:63-67`) + **AI Chat Gateway** (`README.md:75-79`) under the "MCP platform" half.
 5. **Bundles** — add [BUNDLE] where add-ons/Crow OS are introduced (near `README.md:131` "Crow OS & Self-Hosting").
 6. **All-in-one home server** — fold [HOME] into the "Crow OS & Self-Hosting" section (`README.md:131-141`), elevating it.
@@ -104,13 +111,16 @@ Restructure around the spine. Target section order (reorganize existing content;
 
 - [ ] **Step 1: Draft + apply the restructured README** following the outline above, using the canonical blocks verbatim for [ID]/[MCP-DIFF]/[BUNDLE]/[HOME]/[SHARE]. Match the existing README voice.
 
-- [ ] **Step 2: Verify no links broken / nothing dropped.**
+- [ ] **Step 2: Verify no links lost + competitor names removed.** Diff the actual URL SET (not a line count — a restructure can merge link-bearing lines and skew a count without losing a link):
 
 Run:
 ```bash
-cd ~/crow && grep -c "maestro.press\|github.com\|CONTRIBUTING\|SECURITY" README.md && grep -n "OpenClaw\|Hermes" README.md
+cd ~/crow && git show HEAD:README.md | grep -oE 'https?://[^) ]+' | sort -u > /tmp/readme-urls-before.txt
+grep -oE 'https?://[^) ]+' README.md | sort -u > /tmp/readme-urls-after.txt
+echo "=== URLs present BEFORE but missing AFTER (should be empty) ===" ; comm -23 /tmp/readme-urls-before.txt /tmp/readme-urls-after.txt
+echo "=== competitor names (should be empty) ===" ; grep -n "OpenClaw\|Hermes" README.md
 ```
-Expected: link count ≥ the pre-edit count (spot-check the diff); `grep OpenClaw\|Hermes` returns NOTHING (names removed).
+Expected: the "missing AFTER" set is empty (no outbound link dropped); the OpenClaw/Hermes grep returns nothing.
 
 - [ ] **Step 3: Eyeball the diff for preserved qualifiers + field cuts.**
 
@@ -211,7 +221,7 @@ This wires the social card (created in Task 5) so the docs site also emits an `o
     ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
   ],
 ```
-(Base path is `/software/crow/`, so the card at `docs/public/crow-social-card.png` serves at `https://maestro.press/software/crow/crow-social-card.png`.)
+(**VERIFIED:** the droplet serves `docs/public/` assets at `/software/crow/` — `https://maestro.press/software/crow/crow-hero.svg` returns 200 — so `crow-social-card.png` will serve at `https://maestro.press/software/crow/crow-social-card.png` once committed AND the droplet re-publishes (Task 8). Use this absolute maestro.press URL, NOT a github.io URL — the github.io build is base-mismatched and would 404 the asset. Social scrapers require an absolute URL, so a relative path is not an option.)
 
 - [ ] **Step 2: Verify build still succeeds.**
 
@@ -286,13 +296,16 @@ Expected: description = [GH-DESC]; topics include the [GH-TOPICS] set. (Social c
 
 - [ ] **Step 2: Refresh the Crow card** in `software/index.html` (lines 34-42) to lead with the dual-use identity (currently "modular, agentic framework for assistance, research, and home...") — add the MCP-connector + home-server angle in one tightened sentence. Keep the CTAs.
 
-- [ ] **Step 3: Render-check locally.**
+- [ ] **Step 3: Verify the spine landed AND the Texas section survived (real phrase checks, not a substring count).**
 
 Run:
 ```bash
-cd ~/maestro-press-landing && python3 -c "import html.parser,sys; p=html.parser.HTMLParser(); p.feed(open('software/crow-overview/index.html').read()); print('crow-overview parse OK')" && grep -c "section" software/crow-overview/index.html
+cd ~/maestro-press-landing
+echo "=== new spine phrases present (each should be ≥1) ===" ; for p in "MCP" "all-in-one" "home server" "bundle"; do printf "%-14s " "$p"; grep -ci "$p" software/crow-overview/index.html; done
+echo "=== Texas section MUST survive (should be 1) ===" ; grep -c "Open Research Infrastructure" software/crow-overview/index.html
+echo "=== balanced tags sanity (open vs close <section>) ===" ; echo "open: $(grep -oc '<section' software/crow-overview/index.html)  close: $(grep -oc '</section>' software/crow-overview/index.html)"
 ```
-Expected: "parse OK"; section count ≥ pre-edit (sanity that structure intact). Optionally open the file in a browser to eyeball.
+Expected: each spine phrase ≥1; "Open Research Infrastructure" == 1 (the maestro-specific section kept); `<section` open count == `</section>` close count (no broken nesting). Then open the file in a browser to eyeball before committing.
 
 - [ ] **Step 4: Commit to the gitea repo (separate from crow).**
 ```bash
@@ -301,31 +314,39 @@ cd ~/maestro-press-landing && git commit software/crow-overview/index.html softw
 
 ---
 
-## Task 8: maestro.press deploy path — ⚠ VERIFY BEFORE GO-LIVE
+## Task 8: Droplet publish (public docs + social card + maestro landing) — ⚠ VERIFY BEFORE GO-LIVE
 
-**⚠ BLOCKER:** the droplet publish path is UNVERIFIED (root SSH key-denied from this session; no `maestro` alias in non-interactive shell). The static site lives in gitea (`ssh://git@gitea:2222/kh0pp/maestro-press-landing.git`) and is served from the DigitalOcean droplet `67.205.133.238`. **Do NOT claim Surface 4 shipped until the live URL reflects the change.**
+**This is the SINGLE go-live task for everything served at `maestro.press`.** Per the verified deploy model, THREE things only become public when the droplet re-publishes: (a) the VitePress docs at `maestro.press/software/crow/` (Tasks 2-4), (b) the social-card PNG at `maestro.press/software/crow/crow-social-card.png` (Task 5, needed for the og:image to resolve), and (c) the maestro landing pages (Task 7). They share ONE droplet mechanism.
 
-- [ ] **Step 1: Discover the publish path.** From an interactive shell (the `maestro` / `maestro.press` bash alias the user has), determine how gitea → droplet webroot happens: a pull/checkout on the droplet, an rsync, or a gitea webhook. Check the droplet webroot (likely `/var/www/maestro.press` or an nginx `root`).
+**⚠ BLOCKER:** the droplet publish path is UNVERIFIED from this session (root SSH key-denied; no `maestro` alias in non-interactive shell). The maestro landing lives in gitea (`ssh://git@gitea:2222/kh0pp/maestro-press-landing.git`); the docs are built from the crow repo. Both are served by **nginx on droplet `67.205.133.238`**. **Do NOT claim the public surfaces shipped until the live URLs reflect the change.** Prerequisite: the crow-repo branch is already merged to `main` (Task 9) so the droplet can pull the new docs.
+
+- [ ] **Step 1: Discover BOTH publish paths** (interactive shell — the user has the `maestro`/`maestro.press` alias + droplet key):
 ```bash
-# user runs (interactive, has the alias + key):
-maestro "ls -la /var/www/ ; grep -r root /etc/nginx/sites-enabled/ | head ; (cd /var/www/maestro.press 2>/dev/null && git remote -v && git log --oneline -1)"
+# user runs (interactive):
+maestro "echo '--- nginx roots ---'; grep -rn 'root\|location' /etc/nginx/sites-enabled/ | grep -i 'crow\|software\|maestro' ;
+         echo '--- landing checkout ---'; (cd /var/www/maestro.press 2>/dev/null && git remote -v && git log --oneline -1) ;
+         echo '--- docs build: where does /software/crow come from? ---'; ls -la /var/www/maestro.press/software/crow 2>/dev/null | head ;
+         echo '--- any cron/webhook that rebuilds vitepress? ---'; crontab -l 2>/dev/null | grep -i 'crow\|vitepress\|docs'; ls /etc/cron.d 2>/dev/null"
 ```
+Determine: (i) how the landing repo reaches `/var/www/...` (pull / rsync / webhook), and (ii) how the VitePress docs get built+served at `/software/crow/` (droplet `git pull crow && npm run build` + nginx, or a proxy, or a cron). Record both.
 
-- [ ] **Step 2: Push to gitea, then trigger the discovered deploy** (e.g. `git pull` on the droplet, or rsync, per Step 1).
+- [ ] **Step 2: Publish the landing repo.**
 ```bash
 cd ~/maestro-press-landing && git pull --rebase && git push origin main
-# then the droplet-side pull/rsync identified in Step 1
+# then the droplet-side pull/rsync identified in Step 1(i)
 ```
 
-- [ ] **Step 3: Verify live.**
+- [ ] **Step 3: Publish the docs build** via the mechanism found in Step 1(ii) (e.g. droplet pulls `crow` main + `cd docs && npm ci && npm run build`, or triggers whatever cron/hook does it). The committed `docs/public/crow-social-card.png` is part of that build, so this is also what makes the og:image resolve.
 
-Run:
+- [ ] **Step 4: Verify ALL THREE live.**
 ```bash
-curl -s https://maestro.press/software/crow-overview/ | grep -c "MCP connector\|home server\|Use it two ways" || true
+echo "=== landing product page (spine copy) ===" ; curl -s --max-time 12 https://maestro.press/software/crow-overview/ | grep -ci "all-in-one\|MCP server\|native MCP" 
+echo "=== public docs landing (new hero) ===" ; curl -s --max-time 12 https://maestro.press/software/crow/ | grep -ci "agentic framework\|MCP platform"
+echo "=== social card resolves (HTTP 200) ===" ; curl -sI --max-time 12 https://maestro.press/software/crow/crow-social-card.png | head -1
 ```
-Expected: ≥1 match (the new spine copy is live). If 0, the deploy did not propagate — investigate before declaring done.
+Expected: landing ≥1 match; docs ≥1 match; social card → `HTTP/2 200`. Any 0 / non-200 means that surface did not propagate — investigate before declaring done.
 
-> **Note:** Steps 1-2 likely require the user (interactive shell + droplet key). Surface together with the user at execution time; this task may be handed off rather than agent-run.
+> **Note:** Steps 1-3 require the user (interactive shell + droplet key/alias). This task is a HANDOFF — surface it with the user at execution time; the agent prepares the commits/pushes, the user (or the droplet's own automation) performs the publish.
 
 ---
 
@@ -340,7 +361,13 @@ Expected: build complete; diff touches only README + docs (no gateway/funnel fil
 
 - [ ] **Step 2: Opus holistic review** of the full diff across all surfaces — spine consistency (identity/[MCP-DIFF]/[HOME]/[BUNDLE] phrased the same everywhere), no competitor names leaked, EN/ES parity, no broken links, qualifiers preserved. (subagent-driven-development handles the per-task spec+quality reviews; this is the final cross-surface pass.)
 
-- [ ] **Step 3: finishing-a-development-branch** — merge `f7-public-docs-realignment` → `main` (crow repo), `git pull --rebase` then `git push origin main` (triggers GitHub Pages docs deploy automatically). The maestro.press repo is a separate push (Task 8). Confirm the docs deploy succeeded (Actions run green) and the README/docs are live.
+- [ ] **Step 3: HARD MERGE GATE — the social-card PNG must exist before merge/push.** The og:image meta committed in Task 4 points at `crow-social-card.png`; merging before Task 5 produces the PNG would ship a broken og:image. Run:
+```bash
+cd ~/crow && test -f docs/public/crow-social-card.png && file docs/public/crow-social-card.png || echo "BLOCKED: PNG missing — resolve Task 5 tooling decision before merging"
+```
+Expected: `PNG image data, 1200 x 630`. If missing, do NOT merge — finish Task 5 first.
+
+- [ ] **Step 4: finishing-a-development-branch (crow repo) — independent of the droplet publish.** Merge `f7-public-docs-realignment` → `main`, `git pull --rebase` then `git push origin main`. This makes the README live on GitHub immediately and fires the GitHub Pages Action. **Note (corrects the earlier assumption): pushing does NOT make the public docs at `maestro.press/software/crow/` live — that requires the droplet re-publish in Task 8.** The crow-repo merge is the prerequisite for Task 8 (the droplet pulls from it), and Task 6 GitHub metadata can be done in parallel. So: merge crow → main here; then Task 8 is the final public go-live (docs + card + landing), handed off to the user. Do not declare F7 "shipped" until Task 8 Step 4 verifies all three public URLs.
 
 ---
 
@@ -353,3 +380,22 @@ Expected: build complete; diff touches only README + docs (no gateway/funnel fil
 **Consistency:** canonical blocks [ID]/[TWO-WAYS]/[MCP-DIFF]/[BUNDLE]/[HOME]/[SHARE]/[PRIVACY]/[DEV] (+ES variants) defined once, referenced by ID throughout. Social card path `docs/public/crow-social-card.png` consistent across Tasks 4/5/6. Branch name `f7-public-docs-realignment` consistent (Task 0/9).
 
 **Risks carried from spec:** maestro deploy unverified → Task 8 gates go-live on a live-URL check. GH social API absent → Task 6 falls back to web-UI. ES drift → Task 3 rewrites from the EN final. Tooling installs → Tasks 5/6 ask permission per global rule.
+
+---
+
+## Review
+
+**Reviewer:** Plan subagent (staff-engineer adversarial pass), against the live tree. **Date:** 2026-06-10. **Verdict:** REVISE → resolved.
+
+The reviewer verified every line-number anchor in the plan against the live tree (all accurate) and confirmed the three ⚠ blockers are real (`gh` absent, no SVG→PNG rasterizer, GitHub MCP tools don't expose repo metadata). Four critical issues + suggestions raised; resolutions:
+
+- **C1 (og:image domain asserted, not verified) — RESOLVED by verification.** Empirically confirmed the droplet serves `docs/public/` at `/software/crow/` (`curl -sI .../software/crow/crow-hero.svg` → 200), and that `kh0pper.github.io/crow/` is base-mismatched (its `/software/crow/` base 404s assets there). So the maestro.press absolute og:image URL is correct and canonical. Task 4 + the Architecture block now record this with the warning not to use github.io.
+- **C2 (misleading "docs auto-live on push") — FIXED.** Verified `maestro.press/software/crow/` is nginx-on-droplet, not GitHub Pages. The Architecture block now documents the real deploy model; the public docs, social card, and landing share ONE droplet-publish dependency, consolidated into Task 8; Task 9 no longer claims push = public-live.
+- **C3 (og:image committed before PNG exists) — FIXED.** Task 9 Step 3 is now a HARD MERGE GATE that fails if `docs/public/crow-social-card.png` is absent.
+- **C4 (description over 350-char limit) — NOT AN ISSUE (reviewer estimated; I measured).** [GH-DESC] is 263 chars; label updated to record the verified length.
+- **S1 (split maestro into its own plan) — PARTIALLY ADOPTED.** Kept in F7 (user wants all 4 surfaces) but Task 9 now merges the crow-repo work independently; Task 8 is a separable, user-handed-off droplet publish that doesn't block the crow merge.
+- **S2 (Task 7 theater checks) — FIXED.** Replaced `grep -c section` / tolerant HTMLParser with real spine-phrase greps + Texas-section survival + `<section>` open/close balance.
+- **S3 (README link-count weak) — FIXED.** Task 1 Step 2 now diffs the actual URL set before/after.
+- **S4 (redundant `git add` in Task 5) — REJECTED (reviewer wrong):** these are NEW files; repo CLAUDE.md explicitly requires `git add <path>` before `git commit <path>` for new files (`git commit <pathspec>` errors on untracked paths). Kept.
+- **S5 (legit OpenClaw refs) — ADOPTED.** Task 1 now scopes the OpenClaw/Hermes removal to the README sentence only, with an explicit do-not-touch note for `config.ts:123/185`.
+- **Q1/Q2 (deploy topology / custom domain) — ANSWERED** by the C1/C2 verification (droplet-served, maestro.press canonical, github.io base-broken). **Q3 (rasterizer choice) — stands** as the Task 5 decision point. **Q4 (parallel-session conflict / token leak) — no leak** (reviewer confirmed no gitea token in committed files); normal `git pull --rebase` discipline covers parallel pushes.
