@@ -6,8 +6,8 @@
  * custom tracker, and drawer markup.
  */
 
-import { escapeHtml, section, badge } from "../../../shared/components.js";
-import { t, tJs } from "../../../shared/i18n.js";
+import { escapeHtml, section, badge } from "../../shared/components.js";
+import { t, tJs } from "../../shared/i18n.js";
 import { createDbClient } from "../../../../db.js";
 import { botBoardStyles } from "./css.js";
 import { clientJs } from "./client.js";

@@ -6,7 +6,7 @@
  */
 
 import { createDbClient } from "../../../../db.js";
-import { setPeerBotEnabled } from "../../../../bot-federation-client.js";
+import { setPeerBotEnabled } from "../../../bot-federation-client.js";
 import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
 import { TASKS_DB, CARD_STATUSES, LOCK_STATUSES } from "./data-queries.js";
 

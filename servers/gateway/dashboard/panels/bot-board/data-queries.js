@@ -7,7 +7,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createDbClient } from "../../../../db.js";
 import { tasksDbPath } from "../../../../../scripts/pi-bots/instance-paths.mjs";
-import { getPeerCapabilities } from "../../../capabilities-cache.js";
+import { getPeerCapabilities } from "../../capabilities-cache.js";
 import { getTrustedInstances } from "../nest/data-queries.js";
 import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
 
