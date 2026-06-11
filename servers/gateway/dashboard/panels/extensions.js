@@ -24,8 +24,8 @@ export default {
   async handler(req, res, { db, layout, lang }) {
     // Handle POST for store management
     if (req.method === "POST" && req.body) {
-      const handled = await handleExtensionsPost(req, res);
-      if (handled) return;
+      await handleExtensionsPost(req, res);
+      if (res.headersSent) return;
     }
 
     const { installed, available, registrySource, communityStores } = await fetchRegistryData();
