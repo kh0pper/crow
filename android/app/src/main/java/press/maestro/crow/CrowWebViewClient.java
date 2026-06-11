@@ -28,12 +28,14 @@ public class CrowWebViewClient extends WebViewClient {
             return false;
         }
 
-        // Cross-origin but still on the user's Tailscale tailnet — i.e. another
-        // of their own Crow instances. Keep it in the WebView so cross-instance
-        // single sign-on (a grackle→MPA redirect, for example) lands its session
-        // cookie in THIS app's cookie jar instead of an external browser, where
-        // the login would be useless to the app.
-        if (isTailnetHost(requestHost)) {
+        // Cross-origin but on the SAME Tailscale tailnet as the page we're
+        // currently on — i.e. another of the user's own Crow instances. Keep it
+        // in the WebView so cross-instance single sign-on (a grackle→MPA
+        // redirect, for example) lands its session cookie in THIS app's cookie
+        // jar instead of an external browser, where the login would be useless
+        // to the app. Scoped to the current tailnet (not any *.ts.net) so a
+        // hostile page can't keep an arbitrary Tailscale host in-app.
+        if (isSameTailnet(requestHost, currentHost)) {
             return false;
         }
 
@@ -44,26 +46,44 @@ public class CrowWebViewClient extends WebViewClient {
     }
 
     /**
-     * True for hosts on the user's Tailscale tailnet: MagicDNS names
-     * (*.ts.net) and CGNAT addresses (100.64.0.0/10). These are the user's own
-     * instances, safe to keep inside the app.
+     * True when {@code requestHost} is on the same Tailscale tailnet as
+     * {@code currentHost} (the page already loaded — the user's own gateway):
+     *  - MagicDNS: both share the tailnet domain, e.g. a request to
+     *    {@code crow.<tailnet>.ts.net} while on {@code grackle.<tailnet>.ts.net}.
+     *  - CGNAT: both are 100.64.0.0/10 addresses (only meaningful when the
+     *    current page is itself reached over the tailnet).
+     * Anchored to the current tailnet rather than any {@code *.ts.net} host.
      */
-    private static boolean isTailnetHost(String host) {
-        if (host == null) return false;
-        String h = host.toLowerCase();
-        if (h.endsWith(".ts.net")) return true;
-        if (h.startsWith("100.")) {
-            String[] p = h.split("\\.");
-            if (p.length == 4) {
-                try {
-                    int second = Integer.parseInt(p[1]);
-                    return second >= 64 && second <= 127;
-                } catch (NumberFormatException ignored) {
-                    return false;
-                }
-            }
+    private static boolean isSameTailnet(String requestHost, String currentHost) {
+        if (requestHost == null || currentHost == null) return false;
+        String r = requestHost.toLowerCase();
+        String c = currentHost.toLowerCase();
+
+        if (c.endsWith(".ts.net")) {
+            int dot = c.indexOf('.');
+            if (dot < 0) return false;
+            String tailnet = c.substring(dot + 1); // e.g. "dachshund-chromatic.ts.net"
+            return r.equals(tailnet) || r.endsWith("." + tailnet);
         }
-        return false;
+
+        return isCgnat(c) && isCgnat(r);
+    }
+
+    /** True for a Tailscale CGNAT address (100.64.0.0/10). */
+    private static boolean isCgnat(String host) {
+        if (host == null || !host.startsWith("100.")) return false;
+        String[] p = host.split("\\.");
+        if (p.length != 4) return false;
+        try {
+            for (String part : p) {
+                int n = Integer.parseInt(part);
+                if (n < 0 || n > 255) return false;
+            }
+            int second = Integer.parseInt(p[1]);
+            return second >= 64 && second <= 127;
+        } catch (NumberFormatException e) {
+            return false;
+        }
     }
 
     @Override
