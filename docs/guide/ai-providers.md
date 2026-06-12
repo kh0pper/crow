@@ -188,7 +188,7 @@ Once configured, open **Messages** in the Crow's Nest. The **AI Chat** tab appea
 - **Tool calls** — Expandable cards showing when the AI uses your Crow tools
 - **Cancel** — Stop a generation in progress
 
-The AI sees your Crow tools as 7 category tools (`crow_memory`, `crow_projects`, `crow_blog`, `crow_sharing`, `crow_storage`, `crow_tools`, `crow_discover`). It can:
+The AI sees your Crow tools as a small set of category tools (`crow_memory`, `crow_projects`, `crow_blog`, `crow_sharing`, `crow_storage`, `crow_media`, plus `crow_tools` for integrations, `crow_discover` for schema lookup, and explicit orchestration tools). It can:
 
 - Recall your memories and store new ones
 - Search and manage research projects

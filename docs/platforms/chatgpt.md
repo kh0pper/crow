@@ -94,7 +94,7 @@ Any memories you store in ChatGPT are instantly available from Claude, Gemini, o
 
 ## Context Optimization
 
-ChatGPT connects via the gateway. If you have many integrations enabled, consider using the `/router/mcp` endpoint instead of connecting each server individually. The router consolidates 49+ tools into 7 category tools, reducing context window usage:
+ChatGPT connects via the gateway. If you have many integrations enabled, consider using the `/router/mcp` endpoint instead of connecting each server individually. The router consolidates 126+ tools into 10 category tools, reducing context window usage:
 
 ```
 https://your-crow-server/router/sse
