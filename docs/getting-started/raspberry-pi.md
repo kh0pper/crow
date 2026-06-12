@@ -44,12 +44,12 @@ Turn a Raspberry Pi into a dedicated Crow appliance. No SSH required after initi
 One command installs everything:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh | bash
 ```
 
 ::: tip Prefer to inspect first?
 ```bash
-curl -sSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh -o crow-install.sh
+curl -fsSL https://raw.githubusercontent.com/kh0pper/crow/main/scripts/crow-install.sh -o crow-install.sh
 less crow-install.sh   # Review the script
 bash crow-install.sh   # Run it
 ```

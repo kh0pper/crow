@@ -12,7 +12,7 @@ Run Crow on multiple machines — a home server, a cloud VPS, a Raspberry Pi —
 | Benefit | How it helps |
 |---------|-------------|
 | **Redundancy** | If one instance goes down, your data is safe on the other |
-| **Free tier stacking** | Combine Oracle Cloud + Google Cloud for 2GB total RAM at zero cost |
+| **Free tier stacking** | Combine Oracle Cloud + Google Cloud always-free instances at zero cost |
 | **Project isolation** | Dedicate instances to different workstreams (research on one, data scraping on another) |
 | **Geographic distribution** | Place instances in different regions for lower latency |
 | **Offline resilience** | Satellites work independently when disconnected, then sync when reconnected |
