@@ -27,7 +27,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createHash, randomBytes } from "node:crypto";
-import { createDbClient } from "../db.js";
 import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
 import { isKioskActive, kioskBlockedResponse } from "../shared/kiosk-guard.js";
 import {
@@ -46,10 +45,6 @@ import {
   SUPPORTED_APPS as ATTESTATION_APPS,
 } from "../shared/identity-attestation.js";
 import { transform as crosspostTransform, SUPPORTED_PAIRS as CROSSPOST_PAIRS } from "../gateway/crossposting/transforms.js";
-import { PeerManager } from "./peer-manager.js";
-import { SyncManager } from "./sync.js";
-import { InstanceSyncManager } from "./instance-sync.js";
-import { NostrManager } from "./nostr.js";
 import { createNotification } from "../shared/notifications.js";
 import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
 import {
@@ -62,40 +57,13 @@ import { slugify, workspacePathFor, storagePrefixFor } from "../shared/slugify.j
 import { createProjectSpace } from "../shared/project-spaces.js";
 import { mkdirSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
-import { resolveDataDir } from "../db.js";
-
-// Singleton sharing managers — Hyperswarm and Nostr connections are shared across
-// all McpServer instances (stdio, gateway per-session, router dispatch).
-let _sharedManagers = null;
+import { createDbClient, resolveDataDir } from "../db.js";
+import { getSharedManagers, getManagersOrNull } from "./managers.js";
+export { getInstanceSyncManager } from "./managers.js";
 
 // In-memory room state — active companion room tokens.
 // Map<roomCode, { token, hostCrowId, hostName, companionUrl, createdAt, participants: Set<contactId> }>
 const _activeRooms = new Map();
-
-function getSharedManagers(dbPath) {
-  if (_sharedManagers) return _sharedManagers;
-
-  const db = createDbClient(dbPath);
-  const identity = loadOrCreateIdentity();
-  const peerManager = new PeerManager(identity);
-  const syncManager = new SyncManager(identity);
-  const nostrManager = new NostrManager(identity, db);
-
-  // Instance sync manager for cross-instance replication
-  const localInstanceId = getOrCreateLocalInstanceId();
-  const instanceSyncManager = new InstanceSyncManager(identity, db, localInstanceId);
-
-  _sharedManagers = { db, identity, peerManager, syncManager, instanceSyncManager, nostrManager, initialized: false };
-  return _sharedManagers;
-}
-
-/**
- * Get the shared InstanceSyncManager instance (for use by other servers via gateway).
- * Returns null if managers haven't been initialized yet.
- */
-export function getInstanceSyncManager() {
-  return _sharedManagers?.instanceSyncManager || null;
-}
 
 /**
  * Validate a room token for companion access.
@@ -119,8 +87,9 @@ export function validateRoomToken(roomCode, token) {
  * Returns { ok, message, roomCode?, joinUrl? }
  */
 export async function sendRoomInvite(contactName, hostName, opts = {}) {
-  if (!_sharedManagers) return { ok: false, message: "Sharing server not initialized" };
-  const { db, identity, nostrManager } = _sharedManagers;
+  const managers = getManagersOrNull();
+  if (!managers) return { ok: false, message: "Sharing server not initialized" };
+  const { db, identity, nostrManager } = managers;
 
   const result = await db.execute({
     sql: "SELECT * FROM contacts WHERE (crow_id = ? OR display_name = ?) AND is_blocked = 0",
@@ -216,8 +185,9 @@ export function getActiveRooms() {
  * Returns { ok, message }
  */
 export async function sendVoiceMemo(contactName, text, senderName) {
-  if (!_sharedManagers) return { ok: false, message: "Sharing server not initialized" };
-  const { db, identity, nostrManager } = _sharedManagers;
+  const managers = getManagersOrNull();
+  if (!managers) return { ok: false, message: "Sharing server not initialized" };
+  const { db, identity, nostrManager } = managers;
 
   const result = await db.execute({
     sql: "SELECT * FROM contacts WHERE (crow_id = ? OR display_name = ?) AND is_blocked = 0",
@@ -254,8 +224,9 @@ export async function sendVoiceMemo(contactName, text, senderName) {
  * Returns { ok, message }
  */
 export async function sendReaction(contactName, emoji, senderName) {
-  if (!_sharedManagers) return { ok: false, message: "Sharing server not initialized" };
-  const { db, identity, nostrManager } = _sharedManagers;
+  const managers = getManagersOrNull();
+  if (!managers) return { ok: false, message: "Sharing server not initialized" };
+  const { db, identity, nostrManager } = managers;
 
   const result = await db.execute({
     sql: "SELECT * FROM contacts WHERE (crow_id = ? OR display_name = ?) AND is_blocked = 0",
@@ -312,8 +283,9 @@ async function resolveLocalInstanceName(db) {
  * Returns { ok, message, relayId? }
  */
 export async function sendBotRelay(instanceName, task) {
-  if (!_sharedManagers) return { ok: false, message: "Sharing server not initialized" };
-  const { db, identity, nostrManager } = _sharedManagers;
+  const managers = getManagersOrNull();
+  if (!managers) return { ok: false, message: "Sharing server not initialized" };
+  const { db, identity, nostrManager } = managers;
 
   // Verify the target instance exists and is active
   const result = await db.execute({
