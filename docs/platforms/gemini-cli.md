@@ -110,7 +110,7 @@ Connect to a deployed Crow gateway for remote access — useful for Tailscale se
 
 ### Prerequisites
 
-- Crow gateway deployed and reachable ([Cloud Deploy Guide](../getting-started/cloud-deploy) or [Tailscale Setup](../getting-started/tailscale-setup))
+- Crow gateway deployed and reachable ([Getting Started guide](../getting-started/) or [Tailscale Setup](../getting-started/tailscale-setup))
 
 ### Setup Steps
 

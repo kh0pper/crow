@@ -181,7 +181,7 @@ sudo systemctl restart caddy
 Caddy obtiene y renueva automáticamente los certificados de Let's Encrypt. Asegúrate de que el registro DNS A de tu dominio apunte a la IP pública de tu servidor, y de que los puertos 80 y 443 estén abiertos en tu firewall.
 
 ::: tip Capa Gratuita de Oracle Cloud
-Si estás ejecutando en Oracle Cloud, también necesitas agregar reglas de ingreso para los puertos TCP 80 y 443 en la security list de tu VCN. Consulta la [sección de Oracle Cloud](/es/getting-started/cloud-deploy) para más detalles.
+Si estás ejecutando en Oracle Cloud, también necesitas agregar reglas de ingreso para los puertos TCP 80 y 443 en la security list de tu VCN. Consulta la [guía de Oracle Cloud](/es/getting-started/oracle-cloud) para más detalles.
 :::
 
 ::: tip Más allá del acceso de un solo dispositivo

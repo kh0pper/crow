@@ -41,7 +41,7 @@ Connect Crow to [Windsurf](https://devin.ai/desktop) — the AI-powered IDE orig
 
 ### Setup Steps
 
-1. Deploy Crow ([Cloud Deploy Guide](../getting-started/cloud-deploy))
+1. Deploy Crow ([Getting Started guide](../getting-started/))
 
 2. Edit `~/.codeium/windsurf/mcp_config.json`:
    ```json

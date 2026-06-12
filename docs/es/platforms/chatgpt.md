@@ -4,7 +4,7 @@ Conecta Crow a ChatGPT mediante el transporte SSE. ChatGPT admite MCP a través 
 
 ## Requisitos previos
 
-- Gateway de Crow desplegado y funcionando ([Guía de despliegue en la nube](/es/getting-started/cloud-deploy))
+- Gateway de Crow desplegado y funcionando ([guía de Primeros pasos](/es/getting-started/))
 - Un plan ChatGPT Plus o Team
 
 ## Pasos de configuración

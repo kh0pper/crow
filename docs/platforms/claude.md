@@ -4,7 +4,7 @@ Connect Crow to Claude on the web (claude.ai) or the Claude mobile app using Cus
 
 ## Prerequisites
 
-- Crow gateway deployed and healthy ([Cloud Deploy Guide](../getting-started/cloud-deploy))
+- Crow gateway deployed and healthy ([Getting Started guide](../getting-started/))
 - A Claude Pro, Team, or Enterprise plan (Custom Integrations require a paid plan)
 
 ## Setup Steps
