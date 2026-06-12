@@ -76,7 +76,6 @@ List stored files with optional filtering.
 - doc.pdf (1024.0KB, application/pdf) [blog_post:5]
   Key: 1709900000001-doc.pdf | 2026-03-08T11:00:00Z
 ```
-```
 
 ---
 
@@ -98,7 +97,6 @@ Get a presigned download URL for a file.
 Download URL (expires in 60 min):
 http://minio:9000/crow-files/1709900000000-photo.jpg?X-Amz-...
 ```
-```
 
 ---
 
@@ -117,7 +115,6 @@ Delete a file from storage and the database.
 
 ```
 Deleted: 1709900000000-photo.jpg
-```
 ```
 
 ---
