@@ -137,7 +137,7 @@ Recall returns full memory content untruncated (est. 750–1,250 tokens/session)
 
 - **W5-1 · DOC ·** EN docs improvement set: orchestrator user guide, router-mode/context guide, home-server security section, MinIO quickstart, arch↔guide cross-links, MCP-path table, naming-alias note (15 findings, ~5.5h total; per-page verdicts in Appendix A).
 - **W5-2 · DOC ·** ES parity program: 22/~150 pages translated (14.5%); what exists is current + F7-aligned; 4 cross-locale link leaks. Staged translation (getting-started → guide core → platforms), AI-drafted + operator-reviewed. **Effort:** L (operator decides pace/scope).
-- **W5-3 · DOC ·** Hygiene: real droplet IP `67.205.133.238` sits in `docs/superpowers/plans/2026-06-10-f7-*.md` — `superpowers/**` is in `srcExclude` so it does NOT ship, but redact anyway (it's in the public git repo).
+- **W5-3 · DOC ·** Hygiene: real droplet IP `<droplet-ip>` sits in `docs/superpowers/plans/2026-06-10-f7-*.md` — `superpowers/**` is in `srcExclude` so it does NOT ship, but redact anyway (it's in the public git repo).
 
 ---
 
