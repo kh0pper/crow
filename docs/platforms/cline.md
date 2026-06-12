@@ -13,7 +13,7 @@ Connect Crow to [Cline](https://github.com/cline/cline), the AI coding assistant
    npm run setup
    ```
 
-2. Open VS Code Settings → search for "Cline MCP" → edit the MCP server configuration, or create `~/.cline/mcp_config.json`:
+2. In the Cline panel, click the **MCP Servers** icon (toolbar) → **Configure** → **Configure MCP Servers**. This opens Cline's MCP settings file (`cline_mcp_settings.json`, stored under VS Code's `globalStorage/saoudrizwan.claude-dev/settings/`). Add:
    ```json
    {
      "mcpServers": {
@@ -43,7 +43,7 @@ Connect Crow to [Cline](https://github.com/cline/cline), the AI coding assistant
 
 1. Deploy Crow ([Cloud Deploy Guide](../getting-started/cloud-deploy))
 
-2. Add to Cline's MCP configuration:
+2. In the Cline panel, open **MCP Servers** → **Remote Servers** and add the server name + URL, or edit `cline_mcp_settings.json` (via **Configure** → **Configure MCP Servers**):
    ```json
    {
      "mcpServers": {

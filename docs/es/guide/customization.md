@@ -189,7 +189,7 @@ Para habilitar el contexto por dispositivo, establece la variable de entorno `CR
 CROW_DEVICE_ID=grackle
 ```
 
-Esto le dice a Crow en qué dispositivo está corriendo. Una vez que el cableado del gateway esté completo, aplicará automáticamente las sobrescrituras de dispositivo correctas a las instrucciones MCP.
+Esto le dice a Crow en qué dispositivo está corriendo. El gateway y los servidores stdio aplican automáticamente las sobrescrituras de dispositivo correspondientes a las instrucciones MCP y a `crow.md`.
 
 ---
 

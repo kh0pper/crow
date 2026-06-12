@@ -19,10 +19,13 @@ Exposes the gateway on port 3001:
 docker compose --profile cloud up --build
 ```
 
-Set environment variables in a `.env` file or pass them directly:
+Set environment variables in a `.env` file or pass them directly. No database config is needed — Crow uses local SQLite automatically. A minimal `.env`:
 
 ```env
-# No database config needed — Crow uses local SQLite automatically.
+# Public URL of this instance (required for remote MCP clients + OAuth)
+CROW_GATEWAY_URL=https://your-domain.example
+# Optional integration keys, one per service (see .env.example)
+# GITHUB_TOKEN=...
 ```
 
 ## Local Profile
