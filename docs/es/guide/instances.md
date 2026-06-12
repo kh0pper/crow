@@ -12,7 +12,7 @@ Ejecuta Crow en varias máquinas — un servidor en casa, un VPS en la nube, una
 | Beneficio | Cómo ayuda |
 |---------|-------------|
 | **Redundancia** | Si una instancia se cae, tus datos están a salvo en la otra |
-| **Acumulación de niveles gratuitos** | Combina Oracle Cloud + Google Cloud para 2 GB de RAM en total a costo cero |
+| **Acumulación de niveles gratuitos** | Combina instancias siempre gratuitas de Oracle Cloud + Google Cloud a costo cero |
 | **Aislamiento de proyectos** | Dedica instancias a distintas líneas de trabajo (investigación en una, scraping de datos en otra) |
 | **Distribución geográfica** | Coloca instancias en diferentes regiones para menor latencia |
 | **Resiliencia sin conexión** | Los satélites funcionan de forma independiente cuando están desconectados, y luego sincronizan al reconectarse |
