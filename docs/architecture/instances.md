@@ -78,26 +78,28 @@ The `lamport` value is stored alongside every synced row in a `lamport_ts` colum
 
 A conflict occurs when two instances modify the same row (same `row_id`) without having seen each other's changes. Detection:
 
-1. On receiving a remote change, check if the local row has a `lamport_ts` greater than the remote change's `lamport` but the local change was not caused by a prior version of the remote change
-2. If so, insert into `sync_conflicts`:
+1. On receiving a remote change, compare it against the local row. Equivalent rows (same content after wire-form normalization) are noise-suppressed — only real divergence counts.
+2. When two instances genuinely changed the same row without having seen each other's edits, the higher Lamport timestamp wins, and the losing version is preserved in `sync_conflicts`:
 
 ```sql
 CREATE TABLE sync_conflicts (
-  id TEXT PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   table_name TEXT NOT NULL,
   row_id TEXT NOT NULL,
-  local_data TEXT NOT NULL,       -- JSON of local version
-  remote_data TEXT NOT NULL,      -- JSON of remote version
-  local_lamport INTEGER NOT NULL,
-  remote_lamport INTEGER NOT NULL,
-  remote_instance_id TEXT NOT NULL,
+  winning_instance_id TEXT NOT NULL,
+  losing_instance_id TEXT NOT NULL,
+  winning_lamport_ts INTEGER NOT NULL,
+  losing_lamport_ts INTEGER NOT NULL,
+  winning_data TEXT NOT NULL,     -- JSON of the version that was kept
+  losing_data TEXT NOT NULL,      -- JSON of the version that was overridden
+  op TEXT DEFAULT 'update',       -- 'update', 'delete', or 'insert' (collision)
   resolved INTEGER DEFAULT 0,
-  resolution TEXT,                -- "local", "remote", or "merge"
-  created_at INTEGER NOT NULL
+  resolved_at TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
 );
 ```
 
-Conflicts are surfaced in the Nest dashboard and can be resolved by the user choosing local, remote, or a manual merge.
+No edit is ever silently dropped: every conflict raises a deduplicated high-priority notification that deep-links to **Settings → Sync conflicts**, the recovery view. There the operator can keep the current version, restore the overridden one, or resolve all. Restore is guarded — it re-reads the live row first (stale-snapshot guard), never uses `INSERT OR REPLACE`, refuses `op='insert'` collisions (both versions stay visible as JSON for manual resolution), and refuses `crow_context` rows (composite-key last-write-wins applies there instead). A restored version propagates back to the other instances like any normal edit.
 
 ### Sync State
 
@@ -106,12 +108,13 @@ Per-instance sync progress is tracked in `sync_state`:
 ```sql
 CREATE TABLE sync_state (
   instance_id TEXT PRIMARY KEY,
-  last_seq INTEGER DEFAULT 0,     -- Last processed Hypercore sequence number
-  last_lamport INTEGER DEFAULT 0, -- Highest Lamport timestamp seen from this instance
-  last_sync INTEGER,              -- Unix timestamp of last successful sync
-  FOREIGN KEY (instance_id) REFERENCES crow_instances(id)
+  local_counter INTEGER DEFAULT 0,        -- This instance's Lamport counter (atomic increments)
+  last_applied_seq_per_peer TEXT DEFAULT '{}', -- JSON: per-peer feed checkpoints, written per entry
+  updated_at TEXT DEFAULT (datetime('now'))
 );
 ```
+
+Checkpoints are written per applied entry (not per batch), so a crash mid-sync never re-applies or skips entries.
 
 On reconnection, sync resumes from `last_seq` — only new entries are transferred.
 

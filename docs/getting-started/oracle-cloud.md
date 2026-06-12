@@ -204,6 +204,10 @@ sudo systemctl status crow-gateway
 curl http://localhost:3001/health
 ```
 
+::: tip Low-RAM hosts are handled automatically
+On a 1 GB instance like the E2.1.Micro, Crow automatically selects SQLite's `DELETE` journal mode instead of `WAL` (the threshold is configurable via `CROW_WAL_MIN_RAM_GB`, default 2 GiB). No tuning needed — see the [configuration reference](../developers/configuration.md) if you want to override it.
+:::
+
 ## Step 9: Connect Your AI Platform
 
 Your Crow server is now running and accessible via Tailscale. Connect it from any AI platform:

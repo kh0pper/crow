@@ -18,18 +18,19 @@ A Crow's Nest panel is a small add-on that adds a new page to the Crow's Nest. P
 
 ## Panel Structure
 
-A panel lives in `~/.crow/panels/your-panel/` and contains at minimum an `index.js` file:
+A panel is a single JS file at `~/.crow/panels/<id>.js`, optionally accompanied by a `<id>-routes.js` file that registers extra Express routes:
 
 ```
 ~/.crow/panels/
-  your-panel/
-    index.js        # Panel manifest and handler
-    assets/         # Optional static files (images, etc.)
+  weather.js          # Panel manifest and handler
+  weather-routes.js   # Optional companion routes (POST endpoints etc.)
 ```
+
+The panel ID (the filename without `.js`) must match `[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}` and must be listed in `~/.crow/panels.json` to load.
 
 ## Panel Manifest
 
-The `index.js` file exports a panel manifest object:
+The panel file exports a manifest object:
 
 ```js
 export default {
@@ -52,11 +53,11 @@ export default {
 
 | Field | Type | Description |
 |---|---|---|
-| `id` | string | Unique identifier. Must match the directory name. |
+| `id` | string | Unique identifier. Must match the file name (without `.js`). |
 | `name` | string | Display name in the navigation bar. |
 | `icon` | string | Icon identifier (used in the nav). |
 | `route` | string | URL path. Must start with `/dashboard/`. |
-| `navOrder` | number | Position in the nav bar. Built-in panels use 1-10; use 50+ for add-ons. |
+| `navOrder` | number | Position in the nav bar. Built-in panels use 1–80; use a higher value (e.g. 100+) to place yours after them. |
 | `handler` | function | Express route handler. Receives `(req, res, context)`. |
 
 ### Home Screen Visibility
@@ -104,6 +105,17 @@ const logo = getAddonLogo('ollama', 32);
 ```
 
 This is especially useful for third-party panels that need access to built-in shared components without hardcoding paths.
+
+### context.lang
+
+The operator's dashboard language (`"en"` or `"es"`), read from Settings → Language. Use it to localize your panel's copy:
+
+```js
+handler: async (req, res, { db, layout, lang }) => {
+  const title = lang === 'es' ? 'Clima' : 'Weather';
+  // ...
+}
+```
 
 ### context.layout
 
@@ -276,11 +288,10 @@ These automatically adapt to dark and light modes. See the [Brand Identity](/arc
 
 ## Testing Locally
 
-1. Create your panel directory in `~/.crow/panels/`
-2. Add the `index.js` file
-3. Enable it in `panels.json`
-4. Start the gateway: `npm run gateway`
-5. Open `http://localhost:3001/dashboard/your-panel-id`
+1. Save your panel as `~/.crow/panels/<id>.js`
+2. Enable it in `~/.crow/panels.json`
+3. Start the gateway: `npm run gateway`
+4. Open `http://localhost:3001/dashboard/<id>`
 
 ## Turbo Drive compatibility
 
