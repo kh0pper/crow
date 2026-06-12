@@ -157,18 +157,7 @@ async function addColumnIfMissing(table, column, definition) {
 }
 
 await addColumnIfMissing("research_projects", "type", "TEXT DEFAULT 'research'");
-await addColumnIfMissing("research_notes", "lamport_ts", "INTEGER DEFAULT 0");
 await addColumnIfMissing("research_sources", "backend_id", "INTEGER REFERENCES data_backends(id) ON DELETE SET NULL");
-await addColumnIfMissing("contacts", "feed_key", "TEXT");
-await addColumnIfMissing("glasses_photos", "minio_key", "TEXT");
-// LLM consolidation (Phase 1): cloud-provider tag + per-message model recording.
-await addColumnIfMissing("providers", "provider_type", "TEXT");
-await addColumnIfMissing("providers", "gpu_policy", "TEXT");
-await addColumnIfMissing("chat_messages", "model_id", "TEXT");
-// Polish #2 (2026-05-12): user_priority gates the drafter's per-tick choice
-// when the user replies "yes to spring isd" on a Monday digest. NULL = no
-// explicit pick; convention is `1 = user-picked this week`.
-await addColumnIfMissing("job_candidates", "user_priority", "INTEGER");
 
 // --- Project Space redesign Phase 1, M0 (2026-05-26) ---
 // Stable opaque identifiers + origin tracking for every project-scoped row.
@@ -191,7 +180,11 @@ async function addUuidColumn(table) {
     console.warn(`Warning: could not backfill/index ${table}.uuid: ${err.message}`);
   }
 }
-for (const t of ["research_projects", "research_sources", "research_notes", "data_backends", "storage_files"]) {
+// research_notes + storage_files are handled in the late-migrations block at
+// the END of this file — their CREATE TABLE statements come later, so running
+// addUuidColumn here was a no-op-with-warning on fresh databases (the columns
+// were silently MISSING on new installs until the 2026-06-12 fix).
+for (const t of ["research_projects", "research_sources", "data_backends"]) {
   await addUuidColumn(t);
 }
 
@@ -280,11 +273,6 @@ await initTable("project_audit_log table", `
 // and crow_project_get joins on it for file counts. Added after the
 // project_spaces table exists (FK target). project_id = NULL means the
 // file is global / unscoped (legacy behavior preserved for existing rows).
-await addColumnIfMissing(
-  "storage_files",
-  "project_id",
-  "INTEGER REFERENCES project_spaces(id) ON DELETE SET NULL"
-);
 
 // One-shot migration: copy any research_projects rows that aren't already in
 // project_spaces. Idempotent — re-running init-db.js doesn't duplicate rows.
@@ -589,7 +577,6 @@ await addColumnIfMissing("contacts", "email_hash", "TEXT");
 
 // --- Messages: attachments and threading ---
 await addColumnIfMissing("messages", "attachments", "TEXT");
-await addColumnIfMissing("chat_messages", "thread_id", "INTEGER");
 
 // --- Cross-Platform Behavioral Context (crow.md) ---
 
@@ -2400,6 +2387,36 @@ try {
 } catch (err) {
   console.warn("Nav migration W3-6 skipped:", err.message);
 }
+
+// --- Late schema migrations (2026-06-12) ---
+// These ALTERs target tables whose CREATE statements appear ABOVE but after
+// the early-migration block near the top of this file. Running them up there
+// warned "no such table" on fresh databases and left the columns MISSING on
+// new installs (existing fleet DBs got them because their tables already
+// existed). They live here, after every CREATE, so fresh and upgraded
+// databases converge on the same schema.
+await addColumnIfMissing("research_notes", "lamport_ts", "INTEGER DEFAULT 0");
+await addColumnIfMissing("contacts", "feed_key", "TEXT");
+await addColumnIfMissing("glasses_photos", "minio_key", "TEXT");
+// LLM consolidation (Phase 1): cloud-provider tag + per-message model recording.
+await addColumnIfMissing("providers", "provider_type", "TEXT");
+await addColumnIfMissing("providers", "gpu_policy", "TEXT");
+await addColumnIfMissing("chat_messages", "model_id", "TEXT");
+await addColumnIfMissing("chat_messages", "thread_id", "INTEGER");
+// Polish #2 (2026-05-12): user_priority gates the drafter's per-tick choice
+// when the user replies "yes to spring isd" on a Monday digest. NULL = no
+// explicit pick; convention is `1 = user-picked this week`.
+await addColumnIfMissing("job_candidates", "user_priority", "INTEGER");
+// Project Space M0 uuid/origin for the late-created project-scoped tables.
+await addUuidColumn("research_notes");
+await addUuidColumn("storage_files");
+// storage_files.project_id (FK target project_spaces) — Files panel filter +
+// crow_project_get file counts. NULL = global/unscoped (legacy preserved).
+await addColumnIfMissing(
+  "storage_files",
+  "project_id",
+  "INTEGER REFERENCES project_spaces(id) ON DELETE SET NULL"
+);
 
 console.log("Database initialized successfully (local file)");
 db.close();

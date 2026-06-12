@@ -114,7 +114,7 @@ Rooms support up to 4 participants by default (configurable via `CROW_CALLS_MAX_
 
 ## Companion Integration
 
-When the [AI Companion](/guide/extensions) bundle is also installed, the Calls page gains additional modes:
+When the [AI Companion](/architecture/companion) bundle is also installed, the Calls page gains additional modes:
 
 - **Avatar mode** — the companion's Live2D avatar joins the call as a video participant
 - **Face tracking** — the avatar mirrors your expressions via webcam
