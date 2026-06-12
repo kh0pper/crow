@@ -536,19 +536,60 @@ const server = app.listen(PORT, BIND, (error) => {
 });
 
 // --- Graceful Shutdown ---
+//
+// 7-step sequence (per W4-2 spec, total bound ≤ ~15s):
+//   1. shuttingDown = true (blocks new requests in middleware that checks it)
+//   2. server.close() + closeIdleConnections() — stop accepting; release idle keep-alives
+//   3. Drain up to CROW_SHUTDOWN_DRAIN_MS (default 3000) for in-flight requests to finish.
+//      NOTE: /health is served by this same listener — a new monitor poll gets
+//      ECONNREFUSED during the drain window.  That is the correct restart-window
+//      behaviour; up to ~drain-window of monitor-visible refusals is expected.
+//   4. server.closeAllConnections() — sever stragglers (SSE/Turbo-Stream sockets are
+//      legitimately long-lived; they auto-reconnect after the process restarts).
+//   5. sessionManager.closeAll() + shutdownAll() raced vs 10s — unchanged semantics.
+//   6. Best-effort WAL checkpoint (try/caught; busy-fail when other processes share the
+//      DB is harmless — WAL is crash-safe regardless).
+//   7. process.exit(0)
+
+const CROW_SHUTDOWN_DRAIN_MS = parseInt(process.env.CROW_SHUTDOWN_DRAIN_MS || "3000", 10);
 
 let shuttingDown = false;
 
 async function gracefulShutdown() {
   if (shuttingDown) return;
-  shuttingDown = true;
+  shuttingDown = true;                                           // step 1
   console.log("\nShutting down gateway...");
+
+  // Step 2 — stop accepting new connections; release idle keep-alive sockets
+  server.close();
+  server.closeIdleConnections();
+
+  // Step 3 — wait for in-flight requests (drain window)
+  await Promise.race([
+    new Promise((resolve) => server.close(resolve)),            // fires when all connections end
+    new Promise((resolve) => setTimeout(resolve, CROW_SHUTDOWN_DRAIN_MS)),
+  ]);
+
+  // Step 4 — sever any remaining sockets (SSE/Turbo-Stream etc.)
+  server.closeAllConnections();
+
+  // Step 5 — session + proxy shutdown, same semantics as before
   const { shutdownAll } = await import("./proxy.js");
   await Promise.race([
     Promise.allSettled([sessionManager.closeAll(), shutdownAll()]),
     new Promise((resolve) => setTimeout(resolve, 10_000)),
   ]);
-  process.exit(0);
+
+  // Step 6 — best-effort WAL checkpoint
+  try {
+    const _walDb = createDbClient();
+    await _walDb.execute({ sql: "PRAGMA wal_checkpoint(TRUNCATE)", args: [] });
+    _walDb.close();
+  } catch {
+    // Checkpoint failed (busy or DELETE-journal DB) — safe to ignore; WAL is crash-safe.
+  }
+
+  process.exit(0);                                               // step 7
 }
 
 process.on("SIGINT", gracefulShutdown);
