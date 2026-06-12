@@ -1,5 +1,6 @@
 import { createDbClient, resolveDataDir } from "../servers/db.js";
 import { mkdirSync } from "fs";
+import { randomBytes } from "node:crypto";
 import { resolve } from "path";
 import { slugify, workspacePathFor, storagePrefixFor } from "../servers/shared/slugify.js";
 
@@ -72,17 +73,9 @@ await initTable("memories FTS triggers", `
 // --- Research Pipeline Tables ---
 
 await initTable("research tables", `
-  CREATE TABLE IF NOT EXISTS research_projects (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    description TEXT,
-    type TEXT DEFAULT 'research',
-    status TEXT DEFAULT 'active' CHECK(status IN ('active', 'paused', 'completed', 'archived')),
-    tags TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
-  );
-
+  -- (B3b 2026-06-12: research_projects is no longer created — project_spaces is
+  --  the system of record; existing hosts drop the dormant table in the guarded
+  --  migration at the end of this file.)
   CREATE TABLE IF NOT EXISTS research_sources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER,
@@ -156,7 +149,6 @@ async function addColumnIfMissing(table, column, definition) {
   }
 }
 
-await addColumnIfMissing("research_projects", "type", "TEXT DEFAULT 'research'");
 await addColumnIfMissing("research_sources", "backend_id", "INTEGER REFERENCES data_backends(id) ON DELETE SET NULL");
 
 // --- Project Space redesign Phase 1, M0 (2026-05-26) ---
@@ -184,7 +176,7 @@ async function addUuidColumn(table) {
 // the END of this file — their CREATE TABLE statements come later, so running
 // addUuidColumn here was a no-op-with-warning on fresh databases (the columns
 // were silently MISSING on new installs until the 2026-06-12 fix).
-for (const t of ["research_projects", "research_sources", "data_backends"]) {
+for (const t of ["research_sources", "data_backends"]) {
   await addUuidColumn(t);
 }
 
@@ -279,6 +271,13 @@ await initTable("project_audit_log table", `
 // Computes the rich slug in JS (instead of via a SQLite UDF, which would have
 // to be registered on every libsql connection).
 async function migrateLegacyProjectsToSpaces() {
+  // B3b: on hosts where the dormant research_projects table has already been
+  // dropped (and on fresh databases that never create it) there is nothing to
+  // backfill — skip silently.
+  const rpExists = (await db.execute({
+    sql: "SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_projects'",
+  })).rows.length > 0;
+  if (!rpExists) return;
   const dataDir = process.env.CROW_DB_PATH
     ? resolve(process.env.CROW_DB_PATH, "..")
     : resolveDataDir();
@@ -310,7 +309,10 @@ async function migrateLegacyProjectsToSpaces() {
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         args: [
           r.id,
-          r.uuid ?? null,
+          // Pre-B3a hosts carried rp.uuid (backfilled by the old addUuidColumn
+          // pass); a raw pre-M0 table has no uuid column at all — mint one so
+          // the ps NOT NULL constraint is satisfied either way.
+          r.uuid ?? randomBytes(16).toString("hex"),
           slug,
           r.name,
           r.description ?? null,
@@ -366,13 +368,11 @@ await migrateLegacyProjectsToSpaces();
 })();
 
 // W2-5B3a (2026-06-12): the rp→ps forward triggers are RETIRED. All readers
-// (B1) and writers (B2) use project_spaces; fleet observation confirmed zero
-// prod research_projects writes since B2 (rp is also excluded from instance
-// sync). research_projects remains as a frozen dormant table (B3b retirement
-// of the table itself is deferred — user data is absolute). The DROPs are
-// idempotent so every upgrading host converges on first init-db. The
-// migrateLegacyProjectsToSpaces backstop above still self-heals any
-// pre-B3a rows that were never mirrored.
+// (B1) and writers (B2) use project_spaces. B3b (same day) drops the dormant
+// research_projects table itself via the guarded migration at the end of this
+// file — these trigger DROPs stay so any host that skipped B3a still
+// converges. The migrateLegacyProjectsToSpaces backstop above self-heals any
+// unmirrored rows BEFORE the drop guard will allow the table to go.
 await initTable("retire rp→ps forward triggers (B3a)", `
   DROP TRIGGER IF EXISTS tr_rp_to_ps_ins;
   DROP TRIGGER IF EXISTS tr_rp_to_ps_upd;
@@ -2417,6 +2417,35 @@ await addColumnIfMissing(
   "project_id",
   "INTEGER REFERENCES project_spaces(id) ON DELETE SET NULL"
 );
+
+// --- W2-5B3b (2026-06-12): drop the dormant research_projects table ---
+// Preconditions enforced per host, every init-db run, until the drop happens:
+//   1. every rp row is mirrored in project_spaces (zero unmirrored), and
+//   2. no live DDL still references research_projects (old child-table FKs
+//      must have been rebuilt to project_spaces first — B2 migrations above).
+// If either check fails the table is KEPT and a warning names the blocker;
+// user data is absolute, so we never drop an unmirrored row.
+try {
+  const rpThere = (await db.execute({
+    sql: "SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_projects'",
+  })).rows.length > 0;
+  if (rpThere) {
+    const unmirrored = Number((await db.execute({
+      sql: "SELECT COUNT(*) AS c FROM research_projects WHERE id NOT IN (SELECT id FROM project_spaces)",
+    })).rows[0].c);
+    const ddlRefs = Number((await db.execute({
+      sql: "SELECT COUNT(*) AS c FROM sqlite_master WHERE name != 'research_projects' AND sql LIKE '%REFERENCES research_projects%'",
+    })).rows[0].c);
+    if (unmirrored === 0 && ddlRefs === 0) {
+      await db.execute({ sql: "DROP TABLE research_projects" });
+      console.log("  ✓ B3b: dropped dormant research_projects (all rows mirrored in project_spaces)");
+    } else {
+      console.warn(`  ⚠ B3b: keeping research_projects (unmirrored=${unmirrored}, ddlRefs=${ddlRefs}) — resolve before retirement`);
+    }
+  }
+} catch (err) {
+  console.warn("  ⚠ B3b drop check failed (table kept):", err.message);
+}
 
 console.log("Database initialized successfully (local file)");
 db.close();

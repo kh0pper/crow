@@ -9,8 +9,8 @@
  * seeds that used to go through rp now insert into project_spaces directly;
  * the old test 6, which pinned trigger propagation, was deleted):
  *   1. Superset visibility: seeded + helper-created rows both appear via crow_list_projects
- *   2. id-collision guard: createProjectSpace keeps rp seq ahead; a legacy rp
- *      INSERT allocates a non-colliding id and (post-B3a) does NOT mirror to ps
+ *   2. (removed in B3b — the rp sqlite_sequence collision guard left with the
+ *      research_projects table itself; no second id allocator remains)
  *   3. Archive invisibility: archived rows hidden from all migrated readers
  *   4. Context summary: generateCrowContext sees ps-only rows; FK counts intact
  *   5. learner_profile filtering: excluded from generic lists; visible to learner queries
@@ -98,66 +98,6 @@ test("1. superset visibility: legacy rp + ps-only rows both returned by crow_lis
   assert.ok(text.includes(legacyName), "legacy project name present");
   assert.ok(text.includes(`#${psOnlyId}`), `ps-only project #${psOnlyId} visible in list`);
   assert.ok(text.includes("PS-Only Project"), "ps-only project name present");
-
-  db.close();
-});
-
-// ── Test 2: id-collision guard ─────────────────────────────────────────────
-
-test("2. id-collision guard: rp allocates higher id than ps-only; exactly one sqlite_sequence row", async () => {
-  const db = makeDb();
-
-  // First helper call: takes next ps id
-  const { id: psId1 } = await createProjectSpace(db, { name: "Guard Test 1", ownerMember: false });
-
-  // Check sqlite_sequence has exactly one row for research_projects
-  const { rows: seqRows1 } = await db.execute({
-    sql: "SELECT seq FROM sqlite_sequence WHERE name='research_projects'",
-    args: [],
-  });
-  assert.equal(seqRows1.length, 1, "exactly one sqlite_sequence row for research_projects after first call");
-  assert.ok(Number(seqRows1[0].seq) >= psId1, "rp seq >= ps max id after first helper call");
-
-  // Second helper call: pins the one-row invariant under repeated calls
-  const { id: psId2 } = await createProjectSpace(db, { name: "Guard Test 2", ownerMember: false });
-
-  const { rows: seqRows2 } = await db.execute({
-    sql: "SELECT COUNT(*) AS n FROM sqlite_sequence WHERE name='research_projects'",
-    args: [],
-  });
-  assert.equal(Number(seqRows2[0].n), 1, "still exactly one sqlite_sequence row after two helper calls (no OR IGNORE duplicates)");
-
-  const { rows: seqVal } = await db.execute({
-    sql: "SELECT seq FROM sqlite_sequence WHERE name='research_projects'",
-    args: [],
-  });
-  assert.ok(Number(seqVal[0].seq) >= psId2, "rp seq >= max(ps.id) after second call");
-
-  // Now a legacy INSERT must allocate a HIGHER id than the latest ps id
-  await db.execute({
-    sql: `INSERT INTO research_projects (name, status, type, created_at, updated_at)
-          VALUES ('Legacy After Guard', 'active', NULL, datetime('now'), datetime('now'))`,
-    args: [],
-  });
-  const { rows: rpRows } = await db.execute({
-    sql: "SELECT id FROM research_projects WHERE name='Legacy After Guard'",
-    args: [],
-  });
-  const rpId = Number(rpRows[0].id);
-  assert.ok(rpId > psId2, `rp id ${rpId} must be > ps max id ${psId2} (no collision)`);
-
-  // Post-B3a there is NO mirror: the rp insert must NOT materialize a ps row,
-  // and the guard must still hold rp's sequence at/above ps's max id.
-  const { rows: psSeen } = await db.execute({
-    sql: "SELECT id FROM project_spaces WHERE id = ?",
-    args: [rpId],
-  });
-  assert.equal(psSeen.length, 0, "retired trigger: rp insert does not mirror into project_spaces");
-  const { rows: seqFinal } = await db.execute({
-    sql: "SELECT seq FROM sqlite_sequence WHERE name='research_projects'",
-    args: [],
-  });
-  assert.ok(Number(seqFinal[0].seq) >= psId2, "guard invariant survives a legacy rp INSERT");
 
   db.close();
 });
