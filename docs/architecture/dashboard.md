@@ -109,10 +109,24 @@ Built-in panels live in `servers/gateway/dashboard/panels/`:
 | Crow's Nest | `panels/health.js` | `/dashboard/nest` | App launcher tiles, CPU, RAM, disk usage, Docker containers, DB metrics |
 | Messages | `panels/messages.js` | `/dashboard/messages` | View peer messages, threads, read status |
 | Memory | `panels/memory.js` | `/dashboard/memory` | Browse, search, and manage persistent memories |
+| Projects | `panels/projects.js` | `/dashboard/projects` | Browse project spaces, sources, notes |
 | Blog | `panels/blog.js` | `/dashboard/blog` | Manage posts, publish/unpublish, edit |
 | Files | `panels/files.js` | `/dashboard/files` | Browse storage, upload, delete, preview |
 | Extensions | `panels/extensions.js` | `/dashboard/extensions` | Browse marketplace, install/uninstall add-ons, resource warnings |
-| Settings | `panels/settings.js` | `/dashboard/settings` | Configuration, quotas, network rules, contact discovery |
+| Skills | `panels/skills.js` | `/dashboard/skills` | Browse and edit Crow skills |
+| Settings | `panels/settings.js` | `/dashboard/settings` | Configuration, quotas, network rules, contact discovery, sync-conflict recovery |
+| Contacts | `panels/contacts.js` | `/dashboard/contacts` | Peer contacts, invites, discovery |
+| Orchestrator | `panels/orchestrator.js` | `/dashboard/orchestrator` | Run multi-agent teams, view runs and pipelines |
+| Bot Builder | `panels/bot-builder.js` | `/dashboard/bot-builder` | Create and configure bots (personas, skills, channels) |
+| Bot Board | `panels/bot-board.js` | `/dashboard/bot-board` | Monitor running bots, conversations, deliveries |
+| Design System | `panels/design-system.js` | `/dashboard/design-system` | Living reference for tokens and components |
+| Onboarding | `panels/onboarding.js` | (hidden) | First-run setup wizard |
+| Connect | `panels/connect.js` | `/dashboard/connect` | Connect-a-client wizard + local MCP token management |
+| Fediverse Admin | `panels/fediverse.js` | `/dashboard/fediverse` | Fediverse/ActivityPub administration |
+
+The largest panels are **module directories** rather than single files: `panels/<name>/` holds `{css,data-queries,client,api-handlers,html}.js` (plus panel-specific modules like `editor.js`), with the top-level `panels/<name>.js` as a thin orchestrator that wires them together. `bot-builder`, `bot-board`, `extensions`, `contacts`, `messages`, and `nest` follow this pattern; smaller panels remain single files.
+
+Settings sections live in `servers/gateway/dashboard/settings/sections/` — including `sync-conflicts.js`, the multi-instance sync-conflict recovery view that conflict notifications deep-link to (`/dashboard/settings?section=sync-conflicts`).
 
 ## Auth System
 
@@ -149,24 +163,21 @@ After 5 failed login attempts within 15 minutes, the account is locked for 30 mi
 
 ## Layout System
 
-The `layout()` function wraps panel content in a consistent page structure:
+The layout function (`shared/layout.js`) wraps panel content in a consistent page structure. It takes a single options object:
 
 ```js
-function layout(title, content, options = {}) {
-  return `<!DOCTYPE html>
-  <html data-theme="${options.theme || 'dark'}">
-  <head>
-    <title>${title} — Crow's Nest</title>
-    ${styles}
-  </head>
-  <body>
-    ${navigation(options.activePanel)}
-    <main>${content}</main>
-    ${footer}
-  </body>
-  </html>`;
-}
+renderLayout({
+  title,        // page title
+  content,      // panel HTML
+  activePanel,  // highlights the nav entry
+  theme,        // 'dark' | 'light'
+  lang,         // 'en' | 'es'
+  scripts,      // extra page scripts
+  // ...plus panels, glass, serif, afterContent, headerIcons, navGroups, instanceTabs
+})
 ```
+
+Panels receive it as `layout` in their handler context and call it as `layout({ title, content })`.
 
 Everything is a template literal — no template engine dependency. CSS is inlined in the `<head>` to avoid a separate static file server.
 
@@ -255,7 +266,7 @@ The Podcast panel (`bundles/podcast/panels/podcast.js`) is an example: it is ins
 
 ## Third-Party Panels
 
-Community-created panels live in `~/.crow/panels/`. Each panel is a directory or JS file. The Crow's Nest scans this directory on startup and registers any valid panels. Third-party panels receive the same `{ db, layout, appRoot }` context as built-in panels. The `appRoot` path points to the Crow source root, which panels can use for dynamic imports of shared components (e.g., `logos.js`, `components.js`).
+Community-created panels live in `~/.crow/panels/`. Each panel is a single JS file named `<id>.js` (an optional companion `<id>-routes.js` file can register extra routes). Panel IDs must match `[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}`; anything else is rejected at load time. The Crow's Nest loads the panels listed in `~/.crow/panels.json` on startup and registers any valid ones. Third-party panels receive the same `{ db, layout, appRoot, lang }` context as built-in panels. The `appRoot` path points to the Crow source root, which panels can use for dynamic imports of shared components (e.g., `logos.js`, `components.js`); `lang` is the operator's dashboard language (`en`/`es`).
 
 Enable panels in `~/.crow/panels.json` (a JSON array of panel IDs):
 

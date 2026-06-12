@@ -20,7 +20,7 @@ No external accounts or central servers are required. Everything runs on the use
 ├─────────────────────────────────────────────┤
 │  Layer 4: Share Protocol                    │
 │  Types: memory | project | source | note |  │
-│         message | reaction                  │
+│    kb_article | message | reaction          │
 │  Permissions: read | read-write | one-time  │
 ├─────────────────────────────────────────────┤
 │  Layer 3: Data Sync (Hypercore)             │
@@ -76,7 +76,7 @@ When two peers discover each other on the DHT, Hyperswarm establishes an encrypt
 Shared data flows through Hypercore append-only feeds:
 
 - Each contact relationship has **two feeds** — one per direction
-- Feeds are stored locally in `data/peers/<contactId>/`
+- Feeds are stored locally under the data directory at `peers/<contactId>/out` and `peers/<contactId>/in`
 - Entries are signed by the sender and encrypted for the recipient (NaCl box)
 - When peers connect via Hyperswarm, Hypercore automatically syncs any missed entries
 - **Eventually consistent**: If Alice shares at 2pm and Bob comes online at 8pm, he gets everything he missed
@@ -105,11 +105,16 @@ Shared data flows through Hypercore append-only feeds:
 | Type | Payload | Sync Model |
 |---|---|---|
 | `memory` | Single memory entry | One-time or ongoing |
-| `project` | Research project + metadata | Ongoing feed sync |
+| `project` | Project snapshot bundle (clone mode) | One-shot clone delivery |
 | `source` | Research source with citation | One-time |
 | `note` | Research note | One-time |
+| `kb_article` | Knowledge-base article | One-time |
 | `message` | Free-form text (via Nostr) | Nostr relay delivery |
 | `reaction` | Response to a share | Nostr event |
+
+### Project clone mode
+
+Sharing a project (`crow_share` with `share_type: "project"`) delivers a **one-shot snapshot bundle**: the project metadata (with a send-side column allowlist — system-specific fields like `workspace_dir` never go on the wire), its sources, notes, audit log, data-backend manifests, and storage manifest. The recipient creates an independent copy with a `-clone-N` slug; further changes on either side do **not** sync. If the contact is offline, the share is queued with `mode='clone'` and a fresh bundle is rebuilt at re-delivery. Subscription mode (live one-way sync) is planned for a follow-on milestone.
 
 ### Permission Levels
 
@@ -157,16 +162,19 @@ Both endpoints require authentication (signed request with sender's Ed25519 key)
 
 ## MCP Tools
 
-| Tool | Description |
+The server registers **33 tools**, organized into nine modules under `servers/sharing/tools/`:
+
+| Module | Tools |
 |---|---|
-| `crow_generate_invite` | Create an invite code for a new contact |
-| `crow_accept_invite` | Accept invite and complete peer handshake |
-| `crow_list_contacts` | List connected peers with online status |
-| `crow_share` | Share a memory, project, source, or note |
-| `crow_inbox` | Check received shares and messages |
-| `crow_send_message` | Send encrypted message to a contact |
-| `crow_revoke_access` | Revoke a previously shared project |
-| `crow_sharing_status` | Show Crow ID, peer count, relay status |
+| `contacts.js` | `crow_generate_invite`, `crow_accept_invite`, `crow_list_contacts` |
+| `share-inbox.js` | `crow_share` (memories, projects, sources, notes, KB articles), `crow_inbox` |
+| `messaging.js` | `crow_send_message`, `crow_create_message_group`, `crow_list_message_groups`, `crow_send_group_message` |
+| `sharing-admin.js` | `crow_revoke_access`, `crow_sharing_status` |
+| `discovery.js` | `crow_find_contacts`, `crow_set_discoverable` |
+| `instances.js` | `crow_discover_relays`, `crow_add_relay`, `crow_list_instances`, `crow_register_instance`, `crow_update_instance`, `crow_revoke_instance`, `crow_list_sync_conflicts` |
+| `rooms-social.js` | `crow_room_invite`, `crow_room_close`, `crow_voice_memo`, `crow_react` |
+| `identity.js` | `crow_identity_attest`, `crow_identity_verify`, `crow_identity_revoke`, `crow_identity_list` |
+| `crosspost.js` | `crow_list_crosspost_transforms`, `crow_crosspost`, `crow_crosspost_cancel`, `crow_crosspost_mark_published`, `crow_list_crossposts` |
 
 ## Security Model
 
@@ -197,26 +205,39 @@ Both endpoints require authentication (signed request with sender's Ed25519 key)
 
 ## Database Tables
 
-The sharing server adds four tables to the shared SQLite database:
+The sharing server adds these tables to the shared SQLite database:
 
 | Table | Purpose |
 |---|---|
 | `contacts` | Peer identities, public keys, relay status, last seen |
-| `shared_items` | Tracking of sent/received shares with permissions |
+| `shared_items` | Tracking of sent/received shares with permissions; the `mode` column marks queued project clones (`mode='clone'`) so re-delivery rebuilds a fresh bundle |
 | `messages` | Local cache of Nostr messages with read status |
 | `relay_config` | Configured Nostr relays and peer relays |
+| `relay_blobs` | Encrypted store-and-forward blobs held for offline recipients (TTL-expired) |
+| `sync_conflicts` | Multi-instance sync conflicts awaiting review (see [Instance Sync](./instances.md)) |
 
 ## Module Structure
 
 ```
 servers/sharing/
-├── server.js          → createSharingServer() factory with all MCP tools
+├── server.js          → createSharingServer() orchestrator: builds shared context,
+│                        registers the 9 tool modules in a frozen order
 ├── index.js           → Stdio transport wrapper
+├── boot.js            → Startup wiring: pending-share queue re-delivery, feed init
+├── managers.js        → Singleton ownership of peer/sync/relay managers
 ├── identity.js        → Key generation, Crow ID, invite codes, encryption
 ├── peer-manager.js    → Hyperswarm discovery, connection management
 ├── sync.js            → Hypercore feed management, replication
+├── instance-sync.js   → Multi-instance replication (see instances.md)
+├── sync-conflict-resolve.js → Conflict restore flow for the Settings recovery view
+├── clone-bundle.js    → Project clone-bundle build (send-side column allowlist)
+├── rooms.js           → Shared room lifecycle
+├── bot-relay.js       → Bot-to-bot message relay
+├── tailnet-sync.js    → Tailnet-transport instance sync
+├── secret-box.js      → NaCl box encryption helpers
 ├── nostr.js           → Nostr events, NIP-44 encryption, relay comms
-└── relay.js           → Peer relay opt-in, store-and-forward
+├── relay.js           → Peer relay opt-in, store-and-forward
+└── tools/             → 9 modules registering the 33 MCP tools (table above)
 ```
 
 The gateway imports `createSharingServer()` and wires it to HTTP transport at `/sharing/mcp` and `/sharing/sse`, following the same pattern as the memory and project servers.

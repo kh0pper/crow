@@ -81,7 +81,9 @@ Instances sync data through **Hypercore** append-only feeds — the same P2P tec
 - Each instance maintains a Hypercore feed for outbound changes
 - The `InstanceSyncManager` replicates feeds when instances connect
 - **Lamport timestamps** establish causal ordering across machines
-- Conflicts (simultaneous edits to the same memory) are detected and stored in `sync_conflicts` for resolution
+- Conflicts (simultaneous edits to the same memory) are detected — the most recent edit wins, and the other version is kept safe instead of being discarded
+
+When a conflict happens you get a notification that links to **Settings → Sync conflicts**. There you can review both versions side by side, keep the current one, or restore the overridden one — a restore syncs back out to your other instances like any normal edit.
 
 Sync is **eventually consistent**. When two instances are online and can reach each other (via Tailscale, LAN, or the public internet), changes propagate within seconds. When offline, changes queue locally and sync on reconnection.
 
