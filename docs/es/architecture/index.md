@@ -92,7 +92,7 @@ Usa `@libsql/client` con un archivo SQLite local en `~/.crow/data/crow.db`. La s
 
 Tablas clave:
 - `memories` — Con búsqueda de texto completo vía tabla virtual FTS5 con triggers de sincronización
-- `project_spaces` → `research_sources` → `research_notes` — proyectos y sus datos hijos (claves foráneas). `project_members` contiene los roles/capacidades por miembro; `project_audit_log` registra las mutaciones. La tabla legada `research_projects` es un espejo inactivo que los triggers mantienen sincronizado, a la espera de su retiro
+- `project_spaces` → `research_sources` → `research_notes` — proyectos y sus datos hijos (claves foráneas). `project_members` contiene los roles/capacidades por miembro; `project_audit_log` registra las mutaciones. (La tabla legada `research_projects` fue retirada y eliminada en junio de 2026 — `project_spaces` es el único sistema de registro)
 - `crow_context` — Secciones de contexto de comportamiento (usadas para generar crow.md), soporta overrides por dispositivo vía la columna `device_id`
 - `oauth_clients` / `oauth_tokens` — Persistencia de la autenticación del gateway
 - `contacts` — Identidades de peers, claves públicas, estado de relay, última conexión vista

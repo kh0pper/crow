@@ -92,7 +92,7 @@ Uses `@libsql/client` with a local SQLite file at `~/.crow/data/crow.db`. Multi-
 
 Key tables:
 - `memories` — Full-text searchable via FTS5 virtual table with sync triggers
-- `project_spaces` → `research_sources` → `research_notes` — projects and their child data (foreign keys). `project_members` holds per-member roles/capabilities; `project_audit_log` records mutations. The legacy `research_projects` table is a dormant mirror kept in sync by triggers, awaiting retirement
+- `project_spaces` → `research_sources` → `research_notes` — projects and their child data (foreign keys). `project_members` holds per-member roles/capabilities; `project_audit_log` records mutations. (The legacy `research_projects` table was retired and dropped in June 2026 — `project_spaces` is the sole system of record)
 - `crow_context` — Behavioral context sections (used to generate crow.md), supports per-device overrides via `device_id` column
 - `oauth_clients` / `oauth_tokens` — Gateway auth persistence
 - `contacts` — Peer identities, public keys, relay status, last seen

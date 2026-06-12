@@ -249,18 +249,16 @@ export function createMakerLabServer(db, options = {}) {
       // Cascade: sessions → transcripts (FK), codes (FK via session), bound_devices (FK),
       // settings (FK). Memories tagged source='maker-lab' with project_id = learner_id.
       // All deletes in one transactional batch (spec S1): child deletes BEFORE the ps
-      // delete so the maker_sessions CHECK constraint doesn't abort; legacy rp row cleaned.
+      // delete so the maker_sessions CHECK constraint doesn't abort. (B3b: the legacy research_projects row no longer exists — table dropped.)
       const batchResult = await db.batch([
         { sql: `DELETE FROM maker_sessions WHERE learner_id=?`, args: [learner_id] },
         { sql: `DELETE FROM maker_transcripts WHERE learner_id=?`, args: [learner_id] },
         { sql: `DELETE FROM maker_bound_devices WHERE learner_id=?`, args: [learner_id] },
         { sql: `DELETE FROM maker_learner_settings WHERE learner_id=?`, args: [learner_id] },
-        { sql: `DELETE FROM research_projects WHERE id=? AND type='learner_profile'`, args: [learner_id] },
         { sql: `DELETE FROM project_spaces WHERE id=? AND type='learner_profile'`, args: [learner_id] },
       ]);
-      const psRowsAffected = Number(batchResult[5]?.rowsAffected ?? 0);
-      const rpRowsAffected = Number(batchResult[4]?.rowsAffected ?? 0);
-      if (psRowsAffected === 0 && rpRowsAffected === 0) {
+      const psRowsAffected = Number(batchResult[4]?.rowsAffected ?? 0);
+      if (psRowsAffected === 0) {
         return mcpError(`Learner ${learner_id} not found`);
       }
       try {
