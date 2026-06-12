@@ -4,61 +4,20 @@
  * Creates a configured McpServer with P2P sharing tools.
  * Transport-agnostic: used by both stdio (index.js) and HTTP (gateway).
  *
- * 17 MCP tools:
- *   crow_generate_invite    — Create invite code with 24h expiry
- *   crow_accept_invite      — Accept invite, handshake, show safety number
- *   crow_list_contacts      — List peers with online/offline status
- *   crow_share              — Share memory/project/source/note to a contact
- *   crow_inbox              — List received shares and messages
- *   crow_send_message       — Send encrypted Nostr message
- *   crow_revoke_access      — Revoke shared project access
- *   crow_sharing_status     — Show Crow ID, peer count, relay status
- *   crow_find_contacts      — Find Crow users by email hash (privacy-preserving)
- *   crow_set_discoverable   — Opt in/out of contact discovery
- *   crow_discover_relays    — List configured relays
- *   crow_add_relay          — Add a Nostr or peer relay
- *   crow_list_instances     — List registered Crow instances
- *   crow_register_instance  — Register a Crow instance
- *   crow_update_instance    — Update instance details
- *   crow_revoke_instance    — Revoke an instance (device compromise, decommission)
- *   crow_list_sync_conflicts — List and review sync conflicts between instances
+ * 33 MCP tools registered via tools/ modules:
+ *   tools/contacts.js       — crow_generate_invite, crow_accept_invite, crow_list_contacts (#1-3)
+ *   tools/share-inbox.js    — crow_share, crow_inbox (#4-5)
+ *   tools/messaging.js      — crow_send_message, crow_create_message_group, crow_list_message_groups, crow_send_group_message (#6-9)
+ *   tools/sharing-admin.js  — crow_revoke_access, crow_sharing_status (#10-11)
+ *   tools/discovery.js      — crow_find_contacts, crow_set_discoverable (#12-13)
+ *   tools/instances.js      — crow_discover_relays, crow_add_relay, crow_list_instances, crow_register_instance, crow_update_instance, crow_revoke_instance, crow_list_sync_conflicts (#14-20)
+ *   tools/rooms-social.js   — crow_room_invite, crow_room_close, crow_voice_memo, crow_react (#21-24)
+ *   tools/identity.js       — crow_identity_attest, crow_identity_verify, crow_identity_revoke, crow_identity_list (#25-28)
+ *   tools/crosspost.js      — crow_list_crosspost_transforms, crow_crosspost, crow_crosspost_cancel, crow_crosspost_mark_published, crow_list_crossposts (#29-33)
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
-import { createHash, randomBytes } from "node:crypto";
-import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
-import { isKioskActive, kioskBlockedResponse } from "../shared/kiosk-guard.js";
-import {
-  loadOrCreateIdentity,
-  generateInviteCode,
-  parseInviteCode,
-  computeSafetyNumber,
-} from "./identity.js";
-import {
-  canonicalPayload as canonicalAttestationPayload,
-  signAttestation,
-  verifyAttestation,
-  verifyCrowIdBinding,
-  signRevocation,
-  verifyRevocation,
-  SUPPORTED_APPS as ATTESTATION_APPS,
-} from "../shared/identity-attestation.js";
-import { transform as crosspostTransform, SUPPORTED_PAIRS as CROSSPOST_PAIRS } from "../gateway/crossposting/transforms.js";
-import { createNotification } from "../shared/notifications.js";
-import { getOrCreateLocalInstanceId } from "../gateway/instance-registry.js";
-import {
-  AclError,
-  ROLES,
-  assertLocalCapability,
-  appendAudit,
-} from "../shared/project-acl.js";
-import { slugify, workspacePathFor, storagePrefixFor } from "../shared/slugify.js";
-import { createProjectSpace } from "../shared/project-spaces.js";
-import { mkdirSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
-import { createDbClient, resolveDataDir } from "../db.js";
-import { getSharedManagers, getManagersOrNull } from "./managers.js";
+import { getSharedManagers } from "./managers.js";
 export { getInstanceSyncManager } from "./managers.js";
 import { createCloneBundleHelpers } from "./clone-bundle.js";
 import { initSharingRuntime } from "./boot.js";
@@ -73,7 +32,6 @@ import { registerIdentityTools } from "./tools/identity.js";
 import { registerCrosspostTools } from "./tools/crosspost.js";
 
 import {
-  _activeRooms,
   validateRoomToken,
   sendRoomInvite,
   getActiveRooms,
