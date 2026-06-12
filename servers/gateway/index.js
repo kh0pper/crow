@@ -59,7 +59,6 @@ import { crowdsecMiddleware } from "./middleware/crowdsec.js";
 import { rejectFunneledMiddleware } from "./funnel.js";
 
 import { createSharingServer, getInstanceSyncManager, validateRoomToken } from "../sharing/server.js";
-import { createRelayHandlers } from "../sharing/relay.js";
 import { createDbClient } from "../db.js";
 import { createOAuthProvider, initOAuthTables } from "./auth.js";
 import { initProxyServers, loadDynamicBackends, loadRemoteInstances } from "./proxy.js";
@@ -78,6 +77,7 @@ import { mountPublicEndpoints, crowMdHandler } from "./boot/public-endpoints.js"
 import { mountMcpServers } from "./boot/mcp-mounts.js";
 import { mountFeatureRoutes } from "./boot/feature-mounts.js";
 import { mountAdminApi } from "./boot/admin-api.js";
+import { mountPeerPublicApi } from "./boot/peer-public-api.js";
 
 const PORT = parseInt(process.env.PORT || process.env.CROW_GATEWAY_PORT || "3001", 10);
 const BIND = process.env.CROW_GATEWAY_BIND || "0.0.0.0";
@@ -511,95 +511,8 @@ try {
   }
 }
 
-// --- Backend Reload Endpoint (admin-only) ---
-const reloadHandler = async (req, res) => {
-  try {
-    await loadDynamicBackends();
-    res.json({ status: "ok", message: "Dynamic backends reloaded" });
-  } catch (err) {
-    res.status(500).json({ status: "error", message: err.message });
-  }
-};
-
-if (authMiddleware) {
-  app.post("/api/reload-backends", authMiddleware, reloadHandler);
-} else {
-  app.post("/api/reload-backends", reloadHandler);
-}
-
-// --- Peer Relay Endpoints ---
-const relayHandlers = createRelayHandlers(relayDb);
-
-if (authMiddleware) {
-  app.post("/relay/store", authMiddleware, relayHandlers.store);
-  app.get("/relay/fetch", authMiddleware, relayHandlers.fetch);
-} else {
-  app.post("/relay/store", relayHandlers.store);
-  app.get("/relay/fetch", relayHandlers.fetch);
-}
-
-// --- Contact Discovery Endpoints (public, opt-in) ---
-app.get("/discover/profile", async (req, res) => {
-  try {
-    const setting = await relayDb.execute({
-      sql: "SELECT value FROM dashboard_settings WHERE key = 'discovery_enabled'",
-      args: [],
-    });
-    if (!setting.rows.length || setting.rows[0].value !== "true") {
-      return res.status(404).json({ error: "Discovery not enabled" });
-    }
-    const { loadOrCreateIdentity } = await import("../sharing/identity.js");
-    const identity = loadOrCreateIdentity();
-    const nameSetting = await relayDb.execute({
-      sql: "SELECT value FROM dashboard_settings WHERE key = 'discovery_name'",
-      args: [],
-    });
-    res.json({
-      crow_discovery: true,
-      crow_id: identity.crowId,
-      display_name: nameSetting.rows[0]?.value || null,
-      ed25519_pubkey: identity.ed25519Public,
-      secp256k1_pubkey: identity.secp256k1Public,
-    });
-  } catch (err) {
-    res.status(500).json({ error: "Discovery unavailable" });
-  }
-});
-
-// Find a user by email hash (privacy-preserving contact discovery)
-app.get("/discover/find", async (req, res) => {
-  try {
-    const { hash } = req.query;
-    if (!hash || hash.length !== 64) {
-      return res.status(400).json({ error: "Missing or invalid hash parameter (expected SHA-256 hex)" });
-    }
-
-    // Check if this instance has opted into discovery with a matching email hash
-    const emailHash = await relayDb.execute({
-      sql: "SELECT value FROM dashboard_settings WHERE key = 'discovery_email_hash'",
-      args: [],
-    });
-
-    if (!emailHash.rows.length || emailHash.rows[0].value !== hash) {
-      return res.json({ found: false });
-    }
-
-    const { loadOrCreateIdentity } = await import("../sharing/identity.js");
-    const identity = loadOrCreateIdentity();
-    const nameSetting = await relayDb.execute({
-      sql: "SELECT value FROM dashboard_settings WHERE key = 'discovery_name'",
-      args: [],
-    });
-
-    res.json({
-      found: true,
-      crow_id: identity.crowId,
-      display_name: nameSetting.rows[0]?.value || null,
-    });
-  } catch (err) {
-    res.status(500).json({ error: "Discovery unavailable" });
-  }
-});
+// boot/peer-public-api.js — reload endpoint, relay store/fetch, discovery profile/find
+await mountPeerPublicApi(app, { authMiddleware, relayDb, loadDynamicBackends });
 
 // --- Start Server ---
 
