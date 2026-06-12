@@ -50,7 +50,7 @@ Conéctate a un gateway de Crow desplegado para acceder a la plataforma completa
 
 ### Pasos de configuración
 
-1. Despliega Crow ([Guía de despliegue en la nube](/es/getting-started/cloud-deploy))
+1. Despliega Crow ([guía de Primeros pasos](/es/getting-started/))
 
 2. Agrega la configuración a `.mcp.json`:
    ```json

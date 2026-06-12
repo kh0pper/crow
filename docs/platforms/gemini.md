@@ -49,7 +49,7 @@ Connect to a deployed Crow gateway for the full platform including external inte
 
 ### Prerequisites
 
-- Crow gateway deployed and healthy ([Cloud Deploy Guide](../getting-started/cloud-deploy))
+- Crow gateway deployed and healthy ([Getting Started guide](../getting-started/))
 
 ### Setup Steps
 

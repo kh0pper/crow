@@ -110,7 +110,7 @@ Conéctate a un gateway de Crow desplegado para acceso remoto — útil para con
 
 ### Requisitos previos
 
-- Gateway de Crow desplegado y accesible ([Guía de despliegue en la nube](/es/getting-started/cloud-deploy) o [Configuración de Tailscale](/es/getting-started/tailscale-setup))
+- Gateway de Crow desplegado y accesible ([guía de Primeros pasos](/es/getting-started/) o [Configuración de Tailscale](/es/getting-started/tailscale-setup))
 
 ### Pasos de configuración
 

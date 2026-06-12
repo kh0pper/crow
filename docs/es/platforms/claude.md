@@ -4,7 +4,7 @@ Conecta Crow a Claude en la web (claude.ai) o en la aplicación móvil de Claude
 
 ## Requisitos previos
 
-- Gateway de Crow desplegado y funcionando ([Guía de despliegue en la nube](/es/getting-started/cloud-deploy))
+- Gateway de Crow desplegado y funcionando ([guía de Primeros pasos](/es/getting-started/))
 - Un plan Claude Pro, Team o Enterprise (las Integraciones Personalizadas requieren un plan de pago)
 
 ## Pasos de configuración
