@@ -13,23 +13,25 @@ The result: responses can feel slower, the AI may "forget" earlier parts of a co
 When an MCP server connects, every tool it exposes gets serialized into the AI's context. That means the tool name, its description, and the full Zod parameter schema — all converted to text tokens.
 
 ```
-Server connects → 49 tool signatures loaded → ~10,000 tokens consumed
+Server connects → 126 tool signatures loaded → ~25,000 tokens consumed
 ```
 
-Those tokens are consumed before you type a single word. With a 200K token context window, 10,000 tokens is 5% of your budget gone to tool definitions alone. Add a few external integrations and you can easily hit 20-30%.
+Those tokens are consumed before you type a single word. With a 200K token context window, 25,000 tokens is over 12% of your budget gone to tool definitions alone. Add a few external integrations and you can easily hit 30% or more.
 
 ## Crow's Tool Inventory
 
-Crow's five core servers expose 49 tools total:
+Crow's core servers expose over 120 tools total:
 
 | Server | Tools | Examples |
 |--------|-------|---------|
-| Memory | 12 | `crow_store_memory`, `crow_search_memories`, `crow_recall_by_context` |
-| Projects | 12 | `crow_create_project`, `crow_add_source`, `crow_generate_bibliography` |
-| Blog | 12 | `crow_create_post`, `crow_publish_post`, `crow_blog_settings` |
-| Sharing | 8 | `crow_add_peer`, `crow_share_item`, `crow_check_inbox` |
-| Storage | 5 | `crow_upload_file`, `crow_list_files`, `crow_delete_file` |
-| **Total** | **49** | |
+| Memory | 24 | `crow_store_memory`, `crow_search_memories`, `crow_recall_by_context` |
+| Projects | 23 | `crow_create_project`, `crow_add_source`, `crow_generate_bibliography` |
+| Blog | 23 | `crow_create_post`, `crow_publish_post`, `crow_blog_settings` |
+| Sharing | 33 | `crow_generate_invite`, `crow_share`, `crow_inbox` |
+| Storage | 8 | `crow_upload_file`, `crow_list_files`, `crow_delete_file` |
+| Orchestrator | 9 | `crow_orchestrate`, `crow_run_pipeline`, `crow_list_presets` |
+| Consulting | 6 | `crow_consulting_get`, `crow_consulting_stats` |
+| **Total** | **126** | |
 
 Each external integration (Obsidian, Home Assistant, Ollama, etc.) adds 5-20+ more tools on top of this.
 
@@ -39,27 +41,31 @@ Crow offers three configuration modes that trade off between context efficiency 
 
 | Mode | Tools Loaded | Context Cost | Best For |
 |------|-------------|-------------|----------|
-| Gateway Router (`/router/mcp`) | 7 | ~2,500 tokens | Hosted deployments, many integrations |
-| Combined Core (`crow-core`) | 15 at startup | ~5,000 tokens | Local/stdio, Raspberry Pi |
-| Individual Servers | 49+ | ~10,000+ tokens | Maximum compatibility, simple setup |
+| Gateway Router (`/router/mcp`) | 10 | ~3,000 tokens | Hosted deployments, many integrations |
+| Combined Core (`crow-core` stdio) | one server's tools at startup | ~6,000 tokens | Local/stdio, Raspberry Pi |
+| Individual Servers | 126+ | ~25,000+ tokens | Maximum compatibility, simple setup |
 
 ### Gateway Router
 
-The gateway exposes a single MCP endpoint at `/router/mcp` with just 7 meta-tools. Instead of loading all 49 tool definitions upfront, the AI uses `crow_discover` to find relevant tools on demand and `crow_execute` to call them. Tools only enter context when actually needed.
+The gateway exposes a single MCP endpoint at `/router/mcp` with one consolidated **category tool per server** — 10 tools on a full install: `crow_memory`, `crow_projects`, `crow_blog`, `crow_sharing`, `crow_storage`, `crow_media`, `crow_orchestrator`, `crow_consulting`, plus `crow_tools` (external integrations and remote instances) and `crow_discover` (schema lookup). Instead of loading 126 tool definitions upfront, the AI calls a category tool with an `action` parameter — `crow_memory` with `action: "store_memory"`, for example — and uses `crow_discover` to look up available actions and their full schemas on demand. Tool definitions only enter context when actually needed.
 
 ### Combined Core
 
-The `crow-core` server starts with 15 commonly-used tools and activates others on demand via `crow_activate_tools`. A middle ground — fewer tools than individual servers, more direct access than the router.
+The `crow-core` stdio server starts with one server's tools active (memory by default — `CROW_DEFAULT_SERVER` changes it) plus three control tools, and activates other servers on demand via `crow_activate_server`. A middle ground — fewer tools than individual servers, more direct access than the router.
 
 ### Individual Servers
 
 Each server runs as a separate MCP connection. Every tool is available immediately with no discovery step. The simplest setup, and the most compatible across platforms, but the highest context cost.
 
+::: info Naming aliases
+You may see two names for the same thing in older configs — they are aliases, not different servers: the **projects** server was previously called **research** (`/research/mcp` still works as an alias for `/projects/mcp`, and the router accepts `crow_research` for `crow_projects`), and the bare `/mcp` endpoint is a compatibility alias for the memory server.
+:::
+
 ## Recommendations by Use Case
 
 - **Just getting started?** Use individual servers. The setup is straightforward and context cost is manageable with just Crow's core tools.
 
-- **Running many integrations?** Switch to the gateway router. When you have Obsidian, Home Assistant, and other integrations stacked on top of Crow's 49 tools, the router's discover-and-execute pattern keeps context lean.
+- **Running many integrations?** Switch to the gateway router. When you have Obsidian, Home Assistant, and other integrations stacked on top of Crow's 126 tools, the router's category-dispatch pattern keeps context lean.
 
 - **On a Raspberry Pi or constrained device?** Use `crow-core`. It balances low overhead with direct tool access — no HTTP gateway required.
 

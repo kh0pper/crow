@@ -100,3 +100,7 @@ All sharing modes support revocation:
 - [Sharing Guide](./sharing) — General P2P sharing concepts
 - [Data Dashboard](./data-dashboard) — Query and visualize shared databases
 - [Data Backends](./data-backends) — Register databases for sharing
+
+## Under the Hood
+
+For the clone-bundle format and share protocol internals, see the [Sharing Server architecture](/architecture/sharing-server).

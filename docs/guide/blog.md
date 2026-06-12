@@ -234,3 +234,7 @@ CROW_GATEWAY_URL=https://yourdomain.com
 ```
 
 Without this, links in feeds and social previews will point to `http://localhost:3001`, which won't work for external visitors.
+
+## Under the Hood
+
+For how posts, feeds, and public routes work internally, see the [Blog Server architecture](/architecture/blog-server).
