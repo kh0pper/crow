@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// NOTE (B3a 2026-06-12): research_projects is dormant — temp rows seeded here no longer mirror to project_spaces; harness-internal only.
+// NOTE (B3b 2026-06-12): research_projects was dropped — this harness seeds its temp row directly in project_spaces.
 /**
  * Crow Bot Builder — Phase 3.1 live verification harness.
  *
@@ -70,14 +70,14 @@ function piRpc({ args, env }) {
     async close() { try { proc.stdin.end(); } catch {} proc.kill("SIGTERM"); const k = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 5000); await exited; clearTimeout(k); } };
 }
 
-const prodSnap = (() => { const c = db(CROW_DB); const r = c.prepare("SELECT (SELECT COUNT(*) FROM bot_registry) br,(SELECT COUNT(*) FROM schedules) sc,(SELECT COUNT(*) FROM pi_bot_defs) pd,(SELECT COUNT(*) FROM bot_sessions) bs,(SELECT COUNT(*) FROM research_projects) rp").get(); const jm = c.prepare("PRAGMA journal_mode").get().journal_mode; c.close(); return { ...r, jm }; })();
+const prodSnap = (() => { const c = db(CROW_DB); const r = c.prepare("SELECT (SELECT COUNT(*) FROM bot_registry) br,(SELECT COUNT(*) FROM schedules) sc,(SELECT COUNT(*) FROM pi_bot_defs) pd,(SELECT COUNT(*) FROM bot_sessions) bs,(SELECT COUNT(*) FROM project_spaces) rp").get(); const jm = c.prepare("PRAGMA journal_mode").get().journal_mode; c.close(); return { ...r, jm }; })();
 
 // clone the proven research-scout shape
 const c0 = db(CROW_DB);
 const scout = c0.prepare("SELECT definition FROM pi_bot_defs WHERE bot_id='research-scout'").get();
 if (!scout) { console.error("research-scout missing"); process.exit(2); }
 const baseDef = JSON.parse(scout.definition);
-const proj = c0.prepare("INSERT INTO research_projects (name,description,type,created_at) VALUES (?,?,?,datetime('now'))").run("P3.1 E2E (temp)", "phase 3.1 — safe to delete", "research");
+const proj = c0.prepare("INSERT INTO project_spaces (slug,name,description,type,created_at) VALUES ('p3-1-e2e-temp',?,?,?,datetime('now'))").run("P3.1 E2E (temp)", "phase 3.1 — safe to delete", "research");
 const projectId = proj.lastInsertRowid;
 c0.close();
 const t0 = db(TASKS_DB);
@@ -172,15 +172,15 @@ const teardown = () => {
   const d = db(CROW_DB);
   d.prepare("DELETE FROM bot_sessions WHERE bot_id LIKE 'p31-e2e-%'").run();
   d.prepare("DELETE FROM pi_bot_defs WHERE bot_id LIKE 'p31-e2e-%'").run();
-  d.prepare("DELETE FROM research_projects WHERE id=?").run(projectId);
-  const fin = d.prepare("SELECT (SELECT COUNT(*) FROM pi_bot_defs) pd,(SELECT COUNT(*) FROM bot_sessions) bs,(SELECT COUNT(*) FROM research_projects) rp").get();
+  d.prepare("DELETE FROM project_spaces WHERE id=?").run(projectId);
+  const fin = d.prepare("SELECT (SELECT COUNT(*) FROM pi_bot_defs) pd,(SELECT COUNT(*) FROM bot_sessions) bs,(SELECT COUNT(*) FROM project_spaces) rp").get();
   d.close();
   const td = db(TASKS_DB); td.prepare("DELETE FROM tasks_items WHERE project_id=?").run(projectId); const tc = td.prepare("SELECT COUNT(*) c FROM tasks_items").get().c; td.close();
   try { rmSync(maSdir, { recursive: true, force: true }); } catch {}
-  console.log("\n=== teardown ===  pi_bot_defs=" + fin.pd + " bot_sessions=" + fin.bs + " research_projects=" + fin.rp + " tasks_items=" + tc);
+  console.log("\n=== teardown ===  pi_bot_defs=" + fin.pd + " bot_sessions=" + fin.bs + " project_spaces=" + fin.rp + " tasks_items=" + tc);
   check("teardown restored pi_bot_defs=" + prodSnap.pd, fin.pd === prodSnap.pd, String(fin.pd));
   check("teardown restored bot_sessions=" + prodSnap.bs, fin.bs === prodSnap.bs, String(fin.bs));
-  check("teardown restored research_projects=" + prodSnap.rp, fin.rp === prodSnap.rp, String(fin.rp));
+  check("teardown restored project_spaces=" + prodSnap.rp, fin.rp === prodSnap.rp, String(fin.rp));
 };
 
 try { await run(); } catch (e) { console.log("HARNESS ERROR: " + (e && e.stack || e)); fails.push("harness-exception"); }

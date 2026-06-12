@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// NOTE (B3a 2026-06-12): research_projects is dormant — temp rows seeded here no longer mirror to project_spaces; harness-internal only.
+// NOTE (B3b 2026-06-12): research_projects was dropped — this harness seeds its temp row directly in project_spaces.
 /**
  * Crow Bot Builder — Phase 3.0 live verification harness.
  *
@@ -52,7 +52,7 @@ const baseDef = JSON.parse(scout.definition);
 const prodSnap0 = c.prepare(
   "SELECT (SELECT COUNT(*) FROM bot_registry) br,(SELECT COUNT(*) FROM schedules) sc," +
   "(SELECT COUNT(*) FROM pi_bot_defs) pd,(SELECT COUNT(*) FROM bot_sessions) bs," +
-  "(SELECT COUNT(*) FROM research_projects) rp").get();
+  "(SELECT COUNT(*) FROM project_spaces) rp").get();
 const jmode0 = c.prepare("PRAGMA journal_mode").get().journal_mode;
 
 // ---- setup: temp project + two temp bots + cards + plan files ----
@@ -71,7 +71,7 @@ function mkBot(suffix, models) {
 }
 
 const proj = c.prepare(
-  "INSERT INTO research_projects (name,description,type,created_at) VALUES (?,?,?,datetime('now'))"
+  "INSERT INTO project_spaces (slug,name,description,type,created_at) VALUES ('p3-0-e2e-temp',?,?,?,datetime('now'))"
 ).run("P3.0 E2E (temp)", "Phase 3.0 verification — safe to delete", "research");
 const projectId = proj.lastInsertRowid;
 
@@ -205,10 +205,10 @@ const teardown = () => {
   const d = db(CROW_DB);
   d.prepare("DELETE FROM bot_sessions WHERE bot_id LIKE 'p30-e2e-%'").run();
   d.prepare("DELETE FROM pi_bot_defs WHERE bot_id LIKE 'p30-e2e-%'").run();
-  d.prepare("DELETE FROM research_projects WHERE id=?").run(projectId);
+  d.prepare("DELETE FROM project_spaces WHERE id=?").run(projectId);
   const fin = d.prepare(
     "SELECT (SELECT COUNT(*) FROM pi_bot_defs) pd,(SELECT COUNT(*) FROM bot_sessions) bs," +
-    "(SELECT COUNT(*) FROM research_projects) rp,(SELECT COUNT(*) FROM bot_registry) br," +
+    "(SELECT COUNT(*) FROM project_spaces) rp,(SELECT COUNT(*) FROM bot_registry) br," +
     "(SELECT COUNT(*) FROM schedules) sc").get();
   d.close();
   const td = db(TASKS_DB);
@@ -217,11 +217,11 @@ const teardown = () => {
   td.close();
   for (const b of [cloudBot, escBot]) { try { rmSync(b.sdir, { recursive: true, force: true }); } catch {} }
   console.log("\n=== teardown ===");
-  console.log("  restored: pi_bot_defs=" + fin.pd + " bot_sessions=" + fin.bs + " research_projects=" + fin.rp +
+  console.log("  restored: pi_bot_defs=" + fin.pd + " bot_sessions=" + fin.bs + " project_spaces=" + fin.rp +
     " bot_registry=" + fin.br + " schedules=" + fin.sc + " tasks_items=" + tcnt);
   check("teardown: pi_bot_defs back to " + prodSnap0.pd, fin.pd === prodSnap0.pd, String(fin.pd));
   check("teardown: bot_sessions back to " + prodSnap0.bs, fin.bs === prodSnap0.bs, String(fin.bs));
-  check("teardown: research_projects back to " + prodSnap0.rp, fin.rp === prodSnap0.rp, String(fin.rp));
+  check("teardown: project_spaces back to " + prodSnap0.rp, fin.rp === prodSnap0.rp, String(fin.rp));
 };
 
 try {

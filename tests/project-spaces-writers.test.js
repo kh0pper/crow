@@ -461,8 +461,12 @@ test("1b. mid-rebuild failure: old table intact, no abandoned transaction, recov
     runInitDb(dir2);
     const db = createDbClient(join(dir2, "crow.db"));
 
-    // Old-FK maker_bound_devices (smallest maker table) + obstruction
+    // Old-FK maker_bound_devices (smallest maker table) + obstruction.
+    // Pre-B2 hosts also HAVE research_projects (B3b dropped it from live
+    // schemas, so the old-host simulation must create a synthetic one —
+    // PRAGMA foreign_key_check errors outright on a missing parent table).
     await db.executeMultiple(`
+      CREATE TABLE IF NOT EXISTS research_projects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);
       DROP TABLE IF EXISTS maker_bound_devices;
       CREATE TABLE maker_bound_devices (
         fingerprint TEXT PRIMARY KEY,
@@ -516,8 +520,10 @@ test("1c. maker-lab rebuild via the bundle's own createDbClient (real boot path)
 
   const db = makerCreateDbClient(join(dir, "crow.db"));
 
-  // Old-FK maker_bound_devices + a row, exactly like a pre-B2 host
+  // Old-FK maker_bound_devices + a row, exactly like a pre-B2 host (which
+  // also still has research_projects — synthetic here post-B3b).
   await db.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS research_projects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);
     DROP TABLE IF EXISTS maker_bound_devices;
     CREATE TABLE maker_bound_devices (
       fingerprint TEXT PRIMARY KEY,
@@ -556,11 +562,11 @@ test("2. FK enforcement direction — ps-only project_id accepted; ps DELETE cas
   await db.execute(`INSERT INTO project_spaces (id, slug, name, type, status, created_at, updated_at)
     VALUES (999, 'ps-only-test-999', 'PS Only Project', 'general', 'active', datetime('now'), datetime('now'))`);
 
-  // Verify it did NOT create an rp row (ps-only)
+  // Post-B3b there is no research_projects table at all — pin that.
   const { rows: rpCheck } = await db.execute(
-    "SELECT id FROM research_projects WHERE id = 999"
+    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_projects'"
   );
-  assert.equal(rpCheck.length, 0, "ps-only row must not exist in research_projects");
+  assert.equal(rpCheck.length, 0, "research_projects must not exist post-B3b");
 
   // Insert a research_source with project_id pointing at the ps-only id — must succeed (spec test 2)
   await db.execute(`INSERT INTO research_sources (project_id, title, source_type, citation_apa)
@@ -706,10 +712,21 @@ test("10. bundle-rebuild data path — old schemas seeded, rebuild asserts parit
     );
   `);
 
+  // Old-host simulation: pre-B2 hosts HAVE a research_projects table (B3b
+  // dropped it from live schemas, so this test creates a synthetic one to
+  // play the part — exactly like its synthetic old maker-lab tables above).
+  await mlDb.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS research_projects (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      type TEXT,
+      created_at TEXT,
+      updated_at TEXT
+    );
+  `);
   // Seed the learner as a mirrored rp+ps PAIR (what a real pre-B2 host has
-  // when the rebuild runs: init-db's migrateLegacyProjectsToSpaces backfills
-  // ps from rp before any bundle rebuild; the live trigger that used to do
-  // this inline was retired in B3a, and this test seeds AFTER init-db).
+  // when the rebuild runs: the init-db backfill creates the ps twin before
+  // any bundle rebuild).
   await mlDb.execute(`INSERT OR IGNORE INTO research_projects (id, name, type, created_at, updated_at)
     VALUES (50, 'Learner Profile 50', 'learner_profile', datetime('now'), datetime('now'))`);
   await mlDb.execute(`INSERT OR IGNORE INTO project_spaces (id, slug, name, type, status, created_at, updated_at)
@@ -867,9 +884,9 @@ test("10. bundle-rebuild data path — old schemas seeded, rebuild asserts parit
   `);
 
   // Ensure the project exists as a mirrored rp+ps pair: rp id=1 is the old FK
-  // parent for seeding; ps id=1 is what the rebuilt FK will point at (on a
-  // real pre-B2 host the init-db backfill creates the ps twin — the inline
-  // trigger that used to do it was retired in B3a).
+  // parent for seeding; ps id=1 is what the rebuilt FK will point at. The
+  // synthetic research_projects table from the maker-lab section above plays
+  // the pre-B2 host's table (B3b removed it from live schemas).
   await ddDb.execute(`INSERT OR IGNORE INTO research_projects (id, name, created_at, updated_at)
     VALUES (1, 'Test Project', datetime('now'), datetime('now'))`);
   await ddDb.execute(`INSERT OR IGNORE INTO project_spaces (id, slug, name, type, status, created_at, updated_at)
@@ -982,12 +999,8 @@ test("3. writer round-trips — createProjectSpace + updateProjectSpaceMeta at S
   assert.equal(psRows[0].type, "research");
   assert.equal(psRows[0].tags, "alpha,beta");
 
-  // NO new rp row must have been created by the helper
-  const { rows: rpRows } = await db.execute({
-    sql: "SELECT id FROM research_projects WHERE name = 'My Research Project'",
-    args: [],
-  });
-  assert.equal(rpRows.length, 0, "createProjectSpace must NOT create an rp row directly");
+  // (B3b: research_projects no longer exists — nothing for the helper to
+  // write to even by accident; the table-absence pin lives in test 2.)
 
   // updateProjectSpaceMeta: update name + tags on ps-only id
   const affected = await updateProjectSpaceMeta(db, projId, {
@@ -1151,7 +1164,6 @@ test("4. learner lifecycle on ps — create, rename, delete; legacy rp-seeded al
     { sql: "DELETE FROM maker_transcripts WHERE learner_id=?", args: [lid] },
     { sql: "DELETE FROM maker_bound_devices WHERE learner_id=?", args: [lid] },
     { sql: "DELETE FROM maker_learner_settings WHERE learner_id=?", args: [lid] },
-    { sql: "DELETE FROM research_projects WHERE id=? AND type='learner_profile'", args: [lid] },
     { sql: "DELETE FROM project_spaces WHERE id=? AND type='learner_profile'", args: [lid] },
   ]);
   // ps row must be gone (hard delete)
@@ -1168,18 +1180,12 @@ test("4. learner lifecycle on ps — create, rename, delete; legacy rp-seeded al
   });
   assert.equal(settGone.length, 0, "maker_learner_settings must be deleted");
 
-  // Verify batch result had 1 ps row affected
-  const psAffected = Number(batchResult[5]?.rowsAffected ?? 0);
+  // Verify batch result had 1 ps row affected (index 4 post-B3b: 5-statement batch)
+  const psAffected = Number(batchResult[4]?.rowsAffected ?? 0);
   assert.equal(psAffected, 1, "ps delete must have affected 1 row");
 
-  // Legacy case: a pre-B3a learner exists as a mirrored rp+ps PAIR (the
-  // retired trigger or the init-db backfill created the ps twin). Seed both
-  // rows explicitly to reproduce that state.
-  await db.execute({
-    sql: `INSERT INTO research_projects (id, name, type, created_at, updated_at)
-          VALUES (777, 'Legacy Learner', 'learner_profile', datetime('now'), datetime('now'))`,
-    args: [],
-  });
+  // Legacy case (post-B3b): research_projects is gone — a "legacy" learner is
+  // simply a ps row that predates the current code. Seed it directly.
   await db.execute({
     sql: `INSERT INTO project_spaces (id, slug, name, type, status, created_at, updated_at)
           VALUES (777, 'legacy-learner-777', 'Legacy Learner', 'learner_profile', 'active', datetime('now'), datetime('now'))`,
@@ -1189,32 +1195,24 @@ test("4. learner lifecycle on ps — create, rename, delete; legacy rp-seeded al
     sql: "SELECT id FROM project_spaces WHERE id = 777",
     args: [],
   });
-  assert.equal(legacyPs.length, 1, "mirrored ps row present for legacy learner");
+  assert.equal(legacyPs.length, 1, "ps row present for legacy learner");
 
   await db.execute({
     sql: "INSERT INTO maker_learner_settings (learner_id, age) VALUES (777, 10)",
     args: [],
   });
 
-  // Delete legacy learner: both rp AND ps rows must be removed
+  // Delete legacy learner with the maker-lab batch shape (post-B3b: 5 statements)
   const legacyBatch = await db.batch([
     { sql: "DELETE FROM maker_sessions WHERE learner_id=?", args: [777] },
     { sql: "DELETE FROM maker_transcripts WHERE learner_id=?", args: [777] },
     { sql: "DELETE FROM maker_bound_devices WHERE learner_id=?", args: [777] },
     { sql: "DELETE FROM maker_learner_settings WHERE learner_id=?", args: [777] },
-    { sql: "DELETE FROM research_projects WHERE id=? AND type='learner_profile'", args: [777] },
     { sql: "DELETE FROM project_spaces WHERE id=? AND type='learner_profile'", args: [777] },
   ]);
-  const rpAffected = Number(legacyBatch[4]?.rowsAffected ?? 0);
-  const psAffected2 = Number(legacyBatch[5]?.rowsAffected ?? 0);
-  assert.equal(rpAffected, 1, "rp DELETE must affect 1 row for legacy learner");
+  const psAffected2 = Number(legacyBatch[4]?.rowsAffected ?? 0);
   assert.equal(psAffected2, 1, "ps DELETE must affect 1 row for legacy learner");
 
-  const { rows: rpGone } = await db.execute({
-    sql: "SELECT id FROM research_projects WHERE id = 777",
-    args: [],
-  });
-  assert.equal(rpGone.length, 0, "rp row must be gone after legacy learner delete");
   const { rows: psGone2 } = await db.execute({
     sql: "SELECT id FROM project_spaces WHERE id = 777",
     args: [],
@@ -1223,45 +1221,6 @@ test("4. learner lifecycle on ps — create, rename, delete; legacy rp-seeded al
 
   db.close();
 });
-
-// ── Test 5: Sequence-guard ────────────────────────────────────────────────────
-
-test("5. sequence-guard — legacy rp INSERT after ps-only creates allocates non-colliding id", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "crow-psw-t5-"));
-  after(() => rmSync(dir, { recursive: true, force: true }));
-
-  runInitDb(dir);
-  runInitDb(dir);
-
-  const dbPath = join(dir, "crow.db");
-  const db = createDbClient(dbPath);
-
-  // Create several ps-only projects (no rp mirror)
-  const ids = [];
-  for (let i = 0; i < 3; i++) {
-    const { id } = await createProjectSpace(db, { name: `PS Project ${i}`, type: "research" });
-    ids.push(id);
-  }
-  const maxPsId = Math.max(...ids);
-
-  // Now do a legacy rp INSERT (as old code would)
-  const legacyResult = await db.execute({
-    sql: "INSERT INTO research_projects (name, type) VALUES (?, ?)",
-    args: ["Legacy Project", "research"],
-  });
-  const legacyId = Number(legacyResult.lastInsertRowid);
-
-  // The sequence guard in createProjectSpace bumps rp's sqlite_sequence to MAX(ps.id).
-  // So the legacy INSERT must allocate an id > maxPsId (no collision).
-  assert.ok(
-    legacyId > maxPsId,
-    `legacy rp INSERT id ${legacyId} must be > max ps id ${maxPsId} (B1 guard)`
-  );
-
-  db.close();
-});
-
-// ── Test 6: Share payload shape ───────────────────────────────────────────────
 
 test("6. share payload shape — allowlist columns only; archived ps row → not found", async () => {
   const dir = mkdtempSync(join(tmpdir(), "crow-psw-t6-"));
