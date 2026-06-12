@@ -249,34 +249,34 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
     let gwFields, gwHint;
     if (gwType === "discord") {
       gwFields =
-        `<div class="btb-group"><label>Bot token</label>` +
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelBotTokenDiscord", lang)}</label>` +
         `<input type="password" name="gw_token" class="btb-input" autocomplete="off" value="${escapeHtml(gw.token || "")}"></div>` +
         formField("Guild ID (optional)", "gw_guild_id", { value: gw.guild_id || "" }) +
-        `<div class="btb-group"><label>Channel IDs (one per line, optional — blank = any channel)</label>` +
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelChannelIds", lang)}</label>` +
         `<textarea name="gw_channel_ids" rows="3" class="btb-textarea">${escapeHtml((gw.channel_ids || []).join("\n"))}</textarea></div>` +
-        `<div class="btb-group"><label>Allowlist — Discord user IDs (one per line)</label>` +
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelAllowlistDiscord", lang)}</label>` +
         `<textarea name="gw_allowlist" rows="4" class="btb-textarea">${escapeHtml((gw.allowlist || []).join("\n"))}</textarea></div>`;
-      gwHint = `<p class="btb-hint">Discord runs via the long-lived <code>pibot-discord.service</code> (discord_gateway.mjs holds a WebSocket per bot). The <code>MessageContent</code> privileged intent must be enabled in the Discord Developer Portal. After changing token/guild/channel config, restart the service: <code>sudo systemctl restart pibot-discord</code>.</p>`;
+      gwHint = `<p class="btb-hint">${t("botbuilder.gwHintDiscord", lang)}</p>`;
     } else if (gwType === "telegram") {
       gwFields =
-        `<div class="btb-group"><label>Bot token (from @BotFather)</label>` +
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelBotTokenTelegram", lang)}</label>` +
         `<input type="password" name="gw_token" class="btb-input" autocomplete="off" value="${escapeHtml(gw.token || "")}"></div>` +
-        `<div class="btb-group"><label>Allowlist — Telegram user IDs (one per line, blank = anyone)</label>` +
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelAllowlistTelegram", lang)}</label>` +
         `<textarea name="gw_allowlist" rows="4" class="btb-textarea">${escapeHtml((gw.allowlist || []).join("\n"))}</textarea></div>` +
-        `<div class="btb-group"><label>Restrict to chat IDs (one per line, optional)</label>` +
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelChatIds", lang)}</label>` +
         `<textarea name="gw_chat_ids" rows="3" class="btb-textarea">${escapeHtml((gw.chat_ids || []).join("\n"))}</textarea></div>`;
-      gwHint = `<p class="btb-hint">Telegram runs via the long-lived <code>pibot-gateways.service</code> (gateways/telegram.mjs, long-poll — dials out, no inbound port). After changing config, restart: <code>sudo systemctl restart pibot-gateways</code>.</p>`;
+      gwHint = `<p class="btb-hint">${t("botbuilder.gwHintTelegram", lang)}</p>`;
     } else if (gwType === "slack") {
       gwFields =
-        `<div class="btb-group"><label>Bot token (xoxb-…)</label>` +
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelBotTokenSlack", lang)}</label>` +
         `<input type="password" name="gw_bot_token" class="btb-input" autocomplete="off" value="${escapeHtml(gw.bot_token || "")}"></div>` +
-        `<div class="btb-group"><label>App-level token (xapp-…, connections:write)</label>` +
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelAppToken", lang)}</label>` +
         `<input type="password" name="gw_app_token" class="btb-input" autocomplete="off" value="${escapeHtml(gw.app_token || "")}"></div>` +
-        `<div class="btb-group"><label>Allowlist — Slack user IDs (one per line, blank = anyone)</label>` +
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelAllowlistSlack", lang)}</label>` +
         `<textarea name="gw_allowlist" rows="4" class="btb-textarea">${escapeHtml((gw.allowlist || []).join("\n"))}</textarea></div>` +
-        `<div class="btb-group"><label>Restrict to channel IDs (one per line, optional)</label>` +
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelChannelIdsSlack", lang)}</label>` +
         `<textarea name="gw_channel_ids" rows="3" class="btb-textarea">${escapeHtml((gw.channel_ids || []).join("\n"))}</textarea></div>`;
-      gwHint = `<p class="btb-hint">Slack runs via the long-lived <code>pibot-gateways.service</code> (gateways/slack.mjs, Socket Mode — dials out, no inbound port). Needs Socket Mode enabled + an app-level token with <code>connections:write</code>. After changing config, restart: <code>sudo systemctl restart pibot-gateways</code>.</p>`;
+      gwHint = `<p class="btb-hint">${t("botbuilder.gwHintSlack", lang)}</p>`;
     } else if (gwType === "glasses") {
       // Slice B (B4): bind this bot to a paired meta-glasses device. Saving
       // sets the device's bound_bot_id (the voice turn reads it) + the voice
@@ -333,19 +333,19 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       } catch { /* tool-executor unavailable: skip the warning */ }
 
       gwFields =
-        `<div class="btb-group"><label>Paired device</label>` +
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelPairedDevice", lang)}</label>` +
         `<select name="gw_device_id" class="btb-select">${devOpts}</select></div>` +
         (devices.length ? "" : `<p class="btb-hint">No paired glasses devices yet. Pair one in the Meta Glasses panel first.</p>`) +
-        `<div class="btb-group"><label>Fast voice model (overrides the AI tab for this binding)</label>` +
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelFastVoiceModel", lang)}</label>` +
         `<select name="gw_fast_voice_model" class="btb-select">${fvmOpts}</select></div>` +
-        `<div class="btb-group"><label>Voice plumbing (bound to the device)</label>` +
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelVoicePlumbing", lang)}</label>` +
         `<div class="btb-checkbox-group">` +
         `<label>STT&nbsp;${profileSel("gw_stt_profile_id", sttP, selDev && selDev.stt_profile_id)}</label>` +
         `<label>TTS&nbsp;${profileSel("gw_tts_profile_id", ttsP, selDev && selDev.tts_profile_id)}</label>` +
         `<label>Vision&nbsp;${profileSel("gw_vision_profile_id", visionP, selDev && selDev.vision_profile_id)}</label>` +
         `</div></div>` +
         noVoiceWarn;
-      gwHint = `<p class="btb-hint">Saving binds the device (<code>bound_bot_id</code>) so the meta-glasses fast voice turn runs THIS bot's persona, skills, scoped tools, and permissions. One bot &harr; one device; re-binding unbinds the prior device. No gateway restart needed — the voice turn reads the binding live (30s cache).</p>`;
+      gwHint = `<p class="btb-hint">${t("botbuilder.gwHintGlasses", lang)}</p>`;
     } else if (gwType === "companion") {
       // Bind this bot to a companion kiosk device (tablet/room). Reuses the
       // glasses device-store; the device is tagged device_kind:"companion".
@@ -370,14 +370,14 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       const hs = cf.hearing_style || "push_to_talk";
       const hsOpt = (v, l) => `<option value="${v}"${hs === v ? " selected" : ""}>${l}</option>`;
       gwFields =
-        `<div class="btb-group"><label>Paired kiosk device</label>` +
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelPairedKiosk", lang)}</label>` +
         `<select name="gw_device_id" class="btb-select">${devOpts}</select></div>` +
         (devices.length ? "" : `<p class="btb-hint">No paired devices yet. Pair a kiosk/companion device first (Meta Glasses panel pairs devices; kiosks reuse that store).</p>`) +
-        `<div class="btb-group"><label>Avatar (Live2D model name, blank = bot/default)</label>` +
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelAvatarModel", lang)}</label>` +
         `<input type="text" name="gw_avatar_model" class="btb-input" value="${escapeHtml(cf.avatar_model || "")}"></div>` +
-        `<div class="btb-group"><label>Hearing style</label>` +
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelHearingStyle", lang)}</label>` +
         `<select name="gw_hearing_style" class="btb-select">${hsOpt("push_to_talk", "Push to talk")}${hsOpt("wake_word", "Wake word")}${hsOpt("always_listening", "Always listening")}</select></div>` +
-        `<div class="btb-group"><label>Voice idle timeout (seconds before pet/idle)</label>` +
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelVoiceIdleTimeout", lang)}</label>` +
         `<input type="number" name="gw_voice_idle_timeout" class="btb-input" value="${escapeHtml(String(cf.voice_idle_timeout ?? 30))}"></div>` +
         `<div class="btb-group"><label>Features</label><div class="btb-checkbox-group">` +
         `<label><input type="checkbox" name="gw_avatar_animation"${chk(cf.avatar_animation)}> Avatar animation / lip-sync</label>` +
@@ -385,16 +385,16 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
         `<label><input type="checkbox" name="gw_social_chat"${chk(cf.social_chat)}> Social / chatroom &amp; DM features</label>` +
         `<label><input type="checkbox" name="gw_memory_integration"${chk(cf.memory_integration)}> Auto memory integration</label>` +
         `</div></div>`;
-      gwHint = `<p class="btb-hint">Saving binds the device (<code>bound_bot_id</code>, <code>device_kind:companion</code>) so this kiosk shows THIS bot's persona/avatar and the feature toggles above. The fast&rarr;escalate model pair is global to the companion container (the model proxy). Changing avatar/persona takes effect on the next kiosk session; toggles apply live. See <code>docs/guide/kiosk-mode.md</code>.</p>`;
+      gwHint = `<p class="btb-hint">${t("botbuilder.gwHintCompanion", lang)}</p>`;
     } else if (gwType === "none") {
       gwFields = "";
-      gwHint = `<p class="btb-hint">No gateway — this bot is driven only by direct injection / cards, not inbound messages.</p>`;
+      gwHint = `<p class="btb-hint">${t("botbuilder.gwHintNone", lang)}</p>`;
     } else {
       gwFields =
         formField("Gmail address (+alias)", "gw_address", { value: gw.address || "" }) +
         `<div class="btb-group"><label>Allowlist (one address per line)</label>` +
         `<textarea name="gw_allowlist" rows="4" class="btb-textarea">${escapeHtml((gw.allowlist || []).join("\n"))}</textarea></div>`;
-      gwHint = `<p class="btb-hint">Gmail polls <code>to:&lt;+alias&gt;@maestro.press</code> via bridge_tick.mjs (pibot-bridge.timer, ~1 min).</p>`;
+      gwHint = `<p class="btb-hint">${t("botbuilder.gwHintGmail", lang)}</p>`;
     }
     body =
       `<form method="POST" class="btb-form">${hidden("gateways")}` +
@@ -511,12 +511,12 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
           `<h4 style="margin:0 0 .5rem">Tracker definition: ${escapeHtml(selTracker.display_name)}</h4>` +
           `<p class="btb-hint" style="margin:0 0 .75rem">Edit the tracker's column headers (statuses) and data fields. Changes apply to all items in this tracker.</p>` +
           `<div id="bb-tracker-def-msg" class="btb-tdef-msg"></div>` +
-          `<div class="btb-group"><label>Display name</label>` +
+          `<div class="btb-group"><label>${t("botbuilder.tdefLabelDisplayName", lang)}</label>` +
           `<input id="bb-tdef-name" value="${escapeHtml(selTracker.display_name)}" class="btb-input" style="max-width:300px"></div>` +
-          `<div class="btb-group"><label>Status columns (comma-separated, in display order)</label>` +
+          `<div class="btb-group"><label>${t("botbuilder.tdefLabelStatusColumns", lang)}</label>` +
           `<input id="bb-tdef-statuses" value="${escapeHtml(svText)}" class="btb-input" placeholder="pending, processing, received, done"></div>` +
           `<p class="btb-hint" style="margin-top:-.5rem">These become the board columns. Changing them does not migrate existing items &mdash; items with removed statuses will appear in an "other" column.</p>` +
-          `<div class="btb-group"><label>Data fields (columns_json)</label>` +
+          `<div class="btb-group"><label>${t("botbuilder.tdefLabelDataFields", lang)}</label>` +
           `<table class="btb-table">` +
           `<thead><tr><th>Key</th><th>Label</th><th>Type</th><th>Req</th></tr></thead>` +
           `<tbody id="bb-tdef-cols">${colRows}</tbody></table></div>` +
@@ -595,7 +595,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
     const featured = allSkills.includes("skill-writing") ? "skill-writing" : null;
     const general = allSkills.filter((n) => !claimed.has(n) && n !== featured);
     if (general.length) {
-      groupsHtml += `<div class="btb-group"><label>General</label>` +
+      groupsHtml += `<div class="btb-group"><label>${t("botbuilder.skillsGroupGeneral", lang)}</label>` +
         `<p class="btb-hint">${escapeHtml(skillDirs(skCrowHome).join(", "))}</p>${renderBoxes(general)}</div>`;
     }
     // Slice C: prominent "Skill authoring" card.
@@ -670,7 +670,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       actionBar(`<button type="submit" class="btb-btn">${t("botbuilder.btnSaveSkillsPrompt", lang)}</button>`) + `</form>` +
       `<hr class="btb-divider">` +
       `<div class="btb-group"><label>${t("botbuilder.labelProposedSkills", lang)}</label>` +
-      `<p class="btb-hint">Drafted by this bot into <code>&lt;session_dir&gt;/proposed-skills/</code>. Review and edit (sanitize any &#9888; flagged phrasing), then Approve to copy into <code>~/.crow/skills</code> and attach, or Reject to discard. Inert until approved.</p>` +
+      `<p class="btb-hint">${t("botbuilder.skillsHintProposals", lang)}</p>` +
       proposalsHtml +
       `</div>` + propScript +
       // Plan §B5: self-learning provenance/audit feed — what the post-turn
@@ -713,13 +713,13 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       `<div class="btb-group"><label>${t("botbuilder.labelConfirmTools", lang)}</label>` +
       `<textarea name="pp_confirm" rows="3" class="btb-textarea">${escapeHtml((pp.confirm || []).join("\n"))}</textarea></div>` +
       `<div class="btb-group"><label class="btb-checkbox"><input type="checkbox" name="pp_multi_agent"${pp.multi_agent ? " checked" : ""}> Multi-agent (allow the <code>subagent</code> tool)</label></div>` +
-      `<p class="btb-hint">Multi-agent is gated by pi-lab/permission-gating.ts (Phase 3.1): <code>subagent</code> is allowed only when this is on AND the bot's resolved model is MULTI_AGENT_CAPABLE; recursion is depth-capped. Off by default.</p>` +
+      `<p class="btb-hint">${t("botbuilder.hintMultiAgent", lang)}</p>` +
       `<div class="btb-group"><label class="btb-checkbox"><input type="checkbox" name="pp_self_authoring"${pp.self_authoring ? " checked" : ""}> Self-authoring skills (let this bot <strong>propose</strong> new skills)</label></div>` +
-      `<p class="btb-hint">When on, the bot may DRAFT a skill file into its confined staging dir (<code>&lt;session_dir&gt;/proposed-skills/</code>). Proposals are <strong>inert</strong> — they never load and never reach <code>~/.crow/skills</code> until you approve them on the <strong>Skills &amp; Prompt</strong> tab. Skills are pure prompt text; approving one can never grant a tool or change this policy. Off by default.</p>` +
+      `<p class="btb-hint">${t("botbuilder.hintSelfAuthoring", lang)}</p>` +
       `<div class="btb-group"><label>${t("botbuilder.labelSelfLearning", lang)}</label>` +
       `<select name="pp_skill_learning" class="btb-select"><option${slSel("off")}>off</option><option${slSel("propose")}>propose</option><option${slSel("auto")}>auto</option></select></div>` +
-      `<p class="btb-hint">After each turn, an idle-only, cheap-model review decides whether to write or improve a skill (Hermes-style). <strong>propose</strong> drafts into the staging dir for your approval (same flow as self-authoring, but auto-triggered). <strong>auto</strong> writes/patches directly, behind guardrails: guardrail-phrase drafts are blocked to a proposal; high-blast-radius bots (open <code>external_send</code>, non-<code>deny</code> bash, or multi-agent) silently degrade to propose; a bot may only patch skills it itself auto-authored, never operator- or repo-authored ones. Runs ONLY when no pi turn is live, so it never starves real turns. Off by default. Auto-written skills appear under <strong>Skills &amp; Prompt</strong>.</p>` +
-      `<p class="btb-hint">Enforced by pi-lab/permission-gating.ts via PI_BOT_PERMISSION_POLICY (Phase 2.2). Default-deny for safety.</p>` +
+      `<p class="btb-hint">${t("botbuilder.hintSelfLearningDetail", lang)}</p>` +
+      `<p class="btb-hint">${t("botbuilder.hintPermEnforced", lang)}</p>` +
       actionBar(`<button type="submit" class="btb-btn">${t("botbuilder.btnSavePermissions", lang)}</button>`) + `</form>` +
       `<form method="POST" style="margin-top:1rem">` +
       `<input type="hidden" name="action" value="toggle_peer_managed">` +
@@ -785,7 +785,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
     // Send-message form (shown via JS when Send button clicked)
     const sendForm =
       `<div id="bb-sess-send-panel" class="btb-send-panel">` +
-      `<label>Send message to session (thread: <code id="bb-sess-thread"></code>)</label><br>` +
+      `<label>${t("botbuilder.sessionSendLabelPrefix", lang)}<code id="bb-sess-thread"></code>)</label><br>` +
       `<textarea id="bb-sess-msg" rows="3" class="btb-textarea btb-textarea-wide"></textarea>` +
       `<button id="bb-sess-send-btn" class="btb-btn">Send via bridge --inject</button>` +
       `<span id="bb-sess-send-status" class="btb-send-status"></span>` +
@@ -844,7 +844,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       const fb = (r) => (r.source === "fallback" ? ` <span class="btb-review-fallback">(fail-closed fallback)</span>` : "");
       const subAllowed = maOn && capable;
       effHtml =
-        `<div class="btb-group"><b>Effective runtime decision</b> <span class="btb-hint" style="display:inline">(computed via model_resolver.mjs + pi_extensions_allowlist.mjs)</span></div>` +
+        `<div class="btb-group"><b>${t("botbuilder.reviewEffectiveDecision", lang)}</b> <span class="btb-hint" style="display:inline">(computed via model_resolver.mjs + pi_extensions_allowlist.mjs)</span></div>` +
         `<table class="btb-review-table">` +
         `<tr><td>Default model</td><td><code>${escapeHtml(rDef.key)}</code> <span class="btb-review-source">source=${escapeHtml(rDef.source)}</span>${fb(rDef)}</td></tr>` +
         `<tr><td>Escalation model</td><td>` +
@@ -874,7 +874,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       `<form method="POST"><input type="hidden" name="action" value="toggle"><input type="hidden" name="bot_id" value="${escapeHtml(botId)}">` +
       `<button type="submit" class="btb-btn btb-btn-sec">${bot.enabled ? t("botbuilder.btnDisableBot", lang) : t("botbuilder.btnEnableBot", lang)}</button></form>` +
       `</div>` +
-      `<p class="btb-hint">Saving a bot writes pi_bot_defs only. The bridge spawn-per-turn picks up changes on the next inbound; no gateway restart needed.</p>`;
+      `<p class="btb-hint">${t("botbuilder.reviewHintSaving", lang)}</p>`;
   }
 
   return res.send(layout({
