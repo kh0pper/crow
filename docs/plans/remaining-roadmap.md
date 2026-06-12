@@ -86,7 +86,7 @@
 
 #### 4B: CLI Platform Integrations (Partially Done)
 - [x] **Gemini CLI docs** — `docs/platforms/gemini-cli.md` with MCP setup instructions
-- [x] **Qwen Coder CLI docs** — `docs/platforms/qwen-cli.md`
+- [x] **Qwen Code docs** — `docs/platforms/qwen-coder.md` (consolidated from the former qwen-cli.md + qwen-coder.md pair)
 - [ ] **CLI-to-Crow-Chat bridge** — Explore unified Crow Chat powered by preferred LLM
 
 #### 4C: Cron Job Service

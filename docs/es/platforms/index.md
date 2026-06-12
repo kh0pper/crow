@@ -15,7 +15,7 @@ Crow usa el estándar abierto [Model Context Protocol (MCP)](https://modelcontex
 | [Cursor](./cursor) | stdio / HTTP | Varía | Fácil | Compatible |
 | [Windsurf](./windsurf) | stdio / HTTP | Varía | Fácil | Compatible |
 | [Cline](./cline) | stdio / HTTP | Varía | Fácil | Compatible |
-| [Qwen Coder CLI](./qwen-coder) | stdio / HTTP | OAuth 2.1 | Fácil | Compatible |
+| [Qwen Code](./qwen-coder) | stdio / HTTP | OAuth 2.1 | Fácil | Compatible |
 
 ## Endpoints MCP
 
