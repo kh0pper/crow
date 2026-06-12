@@ -21,7 +21,7 @@ import {
 import { createDbClient } from "../../db.js";
 
 export function registerIdentityTools(server, ctx) {
-  // Note: ctx is not used — these tools manage their own DB connections.
+  // Note: ctx is not used — these tools manage their own DB connections; ctx is accepted for signature uniformity with the other register* functions.
 
   // --- F.11: Identity attestation tools ---
 
