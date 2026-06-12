@@ -8,7 +8,7 @@ import { randomUUID } from "crypto";
 import { parseVCard, generateVCard, parseCsv } from "./vcard.js";
 import { upsertSetting } from "../../settings/registry.js";
 import { getContacts } from "./data-queries.js";
-import { getManagersOrNull } from "../../../../../sharing/managers.js";
+import { getManagersOrNull } from "../../../../sharing/managers.js";
 
 /**
  * Handle POST actions from the contacts panel.
