@@ -834,10 +834,10 @@ export function createProjectServer(dbPath, options = {}) {
 
   // --- Project Space tools (Phase 1, M2: 2026-05-26) ---
   //
-  // These tools operate on project_spaces (the new shareable space concept)
-  // not the legacy research_projects table. Existing tools (crow_create_project
-  // etc.) keep using research_projects; the M1 forward triggers mirror those
-  // writes into project_spaces, so legacy projects show up here automatically.
+  // These tools operate on project_spaces (the shareable space concept).
+  // Since W2-5B2 every project tool writes project_spaces directly, and the
+  // M1 rp→ps forward triggers were retired in B3a (2026-06-12);
+  // research_projects is a frozen dormant table.
 
   function aclErrorToToolResult(err) {
     return {

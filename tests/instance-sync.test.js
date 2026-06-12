@@ -458,11 +458,13 @@ test("7b. Noise suppression: transform-aware equivalence — research_notes re-d
   const REMOTE = "remote-t7b";
   const { mgr, db } = makeManager(INST);
 
-  // research_notes.project_id is a FK to research_projects — seed the parent first.
+  // research_notes.project_id is a FK to project_spaces (rebuilt in W2-5B2;
+  // the rp→ps trigger that used to satisfy it was retired in B3a) — seed the
+  // ps parent directly.
   // research_notes.lamport_ts is absent on a fresh DB (ordering bug in init-db line 160
   // which runs before the CREATE TABLE at line 481). Use default NULL → 0 via || 0.
   await db.execute({
-    sql: `INSERT INTO research_projects (id, name) VALUES (42, 'Test Project')`,
+    sql: `INSERT INTO project_spaces (id, slug, name, type, status) VALUES (42, 'test-project-42', 'Test Project', 'general', 'active')`,
     args: [],
   });
   await db.execute({

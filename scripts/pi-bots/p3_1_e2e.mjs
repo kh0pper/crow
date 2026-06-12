@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// NOTE (B3a 2026-06-12): research_projects is dormant — temp rows seeded here no longer mirror to project_spaces; harness-internal only.
 /**
  * Crow Bot Builder — Phase 3.1 live verification harness.
  *
