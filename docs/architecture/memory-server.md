@@ -4,6 +4,8 @@ The memory server (`servers/memory/`) provides persistent, searchable memory acr
 
 ## Tools
 
+This page documents the core memory tools. The server registers **24 tools in total** — the rest cover behavioral context (crow.md sections), schedules, notifications, proactive recall (`crow_deep_recall`), embeddings maintenance, and memory-health analysis (`crow_dream`); see the per-category action list in [Context Management](./context-management).
+
 ### crow_store_memory
 
 Store a new piece of information in persistent memory.

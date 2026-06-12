@@ -48,13 +48,13 @@ export async function handlePeerEdit(req, res, { db, layout }) {
   }
   const def = (r.body && r.body.definition) || {};
   const models = await loadModelOptions(db);
-  const status = q.status ? `<div class="muted" style="margin-bottom:1rem">Status: ${escapeHtml(String(q.status))}</div>` : "";
+  const status = q.status ? `<div style="color:var(--crow-text-muted);margin-bottom:1rem">Status: ${escapeHtml(String(q.status))}</div>` : "";
   // disabled "•••• set" indicators for redacted gateway credentials
   const credLines = [];
   for (const gw of (Array.isArray(def.gateways) ? def.gateways : [])) {
     for (const [k, v] of Object.entries(gw || {})) {
       if (v && typeof v === "object" && v.__redacted) {
-        credLines.push(`<div class="muted">${escapeHtml(gw.type || "gateway")}.${escapeHtml(k)}: ${v.set ? "•••• set (edit on owner)" : "not set"}</div>`);
+        credLines.push(`<div style="color:var(--crow-text-muted)">${escapeHtml(gw.type || "gateway")}.${escapeHtml(k)}: ${v.set ? "•••• set (edit on owner)" : "not set"}</div>`);
       }
     }
   }
@@ -62,7 +62,7 @@ export async function handlePeerEdit(req, res, { db, layout }) {
     `<option value="${escapeHtml(o.key)}" ${def.models && def.models.default === o.key ? "selected" : ""}>${escapeHtml(o.label)}</option>`).join("");
   const content = `
     ${status}
-    <p class="muted">Editing <strong>${escapeHtml(botId)}</strong> on instance <strong>${escapeHtml(peerId)}</strong>. Non-secret fields only; this bot runs on its owner.</p>
+    <p style="color:var(--crow-text-muted)">Editing <strong>${escapeHtml(botId)}</strong> on instance <strong>${escapeHtml(peerId)}</strong>. Non-secret fields only; this bot runs on its owner.</p>
     <form method="POST">
       <input type="hidden" name="peer" value="${escapeHtml(peerId)}">
       <input type="hidden" name="bot_id" value="${escapeHtml(botId)}">

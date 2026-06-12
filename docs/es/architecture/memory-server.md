@@ -4,6 +4,8 @@ El servidor de memoria (`servers/memory/`) proporciona memoria persistente y bus
 
 ## Herramientas
 
+Esta página documenta las herramientas centrales de memoria. El servidor registra **24 herramientas en total** — el resto cubre el contexto conductual (secciones de crow.md), programaciones, notificaciones, recuperación proactiva (`crow_deep_recall`), mantenimiento de embeddings y análisis de salud de la memoria (`crow_dream`); consulta la lista de acciones por categoría en [Gestión de Contexto](./context-management).
+
 ### crow_store_memory
 
 Almacena una nueva pieza de información en la memoria persistente.
