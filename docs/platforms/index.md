@@ -17,6 +17,24 @@ Crow uses the open [Model Context Protocol (MCP)](https://modelcontextprotocol.i
 | [Cline](./cline) | stdio / HTTP | Varies | Easy | Compatible |
 | [Qwen Coder CLI](./qwen-coder) | stdio / HTTP | OAuth 2.1 | Easy | Compatible |
 
+## MCP Endpoints
+
+Every path is relative to your gateway URL (e.g. `http://crow:3001`). Each server is available over Streamable HTTP at `<prefix>/mcp` and over legacy SSE at `<prefix>/sse` + `<prefix>/messages`:
+
+| Prefix | Server | Notes |
+|---|---|---|
+| `/router` | **Category router (recommended)** | 10 consolidated tools instead of the full 126+ raw surface — see [Context & Performance](/guide/context-performance) |
+| `/memory` | Memory | The bare `/mcp` path is a compatibility alias for this server |
+| `/projects` | Projects | `/research` is a legacy alias — same server, older name |
+| `/sharing` | Sharing | |
+| `/storage` | Storage | Available only when MinIO is configured |
+| `/blog-mcp` | Blog | |
+| `/tools` | External tool proxy | Integrations (GitHub, Trello, …) aggregated into one endpoint |
+
+::: info Naming aliases
+The **projects** server was previously called **research**. Old configs using `/research/mcp` or the `crow_research` router tool keep working — they are aliases for `/projects/mcp` and `crow_projects`.
+:::
+
 ## Transport Types
 
 Crow's gateway supports two MCP transport protocols:
@@ -24,19 +42,19 @@ Crow's gateway supports two MCP transport protocols:
 ### Streamable HTTP (Recommended)
 
 - Protocol version: `2025-03-26`
-- Endpoints: `/memory/mcp`, `/projects/mcp`, `/sharing/mcp`, `/storage/mcp`, `/blog-mcp/mcp`, `/tools/mcp`
+- Endpoints: `<prefix>/mcp` from the table above
 - Used by: Claude, Gemini, Grok, Cursor, Windsurf, Cline, Claude Code
 
 ### SSE (Legacy)
 
 - Protocol version: `2024-11-05`
-- Endpoints: `/memory/sse`, `/projects/sse`, `/sharing/sse`, `/storage/sse`, `/blog-mcp/sse`, `/tools/sse`
+- Endpoints: `<prefix>/sse` + `<prefix>/messages` from the table above
 - Used by: ChatGPT
 
 ### stdio (Local Only)
 
 - Direct process communication, no network
-- Used by: Claude Desktop, Claude Code (local), Gemini CLI (local), Qwen Coder CLI (local), Cursor (local), Windsurf (local), Cline (local), OpenClaw (local)
+- Used by: Claude Desktop, Claude Code (local), Gemini CLI (local), Qwen Coder CLI (local), Cursor (local), Windsurf (local), Cline (local)
 
 ## Authentication
 

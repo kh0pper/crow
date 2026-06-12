@@ -8,6 +8,8 @@ The sharing server (`servers/sharing/`) enables secure peer-to-peer sharing betw
 
 No external accounts or central servers are required. Everything runs on the user's own infrastructure.
 
+> User-facing walkthroughs: [Sharing guide](/guide/sharing) (contacts, invites, messaging) and [Data Sharing guide](/guide/data-sharing) (sharing memories and projects). This page covers internals.
+
 ## Architecture
 
 ```

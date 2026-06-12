@@ -229,3 +229,7 @@ Add-ons that declare a `webUI` field in their manifest (with `port`, `path`, and
 ## Third-Party Panels
 
 The Crow's Nest supports add-on panels created by the community. Panels are placed in `~/.crow/panels/` and enabled through a configuration file. Add-ons that include a `panel` field in their manifest get their panel automatically installed and registered when the add-on is installed, and removed when uninstalled. See [Creating Panels](/developers/creating-panels) for details.
+
+## Under the Hood
+
+For the panel registry, auth system, and layout internals, see the [Crow's Nest architecture](/architecture/dashboard).
