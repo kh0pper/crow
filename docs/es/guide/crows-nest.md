@@ -228,8 +228,8 @@ Los complementos que declaran un campo `webUI` en su manifiesto (con `port`, `pa
 
 ## Paneles de terceros
 
-El Crow's Nest soporta paneles complementarios creados por la comunidad. Los paneles se colocan en `~/.crow/panels/` y se habilitan mediante un archivo de configuración. Los complementos que incluyen un campo `panel` en su manifiesto obtienen su panel instalado y registrado automáticamente al instalar el complemento, y se elimina al desinstalarlo. Consulta [Creating Panels](/developers/creating-panels) para más detalles.
+El Crow's Nest soporta paneles complementarios creados por la comunidad. Los paneles se colocan en `~/.crow/panels/` y se habilitan mediante un archivo de configuración. Los complementos que incluyen un campo `panel` en su manifiesto obtienen su panel instalado y registrado automáticamente al instalar el complemento, y se elimina al desinstalarlo. Consulta [Creating Panels](/es/developers/creating-panels) para más detalles.
 
 ## Bajo el capó
 
-Para el registro de paneles, el sistema de autenticación y los detalles internos del diseño, consulta la [arquitectura del Crow's Nest](/architecture/dashboard).
+Para el registro de paneles, el sistema de autenticación y los detalles internos del diseño, consulta la [arquitectura del Crow's Nest](/es/architecture/dashboard).

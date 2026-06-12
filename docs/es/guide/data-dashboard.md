@@ -37,7 +37,7 @@ El Panel de Datos aparece en la barra lateral del Nest después de la instalaci�
 
 ## Explorador de Esquemas
 
-El Explorador de Esquemas muestra cada base de datos registrada como [backend de datos](/guide/data-backends). Selecciona una base de datos en el menú desplegable para ver sus tablas, columnas, tipos de datos y relaciones de claves foráneas.
+El Explorador de Esquemas muestra cada base de datos registrada como [backend de datos](/es/guide/data-backends). Selecciona una base de datos en el menú desplegable para ver sus tablas, columnas, tipos de datos y relaciones de claves foráneas.
 
 Úsalo para entender conjuntos de datos desconocidos antes de escribir consultas. El explorador lee únicamente metadatos del esquema — nunca toca tus datos.
 
@@ -116,7 +116,7 @@ El Panel de Datos aplica límites de seguridad estrictos:
 
 ## Próximos Pasos
 
-- [Backends de Datos](/guide/data-backends) — Registra bases de datos externas
+- [Backends de Datos](/es/guide/data-backends) — Registra bases de datos externas
 - [Compartir Datos](./data-sharing) — Comparte bases de datos con otros usuarios de Crow
-- [Arquitectura del Panel de Datos](/architecture/data-dashboard) — Análisis técnico profundo
-- [Extender el Dashboard](/developers/data-dashboard) — Agrega tipos de gráficos y exportadores
+- [Arquitectura del Panel de Datos](/es/architecture/data-dashboard) — Análisis técnico profundo
+- [Extender el Dashboard](/es/developers/data-dashboard) — Agrega tipos de gráficos y exportadores

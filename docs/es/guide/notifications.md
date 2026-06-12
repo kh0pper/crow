@@ -27,7 +27,7 @@ El sondeo se ejecuta cada 60 segundos y aprovecha el mismo viaje para incluir da
 
 ### Aviso de llamada entrante
 
-Cuando alguien te llama, aparece un banner que se desliza desde arriba en cualquier página del Crow's Nest, con botones de **Aceptar** y **Descartar**. El aviso se descarta automáticamente después de 60 segundos. Consulta [Llamadas](/guide/calls) para más detalles.
+Cuando alguien te llama, aparece un banner que se desliza desde arriba en cualquier página del Crow's Nest, con botones de **Aceptar** y **Descartar**. El aviso se descarta automáticamente después de 60 segundos. Consulta [Llamadas](/es/guide/calls) para más detalles.
 
 ### Chat de IA
 
