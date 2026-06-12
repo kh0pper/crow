@@ -8,6 +8,7 @@ import { randomUUID } from "crypto";
 import { parseVCard, generateVCard, parseCsv } from "./vcard.js";
 import { upsertSetting } from "../../settings/registry.js";
 import { getContacts } from "./data-queries.js";
+import { getManagersOrNull } from "../../../../../sharing/managers.js";
 
 /**
  * Handle POST actions from the contacts panel.
@@ -18,10 +19,32 @@ export async function handleContactAction(req, db) {
 
   // --- Block / Unblock ---
   if (action === "block" && req.body.contact_id) {
+    const contactId = parseInt(req.body.contact_id);
     await db.execute({
       sql: "UPDATE contacts SET is_blocked = 1 WHERE id = ?",
-      args: [parseInt(req.body.contact_id)],
+      args: [contactId],
     });
+    // Close Hypercore feeds for the blocked contact to free FDs.
+    // NOTE: unblocking does NOT re-init feeds — no lazy re-init path exists for
+    // contacts. A restart or re-invite is needed to reopen feeds after an unblock.
+    const managers = getManagersOrNull();
+    if (managers) {
+      try {
+        // SyncManager keys by integer contactId; PeerManager keys by crow_id string.
+        if (managers.syncManager) {
+          await managers.syncManager.closeContactFeeds(contactId);
+        }
+        if (managers.peerManager) {
+          const { rows } = await db.execute({
+            sql: "SELECT crow_id FROM contacts WHERE id = ?",
+            args: [contactId],
+          });
+          if (rows[0]?.crow_id) {
+            await managers.peerManager.leaveContact(rows[0].crow_id);
+          }
+        }
+      } catch {}
+    }
     return { redirect: "/dashboard/contacts" };
   }
 

@@ -1233,6 +1233,43 @@ export class InstanceSyncManager {
   }
 
   /**
+   * Close feeds for a single remote instance and remove them from the Maps.
+   *
+   * Serialized through the _initLocks tail so close cannot interleave with a
+   * concurrent initInstance call for the same remoteInstanceId. Hypercore close
+   * is safe and on-disk storage persists; the instance lazily re-inits on
+   * un-revoke (boot.js eagerInitPairedPeers / tailnet-sync paths gate on status
+   * and will reopen when the instance is un-revoked).
+   */
+  async closeInstanceFeeds(remoteInstanceId) {
+    const prior = this._initLocks.get(remoteInstanceId) || Promise.resolve();
+    const next = prior
+      .catch(() => {})
+      .then(() => this._closeInstanceFeedsInner(remoteInstanceId));
+    this._initLocks.set(remoteInstanceId, next);
+    try {
+      return await next;
+    } finally {
+      if (this._initLocks.get(remoteInstanceId) === next) {
+        this._initLocks.delete(remoteInstanceId);
+      }
+    }
+  }
+
+  async _closeInstanceFeedsInner(remoteInstanceId) {
+    const outFeed = this.outFeeds.get(remoteInstanceId);
+    if (outFeed) {
+      try { await outFeed.close(); } catch {}
+      this.outFeeds.delete(remoteInstanceId);
+    }
+    const inFeed = this.inFeeds.get(remoteInstanceId);
+    if (inFeed) {
+      try { await inFeed.close(); } catch {}
+      this.inFeeds.delete(remoteInstanceId);
+    }
+  }
+
+  /**
    * Close all feeds.
    */
   async close() {
