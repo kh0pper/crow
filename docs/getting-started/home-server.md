@@ -60,6 +60,17 @@ See the [Tailscale Setup Guide](./tailscale-setup) for advanced configuration, i
 Your home server can sync with always-free cloud instances for redundancy and remote access. If your home network goes down, your data is safe in the cloud. Set up [Oracle Cloud](./oracle-cloud) or [Google Cloud](./google-cloud) as a second instance, then [chain them together](./multi-device) — memories sync automatically across both.
 :::
 
+## How Your Crow Stays Secure
+
+A home server is private by default — you don't need to do anything extra for these to hold:
+
+- **Nothing is exposed to the internet.** The installer configures the firewall (UFW) to deny inbound traffic except SSH and HTTPS, and adds fail2ban to block brute-force SSH attempts. Your dashboard and MCP endpoints are reachable only from your home network and your Tailscale network.
+- **Never port-forward the gateway.** If you want remote access, use Tailscale (above) — it gives every device an encrypted tunnel without opening your router. The only thing that should ever be public is your blog, via [Tailscale Funnel](./tailscale-setup), which exposes *only* the public-safe paths (blog, feeds) — the dashboard and your data stay unreachable even with Funnel on.
+- **Everything sensitive requires auth.** The dashboard has a password (with optional two-factor authentication in Settings → Two-Factor Auth, plus automatic lockout after repeated failures); remote AI clients authenticate with OAuth; local clients use a token you generate from the dashboard's Connect panel.
+- **Keep auto-update on** (it's on by default) so security fixes arrive without you thinking about them.
+
+For the full picture — what's public by default, how keys are stored, what to do if something leaks — see the [Security Guide](https://github.com/kh0pper/crow/blob/main/SECURITY.md).
+
 ## Connect Your AI Platform
 
 Once Crow is running, connect it from any AI platform:

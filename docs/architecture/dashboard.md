@@ -6,6 +6,8 @@ title: Crow's Nest
 
 The Crow's Nest (`servers/gateway/dashboard/`) is a server-rendered web interface for managing a Crow instance. (The code directory is still named `dashboard/` for backward compatibility; the user-facing name is "Crow's Nest.") It uses no frontend framework — HTML is generated server-side and served directly by the gateway.
 
+> User-facing walkthrough (panels, launcher, day-to-day use): [Crow's Nest guide](/guide/crows-nest). This page covers internals.
+
 ## Brand Identity
 
 The Crow's Nest uses a cool blue-black palette with indigo accents, defined as CSS custom properties in `servers/gateway/dashboard/shared/layout.js`.

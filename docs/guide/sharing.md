@@ -167,3 +167,7 @@ Your Crow ID stays the same. Contacts don't need to re-connect.
 - Safety numbers let you verify connections weren't intercepted
 - Relays only see encrypted blobs — they cannot read your data
 - You can block contacts at any time to stop all communication
+
+## Under the Hood
+
+For the protocol details — identity keys, Hypercore feeds, Nostr encryption, relays — see the [Sharing Server architecture](/architecture/sharing-server).

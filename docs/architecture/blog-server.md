@@ -6,6 +6,8 @@ title: Blog Server
 
 The blog server (`servers/blog/`) provides a publishing platform through MCP tools and public HTTP routes. Posts are written in Markdown, rendered to HTML, and served with RSS/Atom feeds.
 
+> User-facing walkthrough (writing, publishing, going public): [Blog guide](/guide/blog). This page covers internals.
+
 ## Architecture
 
 ```

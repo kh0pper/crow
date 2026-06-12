@@ -2,6 +2,8 @@
 
 The orchestrator server (`servers/orchestrator/`) provides multi-agent orchestration, allowing teams of AI agents to collaborate on complex goals using Crow's MCP tools.
 
+> Looking for the user-facing walkthrough (running teams, scheduling pipelines, monitoring)? See the [Orchestrator guide](/guide/orchestrator). This page covers internals.
+
 Powered by the [open-multi-agent](https://github.com/kh0pper/open-multi-agent) engine, the orchestrator bridges Crow's existing tools (memory, projects, blog, sharing) into a shared tool registry that multiple agents can access simultaneously.
 
 ## How It Works

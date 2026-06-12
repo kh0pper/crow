@@ -211,7 +211,7 @@ export default defineConfig({
           { text: 'Notifications & Push', link: '/guide/notifications' },
           { text: 'Contact Discovery', link: '/guide/contact-discovery' },
           { text: 'Bot Builder', link: '/guide/bot-builder' },
-
+          { text: 'Orchestrator (Agent Teams)', link: '/guide/orchestrator' },
           { text: 'Meta Glasses', link: '/guide/meta-glasses' },
           { text: 'Kiosk Mode', link: '/guide/kiosk-mode' },
           { text: 'Music', link: '/guide/music' },
