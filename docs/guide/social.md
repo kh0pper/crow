@@ -82,7 +82,7 @@ The `crow_sharing_status` tool shows all configured relays, their connection sta
 
 ## Privacy & Security
 
-### What relays can see
+### What relays could see — and how Crow prevents it
 
 Nostr relays are public infrastructure. Without protections, they could see message metadata (who talks to whom, when). Crow mitigates this:
 

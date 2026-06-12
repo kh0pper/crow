@@ -192,5 +192,5 @@ Cuando dos instancias editan la misma memoria sin conexión, se crea un conflict
 ## Próximos Pasos
 
 - [Guía Multi-Instancia](/es/guide/instances) — Descripción completa de las funciones
-- [Arquitectura de Instancias](/architecture/instances) — Internos de sincronización y resolución de conflictos
+- [Arquitectura de Instancias](/es/architecture/instances) — Internos de sincronización y resolución de conflictos
 - [Configuración de Tailscale](./tailscale-setup) — Asegura tus conexiones entre redes

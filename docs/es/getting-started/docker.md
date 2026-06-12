@@ -40,7 +40,7 @@ Esto crea una URL pública vía Cloudflare que puedes usar para conectarte desde
 
 ## Variables de Entorno
 
-El gateway lee todas las claves de API de integraciones desde variables de entorno. Consulta la página de [Integraciones](/integrations/) para la lista completa.
+El gateway lee todas las claves de API de integraciones desde variables de entorno. Consulta la página de [Integraciones](/es/integrations/) para la lista completa.
 
 > **Nota de seguridad**: Si vas a exponer el gateway a internet, usa siempre un proxy inverso (nginx, Caddy o Cloudflare Tunnel) con HTTPS. Nunca expongas el puerto 3001 directamente a internet sin cifrado TLS. La bandera `--no-auth` nunca debe usarse en despliegues expuestos a internet.
 
