@@ -20,9 +20,148 @@ import {
   handleIncomingBotRelay,
 } from "./bot-relay.js";
 
+/**
+ * Deliver all pending shared_items rows for a connected peer.
+ *
+ * Exported for unit testing.  The onPeerConnected callback calls it with an
+ * outer try/catch (never rejects) because peer-manager invokes that callback
+ * fire-and-forget with no .catch — an unhandled rejection would crash the process.
+ *
+ * Clone rows (mode='clone', share_type='project'):
+ *   - Archived/missing project → mark 'failed', warn, continue.
+ *   - Member row with revoked_at IS NOT NULL → mark 'failed', warn, continue.
+ *   - Member row ABSENT → deliver with role 'viewer' / capabilities null
+ *     (member-row write at share time is non-fatal — absent rows are legitimate).
+ *   - Otherwise → rebuild bundle fresh, send, mark 'delivered' on success.
+ * Plain rows (mode NULL):
+ *   - Existing tableMap path, behavior unchanged.
+ */
+export async function deliverPendingShares({ db, peerManager, contact, identityCrowId, buildProjectCloneBundle }) {
+  const crowId = contact.crow_id;
+  const pending = await db.execute({
+    sql: `SELECT * FROM shared_items WHERE contact_id = ? AND direction = 'sent' AND delivery_status = 'pending'`,
+    args: [contact.id],
+  });
+
+  let delivered = 0;
+  for (const share of pending.rows) {
+    try {
+      // --- Clone re-delivery path ---
+      if (share.mode === "clone" && share.share_type === "project") {
+        // Explicit archived check: buildProjectCloneBundle doesn't filter archived rows.
+        const psRow = (await db.execute({
+          sql: "SELECT archived_at FROM project_spaces WHERE id = ?",
+          args: [share.item_id],
+        })).rows[0];
+        if (!psRow || psRow.archived_at !== null && psRow.archived_at !== undefined && psRow.archived_at) {
+          await db.execute({
+            sql: "UPDATE shared_items SET delivery_status = 'failed' WHERE id = ?",
+            args: [share.id],
+          });
+          console.warn(`[sharing] queued clone #${share.id}: project #${share.item_id} is archived/missing — marked failed`);
+          continue;
+        }
+
+        // Member row lookup WITHOUT the revoked filter.
+        const memberRow = (await db.execute({
+          sql: `SELECT role, capabilities, revoked_at FROM project_members
+                WHERE project_id = ? AND contact_id = ? AND mode = 'clone'
+                ORDER BY id DESC LIMIT 1`,
+          args: [share.item_id, share.contact_id],
+        })).rows[0];
+
+        if (memberRow && memberRow.revoked_at != null) {
+          // Revoked: mark failed and skip — crow_revoke_access normally DELETEs the
+          // shared_items row (sharing-admin.js:72-76), so this branch is defensive.
+          await db.execute({
+            sql: "UPDATE shared_items SET delivery_status = 'failed' WHERE id = ?",
+            args: [share.id],
+          });
+          console.warn(`[sharing] queued clone #${share.id}: project #${share.item_id} access revoked — marked failed`);
+          continue;
+        }
+
+        // Use member row values if present; fall back to viewer/null if absent.
+        const role = memberRow?.role ?? "viewer";
+        const capabilities = memberRow?.capabilities ?? null;
+
+        // Rebuild the bundle fresh (snapshot-at-delivery semantics).
+        const bundle = await buildProjectCloneBundle(share.item_id);
+
+        peerManager.send(crowId, {
+          type: "share",
+          share_type: "project",
+          mode: "clone",
+          payload: bundle,
+          role,
+          capabilities,
+          sender: identityCrowId,
+          timestamp: new Date().toISOString(),
+        });
+
+        await db.execute({
+          sql: "UPDATE shared_items SET delivery_status = 'delivered' WHERE id = ?",
+          args: [share.id],
+        });
+        delivered++;
+        continue;
+      }
+
+      // --- Plain row path (mode NULL) — behavior unchanged ---
+      const tableMap = {
+        memory: { table: "memories", query: null },
+        project: {
+          table: "project_spaces",
+          query: `SELECT id, uuid, name, description, type, status, tags, created_at, updated_at
+                  FROM project_spaces WHERE id = ? AND archived_at IS NULL`,
+        },
+        source: { table: "research_sources", query: null },
+        note: { table: "research_notes", query: null },
+        kb_article: { table: "kb_articles", query: null },
+      };
+      const mapEntry = tableMap[share.share_type];
+      if (!mapEntry) continue;
+
+      let itemDataRows;
+      if (mapEntry.query) {
+        const r = await db.execute({ sql: mapEntry.query, args: [share.item_id] });
+        itemDataRows = r.rows;
+      } else {
+        const r = await db.execute({
+          sql: `SELECT * FROM ${mapEntry.table} WHERE id = ?`,
+          args: [share.item_id],
+        });
+        itemDataRows = r.rows;
+      }
+      if (itemDataRows.length === 0) continue;
+
+      peerManager.send(crowId, {
+        type: "share",
+        share_type: share.share_type,
+        payload: itemDataRows[0],
+        permissions: share.permissions,
+        sender: identityCrowId,
+        timestamp: new Date().toISOString(),
+      });
+
+      await db.execute({
+        sql: "UPDATE shared_items SET delivery_status = 'delivered' WHERE id = ?",
+        args: [share.id],
+      });
+      delivered++;
+    } catch (err) {
+      // Delivery failed — will retry next connection
+    }
+  }
+
+  if (pending.rows.length > 0) {
+    console.log(`[sharing] Delivered ${delivered}/${pending.rows.length} pending share(s) to ${crowId}`);
+  }
+}
+
 export async function initSharingRuntime(managers, helpers) {
   const { db, identity, peerManager, syncManager, instanceSyncManager, nostrManager } = managers;
-  const { applyProjectCloneBundle } = helpers;
+  const { applyProjectCloneBundle, buildProjectCloneBundle } = helpers;
 
   // W4-2 B: runtime guard — a host that pulls code before running init-db will
   // have shared_items without the mode column; ensureColumn is idempotent and
@@ -345,64 +484,18 @@ export async function initSharingRuntime(managers, helpers) {
       args: [c.id],
     });
 
-    // Deliver any pending shares
-    const pending = await db.execute({
-      sql: `SELECT si.*, '${c.crow_id}' as crow_id FROM shared_items si
-            WHERE si.contact_id = ? AND si.direction = 'sent' AND si.delivery_status = 'pending'`,
-      args: [c.id],
-    });
-
-    for (const share of pending.rows) {
-      try {
-        // W4-2: queued clone shares go out without mode:"clone" (receiver no-ops them) — known bug, fix scheduled in W4-2
-        const tableMap = {
-          memory: { table: "memories", query: null },
-          project: {
-            table: "project_spaces",
-            query: `SELECT id, uuid, name, description, type, status, tags, created_at, updated_at
-                    FROM project_spaces WHERE id = ? AND archived_at IS NULL`,
-          },
-          source: { table: "research_sources", query: null },
-          note: { table: "research_notes", query: null },
-          kb_article: { table: "kb_articles", query: null },
-        };
-        const mapEntry = tableMap[share.share_type];
-        if (!mapEntry) continue;
-
-        let itemDataRows;
-        if (mapEntry.query) {
-          const r = await db.execute({ sql: mapEntry.query, args: [share.item_id] });
-          itemDataRows = r.rows;
-        } else {
-          const r = await db.execute({
-            sql: `SELECT * FROM ${mapEntry.table} WHERE id = ?`,
-            args: [share.item_id],
-          });
-          itemDataRows = r.rows;
-        }
-        const itemData = { rows: itemDataRows };
-        if (itemData.rows.length === 0) continue;
-
-        peerManager.send(crowId, {
-          type: "share",
-          share_type: share.share_type,
-          payload: itemData.rows[0],
-          permissions: share.permissions,
-          sender: identity.crowId,
-          timestamp: new Date().toISOString(),
-        });
-
-        await db.execute({
-          sql: "UPDATE shared_items SET delivery_status = 'delivered' WHERE id = ?",
-          args: [share.id],
-        });
-      } catch (err) {
-        // Delivery failed — will retry next connection
-      }
-    }
-
-    if (pending.rows.length > 0) {
-      console.log(`[sharing] Delivered ${pending.rows.length} pending share(s) to ${crowId}`);
+    // Deliver any pending shares — outer try/catch: peer-manager invokes this
+    // callback fire-and-forget (no .catch); an unhandled rejection crashes the process.
+    try {
+      await deliverPendingShares({
+        db,
+        peerManager,
+        contact: c,
+        identityCrowId: identity.crowId,
+        buildProjectCloneBundle,
+      });
+    } catch (err) {
+      console.warn(`[sharing] deliverPendingShares for ${crowId}: ${err.message}`);
     }
   };
 
