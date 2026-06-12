@@ -6,6 +6,8 @@ title: Storage Server
 
 The storage server (`servers/storage/`) provides S3-compatible file storage through MCP tools and HTTP endpoints. It connects to MinIO (or any S3-compatible service) for object storage and tracks file metadata in SQLite.
 
+> User-facing walkthrough (setup, uploading, quotas): [Storage guide](/guide/storage). This page covers internals.
+
 ## Architecture
 
 ```

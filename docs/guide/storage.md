@@ -21,13 +21,13 @@ Files are organized by type — images, documents, audio, attachments — and ac
 
 ## Setup
 
-Storage requires a MinIO instance. The easiest way is Docker:
+Storage requires a MinIO instance. If you run Crow with Docker Compose, add the storage profile to your usual command:
 
 ```bash
-docker compose --profile full up --build
+docker compose --profile local --profile storage up --build
 ```
 
-This starts MinIO alongside the gateway. For standalone MinIO:
+(Use `--profile cloud` instead of `local` on a cloud deployment.) For standalone MinIO:
 
 ```bash
 docker run -d \
@@ -45,13 +45,16 @@ Then add these to your `.env`:
 ```bash
 MINIO_ENDPOINT=localhost
 MINIO_PORT=9000
-MINIO_ACCESS_KEY=crowadmin
-MINIO_SECRET_KEY=your-secure-password
-MINIO_BUCKET=crow-storage
+MINIO_ROOT_USER=crowadmin
+MINIO_ROOT_PASSWORD=your-secure-password
 MINIO_USE_SSL=false
 ```
 
-Run `npm run mcp-config` to regenerate your MCP configuration.
+Crow creates and manages its bucket (`crow-files`) automatically — no bucket setup needed. Run `npm run mcp-config` to regenerate your MCP configuration, then restart the gateway.
+
+::: tip Already have S3 somewhere else?
+Any S3-compatible service works — set `S3_ENDPOINT`, `S3_ACCESS_KEY`, and `S3_SECRET_KEY` instead. You can also configure shared storage from the dashboard (Settings → Shared Storage), which takes precedence over `.env`.
+:::
 
 ## Uploading Files
 
@@ -149,3 +152,7 @@ Storage is optional — Crow works without it. But configuring MinIO unlocks the
 > "Delete the file old-draft.pdf from storage"
 
 Deletion is permanent. Files are removed from both MinIO and the database index.
+
+## Under the Hood
+
+Curious how presigned URLs, quotas, and the MinIO client work internally? See the [Storage Server architecture](/architecture/storage-server).

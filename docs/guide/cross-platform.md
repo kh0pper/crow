@@ -50,7 +50,7 @@ Beyond using Crow from multiple AI platforms, you can run Crow on multiple *mach
 
 ### Step 1: Deploy Crow
 
-Follow the [Cloud Deploy Guide](/getting-started/cloud-deploy) to get your gateway running. You'll get a URL like:
+Follow the [Getting Started guide](/getting-started/) to get your gateway running. You'll get a URL like:
 ```
 https://your-crow-server
 ```
@@ -162,3 +162,7 @@ Crow will store this as a new section, and it will appear in the context documen
 - No platform can access another platform's OAuth tokens
 - All platforms read/write the same data — that's the point
 - You control what's stored and can delete anything anytime
+
+### Local clients: the connect token
+
+Clients on your own network (Claude Code, Cursor, a desktop app) don't need the OAuth dance. Open **Connect** in the Crow's Nest dashboard to generate a **local MCP token**: it's shown once, stored only as a hash, and verified server-side on every request. Paste it into your client config as a bearer token, and rotate or revoke it from the same panel anytime. One token per instance — revoking it disconnects every client using it.
