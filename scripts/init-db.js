@@ -591,6 +591,13 @@ await initTable("shared_items table", `
   CREATE INDEX IF NOT EXISTS idx_shared_items_direction ON shared_items(direction);
 `);
 
+// W4-2 B: track whether a queued share is a project clone ("clone") or a plain
+// share row (NULL).  Placed after the initTable block so that the fresh-DB path
+// runs in the right order.  The rebuild-migration CREATE at ~:550 intentionally
+// omits this column because its SELECT * runs before mode exists on first new-code
+// run; addColumnIfMissing is idempotent and safe on both fresh and existing DBs.
+await addColumnIfMissing("shared_items", "mode", "TEXT");
+
 await initTable("messages table", `
   CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

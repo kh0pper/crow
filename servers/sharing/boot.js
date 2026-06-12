@@ -13,6 +13,7 @@
  */
 
 import { createNotification } from "../shared/notifications.js";
+import { ensureColumn } from "../db.js";
 import {
   resolveLocalInstanceName,
   resolvePendingRelay,
@@ -22,6 +23,15 @@ import {
 export async function initSharingRuntime(managers, helpers) {
   const { db, identity, peerManager, syncManager, instanceSyncManager, nostrManager } = managers;
   const { applyProjectCloneBundle } = helpers;
+
+  // W4-2 B: runtime guard — a host that pulls code before running init-db will
+  // have shared_items without the mode column; ensureColumn is idempotent and
+  // safe to run every startup (mirrors migrations.js:152 precedent for op column).
+  try {
+    await ensureColumn(db, "shared_items", "mode", "TEXT");
+  } catch (err) {
+    console.warn("[sharing] ensureColumn shared_items.mode:", err.message);
+  }
 
   // Start peer manager and join DHT topics for existing contacts
   peerManager.start().then(async () => {
