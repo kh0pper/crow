@@ -99,8 +99,8 @@ Todos los modos de compartición admiten revocación:
 
 - [Guía de Compartir](./sharing) — Conceptos generales de compartición P2P
 - [Data Dashboard](./data-dashboard) — Consulta y visualiza bases de datos compartidas
-- [Backends de Datos](/guide/data-backends) — Registra bases de datos para compartir
+- [Backends de Datos](/es/guide/data-backends) — Registra bases de datos para compartir
 
 ## Bajo el capó
 
-Para el formato del paquete de clonación y los detalles internos del protocolo de compartición, consulta la [arquitectura del Sharing Server](/architecture/sharing-server).
+Para el formato del paquete de clonación y los detalles internos del protocolo de compartición, consulta la [arquitectura del Sharing Server](/es/architecture/sharing-server).

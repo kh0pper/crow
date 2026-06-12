@@ -4,46 +4,46 @@ title: TriliumNext
 
 # TriliumNext
 
-Conecta Crow a TriliumNext para buscar, crear y organizar notas en tu base de conocimiento personal a traves de tu asistente de IA.
+Conecta Crow a TriliumNext para buscar, crear y organizar notas en tu base de conocimiento personal a través de tu asistente de IA.
 
-## Que obtienes
+## Qué obtienes
 
-- Buscar notas por contenido, titulo o atributos
+- Buscar notas por contenido, título o atributos
 - Crear y editar notas con texto enriquecido o markdown
-- Explorar la estructura del arbol de notas
-- Recortar paginas web en notas
-- Acceder y crear notas del dia (diario diario)
+- Explorar la estructura del árbol de notas
+- Recortar páginas web en notas
+- Acceder y crear notas del día (diario diario)
 - Exportar notas en varios formatos
 
-## Configuracion
+## Configuración
 
-Crow soporta dos modos: autoalojar TriliumNext via Docker o conectarse a una instancia existente.
+Crow soporta dos modos: autoalojar TriliumNext vía Docker o conectarse a una instancia existente.
 
-### Opcion A: Docker (autoalojado)
+### Opción A: Docker (autoalojado)
 
 Instala TriliumNext como un bundle de Crow:
 
 > "Crow, instala el bundle de TriliumNext"
 
-O instalalo desde el panel de **Extensiones** en el Crow's Nest.
+O instálalo desde el panel de **Extensiones** en el Crow's Nest.
 
-TriliumNext estara disponible en `http://tu-servidor:8080` despues de la instalacion. Completa la configuracion inicial en la interfaz web para establecer tu contrasena.
+TriliumNext estará disponible en `http://tu-servidor:8080` después de la instalación. Completa la configuración inicial en la interfaz web para establecer tu contraseña.
 
-### Opcion B: Conectar a TriliumNext existente
+### Opción B: Conectar a TriliumNext existente
 
 Si ya tienes un servidor TriliumNext funcionando, conecta Crow directamente.
 
 #### Paso 1: Obtener tu token ETAPI
 
 1. Abre la interfaz web de TriliumNext
-2. Ve a **Opciones** (menu superior derecho) > **ETAPI**
+2. Ve a **Opciones** (menú superior derecho) > **ETAPI**
 3. Haz clic en **Crear nuevo token ETAPI**
 4. Ponle un nombre (ej., "Crow")
 5. Copia el token generado
 
 #### Paso 2: Agregar a Crow
 
-Configura lo siguiente en tu archivo `.env` o via **Crow's Nest** > **Ajustes** > **Integraciones**:
+Configura lo siguiente en tu archivo `.env` o vía **Crow's Nest** > **Ajustes** > **Integraciones**:
 
 ```bash
 TRILIUM_URL=http://tu-servidor-trilium:8080
@@ -52,31 +52,31 @@ TRILIUM_ETAPI_TOKEN=tu-token-etapi-aqui
 
 ## Herramientas de IA
 
-Una vez conectado, interactua con TriliumNext a traves de tu IA:
+Una vez conectado, interactúa con TriliumNext a través de tu IA:
 
-> "Busca en mis notas 'planificacion de proyecto'"
+> "Busca en mis notas 'planificación de proyecto'"
 
-> "Crea una nota llamada 'Notas de reunion — 21 de marzo' bajo mi carpeta Trabajo"
+> "Crea una nota llamada 'Notas de reunión — 21 de marzo' bajo mi carpeta Trabajo"
 
-> "Muestrame la nota del dia de hoy"
+> "Muéstrame la nota del día de hoy"
 
-> "Recorta este articulo en TriliumNext: https://ejemplo.com/articulo"
+> "Recorta este artículo en TriliumNext: https://ejemplo.com/articulo"
 
-> "Explora mi arbol de notas"
+> "Explora mi árbol de notas"
 
-> "Exporta mi carpeta de Investigacion como HTML"
+> "Exporta mi carpeta de Investigación como HTML"
 
 ## Flujos de trabajo
 
-### Captura de investigacion
+### Captura de investigación
 
-Combina TriliumNext con las herramientas de investigacion de Crow:
+Combina TriliumNext con las herramientas de investigación de Crow:
 
-> "Guarda estos hallazgos de investigacion en una nota de TriliumNext y agrega la fuente a mi proyecto de Crow"
+> "Guarda estos hallazgos de investigación en una nota de TriliumNext y agrega la fuente a mi proyecto de Crow"
 
-Las notas creadas de esta forma se vinculan a tu proyecto de investigacion de Crow para referencias cruzadas.
+Las notas creadas de esta forma se vinculan a tu proyecto de investigación de Crow para referencias cruzadas.
 
-### Organizacion de conocimiento
+### Organización de conocimiento
 
 Usa tu IA para reorganizar notas:
 
@@ -86,13 +86,13 @@ Usa tu IA para reorganizar notas:
 
 ### Diario diario
 
-Las notas del dia de TriliumNext funcionan bien con el protocolo de sesion de Crow:
+Las notas del día de TriliumNext funcionan bien con el protocolo de sesión de Crow:
 
-> "Agrega un resumen de la sesion de hoy a mi nota del dia"
+> "Agrega un resumen de la sesión de hoy a mi nota del día"
 
 ## Referencia de Docker Compose
 
-Si prefieres una configuracion manual de Docker:
+Si prefieres una configuración manual de Docker:
 
 ```yaml
 services:
@@ -109,20 +109,20 @@ volumes:
   trilium-data:
 ```
 
-## Solucion de problemas
+## Solución de problemas
 
-### "Conexion rechazada" o tiempo de espera agotado
+### "Conexión rechazada" o tiempo de espera agotado
 
-Asegurate de que la `TRILIUM_URL` sea accesible desde la maquina que ejecuta Crow. TriliumNext usa el puerto 8080 por defecto.
+Asegúrate de que la `TRILIUM_URL` sea accesible desde la máquina que ejecuta Crow. TriliumNext usa el puerto 8080 por defecto.
 
 ### "401 No autorizado"
 
 Es posible que el token ETAPI haya sido eliminado. Crea uno nuevo desde Opciones > ETAPI en la interfaz web de TriliumNext.
 
-### Las notas no aparecen en la busqueda
+### Las notas no aparecen en la búsqueda
 
-Los indices de busqueda de TriliumNext pueden necesitar reconstruirse. Abre la interfaz web de TriliumNext y revisa Opciones > Avanzado para opciones de reindexacion.
+Los índices de búsqueda de TriliumNext pueden necesitar reconstruirse. Abre la interfaz web de TriliumNext y revisa Opciones > Avanzado para opciones de reindexación.
 
-### Las notas del dia no funcionan
+### Las notas del día no funcionan
 
-Las notas del dia requieren una estructura de notas especifica en TriliumNext. Asegurate de tener una nota "Journal" con el atributo `#calendarRoot`. TriliumNext la crea automaticamente durante la configuracion inicial.
+Las notas del día requieren una estructura de notas específica en TriliumNext. Asegúrate de tener una nota "Journal" con el atributo `#calendarRoot`. TriliumNext la crea automáticamente durante la configuración inicial.

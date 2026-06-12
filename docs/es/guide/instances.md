@@ -131,5 +131,5 @@ Accede a él en la URL de tu gateway, en la pestaña de Instancias.
 ## Próximos Pasos
 
 - [Inicio Rápido Multi-Dispositivo](/es/getting-started/multi-device) — Guía de configuración paso a paso
-- [Arquitectura de Instancias](/architecture/instances) — Análisis profundo de los internos de la sincronización
+- [Arquitectura de Instancias](/es/architecture/instances) — Análisis profundo de los internos de la sincronización
 - [Configuración de Tailscale](/es/getting-started/tailscale-setup) — Conectividad segura entre redes

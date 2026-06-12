@@ -82,7 +82,7 @@ Agrega claves de API para servicios externos en tu panel de Render, bajo **Envir
 | Trello | `TRELLO_API_KEY` + `TRELLO_TOKEN` | [Power-Ups de Trello](https://trello.com/power-ups/admin) |
 | Google Workspace | `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` | [Consola de Google Cloud](https://console.cloud.google.com/apis/credentials) |
 
-Consulta la lista completa en la página de [Integraciones](/integrations/).
+Consulta la lista completa en la página de [Integraciones](/es/integrations/).
 
 Después de agregar las claves, Render se reinicia automáticamente. Actualiza tu página `/setup` para confirmar que están conectadas.
 

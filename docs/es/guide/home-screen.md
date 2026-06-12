@@ -49,5 +49,5 @@ Ancla conversaciones, borradores del blog o proyectos a la pantalla de inicio pa
 ## Relacionado
 
 - [Vista general del Crow's Nest](/es/guide/crows-nest) — Documentación completa del dashboard
-- [Creating Add-ons](/developers/creating-addons) — Cómo crear complementos que aparecen en la pantalla de inicio
-- [Creating Panels](/developers/creating-panels) — Cómo crear paneles para el dashboard
+- [Creating Add-ons](/es/developers/creating-addons) — Cómo crear complementos que aparecen en la pantalla de inicio
+- [Creating Panels](/es/developers/creating-panels) — Cómo crear paneles para el dashboard
