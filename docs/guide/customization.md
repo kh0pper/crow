@@ -189,7 +189,7 @@ To enable per-device context, set the `CROW_DEVICE_ID` environment variable befo
 CROW_DEVICE_ID=grackle
 ```
 
-This tells Crow which device it's running on. Once the gateway wiring is complete, it will automatically apply the right device overrides to the MCP instructions.
+This tells Crow which device it's running on. The gateway and the stdio servers automatically apply the matching device overrides to the MCP instructions and to `crow.md`.
 
 ---
 

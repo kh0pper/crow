@@ -13,7 +13,7 @@ Conecta Crow a [Cline](https://github.com/cline/cline), la extensión de VS Code
    npm run setup
    ```
 
-2. Abre la Configuración de VS Code → busca "Cline MCP" → edita la configuración del servidor MCP, o crea `~/.cline/mcp_config.json`:
+2. En el panel de Cline, haz clic en el icono **MCP Servers** (barra de herramientas) → **Configure** → **Configure MCP Servers**. Esto abre el archivo de configuración MCP de Cline (`cline_mcp_settings.json`, almacenado bajo el directorio `globalStorage/saoudrizwan.claude-dev/settings/` de VS Code). Agrega:
    ```json
    {
      "mcpServers": {
@@ -43,7 +43,7 @@ Conecta Crow a [Cline](https://github.com/cline/cline), la extensión de VS Code
 
 1. Despliega Crow ([Guía de despliegue en la nube](/es/getting-started/cloud-deploy))
 
-2. Agrega a la configuración MCP de Cline:
+2. En el panel de Cline, abre **MCP Servers** → **Remote Servers** y agrega el nombre del servidor + la URL, o edita `cline_mcp_settings.json` (vía **Configure** → **Configure MCP Servers**):
    ```json
    {
      "mcpServers": {

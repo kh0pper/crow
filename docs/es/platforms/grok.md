@@ -7,45 +7,38 @@ Conecta Crow a Grok de xAI usando su soporte de Remote MCP Tools.
 - Gateway de Crow desplegado y funcionando ([Guía de despliegue en la nube](/es/getting-started/cloud-deploy))
 - Una cuenta de API de xAI
 
-## Pasos de configuración
+Cualquiera de las dos rutas requiere que tu gateway de Crow sea accesible desde la internet pública (los servidores de xAI lo llaman directamente) — un gateway accesible solo por Tailscale no funcionará con Grok. Recuerda las [reglas de exposición de red](https://github.com/kh0pper/crow/blob/main/SECURITY.md#whats-public-by-default) antes de exponer endpoints MCP públicamente.
 
-Grok admite servidores MCP remotos a través de su API. Configura Crow como una fuente de herramientas remota:
+## Opción A: Connectors de grok.com (interfaz de consumidor)
 
-1. En tu configuración de Grok/xAI, agrega un servidor MCP remoto:
-   ```json
-   {
-     "mcp_servers": [
-       {
-         "url": "https://your-crow-server/memory/mcp",
-         "name": "crow-memory"
-       },
-       {
-         "url": "https://your-crow-server/projects/mcp",
-         "name": "crow-projects"
-       },
-       {
-         "url": "https://your-crow-server/tools/mcp",
-         "name": "crow-tools"
-       }
-     ]
-   }
-   ```
+1. Ve a **grok.com → Connectors → Custom** y agrega un conector MCP personalizado.
+2. Ingresa la URL de tu servidor MCP de Crow (p. ej. `https://your-crow-server/router/mcp`).
+3. Completa la autorización OAuth cuando se te solicite — el gateway de Crow soporta el flujo OAuth 2.1 que usa Connectors.
 
-2. Si usas OAuth, el cliente deberá completar el flujo de autorización. Si usas tokens bearer, puedes generar un token mediante el flujo de OAuth del gateway y pasarlo directamente.
+## Opción B: API de xAI — Remote MCP Tools
+
+Declara Crow como una entrada MCP en el arreglo `tools` de tu solicitud a la API:
+
+```json
+{
+  "tools": [
+    {
+      "type": "mcp",
+      "server_url": "https://your-crow-server/router/mcp",
+      "server_label": "crow",
+      "authorization": "YOUR_ACCESS_TOKEN"
+    }
+  ]
+}
+```
+
+El valor de `authorization` se envía a Crow como un encabezado `Bearer`. Para generar un token, registra un cliente mediante el endpoint `/register` del gateway y completa el flujo de OAuth para obtener un token de acceso (consulta [OAuth 2.1](/architecture/gateway#oauth-2-1)). Campos opcionales: `server_description`, `allowed_tools`, `headers`.
 
 ## Transporte
 
-- **Tipo**: Streamable HTTP
+- **Tipo**: Streamable HTTP (o SSE)
 - **Protocolo**: `2025-03-26`
-- **Autenticación**: OAuth 2.1 o token Bearer
-
-## Uso de tokens Bearer
-
-Si tu cliente de Grok no admite el descubrimiento de OAuth, puedes:
-
-1. Registrar un cliente manualmente mediante el endpoint `/register`
-2. Completar el flujo de OAuth para obtener un token de acceso
-3. Pasar el token como encabezado `Bearer` en las solicitudes
+- **Autenticación**: OAuth 2.1 (Connectors) o Bearer vía el campo `authorization` (API)
 
 ## Contexto multiplataforma
 
