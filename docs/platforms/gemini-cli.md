@@ -60,8 +60,8 @@ Best for development — runs Crow servers directly on your machine. No gateway 
            "CROW_DB_PATH": "/path/to/crow/data/crow.db",
            "MINIO_ENDPOINT": "localhost",
            "MINIO_PORT": "9000",
-           "MINIO_ACCESS_KEY": "your-access-key",
-           "MINIO_SECRET_KEY": "your-secret-key"
+           "MINIO_ROOT_USER": "crowadmin",
+           "MINIO_ROOT_PASSWORD": "your-secure-password"
          }
        }
      }
