@@ -88,10 +88,12 @@ Each agent's `tools` array lists the specific tools relevant to its role. The co
 
 ### Adding a Preset
 
-Add an entry to `servers/orchestrator/presets.js`:
+Presets live in modules under `servers/orchestrator/presets/` — `core.js` (general teams), `mpa.js`, `teams.js`, `bot-job-search.js`, `bot-trackers.js`, with shared constants in `shared.js`. The entry point `servers/orchestrator/presets.js` spreads them into one `presets` object (spread order is frozen — consumers may iterate `Object.keys(presets)`).
+
+Add an entry to the module that fits your preset (e.g. `servers/orchestrator/presets/core.js`):
 
 ```javascript
-export const presets = {
+export const corePresets = {
   my_preset: {
     description: "What this team does",
     categories: ["memory", "projects"],  // which MCP servers to bridge

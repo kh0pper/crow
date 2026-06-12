@@ -4,7 +4,19 @@ The gateway (`servers/gateway/`) is an Express server that makes Crow's MCP serv
 
 ## Modular Route Structure
 
-The gateway uses a modular route architecture. Core MCP transport logic is in `routes/mcp.js`, which exports the `mountMcpServer()` helper. Other route modules handle specific concerns:
+The gateway entry point (`servers/gateway/index.js`, ~600 lines) is an **ordered security narrative**: the funnel/network-boundary middleware and the auth chain are wired inline, in a deliberate order that *is* the security model. Everything else is mounted from modules under `servers/gateway/boot/`:
+
+| Boot module | Purpose |
+|---|---|
+| `boot/public-endpoints.js` | Public-safe endpoints (`/health`, `.well-known`, robots, manifest) |
+| `boot/mcp-mounts.js` | All MCP server mounts (per-server endpoints + the router) |
+| `boot/feature-mounts.js` | Feature routes: backup admin, storage, blog, window manager, media |
+| `boot/admin-api.js` | Dashboard admin API routes |
+| `boot/peer-public-api.js` | Peer/federation public API surface |
+| `boot/late-mounts.js` | Routes that must mount after the main stacks |
+| `boot/post-listen.js` | Post-listen startup tasks + console summary |
+
+Core MCP transport logic is in `routes/mcp.js`, which exports the `mountMcpServer()` helper. Other route modules handle specific concerns:
 
 | Module | Purpose |
 |---|---|
@@ -18,7 +30,7 @@ The gateway uses a modular route architecture. Core MCP transport logic is in `r
 
 ### mountMcpServer() Helper
 
-All MCP servers are mounted via the `mountMcpServer(router, prefix, createServer, sessionManager, authMiddleware)` function from `routes/mcp.js`. It registers both Streamable HTTP and SSE endpoints for a given server factory, using the consolidated `SessionManager` for session tracking.
+All MCP servers are mounted via the `mountMcpServer(router, prefix, createServer, sessionManager, authMiddleware, peerGate)` function from `routes/mcp.js`. It registers both Streamable HTTP and SSE endpoints for a given server factory, using the consolidated `SessionManager` for session tracking. The optional `peerGate` is a default-deny exposure check applied to authenticated **peer instances** (federation): a remote instance can only reach servers the operator has explicitly exposed to it. Local operators (dashboard session, OAuth, or the local MCP token) bypass the peer gate.
 
 ### Streamable HTTP (Primary)
 
@@ -33,6 +45,7 @@ Modern MCP transport used by most clients.
 | `POST\|GET\|DELETE /storage/mcp` | crow-storage (conditional, requires MinIO) |
 | `POST\|GET\|DELETE /blog-mcp/mcp` | crow-blog |
 | `POST\|GET\|DELETE /tools/mcp` | External tool proxy |
+| `POST\|GET\|DELETE /wm/mcp` | Window manager (companion kiosk client; mounted without OAuth — protected by the network boundary, never funnel-exposed) |
 | `POST\|GET\|DELETE /mcp` | crow-memory (compatibility alias) |
 
 Sessions are managed via the `mcp-session-id` header. New sessions are created on `initialize` requests. Each transport gets an in-memory `EventStore` for resumability.
@@ -128,6 +141,8 @@ No authentication required — doesn't expose secrets.
 - **`/api/health`** is protected by dashboard session auth — it exposes system metrics (RAM, disk, CPU). The public **`/health`** endpoint returns only server status (no system info)
 - **OAuth tokens** are stored in the SQLite database and persist across restarts
 - **Rate limiting** is built in — 200 requests per 15 minutes (general) and 20 requests per 15 minutes (auth endpoints: `/authorize`, `/token`, `/register`). For high-traffic deployments, add additional rate limiting via your reverse proxy or hosting provider
+- **SSE connections are capped** — at most `CROW_SSE_MAX` (default 200) concurrent open streams across all eight SSE endpoints. Over the cap, the gateway responds `503` with `Retry-After: 5` and releases all per-stream resources
+- A **local MCP token** (generated from the dashboard's Connect panel) authenticates local AI clients without the OAuth flow — verified server-side, hashed at rest, revocable from the same panel. See the [Cross-Platform Guide](../guide/cross-platform.md)
 - **Content Security Policy** restricts resource loading — allows Google Fonts (dashboard), same-origin scripts, and podcast media sources
 - The **`/crow.md` endpoint** is protected by OAuth when auth is enabled, since it exposes behavioral context
 
@@ -135,9 +150,9 @@ For the full public/private access model, see the [Security Guide](https://githu
 
 ## Router Mode
 
-The `/router/mcp` endpoint exposes 7 consolidated category tools instead of the full 49+ tools from all servers. This reduces context window usage by approximately 75%.
+The `/router/mcp` endpoint exposes **one consolidated category tool per server** instead of the full raw tool surface (120+ tools across all servers). This is a major context-window reduction and the recommended way to connect an AI client.
 
-Each category tool (`crow_memory`, `crow_projects`, `crow_sharing`, `crow_storage`, `crow_blog`, `crow_tools`, `crow_discover`) dispatches to the underlying server via an in-process MCP Client. The `crow_discover` tool returns full schemas on demand, so clients can inspect available actions without loading all tool definitions upfront. The `crow_research` name is accepted as a backward-compatible alias for `crow_projects`.
+On a full install the router registers 10 tools: 8 category tools (`crow_memory`, `crow_projects`, `crow_blog`, `crow_sharing`, `crow_storage`, `crow_media`, `crow_orchestrator`, `crow_consulting`) plus `crow_tools` (external integrations + remote instances) and `crow_discover` (schema lookup). Storage, media, and orchestrator categories appear only when their backing service or bundle is available. Each category tool dispatches to the underlying server via an in-process MCP Client. The `crow_discover` tool returns full schemas on demand, so clients can inspect available actions without loading all tool definitions upfront. The `crow_research` name is accepted as a backward-compatible alias for `crow_projects`.
 
 Router mode is backward compatible — existing per-server endpoints (`/memory/mcp`, `/research/mcp`, etc.) remain unchanged and continue to work as before. The router is an additional endpoint, not a replacement.
 
@@ -201,6 +216,10 @@ Tool results and assistant messages are persisted to `chat_messages` with token 
 ### Rate Limiting
 
 Chat messages are rate-limited to 10 messages per minute per session (separate from the gateway's general rate limiter). Active generations can be cancelled via the cancel endpoint or by the client disconnecting.
+
+## Graceful Shutdown
+
+On `SIGTERM`/`SIGINT` the gateway runs a staged drain instead of exiting immediately: it stops the scheduler (so no new background ticks fire during teardown), stops accepting new connections, gives in-flight requests up to `CROW_SHUTDOWN_DRAIN_MS` (default 3000 ms) to finish, severs remaining sockets (long-lived SSE streams reconnect after restart), shuts down MCP sessions and proxy children, and finally checkpoints the SQLite WAL best-effort before exiting. This minimizes mid-operation kills during deploys and restarts. A monitor polling `/health` may see refusals for up to the drain window — that's the expected restart behavior.
 
 ## Health Check
 
