@@ -20,7 +20,7 @@ A brand-new operator usually only ever touches these: `CROW_GATEWAY_URL` (remote
 | `CROW_GATEWAY_URL` | *(unset = local-only)* | Public URL of this instance (e.g. your `*.ts.net` HTTPS address). Required for remote MCP clients and OAuth. |
 | `CROW_DEVICE_ID` | *(unset)* | Device identity for per-device crow.md overrides (e.g. `laptop`). |
 | `CROW_FILES_PATH` | `/home` | Root the filesystem MCP server may access (used by `npm run mcp-config`). |
-| `CROW_JOURNAL_MODE` | `WAL` | SQLite journal mode. Leave alone. |
+| `CROW_JOURNAL_MODE` | auto | SQLite journal mode. Unset, Crow picks `WAL`, or `DELETE` on low-RAM hosts (total memory ≤ `CROW_WAL_MIN_RAM_GB`, default 2 GiB — e.g. free-tier cloud VMs). Set explicitly to override the auto-selection; otherwise leave alone. The resolver reads the database's current mode first and only flips it when different, so a mode change never stalls connections. |
 | `NODE_ENV` | `development` | Set `production` on deployed instances. |
 
 ## Gateway, auth & access
@@ -92,6 +92,9 @@ A brand-new operator usually only ever touches these: `CROW_GATEWAY_URL` (remote
 | `CROW_BACKUP_KEEP_DAYS` | `7` | Retention. |
 | `CROW_BACKUP_TOKEN` | *(unset)* | Extra bearer requirement for the backup endpoint. |
 | `CROW_AUTO_UPDATE` | enabled | Pull-based auto-update (`0` disables). |
+| `CROW_SSE_MAX` | `200` | Cap on concurrent open SSE streams across all stream endpoints; over the cap, requests get `503` + `Retry-After: 5`. |
+| `CROW_SHUTDOWN_DRAIN_MS` | `3000` | How long graceful shutdown waits for in-flight requests before severing remaining connections. |
+| `CROW_WAL_MIN_RAM_GB` | `2` | RAM threshold (GiB) below which the journal mode auto-selects `DELETE` instead of `WAL` (see `CROW_JOURNAL_MODE`). |
 | `CROW_FILEVIEW_ROOT` | home directory | Root the dashboard markdown fileviewer may read. |
 | `CROW_BUNDLES_DIR` | `~/.crow/bundles` | Installed-bundle directory. |
 
