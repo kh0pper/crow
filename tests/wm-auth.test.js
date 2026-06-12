@@ -185,6 +185,18 @@ test("GET /wm/sse with a valid local MCP token opens the stream", async () => {
   assert.equal(code, 200);
 });
 
+test("dashboard mounted: /dashboard/login is a real route (regression: a broken import inside the dashboard graph once unmounted the whole Nest silently)", async () => {
+  const code = await new Promise((resolve, reject) => {
+    const req = http.get(`http://127.0.0.1:${port}/dashboard/login`, (res) => {
+      res.resume();
+      res.on("end", () => resolve(res.statusCode));
+    });
+    req.on("error", reject);
+    req.setTimeout(8000, () => { req.destroy(); reject(new Error("timeout")); });
+  });
+  assert.notEqual(code, 404, "/dashboard/login must exist — 404 means the dashboard router failed to mount");
+});
+
 test("control: /router/mcp rejects bare requests identically (parity)", async () => {
   const code = await postMcp(port, "/router/mcp");
   assert.equal(code, 401);
