@@ -150,7 +150,8 @@ export async function deliverPendingShares({ db, peerManager, contact, identityC
       });
       delivered++;
     } catch (err) {
-      // Delivery failed — will retry next connection
+      // Delivery failed — row stays 'pending', retried next connection
+      console.warn(`[sharing] pending share #${share.id} (${share.share_type}) delivery error: ${err.message}`);
     }
   }
 
