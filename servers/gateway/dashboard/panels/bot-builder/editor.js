@@ -603,15 +603,14 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
     const ppSelf = !!(def.permission_policy && def.permission_policy.self_authoring);
     const featuredCard =
       `<div style="border:1px solid var(--crow-accent);border-radius:8px;padding:.75rem 1rem;margin-bottom:1rem;background:var(--crow-bg-elevated)">` +
-      `<div style="font-weight:600;margin-bottom:.35rem">&#9997; Skill authoring</div>` +
-      `<p class="btb-hint">Attach <code>skill-writing</code> to teach this bot how to design skills. To let it ` +
-      `<strong>propose</strong> new skills on its own (drafted into a staging dir for your approval), enable ` +
-      `<strong>Self-authoring skills</strong> on the ` +
-      `<a href="/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&amp;tab=permissions">Permissions</a> tab — ` +
-      `currently <strong>${ppSelf ? "ON" : "OFF"}</strong>. Proposals stay inert until you approve them below.</p>` +
+      `<div style="font-weight:600;margin-bottom:.35rem">&#9997; ${t("botbuilder.skillAuthoringTitle", lang)}</div>` +
+      `<p class="btb-hint">${t("botbuilder.skillAuthoringHintPre", lang)} ` +
+      `<a href="/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&amp;tab=permissions">${t("botbuilder.skillAuthoringTabPermissions", lang)}</a> ` +
+      `${t("botbuilder.skillAuthoringHintMid", lang)} <strong>${ppSelf ? t("botbuilder.skillAuthoringOn", lang) : t("botbuilder.skillAuthoringOff", lang)}</strong>. ` +
+      `${t("botbuilder.skillAuthoringHintPost", lang)}</p>` +
       (featured
-        ? `<label class="btb-checkbox"><input type="checkbox" name="skills" value="skill-writing"${sel.has("skill-writing") ? " checked" : ""}> Attach <code>skill-writing</code> (one-click)</label>`
-        : `<p class="btb-muted">skill-writing.md not found in ${escapeHtml(skillDirs(skCrowHome).join(", "))}.</p>`) +
+        ? `<label class="btb-checkbox"><input type="checkbox" name="skills" value="skill-writing"${sel.has("skill-writing") ? " checked" : ""}> ${t("botbuilder.skillAuthoringAttach", lang)}</label>`
+        : `<p class="btb-muted">${t("botbuilder.skillAuthoringNotFound", lang)} ${escapeHtml(skillDirs(skCrowHome).join(", "))}.</p>`) +
       `</div>`;
     // Slice C: proposed-skills review (drafted by a self_authoring bot into
     // <def.session_dir>/proposed-skills). Operator reviews/edits, then

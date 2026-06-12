@@ -177,7 +177,7 @@ The Messages panel uses the storage server for file attachments across all conve
 │  ├── Send message                                       │
 │  │   └── POST /storage/upload (multipart)               │
 │  │       └── MinIO bucket (crow-files)                  │
-│  │           └── s3_key stored in message record         │
+│  │           └── s3_key stored in message record        │
 │  └── Display message                                    │
 │      └── Presigned URL generated on read                │
 │          └── Inline image / download link               │

@@ -53,7 +53,7 @@ import { mcpAuthMetadataRouter } from "@modelcontextprotocol/sdk/server/auth/rou
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import express from "express";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import cors from "cors";
 import { crowdsecMiddleware } from "./middleware/crowdsec.js";
 import { rejectFunneledMiddleware } from "./funnel.js";
@@ -301,7 +301,10 @@ const dashboardLoginLimiter = rateLimit({
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => `${req.ip}:${req.headers["tailscale-user-login"] || ""}`,
+  // ipKeyGenerator normalizes IPv6 to its /56 so a v6 user can't rotate
+  // within their prefix to dodge the limit (express-rate-limit v8 contract;
+  // raw req.ip here triggered the ERR_ERL_KEY_GEN_IPV6 boot warning).
+  keyGenerator: (req) => `${ipKeyGenerator(req.ip)}:${req.headers["tailscale-user-login"] || ""}`,
   skip: (req) => req.method !== "POST",
   message: { error: "Too many login attempts, please try again later" },
 });

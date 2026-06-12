@@ -114,7 +114,7 @@ Las salas soportan hasta 4 participantes por defecto (configurable vía `CROW_CA
 
 ## Integración con el Companion
 
-Cuando el bundle del [AI Companion](/es/guide/extensions) también está instalado, la página de Calls gana modos adicionales:
+Cuando el bundle del [AI Companion](/es/architecture/companion) también está instalado, la página de Calls gana modos adicionales:
 
 - **Modo avatar** — el avatar Live2D del companion se une a la llamada como participante de video
 - **Seguimiento facial** — el avatar refleja tus expresiones vía webcam
