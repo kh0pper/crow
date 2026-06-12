@@ -45,7 +45,7 @@ Modern MCP transport used by most clients.
 | `POST\|GET\|DELETE /storage/mcp` | crow-storage (conditional, requires MinIO) |
 | `POST\|GET\|DELETE /blog-mcp/mcp` | crow-blog |
 | `POST\|GET\|DELETE /tools/mcp` | External tool proxy |
-| `POST\|GET\|DELETE /wm/mcp` | Window manager (companion kiosk client; mounted without OAuth — protected by the network boundary, never funnel-exposed) |
+| `POST\|GET\|DELETE /wm/mcp` | Window manager (companion kiosk client; same auth chain as every other mount — local MCP token, OAuth, or exposure-gated peer) |
 | `POST\|GET\|DELETE /mcp` | crow-memory (compatibility alias) |
 
 Sessions are managed via the `mcp-session-id` header. New sessions are created on `initialize` requests. Each transport gets an in-memory `EventStore` for resumability.
