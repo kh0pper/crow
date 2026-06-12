@@ -135,4 +135,4 @@ Abre el panel de **Skills** en el Crow's Nest para ver todos los skills disponib
 
 ## Puntos de control de seguridad
 
-Ciertas acciones disparan confirmaciones de seguridad — Crow pregunta antes de hacer algo destructivo, que consuma muchos recursos o que modifique la red. Consulta la [guía de personalización](/guide/customization#safety-checkpoints) para más detalles.
+Ciertas acciones disparan confirmaciones de seguridad — Crow pregunta antes de hacer algo destructivo, que consuma muchos recursos o que modifique la red. Consulta la [guía de personalización](/es/guide/customization) para más detalles.
