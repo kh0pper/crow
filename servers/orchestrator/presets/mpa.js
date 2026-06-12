@@ -1,3 +1,4 @@
+// MPA (multi-platform assistant) presets — gmail, outreach, cfp-monitor, memory-review, reliability, prospectus, triage.
 export const mpaPresets = {
   "mpa-gmail": {
     description:
