@@ -92,7 +92,7 @@ claude
 
 Estos editores leen `.mcp.json` del directorio de tu proyecto. Abre la carpeta `crow` en tu editor y los servidores MCP estarán disponibles.
 
-Consulta la [guía de Plataformas](../../platforms/) para instrucciones detalladas de cada herramienta de IA.
+Consulta la [guía de Plataformas](/es/platforms/) para instrucciones detalladas de cada herramienta de IA.
 
 ## Opcional: Agregar Integraciones Externas
 
