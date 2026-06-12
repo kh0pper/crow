@@ -1199,7 +1199,7 @@ export function createSharingServer(dbPath, options = {}) {
     return {
       bundle_version: 1,
       snapshot_at: new Date().toISOString(),
-      origin_instance_id: localInstanceId,
+      origin_instance_id: getOrCreateLocalInstanceId(),
       project,        // includes uuid + slug
       sources,
       notes,
