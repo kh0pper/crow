@@ -12,12 +12,40 @@
  * from `PUBLIC_FUNNEL_PREFIXES` in `servers/gateway/index.js`
  * (currently `/dashboard/streams/*`). See also `authed-stream.js` for
  * session-aware streaming.
+ *
+ * SSE cap: CROW_SSE_MAX (default 200) limits concurrent open streams. When the
+ * cap is reached, openStream returns null (not an object) and the caller MUST
+ * check for null before registering any bus handlers, DB clients, or intervals.
+ * Over-cap responses receive HTTP 503 + Retry-After: 5. This covers all eight
+ * stream endpoints (seven via openAuthedStream, one bare openStream in chat.js).
  */
 
+const SSE_MAX = parseInt(process.env.CROW_SSE_MAX || "200", 10);
+let _openStreamCount = 0;
+
+/** Exposed for tests only — reset the counter between test runs. */
+export function _resetStreamCount() { _openStreamCount = 0; }
+/** Exposed for tests only — read the current count. */
+export function _getStreamCount() { return _openStreamCount; }
+
+/**
+ * Open an SSE stream. Returns a { send, sendRaw, close } object, or null if the
+ * SSE cap is exceeded. Callers MUST check for null before any resource setup.
+ */
 export function openStream(res, { heartbeatMs = 30000 } = {}) {
   if (res.headersSent) {
     throw new Error("openStream: response headers already sent");
   }
+
+  // Enforce SSE cap before any resource allocation.
+  if (_openStreamCount >= SSE_MAX) {
+    res.writeHead(503, { "Retry-After": "5", "Content-Type": "text/plain" });
+    res.end("SSE cap reached — too many open streams. Retry after 5s.");
+    return null;
+  }
+
+  _openStreamCount++;
+
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -51,6 +79,7 @@ export function openStream(res, { heartbeatMs = 30000 } = {}) {
   const close = () => {
     if (closed) return;
     closed = true;
+    _openStreamCount--;
     clearInterval(heartbeat);
     if (!res.writableEnded) {
       try {
