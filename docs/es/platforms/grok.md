@@ -32,7 +32,7 @@ Declara Crow como una entrada MCP en el arreglo `tools` de tu solicitud a la API
 }
 ```
 
-El valor de `authorization` se envía a Crow como un encabezado `Bearer`. Para generar un token, registra un cliente mediante el endpoint `/register` del gateway y completa el flujo de OAuth para obtener un token de acceso (consulta [OAuth 2.1](/architecture/gateway#oauth-2-1)). Campos opcionales: `server_description`, `allowed_tools`, `headers`.
+El valor de `authorization` se envía a Crow como un encabezado `Bearer`. Para generar un token, registra un cliente mediante el endpoint `/register` del gateway y completa el flujo de OAuth para obtener un token de acceso (consulta [OAuth 2.1](/es/architecture/gateway)). Campos opcionales: `server_description`, `allowed_tools`, `headers`.
 
 ## Transporte
 

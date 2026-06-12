@@ -35,7 +35,7 @@ Las extensiones con interfaces web se sirven automáticamente a través del prox
 ### IA y Automatización
 | Extensión | Tipo | Descripción |
 |-----------|------|-------------|
-| [Automatización de Navegador](/guide/browser-automation) | Bundle | Navegador sigiloso con VNC, llenado de formularios, scraping |
+| [Automatización de Navegador](/es/guide/browser-automation) | Bundle | Navegador sigiloso con VNC, llenado de formularios, scraping |
 | Ollama | Bundle | Modelos de IA locales para embeddings y análisis |
 | LocalAI | Bundle | Inferencia local compatible con OpenAI |
 | [Bot Builder](/es/guide/bot-builder) | Integrado | Agentes de Gmail, Discord y lentes — crea, despliega y gestiona agentes desde el dashboard. Autoconfiguración BYOAI, integración con Mensajes, despliegue de skills. |
@@ -43,7 +43,7 @@ Las extensiones con interfaces web se sirven automáticamente a través del prox
 ### Finanzas
 | Extensión | Tipo | Descripción |
 |-----------|------|-------------|
-| [Asistente de Declaración de Impuestos](/guide/tax-filing) | Servidor MCP | Preparación de impuestos federales con ingesta de PDF |
+| [Asistente de Declaración de Impuestos](/es/guide/tax-filing) | Servidor MCP | Preparación de impuestos federales con ingesta de PDF |
 
 ### Medios
 | Extensión | Tipo | Descripción |
@@ -68,7 +68,7 @@ Las extensiones con interfaces web se sirven automáticamente a través del prox
 ### Social y Comunicación
 | Extensión | Tipo | Descripción |
 |-----------|------|-------------|
-| [Videollamadas y Llamadas de Audio](/guide/calls) | Bundle | Llamadas de video/audio entre pares con WebRTC |
+| [Videollamadas y Llamadas de Audio](/es/guide/calls) | Bundle | Llamadas de video/audio entre pares con WebRTC |
 
 ### Infraestructura
 | Extensión | Tipo | Descripción |
@@ -95,4 +95,4 @@ Esto se configura automáticamente durante la instalación — los puertos se ab
 
 ## Para Desarrolladores
 
-Consulta la guía [Creating Add-ons](/developers/creating-addons) para construir tus propias extensiones.
+Consulta la guía [Creating Add-ons](/es/developers/creating-addons) para construir tus propias extensiones.

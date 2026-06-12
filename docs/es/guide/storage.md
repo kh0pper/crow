@@ -155,4 +155,4 @@ La eliminación es permanente. Los archivos se eliminan tanto de MinIO como del 
 
 ## Bajo el capó
 
-¿Te da curiosidad cómo funcionan internamente las URLs prefirmadas, las cuotas y el cliente de MinIO? Consulta la [arquitectura del servidor de almacenamiento](/architecture/storage-server).
+¿Te da curiosidad cómo funcionan internamente las URLs prefirmadas, las cuotas y el cliente de MinIO? Consulta la [arquitectura del servidor de almacenamiento](/es/architecture/storage-server).

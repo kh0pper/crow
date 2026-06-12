@@ -4,17 +4,17 @@ title: IPTV
 
 # IPTV
 
-Gestiona listas de reproduccion M3U, explora canales y accede a datos de guia electronica de programas (EPG) a traves de Crow.
+Gestiona listas de reproducción M3U, explora canales y accede a datos de guía electrónica de programas (EPG) a través de Crow.
 
-## Que obtienes
+## Qué obtienes
 
-- Cargar y gestionar listas de reproduccion M3U
+- Cargar y gestionar listas de reproducción M3U
 - Explorar y buscar canales
 - Organizar favoritos y grupos de canales
-- Ver la guia de programacion (EPG) desde fuentes XMLTV
-- Integracion con Media Hub para explorar canales
+- Ver la guía de programación (EPG) desde fuentes XMLTV
+- Integración con Media Hub para explorar canales
 
-## Configuracion
+## Configuración
 
 No se requiere contenedor Docker — IPTV se ejecuta como un bundle ligero.
 
@@ -22,33 +22,33 @@ No se requiere contenedor Docker — IPTV se ejecuta como un bundle ligero.
 
 > "Crow, instala el bundle de IPTV"
 
-O instalalo desde el panel de **Extensiones** en el Crow's Nest.
+O instálalo desde el panel de **Extensiones** en el Crow's Nest.
 
-## Agregar listas de reproduccion
+## Agregar listas de reproducción
 
-Agrega una URL de lista M3U a traves de tu IA o el panel IPTV:
+Agrega una URL de lista M3U a través de tu IA o el panel IPTV:
 
 > "Crow, agrega una lista IPTV: https://ejemplo.com/lista.m3u"
 
-Puedes agregar multiples listas. Los canales de cada lista se combinan en una unica lista navegable.
+Puedes agregar múltiples listas. Los canales de cada lista se combinan en una única lista navegable.
 
 ::: warning
-Solo usa listas M3U de servicios a los que tengas una suscripcion legitima. Crow no proporciona ni respalda ningun servicio IPTV especifico.
+Solo usa listas M3U de servicios a los que tengas una suscripción legítima. Crow no proporciona ni respalda ningún servicio IPTV específico.
 :::
 
-## Gestion de canales
+## Gestión de canales
 
 ### Explorar canales
 
-Explora los canales por grupo (segun estan definidos en la lista M3U) o busca por nombre:
+Explora los canales por grupo (según están definidos en la lista M3U) o busca por nombre:
 
-> "Muestrame todos los canales de noticias"
+> "Muéstrame todos los canales de noticias"
 
 > "Busca BBC en mis canales IPTV"
 
 ### Favoritos
 
-Marca canales como favoritos para acceso rapido:
+Marca canales como favoritos para acceso rápido:
 
 > "Crow, agrega CNN a mis favoritos de IPTV"
 
@@ -56,13 +56,13 @@ Los favoritos aparecen en la parte superior de la lista de canales en el panel I
 
 ### Grupos
 
-Los canales se organizan por los grupos definidos en tu lista M3U (ej., Noticias, Deportes, Peliculas). Puedes explorar por grupo en el panel o preguntar:
+Los canales se organizan por los grupos definidos en tu lista M3U (ej., Noticias, Deportes, Películas). Puedes explorar por grupo en el panel o preguntar:
 
-> "Muestrame mis canales de Deportes"
+> "Muéstrame mis canales de Deportes"
 
-## Guia electronica de programas (EPG)
+## Guía electrónica de programas (EPG)
 
-Los datos EPG muestran lo que se esta transmitiendo actualmente y los proximos programas de cada canal.
+Los datos EPG muestran lo que se está transmitiendo actualmente y los próximos programas de cada canal.
 
 ### Agregar una fuente EPG
 
@@ -70,27 +70,27 @@ Proporciona una URL XMLTV junto con tu lista:
 
 > "Crow, configura la fuente EPG a https://ejemplo.com/epg.xml"
 
-O configuralo en **Crow's Nest** > **Ajustes** > **Integraciones**.
+O configúralo en **Crow's Nest** > **Ajustes** > **Integraciones**.
 
-### Ver la guia
+### Ver la guía
 
-> "Que hay en CNN ahora mismo?"
+> "¿Qué hay en CNN ahora mismo?"
 
-> "Muestrame la programacion de esta noche para BBC One"
+> "Muéstrame la programación de esta noche para BBC One"
 
-La guia de programacion tambien esta disponible visualmente en el panel IPTV.
+La guía de programación también está disponible visualmente en el panel IPTV.
 
 ## Planes futuros
 
-- **Grabacion** — Grabacion programada via ffmpeg (planificada para v2)
+- **Grabación** — Grabación programada vía ffmpeg (planificada para v2)
 
-## Solucion de problemas
+## Solución de problemas
 
 ### La lista no carga
 
 - Verifica que la URL M3U sea accesible desde tu servidor (intenta abrirla en un navegador)
-- Asegurate de que la URL apunte a un archivo `.m3u` o `.m3u8` valido
-- Algunos proveedores requieren tokens de autenticacion en la URL
+- Asegúrate de que la URL apunte a un archivo `.m3u` o `.m3u8` válido
+- Algunos proveedores requieren tokens de autenticación en la URL
 
 ### Faltan datos EPG
 
@@ -100,4 +100,4 @@ La guia de programacion tambien esta disponible visualmente en el panel IPTV.
 
 ### Los canales no se reproducen
 
-Crow gestiona las listas y metadatos. La reproduccion real de los streams depende de tu reproductor multimedia y las condiciones de red. Asegurate de poder reproducir la URL del stream directamente antes de investigar problemas con la integracion de Crow.
+Crow gestiona las listas y metadatos. La reproducción real de los streams depende de tu reproductor multimedia y las condiciones de red. Asegúrate de poder reproducir la URL del stream directamente antes de investigar problemas con la integración de Crow.

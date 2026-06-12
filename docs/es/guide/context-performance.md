@@ -95,4 +95,4 @@ Usa `crow_discover` con una consulta amplia para ver las herramientas disponible
 
 ---
 
-Para los detalles de implementación sobre cómo Crow gestiona internamente la carga de herramientas y los presupuestos de contexto, consulta la [referencia de arquitectura de gestión de contexto](/architecture/context-management).
+Para los detalles de implementación sobre cómo Crow gestiona internamente la carga de herramientas y los presupuestos de contexto, consulta la [referencia de arquitectura de gestión de contexto](/es/architecture/context-management).

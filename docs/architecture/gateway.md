@@ -150,7 +150,7 @@ For the full public/private access model, see the [Security Guide](https://githu
 
 ## Router Mode
 
-The `/router/mcp` endpoint exposes **one consolidated category tool per server** instead of the full raw tool surface (120+ tools across all servers). This is a major context-window reduction and the recommended way to connect an AI client.
+The `/router/mcp` endpoint exposes **one consolidated category tool per server** instead of the full raw tool surface (126+ tools across all servers). This is a major context-window reduction and the recommended way to connect an AI client.
 
 On a full install the router registers 10 tools: 8 category tools (`crow_memory`, `crow_projects`, `crow_blog`, `crow_sharing`, `crow_storage`, `crow_media`, `crow_orchestrator`, `crow_consulting`) plus `crow_tools` (external integrations + remote instances) and `crow_discover` (schema lookup). Storage, media, and orchestrator categories appear only when their backing service or bundle is available. Each category tool dispatches to the underlying server via an in-process MCP Client. The `crow_discover` tool returns full schemas on demand, so clients can inspect available actions without loading all tool definitions upfront. The `crow_research` name is accepted as a backward-compatible alias for `crow_projects`.
 

@@ -8,6 +8,7 @@
  */
 
 import { createHmac } from "node:crypto";
+import { TOOL_MANIFESTS } from "../tool-manifests.js";
 import rateLimit from "express-rate-limit";
 import { setupPageHandler } from "../setup-page.js";
 import { generateCrowContext } from "../../memory/crow-context.js";
@@ -163,7 +164,10 @@ export async function mountPublicEndpoints(app, deps) {
     // crow-media is now a bundle add-on — its tools appear via proxy when installed
 
     const externalToolCount = connectedTools.reduce((sum, s) => sum + s.toolCount, 0);
-    const coreToolCount = 49; // 12 memory + 12 research + 8 sharing + 5 storage + 12 blog
+    // Derived from TOOL_MANIFESTS (pinned to the real tool surface by
+    // tests/tool-manifests.test.js) — the old hardcoded 49/7 had drifted.
+    const coreToolCount = Object.values(TOOL_MANIFESTS).reduce((sum, m) => sum + Object.keys(m.tools).length, 0);
+    const routerToolCount = Object.keys(TOOL_MANIFESTS).length + 2; // categories + crow_tools + crow_discover
     const routerDisabled = process.env.CROW_DISABLE_ROUTER === "1";
 
     res.json({
@@ -174,7 +178,7 @@ export async function mountPublicEndpoints(app, deps) {
         core: coreToolCount,
         external: externalToolCount,
         total: coreToolCount + externalToolCount,
-        routerMode: routerDisabled ? null : 7,
+        routerMode: routerDisabled ? null : routerToolCount,
       },
     });
   });
