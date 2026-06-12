@@ -64,7 +64,7 @@ Consulta [Gateway](./gateway) para más detalles.
 
 ### 3. Skills (`skills/`)
 
-30 archivos markdown que funcionan como prompts de comportamiento. No son código — definen flujos de trabajo, patrones de activación y lógica de integración. Claude los carga bajo demanda.
+Archivos markdown (más de 40) que funcionan como prompts de comportamiento. No son código — definen flujos de trabajo, patrones de activación y lógica de integración. Claude los carga bajo demanda.
 
 Consulta [Skills](/skills/) para la lista completa.
 

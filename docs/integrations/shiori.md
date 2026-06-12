@@ -44,7 +44,7 @@ If you already run a Shiori instance, connect Crow to it directly. Shiori uses s
 Set the following in your `.env` file or via **Crow's Nest** > **Settings** > **Integrations**:
 
 ```bash
-SHIORI_URL=http://your-shiori-server:8086
+SHIORI_URL=http://your-shiori-server:8080   # stock Shiori default; the Crow bundle (Option A) remaps to 8086
 SHIORI_USERNAME=your-username
 SHIORI_PASSWORD=your-password
 ```

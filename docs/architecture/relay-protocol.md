@@ -141,7 +141,7 @@ This is not yet implemented. Current relay discovery is manual only.
 | Max blob size | 1 MB | Yes (relay operator) |
 | Max pending blobs per recipient | 100 | Yes (relay operator) |
 | Blob TTL | 30 days | Yes (relay operator) |
-| Rate limit | Per contact per hour | Yes (relay operator) |
+| Pending-blob quota | 100 blobs per contact (no per-hour rate limit) | Yes (relay operator) |
 
 ### Quota enforcement
 
@@ -179,7 +179,7 @@ Relays only serve authenticated contacts. An unknown public key cannot store or 
 
 - **Spam** — Anonymous parties cannot fill the relay with junk data
 - **Enumeration** — Unauthenticated requests cannot discover which public keys have pending blobs
-- **Abuse** — Rate limits are enforced per authenticated contact
+- **Abuse** — A pending-blob quota is enforced per authenticated contact
 
 ## Implementation
 

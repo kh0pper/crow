@@ -141,7 +141,7 @@ Esto aún no está implementado. El descubrimiento de relays actual es únicamen
 | Tamaño máximo de blob | 1 MB | Sí (operador del relay) |
 | Máximo de blobs pendientes por destinatario | 100 | Sí (operador del relay) |
 | TTL de blob | 30 días | Sí (operador del relay) |
-| Límite de tasa | Por contacto por hora | Sí (operador del relay) |
+| Cuota de blobs pendientes | 100 blobs por contacto (sin límite por hora) | Sí (operador del relay) |
 
 ### Aplicación de cuotas
 
@@ -179,7 +179,7 @@ Los relays solo atienden a contactos autenticados. Una clave pública desconocid
 
 - **Spam** — Partes anónimas no pueden llenar el relay con datos basura
 - **Enumeración** — Las solicitudes no autenticadas no pueden descubrir qué claves públicas tienen blobs pendientes
-- **Abuso** — Los límites de tasa se aplican por contacto autenticado
+- **Abuso** — Se aplica una cuota de blobs pendientes por contacto autenticado
 
 ## Implementación
 

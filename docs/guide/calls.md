@@ -106,7 +106,7 @@ All media is peer-to-peer. The gateway only handles signaling (room management a
 - Every room has a random 12-character code and a separate authentication token
 - The signaling relay validates the token before accepting WebSocket connections
 - No token-less connections are allowed
-- Room tokens are single-use (generated per call, not reusable)
+- Room tokens are generated per call and expire after 24 hours; within that window the token admits joins to that room only
 
 ## Multi-Participant Calls
 

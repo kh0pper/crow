@@ -4,14 +4,14 @@ title: Deployment Tiers
 
 # Deployment Tiers
 
-Crow runs on everything from a $15 Raspberry Pi to a cloud server. This guide helps you choose the right hardware and understand what each option can handle.
+Crow runs on everything from a $15 Raspberry Pi Zero 2 W to a cloud server. This guide helps you choose the right hardware and understand what each option can handle.
 
 ## Comparison
 
 | Deployment | RAM | Disk | Good For | Limitations |
 |---|---|---|---|---|
 | Raspberry Pi Zero/3 | 512MB–1GB | 16–32GB SD | Memory + blog, 1–2 light add-ons | No Immich, no Ollama, limited storage |
-| Raspberry Pi 4/5 | 2–8GB | 32GB+ SD/SSD | Most add-ons, moderate storage | Ollama only with small models, SSD recommended |
+| Raspberry Pi 4/5 | 2–8GB | 32GB+ SD/SSD | Most add-ons, moderate storage | Ollama only with small models, SSD recommended; note 2025–26 memory shortages raised Pi 5 prices (4GB ≈ $75) |
 | Free cloud (Render) *(legacy)* | 512MB | Ephemeral | Testing only | No Docker add-ons, storage resets on deploy, sleeps after inactivity |
 | Oracle Cloud Free Tier | 1–24GB | 50–200GB | Full platform with add-ons | Network egress limits, ARM architecture |
 | Home server | 4–32GB | 500GB+ | Everything | Power/network dependent |

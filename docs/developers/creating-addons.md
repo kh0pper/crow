@@ -100,7 +100,7 @@ Here is a more complete example (a bundle with Docker, an MCP server, a panel, a
 | `type` | Yes | One of: `panel`, `mcp-server`, `skill`, `bundle` |
 | `description` | Yes | Short description (under 200 characters) |
 | `author` | Yes | Author name or handle |
-| `license` | Yes | SPDX license identifier |
+| `license` | No | SPDX license identifier — optional, but include it when distributing so usage rights are clear |
 | `category` | Yes | Category: `ai`, `media`, `productivity`, `storage`, `smart-home`, `networking`, `social`, `gaming`, `data`, `finance`, `other` |
 | `tags` | No | Array of searchable tags (max 10) |
 | `icon` | No | Icon key (see [Supported icon keys](#supported-icon-keys) below) |

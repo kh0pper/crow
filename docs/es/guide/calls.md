@@ -106,7 +106,7 @@ Todos los medios son peer-to-peer. El gateway solo maneja la señalización (ges
 - Cada sala tiene un código aleatorio de 12 caracteres y un token de autenticación separado
 - El relay de señalización valida el token antes de aceptar conexiones WebSocket
 - No se permiten conexiones sin token
-- Los tokens de sala son de un solo uso (se generan por llamada, no son reutilizables)
+- Los tokens de sala se generan por llamada y expiran a las 24 horas; dentro de esa ventana el token admite uniones solo a esa sala
 
 ## Llamadas con varios participantes
 

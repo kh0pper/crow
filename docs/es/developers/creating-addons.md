@@ -100,7 +100,7 @@ Aquí hay un ejemplo más completo (un bundle con Docker, un servidor MCP, un pa
 | `type` | Sí | Uno de: `panel`, `mcp-server`, `skill`, `bundle` |
 | `description` | Sí | Descripción corta (menos de 200 caracteres) |
 | `author` | Sí | Nombre o alias del autor |
-| `license` | Sí | Identificador de licencia SPDX |
+| `license` | No | Identificador de licencia SPDX — opcional, pero inclúyelo al distribuir para que los derechos de uso queden claros |
 | `category` | Sí | Categoría: `ai`, `media`, `productivity`, `storage`, `smart-home`, `networking`, `social`, `gaming`, `data`, `finance`, `other` |
 | `tags` | No | Arreglo de etiquetas buscables (máx. 10) |
 | `icon` | No | Clave de icono (consulta [Claves de icono compatibles](#claves-de-icono-compatibles) más abajo) |

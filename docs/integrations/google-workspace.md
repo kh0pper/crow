@@ -8,11 +8,10 @@ Connect Crow to Google Workspace to access Gmail, Google Calendar, Docs, Sheets,
 
 ## What You Get
 
-- Read and search Gmail messages
-- View and create Google Calendar events
-- Access Google Docs, Sheets, and Slides
-- Search across your Google Drive
-- Send and read Google Chat messages
+- Read, search, label, and draft Gmail messages
+- View, create, and respond to Google Calendar events
+- Read AND edit Google Docs, Sheets, and Slides (append, find/replace, comments, slide editing)
+- Search and organize your Google Drive
 
 ## Prerequisites
 
@@ -77,12 +76,14 @@ Scopes are requested during the OAuth authorization flow:
 
 | Scope | Why |
 |---|---|
-| `gmail.readonly` | Read and search email messages |
-| `calendar.events` | Read and create calendar events |
-| `drive.readonly` | Search and read files in Drive |
-| `documents` | Read Google Docs |
-| `spreadsheets` | Read Google Sheets |
-| `presentations` | Read Google Slides |
+| `gmail.modify` | Read, search, label, and draft email (no full send) |
+| `calendar.events` | Read, create, and respond to calendar events |
+| `drive` | Search, read, and organize files in Drive |
+| `documents` | Read and edit Google Docs |
+| `spreadsheets` | Read and write Google Sheets |
+| `presentations` | Read and edit Google Slides |
+
+The exact scopes are granted during the OAuth consent flow — review them there; narrower read-only scopes work if you only need read tools.
 
 ## Troubleshooting
 

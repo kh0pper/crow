@@ -150,7 +150,7 @@ A unified three-panel messaging hub inspired by WhatsApp/Signal/Telegram.
 
 **Real-time updates:** The panel polls for new messages every 7 seconds, updating unread badges and appending new messages to the active conversation without page reloads.
 
-**Contact management:** All contact functionality (invite, block/unblock, profile) is integrated into the Messages panel. The old `/dashboard/contacts` URL redirects here automatically.
+**Contact management:** Contacts have their own panel at `/dashboard/contacts` (card grid, profiles, groups, vCard import/export); invite, block/unblock, and profile actions are also reachable from the Messages panel.
 
 ### Memory
 

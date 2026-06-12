@@ -129,7 +129,7 @@ Cuando un peer está desconectado, los mensajes y las comparticiones pueden qued
 | Colaboración en equipo en Discord | Bots nativos (Bot Builder) |
 | Proyecto de código con asistencia de IA | MCP externo vía Cursor o Claude Code |
 | Totalmente local, sin IA en la nube | Chat BYOAI con Ollama |
-| Acceso desde varias apps de chat | Bots nativos (Discord + WhatsApp + Telegram) |
+| Acceso desde varias apps de chat | Bots nativos (Discord, Telegram, Slack, Gmail) |
 | Gestión automatizada del hogar | Bots nativos con skills |
 | Todo lo anterior, simultáneamente | Los tres — comparten una sola base de datos |
 
