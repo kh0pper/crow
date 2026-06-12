@@ -4,29 +4,29 @@ title: Jellyfin
 
 # Jellyfin
 
-Conecta Crow a Jellyfin para explorar tu biblioteca multimedia, buscar contenido y controlar la reproduccion a traves de tu asistente de IA.
+Conecta Crow a Jellyfin para explorar tu biblioteca multimedia, buscar contenido y controlar la reproducción a través de tu asistente de IA.
 
-## Que obtienes
+## Qué obtienes
 
-- Buscar en tu biblioteca multimedia (peliculas, series, musica, audiolibros)
+- Buscar en tu biblioteca multimedia (películas, series, música, audiolibros)
 - Explorar colecciones y contenido agregado recientemente
-- Controlar la reproduccion en dispositivos conectados
-- Ver que se esta reproduciendo actualmente
-- Pestana automatica de **Biblioteca** en el panel Media Hub
+- Controlar la reproducción en dispositivos conectados
+- Ver qué se está reproduciendo actualmente
+- Pestaña automática de **Biblioteca** en el panel Media Hub
 
-## Configuracion
+## Configuración
 
-Crow soporta dos modos para Jellyfin: autoalojamiento via Docker o conexion a una instancia existente.
+Crow soporta dos modos para Jellyfin: autoalojamiento vía Docker o conexión a una instancia existente.
 
-### Opcion A: Docker (autoalojado)
+### Opción A: Docker (autoalojado)
 
 Instala Jellyfin como un bundle de Crow. Esto ejecuta Jellyfin en Docker junto a tu gateway de Crow.
 
 > "Crow, instala el bundle de Jellyfin"
 
-O instalalo desde el panel de **Extensiones** en el Crow's Nest.
+O instálalo desde el panel de **Extensiones** en el Crow's Nest.
 
-Despues de la instalacion, configura la ruta a tus archivos multimedia:
+Después de la instalación, configura la ruta a tus archivos multimedia:
 
 ```bash
 # En tu archivo .env
@@ -37,23 +37,23 @@ Reinicia el bundle para que los cambios surtan efecto:
 
 > "Crow, reinicia el bundle de Jellyfin"
 
-Jellyfin estara disponible en `http://tu-servidor:8096` para la configuracion inicial (crea una cuenta de administrador y configura las bibliotecas).
+Jellyfin estará disponible en `http://tu-servidor:8096` para la configuración inicial (crea una cuenta de administrador y configura las bibliotecas).
 
-### Opcion B: Conectar a Jellyfin existente
+### Opción B: Conectar a Jellyfin existente
 
-Si ya tienes un servidor Jellyfin funcionando, conecta Crow directamente a el.
+Si ya tienes un servidor Jellyfin funcionando, conecta Crow directamente a él.
 
 #### Paso 1: Obtener tu clave de API
 
 1. Abre la interfaz web de Jellyfin
-2. Ve a **Panel de control** > **Claves de API** (en la seccion Avanzado)
-3. Haz clic en **Agregar** (el boton `+`)
+2. Ve a **Panel de control** > **Claves de API** (en la sección Avanzado)
+3. Haz clic en **Agregar** (el botón `+`)
 4. Ponle un nombre (ej., "Crow")
 5. Copia la clave de API generada
 
 #### Paso 2: Agregar a Crow
 
-Configura lo siguiente en tu archivo `.env` o via **Crow's Nest** > **Ajustes** > **Integraciones**:
+Configura lo siguiente en tu archivo `.env` o vía **Crow's Nest** > **Ajustes** > **Integraciones**:
 
 ```bash
 JELLYFIN_URL=http://tu-servidor-jellyfin:8096
@@ -62,23 +62,23 @@ JELLYFIN_API_KEY=tu-clave-api-aqui
 
 ## Herramientas de IA
 
-Una vez conectado, puedes interactuar con Jellyfin a traves de tu IA:
+Una vez conectado, puedes interactuar con Jellyfin a través de tu IA:
 
-> "Que peliculas he agregado recientemente?"
+> "¿Qué películas he agregado recientemente?"
 
 > "Busca documentales en mi biblioteca"
 
-> "Que se esta reproduciendo ahora?"
+> "¿Qué se está reproduciendo ahora?"
 
 > "Reproduce el siguiente episodio de The Expanse en la TV de la sala"
 
-## Integracion con Media Hub
+## Integración con Media Hub
 
-Cuando Jellyfin esta instalado, una pestana de **Biblioteca** aparece automaticamente en el panel Media Hub del Crow's Nest. Esto te da una interfaz visual para explorar tu biblioteca junto a otras fuentes multimedia.
+Cuando Jellyfin está instalado, una pestaña de **Biblioteca** aparece automáticamente en el panel Media Hub del Crow's Nest. Esto te da una interfaz visual para explorar tu biblioteca junto a otras fuentes multimedia.
 
 ## Referencia de Docker Compose
 
-Si prefieres una configuracion manual de Docker en lugar del instalador de bundles:
+Si prefieres una configuración manual de Docker en lugar del instalador de bundles:
 
 ```yaml
 services:
@@ -98,11 +98,11 @@ volumes:
   jellyfin-cache:
 ```
 
-## Solucion de problemas
+## Solución de problemas
 
-### "Conexion rechazada" o tiempo de espera agotado
+### "Conexión rechazada" o tiempo de espera agotado
 
-Asegurate de que la `JELLYFIN_URL` sea accesible desde la maquina que ejecuta Crow. Si Jellyfin esta en otra maquina, usa la IP o el nombre de host correcto.
+Asegúrate de que la `JELLYFIN_URL` sea accesible desde la máquina que ejecuta Crow. Si Jellyfin está en otra máquina, usa la IP o el nombre de host correcto.
 
 ### "401 No autorizado"
 
@@ -110,4 +110,4 @@ Es posible que la clave de API haya sido eliminada. Crea una nueva desde Panel d
 
 ### Los archivos multimedia no aparecen
 
-Jellyfin necesita escanear tu biblioteca multimedia despues de configurar `JELLYFIN_MEDIA_PATH`. Abre la interfaz web de Jellyfin y activa un escaneo de biblioteca desde Panel de control > Bibliotecas.
+Jellyfin necesita escanear tu biblioteca multimedia después de configurar `JELLYFIN_MEDIA_PATH`. Abre la interfaz web de Jellyfin y activa un escaneo de biblioteca desde Panel de control > Bibliotecas.

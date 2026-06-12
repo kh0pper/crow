@@ -4,39 +4,39 @@ title: Kodi
 
 # Kodi
 
-Controla tu centro multimedia Kodi de forma remota a traves de Crow — explora bibliotecas, gestiona la reproduccion y consulta lo que se esta reproduciendo, todo mediante tu asistente de IA.
+Controla tu centro multimedia Kodi de forma remota a través de Crow — explora bibliotecas, gestiona la reproducción y consulta lo que se está reproduciendo, todo mediante tu asistente de IA.
 
-## Que obtienes
+## Qué obtienes
 
-- Control remoto para la reproduccion de Kodi (reproducir, pausar, detener, saltar, volumen)
+- Control remoto para la reproducción de Kodi (reproducir, pausar, detener, saltar, volumen)
 - Buscar y explorar bibliotecas multimedia
-- Ver el contenido en reproduccion actual
-- Navegacion de biblioteca (peliculas, series, musica)
-- Pestana automatica de **Control remoto** en el panel Media Hub
+- Ver el contenido en reproducción actual
+- Navegación de biblioteca (películas, series, música)
+- Pestaña automática de **Control remoto** en el panel Media Hub
 
-## Configuracion
+## Configuración
 
 ### Paso 1: Habilitar el control remoto HTTP en Kodi
 
 1. Abre Kodi en el dispositivo que deseas controlar
 2. Ve a **Ajustes** > **Servicios** > **Control**
-3. Activa **Permitir control remoto via HTTP**
+3. Activa **Permitir control remoto vía HTTP**
 4. Configura un **Puerto** (por defecto: 8080)
-5. Opcionalmente configura un **Nombre de usuario** y **Contrasena** para autenticacion
+5. Opcionalmente configura un **Nombre de usuario** y **Contraseña** para autenticación
 
 ::: tip
-Si configuras un nombre de usuario y contrasena en Kodi, incluyelos en la URL: `http://usuario:contrasena@192.168.1.100:8080`
+Si configuras un nombre de usuario y contraseña en Kodi, inclúyelos en la URL: `http://usuario:contrasena@192.168.1.100:8080`
 :::
 
 ### Paso 2: Agregar a Crow
 
-Configura la URL de Kodi en tu archivo `.env` o via **Crow's Nest** > **Ajustes** > **Integraciones**:
+Configura la URL de Kodi en tu archivo `.env` o vía **Crow's Nest** > **Ajustes** > **Integraciones**:
 
 ```bash
 KODI_URL=http://192.168.1.100:8080
 ```
 
-Si configuraste autenticacion en Kodi:
+Si configuraste autenticación en Kodi:
 
 ```bash
 KODI_URL=http://kodi:micontrasena@192.168.1.100:8080
@@ -44,9 +44,9 @@ KODI_URL=http://kodi:micontrasena@192.168.1.100:8080
 
 ## Herramientas de IA
 
-Una vez conectado, controla Kodi a traves de tu IA:
+Una vez conectado, controla Kodi a través de tu IA:
 
-> "Que se esta reproduciendo en Kodi?"
+> "¿Qué se está reproduciendo en Kodi?"
 
 > "Pausa Kodi"
 
@@ -56,34 +56,34 @@ Una vez conectado, controla Kodi a traves de tu IA:
 
 > "Sube el volumen en Kodi"
 
-> "Explora mi biblioteca de peliculas de Kodi"
+> "Explora mi biblioteca de películas de Kodi"
 
 ## Panel del dashboard
 
-Cuando Kodi esta conectado, el panel Media Hub agrega una pestana de **Control remoto** con:
+Cuando Kodi está conectado, el panel Media Hub agrega una pestaña de **Control remoto** con:
 
-- **En reproduccion** — contenido actual con miniatura, titulo y progreso
+- **En reproducción** — contenido actual con miniatura, título y progreso
 - **Controles de transporte** — reproducir, pausar, detener, saltar, volumen
-- **Explorador de biblioteca** — explora peliculas, series y musica por categoria
+- **Explorador de biblioteca** — explora películas, series y música por categoría
 
-## Integracion con Media Hub
+## Integración con Media Hub
 
-La pestana de control remoto de Kodi aparece automaticamente en el Media Hub junto a otras integraciones multimedia (Biblioteca de Jellyfin, Plex, IPTV). Todas tus fuentes multimedia en un solo lugar.
+La pestaña de control remoto de Kodi aparece automáticamente en el Media Hub junto a otras integraciones multimedia (Biblioteca de Jellyfin, Plex, IPTV). Todas tus fuentes multimedia en un solo lugar.
 
-## Solucion de problemas
+## Solución de problemas
 
-### "Conexion rechazada" o tiempo de espera agotado
+### "Conexión rechazada" o tiempo de espera agotado
 
-- Verifica que el control remoto HTTP este habilitado en Kodi (Ajustes > Servicios > Control)
-- Asegurate de que el puerto coincida con lo que configuraste (por defecto: 8080)
+- Verifica que el control remoto HTTP esté habilitado en Kodi (Ajustes > Servicios > Control)
+- Asegúrate de que el puerto coincida con lo que configuraste (por defecto: 8080)
 - Comprueba que el dispositivo Kodi sea accesible desde tu servidor de Crow
 
 ### "401 No autorizado"
 
-Si configuraste un nombre de usuario y contrasena en los ajustes HTTP de Kodi, asegurate de que esten incluidos en la `KODI_URL`.
+Si configuraste un nombre de usuario y contraseña en los ajustes HTTP de Kodi, asegúrate de que estén incluidos en la `KODI_URL`.
 
 ### Los comandos no funcionan
 
-- Kodi debe estar ejecutandose y no en protector de pantalla ni en modo de espera
-- Algunos comandos solo funcionan durante la reproduccion (ej., pausar, saltar)
-- Si Kodi esta en una red diferente, usa Tailscale para conectar las redes
+- Kodi debe estar ejecutándose y no en protector de pantalla ni en modo de espera
+- Algunos comandos solo funcionan durante la reproducción (ej., pausar, saltar)
+- Si Kodi está en una red diferente, usa Tailscale para conectar las redes
