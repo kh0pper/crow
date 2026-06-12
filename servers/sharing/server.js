@@ -61,7 +61,7 @@ export function createSharingServer(dbPath, options = {}) {
   // the call site here; initSharingRuntime does not re-check it.
   if (!managers.initialized) {
     managers.initialized = true;
-    initSharingRuntime(managers, { applyProjectCloneBundle });
+    initSharingRuntime(managers, { applyProjectCloneBundle, buildProjectCloneBundle });
   }
 
   const server = new McpServer(

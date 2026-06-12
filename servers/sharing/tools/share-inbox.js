@@ -121,14 +121,17 @@ export function registerShareInboxTools(server, ctx) {
         // Record the share in shared_items (event-style row for inbox listing)
         // AND in project_members (mode='clone') so the origin retains an audit
         // trail of which clones were sent to whom.
-        await db.execute({
-          sql: `INSERT INTO shared_items (contact_id, share_type, item_id, permissions, direction, delivery_status)
-                VALUES (?, 'project', ?, ?, 'sent', ?)`,
-          args: [
-            contactRow.id, item_id, "read",
-            peerManager.isConnected(contactRow.crow_id) ? "delivered" : "pending",
-          ],
+        // W4-2 S3: always INSERT 'pending'; update to 'delivered' only after a
+        // successful send so a throwing send doesn't leave the row 'delivered'
+        // and invisible to the re-delivery loop.
+        // W4-2 B: write mode='clone' so the re-delivery loop can distinguish
+        // queued clone rows from plain share rows.
+        const sharedItemResult = await db.execute({
+          sql: `INSERT INTO shared_items (contact_id, share_type, item_id, permissions, direction, delivery_status, mode)
+                VALUES (?, 'project', ?, 'read', 'sent', 'pending', 'clone')`,
+          args: [contactRow.id, item_id],
         });
+        const sharedItemId = Number(sharedItemResult.lastInsertRowid);
 
         // project_members row: contact_id + role + mode='clone' so revoke
         // can find the same record later. Upsert: if the same contact got
@@ -170,8 +173,13 @@ export function registerShareInboxTools(server, ctx) {
               timestamp: new Date().toISOString(),
             });
             deliveryStatus = "delivered";
+            // W4-2 S3: update to 'delivered' only after the send succeeds
+            await db.execute({
+              sql: "UPDATE shared_items SET delivery_status = 'delivered' WHERE id = ?",
+              args: [sharedItemId],
+            });
           } catch (err) {
-            deliveryStatus = "pending";
+            // deliveryStatus stays 'pending' — row already inserted as 'pending'
             console.warn(`[sharing] project clone send failed: ${err.message}`);
           }
         }
