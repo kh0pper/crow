@@ -11,13 +11,14 @@
  * Use `tools: []` for agents that should not call tools (e.g., writers).
  */
 
-import { ATS_PLATFORMS_JSON, WRITING_VOICE_RULES } from "./presets/shared.js";
 import { corePresets } from "./presets/core.js";
 import { mpaPresets } from "./presets/mpa.js";
 import { teamPresets } from "./presets/teams.js";
 import { jobSearchPresets } from "./presets/bot-job-search.js";
 import { trackerPresets } from "./presets/bot-trackers.js";
 
+// Spread order = original key order in presets.js (b6be3cb).
+// Consumers may iterate Object.keys(presets) — do not reorder.
 export const presets = {
   ...corePresets,
   ...mpaPresets,
