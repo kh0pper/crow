@@ -46,7 +46,7 @@ El puerto predeterminado de Wallabag (80) se remapea a **8084** para evitar conf
 
 ### Opción B: Conectar a Wallabag existente
 
-Si ya tienes una instancia de Wallabag funcionando, conecta Crow directamente a ella. Wallabag usa autenticación OAuth2, así que necesitas cuatro credenciales.
+Si ya tienes una instancia de Wallabag funcionando, conecta Crow directamente a ella. Wallabag usa autenticación OAuth2, así que necesitas cuatro credenciales (Client ID, Client Secret, nombre de usuario, contraseña) más la URL del servidor — cinco variables en total.
 
 #### Paso 1: Crear un cliente de API
 

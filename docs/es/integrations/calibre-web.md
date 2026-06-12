@@ -43,11 +43,11 @@ Calibre-Web estará disponible en `http://tu-servidor:8083`. Crea una cuenta de 
 
 Si ya tienes una instancia de Calibre-Web funcionando, conecta Crow directamente a ella.
 
-#### Paso 1: Obtener tu clave de API
+#### Paso 1: Obtener un token bearer
 
-1. Abre tu interfaz de Calibre-Web
-2. Ve a **Settings** (menú de administrador)
-3. Genera o copia tu clave de API
+::: warning Calibre-Web estándar no tiene ajuste de clave de API
+La integración de Crow se autentica con un token bearer (`CALIBRE_WEB_API_KEY`), pero la interfaz estándar de janeczku/calibre-web no ofrece una clave de API de propósito general — sus opciones integradas son inicio de sesión por sesión, autenticación básica OPDS y tokens de sincronización Kobo por usuario. Por tanto, la Opción B solo funciona si tu despliegue expone un token bearer (p. ej., un fork o un proxy inverso con autenticación delante de Calibre-Web). La instancia incluida en la Opción A viene preconfigurada y no necesita nada de esto.
+:::
 
 #### Paso 2: Agregar a Crow
 
@@ -80,7 +80,7 @@ Asegúrate de que la `CALIBRE_WEB_URL` sea accesible desde la máquina que ejecu
 
 ### La clave de API no funciona
 
-Regenera la clave de API desde los ajustes de administrador de Calibre-Web. Asegúrate de haber copiado la clave completa sin espacios en blanco adicionales.
+Asegúrate de haber copiado el token completo sin espacios en blanco adicionales, y de que tu despliegue de Calibre-Web realmente acepte tokens bearer (consulta la advertencia en la Opción B — Calibre-Web estándar no lo hace).
 
 ### "metadata.db not found"
 

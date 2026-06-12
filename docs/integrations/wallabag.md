@@ -46,7 +46,7 @@ Wallabag's default port (80) is remapped to **8084** to avoid conflicts with oth
 
 ### Option B: Connect to existing Wallabag
 
-If you already run a Wallabag instance, connect Crow to it directly. Wallabag uses OAuth2 authentication, so you need four credentials.
+If you already run a Wallabag instance, connect Crow to it directly. Wallabag uses OAuth2 authentication, so you need four credentials (Client ID, Client Secret, username, password) plus the server URL — five variables in total.
 
 #### Step 1: Create an API client
 

@@ -116,7 +116,7 @@ CREATE TABLE sync_state (
 
 Los checkpoints se escriben por entrada aplicada (no por lote), de modo que un crash a mitad de la sincronización nunca re-aplica ni omite entradas.
 
-Al reconectarse, la sincronización se reanuda desde `last_seq` — solo se transfieren las entradas nuevas.
+Al reconectarse, la sincronización se reanuda desde el checkpoint por peer en `last_applied_seq_per_peer` — solo se transfieren las entradas nuevas.
 
 ## Federación vía proxy del gateway
 

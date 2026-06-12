@@ -126,7 +126,7 @@ The feed includes the full [iTunes podcast namespace](https://podcasters.apple.c
 
 - **Apple Podcasts** — Submit your feed URL at [podcastsconnect.apple.com](https://podcastsconnect.apple.com)
 - **Spotify** — Submit at [podcasters.spotify.com](https://podcasters.spotify.com)
-- **Google Podcasts**, **Pocket Casts**, **Overcast**, and any other app that accepts RSS
+- **YouTube Music** (submit your RSS feed via YouTube Studio), **Pocket Casts**, **Overcast**, and any other app that accepts RSS
 
 The feed includes:
 

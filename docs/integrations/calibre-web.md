@@ -43,11 +43,11 @@ Calibre-Web will be available at `http://your-server:8083`. Create an initial ad
 
 If you already run a Calibre-Web instance, connect Crow to it directly.
 
-#### Step 1: Get your API key
+#### Step 1: Get a bearer token
 
-1. Open your Calibre-Web interface
-2. Go to **Settings** (admin menu)
-3. Generate or copy your API key
+::: warning Stock Calibre-Web has no API-key setting
+Crow's integration authenticates with a bearer token (`CALIBRE_WEB_API_KEY`), but the stock janeczku/calibre-web UI does not offer a general-purpose API key — its built-in options are session login, OPDS basic auth, and per-user Kobo sync tokens. Option B therefore works only if your deployment exposes a bearer token (e.g. a fork or an authenticating reverse proxy in front of Calibre-Web). The bundled instance from Option A is preconfigured and needs none of this.
+:::
 
 #### Step 2: Add to Crow
 
@@ -80,7 +80,7 @@ Make sure the `CALIBRE_WEB_URL` is reachable from the machine running Crow. If C
 
 ### API key not working
 
-Regenerate the API key from Calibre-Web's admin settings. Make sure you copied the full key without extra whitespace.
+Make sure you copied the full token without extra whitespace, and that your Calibre-Web deployment actually accepts bearer tokens (see the warning under Option B — stock Calibre-Web does not).
 
 ### "metadata.db not found"
 

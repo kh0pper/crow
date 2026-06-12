@@ -89,7 +89,7 @@ cd ~/.crow/app && npm run setup
 Agregar al CLI `crow`:
 
 ```bash
-crow backup                    # Crea ~/.crow/crow-backup-2024-01-15.tar.gz
+crow backup                    # Crea ~/.crow/crow-backup-2026-06-12.tar.gz
 crow backup --include-bundles  # Incluye los volúmenes de Docker de los bundles
 crow restore backup.tar.gz     # Restaura en la nueva máquina
 ```

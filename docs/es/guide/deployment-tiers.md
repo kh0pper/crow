@@ -4,14 +4,14 @@ title: Niveles de despliegue
 
 # Niveles de despliegue
 
-Crow corre en todo, desde una Raspberry Pi de $15 hasta un servidor en la nube. Esta guía te ayuda a elegir el hardware adecuado y a entender qué puede manejar cada opción.
+Crow corre en todo, desde una Raspberry Pi Zero 2 W de $15 hasta un servidor en la nube. Esta guía te ayuda a elegir el hardware adecuado y a entender qué puede manejar cada opción.
 
 ## Comparación
 
 | Despliegue | RAM | Disco | Ideal para | Limitaciones |
 |---|---|---|---|---|
 | Raspberry Pi Zero/3 | 512MB–1GB | SD de 16–32GB | Memoria + blog, 1–2 complementos ligeros | Sin Immich, sin Ollama, almacenamiento limitado |
-| Raspberry Pi 4/5 | 2–8GB | SD/SSD de 32GB+ | La mayoría de los complementos, almacenamiento moderado | Ollama solo con modelos pequeños, SSD recomendado |
+| Raspberry Pi 4/5 | 2–8GB | SD/SSD de 32GB+ | La mayoría de los complementos, almacenamiento moderado | Ollama solo con modelos pequeños, SSD recomendado; ten en cuenta que la escasez de memoria de 2025–26 elevó los precios de la Pi 5 (4GB ≈ $75) |
 | Nube gratuita (Render) *(legado)* | 512MB | Efímero | Solo pruebas | Sin complementos Docker, el almacenamiento se reinicia con cada deploy, se duerme por inactividad |
 | Oracle Cloud Free Tier | 1–24GB | 50–200GB | Plataforma completa con complementos | Límites de egreso de red, arquitectura ARM |
 | Servidor en casa | 4–32GB | 500GB+ | Todo | Depende de la energía y la red |

@@ -64,7 +64,7 @@ See [Gateway](./gateway) for details.
 
 ### 3. Skills (`skills/`)
 
-30 markdown files that serve as behavioral prompts. Not code — they define workflows, trigger patterns, and integration logic. Loaded by Claude on demand.
+Markdown files (40+) that serve as behavioral prompts. Not code — they define workflows, trigger patterns, and integration logic. Loaded by Claude on demand.
 
 See [Skills](../skills/) for the full list.
 
