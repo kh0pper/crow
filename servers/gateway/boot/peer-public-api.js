@@ -3,7 +3,7 @@
  * contact discovery endpoints.
  *
  * relayDb is passed in deps (created in index.js per C1 — before module 1).
- * deps: { authMiddleware, noAuth, relayDb, loadDynamicBackends }
+ * deps: { authMiddleware, relayDb, loadDynamicBackends }
  */
 
 import { createRelayHandlers } from "../../sharing/relay.js";
