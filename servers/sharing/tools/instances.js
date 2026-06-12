@@ -11,7 +11,7 @@ import { z } from "zod";
 import { createNotification } from "../../shared/notifications.js";
 
 export function registerInstancesTools(server, ctx) {
-  const { db, identity, nostrManager } = ctx;
+  const { db, identity, nostrManager, instanceSyncManager } = ctx;
 
   // --- Tool: crow_discover_relays ---
 
@@ -293,6 +293,13 @@ export function registerInstancesTools(server, ctx) {
       }
 
       await revokeInstance(db, instance_id);
+
+      // Close Hypercore feeds for the revoked instance to free FDs.
+      // Instances lazily re-init on un-revoke (boot eagerInitPairedPeers /
+      // tailnet-sync paths gate on status and will reopen if un-revoked).
+      if (instanceSyncManager) {
+        try { await instanceSyncManager.closeInstanceFeeds(instance_id); } catch {}
+      }
 
       try {
         await createNotification(db, {
