@@ -560,6 +560,13 @@ async function gracefulShutdown() {
   shuttingDown = true;                                           // step 1
   console.log("\nShutting down gateway...");
 
+  // Step 1b — stop scheduler first so no new ticks fire during the drain window
+  // (avoids racing a checkpoint or a DB write against process teardown).
+  try {
+    const { stopScheduler } = await import("./scheduler.js");
+    stopScheduler();
+  } catch {}
+
   // Step 2 — stop accepting new connections; release idle keep-alive sockets
   server.close();
   server.closeIdleConnections();
