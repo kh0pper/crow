@@ -507,8 +507,15 @@ try {
     console.warn("[panel-routes] Failed to load:", err.message);
   }
 } catch (err) {
-  if (err.code !== "ERR_MODULE_NOT_FOUND") {
-    console.warn("[dashboard] Failed to mount:", err.message);
+  // Quiet ONLY for the "no dashboard shipped" minimal deployment (the
+  // dashboard entry module itself is absent). Any OTHER failure — including
+  // an ERR_MODULE_NOT_FOUND from a broken import INSIDE the dashboard graph —
+  // must be LOUD: a one-character import-path typo once took the entire
+  // Crow's Nest down fleet-wide with zero log output (2026-06-12).
+  const entryMissing = err.code === "ERR_MODULE_NOT_FOUND" &&
+    /dashboard[\/]index\.js/.test(err.message || "");
+  if (!entryMissing) {
+    console.error("[dashboard] FAILED TO MOUNT — Crow's Nest is DOWN:", err.message);
   }
 }
 
