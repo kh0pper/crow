@@ -45,7 +45,7 @@ Conéctate a un gateway de Crow desplegado.
 
 ### Pasos de configuración
 
-1. Despliega Crow ([Guía de despliegue en la nube](/es/getting-started/cloud-deploy))
+1. Despliega Crow ([guía de Primeros pasos](/es/getting-started/))
 
 2. Crea `.cursor/mcp.json`:
    ```json

@@ -49,7 +49,7 @@ Conéctate a un gateway de Crow desplegado para acceder a la plataforma completa
 
 ### Requisitos previos
 
-- Gateway de Crow desplegado y funcionando ([Guía de despliegue en la nube](/es/getting-started/cloud-deploy))
+- Gateway de Crow desplegado y funcionando ([guía de Primeros pasos](/es/getting-started/))
 
 ### Pasos de configuración
 

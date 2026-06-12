@@ -181,7 +181,7 @@ sudo systemctl restart caddy
 Caddy automatically obtains and renews Let's Encrypt certificates. Make sure your domain's DNS A record points to your server's public IP, and that ports 80 and 443 are open in your firewall.
 
 ::: tip Oracle Cloud Free Tier
-If you're running on Oracle Cloud, you also need to add ingress rules for TCP ports 80 and 443 in your VCN's security list. See the [Oracle Cloud section](/getting-started/cloud-deploy#oracle-cloud-free-tier) for details.
+If you're running on Oracle Cloud, you also need to add ingress rules for TCP ports 80 and 443 in your VCN's security list. See the [Oracle Cloud guide's security-list section](/getting-started/oracle-cloud#oracle-security-lists-cloud-firewall) for details.
 :::
 
 ::: tip Beyond single-device access
