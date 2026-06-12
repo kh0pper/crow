@@ -499,7 +499,6 @@ const EXTERNAL_SEND_TOOLS = new Set([
   "crow_send_group_message", // sharing: fan-out encrypted DMs
   "crow_voice_memo",         // sharing: spoken memo to a contact
   "crow_share",              // sharing: share an item with a contact
-  "crow_relay",              // sharing: relay a task to a remote instance
 ]);
 export function isExternalSendTool(name) {
   if (!name) return false;
