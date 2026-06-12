@@ -7,7 +7,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { createDbClient, sanitizeFtsQuery, escapeLikePattern, isSqliteVecAvailable } from "../db.js";
+import { createDbClient, sanitizeFtsQuery, escapeLikePattern } from "../db.js";
 import { generateCrowContext, PROTECTED_SECTIONS, invalidateContextCache } from "./crow-context.js";
 import { generateToken, validateToken, shouldSkipGates } from "../shared/confirm.js";
 import { createNotification, cleanupNotifications } from "../shared/notifications.js";
@@ -24,22 +24,9 @@ import { rerank as phase4Rerank } from "./rerank.js";
 export function createMemoryServer(dbPath, options = {}) {
   const db = createDbClient(dbPath);
 
-  // Optional embedding function: (text) => Float32Array | null
-  // Passed via options by the gateway when an AI provider with embeddings is configured.
-  const getEmbedding = options.getEmbedding || null;
-
   // Optional sync manager for instance-to-instance replication.
   // When set, mutations emit change entries to connected instances.
   const syncManager = options.syncManager || null;
-
-  // Cache sqlite-vec availability (checked once on first use)
-  let _vecAvailable = null;
-  async function hasVec() {
-    if (_vecAvailable === null) {
-      _vecAvailable = await isSqliteVecAvailable(db);
-    }
-    return _vecAvailable;
-  }
 
   // --- Phase 4: BLOB-based semantic memory via grackle-embed ---
   // Cache provider-health check so we don't probe on every write.
@@ -52,24 +39,10 @@ export function createMemoryServer(dbPath, options = {}) {
   }
 
   // Store embedding for a memory (fire-and-forget, errors don't block).
-  // Prefers:
-  //   1. Legacy options.getEmbedding + sqlite-vec path (kept for backward compat)
-  //   2. Phase 4 BLOB + grackle-embed path (default when provider is healthy)
+  // Phase 4 BLOB + grackle-embed path (the only path since the never-wired
+  // sqlite-vec legacy branch was removed in W5.5).
   async function storeEmbedding(memoryId, content) {
-    // Legacy injected path (preserved)
-    if (getEmbedding && await hasVec()) {
-      try {
-        const vec = await getEmbedding(content);
-        if (!vec || vec.length === 0) return;
-        const blob = Buffer.from(vec.buffer);
-        await db.execute({
-          sql: "INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding) VALUES (?, ?)",
-          args: [memoryId, blob],
-        });
-        return;
-      } catch {}
-    }
-    // Phase 4 default path — non-blocking, degrades to no-op on provider failure
+    // Non-blocking, degrades to no-op on provider failure
     const info = await phase4ProviderHealthy();
     if (!info.ok) return;
     try {
@@ -150,39 +123,9 @@ export function createMemoryServer(dbPath, options = {}) {
       // Try semantic search first if requested and available
       let semanticRows = [];
 
-      // Legacy sqlite-vec path (kept for backward compat with injected getEmbedding)
-      if (semantic && getEmbedding && await hasVec()) {
-        try {
-          const queryVec = await getEmbedding(query);
-          if (queryVec && queryVec.length > 0) {
-            const blob = Buffer.from(queryVec.buffer);
-            let vecSql = `
-              SELECT m.*, e.distance
-              FROM memory_embeddings e
-              JOIN memories m ON m.id = e.memory_id
-              WHERE e.embedding MATCH ?
-            `;
-            const vecParams = [blob];
-
-            if (category) { vecSql += " AND m.category = ?"; vecParams.push(category); }
-            if (min_importance) { vecSql += " AND m.importance >= ?"; vecParams.push(min_importance); }
-            if (instance_id) { vecSql += " AND m.instance_id = ?"; vecParams.push(instance_id); }
-            if (project_id) { vecSql += " AND m.project_id = ?"; vecParams.push(project_id); }
-
-            vecSql += ` ORDER BY e.distance LIMIT ?`;
-            vecParams.push(limit);
-
-            const { rows: vRows } = await db.execute({ sql: vecSql, args: vecParams });
-            semanticRows = vRows;
-          }
-        } catch {
-          // Semantic search failed — fall through to FTS5
-        }
-      }
-
-      // Phase 4: BLOB + in-process cosine path (default when semantic=true
-      // and no legacy injection). Loads all memory embeddings, scores by
-      // cosine similarity, optionally reranks top-K via grackle-rerank.
+      // Phase 4: BLOB + in-process cosine path. Loads all memory embeddings,
+      // scores by cosine similarity, optionally reranks top-K via
+      // grackle-rerank. (The never-wired sqlite-vec branch was removed in W5.5.)
       if (semantic && semanticRows.length === 0) {
         try {
           const info = await phase4ProviderHealthy();

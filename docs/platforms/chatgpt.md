@@ -4,7 +4,7 @@ Connect Crow to ChatGPT using the SSE transport. ChatGPT supports MCP through it
 
 ## Prerequisites
 
-- Crow gateway deployed and healthy ([Cloud Deploy Guide](../getting-started/cloud-deploy))
+- Crow gateway deployed and healthy ([Getting Started guide](../getting-started/))
 - A ChatGPT Plus or Team plan
 
 ## Setup Steps

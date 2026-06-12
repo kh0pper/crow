@@ -41,7 +41,7 @@ Connect Crow to [Cline](https://github.com/cline/cline), the AI coding assistant
 
 ### Setup Steps
 
-1. Deploy Crow ([Cloud Deploy Guide](../getting-started/cloud-deploy))
+1. Deploy Crow ([Getting Started guide](../getting-started/))
 
 2. In the Cline panel, open **MCP Servers** → **Remote Servers** and add the server name + URL, or edit `cline_mcp_settings.json` (via **Configure** → **Configure MCP Servers**):
    ```json

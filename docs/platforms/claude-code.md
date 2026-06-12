@@ -50,7 +50,7 @@ Connect to a deployed Crow gateway for access to the full platform including ext
 
 ### Setup Steps
 
-1. Deploy Crow ([Cloud Deploy Guide](../getting-started/cloud-deploy))
+1. Deploy Crow ([Getting Started guide](../getting-started/))
 
 2. Add to `.mcp.json`:
    ```json

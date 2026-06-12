@@ -7,6 +7,7 @@
  */
 
 import { randomUUID, createHash } from "node:crypto";
+import { InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { createDbClient, auditLog } from "../db.js";
 
 function hashToken(t) { return createHash('sha256').update(t).digest('hex'); }
@@ -195,11 +196,11 @@ export class CrowOAuthProvider {
       args: [hashedToken],
     });
 
-    if (rows.length === 0) throw new Error("Invalid token");
+    if (rows.length === 0) throw new InvalidTokenError("Invalid token");
     const row = rows[0];
     if (new Date(row.expires_at) < new Date()) {
       await this.db.execute({ sql: "DELETE FROM oauth_tokens WHERE token = ?", args: [hashedToken] });
-      throw new Error("Token expired");
+      throw new InvalidTokenError("Token expired");
     }
 
     return {

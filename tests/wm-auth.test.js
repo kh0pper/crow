@@ -189,3 +189,8 @@ test("control: /router/mcp rejects bare requests identically (parity)", async ()
   const code = await postMcp(port, "/router/mcp");
   assert.equal(code, 401);
 });
+
+test("POST /wm/mcp with a BOGUS bearer is rejected with 401 (not 500)", async () => {
+  const code = await postMcp(port, "/wm/mcp", { Authorization: "Bearer not-a-real-token" });
+  assert.equal(code, 401);
+});
