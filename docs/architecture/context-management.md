@@ -288,15 +288,15 @@ The gateway `/health` response includes tool count telemetry:
   "servers": ["crow-memory", "crow-projects", "crow-sharing", "crow-storage", "crow-blog"],
   "externalServers": [{ "id": "github", "name": "GitHub", "tools": 15 }],
   "toolCounts": {
-    "core": 143,
+    "core": 141,
     "external": 15,
-    "total": 158,
+    "total": 156,
     "routerMode": 10
   }
 }
 ```
 
-The `routerMode` field is the number of router tools exposed (10 on a full install), or `null` when the router is disabled via `CROW_DISABLE_ROUTER=1`. `core` counts every manifest action across the 8 categories (143 including the media bundle's 17).
+The `routerMode` field is the number of router tools exposed (10 on a full install), or `null` when the router is disabled via `CROW_DISABLE_ROUTER=1`. `core` counts every manifest action across the 8 categories (141 on this build, including the media bundle's 17 — the orchestrator manifest lists 7 of its 9 tools).
 
 ## API Reference
 

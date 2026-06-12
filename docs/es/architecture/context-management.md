@@ -288,15 +288,15 @@ La respuesta de `/health` del gateway incluye telemetría de conteo de herramien
   "servers": ["crow-memory", "crow-projects", "crow-sharing", "crow-storage", "crow-blog"],
   "externalServers": [{ "id": "github", "name": "GitHub", "tools": 15 }],
   "toolCounts": {
-    "core": 143,
+    "core": 141,
     "external": 15,
-    "total": 158,
+    "total": 156,
     "routerMode": 10
   }
 }
 ```
 
-El campo `routerMode` es el número de herramientas del router expuestas (10 en una instalación completa), o `null` cuando el router está desactivado vía `CROW_DISABLE_ROUTER=1`. `core` cuenta todas las acciones del manifiesto en las 8 categorías (143 incluyendo las 17 del complemento de medios).
+El campo `routerMode` es el número de herramientas del router expuestas (10 en una instalación completa), o `null` cuando el router está desactivado vía `CROW_DISABLE_ROUTER=1`. `core` cuenta todas las acciones del manifiesto en las 8 categorías (141 en esta compilación, incluyendo las 17 del complemento de medios — el manifiesto del orquestador lista 7 de sus 9 herramientas).
 
 ## Referencia de API
 
