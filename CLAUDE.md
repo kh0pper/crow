@@ -46,7 +46,7 @@ When the AI behavior (formatting, routing) changes → `crow.md` only. When the 
 
 ## Project spaces (Phase 1 redesign, 2026-05-26)
 
-The legacy `research_projects` table is being phased out. New project work writes to `project_spaces` (one row per shareable space with slug, workspace_dir, storage_prefix, tasks_db_uri, etc.). A forward trigger keeps the two in sync during the transition. Membership / ACL lives in `project_members` (role + per-member capability overrides). Mutation events append to `project_audit_log`. Helper at `servers/shared/project-acl.js`.
+Projects live in `project_spaces` (one row per shareable space with slug, workspace_dir, storage_prefix, tasks_db_uri, etc.) — the sole system of record. The legacy `research_projects` table and its mirror triggers were retired and dropped in June 2026 (W2-5 B3a/B3b); a guarded init-db migration drops the dormant table on any host that still carries it. Membership / ACL lives in `project_members` (role + per-member capability overrides). Mutation events append to `project_audit_log`. Helper at `servers/shared/project-acl.js`.
 
 ## Bot Builder (pi-bots)
 

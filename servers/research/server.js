@@ -837,7 +837,7 @@ export function createProjectServer(dbPath, options = {}) {
   // These tools operate on project_spaces (the shareable space concept).
   // Since W2-5B2 every project tool writes project_spaces directly, and the
   // M1 rp→ps forward triggers were retired in B3a (2026-06-12);
-  // research_projects is a frozen dormant table.
+  // research_projects was dropped in B3b (2026-06-12).
 
   function aclErrorToToolResult(err) {
     return {

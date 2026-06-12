@@ -3,7 +3,7 @@
  * Crow Bot Builder — Phase 1 setup fixture (idempotent).
  *
  * Stands up the minimal v0.1 data the bridge + GUI operate on:
- *   1. a research_projects row in crow.db (MPA had 0; plan §4 requires one)
+ *   1. a project_spaces row in crow.db (B3b: research_projects was dropped)
  *   2. one test card in tasks.db (the LIVE kanban) scoped by project_id
  *      (cross-DB SOFT link — app-level only, NEVER a SQL join, per §4)
  *   3. the per-card plan file at <session_dir>/plans/<card_id>.md
@@ -48,8 +48,8 @@ if (!crow.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='pi_b
   console.error("REFUSING: pi_bot_defs missing — run scripts/init-pi-bots.mjs first"); process.exit(2);
 }
 
-// 1. project space (idempotent by name; B3a 2026-06-12 — research_projects is
-//    dormant and its mirror triggers are retired, so this seeds project_spaces)
+// 1. project space (idempotent by name; B3a/B3b 2026-06-12 — research_projects was retired
+//    and dropped, so this seeds project_spaces)
 let proj = crow.prepare("SELECT id FROM project_spaces WHERE name=?").get(PROJECT_NAME);
 if (!proj && !CHECK_ONLY) {
   const info = crow.prepare(
@@ -84,7 +84,7 @@ if (planPath && !CHECK_ONLY && !existsSync(planPath)) {
   writeFileSync(planPath,
 `# Plan — card ${cardId}: ${CARD_TITLE}
 
-**Project:** ${PROJECT_NAME} (crow.db research_projects.id=${projectId})
+**Project:** ${PROJECT_NAME} (crow.db project_spaces.id=${projectId})
 **Owner bot:** ${BOT_ID}
 
 ## Goal
@@ -119,7 +119,7 @@ const definition = {
   },
   gateways: [{ type: "gmail", address: "kevin.hopper+pibot@maestro.press",
                allowlist: ["kevin.hopper1@gmail.com", "kevin.hopper@maestro.press"] }],
-  project_id: projectId,                                       // soft link to crow.db research_projects.id
+  project_id: projectId,                                       // soft link to crow.db project_spaces.id
   permission_policy: { bash: "deny",
                        write_paths: [SESSION_DIR],
                        external_send: "draft_only",
@@ -150,13 +150,13 @@ if (!CHECK_ONLY) {
 }
 
 // --- report ---
-const finalProj = crow.prepare("SELECT id,name,status FROM research_projects WHERE name=?").get(PROJECT_NAME);
+const finalProj = crow.prepare("SELECT id,name,status FROM project_spaces WHERE name=?").get(PROJECT_NAME);
 const finalCard = projectId != null
   ? tasks.prepare("SELECT id,title,status,project_id FROM tasks_items WHERE title=? AND project_id=?").get(CARD_TITLE, projectId)
   : null;
 const finalBot = crow.prepare("SELECT bot_id,display_name,enabled FROM pi_bot_defs WHERE bot_id=?").get(BOT_ID);
 console.log(`[phase1-setup] ${CHECK_ONLY ? "CHECK" : "APPLY"}  bot_registry=${prodBots} (production untouched)`);
-console.log(`  research_projects: ${finalProj ? `id=${finalProj.id} "${finalProj.name}" (${finalProj.status})` : "MISSING"}`);
+console.log(`  project_spaces: ${finalProj ? `id=${finalProj.id} "${finalProj.name}" (${finalProj.status})` : "MISSING"}`);
 console.log(`  tasks_items card : ${finalCard ? `id=${finalCard.id} status=${finalCard.status} project_id=${finalCard.project_id}` : "MISSING"}`);
 console.log(`  plan file        : ${planPath} ${planPath && existsSync(planPath) ? "(present)" : "(absent)"}`);
 console.log(`  pi_bot_defs      : ${finalBot ? `${finalBot.bot_id} "${finalBot.display_name}" enabled=${finalBot.enabled}` : "MISSING"}`);
