@@ -114,19 +114,6 @@ export async function auditLog(db, eventType, { actor, ip, details } = {}) {
 }
 
 /**
- * Check if sqlite-vec extension is available and loaded.
- * Returns true if vec0 virtual tables can be created.
- */
-export async function isSqliteVecAvailable(db) {
-  try {
-    await db.execute("SELECT vec_version()");
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Safely add a column to an existing table if it doesn't exist.
  * SQLite doesn't support IF NOT EXISTS for ALTER TABLE ADD COLUMN,
  * so we catch the "duplicate column" error.
