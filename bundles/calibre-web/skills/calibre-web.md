@@ -73,7 +73,8 @@ tools:
 ## Error Handling
 
 - If Calibre-Web is unreachable: "Cannot connect to Calibre-Web at the configured URL. Make sure the server is running."
-- If auth fails (401/403): "Calibre-Web rejected the API key. Check CALIBRE_WEB_API_KEY in settings."
+- If auth fails (401/403): "Calibre-Web rejected the credentials. Check CALIBRE_WEB_USERNAME and CALIBRE_WEB_PASSWORD in settings."
+- If a shelf/reading-status action reports it needs a browser session: that is stock Calibre-Web behavior for non-OPDS routes — tell the user to do it in the Calibre-Web web UI.
 - If a book is not found: the book may have been removed from the library
 - If shelves are empty: suggest creating shelves in the Calibre-Web interface
 - If the reader URL doesn't work: the book format may not support in-browser reading (suggest downloading instead)
