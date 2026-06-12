@@ -44,7 +44,7 @@ Si ya tienes una instancia de Shiori funcionando, conecta Crow directamente a el
 Configura lo siguiente en tu archivo `.env` o via **Crow's Nest** > **Ajustes** > **Integraciones**:
 
 ```bash
-SHIORI_URL=http://tu-servidor-shiori:8086
+SHIORI_URL=http://tu-servidor-shiori:8080   # predeterminado de Shiori estándar; el complemento de Crow (Opción A) lo remapea a 8086
 SHIORI_USERNAME=tu-usuario
 SHIORI_PASSWORD=tu-contraseña
 ```

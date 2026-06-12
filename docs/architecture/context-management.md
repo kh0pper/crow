@@ -143,7 +143,7 @@ For stdio deployments, `servers/core/` provides a single MCP server that starts 
 
 1. All servers are connected via `InMemoryTransport` and their tools registered on the core `McpServer`
 2. Only the default server's tools are enabled; all others are registered but disabled
-3. The AI sees 15 tools at startup: 12 memory tools + 3 management tools
+3. The AI sees 27 tools at startup: the memory server's 24 tools + 3 management tools
 4. Calling `crow_activate_server("projects")` flips the registered tools to enabled and triggers a `toolListChanged` notification
 5. The AI client re-fetches the tool list and sees the newly available tools
 

@@ -25,7 +25,8 @@ glasses via a supported SDK.
 
 | Model | Released | Supported |
 |---|---|---|
-| Ray-Ban Meta (Gen 2 / AR1) | 2023 | ✅ |
+| Ray-Ban Meta Gen 2 | 2025 | ✅ |
+| Ray-Ban Meta (2023, Snapdragon AR1) | 2023 | ✅ |
 | Ray-Ban Stories (Gen 1) | 2021 | ❌ — DAT does not expose the required primitives |
 
 You'll also need:
@@ -72,7 +73,7 @@ For voice turns to feel responsive, prefer:
 
 - **Groq Whisper** (`whisper-large-v3-turbo`) — fastest cloud option
 - **Deepgram** (`nova-3`) — only true streaming option (partial transcripts)
-- **faster-whisper** on your grackle / local GPU — fully local
+- **faster-whisper** on a GPU machine on your network — fully local
 
 **AI Profiles (BYOAI)** — You already have this if you've used Crow's
 Messages feature. An unbound device uses your default AI profile unless you
@@ -85,8 +86,8 @@ and permissions for the voice turn.
 
 - **OpenAI TTS** (`tts-1`) — good quality, ~200 ms first chunk
 - **ElevenLabs** — highest quality, billed per character
-- **Piper** on your grackle — free, fast, all-local
-- **Kokoro** on your grackle — higher quality than Piper, still local
+- **Piper** on a local machine — free, fast, all-local
+- **Kokoro** on a local GPU — higher quality than Piper, still local
 
 ### 2. Install the Meta Glasses bundle
 
@@ -193,7 +194,7 @@ curl -X POST http://localhost:3000/api/meta-glasses/say \
 
 If you've installed the Funkwhale bundle (available in Extensions)
 and configured shared MinIO/S3 storage, the glasses can play your library
-through their bone-conduction speakers without ever pulling out your phone.
+through their open-ear speakers without ever pulling out your phone.
 
 Install + configure once:
 
@@ -249,8 +250,9 @@ speakers via A2DP.
 - **"Play Person Pitch by Panda Bear"** → the AI calls `fw_play_album`,
   queues the album, and music begins.
 - **"Play Comfy in Nautica"** → the AI calls `fw_play` for the single track.
-- **"Stop"** / **"Pause"** / **"Resume"** / **"Next"** / **"Skip"** — simple
-  media commands are recognized via a fast-path that bypasses the LLM entirely
+- **"Stop"** / **"Pause"** / **"Resume"** / **"Next"** / **"Skip"** — these
+  simple media commands are matched as literal English keywords via a fast-path
+  that bypasses the LLM entirely
   (~800 ms response time vs ~5–8 s for full LLM-mediated commands).
 
 ### Touch controls

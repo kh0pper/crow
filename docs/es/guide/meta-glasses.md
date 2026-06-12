@@ -25,7 +25,8 @@ al audio de los lentes emparejados a través de un SDK soportado.
 
 | Modelo | Lanzamiento | Soportado |
 |---|---|---|
-| Ray-Ban Meta (Gen 2 / AR1) | 2023 | ✅ |
+| Ray-Ban Meta Gen 2 | 2025 | ✅ |
+| Ray-Ban Meta (2023, Snapdragon AR1) | 2023 | ✅ |
 | Ray-Ban Stories (Gen 1) | 2021 | ❌ — DAT no expone las primitivas necesarias |
 
 También necesitarás:
@@ -72,7 +73,7 @@ Para que los turnos de voz se sientan ágiles, prefiere:
 
 - **Groq Whisper** (`whisper-large-v3-turbo`) — la opción en la nube más rápida
 - **Deepgram** (`nova-3`) — la única opción con streaming real (transcripciones parciales)
-- **faster-whisper** en tu grackle / GPU local — totalmente local
+- **faster-whisper** en una máquina con GPU en tu red — totalmente local
 
 **Perfiles de IA (BYOAI)** — Ya tienes esto si has usado la función de
 Mensajes de Crow. Un dispositivo sin vincular usa tu perfil de IA predeterminado a
@@ -85,8 +86,8 @@ herramientas delimitadas y los permisos del turno de voz.
 
 - **OpenAI TTS** (`tts-1`) — buena calidad, ~200 ms hasta el primer fragmento
 - **ElevenLabs** — la mayor calidad, se factura por carácter
-- **Piper** en tu grackle — gratuito, rápido, todo local
-- **Kokoro** en tu grackle — mejor calidad que Piper, igual de local
+- **Piper** en una máquina local — gratuito, rápido, todo local
+- **Kokoro** en una GPU local — mejor calidad que Piper, igual de local
 
 ### 2. Instala el complemento de Lentes Meta
 
@@ -195,7 +196,7 @@ curl -X POST http://localhost:3000/api/meta-glasses/say \
 
 Si instalaste el complemento de Funkwhale (disponible en Extensiones)
 y configuraste almacenamiento compartido MinIO/S3, los lentes pueden reproducir tu
-biblioteca por sus altavoces de conducción ósea sin que jamás saques el teléfono.
+biblioteca por sus altavoces de oído abierto sin que jamás saques el teléfono.
 
 Instala y configura una sola vez:
 
@@ -253,8 +254,9 @@ altavoces de los lentes vía A2DP.
 - **"Reproduce Person Pitch de Panda Bear"** → la IA llama a `fw_play_album`,
   pone el álbum en cola y la música comienza.
 - **"Reproduce Comfy in Nautica"** → la IA llama a `fw_play` para la pista individual.
-- **"Stop"** / **"Pause"** / **"Resume"** / **"Next"** / **"Skip"** — los comandos
-  de medios simples se reconocen por una vía rápida que evita el LLM por completo
+- **"Stop"** / **"Pause"** / **"Resume"** / **"Next"** / **"Skip"** — estos comandos
+  de medios simples se reconocen como palabras clave literales en inglés mediante una
+  vía rápida que evita el LLM por completo
   (~800 ms de tiempo de respuesta vs ~5–8 s para los comandos mediados por el LLM
   completo).
 

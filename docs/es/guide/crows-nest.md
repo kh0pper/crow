@@ -150,7 +150,7 @@ Un centro de mensajería unificado de tres paneles inspirado en WhatsApp/Signal/
 
 **Actualizaciones en tiempo real:** El panel consulta nuevos mensajes cada 7 segundos, actualizando las insignias de no leídos y agregando los mensajes nuevos a la conversación activa sin recargar la página.
 
-**Gestión de contactos:** Toda la funcionalidad de contactos (invitar, bloquear/desbloquear, perfil) está integrada en el panel de Mensajes. La antigua URL `/dashboard/contacts` redirige aquí automáticamente.
+**Gestión de contactos:** Los contactos tienen su propio panel en `/dashboard/contacts` (cuadrícula de tarjetas, perfiles, grupos, importación/exportación de vCard); las acciones de invitar, bloquear/desbloquear y perfil también están accesibles desde el panel de Mensajes.
 
 ### Memoria
 

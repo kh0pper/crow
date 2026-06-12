@@ -116,7 +116,7 @@ CREATE TABLE sync_state (
 
 Checkpoints are written per applied entry (not per batch), so a crash mid-sync never re-applies or skips entries.
 
-On reconnection, sync resumes from `last_seq` — only new entries are transferred.
+On reconnection, sync resumes from the per-peer checkpoint in `last_applied_seq_per_peer` — only new entries are transferred.
 
 ## Federation via Gateway Proxy
 
