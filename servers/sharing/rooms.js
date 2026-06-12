@@ -11,6 +11,7 @@ import { getManagersOrNull } from "./managers.js";
 
 // In-memory room state — active companion room tokens.
 // Map<roomCode, { token, hostCrowId, hostName, companionUrl, createdAt, participants: Set<contactId> }>
+// Exported raw: tools/rooms-social.js (crow_room_close) is the only authorized mutator outside this module.
 export const _activeRooms = new Map();
 
 /**

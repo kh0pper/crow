@@ -13,7 +13,8 @@ import { createNotification } from "../../shared/notifications.js";
 import { createDbClient } from "../../db.js";
 
 export function registerCrosspostTools(server, ctx) {
-  // Note: crosspost tools open their own no-arg createDbClient() connections.
+  // Note: crosspost tools open their own no-arg createDbClient() connections;
+  // ctx is accepted for signature uniformity with the other register* functions.
 
   // --- F.12.2: Crow-native cross-posting ---
 

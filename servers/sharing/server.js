@@ -38,7 +38,7 @@ import {
   sendVoiceMemo,
   sendReaction,
 } from "./rooms.js";
-export { validateRoomToken, sendRoomInvite, getActiveRooms, sendVoiceMemo, sendReaction };
+export { validateRoomToken, sendRoomInvite, getActiveRooms, sendVoiceMemo, sendReaction }; // getActiveRooms: kept for API stability; no current external consumer
 
 import { sendBotRelay } from "./bot-relay.js";
 export { sendBotRelay };
@@ -69,6 +69,10 @@ export function createSharingServer(dbPath, options = {}) {
     options.instructions ? { instructions: options.instructions } : undefined
   );
 
+  // Registration order below is a FROZEN CONTRACT — clients see tools in
+  // registration order; do not reorder these calls (tool-surface harness asserts it).
+  // fullCtx fields: db/identity/peerManager/syncManager/nostrManager are tool-consumed;
+  // instanceSyncManager + applyProjectCloneBundle ride along for shape-completeness (boot-only).
   // tools/contacts.js — crow_generate_invite, crow_accept_invite, crow_list_contacts (#1-3)
   const fullCtx = { db, identity, peerManager, syncManager, instanceSyncManager, nostrManager, buildProjectCloneBundle, applyProjectCloneBundle };
   registerContactsTools(server, fullCtx);
@@ -91,7 +95,7 @@ export function createSharingServer(dbPath, options = {}) {
   // tools/rooms-social.js — crow_room_invite, crow_room_close, crow_voice_memo, crow_react (#21-24)
   registerRoomsSocialTools(server, fullCtx);
 
-  // --- Prompts ---
+  // --- Prompts --- (placed here to preserve original insertion order: after #21-24, before #25-28)
 
   server.prompt(
     "sharing-guide",
