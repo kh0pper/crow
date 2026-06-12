@@ -1,0 +1,87 @@
+# Bundles — el contrato de bundle
+
+Un **bundle** es la unidad modular de la capa de extensión de Crow: un directorio bajo `bundles/<id>/` descrito por un `manifest.json`. Un bundle puede proporcionar cualquier combinación de superficies — un **servicio** en contenedor (Docker), un **servidor MCP** (herramientas), un **panel** del dashboard y **skills** — de ahí que "bundle = servicio + herramientas + skills". El contrato es *por superficies*: un bundle solo está obligado a cumplir las reglas de las superficies que realmente declara.
+
+## De dónde vienen los bundles
+
+- Fuente de verdad: cada `bundles/<id>/manifest.json`.
+- Catálogo de instalación: `registry/add-ons.json` se **genera** a partir de los manifiestos con `npm run build-registry` — nunca lo edites a mano. Está confirmado en git (modelo de lockfile) y una prueba falla si se desincroniza.
+
+## Campos universales obligatorios
+
+Todo manifiesto debe tener:
+
+| Campo | Regla |
+|---|---|
+| `id` | debe ser igual al nombre del directorio |
+| `name` | no vacío |
+| `description` | no vacío |
+| `type` | `bundle` \| `mcp-server` \| `skill` (una etiqueta de categoría general, no lo que determina los campos obligatorios) |
+| `category` | no vacío |
+
+`version` (semver) y `author` son **opcionales**, pero se valida su forma cuando están presentes (algunos bundles de primera parte de modelos/multimedia se publican sin ellos).
+
+## Superficies (declara lo que provees)
+
+Una superficie se "declara" por la presencia de su clave. Cada superficie declarada se valida tanto en su forma **como** en que los archivos que referencia existan bajo el directorio del bundle:
+
+| Superficie | Forma | Integridad |
+|---|---|---|
+| `docker` | `{ "composefile": "docker-compose.yml" }` | el composefile existe |
+| `server` | `{ "command": "node", "args": ["server/index.js"], "envKeys": [...] }`, o `null` | el archivo de entrada se verifica **solo** cuando `command` es `node` y `args[0]` es una ruta (los servidores externos `npx`/`uv` están exentos) |
+| `panel` | `"panel/<id>.js"` **o** `{ "id": "...", "extends": "..." }` | forma de cadena: el archivo existe; forma de objeto: solo la forma (se resuelve en tiempo de ejecución) |
+| `panelRoutes` | `"panel/routes.js"` | el archivo existe |
+| `skills` | `["skills/<id>.md", ...]` | todas las rutas existen |
+| `ports` / `port` / `webUI.port` | enteros (1–65535); `webUI` también puede ser `null` | — |
+| `requires.bundles` / `optional_bundles` | `["<bundle-id>", ...]` | cada id es un directorio `bundles/<id>` con un `manifest.json` (un bundle real) |
+| `env_vars` | `[{ "name": "X", "description": "...", "required": false, "secret": false, "default": "" }]` | cada entrada tiene un `name` |
+
+Se permiten campos desconocidos (el esquema es permisivo) — los extras específicos de cada bundle como `capabilities`, `companion`, `storage`, `providers`, `sttProfileSeed` pasan sin tocarse. La forma canónica es `registry/manifest.schema.json`.
+
+## Borrador / sin publicar
+
+- `"draft": true` excluye un bundle del registro generado.
+- Un directorio de bundle **sin seguimiento** (no confirmado en git) se trata como un borrador implícito — se excluye y se reporta, nunca se publica automáticamente. Esto mantiene el trabajo en progreso fuera del registro.
+
+## Validar + generar
+
+```bash
+npm run build-registry -- --check   # valida todos los manifiestos + verifica desvíos (CI)
+npm run build-registry              # regenera registry/add-ons.json
+npm run test:bundle-contract        # la puerta de node:test
+```
+
+`--check` imprime una auditoría por bundle (id, tipo, superficies, estado) y sale con código distinto de cero ante cualquier manifiesto inválido o si el registro confirmado está desactualizado.
+
+## Ejemplo mínimo
+
+```
+bundles/your-bundle/
+├── manifest.json
+├── docker-compose.yml      (si incluye un servicio)
+├── server/index.js         (si provee herramientas MCP)
+├── panel/your-bundle.js    (si agrega un panel del dashboard)
+└── skills/your-bundle.md   (si agrega skills)
+```
+
+```json
+{
+  "id": "your-bundle",
+  "name": "Your Bundle",
+  "version": "1.0.0",
+  "description": "What it does",
+  "type": "bundle",
+  "author": "You",
+  "category": "utilities",
+  "docker": { "composefile": "docker-compose.yml" },
+  "server": { "command": "node", "args": ["server/index.js"], "envKeys": ["YOUR_API_KEY"] },
+  "panel": "panel/your-bundle.js",
+  "skills": ["skills/your-bundle.md"],
+  "requires": { "env": ["YOUR_API_KEY"] },
+  "env_vars": [
+    { "name": "YOUR_API_KEY", "description": "API key", "required": true, "secret": true }
+  ]
+}
+```
+
+Después de agregar o editar un bundle, ejecuta `npm run build-registry` y confirma tanto el manifiesto como el `registry/add-ons.json` regenerado.
