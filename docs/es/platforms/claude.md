@@ -1,25 +1,25 @@
 # Claude Web y Móvil
 
-Conecte Crow a Claude en la web (claude.ai) o en la aplicación móvil de Claude mediante Integraciones Personalizadas.
+Conecta Crow a Claude en la web (claude.ai) o en la aplicación móvil de Claude mediante Integraciones Personalizadas.
 
 ## Requisitos previos
 
-- Gateway de Crow desplegado y funcionando ([Guía de despliegue en la nube](../../getting-started/cloud-deploy))
+- Gateway de Crow desplegado y funcionando ([Guía de despliegue en la nube](/es/getting-started/cloud-deploy))
 - Un plan Claude Pro, Team o Enterprise (las Integraciones Personalizadas requieren un plan de pago)
 
 ## Pasos de configuración
 
-1. Vaya a [claude.ai/settings](https://claude.ai/settings) → **Integrations**
-2. Haga clic en **Add Custom Integration**
-3. Ingrese un nombre (por ejemplo, "Crow Memory")
-4. Pegue la URL de su gateway:
+1. Ve a [claude.ai/settings](https://claude.ai/settings) → **Integrations**
+2. Haz clic en **Add Custom Integration**
+3. Ingresa un nombre (por ejemplo, "Crow Memory")
+4. Pega la URL de tu gateway:
    ```
    https://your-crow-server/memory/mcp
    ```
-5. Haga clic en **Save** — Claude iniciará el flujo de OAuth
-6. Autorice la conexión cuando se le solicite
+5. Haz clic en **Save** — Claude iniciará el flujo de OAuth
+6. Autoriza la conexión cuando se te solicite
 
-Repita el proceso para cada servidor que desee conectar:
+Repite el proceso para cada servidor que desees conectar:
 
 | Servidor | URL |
 |---|---|
@@ -30,7 +30,7 @@ Repita el proceso para cada servidor que desee conectar:
 | Blog | `https://your-crow-server/blog-mcp/mcp` |
 | External Tools | `https://your-crow-server/tools/mcp` |
 
-> **Nota:** El endpoint de storage requiere que MinIO esté configurado. Consulte la [Guía de Storage](/guide/storage) para la configuración.
+> **Nota:** El endpoint de storage requiere que MinIO esté configurado. Consulta la [Guía de Storage](/es/guide/storage) para la configuración.
 
 ## Transporte
 
@@ -40,11 +40,11 @@ Repita el proceso para cada servidor que desee conectar:
 
 ## Verificación
 
-Después de conectar, pruebe preguntándole a Claude:
+Después de conectar, prueba preguntándole a Claude:
 
 > "Guarda un recuerdo de que Crow ya está conectado."
 
-Si funciona, verá las herramientas de memoria de Crow en acción. Puede verificar los recuerdos almacenados preguntando:
+Si funciona, verás las herramientas de memoria de Crow en acción. Puedes verificar los recuerdos almacenados preguntando:
 
 > "¿Qué recuerdas?"
 
@@ -62,31 +62,31 @@ Para obtener orientación más detallada, Claude puede solicitar prompts de MCP:
 
 Estos prompts funcionan como equivalentes de skills, proporcionando instrucciones detalladas de flujo de trabajo a Claude bajo demanda sin consumir espacio en la ventana de contexto de antemano.
 
-También puede cargar manualmente el contexto completo:
+También puedes cargar manualmente el contexto completo:
 
 > "Carga tu contexto de crow.md"
 
-Consulte la [Guía multiplataforma](/guide/cross-platform) para más detalles.
+Consulta la [Guía multiplataforma](/es/guide/cross-platform) para más detalles.
 
 ## Optimización de contexto
 
 Claude Code admite notificaciones `toolListChanged`, lo que hace que `crow-core` sea una buena opción para uso local, ya que activa servidores bajo demanda en lugar de cargar todas las herramientas de entrada.
 
-Para Claude a través del gateway, el endpoint `/router/mcp` reduce la cantidad de herramientas de más de 49 a 7 herramientas de categoría consolidadas, lo que reduce significativamente el uso de la ventana de contexto. En lugar de conectar cada servidor individualmente, puede conectar un solo endpoint del router:
+Para Claude a través del gateway, el endpoint `/router/mcp` reduce la cantidad de herramientas de más de 126 a 10 herramientas de categoría consolidadas, lo que reduce significativamente el uso de la ventana de contexto. En lugar de conectar cada servidor individualmente, puedes conectar un solo endpoint del router:
 
 ```
 https://your-crow-server/router/mcp
 ```
 
-Consulte la guía de [Contexto y rendimiento](/guide/context-performance) para más detalles.
+Consulta la guía de [Contexto y rendimiento](/es/guide/context-performance) para más detalles.
 
 ::: tip Compartido con Claude Code CLI
-Las Integraciones Personalizadas que agregue aquí también están disponibles en las sesiones de Claude Code CLI, ya que comparten la misma configuración de conectores dentro del ecosistema de Anthropic. Si configura Crow en claude.ai, funciona en Claude Code sin configuración adicional. Este uso compartido entre plataformas es específico de Claude; otras plataformas (ChatGPT, Gemini) gestionan sus conexiones MCP de forma independiente.
+Las Integraciones Personalizadas que agregues aquí también están disponibles en las sesiones de Claude Code CLI, ya que comparten la misma configuración de conectores dentro del ecosistema de Anthropic. Si configuras Crow en claude.ai, funciona en Claude Code sin configuración adicional. Este uso compartido entre plataformas es específico de Claude; otras plataformas (ChatGPT, Gemini) gestionan sus conexiones MCP de forma independiente.
 :::
 
 ## Consejos
 
-- Puede conectar los cinco servidores (memory, projects, sharing, storage, blog) más las herramientas externas simultáneamente
+- Puedes conectar los cinco servidores (memory, projects, sharing, storage, blog) más las herramientas externas simultáneamente
 - La aplicación móvil utiliza las mismas Integraciones Personalizadas que la web
 - Las herramientas de integraciones externas (GitHub, Slack, etc.) aparecen a través del endpoint `/tools/mcp`
 - Los recuerdos almacenados aquí son accesibles instantáneamente desde ChatGPT, Gemini o cualquier otra plataforma conectada
