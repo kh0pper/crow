@@ -1,24 +1,24 @@
 # ChatGPT
 
-Conecte Crow a ChatGPT mediante el transporte SSE. ChatGPT admite MCP a través de su función de Apps/Connectors.
+Conecta Crow a ChatGPT mediante el transporte SSE. ChatGPT admite MCP a través de su función de Apps/Connectors.
 
 ## Requisitos previos
 
-- Gateway de Crow desplegado y funcionando ([Guía de despliegue en la nube](../../getting-started/cloud-deploy))
+- Gateway de Crow desplegado y funcionando ([Guía de despliegue en la nube](/es/getting-started/cloud-deploy))
 - Un plan ChatGPT Plus o Team
 
 ## Pasos de configuración
 
-1. Vaya a [Configuración de ChatGPT](https://chat.openai.com/settings) → **Apps** (o **Connectors**)
-2. Haga clic en **Create** o **Add MCP Server**
-3. Ingrese la URL del endpoint SSE de Crow:
+1. Ve a [Configuración de ChatGPT](https://chat.openai.com/settings) → **Apps** (o **Connectors**)
+2. Haz clic en **Create** o **Add MCP Server**
+3. Ingresa la URL del endpoint SSE de Crow:
    ```
    https://your-crow-server/memory/sse
    ```
 4. ChatGPT descubrirá los metadatos de OAuth e iniciará la autorización
-5. Autorice la conexión cuando se le solicite
+5. Autoriza la conexión cuando se te solicite
 
-Repita el proceso para servidores adicionales:
+Repite el proceso para servidores adicionales:
 
 | Servidor | URL SSE |
 |---|---|
@@ -33,16 +33,16 @@ Repita el proceso para servidores adicionales:
 - **Autenticación**: OAuth 2.1 (descubrimiento automático)
 
 ::: tip Importante
-ChatGPT utiliza el transporte **SSE**, no Streamable HTTP. Use los endpoints `/sse`, no los endpoints `/mcp`.
+ChatGPT utiliza el transporte **SSE**, no Streamable HTTP. Usa los endpoints `/sse`, no los endpoints `/mcp`.
 :::
 
 ## Verificación
 
-Después de conectar, pruebe preguntándole a ChatGPT:
+Después de conectar, prueba preguntándole a ChatGPT:
 
 > "Usa la herramienta de memoria para guardar que ChatGPT está conectado a Crow."
 
-Luego verifique:
+Luego verifica:
 
 > "Busca en mis recuerdos 'ChatGPT'."
 
@@ -55,30 +55,30 @@ Esto significa que ChatGPT sabe cómo recuperar recuerdos relevantes al inicio d
 Para obtener orientación más detallada, ChatGPT puede solicitar prompts de MCP:
 
 - **session-start** — Protocolo detallado de inicio y cierre de sesión
-- **crow-guide** — Documento completo de crow.md (use con `platform: "chatgpt"` para formato específico de ChatGPT)
+- **crow-guide** — Documento completo de crow.md (usa con `platform: "chatgpt"` para formato específico de ChatGPT)
 - **research-guide** / **blog-guide** / **sharing-guide** — Guías de flujo de trabajo para funciones específicas
 
-También puede cargar manualmente el contexto completo:
+También puedes cargar manualmente el contexto completo:
 
 > "Usa la herramienta crow_get_context con platform configurado como chatgpt"
 
-O acceda mediante HTTP:
+O accede mediante HTTP:
 
 ```
 GET https://your-crow-server/crow.md?platform=chatgpt
 ```
 
-Cualquier recuerdo que almacene en ChatGPT estará disponible instantáneamente desde Claude, Gemini o cualquier otra plataforma conectada. Consulte la [Guía multiplataforma](/guide/cross-platform) para más detalles.
+Cualquier recuerdo que almacenes en ChatGPT estará disponible instantáneamente desde Claude, Gemini o cualquier otra plataforma conectada. Consulta la [Guía multiplataforma](/es/guide/cross-platform) para más detalles.
 
 ## Optimización de contexto
 
-ChatGPT se conecta a través del gateway. Si tiene muchas integraciones habilitadas, considere usar el endpoint `/router/mcp` en lugar de conectar cada servidor individualmente. El router consolida más de 49 herramientas en 7 herramientas de categoría, lo que reduce el uso de la ventana de contexto:
+ChatGPT se conecta a través del gateway. Si tienes muchas integraciones habilitadas, considera usar el endpoint `/router/mcp` en lugar de conectar cada servidor individualmente. El router consolida más de 126 herramientas en 10 herramientas de categoría, lo que reduce el uso de la ventana de contexto:
 
 ```
 https://your-crow-server/router/sse
 ```
 
-Consulte la guía de [Contexto y rendimiento](/guide/context-performance) para más detalles.
+Consulta la guía de [Contexto y rendimiento](/es/guide/context-performance) para más detalles.
 
 ## Limitaciones
 
