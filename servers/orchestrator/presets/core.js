@@ -1,3 +1,4 @@
+// Core orchestration presets — research, memory_ops, full, briefing, briefing-bidirectional.
 export const corePresets = {
   research: {
     description: "Research team: one agent searches memories/projects, another synthesizes findings",
