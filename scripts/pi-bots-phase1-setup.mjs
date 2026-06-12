@@ -48,12 +48,13 @@ if (!crow.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='pi_b
   console.error("REFUSING: pi_bot_defs missing — run scripts/init-pi-bots.mjs first"); process.exit(2);
 }
 
-// 1. research_projects (idempotent by name)
-let proj = crow.prepare("SELECT id FROM research_projects WHERE name=?").get(PROJECT_NAME);
+// 1. project space (idempotent by name; B3a 2026-06-12 — research_projects is
+//    dormant and its mirror triggers are retired, so this seeds project_spaces)
+let proj = crow.prepare("SELECT id FROM project_spaces WHERE name=?").get(PROJECT_NAME);
 if (!proj && !CHECK_ONLY) {
   const info = crow.prepare(
-    "INSERT INTO research_projects (name, description, type, status, tags) VALUES (?,?,?,?,?)"
-  ).run(PROJECT_NAME, "Crow Bot Builder v0.1 thin-slice demo project.", "research", "active", "bot-builder,v0.1");
+    "INSERT INTO project_spaces (slug, name, description, type, status, tags) VALUES (?,?,?,?,?,?)"
+  ).run("bot-builder-v01-demo", PROJECT_NAME, "Crow Bot Builder v0.1 thin-slice demo project.", "research", "active", "bot-builder,v0.1");
   proj = { id: info.lastInsertRowid };
 }
 const projectId = proj ? proj.id : null;

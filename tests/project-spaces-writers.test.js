@@ -706,9 +706,14 @@ test("10. bundle-rebuild data path — old schemas seeded, rebuild asserts parit
     );
   `);
 
-  // Seed a research_project (so we can insert learner settings)
+  // Seed the learner as a mirrored rp+ps PAIR (what a real pre-B2 host has
+  // when the rebuild runs: init-db's migrateLegacyProjectsToSpaces backfills
+  // ps from rp before any bundle rebuild; the live trigger that used to do
+  // this inline was retired in B3a, and this test seeds AFTER init-db).
   await mlDb.execute(`INSERT OR IGNORE INTO research_projects (id, name, type, created_at, updated_at)
     VALUES (50, 'Learner Profile 50', 'learner_profile', datetime('now'), datetime('now'))`);
+  await mlDb.execute(`INSERT OR IGNORE INTO project_spaces (id, slug, name, type, status, created_at, updated_at)
+    VALUES (50, 'learner-profile-50', 'Learner Profile 50', 'learner_profile', 'active', datetime('now'), datetime('now'))`);
 
   // Seed maker_transcripts with a deleted high id (spec N4 / C1)
   await mlDb.execute(`INSERT INTO maker_transcripts (id, learner_id, session_token, turn_no, role, content)
@@ -861,9 +866,14 @@ test("10. bundle-rebuild data path — old schemas seeded, rebuild asserts parit
     );
   `);
 
-  // Ensure research_projects has id=1 (the old FK parent) for seeding
+  // Ensure the project exists as a mirrored rp+ps pair: rp id=1 is the old FK
+  // parent for seeding; ps id=1 is what the rebuilt FK will point at (on a
+  // real pre-B2 host the init-db backfill creates the ps twin — the inline
+  // trigger that used to do it was retired in B3a).
   await ddDb.execute(`INSERT OR IGNORE INTO research_projects (id, name, created_at, updated_at)
     VALUES (1, 'Test Project', datetime('now'), datetime('now'))`);
+  await ddDb.execute(`INSERT OR IGNORE INTO project_spaces (id, slug, name, type, status, created_at, updated_at)
+    VALUES (1, 'test-project-1-t10', 'Test Project', 'general', 'active', datetime('now'), datetime('now'))`);
 
   // Seed data_case_studies with a deleted high id (spec N4: seq > MAX(id))
   await ddDb.execute(`INSERT INTO data_case_studies (id, project_id, title, default_voice, display_order)
@@ -1162,19 +1172,24 @@ test("4. learner lifecycle on ps — create, rename, delete; legacy rp-seeded al
   const psAffected = Number(batchResult[5]?.rowsAffected ?? 0);
   assert.equal(psAffected, 1, "ps delete must have affected 1 row");
 
-  // Legacy case: learner seeded via direct rp INSERT (pre-B2 learner)
-  // The rp→ps trigger creates the ps row automatically.
+  // Legacy case: a pre-B3a learner exists as a mirrored rp+ps PAIR (the
+  // retired trigger or the init-db backfill created the ps twin). Seed both
+  // rows explicitly to reproduce that state.
   await db.execute({
     sql: `INSERT INTO research_projects (id, name, type, created_at, updated_at)
           VALUES (777, 'Legacy Learner', 'learner_profile', datetime('now'), datetime('now'))`,
     args: [],
   });
-  // After the trigger fires, ps should have id=777
+  await db.execute({
+    sql: `INSERT INTO project_spaces (id, slug, name, type, status, created_at, updated_at)
+          VALUES (777, 'legacy-learner-777', 'Legacy Learner', 'learner_profile', 'active', datetime('now'), datetime('now'))`,
+    args: [],
+  });
   const { rows: legacyPs } = await db.execute({
     sql: "SELECT id FROM project_spaces WHERE id = 777",
     args: [],
   });
-  assert.equal(legacyPs.length, 1, "rp→ps trigger must create ps row for legacy learner");
+  assert.equal(legacyPs.length, 1, "mirrored ps row present for legacy learner");
 
   await db.execute({
     sql: "INSERT INTO maker_learner_settings (learner_id, age) VALUES (777, 10)",
