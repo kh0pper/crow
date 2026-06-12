@@ -411,7 +411,9 @@ export default function chatRouter(dashboardAuth) {
 
     // Shared SSE primitive — handles heartbeats, keep-alive, EPIPE, and
     // idempotent close. See servers/gateway/streams/sse.js.
-    const { send: sendEvent, close: closeStream } = openStream(res);
+    const chatStream = openStream(res);
+    if (!chatStream) return; // SSE cap exceeded — 503 already sent
+    const { send: sendEvent, close: closeStream } = chatStream;
 
     // AbortController for cancellation
     const abortController = new AbortController();

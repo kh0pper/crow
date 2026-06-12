@@ -30,9 +30,18 @@ import { openStream } from "./sse.js";
 
 const DEFAULT_RECHECK_MS = 5 * 60 * 1000;
 
+/**
+ * Open an authenticated SSE stream. Returns null if the SSE cap is exceeded
+ * (propagated from openStream). Callers MUST check for null before registering
+ * any bus handlers, DB clients, or intervals.
+ */
 export function openAuthedStream(req, res, opts = {}) {
   const token = req.dashboardSession;
   const stream = openStream(res, opts);
+
+  // Propagate null (SSE cap exceeded) — caller must handle null early-return.
+  if (!stream) return null;
+
   const recheckMs = opts.recheckMs ?? DEFAULT_RECHECK_MS;
 
   const recheck = setInterval(async () => {
