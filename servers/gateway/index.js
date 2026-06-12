@@ -78,6 +78,7 @@ import { mountMcpServers } from "./boot/mcp-mounts.js";
 import { mountFeatureRoutes } from "./boot/feature-mounts.js";
 import { mountAdminApi } from "./boot/admin-api.js";
 import { mountPeerPublicApi } from "./boot/peer-public-api.js";
+import { mountLateRoutes } from "./boot/late-mounts.js";
 
 const PORT = parseInt(process.env.PORT || process.env.CROW_GATEWAY_PORT || "3001", 10);
 const BIND = process.env.CROW_GATEWAY_BIND || "0.0.0.0";
@@ -516,58 +517,9 @@ await mountPeerPublicApi(app, { authMiddleware, relayDb, loadDynamicBackends });
 
 // --- Start Server ---
 
-// --- Mount Calls Routes (gated behind CROW_CALLS_ENABLED) ---
-let _setupCallsSignaling = null;
-if (process.env.CROW_CALLS_ENABLED === "1") {
-  try {
-    const { default: callsPageRouter } = await import("./routes/calls-page.js");
-    app.use(callsPageRouter(dashboardAuth));
-    const { default: setupCallsSignaling } = await import("./routes/calls-signaling.js");
-    _setupCallsSignaling = setupCallsSignaling;
-  } catch (err) {
-    if (err.code !== "ERR_MODULE_NOT_FOUND") {
-      console.warn("[calls] Failed to mount:", err.message);
-    }
-  }
-}
-
-// --- Mount LLM-router (folds the standalone companion model-proxy into the
-// gateway). No dashboardAuth: the host-networked companion arrives as loopback,
-// which isAllowedNetwork() rejects; protected instead by rejectFunneledMiddleware
-// (mounted above) + tailnet/loopback-only exposure. See routes/llm-router.js. ---
-try {
-  const { default: llmRouterRouter } = await import("./routes/llm-router.js");
-  app.use(llmRouterRouter());
-  console.log("  [llm-router] mounted: POST /llm/v1/chat/completions, GET /llm/v1/models");
-} catch (err) {
-  if (err.code !== "ERR_MODULE_NOT_FOUND") {
-    console.warn("[llm-router] Failed to mount:", err.message);
-  }
-}
-
-// --- Mount Companion Proxy ---
-let _setupCompanionProxy = null;
-try {
-  const { default: setupCompanionProxy } = await import("./routes/companion-proxy.js");
-  _setupCompanionProxy = setupCompanionProxy;
-} catch (err) {
-  if (err.code !== "ERR_MODULE_NOT_FOUND") {
-    console.warn("[companion-proxy] Failed to load:", err.message);
-  }
-}
-
-// --- Mount Extension Web UI Proxy ---
-let _extensionProxyWsSetup = null;
-try {
-  const { default: extensionProxyRouter } = await import("./routes/extension-proxy.js");
-  const { router, setupWebSocket } = extensionProxyRouter(dashboardAuth);
-  app.use(router);
-  _extensionProxyWsSetup = setupWebSocket;
-} catch (err) {
-  if (err.code !== "ERR_MODULE_NOT_FOUND") {
-    console.warn("[extension-proxy] Failed to mount:", err.message);
-  }
-}
+// boot/late-mounts.js — calls routes, LLM-router, companion proxy, extension proxy
+// S1: returns all three handles for WS wiring in the listen callback
+const { setupCallsSignaling: _setupCallsSignaling, setupCompanionProxy: _setupCompanionProxy, extensionProxyWsSetup: _extensionProxyWsSetup } = await mountLateRoutes(app, { dashboardAuth });
 
 const server = app.listen(PORT, BIND, (error) => {
   if (error) {
