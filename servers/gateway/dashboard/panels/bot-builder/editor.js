@@ -69,6 +69,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
   const hidden = (tb) => `<input type="hidden" name="action" value="save_${tb}"><input type="hidden" name="bot_id" value="${escapeHtml(botId)}">`;
   let body = "";
 
+  // ---- ai tab ----
   if (tabId === "ai") {
     // Provider->model picker, grouped by provider via <optgroup> (the
     // server-rendered "cascading" shape — no client JS, Phase-2.3 style).
@@ -122,7 +123,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       `<label>Vision&nbsp;${profileSelect("vision_profile_ref", visionProfiles)}</label>` +
       `</div></div>` +
       actionBar(`<button type="submit" class="btb-btn">${t("botbuilder.btnSaveAi", lang)}</button>`) + `</form>`;
-  } else if (tabId === "tools") {
+  } else if (tabId === "tools") { // ---- tools tab ----
     const probe = await probeAll();
     const selBuiltin = new Set((def.tools && def.tools.pi_builtin) || []);
     const selMcp = new Set((def.tools && def.tools.crow_mcp) || []);
@@ -226,7 +227,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       `<p class="btb-hint">Curated allowlist only; others need install-approval</p>${extBoxes}${subWarn}</div>` +
       peerToolsHtml +
       actionBar(`<button type="submit" class="btb-btn">${t("botbuilder.btnSaveTools", lang)}</button>`) + `</form>`;
-  } else if (tabId === "gateways") {
+  } else if (tabId === "gateways") { // ---- gateways tab ----
     const gw = (def.gateways && def.gateways[0]) || {};
     const gwType = gw.type || "gmail";
     const gwTypes = [
@@ -402,7 +403,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       `<select name="gw_type" class="btb-select" onchange="this.form.submit()">${typeOpts}</select></div>` +
       gwFields + gwHint +
       actionBar(`<button type="submit" class="btb-btn">${t("botbuilder.btnSaveGateways", lang)}</button>`) + `</form>`;
-  } else if (tabId === "tracker") {
+  } else if (tabId === "tracker") { // ---- tracker tab ----
     let projects = [];
     try { projects = (await db.execute({ sql: "SELECT id, name, slug FROM project_spaces WHERE archived_at IS NULL ORDER BY id", args: [] })).rows; } catch {}
     const projOpts = projects.map((p) => `<option value="${p.id}"${Number(def.project_id) === Number(p.id) ? " selected" : ""}>#${p.id} &mdash; ${escapeHtml(p.name || "")} (${escapeHtml(p.slug || "")})</option>`).join("");
@@ -568,7 +569,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
             };
           })();</script>`;
       })();
-  } else if (tabId === "skills") {
+  } else if (tabId === "skills") { // ---- skills tab ----
     // A6: group skills by contributing extension. An installed extension
     // with a capabilities.skills list (Slice B once bundles are installed)
     // gets its own group; everything else falls under "General". On MPA in
@@ -692,7 +693,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
             : `<p class="btb-hint">${t("botbuilder.noticeNoSelfLearning", lang)}</p>`) +
           `</div>`;
       })();
-  } else if (tabId === "permissions") {
+  } else if (tabId === "permissions") { // ---- permissions tab ----
     const pp = def.permission_policy || {};
     const bashSel = (v) => (pp.bash || "deny") === v ? " selected" : "";
     const esSel = (v) => (pp.external_send || "draft_only") === v ? " selected" : "";
@@ -728,7 +729,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       `<input type="checkbox" name="managed" ${isManaged ? "checked" : ""} onchange="this.form.submit()">` +
       `<span>Manageable by trusted peers (cross-instance edit/run — requires the master toggle in Settings &rarr; Remote Bot Management)</span>` +
       `</label></form>`;
-  } else if (tabId === "triggers") {
+  } else if (tabId === "triggers") { // ---- triggers tab ----
     const tr = def.triggers || {};
     body =
       `<form method="POST" class="btb-form">${hidden("triggers")}` +
@@ -736,7 +737,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       formField(t("botbuilder.labelCron", lang), "tr_cron", { value: tr.cron || "", placeholder: "*/15 * * * *" }) +
       `<p class="btb-hint">The bridge runs its OWN timer over triggers.cron &mdash; NOT the schedules table / pipeline-runner (plan &sect;2).</p>` +
       actionBar(`<button type="submit" class="btb-btn">${t("botbuilder.btnSaveTriggers", lang)}</button>`) + `</form>`;
-  } else if (tabId === "sessions") {
+  } else if (tabId === "sessions") { // ---- sessions tab ----
     // S3: session resume UX — list, send-message, transcript viewer, stop
     let sessions = [];
     try {
@@ -828,7 +829,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
           };
         })();</script>`;
     body = sessHtml + sendForm + sessScript;
-  } else if (tabId === "review") {
+  } else if (tabId === "review") { // ---- review tab ----
     const mcpMsg = q.mcp ? `<p class="btb-notice-ok">${escapeHtml(String(q.mcp))}</p>` : "";
     // R13/R14 (Phase 3.2): show the EFFECTIVE runtime decision the bridge
     // will make — resolved default/escalation provider/model (via the 3.0
