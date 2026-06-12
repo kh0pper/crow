@@ -58,10 +58,10 @@ Configura un nombre memorable en tu [consola de administración de Tailscale](ht
 
 Una vez que Crow esté funcionando, conéctalo desde cualquier plataforma de IA:
 
-- [Claude Web y Móvil](../../platforms/claude)
-- [ChatGPT](../../platforms/chatgpt)
-- [Claude Code](../../platforms/claude-code)
-- [Todas las plataformas](../../platforms/)
+- [Claude Web y Móvil](/es/platforms/claude)
+- [ChatGPT](/es/platforms/chatgpt)
+- [Claude Code](/es/platforms/claude-code)
+- [Todas las plataformas](/es/platforms/)
 
 Visita `https://crow.local/setup` (red local) o `http://crow:3001/setup` (Tailscale) para ver el estado de las integraciones.
 
@@ -87,4 +87,4 @@ bash ~/.crow/app/scripts/crow-update.sh
 
 ## Usuarios de Raspberry Pi
 
-Para detalles específicos de Pi — formatear tarjetas SD, configuración de mDNS, recomendaciones de hardware y el asistente de configuración — consulta la [Guía de Raspberry Pi](../../getting-started/raspberry-pi).
+Para detalles específicos de Pi — formatear tarjetas SD, configuración de mDNS, recomendaciones de hardware y el asistente de configuración — consulta la [Guía de Raspberry Pi](./raspberry-pi).

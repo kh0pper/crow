@@ -94,7 +94,7 @@ See the [Cross-Platform Guide](/guide/cross-platform) for more details.
 
 Claude Code supports `toolListChanged` notifications, making `crow-core` a good fit for local use — it activates servers on demand rather than loading all tools upfront.
 
-For Claude via the gateway, the `/router/mcp` endpoint reduces the tool count from 49+ to 7 consolidated category tools, significantly reducing context window usage. Instead of connecting each server individually, you can connect a single router endpoint:
+For Claude via the gateway, the `/router/mcp` endpoint reduces the tool count from 126+ to 10 consolidated category tools, significantly reducing context window usage. Instead of connecting each server individually, you can connect a single router endpoint:
 
 ```
 https://your-crow-server/router/mcp

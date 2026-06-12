@@ -197,11 +197,11 @@ curl http://localhost:3001/health
 
 Tu servidor Crow ahora está funcionando y accesible vía Tailscale. Conéctalo desde cualquier plataforma de IA:
 
-- [Claude Web y Móvil](../../platforms/claude) — `http://crow:3001/memory/mcp`
-- [ChatGPT](../../platforms/chatgpt) — `http://crow:3001/memory/sse`
-- [Gemini](../../platforms/gemini) — `http://crow:3001/memory/mcp`
-- [Claude Code](../../platforms/claude-code) — `http://crow:3001/memory/mcp`
-- [Todas las plataformas](../../platforms/)
+- [Claude Web y Móvil](/es/platforms/claude) — `http://crow:3001/memory/mcp`
+- [ChatGPT](/es/platforms/chatgpt) — `http://crow:3001/memory/sse`
+- [Gemini](/es/platforms/gemini) — `http://crow:3001/memory/mcp`
+- [Claude Code](/es/platforms/claude-code) — `http://crow:3001/memory/mcp`
+- [Todas las plataformas](/es/platforms/)
 
 Visita `http://crow:3001/setup` desde un dispositivo en tu red Tailscale para ver el estado de las integraciones.
 
