@@ -335,7 +335,8 @@
       "panel": "panel/browser.js",
       "panelRoutes": "panel/routes.js",
       "skills": [
-        "skills/crow-browser.md"
+        "skills/crow-browser.md",
+        "skills/scrape-recipe-template.md"
       ],
       "requires": {
         "env": [
@@ -371,7 +372,7 @@
         "path": "/vnc.html",
         "label": "VNC Viewer"
       },
-      "notes": "11 MCP tools for browser automation. Runs headless Chrome in Docker with Xvfb + VNC. All interactions use human-like patterns for stealth. CDP and VNC bind to localhost only.",
+      "notes": "All-in-one browser automation + scraping toolkit (25+ MCP tools): navigation/forms, smart waits, infinite-scroll, session/cookie/header control, extraction (Readability/Markdown, tables, scrape, paginate, PDF), paywall fallback ladder (extract_article), network/API-response capture, file downloads, proxy, and the VNC human-in-the-loop CAPTCHA handoff. Runs headful Chrome in Docker with Xvfb + VNC. Human-like patterns + fingerprint stealth applied automatically. CDP and VNC bind to localhost only.",
       "official": true
     },
     {
@@ -551,7 +552,8 @@
         ],
         "envKeys": [
           "CALIBRE_WEB_URL",
-          "CALIBRE_WEB_API_KEY"
+          "CALIBRE_WEB_USERNAME",
+          "CALIBRE_WEB_PASSWORD"
         ]
       },
       "panel": "panel/calibre-web.js",
@@ -561,7 +563,8 @@
       ],
       "requires": {
         "env": [
-          "CALIBRE_WEB_API_KEY",
+          "CALIBRE_WEB_USERNAME",
+          "CALIBRE_WEB_PASSWORD",
           "CALIBRE_WEB_DB_PATH"
         ],
         "min_ram_mb": 256,
@@ -575,8 +578,13 @@
           "required": true
         },
         {
-          "name": "CALIBRE_WEB_API_KEY",
-          "description": "Calibre-Web API key for authentication",
+          "name": "CALIBRE_WEB_USERNAME",
+          "description": "Calibre-Web user for OPDS Basic auth",
+          "required": true
+        },
+        {
+          "name": "CALIBRE_WEB_PASSWORD",
+          "description": "Password for that Calibre-Web user",
           "required": true,
           "secret": true
         },
@@ -594,7 +602,7 @@
         "path": "/",
         "label": "Calibre-Web"
       },
-      "notes": "Self-host via Docker (set CALIBRE_WEB_DB_PATH to directory containing metadata.db) or connect to existing Calibre-Web instance (set CALIBRE_WEB_URL + CALIBRE_WEB_API_KEY).",
+      "notes": "Self-host via Docker (set CALIBRE_WEB_DB_PATH to directory containing metadata.db) or connect to existing Calibre-Web instance (set CALIBRE_WEB_URL + CALIBRE_WEB_USERNAME/CALIBRE_WEB_PASSWORD — OPDS Basic auth; stock Calibre-Web has no API keys).",
       "official": true
     },
     {
