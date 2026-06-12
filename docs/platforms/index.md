@@ -15,7 +15,7 @@ Crow uses the open [Model Context Protocol (MCP)](https://modelcontextprotocol.i
 | [Cursor](./cursor) | stdio / HTTP | Varies | Easy | Compatible |
 | [Windsurf](./windsurf) | stdio / HTTP | Varies | Easy | Compatible |
 | [Cline](./cline) | stdio / HTTP | Varies | Easy | Compatible |
-| [Qwen Coder CLI](./qwen-coder) | stdio / HTTP | OAuth 2.1 | Easy | Compatible |
+| [Qwen Code](./qwen-coder) | stdio / HTTP | OAuth 2.1 | Easy | Compatible |
 
 ## MCP Endpoints
 
