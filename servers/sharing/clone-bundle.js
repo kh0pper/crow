@@ -156,10 +156,40 @@ export function createCloneBundleHelpers(ctx) {
       args: [newProjectId, originContactId ?? null],
     });
 
+    // FTS text caps: peer-supplied full_text/abstract/content_summary are
+    // FTS5-indexed via triggers (init-db.js:456-478). Cap them here so a
+    // hostile/buggy peer cannot insert multi-MB rows straight into FTS5.
+    // full_text cap: CROW_CLONE_FULLTEXT_MAX (default 200_000 chars).
+    // abstract + content_summary cap: 50_000 chars (mirrors the zod caps in
+    // research/server.js:283). Truncation appends a fixed marker so the stored
+    // text is self-documenting; the original survives on the origin instance.
+    const FULLTEXT_MAX = parseInt(process.env.CROW_CLONE_FULLTEXT_MAX || "200000", 10);
+    const SUMMARY_MAX = 50000;
+    const TRUNC_MARKER = (field, origLen) =>
+      `\n[truncated at clone import: original ${origLen} chars]`;
+
+    function capText(val, max) {
+      if (val == null || typeof val !== "string" || val.length <= max) return val ?? null;
+      return val.slice(0, max) + TRUNC_MARKER(null, val.length);
+    }
+
     // Source id remap so notes that reference a source still point at the
     // right (newly inserted) row.
     const sourceIdMap = new Map();
+    let truncatedSourceFieldCount = 0;
     for (const s of bundle.sources || []) {
+      const rawFullText = s.full_text ?? null;
+      const rawAbstract = s.abstract ?? null;
+      const rawContentSummary = s.content_summary ?? null;
+
+      const cappedFullText = capText(rawFullText, FULLTEXT_MAX);
+      const cappedAbstract = capText(rawAbstract, SUMMARY_MAX);
+      const cappedContentSummary = capText(rawContentSummary, SUMMARY_MAX);
+
+      if (cappedFullText !== rawFullText) truncatedSourceFieldCount++;
+      if (cappedAbstract !== rawAbstract) truncatedSourceFieldCount++;
+      if (cappedContentSummary !== rawContentSummary) truncatedSourceFieldCount++;
+
       const r = await db.execute({
         sql: `INSERT INTO research_sources
                 (project_id, title, source_type, url, authors, publication_date, publisher,
@@ -172,8 +202,8 @@ export function createCloneBundleHelpers(ctx) {
           s.title ?? "(untitled)",
           s.source_type ?? "other",
           s.url ?? null, s.authors ?? null, s.publication_date ?? null, s.publisher ?? null,
-          s.doi ?? null, s.isbn ?? null, s.abstract ?? null, s.content_summary ?? null,
-          s.full_text ?? null, s.citation_apa ?? "(no citation)",
+          s.doi ?? null, s.isbn ?? null, cappedAbstract, cappedContentSummary,
+          cappedFullText, s.citation_apa ?? "(no citation)",
           s.retrieval_date ?? null, s.retrieval_method ?? null,
           s.verified ?? 0, s.verification_notes ?? null,
           s.tags ?? null, s.relevance_score ?? 5,
@@ -181,6 +211,12 @@ export function createCloneBundleHelpers(ctx) {
         ],
       });
       if (s.id != null) sourceIdMap.set(s.id, Number(r.lastInsertRowid));
+    }
+    if (truncatedSourceFieldCount > 0) {
+      console.warn(
+        `[clone-bundle] applyProjectCloneBundle: ${truncatedSourceFieldCount} source field(s) truncated ` +
+        `(full_text>${FULLTEXT_MAX} or abstract/content_summary>${SUMMARY_MAX} chars)`
+      );
     }
 
     for (const n of bundle.notes || []) {
