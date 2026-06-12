@@ -23,6 +23,7 @@
  */
 
 import Database from "better-sqlite3";
+import os from "node:os";
 import { existsSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -201,7 +202,6 @@ function executeOne(db, sql, rawArgs) {
  * fd waste; removes the deleted-wal-fd hazard for DELETE-mode hosts).
  */
 
-import os from "node:os";
 
 const VALID_JOURNAL_MODES = new Set(["WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "OFF"]);
 
@@ -214,7 +214,7 @@ let _totalmemFn = os.totalmem;
 export function _setTotalmemFn(fn) { _totalmemFn = fn; }
 
 // Dedup-log sets: one warn per (filePath, requestedMode) per process.
-const _modeWarnedPaths = new Set(); // "path::mode"
+const _modeWarnedPaths = new Set(); // dedup keys: "path::mode" or "path::keeper-skip"
 const _failedFlipPaths = new Set(); // "path::mode" — skip flip on repeat attempts
 
 // Dedup-log set for auto-SELECT decision (logged once per process).

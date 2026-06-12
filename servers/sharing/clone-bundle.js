@@ -165,12 +165,12 @@ export function createCloneBundleHelpers(ctx) {
     // text is self-documenting; the original survives on the origin instance.
     const FULLTEXT_MAX = parseInt(process.env.CROW_CLONE_FULLTEXT_MAX || "200000", 10);
     const SUMMARY_MAX = 50000;
-    const TRUNC_MARKER = (field, origLen) =>
+    const TRUNC_MARKER = (origLen) =>
       `\n[truncated at clone import: original ${origLen} chars]`;
 
     function capText(val, max) {
       if (val == null || typeof val !== "string" || val.length <= max) return val ?? null;
-      return val.slice(0, max) + TRUNC_MARKER(null, val.length);
+      return val.slice(0, max) + TRUNC_MARKER(val.length);
     }
 
     // Source id remap so notes that reference a source still point at the
