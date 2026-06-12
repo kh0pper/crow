@@ -1,10 +1,10 @@
 /**
  * Tests for the canonical-slug normalization pass in scripts/init-db.js.
  *
- * Strategy: init a temp DB, insert a trigger-style row via
- * `INSERT INTO research_projects` (which fires tr_rp_to_ps_ins and produces
- * a SQL-only slug), then re-run init-db.js to trigger the normalization pass
- * and verify the slug became canonical.
+ * Strategy: init a temp DB, seed a project_spaces row carrying a legacy
+ * trigger-style slug (the rp→ps triggers were retired in W2-5B3a, but rows
+ * they created with SQL-chain slugs still exist in the wild), then re-run
+ * init-db.js and verify the normalization pass made the slug canonical.
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -29,22 +29,24 @@ after(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("normalization: trigger-inserted accented name gets canonical slug on next init-db", () => {
-  // Insert via research_projects so the SQL trigger fires.
-  // The trigger slug uses a simple replace-chain — "Café Münze" → "café-münze-<id>"
-  // (diacritics NOT stripped). slugify() gives "cafe-munze-<id>".
+test("normalization: legacy trigger-style slug gets canonical slug on next init-db", () => {
+  // Simulate a legacy row left behind by the (retired) rp→ps ins trigger:
+  // its SQL replace-chain kept diacritics — "Café Münze" → "café-münze-<id>".
+  // slugify() gives "cafe-munze-<id>".
   const ins = db.prepare(
-    "INSERT INTO research_projects (name, type, status) VALUES (?, 'general', 'active')"
-  ).run("Café Münze");
-  const id = ins.lastInsertRowid;
+    `INSERT INTO project_spaces (slug, name, type, status)
+     VALUES ('café-münze-seed', 'Café Münze', 'general', 'active')`
+  ).run();
+  const id = Number(ins.lastInsertRowid);
+  // Re-shape the slug into the exact id-suffixed legacy form the trigger emitted.
+  db.prepare("UPDATE project_spaces SET slug = ? WHERE id = ?").run(`café-münze-${id}`, id);
 
-  // Verify the trigger produced the non-canonical slug.
   const before = db.prepare("SELECT slug, workspace_dir FROM project_spaces WHERE id=?").get(id);
-  assert.ok(before, "trigger must have created project_spaces row");
-  // The SQL trigger keeps diacritics; canonical slugify strips them.
+  assert.ok(before, "seed row must exist");
+  // The legacy SQL slug keeps diacritics; canonical slugify strips them.
   const canonical = slugify("Café Münze", id);
   assert.notEqual(before.slug, canonical, "pre-norm slug should differ from canonical");
-  assert.equal(before.workspace_dir, null, "trigger row has no workspace_dir");
+  assert.equal(before.workspace_dir, null, "legacy row has no workspace_dir");
 
   // Re-run init-db — the normalization pass should fix the slug.
   db.close(); // release the DB so init-db can open it without WAL contention

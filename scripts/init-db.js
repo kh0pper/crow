@@ -377,79 +377,18 @@ await migrateLegacyProjectsToSpaces();
   }
 })();
 
-// Forward triggers: research_projects → project_spaces.
-//
-// Legacy INSERT callers (12+ in tree as of M1) keep working transparently.
-// The trigger generates a SQL-only fallback slug — close enough for the legacy
-// path. The canonical-slug normalization pass below (after the backstop) fixes
-// up any rows whose slug drifted from slugify(name, id) due to this SQL form.
-//
-// SQL slug contract: the trailing '||'-'||NEW.id' guarantees uniqueness even
-// when two rows share a name. The normalization pass converts to the JS
-// slugify form for workspace-less rows on every init-db run.
-//
-// INSERT OR IGNORE on the spaces row: if a slug or uuid UNIQUE conflict occurs
-// (possible if the row was already mirrored), we silently skip rather than
-// aborting the legacy writer's INSERT. The init-db backstop
-// (migrateLegacyProjectsToSpaces above) self-heals any missed mirrors.
-//
-// INSERT OR IGNORE on the members row: cheap insurance alongside the
-// WHERE NOT EXISTS guard (which already mirrors the partial unique index).
-//
-// The DROP + recreate is wrapped in BEGIN IMMEDIATE; ... COMMIT; so a
-// concurrent gateway (busy_timeout 30s) can't observe a window where the
-// trigger is absent. executeMultiple autocommits per statement, so we
-// supply the explicit transaction boundary in the DDL string.
-await initTable("project_spaces forward triggers", `
-  BEGIN IMMEDIATE;
+// W2-5B3a (2026-06-12): the rp→ps forward triggers are RETIRED. All readers
+// (B1) and writers (B2) use project_spaces; fleet observation confirmed zero
+// prod research_projects writes since B2 (rp is also excluded from instance
+// sync). research_projects remains as a frozen dormant table (B3b retirement
+// of the table itself is deferred — user data is absolute). The DROPs are
+// idempotent so every upgrading host converges on first init-db. The
+// migrateLegacyProjectsToSpaces backstop above still self-heals any
+// pre-B3a rows that were never mirrored.
+await initTable("retire rp→ps forward triggers (B3a)", `
   DROP TRIGGER IF EXISTS tr_rp_to_ps_ins;
-  CREATE TRIGGER tr_rp_to_ps_ins
-  AFTER INSERT ON research_projects FOR EACH ROW
-  BEGIN
-    INSERT OR IGNORE INTO project_spaces (id, uuid, slug, name, description, type, status, tags, created_at, updated_at)
-    VALUES (
-      NEW.id,
-      COALESCE(NEW.uuid, lower(hex(randomblob(16)))),
-      lower(replace(replace(replace(replace(replace(COALESCE(NEW.name,'project'),' ','-'),'_','-'),'/','-'),'.','-'),'—','-')) || '-' || NEW.id,
-      NEW.name,
-      NEW.description,
-      COALESCE(NEW.type, 'general'),
-      COALESCE(NEW.status, 'active'),
-      NEW.tags,
-      COALESCE(NEW.created_at, datetime('now')),
-      COALESCE(NEW.updated_at, datetime('now'))
-    );
-
-    INSERT OR IGNORE INTO project_members (project_id, contact_id, role, granted_at)
-    SELECT NEW.id, NULL, 'owner', COALESCE(NEW.created_at, datetime('now'))
-    WHERE NOT EXISTS (
-      SELECT 1 FROM project_members
-       WHERE project_id = NEW.id AND contact_id IS NULL AND revoked_at IS NULL
-    );
-  END;
-  COMMIT;
-
-  CREATE TRIGGER IF NOT EXISTS tr_rp_to_ps_upd
-  AFTER UPDATE ON research_projects FOR EACH ROW
-  BEGIN
-    UPDATE project_spaces
-       SET name        = NEW.name,
-           description = NEW.description,
-           type        = COALESCE(NEW.type, type),
-           status      = COALESCE(NEW.status, status),
-           tags        = NEW.tags,
-           updated_at  = COALESCE(NEW.updated_at, datetime('now'))
-     WHERE id = NEW.id;
-  END;
-
-  CREATE TRIGGER IF NOT EXISTS tr_rp_to_ps_del
-  AFTER DELETE ON research_projects FOR EACH ROW
-  BEGIN
-    UPDATE project_spaces
-       SET archived_at = datetime('now'),
-           updated_at  = datetime('now')
-     WHERE id = OLD.id AND archived_at IS NULL;
-  END;
+  DROP TRIGGER IF EXISTS tr_rp_to_ps_upd;
+  DROP TRIGGER IF EXISTS tr_rp_to_ps_del;
 `);
 
 await initTable("sources FTS index", `

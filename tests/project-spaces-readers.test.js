@@ -5,14 +5,15 @@
  * Tests 1-7 cover the spec's reader migration; test 8 is "suite stays green"
  * (verified externally by running the full test suite).
  *
- * Test inventory:
- *   1. Superset visibility: legacy rp + ps-only rows both appear via crow_list_projects
- *   2. id-collision guard: createProjectSpace keeps rp seq ahead; exactly ONE
- *      sqlite_sequence row for research_projects after two helper calls
- *   3. Archive invisibility: trigger-archived rows hidden from all migrated readers
- *   4. Context summary: generateCrowContext sees ps-only rows; legacy FK counts intact
+ * Test inventory (B3a 2026-06-12: the rp→ps forward triggers are retired —
+ * seeds that used to go through rp now insert into project_spaces directly;
+ * the old test 6, which pinned trigger propagation, was deleted):
+ *   1. Superset visibility: seeded + helper-created rows both appear via crow_list_projects
+ *   2. id-collision guard: createProjectSpace keeps rp seq ahead; a legacy rp
+ *      INSERT allocates a non-colliding id and (post-B3a) does NOT mirror to ps
+ *   3. Archive invisibility: archived rows hidden from all migrated readers
+ *   4. Context summary: generateCrowContext sees ps-only rows; FK counts intact
  *   5. learner_profile filtering: excluded from generic lists; visible to learner queries
- *   6. Read-after-write through trigger: rp UPDATE reflected in ps detail query
  *   7. Export shape: maker_export_learner returns explicit cols; no workspace_dir etc.
  */
 
@@ -70,14 +71,15 @@ async function makeResearchClient(db) {
 test("1. superset visibility: legacy rp + ps-only rows both returned by crow_list_projects", async () => {
   const db = makeDb();
 
-  // Seed a legacy project via research_projects (trigger mirrors it into ps)
+  // Seed a legacy-shaped project directly in project_spaces (pre-B3a these
+  // rows arrived via the rp→ps trigger; the trigger is retired)
   await db.execute({
-    sql: `INSERT INTO research_projects (name, description, status, type, created_at, updated_at)
-          VALUES ('Legacy Project', 'legacy desc', 'active', NULL, datetime('now'), datetime('now'))`,
+    sql: `INSERT INTO project_spaces (slug, name, description, status, type, created_at, updated_at)
+          VALUES ('legacy-project-t1', 'Legacy Project', 'legacy desc', 'active', 'general', datetime('now'), datetime('now'))`,
     args: [],
   });
   const { rows: legacyRows } = await db.execute({
-    sql: "SELECT id, name FROM research_projects WHERE name='Legacy Project'",
+    sql: "SELECT id, name FROM project_spaces WHERE name='Legacy Project'",
     args: [],
   });
   const legacyId = Number(legacyRows[0].id);
@@ -144,29 +146,35 @@ test("2. id-collision guard: rp allocates higher id than ps-only; exactly one sq
   const rpId = Number(rpRows[0].id);
   assert.ok(rpId > psId2, `rp id ${rpId} must be > ps max id ${psId2} (no collision)`);
 
-  // Both projects must be visible via ps (trigger mirrored the rp insert)
+  // Post-B3a there is NO mirror: the rp insert must NOT materialize a ps row,
+  // and the guard must still hold rp's sequence at/above ps's max id.
   const { rows: psSeen } = await db.execute({
-    sql: "SELECT id FROM project_spaces WHERE id IN (?, ?) ORDER BY id",
-    args: [psId2, rpId],
+    sql: "SELECT id FROM project_spaces WHERE id = ?",
+    args: [rpId],
   });
-  assert.equal(psSeen.length, 2, "both ps-only and newly-mirrored rp project visible in project_spaces");
+  assert.equal(psSeen.length, 0, "retired trigger: rp insert does not mirror into project_spaces");
+  const { rows: seqFinal } = await db.execute({
+    sql: "SELECT seq FROM sqlite_sequence WHERE name='research_projects'",
+    args: [],
+  });
+  assert.ok(Number(seqFinal[0].seq) >= psId2, "guard invariant survives a legacy rp INSERT");
 
   db.close();
 });
 
 // ── Test 3: Archive invisibility ──────────────────────────────────────────────
 
-test("3. archive invisibility: trigger-archived (deleted) learner hidden from migrated readers", async () => {
+test("3. archive invisibility: archived learner hidden from migrated readers", async () => {
   const db = makeDb();
 
-  // Insert a learner via legacy rp
+  // Seed a learner directly in project_spaces (trigger path retired in B3a)
   await db.execute({
-    sql: `INSERT INTO research_projects (name, type, status, created_at, updated_at)
-          VALUES ('Ghost Learner', 'learner_profile', 'active', datetime('now'), datetime('now'))`,
+    sql: `INSERT INTO project_spaces (slug, name, type, status, created_at, updated_at)
+          VALUES ('ghost-learner-t3', 'Ghost Learner', 'learner_profile', 'active', datetime('now'), datetime('now'))`,
     args: [],
   });
   const { rows: lRows } = await db.execute({
-    sql: "SELECT id FROM research_projects WHERE name='Ghost Learner'",
+    sql: "SELECT id FROM project_spaces WHERE name='Ghost Learner'",
     args: [],
   });
   const lid = Number(lRows[0].id);
@@ -178,9 +186,9 @@ test("3. archive invisibility: trigger-archived (deleted) learner hidden from mi
   });
   assert.equal(before.length, 1, "learner visible in project_spaces before deletion");
 
-  // Delete from rp — fires the archive trigger on ps
+  // Archive the row (the operation the retired del-trigger used to perform)
   await db.execute({
-    sql: "DELETE FROM research_projects WHERE id=?",
+    sql: "UPDATE project_spaces SET archived_at = datetime('now'), updated_at = datetime('now') WHERE id=? AND archived_at IS NULL",
     args: [lid],
   });
 
@@ -189,7 +197,7 @@ test("3. archive invisibility: trigger-archived (deleted) learner hidden from mi
     sql: "SELECT archived_at FROM project_spaces WHERE id=?",
     args: [lid],
   });
-  assert.ok(archived.length === 1 && archived[0].archived_at, "delete trigger set archived_at in project_spaces");
+  assert.ok(archived.length === 1 && archived[0].archived_at, "archived_at set in project_spaces");
 
   // Migrated learner-list query must return nothing for this id
   const { rows: listRows } = await db.execute({
@@ -214,14 +222,14 @@ test("3. archive invisibility: trigger-archived (deleted) learner hidden from mi
   assert.ok(!ensureRows.some(r => Number(r.id) === lid), "archived learner not returned by ensureDefaultLearner-shape query");
 
   // data-dashboard LEFT JOIN: project_name must be NULL for a backend pointing at an archived project.
-  // We need a live rp row for the FK (data_backends.project_id → research_projects), then archive it.
+  // Seed a live ps row for the FK (data_backends.project_id → project_spaces post-B2), then archive it.
   await db.execute({
-    sql: `INSERT INTO research_projects (name, status, type, created_at, updated_at)
-          VALUES ('BackendHost Project', 'active', NULL, datetime('now'), datetime('now'))`,
+    sql: `INSERT INTO project_spaces (slug, name, status, type, created_at, updated_at)
+          VALUES ('backendhost-t3', 'BackendHost Project', 'active', 'general', datetime('now'), datetime('now'))`,
     args: [],
   });
   const { rows: bhRows } = await db.execute({
-    sql: "SELECT id FROM research_projects WHERE name='BackendHost Project'",
+    sql: "SELECT id FROM project_spaces WHERE name='BackendHost Project'",
     args: [],
   });
   const bhId = Number(bhRows[0].id);
@@ -230,11 +238,10 @@ test("3. archive invisibility: trigger-archived (deleted) learner hidden from mi
           VALUES ('ghost-backend', 'sqlite', 'disconnected', ?, '{}', datetime('now'), datetime('now'))`,
     args: [bhId],
   });
-  // Archive the ps row DIRECTLY (no rp delete): foreign_keys is ON by default
-  // in better-sqlite3, so deleting the rp row would CASCADE-delete the backend
-  // and leave the LEFT JOIN with zero rows — a vacuously-true assertion. The
-  // direct UPDATE keeps the backend alive and exercises the ON-condition
-  // filter for real.
+  // Archive (not delete): deleting the ps row would CASCADE-delete the backend
+  // (foreign_keys is ON) and leave the LEFT JOIN with zero rows — a
+  // vacuously-true assertion. The UPDATE keeps the backend alive and
+  // exercises the ON-condition filter for real.
   await db.execute({
     sql: "UPDATE project_spaces SET archived_at = datetime('now') WHERE id = ?",
     args: [bhId],
@@ -255,15 +262,15 @@ test("3. archive invisibility: trigger-archived (deleted) learner hidden from mi
 test("4. context summary: generateCrowContext sees ps-only project; legacy FK counts intact", async () => {
   const db = makeDb();
 
-  // Seed a legacy project with a source and note, timestamped in the future
-  // so it sorts to the top of the LIMIT 5 list regardless of prior test state.
+  // Seed a legacy-shaped project with a source and note, timestamped in the
+  // future so it sorts to the top of the LIMIT 5 list regardless of prior state.
   await db.execute({
-    sql: `INSERT INTO research_projects (name, status, type, created_at, updated_at)
-          VALUES ('T4 Legacy Project', 'active', NULL, datetime('now','+1 hour'), datetime('now','+1 hour'))`,
+    sql: `INSERT INTO project_spaces (slug, name, status, type, created_at, updated_at)
+          VALUES ('t4-legacy', 'T4 Legacy Project', 'active', 'general', datetime('now','+1 hour'), datetime('now','+1 hour'))`,
     args: [],
   });
   const { rows: rRows } = await db.execute({
-    sql: "SELECT id FROM research_projects WHERE name='T4 Legacy Project'",
+    sql: "SELECT id FROM project_spaces WHERE name='T4 Legacy Project'",
     args: [],
   });
   const legacyCtxId = Number(rRows[0].id);
@@ -308,14 +315,14 @@ test("4. context summary: generateCrowContext sees ps-only project; legacy FK co
 test("5. learner_profile filtering: excluded from generic lists; visible to learner-specific queries", async () => {
   const db = makeDb();
 
-  // Seed a learner_profile row via legacy INSERT
+  // Seed a learner_profile row directly in project_spaces
   await db.execute({
-    sql: `INSERT INTO research_projects (name, type, status, created_at, updated_at)
-          VALUES ('Test Learner Filter', 'learner_profile', 'active', datetime('now'), datetime('now'))`,
+    sql: `INSERT INTO project_spaces (slug, name, type, status, created_at, updated_at)
+          VALUES ('learner-filter-t5', 'Test Learner Filter', 'learner_profile', 'active', datetime('now'), datetime('now'))`,
     args: [],
   });
   const { rows: lRows } = await db.execute({
-    sql: "SELECT id FROM research_projects WHERE name='Test Learner Filter'",
+    sql: "SELECT id FROM project_spaces WHERE name='Test Learner Filter'",
     args: [],
   });
   const learnerId = Number(lRows[0].id);
@@ -356,53 +363,19 @@ test("5. learner_profile filtering: excluded from generic lists; visible to lear
   db.close();
 });
 
-// ── Test 6: Read-after-write through trigger ──────────────────────────────────
-
-test("6. read-after-write through trigger: rp UPDATE visible via ps detail query", async () => {
-  const db = makeDb();
-
-  // Seed a legacy project
-  await db.execute({
-    sql: `INSERT INTO research_projects (name, status, type, created_at, updated_at)
-          VALUES ('RAW Project', 'active', NULL, datetime('now'), datetime('now'))`,
-    args: [],
-  });
-  const { rows: initRows } = await db.execute({
-    sql: "SELECT id FROM research_projects WHERE name='RAW Project'",
-    args: [],
-  });
-  const rawId = Number(initRows[0].id);
-
-  // Update via rp (writer path stays on rp; trigger fires upd mirror into ps)
-  await db.execute({
-    sql: "UPDATE research_projects SET status='paused', updated_at=datetime('now') WHERE id=?",
-    args: [rawId],
-  });
-
-  // Read via ps (migrated detail query)
-  const { rows: psDetail } = await db.execute({
-    sql: "SELECT status FROM project_spaces WHERE id=? AND archived_at IS NULL",
-    args: [rawId],
-  });
-  assert.equal(psDetail.length, 1, "project found in ps after rp update");
-  assert.equal(psDetail[0].status, "paused", "rp status update reflected in ps via upd trigger");
-
-  db.close();
-});
-
 // ── Test 7: Export shape ──────────────────────────────────────────────────────
 
 test("7. export shape: maker_export_learner profile has explicit cols; no workspace_dir/storage_prefix/slug/archived_at", async () => {
   const db = makeDb();
 
-  // Seed a learner via legacy INSERT
+  // Seed a learner directly in project_spaces
   await db.execute({
-    sql: `INSERT INTO research_projects (name, type, description, status, tags, created_at, updated_at)
-          VALUES ('Export Learner', 'learner_profile', 'a desc', 'active', 'tag1', datetime('now'), datetime('now'))`,
+    sql: `INSERT INTO project_spaces (slug, name, type, description, status, tags, created_at, updated_at)
+          VALUES ('export-learner-t7', 'Export Learner', 'learner_profile', 'a desc', 'active', 'tag1', datetime('now'), datetime('now'))`,
     args: [],
   });
   const { rows: eRows } = await db.execute({
-    sql: "SELECT id FROM research_projects WHERE name='Export Learner'",
+    sql: "SELECT id FROM project_spaces WHERE name='Export Learner'",
     args: [],
   });
   const eid = Number(eRows[0].id);
