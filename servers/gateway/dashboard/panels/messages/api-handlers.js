@@ -8,6 +8,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createSharingServer } from "../../../../sharing/server.js";
+import { getManagersOrNull } from "../../../../sharing/managers.js";
 
 /**
  * Create a connected sharing MCP client.
@@ -62,6 +63,27 @@ export async function handlePostAction(req, res, { db }) {
       sql: "UPDATE contacts SET is_blocked = 1 WHERE crow_id = ?",
       args: [req.body.crow_id],
     });
+    // Close Hypercore feeds for the blocked contact to free FDs.
+    // NOTE: unblocking does NOT re-init feeds — no lazy re-init path exists for
+    // contacts. A restart or re-invite is needed to reopen feeds after an unblock.
+    const managers = getManagersOrNull();
+    if (managers) {
+      try {
+        if (managers.syncManager) {
+          // SyncManager keys by integer contactId; look it up from crow_id.
+          const { rows } = await db.execute({
+            sql: "SELECT id FROM contacts WHERE crow_id = ?",
+            args: [req.body.crow_id],
+          });
+          if (rows[0]?.id != null) {
+            await managers.syncManager.closeContactFeeds(rows[0].id);
+          }
+        }
+        if (managers.peerManager) {
+          await managers.peerManager.leaveContact(req.body.crow_id);
+        }
+      } catch {}
+    }
     return res.redirectAfterPost("/dashboard/messages");
   }
 
