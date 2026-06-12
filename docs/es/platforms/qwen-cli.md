@@ -1,6 +1,6 @@
 # Qwen CLI
 
-Conecta Crow a [Qwen Chat / Qwen Coder](https://github.com/QwenLM/qwen-agent), el asistente de IA y herramienta de programación de Alibaba.
+Conecta Crow a [Qwen Code](https://github.com/QwenLM/qwen-code), el agente de programación para terminal de Alibaba.
 
 ## Requisitos previos
 
