@@ -1,4 +1,4 @@
-import { createDbClient, resolveDataDir, isSqliteVecAvailable } from "../servers/db.js";
+import { createDbClient, resolveDataDir } from "../servers/db.js";
 import { mkdirSync } from "fs";
 import { resolve } from "path";
 import { slugify, workspacePathFor, storagePrefixFor } from "../servers/shared/slugify.js";
@@ -1831,19 +1831,7 @@ await initTable("rate_limit_buckets table", `
   CREATE INDEX IF NOT EXISTS idx_rate_limit_buckets_refilled ON rate_limit_buckets(refilled_at);
 `);
 
-// --- Optional: sqlite-vec virtual table for semantic search ---
-const hasVec = await isSqliteVecAvailable(db);
-if (hasVec) {
-  await initTable("memory_embeddings virtual table (sqlite-vec)", `
-    CREATE VIRTUAL TABLE IF NOT EXISTS memory_embeddings USING vec0(
-      memory_id INTEGER PRIMARY KEY,
-      embedding FLOAT[1536]
-    );
-  `);
-  console.log("  ✓ sqlite-vec available — semantic search enabled");
-} else {
-  console.log("  ℹ sqlite-vec not available — using BLOB+JS fallback for semantic search");
-}
+console.log("  ℹ semantic search uses BLOB embeddings (memory_embeddings_blob)");
 
 // --- Phase 4 semantic memory tables (always created; BLOB fallback works without sqlite-vec) ---
 // Per-content-type embedding tables. `vec` is a Float32Array serialized as BLOB.
