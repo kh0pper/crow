@@ -8,7 +8,7 @@ Crow addresses this with two complementary strategies: the **Gateway Tool Router
 
 ## Gateway Tool Router
 
-The router (`servers/gateway/router.js`) consolidates all core and external tools behind 7 category tools, reducing context usage by approximately 75%.
+The router (`servers/gateway/router.js`) consolidates all core and external tools behind one category tool per server — 10 tools on a full install — reducing context usage by roughly 90%.
 
 ### Architecture
 
@@ -20,7 +20,8 @@ The router (`servers/gateway/router.js`) consolidates all core and external tool
                                     |
             +-----------+-----------+-----------+-----------+
             |           |           |           |           |
-     crow_memory  crow_projects  crow_blog  crow_sharing  crow_storage
+     crow_memory  crow_projects  crow_blog  crow_sharing  crow_storage  (+media,
+                                                            orchestrator, consulting)
             |           |           |           |           |
      [InMemory   [InMemory   [InMemory   [InMemory   [InMemory
       Transport]  Transport]  Transport]  Transport]  Transport]
@@ -38,12 +39,15 @@ Each category tool creates an in-process `Client` connected to the underlying `M
 
 | Tool | Dispatches To | Actions |
 |---|---|---|
-| `crow_memory` | Memory server | 12 (store, search, recall, list, update, delete, stats, context ops) |
-| `crow_projects` | Project server | 12 (projects, sources, notes, bibliography, stats) |
-| `crow_blog` | Blog server | 12 (create, edit, publish, list, delete, export, themes, stats) |
-| `crow_sharing` | Sharing server | 8 (invite, contacts, share, inbox, messaging, revoke) |
-| `crow_storage` | Storage server | 5 (upload, list, download URL, delete, stats) |
-| `crow_tools` | External proxy servers | Dynamic (Trello, Canvas, Slack, etc.) |
+| `crow_memory` | Memory server | 21 (store, search, recall, list, update, delete, stats, context ops) |
+| `crow_projects` | Project server | 16 (projects, sources, notes, bibliography, stats) |
+| `crow_blog` | Blog server | 23 (create, edit, publish, list, delete, export, themes, stats) |
+| `crow_sharing` | Sharing server | 21 (invite, contacts, share, inbox, messaging, instances, revoke) |
+| `crow_storage` | Storage server | 8 (upload, list, download URL, delete, stats) — when MinIO is configured |
+| `crow_media` | Media bundle | 17 (articles, podcasts, playlists) — when the bundle is installed |
+| `crow_orchestrator` | Orchestrator server | 7 (orchestrate, status, presets, pipelines) — when available |
+| `crow_consulting` | Consulting server | 6 (prospect pipeline ops) |
+| `crow_tools` | External proxy servers | Dynamic (Trello, Canvas, Slack, etc.) + remote instances |
 | `crow_discover` | Static manifests + live schemas | Discovery protocol |
 
 ### Parameter Schema

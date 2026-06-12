@@ -197,7 +197,7 @@ When the AI responds with tool calls, the tool executor (`ai/tool-executor.js`) 
 1. The executor maintains a pool of lazy in-process MCP Clients, one per server category
 2. Each client connects to its server factory via `InMemoryTransport` (same pattern as the tool router)
 3. Tool calls are resolved by category — `crow_memory` routes to the memory server, `crow_projects` to the project server, etc.
-4. The AI sees the 7 category tools from the router pattern, plus `crow_discover` for schema lookup
+4. The AI sees the router-style category tools (the executor dispatches the memory, projects, blog, sharing, storage, and media categories), plus `crow_tools`, `crow_discover` for schema lookup, and explicit orchestration tools
 5. Results are truncated to 2000 characters to prevent context overflow
 6. Up to 10 tool call rounds per message turn (the AI can call tools, get results, and call more tools)
 

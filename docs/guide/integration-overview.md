@@ -77,11 +77,11 @@ This is the core value proposition: **use whichever AI interface fits the moment
 
 ## Tool Routing
 
-Crow exposes 49+ individual MCP tools across its five servers. Loading all of them into an AI's context window is wasteful — most interactions only need a few tools.
+Crow exposes 126+ individual MCP tools across its core servers. Loading all of them into an AI's context window is wasteful — most interactions only need a few tools.
 
 ### The Router Pattern
 
-The gateway's `/router/mcp` endpoint consolidates all tools into **7 category tools**, reducing context usage by approximately 75%:
+The gateway's `/router/mcp` endpoint consolidates all tools into **10 category tools** (8 server categories plus `crow_tools` and `crow_discover`), reducing context usage by roughly 90%:
 
 | Category Tool | Routes To | Actions |
 |---|---|---|
@@ -90,6 +90,9 @@ The gateway's `/router/mcp` endpoint consolidates all tools into **7 category to
 | `crow_blog` | Blog server | create, edit, publish, unpublish, themes, export, share |
 | `crow_sharing` | Sharing server | invite, accept, share, inbox, send message, contacts, revoke |
 | `crow_storage` | Storage server | upload, list, get URL, delete, stats |
+| `crow_media` | Media bundle (when installed) | articles, podcasts, playlists |
+| `crow_orchestrator` | Orchestrator server | orchestrate, pipelines, presets |
+| `crow_consulting` | Consulting server | prospect pipeline ops |
 | `crow_tools` | External integrations | GitHub, Brave Search, Slack, and other connected services |
 | `crow_discover` | Schema lookup | Returns full parameter schemas on demand |
 

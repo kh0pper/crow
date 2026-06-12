@@ -145,4 +145,4 @@ For the full workflow, see the [Cross-Platform Guide](../guide/cross-platform).
 
 ## Context Management
 
-Crow includes a smart tool loading system to reduce context window usage. The gateway router (`/router/mcp`) consolidates 49+ tools into 7 category tools (~75% context reduction). For stdio deployments, `crow-core` provides on-demand server activation. See the [Context Management architecture reference](/architecture/context-management) for details.
+Crow includes a smart tool loading system to reduce context window usage. The gateway router (`/router/mcp`) consolidates 126+ tools into 10 category tools (a ~90% context reduction). For stdio deployments, `crow-core` provides on-demand server activation. See the [Context Management architecture reference](/architecture/context-management) for details.

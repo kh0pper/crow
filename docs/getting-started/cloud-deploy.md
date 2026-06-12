@@ -110,7 +110,7 @@ Visit `/setup` on your deployed URL to see integration status and endpoint URLs.
 > "What do you remember?"
 
 ::: tip Many integrations?
-If you have several integrations enabled, use the `/router/mcp` endpoint instead of connecting each server individually. It consolidates all tools into 7 category tools, reducing context window usage by ~75%. See the [Context & Performance guide](/guide/context-performance).
+If you have several integrations enabled, use the `/router/mcp` endpoint instead of connecting each server individually. It consolidates the full tool surface (126+ tools) into 10 category tools, a major context-window reduction. See the [Context & Performance guide](/guide/context-performance).
 :::
 
 Now connect your AI: [Claude](/platforms/claude) · [ChatGPT](/platforms/chatgpt) · [All platforms](/platforms/)
