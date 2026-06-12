@@ -4,7 +4,7 @@ El Chat de IA integrado de Crow te permite conversar con cualquier proveedor de 
 
 ## Cómo encaja BYOAI
 
-BYOAI es una de las [tres formas en que la IA se conecta a Crow](/guide/integration-overview). Las plataformas externas (Claude.ai, ChatGPT, Cursor) se conectan vía MCP y traen su propia IA. BYOAI invierte eso: el gateway de Crow actúa como el cliente de IA, llamando a la API del proveedor en tu nombre y despachando las llamadas a herramientas internamente.
+BYOAI es una de las [tres formas en que la IA se conecta a Crow](/es/guide/integration-overview). Las plataformas externas (Claude.ai, ChatGPT, Cursor) se conectan vía MCP y traen su propia IA. BYOAI invierte eso: el gateway de Crow actúa como el cliente de IA, llamando a la API del proveedor en tu nombre y despachando las llamadas a herramientas internamente.
 
 Esto significa que BYOAI y las conexiones MCP externas comparten la misma base de datos. Una memoria almacenada desde el Chat BYOAI está disponible al instante en Claude.ai, y viceversa. Todos los patrones de conexión leen y escriben los mismos datos.
 
@@ -51,8 +51,8 @@ No se necesita reiniciar el gateway — la configuración se recarga en caliente
 | Ollama | `ollama` | `llama3.1` | No | Totalmente local, no requiere clave de API |
 | OpenRouter | `openrouter` | `openai/gpt-4o` | Sí | [Obtener clave](https://openrouter.ai/keys) — acceso a más de 100 modelos |
 | Meta AI (Llama) | `meta` | `Llama-4-Maverick-17B-128E-Instruct-FP8` | Sí | [Obtener clave](https://llama.com/) — modelos Llama 4 y 3.3 |
-| DashScope Coding | `openai` | `qwen3.5-plus` | Sí | [Obtener clave](https://dashscope.console.aliyun.com/apiKey) — Qwen, GLM, Kimi, MiniMax ([guía](/guide/dashscope-coding)) |
-| Z.AI Coding | `openai` | `glm-5` | Sí | [Obtener clave](https://z.ai) — modelos GLM ([guía](/guide/zai-coding)) |
+| DashScope Coding | `openai` | `qwen3.5-plus` | Sí | [Obtener clave](https://dashscope.console.aliyun.com/apiKey) — Qwen, GLM, Kimi, MiniMax ([guía](/es/guide/dashscope-coding)) |
+| Z.AI Coding | `openai` | `glm-5` | Sí | [Obtener clave](https://z.ai) — modelos GLM ([guía](/es/guide/zai-coding)) |
 
 ### OpenAI
 
@@ -144,7 +144,7 @@ AI_MODEL=qwen3.5-plus
 AI_BASE_URL=https://coding-intl.dashscope.aliyuncs.com/v1
 ```
 
-El DashScope Coding Plan te da acceso a modelos de Qwen, GLM, Kimi y MiniMax con una sola suscripción. Todos los modelos usan la misma clave de API y la misma base URL — solo cambia el nombre del modelo. Consulta la [guía del DashScope Coding Plan](/guide/dashscope-coding) para las instrucciones completas de configuración y los modelos disponibles.
+El DashScope Coding Plan te da acceso a modelos de Qwen, GLM, Kimi y MiniMax con una sola suscripción. Todos los modelos usan la misma clave de API y la misma base URL — solo cambia el nombre del modelo. Consulta la [guía del DashScope Coding Plan](/es/guide/dashscope-coding) para las instrucciones completas de configuración y los modelos disponibles.
 
 ### Z.AI Coding Plan (Zhipu AI)
 
@@ -155,7 +155,7 @@ AI_MODEL=glm-5
 AI_BASE_URL=https://api.z.ai/api/coding/paas/v4
 ```
 
-El Z.AI Coding Plan brinda acceso a la familia de modelos GLM (GLM-5, GLM-4.7 y más) mediante una suscripción mensual. Consulta la [guía del Z.AI Coding Plan](/guide/zai-coding) para las instrucciones completas de configuración y los modelos disponibles.
+El Z.AI Coding Plan brinda acceso a la familia de modelos GLM (GLM-5, GLM-4.7 y más) mediante una suscripción mensual. Consulta la [guía del Z.AI Coding Plan](/es/guide/zai-coding) para las instrucciones completas de configuración y los modelos disponibles.
 
 ### Endpoint personalizado compatible con OpenAI
 

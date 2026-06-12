@@ -75,6 +75,6 @@ Por defecto, la misma configuración de proveedor que el chat de IA de Crow (`mo
 
 ## Próximos Pasos
 
-- [Arquitectura del orquestador](/architecture/orchestrator) — presets, el puente MCP, herramientas de instancias remotas e internos
+- [Arquitectura del orquestador](/es/architecture/orchestrator) — presets, el puente MCP, herramientas de instancias remotas e internos
 - [Guía de programación](/es/guide/scheduling) — cómo funcionan los horarios de Crow en general
 - [Contexto y Rendimiento](/es/guide/context-performance) — cómo encajan las herramientas del orquestador en el presupuesto de contexto de tu IA

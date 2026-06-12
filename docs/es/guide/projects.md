@@ -182,4 +182,4 @@ El borrado definitivo (eliminar el directorio del espacio de trabajo y todo en c
 
 - [Guía de compartición](./sharing) — conexiones peer y el modelo de compartición más amplio
 - [Guía de Compartición de Datos](./data-sharing) — modos de compartición clon / suscripción / lectura federada
-- [Guía de Backends de Datos](/guide/data-backends) — conectar servidores MCP externos como recursos del proyecto
+- [Guía de Backends de Datos](/es/guide/data-backends) — conectar servidores MCP externos como recursos del proyecto
