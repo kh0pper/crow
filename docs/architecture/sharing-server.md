@@ -27,7 +27,7 @@ No external accounts or central servers are required. Everything runs on the use
 ├─────────────────────────────────────────────┤
 │  Layer 3: Data Sync (Hypercore)             │
 │  Append-only feeds, eventually consistent   │
-│  Each contact pair = paired Hypercore feeds  │
+│  Each contact pair = paired Hypercore feeds │
 ├─────────────────────────────────────────────┤
 │  Layer 2: Discovery & Transport (Hyperswarm)│
 │  DHT peer discovery, NAT holepunching       │
