@@ -9,7 +9,10 @@
 import { Router } from "express";
 
 const CALIBRE_WEB_URL = () => (process.env.CALIBRE_WEB_URL || "http://localhost:8083").replace(/\/+$/, "");
-const CALIBRE_WEB_API_KEY = () => process.env.CALIBRE_WEB_API_KEY || "";
+// Stock Calibre-Web OPDS uses HTTP Basic auth (no API-key mechanism exists upstream).
+const basicAuth = () => "Basic " + Buffer.from(
+  `${process.env.CALIBRE_WEB_USERNAME || ""}:${process.env.CALIBRE_WEB_PASSWORD || ""}`
+).toString("base64");
 
 /**
  * Fetch from Calibre-Web with auth and timeout.
@@ -22,7 +25,7 @@ async function cwFetch(path) {
   try {
     const res = await fetch(url, {
       signal: controller.signal,
-      headers: { "Authorization": `Bearer ${CALIBRE_WEB_API_KEY()}` },
+      headers: { "Authorization": basicAuth() },
     });
     if (!res.ok) throw new Error(`Calibre-Web ${res.status}: ${res.statusText}`);
     const text = await res.text();

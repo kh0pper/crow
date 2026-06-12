@@ -15,34 +15,54 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 const CALIBRE_WEB_URL = (process.env.CALIBRE_WEB_URL || "http://localhost:8083").replace(/\/+$/, "");
-const CALIBRE_WEB_API_KEY = process.env.CALIBRE_WEB_API_KEY || "";
+// Stock Calibre-Web has no API-key mechanism — its OPDS endpoints use HTTP
+// Basic auth with a normal user account. (The original CALIBRE_WEB_API_KEY
+// bearer scheme targeted auth that upstream never had; replaced 2026-06-12.)
+const CALIBRE_WEB_USERNAME = process.env.CALIBRE_WEB_USERNAME || "";
+const CALIBRE_WEB_PASSWORD = process.env.CALIBRE_WEB_PASSWORD || "";
+
+function basicAuthHeader() {
+  return "Basic " + Buffer.from(`${CALIBRE_WEB_USERNAME}:${CALIBRE_WEB_PASSWORD}`).toString("base64");
+}
 
 /**
- * Make an authenticated request to the Calibre-Web API.
+ * Make an authenticated request to Calibre-Web.
  * @param {string} path - API path
- * @param {object} [options] - fetch options
+ * @param {object} [options] - fetch options. Set options.webRoute=true for
+ *   non-OPDS web routes (/shelf/*, /ajax/*): stock Calibre-Web protects those
+ *   with a browser session, not Basic auth, and answers with a redirect to
+ *   /login — we detect that and fail honestly instead of following it.
  * @returns {Promise<any>} parsed response (JSON or text)
  */
 async function cwFetch(path, options = {}) {
   const url = `${CALIBRE_WEB_URL}${path}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
+  const { webRoute, ...fetchOptions } = options;
 
   try {
     const headers = {
-      "Authorization": `Bearer ${CALIBRE_WEB_API_KEY}`,
+      "Authorization": basicAuthHeader(),
       "Content-Type": "application/json",
-      ...options.headers,
+      ...fetchOptions.headers,
     };
 
     const res = await fetch(url, {
-      ...options,
+      ...fetchOptions,
       signal: controller.signal,
       headers,
+      ...(webRoute ? { redirect: "manual" } : {}),
     });
 
+    if (webRoute && res.status >= 300 && res.status < 400) {
+      throw new Error(
+        "This action needs a logged-in browser session in stock Calibre-Web (it redirected to the login page). " +
+        "Do it in the Calibre-Web web UI, or run Calibre-Web behind an authenticating proxy that translates Basic auth into a session."
+      );
+    }
+
     if (!res.ok) {
-      if (res.status === 401 || res.status === 403) throw new Error("Authentication failed — check CALIBRE_WEB_API_KEY");
+      if (res.status === 401 || res.status === 403) throw new Error("Authentication failed — check CALIBRE_WEB_USERNAME and CALIBRE_WEB_PASSWORD");
       if (res.status === 404) throw new Error(`Not found: ${path}`);
       throw new Error(`Calibre-Web API error: ${res.status} ${res.statusText}`);
     }
@@ -298,7 +318,7 @@ export function createCalibreWebServer(options = {}) {
     },
     async ({ shelf_id, book_id }) => {
       try {
-        await cwFetch(`/shelf/add/${shelf_id}/${book_id}`, { method: "POST" });
+        await cwFetch(`/shelf/add/${shelf_id}/${book_id}`, { method: "POST", webRoute: true });
 
         return {
           content: [{
@@ -326,6 +346,7 @@ export function createCalibreWebServer(options = {}) {
           const statusMap = { read: 1, unread: 0, reading: 2 };
           await cwFetch(`/ajax/toggleread/${book_id}`, {
             method: "POST",
+            webRoute: true,
             body: JSON.stringify({ read_status: statusMap[status] }),
           });
 

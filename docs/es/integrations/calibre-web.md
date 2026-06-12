@@ -43,11 +43,9 @@ Calibre-Web estará disponible en `http://tu-servidor:8083`. Crea una cuenta de 
 
 Si ya tienes una instancia de Calibre-Web funcionando, conecta Crow directamente a ella.
 
-#### Paso 1: Obtener un token bearer
+#### Paso 1: Elige un usuario de Calibre-Web
 
-::: warning Calibre-Web estándar no tiene ajuste de clave de API
-La integración de Crow se autentica con un token bearer (`CALIBRE_WEB_API_KEY`), pero la interfaz estándar de janeczku/calibre-web no ofrece una clave de API de propósito general — sus opciones integradas son inicio de sesión por sesión, autenticación básica OPDS y tokens de sincronización Kobo por usuario. Por tanto, la Opción B solo funciona si tu despliegue expone un token bearer (p. ej., un fork o un proxy inverso con autenticación delante de Calibre-Web). La instancia incluida en la Opción A viene preconfigurada y no necesita nada de esto.
-:::
+La integración se autentica con **autenticación básica OPDS** — una cuenta de usuario normal de Calibre-Web (Calibre-Web estándar no tiene claves de API). Usa una cuenta existente o crea una dedicada en **Admin → Users**.
 
 #### Paso 2: Agregar a Crow
 
@@ -55,8 +53,14 @@ Configura lo siguiente en tu archivo `.env` o vía **Crow's Nest** > **Ajustes**
 
 ```bash
 CALIBRE_WEB_URL=http://tu-calibre-web:8083
-CALIBRE_WEB_API_KEY=tu-clave-api-aqui
+CALIBRE_WEB_USERNAME=tu-usuario
+CALIBRE_WEB_PASSWORD=tu-contraseña
 ```
+
+::: info Dos acciones se quedan en la interfaz web
+Buscar, listar, ver detalles de libros, listar estantes y los enlaces de descarga funcionan por OPDS. Agregar un libro a un estante y cambiar el estado de lectura son rutas que en Calibre-Web estándar requieren sesión de navegador — la IA te indicará hacerlas en la interfaz web de Calibre-Web (solo funcionan de forma programática detrás de un proxy inverso con autenticación).
+:::
+
 
 ## Herramientas de IA
 
@@ -78,9 +82,9 @@ Una vez conectado, puedes interactuar con Calibre-Web a través de tu IA:
 
 Asegúrate de que la `CALIBRE_WEB_URL` sea accesible desde la máquina que ejecuta Crow. Si Calibre-Web está en otra máquina, usa la IP o el nombre de host correcto.
 
-### La clave de API no funciona
+### Falló la autenticación
 
-Asegúrate de haber copiado el token completo sin espacios en blanco adicionales, y de que tu despliegue de Calibre-Web realmente acepte tokens bearer (consulta la advertencia en la Opción B — Calibre-Web estándar no lo hace).
+Verifica `CALIBRE_WEB_USERNAME` y `CALIBRE_WEB_PASSWORD` — son las mismas credenciales con las que inicias sesión en la interfaz web de Calibre-Web. Si la cuenta usa un proveedor de autenticación externo (LDAP/OAuth), asegúrate de que también tenga una contraseña local que OPDS pueda aceptar.
 
 ### "metadata.db not found"
 

@@ -43,11 +43,9 @@ Calibre-Web will be available at `http://your-server:8083`. Create an initial ad
 
 If you already run a Calibre-Web instance, connect Crow to it directly.
 
-#### Step 1: Get a bearer token
+#### Step 1: Pick a Calibre-Web user
 
-::: warning Stock Calibre-Web has no API-key setting
-Crow's integration authenticates with a bearer token (`CALIBRE_WEB_API_KEY`), but the stock janeczku/calibre-web UI does not offer a general-purpose API key — its built-in options are session login, OPDS basic auth, and per-user Kobo sync tokens. Option B therefore works only if your deployment exposes a bearer token (e.g. a fork or an authenticating reverse proxy in front of Calibre-Web). The bundled instance from Option A is preconfigured and needs none of this.
-:::
+The integration authenticates with **OPDS Basic auth** — a normal Calibre-Web user account (stock Calibre-Web has no API keys). Use an existing account or create a dedicated one in **Admin → Users**.
 
 #### Step 2: Add to Crow
 
@@ -55,8 +53,13 @@ Set the following in your `.env` file or via **Crow's Nest** > **Settings** > **
 
 ```bash
 CALIBRE_WEB_URL=http://your-calibre-web:8083
-CALIBRE_WEB_API_KEY=your-api-key-here
+CALIBRE_WEB_USERNAME=your-user
+CALIBRE_WEB_PASSWORD=your-password
 ```
+
+::: info Two actions stay in the web UI
+Searching, listing, book details, shelf listing, and download links all work over OPDS. Adding a book to a shelf and setting reading status are session-only routes in stock Calibre-Web — the AI will tell you to do those in the Calibre-Web web UI (they work programmatically only behind an authenticating reverse proxy).
+:::
 
 ## AI Tools
 
@@ -78,9 +81,9 @@ Once connected, you can interact with Calibre-Web through your AI:
 
 Make sure the `CALIBRE_WEB_URL` is reachable from the machine running Crow. If Calibre-Web is on a different machine, use the correct IP or hostname.
 
-### API key not working
+### Authentication failed
 
-Make sure you copied the full token without extra whitespace, and that your Calibre-Web deployment actually accepts bearer tokens (see the warning under Option B — stock Calibre-Web does not).
+Check `CALIBRE_WEB_USERNAME` and `CALIBRE_WEB_PASSWORD` — they are the same credentials you use to log into the Calibre-Web web UI. If the account uses an external auth provider (LDAP/OAuth), make sure it also has a local password OPDS can accept.
 
 ### "metadata.db not found"
 
