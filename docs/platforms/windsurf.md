@@ -1,6 +1,6 @@
 # Windsurf
 
-Connect Crow to [Windsurf](https://codeium.com/windsurf), the AI-powered IDE by Codeium.
+Connect Crow to [Windsurf](https://devin.ai/desktop) — the AI-powered IDE originally by Codeium, now **Devin Desktop** by Cognition (existing Windsurf installs, plans, and settings carry over; the config paths below are unchanged).
 
 ## Option A: Local (stdio)
 

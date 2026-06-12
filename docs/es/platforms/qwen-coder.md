@@ -1,6 +1,6 @@
 # Qwen Coder CLI
 
-Conecta Crow a [Qwen Coder CLI](https://github.com/QwenLM/qwen-coder-cli), el asistente de programación para terminal del equipo Qwen de Alibaba.
+Conecta Crow a [Qwen Code](https://github.com/QwenLM/qwen-code) (antes conocido como Qwen Coder CLI), el agente de programación para terminal del equipo Qwen de Alibaba.
 
 ## Opción A: Local (stdio)
 

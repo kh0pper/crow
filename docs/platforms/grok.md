@@ -7,45 +7,38 @@ Connect Crow to xAI's Grok using its Remote MCP Tools support.
 - Crow gateway deployed and healthy ([Cloud Deploy Guide](../getting-started/cloud-deploy))
 - An xAI API account
 
-## Setup Steps
+Either path requires your Crow gateway to be reachable from the public internet (xAI's servers call it directly) — a Tailscale-only gateway won't work for Grok. Remember the [network-exposure rules](https://github.com/kh0pper/crow/blob/main/SECURITY.md#whats-public-by-default) before exposing MCP endpoints publicly.
 
-Grok supports remote MCP servers through its API. Configure Crow as a remote tool source:
+## Option A: grok.com Connectors (consumer UI)
 
-1. In your Grok/xAI configuration, add a remote MCP server:
-   ```json
-   {
-     "mcp_servers": [
-       {
-         "url": "https://your-crow-server/memory/mcp",
-         "name": "crow-memory"
-       },
-       {
-         "url": "https://your-crow-server/projects/mcp",
-         "name": "crow-projects"
-       },
-       {
-         "url": "https://your-crow-server/tools/mcp",
-         "name": "crow-tools"
-       }
-     ]
-   }
-   ```
+1. Go to **grok.com → Connectors → Custom** and add a custom MCP connector.
+2. Enter your Crow MCP server URL (e.g. `https://your-crow-server/router/mcp`).
+3. Complete the OAuth authorization when prompted — Crow's gateway supports the OAuth 2.1 flow Connectors uses.
 
-2. If using OAuth, the client will need to complete the authorization flow. If using bearer tokens, you can generate a token via the gateway's OAuth flow and pass it directly.
+## Option B: xAI API — Remote MCP Tools
+
+Declare Crow as an MCP entry in the `tools` array of your API request:
+
+```json
+{
+  "tools": [
+    {
+      "type": "mcp",
+      "server_url": "https://your-crow-server/router/mcp",
+      "server_label": "crow",
+      "authorization": "YOUR_ACCESS_TOKEN"
+    }
+  ]
+}
+```
+
+The `authorization` value is sent to Crow as a `Bearer` header. To mint a token, register a client via the gateway's `/register` endpoint and complete the OAuth flow to obtain an access token (see [OAuth 2.1](/architecture/gateway#oauth-2-1)). Optional fields: `server_description`, `allowed_tools`, `headers`.
 
 ## Transport
 
-- **Type**: Streamable HTTP
+- **Type**: Streamable HTTP (or SSE)
 - **Protocol**: `2025-03-26`
-- **Auth**: OAuth 2.1 or Bearer token
-
-## Using Bearer Tokens
-
-If your Grok client doesn't support OAuth discovery, you can:
-
-1. Register a client manually via the `/register` endpoint
-2. Complete the OAuth flow to get an access token
-3. Pass the token as a `Bearer` header in requests
+- **Auth**: OAuth 2.1 (Connectors) or Bearer via the `authorization` field (API)
 
 ## Cross-Platform Context
 

@@ -226,33 +226,20 @@ You don't have to choose — they work together:
 - Messages are sent to your chosen AI provider's API — they leave your machine
 - For fully local operation, use Ollama — nothing leaves your network
 
-## Semantic Search (Opt-in)
+## Semantic Search
 
-When an AI provider with embedding support is configured, Crow can enhance memory search with **semantic search** — finding memories based on meaning, not just keywords.
+When an embedding provider is configured, Crow enhances memory search with **semantic search** — finding memories based on meaning, not just keywords. It is on by default (`semantic: true`) and degrades gracefully: if the embedding provider is offline, search automatically falls back to full-text (FTS5) keyword search. No extra software needs to be installed.
 
 ### Requirements
 
-- An AI provider that supports embeddings (OpenAI, Ollama with nomic-embed-text, or Google)
-- The `sqlite-vec` SQLite extension installed on your system
-- Both are optional — Crow falls back to full-text search (FTS5) when either is missing
+- An embedding provider entry in `models.json` — any OpenAI-compatible embeddings endpoint works (a local vLLM/llama.cpp embedding model, Ollama with `nomic-embed-text`, or a cloud provider). Crow looks for a provider named `grackle-embed` by default.
+- That's it — embeddings are stored as plain BLOBs in the `memory_embeddings` table and compared in-process, which is plenty fast at personal-knowledge-base scale.
 
 ### How it works
 
-1. When you store a memory, Crow generates an embedding vector from the content
-2. The vector is stored in a `memory_embeddings` virtual table (powered by `sqlite-vec`)
-3. When you search with `semantic: true`, Crow compares your query's embedding against stored vectors
-4. Results from semantic and keyword search are merged for the best of both approaches
-
-### Installing sqlite-vec
-
-On Debian/Ubuntu:
-```bash
-sudo apt install sqlite3-vec
-```
-
-Or install from source: [sqlite-vec on GitHub](https://github.com/asg017/sqlite-vec)
-
-After installing, run `npm run init-db` to create the vector table.
+1. When you store a memory, Crow generates an embedding vector from the content (asynchronously — storing never blocks on it)
+2. The vector is stored in the `memory_embeddings` table
+3. When you search, Crow compares your query's embedding against stored vectors and merges the results with keyword search for the best of both approaches
 
 ## LocalAI Bundle
 
