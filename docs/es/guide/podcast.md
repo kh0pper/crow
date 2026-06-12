@@ -126,7 +126,7 @@ El feed incluye el [espacio de nombres de podcast de iTunes](https://podcasters.
 
 - **Apple Podcasts** — Envía la URL de tu feed en [podcastsconnect.apple.com](https://podcastsconnect.apple.com)
 - **Spotify** — Envíala en [podcasters.spotify.com](https://podcasters.spotify.com)
-- **Google Podcasts**, **Pocket Casts**, **Overcast** y cualquier otra app que acepte RSS
+- **YouTube Music** (envía tu feed RSS mediante YouTube Studio), **Pocket Casts**, **Overcast** y cualquier otra app que acepte RSS
 
 El feed incluye:
 

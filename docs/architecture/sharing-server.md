@@ -195,7 +195,7 @@ The server registers **33 tools**, organized into nine modules under `servers/sh
 ### Relay Security
 
 - Relays only accept requests signed by known contacts
-- Rate limiting: configurable max requests per contact per hour
+- Pending-blob quota: at most 100 stored blobs per contact
 - Storage quotas: configurable max storage per contact
 - Blobs expire after TTL (30-day default)
 

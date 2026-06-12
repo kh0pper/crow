@@ -195,7 +195,7 @@ El servidor registra **33 herramientas**, organizadas en nueve módulos bajo `se
 ### Seguridad del relay
 
 - Los relays solo aceptan solicitudes firmadas por contactos conocidos
-- Límite de tasa: máximo configurable de solicitudes por contacto por hora
+- Cuota de blobs pendientes: máximo 100 blobs almacenados por contacto
 - Cuotas de almacenamiento: máximo configurable de almacenamiento por contacto
 - Los blobs expiran tras el TTL (30 días por defecto)
 

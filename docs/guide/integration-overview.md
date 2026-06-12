@@ -129,7 +129,7 @@ When a peer is offline, messages and shares can be held by an opt-in peer relay 
 | Team collaboration on Discord | Native Bots (Bot Builder) |
 | Code project with AI assistance | External MCP via Cursor or Claude Code |
 | Fully local, no cloud AI | BYOAI Chat with Ollama |
-| Access from multiple chat apps | Native Bots (Discord + WhatsApp + Telegram) |
+| Access from multiple chat apps | Native Bots (Discord, Telegram, Slack, Gmail) |
 | Automated household management | Native Bots with skills |
 | All of the above, simultaneously | All three — they share one database |
 

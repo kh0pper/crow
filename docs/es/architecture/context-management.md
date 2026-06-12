@@ -143,7 +143,7 @@ Para despliegues stdio, `servers/core/` proporciona un único servidor MCP que a
 
 1. Todos los servidores se conectan vía `InMemoryTransport` y sus herramientas se registran en el `McpServer` core
 2. Solo las herramientas del servidor predeterminado quedan habilitadas; todas las demás quedan registradas pero deshabilitadas
-3. La IA ve 15 herramientas al arrancar: 12 herramientas de memoria + 3 herramientas de gestión
+3. La IA ve 27 herramientas al arrancar: las 24 herramientas del servidor de memoria + 3 herramientas de gestión
 4. Llamar `crow_activate_server("projects")` cambia las herramientas registradas a habilitadas y dispara una notificación `toolListChanged`
 5. El cliente de IA vuelve a obtener la lista de herramientas y ve las recién disponibles
 
