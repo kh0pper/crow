@@ -284,7 +284,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       // onto the gateway record.
       let devices = [];
       try {
-        const { listDevices } = await import("../../../../bundles/meta-glasses/server/device-store.js");
+        const { listDevices } = await import("../../../../../bundles/meta-glasses/server/device-store.js");
         devices = await listDevices(db).catch(() => []);
       } catch { devices = []; }
       const selDev = devices.find((d) => String(d.id) === String(gw.device_id || "")) || null;
@@ -323,7 +323,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       // the voice tool set rather than advertised as unrunnable).
       let noVoiceWarn = "";
       try {
-        const { voiceUnavailableSelections } = await import("../../ai/tool-executor.js");
+        const { voiceUnavailableSelections } = await import("../../../ai/tool-executor.js");
         const unavailable = voiceUnavailableSelections(def);
         if (unavailable.length) {
           noVoiceWarn =
@@ -354,7 +354,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       // configured per device here — see the AI tab / docs/architecture/companion.md.
       let devices = [];
       try {
-        const { listDevices } = await import("../../../../bundles/meta-glasses/server/device-store.js");
+        const { listDevices } = await import("../../../../../bundles/meta-glasses/server/device-store.js");
         // Any paired device can be bound as a companion kiosk; binding tags it
         // device_kind:"companion". Show all so a fresh device can be claimed.
         devices = await listDevices(db).catch(() => []);
