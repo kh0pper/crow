@@ -195,20 +195,105 @@ function executeOne(db, sql, rawArgs) {
  * Holding one never-closed keeper per DB path guarantees there's always
  * another reader registered in the WAL index, so close() on transient
  * clients can't drop the count to zero.
+ *
+ * Keeper registration is result-read-based: ensureKeeper registers ONLY when
+ * the post-attempt mode read shows 'wal'. Non-WAL DBs don't get a keeper (no
+ * fd waste; removes the deleted-wal-fd hazard for DELETE-mode hosts).
  */
+
+import os from "node:os";
+
 const VALID_JOURNAL_MODES = new Set(["WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "OFF"]);
-function resolveJournalMode() {
-  const raw = (process.env.CROW_JOURNAL_MODE || "WAL").toUpperCase();
-  return VALID_JOURNAL_MODES.has(raw) ? raw : "WAL";
+
+/**
+ * Module-level totalmem probe. Injectable for tests:
+ *   set CROW_TEST_TOTALMEM=<bytes> env before importing, OR
+ *   assign db._setTotalmemFn(fn) in tests (see export below).
+ */
+let _totalmemFn = os.totalmem;
+export function _setTotalmemFn(fn) { _totalmemFn = fn; }
+
+// Dedup-log sets: one warn per (filePath, requestedMode) per process.
+const _modeWarnedPaths = new Set(); // "path::mode"
+const _failedFlipPaths = new Set(); // "path::mode" — skip flip on repeat attempts
+
+// Dedup-log set for auto-SELECT decision (logged once per process).
+let _autoSelectLogged = false;
+
+/**
+ * Resolve the journal mode to request.
+ *
+ * Priority:
+ *   1. CROW_JOURNAL_MODE env (explicit override — always wins).
+ *   2. Low-RAM auto-select: totalmem ≤ CROW_WAL_MIN_RAM_GB → "DELETE".
+ *   3. Default: "WAL".
+ *
+ * CROW_TEST_TOTALMEM env overrides totalmem() for test isolation (set before
+ * import, or use _setTotalmemFn() for in-process injection).
+ */
+export function resolveJournalMode() {
+  if (process.env.CROW_JOURNAL_MODE) {
+    const raw = process.env.CROW_JOURNAL_MODE.toUpperCase();
+    return VALID_JOURNAL_MODES.has(raw) ? raw : "WAL";
+  }
+
+  // Low-RAM auto-select: ≤ CROW_WAL_MIN_RAM_GB GiB → DELETE.
+  // A nominal-2GB host reports slightly under 2 GiB; <= catches it.
+  const minRamGb = parseFloat(process.env.CROW_WAL_MIN_RAM_GB || "2");
+  const totalMem = process.env.CROW_TEST_TOTALMEM
+    ? parseInt(process.env.CROW_TEST_TOTALMEM, 10)
+    : _totalmemFn();
+  const totalGb = totalMem / (1024 ** 3);
+
+  if (totalGb <= minRamGb) {
+    if (!_autoSelectLogged) {
+      _autoSelectLogged = true;
+      console.warn(
+        `[db] Low-RAM host (${totalGb.toFixed(2)} GiB ≤ ${minRamGb} GiB threshold) — ` +
+        `auto-selecting journal_mode=DELETE. Set CROW_JOURNAL_MODE=WAL to override.`
+      );
+    }
+    return "DELETE";
+  }
+
+  return "WAL";
 }
 
-const _dbKeepers = new Map();
-function ensureKeeper(filePath) {
+export const _dbKeepers = new Map();
+
+/**
+ * Ensure a WAL-mode keeper handle exists for filePath.
+ *
+ * Registration is RESULT-READ-BASED: we register the keeper only when the
+ * DB is actually in WAL mode. On non-WAL DBs: close and don't register
+ * (saves the fd; removes the deleted-wal-fd hazard on DELETE-mode hosts).
+ *
+ * Must be called AFTER the client's own pragma resolution in createDbClient
+ * so the read reflects the mode the client actually ended up in.
+ *
+ * @param {string} filePath - Absolute path to the SQLite file.
+ * @param {string} requestedMode - The mode that was requested (for context).
+ */
+function ensureKeeper(filePath, requestedMode) {
   if (_dbKeepers.has(filePath)) return;
   const keeper = new Database(filePath);
-  try { keeper.pragma(`journal_mode = ${resolveJournalMode()}`); } catch {}
-  try { keeper.pragma("busy_timeout = 30000"); } catch {}
-  _dbKeepers.set(filePath, keeper);
+  const actualMode = (() => {
+    try { return keeper.pragma("journal_mode", { simple: true }); } catch { return null; }
+  })();
+  if (typeof actualMode === "string" && actualMode.toLowerCase() === "wal") {
+    try { keeper.pragma("busy_timeout = 30000"); } catch {}
+    _dbKeepers.set(filePath, keeper);
+  } else {
+    // Non-WAL or unreadable — close without registering.
+    try { keeper.close(); } catch {}
+    const warnKey = `${filePath}::keeper-skip`;
+    if (!_modeWarnedPaths.has(warnKey)) {
+      _modeWarnedPaths.add(warnKey);
+      console.warn(
+        `[db] keeper-skip for ${filePath}: mode is '${actualMode}' (requested '${requestedMode}') — no WAL keeper registered`
+      );
+    }
+  }
 }
 
 /**
@@ -220,24 +305,76 @@ function ensureKeeper(filePath) {
  * The async signatures are retained; the underlying work is synchronous
  * because better-sqlite3 is synchronous, but promise-returning keeps
  * callers that use await correct.
+ *
+ * Journal mode handling (read-first, deduped, non-fatal):
+ *   1. READ the current mode (lock-free, no SQLITE_BUSY risk).
+ *   2. Skip the flip if already at the requested mode.
+ *   3. Attempt the flip only when modes differ AND no prior failed attempt
+ *      for this (path, mode) pair in this process (failed-attempt memo prevents
+ *      repeat 5s event-loop stalls on a locked DB during a boot storm).
+ *   4. On throw OR post-flip mismatch: dedup-log once per (path, requestedMode)
+ *      and continue — accept the current mode rather than crashing.
+ *   5. busy_timeout 30000 explicit set stays (unchanged from prior behavior).
  */
 export function createDbClient(dbPath) {
   const filePath = dbPath || process.env.CROW_DB_PATH || resolve(resolveDataDir(), "crow.db");
 
-  ensureKeeper(filePath);
-
   const db = new Database(filePath);
+  const requestedMode = resolveJournalMode();
+
+  // Read-first: lock-free, no SQLITE_BUSY risk.
+  let currentMode = null;
   try {
-    const mode = resolveJournalMode();
-    db.pragma(`journal_mode = ${mode}`);
-  } catch (err) {
-    console.warn("[db] Failed to set journal_mode:", err.message);
+    currentMode = db.pragma("journal_mode", { simple: true });
+  } catch {
+    // Unreadable — proceed to attempt flip anyway.
   }
+
+  const modeKey = `${filePath}::${requestedMode}`;
+  const needsFlip = typeof currentMode === "string"
+    ? currentMode.toLowerCase() !== requestedMode.toLowerCase()
+    : true; // unreadable current mode → attempt flip
+
+  if (needsFlip && !_failedFlipPaths.has(modeKey)) {
+    try {
+      db.pragma(`journal_mode = ${requestedMode}`);
+      // Re-read to confirm.
+      const resultMode = db.pragma("journal_mode", { simple: true });
+      if (typeof resultMode === "string" && resultMode.toLowerCase() !== requestedMode.toLowerCase()) {
+        // Mode mismatch after flip (DB declined — common when another writer holds it).
+        if (!_modeWarnedPaths.has(modeKey)) {
+          _modeWarnedPaths.add(modeKey);
+          console.warn(
+            `[db] journal_mode flip to '${requestedMode}' declined for ${filePath} — ` +
+            `DB is in '${resultMode}' mode. Continuing with current mode.`
+          );
+        }
+        _failedFlipPaths.add(modeKey);
+      }
+    } catch (err) {
+      // SQLITE_BUSY or other error — re-read actual mode and dedup-log.
+      let actualMode = null;
+      try { actualMode = db.pragma("journal_mode", { simple: true }); } catch {}
+      if (!_modeWarnedPaths.has(modeKey)) {
+        _modeWarnedPaths.add(modeKey);
+        console.warn(
+          `[db] journal_mode flip to '${requestedMode}' failed for ${filePath} ` +
+          `(${err.message}) — DB is in '${actualMode}' mode. Continuing with current mode.`
+        );
+      }
+      _failedFlipPaths.add(modeKey); // don't retry; prevents repeat 5s event-loop stalls
+    }
+  }
+
   try {
     db.pragma("busy_timeout = 30000");
   } catch (err) {
     console.warn("[db] Failed to set busy_timeout:", err.message);
   }
+
+  // ensureKeeper AFTER pragma resolution (spec requirement: C4/keeper hygiene).
+  // Registers keeper only when the DB is actually in WAL mode.
+  ensureKeeper(filePath, requestedMode);
 
   return {
     async execute(arg) {
@@ -272,10 +409,23 @@ export function createDbClient(dbPath) {
  *
  * Returns { totalPages, remainingPages } from better-sqlite3, so callers
  * can confirm completion.
+ *
+ * C5 fallback: if no keeper is registered (e.g. DELETE-mode host where
+ * ensureKeeper skipped registration), open a transient handle, run the
+ * backup, then close it. This is safe on DELETE-mode DBs (the never-open-
+ * externally hazard in WAL mode doesn't apply to DELETE/TRUNCATE/PERSIST).
  */
 export async function performBackup(dbPath, destPath) {
   const filePath = dbPath || process.env.CROW_DB_PATH || resolve(resolveDataDir(), "crow.db");
-  ensureKeeper(filePath);
   const keeper = _dbKeepers.get(filePath);
-  return keeper.backup(destPath);
+  if (keeper) {
+    return keeper.backup(destPath);
+  }
+  // C5: transient-handle fallback for non-WAL hosts.
+  const transient = new Database(filePath);
+  try {
+    return await transient.backup(destPath);
+  } finally {
+    try { transient.close(); } catch {}
+  }
 }
