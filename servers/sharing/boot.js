@@ -531,11 +531,17 @@ export async function initSharingRuntime(managers, helpers) {
           });
           importedItemId = Number(result.lastInsertRowid);
         } else if (payload.share_type === "source") {
+          // S4: cap peer-controlled title at 1000 chars — title is FTS5-indexed
+          // (research_sources_fts trigger in init-db.js) and is peer-supplied.
+          const rawTitle = payload.payload.title || "Shared source";
+          const cappedTitle = typeof rawTitle === "string" && rawTitle.length > 1000
+            ? rawTitle.slice(0, 1000)
+            : rawTitle;
           const result = await db.execute({
             sql: `INSERT INTO research_sources (project_id, title, url, source_type, citation, notes)
                   VALUES (NULL, ?, ?, ?, ?, ?)`,
             args: [
-              payload.payload.title || "Shared source",
+              cappedTitle,
               payload.payload.url || "",
               payload.payload.source_type || "other",
               payload.payload.citation || "",

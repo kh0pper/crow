@@ -13,6 +13,7 @@ const CHECK_INTERVAL_MS = 60 * 1000; // Check every 60 seconds
 
 let timer = null;
 let db = null;
+let _started = false; // Guard: prevents orphaned duplicate intervals from a second startScheduler() call.
 
 /**
  * Phase 3 helper: push a TTS message to glasses if the operator opted in
@@ -197,8 +198,15 @@ async function tick() {
 
 /**
  * Start the scheduler. Call after gateway is listening.
+ * A second call while already started warns and returns — prevents orphaned
+ * duplicate intervals (stopScheduler resets the guard).
  */
 export async function startScheduler(database) {
+  if (_started) {
+    console.warn("[scheduler] startScheduler called while already running — ignoring duplicate call");
+    return;
+  }
+  _started = true;
   db = database;
 
   // Compute next_run for all enabled schedules on startup. Skip
@@ -238,11 +246,13 @@ export async function startScheduler(database) {
 }
 
 /**
- * Stop the scheduler.
+ * Stop the scheduler. Resets the started flag so startScheduler can be called
+ * again (e.g. after a graceful shutdown + restart in tests or process reuse).
  */
 export function stopScheduler() {
   if (timer) {
     clearInterval(timer);
     timer = null;
   }
+  _started = false;
 }

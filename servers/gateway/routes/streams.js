@@ -40,7 +40,9 @@ export default function streamsRouter(dashboardAuth) {
   // count`. Fallback polling at 5 min (see shared/notifications.js)
   // stays in place as a safety net for transient SSE drops.
   router.get("/dashboard/streams/notifications", (req, res) => {
-    const { sendRaw } = openAuthedStream(req, res);
+    const stream = openAuthedStream(req, res);
+    if (!stream) return;
+    const { sendRaw } = stream;
 
     const handler = (payload) => {
       try {
@@ -74,7 +76,9 @@ export default function streamsRouter(dashboardAuth) {
   // stay untouched. Badge-only here; message-body live updates are
   // deferred to a later plan.
   router.get("/dashboard/streams/messages", (req, res) => {
-    const { sendRaw } = openAuthedStream(req, res);
+    const stream = openAuthedStream(req, res);
+    if (!stream) return;
+    const { sendRaw } = stream;
 
     const handler = (payload) => {
       try {
@@ -118,7 +122,9 @@ export default function streamsRouter(dashboardAuth) {
   // Filtered views (?run=...) do NOT mount a stream source; they rely
   // on the 5-min reload fallback.
   router.get("/dashboard/streams/orchestrator", (req, res) => {
-    const { sendRaw } = openAuthedStream(req, res);
+    const stream = openAuthedStream(req, res);
+    if (!stream) return;
+    const { sendRaw } = stream;
 
     const handler = (payload) => {
       try {
@@ -182,7 +188,9 @@ export default function streamsRouter(dashboardAuth) {
   //
   // Fallback poll in player.js keeps running at 5 min as a safety net.
   router.get("/dashboard/streams/glasses", (req, res) => {
-    const { send } = openAuthedStream(req, res);
+    const stream = openAuthedStream(req, res);
+    if (!stream) return;
+    const { send } = stream;
 
     const handler = (payload) => {
       try {
@@ -212,7 +220,9 @@ export default function streamsRouter(dashboardAuth) {
   // install) and narrowly scoped so we don't need per-job filtering
   // on the server — the client picks out its own job by id.
   router.get("/dashboard/streams/jobs", (req, res) => {
-    const { send } = openAuthedStream(req, res);
+    const stream = openAuthedStream(req, res);
+    if (!stream) return;
+    const { send } = stream;
 
     const handler = (payload) => {
       try {
@@ -248,7 +258,9 @@ export default function streamsRouter(dashboardAuth) {
   // closed on teardown. Defensive: bot_sessions is absent on the primary
   // gateway's crow.db, so a failed query just emits nothing that tick.
   router.get("/dashboard/streams/bot-sessions", (req, res) => {
-    const { sendRaw } = openAuthedStream(req, res);
+    const stream = openAuthedStream(req, res);
+    if (!stream) return;
+    const { sendRaw } = stream;
     let db;
     try {
       db = createDbClient();
@@ -336,7 +348,9 @@ export default function streamsRouter(dashboardAuth) {
   // primary gateway the tables are absent, so the first tick errors, is
   // swallowed (stderr-only), the last snapshot is kept, the stream stays up.
   router.get("/dashboard/streams/bot-board", async (req, res) => {
-    const { sendRaw } = openAuthedStream(req, res);
+    const stream = openAuthedStream(req, res);
+    if (!stream) return;
+    const { sendRaw } = stream;
     const TASKS_DB = process.env.CROW_TASKS_DB_PATH || "/home/kh0pp/.crow-mpa/data/tasks.db";
     const LOCK = new Set(["active", "waiting-user"]);
 

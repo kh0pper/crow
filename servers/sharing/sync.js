@@ -177,6 +177,45 @@ export class SyncManager {
   }
 
   /**
+   * Close feeds for a single contact and remove them from the Maps.
+   *
+   * Serialized through the _initLocks tail so close cannot interleave with a
+   * concurrent initContact call for the same contactId. Hypercore close is safe
+   * and the on-disk storage persists; the next initContact call will reopen.
+   *
+   * NOTE: UNBLOCKING a contact does NOT re-init feeds — no lazy re-init path
+   * exists for contacts. A restart or re-invite is needed to reopen feeds after
+   * an unblock. This is intentional; do NOT add re-init here.
+   */
+  async closeContactFeeds(contactId) {
+    const prior = this._initLocks.get(contactId) || Promise.resolve();
+    const next = prior
+      .catch(() => {})
+      .then(() => this._closeContactFeedsInner(contactId));
+    this._initLocks.set(contactId, next);
+    try {
+      return await next;
+    } finally {
+      if (this._initLocks.get(contactId) === next) {
+        this._initLocks.delete(contactId);
+      }
+    }
+  }
+
+  async _closeContactFeedsInner(contactId) {
+    const outFeed = this.outFeeds.get(contactId);
+    if (outFeed) {
+      try { await outFeed.close(); } catch {}
+      this.outFeeds.delete(contactId);
+    }
+    const inFeed = this.inFeeds.get(contactId);
+    if (inFeed) {
+      try { await inFeed.close(); } catch {}
+      this.inFeeds.delete(contactId);
+    }
+  }
+
+  /**
    * Close all feeds.
    */
   async destroy() {
