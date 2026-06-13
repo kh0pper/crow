@@ -137,7 +137,7 @@ export default {
     // Collect health signals (30s cached; fails gracefully to null if throws)
     let healthSignals = null;
     try {
-      healthSignals = await collectHealthSignals(db);
+      healthSignals = await collectHealthSignals(db, { lang });
     } catch {}
 
     // Flash param from post-backup redirect
