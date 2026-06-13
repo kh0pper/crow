@@ -23,7 +23,7 @@ studio-display → "Aide"  (avatar B · voz B · social activado)
 
 Vincula un dispositivo en la pestaña **Gateways** del bot → tipo **Compañero de IA**:
 
-1. **Dispositivo emparejado** — elige el dispositivo kiosco (los dispositivos se emparejan en el panel de Lentes Meta; los kioscos reutilizan ese almacén, etiquetados con `device_kind:"companion"`).
+1. **Dispositivo emparejado** — elige el dispositivo kiosco, o simplemente **escribe un nombre** en el campo "…o empareja un quiosco nuevo" y pulsa Guardar: Crow crea y conecta el dispositivo por ti en un solo paso (sin necesidad del bundle de Lentes Meta). Los dispositivos emparejados en el panel de Lentes Meta también aparecen aquí; los kioscos reutilizan ese almacén, etiquetados con `device_kind:"companion"`.
 2. **Avatar** — el modelo Live2D que se renderiza para este kiosco.
 3. **Estilo de escucha** — pulsar para hablar, palabra de activación o escucha permanente.
 4. **Tiempo de inactividad de voz** — segundos de silencio antes de la animación de mascota/inactividad.
