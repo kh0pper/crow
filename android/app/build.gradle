@@ -14,8 +14,15 @@ android {
         //   - Meta Wearables DAT SDK (mwdat-*) targets API 34+
         minSdk 34
         targetSdk 34
-        versionCode 16
-        versionName "1.4.11"
+        versionCode 17
+        versionName "1.5.0"
+    }
+
+    // VERSION_NAME is exposed via BuildConfig so the WebView UA + appVersion()
+    // bridge always track versionName instead of drifting (they were stuck at
+    // "1.4.0" while versionName advanced to 1.4.11). W3.
+    buildFeatures {
+        buildConfig true
     }
 
     signingConfigs {
