@@ -256,7 +256,7 @@ public class MainActivity extends AppCompatActivity {
         settings.setDatabaseEnabled(true);
         settings.setAllowFileAccess(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
-        settings.setUserAgentString(settings.getUserAgentString() + " CrowAndroid/1.4.0");
+        settings.setUserAgentString(settings.getUserAgentString() + " CrowAndroid/" + BuildConfig.VERSION_NAME);
 
         webView.setWebViewClient(new CrowWebViewClient(this));
         webView.setWebChromeClient(new CrowWebChromeClient(this));
@@ -275,7 +275,7 @@ public class MainActivity extends AppCompatActivity {
         /** Version advertised to panels for capability gating. */
         @JavascriptInterface
         public String appVersion() {
-            return "1.4.0";
+            return BuildConfig.VERSION_NAME;
         }
 
         /** Launch the Meta Glasses pairing UI. Called by the meta-glasses panel. */
