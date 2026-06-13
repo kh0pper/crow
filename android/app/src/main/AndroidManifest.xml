@@ -29,11 +29,13 @@
 
         <!--
             Meta Wearables DAT credentials for the "Crow Glasses Integration"
-            project (Meta Wearables Developer Center). As of 2026-04-14 these
-            work for BOTH debug and release builds: Meta Dev Center has both
-            keystore signatures linked to this single APPLICATION_ID.
+            project (Meta Wearables Developer Center), linked to this APPLICATION_ID.
               debug   SHA-256 base64url: StBwV5kRyRhPUuOKtJIGTd8aicyUoFwsXXig8G2sZWs
-              release SHA-256 base64url: vdssZL6KvS4knCnYGwuEa9EPKZ_F56mn6rSisclZPTI
+              release SHA-256 base64url: 3MK2d2JSiwAqIL2JpLCCUFABxIk-Dql7-mc48RNFMH0
+            2026-06-13 (W3): the original release keystore's password was lost, so a
+            NEW release key was generated (above). Its fingerprint MUST be registered
+            at Meta Dev Center for glasses to work on release builds. The old release
+            fingerprint (vdssZL6KvS4knCnYGwuEa9EPKZ_F56mn6rSisclZPTI) is retired.
             Package name: press.maestro.crow.
         -->
         <meta-data
