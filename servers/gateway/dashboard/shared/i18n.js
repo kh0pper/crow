@@ -162,6 +162,41 @@ export const translations = {
   "health.runningStatus": { en: "Running", es: "En ejecución" },
   "health.stoppedStatus": { en: "Stopped", es: "Detenido" },
 
+  // ── Security-maintenance health signals (W2) — plain language, no jargon ──
+  // logins
+  "signals.logins.label": { en: "Sign-ins", es: "Inicios de sesión" },
+  "signals.logins.none": { en: "no failed attempts", es: "sin intentos fallidos" },
+  "signals.logins.count": { en: "{n} failed in 24h", es: "{n} fallidos en 24h" },
+  "signals.logins.some": { en: "{n} failed sign-in attempts in the last day", es: "{n} intentos fallidos de inicio de sesión en el último día" },
+  "signals.logins.storm": { en: "Someone tried to sign in {n} times in the last day and was blocked", es: "Alguien intentó iniciar sesión {n} veces en el último día y fue bloqueado" },
+  "signals.logins.action": { en: "Add extra sign-in protection", es: "Añadir protección extra al inicio de sesión" },
+  "signals.logins.notifTitle": { en: "Someone tried to sign in {n} times and was blocked", es: "Alguien intentó iniciar sesión {n} veces y fue bloqueado" },
+  "signals.logins.notifBody": { en: "Your Crow blocked them for 15 minutes. Consider turning on two-step sign-in.", es: "Tu Crow los bloqueó durante 15 minutos. Considera activar la verificación en dos pasos." },
+  // exposure
+  "signals.exposure.label": { en: "Privacy", es: "Privacidad" },
+  "signals.exposure.private": { en: "private", es: "privado" },
+  "signals.exposure.open": { en: "check needed", es: "necesita revisión" },
+  "signals.exposure.public": { en: "Your Crow dashboard is open to the whole internet. If you didn't mean to do this, remove CROW_DASHBOARD_PUBLIC from your settings.", es: "Tu panel de Crow está abierto a todo internet. Si no era tu intención, elimina CROW_DASHBOARD_PUBLIC de tu configuración." },
+  "signals.exposure.noauth": { en: "The password requirement is turned off", es: "El requisito de contraseña está desactivado" },
+  "signals.exposure.csrf": { en: "A protection against request forgery is turned off", es: "Una protección contra la falsificación de solicitudes está desactivada" },
+  "signals.exposure.funnel": { en: "More of this Crow is shared to the internet than expected", es: "Se comparte más de este Crow en internet de lo esperado" },
+  "signals.exposure.action": { en: "Review access", es: "Revisar acceso" },
+  // integrations
+  "signals.integrations.label": { en: "Connections", es: "Conexiones" },
+  "signals.integrations.ok": { en: "all working", es: "todo funciona" },
+  "signals.integrations.broken": { en: "{n} need attention", es: "{n} necesitan atención" },
+  "signals.integrations.issue": { en: "The connection to {name} has stopped working — it may need a new sign-in", es: "La conexión con {name} ha dejado de funcionar — puede necesitar un nuevo inicio de sesión" },
+  "signals.integrations.maybe": { en: "The connection to {name} may need re-connecting", es: "La conexión con {name} puede necesitar volver a conectarse" },
+  "signals.integrations.action": { en: "Check connections", es: "Revisar conexiones" },
+  // backup
+  "signals.backup.label": { en: "Backup", es: "Copia de seguridad" },
+  "signals.backup.verified": { en: "checked ✓", es: "verificada ✓" },
+  "signals.backup.damaged": { en: "may be damaged", es: "puede estar dañada" },
+  "signals.backup.damagedIssue": { en: "Your latest backup may be damaged — make a new backup now", es: "Tu última copia de seguridad puede estar dañada — haz una copia nueva ahora" },
+  "signals.backup.unverifiedIssue": { en: "Your latest backup hasn't been checked yet — run a backup to check it", es: "Tu última copia aún no ha sido comprobada — haz una copia para comprobarla" },
+  "signals.backup.neverIssue": { en: "Backups aren't set up yet", es: "Las copias de seguridad aún no están configuradas" },
+  "signals.backup.staleIssue": { en: "Last backup was {n} days ago", es: "La última copia de seguridad fue hace {n} días" },
+
   // ─── Nest Panel ───
   "nest.pinned": { en: "Pinned", es: "Fijados" },
   "nest.instances": { en: "Instances", es: "Instancias" },
