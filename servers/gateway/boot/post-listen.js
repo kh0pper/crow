@@ -172,7 +172,7 @@ export async function runPostListenSetup(server, app, deps) {
     const HEALTH_MONITOR_INTERVAL_MS   = 15 * 60 * 1000;  // 15 min
     const runHealthMonitorCycle = async () => {
       try {
-        const { collectHealthSignals, shouldNotify, invalidateHealthCache } =
+        const { collectHealthSignals, shouldNotify, invalidateHealthCache, pruneResolved } =
           await import("../dashboard/panels/nest/health-signals.js");
         const { createNotification } = await import("../../shared/notifications.js");
         const { readSetting } = await import("../dashboard/settings/registry.js");
@@ -212,6 +212,17 @@ export async function runPostListenSetup(server, app, deps) {
             } catch (notifErr) {
               console.warn(`[health-monitor] notification failed for ${issue.id}:`, notifErr.message);
             }
+          }
+
+          // Incident-scoped dedupe: drop markers for issues no longer present
+          // (warn OR info), so a resolved-then-recurring issue notifies again
+          // instead of staying silent under the 24h window. A warn→info
+          // downgrade keeps the marker (id still active = same incident).
+          const activeIds = signals.issues.map(i => i.id);
+          const pruned = pruneResolved(lastMap, activeIds);
+          if (Object.keys(pruned).length !== Object.keys(lastMap).length) {
+            lastMap = pruned;
+            mapDirty = true;
           }
 
           if (mapDirty) {
