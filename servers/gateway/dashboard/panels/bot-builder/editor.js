@@ -374,7 +374,13 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       gwFields =
         `<div class="btb-group"><label>${t("botbuilder.gwLabelPairedKiosk", lang)}</label>` +
         `<select name="gw_device_id" class="btb-select">${devOpts}</select></div>` +
-        (devices.length ? "" : `<p class="btb-hint">No paired devices yet. Pair a kiosk/companion device first (Meta Glasses panel pairs devices; kiosks reuse that store).</p>`) +
+        // One-step kiosk creation: type a name, hit Save, and the handler
+        // pairs a companion-kind device and binds it — no Meta Glasses
+        // bundle needed (the pairing UI used to live only in that panel,
+        // which dead-ended companion-only installs).
+        `<div class="btb-group"><label>${t("botbuilder.gwLabelNewKiosk", lang)}</label>` +
+        `<input type="text" name="gw_new_kiosk_name" class="btb-input" placeholder="${escapeHtml(t("botbuilder.gwPlaceholderNewKiosk", lang))}"></div>` +
+        `<p class="btb-hint">${t("botbuilder.gwHintNewKiosk", lang)}</p>` +
         `<div class="btb-group"><label>${t("botbuilder.gwLabelAvatarModel", lang)}</label>` +
         `<input type="text" name="gw_avatar_model" class="btb-input" value="${escapeHtml(cf.avatar_model || "")}"></div>` +
         `<div class="btb-group"><label>${t("botbuilder.gwLabelHearingStyle", lang)}</label>` +
