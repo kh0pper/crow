@@ -93,8 +93,13 @@ export function actionBar(buttons) {
  */
 export function section(title, content, opts = {}) {
   const delay = opts.delay || 0;
+  // opts.titleHtml: raw heading-HTML escape hatch for callers that need
+  // markup in the heading (e.g. a status badge). When set, `title` is
+  // ignored and the CALLER must escape all user-controlled text inside.
+  // The default path stays fully escaped.
+  const heading = opts.titleHtml != null ? opts.titleHtml : escapeHtml(title);
   return `<div class="card" style="margin-bottom:var(--crow-space-5);animation-delay:${delay}ms">
-  <h3 style="font-family:'Fraunces',serif;font-size:1.1rem;margin-bottom:var(--crow-space-4);padding-bottom:0.5rem;border-bottom:1px solid var(--crow-border)">${escapeHtml(title)}</h3>
+  <h3 style="font-family:'Fraunces',serif;font-size:1.1rem;margin-bottom:var(--crow-space-4);padding-bottom:0.5rem;border-bottom:1px solid var(--crow-border)">${heading}</h3>
   ${content}
 </div>`;
 }
