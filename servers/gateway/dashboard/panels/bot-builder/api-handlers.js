@@ -212,7 +212,25 @@ export async function handleBotBuilderPost(req, res, { db }) {
         // stores per-device companion_features that drive the kiosk UI.
         // The model pair (fast 4B -> 35B) is global (the model proxy), not
         // per device — see docs/architecture/companion.md.
-        const deviceId = (b.gw_device_id || "").trim();
+        let deviceId = (b.gw_device_id || "").trim();
+        // One-step kiosk creation: a typed name (and no selected device)
+        // pairs a fresh companion-kind device right here, so a host with
+        // the companion bundle but NOT meta-glasses (whose panel used to be
+        // the only pairing UI) still works out of the box.
+        const newKioskName = (b.gw_new_kiosk_name || "").trim();
+        if (!deviceId && newKioskName) {
+          try {
+            const { listDevices, pairDevice } = await import("../../../../../bundles/meta-glasses/server/device-store.js");
+            const baseId = ("kiosk-" + newKioskName.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40)).replace(/-$/, "") || "kiosk";
+            const taken = new Set((await listDevices(db).catch(() => [])).map((d) => String(d.id)));
+            let newId = baseId;
+            for (let n = 2; taken.has(newId); n++) newId = `${baseId}-${n}`;
+            await pairDevice(db, { id: newId, name: newKioskName, generation: "unknown", device_kind: "companion" });
+            deviceId = newId;
+          } catch (err) {
+            extraQ = "&warn=" + encodeURIComponent("could not create kiosk device: " + err.message);
+          }
+        }
         const features = {
           avatar_model: (b.gw_avatar_model || "").trim() || undefined,
           avatar_animation: b.gw_avatar_animation === "on" || b.gw_avatar_animation === "true",

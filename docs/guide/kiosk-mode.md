@@ -23,7 +23,7 @@ studio-display → "Aide"  (avatar B · voice B · social on)
 
 Bind a device in the bot's **Gateways** tab → type **AI Companion**:
 
-1. **Paired device** — pick the kiosk device (devices are paired in the Meta Glasses panel; kiosks reuse that store, tagged `device_kind:"companion"`).
+1. **Paired device** — pick the kiosk device, or simply **type a name** in the "…or pair a new kiosk" field and press Save: Crow creates and connects the device for you in one step (no Meta Glasses bundle required). Devices paired in the Meta Glasses panel also appear here; kiosks reuse that store, tagged `device_kind:"companion"`.
 2. **Avatar** — the Live2D model that renders for this kiosk.
 3. **Hearing style** — push-to-talk, wake word, or always listening.
 4. **Voice idle timeout** — seconds of silence before the pet/idle animation.
