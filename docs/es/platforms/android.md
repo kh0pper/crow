@@ -12,7 +12,15 @@ Accede a Crow desde tu dispositivo Android con la aplicación nativa o como una 
 
 Descarga la última versión de Crow para Android:
 
-[Descargar Crow para Android](https://github.com/kh0pper/crow/releases/download/android-v1.0.0/app-release.apk)
+[Descargar Crow para Android (v1.5.0)](https://github.com/kh0pper/crow/releases/download/android-v1.5.0/app-release.apk)
+
+Esta versión funciona en los teléfonos Android más nuevos (Android 15 y el diseño de memoria de 16 KB).
+
+::: warning Desinstala primero la app anterior
+Esta actualización cambia la firma de la app, así que Android no la instalará encima de una versión anterior de Crow. **Desinstala primero tu app de Crow actual y luego instala esta.** Tendrás que volver a emparejar tus gafas y reintroducir la dirección de tu gateway una vez — un paso único.
+:::
+
+¿Buscas una versión anterior? Consulta la [página de Releases](https://github.com/kh0pper/crow/releases).
 
 ### Paso 2: Habilitar orígenes desconocidos
 
@@ -24,12 +32,12 @@ Antes de instalar, permite que tu dispositivo instale aplicaciones de fuera de P
 4. Si te lo pide, permite el navegador que usaste para descargar el APK (Chrome, Firefox, etc.)
 
 ::: tip
-En Android 8+, este ajuste es por aplicación. Solo necesitas permitirlo para el navegador que usaste para la descarga.
+En Android, este ajuste es por aplicación. Solo necesitas permitirlo para el navegador que usaste para la descarga.
 :::
 
 ### Paso 3: Instalar
 
-1. Abre el archivo `crow-android.apk` descargado
+1. Abre el archivo `app-release.apk` descargado
 2. Toca **Instalar** cuando se te solicite
 3. Una vez instalado, abre la aplicación Crow
 
@@ -102,7 +110,7 @@ Todos los paneles del Crow's Nest están disponibles desde la aplicación Androi
 ### La app no se instala
 
 - Asegúrate de haber habilitado "Instalar desde orígenes desconocidos" para la app correcta (tu navegador)
-- Verifica que tu versión de Android sea 8.0 o superior
+- Verifica que tu versión de Android sea 14 o superior (API 34 — requerida por la integración con las gafas Meta)
 - Si el almacenamiento está lleno, libera espacio e inténtalo de nuevo
 
 ### La PWA no funciona sin conexión
