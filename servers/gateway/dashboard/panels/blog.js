@@ -3,6 +3,7 @@
  */
 
 import { escapeHtml, dataTable, section, formField, badge, actionBar, formatDate } from "../shared/components.js";
+import { csrfInput } from "../shared/csrf.js";
 import { ICON_DEPLOY } from "../shared/empty-state-icons.js";
 import { t, tJs } from "../shared/i18n.js";
 import { getBlogSettings, pageShell } from "../../routes/blog-public.js";
@@ -156,8 +157,9 @@ export default {
       <a href="${escapeHtml(blogBaseUrl)}feed.atom" target="_blank" class="btn btn-sm btn-secondary">${t("blog.atom", lang)}</a>
       <form method="POST" style="margin:0;display:inline-flex;align-items:center;gap:0.5rem">
         <input type="hidden" name="action" value="toggle_songbook_index">
+        ${csrfInput(req)}
         <label style="font-size:0.8rem;color:var(--crow-text-muted);cursor:pointer;display:inline-flex;align-items:center;gap:0.35rem">
-          <input type="checkbox" ${songbookOnIndex ? "checked" : ""} onchange="this.form.submit()" style="cursor:pointer">
+          <input type="checkbox" ${songbookOnIndex ? "checked" : ""} onchange="this.form.requestSubmit ? this.form.requestSubmit() : this.form.submit()" style="cursor:pointer">
           Songs on blog index
         </label>
       </form>
@@ -254,6 +256,7 @@ export default {
 
     const postForm = `<form method="POST" id="create-post-form">
       <input type="hidden" name="action" value="${formAction}">
+      ${csrfInput(req)}
       ${isEdit ? `<input type="hidden" name="id" value="${editPost.id}">` : ""}
       <input type="hidden" name="cover_image_key" id="cover-image-key" value="${isEdit && editPost.cover_image_key ? escapeHtml(editPost.cover_image_key) : ""}">
       ${formField(t("blog.titleLabel", lang), "title", { required: true, placeholder: t("blog.titlePlaceholder", lang), value: isEdit ? editPost.title : "" })}
@@ -336,7 +339,9 @@ export default {
 
         if (form) {
           form.addEventListener('submit', async function(e) {
-            if (!fileInput || !fileInput.files || !fileInput.files[0]) return;
+            // fileInput.disabled = the upload already ran and we are re-entering
+            // via requestSubmit() below — fall through to the normal submit.
+            if (!fileInput || fileInput.disabled || !fileInput.files || !fileInput.files[0]) return;
 
             e.preventDefault();
             var submitBtn = form.querySelector('button[type="submit"]');
@@ -366,7 +371,7 @@ export default {
 
               fileInput.disabled = true;
               submitBtn.textContent = 'Creating post...';
-              form.submit();
+              if (form.requestSubmit) form.requestSubmit(); else form.submit();
             } catch (err) {
               crowToast('${tJs("blog.uploadError", lang)}', {type:'error', details: err.message});
               submitBtn.disabled = false;
