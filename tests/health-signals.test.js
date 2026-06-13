@@ -94,7 +94,7 @@ test("backup: file older than 7 days → state warn", async () => {
   assert.equal(result.ok, false, "warn signal → ok=false");
 });
 
-test("backup: fresh backup within 7 days → ok", async () => {
+test("backup: fresh backup, verified ok → ok", async () => {
   invalidateHealthCache();
   const { mkdtempSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
@@ -103,16 +103,50 @@ test("backup: fresh backup within 7 days → ok", async () => {
   const tmpDir = mkdtempSync(join(tmpdir(), "crow-backup-fresh-"));
   process.env.CROW_BACKUP_DIR = tmpDir;
 
-  writeFileSync(join(tmpDir, "test.db"), "");
+  const dbFile = join(tmpDir, "test.db");
+  writeFileSync(dbFile, "x");
 
-  const result = await collectHealthSignals(makeDb());
+  // Supply a matching verification record so the signal reports verified-ok.
+  const verifiedDb = makeDb({
+    async execute({ sql }) {
+      if (sql && sql.includes("pi_bot_defs")) return { rows: [{ c: 0 }] };
+      if (sql && sql.includes("crow_instances")) return { rows: [] };
+      if (sql && sql.includes("auto_update")) return { rows: [{ value: "1.0.0" }] };
+      if (sql && sql.includes("backup_last_verified")) {
+        return { rows: [{ value: JSON.stringify({ path: dbFile, ok: true, result: "ok" }) }] };
+      }
+      return { rows: [] };
+    },
+  });
+
+  const result = await collectHealthSignals(verifiedDb);
 
   if (original == null) delete process.env.CROW_BACKUP_DIR;
   else process.env.CROW_BACKUP_DIR = original;
 
   const backupDetail = result.details.find(d => d.id === "backup");
   assert.ok(backupDetail);
-  assert.equal(backupDetail.state, "ok");
+  assert.equal(backupDetail.state, "ok", "fresh + verified ok → ok");
+});
+
+test("backup: fresh backup, no verification record → info (gentle nudge, not warn)", async () => {
+  invalidateHealthCache();
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const original = process.env.CROW_BACKUP_DIR;
+  const tmpDir = mkdtempSync(join(tmpdir(), "crow-backup-unv-"));
+  process.env.CROW_BACKUP_DIR = tmpDir;
+  writeFileSync(join(tmpDir, "test.db"), "x");
+
+  const result = await collectHealthSignals(makeDb()); // no verification record
+
+  if (original == null) delete process.env.CROW_BACKUP_DIR;
+  else process.env.CROW_BACKUP_DIR = original;
+
+  const backupIssue = result.issues.find(i => i.id === "backup");
+  assert.ok(backupIssue, "unverified fresh backup surfaces an info nudge");
+  assert.equal(backupIssue.severity, "info", "must be info, never a false damaged-warn");
 });
 
 // ─── MINIO_ENDPOINT unset → info not warn ─────────────────────────────────────

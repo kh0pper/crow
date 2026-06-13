@@ -180,14 +180,64 @@ export async function attemptLogin(password, ip) {
       a.count++;
       if (a.count >= LOCKOUT_THRESHOLD) {
         a.lockedUntil = Date.now() + LOCKOUT_DURATION;
-        // Detailed security report
+        // Detailed security report. NOTE: auditLog() reads only {actor, ip,
+        // details} — the extras MUST be nested under `details` or they're
+        // silently dropped (W2-1 fix for a pre-existing bug).
         const userAgent = arguments.length > 3 ? arguments[3] : null;
         await auditLog(db, 'security_lockout_report', {
           ip,
-          userAgent,
-          attempts: a.count,
-          lockedUntil: new Date(a.lockedUntil).toISOString(),
+          details: {
+            userAgent,
+            attempts: a.count,
+            lockedUntil: new Date(a.lockedUntil).toISOString(),
+          },
         });
+        // Tell the owner immediately — the 15-min health monitor is too slow
+        // for "someone is hammering your login right now". Once per hour
+        // (lockout_notified_at cooldown), and seed health_last_notified so the
+        // monitor doesn't fire a duplicate for the same storm. Never let a
+        // notification failure break login handling.
+        try {
+          const { rows: lnRows } = await db.execute({
+            sql: "SELECT value FROM dashboard_settings WHERE key='lockout_notified_at'",
+            args: [],
+          });
+          const lastNotified = lnRows[0]?.value ? Number(lnRows[0].value) : null;
+          if (!lastNotified || Date.now() - lastNotified >= 60 * 60 * 1000) {
+            const { createNotification } = await import("../../shared/notifications.js");
+            const { t } = await import("./shared/i18n.js");
+            await createNotification(db, {
+              type: "system",
+              source: "security:lockout",
+              priority: "high",
+              title: t("signals.logins.notifTitle", "en").replace("{n}", String(a.count)),
+              body: t("signals.logins.notifBody", "en"),
+              action_url: "/dashboard/nest",
+            });
+            const nowStr = String(Date.now());
+            await db.execute({
+              sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('lockout_notified_at', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
+              args: [nowStr, nowStr],
+            });
+            // Seed the monitor's dedupe map so it won't double-notify within 24h.
+            try {
+              const { rows: hmRows } = await db.execute({
+                sql: "SELECT value FROM dashboard_settings WHERE key='health_last_notified'",
+                args: [],
+              });
+              let lastMap = {};
+              try { lastMap = hmRows[0]?.value ? JSON.parse(hmRows[0].value) : {}; } catch {}
+              lastMap.logins = Date.now();
+              const ser = JSON.stringify(lastMap);
+              await db.execute({
+                sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('health_last_notified', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
+                args: [ser, ser],
+              });
+            } catch {}
+          }
+        } catch {
+          // Notification path is best-effort; login handling must continue.
+        }
         // Send lockout alert to hosting API (managed hosting only)
         if (isHosted && process.env.CROW_HOSTING_API_URL && process.env.CROW_HOSTING_AUTH_TOKEN) {
           try {

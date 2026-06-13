@@ -21,7 +21,8 @@ import { Router } from "express";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { performBackup } from "../../db.js";
+import Database from "better-sqlite3";
+import { performBackup, createDbClient } from "../../db.js";
 
 const DEFAULT_DIR = path.join(os.homedir(), "backups", "crow");
 
@@ -33,6 +34,38 @@ function getInstanceLabel() {
   if (dbPath.includes("crow-mpa")) return "mpa";
   if (dbPath.includes("home-finance")) return "finance";
   return "primary";
+}
+
+// Verify a freshly-written backup file is a structurally sound SQLite db.
+// The backup is a standalone copy (better-sqlite3 .backup()), so opening a
+// second read-only handle is safe — the live-WAL hazard applies only to the
+// source db. quick_check is much faster than integrity_check and catches the
+// failure modes that matter (truncation, page corruption).
+function verifyBackupFile(dest) {
+  let handle = null;
+  try {
+    handle = new Database(dest, { readonly: true, fileMustExist: true });
+    const rows = handle.pragma("quick_check");
+    const result = Array.isArray(rows) ? String(rows[0]?.quick_check ?? rows[0]) : String(rows);
+    return { ok: result === "ok", result };
+  } catch (err) {
+    return { ok: false, result: err.message };
+  } finally {
+    try { handle?.close(); } catch {}
+  }
+}
+
+async function recordVerification(record) {
+  const sdb = createDbClient();
+  try {
+    const ser = JSON.stringify(record);
+    await sdb.execute({
+      sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('backup_last_verified', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')",
+      args: [ser, ser],
+    });
+  } finally {
+    try { sdb.close(); } catch {}
+  }
 }
 
 function pruneOldBackups(dir, keepDays) {
@@ -93,12 +126,27 @@ export async function runBackup() {
   const started = Date.now();
   const result = await performBackup(null, dest);
   const size = fs.statSync(dest).size;
+
+  // Verify the backup before declaring success — a backup you can't restore
+  // is worse than no backup, because it gives false confidence (W2-4).
+  const verify = size > 0 ? verifyBackupFile(dest) : { ok: false, result: "empty file" };
+  await recordVerification({
+    path: dest, ok: verify.ok, result: verify.result,
+    size_bytes: size, checked_at: new Date().toISOString(),
+  });
+
   const prune = pruneOldBackups(dir, keepDays);
+  if (!verify.ok) {
+    // Surfaces as flash=backup_fail on the dashboard path and HTTP 500 on the
+    // localhost API — the record is already persisted so the nest signal warns.
+    throw new Error(`backup verification failed: ${verify.result}`);
+  }
   return {
     ok: true,
     instance: label,
     path: dest,
     size_bytes: size,
+    verified: true,
     duration_ms: Date.now() - started,
     pages_copied: result?.totalPages ?? null,
     pruned_older_than_days: keepDays,
