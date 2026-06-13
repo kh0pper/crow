@@ -120,7 +120,7 @@ export default {
     const switcher =
       `<form method="GET" action="/dashboard/bot-board" class="bb-switch">` +
       `<label for="bb-bot" style="font-size:.8rem;color:var(--crow-text-muted)">${t("botboard.labelBotSwitcher", lang)}</label>` +
-      `<select id="bb-bot" name="bot" onchange="this.form.submit()">` +
+      `<select id="bb-bot" name="bot" onchange="this.form.requestSubmit ? this.form.requestSubmit() : this.form.submit()">` +
       switcherOptions +
       `</select>` + editBotLink +
       `<noscript><button type="submit">Go</button></noscript>` +

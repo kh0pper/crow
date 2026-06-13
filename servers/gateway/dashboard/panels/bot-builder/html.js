@@ -9,9 +9,10 @@
  */
 
 import { escapeHtml, section, badge, dataTable, formField, actionBar } from "../../shared/components.js";
+import { csrfInput } from "../../shared/csrf.js";
 import { loadModelOptions } from "./data-queries.js";
 
-export async function renderBotList(res, { db, layout, notice, PAGE_CSS }) {
+export async function renderBotList(res, { db, layout, notice, PAGE_CSS, req }) {
   let bots = [], sessions = [], sessRows = [];
   try {
     bots = (await db.execute({ sql: "SELECT bot_id, display_name, enabled, definition, project_id, datetime(updated_at) AS updated_at FROM pi_bot_defs ORDER BY bot_id", args: [] })).rows;
@@ -55,7 +56,7 @@ export async function renderBotList(res, { db, layout, notice, PAGE_CSS }) {
     `</optgroup>`
   ).join("");
   const form = section("Create an agent",
-    `<form method="POST" class="btb-form"><input type="hidden" name="action" value="create">` +
+    `<form method="POST" class="btb-form"><input type="hidden" name="action" value="create">${csrfInput(req)}` +
     formField("Bot id (slug)", "bot_id", { required: true, placeholder: "research-scout" }) +
     formField("Display name", "display_name", { required: true, placeholder: "Research Scout" }) +
     `<div class="btb-group"><label>Linked project</label>` +

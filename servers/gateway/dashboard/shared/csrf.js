@@ -34,6 +34,7 @@
  */
 
 import { parseCookies } from "../auth.js";
+import { escapeHtml } from "./components.js";
 
 const CSRF_COOKIE = "crow_csrf";
 const HEADER_NAME = "x-crow-csrf";
@@ -103,5 +104,5 @@ export function csrfMiddleware(req, res, next) {
  */
 export function csrfInput(req) {
   const token = req && req.csrfToken ? String(req.csrfToken) : "";
-  return `<input type="hidden" name="_csrf" value="${token}">`;
+  return `<input type="hidden" name="_csrf" value="${escapeHtml(token)}">`;
 }
