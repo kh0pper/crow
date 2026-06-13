@@ -19,17 +19,20 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readdirSync, statSync } from "node:fs";
+import { readdirSync, statSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { t } from "../../shared/i18n.js";
+import { PUBLIC_FUNNEL_PREFIXES } from "../../../funnel.js";
 
 // ─── Module-level 30s cache ───────────────────────────────────────────────────
 
 let _cache = null;
 let _cacheTs = 0;
+let _cacheLang = null;
 const CACHE_TTL = 30_000;
 
-// ─── Exported pure helper ─────────────────────────────────────────────────────
+// ─── Exported pure helpers ────────────────────────────────────────────────────
 
 /**
  * Dedupe helper for the health monitor.
@@ -37,12 +40,31 @@ const CACHE_TTL = 30_000;
  * @param {Record<string, number>} lastMap   — issueId → last-notified epoch ms
  * @param {string} issueId
  * @param {number} nowMs
- * @returns {boolean}  true = should notify (issue is new or 24h window expired)
+ * @param {number} [windowMs]  re-notify window (default 24h)
+ * @returns {boolean}  true = should notify (issue is new or window expired)
  */
-export function shouldNotify(lastMap, issueId, nowMs) {
+export function shouldNotify(lastMap, issueId, nowMs, windowMs = 24 * 60 * 60 * 1000) {
   const last = lastMap[issueId];
   if (last == null) return true;
-  return nowMs - last >= 24 * 60 * 60 * 1000;
+  return nowMs - last >= windowMs;
+}
+
+/**
+ * Incident-scoped dedupe reset. Returns a copy of lastMap keeping only the
+ * entries whose issue id is still active, so a resolved-then-recurring issue
+ * notifies again instead of staying silent under the 24h window.
+ *
+ * @param {Record<string, number>} lastMap
+ * @param {string[]} activeIssueIds  ids of issues currently present (warn OR info)
+ * @returns {Record<string, number>}
+ */
+export function pruneResolved(lastMap, activeIssueIds) {
+  const active = new Set(activeIssueIds);
+  const out = {};
+  for (const [id, ts] of Object.entries(lastMap)) {
+    if (active.has(id)) out[id] = ts;
+  }
+  return out;
 }
 
 // ─── Internal signal collectors ──────────────────────────────────────────────
@@ -277,31 +299,36 @@ async function syncConflictsSignal(db) {
   };
 }
 
-function backupSignal(nowFn) {
+// The default MUST match admin-backup.js's DEFAULT_DIR (~/backups/crow) — the
+// signal previously read ~/.crow/backups (stale pre-upgrade snapshots) while
+// real daily backups land in ~/backups/crow, so it under-reported (W2-4 fix).
+function backupDir() {
+  return process.env.CROW_BACKUP_DIR || join(homedir(), "backups", "crow");
+}
+
+async function backupSignal(db, nowFn, lang) {
   const nowMs = nowFn();
-  const dir = process.env.CROW_BACKUP_DIR || join(homedir(), ".crow", "backups");
+  const dir = backupDir();
   let newestMtimeMs = null;
+  let newestPath = null;
 
   try {
     const files = readdirSync(dir).filter(f => f.endsWith(".db"));
     for (const f of files) {
       try {
-        const m = statSync(join(dir, f)).mtimeMs;
-        if (newestMtimeMs === null || m > newestMtimeMs) newestMtimeMs = m;
+        const full = join(dir, f);
+        const m = statSync(full).mtimeMs;
+        if (newestMtimeMs === null || m > newestMtimeMs) { newestMtimeMs = m; newestPath = full; }
       } catch {}
     }
   } catch {}
 
+  const runAction = { actionLabel: t("health.runBackupNow", lang), actionHref: "/dashboard/nest?action=backup" };
+
   if (newestMtimeMs === null) {
     return {
-      id: "backup",
-      severity: "info",
-      state: "info",
-      label: "Backup",
-      value: "never",
-      issueLabel: "Backups aren't set up yet",
-      actionLabel: "Run a backup",
-      actionHref: "/dashboard/nest?action=backup",
+      id: "backup", severity: "info", state: "info", label: t("signals.backup.label", lang),
+      value: "never", issueLabel: t("signals.backup.neverIssue", lang), ...runAction,
     };
   }
 
@@ -309,24 +336,220 @@ function backupSignal(nowFn) {
   if (ageDays > 7) {
     const daysRounded = Math.floor(ageDays);
     return {
-      id: "backup",
-      severity: "warn",
-      state: "warn",
-      label: "Backup",
-      value: `${daysRounded}d ago`,
-      issueLabel: `Last backup was ${daysRounded} days ago`,
-      actionLabel: "Run a backup",
-      actionHref: "/dashboard/nest?action=backup",
+      id: "backup", severity: "warn", state: "warn", label: t("signals.backup.label", lang),
+      value: `${daysRounded}d ago`, issueLabel: t("signals.backup.staleIssue", lang).replace("{n}", String(daysRounded)), ...runAction,
+    };
+  }
+
+  // Age is fine — layer integrity verification on top.
+  let verified = null;
+  try {
+    const { rows } = await db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key='backup_last_verified'", args: [] });
+    if (rows[0]?.value) verified = JSON.parse(rows[0].value);
+  } catch {}
+
+  // Cheap readability/size check on the newest file (no PRAGMA in the hot path).
+  let readable = false, sizeOk = false;
+  try { const st = statSync(newestPath); readable = true; sizeOk = st.size > 0; } catch {}
+
+  const verifiedFailedForNewest = verified && verified.path === newestPath && verified.ok === false;
+  if (!readable || !sizeOk || verifiedFailedForNewest) {
+    return {
+      id: "backup", severity: "warn", state: "warn", label: t("signals.backup.label", lang),
+      value: t("signals.backup.damaged", lang), issueLabel: t("signals.backup.damagedIssue", lang), ...runAction,
     };
   }
 
   const daysAgo = ageDays < 1 ? "today" : `${Math.floor(ageDays)}d ago`;
+
+  if (!verified || verified.path !== newestPath) {
+    // Newest backup predates the verification feature, or is an external/manual
+    // copy — gentle nudge, never a false "damaged" warn (S5).
+    return {
+      id: "backup", severity: "info", state: "info", label: t("signals.backup.label", lang),
+      value: daysAgo, issueLabel: t("signals.backup.unverifiedIssue", lang), ...runAction,
+    };
+  }
+
+  // Verified healthy.
   return {
-    id: "backup",
-    severity: null,
-    state: "ok",
-    label: "Backup",
-    value: daysAgo,
+    id: "backup", severity: null, state: "ok", label: t("signals.backup.label", lang),
+    value: `${daysAgo} · ${t("signals.backup.verified", lang)}`,
+  };
+}
+
+// ─── Security-maintenance signals (W2) ────────────────────────────────────────
+
+async function loginsSignal(db, lang) {
+  let failures = 0, distinctIps = 0, lockouts = 0;
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT COUNT(*) AS n, COUNT(DISTINCT ip_address) AS ips FROM audit_log
+            WHERE event_type='auth_login_failure' AND created_at >= datetime('now','-24 hours')`,
+      args: [],
+    });
+    failures = Number(rows[0]?.n ?? 0);
+    distinctIps = Number(rows[0]?.ips ?? 0);
+    const { rows: lk } = await db.execute({
+      sql: `SELECT COUNT(*) AS n FROM audit_log
+            WHERE event_type='security_lockout_report' AND created_at >= datetime('now','-24 hours')`,
+      args: [],
+    });
+    lockouts = Number(lk[0]?.n ?? 0);
+  } catch {}
+
+  if (failures === 0) {
+    return { id: "logins", severity: null, state: "ok", label: t("signals.logins.label", lang), value: t("signals.logins.none", lang) };
+  }
+
+  const storm = lockouts > 0 || failures >= 10;   // warn → notifies
+  const minor = failures >= 5;                     // info → strip only
+  if (!storm && !minor) {
+    // 1-4 failures = owner typos; surface the count but stay ok.
+    return { id: "logins", severity: null, state: "ok", label: t("signals.logins.label", lang),
+      value: t("signals.logins.count", lang).replace("{n}", String(failures)) };
+  }
+  const state = storm ? "warn" : "info";
+  return {
+    id: "logins", severity: state, state, label: t("signals.logins.label", lang),
+    value: t("signals.logins.count", lang).replace("{n}", String(failures)),
+    issueLabel: (storm ? t("signals.logins.storm", lang) : t("signals.logins.some", lang))
+      .replace("{n}", String(failures)).replace("{ips}", String(distinctIps)),
+    actionLabel: t("signals.logins.action", lang),
+    actionHref: "/dashboard/settings?section=two-factor",
+  };
+}
+
+// 5-min cache for the (external) tailscale query + injectable reader for tests.
+let _tsServeCache = { ts: 0, raw: null };
+let _tailscaleReader = () => execFileSync("tailscale", ["serve", "status", "-json"], { encoding: "utf-8", timeout: 2000 });
+export function _setTailscaleReader(fn) { _tailscaleReader = fn; _tsServeCache = { ts: 0, raw: null }; }
+
+// Returns funnel-exposed paths (array), or null when we couldn't determine
+// (CLI absent / erroring / unexpected shape) → caller skips silently.
+// C1: serve ≠ funnel. A healthy PRIVATE box mounts "/" under Web.<host> with
+// NO AllowFunnel key — that must NOT be read as exposure. Only paths under a
+// hostport with AllowFunnel===true are actually public.
+function funnelExposedPaths(nowMs) {
+  if (nowMs - _tsServeCache.ts < 5 * 60 * 1000) return _tsServeCache.raw;
+  let paths = null;
+  try {
+    const cfg = JSON.parse(_tailscaleReader());
+    const allow = cfg.AllowFunnel || {};
+    const enabledHostports = Object.keys(allow).filter((hp) => allow[hp] === true);
+    // Absent/empty AllowFunnel → fully private → empty list (not null).
+    paths = [];
+    for (const hp of enabledHostports) {
+      const handlers = (cfg.Web && cfg.Web[hp] && cfg.Web[hp].Handlers) || {};
+      for (const p of Object.keys(handlers)) paths.push(p);
+    }
+  } catch {
+    paths = null; // CLI missing / not running / unexpected shape → skip
+  }
+  _tsServeCache = { ts: nowMs, raw: paths };
+  return paths;
+}
+
+// Reuse funnel.js's exact prefix semantics (trailing-slash = subtree, else exact).
+function isPublicSafePath(p) {
+  return PUBLIC_FUNNEL_PREFIXES.some((pre) => pre.endsWith("/") ? p.startsWith(pre) : p === pre);
+}
+
+function exposureSignal(lang, nowFn) {
+  const problems = [];
+  if (process.env.CROW_DASHBOARD_PUBLIC === "true") problems.push(t("signals.exposure.public", lang));
+  if (process.argv.includes("--no-auth")) problems.push(t("signals.exposure.noauth", lang));
+  if (process.env.CROW_CSRF_STRICT === "0") problems.push(t("signals.exposure.csrf", lang));
+
+  const exposed = funnelExposedPaths(nowFn());
+  if (Array.isArray(exposed)) {
+    const unsafe = exposed.filter((p) => !isPublicSafePath(p));
+    if (unsafe.length > 0) problems.push(t("signals.exposure.funnel", lang));
+  }
+
+  if (problems.length === 0) {
+    return { id: "exposure", severity: null, state: "ok", label: t("signals.exposure.label", lang), value: t("signals.exposure.private", lang) };
+  }
+  return {
+    id: "exposure", severity: "warn", state: "warn", label: t("signals.exposure.label", lang),
+    value: t("signals.exposure.open", lang), issueLabel: problems[0],
+    actionLabel: t("signals.exposure.action", lang), actionHref: "/dashboard/settings?section=connections",
+  };
+}
+
+async function integrationsSignal(db, lang) {
+  const warnNames = [];   // real failure tracking → warn
+  const infoNames = [];   // soft heuristic (Google) → info
+
+  // 1. Project data backends with a recent error (Q4: 30-day recency gate).
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT name FROM data_backends WHERE status='error' AND updated_at >= datetime('now','-30 days') LIMIT 5`,
+      args: [],
+    });
+    for (const r of rows) warnNames.push(r.name || "a data source");
+  } catch {}
+
+  // 2. Trusted+active peers whose latest outbound call returned 401/403 in 7d.
+  try {
+    const { rows } = await db.execute({
+      sql: `SELECT ci.name FROM crow_instances ci
+            JOIN cross_host_calls c ON c.id = (
+              SELECT id FROM cross_host_calls
+              WHERE target_instance_id = ci.id AND direction='outbound' AND http_status IS NOT NULL
+              ORDER BY at DESC LIMIT 1)
+            WHERE ci.trusted=1 AND ci.status='active'
+              AND c.http_status IN (401,403) AND c.at >= datetime('now','-7 days')`,
+      args: [],
+    });
+    for (const r of rows) warnNames.push(r.name || "a paired instance");
+  } catch {}
+
+  // 3. Google token files — INFO only, provably-dead case (S1): expired >7d AND
+  //    no refresh_token. Never log file contents (S2).
+  try {
+    const candidates = [];
+    if (process.env.GOOGLE_TOKEN_FILE) candidates.push(process.env.GOOGLE_TOKEN_FILE);
+    try {
+      const cfgRoot = join(homedir(), ".config");
+      for (const d of readdirSync(cfgRoot)) {
+        if (!d.startsWith("google-workspace-mcp")) continue;
+        try {
+          for (const f of readdirSync(join(cfgRoot, d))) {
+            if (f.endsWith(".json")) candidates.push(join(cfgRoot, d, f));
+          }
+        } catch {}
+      }
+    } catch {}
+    const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
+    for (const file of candidates.slice(0, 10)) {
+      try {
+        const tok = JSON.parse(readFileSync(file, "utf-8"));
+        const exp = tok.expiry ? new Date(tok.expiry).getTime() : NaN;
+        if (tok.token && !tok.refresh_token && Number.isFinite(exp) && exp < Date.now() - SEVEN_DAYS) {
+          infoNames.push("Google");
+        }
+      } catch {}
+    }
+  } catch {}
+
+  if (warnNames.length === 0 && infoNames.length === 0) {
+    return { id: "integrations", severity: null, state: "ok", label: t("signals.integrations.label", lang), value: t("signals.integrations.ok", lang) };
+  }
+  if (warnNames.length > 0) {
+    return {
+      id: "integrations", severity: "warn", state: "warn", label: t("signals.integrations.label", lang),
+      value: t("signals.integrations.broken", lang).replace("{n}", String(warnNames.length + infoNames.length)),
+      issueLabel: t("signals.integrations.issue", lang).replace("{name}", warnNames[0]),
+      actionLabel: t("signals.integrations.action", lang), actionHref: "/dashboard/settings?section=integrations",
+    };
+  }
+  // Only soft Google info.
+  return {
+    id: "integrations", severity: "info", state: "info", label: t("signals.integrations.label", lang),
+    value: t("signals.integrations.broken", lang).replace("{n}", String(infoNames.length)),
+    issueLabel: t("signals.integrations.maybe", lang).replace("{name}", infoNames[0]),
+    actionLabel: t("signals.integrations.action", lang), actionHref: "/dashboard/settings?section=integrations",
   };
 }
 
@@ -342,9 +565,10 @@ function backupSignal(nowFn) {
  */
 export async function collectHealthSignals(db, opts = {}) {
   const nowFn = opts.now ?? (() => Date.now());
+  const lang = opts.lang ?? "en";
 
   const ts = nowFn();
-  if (_cache && ts - _cacheTs < CACHE_TTL) return _cache;
+  if (_cache && ts - _cacheTs < CACHE_TTL && _cacheLang === lang) return _cache;
 
   const rawSignals = await Promise.all([
     diskSignal(),
@@ -352,8 +576,11 @@ export async function collectHealthSignals(db, opts = {}) {
     agentsSignal(db),
     peersSignal(db),
     updatesSignal(db),
-    backupSignal(nowFn),
+    backupSignal(db, nowFn, lang),
     syncConflictsSignal(db),
+    loginsSignal(db, lang),
+    exposureSignal(lang, nowFn),
+    integrationsSignal(db, lang),
   ].map(p => Promise.resolve(p).catch(err => ({
     id: "unknown",
     severity: null,
@@ -385,6 +612,7 @@ export async function collectHealthSignals(db, opts = {}) {
   const result = { ok, issues, details };
   _cache = result;
   _cacheTs = ts;
+  _cacheLang = lang;
   return result;
 }
 
@@ -394,4 +622,5 @@ export async function collectHealthSignals(db, opts = {}) {
 export function invalidateHealthCache() {
   _cache = null;
   _cacheTs = 0;
+  _cacheLang = null;
 }
