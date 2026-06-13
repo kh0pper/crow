@@ -8,11 +8,12 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
+import android.os.SystemClock;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.ViewParent;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
@@ -39,17 +40,17 @@ public class MainActivity extends AppCompatActivity {
     private static final String PREFS_NAME = "CrowPrefs";
     private static final String KEY_GATEWAY_URL = "gateway_url";
     private static final String WORK_NAME = "crow_notification_poll";
-    private static final long FOREGROUND_POLL_INTERVAL_MS = 60_000; // 60 seconds
 
     private WebView webView;
     private SwipeRefreshLayout swipeRefresh;
     private volatile boolean isWebViewAtTop = false;
+    // Debounce the pull-to-refresh scroll probe so a flurry of touch-downs
+    // doesn't re-run the .content-body DOM walk on every tap (W3).
+    private long lastScrollProbeMs = 0L;
     private FrameLayout statusOverlay;
     private TextView statusText;
     private ValueCallback<Uri[]> fileUploadCallback;
     private PermissionRequest pendingWebViewPermRequest;
-    private Handler foregroundPollHandler;
-    private Runnable foregroundPollRunnable;
 
     private final ActivityResultLauncher<Intent> fileChooserLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -135,6 +136,13 @@ public class MainActivity extends AppCompatActivity {
         // (e.g. .msg-chat-viewport in Messages, <pre> blocks in Skills, etc.).
         webView.setOnTouchListener((v, event) -> {
             if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
+                // Debounce: reuse the last result if probed <250ms ago. The DOM
+                // walk is the cost; a burst of taps doesn't need to re-run it.
+                long now = SystemClock.uptimeMillis();
+                if (now - lastScrollProbeMs < 250) {
+                    return false;
+                }
+                lastScrollProbeMs = now;
                 webView.evaluateJavascript(
                     "(function() {" +
                     "  var all = document.querySelectorAll('.content-body, .content-body *');" +
@@ -169,27 +177,11 @@ public class MainActivity extends AppCompatActivity {
         // Start ntfy listener service for real-time push notifications
         startNtfyService();
 
-        // Set up foreground polling handler
-        foregroundPollHandler = new Handler(Looper.getMainLooper());
-        foregroundPollRunnable = new Runnable() {
-            @Override
-            public void run() {
-                // Run the notification check on a background thread
-                new Thread(() -> {
-                    NotificationWorker worker = null;
-                    try {
-                        // Use WorkManager's one-time work for immediate check
-                        androidx.work.OneTimeWorkRequest immediateWork =
-                                new androidx.work.OneTimeWorkRequest.Builder(NotificationWorker.class)
-                                        .build();
-                        WorkManager.getInstance(getApplicationContext()).enqueue(immediateWork);
-                    } catch (Exception e) {
-                        // Ignore — best effort
-                    }
-                }).start();
-                foregroundPollHandler.postDelayed(this, FOREGROUND_POLL_INTERVAL_MS);
-            }
-        };
+        // (W3) Removed the 60s foreground notification poll: it was redundant
+        // with the real-time ntfy stream (NtfyListenerService, replay-safe via
+        // since=) plus the 15-min WorkManager fallback (scheduleBackgroundPolling).
+        // Firing a WorkManager job every minute while foregrounded was pure
+        // battery cost with no added coverage.
 
         // Load gateway or open settings
         String gatewayUrl = getGatewayUrl();
@@ -372,15 +364,14 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        // Resume WebView JS timers/rendering (paused in onPause to save battery).
+        if (webView != null) webView.onResume();
         String gatewayUrl = getGatewayUrl();
         if (gatewayUrl != null && !gatewayUrl.isEmpty()) {
             if (webView.getUrl() == null) {
                 loadGateway(gatewayUrl);
             }
         }
-        // Start foreground polling
-        foregroundPollHandler.postDelayed(foregroundPollRunnable, FOREGROUND_POLL_INTERVAL_MS);
-
         // Restart ntfy service (handles returning from settings with new gateway URL)
         startNtfyService();
     }
@@ -388,8 +379,27 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onPause() {
         super.onPause();
-        // Stop foreground polling
-        foregroundPollHandler.removeCallbacks(foregroundPollRunnable);
+        // Pause WebView JS timers/rendering while backgrounded (W3 battery win —
+        // dashboard timers otherwise keep running off-screen).
+        if (webView != null) webView.onPause();
+    }
+
+    @Override
+    protected void onDestroy() {
+        // Leak-safe WebView teardown (W3): detach from its parent before
+        // destroy() so the Activity isn't retained via the WebView's native
+        // callbacks. The parent is a SwipeRefreshLayout, so cast to ViewGroup
+        // (NOT FrameLayout — that would ClassCastException).
+        if (webView != null) {
+            webView.setOnTouchListener(null);
+            ViewParent parent = webView.getParent();
+            if (parent instanceof ViewGroup) {
+                ((ViewGroup) parent).removeView(webView);
+            }
+            webView.destroy();
+            webView = null;
+        }
+        super.onDestroy();
     }
 
     @Override
