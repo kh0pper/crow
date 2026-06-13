@@ -566,6 +566,7 @@ export const translations = {
   // Notices
   "botbuilder.noticeUnknownBot": { en: "Unknown bot.", es: "Bot desconocido." },
   "botbuilder.noticeAllBots": { en: "all bots", es: "todos los bots" },
+  "botbuilder.editBotTitle": { en: "Edit bot", es: "Editar bot" },
   "botbuilder.noticeNoSessions": { en: "No sessions for this bot.", es: "No hay sesiones para este bot." },
   "botbuilder.noticeNoProposedSkills": { en: "No proposed skills awaiting review.", es: "No hay habilidades propuestas pendientes de revisión." },
   "botbuilder.noticeNoSelfLearning": { en: "No self-learning activity yet (enable it on the <strong>Permissions</strong> tab).", es: "Aún no hay actividad de autoaprendizaje (actívalo en la pestaña <strong>Permisos</strong>)." },

@@ -17,6 +17,7 @@
  */
 
 import { escapeHtml } from "../../../shared/components.js";
+import { csrfInput } from "../../../shared/csrf.js";
 import { readSetting, upsertSetting } from "../../registry.js";
 import aiProfilesSection from "./ai-profiles.js";
 import ttsProfilesSection from "./tts-profiles.js";
@@ -41,7 +42,7 @@ async function readFeatureFlags(db) {
   try { return JSON.parse(raw) || {}; } catch { return {}; }
 }
 
-function renderFeatureFlagsBanner(flags) {
+function renderFeatureFlagsBanner(flags, req) {
   const smartOn = flags?.smart_chat === true;
   // NOT in SYNC_ALLOWLIST by design — feature flags stay local so a
   // paired instance can't flip each other's experimental features on.
@@ -54,8 +55,9 @@ function renderFeatureFlagsBanner(flags) {
       <input type="hidden" name="action" value="toggle_feature_flag">
       <input type="hidden" name="flag" value="smart_chat">
       <input type="hidden" name="value" value="${smartOn ? "off" : "on"}">
+      ${csrfInput(req)}
       <label class="llm-ff-toggle">
-        <input type="checkbox" ${smartOn ? "checked" : ""} onchange="this.form.submit()">
+        <input type="checkbox" ${smartOn ? "checked" : ""} onchange="this.form.requestSubmit ? this.form.requestSubmit() : this.form.submit()">
         <span class="llm-ff-label">Smart Chat (auto-routing profiles)</span>
       </label>
       <span class="llm-ff-sub">Enables <code>kind: "auto"</code> profiles below. Routes each message to code / vision / fast / deep / default providers based on slash-commands, image attachments, or keywords. Server-side gate — non-UI clients can't route.</span>
@@ -88,7 +90,7 @@ export default {
     const flags = await readFeatureFlags(db);
     // Flag banner only appears on the Chat subtab — it's what the flag
     // actually gates. TTS/STT/Vision tabs stay uncluttered.
-    const banner = active.id === "chat" ? renderFeatureFlagsBanner(flags) : "";
+    const banner = active.id === "chat" ? renderFeatureFlagsBanner(flags, req) : "";
 
     return `
       ${banner}

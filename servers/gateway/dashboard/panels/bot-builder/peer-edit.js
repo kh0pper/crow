@@ -74,6 +74,6 @@ export async function handlePeerEdit(req, res, { db, layout }) {
       <div style="margin-top:1.5rem"><button type="submit" class="btn btn-primary">Save to peer</button>
         <a href="/dashboard/bot-board" class="btn btn-secondary">Cancel</a></div>
     </form>`;
-  res.send(layout({ title: "Edit peer bot", content: section(`Edit ${escapeHtml(botId)} @ ${escapeHtml(peerId)}`, content) }));
+  res.send(layout({ title: "Edit peer bot", content: section(`Edit ${botId} @ ${peerId}`, content) }));
   return true;
 }

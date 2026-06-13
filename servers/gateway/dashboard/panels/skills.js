@@ -218,7 +218,7 @@ export default {
             <a href="/dashboard/skills" class="btn btn-secondary">Cancel</a>
           </div>
         </form>`;
-      const editContent = section(escapeHtml(row.section_title || sectionKey), editForm);
+      const editContent = section(row.section_title || sectionKey, editForm);
       return layout({ title: `Edit: ${row.section_title || sectionKey}`, content: editContent });
     }
 
@@ -280,7 +280,7 @@ export default {
           </form>`;
       }
 
-      const editContent = section(`${escapeHtml(safeName)}`, editForm);
+      const editContent = section(safeName, editForm);
       return layout({ title: `${t("skills.skillPrefix", lang)} ${safeName}`, content: editContent });
     }
 

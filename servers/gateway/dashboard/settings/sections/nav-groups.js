@@ -6,6 +6,7 @@
  */
 
 import { escapeHtml } from "../../shared/components.js";
+import { csrfInput } from "../../shared/csrf.js";
 import { t } from "../../shared/i18n.js";
 import { upsertSetting } from "../registry.js";
 
@@ -68,7 +69,8 @@ export default {
             <form method="POST" style="display:inline">
               <input type="hidden" name="action" value="move_panel_to_group">
               <input type="hidden" name="panel_id" value="${escapeHtml(pid)}">
-              <select name="target_group" onchange="this.form.submit()" style="font-size:0.8rem;padding:0.2rem 0.4rem;background:var(--crow-bg-elevated);color:var(--crow-text-primary);border:1px solid var(--crow-border);border-radius:4px">
+              ${csrfInput(req)}
+              <select name="target_group" onchange="this.form.requestSubmit ? this.form.requestSubmit() : this.form.submit()" style="font-size:0.8rem;padding:0.2rem 0.4rem;background:var(--crow-bg-elevated);color:var(--crow-text-primary);border:1px solid var(--crow-border);border-radius:4px">
                 ${groups.map((gg) => `<option value="${escapeHtml(gg.id)}"${gg.id === g.id ? " selected" : ""}>${escapeHtml(gg.name)}</option>`).join("")}
               </select>
             </form>

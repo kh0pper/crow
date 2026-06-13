@@ -65,6 +65,6 @@ export default {
     }
 
     // ---- list + create + run monitor (C6: delegated to html.js) ----
-    return renderBotList(res, { db, layout, notice, PAGE_CSS });
+    return renderBotList(res, { db, layout, notice, PAGE_CSS, req });
   },
 };
