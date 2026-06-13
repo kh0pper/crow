@@ -880,11 +880,18 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
   }
 
   return res.send(layout({
-    title: "Bot Builder — " + escapeHtml(botId),
+    title: "Bot Builder — " + botId, // renderLayout escapes the title itself
     content: PAGE_CSS + section(
-      `Edit bot: ${escapeHtml(bot.display_name || botId)} ${bot.enabled ? badge("enabled", "connected") : badge("disabled", "draft")}`,
+      "",
       `<p><a href="/dashboard/bot-builder">&larr; ${t("botbuilder.noticeAllBots", lang)}</a></p>` + notice +
-      nav + body
+      nav + body,
+      {
+        // The heading carries a live status badge — raw HTML by design.
+        // Everything user-controlled inside it is escaped here.
+        titleHtml:
+          `${escapeHtml(t("botbuilder.editBotTitle", lang))}: ${escapeHtml(bot.display_name || botId)} ` +
+          (bot.enabled ? badge("enabled", "connected") : badge("disabled", "draft")),
+      }
     ),
   }));
 }
