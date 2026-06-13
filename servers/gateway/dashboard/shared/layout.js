@@ -130,22 +130,26 @@ function turboDiagScript() {
  * @param {string} [opts.afterContent] - HTML rendered after </main> inside .dashboard (e.g. persistent player bar)
  * @param {string} [opts.headerIcons] - HTML rendered inside .content-header, right of title (e.g. notification bell, health icon)
  * @param {Array} [opts.navGroups] - Grouped nav: [{ id, name, collapsed, panels: [{ id, name, icon, route, navOrder }] }]
- * @param {Array|null} [opts.instanceTabs] - Unified multi-instance tabs: [{ id, name, status, isLocal }]. When null, strip is rendered hidden (body.unified-off).
+ * @param {Array|null} [opts.instanceTabs] - Unified multi-instance tabs: [{ id, name, status, isLocal }]. Only the nest handler passes this; every other page renders an empty, CSS-hidden strip (body.unified-off).
  */
 export function renderLayout({ title, content, activePanel, panels, theme, glass, serif, scripts, afterContent, headerIcons, lang, navGroups, instanceTabs }) {
   const themeClass = [
     theme === "light" ? "theme-light" : "",
     glass ? "theme-glass" : "",
     serif ? "theme-serif" : "",
-    // Unified-off class gates the permanent tabs strip visibility via CSS.
-    // The strip is ALWAYS rendered (for Turbo permanence across panel nav)
-    // but hidden when the unified flag is off or no peers are trusted.
+    // Unified-off class gates the tabs strip visibility via CSS. The strip
+    // is re-rendered on every page (it must NOT be data-turbo-permanent:
+    // Turbo would pin the first-rendered — usually empty — strip across
+    // navigations, hiding the peers on the nest; W1-2) and hidden when the
+    // unified flag is off or no peers are trusted.
     (Array.isArray(instanceTabs) && instanceTabs.length > 1) ? "" : "unified-off",
   ].filter(Boolean).join(" ");
   const sortedPanels = [...panels].sort((a, b) => (a.navOrder || 0) - (b.navOrder || 0));
 
   // Render the instance tabs strip. Populated with local + peer tabs when
-  // `instanceTabs` is provided; otherwise empty shell for Turbo permanence.
+  // `instanceTabs` is provided (only the nest handler does — health.js);
+  // otherwise an empty, CSS-hidden shell. Rendered fresh per page so the
+  // strip always matches this render's body.unified-off class.
   // ARIA role varies by path — tablist on /dashboard (tabpanels exist),
   // navigation elsewhere (plain links). Since we don't have the active path
   // here, we go with role="tablist" on the nest panel (activePanel === 'nest')
@@ -172,7 +176,7 @@ export function renderLayout({ title, content, activePanel, panels, theme, glass
       return `<a href="${href}" class="${klass}" data-turbo="false"${tabRole}${ariaDisabled}${ariaSelected}${tabIndex} data-instance-id="${escapeHtml(tab.id)}"><span class="crow-instance-tab-dot"></span>${escapeHtml(tab.name)}</a>`;
     }).join("");
   }
-  const instanceTabsStrip = `<nav id="crow-instance-tabs" class="crow-instance-tabs" role="${stripRole}" aria-label="${stripAriaLabel}" data-turbo-permanent>${stripInner}</nav>`;
+  const instanceTabsStrip = `<nav id="crow-instance-tabs" class="crow-instance-tabs" role="${stripRole}" aria-label="${stripAriaLabel}">${stripInner}</nav>`;
 
   let navItems;
   if (navGroups && navGroups.length > 0) {
