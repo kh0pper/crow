@@ -305,8 +305,9 @@ export function nestCSS() {
     outline-offset: 2px;
   }
 
-  /* Instance-tabs strip styles live in shared/layout.js (dashboardCss)
-   * so they survive Turbo panel nav when the strip is data-turbo-permanent. */
+  /* Instance-tabs strip styles live in shared/layout.js (dashboardCss) —
+   * the strip is part of the shared layout, re-rendered on every page
+   * (it is deliberately NOT data-turbo-permanent; see W1-2). */
 
   /* ─── Health Strip (W3-3) ─── */
   .nest-health-strip {
