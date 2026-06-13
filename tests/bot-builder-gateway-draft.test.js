@@ -75,6 +75,51 @@ test("device-less glasses save persists the type as a draft", async () => {
   assert.equal(def.gateways[0]?.type, "glasses");
 });
 
+test("typed kiosk name pairs + binds a companion device in one Save (no glasses bundle needed)", async () => {
+  const res = mkRes();
+  await handleBotBuilderPost(
+    { body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "companion", gw_new_kiosk_name: "Kitchen Tablet", gw_hearing_style: "wake_word" } },
+    res, { db }
+  );
+  assert.match(res.redirected, /saved=1/, "save must succeed: " + res.redirected);
+  const def = await readDef();
+  assert.equal(def.gateways[0]?.type, "companion");
+  assert.equal(def.gateways[0]?.device_id, "kiosk-kitchen-tablet", "device id derived from the name");
+  const { listDevices } = await import("../bundles/meta-glasses/server/device-store.js");
+  const devices = await listDevices(db);
+  const d = devices.find((x) => x.id === "kiosk-kitchen-tablet");
+  assert.ok(d, "device must exist in the store");
+  assert.equal(d.device_kind, "companion");
+  assert.equal(d.bound_bot_id, "draft-bot", "device must be bound to the bot");
+  assert.equal(d.name, "Kitchen Tablet");
+});
+
+test("kiosk name collision gets a numeric suffix instead of re-pairing the existing device", async () => {
+  const res = mkRes();
+  await handleBotBuilderPost(
+    { body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "companion", gw_new_kiosk_name: "Kitchen Tablet" } },
+    res, { db }
+  );
+  assert.match(res.redirected, /saved=1/);
+  const { listDevices } = await import("../bundles/meta-glasses/server/device-store.js");
+  const devices = await listDevices(db);
+  assert.ok(devices.find((x) => x.id === "kiosk-kitchen-tablet-2"), "second device must get -2 suffix");
+});
+
+test("selected device wins over a typed name", async () => {
+  const res = mkRes();
+  await handleBotBuilderPost(
+    { body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "companion", gw_device_id: "kiosk-kitchen-tablet", gw_new_kiosk_name: "Ignored Name" } },
+    res, { db }
+  );
+  assert.match(res.redirected, /saved=1/);
+  const def = await readDef();
+  assert.equal(def.gateways[0]?.device_id, "kiosk-kitchen-tablet");
+  const { listDevices } = await import("../bundles/meta-glasses/server/device-store.js");
+  const devices = await listDevices(db);
+  assert.ok(!devices.find((x) => x.name === "Ignored Name"), "no device created when one was selected");
+});
+
 test("switching back to gmail still works after a draft", async () => {
   const res = mkRes();
   await handleBotBuilderPost(
