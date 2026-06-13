@@ -12,15 +12,15 @@ Access Crow from your Android device with the native app or as a Progressive Web
 
 Download the latest Crow Android app:
 
-[Download Crow for Android (v1.4.0)](https://github.com/kh0pper/crow/releases/download/android-v1.4.0/app-debug.apk)
+[Download Crow for Android (v1.5.0)](https://github.com/kh0pper/crow/releases/download/android-v1.5.0/app-release.apk)
 
-::: warning Debug-signed build
-v1.4.0 is signed with the debug keystore rather than the release keystore. It includes the new Meta Ray-Ban glasses integration, which requires a specific signing fingerprint registered at Meta's Wearables Developer Center — the debug key is currently the one registered there. A release-signed APK will ship once the release fingerprint is also authorized on Meta's side.
+This version works on the newest Android phones (Android 15 and the 16 KB memory layout).
 
-**If you already have v1.3.0 installed**, you need to uninstall it first before installing v1.4.0 — Android refuses to upgrade between builds signed with different keys.
+::: warning Uninstall the old app first
+This update changes the app's signature, so Android won't install it on top of an older Crow app. **Uninstall your existing Crow app first, then install this one.** You'll re-pair your glasses and re-enter your gateway address once — a one-time step.
 :::
 
-Looking for the older release? [Download v1.3.0 (release-signed)](https://github.com/kh0pper/crow/releases/download/android-v1.3.0/app-release.apk).
+Looking for an older build? See the [Releases page](https://github.com/kh0pper/crow/releases).
 
 ### Step 2: Enable unknown sources
 
@@ -37,7 +37,7 @@ On Android 8+, this setting is per-app. You only need to allow the browser you u
 
 ### Step 3: Install
 
-1. Open the downloaded `app-debug.apk` file
+1. Open the downloaded `app-release.apk` file
 2. Tap **Install** when prompted
 3. Once installed, open the Crow app
 
@@ -152,7 +152,7 @@ The Calls panel lets you start peer-to-peer voice and video calls with your cont
 - Make sure you enabled "Install from unknown sources" for the correct app (your browser)
 - Check that your Android version is 14.0 or higher (the new Meta Glasses features require API 34; older Android versions can use v1.3.0)
 - If storage is full, free up space and retry
-- If upgrading from v1.3.0, uninstall the old version first — v1.4.0 uses a different signing key
+- If upgrading from an older version, uninstall it first — v1.5.0 is release-signed and Android won't install over a differently-signed build
 
 ### PWA not working offline
 

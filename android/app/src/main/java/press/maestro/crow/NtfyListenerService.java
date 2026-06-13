@@ -52,10 +52,15 @@ public class NtfyListenerService extends Service {
     private static final String ENCRYPTED_PREFS_NAME = "CrowSecurePrefs";
     private static final String KEY_NTFY_AUTH = "ntfy_auth_token";
     private static final long CONFIG_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-    private static final long MAX_BACKOFF_MS = 60_000;
+    private static final long MAX_BACKOFF_MS = 5 * 60_000; // 5 min cap (was 60s — too tight)
+    // After this many consecutive connect failures, tell the user the
+    // real-time push path is down and we've fallen back to the 15-min checks.
+    private static final int FAILURES_BEFORE_DEGRADED = 5;
 
     private volatile boolean running = false;
     private Thread streamThread;
+    private int consecutiveFailures = 0;
+    private boolean degradedShown = false;
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -88,6 +93,27 @@ public class NtfyListenerService extends Service {
     @Override
     public IBinder onBind(Intent intent) {
         return null;
+    }
+
+    /**
+     * Update the foreground notification in place (same FOREGROUND_NOTIFICATION_ID
+     * + CHANNEL_SERVICE, so it replaces rather than stacks). `degraded` shows the
+     * push-offline fallback message; otherwise the normal connected message.
+     */
+    private void updateForegroundNotification(boolean degraded) {
+        try {
+            Notification n = new NotificationCompat.Builder(this, NotificationHelper.CHANNEL_SERVICE)
+                    .setSmallIcon(android.R.drawable.ic_dialog_info)
+                    .setContentTitle("Crow")
+                    .setContentText(degraded
+                            ? "Push offline — using 15-min checks"
+                            : "Connected for push notifications")
+                    .setOngoing(true)
+                    .build();
+            startForeground(FOREGROUND_NOTIFICATION_ID, n);
+        } catch (Exception e) {
+            // Best effort — never let a notification update crash the service.
+        }
     }
 
     @Override
@@ -137,6 +163,13 @@ public class NtfyListenerService extends Service {
             } catch (Exception e) {
                 if (!running) return;
                 Log.w(TAG, "Stream error, reconnecting in " + backoffMs + "ms: " + e.getMessage());
+                // Surface a degraded state after repeated failures so the user
+                // knows real-time push is down (the 15-min worker still runs).
+                consecutiveFailures++;
+                if (consecutiveFailures >= FAILURES_BEFORE_DEGRADED && !degradedShown) {
+                    degradedShown = true;
+                    updateForegroundNotification(true);
+                }
                 try {
                     Thread.sleep(backoffMs);
                 } catch (InterruptedException ie) {
@@ -325,6 +358,12 @@ public class NtfyListenerService extends Service {
             }
 
             Log.i(TAG, "Connected to ntfy stream");
+            // Connected — clear any degraded state (the real-time path is back).
+            consecutiveFailures = 0;
+            if (degradedShown) {
+                degradedShown = false;
+                updateForegroundNotification(false);
+            }
 
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(conn.getInputStream()))) {
