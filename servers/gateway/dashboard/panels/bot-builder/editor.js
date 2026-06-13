@@ -6,6 +6,7 @@
  * already in the sessions tab use i18n; all other inline JS stays EN.
  */
 import { escapeHtml, section, badge, formField, actionBar } from "../../shared/components.js";
+import { csrfInput } from "../../shared/csrf.js";
 import { t, tJs } from "../../shared/i18n.js";
 import { createDbClient } from "../../../../db.js";
 import { serversForBot } from "../../../../../scripts/pi-bots/mcp_writer.mjs";
@@ -66,7 +67,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
     ).join("") +
     `</div>`;
 
-  const hidden = (tb) => `<input type="hidden" name="action" value="save_${tb}"><input type="hidden" name="bot_id" value="${escapeHtml(botId)}">`;
+  const hidden = (tb) => `<input type="hidden" name="action" value="save_${tb}"><input type="hidden" name="bot_id" value="${escapeHtml(botId)}">${csrfInput(req)}`;
   let body = "";
 
   // ---- ai tab ----
@@ -400,7 +401,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
     body =
       `<form method="POST" class="btb-form">${hidden("gateways")}` +
       `<div class="btb-group"><label>${t("botbuilder.labelGatewayType", lang)}</label>` +
-      `<select name="gw_type" class="btb-select" onchange="this.form.submit()">${typeOpts}</select></div>` +
+      `<select name="gw_type" class="btb-select" onchange="this.form.requestSubmit ? this.form.requestSubmit() : this.form.submit()">${typeOpts}</select></div>` +
       gwFields + gwHint +
       actionBar(`<button type="submit" class="btb-btn">${t("botbuilder.btnSaveGateways", lang)}</button>`) + `</form>`;
   } else if (tabId === "tracker") { // ---- tracker tab ----
@@ -724,8 +725,9 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       `<form method="POST" style="margin-top:1rem">` +
       `<input type="hidden" name="action" value="toggle_peer_managed">` +
       `<input type="hidden" name="bot_id" value="${escapeHtml(botId)}">` +
+      csrfInput(req) +
       `<label style="display:flex;align-items:center;gap:0.6rem;cursor:pointer">` +
-      `<input type="checkbox" name="managed" ${isManaged ? "checked" : ""} onchange="this.form.submit()">` +
+      `<input type="checkbox" name="managed" ${isManaged ? "checked" : ""} onchange="this.form.requestSubmit ? this.form.requestSubmit() : this.form.submit()">` +
       `<span>Manageable by trusted peers (cross-instance edit/run — requires the master toggle in Settings &rarr; Remote Bot Management)</span>` +
       `</label></form>`;
   } else if (tabId === "triggers") { // ---- triggers tab ----
@@ -869,20 +871,27 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       `<pre class="btb-pre">${escapeHtml(JSON.stringify(def, null, 2))}</pre>` +
       `<p style="margin:.75rem 0">Per-bot MCP servers from selection: <code>${escapeHtml(serversForBot(def).join(", ") || "(none)")}</code></p>` +
       `<div style="display:flex;gap:.5rem;flex-wrap:wrap;margin:.75rem 0">` +
-      `<form method="POST"><input type="hidden" name="action" value="regen_mcp"><input type="hidden" name="bot_id" value="${escapeHtml(botId)}">` +
+      `<form method="POST"><input type="hidden" name="action" value="regen_mcp"><input type="hidden" name="bot_id" value="${escapeHtml(botId)}">${csrfInput(req)}` +
       `<button type="submit" class="btb-btn">${t("botbuilder.btnRegenMcp", lang)}</button></form>` +
-      `<form method="POST"><input type="hidden" name="action" value="toggle"><input type="hidden" name="bot_id" value="${escapeHtml(botId)}">` +
+      `<form method="POST"><input type="hidden" name="action" value="toggle"><input type="hidden" name="bot_id" value="${escapeHtml(botId)}">${csrfInput(req)}` +
       `<button type="submit" class="btb-btn btb-btn-sec">${bot.enabled ? t("botbuilder.btnDisableBot", lang) : t("botbuilder.btnEnableBot", lang)}</button></form>` +
       `</div>` +
       `<p class="btb-hint">${t("botbuilder.reviewHintSaving", lang)}</p>`;
   }
 
   return res.send(layout({
-    title: "Bot Builder — " + escapeHtml(botId),
+    title: "Bot Builder — " + botId, // renderLayout escapes the title itself
     content: PAGE_CSS + section(
-      `Edit bot: ${escapeHtml(bot.display_name || botId)} ${bot.enabled ? badge("enabled", "connected") : badge("disabled", "draft")}`,
+      "",
       `<p><a href="/dashboard/bot-builder">&larr; ${t("botbuilder.noticeAllBots", lang)}</a></p>` + notice +
-      nav + body
+      nav + body,
+      {
+        // The heading carries a live status badge — raw HTML by design.
+        // Everything user-controlled inside it is escaped here.
+        titleHtml:
+          `${escapeHtml(t("botbuilder.editBotTitle", lang))}: ${escapeHtml(bot.display_name || botId)} ` +
+          (bot.enabled ? badge("enabled", "connected") : badge("disabled", "draft")),
+      }
     ),
   }));
 }

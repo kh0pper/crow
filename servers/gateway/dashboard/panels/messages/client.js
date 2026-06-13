@@ -1093,8 +1093,17 @@ export function messagesClientJS(opts) {
         crowIdInput.name = 'crow_id';
         crowIdInput.value = contact.crow_id;
         form.appendChild(crowIdInput);
+        // _csrf body fallback: a dynamically built form bypasses Turbo's
+        // header hook unless submitted via requestSubmit; carry the
+        // double-submit token either way (cookie value is hex — no decode).
+        var csrfEl = document.createElement('input');
+        csrfEl.type = 'hidden';
+        csrfEl.name = '_csrf';
+        var csrfM = document.cookie.match(/(?:^|;\\s*)crow_csrf=([^;]*)/);
+        csrfEl.value = csrfM ? csrfM[1] : '';
+        form.appendChild(csrfEl);
         document.body.appendChild(form);
-        form.submit();
+        if (form.requestSubmit) form.requestSubmit(); else form.submit();
       },
     }));
   }
