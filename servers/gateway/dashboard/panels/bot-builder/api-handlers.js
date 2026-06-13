@@ -169,31 +169,39 @@ export async function handleBotBuilderPost(req, res, { db }) {
         const fvm = (b.gw_fast_voice_model || "").trim();
         const prior = (def.gateways || []).find((g) => g && g.type === "glasses");
         const priorDeviceId = prior && prior.device_id ? String(prior.device_id) : "";
-        def.gateways = deviceId
-          ? [{ type: "glasses", device_id: deviceId, ...(fvm ? { fast_voice_model: fvm } : {}) }]
-          : [];
+        // Persist the TYPE even with no device: the type-change auto-submit
+        // posts before a device is chosen, and dropping the record made the
+        // dropdown snap back to gmail on re-render (W1-4). A device-less
+        // record is a harmless UI draft — every consumer (bridge_tick,
+        // discord_gateway, gateway_runner, voice turn) keys on its own type
+        // plus required fields / device.bound_bot_id, never this record.
+        def.gateways = [{ type: "glasses", ...(deviceId ? { device_id: deviceId } : {}), ...(fvm ? { fast_voice_model: fvm } : {}) }];
         // Keep def.fast_voice_model (read by the voice turn) in sync.
         if (fvm) def.fast_voice_model = fvm;
         try {
           const { listDevices, updateDeviceProfiles } = await import("../../../../../bundles/meta-glasses/server/device-store.js");
-          // Unbind any OTHER device currently bound to this bot, and the
-          // prior device if the binding moved ("" -> null via the store).
-          const devices = await listDevices(db).catch(() => []);
-          for (const d of devices) {
-            if (d.bound_bot_id === botId && d.id !== deviceId) {
-              await updateDeviceProfiles(db, d.id, { bound_bot_id: "" });
-            }
-          }
-          if (priorDeviceId && priorDeviceId !== deviceId) {
-            await updateDeviceProfiles(db, priorDeviceId, { bound_bot_id: "" });
-          }
           if (deviceId) {
+            // Unbind any OTHER device currently bound to this bot, and the
+            // prior device if the binding moved ("" -> null via the store).
+            const devices = await listDevices(db).catch(() => []);
+            for (const d of devices) {
+              if (d.bound_bot_id === botId && d.id !== deviceId) {
+                await updateDeviceProfiles(db, d.id, { bound_bot_id: "" });
+              }
+            }
+            if (priorDeviceId && priorDeviceId !== deviceId) {
+              await updateDeviceProfiles(db, priorDeviceId, { bound_bot_id: "" });
+            }
             const patch = { bound_bot_id: botId };
             if ("gw_tts_profile_id" in b) patch.tts_profile_id = (b.gw_tts_profile_id || "").trim();
             if ("gw_stt_profile_id" in b) patch.stt_profile_id = (b.gw_stt_profile_id || "").trim();
             if ("gw_vision_profile_id" in b) patch.vision_profile_id = (b.gw_vision_profile_id || "").trim();
             await updateDeviceProfiles(db, deviceId, patch);
+          } else if (priorDeviceId) {
+            // A device WAS bound and the form now submits none — explicit unbind.
+            await updateDeviceProfiles(db, priorDeviceId, { bound_bot_id: "" });
           }
+          // No device before, none now: pure type-change draft — mutate nothing.
         } catch (err) {
           extraQ = "&warn=" + encodeURIComponent("device binding incomplete: " + err.message);
         }
@@ -216,26 +224,33 @@ export async function handleBotBuilderPost(req, res, { db }) {
         };
         const prior = (def.gateways || []).find((g) => g && g.type === "companion");
         const priorDeviceId = prior && prior.device_id ? String(prior.device_id) : "";
-        def.gateways = deviceId ? [{ type: "companion", device_id: deviceId }] : [];
+        // Persist the TYPE even with no device — same draft semantics as the
+        // glasses branch above (W1-4: device-less save must not snap the
+        // dropdown back to gmail).
+        def.gateways = [{ type: "companion", ...(deviceId ? { device_id: deviceId } : {}) }];
         def.companion_features = features;
         try {
           const { listDevices, updateDeviceProfiles } = await import("../../../../../bundles/meta-glasses/server/device-store.js");
-          const devices = await listDevices(db).catch(() => []);
-          for (const d of devices) {
-            if (d.bound_bot_id === botId && d.id !== deviceId) {
-              await updateDeviceProfiles(db, d.id, { bound_bot_id: "" });
-            }
-          }
-          if (priorDeviceId && priorDeviceId !== deviceId) {
-            await updateDeviceProfiles(db, priorDeviceId, { bound_bot_id: "" });
-          }
           if (deviceId) {
+            const devices = await listDevices(db).catch(() => []);
+            for (const d of devices) {
+              if (d.bound_bot_id === botId && d.id !== deviceId) {
+                await updateDeviceProfiles(db, d.id, { bound_bot_id: "" });
+              }
+            }
+            if (priorDeviceId && priorDeviceId !== deviceId) {
+              await updateDeviceProfiles(db, priorDeviceId, { bound_bot_id: "" });
+            }
             await updateDeviceProfiles(db, deviceId, {
               bound_bot_id: botId,
               device_kind: "companion",
               companion_features: features,
             });
+          } else if (priorDeviceId) {
+            // A device WAS bound and the form now submits none — explicit unbind.
+            await updateDeviceProfiles(db, priorDeviceId, { bound_bot_id: "" });
           }
+          // No device before, none now: pure type-change draft — mutate nothing.
         } catch (err) {
           extraQ = "&warn=" + encodeURIComponent("companion binding incomplete: " + err.message);
         }
