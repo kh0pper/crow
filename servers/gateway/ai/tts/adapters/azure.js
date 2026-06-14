@@ -8,7 +8,7 @@
  * config.defaultVoice
  */
 
-import { connectTimeout, composeSignals, TTS_TIMEOUT_MS } from "../../../../../shared/http-timeout.js";
+import { connectTimeout, composeSignals, TTS_TIMEOUT_MS } from "../../../../shared/http-timeout.js";
 
 function escapeXml(s) {
   return String(s)
