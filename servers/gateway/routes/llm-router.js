@@ -33,7 +33,7 @@ import express from "express";
 import { Readable } from "node:stream";
 import { createDbClient } from "../../db.js";
 import { resolveProviderConfig } from "../ai/resolve-profile.js";
-import { maybeAcquireLocalProvider } from "../gpu-orchestrator.js";
+import { maybeAcquireLocalProvider, warmProviderByName } from "../gpu-orchestrator.js";
 import { connectTimeout, isTimeoutError, LLM_CONNECT_TIMEOUT_MS } from "../../shared/http-timeout.js";
 
 const FAST_KEY = process.env.COMPANION_FAST_MODEL || "crow-voice/qwen3.5-4b";
@@ -281,6 +281,22 @@ export default function llmRouterRouter() {
   router.use("/llm", express.json({ limit: "10mb" }));
   router.get("/llm/v1/models", (req, res) => handleModels(res));
   router.post("/llm/v1/chat/completions", (req, res) => handleChat(req, res));
+  // POST /llm/acquire { provider } — warm a local model bundle and wait until it's
+  // ready. The gateway chat path warms inline before a turn; this gives the same
+  // capability to the pi-bots host (background jobs + bridge) which runs in a
+  // SEPARATE process and must not run its own gpu-orchestrator. Resolves a
+  // bundle-less alias (e.g. crow-local) to its bundled sibling. Loopback/tailnet
+  // only (never funnel-exposed), same as the rest of /llm.
+  router.post("/llm/acquire", async (req, res) => {
+    const provider = req.body && (req.body.provider || req.body.providerId);
+    if (!provider) return res.status(400).json({ ok: false, error: "provider required" });
+    try {
+      const warmed = await warmProviderByName(provider);
+      res.json({ ok: warmed !== false, warmed, provider });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
   // Probe-friendly health (matches the old proxy's GET / and /health).
   router.get("/llm", (req, res) => res.json({ ok: true }));
   router.get("/llm/health", (req, res) => res.json({ ok: true }));

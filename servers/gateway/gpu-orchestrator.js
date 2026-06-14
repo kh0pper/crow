@@ -213,6 +213,44 @@ export async function maybeAcquireLocalProvider(providerName) {
   }
 }
 
+/**
+ * Map a provider NAME to the bundle-backed provider that should be warmed for it.
+ * PURE (takes the loaded providers cfg). Some providers are bundle-less raw-endpoint
+ * aliases that share a baseUrl with a bundled provider — e.g. pi resolves to
+ * "crow-local" (bundleId null, :8003), but the warmable bundle is "crow-chat"
+ * (same :8003). Returns the name to warm (self if it has a bundle, else a local
+ * sibling with the same baseUrl that does), or null when nothing is warmable
+ * (cloud provider / unknown / no matching bundle).
+ */
+export function resolveWarmableProviderName(cfg, name) {
+  const provs = (cfg && cfg.providers) || {};
+  const direct = provs[name];
+  if (!direct) return null;
+  if (direct.bundleId) return name;
+  if (direct.host != null && direct.host !== "local") return null; // cloud alias — not warmable
+  const base = direct.baseUrl || direct.baseURL || direct.base_url;
+  if (!base) return null;
+  for (const [n, v] of Object.entries(provs)) {
+    if (n === name || !v || !v.bundleId) continue;
+    if (v.host != null && v.host !== "local") continue;
+    if ((v.baseUrl || v.baseURL || v.base_url) === base) return n;
+  }
+  return null;
+}
+
+/**
+ * Warm the bundle backing `name` (resolving a bundle-less alias to its sibling).
+ * Returns the acquire result (true/false/null). Safe for cloud/unknown providers
+ * (returns null — no-op). Backs POST /llm/acquire for the pi-bots background-job /
+ * bridge warm path; the gateway chat path already warms inline.
+ */
+export async function warmProviderByName(name) {
+  if (!name) return null;
+  const target = resolveWarmableProviderName(loadProviders(), name);
+  if (!target) return null;
+  return maybeAcquireLocalProvider(target);
+}
+
 // Test/introspection helpers — exported for smoke scripts.
 export const _internals = { getProvider, getMutexSiblings, getMutexGroups, mutexGroupOf };
 
