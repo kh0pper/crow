@@ -205,7 +205,7 @@ export class PiRpc {
   }
 }
 
-function loadBot(botId) {
+export function loadBot(botId) {
   const c = db(CROW_DB);
   // M3b: project_id is now the column (not JSON). The JSON copy may still
   // exist for back-compat on legacy rows but is no longer authoritative.
