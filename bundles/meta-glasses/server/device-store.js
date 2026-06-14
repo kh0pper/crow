@@ -97,30 +97,36 @@ export async function pairDevice(db, {
   const devices = await readAll(db);
   const now = new Date().toISOString();
   const existing = devices.findIndex(d => d.id === id);
-  // Re-pair preserves the prior ocr_enabled toggle — token rotation
-  // shouldn't silently revert a user's explicit opt-in.
-  const priorOcr = existing >= 0 ? !!devices[existing].ocr_enabled : false;
-  const priorRetention = existing >= 0 ? devices[existing].photo_retention : null;
+  const prior = existing >= 0 ? devices[existing] : null;
+  // Re-pair (token rotation, e.g. after an app reinstall) must NOT silently
+  // wipe the operator's bot binding or voice profiles. The app's pair call
+  // only sends id/name/generation, so any field it omits falls back to the
+  // prior record — same principle the ocr_enabled toggle already used.
+  const priorOcr = prior ? !!prior.ocr_enabled : false;
+  const priorRetention = prior ? prior.photo_retention : null;
   const retention = RETENTION_VALUES.has(photo_retention)
     ? photo_retention
     : (priorRetention && RETENTION_VALUES.has(priorRetention) ? priorRetention : "never");
+  const keep = (val, key) => (val != null ? val : (prior ? prior[key] ?? null : null));
   const record = {
     id,
     name: name || id,
-    paired_at: existing >= 0 ? devices[existing].paired_at : now,
+    paired_at: prior ? prior.paired_at : now,
     last_seen: null,
     token_hash,
-    household_profile,
-    stt_profile_id,
-    ai_profile_slug,
-    tts_profile_id,
-    vision_profile_id,
+    household_profile: keep(household_profile, "household_profile"),
+    stt_profile_id: keep(stt_profile_id, "stt_profile_id"),
+    ai_profile_slug: keep(ai_profile_slug, "ai_profile_slug"),
+    tts_profile_id: keep(tts_profile_id, "tts_profile_id"),
+    vision_profile_id: keep(vision_profile_id, "vision_profile_id"),
     ocr_enabled: !!(ocr_enabled || priorOcr),
     photo_retention: retention,
     generation,
     device_kind: device_kind === "companion" ? "companion" : "glasses",
-    companion_features:
-      companion_features ?? (existing >= 0 ? devices[existing].companion_features ?? null : null),
+    companion_features: companion_features ?? (prior ? prior.companion_features ?? null : null),
+    // Preserve the Bot Builder binding across re-pair — un-binding on token
+    // rotation was a silent footgun (operator would have to re-bind every reinstall).
+    bound_bot_id: prior ? (prior.bound_bot_id ?? null) : null,
   };
   if (existing >= 0) devices[existing] = record;
   else devices.push(record);
