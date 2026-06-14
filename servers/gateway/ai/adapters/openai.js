@@ -139,6 +139,13 @@ export default function createOpenAIAdapter(config) {
       if (openaiTools) {
         body.tools = openaiTools;
       }
+      // Pass-through for vLLM/llama.cpp chat-template flags (e.g.
+      // { enable_thinking: false } to suppress qwen3's reasoning block on the
+      // voice route). Only sent when the caller opts in — cloud endpoints that
+      // reject unknown fields never see it unless explicitly requested.
+      if (options.chatTemplateKwargs && typeof options.chatTemplateKwargs === "object") {
+        body.chat_template_kwargs = options.chatTemplateKwargs;
+      }
 
       const headers = {
         "Content-Type": "application/json",
