@@ -30,12 +30,16 @@ import Database from "better-sqlite3";
 import { CronExpressionParser } from "cron-parser";
 import { generateJobId } from "./job_runner.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
+import { BOT_JOBS_DDL } from "./bot-jobs-schema.mjs";
 
 export const BOTCRON_PREFIX = "pipeline:botcron:";
 
+// Lazy self-heal of bot_jobs (a fired schedule INSERTs one) — once per process.
+let _botJobsEnsured = false;
 function dbConn() {
   const d = new Database(botsDbPath());
   d.pragma("busy_timeout = 10000");
+  if (!_botJobsEnsured) { try { d.exec(BOT_JOBS_DDL); _botJobsEnsured = true; } catch {} }
   return d;
 }
 
