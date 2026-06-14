@@ -6,7 +6,7 @@
  * config.defaultVoice — default voice_id
  */
 
-import { connectTimeout, composeSignals, TTS_TIMEOUT_MS } from "../../../../../shared/http-timeout.js";
+import { connectTimeout, composeSignals, TTS_TIMEOUT_MS } from "../../../../shared/http-timeout.js";
 
 const DEFAULT_BASE_URL = "https://api.elevenlabs.io";
 
