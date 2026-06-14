@@ -573,34 +573,16 @@ export function getChatTools(opts = {}) {
     },
   });
 
-  // Bound bots: device-native + deep-work tools advertised as explicit schemas.
-  // crow_orchestrate/_status — the advertised crow_orchestrator category proxy is
-  // NOT executable (executeTool's regex omits orchestrator); naming them as real
-  // tools lets strict providers call them (deep work rides crow_orchestrate, B5).
+  // Bound bots: device-native tools advertised as explicit schemas.
   // crow_glasses_capture_photo — intercepted in the meta-glasses panel and never
   // reaches an MCP server, but must be advertised so the model can take photos.
+  // NOTE (2026-06-14): crow_orchestrate/_status were force-injected here for EVERY
+  // bound bot. They are removed — the orchestrator is being retired (a weak fast-voice
+  // model mis-fired crow_orchestrate on trivial commands like "play my music", and it
+  // ran on the orchestrator's startup-default provider — a dead cloud key on some
+  // hosts — surfacing as "llm server connection issue"). Background "deep work" will
+  // return via a pi-backed crow_delegate tool (see Plan B). See plan doc.
   if (scope) {
-    tools.push({
-      name: "crow_orchestrate",
-      description: "Start a multi-agent team on a complex goal (research, multi-step analysis, code work). Runs in the BACKGROUND and returns a job id immediately — ack to the user, then check crow_orchestrate_status on a later turn.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          goal: { type: "string", description: "The goal for the agent team" },
-          preset: { type: "string", description: "Team preset (research, memory_ops, full, ...). Optional." },
-        },
-        required: ["goal"],
-      },
-    });
-    tools.push({
-      name: "crow_orchestrate_status",
-      description: "Check status / retrieve the result of an orchestration job by its job id. Returns running, completed (with summary), or failed.",
-      inputSchema: {
-        type: "object",
-        properties: { jobId: { type: "string", description: "Job id returned by crow_orchestrate" } },
-        required: ["jobId"],
-      },
-    });
     tools.push({
       name: "crow_glasses_capture_photo",
       description: "Capture a photo from the paired glasses camera (and, when a vision profile is set, describe it). Use when the user asks what you see or to take a picture.",
