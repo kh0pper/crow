@@ -25,9 +25,14 @@ import { hostAdapters, getAdapter, isHostManaged } from "./index.mjs";
 import { reapStalePi } from "../pi_lifecycle.mjs";
 import { botsDbPath } from "../instance-paths.mjs";
 import { runtimeGate } from "../runtime-gate.mjs";
+import { tickJobs } from "../job_runner.mjs";
+import { makeChannelDeliverer } from "./deliver.mjs";
 
 const CROW_DB = botsDbPath();
 const REAP_INTERVAL_MS = Number(process.env.PIBOT_REAP_INTERVAL_MS || 60000);
+// Background-job poll cadence. Coarse on purpose (S2: ≥60s, like pipeline-runner)
+// — the claim is one atomic UPDATE and a job holds no DB txn across its pi spawn.
+const JOB_POLL_MS = Number(process.env.PIBOT_JOB_POLL_MS || 60000);
 
 function log(msg) { console.log("[gateways] " + msg); }
 function db() { const d = new Database(CROW_DB); d.pragma("busy_timeout = 10000"); return d; }
@@ -54,6 +59,9 @@ function loadGatewayJobs() {
 const handles = [];   // { stop } for each started adapter
 let reaper = null;
 let _gate = null;
+let jobTimer = null;
+let jobRunning = false; // guard: never let two job ticks overlap (a job can run minutes)
+const deliverChannel = makeChannelDeliverer({ log: (m) => log("[deliver] " + m) });
 
 async function startAll() {
   const jobs = loadGatewayJobs();
@@ -98,10 +106,30 @@ function startReaper() {
   log("out-of-process reaper armed (every " + Math.round(REAP_INTERVAL_MS / 1000) + "s)");
 }
 
+// Background-job runner (Plan B Part 1 Stage 2). This host is the PRIMARY runner:
+// it holds the telegram/slack transports and can deliver to every channel (gmail
+// via gio, all sockets via stateless SDK-REST). Gated with the adapters so jobs
+// only run when bot_runtime is on. tickJobs claims at most one job per sweep
+// behind a reserved-slot gate, so it can never starve an interactive turn.
+async function jobSweep() {
+  if (jobRunning) return; // a job may run for minutes — never overlap sweeps
+  jobRunning = true;
+  try { await tickJobs({ log: (m) => log("[jobs] " + m), deliverChannel }); }
+  catch (e) { log("[jobs] error (non-fatal): " + ((e && e.message) || e)); }
+  finally { jobRunning = false; }
+}
+function startJobs() {
+  jobTimer = setInterval(jobSweep, JOB_POLL_MS);
+  if (jobTimer.unref) jobTimer.unref();
+  log("background-job runner armed (every " + Math.round(JOB_POLL_MS / 1000) + "s)");
+}
+function stopJobs() { if (jobTimer) { clearInterval(jobTimer); jobTimer = null; } }
+
 async function shutdown() {
   log("SIGTERM — stopping " + handles.length + " adapter(s)");
   if (_gate) { try { _gate.dispose(); } catch {} }
   if (reaper) { clearInterval(reaper); reaper = null; }
+  stopJobs();
   for (const h of handles) { try { await h.stop(); } catch {} }
   process.exit(0);
 }
@@ -113,6 +141,10 @@ process.on("SIGINT", shutdown);
   // F3b: self-gate on feature_flags.bot_runtime — start/stop adapters on the
   // toggle without a restart. Off = idle (service up, no adapters connected).
   // NOTE: this db() connection is intentionally long-lived — the gate re-reads it every poll; do not close it.
-  _gate = runtimeGate(db(), { start: startAll, stop: stopAdapters, logTag: "gateways" });
+  _gate = runtimeGate(db(), {
+    start: async () => { await startAll(); startJobs(); },
+    stop: async () => { await stopAdapters(); stopJobs(); },
+    logTag: "gateways",
+  });
   setInterval(() => {}, 1 << 30); // keep the process alive across idle periods
 })();

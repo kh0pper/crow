@@ -158,6 +158,22 @@ function acquireLock() {
       }
     }
   }
+  // Background-job drain (Plan B Part 1 Stage 2). On a Gmail-only deployment with
+  // NO pibot-gateways host, this is the only place queued bot_jobs get run +
+  // delivered. Where a gateways host IS present it's the primary runner; the
+  // atomic single-row claim + the reserved-slot gate inside tickJobs make running
+  // here too safe (whoever claims first wins, never exceeding the pi budget). One
+  // job per invocation keeps this oneshot tick bounded; a long job (up to the 10-
+  // min JOB_TIMEOUT) holds the tick's lock, delaying the next mail poll — the
+  // accepted tradeoff for a host with no dedicated job runner.
+  try {
+    const { tickJobs } = await import("./job_runner.mjs");
+    const { makeChannelDeliverer } = await import("./gateways/deliver.mjs");
+    const deliverChannel = makeChannelDeliverer({ log: (m) => console.log("[tick:deliver] " + m) });
+    const jr = await tickJobs({ log: (m) => console.log("[tick:jobs] " + m), deliverChannel });
+    if (jr && jr.ran) console.log(`[tick] background job ${jr.ran} → ${jr.status}`);
+  } catch (e) { console.error("[tick] job drain error (non-fatal): " + (e && e.message || e)); }
+
   try { unlinkSync(LOCK); } catch {}
   console.log(`[tick] complete — processed ${processed} inbound`);
   process.exit(0);
