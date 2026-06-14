@@ -29,7 +29,7 @@
  * proved the crow-chat --jinja regex scar does NOT reproduce under pi).
  */
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { botsDbPath } from "./instance-paths.mjs";
 import { mintRemoteBlocks } from "./remote-blocks.mjs";
@@ -289,6 +289,12 @@ export function probeServerTools(block, opts = {}) {
   // spawn(undefined) throws "The 'file' argument must be of type string".
   if (block && block.url && !block.command) {
     return probeHttpServerTools(block, timeoutMs);
+  }
+  // Removed / half-installed addon: its cwd points at a bundle dir that no
+  // longer exists, so spawn() would throw ENOENT ("proc error: spawn node
+  // ENOENT"). Report it cleanly instead of a cryptic error / 15s hang.
+  if (block && block.cwd && !existsSync(block.cwd)) {
+    return Promise.resolve({ ok: false, error: "not installed (missing " + block.cwd + ")" });
   }
   return new Promise((resolve) => {
     let done = false;

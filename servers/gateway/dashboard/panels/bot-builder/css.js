@@ -44,9 +44,13 @@ export function botBuilderStyles() {
   .btb-mcp-section{margin:.75rem 0 .5rem}
   .btb-mcp-section b{font-size:.9rem}
   .btb-mcp-count{font-size:.8rem;color:var(--crow-text-muted)}
-  .btb-mcp-grid{display:flex;flex-wrap:wrap;gap:0}
-  .btb-mcp-tool{display:inline-flex;align-items:center;gap:.3rem;width:48%;font-size:.85rem;padding:.15rem 0}
-  .btb-mcp-regex{color:var(--crow-text-secondary);font-size:.8rem}
+  /* Responsive: auto-fill collapses to 1 column on phones (fixed 48% widths
+     overflowed and overlapped long tool names); long names wrap instead of
+     colliding; checkbox stays top-aligned beside a wrapped 2-line name. */
+  .btb-mcp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:.1rem .9rem}
+  .btb-mcp-tool{display:flex;align-items:flex-start;gap:.45rem;min-width:0;font-size:.85rem;padding:.25rem 0;line-height:1.3;overflow-wrap:anywhere}
+  .btb-mcp-tool input[type="checkbox"]{margin:.15rem 0 0;flex:none}
+  .btb-mcp-regex{color:var(--crow-text-secondary);font-size:.8rem;white-space:nowrap}
 
   /* Tables */
   .btb-table{width:100%;border-collapse:collapse;font-size:.85rem}
