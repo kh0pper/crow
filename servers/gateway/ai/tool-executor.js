@@ -19,6 +19,7 @@ import { createConsultingServer } from "../../consulting/server.js";
 import { TOOL_MANIFESTS } from "../tool-manifests.js";
 import { connectedServers } from "../proxy.js";
 import { voiceCategoryFor } from "../../../scripts/pi-bots/ext_registry.mjs";
+import { createDbClient } from "../../db.js";
 
 /**
  * Category proxies the chat tool-executor can actually dispatch. Mirrors the
@@ -172,8 +173,18 @@ function resolveToolCategory(action) {
  * Manages a pool of lazy in-process MCP clients and dispatches
  * tool calls to the appropriate server.
  */
-export function createToolExecutor() {
+/**
+ * @param {object} [opts]
+ * @param {object} [opts.botDef]          bound bot definition — sets the default
+ *                                        delegate target (crow_delegate's `bot`).
+ * @param {object} [opts.defaultDeliverTo] deliver_to spec to use when crow_delegate
+ *                                        is called without one (e.g. the current
+ *                                        gateway turn's thread). Falls back to poll.
+ */
+export function createToolExecutor(opts = {}) {
   const clients = new Map(); // category → Client
+  const boundBotId = opts.botDef && opts.botDef.bot_id ? opts.botDef.bot_id : null;
+  const defaultDeliverTo = opts.defaultDeliverTo || null;
 
   async function getClient(category) {
     if (clients.has(category)) return clients.get(category);
@@ -234,6 +245,17 @@ export function createToolExecutor() {
         return await handleDiscover(args);
       }
 
+      // crow_delegate / crow_job_status — pi-backed background jobs (Plan B Part 1
+      // Stage 3, the crow_orchestrate replacement). Pure DB ops: enqueue a queued
+      // bot_jobs row / read one back. The pi-bots host (gateway_runner / bridge_tick)
+      // claims + runs + delivers it out of band.
+      if (name === "crow_delegate") {
+        return await handleDelegate(args);
+      }
+      if (name === "crow_job_status") {
+        return await handleJobStatus(args);
+      }
+
       // crow_tools — external integrations (legacy wrapper, still supported)
       if (name === "crow_tools") {
         return await handleExternalTool(args);
@@ -284,6 +306,68 @@ export function createToolExecutor() {
         };
       })
     );
+  }
+
+  /**
+   * crow_delegate — enqueue a background job for a Crow bot. The bot runs the goal
+   * detached in the pi-bots host and the result is delivered per deliver_to. This
+   * is the crow_orchestrate replacement: a single strong agent (pi) doing the work
+   * in one coherent context, async. Pure DB op here — no process is spawned.
+   * Defaults: bot = the bound bot; deliver_to = the turn's thread (if the caller
+   * provided one) else poll-mode (read back later with crow_job_status).
+   */
+  async function handleDelegate(args) {
+    const goal = (args && typeof args.goal === "string") ? args.goal.trim() : "";
+    if (!goal) return { result: "Error: crow_delegate requires a non-empty 'goal'", isError: true };
+    const botId = (args && args.bot) || boundBotId;
+    if (!botId) {
+      return { result: "Error: crow_delegate needs a 'bot' (no bot is bound to this conversation)", isError: true };
+    }
+    // deliver_to: explicit arg wins; else the caller's default (turn thread); else poll.
+    let deliverTo = args && args.deliver_to != null ? args.deliver_to : defaultDeliverTo;
+    if (deliverTo && typeof deliverTo === "string") {
+      try { deliverTo = JSON.parse(deliverTo); } catch { /* leave as-is; stored verbatim */ }
+    }
+    const db = createDbClient();
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT bot_id, enabled FROM pi_bot_defs WHERE bot_id = ?",
+        args: [botId],
+      });
+      if (!rows.length) return { result: `Error: unknown bot '${botId}'`, isError: true };
+      if (!rows[0].enabled) return { result: `Error: bot '${botId}' is disabled`, isError: true };
+
+      const jobId = "job-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+      const deliverJson = deliverTo == null ? null
+        : (typeof deliverTo === "string" ? deliverTo : JSON.stringify(deliverTo));
+      const escalate = args && (args.escalate === true || args.escalate === 1) ? 1 : 0;
+      await db.execute({
+        sql: "INSERT INTO bot_jobs (job_id, bot_id, goal, status, deliver_to, source, escalate) "
+           + "VALUES (?, ?, ?, 'queued', ?, ?, ?)",
+        args: [jobId, botId, goal, deliverJson, "chat", escalate],
+      });
+      const kind = (deliverTo && deliverTo.kind) || "poll";
+      return {
+        result: JSON.stringify({ jobId, status: "queued", bot: botId, deliver: kind }),
+        isError: false,
+      };
+    } finally { try { db.close(); } catch {} }
+  }
+
+  /** crow_job_status — read a delegated job's current state (poll-mode retrieval). */
+  async function handleJobStatus(args) {
+    const jobId = args && args.jobId;
+    if (!jobId) return { result: "Error: crow_job_status requires 'jobId'", isError: true };
+    const db = createDbClient();
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT job_id, bot_id, status, result, error, tool_calls, attempts, "
+           + "created_at, started_at, ended_at FROM bot_jobs WHERE job_id = ?",
+        args: [jobId],
+      });
+      if (!rows.length) return { result: `Error: no job '${jobId}'`, isError: true };
+      return { result: JSON.stringify(rows[0]), isError: false };
+    } finally { try { db.close(); } catch {} }
   }
 
   /**
@@ -573,15 +657,50 @@ export function getChatTools(opts = {}) {
     },
   });
 
+  // crow_delegate / crow_job_status — pi-backed background jobs (Plan B Part 1
+  // Stage 3). The crow_orchestrate replacement: hand a long/background task to a
+  // Crow bot, which runs it async; the result is delivered or polled. UNLIKE the
+  // force-injected crow_orchestrate (which mis-fired on trivial voice commands and
+  // hit a dead provider), this only enqueues a DB row — but the description is kept
+  // tight so a weak fast-voice model doesn't reach for it on ordinary requests.
+  // Advertised in both bound and unbound turns (a core capability, not scoped).
+  tools.push({
+    name: "crow_delegate",
+    description: "Hand off a LONG or BACKGROUND task to be done asynchronously by a Crow bot, returning "
+      + "immediately with a job id. Use ONLY when the user explicitly wants substantial work done in the "
+      + "background or later (e.g. 'research X and report back', 'draft a long write-up'). Do NOT use it for "
+      + "normal, quick requests you can answer or tool-call directly now (playing music, recalling a memory, "
+      + "taking a photo, answering a question). The result is delivered per deliver_to, or read back later "
+      + "with crow_job_status.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        goal: { type: "string", description: "The task to perform, self-contained." },
+        bot: { type: "string", description: "Bot id to run it (default: the bot bound to this conversation)." },
+        deliver_to: {
+          type: "object",
+          description: "Where the result goes. Omit for poll-mode. { kind:'memory', memory_category? } stores "
+            + "it as a Crow memory; { kind:'poll' } leaves it for crow_job_status.",
+        },
+        escalate: { type: "boolean", description: "Use the bot's stronger/escalated model for this job." },
+      },
+      required: ["goal"],
+    },
+  });
+  tools.push({
+    name: "crow_job_status",
+    description: "Check a delegated background job by its job id (returned by crow_delegate). Returns its "
+      + "status (queued/running/completed/failed) and, when finished, the result.",
+    inputSchema: {
+      type: "object",
+      properties: { jobId: { type: "string", description: "The job id from crow_delegate." } },
+      required: ["jobId"],
+    },
+  });
+
   // Bound bots: device-native tools advertised as explicit schemas.
   // crow_glasses_capture_photo — intercepted in the meta-glasses panel and never
   // reaches an MCP server, but must be advertised so the model can take photos.
-  // NOTE (2026-06-14): crow_orchestrate/_status were force-injected here for EVERY
-  // bound bot. They are removed — the orchestrator is being retired (a weak fast-voice
-  // model mis-fired crow_orchestrate on trivial commands like "play my music", and it
-  // ran on the orchestrator's startup-default provider — a dead cloud key on some
-  // hosts — surfacing as "llm server connection issue"). Background "deep work" will
-  // return via a pi-backed crow_delegate tool (see Plan B). See plan doc.
   if (scope) {
     tools.push({
       name: "crow_glasses_capture_photo",
