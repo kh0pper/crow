@@ -985,7 +985,12 @@ LONG WORK via the orchestrator. For research, multi-step analysis, code work, or
       // speak it — only feed post-</think> text into the TTS buffer.
       let ttsSpeakOpen = false;
       let ttsPre = "";
-      for await (const event of chatAdapter.chatStream(messages, tools, { temperature: 0.7, maxTokens: roundMaxTokens })) {
+      // enable_thinking:false suppresses qwen3's reasoning preamble on the
+      // voice route — it's freeform inline text (no <think> tags) so it can't
+      // be cleanly stripped from speech; a voice reply should be answer-only
+      // and low-latency anyway. (The <think>-gate above still backstops any
+      // model that DOES use tags.) Ignored by adapters that don't read it.
+      for await (const event of chatAdapter.chatStream(messages, tools, { temperature: 0.7, maxTokens: roundMaxTokens, chatTemplateKwargs: { enable_thinking: false } })) {
         if (event.type === "content_delta" && event.text) {
           sendText(ws, { type: "llm_delta", text: event.text });
           assistantContent += event.text;
