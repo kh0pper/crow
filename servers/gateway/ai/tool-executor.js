@@ -20,6 +20,17 @@ import { TOOL_MANIFESTS } from "../tool-manifests.js";
 import { connectedServers } from "../proxy.js";
 import { voiceCategoryFor } from "../../../scripts/pi-bots/ext_registry.mjs";
 import { createDbClient } from "../../db.js";
+import { CronExpressionParser } from "cron-parser";
+
+// Bot-cron schedule namespace (Plan B Part 1 Stage 4). MUST stay in sync with
+// scripts/pi-bots/bot_scheduler.mjs BOTCRON_PREFIX. Namespaced UNDER 'pipeline:'
+// so the gateway notification scheduler's `NOT LIKE 'pipeline:%'` catch-all skips
+// these rows (C1 — avoids the next_run data-loss race).
+const BOTCRON_PREFIX = "pipeline:botcron:";
+function botcronNextRun(cronExpression, fromDate = new Date()) {
+  try { return CronExpressionParser.parse(cronExpression, { currentDate: fromDate }).next().toISOString(); }
+  catch { return null; }
+}
 
 /**
  * Category proxies the chat tool-executor can actually dispatch. Mirrors the
@@ -255,6 +266,15 @@ export function createToolExecutor(opts = {}) {
       if (name === "crow_job_status") {
         return await handleJobStatus(args);
       }
+      if (name === "crow_schedule_bot") {
+        return await handleScheduleBot(args);
+      }
+      if (name === "crow_list_bot_schedules") {
+        return await handleListBotSchedules(args);
+      }
+      if (name === "crow_delete_bot_schedule") {
+        return await handleDeleteBotSchedule(args);
+      }
 
       // crow_tools — external integrations (legacy wrapper, still supported)
       if (name === "crow_tools") {
@@ -367,6 +387,88 @@ export function createToolExecutor(opts = {}) {
       });
       if (!rows.length) return { result: `Error: no job '${jobId}'`, isError: true };
       return { result: JSON.stringify(rows[0]), isError: false };
+    } finally { try { db.close(); } catch {} }
+  }
+
+  /**
+   * crow_schedule_bot — create a recurring bot-cron schedule. Stores the job spec
+   * ({goal, deliver_to?, escalate?, label?}) as JSON in schedules.description under
+   * the task "pipeline:botcron:<bot_id>"; the pi-bots bot_scheduler enqueues a
+   * bot_jobs row each time it fires. Mirrors crow_schedule_pipeline.
+   */
+  async function handleScheduleBot(args) {
+    const goal = (args && typeof args.goal === "string") ? args.goal.trim() : "";
+    const cron = (args && typeof args.cron === "string") ? args.cron.trim() : "";
+    if (!goal) return { result: "Error: crow_schedule_bot requires a 'goal'", isError: true };
+    if (!cron) return { result: "Error: crow_schedule_bot requires a 'cron' expression", isError: true };
+    const botId = (args && args.bot) || boundBotId;
+    if (!botId) return { result: "Error: crow_schedule_bot needs a 'bot'", isError: true };
+    const nextRun = botcronNextRun(cron);
+    if (!nextRun) return { result: `Error: invalid cron expression '${cron}'`, isError: true };
+
+    const db = createDbClient();
+    try {
+      const { rows } = await db.execute({ sql: "SELECT enabled FROM pi_bot_defs WHERE bot_id=?", args: [botId] });
+      if (!rows.length) return { result: `Error: unknown bot '${botId}'`, isError: true };
+      if (!rows[0].enabled) return { result: `Error: bot '${botId}' is disabled`, isError: true };
+
+      const spec = { goal };
+      if (args.deliver_to != null) {
+        spec.deliver_to = typeof args.deliver_to === "string"
+          ? (() => { try { return JSON.parse(args.deliver_to); } catch { return args.deliver_to; } })()
+          : args.deliver_to;
+      }
+      if (args.escalate === true || args.escalate === 1) spec.escalate = true;
+      if (args.label) spec.label = String(args.label);
+
+      const { rows: ins } = await db.execute({
+        sql: "INSERT INTO schedules (task, cron_expression, description, enabled, next_run) "
+           + "VALUES (?, ?, ?, 1, ?) RETURNING id",
+        args: [BOTCRON_PREFIX + botId, cron, JSON.stringify(spec), nextRun],
+      });
+      return {
+        result: JSON.stringify({ scheduleId: ins[0].id, bot: botId, cron, next_run: nextRun }),
+        isError: false,
+      };
+    } finally { try { db.close(); } catch {} }
+  }
+
+  /** crow_list_bot_schedules — list bot-cron schedules (optionally for one bot). */
+  async function handleListBotSchedules(args) {
+    const botId = (args && args.bot) || null;
+    const db = createDbClient();
+    try {
+      const sql = "SELECT id, task, cron_expression, description, enabled, last_run, next_run FROM schedules "
+        + "WHERE task LIKE ?" + (botId ? " AND task = ?" : "") + " ORDER BY id";
+      const sqlArgs = botId ? [BOTCRON_PREFIX + "%", BOTCRON_PREFIX + botId] : [BOTCRON_PREFIX + "%"];
+      const { rows } = await db.execute({ sql, args: sqlArgs });
+      const list = rows.map((r) => {
+        let spec = {};
+        try { spec = JSON.parse(r.description || "{}"); } catch { spec = {}; }
+        return {
+          scheduleId: r.id, bot: r.task.slice(BOTCRON_PREFIX.length), cron: r.cron_expression,
+          enabled: !!r.enabled, goal: spec.goal, deliver_to: spec.deliver_to || null,
+          label: spec.label || null, last_run: r.last_run, next_run: r.next_run,
+        };
+      });
+      return { result: JSON.stringify(list), isError: false };
+    } finally { try { db.close(); } catch {} }
+  }
+
+  /** crow_delete_bot_schedule — delete a bot-cron schedule by id (bot-cron rows only). */
+  async function handleDeleteBotSchedule(args) {
+    const id = args && args.scheduleId;
+    if (id == null) return { result: "Error: crow_delete_bot_schedule requires 'scheduleId'", isError: true };
+    const db = createDbClient();
+    try {
+      // Guard: only ever delete a pipeline:botcron: row, never an arbitrary schedule.
+      const { rows } = await db.execute({
+        sql: "SELECT id FROM schedules WHERE id=? AND task LIKE ?",
+        args: [id, BOTCRON_PREFIX + "%"],
+      });
+      if (!rows.length) return { result: `Error: no bot schedule #${id}`, isError: true };
+      await db.execute({ sql: "DELETE FROM schedules WHERE id=? AND task LIKE ?", args: [id, BOTCRON_PREFIX + "%"] });
+      return { result: JSON.stringify({ deleted: id }), isError: false };
     } finally { try { db.close(); } catch {} }
   }
 
@@ -697,6 +799,47 @@ export function getChatTools(opts = {}) {
       required: ["jobId"],
     },
   });
+
+  // Bot-cron management (Stage 4). Administrative — advertised only in the UNBOUND
+  // surface (dashboard chat), NOT scoped voice bots, to keep the per-voice-turn
+  // tool surface lean (the crow_orchestrate misfire lesson). The recurring job is
+  // composed with crow_delegate's runner via the bot_jobs table.
+  if (!scope) {
+    tools.push({
+      name: "crow_schedule_bot",
+      description: "Schedule a Crow bot to run a goal on a recurring cron schedule. The result is delivered "
+        + "per deliver_to (default poll). Use for recurring background work (e.g. a daily digest).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          goal: { type: "string", description: "The task to run each time." },
+          cron: { type: "string", description: "Cron expression, e.g. '0 8 * * *' for 8am daily." },
+          bot: { type: "string", description: "Bot id to run it." },
+          deliver_to: { type: "object", description: "Result destination, e.g. { kind:'memory' }. Omit for poll." },
+          escalate: { type: "boolean", description: "Use the bot's stronger model for each run." },
+          label: { type: "string", description: "Human label for the schedule." },
+        },
+        required: ["goal", "cron", "bot"],
+      },
+    });
+    tools.push({
+      name: "crow_list_bot_schedules",
+      description: "List recurring bot-cron schedules (optionally filtered to one bot).",
+      inputSchema: {
+        type: "object",
+        properties: { bot: { type: "string", description: "Filter to this bot id (optional)." } },
+      },
+    });
+    tools.push({
+      name: "crow_delete_bot_schedule",
+      description: "Delete a recurring bot-cron schedule by its scheduleId (from crow_list_bot_schedules).",
+      inputSchema: {
+        type: "object",
+        properties: { scheduleId: { type: "number", description: "The schedule id to delete." } },
+        required: ["scheduleId"],
+      },
+    });
+  }
 
   // Bound bots: device-native tools advertised as explicit schemas.
   // crow_glasses_capture_photo — intercepted in the meta-glasses panel and never
