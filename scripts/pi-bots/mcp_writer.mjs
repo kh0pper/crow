@@ -240,12 +240,56 @@ function deepHasPattern(schema, depth = 0) {
 }
 
 /**
- * Live `tools/list` for one MCP server block (command/args/cwd/env exactly as
- * pi-lab/mcp-client would spawn it). Never throws — returns {ok:false,error}.
+ * Live `tools/list` for a URL-based (streamable HTTP) MCP server block.
+ * Mirrors the stdio probe's return shape. Never throws.
+ */
+async function probeHttpServerTools(block, timeoutMs) {
+  let client, transport;
+  try {
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const { StreamableHTTPClientTransport } = await import(
+      "@modelcontextprotocol/sdk/client/streamableHttp.js"
+    );
+    const requestInit = {};
+    if (block.headers && typeof block.headers === "object") requestInit.headers = block.headers;
+    transport = new StreamableHTTPClientTransport(new URL(block.url), { requestInit });
+    client = new Client({ name: "pibot-picker", version: "0" });
+    let timer;
+    await Promise.race([
+      client.connect(transport),
+      new Promise((_, rej) => {
+        timer = setTimeout(() => rej(new Error("connect timeout")), timeoutMs);
+      }),
+    ]);
+    clearTimeout(timer);
+    const list = await client.listTools();
+    const tools = (list && list.tools ? list.tools : []).map((t) => ({
+      name: t.name,
+      description: (t.description || "").slice(0, 240),
+      hasPattern: deepHasPattern(t.inputSchema),
+    }));
+    return { ok: true, serverName: block.url, tools };
+  } catch (e) {
+    return { ok: false, error: "http probe failed: " + (e.message || String(e)) };
+  } finally {
+    try { await client?.close(); } catch { /* ignore */ }
+    try { await transport?.close(); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Live `tools/list` for one MCP server block. Handles both stdio servers
+ * (command/args/cwd/env exactly as pi-lab/mcp-client would spawn it) and
+ * URL-based streamable-HTTP servers. Never throws — returns {ok:false,error}.
  * @returns {Promise<{ok:boolean, serverName?:string, tools?:Array<{name:string,description:string,hasPattern:boolean}>, error?:string}>}
  */
 export function probeServerTools(block, opts = {}) {
   const timeoutMs = opts.timeoutMs || 15000;
+  // URL-based (streamable HTTP) MCP server — probe over HTTP, never stdio spawn.
+  // spawn(undefined) throws "The 'file' argument must be of type string".
+  if (block && block.url && !block.command) {
+    return probeHttpServerTools(block, timeoutMs);
+  }
   return new Promise((resolve) => {
     let done = false;
     const finish = (r) => {
