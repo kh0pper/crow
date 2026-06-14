@@ -12,10 +12,12 @@
  *
  * Design (review-hardened):
  *  - The bot_jobs TABLE is the cross-process IPC channel: the gateway and
- *    scripts/pi-bots/ open the SAME crow.db. crow.db is DELETE journal mode, so a
- *    single UPDATE...RETURNING claim is atomic (SQLite serializes writers). We
- *    NEVER hold a transaction across the (minutes-long) pi spawn — claim is one
- *    brief sync UPDATE, run is connection-free, finalize is one brief UPDATE.
+ *    scripts/pi-bots/ open the SAME crow.db. journal_mode is RAM-dependent
+ *    (resolveJournalMode: WAL on >2 GiB hosts — crow/mpa/grackle — DELETE only on
+ *    ≤2 GiB like black-swan); a single UPDATE...RETURNING claim is atomic in BOTH
+ *    modes (SQLite serializes writers). We NEVER hold a transaction across the
+ *    (minutes-long) pi spawn — claim is one brief sync UPDATE, run is
+ *    connection-free, finalize is one brief UPDATE.
  *  - CONCURRENCY (C3): jobs ride the same countLivePi()/maxPi budget as live
  *    turns + skill reviews, but with a RESERVED slot — a job is claimed only when
  *    countLivePi() < maxPi-1 (on a 2-slot node: only when idle), so a background
@@ -212,11 +214,19 @@ export async function runJob(job, { log = () => {} } = {}) {
 
 /**
  * Deliver a completed job's result per deliver_to JSON:
- *   { kind: "memory", memory_category? }  → store as a Crow memory
- *   { kind: "gateway", gateway_type, gateway_thread_id } → reply on the channel (Stage 2/3)
- *   { kind: "poll" } | null               → no push; caller reads bot_jobs.result
+ *   { kind: "memory", memory_category? }                 → store as a Crow memory (inline)
+ *   { kind: "poll" } | null                              → no push; caller reads bot_jobs.result
+ *   { kind: "gmail",   to, reply_to?, subject?, thread } → reply on the Gmail thread
+ *   { kind: "gateway", gateway_type, gateway_thread_id } → post to the socket channel
+ *
+ * memory/poll are transport-free and handled here. The CHANNEL kinds (gmail +
+ * the socket gateways) are delegated to `deliverChannel` — the host-provided
+ * callback (see gateways/deliver.makeChannelDeliverer) that owns the actual
+ * Gmail CLI / SDK-REST send. When no deliverChannel is injected (e.g. a bare
+ * detached worker), the result simply stays in bot_jobs.result for poll
+ * retrieval rather than being lost.
  */
-export async function deliverResult(job, text, { log = () => {} } = {}) {
+export async function deliverResult(job, text, { log = () => {}, deliverChannel = null } = {}) {
   let spec = null;
   try { spec = job.deliver_to ? JSON.parse(job.deliver_to) : null; } catch { spec = null; }
   const kind = (spec && spec.kind) || "poll";
@@ -230,11 +240,12 @@ export async function deliverResult(job, text, { log = () => {} } = {}) {
     } finally { c.close(); }
     return { delivered: "memory" };
   }
-  if (kind === "gateway") {
-    // Channel delivery requires the live in-memory transport (Discord/Telegram/
-    // Slack) held by the pibot-gateways host, or the gmail CLI. Wired in Stage 2.
-    log(`job ${job.job_id} → gateway delivery (${spec && spec.gateway_type}) deferred to the gateways host (Stage 2)`);
-    return { delivered: "deferred-gateway" };
+  if (kind === "gmail" || kind === "gateway") {
+    if (!deliverChannel) {
+      log(`job ${job.job_id} → ${kind} delivery deferred (no channel deliverer in this process); result kept for poll`);
+      return { delivered: "deferred" };
+    }
+    return await deliverChannel(job, spec, text);
   }
   return { delivered: "none" };
 }
@@ -244,7 +255,7 @@ export async function deliverResult(job, text, { log = () => {} } = {}) {
  * spare (reserved-slot gate) — claim and run ONE job to completion, finalize,
  * and deliver. Async; holds no DB connection across the pi run.
  */
-export async function tickJobs({ log = () => {} } = {}) {
+export async function tickJobs({ log = () => {}, deliverChannel = null } = {}) {
   recoverStaleClaims(log);
 
   const maxPi = LIFECYCLE_DEFAULTS.maxPi;
@@ -267,7 +278,7 @@ export async function tickJobs({ log = () => {} } = {}) {
   log(`job ${job.job_id} → ${outcome.status}${outcome.error ? " (" + outcome.error + ")" : ""}`);
 
   if (outcome.status === "completed") {
-    try { await deliverResult(job, outcome.result, { log }); }
+    try { await deliverResult(job, outcome.result, { log, deliverChannel }); }
     catch (e) { log(`delivery failed for ${job.job_id}: ${(e && e.message) || e}`); }
   }
   return { ran: job.job_id, status: outcome.status };
@@ -289,8 +300,11 @@ if (import.meta.url === "file://" + process.argv[1]) {
       console.log(JSON.stringify(jobStatus(flag("--status")), null, 2));
       process.exit(0);
     }
+    // Manual ops deliver for real too (so a CLI --tick can post to a channel).
+    const mkDeliver = async () =>
+      (await import("./gateways/deliver.mjs")).makeChannelDeliverer({ log });
     if (a.includes("--tick")) {
-      console.log(JSON.stringify(await tickJobs({ log })));
+      console.log(JSON.stringify(await tickJobs({ log, deliverChannel: await mkDeliver() })));
       process.exit(0);
     }
     if (a.includes("--run-once")) {
@@ -306,7 +320,7 @@ if (import.meta.url === "file://" + process.argv[1]) {
         outcome = { status: "failed", result: null, error: String((e && e.message) || e), tool_calls: null, pi_session_id: null };
       }
       finalizeJob(job.job_id, outcome);
-      if (outcome.status === "completed") await deliverResult(job, outcome.result, { log }).catch(() => {});
+      if (outcome.status === "completed") await deliverResult(job, outcome.result, { log, deliverChannel: await mkDeliver() }).catch(() => {});
       console.log(JSON.stringify({ ran: job.job_id, status: outcome.status }));
       process.exit(0);
     }
