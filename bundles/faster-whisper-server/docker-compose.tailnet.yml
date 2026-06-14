@@ -1,0 +1,13 @@
+# Opt-in tailnet override (cross-instance voice) — see kokoro-tts/docker-compose.tailnet.yml
+# for the full rationale. Publishes faster-whisper on this host's Tailscale IP
+# (tailnet-only, not LAN/public) so trusted paired instances can use it for STT,
+# while keeping the loopback binding for the local companion.
+#
+# Apply (requires CROW_TAILSCALE_IP set to this host's Tailscale IPv4):
+#   CROW_TAILSCALE_IP=<ts-ip> docker compose \
+#     -f docker-compose.yml -f docker-compose.tailnet.yml up -d
+services:
+  faster-whisper-server:
+    ports:
+      - "127.0.0.1:8004:8000"
+      - "${CROW_TAILSCALE_IP}:8004:8000"
