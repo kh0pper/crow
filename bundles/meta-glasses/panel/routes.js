@@ -979,12 +979,32 @@ LONG WORK via the orchestrator. For research, multi-step analysis, code work, or
       const toolCalls = [];
       const roundMaxTokens = nextMaxTokens;
       nextMaxTokens = 600;
+      // TTS think-gate (per round): reasoning models (qwen3 etc.) emit a
+      // <think>…</think> block before the answer. Keep it in the model output
+      // and the llm_delta stream (thinking is preserved/visible), but NEVER
+      // speak it — only feed post-</think> text into the TTS buffer.
+      let ttsSpeakOpen = false;
+      let ttsPre = "";
       for await (const event of chatAdapter.chatStream(messages, tools, { temperature: 0.7, maxTokens: roundMaxTokens })) {
         if (event.type === "content_delta" && event.text) {
           sendText(ws, { type: "llm_delta", text: event.text });
           assistantContent += event.text;
-          textBuffer += event.text;
-          await drainBuffer(false);
+          // Strip the leading <think>…</think> block from the spoken path only.
+          let speak = event.text;
+          if (!ttsSpeakOpen) {
+            ttsPre += event.text;
+            const lead = ttsPre.replace(/^\s+/, "");
+            if (lead.startsWith("<think>")) {
+              const close = ttsPre.indexOf("</think>");
+              if (close < 0) { speak = ""; }                       // still inside <think>
+              else { speak = ttsPre.slice(close + 8); ttsPre = ""; ttsSpeakOpen = true; }
+            } else if (lead.length < 7 && "<think>".startsWith(lead)) {
+              speak = "";                                           // partial — could still be "<think>"
+            } else {
+              speak = ttsPre; ttsPre = ""; ttsSpeakOpen = true;     // not a think block
+            }
+          }
+          if (speak) { textBuffer += speak; await drainBuffer(false); }
         } else if (event.type === "tool_call") {
           toolCalls.push({ id: event.id, name: event.name, arguments: event.arguments });
         } else if (event.type === "done") {
