@@ -934,7 +934,7 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
       }
     }
 
-    toolExecutor = createToolExecutor();
+    toolExecutor = createToolExecutor({ botDef: boundBot });
     const tools = getChatTools({ botDef: boundBot });
     const systemPrompt = await generateSystemPrompt({ deviceId: device.id, botDef: boundBot });
     console.log(`[meta-glasses] voice turn: transcript=${JSON.stringify(transcript)} ai=${chatLabel} bound=${boundBot ? boundBot.bot_id : "none"} tools=${tools.length}`);
