@@ -9,7 +9,7 @@
  * config.defaultVoice  — e.g. af_bella
  */
 
-import { connectTimeout, composeSignals, TTS_TIMEOUT_MS } from "../../../../../shared/http-timeout.js";
+import { connectTimeout, composeSignals, TTS_TIMEOUT_MS } from "../../../../shared/http-timeout.js";
 
 export default function createKokoroTtsAdapter(config) {
   // Normalize: strip trailing slashes AND a trailing `/v1` so the same profile
