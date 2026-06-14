@@ -40,6 +40,7 @@ import { resolveSkills } from "./skill_resolver.mjs";
 import { resolveCrowHome } from "./ext_registry.mjs";
 import { writeBotMcp } from "./mcp_writer.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
+import { BOT_JOBS_DDL } from "./bot-jobs-schema.mjs";
 
 const JOB_TIMEOUT_MS = Number(process.env.PIBOT_JOB_TIMEOUT_MS || 600000); // 10 min, < 30-min reaper cap
 const MAX_JOB_ATTEMPTS = Number(process.env.PIBOT_MAX_JOB_ATTEMPTS || 3);  // caps re-enqueue of abandoned jobs
@@ -47,9 +48,15 @@ const MAX_JOB_ATTEMPTS = Number(process.env.PIBOT_MAX_JOB_ATTEMPTS || 3);  // ca
 // crow.db opened with busy_timeout only, NEVER a journal_mode pragma (a stray
 // WAL flip is the documented SQLITE_BUSY trap — memory crowdb-wal-flip-new-consumers).
 // Path resolved per call so CROW_DB_PATH (tests / MPA pinning) is always honored.
+// Lazy self-heal: create bot_jobs on first connection in this process so installs
+// that predate the table (init-db only re-runs on the 3-table completeness miss)
+// work after a runner restart — mirrors pipeline-runner's ensurePipelineRunsTable.
+// Idempotent (CREATE … IF NOT EXISTS); guarded so it runs at most once per process.
+let _botJobsEnsured = false;
 function dbConn() {
   const d = new Database(botsDbPath());
   d.pragma("busy_timeout = 10000");
+  if (!_botJobsEnsured) { try { d.exec(BOT_JOBS_DDL); _botJobsEnsured = true; } catch {} }
   return d;
 }
 

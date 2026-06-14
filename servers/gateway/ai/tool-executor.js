@@ -21,6 +21,15 @@ import { connectedServers } from "../proxy.js";
 import { voiceCategoryFor } from "../../../scripts/pi-bots/ext_registry.mjs";
 import { createDbClient } from "../../db.js";
 import { CronExpressionParser } from "cron-parser";
+import { BOT_JOBS_DDL } from "../../../scripts/pi-bots/bot-jobs-schema.mjs";
+
+// Lazy self-heal of bot_jobs on the gateway side (libsql), once per process —
+// matches the pi-bots runner's ensure. Idempotent; never throws into a tool call.
+let _botJobsEnsured = false;
+async function ensureBotJobs(db) {
+  if (_botJobsEnsured) return;
+  try { await db.executeMultiple(BOT_JOBS_DDL); _botJobsEnsured = true; } catch { /* surfaced by the caller's own op */ }
+}
 
 // Bot-cron schedule namespace (Plan B Part 1 Stage 4). MUST stay in sync with
 // scripts/pi-bots/bot_scheduler.mjs BOTCRON_PREFIX. Namespaced UNDER 'pipeline:'
@@ -350,6 +359,7 @@ export function createToolExecutor(opts = {}) {
     }
     const db = createDbClient();
     try {
+      await ensureBotJobs(db);
       const { rows } = await db.execute({
         sql: "SELECT bot_id, enabled FROM pi_bot_defs WHERE bot_id = ?",
         args: [botId],
@@ -380,6 +390,7 @@ export function createToolExecutor(opts = {}) {
     if (!jobId) return { result: "Error: crow_job_status requires 'jobId'", isError: true };
     const db = createDbClient();
     try {
+      await ensureBotJobs(db);
       const { rows } = await db.execute({
         sql: "SELECT job_id, bot_id, status, result, error, tool_calls, attempts, "
            + "created_at, started_at, ended_at FROM bot_jobs WHERE job_id = ?",

@@ -3,6 +3,7 @@ import { mkdirSync } from "fs";
 import { randomBytes } from "node:crypto";
 import { resolve } from "path";
 import { slugify, workspacePathFor, storagePrefixFor } from "../servers/shared/slugify.js";
+import { BOT_JOBS_DDL } from "./pi-bots/bot-jobs-schema.mjs";
 
 // Ensure data directory exists
 const dataDir = process.env.CROW_DB_PATH
@@ -2176,37 +2177,12 @@ await initTable("bot_runs table", `
 // atomically claims one ('queued'->'running' with worker_pid), runs the bot pi
 // detached on the goal, captures the result, and delivers it (deliver_to JSON:
 // channel reply / Crow memory / poll). This table IS the cross-process IPC
-// channel — the gateway and scripts/pi-bots/ open the SAME crow.db. crow.db is
-// DELETE journal mode, so a single UPDATE...RETURNING claim is atomic (writers
-// serialize); pollers stay coarse (>=60s) to bound lock contention.
-await initTable("bot_jobs table", `
-  CREATE TABLE IF NOT EXISTS bot_jobs (
-    job_id        TEXT PRIMARY KEY,
-    bot_id        TEXT NOT NULL,
-    goal          TEXT NOT NULL,
-    status        TEXT NOT NULL DEFAULT 'queued',  -- queued | running | completed | failed
-    deliver_to    TEXT,                            -- JSON {kind, gateway_type?, gateway_thread_id?, memory_category?}
-    source        TEXT,                            -- voice | chat | schedule | manual
-    schedule_id   INTEGER,                         -- set when launched by the bot cron runner
-    escalate      INTEGER NOT NULL DEFAULT 0,
-    attempts      INTEGER NOT NULL DEFAULT 0,      -- retry counter (caps re-enqueue of abandoned jobs)
-    result        TEXT,
-    error         TEXT,
-    pi_session_id TEXT,
-    tool_calls    INTEGER,
-    worker_pid    INTEGER,                         -- pi-bots host pid that claimed it (stale-claim recovery)
-    claimed_at    TEXT,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    started_at    TEXT,
-    ended_at      TEXT
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_bot_jobs_status
-    ON bot_jobs(status, created_at);
-
-  CREATE INDEX IF NOT EXISTS idx_bot_jobs_bot
-    ON bot_jobs(bot_id, created_at DESC);
-`);
+// channel — the gateway and scripts/pi-bots/ open the SAME crow.db. journal_mode
+// is RAM-dependent (WAL on >2 GiB hosts, DELETE on ≤2 GiB); a single
+// UPDATE...RETURNING claim is atomic in BOTH modes (writers serialize). Pollers
+// stay coarse (>=60s) to bound lock contention. DDL lives in
+// pi-bots/bot-jobs-schema.mjs (also lazy-ensured by the runner + gateway).
+await initTable("bot_jobs table", BOT_JOBS_DDL);
 
 
 
