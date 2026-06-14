@@ -44,13 +44,17 @@ export function botBuilderStyles() {
   .btb-mcp-section{margin:.75rem 0 .5rem}
   .btb-mcp-section b{font-size:.9rem}
   .btb-mcp-count{font-size:.8rem;color:var(--crow-text-muted)}
-  /* Responsive: auto-fill collapses to 1 column on phones (fixed 48% widths
-     overflowed and overlapped long tool names); long names wrap instead of
-     colliding; checkbox stays top-aligned beside a wrapped 2-line name. */
-  .btb-mcp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:.1rem .9rem}
-  .btb-mcp-tool{display:flex;align-items:flex-start;gap:.45rem;min-width:0;font-size:.85rem;padding:.25rem 0;line-height:1.3;overflow-wrap:anywhere}
-  .btb-mcp-tool input[type="checkbox"]{margin:.15rem 0 0;flex:none}
-  .btb-mcp-regex{color:var(--crow-text-secondary);font-size:.8rem;white-space:nowrap}
+  /* Mobile-first: ONE tool per full-width row. Each row is a plain block (NOT
+     flex) so the name uses the full width and sits on one line — long names
+     have no spaces (crow_browser_capture_har_image), and in a flex row they'd
+     shrink to a 1-char-wide item and wrap vertically. The checkbox is inline.
+     2 columns only on wider screens. overflow-wrap:break-word breaks a name
+     ONLY if it would actually overflow (rare at full width), never per-char. */
+  .btb-mcp-grid{display:grid;grid-template-columns:1fr;gap:0 1.25rem}
+  .btb-mcp-tool{display:block;font-size:.85rem;padding:.32rem 0;line-height:1.3;overflow-wrap:break-word}
+  .btb-mcp-tool input[type="checkbox"]{margin:0 .5rem 0 0;vertical-align:middle;flex:none}
+  .btb-mcp-regex{color:var(--crow-text-secondary);font-size:.78rem;white-space:nowrap}
+  @media(min-width:620px){.btb-mcp-grid{grid-template-columns:1fr 1fr}}
 
   /* Tables */
   .btb-table{width:100%;border-collapse:collapse;font-size:.85rem}
