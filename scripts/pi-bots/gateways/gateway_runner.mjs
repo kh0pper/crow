@@ -26,6 +26,7 @@ import { reapStalePi } from "../pi_lifecycle.mjs";
 import { botsDbPath } from "../instance-paths.mjs";
 import { runtimeGate } from "../runtime-gate.mjs";
 import { tickJobs } from "../job_runner.mjs";
+import { tickBotSchedules } from "../bot_scheduler.mjs";
 import { makeChannelDeliverer } from "./deliver.mjs";
 
 const CROW_DB = botsDbPath();
@@ -33,6 +34,9 @@ const REAP_INTERVAL_MS = Number(process.env.PIBOT_REAP_INTERVAL_MS || 60000);
 // Background-job poll cadence. Coarse on purpose (S2: ≥60s, like pipeline-runner)
 // — the claim is one atomic UPDATE and a job holds no DB txn across its pi spawn.
 const JOB_POLL_MS = Number(process.env.PIBOT_JOB_POLL_MS || 60000);
+// Bot-cron poll cadence. Cheap (enqueues a row, never spawns pi) — 60s like the
+// orchestrator's pipeline-runner.
+const BOTCRON_POLL_MS = Number(process.env.PIBOT_BOTCRON_POLL_MS || 60000);
 
 function log(msg) { console.log("[gateways] " + msg); }
 function db() { const d = new Database(CROW_DB); d.pragma("busy_timeout = 10000"); return d; }
@@ -61,6 +65,7 @@ let reaper = null;
 let _gate = null;
 let jobTimer = null;
 let jobRunning = false; // guard: never let two job ticks overlap (a job can run minutes)
+let cronTimer = null;
 const deliverChannel = makeChannelDeliverer({ log: (m) => log("[deliver] " + m) });
 
 async function startAll() {
@@ -125,11 +130,27 @@ function startJobs() {
 }
 function stopJobs() { if (jobTimer) { clearInterval(jobTimer); jobTimer = null; } }
 
+// Bot-cron scheduler (Stage 4): enqueues a bot_jobs row for each due
+// pipeline:botcron:<bot_id> schedule; the job runner above then runs+delivers it.
+function cronSweep() {
+  try {
+    const r = tickBotSchedules({ log: (m) => log("[botcron] " + m) });
+    if (r && r.fired) log("[botcron] enqueued " + r.fired + " scheduled job(s)");
+  } catch (e) { log("[botcron] error (non-fatal): " + ((e && e.message) || e)); }
+}
+function startSchedules() {
+  cronTimer = setInterval(cronSweep, BOTCRON_POLL_MS);
+  if (cronTimer.unref) cronTimer.unref();
+  log("bot-cron scheduler armed (every " + Math.round(BOTCRON_POLL_MS / 1000) + "s)");
+}
+function stopSchedules() { if (cronTimer) { clearInterval(cronTimer); cronTimer = null; } }
+
 async function shutdown() {
   log("SIGTERM — stopping " + handles.length + " adapter(s)");
   if (_gate) { try { _gate.dispose(); } catch {} }
   if (reaper) { clearInterval(reaper); reaper = null; }
   stopJobs();
+  stopSchedules();
   for (const h of handles) { try { await h.stop(); } catch {} }
   process.exit(0);
 }
@@ -142,8 +163,8 @@ process.on("SIGINT", shutdown);
   // toggle without a restart. Off = idle (service up, no adapters connected).
   // NOTE: this db() connection is intentionally long-lived — the gate re-reads it every poll; do not close it.
   _gate = runtimeGate(db(), {
-    start: async () => { await startAll(); startJobs(); },
-    stop: async () => { await stopAdapters(); stopJobs(); },
+    start: async () => { await startAll(); startJobs(); startSchedules(); },
+    stop: async () => { await stopAdapters(); stopJobs(); stopSchedules(); },
     logTag: "gateways",
   });
   setInterval(() => {}, 1 << 30); // keep the process alive across idle periods
