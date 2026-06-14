@@ -1,0 +1,19 @@
+# Opt-in tailnet override (cross-instance voice).
+#
+# The base docker-compose.yml binds Kokoro loopback-only (single-instance
+# default, preserves the network-exposure invariant). This override ALSO
+# publishes it on this host's Tailscale IP so TRUSTED paired instances (your
+# tailnet peers) can use it for inference — e.g. a glasses bot on another
+# instance. It binds the specific Tailscale IP, NOT 0.0.0.0, so it is reachable
+# from the tailnet only, never the LAN or public internet. The loopback binding
+# is kept here too so the local companion's localhost path is unaffected
+# regardless of how Compose merges the ports list.
+#
+# Apply (requires CROW_TAILSCALE_IP set to this host's Tailscale IPv4):
+#   CROW_TAILSCALE_IP=<ts-ip> docker compose \
+#     -f docker-compose.yml -f docker-compose.tailnet.yml up -d
+services:
+  kokoro-tts:
+    ports:
+      - "127.0.0.1:8880:8880"
+      - "${CROW_TAILSCALE_IP}:8880:8880"
