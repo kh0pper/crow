@@ -35,8 +35,14 @@ services:
       - --max-num-seqs
       - "8"
       - --enable-auto-tool-choice
+      # Qwen3.5 emits XML-style tool calls (<tool_call><function=NAME><parameter=KEY>…)
+      # which the `hermes` parser (expects <tool_call>{json}</tool_call>) cannot parse —
+      # it leaves tool calls as raw text, swallowed entirely in streaming mode, so the
+      # voice/companion turn produces no content and no tool call (silent "choke").
+      # `qwen3_xml` is the matching parser for this model's format. Verified by feeding
+      # the model's exact output to each parser offline (2026-06-14).
       - --tool-call-parser
-      - hermes
+      - qwen3_xml
       - --enforce-eager
       # Text-only. Qwen3.5-4B is natively vision-language, but its ViT encoder's
       # worst-case multimodal profiling (preprocessor longest_edge=16.7M px →

@@ -35,8 +35,13 @@ services:
       - --max-num-seqs
       - "4"
       - --enable-auto-tool-choice
+      # Qwen3.5 emits XML-style tool calls (<tool_call><function=NAME><parameter=KEY>…)
+      # which `hermes` (expects <tool_call>{json}</tool_call>) cannot parse — tool calls
+      # leak as raw text and are swallowed in streaming mode. `qwen3_xml` matches this
+      # model generation's format (chat-template-verified 2026-06-14; same fix as the
+      # qwen3.5-4b voice bundle). The older Qwen3 (non-.5) bundles correctly stay on hermes.
       - --tool-call-parser
-      - hermes
+      - qwen3_xml
       - --enforce-eager
     restart: unless-stopped
     ipc: host
