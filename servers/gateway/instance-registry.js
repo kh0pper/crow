@@ -15,6 +15,7 @@ import { resolve } from "path";
 import { homedir } from "os";
 import { hostname as osHostname } from "os";
 import bus from "../shared/event-bus.js";
+import { createDbClient } from "../db.js";
 
 const INSTANCES_JSON_PATH = resolve(homedir(), ".crow", "instances.json");
 
@@ -407,26 +408,52 @@ export function computeInstanceSyncTopic(crowId) {
  * @param {string} token - The bearer token from the Authorization header
  * @returns {Promise<object|null>} The matching instance row, or null if invalid
  */
-export async function validateInstanceToken(db, token) {
+export async function validateInstanceToken(db, token, opts = {}) {
   if (!token) return null;
 
   const tokenHash = createHash("sha256").update(token).digest("hex");
 
+  // Authenticate any paired, non-revoked peer regardless of liveness.
+  // Filtering on status='active' created a deadlock: a peer marked
+  // 'offline' (after any probe failure — a restart, network blip, or the
+  // downtime that originally flipped it) could never re-authenticate to
+  // prove it was back, so federated MCP calls 500'd forever. `offline` is a
+  // liveness signal, not a trust gate; trust is the token-hash match plus
+  // not being revoked. Mirrors getTrustedInstances' predicate.
+  const sql = "SELECT * FROM crow_instances WHERE auth_token_hash = ? AND status IN ('active','offline')";
+
   try {
-    // Authenticate any paired, non-revoked peer regardless of liveness.
-    // Filtering on status='active' created a deadlock: a peer marked
-    // 'offline' (after any probe failure — a restart, network blip, or the
-    // downtime that originally flipped it) could never re-authenticate to
-    // prove it was back, so federated MCP calls 500'd forever. `offline` is a
-    // liveness signal, not a trust gate; trust is the token-hash match plus
-    // not being revoked. Mirrors getTrustedInstances' predicate.
-    const { rows } = await db.execute({
-      sql: "SELECT * FROM crow_instances WHERE auth_token_hash = ? AND status IN ('active','offline')",
-      args: [tokenHash],
-    });
+    const { rows } = await db.execute({ sql, args: [tokenHash] });
     return rows[0] || null;
-  } catch {
-    return null;
+  } catch (err) {
+    // A DB error here is NOT proof the token is invalid. The old
+    // `catch { return null }` silently rejected EVERY paired peer as
+    // `invalid_token` whenever this captured-at-startup connection hit a
+    // transient WAL/shm desync or on-disk corruption — turning a database
+    // fault into a total, SILENT cross-instance federation blackout that only
+    // a gateway restart cleared, and that looked exactly like a bad token
+    // (misdirecting diagnosis to the auth layer). Make it loud, and retry once
+    // on a FRESH client: re-opening the file re-maps the WAL/shm and clears the
+    // common transient case without a restart. Genuine corruption still fails,
+    // but now visibly. (2026-06-14 incident: corrupt cross_host_calls page on
+    // crow's primary crow.db blacked out all federated tool calls.)
+    console.error(
+      `[instance-registry] validateInstanceToken: DB error on captured client (retrying on a fresh client): ${err.message}`,
+    );
+    const makeFresh = opts._freshClient || createDbClient;
+    let fresh;
+    try {
+      fresh = makeFresh();
+      const { rows } = await fresh.execute({ sql, args: [tokenHash] });
+      return rows[0] || null;
+    } catch (err2) {
+      console.error(
+        `[instance-registry] validateInstanceToken: retry on a fresh client ALSO failed — federated auth is degraded, peer will be rejected: ${err2.message}`,
+      );
+      return null;
+    } finally {
+      try { fresh?.close?.(); } catch { /* ignore close errors */ }
+    }
   }
 }
 
