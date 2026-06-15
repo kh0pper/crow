@@ -45,7 +45,6 @@ Cada herramienta de categoría crea un `Client` en proceso conectado al `McpServ
 | `crow_sharing` | Servidor de compartición | 21 (invitaciones, contactos, compartir, bandeja de entrada, mensajería, instancias, revocar) |
 | `crow_storage` | Servidor de almacenamiento | 8 (subir, listar, URL de descarga, eliminar, estadísticas) — cuando MinIO está configurado |
 | `crow_media` | Bundle de media | 17 (artículos, podcasts, playlists) — cuando el bundle está instalado |
-| `crow_orchestrator` | Servidor orquestador | 7 (orquestar, estado, presets, pipelines) — cuando está disponible |
 | `crow_consulting` | Servidor de consultoría | 6 (operaciones del pipeline de prospectos) |
 | `crow_tools` | Servidores proxy externos | Dinámico (Trello, Canvas, Slack, etc.) + instancias remotas |
 | `crow_discover` | Manifiestos estáticos + esquemas en vivo | Protocolo de descubrimiento |
