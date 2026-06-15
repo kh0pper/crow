@@ -14,6 +14,7 @@ import { getPeerOverview } from "../overview-cache.js";
 import { readSetting } from "../settings/registry.js";
 import { getInstance, getOrCreateLocalInstanceId } from "../../instance-registry.js";
 import { t } from "../shared/i18n.js";
+import { renderFixItCards } from "../../fix-it/index.js";
 
 async function resolveLocalInstanceName(db, lang) {
   try {
@@ -140,14 +141,20 @@ export default {
       healthSignals = await collectHealthSignals(db, { lang });
     } catch {}
 
-    // Flash param from post-backup redirect
+    // Fix-it cards (fails gracefully to "" if anything throws)
+    let fixItHtml = "";
+    try {
+      fixItHtml = await renderFixItCards(db, { lang, req });
+    } catch {}
+
+    // Flash param from post-backup / fix-it redirects
     const flash = (typeof req.query?.flash === "string" &&
-      ["backup_ok", "backup_fail"].includes(req.query.flash))
+      ["backup_ok", "backup_fail", "fixit_fixed", "fixit_dismissed", "fixit_error"].includes(req.query.flash))
       ? req.query.flash
       : null;
 
     const css = nestCSS();
-    const html = buildNestHTML({ ...data, healthSignals, flash }, lang);
+    const html = buildNestHTML({ ...data, healthSignals, flash, fixItHtml }, lang);
     const js = nestClientJS(lang);
     const content = css + html + js;
 
