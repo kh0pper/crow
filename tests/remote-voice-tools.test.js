@@ -203,6 +203,32 @@ test("buildRemoteVoiceContext: callRemote rewrites a funkwhale audio envelope", 
   await ctx.close();
 });
 
+test("buildRemoteVoiceContext: scopes remote tools to the bot's crow_mcp selection for that capability", async () => {
+  _resetRemoteVoiceCacheForTests();
+  const deps = fakeDeps();
+  // Discovery returns 3 funkwhale tools; bot selected only fw_play (+ fw_search).
+  deps.clientFactory = async ({ instanceId }) => ({
+    callTool: async ({ name }) => name === "crow_discover"
+      ? { content: [{ type: "text", text: ["External integration tools:", "", "  funkwhale:", "    - fw_play: Play.", "    - fw_search: Find.", "    - fw_block_user: Admin.", "    - fw_defederate: Admin."].join("\n") }] }
+      : { content: [{ type: "text", text: "{}" }] },
+    close: async () => {},
+  });
+  const scopedBot = { tools: { remote_mcp: ["inst-A::funkwhale"], crow_mcp: ["funkwhale/fw_play", "funkwhale/fw_search"] } };
+  const ctx = await buildRemoteVoiceContext({}, scopedBot, deps);
+  assert.deepEqual(ctx.advertised.map(t => t.name).sort(), ["fw_play", "fw_search"]);
+  assert.equal(ctx.routeMap.has("fw_block_user"), false);
+  assert.equal(ctx.routeMap.has("fw_defederate"), false);
+  await ctx.close();
+});
+
+test("buildRemoteVoiceContext: no crow_mcp selection for a capability ⇒ all its tools (unchanged)", async () => {
+  _resetRemoteVoiceCacheForTests();
+  const deps = fakeDeps(); // discovery returns just fw_play
+  const ctx = await buildRemoteVoiceContext({}, BOT, deps); // BOT has remote_mcp but no crow_mcp
+  assert.deepEqual(ctx.advertised.map(t => t.name), ["fw_play"]);
+  await ctx.close();
+});
+
 test("buildRemoteVoiceContext: a peer whose discovery throws degrades to null", async () => {
   _resetRemoteVoiceCacheForTests();
   const deps = fakeDeps();

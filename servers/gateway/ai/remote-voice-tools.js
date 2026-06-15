@@ -28,6 +28,27 @@
 import { remoteServersForBot, parseRemoteInvocationFlag } from "../../../scripts/pi-bots/remote-blocks.mjs";
 
 /**
+ * Map<canonicalId, Set<toolName>> of a bot's per-capability tool selections from
+ * def.tools.crow_mcp ("<server>/<tool>"). Used to scope a remote capability's
+ * advertised voice tools to what the bot actually picked (drops admin tools).
+ */
+export function selectedByCapability(botDef) {
+  const out = new Map();
+  const crowMcp = (botDef && botDef.tools && botDef.tools.crow_mcp) || [];
+  for (const sel of crowMcp) {
+    const s = String(sel);
+    const i = s.indexOf("/");
+    if (i <= 0) continue;
+    const server = s.slice(0, i);
+    const tool = s.slice(i + 1);
+    if (!tool) continue;
+    if (!out.has(server)) out.set(server, new Set());
+    out.get(server).add(tool);
+  }
+  return out;
+}
+
+/**
  * Parse the remote router's crow_discover({category:"tools"}) text into
  * Map<capabilityId, [{name, description}]>. Header lines are "  <id>:" (two
  * spaces); tool lines are "    - <name>: <desc>" (four spaces).
@@ -248,8 +269,31 @@ export async function buildRemoteVoiceContext(db, botDef, deps = {}) {
   }
   if (!disc.advertised.length) return null;
 
+  // ---- per-bot scoping (applied post-cache so the cache stays bot-agnostic) ----
+  // If the bot selected specific tools for a remote capability in its crow_mcp
+  // ("<canonicalId>/<tool>"), advertise + route ONLY those — keeps the voice
+  // surface lean for a weak fast model (drops a capability's admin/moderation
+  // tools it never needs). No selection for a capability ⇒ all its tools (prior
+  // behavior). The cache holds the full capability set; this filters per call.
+  const selByCap = selectedByCapability(botDef);
+  let advertised = disc.advertised;
+  let routeMap = disc.routeMap;
+  if (selByCap.size) {
+    const adv = [];
+    const rm = new Map();
+    for (const t of disc.advertised) {
+      const r = disc.routeMap.get(t.name);
+      const sel = r && selByCap.get(r.canonicalId);
+      if (sel && sel.size && !sel.has(t.name)) continue;
+      adv.push(t);
+      if (r) rm.set(t.name, r);
+    }
+    advertised = adv;
+    routeMap = rm;
+  }
+  if (!advertised.length) return null;
+
   // ---- routing (lazy clients, closed by close()) ----
-  const routeMap = disc.routeMap;
   // Map<instanceId, Promise<client>>. Caching the PROMISE (not the resolved
   // client) makes concurrent callRemote()s for the same instance — executeToolCalls
   // runs tool calls via Promise.all — share one connect instead of racing two and
@@ -282,5 +326,5 @@ export async function buildRemoteVoiceContext(db, botDef, deps = {}) {
     for (const p of clients.values()) { try { await (await p)?.close?.(); } catch {} }
     clients.clear();
   }
-  return { advertised: disc.advertised, routeMap, callRemote, close };
+  return { advertised, routeMap, callRemote, close };
 }
