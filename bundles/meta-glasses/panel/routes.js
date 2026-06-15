@@ -2809,10 +2809,25 @@ export async function pushAudioStream(deviceId, { url, codec, sampleRate, channe
     } else if (typeof auth === "string" && auth.startsWith("crow-peer:")) {
       // Federated audio: stream through the owning instance's /audio/stream
       // proxy, authed with that peer's bearer (same token the voice loop uses).
+      // SECURITY (defense-in-depth): only attach the bearer if `url` targets that
+      // peer's REGISTERED gateway host. The url should always be one we built in
+      // rewriteStream, but never send a peer bearer to an unexpected host.
       const instId = auth.slice("crow-peer:".length);
       try {
-        const { getPeerCreds } = await import(pathToFileURL(join(gatewayDir, "..", "shared", "peer-credentials.js")).href);
-        bearer = getPeerCreds(instId)?.auth_token || null;
+        let gwHost = null;
+        const dbc = (await loadDb()).createDbClient();
+        try {
+          const { rows } = await dbc.execute({ sql: "SELECT gateway_url FROM crow_instances WHERE id = ?", args: [instId] });
+          if (rows[0]?.gateway_url) gwHost = new URL(rows[0].gateway_url).host;
+        } finally { try { dbc.close(); } catch {} }
+        let targetHost = null;
+        try { targetHost = new URL(url).host; } catch {}
+        if (gwHost && targetHost && gwHost === targetHost) {
+          const { getPeerCreds } = await import(pathToFileURL(join(gatewayDir, "..", "shared", "peer-credentials.js")).href);
+          bearer = getPeerCreds(instId)?.auth_token || null;
+        } else {
+          console.warn(`[meta-glasses] crow-peer auth host mismatch for ${instId} (target=${targetHost} gateway=${gwHost}) — not attaching bearer`);
+        }
       } catch (err) {
         console.warn(`[meta-glasses] crow-peer auth resolve failed for ${instId}: ${err.message}`);
       }
