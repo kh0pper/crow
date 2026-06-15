@@ -6,8 +6,8 @@
  * tool that errors when called (crow_relay was live for months). A missing
  * entry = a real tool invisible to discovery (the whole W2-5 project-members
  * surface was). Pin key equality AND entry shape for every category whose
- * factory constructs in an isolated env. media (bundle) and orchestrator
- * (optional sibling dep) are environment-dependent by design and skipped.
+ * factory constructs in an isolated env. media (bundle) is
+ * environment-dependent by design and skipped.
  *
  * The comparison runs in a CHILD process with an explicit process.exit():
  * importing the sharing server has side effects that leave live handles
