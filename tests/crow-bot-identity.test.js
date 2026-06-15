@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { deriveBotIdentity, loadInstanceSeed } from "../servers/sharing/identity.js";
+import { deriveBotIdentity, loadInstanceSeed, generateBotInviteCode, parseBotInviteCode } from "../servers/sharing/identity.js";
 
 const SEED = Buffer.alloc(32, 7); // fixed, deterministic
 
@@ -45,4 +45,25 @@ test("loadInstanceSeed throws on an encrypted identity (no passphrase in host)",
     writeFileSync(join(d, "identity.json"), JSON.stringify({ encrypted: { salt: "x" } }));
     assert.throws(() => loadInstanceSeed(d), /encrypted/i);
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("bot invite code round-trips address + token + relays", () => {
+  const bot = deriveBotIdentity(SEED, "bot-alpha");
+  const code = generateBotInviteCode(bot, "tok-123", ["wss://relay.example"]);
+  const parsed = parseBotInviteCode(code);
+  assert.equal(parsed.botCrowId, bot.crowId);
+  assert.equal(parsed.ed25519Pubkey, bot.ed25519Pubkey);
+  assert.equal(parsed.secp256k1Pubkey, bot.secp256k1Pubkey);
+  assert.equal(parsed.token, "tok-123");
+  assert.deepEqual(parsed.relays, ["wss://relay.example"]);
+});
+
+test("parseBotInviteCode rejects a tampered crow_id", () => {
+  const bot = deriveBotIdentity(SEED, "bot-alpha");
+  const other = deriveBotIdentity(SEED, "bot-beta");
+  const code = generateBotInviteCode(bot, "tok-123");
+  // Splice another bot's crow_id onto the front → integrity check must fail.
+  const parts = code.split(".");
+  const bad = [other.crowId, parts[1], parts[2]].join(".");
+  assert.throws(() => parseBotInviteCode(bad), /mismatch|match/i);
 });
