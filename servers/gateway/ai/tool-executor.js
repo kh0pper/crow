@@ -23,6 +23,8 @@ import { createDbClient } from "../../db.js";
 import { CronExpressionParser } from "cron-parser";
 import { BOT_JOBS_DDL } from "../../../scripts/pi-bots/bot-jobs-schema.mjs";
 
+export { buildRemoteVoiceContext } from "./remote-voice-tools.js";
+
 // Lazy self-heal of bot_jobs on the gateway side (libsql), once per process —
 // matches the pi-bots runner's ensure. Idempotent; never throws into a tool call.
 let _botJobsEnsured = false;
@@ -194,6 +196,7 @@ export function createToolExecutor(opts = {}) {
   const clients = new Map(); // category → Client
   const boundBotId = opts.botDef && opts.botDef.bot_id ? opts.botDef.bot_id : null;
   const defaultDeliverTo = opts.defaultDeliverTo || null;
+  const remote = opts.remote || null; // cross-instance voice routing (null = off)
 
   async function getClient(category) {
     if (clients.has(category)) return clients.get(category);
@@ -224,6 +227,25 @@ export function createToolExecutor(opts = {}) {
    */
   async function executeTool(name, args) {
     try {
+      // Cross-instance routing (voice). Unwrap the crow_tools proxy so a remote
+      // tool hidden behind it still routes remotely. Only names a selected remote
+      // capability owns (routeMap) are routed; everything else falls through to
+      // the unchanged local logic below.
+      if (remote && remote.routeMap) {
+        const eff = (name === "crow_tools" && args && typeof args.action === "string" && args.action)
+          ? args.action : name;
+        if (remote.routeMap.has(eff)) {
+          const params = name === "crow_tools" ? (args.params || {}) : (args || {});
+          try {
+            const result = await remote.callRemote(eff, params);
+            if (result) return formatResult(result);
+            return { result: `Remote tool "${eff}" is unavailable right now.`, isError: true };
+          } catch (err) {
+            return { result: `Remote tool error (${eff}): ${err.message}`, isError: true };
+          }
+        }
+      }
+
       // Check if it's a category-level tool (crow_memory, crow_projects, etc.)
       const categoryMatch = name.match(/^crow_(memory|projects|blog|sharing|storage|media)$/);
       if (categoryMatch) {
@@ -917,6 +939,23 @@ export function getChatTools(opts = {}) {
           },
           required: ["action"],
         },
+      });
+    }
+  }
+
+  // Cross-instance (federated) voice tools — advertised as direct promoted tools
+  // so the model can call them by name; the executor routes each to its owning
+  // instance (see buildRemoteVoiceContext / executeTool's remote branch). Deduped
+  // against everything already advertised. Absent unless the bound bot opted in.
+  if (Array.isArray(opts.remoteTools) && opts.remoteTools.length) {
+    const have = new Set(tools.map((t) => t.name));
+    for (const rt of opts.remoteTools) {
+      if (!rt || !rt.name || have.has(rt.name)) continue;
+      have.add(rt.name);
+      tools.push({
+        name: rt.name,
+        description: rt.description || "",
+        inputSchema: rt.inputSchema || { type: "object", properties: {}, additionalProperties: true },
       });
     }
   }
