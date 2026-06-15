@@ -6,9 +6,9 @@
  * default to local scope because the typical vLLM endpoint IP is
  * instance-specific. Users can promote to global via the scope toggle.
  *
- * Each profile carries either a pointer into models.json (`provider_id`
- * + `model_id`) OR direct `baseUrl` / `apiKey` / `model`. Pointer mode lets
- * profiles track orchestrator/models.json changes automatically.
+ * Each profile carries either a pointer into the provider registry
+ * (`provider_id` + `model_id`) OR direct `baseUrl` / `apiKey` / `model`.
+ * Pointer mode lets profiles track provider/models.json changes automatically.
  */
 
 import { escapeHtml } from "../../../shared/components.js";

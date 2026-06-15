@@ -34,7 +34,7 @@ export async function mountAdminApi(app, deps) {
     });
   });
 
-  // --- Provider health matrix (orchestrator registry liveness) ---
+  // --- Provider health matrix (provider registry liveness) ---
   try {
     const { providersHealthHandler } = await import("../../shared/providers.js");
     app.get("/api/providers/health", dashboardAuth, providersHealthHandler);
