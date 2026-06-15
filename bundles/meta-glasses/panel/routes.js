@@ -2803,10 +2803,21 @@ export async function pushAudioStream(deviceId, { url, codec, sampleRate, channe
   if (!acquireTurnLock(deviceId, sess.ws)) return { delivered: false, reason: "lock_busy" };
   try {
     const headers = {};
+    let bearer = null;
     if (auth && AUDIO_STREAM_AUTH_SENTINELS[auth]) {
-      const token = AUDIO_STREAM_AUTH_SENTINELS[auth]();
-      if (token) headers.Authorization = `Bearer ${token}`;
+      bearer = AUDIO_STREAM_AUTH_SENTINELS[auth]();
+    } else if (typeof auth === "string" && auth.startsWith("crow-peer:")) {
+      // Federated audio: stream through the owning instance's /audio/stream
+      // proxy, authed with that peer's bearer (same token the voice loop uses).
+      const instId = auth.slice("crow-peer:".length);
+      try {
+        const { getPeerCreds } = await import(pathToFileURL(join(gatewayDir, "..", "shared", "peer-credentials.js")).href);
+        bearer = getPeerCreds(instId)?.auth_token || null;
+      } catch (err) {
+        console.warn(`[meta-glasses] crow-peer auth resolve failed for ${instId}: ${err.message}`);
+      }
     }
+    if (bearer) headers.Authorization = `Bearer ${bearer}`;
     // Manual redirect handling to avoid leaking the bearer to signed storage
     // URLs or attacker-controlled hosts. Validate the Location host on any 3xx,
     // then drop the bearer and auto-follow the rest of the chain.
