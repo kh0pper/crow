@@ -184,3 +184,23 @@ test("buildRemoteVoiceContext: a peer whose discovery throws degrades to null", 
   deps.clientFactory = async () => { throw new Error("peer down"); };
   assert.equal(await buildRemoteVoiceContext({}, BOT, deps), null);
 });
+
+test("buildRemoteVoiceContext: a transient routing-connect failure does not poison the next call", async () => {
+  _resetRemoteVoiceCacheForTests();
+  // First connect = discovery (succeeds). Second connect = first routing client
+  // (fails). Third connect = retry (succeeds). The fix must clear the rejected
+  // promise so the retry reconnects instead of re-throwing the cached reject.
+  const deps = fakeDeps();
+  const okFactory = deps.clientFactory;
+  let n = 0;
+  deps.clientFactory = async (o) => {
+    n++;
+    if (n === 2) throw new Error("transient connect fail");
+    return okFactory(o);
+  };
+  const ctx = await buildRemoteVoiceContext({}, BOT, deps); // n=1 discovery
+  await assert.rejects(() => ctx.callRemote("fw_play", {})); // n=2 routing connect fails, entry cleared
+  const r = await ctx.callRemote("fw_play", { q: "x" });     // n=3 retry succeeds
+  assert.ok(r && r.content);
+  await ctx.close();
+});

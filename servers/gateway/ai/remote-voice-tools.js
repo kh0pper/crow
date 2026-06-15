@@ -244,7 +244,16 @@ export async function buildRemoteVoiceContext(db, botDef, deps = {}) {
   async function callRemote(toolName, args) {
     const route = routeMap.get(toolName);
     if (!route) return null;
-    const client = await clientFor(route.instanceId);
+    let client;
+    try {
+      client = await clientFor(route.instanceId);
+    } catch (err) {
+      // A transient connect failure must not poison the cached promise for the
+      // rest of the turn — clear it so a later call (e.g. fw_play after a failed
+      // fw_search) gets a fresh attempt.
+      clients.delete(route.instanceId);
+      throw err;
+    }
     // C3: NO instance_id — peer-exposure denies onward-relay hops.
     const result = await client.callTool({ name: "crow_tools", arguments: { action: toolName, params: args || {} } });
     return rewriteAudioResult(result, urls.get(route.instanceId), route.instanceId);
