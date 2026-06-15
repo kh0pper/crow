@@ -1648,6 +1648,36 @@ await initTable("fix_it_items table", `
   CREATE UNIQUE INDEX IF NOT EXISTS idx_fix_it_items_dedup ON fix_it_items(source, dedup_key);
   CREATE INDEX IF NOT EXISTS idx_fix_it_items_status ON fix_it_items(status);
 `);
+// --- Crow Messages gateway (2026-06-15): per-bot inbound authorization + invite
+// tokens. LOCAL-ONLY (operational state, never synced). ACL is keyed on the
+// x-only secp256k1 pubkey (verifiable from a signed inbound DM). ---
+await initTable("bot_message_acl table", `
+  CREATE TABLE IF NOT EXISTS bot_message_acl (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id        TEXT NOT NULL,
+    sender_pubkey TEXT NOT NULL,
+    crow_id       TEXT,
+    display_name  TEXT,
+    added_via     TEXT NOT NULL DEFAULT 'invite'
+                    CHECK (added_via IN ('invite','manual')),
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(bot_id, sender_pubkey)
+  );
+  CREATE INDEX IF NOT EXISTS idx_bot_message_acl_bot ON bot_message_acl(bot_id);
+`);
+await initTable("bot_message_invites table", `
+  CREATE TABLE IF NOT EXISTS bot_message_invites (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id      TEXT NOT NULL,
+    token       TEXT NOT NULL UNIQUE,
+    expires_at  TEXT,
+    max_uses    INTEGER,
+    uses        INTEGER NOT NULL DEFAULT 0,
+    revoked     INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_bot_message_invites_bot ON bot_message_invites(bot_id);
+`);
 
 // If a previous botched migration recreated dashboard_settings without PK(key),
 // restore it. Detect by checking pragma + absence of the overrides table data
