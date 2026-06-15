@@ -101,3 +101,86 @@ test("rewriteAudioResult leaves non-audio / non-funkwhale results untouched", ()
   const odd = { content: [{ type: "text", text: JSON.stringify({ _audio_stream: { url: "https://elsewhere/x.mp3", codec: "mp3" } }) }] };
   assert.equal(JSON.parse(rewriteAudioResult(odd, "https://x", "c1").content[0].text)._audio_stream.url, "https://elsewhere/x.mp3");
 });
+
+import { buildRemoteVoiceContext, _resetRemoteVoiceCacheForTests } from "../servers/gateway/ai/remote-voice-tools.js";
+
+const FAKE_DISCOVER_TEXT = ["External integration tools:", "", "  funkwhale:", "    - fw_play: Play music."].join("\n");
+
+function fakeDeps({ flag = true, urls = { "inst-A": "https://peer.example:8447" } } = {}) {
+  const calls = [];
+  let connects = 0;
+  return {
+    calls, get connects() { return connects; },
+    readSettingFn: async () => JSON.stringify({ remote_invocation: flag }),
+    getPeerGatewayUrls: async () => new Map(Object.entries(urls)),
+    nowFn: () => 1000,
+    clientFactory: async ({ instanceId }) => {
+      connects++;
+      return {
+        _id: instanceId,
+        callTool: async ({ name, arguments: a }) => {
+          calls.push({ instanceId, name, arguments: a });
+          if (name === "crow_discover") return { content: [{ type: "text", text: FAKE_DISCOVER_TEXT }] };
+          return { content: [{ type: "text", text: JSON.stringify({ ok: true, name, a }) }] };
+        },
+        close: async () => {},
+      };
+    },
+  };
+}
+
+const BOT = { tools: { remote_mcp: ["inst-A::funkwhale"] } };
+
+test("buildRemoteVoiceContext: null when no remote_mcp / flag off / no gateway_url", async () => {
+  _resetRemoteVoiceCacheForTests();
+  assert.equal(await buildRemoteVoiceContext({}, { tools: {} }, fakeDeps()), null);
+  assert.equal(await buildRemoteVoiceContext({}, BOT, fakeDeps({ flag: false })), null);
+  assert.equal(await buildRemoteVoiceContext({}, BOT, fakeDeps({ urls: {} })), null);
+});
+
+test("buildRemoteVoiceContext: discovers, advertises, routes via crow_tools WITHOUT instance_id", async () => {
+  _resetRemoteVoiceCacheForTests();
+  const deps = fakeDeps();
+  const ctx = await buildRemoteVoiceContext({}, BOT, deps);
+  assert.deepEqual(ctx.advertised.map(t => t.name), ["fw_play"]);
+  await ctx.callRemote("fw_play", { query: "jazz" });
+  const wrapped = deps.calls.find(c => c.name === "crow_tools");
+  assert.deepEqual(wrapped.arguments, { action: "fw_play", params: { query: "jazz" } });
+  assert.equal("instance_id" in wrapped.arguments, false);
+  await ctx.close();
+});
+
+test("buildRemoteVoiceContext: discovery is cached by selection signature (C5)", async () => {
+  _resetRemoteVoiceCacheForTests();
+  const deps = fakeDeps();
+  const a = await buildRemoteVoiceContext({}, BOT, deps); await a.close();
+  const discoverCalls1 = deps.calls.filter(c => c.name === "crow_discover").length;
+  const b = await buildRemoteVoiceContext({}, BOT, deps); await b.close();
+  const discoverCalls2 = deps.calls.filter(c => c.name === "crow_discover").length;
+  assert.equal(discoverCalls1, 1);
+  assert.equal(discoverCalls2, 1, "second build reuses cached discovery — no extra crow_discover");
+});
+
+test("buildRemoteVoiceContext: callRemote rewrites a funkwhale audio envelope", async () => {
+  _resetRemoteVoiceCacheForTests();
+  const deps = fakeDeps();
+  deps.clientFactory = async ({ instanceId }) => ({
+    callTool: async ({ name }) => name === "crow_discover"
+      ? { content: [{ type: "text", text: FAKE_DISCOVER_TEXT }] }
+      : { content: [{ type: "text", text: JSON.stringify({ _audio_stream: { url: "http://crow-funkwhale/api/v1/listen/abc/?to=opus", codec: "opus", auth: "funkwhale" } }) }] },
+    close: async () => {},
+  });
+  const ctx = await buildRemoteVoiceContext({}, BOT, deps);
+  const r = await ctx.callRemote("fw_play", {});
+  const env = JSON.parse(r.content[0].text)._audio_stream;
+  assert.match(env.url, /^https:\/\/peer\.example:8447\/audio\/stream\?cap=funkwhale&id=abc&codec=opus$/);
+  assert.equal(env.auth, "crow-peer:inst-A");
+  await ctx.close();
+});
+
+test("buildRemoteVoiceContext: a peer whose discovery throws degrades to null", async () => {
+  _resetRemoteVoiceCacheForTests();
+  const deps = fakeDeps();
+  deps.clientFactory = async () => { throw new Error("peer down"); };
+  assert.equal(await buildRemoteVoiceContext({}, BOT, deps), null);
+});

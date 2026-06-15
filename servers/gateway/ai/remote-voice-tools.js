@@ -148,3 +148,110 @@ export async function createRemoteRouterClient({ instanceId, gatewayUrl }) {
   ]);
   return client;
 }
+
+// Discovery cache: signature -> { at, advertised, routeMap }. Keyed on the
+// bot's sorted remote_mcp selections + instance gateway urls; TTL bounds drift.
+const DISCOVERY_TTL_MS = 5 * 60 * 1000;
+const _discoveryCache = new Map();
+export function _resetRemoteVoiceCacheForTests() { _discoveryCache.clear(); }
+
+async function defaultPeerGatewayUrls(db) {
+  const map = new Map();
+  try {
+    const { rows } = await db.execute({
+      sql: "SELECT id, gateway_url FROM crow_instances WHERE status != 'revoked' AND gateway_url IS NOT NULL",
+      args: [],
+    });
+    for (const r of rows) map.set(r.id, r.gateway_url);
+  } catch { /* no peers / table missing */ }
+  return map;
+}
+
+async function defaultReadSetting(db, key) {
+  const { readSetting } = await import("../dashboard/settings/registry.js");
+  return readSetting(db, key);
+}
+
+async function defaultDiscover(client) {
+  const r = await client.callTool({ name: "crow_discover", arguments: { category: "tools" } });
+  let text = "";
+  for (const b of r?.content || []) if (b.type === "text") text += b.text;
+  return text;
+}
+
+/**
+ * Build the per-bot remote voice context, or null when the bot hasn't opted in /
+ * the flag is off / no reachable peer advertises a selected capability. Never
+ * throws into the voice turn. See the module header for the security model.
+ */
+export async function buildRemoteVoiceContext(db, botDef, deps = {}) {
+  const readSettingFn = deps.readSettingFn || defaultReadSetting;
+  const getPeerGatewayUrls = deps.getPeerGatewayUrls || defaultPeerGatewayUrls;
+  const clientFactory = deps.clientFactory || createRemoteRouterClient;
+  const discoverFn = deps.discoverFn || defaultDiscover;
+  const now = deps.nowFn || (() => Date.now());
+
+  const selections = remoteServersForBot(botDef);
+  if (!selections.length) return null;
+
+  let flagRaw;
+  try { flagRaw = await readSettingFn(db, "feature_flags"); } catch { return null; }
+  if (!parseRemoteInvocationFlag(flagRaw)) return null;
+
+  const urls = await getPeerGatewayUrls(db);
+  const wantedIds = [...new Set(selections.map(s => s.instanceId))].filter(id => urls.get(id));
+  if (!wantedIds.length) return null;
+
+  // ---- discovery (cached) ----
+  const sig = JSON.stringify({
+    sel: selections.map(s => `${s.instanceId}::${s.canonicalId}`).sort(),
+    urls: wantedIds.slice().sort().map(id => `${id}=${urls.get(id)}`),
+  });
+  let disc = _discoveryCache.get(sig);
+  if (!disc || now() - disc.at > DISCOVERY_TTL_MS) {
+    const parsedByInstance = new Map();
+    for (const id of wantedIds) {
+      let client = null;
+      try {
+        client = await clientFactory({ instanceId: id, gatewayUrl: urls.get(id) });
+        parsedByInstance.set(id, parseCapabilityTools(await discoverFn(client)));
+      } catch (err) {
+        console.warn(`[voice-remote] discovery failed for instance ${id}: ${err.message}`);
+      } finally {
+        if (client) { try { await client.close?.(); } catch {} }
+      }
+    }
+    const reachable = selections.filter(s => parsedByInstance.has(s.instanceId));
+    const { advertised, routeMap } = selectRemoteToolset(parsedByInstance, reachable);
+    disc = { at: now(), advertised, routeMap };
+    _discoveryCache.set(sig, disc);
+  }
+  if (!disc.advertised.length) return null;
+
+  // ---- routing (lazy clients, closed by close()) ----
+  const routeMap = disc.routeMap;
+  // Map<instanceId, Promise<client>>. Caching the PROMISE (not the resolved
+  // client) makes concurrent callRemote()s for the same instance — executeToolCalls
+  // runs tool calls via Promise.all — share one connect instead of racing two and
+  // orphaning a connection.
+  const clients = new Map();
+  function clientFor(instanceId) {
+    if (!clients.has(instanceId)) {
+      clients.set(instanceId, clientFactory({ instanceId, gatewayUrl: urls.get(instanceId) }));
+    }
+    return clients.get(instanceId); // a Promise<client>; awaited by callers
+  }
+  async function callRemote(toolName, args) {
+    const route = routeMap.get(toolName);
+    if (!route) return null;
+    const client = await clientFor(route.instanceId);
+    // C3: NO instance_id — peer-exposure denies onward-relay hops.
+    const result = await client.callTool({ name: "crow_tools", arguments: { action: toolName, params: args || {} } });
+    return rewriteAudioResult(result, urls.get(route.instanceId), route.instanceId);
+  }
+  async function close() {
+    for (const p of clients.values()) { try { await (await p)?.close?.(); } catch {} }
+    clients.clear();
+  }
+  return { advertised: disc.advertised, routeMap, callRemote, close };
+}
