@@ -347,6 +347,11 @@ await mountPublicEndpoints(app, { relayDb, validateRoomToken });
 // This runs before OAuth and allows federated requests with pre-shared tokens.
 import { instanceAuthMiddleware } from "./instance-registry.js";
 app.use(instanceAuthMiddleware(createDbClient()));
+// Federated audio stream-proxy: peer-authed, exposure-gated funkwhale streaming
+// for cross-instance voice playback. Mounted right after instanceAuthMiddleware
+// so req.instanceAuth is populated; under /audio → Funnel-blocked.
+import audioProxyRouter from "./routes/audio-proxy.js";
+app.use(audioProxyRouter({ createDbClient }));
 // F6c-2: local MCP token verifier. Runs AFTER instance auth (which wins) and
 // BEFORE OAuth. Sets req.localTokenAuth for a valid static token; the MCP
 // routes' skipAuthForInstance turns that into full local-operator access.
