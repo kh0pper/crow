@@ -119,7 +119,6 @@ Los paneles integrados viven en `servers/gateway/dashboard/panels/`:
 | Skills | `panels/skills.js` | `/dashboard/skills` | Navegar y editar las skills de Crow |
 | Configuración | `panels/settings.js` | `/dashboard/settings` | Configuración, cuotas, reglas de red, descubrimiento de contactos, recuperación de conflictos de sincronización |
 | Contactos | `panels/contacts.js` | `/dashboard/contacts` | Contactos peer, invitaciones, descubrimiento |
-| Orquestador | `panels/orchestrator.js` | `/dashboard/orchestrator` | Ejecutar equipos multiagente, ver ejecuciones y pipelines |
 | Bot Builder | `panels/bot-builder.js` | `/dashboard/bot-builder` | Crear y configurar bots (personas, skills, canales) |
 | Bot Board | `panels/bot-board.js` | `/dashboard/bot-board` | Monitorear bots en ejecución, conversaciones, entregas |
 | Sistema de diseño | `panels/design-system.js` | `/dashboard/design-system` | Referencia viva de tokens y componentes |

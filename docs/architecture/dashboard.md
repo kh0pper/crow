@@ -118,7 +118,6 @@ Built-in panels live in `servers/gateway/dashboard/panels/`:
 | Skills | `panels/skills.js` | `/dashboard/skills` | Browse and edit Crow skills |
 | Settings | `panels/settings.js` | `/dashboard/settings` | Configuration, quotas, network rules, contact discovery, sync-conflict recovery |
 | Contacts | `panels/contacts.js` | `/dashboard/contacts` | Peer contacts, invites, discovery |
-| Orchestrator | `panels/orchestrator.js` | `/dashboard/orchestrator` | Run multi-agent teams, view runs and pipelines |
 | Bot Builder | `panels/bot-builder.js` | `/dashboard/bot-builder` | Create and configure bots (personas, skills, channels) |
 | Bot Board | `panels/bot-board.js` | `/dashboard/bot-board` | Monitor running bots, conversations, deliveries |
 | Design System | `panels/design-system.js` | `/dashboard/design-system` | Living reference for tokens and components |
