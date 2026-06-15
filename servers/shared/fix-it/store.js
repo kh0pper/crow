@@ -53,16 +53,30 @@ export async function upsertItem(db, item) {
             remedies = excluded.remedies,
             context = excluded.context,
             updated_at = datetime('now'),
-            status = CASE WHEN fix_it_items.status = 'resolved' THEN 'pending' ELSE fix_it_items.status END`,
+            -- Reopen a resolved card, or a dismissed card whose suppression
+            -- window has elapsed; an actively-suppressed dismissal stays hidden.
+            status = CASE
+              WHEN fix_it_items.status = 'resolved' THEN 'pending'
+              WHEN fix_it_items.status = 'dismissed'
+                   AND fix_it_items.suppressed_until IS NOT NULL
+                   AND fix_it_items.suppressed_until <= datetime('now') THEN 'pending'
+              ELSE fix_it_items.status
+            END`,
     args: [source, dedupKey, title, why, severity, JSON.stringify(remedies), context == null ? null : JSON.stringify(context)],
   });
 
   const after = await db.execute({
-    sql: "SELECT id FROM fix_it_items WHERE source = ? AND dedup_key = ?",
+    sql: "SELECT id, status FROM fix_it_items WHERE source = ? AND dedup_key = ?",
     args: [source, dedupKey],
   });
-  const id = Number(after.rows[0].id);
-  const notify = !existed || existed.status === "resolved";
+  const row = after.rows[0];
+  const id = Number(row.id);
+  // Notify on a brand-new card, or any transition INTO pending (resolved or
+  // expired-dismissed → pending). A pending card that merely re-detects (count
+  // bump) does not re-notify. (Snapshot-vs-now: a rare concurrent double-insert
+  // of the SAME key can double-notify an `urgent` item; benign for v1's warn-only
+  // seed — see plan Known limitations.)
+  const notify = !existed || (existed.status !== "pending" && row.status === "pending");
   return { id, notify };
 }
 
