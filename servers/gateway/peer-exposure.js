@@ -15,6 +15,7 @@
 import { readSetting } from "./dashboard/settings/registry.js";
 import { getOrCreateLocalInstanceId } from "./instance-registry.js";
 import { auditCrossHostCall } from "../shared/cross-host-auth.js";
+import { emitFixIt } from "./fix-it/index.js";
 
 /** Local-only (never-synced) setting key. Deliberately absent from sync-allowlist.js. */
 export const EXPOSURE_SETTING_KEY = "remote_exposed_tools";
@@ -107,7 +108,7 @@ const DENY_CODE = -32001;
  * @param {Set<string>} [o.exposedSetOverride] test hook — skip the db read
  * @param {Function} [o.auditFn] test hook — defaults to auditCrossHostCall
  */
-export async function enforcePeerExposure({ prefix, req, res, db, connectedServers, exposedSetOverride, auditFn = auditCrossHostCall }) {
+export async function enforcePeerExposure({ prefix, req, res, db, connectedServers, exposedSetOverride, auditFn = auditCrossHostCall, emitFn = emitFixIt }) {
   // Only peer-instance callers are gated. Local-operator calls don't carry this.
   if (!req?.instanceAuth?.instance) return true;
 
@@ -138,6 +139,20 @@ export async function enforcePeerExposure({ prefix, req, res, db, connectedServe
   } catch { /* audit must not break the path */ }
 
   if (allowed) return true;
+
+  // Fix-it: a resolvable capability was denied → surface a one-click "Allow"
+  // card. Fire-and-forget; must never block or break the gate. Only real,
+  // resolvable capabilities (string canonicalId) become cards — a null-canonical
+  // (malformed) deny is skipped.
+  if (typeof canonicalId === "string") {
+    try {
+      Promise.resolve(emitFn(db, "peer-exposure:denied", {
+        capability: canonicalId,
+        requestingInstance: sourceId,
+        toolName,
+      })).catch(() => {});
+    } catch { /* never breaks the gate */ }
+  }
 
   if (!res.headersSent) {
     res.status(403).json({
