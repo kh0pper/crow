@@ -3,7 +3,7 @@
  *
  * Called FIRE-AND-FORGET from the app.listen() callback (S2). Every internal
  * .then/IIFE/.catch construct is verbatim. initProxyServers/loadRemoteInstances/
- * startAutoUpdate/startScheduler/connectedServers/createDbClient are imported
+ * startAutoUpdate/startScheduler/createDbClient are imported
  * here; this module does NOT receive authMiddleware/sessionManager/instructions/
  * dashboardAuth/relayDb.
  *
@@ -17,7 +17,6 @@
 import { initProxyServers, loadRemoteInstances } from "../proxy.js";
 import { startAutoUpdate } from "../auto-update.js";
 import { startScheduler } from "../scheduler.js";
-import { connectedServers } from "../proxy.js";
 import { createDbClient } from "../../db.js";
 
 export async function runPostListenSetup(server, app, deps) {
@@ -260,21 +259,6 @@ export async function runPostListenSetup(server, app, deps) {
   import("../crossposting/scheduler.js")
     .then(({ startCrosspostScheduler }) => startCrosspostScheduler())
     .catch((err) => console.warn("[crosspost-scheduler] not started:", err.message));
-
-  // Start orchestrator pipeline runner (polls for pipeline: schedules).
-  // Lazy import so deployments without the open-multi-agent sibling repo
-  // (e.g. hosted relays) keep running.
-  import("../../orchestrator/server.js")
-    .then(({ startOrchestratorPipelines }) => {
-      startOrchestratorPipelines(createDbClient(), { connectedServers });
-    })
-    .catch((err) => {
-      if (err.code === "ERR_MODULE_NOT_FOUND") {
-        console.warn("[pipeline-runner] Orchestrator unavailable (open-multi-agent not installed). Skipping.");
-      } else {
-        console.error("[pipeline-runner] Failed to start:", err.message);
-      }
-    });
 
   // Register this instance in the instance registry
   import("../instance-registry.js").then(async ({ ensureLocalInstanceRegistered }) => {

@@ -77,9 +77,6 @@
     "youtube-sr": "^4.3.12",
     "zod": "^3.24.0"
   },
-  "optionalDependencies": {
-    "open-multi-agent": "file:../open-multi-agent"
-  },
   "engines": {
     "node": ">=18.0.0"
   },
