@@ -1836,45 +1836,12 @@ await initTable("providers table (Phase 5-full)", `
   CREATE INDEX IF NOT EXISTS idx_providers_enabled ON providers(disabled);
 `);
 
-// --- Phase 5-full orchestrator events (observability timeline) ---
-await initTable("orchestrator_events table (Phase 5-full)", `
-  CREATE TABLE IF NOT EXISTS orchestrator_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id TEXT,
-    event_type TEXT NOT NULL,
-    provider_id TEXT,
-    bundle_id TEXT,
-    preset TEXT,
-    agent_name TEXT,
-    refs INTEGER,
-    data TEXT,
-    at TEXT DEFAULT (datetime('now'))
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_orch_events_run ON orchestrator_events(run_id, at DESC);
-  CREATE INDEX IF NOT EXISTS idx_orch_events_type ON orchestrator_events(event_type, at DESC);
-  CREATE INDEX IF NOT EXISTS idx_orch_events_provider ON orchestrator_events(provider_id, at DESC);
-`);
-
-// --- LLM consolidation: per-agent provider/model overrides for presets.
-// Synthetic `id` PK = `${preset_name}:${agent_name}` so instance-sync can
-// dispatch on `WHERE id = ?` (the sync machinery short-circuits when
-// row.id is undefined — composite keys silently fail to replicate).
-await initTable("orchestrator_role_overrides table", `
-  CREATE TABLE IF NOT EXISTS orchestrator_role_overrides (
-    id TEXT PRIMARY KEY,
-    preset_name TEXT NOT NULL,
-    agent_name TEXT NOT NULL,
-    provider_id TEXT,
-    model_id TEXT,
-    lamport_ts INTEGER DEFAULT 0,
-    instance_id TEXT,
-    updated_at TEXT DEFAULT (datetime('now'))
-  );
-
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_role_overrides_unique
-    ON orchestrator_role_overrides(preset_name, agent_name);
-`);
+// NOTE: the multi-agent orchestrator was retired (Plan B Part 2, 2026-06-14).
+// Its two tables — orchestrator_events (run/lifecycle observability timeline)
+// and orchestrator_role_overrides (preset per-agent provider overrides) — are
+// no longer created here; existing hosts drop them via the guarded migration
+// near the end of this file. GPU model lifecycle (refcounts) is in-memory in
+// servers/shared/lifecycle.js and never needed a table.
 
 // Seed 7 protected default sections (safe to re-run)
 const seedSections = [
@@ -2458,6 +2425,36 @@ try {
   }
 } catch (err) {
   console.warn("  ⚠ B3b drop check failed (table kept):", err.message);
+}
+
+// --- Plan B Part 2 (2026-06-14): orchestrator teardown DB cleanup ---
+// The multi-agent orchestrator was retired; pi (Bot Builder) handles all
+// foreground + background work. Drop its two tables and purge its legacy
+// schedule rows. Guarded + idempotent: safe to re-run every init-db.
+//   - orchestrator_events: observability timeline, no FK refs, disposable.
+//   - orchestrator_role_overrides: synced table — its instance-sync allowlist
+//     entry is removed in the same commit (servers/sharing/instance-sync.js).
+//   - schedules: delete the legacy 'pipeline:%' rows (MPA pipelines + the old
+//     pipeline:bot:* trackers — Q1 confirmed disposable by the operator,
+//     archived at ~/crow-archives/orchestrator-retirement-2026-06-14/) but
+//     PRESERVE 'pipeline:botcron:%' (the new pi-bot cron, which deliberately
+//     namespaces under the gateway-scheduler-protected pipeline: prefix).
+try {
+  await db.execute({ sql: "DROP TABLE IF EXISTS orchestrator_events" });
+  await db.execute({ sql: "DROP TABLE IF EXISTS orchestrator_role_overrides" });
+  const purged = Number((await db.execute({
+    sql: "SELECT COUNT(*) AS c FROM schedules WHERE task LIKE 'pipeline:%' AND task NOT LIKE 'pipeline:botcron:%'",
+  })).rows[0].c);
+  if (purged > 0) {
+    await db.execute({
+      sql: "DELETE FROM schedules WHERE task LIKE 'pipeline:%' AND task NOT LIKE 'pipeline:botcron:%'",
+    });
+    console.log(`  ✓ orchestrator teardown: dropped event/role tables, purged ${purged} legacy pipeline schedule(s)`);
+  } else {
+    console.log("  ✓ orchestrator teardown: dropped event/role tables (no legacy pipeline schedules)");
+  }
+} catch (err) {
+  console.warn("  ⚠ orchestrator teardown cleanup failed:", err.message);
 }
 
 console.log("Database initialized successfully (local file)");

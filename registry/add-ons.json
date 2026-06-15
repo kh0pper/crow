@@ -2445,7 +2445,7 @@
       "type": "bundle",
       "name": "llama.cpp Qwen3.5-122B-A10B Q5_K_M + MTP (ROCm 7.2.3)",
       "category": "ai",
-      "description": "On-demand high-end reasoning specialist — Qwen3.5-122B-A10B MoE (122B total / 10B active) Q5_K_M (~94GB) via llama.cpp with Multi-Token Prediction (--spec-type draft-mtp --spec-draft-n-max 3). ROCm 7.2.3 toolbox (MTP requires llama.cpp >= 9189). Shares :8003 mutex group; conflicts with crow-chat (orchestrator unloads it before warming).",
+      "description": "On-demand high-end reasoning specialist — Qwen3.5-122B-A10B MoE (122B total / 10B active) Q5_K_M (~94GB) via llama.cpp with Multi-Token Prediction (--spec-type draft-mtp --spec-draft-n-max 3). ROCm 7.2.3 toolbox (MTP requires llama.cpp >= 9189). Shares :8003 mutex group; conflicts with crow-chat (the GPU orchestrator unloads it before warming).",
       "host": "local",
       "requires": {
         "gpu": true,
@@ -5699,7 +5699,7 @@
       "type": "bundle",
       "name": "vLLM Vision — Qwen3-VL-8B-Instruct-FP8",
       "category": "ai",
-      "description": "Vision-language model for image understanding, OCR, structured output. Qwen3-VL-8B in FP8 (Blackwell). On-demand via orchestrator; mutex with grackle-embed/rerank during burst.",
+      "description": "Vision-language model for image understanding, OCR, structured output. Qwen3-VL-8B in FP8 (Blackwell). On-demand via the GPU orchestrator; mutex with grackle-embed/rerank during burst.",
       "host": "49cf71ca878643ba7717f344329266fd",
       "requires": {
         "gpu": true,

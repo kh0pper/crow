@@ -20,7 +20,7 @@ Esos tokens se consumen antes de que escribas una sola palabra. Con una ventana 
 
 ## El inventario de herramientas de Crow
 
-Los servidores centrales de Crow exponen más de 120 herramientas en total:
+Los servidores centrales de Crow exponen más de 110 herramientas en total:
 
 | Servidor | Herramientas | Ejemplos |
 |--------|-------|---------|
@@ -29,9 +29,8 @@ Los servidores centrales de Crow exponen más de 120 herramientas en total:
 | Blog | 23 | `crow_create_post`, `crow_publish_post`, `crow_blog_settings` |
 | Compartición | 33 | `crow_generate_invite`, `crow_share`, `crow_inbox` |
 | Almacenamiento | 8 | `crow_upload_file`, `crow_list_files`, `crow_delete_file` |
-| Orquestador | 9 | `crow_orchestrate`, `crow_run_pipeline`, `crow_list_presets` |
 | Consultoría | 6 | `crow_consulting_get`, `crow_consulting_stats` |
-| **Total** | **126** | |
+| **Total** | **117** | |
 
 Cada integración externa (Obsidian, Home Assistant, Ollama, etc.) agrega 5-20+ herramientas adicionales encima de esto.
 
@@ -41,13 +40,13 @@ Crow ofrece tres modos de configuración que intercambian eficiencia de contexto
 
 | Modo | Herramientas cargadas | Costo de contexto | Ideal para |
 |------|-------------|-------------|----------|
-| Router del gateway (`/router/mcp`) | 10 | ~3,000 tokens | Despliegues alojados, muchas integraciones |
+| Router del gateway (`/router/mcp`) | 9 | ~3,000 tokens | Despliegues alojados, muchas integraciones |
 | Núcleo combinado (`crow-core` stdio) | las herramientas de un servidor al inicio | ~6,000 tokens | Local/stdio, Raspberry Pi |
-| Servidores individuales | 126+ | ~25,000+ tokens | Máxima compatibilidad, configuración simple |
+| Servidores individuales | 117+ | ~25,000+ tokens | Máxima compatibilidad, configuración simple |
 
 ### Router del gateway
 
-El gateway expone un único endpoint MCP en `/router/mcp` con una **herramienta de categoría por servidor** consolidada — 10 herramientas en una instalación completa: `crow_memory`, `crow_projects`, `crow_blog`, `crow_sharing`, `crow_storage`, `crow_media`, `crow_orchestrator`, `crow_consulting`, más `crow_tools` (integraciones externas e instancias remotas) y `crow_discover` (consulta de esquemas). En lugar de cargar 126 definiciones de herramientas por adelantado, la IA llama a una herramienta de categoría con un parámetro `action` — `crow_memory` con `action: "store_memory"`, por ejemplo — y usa `crow_discover` para consultar bajo demanda las acciones disponibles y sus esquemas completos. Las definiciones de herramientas solo entran al contexto cuando realmente se necesitan.
+El gateway expone un único endpoint MCP en `/router/mcp` con una **herramienta de categoría por servidor** consolidada — 9 herramientas en una instalación completa: `crow_memory`, `crow_projects`, `crow_blog`, `crow_sharing`, `crow_storage`, `crow_media`, `crow_consulting`, más `crow_tools` (integraciones externas e instancias remotas) y `crow_discover` (consulta de esquemas). En lugar de cargar 117 definiciones de herramientas por adelantado, la IA llama a una herramienta de categoría con un parámetro `action` — `crow_memory` con `action: "store_memory"`, por ejemplo — y usa `crow_discover` para consultar bajo demanda las acciones disponibles y sus esquemas completos. Las definiciones de herramientas solo entran al contexto cuando realmente se necesitan.
 
 ### Núcleo combinado
 

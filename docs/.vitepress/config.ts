@@ -126,7 +126,6 @@ export default defineConfig({
               { text: 'Bot Builder', link: '/es/architecture/bot-builder' },
               { text: 'Compañero de IA', link: '/es/architecture/companion' },
               { text: 'Panel de Datos', link: '/es/architecture/data-dashboard' },
-              { text: 'Orquestador', link: '/es/architecture/orchestrator' },
             ],
           },
           {
@@ -149,7 +148,6 @@ export default defineConfig({
               { text: 'Notificaciones y Push', link: '/es/guide/notifications' },
               { text: 'Descubrimiento de Contactos', link: '/es/guide/contact-discovery' },
               { text: 'Bot Builder', link: '/es/guide/bot-builder' },
-              { text: 'Orquestador (Equipos de Agentes)', link: '/es/guide/orchestrator' },
               { text: 'Lentes Meta', link: '/es/guide/meta-glasses' },
               { text: 'Modo Kiosco', link: '/es/guide/kiosk-mode' },
               { text: 'Música', link: '/es/guide/music' },
@@ -311,7 +309,6 @@ export default defineConfig({
           { text: 'AI Companion', link: '/architecture/companion' },
 
           { text: 'Data Dashboard', link: '/architecture/data-dashboard' },
-          { text: 'Orchestrator', link: '/architecture/orchestrator' },
         ],
       },
       {
@@ -334,7 +331,6 @@ export default defineConfig({
           { text: 'Notifications & Push', link: '/guide/notifications' },
           { text: 'Contact Discovery', link: '/guide/contact-discovery' },
           { text: 'Bot Builder', link: '/guide/bot-builder' },
-          { text: 'Orchestrator (Agent Teams)', link: '/guide/orchestrator' },
           { text: 'Meta Glasses', link: '/guide/meta-glasses' },
           { text: 'Kiosk Mode', link: '/guide/kiosk-mode' },
           { text: 'Music', link: '/guide/music' },
