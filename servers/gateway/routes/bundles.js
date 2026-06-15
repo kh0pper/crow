@@ -34,8 +34,8 @@ import { getOrCreateLocalInstanceId, getInstance } from "../instance-registry.js
 import {
   registerProviderFromManifest,
   unregisterProvidersByBundle,
-} from "../../orchestrator/providers-db.js";
-import { invalidateProvidersCache } from "../../orchestrator/providers.js";
+} from "../../shared/providers-db.js";
+import { invalidateProvidersCache } from "../../shared/providers.js";
 import { writeSetting } from "../dashboard/settings/registry.js";
 
 /**

@@ -14,7 +14,7 @@ import {
   getLifecycleSnapshot,
   onLifecycleEvent,
   resetAllRefcounts,
-} from "../../servers/orchestrator/lifecycle.js";
+} from "../../servers/shared/lifecycle.js";
 
 let failed = 0;
 function t(name, ok, detail) {

@@ -48,7 +48,7 @@ import { existsSync, readFileSync, writeFileSync, realpathSync, statSync, readdi
 import { join } from "node:path";
 import { createDbClient } from "../../db.js";
 import { jsonError } from "./_error.js";
-import { listProvidersAll } from "../../orchestrator/providers-db.js";
+import { listProvidersAll } from "../../shared/providers-db.js";
 import { proposalsDir, normalizeSkillName, listProposals } from "../../../scripts/pi-bots/skill_proposals.mjs";
 // B4: shared write+attach helper (one code path with the auto review pass).
 import { promoteSkill } from "../../../scripts/pi-bots/skill_promote.mjs";

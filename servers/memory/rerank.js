@@ -6,7 +6,7 @@
  * reranker is offline — search still works, just with less-refined order.
  */
 
-import { loadProviders } from "../orchestrator/providers.js";
+import { loadProviders } from "../shared/providers.js";
 
 const DEFAULT_PROVIDER = "grackle-rerank";
 const RERANK_TIMEOUT_MS = 10_000;

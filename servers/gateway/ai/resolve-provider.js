@@ -14,7 +14,7 @@ import {
   resolveProviderConfig as _resolveProviderConfig,
 } from "./resolve-profile.js";
 import { createDbClient } from "../../db.js";
-import { loadProviders as loadCachedProviders } from "../../orchestrator/providers.js";
+import { loadProviders as loadCachedProviders } from "../../shared/providers.js";
 
 /**
  * Resolve (provider_id, model_id) → adapter config. Async + DB-first.

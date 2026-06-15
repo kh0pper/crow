@@ -36,7 +36,7 @@ export async function mountAdminApi(app, deps) {
 
   // --- Provider health matrix (orchestrator registry liveness) ---
   try {
-    const { providersHealthHandler } = await import("../../orchestrator/providers.js");
+    const { providersHealthHandler } = await import("../../shared/providers.js");
     app.get("/api/providers/health", dashboardAuth, providersHealthHandler);
     console.log("Provider health matrix mounted at /api/providers/health");
   } catch (err) {
@@ -60,7 +60,7 @@ export async function mountAdminApi(app, deps) {
 
   // --- Provider DB seed (Phase 5-full: first-boot migration from models.json) ---
   try {
-    const { seedProvidersFromModelsJson } = await import("../../orchestrator/providers-db.js");
+    const { seedProvidersFromModelsJson } = await import("../../shared/providers-db.js");
     const seed = await seedProvidersFromModelsJson(createDbClient());
     if (seed.seeded > 0) {
       console.log(`[providers] Seeded ${seed.seeded} providers from ${seed.source}`);
@@ -75,7 +75,7 @@ export async function mountAdminApi(app, deps) {
   // silently re-enable on the next restart. The "Sync bundle providers" button
   // in the LLM settings page passes force=true to explicitly re-enable.
   try {
-    const { syncProvidersFromModelsJson } = await import("../../orchestrator/providers-db.js");
+    const { syncProvidersFromModelsJson } = await import("../../shared/providers-db.js");
     const res = await syncProvidersFromModelsJson(createDbClient());
     if (res.upserted > 0 || res.skipped_disabled > 0) {
       console.log(`[providers] Reconciled models.json → DB: upserted=${res.upserted} skipped_disabled=${res.skipped_disabled}`);

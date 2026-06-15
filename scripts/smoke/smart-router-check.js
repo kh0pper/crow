@@ -19,7 +19,7 @@ import {
   writeSetting,
   deleteLocalSetting,
 } from "../../servers/gateway/dashboard/settings/registry.js";
-import { listProvidersAll } from "../../servers/orchestrator/providers-db.js";
+import { listProvidersAll } from "../../servers/shared/providers-db.js";
 
 const db = createDbClient();
 let failed = 0;

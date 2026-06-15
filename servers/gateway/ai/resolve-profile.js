@@ -11,7 +11,7 @@
  * is kept as a thin backwards-compat wrapper during the phased rollout.
  */
 
-import { loadProviders as loadCachedProviders } from "../../orchestrator/providers.js";
+import { loadProviders as loadCachedProviders } from "../../shared/providers.js";
 
 function firstModelId(models) {
   if (!Array.isArray(models)) return null;

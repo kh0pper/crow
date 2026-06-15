@@ -32,7 +32,7 @@ export async function mountMcpServers(app, deps) {
   // Phase 5-polish: attach syncManager to providers-db so upsert/disable push
   // to paired peers via emitChange (pull-side already covered by SYNCED_TABLES).
   try {
-    const { setProviderSyncManager } = await import("../../orchestrator/providers-db.js");
+    const { setProviderSyncManager } = await import("../../shared/providers-db.js");
     setProviderSyncManager(syncManager);
   } catch {}
 

@@ -10,7 +10,7 @@
  * Usage: node scripts/smoke/providers-health.js
  */
 
-import { healthMatrix } from "../../servers/orchestrator/providers.js";
+import { healthMatrix } from "../../servers/shared/providers.js";
 
 function fail(msg) {
   console.error(`FAIL: ${msg}`);

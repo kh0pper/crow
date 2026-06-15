@@ -22,7 +22,7 @@
  * lamport_ts; no mitigation needed.
  */
 
-import { upsertProvider } from "../../../../orchestrator/providers-db.js";
+import { upsertProvider } from "../../../../shared/providers-db.js";
 import { resolveEnvPath, readEnvFile } from "../../../env-manager.js";
 import { upsertSetting, readSetting } from "../registry.js";
 

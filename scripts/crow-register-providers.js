@@ -71,7 +71,7 @@ try {
     }
   }
 
-  const { registerProviderFromManifest } = await import("../servers/orchestrator/providers-db.js");
+  const { registerProviderFromManifest } = await import("../servers/shared/providers-db.js");
   const port = manifest.port || 0;
   let registered = 0;
   for (const pdef of manifest.providers) {
