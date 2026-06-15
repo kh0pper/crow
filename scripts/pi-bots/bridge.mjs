@@ -35,6 +35,7 @@ import { gatewayHint as resolveGatewayHint } from "./gateways/index.mjs";
 import { runSkillReview } from "./skill_review.mjs";
 import { botsDbPath, tasksDbPath as resolveTasksDbPath } from "./instance-paths.mjs";
 import { remoteServersForBot, parseRemoteInvocationFlag } from "./remote-blocks.mjs";
+import { warmModel } from "./warm.mjs";
 import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
 
 const HOME = "/home/kh0pp";
@@ -538,6 +539,12 @@ export async function handleInbound(opts) {
     pi_session_dir: sessionDir + "/sessions", status: "active", control: "run",
     model: resolved.key, escalated: resolved.escalated ? 1 : 0,
   }));
+
+  // Warm the resolved model bundle before spawning pi (same as runJob). The
+  // bridge is a separate process from the gateway, so it warms over HTTP via
+  // POST /llm/acquire; without this a cold on-demand model (:8003) makes pi
+  // return "Connection error" → "(no reply)" on Discord/Gmail. Non-fatal.
+  await warmModel(resolved.provider, log);
 
   const pi = new PiRpc({ def, sessionDir, resolved, selfAuthoringDir, remoteEnabled,
     piSessionId: effectiveResume ? session.pi_session_id : null, appendSystemPromptFile: sysFile });
