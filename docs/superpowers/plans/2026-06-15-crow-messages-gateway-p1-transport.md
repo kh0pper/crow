@@ -414,9 +414,14 @@ Expected: FAIL — module not found.
  * the pi-bots host process. Pure helpers (xOnly/buildDM/openDM/makeDedupeGate)
  * are unit-tested; the relay wrappers are thin and exercised via injected stubs.
  */
-// Polyfill WebSocket for Node < 22 (nostr-tools/relay requires it). Without this
-// Relay.connect() rejects and the bot silently connects to 0 relays.
-// (Ported verbatim from servers/sharing/nostr.js:12-20.)
+// Polyfill WebSocket for Node < 22 (nostr-tools/relay needs it). NOTE: static
+// imports below are HOISTED and evaluated before this top-level block runs, so
+// textual order is NOT the mechanism — at module-eval time nostr-tools/relay
+// captures the (still-undefined) global. What makes it work: ESM awaits this
+// module's top-level `await import("ws")` (which sets globalThis.WebSocket)
+// before start() runs, AND we pin the impl explicitly via
+// useWebSocketImplementation so we don't rely on nostr-tools' runtime fallback.
+// (Mirrors servers/sharing/nostr.js:12-20, hardened.)
 if (typeof globalThis.WebSocket === "undefined") {
   try {
     const ws = await import("ws");
@@ -427,7 +432,10 @@ if (typeof globalThis.WebSocket === "undefined") {
 }
 import { finalizeEvent } from "nostr-tools/pure";
 import * as nip44 from "nostr-tools/nip44";
-import { Relay } from "nostr-tools/relay";
+import { Relay, useWebSocketImplementation } from "nostr-tools/relay";
+// Pin the implementation explicitly (survives a future nostr-tools that drops
+// the constructor-time `|| WebSocket` fallback).
+if (globalThis.WebSocket) { try { useWebSocketImplementation(globalThis.WebSocket); } catch { /* older nostr-tools: runtime fallback covers it */ } }
 
 /** Normalize any secp pubkey hex to Nostr x-only 64-hex (strip 02/03 prefix). */
 export function xOnly(hex) {
@@ -680,7 +688,7 @@ test("invite-accept event authorizes the sender, runs no pi turn", async () => {
       log: () => {},
     });
     assert.equal(turns, 0, "no pi turn on accept");
-    assert.equal(cmStore.authorizeSender(db, "bot1", "a".repeat(64), false), true, "now authorized");
+    assert.equal(cmStore.authorizeSender(db, "bot1", "a".repeat(64)), true, "now authorized");
     assert.equal(sent.length, 1, "sent an ack");
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
@@ -997,7 +1005,7 @@ git show --stat HEAD
 
 ## Self-Review
 
-**Spec coverage (Plan-1 slice):** derived identity (§Identity → T1); data model (§Data model → T2); invite codec (§Invites → T3); Nostr transport primitives + adapter driving the real pi bridge with `gateway_thread_id`, replies from the bot key, no `messages`-table writes (§Transport → T4/T6); default-deny authorization by secp pubkey, invite-consume, paired-instance toggle (§Trust → T5/T6); host registration so `gateway_runner` auto-hosts it (§Registry → T7); E2E (§Testing → T8). **Deferred to Plan 2 (not this plan):** owner Bot Builder UI (Share/manage/Advanced), recipient `crow_accept_bot_invite` tool + landing route, `capabilitiesForUI`/`STATIC_META` friendly entry, i18n. These are the human-facing sharing layer; the transport works now with a manually/inserted invite + accept.
+**Spec coverage (Plan-1 slice):** derived identity (§Identity → T1); data model (§Data model → T2); invite codec (§Invites → T3); Nostr transport primitives + adapter driving the real pi bridge with `gateway_thread_id`, replies from the bot key, no `messages`-table writes (§Transport → T4/T6); default-deny authorization by signed secp pubkey, invite-consume (§Trust → T5/T6); host registration so `gateway_runner` auto-hosts it (§Registry → T7); E2E (§Testing → T8). **Deferred to Plan 2 (not this plan):** the "allow any paired instance" toggle (no key source today — see scope note), owner Bot Builder UI (Share/manage/Advanced), recipient `crow_accept_bot_invite` tool + landing route, `capabilitiesForUI`/`STATIC_META` friendly entry, i18n. These are the human-facing sharing layer; the transport works now with a manually/inserted invite + accept.
 
 **Placeholder scan:** the two integration specifics flagged inline (the `botsDbPath`/`base.mjs` import names in Task 6, and the `crow_instances.secp256k1_pubkey` column in Task 5) are **verify-then-adjust** items with concrete fallbacks, not blanks — the executor confirms the exact symbol against the cited existing file. No `TBD`/`handle errors`/`similar to`.
 
@@ -1030,4 +1038,6 @@ Suggestions applied:
 - **xOnly authorization-key mismatch** (security) → the ACL is now keyed on the **signed `event.pubkey`** (`pk`), never the sender-claimed key; claimed fields are labels only. Prevents both lockout and authorizing a third party.
 - **`since` window** added (no stale relay replay). **Long-lived better-sqlite3 handle**: confirmed safe (single-statement writes + `busy_timeout`, matching `gateway_runner.mjs`); documented.
 
-Open deployment guardrails (carried to "After Plan 1"): the pi-bots host needs `nostr-tools` + `ws` + `better-sqlite3` resolvable (all already used elsewhere — confirm), and `start()`'s `loadInstanceSeed(dirname(botsDbPath()))` must point at an **unencrypted** instance identity (home instances are; it throws clearly otherwise).
+Open deployment guardrails (carried to "After Plan 1"): the pi-bots host needs `nostr-tools` + `ws` + `better-sqlite3` resolvable (all already used elsewhere — confirm), and `start()`'s `loadInstanceSeed(dirname(botsDbPath()))` must point at an **unencrypted** instance identity that sits **beside** the configured DB (the standard `~/.crow/data` layout co-locates `identity.json` + `crow.db`; it throws clearly otherwise and the gateway no-ops with a log line).
+
+**Confirmatory re-review (2026-06-15): VERDICT APPROVE — no critical issues.** A second adversarial pass verified all four fixes against live code and found no regressions: test counts consistent (T1=5, T3=7, T2=1, T5=3, T4=3, T6=6, T7=7, T8=1); no caller passes removed params; ACL never keyed on a claimed key; split-brain fix well-founded. It **empirically proved** the WebSocket polyfill works — but for a subtle reason (nostr-tools resolves the socket via a constructor-time `|| WebSocket` global re-read at runtime, not the eval-time capture, and ESM settles this module's top-level `await import("ws")` before `start()` runs). Hardening applied per its recommendation: explicit `useWebSocketImplementation(globalThis.WebSocket)` (survives a future nostr-tools dropping the fallback) + corrected the misleading "textual order" comment. Two cosmetic nits also fixed (a vestigial 4th arg in a Task-6 test; the Self-Review's stale paired-toggle in-scope line moved to deferred).
