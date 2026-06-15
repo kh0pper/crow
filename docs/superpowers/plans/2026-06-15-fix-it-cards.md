@@ -1460,3 +1460,7 @@ A second independent code-reviewer (no Critical issues) verified all 8 security 
 ### Known limitations (v1)
 - `upsertItem`'s `notify` is computed from a pre-upsert snapshot; concurrent double-inserts of one dedup key can double-fire an `urgent` push. Benign for v1 (warn-only). Make transactional before shipping an `urgent` detector.
 - `expose-capability` remedy reads `remote_exposed_tools` then writes — same non-transactional pattern; last-writer-wins across a simultaneous manual edit of the exposure panel. Practically irrelevant (single operator) and the write is idempotent-add.
+- If `readSetting` *throws* during a remedy click, `getExposedCapabilities` returns an empty set (its deny-all-on-error contract), so the write would narrow the allowlist to just the clicked capability. Fail-safe direction (never over-exposes), rare (requires a DB read error at click time); not worth weakening the security gate's deny-all-on-error behavior to guard.
+
+### Security review (2026-06-15) — CLEAN
+Independent `/security-review` pass: no HIGH/MEDIUM newly-introduced findings. Verified: all `store.js` SQL parameterized (incl. the `datetime('now','+'||?||' days')` dismiss binding); every rendered value `escapeHtml`-escaped and the only peer-free-text value (`toolName`) is stored-not-rendered; POST route behind `dashboardAuth`+`csrfMiddleware`; the deny-path emit is decision-neutral and creates only a pending card (exposure requires an authenticated CSRF-protected operator click); the exposed capability derives from server-stored remedies JSON, not the POST body.
