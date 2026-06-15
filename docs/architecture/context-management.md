@@ -8,7 +8,7 @@ Crow addresses this with two complementary strategies: the **Gateway Tool Router
 
 ## Gateway Tool Router
 
-The router (`servers/gateway/router.js`) consolidates all core and external tools behind one category tool per server — 10 tools on a full install — reducing context usage by roughly 90%.
+The router (`servers/gateway/router.js`) consolidates all core and external tools behind one category tool per server — 9 tools on a full install — reducing context usage by roughly 90%.
 
 ### Architecture
 
@@ -21,7 +21,7 @@ The router (`servers/gateway/router.js`) consolidates all core and external tool
             +-----------+-----------+-----------+-----------+
             |           |           |           |           |
      crow_memory  crow_projects  crow_blog  crow_sharing  crow_storage  (+media,
-                                                            orchestrator, consulting)
+                                                            consulting)
             |           |           |           |           |
      [InMemory   [InMemory   [InMemory   [InMemory   [InMemory
       Transport]  Transport]  Transport]  Transport]  Transport]
@@ -94,7 +94,7 @@ Category-level discovery uses static manifests (no server instantiation). Action
 | Mode | Tools Loaded | Estimated Tokens |
 |---|---|---|
 | Individual servers (no router) | 126+ x ~200 tokens | ~25,000+ |
-| Router mode | 10 x ~300 tokens | ~3,000 |
+| Router mode | 9 x ~300 tokens | ~3,000 |
 | **Reduction** | | **~90%** |
 
 ### Feature Flag
@@ -287,15 +287,15 @@ The gateway `/health` response includes tool count telemetry:
   "servers": ["crow-memory", "crow-projects", "crow-sharing", "crow-storage", "crow-blog"],
   "externalServers": [{ "id": "github", "name": "GitHub", "tools": 15 }],
   "toolCounts": {
-    "core": 141,
+    "core": 134,
     "external": 15,
-    "total": 156,
-    "routerMode": 10
+    "total": 149,
+    "routerMode": 9
   }
 }
 ```
 
-The `routerMode` field is the number of router tools exposed (10 on a full install), or `null` when the router is disabled via `CROW_DISABLE_ROUTER=1`. `core` counts every manifest action across the 8 categories (141 on this build, including the media bundle's 17 — the orchestrator manifest lists 7 of its 9 tools).
+The `routerMode` field is the number of router tools exposed (9 on a full install), or `null` when the router is disabled via `CROW_DISABLE_ROUTER=1`. `core` counts every manifest action across the 7 categories (134 on this build, including the media bundle's 17).
 
 ## API Reference
 

@@ -8,7 +8,7 @@ Crow aborda esto con dos estrategias complementarias: el **Router de Herramienta
 
 ## Router de herramientas del gateway
 
-El router (`servers/gateway/router.js`) consolida todas las herramientas centrales y externas detrás de una herramienta de categoría por servidor — 10 herramientas en una instalación completa — reduciendo el uso de contexto en aproximadamente un 90%.
+El router (`servers/gateway/router.js`) consolida todas las herramientas centrales y externas detrás de una herramienta de categoría por servidor — 9 herramientas en una instalación completa — reduciendo el uso de contexto en aproximadamente un 90%.
 
 ### Arquitectura
 
@@ -21,7 +21,7 @@ El router (`servers/gateway/router.js`) consolida todas las herramientas central
             +-----------+-----------+-----------+-----------+
             |           |           |           |           |
      crow_memory  crow_projects  crow_blog  crow_sharing  crow_storage  (+media,
-                                                            orchestrator, consulting)
+                                                            consulting)
             |           |           |           |           |
      [InMemory   [InMemory   [InMemory   [InMemory   [InMemory
       Transport]  Transport]  Transport]  Transport]  Transport]
@@ -94,7 +94,7 @@ El descubrimiento a nivel de categoría usa manifiestos estáticos (sin instanci
 | Modo | Herramientas cargadas | Tokens estimados |
 |---|---|---|
 | Servidores individuales (sin router) | 126+ x ~200 tokens | ~25,000+ |
-| Modo router | 10 x ~300 tokens | ~3,000 |
+| Modo router | 9 x ~300 tokens | ~3,000 |
 | **Reducción** | | **~90%** |
 
 ### Bandera de funcionalidad
@@ -287,15 +287,15 @@ La respuesta de `/health` del gateway incluye telemetría de conteo de herramien
   "servers": ["crow-memory", "crow-projects", "crow-sharing", "crow-storage", "crow-blog"],
   "externalServers": [{ "id": "github", "name": "GitHub", "tools": 15 }],
   "toolCounts": {
-    "core": 141,
+    "core": 134,
     "external": 15,
-    "total": 156,
-    "routerMode": 10
+    "total": 149,
+    "routerMode": 9
   }
 }
 ```
 
-El campo `routerMode` es el número de herramientas del router expuestas (10 en una instalación completa), o `null` cuando el router está desactivado vía `CROW_DISABLE_ROUTER=1`. `core` cuenta todas las acciones del manifiesto en las 8 categorías (141 en esta compilación, incluyendo las 17 del complemento de medios — el manifiesto del orquestador lista 7 de sus 9 herramientas).
+El campo `routerMode` es el número de herramientas del router expuestas (9 en una instalación completa), o `null` cuando el router está desactivado vía `CROW_DISABLE_ROUTER=1`. `core` cuenta todas las acciones del manifiesto en las 7 categorías (134 en esta compilación, incluyendo las 17 del complemento de medios).
 
 ## Referencia de API
 
