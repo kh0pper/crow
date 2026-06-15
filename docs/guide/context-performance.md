@@ -20,7 +20,7 @@ Those tokens are consumed before you type a single word. With a 200K token conte
 
 ## Crow's Tool Inventory
 
-Crow's core servers expose over 120 tools total:
+Crow's core servers expose over 110 tools total:
 
 | Server | Tools | Examples |
 |--------|-------|---------|
@@ -29,9 +29,8 @@ Crow's core servers expose over 120 tools total:
 | Blog | 23 | `crow_create_post`, `crow_publish_post`, `crow_blog_settings` |
 | Sharing | 33 | `crow_generate_invite`, `crow_share`, `crow_inbox` |
 | Storage | 8 | `crow_upload_file`, `crow_list_files`, `crow_delete_file` |
-| Orchestrator | 9 | `crow_orchestrate`, `crow_run_pipeline`, `crow_list_presets` |
 | Consulting | 6 | `crow_consulting_get`, `crow_consulting_stats` |
-| **Total** | **126** | |
+| **Total** | **117** | |
 
 Each external integration (Obsidian, Home Assistant, Ollama, etc.) adds 5-20+ more tools on top of this.
 
@@ -41,13 +40,13 @@ Crow offers three configuration modes that trade off between context efficiency 
 
 | Mode | Tools Loaded | Context Cost | Best For |
 |------|-------------|-------------|----------|
-| Gateway Router (`/router/mcp`) | 10 | ~3,000 tokens | Hosted deployments, many integrations |
+| Gateway Router (`/router/mcp`) | 9 | ~3,000 tokens | Hosted deployments, many integrations |
 | Combined Core (`crow-core` stdio) | one server's tools at startup | ~6,000 tokens | Local/stdio, Raspberry Pi |
-| Individual Servers | 126+ | ~25,000+ tokens | Maximum compatibility, simple setup |
+| Individual Servers | 117+ | ~25,000+ tokens | Maximum compatibility, simple setup |
 
 ### Gateway Router
 
-The gateway exposes a single MCP endpoint at `/router/mcp` with one consolidated **category tool per server** — 10 tools on a full install: `crow_memory`, `crow_projects`, `crow_blog`, `crow_sharing`, `crow_storage`, `crow_media`, `crow_orchestrator`, `crow_consulting`, plus `crow_tools` (external integrations and remote instances) and `crow_discover` (schema lookup). Instead of loading 126 tool definitions upfront, the AI calls a category tool with an `action` parameter — `crow_memory` with `action: "store_memory"`, for example — and uses `crow_discover` to look up available actions and their full schemas on demand. Tool definitions only enter context when actually needed.
+The gateway exposes a single MCP endpoint at `/router/mcp` with one consolidated **category tool per server** — 9 tools on a full install: `crow_memory`, `crow_projects`, `crow_blog`, `crow_sharing`, `crow_storage`, `crow_media`, `crow_consulting`, plus `crow_tools` (external integrations and remote instances) and `crow_discover` (schema lookup). Instead of loading 117 tool definitions upfront, the AI calls a category tool with an `action` parameter — `crow_memory` with `action: "store_memory"`, for example — and uses `crow_discover` to look up available actions and their full schemas on demand. Tool definitions only enter context when actually needed.
 
 ### Combined Core
 

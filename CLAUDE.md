@@ -33,7 +33,7 @@ When the AI behavior (formatting, routing) changes → `crow.md` only. When the 
 ## Where to find things
 
 - **Build / scripts**: `package.json`, `docker-compose.yml`, `scripts/`.
-- **Architecture per server**: `docs/architecture/{memory,research,sharing,storage,blog,gateway,dashboard,orchestrator}-server.md`.
+- **Architecture per server**: `docs/architecture/{memory,research,sharing,storage,blog,gateway,dashboard}-server.md`.
 - **DB schema (source of truth)**: `scripts/init-db.js`. FTS5 triggers are inline; if you change a table that has an FTS shadow (`memories`, `sources`, `blog_posts`, `kb_articles`), update the virtual table + insert/update/delete triggers in the same place.
 - **Dashboard / Turbo Drive / Turbo Streams**: `docs/architecture/dashboard.md`. Vendored Turbo at `servers/gateway/public/vendor/turbo-8.0.5.umd.js` (pinned). Opt out with systemd drop-in env `CROW_ENABLE_TURBO=0`.
 - **MCP config**: `.mcp.json` is generated — run `npm run mcp-config` after editing `.env`. Registry at `scripts/server-registry.js`. Use `npm run mcp-config -- --combined` for a single `crow-core` entry.

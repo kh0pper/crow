@@ -82,7 +82,7 @@ This wrapper is the security boundary for voice. It closes the gap left by the o
 
 ## Deep work
 
-Long-running work is handed to Crow's [orchestrator](/architecture/orchestrator). The orchestrator dispatches the job in the background with a time ceiling and an in-memory job map. The agent acknowledges immediately and the result is delivered on a later turn, since the job outlives the turn that started it. A persistent completion-notification path is a planned follow-on.
+Long-running work is handed off as a background job via the `crow_delegate` tool. The job is enqueued in the shared `bot_jobs` table and run by a pi worker in the Bot Builder host process — a single strong agent doing the multi-step work in one coherent context. The agent acknowledges immediately with a job ID and the result is delivered on a later turn (retrieved with `crow_job_status`, or pushed to the originating channel), since the job outlives the turn that started it. A persistent completion-notification path is a planned follow-on.
 
 ## Opt-in self-authoring
 
@@ -94,5 +94,4 @@ A staged file is inert by construction. The skill resolver loads skills by name 
 
 - [Bot Builder Guide](/guide/bot-builder): The user-facing walkthrough
 - [Meta Glasses](/guide/meta-glasses): The glasses gateway in use
-- [Orchestrator](/architecture/orchestrator): Background deep-work execution
 - [Context Management](/architecture/context-management): How tools are advertised to keep context lean

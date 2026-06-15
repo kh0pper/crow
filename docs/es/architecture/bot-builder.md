@@ -83,7 +83,7 @@ Este wrapper es la frontera de seguridad para la voz. Cierra la brecha que dejab
 
 ## Trabajo profundo
 
-El trabajo de larga duración se entrega al [orquestador](/es/architecture/orchestrator) de Crow. El orquestador despacha el trabajo en segundo plano con un techo de tiempo y un mapa de trabajos en memoria. El agente acusa recibo de inmediato y el resultado se entrega en un turno posterior, ya que el trabajo sobrevive al turno que lo inició. Una vía persistente de notificación de finalización es un siguiente paso planeado.
+El trabajo de larga duración se entrega como un trabajo en segundo plano mediante la herramienta `crow_delegate`. El trabajo se encola en la tabla compartida `bot_jobs` y lo ejecuta un worker de pi en el proceso anfitrión del Bot Builder — un único agente fuerte realizando el trabajo de varios pasos en un contexto coherente. El agente acusa recibo de inmediato con un ID de trabajo y el resultado se entrega en un turno posterior (se obtiene con `crow_job_status`, o se envía al canal de origen), ya que el trabajo sobrevive al turno que lo inició. Una vía persistente de notificación de finalización es un siguiente paso planeado.
 
 ## Autoescritura opcional (opt-in)
 
@@ -95,5 +95,4 @@ Un archivo en staging es inerte por construcción. El resolvedor de skills carga
 
 - [Guía del Bot Builder](/es/guide/bot-builder): El recorrido de cara al usuario
 - [Meta Glasses](/es/guide/meta-glasses): El gateway de lentes en uso
-- [Orquestador](/es/architecture/orchestrator): Ejecución de trabajo profundo en segundo plano
 - [Gestión de contexto](/es/architecture/context-management): Cómo se anuncian las herramientas para mantener el contexto ligero
