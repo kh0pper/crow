@@ -1449,3 +1449,14 @@ Suggestions/questions incorporated:
 5. Added "Test harness invariants": `CROW_DB_PATH` must be unset; keep each `fix-it-*.test.js` a separate file (registry singleton + `wired` flag isolation).
 6. Task 8 Step 5 now names the real neighbor suites (`exposure-allowlist.test.js`, `bot-management-exposure.test.js`).
 7. Documented the `type:"system"` push choice (Q9) and confirmed the empty-`crow_instances` fallback path (Q10, no action). `listPending` second-granularity ordering (Q8) accepted for v1 — `id DESC` is the deterministic tiebreaker.
+
+### Post-implementation code review (independent adversarial pass, 2026-06-15)
+
+A second independent code-reviewer (no Critical issues) verified all 8 security properties: every rendered value is `escapeHtml`-escaped (no XSS, including peer-controlled `toolName`/instance name); CSRF token is populated at nest-render time and the POST route sits behind `dashboardAuth`+`csrfMiddleware`; the `instant`-only gate blocks future confirm/guided remedies; malformed POST bodies redirect to `fixit_error` with no unhandled throw; the fire-and-forget emit swallows both sync throws and async rejections while the 403 always sends; no cross-request shared mutable state; the remedy only ever adds to the local setting; the route closes its db client. Two Important findings:
+
+- **#1 Dismissed cards never resurfaced** (real spec gap) — **FIXED** (`fix(fix-it): reopen dismissed cards after suppression window elapses`). The upsert `CASE` now reopens a `dismissed` row whose `suppressed_until <= now`, and `notify` fires on any transition *into* `pending`. New store test: "dismissed item resurfaces … after the suppression window passes."
+- **#2 TOCTOU on the `notify` flag** — a rare concurrent double-insert of the SAME dedup key can double-notify an `urgent` item. **Accepted for v1, documented** (Known limitations below): zero impact on the v1 funkwhale seed (`warn`, no push), and the codebase's own nest pin/unpin handler uses the identical non-transactional SELECT-then-upsert. A future `urgent` detector should make `upsertItem` transactional (single-connection BEGIN/COMMIT or `RETURNING`).
+
+### Known limitations (v1)
+- `upsertItem`'s `notify` is computed from a pre-upsert snapshot; concurrent double-inserts of one dedup key can double-fire an `urgent` push. Benign for v1 (warn-only). Make transactional before shipping an `urgent` detector.
+- `expose-capability` remedy reads `remote_exposed_tools` then writes — same non-transactional pattern; last-writer-wins across a simultaneous manual edit of the exposure panel. Practically irrelevant (single operator) and the write is idempotent-add.
