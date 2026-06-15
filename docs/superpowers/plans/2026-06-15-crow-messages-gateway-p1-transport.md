@@ -4,7 +4,7 @@
 
 **Goal:** Make a Crow bot receivable and replyable over Crow Messages (Nostr DM) under its own derived identity, with default-deny per-bot authorization — testable end-to-end with a mock relay and a manually-authorized sender.
 
-**Architecture:** A pi-bots host adapter (`scripts/pi-bots/gateways/crow-messages.mjs`, hosted by `gateway_runner` like Telegram/Slack) derives the bot's Nostr keypair from the instance seed, subscribes for the bot's pubkey, decrypts inbound DMs, authorizes the sender against a per-bot ACL (+ optional "any paired instance"), and drives the real pi bridge (`handleInbound`) so the bot answers as itself; replies are published from the bot key. A small Nostr-client helper and a better-sqlite3 ACL/invite store back it. This plan is the **transport layer**; Plan 2 adds the Bot Builder sharing UI + the recipient one-tap accept flow.
+**Architecture:** A pi-bots host adapter (`scripts/pi-bots/gateways/crow-messages.mjs`, hosted by `gateway_runner` like Telegram/Slack) derives the bot's Nostr keypair from the instance seed, subscribes for the bot's pubkey, decrypts inbound DMs, authorizes the sender against a per-bot ACL (default-deny; the "any paired instance" source is deferred to Plan 2), and drives the real pi bridge (`handleInbound`) so the bot answers as itself; replies are published from the bot key. A small Nostr-client helper and a better-sqlite3 ACL/invite store back it. This plan is the **transport layer**; Plan 2 adds the Bot Builder sharing UI + the recipient one-tap accept flow.
 
 **Tech Stack:** Node.js ESM, `node --test`, `nostr-tools` (`/pure`, `/nip44`, `/relay`), `@noble/*` (hkdf/ed25519/secp256k1, already used by `identity.js`), better-sqlite3 (pi-bots host), libsql (schema via `init-db.js`).
 
@@ -41,7 +41,10 @@
 ```js
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deriveBotIdentity } from "../servers/sharing/identity.js";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { deriveBotIdentity, loadInstanceSeed } from "../servers/sharing/identity.js";
 
 const SEED = Buffer.alloc(32, 7); // fixed, deterministic
 
@@ -66,6 +69,23 @@ test("deriveBotIdentity shape: crow: id, hex keys, compressed secp (66 hex)", ()
 test("deriveBotIdentity requires seed + botId", () => {
   assert.throws(() => deriveBotIdentity(null, "x"));
   assert.throws(() => deriveBotIdentity(SEED, ""));
+});
+
+test("loadInstanceSeed reads the unencrypted seed from a given data dir", () => {
+  const d = mkdtempSync(join(tmpdir(), "seed-"));
+  try {
+    const seedHex = Buffer.alloc(32, 5).toString("hex");
+    writeFileSync(join(d, "identity.json"), JSON.stringify({ seed: seedHex }));
+    assert.equal(loadInstanceSeed(d).toString("hex"), seedHex);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("loadInstanceSeed throws on an encrypted identity (no passphrase in host)", () => {
+  const d = mkdtempSync(join(tmpdir(), "seed-enc-"));
+  try {
+    writeFileSync(join(d, "identity.json"), JSON.stringify({ encrypted: { salt: "x" } }));
+    assert.throws(() => loadInstanceSeed(d), /encrypted/i);
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });
 ```
 
@@ -105,12 +125,29 @@ export function deriveBotIdentity(seed, botId) {
     secp256k1Pubkey: Buffer.from(secp256k1Pub).toString("hex"),
   };
 }
+
+/**
+ * Load the raw instance seed from a SPECIFIC data dir's identity.json. Used by
+ * the pi-bots host to derive bot keys from the SAME instance the bot DB belongs
+ * to — avoiding the CROW_DATA_DIR-vs-CROW_DB_PATH split-brain (the host may set
+ * only CROW_DB_PATH, so the module-level CROW_DATA_DIR fallback could resolve a
+ * different instance). Unencrypted seeds only (the host has no passphrase).
+ */
+export function loadInstanceSeed(dataDir) {
+  const p = resolve(dataDir, "identity.json");
+  const stored = JSON.parse(readFileSync(p, "utf-8"));
+  if (stored.encrypted) throw new Error("loadInstanceSeed: encrypted identity requires a passphrase (unsupported in the gateway host)");
+  if (!stored.seed) throw new Error("loadInstanceSeed: identity.json has no plaintext seed");
+  return Buffer.from(stored.seed, "hex");
+}
 ```
+
+(`resolve` and `readFileSync` are already imported at the top of `identity.js` — lines 14-15.)
 
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `node --test tests/crow-bot-identity.test.js`
-Expected: PASS (3 tests).
+Expected: PASS (5 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -308,7 +345,7 @@ export function parseBotInviteCode(code) {
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `node --test tests/crow-bot-identity.test.js`
-Expected: PASS (5 tests total).
+Expected: PASS (7 tests total).
 
 - [ ] **Step 5: Commit**
 
@@ -333,13 +370,21 @@ git show --stat HEAD
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { deriveBotIdentity } from "../servers/sharing/identity.js";
-import { xOnly, buildDM, openDM } from "../scripts/pi-bots/gateways/nostr-client.mjs";
+import { xOnly, buildDM, openDM, makeDedupeGate } from "../scripts/pi-bots/gateways/nostr-client.mjs";
 
 const SEED = Buffer.alloc(32, 9);
 
 test("xOnly strips a compressed (66) key to 64, passes 64 through", () => {
   assert.equal(xOnly("02" + "a".repeat(64)).length, 64);
   assert.equal(xOnly("a".repeat(64)), "a".repeat(64));
+});
+
+test("makeDedupeGate: first sight true, repeats false", () => {
+  const gate = makeDedupeGate();
+  assert.equal(gate("evt-1"), true);
+  assert.equal(gate("evt-1"), false);
+  assert.equal(gate("evt-2"), true);
+  assert.equal(gate(null), false);
 });
 
 test("buildDM → openDM round-trips between two derived identities", () => {
@@ -366,9 +411,20 @@ Expected: FAIL — module not found.
 /**
  * Minimal Nostr DM client for the pi-bots crow-messages adapter. Mirrors the
  * NIP-44 / kind:4 conventions in servers/sharing/nostr.js but stands alone in
- * the pi-bots host process. Pure helpers (xOnly/buildDM/openDM) are unit-tested;
- * the relay wrappers are thin and exercised via injected stubs in integration.
+ * the pi-bots host process. Pure helpers (xOnly/buildDM/openDM/makeDedupeGate)
+ * are unit-tested; the relay wrappers are thin and exercised via injected stubs.
  */
+// Polyfill WebSocket for Node < 22 (nostr-tools/relay requires it). Without this
+// Relay.connect() rejects and the bot silently connects to 0 relays.
+// (Ported verbatim from servers/sharing/nostr.js:12-20.)
+if (typeof globalThis.WebSocket === "undefined") {
+  try {
+    const ws = await import("ws");
+    globalThis.WebSocket = ws.default || ws.WebSocket;
+  } catch {
+    // ws not available — Nostr messaging will fail gracefully
+  }
+}
 import { finalizeEvent } from "nostr-tools/pure";
 import * as nip44 from "nostr-tools/nip44";
 import { Relay } from "nostr-tools/relay";
@@ -377,6 +433,24 @@ import { Relay } from "nostr-tools/relay";
 export function xOnly(hex) {
   const h = String(hex || "");
   return h.length === 66 ? h.slice(2) : h;
+}
+
+/**
+ * Cross-relay dedup gate. The same event id is delivered once PER relay; without
+ * this, every inbound chat/accept runs N times (N pi turns, N replies). Returns
+ * a function `(eventId) => boolean` that is true the FIRST time it sees an id and
+ * false thereafter. Bounded (FIFO eviction) so a long-lived handle can't grow
+ * without limit. (Mirrors the seenEventIds guard in nostr.js:330,345-346.)
+ */
+export function makeDedupeGate(maxSize = 4096) {
+  const seen = new Set();
+  return (eventId) => {
+    if (!eventId) return false;
+    if (seen.has(eventId)) return false;
+    seen.add(eventId);
+    if (seen.size > maxSize) seen.delete(seen.values().next().value);
+    return true;
+  };
 }
 
 /** Build a signed kind:4 NIP-44 DM from senderPriv to recipient (x-only hex). */
@@ -429,7 +503,7 @@ export async function publish(relays, event) {
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `node --test tests/crow-messages-adapter.test.js`
-Expected: PASS (2 tests).
+Expected: PASS (3 tests — xOnly, dedupe gate, DM round-trip).
 
 - [ ] **Step 5: Commit**
 
@@ -461,12 +535,12 @@ test("upsertAclFromAccept + authorizeSender (default-deny)", async () => {
   const d = bdb();
   try {
     const pk = "a".repeat(64);
-    assert.equal(cmStore.authorizeSender(d, "bot1", pk, false), false, "deny before add");
+    assert.equal(cmStore.authorizeSender(d, "bot1", pk), false, "deny before add");
     cmStore.upsertAclFromAccept(d, "bot1", pk, "crow:zzz", "Alice");
-    assert.equal(cmStore.authorizeSender(d, "bot1", pk, false), true, "allow after add");
-    assert.equal(cmStore.authorizeSender(d, "bot1", "b".repeat(64), false), false, "other sender denied");
+    assert.equal(cmStore.authorizeSender(d, "bot1", pk), true, "allow after add");
+    assert.equal(cmStore.authorizeSender(d, "bot1", "b".repeat(64)), false, "other sender denied");
     // x-only normalization: a 66-hex compressed form authorizes the stored 64-hex
-    assert.equal(cmStore.authorizeSender(d, "bot1", "02" + pk, false), true, "compressed key normalized");
+    assert.equal(cmStore.authorizeSender(d, "bot1", "02" + pk), true, "compressed key normalized");
   } finally { d.close(); }
 });
 
@@ -484,19 +558,9 @@ test("consumeInvite validates token, respects max_uses + revoked + expiry", asyn
   } finally { d.close(); }
 });
 
-test("authorizeSender honors allow_paired_instances via crow_instances", async () => {
-  const d = bdb();
-  try {
-    const pk = "c".repeat(64);
-    d.prepare("INSERT INTO crow_instances (id, crow_id, secp256k1_pubkey, status, created_at, updated_at) VALUES (?,?,?, 'active', datetime('now'), datetime('now'))")
-      .run("inst-1", "crow:peer", "02" + pk); // stored compressed
-    assert.equal(cmStore.authorizeSender(d, "bot1", pk, false), false, "off → deny");
-    assert.equal(cmStore.authorizeSender(d, "bot1", pk, true), true, "on → paired instance allowed");
-  } finally { d.close(); }
-});
 ```
 
-(If `crow_instances` lacks a `secp256k1_pubkey` column on this schema, the third test documents the dependency — verify the column exists in `scripts/init-db.js` `crow_instances`; the adapter's paired-instance match relies on it.)
+> **Scope note (set during plan review, 2026-06-15):** the spec's **"allow any paired instance"** trust source is **deferred to Plan 2**. Reason: `crow_instances` has **no** `secp256k1_pubkey` column (verified `init-db.js:1503`) — paired peers are keyed by `crow_id`/`auth_token_hash`, not a Nostr secp key — so there is no working way to match an inbound event's pubkey to a paired instance today. Shipping the toggle now would be a dead control. Plan 1 authorizes on the **ACL only** (which is fully functional via invites/manual add); Plan 2 lands the toggle together with the enrollment/source that makes it real (a `contacts`-join by `crow_id`, or a new `crow_instances.secp256k1_pubkey` populated at enrollment).
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -523,17 +587,15 @@ export function resolveRelays(db) {
   return DEFAULT_RELAYS;
 }
 
-/** True if senderPubkey is allowed to message botId. */
-export function authorizeSender(db, botId, senderPubkey, allowPaired) {
+/**
+ * True if senderPubkey (x-only after normalization) is in botId's ACL.
+ * Plan 1 = ACL-only (default-deny). The "allow any paired instance" source is a
+ * Plan 2 addition (crow_instances has no secp key today — see plan scope note).
+ */
+export function authorizeSender(db, botId, senderPubkey) {
   const pk = xOnly(senderPubkey);
   const acl = db.prepare("SELECT 1 FROM bot_message_acl WHERE bot_id=? AND sender_pubkey=? LIMIT 1").get(botId, pk);
-  if (acl) return true;
-  if (allowPaired) {
-    // crow_instances stores compressed (66) secp keys; compare on x-only.
-    const rows = db.prepare("SELECT secp256k1_pubkey FROM crow_instances WHERE status='active'").all();
-    for (const r of rows) if (xOnly(r.secp256k1_pubkey) === pk) return true;
-  }
-  return false;
+  return !!acl;
 }
 
 /** Validate + consume an invite token (atomic-ish: check then bump uses). */
@@ -566,7 +628,7 @@ export { xOnly, DEFAULT_RELAYS };
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `node --test tests/crow-messages-store.test.js`
-Expected: PASS (4 tests total). If the paired-instance test errors on a missing `secp256k1_pubkey` column, confirm `crow_instances` defines it in `scripts/init-db.js` and adjust the seed insert columns to match the real schema.
+Expected: PASS (3 tests total — schema, ACL/authorize, invite-consume).
 
 - [ ] **Step 5: Commit**
 
@@ -612,7 +674,7 @@ test("invite-accept event authorizes the sender, runs no pi turn", async () => {
     await handleCrowMessageEvent({
       botId: "bot1", senderPubkey: "a".repeat(64),
       decrypted: JSON.stringify({ type: "crow_social", subtype: "bot_invite_accept", token: "tok-1", sender: { crow_id: "crow:s", secp256k1Pub: "a".repeat(64), display_name: "Sam" } }),
-      db, allowPaired: false,
+      db,
       handleInbound: async () => { turns++; return { action: "done" }; },
       sendDM: async (pk, text) => sent.push([pk, text]),
       log: () => {},
@@ -630,7 +692,7 @@ test("authorized chat → handleInbound with crow-messages thread; reply publish
     let seen = null; const sent = [];
     await handleCrowMessageEvent({
       botId: "bot1", senderPubkey: "a".repeat(64), decrypted: "what's the weather?",
-      db, allowPaired: false,
+      db,
       handleInbound: async (opts) => { seen = opts; await opts.sendReply("sunny"); return { action: "done" }; },
       sendDM: async (pk, text) => sent.push([pk, text]),
       log: () => {},
@@ -648,7 +710,7 @@ test("unauthorized chat → no turn, no reply", async () => {
     let turns = 0; const sent = [];
     await handleCrowMessageEvent({
       botId: "bot1", senderPubkey: "z".repeat(64), decrypted: "hi",
-      db, allowPaired: false,
+      db,
       handleInbound: async () => { turns++; return {}; },
       sendDM: async (...a) => sent.push(a), log: () => {},
     });
@@ -671,11 +733,11 @@ Expected: FAIL — `handleCrowMessageEvent` not exported (module missing).
  * A bot is reachable under its own derived Nostr identity; authorized senders'
  * DMs drive the real pi bridge (handleInbound) and the bot replies from its key.
  */
-import { loadOrCreateIdentity, deriveBotIdentity } from "../../../servers/sharing/identity.js";
+import { loadInstanceSeed, deriveBotIdentity } from "../../../servers/sharing/identity.js";
 import { handleInbound as realHandleInbound } from "../bridge.mjs";
 import { chunkedSend, SerialQueue } from "./base.mjs";
 import * as cmStore from "./crow-messages-store.mjs";
-import { xOnly, buildDM, openDM, connectRelays, subscribe, publish } from "./nostr-client.mjs";
+import { xOnly, buildDM, openDM, connectRelays, subscribe, publish, makeDedupeGate } from "./nostr-client.mjs";
 
 export const type = "crow-messages";
 export const mode = "nostr";
@@ -694,26 +756,32 @@ export async function checkRequirements() {
  * Core router for one decrypted inbound DM. Dependency-injected for testing.
  * @returns {Promise<void>}
  */
-export async function handleCrowMessageEvent({ botId, botIdentity, senderPubkey, decrypted, db, allowPaired, handleInbound, sendDM, log }) {
-  const pk = xOnly(senderPubkey);
+export async function handleCrowMessageEvent({ botId, senderPubkey, decrypted, db, handleInbound, sendDM, log }) {
+  const pk = xOnly(senderPubkey); // the cryptographically-verified signer of the event
   // Control message?
   if (typeof decrypted === "string" && decrypted.startsWith("{")) {
     let payload = null;
     try { payload = JSON.parse(decrypted); } catch { payload = null; }
     if (payload && payload.type === "crow_social" && payload.subtype === "bot_invite_accept") {
-      const ok = cmStore.consumeInvite(db, botId, payload.token);
-      if (!ok) { log("invite reject bot=" + botId + " sender=" + pk); return; }
-      const s = payload.sender || {};
-      cmStore.upsertAclFromAccept(db, botId, s.secp256k1Pub || pk, s.crow_id || null, s.display_name || null);
+      // Idempotent re-accept: an already-authorized sender (e.g. a second device,
+      // or a duplicate that slipped the gate) just gets re-acked, no token burn.
+      if (!cmStore.authorizeSender(db, botId, pk)) {
+        if (!cmStore.consumeInvite(db, botId, payload.token)) { log("invite reject bot=" + botId + " sender=" + pk); return; }
+        const s = payload.sender || {};
+        // Key the ACL on `pk` (the SIGNED event pubkey) — never the sender-claimed
+        // key — so future chats (authorized by event.pubkey) match and a malicious
+        // accept can't authorize a third party. Claimed fields are labels only.
+        cmStore.upsertAclFromAccept(db, botId, pk, s.crow_id || null, s.display_name || null);
+        log("invite accept bot=" + botId + " sender=" + pk);
+      }
       try { await sendDM(pk, "You can chat with this bot now."); } catch { /* ack best-effort */ }
-      log("invite accept bot=" + botId + " sender=" + pk);
       return;
     }
     // Unknown control payloads are ignored (no turn).
     if (payload && payload.type) return;
   }
-  // Plain chat → authorize then run a turn.
-  if (!cmStore.authorizeSender(db, botId, pk, allowPaired)) { log("drop unauthorized bot=" + botId + " sender=" + pk); return; }
+  // Plain chat → authorize (ACL-only in Plan 1) then run a turn.
+  if (!cmStore.authorizeSender(db, botId, pk)) { log("drop unauthorized bot=" + botId + " sender=" + pk); return; }
   await handleInbound({
     bot_id: botId,
     gateway_thread_id: "crow-messages:" + pk,
@@ -725,25 +793,32 @@ export async function handleCrowMessageEvent({ botId, botIdentity, senderPubkey,
 }
 
 export async function start({ bot_id, gw, log }) {
-  let identity;
-  try { identity = loadOrCreateIdentity(); } catch (e) { log("crow-messages bot=" + bot_id + " no identity: " + e.message); return { stop() {} }; }
-  const botIdentity = deriveBotIdentity(identity.seed, bot_id);
-  const allowPaired = !!(gw && gw.allow_paired_instances);
-
+  const { dirname } = await import("node:path");
   const Database = (await import("better-sqlite3")).default;
-  const { botsDbPath } = await import("../paths.mjs"); // existing CROW_DB resolver used by gateway_runner
-  const db = new Database(botsDbPath()); db.pragma("busy_timeout = 10000");
+  const { botsDbPath } = await import("../instance-paths.mjs"); // CROW_DB resolver used by gateway_runner
+  const dbPath = botsDbPath();
+  const db = new Database(dbPath); db.pragma("busy_timeout = 10000");
+
+  // Derive the bot key from the SAME instance dir the DB lives in (avoids the
+  // CROW_DATA_DIR/CROW_DB_PATH split-brain — see loadInstanceSeed).
+  let seed;
+  try { seed = loadInstanceSeed(dirname(dbPath)); }
+  catch (e) { log("crow-messages bot=" + bot_id + " no instance seed: " + e.message); try { db.close(); } catch {} return { stop() {} }; }
+  const botIdentity = deriveBotIdentity(seed, bot_id);
 
   const relays = await connectRelays(cmStore.resolveRelays(db));
   const botXOnly = xOnly(botIdentity.secp256k1Pubkey);
   const queue = new SerialQueue({ maxDepth: 5, log, handler: (job) => job() });
+  const isNew = makeDedupeGate(); // collapse the same event arriving from N relays
+  const since = Math.floor(Date.now() / 1000) - 86400; // don't replay >24h of relay history
 
-  const subs = subscribe(relays, { kinds: [4], "#p": [botXOnly] }, (event) => {
+  const subs = subscribe(relays, { kinds: [4], "#p": [botXOnly], since }, (event) => {
+    if (!isNew(event.id)) return; // already handled from another relay
     let decrypted;
     try { decrypted = openDM(botIdentity.secp256k1Priv, event.pubkey, event.content); }
     catch { return; } // not for us / undecryptable
     queue.push(() => handleCrowMessageEvent({
-      botId: bot_id, botIdentity, senderPubkey: event.pubkey, decrypted, db, allowPaired,
+      botId: bot_id, senderPubkey: event.pubkey, decrypted, db,
       handleInbound: realHandleInbound,
       sendDM: async (recipXOnly, text) => {
         await chunkedSend(async (chunk) => {
@@ -768,12 +843,12 @@ export async function start({ bot_id, gw, log }) {
 export default { type, mode, configFields, gatewayHint, checkRequirements, start, handleCrowMessageEvent };
 ```
 
-> **Integration note for the executor:** `start()` references `botsDbPath` from a pi-bots paths module and `chunkedSend`/`SerialQueue` from `base.mjs`. Confirm the exact export names/paths against `gateway_runner.mjs` (it builds `CROW_DB = botsDbPath()`) and `base.mjs` before running; adjust the import specifiers if they differ. `start()` is **not** unit-tested (it needs real relays); Task 8 covers the wired path via injected stubs, and the live smoke happens at deploy.
+> **Integration note for the executor:** `start()` imports `botsDbPath` from `../instance-paths.mjs` (confirmed: `gateway_runner.mjs:26` does the same, building `CROW_DB = botsDbPath()`) and `chunkedSend`/`SerialQueue` from `base.mjs` (confirmed exports; `SerialQueue`'s `handler` is invoked as `handler(job)`, so `handler:(job)=>job()` runs each queued thunk). `start()` is **not** unit-tested (it needs real relays + the live identity file); its dedup gate and router are covered by the gate unit test + Task 8 via injected stubs, and the live smoke happens at deploy. The WebSocket polyfill in `nostr-client.mjs` (Task 4) is what makes `connectRelays` actually work in the Node-20 pi-bots host.
 
 - [ ] **Step 4: Run to verify the core passes**
 
 Run: `node --test tests/crow-messages-adapter.test.js`
-Expected: PASS (5 tests total — 2 crypto + 3 routing).
+Expected: PASS (6 tests total — 3 crypto/gate + 3 routing).
 
 - [ ] **Step 5: Commit**
 
@@ -826,7 +901,7 @@ const HOST_ADAPTERS = [telegram, slack, crowMessages];
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `node --test tests/crow-messages-adapter.test.js`
-Expected: PASS (6 tests total).
+Expected: PASS (7 tests total).
 
 - [ ] **Step 5: Commit**
 
@@ -874,7 +949,7 @@ test("invite → accept → authorized chat → reply decryptable by sender", as
     const sendDM = async (recipXOnly, text) => {
       outbound.push(buildDM(bot.secp256k1Priv, recipXOnly, text));
     };
-    const deps = { botId: "bot1", db, allowPaired: false, sendDM, log: () => {} };
+    const deps = { botId: "bot1", db, sendDM, log: () => {} };
 
     // 1. sender accepts the invite
     await handleCrowMessageEvent({
@@ -926,7 +1001,7 @@ git show --stat HEAD
 
 **Placeholder scan:** the two integration specifics flagged inline (the `botsDbPath`/`base.mjs` import names in Task 6, and the `crow_instances.secp256k1_pubkey` column in Task 5) are **verify-then-adjust** items with concrete fallbacks, not blanks — the executor confirms the exact symbol against the cited existing file. No `TBD`/`handle errors`/`similar to`.
 
-**Type consistency:** `deriveBotIdentity` shape (`secp256k1Priv`/`secp256k1Pubkey`/`crowId`) is consistent across T1/T3/T6/T8; pubkeys are x-only 64-hex at every store/compare boundary via `xOnly`; `handleCrowMessageEvent`'s injected deps (`db`, `handleInbound`, `sendDM`, `allowPaired`, `log`) match between T6's definition and T8's call.
+**Type consistency:** `deriveBotIdentity` shape (`secp256k1Priv`/`secp256k1Pubkey`/`crowId`) is consistent across T1/T3/T6/T8; pubkeys are x-only 64-hex at every store/compare boundary via `xOnly`; `handleCrowMessageEvent`'s injected deps (`db`, `handleInbound`, `sendDM`, `log`) match between T6's definition and T8's call.
 
 ---
 
@@ -935,3 +1010,24 @@ git show --stat HEAD
 1. **Pre-deploy verification:** the live host that runs crow-messages bots needs `nostr-tools` + `better-sqlite3` resolvable in the pi-bots process (both already used elsewhere — confirm), and the host's env must point `identity.js` at the right instance seed (`CROW_DATA_DIR`/`HOME`).
 2. **Plan 2 — Sharing UX:** owner Bot Builder config block (the "Share access" link/QR, "Allow my other Crow devices", "Who can message" list with Remove, "New link" rotation, Advanced disclosure) + persistence/actions in `api-handlers.js` + a `capabilitiesForUI` entry; the recipient `crow_accept_bot_invite` sharing tool (parse code → add the bot as a contact so it shows in Messages → send the `bot_invite_accept` DM) + the "Add & message" landing route. Brainstorming already locked this UX — Plan 2 turns it into tasks.
 3. Then: plan-review → execute → `/security-review` (new Nostr transport + authorization boundary) → finishing-a-development-branch → deploy.
+
+---
+
+## Review
+
+**Reviewer:** Staff-engineer adversarial pass (Plan subagent), verified against live code. **Date:** 2026-06-15. **Verdict:** REVISE → all four critical issues fixed + suggestions applied; re-verified facts directly. Plan now ready for execution.
+
+Confirmed accurate by the reviewer (no change): `deriveBotIdentity` reaching file-private `deriveKey`/`computeCrowId`; `secp.getPublicKey` returns compressed 66-hex (xOnly logic correct); `loadOrCreateIdentity().seed` exists; `HOST_ADAPTERS` registration suffices for `gateway_runner` auto-hosting; `base.mjs` exports + `SerialQueue` `handler(job)` shape; `handleInbound` is a safe named import; `relay_config`/`fix_it_items` anchor exist; `gateway_thread_id` is plain TEXT; the dual better-sqlite3/libsql access is safe given single-statement writes + `busy_timeout` (the codebase convention).
+
+Critical issues → resolution:
+1. **C1 `crow_instances.secp256k1_pubkey` doesn't exist** (verified `init-db.js:1503`) — the "allow any paired instance" toggle had no working key source. → **Deferred to Plan 2**; Plan 1 is ACL-only (`authorizeSender(db,botId,pubkey)`); removed the dead toggle, its store path, and its test; added a scope note. Plan 2 lands the toggle with a real source (`contacts` join by `crow_id`, or a new enrollment-populated column).
+2. **C2 No cross-relay dedup** → duplicate accepts / duplicate pi turns + replies (same event id arrives once per relay; `nostr.js:330,345` guards this, the plan didn't). → Added `makeDedupeGate()` (bounded, mirrors `seenEventIds`) used in `start()`'s `onevent` before decrypt/queue, plus a `since: now-86400` filter window; unit-tested the gate. Also made invite-accept **idempotent** (already-authorized sender → re-ack, no token burn).
+3. **C3 Missing WebSocket polyfill** — Node-20 pi-bots host has no global `WebSocket`; `nostr-tools/relay` needs it (`nostr.js:12-20` polyfills from `ws`), else relays silently connect to 0 and the bot is dead at deploy. → Ported the polyfill to the top of `nostr-client.mjs`.
+4. **C4 Wrong import path** — `start()` said `../paths.mjs`; the real module is `../instance-paths.mjs` (`gateway_runner.mjs:26`, export `botsDbPath`). → Fixed.
+
+Suggestions applied:
+- **Seed/DB split-brain** (the host may set only `CROW_DB_PATH`, so `identity.js`'s `CROW_DATA_DIR` fallback could resolve a *different* instance) → added `loadInstanceSeed(dataDir)` and `start()` now derives the bot key from `dirname(botsDbPath())` — seed and DB always come from the same instance dir.
+- **xOnly authorization-key mismatch** (security) → the ACL is now keyed on the **signed `event.pubkey`** (`pk`), never the sender-claimed key; claimed fields are labels only. Prevents both lockout and authorizing a third party.
+- **`since` window** added (no stale relay replay). **Long-lived better-sqlite3 handle**: confirmed safe (single-statement writes + `busy_timeout`, matching `gateway_runner.mjs`); documented.
+
+Open deployment guardrails (carried to "After Plan 1"): the pi-bots host needs `nostr-tools` + `ws` + `better-sqlite3` resolvable (all already used elsewhere — confirm), and `start()`'s `loadInstanceSeed(dirname(botsDbPath()))` must point at an **unencrypted** instance identity (home instances are; it throws clearly otherwise).
