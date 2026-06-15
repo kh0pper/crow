@@ -3,7 +3,7 @@
   "type": "bundle",
   "name": "llama.cpp Qwen3.5-122B-A10B Q5_K_M + MTP (ROCm 7.2.3)",
   "category": "ai",
-  "description": "On-demand high-end reasoning specialist — Qwen3.5-122B-A10B MoE (122B total / 10B active) Q5_K_M (~94GB) via llama.cpp with Multi-Token Prediction (--spec-type draft-mtp --spec-draft-n-max 3). ROCm 7.2.3 toolbox (MTP requires llama.cpp >= 9189). Shares :8003 mutex group; conflicts with crow-chat (orchestrator unloads it before warming).",
+  "description": "On-demand high-end reasoning specialist — Qwen3.5-122B-A10B MoE (122B total / 10B active) Q5_K_M (~94GB) via llama.cpp with Multi-Token Prediction (--spec-type draft-mtp --spec-draft-n-max 3). ROCm 7.2.3 toolbox (MTP requires llama.cpp >= 9189). Shares :8003 mutex group; conflicts with crow-chat (the GPU orchestrator unloads it before warming).",
   "host": "local",
   "requires": {
     "gpu": true,
