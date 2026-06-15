@@ -18,7 +18,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { jsonSchemaPropertiesToZod } from "../shared/json-schema-to-zod.js";
 import { INTEGRATIONS, isIntegrationConfigured, getSpawnEnv } from "./integrations.js";
 import { createDbClient } from "../db.js";
-import { createGoogleOAuthProvider } from "../orchestrator/oauth-client-provider.js";
+import { createGoogleOAuthProvider } from "../shared/oauth-client-provider.js";
 
 // Track connected servers for health checks and router access
 const connectedServers = new Map(); // id → { client, process, tools }
@@ -117,7 +117,7 @@ async function connectAddonServer(id, config) {
     if (transportMode === "http") {
       // Remote HTTP MCP server (e.g. Google's gmailmcp.googleapis.com).
       // OAuth flow is handled by the SDK via authProvider; see
-      // orchestrator/oauth-client-provider.js for the token file shape.
+      // shared/oauth-client-provider.js for the token file shape.
       if (!config.url) {
         throw new Error(`addon ${id}: transport=http requires a "url" field`);
       }

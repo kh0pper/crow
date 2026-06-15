@@ -24,7 +24,7 @@ import { getPresignedUrl, isAvailable as isStorageAvailable } from "../../storag
 import { openStream } from "../streams/sse.js";
 import { resolveProviderConfig } from "../ai/resolve-profile.js";
 import { checkVendorSwitch } from "../ai/vendor-guard.js";
-import { listProvidersAll } from "../../orchestrator/providers-db.js";
+import { listProvidersAll } from "../../shared/providers-db.js";
 import { chooseProvider as smartRoute, stripSlashCommand, SmartChatDisabled } from "../ai/smart-router.js";
 import { fixedWindowLimit } from "../middleware/rate-limit.js";
 

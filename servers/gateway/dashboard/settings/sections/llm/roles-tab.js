@@ -14,7 +14,7 @@
 
 import { escapeHtml } from "../../../shared/components.js";
 import { listAllRoles, roleShape } from "../../../../../orchestrator/role-shape.js";
-import { listProvidersAll, listRoleOverrides, setRoleOverride, clearRoleOverride } from "../../../../../orchestrator/providers-db.js";
+import { listProvidersAll, listRoleOverrides, setRoleOverride, clearRoleOverride } from "../../../../../shared/providers-db.js";
 import { compat } from "../../../../../orchestrator/compat.js";
 import { presets } from "../../../../../orchestrator/presets.js";
 import { readSetting } from "../../registry.js";

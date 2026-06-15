@@ -5,7 +5,7 @@
  */
 
 import { escapeHtml } from "../../../shared/components.js";
-import { healthMatrix } from "../../../../../orchestrator/providers.js";
+import { healthMatrix } from "../../../../../shared/providers.js";
 
 export default {
   async render({ db, req }) {

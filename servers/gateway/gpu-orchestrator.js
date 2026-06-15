@@ -41,7 +41,7 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join, dirname, resolve } from "node:path";
-import { loadProviders as loadCachedProviders } from "../orchestrator/providers.js";
+import { loadProviders as loadCachedProviders } from "../shared/providers.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const BUNDLES_DIR = resolve(dirname(__filename), "..", "..", "bundles");

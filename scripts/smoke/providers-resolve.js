@@ -7,7 +7,7 @@
  * Exits 0 on pass, non-zero on fail.
  */
 
-import { loadProviders } from "../../servers/orchestrator/providers.js";
+import { loadProviders } from "../../servers/shared/providers.js";
 
 const EXPECTED_PROVIDERS = [
   "crow-dispatch",

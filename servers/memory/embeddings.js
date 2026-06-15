@@ -11,7 +11,7 @@
  * Providers resolved from models.json via existing providers.js loader.
  */
 
-import { loadProviders } from "../orchestrator/providers.js";
+import { loadProviders } from "../shared/providers.js";
 
 const DEFAULT_PROVIDER = "grackle-embed";
 const EMBED_TIMEOUT_MS = 10_000;

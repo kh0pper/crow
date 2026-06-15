@@ -17,9 +17,9 @@ import {
   upsertProvider,
   disableProvider,
   syncProvidersFromModelsJson,
-} from "../../../../../orchestrator/providers-db.js";
-import { invalidateProvidersCache } from "../../../../../orchestrator/providers.js";
-import { KNOWN_PROVIDER_TYPES } from "../../../../../orchestrator/provider-type.js";
+} from "../../../../../shared/providers-db.js";
+import { invalidateProvidersCache } from "../../../../../shared/providers.js";
+import { KNOWN_PROVIDER_TYPES } from "../../../../../shared/provider-type.js";
 
 const BACK = "?section=llm&tab=providers";
 

@@ -6,7 +6,7 @@
  * Reads a Google Cloud OAuth Desktop Client credentials.json, runs the
  * authorization_code + loopback redirect flow, exchanges the code for
  * tokens, and writes token.json in the shape that
- * servers/orchestrator/oauth-client-provider.js reads.
+ * servers/shared/oauth-client-provider.js reads.
  *
  * Usage:
  *   node scripts/google-mcp-auth.mjs \

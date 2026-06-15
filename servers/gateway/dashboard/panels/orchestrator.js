@@ -84,7 +84,7 @@ export default {
       const { action } = req.body || {};
       if (action === "reset_refcounts") {
         try {
-          const { resetAllRefcounts } = await import("../../../orchestrator/lifecycle.js");
+          const { resetAllRefcounts } = await import("../../../shared/lifecycle.js");
           await resetAllRefcounts();
         } catch {}
         res.redirectAfterPost("/dashboard/orchestrator");
@@ -105,7 +105,7 @@ export default {
     // Lifecycle snapshot (always fresh from memory)
     let snapshot = {};
     try {
-      const { getLifecycleSnapshot } = await import("../../../orchestrator/lifecycle.js");
+      const { getLifecycleSnapshot } = await import("../../../shared/lifecycle.js");
       snapshot = getLifecycleSnapshot();
     } catch {}
 
