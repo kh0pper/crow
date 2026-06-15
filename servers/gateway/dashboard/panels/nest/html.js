@@ -171,6 +171,12 @@ function buildHealthStrip(health, lang, flash) {
     flashHtml = `<div class="nest-flash nest-flash--success">${escapeHtml(t("health.backupDone", lang))}</div>`;
   } else if (flash === "backup_fail") {
     flashHtml = `<div class="nest-flash nest-flash--error">${escapeHtml(t("health.backupFailed", lang))}</div>`;
+  } else if (flash === "fixit_fixed") {
+    flashHtml = `<div class="nest-flash nest-flash--success">Done — it's shared now.</div>`;
+  } else if (flash === "fixit_dismissed") {
+    flashHtml = `<div class="nest-flash nest-flash--success">Dismissed for now.</div>`;
+  } else if (flash === "fixit_error") {
+    flashHtml = `<div class="nest-flash nest-flash--error">Couldn't apply that fix.</div>`;
   }
 
   if (!health) return flashHtml;
@@ -233,7 +239,7 @@ function buildHealthStrip(health, lang, flash) {
 }
 
 export function buildNestHTML(data, lang) {
-  const { pinnedItems, bundles, instances, trustedInstances, peerOverviews, ssoEnabled, healthSignals, flash } = data;
+  const { pinnedItems, bundles, instances, trustedInstances, peerOverviews, ssoEnabled, healthSignals, flash, fixItHtml } = data;
   const carouselMode = Array.isArray(peerOverviews) && peerOverviews.length > 0;
 
   let tileIndex = 0;
@@ -450,8 +456,8 @@ export function buildNestHTML(data, lang) {
     }
 
     const carousel = `<div class="nest-instance-carousel" role="region" aria-live="polite">${sections.join("")}</div>`;
-    return `${welcomeHtml}${healthStripHtml}${pinnedHtml}${carousel}`;
+    return `${welcomeHtml}${healthStripHtml}${fixItHtml || ""}${pinnedHtml}${carousel}`;
   }
 
-  return `${welcomeHtml}${healthStripHtml}${pinnedHtml}${instancesHtml}${gridHtml}`;
+  return `${welcomeHtml}${healthStripHtml}${fixItHtml || ""}${pinnedHtml}${instancesHtml}${gridHtml}`;
 }

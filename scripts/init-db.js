@@ -1624,6 +1624,31 @@ await initTable("dashboard_settings_overrides table", `
   CREATE INDEX IF NOT EXISTS idx_dashboard_overrides_key ON dashboard_settings_overrides(key);
 `);
 
+// --- Fix-it Cards (2026-06-15): per-instance operational "noticed → one-click
+// fix" items. LOCAL-ONLY, never synced (deliberately absent from
+// sync-allowlist). UNIQUE(source,dedup_key) collapses retries into one card. ---
+await initTable("fix_it_items table", `
+  CREATE TABLE IF NOT EXISTS fix_it_items (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    source           TEXT NOT NULL,
+    dedup_key        TEXT NOT NULL,
+    title            TEXT NOT NULL,
+    why              TEXT,
+    severity         TEXT NOT NULL DEFAULT 'warn'
+                       CHECK (severity IN ('info','warn','urgent')),
+    remedies         TEXT NOT NULL DEFAULT '[]',
+    context          TEXT,
+    status           TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (status IN ('pending','dismissed','resolved')),
+    count            INTEGER NOT NULL DEFAULT 1,
+    suppressed_until TEXT,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_fix_it_items_dedup ON fix_it_items(source, dedup_key);
+  CREATE INDEX IF NOT EXISTS idx_fix_it_items_status ON fix_it_items(status);
+`);
+
 // If a previous botched migration recreated dashboard_settings without PK(key),
 // restore it. Detect by checking pragma + absence of the overrides table data
 // (already populated means we already did it).
