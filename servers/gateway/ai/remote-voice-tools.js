@@ -81,12 +81,21 @@ export function selectRemoteToolset(parsedByInstance, selections) {
 
 const LISTEN_ID_RE = /\/listen\/([0-9a-fA-F-]+)\//;
 
-/** Rewrite one {url, codec, auth, ...} stream descriptor to the owning
- * instance's /audio/stream proxy. Non-funkwhale-listen urls are left as-is. */
+/**
+ * Rewrite one {url, codec, auth, ...} stream descriptor to the owning instance's
+ * /audio/stream proxy. Returns null for anything we cannot safely proxy (no url,
+ * or a non-funkwhale-listen url). SECURITY: the descriptor comes from a remote
+ * peer's tool result. A non-listen url must NOT pass through unchanged — it would
+ * carry the peer-supplied url + auth sentinel into pushAudioStream, which would
+ * then attach a bearer and fetch an attacker-chosen host (credential exfil/SSRF).
+ * For matched urls we OVERRIDE both url (→ our /audio/stream on the called
+ * instance's gateway) and auth (→ crow-peer:<the instance we actually called>),
+ * so a peer cannot redirect the bearer or name a different victim instance.
+ */
 function rewriteStream(s, gatewayUrl, instanceId) {
-  if (!s || typeof s.url !== "string") return s;
+  if (!s || typeof s.url !== "string") return null;
   const m = s.url.match(LISTEN_ID_RE);
-  if (!m) return s;
+  if (!m) return null;
   const id = m[1];
   const codec = s.codec || (s.url.match(/[?&]to=([^&]+)/)?.[1]) || "mp3";
   const base = String(gatewayUrl).replace(/\/+$/, "");
@@ -101,7 +110,9 @@ function rewriteStream(s, gatewayUrl, instanceId) {
  * Rewrite any Funkwhale _audio_stream envelope (head + album queue) inside an
  * MCP tool result so the consuming instance streams the bytes through the
  * owning instance's /audio/stream proxy. Mutates + returns the same result
- * object. No-op for results without a funkwhale audio envelope.
+ * object. No-op for results without a funkwhale audio envelope. An envelope we
+ * can't safely proxy (non-funkwhale-listen url) is DROPPED entirely rather than
+ * forwarded with its peer-supplied url/auth (see rewriteStream security note).
  */
 export function rewriteAudioResult(result, gatewayUrl, instanceId) {
   for (const block of result?.content || []) {
@@ -111,9 +122,18 @@ export function rewriteAudioResult(result, gatewayUrl, instanceId) {
       const parsed = JSON.parse(block.text);
       const env = parsed._audio_stream;
       if (!env || typeof env.url !== "string") continue;
-      const queue = Array.isArray(env.queue) ? env.queue : null;
       const head = rewriteStream(env, gatewayUrl, instanceId);
-      if (queue) head.queue = queue.map((q) => rewriteStream(q, gatewayUrl, instanceId));
+      if (!head) {
+        // Not a proxyable funkwhale stream — strip it so nothing downstream
+        // fetches a peer-controlled url with a bearer attached.
+        delete parsed._audio_stream;
+        block.text = JSON.stringify(parsed);
+        continue;
+      }
+      head.queue = Array.isArray(env.queue)
+        ? env.queue.map((q) => rewriteStream(q, gatewayUrl, instanceId)).filter(Boolean)
+        : undefined;
+      if (!head.queue) delete head.queue;
       parsed._audio_stream = head;
       block.text = JSON.stringify(parsed);
     } catch { /* not JSON — leave untouched */ }
