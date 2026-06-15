@@ -184,6 +184,48 @@ function deriveIdentity(seed, stored) {
 }
 
 /**
+ * Derive a per-bot identity from the instance seed. Pure + deterministic:
+ * same (seed, botId) → same keys/crow_id. Namespaced so a bot key is
+ * independent of the instance identity and of other bots. Nothing stored.
+ */
+export function deriveBotIdentity(seed, botId) {
+  if (!seed || !botId || typeof botId !== "string") {
+    throw new Error("deriveBotIdentity requires (seed, botId)");
+  }
+  const ns = "crow-bot-v1:" + botId;
+  const ed25519Priv = deriveKey(seed, ns + "|ed25519", 32);
+  const ed25519Pub = ed.getPublicKey(ed25519Priv);
+  const secp256k1Priv = deriveKey(seed, ns + "|secp256k1", 32);
+  const secp256k1Pub = secp.getPublicKey(secp256k1Priv); // compressed (33 bytes)
+  const crowId = computeCrowId(ed25519Pub);
+  return {
+    crowId,
+    botId,
+    ed25519Priv: Buffer.from(ed25519Priv),
+    ed25519Pub: Buffer.from(ed25519Pub),
+    ed25519Pubkey: Buffer.from(ed25519Pub).toString("hex"),
+    secp256k1Priv: Buffer.from(secp256k1Priv),
+    secp256k1Pub: Buffer.from(secp256k1Pub),
+    secp256k1Pubkey: Buffer.from(secp256k1Pub).toString("hex"),
+  };
+}
+
+/**
+ * Load the raw instance seed from a SPECIFIC data dir's identity.json. Used by
+ * the pi-bots host to derive bot keys from the SAME instance the bot DB belongs
+ * to — avoiding the CROW_DATA_DIR-vs-CROW_DB_PATH split-brain (the host may set
+ * only CROW_DB_PATH, so the module-level CROW_DATA_DIR fallback could resolve a
+ * different instance). Unencrypted seeds only (the host has no passphrase).
+ */
+export function loadInstanceSeed(dataDir) {
+  const p = resolve(dataDir, "identity.json");
+  const stored = JSON.parse(readFileSync(p, "utf-8"));
+  if (stored.encrypted) throw new Error("loadInstanceSeed: encrypted identity requires a passphrase (unsupported in the gateway host)");
+  if (!stored.seed) throw new Error("loadInstanceSeed: identity.json has no plaintext seed");
+  return Buffer.from(stored.seed, "hex");
+}
+
+/**
  * Generate a single-use invite code with 24h expiry.
  * Format: <crowId>.<payload>.<hmac>
  * Payload: base64url({ ed25519Pub, secp256k1Pub, expires })
