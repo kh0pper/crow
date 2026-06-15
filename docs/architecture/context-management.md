@@ -45,7 +45,6 @@ Each category tool creates an in-process `Client` connected to the underlying `M
 | `crow_sharing` | Sharing server | 21 (invite, contacts, share, inbox, messaging, instances, revoke) |
 | `crow_storage` | Storage server | 8 (upload, list, download URL, delete, stats) — when MinIO is configured |
 | `crow_media` | Media bundle | 17 (articles, podcasts, playlists) — when the bundle is installed |
-| `crow_orchestrator` | Orchestrator server | 7 (orchestrate, status, presets, pipelines) — when available |
 | `crow_consulting` | Consulting server | 6 (prospect pipeline ops) |
 | `crow_tools` | External proxy servers | Dynamic (Trello, Canvas, Slack, etc.) + remote instances |
 | `crow_discover` | Static manifests + live schemas | Discovery protocol |
