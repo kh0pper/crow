@@ -1,28 +1,29 @@
 /**
- * Settings Section: LLM Orchestrator (consolidated)
+ * Settings Section: LLM (consolidated)
  *
  * One page that replaces ai-provider / ai-profiles / providers / tts-profiles /
  * stt-profiles / vision-profiles. Four internal tabs keyed by ?tab=:
  *   - providers (default) — DB-backed provider registry, Add-cloud, Sync button
- *   - roles                — 12 preset-agent override rows w/ compat check
  *   - profiles             — chat/TTS/STT/vision (links into live sections for v1)
  *   - health               — /api/providers/health matrix + re-probe
+ *   - lifecycle            — GPU model refcounts + reset (folded from the
+ *                            retired Orchestrator panel; Plan B Part 2/Part 3)
  *
- * During rollout this section ships alongside the six it will replace.
- * Phase 7 (deletion) flips panels/settings.js to drop the old ones.
+ * The former "Agent roles" tab (orchestrator preset per-agent provider
+ * overrides) was removed with the orchestrator teardown.
  */
 
 import { escapeHtml } from "../../shared/components.js";
 import providersTab from "./llm/providers-tab.js";
-import rolesTab from "./llm/roles-tab.js";
 import profilesTab from "./llm/profiles-tab.js";
 import healthTab from "./llm/health-tab.js";
+import lifecycleTab from "./llm/lifecycle-tab.js";
 
 const TABS = [
   { id: "providers", label: "Providers", render: providersTab.render, handleAction: providersTab.handleAction },
-  { id: "roles",     label: "Agent roles", render: rolesTab.render,   handleAction: rolesTab.handleAction },
-  { id: "profiles",  label: "Profiles",   render: profilesTab.render, handleAction: profilesTab.handleAction },
-  { id: "health",    label: "Health",     render: healthTab.render,   handleAction: healthTab.handleAction },
+  { id: "profiles",  label: "Profiles",  render: profilesTab.render,  handleAction: profilesTab.handleAction },
+  { id: "health",    label: "Health",    render: healthTab.render,    handleAction: healthTab.handleAction },
+  { id: "lifecycle", label: "Lifecycle", render: lifecycleTab.render, handleAction: lifecycleTab.handleAction },
 ];
 
 function resolveTab(req) {
