@@ -226,6 +226,46 @@ export function loadInstanceSeed(dataDir) {
 }
 
 /**
+ * Encode a bot invite: `<botCrowId>.<base64url(payload)>.<hmac>`. Payload carries
+ * the bot address (keys) + an authorization token + relay hints. HMAC mirrors
+ * generateInviteCode (tamper-evidence for the issuer; recipients validate by the
+ * crowId↔ed25519 check in parseBotInviteCode).
+ */
+export function generateBotInviteCode(botIdentity, token, relays = []) {
+  const payload = Buffer.from(JSON.stringify({
+    crowId: botIdentity.crowId,
+    ed25519Pub: botIdentity.ed25519Pubkey,
+    secp256k1Pub: botIdentity.secp256k1Pubkey,
+    token,
+    relays,
+    v: 1,
+  })).toString("base64url");
+  const hmac = createHmac("sha256", botIdentity.ed25519Priv).update(payload).digest("base64url");
+  return `${botIdentity.crowId}.${payload}.${hmac}`;
+}
+
+/**
+ * Decode + validate a bot invite. Throws on malformed input or a crow_id that
+ * does not match the embedded ed25519 pubkey.
+ */
+export function parseBotInviteCode(code) {
+  const parts = String(code).split(".");
+  if (parts.length !== 3) throw new Error("Invalid bot invite code format");
+  const [crowIdPart, payload] = parts;
+  const data = JSON.parse(Buffer.from(payload, "base64url").toString());
+  if (data.crowId !== crowIdPart) throw new Error("Bot invite Crow ID mismatch");
+  const expected = computeCrowId(Buffer.from(data.ed25519Pub, "hex"));
+  if (expected !== data.crowId) throw new Error("Bot invite public key does not match Crow ID");
+  return {
+    botCrowId: data.crowId,
+    ed25519Pubkey: data.ed25519Pub,
+    secp256k1Pubkey: data.secp256k1Pub,
+    token: data.token,
+    relays: Array.isArray(data.relays) ? data.relays : [],
+  };
+}
+
+/**
  * Generate a single-use invite code with 24h expiry.
  * Format: <crowId>.<payload>.<hmac>
  * Payload: base64url({ ed25519Pub, secp256k1Pub, expires })
