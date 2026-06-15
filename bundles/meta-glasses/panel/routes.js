@@ -778,11 +778,12 @@ async function loadBoundBotDef(db, botId) {
 async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
   const db = (await loadDb()).createDbClient();
   let toolExecutor = null;
+  let remoteVoice = null;
   try {
     const { getDefaultSttProfile, createSttAdapter, getSttProfiles } = await loadStt();
     const { getTtsProfiles, createTtsAdapter, getDefaultTtsProfile } = await loadTts();
     const { createAdapterFromProfile, getAiProfiles } = await loadProvider();
-    const { createToolExecutor, getChatTools, MAX_TOOL_ROUNDS, effectiveToolName, isExternalSendTool, isConnectedAddonTool, botVoiceScope } = await loadToolExec();
+    const { createToolExecutor, getChatTools, MAX_TOOL_ROUNDS, effectiveToolName, isExternalSendTool, isConnectedAddonTool, botVoiceScope, buildRemoteVoiceContext } = await loadToolExec();
     const { generateSystemPrompt } = await loadSystemPrompt();
 
     // 1. STT
@@ -934,8 +935,17 @@ async function runVoiceTurn(ws, device, audioBuffer, options = {}) {
       }
     }
 
-    toolExecutor = createToolExecutor({ botDef: boundBot });
-    const tools = getChatTools({ botDef: boundBot });
+    // Cross-instance voice tools — null unless this bound bot opted into
+    // remote_mcp AND feature_flags.remote_invocation. A down peer / discovery
+    // error degrades to local (returns null, never throws), so the turn works.
+    try {
+      remoteVoice = await buildRemoteVoiceContext(db, boundBot);
+    } catch (err) {
+      console.warn(`[meta-glasses] remote voice tools unavailable: ${err.message}`);
+    }
+    toolExecutor = createToolExecutor({ botDef: boundBot, remote: remoteVoice });
+    const tools = getChatTools({ botDef: boundBot, remoteTools: remoteVoice?.advertised });
+    if (remoteVoice) console.log(`[meta-glasses] remote voice tools: ${remoteVoice.advertised.map(t => t.name).join(", ")}`);
     const systemPrompt = await generateSystemPrompt({ deviceId: device.id, botDef: boundBot });
     console.log(`[meta-glasses] voice turn: transcript=${JSON.stringify(transcript)} ai=${chatLabel} bound=${boundBot ? boundBot.bot_id : "none"} tools=${tools.length}`);
 
@@ -1313,6 +1323,7 @@ DESTRUCTIVE TOOLS. For any tool that deletes, removes, unpublishes, or dismisses
     sendText(ws, { type: "error", code: "turn_failed", recoverable: true, message: err.message });
   } finally {
     if (toolExecutor) { try { await toolExecutor.close(); } catch {} }
+    if (remoteVoice) { try { await remoteVoice.close(); } catch {} }
     try { db.close(); } catch {}
   }
 }
