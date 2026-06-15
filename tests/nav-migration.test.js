@@ -228,7 +228,6 @@ test("new defaults: all core visible panels are accounted for in the default ass
     "bot-builder": "agents",
     "bot-board": "agents",
     skills: "agents",
-    orchestrator: "agents",
     connect: "connections",
     contacts: "connections",
     messages: "connections",
@@ -243,7 +242,7 @@ test("new defaults: all core visible panels are accounted for in the default ass
   };
   const specPanels = [
     "nest",
-    "bot-builder", "bot-board", "skills", "orchestrator",
+    "bot-builder", "bot-board", "skills",
     "connect", "contacts", "messages", "fediverse",
     "memory", "projects", "blog", "files", "extensions",
     "settings", "design-system",
