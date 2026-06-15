@@ -77,6 +77,7 @@ import designSystemPanel from "./panels/design-system.js";
 import onboardingPanel from "./panels/onboarding.js";
 import connectPanel from "./panels/connect.js";
 import fediversePanel from "./panels/fediverse.js";
+import { handleFixItAction } from "../fix-it/index.js";
 import bundlesRouterFactory from "../routes/bundles.js";
 
 /**
@@ -627,6 +628,16 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     const db = createDbClient();
     try {
       await fediversePanel.handleAction(req, res, { db });
+    } finally {
+      try { db.close(); } catch {}
+    }
+  });
+
+  // Fix-it Cards action POST (remedy / dismiss) — dashboard-authed, CSRF-protected.
+  router.post("/dashboard/fix-it/action", async (req, res) => {
+    const db = createDbClient();
+    try {
+      await handleFixItAction(req, res, { db });
     } finally {
       try { db.close(); } catch {}
     }
