@@ -14,6 +14,7 @@ import { writeSetting } from "../registry.js";
 import { getLocalCatalog } from "../../../capability-registry.js";
 import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
 import { escapeHtml } from "../../shared/components.js";
+import { resolveFriendlyName } from "../../../fix-it/friendly-names.js";
 
 export default {
   id: "remote-exposure",
@@ -45,9 +46,10 @@ export default {
 
     const rows = caps.map((c) => {
       const on = c.exposed === true;
+      const friendly = resolveFriendlyName(c.canonicalId, c.name);
       return `<label style="display:flex;align-items:center;gap:0.6rem;padding:0.4rem 0;border-bottom:1px solid var(--crow-border,#2222)">
         <input type="checkbox" name="cap" value="${escapeHtml(c.canonicalId)}" ${on ? "checked" : ""}>
-        <span style="flex:1">${escapeHtml(c.name)} <span style="color:var(--crow-text-muted);font-size:0.85rem">(${escapeHtml(c.category)}${c.bundleId ? " · addon" : ""})</span></span>
+        <span style="flex:1">${escapeHtml(friendly)} <span style="color:var(--crow-text-muted);font-size:0.85rem">(${escapeHtml(c.category)}${c.bundleId ? " · addon" : ""})</span></span>
         <code style="color:var(--crow-text-muted);font-size:0.8rem">${escapeHtml(c.canonicalId)}</code>
       </label>`;
     }).join("");
