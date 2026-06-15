@@ -83,13 +83,25 @@ test("resolveByKey clears the card; re-detect reopens it (notify true)", async (
   assert.equal((await store.getItem(db, id)).status, "pending");
 });
 
-test("dismissed item stays dismissed on re-detect (no reopen)", async () => {
+test("dismissed item stays dismissed on re-detect within the window (no reopen)", async () => {
   await clear();
   const { id } = await store.upsertItem(db, baseItem);
   await store.dismiss(db, id, 7);
   const re = await store.upsertItem(db, baseItem);
   assert.equal(re.notify, false);
   assert.equal((await store.getItem(db, id)).status, "dismissed");
+});
+
+test("dismissed item resurfaces (reopens to pending, notify) after the suppression window passes", async () => {
+  await clear();
+  const { id } = await store.upsertItem(db, baseItem);
+  await store.dismiss(db, id, 7);
+  // Simulate the 7-day suppression window having elapsed.
+  await db.execute({ sql: "UPDATE fix_it_items SET suppressed_until = datetime('now','-1 day') WHERE id = ?", args: [id] });
+  const re = await store.upsertItem(db, baseItem);
+  assert.equal((await store.getItem(db, id)).status, "pending", "expired-dismissed reopens on re-detect");
+  assert.equal(re.notify, true, "reopened-from-dismissed notifies");
+  assert.equal((await store.listPending(db)).length, 1);
 });
 
 test("getItem returns null for missing id", async () => {
