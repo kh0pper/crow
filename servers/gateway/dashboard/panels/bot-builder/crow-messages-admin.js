@@ -6,7 +6,7 @@
  * uses via libsql (db.execute). Same crow.db file — single-statement writes.
  *
  * Identity is derived (never stored): the gateway's own instance seed
- * (loadOrCreateIdentity().seed) + the bot id → deriveBotIdentity.
+ * (loadInstanceSeed(dirname(botsDbPath()))) + the bot id → deriveBotIdentity.
  */
 import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
@@ -53,11 +53,12 @@ export async function mintInvite(db, botId, { expiresAt = null, maxUses = null }
   return token;
 }
 
-/** Latest non-revoked invite for a bot, or null. */
+/** Latest non-revoked, non-expired invite for a bot, or null. */
 export async function getActiveInvite(db, botId) {
   const { rows } = await db.execute({
     sql: "SELECT id, token, expires_at, max_uses, uses, revoked, created_at FROM bot_message_invites "
-       + "WHERE bot_id=? AND revoked=0 ORDER BY id DESC LIMIT 1",
+       + "WHERE bot_id=? AND revoked=0 AND (expires_at IS NULL OR expires_at > datetime('now')) "
+       + "ORDER BY id DESC LIMIT 1",
     args: [botId],
   });
   return rows[0] || null;
