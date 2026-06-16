@@ -60,3 +60,22 @@ test("consumeInvite validates token, respects max_uses + revoked + expiry", asyn
     assert.equal(cmStore.consumeInvite(d, "bot1", "tok-E"), false, "expired");
   } finally { d.close(); }
 });
+
+test("markEventSeen dedups per (bot,event) and survives across handles; pruneSeen ages out", async () => {
+  const d = bdb();
+  try {
+    assert.equal(cmStore.markEventSeen(d, "bot1", "evt-1"), true, "first sight");
+    assert.equal(cmStore.markEventSeen(d, "bot1", "evt-1"), false, "repeat");
+    assert.equal(cmStore.markEventSeen(d, "bot1", "evt-2"), true, "distinct event");
+    assert.equal(cmStore.markEventSeen(d, "bot2", "evt-1"), true, "distinct bot");
+    assert.equal(cmStore.markEventSeen(d, "bot1", null), false, "null id");
+  } finally { d.close(); }
+  // A fresh handle (simulating a restart) still sees the persisted ids.
+  const d2 = bdb();
+  try {
+    assert.equal(cmStore.markEventSeen(d2, "bot1", "evt-1"), false, "persisted across handles");
+    d2.prepare("UPDATE bot_message_seen SET created_at = datetime('now','-5 day') WHERE event_id='evt-2'").run();
+    cmStore.pruneSeen(d2, 2);
+    assert.equal(cmStore.markEventSeen(d2, "bot1", "evt-2"), true, "pruned old row → seen-as-new again");
+  } finally { d2.close(); }
+});

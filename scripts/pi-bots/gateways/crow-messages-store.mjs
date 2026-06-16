@@ -50,4 +50,21 @@ export function upsertAclFromAccept(db, botId, senderPubkey, crowId, displayName
     .run(botId, pk, crowId || null, displayName || null);
 }
 
+/**
+ * Persistent processed-event dedup. Returns true the FIRST time (bot, event) is
+ * seen, false on a repeat — surviving a host restart so a relay's 24h replay
+ * doesn't re-run pi turns for already-answered chats. Mark BEFORE running a turn
+ * (at-most-once on crash, preferable to a replay storm).
+ */
+export function markEventSeen(db, botId, eventId) {
+  if (!eventId) return false;
+  const r = db.prepare("INSERT OR IGNORE INTO bot_message_seen (bot_id, event_id) VALUES (?,?)").run(botId, eventId);
+  return r.changes > 0;
+}
+
+/** Drop seen-event rows older than `days` (keeps the table bounded). */
+export function pruneSeen(db, days = 2) {
+  db.prepare("DELETE FROM bot_message_seen WHERE created_at < datetime('now', '-' || ? || ' days')").run(days);
+}
+
 export { xOnly, DEFAULT_RELAYS };
