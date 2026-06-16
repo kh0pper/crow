@@ -405,7 +405,13 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
         `<div class="btb-group"><label class="btb-checkbox">` +
         `<input type="checkbox" name="gw_allow_paired_instances"${allowPaired ? " checked" : ""}> ` +
         `${escapeHtml(t("botbuilder.cmAllowPaired", lang))}</label></div>`;
-      gwFields = pairedToggle;
+      const taglineField =
+        `<div class="btb-group"><label>${escapeHtml(t("botbuilder.cmTaglineLabel", lang))}</label>` +
+        `<input type="text" name="gw_description" maxlength="140" ` +
+        `value="${escapeHtml(typeof gw.description === "string" ? gw.description : "")}" ` +
+        `placeholder="${escapeHtml(t("botbuilder.cmTaglinePlaceholder", lang))}">` +
+        `<p class="btb-hint">${escapeHtml(t("botbuilder.cmTaglineHint", lang))}</p></div>`;
+      gwFields = pairedToggle + taglineField;
       gwHint = `<p class="btb-hint">${escapeHtml(t("botbuilder.cmHint", lang))}</p>`;
 
       // Everything below is its OWN form(s) → must live OUTSIDE the main form.
