@@ -692,7 +692,7 @@ export function buildBotDirectory({ groups, context, csrf, lang }) {
 - [ ] **Step 5: Run, verify PASS**
 
 Run: `node --test --test-force-exit tests/bot-directory-render.test.js`
-Expected: PASS (5 tests).
+Expected: PASS (4 tests: messages-context, contacts-context, empty-state, es-branch).
 
 - [ ] **Step 6: Commit**
 
@@ -1174,13 +1174,13 @@ The existing `contacts.js:29` caller (`await handleContactAction(req, db)`) stay
 ```javascript
     } else if (view === "bots") {
       const { getBotDirectory } = await import("./messages/data-queries.js");
-      const { buildBotDirectory } = await import("./shared/bot-directory.js");
-      const { csrfInput } = await import("./shared/csrf.js");
+      const { buildBotDirectory } = await import("../shared/bot-directory.js");
+      const { csrfInput } = await import("../shared/csrf.js");
       const dir = await getBotDirectory(db).catch(() => ({ groups: [], total: 0, notAddedCount: 0 }));
       bodyHtml = buildBotDirectory({ groups: dir.groups, context: "contacts", csrf: csrfInput(req), lang });
 ```
 
-VERIFY the relative import paths from `contacts.js` (which lives at `servers/gateway/dashboard/panels/contacts.js`): `getBotDirectory` is at `panels/messages/data-queries.js` → `"./messages/data-queries.js"`; `bot-directory.js` and `csrf.js` are at `dashboard/shared/` → from `panels/` that is `"../shared/bot-directory.js"` and `"../shared/csrf.js"`. (The messages panel imports csrf as `"../shared/csrf.js"` — match that; the `"./shared/..."` forms above are WRONG, use `"../shared/..."`. Confirm by checking an existing import in `contacts.js`.)
+The import paths from `contacts.js` (at `servers/gateway/dashboard/panels/contacts.js`): `getBotDirectory` is at `panels/messages/data-queries.js` → `"./messages/data-queries.js"`; `bot-directory.js` and `csrf.js` are at `dashboard/shared/` → from `panels/` that is `"../shared/bot-directory.js"` and `"../shared/csrf.js"` (matches the existing `../shared/...` imports in contacts.js). The snippet above already uses the correct paths — paste it verbatim.
 
 Then add `{ id: "bots", label: t("contacts.browseBots", lang) },` to the `tabs` array (`:79-83`) so the view is reachable from the tab bar.
 
