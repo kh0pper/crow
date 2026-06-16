@@ -149,7 +149,9 @@ export async function listAdvertisedBots(db) {
       ? def.gateways.find((g) => g && g.type === "crow-messages" && g.allow_paired_instances === true)
       : null;
     if (!gw) continue;
-    out.push({ botId: r.bot_id, displayName: r.display_name || r.bot_id });
+    const description = (typeof gw.description === "string" && gw.description.trim())
+      ? gw.description.trim().slice(0, 140) : null;
+    out.push({ botId: r.bot_id, displayName: r.display_name || r.bot_id, description });
   }
   return out;
 }
@@ -176,14 +178,16 @@ export async function buildAdvertisementPayload(
       const ident = _identityFor(b.botId); // throws if no identity.json beside crow.db
       const token = await getOrCreatePairedRosterInvite(db, b.botId);
       const inviteCode = await _buildInviteCode(db, b.botId, token);
-      bots.push({
+      const entry = {
         bot_id: b.botId,
         display_name: b.displayName,
         instance_id: instanceId,
         instance_label: instanceLabel,
         messaging_pubkey: xOnly(ident.secp256k1Pubkey),
         invite_code: inviteCode,
-      });
+      };
+      if (b.description) entry.description = b.description;
+      bots.push(entry);
     } catch (err) {
       // Skip a bot whose identity can't derive (no instance seed). Log so a
       // surprising DB/identity error leaves a trace rather than vanishing
