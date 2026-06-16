@@ -35,13 +35,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 
-// Mirrors the guarded-ALTER helper in init-db.js (same approach as
-// tests/roster-advertise-schema.test.js) so the test asserts column + backfill
-// behavior without bootstrapping the whole init-db script.
-async function addColumnIfMissing(db, table, column, decl) {
+// Mirrors the REAL init-db.js helper EXACTLY: signature (table, column,
+// definition) and DDL `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`
+// (verified scripts/init-db.js:140-148). The third arg is the TYPE clause only
+// ("INTEGER DEFAULT 0"), NOT a full "is_bot INTEGER..." decl — matching this
+// here is what protects the production migration call in Step 3.
+async function addColumnIfMissing(db, table, column, definition) {
   const { rows } = await db.execute(`PRAGMA table_info(${table})`);
   if (!rows.some((r) => r.name === column)) {
-    await db.execute(`ALTER TABLE ${table} ADD COLUMN ${decl}`);
+    await db.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }
 
@@ -52,7 +54,7 @@ test("contacts.is_bot is added idempotently and backfills origin='advertised'", 
   await db.execute(`INSERT INTO contacts (crow_id, origin) VALUES ('crow:human1', NULL)`);
 
   for (let i = 0; i < 2; i++) {
-    await addColumnIfMissing(db, "contacts", "is_bot", "is_bot INTEGER DEFAULT 0");
+    await addColumnIfMissing(db, "contacts", "is_bot", "INTEGER DEFAULT 0");
     // Backfill is guarded to run once-effectively: only flips rows still at 0.
     await db.execute("UPDATE contacts SET is_bot = 1 WHERE origin = 'advertised' AND is_bot = 0");
   }
@@ -80,16 +82,19 @@ Immediately after the `await addColumnIfMissing("bot_message_invites", "kind", "
 // contacts.is_bot marks a contact that is a Crow Messages bot (vs a human), so
 // the UI can badge it and the future group phase can treat "add a bot" and
 // "add a person" uniformly. Backfill the reliably-known bots (origin='advertised').
-await addColumnIfMissing("contacts", "is_bot", "is_bot INTEGER DEFAULT 0");
-await db.execute("UPDATE contacts SET is_bot = 1 WHERE origin = 'advertised' AND is_bot = 0");
+await addColumnIfMissing("contacts", "is_bot", "INTEGER DEFAULT 0");
+await db.execute({ sql: "UPDATE contacts SET is_bot = 1 WHERE origin = 'advertised' AND is_bot = 0" });
 ```
 
-(`addColumnIfMissing` declares the column as `"is_bot INTEGER DEFAULT 0"` — pass the full decl, matching the `"origin TEXT"` precedent. Check the exact `addColumnIfMissing` signature in init-db.js: it takes `(table, columnName, decl)` where `decl` is the full `<name> <type>` clause — confirm by reading the helper near the top of init-db.js and match it.)
+CRITICAL: the real `addColumnIfMissing(table, column, definition)` (scripts/init-db.js:140) builds `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`, so the third arg is the TYPE CLAUSE ONLY — `"INTEGER DEFAULT 0"`, NOT `"is_bot INTEGER DEFAULT 0"` (the precedent is `addColumnIfMissing("contacts", "origin", "TEXT")` at :2531). Passing the full decl produces `ADD COLUMN is_bot is_bot INTEGER...` which the helper's try/catch swallows — the column would silently never be added. Note `db.execute` here takes an object (`{ sql }`), matching the surrounding init-db calls.
 
-- [ ] **Step 4: Run init-db against a temp dir to confirm no error**
+- [ ] **Step 4: Run init-db against a temp dir and ASSERT the column actually exists**
 
-Run: `CROW_DB_PATH=/tmp/crowtest-$$/crow.db node scripts/init-db.js 2>&1 | tail -5`
-Expected: ends with "Database initialized successfully" and no error about `is_bot`. (Create `/tmp/crowtest-$$/` first if init-db doesn't.)
+```bash
+D=$(mktemp -d); CROW_DB_PATH="$D/crow.db" node scripts/init-db.js 2>&1 | tail -3
+node -e 'const Database=require("better-sqlite3"); const db=new Database(process.env.D+"/crow.db",{readonly:true}); const cols=db.pragma("table_info(contacts)").map(c=>c.name); if(!cols.includes("is_bot")){console.error("FAIL: is_bot missing"); process.exit(1);} console.log("is_bot column present");' D="$D"
+```
+Expected: prints "is_bot column present". (This guards against C1 — the characterization test in Step 1 mirrors the helper but a real init-db run is what proves the production call is correct.)
 
 - [ ] **Step 5: Commit**
 
@@ -590,9 +595,18 @@ test("contacts context renders Add only (no Message)", () => {
   assert.ok(!html.includes('value="dir_message_bot"'), "no Message in contacts context");
 });
 
-test("empty directory renders an empty-state, no forms", () => {
+test("empty directory renders the resolved empty-state, no forms, no raw keys", () => {
   const html = buildBotDirectory({ groups: [], context: "messages", csrf: CSRF, lang: "en" });
   assert.ok(!html.includes("dir_add_bot"), "no add forms when empty");
+  assert.ok(html.includes("No bots available"), "resolved empty-state string (catches a missing botdir.empty key)");
+  assert.ok(!html.includes("botdir."), "no raw i18n key leaked");
+});
+
+test("es branch resolves the directory strings (t() falls back to en silently)", () => {
+  const html = buildBotDirectory({ groups: GROUPS, context: "messages", csrf: CSRF, lang: "es" });
+  assert.ok(html.includes("Agregar"), "es Add label resolved");
+  assert.ok(html.includes("Buscar bots"), "es search placeholder resolved");
+  assert.ok(!html.includes("botdir."), "no raw key leaked in es");
 });
 ```
 
@@ -678,7 +692,7 @@ export function buildBotDirectory({ groups, context, csrf, lang }) {
 - [ ] **Step 5: Run, verify PASS**
 
 Run: `node --test --test-force-exit tests/bot-directory-render.test.js`
-Expected: PASS (3 tests).
+Expected: PASS (5 tests).
 
 - [ ] **Step 6: Commit**
 
@@ -731,8 +745,9 @@ test("dir_add_bot materializes the contact and flags is_bot=1", async () => {
   await handlePostAction(req, res, { db, sharingClientFactory: async () => fakeClientThatAccepts(db, calls) });
   assert.equal(res.headersSent, true);
   assert.deepEqual(calls, ["crow_accept_bot_invite"], "accept only, no send");
-  const { rows } = await db.execute({ sql: "SELECT is_bot FROM contacts WHERE crow_id=?", args: [CROW_ID] });
+  const { rows } = await db.execute({ sql: "SELECT is_bot, origin FROM contacts WHERE crow_id=?", args: [CROW_ID] });
   assert.equal(Number(rows[0].is_bot), 1, "contact flagged is_bot");
+  assert.equal(rows[0].origin, "advertised", "new contact tagged origin=advertised (prune lifecycle)");
 });
 
 test("dir_message_bot materializes, flags is_bot, and redirects to ?open=<id>", async () => {
@@ -798,6 +813,14 @@ Add these two action branches (place them where `message_advertised_bot` was, an
       botCrowId = parseBotInviteCode(code).botCrowId;
     } catch { /* malformed — accept will report; bail to plain redirect */ }
 
+    // Was this bot already a contact? Only tag origin on contacts WE create
+    // (mirrors the removed message_advertised_bot discipline), preserving the
+    // pruneStaleAdvertisedContacts lifecycle + the Task-1 backfill grain.
+    let wasNew = false;
+    if (botCrowId) {
+      try { const { rows } = await db.execute({ sql: "SELECT 1 FROM contacts WHERE crow_id = ?", args: [botCrowId] }); wasNew = rows.length === 0; } catch {}
+    }
+
     let redirectTo = "/dashboard/messages";
     try {
       const client = await sharingClientFactory();
@@ -805,6 +828,7 @@ Add these two action branches (place them where `message_advertised_bot` was, an
         const accepted = await client.callTool({ name: "crow_accept_bot_invite", arguments: { invite_code: code } });
         if (accepted?.isError) return res.redirectAfterPost("/dashboard/messages");
         if (botCrowId) {
+          if (wasNew) await db.execute({ sql: "UPDATE contacts SET origin = 'advertised' WHERE crow_id = ?", args: [botCrowId] });
           await markContactIsBot(db, botCrowId);
           if (action === "dir_message_bot") {
             const { rows } = await db.execute({ sql: "SELECT id FROM contacts WHERE crow_id = ?", args: [botCrowId] });
@@ -922,6 +946,8 @@ Replace the `advertisedBots` block (~59-61) and the `buildMessagesHTML` arg:
 
 And in the `buildMessagesHTML({...})` call, replace `advertisedBots,` with `botDirectory,`. Update the import line at top from `getUnifiedConversationList, getAdvertisedBotItems` to `getUnifiedConversationList` (drop the now-unused import).
 
+Then **remove the now-orphaned `getAdvertisedBotItems`** from `messages/data-queries.js` (nothing imports it after this change — `getBotDirectory` supersedes it; `pruneStaleAdvertisedContacts` stays, used by `getBotDirectory`). Confirm with `grep -rn "getAdvertisedBotItems" servers/ tests/` — the only remaining hit should be `tests/roster-advertise-aggregate.test.js`, which Step 8 deletes.
+
 - [ ] **Step 4: Update `html.js`** — import the shared component, replace the advertised section, add the Browse entry + modal + popover item
 
 At top of `html.js`:
@@ -999,7 +1025,7 @@ Add an attach-once on-load hook that opens a conversation when `?open=<id>` is p
   }
 ```
 
-Expose `msgOpenBotDirectory`/`msgCloseBotDirectory` the same way the other on* functions are exposed (check how `msgShowInviteDialog` is made global in this file — likely `window.msgShowInviteDialog = msgShowInviteDialog;` near the bottom — mirror that for the two new functions).
+No global-exposure step is needed: `client.js` is a bare `<script>` template with NO IIFE, so top-level `function` declarations auto-globalize (that is why the existing inline `onclick="msgSelectItem(...)"` already works). Declare `msgOpenBotDirectory`/`msgCloseBotDirectory` as plain top-level functions like `msgSelectItem`; do NOT add any `window.* =` assignment (there are none in this file).
 
 - [ ] **Step 6: Add CSS** in `css.js` (append to the returned template; keep the existing visual language — reuse `--crow-*` vars):
 
@@ -1034,14 +1060,20 @@ Expose `msgOpenBotDirectory`/`msgCloseBotDirectory` the same way the other on* f
 - [ ] **Step 8: Run the surface test + the prior Messages render tests**
 
 Run: `node --test --test-force-exit tests/bot-directory-messages-surface.test.js tests/messages-add-bot-form.test.js`
-Expected: PASS. (`tests/roster-advertise-html.test.js` asserted the OLD `message_advertised_bot` section — update it: replace its assertions with the collapsed-Browse-entry expectations, or delete it if fully superseded by the new surface test. Decide by reading it; if it only tested the removed section, `git rm` it.)
+Expected: PASS.
+
+Now retire the two tests that asserted the removed behavior:
+- `tests/roster-advertise-html.test.js` — asserted the OLD `message_advertised_bot` inline section (`getAdvertisedBotItems` render). Read it; it only tests the removed section, so `git rm tests/roster-advertise-html.test.js`.
+- `tests/roster-advertise-aggregate.test.js` — imports/tests the now-removed `getAdvertisedBotItems` (verified: only that). `git rm tests/roster-advertise-aggregate.test.js`.
+
+(If on reading either file you find it also covers still-live behavior, update rather than delete — but per the review both only exercise removed code.)
 
 - [ ] **Step 9: Commit**
 
 ```bash
 git add tests/bot-directory-messages-surface.test.js
-git commit tests/bot-directory-messages-surface.test.js servers/gateway/dashboard/panels/messages.js servers/gateway/dashboard/panels/messages/html.js servers/gateway/dashboard/panels/messages/client.js servers/gateway/dashboard/panels/messages/css.js servers/gateway/dashboard/shared/i18n.js -m "feat(crow-messages): Messages bot directory modal + Browse entry + open-hook"
-# if roster-advertise-html.test.js was retired/updated, include it in the commit paths
+git rm tests/roster-advertise-html.test.js tests/roster-advertise-aggregate.test.js
+git commit tests/bot-directory-messages-surface.test.js tests/roster-advertise-html.test.js tests/roster-advertise-aggregate.test.js servers/gateway/dashboard/panels/messages.js servers/gateway/dashboard/panels/messages/html.js servers/gateway/dashboard/panels/messages/client.js servers/gateway/dashboard/panels/messages/css.js servers/gateway/dashboard/shared/i18n.js -m "feat(crow-messages): Messages bot directory modal + Browse entry + open-hook"
 git show --stat HEAD
 ```
 
@@ -1088,8 +1120,9 @@ test("contacts dir_add_bot materializes + flags is_bot", async () => {
   const result = await handleContactAction(req, db, { sharingClientFactory: async () => fakeClient });
   assert.equal(result.redirect, "/dashboard/contacts?view=bots");
   assert.deepEqual(calls, ["crow_accept_bot_invite"]);
-  const { rows } = await db.execute({ sql:"SELECT is_bot FROM contacts WHERE crow_id=?", args:[CROW_ID] });
+  const { rows } = await db.execute({ sql:"SELECT is_bot, origin FROM contacts WHERE crow_id=?", args:[CROW_ID] });
   assert.equal(Number(rows[0].is_bot), 1);
+  assert.equal(rows[0].origin, "advertised", "new contact tagged origin=advertised");
 });
 ```
 
@@ -1100,7 +1133,13 @@ Expected: FAIL — `dir_add_bot` not handled; `handleContactAction` may not acce
 
 - [ ] **Step 4: Implement the contacts `dir_add_bot` handler**
 
-In `contacts/api-handlers.js`: add a `sharingClientFactory` param to `handleContactAction` (default to the same in-memory sharing client factory the messages panel uses — import `getSharingClient` pattern or replicate it), import `markContactIsBot`, and add:
+Real signature is `handleContactAction(req, db)` (`contacts/api-handlers.js:17`), and its sole caller `contacts.js:29` passes exactly two args. So the new param MUST have a destructure default: change the signature to:
+
+```javascript
+export async function handleContactAction(req, db, { sharingClientFactory = makeSharingClient } = {}) {
+```
+
+`getSharingClient` in `messages/api-handlers.js` is NOT exported, so REPLICATE the tiny in-memory factory at the top of `contacts/api-handlers.js` (copy the 6-line `getSharingClient` body verbatim, name it `makeSharingClient`). Add `import { markContactIsBot } from "../../shared/mark-contact-bot.js";`. The required imports for the factory: `Client` from `@modelcontextprotocol/sdk/client/index.js`, `InMemoryTransport` from `@modelcontextprotocol/sdk/inMemory.js`, `createSharingServer` from `../../../../sharing/server.js`. Then add the handler:
 
 ```javascript
   if (action === "dir_add_bot" && req.body.invite_code) {
@@ -1110,33 +1149,40 @@ In `contacts/api-handlers.js`: add a `sharingClientFactory` param to `handleCont
       const { parseBotInviteCode } = await import("../../../../sharing/identity.js");
       botCrowId = parseBotInviteCode(code).botCrowId;
     } catch {}
+    let wasNew = false;
+    if (botCrowId) { try { const { rows } = await db.execute({ sql: "SELECT 1 FROM contacts WHERE crow_id = ?", args: [botCrowId] }); wasNew = rows.length === 0; } catch {} }
     try {
       const client = await sharingClientFactory();
       try {
         const accepted = await client.callTool({ name: "crow_accept_bot_invite", arguments: { invite_code: code } });
-        if (!accepted?.isError && botCrowId) await markContactIsBot(db, botCrowId);
+        if (!accepted?.isError && botCrowId) {
+          if (wasNew) await db.execute({ sql: "UPDATE contacts SET origin = 'advertised' WHERE crow_id = ?", args: [botCrowId] });
+          await markContactIsBot(db, botCrowId);
+        }
       } finally { await client.close(); }
     } catch (err) { console.error("[contacts] dir_add_bot failed:", err.message); }
     return { redirect: "/dashboard/contacts?view=bots" };
   }
 ```
 
-(Match the exact in-memory MCP client creation used in `messages/api-handlers.js` `getSharingClient`. If replicating, keep it DRY by importing a shared factory if one exists; otherwise mirror the local pattern.)
+The existing `contacts.js:29` caller (`await handleContactAction(req, db)`) stays UNCHANGED — the `= {}` default makes the third arg optional.
 
 - [ ] **Step 5: Add the `view=bots` render in `contacts.js`**
 
-Add a tab entry and a view branch that builds the directory in contacts context. In the view switch, add:
+`contacts.js` assigns `bodyHtml` through an `if/else` chain (`:52-74`) and builds a `tabs` array (`:79-83`); there is NO `section()` helper or `body` var. Add a new arm to the chain (after the `view === "profile"` arm, before the final `else`):
 
 ```javascript
     } else if (view === "bots") {
-      const { getBotDirectory } = await import("./messages/data-queries.js"); // NOTE: path is "../messages/..." — use the correct relative path from contacts.js
-      const { buildBotDirectory } = await import("../shared/bot-directory.js");
-      const { csrfInput } = await import("../shared/csrf.js");
+      const { getBotDirectory } = await import("./messages/data-queries.js");
+      const { buildBotDirectory } = await import("./shared/bot-directory.js");
+      const { csrfInput } = await import("./shared/csrf.js");
       const dir = await getBotDirectory(db).catch(() => ({ groups: [], total: 0, notAddedCount: 0 }));
-      body = section(t("contacts.browseBots", lang), buildBotDirectory({ groups: dir.groups, context: "contacts", csrf: csrfInput(req), lang }));
+      bodyHtml = buildBotDirectory({ groups: dir.groups, context: "contacts", csrf: csrfInput(req), lang });
 ```
 
-(Use the EXACT relative import paths from `contacts.js`'s location — `getBotDirectory` lives in `panels/messages/data-queries.js`, so from `panels/contacts.js` it is `"./messages/data-queries.js"`. Verify and fix the path. Add `"bots"` to the tab list near the `view` tabs so it is reachable; label `t("contacts.browseBots", lang)`.)
+VERIFY the relative import paths from `contacts.js` (which lives at `servers/gateway/dashboard/panels/contacts.js`): `getBotDirectory` is at `panels/messages/data-queries.js` → `"./messages/data-queries.js"`; `bot-directory.js` and `csrf.js` are at `dashboard/shared/` → from `panels/` that is `"../shared/bot-directory.js"` and `"../shared/csrf.js"`. (The messages panel imports csrf as `"../shared/csrf.js"` — match that; the `"./shared/..."` forms above are WRONG, use `"../shared/..."`. Confirm by checking an existing import in `contacts.js`.)
+
+Then add `{ id: "bots", label: t("contacts.browseBots", lang) },` to the `tabs` array (`:79-83`) so the view is reachable from the tab bar.
 
 - [ ] **Step 6: Add i18n keys**
 
@@ -1179,7 +1225,9 @@ test("getUnifiedConversationList carries isBot for bot contacts", async () => {
   const db = createClient({ url: ":memory:" });
   await db.execute(`CREATE TABLE chat_conversations (id INTEGER PRIMARY KEY, title TEXT, provider TEXT, model TEXT, updated_at TEXT, created_at TEXT)`);
   await db.execute(`CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, conversation_id INTEGER)`);
-  await db.execute(`CREATE TABLE contacts (id INTEGER PRIMARY KEY, crow_id TEXT, display_name TEXT, last_seen TEXT, is_blocked INTEGER DEFAULT 0, is_bot INTEGER DEFAULT 0)`);
+  // created_at is required: getUnifiedConversationList orders peers by c.created_at;
+  // without it the peer SELECT throws and is swallowed, leaving items empty.
+  await db.execute(`CREATE TABLE contacts (id INTEGER PRIMARY KEY, crow_id TEXT, display_name TEXT, last_seen TEXT, is_blocked INTEGER DEFAULT 0, is_bot INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')))`);
   await db.execute(`CREATE TABLE messages (id INTEGER PRIMARY KEY, contact_id INTEGER, created_at TEXT, is_read INTEGER, direction TEXT)`);
   await db.execute(`INSERT INTO contacts (crow_id, display_name, is_bot) VALUES ('crow:bot','Helper',1)`);
   await db.execute(`INSERT INTO contacts (crow_id, display_name, is_bot) VALUES ('crow:human','Kevin',0)`);
@@ -1272,6 +1320,20 @@ Expected: prints `imports ok` with no throw.
 **Type/name consistency:** action names `dir_add_bot` / `dir_message_bot` used identically in Tasks 6/7/9. `getBotDirectory` shape `{groups,total,notAddedCount}` consistent across Tasks 5/8. `markContactIsBot(db, crowId)` consistent Tasks 7/9. `buildBotDirectory({groups,context,csrf,lang})` consistent Tasks 6/8/9. `isBot` item field consistent Tasks 10.
 
 ---
+
+## Review
+
+**Reviewer:** Plan subagent (staff-engineer adversarial pass), 2026-06-16. **Verdict: REVISE → fixed inline below.** Every anchor/signature was checked against the real files.
+
+**Critical fixes applied:**
+1. **C1 — migration call was malformed.** Real `addColumnIfMissing(table, column, definition)` builds `ADD COLUMN ${column} ${definition}`, so the 3rd arg is the type clause only. Plan now passes `"INTEGER DEFAULT 0"` (not `"is_bot INTEGER DEFAULT 0"`), the Task-1 test mirror matches the REAL helper signature, and Step 4 now asserts the column actually exists after a real init-db run (the wrong form was silently swallowed by the helper's try/catch).
+2. **C2 — Task 9 referenced a nonexistent `section()`/`body`.** Rewritten to use the real `bodyHtml` + the `if/else` view chain + the `tabs` array.
+3. **C3 — `handleContactAction` signature.** Now `(req, db, { sharingClientFactory = makeSharingClient } = {})` (the `= {}` keeps the existing 2-arg caller working); `getSharingClient` isn't exported, so the factory is replicated as `makeSharingClient` with explicit imports listed.
+4. **C4 — prune-lifecycle regression.** The directory materialize handlers (Messages Task 7 + Contacts Task 9) now also set `origin='advertised'` on NEW contacts (wasNew guard), preserving `pruneStaleAdvertisedContacts` semantics + the Task-1 backfill grain. Tests assert `origin`.
+
+**Suggestions applied:** S1 (deleted the wrong "mirror `window.msgShowInviteDialog`" prose — bare functions auto-globalize, no IIFE), S2 (corrected the contacts→shared import path to `../shared/...`), S3 (Task 10 test `contacts` table gains `created_at` so the peer SELECT doesn't throw-and-swallow), S4 (added es-branch + empty-state + raw-key-leak assertions per spec §8), S5 (Task 8 removes the orphaned `getAdvertisedBotItems` and `git rm`s `roster-advertise-aggregate.test.js` + `roster-advertise-html.test.js`).
+
+**Approved as sound:** the spec-§2 deviation (mark `is_bot` at the gateway-handler layer via `markContactIsBot`, not inside the integration-heavy sharing tool) — the reviewer confirmed `origin='advertised'` was always written at the handler layer (the tool never set `origin` either), so this mirrors the existing pattern; the AI-direct-tool path being unbadged is pre-existing and minor. **Noted (S6):** `markContactIsBot` sets `is_bot=1` unconditionally by `crow_id` — harmless for a bot (a bot is always a bot). **Noted (Q3):** a `?open=<id>` pointing at a blocked contact is a harmless no-op (blocked contacts aren't in the strip); `dir_message_bot`'s post-accept `SELECT id` is safe (same in-process libsql, the INSERT is committed before the SELECT).
 
 ## Deploy (after merge)
 
