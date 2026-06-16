@@ -28,7 +28,7 @@ function validateBot(b, instanceId) {
     instance_id: instanceId,
     instance_label: typeof b.instance_label === "string" ? b.instance_label.slice(0, 256) : null,
     messaging_pubkey: pk,
-    invite_code: b.invite_code,
+    invite_code: b.invite_code.slice(0, 2000), // fresh slice — cache is the hardening point for peer data
   };
 }
 
@@ -62,9 +62,18 @@ export async function getPeerAdvertisedBots(db, instanceId) {
     return entry.data;
   }
   const inflight = (async () => {
-    const data = await doFetch(db, instanceId);
-    _cache.set(instanceId, { data, expiresAt: now() + TTL_MS });
-    return data;
+    // doFetch never throws today, but guard the IIFE anyway (mirrors
+    // overview-cache.js) so a future fallible doFetch can't surface an
+    // unhandled rejection to callers sharing this inflight promise.
+    try {
+      const data = await doFetch(db, instanceId);
+      _cache.set(instanceId, { data, expiresAt: now() + TTL_MS });
+      return data;
+    } catch (err) {
+      const sentinel = { instanceId, status: "unavailable", reason: "exception:" + (err?.message || "unknown"), bots: [] };
+      _cache.set(instanceId, { data: sentinel, expiresAt: now() + TTL_MS });
+      return sentinel;
+    }
   })();
   _cache.set(instanceId, { inflight, expiresAt: now() + FETCH_TIMEOUT_MS + 500 });
   return inflight;
