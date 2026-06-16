@@ -77,7 +77,7 @@ One focused render test: `tests/messages-add-bot-form.test.js`. Asserts `buildMe
 - a `name="invite_code"` textarea,
 - the CSRF token (when a `csrf` string is supplied).
 
-The `accept_bot_invite` action handler is already covered by the shipped `crow-accept-bot-invite` tests; the i18n keys are validated by the existing i18n completeness test (if present) — otherwise asserted in the render test via `t(...)` not throwing.
+The `accept_bot_invite` action handler is already covered by the shipped `crow-accept-bot-invite` tests. There is no standalone i18n completeness test in the suite, so the render test indirectly exercises the four new keys: it builds the HTML with a real `lang`, and the asserted markup (item title, button label, placeholder) only appears if `t(...)` resolves each key rather than echoing the raw key string.
 
 ## Out of scope
 
