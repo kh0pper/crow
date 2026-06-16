@@ -76,6 +76,18 @@ test("buildInviteCode produces a code parseable by parseBotInviteCode with the a
   assert.ok(Array.isArray(parsed.relays), "carries relays");
 });
 
+test("buildInviteCode carries the bot's display name from pi_bot_defs", async () => {
+  const { parseBotInviteCode } = await import("../servers/sharing/identity.js");
+  await db.execute({
+    sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?,?,?,1) "
+       + "ON CONFLICT(bot_id) DO UPDATE SET display_name=excluded.display_name",
+    args: ["namedbot", "Kevin's Assistant", JSON.stringify({ tools: {}, models: {} })],
+  });
+  const tok = await admin.mintInvite(db, "namedbot", {});
+  const parsed = parseBotInviteCode(await admin.buildInviteCode(db, "namedbot", tok));
+  assert.equal(parsed.name, "Kevin's Assistant", "invite carries the bot display name");
+});
+
 test("getActiveInvite skips expired invites; returns valid non-expired invite", async () => {
   // Expired invite should NOT be returned.
   await admin.mintInvite(db, "botExpiry", { expiresAt: "2000-01-01 00:00:00" });

@@ -64,7 +64,8 @@ export default {
       let botName = null;
       try {
         const { parseBotInviteCode } = await import("../../../sharing/identity.js");
-        botName = parseBotInviteCode(biCode).botCrowId;
+        const parsed = parseBotInviteCode(biCode);
+        botName = parsed.name || parsed.botCrowId;
       } catch { /* malformed/expired: still offer the button; the tool reports the error */ }
       botInvite = { code: biCode, name: botName, csrf: csrfInput(req) };
     }

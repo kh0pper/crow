@@ -98,9 +98,19 @@ export async function addManualAcl(db, botId, senderPubkey, crowId = null, displ
   });
 }
 
-/** Build the shareable, ed25519-signed invite code for (bot, token). */
+/** The bot's human display name (for friendly invite labels), or null. */
+export async function displayNameFor(db, botId) {
+  try {
+    const { rows } = await db.execute({ sql: "SELECT display_name FROM pi_bot_defs WHERE bot_id=?", args: [botId] });
+    return rows[0]?.display_name || null;
+  } catch { return null; }
+}
+
+/** Build the shareable, ed25519-signed invite code for (bot, token). Carries the
+ *  bot's display name so the recipient sees a friendly label, not the crow: id. */
 export async function buildInviteCode(db, botId, token) {
   const botIdentity = botIdentityFor(botId);
   const relays = await resolveRelays(db);
-  return generateBotInviteCode(botIdentity, token, relays);
+  const name = await displayNameFor(db, botId);
+  return generateBotInviteCode(botIdentity, token, relays, name);
 }
