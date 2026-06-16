@@ -114,3 +114,77 @@ export async function buildInviteCode(db, botId, token) {
   const name = await displayNameFor(db, botId);
   return generateBotInviteCode(botIdentity, token, relays, name);
 }
+
+/**
+ * Find the bot's reusable paired-roster invite (unlimited-use, non-expiring,
+ * kind='paired-roster', not revoked), or mint one. Returns the token string.
+ * One invite suffices: all of the operator's paired instances share one Nostr
+ * identity, so a single accept authorizes every sibling.
+ */
+export async function getOrCreatePairedRosterInvite(db, botId) {
+  const { rows } = await db.execute({
+    sql: "SELECT token FROM bot_message_invites WHERE bot_id=? AND kind='paired-roster' AND revoked=0 ORDER BY id DESC LIMIT 1",
+    args: [botId],
+  });
+  if (rows.length) return rows[0].token;
+  const token = randomBytes(24).toString("base64url");
+  await db.execute({
+    sql: "INSERT INTO bot_message_invites (bot_id, token, expires_at, max_uses, kind) VALUES (?,?,NULL,NULL,'paired-roster')",
+    args: [botId, token],
+  });
+  return token;
+}
+
+/** Bots whose def has a crow-messages gateway with allow_paired_instances=true. */
+export async function listAdvertisedBots(db) {
+  const { rows } = await db.execute({
+    sql: "SELECT bot_id, display_name, definition FROM pi_bot_defs WHERE enabled=1",
+    args: [],
+  });
+  const out = [];
+  for (const r of rows) {
+    let def;
+    try { def = JSON.parse(r.definition || "{}"); } catch { continue; }
+    const gw = Array.isArray(def.gateways)
+      ? def.gateways.find((g) => g && g.type === "crow-messages" && g.allow_paired_instances === true)
+      : null;
+    if (!gw) continue;
+    out.push({ botId: r.bot_id, displayName: r.display_name || r.bot_id });
+  }
+  return out;
+}
+
+/**
+ * Build the advertisement payload served to paired peers. Each entry carries a
+ * reusable paired-roster invite code (which embeds the bot's pubkey + relays +
+ * name) plus the x-only messaging pubkey for receiver-side dedup. A bot whose
+ * identity can't derive (no instance seed) is skipped, not fatal.
+ *
+ * NOTE: there is intentionally NO top-level `relay_url` (the relays are already
+ * embedded in the signed invite_code via generateBotInviteCode, so a separate
+ * field would be redundant).
+ *
+ * `_identityFor`/`_buildInviteCode` are injectable test seams (mirrors the
+ * `_setFetchImpl` style elsewhere); production passes neither.
+ */
+export async function buildAdvertisementPayload(
+  db, { instanceId, instanceLabel, _identityFor = botIdentityFor, _buildInviteCode = buildInviteCode } = {}
+) {
+  const bots = [];
+  for (const b of await listAdvertisedBots(db)) {
+    try {
+      const ident = _identityFor(b.botId); // throws if no identity.json beside crow.db
+      const token = await getOrCreatePairedRosterInvite(db, b.botId);
+      const inviteCode = await _buildInviteCode(db, b.botId, token);
+      bots.push({
+        bot_id: b.botId,
+        display_name: b.displayName,
+        instance_id: instanceId,
+        instance_label: instanceLabel,
+        messaging_pubkey: xOnly(ident.secp256k1Pubkey),
+        invite_code: inviteCode,
+      });
+    } catch { /* skip a bot whose identity can't derive */ }
+  }
+  return { bots };
+}
