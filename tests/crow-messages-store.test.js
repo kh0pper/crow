@@ -111,3 +111,45 @@ test("authorizeSender: allow_paired_instances lets a paired-instance contact thr
   d.close();
   rmSync(tmp, { recursive: true, force: true });
 });
+
+test("authorizeSender: paired-instance path denied when instance is revoked", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "cm-store-revoked-"));
+  execFileSync(process.execPath, ["scripts/init-db.js"], {
+    env: { ...process.env, CROW_DATA_DIR: tmp }, stdio: "pipe",
+    cwd: new URL("..", import.meta.url).pathname,
+  });
+  const d = new Database(join(tmp, "crow.db"));
+  const xonly = "5".repeat(64);
+  d.prepare("INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (?,?,?,?)")
+    .run("crow:revoked01", "Revoked Box", "51".repeat(16), "02" + xonly);
+  d.prepare("INSERT INTO crow_instances (id, name, crow_id, status) VALUES (?,?,?,?)")
+    .run("inst-rev", "Revoked Box", "crow:revoked01", "revoked");
+  // allowPaired=true but instance is revoked → must deny
+  assert.equal(cmStore.authorizeSender(d, "botR", xonly, true), false, "revoked instance denied");
+  // Sanity: if status were 'active' it would be allowed
+  d.prepare("UPDATE crow_instances SET status='active' WHERE id='inst-rev'").run();
+  assert.equal(cmStore.authorizeSender(d, "botR", xonly, true), true, "active instance allowed (sanity)");
+  d.close();
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test("authorizeSender: paired-instance path denied when contact is blocked", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "cm-store-blocked-"));
+  execFileSync(process.execPath, ["scripts/init-db.js"], {
+    env: { ...process.env, CROW_DATA_DIR: tmp }, stdio: "pipe",
+    cwd: new URL("..", import.meta.url).pathname,
+  });
+  const d = new Database(join(tmp, "crow.db"));
+  const xonly = "7".repeat(64);
+  d.prepare("INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey, is_blocked) VALUES (?,?,?,?,?)")
+    .run("crow:blocked01", "Blocked Box", "71".repeat(16), "02" + xonly, 1);
+  d.prepare("INSERT INTO crow_instances (id, name, crow_id, status) VALUES (?,?,?,?)")
+    .run("inst-blk", "Blocked Box", "crow:blocked01", "active");
+  // allowPaired=true, instance active, but contact is blocked → must deny
+  assert.equal(cmStore.authorizeSender(d, "botB", xonly, true), false, "blocked contact denied");
+  // Sanity: unblock → allowed
+  d.prepare("UPDATE contacts SET is_blocked=0 WHERE crow_id='crow:blocked01'").run();
+  assert.equal(cmStore.authorizeSender(d, "botB", xonly, true), true, "unblocked contact allowed (sanity)");
+  d.close();
+  rmSync(tmp, { recursive: true, force: true });
+});
