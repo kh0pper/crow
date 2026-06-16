@@ -1107,6 +1107,7 @@ export const translations = {
   "contacts.tabAll": { en: "All Contacts", es: "Todos los contactos" },
   "contacts.tabGroups": { en: "Groups", es: "Grupos" },
   "contacts.tabProfile": { en: "My Profile", es: "Mi perfil" },
+  "contacts.browseBots": { en: "Browse Crow bots", es: "Explorar bots de Crow" },
   "contacts.searchPlaceholder": { en: "Search contacts...", es: "Buscar contactos..." },
   "contacts.typeAll": { en: "All Types", es: "Todos los tipos" },
   "contacts.typeCrow": { en: "Crow Peers", es: "Pares Crow" },

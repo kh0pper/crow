@@ -9,12 +9,28 @@ import { parseVCard, generateVCard, parseCsv } from "./vcard.js";
 import { upsertSetting } from "../../settings/registry.js";
 import { getContacts } from "./data-queries.js";
 import { getManagersOrNull } from "../../../../sharing/managers.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createSharingServer } from "../../../../sharing/server.js";
+import { markContactIsBot } from "../../shared/mark-contact-bot.js";
+
+/**
+ * Create a connected sharing MCP client.
+ */
+async function makeSharingClient() {
+  const server = createSharingServer();
+  const client = new Client({ name: "dashboard-contacts-action", version: "0.1.0" });
+  const [ct, st] = InMemoryTransport.createLinkedPair();
+  await server.connect(st);
+  await client.connect(ct);
+  return client;
+}
 
 /**
  * Handle POST actions from the contacts panel.
  * @returns {{ redirect?: string, download?: string } | null}
  */
-export async function handleContactAction(req, db) {
+export async function handleContactAction(req, db, { sharingClientFactory = makeSharingClient } = {}) {
   const { action } = req.body;
 
   // --- Block / Unblock ---
@@ -229,6 +245,29 @@ export async function handleContactAction(req, db) {
     }
 
     return { redirect: "/dashboard/contacts" };
+  }
+
+  // --- Browse bots directory: add bot as contact ---
+  if (action === "dir_add_bot" && req.body.invite_code) {
+    const code = req.body.invite_code.trim();
+    let botCrowId = null;
+    try {
+      const { parseBotInviteCode } = await import("../../../../sharing/identity.js");
+      botCrowId = parseBotInviteCode(code).botCrowId;
+    } catch {}
+    let wasNew = false;
+    if (botCrowId) { try { const { rows } = await db.execute({ sql: "SELECT 1 FROM contacts WHERE crow_id = ?", args: [botCrowId] }); wasNew = rows.length === 0; } catch {} }
+    try {
+      const client = await sharingClientFactory();
+      try {
+        const accepted = await client.callTool({ name: "crow_accept_bot_invite", arguments: { invite_code: code } });
+        if (!accepted?.isError && botCrowId) {
+          if (wasNew) await db.execute({ sql: "UPDATE contacts SET origin = 'advertised' WHERE crow_id = ?", args: [botCrowId] });
+          await markContactIsBot(db, botCrowId);
+        }
+      } finally { await client.close(); }
+    } catch (err) { console.error("[contacts] dir_add_bot failed:", err.message); }
+    return { redirect: "/dashboard/contacts?view=bots" };
   }
 
   return null;
