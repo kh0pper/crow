@@ -62,6 +62,13 @@ export default {
       // --- My Profile ---
       const profile = await getMyProfile(db);
       bodyHtml = renderMyProfile(profile, lang);
+    } else if (view === "bots") {
+      // --- Browse Crow Bots Directory ---
+      const { getBotDirectory } = await import("./messages/data-queries.js");
+      const { buildBotDirectory } = await import("../shared/bot-directory.js");
+      const { csrfInput } = await import("../shared/csrf.js");
+      const dir = await getBotDirectory(db).catch(() => ({ groups: [], total: 0, notAddedCount: 0 }));
+      bodyHtml = buildBotDirectory({ groups: dir.groups, context: "contacts", csrf: csrfInput(req), lang });
     } else {
       // --- All Contacts (default) ---
       const filters = {
@@ -80,6 +87,7 @@ export default {
         { id: "all", label: t("contacts.tabAll", lang) },
         { id: "groups", label: t("contacts.tabGroups", lang) },
         { id: "profile", label: t("contacts.tabProfile", lang) },
+        { id: "bots", label: t("contacts.browseBots", lang) },
       ];
       tabsHtml = `<div class="contacts-tabs">
         ${tabs.map((tab) =>
