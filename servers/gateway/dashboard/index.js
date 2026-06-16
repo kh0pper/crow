@@ -595,8 +595,9 @@ export default function dashboardRouter(mcpAuthMiddleware) {
     if (!req.headers["x-crow-signature"]) return next();
     // /dashboard/overview → federationRouter (Phase 1)
     // /dashboard/capabilities → federationRouter (F4a Layer 1)
+    // /dashboard/advertised-bots → federationRouter (Theme 12 roster auto-advertise)
     // /dashboard/bot-federation/* → federationRouter (F4a Layer 3, parameterized paths)
-    if (federationRouter && (req.path === "/overview" || req.path === "/capabilities" || req.path.startsWith("/bot-federation/"))) {
+    if (federationRouter && (req.path === "/overview" || req.path === "/capabilities" || req.path === "/advertised-bots" || req.path.startsWith("/bot-federation/"))) {
       return federationRouter(req, res, next);
     }
     // Everything else (bundles) → bundlesRouter (existing behavior)
