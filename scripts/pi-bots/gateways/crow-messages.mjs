@@ -25,7 +25,7 @@ export async function checkRequirements() {
  * Core router for one decrypted inbound DM. Dependency-injected for testing.
  * @returns {Promise<void>}
  */
-export async function handleCrowMessageEvent({ botId, senderPubkey, decrypted, db, handleInbound, sendDM, log }) {
+export async function handleCrowMessageEvent({ botId, senderPubkey, decrypted, db, handleInbound, sendDM, log, allowPaired = false }) {
   const pk = xOnly(senderPubkey); // the cryptographically-verified signer of the event
   // Control message?
   if (typeof decrypted === "string" && decrypted.startsWith("{")) {
@@ -49,8 +49,8 @@ export async function handleCrowMessageEvent({ botId, senderPubkey, decrypted, d
     // Unknown control payloads are ignored (no turn).
     if (payload && payload.type) return;
   }
-  // Plain chat → authorize (ACL-only in Plan 1) then run a turn.
-  if (!cmStore.authorizeSender(db, botId, pk)) { log("drop unauthorized bot=" + botId + " sender=" + pk); return; }
+  // Plain chat → authorize (ACL-only in Plan 1, allowPaired in Plan 2) then run a turn.
+  if (!cmStore.authorizeSender(db, botId, pk, allowPaired)) { log("drop unauthorized bot=" + botId + " sender=" + pk); return; }
   await handleInbound({
     bot_id: botId,
     gateway_thread_id: "crow-messages:" + pk,
@@ -76,6 +76,7 @@ export async function start({ bot_id, gw, log }) {
   catch (e) { log("crow-messages bot=" + bot_id + " no instance seed: " + e.message); try { db.close(); } catch {} return { stop() {} }; }
   const botIdentity = deriveBotIdentity(seed, bot_id);
 
+  const allowPaired = !!(gw && gw.allow_paired_instances);
   try { cmStore.pruneSeen(db); } catch { /* best-effort */ }
   const relays = await connectRelays(cmStore.resolveRelays(db));
   const botXOnly = xOnly(botIdentity.secp256k1Pubkey);
@@ -101,6 +102,7 @@ export async function start({ bot_id, gw, log }) {
         }, text, { log });
       },
       log,
+      allowPaired,
     }).catch((e) => log("event handler error: " + (e && e.message))));
   });
 
