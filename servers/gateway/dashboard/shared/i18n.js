@@ -660,6 +660,22 @@ export const translations = {
   // Review tab
   "botbuilder.reviewEffectiveDecision": { en: "Effective runtime decision", es: "Decisión de ejecución efectiva" },
   "botbuilder.reviewHintSaving": { en: "Saving a bot writes pi_bot_defs only. The bridge spawn-per-turn picks up changes on the next inbound; no gateway restart needed.", es: "Guardar un bot solo escribe pi_bot_defs. El bridge por turno recoge los cambios en el siguiente mensaje entrante; no se necesita reiniciar el gateway." },
+  // Crow Messages gateway editor (Plan 2)
+  "botbuilder.cmHint": { en: "People you share access with can chat with this bot over Crow Messages. The bot answers as itself.", es: "Las personas con quienes compartas el acceso podrán chatear con este bot por Crow Messages. El bot responde como tal." },
+  "botbuilder.cmShareLabel": { en: "Share access", es: "Compartir acceso" },
+  "botbuilder.cmShareHint": { en: "Send this to anyone you want to let chat with this bot.", es: "Envía esto a quien quieras que pueda chatear con este bot." },
+  "botbuilder.cmOpenLink": { en: "Open invite on this device", es: "Abrir invitación en este dispositivo" },
+  "botbuilder.cmShareBtn": { en: "Share access", es: "Compartir acceso" },
+  "botbuilder.cmNewLinkBtn": { en: "New link", es: "Nuevo enlace" },
+  "botbuilder.cmWhoCanMessage": { en: "Who can message this bot", es: "Quién puede escribir a este bot" },
+  "botbuilder.cmNobodyYet": { en: "Nobody yet. Share access to add people.", es: "Nadie todavía. Comparte el acceso para añadir personas." },
+  "botbuilder.cmRemove": { en: "Remove", es: "Quitar" },
+  "botbuilder.cmAllowPaired": { en: "Allow my other Crow devices", es: "Permitir mis otros dispositivos Crow" },
+  "botbuilder.cmAdvanced": { en: "Advanced", es: "Avanzado" },
+  "botbuilder.cmRawAddress": { en: "Bot address", es: "Dirección del bot" },
+  "botbuilder.cmManualPubkey": { en: "Add by public key", es: "Añadir por clave pública" },
+  "botbuilder.cmManualName": { en: "Name (optional)", es: "Nombre (opcional)" },
+  "botbuilder.cmManualAdd": { en: "Add", es: "Añadir" },
 
   // ─── Bot Board Panel (W3-4 + W4-3 i18n sweep) ───
   // Status label keys — display counterparts to the frozen CARD_STATUSES data values
