@@ -291,6 +291,16 @@ test("parseBotInviteCode rejects a tampered crow_id", () => {
   const bad = [other.crowId, parts[1], parts[2]].join(".");
   assert.throws(() => parseBotInviteCode(bad), /mismatch|match/i);
 });
+
+test("parseBotInviteCode rejects a tampered payload (ed25519 signature)", () => {
+  const bot = deriveBotIdentity(SEED, "bot-alpha");
+  const code = generateBotInviteCode(bot, "tok-123", []);
+  const [crowId, payloadB64, sig] = code.split(".");
+  const data = JSON.parse(Buffer.from(payloadB64, "base64url").toString());
+  data.secp256k1Pub = "0".repeat(66); data.token = "stolen"; // fields the crowId check doesn't cover
+  const tampered = Buffer.from(JSON.stringify(data)).toString("base64url");
+  assert.throws(() => parseBotInviteCode([crowId, tampered, sig].join(".")), /signature/i);
+});
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -302,10 +312,13 @@ Expected: FAIL — `generateBotInviteCode` not exported.
 
 ```js
 /**
- * Encode a bot invite: `<botCrowId>.<base64url(payload)>.<hmac>`. Payload carries
- * the bot address (keys) + an authorization token + relay hints. HMAC mirrors
- * generateInviteCode (tamper-evidence for the issuer; recipients validate by the
- * crowId↔ed25519 check in parseBotInviteCode).
+ * Encode a bot invite: `<botCrowId>.<base64url(payload)>.<ed25519-sig>`. Payload
+ * carries the bot address (keys) + an authorization token + relay hints, SIGNED
+ * with the bot's ed25519 private key. Because the embedded ed25519 pubkey is
+ * bound to crowId (computeCrowId), a recipient can verify the WHOLE payload —
+ * secp key, token, relays — is authentic. (An HMAC keyed on the private key,
+ * as the legacy instance invites use, is NOT third-party-verifiable; a MITM
+ * could swap the unbound secp key/relays. Hardened per commit-review HIGH.)
  */
 export function generateBotInviteCode(botIdentity, token, relays = []) {
   const payload = Buffer.from(JSON.stringify({
@@ -316,22 +329,24 @@ export function generateBotInviteCode(botIdentity, token, relays = []) {
     relays,
     v: 1,
   })).toString("base64url");
-  const hmac = createHmac("sha256", botIdentity.ed25519Priv).update(payload).digest("base64url");
-  return `${botIdentity.crowId}.${payload}.${hmac}`;
+  const signature = sign(payload, botIdentity.ed25519Priv); // existing exported ed25519 sign()
+  return `${botIdentity.crowId}.${payload}.${signature}`;
 }
 
 /**
- * Decode + validate a bot invite. Throws on malformed input or a crow_id that
- * does not match the embedded ed25519 pubkey.
+ * Decode + validate a bot invite. Throws on malformed input, a crow_id that does
+ * not match the embedded ed25519 pubkey, or a payload whose ed25519 signature
+ * does not verify.
  */
 export function parseBotInviteCode(code) {
   const parts = String(code).split(".");
   if (parts.length !== 3) throw new Error("Invalid bot invite code format");
-  const [crowIdPart, payload] = parts;
+  const [crowIdPart, payload, signature] = parts;
   const data = JSON.parse(Buffer.from(payload, "base64url").toString());
   if (data.crowId !== crowIdPart) throw new Error("Bot invite Crow ID mismatch");
   const expected = computeCrowId(Buffer.from(data.ed25519Pub, "hex"));
   if (expected !== data.crowId) throw new Error("Bot invite public key does not match Crow ID");
+  if (!verify(payload, signature, data.ed25519Pub)) throw new Error("Bot invite signature invalid");
   return {
     botCrowId: data.crowId,
     ed25519Pubkey: data.ed25519Pub,
@@ -342,10 +357,12 @@ export function parseBotInviteCode(code) {
 }
 ```
 
+(`sign`/`verify` are existing exported ed25519 helpers in `identity.js` — function declarations, hoisted, so the forward reference works.)
+
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `node --test tests/crow-bot-identity.test.js`
-Expected: PASS (7 tests total).
+Expected: PASS (8 tests total).
 
 - [ ] **Step 5: Commit**
 
@@ -1040,4 +1057,4 @@ Suggestions applied:
 
 Open deployment guardrails (carried to "After Plan 1"): the pi-bots host needs `nostr-tools` + `ws` + `better-sqlite3` resolvable (all already used elsewhere — confirm), and `start()`'s `loadInstanceSeed(dirname(botsDbPath()))` must point at an **unencrypted** instance identity that sits **beside** the configured DB (the standard `~/.crow/data` layout co-locates `identity.json` + `crow.db`; it throws clearly otherwise and the gateway no-ops with a log line).
 
-**Confirmatory re-review (2026-06-15): VERDICT APPROVE — no critical issues.** A second adversarial pass verified all four fixes against live code and found no regressions: test counts consistent (T1=5, T3=7, T2=1, T5=3, T4=3, T6=6, T7=7, T8=1); no caller passes removed params; ACL never keyed on a claimed key; split-brain fix well-founded. It **empirically proved** the WebSocket polyfill works — but for a subtle reason (nostr-tools resolves the socket via a constructor-time `|| WebSocket` global re-read at runtime, not the eval-time capture, and ESM settles this module's top-level `await import("ws")` before `start()` runs). Hardening applied per its recommendation: explicit `useWebSocketImplementation(globalThis.WebSocket)` (survives a future nostr-tools dropping the fallback) + corrected the misleading "textual order" comment. Two cosmetic nits also fixed (a vestigial 4th arg in a Task-6 test; the Self-Review's stale paired-toggle in-scope line moved to deferred).
+**Confirmatory re-review (2026-06-15): VERDICT APPROVE — no critical issues.** A second adversarial pass verified all four fixes against live code and found no regressions: test counts consistent (T1=5, T3=8, T2=1, T5=3, T4=3, T6=6, T7=7, T8=1); no caller passes removed params; ACL never keyed on a claimed key; split-brain fix well-founded. It **empirically proved** the WebSocket polyfill works — but for a subtle reason (nostr-tools resolves the socket via a constructor-time `|| WebSocket` global re-read at runtime, not the eval-time capture, and ESM settles this module's top-level `await import("ws")` before `start()` runs). Hardening applied per its recommendation: explicit `useWebSocketImplementation(globalThis.WebSocket)` (survives a future nostr-tools dropping the fallback) + corrected the misleading "textual order" comment. Two cosmetic nits also fixed (a vestigial 4th arg in a Task-6 test; the Self-Review's stale paired-toggle in-scope line moved to deferred).
