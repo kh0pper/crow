@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { handleCrowMessageEvent } from "../scripts/pi-bots/gateways/crow-messages.mjs";
 import * as cmStore from "../scripts/pi-bots/gateways/crow-messages-store.mjs";
+import { isHostManaged, getAdapter } from "../scripts/pi-bots/gateways/index.mjs";
 
 function freshDb() {
   const d = mkdtempSync(join(tmpdir(), "crowmsg-adapter-"));
@@ -95,4 +96,10 @@ test("unauthorized chat → no turn, no reply", async () => {
     assert.equal(turns, 0);
     assert.equal(sent.length, 0);
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("crow-messages is registered as a host-managed adapter", () => {
+  assert.equal(isHostManaged("crow-messages"), true);
+  const a = getAdapter("crow-messages");
+  assert.ok(a && a.type === "crow-messages" && typeof a.start === "function");
 });

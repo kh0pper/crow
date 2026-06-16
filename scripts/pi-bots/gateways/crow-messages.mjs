@@ -4,7 +4,6 @@
  * DMs drive the real pi bridge (handleInbound) and the bot replies from its key.
  */
 import { loadInstanceSeed, deriveBotIdentity } from "../../../servers/sharing/identity.js";
-import { handleInbound as realHandleInbound } from "../bridge.mjs";
 import { chunkedSend, SerialQueue } from "./base.mjs";
 import * as cmStore from "./crow-messages-store.mjs";
 import { xOnly, buildDM, openDM, connectRelays, subscribe, publish, makeDedupeGate } from "./nostr-client.mjs";
@@ -66,6 +65,7 @@ export async function start({ bot_id, gw, log }) {
   const { dirname } = await import("node:path");
   const Database = (await import("better-sqlite3")).default;
   const { botsDbPath } = await import("../instance-paths.mjs"); // CROW_DB resolver used by gateway_runner
+  const { handleInbound: realHandleInbound } = await import("../bridge.mjs");
   const dbPath = botsDbPath();
   const db = new Database(dbPath); db.pragma("busy_timeout = 10000");
 
