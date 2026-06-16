@@ -2524,5 +2524,12 @@ try {
   console.warn("  ⚠ orchestrator teardown cleanup failed:", err.message);
 }
 
+// --- Roster auto-advertise (Theme 12, 2026-06-15) ---
+// contacts.origin distinguishes auto-materialized advertised bots ('advertised')
+// from manual/invite contacts (NULL). bot_message_invites.kind tags the
+// reusable paired-roster invite ('paired-roster') so it is reused, not re-minted.
+await addColumnIfMissing("contacts", "origin", "TEXT");          // NULL=manual/invite, 'advertised'
+await addColumnIfMissing("bot_message_invites", "kind", "TEXT"); // NULL=normal, 'paired-roster'
+
 console.log("Database initialized successfully (local file)");
 db.close();
