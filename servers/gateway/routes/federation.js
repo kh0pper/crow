@@ -194,6 +194,15 @@ export default function federationRouter({ createDbClient }) {
     emptyBodyString: "",
   });
 
+  // Same HMAC gate, distinct audit action so paired-roster advertise traffic is
+  // distinguishable from overview fetches in cross_host_calls. (Siblings keep
+  // their existing label to avoid churn in their audit assertions.)
+  const advertisedBotsVerify = crossHostVerifyMiddleware(dbForAudit, {
+    optional: false,
+    audit: "federation.advertised-bots",
+    emptyBodyString: "",
+  });
+
   // Route path is relative to the `/dashboard` mount point in the parent
   // dashboard router. The external URL is `/dashboard/overview`.
   router.get("/overview", federationVerify, async (req, res) => {
@@ -251,7 +260,7 @@ export default function federationRouter({ createDbClient }) {
   // allow_paired_instances=true. Same HMAC gate as /overview; under /dashboard →
   // Funnel-blocked (never add to PUBLIC_FUNNEL_PREFIXES). Each entry carries a
   // reusable paired-roster invite the caller auto-accepts on first message.
-  router.get("/advertised-bots", federationVerify, async (req, res) => {
+  router.get("/advertised-bots", advertisedBotsVerify, async (req, res) => {
     const db = createDbClient();
     try {
       const localId = getOrCreateLocalInstanceId();

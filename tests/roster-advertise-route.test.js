@@ -36,7 +36,6 @@ const { rejectFunneledMiddleware } = await import("../servers/gateway/funnel.js"
 // empty rows for everything else (buildAdvertisementPayload → listAdvertisedBots
 // returns [] → bots: [] in the payload).
 function fakeDb() {
-  let callCount = 0;
   return {
     execute: async (opts) => {
       const sql = typeof opts === "string" ? opts : (opts?.sql ?? "");
