@@ -129,5 +129,19 @@ export async function handlePostAction(req, res, { db }) {
     return res.redirectAfterPost("/dashboard/messages");
   }
 
+  if (action === "accept_bot_invite" && req.body.invite_code) {
+    try {
+      const client = await getSharingClient();
+      await client.callTool({
+        name: "crow_accept_bot_invite",
+        arguments: { invite_code: req.body.invite_code.trim() },
+      });
+      await client.close();
+    } catch (err) {
+      console.error("[messages] Failed to accept bot invite:", err.message);
+    }
+    return res.redirectAfterPost("/dashboard/messages");
+  }
+
   return false; // Action not handled
 }
