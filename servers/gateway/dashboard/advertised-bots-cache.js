@@ -29,6 +29,8 @@ function validateBot(b, instanceId) {
     instance_label: typeof b.instance_label === "string" ? b.instance_label.slice(0, 256) : null,
     messaging_pubkey: pk,
     invite_code: b.invite_code.slice(0, 2000), // fresh slice — cache is the hardening point for peer data
+    description: (typeof b.description === "string" && b.description.trim())
+      ? b.description.trim().slice(0, 140) : null,
   };
 }
 
