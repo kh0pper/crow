@@ -59,6 +59,30 @@ export async function handleBotBuilderPost(req, res, { db }) {
     return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=permissions`);
   }
 
+  // ---- Crow Messages gateway management actions (Plan 2) ----
+  if (action === "gw_share" || action === "gw_newlink" || action === "gw_remove" || action === "gw_advanced_add") {
+    const botId = (b.bot_id || "").trim();
+    if (!botId) return res.redirectAfterPost("/dashboard/bot-builder");
+    const admin = await import("./crow-messages-admin.js");
+    try {
+      if (action === "gw_share") {
+        // Mint only if there isn't already an active link (idempotent Share).
+        const active = await admin.getActiveInvite(db, botId);
+        if (!active) await admin.mintInvite(db, botId, {});
+      } else if (action === "gw_newlink") {
+        await admin.rotateInvite(db, botId, {});
+      } else if (action === "gw_remove") {
+        if (b.sender_pubkey) await admin.removeAcl(db, botId, String(b.sender_pubkey).trim());
+      } else if (action === "gw_advanced_add") {
+        const pk = (b.sender_pubkey || "").trim();
+        if (pk) await admin.addManualAcl(db, botId, pk, null, (b.display_name || "").trim() || null);
+      }
+    } catch (e) {
+      return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=gateways&warn=${encodeURIComponent(e.message)}`);
+    }
+    return res.redirectAfterPost(`/dashboard/bot-builder?bot=${encodeURIComponent(botId)}&tab=gateways`);
+  }
+
   // tab saves — merge only that tab's fields into the existing definition
   if (action && action.startsWith("save_")) {
     const botId = b.bot_id;
@@ -280,12 +304,20 @@ export async function handleBotBuilderPost(req, res, { db }) {
             allowlist: lines(b.gw_allowlist),
           },
         ];
+      } else if (gwType === "crow-messages") {
+        // First-class P2P gateway (host adapter from Plan 1). Identity is derived
+        // and invites/ACL live in their own tables (edited via gw_* actions); the
+        // bot def only carries the type + the allow-paired toggle. This minimal
+        // record is a valid host-managed gateway: gateway_runner.mjs:56 iterates
+        // def.gateways[], and :89 calls adapter.start({bot_id, gw, log}) with this
+        // exact object (the adapter reads gw.allow_paired_instances — Task 2).
+        def.gateways = [{
+          type: "crow-messages",
+          allow_paired_instances: b.gw_allow_paired_instances === "on" || b.gw_allow_paired_instances === "true",
+        }];
       } else {
-        // Not-yet-available gateway type (e.g. "crow-messages"/"signal" are
-        // shipped as host adapters but their management UI lands in a later
-        // wave). Refuse to persist it so the runner can't host a feature with no
-        // way to manage it — leave def.gateways unchanged. (Server-side gate; the
-        // editor also renders these options disabled.)
+        // Genuinely unsupported / coming-soon type (e.g. "signal"): refuse to
+        // persist so the runner can't host a feature with no management UI.
         console.warn(`[bot-builder] ignoring save of unsupported gateway type "${gwType}" for bot ${botId}`);
       }
     } else if (tab === "tracker") {
