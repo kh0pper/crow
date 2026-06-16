@@ -6,7 +6,7 @@ import { buildMessagesHTML } from "../servers/gateway/dashboard/panels/messages/
 const BASE = {
   items: [], totalUnread: 0, aiConfigured: false, storageAvailable: false,
   inviteResult: null, inviteError: null, lang: "en", botInvite: null,
-  advertisedBots: [], csrf: '<input type="hidden" name="_csrf" value="tok">',
+  botDirectory: { groups: [], total: 0, notAddedCount: 0 }, csrf: '<input type="hidden" name="_csrf" value="tok">',
 };
 
 // Helper: isolate the markup of the invite-bot form (from its dialog id to the

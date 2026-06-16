@@ -661,58 +661,6 @@ export function messagesCSS() {
   }
   .msg-attachment-preview-remove:hover { opacity: 0.8; }
 
-  /* === Bots on your other Crows (roster auto-advertise) === */
-  .msg-advertised-section {
-    padding: 10px 12px;
-    border-bottom: 1px solid var(--crow-border);
-    background: var(--crow-bg-elevated);
-  }
-  .msg-advertised-title {
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--crow-text-muted);
-    margin-bottom: 8px;
-  }
-  .msg-advertised-bot {
-    padding: 8px 0;
-    border-top: 1px solid var(--crow-border);
-  }
-  .msg-advertised-bot:first-of-type { border-top: none; }
-  .msg-advertised-bot-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 6px;
-    font-size: 0.85rem;
-  }
-  .msg-advertised-badge {
-    font-size: 0.65rem;
-    padding: 2px 7px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--crow-accent) 14%, transparent);
-    color: var(--crow-accent);
-    white-space: nowrap;
-  }
-  .msg-advertised-form {
-    display: flex;
-    gap: 6px;
-  }
-  .msg-advertised-form input[type="text"] {
-    flex: 1;
-    min-width: 0;
-    padding: 6px 8px;
-    font-size: 0.8rem;
-    border: 1px solid var(--crow-border);
-    border-radius: 6px;
-    background: var(--crow-bg-deep);
-    color: var(--crow-text-primary);
-  }
-  .msg-advertised-form input[type="text"]:focus {
-    outline: none;
-    border-color: var(--crow-accent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--crow-accent) 25%, transparent);
-  }
   .msg-btn-primary {
     padding: 6px 12px;
     font-size: 0.8rem;
