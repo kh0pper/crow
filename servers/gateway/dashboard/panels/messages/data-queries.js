@@ -132,7 +132,10 @@ export async function getMessageStatus(db) {
  * contact. Never throws — a bad peer is silently dropped by the cache.
  */
 export async function getAdvertisedBotItems(db) {
-  // Pubkeys we already have a contact for (trailing-64, lowercased).
+  // Pubkeys we already have a contact for (trailing-64, lowercased). This
+  // includes BLOCKED contacts on purpose: a bot you blocked should NOT
+  // reappear in the advertised "available" list, so we keep its pubkey here
+  // to suppress it.
   const known = new Set();
   try {
     const { rows } = await db.execute("SELECT secp256k1_pubkey FROM contacts WHERE secp256k1_pubkey IS NOT NULL");
