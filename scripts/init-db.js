@@ -2531,5 +2531,12 @@ try {
 await addColumnIfMissing("contacts", "origin", "TEXT");          // NULL=manual/invite, 'advertised'
 await addColumnIfMissing("bot_message_invites", "kind", "TEXT"); // NULL=normal, 'paired-roster'
 
+// --- Cross-instance bot directory (phase 2, 2026-06-16) ---
+// contacts.is_bot marks a contact that is a Crow Messages bot (vs a human), so
+// the UI can badge it and the future group phase can treat "add a bot" and
+// "add a person" uniformly. Backfill the reliably-known bots (origin='advertised').
+await addColumnIfMissing("contacts", "is_bot", "INTEGER DEFAULT 0");
+await db.execute({ sql: "UPDATE contacts SET is_bot = 1 WHERE origin = 'advertised' AND is_bot = 0" });
+
 console.log("Database initialized successfully (local file)");
 db.close();
