@@ -75,10 +75,13 @@ const STATIC_META = {
   },
 };
 
+const LABEL_OVERRIDES = { "crow-messages": "Crow Messages" };
+
 export function capabilitiesForUI() {
   const out = [STATIC_META.gmail, STATIC_META.discord];
   for (const a of HOST_ADAPTERS) {
-    out.push({ type: a.type, mode: a.mode, label: a.type.charAt(0).toUpperCase() + a.type.slice(1), configFields: a.configFields || [] });
+    const label = LABEL_OVERRIDES[a.type] || (a.type.charAt(0).toUpperCase() + a.type.slice(1));
+    out.push({ type: a.type, mode: a.mode, label, configFields: a.configFields || [] });
   }
   return out;
 }

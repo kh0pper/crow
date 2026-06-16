@@ -79,3 +79,77 @@ test("markEventSeen dedups per (bot,event) and survives across handles; pruneSee
     assert.equal(cmStore.markEventSeen(d2, "bot1", "evt-2"), true, "pruned old row → seen-as-new again");
   } finally { d2.close(); }
 });
+
+test("authorizeSender: allow_paired_instances lets a paired-instance contact through without an ACL row", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "cm-store-paired-"));
+  execFileSync(process.execPath, ["scripts/init-db.js"], {
+    env: { ...process.env, CROW_DATA_DIR: tmp }, stdio: "pipe",
+    cwd: new URL("..", import.meta.url).pathname,
+  });
+  const d = new Database(join(tmp, "crow.db"));
+  // contacts.secp256k1_pubkey is stored as the 66-hex COMPRESSED key (02/03 prefix),
+  // but events authorize on the 64-hex x-only pubkey. Test BOTH parity prefixes.
+  const xonly02 = "c".repeat(64);          // a 02-prefixed contact
+  const xonly03 = "f".repeat(64);          // a 03-prefixed contact (the half a naive "02"+pk match misses)
+  d.prepare("INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (?,?,?,?)")
+    .run("crow:paired01", "Laptop", "ed".repeat(16), "02" + xonly02);
+  d.prepare("INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (?,?,?,?)")
+    .run("crow:paired03", "Phone", "ee".repeat(16), "03" + xonly03);
+  d.prepare("INSERT INTO crow_instances (id, name, crow_id) VALUES (?,?,?)").run("inst-1", "Laptop", "crow:paired01");
+  d.prepare("INSERT INTO crow_instances (id, name, crow_id) VALUES (?,?,?)").run("inst-2", "Phone", "crow:paired03");
+  // Off → denied (default-deny, no ACL row).
+  assert.equal(cmStore.authorizeSender(d, "botX", xonly02, false), false, "denied with toggle off");
+  // On → allowed via the paired-instance join, for BOTH 02 and 03 contacts.
+  assert.equal(cmStore.authorizeSender(d, "botX", xonly02, true), true, "02-prefixed paired contact allowed");
+  assert.equal(cmStore.authorizeSender(d, "botX", xonly03, true), true, "03-prefixed paired contact allowed");
+  // A contact who is NOT a registered instance → denied even with toggle on.
+  d.prepare("INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (?,?,?,?)")
+    .run("crow:friend01", "Friend", "ab".repeat(16), "02" + "a".repeat(64));
+  assert.equal(cmStore.authorizeSender(d, "botX", "a".repeat(64), true), false, "non-instance contact denied");
+  // Unknown sender → denied.
+  assert.equal(cmStore.authorizeSender(d, "botX", "d".repeat(64), true), false, "unknown sender denied");
+  d.close();
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test("authorizeSender: paired-instance path denied when instance is revoked", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "cm-store-revoked-"));
+  execFileSync(process.execPath, ["scripts/init-db.js"], {
+    env: { ...process.env, CROW_DATA_DIR: tmp }, stdio: "pipe",
+    cwd: new URL("..", import.meta.url).pathname,
+  });
+  const d = new Database(join(tmp, "crow.db"));
+  const xonly = "5".repeat(64);
+  d.prepare("INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (?,?,?,?)")
+    .run("crow:revoked01", "Revoked Box", "51".repeat(16), "02" + xonly);
+  d.prepare("INSERT INTO crow_instances (id, name, crow_id, status) VALUES (?,?,?,?)")
+    .run("inst-rev", "Revoked Box", "crow:revoked01", "revoked");
+  // allowPaired=true but instance is revoked → must deny
+  assert.equal(cmStore.authorizeSender(d, "botR", xonly, true), false, "revoked instance denied");
+  // Sanity: if status were 'active' it would be allowed
+  d.prepare("UPDATE crow_instances SET status='active' WHERE id='inst-rev'").run();
+  assert.equal(cmStore.authorizeSender(d, "botR", xonly, true), true, "active instance allowed (sanity)");
+  d.close();
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test("authorizeSender: paired-instance path denied when contact is blocked", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "cm-store-blocked-"));
+  execFileSync(process.execPath, ["scripts/init-db.js"], {
+    env: { ...process.env, CROW_DATA_DIR: tmp }, stdio: "pipe",
+    cwd: new URL("..", import.meta.url).pathname,
+  });
+  const d = new Database(join(tmp, "crow.db"));
+  const xonly = "7".repeat(64);
+  d.prepare("INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey, is_blocked) VALUES (?,?,?,?,?)")
+    .run("crow:blocked01", "Blocked Box", "71".repeat(16), "02" + xonly, 1);
+  d.prepare("INSERT INTO crow_instances (id, name, crow_id, status) VALUES (?,?,?,?)")
+    .run("inst-blk", "Blocked Box", "crow:blocked01", "active");
+  // allowPaired=true, instance active, but contact is blocked → must deny
+  assert.equal(cmStore.authorizeSender(d, "botB", xonly, true), false, "blocked contact denied");
+  // Sanity: unblock → allowed
+  d.prepare("UPDATE contacts SET is_blocked=0 WHERE crow_id='crow:blocked01'").run();
+  assert.equal(cmStore.authorizeSender(d, "botB", xonly, true), true, "unblocked contact allowed (sanity)");
+  d.close();
+  rmSync(tmp, { recursive: true, force: true });
+});
