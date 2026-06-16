@@ -9,6 +9,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createSharingServer } from "../../../../sharing/server.js";
 import { getManagersOrNull } from "../../../../sharing/managers.js";
+import { markContactIsBot } from "../../shared/mark-contact-bot.js";
 
 /**
  * Create a connected sharing MCP client.
@@ -137,56 +138,53 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
         arguments: { invite_code: req.body.invite_code.trim() },
       });
       await client.close();
+      try {
+        const { parseBotInviteCode } = await import("../../../../sharing/identity.js");
+        await markContactIsBot(db, parseBotInviteCode(req.body.invite_code.trim()).botCrowId);
+      } catch {}
     } catch (err) {
       console.error("[messages] Failed to accept bot invite:", err.message);
     }
     return res.redirectAfterPost("/dashboard/messages");
   }
 
-  if (action === "message_advertised_bot" && req.body.invite_code && req.body.message) {
+  if ((action === "dir_add_bot" || action === "dir_message_bot") && req.body.invite_code) {
     const code = req.body.invite_code.trim();
     let botCrowId = null;
     try {
-      const { parseBotInviteCode } = await import("../../../../sharing/identity.js"); // four levels up (cf. api-handlers.js static imports)
+      const { parseBotInviteCode } = await import("../../../../sharing/identity.js");
       botCrowId = parseBotInviteCode(code).botCrowId;
-    } catch { /* malformed — accept will report the error; bail to redirect */ }
+    } catch { /* malformed — accept will report; bail to plain redirect */ }
 
+    // Was this bot already a contact? Only tag origin on contacts WE create
+    // (mirrors the removed message_advertised_bot discipline), preserving the
+    // pruneStaleAdvertisedContacts lifecycle + the is_bot backfill grain.
+    let wasNew = false;
+    if (botCrowId) {
+      try { const { rows } = await db.execute({ sql: "SELECT 1 FROM contacts WHERE crow_id = ?", args: [botCrowId] }); wasNew = rows.length === 0; } catch {}
+    }
+
+    let redirectTo = "/dashboard/messages";
     try {
-      // Was this bot already a contact? (Only tag origin on contacts WE create,
-      // so we never relabel a manually-added contact.)
-      let wasNew = false;
-      if (botCrowId) {
-        const { rows } = await db.execute({ sql: "SELECT 1 FROM contacts WHERE crow_id = ?", args: [botCrowId] });
-        wasNew = rows.length === 0;
-      }
-
       const client = await sharingClientFactory();
-      // try/finally so the in-memory MCP client is always closed — even if the
-      // UPDATE or crow_send_message throws (otherwise its pipe leaks for the
-      // process lifetime in this long-lived gateway).
       try {
-        // crow_accept_bot_invite sets isError:true ONLY on a malformed code / DB
-        // failure (it does NOT create a contact then). An owner momentarily
-        // unreachable is a NON-error success (accept + message go to relays
-        // store-and-forward), so we proceed in that case.
         const accepted = await client.callTool({ name: "crow_accept_bot_invite", arguments: { invite_code: code } });
-        if (accepted?.isError) {
-          return res.redirectAfterPost("/dashboard/messages"); // accept failed → nothing materialized
-        }
-
+        if (accepted?.isError) return res.redirectAfterPost("/dashboard/messages");
         if (botCrowId) {
-          if (wasNew) {
-            await db.execute({ sql: "UPDATE contacts SET origin = 'advertised' WHERE crow_id = ?", args: [botCrowId] });
+          if (wasNew) await db.execute({ sql: "UPDATE contacts SET origin = 'advertised' WHERE crow_id = ?", args: [botCrowId] });
+          await markContactIsBot(db, botCrowId);
+          if (action === "dir_message_bot") {
+            const { rows } = await db.execute({ sql: "SELECT id FROM contacts WHERE crow_id = ?", args: [botCrowId] });
+            if (rows[0]?.id != null) redirectTo = `/dashboard/messages?open=${rows[0].id}`;
           }
-          await client.callTool({ name: "crow_send_message", arguments: { contact: botCrowId, message: req.body.message } });
         }
       } finally {
         await client.close();
       }
     } catch (err) {
-      console.error("[messages] Failed to message advertised bot:", err.message);
+      console.error("[messages] dir bot materialize failed:", err.message);
     }
-    return res.redirectAfterPost("/dashboard/messages");
+    return res.redirectAfterPost(redirectTo);
   }
 
   return false; // Action not handled
