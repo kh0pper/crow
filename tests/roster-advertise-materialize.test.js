@@ -63,9 +63,9 @@ test("first send to an advertised bot accepts the invite, tags origin, and sends
   assert.equal(res.headersSent, true, "redirected");
   assert.deepEqual(calls, ["crow_accept_bot_invite", "crow_send_message"], "accept then send");
 
-  const { rows } = await db.execute(
-    `SELECT origin FROM contacts WHERE crow_id='${REAL_BOT_CROW_ID}'`
-  );
+  const { rows } = await db.execute({
+    sql: "SELECT origin FROM contacts WHERE crow_id = ?", args: [REAL_BOT_CROW_ID],
+  });
   assert.equal(rows[0]?.origin, "advertised", "newly created contact tagged origin=advertised");
 });
 

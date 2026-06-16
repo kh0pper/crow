@@ -161,23 +161,28 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
       }
 
       const client = await sharingClientFactory();
-      // crow_accept_bot_invite sets isError:true ONLY on a malformed code / DB
-      // failure (it does NOT create a contact then). An owner momentarily
-      // unreachable is a NON-error success (accept + message go to relays
-      // store-and-forward), so we proceed in that case.
-      const accepted = await client.callTool({ name: "crow_accept_bot_invite", arguments: { invite_code: code } });
-      if (accepted?.isError) {
-        await client.close();
-        return res.redirectAfterPost("/dashboard/messages"); // accept failed → nothing materialized
-      }
-
-      if (botCrowId) {
-        if (wasNew) {
-          await db.execute({ sql: "UPDATE contacts SET origin = 'advertised' WHERE crow_id = ?", args: [botCrowId] });
+      // try/finally so the in-memory MCP client is always closed — even if the
+      // UPDATE or crow_send_message throws (otherwise its pipe leaks for the
+      // process lifetime in this long-lived gateway).
+      try {
+        // crow_accept_bot_invite sets isError:true ONLY on a malformed code / DB
+        // failure (it does NOT create a contact then). An owner momentarily
+        // unreachable is a NON-error success (accept + message go to relays
+        // store-and-forward), so we proceed in that case.
+        const accepted = await client.callTool({ name: "crow_accept_bot_invite", arguments: { invite_code: code } });
+        if (accepted?.isError) {
+          return res.redirectAfterPost("/dashboard/messages"); // accept failed → nothing materialized
         }
-        await client.callTool({ name: "crow_send_message", arguments: { contact: botCrowId, message: req.body.message } });
+
+        if (botCrowId) {
+          if (wasNew) {
+            await db.execute({ sql: "UPDATE contacts SET origin = 'advertised' WHERE crow_id = ?", args: [botCrowId] });
+          }
+          await client.callTool({ name: "crow_send_message", arguments: { contact: botCrowId, message: req.body.message } });
+        }
+      } finally {
+        await client.close();
       }
-      await client.close();
     } catch (err) {
       console.error("[messages] Failed to message advertised bot:", err.message);
     }
