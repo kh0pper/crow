@@ -124,7 +124,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import {
-  getOrCreatePairedRosterInvite, listAdvertisedBots,
+  getOrCreatePairedRosterInvite, listAdvertisedBots, buildAdvertisementPayload,
 } from "../servers/gateway/dashboard/panels/bot-builder/crow-messages-admin.js";
 
 async function seed(db) {
@@ -164,6 +164,27 @@ test("listAdvertisedBots returns only crow-messages bots with allow_paired_insta
   const bots = await listAdvertisedBots(db);
   assert.deepEqual(bots.map((b) => b.botId).sort(), ["yes"]);
   assert.equal(bots[0].displayName, "Yes Bot");
+});
+
+test("buildAdvertisementPayload combines identity + invite into the wire shape", async () => {
+  const db = createClient({ url: ":memory:" });
+  await seed(db);
+  await db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES (?,?,?,1)",
+    args: ["yes", "Yes Bot", JSON.stringify({ gateways: [{ type: "crow-messages", allow_paired_instances: true }] })] });
+
+  const payload = await buildAdvertisementPayload(db, {
+    instanceId: "inst-1", instanceLabel: "Laptop",
+    _identityFor: () => ({ secp256k1Pubkey: "02" + "a".repeat(64) }), // compressed → xOnly strips prefix
+    _buildInviteCode: async (_db, botId, token) => `crow:${botId}.${token}.sig`,
+  });
+  assert.equal(payload.bots.length, 1);
+  const b = payload.bots[0];
+  assert.equal(b.bot_id, "yes");
+  assert.equal(b.display_name, "Yes Bot");
+  assert.equal(b.instance_id, "inst-1");
+  assert.equal(b.instance_label, "Laptop");
+  assert.equal(b.messaging_pubkey, "a".repeat(64), "x-only (prefix stripped)");
+  assert.ok(b.invite_code.startsWith("crow:yes."), "invite code built from the reused token");
 });
 ```
 
@@ -221,14 +242,23 @@ export async function listAdvertisedBots(db) {
  * reusable paired-roster invite code (which embeds the bot's pubkey + relays +
  * name) plus the x-only messaging pubkey for receiver-side dedup. A bot whose
  * identity can't derive (no instance seed) is skipped, not fatal.
+ *
+ * NOTE: there is intentionally NO top-level `relay_url` (the spec's payload
+ * lists one) — the relays are already embedded in the signed invite_code via
+ * generateBotInviteCode, so a separate field would be redundant.
+ *
+ * `_identityFor`/`_buildInviteCode` are injectable test seams (mirrors the
+ * `_setFetchImpl` style elsewhere); production passes neither.
  */
-export async function buildAdvertisementPayload(db, { instanceId, instanceLabel }) {
+export async function buildAdvertisementPayload(
+  db, { instanceId, instanceLabel, _identityFor = botIdentityFor, _buildInviteCode = buildInviteCode } = {}
+) {
   const bots = [];
   for (const b of await listAdvertisedBots(db)) {
     try {
-      const ident = botIdentityFor(b.botId); // throws if no identity.json beside crow.db
+      const ident = _identityFor(b.botId); // throws if no identity.json beside crow.db
       const token = await getOrCreatePairedRosterInvite(db, b.botId);
-      const inviteCode = await buildInviteCode(db, b.botId, token);
+      const inviteCode = await _buildInviteCode(db, b.botId, token);
       bots.push({
         bot_id: b.botId,
         display_name: b.displayName,
@@ -242,6 +272,8 @@ export async function buildAdvertisementPayload(db, { instanceId, instanceLabel 
   return { bots };
 }
 ```
+
+> **Confirm:** `deriveBotIdentity(...)` returns the compressed secp256k1 key under `.secp256k1Pubkey` (`servers/sharing/identity.js:209`); `xOnly()` strips the 02/03 prefix to 64-hex.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -313,7 +345,7 @@ test("GET /dashboard/advertised-bots returns advertised bots to a signed paired 
   //  and ensure an instance identity.json exists beside the test crow.db so botIdentityFor() works —
   //  follow how other crow-messages tests provide identity, or skip identity by asserting the
   //  empty-but-200 contract when no bots qualify.)
-  const headers = signedHeaders("GET", "/dashboard/advertised-bots", "");
+  const headers = signedHeaders({ method: "GET", path: "/dashboard/advertised-bots", body: "" });
   const res = await request(app).get("/dashboard/advertised-bots").set(headers);
   assert.equal(res.status, 200);
   assert.ok(Array.isArray(res.body.bots), "body.bots is an array");
@@ -322,6 +354,17 @@ test("GET /dashboard/advertised-bots returns advertised bots to a signed paired 
 test("GET /dashboard/advertised-bots rejects an unsigned caller", async () => {
   const res = await request(app).get("/dashboard/advertised-bots");
   assert.notEqual(res.status, 200);
+});
+
+test("GET /dashboard/advertised-bots is rejected under a Funnel header", async () => {
+  // Mirror how federation-overview.test.js asserts the network-exposure invariant:
+  // mount rejectFunneledMiddleware() ahead of the dashboard router (or set the app
+  // up exactly as that test does), then send the Funnel marker header. A private
+  // route must never be reachable via Funnel.
+  const headers = signedHeaders({ method: "GET", path: "/dashboard/advertised-bots", body: "" });
+  const res = await request(app).get("/dashboard/advertised-bots")
+    .set(headers).set("Tailscale-Funnel-Request", "true");
+  assert.notEqual(res.status, 200, "Funnel-marked request must be rejected");
 });
 ```
 
@@ -406,8 +449,8 @@ Expected: FAIL — module does not exist.
  * that errors/times out yields an `unavailable` sentinel (never throws), so a
  * single offline Crow can't break the Messages render.
  */
-import { forwardSignedRequest } from "../shared/peer-forward.js";
-import { getOrCreateLocalInstanceId } from "./instance-registry.js";
+import { forwardSignedRequest } from "../../shared/peer-forward.js";
+import { getOrCreateLocalInstanceId } from "../instance-registry.js";
 
 const TTL_MS = 60_000;
 const FETCH_TIMEOUT_MS = 2_000;
@@ -438,7 +481,7 @@ async function defaultFetchImpl(db, instanceId) {
   return forwardSignedRequest({
     db, sourceInstanceId: localId, targetInstanceId: instanceId,
     method: "GET", path: "/dashboard/advertised-bots",
-    auditAction: "federation.overview", actor: "advertised-bots-cache",
+    auditAction: "federation.advertised-bots", actor: "advertised-bots-cache",
     timeoutMs: FETCH_TIMEOUT_MS, maxResponseBytes: MAX_RESPONSE_BYTES,
   });
 }
@@ -513,12 +556,14 @@ const PK_KNOWN = "c".repeat(64);
 
 async function seed(db) {
   await db.execute(`CREATE TABLE contacts (id INTEGER PRIMARY KEY, crow_id TEXT, secp256k1_pubkey TEXT)`);
-  await db.execute(`CREATE TABLE crow_instances (id TEXT PRIMARY KEY, crow_id TEXT, status TEXT)`);
-  // Two paired peers + a revoked one + the local-mcp pseudo-instance (must be skipped).
-  await db.execute("INSERT INTO crow_instances (id, crow_id, status) VALUES ('peer1','u',  'active')");
-  await db.execute("INSERT INTO crow_instances (id, crow_id, status) VALUES ('peer2','u',  'offline')");
-  await db.execute("INSERT INTO crow_instances (id, crow_id, status) VALUES ('gone', 'u',  'revoked')");
-  await db.execute("INSERT INTO crow_instances (id, crow_id, status) VALUES ('mcp','__local_mcp__','active')");
+  // Columns getTrustedInstances reads: trusted + status (+ is_home/name for ORDER BY).
+  await db.execute(`CREATE TABLE crow_instances (id TEXT PRIMARY KEY, crow_id TEXT, status TEXT, trusted INTEGER, is_home INTEGER, name TEXT)`);
+  // peer1/peer2 are trusted + active/offline → fetched. The rest are excluded by getTrustedInstances:
+  await db.execute("INSERT INTO crow_instances (id, crow_id, status, trusted) VALUES ('peer1','u','active', 1)");
+  await db.execute("INSERT INTO crow_instances (id, crow_id, status, trusted) VALUES ('peer2','u','offline',1)");
+  await db.execute("INSERT INTO crow_instances (id, crow_id, status, trusted) VALUES ('gone', 'u','revoked',1)");   // status excluded
+  await db.execute("INSERT INTO crow_instances (id, crow_id, status, trusted) VALUES ('paused','u','paused', 1)");  // status excluded
+  await db.execute("INSERT INTO crow_instances (id, crow_id, status, trusted) VALUES ('untr', 'u','active', 0)");   // untrusted excluded
   // An already-materialized contact (compressed 02-prefixed key whose trailing-64 == PK_KNOWN).
   await db.execute({ sql: "INSERT INTO contacts (crow_id, secp256k1_pubkey) VALUES ('crow:known', ?)", args: ["02" + PK_KNOWN] });
 }
@@ -554,11 +599,12 @@ Expected: FAIL — `getAdvertisedBotItems` not exported.
 
 - [ ] **Step 3: Implement `getAdvertisedBotItems` in `data-queries.js`**
 
-Add the import at the top of the file:
+Add the imports at the top of the file. Use the established `getTrustedInstances` helper (the same one every other federation fan-out uses — `trusted=1 AND status IN ('active','offline')`); do NOT hand-roll a `crow_instances` predicate (a bespoke filter would fire wasted round-trips at untrusted/paused peers that `forwardSignedRequest` rejects with `target_not_trusted`):
 
 ```js
-import { getPeerAdvertisedBots } from "../../advertised-bots-cache.js";
-import { getOrCreateLocalInstanceId } from "../../instance-registry.js";
+import { getPeerAdvertisedBots } from "../../advertised-bots-cache.js";          // dashboard/advertised-bots-cache.js (two up)
+import { getTrustedInstances } from "../nest/data-queries.js";                   // sibling panel
+import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";      // gateway/instance-registry.js (three up)
 ```
 
 Add the function:
@@ -584,13 +630,13 @@ export async function getAdvertisedBotItems(db) {
   let localId = null;
   try { localId = getOrCreateLocalInstanceId(); } catch {}
 
+  // Trusted + active/offline peers only (same set every federation fan-out uses).
+  // This already excludes revoked, paused, untrusted, and the __local_mcp__
+  // pseudo-instance; we additionally drop self.
   let peerIds = [];
   try {
-    const { rows } = await db.execute({
-      sql: "SELECT id FROM crow_instances WHERE status != 'revoked' AND (crow_id IS NULL OR crow_id != '__local_mcp__')",
-      args: [],
-    });
-    peerIds = rows.map((r) => r.id).filter((id) => id && id !== localId);
+    const insts = await getTrustedInstances(db);
+    peerIds = insts.map((i) => i.id).filter((id) => id && id !== localId);
   } catch {}
 
   const settled = await Promise.allSettled(peerIds.map((id) => getPeerAdvertisedBots(db, id)));
@@ -841,6 +887,28 @@ test("first send to an advertised bot accepts the invite, tags origin, and sends
   const { rows } = await db.execute("SELECT origin FROM contacts WHERE crow_id='crow:bot-id-here'");
   assert.equal(rows[0]?.origin, "advertised", "newly created contact tagged origin=advertised");
 });
+
+test("accept failure → no tag, no send (no half-state)", async () => {
+  const db = createClient({ url: ":memory:" });
+  await db.execute(`CREATE TABLE contacts (id INTEGER PRIMARY KEY, crow_id TEXT, secp256k1_pubkey TEXT, origin TEXT)`);
+  const calls = [];
+  const fakeClient = {
+    async callTool(args) {
+      calls.push(args.name);
+      // Simulate a malformed/failed accept: isError, no contact created.
+      return { isError: true, content: [{ type: "text", text: "Failed to accept bot invite: bad code" }] };
+    },
+    async close() {},
+  };
+  const req = { body: { action: "message_advertised_bot",
+    invite_code: "crow:bot-id-here.payload.sig", message: "hello" } };
+  const res = fakeRes();
+
+  await handlePostAction(req, res, { db, sharingClientFactory: async () => fakeClient });
+  assert.deepEqual(calls, ["crow_accept_bot_invite"], "send NOT attempted after failed accept");
+  const { rows } = await db.execute("SELECT COUNT(*) AS n FROM contacts");
+  assert.equal(Number(rows[0].n), 0, "no contact materialized on failed accept");
+});
 ```
 
 > If `parseBotInviteCode` rejects the fake string, generate a real code in the test via `generateBotInviteCode(deriveBotIdentity(seed,'bot'), 'tok', [], null)` and read back its `botCrowId` with `parseBotInviteCode` to use as the expected crow_id. Keep the call-order + origin-tag assertions.
@@ -880,7 +948,16 @@ Add the action (place after the `accept_bot_invite` block, before `return false;
 
       const client = await sharingClientFactory();
       // Accept creates the local contact + tells the owner to authorize us.
-      await client.callTool({ name: "crow_accept_bot_invite", arguments: { invite_code: code } });
+      // crow_accept_bot_invite sets isError:true ONLY on a malformed code / DB
+      // failure (it does NOT create a contact in that case). An owner that's
+      // momentarily unreachable is a NON-error success (the accept + the message
+      // are published to relays store-and-forward; the owner picks them up when
+      // back online), so we proceed in that case.
+      const accepted = await client.callTool({ name: "crow_accept_bot_invite", arguments: { invite_code: code } });
+      if (accepted?.isError) {
+        await client.close();
+        return res.redirectAfterPost("/dashboard/messages"); // accept failed → nothing materialized
+      }
 
       if (botCrowId) {
         if (wasNew) {
@@ -1019,12 +1096,12 @@ git show --stat HEAD | head -8
 **Files:**
 - Test: `tests/auth-network.test.js` (existing — run, do not modify unless it fails)
 
-The new route lives under the `/dashboard` mount and is HMAC-gated by `federationVerify`; it is NOT in `PUBLIC_FUNNEL_PREFIXES`, so it must remain Funnel-blocked. Confirm nothing regressed.
+The new route lives under the `/dashboard` mount and is HMAC-gated by `federationVerify`; it is NOT in `PUBLIC_FUNNEL_PREFIXES`, so it must remain Funnel-blocked. The route-specific Funnel-rejection assertion lives in Task 3; `auth-network.test.js` here is the broader middleware/`isAllowedNetwork` invariant (it does not enumerate routes, so it confirms the network policy generally, not this route specifically). Also run the changed-signature regression test for `handlePostAction`.
 
-- [ ] **Step 1: Run the network-invariant test**
+- [ ] **Step 1: Run the network-invariant + signature-regression tests**
 
-Run: `node --test --test-force-exit tests/auth-network.test.js`
-Expected: PASS — no public exposure of private routes.
+Run: `node --test --test-force-exit tests/auth-network.test.js tests/crow-accept-bot-invite.test.js`
+Expected: PASS — network policy intact; the `handlePostAction({db})` call site still works (the `sharingClientFactory` default applies).
 
 - [ ] **Step 2: Run the full roster-advertise test set together**
 
@@ -1055,10 +1132,28 @@ No code change expected here; this task is verification. If a regression surface
 
 ## Deploy (after merge — per the handoff cheat-sheet)
 
-Schema change present → at each host: `git pull --rebase`, then run `node scripts/init-db.js` per data dir **first** (MPA: `CROW_DB_PATH=~/.crow-mpa/data/crow.db node scripts/init-db.js`), then restart the **gateway(s)**. The pi-bots host (`pibot-gateways@crow-mpa`, `pibot-gateways@grackle`) does **not** need restarting — no adapter/store code changed (the new invite row is read by the existing `consumeInvite` path). Hosts: crow main (`:3001`) + MPA (`:3006`) + grackle (`:3002`) + black-swan (`0.0.0.0:3001`). Verify via node ports, not ts.net `/health`. Gateway restarts drop glasses/companion WS (reopen app).
+Schema change present → at each host: `git pull --rebase`, then run `node scripts/init-db.js` per data dir **first** (MPA: `CROW_DB_PATH=~/.crow-mpa/data/crow.db node scripts/init-db.js`), then restart the **gateway(s)**. The pi-bots host (`pibot-gateways@crow-mpa`, `pibot-gateways@grackle`) does **not** need restarting — no adapter/store code changed, and `consumeInvite` (`crow-messages-store.mjs:47`) reads the invite row with a fresh `SELECT` per accept, so a newly-minted paired-roster invite is visible to the running adapter **without** a restart (there is no in-memory invite cache). Hosts: crow main (`:3001`) + MPA (`:3006`) + grackle (`:3002`) + black-swan (`0.0.0.0:3001`). Verify via node ports, not ts.net `/health`. Gateway restarts drop glasses/companion WS (reopen app).
+
+**Invite revocation interaction:** `rotateInvite` (the Share UI's "rotate") sets `revoked=1` on **all** of a bot's invites, including the paired-roster one. The next advertise call re-mints a fresh paired-roster invite (`getOrCreatePairedRosterInvite` only reuses `revoked=0` rows), so the roster self-heals; any already-distributed paired-roster code sitting in a viewer's ≤60s cache goes dead until the cache refreshes — acceptable, since sending always requires a live accept against the owner.
 
 ## Self-Review notes (author)
 
 - **Spec coverage:** gating (Task 2 `listAdvertisedBots`), pull-at-render transport (Tasks 3–4), display (Task 6), materialize-on-first-send (Task 7), embedded-invite auth (Tasks 2+7), cleanup (Task 8), schema `contacts.origin`/invite `kind` (Task 1), security/Funnel invariant (Task 9). All spec sections map to a task.
 - **Type consistency:** owner payload keys are snake_case (`bot_id`, `messaging_pubkey`, `invite_code`, `instance_label`) end-to-end through the cache validator; the viewer item is camelCase (`botId`, `messagingPubkey`, `inviteCode`, `instanceLabel`) from `getAdvertisedBotItems` onward (Tasks 5–7 consistent). Pubkey comparison is always trailing-64 lowercased.
 - **Open verification (not placeholders):** confirm `deriveBotIdentity` field name (`secp256k1Pubkey`) in Task 2; copy the signing harness from `tests/federation-overview.test.js` in Task 3; locate the i18n source file in Task 6. Each is a concrete lookup, not an unspecified decision.
+
+---
+
+## Review
+
+**Reviewer:** staff-engineer adversarial pass (Plan subagent), 2026-06-16. **Verdict: REVISE → addressed.**
+
+Critical issues raised and resolved in-place:
+1. **Task 4 import paths wrong by a level** (`../shared/…`, `./instance-registry.js`) → fixed to `../../shared/peer-forward.js` + `../instance-registry.js` (match sibling `overview-cache.js:33-34`).
+2. **Task 5 `getOrCreateLocalInstanceId` import depth** (`../../`) → fixed to `../../../instance-registry.js`.
+3. **Task 5 hand-rolled peer predicate** diverged from the codebase and would fire wasted round-trips at untrusted/paused peers → switched to the established `getTrustedInstances(db)` helper (`nest/data-queries.js:222`); test seed updated to exercise the `trusted=1 AND status IN ('active','offline')` filter.
+4. **Task 7 ignored the accept result** (spec forbids half-create) → handler now bails on `accepted.isError` before tagging/sending; added a test for the failure path. Contract clarified: owner-momentarily-unreachable is a non-error (Nostr store-and-forward), so we proceed there.
+
+Suggestions applied: distinct audit label `federation.advertised-bots` (Task 4); fixed `signedHeaders({…})` object arity + added a route-level Funnel-rejection test (Task 3); added a `buildAdvertisementPayload` unit test via injectable seams (Task 2); noted intentional `relay_url` omission (embedded in the signed invite); added `crow-accept-bot-invite.test.js` regression to Task 9; documented the no-restart live-`SELECT` invite read and the `rotateInvite` self-heal in Deploy.
+
+Reviewer-verified-correct (no change needed): `forwardSignedRequest` params/return `{ok,status,body,raw,error}` + `targetInstanceId`; `deriveBotIdentity().secp256k1Pubkey`; `parseBotInviteCode().botCrowId`/`.secp256k1Pubkey`; `consumeInvite` treats `max_uses=NULL` as unlimited; `addColumnIfMissing(table,column,definition)` exists; `handlePostAction({db})` call site survives the new default arg; route auth/Funnel-block correct.
