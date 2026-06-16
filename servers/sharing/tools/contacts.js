@@ -7,7 +7,26 @@
 
 import { z } from "zod";
 import { isKioskActive, kioskBlockedResponse } from "../../shared/kiosk-guard.js";
-import { generateInviteCode, parseInviteCode, computeSafetyNumber } from "../identity.js";
+import { generateInviteCode, parseInviteCode, parseBotInviteCode, computeSafetyNumber } from "../identity.js";
+
+/**
+ * Build the DM payload a recipient sends to a bot to accept its invite.
+ * The adapter authorizes future chats on the SIGNED event pubkey, so the keys
+ * here are labels the bot stores; the token is the bearer capability it checks.
+ */
+export function buildBotAcceptPayload(token, identity, displayName) {
+  return JSON.stringify({
+    type: "crow_social",
+    subtype: "bot_invite_accept",
+    token,
+    sender: {
+      crow_id: identity.crowId,
+      ed25519_pubkey: identity.ed25519Pubkey,
+      secp256k1_pubkey: identity.secp256k1Pubkey,
+      display_name: displayName || identity.crowId,
+    },
+  });
+}
 
 export function registerContactsTools(server, ctx) {
   const { db, identity, peerManager, syncManager, nostrManager } = ctx;
@@ -141,6 +160,70 @@ export function registerContactsTools(server, ctx) {
       } catch (err) {
         return {
           content: [{ type: "text", text: `Failed to accept invite: ${err.message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // --- Tool: crow_accept_bot_invite ---
+
+  server.tool(
+    "crow_accept_bot_invite",
+    "Accept a Crow Messages bot invite. Adds the bot to your Messages so you can chat with it, and tells the bot you accepted so it authorizes you. Paste the bot invite code the owner shared.",
+    {
+      invite_code: z.string().max(2000).describe("The bot invite code (crow:<id>.<payload>.<sig>)"),
+      display_name: z.string().max(100).optional().describe("Name to show for this bot"),
+    },
+    async ({ invite_code, display_name }) => {
+      if (await isKioskActive(db)) return kioskBlockedResponse("crow_accept_bot_invite");
+      try {
+        const bot = parseBotInviteCode(invite_code.trim());
+        const name = display_name || bot.botCrowId;
+
+        // Add the bot as a contact so it appears in Messages and we subscribe
+        // for its replies. Idempotent on crow_id.
+        const existing = await db.execute({
+          sql: "SELECT id FROM contacts WHERE crow_id = ?", args: [bot.botCrowId],
+        });
+        let contactId;
+        if (existing.rows.length > 0) {
+          contactId = Number(existing.rows[0].id);
+        } else {
+          const result = await db.execute({
+            sql: "INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (?,?,?,?)",
+            args: [bot.botCrowId, name, bot.ed25519Pubkey, bot.secp256k1Pubkey],
+          });
+          contactId = Number(result.lastInsertRowid);
+          try { await syncManager.initContact(contactId, null); } catch { /* bot has no hypercore feed; non-fatal */ }
+        }
+
+        // Subscribe to the bot's replies over Nostr.
+        try {
+          await nostrManager.subscribeToContact({
+            id: contactId, crowId: bot.botCrowId, secp256k1_pubkey: bot.secp256k1Pubkey,
+          });
+        } catch { /* non-fatal — re-subscribed on next restart */ }
+
+        // Tell the bot we accepted (carries the token it validates).
+        try {
+          if (nostrManager.relays.size === 0) await nostrManager.connectRelays();
+          await nostrManager.sendMessage(
+            { secp256k1_pubkey: bot.secp256k1Pubkey },
+            buildBotAcceptPayload(bot.token, identity, name)
+          );
+        } catch (err) {
+          return {
+            content: [{ type: "text", text: `Added ${name}, but could not reach the bot to confirm (it will authorize you when next online): ${err.message}` }],
+          };
+        }
+
+        return {
+          content: [{ type: "text", text: `Added ${name}! You can now message this bot from your Messages list.` }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `Failed to accept bot invite: ${err.message}` }],
           isError: true,
         };
       }
