@@ -179,7 +179,9 @@ export function registerContactsTools(server, ctx) {
       if (await isKioskActive(db)) return kioskBlockedResponse("crow_accept_bot_invite");
       try {
         const bot = parseBotInviteCode(invite_code.trim());
-        const name = display_name || bot.botCrowId;
+        // Prefer an explicit name, else the friendly name the owner put in the
+        // invite, else the raw crow: id.
+        const name = display_name || bot.name || bot.botCrowId;
 
         // Add the bot as a contact so it appears in Messages and we subscribe
         // for its replies. Idempotent on crow_id.

@@ -58,6 +58,16 @@ test("bot invite code round-trips address + token + relays", () => {
   assert.deepEqual(parsed.relays, ["wss://relay.example"]);
 });
 
+test("bot invite code carries an optional display name (back-compat: absent → null)", () => {
+  const bot = deriveBotIdentity(SEED, "bot-alpha");
+  // With a name.
+  const withName = parseBotInviteCode(generateBotInviteCode(bot, "tok-1", [], "Kevin's Assistant"));
+  assert.equal(withName.name, "Kevin's Assistant");
+  // Without a name (old-style call) → null, not undefined.
+  const noName = parseBotInviteCode(generateBotInviteCode(bot, "tok-2", []));
+  assert.equal(noName.name, null);
+});
+
 test("parseBotInviteCode rejects a tampered crow_id", () => {
   const bot = deriveBotIdentity(SEED, "bot-alpha");
   const other = deriveBotIdentity(SEED, "bot-beta");

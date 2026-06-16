@@ -234,13 +234,16 @@ export function loadInstanceSeed(dataDir) {
  * (An HMAC keyed on the private key, as the legacy instance invites use, gives no
  * third-party verifiability; a MITM could swap the unbound secp key/relays.)
  */
-export function generateBotInviteCode(botIdentity, token, relays = []) {
+export function generateBotInviteCode(botIdentity, token, relays = [], name = null) {
   const payload = Buffer.from(JSON.stringify({
     crowId: botIdentity.crowId,
     ed25519Pub: botIdentity.ed25519Pubkey,
     secp256k1Pub: botIdentity.secp256k1Pubkey,
     token,
     relays,
+    // Optional friendly bot name so the recipient sees "<name>" rather than the
+    // raw crow: id. Signed like the rest of the payload (tamper-evident).
+    ...(name ? { name } : {}),
     v: 1,
   })).toString("base64url");
   const signature = sign(payload, botIdentity.ed25519Priv);
@@ -267,6 +270,7 @@ export function parseBotInviteCode(code) {
     secp256k1Pubkey: data.secp256k1Pub,
     token: data.token,
     relays: Array.isArray(data.relays) ? data.relays : [],
+    name: data.name || null,
   };
 }
 
