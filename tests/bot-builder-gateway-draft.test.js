@@ -130,3 +130,21 @@ test("switching back to gmail still works after a draft", async () => {
   const def = await readDef();
   assert.equal(def.gateways[0]?.type, "gmail");
 });
+
+test("a not-yet-available gateway type (crow-messages) is NOT persisted", async () => {
+  // Known gmail state (the prior test already set gmail; be explicit anyway).
+  let res = mkRes();
+  await handleBotBuilderPost(
+    { body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "gmail", gw_address: "z@z.z", gw_allowlist: "" } },
+    res, { db }
+  );
+  // Attempt to switch to the "coming soon" host adapter (no management UI yet).
+  res = mkRes();
+  await handleBotBuilderPost(
+    { body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "crow-messages" } },
+    res, { db }
+  );
+  const def = await readDef();
+  assert.notEqual(def.gateways[0]?.type, "crow-messages", "coming-soon type must not be persisted");
+  assert.equal(def.gateways[0]?.type, "gmail", "gateways unchanged (stays gmail)");
+});
