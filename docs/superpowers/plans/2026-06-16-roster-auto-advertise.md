@@ -334,7 +334,7 @@ Add the route immediately after the `/capabilities` route (before the `router.us
 
 - [ ] **Step 2: Write the failing test (mirror `tests/federation-overview.test.js`)**
 
-Open `tests/federation-overview.test.js` and copy its exact app/signing harness (how it mounts the dashboard router, mints a paired instance + bearer token, and builds the `X-Crow-Signature`/`Timestamp`/`Nonce` headers via `signedHeaders`). Reuse that harness verbatim, changing only the request path and assertions:
+Open `tests/federation-overview.test.js` and copy its exact app/signing harness (how it mounts the dashboard router, mints a paired instance + bearer token, and builds the `X-Crow-Signature`/`Timestamp`/`Nonce` headers via `signedHeaders`). Reuse that harness verbatim, changing only the request path and assertions. **Note:** the real harness issues requests via `fetch` against `app.listen(...)` (NOT supertest); the `request(app)` calls in the snippet below are illustrative shorthand — use the harness's actual `fetch` mechanism.
 
 ```js
 // tests/roster-advertise-route.test.js  (harness copied from federation-overview.test.js)
@@ -933,7 +933,7 @@ Add the action (place after the `accept_bot_invite` block, before `return false;
     const code = req.body.invite_code.trim();
     let botCrowId = null;
     try {
-      const { parseBotInviteCode } = await import("../../../sharing/identity.js");
+      const { parseBotInviteCode } = await import("../../../../sharing/identity.js"); // four levels up (cf. api-handlers.js:10-11)
       botCrowId = parseBotInviteCode(code).botCrowId;
     } catch { /* malformed — accept will report the error; bail to redirect */ }
 
@@ -1157,3 +1157,5 @@ Critical issues raised and resolved in-place:
 Suggestions applied: distinct audit label `federation.advertised-bots` (Task 4); fixed `signedHeaders({…})` object arity + added a route-level Funnel-rejection test (Task 3); added a `buildAdvertisementPayload` unit test via injectable seams (Task 2); noted intentional `relay_url` omission (embedded in the signed invite); added `crow-accept-bot-invite.test.js` regression to Task 9; documented the no-restart live-`SELECT` invite read and the `rotateInvite` self-heal in Deploy.
 
 Reviewer-verified-correct (no change needed): `forwardSignedRequest` params/return `{ok,status,body,raw,error}` + `targetInstanceId`; `deriveBotIdentity().secp256k1Pubkey`; `parseBotInviteCode().botCrowId`/`.secp256k1Pubkey`; `consumeInvite` treats `max_uses=NULL` as unlimited; `addColumnIfMissing(table,column,definition)` exists; `handlePostAction({db})` call site survives the new default arg; route auth/Funnel-block correct.
+
+**Second pass (re-review), 2026-06-16:** the 4 original criticals all confirmed resolved; one NEW critical found and fixed — Task 7's dynamic import `../../../sharing/identity.js` was off by one level → corrected to `../../../../sharing/identity.js` (matches `api-handlers.js:10-11`). Added a note that Task 3's `request(app)` snippet is illustrative (the real harness uses `fetch`). Reviewer confirmed `getTrustedInstances` excludes self (trusted defaults 0) with the explicit `id !== localId` as sound defense-in-depth. **Now safe to execute.**
