@@ -26,7 +26,7 @@ async function getSharingClient() {
  * Handle POST actions from the messages panel.
  * Returns true if the action was handled (response sent), false otherwise.
  */
-export async function handlePostAction(req, res, { db }) {
+export async function handlePostAction(req, res, { db, sharingClientFactory = getSharingClient }) {
   const { action } = req.body;
 
   if (action === "send_peer" && req.body.contact_id && req.body.message) {
@@ -131,7 +131,7 @@ export async function handlePostAction(req, res, { db }) {
 
   if (action === "accept_bot_invite" && req.body.invite_code) {
     try {
-      const client = await getSharingClient();
+      const client = await sharingClientFactory();
       await client.callTool({
         name: "crow_accept_bot_invite",
         arguments: { invite_code: req.body.invite_code.trim() },
@@ -139,6 +139,47 @@ export async function handlePostAction(req, res, { db }) {
       await client.close();
     } catch (err) {
       console.error("[messages] Failed to accept bot invite:", err.message);
+    }
+    return res.redirectAfterPost("/dashboard/messages");
+  }
+
+  if (action === "message_advertised_bot" && req.body.invite_code && req.body.message) {
+    const code = req.body.invite_code.trim();
+    let botCrowId = null;
+    try {
+      const { parseBotInviteCode } = await import("../../../../sharing/identity.js"); // four levels up (cf. api-handlers.js static imports)
+      botCrowId = parseBotInviteCode(code).botCrowId;
+    } catch { /* malformed — accept will report the error; bail to redirect */ }
+
+    try {
+      // Was this bot already a contact? (Only tag origin on contacts WE create,
+      // so we never relabel a manually-added contact.)
+      let wasNew = false;
+      if (botCrowId) {
+        const { rows } = await db.execute({ sql: "SELECT 1 FROM contacts WHERE crow_id = ?", args: [botCrowId] });
+        wasNew = rows.length === 0;
+      }
+
+      const client = await sharingClientFactory();
+      // crow_accept_bot_invite sets isError:true ONLY on a malformed code / DB
+      // failure (it does NOT create a contact then). An owner momentarily
+      // unreachable is a NON-error success (accept + message go to relays
+      // store-and-forward), so we proceed in that case.
+      const accepted = await client.callTool({ name: "crow_accept_bot_invite", arguments: { invite_code: code } });
+      if (accepted?.isError) {
+        await client.close();
+        return res.redirectAfterPost("/dashboard/messages"); // accept failed → nothing materialized
+      }
+
+      if (botCrowId) {
+        if (wasNew) {
+          await db.execute({ sql: "UPDATE contacts SET origin = 'advertised' WHERE crow_id = ?", args: [botCrowId] });
+        }
+        await client.callTool({ name: "crow_send_message", arguments: { contact: botCrowId, message: req.body.message } });
+      }
+      await client.close();
+    } catch (err) {
+      console.error("[messages] Failed to message advertised bot:", err.message);
     }
     return res.redirectAfterPost("/dashboard/messages");
   }
