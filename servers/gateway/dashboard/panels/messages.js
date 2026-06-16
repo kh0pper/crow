@@ -15,6 +15,7 @@ import { buildMessagesHTML } from "./messages/html.js";
 import { messagesClientJS } from "./messages/client.js";
 import { handlePostAction } from "./messages/api-handlers.js";
 import { getUnifiedConversationList } from "./messages/data-queries.js";
+import { csrfInput } from "../shared/csrf.js";
 
 export default {
   id: "messages",
@@ -55,6 +56,19 @@ export default {
     // --- Get unified conversation list ---
     const { items, totalUnread } = await getUnifiedConversationList(db);
 
+    // --- Bot-invite landing: a shared link opened on THIS instance (?bot_invite=<code>).
+    // Parse here (we have `req`) so the still-sync HTML builder just renders strings.
+    let botInvite = null;
+    const biCode = (req.query && req.query.bot_invite) || null;
+    if (biCode) {
+      let botName = null;
+      try {
+        const { parseBotInviteCode } = await import("../../../sharing/identity.js");
+        botName = parseBotInviteCode(biCode).botCrowId;
+      } catch { /* malformed/expired: still offer the button; the tool reports the error */ }
+      botInvite = { code: biCode, name: botName, csrf: csrfInput(req) };
+    }
+
     // --- Build page ---
     const css = messagesCSS();
     const html = buildMessagesHTML({
@@ -65,6 +79,7 @@ export default {
       inviteResult: req._inviteResult || null,
       inviteError: req._inviteError || null,
       lang,
+      botInvite,
     });
     const js = messagesClientJS({ aiConfigured, storageAvailable, lang });
 

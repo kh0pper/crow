@@ -131,20 +131,56 @@ test("switching back to gmail still works after a draft", async () => {
   assert.equal(def.gateways[0]?.type, "gmail");
 });
 
-test("a not-yet-available gateway type (crow-messages) is NOT persisted", async () => {
-  // Known gmail state (the prior test already set gmail; be explicit anyway).
+test("crow-messages saves type + allow_paired_instances toggle", async () => {
   let res = mkRes();
   await handleBotBuilderPost(
-    { body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "gmail", gw_address: "z@z.z", gw_allowlist: "" } },
+    { body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "crow-messages", gw_allow_paired_instances: "on" } },
     res, { db }
   );
-  // Attempt to switch to the "coming soon" host adapter (no management UI yet).
+  assert.match(res.redirected, /saved=1/, "save must succeed: " + res.redirected);
+  let def = await readDef();
+  assert.equal(def.gateways[0]?.type, "crow-messages", "type persists");
+  assert.equal(def.gateways[0]?.allow_paired_instances, true, "toggle on persists true");
+
+  // Toggle off (checkbox absent in the body).
   res = mkRes();
   await handleBotBuilderPost(
     { body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "crow-messages" } },
     res, { db }
   );
-  const def = await readDef();
-  assert.notEqual(def.gateways[0]?.type, "crow-messages", "coming-soon type must not be persisted");
-  assert.equal(def.gateways[0]?.type, "gmail", "gateways unchanged (stays gmail)");
+  def = await readDef();
+  assert.equal(def.gateways[0]?.allow_paired_instances, false, "absent checkbox persists false");
+});
+
+test("gw_share mints an active invite; gw_newlink rotates it", async () => {
+  const admin = await import("../servers/gateway/dashboard/panels/bot-builder/crow-messages-admin.js");
+  let res = mkRes();
+  await handleBotBuilderPost({ body: { action: "gw_share", bot_id: "draft-bot" } }, res, { db });
+  assert.match(res.redirected, /tab=gateways/, "redirects to gateways tab");
+  const first = await admin.getActiveInvite(db, "draft-bot");
+  assert.ok(first && first.token, "an active invite exists after share");
+
+  res = mkRes();
+  await handleBotBuilderPost({ body: { action: "gw_newlink", bot_id: "draft-bot" } }, res, { db });
+  const second = await admin.getActiveInvite(db, "draft-bot");
+  assert.notEqual(second.token, first.token, "new link rotates the token");
+});
+
+test("gw_advanced_add then gw_remove edits the ACL", async () => {
+  const admin = await import("../servers/gateway/dashboard/panels/bot-builder/crow-messages-admin.js");
+  const pk = "e".repeat(64);
+  let res = mkRes();
+  await handleBotBuilderPost(
+    { body: { action: "gw_advanced_add", bot_id: "draft-bot", sender_pubkey: pk, display_name: "Bob" } },
+    res, { db }
+  );
+  let acl = await admin.listAcl(db, "draft-bot");
+  assert.ok(acl.find((r) => r.sender_pubkey === pk && r.display_name === "Bob"), "manual ACL added");
+
+  res = mkRes();
+  await handleBotBuilderPost(
+    { body: { action: "gw_remove", bot_id: "draft-bot", sender_pubkey: pk } }, res, { db }
+  );
+  acl = await admin.listAcl(db, "draft-bot");
+  assert.ok(!acl.find((r) => r.sender_pubkey === pk), "ACL row removed");
 });

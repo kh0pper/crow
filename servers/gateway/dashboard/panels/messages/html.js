@@ -29,7 +29,22 @@ function initials(name) {
  * Build the full messages panel HTML.
  */
 export function buildMessagesHTML(data) {
-  const { items, totalUnread, aiConfigured, storageAvailable, inviteResult, inviteError, lang } = data;
+  const { items, totalUnread, aiConfigured, storageAvailable, inviteResult, inviteError, lang, botInvite } = data;
+
+  // Bot-invite "Add & message" card (data pre-parsed in messages.js).
+  let botInviteCard = "";
+  if (botInvite) {
+    const name = botInvite.name || "a Crow bot";
+    botInviteCard =
+      `<div class="msg-bot-invite-card">` +
+      `<p><strong>${escapeHtml(name)}</strong> would like to chat with you.</p>` +
+      `<form method="POST" action="/dashboard/messages">` +
+      `<input type="hidden" name="action" value="accept_bot_invite">` +
+      `<input type="hidden" name="invite_code" value="${escapeHtml(botInvite.code)}">` +
+      `${botInvite.csrf}` +
+      `<button type="submit" class="msg-btn-primary">Add &amp; message</button>` +
+      `</form></div>`;
+  }
 
   // Build avatar strip items
   const avatarItems = items.map((item) => {
@@ -68,7 +83,7 @@ export function buildMessagesHTML(data) {
 
   const noChatsLabel = escapeHtml(t("messages.noChats", lang));
 
-  return `
+  return botInviteCard + `
     <div class="msg-hub" style="position:relative">
       ${inviteBanner}
       <!-- Live peer-badge updates via Turbo Stream (Phase C.3). The
