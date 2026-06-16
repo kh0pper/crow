@@ -184,6 +184,93 @@ function deriveIdentity(seed, stored) {
 }
 
 /**
+ * Derive a per-bot identity from the instance seed. Pure + deterministic:
+ * same (seed, botId) → same keys/crow_id. Namespaced so a bot key is
+ * independent of the instance identity and of other bots. Nothing stored.
+ */
+export function deriveBotIdentity(seed, botId) {
+  if (!seed || !botId || typeof botId !== "string") {
+    throw new Error("deriveBotIdentity requires (seed, botId)");
+  }
+  const ns = "crow-bot-v1:" + botId;
+  const ed25519Priv = deriveKey(seed, ns + "|ed25519", 32);
+  const ed25519Pub = ed.getPublicKey(ed25519Priv);
+  const secp256k1Priv = deriveKey(seed, ns + "|secp256k1", 32);
+  const secp256k1Pub = secp.getPublicKey(secp256k1Priv); // compressed (33 bytes)
+  const crowId = computeCrowId(ed25519Pub);
+  return {
+    crowId,
+    botId,
+    ed25519Priv: Buffer.from(ed25519Priv),
+    ed25519Pub: Buffer.from(ed25519Pub),
+    ed25519Pubkey: Buffer.from(ed25519Pub).toString("hex"),
+    secp256k1Priv: Buffer.from(secp256k1Priv),
+    secp256k1Pub: Buffer.from(secp256k1Pub),
+    secp256k1Pubkey: Buffer.from(secp256k1Pub).toString("hex"),
+  };
+}
+
+/**
+ * Load the raw instance seed from a SPECIFIC data dir's identity.json. Used by
+ * the pi-bots host to derive bot keys from the SAME instance the bot DB belongs
+ * to — avoiding the CROW_DATA_DIR-vs-CROW_DB_PATH split-brain (the host may set
+ * only CROW_DB_PATH, so the module-level CROW_DATA_DIR fallback could resolve a
+ * different instance). Unencrypted seeds only (the host has no passphrase).
+ */
+export function loadInstanceSeed(dataDir) {
+  const p = resolve(dataDir, "identity.json");
+  const stored = JSON.parse(readFileSync(p, "utf-8"));
+  if (stored.encrypted) throw new Error("loadInstanceSeed: encrypted identity requires a passphrase (unsupported in the gateway host)");
+  if (!stored.seed) throw new Error("loadInstanceSeed: identity.json has no plaintext seed");
+  return Buffer.from(stored.seed, "hex");
+}
+
+/**
+ * Encode a bot invite: `<botCrowId>.<base64url(payload)>.<ed25519-sig>`. Payload
+ * carries the bot address (keys) + an authorization token + relay hints, and is
+ * SIGNED with the bot's ed25519 private key. Because the embedded ed25519 pubkey
+ * is bound to crowId (computeCrowId), a recipient can verify the ENTIRE payload
+ * — including the secp key, token, and relays — is authentic and untampered.
+ * (An HMAC keyed on the private key, as the legacy instance invites use, gives no
+ * third-party verifiability; a MITM could swap the unbound secp key/relays.)
+ */
+export function generateBotInviteCode(botIdentity, token, relays = []) {
+  const payload = Buffer.from(JSON.stringify({
+    crowId: botIdentity.crowId,
+    ed25519Pub: botIdentity.ed25519Pubkey,
+    secp256k1Pub: botIdentity.secp256k1Pubkey,
+    token,
+    relays,
+    v: 1,
+  })).toString("base64url");
+  const signature = sign(payload, botIdentity.ed25519Priv);
+  return `${botIdentity.crowId}.${payload}.${signature}`;
+}
+
+/**
+ * Decode + validate a bot invite. Throws on malformed input, a crow_id that does
+ * not match the embedded ed25519 pubkey, or a payload whose ed25519 signature
+ * does not verify (tamper-evident over the whole payload).
+ */
+export function parseBotInviteCode(code) {
+  const parts = String(code).split(".");
+  if (parts.length !== 3) throw new Error("Invalid bot invite code format");
+  const [crowIdPart, payload, signature] = parts;
+  const data = JSON.parse(Buffer.from(payload, "base64url").toString());
+  if (data.crowId !== crowIdPart) throw new Error("Bot invite Crow ID mismatch");
+  const expected = computeCrowId(Buffer.from(data.ed25519Pub, "hex"));
+  if (expected !== data.crowId) throw new Error("Bot invite public key does not match Crow ID");
+  if (!verify(payload, signature, data.ed25519Pub)) throw new Error("Bot invite signature invalid");
+  return {
+    botCrowId: data.crowId,
+    ed25519Pubkey: data.ed25519Pub,
+    secp256k1Pubkey: data.secp256k1Pub,
+    token: data.token,
+    relays: Array.isArray(data.relays) ? data.relays : [],
+  };
+}
+
+/**
  * Generate a single-use invite code with 24h expiry.
  * Format: <crowId>.<payload>.<hmac>
  * Payload: base64url({ ed25519Pub, secp256k1Pub, expires })

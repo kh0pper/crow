@@ -23,9 +23,10 @@
  */
 import telegram from "./telegram.mjs";
 import slack from "./slack.mjs";
+import crowMessages from "./crow-messages.mjs";
 
 /** Adapter modules the host process owns (each exports start() -> {stop}). */
-const HOST_ADAPTERS = [telegram, slack];
+const HOST_ADAPTERS = [telegram, slack, crowMessages];
 const HOST_BY_TYPE = Object.fromEntries(HOST_ADAPTERS.map((a) => [a.type, a]));
 
 export function hostAdapters() { return HOST_ADAPTERS.slice(); }

@@ -272,14 +272,21 @@ export async function handleBotBuilderPost(req, res, { db }) {
         } catch (err) {
           extraQ = "&warn=" + encodeURIComponent("companion binding incomplete: " + err.message);
         }
-      } else {
+      } else if (gwType === "gmail") {
         def.gateways = [
           {
-            type: gwType,
+            type: "gmail",
             address: (b.gw_address || "").trim(),
             allowlist: lines(b.gw_allowlist),
           },
         ];
+      } else {
+        // Not-yet-available gateway type (e.g. "crow-messages"/"signal" are
+        // shipped as host adapters but their management UI lands in a later
+        // wave). Refuse to persist it so the runner can't host a feature with no
+        // way to manage it — leave def.gateways unchanged. (Server-side gate; the
+        // editor also renders these options disabled.)
+        console.warn(`[bot-builder] ignoring save of unsupported gateway type "${gwType}" for bot ${botId}`);
       }
     } else if (tab === "tracker") {
       // M3b: project_id is owned by the column now.
