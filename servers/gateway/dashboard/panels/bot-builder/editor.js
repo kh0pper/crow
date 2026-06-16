@@ -238,7 +238,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       { value: "slack", label: "Slack", available: true },
       { value: "glasses", label: "Meta Glasses", available: true },
       { value: "companion", label: "AI Companion (kiosk)", available: true },
-      { value: "crow-messages", label: "Crow Messages", available: false },
+      { value: "crow-messages", label: "Crow Messages", available: true },
       { value: "signal", label: "Signal", available: false },
       { value: "none", label: "None (no gateway)", available: true },
     ];
@@ -248,7 +248,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
     // Server-rendered, type-aware fields. Changing the type auto-submits so
     // the form re-renders with the right fields for that gateway (any
     // not-yet-filled values save empty — a harmless draft until completed).
-    let gwFields, gwHint;
+    let gwFields, gwHint, gwExtra = ""; // gwExtra renders OUTSIDE the main form (sibling)
     if (gwType === "discord") {
       gwFields =
         `<div class="btb-group"><label>${t("botbuilder.gwLabelBotTokenDiscord", lang)}</label>` +
@@ -394,6 +394,86 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
         `<label><input type="checkbox" name="gw_memory_integration"${chk(cf.memory_integration)}> Auto memory integration</label>` +
         `</div></div>`;
       gwHint = `<p class="btb-hint">${t("botbuilder.gwHintCompanion", lang)}</p>`;
+    } else if (gwType === "crow-messages") {
+      const admin = await import("./crow-messages-admin.js");
+      const allowPaired = gw.allow_paired_instances === true;
+      let botCrowId = "";
+      try { botCrowId = admin.botIdentityFor(botId).crowId; } catch { botCrowId = ""; }
+
+      // Only the toggle belongs in the MAIN save_gateways form.
+      const pairedToggle =
+        `<div class="btb-group"><label class="btb-checkbox">` +
+        `<input type="checkbox" name="gw_allow_paired_instances"${allowPaired ? " checked" : ""}> ` +
+        `${escapeHtml(t("botbuilder.cmAllowPaired", lang))}</label></div>`;
+      gwFields = pairedToggle;
+      gwHint = `<p class="btb-hint">${escapeHtml(t("botbuilder.cmHint", lang))}</p>`;
+
+      // Everything below is its OWN form(s) → must live OUTSIDE the main form.
+      // Explicit hidden action inputs (NOT the hidden() helper, which prefixes "save_").
+      const actInputs = (act) =>
+        `<input type="hidden" name="action" value="${act}">` +
+        `<input type="hidden" name="bot_id" value="${escapeHtml(botId)}">${csrfInput(req)}`;
+
+      // Current shareable link (if an active invite exists) + its QR.
+      let shareBlock = "";
+      try {
+        const active = await admin.getActiveInvite(db, botId);
+        if (active) {
+          const code = await admin.buildInviteCode(db, botId, active.token);
+          const link = `/dashboard/messages?bot_invite=${encodeURIComponent(code)}`;
+          let qrImg = "";
+          try {
+            const QRCode = (await import("qrcode")).default;
+            const dataUrl = await QRCode.toDataURL(code, { width: 220, margin: 1 });
+            qrImg = `<img src="${dataUrl}" alt="Share QR" width="220" height="220" style="image-rendering:pixelated">`;
+          } catch { /* qr optional */ }
+          shareBlock =
+            `<div class="btb-group"><label>${escapeHtml(t("botbuilder.cmShareLabel", lang))}</label>` +
+            `<p class="btb-hint">${escapeHtml(t("botbuilder.cmShareHint", lang))}</p>` +
+            `<textarea class="btb-textarea" rows="3" readonly onclick="this.select()">${escapeHtml(code)}</textarea>` +
+            `<p class="btb-hint"><a href="${escapeHtml(link)}">${escapeHtml(t("botbuilder.cmOpenLink", lang))}</a></p>` +
+            (qrImg ? `<div style="margin:.5rem 0">${qrImg}</div>` : "") + `</div>`;
+        }
+      } catch { shareBlock = ""; }
+
+      const shareActions =
+        `<div class="btb-group">` +
+        `<form method="POST" style="display:inline">${actInputs("gw_share")}` +
+        `<button type="submit" class="btb-btn">${escapeHtml(t("botbuilder.cmShareBtn", lang))}</button></form> ` +
+        `<form method="POST" style="display:inline">${actInputs("gw_newlink")}` +
+        `<button type="submit" class="btb-btn">${escapeHtml(t("botbuilder.cmNewLinkBtn", lang))}</button></form>` +
+        `</div>`;
+
+      // "Who can message" — ACL rows as a name list, each with Remove.
+      let aclList = "";
+      try {
+        const acl = await admin.listAcl(db, botId);
+        const items = acl.map((r) => {
+          const label = escapeHtml(r.display_name || r.crow_id || r.sender_pubkey.slice(0, 12) + "…");
+          return `<li><span>${label}</span> ` +
+            `<form method="POST" style="display:inline">${actInputs("gw_remove")}` +
+            `<input type="hidden" name="sender_pubkey" value="${escapeHtml(r.sender_pubkey)}">` +
+            `<button type="submit" class="btb-btn">${escapeHtml(t("botbuilder.cmRemove", lang))}</button></form></li>`;
+        }).join("");
+        aclList =
+          `<div class="btb-group"><label>${escapeHtml(t("botbuilder.cmWhoCanMessage", lang))}</label>` +
+          (items ? `<ul style="list-style:none;padding-left:0">${items}</ul>`
+                 : `<p class="btb-hint">${escapeHtml(t("botbuilder.cmNobodyYet", lang))}</p>`) +
+          `</div>`;
+      } catch { aclList = ""; }
+
+      const advanced =
+        `<details><summary>${escapeHtml(t("botbuilder.cmAdvanced", lang))} &#9656;</summary>` +
+        (botCrowId ? `<p class="btb-hint">${escapeHtml(t("botbuilder.cmRawAddress", lang))}: <code>${escapeHtml(botCrowId)}</code></p>` : "") +
+        `<form method="POST">${actInputs("gw_advanced_add")}` +
+        `<div class="btb-group"><label>${escapeHtml(t("botbuilder.cmManualPubkey", lang))}</label>` +
+        `<input type="text" name="sender_pubkey" class="btb-input" placeholder="secp256k1 hex (64 or 66)"></div>` +
+        `<div class="btb-group"><label>${escapeHtml(t("botbuilder.cmManualName", lang))}</label>` +
+        `<input type="text" name="display_name" class="btb-input"></div>` +
+        `<button type="submit" class="btb-btn">${escapeHtml(t("botbuilder.cmManualAdd", lang))}</button></form>` +
+        `</details>`;
+
+      gwExtra = `<div class="btb-cm-manage">` + shareBlock + shareActions + aclList + advanced + `</div>`;
     } else if (gwType === "none") {
       gwFields = "";
       gwHint = `<p class="btb-hint">${t("botbuilder.gwHintNone", lang)}</p>`;
@@ -409,7 +489,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       `<div class="btb-group"><label>${t("botbuilder.labelGatewayType", lang)}</label>` +
       `<select name="gw_type" class="btb-select" onchange="this.form.requestSubmit ? this.form.requestSubmit() : this.form.submit()">${typeOpts}</select></div>` +
       gwFields + gwHint +
-      actionBar(`<button type="submit" class="btb-btn">${t("botbuilder.btnSaveGateways", lang)}</button>`) + `</form>`;
+      actionBar(`<button type="submit" class="btb-btn">${t("botbuilder.btnSaveGateways", lang)}</button>`) + `</form>` + gwExtra;
   } else if (tabId === "tracker") { // ---- tracker tab ----
     let projects = [];
     try { projects = (await db.execute({ sql: "SELECT id, name, slug FROM project_spaces WHERE archived_at IS NULL ORDER BY id", args: [] })).rows; } catch {}
