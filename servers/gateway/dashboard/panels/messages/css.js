@@ -725,6 +725,23 @@ export function messagesCSS() {
   }
   .msg-btn-primary:hover { filter: brightness(1.08); }
 
+  /* === Bot Directory Browse Entry + Modal === */
+  .msg-browse-bots { padding:8px 12px; cursor:pointer; font-size:0.8rem; color:var(--crow-text-muted); border-bottom:1px solid var(--crow-border); }
+  .msg-browse-cta { color:var(--crow-accent); }
+  .bot-dir-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:200; }
+  .bot-dir-modal.visible { display:flex; align-items:center; justify-content:center; }
+  .bot-dir-modal-card { background:var(--crow-bg-elevated); border:1px solid var(--crow-border); border-radius:10px; width:min(560px,92vw); max-height:80vh; overflow:auto; padding:16px; }
+  .bot-dir-modal-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+  .bot-dir-modal-close { background:none; border:none; color:var(--crow-text-muted); font-size:1.4rem; cursor:pointer; }
+  .bot-dir-search { width:100%; margin-bottom:10px; padding:6px 8px; border:1px solid var(--crow-border); border-radius:6px; background:var(--crow-bg-deep); color:var(--crow-text); }
+  .bot-dir-group-head { font-size:0.72rem; text-transform:uppercase; color:var(--crow-text-muted); margin:8px 0 4px; }
+  .bot-dir-row { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid var(--crow-border); }
+  .bot-dir-tagline { font-size:0.75rem; color:var(--crow-text-muted); }
+  .bot-dir-btn { font-size:0.75rem; padding:4px 10px; border:1px solid var(--crow-border); border-radius:6px; background:var(--crow-bg-deep); color:var(--crow-text); cursor:pointer; }
+  .bot-dir-btn-primary { background:var(--crow-accent); color:#fff; border-color:var(--crow-accent); }
+  .bot-dir-added { font-size:0.75rem; color:var(--crow-text-muted); text-decoration:none; }
+  .bot-dir-empty { padding:16px; color:var(--crow-text-muted); font-size:0.85rem; }
+
   /* === Responsive === */
   @media (max-width: 900px) {
     .msg-info:not(.hidden) { width: 200px; }
