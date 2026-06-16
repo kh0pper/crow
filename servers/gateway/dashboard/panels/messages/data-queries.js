@@ -186,6 +186,62 @@ export async function getAdvertisedBotItems(db) {
 }
 
 /**
+ * Cross-instance bot directory: all advertised bots across trusted peers,
+ * grouped by instance, each marked added/contactId via a pubkey match against
+ * contacts (includes blocked — a blocked bot is still "known"). Shows ALL bots
+ * (added ones are badged, not hidden). Never throws.
+ */
+export async function getBotDirectory(db) {
+  const known = new Map(); // trailing-64 lowercased x-only pubkey -> contact id
+  try {
+    const { rows } = await db.execute("SELECT id, secp256k1_pubkey FROM contacts WHERE secp256k1_pubkey IS NOT NULL");
+    for (const r of rows) {
+      const h = String(r.secp256k1_pubkey || "");
+      if (h.length >= 64) known.set(h.slice(-64).toLowerCase(), Number(r.id));
+    }
+  } catch {}
+
+  let localId = null;
+  try { localId = getOrCreateLocalInstanceId(); } catch {}
+  let insts = [];
+  try { insts = await getTrustedInstances(db); } catch {}
+  const peerIds = insts.map((i) => i.id).filter((id) => id && id !== localId);
+
+  const settled = await Promise.allSettled(peerIds.map((id) => getPeerAdvertisedBots(db, id)));
+  const seen = new Set();
+  const live = new Set();
+  const groupsByInst = new Map();
+  let total = 0, notAddedCount = 0;
+  for (const s of settled) {
+    if (s.status !== "fulfilled" || !s.value || s.value.status !== "ok") continue;
+    for (const b of s.value.bots) {
+      live.add(b.messaging_pubkey);
+      if (seen.has(b.messaging_pubkey)) continue;
+      seen.add(b.messaging_pubkey);
+      const contactId = known.get(b.messaging_pubkey) ?? null;
+      const added = contactId != null;
+      total += 1;
+      if (!added) notAddedCount += 1;
+      const g = groupsByInst.get(b.instance_id) || { instanceId: b.instance_id, instanceLabel: b.instance_label || null, bots: [] };
+      g.bots.push({
+        botId: b.bot_id,
+        displayName: b.display_name,
+        description: b.description || null,
+        instanceId: b.instance_id,
+        instanceLabel: b.instance_label || null,
+        messagingPubkey: b.messaging_pubkey,
+        inviteCode: b.invite_code,
+        added,
+        contactId,
+      });
+      groupsByInst.set(b.instance_id, g);
+    }
+  }
+  if (live.size > 0) { try { await pruneStaleAdvertisedContacts(db, live); } catch {} }
+  return { groups: Array.from(groupsByInst.values()), total, notAddedCount };
+}
+
+/**
  * Delete origin='advertised' contacts that have no message history AND are no
  * longer advertised (not in `livePubkeys`, a Set of trailing-64 lowercased
  * x-only keys). Contacts with history are always kept. Never throws.
