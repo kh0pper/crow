@@ -14,6 +14,16 @@ import { readSetting, writeSetting } from "../../settings/registry.js";
 import { regenerateBotMcp } from "../bot-mcp-regen.js";
 import { normalizeSkillName } from "../../../../../scripts/pi-bots/skill_proposals.mjs";
 
+export function buildCrowMessagesGatewayConfig(b) {
+  const gw = {
+    type: "crow-messages",
+    allow_paired_instances: b.gw_allow_paired_instances === "on" || b.gw_allow_paired_instances === "true",
+  };
+  const desc = typeof b.gw_description === "string" ? b.gw_description.trim() : "";
+  if (desc) gw.description = desc.slice(0, 140);
+  return gw;
+}
+
 export async function handleBotBuilderPost(req, res, { db }) {
   const b = req.body || {};
   const action = b.action;
@@ -311,10 +321,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
         // record is a valid host-managed gateway: gateway_runner.mjs:56 iterates
         // def.gateways[], and :89 calls adapter.start({bot_id, gw, log}) with this
         // exact object (the adapter reads gw.allow_paired_instances — Task 2).
-        def.gateways = [{
-          type: "crow-messages",
-          allow_paired_instances: b.gw_allow_paired_instances === "on" || b.gw_allow_paired_instances === "true",
-        }];
+        def.gateways = [buildCrowMessagesGatewayConfig(b)];
       } else {
         // Genuinely unsupported / coming-soon type (e.g. "signal"): refuse to
         // persist so the runner can't host a feature with no management UI.

@@ -683,6 +683,9 @@ export const translations = {
   "botbuilder.cmManualPubkey": { en: "Add by public key", es: "Añadir por clave pública" },
   "botbuilder.cmManualName": { en: "Name (optional)", es: "Nombre (opcional)" },
   "botbuilder.cmManualAdd": { en: "Add", es: "Añadir" },
+  "botbuilder.cmTaglineLabel": { en: "Directory tagline (optional)", es: "Lema del directorio (opcional)" },
+  "botbuilder.cmTaglinePlaceholder": { en: "e.g. Schedules, reminders & weather", es: "p. ej. Agenda, recordatorios y clima" },
+  "botbuilder.cmTaglineHint": { en: "Shown to your other Crows when they browse this bot. Never includes the system prompt.", es: "Se muestra a tus otros Crows cuando exploran este bot. Nunca incluye el prompt del sistema." },
 
   // ─── Bot Board Panel (W3-4 + W4-3 i18n sweep) ───
   // Status label keys — display counterparts to the frozen CARD_STATUSES data values
