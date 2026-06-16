@@ -184,7 +184,12 @@ export async function buildAdvertisementPayload(
         messaging_pubkey: xOnly(ident.secp256k1Pubkey),
         invite_code: inviteCode,
       });
-    } catch { /* skip a bot whose identity can't derive */ }
+    } catch (err) {
+      // Skip a bot whose identity can't derive (no instance seed). Log so a
+      // surprising DB/identity error leaves a trace rather than vanishing
+      // silently (cf. the 2026-06-14 crow.db silent-federation-blackout).
+      console.warn(`[crow-messages] advertise skip for bot ${b.botId}:`, err.message);
+    }
   }
   return { bots };
 }
