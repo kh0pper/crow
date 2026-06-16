@@ -160,9 +160,11 @@ export async function getAdvertisedBotItems(db) {
   const settled = await Promise.allSettled(peerIds.map((id) => getPeerAdvertisedBots(db, id)));
   const items = [];
   const seen = new Set();
+  const live = new Set();
   for (const s of settled) {
     if (s.status !== "fulfilled" || !s.value || s.value.status !== "ok") continue;
     for (const b of s.value.bots) {
+      live.add(b.messaging_pubkey);
       if (known.has(b.messaging_pubkey) || seen.has(b.messaging_pubkey)) continue;
       seen.add(b.messaging_pubkey);
       items.push({
@@ -176,5 +178,30 @@ export async function getAdvertisedBotItems(db) {
       });
     }
   }
+  await pruneStaleAdvertisedContacts(db, live);
   return items;
+}
+
+/**
+ * Delete origin='advertised' contacts that have no message history AND are no
+ * longer advertised (not in `livePubkeys`, a Set of trailing-64 lowercased
+ * x-only keys). Contacts with history are always kept. Never throws.
+ */
+export async function pruneStaleAdvertisedContacts(db, livePubkeys) {
+  try {
+    const { rows } = await db.execute(`
+      SELECT c.id, c.secp256k1_pubkey
+      FROM contacts c
+      LEFT JOIN messages m ON m.contact_id = c.id
+      WHERE c.origin = 'advertised'
+      GROUP BY c.id
+      HAVING COUNT(m.id) = 0`);
+    for (const r of rows) {
+      const h = String(r.secp256k1_pubkey || "");
+      const pk = h.length >= 64 ? h.slice(-64).toLowerCase() : "";
+      if (!livePubkeys.has(pk)) {
+        await db.execute({ sql: "DELETE FROM contacts WHERE id = ?", args: [r.id] });
+      }
+    }
+  } catch {}
 }
