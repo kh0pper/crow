@@ -117,6 +117,34 @@ export function messagesClientJS(opts) {
     if (dialog) dialog.classList.toggle('visible');
   }
 
+  function msgOpenBotDirectory() {
+    var m = document.getElementById('bot-dir-modal');
+    if (m) m.classList.add('visible');
+    var pop = document.getElementById('msg-popover');
+    if (pop) pop.classList.remove('visible');
+  }
+  function msgCloseBotDirectory() {
+    var m = document.getElementById('bot-dir-modal');
+    if (m) m.classList.remove('visible');
+  }
+  document.addEventListener('input', function (e) {
+    if (!e.target || !e.target.hasAttribute('data-bot-directory-search')) return;
+    var q = e.target.value.toLowerCase();
+    document.querySelectorAll('.bot-dir-row').forEach(function (row) {
+      var hay = row.getAttribute('data-bot-search') || '';
+      row.style.display = hay.indexOf(q) === -1 ? 'none' : '';
+    });
+  });
+
+  if (!window.__msgOpenHookBound) {
+    window.__msgOpenHookBound = true;
+    var params = new URLSearchParams(window.location.search);
+    var openId = params.get('open');
+    if (openId && /^\d+$/.test(openId)) {
+      setTimeout(function () { try { msgSelectItem('peer', parseInt(openId, 10)); } catch (e) {} }, 0);
+    }
+  }
+
   // Close popover on outside click — attach once per document lifetime so
   // Turbo re-entries don't stack listeners. Lookups are by ID, so the
   // listener works against whichever popover is currently mounted.

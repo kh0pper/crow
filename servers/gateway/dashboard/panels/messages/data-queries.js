@@ -126,66 +126,6 @@ export async function getMessageStatus(db) {
 }
 
 /**
- * Advertised bots from paired instances, as read-only "available" Messages
- * entries. Excludes self + revoked/paused/untrusted peers (via getTrustedInstances),
- * dedups by messaging pubkey, and omits any bot already materialized as a local
- * contact. Never throws — a bad peer is silently dropped by the cache.
- */
-export async function getAdvertisedBotItems(db) {
-  // Pubkeys we already have a contact for (trailing-64, lowercased). This
-  // includes BLOCKED contacts on purpose: a bot you blocked should NOT
-  // reappear in the advertised "available" list, so we keep its pubkey here
-  // to suppress it.
-  const known = new Set();
-  try {
-    const { rows } = await db.execute("SELECT secp256k1_pubkey FROM contacts WHERE secp256k1_pubkey IS NOT NULL");
-    for (const r of rows) {
-      const h = String(r.secp256k1_pubkey || "");
-      if (h.length >= 64) known.add(h.slice(-64).toLowerCase());
-    }
-  } catch {}
-
-  let localId = null;
-  try { localId = getOrCreateLocalInstanceId(); } catch {}
-
-  // Trusted + active/offline peers only (same set every federation fan-out uses).
-  // This already excludes revoked, paused, untrusted, and the __local_mcp__
-  // pseudo-instance; we additionally drop self.
-  let peerIds = [];
-  try {
-    const insts = await getTrustedInstances(db);
-    peerIds = insts.map((i) => i.id).filter((id) => id && id !== localId);
-  } catch {}
-
-  const settled = await Promise.allSettled(peerIds.map((id) => getPeerAdvertisedBots(db, id)));
-  const items = [];
-  const seen = new Set();
-  const live = new Set();
-  for (const s of settled) {
-    if (s.status !== "fulfilled" || !s.value || s.value.status !== "ok") continue;
-    for (const b of s.value.bots) {
-      live.add(b.messaging_pubkey);
-      if (known.has(b.messaging_pubkey) || seen.has(b.messaging_pubkey)) continue;
-      seen.add(b.messaging_pubkey);
-      items.push({
-        type: "advertised",
-        botId: b.bot_id,
-        displayName: b.display_name,
-        instanceId: b.instance_id,
-        instanceLabel: b.instance_label,
-        messagingPubkey: b.messaging_pubkey,
-        inviteCode: b.invite_code,
-      });
-    }
-  }
-  // Only prune when at least one peer actually responded — otherwise a transient
-  // all-peers-unreachable blip (empty `live`) would clear no-history advertised
-  // contacts that should just re-materialize once peers answer again.
-  if (live.size > 0) await pruneStaleAdvertisedContacts(db, live);
-  return items;
-}
-
-/**
  * Cross-instance bot directory: all advertised bots across trusted peers,
  * grouped by instance, each marked added/contactId via a pubkey match against
  * contacts (includes blocked — a blocked bot is still "known"). Shows ALL bots

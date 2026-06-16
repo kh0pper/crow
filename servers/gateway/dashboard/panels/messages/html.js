@@ -7,6 +7,7 @@
 
 import { escapeHtml } from "../../shared/components.js";
 import { t } from "../../shared/i18n.js";
+import { buildBotDirectory } from "../../shared/bot-directory.js";
 
 /** Color palette for peer avatars (deterministic by contact ID) */
 const PEER_COLORS = [
@@ -29,7 +30,7 @@ function initials(name) {
  * Build the full messages panel HTML.
  */
 export function buildMessagesHTML(data) {
-  const { items, totalUnread, aiConfigured, storageAvailable, inviteResult, inviteError, lang, botInvite, advertisedBots, csrf } = data;
+  const { items, totalUnread, aiConfigured, storageAvailable, inviteResult, inviteError, lang, botInvite, csrf } = data;
 
   // Bot-invite "Add & message" card (data pre-parsed in messages.js).
   let botInviteCard = "";
@@ -46,28 +47,20 @@ export function buildMessagesHTML(data) {
       `</form></div>`;
   }
 
-  // "Bots on your other Crows" — advertised peer-bots (read-only until first send).
-  let advertisedSection = "";
-  if (Array.isArray(advertisedBots) && advertisedBots.length) {
-    const rows = advertisedBots.map((b) =>
-      `<div class="msg-advertised-bot">` +
-        `<div class="msg-advertised-bot-head">` +
-          `<strong>${escapeHtml(b.displayName)}</strong>` +
-          `<span class="msg-advertised-badge">${escapeHtml(b.instanceLabel || t("messages.anotherCrow", lang))}</span>` +
-        `</div>` +
-        `<form method="POST" action="/dashboard/messages" class="msg-advertised-form">` +
-          `<input type="hidden" name="action" value="message_advertised_bot">` +
-          `<input type="hidden" name="invite_code" value="${escapeHtml(b.inviteCode)}">` +
-          `<input type="text" name="message" required placeholder="${escapeHtml(t("messages.advertisedPlaceholder", lang))}">` +
-          `${csrf || ""}` +
-          `<button type="submit" class="msg-btn-primary">${escapeHtml(t("messages.send", lang))}</button>` +
-        `</form>` +
-      `</div>`
-    ).join("");
-    advertisedSection =
-      `<div class="msg-advertised-section">` +
-      `<div class="msg-advertised-title">${escapeHtml(t("messages.botsOnOtherCrows", lang))}</div>` +
-      rows + `</div>`;
+  // Collapsed "browse bots on your other Crows" entry + the directory modal.
+  const dir = data.botDirectory || { groups: [], total: 0, notAddedCount: 0 };
+  let browseEntry = "", botDirModal = "";
+  if (dir.total > 0) {
+    browseEntry =
+      `<div class="msg-browse-bots" onclick="msgOpenBotDirectory()">` +
+      `${escapeHtml(t("messages.botsAvailable", lang).replace("{n}", String(dir.notAddedCount)))}` +
+      ` <span class="msg-browse-cta">${escapeHtml(t("messages.browse", lang))}</span></div>`;
+    botDirModal =
+      `<div class="bot-dir-modal" id="bot-dir-modal"><div class="bot-dir-modal-card">` +
+      `<div class="bot-dir-modal-head"><strong>${escapeHtml(t("messages.botDirectoryTitle", lang))}</strong>` +
+      `<button class="bot-dir-modal-close" onclick="msgCloseBotDirectory()">&times;</button></div>` +
+      buildBotDirectory({ groups: dir.groups, context: "messages", csrf, lang }) +
+      `</div></div>`;
   }
 
   // Build avatar strip items
@@ -107,9 +100,10 @@ export function buildMessagesHTML(data) {
 
   const noChatsLabel = escapeHtml(t("messages.noChats", lang));
 
-  return botInviteCard + advertisedSection + `
+  return botInviteCard + browseEntry + `
     <div class="msg-hub" style="position:relative">
       ${inviteBanner}
+      ${botDirModal}
       <!-- Live peer-badge updates via Turbo Stream (Phase C.3). The
            fallback poll at 5min lives in client.js pollStatus. -->
       <turbo-stream-source src="/dashboard/streams/messages"></turbo-stream-source>
@@ -141,6 +135,10 @@ export function buildMessagesHTML(data) {
         <div class="msg-popover-item" onclick="msgShowInviteDialog('bot')">
           <div class="msg-popover-item-title">${t("messages.addBot", lang)}</div>
           <div class="msg-popover-item-desc">${t("messages.addBotDesc", lang)}</div>
+        </div>
+        <div class="msg-popover-item" onclick="msgOpenBotDirectory()">
+          <div class="msg-popover-item-title">${t("messages.messageABot", lang)}</div>
+          <div class="msg-popover-item-desc">${t("messages.messageABotDesc", lang)}</div>
         </div>
         <div class="msg-invite-dialog" id="invite-generate">
           <form method="POST">

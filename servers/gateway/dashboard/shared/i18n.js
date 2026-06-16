@@ -292,6 +292,11 @@ export const translations = {
   "messages.botsOnOtherCrows": { en: "Bots on your other Crows", es: "Bots en tus otros Crows" },
   "messages.anotherCrow": { en: "another Crow", es: "otro Crow" },
   "messages.advertisedPlaceholder": { en: "Send a message to start…", es: "Envía un mensaje para empezar…" },
+  "messages.botsAvailable": { en: "{n} bots available on your other Crows", es: "{n} bots disponibles en tus otros Crows" },
+  "messages.browse": { en: "Browse", es: "Explorar" },
+  "messages.botDirectoryTitle": { en: "Bots on your other Crows", es: "Bots en tus otros Crows" },
+  "messages.messageABot": { en: "Message a Bot", es: "Enviar mensaje a un bot" },
+  "messages.messageABotDesc": { en: "Browse bots on your other Crows", es: "Explora bots en tus otros Crows" },
 
   // ─── Blog Panel ───
   "blog.pageTitle": { en: "Blog", es: "Blog" },
