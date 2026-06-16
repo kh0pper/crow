@@ -35,3 +35,19 @@ test("second call within TTL does not re-fetch", async () => {
   await getPeerAdvertisedBots({}, "inst3");
   assert.equal(calls, 1, "cached on second call");
 });
+
+test("concurrent cold-cache calls share one fetch (stampede-protected)", async () => {
+  let calls = 0;
+  _setFetchImpl(async () => {
+    calls++;
+    await new Promise((r) => setTimeout(r, 10)); // keep the fetch in-flight
+    return { ok: true, body: { bots: [] } };
+  });
+  const [a, b] = await Promise.all([
+    getPeerAdvertisedBots({}, "inst4"),
+    getPeerAdvertisedBots({}, "inst4"),
+  ]);
+  assert.equal(calls, 1, "both callers shared a single in-flight fetch");
+  assert.equal(a.status, "ok");
+  assert.equal(b.status, "ok");
+});
