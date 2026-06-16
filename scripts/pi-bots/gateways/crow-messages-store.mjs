@@ -35,7 +35,7 @@ export function authorizeSender(db, botId, senderPubkey, allowPaired = false) {
       // 03-prefixed contact — ~half of them).
       const paired = db.prepare(
         "SELECT 1 FROM contacts c JOIN crow_instances i ON i.crow_id = c.crow_id "
-        + "WHERE substr(c.secp256k1_pubkey, -64) = ? LIMIT 1"
+        + "WHERE substr(c.secp256k1_pubkey, -64) = ? AND c.is_blocked = 0 AND i.status != 'revoked' LIMIT 1"
       ).get(pk);
       if (paired) return true;
     }
