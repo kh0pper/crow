@@ -420,18 +420,25 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
         const active = await admin.getActiveInvite(db, botId);
         if (active) {
           const code = await admin.buildInviteCode(db, botId, active.token);
-          const link = `/dashboard/messages?bot_invite=${encodeURIComponent(code)}`;
+          const relLink = `/dashboard/messages?bot_invite=${encodeURIComponent(code)}`;
+          // Absolute self-URL so the QR is scannable-to-landing and the copied
+          // link opens the accept card directly (on the owner's own Crow devices).
+          // CROW_GATEWAY_URL is set on deployed hosts; fall back to the request
+          // host, else the relative path (works when opened on this same host).
+          const base = (process.env.CROW_GATEWAY_URL
+            || (req.get ? `${req.protocol || "http"}://${req.get("host")}` : "")).replace(/\/+$/, "");
+          const shareUrl = base ? base + relLink : relLink;
           let qrImg = "";
           try {
             const QRCode = (await import("qrcode")).default;
-            const dataUrl = await QRCode.toDataURL(code, { width: 220, margin: 1 });
+            const dataUrl = await QRCode.toDataURL(shareUrl, { width: 220, margin: 1 });
             qrImg = `<img src="${dataUrl}" alt="Share QR" width="220" height="220" style="image-rendering:pixelated">`;
           } catch { /* qr optional */ }
           shareBlock =
             `<div class="btb-group"><label>${escapeHtml(t("botbuilder.cmShareLabel", lang))}</label>` +
             `<p class="btb-hint">${escapeHtml(t("botbuilder.cmShareHint", lang))}</p>` +
-            `<textarea class="btb-textarea" rows="3" readonly onclick="this.select()">${escapeHtml(code)}</textarea>` +
-            `<p class="btb-hint"><a href="${escapeHtml(link)}">${escapeHtml(t("botbuilder.cmOpenLink", lang))}</a></p>` +
+            `<textarea class="btb-textarea" rows="3" readonly onclick="this.select()">${escapeHtml(shareUrl)}</textarea>` +
+            `<p class="btb-hint"><a href="${escapeHtml(relLink)}">${escapeHtml(t("botbuilder.cmOpenLink", lang))}</a></p>` +
             (qrImg ? `<div style="margin:.5rem 0">${qrImg}</div>` : "") + `</div>`;
         }
       } catch { shareBlock = ""; }
