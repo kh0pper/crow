@@ -196,14 +196,15 @@ export function registerContactsTools(server, ctx) {
           });
           contactId = Number(result.lastInsertRowid);
           try { await syncManager.initContact(contactId, null); } catch { /* bot has no hypercore feed; non-fatal */ }
+          // Subscribe to the bot's replies over Nostr (new contact only — existing
+          // contacts already have a live subscription from their first accept or
+          // from restart, so re-subscribing would leak a handle per relay).
+          try {
+            await nostrManager.subscribeToContact({
+              id: contactId, crowId: bot.botCrowId, secp256k1_pubkey: bot.secp256k1Pubkey,
+            });
+          } catch { /* non-fatal — re-subscribed on next restart */ }
         }
-
-        // Subscribe to the bot's replies over Nostr.
-        try {
-          await nostrManager.subscribeToContact({
-            id: contactId, crowId: bot.botCrowId, secp256k1_pubkey: bot.secp256k1Pubkey,
-          });
-        } catch { /* non-fatal — re-subscribed on next restart */ }
 
         // Tell the bot we accepted (carries the token it validates).
         try {
