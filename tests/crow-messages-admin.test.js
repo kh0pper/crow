@@ -76,6 +76,19 @@ test("buildInviteCode produces a code parseable by parseBotInviteCode with the a
   assert.ok(Array.isArray(parsed.relays), "carries relays");
 });
 
+test("getActiveInvite skips expired invites; returns valid non-expired invite", async () => {
+  // Expired invite should NOT be returned.
+  await admin.mintInvite(db, "botExpiry", { expiresAt: "2000-01-01 00:00:00" });
+  const expired = await admin.getActiveInvite(db, "botExpiry");
+  assert.ok(expired === null || expired === undefined, "expired invite is not returned");
+
+  // Non-expired invite (no expiry) SHOULD be returned.
+  const validTok = await admin.mintInvite(db, "botExpiry", {});
+  const active = await admin.getActiveInvite(db, "botExpiry");
+  assert.ok(active !== null && active !== undefined, "non-expired invite is returned");
+  assert.equal(active.token, validTok, "token matches the non-expired mint");
+});
+
 test("botIdentityFor matches the key the pi-bots adapter would subscribe under (parity)", async () => {
   // The adapter derives via loadInstanceSeed(dirname(botsDbPath())); the admin
   // helper MUST produce the identical crow_id, or shared invites are dead.
