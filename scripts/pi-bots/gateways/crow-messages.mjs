@@ -76,14 +76,18 @@ export async function start({ bot_id, gw, log }) {
   catch (e) { log("crow-messages bot=" + bot_id + " no instance seed: " + e.message); try { db.close(); } catch {} return { stop() {} }; }
   const botIdentity = deriveBotIdentity(seed, bot_id);
 
+  try { cmStore.pruneSeen(db); } catch { /* best-effort */ }
   const relays = await connectRelays(cmStore.resolveRelays(db));
   const botXOnly = xOnly(botIdentity.secp256k1Pubkey);
   const queue = new SerialQueue({ maxDepth: 5, log, handler: (job) => job() });
-  const isNew = makeDedupeGate(); // collapse the same event arriving from N relays
+  const isNew = makeDedupeGate(); // collapse the same event arriving from N relays (in-process)
   const since = Math.floor(Date.now() / 1000) - 86400; // don't replay >24h of relay history
 
   const subs = subscribe(relays, { kinds: [4], "#p": [botXOnly], since }, (event) => {
-    if (!isNew(event.id)) return; // already handled from another relay
+    if (!isNew(event.id)) return; // already handled from another relay (same process)
+    // Cross-restart dedup: a relay replays up to 24h on resubscribe; persisting
+    // processed ids stops re-answering chats the bot already handled pre-restart.
+    if (!cmStore.markEventSeen(db, bot_id, event.id)) return;
     let decrypted;
     try { decrypted = openDM(botIdentity.secp256k1Priv, event.pubkey, event.content); }
     catch { return; } // not for us / undecryptable

@@ -1678,6 +1678,18 @@ await initTable("bot_message_invites table", `
   );
   CREATE INDEX IF NOT EXISTS idx_bot_message_invites_bot ON bot_message_invites(bot_id);
 `);
+// Persistent processed-event dedup for the crow-messages adapter: survives a
+// host restart so a relay's 24h replay does NOT re-run pi turns for chat DMs the
+// bot already answered. Pruned by age. LOCAL-ONLY.
+await initTable("bot_message_seen table", `
+  CREATE TABLE IF NOT EXISTS bot_message_seen (
+    bot_id     TEXT NOT NULL,
+    event_id   TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (bot_id, event_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_bot_message_seen_age ON bot_message_seen(created_at);
+`);
 
 // If a previous botched migration recreated dashboard_settings without PK(key),
 // restore it. Detect by checking pragma + absence of the overrides table data
