@@ -29,7 +29,7 @@ function initials(name) {
  * Build the full messages panel HTML.
  */
 export function buildMessagesHTML(data) {
-  const { items, totalUnread, aiConfigured, storageAvailable, inviteResult, inviteError, lang, botInvite } = data;
+  const { items, totalUnread, aiConfigured, storageAvailable, inviteResult, inviteError, lang, botInvite, advertisedBots, csrf } = data;
 
   // Bot-invite "Add & message" card (data pre-parsed in messages.js).
   let botInviteCard = "";
@@ -44,6 +44,30 @@ export function buildMessagesHTML(data) {
       `${botInvite.csrf}` +
       `<button type="submit" class="msg-btn-primary">Add &amp; message</button>` +
       `</form></div>`;
+  }
+
+  // "Bots on your other Crows" — advertised peer-bots (read-only until first send).
+  let advertisedSection = "";
+  if (Array.isArray(advertisedBots) && advertisedBots.length) {
+    const rows = advertisedBots.map((b) =>
+      `<div class="msg-advertised-bot">` +
+        `<div class="msg-advertised-bot-head">` +
+          `<strong>${escapeHtml(b.displayName)}</strong>` +
+          `<span class="msg-advertised-badge">${escapeHtml(b.instanceLabel || t("messages.anotherCrow", lang))}</span>` +
+        `</div>` +
+        `<form method="POST" action="/dashboard/messages" class="msg-advertised-form">` +
+          `<input type="hidden" name="action" value="message_advertised_bot">` +
+          `<input type="hidden" name="invite_code" value="${escapeHtml(b.inviteCode)}">` +
+          `<input type="text" name="message" required placeholder="${escapeHtml(t("messages.advertisedPlaceholder", lang))}">` +
+          `${csrf || ""}` +
+          `<button type="submit" class="msg-btn-primary">${escapeHtml(t("messages.send", lang))}</button>` +
+        `</form>` +
+      `</div>`
+    ).join("");
+    advertisedSection =
+      `<div class="msg-advertised-section">` +
+      `<div class="msg-advertised-title">${escapeHtml(t("messages.botsOnOtherCrows", lang))}</div>` +
+      rows + `</div>`;
   }
 
   // Build avatar strip items
@@ -83,7 +107,7 @@ export function buildMessagesHTML(data) {
 
   const noChatsLabel = escapeHtml(t("messages.noChats", lang));
 
-  return botInviteCard + `
+  return botInviteCard + advertisedSection + `
     <div class="msg-hub" style="position:relative">
       ${inviteBanner}
       <!-- Live peer-badge updates via Turbo Stream (Phase C.3). The

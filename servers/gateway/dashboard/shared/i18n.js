@@ -285,6 +285,9 @@ export const translations = {
   "messages.clickToCopy": { en: "Click to copy", es: "Haz clic para copiar" },
   "messages.copied": { en: "Copied!", es: "¡Copiado!" },
   "messages.file": { en: "File", es: "Archivo" },
+  "messages.botsOnOtherCrows": { en: "Bots on your other Crows", es: "Bots en tus otros Crows" },
+  "messages.anotherCrow": { en: "another Crow", es: "otro Crow" },
+  "messages.advertisedPlaceholder": { en: "Send a message to start…", es: "Envía un mensaje para empezar…" },
 
   // ─── Blog Panel ───
   "blog.pageTitle": { en: "Blog", es: "Blog" },

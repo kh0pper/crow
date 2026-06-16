@@ -14,7 +14,7 @@ import { messagesCSS } from "./messages/css.js";
 import { buildMessagesHTML } from "./messages/html.js";
 import { messagesClientJS } from "./messages/client.js";
 import { handlePostAction } from "./messages/api-handlers.js";
-import { getUnifiedConversationList } from "./messages/data-queries.js";
+import { getUnifiedConversationList, getAdvertisedBotItems } from "./messages/data-queries.js";
 import { csrfInput } from "../shared/csrf.js";
 
 export default {
@@ -56,6 +56,10 @@ export default {
     // --- Get unified conversation list ---
     const { items, totalUnread } = await getUnifiedConversationList(db);
 
+    // Advertised peer-bots (read-only "available" entries). Never throws.
+    let advertisedBots = [];
+    try { advertisedBots = await getAdvertisedBotItems(db); } catch {}
+
     // --- Bot-invite landing: a shared link opened on THIS instance (?bot_invite=<code>).
     // Parse here (we have `req`) so the still-sync HTML builder just renders strings.
     let botInvite = null;
@@ -81,6 +85,8 @@ export default {
       inviteError: req._inviteError || null,
       lang,
       botInvite,
+      advertisedBots,
+      csrf: csrfInput(req),
     });
     const js = messagesClientJS({ aiConfigured, storageAvailable, lang });
 
