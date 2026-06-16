@@ -1153,6 +1153,14 @@ export const translations = {
   "contacts.importPastePlaceholder": { en: "Paste vCard or CSV content here...", es: "Pega el contenido vCard o CSV aqui..." },
   "contacts.importButton": { en: "Import", es: "Importar" },
 
+  // ─── Bot Directory (cross-instance bot picker) ───
+  "botdir.empty": { en: "No bots available on your other Crows yet.", es: "Aún no hay bots disponibles en tus otros Crows." },
+  "botdir.added": { en: "Added ✓", es: "Agregado ✓" },
+  "botdir.add": { en: "Add", es: "Agregar" },
+  "botdir.message": { en: "Message", es: "Mensaje" },
+  "botdir.anotherCrow": { en: "Another Crow", es: "Otro Crow" },
+  "botdir.searchPlaceholder": { en: "Search bots...", es: "Buscar bots..." },
+
   // ─── Onboarding (first-run guided tour) ───
   "onboarding.title": { en: "Welcome to Crow", es: "Bienvenido a Crow" },
   "onboarding.welcome.title": { en: "Welcome", es: "Bienvenido" },
