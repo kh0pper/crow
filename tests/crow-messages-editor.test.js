@@ -29,6 +29,12 @@ before(async () => {
 after(async () => { try { db && db.close && db.close(); } catch {} rmSync(dir, { recursive: true, force: true }); });
 
 test("gateways tab for crow-messages renders correct action names + csrf, no save_ prefix bug", async () => {
+  // Seed an ACL row so the "Who can message" list renders a Remove form.
+  await db.execute({
+    sql: "INSERT INTO bot_message_acl (bot_id, sender_pubkey, crow_id, display_name, added_via) VALUES (?,?,?,?, 'invite')",
+    args: ["cm-bot", "a".repeat(64), "crow:friend01", "Alice"],
+  });
+
   let html = "";
   const res = { send: (s) => { html = s; } };
   const layout = ({ content }) => content;
@@ -41,4 +47,6 @@ test("gateways tab for crow-messages renders correct action names + csrf, no sav
   assert.match(html, /name="gw_allow_paired_instances"[^>]*checked/, "paired toggle reflects saved true");
   // CSRF: the page must carry a _csrf field for the POST forms.
   assert.match(html, /name="_csrf"/, "csrf field present");
+  // ACL row renders a Remove form with gw_remove action.
+  assert.match(html, /name="action" value="gw_remove"/, "ACL row renders gw_remove form");
 });

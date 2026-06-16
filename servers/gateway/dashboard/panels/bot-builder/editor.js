@@ -411,7 +411,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       // Everything below is its OWN form(s) → must live OUTSIDE the main form.
       // Explicit hidden action inputs (NOT the hidden() helper, which prefixes "save_").
       const actInputs = (act) =>
-        `<input type="hidden" name="action" value="${act}">` +
+        `<input type="hidden" name="action" value="${escapeHtml(act)}">` +
         `<input type="hidden" name="bot_id" value="${escapeHtml(botId)}">${csrfInput(req)}`;
 
       // Current shareable link (if an active invite exists) + its QR.
