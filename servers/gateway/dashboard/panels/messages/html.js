@@ -75,9 +75,11 @@ export function buildMessagesHTML(data) {
       const color = peerColor(item.id);
       const label = escapeHtml(initials(item.displayName));
       const unreadClass = item.unread > 0 ? " visible" : "";
+      const botTag = item.isBot ? `<span class="msg-bot-tag" title="${escapeHtml(t("messages.botTag", lang))}">${escapeHtml(t("messages.botTag", lang))}</span>` : "";
       return `<div class="msg-avatar-item" data-type="peer" data-id="${item.id}" onclick="msgSelectItem('peer',${item.id})" title="${escapeHtml(item.displayName)}">
         <div class="msg-avatar msg-avatar-peer" style="--peer-color:${color}">${label}</div>
         <span id="badge-peer-${item.id}" class="msg-unread-badge${unreadClass}" data-badge-peer="${item.id}">${item.unread > 0 ? item.unread : ""}</span>
+        ${botTag}
       </div>`;
     }
   }).join("");

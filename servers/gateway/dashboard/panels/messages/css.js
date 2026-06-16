@@ -742,6 +742,8 @@ export function messagesCSS() {
   .bot-dir-added { font-size:0.75rem; color:var(--crow-text-muted); text-decoration:none; }
   .bot-dir-empty { padding:16px; color:var(--crow-text-muted); font-size:0.85rem; }
 
+  .msg-bot-tag { font-size:0.55rem; text-transform:uppercase; color:var(--crow-text-muted); background:var(--crow-bg-deep); border:1px solid var(--crow-border); border-radius:4px; padding:0 3px; margin-top:2px; }
+
   /* === Responsive === */
   @media (max-width: 900px) {
     .msg-info:not(.hidden) { width: 200px; }

@@ -297,6 +297,7 @@ export const translations = {
   "messages.botDirectoryTitle": { en: "Bots on your other Crows", es: "Bots en tus otros Crows" },
   "messages.messageABot": { en: "Message a Bot", es: "Enviar mensaje a un bot" },
   "messages.messageABotDesc": { en: "Browse bots on your other Crows", es: "Explora bots en tus otros Crows" },
+  "messages.botTag": { en: "bot", es: "bot" },
 
   // ─── Blog Panel ───
   "blog.pageTitle": { en: "Blog", es: "Blog" },
