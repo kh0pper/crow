@@ -67,3 +67,17 @@ test("parseBotInviteCode rejects a tampered crow_id", () => {
   const bad = [other.crowId, parts[1], parts[2]].join(".");
   assert.throws(() => parseBotInviteCode(bad), /mismatch|match/i);
 });
+
+test("parseBotInviteCode rejects a tampered payload (ed25519 signature)", () => {
+  const bot = deriveBotIdentity(SEED, "bot-alpha");
+  const code = generateBotInviteCode(bot, "tok-123", []);
+  const [crowId, payloadB64, sig] = code.split(".");
+  // Tamper a field the crowId↔ed25519 check does NOT cover (the secp key + token),
+  // keeping crowId/ed25519Pub consistent → only the signature can catch it.
+  const data = JSON.parse(Buffer.from(payloadB64, "base64url").toString());
+  data.secp256k1Pub = "0".repeat(66);
+  data.token = "stolen";
+  const tampered = Buffer.from(JSON.stringify(data)).toString("base64url");
+  const bad = [crowId, tampered, sig].join(".");
+  assert.throws(() => parseBotInviteCode(bad), /signature/i);
+});

@@ -226,10 +226,13 @@ export function loadInstanceSeed(dataDir) {
 }
 
 /**
- * Encode a bot invite: `<botCrowId>.<base64url(payload)>.<hmac>`. Payload carries
- * the bot address (keys) + an authorization token + relay hints. HMAC mirrors
- * generateInviteCode (tamper-evidence for the issuer; recipients validate by the
- * crowId↔ed25519 check in parseBotInviteCode).
+ * Encode a bot invite: `<botCrowId>.<base64url(payload)>.<ed25519-sig>`. Payload
+ * carries the bot address (keys) + an authorization token + relay hints, and is
+ * SIGNED with the bot's ed25519 private key. Because the embedded ed25519 pubkey
+ * is bound to crowId (computeCrowId), a recipient can verify the ENTIRE payload
+ * — including the secp key, token, and relays — is authentic and untampered.
+ * (An HMAC keyed on the private key, as the legacy instance invites use, gives no
+ * third-party verifiability; a MITM could swap the unbound secp key/relays.)
  */
 export function generateBotInviteCode(botIdentity, token, relays = []) {
   const payload = Buffer.from(JSON.stringify({
@@ -240,22 +243,24 @@ export function generateBotInviteCode(botIdentity, token, relays = []) {
     relays,
     v: 1,
   })).toString("base64url");
-  const hmac = createHmac("sha256", botIdentity.ed25519Priv).update(payload).digest("base64url");
-  return `${botIdentity.crowId}.${payload}.${hmac}`;
+  const signature = sign(payload, botIdentity.ed25519Priv);
+  return `${botIdentity.crowId}.${payload}.${signature}`;
 }
 
 /**
- * Decode + validate a bot invite. Throws on malformed input or a crow_id that
- * does not match the embedded ed25519 pubkey.
+ * Decode + validate a bot invite. Throws on malformed input, a crow_id that does
+ * not match the embedded ed25519 pubkey, or a payload whose ed25519 signature
+ * does not verify (tamper-evident over the whole payload).
  */
 export function parseBotInviteCode(code) {
   const parts = String(code).split(".");
   if (parts.length !== 3) throw new Error("Invalid bot invite code format");
-  const [crowIdPart, payload] = parts;
+  const [crowIdPart, payload, signature] = parts;
   const data = JSON.parse(Buffer.from(payload, "base64url").toString());
   if (data.crowId !== crowIdPart) throw new Error("Bot invite Crow ID mismatch");
   const expected = computeCrowId(Buffer.from(data.ed25519Pub, "hex"));
   if (expected !== data.crowId) throw new Error("Bot invite public key does not match Crow ID");
+  if (!verify(payload, signature, data.ed25519Pub)) throw new Error("Bot invite signature invalid");
   return {
     botCrowId: data.crowId,
     ed25519Pubkey: data.ed25519Pub,
