@@ -243,7 +243,7 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       { value: "none", label: "None (no gateway)", available: true },
     ];
     const typeOpts = gwTypes.map((tb) =>
-      `<option value="${tb.value}"${gwType === tb.value ? " selected" : ""}>${escapeHtml(tb.label)}${tb.available ? "" : " — coming soon"}</option>`
+      `<option value="${tb.value}"${gwType === tb.value ? " selected" : ""}${tb.available ? "" : " disabled"}>${escapeHtml(tb.label)}${tb.available ? "" : " — coming soon"}</option>`
     ).join("");
     // Server-rendered, type-aware fields. Changing the type auto-submits so
     // the form re-renders with the right fields for that gateway (any
