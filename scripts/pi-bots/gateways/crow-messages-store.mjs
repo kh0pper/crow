@@ -16,14 +16,31 @@ export function resolveRelays(db) {
 }
 
 /**
- * True if senderPubkey (x-only after normalization) is in botId's ACL.
- * Plan 1 = ACL-only (default-deny). The "allow any paired instance" source is a
- * Plan 2 addition (crow_instances has no secp key today — see plan scope note).
+ * True if senderPubkey (x-only) may message botId.
+ * Sources: (1) the bot's ACL (default-deny), OR (2) when allowPaired is true,
+ * the sender is one of the operator's own paired instances — i.e. a contacts
+ * row (which carries the secp key) whose crow_id is a registered crow_instances
+ * row (crow_instances itself has no secp key, so we join contacts by crow_id).
+ * Fail-closed: any error → false.
  */
-export function authorizeSender(db, botId, senderPubkey) {
+export function authorizeSender(db, botId, senderPubkey, allowPaired = false) {
   const pk = xOnly(senderPubkey);
-  const acl = db.prepare("SELECT 1 FROM bot_message_acl WHERE bot_id=? AND sender_pubkey=? LIMIT 1").get(botId, pk);
-  return !!acl;
+  try {
+    const acl = db.prepare("SELECT 1 FROM bot_message_acl WHERE bot_id=? AND sender_pubkey=? LIMIT 1").get(botId, pk);
+    if (acl) return true;
+    if (allowPaired) {
+      // contacts.secp256k1_pubkey is the 66-hex COMPRESSED key (02/03 prefix);
+      // events authorize on the 64-hex x-only key. Compare the trailing 64 hex
+      // so BOTH y-parities match (a `02`+pk equality test would miss every
+      // 03-prefixed contact — ~half of them).
+      const paired = db.prepare(
+        "SELECT 1 FROM contacts c JOIN crow_instances i ON i.crow_id = c.crow_id "
+        + "WHERE substr(c.secp256k1_pubkey, -64) = ? LIMIT 1"
+      ).get(pk);
+      if (paired) return true;
+    }
+  } catch { return false; }
+  return false;
 }
 
 /** Validate + consume an invite token (atomic-ish: check then bump uses). */

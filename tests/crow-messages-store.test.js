@@ -79,3 +79,35 @@ test("markEventSeen dedups per (bot,event) and survives across handles; pruneSee
     assert.equal(cmStore.markEventSeen(d2, "bot1", "evt-2"), true, "pruned old row → seen-as-new again");
   } finally { d2.close(); }
 });
+
+test("authorizeSender: allow_paired_instances lets a paired-instance contact through without an ACL row", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "cm-store-paired-"));
+  execFileSync(process.execPath, ["scripts/init-db.js"], {
+    env: { ...process.env, CROW_DATA_DIR: tmp }, stdio: "pipe",
+    cwd: new URL("..", import.meta.url).pathname,
+  });
+  const d = new Database(join(tmp, "crow.db"));
+  // contacts.secp256k1_pubkey is stored as the 66-hex COMPRESSED key (02/03 prefix),
+  // but events authorize on the 64-hex x-only pubkey. Test BOTH parity prefixes.
+  const xonly02 = "c".repeat(64);          // a 02-prefixed contact
+  const xonly03 = "f".repeat(64);          // a 03-prefixed contact (the half a naive "02"+pk match misses)
+  d.prepare("INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (?,?,?,?)")
+    .run("crow:paired01", "Laptop", "ed".repeat(16), "02" + xonly02);
+  d.prepare("INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (?,?,?,?)")
+    .run("crow:paired03", "Phone", "ee".repeat(16), "03" + xonly03);
+  d.prepare("INSERT INTO crow_instances (id, name, crow_id) VALUES (?,?,?)").run("inst-1", "Laptop", "crow:paired01");
+  d.prepare("INSERT INTO crow_instances (id, name, crow_id) VALUES (?,?,?)").run("inst-2", "Phone", "crow:paired03");
+  // Off → denied (default-deny, no ACL row).
+  assert.equal(cmStore.authorizeSender(d, "botX", xonly02, false), false, "denied with toggle off");
+  // On → allowed via the paired-instance join, for BOTH 02 and 03 contacts.
+  assert.equal(cmStore.authorizeSender(d, "botX", xonly02, true), true, "02-prefixed paired contact allowed");
+  assert.equal(cmStore.authorizeSender(d, "botX", xonly03, true), true, "03-prefixed paired contact allowed");
+  // A contact who is NOT a registered instance → denied even with toggle on.
+  d.prepare("INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey) VALUES (?,?,?,?)")
+    .run("crow:friend01", "Friend", "ab".repeat(16), "02" + "a".repeat(64));
+  assert.equal(cmStore.authorizeSender(d, "botX", "a".repeat(64), true), false, "non-instance contact denied");
+  // Unknown sender → denied.
+  assert.equal(cmStore.authorizeSender(d, "botX", "d".repeat(64), true), false, "unknown sender denied");
+  d.close();
+  rmSync(tmp, { recursive: true, force: true });
+});
