@@ -51,6 +51,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { botFederationRouter } from "./bot-federation-routes.js";
+import { buildAdvertisementPayload } from "../dashboard/panels/bot-builder/crow-messages-admin.js";
 
 /**
  * Load installed bundles from ~/.crow/installed.json + manifests. Same
@@ -241,6 +242,28 @@ export default function federationRouter({ createDbClient }) {
     } catch (err) {
       console.warn("[federation] capabilities render failed:", err.message);
       res.status(500).json({ error: "capabilities_render_failed" });
+    } finally {
+      db.close();
+    }
+  });
+
+  // Roster auto-advertise (Theme 12): the responding instance's bots that have
+  // allow_paired_instances=true. Same HMAC gate as /overview; under /dashboard →
+  // Funnel-blocked (never add to PUBLIC_FUNNEL_PREFIXES). Each entry carries a
+  // reusable paired-roster invite the caller auto-accepts on first message.
+  router.get("/advertised-bots", federationVerify, async (req, res) => {
+    const db = createDbClient();
+    try {
+      const localId = getOrCreateLocalInstanceId();
+      const inst = await getInstance(db, localId);
+      const payload = await buildAdvertisementPayload(db, {
+        instanceId: localId,
+        instanceLabel: inst?.name || inst?.hostname || null,
+      });
+      res.type("application/json").send(JSON.stringify(payload));
+    } catch (err) {
+      console.warn("[federation] advertised-bots render failed:", err.message);
+      res.status(500).json({ error: "advertised_bots_render_failed" });
     } finally {
       db.close();
     }
