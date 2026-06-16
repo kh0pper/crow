@@ -4,6 +4,10 @@
  * DB queries for the unified conversation list, peer messages, and status polling.
  */
 
+import { getPeerAdvertisedBots } from "../../advertised-bots-cache.js";
+import { getTrustedInstances } from "../nest/data-queries.js";
+import { getOrCreateLocalInstanceId } from "../../../instance-registry.js";
+
 /**
  * Get a unified conversation list merging AI chats and peer contacts.
  * Sorted by last activity descending.
@@ -119,4 +123,55 @@ export async function getMessageStatus(db) {
     peers: peerRows.map((r) => ({ contactId: r.contactId, unread: Number(r.unread) || 0, lastActivity: r.lastActivity })),
     ai: aiRows.map((r) => ({ convId: r.convId, lastActivity: r.lastActivity })),
   };
+}
+
+/**
+ * Advertised bots from paired instances, as read-only "available" Messages
+ * entries. Excludes self + revoked/paused/untrusted peers (via getTrustedInstances),
+ * dedups by messaging pubkey, and omits any bot already materialized as a local
+ * contact. Never throws — a bad peer is silently dropped by the cache.
+ */
+export async function getAdvertisedBotItems(db) {
+  // Pubkeys we already have a contact for (trailing-64, lowercased).
+  const known = new Set();
+  try {
+    const { rows } = await db.execute("SELECT secp256k1_pubkey FROM contacts WHERE secp256k1_pubkey IS NOT NULL");
+    for (const r of rows) {
+      const h = String(r.secp256k1_pubkey || "");
+      if (h.length >= 64) known.add(h.slice(-64).toLowerCase());
+    }
+  } catch {}
+
+  let localId = null;
+  try { localId = getOrCreateLocalInstanceId(); } catch {}
+
+  // Trusted + active/offline peers only (same set every federation fan-out uses).
+  // This already excludes revoked, paused, untrusted, and the __local_mcp__
+  // pseudo-instance; we additionally drop self.
+  let peerIds = [];
+  try {
+    const insts = await getTrustedInstances(db);
+    peerIds = insts.map((i) => i.id).filter((id) => id && id !== localId);
+  } catch {}
+
+  const settled = await Promise.allSettled(peerIds.map((id) => getPeerAdvertisedBots(db, id)));
+  const items = [];
+  const seen = new Set();
+  for (const s of settled) {
+    if (s.status !== "fulfilled" || !s.value || s.value.status !== "ok") continue;
+    for (const b of s.value.bots) {
+      if (known.has(b.messaging_pubkey) || seen.has(b.messaging_pubkey)) continue;
+      seen.add(b.messaging_pubkey);
+      items.push({
+        type: "advertised",
+        botId: b.bot_id,
+        displayName: b.display_name,
+        instanceId: b.instance_id,
+        instanceLabel: b.instance_label,
+        messagingPubkey: b.messaging_pubkey,
+        inviteCode: b.invite_code,
+      });
+    }
+  }
+  return items;
 }
