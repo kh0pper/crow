@@ -178,7 +178,10 @@ export async function getAdvertisedBotItems(db) {
       });
     }
   }
-  await pruneStaleAdvertisedContacts(db, live);
+  // Only prune when at least one peer actually responded — otherwise a transient
+  // all-peers-unreachable blip (empty `live`) would clear no-history advertised
+  // contacts that should just re-materialize once peers answer again.
+  if (live.size > 0) await pruneStaleAdvertisedContacts(db, live);
   return items;
 }
 
