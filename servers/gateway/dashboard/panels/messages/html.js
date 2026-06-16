@@ -138,6 +138,10 @@ export function buildMessagesHTML(data) {
           <div class="msg-popover-item-title">${t("messages.acceptInvite", lang)}</div>
           <div class="msg-popover-item-desc">${t("messages.acceptInviteDesc", lang)}</div>
         </div>
+        <div class="msg-popover-item" onclick="msgShowInviteDialog('bot')">
+          <div class="msg-popover-item-title">${t("messages.addBot", lang)}</div>
+          <div class="msg-popover-item-desc">${t("messages.addBotDesc", lang)}</div>
+        </div>
         <div class="msg-invite-dialog" id="invite-generate">
           <form method="POST">
             <input type="hidden" name="action" value="generate_invite">
@@ -149,6 +153,14 @@ export function buildMessagesHTML(data) {
             <input type="hidden" name="action" value="accept_invite">
             <textarea name="invite_code" placeholder="${t("messages.pasteInvitePlaceholder", lang)}" rows="3" required></textarea>
             <button type="submit" class="msg-send-btn" style="width:100%;font-size:0.8rem;padding:6px">${t("messages.acceptInviteButton", lang)}</button>
+          </form>
+        </div>
+        <div class="msg-invite-dialog" id="invite-bot">
+          <form method="POST">
+            <input type="hidden" name="action" value="accept_bot_invite">
+            <textarea name="invite_code" placeholder="${t("messages.pasteBotInvitePlaceholder", lang)}" rows="3" required></textarea>
+            ${csrf || ""}
+            <button type="submit" class="msg-send-btn" style="width:100%;font-size:0.8rem;padding:6px">${t("messages.addBotButton", lang)}</button>
           </form>
         </div>
       </div>
