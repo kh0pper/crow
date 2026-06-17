@@ -714,5 +714,37 @@ export function messagesCSS() {
     .msg-strip-new { border-radius: 10px; }
     .msg-bubble { max-width: 92%; font-size: 0.85rem; }
   }
+
+  /* === Rooms (multi-party) === */
+  .msg-avatar-room {
+    background: linear-gradient(135deg, #f59e0b, #ec4899);
+  }
+  .msg-input {
+    width: 100%;
+    box-sizing: border-box;
+    margin: 4px 0;
+    padding: 6px 8px;
+    background: var(--crow-bg-surface);
+    border: 1px solid var(--crow-border);
+    border-radius: 6px;
+    color: var(--crow-text-primary);
+    font-size: 0.82rem;
+  }
+  .msg-bot-badge {
+    display: inline-block;
+    background: var(--crow-accent-muted, #1e293b);
+    color: var(--crow-accent, #38bdf8);
+    border-radius: 4px;
+    padding: 0 5px;
+    font-size: 0.65rem;
+    text-transform: lowercase;
+    vertical-align: middle;
+  }
+  .msg-member-picker { max-height: 180px; overflow-y: auto; margin: 8px 0; border: 1px solid var(--border, #333); border-radius: 6px; padding: 6px; }
+  .msg-member-picker-label { font-size: 0.72rem; opacity: 0.7; margin-bottom: 4px; }
+  .msg-member-opt { display: block; padding: 3px 4px; font-size: 0.82rem; cursor: pointer; }
+  .msg-room-chip { display: inline-flex; align-items: center; gap: 3px; background: var(--chip-bg, #222); border-radius: 10px; padding: 1px 8px; font-size: 0.75rem; }
+  .msg-room-hint, .msg-room-mode { font-size: 0.75rem; opacity: 0.7; margin-top: 6px; }
+  .msg-bubble-sender { font-size: 0.7rem; opacity: 0.7; margin-bottom: 2px; }
 </style>`;
 }

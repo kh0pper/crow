@@ -295,6 +295,18 @@ export const translations = {
   "messages.messageABot": { en: "Message a Bot", es: "Enviar mensaje a un bot" },
   "messages.messageABotDesc": { en: "Browse bots on your other Crows", es: "Explora bots en tus otros Crows" },
   "messages.botTag": { en: "bot", es: "bot" },
+  "messages.newGroup": { en: "New Group", es: "Nuevo grupo" },
+  "messages.newGroupDesc": { en: "Start a multi-party room with people and bots", es: "Inicia una sala con personas y bots" },
+  "messages.groupName": { en: "Group name", es: "Nombre del grupo" },
+  "messages.groupMembers": { en: "Add members (people and bots)", es: "Agregar miembros (personas y bots)" },
+  "messages.createGroupBtn": { en: "Create Group", es: "Crear grupo" },
+  "messages.roomMode": { en: "Bot replies", es: "Respuestas de bots" },
+  "messages.roomModeAddressed": { en: "Only when addressed", es: "Solo cuando se le menciona" },
+  "messages.roomModeAlways": { en: "To every message", es: "A cada mensaje" },
+  "messages.roomMembers": { en: "Members", es: "Miembros" },
+  "messages.roomRename": { en: "Rename", es: "Renombrar" },
+  "messages.roomDelete": { en: "Delete room", es: "Eliminar sala" },
+  "messages.roomLeaveHint": { en: "Bots reply only to people, never to each other.", es: "Los bots responden solo a personas, nunca entre ellos." },
 
   // ─── Blog Panel ───
   "blog.pageTitle": { en: "Blog", es: "Blog" },
