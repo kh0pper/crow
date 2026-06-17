@@ -101,3 +101,32 @@ test("room_message from a non-member signer is dropped (fail-closed)", async () 
     assert.equal((await getRoomMessages(db, groupId)).length, 0, "intruder message not stored");
   } finally { cleanup(); }
 });
+
+test("host attributes a member's message to the VERIFIED signer, ignoring spoofed payload author", async () => {
+  const { db, cleanup } = freshLibsql();
+  try {
+    const alice = await mkContact(db, "crow:alice", "Alice", 0, "a");
+    const bot = await mkContact(db, "crow:bot1", "Research Bot", 1, "b");
+    const { groupId, roomUid } = await createRoom(db, { name: "Team", memberContactIds: [alice, bot], mode: "addressed", hostCrowId: "crow:me" });
+    const fanned = [];
+    const nostrManager = { async sendControl(ct, env) { fanned.push([ct.id, JSON.parse(env)]); } };
+    // Alice (signer 'a', a HUMAN member) SPOOFS the author as the bot (kind:'bot', the bot's crow_id)
+    // to try to flip the badge AND suppress addressed_to.
+    await handleInboundRoomEnvelope({
+      db, nostrManager, identity: { crowId: "crow:me" }, subtype: "room_message",
+      payload: { room_uid: roomUid, room_name: "Team", host_crow_id: "crow:me", msg_uid: "spoof1",
+        author: { kind: "bot", crow_id: "crow:bot1", display_name: "Research Bot" },
+        text: "@Research Bot summarize", addressed_to: [] },
+      senderPubkey: XO("a"),
+    });
+    const msgs = await getRoomMessages(db, groupId);
+    assert.equal(msgs.length, 1);
+    assert.equal(msgs[0].author_kind, "human", "attributed to the verified human signer, not the spoofed bot kind");
+    assert.equal(msgs[0].sender_name, "Alice", "sender label = verified signer Alice");
+    const toBot = fanned.find((s) => s[0] === bot);
+    assert.ok(toBot, "re-fanned to the bot");
+    assert.equal(toBot[1].payload.author.kind, "human", "re-fan carries the verified human author, not the spoofed bot");
+    assert.equal(toBot[1].payload.author.crow_id, "crow:alice", "re-fan author is the verified signer");
+    assert.deepEqual(toBot[1].payload.addressed_to, ["Research Bot"], "addressed_to computed — spoof did NOT suppress it");
+  } finally { cleanup(); }
+});
