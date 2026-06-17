@@ -224,5 +224,8 @@ export function buildMessagesHTML(data) {
 
     <input type="file" id="msg-file-input" style="display:none" multiple accept="image/*,application/pdf,audio/*,video/*,text/*,application/json,application/zip">
     <div id="msg-storage-available" data-available="${storageAvailable ? '1' : '0'}" style="display:none"></div>
+    <!-- Contact roster (people + bots) for the room "add member" picker. Same
+         normalized source as the New Group dialog; read client-side, no extra fetch. -->
+    <script id="msg-contacts-data" type="application/json">${JSON.stringify(contactsForPicker || []).replace(/</g, "\\u003c")}</script>
   `;
 }

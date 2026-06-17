@@ -306,6 +306,8 @@ export const translations = {
   "messages.roomMembers": { en: "Members", es: "Miembros" },
   "messages.roomRename": { en: "Rename", es: "Renombrar" },
   "messages.roomDelete": { en: "Delete room", es: "Eliminar sala" },
+  "messages.roomAddMember": { en: "Add member", es: "Agregar miembro" },
+  "messages.roomAddBotPrompt": { en: "Local bot id to add:", es: "ID del bot local a agregar:" },
   "messages.roomLeaveHint": { en: "Bots reply only to people, never to each other.", es: "Los bots responden solo a personas, nunca entre ellos." },
 
   // ─── Blog Panel ───
