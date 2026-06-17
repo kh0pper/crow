@@ -22,35 +22,24 @@ Rejected alternatives: **B** in-process/job-queue relay to local bots (two diver
 
 ## Data model
 
-Rooms are a **distinct messaging entity**, but members are just **contacts** (some `is_bot`), preserving the arc's load-bearing principle: *a bot is a contact/participant.* We do **not** overload `contact_groups` (stays a purely organizational Contacts-panel feature) and do **not** overload the 1:1 `messages` table (keeps its schema/queries clean). Three new tables in `scripts/init-db.js` (via `initTable`):
+**Rooms are built ON the existing `contact_groups`** (which is *not* purely organizational — it already backs `crow_send_group_message`, a one-way `group_message` broadcast). Reusing it keeps ONE "group" concept, reuses `contact_group_members` + the group picker, and lets the legacy broadcast evolve into a real room. A `contact_group` **becomes a room** when it carries a `room_uid`; plain organizational groups (no `room_uid`) are unaffected. Members are just **contacts** (some `is_bot`), preserving *a bot is a contact/participant.* The 1:1 `messages` table is **not** overloaded — room messages get their own table.
 
+**Extend `contact_groups`** (via `addColumnIfMissing` — 3rd arg is the type-clause only):
+```
+room_uid     TEXT      -- NULL = plain organizational group; non-NULL = a messaging room (stable, shared across instances)
+host_crow_id TEXT      -- host instance's crow_id (this instance, in 3a)
+mode         TEXT DEFAULT 'addressed'   -- 'addressed' | 'always' (validated in code; CHECK can't be added to an existing table)
+```
+A partial unique index keeps `room_uid` unique when present: `CREATE UNIQUE INDEX idx_contact_groups_room_uid ON contact_groups(room_uid) WHERE room_uid IS NOT NULL;`
+
+**Reuse `contact_group_members` as-is** for the roster (`group_id`, `contact_id`). Bots are added as `is_bot` contact members.
+
+**New `room_messages` table** (the one genuinely new table — `messages.contact_id` is NOT NULL with 1:1 semantics, so room messages can't live there), keyed by `group_id`:
 ```sql
--- The room itself. room_uid is the STABLE shared id used in envelopes across instances.
-CREATE TABLE message_rooms (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  room_uid     TEXT NOT NULL UNIQUE,
-  name         TEXT NOT NULL,
-  host_crow_id TEXT,                    -- host instance's crow_id (this instance, in 3a)
-  mode         TEXT NOT NULL DEFAULT 'addressed' CHECK (mode IN ('addressed','always')),
-  created_at   TEXT DEFAULT (datetime('now')),
-  updated_at   TEXT DEFAULT (datetime('now'))
-);
-
--- Participants = contacts (humans + bots, uniform). The operator/host is implicit, not a row.
-CREATE TABLE message_room_members (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  room_id    INTEGER NOT NULL REFERENCES message_rooms(id) ON DELETE CASCADE,
-  contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
-  role       TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('host','member')),
-  joined_at  TEXT DEFAULT (datetime('now')),
-  UNIQUE(room_id, contact_id)
-);
-
--- Room messages, kept SEPARATE from the 1:1 `messages` table.
 CREATE TABLE room_messages (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,
-  room_id           INTEGER NOT NULL REFERENCES message_rooms(id) ON DELETE CASCADE,
-  msg_uid           TEXT NOT NULL,         -- stable logical id (origin-assigned, preserved through re-fan); cross-participant dedup key
+  group_id          INTEGER NOT NULL REFERENCES contact_groups(id) ON DELETE CASCADE,
+  msg_uid           TEXT NOT NULL,         -- origin-assigned, preserved through re-fan; cross-participant dedup key
   sender_contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,  -- NULL = you (the host/operator)
   sender_label      TEXT,                  -- display-name snapshot (resilient if contact later deleted)
   author_kind       TEXT NOT NULL DEFAULT 'human' CHECK (author_kind IN ('human','bot')),
@@ -60,14 +49,16 @@ CREATE TABLE room_messages (
   is_read           INTEGER DEFAULT 0,
   created_at        TEXT DEFAULT (datetime('now'))
 );
-CREATE INDEX idx_room_messages_room ON room_messages(room_id, created_at);
-CREATE UNIQUE INDEX idx_room_messages_msg_uid ON room_messages(room_id, msg_uid);
+CREATE INDEX idx_room_messages_group ON room_messages(group_id, created_at);
+CREATE UNIQUE INDEX idx_room_messages_msg_uid ON room_messages(group_id, msg_uid);
 ```
 
 Supporting points:
-- **Local bots become `is_bot` contacts on their own host** (derived pubkey via `deriveBotIdentity`), upserted by an idempotent helper `ensureLocalBotContact(botId)` when you add one to a room — so membership is uniformly `contact_id`.
+- **`room_uid` is the shared key.** Each participating instance has its OWN `contact_groups` row carrying the same `room_uid`: the host creates it at room creation; a participant materializes its local row on `room_join` (and populates `contact_group_members` from the join's `members[]`). All `room_message` envelopes carry `room_uid`; each instance maps it to its local `group_id`.
+- **Local bots become `is_bot` contacts on their own host** (derived pubkey via `deriveBotIdentity`), upserted by an idempotent helper `ensureLocalBotContact(botId)` when added to a room — so membership is uniformly `contact_id`.
 - **`author_kind` is the loop-safety keystone.** Bots only run a turn on `author_kind='human'` rows; a bot's reply is `author_kind='bot'`, ignored by every bot.
 - The host/operator is **implicit** (the room owner), not a member row. Members = the others.
+- The legacy `group_message` broadcast subtype stays distinct from the new `room_message` subtype; no behavior change to `crow_send_group_message` in this phase.
 
 ## Transport envelope
 
@@ -138,7 +129,7 @@ Node built-in runner (`node --test --test-force-exit tests/<file>.test.js`):
 
 ## Files touched (anticipated)
 
-- `scripts/init-db.js` — 3 new tables (schema-change deploy: run `CROW_DB_PATH=<path> node scripts/init-db.js` per data dir first, verify, then restart).
+- `scripts/init-db.js` — 3 new `contact_groups` columns (`addColumnIfMissing`) + partial unique index on `room_uid` + the new `room_messages` table (schema-change deploy: run `CROW_DB_PATH=<path> node scripts/init-db.js` per data dir first, verify, then restart).
 - `servers/gateway/dashboard/panels/messages/` — `html.js` / `client.js` / `css.js` / `data-queries.js` / `api-handlers.js` (New Group, room list, room thread, settings).
 - `servers/gateway/dashboard/panels/messages/` new module(s) for room store + fan-out (libsql side), mirroring the `crow-messages-admin.js` pattern.
 - `servers/sharing/` — room envelope send (a `room_message`/`room_join` sender alongside `rooms.js` social senders) + inbound `room_message`/`room_join` handling in the peer-message path.
