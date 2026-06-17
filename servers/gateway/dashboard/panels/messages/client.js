@@ -117,6 +117,13 @@ export function messagesClientJS(opts) {
     if (dialog) dialog.classList.toggle('visible');
   }
 
+  function msgShowCreateGroupDialog() {
+    document.querySelectorAll('.msg-invite-dialog').forEach(function (d) { d.classList.remove('visible'); });
+    var dialog = document.getElementById('invite-group');
+    if (dialog) dialog.classList.toggle('visible');
+    var pop = document.getElementById('msg-popover'); if (pop) pop.classList.remove('visible');
+  }
+
   function msgOpenBotDirectory() {
     var m = document.getElementById('bot-dir-modal');
     if (m) m.classList.add('visible');
@@ -142,6 +149,10 @@ export function messagesClientJS(opts) {
     var openId = params.get('open');
     if (openId && /^\d+$/.test(openId)) {
       setTimeout(function () { try { msgSelectItem('peer', parseInt(openId, 10)); } catch (e) {} }, 0);
+    }
+    var openRoom = params.get('openRoom');
+    if (openRoom && /^\d+$/.test(openRoom)) {
+      setTimeout(function () { try { msgSelectRoom(parseInt(openRoom, 10)); } catch (e) {} }, 0);
     }
   }
 
@@ -180,6 +191,23 @@ export function messagesClientJS(opts) {
     } else {
       loadPeerConversation(id);
     }
+  }
+
+  // Rooms (multi-party). groupId is numeric; _activeItem.id holds the groupId.
+  function msgSelectRoom(groupId) {
+    var gid = String(groupId);
+    if (_activeItem && _activeItem.type === 'room' && String(_activeItem.id) === gid) return;
+    _activeItem = { type: 'room', id: gid };
+    _replyingTo = null;
+    _pendingAttachments = [];
+
+    document.querySelectorAll('.msg-avatar-item').forEach(function(item) {
+      var match = item.dataset.type === 'room' && String(item.dataset.id) === gid;
+      item.classList.toggle('active', match);
+    });
+
+    var pop = document.getElementById('msg-popover'); if (pop) pop.classList.remove('visible');
+    loadRoomConversation(gid);
   }
 
   // === AI Chat ===
@@ -685,6 +713,91 @@ export function messagesClientJS(opts) {
     if (sendBtn) sendBtn.disabled = false;
   }
 
+  // === Rooms (multi-party) ===
+  async function loadRoomConversation(groupId) {
+    var chat = document.getElementById('msg-chat');
+    chat.textContent = '';
+    try {
+      var r = await fetch('/api/messages/room/' + encodeURIComponent(groupId));
+      var data = await r.json();
+      var room = data.room;
+      var msgs = data.messages || [];
+      _messages = msgs;
+      if (!room) {
+        chat.appendChild(el('div', { className: 'msg-empty' }, [
+          el('div', {}, [el('h3', { text: 'Room not found' })])
+        ]));
+        return;
+      }
+      _activeItem = { type: 'room', id: String(groupId), room: room, members: data.members || [] };
+      renderChatUI(chat, {
+        type: 'room',
+        id: String(groupId),
+        name: room.name || 'Room',
+        room: room,
+        members: data.members || [],
+      }, msgs);
+    } catch(e) { console.error('Failed to load room conversation:', e); }
+  }
+
+  async function sendRoomMessage() {
+    if (_sending || !_activeItem || _activeItem.type !== 'room') return;
+    var input = document.getElementById('msg-input');
+    var text = (input.value || '').trim();
+    if (!text) return;
+    input.value = '';
+    input.style.height = 'auto';
+    try {
+      await fetch('/api/messages/room/' + encodeURIComponent(_activeItem.id) + '/send', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text }),
+      });
+    } catch(e) { console.error('Failed to send room message:', e); }
+    loadRoomConversation(_activeItem.id);
+  }
+
+  // --- Room settings affordances ---
+  async function roomSetMode(groupId, mode) {
+    try {
+      await fetch('/api/messages/room/' + encodeURIComponent(groupId) + '/mode', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: mode }),
+      });
+    } catch(e) { console.error('roomSetMode failed:', e); }
+    loadRoomConversation(groupId);
+  }
+  async function roomRename(groupId) {
+    var name = prompt('${tJs("messages.roomRename", lang)}');
+    if (!name || !name.trim()) return;
+    try {
+      await fetch('/api/messages/room/' + encodeURIComponent(groupId) + '/rename', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }),
+      });
+    } catch(e) { console.error('roomRename failed:', e); }
+    loadRoomConversation(groupId);
+  }
+  async function roomDelete(groupId) {
+    if (!confirm('${tJs("messages.roomDelete", lang)}?')) return;
+    try {
+      await fetch('/api/messages/room/' + encodeURIComponent(groupId), { method: 'DELETE' });
+    } catch(e) { console.error('roomDelete failed:', e); }
+    _activeItem = null;
+    window.location.href = '/dashboard/messages';
+  }
+  async function roomRemoveMember(groupId, contactId) {
+    try {
+      await fetch('/api/messages/room/' + encodeURIComponent(groupId) + '/members/' + encodeURIComponent(contactId), { method: 'DELETE' });
+    } catch(e) { console.error('roomRemoveMember failed:', e); }
+    loadRoomConversation(groupId);
+  }
+  async function roomAddMember(groupId, contactId) {
+    if (!contactId) return;
+    try {
+      await fetch('/api/messages/room/' + encodeURIComponent(groupId) + '/members', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contact_id: contactId }),
+      });
+    } catch(e) { console.error('roomAddMember failed:', e); }
+    loadRoomConversation(groupId);
+  }
+
   // === Shared Chat UI Rendering ===
   function renderChatUI(container, headerData, msgs) {
     container.textContent = '';
@@ -732,6 +845,48 @@ export function messagesClientJS(opts) {
               .then(function() { window.location.href = '/dashboard/messages'; });
           }
         },
+      }));
+    }
+
+    if (headerData.type === 'room') {
+      var gid = headerData.id;
+      var room = headerData.room || {};
+      var members = headerData.members || [];
+
+      // Bot-reply mode selector
+      var modeSel = el('select', { className: 'msg-model-select', title: '${tJs("messages.roomMode", lang)}', onchange: function() {
+        roomSetMode(gid, this.value);
+      }});
+      var optA = el('option', { value: 'addressed', text: '${tJs("messages.roomModeAddressed", lang)}' });
+      var optB = el('option', { value: 'always', text: '${tJs("messages.roomModeAlways", lang)}' });
+      if ((room.mode || 'addressed') === 'always') optB.selected = true; else optA.selected = true;
+      modeSel.appendChild(optA);
+      modeSel.appendChild(optB);
+      header.appendChild(modeSel);
+
+      // Member chips with remove (×)
+      var memberWrap = el('div', { css: 'display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin:0 0.4rem' });
+      for (var mi = 0; mi < members.length; mi++) {
+        (function(mem) {
+          var chip = el('span', { className: 'msg-room-chip' });
+          if (Number(mem.is_bot)) chip.appendChild(el('span', { className: 'msg-bot-badge', text: 'bot', css: 'margin-right:3px' }));
+          chip.appendChild(document.createTextNode(mem.display_name || (mem.crow_id || '').substring(0, 10)));
+          chip.appendChild(el('button', {
+            css: 'background:none;border:none;color:var(--crow-text-muted);cursor:pointer;margin-left:3px;padding:0;font-size:0.8rem',
+            text: '\\u00d7',
+            onclick: function() { roomRemoveMember(gid, mem.id); },
+          }));
+          memberWrap.appendChild(chip);
+        })(members[mi]);
+      }
+      header.appendChild(memberWrap);
+
+      header.appendChild(el('button', { className: 'msg-info-toggle', text: '${tJs("messages.roomRename", lang)}', onclick: function() { roomRename(gid); } }));
+      header.appendChild(el('button', {
+        className: 'msg-info-toggle',
+        css: 'color:var(--crow-error)',
+        text: '${tJs("messages.roomDelete", lang)}',
+        onclick: function() { roomDelete(gid); },
       }));
     }
 
@@ -824,6 +979,7 @@ export function messagesClientJS(opts) {
     if (!_activeItem) return;
     if (_activeItem.type === 'ai') sendAiMessage();
     else if (_activeItem.type === 'peer') sendPeerMessage();
+    else if (_activeItem.type === 'room') sendRoomMessage();
   }
 
   // === Message Bubble Rendering ===
@@ -844,6 +1000,17 @@ export function messagesClientJS(opts) {
     var div = el('div', { className: 'msg-bubble ' + (isSent ? 'sent' : 'received') });
     var msgId = msg.id || msg.nostr_event_id || null;
     if (msgId) div.dataset.msgId = msgId;
+
+    // Room messages carry a per-sender label (and bot badge for bot authors).
+    if (_activeItem && _activeItem.type === 'room') {
+      var senderName = msg.sender_name || msg.sender_label || (isSent ? '${tJs("messages.you", lang)}' : '${tJs("messages.them", lang)}');
+      var senderLine = el('div', { className: 'msg-bubble-sender' });
+      if (msg.author_kind === 'bot' || Number(msg.sender_is_bot)) {
+        senderLine.appendChild(el('span', { className: 'msg-bot-badge', text: 'bot', css: 'margin-right:4px' }));
+      }
+      senderLine.appendChild(document.createTextNode(senderName));
+      div.appendChild(senderLine);
+    }
 
     // Reply preview (thread)
     var threadId = msg.thread_id;

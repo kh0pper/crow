@@ -71,6 +71,13 @@ export function buildMessagesHTML(data) {
         <div class="msg-avatar msg-avatar-ai">${label}</div>
         <span class="msg-unread-badge" data-badge-ai="${item.id}"></span>
       </div>`;
+    } else if (item.type === "room") {
+      const label = escapeHtml(initials(item.displayName));
+      const unreadClass = item.unread > 0 ? " visible" : "";
+      return `<div class="msg-avatar-item" data-type="room" data-id="${item.groupId}" onclick="msgSelectRoom(${item.groupId})" title="${escapeHtml(item.displayName)}">
+        <div class="msg-avatar msg-avatar-room">${label}</div>
+        <span id="badge-room-${item.groupId}" class="msg-unread-badge${unreadClass}" data-badge-room="${item.groupId}">${item.unread > 0 ? item.unread : ""}</span>
+      </div>`;
     } else {
       const color = peerColor(item.id);
       const label = escapeHtml(initials(item.displayName));
@@ -83,6 +90,12 @@ export function buildMessagesHTML(data) {
       </div>`;
     }
   }).join("");
+
+  // Member picker source for the New Group dialog: peer contacts (people + bots)
+  // already in the unified list. Normalized to { id, display_name, crow_id, is_bot }.
+  const contactsForPicker = items
+    .filter((it) => it.type === "peer")
+    .map((it) => ({ id: it.id, display_name: it.displayName, crow_id: it.crowId, is_bot: it.isBot }));
 
   // Invite result banner
   let inviteBanner = "";
@@ -141,6 +154,31 @@ export function buildMessagesHTML(data) {
         <div class="msg-popover-item" onclick="msgOpenBotDirectory()">
           <div class="msg-popover-item-title">${t("messages.messageABot", lang)}</div>
           <div class="msg-popover-item-desc">${t("messages.messageABotDesc", lang)}</div>
+        </div>
+        <div class="msg-popover-item" onclick="msgShowCreateGroupDialog()">
+          <div class="msg-popover-item-title">${t("messages.newGroup", lang)}</div>
+          <div class="msg-popover-item-desc">${t("messages.newGroupDesc", lang)}</div>
+        </div>
+        <div class="msg-invite-dialog" id="invite-group">
+          <form method="POST">
+            <input type="hidden" name="action" value="create_room">
+            <input name="room_name" placeholder="${t("messages.groupName", lang)}" required maxlength="80" class="msg-input">
+            <label class="msg-room-mode">${t("messages.roomMode", lang)}:
+              <select name="mode">
+                <option value="addressed">${t("messages.roomModeAddressed", lang)}</option>
+                <option value="always">${t("messages.roomModeAlways", lang)}</option>
+              </select>
+            </label>
+            <div class="msg-member-picker">
+              <div class="msg-member-picker-label">${t("messages.groupMembers", lang)}</div>
+              ${(contactsForPicker || []).map((c) => `
+                <label class="msg-member-opt"><input type="checkbox" name="member_ids" value="${c.id}">
+                  ${c.is_bot ? '<span class="msg-bot-badge">bot</span> ' : ""}${escapeHtml(c.display_name || c.crow_id)}</label>`).join("")}
+            </div>
+            ${csrf || ""}
+            <button type="submit" class="msg-send-btn" style="width:100%;font-size:0.8rem;padding:6px">${t("messages.createGroupBtn", lang)}</button>
+          </form>
+          <div class="msg-room-hint">${t("messages.roomLeaveHint", lang)}</div>
         </div>
         <div class="msg-invite-dialog" id="invite-generate">
           <form method="POST">
