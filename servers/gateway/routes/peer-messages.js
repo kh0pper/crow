@@ -223,5 +223,83 @@ export default function peerMessagesRouter(dashboardAuth) {
     }
   });
 
+  // --- Rooms (multi-party) ---
+  router.get("/api/messages/room/:groupId", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { getRoom, listRoomMembers, getRoomMessages } = await import("../dashboard/panels/messages/rooms-store.js");
+      const groupId = parseInt(req.params.groupId, 10);
+      const room = await getRoom(db, groupId);
+      if (!room) return res.status(404).json({ error: "Room not found" });
+      await db.execute({ sql: "UPDATE room_messages SET is_read = 1 WHERE group_id = ? AND direction = 'received'", args: [groupId] });
+      res.json({ room, members: await listRoomMembers(db, groupId), messages: await getRoomMessages(db, groupId) });
+    } catch (err) { res.status(500).json({ error: err.message }); } finally { db.close(); }
+  });
+
+  router.post("/api/messages/room/:groupId/send", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { sendOperatorRoomMessage } = await import("../dashboard/panels/messages/room-send.js");
+      const { getManagersOrNull } = await import("../../sharing/managers.js");
+      const message = (req.body && req.body.message || "").toString();
+      if (!message.trim()) return res.status(400).json({ error: "Message required" });
+      const r = await sendOperatorRoomMessage({ db, managers: getManagersOrNull(), groupId: parseInt(req.params.groupId, 10), message: message.trim() });
+      res.json(r);
+    } catch (err) { res.status(500).json({ error: err.message }); } finally { db.close(); }
+  });
+
+  router.post("/api/messages/room/:groupId/members", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { addMember } = await import("../dashboard/panels/messages/rooms-store.js");
+      const groupId = parseInt(req.params.groupId, 10);
+      if (req.body.bot_id) {
+        const { ensureLocalBotContact } = await import("../dashboard/shared/ensure-local-bot-contact.js");
+        const cid = await ensureLocalBotContact(db, String(req.body.bot_id).trim());
+        if (cid != null) await addMember(db, groupId, cid);
+      } else if (req.body.contact_id) {
+        await addMember(db, groupId, parseInt(req.body.contact_id, 10));
+      }
+      res.json({ ok: true });
+    } catch (err) { res.status(500).json({ error: err.message }); } finally { db.close(); }
+  });
+
+  router.delete("/api/messages/room/:groupId/members/:contactId", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { removeMember } = await import("../dashboard/panels/messages/rooms-store.js");
+      await removeMember(db, parseInt(req.params.groupId, 10), parseInt(req.params.contactId, 10));
+      res.json({ ok: true });
+    } catch (err) { res.status(500).json({ error: err.message }); } finally { db.close(); }
+  });
+
+  router.post("/api/messages/room/:groupId/mode", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { setMode } = await import("../dashboard/panels/messages/rooms-store.js");
+      await setMode(db, parseInt(req.params.groupId, 10), req.body.mode === "always" ? "always" : "addressed");
+      res.json({ ok: true });
+    } catch (err) { res.status(500).json({ error: err.message }); } finally { db.close(); }
+  });
+
+  router.post("/api/messages/room/:groupId/rename", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { renameRoom } = await import("../dashboard/panels/messages/rooms-store.js");
+      const name = (req.body.name || "").toString().trim();
+      if (name) await renameRoom(db, parseInt(req.params.groupId, 10), name);
+      res.json({ ok: true });
+    } catch (err) { res.status(500).json({ error: err.message }); } finally { db.close(); }
+  });
+
+  router.delete("/api/messages/room/:groupId", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { deleteRoom } = await import("../dashboard/panels/messages/rooms-store.js");
+      await deleteRoom(db, parseInt(req.params.groupId, 10));
+      res.json({ ok: true });
+    } catch (err) { res.status(500).json({ error: err.message }); } finally { db.close(); }
+  });
+
   return router;
 }
