@@ -10,6 +10,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createSharingServer } from "../../../../sharing/server.js";
 import { getManagersOrNull } from "../../../../sharing/managers.js";
 import { markContactIsBot } from "../../shared/mark-contact-bot.js";
+import { createRoom, listRoomMembers } from "./rooms-store.js";
+import { buildRoomJoinEnvelope, fanOut } from "../../../../sharing/room-fanout.js";
 
 /**
  * Create a connected sharing MCP client.
@@ -27,7 +29,8 @@ async function getSharingClient() {
  * Handle POST actions from the messages panel.
  * Returns true if the action was handled (response sent), false otherwise.
  */
-export async function handlePostAction(req, res, { db, sharingClientFactory = getSharingClient }) {
+export async function handlePostAction(req, res, { db, sharingClientFactory = getSharingClient, _managers = null }) {
+  const managers = _managers || getManagersOrNull();
   const { action } = req.body;
 
   if (action === "send_peer" && req.body.contact_id && req.body.message) {
@@ -67,7 +70,6 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
     // Close Hypercore feeds for the blocked contact to free FDs.
     // NOTE: unblocking does NOT re-init feeds — no lazy re-init path exists for
     // contacts. A restart or re-invite is needed to reopen feeds after an unblock.
-    const managers = getManagersOrNull();
     if (managers) {
       try {
         if (managers.syncManager) {
@@ -185,6 +187,24 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
       console.error("[messages] dir bot materialize failed:", err.message);
     }
     return res.redirectAfterPost(redirectTo);
+  }
+
+  if (action === "create_room" && req.body.room_name) {
+    // member_ids arrives as repeated checkbox fields (array) OR a comma string.
+    const rawMembers = req.body.member_ids;
+    const memberIds = (Array.isArray(rawMembers) ? rawMembers : String(rawMembers || "").split(","))
+      .map((s) => parseInt(String(s).trim(), 10)).filter((n) => Number.isInteger(n));
+    const mode = req.body.mode === "always" ? "always" : "addressed";
+    const hostCrowId = managers?.identity?.crowId || null;
+    const { groupId, roomUid } = await createRoom(db, { name: req.body.room_name.trim(), memberContactIds: memberIds, mode, hostCrowId });
+    // Notify members so their client materializes the room.
+    if (managers?.nostrManager) {
+      const members = await listRoomMembers(db, groupId);
+      const roster = members.map((m) => ({ crow_id: m.crow_id, display_name: m.display_name }));
+      const join = buildRoomJoinEnvelope({ roomUid, roomName: req.body.room_name.trim(), hostCrowId, members: roster });
+      await fanOut({ nostrManager: managers.nostrManager, members, envelope: join, log: (m) => console.error("[rooms]", m) });
+    }
+    return res.redirectAfterPost("/dashboard/messages?openRoom=" + groupId);
   }
 
   return false; // Action not handled
