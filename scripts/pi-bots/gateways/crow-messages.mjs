@@ -25,12 +25,38 @@ export async function checkRequirements() {
  * Core router for one decrypted inbound DM. Dependency-injected for testing.
  * @returns {Promise<void>}
  */
-export async function handleCrowMessageEvent({ botId, senderPubkey, decrypted, db, handleInbound, sendDM, log, allowPaired = false }) {
+export async function handleCrowMessageEvent({
+  botId, senderPubkey, decrypted, db, handleInbound, sendDM, log, allowPaired = false,
+  hostXOnly = null, botDisplayName = null, botCrowId = null, sendRoomReply = null,
+}) {
   const pk = xOnly(senderPubkey); // the cryptographically-verified signer of the event
   // Control message?
   if (typeof decrypted === "string" && decrypted.startsWith("{")) {
     let payload = null;
     try { payload = JSON.parse(decrypted); } catch { payload = null; }
+    if (payload && payload.type === "crow_social" && payload.subtype === "room_message") {
+      // Trust: accept room traffic ONLY from our own host instance (the signer of
+      // this DM). Payload fields (author/host_crow_id) are LABELS, never trusted.
+      if (!hostXOnly || pk !== xOnly(hostXOnly)) { log("room drop: signer!=host bot=" + botId); return; }
+      const p = payload.payload || {};
+      const author = p.author || {};
+      // Loop-safety: react ONLY to human-authored messages.
+      if (author.kind !== "human") return;
+      // Addressing: the host already encoded the mode decision into addressed_to
+      // (all bots in 'always' mode, matched bots otherwise). We only check membership.
+      const me = String(botDisplayName || "").toLowerCase();
+      const addressed = Array.isArray(p.addressed_to) ? p.addressed_to.map((s) => String(s).toLowerCase()) : [];
+      if (!me || !addressed.includes(me)) return;
+      await handleInbound({
+        bot_id: botId,
+        gateway_thread_id: "crow-room:" + p.room_uid,
+        user_message: p.text || "",
+        gateway_type: "crow-messages",
+        sendReply: async (text) => { if (sendRoomReply) await sendRoomReply(p.room_uid, p.room_name, text); },
+        log: (m) => log("  [bridge:" + botId + "] " + m),
+      });
+      return;
+    }
     if (payload && payload.type === "crow_social" && payload.subtype === "bot_invite_accept") {
       // Idempotent re-accept: an already-authorized sender (e.g. a second device,
       // or a duplicate that slipped the gate) just gets re-acked, no token burn.
@@ -76,6 +102,15 @@ export async function start({ bot_id, gw, log }) {
   catch (e) { log("crow-messages bot=" + bot_id + " no instance seed: " + e.message); try { db.close(); } catch {} return { stop() {} }; }
   const botIdentity = deriveBotIdentity(seed, bot_id);
 
+  const { deriveInstanceIdentity } = await import("../../../servers/sharing/identity.js");
+  const hostIdentity = deriveInstanceIdentity(seed);
+  const hostXOnly = xOnly(hostIdentity.secp256k1Pubkey);
+  const botDisplayName = (() => {
+    try { return db.prepare("SELECT display_name FROM pi_bot_defs WHERE bot_id=?").get(bot_id)?.display_name || bot_id; }
+    catch { return bot_id; }
+  })();
+  const { randomBytes } = await import("node:crypto");
+
   const allowPaired = !!(gw && gw.allow_paired_instances);
   try { cmStore.pruneSeen(db); } catch { /* best-effort */ }
   const relays = await connectRelays(cmStore.resolveRelays(db));
@@ -103,6 +138,26 @@ export async function start({ bot_id, gw, log }) {
       },
       log,
       allowPaired,
+      hostXOnly,
+      botDisplayName,
+      botCrowId: botIdentity.crowId,
+      sendRoomReply: async (roomUid, roomName, text) => {
+        // Reply to the HOST as a bot-authored room_message; one envelope per chunk,
+        // each with its own msg_uid so the host dedups + relays each bubble.
+        await chunkedSend(async (chunk) => {
+          const env = JSON.stringify({
+            type: "crow_social", version: 1, subtype: "room_message",
+            payload: {
+              room_uid: roomUid, room_name: roomName, host_crow_id: hostIdentity.crowId,
+              msg_uid: randomBytes(16).toString("hex"),
+              author: { kind: "bot", crow_id: botIdentity.crowId, display_name: botDisplayName },
+              text: chunk, addressed_to: [], ts: new Date().toISOString(),
+            },
+          });
+          const ev = buildDM(botIdentity.secp256k1Priv, hostXOnly, env);
+          await publish(relays, ev);
+        }, text, { log });
+      },
     }).catch((e) => log("event handler error: " + (e && e.message))));
   });
 

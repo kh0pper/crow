@@ -210,6 +210,11 @@ export function deriveBotIdentity(seed, botId) {
   };
 }
 
+/** The instance's OWN identity from a raw seed (same derivation as loadOrCreateIdentity). */
+export function deriveInstanceIdentity(seed) {
+  return deriveIdentity(seed); // { crowId, secp256k1Pubkey, secp256k1Priv, ... }
+}
+
 /**
  * Load the raw instance seed from a SPECIFIC data dir's identity.json. Used by
  * the pi-bots host to derive bot keys from the SAME instance the bot DB belongs
