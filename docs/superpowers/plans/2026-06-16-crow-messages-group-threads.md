@@ -15,18 +15,21 @@
 ## File structure
 
 **New files:**
-- `servers/gateway/dashboard/shared/ensure-local-bot-contact.js` — upsert a local bot as an `is_bot` contact (derived pubkey).
+- `servers/gateway/dashboard/shared/ensure-local-bot-contact.js` — upsert a local bot as an `is_bot` contact (derived pubkeys, name from `pi_bot_defs`, `origin='local-bot'`).
 - `servers/gateway/dashboard/panels/messages/rooms-store.js` — libsql room + room-message store (room CRUD, members, messages, `computeAddressedTo`).
-- `servers/sharing/room-fanout.js` — envelope builders + `fanOut` (pure-ish; injected `nostrManager`).
+- `servers/gateway/dashboard/panels/messages/room-send.js` — `sendOperatorRoomMessage` (host fan-out vs participant-to-host); used by the JSON send route + tests.
+- `servers/sharing/room-fanout.js` — envelope builders + `fanOut` (uses `nostrManager.sendControl`).
 - `servers/sharing/room-inbound.js` — `handleInboundRoomEnvelope` (host re-fan + participant materialize); wired into `boot.js`.
-- Tests: `tests/rooms-store.test.js`, `tests/room-fanout.test.js`, `tests/room-inbound.test.js`, `tests/room-adapter.test.js`, `tests/messages-room-actions.test.js`, `tests/ensure-local-bot-contact.test.js`.
+- Tests: `tests/rooms-schema.test.js`, `tests/ensure-local-bot-contact.test.js`, `tests/rooms-store.test.js`, `tests/room-fanout.test.js`, `tests/room-inbound.test.js`, `tests/room-adapter.test.js`, `tests/messages-room-actions.test.js`, `tests/room-send.test.js`, `tests/messages-room-i18n.test.js`.
 
 **Modified files:**
 - `scripts/init-db.js` — 3 `contact_groups` columns + partial unique index + `room_messages` table.
 - `servers/sharing/identity.js` — export `deriveInstanceIdentity(seed)`.
-- `scripts/pi-bots/gateways/crow-messages.mjs` — `room_message` branch + room-aware reply + room `gatewayHint`.
+- `servers/sharing/nostr.js` — add `sendControl` (publish-only, no 1:1 caching).
+- `scripts/pi-bots/gateways/crow-messages.mjs` — `room_message` branch + room-aware reply.
 - `servers/sharing/boot.js` — route `room_message` / `room_join` subtypes to `handleInboundRoomEnvelope`.
-- `servers/gateway/dashboard/panels/messages/` — `api-handlers.js`, `data-queries.js`, `html.js`, `client.js`, `css.js`.
+- `servers/gateway/routes/peer-messages.js` — room JSON routes (thread/send/read/members/mode/rename/delete).
+- `servers/gateway/dashboard/panels/messages/` — `api-handlers.js` (create_room), `data-queries.js` (rooms in list + filter local-bot peers), `html.js` (New Group dialog), `client.js` (SPA room thread), `css.js`.
 - `servers/gateway/dashboard/shared/i18n.js` — EN + ES keys.
 
 **Shared test helper** (define inline at the top of each libsql test file that needs it):
@@ -185,20 +188,25 @@ function freshLibsql() {
 }
 
 // Inject a stub identity resolver so the test needs no identity.json on disk.
-const stubIdentity = (botId) => ({ crowId: "crow:bot-" + botId, secp256k1Pubkey: "02" + "a".repeat(64) });
+const stubIdentity = (botId) => ({ crowId: "crow:bot-" + botId, secp256k1Pubkey: "02" + "a".repeat(64), ed25519Pubkey: "b".repeat(64) });
 
-test("creates an is_bot contact with the derived pubkey, idempotently", async () => {
+test("creates an is_bot contact with derived pubkeys + pi_bot_defs name; idempotent", async () => {
   const { db, cleanup } = freshLibsql();
   try {
-    const id1 = await ensureLocalBotContact(db, "bot1", { displayName: "Research Bot", _identityFor: stubIdentity });
+    // The bot's friendly name comes from pi_bot_defs so it aligns with what the
+    // adapter checks addressed_to against (see Task 7).
+    await db.execute({ sql: "INSERT INTO pi_bot_defs (bot_id, display_name, definition, enabled) VALUES ('bot1','Research Bot','{}',1)", args: [] });
+    const id1 = await ensureLocalBotContact(db, "bot1", { _identityFor: stubIdentity });
     assert.ok(id1 > 0);
-    const { rows } = await db.execute({ sql: "SELECT crow_id, display_name, is_bot, secp256k1_pubkey FROM contacts WHERE id = ?", args: [id1] });
+    const { rows } = await db.execute({ sql: "SELECT crow_id, display_name, is_bot, secp256k1_pubkey, ed25519_pubkey, origin FROM contacts WHERE id = ?", args: [id1] });
     assert.equal(rows[0].crow_id, "crow:bot-bot1");
     assert.equal(Number(rows[0].is_bot), 1);
-    assert.equal(rows[0].display_name, "Research Bot");
+    assert.equal(rows[0].display_name, "Research Bot", "name sourced from pi_bot_defs");
     assert.equal(rows[0].secp256k1_pubkey, "02" + "a".repeat(64));
+    assert.equal(rows[0].ed25519_pubkey, "b".repeat(64), "ed25519 NOT NULL satisfied");
+    assert.equal(rows[0].origin, "local-bot", "marked so it is filtered from the 1:1 peer list");
     // Idempotent: same crow_id → same row id, no duplicate.
-    const id2 = await ensureLocalBotContact(db, "bot1", { displayName: "Research Bot", _identityFor: stubIdentity });
+    const id2 = await ensureLocalBotContact(db, "bot1", { _identityFor: stubIdentity });
     assert.equal(id2, id1);
     const { rows: all } = await db.execute("SELECT COUNT(*) AS n FROM contacts");
     assert.equal(Number(all[0].n), 1);
@@ -217,9 +225,11 @@ Expected: FAIL (module not found).
 ```js
 /**
  * Upsert one of THIS instance's bots as an is_bot contact, so it can be a uniform
- * room member (phase 3a). The pubkey is DERIVED (deriveBotIdentity), never stored
- * elsewhere — same anchor the pi-bots adapter subscribes on. Idempotent on crow_id.
- * Returns the contact id, or null on any failure (never throws).
+ * room member (phase 3a). The pubkeys are DERIVED (deriveBotIdentity), never stored
+ * elsewhere — same anchor the pi-bots adapter subscribes on. The display name is
+ * sourced from pi_bot_defs so it MATCHES what the adapter checks addressed_to
+ * against (Task 7). Marked origin='local-bot' so the 1:1 peer list filters it out.
+ * Idempotent on crow_id. Returns the contact id, or null on any failure (never throws).
  */
 import { dirname } from "node:path";
 import { loadInstanceSeed, deriveBotIdentity } from "../../../sharing/identity.js";
@@ -227,7 +237,16 @@ import { botsDbPath } from "../../../../scripts/pi-bots/instance-paths.mjs";
 
 function defaultIdentityFor(botId) {
   const seed = loadInstanceSeed(dirname(botsDbPath()));
-  return deriveBotIdentity(seed, botId); // { crowId, secp256k1Pubkey, ... }
+  return deriveBotIdentity(seed, botId); // { crowId, secp256k1Pubkey, ed25519Pubkey, ... }
+}
+
+async function resolveBotName(db, botId, override) {
+  if (override) return override;
+  try {
+    const { rows } = await db.execute({ sql: "SELECT display_name FROM pi_bot_defs WHERE bot_id = ?", args: [botId] });
+    if (rows[0]?.display_name) return rows[0].display_name;
+  } catch { /* table/row may be absent */ }
+  return botId;
 }
 
 export async function ensureLocalBotContact(db, botId, { displayName = null, _identityFor = defaultIdentityFor } = {}) {
@@ -235,19 +254,20 @@ export async function ensureLocalBotContact(db, botId, { displayName = null, _id
   try {
     const ident = _identityFor(botId);
     const crowId = ident.crowId;
-    const pubkey = ident.secp256k1Pubkey;
-    const name = displayName || botId;
+    const secp = ident.secp256k1Pubkey;
+    const ed = ident.ed25519Pubkey; // contacts.ed25519_pubkey is NOT NULL (init-db.js:456)
+    const name = await resolveBotName(db, botId, displayName);
     const { rows } = await db.execute({ sql: "SELECT id FROM contacts WHERE crow_id = ? LIMIT 1", args: [crowId] });
     if (rows.length) {
       await db.execute({
-        sql: "UPDATE contacts SET is_bot = 1, display_name = COALESCE(?, display_name), secp256k1_pubkey = ? WHERE id = ?",
-        args: [name, pubkey, rows[0].id],
+        sql: "UPDATE contacts SET is_bot = 1, display_name = ?, secp256k1_pubkey = ?, ed25519_pubkey = ?, origin = 'local-bot' WHERE id = ?",
+        args: [name, secp, ed, rows[0].id],
       });
       return Number(rows[0].id);
     }
     const res = await db.execute({
-      sql: "INSERT INTO contacts (crow_id, display_name, is_bot, secp256k1_pubkey, contact_type) VALUES (?,?,1,?, 'crow')",
-      args: [crowId, name, pubkey],
+      sql: "INSERT INTO contacts (crow_id, display_name, is_bot, secp256k1_pubkey, ed25519_pubkey, contact_type, origin) VALUES (?,?,1,?,?, 'crow', 'local-bot')",
+      args: [crowId, name, secp, ed],
     });
     return Number(res.lastInsertRowid);
   } catch (err) {
@@ -299,7 +319,7 @@ function freshLibsql() {
   return { dir, db, cleanup() { try { db.close(); } catch {} rmSync(dir, { recursive: true, force: true }); } };
 }
 async function mkContact(db, crowId, name, isBot = 0) {
-  const r = await db.execute({ sql: "INSERT INTO contacts (crow_id, display_name, is_bot, secp256k1_pubkey, contact_type) VALUES (?,?,?,?, 'crow')", args: [crowId, name, isBot, "02" + crowId.slice(-1).repeat(64)] });
+  const r = await db.execute({ sql: "INSERT INTO contacts (crow_id, display_name, is_bot, secp256k1_pubkey, ed25519_pubkey, contact_type) VALUES (?,?,?,?,?, 'crow')", args: [crowId, name, isBot, "02" + crowId.slice(-1).repeat(64), "e".repeat(64)] });
   return Number(r.lastInsertRowid);
 }
 
@@ -587,7 +607,8 @@ test("buildRoomMessageEnvelope shapes a crow_social room_message", () => {
 
 test("fanOut sends to every member except the excluded origin; returns sent/failed", async () => {
   const calls = [];
-  const nostrManager = { async sendMessage(contact, envelope) {
+  // fanOut MUST use sendControl (publish-only, no 1:1 messages caching), NOT sendMessage.
+  const nostrManager = { async sendControl(contact, envelope) {
     if (contact.id === 3) throw new Error("relay down");
     calls.push([contact.id, JSON.parse(envelope).subtype]);
     return { eventId: "e", relays: ["wss://x"] };
@@ -638,17 +659,43 @@ export function buildRoomJoinEnvelope({ roomUid, roomName, hostCrowId, members =
 /**
  * Send `envelope` to each member contact except `excludeContactId`. Best-effort:
  * one failed recipient never aborts the rest. Returns { sent:[ids], failed:[ids] }.
+ * Uses nostrManager.sendControl — publish-only, so control envelopes are NOT cached
+ * into the 1:1 `messages` table (sendMessage WOULD cache them — nostr.js:150-158).
  */
 export async function fanOut({ nostrManager, members, envelope, excludeContactId = null, log = () => {} }) {
   const sent = [], failed = [];
   for (const c of members) {
     if (excludeContactId != null && Number(c.id) === Number(excludeContactId)) continue;
-    try { await nostrManager.sendMessage(c, envelope); sent.push(c.id); }
+    try { await nostrManager.sendControl(c, envelope); sent.push(c.id); }
     catch (e) { failed.push(c.id); log("room fanout fail contact=" + c.id + ": " + (e && e.message)); }
   }
   return { sent, failed };
 }
 ```
+
+- [ ] **Step 3b: Add `sendControl` to `NostrManager` (publish-only, no caching)**
+
+In `servers/sharing/nostr.js`, add a method alongside `sendMessage` (after it, ~line 164). It is `sendMessage` WITHOUT the "Cache locally" INSERT block (nostr.js:150-158) — so room/control envelopes never pollute the 1:1 `messages` table:
+```js
+  /**
+   * Send an encrypted DM WITHOUT caching it into the 1:1 `messages` table. Used
+   * for control/room envelopes (crow_social) that must not appear as 1:1 chat rows.
+   */
+  async sendControl(contact, content) {
+    if (this.relays.size === 0) await this.connectRelays();
+    let recipientPubkey = contact.secp256k1_pubkey || contact.secp256k1Pubkey;
+    if (recipientPubkey && recipientPubkey.length === 66) recipientPubkey = recipientPubkey.slice(2);
+    const conversationKey = nip44.v2.utils.getConversationKey(this.identity.secp256k1Priv, recipientPubkey);
+    const encrypted = nip44.v2.encrypt(content, conversationKey);
+    const event = finalizeEvent({ kind: 4, created_at: Math.floor(Date.now() / 1000), tags: [["p", recipientPubkey]], content: encrypted }, this.identity.secp256k1Priv);
+    const published = [];
+    for (const [url, relay] of this.relays) {
+      try { await relay.publish(event); published.push(url); } catch { /* relay best-effort */ }
+    }
+    return { eventId: event.id, relays: published };
+  }
+```
+(`nip44`, `finalizeEvent` are already imported at the top of `nostr.js` — used by `sendMessage`.)
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -657,8 +704,8 @@ Expected: PASS.
 
 - [ ] **Step 5: Commit**
 ```bash
-git add servers/sharing/room-fanout.js tests/room-fanout.test.js
-git commit servers/sharing/room-fanout.js tests/room-fanout.test.js -m "feat(crow-messages): room envelope builders + fan-out"
+git add servers/sharing/room-fanout.js servers/sharing/nostr.js tests/room-fanout.test.js
+git commit servers/sharing/room-fanout.js servers/sharing/nostr.js tests/room-fanout.test.js -m "feat(crow-messages): room envelope builders + non-caching fan-out (sendControl)"
 ```
 
 ---
@@ -695,23 +742,25 @@ function freshLibsql() {
 const PK = (c) => "02" + c.repeat(64);           // compressed contact pubkey
 const XO = (c) => c.repeat(64);                   // x-only signer
 async function mkContact(db, crowId, name, isBot, c) {
-  const r = await db.execute({ sql: "INSERT INTO contacts (crow_id, display_name, is_bot, secp256k1_pubkey, contact_type) VALUES (?,?,?,?, 'crow')", args: [crowId, name, isBot, PK(c)] });
+  const r = await db.execute({ sql: "INSERT INTO contacts (crow_id, display_name, is_bot, secp256k1_pubkey, ed25519_pubkey, contact_type) VALUES (?,?,?,?,?, 'crow')", args: [crowId, name, isBot, PK(c), "e".repeat(64)] });
   return Number(r.lastInsertRowid);
 }
 
-test("room_join materializes a local room + members", async () => {
+test("room_join from a KNOWN contact materializes a local room; unknown signer dropped", async () => {
   const { db, cleanup } = freshLibsql();
   try {
-    const sent = [];
-    const nostrManager = { async sendMessage(ct, env) { sent.push([ct.id, JSON.parse(env).subtype]); } };
-    await handleInboundRoomEnvelope({
-      db, nostrManager, identity: { crowId: "crow:me" },
-      subtype: "room_join",
+    await mkContact(db, "crow:host", "Host", 0, "h"); // the host is a known contact
+    const nostrManager = { async sendControl() {} };
+    const join = (signer) => handleInboundRoomEnvelope({
+      db, nostrManager, identity: { crowId: "crow:me" }, subtype: "room_join",
       payload: { room_uid: "u-join", room_name: "Invited", host_crow_id: "crow:host", members: [] },
-      senderPubkey: XO("h"),
+      senderPubkey: signer,
     });
+    await join(XO("z")); // unknown signer
+    assert.equal(await getRoomByUid(db, "u-join"), null, "unknown signer cannot create a room");
+    await join(XO("h")); // known host
     const room = await getRoomByUid(db, "u-join");
-    assert.ok(room, "room materialized");
+    assert.ok(room, "room materialized from known host");
     assert.equal(room.host_crow_id, "crow:host");
   } finally { cleanup(); }
 });
@@ -723,7 +772,7 @@ test("host re-fans a member's human message to other members, computing addresse
     const bot = await mkContact(db, "crow:bot1", "Research Bot", 1, "b");
     const { groupId, roomUid } = await createRoom(db, { name: "Team", memberContactIds: [alice, bot], mode: "addressed", hostCrowId: "crow:me" });
     const fanned = [];
-    const nostrManager = { async sendMessage(ct, env) { fanned.push([ct.id, JSON.parse(env)]); } };
+    const nostrManager = { async sendControl(ct, env) { fanned.push([ct.id, JSON.parse(env)]); } };
     const payload = {
       room_uid: roomUid, room_name: "Team", host_crow_id: "crow:me", msg_uid: "mh1",
       author: { kind: "human", crow_id: "crow:alice", display_name: "Alice" },
@@ -755,7 +804,7 @@ test("participant side (room hosted elsewhere) stores the host's relay but does 
     const gid = await ensureLocalRoomForUid(db, { roomUid: "u-remote", name: "Their Room", hostCrowId: "crow:host" });
     await addMember(db, gid, host);
     let fanned = 0;
-    const nostrManager = { async sendMessage() { fanned++; } };
+    const nostrManager = { async sendControl() { fanned++; } };
     await handleInboundRoomEnvelope({
       db, nostrManager, identity: { crowId: "crow:me" }, subtype: "room_message",
       payload: { room_uid: "u-remote", msg_uid: "r1", author: { kind: "human", crow_id: "crow:alice", display_name: "Alice" }, text: "hi all", addressed_to: [] },
@@ -771,7 +820,7 @@ test("room_message from a non-member signer is dropped (fail-closed)", async () 
   try {
     const alice = await mkContact(db, "crow:alice", "Alice", 0, "a");
     const { groupId, roomUid } = await createRoom(db, { name: "Team", memberContactIds: [alice], mode: "addressed", hostCrowId: "crow:me" });
-    const nostrManager = { async sendMessage() { throw new Error("should not fan"); } };
+    const nostrManager = { async sendControl() { throw new Error("should not fan"); } };
     await handleInboundRoomEnvelope({
       db, nostrManager, identity: { crowId: "crow:me" }, subtype: "room_message",
       payload: { room_uid: roomUid, msg_uid: "x", author: { kind: "human" }, text: "intruder", addressed_to: [] },
@@ -815,6 +864,10 @@ export async function handleInboundRoomEnvelope({ db, nostrManager, identity, su
   const pk = xOnly(senderPubkey);
 
   if (subtype === "room_join") {
+    // Trust: only a KNOWN contact (the host) may pull us into a room. Fail-closed —
+    // prevents an unknown sender from auto-creating room rows in our list.
+    const { rows: known } = await db.execute("SELECT secp256k1_pubkey FROM contacts WHERE secp256k1_pubkey IS NOT NULL AND is_blocked = 0");
+    if (!known.some((r) => pubkeyMatches(r.secp256k1_pubkey, pk))) { log("room_join drop: unknown signer"); return; }
     const groupId = await ensureLocalRoomForUid(db, {
       roomUid: payload.room_uid, name: payload.room_name, hostCrowId: payload.host_crow_id,
     });
@@ -1136,9 +1189,11 @@ function freshLibsql() {
   return { dir, db, cleanup() { try { db.close(); } catch {} rmSync(dir, { recursive: true, force: true }); } };
 }
 
-test("getUnifiedConversationList includes rooms with type 'room' and unread", async () => {
+test("getUnifiedConversationList includes rooms; excludes local-bot self-contacts from peers", async () => {
   const { db, cleanup } = freshLibsql();
   try {
+    // A local-bot self-contact must NOT show as a phantom 1:1 conversation.
+    await db.execute("INSERT INTO contacts (crow_id, display_name, is_bot, secp256k1_pubkey, ed25519_pubkey, contact_type, origin) VALUES ('crow:bot1','Research Bot',1,'02"+"b".repeat(64)+"','"+"e".repeat(64)+"','crow','local-bot')");
     const { groupId } = await createRoom(db, { name: "Team", memberContactIds: [], mode: "addressed", hostCrowId: "crow:me" });
     await insertRoomMessage(db, { groupId, msgUid: "m1", senderContactId: null, senderLabel: "Bot", authorKind: "bot", content: "hi", direction: "received" });
     const { items, totalUnread } = await getUnifiedConversationList(db);
@@ -1148,6 +1203,7 @@ test("getUnifiedConversationList includes rooms with type 'room' and unread", as
     assert.equal(room.groupId, groupId);
     assert.equal(room.unread, 1);
     assert.equal(totalUnread, 1);
+    assert.equal(items.filter((i) => i.type === "peer").length, 0, "local-bot self-contact not listed as a peer");
   } finally { cleanup(); }
 });
 ```
@@ -1157,9 +1213,13 @@ test("getUnifiedConversationList includes rooms with type 'room' and unread", as
 Run: `node --test --test-force-exit tests/messages-room-actions.test.js`
 Expected: FAIL (no `type:'room'` item).
 
-- [ ] **Step 3: Implement — add a rooms block to `getUnifiedConversationList`**
+- [ ] **Step 3: Implement — filter local-bot peers + add a rooms block to `getUnifiedConversationList`**
 
-In `servers/gateway/dashboard/panels/messages/data-queries.js`, inside `getUnifiedConversationList`, AFTER the "Peer contacts" `try {…} catch {}` block and BEFORE the final `items.sort(...)`, add:
+(a) In the existing "Peer contacts" query (`data-queries.js:51`), change the WHERE clause from `WHERE c.is_blocked = 0` to:
+```sql
+      WHERE c.is_blocked = 0 AND (c.origin IS NULL OR c.origin != 'local-bot')
+```
+(b) Then, AFTER the "Peer contacts" `try {…} catch {}` block and BEFORE the final `items.sort(...)`, add:
 ```js
   // Rooms (multi-party). A contact_group with a room_uid is a room.
   try {
@@ -1205,79 +1265,55 @@ git commit servers/gateway/dashboard/panels/messages/data-queries.js tests/messa
 
 ---
 
-## Task 9: Panel POST action handlers — create / send / manage rooms
+## Task 9: `create_room` POST action (New Group popover)
 
-The handlers must work both as **host** (we created the room → fan out to all members) and as **participant** (room hosted elsewhere → send a single message to the host). In 3a the operator is always host of their own rooms; the participant branch exists because remote humans run the same code.
+Room creation is a server-rendered popover **form** (like `accept_invite`), posted to `handlePostAction`. Sending into and managing a room are **SPA JSON routes** (Task 10) because the room thread is client-rendered (see Task 11) — the messages panel is an SPA (`client.js` fetches `/api/messages/...`), NOT server-rendered threads.
 
 **Files:**
 - Modify: `servers/gateway/dashboard/panels/messages/api-handlers.js`
-- Test: `tests/messages-room-actions.test.js` (append)
+- Test: `tests/messages-room-actions.test.js` (create)
 
-- [ ] **Step 1: Write the failing test (append)**
+- [ ] **Step 1: Write the failing test**
 
+`tests/messages-room-actions.test.js`:
 ```js
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { createClient } from "@libsql/client";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { handlePostAction } from "../servers/gateway/dashboard/panels/messages/api-handlers.js";
-import { getRoom, getRoomByUid, listRoomMembers, getRoomMessages } from "../servers/gateway/dashboard/panels/messages/rooms-store.js";
+import { listRoomMembers } from "../servers/gateway/dashboard/panels/messages/rooms-store.js";
 
+function freshLibsql() {
+  const dir = mkdtempSync(join(tmpdir(), "crowroom-"));
+  execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: dir }, stdio: "pipe", cwd: join(import.meta.dirname, "..") });
+  const db = createClient({ url: "file:" + join(dir, "crow.db") });
+  return { dir, db, cleanup() { try { db.close(); } catch {} rmSync(dir, { recursive: true, force: true }); } };
+}
 function fakeRes() { return { _r: null, redirectAfterPost(p) { this._r = p; return true; } }; }
-// Capture fan-out by injecting a fake managers object.
+// fanOut uses sendControl (publish-only, no 1:1 caching).
 function fakeManagers(sink) {
-  return { identity: { crowId: "crow:me" }, nostrManager: { async sendMessage(ct, env) { sink.push([ct.id, JSON.parse(env)]); } } };
+  return { identity: { crowId: "crow:me", displayName: "My Crow" }, nostrManager: { async sendControl(ct, env) { sink.push([ct.id, JSON.parse(env)]); } } };
 }
 
-test("create_room → host room with members; room_join fanned to members", async () => {
+test("create_room → host room with members; room_join fanned via sendControl; redirects to openRoom", async () => {
   const { db, cleanup } = freshLibsql();
   try {
-    const a = await db.execute({ sql: "INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, contact_type) VALUES ('crow:a','Alice','02"+"a".repeat(64)+"','crow')", args: [] });
+    const a = await db.execute({ sql: "INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, ed25519_pubkey, contact_type) VALUES ('crow:a','Alice','02"+"a".repeat(64)+"','"+"e".repeat(64)+"','crow')", args: [] });
     const aliceId = Number(a.lastInsertRowid);
     const sink = [];
-    const req = { body: { action: "create_room", room_name: "Team", member_ids: String(aliceId) } };
+    const req = { body: { action: "create_room", room_name: "Team", mode: "addressed", member_ids: String(aliceId) } };
     const res = fakeRes();
     const handled = await handlePostAction(req, res, { db, _managers: fakeManagers(sink) });
     assert.equal(handled, true);
     const room = (await db.execute("SELECT id FROM contact_groups WHERE room_uid IS NOT NULL")).rows[0];
     assert.ok(room, "room created");
     assert.equal((await listRoomMembers(db, room.id)).length, 1);
-    assert.ok(sink.some((s) => s[1].subtype === "room_join"), "room_join sent");
-  } finally { cleanup(); }
-});
-
-test("room_send (host) stores a sent row and fans out room_message", async () => {
-  const { db, cleanup } = freshLibsql();
-  try {
-    const a = await db.execute({ sql: "INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, contact_type) VALUES ('crow:a','Alice','02"+"a".repeat(64)+"','crow')", args: [] });
-    const aliceId = Number(a.lastInsertRowid);
-    const { groupId, roomUid } = await createRoom(db, { name: "Team", memberContactIds: [aliceId], mode: "addressed", hostCrowId: "crow:me" });
-    const sink = [];
-    const req = { body: { action: "room_send", group_id: String(groupId), message: "hello team" } };
-    const res = fakeRes();
-    await handlePostAction(req, res, { db, _managers: fakeManagers(sink) });
-    const msgs = await getRoomMessages(db, groupId);
-    assert.equal(msgs.length, 1);
-    assert.equal(msgs[0].direction, "sent");
-    assert.equal(msgs[0].author_kind, "human");
-    const fanned = sink.filter((s) => s[1].subtype === "room_message");
-    assert.equal(fanned.length, 1);
-    assert.equal(fanned[0][1].payload.room_uid, roomUid);
-  } finally { cleanup(); }
-});
-
-test("room_set_mode / room_rename / room_remove_member / room_delete", async () => {
-  const { db, cleanup } = freshLibsql();
-  try {
-    const a = await db.execute({ sql: "INSERT INTO contacts (crow_id, display_name, secp256k1_pubkey, contact_type) VALUES ('crow:a','Alice','02"+"a".repeat(64)+"','crow')", args: [] });
-    const aliceId = Number(a.lastInsertRowid);
-    const { groupId } = await createRoom(db, { name: "Team", memberContactIds: [aliceId], mode: "addressed", hostCrowId: "crow:me" });
-    const sink = [];
-    const run = async (body) => { const res = fakeRes(); await handlePostAction({ body }, res, { db, _managers: fakeManagers(sink) }); };
-    await run({ action: "room_set_mode", group_id: String(groupId), mode: "always" });
-    assert.equal((await getRoom(db, groupId)).mode, "always");
-    await run({ action: "room_rename", group_id: String(groupId), room_name: "Squad" });
-    assert.equal((await getRoom(db, groupId)).name, "Squad");
-    await run({ action: "room_remove_member", group_id: String(groupId), contact_id: String(aliceId) });
-    assert.equal((await listRoomMembers(db, groupId)).length, 0);
-    await run({ action: "room_delete", group_id: String(groupId) });
-    assert.equal(await getRoom(db, groupId), null);
+    assert.ok(sink.some((s) => s[1].subtype === "room_join"), "room_join fanned");
+    assert.match(res._r, /openRoom=/);
   } finally { cleanup(); }
 });
 ```
@@ -1285,21 +1321,16 @@ test("room_set_mode / room_rename / room_remove_member / room_delete", async () 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `node --test --test-force-exit tests/messages-room-actions.test.js`
-Expected: FAIL (actions not handled).
+Expected: FAIL (`create_room` not handled).
 
-- [ ] **Step 3: Implement — add room actions to `handlePostAction`**
+- [ ] **Step 3: Implement — add `create_room` to `handlePostAction`**
 
 In `servers/gateway/dashboard/panels/messages/api-handlers.js`:
 
 (a) Add imports at the top:
 ```js
-import { randomBytes } from "node:crypto";
-import {
-  createRoom, getRoom, listRoomMembers, addMember, removeMember,
-  setMode, renameRoom, deleteRoom, insertRoomMessage, computeAddressedTo,
-} from "./rooms-store.js";
-import { buildRoomMessageEnvelope, buildRoomJoinEnvelope, fanOut } from "../../../../sharing/room-fanout.js";
-import { ensureLocalBotContact } from "../../shared/ensure-local-bot-contact.js";
+import { createRoom, listRoomMembers } from "./rooms-store.js";
+import { buildRoomJoinEnvelope, fanOut } from "../../../../sharing/room-fanout.js";
 ```
 
 (b) Change the signature to accept an injectable managers seam (defaults to the real one):
@@ -1310,11 +1341,10 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
 ```
 (`getManagersOrNull` is already imported at line 11.)
 
-(c) Add these branches before the final `return false;`:
+(c) Add this branch before the final `return false;`:
 ```js
   if (action === "create_room" && req.body.room_name) {
-    // member_ids arrives as a comma string (single field) OR an array (repeated
-    // checkbox fields from the New Group form) — normalize both.
+    // member_ids arrives as repeated checkbox fields (array) OR a comma string.
     const rawMembers = req.body.member_ids;
     const memberIds = (Array.isArray(rawMembers) ? rawMembers : String(rawMembers || "").split(","))
       .map((s) => parseInt(String(s).trim(), 10)).filter((n) => Number.isInteger(n));
@@ -1330,58 +1360,6 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
     }
     return res.redirectAfterPost("/dashboard/messages?openRoom=" + groupId);
   }
-
-  if (action === "room_send" && req.body.group_id && req.body.message) {
-    const groupId = parseInt(req.body.group_id, 10);
-    const room = await getRoom(db, groupId);
-    if (!room) return res.redirectAfterPost("/dashboard/messages");
-    const msgUid = randomBytes(16).toString("hex");
-    const myCrowId = managers?.identity?.crowId || null;
-    const author = { kind: "human", crow_id: myCrowId, display_name: managers?.identity?.displayName || "You" };
-    await insertRoomMessage(db, { groupId, msgUid, senderContactId: null, senderLabel: "You", authorKind: "human", content: req.body.message, direction: "sent" });
-    if (managers?.nostrManager) {
-      const members = await listRoomMembers(db, groupId);
-      const isHost = !room.host_crow_id || room.host_crow_id === myCrowId;
-      if (isHost) {
-        const botRoster = members.filter((m) => Number(m.is_bot) === 1).map((m) => ({ contactId: m.id, name: m.display_name || m.crow_id }));
-        const addressedTo = room.mode === "always" ? botRoster.map((b) => b.name) : computeAddressedTo(req.body.message, botRoster);
-        const env = buildRoomMessageEnvelope({ roomUid: room.room_uid, roomName: room.name, hostCrowId: myCrowId, msgUid, author, text: req.body.message, addressedTo });
-        await fanOut({ nostrManager: managers.nostrManager, members, envelope: env, log: (m) => console.error("[rooms]", m) });
-      } else {
-        // Participant: send only to the host, who re-fans. addressed_to left to the host.
-        const host = members.find((m) => m.crow_id === room.host_crow_id);
-        const env = buildRoomMessageEnvelope({ roomUid: room.room_uid, roomName: room.name, hostCrowId: room.host_crow_id, msgUid, author, text: req.body.message, addressedTo: [] });
-        if (host) await fanOut({ nostrManager: managers.nostrManager, members: [host], envelope: env });
-      }
-    }
-    return res.redirectAfterPost("/dashboard/messages?openRoom=" + groupId);
-  }
-
-  if (action === "room_add_member" && req.body.group_id && req.body.contact_id) {
-    await addMember(db, parseInt(req.body.group_id, 10), parseInt(req.body.contact_id, 10));
-    return res.redirectAfterPost("/dashboard/messages?openRoom=" + parseInt(req.body.group_id, 10));
-  }
-  if (action === "room_add_bot" && req.body.group_id && req.body.bot_id) {
-    const cid = await ensureLocalBotContact(db, req.body.bot_id.trim(), { displayName: req.body.bot_display_name || null });
-    if (cid != null) await addMember(db, parseInt(req.body.group_id, 10), cid);
-    return res.redirectAfterPost("/dashboard/messages?openRoom=" + parseInt(req.body.group_id, 10));
-  }
-  if (action === "room_remove_member" && req.body.group_id && req.body.contact_id) {
-    await removeMember(db, parseInt(req.body.group_id, 10), parseInt(req.body.contact_id, 10));
-    return res.redirectAfterPost("/dashboard/messages?openRoom=" + parseInt(req.body.group_id, 10));
-  }
-  if (action === "room_set_mode" && req.body.group_id) {
-    await setMode(db, parseInt(req.body.group_id, 10), req.body.mode === "always" ? "always" : "addressed");
-    return res.redirectAfterPost("/dashboard/messages?openRoom=" + parseInt(req.body.group_id, 10));
-  }
-  if (action === "room_rename" && req.body.group_id && req.body.room_name) {
-    await renameRoom(db, parseInt(req.body.group_id, 10), req.body.room_name.trim());
-    return res.redirectAfterPost("/dashboard/messages?openRoom=" + parseInt(req.body.group_id, 10));
-  }
-  if (action === "room_delete" && req.body.group_id) {
-    await deleteRoom(db, parseInt(req.body.group_id, 10));
-    return res.redirectAfterPost("/dashboard/messages");
-  }
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -1392,23 +1370,244 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 ```bash
 git add servers/gateway/dashboard/panels/messages/api-handlers.js tests/messages-room-actions.test.js
-git commit servers/gateway/dashboard/panels/messages/api-handlers.js tests/messages-room-actions.test.js -m "feat(crow-messages): room POST action handlers (create/send/manage)"
+git commit servers/gateway/dashboard/panels/messages/api-handlers.js tests/messages-room-actions.test.js -m "feat(crow-messages): create_room POST action"
 ```
 
 ---
 
-## Task 10: UI — New Group popover, room thread, settings, i18n
+## Task 10: Room JSON routes + operator send helper
 
-This task is rendering + JS only (no new logic paths). Verify by a render smoke test + manual preview. Follow the exact patterns in `html.js` (popover items, dialogs, `csrf`), `client.js` (dialog toggles), and `i18n.js` (EN+ES pairs).
+The thread (load/send/read) and management (members/mode/rename/delete) are JSON routes the SPA calls with `fetch` (cookie auth, like `/api/messages/peer/*` — no CSRF token). The non-trivial logic — sending as host vs participant — lives in a unit-tested helper; the routes are thin wrappers.
+
+**Files:**
+- Create: `servers/gateway/dashboard/panels/messages/room-send.js`
+- Modify: `servers/gateway/routes/peer-messages.js`
+- Test: `tests/room-send.test.js`
+
+- [ ] **Step 1: Write the failing test**
+
+`tests/room-send.test.js`:
+```js
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { createClient } from "@libsql/client";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { sendOperatorRoomMessage } from "../servers/gateway/dashboard/panels/messages/room-send.js";
+import { createRoom, ensureLocalRoomForUid, addMember, getRoomMessages } from "../servers/gateway/dashboard/panels/messages/rooms-store.js";
+
+function freshLibsql() {
+  const dir = mkdtempSync(join(tmpdir(), "crowroom-"));
+  execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: dir }, stdio: "pipe", cwd: join(import.meta.dirname, "..") });
+  const db = createClient({ url: "file:" + join(dir, "crow.db") });
+  return { dir, db, cleanup() { try { db.close(); } catch {} rmSync(dir, { recursive: true, force: true }); } };
+}
+async function mkContact(db, crowId, name, isBot, c) {
+  const r = await db.execute({ sql: "INSERT INTO contacts (crow_id, display_name, is_bot, secp256k1_pubkey, ed25519_pubkey, contact_type) VALUES (?,?,?,?,?, 'crow')", args: [crowId, name, isBot, "02" + c.repeat(64), "e".repeat(64)] });
+  return Number(r.lastInsertRowid);
+}
+function managers(sink) {
+  return { identity: { crowId: "crow:me", displayName: "My Crow" }, nostrManager: { async sendControl(ct, env) { sink.push([ct.id, JSON.parse(env)]); } } };
+}
+
+test("host send: stores 'sent' row (label You), fans room_message to all members with addressed_to", async () => {
+  const { db, cleanup } = freshLibsql();
+  try {
+    const alice = await mkContact(db, "crow:alice", "Alice", 0, "a");
+    const bot = await mkContact(db, "crow:bot1", "Research Bot", 1, "b");
+    const { groupId, roomUid } = await createRoom(db, { name: "Team", memberContactIds: [alice, bot], mode: "addressed", hostCrowId: "crow:me" });
+    const sink = [];
+    const r = await sendOperatorRoomMessage({ db, managers: managers(sink), groupId, message: "@Research Bot hi" });
+    assert.equal(r.ok, true);
+    const msgs = await getRoomMessages(db, groupId);
+    assert.equal(msgs.length, 1);
+    assert.equal(msgs[0].direction, "sent");
+    assert.equal(msgs[0].sender_label, "You");
+    const fanned = sink.filter((s) => s[1].subtype === "room_message");
+    assert.equal(fanned.length, 2, "to both members");
+    const botMsg = fanned.find((s) => s[0] === bot)[1];
+    assert.equal(botMsg.payload.room_uid, roomUid);
+    assert.deepEqual(botMsg.payload.addressed_to, ["Research Bot"]);
+    assert.equal(botMsg.payload.author.display_name, "My Crow", "remote label is the instance name, not You");
+  } finally { cleanup(); }
+});
+
+test("participant send (room hosted elsewhere): sends only to the host", async () => {
+  const { db, cleanup } = freshLibsql();
+  try {
+    const host = await mkContact(db, "crow:host", "Host", 0, "h");
+    const gid = await ensureLocalRoomForUid(db, { roomUid: "u-x", name: "Theirs", hostCrowId: "crow:host" });
+    await addMember(db, gid, host);
+    const sink = [];
+    const r = await sendOperatorRoomMessage({ db, managers: managers(sink), groupId: gid, message: "hi" });
+    assert.equal(r.ok, true);
+    assert.equal(sink.length, 1, "only the host");
+    assert.equal(sink[0][0], host);
+  } finally { cleanup(); }
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `node --test --test-force-exit tests/room-send.test.js`
+Expected: FAIL (module not found).
+
+- [ ] **Step 3: Implement the send helper**
+
+`servers/gateway/dashboard/panels/messages/room-send.js`:
+```js
+/**
+ * Send an operator-authored message into a room. As HOST: store a 'sent' row and
+ * fan the room_message out to every member (computing addressed_to). As PARTICIPANT
+ * (room hosted elsewhere): store locally and send only to the host, who re-fans.
+ * managers = { identity, nostrManager }. Returns { ok, groupId }.
+ */
+import { randomBytes } from "node:crypto";
+import { getRoom, listRoomMembers, insertRoomMessage, computeAddressedTo } from "./rooms-store.js";
+import { buildRoomMessageEnvelope, fanOut } from "../../../../sharing/room-fanout.js";
+
+export async function sendOperatorRoomMessage({ db, managers, groupId, message }) {
+  const room = await getRoom(db, groupId);
+  if (!room) return { ok: false, error: "no such room" };
+  const msgUid = randomBytes(16).toString("hex");
+  const myCrowId = managers?.identity?.crowId || null;
+  // Remote participants see the instance's name (NOT "You"); the local row shows "You".
+  const author = { kind: "human", crow_id: myCrowId, display_name: managers?.identity?.displayName || myCrowId || "Crow" };
+  await insertRoomMessage(db, { groupId, msgUid, senderContactId: null, senderLabel: "You", authorKind: "human", content: message, direction: "sent" });
+  if (managers?.nostrManager) {
+    const members = await listRoomMembers(db, groupId);
+    const isHost = !room.host_crow_id || room.host_crow_id === myCrowId;
+    if (isHost) {
+      const botRoster = members.filter((m) => Number(m.is_bot) === 1).map((m) => ({ contactId: m.id, name: m.display_name || m.crow_id }));
+      const addressedTo = room.mode === "always" ? botRoster.map((b) => b.name) : computeAddressedTo(message, botRoster);
+      const env = buildRoomMessageEnvelope({ roomUid: room.room_uid, roomName: room.name, hostCrowId: myCrowId, msgUid, author, text: message, addressedTo });
+      await fanOut({ nostrManager: managers.nostrManager, members, envelope: env, log: (m) => console.error("[rooms]", m) });
+    } else {
+      const host = members.find((m) => m.crow_id === room.host_crow_id);
+      const env = buildRoomMessageEnvelope({ roomUid: room.room_uid, roomName: room.name, hostCrowId: room.host_crow_id, msgUid, author, text: message, addressedTo: [] });
+      if (host) await fanOut({ nostrManager: managers.nostrManager, members: [host], envelope: env });
+    }
+  }
+  return { ok: true, groupId };
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `node --test --test-force-exit tests/room-send.test.js`
+Expected: PASS.
+
+- [ ] **Step 5: Add the room JSON routes**
+
+In `servers/gateway/routes/peer-messages.js`, add these routes inside `peerMessagesRouter` (before `return router;`). They follow the existing `createDbClient()` + `try/finally db.close()` pattern; management calls the already-tested `rooms-store` functions, send calls the helper:
+```js
+  // --- Rooms (multi-party) ---
+  router.get("/api/messages/room/:groupId", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { getRoom, listRoomMembers, getRoomMessages } = await import("../dashboard/panels/messages/rooms-store.js");
+      const groupId = parseInt(req.params.groupId, 10);
+      const room = await getRoom(db, groupId);
+      if (!room) return res.status(404).json({ error: "Room not found" });
+      // Mark received messages read on open.
+      await db.execute({ sql: "UPDATE room_messages SET is_read = 1 WHERE group_id = ? AND direction = 'received'", args: [groupId] });
+      res.json({ room, members: await listRoomMembers(db, groupId), messages: await getRoomMessages(db, groupId) });
+    } catch (err) { res.status(500).json({ error: err.message }); } finally { db.close(); }
+  });
+
+  router.post("/api/messages/room/:groupId/send", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { sendOperatorRoomMessage } = await import("../dashboard/panels/messages/room-send.js");
+      const { getManagersOrNull } = await import("../../sharing/managers.js");
+      const message = (req.body && req.body.message || "").toString();
+      if (!message.trim()) return res.status(400).json({ error: "Message required" });
+      const r = await sendOperatorRoomMessage({ db, managers: getManagersOrNull(), groupId: parseInt(req.params.groupId, 10), message: message.trim() });
+      res.json(r);
+    } catch (err) { res.status(500).json({ error: err.message }); } finally { db.close(); }
+  });
+
+  router.post("/api/messages/room/:groupId/members", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { addMember } = await import("../dashboard/panels/messages/rooms-store.js");
+      const groupId = parseInt(req.params.groupId, 10);
+      if (req.body.bot_id) {
+        const { ensureLocalBotContact } = await import("../dashboard/shared/ensure-local-bot-contact.js");
+        const cid = await ensureLocalBotContact(db, String(req.body.bot_id).trim());
+        if (cid != null) await addMember(db, groupId, cid);
+      } else if (req.body.contact_id) {
+        await addMember(db, groupId, parseInt(req.body.contact_id, 10));
+      }
+      res.json({ ok: true });
+    } catch (err) { res.status(500).json({ error: err.message }); } finally { db.close(); }
+  });
+
+  router.delete("/api/messages/room/:groupId/members/:contactId", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { removeMember } = await import("../dashboard/panels/messages/rooms-store.js");
+      await removeMember(db, parseInt(req.params.groupId, 10), parseInt(req.params.contactId, 10));
+      res.json({ ok: true });
+    } catch (err) { res.status(500).json({ error: err.message }); } finally { db.close(); }
+  });
+
+  router.post("/api/messages/room/:groupId/mode", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { setMode } = await import("../dashboard/panels/messages/rooms-store.js");
+      await setMode(db, parseInt(req.params.groupId, 10), req.body.mode === "always" ? "always" : "addressed");
+      res.json({ ok: true });
+    } catch (err) { res.status(500).json({ error: err.message }); } finally { db.close(); }
+  });
+
+  router.post("/api/messages/room/:groupId/rename", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { renameRoom } = await import("../dashboard/panels/messages/rooms-store.js");
+      const name = (req.body.name || "").toString().trim();
+      if (name) await renameRoom(db, parseInt(req.params.groupId, 10), name);
+      res.json({ ok: true });
+    } catch (err) { res.status(500).json({ error: err.message }); } finally { db.close(); }
+  });
+
+  router.delete("/api/messages/room/:groupId", async (req, res) => {
+    const db = createDbClient();
+    try {
+      const { deleteRoom } = await import("../dashboard/panels/messages/rooms-store.js");
+      await deleteRoom(db, parseInt(req.params.groupId, 10));
+      res.json({ ok: true });
+    } catch (err) { res.status(500).json({ error: err.message }); } finally { db.close(); }
+  });
+```
+
+- [ ] **Step 6: Verify the route module loads**
+
+Run: `node --input-type=module -e 'await import("./servers/gateway/routes/peer-messages.js"); await import("./servers/gateway/dashboard/panels/messages/room-send.js"); console.log("routes ok")'`
+Expected: prints `routes ok`.
+
+- [ ] **Step 7: Commit**
+```bash
+git add servers/gateway/dashboard/panels/messages/room-send.js servers/gateway/routes/peer-messages.js tests/room-send.test.js
+git commit servers/gateway/dashboard/panels/messages/room-send.js servers/gateway/routes/peer-messages.js tests/room-send.test.js -m "feat(crow-messages): room JSON routes + operator send helper"
+```
+
+---
+
+## Task 11: Room UI — SPA thread, New Group dialog, i18n
+
+The messages panel is an SPA: `client.js` builds the thread DOM and talks to `/api/messages/*` via `fetch`. So the room thread is rendered in `client.js` (NOT a server form), reusing the existing `renderChatUI`/bubble code paths. Room creation is the one server-rendered piece (a popover POST form, Task 9). `client.js` is browser JS embedded as a string by the panel — not unit-testable here; verified by the i18n key test + the live-verify step.
 
 **Files:**
 - Modify: `servers/gateway/dashboard/shared/i18n.js`
-- Modify: `servers/gateway/dashboard/panels/messages/html.js`
-- Modify: `servers/gateway/dashboard/panels/messages/client.js`
+- Modify: `servers/gateway/dashboard/panels/messages/html.js` (popover item + New Group dialog + member picker)
+- Modify: `servers/gateway/dashboard/panels/messages/client.js` (room dispatch, load, render, send, settings)
 - Modify: `servers/gateway/dashboard/panels/messages/css.js`
-- Test: `tests/messages-room-render.test.js` (create)
+- Test: `tests/messages-room-i18n.test.js` (create)
 
-- [ ] **Step 1: Add i18n keys (EN + ES)**
+- [ ] **Step 1: Add i18n keys (EN + ES) + a key-presence test**
 
 In `servers/gateway/dashboard/shared/i18n.js`, in the `translations` object, add:
 ```js
@@ -1421,29 +1620,45 @@ In `servers/gateway/dashboard/shared/i18n.js`, in the `translations` object, add
 "messages.roomModeAddressed": { en: "Only when addressed", es: "Solo cuando se le menciona" },
 "messages.roomModeAlways": { en: "To every message", es: "A cada mensaje" },
 "messages.roomMembers": { en: "Members", es: "Miembros" },
-"messages.roomAddMember": { en: "Add member", es: "Agregar miembro" },
 "messages.roomRename": { en: "Rename", es: "Renombrar" },
 "messages.roomDelete": { en: "Delete room", es: "Eliminar sala" },
 "messages.roomLeaveHint": { en: "Bots reply only to people, never to each other.", es: "Los bots responden solo a personas, nunca entre ellos." },
 ```
 
-- [ ] **Step 2: Add the "New Group" popover item + create dialog (`html.js`)**
+`tests/messages-room-i18n.test.js`:
+```js
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { translations } from "../servers/gateway/dashboard/shared/i18n.js";
 
-In `servers/gateway/dashboard/panels/messages/html.js`, after the existing `msgOpenBotDirectory()` popover item (~line 141-144), add a sibling popover item:
+test("all new room i18n keys exist in EN and ES", () => {
+  const keys = ["messages.newGroup", "messages.newGroupDesc", "messages.groupName", "messages.groupMembers", "messages.createGroupBtn", "messages.roomMode", "messages.roomModeAddressed", "messages.roomModeAlways", "messages.roomMembers", "messages.roomRename", "messages.roomDelete", "messages.roomLeaveHint"];
+  for (const k of keys) {
+    assert.ok(translations[k], "missing key " + k);
+    assert.ok(translations[k].en && translations[k].es, "missing en/es for " + k);
+  }
+});
+```
+(Confirm `translations` is exported from `i18n.js` — the reviewer verified the `en`/`es` pair shape; if it's not a named export, export it or adjust the import.)
+
+Run: `node --test --test-force-exit tests/messages-room-i18n.test.js` → PASS.
+
+- [ ] **Step 2: New Group popover item + dialog (`html.js`)**
+
+After the existing `msgOpenBotDirectory()` popover item (~line 141-144), add:
 ```js
         <div class="msg-popover-item" onclick="msgShowCreateGroupDialog()">
           <div class="msg-popover-item-title">${t("messages.newGroup", lang)}</div>
           <div class="msg-popover-item-desc">${t("messages.newGroupDesc", lang)}</div>
         </div>
 ```
-And add a dialog near the other `msg-invite-dialog` blocks. `contactsForPicker` is the existing contacts list available to the panel (the same list used to render conversations) — render a checkbox per contact, bots labeled:
+Add a dialog near the other `msg-invite-dialog` blocks. `contactsForPicker` + `csrf` come from the panel's render data (the panel already passes `csrf`; add `contactsForPicker` from the same contacts query that feeds the conversation list). Use the `escapeHtml` already imported in `html.js`:
 ```js
       <div class="msg-invite-dialog" id="invite-group">
         <form method="POST">
           <input type="hidden" name="action" value="create_room">
           <input name="room_name" placeholder="${t("messages.groupName", lang)}" required maxlength="80" class="msg-input">
-          <label class="msg-room-mode">
-            ${t("messages.roomMode", lang)}:
+          <label class="msg-room-mode">${t("messages.roomMode", lang)}:
             <select name="mode">
               <option value="addressed">${t("messages.roomModeAddressed", lang)}</option>
               <option value="always">${t("messages.roomModeAlways", lang)}</option>
@@ -1452,126 +1667,71 @@ And add a dialog near the other `msg-invite-dialog` blocks. `contactsForPicker` 
           <div class="msg-member-picker">
             <div class="msg-member-picker-label">${t("messages.groupMembers", lang)}</div>
             ${(contactsForPicker || []).map((c) => `
-              <label class="msg-member-opt">
-                <input type="checkbox" name="member_ids" value="${c.id}">
-                ${c.is_bot ? '<span class="msg-bot-badge">bot</span> ' : ""}${escapeHtml(c.display_name || c.crow_id)}
-              </label>`).join("")}
+              <label class="msg-member-opt"><input type="checkbox" name="member_ids" value="${c.id}">
+                ${c.is_bot ? '<span class="msg-bot-badge">bot</span> ' : ""}${escapeHtml(c.display_name || c.crow_id)}</label>`).join("")}
           </div>
           ${csrf || ""}
-          <button type="submit" class="msg-send-btn msg-room-create-btn">${t("messages.createGroupBtn", lang)}</button>
+          <button type="submit" class="msg-send-btn">${t("messages.createGroupBtn", lang)}</button>
         </form>
         <div class="msg-room-hint">${t("messages.roomLeaveHint", lang)}</div>
       </div>
 ```
-NOTE: `member_ids` is sent as repeated checkbox fields; Express collects repeated fields into an array. The Task 9 `create_room` handler already normalizes both an array and a comma string — no further change needed here.
+(The Task 9 handler normalizes `member_ids` whether it arrives as an array or comma string.)
 
-Use the existing `escapeHtml` helper already imported in `html.js` (confirm it's imported; the panel already escapes bot titles per the arc). `contactsForPicker` and `csrf` come from the panel's render data — thread them through where the panel calls the html render (the panel already passes `csrf`; add `contactsForPicker` from the same contacts query used for the conversation list).
+- [ ] **Step 3: Room thread in the SPA (`client.js`)**
 
-- [ ] **Step 3: Render the room thread + settings (`html.js`)**
-
-When `openRoom` (or `?openRoom=<groupId>`) is set, the panel renders a room thread instead of a 1:1 thread. Add a `renderRoomThread({ room, members, messages, lang, csrf })` helper in `html.js`:
-```js
-export function renderRoomThread({ room, members, messages, lang, csrf, escapeHtml }) {
-  const bubbles = (messages || []).map((m) => `
-    <div class="msg-bubble ${m.direction === "sent" ? "sent" : "received"}">
-      <div class="msg-bubble-sender">${m.author_kind === "bot" ? '<span class="msg-bot-badge">bot</span> ' : ""}${escapeHtml(m.sender_name || m.sender_label || "You")}</div>
-      <div class="msg-bubble-text">${escapeHtml(m.content)}</div>
-    </div>`).join("");
-  const memberChips = (members || []).map((m) => `
-    <span class="msg-room-chip">${Number(m.is_bot) === 1 ? '<span class="msg-bot-badge">bot</span> ' : ""}${escapeHtml(m.display_name || m.crow_id)}
-      <form method="POST" class="msg-chip-x"><input type="hidden" name="action" value="room_remove_member"><input type="hidden" name="group_id" value="${room.id}"><input type="hidden" name="contact_id" value="${m.id}">${csrf || ""}<button type="submit" title="${t("common.remove", lang)}">×</button></form>
-    </span>`).join("");
-  return `
-    <div class="msg-room-header">
-      <span class="msg-room-title">${escapeHtml(room.name)}</span>
-      <span class="msg-room-members">${memberChips}</span>
-      <form method="POST" class="msg-room-mode-form">
-        <input type="hidden" name="action" value="room_set_mode"><input type="hidden" name="group_id" value="${room.id}">
-        <select name="mode" onchange="this.form.requestSubmit()">
-          <option value="addressed" ${room.mode !== "always" ? "selected" : ""}>${t("messages.roomModeAddressed", lang)}</option>
-          <option value="always" ${room.mode === "always" ? "selected" : ""}>${t("messages.roomModeAlways", lang)}</option>
-        </select>${csrf || ""}
-      </form>
-    </div>
-    <div class="msg-thread">${bubbles}</div>
-    <form method="POST" class="msg-composer">
-      <input type="hidden" name="action" value="room_send"><input type="hidden" name="group_id" value="${room.id}">
-      <input name="message" class="msg-input" placeholder="Message ${escapeHtml(room.name)}… (use @name to address a bot)" required autocomplete="off">
-      ${csrf || ""}
-      <button type="submit" class="msg-send-btn">→</button>
-    </form>`;
-}
-```
-Wire the panel: where it currently decides to render a 1:1 thread when `open=<contactId>`, add an `openRoom=<groupId>` branch that loads `getRoom`, `listRoomMembers`, `getRoomMessages` and calls `renderRoomThread`. Mark room messages read on open: `UPDATE room_messages SET is_read = 1 WHERE group_id = ? AND direction = 'received'`. Add `"common.remove": { en: "Remove", es: "Quitar" }` to i18n if not present.
-
-- [ ] **Step 4: Add the dialog toggle + @-helper (`client.js`)**
-
-In `servers/gateway/dashboard/panels/messages/client.js`, mirror `msgShowInviteDialog`:
+(a) Dialog toggle — mirror `msgShowInviteDialog`:
 ```js
 function msgShowCreateGroupDialog() {
   document.querySelectorAll('.msg-invite-dialog').forEach(function (d) { d.classList.remove('visible'); });
   var dialog = document.getElementById('invite-group');
   if (dialog) dialog.classList.toggle('visible');
-  var pop = document.getElementById('msg-popover');
-  if (pop) pop.classList.remove('visible');
+  var pop = document.getElementById('msg-popover'); if (pop) pop.classList.remove('visible');
 }
 ```
-(The `@`-mention picker is sugar; the host computes `addressed_to` authoritatively, so a plain text input is sufficient for v1. Skip a JS autocomplete to keep scope tight — the placeholder already tells the user to type `@name`.)
+(b) Click dispatch — at the conversation-click branch (`client.js:178`, where `type === 'ai'` → `loadAiConversation`, else `loadPeerConversation`), add a room branch FIRST. Room list items have `id` like `"room-<groupId>"` and `type === 'room'` (Task 8):
+```js
+    if (type === 'room') { loadRoomConversation(String(id).replace('room-', '')); return; }
+```
+(c) `loadRoomConversation(groupId)` — mirror `loadPeerConversation` (`client.js:604`): `fetch('/api/messages/room/' + encodeURIComponent(groupId))`, then set `_activeItem = { type: 'room', id: groupId, room: data.room, members: data.members }`, `_messages = data.messages`, and call the existing `renderChatUI(container, { type: 'room', id: groupId, name: data.room.name, room: data.room, members: data.members }, data.messages)`.
+(d) `renderChatUI` (`client.js:689`) — add a `type === 'room'` header (room name + a settings button opening a members/mode/rename/delete panel that calls the JSON routes via `fetch`) and ensure the composer's send dispatch (`sendCurrentMessage`, `client.js:825`) routes `type === 'room'` → `sendRoomMessage()`:
+```js
+  else if (_activeItem.type === 'room') sendRoomMessage();
+```
+```js
+  async function sendRoomMessage() {
+    var text = (input.value || '').trim(); if (!text) return;
+    input.value = '';
+    await fetch('/api/messages/room/' + encodeURIComponent(_activeItem.id) + '/send', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text }),
+    });
+    loadRoomConversation(_activeItem.id); // refresh the thread
+  }
+```
+(e) Message bubbles — in the bubble renderer (`client.js` ~line 905+, where `_activeItem.type === 'peer'` controls actions), for `type === 'room'` show a per-message **sender label** (`m.sender_name || m.sender_label || 'You'`) and a **bot badge** when `m.author_kind === 'bot'`. Outgoing = `m.direction === 'sent'`.
+(f) Settings affordances — a small header menu with: mode `<select>` → `POST /room/:id/mode`; "Rename" → prompt → `POST /room/:id/rename`; "Delete" → confirm → `DELETE /room/:id` then return to the list; add-member (pick a contact or bot) → `POST /room/:id/members`; remove-member (× on a member chip) → `DELETE /room/:id/members/:contactId`. Each is a `fetch` then `loadRoomConversation` refresh.
+(g) Live-update — the existing status poll (`client.js:1172` `/api/messages/status`) can stay peer/ai-only for v1; refresh the open room on send (d) and on manual reopen. (A room poll endpoint is a fast-follow.)
 
-- [ ] **Step 5: Add minimal CSS (`css.js`)**
+- [ ] **Step 4: CSS (`css.js`)**
 
-Append room styles to the exported CSS string in `servers/gateway/dashboard/panels/messages/css.js` (match existing class naming + variables):
+Append to the exported CSS string in `css.js`:
 ```css
 .msg-member-picker { max-height: 180px; overflow-y: auto; margin: 8px 0; border: 1px solid var(--border, #333); border-radius: 6px; padding: 6px; }
 .msg-member-opt { display: block; padding: 3px 4px; font-size: 0.82rem; cursor: pointer; }
-.msg-room-header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border, #333); }
-.msg-room-title { font-weight: 600; }
 .msg-room-chip { display: inline-flex; align-items: center; gap: 3px; background: var(--chip-bg, #222); border-radius: 10px; padding: 1px 8px; font-size: 0.75rem; }
-.msg-chip-x { display: inline; } .msg-chip-x button { background: none; border: none; color: inherit; cursor: pointer; }
 .msg-room-hint, .msg-room-mode { font-size: 0.75rem; opacity: 0.7; margin-top: 6px; }
 .msg-bubble-sender { font-size: 0.7rem; opacity: 0.7; margin-bottom: 2px; }
 ```
 
-- [ ] **Step 6: Write a render smoke test**
-
-`tests/messages-room-render.test.js`:
-```js
-import { test } from "node:test";
-import assert from "node:assert/strict";
-import { renderRoomThread } from "../servers/gateway/dashboard/panels/messages/html.js";
-
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-
-test("renderRoomThread shows bot badge, sender labels, addressed placeholder, and CSRF", () => {
-  const html = renderRoomThread({
-    room: { id: 5, name: "Team", mode: "addressed" },
-    members: [{ id: 1, display_name: "Alice", is_bot: 0 }, { id: 2, display_name: "Research Bot", is_bot: 1 }],
-    messages: [
-      { direction: "sent", author_kind: "human", sender_name: null, sender_label: "You", content: "hi" },
-      { direction: "received", author_kind: "bot", sender_name: "Research Bot", content: "hello" },
-    ],
-    lang: "en", csrf: '<input type="hidden" name="_csrf" value="t">', escapeHtml: esc,
-  });
-  assert.match(html, /Research Bot/);
-  assert.match(html, /msg-bot-badge/);
-  assert.match(html, /name="action" value="room_send"/);
-  assert.match(html, /_csrf/);
-  assert.match(html, /@name to address a bot/);
-});
-```
-
-- [ ] **Step 7: Run + commit**
-
-Run: `node --test --test-force-exit tests/messages-room-render.test.js`
-Expected: PASS.
+- [ ] **Step 5: Commit**
 ```bash
-git add servers/gateway/dashboard/shared/i18n.js servers/gateway/dashboard/panels/messages/html.js servers/gateway/dashboard/panels/messages/client.js servers/gateway/dashboard/panels/messages/css.js tests/messages-room-render.test.js
-git commit servers/gateway/dashboard/shared/i18n.js servers/gateway/dashboard/panels/messages/html.js servers/gateway/dashboard/panels/messages/client.js servers/gateway/dashboard/panels/messages/css.js tests/messages-room-render.test.js -m "feat(crow-messages): room UI — New Group, room thread, settings, i18n"
+git add servers/gateway/dashboard/shared/i18n.js servers/gateway/dashboard/panels/messages/html.js servers/gateway/dashboard/panels/messages/client.js servers/gateway/dashboard/panels/messages/css.js tests/messages-room-i18n.test.js
+git commit servers/gateway/dashboard/shared/i18n.js servers/gateway/dashboard/panels/messages/html.js servers/gateway/dashboard/panels/messages/client.js servers/gateway/dashboard/panels/messages/css.js tests/messages-room-i18n.test.js -m "feat(crow-messages): room SPA thread + New Group dialog + i18n"
 ```
 
 ---
 
-## Task 11: Full-suite + boot verification
+## Task 12: Full-suite + boot verification
 
 - [ ] **Step 1: Run the full test suite**
 
@@ -1582,7 +1742,7 @@ Expected: All pass (the prior baseline was 746/746; this adds the new files). In
 
 Run:
 ```bash
-node --input-type=module -e 'await import("./servers/sharing/boot.js"); await import("./servers/sharing/room-inbound.js"); await import("./servers/gateway/dashboard/panels/messages/api-handlers.js"); await import("./scripts/pi-bots/gateways/crow-messages.mjs"); console.log("graphs ok")'
+node --input-type=module -e 'await import("./servers/sharing/boot.js"); await import("./servers/sharing/room-inbound.js"); await import("./servers/sharing/room-fanout.js"); await import("./servers/gateway/routes/peer-messages.js"); await import("./servers/gateway/dashboard/panels/messages/api-handlers.js"); await import("./servers/gateway/dashboard/panels/messages/room-send.js"); await import("./scripts/pi-bots/gateways/crow-messages.mjs"); console.log("graphs ok")'
 ```
 Expected: prints `graphs ok`.
 
@@ -1597,13 +1757,17 @@ git commit -m "chore(crow-messages): format phase 3a room threads" <changed path
 
 ---
 
-## Self-review notes (gaps closed during planning)
+## Self-review notes (gaps closed during planning + plan review)
 
-- **`member_ids` array vs comma string** — handler normalizes both (Task 9 Step 3 / Task 10 Step 2).
-- **Host vs participant send** — `room_send` branches on `host_crow_id` (Task 9); both paths exist because remote humans run identical code in 3a.
-- **Loop safety** — enforced in TWO independent places: the bot adapter gate (`author.kind!=='human'` → no turn, Task 7) and the host never sets `addressed_to` for bot-authored messages (Task 6/9). Tested in `room-adapter.test.js`.
-- **Dedup** — `room_messages(group_id,msg_uid)` UNIQUE + `insertRoomMessage` returns false on dup; the host skips re-fan on a dup (Task 6).
-- **Trust** — bot accepts only its own-host signer (Task 7); host accepts only room-member signers (Task 6). Both fail-closed, both tested.
+- **No 1:1 pollution** — fan-out uses `nostrManager.sendControl` (publish-only), NOT `sendMessage` (which caches into the 1:1 `messages` table, nostr.js:150-158). Added in Task 5.
+- **`ed25519_pubkey` NOT NULL** — every contact INSERT (helper + tests) supplies it; `ensureLocalBotContact` uses the derived `ed25519Pubkey` (Task 2).
+- **SPA, not server forms** — the room thread is a `client.js` fetch UI against JSON routes in `peer-messages.js` (Tasks 10–11); only room *creation* is a popover POST form (Task 9). Matches the existing 1:1 `/api/messages/peer/*` architecture.
+- **Bot name alignment** — `ensureLocalBotContact` sources the contact display name from `pi_bot_defs.display_name`, the SAME value the adapter checks `addressed_to` against (Tasks 2 + 7) — so an addressed bot actually fires.
+- **Host vs participant send** — `sendOperatorRoomMessage` branches on `host_crow_id` (Task 10); both paths exist because remote humans run identical code in 3a.
+- **Loop safety** — enforced in TWO independent places: the bot adapter gate (`author.kind!=='human'` → no turn, Task 7) and the host never setting `addressed_to` for bot-authored messages (Task 6). Tested in `room-adapter.test.js`.
+- **Dedup** — `room_messages(group_id,msg_uid)` UNIQUE + `insertRoomMessage` returns false on dup; the host skips re-fan on a dup (Task 6). Bot-side relay-replay covered by the existing `markEventSeen` (event-id) gate upstream of the room branch.
+- **Trust** — bot accepts only its own-host signer (Task 7); host accepts only room-member signers; participant accepts only the host signer; `room_join` accepted only from a known contact (Task 6). All fail-closed, all tested.
+- **No 1:1 peer clutter** — `local-bot` self-contacts are filtered from the peer conversation list (Task 8).
 
 ## After implementation (NOT part of the TDD tasks)
 
@@ -1612,3 +1776,16 @@ git commit -m "chore(crow-messages): format phase 3a room threads" <changed path
 - **Deploy (schema change + adapter change):** per data dir, `CROW_DB_PATH=<db> node scripts/init-db.js` → verify columns/table via PRAGMA → restart gateway(s) → **restart `pibot-gateways@<inst>`** (adapter changed — unlike phases 1/2). Hosts: crow `~/.crow` :3001, MPA `~/.crow-mpa` :3006 (GPU/bot host), grackle `~/crow` :3002, black-swan `~/crow` :3001.
 - **Live-verify cross-instance:** create a real room with one local bot + one remote human contact; confirm the bot answers only when addressed, the human sees the bot's reply (re-fan works), and a second bot stays silent. Not "tests pass."
 - **Docs TODO** (the standing operator ask): after this ships, document the whole Crow Messages arc in the public VitePress/GitHub docs (EN+ES) — see the handoff `session-handoff-2026-06-16-crow-messages-phase3-and-docs`.
+
+---
+
+## Review
+
+**Round 1 — 2026-06-16 — VERDICT: REVISE** (adversarial staff-engineer review). All findings verified against the real code and resolved:
+1. **`contacts.ed25519_pubkey` NOT NULL** (init-db.js:456) — every contact INSERT omitted it → would throw. FIXED: `ensureLocalBotContact` + all test helpers now supply it (bot has a derived `ed25519Pubkey`).
+2. **`sendMessage` caches raw envelope JSON into the 1:1 `messages` table** (nostr.js:150-158) → fan-out would pollute every member's DM thread. FIXED: added `nostrManager.sendControl` (publish-only); `fanOut` uses it (Task 5).
+3. **Server-rendered room thread incompatible with the panel SPA** (`client.js` fetches `/api/messages/*`). FIXED: room thread is now JSON routes in `peer-messages.js` + a `client.js` `room` branch (Tasks 10–11); only room creation stays a popover POST form (Task 9). The participant-side re-fan bug found pre-review remains fixed (Task 6).
+4. **Bot never answers if the room-member name ≠ `pi_bot_defs.display_name`.** FIXED: `ensureLocalBotContact` sources the contact name from `pi_bot_defs.display_name`, the same value the adapter matches `addressed_to` against (Tasks 2 + 7).
+5. Suggestions adopted: filter `local-bot` self-contacts from the 1:1 peer list (Task 8); operator's fanned-out label uses the instance name, not "You" (Task 10); `room_join` accepted only from a known contact (Task 6); multi-bot `computeAddressedTo` test (Task 4).
+
+Open questions answered: bot-side replay dedup is the existing upstream `markEventSeen` event-id gate (sufficient — the host dedups `msg_uid` before fan-out, so a bot sees one event per logical message). Operator↔own-bot 1:1 is unchanged/out-of-scope. Round 2 review pending.
