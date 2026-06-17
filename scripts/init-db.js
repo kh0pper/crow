@@ -1423,6 +1423,57 @@ await initTable("chat_messages table", `
   CREATE INDEX IF NOT EXISTS idx_chat_messages_conv ON chat_messages(conversation_id);
 `);
 
+// --- Metering core (paid metered inference) ---
+// pricing_rules: operator-editable price book. Cost per 1M tokens keyed by
+// provider_id and/or provider_type + model_id ('*' = any model). effective_to
+// NULL = currently in force; superseded rules are kept for historical pricing.
+await initTable("pricing_rules table", `
+  CREATE TABLE IF NOT EXISTS pricing_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_id TEXT,
+    provider_type TEXT,
+    model_id TEXT NOT NULL DEFAULT '*',
+    input_cost_per_1m REAL NOT NULL,
+    output_cost_per_1m REAL NOT NULL,
+    cache_read_cost_per_1m REAL,
+    cache_write_cost_per_1m REAL,
+    effective_from TEXT DEFAULT (datetime('now')),
+    effective_to TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_pricing_rules_lookup ON pricing_rules(provider_id, provider_type, model_id);
+`);
+
+// usage_events: append-only metering ledger. One row per metered inference
+// call, attributed to a tenant. priced=0 + computed_cost_usd NULL means no
+// price rule matched (surfaced for backfill, never silently dropped). tenant_id
+// is nullable for now (Phase 1.0 identity only); full tenant isolation is later.
+await initTable("usage_events table", `
+  CREATE TABLE IF NOT EXISTS usage_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id TEXT,
+    conversation_id INTEGER,
+    message_id INTEGER,
+    surface TEXT NOT NULL DEFAULT 'chat',
+    provider_id TEXT,
+    provider_type TEXT,
+    model_id TEXT,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    computed_cost_usd REAL,
+    priced INTEGER NOT NULL DEFAULT 0,
+    request_id TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_usage_events_tenant ON usage_events(tenant_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_usage_events_conv ON usage_events(conversation_id);
+  CREATE INDEX IF NOT EXISTS idx_usage_events_unpriced ON usage_events(priced);
+`);
+
 // Migration: add attachments column to chat_messages if missing
 try {
   await db.execute("SELECT attachments FROM chat_messages LIMIT 0");

@@ -27,6 +27,7 @@ import { checkVendorSwitch } from "../ai/vendor-guard.js";
 import { listProvidersAll } from "../../shared/providers-db.js";
 import { chooseProvider as smartRoute, stripSlashCommand, SmartChatDisabled } from "../ai/smart-router.js";
 import { fixedWindowLimit } from "../middleware/rate-limit.js";
+import { recordUsageEvent } from "../../shared/metering.js";
 
 /** Sliding window: max messages to send to AI */
 const CONTEXT_WINDOW = 20;
@@ -755,7 +756,7 @@ export default function chatRouter(dashboardAuth) {
         // Path A overrides). NULLable; user-row + tool-row INSERTs
         // elsewhere in this file intentionally leave it unset.
         if (assistantContent || toolCalls.length > 0) {
-          await db.execute({
+          const insRes = await db.execute({
             sql: `INSERT INTO chat_messages (conversation_id, role, content, tool_calls, input_tokens, output_tokens, model_id)
                   VALUES (?, 'assistant', ?, ?, ?, ?, ?)`,
             args: [
@@ -771,6 +772,26 @@ export default function chatRouter(dashboardAuth) {
               effectiveModel || null,
             ],
           });
+
+          // Metering: record a usage_event for this model round. Best-effort —
+          // never let the meter break a chat turn. Attribution is by provider_id
+          // (the v1 price-book key); tenant + provider_type resolution are
+          // follow-up wiring. Unmatched models are still recorded (priced=0).
+          try {
+            await recordUsageEvent(db, {
+              tenantId: null,
+              conversationId: convId,
+              messageId: insRes?.lastInsertRowid != null ? Number(insRes.lastInsertRowid) : null,
+              surface: "chat",
+              providerId: effectiveProvider || null,
+              providerType: null,
+              modelId: effectiveModel || null,
+              inputTokens: roundInputTokens,
+              outputTokens: roundOutputTokens,
+            });
+          } catch (meterErr) {
+            console.warn(`[metering] usage_event record failed: ${meterErr.message}`);
+          }
         }
 
         // If no tool calls, we're done
