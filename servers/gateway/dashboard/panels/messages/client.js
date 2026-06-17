@@ -797,6 +797,26 @@ export function messagesClientJS(opts) {
     } catch(e) { console.error('roomAddMember failed:', e); }
     loadRoomConversation(groupId);
   }
+  async function roomAddBot(groupId, botId) {
+    if (!botId || !String(botId).trim()) return;
+    try {
+      await fetch('/api/messages/room/' + encodeURIComponent(groupId) + '/members', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bot_id: String(botId).trim() }),
+      });
+    } catch(e) { console.error('roomAddBot failed:', e); }
+    loadRoomConversation(groupId);
+  }
+
+  // Contact roster (people + bots) embedded server-side for the add-member
+  // picker — no extra fetch. Returns [{ id, display_name, crow_id, is_bot }].
+  function msgContactRoster() {
+    try {
+      var node = document.getElementById('msg-contacts-data');
+      if (!node) return [];
+      var arr = JSON.parse(node.textContent || '[]');
+      return Array.isArray(arr) ? arr : [];
+    } catch(e) { return []; }
+  }
 
   // === Shared Chat UI Rendering ===
   function renderChatUI(container, headerData, msgs) {
@@ -880,6 +900,36 @@ export function messagesClientJS(opts) {
         })(members[mi]);
       }
       header.appendChild(memberWrap);
+
+      // Add-member picker: contacts (people + bots) NOT already in the room.
+      // Choosing one POSTs { contact_id }. Members already present are excluded
+      // by id via headerData.members.
+      var memberIds = {};
+      for (var xi = 0; xi < members.length; xi++) { memberIds[String(members[xi].id)] = true; }
+      var roster = msgContactRoster().filter(function(c) { return !memberIds[String(c.id)]; });
+      var addSel = el('select', { className: 'msg-model-select', title: '${tJs("messages.roomAddMember", lang)}', css: 'max-width:160px' });
+      addSel.appendChild(el('option', { value: '', text: '${tJs("messages.roomAddMember", lang)}' }));
+      roster.forEach(function(c) {
+        var label = (Number(c.is_bot) ? 'bot · ' : '') + (c.display_name || (c.crow_id || '').substring(0, 10));
+        addSel.appendChild(el('option', { value: String(c.id), text: label }));
+      });
+      addSel.addEventListener('change', function() {
+        var v = this.value;
+        this.selectedIndex = 0;
+        if (v) roomAddMember(gid, parseInt(v, 10));
+      });
+      header.appendChild(addSel);
+
+      // Add a LOCAL bot by id (materialized into an is_bot contact server-side).
+      header.appendChild(el('button', {
+        className: 'msg-info-toggle',
+        text: '+ bot',
+        title: '${tJs("messages.roomAddBotPrompt", lang)}',
+        onclick: function() {
+          var botId = prompt('${tJs("messages.roomAddBotPrompt", lang)}');
+          if (botId && botId.trim()) roomAddBot(gid, botId.trim());
+        },
+      }));
 
       header.appendChild(el('button', { className: 'msg-info-toggle', text: '${tJs("messages.roomRename", lang)}', onclick: function() { roomRename(gid); } }));
       header.appendChild(el('button', {
