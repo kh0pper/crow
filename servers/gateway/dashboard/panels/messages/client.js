@@ -747,11 +747,20 @@ export function messagesClientJS(opts) {
     if (!text) return;
     input.value = '';
     input.style.height = 'auto';
+
+    _sending = true;
+    document.getElementById('msg-send-btn').disabled = true;
+
     try {
       await fetch('/api/messages/room/' + encodeURIComponent(_activeItem.id) + '/send', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text }),
       });
     } catch(e) { console.error('Failed to send room message:', e); }
+
+    _sending = false;
+    var sendBtn = document.getElementById('msg-send-btn');
+    if (sendBtn) sendBtn.disabled = false;
+
     loadRoomConversation(_activeItem.id);
   }
 

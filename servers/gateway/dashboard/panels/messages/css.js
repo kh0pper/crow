@@ -740,10 +740,10 @@ export function messagesCSS() {
     text-transform: lowercase;
     vertical-align: middle;
   }
-  .msg-member-picker { max-height: 180px; overflow-y: auto; margin: 8px 0; border: 1px solid var(--border, #333); border-radius: 6px; padding: 6px; }
+  .msg-member-picker { max-height: 180px; overflow-y: auto; margin: 8px 0; border: 1px solid var(--crow-border, #333); border-radius: 6px; padding: 6px; }
   .msg-member-picker-label { font-size: 0.72rem; opacity: 0.7; margin-bottom: 4px; }
   .msg-member-opt { display: block; padding: 3px 4px; font-size: 0.82rem; cursor: pointer; }
-  .msg-room-chip { display: inline-flex; align-items: center; gap: 3px; background: var(--chip-bg, #222); border-radius: 10px; padding: 1px 8px; font-size: 0.75rem; }
+  .msg-room-chip { display: inline-flex; align-items: center; gap: 3px; background: var(--crow-bg-surface, #222); border-radius: 10px; padding: 1px 8px; font-size: 0.75rem; }
   .msg-room-hint, .msg-room-mode { font-size: 0.75rem; opacity: 0.7; margin-top: 6px; }
   .msg-bubble-sender { font-size: 0.7rem; opacity: 0.7; margin-bottom: 2px; }
 </style>`;
