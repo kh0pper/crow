@@ -48,7 +48,7 @@ export async function getUnifiedConversationList(db) {
              SUM(CASE WHEN m.is_read = 0 AND m.direction = 'received' THEN 1 ELSE 0 END) as unread
       FROM contacts c
       LEFT JOIN messages m ON m.contact_id = c.id
-      WHERE c.is_blocked = 0
+      WHERE c.is_blocked = 0 AND (c.origin IS NULL OR c.origin != 'local-bot')
       GROUP BY c.id
       ORDER BY last_msg_at DESC NULLS LAST, c.created_at DESC
     `);
@@ -69,6 +69,36 @@ export async function getUnifiedConversationList(db) {
     }
   } catch {}
 
+
+  // Rooms (multi-party). A contact_group with a room_uid is a room.
+  try {
+    const { rows: roomRows } = await db.execute(`
+      SELECT g.id AS group_id, g.name, g.room_uid, g.mode,
+             MAX(rm.created_at) AS last_msg_at,
+             SUM(CASE WHEN rm.is_read = 0 AND rm.direction = 'received' THEN 1 ELSE 0 END) AS unread,
+             (SELECT COUNT(*) FROM contact_group_members gm WHERE gm.group_id = g.id) AS member_count
+      FROM contact_groups g
+      LEFT JOIN room_messages rm ON rm.group_id = g.id
+      WHERE g.room_uid IS NOT NULL
+      GROUP BY g.id
+      ORDER BY last_msg_at DESC NULLS LAST, g.id DESC
+    `);
+    for (const row of roomRows) {
+      const unread = Number(row.unread) || 0;
+      totalUnread += unread;
+      items.push({
+        type: "room",
+        id: "room-" + row.group_id,
+        groupId: Number(row.group_id),
+        roomUid: row.room_uid,
+        displayName: row.name || "Room",
+        mode: row.mode || "addressed",
+        memberCount: Number(row.member_count) || 0,
+        lastActivity: row.last_msg_at || null,
+        unread,
+      });
+    }
+  } catch {}
 
   // Sort all items by last activity
   items.sort((a, b) => {
