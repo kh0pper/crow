@@ -337,6 +337,9 @@ export async function initSharingRuntime(managers, helpers) {
           } catch (err) {
             console.warn("[sharing] Failed to create relay result notification:", err.message);
           }
+        } else if (subtype === "room_message" || subtype === "room_join") {
+          const { handleInboundRoomEnvelope } = await import("./room-inbound.js");
+          await handleInboundRoomEnvelope({ db, nostrManager, identity, subtype, payload, senderPubkey, log: (m) => console.log("[rooms]", m) });
         }
       });
       console.log("[sharing] Subscribed to incoming Nostr messages");
