@@ -164,6 +164,24 @@ export class NostrManager {
   }
 
   /**
+   * Send an encrypted DM WITHOUT caching it into the 1:1 `messages` table. Used
+   * for control/room envelopes (crow_social) that must not appear as 1:1 chat rows.
+   */
+  async sendControl(contact, content) {
+    if (this.relays.size === 0) await this.connectRelays();
+    let recipientPubkey = contact.secp256k1_pubkey || contact.secp256k1Pubkey;
+    if (recipientPubkey && recipientPubkey.length === 66) recipientPubkey = recipientPubkey.slice(2);
+    const conversationKey = nip44.v2.utils.getConversationKey(this.identity.secp256k1Priv, recipientPubkey);
+    const encrypted = nip44.v2.encrypt(content, conversationKey);
+    const event = finalizeEvent({ kind: 4, created_at: Math.floor(Date.now() / 1000), tags: [["p", recipientPubkey]], content: encrypted }, this.identity.secp256k1Priv);
+    const published = [];
+    for (const [url, relay] of this.relays) {
+      try { await relay.publish(event); published.push(url); } catch { /* relay best-effort */ }
+    }
+    return { eventId: event.id, relays: published };
+  }
+
+  /**
    * Subscribe to messages from a specific contact.
    */
   async subscribeToContact(contact) {
