@@ -94,3 +94,18 @@ test("computeAddressedTo: exact @mention and whole-word name; no substring false
   // multi-bot: both addressed
   assert.deepEqual(computeAddressedTo("@Research Bot and @Max please", roster).sort(), ["Max", "Research Bot"]);
 });
+
+test("deleteRoom removes room_messages + memberships (no orphans; FK cascade is off at runtime)", async () => {
+  const { db, cleanup } = freshLibsql();
+  try {
+    const alice = await mkContact(db, "crow:alice", "Alice");
+    const { groupId } = await createRoom(db, { name: "Team", memberContactIds: [alice], mode: "addressed", hostCrowId: "crow:me" });
+    await insertRoomMessage(db, { groupId, msgUid: "m1", senderContactId: alice, senderLabel: "Alice", authorKind: "human", content: "hi", direction: "received" });
+    await deleteRoom(db, groupId);
+    assert.equal(await getRoom(db, groupId), null, "room gone");
+    const rm = await db.execute({ sql: "SELECT COUNT(*) AS n FROM room_messages WHERE group_id = ?", args: [groupId] });
+    assert.equal(Number(rm.rows[0].n), 0, "no orphaned room_messages");
+    const gm = await db.execute({ sql: "SELECT COUNT(*) AS n FROM contact_group_members WHERE group_id = ?", args: [groupId] });
+    assert.equal(Number(gm.rows[0].n), 0, "no orphaned memberships");
+  } finally { cleanup(); }
+});

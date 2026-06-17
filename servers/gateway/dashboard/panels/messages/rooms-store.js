@@ -74,7 +74,14 @@ export async function renameRoom(db, groupId, name) {
   await db.execute({ sql: "UPDATE contact_groups SET name = ? WHERE id = ? AND room_uid IS NOT NULL", args: [name, groupId] });
 }
 export async function deleteRoom(db, groupId) {
-  await db.execute({ sql: "DELETE FROM contact_groups WHERE id = ? AND room_uid IS NOT NULL", args: [groupId] });
+  // FK ON DELETE CASCADE does not fire at runtime (foreign_keys pragma is off on the
+  // request-path client), so explicitly remove room messages + memberships to avoid
+  // orphan rows. Guard on getRoom so a plain organizational group is never touched.
+  const room = await getRoom(db, groupId);
+  if (!room) return;
+  await db.execute({ sql: "DELETE FROM room_messages WHERE group_id = ?", args: [groupId] });
+  await db.execute({ sql: "DELETE FROM contact_group_members WHERE group_id = ?", args: [groupId] });
+  await db.execute({ sql: "DELETE FROM contact_groups WHERE id = ?", args: [groupId] });
 }
 
 /** Insert a room message. Returns true if newly inserted, false if a dup (group, msg_uid). */
