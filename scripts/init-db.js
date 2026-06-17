@@ -1754,6 +1754,35 @@ await initTable("contact_group_members table", `
   CREATE UNIQUE INDEX IF NOT EXISTS idx_group_members_unique ON contact_group_members(group_id, contact_id);
 `);
 
+// --- Crow Messages rooms (phase 3a): a contact_group becomes a multi-party room
+// when it carries a room_uid. Plain organizational groups (room_uid NULL) are
+// unaffected. mode is validated in code ('addressed'|'always') — a CHECK can't be
+// added to an existing table via ALTER, so it lives in rooms-store, not the column.
+await addColumnIfMissing("contact_groups", "room_uid", "TEXT");
+await addColumnIfMissing("contact_groups", "host_crow_id", "TEXT");
+await addColumnIfMissing("contact_groups", "mode", "TEXT DEFAULT 'addressed'");
+await db.execute(
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_groups_room_uid ON contact_groups(room_uid) WHERE room_uid IS NOT NULL"
+);
+
+await initTable("room_messages table", `
+  CREATE TABLE IF NOT EXISTS room_messages (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id          INTEGER NOT NULL REFERENCES contact_groups(id) ON DELETE CASCADE,
+    msg_uid           TEXT NOT NULL,
+    sender_contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
+    sender_label      TEXT,
+    author_kind       TEXT NOT NULL DEFAULT 'human' CHECK (author_kind IN ('human','bot')),
+    content           TEXT NOT NULL,
+    direction         TEXT NOT NULL CHECK (direction IN ('sent','received')),
+    nostr_event_id    TEXT,
+    is_read           INTEGER DEFAULT 0,
+    created_at        TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_room_messages_group ON room_messages(group_id, created_at);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_room_messages_msg_uid ON room_messages(group_id, msg_uid);
+`);
+
 // --- Push Subscriptions (Web Push / PWA) ---
 
 await initTable("push_subscriptions table", `
