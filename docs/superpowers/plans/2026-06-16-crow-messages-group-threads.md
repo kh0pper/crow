@@ -632,7 +632,7 @@ Expected: FAIL (module not found).
 ```js
 /**
  * Crow Messages room transport (phase 3a). Pure envelope builders + a best-effort
- * fan-out over the existing nostrManager.sendMessage 1:1 path. The host calls this
+ * fan-out over nostrManager.sendControl (publish-only, no 1:1 caching). The host calls this
  * to relay a room_message to every member; a participant uses it to send a reply
  * to the host. No relay/identity coupling here — nostrManager is injected.
  */
@@ -1788,4 +1788,6 @@ git commit -m "chore(crow-messages): format phase 3a room threads" <changed path
 4. **Bot never answers if the room-member name ≠ `pi_bot_defs.display_name`.** FIXED: `ensureLocalBotContact` sources the contact name from `pi_bot_defs.display_name`, the same value the adapter matches `addressed_to` against (Tasks 2 + 7).
 5. Suggestions adopted: filter `local-bot` self-contacts from the 1:1 peer list (Task 8); operator's fanned-out label uses the instance name, not "You" (Task 10); `room_join` accepted only from a known contact (Task 6); multi-bot `computeAddressedTo` test (Task 4).
 
-Open questions answered: bot-side replay dedup is the existing upstream `markEventSeen` event-id gate (sufficient — the host dedups `msg_uid` before fan-out, so a bot sees one event per logical message). Operator↔own-bot 1:1 is unchanged/out-of-scope. Round 2 review pending.
+Open questions answered: bot-side replay dedup is the existing upstream `markEventSeen` event-id gate (sufficient — the host dedups `msg_uid` before fan-out, so a bot sees one event per logical message). Operator↔own-bot 1:1 is unchanged/out-of-scope.
+
+**Round 2 — 2026-06-16 — VERDICT: APPROVE.** All seven round-1 fixes verified correct against the real code (ed25519 in every INSERT; `sendControl` faithful + used at all fan-out sites + all mocks updated; SPA route/`client.js` anchors all real; bot-name alignment via `pi_bot_defs.display_name`; `contacts.origin` filter valid; `room_join` known-contact trust; `translations` is a named export). No new blockers. Non-blocking: fixed a stale `sendMessage` docstring in `room-fanout.js`; a few "~line N" anchors drift slightly but the prose anchors are unambiguous; the room list-item highlight (`client.js:171` compares `parseInt(dataset.id)`) is UI-only and covered by the live-verify step. **Intended-behavior confirmation:** a remote human member CAN trigger your local bot (that is the "you + bots + other humans" design; loop-safety still holds since bot replies are `kind:'bot'`); members are people you added and can remove.
