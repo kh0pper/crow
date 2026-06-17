@@ -76,3 +76,49 @@ export async function renameRoom(db, groupId, name) {
 export async function deleteRoom(db, groupId) {
   await db.execute({ sql: "DELETE FROM contact_groups WHERE id = ? AND room_uid IS NOT NULL", args: [groupId] });
 }
+
+/** Insert a room message. Returns true if newly inserted, false if a dup (group, msg_uid). */
+export async function insertRoomMessage(db, { groupId, msgUid, senderContactId = null, senderLabel = null, authorKind = "human", content, direction, nostrEventId = null }) {
+  const res = await db.execute({
+    sql: `INSERT OR IGNORE INTO room_messages
+            (group_id, msg_uid, sender_contact_id, sender_label, author_kind, content, direction, nostr_event_id)
+          VALUES (?,?,?,?,?,?,?,?)`,
+    args: [groupId, msgUid, senderContactId, senderLabel, authorKind === "bot" ? "bot" : "human", content, direction, nostrEventId],
+  });
+  return (res.rowsAffected || 0) > 0;
+}
+
+/** Room messages, oldest-first, joined to the sender contact for display. */
+export async function getRoomMessages(db, groupId, { limit = 200 } = {}) {
+  const { rows } = await db.execute({
+    sql: `SELECT rm.id, rm.msg_uid, rm.content, rm.author_kind, rm.direction, rm.is_read, rm.created_at,
+                 rm.sender_label, c.display_name AS sender_name, c.is_bot AS sender_is_bot
+          FROM room_messages rm
+          LEFT JOIN contacts c ON c.id = rm.sender_contact_id
+          WHERE rm.group_id = ?
+          ORDER BY rm.id ASC
+          LIMIT ?`,
+    args: [groupId, limit],
+  });
+  return rows;
+}
+
+/**
+ * Which bots in `botRoster` a human message addresses. Matches an explicit
+ * `@name` OR a whole-word occurrence of the bot's display name (case-insensitive).
+ * NEVER substring ("maximum" must not match "Max"). botRoster: [{contactId,name}].
+ */
+export function computeAddressedTo(text, botRoster) {
+  const out = [];
+  const lc = String(text || "").toLowerCase();
+  for (const b of botRoster) {
+    const name = String(b.name || "").trim();
+    if (!name) continue;
+    const nl = name.toLowerCase();
+    const esc = nl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const at = lc.includes("@" + nl);
+    const word = new RegExp("(^|[^a-z0-9])" + esc + "([^a-z0-9]|$)").test(lc);
+    if (at || word) out.push(name);
+  }
+  return out;
+}

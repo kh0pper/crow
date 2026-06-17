@@ -9,6 +9,7 @@ import {
   createRoom, getRoomByUid, getRoom, listRoomMembers, ensureLocalRoomForUid,
   addMember, removeMember, setMode, renameRoom, deleteRoom, listRooms,
 } from "../servers/gateway/dashboard/panels/messages/rooms-store.js";
+import { insertRoomMessage, getRoomMessages, computeAddressedTo } from "../servers/gateway/dashboard/panels/messages/rooms-store.js";
 
 function freshLibsql() {
   const dir = mkdtempSync(join(tmpdir(), "crowroom-"));
@@ -66,4 +67,30 @@ test("ensureLocalRoomForUid materializes once; add/remove/setMode/rename/delete"
     assert.equal(await getRoom(db, gid1), null);
     assert.equal((await listRooms(db)).length, 0);
   } finally { cleanup(); }
+});
+
+test("insertRoomMessage dedups on (group, msg_uid); getRoomMessages returns chronological", async () => {
+  const { db, cleanup } = freshLibsql();
+  try {
+    const { groupId } = await createRoom(db, { name: "R", memberContactIds: [], mode: "addressed", hostCrowId: "crow:me" });
+    const a = await insertRoomMessage(db, { groupId, msgUid: "m1", senderContactId: null, senderLabel: "You", authorKind: "human", content: "hi", direction: "sent" });
+    const b = await insertRoomMessage(db, { groupId, msgUid: "m1", senderContactId: null, senderLabel: "You", authorKind: "human", content: "hi", direction: "sent" });
+    assert.equal(a, true, "first insert is new");
+    assert.equal(b, false, "duplicate msg_uid ignored");
+    await insertRoomMessage(db, { groupId, msgUid: "m2", senderContactId: null, senderLabel: "Bot", authorKind: "bot", content: "hello", direction: "received" });
+    const msgs = await getRoomMessages(db, groupId);
+    assert.equal(msgs.length, 2);
+    assert.equal(msgs[0].content, "hi");
+    assert.equal(msgs[1].author_kind, "bot");
+  } finally { cleanup(); }
+});
+
+test("computeAddressedTo: exact @mention and whole-word name; no substring false-positive", async () => {
+  const roster = [{ contactId: 1, name: "Research Bot" }, { contactId: 2, name: "Max" }];
+  assert.deepEqual(computeAddressedTo("hey @Research Bot can you help", roster), ["Research Bot"]);
+  assert.deepEqual(computeAddressedTo("Max, what time is it?", roster), ["Max"]);
+  assert.deepEqual(computeAddressedTo("the maximum value", roster), [], "'maximum' must NOT match 'Max'");
+  assert.deepEqual(computeAddressedTo("nobody addressed here", roster), []);
+  // multi-bot: both addressed
+  assert.deepEqual(computeAddressedTo("@Research Bot and @Max please", roster).sort(), ["Max", "Research Bot"]);
 });
