@@ -57,19 +57,39 @@ export async function handleInboundRoomEnvelope({ db, nostrManager, identity, su
     }
     if (!authorized) { log("room_message drop: signer not member/host of " + payload.room_uid); return; }
 
-    // Attribute the message to its AUTHOR (by crow_id) for display, not the signer
-    // (on the participant side the signer is the host relaying someone else's text).
-    let authorContactId = null, authorLabel = author.display_name || null;
-    if (author.crow_id) {
-      const { rows } = await db.execute({ sql: "SELECT id, display_name FROM contacts WHERE crow_id = ?", args: [author.crow_id] });
-      if (rows[0]) { authorContactId = rows[0].id; authorLabel = rows[0].display_name || authorLabel; }
+    // Attribute the message to the CRYPTOGRAPHICALLY-VERIFIED author, never the
+    // spoofable payload labels. Two legs:
+    //   - signer IS a room member (host-receive leg, the member relays their own
+    //     message): trust the verified signer; IGNORE payload author entirely.
+    //   - signer is null (participant leg, the room's host relays someone else's
+    //     text): the host already attributed it, so honor the payload author for
+    //     display, resolving the contact by crow_id (fallback to display_name).
+    let authorContactId = null, authorLabel = null, resolvedAuthor;
+    if (signerMember) {
+      authorContactId = signerMember.id;
+      authorLabel = signerMember.display_name;
+      resolvedAuthor = {
+        kind: Number(signerMember.is_bot) === 1 ? "bot" : "human",
+        crow_id: signerMember.crow_id,
+        display_name: signerMember.display_name,
+      };
+    } else {
+      resolvedAuthor = {
+        kind: author.kind === "bot" ? "bot" : "human",
+        crow_id: author.crow_id || null,
+        display_name: author.display_name || null,
+      };
+      authorLabel = author.display_name || null;
+      if (author.crow_id) {
+        const { rows } = await db.execute({ sql: "SELECT id, display_name FROM contacts WHERE crow_id = ?", args: [author.crow_id] });
+        if (rows[0]) { authorContactId = rows[0].id; authorLabel = rows[0].display_name || authorLabel; }
+      }
     }
-    if (authorContactId == null && signerMember) { authorContactId = signerMember.id; authorLabel = authorLabel || signerMember.display_name; }
 
     const inserted = await insertRoomMessage(db, {
       groupId: room.id, msgUid: payload.msg_uid, senderContactId: authorContactId,
       senderLabel: authorLabel,
-      authorKind: author.kind === "bot" ? "bot" : "human",
+      authorKind: resolvedAuthor.kind,
       content: payload.text || "", direction: "received", nostrEventId: null,
     });
     if (!inserted) return; // duplicate msg_uid — already handled
@@ -80,12 +100,12 @@ export async function handleInboundRoomEnvelope({ db, nostrManager, identity, su
     // Host re-fan to all OTHER members. For human-authored messages the host
     // computes addressed_to (authoritative); bot-authored messages address no one.
     const botRoster = members.filter((m) => Number(m.is_bot) === 1).map((m) => ({ contactId: m.id, name: m.display_name || m.crow_id }));
-    const addressedTo = author.kind === "human"
+    const addressedTo = resolvedAuthor.kind === "human"
       ? (room.mode === "always" ? botRoster.map((b) => b.name) : computeAddressedTo(payload.text || "", botRoster))
       : [];
     const envelope = buildRoomMessageEnvelope({
       roomUid: room.room_uid, roomName: room.name, hostCrowId: identity.crowId,
-      msgUid: payload.msg_uid, author, text: payload.text || "", addressedTo, ts: payload.ts || null,
+      msgUid: payload.msg_uid, author: resolvedAuthor, text: payload.text || "", addressedTo, ts: payload.ts || null,
     });
     // Exclude the transport origin (the member who sent it) from the re-fan.
     await fanOut({ nostrManager, members, envelope, excludeContactId: signerMember ? signerMember.id : null, log });
