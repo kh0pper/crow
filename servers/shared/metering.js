@@ -137,6 +137,70 @@ export async function loadPricingRules(db) {
 }
 
 /**
+ * Aggregate the usage ledger into spend totals + a per-provider/model breakdown,
+ * plus the count of UNPRICED events (the coverage gap that the reconciliation
+ * gate watches). Optional `since`/`until` (ISO strings) bound the window.
+ *
+ * This is the queryable core for both usage reporting and reconciliation:
+ * compare `totals.costUsd` (and the per-provider rows) against the backend's
+ * real invoice; a non-zero `unpricedEvents` means the price book has gaps.
+ *
+ * @param {{execute:Function}} db
+ * @param {{since?:string|null, until?:string|null}} [opts]
+ */
+export async function summarizeUsage(db, { since = null, until = null } = {}) {
+  const where = [];
+  const args = [];
+  if (since) { where.push("created_at >= ?"); args.push(since); }
+  if (until) { where.push("created_at < ?"); args.push(until); }
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+  const totalsRes = await db.execute({
+    sql: `SELECT COUNT(*) AS events,
+            COALESCE(SUM(input_tokens),0)  AS inputTokens,
+            COALESCE(SUM(output_tokens),0) AS outputTokens,
+            COALESCE(SUM(cached_tokens),0) AS cachedTokens,
+            COALESCE(SUM(computed_cost_usd),0) AS costUsd,
+            COALESCE(SUM(CASE WHEN priced=0 THEN 1 ELSE 0 END),0) AS unpriced
+          FROM usage_events ${whereSql}`,
+    args,
+  });
+  const t = totalsRes.rows[0];
+
+  const byRes = await db.execute({
+    sql: `SELECT provider_id, provider_type, model_id,
+            COUNT(*) AS events,
+            COALESCE(SUM(input_tokens),0)  AS inputTokens,
+            COALESCE(SUM(output_tokens),0) AS outputTokens,
+            COALESCE(SUM(computed_cost_usd),0) AS costUsd
+          FROM usage_events ${whereSql}
+          GROUP BY provider_id, provider_type, model_id
+          ORDER BY costUsd DESC`,
+    args,
+  });
+
+  return {
+    totals: {
+      events: Number(t.events),
+      inputTokens: Number(t.inputTokens),
+      outputTokens: Number(t.outputTokens),
+      cachedTokens: Number(t.cachedTokens),
+      costUsd: Number(t.costUsd),
+    },
+    unpricedEvents: Number(t.unpriced),
+    byProvider: byRes.rows.map((r) => ({
+      providerId: r.provider_id,
+      providerType: r.provider_type,
+      modelId: r.model_id,
+      events: Number(r.events),
+      inputTokens: Number(r.inputTokens),
+      outputTokens: Number(r.outputTokens),
+      costUsd: Number(r.costUsd),
+    })),
+  };
+}
+
+/**
  * Record one metered inference call into usage_events.
  *
  * Looks up the matching price rule and computes cost. If no rule matches, the
