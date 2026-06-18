@@ -35,6 +35,7 @@ import { createDbClient } from "../../db.js";
 import { resolveProviderConfig } from "../ai/resolve-profile.js";
 import { maybeAcquireLocalProvider, warmProviderByName } from "../gpu-orchestrator.js";
 import { connectTimeout, isTimeoutError, LLM_CONNECT_TIMEOUT_MS } from "../../shared/http-timeout.js";
+import { extractUsageFromOpenAIResponse, recordUsageEvent } from "../../shared/metering.js";
 
 const FAST_KEY = process.env.COMPANION_FAST_MODEL || "crow-voice/qwen3.5-4b";
 const ESC_KEY = process.env.COMPANION_ESCALATION_MODEL || "crow-chat/qwen3.6-35b-a3b";
@@ -237,14 +238,42 @@ async function handleChat(req, res) {
   res.status(upstream.status);
   res.set("Content-Type", upstream.headers.get("content-type") || "application/json");
   if (!upstream.body) return res.end();
+  // Tap the pass-through to meter usage (companion/glasses). Bytes are forwarded
+  // unchanged; we keep only a bounded tail because the OpenAI usage block rides
+  // the final include_usage SSE frame (or is the whole non-streaming JSON body).
+  let captured = "";
+  const CAP = 64 * 1024;
   try {
     await new Promise((resolve, reject) => {
       const nodeStream = Readable.fromWeb(upstream.body);
       nodeStream.on("error", reject);
+      nodeStream.on("data", (chunk) => {
+        captured += chunk.toString("utf8");
+        if (captured.length > CAP) captured = captured.slice(-CAP);
+      });
       res.on("close", () => nodeStream.destroy());
       nodeStream.pipe(res);
       res.on("finish", resolve);
     });
+    // Metering: best-effort, never affects the proxied response.
+    if (upstream.ok) {
+      try {
+        const usage = extractUsageFromOpenAIResponse(captured);
+        if (usage) {
+          await recordUsageEvent(db(), {
+            surface: "llm",
+            providerId,
+            providerType: null,
+            modelId: up.model,
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            cachedTokens: usage.cachedTokens,
+          });
+        }
+      } catch (meterErr) {
+        console.warn(`[metering] /llm usage record failed: ${meterErr.message}`);
+      }
+    }
   } catch (e) {
     console.error(`[llm-router] stream error: ${e.message}`);
     if (!res.writableEnded) res.end();

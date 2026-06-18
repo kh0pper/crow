@@ -73,6 +73,57 @@ export function selectPriceRule(rules, { providerId = null, providerType = null,
 }
 
 /**
+ * Map an OpenAI-style usage object to our token shape.
+ * @param {object} u  { prompt_tokens, completion_tokens, prompt_tokens_details? }
+ */
+function mapOpenAIUsage(u) {
+  return {
+    inputTokens: u.prompt_tokens || 0,
+    outputTokens: u.completion_tokens || 0,
+    cachedTokens: u.prompt_tokens_details?.cached_tokens || 0,
+  };
+}
+
+/**
+ * Extract token usage from a captured OpenAI-compatible response body —
+ * either a non-streaming JSON object or a streamed SSE transcript (where the
+ * `usage` block rides the final `include_usage` chunk). Returns null when no
+ * usage is present (e.g. a stream that didn't request include_usage).
+ *
+ * Used by the /llm proxy tap to meter companion/glasses traffic.
+ *
+ * @param {string} rawText  the full upstream response body
+ * @returns {{inputTokens:number, outputTokens:number, cachedTokens:number}|null}
+ */
+export function extractUsageFromOpenAIResponse(rawText) {
+  if (!rawText || typeof rawText !== "string") return null;
+
+  // Non-streaming: the whole body is one JSON object with a top-level usage.
+  try {
+    const obj = JSON.parse(rawText);
+    if (obj && obj.usage) return mapOpenAIUsage(obj.usage);
+  } catch {
+    // not plain JSON — fall through to SSE parsing
+  }
+
+  // Streaming SSE: scan `data:` frames, keep the last one carrying usage.
+  let found = null;
+  for (const line of rawText.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) continue;
+    const payload = trimmed.slice(5).trim();
+    if (!payload || payload === "[DONE]") continue;
+    try {
+      const chunk = JSON.parse(payload);
+      if (chunk && chunk.usage) found = mapOpenAIUsage(chunk.usage);
+    } catch {
+      // skip unparseable frame
+    }
+  }
+  return found;
+}
+
+/**
  * Load the currently-in-force price rules (effective_to IS NULL).
  *
  * @param {{execute:Function}} db  a libsql client
