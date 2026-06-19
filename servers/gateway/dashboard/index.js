@@ -77,6 +77,7 @@ import designSystemPanel from "./panels/design-system.js";
 import onboardingPanel from "./panels/onboarding.js";
 import connectPanel from "./panels/connect.js";
 import fediversePanel from "./panels/fediverse.js";
+import meteringPanel from "./panels/metering.js";
 import { handleFixItAction } from "../fix-it/index.js";
 import bundlesRouterFactory from "../routes/bundles.js";
 
@@ -107,6 +108,7 @@ export default function dashboardRouter(mcpAuthMiddleware) {
   registerPanel(onboardingPanel);
   registerPanel(connectPanel);
   registerPanel(fediversePanel);
+  registerPanel(meteringPanel);
 
   // Load third-party panels (async, non-blocking)
   loadExternalPanels().catch((err) => {
