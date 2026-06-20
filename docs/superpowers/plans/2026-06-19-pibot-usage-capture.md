@@ -179,6 +179,10 @@ test("meterBotTurn writes a priced surface=bot row from the per-turn delta", asy
   });
   assert.equal(res.recorded, true);
   assert.equal(res.priced, true);
+  // delta = {input:60, output:25, cacheRead:5} at $1/1M in+out, no cache_read rate
+  // ⇒ cacheRead billed at input rate ⇒ (55+5+25)/1e6 = 0.000085. Assert the exact
+  // number so a computeCost wiring regression is caught (not just priced=1).
+  assert.ok(Math.abs(res.cost - 0.000085) < 1e-12, `expected ~0.000085, got ${res.cost}`);
   const { rows } = await libsqlAdapter(conn).execute("SELECT * FROM usage_events");
   assert.equal(rows.length, 1);
   assert.equal(rows[0].surface, "bot");
@@ -191,6 +195,7 @@ test("meterBotTurn writes a priced surface=bot row from the per-turn delta", asy
   assert.equal(rows[0].tenant_id, null);
   assert.equal(rows[0].request_id, "sess-1");
   assert.equal(Number(rows[0].priced), 1);
+  assert.ok(Math.abs(Number(rows[0].computed_cost_usd) - 0.000085) < 1e-12);
 });
 
 test("meterBotTurn still records an UNPRICED row when no rule matches", async () => {
@@ -208,6 +213,26 @@ test("meterBotTurn still records an UNPRICED row when no rule matches", async ()
   assert.equal(rows.length, 1);
   assert.equal(Number(rows[0].priced), 0);
   assert.equal(rows[0].computed_cost_usd, null);
+});
+
+test("meterBotTurn writes a clamped row when compaction makes a dimension negative", async () => {
+  const conn = freshDb();
+  conn.prepare(
+    "INSERT INTO pricing_rules (provider_id, model_id, input_cost_per_1m, output_cost_per_1m) VALUES (?,?,?,?)",
+  ).run("crow-test", "*", 1.0, 1.0);
+  // input compacted down (480 < 500) ⇒ clamps to 0; output still grew by 10.
+  const res = await meterBotTurn({
+    conn,
+    statsBefore: { tokens: { input: 500, output: 50, cacheRead: 0 } },
+    statsAfter: { tokens: { input: 480, output: 60, cacheRead: 0 } },
+    resolved: { provider: "crow-test", model: "qwen" },
+    requestId: "sess-compact",
+  });
+  assert.equal(res.recorded, true);
+  const { rows } = await libsqlAdapter(conn).execute("SELECT input_tokens, output_tokens FROM usage_events");
+  assert.equal(rows.length, 1);
+  assert.equal(Number(rows[0].input_tokens), 0);
+  assert.equal(Number(rows[0].output_tokens), 10);
 });
 
 test("meterBotTurn records nothing on zero delta or missing after-stats", async () => {
@@ -288,7 +313,7 @@ export async function meterBotTurn({
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `node --test tests/pibot-metering.test.js`
-Expected: PASS (5 tests total).
+Expected: PASS (6 tests total: adapter, tokenDelta, priced, unpriced, compaction-clamp, zero/missing).
 
 - [ ] **Step 5: Commit**
 
@@ -309,6 +334,10 @@ git show --stat HEAD | head -6
 - Produces: `PiRpc.getSessionStats() -> Promise<{type:"response",command:"get_session_stats",success:true,data:SessionStats}>` (mirrors `getState()`).
 
 > **Note on verification:** `handleInbound` spawns a real pi process, so it is proven by E2E scripts (`p3_0_e2e.mjs` etc.) and the post-deploy live smoke (Task 5), not a unit test. The pure logic it calls (`meterBotTurn`/`tokenDelta`) is fully unit-tested in Tasks 1–2. This task's gate is: code added correctly + the metering/pibot suites stay green + no syntax error on load.
+>
+> **Divergence from the spec's test item 6 (acknowledged):** the spec proposed a unit test feeding a fake `response/get_session_stats` NDJSON frame through the PiRpc stdout buffer. `PiRpc` is not exported and spawns on construction, so a real unit test would require a refactor. Instead, `getSessionStats()` is a verbatim mirror of the already-E2E-proven `getState()`, and Step 4 below adds a cheap grep that pins the RPC command string against the installed pi CLI — which is the only thing that could silently typo-fail and would otherwise only surface at the live smoke.
+>
+> **Resumed-session edge (best-effort, documented):** `pi.getSessionStats()` resolves on a `command:"get_session_stats"` response regardless of `success`. If a resumed session contains historical assistant messages without a `usage` field, pi's `getSessionStats()` throws → `success:false` → `.data` has no `tokens` → `meterBotTurn` no-ops immediately (no 15s wait, no crash). Net: such turns are silently unmetered. Acceptable for v1 (best-effort capture); the residual is exactly what reconciliation (1.5) measures. Do NOT change the predicate to require `success===true` — that would force a 15s timeout per turn on those sessions.
 
 - [ ] **Step 1: Add the import**
 
@@ -346,7 +375,7 @@ become:
     const stats1 = await pi.getSessionStats().catch(() => null);
 ```
 
-Then, immediately after the existing `upsertSession(session);` line that follows `session.model = resolved.key; session.escalated = ...` (the one BEFORE the `notice`/`sendReply`), add:
+Then add the recording block **inside the success `try` block** (NOT the `catch`). The exact anchor is the `upsertSession(session);` at **`bridge.mjs:568`** — the one that immediately follows `session.status = status; session.control = "run";` and `session.model = resolved.key; session.escalated = resolved.escalated ? 1 : 0;`, and comes right before `const notice = resolved.escalationRequestedButUnavailable`. (Do NOT confuse it with the identical `upsertSession(session)` in the `catch` at ~line 599 — that path is for errored turns and is intentionally left unmetered: a turn that threw has unreliable `stats1`, and the spec scopes capture to successful turns.) `piSessionId` is the block-`const` declared at `bridge.mjs:559` inside this same `try`, so it is in scope here. Immediately after line 568, add:
 
 ```js
     // Phase 1.4: meter this bot turn (surface=bot) into usage_events via the
@@ -366,14 +395,17 @@ Then, immediately after the existing `upsertSession(session);` line that follows
     }
 ```
 
-- [ ] **Step 4: Verify the module loads + suites stay green**
+- [ ] **Step 4: Pin the RPC command string, verify the module loads + suites stay green**
 
-Run:
 ```bash
+# The RPC command string MUST match the installed pi CLI exactly (typo-guard).
+PI_DIR="$HOME/.nvm/versions/node/v20.20.2/lib/node_modules/@earendil-works/pi-coding-agent"
+grep -q 'case "get_session_stats"' "$PI_DIR/dist/modes/rpc/rpc-mode.js" && echo "RPC command string OK" || { echo "MISMATCH — pi CLI does not expose get_session_stats"; exit 1; }
+grep -c 'get_session_stats' scripts/pi-bots/bridge.mjs   # expect 2 (send + waitFor predicate)
 node -e "import('./scripts/pi-bots/bridge.mjs').then(()=>console.log('bridge loads OK')).catch(e=>{console.error(e);process.exit(1)})"
 node --test tests/pibot-metering.test.js tests/metering.test.js tests/metering-record.test.js tests/metering-summary.test.js tests/metering-extract.test.js tests/metering-panel.test.js tests/llm-tap.test.js tests/init-db-metering-tables.test.js
 ```
-Expected: `bridge loads OK`, then all metering tests PASS (no regression).
+Expected: `RPC command string OK`, count `2`, `bridge loads OK`, then all metering tests PASS (no regression).
 
 - [ ] **Step 5: Commit**
 
@@ -487,17 +519,18 @@ systemctl --user list-units 'pibot*' 2>/dev/null || systemctl list-units 'pibot*
 ```
 Expected: unit active, no crash loop (`NRestarts=0`).
 
-- [ ] **Step 3: Live smoke — one real bot turn → assert a `surface=bot` row**
+- [ ] **Step 3: Live smoke — TWO turns on one thread → assert two `surface=bot` rows**
 
-Note the current max id, drive one bot turn (a real inbound on a test bot, or a scheduled test job), then confirm a new row landed:
+Two turns on the SAME thread exercise the non-trivial path: turn 2 resumes the pi session, so its `stats0` is non-zero and the delta math (not just the absolute count) is verified in prod. A one-turn smoke would only test the fresh-session case (`stats0={0,0,0}`, delta==absolute) and miss any resumed-session baseline/sign bug.
 
 ```bash
 DB=/home/kh0pp/.crow-mpa/data/crow.db
 sqlite3 "$DB" "SELECT COALESCE(MAX(id),0) FROM usage_events;"   # baseline
-# ... trigger ONE bot turn via the normal channel (Gmail/Discord) or a test job ...
-sqlite3 -header -column "$DB" "SELECT id, surface, provider_id, model_id, input_tokens, output_tokens, cached_tokens, priced, request_id, created_at FROM usage_events WHERE surface='bot' ORDER BY id DESC LIMIT 3;"
+# ... trigger TWO bot turns on the SAME gateway thread (Gmail/Discord), e.g. ask
+#     a question, then a follow-up so turn 2 resumes the session ...
+sqlite3 -header -column "$DB" "SELECT id, surface, provider_id, model_id, input_tokens, output_tokens, cached_tokens, priced, request_id, created_at FROM usage_events WHERE surface='bot' ORDER BY id DESC LIMIT 5;"
 ```
-Expected: a new `surface=bot` row with non-zero `input_tokens`/`output_tokens` and a `request_id` matching the pi session. `priced=0` is EXPECTED until the MPA price book is seeded (the metering panel's unpriced-coverage warning reflects this) — that is correct, not a bug.
+Expected: TWO new `surface=bot` rows, each with non-zero `input_tokens`/`output_tokens` (turn 2's are the per-turn delta, NOT the cumulative total — if turn 2 shows roughly turn-1+turn-2 summed, the resumed-session delta is broken), and a `request_id` matching the pi session. `priced=0` is EXPECTED until the MPA price book is seeded (the metering panel's unpriced-coverage warning reflects this) — that is correct, not a bug.
 
 - [ ] **Step 4: Confirm the panel shows it**
 
@@ -528,3 +561,23 @@ Update `~/.claude/projects/-home-kh0pp-crow/memory/ferpa-metered-inference-proje
 **Placeholder scan:** none — every code step has complete code; every run step has a command + expected output.
 
 **Type consistency:** `libsqlAdapter(conn)`, `tokenDelta(before, after, log)`, `meterBotTurn({conn, statsBefore, statsAfter, resolved, surface, requestId, log})`, `getSessionStats()` used identically across Tasks 1–4. `statsBefore`/`statsAfter` are always the `SessionStats` object (`.data`), and callers pass `stats0 && stats0.data` consistently.
+
+---
+
+## Review
+
+**Reviewer:** staff-engineer plan review (Plan subagent), adversarial, verified against actual code.
+**Date:** 2026-06-19
+**Verdict:** REVISE → all issues addressed.
+
+The reviewer independently verified as CORRECT: `selectPriceRule` matches `provider_id`+`model_id='*'` (score 3 → priced); the full pi RPC chain (`rpc-mode.js:435-437` → `success(...)` envelope; `SessionStats.tokens` at `agent-session.js:2366`); the WAL-flip hazard (`db.js:221-246` defaults WAL on high-RAM) justifying the thin adapter over `createDbClient`; `{execute}` compatibility (`loadPricingRules` string form, `recordUsageEvent` `{sql,args}` form); insertion anchors (`getState()` at `bridge.mjs:184`, `st0/prompt/st1` at 556-558, job_runner block at 210-215); and that the second short-lived connection mirrors the already-in-prod `appendAuditBridge` (no new concurrency risk).
+
+Resolutions:
+- **CRITICAL — ambiguous insertion anchor (Task 3 Step 3):** the `upsertSession(session)` + `notice`/`sendReply` pattern occurs in BOTH the success `try` and the `catch`. Pinned the anchor to `bridge.mjs:568` (success path), explicitly disambiguated from the `catch` at ~599, and noted `piSessionId` is the block-`const` at line 559 in scope there.
+- **CRITICAL — `piSessionId` scope unstated:** folded into the anchor fix.
+- **#4 errored turns unmetered:** documented as intentional for v1 (errored turns have unreliable `stats1`; spec scopes capture to successful turns).
+- **#5 cost not asserted:** Task 2 priced test now asserts `res.cost` and `computed_cost_usd ≈ 0.000085` exactly.
+- **#6 no integration test for the compaction clamp via `meterBotTurn`:** added a test (input 500→480 clamps to 0, output +10 recorded).
+- **#3 dropped parse test:** acknowledged the spec divergence; added a grep in Task 3 Step 4 pinning the RPC command string against the installed pi CLI (the only silent-typo risk).
+- **#7 resumed-session usage-less messages:** documented the safe no-op; explicitly rejected requiring `success===true` (would force a 15s per-turn timeout).
+- **#8 one-turn smoke too weak:** Task 5 smoke is now TWO turns on one thread, verifying the resumed-session delta (not just the fresh absolute count).
