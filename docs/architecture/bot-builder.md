@@ -66,8 +66,26 @@ When an agent selects a tool from an extension that is not part of Crow's canoni
 | **Discord** | `discord_gateway.mjs` | A long-lived Discord WebSocket that drives the runtime, with a per-agent user allowlist |
 | **Meta Glasses** | `bundles/meta-glasses/` | A paired device binds to an agent and drives the fast voice turn |
 | **AI Companion** | `bundles/companion/` + `scripts/companion/model-proxy.mjs` | A kiosk device binds to an agent; the [companion](/architecture/companion)'s OLVV loop runs that agent's persona/avatar/tools, with a model proxy routing fast (4B) → escalate (35B) |
+| **Crow Messages** | `scripts/pi-bots/gateways/crow-messages.mjs` | The agent is reachable as a contact over Crow's peer messaging; authorized senders' encrypted DMs drive the runtime and the agent replies from its own derived identity. See [Crow Messages](#crow-messages-bots-as-contacts) below. |
 
 > The Meta Glasses and AI Companion channels run their own voice loop (the glasses voice turn; OLVV for the companion) rather than the pi `bridge.mjs` runtime — so the bound agent's persona/skills/tools drive the turn, but the engine is the voice front end, not pi. See [AI Companion](/architecture/companion).
+
+## Crow Messages: bots as contacts
+
+The Crow Messages gateway makes an agent reachable as a first-class contact over Crow's peer-to-peer messaging. The whole surface — sharing a bot, the cross-Crow directory, and group rooms — rests on one principle: **a bot is a contact.** See the [Crow Messages guide](/guide/crow-messages) for the user-facing walkthrough.
+
+**Per-bot identity.** Each agent that runs a crow-messages gateway has a Nostr keypair *derived* from the instance seed plus the bot id (`deriveBotIdentity`). Nothing is stored: the same derivation runs in the dashboard (to show the bot's address and mint invites) and in the pi-bots host (to subscribe and reply), so the two always agree. The bot answers from its own key, as itself.
+
+**Adapter and authorization.** `scripts/pi-bots/gateways/crow-messages.mjs` subscribes the bot to its own pubkey, decrypts inbound DMs, and drives the real `bridge.mjs` runtime for authorized senders. Authorization is **default-deny** and keyed on the cryptographically verified event signer, never on any claimed field in the message body. The access list (`bot_message_acl`) is populated by accepting an ed25519-signed invite (`bot_message_invites`); an optional "allow paired instances" mode also admits the operator's own paired Crows. A persistent seen-event table makes the turn idempotent against a relay's replay window.
+
+**Bots as contacts + the directory.** Accepting a bot writes a `contacts` row flagged `is_bot`, which is the seam the rest of the feature builds on. Bots that opt in are advertised to the operator's paired instances over a signed `advertised-bots` transport, and `getBotDirectory` aggregates them across the fleet (grouped by instance, deduped by messaging pubkey) so the dashboard can browse and one-click add them.
+
+**Group rooms.** A room reuses the existing `contact_groups` table: a group becomes a multi-party room when it carries a `room_uid` (plain organizational groups are untouched). Members reuse `contact_group_members`; room messages live in their own `room_messages` table. Transport is **hub-and-spoke** over the same pairwise DMs: the room's host instance fans each message out to every member (people and bots uniformly) via a publish-only `sendControl` that does not pollute the one-to-one message cache. A bot is just a participant addressed at its pubkey, so local and remote bots are one code path.
+
+Two structural invariants make rooms safe rather than merely tuned:
+
+- **Loop safety.** A bot runs a turn only on a *human*-authored message, and only when the host's computed `addressed_to` names it (or the room is in "always" mode). A bot's own reply is marked bot-authored, which every bot ignores. Re-fanning a bot reply never re-triggers a bot, so the work is bounded at one turn per bot per human message — a loop is impossible by construction.
+- **Signer-verified attribution.** A received room message is attributed to the verified signer, not to any author label in the payload, so a member cannot impersonate another member or flip the bot badge to suppress addressing.
 
 ## The voice path
 

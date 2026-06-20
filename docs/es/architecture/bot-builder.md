@@ -67,8 +67,26 @@ Cuando un agente selecciona una herramienta de una extensión que no forma parte
 | **Discord** | `discord_gateway.mjs` | Un WebSocket de Discord de larga vida que dirige el runtime, con una lista de usuarios permitidos por agente |
 | **Meta Glasses** | `bundles/meta-glasses/` | Un dispositivo emparejado se vincula a un agente y dirige el turno de voz rápido |
 | **AI Companion** | `bundles/companion/` + `scripts/companion/model-proxy.mjs` | Un dispositivo kiosko se vincula a un agente; el bucle OLVV del [companion](/es/architecture/companion) ejecuta la persona/avatar/herramientas de ese agente, con un proxy de modelos que enruta rápido (4B) → escalado (35B) |
+| **Crow Messages** | `scripts/pi-bots/gateways/crow-messages.mjs` | El agente es accesible como contacto a través de la mensajería entre pares de Crow; los DM cifrados de remitentes autorizados dirigen el runtime y el agente responde desde su propia identidad derivada. Consulta [Crow Messages](#crow-messages-los-bots-como-contactos) abajo. |
 
 > Los canales de Meta Glasses y AI Companion ejecutan su propio bucle de voz (el turno de voz de los lentes; OLVV para el companion) en lugar del runtime pi `bridge.mjs` — así que la persona/skills/herramientas del agente vinculado dirigen el turno, pero el motor es el front end de voz, no pi. Consulta [AI Companion](/es/architecture/companion).
+
+## Crow Messages: los bots como contactos
+
+La pasarela de Crow Messages hace que un agente sea accesible como un contacto de primera clase a través de la mensajería entre pares de Crow. Toda la superficie — compartir un bot, el directorio entre Crows y las salas grupales — descansa sobre un principio: **un bot es un contacto.** Consulta la [guía de Crow Messages](/es/guide/crow-messages) para el recorrido orientado al usuario.
+
+**Identidad por bot.** Cada agente que ejecuta una pasarela de crow-messages tiene un par de claves Nostr *derivado* de la semilla de la instancia más el id del bot (`deriveBotIdentity`). No se almacena nada: la misma derivación corre en el panel (para mostrar la dirección del bot y acuñar invitaciones) y en el host de pi-bots (para suscribirse y responder), así que ambos siempre coinciden. El bot responde desde su propia clave, como él mismo.
+
+**Adaptador y autorización.** `scripts/pi-bots/gateways/crow-messages.mjs` suscribe el bot a su propio pubkey, descifra los DM entrantes y dirige el runtime real `bridge.mjs` para los remitentes autorizados. La autorización es **denegar por defecto** y se basa en el firmante del evento verificado criptográficamente, nunca en un campo declarado en el cuerpo del mensaje. La lista de acceso (`bot_message_acl`) se llena al aceptar una invitación firmada con ed25519 (`bot_message_invites`); un modo opcional de "permitir instancias emparejadas" también admite los propios Crows emparejados del operador. Una tabla persistente de eventos vistos hace el turno idempotente frente a la ventana de reenvío de un relay.
+
+**Bots como contactos + el directorio.** Aceptar un bot escribe una fila en `contacts` marcada `is_bot`, que es la costura sobre la que se construye el resto de la función. Los bots que se suman se anuncian a las instancias emparejadas del operador por un transporte firmado de `advertised-bots`, y `getBotDirectory` los agrega a través de la flota (agrupados por instancia, deduplicados por pubkey de mensajería) para que el panel pueda explorarlos y agregarlos con un clic.
+
+**Salas grupales.** Una sala reutiliza la tabla existente `contact_groups`: un grupo se convierte en una sala de varias partes cuando lleva un `room_uid` (los grupos organizativos simples no se tocan). Los miembros reutilizan `contact_group_members`; los mensajes de sala viven en su propia tabla `room_messages`. El transporte es **hub-and-spoke** sobre los mismos DM por pares: la instancia anfitriona de la sala distribuye cada mensaje a cada miembro (personas y bots por igual) mediante un `sendControl` de solo publicación que no contamina la caché de mensajes uno a uno. Un bot es solo un participante direccionado en su pubkey, así que los bots locales y remotos son un único camino de código.
+
+Dos invariantes estructurales hacen que las salas sean seguras y no solo ajustadas:
+
+- **Seguridad ante bucles.** Un bot ejecuta un turno solo ante un mensaje escrito por una *persona*, y solo cuando el `addressed_to` calculado por el anfitrión lo nombra (o la sala está en modo "a cada mensaje"). La propia respuesta de un bot se marca como de bot, lo cual todo bot ignora. Redistribuir la respuesta de un bot nunca vuelve a activar a un bot, así que el trabajo queda acotado a un turno por bot por mensaje humano — un bucle es imposible por construcción.
+- **Atribución verificada por firma.** Un mensaje de sala recibido se atribuye al firmante verificado, no a ninguna etiqueta de autor en la carga útil, así que un miembro no puede hacerse pasar por otro ni cambiar la insignia de bot para suprimir el direccionamiento.
 
 ## La vía de voz
 

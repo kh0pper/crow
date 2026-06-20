@@ -43,6 +43,7 @@ Un gateway conecta un agente con un lugar donde la gente habla con él. La misma
 - **Gmail**: El agente lee y responde correo en un buzón conectado.
 - **Discord**: El agente se une a un servidor de Discord como bot y responde en canales y mensajes directos, con una lista de usuarios permitidos por agente.
 - **Lentes Meta**: Un par de lentes Ray-Ban Meta (Gen 2) emparejados se vincula a un agente. Ese agente entonces dirige el turno de voz rápido: su persona, sus skills, sus herramientas delimitadas y sus permisos, hablados a través de los perfiles de habla y voz que elegiste. Consulta la [guía de Lentes Meta](/es/guide/meta-glasses).
+- **Crow Messages**: El agente se vuelve accesible como un contacto. Las personas que invites pueden enviarle mensajes, puedes explorar y agregar los bots que corren en tus Crows, y puedes reunir a personas y bots en una sala grupal. Consulta la [guía de Crow Messages](/es/guide/crow-messages).
 
 Vincular los lentes a un agente es uno a uno: un dispositivo dirige un agente a la vez, y elegir un nuevo agente para un dispositivo libera el vínculo anterior.
 
@@ -81,6 +82,7 @@ La pestaña Revisar / Desplegar resume el agente antes de que lo confirmes. Una 
 ## Relacionado
 
 - [Lentes Meta](/es/guide/meta-glasses): Ejecuta un agente manos libres en lentes Ray-Ban Meta
+- [Crow Messages](/es/guide/crow-messages): Comparte un bot, explora bots de tus Crows y crea salas grupales
 - [Arquitectura del Bot Builder](/es/architecture/bot-builder): El motor, el modelo de datos y los internos del despacho de voz
 - [Extensiones](/es/guide/extensions): Instala extensiones que aportan herramientas y skills
 - [Escribir Skills](/es/developers/skills): Crea los prompts conductuales que usan los agentes
