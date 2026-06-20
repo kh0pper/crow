@@ -119,6 +119,18 @@ and bridge (adapter) is deliberate — reconciliation (1.5) must trust one
 recording code path. Rows from better-sqlite3 `.all()` are plain objects, shape-
 compatible with what `loadPricingRules`/`selectPriceRule` consume.
 
+**Why NOT reuse `servers/db.js:createDbClient` (which already exposes the libsql
+`.execute` surface over better-sqlite3):** `createDbClient` calls
+`resolveJournalMode()`, which **defaults to WAL on high-RAM hosts** (crow is one)
+unless `CROW_JOURNAL_MODE` is set — and the pibot service does **not** set it for
+the bridge process. So `createDbClient(CROW_DB)` in a transient turn process would
+attempt to flip the prod crow.db to WAL and register a WAL keeper — exactly the
+`crowdb-wal-flip-new-consumers` hazard the bridge avoids by opening with
+busy_timeout only (`db()` helper, line ~53). The thin adapter wraps the bridge's
+**existing** busy-timeout-only connection and flips nothing — identical discipline
+to every current bridge write (`getSession`, `upsertSession`, `appendAuditBridge`).
+Do not replace it with `createDbClient`.
+
 **`meterBotTurn({ conn, statsBefore, statsAfter, resolved, surface = "bot", requestId, log })`**
 — async, best-effort:
 
