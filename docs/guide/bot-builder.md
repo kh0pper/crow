@@ -43,6 +43,7 @@ A gateway connects an agent to a place where people talk to it. The same agent d
 - **Gmail**: The agent reads and replies to email on a connected mailbox.
 - **Discord**: The agent joins a Discord server as a bot and answers in channels and DMs, with a per-agent user allowlist.
 - **Meta Glasses**: A paired pair of Ray-Ban Meta (Gen 2) glasses binds to one agent. That agent then drives the fast voice turn: its persona, its skills, its scoped tools, and its permissions, spoken through the speech and voice profiles you picked. See the [Meta Glasses guide](/guide/meta-glasses).
+- **Crow Messages**: The agent becomes reachable as a contact. People you invite can message it, you can browse and add the bots running across your Crows, and you can put people and bots together in a group room. See the [Crow Messages guide](/guide/crow-messages).
 
 Binding glasses to an agent is one-to-one: a device drives one agent at a time, and choosing a new agent for a device releases the old binding.
 
@@ -81,6 +82,7 @@ The Review / Deploy tab summarizes the agent before you commit it. Once deployed
 ## Related
 
 - [Meta Glasses](/guide/meta-glasses): Run an agent hands-free on Ray-Ban Meta glasses
+- [Crow Messages](/guide/crow-messages): Share a bot, browse bots across your Crows, and build group rooms
 - [Bot Builder Architecture](/architecture/bot-builder): The engine, data model, and voice dispatch internals
 - [Extensions](/guide/extensions): Install extensions that contribute tools and skills
 - [Writing Skills](/developers/skills): Author the behavioral prompts agents use
