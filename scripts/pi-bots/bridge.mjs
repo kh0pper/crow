@@ -183,7 +183,12 @@ export class PiRpc {
     return this.waitFor((m) => m.type === "agent_end", ms, "agent_end");
   }
   async getState() { this.send({ type: "get_state" }); return this.waitFor((m) => m.type === "response" && m.command === "get_state", 15000, "get_state"); }
-  async getSessionStats() { this.send({ type: "get_session_stats" }); return this.waitFor((m) => m.type === "response" && m.command === "get_session_stats", 15000, "get_session_stats"); }
+  // Correlate by a unique per-call id: waitFor scans an ACCUMULATING responses
+  // array, so without an id the second get_session_stats of a turn would match
+  // the FIRST call's stale response (=> zero delta, silent no-op). pi echoes the
+  // id we send (rpc-mode success()). getState tolerates the stale match only
+  // because sessionId is invariant; token counts change per turn, so we can't.
+  async getSessionStats() { const id = "stats_" + (this._statsSeq = (this._statsSeq || 0) + 1); this.send({ type: "get_session_stats", id }); return this.waitFor((m) => m.type === "response" && m.id === id && m.command === "get_session_stats", 15000, "get_session_stats"); }
   async abort() { this.send({ type: "abort" }); return this.waitFor((m) => m.type === "response" && m.command === "abort", 15000, "abort").catch(() => null); }
   assistantText() {
     let last = null; for (const e of this.events) if (e.type === "agent_end") last = e;
