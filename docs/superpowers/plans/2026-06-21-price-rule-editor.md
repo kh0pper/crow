@@ -454,7 +454,13 @@ git show --stat HEAD | head -6
 
 - [ ] **Step 1: Update the existing render-test call sites + add editor tests (red)**
 
-In `tests/metering-panel.test.js`, the existing tests call `renderUsageBody(summary, [], "en")` / `renderUsageBody(summary, rules, "en")` (3 args). Update each to pass `csrf` as the 3rd arg and `"en"` as the 4th — change every `renderUsageBody(summary, X, "en")` to `renderUsageBody(summary, X, "", "en")`. Then append:
+In `tests/metering-panel.test.js`, the existing tests call `renderUsageBody(...)` with 3 args where the 3rd is `lang`. The new signature inserts `csrf` as the 3rd param, so update **all four** call sites to pass `""` as the 3rd (csrf) arg and `"en"` as the 4th. Update each one explicitly — note the second one's first arg is `withGap`, NOT `summary`, so a blind `renderUsageBody(summary, ...)` replace would miss it:
+- `renderUsageBody(summary, [], "en")` → `renderUsageBody(summary, [], "", "en")` (the "shows spend total" test)
+- `renderUsageBody(withGap, [], "en")` → `renderUsageBody(withGap, [], "", "en")` (the "warns when unpriced" test)
+- `renderUsageBody(summary, [], "en")` → `renderUsageBody(summary, [], "", "en")` (the "does NOT show warning" test)
+- `renderUsageBody(summary, rules, "en")` → `renderUsageBody(summary, rules, "", "en")` (the "lists configured price rules" test)
+
+Then append:
 
 ```js
 test("renderUsageBody renders the price-rule editor (update/delete/add/seed + csrf)", () => {
@@ -636,6 +642,8 @@ sqlite3 /home/kh0pp/.crow-mpa/data/crow.db "SELECT provider_id, provider_type, m
 ```
 Expected: `5 inserted, 0 already present.` and 5 rows. (After this, new bot `usage_events` on crow-mpa price against these rules instead of `priced=0`.)
 
+> **Seed-vs-churn safety (re the earlier price-book wipe):** the seed dedups on `effective_to IS NULL` (active) rows, so it is safe regardless of how a prior churn removed rules — a hard `DELETE` is simply restored, and a soft-expire (`effective_to` set) leaves the row inactive and the seed inserts one fresh active rule (correct; `loadPricingRules` only returns active). It never produces two active rules for the same key. If you ever see a duplicate active row, that predates this seed.
+
 - [ ] **Step 3: Seed grackle + black-swan (remote — operator-gated)**
 
 For each remote host, run the seed in its `~/crow` against its data dir. Confirm the data dir first (`echo $CROW_DATA_DIR` in the gateway service env, or default `~/.crow/data`).
@@ -682,3 +690,19 @@ Update `~/.claude/projects/-home-kh0pp-crow/memory/ferpa-metered-inference-proje
 **Placeholder scan:** none — every code step has complete code; every run step has a command + expected output. (The `<pw>` and unit-name in Task 5 Step 4 are operator-environment values intentionally not hardcoded.)
 
 **Type consistency:** `validateRule(fields)→{ok,errors,normalized}`, `addPriceRule(db,fields)→{id}`, `updatePriceRule(db,id,{input,output})→{changed}`, `deletePriceRule(db,id)→{deleted}`, `seedPriceBook(db)→{inserted,skipped}`, `renderUsageBody(summary,priceRules,csrf,lang,error)`, `priceBookEditor(priceRules,csrf)` — used consistently across tasks. `parseRate`/`strOrNull` defined in Task 1, reused in Task 2.
+
+---
+
+## Review
+
+**Reviewer:** staff-engineer plan review (Plan subagent), adversarial, verified against actual code.
+**Date:** 2026-06-21
+**Verdict:** APPROVE (with minor fixes) → fixes applied.
+
+The reviewer empirically verified the load-bearing claims: `db.execute` returns `{rows, rowsAffected, lastInsertRowid}` for BOTH `createDbClient` (better-sqlite3, plain Number) and `@libsql/client` (BigInt `lastInsertRowid`), and `Number(...)` casts both; `_csrf` is exactly the field `csrfMiddleware` validates, mounted (index.js:615) before the panel dispatch (`router.all` at :769) with auth (:610) and `express.urlencoded` body parsing (:92) all ahead of it — so the metering POST route is auto-protected and `req.body` is populated, no wiring needed; the `db0()` test schema byte-matches `init-db.js` pricing_rules; `parseRate("0")===0` (not null); all form interpolations are `escapeHtml(String(...))`-wrapped (no injection gap); in-place edit is coherent because `recordUsageEvent` freezes `computed_cost_usd` on each event and `summarizeUsage` reads the stored column (a rule edit never changes a recorded bill); `renderUsageBody` has exactly one production caller to update.
+
+Resolutions:
+- **CRITICAL #1 — Task 4 Step 1 mis-described the test call sites:** a blind `renderUsageBody(summary, X, "en")` replace would skip line 24's `renderUsageBody(withGap, [], "en")` (first arg `withGap`), silently leaving a 3-arg call with `csrf="en"`. Fixed: Step 1 now enumerates all four call sites explicitly, flagging the `withGap` one.
+- **CRITICAL #2 (control flow after catch fall-through):** reviewer confirmed it is already correct (PRG path sets headers + returns; error path falls to the final `return layout(...)` which the dispatcher renders). No change.
+- **Q1 (seed vs the earlier price-book wipe):** documented in Task 5 — the seed dedups on active rows, so it is safe under any churn (hard-delete → restore; soft-expire → one fresh active insert), never double-active-inserts.
+- **Suggestions (no-op feedback on `changed/deleted===0`; raw bind error on a hand-crafted POST with no `id`):** both reachable only via hand-crafted POST (the UI always operates on real rows behind a confirm), and the error is caught + surfaced as a callout. Left as documented v1 follow-ups, not built (reviewer: "not required for v1").
