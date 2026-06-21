@@ -36,6 +36,7 @@ import { runSkillReview } from "./skill_review.mjs";
 import { botsDbPath, tasksDbPath as resolveTasksDbPath } from "./instance-paths.mjs";
 import { remoteServersForBot, parseRemoteInvocationFlag } from "./remote-blocks.mjs";
 import { warmModel } from "./warm.mjs";
+import { meterBotTurn } from "./metering.mjs";
 import { getOrCreateLocalInstanceId } from "../../servers/gateway/instance-registry.js";
 
 const HOME = "/home/kh0pp";
@@ -182,6 +183,7 @@ export class PiRpc {
     return this.waitFor((m) => m.type === "agent_end", ms, "agent_end");
   }
   async getState() { this.send({ type: "get_state" }); return this.waitFor((m) => m.type === "response" && m.command === "get_state", 15000, "get_state"); }
+  async getSessionStats() { this.send({ type: "get_session_stats" }); return this.waitFor((m) => m.type === "response" && m.command === "get_session_stats", 15000, "get_session_stats"); }
   async abort() { this.send({ type: "abort" }); return this.waitFor((m) => m.type === "response" && m.command === "abort", 15000, "abort").catch(() => null); }
   assistantText() {
     let last = null; for (const e of this.events) if (e.type === "agent_end") last = e;
@@ -554,8 +556,10 @@ export async function handleInbound(opts) {
   let postTurn = null;
   try {
     const st0 = await pi.getState().catch(() => null);
+    const stats0 = await pi.getSessionStats().catch(() => null);
     await pi.prompt(promptText, TURN_TIMEOUT_MS, opts.images);
     const st1 = await pi.getState().catch(() => null);
+    const stats1 = await pi.getSessionStats().catch(() => null);
     const piSessionId = (st1 && st1.data && st1.data.sessionId) || (st0 && st0.data && st0.data.sessionId) || (effectiveResume ? session.pi_session_id : null) || null;
     const text = pi.assistantText() || "(no reply)";
     const calls = pi.toolCalls();
@@ -566,6 +570,21 @@ export async function handleInbound(opts) {
     session.status = status; session.control = "run";
     session.model = resolved.key; session.escalated = resolved.escalated ? 1 : 0;
     upsertSession(session);
+    // Phase 1.4: meter this bot turn (surface=bot) into usage_events via the
+    // shared recordUsageEvent path. Best-effort — never breaks a turn. Uses a
+    // short-lived busy_timeout-only connection (same discipline as appendAuditBridge;
+    // NOT createDbClient, which would WAL-flip the prod crow.db).
+    try {
+      const mconn = db(CROW_DB);
+      try {
+        await meterBotTurn({
+          conn: mconn, statsBefore: stats0 && stats0.data, statsAfter: stats1 && stats1.data,
+          resolved, surface: "bot", requestId: piSessionId, log,
+        });
+      } finally { mconn.close(); }
+    } catch (e) {
+      log("[metering] bot usage record failed (non-fatal): " + ((e && e.message) || e));
+    }
     // R12: the Gmail operator never sees stderr — if escalation was asked
     // for but no escalation model is configured, say so in-band.
     const notice = resolved.escalationRequestedButUnavailable
