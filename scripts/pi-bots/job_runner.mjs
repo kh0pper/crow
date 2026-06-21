@@ -42,6 +42,7 @@ import { writeBotMcp } from "./mcp_writer.mjs";
 import { botsDbPath } from "./instance-paths.mjs";
 import { BOT_JOBS_DDL } from "./bot-jobs-schema.mjs";
 import { warmModel } from "./warm.mjs";
+import { meterBotTurn } from "./metering.mjs";
 
 const JOB_TIMEOUT_MS = Number(process.env.PIBOT_JOB_TIMEOUT_MS || 600000); // 10 min, < 30-min reaper cap
 const MAX_JOB_ATTEMPTS = Number(process.env.PIBOT_MAX_JOB_ATTEMPTS || 3);  // caps re-enqueue of abandoned jobs
@@ -208,10 +209,25 @@ export async function runJob(job, { log = () => {} } = {}) {
     });
     try {
       const st0 = await pi.getState().catch(() => null);
+      const stats0 = await pi.getSessionStats().catch(() => null);
       await pi.prompt(buildJobPrompt(job.goal), JOB_TIMEOUT_MS);
       const st1 = await pi.getState().catch(() => null);
+      const stats1 = await pi.getSessionStats().catch(() => null);
       const sessionId = (st1 && st1.data && st1.data.sessionId)
         || (st0 && st0.data && st0.data.sessionId) || null;
+      // Phase 1.4: meter the scheduled job turn (surface=bot). Best-effort —
+      // never fails the job. dbConn() is busy_timeout-only (no WAL flip).
+      try {
+        const mconn = dbConn();
+        try {
+          await meterBotTurn({
+            conn: mconn, statsBefore: stats0 && stats0.data, statsAfter: stats1 && stats1.data,
+            resolved, surface: "bot", requestId: sessionId, log,
+          });
+        } finally { mconn.close(); }
+      } catch (e) {
+        log("[metering] job usage record failed (non-fatal): " + ((e && e.message) || e));
+      }
       const text = pi.assistantText() || "(no reply)";
       const calls = pi.toolCalls();
       return { result: text, toolCalls: calls.length, sessionId, model: resolved.key };
