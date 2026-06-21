@@ -95,3 +95,25 @@ test("deletePriceRule removes the row", async () => {
   const { rows } = await db.execute("SELECT COUNT(*) AS n FROM pricing_rules");
   assert.equal(Number(rows[0].n), 0);
 });
+
+import { seedPriceBook, STARTER_RULES } from "../servers/shared/price-book.js";
+
+test("seedPriceBook inserts the starter rules once, then is idempotent", async () => {
+  const db = await db0();
+  const first = await seedPriceBook(db);
+  assert.equal(first.inserted, STARTER_RULES.length);
+  assert.equal(first.skipped, 0);
+  const second = await seedPriceBook(db);
+  assert.equal(second.inserted, 0);
+  assert.equal(second.skipped, STARTER_RULES.length);
+  const { rows } = await db.execute("SELECT COUNT(*) AS n FROM pricing_rules");
+  assert.equal(Number(rows[0].n), STARTER_RULES.length);
+});
+
+test("seedPriceBook seeds the self-hosted $0 rules", async () => {
+  const db = await db0();
+  await seedPriceBook(db);
+  const { rows } = await db.execute("SELECT input_cost_per_1m FROM pricing_rules WHERE provider_id='crow-chat'");
+  assert.equal(rows.length, 1);
+  assert.equal(Number(rows[0].input_cost_per_1m), 0);
+});
