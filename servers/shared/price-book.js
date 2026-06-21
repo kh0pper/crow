@@ -82,3 +82,42 @@ export async function deletePriceRule(db, id) {
   const res = await db.execute({ sql: `DELETE FROM pricing_rules WHERE id = ?`, args: [id] });
   return { deleted: Number(res.rowsAffected || 0) };
 }
+
+// $ per 1M tokens. input≈output for these open-weight models.
+export const STARTER_RULES = [
+  // Self-hosted local models: no marginal per-token cost (amortized hardware/
+  // electricity). Keeps local traffic priced=$0 instead of an unpriced gap.
+  { provider_id: "crow-voice", provider_type: null, model_id: "*", input: 0, output: 0 },
+  { provider_id: "crow-chat", provider_type: null, model_id: "*", input: 0, output: 0 },
+  // Together.ai serverless REFERENCE rates (2026-06, research-sourced — RE-VERIFY
+  // at contract time). Keyed by provider_type so they apply once a Together row exists.
+  { provider_id: null, provider_type: "together", model_id: "meta-llama/Llama-3.1-8B-Instruct", input: 0.18, output: 0.18 },
+  { provider_id: null, provider_type: "together", model_id: "meta-llama/Llama-3.3-70B-Instruct-Turbo", input: 1.04, output: 1.04 },
+  { provider_id: null, provider_type: "together", model_id: "deepseek-ai/DeepSeek-V3", input: 1.25, output: 1.25 },
+];
+
+/** Idempotently insert STARTER_RULES; skip an existing active rule for the same key. */
+export async function seedPriceBook(db) {
+  let inserted = 0;
+  let skipped = 0;
+  for (const r of STARTER_RULES) {
+    const { rows } = await db.execute({
+      sql: `SELECT 1 FROM pricing_rules
+            WHERE effective_to IS NULL
+              AND IFNULL(provider_id,'')   = IFNULL(?,'')
+              AND IFNULL(provider_type,'') = IFNULL(?,'')
+              AND model_id = ?
+            LIMIT 1`,
+      args: [r.provider_id, r.provider_type, r.model_id],
+    });
+    if (rows.length) { skipped++; continue; }
+    await db.execute({
+      sql: `INSERT INTO pricing_rules
+              (provider_id, provider_type, model_id, input_cost_per_1m, output_cost_per_1m)
+            VALUES (?, ?, ?, ?, ?)`,
+      args: [r.provider_id, r.provider_type, r.model_id, r.input, r.output],
+    });
+    inserted++;
+  }
+  return { inserted, skipped };
+}
