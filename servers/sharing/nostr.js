@@ -29,6 +29,7 @@ import * as nip44 from "nostr-tools/nip44";
 import * as nip19 from "nostr-tools/nip19";
 import { Relay } from "nostr-tools/relay";
 import { safeRelayPublish } from "./safe-relay-publish.js";
+import { makeResilientSub } from "./resilient-subscribe.js";
 
 const DEFAULT_RELAYS = [
   "wss://relay.damus.io",
@@ -42,6 +43,7 @@ export class NostrManager {
     this.relays = new Map(); // url -> Relay
     this.subscriptions = new Map(); // contactCrowId -> sub
     this.onMessage = null; // callback(contactId, message)
+    this._healthTimer = null; // single health loop for all resilient subs
   }
 
   /**
@@ -75,7 +77,7 @@ export class NostrManager {
     const results = await Promise.allSettled(
       relayUrls.map(async (url) => {
         const relay = await Promise.race([
-          Relay.connect(url),
+          Relay.connect(url, { enablePing: true }),
           new Promise((_, reject) =>
             setTimeout(() => reject(new Error("connection timeout")), 10000)
           ),
@@ -184,6 +186,27 @@ export class NostrManager {
   }
 
   /**
+   * Start the single periodic health loop that re-establishes any resilient
+   * subscription whose relay has dropped. Idempotent (created once). unref'd so
+   * it never keeps the process alive on its own.
+   */
+  _startHealthLoop() {
+    if (this._healthTimer) return;
+    const ms = Number(process.env.CROW_NOSTR_HEALTH_MS) || 45000;
+    this._healthTimer = setInterval(() => {
+      for (const h of this.subscriptions.values()) {
+        // ensureHealthy is async — a sync try/catch would NOT catch a rejected
+        // promise. Wrap so a stray rejection can never become an unhandledRejection
+        // (the whole point of this arc is a gateway that never silently dies).
+        if (h && typeof h.ensureHealthy === "function") {
+          Promise.resolve(h.ensureHealthy()).catch(() => {});
+        }
+      }
+    }, ms);
+    if (this._healthTimer.unref) this._healthTimer.unref();
+  }
+
+  /**
    * Subscribe to messages from a specific contact.
    */
   async subscribeToContact(contact) {
@@ -201,92 +224,79 @@ export class NostrManager {
 
     for (const [url, relay] of this.relays) {
       try {
-        const sub = relay.subscribe(
-          [
-            {
-              kinds: [4],
-              authors: [contactPubkey],
-              "#p": [ownPubkey],
-            },
-          ],
-          {
-            onevent: async (event) => {
+        const onevent = async (event) => {
+          try {
+            const conversationKey = nip44.v2.utils.getConversationKey(
+              this.identity.secp256k1Priv,
+              contactPubkey
+            );
+            const decrypted = nip44.v2.decrypt(event.content, conversationKey);
+
+            if (decrypted.startsWith("{")) {
               try {
-                // Decrypt NIP-44
-                const conversationKey = nip44.v2.utils.getConversationKey(
-                  this.identity.secp256k1Priv,
-                  contactPubkey
-                );
-                const decrypted = nip44.v2.decrypt(event.content, conversationKey);
-
-                // Skip system messages — don't store as regular messages
-                // These are handled by subscribeToIncoming's social callback
-                if (decrypted.startsWith("{")) {
-                  try {
-                    const parsed = JSON.parse(decrypted);
-                    if (parsed.type === "invite_accepted" || parsed.type === "crow_social") {
-                      return;
-                    }
-                  } catch {
-                    // Not valid JSON, treat as regular message
-                  }
+                const parsed = JSON.parse(decrypted);
+                if (parsed.type === "invite_accepted" || parsed.type === "crow_social") {
+                  return;
                 }
-
-                // Cache locally
-                if (contactId && this.db) {
-                  try {
-                    const result = await this.db.execute({
-                      sql: `INSERT OR IGNORE INTO messages (contact_id, nostr_event_id, content, direction, is_read, created_at)
-                            VALUES (?, ?, ?, 'received', 0, datetime(?, 'unixepoch'))`,
-                      args: [contactId, event.id, decrypted, event.created_at],
-                    });
-                    // Only notify for genuinely new messages, not replays
-                    if (result.rowsAffected > 0) {
-                      try {
-                        await createNotification(this.db, {
-                          title: `Message from ${contact.display_name || crowId}`,
-                          type: "peer",
-                          source: "sharing:message",
-                          action_url: "/dashboard/messages",
-                        });
-                      } catch {}
-                      // Broadcast the new per-peer unread count to any
-                      // live Turbo Stream subscribers. Swallowed
-                      // errors must not break the inbound message path.
-                      try {
-                        const { rows } = await this.db.execute({
-                          sql: `SELECT COUNT(*) AS unread FROM messages
-                                WHERE contact_id = ? AND is_read = 0 AND direction = 'received'`,
-                          args: [contactId],
-                        });
-                        const unread = Number(rows?.[0]?.unread ?? 0);
-                        bus.emit("messages:changed", { contactId, unread });
-                      } catch {}
-                    }
-                  } catch {
-                    // Duplicate event, ignore
-                  }
-                }
-
-                if (this.onMessage) {
-                  this.onMessage(crowId, {
-                    eventId: event.id,
-                    content: decrypted,
-                    timestamp: event.created_at,
-                  });
-                }
-              } catch (err) {
-                // Decryption failed — not for us or corrupted
+              } catch {
+                // Not valid JSON, treat as regular message
               }
-            },
-          }
-        );
+            }
 
-        this.subscriptions.set(`${crowId}:${url}`, sub);
+            if (contactId && this.db) {
+              try {
+                const result = await this.db.execute({
+                  sql: `INSERT OR IGNORE INTO messages (contact_id, nostr_event_id, content, direction, is_read, created_at)
+                        VALUES (?, ?, ?, 'received', 0, datetime(?, 'unixepoch'))`,
+                  args: [contactId, event.id, decrypted, event.created_at],
+                });
+                if (result.rowsAffected > 0) {
+                  try {
+                    await createNotification(this.db, {
+                      title: `Message from ${contact.display_name || crowId}`,
+                      type: "peer",
+                      source: "sharing:message",
+                      action_url: "/dashboard/messages",
+                    });
+                  } catch {}
+                  try {
+                    const { rows } = await this.db.execute({
+                      sql: `SELECT COUNT(*) AS unread FROM messages
+                            WHERE contact_id = ? AND is_read = 0 AND direction = 'received'`,
+                      args: [contactId],
+                    });
+                    const unread = Number(rows?.[0]?.unread ?? 0);
+                    bus.emit("messages:changed", { contactId, unread });
+                  } catch {}
+                }
+              } catch {
+                // Duplicate event, ignore
+              }
+            }
+
+            if (this.onMessage) {
+              this.onMessage(crowId, { eventId: event.id, content: decrypted, timestamp: event.created_at });
+            }
+          } catch (err) {
+            // Decryption failed — not for us or corrupted
+          }
+        };
+        const handle = makeResilientSub(
+          relay,
+          { kinds: [4], authors: [contactPubkey], "#p": [ownPubkey] },
+          onevent,
+          {} // no initialSince → contact subs keep their full-history-then-rolling behavior
+        );
+        // Close any prior resilient handle for this key before replacing it, so a
+        // re-subscribe can't orphan a live sub (no longer health-driven, leaked by destroy()).
+        const prev = this.subscriptions.get(`${crowId}:${url}`);
+        if (prev && typeof prev.close === "function") { try { prev.close(); } catch {} }
+        this.subscriptions.set(`${crowId}:${url}`, handle);
       } catch (err) {
         // Subscription failed for this relay
       }
     }
+    this._startHealthLoop();
   }
 
   /**
@@ -349,56 +359,50 @@ export class NostrManager {
     const ownPubkey = this.pubkey?.length === 66 ? this.pubkey.slice(2) : this.pubkey;
     const seenEventIds = new Set();
 
+    const incomingSince = Math.floor(Date.now() / 1000) - 86400; // Last 24h only
     for (const [url, relay] of this.relays) {
       try {
-        const sub = relay.subscribe(
-          [
-            {
-              kinds: [4],
-              "#p": [ownPubkey],
-              since: Math.floor(Date.now() / 1000) - 86400, // Last 24h only
-            },
-          ],
-          {
-            onevent: async (event) => {
-              // Deduplicate events across relays
-              if (seenEventIds.has(event.id)) return;
-              seenEventIds.add(event.id);
-
+        const onevent = async (event) => {
+          if (seenEventIds.has(event.id)) return;
+          seenEventIds.add(event.id);
+          try {
+            let senderPubkey = event.pubkey;
+            const conversationKey = nip44.v2.utils.getConversationKey(
+              this.identity.secp256k1Priv,
+              senderPubkey
+            );
+            const decrypted = nip44.v2.decrypt(event.content, conversationKey);
+            if (decrypted.startsWith("{")) {
               try {
-                // Derive sender pubkey from event
-                let senderPubkey = event.pubkey;
-
-                const conversationKey = nip44.v2.utils.getConversationKey(
-                  this.identity.secp256k1Priv,
-                  senderPubkey
-                );
-                const decrypted = nip44.v2.decrypt(event.content, conversationKey);
-
-                // Check if it's a structured JSON message
-                if (decrypted.startsWith("{")) {
-                  try {
-                    const payload = JSON.parse(decrypted);
-                    if (payload.type === "invite_accepted" && onInviteAccepted) {
-                      await onInviteAccepted(payload);
-                    } else if (payload.type === "crow_social" && payload.subtype && onSocialMessage) {
-                      await onSocialMessage(payload.subtype, payload.payload || {}, senderPubkey);
-                    }
-                  } catch {
-                    // Not valid JSON or not our message type
-                  }
+                const payload = JSON.parse(decrypted);
+                if (payload.type === "invite_accepted" && onInviteAccepted) {
+                  await onInviteAccepted(payload);
+                } else if (payload.type === "crow_social" && payload.subtype && onSocialMessage) {
+                  await onSocialMessage(payload.subtype, payload.payload || {}, senderPubkey);
                 }
-              } catch (decryptErr) {
-                // Decryption failed — event not for us or from unknown sender
+              } catch {
+                // Not valid JSON or not our message type
               }
-            },
+            }
+          } catch (decryptErr) {
+            // Decryption failed — event not for us or from unknown sender
           }
+        };
+        const handle = makeResilientSub(
+          relay,
+          { kinds: [4], "#p": [ownPubkey] },
+          onevent,
+          { initialSince: incomingSince }
         );
-        this.subscriptions.set(`incoming:${url}`, sub);
+        // Close any prior resilient handle for this key before replacing it (see subscribeToContact).
+        const prevIncoming = this.subscriptions.get(`incoming:${url}`);
+        if (prevIncoming && typeof prevIncoming.close === "function") { try { prevIncoming.close(); } catch {} }
+        this.subscriptions.set(`incoming:${url}`, handle);
       } catch {
         // Subscription failed for this relay
       }
     }
+    this._startHealthLoop();
   }
 
   /**
@@ -421,6 +425,10 @@ export class NostrManager {
    * Disconnect from all relays.
    */
   async destroy() {
+    if (this._healthTimer) {
+      clearInterval(this._healthTimer);
+      this._healthTimer = null;
+    }
     for (const sub of this.subscriptions.values()) {
       try {
         sub.close();
