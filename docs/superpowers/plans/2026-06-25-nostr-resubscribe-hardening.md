@@ -42,8 +42,14 @@ import assert from "node:assert/strict";
 import { makeResilientSub } from "../servers/sharing/resilient-subscribe.js";
 import { makeDedupeGate } from "../scripts/pi-bots/gateways/nostr-client.mjs";
 
-// Stub nostr-tools Relay. subscribe() throws when disconnected (mirrors
-// send-on-closed). drop() simulates a socket loss: connected=false + fire the
+// Stub nostr-tools Relay. NOTE on fidelity: the real relay.subscribe() does NOT
+// throw on a closed connection — it returns a sub handle and leaks an un-awaited
+// rejected send(). We model "subscribe while down" as a SYNCHRONOUS throw purely
+// for testability (it drives sub=null in the busy-guard test). This is safe
+// because production never calls doSubscribe() while disconnected: at
+// construction the relay is connected, and in ensureHealthy() the synchronous
+// subscribe is gated by `if (!relay.connected) return` with no await between the
+// check and the call. drop() simulates a socket loss: connected=false + fire the
 // live sub's onclose. deliver() pushes an event to the latest live sub.
 function makeStubRelay({ connected = true } = {}) {
   const relay = {
@@ -217,13 +223,16 @@ export function makeResilientSub(relay, filter, onevent, opts = {}) {
     busy = true;
     try {
       if (!relay.connected) {
+        let to;
         try {
           await Promise.race([
             relay.connect(),
-            new Promise((_, rej) => setTimeout(() => rej(new Error("connect timeout")), connectTimeoutMs)),
+            new Promise((_, rej) => { to = setTimeout(() => rej(new Error("connect timeout")), connectTimeoutMs); }),
           ]);
         } catch {
           return; // still down → retry next tick
+        } finally {
+          clearTimeout(to); // don't leave the race timer dangling when connect wins
         }
       }
       if (!relay.connected) return;
@@ -275,6 +284,9 @@ Append to `tests/crow-messages-adapter.test.js`:
 ```js
 import { subscribeResilient } from "../scripts/pi-bots/gateways/nostr-client.mjs";
 
+// subscribe() throws synchronously when down — a test-only model (real
+// nostr-tools leaks an un-awaited rejection instead); production never subscribes
+// while disconnected. See tests/resilient-subscribe.test.js for the full note.
 function stubRelay({ connected = true } = {}) {
   const r = {
     connected, connectCalls: 0, subscribeCalls: [], _subs: [], closed: false,
@@ -383,6 +395,8 @@ git show --stat HEAD
 
 This wires the real adapter. `start()` is integration-heavy (dynamic imports of `bridge.mjs`, `better-sqlite3`, the instance seed) and is not unit-tested today; verification is the full adapter/integration suite staying green plus a module-load smoke. The reconnect mechanism itself is covered by Tasks 1–2.
 
+**Coverage decision (plan-review Q1):** the `start()`/`stop()` glue ships without dedicated unit coverage by deliberate choice — `start()` was never injectable and refactoring it for one test is out of scope. The residual risk is a `subs`→`subResilient` rename slip that the module-load smoke can't catch. Mitigations: (a) the implementing subagent's two-stage review MUST read `start()`/`stop()` and confirm no dangling `subs`/`subscribe` reference remains; (b) the live-verify (DM round-trips after a simulated drop, no restart) is the functional backstop.
+
 - [ ] **Step 1: Update the import line**
 
 In `scripts/pi-bots/gateways/crow-messages.mjs`, change the `nostr-client.mjs` import to add `subscribeResilient` and drop the now-unused `subscribe`:
@@ -393,21 +407,28 @@ import { xOnly, buildDM, openDM, connectRelays, subscribeResilient, publish, mak
 
 - [ ] **Step 2: Replace the one-shot subscribe with the resilient variant**
 
-In `start()`, replace `const subs = subscribe(relays, { kinds: [4], "#p": [botXOnly], since }, (event) => {` with:
+Two precise anchors in `start()`. The handler closure spans `crow-messages.mjs:122-162` and contains several nested `});`/`)` — change ONLY the two lines below.
 
+**Opening (line 122):** replace
+```js
+  const subs = subscribe(relays, { kinds: [4], "#p": [botXOnly], since }, (event) => {
+```
+with
 ```js
   const subResilient = subscribeResilient(relays, { kinds: [4], "#p": [botXOnly] }, (event) => {
 ```
+(`since` is removed from the filter — the primitive injects it; it moves into `opts` below.)
 
-(Note: `since` moves into `opts` — see Step 3. The filter no longer carries `since`; the primitive injects it.)
-
-And pass `since` via opts at the END of the `subscribeResilient(...)` call — change the call's closing so the options object is supplied. The closure body (dedupe gate → `markEventSeen` → `openDM` → `queue.push`) is unchanged. The call now ends:
-
+**Closing (line 162):** this is the outermost `});` that closes the `subscribe(...)` call — NOT line 161's `).catch(...)` and NOT any inner `})`. Replace the line 162
+```js
+  });
+```
+with
 ```js
   }, { initialSince: since });
 ```
 
-(i.e. the `(event) => { ... }` handler is the 3rd arg, `{ initialSince: since }` is the 4th.)
+The closure body (lines 123-161: dedupe gate → `markEventSeen` → `openDM` → `queue.push`) is unchanged — `(event) => { ... }` stays the 3rd arg, `{ initialSince: since }` becomes the 4th.
 
 - [ ] **Step 3: Add the health-loop interval after the listen log line**
 
@@ -470,6 +491,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { NostrManager } from "../servers/sharing/nostr.js";
 
+// subscribe() throws synchronously when down — a test-only model (real
+// nostr-tools leaks an un-awaited rejection instead); production never subscribes
+// while disconnected. See tests/resilient-subscribe.test.js for the full note.
 function stubRelay({ connected = true } = {}) {
   const r = {
     connected, connectCalls: 0, subscribeCalls: [], _subs: [], closed: false,
@@ -567,7 +591,12 @@ Add this method to the class (e.g. just before `subscribeToContact`):
     const ms = Number(process.env.CROW_NOSTR_HEALTH_MS) || 45000;
     this._healthTimer = setInterval(() => {
       for (const h of this.subscriptions.values()) {
-        try { if (h && typeof h.ensureHealthy === "function") h.ensureHealthy(); } catch {}
+        // ensureHealthy is async — a sync try/catch would NOT catch a rejected
+        // promise. Wrap so a stray rejection can never become an unhandledRejection
+        // (the whole point of this arc is a gateway that never silently dies).
+        if (h && typeof h.ensureHealthy === "function") {
+          Promise.resolve(h.ensureHealthy()).catch(() => {});
+        }
       }
     }, ms);
     if (this._healthTimer.unref) this._healthTimer.unref();
@@ -644,6 +673,10 @@ In `subscribeToContact`, replace the whole `for (const [url, relay] of this.rela
           onevent,
           {} // no initialSince → contact subs keep their full-history-then-rolling behavior
         );
+        // Close any prior resilient handle for this key before replacing it, so a
+        // re-subscribe can't orphan a live sub (no longer health-driven, leaked by destroy()).
+        const prev = this.subscriptions.get(`${crowId}:${url}`);
+        if (prev && typeof prev.close === "function") { try { prev.close(); } catch {} }
         this.subscriptions.set(`${crowId}:${url}`, handle);
       } catch (err) {
         // Subscription failed for this relay
@@ -692,6 +725,9 @@ In `subscribeToIncoming`, replace the `for (const [url, relay] of this.relays) {
           onevent,
           { initialSince: incomingSince }
         );
+        // Close any prior resilient handle for this key before replacing it (see subscribeToContact).
+        const prevIncoming = this.subscriptions.get(`incoming:${url}`);
+        if (prevIncoming && typeof prevIncoming.close === "function") { try { prevIncoming.close(); } catch {} }
         this.subscriptions.set(`incoming:${url}`, handle);
       } catch {
         // Subscription failed for this relay
@@ -767,3 +803,21 @@ Expected: boots clean; no `resilient-subscribe` import error, no unhandled rejec
 **Placeholder scan:** none — every code step is complete.
 
 **Type consistency:** `makeResilientSub(relay, filter, onevent, opts) → {ensureHealthy, close}` used identically in Tasks 2 and 4. `subscribeResilient(...) → {handles, ensureAllHealthy, stop}` defined in Task 2, used in Task 3. `_healthTimer`/`_startHealthLoop` consistent across Task 4 steps. Health interval `45000` and skew `120` consistent with the spec.
+
+---
+
+## Review
+
+**Reviewer:** Plan subagent (staff-engineer adversarial pass), 2026-06-25.
+**Verdict:** REVISE → all issues addressed inline (below); ready to execute.
+
+The reviewer verified the load-bearing claims against `nostr-tools@2.23.3` source and confirmed them: (a) with `enablePing:true` and `enableReconnect` OFF, every drop mode (clean close, RST, silent half-open via ping timeout) funnels through `handleHardClose` → `_connected=false` + `closeAllSubscriptions` → our sub's `onclose` fires (`sub=null`) — no path leaves a dead socket reporting `connected:true`; (b) `Relay.connect(url, {enablePing:true})` flows the option to the constructor and survives reconnect; (c) the `since`-omit branch is correct; (d) nothing else reads `this.subscriptions`, so storing handles is safe and `destroy()` still works.
+
+Issues raised and resolution:
+- **C1 (critical) — async rejection escapes the gateway health loop's sync `try/catch`.** FIXED: `_startHealthLoop` now wraps each call as `Promise.resolve(h.ensureHealthy()).catch(() => {})`, matching the adapter's `.catch()`. (Task 4 Step 5.)
+- **S1 — stub `subscribe()` synchronous-throw is not faithful to nostr-tools.** ADDRESSED: added a fidelity note to all three stubs explaining it's a test-only model and that production never calls `doSubscribe` while disconnected (so the throw path is unreachable in prod). (Tasks 1, 2, 4.)
+- **S2 — Task 3 Step 2 anchor imprecise.** FIXED: both anchors now quoted explicitly — opening line 122 and the outermost closing `});` at line 162 (not line 161's `).catch` nor any inner `})`).
+- **S3 — re-subscribing a key orphans the prior resilient handle.** FIXED: `subscribeToContact`/`subscribeToIncoming` now close any existing handle for the key before `.set(...)`. (Task 4 Steps 6–7.)
+- **S4 — dangling connect-timeout timer.** FIXED: `ensureHealthy` clears the race timer in a `finally`. (Task 1.)
+- **Q1 — `start()`/`stop()` ships without unit coverage.** ANSWERED in Task 3: deliberate scope decision; mitigated by the two-stage implementation review reading the glue + the live-verify backstop.
+- **Q2 — `enablePing` non-unref'd ping interval could hang a short-lived process.** ANSWERED: verified every `connectRelays`/`_doConnectRelays` caller runs inside a long-lived process (gateway via `managers.js`, MCP tool handlers, the pibot adapter) that closes relays on shutdown; no connect-and-exit CLI exists. Documented as a constraint for any future short-lived caller (must `destroy()`/`close()`).
