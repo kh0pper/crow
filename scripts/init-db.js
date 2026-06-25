@@ -1,4 +1,5 @@
 import { createDbClient, resolveDataDir } from "../servers/db.js";
+import { ensureTenant, DEFAULT_TENANT_ID } from "../servers/shared/tenancy.js";
 import { mkdirSync } from "fs";
 import { randomBytes } from "node:crypto";
 import { resolve } from "path";
@@ -1473,6 +1474,42 @@ await initTable("usage_events table", `
   CREATE INDEX IF NOT EXISTS idx_usage_events_conv ON usage_events(conversation_id);
   CREATE INDEX IF NOT EXISTS idx_usage_events_unpriced ON usage_events(priced);
 `);
+
+// tenants: minimal registry (Phase 1.0 — identity only). usage_events.tenant_id
+// is a SOFT link by convention (no FK: SQLite can't ALTER ADD CONSTRAINT and the
+// meter path must not throw on an unknown tenant). Phase 3 hardens this during
+// the real isolation re-architecture.
+await initTable("tenants table", `
+  CREATE TABLE IF NOT EXISTS tenants (
+    id TEXT PRIMARY KEY,
+    name TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+// Seed the default tenant; also register the env tenant if one is set and
+// distinct (so resolveTenantId()'s id always has a registry home). Backfill is a
+// SEPARATE try/catch so a seed failure never skips the backfill (and vice versa).
+try {
+  await ensureTenant(db, { id: DEFAULT_TENANT_ID, name: "Default (operator)" });
+  const envTenant = process.env.CROW_TENANT_ID;
+  if (envTenant && envTenant !== DEFAULT_TENANT_ID) {
+    await ensureTenant(db, { id: envTenant, name: envTenant });
+  }
+} catch (e) {
+  console.error("[init-db] tenant seed skipped:", e.message);
+}
+// Backfill legacy NULL usage_events rows to 'default' (they predate tagging and
+// were the operator's). Always targets 'default', even on an env-tenant instance.
+try {
+  await db.execute({
+    sql: `UPDATE usage_events SET tenant_id = ? WHERE tenant_id IS NULL`,
+    args: [DEFAULT_TENANT_ID],
+  });
+} catch (e) {
+  console.error("[init-db] tenant backfill skipped:", e.message);
+}
 
 // Migration: add attachments column to chat_messages if missing
 try {
