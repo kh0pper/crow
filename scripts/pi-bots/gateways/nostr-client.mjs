@@ -24,6 +24,7 @@ import { finalizeEvent } from "nostr-tools/pure";
 import * as nip44 from "nostr-tools/nip44";
 import { Relay, useWebSocketImplementation } from "nostr-tools/relay";
 import { safeRelayPublish } from "../../../servers/sharing/safe-relay-publish.js";
+import { makeResilientSub } from "../../../servers/sharing/resilient-subscribe.js";
 // Pin the implementation explicitly (survives a future nostr-tools that drops
 // the constructor-time `|| WebSocket` fallback).
 if (globalThis.WebSocket) { try { useWebSocketImplementation(globalThis.WebSocket); } catch { /* older nostr-tools: runtime fallback covers it */ } }
@@ -75,7 +76,7 @@ export async function connectRelays(urls, timeoutMs = 10000) {
   const relays = new Map();
   const results = await Promise.allSettled(urls.map(async (url) => {
     const relay = await Promise.race([
-      Relay.connect(url),
+      Relay.connect(url, { enablePing: true }),
       new Promise((_, rej) => setTimeout(() => rej(new Error("connection timeout")), timeoutMs)),
     ]);
     return { url, relay };
@@ -91,6 +92,21 @@ export function subscribe(relays, filter, onevent) {
     try { subs.push(relay.subscribe([filter], { onevent })); } catch { /* per-relay */ }
   }
   return subs;
+}
+
+/**
+ * Resilient variant of subscribe(): one self-healing handle per relay. The
+ * caller drives recovery by calling ensureAllHealthy() on an interval and tears
+ * down with stop(). Pair with Relay.connect(url, { enablePing: true }).
+ */
+export function subscribeResilient(relays, filter, onevent, opts = {}) {
+  const handles = [];
+  for (const [, relay] of relays) handles.push(makeResilientSub(relay, filter, onevent, opts));
+  return {
+    handles,
+    async ensureAllHealthy() { for (const h of handles) await h.ensureHealthy(); },
+    stop() { for (const h of handles) { try { h.close(); } catch {} } },
+  };
 }
 
 /** Publish an event to all relays (best-effort). */
