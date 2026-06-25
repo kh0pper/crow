@@ -17,9 +17,9 @@
 - **Hot path stays cheap + unfailable:** `resolveTenantId()` does NO DB read and cannot throw. The three call sites are already best-effort try/catch — unchanged.
 - **Soft link, no FK.** `usage_events.tenant_id` stays plain nullable `TEXT`; `tenants` is a registry linked by convention. No `usage_events` schema change. (SQLite can't `ALTER TABLE ADD CONSTRAINT`, and the meter must not throw on an unknown tenant.)
 - **`resolveTenantId(ctx = {})` ignores `ctx`** today — it exists ONLY as the Phase-3 seam (Phase 3 replaces the body to resolve from request/auth/device without touching any call site). Keep the param; it is intentional, not dead code.
-- **Backfill target is always `'default''`** (legacy NULL rows predate tagging and were the operator's), even on an env-tenant instance.
+- **Backfill target is always `'default'`** (legacy NULL rows predate tagging and were the operator's), even on an env-tenant instance. (On an env-tenant instance the ledger then spans two ids — legacy `'default'` + new env id; the spec accepts this, and no current reconciliation/billing query assumes a single id per instance.)
 - **All init-db additions idempotent** (safe to re-run on every instance).
-- **Commits:** explicit path args (`git commit <paths> -m`); `git pull --rebase` before push; **no Claude co-author**. NOTE: the working tree has 2 unrelated uncommitted files (`scripts/pi-bots/gateways/nostr-client.mjs`, `servers/sharing/nostr.js`) from another session — NEVER stage or commit them; always use explicit per-file paths.
+- **Commits:** explicit path args (`git commit <paths> -m`); `git pull --rebase` before push; **no Claude co-author**. NOTE: the working tree is dirty with unrelated WIP from other sessions — **2 modified** tracked files (`scripts/pi-bots/gateways/nostr-client.mjs`, `servers/sharing/nostr.js`) **plus ~20 untracked** entries (`bundles/*`, `data`, `scripts/research/*.py`, `scripts/ops/hs-diag.mjs`, `servers/sharing/safe-relay-publish.js`, `tests/safe-relay-publish.test.js`, etc.). **NEVER `git add -A` / `git add .`**; commit ONLY the explicit per-file paths each task names. Also: run tests by the explicit file list each step gives — do NOT run the whole `node --test` suite (it would pick up the untracked `tests/safe-relay-publish.test.js`).
 - **Branch:** work on the existing `feat/tenant-primitive` branch (the spec is already committed there at `1eae03c`).
 
 ---
@@ -221,20 +221,26 @@ await initTable("tenants table", `
 `);
 
 // Seed the default tenant; also register the env tenant if one is set and
-// distinct (so resolveTenantId()'s id always has a registry home). Then backfill
-// legacy NULL usage_events rows to 'default' (they predate tagging; operator's).
+// distinct (so resolveTenantId()'s id always has a registry home). Backfill is a
+// SEPARATE try/catch so a seed failure never skips the backfill (and vice versa).
 try {
   await ensureTenant(db, { id: DEFAULT_TENANT_ID, name: "Default (operator)" });
   const envTenant = process.env.CROW_TENANT_ID;
   if (envTenant && envTenant !== DEFAULT_TENANT_ID) {
     await ensureTenant(db, { id: envTenant, name: envTenant });
   }
+} catch (e) {
+  console.error("[init-db] tenant seed skipped:", e.message);
+}
+// Backfill legacy NULL usage_events rows to 'default' (they predate tagging and
+// were the operator's). Always targets 'default', even on an env-tenant instance.
+try {
   await db.execute({
     sql: `UPDATE usage_events SET tenant_id = ? WHERE tenant_id IS NULL`,
     args: [DEFAULT_TENANT_ID],
   });
 } catch (e) {
-  console.error("[init-db] tenant seed/backfill skipped:", e.message);
+  console.error("[init-db] tenant backfill skipped:", e.message);
 }
 ```
 
@@ -388,9 +394,25 @@ cd /home/kh0pp/crow
 git pull --rebase
 node --test tests/tenancy.test.js tests/init-db-metering-tables.test.js tests/pibot-metering.test.js tests/metering.test.js tests/metering-record.test.js tests/metering-panel.test.js tests/price-book.test.js
 ```
-Expected: all green. Then finish the branch per `superpowers:finishing-a-development-branch` (FF-merge `feat/tenant-primitive` → main, push). Verify `git show --stat` on the merge contains ONLY the tenant-primitive files (NOT the unrelated nostr WIP).
+Expected: all green. Then finish the branch per `superpowers:finishing-a-development-branch` (FF-merge `feat/tenant-primitive` → main, push). **Verify the merge is clean:** `git show --stat <merge-sha>` must list ONLY the tenant-primitive files (`servers/shared/tenancy.js`, `scripts/init-db.js`, `servers/gateway/routes/chat.js`, `servers/gateway/routes/llm-router.js`, `scripts/pi-bots/metering.mjs`, the 3 test files, the spec + this plan) — NOT any of the dirty WIP (nostr files, bundles, scripts/research, safe-relay-publish). Because every task committed by explicit path, the unrelated WIP stays uncommitted; confirm it's still uncommitted (`git status --short` still shows it) after the merge.
 
-- [ ] **Step 2: Run the idempotent migration on each instance**
+**Deploy ORDER matters (closes a transient-NULL window): RESTART the new code FIRST, THEN run init-db.** `resolveTenantId()` is env/constant (no table read) and `usage_events.tenant_id` is a soft link (no FK), so the restarted code writes `tenant_id='default'` correctly even before the `tenants` table exists. Running the backfill *after* the restart means no metered event is written with NULL in the gap (if init-db ran first, the old code would keep writing NULL until the restart).
+
+- [ ] **Step 2: Restart gateways/bots onto the new code (folds in the deferred editor-UI deploy)**
+
+The local crow + crow-mpa gateways share the `/home/kh0pp/crow` checkout, already on merged main after Step 1. Confirm unit names first (`systemctl list-units 'crow*gateway*' 'pibot*'`), then:
+
+```bash
+echo '<pw>' | sudo -S systemctl restart crow-gateway crow-mpa-gateway pibot-gateways@crow-mpa pibot-discord@crow-mpa
+# verify each: ActiveState=active, SubState=running, NRestarts=0; crow-gateway /health 200
+```
+For grackle + black-swan, pull main then restart their gateway so the resolver (and the editor UI, already on main) loads there too — else their chat/llm surfaces keep writing NULL until restarted:
+```bash
+grackle "cd ~/crow && git pull --rebase 2>&1 | tail -1"   # then restart its crow-gateway unit (confirm name)
+ssh black-swan "cd ~/crow && git pull --rebase 2>&1 | tail -1"  # then restart its crow-gateway unit
+```
+
+- [ ] **Step 3: Run the idempotent migration on each instance (creates `tenants` + backfills the pre-restart NULLs)**
 
 ```bash
 # crow main
@@ -399,32 +421,24 @@ sqlite3 /home/kh0pp/.crow/data/crow.db "SELECT id,status FROM tenants; SELECT CO
 # crow-mpa (bots run here — backfills real bot usage_events to 'default')
 CROW_DATA_DIR=/home/kh0pp/.crow-mpa/data node scripts/init-db.js >/dev/null 2>&1
 sqlite3 /home/kh0pp/.crow-mpa/data/crow.db "SELECT id FROM tenants; SELECT COUNT(*) AS null_tenants FROM usage_events WHERE tenant_id IS NULL;"
-# grackle + black-swan (pull main first)
-grackle "cd ~/crow && git pull --rebase && CROW_DATA_DIR=/home/kh0pp/.crow/data node scripts/init-db.js >/dev/null 2>&1 && sqlite3 ~/.crow/data/crow.db 'SELECT id FROM tenants;'"
-ssh black-swan "cd ~/crow && git pull --rebase && CROW_DATA_DIR=/home/ubuntu/.crow/data node scripts/init-db.js >/dev/null 2>&1 && sqlite3 ~/.crow/data/crow.db 'SELECT id FROM tenants;'"
+# grackle + black-swan (already pulled in Step 2)
+grackle "cd ~/crow && CROW_DATA_DIR=/home/kh0pp/.crow/data node scripts/init-db.js >/dev/null 2>&1 && sqlite3 ~/.crow/data/crow.db 'SELECT id FROM tenants;'"
+ssh black-swan "cd ~/crow && CROW_DATA_DIR=/home/ubuntu/.crow/data node scripts/init-db.js >/dev/null 2>&1 && sqlite3 ~/.crow/data/crow.db 'SELECT id FROM tenants;'"
 ```
 Expected on each: a `default` (active) tenant row and `null_tenants = 0`.
 
-- [ ] **Step 3: Restart the gateways/bots onto the new code (folds in the editor-UI deploy)**
+- [ ] **Step 4: Live smoke — a real metered event tags the tenant, and NO new NULLs appear**
 
-```bash
-# confirm unit names first: systemctl list-units 'crow*gateway*' 'pibot*'
-echo '<pw>' | sudo -S systemctl restart crow-gateway crow-mpa-gateway pibot-gateways@crow-mpa pibot-discord@crow-mpa
-# verify each: active/running, NRestarts=0, /health 200
-```
-(grackle/black-swan gateways: restart if you want the editor UI + new resolver loaded there; their migration already ran.)
-
-- [ ] **Step 4: Live smoke — a real metered event tags the tenant**
-
-Drive one bot turn on crow-mpa (the `--inject` one-turn smoke from the 1.4 deploy), then confirm the new `usage_events` row carries `tenant_id='default'`:
+Drive one bot turn on crow-mpa (the `--inject` one-turn smoke from the 1.4 deploy), then confirm the new `usage_events` row carries `tenant_id='default'` AND that no NULL rows exist (proving the restart-first ordering closed the window):
 
 ```bash
 DB=/home/kh0pp/.crow-mpa/data/crow.db
 sqlite3 "$DB" "SELECT COALESCE(MAX(id),0) FROM usage_events;"   # baseline
 # ... trigger ONE bot turn (see the 1.4 deploy smoke command) ...
 sqlite3 -header -column "$DB" "SELECT id, surface, tenant_id, provider_id, input_tokens FROM usage_events ORDER BY id DESC LIMIT 3;"
+sqlite3 "$DB" "SELECT COUNT(*) AS null_tenants FROM usage_events WHERE tenant_id IS NULL;"   # must be 0
 ```
-Expected: the new row has `tenant_id='default'` (not NULL). Delete the synthetic smoke row + bot_session afterward.
+Expected: the new row has `tenant_id='default'` (not NULL); `null_tenants = 0`. Delete the synthetic smoke row + bot_session afterward.
 
 - [ ] **Step 5: Update the project memory**
 
@@ -447,3 +461,20 @@ Update `~/.claude/projects/-home-kh0pp-crow/memory/ferpa-metered-inference-proje
 **Placeholder scan:** none — every code step has complete code; every run step has a command + expected output. (`<pw>` and unit-name confirmation in Task 4 Step 3 are operator-environment values intentionally not hardcoded.)
 
 **Type consistency:** `resolveTenantId(ctx = {}) -> string`, `DEFAULT_TENANT_ID = "default"`, `ensureTenant(db, {id, name}) -> Promise<void>` used identically across Tasks 1–3. The pi-bots test asserts against `resolveTenantId()` (imported) so it tracks the resolver regardless of env.
+
+---
+
+## Review
+
+**Reviewer:** staff-engineer plan review (Plan subagent), adversarial, verified against actual code.
+**Date:** 2026-06-24
+**Verdict:** REVISE → fixes applied (all confined to Task 4 + two corrections; Tasks 1–3 verified accurate).
+
+The reviewer confirmed every load-bearing claim: init-db structure (`db` at :14, `initTable`/`executeMultiple`, top-level await, usage_events block ends ~:1475, next is the attachments migration); `recordUsageEvent` accepts+threads `tenantId` (:217/:246); the three anchors exact (`chat.js:782`, `llm-router.js:263` omit, `pibot metering.mjs:67`); import paths correct for each file's location; the init-db test harness + the pibot `:78` assertion + `freshDb`/`@libsql/client`. **No hidden breakage:** only `metering-record.test.js:52` asserts a tenant value and it's an explicit input; `summarizeUsage`/the panel never group/filter by `tenant_id`, so `'default'` vs `null` changes no output. `INSERT OR IGNORE` idempotency, the NULL-only backfill, and the env-tenant seeding all correct. `ctx` is a spec-justified seam (no lint gate), keep it.
+
+Resolutions:
+- **CRITICAL — transient-NULL deploy window (Task 4):** backfill originally ran before the restart, so the old code wrote NULL in the gap and those rows lingered. **Reordered: restart onto new code FIRST (safe — resolver is env/constant, soft link no FK), THEN run init-db** so it backfills the pre-restart NULLs and no gap exists. Step 4 now also asserts `null_tenants = 0` post-restart.
+- **CRITICAL — inaccurate working-tree note:** corrected to "2 modified + ~20 untracked; never `git add -A`/`.`; commit only named paths; don't run the whole `node --test` suite (untracked `tests/safe-relay-publish.test.js`)." Task 4 Step 1 merge-clean check expanded.
+- **SUGGESTION — seed/backfill coupling:** split into two try/catch blocks so a seed failure can't skip the backfill.
+- **Q (mixed tenant ids on an env-tenant instance):** documented in Global Constraints — spec accepts it; no current reconciliation query assumes one id per instance.
+- **Q (editor-UI fold):** the editor UI is already on main (`a6eca52`); grackle/black-swan get it via the Step 2 `git pull` + restart, so the memory note is accurate for whichever gateways were restarted. Typo `'default''` fixed.
