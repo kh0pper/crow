@@ -14,6 +14,7 @@
  * the bridge avoids by opening busy_timeout-only. This shim flips nothing.
  */
 import { recordUsageEvent } from "../../servers/shared/metering.js";
+import { resolveTenantId } from "../../servers/shared/tenancy.js";
 
 // Wrap a better-sqlite3 connection in the async {execute} surface that
 // recordUsageEvent / loadPricingRules expect. SELECT -> {rows}; write -> {rowsAffected}.
@@ -64,7 +65,7 @@ export async function meterBotTurn({
   }
   const r = await recordUsageEvent(libsqlAdapter(conn), {
     surface,
-    tenantId: null,
+    tenantId: resolveTenantId(),
     providerId: resolved && resolved.provider != null ? resolved.provider : null,
     providerType: null,
     modelId: resolved && resolved.model != null ? resolved.model : null,

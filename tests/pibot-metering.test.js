@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import { libsqlAdapter, meterBotTurn, tokenDelta } from "../scripts/pi-bots/metering.mjs";
+import { resolveTenantId } from "../servers/shared/tenancy.js";
 
 // Minimal schema mirroring init-db.js (matches tests/metering-record.test.js).
 export function freshDb() {
@@ -75,7 +76,7 @@ test("meterBotTurn writes a priced surface=bot row from the per-turn delta", asy
   assert.equal(rows[0].provider_id, "crow-test");
   assert.equal(rows[0].provider_type, null);
   assert.equal(rows[0].model_id, "qwen");
-  assert.equal(rows[0].tenant_id, null);
+  assert.equal(rows[0].tenant_id, resolveTenantId()); // was null; now the resolved tenant
   assert.equal(rows[0].request_id, "sess-1");
   assert.equal(Number(rows[0].priced), 1);
   assert.ok(Math.abs(Number(rows[0].computed_cost_usd) - 0.000085) < 1e-12);
@@ -133,4 +134,23 @@ test("meterBotTurn records nothing on zero delta or missing after-stats", async 
   assert.equal(none.recorded, false);
   const { rows } = await libsqlAdapter(conn).execute("SELECT * FROM usage_events");
   assert.equal(rows.length, 0);
+});
+
+test("meterBotTurn tags usage with the default tenant when CROW_TENANT_ID is unset", async () => {
+  const prev = process.env.CROW_TENANT_ID;
+  delete process.env.CROW_TENANT_ID;
+  try {
+    const conn = freshDb();
+    await meterBotTurn({
+      conn,
+      statsBefore: { tokens: { input: 0, output: 0, cacheRead: 0 } },
+      statsAfter: { tokens: { input: 5, output: 5, cacheRead: 0 } },
+      resolved: { provider: "x", model: "y" },
+      requestId: "s",
+    });
+    const { rows } = await libsqlAdapter(conn).execute("SELECT tenant_id FROM usage_events");
+    assert.equal(rows[0].tenant_id, "default");
+  } finally {
+    if (prev !== undefined) process.env.CROW_TENANT_ID = prev;
+  }
 });
