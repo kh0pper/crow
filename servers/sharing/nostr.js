@@ -28,6 +28,7 @@ import bus from "../shared/event-bus.js";
 import * as nip44 from "nostr-tools/nip44";
 import * as nip19 from "nostr-tools/nip19";
 import { Relay } from "nostr-tools/relay";
+import { safeRelayPublish } from "./safe-relay-publish.js";
 
 const DEFAULT_RELAYS = [
   "wss://relay.damus.io",
@@ -136,12 +137,13 @@ export class NostrManager {
       content: encrypted,
     }, this.identity.secp256k1Priv);
 
-    // Publish to all connected relays
+    // Publish to all connected relays. safeRelayPublish reconnects-or-skips a
+    // dropped relay so a closed-connection send() can't leak an unhandled
+    // rejection and crash the process (see safe-relay-publish.js).
     const published = [];
     for (const [url, relay] of this.relays) {
       try {
-        await relay.publish(event);
-        published.push(url);
+        if (await safeRelayPublish(relay, event)) published.push(url);
       } catch (err) {
         // Publishing failed to this relay
       }
@@ -176,7 +178,7 @@ export class NostrManager {
     const event = finalizeEvent({ kind: 4, created_at: Math.floor(Date.now() / 1000), tags: [["p", recipientPubkey]], content: encrypted }, this.identity.secp256k1Priv);
     const published = [];
     for (const [url, relay] of this.relays) {
-      try { await relay.publish(event); published.push(url); } catch { /* relay best-effort */ }
+      try { if (await safeRelayPublish(relay, event)) published.push(url); } catch { /* relay best-effort */ }
     }
     return { eventId: event.id, relays: published };
   }

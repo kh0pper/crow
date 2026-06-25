@@ -23,6 +23,7 @@ if (typeof globalThis.WebSocket === "undefined") {
 import { finalizeEvent } from "nostr-tools/pure";
 import * as nip44 from "nostr-tools/nip44";
 import { Relay, useWebSocketImplementation } from "nostr-tools/relay";
+import { safeRelayPublish } from "../../../servers/sharing/safe-relay-publish.js";
 // Pin the implementation explicitly (survives a future nostr-tools that drops
 // the constructor-time `|| WebSocket` fallback).
 if (globalThis.WebSocket) { try { useWebSocketImplementation(globalThis.WebSocket); } catch { /* older nostr-tools: runtime fallback covers it */ } }
@@ -94,5 +95,7 @@ export function subscribe(relays, filter, onevent) {
 
 /** Publish an event to all relays (best-effort). */
 export async function publish(relays, event) {
-  for (const [, relay] of relays) { try { await relay.publish(event); } catch { /* per-relay */ } }
+  // safeRelayPublish reconnects-or-skips a dropped relay so a closed-connection
+  // send() can't leak an unhandled rejection and crash the pi-bots host.
+  for (const [, relay] of relays) { try { await safeRelayPublish(relay, event); } catch { /* per-relay */ } }
 }
