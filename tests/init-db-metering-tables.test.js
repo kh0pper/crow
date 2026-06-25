@@ -62,3 +62,31 @@ test("usage_events table exists with tenant/token/cost columns", () => {
     assert.ok(c.includes(col), `usage_events missing column ${col}`);
   }
 });
+
+test("tenants table has a seeded default row", () => {
+  const rows = db.prepare("SELECT id, status FROM tenants WHERE id='default'").all();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].status, "active");
+});
+
+test("init-db backfills NULL usage_events.tenant_id to 'default' and is idempotent", () => {
+  const d2 = mkdtempSync(join(tmpdir(), "metering-backfill-"));
+  try {
+    // 1st init: creates tables + seeds the default tenant.
+    execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: d2 }, stdio: "pipe" });
+    // Insert a legacy NULL-tenant usage_events row.
+    const w = new Database(join(d2, "crow.db"));
+    w.prepare("INSERT INTO usage_events (tenant_id, surface, input_tokens, output_tokens) VALUES (NULL, 'chat', 1, 1)").run();
+    w.close();
+    // 2nd init: the backfill runs and must be clean (idempotent re-run).
+    execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: d2 }, stdio: "pipe" });
+    const r = new Database(join(d2, "crow.db"), { readonly: true });
+    const nullCount = r.prepare("SELECT COUNT(*) AS n FROM usage_events WHERE tenant_id IS NULL").get().n;
+    const defCount = r.prepare("SELECT COUNT(*) AS n FROM usage_events WHERE tenant_id='default'").get().n;
+    r.close();
+    assert.equal(nullCount, 0, "no NULL tenant_id rows remain after backfill");
+    assert.ok(defCount >= 1, "the legacy row was backfilled to default");
+  } finally {
+    rmSync(d2, { recursive: true, force: true });
+  }
+});
