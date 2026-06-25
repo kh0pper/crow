@@ -28,6 +28,7 @@ import { listProvidersAll } from "../../shared/providers-db.js";
 import { chooseProvider as smartRoute, stripSlashCommand, SmartChatDisabled } from "../ai/smart-router.js";
 import { fixedWindowLimit } from "../middleware/rate-limit.js";
 import { recordUsageEvent } from "../../shared/metering.js";
+import { resolveTenantId } from "../../shared/tenancy.js";
 
 /** Sliding window: max messages to send to AI */
 const CONTEXT_WINDOW = 20;
@@ -779,7 +780,7 @@ export default function chatRouter(dashboardAuth) {
           // follow-up wiring. Unmatched models are still recorded (priced=0).
           try {
             await recordUsageEvent(db, {
-              tenantId: null,
+              tenantId: resolveTenantId(),
               conversationId: convId,
               messageId: insRes?.lastInsertRowid != null ? Number(insRes.lastInsertRowid) : null,
               surface: "chat",

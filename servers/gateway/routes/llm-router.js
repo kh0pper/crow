@@ -36,6 +36,7 @@ import { resolveProviderConfig } from "../ai/resolve-profile.js";
 import { maybeAcquireLocalProvider, warmProviderByName } from "../gpu-orchestrator.js";
 import { connectTimeout, isTimeoutError, LLM_CONNECT_TIMEOUT_MS } from "../../shared/http-timeout.js";
 import { extractUsageFromOpenAIResponse, recordUsageEvent } from "../../shared/metering.js";
+import { resolveTenantId } from "../../shared/tenancy.js";
 
 const FAST_KEY = process.env.COMPANION_FAST_MODEL || "crow-voice/qwen3.5-4b";
 const ESC_KEY = process.env.COMPANION_ESCALATION_MODEL || "crow-chat/qwen3.6-35b-a3b";
@@ -261,6 +262,7 @@ async function handleChat(req, res) {
         const usage = extractUsageFromOpenAIResponse(captured);
         if (usage) {
           await recordUsageEvent(db(), {
+            tenantId: resolveTenantId(),
             surface: "llm",
             providerId,
             providerType: null,
