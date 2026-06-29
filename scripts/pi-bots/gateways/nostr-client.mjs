@@ -23,6 +23,8 @@ if (typeof globalThis.WebSocket === "undefined") {
 import { finalizeEvent } from "nostr-tools/pure";
 import * as nip44 from "nostr-tools/nip44";
 import { Relay, useWebSocketImplementation } from "nostr-tools/relay";
+import { safeRelayPublish } from "../../../servers/sharing/safe-relay-publish.js";
+import { makeResilientSub } from "../../../servers/sharing/resilient-subscribe.js";
 // Pin the implementation explicitly (survives a future nostr-tools that drops
 // the constructor-time `|| WebSocket` fallback).
 if (globalThis.WebSocket) { try { useWebSocketImplementation(globalThis.WebSocket); } catch { /* older nostr-tools: runtime fallback covers it */ } }
@@ -74,7 +76,11 @@ export async function connectRelays(urls, timeoutMs = 10000) {
   const relays = new Map();
   const results = await Promise.allSettled(urls.map(async (url) => {
     const relay = await Promise.race([
-      Relay.connect(url),
+      // enablePing is load-bearing for the health loop: a ping timeout closes a
+      // silently-dead half-open socket (ws.close → relay.connected = false), which
+      // is the ONLY signal ensureHealthy() has to trigger a reconnect/resubscribe.
+      // Without it, relay.connected stays true forever and the sub never re-establishes.
+      Relay.connect(url, { enablePing: true }),
       new Promise((_, rej) => setTimeout(() => rej(new Error("connection timeout")), timeoutMs)),
     ]);
     return { url, relay };
@@ -92,7 +98,27 @@ export function subscribe(relays, filter, onevent) {
   return subs;
 }
 
+/**
+ * Resilient variant of subscribe(): one self-healing handle per relay. The
+ * caller drives recovery by calling ensureAllHealthy() on an interval and tears
+ * down with stop(). Pair with Relay.connect(url, { enablePing: true }).
+ */
+export function subscribeResilient(relays, filter, onevent, opts = {}) {
+  const handles = [];
+  for (const [, relay] of relays) handles.push(makeResilientSub(relay, filter, onevent, opts));
+  return {
+    handles,
+    // Heal all relays concurrently (parity with the gateway side): one slow/hung
+    // relay reconnect must not serialize the others. ensureHealthy self-guards
+    // (busy/stopped, bounded connect) so concurrent calls are safe.
+    async ensureAllHealthy() { await Promise.allSettled(handles.map((h) => h.ensureHealthy())); },
+    stop() { for (const h of handles) { try { h.close(); } catch {} } },
+  };
+}
+
 /** Publish an event to all relays (best-effort). */
 export async function publish(relays, event) {
-  for (const [, relay] of relays) { try { await relay.publish(event); } catch { /* per-relay */ } }
+  // safeRelayPublish reconnects-or-skips a dropped relay so a closed-connection
+  // send() can't leak an unhandled rejection and crash the pi-bots host.
+  for (const [, relay] of relays) { try { await safeRelayPublish(relay, event); } catch { /* per-relay */ } }
 }

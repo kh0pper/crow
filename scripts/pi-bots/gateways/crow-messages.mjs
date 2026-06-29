@@ -6,7 +6,7 @@
 import { loadInstanceSeed, deriveBotIdentity } from "../../../servers/sharing/identity.js";
 import { chunkedSend, SerialQueue } from "./base.mjs";
 import * as cmStore from "./crow-messages-store.mjs";
-import { xOnly, buildDM, openDM, connectRelays, subscribe, publish, makeDedupeGate } from "./nostr-client.mjs";
+import { xOnly, buildDM, openDM, connectRelays, subscribeResilient, publish, makeDedupeGate } from "./nostr-client.mjs";
 
 export const type = "crow-messages";
 export const mode = "nostr";
@@ -119,7 +119,7 @@ export async function start({ bot_id, gw, log }) {
   const isNew = makeDedupeGate(); // collapse the same event arriving from N relays (in-process)
   const since = Math.floor(Date.now() / 1000) - 86400; // don't replay >24h of relay history
 
-  const subs = subscribe(relays, { kinds: [4], "#p": [botXOnly], since }, (event) => {
+  const subResilient = subscribeResilient(relays, { kinds: [4], "#p": [botXOnly] }, (event) => {
     if (!isNew(event.id)) return; // already handled from another relay (same process)
     // Cross-restart dedup: a relay replays up to 24h on resubscribe; persisting
     // processed ids stops re-answering chats the bot already handled pre-restart.
@@ -159,12 +159,16 @@ export async function start({ bot_id, gw, log }) {
         }, text, { log });
       },
     }).catch((e) => log("event handler error: " + (e && e.message))));
-  });
+  }, { initialSince: since });
 
   log("crow-messages bot=" + bot_id + " listening as " + botIdentity.crowId + " on " + relays.size + " relay(s)");
+  const healthMs = Number(process.env.PIBOT_NOSTR_HEALTH_MS) || 45000;
+  const healthTimer = setInterval(() => { subResilient.ensureAllHealthy().catch(() => {}); }, healthMs);
+  if (healthTimer.unref) healthTimer.unref();
   return {
     stop() {
-      for (const s of subs) { try { s.close(); } catch {} }
+      try { clearInterval(healthTimer); } catch {}
+      try { subResilient.stop(); } catch {}
       for (const [, relay] of relays) { try { relay.close(); } catch {} }
       try { db.close(); } catch {}
     },

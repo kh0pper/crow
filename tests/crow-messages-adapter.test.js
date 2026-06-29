@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { deriveBotIdentity } from "../servers/sharing/identity.js";
-import { xOnly, buildDM, openDM, makeDedupeGate } from "../scripts/pi-bots/gateways/nostr-client.mjs";
+import { xOnly, buildDM, openDM, makeDedupeGate, subscribeResilient } from "../scripts/pi-bots/gateways/nostr-client.mjs";
 import Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -102,4 +102,47 @@ test("crow-messages is registered as a host-managed adapter", () => {
   assert.equal(isHostManaged("crow-messages"), true);
   const a = getAdapter("crow-messages");
   assert.ok(a && a.type === "crow-messages" && typeof a.start === "function");
+});
+
+// subscribe() throws synchronously when down — a test-only model (real
+// nostr-tools leaks an un-awaited rejection instead); production never subscribes
+// while disconnected. See tests/resilient-subscribe.test.js for the full note.
+function stubRelay({ connected = true } = {}) {
+  const r = {
+    connected, connectCalls: 0, subscribeCalls: [], _subs: [], closed: false,
+    subscribe(filters, { onevent, onclose }) {
+      if (!r.connected) throw new Error("closed");
+      r.subscribeCalls.push({ filters, onevent, onclose });
+      const s = { onevent, onclose, closed: false, close() { this.closed = true; } };
+      r._subs.push(s); return s;
+    },
+    async connect() { r.connectCalls++; r.connected = true; },
+    close() { r.closed = true; },
+    drop() { r.connected = false; const s = r._subs[r._subs.length - 1]; if (s && s.onclose) s.onclose(); },
+  };
+  return r;
+}
+
+test("subscribeResilient builds one handle per relay and reconnects all on ensureAllHealthy", async () => {
+  const a = stubRelay(); const b = stubRelay();
+  const relays = new Map([["wss://a", a], ["wss://b", b]]);
+  const sub = subscribeResilient(relays, { kinds: [4], "#p": ["bot"] }, () => {}, { initialSince: 10 });
+  assert.equal(a.subscribeCalls.length, 1);
+  assert.equal(b.subscribeCalls.length, 1);
+  a.drop(); b.drop();
+  await sub.ensureAllHealthy();
+  assert.equal(a.subscribeCalls.length, 2);
+  assert.equal(b.subscribeCalls.length, 2);
+  sub.stop();
+});
+
+test("subscribeResilient.stop() closes every handle (later ensureAllHealthy is a no-op)", async () => {
+  const a = stubRelay();
+  const relays = new Map([["wss://a", a]]);
+  const sub = subscribeResilient(relays, { kinds: [4] }, () => {}, {});
+  sub.stop();
+  a.drop();
+  await sub.ensureAllHealthy();
+  assert.equal(a.connectCalls, 0);
+  assert.equal(a.subscribeCalls.length, 1);
 });
