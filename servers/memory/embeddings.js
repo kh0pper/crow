@@ -16,7 +16,9 @@ import { createDbClient } from "../db.js";
 
 // Fallback when no provider is configured via env or the dashboard setting.
 const FALLBACK_PROVIDER = "grackle-embed";
-const EMBED_TIMEOUT_MS = 10_000;
+// Per-request embed timeout. Default suits fast GPU endpoints; CPU/local
+// embedders (e.g. llamafile) need more for long documents — raise via env.
+const EMBED_TIMEOUT_MS = Number(process.env.CROW_EMBED_TIMEOUT_MS) || 10_000;
 const FETCH_RETRIES = 1;
 
 // Default embedding-provider resolution, in priority order:
@@ -60,15 +62,41 @@ export async function resolveDefaultProvider() {
 // Provider resolution
 // -----------------------------------------------------------------------
 
-function resolveEmbedConfig(providerName = FALLBACK_PROVIDER) {
-  const cfg = loadProviders();
-  const p = cfg.providers?.[providerName];
+async function resolveEmbedConfig(providerName = FALLBACK_PROVIDER) {
+  let p = loadProviders().providers?.[providerName];
+  // Cold-cache / DB-only provider: loadProviders() returns models.json on a
+  // process's first call (it warms from the DB asynchronously). Fall back to a
+  // direct providers-table read so one-shot scripts and first-in-process calls
+  // still resolve providers that exist only in the DB (e.g. installed bundles).
   if (!p || !p.baseUrl) {
-    throw new Error(`embedding provider "${providerName}" not configured in models.json`);
+    p = await loadProviderFromDb(providerName);
+  }
+  if (!p || !p.baseUrl) {
+    throw new Error(`embedding provider "${providerName}" not configured`);
   }
   const model = p.models?.[0]?.id || "default";
   const dim = p.models?.[0]?.dim || null;
   return { baseUrl: p.baseUrl, apiKey: p.apiKey, model, dim, name: providerName };
+}
+
+async function loadProviderFromDb(id) {
+  try {
+    const db = createDbClient();
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT base_url, api_key, models FROM providers WHERE id = ? AND (disabled IS NULL OR disabled = 0) LIMIT 1",
+        args: [id],
+      });
+      if (!rows.length) return null;
+      let models = [];
+      try { models = JSON.parse(rows[0].models || "[]"); } catch {}
+      return { baseUrl: rows[0].base_url, apiKey: rows[0].api_key, models };
+    } finally {
+      db.close?.();
+    }
+  } catch {
+    return null;
+  }
 }
 
 // -----------------------------------------------------------------------
@@ -80,7 +108,7 @@ function resolveEmbedConfig(providerName = FALLBACK_PROVIDER) {
  * Returns Float32Array (for single) or Float32Array[] (for array).
  */
 export async function embedText(text, { providerName } = {}) {
-  const cfg = resolveEmbedConfig(providerName || (await resolveDefaultProvider()));
+  const cfg = await resolveEmbedConfig(providerName || (await resolveDefaultProvider()));
   const isArray = Array.isArray(text);
   const input = isArray ? text : [text];
 
@@ -119,7 +147,7 @@ export async function embedText(text, { providerName } = {}) {
  */
 export async function embedProviderInfo(providerName) {
   try {
-    const cfg = resolveEmbedConfig(providerName || (await resolveDefaultProvider()));
+    const cfg = await resolveEmbedConfig(providerName || (await resolveDefaultProvider()));
     const res = await fetch(cfg.baseUrl.replace(/\/+$/, "") + "/models", {
       signal: AbortSignal.timeout(3000),
     });

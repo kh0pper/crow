@@ -8,6 +8,7 @@ import {
   decideAction,
   buildContent,
   buildContext,
+  isDatabaseRow,
 } from "../scripts/sync-notion.js";
 
 test("richTextToPlain joins plain_text segments and tolerates empties", () => {
@@ -90,6 +91,14 @@ test("buildContent caps length and prefixes the title", () => {
   const content = buildContent("Title", "body");
   assert.equal(content, "# Title\n\nbody");
   assert.ok(buildContent("T", "x".repeat(60000)).length <= 50000);
+});
+
+test("isDatabaseRow flags pages whose parent is a database (the noisy calendar cells)", () => {
+  assert.equal(isDatabaseRow({ parent: { type: "database_id", database_id: "x" } }), true);
+  assert.equal(isDatabaseRow({ parent: { type: "page_id", page_id: "y" } }), false);
+  assert.equal(isDatabaseRow({ parent: { type: "workspace", workspace: true } }), false);
+  assert.equal(isDatabaseRow({}), false);
+  assert.equal(isDatabaseRow(undefined), false);
 });
 
 test("buildContext records provenance for dedup/change detection", () => {
