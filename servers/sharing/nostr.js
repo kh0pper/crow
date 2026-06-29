@@ -77,6 +77,10 @@ export class NostrManager {
     const results = await Promise.allSettled(
       relayUrls.map(async (url) => {
         const relay = await Promise.race([
+          // enablePing is load-bearing for the health loop: a ping timeout closes a
+          // silently-dead half-open socket (ws.close → relay.connected = false), which
+          // is the ONLY signal ensureHealthy() has to trigger a reconnect/resubscribe.
+          // Without it, relay.connected stays true forever and the sub never re-establishes.
           Relay.connect(url, { enablePing: true }),
           new Promise((_, reject) =>
             setTimeout(() => reject(new Error("connection timeout")), 10000)

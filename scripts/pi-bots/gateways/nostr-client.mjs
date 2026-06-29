@@ -76,6 +76,10 @@ export async function connectRelays(urls, timeoutMs = 10000) {
   const relays = new Map();
   const results = await Promise.allSettled(urls.map(async (url) => {
     const relay = await Promise.race([
+      // enablePing is load-bearing for the health loop: a ping timeout closes a
+      // silently-dead half-open socket (ws.close → relay.connected = false), which
+      // is the ONLY signal ensureHealthy() has to trigger a reconnect/resubscribe.
+      // Without it, relay.connected stays true forever and the sub never re-establishes.
       Relay.connect(url, { enablePing: true }),
       new Promise((_, rej) => setTimeout(() => rej(new Error("connection timeout")), timeoutMs)),
     ]);
@@ -104,7 +108,10 @@ export function subscribeResilient(relays, filter, onevent, opts = {}) {
   for (const [, relay] of relays) handles.push(makeResilientSub(relay, filter, onevent, opts));
   return {
     handles,
-    async ensureAllHealthy() { for (const h of handles) await h.ensureHealthy(); },
+    // Heal all relays concurrently (parity with the gateway side): one slow/hung
+    // relay reconnect must not serialize the others. ensureHealthy self-guards
+    // (busy/stopped, bounded connect) so concurrent calls are safe.
+    async ensureAllHealthy() { await Promise.allSettled(handles.map((h) => h.ensureHealthy())); },
     stop() { for (const h of handles) { try { h.close(); } catch {} } },
   };
 }

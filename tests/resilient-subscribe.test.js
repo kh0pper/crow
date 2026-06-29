@@ -88,6 +88,20 @@ test("replay of the same event id collapses at the caller's dedupe gate", async 
   assert.deepEqual(business, ["dup"]); // business callback fired once
 });
 
+test("future-dated created_at cannot poison the resubscribe `since` (clamped to now + skew)", async () => {
+  const relay = makeStubRelay();
+  const now = Math.floor(Date.now() / 1000);
+  const skewSec = 120;
+  const h = makeResilientSub(relay, { kinds: [4] }, () => {}, { initialSince: 1000, skewSec });
+  // A malicious / clock-skewed event 10 days in the future.
+  relay.deliver({ id: "evil", created_at: now + 10 * 86400 });
+  relay.drop();
+  await h.ensureHealthy();
+  const since = relay.subscribeCalls[1].filters[0].since;
+  // since must NOT be in the future, or the relay returns nothing → receive blackout.
+  assert.ok(since <= now + skewSec, `since ${since} must be <= now+skew ${now + skewSec}`);
+});
+
 test("close() makes a later ensureHealthy a no-op (no reconnect, no resubscribe)", async () => {
   const relay = makeStubRelay();
   const h = makeResilientSub(relay, { kinds: [4] }, () => {}, {});
@@ -96,6 +110,19 @@ test("close() makes a later ensureHealthy a no-op (no reconnect, no resubscribe)
   await h.ensureHealthy();
   assert.equal(relay.connectCalls, 0);
   assert.equal(relay.subscribeCalls.length, 1); // only the initial subscribe
+});
+
+test("close() during an in-flight reconnect prevents a post-close resubscribe", async () => {
+  const relay = makeStubRelay({ connected: false });
+  let release;
+  relay.connect = async () => { relay.connectCalls++; await new Promise((r) => { release = r; }); relay.connected = true; };
+  const h = makeResilientSub(relay, { kinds: [4] }, () => {}, {}); // initial subscribe throws (disconnected) → sub=null
+  assert.equal(relay.subscribeCalls.length, 0);
+  const p = h.ensureHealthy(); // enters connect branch, awaits
+  h.close();                   // teardown races the in-flight reconnect
+  release();                   // connect resolves → relay.connected = true
+  await p;
+  assert.equal(relay.subscribeCalls.length, 0); // no resubscribe after close
 });
 
 test("overlapping ensureHealthy ticks do not double-subscribe (busy guard)", async () => {

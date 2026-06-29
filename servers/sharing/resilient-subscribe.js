@@ -35,8 +35,14 @@ export function makeResilientSub(relay, filter, onevent, opts = {}) {
   let busy = false;
 
   const wrapped = (event) => {
-    if (event && typeof event.created_at === "number" && (lastSeen === null || event.created_at > lastSeen)) {
-      lastSeen = event.created_at;
+    if (event && typeof event.created_at === "number") {
+      // Clamp the watermark to no more than now + skew. A future-dated created_at
+      // (malicious or clock-skewed) must never push `since` (= lastSeen - skew)
+      // into the future, or the resubscribe filter would match nothing and cause a
+      // permanent receive blackout that a restart can't clear.
+      const ceiling = Math.floor(Date.now() / 1000) + skewSec;
+      const clamped = Math.min(event.created_at, ceiling);
+      if (lastSeen === null || clamped > lastSeen) lastSeen = clamped;
     }
     onevent(event);
   };
@@ -72,6 +78,10 @@ export function makeResilientSub(relay, filter, onevent, opts = {}) {
           clearTimeout(to); // don't leave the race timer dangling when connect wins
         }
       }
+      // Re-check `stopped` after the connect await: close() may have raced the
+      // in-flight reconnect (teardown-during-reconnect). Without this, we'd
+      // resurrect a subscription on a relay that's being torn down.
+      if (stopped) return;
       if (!relay.connected) return;
       if (!sub) doSubscribe();
     } finally {
