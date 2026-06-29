@@ -179,22 +179,33 @@ async function notionFetch(token, path, { method = "GET", body } = {}) {
   throw lastErr || new Error("Notion request failed");
 }
 
-/** Enumerate all pages shared with the integration. */
-async function searchPages(token, { limit } = {}) {
+/**
+ * A page whose parent is a database is a database row (e.g. a calendar cell or
+ * tracker entry) — usually low-signal noise for semantic search. Exported for tests.
+ */
+export function isDatabaseRow(page) {
+  return page?.parent?.type === "database_id";
+}
+
+/** Enumerate pages shared with the integration. Skips database-row pages unless includeDbRows. */
+async function searchPages(token, { limit, includeDbRows = false } = {}) {
   const pages = [];
+  let dbRowsSkipped = 0;
   let cursor;
   do {
     const body = { filter: { value: "page", property: "object" }, page_size: 100 };
     if (cursor) body.start_cursor = cursor;
     const data = await notionFetch(token, "/search", { method: "POST", body });
     for (const r of data.results || []) {
-      if (r.object === "page") pages.push(r);
-      if (limit && pages.length >= limit) return pages.slice(0, limit);
+      if (r.object !== "page") continue;
+      if (!includeDbRows && isDatabaseRow(r)) { dbRowsSkipped++; continue; }
+      pages.push(r);
+      if (limit && pages.length >= limit) return { pages: pages.slice(0, limit), dbRowsSkipped };
     }
     cursor = data.has_more ? data.next_cursor : null;
     if (cursor) await sleep(THROTTLE_MS);
   } while (cursor);
-  return pages;
+  return { pages, dbRowsSkipped };
 }
 
 /** Fetch a block's children recursively, attaching `children` arrays. */
@@ -242,7 +253,7 @@ async function fetchPageMarkdown(token, pageId) {
  */
 export async function runSync(opts = {}) {
   const token = opts.token ?? process.env.NOTION_TOKEN;
-  const { limit = null, dryRun = false, force = false } = opts;
+  const { limit = null, dryRun = false, force = false, includeDbRows = false } = opts;
   const logger = opts.log ?? console.log;
   const log = (msg) => logger(msg);
   log.error = (msg) => (opts.logError ?? console.error)(msg);
@@ -268,8 +279,8 @@ export async function runSync(opts = {}) {
   const ownsDb = !opts.db;
   const db = opts.db ?? createDbClient();
   try {
-    const pages = await searchPages(token, { limit });
-    log(`found ${pages.length} shared page(s)`);
+    const { pages, dbRowsSkipped } = await searchPages(token, { limit, includeDbRows });
+    log(`found ${pages.length} content page(s)` + (dbRowsSkipped ? `, skipped ${dbRowsSkipped} database-row page(s)` : ""));
 
     for (const page of pages) {
       const title = extractTitle(page);
@@ -365,6 +376,7 @@ function parseArgs(argv) {
     else if (a === "--dry-run") out.dryRun = true;
     else if (a === "--force") out.force = true;
     else if (a === "--once") out.once = true; // single pass is the only mode; accepted for clarity
+    else if (a === "--include-db-rows") out.includeDbRows = true;
     else if (a === "--help" || a === "-h") out.help = true;
   }
   return out;
@@ -378,6 +390,7 @@ async function main() {
     console.log("  --dry-run       show insert/update/skip decisions without writing");
     console.log("  --limit N       cap the number of pages (for testing)");
     console.log("  --force         re-embed every page regardless of last_edited_time");
+    console.log("  --include-db-rows  also sync database-row pages (default: skip them)");
     console.log("\nRequires NOTION_TOKEN in the environment.");
     process.exit(0);
   }
@@ -385,6 +398,7 @@ async function main() {
     limit: args.limit,
     dryRun: args.dryRun,
     force: args.force,
+    includeDbRows: args.includeDbRows,
   });
   if (!result.ok) process.exit(1);
 }
