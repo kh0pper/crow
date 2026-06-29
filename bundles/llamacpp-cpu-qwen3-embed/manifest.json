@@ -1,0 +1,43 @@
+{
+  "id": "llamacpp-cpu-qwen3-embed",
+  "type": "bundle",
+  "name": "llama.cpp Qwen3-Embedding-0.6B (CPU)",
+  "category": "ai",
+  "description": "CPU-only text embeddings. Qwen3-Embedding-0.6B Q8_0 GGUF served by llama.cpp with an OpenAI-compatible /v1/embeddings endpoint on port 8007. Runs anywhere Docker runs (including macOS/Windows Docker Desktop) — no GPU required. Registers the llamacpp-cpu-embed provider for semantic memory/research/blog search.",
+  "author": "Crow",
+  "version": "1.0.0",
+  "host": "local",
+  "icon": "cpu",
+  "tags": ["ai", "embeddings", "semantic-search", "cpu", "llama.cpp", "local", "privacy"],
+  "requires": {
+    "gpu_arch": ["cpu"],
+    "min_ram_mb": 2048,
+    "min_disk_mb": 3000
+  },
+  "env_vars": [],
+  "port": 8007,
+  "webUI": null,
+  "docker": {
+    "composefile": "docker-compose.yml"
+  },
+  "providers": [
+    {
+      "id": "llamacpp-cpu-embed",
+      "baseUrlTemplate": "http://{host_ip}:{port}/v1",
+      "apiKey": "none",
+      "description": "OpenAI-compatible embedding endpoint (Qwen3-Embedding-0.6B Q8_0, CPU llama.cpp)",
+      "models": [
+        {
+          "id": "qwen3-embedding-0.6b",
+          "task": "embed",
+          "dim": 1024,
+          "dimensions": 1024,
+          "contextLen": 8192,
+          "warm": false,
+          "priority": "background"
+        }
+      ]
+    }
+  ],
+  "notes": "CPU-only; the first request downloads the ~640MB GGUF and caches it in a Docker volume. After install, select it as the embedding provider — set dashboard_settings 'embed_provider' = 'llamacpp-cpu-embed' (or export CROW_EMBED_PROVIDER=llamacpp-cpu-embed). 1024-dim, vector-space compatible with grackle-embed / vllm-cuda-embed (same model)."
+}
