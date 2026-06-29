@@ -262,7 +262,7 @@ export async function runSync(opts = {}) {
   if (info.ok) {
     log(`embed provider=${info.provider} model=${info.model}`);
   } else {
-    log(`embed provider offline (${info.error}) — storing FTS-only; run 'npm run backfill -- --only memories' once it's back`);
+    log(`embed provider offline (${info.error}) — storing FTS-only; run 'node scripts/backfill-embeddings.js --only memories' once it's back`);
   }
 
   const ownsDb = !opts.db;
@@ -335,6 +335,7 @@ export async function runSync(opts = {}) {
         await sleep(THROTTLE_MS);
       } catch (err) {
         stats.failed++;
+        stats.ok = false; // surface partial failures in the CLI exit code (cron/monitoring)
         log.error(`  FAILED "${title}" (${page?.id}): ${err.message}`);
       }
     }
