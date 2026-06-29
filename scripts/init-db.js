@@ -43,6 +43,7 @@ await initTable("memories table", `
   CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
   CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
   CREATE INDEX IF NOT EXISTS idx_memories_tags ON memories(tags);
+  CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source);
 `);
 
 await initTable("memories FTS index", `

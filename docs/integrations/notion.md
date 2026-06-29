@@ -67,3 +67,70 @@ Notion search only returns pages that have been explicitly connected to the inte
 ### Token starts with "secret_" instead of "ntn_"
 
 Older Notion integrations used the `secret_` prefix. Both formats work — just paste the full token as-is.
+
+## Sync Notion into Crow memory (local semantic search)
+
+Notion's API (and its MCP server) only does **keyword** search. Crow's **semantic**
+search runs over the `memories` table, not over Notion live. `scripts/sync-notion.js`
+bridges the two: it pulls every page shared with your integration, converts it to
+Markdown, and stores each as a memory (`category=learning`, `tags=notion,sync`). The
+normal embedding pipeline then makes that content semantically searchable through
+`crow_search_memories` / `crow_deep_recall` from any connected client.
+
+It's **idempotent** — pages are deduped on `source = notion:<pageId>` and only re-embedded
+when their Notion `last_edited_time` changes — and **inert** when `NOTION_TOKEN` is unset,
+so instances that don't use Notion are unaffected.
+
+### Run it
+
+```bash
+# Token must be in the environment (e.g. via --env-file=.env, Node >= 20):
+npm run sync-notion -- --once --dry-run --limit 5   # preview decisions, no writes
+npm run sync-notion -- --once                        # full sync
+npm run sync-notion -- --once --force                # re-embed everything
+```
+
+Flags: `--dry-run` (show insert/update/skip, no writes), `--limit N` (cap pages),
+`--force` (ignore `last_edited_time`). If the embedding provider is offline the pages
+are still stored (keyword-searchable); run `npm run backfill -- --only memories` later
+to fill embeddings.
+
+> One memory per page (v1). Very long, multi-topic pages are averaged into a single
+> embedding and content past ~8000 chars is excluded from the *embedding* (still stored
+> and keyword-searchable). The `source` key already supports a future per-section
+> (`notion:<pageId>#<n>`) chunking upgrade with no schema change.
+
+### Schedule it
+
+Run the sync on a timer. A macOS launchd template is provided at
+[`examples/notion-sync/com.crow.notion-sync.plist.example`](https://github.com/kh0pper/crow/blob/main/examples/notion-sync/com.crow.notion-sync.plist.example)
+(fill in the placeholder paths, copy to `~/Library/LaunchAgents/`, `launchctl load`).
+
+::: tip Why not crow_create_schedule?
+The built-in scheduler only advances DB rows and emits notifications — it does not spawn
+external scripts. Use an OS timer (launchd / systemd / cron) instead.
+:::
+
+**Linux (systemd user timer)** — `~/.config/systemd/user/crow-notion-sync.{service,timer}`:
+
+```ini
+# crow-notion-sync.service
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Developer/crow
+ExecStart=/usr/bin/node --env-file=%h/Developer/crow/.env scripts/sync-notion.js --once
+
+# crow-notion-sync.timer
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+[Install]
+WantedBy=timers.target
+```
+Enable with `systemctl --user enable --now crow-notion-sync.timer`.
+
+**cron** (every 6 hours):
+
+```cron
+0 */6 * * * cd $HOME/Developer/crow && /usr/bin/node --env-file=.env scripts/sync-notion.js --once >> $HOME/.crow/logs/notion-sync.log 2>&1
+```
