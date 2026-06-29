@@ -6089,6 +6089,49 @@
       "webUI": null,
       "notes": "No host port publish. Expose via Caddy after install: caddy_add_federation_site { domain: WF_HOST, upstream: 'writefreely:8080', profile: 'activitypub' }. On first-run the admin account is created via the web UI; there is no CLI bootstrap.",
       "official": true
+    },
+    {
+      "id": "xquik",
+      "name": "Xquik",
+      "version": "1.0.0",
+      "description": "Read-only X data workflows for tweet search, tweet lookup, user search, user lookup, trends, and radar research via the public Xquik REST API.",
+      "type": "bundle",
+      "author": "Crow",
+      "category": "social-data",
+      "tags": [
+        "x",
+        "twitter",
+        "social-data",
+        "tweet-search",
+        "trends",
+        "research"
+      ],
+      "icon": "search",
+      "skills": [
+        "skills/xquik.md"
+      ],
+      "requires": {
+        "env": [
+          "XQUIK_API_KEY"
+        ]
+      },
+      "env_vars": [
+        {
+          "name": "XQUIK_API_KEY",
+          "description": "Xquik API key used by the configured REST client.",
+          "required": true,
+          "secret": true
+        },
+        {
+          "name": "XQUIK_API_BASE_URL",
+          "description": "Xquik REST API base URL.",
+          "default": "https://xquik.com",
+          "required": false
+        }
+      ],
+      "webUI": null,
+      "notes": "Skill-only add-on. Configure a REST client with XQUIK_API_KEY before using the workflows.",
+      "official": true
     }
   ]
 }
