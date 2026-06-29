@@ -1,0 +1,45 @@
+## llama.cpp CPU embedding server — Qwen3-Embedding-0.6B (OpenAI-compatible).
+##
+## No GPU required; runs on any Docker host including macOS/Windows Docker Desktop.
+## The first start downloads the GGUF (~640MB) via -hf and caches it in the named
+## volume, so subsequent restarts are fast.
+##
+## Usage (manual test):
+##   docker compose up -d
+##   curl http://127.0.0.1:8007/v1/models
+##   curl -s http://127.0.0.1:8007/v1/embeddings \
+##     -H 'Content-Type: application/json' \
+##     -d '{"model":"qwen3-embedding-0.6b","input":"hello"}' | head -c 200
+
+services:
+  llamacpp-cpu-qwen3-embed:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: llamacpp-cpu-qwen3-embed
+    environment:
+      - LLAMA_CACHE=/models
+    volumes:
+      - llamacpp-cpu-qwen3-embed-models:/models
+    ports:
+      - "127.0.0.1:8007:8000"
+    command:
+      - --hf-repo
+      - Qwen/Qwen3-Embedding-0.6B-GGUF
+      - --hf-file
+      - Qwen3-Embedding-0.6B-Q8_0.gguf
+      - --alias
+      - qwen3-embedding-0.6b
+      - --embedding
+      - --pooling
+      - mean
+      - --ctx-size
+      - "8192"
+      - --threads
+      - "4"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    restart: unless-stopped
+
+volumes:
+  llamacpp-cpu-qwen3-embed-models:
