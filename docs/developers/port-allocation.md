@@ -61,6 +61,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 6875 | 127.0.0.1 | bookstack (existing) | existing |
 | 8000 | 127.0.0.1 | paperless (existing) | existing |
 | 8004 | 127.0.0.1 | faster-whisper-server (local STT) | existing |
+| 8007 | 127.0.0.1 | llamacpp-cpu-qwen3-embed (CPU embeddings) | PR #111 |
 | 8080 | 127.0.0.1 | localai (existing) — **also nextcloud, conflict** | existing |
 | 8081 | 127.0.0.1 | calibre-server (existing) | existing |
 | 8083 | 127.0.0.1 | calibre-web (existing) | existing |
