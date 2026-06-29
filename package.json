@@ -19,6 +19,7 @@
     "identity:import": "node -e \"import('./servers/sharing/identity.js').then(m => m.importIdentity())\"",
     "create-integration": "node scripts/create-integration.js",
     "mcp-config": "node scripts/generate-mcp-config.js",
+    "sync-notion": "node scripts/sync-notion.js",
     "migrate-data": "node scripts/migrate-data-dir.js",
     "check": "node scripts/check.js",
     "sync-skills": "node scripts/sync-skills.js",
@@ -40,7 +41,8 @@
     "test:pir-routes": "node --test tests/pir-routes.test.js",
     "test:sso-ticket": "node --test tests/sso-ticket.test.js",
     "test:gpu-vram": "node --test tests/gpu-arch-vram.test.js",
-    "test:port-inventory": "node --test tests/port-inventory.test.js"
+    "test:port-inventory": "node --test tests/port-inventory.test.js",
+    "test:notion-sync": "node --test tests/notion-sync.test.js"
   },
   "dependencies": {
     "@libsql/client": "^0.17.2",
