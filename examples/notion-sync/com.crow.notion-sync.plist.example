@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS launchd template for scheduling the Notion -> Crow memory sync.
+
+  Setup:
+    1. Replace every /ABSOLUTE/PATH/TO and YOU placeholder below.
+       - node:  run `which node` (use the absolute path; nvm users must pin the
+         versioned path, e.g. ~/.nvm/versions/node/vXX.Y.Z/bin/node).
+       - crow:  the repo checkout, e.g. /Users/you/Developer/crow
+    2. Put your token in <repo>/.env as NOTION_TOKEN=ntn_... (loaded via --env-file;
+       requires Node >= 20. On Node 18, instead add NOTION_TOKEN to
+       <EnvironmentVariables> below and drop the --env-file argument).
+    3. Copy to ~/Library/LaunchAgents/com.crow.notion-sync.plist, then:
+         chmod 600 ~/Library/LaunchAgents/com.crow.notion-sync.plist
+         launchctl load ~/Library/LaunchAgents/com.crow.notion-sync.plist
+       Trigger a run immediately:
+         launchctl kickstart -k gui/$(id -u)/com.crow.notion-sync
+
+  Notes:
+    - StartInterval runs every 6h (21600s). launchd will NOT start an overlapping
+      run if a previous one is still going, and the sync is idempotent regardless.
+    - Do NOT add <KeepAlive> — this is a periodic job, not a long-running daemon.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.crow.notion-sync</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/node</string>
+    <string>--env-file=/ABSOLUTE/PATH/TO/crow/.env</string>
+    <string>/ABSOLUTE/PATH/TO/crow/scripts/sync-notion.js</string>
+    <string>--once</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/YOU</string>
+    <key>CROW_DB_PATH</key>
+    <string>/Users/YOU/.crow/data/crow.db</string>
+    <!-- On Node 18 (no --env-file): uncomment and set the token here instead.
+    <key>NOTION_TOKEN</key>
+    <string>ntn_REPLACE_ME</string>
+    -->
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/ABSOLUTE/PATH/TO/crow</string>
+
+  <key>StartInterval</key>
+  <integer>21600</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/.crow/logs/notion-sync.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/.crow/logs/notion-sync.err.log</string>
+</dict>
+</plist>
