@@ -32,7 +32,7 @@
           "task": "embed",
           "dim": 1024,
           "dimensions": 1024,
-          "contextLen": 32768,
+          "contextLen": 8192,
           "warm": false,
           "priority": "background"
         }
