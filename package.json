@@ -42,7 +42,8 @@
     "test:sso-ticket": "node --test tests/sso-ticket.test.js",
     "test:gpu-vram": "node --test tests/gpu-arch-vram.test.js",
     "test:port-inventory": "node --test tests/port-inventory.test.js",
-    "test:notion-sync": "node --test tests/notion-sync.test.js"
+    "test:notion-sync": "node --test tests/notion-sync.test.js",
+    "test:embed-provider": "node --test tests/embed-provider.test.js"
   },
   "dependencies": {
     "@libsql/client": "^0.17.2",
