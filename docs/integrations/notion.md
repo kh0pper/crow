@@ -92,7 +92,7 @@ npm run sync-notion -- --once --force                # re-embed everything
 
 Flags: `--dry-run` (show insert/update/skip, no writes), `--limit N` (cap pages),
 `--force` (ignore `last_edited_time`). If the embedding provider is offline the pages
-are still stored (keyword-searchable); run `npm run backfill -- --only memories` later
+are still stored (keyword-searchable); run `node scripts/backfill-embeddings.js --only memories` later
 to fill embeddings.
 
 > One memory per page (v1). Very long, multi-topic pages are averaged into a single
