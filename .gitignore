@@ -47,7 +47,12 @@ scripts/bench/results/quality/*.dat
 # crow-autoupdate-pull-only.
 /crow.db
 /crow.db-*
-/data/
+# Match both the real ./data/ dir and the symlink setup.js creates
+# (./data -> ~/.crow/data). A trailing slash matches only a directory, so the
+# symlink stayed untracked and the auto-updater's `git stash --include-untracked`
+# would sweep it away — init-db then recreated ./data as a real dir with a fresh
+# empty DB, splitting the database. No trailing slash matches the symlink too.
+/data
 servers/gateway/public/blog/
 bundles/.env.cuda
 bundles/*/.env
