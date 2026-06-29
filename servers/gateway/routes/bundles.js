@@ -19,6 +19,7 @@
 import { Router } from "express";
 import { createNotification } from "../../shared/notifications.js";
 import bus from "../../shared/event-bus.js";
+import { isSupervised } from "../../shared/supervisor.js";
 import { createDbClient } from "../../db.js";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, copyFileSync, unlinkSync, symlinkSync } from "node:fs";
@@ -747,14 +748,14 @@ function revertEnvInGateway(envKeys) {
 
 /**
  * Schedule a graceful gateway restart so new env vars take effect.
- * Uses the same pattern as auto-update: exit with code 1 so systemd restarts.
+ * Uses the same pattern as auto-update: exit with code 1 so the supervisor restarts.
  * Emits 'crow:shutdown' on process so the HTTP server can close its listening
- * socket before the exit — prevents EADDRINUSE when systemd starts the new instance.
- * For non-systemd, just sets process.env so the storage server can reinitialize.
+ * socket before the exit — prevents EADDRINUSE when the supervisor starts the new instance.
+ * When unsupervised, just sets process.env so the storage server can reinitialize.
  */
 function scheduleGatewayRestart(delayMs = 2000) {
-  if (process.env.INVOCATION_ID) {
-    // Running as systemd service — close server, then exit to trigger restart
+  if (isSupervised()) {
+    // Supervised — close server, then exit to trigger restart
     console.log("[bundles] Restarting gateway to apply new configuration...");
     setTimeout(() => {
       process.emit("crow:shutdown");
@@ -762,7 +763,7 @@ function scheduleGatewayRestart(delayMs = 2000) {
       setTimeout(() => process.exit(1), 1000);
     }, delayMs);
   } else {
-    // Not systemd — reload env vars into current process
+    // Unsupervised — reload env vars into current process
     try {
       const envContent = readFileSync(APP_ENV_PATH, "utf8");
       for (const line of envContent.split("\n")) {

@@ -5,6 +5,7 @@
 import { escapeHtml, badge } from "../../shared/components.js";
 import { t, tJs } from "../../shared/i18n.js";
 import { getProxyStatus } from "../../../proxy.js";
+import { isSupervised } from "../../../../shared/supervisor.js";
 
 export default {
   id: "integrations",
@@ -245,9 +246,9 @@ function pollHealth(attempts) {
         console.warn("[settings] Failed to regenerate .mcp.json:", e.message);
       }
 
-      const isSystemd = !!process.env.INVOCATION_ID;
-      res.json({ ok: true, restarting: isSystemd });
-      if (isSystemd) {
+      const supervised = isSupervised();
+      res.json({ ok: true, restarting: supervised });
+      if (supervised) {
         setTimeout(() => process.exit(0), 500);
       }
       return true;
@@ -281,9 +282,9 @@ function pollHealth(attempts) {
         console.warn("[settings] Failed to regenerate .mcp.json:", e.message);
       }
 
-      const isSystemd = !!process.env.INVOCATION_ID;
-      res.json({ ok: true, restarting: isSystemd });
-      if (isSystemd) {
+      const supervised = isSupervised();
+      res.json({ ok: true, restarting: supervised });
+      if (supervised) {
         setTimeout(() => process.exit(0), 500);
       }
       return true;

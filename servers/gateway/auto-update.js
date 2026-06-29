@@ -4,12 +4,13 @@
  * Enabled by default. Users can toggle via Settings panel or CROW_AUTO_UPDATE env var.
  * Stores state in dashboard_settings DB table.
  *
- * On update: git pull → npm install → init-db → restart (if systemd)
+ * On update: git pull → npm install → init-db → restart (if supervised)
  */
 
 import { execFile } from "node:child_process";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isSupervised } from "../shared/supervisor.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = dirname(dirname(__dirname));
@@ -172,11 +173,13 @@ export async function checkForUpdates() {
 
     log(`Updated: ${currentVersion} → ${newVersion}`);
 
-    // Restart if running as systemd service
-    if (process.env.INVOCATION_ID) {
-      log("Restarting gateway via systemd...");
+    // Restart to load the new code when supervised (systemd, launchd
+    // KeepAlive, Docker, etc.). Without a supervisor the pulled code only
+    // takes effect on the next manual restart.
+    if (isSupervised()) {
+      log("Restarting gateway to apply update...");
       // Close the HTTP server first to release the port, then exit
-      // so systemd restart doesn't hit EADDRINUSE
+      // so the supervisor's restart doesn't hit EADDRINUSE
       setTimeout(() => {
         process.emit("crow:shutdown");
         setTimeout(() => process.exit(1), 1000);
