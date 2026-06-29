@@ -12,16 +12,55 @@
  */
 
 import { loadProviders } from "../shared/providers.js";
+import { createDbClient } from "../db.js";
 
-const DEFAULT_PROVIDER = "grackle-embed";
+// Fallback when no provider is configured via env or the dashboard setting.
+const FALLBACK_PROVIDER = "grackle-embed";
 const EMBED_TIMEOUT_MS = 10_000;
 const FETCH_RETRIES = 1;
+
+// Default embedding-provider resolution, in priority order:
+//   1. CROW_EMBED_PROVIDER env var (headless/scripts/gateway via .env)
+//   2. dashboard_settings 'embed_provider' (shared crow.db — reaches every
+//      process, including the MCP servers Claude Code spawns, with no
+//      re-registration; settable from the dashboard)
+//   3. FALLBACK_PROVIDER ("grackle-embed") — preserves prior behavior
+// Cached for 30s so the hot embed path stays cheap.
+let _defaultProviderCache = null;
+let _defaultProviderAt = 0;
+const DEFAULT_PROVIDER_TTL_MS = 30_000;
+
+export async function resolveDefaultProvider() {
+  if (process.env.CROW_EMBED_PROVIDER) return process.env.CROW_EMBED_PROVIDER;
+  if (_defaultProviderCache && Date.now() - _defaultProviderAt < DEFAULT_PROVIDER_TTL_MS) {
+    return _defaultProviderCache;
+  }
+  let resolved = FALLBACK_PROVIDER;
+  try {
+    const db = createDbClient();
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT value FROM dashboard_settings WHERE key = 'embed_provider'",
+        args: [],
+      });
+      const v = rows?.[0]?.value;
+      if (v && String(v).trim()) resolved = String(v).trim();
+    } finally {
+      db.close?.();
+    }
+  } catch {
+    // DB unavailable — keep the fallback.
+  }
+  _defaultProviderCache = resolved;
+  _defaultProviderAt = Date.now();
+  return resolved;
+}
 
 // -----------------------------------------------------------------------
 // Provider resolution
 // -----------------------------------------------------------------------
 
-function resolveEmbedConfig(providerName = DEFAULT_PROVIDER) {
+function resolveEmbedConfig(providerName = FALLBACK_PROVIDER) {
   const cfg = loadProviders();
   const p = cfg.providers?.[providerName];
   if (!p || !p.baseUrl) {
@@ -40,8 +79,8 @@ function resolveEmbedConfig(providerName = DEFAULT_PROVIDER) {
  * Embed a single text (or array of texts).
  * Returns Float32Array (for single) or Float32Array[] (for array).
  */
-export async function embedText(text, { providerName = DEFAULT_PROVIDER } = {}) {
-  const cfg = resolveEmbedConfig(providerName);
+export async function embedText(text, { providerName } = {}) {
+  const cfg = resolveEmbedConfig(providerName || (await resolveDefaultProvider()));
   const isArray = Array.isArray(text);
   const input = isArray ? text : [text];
 
@@ -78,9 +117,9 @@ export async function embedText(text, { providerName = DEFAULT_PROVIDER } = {}) 
  * Query the health/config of an embedding provider.
  * Returns { ok, model, dim, baseUrl } or { ok: false, error }.
  */
-export async function embedProviderInfo(providerName = DEFAULT_PROVIDER) {
+export async function embedProviderInfo(providerName) {
   try {
-    const cfg = resolveEmbedConfig(providerName);
+    const cfg = resolveEmbedConfig(providerName || (await resolveDefaultProvider()));
     const res = await fetch(cfg.baseUrl.replace(/\/+$/, "") + "/models", {
       signal: AbortSignal.timeout(3000),
     });
