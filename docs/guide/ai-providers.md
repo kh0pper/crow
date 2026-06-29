@@ -232,8 +232,32 @@ When an embedding provider is configured, Crow enhances memory search with **sem
 
 ### Requirements
 
-- An embedding provider entry in `models.json` — any OpenAI-compatible embeddings endpoint works (a local vLLM/llama.cpp embedding model, Ollama with `nomic-embed-text`, or a cloud provider). Crow looks for a provider named `grackle-embed` by default.
+- An embedding provider entry in `models.json` or the providers DB — any OpenAI-compatible embeddings endpoint works (a local vLLM/llama.cpp embedding model, Ollama with `nomic-embed-text`, or a cloud provider).
 - That's it — embeddings are stored as plain BLOBs in the `memory_embeddings` table and compared in-process, which is plenty fast at personal-knowledge-base scale.
+
+### Choosing the embedding provider
+
+Crow uses `grackle-embed` by default, but the provider is configurable so you can point semantic search at whatever embedder you run. Resolution order (first match wins):
+
+1. **`CROW_EMBED_PROVIDER`** environment variable — best for headless/scripted runs and the gateway (loaded from `.env`).
+2. **`embed_provider`** key in `dashboard_settings` — stored in the shared `crow.db`, so it reaches **every** process (the gateway, the MCP servers Claude Code spawns, the sync/backfill scripts) with no re-registration. Set it once:
+   ```sql
+   INSERT INTO dashboard_settings (key, value) VALUES ('embed_provider', '<provider-id>')
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+   ```
+3. **`grackle-embed`** fallback (preserves prior behavior).
+
+The value is the provider `id` as registered (e.g. by an embedding bundle). After changing it, allow up to ~30s for the in-process cache to refresh (running processes re-probe the new provider automatically — no restart needed).
+
+::: warning Re-embed after switching to a different model
+Embeddings are only comparable within the same model's vector space, and semantic search filters stored vectors by model. If the new provider serves a **different** model than the one your existing memories were embedded with (e.g. switching `grackle-embed`'s Qwen3-Embedding to `nomic-embed-text`), those older memories drop out of semantic results until you re-embed them. Re-embed once after switching:
+
+```
+node scripts/backfill-embeddings.js --only memories
+```
+
+Switching between providers that serve the **same** model (e.g. the GPU and CPU Qwen3-Embedding bundles) needs no re-embed — the vectors are interchangeable.
+:::
 
 ### How it works
 

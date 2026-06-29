@@ -14,6 +14,7 @@ import { createNotification, cleanupNotifications } from "../shared/notification
 import {
   embedText as phase4EmbedText,
   embedProviderInfo,
+  resolveDefaultProvider,
   upsertMemoryEmbedding,
   loadMemoryEmbeddings,
   rankByCosine,
@@ -28,25 +29,33 @@ export function createMemoryServer(dbPath, options = {}) {
   // When set, mutations emit change entries to connected instances.
   const syncManager = options.syncManager || null;
 
-  // --- Phase 4: BLOB-based semantic memory via grackle-embed ---
-  // Cache provider-health check so we don't probe on every write.
+  // --- Phase 4: BLOB-based semantic memory ---
+  // Cache provider-health check so we don't probe on every write. Keyed on the
+  // resolved default provider so a runtime change to the embed provider (env or
+  // the dashboard_settings 'embed_provider' key) re-probes within one
+  // resolveDefaultProvider TTL instead of serving the old provider's model/dim
+  // forever. info.provider is then pinned onto every embedText call below so the
+  // vector's source endpoint and its stored `model` tag can never diverge.
   let _phase4ProviderInfo = null;
+  let _phase4ProviderName = null;
   async function phase4ProviderHealthy() {
-    if (_phase4ProviderInfo === null) {
-      _phase4ProviderInfo = await embedProviderInfo().catch(() => ({ ok: false }));
+    const providerName = await resolveDefaultProvider();
+    if (_phase4ProviderInfo === null || providerName !== _phase4ProviderName) {
+      _phase4ProviderName = providerName;
+      _phase4ProviderInfo = await embedProviderInfo(providerName).catch(() => ({ ok: false }));
     }
     return _phase4ProviderInfo;
   }
 
   // Store embedding for a memory (fire-and-forget, errors don't block).
-  // Phase 4 BLOB + grackle-embed path (the only path since the never-wired
-  // sqlite-vec legacy branch was removed in W5.5).
+  // Phase 4 BLOB path (the only path since the never-wired sqlite-vec legacy
+  // branch was removed in W5.5).
   async function storeEmbedding(memoryId, content) {
     // Non-blocking, degrades to no-op on provider failure
     const info = await phase4ProviderHealthy();
     if (!info.ok) return;
     try {
-      const vec = await phase4EmbedText(content);
+      const vec = await phase4EmbedText(content, { providerName: info.provider });
       if (!vec || vec.length === 0) return;
       await upsertMemoryEmbedding(db, memoryId, vec, {
         model: info.model,
@@ -130,7 +139,7 @@ export function createMemoryServer(dbPath, options = {}) {
         try {
           const info = await phase4ProviderHealthy();
           if (info.ok) {
-            const queryVec = await phase4EmbedText(query);
+            const queryVec = await phase4EmbedText(query, { providerName: info.provider });
             const allEmbs = await loadMemoryEmbeddings(db, { model: info.model });
             if (queryVec && allEmbs.length > 0) {
               const topK = Math.min(Math.max(limit * 3, 30), 200);
@@ -625,7 +634,7 @@ export function createMemoryServer(dbPath, options = {}) {
       let succeeded = 0, failed = 0;
       for (const m of rows) {
         try {
-          const vec = await phase4EmbedText(m.content);
+          const vec = await phase4EmbedText(m.content, { providerName: info.provider });
           if (vec && vec.length > 0) {
             await upsertMemoryEmbedding(db, m.id, vec, { model: info.model, dim: vec.length });
             succeeded++;
