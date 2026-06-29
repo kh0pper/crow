@@ -7,6 +7,7 @@ Index for working on this repo. Load-bearing rules inline; deep reference is in 
 - **Always commit with a positional path arg**: `git commit <path> -m "..."`, not `git add <path> && git commit -m "..."`. Parallel Claude sessions modify the working tree concurrently; `git add` then a bare `git commit` will sweep in unrelated WIP. Verify with `git show --stat HEAD` after every commit. (See `~/.claude/CLAUDE.md` Learnings 2026-04-14.)
 - **Always `git pull --rebase` before pushing a branch** — parallel sessions commonly push to `main` between your fetch and your push.
 - **Tests**: Node built-in test runner, no third-party framework — `node --test tests/<file>.test.js` (all tests live in `tests/*.test.js`). Also verify a server starts cleanly: `node servers/<name>/index.js` (ctrl-C to exit) or `node servers/gateway/index.js --no-auth` for the gateway.
+- **Check CI before merging a PR** — the gate is GitHub **Actions check-runs**, not the legacy commit-status API (which omits them and can read empty/green when a check is red). Query `https://api.github.com/repos/<owner>/<repo>/commits/<sha>/check-runs` (public, no auth) and confirm every run is `completed`/`success`, or reproduce the check locally first. CI workflows live in `.github/workflows/`; notably **any new bundle host port must be added to `docs/developers/port-allocation.md`** or `check-ports` (`scripts/check-port-allocation.js`) fails. (See `~/.claude/CLAUDE.md` Learnings 2026-06-28.)
 
 ## Network exposure invariant
 
