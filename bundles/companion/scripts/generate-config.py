@@ -600,7 +600,7 @@ def generate_config(profiles, env_vars, tts_profiles=None):
                         "faster_first_response": True,
                         "segment_method": "pysbd",
                         "use_mcpp": True,
-                        "mcp_enabled_servers": ["crow-wm", "crow-storage"],
+                        "mcp_enabled_servers": global_mcp_servers(),
                     }
                 },
                 "llm_configs": {"openai_compatible_llm": llm_config},
@@ -684,6 +684,23 @@ def get_household_profiles():
             "voice": voice or "en-US-AvaMultilingualNeural",
         })
     return profiles
+
+
+def bot_mcp_servers(features):
+    """MCP servers for a companion agent. The "crow" router bridge carries the
+    memory/projects/blog/sharing category tools; memory_integration=True is the
+    per-bot OPT-IN (privacy: a shared kiosk's default character must not search
+    the owner's memory store unless deliberately enabled)."""
+    servers = ["crow-wm", "crow-storage"]
+    if (features or {}).get("memory_integration") is True:
+        servers.append("crow")
+    return servers
+
+
+def global_mcp_servers():
+    """Household personas hardcode memory-tool instructions + per-profile
+    scoping, so household mode enables the crow bridge globally."""
+    return bot_mcp_servers({"memory_integration": bool(get_household_profiles())})
 
 
 def get_companion_bots(db_path):
@@ -952,7 +969,16 @@ def main():
         }
         if bot["persona"]:
             cc["persona_prompt"] = bot["persona"]
+        servers = bot_mcp_servers(bot["features"])
+        if servers != global_mcp_servers():
+            cc["agent_config"] = {
+                "agent_settings": {
+                    "basic_memory_agent": {"mcp_enabled_servers": servers}
+                }
+            }
         path = os.path.join(characters_dir, f"crow_bot_{bot['slug']}.yaml")
+        if os.path.exists(path):
+            print(f"Warning: bot preset collision on slug '{bot['slug']}' — '{bot['bot_id']}' overwrites an earlier bot's preset", file=sys.stderr)
         with open(path, "w") as f:
             yaml.dump({"character_config": cc}, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
         bot_presets += 1
