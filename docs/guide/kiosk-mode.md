@@ -29,17 +29,18 @@ Bind a device in the bot's **Gateways** tab → type **AI Companion**:
 4. **Voice idle timeout** — seconds of silence before the pet/idle animation.
 5. **Features** — toggle avatar animation/lip-sync, pet/idle mode, social (chatroom & DM) features, and automatic memory integration.
 
-Saving sets the device's `bound_bot_id` and stores the toggles as `companion_features`. Persona and avatar take effect on the next kiosk session; the feature toggles apply live.
+Saving sets the device's `bound_bot_id` and stores the toggles as `companion_features`. Persona and avatar take effect on the next kiosk session. The feature toggles apply at two different layers: device-config features (`social_chat`, `face_tracking`, hearing style, voice idle timeout) are fetched and applied on each kiosk page load, while config-gen features (`avatar_model`, `memory_integration`) are baked into the generated companion config and only take effect after a config regeneration + container restart. See the [`companion_features` semantics table](/architecture/companion) for the full breakdown.
 
 ### What is and isn't per device
 
 | Per device | Shared across the container |
 |------------|-----------------------------|
 | Persona, avatar, voice | The fast→escalate **model pair** |
-| `companion_features` (avatar animation, pet mode, social/chat, memory) | The MCP tool set |
+| `companion_features` (avatar animation, pet mode, social/chat, memory) | The base MCP bridges (`crow-wm`, `crow-storage`) |
+| The `crow` memory bridge (per-bot `memory_integration` opt-in) | |
 | Bound bot | |
 
-The model pair is shared because one companion container has a single LLM `base_url` (the gateway's [`/llm/v1` router](/architecture/companion)). A kiosk that genuinely needs a *different* model pair or tool scope needs its **own companion container** (own port + `conf.yaml`).
+The model pair is shared because one companion container has a single LLM `base_url` (the gateway's [`/llm/v1` router](/architecture/companion)). The MCP tool set is *mostly* shared — every character gets `crow-wm` and `crow-storage` — but the `crow` memory bridge is added per bot when its `memory_integration` feature is enabled (a config-gen setting; see [MCP bridges](/architecture/companion)). A kiosk that genuinely needs a *different* model pair needs its **own companion container** (own port + `conf.yaml`).
 
 ## Social / chat features
 
