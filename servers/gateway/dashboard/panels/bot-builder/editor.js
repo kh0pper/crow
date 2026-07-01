@@ -393,7 +393,8 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
         `<label><input type="checkbox" name="gw_social_chat"${chk(cf.social_chat)}> Social / chatroom &amp; DM features</label>` +
         `<label><input type="checkbox" name="gw_memory_integration"${chk(cf.memory_integration)}> Auto memory integration</label>` +
         `<label><input type="checkbox" name="gw_face_tracking"${chk(cf.face_tracking !== false)}> Face tracking (camera drives the avatar)</label>` +
-        `</div></div>`;
+        `</div></div>` +
+        `<p class="btb-hint">${t("botbuilder.gwHintHousehold", lang)}</p>`;
       gwHint = `<p class="btb-hint">${t("botbuilder.gwHintCompanion", lang)}</p>`;
     } else if (gwType === "crow-messages") {
       const admin = await import("./crow-messages-admin.js");
