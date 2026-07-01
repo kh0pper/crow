@@ -51,6 +51,36 @@ El companion resuelve los modelos a través de `servers/gateway/ai/resolve-profi
 
 Un **dispositivo** companion (una tablet kiosko / pantalla de sala) se vincula a un agente del Bot Builder exactamente igual que un dispositivo Meta Glasses: el registro del dispositivo (`device-store.js`, etiquetado `device_kind:"companion"`) lleva `bound_bot_id`, y el kiosko muestra la persona/avatar de ese bot más los toggles `companion_features` por dispositivo. Configúralo en la pestaña **Gateways** del bot (tipo *AI Companion*). El par de modelos es global (el router `/llm/v1` del gateway); la variación por dispositivo es solo persona/avatar/voz/funciones. Consulta el [modo kiosko](/es/guide/kiosk-mode).
 
+### Semántica de `companion_features`
+
+Las casillas/campos de *AI Companion* en la pestaña Gateways no son uniformes — cada una está conectada en una capa distinta:
+
+| Función | Capa | Predeterminado | Efecto |
+|---------|------|-----------------|--------|
+| `social_chat` | runtime | apagado | `crow-device-config.js` oculta el panel `#crow-voice-panel` (voz/pares) salvo que sea `true`. |
+| `avatar_model` | generación de config | avatar configurado del bot, o el predeterminado | `generate-config.py` elige el modelo Live2D para el preset de personaje del bot. |
+| `memory_integration` | generación de config | **apagado — opt-in por bot** | `true` añade el puente `crow` del router (herramientas de categoría memoria/proyectos/blog/compartir) a `mcp_enabled_servers` de ese bot (`bot_mcp_servers()` en `generate-config.py`). Apagado por defecto: el personaje predeterminado de un kiosko compartido no debe buscar en la memoria del propietario a menos que se habilite deliberadamente. El modo hogar (más abajo) lo activa globalmente sin importar la configuración propia de cada bot. |
+| `face_tracking` | runtime | **encendido** (solo `=== false` lo deshabilita) | Es una compuerta de disponibilidad, no un opt-in: `false` oculta el botón `#crow-face-tracking-toggle`, bloquea que `toggle()` abra la cámara y — como las funciones se cargan mediante un fetch asíncrono que un clic puede adelantar — desmonta de inmediato una cámara/seguimiento ya en marcha en cuanto llega la bandera `false` (`crow-face-tracking.js` + `crow-device-config.js`). |
+| `hearing_style` / `voice_idle_timeout` | plomería de device-config | `push_to_talk` / 30s | Se configuran en la pestaña Gateways del bot (`gw_hearing_style`, `gw_voice_idle_timeout`), se guardan en la fila del gateway y se transmiten a la config del dispositivo. |
+| `pet_mode` / `avatar_animation` | almacenado | mascota apagada / animación encendida | `crow-device-config.js` refleja ambos como atributos `data-crow-pet` / `data-crow-anim`; los valores se guardan y se aplican como atributos hoy, pero el comportamiento de modo mascota en el kiosko que deberían impulsar aún no se ha verificado de extremo a extremo en un kiosko real. |
+
+`proactive_speak_prompt` se consideró pero se eliminó — nunca existió un disparador que lo activara, así que quedaba como config muerta.
+
+### Perfiles del hogar
+
+Los perfiles del hogar son un mecanismo **separado y global**, distinto de las funciones por bot: varios usuarios con nombre (hasta 9), cada uno con su propio avatar y voz TTS, compartiendo un mismo contenedor/kiosko companion. Se configuran en **Ajustes → Companion → Hogar** (`bundles/companion/settings-section.js`), no por bot, mediante las variables de entorno `COMPANION_PROFILE_N_NAME` / `_AVATAR` / `_TTS_PROFILE_ID` / `_TTS_VOICE`, leídas por `get_household_profiles()` en `generate-config.py`. Cada perfil se convierte en su propio personaje de OLVV (`crow_profile_<slug>`) cuya persona lleva instrucciones de alcance de memoria por usuario añadidas automáticamente (etiqueta `profile:<slug>` al guardar/buscar, no leer las memorias de otros miembros salvo que se pregunte por ellas).
+
+Definir cualquier perfil del hogar activa un interruptor **global**: `global_mcp_servers()` habilita el puente de memoria `crow` para el personaje predeterminado sin importar el toggle `memory_integration` de ningún bot individual, porque las personas del hogar ya llevan su propio alcance de memoria por perfil en el prompt. Los cambios en las variables de entorno requieren reiniciar el contenedor para aplicarse — `generate-config.py` se ejecuta una sola vez al iniciar el contenedor, no se recarga en caliente.
+
+### Puentes MCP
+
+Todo personaje del companion recibe `crow-wm` (gestor de ventanas) y `crow-storage` (subidas) incondicionalmente — siempre están en `mcp_enabled_servers`. El puente `crow` (herramientas de categoría del router, incluida memoria/proyectos/blog/compartir) es opt-in, controlado de dos formas:
+
+- **Por bot**: solo cuando la función `memory_integration` de ese bot es `true`. El preset de personaje del bot recibe una anulación mínima de `agent_config` con `crow` añadido a `mcp_enabled_servers`, emitida solo cuando difiere del valor global predeterminado.
+- **Globalmente**: cuando hay perfiles del hogar definidos, todos los personajes (no solo los bots que optaron por entrar) reciben `crow`.
+
+La razón de privacidad es la misma en ambos casos: el personaje predeterminado de un kiosko compartido no debe poder buscar en la memoria del propietario solo por ejecutarse sobre la infraestructura de Crow — o bien un bot debe activarse deliberadamente, o la persona del perfil del hogar debe llevar su propio alcance de memoria por usuario.
+
 ## Solución de problemas
 
 - **"error calling the chat endpoint…"** — el `conf.yaml` generado está apuntando OLVV a un endpoint que rechaza la solicitud. Revisa `docker logs crow-companion` para ver el error del upstream. Causas comunes: un perfil de nube que rechaza un arreglo `tools: []` vacío (usa un modelo local, que lo tolera), o un fallo del puente MCP por el que no se carga ninguna herramienta. El puente apunta a los montajes MCP del gateway (`/router`, `/storage`, `/wm`) en `CROW_MCP_BRIDGE_PORT` (predeterminado `3001`); `/router`, `/storage` y `/wm` requieren un token MCP local (genéralo en el panel Connect del dashboard; `generate-config.py` lo lee de la variable de entorno `CROW_LOCAL_MCP_TOKEN` y lo incrusta en `mcp_servers.json` — si no está definida, los puentes reciben 401).
@@ -65,4 +95,8 @@ Un **dispositivo** companion (una tablet kiosko / pantalla de sala) se vincula a
 | `servers/gateway/routes/llm-router.js` | router `/llm/v1` de enrutamiento de modelos en proceso (rápido → escalado) |
 | `bundles/vllm-rocm-qwen35-4b/` | el bundle del modelo rápido `crow-voice` |
 | `bundles/meta-glasses/server/device-store.js` | vinculación de dispositivos (`device_kind`, `companion_features`) |
+| `bundles/companion/scripts/crow-device-config.js` | lado cliente: aplica `companion_features` al kiosko en ejecución (visibilidad de paneles, atributos, desmontaje de cámara) |
+| `bundles/companion/scripts/crow-face-tracking.js` | seguimiento facial por cámara + la compuerta de disponibilidad `face_tracking` |
+| `bundles/companion/settings-section.js` | Ajustes → Companion del dashboard, incluidos los slots de perfiles del hogar |
 | `servers/gateway/dashboard/panels/bot-builder.js` | la pestaña de gateway *AI Companion* |
+| `servers/gateway/dashboard/panels/bot-builder/editor.js` | la UI de la pestaña Gateways para `companion_features` (integración de memoria, seguimiento facial, estilo de escucha, etc.) |
