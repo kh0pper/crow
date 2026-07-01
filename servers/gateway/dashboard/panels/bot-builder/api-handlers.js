@@ -271,6 +271,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
           pet_mode: b.gw_pet_mode === "on" || b.gw_pet_mode === "true",
           social_chat: b.gw_social_chat === "on" || b.gw_social_chat === "true",
           memory_integration: b.gw_memory_integration === "on" || b.gw_memory_integration === "true",
+          face_tracking: b.gw_face_tracking === "on" || b.gw_face_tracking === "true",
           hearing_style: (b.gw_hearing_style || "push_to_talk").trim(),
           voice_idle_timeout: Number(b.gw_voice_idle_timeout || 30) || 30,
         };

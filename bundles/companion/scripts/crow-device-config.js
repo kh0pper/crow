@@ -38,6 +38,16 @@
     root.setAttribute("data-crow-social", f.social_chat ? "on" : "off");
     root.setAttribute("data-crow-pet", f.pet_mode ? "on" : "off");
     root.setAttribute("data-crow-anim", f.avatar_animation === false ? "off" : "on");
+    root.setAttribute("data-crow-face", f.face_tracking === false ? "off" : "on");
+    // Hide the face-tracking toggle button entirely on disabled devices, and
+    // stop tracking if the flag arrives after the user already started it
+    // (features load via async fetch — a click can beat the response).
+    try {
+      var ft = window.CrowFaceTracking;
+      if (f.face_tracking === false && ft) {
+        if (ft.isEnabled && ft.isEnabled()) ft.toggle();
+      }
+    } catch (e) {}
     // Social/chatroom UI: the Crow voice/peer panel is the social surface.
     var social = document.getElementById("crow-voice-panel");
     if (social) social.style.display = f.social_chat ? "" : "none";
