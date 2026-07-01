@@ -6,7 +6,7 @@ title: Arquitectura del AI Companion
 
 El AI Companion es el front end de voz y avatar de Crow — un personaje animado de [Live2D](https://www.live2d.com/) con voz de entrada y salida, que ejecuta el motor [Open-LLM-VTuber](https://github.com/Open-LLM-VTuber/Open-LLM-VTuber) (OLVV) en el contenedor Docker `crow-companion` (puerto `12393`). Es la superficie detrás del [modo kiosko](/es/guide/kiosk-mode) y está vinculado a un agente del [Bot Builder](/es/architecture/bot-builder), lo que lo convierte en el **canal** companion junto a Gmail, Discord y Meta Glasses.
 
-## Diseño: OLVV conserva su bucle; un proxy elige el modelo
+## Diseño: OLVV conserva su bucle; el gateway elige el modelo
 
 A diferencia de los canales de correo/Discord (que enrutan los turnos a través del runtime pi en `bridge.mjs`), el companion **conserva el propio bucle LLM de OLVV**. Ese bucle ya hace tres cosas de las que el companion depende:
 
@@ -14,25 +14,25 @@ A diferencia de los canales de correo/Discord (que enrutan los turnos a través 
 - **Gestor de ventanas del lado del cliente** — `crow_wm_open` / `crow_wm_media` son herramientas MCP cuyo *efecto* lo entrega `crow-wm.js` (inyectado en el navegador de OLVV) escuchando los eventos `tool_call_status` que **emite el bucle de OLVV**. Enrutar los turnos a través de pi rompería el control de ventanas/medios por voz.
 - **Streaming de tokens** — OLVV transmite la respuesta al TTS oración por oración.
 
-Así que, en lugar de reemplazar el bucle, un **proxy de enrutamiento de modelos** delgado se sitúa en el `base_url` de OLVV y solo elige *qué modelo local responde*:
+Así que, en lugar de reemplazar el bucle, el `base_url` de OLVV apunta al **router `/llm/v1`** en proceso del gateway, que solo elige *qué modelo local responde*:
 
 ```
 Voz/texto → OLVV (STT · bucle LLM · herramientas MCP · Live2D · TTS)
-   base_url de OLVV → model-proxy del companion (127.0.0.1:11435/v1)   [global, sin alcance por dispositivo]
+   base_url de OLVV → router /llm/v1 del gateway (http://localhost:3001/llm/v1)   [global, sin alcance por dispositivo]
         reenvía messages + tools sin cambios · canaliza el stream SSE directo de vuelta
         por turno:  qwen3.5-4b (rápido)  --"!escalate" inicial-->  qwen3.6-35b-a3b
    OLVV ejecuta el bucle de herramientas → emite tool_call_status → crow-wm.js abre ventanas
 ```
 
-El proxy (`scripts/companion/model-proxy.mjs`, `companion-model-proxy.service`):
+El enrutamiento de modelos corre en proceso dentro del gateway: `servers/gateway/routes/llm-router.js` sirve `/llm/v1` (compatible con OpenAI), enrutando cada turno primero al modelo rápido con escalado por `!escalate`. El contenedor companion lo alcanza vía `COMPANION_PROXY_URL` (predeterminado `http://localhost:3001/llm/v1`, ver `bundles/companion/docker-compose.yml`). El router:
 
-- expone `/v1/chat/completions` y `/v1/models` en loopback `:11435` (el contenedor es `network_mode: host`, así que `localhost` lo alcanza);
+- expone `/llm/v1/chat/completions` y `/llm/v1/models`, compatible con OpenAI;
 - enruta cada turno al modelo **rápido** por defecto, cambiando al modelo de **escalado** cuando el último mensaje del usuario comienza con `!escalate` (el token se elimina antes de reenviar);
 - **reenvía `messages` + `tools` sin cambios** y canaliza el SSE del upstream de vuelta, de modo que el bucle de herramientas de OLVV, `tool_call_status` y el streaming quedan intactos;
 - deshabilita la cadena de pensamiento visible en la ruta rápida (`chat_template_kwargs.enable_thinking=false`) para que el avatar no hable su razonamiento; el escalado conserva el razonamiento para el trabajo agéntico;
 - corre globalmente (no por dispositivo): el `base_url` de OLVV es fijo por contenedor, así que **el par de modelos se comparte entre todos los dispositivos de un mismo contenedor companion**.
 
-`generate-config.py` apunta el `base_url` de OLVV al proxy cuando `COMPANION_PROXY_URL` está definida (predeterminado `http://localhost:11435/v1`); quítala para hablar directamente con un modelo.
+`generate-config.py` apunta el `base_url` de OLVV al router cuando `COMPANION_PROXY_URL` está definida (predeterminado `http://localhost:3001/llm/v1`); quítala para hablar directamente con un modelo.
 
 ## Modelos: voz rápida, escalar para trabajo agéntico
 
@@ -49,7 +49,7 @@ El companion resuelve los modelos a través de `servers/gateway/ai/resolve-profi
 
 ## Vincular un bot (el canal companion)
 
-Un **dispositivo** companion (una tablet kiosko / pantalla de sala) se vincula a un agente del Bot Builder exactamente igual que un dispositivo Meta Glasses: el registro del dispositivo (`device-store.js`, etiquetado `device_kind:"companion"`) lleva `bound_bot_id`, y el kiosko muestra la persona/avatar de ese bot más los toggles `companion_features` por dispositivo. Configúralo en la pestaña **Gateways** del bot (tipo *AI Companion*). El par de modelos es global (el proxy); la variación por dispositivo es solo persona/avatar/voz/funciones. Consulta el [modo kiosko](/es/guide/kiosk-mode).
+Un **dispositivo** companion (una tablet kiosko / pantalla de sala) se vincula a un agente del Bot Builder exactamente igual que un dispositivo Meta Glasses: el registro del dispositivo (`device-store.js`, etiquetado `device_kind:"companion"`) lleva `bound_bot_id`, y el kiosko muestra la persona/avatar de ese bot más los toggles `companion_features` por dispositivo. Configúralo en la pestaña **Gateways** del bot (tipo *AI Companion*). El par de modelos es global (el router `/llm/v1` del gateway); la variación por dispositivo es solo persona/avatar/voz/funciones. Consulta el [modo kiosko](/es/guide/kiosk-mode).
 
 ## Solución de problemas
 
@@ -62,8 +62,7 @@ Un **dispositivo** companion (una tablet kiosko / pantalla de sala) se vincula a
 | Ruta | Rol |
 |------|------|
 | `bundles/companion/` | contenedor OLVV, `generate-config.py`, `crow-wm.js`, inyectores |
-| `scripts/companion/model-proxy.mjs` | proxy de enrutamiento de modelos (rápido → escalado) |
-| `scripts/companion/companion-model-proxy.service` | unidad systemd para el proxy |
+| `servers/gateway/routes/llm-router.js` | router `/llm/v1` de enrutamiento de modelos en proceso (rápido → escalado) |
 | `bundles/vllm-rocm-qwen35-4b/` | el bundle del modelo rápido `crow-voice` |
 | `bundles/meta-glasses/server/device-store.js` | vinculación de dispositivos (`device_kind`, `companion_features`) |
 | `servers/gateway/dashboard/panels/bot-builder.js` | la pestaña de gateway *AI Companion* |

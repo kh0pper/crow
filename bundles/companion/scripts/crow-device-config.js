@@ -6,8 +6,8 @@
  *   - selects the bound bot's OLVV character preset (persona + avatar), and
  *   - toggles companion_features (social/chat UI, pet/idle, animation).
  *
- * The fast->escalate model pair is GLOBAL (the model proxy), so this never
- * touches the LLM config — only presentation.
+ * The fast->escalate model pair is GLOBAL (the gateway /llm/v1 router), so this
+ * never touches the LLM config — only presentation.
  *
  * VERIFY-ON-DEVICE notes (built per the OLVV patterns; confirm on a real kiosk):
  *   - the exact "switch-config" message type/field for this OLVV build, and

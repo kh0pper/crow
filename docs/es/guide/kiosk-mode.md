@@ -39,7 +39,7 @@ Al guardar se establece el `bound_bot_id` del dispositivo y los toggles se almac
 | `companion_features` (animación del avatar, modo mascota, social/chat, memoria) | El conjunto de herramientas MCP |
 | Bot vinculado | |
 
-El par de modelos se comparte porque un contenedor de compañero tiene un único `base_url` de LLM (el [proxy de modelos](/es/architecture/companion)). Un kiosco que de verdad necesite un par de modelos o un alcance de herramientas *distinto* necesita su **propio contenedor de compañero** (puerto propio + `conf.yaml`).
+El par de modelos se comparte porque un contenedor de compañero tiene un único `base_url` de LLM (el [router `/llm/v1` del gateway](/es/architecture/companion)). Un kiosco que de verdad necesite un par de modelos o un alcance de herramientas *distinto* necesita su **propio contenedor de compañero** (puerto propio + `conf.yaml`).
 
 ## Funciones sociales / de chat
 
@@ -47,6 +47,6 @@ La sala de chat y los DM del compañero están controlados por el toggle por dis
 
 ## Relacionado
 
-- [Arquitectura del Compañero de IA](/es/architecture/companion) — el motor, el proxy de modelos y el escalamiento
+- [Arquitectura del Compañero de IA](/es/architecture/companion) — el motor, el router de modelos y el escalamiento
 - [Bot Builder](/es/guide/bot-builder) — definir el agente que ejecuta un kiosco
 - [Lentes Meta](/es/guide/meta-glasses) — el canal de voz hermano y el flujo de emparejamiento de dispositivos

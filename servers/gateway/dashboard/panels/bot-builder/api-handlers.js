@@ -244,8 +244,8 @@ export async function handleBotBuilderPost(req, res, { db }) {
         // binding (device.bound_bot_id is the source of truth) but tags the
         // device device_kind:"companion" so the companion path claims it, and
         // stores per-device companion_features that drive the kiosk UI.
-        // The model pair (fast 4B -> 35B) is global (the model proxy), not
-        // per device — see docs/architecture/companion.md.
+        // The model pair (fast 4B -> 35B) is global (the gateway /llm/v1 router),
+        // not per device — see docs/architecture/companion.md.
         let deviceId = (b.gw_device_id || "").trim();
         // One-step kiosk creation: a typed name (and no selected device)
         // pairs a fresh companion-kind device right here, so a host with
