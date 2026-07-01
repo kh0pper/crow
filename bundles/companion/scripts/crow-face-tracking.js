@@ -475,6 +475,10 @@
   function createToggleUI() {
     if (_toggleBtn) return;
 
+    var css = document.createElement("style");
+    css.textContent = 'html[data-crow-face="off"] #crow-face-tracking-toggle { display: none !important; }';
+    document.head.appendChild(css);
+
     _toggleBtn = document.createElement("button");
     _toggleBtn.id = "crow-face-tracking-toggle";
     _toggleBtn.title = "Toggle face tracking";
@@ -536,6 +540,11 @@
         return;
       }
 
+      if (window.CrowDeviceFeatures && window.CrowDeviceFeatures.face_tracking === false) {
+        emit("error", { error: "Face tracking is disabled for this device (Bot Builder → Gateways → Features)" });
+        return;
+      }
+
       // Enable
       if (_unloadTimer) {
         clearTimeout(_unloadTimer);
@@ -554,6 +563,17 @@
         document.body.appendChild(_videoEl);
 
         _videoEl.onloadeddata = function() {
+          if (window.CrowDeviceFeatures && window.CrowDeviceFeatures.face_tracking === false) {
+            if (_animFrame) cancelAnimationFrame(_animFrame);
+            _animFrame = null;
+            releaseCamera();
+            if (_videoEl) {
+              try { _videoEl.remove(); } catch (e) {}
+              _videoEl = null;
+            }
+            emit("error", { error: "Face tracking is disabled for this device (Bot Builder → Gateways → Features)" });
+            return;
+          }
           _enabled = true;
           _lastFrameTime = 0;
           _slowFrameCount = 0;
