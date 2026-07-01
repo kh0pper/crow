@@ -582,7 +582,6 @@ def generate_config(profiles, env_vars, tts_profiles=None):
                 "live2d_expression_prompt": "live2d_expression_prompt",
                 "group_conversation_prompt": "group_conversation_prompt",
                 "mcp_prompt": "mcp_prompt",
-                "proactive_speak_prompt": "proactive_speak_prompt",
             },
         },
         "character_config": {
