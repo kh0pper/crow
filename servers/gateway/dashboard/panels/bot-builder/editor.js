@@ -352,8 +352,8 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       // Bind this bot to a companion kiosk device (tablet/room). Reuses the
       // glasses device-store; the device is tagged device_kind:"companion".
       // The companion_features here drive the kiosk UI (avatar/voice/social).
-      // The fast->escalate model pair is global (the model proxy), so it's NOT
-      // configured per device here — see the AI tab / docs/architecture/companion.md.
+      // The fast->escalate model pair is global (the gateway /llm/v1 router), so
+      // it's NOT configured per device here — see the AI tab / docs/architecture/companion.md.
       let devices = [];
       try {
         const { listDevices } = await import("../../../../../bundles/meta-glasses/server/device-store.js");

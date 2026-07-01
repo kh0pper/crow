@@ -39,7 +39,7 @@ Saving sets the device's `bound_bot_id` and stores the toggles as `companion_fea
 | `companion_features` (avatar animation, pet mode, social/chat, memory) | The MCP tool set |
 | Bound bot | |
 
-The model pair is shared because one companion container has a single LLM `base_url` (the [model proxy](/architecture/companion)). A kiosk that genuinely needs a *different* model pair or tool scope needs its **own companion container** (own port + `conf.yaml`).
+The model pair is shared because one companion container has a single LLM `base_url` (the gateway's [`/llm/v1` router](/architecture/companion)). A kiosk that genuinely needs a *different* model pair or tool scope needs its **own companion container** (own port + `conf.yaml`).
 
 ## Social / chat features
 
@@ -47,6 +47,6 @@ The companion's chatroom and DM features are gated by the per-device `social_cha
 
 ## Related
 
-- [AI Companion architecture](/architecture/companion) — the engine, model proxy, and escalation
+- [AI Companion architecture](/architecture/companion) — the engine, model router, and escalation
 - [Bot Builder](/guide/bot-builder) — defining the agent a kiosk runs
 - [Meta Glasses](/guide/meta-glasses) — the sibling voice channel and device-pairing flow
