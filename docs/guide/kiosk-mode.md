@@ -29,7 +29,7 @@ Bind a device in the bot's **Gateways** tab → type **AI Companion**:
 4. **Voice idle timeout** — seconds of silence before the pet/idle animation.
 5. **Features** — toggle avatar animation/lip-sync, pet/idle mode, social (chatroom & DM) features, and automatic memory integration.
 
-Saving sets the device's `bound_bot_id` and stores the toggles as `companion_features`. Persona and avatar take effect on the next kiosk session. The feature toggles apply at two different layers: device-config features (`social_chat`, `face_tracking`, hearing style, voice idle timeout) are fetched and applied on each kiosk page load, while config-gen features (`avatar_model`, `memory_integration`) are baked into the generated companion config and only take effect after a config regeneration + container restart. See the [`companion_features` semantics table](/architecture/companion) for the full breakdown.
+Saving sets the device's `bound_bot_id` and stores the toggles as `companion_features`. Persona and avatar take effect on the next kiosk session. The feature toggles apply at different layers: device-config features (`social_chat`, `face_tracking`) are fetched and applied on each kiosk page load; hearing style and voice idle timeout are fetched and exposed to the kiosk via the same device-config plumbing, but there's no client-side consumer for them yet, so they aren't actually applied client-side; config-gen features (`avatar_model`, `memory_integration`) are baked into the generated companion config and only take effect after a config regeneration + container restart. See the [`companion_features` semantics table](/architecture/companion) for the full breakdown.
 
 ### What is and isn't per device
 
