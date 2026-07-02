@@ -49,12 +49,17 @@ test("backup: no backup dir → state info, not warn", async () => {
   assert.ok(backupDetail, "backup detail must be present");
   assert.equal(backupDetail.state, "info", "no backup dir → info, not warn");
 
-  // Issue must be info (not warn), so ok should still be true
+  // Issue must be info (not warn). Scope the assertion to the BACKUP signal
+  // only: result.ok is a global roll-up over ~10 signals (exposure reads live
+  // tailscale funnel state + env, disk reads df, storage probes MinIO, etc.),
+  // any of which can legitimately warn on a real host — so asserting the global
+  // result.ok here is env-dependent and flaky. What this test owns is that a
+  // missing backup dir is info, never warn, and thus contributes no warn.
   const backupIssue = result.issues.find(i => i.id === "backup");
   assert.ok(backupIssue, "backup issue must surface");
   assert.equal(backupIssue.severity, "info");
-  // ok = no warn issues
-  assert.equal(result.ok, true, "no warn signals → ok=true");
+  const backupWarn = result.issues.find(i => i.id === "backup" && i.severity === "warn");
+  assert.equal(backupWarn, undefined, "no backup dir must not produce a warn issue");
 });
 
 test("backup: file older than 7 days → state warn", async () => {
