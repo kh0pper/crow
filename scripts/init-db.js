@@ -1820,6 +1820,8 @@ await addColumnIfMissing("contacts", "notes", "TEXT");
 await addColumnIfMissing("contacts", "contact_type", "TEXT DEFAULT 'crow'");
 await addColumnIfMissing("contacts", "email", "TEXT");
 await addColumnIfMissing("contacts", "phone", "TEXT");
+// NULL = normal contact; 'pending' = unaccepted message request; 'accepted' = accepted partial contact (L6).
+await addColumnIfMissing("contacts", "request_status", "TEXT");
 
 // --- Contact Groups ---
 await initTable("contact_groups table", `
