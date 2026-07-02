@@ -14,11 +14,112 @@
 
 import { createNotification } from "../shared/notifications.js";
 import { ensureColumn } from "../db.js";
+import { normalizePubkey, findContactByPubkey } from "./pubkey-util.js";
 import {
   resolveLocalInstanceName,
   resolvePendingRelay,
   handleIncomingBotRelay,
 } from "./bot-relay.js";
+
+/**
+ * L6 receive-path fix — turn a decrypted DM from an unknown sender into a
+ * visible **message request** instead of silently dropping it.
+ *
+ * Called by the `onMessageRequest` branch of `subscribeToIncoming` for every
+ * event NOT consumed by a real handler (plaintext, malformed JSON, or a
+ * subtype-less crow_social). It:
+ *   1. Resolves the sender by secp256k1 pubkey (trailing-64 normalized).
+ *      - Existing FULL contact (request_status IS NULL) → return early; the
+ *        per-contact `subscribeToContact` already stores that DM (no double-store).
+ *      - Existing request contact ('pending'/'accepted') → reuse its id.
+ *      - Otherwise → INSERT a minimal request contact
+ *        (`crow_id='req:'+<FULL 64-hex>`, empty ed25519, 'pending').
+ *   2. Stores the DM as a `received` message (INSERT OR IGNORE, dedup on
+ *      nostr_event_id).
+ *   3. Notifies ONLY when the request contact row was NEWLY created this call
+ *      (deterministic first-contact signal — not a racy post-insert count).
+ *
+ * Exported for unit testing without live relays. NEVER throws — the receive
+ * path must not break delivery. `managers.createNotification` may be injected
+ * (tests); otherwise the shared helper is used.
+ *
+ * @param {object} db
+ * @param {object} managers - may carry an optional `createNotification` override
+ * @param {{senderPubkey:string, content:string, eventId:string}} evt
+ */
+export async function handleIncomingRequest(db, managers, { senderPubkey, content, eventId } = {}) {
+  const notify = (managers && managers.createNotification) || createNotification;
+  try {
+    if (!db || !senderPubkey) return;
+
+    let contactId;
+    let newlyCreated = false;
+
+    const existing = await findContactByPubkey(db, senderPubkey);
+    if (existing) {
+      // A full contact (request_status NULL) is already handled by the
+      // per-contact subscription — do nothing here to avoid a double-store.
+      if (existing.request_status === null || existing.request_status === undefined) {
+        return;
+      }
+      // 'pending' or 'accepted' request contact — reuse it.
+      contactId = existing.id;
+    } else {
+      // Minimal request contact. crow_id uses the FULL 64-hex normalized
+      // pubkey (NOT a 16-hex prefix) so two senders can never collide on the
+      // UNIQUE crow_id and re-drop a DM (reintroducing L6).
+      const crowId = "req:" + normalizePubkey(senderPubkey);
+      try {
+        const result = await db.execute({
+          sql: `INSERT INTO contacts (crow_id, secp256k1_pubkey, ed25519_pubkey, display_name, request_status, contact_type)
+                VALUES (?, ?, '', NULL, 'pending', 'crow')`,
+          args: [crowId, senderPubkey],
+        });
+        contactId = Number(result.lastInsertRowid);
+        newlyCreated = true;
+      } catch (insErr) {
+        // Concurrent insert of the same crow_id (UNIQUE) — re-resolve and
+        // reuse rather than dropping the DM.
+        const again = await findContactByPubkey(db, senderPubkey);
+        if (!again) throw insErr;
+        contactId = again.id;
+      }
+    }
+
+    // Store the DM (dedup on the UNIQUE nostr_event_id).
+    try {
+      await db.execute({
+        sql: `INSERT OR IGNORE INTO messages (contact_id, nostr_event_id, content, direction, is_read, created_at)
+              VALUES (?, ?, ?, 'received', 0, datetime('now'))`,
+        args: [contactId, eventId ?? null, content ?? ""],
+      });
+    } catch (msgErr) {
+      try { console.warn("[sharing] message-request store failed:", msgErr.message); } catch {}
+    }
+
+    // First-contact notification only (deterministic: the request row was
+    // just created this call).
+    if (newlyCreated) {
+      try {
+        const preview = typeof content === "string" && content.length > 200
+          ? content.slice(0, 200) + "..."
+          : (content || "Someone wants to message you");
+        await notify(db, {
+          title: "New message request",
+          body: preview,
+          type: "peer",
+          source: "sharing:message_request",
+          action_url: "/dashboard/messages",
+        });
+      } catch (notifyErr) {
+        try { console.warn("[sharing] message-request notify failed:", notifyErr.message); } catch {}
+      }
+    }
+  } catch (err) {
+    // Never throw out of the receive path — a throw would kill the subscription.
+    try { console.warn("[sharing] handleIncomingRequest failed:", err.message); } catch {}
+  }
+}
 
 /**
  * Deliver all pending shared_items rows for a connected peer.
@@ -340,6 +441,20 @@ export async function initSharingRuntime(managers, helpers) {
         } else if (subtype === "room_message" || subtype === "room_join") {
           const { handleInboundRoomEnvelope } = await import("./room-inbound.js");
           await handleInboundRoomEnvelope({ db, nostrManager, identity, subtype, payload, senderPubkey, log: (m) => console.log("[rooms]", m) });
+        }
+      }, async (senderPubkey, content, event) => {
+        // L6: any decrypted DM NOT consumed by a real handler (plaintext,
+        // malformed JSON, or a subtype-less crow_social) becomes a visible
+        // message request instead of being silently dropped. handleIncomingRequest
+        // never throws, but double-guard so onevent stays throw-proof.
+        try {
+          await handleIncomingRequest(db, managers, {
+            senderPubkey,
+            content,
+            eventId: event?.id,
+          });
+        } catch (err) {
+          try { console.warn("[sharing] onMessageRequest wiring failed:", err.message); } catch {}
         }
       });
       console.log("[sharing] Subscribed to incoming Nostr messages");
