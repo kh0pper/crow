@@ -27,7 +27,7 @@ Si tu iPhone y tu servidor Crow están en la misma red doméstica, puedes saltar
 ## Paso 2: Abre la URL de tu Crow's Nest en Safari
 
 1. Abre **Safari** (tiene que ser Safari — otros navegadores en iOS no pueden instalar apps web en la pantalla de inicio)
-2. Escribe la dirección que te dio quien configuró tu Crow — se parece a una dirección web, por ejemplo `http://100.121.254.89:3001` o `https://tu-servidor.ts.net`
+2. Escribe la dirección que te dio quien configuró tu Crow — se parece a una dirección web, por ejemplo `http://100.121.254.89:3001` o `https://tu-servidor.tu-tailnet.ts.net:8444/dashboard` (el número después de los `:` varía según la configuración — consulta la [guía de Configuración de Tailscale](/es/getting-started/tailscale-setup) o ejecuta `tailscale serve status` en el servidor para encontrar el tuyo)
 3. Inicia sesión con tu contraseña del Crow's Nest
 
 ## Paso 3: Agrega Crow a tu Pantalla de Inicio

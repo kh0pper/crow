@@ -23,7 +23,7 @@ If your iPhone and your Crow server are on the same home network, you can skip T
 ## Step 2: Open your Crow's Nest URL in Safari
 
 1. Open **Safari** (this must be Safari — other browsers on iOS can't install web apps to the Home Screen)
-2. Type in the address whoever set up your Crow gave you — it looks like a website address, for example `http://100.121.254.89:3001` or `https://your-server.ts.net`
+2. Type in the address whoever set up your Crow gave you — it looks like a website address, for example `http://100.121.254.89:3001` or `https://your-server.your-tailnet.ts.net:8444/dashboard` (the number after the `:` varies per setup — see the [Tailscale Setup guide](../getting-started/tailscale-setup) or run `tailscale serve status` on the server to find yours)
 3. Log in with your Crow's Nest password
 
 ## Step 3: Add Crow to your Home Screen
