@@ -9,7 +9,7 @@ const PKA = "a".repeat(64), PKB = "b".repeat(64);
 
 async function seedDb(contactRows = []) {
   const db = createClient({ url: ":memory:" });
-  await db.execute(`CREATE TABLE contacts (id INTEGER PRIMARY KEY, crow_id TEXT, secp256k1_pubkey TEXT, origin TEXT, is_bot INTEGER DEFAULT 0)`);
+  await db.execute(`CREATE TABLE contacts (id INTEGER PRIMARY KEY, crow_id TEXT, secp256k1_pubkey TEXT, origin TEXT, is_bot INTEGER DEFAULT 0, request_status TEXT)`);
   for (const c of contactRows) {
     await db.execute({ sql: "INSERT INTO contacts (crow_id, secp256k1_pubkey, origin) VALUES (?,?,?)", args: [c.crow_id, c.pk, c.origin || null] });
   }

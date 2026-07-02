@@ -25,7 +25,9 @@ export function registerMessagingTools(server, ctx) {
       if (await isKioskActive(db)) return kioskBlockedResponse("crow_send_message");
       // Find contact
       const result = await db.execute({
-        sql: "SELECT * FROM contacts WHERE (crow_id = ? OR display_name = ?) AND is_blocked = 0",
+        // Messaging surface = NULL + 'accepted'. A still-'pending' request cannot
+        // be messaged by guessing its req:<pubkey> id; an accepted one can.
+        sql: "SELECT * FROM contacts WHERE (crow_id = ? OR display_name = ?) AND is_blocked = 0 AND (request_status IS NULL OR request_status = 'accepted')",
         args: [contact, contact],
       });
 

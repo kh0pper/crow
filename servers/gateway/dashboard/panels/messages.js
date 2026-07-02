@@ -14,7 +14,7 @@ import { messagesCSS } from "./messages/css.js";
 import { buildMessagesHTML } from "./messages/html.js";
 import { messagesClientJS } from "./messages/client.js";
 import { handlePostAction } from "./messages/api-handlers.js";
-import { getUnifiedConversationList, getBotDirectory } from "./messages/data-queries.js";
+import { getUnifiedConversationList, getBotDirectory, getMessageRequests } from "./messages/data-queries.js";
 import { csrfInput } from "../shared/csrf.js";
 
 export default {
@@ -60,6 +60,10 @@ export default {
     let botDirectory = { groups: [], total: 0, notAddedCount: 0 };
     try { botDirectory = await getBotDirectory(db); } catch {}
 
+    // Pending message requests (L6 "Requests (N)" inbox; never throws).
+    let requests = [];
+    try { requests = await getMessageRequests(db); } catch {}
+
     // --- Bot-invite landing: a shared link opened on THIS instance (?bot_invite=<code>).
     // Parse here (we have `req`) so the still-sync HTML builder just renders strings.
     let botInvite = null;
@@ -86,6 +90,7 @@ export default {
       lang,
       botInvite,
       botDirectory,
+      requests,
       csrf: csrfInput(req),
     });
     const js = messagesClientJS({ aiConfigured, storageAvailable, lang });
