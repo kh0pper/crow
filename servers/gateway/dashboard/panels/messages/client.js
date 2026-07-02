@@ -1149,6 +1149,21 @@ export function messagesClientJS(opts) {
       div.appendChild(el('div', { className: 'msg-bubble-meta', text: relativeTime(msg.created_at) }));
     }
 
+    // Delivery status indicator (sent messages only) — persisted delivery_status
+    // read back on THREAD RELOAD (R2 Task 4). Task 3's markBubbleFailed already
+    // surfaces a live send-time failure; reuse it here for consistency ('failed'
+    // gets the same 'msg-bubble-failed' class + note). 'relayed'/'delivered' get a
+    // small muted check; 'pending'/null render nothing.
+    if (isSent && msg.delivery_status === 'failed') {
+      markBubbleFailed(div);
+    } else if (isSent && (msg.delivery_status === 'relayed' || msg.delivery_status === 'delivered')) {
+      div.appendChild(el('span', {
+        className: 'msg-delivery',
+        title: msg.delivery_status === 'delivered' ? '${tJs("messages.deliveryDelivered", lang)}' : '${tJs("messages.deliveryRelayed", lang)}',
+        text: msg.delivery_status === 'delivered' ? '\\u2713\\u2713' : '\\u2713',
+      }));
+    }
+
     // Reply button (received peer messages)
     if (!isSent && msgId && _activeItem && _activeItem.type === 'peer') {
       div.appendChild(el('button', {
@@ -1183,7 +1198,7 @@ export function messagesClientJS(opts) {
         b.appendChild(el('div', {
           className: 'msg-bubble-failed-note',
           css: 'color:var(--crow-error,#ef4444);font-size:0.7rem;margin-top:2px;',
-          text: '! not delivered' + (errText ? ' — ' + errText : ''),
+          text: '! ${tJs("messages.notDelivered", lang)}' + (errText ? ' — ' + errText : ''),
         }));
       }
     } catch (e) { /* never let feedback crash the send path */ }
