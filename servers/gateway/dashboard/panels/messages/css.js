@@ -284,6 +284,17 @@ export function messagesCSS() {
   }
   .msg-bubble.sent .msg-bubble-meta { text-align: right; }
 
+  /* R2 Task 4: persisted delivery-status indicator (thread reload). Small,
+     muted single/double check for relayed/delivered. The 'failed' state
+     reuses .msg-bubble-failed / .msg-bubble-failed-note from Task 3. */
+  .msg-delivery {
+    display: inline-block;
+    margin-left: 4px;
+    font-size: 0.7rem;
+    color: var(--crow-text-muted);
+    opacity: 0.7;
+  }
+
   /* Reply preview inside bubble */
   .msg-bubble-reply-preview {
     border-left: 3px solid var(--crow-accent);

@@ -163,7 +163,7 @@ export async function getMessageRequests(db) {
 export async function getPeerMessages(db, contactId, { limit = 50, offset = 0 } = {}) {
   const { rows } = await db.execute({
     sql: `SELECT m.id, m.content, m.direction, m.is_read, m.created_at,
-                 m.thread_id, m.nostr_event_id, m.attachments,
+                 m.thread_id, m.nostr_event_id, m.attachments, m.delivery_status,
                  c.display_name, c.crow_id
           FROM messages m
           LEFT JOIN contacts c ON m.contact_id = c.id
