@@ -64,6 +64,7 @@ export default defineConfig({
               { text: 'Cline', link: '/es/platforms/cline' },
               { text: 'Qwen Code', link: '/es/platforms/qwen-coder' },
               { text: 'Aplicación Android', link: '/es/platforms/android' },
+              { text: 'iPhone (PWA)', link: '/es/platforms/ios' },
             ],
           },
           {
@@ -247,6 +248,7 @@ export default defineConfig({
           { text: 'Qwen Code', link: '/platforms/qwen-coder' },
 
           { text: 'Android App', link: '/platforms/android' },
+          { text: 'iPhone (PWA)', link: '/platforms/ios' },
         ],
       },
       {
