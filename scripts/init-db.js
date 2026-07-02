@@ -553,6 +553,26 @@ await initTable("messages table", `
 // they are inherently delivered; no query filters on this column for them).
 await addColumnIfMissing("messages", "delivery_status", "TEXT");
 
+// R5: persisted retry queue for unacked outbound DMs. Holds the EXACT
+// serialized signed Nostr event so a retry re-publishes the same event.id and
+// the recipient's INSERT OR IGNORE dedups it. A row exists <=> awaiting a
+// delivery receipt; it is deleted on ack (markDelivered) or expiry (~60h).
+await initTable("message_retry_queue table", `
+  CREATE TABLE IF NOT EXISTS message_retry_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nostr_event_id TEXT UNIQUE NOT NULL,
+    contact_id INTEGER,
+    recipient_pubkey TEXT,
+    raw_event TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_retry_next ON message_retry_queue(next_attempt_at);
+`);
+
 await initTable("relay_config table", `
   CREATE TABLE IF NOT EXISTS relay_config (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
