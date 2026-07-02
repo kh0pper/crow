@@ -106,15 +106,34 @@ if (process.env.CROW_DASHBOARD_PUBLIC === "true") {
 // Initialize OAuth tables
 await initOAuthTables();
 
-// Verify core schema exists — auto-initialize if missing (Docker first run)
+// Verify core schema exists / is current — auto-initialize if missing (Docker
+// first run) OR if the persisted schema generation is behind the code (an
+// out-of-band `git pull`/rollback/merge-then-restart that added migrations but
+// never re-ran init-db; the 6h auto-updater runs init-db post-pull, this covers
+// the manual path). See servers/shared/schema-version.js.
 try {
+  const { SCHEMA_GENERATION, needsSchemaInit } = await import("../shared/schema-version.js");
   const _schemaDb = createDbClient();
   const { rows } = await _schemaDb.execute(
     "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('memories', 'dashboard_settings', 'crow_context')"
   );
+  let userVersion = 0;
+  try {
+    const uvRes = await _schemaDb.execute("PRAGMA user_version");
+    userVersion = Number(uvRes.rows?.[0]?.user_version ?? 0);
+  } catch {
+    userVersion = 0;
+  }
   _schemaDb.close();
-  if (rows.length < 3) {
-    console.log("Database schema incomplete — running init-db...");
+  const driftOnly = rows.length >= 3 && userVersion < SCHEMA_GENERATION;
+  if (needsSchemaInit({ coreTableCount: rows.length, userVersion, schemaGeneration: SCHEMA_GENERATION })) {
+    if (driftOnly) {
+      console.log(
+        `Schema version drift (db user_version=${userVersion} < code SCHEMA_GENERATION=${SCHEMA_GENERATION}) — running init-db to apply pending migrations...`
+      );
+    } else {
+      console.log("Database schema incomplete — running init-db...");
+    }
     const { execFileSync } = await import("node:child_process");
     const { dirname } = await import("node:path");
     const { fileURLToPath } = await import("node:url");
