@@ -11,6 +11,7 @@
     "storage-server": "node servers/storage/index.js",
     "blog-server": "node servers/blog/index.js",
     "init-db": "node scripts/init-db.js",
+    "recover-db": "node scripts/recover-crow-db.mjs",
     "wizard": "node scripts/wizard.js",
     "desktop-config": "node scripts/generate-desktop-config.js",
     "gateway": "node servers/gateway/index.js",
