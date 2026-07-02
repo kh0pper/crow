@@ -29,6 +29,35 @@ export function shouldRunHealthMonitor({ env, noAuth }) {
   return env.CROW_DISABLE_HEALTH_MONITOR !== "1";
 }
 
+/**
+ * Run one cross_host_calls audit-retention cycle: prune rows older than the
+ * default 14-day window, then best-effort WAL-checkpoint. Opens a fresh db
+ * client via the injected factory (defaults to createDbClient) and always
+ * closes it. NEVER throws — a failure here must not cascade into an outage.
+ * Exported so the boot timer and tests share one code path.
+ *
+ * @param {() => {execute: Function, close?: Function}} [dbFactory]
+ * @returns {Promise<{deleted:number, checkpointed:boolean}>}
+ */
+export async function runCrossHostAuditPrune(dbFactory = createDbClient) {
+  try {
+    const { pruneCrossHostAudit } = await import("../../shared/cross-host-audit-retention.js");
+    const db = dbFactory();
+    try {
+      const { deleted, checkpointed } = await pruneCrossHostAudit(db);
+      if (deleted > 0) {
+        console.log(`[xhost-audit-retention] pruned ${deleted} row(s) from cross_host_calls (checkpointed=${checkpointed})`);
+      }
+      return { deleted, checkpointed };
+    } finally {
+      try { db.close?.(); } catch {}
+    }
+  } catch (err) {
+    console.warn("[xhost-audit-retention] cycle error:", err?.message || err);
+    return { deleted: 0, checkpointed: false };
+  }
+}
+
 export async function runPostListenSetup(server, app, deps) {
   const { setupCallsSignaling, setupCompanionProxy, extensionProxyWsSetup, PORT, BIND, noAuth } = deps;
 
@@ -265,6 +294,35 @@ export async function runPostListenSetup(server, app, deps) {
     console.log("[health-monitor] armed (15-min interval, first run in 2 min)");
   } else if (noAuth) {
     console.log("[health-monitor] skipped: --no-auth gateway is never the primary dashboard");
+  }
+
+  // cross_host_calls audit-retention (2026-07-02 corruption-hardening plan,
+  // Task 1): cross_host_calls is an unbounded append-only high-write table
+  // that has corrupted crow's DB twice. Prune rows older than 14 days
+  // (default — see cross-host-audit-retention.js for why 14, not 7) then
+  // best-effort WAL-checkpoint. First run ~5 min after boot, then every 24h.
+  //
+  // Runs UNCONDITIONALLY on every instance — deliberately NOT gated to the
+  // home/primary instance. cross_host_calls is written per-instance by
+  // auditCrossHostCall into each instance's OWN local crow.db; there is no
+  // shared/central audit table. Gating on is_home would leave non-home peers
+  // (grackle, black-swan) never pruning their own table → unbounded growth →
+  // the exact corruption this fix exists to prevent. Same-host multi-process
+  // gateways use SEPARATE data dirs (crow-mpa → CROW_DATA_DIR=~/.crow-mpa/data),
+  // so there is no shared-file contention to avoid; and if two processes ever
+  // did share one file, concurrent DELETE+checkpoint just serialize harmlessly
+  // on busy_timeout. Also runs regardless of --no-auth (harmless — a --no-auth
+  // box may point at a throwaway DB). Fully try/caught; never throws.
+  {
+    const XHOST_AUDIT_PRUNE_BOOT_DELAY_MS = 5 * 60 * 1000;    // 5 min
+    const XHOST_AUDIT_PRUNE_INTERVAL_MS   = 24 * 60 * 60 * 1000; // 24h
+
+    setTimeout(() => {
+      runCrossHostAuditPrune(createDbClient);
+      setInterval(() => runCrossHostAuditPrune(createDbClient), XHOST_AUDIT_PRUNE_INTERVAL_MS).unref();
+    }, XHOST_AUDIT_PRUNE_BOOT_DELAY_MS).unref();
+
+    console.log("[xhost-audit-retention] armed (24h interval, first run in 5 min)");
   }
 
   // F.13: crosspost publish/GC scheduler (no-ops on an empty crosspost_log;

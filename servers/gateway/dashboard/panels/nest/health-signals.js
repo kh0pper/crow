@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { t } from "../../shared/i18n.js";
 import { PUBLIC_FUNNEL_PREFIXES } from "../../../funnel.js";
+import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
 
 // ─── Module-level 30s cache ───────────────────────────────────────────────────
 
@@ -553,6 +554,29 @@ async function integrationsSignal(db, lang) {
   };
 }
 
+// Federation audit DB corruption — the in-process circuit-breaker in
+// cross-host-auth.js trips when the cross_host_calls audit table goes
+// structurally corrupt. Surface it in the nest so a malformed-audit-DB
+// condition is LOUD (not the silent multi-day degradation that happened
+// twice). No DB read — reads the per-process breaker flag.
+function federationAuditSignal(lang) {
+  if (!isAuditDegraded()) {
+    return {
+      id: "federationAudit", severity: null, state: "ok",
+      label: t("signals.federationAudit.label", lang),
+      value: t("signals.federationAudit.ok", lang),
+    };
+  }
+  return {
+    id: "federationAudit", severity: "warn", state: "warn",
+    label: t("signals.federationAudit.label", lang),
+    value: t("signals.federationAudit.degraded", lang),
+    issueLabel: t("signals.federationAudit.issue", lang),
+    actionLabel: t("signals.federationAudit.action", lang),
+    actionHref: "/dashboard/nest",
+  };
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 /**
@@ -581,6 +605,7 @@ export async function collectHealthSignals(db, opts = {}) {
     loginsSignal(db, lang),
     exposureSignal(lang, nowFn),
     integrationsSignal(db, lang),
+    federationAuditSignal(lang),
   ].map(p => Promise.resolve(p).catch(err => ({
     id: "unknown",
     severity: null,
