@@ -31,6 +31,7 @@ import { Relay } from "nostr-tools/relay";
 import { safeRelayPublish } from "./safe-relay-publish.js";
 import { makeResilientSub } from "./resilient-subscribe.js";
 import { readIncomingSince, persistIncomingCursor } from "./contact-promote.js";
+import { shouldEnqueue, enqueueRetry, dueRetries, recordAttempt, buildDeliveryReceipt, normalizePubkey } from "./retry-queue.js";
 
 // Heavily-operated public relays, each verified (2026-07-02) to accept an
 // anonymous kind-4 publish (a throwaway-key connect+publish probe). Dropped
@@ -53,6 +54,7 @@ export class NostrManager {
     this.subscriptions = new Map(); // contactCrowId -> sub
     this.onMessage = null; // callback(contactId, message)
     this._healthTimer = null; // single health loop for all resilient subs
+    this._retryTimer = null; // single backoff loop re-publishing unacked DMs
   }
 
   /**
@@ -184,6 +186,25 @@ export class NostrManager {
       }
     }
 
+    // R5: if this genuine 1:1 DM reached >=1 relay, enqueue it for retry until
+    // the recipient acks (delivery receipt) or it expires (~60h). Skips 0-relay
+    // sends, self-messages, and crow_social/invite_accepted control envelopes
+    // (the recipient never stores/acks those). Best-effort — never throws.
+    try {
+      const ownNorm = normalizePubkey(this.pubkey || "");
+      const recipientNorm = normalizePubkey(recipientPubkey || "");
+      if (contactId && this.db &&
+          shouldEnqueue({ content, publishedCount: published.length, recipientNorm, ownNorm })) {
+        await enqueueRetry(this.db, {
+          eventId: event.id,
+          contactId,
+          recipientPubkey,
+          rawEvent: JSON.stringify(event),
+          nowSec: Math.floor(Date.now() / 1000),
+        });
+      }
+    } catch { /* enqueue is best-effort */ }
+
     return {
       eventId: event.id,
       relays: published,
@@ -227,6 +248,49 @@ export class NostrManager {
       }
     }, ms);
     if (this._healthTimer.unref) this._healthTimer.unref();
+  }
+
+  /**
+   * One retry pass: re-publish every due unacked DM (the EXACT stored signed
+   * event, so the recipient dedups) to the connected relays, then advance or
+   * expire it. A row whose raw_event won't parse is dropped. Never throws.
+   */
+  async _runRetryTick() {
+    const maxAgeSec = Number(process.env.CROW_NOSTR_RETRY_MAX_AGE_SEC) || 216000; // ~60h
+    const nowSec = Math.floor(Date.now() / 1000);
+    let due;
+    try { due = await dueRetries(this.db, nowSec, 50); } catch { return; }
+    for (const row of due) {
+      let event;
+      try { event = JSON.parse(row.raw_event); } catch { event = null; }
+      if (!event || !event.id) {
+        // Corrupt payload — cannot republish. Delete by primary key directly
+        // (NOT contact-bound markDelivered, which no-ops on a NULL contact_id
+        // and would leave the row re-selected every tick forever).
+        try { await this.db.execute({ sql: "DELETE FROM message_retry_queue WHERE id = ?", args: [row.id] }); } catch {}
+        continue;
+      }
+      // Advance/expire even if every relay was down this tick (bounded by the
+      // 12h tail + ~60h expiry) — avoids a tight re-publish loop during an outage.
+      for (const [, relay] of this.relays) {
+        try { await safeRelayPublish(relay, event); } catch { /* relay best-effort */ }
+      }
+      try { await recordAttempt(this.db, row, nowSec, maxAgeSec); } catch {}
+    }
+  }
+
+  /**
+   * Start the single periodic retry loop (idempotent, unref'd). Re-publishes
+   * unacked DMs on a backoff until a delivery receipt clears them or they
+   * expire. Mirrors _startHealthLoop — a stray rejection can never escape.
+   */
+  _startRetryLoop() {
+    if (this._retryTimer) return;
+    const ms = Number(process.env.CROW_NOSTR_RETRY_MS) || 60000;
+    this._retryTimer = setInterval(() => {
+      Promise.resolve(this._runRetryTick()).catch(() => {});
+    }, ms);
+    if (this._retryTimer.unref) this._retryTimer.unref();
   }
 
   /**
@@ -463,6 +527,7 @@ export class NostrManager {
       }
     }
     this._startHealthLoop();
+    this._startRetryLoop();
   }
 
   /**
