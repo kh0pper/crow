@@ -368,6 +368,9 @@ export function messagesCSS() {
     gap: 0.5rem;
     align-items: flex-end;
     flex-shrink: 0;
+    /* Wrap so the AI/bot model-picker + Pin controls drop to a second row on
+       narrow (mobile) widths instead of crowding the textarea to ~0px. */
+    flex-wrap: wrap;
   }
 
   .msg-attach-btn {
@@ -387,7 +390,11 @@ export function messagesCSS() {
   }
 
   .msg-textarea {
-    flex: 1;
+    /* flex-basis 60% + a hard min-width keeps the input usable even when the
+       bot compose-bar adds a model-picker + Pin; with .msg-chat-input wrapping,
+       the controls drop to their own row rather than collapsing the input. */
+    flex: 1 1 60%;
+    min-width: 140px;
     resize: none;
     border: 1px solid var(--crow-border);
     border-radius: 8px;
