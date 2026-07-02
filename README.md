@@ -51,7 +51,7 @@ Unlike hosted, auto-authoring bot platforms, Crow keeps the engine on your hardw
 
 Crow is the first AI platform with built-in encrypted peer-to-peer sharing. No cloud middleman, no accounts to create, just your Crow ID.
 
-Crow spans your devices, pulling multiple instances into one private interface — access and control all of your connected instances from the open-source Android app, or from the dashboard in any browser.
+Crow spans your devices, pulling multiple instances into one private interface — access and control all of your connected instances from the open-source Android app, an installable iPhone web app (no App Store needed), or from the dashboard in any browser.
 
 - **Share memories and projects**: Send a memory or an entire project space to a friend's Crow, encrypted end-to-end.
 - **Collaborate on project spaces**: Project spaces have members, roles (owner / editor / viewer / guest), and per-member capability overrides. Clone-share delivers a one-shot snapshot today; live one-way subscription is a planned follow-on.
