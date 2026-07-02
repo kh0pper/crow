@@ -20,6 +20,7 @@ import {
   resolvePendingRelay,
   handleIncomingBotRelay,
 } from "./bot-relay.js";
+import { upsertFullContact } from "./contact-promote.js";
 
 /**
  * L6 receive-path fix — turn a decrypted DM from an unknown sender into a
@@ -118,6 +119,27 @@ export async function handleIncomingRequest(db, managers, { senderPubkey, conten
   } catch (err) {
     // Never throw out of the receive path — a throw would kill the subscription.
     try { console.warn("[sharing] handleIncomingRequest failed:", err.message); } catch {}
+  }
+}
+
+/**
+ * R4: an authenticated invite_accepted DM completes the handshake. Promotes an
+ * existing accepted/pending message-request row for the same secp identity into
+ * a FULL contact (or adds a fresh one), via the idempotent upsertFullContact.
+ * This is the ONLY promotion trigger — the plaintext message-request path can
+ * NEVER elevate a contact. Never throws (receive path).
+ */
+export async function handleInviteAccepted(db, managers, payload) {
+  try {
+    if (!payload || !payload.crowId || !payload.ed25519Pub || !payload.secp256k1Pub) return;
+    await upsertFullContact(db, managers, {
+      crowId: payload.crowId,
+      ed25519Pub: payload.ed25519Pub,
+      secp256k1Pub: payload.secp256k1Pub,
+      displayName: payload.displayName,
+    });
+  } catch (err) {
+    try { console.warn("[sharing] invite_accepted promotion failed:", err.message); } catch {}
   }
 }
 
@@ -325,27 +347,7 @@ export async function initSharingRuntime(managers, helpers) {
     // Done here so relay connections from subscribeToContact are reused
     try {
       await nostrManager.subscribeToIncoming(async (payload) => {
-        if (!payload.crowId || !payload.ed25519Pub || !payload.secp256k1Pub) return;
-
-        const existing = await db.execute({
-          sql: "SELECT id FROM contacts WHERE crow_id = ?",
-          args: [payload.crowId],
-        });
-        if (existing.rows.length > 0) return;
-
-        const result = await db.execute({
-          sql: `INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey)
-                VALUES (?, ?, ?, ?)`,
-          args: [payload.crowId, payload.displayName || payload.crowId, payload.ed25519Pub, payload.secp256k1Pub],
-        });
-
-        const contactId = Number(result.lastInsertRowid);
-        await syncManager.initContact(contactId, null);
-        await peerManager.joinContact({ crowId: payload.crowId, ed25519Pubkey: payload.ed25519Pub });
-        await nostrManager.subscribeToContact({
-          id: contactId, crowId: payload.crowId, secp256k1_pubkey: payload.secp256k1Pub,
-        });
-        console.log(`[sharing] Auto-added contact from invite acceptance: ${payload.displayName || payload.crowId}`);
+        await handleInviteAccepted(db, { syncManager, peerManager, nostrManager }, payload);
       }, async (subtype, payload, senderPubkey) => {
         console.log(`[sharing] Received crow_social message: ${subtype}`);
         if (subtype === "room_invite") {
