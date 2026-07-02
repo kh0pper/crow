@@ -106,6 +106,7 @@ export const TOOL_MANIFESTS = {
     tools: {
       crow_generate_invite: { params: "display_name?", desc: "Generate invite code" },
       crow_accept_invite: { params: "invite_code, display_name?", desc: "Accept invite code" },
+      crow_add_contact: { params: "crow_id, secp256k1_pubkey, ed25519_pubkey?, display_name?", desc: "Repair/add a contact by Crow ID + keys (completes a half-finished handshake without a fresh invite)" },
       crow_accept_bot_invite: { params: "invite_code, display_name?", desc: "Accept a Crow Messages bot invite (adds the bot to Messages + authorizes you)" },
       crow_list_contacts: { params: "include_blocked?", desc: "List contacts" },
       crow_share: { params: "contact, share_type, item_id, permissions?, confirm_token", desc: "Share item with contact. Returns preview + token on first call; pass token back to execute." },
