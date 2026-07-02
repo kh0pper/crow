@@ -244,8 +244,8 @@ export async function handleBotBuilderPost(req, res, { db }) {
         // binding (device.bound_bot_id is the source of truth) but tags the
         // device device_kind:"companion" so the companion path claims it, and
         // stores per-device companion_features that drive the kiosk UI.
-        // The model pair (fast 4B -> 35B) is global (the model proxy), not
-        // per device — see docs/architecture/companion.md.
+        // The model pair (fast 4B -> 35B) is global (the gateway /llm/v1 router),
+        // not per device — see docs/architecture/companion.md.
         let deviceId = (b.gw_device_id || "").trim();
         // One-step kiosk creation: a typed name (and no selected device)
         // pairs a fresh companion-kind device right here, so a host with
@@ -271,6 +271,7 @@ export async function handleBotBuilderPost(req, res, { db }) {
           pet_mode: b.gw_pet_mode === "on" || b.gw_pet_mode === "true",
           social_chat: b.gw_social_chat === "on" || b.gw_social_chat === "true",
           memory_integration: b.gw_memory_integration === "on" || b.gw_memory_integration === "true",
+          face_tracking: b.gw_face_tracking === "on" || b.gw_face_tracking === "true",
           hearing_style: (b.gw_hearing_style || "push_to_talk").trim(),
           voice_idle_timeout: Number(b.gw_voice_idle_timeout || 30) || 30,
         };

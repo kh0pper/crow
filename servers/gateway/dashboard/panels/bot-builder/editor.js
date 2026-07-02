@@ -352,8 +352,8 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
       // Bind this bot to a companion kiosk device (tablet/room). Reuses the
       // glasses device-store; the device is tagged device_kind:"companion".
       // The companion_features here drive the kiosk UI (avatar/voice/social).
-      // The fast->escalate model pair is global (the model proxy), so it's NOT
-      // configured per device here — see the AI tab / docs/architecture/companion.md.
+      // The fast->escalate model pair is global (the gateway /llm/v1 router), so
+      // it's NOT configured per device here — see the AI tab / docs/architecture/companion.md.
       let devices = [];
       try {
         const { listDevices } = await import("../../../../../bundles/meta-glasses/server/device-store.js");
@@ -392,7 +392,9 @@ export async function renderBotEditor(req, res, { db, layout, lang, PAGE_CSS, bo
         `<label><input type="checkbox" name="gw_pet_mode"${chk(cf.pet_mode)}> Pet / idle animation</label>` +
         `<label><input type="checkbox" name="gw_social_chat"${chk(cf.social_chat)}> Social / chatroom &amp; DM features</label>` +
         `<label><input type="checkbox" name="gw_memory_integration"${chk(cf.memory_integration)}> Auto memory integration</label>` +
-        `</div></div>`;
+        `<label><input type="checkbox" name="gw_face_tracking"${chk(cf.face_tracking !== false)}> Face tracking (camera drives the avatar)</label>` +
+        `</div></div>` +
+        `<p class="btb-hint">${t("botbuilder.gwHintHousehold", lang)}</p>`;
       gwHint = `<p class="btb-hint">${t("botbuilder.gwHintCompanion", lang)}</p>`;
     } else if (gwType === "crow-messages") {
       const admin = await import("./crow-messages-admin.js");

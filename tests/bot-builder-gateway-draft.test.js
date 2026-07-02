@@ -64,6 +64,28 @@ test("device-less companion save persists the type as a draft (no gmail snap-bac
   assert.equal(def.companion_features?.hearing_style, "push_to_talk");
 });
 
+test("companion save with gw_face_tracking=on persists face_tracking: true", async () => {
+  const res = mkRes();
+  await handleBotBuilderPost(
+    { body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "companion", gw_face_tracking: "on" } },
+    res, { db }
+  );
+  assert.match(res.redirected, /saved=1/, "save must succeed: " + res.redirected);
+  const def = await readDef();
+  assert.equal(def.companion_features?.face_tracking, true, "checked box persists true");
+});
+
+test("companion save with gw_face_tracking absent persists face_tracking: false", async () => {
+  const res = mkRes();
+  await handleBotBuilderPost(
+    { body: { action: "save_gateways", bot_id: "draft-bot", gw_type: "companion" } },
+    res, { db }
+  );
+  assert.match(res.redirected, /saved=1/, "save must succeed: " + res.redirected);
+  const def = await readDef();
+  assert.equal(def.companion_features?.face_tracking, false, "absent checkbox persists false");
+});
+
 test("device-less glasses save persists the type as a draft", async () => {
   const res = mkRes();
   await handleBotBuilderPost(

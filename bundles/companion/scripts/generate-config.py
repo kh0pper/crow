@@ -555,12 +555,13 @@ def generate_config(profiles, env_vars, tts_profiles=None):
             "temperature": 0.8,
         }
 
-    # Companion model-routing proxy: when COMPANION_PROXY_URL is set, OLVV talks to
-    # the proxy instead of a model directly. The proxy routes each turn to the fast
-    # model (Qwen3.5-4B) by default, escalating to the 35B on a "!escalate" prefix,
-    # and forwards messages + tools verbatim so OLVV's own tool loop / crow_wm /
-    # streaming all keep working. The `model` field is a placeholder — the proxy
-    # rewrites it per chosen upstream. (Host network → localhost reaches the proxy.)
+    # Companion model routing: when COMPANION_PROXY_URL is set (compose default:
+    # the gateway's in-process /llm/v1 router, servers/gateway/routes/llm-router.js),
+    # OLVV talks to it instead of a model directly. The router picks the fast model
+    # (Qwen3.5-4B) by default, escalating to the 35B on a "!escalate" prefix, and
+    # forwards messages + tools verbatim so OLVV's own tool loop / crow_wm /
+    # streaming all keep working. The `model` field is a placeholder — the router
+    # rewrites it per chosen upstream. (Host network → localhost reaches the gateway.)
     proxy_url = os.environ.get("COMPANION_PROXY_URL", "")
     if proxy_url:
         llm_config = {
@@ -569,7 +570,7 @@ def generate_config(profiles, env_vars, tts_profiles=None):
             "model": os.environ.get("COMPANION_PROXY_MODEL", "qwen3.5-4b"),
             "temperature": 0.8,
         }
-        print(f"Companion LLM routed through model proxy: {proxy_url}", file=sys.stderr)
+        print(f"Companion LLM routed through the gateway /llm/v1 router: {proxy_url}", file=sys.stderr)
 
     config = {
         "system_config": {
@@ -581,7 +582,6 @@ def generate_config(profiles, env_vars, tts_profiles=None):
                 "live2d_expression_prompt": "live2d_expression_prompt",
                 "group_conversation_prompt": "group_conversation_prompt",
                 "mcp_prompt": "mcp_prompt",
-                "proactive_speak_prompt": "proactive_speak_prompt",
             },
         },
         "character_config": {
@@ -600,7 +600,7 @@ def generate_config(profiles, env_vars, tts_profiles=None):
                         "faster_first_response": True,
                         "segment_method": "pysbd",
                         "use_mcpp": True,
-                        "mcp_enabled_servers": ["crow-wm", "crow-storage"],
+                        "mcp_enabled_servers": global_mcp_servers(),
                     }
                 },
                 "llm_configs": {"openai_compatible_llm": llm_config},
@@ -686,12 +686,29 @@ def get_household_profiles():
     return profiles
 
 
+def bot_mcp_servers(features):
+    """MCP servers for a companion agent. The "crow" router bridge carries the
+    memory/projects/blog/sharing category tools; memory_integration=True is the
+    per-bot OPT-IN (privacy: a shared kiosk's default character must not search
+    the owner's memory store unless deliberately enabled)."""
+    servers = ["crow-wm", "crow-storage"]
+    if (features or {}).get("memory_integration") is True:
+        servers.append("crow")
+    return servers
+
+
+def global_mcp_servers():
+    """Household personas hardcode memory-tool instructions + per-profile
+    scoping, so household mode enables the crow bridge globally."""
+    return bot_mcp_servers({"memory_integration": bool(get_household_profiles())})
+
+
 def get_companion_bots(db_path):
     """Read pi_bot_defs for bots bound to a companion gateway (Part 3).
 
     Each returned bot gets its own OLVV character preset (crow_bot_<slug>) so a
     kiosk can select its bound bot's persona + avatar per device via ?device=.
-    The model pair stays global (the model proxy) — presets only carry
+    The model pair stays global (the gateway /llm/v1 router) — presets only carry
     persona/avatar/voice, never an llm_config.
     """
     if not db_path:
@@ -939,7 +956,7 @@ def main():
 
     # Part 3: per-companion-bot character presets. A kiosk device bound to a bot
     # selects crow_bot_<slug> (persona + avatar) via ?device=. No llm_config here —
-    # the model pair is the global model proxy.
+    # the model pair is the global gateway /llm/v1 router.
     bot_presets = 0
     for bot in get_companion_bots(db_path):
         avatar = bot["avatar"] if bot["avatar"] in all_avatar_models else default_avatar
@@ -952,7 +969,16 @@ def main():
         }
         if bot["persona"]:
             cc["persona_prompt"] = bot["persona"]
+        servers = bot_mcp_servers(bot["features"])
+        if servers != global_mcp_servers():
+            cc["agent_config"] = {
+                "agent_settings": {
+                    "basic_memory_agent": {"mcp_enabled_servers": servers}
+                }
+            }
         path = os.path.join(characters_dir, f"crow_bot_{bot['slug']}.yaml")
+        if os.path.exists(path):
+            print(f"Warning: bot preset collision on slug '{bot['slug']}' — '{bot['bot_id']}' overwrites an earlier bot's preset", file=sys.stderr)
         with open(path, "w") as f:
             yaml.dump({"character_config": cc}, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
         bot_presets += 1
