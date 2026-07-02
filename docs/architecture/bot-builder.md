@@ -65,7 +65,7 @@ When an agent selects a tool from an extension that is not part of Crow's canoni
 | **Gmail** | `bridge_tick.mjs` | Polls a connected mailbox, drafts or sends replies subject to policy |
 | **Discord** | `discord_gateway.mjs` | A long-lived Discord WebSocket that drives the runtime, with a per-agent user allowlist |
 | **Meta Glasses** | `bundles/meta-glasses/` | A paired device binds to an agent and drives the fast voice turn |
-| **AI Companion** | `bundles/companion/` + `scripts/companion/model-proxy.mjs` | A kiosk device binds to an agent; the [companion](/architecture/companion)'s OLVV loop runs that agent's persona/avatar/tools, with a model proxy routing fast (4B) → escalate (35B) |
+| **AI Companion** | `bundles/companion/` + the gateway's `/llm/v1` router (`servers/gateway/routes/llm-router.js`) | A kiosk device binds to an agent; the [companion](/architecture/companion)'s OLVV loop runs that agent's persona/avatar/tools, with the router routing fast (4B) → escalate (35B) |
 | **Crow Messages** | `scripts/pi-bots/gateways/crow-messages.mjs` | The agent is reachable as a contact over Crow's peer messaging; authorized senders' encrypted DMs drive the runtime and the agent replies from its own derived identity. See [Crow Messages](#crow-messages-bots-as-contacts) below. |
 
 > The Meta Glasses and AI Companion channels run their own voice loop (the glasses voice turn; OLVV for the companion) rather than the pi `bridge.mjs` runtime — so the bound agent's persona/skills/tools drive the turn, but the engine is the voice front end, not pi. See [AI Companion](/architecture/companion).
