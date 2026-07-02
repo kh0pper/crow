@@ -18,14 +18,29 @@ test("buildBotAcceptPayload carries the token + the accepter's identity, typed c
   assert.equal(out.sender.display_name, "Kevin");
 });
 
+// A stub sharing-client factory that records callTool invocations and NEVER
+// spins up the real in-memory sharing server (which would open live Nostr relay
+// sockets + Hyperswarm and keep node:test alive forever). Injected via the
+// handlePostAction `sharingClientFactory` param.
+function makeStubSharingFactory() {
+  const toolCalls = [];
+  const factory = async () => ({
+    callTool: async (args) => { toolCalls.push(args); return { content: [{ type: "text", text: "" }] }; },
+    close: async () => {},
+  });
+  factory.toolCalls = toolCalls;
+  return factory;
+}
+
 test("messages handlePostAction routes accept_bot_invite to the sharing tool and redirects", async () => {
   const { handlePostAction } = await import("../servers/gateway/dashboard/panels/messages/api-handlers.js");
-  // Stub the sharing client factory via a captured call recorder on the module
-  // is overkill; instead assert the dispatch path returns a redirect for a
-  // well-formed body even if the tool call fails internally (it catches).
+  // Inject a stub factory so no real sharing runtime (relay sockets/Hyperswarm)
+  // starts — otherwise this test never lets the process exit.
+  const sharingClientFactory = makeStubSharingFactory();
   const calls = [];
   const req = { body: { action: "accept_bot_invite", invite_code: "crow:x.y.z" } };
   const res = { redirectAfterPost: (u) => { calls.push(u); res.headersSent = true; } };
-  await handlePostAction(req, res, { db: { execute: async () => ({ rows: [] }) } });
+  await handlePostAction(req, res, { db: { execute: async () => ({ rows: [] }) }, sharingClientFactory });
   assert.equal(calls[0], "/dashboard/messages", "redirects back to messages");
+  assert.equal(sharingClientFactory.toolCalls[0]?.name, "crow_accept_bot_invite", "routes to the bot-invite tool via the injected factory");
 });
