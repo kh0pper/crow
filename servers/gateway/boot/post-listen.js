@@ -29,6 +29,35 @@ export function shouldRunHealthMonitor({ env, noAuth }) {
   return env.CROW_DISABLE_HEALTH_MONITOR !== "1";
 }
 
+/**
+ * Run one cross_host_calls audit-retention cycle: prune rows older than the
+ * default 14-day window, then best-effort WAL-checkpoint. Opens a fresh db
+ * client via the injected factory (defaults to createDbClient) and always
+ * closes it. NEVER throws — a failure here must not cascade into an outage.
+ * Exported so the boot timer and tests share one code path.
+ *
+ * @param {() => {execute: Function, close?: Function}} [dbFactory]
+ * @returns {Promise<{deleted:number, checkpointed:boolean}>}
+ */
+export async function runCrossHostAuditPrune(dbFactory = createDbClient) {
+  try {
+    const { pruneCrossHostAudit } = await import("../../shared/cross-host-audit-retention.js");
+    const db = dbFactory();
+    try {
+      const { deleted, checkpointed } = await pruneCrossHostAudit(db);
+      if (deleted > 0) {
+        console.log(`[xhost-audit-retention] pruned ${deleted} row(s) from cross_host_calls (checkpointed=${checkpointed})`);
+      }
+      return { deleted, checkpointed };
+    } finally {
+      try { db.close?.(); } catch {}
+    }
+  } catch (err) {
+    console.warn("[xhost-audit-retention] cycle error:", err?.message || err);
+    return { deleted: 0, checkpointed: false };
+  }
+}
+
 export async function runPostListenSetup(server, app, deps) {
   const { setupCallsSignaling, setupCompanionProxy, extensionProxyWsSetup, PORT, BIND, noAuth } = deps;
 
@@ -271,51 +300,26 @@ export async function runPostListenSetup(server, app, deps) {
   // Task 1): cross_host_calls is an unbounded append-only high-write table
   // that has corrupted crow's DB twice. Prune rows older than 14 days
   // (default — see cross-host-audit-retention.js for why 14, not 7) then
-  // best-effort WAL-checkpoint. First run ~5 min after boot, then every
-  // 24h. Runs regardless of --no-auth (harmless — a --no-auth box may point
-  // at a throwaway DB). Gated to the home/primary instance only so multiple
-  // same-host gateway processes sharing one crow.db file (e.g. primary +
-  // MPA) don't redundantly prune+checkpoint the same file concurrently. A
-  // fresh/standalone install with no instance yet designated "home" is
-  // treated as primary too (getHomeInstance() returns nothing until the
-  // user explicitly pairs/chains instances) — otherwise the fix would never
-  // engage on the common single-instance install. Fully try/caught; never
-  // throws.
+  // best-effort WAL-checkpoint. First run ~5 min after boot, then every 24h.
+  //
+  // Runs UNCONDITIONALLY on every instance — deliberately NOT gated to the
+  // home/primary instance. cross_host_calls is written per-instance by
+  // auditCrossHostCall into each instance's OWN local crow.db; there is no
+  // shared/central audit table. Gating on is_home would leave non-home peers
+  // (grackle, black-swan) never pruning their own table → unbounded growth →
+  // the exact corruption this fix exists to prevent. Same-host multi-process
+  // gateways use SEPARATE data dirs (crow-mpa → CROW_DATA_DIR=~/.crow-mpa/data),
+  // so there is no shared-file contention to avoid; and if two processes ever
+  // did share one file, concurrent DELETE+checkpoint just serialize harmlessly
+  // on busy_timeout. Also runs regardless of --no-auth (harmless — a --no-auth
+  // box may point at a throwaway DB). Fully try/caught; never throws.
   {
     const XHOST_AUDIT_PRUNE_BOOT_DELAY_MS = 5 * 60 * 1000;    // 5 min
     const XHOST_AUDIT_PRUNE_INTERVAL_MS   = 24 * 60 * 60 * 1000; // 24h
 
-    const isHomeOrStandalone = async (db) => {
-      const { getOrCreateLocalInstanceId, getInstance, getHomeInstance } =
-        await import("../instance-registry.js");
-      const localId = getOrCreateLocalInstanceId();
-      const local = await getInstance(db, localId);
-      if (local?.is_home === 1) return true;
-      const home = await getHomeInstance(db);
-      return !home; // nobody designated home yet — treat this instance as primary
-    };
-
-    const runXhostAuditPrune = async () => {
-      try {
-        const { pruneCrossHostAudit } = await import("../../shared/cross-host-audit-retention.js");
-        const db = createDbClient();
-        try {
-          if (!(await isHomeOrStandalone(db))) return;
-          const { deleted, checkpointed } = await pruneCrossHostAudit(db);
-          if (deleted > 0) {
-            console.log(`[xhost-audit-retention] pruned ${deleted} row(s) from cross_host_calls (checkpointed=${checkpointed})`);
-          }
-        } finally {
-          try { db.close(); } catch {}
-        }
-      } catch (err) {
-        console.warn("[xhost-audit-retention] cycle error:", err?.message || err);
-      }
-    };
-
     setTimeout(() => {
-      runXhostAuditPrune();
-      setInterval(runXhostAuditPrune, XHOST_AUDIT_PRUNE_INTERVAL_MS).unref();
+      runCrossHostAuditPrune(createDbClient);
+      setInterval(() => runCrossHostAuditPrune(createDbClient), XHOST_AUDIT_PRUNE_INTERVAL_MS).unref();
     }, XHOST_AUDIT_PRUNE_BOOT_DELAY_MS).unref();
 
     console.log("[xhost-audit-retention] armed (24h interval, first run in 5 min)");

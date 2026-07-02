@@ -77,6 +77,32 @@ test("default retention (14d) deletes only the 20d-old row", async () => {
   await db.close();
 });
 
+test("boot wiring: runCrossHostAuditPrune prunes the real table via a db factory and never throws", async () => {
+  const { createDbClient } = await import("../servers/db.js");
+  const { runCrossHostAuditPrune } = await import("../servers/gateway/boot/post-listen.js");
+
+  // Seed one stale (20d) row that the default 14d retention must remove.
+  const seed = createDbClient(dbPath);
+  await insertRow(seed, 20);
+  const beforeCount = (await seed.execute("SELECT COUNT(*) AS n FROM cross_host_calls")).rows[0].n;
+  await seed.close();
+
+  // The boot timer calls runCrossHostAuditPrune(createDbClient). We inject a
+  // factory bound to the temp DB so the test drives the same code path.
+  const result = await runCrossHostAuditPrune(() => createDbClient(dbPath));
+  assert.equal(typeof result.deleted, "number");
+  assert.ok(result.deleted >= 1, "the 20d-old seed row must be pruned by the default 14d retention");
+
+  const check = createDbClient(dbPath);
+  const afterCount = (await check.execute("SELECT COUNT(*) AS n FROM cross_host_calls")).rows[0].n;
+  await check.close();
+  assert.equal(afterCount, beforeCount - result.deleted, "row count must drop by exactly the reported deleted count");
+
+  // A factory that throws must still resolve (never throw) with a zero result.
+  const bad = await runCrossHostAuditPrune(() => { throw new Error("db open failed"); });
+  assert.deepEqual(bad, { deleted: 0, checkpointed: false });
+});
+
 test("never rejects against a closed/broken db handle", async () => {
   const { pruneCrossHostAudit } = await import("../servers/shared/cross-host-audit-retention.js");
 
