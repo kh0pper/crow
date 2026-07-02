@@ -230,6 +230,21 @@ export class NostrManager {
   }
 
   /**
+   * R5: confirm receipt of a DM back to its sender. A crow_social control
+   * envelope (never a 1:1 row) naming the received event id; the sender flips
+   * relayed→delivered and stops retrying. Never throws (receive-path caller
+   * fires this fire-and-forget).
+   */
+  async _sendDeliveryReceipt(contact, eventId) {
+    try {
+      if (!contact || !eventId) return;
+      await this.sendControl(contact, buildDeliveryReceipt([eventId]));
+    } catch {
+      // Ack is best-effort; a lost ack self-heals on the sender's next retry.
+    }
+  }
+
+  /**
    * Start the single periodic health loop that re-establishes any resilient
    * subscription whose relay has dropped. Idempotent (created once). unref'd so
    * it never keeps the process alive on its own.
@@ -360,6 +375,11 @@ export class NostrManager {
                 // Duplicate event, ignore
               }
             }
+
+            // R5: confirm receipt to the sender (new OR duplicate — a dup means
+            // a retry re-delivered, and re-acking self-heals a lost ack).
+            // Fire-and-forget: never block or throw inside onevent.
+            Promise.resolve(this._sendDeliveryReceipt(contact, event.id)).catch(() => {});
 
             if (this.onMessage) {
               this.onMessage(crowId, { eventId: event.id, content: decrypted, timestamp: event.created_at });
