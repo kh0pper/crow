@@ -5,6 +5,7 @@ import { randomBytes } from "node:crypto";
 import { resolve } from "path";
 import { slugify, workspacePathFor, storagePrefixFor } from "../servers/shared/slugify.js";
 import { BOT_JOBS_DDL } from "./pi-bots/bot-jobs-schema.mjs";
+import { SCHEMA_GENERATION } from "../servers/shared/schema-version.js";
 
 // Ensure data directory exists
 const dataDir = process.env.CROW_DB_PATH
@@ -2657,6 +2658,12 @@ await addColumnIfMissing("bot_message_invites", "kind", "TEXT"); // NULL=normal,
 // "add a person" uniformly. Backfill the reliably-known bots (origin='advertised').
 await addColumnIfMissing("contacts", "is_bot", "INTEGER DEFAULT 0");
 await db.execute({ sql: "UPDATE contacts SET is_bot = 1 WHERE origin = 'advertised' AND is_bot = 0" });
+
+// Stamp the schema generation so the gateway boot gate can detect when an
+// out-of-band code update introduced migrations that a plain restart missed.
+// (PRAGMA values can't be bound params — interpolate the coerced Number.)
+await db.execute("PRAGMA user_version = " + Number(SCHEMA_GENERATION));
+console.log(`Schema generation set to ${SCHEMA_GENERATION}`);
 
 console.log("Database initialized successfully (local file)");
 db.close();
