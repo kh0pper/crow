@@ -4,7 +4,7 @@
 
 **Goal:** A DM sent while the recipient is offline/asleep, or dropped by public-relay retention roulette, is recovered instead of silently lost — the recipient confirms actual receipt (sender flips `relayed`→`delivered`, ✓→✓✓), and the sender re-publishes the exact unacked event on a ~60h backoff until acked or expired. A long-retention self-hosted relay (product-wide default) shrinks the offline window toward zero.
 
-**Architecture:** Three composing layers. (1) **Delivery receipts** — on receipt of a plain DM from an established contact, the recipient sends a `crow_social`/`delivery_receipt` control envelope back (publish-only, never a 1:1 row); the sender routes it through the existing `subscribeToIncoming`→`onSocialMessage` path and flips `messages.delivery_status` to `delivered`, bound to the acking contact so a receipt can't be forged for another contact's messages. (2) **Sender retry queue** — a persisted `message_retry_queue` holding the *exact serialized signed event* (re-encrypting would change `event.id` and defeat recipient dedup); an unref'd backoff loop in `NostrManager` re-publishes due rows until acked (row deleted) or expired (~60h). (3) **Self-hosted relay** — a long-retention nostr-rs-relay on the maestro.press droplet, added to `DEFAULT_RELAYS` so every install uses it with zero handshake changes; operator-gated infra shipped separately (Task 6). Layers 1–2 (Tasks 1–5) are a self-contained, mergeable branch that ships the guarantee even before the relay exists.
+**Architecture:** Three composing layers. (1) **Delivery receipts** — on receipt of a plain DM from an established contact, the recipient sends a `crow_social`/`delivery_receipt` control envelope back (publish-only, never a 1:1 row); the sender routes it through the existing `subscribeToIncoming`→`onSocialMessage` path and flips `messages.delivery_status` to `delivered`, bound to the acking contact so a receipt can't be forged for another contact's messages. (2) **Sender retry queue** — a persisted `message_retry_queue` holding the *exact serialized signed event* (re-encrypting would change `event.id` and defeat recipient dedup); an unref'd backoff loop in `NostrManager` re-publishes due rows until acked (row deleted) or expired (~60h). (3) **Self-hosted relay** — a long-retention nostr-rs-relay on the maestro.press droplet, added to `DEFAULT_RELAYS` so every install uses it with zero handshake changes; operator-gated infra shipped separately (Task 6). Layers 1–2 (Tasks 1–5) are a self-contained, mergeable branch that ships the receipts/✓✓/retry-clear/forgery mechanism and recovers the **recipient-restart** case (a contact sub re-fetches full history with no `since` on reconnect, so a still-relay-retained message arrives and is acked). It does **not** by itself deliver the full offline (L1) guarantee for long or transient-socket-drop outages: a retry re-publishes the event with its **original `created_at`**, and age-based public-relay eviction (plus `since`-windowed live re-subscribes) can filter it out. **Layer 3 (Task 6) is what completes the L1 fix** — a relay we control retains the event until the recipient reconnects — so it is strongly recommended, sequenced as a separate operator-gated infra PR.
 
 **Tech Stack:** Node ESM, `@libsql/client`, `nostr-tools` (NIP-44, kind:4), Node built-in test runner. Docker (nostr-rs-relay) for the relay. No new npm dependencies in the crow repo.
 
@@ -38,7 +38,7 @@
 
 **Health-loop idiom.** `_startHealthLoop()` (`nostr.js:216-230`): idempotent (`if (this._healthTimer) return`), `setInterval` (env `CROW_NOSTR_HEALTH_MS` || 45000), `.unref()`, wraps each async call in `Promise.resolve(...).catch(()=>{})`. **`_startRetryLoop()` mirrors this exactly.** Constructor initializes `this._healthTimer = null` (`nostr.js:55`) — R5 adds `this._retryTimer = null`.
 
-**Client rendering (already shipped, R2 Task 4).** `panels/messages/client.js:1157-1163`: `delivery_status === 'failed'` → failed style; `'relayed'|'delivered'` → a check indicator; `'delivered'` renders `✓✓`, `'relayed'` renders `✓`. So flipping the column to `'delivered'` + a re-render lights ✓✓; correctness is guaranteed on reload (the column is read on fetch) and live via the existing `messages:changed` signal.
+**Client rendering (already shipped, R2 Task 4).** `panels/messages/client.js:1157-1163`: `delivery_status === 'failed'` → failed style; `'relayed'|'delivered'` → a check indicator; `'delivered'` renders `✓✓`, `'relayed'` renders `✓`. Flipping the column to `'delivered'` lights ✓✓ **on the sender's next thread reload/refetch** (the column is read on fetch). Note the `messages:changed` SSE consumer (`servers/gateway/routes/streams.js`) is **badge-only** — it does not re-render message bubbles (live message-body updates are a deferred plan), so R5 does **not** emit it from the ack handler (doing so would also clobber the peer's unread badge, since that consumer reads `payload.unread ?? 0`). ✓✓ is reload-correct, which is sufficient.
 
 ---
 
@@ -438,7 +438,7 @@ git show --stat HEAD
 - Consumes: `shouldEnqueue`, `enqueueRetry`, `dueRetries`, `recordAttempt`, `normalizePubkey` (Task 1); `safeRelayPublish` (`nostr.js:31`).
 - Produces:
   - `sendMessage` enqueues via `enqueueRetry` when `shouldEnqueue(...)` — after the local-cache write, using the just-built `event` (`JSON.stringify(event)` = `rawEvent`), `contactId`, `published.length`, and the normalized recipient/own pubkeys.
-  - `NostrManager._runRetryTick() : Promise<void>` — testable tick body: fetch `dueRetries`, re-publish each row's `raw_event` (parsed) to all `this.relays` via `safeRelayPublish`, then `recordAttempt`. A row whose `raw_event` won't parse is dropped (`markDelivered`). Never throws.
+  - `NostrManager._runRetryTick() : Promise<void>` — testable tick body: fetch `dueRetries`, re-publish each row's `raw_event` (parsed) to all `this.relays` via `safeRelayPublish`, then `recordAttempt`. A row whose `raw_event` won't parse is dropped via a direct `DELETE ... WHERE id=?` (not `markDelivered`, which no-ops on a NULL `contact_id`). Never throws.
   - `NostrManager._startRetryLoop() : void` — idempotent unref'd `setInterval` (env `CROW_NOSTR_RETRY_MS` || 60000) invoking `_runRetryTick` wrapped in `Promise.resolve(...).catch(()=>{})`. Reads `CROW_NOSTR_RETRY_MAX_AGE_SEC` || `216000` (~60h) for `_runRetryTick`'s expiry.
 
 - [ ] **Step 1: Write the failing test**
@@ -554,7 +554,7 @@ Expected: FAIL — `m._runRetryTick is not a function`.
 
 In `servers/sharing/nostr.js`, add the import to the existing `contact-promote` import line region (near `:33`):
 ```js
-import { shouldEnqueue, enqueueRetry, dueRetries, recordAttempt, markDelivered, buildDeliveryReceipt, normalizePubkey } from "./retry-queue.js";
+import { shouldEnqueue, enqueueRetry, dueRetries, recordAttempt, buildDeliveryReceipt, normalizePubkey } from "./retry-queue.js";
 ```
 In the constructor (after `this._healthTimer = null;` at `:55`):
 ```js
@@ -576,10 +576,14 @@ Add these two methods immediately after `_startHealthLoop()` (after `nostr.js:23
       let event;
       try { event = JSON.parse(row.raw_event); } catch { event = null; }
       if (!event || !event.id) {
-        // Corrupt payload — cannot republish; drop it (contact-bound).
-        try { await markDelivered(this.db, [row.nostr_event_id], row.contact_id); } catch {}
+        // Corrupt payload — cannot republish. Delete by primary key directly
+        // (NOT contact-bound markDelivered, which no-ops on a NULL contact_id
+        // and would leave the row re-selected every tick forever).
+        try { await this.db.execute({ sql: "DELETE FROM message_retry_queue WHERE id = ?", args: [row.id] }); } catch {}
         continue;
       }
+      // Advance/expire even if every relay was down this tick (bounded by the
+      // 12h tail + ~60h expiry) — avoids a tight re-publish loop during an outage.
       for (const [, relay] of this.relays) {
         try { await safeRelayPublish(relay, event); } catch { /* relay best-effort */ }
       }
@@ -764,8 +768,8 @@ git show --stat HEAD
 - Test: `tests/delivery-receipt-handler.test.js`
 
 **Interfaces:**
-- Consumes: `findContactByPubkey`, `normalizePubkey` (`pubkey-util.js`); `markDelivered` (Task 1); `bus` (`servers/shared/event-bus.js`); `DELIVERY_RECEIPT_SUBTYPE` (Task 1).
-- Produces: `handleDeliveryReceipt(db, eventIds, senderPubkey) : Promise<void>` — exported from `boot.js`. Resolves `senderPubkey`→contact (`findContactByPubkey`); if none, no-op. `UPDATE messages SET delivery_status='delivered' WHERE nostr_event_id IN (eventIds) AND direction='sent' AND contact_id = <that contact>` (**contact-bound** — a receipt can only mark *its own* messages, closing forgery since `event.id` is public on relays). Clears retry rows via contact-bound `markDelivered`. Emits `bus.emit("messages:changed", { contactId })` so the ✓✓ lights live. **Fully guarded — never throws** (receive path). Works independently of the retry queue, so a late ack (post-expiry) still flips the column.
+- Consumes: `findContactByPubkey` (`pubkey-util.js`, **already imported in `boot.js:17`**); `markDelivered` + `DELIVERY_RECEIPT_SUBTYPE` (Task 1).
+- Produces: `handleDeliveryReceipt(db, eventIds, senderPubkey) : Promise<void>` — exported from `boot.js`. Resolves `senderPubkey`→contact (`findContactByPubkey`); if none, no-op. `UPDATE messages SET delivery_status='delivered' WHERE nostr_event_id IN (eventIds) AND direction='sent' AND contact_id = <that contact>` (**contact-bound** — a receipt can only mark *its own* messages, closing forgery since `event.id` is public on relays). Clears retry rows via contact-bound `markDelivered`. **No `bus` emit** (the SSE consumer is badge-only and would clobber the unread count — see the client-rendering note; ✓✓ is reload-correct). **Fully guarded — never throws** (receive path). Works independently of the retry queue, so a late ack (post-expiry) still flips the column.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -863,13 +867,11 @@ Expected: FAIL — `handleDeliveryReceipt` not exported.
 
 - [ ] **Step 3: Add the exported handler**
 
-In `servers/sharing/boot.js`, add imports near the other local imports (with the `contact-promote`/`pubkey-util` imports):
+In `servers/sharing/boot.js`, add **one** new import near the other local imports. `findContactByPubkey` is **already imported** at `boot.js:17` (`import { normalizePubkey, findContactByPubkey } from "./pubkey-util.js"`) — do NOT re-import it (that is a duplicate-declaration `SyntaxError`). The only genuinely-new import is:
 ```js
-import { findContactByPubkey } from "./pubkey-util.js";
 import { markDelivered, DELIVERY_RECEIPT_SUBTYPE } from "./retry-queue.js";
-import bus from "../shared/event-bus.js";
 ```
-(If any of these are already imported in `boot.js`, reuse the existing import — do not double-import. Grep first: `grep -n "pubkey-util\|event-bus\|retry-queue" servers/sharing/boot.js`.)
+(Grep first to confirm current state: `grep -n "pubkey-util\|retry-queue" servers/sharing/boot.js`.)
 
 Add the exported function at module scope (a natural spot is just after `handleInviteAccepted` closes):
 ```js
@@ -879,7 +881,7 @@ Add the exported function at module scope (a natural spot is just after `handleI
  * rows — both CONTACT-BOUND (the receipt's authenticated sender pubkey must own
  * those messages), because a Nostr event.id is public on relays and a stranger
  * could otherwise forge a receipt. Independent of the retry queue, so a late
- * (post-expiry) ack still lights ✓✓. Never throws (receive path).
+ * (post-expiry) ack still flips the column. Never throws (receive path).
  */
 export async function handleDeliveryReceipt(db, eventIds, senderPubkey) {
   try {
@@ -894,7 +896,10 @@ export async function handleDeliveryReceipt(db, eventIds, senderPubkey) {
       args: [contact.id, ...ids],
     });
     await markDelivered(db, ids, contact.id);
-    try { bus.emit("messages:changed", { contactId: contact.id }); } catch {}
+    // No bus emit: the messages:changed SSE consumer is badge-only and reads
+    // payload.unread — emitting here (without a recomputed unread) would blank
+    // the peer's unread badge, and it can't render ✓✓ anyway. ✓✓ shows on the
+    // sender's next thread reload (delivery_status is read on fetch).
   } catch (err) {
     try { console.warn("[sharing] delivery_receipt handling failed:", err.message); } catch {}
   }
@@ -1007,6 +1012,15 @@ From the two-instance harness (Gitea `feat/messages-p1a-harness`; black-swan DUT
 
 **Known follow-ups (out of scope, log in ledger):** extend 0-relay failure detection to `crow_send_group_message` (R2 follow-up); delete the dead `send_peer` api-handler; apple-touch-icon PNG. R5 does not batch acks (per-event ack, array-of-one) — a deliberate YAGNI given minutes/hours-apart retries.
 
+**Graceful degradation to note in the ledger:** an R5 sender messaging a **pre-R5 recipient** (or one whose contact row is still a `'pending'`/`'accepted'` request, so no `subscribeToContact` ack is emitted) never receives a receipt → the DM retries ~5× over ~60h then expires and stays single-✓. Harmless (recipient dedups the exact re-published `event.id`; no duplicate rows), correct, but it is extra relay traffic worth stating. This resolves on the recipient's upgrade / full-contact promotion (R4).
+
 ## Review
 
-_(2-round adversarial Plan review to be recorded here before execution.)_
+**Round 1 (2026-07-02, adversarial staff-engineer subagent, opus): REVISE — all findings applied.**
+- **IMPORTANT 1 (real UI regression):** the ack handler's `bus.emit("messages:changed", {contactId})` had two defects — the only consumer (`servers/gateway/routes/streams.js`) is **badge-only** (message-body live render is a deferred plan), so it never lit ✓✓ live (plan claim was false); and it reads `payload.unread ?? 0`, so an emit omitting `unread` would blank the peer's unread badge on any inbound receipt. **Fix:** dropped the emit entirely (✓✓ is reload-correct — the column is read on fetch); corrected the client-rendering note and the ack-handler interface/code.
+- **IMPORTANT 2 (would break boot.js):** `boot.js:17` already imports `findContactByPubkey`; the Task-4 import block re-declared it → `SyntaxError`. **Fix:** reduced the new import to `{ markDelivered, DELIVERY_RECEIPT_SUBTYPE }` only, with an explicit do-not-re-import note.
+- **IMPORTANT 3 (over-stated guarantee):** a retry re-publishes the event with its **original `created_at`**, so age-based public-relay eviction (and `since`-windowed live re-subscribes, L2/L7) can filter it out — Tasks 1–5 alone recover the **recipient-restart** case (full-history `subscribeToContact`, no `since`) but not arbitrary offline outages; the full L1 fix leans on Task 6's long-retention relay. **Fix:** reworded the Architecture + client note; Task 6 marked as strongly recommended to complete L1.
+- **MINOR:** corrupt-`raw_event` cleanup switched from contact-bound `markDelivered` (no-ops on a NULL `contact_id` → row re-selected forever) to a direct `DELETE ... WHERE id=?`; removed the now-unused `markDelivered` import from `nostr.js`; added the pre-R5-recipient interop note above; noted the "attempt consumed during a total-relay outage" tradeoff inline (bounded, acceptable).
+- **Confirmed sound (no action):** no ack-of-ack loop (receipt is `crow_social`, sender's own `subscribeToContact` early-returns at `:261`, routed only via `subscribeToIncoming`→`onSocialMessage`); retry cannot duplicate (exact `event.id` → recipient `INSERT OR IGNORE` dedups; no re-encryption); forgery doubly-bound (receipt must decrypt under the pairwise NIP-44 key AND handler UPDATE/`markDelivered` are `contact_id`-scoped); receive-path-never-throws honored (fire-and-forget acks, guarded loop, unref'd interval); `A` does receive `B`'s receipt (`sendControl` tags `["p", A_xonly]`, matching A's incoming filter); SCHEMA 2→3 auto-applies (verified `init-db.js` `PRAGMA user_version` + gateway boot gate); FK/init ordering fine (contacts created before the new table). All 4 embedded test files hand-traced against the specified implementation — assertions correct (incl. the `backoffSeconds(2)` fencepost fix).
+
+**Round 2 (2026-07-02, focused confirmation subagent, opus): APPROVE.** Re-verified all 4 fixes against the plan + live source (`boot.js:17`, `nostr.js:33/292`, `streams.js:87`, `client.js:1157-1164`): ack handler no longer emits/imports `bus` and the interface + client-rendering note are consistent (✓✓ reload-only); the Task-4 import is reduced to `{ markDelivered, DELIVERY_RECEIPT_SUBTYPE }` with `findContactByPubkey` from the existing `boot.js:17` import (no SyntaxError); the offline-guarantee wording is honest and not self-contradictory with the Goal; the corrupt-row `DELETE ... WHERE id=?` matches its test and `markDelivered` is correctly removed from the `nostr.js` import yet still exported/used where needed. Caught **one stale interface-summary line** (Task 2 still said the corrupt row is dropped "via `markDelivered`") — **fixed** to reference the direct delete. **Plan is ready for subagent-driven execution.**
