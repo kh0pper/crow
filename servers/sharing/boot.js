@@ -278,11 +278,26 @@ export async function initSharingRuntime(managers, helpers) {
   peerManager.start().then(async () => {
     try {
       const contacts = await db.execute({
-        sql: "SELECT id, crow_id, display_name, ed25519_pubkey, secp256k1_pubkey FROM contacts WHERE is_blocked = 0",
+        sql: "SELECT id, crow_id, display_name, ed25519_pubkey, secp256k1_pubkey, request_status FROM contacts WHERE is_blocked = 0",
         args: [],
       });
       for (const c of contacts.rows) {
         try {
+          // SPLIT by request_status:
+          //   NULL      → full contact: peer-join + sync + Nostr subscribe (unchanged).
+          //   'accepted'→ partial (secp-only, no ed25519): Nostr subscribe ONLY —
+          //               initContact/joinContact would fail on the empty ed25519 key.
+          //   'pending' → skip entirely; the broad subscribeToIncoming still receives it.
+          if (c.request_status === "pending") continue;
+          if (c.request_status === "accepted") {
+            await nostrManager.subscribeToContact({
+              id: c.id,
+              crow_id: c.crow_id,
+              secp256k1_pubkey: c.secp256k1_pubkey,
+              display_name: c.display_name,
+            });
+            continue;
+          }
           await syncManager.initContact(c.id, null);
           await peerManager.joinContact({
             crowId: c.crow_id,

@@ -55,7 +55,7 @@ export async function listRoomMembers(db, groupId) {
   const { rows } = await db.execute({
     sql: `SELECT c.id, c.crow_id, c.display_name, c.is_bot, c.secp256k1_pubkey, c.is_blocked
           FROM contact_group_members gm JOIN contacts c ON c.id = gm.contact_id
-          WHERE gm.group_id = ? AND c.is_blocked = 0`,
+          WHERE gm.group_id = ? AND c.is_blocked = 0 AND c.request_status IS NULL`,
     args: [groupId],
   });
   return rows;
