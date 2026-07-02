@@ -21,6 +21,7 @@ import {
   handleIncomingBotRelay,
 } from "./bot-relay.js";
 import { upsertFullContact } from "./contact-promote.js";
+import { markDelivered, DELIVERY_RECEIPT_SUBTYPE } from "./retry-queue.js";
 
 /**
  * L6 receive-path fix — turn a decrypted DM from an unknown sender into a
@@ -144,6 +145,36 @@ export async function handleInviteAccepted(db, managers, payload, senderPubkey) 
     });
   } catch (err) {
     try { console.warn("[sharing] invite_accepted promotion failed:", err.message); } catch {}
+  }
+}
+
+/**
+ * R5: a delivery receipt from a contact confirms they actually received our
+ * DM(s). Flip the matching sent rows relayed→delivered and clear their retry
+ * rows — both CONTACT-BOUND (the receipt's authenticated sender pubkey must own
+ * those messages), because a Nostr event.id is public on relays and a stranger
+ * could otherwise forge a receipt. Independent of the retry queue, so a late
+ * (post-expiry) ack still flips the column. Never throws (receive path).
+ */
+export async function handleDeliveryReceipt(db, eventIds, senderPubkey) {
+  try {
+    const ids = (Array.isArray(eventIds) ? eventIds : []).filter((x) => typeof x === "string" && x);
+    if (!db || ids.length === 0) return;
+    const contact = await findContactByPubkey(db, senderPubkey);
+    if (!contact) return; // receipt from a non-contact → ignore
+    const placeholders = ids.map(() => "?").join(",");
+    await db.execute({
+      sql: `UPDATE messages SET delivery_status = 'delivered'
+            WHERE direction = 'sent' AND contact_id = ? AND nostr_event_id IN (${placeholders})`,
+      args: [contact.id, ...ids],
+    });
+    await markDelivered(db, ids, contact.id);
+    // No bus emit: the messages:changed SSE consumer is badge-only and reads
+    // payload.unread — emitting here (without a recomputed unread) would blank
+    // the peer's unread badge, and it can't render ✓✓ anyway. ✓✓ shows on the
+    // sender's next thread reload (delivery_status is read on fetch).
+  } catch (err) {
+    try { console.warn("[sharing] delivery_receipt handling failed:", err.message); } catch {}
   }
 }
 
@@ -459,6 +490,8 @@ export async function initSharingRuntime(managers, helpers) {
           } catch (err) {
             console.warn("[sharing] Failed to create relay result notification:", err.message);
           }
+        } else if (subtype === DELIVERY_RECEIPT_SUBTYPE) {
+          await handleDeliveryReceipt(db, payload.event_ids, senderPubkey);
         } else if (subtype === "room_message" || subtype === "room_join") {
           const { handleInboundRoomEnvelope } = await import("./room-inbound.js");
           await handleInboundRoomEnvelope({ db, nostrManager, identity, subtype, payload, senderPubkey, log: (m) => console.log("[rooms]", m) });
