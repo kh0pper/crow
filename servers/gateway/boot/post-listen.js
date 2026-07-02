@@ -267,6 +267,60 @@ export async function runPostListenSetup(server, app, deps) {
     console.log("[health-monitor] skipped: --no-auth gateway is never the primary dashboard");
   }
 
+  // cross_host_calls audit-retention (2026-07-02 corruption-hardening plan,
+  // Task 1): cross_host_calls is an unbounded append-only high-write table
+  // that has corrupted crow's DB twice. Prune rows older than 14 days
+  // (default — see cross-host-audit-retention.js for why 14, not 7) then
+  // best-effort WAL-checkpoint. First run ~5 min after boot, then every
+  // 24h. Runs regardless of --no-auth (harmless — a --no-auth box may point
+  // at a throwaway DB). Gated to the home/primary instance only so multiple
+  // same-host gateway processes sharing one crow.db file (e.g. primary +
+  // MPA) don't redundantly prune+checkpoint the same file concurrently. A
+  // fresh/standalone install with no instance yet designated "home" is
+  // treated as primary too (getHomeInstance() returns nothing until the
+  // user explicitly pairs/chains instances) — otherwise the fix would never
+  // engage on the common single-instance install. Fully try/caught; never
+  // throws.
+  {
+    const XHOST_AUDIT_PRUNE_BOOT_DELAY_MS = 5 * 60 * 1000;    // 5 min
+    const XHOST_AUDIT_PRUNE_INTERVAL_MS   = 24 * 60 * 60 * 1000; // 24h
+
+    const isHomeOrStandalone = async (db) => {
+      const { getOrCreateLocalInstanceId, getInstance, getHomeInstance } =
+        await import("../instance-registry.js");
+      const localId = getOrCreateLocalInstanceId();
+      const local = await getInstance(db, localId);
+      if (local?.is_home === 1) return true;
+      const home = await getHomeInstance(db);
+      return !home; // nobody designated home yet — treat this instance as primary
+    };
+
+    const runXhostAuditPrune = async () => {
+      try {
+        const { pruneCrossHostAudit } = await import("../../shared/cross-host-audit-retention.js");
+        const db = createDbClient();
+        try {
+          if (!(await isHomeOrStandalone(db))) return;
+          const { deleted, checkpointed } = await pruneCrossHostAudit(db);
+          if (deleted > 0) {
+            console.log(`[xhost-audit-retention] pruned ${deleted} row(s) from cross_host_calls (checkpointed=${checkpointed})`);
+          }
+        } finally {
+          try { db.close(); } catch {}
+        }
+      } catch (err) {
+        console.warn("[xhost-audit-retention] cycle error:", err?.message || err);
+      }
+    };
+
+    setTimeout(() => {
+      runXhostAuditPrune();
+      setInterval(runXhostAuditPrune, XHOST_AUDIT_PRUNE_INTERVAL_MS).unref();
+    }, XHOST_AUDIT_PRUNE_BOOT_DELAY_MS).unref();
+
+    console.log("[xhost-audit-retention] armed (24h interval, first run in 5 min)");
+  }
+
   // F.13: crosspost publish/GC scheduler (no-ops on an empty crosspost_log;
   // kill switch CROW_DISABLE_CROSSPOST_SCHEDULER=1). Lazy import keeps boot
   // resilient if the crossposting module is absent.
