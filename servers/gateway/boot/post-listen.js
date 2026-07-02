@@ -19,6 +19,16 @@ import { startAutoUpdate } from "../auto-update.js";
 import { startScheduler } from "../scheduler.js";
 import { createDbClient } from "../../db.js";
 
+// QW1 (Crow Messages usability arc, Phase 0): a gateway started with
+// --no-auth (e.g. grackle's loopback companion MCP bridge) is never the
+// primary dashboard and must never run the W2 health monitor — otherwise it
+// evaluates its own --no-auth flag as an exposure warn and pushes "the
+// password requirement is turned off" notifications every dedupe cycle.
+export function shouldRunHealthMonitor({ env, noAuth }) {
+  if (noAuth) return false;
+  return env.CROW_DISABLE_HEALTH_MONITOR !== "1";
+}
+
 export async function runPostListenSetup(server, app, deps) {
   const { setupCallsSignaling, setupCompanionProxy, extensionProxyWsSetup, PORT, BIND, noAuth } = deps;
 
@@ -166,7 +176,9 @@ export async function runPostListenSetup(server, app, deps) {
   // Kill switch: CROW_DISABLE_HEALTH_MONITOR=1. Never throws; each cycle is
   // fully try/caught. Notifies (dashboard+ntfy path) for newly-degraded warn
   // signals, using 24h dedupe persisted in dashboard_settings.
-  if (process.env.CROW_DISABLE_HEALTH_MONITOR !== "1") {
+  // QW1: also never runs under --no-auth (see shouldRunHealthMonitor above) —
+  // a no-auth gateway is never the primary dashboard.
+  if (shouldRunHealthMonitor({ env: process.env, noAuth })) {
     const HEALTH_MONITOR_BOOT_DELAY_MS = 2 * 60 * 1000;   // 2 min
     const HEALTH_MONITOR_INTERVAL_MS   = 15 * 60 * 1000;  // 15 min
     const runHealthMonitorCycle = async () => {
@@ -251,6 +263,8 @@ export async function runPostListenSetup(server, app, deps) {
     }, HEALTH_MONITOR_BOOT_DELAY_MS);
 
     console.log("[health-monitor] armed (15-min interval, first run in 2 min)");
+  } else if (noAuth) {
+    console.log("[health-monitor] skipped: --no-auth gateway is never the primary dashboard");
   }
 
   // F.13: crosspost publish/GC scheduler (no-ops on an empty crosspost_log;
