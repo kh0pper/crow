@@ -684,8 +684,8 @@ export function messagesClientJS(opts) {
     _pendingAttachments = [];
     renderAttachmentPreview();
 
-    // Optimistic UI
-    appendBubble(viewport, {
+    // Optimistic UI — keep a ref so we can mark it failed if the send doesn't land.
+    var sentBubble = appendBubble(viewport, {
       direction: 'sent',
       content: content || '',
       created_at: new Date().toISOString(),
@@ -694,7 +694,7 @@ export function messagesClientJS(opts) {
     viewport.scrollTop = viewport.scrollHeight;
 
     try {
-      await fetch('/api/messages/peer/' + encodeURIComponent(_activeItem.id) + '/send', {
+      var response = await fetch('/api/messages/peer/' + encodeURIComponent(_activeItem.id) + '/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -702,8 +702,16 @@ export function messagesClientJS(opts) {
           attachments: atts.length > 0 ? atts : undefined,
         }),
       });
+      // A 0-relay send returns a non-ok response (or {ok:false}); surface it on
+      // the just-sent bubble instead of leaving a misleading success bubble.
+      var body = null;
+      try { body = await response.json(); } catch(_) { /* non-JSON body */ }
+      if (!response.ok || (body && body.ok === false)) {
+        markBubbleFailed(sentBubble, body && body.error);
+      }
     } catch(e) {
       console.error('Failed to send peer message:', e);
+      markBubbleFailed(sentBubble);
     }
 
     _replyingTo = null;
@@ -1141,6 +1149,21 @@ export function messagesClientJS(opts) {
       div.appendChild(el('div', { className: 'msg-bubble-meta', text: relativeTime(msg.created_at) }));
     }
 
+    // Delivery status indicator (sent messages only) — persisted delivery_status
+    // read back on THREAD RELOAD (R2 Task 4). Task 3's markBubbleFailed already
+    // surfaces a live send-time failure; reuse it here for consistency ('failed'
+    // gets the same 'msg-bubble-failed' class + note). 'relayed'/'delivered' get a
+    // small muted check; 'pending'/null render nothing.
+    if (isSent && msg.delivery_status === 'failed') {
+      markBubbleFailed(div);
+    } else if (isSent && (msg.delivery_status === 'relayed' || msg.delivery_status === 'delivered')) {
+      div.appendChild(el('span', {
+        className: 'msg-delivery',
+        title: msg.delivery_status === 'delivered' ? '${tJs("messages.deliveryDelivered", lang)}' : '${tJs("messages.deliveryRelayed", lang)}',
+        text: msg.delivery_status === 'delivered' ? '\\u2713\\u2713' : '\\u2713',
+      }));
+    }
+
     // Reply button (received peer messages)
     if (!isSent && msgId && _activeItem && _activeItem.type === 'peer') {
       div.appendChild(el('button', {
@@ -1156,6 +1179,29 @@ export function messagesClientJS(opts) {
     }
 
     container.appendChild(div);
+    return div;
+  }
+
+  // Mark an optimistic 'sent' bubble as failed-to-deliver (send-time surfacing;
+  // Task 4's delivery_status gives it on reload too). Defensive: falls back to
+  // the viewport's last child if no bubble ref was captured.
+  function markBubbleFailed(bubble, errText) {
+    try {
+      var b = bubble;
+      if (!b) {
+        var vp = document.getElementById('msg-viewport');
+        b = vp && vp.lastElementChild;
+      }
+      if (!b) return;
+      b.classList.add('msg-bubble-failed');
+      if (!b.querySelector('.msg-bubble-failed-note')) {
+        b.appendChild(el('div', {
+          className: 'msg-bubble-failed-note',
+          css: 'color:var(--crow-error,#ef4444);font-size:0.7rem;margin-top:2px;',
+          text: '! ${tJs("messages.notDelivered", lang)}' + (errText ? ' — ' + errText : ''),
+        }));
+      }
+    } catch (e) { /* never let feedback crash the send path */ }
   }
 
   // === Reply Bar ===

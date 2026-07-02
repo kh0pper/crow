@@ -17,7 +17,105 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createSharingServer } from "../../sharing/server.js";
 
-export default function peerMessagesRouter(dashboardAuth) {
+/**
+ * Create a connected sharing MCP client (the real in-memory transport). This is
+ * the default factory; tests inject a stub so no live Nostr runtime starts.
+ */
+async function makePeerSharingClient() {
+  const server = createSharingServer();
+  const client = new Client({ name: "peer-messages-api", version: "0.1.0" });
+  const [ct, st] = InMemoryTransport.createLinkedPair();
+  await server.connect(st);
+  await client.connect(ct);
+  return client;
+}
+
+/**
+ * Send a peer message and surface a 0-relay failure on the LIVE path.
+ *
+ * The tool result (crow_send_message) is CAPTURED and inspected — a result with
+ * isError (a 0-relay publish) returns a non-ok (502) response instead of the
+ * old unconditional { ok:true }. This is what lets the dashboard mark the
+ * optimistic bubble as failed at send time.
+ *
+ * Exported for unit tests (drive it with a stub db + sharingClientFactory).
+ */
+export async function handlePeerSend(req, res, { db, sharingClientFactory = makePeerSharingClient } = {}) {
+  const contactId = parseInt(req.params.contactId);
+  if (!contactId) return res.status(400).json({ error: "Invalid contact ID" });
+
+  const { message, attachments } = req.body || {};
+  if (!message || typeof message !== "string" || !message.trim()) {
+    return res.status(400).json({ error: "Message content is required" });
+  }
+
+  // Get contact identifier for crow_send_message
+  const { rows: contactRows } = await db.execute({
+    sql: "SELECT crow_id, display_name FROM contacts WHERE id = ?",
+    args: [contactId],
+  });
+  if (contactRows.length === 0) {
+    return res.status(404).json({ error: "Contact not found" });
+  }
+
+  const contact = contactRows[0];
+  const contactIdentifier = contact.display_name || contact.crow_id;
+
+  // Send via MCP sharing server — CAPTURE the result (a 0-relay send is a
+  // failure the client must see).
+  let toolResult;
+  const client = await sharingClientFactory();
+  try {
+    toolResult = await client.callTool({
+      name: "crow_send_message",
+      arguments: { contact: contactIdentifier, message: message.trim() },
+    });
+  } finally {
+    await client.close();
+  }
+
+  const resultText = (toolResult?.content || [])
+    .map((c) => c && c.text)
+    .filter(Boolean)
+    .join(" ");
+  if (toolResult?.isError) {
+    // Delivery failed (e.g. reached 0 relays). Do NOT report success.
+    return res.status(502).json({ ok: false, error: resultText || "Message could not be delivered." });
+  }
+
+  // Store attachment metadata if provided (only for a delivered message)
+  if (attachments && Array.isArray(attachments) && attachments.length > 0) {
+    // Get the message we just sent (latest sent message to this contact)
+    const { rows: latestMsg } = await db.execute({
+      sql: `SELECT id FROM messages
+            WHERE contact_id = ? AND direction = 'sent'
+            ORDER BY id DESC LIMIT 1`,
+      args: [contactId],
+    });
+
+    if (latestMsg.length > 0) {
+      const msgId = latestMsg[0].id;
+      await db.execute({
+        sql: "UPDATE messages SET attachments = ? WHERE id = ?",
+        args: [JSON.stringify(attachments), msgId],
+      });
+
+      // Update storage_files references
+      for (const att of attachments) {
+        if (att.s3_key) {
+          await db.execute({
+            sql: "UPDATE storage_files SET reference_type = 'message', reference_id = ? WHERE s3_key = ?",
+            args: [msgId, att.s3_key],
+          });
+        }
+      }
+    }
+  }
+
+  res.json({ ok: true });
+}
+
+export default function peerMessagesRouter(dashboardAuth, { sharingClientFactory = makePeerSharingClient } = {}) {
   const router = Router();
 
   // All peer message routes require dashboard auth
@@ -89,74 +187,9 @@ export default function peerMessagesRouter(dashboardAuth) {
   router.post("/api/messages/peer/:contactId/send", async (req, res) => {
     const db = createDbClient();
     try {
-      const contactId = parseInt(req.params.contactId);
-      if (!contactId) return res.status(400).json({ error: "Invalid contact ID" });
-
-      const { message, attachments } = req.body || {};
-      if (!message || typeof message !== "string" || !message.trim()) {
-        return res.status(400).json({ error: "Message content is required" });
-      }
-
-      // Get contact identifier for crow_send_message
-      const { rows: contactRows } = await db.execute({
-        sql: "SELECT crow_id, display_name FROM contacts WHERE id = ?",
-        args: [contactId],
-      });
-      if (contactRows.length === 0) {
-        return res.status(404).json({ error: "Contact not found" });
-      }
-
-      const contact = contactRows[0];
-      const contactIdentifier = contact.display_name || contact.crow_id;
-
-      // Send via MCP sharing server
-      const server = createSharingServer();
-      const client = new Client({ name: "peer-messages-api", version: "0.1.0" });
-      const [ct, st] = InMemoryTransport.createLinkedPair();
-      await server.connect(st);
-      await client.connect(ct);
-
-      try {
-        await client.callTool({
-          name: "crow_send_message",
-          arguments: { contact: contactIdentifier, message: message.trim() },
-        });
-      } finally {
-        await client.close();
-      }
-
-      // Store attachment metadata if provided
-      if (attachments && Array.isArray(attachments) && attachments.length > 0) {
-        // Get the message we just sent (latest sent message to this contact)
-        const { rows: latestMsg } = await db.execute({
-          sql: `SELECT id FROM messages
-                WHERE contact_id = ? AND direction = 'sent'
-                ORDER BY id DESC LIMIT 1`,
-          args: [contactId],
-        });
-
-        if (latestMsg.length > 0) {
-          const msgId = latestMsg[0].id;
-          await db.execute({
-            sql: "UPDATE messages SET attachments = ? WHERE id = ?",
-            args: [JSON.stringify(attachments), msgId],
-          });
-
-          // Update storage_files references
-          for (const att of attachments) {
-            if (att.s3_key) {
-              await db.execute({
-                sql: "UPDATE storage_files SET reference_type = 'message', reference_id = ? WHERE s3_key = ?",
-                args: [msgId, att.s3_key],
-              });
-            }
-          }
-        }
-      }
-
-      res.json({ ok: true });
+      await handlePeerSend(req, res, { db, sharingClientFactory });
     } catch (err) {
-      res.status(500).json({ error: err.message });
+      if (!res.headersSent) res.status(500).json({ error: err.message });
     } finally {
       db.close();
     }
