@@ -129,9 +129,13 @@ export async function handleIncomingRequest(db, managers, { senderPubkey, conten
  * This is the ONLY promotion trigger — the plaintext message-request path can
  * NEVER elevate a contact. Never throws (receive path).
  */
-export async function handleInviteAccepted(db, managers, payload) {
+export async function handleInviteAccepted(db, managers, payload, senderPubkey) {
   try {
     if (!payload || !payload.crowId || !payload.ed25519Pub || !payload.secp256k1Pub) return;
+    // Bind promotion to the AUTHENTICATED signing key: the payload's claimed
+    // secp key must equal the event's cryptographically-bound pubkey, else a
+    // stranger could forge an invite_accepted to promote/hijack a gated contact.
+    if (normalizePubkey(payload.secp256k1Pub) !== normalizePubkey(senderPubkey)) return;
     await upsertFullContact(db, managers, {
       crowId: payload.crowId,
       ed25519Pub: payload.ed25519Pub,
@@ -346,8 +350,8 @@ export async function initSharingRuntime(managers, helpers) {
     // Subscribe to all incoming DMs (invites, social messages)
     // Done here so relay connections from subscribeToContact are reused
     try {
-      await nostrManager.subscribeToIncoming(async (payload) => {
-        await handleInviteAccepted(db, { syncManager, peerManager, nostrManager }, payload);
+      await nostrManager.subscribeToIncoming(async (payload, senderPubkey) => {
+        await handleInviteAccepted(db, { syncManager, peerManager, nostrManager }, payload, senderPubkey);
       }, async (subtype, payload, senderPubkey) => {
         console.log(`[sharing] Received crow_social message: ${subtype}`);
         if (subtype === "room_invite") {

@@ -417,7 +417,7 @@ export class NostrManager {
                 const payload = JSON.parse(decrypted);
                 if (payload.type === "invite_accepted" && onInviteAccepted) {
                   handled = true;
-                  await onInviteAccepted(payload);
+                  await onInviteAccepted(payload, senderPubkey);
                 } else if (payload.type === "crow_social" && payload.subtype && onSocialMessage) {
                   handled = true;
                   await onSocialMessage(payload.subtype, payload.payload || {}, senderPubkey);
