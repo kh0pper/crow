@@ -112,6 +112,52 @@ export async function getUnifiedConversationList(db) {
 }
 
 /**
+ * Get pending message requests (unknown-sender DMs, L6). Each is a minimal
+ * `contacts` row tagged `request_status='pending'` with its stored messages.
+ * Returns the newest-first list the "Requests (N)" inbox renders, each with a
+ * short display, the latest message as a preview, the message count, and the
+ * contact/created timestamps. 'accepted' and full (NULL) contacts are excluded.
+ * Never throws.
+ */
+export async function getMessageRequests(db) {
+  try {
+    const { rows } = await db.execute(`
+      SELECT c.id, c.crow_id, c.display_name, c.created_at,
+             COUNT(m.id) AS msg_count,
+             MAX(m.created_at) AS last_msg_at,
+             (SELECT content FROM messages WHERE contact_id = c.id ORDER BY id DESC LIMIT 1) AS preview
+      FROM contacts c
+      LEFT JOIN messages m ON m.contact_id = c.id
+      WHERE c.request_status = 'pending'
+      GROUP BY c.id
+      ORDER BY last_msg_at DESC NULLS LAST, c.created_at DESC
+    `);
+    return rows.map((r) => {
+      const crowId = String(r.crow_id || "");
+      // `req:<64-hex pubkey>` → a compact `req:<first 10>…`; other ids → prefix.
+      let shortId;
+      if (crowId.startsWith("req:")) {
+        shortId = "req:" + crowId.slice(4, 14) + "…";
+      } else {
+        shortId = crowId.length > 16 ? crowId.substring(0, 16) + "…" : crowId;
+      }
+      return {
+        id: Number(r.id),
+        crowId,
+        displayName: r.display_name || shortId,
+        shortId,
+        preview: r.preview || "",
+        msgCount: Number(r.msg_count) || 0,
+        createdAt: r.created_at,
+        lastMsgAt: r.last_msg_at,
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Get peer messages for a specific contact.
  */
 export async function getPeerMessages(db, contactId, { limit = 50, offset = 0 } = {}) {

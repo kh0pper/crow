@@ -315,6 +315,10 @@ export const translations = {
   "messages.roomAddMember": { en: "Add member", es: "Agregar miembro" },
   "messages.roomAddBotPrompt": { en: "Local bot id to add:", es: "ID del bot local a agregar:" },
   "messages.roomLeaveHint": { en: "Bots reply only to people, never to each other.", es: "Los bots responden solo a personas, nunca entre ellos." },
+  "messages.requests": { en: "Requests ({n})", es: "Solicitudes ({n})" },
+  "messages.requestsHelp": { en: "People who messaged you but aren't contacts yet.", es: "Personas que te escribieron pero aún no son contactos." },
+  "messages.acceptRequest": { en: "Accept", es: "Aceptar" },
+  "messages.declineRequest": { en: "Decline", es: "Rechazar" },
 
   // ─── Blog Panel ───
   "blog.pageTitle": { en: "Blog", es: "Blog" },

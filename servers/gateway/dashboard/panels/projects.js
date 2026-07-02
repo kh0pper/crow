@@ -331,7 +331,7 @@ async function renderDetailView(db, projectId, layout, lang) {
              ORDER BY pm.granted_at ASC`,
       args: [projectId],
     }),
-    db.execute({ sql: "SELECT id, display_name, crow_id FROM contacts WHERE is_blocked = 0 ORDER BY display_name, id LIMIT 200" }),
+    db.execute({ sql: "SELECT id, display_name, crow_id FROM contacts WHERE is_blocked = 0 AND request_status IS NULL ORDER BY display_name, id LIMIT 200" }),
     db.execute({
       sql: `SELECT created_at, actor_type, actor_id, action, target, payload
               FROM project_audit_log WHERE project_id = ?
