@@ -14,7 +14,9 @@ import { escapeLikePattern } from "../../../../db.js";
 export async function getContacts(db, opts = {}) {
   const { search, groupId, type, limit = 100, offset = 0 } = opts;
   const args = [];
-  const conditions = [];
+  // Request rows (request_status 'pending'/'accepted') are partial secp-only
+  // contacts — never surface them as normal contacts.
+  const conditions = ["c.request_status IS NULL"];
 
   if (search) {
     conditions.push("(c.display_name LIKE ? OR c.email LIKE ? OR c.crow_id LIKE ?)");

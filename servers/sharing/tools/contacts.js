@@ -242,11 +242,13 @@ export function registerContactsTools(server, ctx) {
       include_blocked: z.boolean().default(false).describe("Include blocked contacts"),
     },
     async ({ include_blocked }) => {
-      let sql = "SELECT * FROM contacts";
+      // request_status IS NOT NULL rows are partial message-request contacts
+      // (secp-only) — exclude them from the normal contact listing.
+      let sql = "SELECT * FROM contacts WHERE request_status IS NULL";
       const args = [];
 
       if (!include_blocked) {
-        sql += " WHERE is_blocked = 0";
+        sql += " AND is_blocked = 0";
       }
       sql += " ORDER BY last_seen DESC NULLS LAST";
 

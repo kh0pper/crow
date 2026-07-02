@@ -49,6 +49,7 @@ export async function getUnifiedConversationList(db) {
       FROM contacts c
       LEFT JOIN messages m ON m.contact_id = c.id
       WHERE c.is_blocked = 0 AND (c.origin IS NULL OR c.origin != 'local-bot')
+        AND (c.request_status IS NULL OR c.request_status = 'accepted')
       GROUP BY c.id
       ORDER BY last_msg_at DESC NULLS LAST, c.created_at DESC
     `);
@@ -165,7 +166,7 @@ export async function getMessageStatus(db) {
 export async function getBotDirectory(db) {
   const known = new Map(); // trailing-64 lowercased x-only pubkey -> contact id
   try {
-    const { rows } = await db.execute("SELECT id, secp256k1_pubkey FROM contacts WHERE secp256k1_pubkey IS NOT NULL");
+    const { rows } = await db.execute("SELECT id, secp256k1_pubkey FROM contacts WHERE secp256k1_pubkey IS NOT NULL AND request_status IS NULL");
     for (const r of rows) {
       const h = String(r.secp256k1_pubkey || "");
       if (h.length >= 64) known.set(h.slice(-64).toLowerCase(), Number(r.id));

@@ -10,7 +10,7 @@ test("getUnifiedConversationList carries isBot for bot contacts", async () => {
   await db.execute(`CREATE TABLE chat_messages (id INTEGER PRIMARY KEY, conversation_id INTEGER)`);
   // created_at is required: getUnifiedConversationList orders peers by c.created_at.
   // `origin` matches the real contacts schema (the peer query filters origin='local-bot').
-  await db.execute(`CREATE TABLE contacts (id INTEGER PRIMARY KEY, crow_id TEXT, display_name TEXT, last_seen TEXT, is_blocked INTEGER DEFAULT 0, is_bot INTEGER DEFAULT 0, origin TEXT, created_at TEXT DEFAULT (datetime('now')))`);
+  await db.execute(`CREATE TABLE contacts (id INTEGER PRIMARY KEY, crow_id TEXT, display_name TEXT, last_seen TEXT, is_blocked INTEGER DEFAULT 0, is_bot INTEGER DEFAULT 0, origin TEXT, request_status TEXT, created_at TEXT DEFAULT (datetime('now')))`);
   await db.execute(`CREATE TABLE messages (id INTEGER PRIMARY KEY, contact_id INTEGER, created_at TEXT, is_read INTEGER, direction TEXT)`);
   await db.execute(`INSERT INTO contacts (crow_id, display_name, is_bot) VALUES ('crow:bot','Helper',1)`);
   await db.execute(`INSERT INTO contacts (crow_id, display_name, is_bot) VALUES ('crow:human','Kevin',0)`);
