@@ -63,6 +63,46 @@ export function buildMessagesHTML(data) {
       `</div></div>`;
   }
 
+  // L6 "Requests (N)" inbox: unknown-sender DMs surfaced with Accept/Decline.
+  // Collapsible block, templated on the msg-bot-invite-card Accept form; each
+  // row is two classic <form method="POST"> submits (CSRF via the pre-rendered
+  // `csrf` input, same as the New Group / bot-invite forms in this file).
+  const requests = data.requests || [];
+  let requestsBlock = "";
+  if (requests.length > 0) {
+    const rows = requests.map((r) => {
+      const preview = r.preview ? escapeHtml(String(r.preview).substring(0, 140)) : "";
+      const idAttr = escapeHtml(String(r.id));
+      const countBadge = r.msgCount > 1 ? ` <span class="msg-request-count">${escapeHtml(String(r.msgCount))}</span>` : "";
+      return (
+        `<div class="msg-request-row">` +
+        `<div class="msg-request-meta"><strong>${escapeHtml(r.shortId || r.crowId)}</strong>${countBadge}</div>` +
+        (preview ? `<div class="msg-request-preview">${preview}</div>` : "") +
+        `<div class="msg-request-actions">` +
+        `<form method="POST" action="/dashboard/messages">` +
+        `<input type="hidden" name="action" value="accept_request">` +
+        `<input type="hidden" name="request_id" value="${idAttr}">` +
+        `${csrf || ""}` +
+        `<button type="submit" class="msg-btn-primary">${escapeHtml(t("messages.acceptRequest", lang))}</button>` +
+        `</form>` +
+        `<form method="POST" action="/dashboard/messages">` +
+        `<input type="hidden" name="action" value="decline_request">` +
+        `<input type="hidden" name="request_id" value="${idAttr}">` +
+        `${csrf || ""}` +
+        `<button type="submit" class="msg-btn-secondary">${escapeHtml(t("messages.declineRequest", lang))}</button>` +
+        `</form>` +
+        `</div>` +
+        `</div>`
+      );
+    }).join("");
+    requestsBlock =
+      `<details class="msg-requests-block" open>` +
+      `<summary>${escapeHtml(t("messages.requests", lang).replace("{n}", String(requests.length)))}</summary>` +
+      `<div class="msg-requests-help">${escapeHtml(t("messages.requestsHelp", lang))}</div>` +
+      rows +
+      `</details>`;
+  }
+
   // Build avatar strip items
   const avatarItems = items.map((item) => {
     if (item.type === "ai") {
@@ -115,7 +155,7 @@ export function buildMessagesHTML(data) {
 
   const noChatsLabel = escapeHtml(t("messages.noChats", lang));
 
-  return botInviteCard + browseEntry + `
+  return botInviteCard + requestsBlock + browseEntry + `
     <div class="msg-hub" style="position:relative">
       ${inviteBanner}
       ${botDirModal}

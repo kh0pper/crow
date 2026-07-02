@@ -672,6 +672,38 @@ export function messagesCSS() {
     white-space: nowrap;
   }
   .msg-btn-primary:hover { filter: brightness(1.08); }
+  .msg-btn-secondary {
+    padding: 6px 12px;
+    font-size: 0.8rem;
+    border: 1px solid var(--crow-border);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--crow-text-muted);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .msg-btn-secondary:hover { background: var(--crow-bg-elevated); }
+
+  /* === L6 Message Requests inbox === */
+  .msg-requests-block { border-bottom: 1px solid var(--crow-border); padding: 4px 0; }
+  .msg-requests-block > summary {
+    cursor: pointer; padding: 8px 12px; font-size: 0.85rem; font-weight: 600;
+    color: var(--crow-text); list-style-position: inside;
+  }
+  .msg-requests-help { padding: 0 12px 6px; font-size: 0.72rem; color: var(--crow-text-muted); }
+  .msg-request-row { padding: 8px 12px; border-top: 1px solid var(--crow-border); }
+  .msg-request-meta { font-size: 0.8rem; color: var(--crow-text); }
+  .msg-request-count {
+    display: inline-block; min-width: 16px; padding: 0 5px; margin-left: 4px;
+    border-radius: 8px; background: var(--crow-accent); color: #fff;
+    font-size: 0.65rem; line-height: 16px; text-align: center;
+  }
+  .msg-request-preview {
+    font-size: 0.75rem; color: var(--crow-text-muted); margin: 4px 0 8px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .msg-request-actions { display: flex; gap: 8px; }
+  .msg-request-actions form { margin: 0; }
 
   /* === Bot Directory Browse Entry + Modal === */
   .msg-browse-bots { padding:8px 12px; cursor:pointer; font-size:0.8rem; color:var(--crow-text-muted); border-bottom:1px solid var(--crow-border); }
