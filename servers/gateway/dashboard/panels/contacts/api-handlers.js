@@ -92,6 +92,32 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
     return { redirect: "/dashboard/contacts" };
   }
 
+  // R4: repair/add a real Crow contact by pasting its Crow ID + public keys.
+  // Delegates to the crow_add_contact tool (idempotent insert/promote/merge),
+  // which does the sync/DHT/Nostr wiring in-process.
+  if (action === "add_by_id") {
+    const crowId = (req.body.crow_id || "").trim();
+    const secp = (req.body.secp256k1_pubkey || "").trim();
+    if (!crowId || !secp) return { redirect: "/dashboard/contacts" };
+    try {
+      const client = await sharingClientFactory();
+      try {
+        await client.callTool({
+          name: "crow_add_contact",
+          arguments: {
+            crow_id: crowId,
+            secp256k1_pubkey: secp,
+            ed25519_pubkey: (req.body.ed25519_pubkey || "").trim() || undefined,
+            display_name: (req.body.name || "").trim() || undefined,
+          },
+        });
+      } finally { try { await client.close?.(); } catch {} }
+    } catch (err) {
+      console.error("[contacts] add_by_id failed:", err.message);
+    }
+    return { redirect: "/dashboard/contacts" };
+  }
+
   // --- Edit contact ---
   if (action === "edit_contact" && req.body.contact_id) {
     const fields = [];

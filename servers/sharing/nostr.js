@@ -30,6 +30,7 @@ import * as nip19 from "nostr-tools/nip19";
 import { Relay } from "nostr-tools/relay";
 import { safeRelayPublish } from "./safe-relay-publish.js";
 import { makeResilientSub } from "./resilient-subscribe.js";
+import { readIncomingSince, persistIncomingCursor } from "./contact-promote.js";
 
 // Heavily-operated public relays, each verified (2026-07-02) to accept an
 // anonymous kind-4 publish (a throwaway-key connect+publish probe). Dropped
@@ -389,7 +390,7 @@ export class NostrManager {
     const ownPubkey = this.pubkey?.length === 66 ? this.pubkey.slice(2) : this.pubkey;
     const seenEventIds = new Set();
 
-    const incomingSince = Math.floor(Date.now() / 1000) - 86400; // Last 24h only
+    const incomingSince = await readIncomingSince(this.db, Math.floor(Date.now() / 1000));
     for (const [url, relay] of this.relays) {
       try {
         const onevent = async (event) => {
@@ -416,7 +417,7 @@ export class NostrManager {
                 const payload = JSON.parse(decrypted);
                 if (payload.type === "invite_accepted" && onInviteAccepted) {
                   handled = true;
-                  await onInviteAccepted(payload);
+                  await onInviteAccepted(payload, senderPubkey);
                 } else if (payload.type === "crow_social" && payload.subtype && onSocialMessage) {
                   handled = true;
                   await onSocialMessage(payload.subtype, payload.payload || {}, senderPubkey);
@@ -439,6 +440,10 @@ export class NostrManager {
                 // Request path must never break the subscription.
               }
             }
+
+            // Advance the durable incoming cursor (monotonic, never throws) so
+            // a restart resumes from here instead of now-24h.
+            await persistIncomingCursor(this.db, event.created_at);
           } catch (decryptErr) {
             // Decryption failed — event not for us or from unknown sender
           }

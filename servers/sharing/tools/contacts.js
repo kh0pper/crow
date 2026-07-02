@@ -8,6 +8,7 @@
 import { z } from "zod";
 import { isKioskActive, kioskBlockedResponse } from "../../shared/kiosk-guard.js";
 import { generateInviteCode, parseInviteCode, parseBotInviteCode, computeSafetyNumber } from "../identity.js";
+import { upsertFullContact } from "../contact-promote.js";
 
 /**
  * Build the DM payload a recipient sends to a bot to accept its invite.
@@ -162,6 +163,35 @@ export function registerContactsTools(server, ctx) {
           content: [{ type: "text", text: `Failed to accept invite: ${err.message}` }],
           isError: true,
         };
+      }
+    }
+  );
+
+  // --- Tool: crow_add_contact (R4 handshake repair) ---
+
+  server.tool(
+    "crow_add_contact",
+    "Repair or add a Crow contact directly from their Crow ID and public keys — the recovery path when an invite handshake half-completed and messages are stuck as requests. Idempotent: completes an existing partial/request contact in place instead of duplicating it.",
+    {
+      crow_id: z.string().max(200).describe("The contact's Crow ID (e.g. crow:abcd1234)"),
+      secp256k1_pubkey: z.string().max(200).describe("Their secp256k1 public key (64- or 66-hex)"),
+      ed25519_pubkey: z.string().max(200).optional().describe("Their ed25519 public key (enables peer sync + room trust)"),
+      display_name: z.string().max(100).optional().describe("Name for this contact"),
+    },
+    async ({ crow_id, secp256k1_pubkey, ed25519_pubkey, display_name }) => {
+      if (await isKioskActive(db)) return kioskBlockedResponse("crow_add_contact");
+      try {
+        // Pass the raw `db` — upsertFullContact only needs `.execute`, and
+        // crow_accept_invite calls `db.execute` on the raw ctx db (contacts.js:78,90).
+        const r = await upsertFullContact(
+          db,
+          { syncManager, peerManager, nostrManager },
+          { crowId: crow_id.trim(), ed25519Pub: (ed25519_pubkey || "").trim(), secp256k1Pub: secp256k1_pubkey.trim(), displayName: display_name?.trim() }
+        );
+        const verb = r.outcome === "created" ? "Added" : r.outcome === "noop" ? "Already connected to" : "Repaired contact";
+        return { content: [{ type: "text", text: `${verb} ${display_name || crow_id} (${r.outcome}).` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Failed to add contact: ${err.message}` }], isError: true };
       }
     }
   );
