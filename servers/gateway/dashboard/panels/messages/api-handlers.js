@@ -207,5 +207,51 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
     return res.redirectAfterPost("/dashboard/messages?openRoom=" + groupId);
   }
 
+  // L6: accept a pending message request. Flips 'pending'→'accepted' (a distinct
+  // GATED state — NOT NULL, so the partial secp-only row can't masquerade as a
+  // full contact in peer-join/sync/room-trust until R4 supplies its identity),
+  // marks its messages read, and (best-effort) opens a per-contact Nostr sub so
+  // replies flow. Unknown / already-handled id = safe no-op redirect.
+  if (action === "accept_request" && req.body.request_id) {
+    const id = parseInt(req.body.request_id, 10);
+    if (Number.isInteger(id)) {
+      const { rows } = await db.execute({
+        sql: "SELECT id, crow_id, secp256k1_pubkey FROM contacts WHERE id = ? AND request_status = 'pending'",
+        args: [id],
+      });
+      if (rows.length > 0) {
+        const c = rows[0];
+        await db.execute({ sql: "UPDATE contacts SET request_status = 'accepted' WHERE id = ?", args: [id] });
+        await db.execute({ sql: "UPDATE messages SET is_read = 1 WHERE contact_id = ?", args: [id] });
+        if (managers?.nostrManager) {
+          try {
+            await managers.nostrManager.subscribeToContact({
+              id: c.id,
+              crow_id: c.crow_id,
+              secp256k1_pubkey: c.secp256k1_pubkey,
+            });
+          } catch (err) {
+            console.error("[messages] accept_request subscribe failed:", err.message);
+          }
+        }
+      }
+    }
+    return res.redirectAfterPost("/dashboard/messages");
+  }
+
+  // L6: decline a pending message request → delete the request contact. CASCADE
+  // drops its messages (and any group memberships). Safe: request rows don't
+  // push-sync, so there's no re-sync race. Unknown id = safe no-op redirect.
+  if (action === "decline_request" && req.body.request_id) {
+    const id = parseInt(req.body.request_id, 10);
+    if (Number.isInteger(id)) {
+      await db.execute({
+        sql: "DELETE FROM contacts WHERE id = ? AND request_status = 'pending'",
+        args: [id],
+      });
+    }
+    return res.redirectAfterPost("/dashboard/messages");
+  }
+
   return false; // Action not handled
 }

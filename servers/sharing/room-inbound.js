@@ -24,7 +24,7 @@ export async function handleInboundRoomEnvelope({ db, nostrManager, identity, su
   if (subtype === "room_join") {
     // Trust: only a KNOWN contact (the host) may pull us into a room. Fail-closed —
     // prevents an unknown sender from auto-creating room rows in our list.
-    const { rows: known } = await db.execute("SELECT secp256k1_pubkey FROM contacts WHERE secp256k1_pubkey IS NOT NULL AND is_blocked = 0");
+    const { rows: known } = await db.execute("SELECT secp256k1_pubkey FROM contacts WHERE secp256k1_pubkey IS NOT NULL AND is_blocked = 0 AND request_status IS NULL");
     if (!known.some((r) => pubkeyMatches(r.secp256k1_pubkey, pk))) { log("room_join drop: unknown signer"); return; }
     const groupId = await ensureLocalRoomForUid(db, {
       roomUid: payload.room_uid, name: payload.room_name, hostCrowId: payload.host_crow_id,
@@ -33,7 +33,7 @@ export async function handleInboundRoomEnvelope({ db, nostrManager, identity, su
     if (Array.isArray(payload.members)) {
       for (const m of payload.members) {
         if (!m || !m.crow_id) continue;
-        const { rows } = await db.execute({ sql: "SELECT id FROM contacts WHERE crow_id = ?", args: [m.crow_id] });
+        const { rows } = await db.execute({ sql: "SELECT id FROM contacts WHERE crow_id = ? AND request_status IS NULL", args: [m.crow_id] });
         if (rows[0]?.id != null) await db.execute({ sql: "INSERT OR IGNORE INTO contact_group_members (group_id, contact_id) VALUES (?,?)", args: [groupId, rows[0].id] });
       }
     }
@@ -52,7 +52,7 @@ export async function handleInboundRoomEnvelope({ db, nostrManager, identity, su
     const signerMember = members.find((m) => pubkeyMatches(m.secp256k1_pubkey, pk));
     let authorized = !!signerMember;
     if (!authorized && room.host_crow_id) {
-      const { rows } = await db.execute({ sql: "SELECT secp256k1_pubkey FROM contacts WHERE crow_id = ?", args: [room.host_crow_id] });
+      const { rows } = await db.execute({ sql: "SELECT secp256k1_pubkey FROM contacts WHERE crow_id = ? AND request_status IS NULL", args: [room.host_crow_id] });
       if (rows[0] && pubkeyMatches(rows[0].secp256k1_pubkey, pk)) authorized = true;
     }
     if (!authorized) { log("room_message drop: signer not member/host of " + payload.room_uid); return; }

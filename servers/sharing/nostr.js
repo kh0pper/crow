@@ -352,9 +352,17 @@ export class NostrManager {
    * Subscribe to all incoming DMs directed at us.
    * Routes message types:
    *   - invite_accepted → onInviteAccepted(payload)
-   *   - crow_social → onSocialMessage(subtype, payload, senderPubkey)
+   *   - crow_social (with subtype) → onSocialMessage(subtype, payload, senderPubkey)
+   *   - ANYTHING ELSE (plaintext, malformed JSON, subtype-less crow_social,
+   *     unknown type) → onMessageRequest(senderPubkey, decrypted, event)
+   *
+   * L6 fix: previously a decrypted DM that was not a recognized JSON envelope
+   * fell through and was silently dropped. Now `handled` tracks whether a real
+   * handler was ACTUALLY INVOKED; if not, the DM routes to onMessageRequest so
+   * nothing vanishes. Every branch is guarded — onevent must NEVER throw (a
+   * throw kills the subscription and breaks all delivery).
    */
-  async subscribeToIncoming(onInviteAccepted, onSocialMessage) {
+  async subscribeToIncoming(onInviteAccepted, onSocialMessage, onMessageRequest) {
     await this.connectRelays();
 
     if (this.relays.size > 0) {
@@ -376,16 +384,41 @@ export class NostrManager {
               senderPubkey
             );
             const decrypted = nip44.v2.decrypt(event.content, conversationKey);
+
+            // `handled` = a real handler was ACTUALLY INVOKED (not merely
+            // "the type string matched"). We set it true at the point we
+            // decide to invoke — BEFORE the await — so that a handler which
+            // itself throws does NOT fall through and get double-processed as
+            // a message request. It stays false for genuine JSON.parse
+            // failures and unrecognized/subtype-less payloads, which then
+            // correctly route to the request path below.
+            let handled = false;
             if (decrypted.startsWith("{")) {
               try {
                 const payload = JSON.parse(decrypted);
                 if (payload.type === "invite_accepted" && onInviteAccepted) {
+                  handled = true;
                   await onInviteAccepted(payload);
                 } else if (payload.type === "crow_social" && payload.subtype && onSocialMessage) {
+                  handled = true;
                   await onSocialMessage(payload.subtype, payload.payload || {}, senderPubkey);
                 }
               } catch {
-                // Not valid JSON or not our message type
+                // Malformed JSON (starts with "{" but JSON.parse threw) OR a
+                // handler threw. If a handler was invoked, `handled` is
+                // already true → we won't double-fire below.
+              }
+            }
+
+            // L6: route everything a real handler did NOT consume —
+            // plaintext, malformed JSON, a subtype-less crow_social — to the
+            // message-request path so no DM is silently dropped. Wrapped in
+            // its own try/catch: onevent must NEVER throw.
+            if (!handled && onMessageRequest) {
+              try {
+                await onMessageRequest(senderPubkey, decrypted, event);
+              } catch {
+                // Request path must never break the subscription.
               }
             }
           } catch (decryptErr) {
