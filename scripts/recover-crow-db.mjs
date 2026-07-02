@@ -235,9 +235,15 @@ for (const { name, sql } of targetTables) {
     report.push([name, "copied", srcCount, info.changes]);
     completeness.push({ name, srcCount });
   } catch (e) {
-    // A copy failure mid-salvage is fatal to completeness — record and let the
-    // gate abort below.
+    // A copy failure on a READABLE table (srcCount>0) is fatal to completeness:
+    // count(*) can traverse the b-tree while a full row read hits a corrupt
+    // leaf/overflow page and throws (SQLITE_CORRUPT). integrity_check on the
+    // fresh target would still be 'ok' (a table merely missing rows is
+    // structurally valid), so we MUST register it as a shortfall so the swap
+    // gate aborts. Recording {name, srcCount} makes the recount below diff
+    // srcCount>0 vs the (0/partial) rows that actually landed.
     report.push([name, "COPY-FAIL:" + e.message.slice(0, 60), srcCount, 0]);
+    completeness.push({ name, srcCount });
     if (name === "crow_instances" && isMalformed(e.message)) crowInstancesSkipped = true;
   }
 }
@@ -321,7 +327,12 @@ log("integrity_check:", JSON.stringify(integ));
 log("copy failures:  ", copyFails.length, copyFails.map((f) => `${f[0]}(${f[1]})`).join(", ") || "(none)");
 log("token:          ", tokenStatus);
 
-const gatePass = integrityOk && shortfalls.length === 0;
+// A COPY-FAIL on a table with readable rows (report src column > 0) is a hard
+// abort even if — belt-and-suspenders — the recount somehow matched. Skipped
+// tables (cross_host_calls/mcp_sessions) never reach the copy path so they
+// can't trip this. report row shape: [name, status, srcCount, copiedCount].
+const readableCopyFail = copyFails.some((r) => r[2] > 0);
+const gatePass = integrityOk && shortfalls.length === 0 && !readableCopyFail;
 
 if (!gatePass) {
   log("");
@@ -329,6 +340,10 @@ if (!gatePass) {
   if (shortfalls.length) {
     log("❌ row-count completeness FAILED — some source rows did not land:");
     for (const s of shortfalls) log("   -", s);
+  }
+  if (readableCopyFail) {
+    log("❌ a READABLE source table failed to copy (partial corruption — rows countable but not readable):");
+    for (const r of copyFails.filter((x) => x[2] > 0)) log(`   - ${r[0]} (src=${r[2]}): ${r[1]}`);
   }
   log("");
   log("Rebuilt (rejected) DB left for inspection at:", TEMP);

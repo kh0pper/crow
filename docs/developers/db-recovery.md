@@ -54,7 +54,11 @@ Flags:
    - every readable source table's row count exactly matches the copied count
      (a partially-readable source can't yield an "ok" but lossy DB).
    Any shortfall prints a loud diff and **aborts without swapping**; the
-   rejected rebuild is left on disk for inspection.
+   rejected rebuild is left on disk for inspection. A **COPY-FAIL on a readable
+   table** (its `count(*)` succeeds but a full row read throws `SQLITE_CORRUPT`
+   on a corrupt leaf/overflow page — the classic partial-corruption case) also
+   aborts, since `integrity_check` on the fresh target would otherwise pass on a
+   table that is simply missing its rows.
 7. **Swap** — atomically renames the rebuilt file over `<db>` and removes the
    stale `-wal`/`-shm`. Prints a runbook, every row count, and — if
    `crow_instances` had to be dropped — a **loud "federation peers must
