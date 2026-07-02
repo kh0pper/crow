@@ -42,11 +42,28 @@ export function registerMessagingTools(server, ctx) {
 
       try {
         const delivery = await nostrManager.sendMessage(contactRow, message);
+        const relayCount = delivery?.relays?.length || 0;
+        const target = contactRow.display_name || contactRow.crow_id;
+        // A 0-relay publish is a delivery FAILURE, not a silent success: the
+        // event reached no relay, so the recipient can never receive it.
+        if (relayCount === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Message could NOT be delivered — reached 0 relays. Check your connection / relay settings.",
+              },
+            ],
+            isError: true,
+          };
+        }
+        // A partial publish (>=1 of N) stays a success: publish-acceptance by at
+        // least one relay is the deliverability signal we have pre-R5-ack.
         return {
           content: [
             {
               type: "text",
-              text: `Message sent to ${contactRow.display_name || contactRow.crow_id} via ${delivery.relays.length} relay(s).`,
+              text: `Message delivered to ${target} via ${relayCount} relay(s).`,
             },
           ],
         };

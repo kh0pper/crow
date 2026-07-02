@@ -274,6 +274,10 @@ export const translations = {
   "messages.contactNotFound": { en: "Contact not found", es: "Contacto no encontrado" },
   "messages.reply": { en: "Reply", es: "Responder" },
   "messages.replyingTo": { en: "Replying to", es: "Respondiendo a" },
+  // R2 Task 4 — persisted delivery-status indicator on thread reload.
+  "messages.notDelivered": { en: "not delivered", es: "no entregado" },
+  "messages.deliveryRelayed": { en: "Relayed to at least one relay", es: "Retransmitido a al menos un repetidor" },
+  "messages.deliveryDelivered": { en: "Delivered", es: "Entregado" },
   "messages.you": { en: "You", es: "Tú" },
   "messages.them": { en: "Them", es: "Ellos" },
   "messages.attachFile": { en: "Attach file", es: "Adjuntar archivo" },
