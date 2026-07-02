@@ -197,6 +197,12 @@ export const translations = {
   "signals.backup.neverIssue": { en: "Backups aren't set up yet", es: "Las copias de seguridad aún no están configuradas" },
   "signals.backup.staleIssue": { en: "Last backup was {n} days ago", es: "La última copia de seguridad fue hace {n} días" },
 
+  "signals.federationAudit.label": { en: "Federation audit", es: "Auditoría de federación" },
+  "signals.federationAudit.ok": { en: "logging", es: "registrando" },
+  "signals.federationAudit.degraded": { en: "paused", es: "en pausa" },
+  "signals.federationAudit.issue": { en: "The federation audit database is corrupted — federation still works, but audit logging is paused. Run npm run recover-db to rebuild it.", es: "La base de datos de auditoría de federación está dañada — la federación sigue funcionando, pero el registro de auditoría está en pausa. Ejecuta npm run recover-db para reconstruirla." },
+  "signals.federationAudit.action": { en: "How to recover", es: "Cómo recuperar" },
+
   // ─── Nest Panel ───
   "nest.pinned": { en: "Pinned", es: "Fijados" },
   "nest.instances": { en: "Instances", es: "Instancias" },
