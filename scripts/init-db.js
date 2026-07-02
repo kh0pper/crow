@@ -547,6 +547,12 @@ await initTable("messages table", `
   CREATE INDEX IF NOT EXISTS idx_messages_read ON messages(is_read);
 `);
 
+// R2 Task 2: honest delivery feedback for sent DMs. Nullable, no CHECK — keep
+// addColumn simple and forward-compatible with a future 'delivered' ack (R5).
+// Values: pending / relayed / failed / delivered (received rows stay NULL —
+// they are inherently delivered; no query filters on this column for them).
+await addColumnIfMissing("messages", "delivery_status", "TEXT");
+
 await initTable("relay_config table", `
   CREATE TABLE IF NOT EXISTS relay_config (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

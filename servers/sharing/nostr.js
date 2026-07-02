@@ -163,14 +163,24 @@ export class NostrManager {
       }
     }
 
-    // Cache locally
+    // Cache locally. delivery_status reflects the honest publish outcome above
+    // ('relayed' when >=1 relay accepted, 'failed' when 0). Best-effort: the
+    // event was already published (or not) to relays above, so a local-cache
+    // write failure must not throw out of sendMessage and lose that outcome
+    // for the caller (see Global Constraints in the R2 plan).
     const contactId = contact.id || contact.contact_id;
+    const deliveryStatus = published.length > 0 ? "relayed" : "failed";
     if (contactId && this.db) {
-      await this.db.execute({
-        sql: `INSERT INTO messages (contact_id, nostr_event_id, content, direction, is_read, created_at)
-              VALUES (?, ?, ?, 'sent', 1, datetime('now'))`,
-        args: [contactId, event.id, content],
-      });
+      try {
+        await this.db.execute({
+          sql: `INSERT INTO messages (contact_id, nostr_event_id, content, direction, is_read, delivery_status, created_at)
+                VALUES (?, ?, ?, 'sent', 1, ?, datetime('now'))`,
+          args: [contactId, event.id, content, deliveryStatus],
+        });
+      } catch (err) {
+        // Local-cache write failed — the message was still (or wasn't)
+        // published above; don't let a DB error mask that outcome.
+      }
     }
 
     return {
