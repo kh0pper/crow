@@ -111,6 +111,20 @@ export function renderContactList(contacts, groups, filters, lang) {
     </form>
   </details>`;
 
+  // Add/repair by Crow ID form (R4: recovery path for a half-completed handshake)
+  const addByIdForm = `<details style="margin-bottom:1rem">
+    <summary style="cursor:pointer;font-size:0.85rem;color:var(--crow-accent);font-weight:500">${t("contacts.addById", lang)}</summary>
+    <form method="POST" style="margin-top:0.75rem;padding:1rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px">
+      <input type="hidden" name="action" value="add_by_id">
+      <p style="font-size:0.8rem;color:var(--crow-text-muted);margin:0 0 0.75rem">${t("contacts.addByIdHint", lang)}</p>
+      ${formField(t("contacts.fieldCrowId", lang), "crow_id", { required: true, placeholder: "crow:abcd1234" })}
+      ${formField(t("contacts.fieldSecpKey", lang), "secp256k1_pubkey", { required: true, placeholder: t("contacts.secpPlaceholder", lang) })}
+      ${formField(t("contacts.fieldEd25519Key", lang), "ed25519_pubkey", { placeholder: t("contacts.ed25519Placeholder", lang) })}
+      ${formField(t("contacts.fieldName", lang), "name", { placeholder: t("contacts.namePlaceholder", lang) })}
+      <button type="submit" class="btn btn-primary" style="margin-top:0.5rem">${t("contacts.addByIdButton", lang)}</button>
+    </form>
+  </details>`;
+
   let gridHtml;
   if (contacts.length === 0) {
     gridHtml = `<div class="contacts-empty">
@@ -143,7 +157,7 @@ export function renderContactList(contacts, groups, filters, lang) {
   // Import modal
   const importModal = renderImportModal(lang);
 
-  return toolbar + addForm + gridHtml + importModal;
+  return toolbar + addForm + addByIdForm + gridHtml + importModal;
 }
 
 // ──────────────────────────────────────────────
