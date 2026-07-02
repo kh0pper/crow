@@ -42,7 +42,7 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
 
     const contactIdentifier = rows[0].display_name || rows[0].crow_id;
     try {
-      const client = await getSharingClient();
+      const client = await sharingClientFactory();
       await client.callTool({
         name: "crow_send_message",
         arguments: { contact: contactIdentifier, message: req.body.message },
@@ -100,7 +100,7 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
 
   if (action === "generate_invite") {
     try {
-      const client = await getSharingClient();
+      const client = await sharingClientFactory();
       const result = await client.callTool({
         name: "crow_generate_invite",
         arguments: {},
@@ -120,7 +120,7 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
 
   if (action === "accept_invite" && req.body.invite_code) {
     try {
-      const client = await getSharingClient();
+      const client = await sharingClientFactory();
       await client.callTool({
         name: "crow_accept_invite",
         arguments: { invite_code: req.body.invite_code.trim() },
