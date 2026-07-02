@@ -31,9 +31,17 @@ import { Relay } from "nostr-tools/relay";
 import { safeRelayPublish } from "./safe-relay-publish.js";
 import { makeResilientSub } from "./resilient-subscribe.js";
 
-const DEFAULT_RELAYS = [
+// Heavily-operated public relays, each verified (2026-07-02) to accept an
+// anonymous kind-4 publish (a throwaway-key connect+publish probe). Dropped
+// from the candidate set: wss://relay.nostr.band (connect timeout — did not
+// respond over plain WebSocket either) and wss://offchain.pub (connects, but
+// rejects anonymous writes: "Policy violated and pubkey is not in our web of
+// trust"). These are always a floor for connectRelays()/getConfiguredRelays()
+// — see the merge behavior below — so one flaky relay is never a SPOF.
+export const DEFAULT_RELAYS = [
   "wss://relay.damus.io",
   "wss://nos.lol",
+  "wss://relay.primal.net",
 ];
 
 export class NostrManager {
@@ -71,7 +79,7 @@ export class NostrManager {
   }
 
   async _doConnectRelays(customRelays) {
-    const relayUrls = customRelays || DEFAULT_RELAYS;
+    const relayUrls = customRelays || (await this.getConfiguredRelays());
 
     // Connect to relays in parallel with a per-relay timeout
     const results = await Promise.allSettled(
@@ -443,19 +451,45 @@ export class NostrManager {
   }
 
   /**
-   * Get configured relays from DB.
+   * Get configured relays: DEFAULT_RELAYS merged with any enabled user-added
+   * relay_config rows (deduped, case-insensitively, by exact URL). Defaults
+   * are ALWAYS a floor — this must never shrink to just the config rows,
+   * or an install that ran crow_add_relay once would drop to a single relay
+   * (the SPOF this fixes). Never throws: any DB error falls back to
+   * DEFAULT_RELAYS so a broken relay_config read can't break connectRelays().
    */
   async getConfiguredRelays() {
     if (!this.db) return DEFAULT_RELAYS;
 
-    const result = await this.db.execute({
-      sql: `SELECT relay_url FROM relay_config
-            WHERE relay_type = 'nostr' AND enabled = 1`,
-      args: [],
-    });
+    let configured = [];
+    try {
+      const result = await this.db.execute({
+        sql: `SELECT relay_url FROM relay_config
+              WHERE relay_type = 'nostr' AND enabled = 1`,
+        args: [],
+      });
+      configured = result.rows.map((r) => r.relay_url);
+    } catch (err) {
+      console.warn("[nostr] getConfiguredRelays: DB read failed, falling back to DEFAULT_RELAYS:", err?.message);
+      return DEFAULT_RELAYS;
+    }
 
-    if (result.rows.length === 0) return DEFAULT_RELAYS;
-    return result.rows.map((r) => r.relay_url);
+    const seen = new Set();
+    const merged = [];
+    for (const url of [...DEFAULT_RELAYS, ...configured]) {
+      const key = url.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(url);
+    }
+    return merged;
+  }
+
+  /**
+   * URLs of currently-connected relays.
+   */
+  connectedRelayUrls() {
+    return [...this.relays.keys()];
   }
 
   /**
