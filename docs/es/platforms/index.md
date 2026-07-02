@@ -17,6 +17,15 @@ Crow usa el estándar abierto [Model Context Protocol (MCP)](https://modelcontex
 | [Cline](./cline) | stdio / HTTP | Varía | Fácil | Compatible |
 | [Qwen Code](./qwen-coder) | stdio / HTTP | OAuth 2.1 | Fácil | Compatible |
 
+## Apps móviles
+
+La tabla anterior cubre los clientes MCP (asistentes de IA que se conectan a las herramientas de Crow). Crow también tiene acceso móvil dedicado al propio panel del Crow's Nest:
+
+| Plataforma | Método de instalación | Estado |
+|---|---|---|
+| [Aplicación Android](./android) | APK nativo, o PWA vía Chrome | Totalmente probado |
+| [iPhone (PWA)](./ios) | App web instalable vía Safari (sin App Store) | Totalmente probado |
+
 ## Endpoints MCP
 
 Cada ruta es relativa a la URL de tu gateway (por ejemplo, `http://crow:3001`). Cada servidor está disponible vía Streamable HTTP en `<prefix>/mcp` y vía SSE legado en `<prefix>/sse` + `<prefix>/messages`:
