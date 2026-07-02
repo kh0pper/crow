@@ -44,3 +44,21 @@ test("messages handlePostAction routes accept_bot_invite to the sharing tool and
   assert.equal(calls[0], "/dashboard/messages", "redirects back to messages");
   assert.equal(sharingClientFactory.toolCalls[0]?.name, "crow_accept_bot_invite", "routes to the bot-invite tool via the injected factory");
 });
+
+test("messages handlePostAction send_peer honors the injected sharingClientFactory (no real runtime)", async () => {
+  const { handlePostAction } = await import("../servers/gateway/dashboard/panels/messages/api-handlers.js");
+  // Regression guard: the send_peer branch used to call getSharingClient()
+  // directly, ignoring the injectable factory and starting the real sharing
+  // runtime (live relay sockets). Prove the injected stub is the one used.
+  const sharingClientFactory = makeStubSharingFactory();
+  const calls = [];
+  const req = { body: { action: "send_peer", contact_id: "7", message: "hello there" } };
+  const res = { redirectAfterPost: (u) => { calls.push(u); res.headersSent = true; } };
+  const db = { execute: async () => ({ rows: [{ display_name: "Alice", crow_id: "crow:alice0001" }] }) };
+  await handlePostAction(req, res, { db, sharingClientFactory });
+  assert.equal(calls[0], "/dashboard/messages", "redirects back to messages");
+  const sent = sharingClientFactory.toolCalls[0];
+  assert.equal(sent?.name, "crow_send_message", "send_peer went through the injected factory");
+  assert.equal(sent?.arguments?.contact, "Alice");
+  assert.equal(sent?.arguments?.message, "hello there");
+});
