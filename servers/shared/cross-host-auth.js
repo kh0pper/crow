@@ -216,16 +216,134 @@ export function verifyRequest({ method, path, body, headers, signingKey, skewMs 
 }
 
 // -----------------------------------------------------------------------
-// Audit logging
+// Audit logging + corruption circuit-breaker
 // -----------------------------------------------------------------------
+//
+// The `cross_host_calls` audit table has now corrupted TWICE the same way
+// (2026-06-14, 2026-07-02): an unbounded high-write table whose crash-mid-
+// write orphaned pages, then spammed 40k "disk image is malformed" errors
+// while federation degraded SILENTLY for days. This breaker converts that
+// silent-degradation failure mode into a LOUD, self-limiting one:
+//
+//   • Structural insert errors (malformed / not-a-database / disk image /
+//     disk I/O / SQLITE_IOERR) increment a counter. Past a threshold the
+//     breaker OPENS: subsequent audit inserts short-circuit (skip the
+//     INSERT) so we stop feeding the corruption.
+//   • On trip we fire a LOUD alert. CRITICAL: the alert must NOT depend on
+//     a write to the corrupt DB — `createNotification` (notifications.js:63)
+//     INSERTs to the same crow.db BEFORE it sends ntfy/email, so those loud
+//     channels never fire when the DB is malformed. We therefore call the
+//     DB-free push exports DIRECTLY (sendNtfyNotification / sendEmailNotif).
+//   • Transient SQLITE_BUSY does NOT trip it.
+//   • The alert re-arms after a ~6h cooldown so a days-long degradation
+//     re-alerts instead of going silent after the first ping.
+//
+// Per-process singleton: assumes ONE crow.db file per process (true on this
+// fleet). All flags reset on process restart (and via _resetAuditBreaker()).
+// -----------------------------------------------------------------------
+
+const AUDIT_STRUCTURAL_RE = /malformed|not a database|disk image|disk I\/O|SQLITE_IOERR/i;
+const AUDIT_TRIP_THRESHOLD = 3;
+const AUDIT_ALERT_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6h re-arm
+
+let _auditStructuralCount = 0;
+let _auditDisabled = false;
+let _auditNotified = false;
+let _auditNotifiedAt = 0;
+
+// Injectable clock (test hook) so the 6h re-arm is deterministic in tests.
+let _auditNow = () => Date.now();
+
+// Overridable alert channels (test hook). Production leaves this null and
+// dynamic-imports the REAL DB-free push modules — NOT notifications.js.
+let _auditAlertChannels = null;
+
+/**
+ * Resolve the DB-free alert channels. Exported so a test can assert the
+ * default wiring points at gateway/push/{ntfy,email}.js (NOT createNotification,
+ * which writes to the corrupt DB first — the round-2 review bug this guards).
+ */
+export async function _loadAlertChannels() {
+  if (_auditAlertChannels) return _auditAlertChannels;
+  const [ntfy, email] = await Promise.all([
+    import("../gateway/push/ntfy.js"),
+    import("../gateway/push/email.js"),
+  ]);
+  return {
+    sendNtfyNotification: ntfy.sendNtfyNotification,
+    sendEmailNotification: email.sendEmailNotification,
+  };
+}
+
+/**
+ * Fire the loud corruption alert if due (one-shot with 6h re-arm). Never
+ * throws — a push/email failure must never propagate into the auth path.
+ */
+async function fireCorruptionAlertIfDue() {
+  const now = _auditNow();
+  if (_auditNotified && (now - _auditNotifiedAt) < AUDIT_ALERT_COOLDOWN_MS) return;
+  _auditNotified = true;
+  _auditNotifiedAt = now;
+  try {
+    const ch = await _loadAlertChannels();
+    const payload = {
+      title: "Federation audit DB is corrupted",
+      body: "Federation audit DB is corrupted — run `npm run recover-db`; federation still works, audit logging paused.",
+      url: "/dashboard/nest",
+      priority: "high", // high → the email channel actually sends
+      type: "system",
+    };
+    // Route through BOTH DB-free channels directly (no createNotification).
+    await ch.sendNtfyNotification(payload);
+    await ch.sendEmailNotification(payload);
+  } catch (err) {
+    // A push/email failure must never break federation auth.
+    console.warn(`[cross-host-auth] corruption alert failed: ${err?.message}`);
+  }
+}
+
+/** True when the audit breaker is open (structural corruption detected). */
+export function isAuditDegraded() {
+  return _auditDisabled;
+}
+
+/** Test hook: clear counter + _auditDisabled + _notified + cooldown + clock. */
+export function _resetAuditBreaker() {
+  _auditStructuralCount = 0;
+  _auditDisabled = false;
+  _auditNotified = false;
+  _auditNotifiedAt = 0;
+  _auditNow = () => Date.now();
+}
+
+/** Test hook: override the alert channels (stub ntfy/email). */
+export function _setAlertChannels(channels) {
+  _auditAlertChannels = channels;
+}
+
+/** Test hook: override the clock used for the 6h re-arm cooldown. */
+export function _setAuditClock(fn) {
+  _auditNow = fn || (() => Date.now());
+}
 
 /**
  * Record a cross-host call attempt in the cross_host_calls table.
  *
- * Never throws: audit failure must not break the primary action.
+ * Never throws: audit failure must not break the primary action. When the
+ * corruption breaker is open, the INSERT is skipped entirely (and the alert
+ * re-arms if the cooldown has elapsed).
  */
 export async function auditCrossHostCall(db, record) {
   if (!db) return;
+
+  // Breaker open — stop feeding the corruption; skip the INSERT.
+  if (_auditDisabled) {
+    // Re-arm the loud alert if the cooldown elapsed (days-long degradation
+    // must re-alert; once disabled no inserts run so the error path can't).
+    await fireCorruptionAlertIfDue();
+    return;
+  }
+
   try {
     await db.execute({
       sql: `INSERT INTO cross_host_calls
@@ -248,8 +366,17 @@ export async function auditCrossHostCall(db, record) {
       ],
     });
   } catch (err) {
-    // Swallow — audit must not break the primary path
+    // Swallow — audit must not break the primary path.
     console.warn(`[cross-host-auth] audit write failed: ${err.message}`);
+    // Only STRUCTURAL corruption trips the breaker; transient SQLITE_BUSY
+    // (contention) must not.
+    if (AUDIT_STRUCTURAL_RE.test(err?.message || "")) {
+      _auditStructuralCount++;
+      if (!_auditDisabled && _auditStructuralCount >= AUDIT_TRIP_THRESHOLD) {
+        _auditDisabled = true;
+        await fireCorruptionAlertIfDue();
+      }
+    }
   }
 }
 
