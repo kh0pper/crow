@@ -17,7 +17,7 @@
 - **XSS discipline**: every interpolated user/tool value in HTML goes through `escapeHtml` (from `servers/gateway/dashboard/shared/components.js:5`) — the R2 review standard.
 - **Never instantiate the sharing client from render code** — QR/share building happens in panel *loaders/handlers*; `peer-invite-ui.js` renderers are pure sync string functions (the QW2 live-socket trap).
 - **The invite code NEVER appears in a URL query or server log** — fragment (`#`) only in links; `console.error` lines must not echo `req.body.invite_code`.
-- **Kiosk guards unchanged**: `crow_generate_invite`/`crow_accept_invite` already kiosk-guard in `servers/sharing/tools/contacts.js:44`/accept path — panels call the tools, so no new guard code, but nothing may bypass the tools.
+- **Kiosk guards**: `crow_generate_invite` kiosk-guards at `servers/sharing/tools/contacts.js:44`; **`crow_accept_invite` does NOT (pre-existing gap)** — Task 1 adds the guard as the handler's first line, so every new accept surface (Contacts section, `?invite=` deep link) is covered. Nothing may bypass the tools.
 - **i18n**: every new user-visible string in `servers/gateway/dashboard/shared/i18n.js` with BOTH `en` and `es`. The static page carries its own bilingual strings (it is not a gateway render).
 - **The network-exposure invariant is untouched**: NO new gateway routes, NO Funnel changes. The static page lives in `docs/public/` (GitHub Pages), not on any gateway.
 - Branch: `feat/messages-p2-invite-links` (base = the spec/plan commits on `main`). Design spec: `docs/superpowers/specs/2026-07-03-messages-phase2-contact-add-ux-design.md` (§PR1).
@@ -217,13 +217,14 @@ import { buildInviteUrl, extractInviteCode } from "../invite-url.js";
       };
 ```
 
-(c) In `crow_accept_invite`'s handler, make the very FIRST line of the handler body (before kiosk check is fine, before any parse) normalize the input:
+(c) In `crow_accept_invite`'s handler (`server.tool` at `:67`, body from `:74`), make the FIRST TWO lines of the handler body:
 
 ```js
+      if (await isKioskActive(db)) return kioskBlockedResponse("crow_accept_invite");
       invite_code = extractInviteCode(invite_code);
 ```
 
-(so a pasted URL works from any MCP client, not just the dashboard).
+The kiosk guard is NEW — the accept handler is currently unguarded (verified: only `crow_generate_invite:44`, `crow_add_contact:182`, `crow_accept_bot_invite:209` guard today), and this plan widens the accept surface, so the guard ships with it. `isKioskActive`/`kioskBlockedResponse` are already imported in this file (used at `:44`). `invite_code` is a destructured parameter (reassignment legal). The extraction makes a pasted URL work from any MCP client, not just the dashboard.
 
 - [ ] **Step 6: Sanity-run the neighboring sharing tests**
 
@@ -567,7 +568,7 @@ import { renderInviteShare, renderPeerInviteForms } from "../../shared/peer-invi
     personInviteCard = personInvite.fromId
       ? `<div class="msg-person-invite-card" style="margin:12px;padding:12px;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px">` +
         `<div style="font-size:0.85rem;font-weight:600;margin-bottom:6px">${t("invite.connectWith", lang)} ${escapeHtml(personInvite.fromId)}?</div>` +
-        `<form method="POST">` +
+        `<form method="POST" action="/dashboard/messages">` +
         `<input type="hidden" name="action" value="accept_invite">` +
         `<input type="hidden" name="invite_code" value="${escapeHtml(personInvite.code)}">` +
         `${personInvite.csrf || ""}` +
@@ -654,11 +655,11 @@ import { extractInviteCode } from "../../../../sharing/invite-url.js";
 (a) Add to imports at the top:
 
 ```js
-import { buildInviteShare } from "./shared/peer-invite-ui.js";
+import { buildInviteShare } from "../shared/peer-invite-ui.js";
 import { extractInviteCode } from "../../../sharing/invite-url.js";
 ```
 
-(NOTE: `messages.js` lives at `panels/messages.js`, so shared is `./shared/…` — mirror the file's existing relative imports; it already imports from `../../../sharing/identity.js` at `:72`, use the same depth for `invite-url.js`.)
+(NOTE: `messages.js` lives at `panels/messages.js`; the shared dir is a SIBLING of `panels/`, so the specifier is `../shared/…` — exactly like the file's existing `../shared/csrf.js` import at `:18`. The sharing depth matches its existing `../../../sharing/identity.js` dynamic import at `:72`.)
 
 (b) After the bot-invite parse block (`:67-78`), add the person-invite parse:
 
@@ -712,8 +713,8 @@ git show --stat HEAD
 - Test: `tests/contacts-peer-add.test.js`
 
 **Interfaces:**
-- Consumes: Task 2 renderers; Task 1 `extractInviteCode`; the file's own `makeSharingClient()` (`api-handlers.js:20-27`).
-- Produces: `handleContactAction` may return `{ inviteResult }` or `{ inviteError }` (new, alongside the existing `{ redirect }`/`{ download }`); `renderContactList(contacts, groups, filters, lang, peerAdd)` gains an optional 5th param `peerAdd = { inviteShare, inviteError }` (default `{}` — all existing call sites keep working).
+- Consumes: Task 2 renderers; Task 1 `extractInviteCode`; the handler's injectable `sharingClientFactory` param (signature `handleContactAction(req, db, { sharingClientFactory = makeSharingClient } = {})` at `api-handlers.js:33` — same injection `add_by_id` uses at `:103`).
+- Produces: `handleContactAction` may return `{ inviteResult }` or `{ inviteError }` (new, alongside the existing `{ redirect }`/`{ download }`); `renderContactList(contacts, groups, filters, lang, peerAdd)` gains an optional 5th param `peerAdd = { inviteShare, inviteError, csrf }` (default `{}` — all existing call sites keep working).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -769,13 +770,13 @@ Expected: FAIL (no add-peer section yet).
 import { extractInviteCode } from "../../../../sharing/invite-url.js";
 ```
 
-(b) Inside `handleContactAction`, beside the `add_by_id` block (`:98-119`), add two actions following the same client pattern:
+(b) Inside `handleContactAction`, beside the `add_by_id` block (`:98-119`), add two actions using the handler's injectable `sharingClientFactory` param (same as `add_by_id` at `:103` — it defaults to `makeSharingClient`, and keeps the actions handler-level testable):
 
 ```js
   // P2/C1+C3: full peer-add from the Contacts panel — generate an invite…
   if (action === "generate_invite") {
     try {
-      const client = await makeSharingClient();
+      const client = await sharingClientFactory();
       try {
         const result = await client.callTool({ name: "crow_generate_invite", arguments: {} });
         const text = result.content?.[0]?.text || "";
@@ -792,7 +793,7 @@ import { extractInviteCode } from "../../../../sharing/invite-url.js";
   if (action === "accept_invite" && req.body.invite_code) {
     try {
       const code = extractInviteCode(req.body.invite_code);
-      const client = await makeSharingClient();
+      const client = await sharingClientFactory();
       try {
         const result = await client.callTool({ name: "crow_accept_invite", arguments: { invite_code: code } });
         if (result?.isError) return { inviteError: result.content?.[0]?.text || "Invite could not be accepted." };
@@ -807,11 +808,14 @@ import { extractInviteCode } from "../../../../sharing/invite-url.js";
 
 - [ ] **Step 4: Thread results through the loader `contacts.js`**
 
-(a) Add to imports at the top:
+(a) Add to imports at the top (beside the existing `../shared/components.js` import at `:15`):
 
 ```js
-import { buildInviteShare } from "./shared/peer-invite-ui.js";
+import { buildInviteShare } from "../shared/peer-invite-ui.js";
+import { csrfInput } from "../shared/csrf.js";
 ```
+
+(`contacts.js` lives in `panels/`; shared is a sibling dir → `../shared/…`, same as its existing shared imports.)
 
 (b) In the POST block (`:28-36`), capture invite results:
 
@@ -831,9 +835,10 @@ import { buildInviteShare } from "./shared/peer-invite-ui.js";
       }
       if (result?.inviteError) peerAdd.inviteError = result.inviteError;
     }
+    peerAdd.csrf = csrfInput(req);
 ```
 
-(declare `let peerAdd = {}` BEFORE the `if` so it's in scope for rendering below.)
+(declare `let peerAdd = {}` BEFORE the `if` so it's in scope for rendering below; `peerAdd.csrf` makes the Contacts forms robust with Turbo disabled, matching the Messages side — the shared component behaves identically in both panels.)
 
 (c) Pass it to the list render — the `renderContactList(contacts, groups, filters, lang)` call in the default/all view becomes `renderContactList(contacts, groups, filters, lang, peerAdd)`.
 
@@ -850,7 +855,7 @@ import { renderInviteShare, renderPeerInviteForms } from "../../shared/peer-invi
 (c) After `addByIdForm` (`:115-124`), build the section:
 
 ```js
-  const peerForms = renderPeerInviteForms({ lang });
+  const peerForms = renderPeerInviteForms({ lang, csrf: peerAdd.csrf || "" });
   const peerAddSection = `<details class="contacts-add-peer" style="margin-bottom:1rem"${peerAdd.inviteShare || peerAdd.inviteError ? " open" : ""}>
     <summary style="cursor:pointer;font-size:0.85rem;color:var(--crow-accent);font-weight:500">${t("contacts.addPeer", lang)}</summary>
     <div style="margin-top:0.75rem;padding:1rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px">
@@ -1097,7 +1102,7 @@ git show --stat HEAD
 - [ ] **Step 1: Full suite**
 
 Run: `node --test tests/ 2>&1 | tail -5`
-Expected: 0 fail (982 baseline + ~24 new from Tasks 1–5).
+Expected: 0 fail (982 baseline + 27 new from Tasks 1–5 ≈ 1009).
 
 - [ ] **Step 2: Isolated gateway boot**
 
