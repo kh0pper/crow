@@ -13,7 +13,7 @@
 - **Commit with a positional path arg**: `git commit <path> -m "..."`, never `git add <path> && git commit` (bare). For NEW files, `git add <thatpath>` first, then `git commit <thatpath> ... -m`. Verify with `git show --stat HEAD` after each commit. Substantial untracked WIP in the tree (`bundles/`, `bots/`, `scripts/`) must never be swept.
 - **`git pull --rebase` before any push** — parallel sessions push to `main`.
 - **Never attribute Claude as a co-author**; never add Claude as a contributor.
-- **Tests**: `node --test tests/<file>.test.js`. Full suite must stay green (`node --test tests/` — 961/961 on `main` as of `5f8356f1`; this plan adds ~15).
+- **Tests**: `node --test tests/<file>.test.js`. Full suite must stay green (`node --test tests/` — 961/961 on `main` as of `5f8356f1`; this plan adds 21: 5 receive-health + 4 hooks + 5 decouple + 7 signal).
 - **No schema migration in this plan.** Do NOT touch `servers/shared/schema-version.js` or `scripts/init-db.js`.
 - **Never throw on the receive path**: `onevent` closures and everything they call stay throw-proof. New health-module calls inside `onevent` must be bare synchronous one-liners on a module that cannot throw.
 - **Never instantiate the sharing client from gateway code** — `health-signals.js` may import ONLY the new pure `receive-health.js` from `servers/sharing/` (no `nostr.js`, no `boot.js`): transitively importing the live client spins up relay sockets that keep the process alive (hung the suite 44 min pre-QW2).
@@ -492,7 +492,10 @@ test("moved ladder keeps its free variables in scope (invite/social/request driv
     () => h.onSocial("room_message", {}, "d".repeat(64)),
     "onSocial(room_message)",
   );
-  // bot_relay → handleIncomingBotRelay(payload, db, identity, nostrManager) — references `identity`
+  // bot_relay → early-returns on target_instance mismatch (exercises the
+  // resolveLocalInstanceName/db path only; the `identity` free variable is
+  // covered by the room_message drive above, which evaluates it in the
+  // argument object before the callee runs)
   await assertNoReferenceError(
     () => h.onSocial("bot_relay", { target_instance: "nope", sender_instance: "x" }, "d".repeat(64)),
     "onSocial(bot_relay)",
@@ -516,8 +519,9 @@ test("startNostrReceive: backoff is capped at maxMs and never rejects", async ()
   let pending = null;
   const schedule = (fn, ms) => { scheduled.push(ms); pending = fn; };
   await startNostrReceive(managers, { baseMs: 1000, maxMs: 4000, schedule });
-  // Drive the retries manually.
-  for (let i = 0; i < 5; i++) { const fn = pending; pending = null; await fn(); }
+  // Drive the retries manually: initial attempt scheduled push #1; 4 more
+  // attempts (all still throwing) push #2-#5. 5 attempts total, throwsLeft 6→1.
+  for (let i = 0; i < 4; i++) { const fn = pending; pending = null; await fn(); }
   assert.deepEqual(scheduled, [1000, 2000, 4000, 4000, 4000], "capped at maxMs");
   assert.equal(getReceiveHealth().receiveWired, false);
   assert.match(getReceiveHealth().lastError, /relay wiring boom/);
@@ -956,7 +960,7 @@ git show --stat HEAD
 - [ ] **Step 1: Full suite**
 
 Run: `node --test tests/ 2>&1 | tail -15`
-Expected: ALL PASS (961 baseline + ~16 new). Zero regressions.
+Expected: ALL PASS (961 baseline + 21 new = 982). Zero regressions.
 
 - [ ] **Step 2: Isolated gateway boot + live-signal spot-check**
 
@@ -1004,6 +1008,8 @@ Then confirm the nest shows the **Messages** signal `ok` with the relay count (d
 - **Type consistency:** `setReceiveWired(ok, err)` / `getReceiveHealth()` shapes match across Tasks 1→2→3; `messagesSignal(db, lang, nowFn)` matches its `collectHealthSignals` call; i18n keys in Task 3 Steps 3/4 match 1:1. ✓
 
 ## Review
+
+**Round 2 (2026-07-03, adversarial opus subagent): REVISE → all addressed. Round-1 fixes BOTH VERIFIED correct and complete** (destructure covers every free variable of the moved ladder — full identifier enumeration of `boot.js:384–513` confirmed `instanceSyncManager` appears only in the non-moving instance-sync tail; the ladder-scope test genuinely catches the critical because each free variable is evaluated in the argument-building expression in caller scope, so a `ReferenceError` fires before any tolerated stub-db error). Also verified: the room_message drive can't hang (stub db → `getRoomByUid` null → early return after one db call) and `room-inbound.js`'s import chain is socket/timer-free (no QW2 trap). New findings, all fixed: **[IMPORTANT]** the backoff-cap test drove 6 attempts against a 5-element expected array (off-by-one; loop corrected to `i < 4` → 5 attempts, `receiveWired` stays false); **[MINOR]** the bot_relay drive early-returns before `handleIncomingBotRelay` so it never exercises `identity` — comment corrected (identity coverage = the room_message drive); **[MINOR]** stale new-test totals (~15/~16 → 21: 5+4+5+7; full-suite expectation 982).
 
 **Round 1 (2026-07-03, adversarial opus subagent): REVISE — all findings addressed:**
 1. **[CRITICAL, fixed]** `wireNostrReceive` destructured only `{ db, nostrManager }` while the moved ladder references `syncManager`/`peerManager` (`boot.js:385`), `identity` (`boot.js:477,497`), and `managers` itself (`boot.js:505`) — a ReferenceError silently swallowed by `subscribeToIncoming`'s `handled=true` try/catch would have broken R4 invite promotion. Destructure corrected to all five + `managers` kept in scope; rationale comment added at the destructure site.
