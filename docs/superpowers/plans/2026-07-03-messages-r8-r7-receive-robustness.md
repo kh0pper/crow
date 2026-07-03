@@ -346,6 +346,8 @@ and its decrypt-failure catch (`nostr.js:540–542`):
 
 These are bare synchronous calls on a zero-import module — they cannot throw and cannot block `onevent`.
 
+**Known observability limit (accepted, per spec "mirror of `relays.size`"):** the count reflects the last `_doConnectRelays` run — `connectRelays` short-circuits once the Map is populated (`nostr.js:82`) and the PR #115 health loop reconnects via `relay.connect()` without repopulating the Map, so a post-boot total socket loss does NOT drop the number to 0 (the health loop is the recovery for that case). A live `relay.connected`-filtered count is a logged follow-up, not this plan.
+
 - [ ] **Step 8: Run both test files to verify pass**
 
 Run: `node --test tests/receive-health.test.js tests/nostr-receive-health-hooks.test.js`
@@ -418,13 +420,26 @@ function stubManagers({ startRejects = false, incomingThrows = 0 } = {}) {
     instanceSyncManager: { localInstanceId: "inst-test" },
     nostrManager: {
       subscribeToContact: async (c) => { calls.subscribeToContact.push(c.crow_id); },
-      subscribeToIncoming: async () => {
+      subscribeToIncoming: async (onInvite, onSocial, onRequest) => {
         if (throwsLeft > 0) { throwsLeft--; throw new Error("relay wiring boom"); }
         calls.subscribeToIncoming++;
+        calls.handlers = { onInvite, onSocial, onRequest }; // captured for ladder-scope tests
       },
     },
   };
   return { managers, calls };
+}
+
+// The scope-trap detector (review round 1): a too-narrow destructure in
+// wireNostrReceive makes a ladder branch throw ReferenceError on its free
+// variables (syncManager/peerManager/identity). Stub-db failures are tolerated;
+// a ReferenceError is the bug.
+async function assertNoReferenceError(fn, label) {
+  try {
+    await fn();
+  } catch (err) {
+    assert.ok(!(err instanceof ReferenceError), `${label}: ladder scope broken — ${err.message}`);
+  }
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 20));
@@ -459,6 +474,39 @@ test("startNostrReceive: wiring failure sets receiveWired=false and retries with
   assert.equal(calls.subscribeToIncoming, 1, "third attempt succeeds");
   assert.deepEqual(scheduled, [1000, 2000], "exponential backoff from baseMs");
   assert.equal(getReceiveHealth().receiveWired, true);
+});
+
+test("moved ladder keeps its free variables in scope (invite/social/request drive without ReferenceError)", async () => {
+  _resetReceiveHealth();
+  const { managers, calls } = stubManagers();
+  await wireNostrReceive(managers);
+  const h = calls.handlers;
+  assert.ok(h, "stub must capture the three subscribeToIncoming callbacks");
+  // invite_accepted → handleInviteAccepted(db, { syncManager, peerManager, nostrManager }, …)
+  await assertNoReferenceError(
+    () => h.onInvite({ type: "invite_accepted", crow_id: "crow:x", secp: "02" + "d".repeat(64) }, "d".repeat(64)),
+    "onInviteAccepted",
+  );
+  // room_message → handleInboundRoomEnvelope({ db, nostrManager, identity, … }) — references `identity`
+  await assertNoReferenceError(
+    () => h.onSocial("room_message", {}, "d".repeat(64)),
+    "onSocial(room_message)",
+  );
+  // bot_relay → handleIncomingBotRelay(payload, db, identity, nostrManager) — references `identity`
+  await assertNoReferenceError(
+    () => h.onSocial("bot_relay", { target_instance: "nope", sender_instance: "x" }, "d".repeat(64)),
+    "onSocial(bot_relay)",
+  );
+  // reaction → createNotification-only branch
+  await assertNoReferenceError(
+    () => h.onSocial("reaction", { emoji: "+1", sender_name: "X" }, "d".repeat(64)),
+    "onSocial(reaction)",
+  );
+  // message-request fallback → handleIncomingRequest(db, managers, …) — references `managers`
+  await assertNoReferenceError(
+    () => h.onRequest("d".repeat(64), "plain text", { id: "evt1" }),
+    "onMessageRequest",
+  );
 });
 
 test("startNostrReceive: backoff is capped at maxMs and never rejects", async () => {
@@ -504,7 +552,14 @@ import { setReceiveWired } from "./receive-health.js";
  * replaces any prior handle per subscription key.
  */
 export async function wireNostrReceive(managers) {
-  const { db, nostrManager } = managers;
+  // The handler ladder references ALL of these free names (review round 1
+  // critical): handleInviteAccepted uses syncManager/peerManager (boot.js:385),
+  // handleIncomingBotRelay + handleInboundRoomEnvelope use identity
+  // (boot.js:477,497), handleIncomingRequest takes the whole `managers`
+  // (boot.js:505). Destructuring too few silently breaks invite promotion —
+  // the ReferenceError is swallowed by subscribeToIncoming's handled=true
+  // try/catch (nostr.js:508-521).
+  const { db, identity, peerManager, syncManager, nostrManager } = managers;
 
   try {
     const contacts = await db.execute({
@@ -574,6 +629,8 @@ export function startNostrReceive(managers, opts = {}) {
 }
 ```
 
+*(Accepted, per review round 1 minor: the retry chain has no disarm — unref'd timers can't hold the process open, the gateway's `NostrManager` lives for the process lifetime, and tests inject `schedule` so no real timers leak. A disarm handle wired to `destroy()` is a logged follow-up, not this plan.)*
+
 **Move semantics for the ladder:** the three callback bodies currently passed to `nostrManager.subscribeToIncoming` inside the `.then()` block (`boot.js:384–513`, ending at `console.log("[sharing] Subscribed to incoming Nostr messages")`) move **unchanged** into `wireNostrReceive`. The old `try { ... } catch { console.warn("Failed to subscribe...") }` wrapper is **dropped** — the throw now propagates to `startNostrReceive` (which records + retries). Also **delete** the stale trailing comment at `boot.js:816–817` ("subscribeToIncoming is now set up inside peerManager.start().then()...") — it becomes false.
 
 **(c)** In `initSharingRuntime`, immediately BEFORE `peerManager.start().then(...)` (`boot.js:335`), add:
@@ -625,7 +682,7 @@ export function startNostrReceive(managers, opts = {}) {
 - [ ] **Step 5: Run the decouple tests**
 
 Run: `node --test tests/boot-receive-decouple.test.js`
-Expected: PASS (4/4). If the `initSharingRuntime` test trips on a stub gap (the function also assigns `peerManager.onInstanceConnected/onPeerConnected/onPeerData/localInstanceId/getFeedKeyForInstance/onInstanceKeyReceived` — plain property assignments that a plain object absorbs), extend the stub minimally rather than weakening the assertions.
+Expected: PASS (5/5). If the `initSharingRuntime` test trips on a stub gap (the function also assigns `peerManager.onInstanceConnected/onPeerConnected/onPeerData/localInstanceId/getFeedKeyForInstance/onInstanceKeyReceived` — plain property assignments that a plain object absorbs), extend the stub minimally rather than weakening the assertions.
 
 - [ ] **Step 6: Run every suite that touches the moved code**
 
@@ -948,7 +1005,13 @@ Then confirm the nest shows the **Messages** signal `ok` with the relay count (d
 
 ## Review
 
-*(2-round adversarial review record — to be filled before execution.)*
+**Round 1 (2026-07-03, adversarial opus subagent): REVISE — all findings addressed:**
+1. **[CRITICAL, fixed]** `wireNostrReceive` destructured only `{ db, nostrManager }` while the moved ladder references `syncManager`/`peerManager` (`boot.js:385`), `identity` (`boot.js:477,497`), and `managers` itself (`boot.js:505`) — a ReferenceError silently swallowed by `subscribeToIncoming`'s `handled=true` try/catch would have broken R4 invite promotion. Destructure corrected to all five + `managers` kept in scope; rationale comment added at the destructure site.
+2. **[IMPORTANT, fixed]** No test exercised the moved ladder, so #1 would have shipped undetected. Added the ladder-scope test: the stub captures the three real callbacks and drives `invite_accepted`, `room_message`, `bot_relay`, `reaction`, and the request fallback, asserting no `ReferenceError` (stub-db failures tolerated).
+3. **[MINOR, noted]** `relaysConnected` reflects the last `_doConnectRelays` run — a post-boot total socket loss doesn't drop it to 0 (`connectRelays` short-circuits at `nostr.js:82`; the PR #115 health loop reconnects without repopulating the Map). Accepted per spec ("mirror of relays.size"); live-count = logged follow-up. Boot-time all-relays-fail IS covered honestly (verified: `_doConnectRelays` never throws, `subscribeToIncoming` no-ops on an empty Map → `receiveWired=true` + `relaysConnected=0` → warn row 3 fires — the L9-adjacent case).
+4. **[MINOR, noted]** `startNostrReceive` retry chain has no disarm — accepted (unref'd, process-lifetime manager, tests inject `schedule`); disarm-on-destroy = logged follow-up.
+5. **[MINOR, confirmed intended]** the monitor notification title is the descriptive `issueLabel` (`post-listen.js:242-249`, `health-signals.js:630`); monitor path verified allowlist-free — every `severity==="warn"` issue notifies, new signal included automatically.
+Reviewer verified sound: idempotent re-subscribe close-and-replace both paths + `nostr_event_id` UNIQUE re-delivery guard; `makeResilientSub` wrapper invokes the real `onevent` synchronously through decrypt; `readIncomingSince`/`persistIncomingCursor` null-db safe; `initSharingRuntime` stub survival (only `ensureColumn` + property assignments outside the `.then`); `t()` returns key on miss; import path + zero-import chain socket-free; no `SCHEMA_GENERATION` bump needed.
 
 ## Execution & Final Review
 
