@@ -203,6 +203,18 @@ export const translations = {
   "signals.federationAudit.issue": { en: "The federation audit database is corrupted — federation still works, but audit logging is paused. Run npm run recover-db to rebuild it.", es: "La base de datos de auditoría de federación está dañada — la federación sigue funcionando, pero el registro de auditoría está en pausa. Ejecuta npm run recover-db para reconstruirla." },
   "signals.federationAudit.action": { en: "How to recover", es: "Cómo recuperar" },
 
+  "signals.messages.label": { en: "Messages", es: "Mensajes" },
+  "signals.messages.off": { en: "not active", es: "no activo" },
+  "signals.messages.down": { en: "not receiving", es: "sin recibir" },
+  "signals.messages.downIssue": { en: "Crow isn't receiving messages — the receive path failed to start and is retrying. Messages sent to you are held on relays until it recovers.", es: "Crow no está recibiendo mensajes — la ruta de recepción no pudo iniciarse y está reintentando. Los mensajes que te envíen quedan retenidos en los relés hasta que se recupere." },
+  "signals.messages.noRelays": { en: "no relays", es: "sin relés" },
+  "signals.messages.noRelaysIssue": { en: "No message relays are connected — Crow can't send or receive messages right now.", es: "No hay relés de mensajes conectados — Crow no puede enviar ni recibir mensajes ahora mismo." },
+  "signals.messages.action": { en: "Open Messages", es: "Abrir Mensajes" },
+  "signals.messages.relays": { en: "{n} relays", es: "{n} relés" },
+  "signals.messages.lastIn": { en: "last in {age}", es: "último hace {age}" },
+  "signals.messages.pending": { en: "{n} pending out", es: "{n} salientes pendientes" },
+  "signals.messages.undecryptable": { en: "{n} undecryptable", es: "{n} indescifrables" },
+
   // ─── Nest Panel ───
   "nest.pinned": { en: "Pinned", es: "Fijados" },
   "nest.instances": { en: "Instances", es: "Instancias" },
