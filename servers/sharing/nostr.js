@@ -30,6 +30,7 @@ import * as nip19 from "nostr-tools/nip19";
 import { Relay } from "nostr-tools/relay";
 import { safeRelayPublish } from "./safe-relay-publish.js";
 import { makeResilientSub } from "./resilient-subscribe.js";
+import { setRelaysConnected, markInbound, markDecryptFailure } from "./receive-health.js";
 import { readIncomingSince, persistIncomingCursor } from "./contact-promote.js";
 import { shouldEnqueue, enqueueRetry, dueRetries, recordAttempt, buildDeliveryReceipt, normalizePubkey } from "./retry-queue.js";
 
@@ -118,6 +119,7 @@ export class NostrManager {
       }
     }
 
+    setRelaysConnected(this.relays.size);
     return [...this.relays.keys()];
   }
 
@@ -341,6 +343,7 @@ export class NostrManager {
               contactPubkey
             );
             const decrypted = nip44.v2.decrypt(event.content, conversationKey);
+            markInbound();
 
             if (decrypted.startsWith("{")) {
               try {
@@ -394,6 +397,7 @@ export class NostrManager {
             }
           } catch (err) {
             // Decryption failed — not for us or corrupted
+            markDecryptFailure();
           }
         };
         const handle = makeResilientSub(
@@ -495,6 +499,7 @@ export class NostrManager {
               senderPubkey
             );
             const decrypted = nip44.v2.decrypt(event.content, conversationKey);
+            markInbound();
 
             // `handled` = a real handler was ACTUALLY INVOKED (not merely
             // "the type string matched"). We set it true at the point we
@@ -538,6 +543,7 @@ export class NostrManager {
             await persistIncomingCursor(this.db, event.created_at);
           } catch (decryptErr) {
             // Decryption failed — event not for us or from unknown sender
+            markDecryptFailure();
           }
         };
         const handle = makeResilientSub(
