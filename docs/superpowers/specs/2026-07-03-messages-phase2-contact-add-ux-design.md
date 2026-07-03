@@ -78,7 +78,11 @@ inverse (client-side JS uses the same convention). The code rides the URL
 
 ### 2. Static invite page (docs site)
 
-New `docs/invite.md` (EN; ES twin per docs i18n convention) with inline JS:
+New `docs/public/invite/index.html` — a self-contained verbatim static file
+(VitePress copies `docs/public/` to the site root untouched, so it serves at
+`https://maestro.press/software/crow/invite/`; a markdown page can't carry
+plain inline `<script>` — VitePress treats those as Vue SFC blocks). Bilingual
+EN/ES in one page (JS toggle), inline CSS, zero external resources:
 - Reads `location.hash`; if a code is present, shows it in a monospace block
   with a **Copy** button and two paths:
   - "Have Crow? Open your dashboard → Messages → Accept invite → paste."
