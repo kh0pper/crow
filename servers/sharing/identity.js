@@ -301,7 +301,7 @@ export function generateInviteCode(identity, opts = {}) {
     crowId: identity.crowId,
     expires,
   };
-  if (opts.inviteId) payloadObj.inviteId = String(opts.inviteId);
+  if (typeof opts.inviteId === "string" && opts.inviteId) payloadObj.inviteId = String(opts.inviteId);
   const payload = Buffer.from(JSON.stringify(payloadObj)).toString("base64url");
 
   const hmac = createHmac("sha256", identity.ed25519Priv)
