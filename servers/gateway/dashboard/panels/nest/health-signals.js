@@ -25,6 +25,7 @@ import { homedir } from "node:os";
 import { t } from "../../shared/i18n.js";
 import { PUBLIC_FUNNEL_PREFIXES } from "../../../funnel.js";
 import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
+import { getReceiveHealth } from "../../../../sharing/receive-health.js";
 
 // ─── Module-level 30s cache ───────────────────────────────────────────────────
 
@@ -577,6 +578,62 @@ function federationAuditSignal(lang) {
   };
 }
 
+// Messages receive-path health (R8+R7). Reads the pure receive-health module —
+// NEVER the sharing client (importing the live client opens relay sockets).
+// Warn ONLY on a dead receive path or zero relays; a quiet mailbox, queued
+// outbound retries, and decrypt failures are display-only, never issues.
+function formatAge(ms) {
+  const min = Math.floor(ms / 60_000);
+  if (min < 1) return "now";
+  if (min < 60) return `${min}m`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+async function messagesSignal(db, lang, nowFn) {
+  const h = getReceiveHealth();
+  const label = t("signals.messages.label", lang);
+  const action = { actionLabel: t("signals.messages.action", lang), actionHref: "/dashboard/messages" };
+
+  if (h.receiveWired === null) {
+    return { id: "messages", severity: null, state: "off", label, value: t("signals.messages.off", lang) };
+  }
+  if (h.receiveWired === false) {
+    return {
+      id: "messages", severity: "warn", state: "warn", label,
+      value: t("signals.messages.down", lang),
+      issueLabel: t("signals.messages.downIssue", lang), ...action,
+    };
+  }
+  if (h.relaysConnected === 0) {
+    return {
+      id: "messages", severity: "warn", state: "warn", label,
+      value: t("signals.messages.noRelays", lang),
+      issueLabel: t("signals.messages.noRelaysIssue", lang), ...action,
+    };
+  }
+
+  // Healthy — everything below is display-only.
+  let pendingOut = 0;
+  try {
+    const { rows } = await db.execute({ sql: "SELECT COUNT(*) AS n FROM message_retry_queue", args: [] });
+    pendingOut = Number(rows[0]?.n ?? 0);
+  } catch {} // table missing / DB hiccup → just omit the count
+
+  const parts = [t("signals.messages.relays", lang).replace("{n}", String(h.relaysConnected))];
+  if (h.lastInboundAt) {
+    parts.push(t("signals.messages.lastIn", lang).replace("{age}", formatAge(nowFn() - h.lastInboundAt)));
+  }
+  if (pendingOut > 0) {
+    parts.push(t("signals.messages.pending", lang).replace("{n}", String(pendingOut)));
+  }
+  if (h.decryptFailures > 0) {
+    parts.push(t("signals.messages.undecryptable", lang).replace("{n}", String(h.decryptFailures)));
+  }
+  return { id: "messages", severity: null, state: "ok", label, value: parts.join(" · ") };
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 /**
@@ -606,6 +663,7 @@ export async function collectHealthSignals(db, opts = {}) {
     exposureSignal(lang, nowFn),
     integrationsSignal(db, lang),
     federationAuditSignal(lang),
+    messagesSignal(db, lang, nowFn),
   ].map(p => Promise.resolve(p).catch(err => ({
     id: "unknown",
     severity: null,
