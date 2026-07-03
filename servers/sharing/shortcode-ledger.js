@@ -18,16 +18,31 @@
 const KEY = "sharing:shortcode_invites";
 export const LEDGER_TTL_MS = 72 * 60 * 60 * 1000;
 
+// inviteId is attacker-controlled (echoed from a NIP-44-decrypted invite_accepted
+// payload sent by any authenticated contact). It must never be used to index a
+// plain object: an id of "__proto__"/"constructor"/"prototype" would let a
+// sender pollute Object.prototype process-wide (CWE-1321). Defense in depth:
+// (1) the ledger itself is a null-prototype object below, so even a magic key
+// can't resolve onto Object.prototype, and (2) these ids are rejected outright
+// before ever touching the ledger.
+const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function isValidInviteId(inviteId) {
+  return typeof inviteId === "string" && inviteId.length > 0 && !DANGEROUS_KEYS.has(inviteId);
+}
+
 async function loadLedger(db) {
   try {
     const res = await db.execute({
       sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [KEY],
     });
-    if (!res.rows.length) return {};
+    if (!res.rows.length) return Object.create(null);
     const parsed = JSON.parse(res.rows[0].value);
-    return parsed && typeof parsed === "object" ? parsed : {};
+    return parsed && typeof parsed === "object"
+      ? Object.assign(Object.create(null), parsed)
+      : Object.create(null);
   } catch {
-    return {}; // corrupt/missing → self-heal empty
+    return Object.create(null); // corrupt/missing → self-heal empty
   }
 }
 
@@ -50,6 +65,7 @@ async function saveLedger(db, ledger) {
 }
 
 export async function recordShortInvite(db, inviteId, codeExpiresAt) {
+  if (!isValidInviteId(inviteId)) return; // bogus/dangerous id: caller bug, not a use case
   const now = Date.now();
   const ledger = prune(await loadLedger(db), now);
   ledger[inviteId] = { state: "outstanding", codeExpiresAt, recordedAt: now };
@@ -57,9 +73,11 @@ export async function recordShortInvite(db, inviteId, codeExpiresAt) {
 }
 
 export async function consumeShortInvite(db, inviteId) {
+  if (!isValidInviteId(inviteId)) return "unknown"; // never index the ledger with a dangerous key
   const now = Date.now();
   const ledger = prune(await loadLedger(db), now);
-  const entry = ledger[inviteId];
+  const hasEntry = Object.prototype.hasOwnProperty.call(ledger, inviteId);
+  const entry = hasEntry ? ledger[inviteId] : undefined;
   if (!entry) { await saveLedger(db, ledger); return "unknown"; }
   if (entry.state === "consumed") { await saveLedger(db, ledger); return "replayed"; }
   // C1(b): the inviter stops honoring a short code after its 10-min window,

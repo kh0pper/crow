@@ -82,6 +82,27 @@ test("corrupt ledger JSON self-heals to empty", async () => {
   assert.equal(await consumeShortInvite(db, "y"), "consumed");
 });
 
+// CWE-1321 regression: inviteId is attacker-controlled (echoed from a
+// NIP-44-decrypted invite_accepted payload). "__proto__"/"constructor" must
+// never be usable to pollute Object.prototype, whether via the read side
+// (ledger["__proto__"] silently resolving to Object.prototype) or the write
+// side (ledger["__proto__"] = {...} landing on Object.prototype globally).
+test("proto-pollution: __proto__ inviteId is rejected, never pollutes Object.prototype", async () => {
+  const db = makeDb();
+  await recordShortInvite(db, "__proto__", Date.now() + 1000);
+  assert.equal(await consumeShortInvite(db, "__proto__"), "unknown");
+  assert.equal(Object.prototype.state, undefined);
+  assert.equal(({}).state, undefined);
+});
+
+test("proto-pollution: constructor inviteId is rejected, never pollutes Object.prototype", async () => {
+  const db = makeDb();
+  await recordShortInvite(db, "constructor", Date.now() + 1000);
+  assert.equal(await consumeShortInvite(db, "constructor"), "unknown");
+  assert.equal(Object.prototype.state, undefined);
+  assert.equal(({}).state, undefined);
+});
+
 test("generateInviteCode: additive inviteId + expiresInMs round-trip", async () => {
   // Identity fixture pattern from tests/crow-messages-editor.test.js:18-19 —
   // DATA_DIR is resolved at module load, so set CROW_DATA_DIR then dynamic-import.
