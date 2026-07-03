@@ -295,7 +295,12 @@ export function registerContactsTools(server, ctx) {
 
         // I1 FAIL-CLOSED: two DISTINCT rendezvous payloads under one code key
         // means someone else published under the same derived key — a MITM
-        // attempt. Refuse rather than newest-wins.
+        // attempt. Refuse rather than newest-wins. This is a TRIPWIRE, not a
+        // guarantee: a code-cracker who floods >limit relays with their OWN
+        // single payload can bury the honest event so only one distinct code is
+        // seen. That regime already presupposes a cracked code, where the
+        // safety number (PR3) is the real backstop; this catches the naive
+        // competing-publish, which is the common accidental/low-effort case.
         const distinctCodes = new Set(parsed.map((p) => p.inviteCode));
         if (distinctCodes.size > 1) {
           console.warn("[sharing] short-code: multiple distinct rendezvous events — refusing");
