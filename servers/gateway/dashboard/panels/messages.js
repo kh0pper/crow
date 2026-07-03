@@ -16,7 +16,7 @@ import { messagesClientJS } from "./messages/client.js";
 import { handlePostAction } from "./messages/api-handlers.js";
 import { getUnifiedConversationList, getBotDirectory, getMessageRequests } from "./messages/data-queries.js";
 import { csrfInput } from "../shared/csrf.js";
-import { buildInviteShare } from "../shared/peer-invite-ui.js";
+import { buildInviteShare, parseShortCodeResult } from "../shared/peer-invite-ui.js";
 import { extractInviteCode } from "../../../sharing/invite-url.js";
 
 export default {
@@ -99,6 +99,12 @@ export default {
       try { inviteShare = await buildInviteShare(req._inviteResult); } catch {}
     }
 
+    // Short-code pairing result (P2/C2) — parsed sync, no QR/network involved.
+    let shortCodeShare = null;
+    if (req._shortCodeResult) {
+      try { shortCodeShare = parseShortCodeResult(req._shortCodeResult); } catch {}
+    }
+
     const css = messagesCSS();
     const html = buildMessagesHTML({
       items,
@@ -114,6 +120,7 @@ export default {
       csrf: csrfInput(req),
       inviteShare,
       personInvite,
+      shortCodeShare,
     });
     const js = messagesClientJS({ aiConfigured, storageAvailable, lang });
 
