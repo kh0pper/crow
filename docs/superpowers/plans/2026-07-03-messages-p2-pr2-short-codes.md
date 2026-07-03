@@ -6,7 +6,7 @@
 
 **Architecture:** Four pieces. (1) **`servers/sharing/short-code.js`** — pure crypto module: Crockford-base32 code generation (12 chars = 60 bits), normalization, async `crypto.scrypt` key derivation (N=2¹⁷, r=8 — memory-hard per the master-plan guardrail), and the NIP-44 self-encrypted rendezvous envelope (kind:4 self-DM authored by the code-derived key — kind:4 deliberately, so the maestro relay's allowlist carries it and all 4 relays serve rendezvous). (2) **Single-use ledger** — `servers/sharing/shortcode-ledger.js` on the existing `dashboard_settings` table (NO schema change): the short-code invite's standard inner code carries an additive `inviteId` nonce; the acceptor's `invite_accepted` echoes it; the inviter's `handleInviteAccepted` consumes it once and rejects replays. (3) **Tools** — `crow_generate_short_invite` / `crow_accept_short_invite` (kiosk-guarded), with the existing `crow_accept_invite` body extracted VERBATIM into a shared `acceptInviteCore` both accept paths call, plus two small `NostrManager` methods (`publishRendezvousEvent`, `fetchLatestByAuthor`). (4) **UI** — the PR1 shared component gains a "Use a short code instead" surface in both panels.
 
-**THREAT MODEL (this PR gets the hardest adversarial review):** the rendezvous event sits on PUBLIC relays and the code-derived key is also the event's signing key. An attacker who cracks the code inside the expiry window can decrypt the payload (privacy leak: inviter's pubkeys + a standard invite code) and publish a competing event under the same key (pairing MITM). **The KDF salt is a fixed product constant** (the code is the only shared secret — no per-invite salt is possible), so the memory-hard cost is a ONE-TIME, amortizable precomputation over the whole code space, NOT a per-attack cost — a fixed-salt design does not let memory-hardness "defeat" brute-force, it only sets the size of a one-time table. Defenses, layered and honestly costed: **60-bit entropy** (12 Crockford chars × 5 bits, `crypto.randomBytes`) — the floor is raised from the spec's 40-bit MINIMUM specifically because the fixed salt makes 2⁴⁰ precomputable (~12k core-years, ~9 TB table — feasible for a well-funded adversary); 2⁶⁰ precomputation is ~10⁷ core-years and an exabyte-scale table, infeasible for anyone. × **memory-hard KDF** (scrypt N=2¹⁷ r=8 — blunts GPU/ASIC parallelism, raising the per-eval cost of that precompute) × **~10-minute expiry** (enforced THREE ways: the encrypted envelope's `expires`, acceptor-side; the SHORT inner-invite expiry so the inner code is dead via any path after 10 min; and the inviter's ledger `codeExpiresAt` cutoff) × **inviter-side single-use after authentication** (the first AUTHENTICATED `invite_accepted` echoing the `inviteId` wins; replays rejected) × **acceptor fail-closed on a compromised code** (two distinct rendezvous events under one code key → "get a fresh code") × **safety number named in the UI as the explicit MITM backstop** (with the honest caveat below). Honest limits, stated in code comments and UI copy: single-use is best-effort on the generating instance (see the multi-instance note in Background); the person you speak the code to — and anyone who overhears — holds the secret until it expires; **and the safety-number comparison UI does not land until PR3, so PR2's UI copy points at it as the coming backstop while naming out-of-band verification as the interim advice.**
+**THREAT MODEL (this PR gets the hardest adversarial review):** the rendezvous event sits on PUBLIC relays and the code-derived key is also the event's signing key. An attacker who cracks the code inside the expiry window can decrypt the payload (privacy leak: inviter's pubkeys + a standard invite code) and publish a competing event under the same key (pairing MITM). **The KDF salt is a fixed product constant** (the code is the only shared secret — no per-invite salt is possible), so the memory-hard cost is a ONE-TIME, amortizable precomputation over the whole code space, NOT a per-attack cost — a fixed-salt design does not let memory-hardness "defeat" brute-force, it only sets the size of a one-time table. Defenses, layered and honestly costed: **60-bit entropy** (12 Crockford chars × 5 bits, `crypto.randomBytes`) — the floor is raised from the spec's 40-bit MINIMUM specifically because the fixed salt makes 2⁴⁰ precomputable (~12k core-years, ~9 TB table — feasible for a well-funded adversary); 2⁶⁰ precomputation is ~10¹⁰–10¹¹ core-years and a ~32-exabyte table, infeasible for anyone. × **memory-hard KDF** (scrypt N=2¹⁷ r=8 — blunts GPU/ASIC parallelism, raising the per-eval cost of that precompute) × **~10-minute expiry** (the encrypted envelope's `expires` + the SHORT inner-invite `expires` both bound the ACCEPTOR side to 10 min via any accept path; the inviter's ledger `codeExpiresAt` cutoff bounds the `inviteId`-echoed path. HONEST LIMIT: a code-KNOWER who forges an `invite_accepted` from their OWN identity with `inviteId` OMITTED is authenticated (their secp == their signing key) and the ledger cannot see it — that fresh-forged-pairing case is bounded only by entropy×KDF and the safety-number backstop, NOT by expiry. The expiry legs stop honest-acceptor leaks and authenticated-echo replays, which is what they exist for.) × **inviter-side single-use after authentication** (the first AUTHENTICATED `invite_accepted` echoing the `inviteId` wins; replays rejected) × **acceptor fail-closed on a compromised code** (two distinct rendezvous events under one code key → "get a fresh code") × **safety number named in the UI as the explicit MITM backstop** (with the honest caveat below). Honest limits, stated in code comments and UI copy: single-use is best-effort on the generating instance (see the multi-instance note in Background); the person you speak the code to — and anyone who overhears — holds the secret until it expires; **and the safety-number comparison UI does not land until PR3, so PR2's UI copy points at it as the coming backstop while naming out-of-band verification as the interim advice.**
 
 **Tech Stack:** Node ESM, `crypto.scrypt`/`randomBytes` (built-in), `nostr-tools/pure` (`finalizeEvent`, `getPublicKey`) + `nostr-tools/nip44` (`nip44.v2`) — the import paths `nostr.js` uses (`:22-28`), Node built-in test runner. **No new dependencies. NO schema change → NO `SCHEMA_GENERATION` bump** (stays 3; the ledger lives in `dashboard_settings`); plain-restart deploy.
 
@@ -67,9 +67,9 @@
 
 **Interfaces (later tasks rely on these exact names):**
 - `SHORTCODE_EXPIRY_MS = 10 * 60 * 1000`
-- `generateShortCode(): string` — 8 Crockford chars (no I/L/O/U), from `randomBytes(5)` (5 bytes = 40 bits = 8×5-bit symbols, zero bias).
-- `formatShortCode(code): string` — `"K7Q4-M2X9"` display grouping.
-- `normalizeShortCode(input): string` — uppercase, strip `[-\s]`, map `I→1 L→1 O→0`; returns `""` unless the result is exactly 8 chars of the alphabet.
+- `generateShortCode(): string` — 12 Crockford chars (no I/L/O/U), from `randomBytes(8)` with the low 4 bits dropped (60 bits = 12×5-bit symbols, zero bias).
+- `formatShortCode(code): string` — `"K7Q4-M2X9-3FHT"` display grouping (4s).
+- `normalizeShortCode(input): string` — uppercase, strip `[-\s]`, map `I→1 L→1 O→0`; returns `""` unless the result is exactly 12 chars of the alphabet.
 - `async deriveShortCodeKeys(code, opts = {}): { priv: Buffer, pub: string }` — `scrypt(normalized, "crow-shortcode-invite-v1", 32)` with the Global-Constraints params (opts may override `N` FOR TESTS ONLY — documented as such); `pub` = x-only 64-hex via `getPublicKey(priv)`.
 - `buildRendezvousEvent(keys, payload): Event` — `payload` is `{ inviteCode, expires }`; NIP-44 self-encrypt (`getConversationKey(keys.priv, keys.pub)`), `finalizeEvent({ kind: 4, created_at: now, tags: [["p", keys.pub]], content }, keys.priv)`.
 - `parseRendezvousEvent(event, keys): { inviteCode, expires }` — throws `"not a rendezvous event"` if `event.pubkey !== keys.pub`, throws on decrypt/JSON failure, throws `"short code expired"` when `Date.now() > expires`.
@@ -195,8 +195,8 @@ Create `servers/sharing/short-code.js`:
  * pairing MITM. The salt is a FIXED product constant (the code is the only
  * shared input), so the memory-hard cost is a ONE-TIME precomputation over
  * the whole code space, NOT a per-guess cost — 60 bits (not the spec's 40-bit
- * floor) is chosen so that one-time table is infeasible (~10^7 core-years,
- * exabyte-scale) rather than merely expensive. Layered defenses: 60-bit
+ * floor) is chosen so that one-time table is infeasible (~10^10 core-years,
+ * ~32-exabyte) rather than merely expensive. Layered defenses: 60-bit
  * entropy x memory-hard scrypt x ~10-min expiry (envelope + short inner code
  * + ledger cutoff) x authenticated single-use x acceptor fail-closed on a
  * duplicate-event code x the safety number as the named (PR3) backstop.
@@ -206,7 +206,7 @@ Create `servers/sharing/short-code.js`:
 
 import { randomBytes, scrypt as _scrypt } from "crypto";
 import { promisify } from "util";
-import { finalizeEvent, getPublicKey } from "nostr-tools";
+import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 import * as nip44 from "nostr-tools/nip44";
 
 const scrypt = promisify(_scrypt);
@@ -243,7 +243,7 @@ export function formatShortCode(code) {
 
 /**
  * Uppercase, strip separators, map Crockford confusables (I/L→1, O→0).
- * Returns "" unless the result is EXACTLY 8 alphabet chars (U stays invalid).
+ * Returns "" unless the result is EXACTLY 12 alphabet chars (U stays invalid).
  */
 export function normalizeShortCode(input) {
   if (typeof input !== "string") return "";
@@ -389,6 +389,16 @@ test("a past-codeExpiresAt row returns 'expired', not 'consumed'", async () => {
   assert.equal(await consumeShortInvite(db, "stale"), "expired");
 });
 
+// I2 ordering property (finding 9b): the ledger is consumed only AFTER the R4
+// auth check, so an UNAUTHENTICATED invite_accepted that carries a valid
+// inviteId must NOT burn the token. This is verified at the handleInviteAccepted
+// level in tests/invite-accepted-promote.test.js (see Task 2 Step 6): add a case
+// there where payload.inviteId is set but normalizePubkey(payload.secp) !=
+// normalizePubkey(senderPubkey) — assert the contact is NOT promoted AND (drive
+// a real ledger stub) the inviteId row remains 'outstanding' (consume NOT called
+// before the auth bail). Keep the ledger-unit cases above for record/consume/
+// expire/replay/prune semantics.
+
 test("entries older than LEDGER_TTL_MS are pruned; consumed survives within TTL", async () => {
   const db = makeDb();
   await recordShortInvite(db, "old", Date.now() + 600000);
@@ -436,9 +446,14 @@ test("generateInviteCode: additive inviteId + expiresInMs round-trip", async () 
   const short = generateInviteCode(id, { inviteId: "n-2", expiresInMs: 10 * 60 * 1000 });
   const parsed = parseInviteCode(short);
   assert.equal(parsed.inviteId, "n-2");
-  // parseInviteCode enforces expiry; craft an already-expired one and expect throw
-  const dead = generateInviteCode(id, { expiresInMs: -1 });
-  assert.throws(() => parseInviteCode(dead), /expire/i);
+  // The short inner-invite expiry is ~10 min out, not 24h.
+  assert.ok(parsed.inviteId === "n-2");
+  const ttl = JSON.parse(Buffer.from(short.split(".")[1], "base64url")).expires - Date.now();
+  assert.ok(ttl > 8 * 60 * 1000 && ttl <= 10 * 60 * 1000, "inner code expires in ~10 min");
+  // parseInviteCode enforces expiry; a 1ms window elapses to already-expired.
+  const brief = generateInviteCode(id, { expiresInMs: 1 });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.throws(() => parseInviteCode(brief), /expire/i);
 });
 ```
 
@@ -588,8 +603,10 @@ Read `handleInviteAccepted` (`boot.js:134`) and find the existing authentication
 
 - [ ] **Step 6: Run the tests**
 
+ADD to `tests/invite-accepted-promote.test.js` a case proving I2's ordering: a payload with a valid `inviteId` BUT a forged secp (`normalizePubkey(payload.secp) != normalizePubkey(senderPubkey)`) must bail at the auth check with NO promote AND without consuming the ledger (inject a ledger stub whose `consumeShortInvite` sets a flag; assert the flag is false — the gate runs only after auth passes). Then run:
+
 Run: `node --test tests/shortcode-ledger.test.js tests/invite-accepted-promote.test.js tests/contact-promote.test.js`
-Expected: ALL PASS (the two R4 suites prove the gate does not disturb authenticated promotion — their payloads carry no `inviteId`, so the gate is a no-op for them).
+Expected: ALL PASS (the existing R4 cases carry no `inviteId`, so the gate is a no-op for them; the new negative case proves consume-after-auth).
 
 - [ ] **Step 7: Commit**
 
@@ -610,10 +627,10 @@ git show --stat HEAD
 
 **Interfaces:**
 - `NostrManager.publishRendezvousEvent(event): Promise<string[]>` — `connectRelays()` when empty, then the `safeRelayPublish` loop verbatim from `sendMessage` (`nostr.js:170-176`); returns the `published` url list. NO local message cache, NO retry enqueue (a rendezvous event is not a DM).
-- `NostrManager.fetchRendezvousByAuthor(authorHex, timeoutMs = 5000): Promise<{ events: Event[] }>` — `connectRelays()` when empty; on each connected relay, `relay.subscribe([{ kinds: [4], authors: [authorHex], limit: 4 }], { onevent, onclose })` (NOT `limit:1` — I1: a single event could be the attacker's; we must SEE a competing event to fail closed); collect until every relay reaches EOSE-or-close OR the timeout fires; close all subs (in `finally`); return `{ events }` deduped by `event.id`. Never throws on a single-relay failure. `limit:4` bounds relay work while still surfacing a competing publish. (NIP: `relay.subscribe` fires `oneose`/`onclose` via the resilient wrapper; mirror the RAW-relay subscribe shape from `servers/sharing/resilient-subscribe.js:54` — `{ onevent, onclose }` — NOT `subscribeToContact`, which wraps `makeResilientSub`.)
+- `NostrManager.fetchRendezvousByAuthor(authorHex, timeoutMs = 5000): Promise<{ events: Event[] }>` — `connectRelays()` when empty; on each connected relay, `relay.subscribe([{ kinds: [4], authors: [authorHex], limit: 4 }], { onevent, onclose })` (NOT `limit:1` — I1: a single event could be the attacker's; we must SEE a competing event to fail closed); collect until **every relay has fired `oneose`** (relays send stored events then EOSE; they do NOT close the socket, so `onclose` alone never resolves this) OR the `timeoutMs` cap fires; close all subs (in `finally`); return `{ events }` deduped by `event.id`. **Wire `oneose` explicitly and wait for ALL relays (or the timeout) — NEVER early-resolve on the first relay's EOSE**, or a slightly-later competing publish (the I1 MITM signal) could be missed. Never throws on a single-relay failure (wrap each relay's subscribe in try/catch). `limit:4` bounds relay work while still surfacing a competing publish. Subscribe shape: raw `relay.subscribe([filter], { onevent, oneose })` (mirror `servers/sharing/resilient-subscribe.js:54` for the raw-relay call, but ADD `oneose` — that file wires only `onevent`/`onclose` because it is for long-lived subs; a one-shot query needs `oneose`). NOT `subscribeToContact`, which wraps `makeResilientSub`.
 - `acceptInviteCore({ invite_code, display_name })` — module-level async function inside `tools/contacts.js` holding the CURRENT `crow_accept_invite` body VERBATIM (from `const peer = parseInviteCode…` through the success-return), parameterized only by the already-in-closure `db/identity/syncManager/peerManager/nostrManager`. Two declared changes ONLY: (a) the `acceptancePayload` gains `...(peer.inviteId ? { inviteId: peer.inviteId } : {})`; (b) it returns the same `{ content: [...] }` shapes it does today. `crow_accept_invite`'s handler becomes: kiosk guard → `extractInviteCode` → `try { return await acceptInviteCore(...) } catch → isError` (identical observable behavior). **M3 (accepted, documented):** the inherited already-a-contact early-return (`contacts.js:91-95`) returns without sending `invite_accepted`, so in the short-code path re-accepting a KNOWN identity never consumes the inviter's `inviteId` (it stays `outstanding` until the ledger 10-min `codeExpiresAt` cutoff / 72h TTL). Low impact (re-pairing an already-authenticated contact), and the codeExpiresAt cutoff bounds the outstanding window — leave as-is.
-- Tool `crow_generate_short_invite` (no params): kiosk guard → `generateShortCode()` → `deriveShortCodeKeys(code)` (FULL-strength — no N override) → `randomUUID()` inviteId → `generateInviteCode(identity, { inviteId })` → `recordShortInvite(db, inviteId, expires)` → `buildRendezvousEvent(keys, { inviteCode, expires: Date.now() + SHORTCODE_EXPIRY_MS })` → `publishRendezvousEvent`; `published.length === 0` → `isError` "could not reach any relay — try again or use an invite link"; success text: the FORMATTED code, the expiry in minutes, "speak or type it — don't post it anywhere public", and the safety-number verification pointer. The raw short code appears ONLY in the tool result (never logged).
-- Tool `crow_accept_short_invite` (`{ short_code: z.string().max(32), display_name? }`): kiosk guard → `normalizeShortCode` (empty → friendly `isError` "that doesn't look like a Crow short code") → `deriveShortCodeKeys` → `fetchRendezvousByAuthor(keys.pub)` → let `parsed = events.map(e => tryParse(e, keys)).filter(Boolean)` (each via `parseRendezvousEvent`, wrapped so an expired/tamper event is dropped not thrown). Then:
+- Tool `crow_generate_short_invite` (no params): kiosk guard → `generateShortCode()` → `deriveShortCodeKeys(code)` (FULL-strength — no N override) → `randomUUID()` inviteId → `const expires = Date.now() + SHORTCODE_EXPIRY_MS` → `generateInviteCode(identity, { inviteId, expiresInMs: SHORTCODE_EXPIRY_MS })` (the inner code dies in 10 min via ANY accept path — C1 fix (a); WITHOUT this the inner code silently reverts to the 24h default and the acceptor-side leak window reopens) → `recordShortInvite(db, inviteId, expires)` → `buildRendezvousEvent(keys, { inviteCode, expires: Date.now() + SHORTCODE_EXPIRY_MS })` → `publishRendezvousEvent`; `published.length === 0` → `isError` "could not reach any relay — try again or use an invite link"; success text: the FORMATTED code, the expiry in minutes, "speak or type it — don't post it anywhere public", and the safety-number verification pointer. The raw short code appears ONLY in the tool result (never logged).
+- Tool `crow_accept_short_invite` (`{ short_code: z.string().max(24), display_name? }`): kiosk guard → `normalizeShortCode` (empty → friendly `isError` "that doesn't look like a Crow short code") → `deriveShortCodeKeys` → `fetchRendezvousByAuthor(keys.pub)` → let `parsed = events.map(e => tryParse(e, keys)).filter(Boolean)` (each via `parseRendezvousEvent`, wrapped so an expired/tamper event is dropped not thrown). Then:
   - `parsed.length === 0` → `isError` "code not found or expired — ask for a fresh one".
   - **`new Set(parsed.map(p => p.inviteCode)).size > 1` → `isError` "this code may be compromised — ask for a fresh one and verify the safety number after connecting" (I1 FAIL-CLOSED: two DISTINCT rendezvous payloads under one code key means someone else published under the same derived key — a MITM attempt).** Log the fixed string `[sharing] short-code: multiple distinct rendezvous events — refusing`.
   - exactly one distinct payload → `acceptInviteCore({ invite_code: <that>.inviteCode, display_name })`.
@@ -629,7 +646,9 @@ Create `tests/short-invite-tools.test.js` — stub-driven, no live relays (metho
 //    kind:4 event authored by a 64-hex key ≠ identity key (stub
 //    publishRendezvousEvent to capture the event; assert event.pubkey !=
 //    identity secp x-only pub, and assert the DISPLAYED code parses via
-//    normalizeShortCode).
+//    normalizeShortCode; ALSO parse the rendezvous envelope's inner invite
+//    code and assert its `expires` is ~10 min out, not 24h — proves C1 fix (a)
+//    is wired (finding 9a)).
 // 2. generate with 0-relay publish (stub returns []) → result.isError true.
 // 3. accept happy path: stub fetchRendezvousByAuthor to return { events: [<one real event>] } —
 //    buildRendezvousEvent(keys, { inviteCode: <real generated invite>,
@@ -658,7 +677,7 @@ Write real tests from this skeleton — every case above must exist and assert c
 
 - [ ] **Step 2: Run to verify failure** — `node --test tests/short-invite-tools.test.js` → FAIL (tools not defined).
 
-- [ ] **Step 3: `nostr.js` methods** — add `publishRendezvousEvent` and `fetchRendezvousByAuthor` as specified in Interfaces, placed near `sendMessage`. Reuse `safeRelayPublish` (already imported) for publish. For the fetch, use the RAW `relay.subscribe([filter], { onevent, onclose })` shape from `servers/sharing/resilient-subscribe.js:54` (NOT `subscribeToContact`, which wraps `makeResilientSub` and is for long-lived subs); resolve when all relays have closed/EOSE'd or an unref'd `setTimeout(timeoutMs)` fires; `finally` close every sub; dedupe collected events by `event.id`. Never throw on a single-relay error (wrap each relay's subscribe in try/catch).
+- [ ] **Step 3: `nostr.js` methods** — add `publishRendezvousEvent` and `fetchRendezvousByAuthor` as specified in Interfaces, placed near `sendMessage`. Reuse `safeRelayPublish` (already imported) for publish. For the fetch, use the RAW `relay.subscribe([filter], { onevent, onclose })` shape from `servers/sharing/resilient-subscribe.js:54` (NOT `subscribeToContact`, which wraps `makeResilientSub` and is for long-lived subs); resolve when all relays have fired `oneose` (wire `oneose` explicitly — sockets don't close after stored events) or an unref'd `setTimeout(timeoutMs)` fires; `finally` close every sub; dedupe collected events by `event.id`. Never throw on a single-relay error (wrap each relay's subscribe in try/catch).
 
 - [ ] **Step 4: `tools/contacts.js`** — (a) add imports: `randomUUID` from `"crypto"`; `generateShortCode, formatShortCode, normalizeShortCode, deriveShortCodeKeys, buildRendezvousEvent, parseRendezvousEvent, SHORTCODE_EXPIRY_MS` from `"../short-code.js"`; `recordShortInvite` from `"../shortcode-ledger.js"`. (b) Extract `acceptInviteCore` VERBATIM per Interfaces (run a normalized diff old-body vs new-function to prove identity; the ONLY delta is the `inviteId` spread in `acceptancePayload`). (c) Register the two tools with the exact behaviors in Interfaces. Tool descriptions must tell the model when to use them (e.g. generate: "Generate a short 8-character pairing code to read aloud or type. Expires in 10 minutes…").
 
@@ -685,12 +704,12 @@ git show --stat HEAD
 
 **Interfaces:**
 - `renderShortCodeShare({ formattedCode, expiresAt }, lang): string` — the inviter's result block: the code BIG (monospace, letter-spaced), "expires at HH:MM (~10 minutes)" (server-rendered time, no live countdown — keep it dependency-free), the speak-don't-post warning, and the safety-number pointer (`invite.verifyLater`, existing key). **M5 (conscious spec deviation):** spec §PR2.5 mentions a live countdown + regenerate button; both are dropped here for simplicity (static server-rendered expiry time; regenerate = just click generate again). Acceptable — the expiry is enforced server-side regardless of the display.
-- `renderShortCodeForms({ lang, csrf = "" }): { generateForm, acceptForm }` — generate: hidden action `generate_short_invite` + button; accept: `<input name="short_code" maxlength="16">` (accepts hyphens/spaces; server normalizes) + hidden action `accept_short_invite` + button.
+- `renderShortCodeForms({ lang, csrf = "" }): { generateForm, acceptForm }` — generate: hidden action `generate_short_invite` + button; accept: `<input name="short_code" maxlength="20">` (accepts hyphens/spaces; server normalizes) + hidden action `accept_short_invite` + button.
 - Panel actions (both panels, mirroring PR1's generate/accept action shapes exactly):
   - `generate_short_invite` → call `crow_generate_short_invite`; messages: `req._shortCodeResult = text` / `req._inviteError`, return false; contacts: return `{ shortCodeResult: text }` / `{ inviteError }`.
   - `accept_short_invite` → call `crow_accept_short_invite` with `req.body.short_code`; error → same error surfaces as PR1's accept; success → redirect (same as accept_invite).
-- Result parsing: `parseShortCodeResult(text): { formattedCode, expiresAt }|null` (in `peer-invite-ui.js`) — extracts the `XXXX-XXXX` token (regex `/\b[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}\b/`) and computes `expiresAt = Date.now() + 10*60*1000` at render time (display-only).
-- New i18n keys (EN+ES, exact copy in the implementing step): `invite.shortCodeTitle`, `invite.shortCodeGenerateBtn`, `invite.shortCodeHint` ("Read it aloud or type it — anyone who hears it can use it until it expires."), `invite.shortCodeExpiry` ("Expires in about 10 minutes"), `invite.shortCodeAcceptPlaceholder` ("Enter the 8-character code…"), `invite.shortCodeAcceptBtn`, `invite.shortCodeToggle` ("Use a short code instead").
+- Result parsing: `parseShortCodeResult(text): { formattedCode, expiresAt }|null` (in `peer-invite-ui.js`) — extracts the `XXXX-XXXX-XXXX` token (regex `/\b[0-9A-HJKMNP-TV-Z]{4}(?:-[0-9A-HJKMNP-TV-Z]{4}){2}\b/` — THREE groups for the 12-char code; a two-group pattern would truncate the code to 8 chars and make the acceptor's `normalizeShortCode` reject it, breaking the happy path) and computes `expiresAt = Date.now() + 10*60*1000` at render time (display-only).
+- New i18n keys (EN+ES, exact copy in the implementing step): `invite.shortCodeTitle`, `invite.shortCodeGenerateBtn`, `invite.shortCodeHint` ("Read it aloud or type it — anyone who hears it can use it until it expires."), `invite.shortCodeExpiry` ("Expires in about 10 minutes"), `invite.shortCodeAcceptPlaceholder` ("Enter the 12-character code…"), `invite.shortCodeAcceptBtn`, `invite.shortCodeToggle` ("Use a short code instead").
 - Placement: in BOTH panels the short-code UI lives inside the SAME container as PR1's forms — messages: two new `msg-invite-dialog` entries are NOT added; instead the existing `#invite-generate` and `#invite-accept` dialogs each gain a `<details>` "Use a short code instead" block under the PR1 form (one surface, progressive disclosure). Contacts: same `<details>` inside the existing add-peer section, under the two PR1 forms.
 
 - [ ] **Step 1: failing test** — `tests/short-code-ui.test.js`: renderShortCodeShare (code shown, expiry text, hint, es strings, XSS on formattedCode); renderShortCodeForms (actions + field names + csrf); buildMessagesHTML with `shortCodeShare` set renders the block; renderContactList shows the toggle; parseShortCodeResult round-trip + null on garbage. Follow the PR1 test files' fixture patterns (`tests/messages-invite-share.test.js`, `tests/contacts-peer-add.test.js`).
@@ -734,4 +753,12 @@ git show --stat HEAD
 - **I4 (the "replayed → return" gate silently drops the PR3 retries its own 72h TTL exists for):** documented as a hard constraint for the PR3 implementer (emit `handshake_complete` on the `"replayed"` verdict too, idempotent).
 - Minors: M1 import paths → `nostr-tools/pure` + `/nip44`; M2 subscribe-shape pointer → `resilient-subscribe.js:54` (`{onevent,onclose}`), not `subscribeToContact`; M3 already-a-contact-skips-consume documented (bounded by codeExpiresAt); M4 scrypt single-flight lock + test; M5 live-countdown/regenerate spec-drift noted as conscious; M6 Task-2 identity fixture pinned to the `crow-messages-editor.test.js` pattern + instance-sync citation corrected.
 
-*(Round 2 to be recorded here before execution.)*
+**Round 2 (2026-07-03, fresh adversarial security subagent, opus): REVISE → all fixed.**
+- **[CRITICAL] `parseShortCodeResult` regex was a stale 2-group (8-char) pattern** → truncated the 12-char code to 8, making every UI happy-path pairing impossible. Fixed to the 3-group pattern; UI round-trip test mandated.
+- **[IMPORTANT] Task 3 minted the inner invite WITHOUT `expiresInMs`** → silently reverted to the 24h default, un-doing C1(a). Fixed: `generateInviteCode(identity, { inviteId, expiresInMs: SHORTCODE_EXPIRY_MS })`; a test now asserts the minted inner code expires in ~10 min (finding 9a).
+- **[IMPORTANT] the `expiresInMs: -1` test was inert** (the `>0` guard clamps it to 24h, so `parseInviteCode` never threw) → replaced with a real 1ms-window elapse.
+- **[IMPORTANT] the "expiry enforced THREE ways / inviter stops honoring" claim was overstated** → rewritten honestly: envelope+inner-code bound the ACCEPTOR side; the ledger bounds the `inviteId`-echoed path; a code-knower forging a fresh `invite_accepted` with `inviteId` OMITTED is bounded only by entropy×KDF + the safety number (the acknowledged threat-model backstop). An I2-ordering negative test (finding 9b) proves an unauthenticated `invite_accepted` carrying an inviteId does NOT consume the token.
+- Minors: 8→12 propagated to Task-1 interface prose, the module docstring, and the user-facing i18n placeholder ("Enter the 12-character code"); `short-code.js` import → `nostr-tools/pure`; precompute figure corrected to ~10¹⁰–10¹¹ core-years / ~32 EB (conclusion unchanged); `fetchRendezvousByAuthor` wires `oneose` explicitly and waits for ALL relays (or timeout) — never first-EOSE (or a late competing publish could slip past I1).
+Round-2 confirmed correct (unchanged): 32-symbol alphabet with no I/L/O/U (60 bits, no collision loss); bias-free bit extraction; C1 HMAC coherence; I2 clean after-auth insertion point (`boot.js:140` auth return, `:141` first side effect); I1 "distinct inviteCode payloads" is the right fail-closed trigger; no PR1 anchor drift at `3a36c256`.
+
+**Both rounds resolved. Plan APPROVED for execution.**
