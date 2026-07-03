@@ -1,15 +1,122 @@
 /**
  * Crow Sharing — Contacts Tools
  *
- * Registers: crow_generate_invite, crow_accept_invite, crow_list_contacts
- * (tool registration order #1-3)
+ * Registers: crow_generate_invite, crow_accept_invite, crow_generate_short_invite,
+ * crow_accept_short_invite, crow_add_contact, crow_accept_bot_invite, crow_list_contacts
  */
 
 import { z } from "zod";
+import { randomUUID } from "crypto";
 import { isKioskActive, kioskBlockedResponse } from "../../shared/kiosk-guard.js";
 import { generateInviteCode, parseInviteCode, parseBotInviteCode, computeSafetyNumber } from "../identity.js";
 import { upsertFullContact } from "../contact-promote.js";
 import { buildInviteUrl, extractInviteCode } from "../invite-url.js";
+import {
+  generateShortCode, formatShortCode, normalizeShortCode, deriveShortCodeKeys,
+  buildRendezvousEvent, parseRendezvousEvent, SHORTCODE_EXPIRY_MS,
+} from "../short-code.js";
+import { recordShortInvite } from "../shortcode-ledger.js";
+
+/**
+ * Core of "accept an invite and pair with the peer it names." VERBATIM
+ * extraction of the former crow_accept_invite handler body (from `const peer =
+ * parseInviteCode…` through the success return) — see the P2/C2 plan's Task 3
+ * Interfaces. The ONLY two deltas from that inherited body: (a) the
+ * acceptancePayload gains `...(peer.inviteId ? { inviteId: peer.inviteId } :
+ * {})` so the short-code single-use ledger can consume the token; (b) nothing
+ * else — same `{ content: [...] }` shapes, same control flow, same error
+ * surface. Module-level (not a closure over registerContactsTools) so both
+ * crow_accept_invite and crow_accept_short_invite can share it; the
+ * previously-in-closure collaborators are passed explicitly instead.
+ */
+async function acceptInviteCore({ invite_code, display_name }, { db, identity, syncManager, peerManager, nostrManager }) {
+  const peer = parseInviteCode(invite_code);
+
+  // Check if already a contact
+  const existing = await db.execute({
+    sql: "SELECT id FROM contacts WHERE crow_id = ?",
+    args: [peer.crowId],
+  });
+
+  if (existing.rows.length > 0) {
+    return {
+      content: [{ type: "text", text: `Already connected to ${peer.crowId}` }],
+    };
+  }
+
+  // Add to contacts
+  const result = await db.execute({
+    sql: `INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey)
+          VALUES (?, ?, ?, ?)`,
+    args: [
+      peer.crowId,
+      display_name || peer.crowId,
+      peer.ed25519Pubkey,
+      peer.secp256k1Pubkey,
+    ],
+  });
+
+  const contactId = Number(result.lastInsertRowid);
+
+  // Initialize sync feeds
+  await syncManager.initContact(contactId, null);
+
+  // Join Hyperswarm topic for this contact
+  await peerManager.joinContact({
+    crowId: peer.crowId,
+    ed25519Pubkey: peer.ed25519Pubkey,
+  });
+
+  // Subscribe to Nostr messages
+  await nostrManager.subscribeToContact({
+    id: contactId,
+    crowId: peer.crowId,
+    secp256k1_pubkey: peer.secp256k1Pubkey,
+  });
+
+  // Compute safety number
+  const safetyNumber = computeSafetyNumber(
+    identity.ed25519Pubkey,
+    peer.ed25519Pubkey
+  );
+
+  // Send acceptance back to inviter so they auto-add us
+  try {
+    if (nostrManager.relays.size === 0) {
+      await nostrManager.connectRelays();
+    }
+    const acceptancePayload = JSON.stringify({
+      type: "invite_accepted",
+      crowId: identity.crowId,
+      ed25519Pub: identity.ed25519Pubkey,
+      secp256k1Pub: identity.secp256k1Pubkey,
+      ...(peer.inviteId ? { inviteId: peer.inviteId } : {}),
+    });
+    await nostrManager.sendMessage(
+      { secp256k1_pubkey: peer.secp256k1Pubkey },
+      acceptancePayload
+    );
+  } catch {
+    // Non-fatal — inviter can still add us manually
+  }
+
+  return {
+    content: [
+      {
+        type: "text",
+        text: [
+          `Connected to ${display_name || peer.crowId}!`,
+          ``,
+          `Crow ID: ${peer.crowId}`,
+          `Safety Number: ${safetyNumber}`,
+          ``,
+          `Verify this safety number with your contact through a separate channel`,
+          `(in person, phone call, etc.) to confirm the connection is secure.`,
+        ].join("\n"),
+      },
+    ],
+  };
+}
 
 /**
  * Build the DM payload a recipient sends to a bot to accept its invite.
@@ -80,94 +187,141 @@ export function registerContactsTools(server, ctx) {
       if (await isKioskActive(db)) return kioskBlockedResponse("crow_accept_invite");
       invite_code = extractInviteCode(invite_code);
       try {
-        const peer = parseInviteCode(invite_code);
+        return await acceptInviteCore(
+          { invite_code, display_name },
+          { db, identity, syncManager, peerManager, nostrManager }
+        );
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `Failed to accept invite: ${err.message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
 
-        // Check if already a contact
-        const existing = await db.execute({
-          sql: "SELECT id FROM contacts WHERE crow_id = ?",
-          args: [peer.crowId],
-        });
+  // --- Tool: crow_generate_short_invite (P2/C2) ---
 
-        if (existing.rows.length > 0) {
+  server.tool(
+    "crow_generate_short_invite",
+    "Generate a short 12-character pairing code to read aloud or type to someone right now (in person, on a call). Expires in 10 minutes. For longer-lived sharing (email, chat, no time pressure) use crow_generate_invite instead.",
+    {},
+    async () => {
+      if (await isKioskActive(db)) return kioskBlockedResponse("crow_generate_short_invite");
+      try {
+        const code = generateShortCode();
+        const keys = await deriveShortCodeKeys(code); // full-strength — production, no N override
+        const inviteId = randomUUID();
+        const expires = Date.now() + SHORTCODE_EXPIRY_MS;
+        // C1 fix (a): the inner code MUST carry expiresInMs so it dies in 10
+        // min via ANY accept path — without it, it silently reverts to the
+        // 24h default and reopens the acceptor-side leak window.
+        const innerCode = generateInviteCode(identity, { inviteId, expiresInMs: SHORTCODE_EXPIRY_MS });
+        await recordShortInvite(db, inviteId, expires);
+        const event = buildRendezvousEvent(keys, { inviteCode: innerCode, expires: Date.now() + SHORTCODE_EXPIRY_MS });
+        const published = await nostrManager.publishRendezvousEvent(event);
+
+        if (published.length === 0) {
           return {
-            content: [{ type: "text", text: `Already connected to ${peer.crowId}` }],
+            content: [{ type: "text", text: "Could not reach any relay — try again or use an invite link (crow_generate_invite)." }],
+            isError: true,
           };
         }
 
-        // Add to contacts
-        const result = await db.execute({
-          sql: `INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey)
-                VALUES (?, ?, ?, ?)`,
-          args: [
-            peer.crowId,
-            display_name || peer.crowId,
-            peer.ed25519Pubkey,
-            peer.secp256k1Pubkey,
-          ],
-        });
-
-        const contactId = Number(result.lastInsertRowid);
-
-        // Initialize sync feeds
-        await syncManager.initContact(contactId, null);
-
-        // Join Hyperswarm topic for this contact
-        await peerManager.joinContact({
-          crowId: peer.crowId,
-          ed25519Pubkey: peer.ed25519Pubkey,
-        });
-
-        // Subscribe to Nostr messages
-        await nostrManager.subscribeToContact({
-          id: contactId,
-          crowId: peer.crowId,
-          secp256k1_pubkey: peer.secp256k1Pubkey,
-        });
-
-        // Compute safety number
-        const safetyNumber = computeSafetyNumber(
-          identity.ed25519Pubkey,
-          peer.ed25519Pubkey
-        );
-
-        // Send acceptance back to inviter so they auto-add us
-        try {
-          if (nostrManager.relays.size === 0) {
-            await nostrManager.connectRelays();
-          }
-          const acceptancePayload = JSON.stringify({
-            type: "invite_accepted",
-            crowId: identity.crowId,
-            ed25519Pub: identity.ed25519Pubkey,
-            secp256k1Pub: identity.secp256k1Pubkey,
-          });
-          await nostrManager.sendMessage(
-            { secp256k1_pubkey: peer.secp256k1Pubkey },
-            acceptancePayload
-          );
-        } catch {
-          // Non-fatal — inviter can still add us manually
-        }
-
+        const formatted = formatShortCode(code);
+        const minutes = Math.round(SHORTCODE_EXPIRY_MS / 60000);
         return {
           content: [
             {
               type: "text",
               text: [
-                `Connected to ${display_name || peer.crowId}!`,
+                `Short pairing code (expires in ${minutes} minutes):`,
                 ``,
-                `Crow ID: ${peer.crowId}`,
-                `Safety Number: ${safetyNumber}`,
+                formatted,
                 ``,
-                `Verify this safety number with your contact through a separate channel`,
-                `(in person, phone call, etc.) to confirm the connection is secure.`,
+                `Speak it aloud or type it to the other person — don't post it anywhere public.`,
+                `They should use \`crow_accept_short_invite\` with this code.`,
+                `Once connected, verify the safety number through a separate channel to confirm the connection is secure.`,
               ].join("\n"),
             },
           ],
         };
       } catch (err) {
         return {
-          content: [{ type: "text", text: `Failed to accept invite: ${err.message}` }],
+          content: [{ type: "text", text: `Failed to generate short invite: ${err.message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // --- Tool: crow_accept_short_invite (P2/C2) ---
+
+  server.tool(
+    "crow_accept_short_invite",
+    "Accept a short pairing code someone read aloud or typed to you. Looks up the pairing rendezvous on the relay network and completes the connection. Shows a safety number for out-of-band verification.",
+    {
+      short_code: z.string().max(24).describe("The short pairing code (e.g. K7Q4-M2X9-3FHT)"),
+      display_name: z.string().max(100).optional().describe("Name for this contact"),
+    },
+    async ({ short_code, display_name }) => {
+      if (await isKioskActive(db)) return kioskBlockedResponse("crow_accept_short_invite");
+      const normalized = normalizeShortCode(short_code);
+      if (!normalized) {
+        return {
+          content: [{ type: "text", text: "That doesn't look like a Crow short code." }],
+          isError: true,
+        };
+      }
+      try {
+        const keys = await deriveShortCodeKeys(normalized); // full-strength — production, no N override
+        const { events } = await nostrManager.fetchRendezvousByAuthor(keys.pub);
+
+        const parsed = [];
+        for (const event of events) {
+          try {
+            parsed.push(parseRendezvousEvent(event, keys));
+          } catch {
+            // Expired/tampered/wrong-key event — dropped, not thrown.
+          }
+        }
+
+        if (parsed.length === 0) {
+          return {
+            content: [{ type: "text", text: "Code not found or expired — ask for a fresh one." }],
+            isError: true,
+          };
+        }
+
+        // I1 FAIL-CLOSED: two DISTINCT rendezvous payloads under one code key
+        // means someone else published under the same derived key — a MITM
+        // attempt. Refuse rather than newest-wins.
+        const distinctCodes = new Set(parsed.map((p) => p.inviteCode));
+        if (distinctCodes.size > 1) {
+          console.warn("[sharing] short-code: multiple distinct rendezvous events — refusing");
+          return {
+            content: [{ type: "text", text: "This code may be compromised — ask for a fresh one and verify the safety number after connecting." }],
+            isError: true,
+          };
+        }
+
+        const result = await acceptInviteCore(
+          { invite_code: parsed[0].inviteCode, display_name },
+          { db, identity, syncManager, peerManager, nostrManager }
+        );
+        if (result.isError) return result;
+
+        // Append the safety-number backstop caveat to the (verbatim, shared)
+        // success text without altering acceptInviteCore itself.
+        const caveat = "\n\n(A safety-number comparison UI is coming in a future update — for now, read the numbers aloud to your contact through a separate channel.)";
+        return {
+          content: result.content.map((c, i) =>
+            i === 0 && c.type === "text" ? { ...c, text: c.text + caveat } : c
+          ),
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `Failed to accept short invite: ${err.message}` }],
           isError: true,
         };
       }
