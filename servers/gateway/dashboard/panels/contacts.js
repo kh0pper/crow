@@ -14,6 +14,8 @@ import { getContacts, getContact, getContactActivity, getGroups, getMyProfile } 
 import { handleContactAction } from "./contacts/api-handlers.js";
 import { section } from "../shared/components.js";
 import { t } from "../shared/i18n.js";
+import { buildInviteShare } from "../shared/peer-invite-ui.js";
+import { csrfInput } from "../shared/csrf.js";
 
 export default {
   id: "contacts",
@@ -25,6 +27,7 @@ export default {
 
   async handler(req, res, { db, layout, lang }) {
     // --- Handle POST actions ---
+    let peerAdd = {};
     if (req.method === "POST") {
       const result = await handleContactAction(req, db);
       if (result?.redirect) return res.redirectAfterPost(result.redirect);
@@ -33,7 +36,13 @@ export default {
         res.setHeader("Content-Disposition", "attachment; filename=contacts.vcf");
         return res.send(result.download);
       }
+      if (result?.inviteResult) {
+        try { peerAdd.inviteShare = await buildInviteShare(result.inviteResult); } catch {}
+        if (!peerAdd.inviteShare) peerAdd.inviteError = "Invite generated but could not be rendered — use the Messages panel.";
+      }
+      if (result?.inviteError) peerAdd.inviteError = result.inviteError;
     }
+    peerAdd.csrf = csrfInput(req);
 
     // --- Determine view ---
     const view = req.query.view || "all";
@@ -77,7 +86,7 @@ export default {
         type: req.query.type || "all",
       };
       const contacts = await getContacts(db, filters);
-      bodyHtml = renderContactList(contacts, groups, filters, lang);
+      bodyHtml = renderContactList(contacts, groups, filters, lang, peerAdd);
     }
 
     // Build tabs HTML
