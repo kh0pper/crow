@@ -44,6 +44,14 @@ export const DEFAULT_RELAYS = [
   "wss://relay.damus.io",
   "wss://nos.lol",
   "wss://relay.primal.net",
+  // Self-hosted, long-retention relay (nostr-rs-relay on the maestro.press
+  // droplet) — holds an offline recipient's DMs until they reconnect, which
+  // completes the R5 delivery guarantee for arbitrary offline windows
+  // (loss-mode L1; public relays evict by age). Restricted to kind:4 (all Crow
+  // traffic) and write-rate-limited. Verified 2026-07-02 with a throwaway-key
+  // connect+publish+fetch probe. It is a separate service behind nginx, not a
+  // gateway route, so it does not touch the Funnel network-exposure invariant.
+  "wss://nostr.crow.maestro.press",
 ];
 
 export class NostrManager {
