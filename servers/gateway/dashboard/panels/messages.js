@@ -16,6 +16,8 @@ import { messagesClientJS } from "./messages/client.js";
 import { handlePostAction } from "./messages/api-handlers.js";
 import { getUnifiedConversationList, getBotDirectory, getMessageRequests } from "./messages/data-queries.js";
 import { csrfInput } from "../shared/csrf.js";
+import { buildInviteShare } from "../shared/peer-invite-ui.js";
+import { extractInviteCode } from "../../../sharing/invite-url.js";
 
 export default {
   id: "messages",
@@ -78,7 +80,25 @@ export default {
       botInvite = { code: biCode, name: botName, csrf: csrfInput(req) };
     }
 
+    // --- Person-invite landing (?invite=<code or full URL>) — P2/C1 deep link.
+    let personInvite = null;
+    const piRaw = (req.query && req.query.invite) || null;
+    if (piRaw) {
+      const code = extractInviteCode(String(piRaw));
+      let fromId = null;
+      try {
+        const { parseInviteCode } = await import("../../../sharing/identity.js");
+        fromId = parseInviteCode(code).crowId;
+      } catch { /* invalid/expired — card renders the invalid notice */ }
+      personInvite = { code, fromId, csrf: csrfInput(req) };
+    }
+
     // --- Build page ---
+    let inviteShare = null;
+    if (req._inviteResult) {
+      try { inviteShare = await buildInviteShare(req._inviteResult); } catch {}
+    }
+
     const css = messagesCSS();
     const html = buildMessagesHTML({
       items,
@@ -92,6 +112,8 @@ export default {
       botDirectory,
       requests,
       csrf: csrfInput(req),
+      inviteShare,
+      personInvite,
     });
     const js = messagesClientJS({ aiConfigured, storageAvailable, lang });
 

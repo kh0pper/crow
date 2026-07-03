@@ -13,6 +13,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createSharingServer } from "../../../../sharing/server.js";
 import { markContactIsBot } from "../../shared/mark-contact-bot.js";
+import { extractInviteCode } from "../../../../sharing/invite-url.js";
 
 /**
  * Create a connected sharing MCP client.
@@ -114,6 +115,38 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
       } finally { try { await client.close?.(); } catch {} }
     } catch (err) {
       console.error("[contacts] add_by_id failed:", err.message);
+    }
+    return { redirect: "/dashboard/contacts" };
+  }
+
+  // P2/C1+C3: full peer-add from the Contacts panel — generate an invite…
+  if (action === "generate_invite") {
+    try {
+      const client = await sharingClientFactory();
+      try {
+        const result = await client.callTool({ name: "crow_generate_invite", arguments: {} });
+        const text = result.content?.[0]?.text || "";
+        if (result?.isError) return { inviteError: text || "Could not generate invite." };
+        return { inviteResult: text };
+      } finally { try { await client.close?.(); } catch {} }
+    } catch (err) {
+      console.error("[contacts] generate_invite failed:", err.message);
+      return { inviteError: err.message };
+    }
+  }
+
+  // …and accept one (forgiving: raw code or full share URL).
+  if (action === "accept_invite" && req.body.invite_code) {
+    try {
+      const code = extractInviteCode(req.body.invite_code);
+      const client = await sharingClientFactory();
+      try {
+        const result = await client.callTool({ name: "crow_accept_invite", arguments: { invite_code: code } });
+        if (result?.isError) return { inviteError: result.content?.[0]?.text || "Invite could not be accepted." };
+      } finally { try { await client.close?.(); } catch {} }
+    } catch (err) {
+      console.error("[contacts] accept_invite failed"); // never echo the code
+      return { inviteError: err.message };
     }
     return { redirect: "/dashboard/contacts" };
   }
