@@ -65,3 +65,61 @@ export function renderPeerInviteForms({ lang, csrf = "", prefillCode = "" }) {
   </form>`;
   return { generateForm, acceptForm };
 }
+
+// ──────────────────────────────────────────────
+// Short-code pairing (Messages Phase 2 PR2 / C2)
+// ──────────────────────────────────────────────
+
+// THREE groups (4+4+4 = 12 chars) — the code is 12 chars (K7Q4-M2X9-3FHT). A
+// two-group (8-char) pattern would truncate the match and make the
+// acceptor's normalizeShortCode reject it, breaking the happy path
+// (round-2 security review CRITICAL — do not regress to two groups).
+const SHORT_CODE_RE = /\b[0-9A-HJKMNP-TV-Z]{4}(?:-[0-9A-HJKMNP-TV-Z]{4}){2}\b/;
+
+/**
+ * Find the 12-char short code inside crow_generate_short_invite's text
+ * output and compute a display-only expiry (10 min from render time — the
+ * server enforces the real expiry regardless of this display value).
+ */
+export function parseShortCodeResult(text) {
+  if (typeof text !== "string") return null;
+  const m = text.match(SHORT_CODE_RE);
+  if (!m) return null;
+  return { formattedCode: m[0], expiresAt: Date.now() + 10 * 60 * 1000 };
+}
+
+/**
+ * Sync HTML share block: the code BIG (monospace, letter-spaced), a
+ * server-rendered expiry time (no live countdown — kept dependency-free per
+ * M5), the speak-don't-post hint, and the safety-number backstop pointer.
+ */
+export function renderShortCodeShare(share, lang) {
+  if (!share || !share.formattedCode) return "";
+  const code = escapeHtml(share.formattedCode);
+  let timeStr = "";
+  if (share.expiresAt) {
+    try {
+      timeStr = new Date(share.expiresAt).toLocaleTimeString(lang === "es" ? "es-ES" : "en-US", { hour: "2-digit", minute: "2-digit" });
+    } catch { /* display-only — never throws */ }
+  }
+  return `<div class="short-code-share">
+    <div style="font-size:1.6rem;font-weight:700;letter-spacing:0.15em;font-family:monospace;text-align:center;margin:8px 0;background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:8px;padding:12px 6px">${code}</div>
+    <p style="font-size:0.75rem;color:var(--crow-text-muted);margin:0 0 4px">${t("invite.shortCodeExpiry", lang)}${timeStr ? ` (${escapeHtml(timeStr)})` : ""}</p>
+    <p style="font-size:0.75rem;color:var(--crow-text-muted);margin:0 0 6px">${t("invite.shortCodeHint", lang)}</p>
+    <p style="font-size:0.7rem;color:var(--crow-text-muted);margin:6px 0 0">${t("invite.verifyLater", lang)}</p>
+  </div>`;
+}
+
+/** Sync generate + accept form strings for the short-code alternative. */
+export function renderShortCodeForms({ lang, csrf = "" }) {
+  const generateForm = `<form method="POST">
+    <input type="hidden" name="action" value="generate_short_invite">${csrf}
+    <button type="submit" class="btn btn-primary" style="width:100%;font-size:0.8rem;padding:6px">${t("invite.shortCodeGenerateBtn", lang)}</button>
+  </form>`;
+  const acceptForm = `<form method="POST">
+    <input type="hidden" name="action" value="accept_short_invite">${csrf}
+    <input type="text" name="short_code" maxlength="20" required placeholder="${escapeHtml(t("invite.shortCodeAcceptPlaceholder", lang))}" style="width:100%;font-size:0.85rem;letter-spacing:0.05em;background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:6px;padding:8px;color:var(--crow-text)">
+    <button type="submit" class="btn btn-primary" style="width:100%;font-size:0.8rem;padding:6px;margin-top:4px">${t("invite.shortCodeAcceptBtn", lang)}</button>
+  </form>`;
+  return { generateForm, acceptForm };
+}

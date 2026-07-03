@@ -14,7 +14,7 @@ import { getContacts, getContact, getContactActivity, getGroups, getMyProfile } 
 import { handleContactAction } from "./contacts/api-handlers.js";
 import { section } from "../shared/components.js";
 import { t } from "../shared/i18n.js";
-import { buildInviteShare } from "../shared/peer-invite-ui.js";
+import { buildInviteShare, parseShortCodeResult } from "../shared/peer-invite-ui.js";
 import { csrfInput } from "../shared/csrf.js";
 
 export default {
@@ -39,6 +39,10 @@ export default {
       if (result?.inviteResult) {
         try { peerAdd.inviteShare = await buildInviteShare(result.inviteResult); } catch {}
         if (!peerAdd.inviteShare) peerAdd.inviteError = "Invite generated but could not be rendered — use the Messages panel.";
+      }
+      if (result?.shortCodeResult) {
+        try { peerAdd.shortCodeShare = parseShortCodeResult(result.shortCodeResult); } catch {}
+        if (!peerAdd.shortCodeShare) peerAdd.inviteError = "Short code generated but could not be rendered — try again.";
       }
       if (result?.inviteError) peerAdd.inviteError = result.inviteError;
     }

@@ -142,6 +142,50 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
     return res.redirectAfterPost("/dashboard/messages");
   }
 
+  // Short-code pairing (P2/C2): generate a 12-char code to read aloud/type.
+  if (action === "generate_short_invite") {
+    try {
+      const client = await sharingClientFactory();
+      let result;
+      try {
+        result = await client.callTool({ name: "crow_generate_short_invite", arguments: {} });
+      } finally { try { await client.close?.(); } catch {} }
+      const text = result.content?.[0]?.text || "";
+      if (result?.isError) {
+        req._inviteError = text || "Could not generate a short code.";
+      } else {
+        req._shortCodeResult = text;
+      }
+    } catch (err) {
+      console.error("[messages] Failed to generate short invite:", err.message);
+      req._inviteError = err.message;
+    }
+    // Don't redirect — let the panel render with the short-code result
+    return false;
+  }
+
+  if (action === "accept_short_invite" && req.body.short_code) {
+    try {
+      const client = await sharingClientFactory();
+      let result;
+      try {
+        result = await client.callTool({
+          name: "crow_accept_short_invite",
+          arguments: { short_code: req.body.short_code },
+        });
+      } finally { try { await client.close?.(); } catch {} }
+      if (result?.isError) {
+        req._inviteError = result.content?.[0]?.text || "Code could not be accepted.";
+        return false; // re-render with the error banner
+      }
+    } catch (err) {
+      console.error("[messages] Failed to accept short code"); // never echo the code
+      req._inviteError = err.message;
+      return false;
+    }
+    return res.redirectAfterPost("/dashboard/messages");
+  }
+
   if (action === "accept_bot_invite" && req.body.invite_code) {
     try {
       const client = await sharingClientFactory();
