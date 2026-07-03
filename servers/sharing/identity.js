@@ -282,18 +282,27 @@ export function parseBotInviteCode(code) {
 /**
  * Generate a single-use invite code with 24h expiry.
  * Format: <crowId>.<payload>.<hmac>
- * Payload: base64url({ ed25519Pub, secp256k1Pub, expires })
+ * Payload: base64url({ ed25519Pub, secp256k1Pub, expires[, inviteId] })
+ *
+ * opts.inviteId (string, optional) — additive; when present, echoes through
+ * parseInviteCode for short-code single-use ledger tracking (P2/C2).
+ * opts.expiresInMs (positive number, optional) — overrides the default 24h
+ * expiry window (used by short-code's 10-min inner-code window). Legacy
+ * callers (no opts) are byte-identical to today's behavior.
  */
-export function generateInviteCode(identity) {
-  const expires = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
-  const payload = Buffer.from(
-    JSON.stringify({
-      ed25519Pub: identity.ed25519Pubkey,
-      secp256k1Pub: identity.secp256k1Pubkey,
-      crowId: identity.crowId,
-      expires,
-    })
-  ).toString("base64url");
+export function generateInviteCode(identity, opts = {}) {
+  const ttlMs = (typeof opts.expiresInMs === "number" && opts.expiresInMs > 0)
+    ? opts.expiresInMs
+    : 24 * 60 * 60 * 1000; // default 24h (unchanged for plain invites)
+  const expires = Date.now() + ttlMs;
+  const payloadObj = {
+    ed25519Pub: identity.ed25519Pubkey,
+    secp256k1Pub: identity.secp256k1Pubkey,
+    crowId: identity.crowId,
+    expires,
+  };
+  if (typeof opts.inviteId === "string" && opts.inviteId) payloadObj.inviteId = String(opts.inviteId);
+  const payload = Buffer.from(JSON.stringify(payloadObj)).toString("base64url");
 
   const hmac = createHmac("sha256", identity.ed25519Priv)
     .update(payload)
@@ -333,6 +342,7 @@ export function parseInviteCode(code) {
     crowId: data.crowId,
     ed25519Pubkey: data.ed25519Pub,
     secp256k1Pubkey: data.secp256k1Pub,
+    inviteId: data.inviteId,
   };
 }
 

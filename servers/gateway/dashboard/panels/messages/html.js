@@ -8,7 +8,7 @@
 import { escapeHtml } from "../../shared/components.js";
 import { t } from "../../shared/i18n.js";
 import { buildBotDirectory } from "../../shared/bot-directory.js";
-import { renderInviteShare, renderPeerInviteForms } from "../../shared/peer-invite-ui.js";
+import { renderInviteShare, renderPeerInviteForms, renderShortCodeShare, renderShortCodeForms } from "../../shared/peer-invite-ui.js";
 
 /** Color palette for peer avatars (deterministic by contact ID) */
 const PEER_COLORS = [
@@ -31,9 +31,10 @@ function initials(name) {
  * Build the full messages panel HTML.
  */
 export function buildMessagesHTML(data) {
-  const { items, totalUnread, aiConfigured, storageAvailable, inviteResult, inviteError, lang, botInvite, csrf, inviteShare, personInvite } = data;
+  const { items, totalUnread, aiConfigured, storageAvailable, inviteResult, inviteError, lang, botInvite, csrf, inviteShare, personInvite, shortCodeShare } = data;
 
   const peerForms = renderPeerInviteForms({ lang, csrf: csrf || "" });
+  const shortCodeForms = renderShortCodeForms({ lang, csrf: csrf || "" });
 
   // Bot-invite "Add & message" card (data pre-parsed in messages.js).
   let botInviteCard = "";
@@ -168,6 +169,13 @@ export function buildMessagesHTML(data) {
       <button onclick="this.parentElement.remove()" style="margin-top:6px;font-size:0.75rem;background:none;border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text-muted);cursor:pointer;padding:3px 8px">${t("messages.dismiss", lang)}</button>
     </div>`;
   }
+  if (shortCodeShare) {
+    inviteBanner = `<div style="position:absolute;top:0;left:0;right:0;z-index:50;padding:12px;background:var(--crow-bg-elevated);border-bottom:1px solid var(--crow-border);max-height:70%;overflow-y:auto">
+      <div style="font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">${t("invite.shortCodeTitle", lang)}</div>
+      ${renderShortCodeShare(shortCodeShare, lang)}
+      <button onclick="this.parentElement.remove()" style="margin-top:6px;font-size:0.75rem;background:none;border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text-muted);cursor:pointer;padding:3px 8px">${t("messages.dismiss", lang)}</button>
+    </div>`;
+  }
   if (inviteError) {
     inviteBanner = `<div style="position:absolute;top:0;left:0;right:0;z-index:50;padding:12px;background:var(--crow-bg-elevated);border-bottom:1px solid var(--crow-border)">
       <div style="font-size:0.8rem;color:var(--crow-error)">${t("messages.inviteError", lang)} ${escapeHtml(inviteError)}</div>
@@ -244,9 +252,17 @@ export function buildMessagesHTML(data) {
         </div>
         <div class="msg-invite-dialog" id="invite-generate">
           ${peerForms.generateForm}
+          <details style="margin-top:8px">
+            <summary style="cursor:pointer;font-size:0.75rem;color:var(--crow-text-muted)">${t("invite.shortCodeToggle", lang)}</summary>
+            <div style="margin-top:6px">${shortCodeForms.generateForm}</div>
+          </details>
         </div>
         <div class="msg-invite-dialog" id="invite-accept">
           ${peerForms.acceptForm}
+          <details style="margin-top:8px">
+            <summary style="cursor:pointer;font-size:0.75rem;color:var(--crow-text-muted)">${t("invite.shortCodeToggle", lang)}</summary>
+            <div style="margin-top:6px">${shortCodeForms.acceptForm}</div>
+          </details>
         </div>
         <div class="msg-invite-dialog" id="invite-bot">
           <form method="POST">

@@ -351,6 +351,19 @@ export const translations = {
   "invite.connectWith": { en: "Connect with", es: "Conectar con" },
   "invite.invalidCode": { en: "This invite looks invalid or has expired. Ask for a new one.", es: "Esta invitación parece inválida o ha caducado. Pide una nueva." },
   "invite.verifyLater": { en: "After connecting, compare safety numbers to verify each other.", es: "Después de conectar, comparen los números de seguridad para verificarse." },
+
+  // ─── Short-code pairing (Messages Phase 2 PR2 / C2) ───
+  "invite.shortCodeToggle": { en: "Use a short code instead", es: "Usar un código corto en su lugar" },
+  "invite.shortCodeTitle": { en: "Short pairing code", es: "Código corto de emparejamiento" },
+  "invite.shortCodeGenerateBtn": { en: "Generate a short code", es: "Generar un código corto" },
+  "invite.shortCodeHint": {
+    en: "Read it aloud or type it — anyone who hears it can use it until it expires.",
+    es: "Léelo en voz alta o escríbelo: cualquiera que lo escuche puede usarlo hasta que caduque.",
+  },
+  "invite.shortCodeExpiry": { en: "Expires in about 10 minutes", es: "Caduca en unos 10 minutos" },
+  "invite.shortCodeAcceptPlaceholder": { en: "Enter the 12-character code…", es: "Ingresa el código de 12 caracteres…" },
+  "invite.shortCodeAcceptBtn": { en: "Accept short code", es: "Aceptar código corto" },
+
   "contacts.addPeer": { en: "Add a Crow peer", es: "Añadir un par de Crow" },
   "contacts.addPeerDesc": { en: "Invite someone with a link or accept theirs", es: "Invita a alguien con un enlace o acepta el suyo" },
 

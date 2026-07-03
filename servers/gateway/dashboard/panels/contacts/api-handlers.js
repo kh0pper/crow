@@ -151,6 +151,37 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
     return { redirect: "/dashboard/contacts" };
   }
 
+  // Short-code pairing (P2/C2): generate a 12-char code to read aloud/type...
+  if (action === "generate_short_invite") {
+    try {
+      const client = await sharingClientFactory();
+      try {
+        const result = await client.callTool({ name: "crow_generate_short_invite", arguments: {} });
+        const text = result.content?.[0]?.text || "";
+        if (result?.isError) return { inviteError: text || "Could not generate a short code." };
+        return { shortCodeResult: text };
+      } finally { try { await client.close?.(); } catch {} }
+    } catch (err) {
+      console.error("[contacts] generate_short_invite failed:", err.message);
+      return { inviteError: err.message };
+    }
+  }
+
+  // ...and accept one.
+  if (action === "accept_short_invite" && req.body.short_code) {
+    try {
+      const client = await sharingClientFactory();
+      try {
+        const result = await client.callTool({ name: "crow_accept_short_invite", arguments: { short_code: req.body.short_code } });
+        if (result?.isError) return { inviteError: result.content?.[0]?.text || "Code could not be accepted." };
+      } finally { try { await client.close?.(); } catch {} }
+    } catch (err) {
+      console.error("[contacts] accept_short_invite failed"); // never echo the code
+      return { inviteError: err.message };
+    }
+    return { redirect: "/dashboard/contacts" };
+  }
+
   // --- Edit contact ---
   if (action === "edit_contact" && req.body.contact_id) {
     const fields = [];

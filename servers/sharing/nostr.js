@@ -222,6 +222,87 @@ export class NostrManager {
   }
 
   /**
+   * Publish a one-shot rendezvous event (short-code pairing, P2/C2) to every
+   * connected relay. Reuses the same safeRelayPublish loop as sendMessage, but
+   * there is NO local message cache and NO retry enqueue — a rendezvous event
+   * is not a DM, it's a public artifact under a code-derived key that either
+   * side can re-publish/re-fetch within the code's own expiry window.
+   */
+  async publishRendezvousEvent(event) {
+    if (this.relays.size === 0) {
+      await this.connectRelays();
+    }
+    const published = [];
+    for (const [url, relay] of this.relays) {
+      try {
+        if (await safeRelayPublish(relay, event)) published.push(url);
+      } catch (err) {
+        // Publishing failed to this relay
+      }
+    }
+    return published;
+  }
+
+  /**
+   * One-shot fetch of rendezvous events (kind:4) authored by a code-derived
+   * key, across every connected relay. `limit:4` (NOT 1) is deliberate — I1:
+   * a single event could be an attacker's; the caller must SEE a competing
+   * event under the same key to fail closed. Waits for EVERY relay's `oneose`
+   * (relays send stored events then EOSE; they do NOT close the socket, so
+   * `onclose` alone would never resolve this) or the `timeoutMs` cap, whichever
+   * comes first — NEVER resolves on the first relay's EOSE alone, or a
+   * slightly-later competing publish (the I1 signal) could be missed. Each
+   * relay's subscribe is wrapped in try/catch so one dead socket can't throw
+   * or block the wait on the others.
+   */
+  async fetchRendezvousByAuthor(authorHex, timeoutMs = 5000) {
+    if (this.relays.size === 0) {
+      await this.connectRelays();
+    }
+    const filter = { kinds: [4], authors: [authorHex], limit: 4 };
+    const events = new Map(); // dedupe by event.id
+    const subs = [];
+
+    await new Promise((resolve) => {
+      let done = false;
+      let remaining = this.relays.size;
+      let timer;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        if (timer) clearTimeout(timer);
+        resolve();
+      };
+      if (remaining === 0) { finish(); return; }
+      timer = setTimeout(finish, timeoutMs);
+      if (timer.unref) timer.unref();
+
+      for (const [, relay] of this.relays) {
+        try {
+          const sub = relay.subscribe([filter], {
+            onevent: (event) => { if (event && event.id) events.set(event.id, event); },
+            oneose: () => {
+              remaining -= 1;
+              if (remaining <= 0) finish();
+            },
+          });
+          subs.push(sub);
+        } catch (err) {
+          // Dead/unreachable relay — count it as already-EOSE'd so it can't
+          // block the wait for the others.
+          remaining -= 1;
+        }
+      }
+      if (remaining <= 0) finish();
+    });
+
+    for (const sub of subs) {
+      try { sub.close(); } catch {}
+    }
+    return { events: [...events.values()] };
+  }
+
+  /**
    * Send an encrypted DM WITHOUT caching it into the 1:1 `messages` table. Used
    * for control/room envelopes (crow_social) that must not appear as 1:1 chat rows.
    */

@@ -13,6 +13,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleInviteAccepted } from "../servers/sharing/boot.js";
+import { recordShortInvite, consumeShortInvite } from "../servers/sharing/shortcode-ledger.js";
 
 function freshDb() {
   const dir = mkdtempSync(join(tmpdir(), "invacc-"));
@@ -113,5 +114,47 @@ test("does NOT promote when the payload secp key != the authenticated sender key
       sql: "SELECT * FROM contacts WHERE crow_id = ?", args: ["crow:realpeer9"],
     });
     assert.equal(crowIdRows.length, 0);
+  } finally { cleanup(); }
+});
+
+test("I2: an unauthenticated (forged-sender) invite_accepted carrying a valid inviteId must NOT consume the short-code ledger token", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    // Seed a gated (accepted) message-request row for the VICTIM secp key,
+    // same shape as the forgery test above.
+    await db.execute({
+      sql: `INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, contact_type, request_status)
+            VALUES (?, '', ?, 'crow', 'accepted')`,
+      args: ["req:" + PK_XONLY, PK],
+    });
+
+    // A real, still-outstanding short-code ledger row for this inviteId.
+    const inviteId = "test-inviteid-i2";
+    await recordShortInvite(db, inviteId, Date.now() + 600000);
+
+    // Forged payload: claims the VICTIM's secp key AND rides a valid
+    // inviteId, but the Nostr event was actually signed by the ATTACKER's key.
+    const forged = {
+      type: "invite_accepted",
+      crowId: "crow:realpeer9",
+      ed25519Pub: "f".repeat(64),
+      secp256k1Pub: PK,
+      inviteId,
+    };
+
+    await handleInviteAccepted(db, stubMgrs(), forged, ATTACKER_PK);
+
+    // Not promoted (same assertion shape as the forgery test above).
+    const { rows } = await db.execute({
+      sql: "SELECT * FROM contacts WHERE lower(substr(secp256k1_pubkey,-64)) = ?", args: [PK_XONLY],
+    });
+    assert.equal(rows.length, 1);
+    assert.notEqual(rows[0].request_status, null);
+
+    // The ledger gate must run ONLY after the auth check — since auth failed
+    // here, the row must still be outstanding. Consuming it now for the
+    // FIRST time must return "consumed" (not "replayed"), proving the forged
+    // call never touched it.
+    assert.equal(await consumeShortInvite(db, inviteId), "consumed");
   } finally { cleanup(); }
 });

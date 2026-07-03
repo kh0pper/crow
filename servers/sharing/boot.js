@@ -138,6 +138,32 @@ export async function handleInviteAccepted(db, managers, payload, senderPubkey) 
     // secp key must equal the event's cryptographically-bound pubkey, else a
     // stranger could forge an invite_accepted to promote/hijack a gated contact.
     if (normalizePubkey(payload.secp256k1Pub) !== normalizePubkey(senderPubkey)) return;
+
+    // P2/C2 single-use gate (runs ONLY after the R4 auth check above, so an
+    // unauthenticated forged invite_accepted cannot burn the token — "first
+    // AUTHENTICATED wins", spec §PR2.4). A short-code acceptance echoes the
+    // inviteId; the first authenticated echo consumes it. Fail OPEN on unknown
+    // (instance-local ledger; sibling instances legitimately miss it) and on
+    // ledger errors (never let the ledger break honest pairing).
+    if (payload && typeof payload.inviteId === "string" && payload.inviteId) {
+      try {
+        const { consumeShortInvite } = await import("./shortcode-ledger.js");
+        const verdict = await consumeShortInvite(db, payload.inviteId);
+        if (verdict === "replayed") {
+          // I4: PR3's handshake_complete ack must still fire for this verdict
+          // (idempotent) — the retained 72h ledger TTL keeps the row available.
+          console.warn("[sharing] short-code invite replay rejected");
+          return;
+        }
+        if (verdict === "expired") {
+          console.warn("[sharing] short-code invite expired");
+          return;
+        }
+      } catch {
+        console.warn("[sharing] short-code ledger check failed — proceeding");
+      }
+    }
+
     await upsertFullContact(db, managers, {
       crowId: payload.crowId,
       ed25519Pub: payload.ed25519Pub,

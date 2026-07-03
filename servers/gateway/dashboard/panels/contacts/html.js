@@ -7,7 +7,7 @@
 
 import { escapeHtml, badge, formField } from "../../shared/components.js";
 import { t } from "../../shared/i18n.js";
-import { renderInviteShare, renderPeerInviteForms } from "../../shared/peer-invite-ui.js";
+import { renderInviteShare, renderPeerInviteForms, renderShortCodeShare, renderShortCodeForms } from "../../shared/peer-invite-ui.js";
 
 /** Color palette for contact avatars (deterministic by contact ID) */
 const AVATAR_COLORS = [
@@ -127,16 +127,25 @@ export function renderContactList(contacts, groups, filters, lang, peerAdd = {})
   </details>`;
 
   const peerForms = renderPeerInviteForms({ lang, csrf: peerAdd.csrf || "" });
-  const peerAddSection = `<details class="contacts-add-peer" style="margin-bottom:1rem"${peerAdd.inviteShare || peerAdd.inviteError ? " open" : ""}>
+  const shortCodeForms = renderShortCodeForms({ lang, csrf: peerAdd.csrf || "" });
+  const peerAddSection = `<details class="contacts-add-peer" style="margin-bottom:1rem"${peerAdd.inviteShare || peerAdd.inviteError || peerAdd.shortCodeShare ? " open" : ""}>
     <summary style="cursor:pointer;font-size:0.85rem;color:var(--crow-accent);font-weight:500">${t("contacts.addPeer", lang)}</summary>
     <div style="margin-top:0.75rem;padding:1rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px">
       <p style="font-size:0.8rem;color:var(--crow-text-muted);margin:0 0 0.75rem">${t("contacts.addPeerDesc", lang)}</p>
       ${peerAdd.inviteError ? `<div style="font-size:0.8rem;color:var(--crow-error);margin-bottom:0.5rem">${escapeHtml(peerAdd.inviteError)}</div>` : ""}
       ${peerAdd.inviteShare ? renderInviteShare(peerAdd.inviteShare, lang) : ""}
+      ${peerAdd.shortCodeShare ? renderShortCodeShare(peerAdd.shortCodeShare, lang) : ""}
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin-top:0.5rem">
         <div>${peerForms.generateForm}</div>
         <div>${peerForms.acceptForm}</div>
       </div>
+      <details style="margin-top:0.75rem">
+        <summary style="cursor:pointer;font-size:0.75rem;color:var(--crow-text-muted)">${t("invite.shortCodeToggle", lang)}</summary>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin-top:0.5rem">
+          <div>${shortCodeForms.generateForm}</div>
+          <div>${shortCodeForms.acceptForm}</div>
+        </div>
+      </details>
     </div>
   </details>`;
 
