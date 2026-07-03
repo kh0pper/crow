@@ -12,6 +12,7 @@ import { getManagersOrNull } from "../../../../sharing/managers.js";
 import { markContactIsBot } from "../../shared/mark-contact-bot.js";
 import { createRoom, listRoomMembers } from "./rooms-store.js";
 import { buildRoomJoinEnvelope, fanOut } from "../../../../sharing/room-fanout.js";
+import { extractInviteCode } from "../../../../sharing/invite-url.js";
 
 /**
  * Create a connected sharing MCP client.
@@ -120,14 +121,23 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
 
   if (action === "accept_invite" && req.body.invite_code) {
     try {
+      const code = extractInviteCode(req.body.invite_code);
       const client = await sharingClientFactory();
-      await client.callTool({
-        name: "crow_accept_invite",
-        arguments: { invite_code: req.body.invite_code.trim() },
-      });
-      await client.close();
+      let result;
+      try {
+        result = await client.callTool({
+          name: "crow_accept_invite",
+          arguments: { invite_code: code },
+        });
+      } finally { try { await client.close?.(); } catch {} }
+      if (result?.isError) {
+        req._inviteError = result.content?.[0]?.text || "Invite could not be accepted.";
+        return false; // re-render with the error banner
+      }
     } catch (err) {
-      console.error("[messages] Failed to accept invite:", err.message);
+      console.error("[messages] Failed to accept invite"); // never echo the code
+      req._inviteError = err.message;
+      return false;
     }
     return res.redirectAfterPost("/dashboard/messages");
   }
