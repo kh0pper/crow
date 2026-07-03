@@ -9,6 +9,7 @@ import { z } from "zod";
 import { isKioskActive, kioskBlockedResponse } from "../../shared/kiosk-guard.js";
 import { generateInviteCode, parseInviteCode, parseBotInviteCode, computeSafetyNumber } from "../identity.js";
 import { upsertFullContact } from "../contact-promote.js";
+import { buildInviteUrl, extractInviteCode } from "../invite-url.js";
 
 /**
  * Build the DM payload a recipient sends to a bot to accept its invite.
@@ -43,6 +44,7 @@ export function registerContactsTools(server, ctx) {
     async ({ display_name }) => {
       if (await isKioskActive(db)) return kioskBlockedResponse("crow_generate_invite");
       const code = generateInviteCode(identity);
+      const url = buildInviteUrl(code);
       return {
         content: [
           {
@@ -51,6 +53,9 @@ export function registerContactsTools(server, ctx) {
               `Invite code generated (expires in 24 hours):`,
               ``,
               `\`${code}\``,
+              ``,
+              `Share link (opens a page with the code and instructions):`,
+              url,
               ``,
               `Share this code with the person you want to connect with.`,
               `They should use \`crow_accept_invite\` with this code.`,
@@ -72,6 +77,8 @@ export function registerContactsTools(server, ctx) {
       display_name: z.string().max(100).optional().describe("Name for this contact"),
     },
     async ({ invite_code, display_name }) => {
+      if (await isKioskActive(db)) return kioskBlockedResponse("crow_accept_invite");
+      invite_code = extractInviteCode(invite_code);
       try {
         const peer = parseInviteCode(invite_code);
 

@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Crow invite</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         max-width: 560px; margin: 0 auto; padding: 24px 16px; line-height: 1.5;
+         background: #0f1115; color: #e6e6e6; }
+  @media (prefers-color-scheme: light) { body { background: #fafafa; color: #1a1a1a; } .card { background:#fff !important; border-color:#ddd !important; } code { background:#eee !important; } }
+  h1 { font-size: 1.3rem; } h2 { font-size: 1rem; margin-top: 1.4rem; }
+  .card { background: #181b22; border: 1px solid #2a2f3a; border-radius: 10px; padding: 16px; margin: 14px 0; }
+  code, .code { font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .code { display: block; word-break: break-all; background: #10131a; border-radius: 8px;
+          padding: 10px; font-size: 0.85rem; margin: 8px 0; }
+  button { font-size: 0.9rem; padding: 8px 16px; border-radius: 8px; border: 1px solid #3a4150;
+           background: #232838; color: inherit; cursor: pointer; }
+  .muted { opacity: 0.7; font-size: 0.85rem; }
+  .hidden { display: none; }
+  a { color: #7aa2ff; }
+  .langbtn { float: right; font-size: 0.75rem; padding: 4px 10px; }
+</style>
+</head>
+<body>
+<button class="langbtn" id="langToggle" type="button">ES</button>
+
+<div data-lang="en">
+  <h1>🐦‍⬛ You've been invited to connect on Crow</h1>
+  <div id="codeCard-en" class="card hidden">
+    <div class="muted">Invite code (expires 24 hours after it was created, single acceptance):</div>
+    <span class="code" id="code-en"></span>
+    <button type="button" onclick="copyCode(this)" data-done="Copied ✓">Copy code</button>
+  </div>
+  <div id="noCode-en" class="card hidden">
+    <strong>This link has no invite code attached.</strong>
+    <p class="muted">Ask the person who invited you to send the full link (it ends with <code>#crow:…</code>).</p>
+  </div>
+  <div id="expired-en" class="card hidden">
+    <strong>This invite looks expired.</strong>
+    <p class="muted">Invite codes last 24 hours — ask for a fresh one.</p>
+  </div>
+  <h2>Have Crow already?</h2>
+  <p>Open your Crow dashboard → <strong>Messages</strong> → <strong>+</strong> → <strong>Accept an invite</strong> → paste the code.</p>
+  <p class="muted">Or open it directly on your Crow (enter your dashboard address — this stays on your device):</p>
+  <div class="card"><input id="gw-en" placeholder="https://your-crow.example.ts.net:8444" style="width:100%;padding:8px;border-radius:8px;border:1px solid #3a4150;background:transparent;color:inherit">
+  <button type="button" style="margin-top:8px" onclick="openOnCrow('en')">Open my Crow</button></div>
+  <h2>New to Crow?</h2>
+  <p>Crow is a private, self-hosted AI + messaging hub. <a href="https://maestro.press/software/crow/getting-started/">Install Crow</a>, then come back to this link.</p>
+  <p class="muted">Privacy: the code lives only in this link (after the <code>#</code>) — this page sends nothing anywhere. Whoever carried the link could see the code, which is why it expires. After connecting, compare <strong>safety numbers</strong> to verify each other.</p>
+</div>
+
+<div data-lang="es" class="hidden">
+  <h1>🐦‍⬛ Te han invitado a conectar en Crow</h1>
+  <div id="codeCard-es" class="card hidden">
+    <div class="muted">Código de invitación (caduca 24 horas después de crearse, un solo uso):</div>
+    <span class="code" id="code-es"></span>
+    <button type="button" onclick="copyCode(this)" data-done="Copiado ✓">Copiar código</button>
+  </div>
+  <div id="noCode-es" class="card hidden">
+    <strong>Este enlace no lleva ningún código de invitación.</strong>
+    <p class="muted">Pide a quien te invitó que envíe el enlace completo (termina en <code>#crow:…</code>).</p>
+  </div>
+  <div id="expired-es" class="card hidden">
+    <strong>Esta invitación parece caducada.</strong>
+    <p class="muted">Los códigos duran 24 horas — pide uno nuevo.</p>
+  </div>
+  <h2>¿Ya tienes Crow?</h2>
+  <p>Abre tu panel de Crow → <strong>Mensajes</strong> → <strong>+</strong> → <strong>Aceptar una invitación</strong> → pega el código.</p>
+  <p class="muted">O ábrelo directamente en tu Crow (escribe la dirección de tu panel — no sale de tu dispositivo):</p>
+  <div class="card"><input id="gw-es" placeholder="https://tu-crow.example.ts.net:8444" style="width:100%;padding:8px;border-radius:8px;border:1px solid #3a4150;background:transparent;color:inherit">
+  <button type="button" style="margin-top:8px" onclick="openOnCrow('es')">Abrir mi Crow</button></div>
+  <h2>¿Nuevo en Crow?</h2>
+  <p>Crow es un centro privado y autoalojado de IA + mensajería. <a href="https://maestro.press/software/crow/getting-started/">Instala Crow</a> y vuelve a este enlace.</p>
+  <p class="muted">Privacidad: el código vive solo en este enlace (tras el <code>#</code>) — esta página no envía nada a ningún sitio. Quien llevó el enlace pudo ver el código; por eso caduca. Tras conectar, comparen los <strong>números de seguridad</strong> para verificarse.</p>
+</div>
+
+<script>
+(function () {
+  var code = "";
+  try { code = decodeURIComponent((location.hash || "").slice(1)); } catch (e) { code = (location.hash || "").slice(1); }
+  var valid = /^crow:[a-z0-9]{10}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(code);
+  var expired = false;
+  if (valid) {
+    try {
+      var payload = JSON.parse(atob(code.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+      if (payload && payload.expires && Date.now() > payload.expires) expired = true;
+    } catch (e) { /* payload undecodable — let the accepting Crow judge it */ }
+  }
+  ["en", "es"].forEach(function (l) {
+    if (valid && !expired) {
+      document.getElementById("code-" + l).textContent = code;
+      document.getElementById("codeCard-" + l).classList.remove("hidden");
+    } else if (valid && expired) {
+      document.getElementById("expired-" + l).classList.remove("hidden");
+    } else {
+      document.getElementById("noCode-" + l).classList.remove("hidden");
+    }
+  });
+  window.copyCode = function (btn) {
+    var text = btn.previousElementSibling.textContent;
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(function () { btn.textContent = btn.getAttribute("data-done"); });
+  };
+  window.openOnCrow = function (l) {
+    var gw = (document.getElementById("gw-" + l).value || "").trim().replace(/\/+$/, "");
+    if (!gw) return;
+    if (!/^https?:\/\//.test(gw)) gw = "https://" + gw;
+    location.href = gw + "/dashboard/messages?invite=" + encodeURIComponent(code) ;
+  };
+  var showing = (navigator.language || "").toLowerCase().indexOf("es") === 0 ? "es" : "en";
+  function render() {
+    document.querySelectorAll("[data-lang]").forEach(function (el) {
+      el.classList.toggle("hidden", el.getAttribute("data-lang") !== showing);
+    });
+    document.getElementById("langToggle").textContent = showing === "en" ? "ES" : "EN";
+    document.documentElement.lang = showing;
+  }
+  document.getElementById("langToggle").onclick = function () { showing = showing === "en" ? "es" : "en"; render(); };
+  render();
+})();
+</script>
+</body>
+</html>

@@ -8,6 +8,7 @@
 import { escapeHtml } from "../../shared/components.js";
 import { t } from "../../shared/i18n.js";
 import { buildBotDirectory } from "../../shared/bot-directory.js";
+import { renderInviteShare, renderPeerInviteForms } from "../../shared/peer-invite-ui.js";
 
 /** Color palette for peer avatars (deterministic by contact ID) */
 const PEER_COLORS = [
@@ -30,7 +31,9 @@ function initials(name) {
  * Build the full messages panel HTML.
  */
 export function buildMessagesHTML(data) {
-  const { items, totalUnread, aiConfigured, storageAvailable, inviteResult, inviteError, lang, botInvite, csrf } = data;
+  const { items, totalUnread, aiConfigured, storageAvailable, inviteResult, inviteError, lang, botInvite, csrf, inviteShare, personInvite } = data;
+
+  const peerForms = renderPeerInviteForms({ lang, csrf: csrf || "" });
 
   // Bot-invite "Add & message" card (data pre-parsed in messages.js).
   let botInviteCard = "";
@@ -45,6 +48,22 @@ export function buildMessagesHTML(data) {
       `${botInvite.csrf}` +
       `<button type="submit" class="msg-btn-primary">Add &amp; message</button>` +
       `</form></div>`;
+  }
+
+  // Person-invite deep link (?invite=<code>) opened on THIS instance (P2/C1).
+  let personInviteCard = "";
+  if (personInvite) {
+    personInviteCard = personInvite.fromId
+      ? `<div class="msg-person-invite-card" style="margin:12px;padding:12px;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px">` +
+        `<div style="font-size:0.85rem;font-weight:600;margin-bottom:6px">${t("invite.connectWith", lang)} ${escapeHtml(personInvite.fromId)}?</div>` +
+        `<form method="POST" action="/dashboard/messages">` +
+        `<input type="hidden" name="action" value="accept_invite">` +
+        `<input type="hidden" name="invite_code" value="${escapeHtml(personInvite.code)}">` +
+        `${personInvite.csrf || ""}` +
+        `<button type="submit" class="msg-send-btn" style="font-size:0.8rem;padding:6px 14px">${t("invite.acceptBtn", lang)}</button>` +
+        `</form></div>`
+      : `<div class="msg-person-invite-card" style="margin:12px;padding:12px;background:var(--crow-bg-elevated);border:1px solid var(--crow-error);border-radius:8px">` +
+        `<div style="font-size:0.8rem;color:var(--crow-error)">${t("invite.invalidCode", lang)}</div></div>`;
   }
 
   // Collapsed "browse bots on your other Crows" entry + the directory modal.
@@ -140,9 +159,12 @@ export function buildMessagesHTML(data) {
   // Invite result banner
   let inviteBanner = "";
   if (inviteResult) {
-    inviteBanner = `<div style="position:absolute;top:0;left:0;right:0;z-index:50;padding:12px;background:var(--crow-bg-elevated);border-bottom:1px solid var(--crow-border)">
+    const body = inviteShare
+      ? renderInviteShare(inviteShare, lang)
+      : `<pre style="font-size:0.75rem;white-space:pre-wrap;word-break:break-all;background:var(--crow-bg-deep);padding:8px;border-radius:6px;max-height:120px;overflow-y:auto">${escapeHtml(inviteResult)}</pre>`;
+    inviteBanner = `<div style="position:absolute;top:0;left:0;right:0;z-index:50;padding:12px;background:var(--crow-bg-elevated);border-bottom:1px solid var(--crow-border);max-height:70%;overflow-y:auto">
       <div style="font-size:0.8rem;color:var(--crow-text-muted);margin-bottom:4px">${t("messages.inviteGenerated", lang)}</div>
-      <pre style="font-size:0.75rem;white-space:pre-wrap;word-break:break-all;background:var(--crow-bg-deep);padding:8px;border-radius:6px;max-height:120px;overflow-y:auto">${escapeHtml(inviteResult)}</pre>
+      ${body}
       <button onclick="this.parentElement.remove()" style="margin-top:6px;font-size:0.75rem;background:none;border:1px solid var(--crow-border);border-radius:4px;color:var(--crow-text-muted);cursor:pointer;padding:3px 8px">${t("messages.dismiss", lang)}</button>
     </div>`;
   }
@@ -155,7 +177,7 @@ export function buildMessagesHTML(data) {
 
   const noChatsLabel = escapeHtml(t("messages.noChats", lang));
 
-  return botInviteCard + requestsBlock + browseEntry + `
+  return botInviteCard + personInviteCard + requestsBlock + browseEntry + `
     <div class="msg-hub" style="position:relative">
       ${inviteBanner}
       ${botDirModal}
@@ -221,17 +243,10 @@ export function buildMessagesHTML(data) {
           <div class="msg-room-hint">${t("messages.roomLeaveHint", lang)}</div>
         </div>
         <div class="msg-invite-dialog" id="invite-generate">
-          <form method="POST">
-            <input type="hidden" name="action" value="generate_invite">
-            <button type="submit" class="msg-send-btn" style="width:100%;font-size:0.8rem;padding:6px">${t("messages.generateInviteCode", lang)}</button>
-          </form>
+          ${peerForms.generateForm}
         </div>
         <div class="msg-invite-dialog" id="invite-accept">
-          <form method="POST">
-            <input type="hidden" name="action" value="accept_invite">
-            <textarea name="invite_code" placeholder="${t("messages.pasteInvitePlaceholder", lang)}" rows="3" required></textarea>
-            <button type="submit" class="msg-send-btn" style="width:100%;font-size:0.8rem;padding:6px">${t("messages.acceptInviteButton", lang)}</button>
-          </form>
+          ${peerForms.acceptForm}
         </div>
         <div class="msg-invite-dialog" id="invite-bot">
           <form method="POST">
