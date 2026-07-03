@@ -16,8 +16,10 @@ test("static invite page exists where DEFAULT_INVITE_PAGE_URL points", () => {
 test("page is self-contained and reads the fragment client-side only", () => {
   const html = readFileSync(PAGE, "utf-8");
   assert.ok(html.includes("location.hash"), "reads the fragment");
-  assert.ok(!/\b(src|href)\s*=\s*"https?:\/\//.test(html.replace(/href="https:\/\/maestro\.press[^"]*"/g, "")),
-    "no external scripts/styles/images (own-domain install links exempt)");
+  const stripped = html.replace(/href="https:\/\/maestro\.press[^"]*"/g, "");
+  const externalRef = /(?:\b(?:src|href|formaction)\s*=\s*["']?\s*(?:https?:)?\/\/)|url\(\s*["']?\s*(?:https?:)?\/\//i;
+  assert.ok(!externalRef.test(stripped), "no external scripts/styles/images (own-domain install links exempt)");
+  assert.ok(!/http-equiv\s*=\s*["']?refresh/i.test(html), "no meta refresh");
   assert.ok(!html.includes("fetch("), "no network calls");
   assert.ok(!html.includes("XMLHttpRequest"), "no network calls");
   assert.ok(html.includes("navigator.clipboard"), "copy button");
