@@ -191,9 +191,10 @@ In `servers/sharing/tools/contacts.js`:
 import { buildInviteUrl, extractInviteCode } from "../invite-url.js";
 ```
 
-(b) In `crow_generate_invite`'s handler (currently `:44-62`), after `const code = generateInviteCode(identity);` compute the URL and add TWO lines to the text array — the result becomes:
+(b) In `crow_generate_invite`'s handler (currently `:44-62`), compute the URL after the code and add TWO lines to the text array. The FULL handler body becomes (note the existing kiosk guard STAYS as line 1 — do not drop it):
 
 ```js
+      if (await isKioskActive(db)) return kioskBlockedResponse("crow_generate_invite");
       const code = generateInviteCode(identity);
       const url = buildInviteUrl(code);
       return {
@@ -226,16 +227,26 @@ import { buildInviteUrl, extractInviteCode } from "../invite-url.js";
 
 The kiosk guard is NEW — the accept handler is currently unguarded (verified: only `crow_generate_invite:44`, `crow_add_contact:182`, `crow_accept_bot_invite:209` guard today), and this plan widens the accept surface, so the guard ships with it. `isKioskActive`/`kioskBlockedResponse` are already imported in this file (used at `:44`). `invite_code` is a destructured parameter (reassignment legal). The extraction makes a pasted URL work from any MCP client, not just the dashboard.
 
-- [ ] **Step 6: Sanity-run the neighboring sharing tests**
+- [ ] **Step 6: Document the env override**
+
+Append to `.env.example` (with the neighboring optional-var comment style):
+
+```bash
+# Optional: override the public static page invite share-links point at
+# (default: https://maestro.press/software/crow/invite/). Self-hosters only.
+# CROW_INVITE_PAGE_URL=
+```
+
+- [ ] **Step 7: Sanity-run the neighboring sharing tests**
 
 Run: `node --test tests/invite-url.test.js tests/contact-promote.test.js tests/invite-accepted-promote.test.js`
 Expected: ALL PASS (the tool text change is additive; nothing parses the old text shape — verify with `grep -rn "Invite code generated" servers/ tests/ scripts/` → only `tools/contacts.js` defines it; if any consumer asserts the old exact text, update that assertion in this task).
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add servers/sharing/invite-url.js tests/invite-url.test.js
-git commit servers/sharing/invite-url.js tests/invite-url.test.js servers/sharing/tools/contacts.js -m "feat(sharing): invite share URL builder + forgiving code extraction (P2/C1)"
+git commit servers/sharing/invite-url.js tests/invite-url.test.js servers/sharing/tools/contacts.js .env.example -m "feat(sharing): invite share URL builder + forgiving code extraction + kiosk-guard accept (P2/C1)"
 git show --stat HEAD
 ```
 
@@ -632,11 +643,13 @@ import { extractInviteCode } from "../../../../sharing/invite-url.js";
     try {
       const code = extractInviteCode(req.body.invite_code);
       const client = await sharingClientFactory();
-      const result = await client.callTool({
-        name: "crow_accept_invite",
-        arguments: { invite_code: code },
-      });
-      await client.close();
+      let result;
+      try {
+        result = await client.callTool({
+          name: "crow_accept_invite",
+          arguments: { invite_code: code },
+        });
+      } finally { try { await client.close?.(); } catch {} }
       if (result?.isError) {
         req._inviteError = result.content?.[0]?.text || "Invite could not be accepted.";
         return false; // re-render with the error banner
@@ -1133,4 +1146,14 @@ PR via github MCP (`mcp__github__create_pull_request`, owner=kh0pper repo=crow, 
 
 ## Review
 
-*(2-round adversarial review to be recorded here before execution.)*
+**Round 1 (2026-07-03, adversarial subagent, opus): REVISE — all addressed.**
+1. [CRITICAL] Both panel-loader imports used `./shared/peer-invite-ui.js` (resolves to nonexistent `panels/shared/`) with a false justifying note → fixed to `../shared/…` (matches `messages.js:18` `../shared/csrf.js`); note corrected.
+2. [IMPORTANT] Plan claimed `crow_accept_invite` kiosk-guards — it does NOT (only generate/:44, add_contact/:182, accept_bot_invite/:209 guard). Since this plan widens the accept surface (Contacts section + deep link), Task 1 now ADDS the guard as the handler's first line; constraint text corrected.
+3. [MINOR] Contacts actions now use the injectable `sharingClientFactory` (parity with `add_by_id:103`, testable). 4. [MINOR] Person-invite card form got explicit `action="/dashboard/messages"` so the POST target carries no `?invite=` query. 5. [MINOR] Contacts side now threads `csrfInput(req)` (Turbo-off robustness, component parity). 6. [MINOR] Test count corrected to 27 (baseline ≈1009).
+Verified clean by the reviewer: CODE_RE vs real base36 output (always lowercase, no URL false-match — `encodeURIComponent` encodes `:`); csrf double-submit accepts header OR field (additive); `invite_code` reassignable; `openOnCrow` scheme-safe; static-page test regexes correct; no gateway URL access-logging (deep-link claim holds); `renderContactList` single call site.
+
+**Round 2 (2026-07-03, fresh adversarial subagent, opus): APPROVE — 3 minors, all applied.**
+1. Task 1's generate-handler reproduction now includes the existing kiosk guard as line 1 (no test covers kiosk-generate; a whole-block misread could have dropped it silently). 2. Messages `accept_invite` closes the client in `finally` (no FD leak on throw; matches the contacts block). 3. `CROW_INVITE_PAGE_URL` documented in `.env.example` (new Task 1 Step 6).
+Round-1 fixes re-verified correct against live source (`db` in scope via `registerContactsTools` ctx destructure `:33`; guard imports present `:9`; all import depths; `handleContactAction` signature `:33`). Explicitly cleared: atob unpadded base64url is safe (WHATWG forgiving-base64; length%4==1 impossible for valid payloads); only 2 tests import `buildMessagesHTML`, neither touches the changed forms; zero tests import `renderContactList`; no tool-text consumers parse the generate output; no i18n/CSS collisions; `?invite=` conflicts none; re-render-on-false path confirmed (`messages.js:34` gates on `res.headersSent`).
+
+*(Execution record to be appended by Task 6.)*
