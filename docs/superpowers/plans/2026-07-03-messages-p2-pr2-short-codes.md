@@ -762,3 +762,18 @@ git show --stat HEAD
 Round-2 confirmed correct (unchanged): 32-symbol alphabet with no I/L/O/U (60 bits, no collision loss); bias-free bit extraction; C1 HMAC coherence; I2 clean after-auth insertion point (`boot.js:140` auth return, `:141` first side effect); I1 "distinct inviteCode payloads" is the right fail-closed trigger; no PR1 anchor drift at `3a36c256`.
 
 **Both rounds resolved. Plan APPROVED for execution.**
+
+## Execution & Final Security Review (2026-07-03)
+
+Executed via subagent-driven development on `feat/messages-p2-short-codes` (base `91d1fcdf`), fresh sonnet implementer + sonnet reviewer per task:
+- Task 1 `83c7b682` — short-code.js (12-char/60-bit Crockford, async scrypt + single-flight, NIP-44 rendezvous). Review SPEC ✅ Approved zero findings; crypto independently verified (32-sym alphabet, bias-free extraction, async-only, lock). 9/9.
+- Task 2 `4f8d2302` + fix `fcf7c634` — shortcode-ledger.js + inviteId/expiresInMs + consume-after-auth gate. Review caught a **CRITICAL remote prototype-pollution** (attacker `inviteId` as object key, empirically reproduced) → FIXED (null-proto ledger + `__proto__`/`constructor`/`prototype` reject-set + hasOwnProperty + identity typeof guard + 2 regression tests); controller directly re-verified + reviewer re-review **Approved** (both ⚠️ resolved). Gate-after-auth verified structurally + by I2 negative test. 19/19.
+- Task 3 `2695f20a` — acceptInviteCore VERBATIM extract (independently re-diffed: only delta = inviteId spread) + publishRendezvousEvent/fetchRendezvousByAuthor (wait-all-EOSE, never first) + 2 tools + I1 fail-closed. randomUUID inviteId + expiresInMs wired. Review Approved zero crit/imp. 8/8 + 42/42 neighbors.
+- Task 4 `9db4814e` — short-code UI both panels (progressive-disclosure `<details>`). 3-group regex test-guarded (round-2 CRITICAL not regressed); i18n "12-character" EN+ES. Review Approved 0/0/0. 16/16 + 82/82 regression.
+- Polish `7cebd5ff` — I1 comment clarified (tripwire not flood-proof) per final review.
+
+Controller verification: **full suite 1052/1052**; isolated gateway boot clean (4 relays, both subscribe lines); NO schema change (user_version stays 3).
+
+**FINAL SECURITY REVIEW (opus, 91d1fcdf..9db4814e): READY TO MERGE — Yes. 0 Critical / 0 Important / 3 Minor** (all within the conceded cracked-code threat model: I1 flood-evadable tripwire; consume-before-promote token-strand on promote-throw; ledger load-check-save TOCTOU — none escalate beyond "code already cracked → safety-number backstop"). Independently re-audited: crypto math (60-bit bias-free, async-only memory-hard scrypt, non-wedging lock, NIP-44 MAC carries confidentiality/integrity vs relay+observer); consume strictly after R4 auth + before promote; proto-pollution closed both layers; expiry enforced on EVERY accept path; verbatim acceptInviteCore behavior-preserving; L6/R4/R5 trust boundaries intact; no schema change; log hygiene clean; kiosk on both tools.
+
+PR2 follow-ups (non-blocking, all conceded-threat-model): I1 flood evasion (safety-number backstop covers it); consume-before-promote strand (recoverable via add-by-id); ledger TOCTOU (single-use is best-effort by design). PR3 hard requirement carried: emit `handshake_complete` ack on the ledger `"replayed"` verdict too (idempotent) so a lost first-ack doesn't strand the acceptor's ~60h retry.
