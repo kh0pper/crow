@@ -336,6 +336,24 @@ export const translations = {
   "messages.acceptRequest": { en: "Accept", es: "Aceptar" },
   "messages.declineRequest": { en: "Decline", es: "Rechazar" },
 
+  // ─── Peer invite share (Messages Phase 2 PR1) ───
+  "invite.shareLabel": { en: "Share this link", es: "Comparte este enlace" },
+  "invite.shareHint": {
+    en: "Anyone who sees this link can use the code inside it — send it over a channel you trust. It expires in 24 hours.",
+    es: "Cualquiera que vea este enlace puede usar el código que contiene: envíalo por un canal de confianza. Caduca en 24 horas.",
+  },
+  "invite.copyLink": { en: "Copy link", es: "Copiar enlace" },
+  "invite.rawCode": { en: "Or share the raw code", es: "O comparte el código directamente" },
+  "invite.generateBtn": { en: "Create invite link", es: "Crear enlace de invitación" },
+  "invite.acceptTitle": { en: "Accept an invite", es: "Aceptar una invitación" },
+  "invite.pastePlaceholder": { en: "Paste an invite link or code...", es: "Pega un enlace o código de invitación..." },
+  "invite.acceptBtn": { en: "Accept invite", es: "Aceptar invitación" },
+  "invite.connectWith": { en: "Connect with", es: "Conectar con" },
+  "invite.invalidCode": { en: "This invite looks invalid or has expired. Ask for a new one.", es: "Esta invitación parece inválida o ha caducado. Pide una nueva." },
+  "invite.verifyLater": { en: "After connecting, compare safety numbers to verify each other.", es: "Después de conectar, comparen los números de seguridad para verificarse." },
+  "contacts.addPeer": { en: "Add a Crow peer", es: "Añadir un par de Crow" },
+  "contacts.addPeerDesc": { en: "Invite someone with a link or accept theirs", es: "Invita a alguien con un enlace o acepta el suyo" },
+
   // ─── Blog Panel ───
   "blog.pageTitle": { en: "Blog", es: "Blog" },
   "blog.total": { en: "Total", es: "Total" },
