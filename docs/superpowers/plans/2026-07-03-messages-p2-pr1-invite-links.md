@@ -1157,3 +1157,18 @@ Verified clean by the reviewer: CODE_RE vs real base36 output (always lowercase,
 Round-1 fixes re-verified correct against live source (`db` in scope via `registerContactsTools` ctx destructure `:33`; guard imports present `:9`; all import depths; `handleContactAction` signature `:33`). Explicitly cleared: atob unpadded base64url is safe (WHATWG forgiving-base64; length%4==1 impossible for valid payloads); only 2 tests import `buildMessagesHTML`, neither touches the changed forms; zero tests import `renderContactList`; no tool-text consumers parse the generate output; no i18n/CSS collisions; `?invite=` conflicts none; re-render-on-false path confirmed (`messages.js:34` gates on `res.headersSent`).
 
 *(Execution record to be appended by Task 6.)*
+
+## Execution & Final Review (2026-07-03)
+
+Executed via subagent-driven development on `feat/messages-p2-invite-links` (base `dbf5efbf`), fresh sonnet implementer + sonnet reviewer per task:
+- Task 1 `1368df13` — invite-url.js + tool wiring + NEW crow_accept_invite kiosk guard + .env.example (SPEC ✅, QUALITY Approved, zero findings, 16/16).
+- Task 2 `695e0e58` — peer-invite-ui.js + 14 i18n keys EN+ES (SPEC ✅, Approved, zero findings, 7/7 + full 996/996).
+- Task 3 `6d672c71` — messages panel: share block, ?invite= card, honest accept errors, tray→shared forms (SPEC ✅ 7/7 items, Approved, zero findings, 6/6 + 68/68 widened net).
+- Task 4 `ee69f6ba` — contacts add-peer section via injectable factory (SPEC ✅, Approved, zero findings, 6/6 incl. regression).
+- Task 5 `2b5157e0` + fix `d5947cf4` — static page + integrity test; reviewer's Important (weak external-ref guard regex) FIXED and re-review RESOLVED (hardened: any-quote/case/protocol-relative/formaction/css-url/meta-refresh, catch-capability proven).
+
+Controller verification: **full suite 1009/1009** (982 baseline + 27 new, exact); isolated gateway boot clean (`listening` + `[nostr] Subscribed to incoming` + `[sharing] Subscribed to incoming Nostr messages`).
+
+**FINAL whole-branch review (opus, dbf5efbf..d5947cf4): READY TO MERGE — Yes. 0 Critical / 0 Important / 3 Minor follow-ups.** Security: invite-code lifecycle traced exfiltration-clean end-to-end (no server log echoes the code; only query-param appearance is the user-initiated `?invite=` into the recipient's own gateway; every HTML sink escaped; static page fully self-contained, scheme-forced deep link). Kiosk: BOTH tools now guard (the pre-existing accept gap is closed by this PR); all four panel paths route through the tools. Trust boundaries L6/R4/R5 untouched. CSRF strictly improved (tray/contacts/card forms now Turbo-off-safe). Round-1's critical `./shared/` import bug confirmed fixed. Independent verification: 27/27 new + 17/17 neighbors + all 7 modules import clean.
+
+Minor follow-ups (non-blocking): M1 tighten the test's maestro.press exemption to `maestro\.press\/` (prefix-match nit); M2 optionally unify the Contacts share-null fallback with Messages' raw-code fallback; M3 remove 3 orphaned `messages.*` i18n keys (generateInviteCode / acceptInviteButton / pasteInvitePlaceholder).
