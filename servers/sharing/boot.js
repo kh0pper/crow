@@ -22,6 +22,7 @@ import {
 } from "./bot-relay.js";
 import { upsertFullContact } from "./contact-promote.js";
 import { markDelivered, DELIVERY_RECEIPT_SUBTYPE } from "./retry-queue.js";
+import { setReceiveWired } from "./receive-health.js";
 
 /**
  * L6 receive-path fix — turn a decrypted DM from an unknown sender into a
@@ -318,6 +319,216 @@ export async function deliverPendingShares({ db, peerManager, contact, identityC
   }
 }
 
+/**
+ * R8 (never run deaf): wire the Nostr receive path — per-contact subscriptions
+ * plus the broad incoming subscription — INDEPENDENT of Hyperswarm. DMs are
+ * Nostr kind:4 and need no DHT; before this split the whole block lived inside
+ * peerManager.start().then(), so a single DHT failure at boot silently killed
+ * all message receipt until restart (L11).
+ *
+ * Per-contact subscribe failures warn-and-continue (as before). A
+ * subscribeToIncoming failure PROPAGATES — that is the wiring failure
+ * startNostrReceive retries. Re-running is safe: NostrManager closes and
+ * replaces any prior handle per subscription key.
+ */
+export async function wireNostrReceive(managers) {
+  // The handler ladder references ALL of these free names (review round 1
+  // critical): handleInviteAccepted uses syncManager/peerManager (boot.js:385),
+  // handleIncomingBotRelay + handleInboundRoomEnvelope use identity
+  // (boot.js:477,497), handleIncomingRequest takes the whole `managers`
+  // (boot.js:505). Destructuring too few silently breaks invite promotion —
+  // the ReferenceError is swallowed by subscribeToIncoming's handled=true
+  // try/catch (nostr.js:508-521).
+  const { db, identity, peerManager, syncManager, nostrManager } = managers;
+
+  try {
+    const contacts = await db.execute({
+      sql: "SELECT id, crow_id, display_name, ed25519_pubkey, secp256k1_pubkey, request_status FROM contacts WHERE is_blocked = 0",
+      args: [],
+    });
+    for (const c of contacts.rows) {
+      try {
+        // 'pending' requests stay unsubscribed — the broad incoming
+        // subscription below still receives them (L6 request path).
+        if (c.request_status === "pending") continue;
+        await nostrManager.subscribeToContact({
+          id: c.id,
+          crow_id: c.crow_id,
+          secp256k1_pubkey: c.secp256k1_pubkey,
+          display_name: c.display_name,
+        });
+      } catch (err) {
+        console.warn(`[sharing] Nostr subscribe failed for ${c.crow_id}:`, err.message);
+      }
+    }
+  } catch (err) {
+    console.warn("[sharing] Failed to load contacts for Nostr subscribe:", err.message);
+  }
+
+  // Broad incoming subscription (invites, social envelopes, message requests).
+  // Ordered after the per-contact loop so relay connections are reused.
+  await nostrManager.subscribeToIncoming(async (payload, senderPubkey) => {
+    await handleInviteAccepted(db, { syncManager, peerManager, nostrManager }, payload, senderPubkey);
+  }, async (subtype, payload, senderPubkey) => {
+    console.log(`[sharing] Received crow_social message: ${subtype}`);
+    if (subtype === "room_invite") {
+      const { room_code, join_url, host_name, host_crow_id } = payload;
+      if (!room_code || !join_url) return;
+      try {
+        await createNotification(db, {
+          title: `${host_name || "Someone"} is calling`,
+          body: `Tap to join the call`,
+          type: "peer",
+          source: "sharing:room_invite",
+          priority: "high",
+          action_url: join_url,
+        });
+      } catch (err) {
+        console.warn("[sharing] Failed to create room invite notification:", err.message);
+      }
+    } else if (subtype === "room_closed") {
+      const { host_name } = payload;
+      try {
+        await createNotification(db, {
+          title: `${host_name || "Host"} closed the room`,
+          type: "peer",
+          source: "sharing:room_closed",
+        });
+      } catch {}
+    } else if (subtype === "voice_memo") {
+      const { text, sender_name } = payload;
+      if (!text) return;
+      try {
+        await createNotification(db, {
+          title: `Voice memo from ${sender_name || "Someone"}`,
+          body: text.length > 200 ? text.slice(0, 200) + "..." : text,
+          type: "peer",
+          source: "sharing:voice_memo",
+          priority: "high",
+        });
+      } catch (err) {
+        console.warn("[sharing] Failed to create voice memo notification:", err.message);
+      }
+    } else if (subtype === "reaction") {
+      const { emoji, sender_name } = payload;
+      if (!emoji) return;
+      try {
+        await createNotification(db, {
+          title: `${sender_name || "Someone"} reacted ${emoji}`,
+          type: "peer",
+          source: "sharing:reaction",
+        });
+      } catch {}
+    } else if (subtype === "group_message") {
+      const { group_name, sender_name, message: msgText } = payload;
+      if (!msgText) return;
+      try {
+        await createNotification(db, {
+          title: `[${group_name || "Group"}] ${sender_name || "Someone"}`,
+          body: msgText.length > 200 ? msgText.slice(0, 200) + "..." : msgText,
+          type: "peer",
+          source: "sharing:group_message",
+          priority: "high",
+        });
+      } catch (err) {
+        console.warn("[sharing] Failed to create group message notification:", err.message);
+      }
+      // Also store as a regular message with group context
+      try {
+        // Find the sender contact
+        const senderContact = await db.execute({
+          sql: "SELECT id FROM contacts WHERE crow_id = ?",
+          args: [payload.sender_crow_id || ""],
+        });
+        if (senderContact.rows.length > 0) {
+          await db.execute({
+            sql: `INSERT INTO messages (contact_id, nostr_event_id, content, direction, is_read, created_at)
+                  VALUES (?, ?, ?, 'received', 0, datetime('now'))`,
+            args: [senderContact.rows[0].id, `grp_${Date.now()}`, `[${group_name}] ${msgText}`],
+          });
+        }
+      } catch {}
+    } else if (subtype === "bot_relay") {
+      const localName = await resolveLocalInstanceName(db);
+      if (payload.target_instance !== localName) return; // Not for us
+      // Validate sender is a known instance
+      const senderCheck = await db.execute({
+        sql: "SELECT id FROM crow_instances WHERE name = ? AND status = 'active'",
+        args: [payload.sender_instance],
+      });
+      if (senderCheck.rows.length === 0) {
+        console.warn(`[sharing] Bot relay from unknown instance: ${payload.sender_instance}`);
+        return;
+      }
+      handleIncomingBotRelay(payload, db, identity, nostrManager);
+    } else if (subtype === "bot_relay_result") {
+      const localName = await resolveLocalInstanceName(db);
+      if (payload.target_instance !== localName) return; // Not for us
+      const pending = resolvePendingRelay(payload.relay_id);
+      try {
+        await createNotification(db, {
+          title: `${payload.responder_instance}: ${payload.status === "success" ? "Done" : "Error"}`,
+          body: payload.result || "No details",
+          type: "system",
+          source: "sharing:bot_relay_result",
+          priority: "high",
+        });
+      } catch (err) {
+        console.warn("[sharing] Failed to create relay result notification:", err.message);
+      }
+    } else if (subtype === DELIVERY_RECEIPT_SUBTYPE) {
+      await handleDeliveryReceipt(db, payload.event_ids, senderPubkey);
+    } else if (subtype === "room_message" || subtype === "room_join") {
+      const { handleInboundRoomEnvelope } = await import("./room-inbound.js");
+      await handleInboundRoomEnvelope({ db, nostrManager, identity, subtype, payload, senderPubkey, log: (m) => console.log("[rooms]", m) });
+    }
+  }, async (senderPubkey, content, event) => {
+    // L6: any decrypted DM NOT consumed by a real handler (plaintext,
+    // malformed JSON, or a subtype-less crow_social) becomes a visible
+    // message request instead of being silently dropped. handleIncomingRequest
+    // never throws, but double-guard so onevent stays throw-proof.
+    try {
+      await handleIncomingRequest(db, managers, {
+        senderPubkey,
+        content,
+        eventId: event?.id,
+      });
+    } catch (err) {
+      try { console.warn("[sharing] onMessageRequest wiring failed:", err.message); } catch {}
+    }
+  });
+  console.log("[sharing] Subscribed to incoming Nostr messages");
+}
+
+/**
+ * Run wireNostrReceive with health reporting + bounded-backoff retry.
+ * Never rejects. The retry timer is unref'd so it can never hold the
+ * process open.
+ */
+export function startNostrReceive(managers, opts = {}) {
+  const baseMs = opts.baseMs ?? 15_000;
+  const maxMs = opts.maxMs ?? 300_000;
+  const schedule = opts.schedule ?? ((fn, ms) => {
+    const t = setTimeout(fn, ms);
+    if (t.unref) t.unref();
+    return t;
+  });
+  let attempt = 0;
+  const run = async () => {
+    try {
+      await wireNostrReceive(managers);
+      setReceiveWired(true);
+    } catch (err) {
+      setReceiveWired(false, err);
+      const delay = Math.min(baseMs * 2 ** attempt, maxMs);
+      attempt += 1;
+      console.warn(`[sharing] Nostr receive wiring failed (retry in ${Math.round(delay / 1000)}s):`, err?.message);
+      schedule(run, delay);
+    }
+  };
+  return run();
+}
+
 export async function initSharingRuntime(managers, helpers) {
   const { db, identity, peerManager, syncManager, instanceSyncManager, nostrManager } = managers;
   const { applyProjectCloneBundle, buildProjectCloneBundle } = helpers;
@@ -331,6 +542,10 @@ export async function initSharingRuntime(managers, helpers) {
     console.warn("[sharing] ensureColumn shared_items.mode:", err.message);
   }
 
+  // R8: the Nostr receive path must never depend on Hyperswarm coming up.
+  // Fire-and-forget (never rejects); failures are health-visible + retried.
+  startNostrReceive(managers);
+
   // Start peer manager and join DHT topics for existing contacts
   peerManager.start().then(async () => {
     try {
@@ -340,32 +555,14 @@ export async function initSharingRuntime(managers, helpers) {
       });
       for (const c of contacts.rows) {
         try {
-          // SPLIT by request_status:
-          //   NULL      → full contact: peer-join + sync + Nostr subscribe (unchanged).
-          //   'accepted'→ partial (secp-only, no ed25519): Nostr subscribe ONLY —
-          //               initContact/joinContact would fail on the empty ed25519 key.
-          //   'pending' → skip entirely; the broad subscribeToIncoming still receives it.
-          if (c.request_status === "pending") continue;
-          if (c.request_status === "accepted") {
-            await nostrManager.subscribeToContact({
-              id: c.id,
-              crow_id: c.crow_id,
-              secp256k1_pubkey: c.secp256k1_pubkey,
-              display_name: c.display_name,
-            });
-            continue;
-          }
+          // Nostr subscriptions are handled by wireNostrReceive (R8). Only
+          // FULL contacts (request_status NULL) join DHT topics / sync —
+          // partial rows lack a usable ed25519 key.
+          if (c.request_status === "pending" || c.request_status === "accepted") continue;
           await syncManager.initContact(c.id, null);
           await peerManager.joinContact({
             crowId: c.crow_id,
             ed25519Pubkey: c.ed25519_pubkey,
-          });
-          // Subscribe to Nostr messages from this contact
-          await nostrManager.subscribeToContact({
-            id: c.id,
-            crow_id: c.crow_id,
-            secp256k1_pubkey: c.secp256k1_pubkey,
-            display_name: c.display_name,
           });
         } catch (err) {
           console.warn(`[sharing] Failed to join topic for ${c.crow_id}:`, err.message);
@@ -376,144 +573,6 @@ export async function initSharingRuntime(managers, helpers) {
       }
     } catch (err) {
       console.warn("[sharing] Failed to load contacts on startup:", err.message);
-    }
-
-    // Subscribe to all incoming DMs (invites, social messages)
-    // Done here so relay connections from subscribeToContact are reused
-    try {
-      await nostrManager.subscribeToIncoming(async (payload, senderPubkey) => {
-        await handleInviteAccepted(db, { syncManager, peerManager, nostrManager }, payload, senderPubkey);
-      }, async (subtype, payload, senderPubkey) => {
-        console.log(`[sharing] Received crow_social message: ${subtype}`);
-        if (subtype === "room_invite") {
-          const { room_code, join_url, host_name, host_crow_id } = payload;
-          if (!room_code || !join_url) return;
-          try {
-            await createNotification(db, {
-              title: `${host_name || "Someone"} is calling`,
-              body: `Tap to join the call`,
-              type: "peer",
-              source: "sharing:room_invite",
-              priority: "high",
-              action_url: join_url,
-            });
-          } catch (err) {
-            console.warn("[sharing] Failed to create room invite notification:", err.message);
-          }
-        } else if (subtype === "room_closed") {
-          const { host_name } = payload;
-          try {
-            await createNotification(db, {
-              title: `${host_name || "Host"} closed the room`,
-              type: "peer",
-              source: "sharing:room_closed",
-            });
-          } catch {}
-        } else if (subtype === "voice_memo") {
-          const { text, sender_name } = payload;
-          if (!text) return;
-          try {
-            await createNotification(db, {
-              title: `Voice memo from ${sender_name || "Someone"}`,
-              body: text.length > 200 ? text.slice(0, 200) + "..." : text,
-              type: "peer",
-              source: "sharing:voice_memo",
-              priority: "high",
-            });
-          } catch (err) {
-            console.warn("[sharing] Failed to create voice memo notification:", err.message);
-          }
-        } else if (subtype === "reaction") {
-          const { emoji, sender_name } = payload;
-          if (!emoji) return;
-          try {
-            await createNotification(db, {
-              title: `${sender_name || "Someone"} reacted ${emoji}`,
-              type: "peer",
-              source: "sharing:reaction",
-            });
-          } catch {}
-        } else if (subtype === "group_message") {
-          const { group_name, sender_name, message: msgText } = payload;
-          if (!msgText) return;
-          try {
-            await createNotification(db, {
-              title: `[${group_name || "Group"}] ${sender_name || "Someone"}`,
-              body: msgText.length > 200 ? msgText.slice(0, 200) + "..." : msgText,
-              type: "peer",
-              source: "sharing:group_message",
-              priority: "high",
-            });
-          } catch (err) {
-            console.warn("[sharing] Failed to create group message notification:", err.message);
-          }
-          // Also store as a regular message with group context
-          try {
-            // Find the sender contact
-            const senderContact = await db.execute({
-              sql: "SELECT id FROM contacts WHERE crow_id = ?",
-              args: [payload.sender_crow_id || ""],
-            });
-            if (senderContact.rows.length > 0) {
-              await db.execute({
-                sql: `INSERT INTO messages (contact_id, nostr_event_id, content, direction, is_read, created_at)
-                      VALUES (?, ?, ?, 'received', 0, datetime('now'))`,
-                args: [senderContact.rows[0].id, `grp_${Date.now()}`, `[${group_name}] ${msgText}`],
-              });
-            }
-          } catch {}
-        } else if (subtype === "bot_relay") {
-          const localName = await resolveLocalInstanceName(db);
-          if (payload.target_instance !== localName) return; // Not for us
-          // Validate sender is a known instance
-          const senderCheck = await db.execute({
-            sql: "SELECT id FROM crow_instances WHERE name = ? AND status = 'active'",
-            args: [payload.sender_instance],
-          });
-          if (senderCheck.rows.length === 0) {
-            console.warn(`[sharing] Bot relay from unknown instance: ${payload.sender_instance}`);
-            return;
-          }
-          handleIncomingBotRelay(payload, db, identity, nostrManager);
-        } else if (subtype === "bot_relay_result") {
-          const localName = await resolveLocalInstanceName(db);
-          if (payload.target_instance !== localName) return; // Not for us
-          const pending = resolvePendingRelay(payload.relay_id);
-          try {
-            await createNotification(db, {
-              title: `${payload.responder_instance}: ${payload.status === "success" ? "Done" : "Error"}`,
-              body: payload.result || "No details",
-              type: "system",
-              source: "sharing:bot_relay_result",
-              priority: "high",
-            });
-          } catch (err) {
-            console.warn("[sharing] Failed to create relay result notification:", err.message);
-          }
-        } else if (subtype === DELIVERY_RECEIPT_SUBTYPE) {
-          await handleDeliveryReceipt(db, payload.event_ids, senderPubkey);
-        } else if (subtype === "room_message" || subtype === "room_join") {
-          const { handleInboundRoomEnvelope } = await import("./room-inbound.js");
-          await handleInboundRoomEnvelope({ db, nostrManager, identity, subtype, payload, senderPubkey, log: (m) => console.log("[rooms]", m) });
-        }
-      }, async (senderPubkey, content, event) => {
-        // L6: any decrypted DM NOT consumed by a real handler (plaintext,
-        // malformed JSON, or a subtype-less crow_social) becomes a visible
-        // message request instead of being silently dropped. handleIncomingRequest
-        // never throws, but double-guard so onevent stays throw-proof.
-        try {
-          await handleIncomingRequest(db, managers, {
-            senderPubkey,
-            content,
-            eventId: event?.id,
-          });
-        } catch (err) {
-          try { console.warn("[sharing] onMessageRequest wiring failed:", err.message); } catch {}
-        }
-      });
-      console.log("[sharing] Subscribed to incoming Nostr messages");
-    } catch (err) {
-      console.warn("[sharing] Failed to subscribe to incoming messages:", err.message);
     }
 
     // Join instance sync topic for cross-instance discovery
@@ -812,7 +871,4 @@ export async function initSharingRuntime(managers, helpers) {
   syncManager.onEntry = async (contactId, entry) => {
     console.log(`[sharing] Received Hypercore entry for contact ${contactId}:`, entry.type);
   };
-
-  // subscribeToIncoming is now set up inside peerManager.start().then()
-  // so relay connections from subscribeToContact are reused
 }
