@@ -132,8 +132,12 @@ Messages and social interactions use the Nostr protocol:
 
 - **NIP-44 encryption** (ChaCha20-Poly1305) for all direct messages
 - **NIP-59 gift wraps** for sender anonymity on public relays
-- **Free public relays** provide guaranteed async delivery (messages persist on relays until fetched)
-- Default relays: `wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.nostr.band`
+- **Public relays** provide async delivery (messages persist on relays until fetched)
+- **Default relays** (`DEFAULT_RELAYS` in `servers/sharing/nostr.js`): `wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.primal.net`, and the self-hosted `wss://nostr.crow.maestro.press`. `getConfiguredRelays()` always merges these defaults with any user-configured relays, so the defaults are a floor and one flaky relay is never a single point of failure.
+
+**Self-hosted long-retention relay.** Public relays evict events by age, so a DM sent while the recipient is offline for a long window can be dropped before they reconnect (loss-mode L1). To close this, one default is a self-hosted `nostr-rs-relay` on the maestro.press droplet at `wss://nostr.crow.maestro.press`, configured to retain events long enough to outlast the R5 retry horizon. It is **restricted to `kind:4`** (the only kind Crow uses — all DMs, invites, receipts, group messages, and control envelopes are encrypted kind:4) and write-rate-limited, which bounds abuse on an open-write endpoint.
+
+> **Network-exposure note.** This relay is a **separate service** (its own container behind nginx on maestro.press), *not* a Crow gateway route. It therefore does **not** fall under the gateway's Tailscale-Funnel exposure invariant (which governs dashboard/MCP/private routes on the gateway itself). It is a deliberate, operator-approved public surface that carries only NIP-44-encrypted `kind:4` events the relay cannot read.
 
 The Nostr identity (secp256k1 key) is derived from the same master seed as the Hypercore identity, so users have a single Crow ID for everything.
 

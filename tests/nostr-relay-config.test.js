@@ -25,6 +25,12 @@ test("DEFAULT_RELAYS is a resilient set of more than 2 relays", () => {
   assert.ok(DEFAULT_RELAYS.length > 2, `expected >2 default relays, got ${DEFAULT_RELAYS.length}`);
   assert.ok(DEFAULT_RELAYS.includes("wss://relay.damus.io"));
   assert.ok(DEFAULT_RELAYS.includes("wss://nos.lol"));
+  // The self-hosted long-retention relay ships as a default so every install
+  // gets offline-message retention (R5 / loss-mode L1) with no config.
+  assert.ok(
+    DEFAULT_RELAYS.includes("wss://nostr.crow.maestro.press"),
+    "self-hosted long-retention relay present in defaults",
+  );
 });
 
 test("getConfiguredRelays returns full DEFAULT_RELAYS when relay_config is empty", async () => {
