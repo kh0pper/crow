@@ -36,6 +36,24 @@ export function buildDeliveryReceipt(eventIds) {
   });
 }
 
+export const HANDSHAKE_COMPLETE_SUBTYPE = "handshake_complete";
+
+/** Pure: the crow_social ack an inviter sends when it has processed an
+ * authenticated invite_accepted. Names the invite_accepted event id(s) so the
+ * acceptor clears the exact retry row (markDelivered, contact-bound). Mirrors
+ * buildDeliveryReceipt — a lost ack self-heals on the acceptor's next retry /
+ * the inviter's next restart (the "replayed" re-ack). */
+export function buildHandshakeComplete(eventIds) {
+  const ids = (Array.isArray(eventIds) ? eventIds : [])
+    .filter((x) => typeof x === "string" && x.length > 0);
+  return JSON.stringify({
+    type: "crow_social",
+    version: 1,
+    subtype: HANDSHAKE_COMPLETE_SUBTYPE,
+    payload: { event_ids: ids },
+  });
+}
+
 /**
  * Pure: is this send retry-eligible? True only for a genuine 1:1 DM that
  * reached >=1 relay, is not addressed to ourselves, and is not a crow_social /
