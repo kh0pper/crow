@@ -85,6 +85,11 @@ export const EXCLUDED_COLUMNS = {
   // independently form the same req: row, manufacturing spurious conflicts.
   // All stripped from the wire; the row still syncs (keyed on crow_id).
   contacts: ["verified", "last_seen", "id", "created_at"],
+  // Phase 3 PR-B: messages sync keyed on nostr_event_id; the per-instance
+  // id/contact_id are never portable (crow_id rides the wire instead). is_read
+  // is per-device (each instance computes its own unread badge). lamport_ts is
+  // sync metadata carried in the entry envelope, not the row.
+  messages: ["id", "contact_id", "is_read", "lamport_ts"],
 };
 
 // Per-table outbound mutations applied right after the EXCLUDED_COLUMNS strip.
@@ -168,6 +173,13 @@ function shouldSyncRow(table, row) {
     const rs = row.request_status;
     if (rs !== null && rs !== undefined && rs !== "accepted") return false;
     return true;
+  }
+  if (table === "messages") {
+    // A syncable message MUST carry the stable key (nostr_event_id) and the
+    // contact's crow_id (attached on emit). Rows lacking either — synthetic
+    // group ids (grp_<ts>, own room sync) or an unresolved contact — never sync.
+    if (!row) return false;
+    return Boolean(row.nostr_event_id) && Boolean(row.crow_id);
   }
   if (table !== "dashboard_settings") return true;
   if (!row || !row.key) return false;
