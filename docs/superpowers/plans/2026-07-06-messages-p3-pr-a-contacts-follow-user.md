@@ -236,6 +236,16 @@ test("_applyContact: rebind converges an independently-formed local req: row", a
   assert.equal(rows[0].crow_id, "crow:b");
 });
 
+test("_applyContact: rebind never un-promotes a real crow: id to a req: placeholder (R2b)", async () => {
+  const m = mgr(); const db = m.db;
+  await db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, request_status, lamport_ts) VALUES ('crow:promoted','e', ?, NULL, 5)", args: [SECP_A] });
+  // a late, higher-lamport accepted req: entry for the same secp must NOT relabel it down
+  await m._applyEntry(REMOTE_ID, signedEntry("contacts", "update", { crow_id: "req:" + SECP_A, secp256k1_pubkey: SECP_A, request_status: "accepted" }, 99));
+  const rows = (await db.execute({ sql: "SELECT crow_id, request_status FROM contacts WHERE lower(substr(secp256k1_pubkey,-64))=?", args: [SECP_A] })).rows;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].crow_id, "crow:promoted", "stayed promoted");
+});
+
 test("_applyContact: apply drops verified/last_seen and honors carve-outs", async () => {
   const m = mgr(); const db = m.db;
   await m._applyEntry(REMOTE_ID, signedEntry("contacts", "insert",
@@ -399,6 +409,11 @@ Add the method after `_applyCrowContext` (after line 911). It mirrors `_applyCro
         args: [secpNorm],
       })).rows[0] || null : null;
       if (secpRow) {
+        // R2b guard: never relabel a real `crow:` id DOWN to a `req:` placeholder
+        // (a 3+-instance cross-feed reorder could otherwise deliver an accepted
+        // req: entry at a higher lamport AFTER the promotion and un-promote the
+        // contact). Promotion is one-directional.
+        if (String(crowId).startsWith("req:") && !String(secpRow.crow_id).startsWith("req:")) return;
         // LWW: only rebind if the incoming entry is at least as new as the local
         // same-secp row (a stale re-delivery must not relabel a fresher row).
         if (lamportTs >= (secpRow.lamport_ts || 0)) {
