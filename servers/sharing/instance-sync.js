@@ -18,6 +18,7 @@ import { resolve } from "node:path";
 import { sign, verify } from "./identity.js";
 import { resolveDataDir } from "../db.js";
 import { isSyncable } from "../gateway/dashboard/settings/sync-allowlist.js";
+import { normalizePubkey } from "./pubkey-util.js";
 import bus from "../shared/event-bus.js";
 
 /**
@@ -71,11 +72,19 @@ export const SYNCED_TABLES = [
 ];
 
 // Columns to exclude from sync payloads (security-sensitive or instance-local)
-const EXCLUDED_COLUMNS = {
+export const EXCLUDED_COLUMNS = {
   crow_instances: ["auth_token_hash"],
   // apiKey can be sensitive for some deployments; keep in sync by default for
   // local-lab scenarios but flag here as the place to exclude if paranoid.
   providers: [],
+  // Phase 3 (contacts follow the user): `verified` is a per-device attestation
+  // ("I compared the safety number on THIS device") — never assert it on a
+  // device that didn't check. `last_seen` is bumped on every inbound DM
+  // (boot.js) — syncing it would firehose the feed. `id` is the per-instance
+  // AUTOINCREMENT key (never portable). `created_at` differs when two instances
+  // independently form the same req: row, manufacturing spurious conflicts.
+  // All stripped from the wire; the row still syncs (keyed on crow_id).
+  contacts: ["verified", "last_seen", "id", "created_at"],
 };
 
 // Per-table outbound mutations applied right after the EXCLUDED_COLUMNS strip.
@@ -149,12 +158,26 @@ function _scheduleStorageReset() {
 }
 
 function shouldSyncRow(table, row) {
+  if (table === "contacts") {
+    if (!row) return false;
+    // local-bot contacts are hosted on THIS instance (instance-local secp key);
+    // a phantom on a peer would point at a bot that isn't there.
+    if (row.origin === "local-bot") return false;
+    // Only established contacts sync. `pending` message-requests are a
+    // per-instance inbox each instance forms from the shared inbound stream.
+    const rs = row.request_status;
+    if (rs !== null && rs !== undefined && rs !== "accepted") return false;
+    return true;
+  }
   if (table !== "dashboard_settings") return true;
   if (!row || !row.key) return false;
   // dashboard_settings holds only the global scope; per-instance overrides live
   // in dashboard_settings_overrides (never synced). Allowlist gates the key.
   return isSyncable(row.key);
 }
+
+// Test-only alias (keeps the function module-private for production callers).
+export function shouldSyncRowForTest(table, row) { return shouldSyncRow(table, row); }
 
 export class InstanceSyncManager {
   /**
@@ -664,6 +687,20 @@ export class InstanceSyncManager {
       return;
     }
 
+    // contacts is keyed by the stable crow_id (per-instance AUTOINCREMENT id is
+    // NOT portable). Route ALL ops through the natural-key handler, mirroring
+    // _applyCrowContext. shouldSyncRow already gated inbound at :639 (before the
+    // signature verify + dispatch), so a peer-injected pending/local-bot row
+    // never reaches here.
+    if (table === "contacts") {
+      try {
+        await this._applyContact(op, row, lamport_ts, instance_id);
+      } catch (err) {
+        console.warn(`[instance-sync] Failed to apply ${op} on contacts:`, err.message);
+      }
+      return;
+    }
+
     // Conflict detection gates both updates and deletes — a stale remote delete
     // with a lower lamport_ts must not silently destroy a newer local edit (D6).
     if ((op === "update" || op === "delete") && row.id !== undefined) {
@@ -908,6 +945,167 @@ export class InstanceSyncManager {
     } catch (err) {
       console.warn(`[instance-sync] crow_context conflict LOGGING failed (local data preserved):`, err.message);
     }
+  }
+
+  /**
+   * Apply a contacts mutation keyed on the stable crow_id (Phase 3 / D1).
+   * Per-instance AUTOINCREMENT id is never used. LWW by lamport_ts, matching
+   * _applyCrowContext / _checkConflict (W4-1) semantics. After any insert/update
+   * that leaves a live row, fires this.onContactSynced(localRow) so the receiver
+   * subscribes to the contact (boot-injected; undefined in tests/pre-boot).
+   *
+   * @param {"insert"|"update"|"delete"} op
+   * @param {object} row - wire row (no local id; keyed by crow_id)
+   * @param {number} lamportTs
+   * @param {string} instanceId - origin instance id
+   */
+  async _applyContact(op, row, lamportTs, instanceId) {
+    const crowId = row && row.crow_id;
+    if (!crowId) {
+      console.warn("[instance-sync] _applyContact: missing crow_id — skipping");
+      return;
+    }
+
+    // PRAGMA-filter incoming keys to live columns; always drop id/lamport_ts/
+    // instance_id and the never-synced verified/last_seen/created_at (defense on
+    // apply — these are stripped on emit too).
+    if (!this._contactCols) {
+      try {
+        const { rows: pragma } = await this.db.execute({ sql: "PRAGMA table_info(contacts)", args: [] });
+        this._contactCols = new Set(pragma.map((r) => r.name));
+      } catch { this._contactCols = null; }
+    }
+    // Defense-in-depth: dynamic column names below are built from `filtered`'s
+    // keys, so they MUST be whitelisted against the live schema. If the PRAGMA
+    // failed we cannot whitelist — skip rather than build SQL from raw wire keys.
+    if (!this._contactCols) {
+      console.warn("[instance-sync] _applyContact: contacts columns unavailable — skipping");
+      return;
+    }
+    const ALWAYS_DROP = new Set(["id", "lamport_ts", "instance_id", "verified", "last_seen", "created_at"]);
+    const filtered = {};
+    for (const [k, v] of Object.entries(row)) {
+      if (ALWAYS_DROP.has(k)) continue;
+      if (!this._contactCols.has(k)) continue;
+      filtered[k] = v;
+    }
+
+    const { rows: localRows } = await this.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [crowId] });
+    const localRow = localRows[0] ?? null;
+    const localTs = localRow?.lamport_ts || 0;
+    const rowIdJson = JSON.stringify({ crow_id: crowId });
+
+    // ── delete ──────────────────────────────────────────────────────────────
+    if (op === "delete") {
+      if (!localRow) return;
+      if (lamportTs > localTs) {
+        await this.db.execute({ sql: "DELETE FROM contacts WHERE crow_id = ?", args: [crowId] });
+        return;
+      }
+      try {
+        await this._insertConflictRow("contacts", rowIdJson,
+          localRow.instance_id || this.localInstanceId, instanceId, localTs, lamportTs,
+          JSON.stringify(localRow), JSON.stringify(filtered), "delete");
+        await this._notifyConflict();
+      } catch (err) {
+        console.warn("[instance-sync] contacts delete conflict LOGGING failed (local kept):", err.message);
+      }
+      return;
+    }
+
+    // ── insert / update ────────────────────────────────────────────────────
+    if (!localRow) {
+      // NOT NULL parity (ed25519_pubkey, secp256k1_pubkey are NOT NULL). A
+      // partial old-sender row would throw; skip with a warning instead
+      // (mirrors _applyCrowContext's required-column guard). Empty string '' is
+      // fine — manual/keyless contacts carry ''; only a truly-absent column skips.
+      if (filtered.secp256k1_pubkey == null || filtered.ed25519_pubkey == null) {
+        console.warn("[instance-sync] _applyContact: insert skipped — NOT NULL pubkey column absent");
+        return;
+      }
+
+      // Same-secp REBIND (spec §A2 "upsertFullContact-style merge"). The
+      // handshake rebinds a placeholder `req:<secp>` contact to a real
+      // `crow:<id>` (contact-promote.js). An instance offline across the
+      // handshake catches up as update(req:x) then update(crow:y) — same secp,
+      // different crow_id. Keying only on crow_id would insert BOTH → a split
+      // contact. So on a crow_id miss, if a local row already holds this secp
+      // under a DIFFERENT crow_id, REBIND it instead of inserting a duplicate.
+      // Safe: the entry is ed25519-signed by the shared identity, a secp match =
+      // same key-holder = same peer, and the incoming crow_id is unowned here.
+      const secpNorm = filtered.secp256k1_pubkey ? normalizePubkey(String(filtered.secp256k1_pubkey)) : "";
+      const secpRow = secpNorm ? (await this.db.execute({
+        sql: "SELECT * FROM contacts WHERE lower(substr(secp256k1_pubkey,-64)) = ? ORDER BY id ASC LIMIT 1",
+        args: [secpNorm],
+      })).rows[0] || null : null;
+      if (secpRow) {
+        // Never relabel a real `crow:` id DOWN to a `req:` placeholder (a 3+-
+        // instance cross-feed reorder could otherwise un-promote). One-directional.
+        if (String(crowId).startsWith("req:") && !String(secpRow.crow_id).startsWith("req:")) return;
+        // LWW: only rebind if the incoming entry is at least as new as the local
+        // same-secp row (a stale re-delivery must not relabel a fresher row).
+        if (lamportTs >= (secpRow.lamport_ts || 0)) {
+          const rebindKeys = Object.keys(filtered).filter((k) => k !== "crow_id");
+          const setClauses = ["crow_id = ?", ...rebindKeys.map((k) => `${k} = ?`), "verified = 0", "lamport_ts = ?"];
+          const vals = [crowId, ...rebindKeys.map((k) => filtered[k] ?? null), lamportTs];
+          await this.db.execute({ sql: `UPDATE contacts SET ${setClauses.join(", ")} WHERE id = ?`, args: [...vals, secpRow.id] });
+          await this._afterContactApplied(crowId);
+        }
+        return;
+      }
+
+      const cols = Object.keys(filtered).filter((k) => filtered[k] !== undefined);
+      if (!cols.includes("crow_id")) cols.push("crow_id");
+      const insertCols = [...new Set(cols)];
+      const placeholders = insertCols.map(() => "?").join(", ");
+      const values = insertCols.map((k) => (k === "crow_id" ? crowId : filtered[k] ?? null));
+      await this.db.execute({
+        sql: `INSERT INTO contacts (${insertCols.join(", ")}, lamport_ts) VALUES (${placeholders}, ?)`,
+        args: [...values, lamportTs],
+      });
+      await this._afterContactApplied(crowId);
+      return;
+    }
+
+    if (lamportTs > localTs) {
+      const updateKeys = Object.keys(filtered).filter((k) => k !== "crow_id");
+      // PR3 parity: a synced key rebind invalidates a local safety-number check.
+      // `verified` is excluded from the wire (only ever set by a local device
+      // comparison), so a secp/ed change MUST reset it to 0 — matching the local
+      // promote/merge path (contact-promote.js).
+      const secpChanged = filtered.secp256k1_pubkey != null &&
+        normalizePubkey(String(filtered.secp256k1_pubkey)) !== normalizePubkey(String(localRow.secp256k1_pubkey || ""));
+      const edChanged = filtered.ed25519_pubkey != null &&
+        String(filtered.ed25519_pubkey) !== String(localRow.ed25519_pubkey || "");
+      const setClauses = updateKeys.map((k) => `${k} = ?`);
+      const vals = updateKeys.map((k) => filtered[k] ?? null);
+      if (secpChanged || edChanged) setClauses.push("verified = 0");
+      setClauses.push("lamport_ts = ?"); vals.push(lamportTs);
+      await this.db.execute({ sql: `UPDATE contacts SET ${setClauses.join(", ")} WHERE crow_id = ?`, args: [...vals, crowId] });
+      await this._afterContactApplied(crowId);
+      return;
+    }
+
+    // incomingTs <= localTs
+    if (rowsEquivalent(localRow, filtered)) return; // re-delivery noise
+    try {
+      await this._insertConflictRow("contacts", rowIdJson,
+        localRow.instance_id || this.localInstanceId, instanceId, localTs, lamportTs,
+        JSON.stringify(localRow), JSON.stringify(filtered), op || "update");
+      await this._notifyConflict();
+    } catch (err) {
+      console.warn("[instance-sync] contacts conflict LOGGING failed (local kept):", err.message);
+    }
+  }
+
+  /** Re-select the applied contact row and hand it to the subscribe hook (guarded). */
+  async _afterContactApplied(crowId) {
+    try {
+      const { rows } = await this.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [crowId] });
+      if (rows[0] && typeof this.onContactSynced === "function") {
+        Promise.resolve(this.onContactSynced(rows[0])).catch(() => {});
+      }
+    } catch {}
   }
 
   /**
