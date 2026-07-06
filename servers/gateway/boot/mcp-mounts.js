@@ -71,6 +71,18 @@ export async function mountMcpServers(app, deps) {
     console.warn(`[instance-sync] reemitSyncableSettingsOnce failed: ${err.message}`);
   }
 
+  // I-4: one-shot re-emit of existing full contacts so a peer can resolve
+  // crow_id → local contact_id for contacts that predate PR-A's contact-sync
+  // (otherwise every synced message for such a contact is dropped forever).
+  // Guarded by a flag row; idempotent on subsequent boots.
+  try {
+    if (syncManager?.backfillContactsOnce) {
+      await syncManager.backfillContactsOnce();
+    }
+  } catch (err) {
+    console.warn(`[instance-sync] backfillContactsOnce failed: ${err.message}`);
+  }
+
   // Scoped-settings sync: wire the registry's writeSetting to emitChange so
   // operator edits on one instance propagate to paired peers.
   try {

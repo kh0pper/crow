@@ -33,6 +33,7 @@ import { makeResilientSub } from "./resilient-subscribe.js";
 import { setRelaysConnected, markInbound, markDecryptFailure } from "./receive-health.js";
 import { readIncomingSince, persistIncomingCursor } from "./contact-promote.js";
 import { shouldEnqueue, enqueueRetry, dueRetries, recordAttempt, buildDeliveryReceipt, normalizePubkey } from "./retry-queue.js";
+import { emitMessageInsert } from "./message-sync.js";
 
 // Heavily-operated public relays, each verified (2026-07-02) to accept an
 // anonymous kind-4 publish (a throwaway-key connect+publish probe). Dropped
@@ -194,6 +195,10 @@ export class NostrManager {
         // Local-cache write failed — the message was still (or wasn't)
         // published above; don't let a DB error mask that outcome.
       }
+      // Phase 3 PR-B: mirror this sent row to the user's paired instances so the
+      // thread reads coherently there. Best-effort; never blocks/throws out of
+      // sendMessage (which must still return its relay outcome).
+      emitMessageInsert(this.db, { contactId, nostrEventId: event.id }).catch(() => {});
     }
 
     // R5: if this genuine 1:1 DM reached >=1 relay, enqueue it for retry until
@@ -488,6 +493,12 @@ export class NostrManager {
                       type: "peer",
                       source: "sharing:message",
                       action_url: "/dashboard/messages",
+                      // I-1: client-side collapse key — a device that also receives
+                      // this DM via instance-sync notifies with the SAME
+                      // nostr_event_id, so the two pushes dedupe. Title-only, no
+                      // body/message-preview (M-3 — DM content stays out of the
+                      // notification store + push payload).
+                      metadata: { nostr_event_id: event.id },
                     });
                   } catch {}
                   try {
@@ -499,6 +510,11 @@ export class NostrManager {
                     const unread = Number(rows?.[0]?.unread ?? 0);
                     bus.emit("messages:changed", { contactId, unread });
                   } catch {}
+                  // Phase 3 PR-B: mirror this received row to paired instances
+                  // (S-COHERENCE-DIR) so an instance that was offline backfills
+                  // it. Only on a genuinely-new row (rowsAffected > 0) to avoid
+                  // re-emitting a duplicate. Best-effort; never throws.
+                  emitMessageInsert(this.db, { contactId, nostrEventId: event.id }).catch(() => {});
                 }
               } catch {
                 // Duplicate event, ignore

@@ -85,6 +85,11 @@ export const EXCLUDED_COLUMNS = {
   // independently form the same req: row, manufacturing spurious conflicts.
   // All stripped from the wire; the row still syncs (keyed on crow_id).
   contacts: ["verified", "last_seen", "id", "created_at"],
+  // Phase 3 PR-B: messages sync keyed on nostr_event_id; the per-instance
+  // id/contact_id are never portable (crow_id rides the wire instead). is_read
+  // is per-device (each instance computes its own unread badge). lamport_ts is
+  // sync metadata carried in the entry envelope, not the row.
+  messages: ["id", "contact_id", "is_read", "lamport_ts"],
 };
 
 // Per-table outbound mutations applied right after the EXCLUDED_COLUMNS strip.
@@ -168,6 +173,13 @@ function shouldSyncRow(table, row) {
     const rs = row.request_status;
     if (rs !== null && rs !== undefined && rs !== "accepted") return false;
     return true;
+  }
+  if (table === "messages") {
+    // A syncable message MUST carry the stable key (nostr_event_id) and the
+    // contact's crow_id (attached on emit). Rows lacking either — synthetic
+    // group ids (grp_<ts>, own room sync) or an unresolved contact — never sync.
+    if (!row) return false;
+    return Boolean(row.nostr_event_id) && Boolean(row.crow_id);
   }
   if (table !== "dashboard_settings") return true;
   if (!row || !row.key) return false;
@@ -498,6 +510,94 @@ export class InstanceSyncManager {
   }
 
   /**
+   * One-shot idempotent backfill (Phase 3 PR-B / I-4): re-emit every existing
+   * SYNCABLE full contact so a peer can resolve crow_id → local contact_id for
+   * contacts that predate PR-A (they never emitted a contact-sync entry, so
+   * _applyMessage would otherwise SKIP every synced message for them forever).
+   *
+   * Guarded by a dashboard_settings flag so it runs at most once per instance
+   * lifetime — no repeated lamport thrash. On the peer, _applyContact converges
+   * an unchanged re-emit as an effective no-op (fresh lamport → UPDATE with
+   * identical values; onContactSynced re-subscribe is idempotent). Mirrors
+   * reemitSyncableSettingsOnce(). Never throws out of the loop.
+   */
+  async backfillContactsOnce() {
+    const FLAG_KEY = "__contacts_backfill_v1";
+    let alreadyRan = false;
+    try {
+      const { rows } = await this.db.execute({
+        sql: "SELECT value FROM dashboard_settings WHERE key = ?",
+        args: [FLAG_KEY],
+      });
+      alreadyRan = rows?.length > 0;
+    } catch {}
+    if (alreadyRan) return 0;
+
+    if (this.outFeeds.size === 0) {
+      // No paired peers — nothing to backfill. Mark done so we don't recheck.
+      try {
+        await this.db.execute({
+          sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, 'no-peers', datetime('now')) ON CONFLICT(key) DO NOTHING",
+          args: [FLAG_KEY],
+        });
+      } catch {}
+      return 0;
+    }
+
+    // I-B1 ordering guard: drain the locally-replicated inbound backlog FIRST,
+    // so a peer's already-delivered newer edit (e.g. a block) is applied before
+    // we re-emit with a fresh lamport and fabricate recency over it.
+    // _processNewEntries' per-peer promise-chain serializes this safely with
+    // any concurrent append-listener run; checkpointing makes it idempotent.
+    try {
+      for (const [peerId, inFeed] of this.inFeeds) {
+        await this._processNewEntries(peerId, inFeed);
+      }
+    } catch (err) {
+      console.warn(`[instance-sync] contacts backfill drain failed: ${err.message}`);
+    }
+
+    let rows = [];
+    try {
+      const r = await this.db.execute({
+        sql: `SELECT * FROM contacts
+               WHERE (request_status IS NULL OR request_status = 'accepted')
+                 AND (is_bot IS NULL OR is_bot = 0)
+                 AND (origin IS NULL OR origin != 'local-bot')
+                 AND (is_blocked IS NULL OR is_blocked = 0)`,
+      });
+      rows = r.rows || [];
+    } catch (err) {
+      console.warn(`[instance-sync] contacts backfill read failed: ${err.message}`);
+      return 0;
+    }
+
+    let emitted = 0;
+    for (const row of rows) {
+      try {
+        // shouldSyncRow("contacts", …) is the final gate inside emitChange;
+        // EXCLUDED_COLUMNS.contacts strips verified/last_seen/id/created_at.
+        await this.emitChange("contacts", "update", row);
+        emitted++;
+      } catch (err) {
+        console.warn(`[instance-sync] contacts backfill emit failed for ${row.crow_id}: ${err.message}`);
+      }
+    }
+
+    try {
+      await this.db.execute({
+        sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO NOTHING",
+        args: [FLAG_KEY, `done:${emitted}`],
+      });
+    } catch {}
+
+    if (emitted > 0) {
+      console.log(`[instance-sync] one-shot contacts backfill: ${emitted} contact(s) re-emitted → peers resolve legacy contacts`);
+    }
+    return emitted;
+  }
+
+  /**
    * Get the local outgoing feed key for a remote instance.
    * Used during instance handshake so the remote knows our feed key.
    */
@@ -727,6 +827,19 @@ export class InstanceSyncManager {
       return;
     }
 
+    // messages are keyed by the stable nostr_event_id (UNIQUE); the per-instance
+    // AUTOINCREMENT id + local contact_id are NOT portable. Route ALL ops through
+    // the natural-key handler, mirroring _applyCrowContext / _applyContact.
+    // shouldSyncRow already gated at :678 (nostr_event_id + crow_id required).
+    if (table === "messages") {
+      try {
+        await this._applyMessage(op, row, lamport_ts, instance_id);
+      } catch (err) {
+        console.warn(`[instance-sync] Failed to apply ${op} on messages:`, err.message);
+      }
+      return;
+    }
+
     // Conflict detection gates both updates and deletes — a stale remote delete
     // with a lower lamport_ts must not silently destroy a newer local edit (D6).
     if ((op === "update" || op === "delete") && row.id !== undefined) {
@@ -749,25 +862,6 @@ export class InstanceSyncManager {
       }
     } catch (err) {
       console.warn(`[instance-sync] Failed to apply ${op} on ${table}:`, err.message);
-    }
-
-    // Broadcast a messages:changed event when a synced-in message row
-    // lands locally. Without this, a paired Crow receiving a peer
-    // message via Nostr forwards the row via InstanceSync but our
-    // local onMessage / createNotification paths never fire, so
-    // badges wouldn't live-update. The 5-min fallback poll would
-    // eventually catch up, but this closes the gap for cross-instance
-    // traffic. Errors are swallowed — the row is already applied.
-    if (op === "insert" && table === "messages" && row?.contact_id != null) {
-      try {
-        const { rows } = await this.db.execute({
-          sql: `SELECT COUNT(*) AS unread FROM messages
-                WHERE contact_id = ? AND is_read = 0 AND direction = 'received'`,
-          args: [row.contact_id],
-        });
-        const unread = Number(rows?.[0]?.unread ?? 0);
-        bus.emit("messages:changed", { contactId: row.contact_id, unread });
-      } catch {}
     }
   }
 
@@ -1132,6 +1226,130 @@ export class InstanceSyncManager {
         Promise.resolve(this.onContactSynced(rows[0])).catch(() => {});
       }
     } catch {}
+  }
+
+  /**
+   * Apply a messages mutation keyed on the stable nostr_event_id (Phase 3 PR-B /
+   * S3). Messages are immutable inserts; the UNIQUE(nostr_event_id) constraint
+   * gives free store-dedupe (the same event arriving via BOTH direct Nostr AND
+   * sync yields exactly one row). The per-instance id/contact_id are never used —
+   * contact_id is resolved LOCALLY from the wire-carried crow_id. If the contact
+   * is not local yet, SKIP (no phantom contact): the row will also arrive via
+   * direct Nostr once subscribed, or on a later re-sync once the contact syncs.
+   *
+   * On a genuinely-new row (INSERT OR IGNORE rowsAffected > 0) fires
+   * messages:changed with the LOCAL contact_id (folded from the old :761-771 hook so
+   * live badges update). The received-row notification is added in Task 3.
+   *
+   * @param {"insert"} op            - only inserts are emitted; other ops are no-ops
+   * @param {object} row             - wire row (crow_id + nostr_event_id keyed)
+   * @param {number} lamportTs       - entry envelope lamport (unused; messages don't LWW)
+   * @param {string} instanceId      - origin instance id (unused)
+   */
+  async _applyMessage(op, row, lamportTs, instanceId) {
+    if (op !== "insert") return; // messages are insert-only on the wire
+    const eventId = row && row.nostr_event_id;
+    const crowId = row && row.crow_id;
+    if (!eventId || !crowId) {
+      console.warn("[instance-sync] _applyMessage: missing nostr_event_id/crow_id — skipping");
+      return;
+    }
+
+    // Resolve the LOCAL contact by crow_id. If absent, skip — never conjure a
+    // contact through the message channel (trust boundary). The row backfills
+    // once the contact syncs (PR-A) or via direct Nostr.
+    const { rows: crows } = await this.db.execute({
+      sql: "SELECT id, is_blocked FROM contacts WHERE crow_id = ? LIMIT 1",
+      args: [crowId],
+    });
+    const localContactId = crows[0]?.id;
+    if (localContactId == null) return;
+    // I-2: resolve the local block flag. A locally-blocked contact still STORES
+    // the synced row (converged-block semantics — the row is consistent with a
+    // block that hasn't finished propagating, and dropping it would lose data),
+    // but its NOTIFICATION is SUPPRESSED below. The notification is the security-
+    // relevant surface the sync channel must not let a blocked contact bypass
+    // during block-propagation divergence.
+    const isBlocked = Number(crows[0]?.is_blocked ?? 0) === 1;
+
+    // Store-dedupe on the UNIQUE nostr_event_id. Carry the original created_at
+    // (coherent thread ordering) + direction verbatim (a 'sent' row on A shows as
+    // 'sent' on B). is_read defaults 0 on this device (per-device unread badge).
+    const result = await this.db.execute({
+      sql: `INSERT OR IGNORE INTO messages
+              (contact_id, nostr_event_id, content, direction, thread_id, created_at, delivery_status, attachments)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        localContactId,
+        eventId,
+        row.content ?? "",
+        row.direction === "sent" ? "sent" : "received", // CHECK-constraint safe
+        row.thread_id ?? null,
+        row.created_at ?? new Date().toISOString(),
+        row.delivery_status ?? null,
+        row.attachments ?? null,
+      ],
+    });
+
+    if (Number(result.rowsAffected ?? 0) > 0 && !isBlocked) {
+      // I-2 + M-B1: a locally-blocked contact gets NEITHER the notification
+      // NOR the unread-badge tick (the row itself is stored above regardless —
+      // convergence preserved, no user-visible surface for a blocked contact).
+      // Live badge update (folded from the old :761-771 hook), with the LOCAL id.
+      try {
+        const { rows } = await this.db.execute({
+          sql: `SELECT COUNT(*) AS unread FROM messages
+                WHERE contact_id = ? AND is_read = 0 AND direction = 'received'`,
+          args: [localContactId],
+        });
+        bus.emit("messages:changed", { contactId: localContactId, unread: Number(rows?.[0]?.unread ?? 0) });
+      } catch {}
+      // Task 3 inserts the received-row notification here (gate shared with
+      // the badge — see the enclosing !isBlocked).
+      await this._notifyMessageApplied?.(localContactId, crowId, row);
+    }
+  }
+
+  /**
+   * Phase 3 PR-B (S-NOTIFY): fire exactly one notification for a newly-stored
+   * RECEIVED message (never for a 'sent' mirror). Called only on rowsAffected>0
+   * from _applyMessage, so a duplicate (already stored via direct Nostr or an
+   * earlier sync) never re-notifies (layer a — per-instance dedupe). Carries the
+   * nostr_event_id in metadata as a client collapse key so two simultaneously-
+   * online instances' pushes can be merged (layer b). Never throws.
+   *
+   * this.createNotification is a test seam (default: the shared helper, lazily
+   * imported to keep the push side-effect graph out of this module's static load).
+   */
+  async _notifyMessageApplied(localContactId, crowId, wireRow) {
+    try {
+      if (!wireRow || wireRow.direction === "sent") return; // only inbound notifies
+      let name = crowId;
+      try {
+        const { rows } = await this.db.execute({
+          sql: "SELECT display_name FROM contacts WHERE id = ? LIMIT 1",
+          args: [localContactId],
+        });
+        name = rows[0]?.display_name || crowId;
+      } catch {}
+      const notify = this.createNotification ||
+        (async (db, opts) => {
+          const { createNotification } = await import("../shared/notifications.js");
+          return createNotification(db, opts);
+        });
+      await notify(this.db, {
+        title: `Message from ${name}`,
+        type: "peer",
+        source: "sharing:message",
+        action_url: "/dashboard/messages",
+        // Client-side collapse key: two online instances that both notify for the
+        // same DM can dedupe on this. Rides the existing metadata JSON column —
+        // NO schema change (SCHEMA_GENERATION stays 4).
+        metadata: { nostr_event_id: wireRow.nostr_event_id },
+      });
+    } catch (err) {
+      try { console.warn("[instance-sync] message-applied notify failed:", err.message); } catch {}
+    }
   }
 
   /**
