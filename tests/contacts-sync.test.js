@@ -147,6 +147,14 @@ test("_applyContact: apply drops verified/last_seen and honors carve-outs", asyn
   assert.equal((await db.execute({ sql: "SELECT COUNT(*) c FROM contacts WHERE crow_id='crow:reqx'" })).rows[0].c, 0, "pending not applied");
 });
 
+test("_applyContact: a bad-signature contacts entry is dropped before apply", async () => {
+  const m = mgr(); const db = m.db;
+  const e = { table: "contacts", op: "insert", row: { crow_id: "crow:badsig", ed25519_pubkey: "", secp256k1_pubkey: secp(14) }, lamport_ts: 4, instance_id: REMOTE_ID };
+  e.signature = "00".repeat(64); // invalid signature
+  await m._applyEntry(REMOTE_ID, e);
+  assert.equal((await db.execute({ sql: "SELECT COUNT(*) c FROM contacts WHERE crow_id='crow:badsig'" })).rows[0].c, 0, "unverified entry not applied");
+});
+
 test("_applyContact: fires onContactSynced with the local row; never throws on junk", async () => {
   const m = mgr(); const seen = [];
   m.onContactSynced = (r) => seen.push(r);
