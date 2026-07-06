@@ -10,6 +10,7 @@ import { randomUUID } from "crypto";
 import { isKioskActive, kioskBlockedResponse } from "../../shared/kiosk-guard.js";
 import { generateInviteCode, parseInviteCode, parseBotInviteCode, computeSafetyNumber } from "../identity.js";
 import { upsertFullContact } from "../contact-promote.js";
+import { emitContactChange } from "../contact-sync.js";
 import { buildInviteUrl, extractInviteCode } from "../invite-url.js";
 import {
   generateShortCode, formatShortCode, normalizeShortCode, deriveShortCodeKeys,
@@ -376,6 +377,13 @@ export function registerContactsTools(server, ctx) {
               id: contactId, crowId: bot.botCrowId, secp256k1_pubkey: bot.secp256k1Pubkey,
             });
           } catch { /* non-fatal — re-subscribed on next restart */ }
+          // Phase 3: an accepted remote bot is a real cross-instance contact —
+          // propagate it to the user's other instances (advertised/remote bots
+          // sync per S-BOTS; a local-bot would be gated by shouldSyncRow).
+          try {
+            const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [contactId] });
+            if (rows[0]) await emitContactChange("insert", rows[0]);
+          } catch { /* never blocks the accept */ }
         }
 
         // Tell the bot we accepted (carries the token it validates).
