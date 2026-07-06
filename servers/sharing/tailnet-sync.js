@@ -53,43 +53,42 @@ function verifyHandshakePayload(payload, expectedPubkeyHex) {
 }
 
 /**
- * Derive a WebSocket URL for tailnet-sync from a peer's crow_instances row.
- * Prefers a direct tailnet-port endpoint over public Funnel URLs because the
- * Tailscale Funnel only proxies a curated public path-list (/blog etc.) — the
- * /api/instance-sync/stream path is deliberately not exposed publicly.
+ * Derive the ordered WebSocket dial candidates for a peer's crow_instances row.
  *
- * Resolution order:
- *   1. tailscale_ip + CROW_GATEWAY_PORT (default 3002) — the canonical tailnet path.
- *   2. host of gateway_url + CROW_GATEWAY_PORT — when tailscale_ip is unset
- *      but gateway_url's host is a magic-dns name we can re-port-target.
- *   3. gateway_url as-is (last resort; works only if the operator has wired
- *      Funnel/proxy to forward /api/instance-sync/stream — uncommon).
+ * Primary: gateway_url, honoring its scheme. On this fleet gateway_url is a
+ * Tailscale Serve HTTPS endpoint (e.g. https://grackle…ts.net:8444 → backend
+ * :3002) — tailscaled terminates TLS on the Serve port and proxies the
+ * upgrade to the plain-HTTP backend, so the correct dial is
+ * wss://<hostname>:<port>. The HOSTNAME is load-bearing: Serve needs SNI, so
+ * a raw-IP wss dial fails its TLS handshake. And plain ws:// against a Serve
+ * port is the bug this replaced (HTTP 400 / TLS alert, silently retried
+ * forever — the L3 outage of 2026-07-06). Port 443 is never dialed: that's
+ * public Funnel, which only proxies the curated public path-list and
+ * /api/instance-sync/stream is deliberately not on it.
+ *
+ * Fallback: ws://<tailscale_ip>:<fallbackPort> — a direct plain-WS dial of
+ * the standard backend gateway port for Serve-less peers. fallbackPort is a
+ * BACKEND port (the gateway listens plain HTTP), never a Serve HTTPS port.
  */
-function peerToWsUrl(peer, fallbackPort = 3002) {
-  // Prefer the peer's explicit port from gateway_url; only fall back to
-  // fallbackPort when the URL has none. (Each Crow may run on a different
-  // port — crow uses 3001, grackle uses 3002.)
-  let portFromUrl = null;
-  let hostFromUrl = null;
-  const raw = peer?.gateway_url;
+export function peerToWsUrlCandidates(peer, fallbackPort = 3002) {
+  const candidates = [];
+  const raw = peer?.gateway_url ? String(peer.gateway_url).trim() : "";
   if (raw) {
-    const noScheme = String(raw).replace(/^[a-z]+:\/\//, "").split("/")[0];
-    const colonIdx = noScheme.lastIndexOf(":");
-    if (colonIdx >= 0) {
-      hostFromUrl = noScheme.slice(0, colonIdx);
-      const p = parseInt(noScheme.slice(colonIdx + 1), 10);
-      if (!Number.isNaN(p)) portFromUrl = p;
-    } else {
-      hostFromUrl = noScheme;
+    let u = null;
+    try { u = new URL(raw.includes("://") ? raw : `https://${raw}`); } catch { /* malformed — fall through */ }
+    if (u?.hostname) {
+      const isHttp = u.protocol === "http:";
+      const port = u.port ? parseInt(u.port, 10) : (isHttp ? 80 : 443);
+      if (port !== 443) {
+        candidates.push(`${isHttp ? "ws" : "wss"}://${u.hostname}:${port}${WS_PATH}`);
+      }
     }
-    // Treat the public Funnel port (443) as "no usable port" — Funnel only
-    // proxies a public path-list, which excludes /api/instance-sync/stream.
-    if (portFromUrl === 443) portFromUrl = null;
   }
-  const port = portFromUrl || fallbackPort;
-  if (peer?.tailscale_ip) return `ws://${peer.tailscale_ip}:${port}${WS_PATH}`;
-  if (hostFromUrl) return `ws://${hostFromUrl}:${port}${WS_PATH}`;
-  return null;
+  if (peer?.tailscale_ip) {
+    const direct = `ws://${peer.tailscale_ip}:${fallbackPort}${WS_PATH}`;
+    if (!candidates.includes(direct)) candidates.push(direct);
+  }
+  return candidates;
 }
 
 /**
@@ -249,6 +248,15 @@ export function setupTailnetSyncServer(server, ctx) {
 
   server.on("upgrade", async (req, socket, head) => {
     if (!req.url || !req.url.startsWith(WS_PATH)) return; // let other handlers process
+    // Network-exposure invariant, defense-in-depth: instance-sync must never
+    // be reachable via Tailscale Funnel. The ed25519 mutual auth below would
+    // reject an outsider anyway, but a Funnel-tagged request shouldn't even
+    // get a handshake. (Upgrade requests bypass the Express middleware that
+    // enforces this for regular routes.)
+    if (req.headers["tailscale-funnel-request"]) {
+      try { socket.destroy(); } catch {}
+      return;
+    }
     wss.handleUpgrade(req, socket, head, async (ws) => {
       const frameReader = attachFrameReader(ws);
       try {
@@ -283,6 +291,18 @@ class PeerDialer {
     this.retryMs = RETRY_BASE_MS;
     this.timer = null;
     this.stopped = false;
+    this.attempt = 0; // rotates through dial candidates
+    this.failCount = 0; // consecutive failures, for rate-limited logging
+  }
+
+  // Dial failures land in ws.on("error") — historically swallowed, which hid
+  // a never-working dial URL for months. Log the first failure and every
+  // 10th thereafter so a dead transport is visible without spamming journald.
+  _noteDialFailure(wsUrl, err) {
+    this.failCount += 1;
+    if (this.failCount === 1 || this.failCount % 10 === 0) {
+      console.warn(`[tailnet-sync] dial ${wsUrl} failed (attempt ${this.failCount}): ${err?.message || err}`);
+    }
   }
 
   start() { this.connect(); }
@@ -302,11 +322,15 @@ class PeerDialer {
   async connect() {
     if (this.stopped) return;
     const { identity, instanceSyncManager, db } = this.ctx;
-    const wsUrl = peerToWsUrl(this.peer, this.ctx.gatewayPort);
-    if (!wsUrl) {
+    const candidates = peerToWsUrlCandidates(this.peer, this.ctx.gatewayPort);
+    if (candidates.length === 0) {
       // No tailnet endpoint to dial; leave for Hyperswarm.
       return;
     }
+    // Ladder through candidates across retries (Serve endpoint first, then
+    // the direct backend dial) so one broken path doesn't kill the transport.
+    const wsUrl = candidates[this.attempt % candidates.length];
+    this.attempt += 1;
     if (this.peer.id === instanceSyncManager.localInstanceId) return; // self
     // Deterministic dialer election: exactly one side dials, the other side
     // accepts. We dial only when our id sorts BEFORE the peer's id. This
@@ -376,8 +400,11 @@ class PeerDialer {
           args: [remoteInstanceId],
         }).catch(() => {});
 
-        // Reset retry backoff on successful auth.
+        // Reset retry backoff + failure counter on successful auth, and pin
+        // the winning candidate so reconnects go straight back to it.
         this.retryMs = RETRY_BASE_MS;
+        this.failCount = 0;
+        this.attempt -= 1; // re-dial this same candidate next time
 
         // Hand off to Hypercore. Client side = isInitiator: true.
         frameReader.detach();
@@ -398,7 +425,11 @@ class PeerDialer {
       this.ws = null;
       this.scheduleRetry();
     });
-    ws.on("error", () => { /* ignore — close will follow */ });
+    ws.on("error", (err) => {
+      // close will follow and schedule the retry; just make the failure
+      // visible (rate-limited) — a swallowed error here hid the L3 outage.
+      this._noteDialFailure(wsUrl, err);
+    });
   }
 }
 
