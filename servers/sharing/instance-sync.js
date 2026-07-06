@@ -739,6 +739,19 @@ export class InstanceSyncManager {
       return;
     }
 
+    // messages are keyed by the stable nostr_event_id (UNIQUE); the per-instance
+    // AUTOINCREMENT id + local contact_id are NOT portable. Route ALL ops through
+    // the natural-key handler, mirroring _applyCrowContext / _applyContact.
+    // shouldSyncRow already gated at :678 (nostr_event_id + crow_id required).
+    if (table === "messages") {
+      try {
+        await this._applyMessage(op, row, lamport_ts, instance_id);
+      } catch (err) {
+        console.warn(`[instance-sync] Failed to apply ${op} on messages:`, err.message);
+      }
+      return;
+    }
+
     // Conflict detection gates both updates and deletes — a stale remote delete
     // with a lower lamport_ts must not silently destroy a newer local edit (D6).
     if ((op === "update" || op === "delete") && row.id !== undefined) {
@@ -761,25 +774,6 @@ export class InstanceSyncManager {
       }
     } catch (err) {
       console.warn(`[instance-sync] Failed to apply ${op} on ${table}:`, err.message);
-    }
-
-    // Broadcast a messages:changed event when a synced-in message row
-    // lands locally. Without this, a paired Crow receiving a peer
-    // message via Nostr forwards the row via InstanceSync but our
-    // local onMessage / createNotification paths never fire, so
-    // badges wouldn't live-update. The 5-min fallback poll would
-    // eventually catch up, but this closes the gap for cross-instance
-    // traffic. Errors are swallowed — the row is already applied.
-    if (op === "insert" && table === "messages" && row?.contact_id != null) {
-      try {
-        const { rows } = await this.db.execute({
-          sql: `SELECT COUNT(*) AS unread FROM messages
-                WHERE contact_id = ? AND is_read = 0 AND direction = 'received'`,
-          args: [row.contact_id],
-        });
-        const unread = Number(rows?.[0]?.unread ?? 0);
-        bus.emit("messages:changed", { contactId: row.contact_id, unread });
-      } catch {}
     }
   }
 
@@ -1144,6 +1138,88 @@ export class InstanceSyncManager {
         Promise.resolve(this.onContactSynced(rows[0])).catch(() => {});
       }
     } catch {}
+  }
+
+  /**
+   * Apply a messages mutation keyed on the stable nostr_event_id (Phase 3 PR-B /
+   * S3). Messages are immutable inserts; the UNIQUE(nostr_event_id) constraint
+   * gives free store-dedupe (the same event arriving via BOTH direct Nostr AND
+   * sync yields exactly one row). The per-instance id/contact_id are never used —
+   * contact_id is resolved LOCALLY from the wire-carried crow_id. If the contact
+   * is not local yet, SKIP (no phantom contact): the row will also arrive via
+   * direct Nostr once subscribed, or on a later re-sync once the contact syncs.
+   *
+   * On a genuinely-new row (INSERT OR IGNORE rowsAffected > 0) fires
+   * messages:changed with the LOCAL contact_id (folded from the old :761-771 hook so
+   * live badges update). The received-row notification is added in Task 3.
+   *
+   * @param {"insert"} op            - only inserts are emitted; other ops are no-ops
+   * @param {object} row             - wire row (crow_id + nostr_event_id keyed)
+   * @param {number} lamportTs       - entry envelope lamport (unused; messages don't LWW)
+   * @param {string} instanceId      - origin instance id (unused)
+   */
+  async _applyMessage(op, row, lamportTs, instanceId) {
+    if (op !== "insert") return; // messages are insert-only on the wire
+    const eventId = row && row.nostr_event_id;
+    const crowId = row && row.crow_id;
+    if (!eventId || !crowId) {
+      console.warn("[instance-sync] _applyMessage: missing nostr_event_id/crow_id — skipping");
+      return;
+    }
+
+    // Resolve the LOCAL contact by crow_id. If absent, skip — never conjure a
+    // contact through the message channel (trust boundary). The row backfills
+    // once the contact syncs (PR-A) or via direct Nostr.
+    const { rows: crows } = await this.db.execute({
+      sql: "SELECT id, is_blocked FROM contacts WHERE crow_id = ? LIMIT 1",
+      args: [crowId],
+    });
+    const localContactId = crows[0]?.id;
+    if (localContactId == null) return;
+    // I-2: resolve the local block flag. A locally-blocked contact still STORES
+    // the synced row (converged-block semantics — the row is consistent with a
+    // block that hasn't finished propagating, and dropping it would lose data),
+    // but its NOTIFICATION is SUPPRESSED below. The notification is the security-
+    // relevant surface the sync channel must not let a blocked contact bypass
+    // during block-propagation divergence.
+    const isBlocked = Number(crows[0]?.is_blocked ?? 0) === 1;
+
+    // Store-dedupe on the UNIQUE nostr_event_id. Carry the original created_at
+    // (coherent thread ordering) + direction verbatim (a 'sent' row on A shows as
+    // 'sent' on B). is_read defaults 0 on this device (per-device unread badge).
+    const result = await this.db.execute({
+      sql: `INSERT OR IGNORE INTO messages
+              (contact_id, nostr_event_id, content, direction, thread_id, created_at, delivery_status, attachments)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        localContactId,
+        eventId,
+        row.content ?? "",
+        row.direction === "sent" ? "sent" : "received", // CHECK-constraint safe
+        row.thread_id ?? null,
+        row.created_at ?? new Date().toISOString(),
+        row.delivery_status ?? null,
+        row.attachments ?? null,
+      ],
+    });
+
+    if (Number(result.rowsAffected ?? 0) > 0 && !isBlocked) {
+      // I-2 + M-B1: a locally-blocked contact gets NEITHER the notification
+      // NOR the unread-badge tick (the row itself is stored above regardless —
+      // convergence preserved, no user-visible surface for a blocked contact).
+      // Live badge update (folded from the old :761-771 hook), with the LOCAL id.
+      try {
+        const { rows } = await this.db.execute({
+          sql: `SELECT COUNT(*) AS unread FROM messages
+                WHERE contact_id = ? AND is_read = 0 AND direction = 'received'`,
+          args: [localContactId],
+        });
+        bus.emit("messages:changed", { contactId: localContactId, unread: Number(rows?.[0]?.unread ?? 0) });
+      } catch {}
+      // Task 3 inserts the received-row notification here (gate shared with
+      // the badge — see the enclosing !isBlocked).
+      await this._notifyMessageApplied?.(localContactId, crowId, row);
+    }
   }
 
   /**
