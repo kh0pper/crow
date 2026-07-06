@@ -52,9 +52,9 @@ async function acceptInviteCore({ invite_code, display_name }, { db, identity, s
     peer.ed25519Pubkey
   );
 
-  // Send acceptance back to the inviter so they auto-add us — and, in PR3,
-  // keep retrying until they acknowledge (Task 3 swaps this to
-  // sendInviteAccepted).
+  // Send acceptance back to the inviter so they auto-add us. sendInviteAccepted
+  // (PR3) also enqueues it for retry until the inviter's handshake_complete ack
+  // clears the row — so an offline inviter can no longer strand the handshake.
   try {
     if (nostrManager.relays.size === 0) {
       await nostrManager.connectRelays();
@@ -66,8 +66,8 @@ async function acceptInviteCore({ invite_code, display_name }, { db, identity, s
       secp256k1Pub: identity.secp256k1Pubkey,
       ...(peer.inviteId ? { inviteId: peer.inviteId } : {}),
     });
-    await nostrManager.sendMessage(
-      { secp256k1_pubkey: peer.secp256k1Pubkey },
+    await nostrManager.sendInviteAccepted(
+      { id: contactId, secp256k1_pubkey: peer.secp256k1Pubkey },
       acceptancePayload
     );
   } catch {
