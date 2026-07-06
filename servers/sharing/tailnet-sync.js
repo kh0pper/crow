@@ -100,14 +100,24 @@ export function peerToWsUrlCandidates(peer, fallbackPort = 3002) {
  * Once the WS hands off to Hypercore (binary replication), call detach() to
  * stop intercepting frames so binary data flows through cleanly.
  */
-function attachFrameReader(ws) {
+export function attachFrameReader(ws) {
   const queue = [];
   const waiters = [];
+  const binaryBuffer = []; // binary frames that raced the handshake — replayed at handoff
   let closed = false;
   let closeReason = null;
 
   function onMsg(data, isBinary) {
-    if (isBinary) return; // binary frames aren't ours — let Hypercore take them
+    if (isBinary) {
+      // Binary frames belong to the post-handshake Noise/Hypercore stream.
+      // The peer's Noise initiator hello commonly lands while WE are still
+      // finishing handshake DB writes (feed-key persist, last_seen) — i.e.
+      // before detach(). Dropping it deadlocks replication silently (the
+      // responder waits forever for a hello that never re-sends), so buffer
+      // for replay instead.
+      binaryBuffer.push(data);
+      return;
+    }
     let parsed;
     try { parsed = JSON.parse(data.toString()); }
     catch { return; }
@@ -135,6 +145,10 @@ function attachFrameReader(ws) {
     ws.off("message", onMsg);
     ws.off("close", onClose);
     ws.off("error", onError);
+    // Hand any raced binary frames to the caller for replay into the
+    // post-handshake stream (see handoffToStream). Drain so a second
+    // detach can't double-replay.
+    return binaryBuffer.splice(0);
   }
   function readJsonFrame(timeoutMs) {
     if (closed) return Promise.reject(closeReason || new Error("socket closed"));
@@ -154,6 +168,23 @@ function attachFrameReader(ws) {
     });
   }
   return { readJsonFrame, detach };
+}
+
+/**
+ * Swap the WS from JSON-handshake framing to the binary replication stream
+ * without losing frames. The WS is paused across the consumer swap so no
+ * frame can slip between the frame reader detaching and the duplex
+ * attaching; binary frames that arrived DURING the handshake (buffered by
+ * attachFrameReader) are replayed, in order, ahead of live traffic.
+ */
+export function handoffToStream(ws, frameReader) {
+  try { ws.pause(); } catch { /* already closing — duplex teardown handles it */ }
+  const buffered = frameReader.detach();
+  const wsStream = createWebSocketStream(ws, { allowHalfOpen: false });
+  wsStream.on("error", () => {});
+  for (const frame of buffered) ws.emit("message", frame, true);
+  try { ws.resume(); } catch { /* already closing */ }
+  return wsStream;
 }
 
 /**
@@ -228,10 +259,9 @@ async function handleAcceptedConnection(ws, peerHandshake, frameReader, ctx) {
 
   // Hand the WS off to Hypercore for binary replication framing. Hypercore
   // expects a NoiseSecretStream; wrap the WS Duplex first. Server side =
-  // isInitiator: false (the dialer is the initiator).
-  frameReader.detach();
-  const wsStream = createWebSocketStream(ws, { allowHalfOpen: false });
-  wsStream.on("error", () => {});
+  // isInitiator: false (the dialer is the initiator). handoffToStream
+  // replays any Noise frames that raced our handshake DB writes.
+  const wsStream = handoffToStream(ws, frameReader);
   const noiseStream = new NoiseSecretStream(false, wsStream);
   noiseStream.on("error", () => {});
   await instanceSyncManager.replicate(remoteInstanceId, noiseStream);
@@ -407,9 +437,10 @@ class PeerDialer {
         this.attempt -= 1; // re-dial this same candidate next time
 
         // Hand off to Hypercore. Client side = isInitiator: true.
-        frameReader.detach();
-        const wsStream = createWebSocketStream(ws, { allowHalfOpen: false });
-        wsStream.on("error", () => {});
+        // handoffToStream replays any binary frames that raced the
+        // handshake (defensive — the responder shouldn't write first,
+        // but symmetric handling costs nothing).
+        const wsStream = handoffToStream(ws, frameReader);
         const noiseStream = new NoiseSecretStream(true, wsStream);
         noiseStream.on("error", () => {});
         await instanceSyncManager.replicate(remoteInstanceId, noiseStream);
