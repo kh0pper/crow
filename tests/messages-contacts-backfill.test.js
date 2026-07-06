@@ -124,3 +124,45 @@ test("backfillContactsOnce: drains the inbound backlog BEFORE re-emitting (I-B1 
 });
 // fakeFeedWith(entries): minimal in-feed stub — { length: entries.length, async get(seq){ return entries[seq]; } }
 // (matches the _processNewEntries contract: reads lastSeq via sync_state, iterates seq < length, feed.get(seq)).
+
+// ---- reemitSyncableSettingsOnce: same boot-vs-feed-init race class, same fix (ported) ----
+
+test("reemitSyncableSettingsOnce: no armed peers → stays RETRYABLE; runs once feeds arm; then terminal", async () => {
+  const m = freshMgr("reemit-race", "local-6");
+  m.outFeeds.clear();
+  await m.db.execute({
+    sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('nav_groups', '[]', datetime('now'))",
+    args: [],
+  });
+  const emitted = [];
+  m.emitChange = async (_t, _o, r) => emitted.push(r.key);
+  assert.equal(await m.reemitSyncableSettingsOnce(), 0);
+  assert.equal(emitted.length, 0, "no-peers path must not emit");
+  m.outFeeds.set("peer-1", { append: async () => {} });
+  assert.ok((await m.reemitSyncableSettingsOnce()) >= 1, "retry with armed feeds must re-emit");
+  assert.ok(emitted.includes("nav_groups"));
+  const before = emitted.length;
+  assert.equal(await m.reemitSyncableSettingsOnce(), 0, "terminal after the real run");
+  assert.equal(emitted.length, before);
+});
+
+test("reemitSyncableSettingsOnce: stale 'no-peers' flag row is healed (UPSERT done-mark)", async () => {
+  const m = freshMgr("reemit-heal", "local-7");
+  m.outFeeds.set("peer-1", { append: async () => {} });
+  await m.db.execute({
+    sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('nav_groups', '[]', datetime('now'))",
+    args: [],
+  });
+  await m.db.execute({
+    sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('__sync_reemit_allowlist_v1', 'no-peers', datetime('now'))",
+    args: [],
+  });
+  const emitted = [];
+  m.emitChange = async (_t, _o, r) => emitted.push(r.key);
+  assert.ok((await m.reemitSyncableSettingsOnce()) >= 1, "stale no-peers is not terminal");
+  const { rows } = await m.db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key='__sync_reemit_allowlist_v1'" });
+  assert.match(rows[0].value, /^done:\d+$/, "done-mark UPSERTs over the stale row");
+  const before = emitted.length;
+  assert.equal(await m.reemitSyncableSettingsOnce(), 0, "terminal — no per-boot re-emit thrash");
+  assert.equal(emitted.length, before);
+});
