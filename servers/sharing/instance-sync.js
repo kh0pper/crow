@@ -446,25 +446,21 @@ export class InstanceSyncManager {
    */
   async reemitSyncableSettingsOnce() {
     const FLAG_KEY = "__sync_reemit_allowlist_v1";
+    // Same race class as backfillContactsOnce: the boot call runs concurrently
+    // with the async sharing boot that arms outFeeds, so 'no-peers' must be
+    // retryable, and only a real completed run ('done:<n>') is terminal.
     let alreadyRan = false;
     try {
       const { rows } = await this.db.execute({
         sql: "SELECT value FROM dashboard_settings WHERE key = ?",
         args: [FLAG_KEY],
       });
-      alreadyRan = rows?.length > 0;
+      alreadyRan = typeof rows?.[0]?.value === "string" && rows[0].value.startsWith("done:");
     } catch {}
     if (alreadyRan) return 0;
 
     if (this.outFeeds.size === 0) {
-      // No paired peers — nothing to reconcile with. Still mark done so we
-      // don't keep checking on every boot.
-      try {
-        await this.db.execute({
-          sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, 'no-peers', datetime('now')) ON CONFLICT(key) DO NOTHING",
-          args: [FLAG_KEY],
-        });
-      } catch {}
+      // No paired peers armed (yet) — retry next boot; do NOT mark the flag.
       return 0;
     }
 
@@ -497,8 +493,10 @@ export class InstanceSyncManager {
     }
 
     try {
+      // UPSERT: a stale 'no-peers' row from the pre-fix code must be
+      // overwritten or this done-mark silently no-ops (per-boot re-emit).
       await this.db.execute({
-        sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO NOTHING",
+        sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
         args: [FLAG_KEY, `done:${emitted}`],
       });
     } catch {}
@@ -523,24 +521,25 @@ export class InstanceSyncManager {
    */
   async backfillContactsOnce() {
     const FLAG_KEY = "__contacts_backfill_v1";
+    // Only a real completed run ("done:<n>") is terminal. The boot call races
+    // the async sharing boot that opens the sync feeds — on a slow host the
+    // peers exist but outFeeds is still empty when we run (observed live on
+    // grackle 2026-07-06: flag stuck at 'no-peers' with 4 paired peers).
+    // Treating no-peers as retryable makes the next boot backfill correctly;
+    // a genuinely peer-less instance just re-runs two cheap queries per boot.
     let alreadyRan = false;
     try {
       const { rows } = await this.db.execute({
         sql: "SELECT value FROM dashboard_settings WHERE key = ?",
         args: [FLAG_KEY],
       });
-      alreadyRan = rows?.length > 0;
+      alreadyRan = typeof rows?.[0]?.value === "string" && rows[0].value.startsWith("done:");
     } catch {}
     if (alreadyRan) return 0;
 
     if (this.outFeeds.size === 0) {
-      // No paired peers — nothing to backfill. Mark done so we don't recheck.
-      try {
-        await this.db.execute({
-          sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, 'no-peers', datetime('now')) ON CONFLICT(key) DO NOTHING",
-          args: [FLAG_KEY],
-        });
-      } catch {}
+      // No paired peers armed (yet) — nothing to backfill NOW. Deliberately
+      // do NOT mark the flag: feeds may simply not have opened yet this boot.
       return 0;
     }
 
@@ -585,8 +584,11 @@ export class InstanceSyncManager {
     }
 
     try {
+      // UPSERT, not DO NOTHING: a stale 'no-peers' row (written by the pre-fix
+      // code when boot raced feed-init) must be overwritten, or the done-mark
+      // silently no-ops and the backfill re-emits every boot (lamport thrash).
       await this.db.execute({
-        sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO NOTHING",
+        sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
         args: [FLAG_KEY, `done:${emitted}`],
       });
     } catch {}
