@@ -13,6 +13,7 @@ import { mkdirSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sign, encryptForPeer, decryptFromPeer } from "./identity.js";
+import { shouldInitInstanceSync } from "./instance-sync.js";
 import { resolveDataDir } from "../db.js";
 
 const PEERS_DIR = resolve(resolveDataDir(), "peers");
@@ -33,6 +34,8 @@ export class SyncManager {
     this.inFeeds = new Map(); // contactId -> Hypercore (their incoming feed)
     this.onEntry = null; // callback(contactId, entry)
     this._initLocks = new Map(); // contactId -> tail Promise (see initContact)
+    // --no-auth companion: no per-contact sync feeds (would grab the feed lock).
+    this.p2pDisabled = !shouldInitInstanceSync({ argv: process.argv, env: process.env });
   }
 
   /**
@@ -48,6 +51,7 @@ export class SyncManager {
    * See InstanceSyncManager.initInstance() for the same pattern.
    */
   async initContact(contactId, theirFeedKey) {
+    if (this.p2pDisabled) return null; // --no-auth companion: no per-contact feeds
     const prior = this._initLocks.get(contactId) || Promise.resolve();
     const next = prior
       .catch(() => {}) // a failed prior turn shouldn't block our attempt
