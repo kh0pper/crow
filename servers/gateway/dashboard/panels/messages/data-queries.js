@@ -43,7 +43,7 @@ export async function getUnifiedConversationList(db) {
   // Peer contacts with message activity
   try {
     const { rows: peerRows } = await db.execute(`
-      SELECT c.id as contact_id, c.crow_id, c.display_name, c.last_seen, c.is_blocked, c.is_bot,
+      SELECT c.id as contact_id, c.crow_id, c.display_name, c.last_seen, c.is_blocked, c.is_bot, c.verified,
              MAX(m.created_at) as last_msg_at,
              SUM(CASE WHEN m.is_read = 0 AND m.direction = 'received' THEN 1 ELSE 0 END) as unread
       FROM contacts c
@@ -65,6 +65,7 @@ export async function getUnifiedConversationList(db) {
         lastActivity: row.last_msg_at || row.last_seen || null,
         lastSeen: row.last_seen,
         isBot: !!Number(row.is_bot),
+        verified: !!Number(row.verified),
         unread,
       });
     }
