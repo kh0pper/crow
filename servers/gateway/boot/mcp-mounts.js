@@ -36,6 +36,17 @@ export async function mountMcpServers(app, deps) {
     setProviderSyncManager(syncManager);
   } catch {}
 
+  // Phase 3 (contacts follow the user): when a contact syncs in from a paired
+  // instance, wire it live (subscribe to its DMs / join its topic) so it can
+  // receive messages. Guarded; never throws into the apply loop.
+  try {
+    if (syncManager) {
+      const { wireSyncedContact } = await import("../../sharing/contact-promote.js");
+      const { getManagersOrNull } = await import("../../sharing/managers.js");
+      syncManager.onContactSynced = (row) => { wireSyncedContact(getManagersOrNull(), row); };
+    }
+  } catch {}
+
   // CRITICAL: open outFeeds for every paired peer BEFORE any emitChange can
   // fire. Without this, emissions before the first WebSocket handshake land
   // on an empty outFeeds map and are silently dropped while _localCounter
