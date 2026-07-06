@@ -446,25 +446,21 @@ export class InstanceSyncManager {
    */
   async reemitSyncableSettingsOnce() {
     const FLAG_KEY = "__sync_reemit_allowlist_v1";
+    // Same race class as backfillContactsOnce: the boot call runs concurrently
+    // with the async sharing boot that arms outFeeds, so 'no-peers' must be
+    // retryable, and only a real completed run ('done:<n>') is terminal.
     let alreadyRan = false;
     try {
       const { rows } = await this.db.execute({
         sql: "SELECT value FROM dashboard_settings WHERE key = ?",
         args: [FLAG_KEY],
       });
-      alreadyRan = rows?.length > 0;
+      alreadyRan = typeof rows?.[0]?.value === "string" && rows[0].value.startsWith("done:");
     } catch {}
     if (alreadyRan) return 0;
 
     if (this.outFeeds.size === 0) {
-      // No paired peers — nothing to reconcile with. Still mark done so we
-      // don't keep checking on every boot.
-      try {
-        await this.db.execute({
-          sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, 'no-peers', datetime('now')) ON CONFLICT(key) DO NOTHING",
-          args: [FLAG_KEY],
-        });
-      } catch {}
+      // No paired peers armed (yet) — retry next boot; do NOT mark the flag.
       return 0;
     }
 
@@ -497,8 +493,10 @@ export class InstanceSyncManager {
     }
 
     try {
+      // UPSERT: a stale 'no-peers' row from the pre-fix code must be
+      // overwritten or this done-mark silently no-ops (per-boot re-emit).
       await this.db.execute({
-        sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO NOTHING",
+        sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
         args: [FLAG_KEY, `done:${emitted}`],
       });
     } catch {}
