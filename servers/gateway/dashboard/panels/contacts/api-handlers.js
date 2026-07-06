@@ -73,6 +73,16 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
     return { redirect: "/dashboard/contacts" };
   }
 
+  // --- Trust: mark/unmark a contact as safety-number verified (P2/C4) ---
+  if (action === "set_verified" && req.body.contact_id) {
+    const contactId = parseInt(req.body.contact_id);
+    await db.execute({
+      sql: "UPDATE contacts SET verified = ? WHERE id = ?",
+      args: [req.body.verified === "1" ? 1 : 0, contactId],
+    });
+    return { redirect: "/dashboard/contacts?view=contact&contact=" + contactId };
+  }
+
   // --- Add manual contact ---
   if (action === "add_manual") {
     const name = (req.body.name || "").trim();

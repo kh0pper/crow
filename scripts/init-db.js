@@ -1849,6 +1849,9 @@ await addColumnIfMissing("contacts", "email", "TEXT");
 await addColumnIfMissing("contacts", "phone", "TEXT");
 // NULL = normal contact; 'pending' = unaccepted message request; 'accepted' = accepted partial contact (L6).
 await addColumnIfMissing("contacts", "request_status", "TEXT");
+// PR3 trust UI: 0 = unverified, 1 = user compared the safety number. Reset to 0
+// on any crow_id/secp key change (see upsertFullContact). SCHEMA_GENERATION 3->4.
+await addColumnIfMissing("contacts", "verified", "INTEGER DEFAULT 0");
 
 // --- Contact Groups ---
 await initTable("contact_groups table", `

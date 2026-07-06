@@ -121,7 +121,7 @@ export async function upsertFullContact(db, managers, { crowId, ed25519Pub, secp
     await db.execute({ sql: "UPDATE messages SET contact_id = ? WHERE contact_id = ?", args: [byCrow.id, otherSecp.id] });
     await db.execute({ sql: "DELETE FROM contacts WHERE id = ?", args: [otherSecp.id] });
     await db.execute({
-      sql: `UPDATE contacts SET request_status = NULL,
+      sql: `UPDATE contacts SET request_status = NULL, verified = 0,
               ed25519_pubkey = COALESCE(NULLIF(ed25519_pubkey,''), ?),
               display_name  = COALESCE(NULLIF(display_name,''), ?) WHERE id = ?`,
       args: [ed, name, byCrow.id],
@@ -162,7 +162,7 @@ export async function upsertFullContact(db, managers, { crowId, ed25519Pub, secp
     await db.execute({
       sql: `UPDATE contacts SET crow_id = ?, secp256k1_pubkey = ?,
               ed25519_pubkey = COALESCE(NULLIF(ed25519_pubkey,''), ?),
-              request_status = NULL,
+              request_status = NULL, verified = 0,
               display_name = CASE WHEN display_name IS NULL OR display_name = '' OR display_name LIKE 'req:%'
                                   THEN ? ELSE display_name END
             WHERE id = ?`,

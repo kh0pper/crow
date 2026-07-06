@@ -8,6 +8,7 @@
 import { escapeHtml, badge, formField } from "../../shared/components.js";
 import { t } from "../../shared/i18n.js";
 import { renderInviteShare, renderPeerInviteForms, renderShortCodeShare, renderShortCodeForms } from "../../shared/peer-invite-ui.js";
+import { computeSafetyNumber } from "../../../../sharing/identity.js";
 
 /** Color palette for contact avatars (deterministic by contact ID) */
 const AVATAR_COLORS = [
@@ -166,7 +167,7 @@ export function renderContactList(contacts, groups, filters, lang, peerAdd = {})
         <div class="contact-card-header">
           ${avatarHtml(c)}
           <div class="contact-card-info">
-            <div class="contact-card-name">${escapeHtml(c.display_name || "Unknown")}</div>
+            <div class="contact-card-name">${escapeHtml(c.display_name || "Unknown")}${c.verified ? ` <span class="verified-badge" title="${t("contacts.verifiedBadgeTitle", lang)}">✓</span>` : ""}</div>
             <div class="contact-card-meta">${escapeHtml(meta)}</div>
           </div>
           ${typeBadge(c, lang)}
@@ -188,7 +189,7 @@ export function renderContactList(contacts, groups, filters, lang, peerAdd = {})
 // Contact Profile
 // ──────────────────────────────────────────────
 
-export function renderContactProfile(contact, activities, groups, allGroups, lang) {
+export function renderContactProfile(contact, activities, groups, allGroups, lang, myEd25519Pubkey = "") {
   if (!contact) {
     return `<div class="contacts-empty"><p>${t("contacts.notFound", lang)}</p></div>`;
   }
@@ -221,6 +222,22 @@ export function renderContactProfile(contact, activities, groups, allGroups, lan
         ${details.map((d) => `<div class="profile-field"><span class="profile-field-label">${escapeHtml(d.label)}</span><span class="profile-field-value">${escapeHtml(d.value)}</span></div>`).join("")}
       </div>`
     : "";
+
+  // Trust / safety-number verification (crow contacts only, when we can compute it).
+  let verifyHtml = "";
+  if (myEd25519Pubkey && contact.ed25519_pubkey && contact.contact_type !== "manual") {
+    const safety = computeSafetyNumber(myEd25519Pubkey, contact.ed25519_pubkey);
+    const isVerified = !!contact.verified;
+    const toggle = isVerified
+      ? `<form method="POST" style="display:inline"><input type="hidden" name="action" value="set_verified"><input type="hidden" name="contact_id" value="${contact.id}"><input type="hidden" name="verified" value="0"><button type="submit" class="btn btn-sm btn-secondary">${t("contacts.unverify", lang)}</button></form>`
+      : `<form method="POST" style="display:inline"><input type="hidden" name="action" value="set_verified"><input type="hidden" name="contact_id" value="${contact.id}"><input type="hidden" name="verified" value="1"><button type="submit" class="btn btn-sm btn-primary">${t("contacts.markVerified", lang)}</button></form>`;
+    verifyHtml = `<div class="profile-section">
+      <div class="profile-section-title">${t("contacts.verification", lang)}${isVerified ? ` <span class="verified-badge" title="${t("contacts.verifiedBadgeTitle", lang)}">✓ ${t("contacts.verified", lang)}</span>` : ""}</div>
+      <p style="font-size:0.8rem;color:var(--crow-text-secondary)">${t("contacts.safetyNumberHelp", lang)}</p>
+      <div class="profile-field"><span class="profile-field-label">${t("contacts.safetyNumber", lang)}</span><span class="profile-field-value" style="font-family:monospace;letter-spacing:0.05em">${escapeHtml(safety)}</span></div>
+      <div style="margin-top:0.5rem">${toggle}</div>
+    </div>`;
+  }
 
   // Notes / bio
   const notesHtml = (contact.notes || contact.bio)
@@ -315,7 +332,7 @@ export function renderContactProfile(contact, activities, groups, allGroups, lan
   </div>`;
 
   return `<div class="contact-profile">
-    ${header}${detailsHtml}${notesHtml}${groupsSection}${activityHtml}${editForm}${actions}
+    ${header}${detailsHtml}${verifyHtml}${notesHtml}${groupsSection}${activityHtml}${editForm}${actions}
   </div>`;
 }
 

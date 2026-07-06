@@ -307,6 +307,13 @@ export class NostrManager {
    * for control/room envelopes (crow_social) that must not appear as 1:1 chat rows.
    */
   async sendControl(contact, content) {
+    const { eventId, relays } = await this._sendControlEvent(contact, content);
+    return { eventId, relays };
+  }
+
+  /** Build+publish a kind:4 control DM; returns the signed event too (so
+   * sendInviteAccepted can store it for retry). */
+  async _sendControlEvent(contact, content) {
     if (this.relays.size === 0) await this.connectRelays();
     let recipientPubkey = contact.secp256k1_pubkey || contact.secp256k1Pubkey;
     if (recipientPubkey && recipientPubkey.length === 66) recipientPubkey = recipientPubkey.slice(2);
@@ -317,7 +324,37 @@ export class NostrManager {
     for (const [url, relay] of this.relays) {
       try { if (await safeRelayPublish(relay, event)) published.push(url); } catch { /* relay best-effort */ }
     }
-    return { eventId: event.id, relays: published };
+    return { eventId: event.id, relays: published, event };
+  }
+
+  /**
+   * Send an invite_accepted acceptance DM (control envelope — no message row)
+   * AND enqueue it for retry (PR3 carve-in). The general shouldEnqueue policy
+   * excludes invite_accepted; this is the ONE deliberate exception — the
+   * acceptor retries the acceptance until the inviter acks it with
+   * handshake_complete (which clears the row via markDelivered). Never throws
+   * the enqueue.
+   */
+  async sendInviteAccepted(contact, content) {
+    const { eventId, relays: published, event } = await this._sendControlEvent(contact, content);
+    try {
+      if (this.db && contact && contact.id != null && published.length > 0 && event) {
+        // Normalize by LENGTH (66→64) exactly like sendMessage/_sendControlEvent —
+        // NOT a /^0[23]/ replace, which would corrupt a 64-hex x-only key that
+        // happens to start with 02/03. (recipient_pubkey is stored metadata only;
+        // republish uses raw_event's #p tag — still, keep it correct.)
+        let recipientPubkey = contact.secp256k1_pubkey || contact.secp256k1Pubkey || "";
+        if (recipientPubkey.length === 66) recipientPubkey = recipientPubkey.slice(2);
+        await enqueueRetry(this.db, {
+          eventId,
+          contactId: contact.id,
+          recipientPubkey,
+          rawEvent: JSON.stringify(event),
+          nowSec: Math.floor(Date.now() / 1000),
+        });
+      }
+    } catch { /* enqueue is best-effort */ }
+    return { eventId, relays: published };
   }
 
   /**
@@ -595,7 +632,7 @@ export class NostrManager {
                 const payload = JSON.parse(decrypted);
                 if (payload.type === "invite_accepted" && onInviteAccepted) {
                   handled = true;
-                  await onInviteAccepted(payload, senderPubkey);
+                  await onInviteAccepted(payload, senderPubkey, event);
                 } else if (payload.type === "crow_social" && payload.subtype && onSocialMessage) {
                   handled = true;
                   await onSocialMessage(payload.subtype, payload.payload || {}, senderPubkey);

@@ -66,7 +66,10 @@ export default {
       // --- Contact Profile ---
       const contact = await getContact(db, contactId);
       const activities = contact ? await getContactActivity(db, contact.id) : [];
-      bodyHtml = renderContactProfile(contact, activities, groups, groups, lang);
+      const { loadOrCreateIdentity } = await import("../../../sharing/identity.js");
+      let myEd = "";
+      try { myEd = loadOrCreateIdentity().ed25519Pubkey || ""; } catch {}
+      bodyHtml = renderContactProfile(contact, activities, groups, groups, lang, myEd);
     } else if (view === "groups") {
       // --- Group Manager ---
       const contacts = await getContacts(db, { limit: 500 });
