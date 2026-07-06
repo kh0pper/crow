@@ -8,6 +8,7 @@
  */
 
 import Hyperswarm from "hyperswarm";
+import { shouldInitInstanceSync } from "./instance-sync.js";
 import { createHash, randomBytes } from "node:crypto";
 import { sign, verify } from "./identity.js";
 
@@ -37,12 +38,20 @@ export class PeerManager {
     this.onInstanceKeyReceived = null; // callback(remoteInstanceId, feedKeyHex) — peer advertised their outgoing Hypercore feed key
     this.getFeedKeyForInstance = null; // async (remoteInstanceId) => hex — our outgoing feed key to this specific peer instance
     this.localInstanceId = null; // wired by server.js — the local Crow instance id we advertise to peers
+
+    // A --no-auth companion gateway (e.g. grackle's loopback crow-mcp-bridge) is
+    // never a peer — it must NOT run the Hyperswarm P2P layer, or it steals the
+    // DHT-topic connection (and per-contact feed locks) from the PRIMARY gateway,
+    // starving the primary's cross-instance replication. Same signal as the
+    // instance-sync feed gate. See shouldInitInstanceSync().
+    this.p2pDisabled = !shouldInitInstanceSync({ argv: process.argv, env: process.env });
   }
 
   /**
    * Initialize Hyperswarm and start listening.
    */
   async start() {
+    if (this.p2pDisabled) return this; // --no-auth companion: no swarm
     this.swarm = new Hyperswarm();
 
     this.swarm.on("connection", (conn, info) => {
@@ -56,6 +65,7 @@ export class PeerManager {
    * Join the DHT topic for a specific contact.
    */
   async joinContact(contact) {
+    if (this.p2pDisabled) return null; // --no-auth companion: no DHT topics
     if (!this.swarm) throw new Error("PeerManager not started");
 
     const topic = computeTopic(
@@ -93,6 +103,7 @@ export class PeerManager {
    * topic = sha256(crowId + "instance-sync")
    */
   async joinInstanceSync() {
+    if (this.p2pDisabled) return null; // --no-auth companion: no instance-sync topic
     if (!this.swarm) throw new Error("PeerManager not started");
 
     this.instanceSyncTopic = createHash("sha256")
