@@ -66,6 +66,7 @@ export async function persistIncomingCursor(db, createdAtSec) {
 }
 
 import { normalizePubkey } from "./pubkey-util.js";
+import { emitContactChange, emitContactDelete } from "./contact-sync.js";
 
 const HEX_KEY = /^[0-9a-fA-F]{64}(?:[0-9a-fA-F]{2})?$/; // 64 x-only or 66 compressed
 
@@ -151,6 +152,10 @@ export async function upsertFullContact(db, managers, { crowId, ed25519Pub, secp
     });
     const row = (await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [byCrow.id] })).rows[0];
     await wireFullContact(managers, row);
+    // Phase 3: the folded row is gone on this instance; propagate its delete +
+    // the merged owner to the user's other instances.
+    await emitContactDelete(otherSecp.crow_id);
+    await emitContactChange("update", row);
     return { contactId: row.id, outcome: "merged" };
   }
 
@@ -193,6 +198,7 @@ export async function upsertFullContact(db, managers, { crowId, ed25519Pub, secp
     });
     const row = (await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [target.id] })).rows[0];
     await wireFullContact(managers, row);
+    await emitContactChange("update", row); // Phase 3: promoted contact follows the user
     return { contactId: row.id, outcome: "promoted" };
   }
 
@@ -204,5 +210,6 @@ export async function upsertFullContact(db, managers, { crowId, ed25519Pub, secp
   });
   const row = (await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [Number(ins.lastInsertRowid)] })).rows[0];
   await wireFullContact(managers, row);
+  await emitContactChange("insert", row); // Phase 3: new contact follows the user
   return { contactId: row.id, outcome: "created" };
 }
