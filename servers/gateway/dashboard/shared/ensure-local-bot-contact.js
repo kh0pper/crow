@@ -35,7 +35,7 @@ export async function ensureLocalBotContact(db, botId, { displayName = null, _id
     const { rows } = await db.execute({ sql: "SELECT id FROM contacts WHERE crow_id = ? LIMIT 1", args: [crowId] });
     if (rows.length) {
       await db.execute({
-        sql: "UPDATE contacts SET is_bot = 1, display_name = ?, secp256k1_pubkey = ?, ed25519_pubkey = ?, origin = 'local-bot' WHERE id = ?",
+        sql: "UPDATE contacts SET is_bot = 1, display_name = ?, secp256k1_pubkey = ?, ed25519_pubkey = ?, origin = 'local-bot', verified = 0 WHERE id = ?",
         args: [name, secp, ed, rows[0].id],
       });
       return Number(rows[0].id);
