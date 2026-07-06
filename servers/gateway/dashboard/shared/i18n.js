@@ -363,6 +363,13 @@ export const translations = {
   "invite.shortCodeExpiry": { en: "Expires in about 10 minutes", es: "Caduca en unos 10 minutos" },
   "invite.shortCodeAcceptPlaceholder": { en: "Enter the 12-character code…", es: "Ingresa el código de 12 caracteres…" },
   "invite.shortCodeAcceptBtn": { en: "Accept short code", es: "Aceptar código corto" },
+  "contacts.verification": { en: "Verification", es: "Verificación" },
+  "contacts.safetyNumber": { en: "Safety number", es: "Número de seguridad" },
+  "contacts.safetyNumberHelp": { en: "Compare this number with your contact over a channel you trust — a phone call or in person. If it matches, they are who they say.", es: "Compara este número con tu contacto por un canal de confianza — una llamada o en persona. Si coincide, son quienes dicen ser." },
+  "contacts.markVerified": { en: "Mark as verified", es: "Marcar como verificado" },
+  "contacts.verified": { en: "Verified", es: "Verificado" },
+  "contacts.unverify": { en: "Remove verification", es: "Quitar verificación" },
+  "contacts.verifiedBadgeTitle": { en: "Safety number verified", es: "Número de seguridad verificado" },
 
   "contacts.addPeer": { en: "Add a Crow peer", es: "Añadir un par de Crow" },
   "contacts.addPeerDesc": { en: "Invite someone with a link or accept theirs", es: "Invita a alguien con un enlace o acepta el suyo" },
