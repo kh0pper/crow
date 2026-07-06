@@ -90,6 +90,8 @@ export async function handleIncomingRequest(db, managers, { senderPubkey, conten
     }
 
     // Store the DM (dedup on the UNIQUE nostr_event_id).
+    // Phase 3 PR-B: deliberately NOT emitted to instance-sync — the req:<pubkey>
+    // pending contact doesn't sync (S-REQUESTS), so a peer could never resolve it.
     try {
       await db.execute({
         sql: `INSERT OR IGNORE INTO messages (contact_id, nostr_event_id, content, direction, is_read, created_at)
@@ -495,7 +497,9 @@ export async function wireNostrReceive(managers) {
       } catch (err) {
         console.warn("[sharing] Failed to create group message notification:", err.message);
       }
-      // Also store as a regular message with group context
+      // Also store as a regular message with group context.
+      // Phase 3 PR-B: deliberately NOT emitted to instance-sync — synthetic
+      // grp_<ts> event id (not a real Nostr event); rooms have their own sync path.
       try {
         // Find the sender contact
         const senderContact = await db.execute({
