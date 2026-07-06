@@ -179,6 +179,21 @@ function shouldSyncRow(table, row) {
 // Test-only alias (keeps the function module-private for production callers).
 export function shouldSyncRowForTest(table, row) { return shouldSyncRow(table, row); }
 
+/**
+ * Whether this process should participate in cross-instance sync feeds.
+ * A `--no-auth` gateway is a loopback companion (e.g. grackle's crow-mcp-bridge),
+ * NEVER the primary instance — it must NOT open the instance-sync Hypercore feeds,
+ * or it grabs the on-disk feed lock and starves the PRIMARY gateway ("File
+ * descriptor could not be locked"), silently breaking the primary's replication.
+ * Same class as shouldRunHealthMonitor (QW1). Pure + injectable for tests.
+ * @param {{argv?: string[], env?: object}} opts
+ */
+export function shouldInitInstanceSync({ argv = [], env = {} } = {}) {
+  if (env.CROW_DISABLE_INSTANCE_SYNC === "1") return false;
+  if (Array.isArray(argv) && argv.includes("--no-auth")) return false;
+  return true;
+}
+
 export class InstanceSyncManager {
   /**
    * @param {object} identity - Crow identity (from loadOrCreateIdentity)
@@ -207,6 +222,12 @@ export class InstanceSyncManager {
 
     // Whether the manager has been started
     this.started = false;
+
+    // A --no-auth companion gateway must not open instance-sync feeds (it would
+    // steal the primary's feed lock). Detected from the process flags at
+    // construction so ALL feed-open paths (eagerInitPairedPeers, tailnet-sync,
+    // boot.js) are gated uniformly. See shouldInitInstanceSync().
+    this.feedsDisabled = !shouldInitInstanceSync({ argv: process.argv, env: process.env });
   }
 
   /**
@@ -285,6 +306,8 @@ export class InstanceSyncManager {
    * @param {Buffer|null} theirFeedKey - The remote instance's outgoing feed key (null if unknown yet)
    */
   async initInstance(remoteInstanceId, theirFeedKey) {
+    // --no-auth companion: never open feeds (would steal the primary's lock).
+    if (this.feedsDisabled) return null;
     // Serialize per-peer to prevent concurrent fd-lock contention on
     // <feed-dir>/db/LOCK. Multiple startup paths converge here for the
     // same peer (boot loop at server.js, eagerInitPairedPeers, the
@@ -362,6 +385,7 @@ export class InstanceSyncManager {
    * catch up entries that mirrored during a previous session.
    */
   async eagerInitPairedPeers() {
+    if (this.feedsDisabled) return 0; // --no-auth companion: skip feed init entirely
     let rows = [];
     try {
       const r = await this.db.execute({
@@ -508,6 +532,8 @@ export class InstanceSyncManager {
    * @param {object} row - The row data (for insert/update) or { id } (for delete)
    */
   async emitChange(table, op, row) {
+    // --no-auth companion doesn't drive fleet sync (and has no outFeeds).
+    if (this.feedsDisabled) return;
     if (!SYNCED_TABLES.includes(table)) return;
     if (!shouldSyncRow(table, row)) return; // local-only row; don't broadcast
 
