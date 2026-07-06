@@ -975,11 +975,18 @@ export class InstanceSyncManager {
         this._contactCols = new Set(pragma.map((r) => r.name));
       } catch { this._contactCols = null; }
     }
+    // Defense-in-depth: dynamic column names below are built from `filtered`'s
+    // keys, so they MUST be whitelisted against the live schema. If the PRAGMA
+    // failed we cannot whitelist — skip rather than build SQL from raw wire keys.
+    if (!this._contactCols) {
+      console.warn("[instance-sync] _applyContact: contacts columns unavailable — skipping");
+      return;
+    }
     const ALWAYS_DROP = new Set(["id", "lamport_ts", "instance_id", "verified", "last_seen", "created_at"]);
     const filtered = {};
     for (const [k, v] of Object.entries(row)) {
       if (ALWAYS_DROP.has(k)) continue;
-      if (this._contactCols && !this._contactCols.has(k)) continue;
+      if (!this._contactCols.has(k)) continue;
       filtered[k] = v;
     }
 
