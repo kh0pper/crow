@@ -32,55 +32,29 @@ import { recordShortInvite } from "../shortcode-ledger.js";
 async function acceptInviteCore({ invite_code, display_name }, { db, identity, syncManager, peerManager, nostrManager }) {
   const peer = parseInviteCode(invite_code);
 
-  // Check if already a contact
-  const existing = await db.execute({
-    sql: "SELECT id FROM contacts WHERE crow_id = ?",
-    args: [peer.crowId],
-  });
+  // Idempotent, repairable insert/promote/merge — re-accepting a known or
+  // partial contact repairs it instead of erroring (the repair action IS the
+  // normal action). Handles wiring (sync feeds, DHT topic, Nostr sub) itself.
+  const { contactId } = await upsertFullContact(
+    db,
+    { syncManager, peerManager, nostrManager },
+    {
+      crowId: peer.crowId,
+      ed25519Pub: peer.ed25519Pubkey,
+      secp256k1Pub: peer.secp256k1Pubkey,
+      displayName: display_name || undefined,
+    },
+  );
 
-  if (existing.rows.length > 0) {
-    return {
-      content: [{ type: "text", text: `Already connected to ${peer.crowId}` }],
-    };
-  }
-
-  // Add to contacts
-  const result = await db.execute({
-    sql: `INSERT INTO contacts (crow_id, display_name, ed25519_pubkey, secp256k1_pubkey)
-          VALUES (?, ?, ?, ?)`,
-    args: [
-      peer.crowId,
-      display_name || peer.crowId,
-      peer.ed25519Pubkey,
-      peer.secp256k1Pubkey,
-    ],
-  });
-
-  const contactId = Number(result.lastInsertRowid);
-
-  // Initialize sync feeds
-  await syncManager.initContact(contactId, null);
-
-  // Join Hyperswarm topic for this contact
-  await peerManager.joinContact({
-    crowId: peer.crowId,
-    ed25519Pubkey: peer.ed25519Pubkey,
-  });
-
-  // Subscribe to Nostr messages
-  await nostrManager.subscribeToContact({
-    id: contactId,
-    crowId: peer.crowId,
-    secp256k1_pubkey: peer.secp256k1Pubkey,
-  });
-
-  // Compute safety number
+  // Compute safety number (unchanged).
   const safetyNumber = computeSafetyNumber(
     identity.ed25519Pubkey,
     peer.ed25519Pubkey
   );
 
-  // Send acceptance back to inviter so they auto-add us
+  // Send acceptance back to the inviter so they auto-add us. sendInviteAccepted
+  // (PR3) also enqueues it for retry until the inviter's handshake_complete ack
+  // clears the row — so an offline inviter can no longer strand the handshake.
   try {
     if (nostrManager.relays.size === 0) {
       await nostrManager.connectRelays();
@@ -92,8 +66,8 @@ async function acceptInviteCore({ invite_code, display_name }, { db, identity, s
       secp256k1Pub: identity.secp256k1Pubkey,
       ...(peer.inviteId ? { inviteId: peer.inviteId } : {}),
     });
-    await nostrManager.sendMessage(
-      { secp256k1_pubkey: peer.secp256k1Pubkey },
+    await nostrManager.sendInviteAccepted(
+      { id: contactId, secp256k1_pubkey: peer.secp256k1Pubkey },
       acceptancePayload
     );
   } catch {

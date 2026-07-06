@@ -65,6 +65,7 @@ function makeNostrStub(overrides = {}) {
     async connectRelays() { return [...this.relays.keys()]; },
     async subscribeToContact() {},
     sendMessage: overrides.sendMessage || (async () => ({ eventId: "e", relays: ["stub://r1"] })),
+    sendInviteAccepted: overrides.sendInviteAccepted || overrides.sendMessage || (async () => ({ eventId: "e", relays: ["stub://r1"] })),
     publishRendezvousEvent: overrides.publishRendezvousEvent || (async () => ["stub://r1"]),
     fetchRendezvousByAuthor: overrides.fetchRendezvousByAuthor || (async () => ({ events: [] })),
   };

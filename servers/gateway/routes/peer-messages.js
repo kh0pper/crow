@@ -160,7 +160,7 @@ export default function peerMessagesRouter(dashboardAuth, { sharingClientFactory
 
       // Get contact info
       const { rows: contactRows } = await db.execute({
-        sql: `SELECT id, crow_id, display_name, ed25519_pubkey, is_blocked, last_seen, created_at
+        sql: `SELECT id, crow_id, display_name, ed25519_pubkey, is_blocked, last_seen, created_at, verified
               FROM contacts WHERE id = ?`,
         args: [contactId],
       });

@@ -21,7 +21,7 @@ import {
   handleIncomingBotRelay,
 } from "./bot-relay.js";
 import { upsertFullContact } from "./contact-promote.js";
-import { markDelivered, DELIVERY_RECEIPT_SUBTYPE } from "./retry-queue.js";
+import { markDelivered, DELIVERY_RECEIPT_SUBTYPE, HANDSHAKE_COMPLETE_SUBTYPE, buildHandshakeComplete } from "./retry-queue.js";
 import { setReceiveWired } from "./receive-health.js";
 
 /**
@@ -124,14 +124,30 @@ export async function handleIncomingRequest(db, managers, { senderPubkey, conten
   }
 }
 
+/** Fire-and-forget handshake_complete ack to the acceptor (authenticated
+ * senderPubkey). Naming the invite_accepted event id lets the acceptor clear
+ * the exact retry row. Best-effort — a lost ack self-heals. */
+async function ackHandshake(nostrManager, senderPubkey, event) {
+  try {
+    if (!nostrManager || !event || !event.id) return;
+    await nostrManager.sendControl({ secp256k1_pubkey: senderPubkey }, buildHandshakeComplete([event.id]));
+  } catch { /* ack is best-effort */ }
+}
+
 /**
  * R4: an authenticated invite_accepted DM completes the handshake. Promotes an
  * existing accepted/pending message-request row for the same secp identity into
  * a FULL contact (or adds a fresh one), via the idempotent upsertFullContact.
  * This is the ONLY promotion trigger — the plaintext message-request path can
  * NEVER elevate a contact. Never throws (receive path).
+ *
+ * PR3: also emits a handshake_complete ack (naming `event.id`) back to the
+ * acceptor — after a successful promote, AND at the "replayed" ledger verdict
+ * (I4 self-heal: a lost first ack re-heals when the inviter restarts and
+ * re-sees the retried event). NOT on "expired" and NOT on the auth-fail bail.
+ * `event` is optional (legacy callers) — no event means no ack, guarded.
  */
-export async function handleInviteAccepted(db, managers, payload, senderPubkey) {
+export async function handleInviteAccepted(db, managers, payload, senderPubkey, event) {
   try {
     if (!payload || !payload.crowId || !payload.ed25519Pub || !payload.secp256k1Pub) return;
     // Bind promotion to the AUTHENTICATED signing key: the payload's claimed
@@ -153,6 +169,7 @@ export async function handleInviteAccepted(db, managers, payload, senderPubkey) 
           // I4: PR3's handshake_complete ack must still fire for this verdict
           // (idempotent) — the retained 72h ledger TTL keeps the row available.
           console.warn("[sharing] short-code invite replay rejected");
+          await ackHandshake(managers?.nostrManager, senderPubkey, event); // I4 self-heal
           return;
         }
         if (verdict === "expired") {
@@ -170,6 +187,7 @@ export async function handleInviteAccepted(db, managers, payload, senderPubkey) 
       secp256k1Pub: payload.secp256k1Pub,
       displayName: payload.displayName,
     });
+    await ackHandshake(managers?.nostrManager, senderPubkey, event);
   } catch (err) {
     try { console.warn("[sharing] invite_accepted promotion failed:", err.message); } catch {}
   }
@@ -202,6 +220,24 @@ export async function handleDeliveryReceipt(db, eventIds, senderPubkey) {
     // sender's next thread reload (delivery_status is read on fetch).
   } catch (err) {
     try { console.warn("[sharing] delivery_receipt handling failed:", err.message); } catch {}
+  }
+}
+
+/**
+ * PR3: the acceptor received the inviter's handshake_complete ack — clear the
+ * invite_accepted retry row(s), CONTACT-BOUND to the authenticated sender so a
+ * forged ack can't purge another contact's retries. Mirrors handleDeliveryReceipt.
+ * Never throws (receive path).
+ */
+export async function handleHandshakeComplete(db, eventIds, senderPubkey) {
+  try {
+    const ids = (Array.isArray(eventIds) ? eventIds : []).filter((x) => typeof x === "string" && x);
+    if (!db || ids.length === 0) return;
+    const contact = await findContactByPubkey(db, senderPubkey);
+    if (!contact) return;
+    await markDelivered(db, ids, contact.id);
+  } catch (err) {
+    try { console.warn("[sharing] handshake_complete handling failed:", err.message); } catch {}
   }
 }
 
@@ -393,8 +429,8 @@ export async function wireNostrReceive(managers) {
 
   // Broad incoming subscription (invites, social envelopes, message requests).
   // Ordered after the per-contact loop so relay connections are reused.
-  await nostrManager.subscribeToIncoming(async (payload, senderPubkey) => {
-    await handleInviteAccepted(db, { syncManager, peerManager, nostrManager }, payload, senderPubkey);
+  await nostrManager.subscribeToIncoming(async (payload, senderPubkey, event) => {
+    await handleInviteAccepted(db, { syncManager, peerManager, nostrManager }, payload, senderPubkey, event);
   }, async (subtype, payload, senderPubkey) => {
     console.log(`[sharing] Received crow_social message: ${subtype}`);
     if (subtype === "room_invite") {
@@ -504,6 +540,8 @@ export async function wireNostrReceive(managers) {
       }
     } else if (subtype === DELIVERY_RECEIPT_SUBTYPE) {
       await handleDeliveryReceipt(db, payload.event_ids, senderPubkey);
+    } else if (subtype === HANDSHAKE_COMPLETE_SUBTYPE) {
+      await handleHandshakeComplete(db, payload.event_ids, senderPubkey);
     } else if (subtype === "room_message" || subtype === "room_join") {
       const { handleInboundRoomEnvelope } = await import("./room-inbound.js");
       await handleInboundRoomEnvelope({ db, nostrManager, identity, subtype, payload, senderPubkey, log: (m) => console.log("[rooms]", m) });

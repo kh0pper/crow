@@ -655,6 +655,7 @@ export function messagesClientJS(opts) {
         type: 'peer',
         id: contactId,
         isOnline: isOnline,
+        verified: contact.verified,
       }, msgs);
 
       showPeerInfo(contact);
@@ -847,6 +848,10 @@ export function messagesClientJS(opts) {
     }
 
     header.appendChild(el('div', { className: 'msg-chat-header-name', text: headerData.name }));
+
+    if (headerData.verified) {
+      header.appendChild(el('span', { className: 'verified-badge', text: '✓', title: '${tJs("contacts.verifiedBadgeTitle", lang)}' }));
+    }
 
     // Model selector (for profile-based AI conversations) or static meta
     if (headerData.type === 'ai' && headerData.models && headerData.models.length > 0) {
