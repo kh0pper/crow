@@ -510,6 +510,94 @@ export class InstanceSyncManager {
   }
 
   /**
+   * One-shot idempotent backfill (Phase 3 PR-B / I-4): re-emit every existing
+   * SYNCABLE full contact so a peer can resolve crow_id → local contact_id for
+   * contacts that predate PR-A (they never emitted a contact-sync entry, so
+   * _applyMessage would otherwise SKIP every synced message for them forever).
+   *
+   * Guarded by a dashboard_settings flag so it runs at most once per instance
+   * lifetime — no repeated lamport thrash. On the peer, _applyContact converges
+   * an unchanged re-emit as an effective no-op (fresh lamport → UPDATE with
+   * identical values; onContactSynced re-subscribe is idempotent). Mirrors
+   * reemitSyncableSettingsOnce(). Never throws out of the loop.
+   */
+  async backfillContactsOnce() {
+    const FLAG_KEY = "__contacts_backfill_v1";
+    let alreadyRan = false;
+    try {
+      const { rows } = await this.db.execute({
+        sql: "SELECT value FROM dashboard_settings WHERE key = ?",
+        args: [FLAG_KEY],
+      });
+      alreadyRan = rows?.length > 0;
+    } catch {}
+    if (alreadyRan) return 0;
+
+    if (this.outFeeds.size === 0) {
+      // No paired peers — nothing to backfill. Mark done so we don't recheck.
+      try {
+        await this.db.execute({
+          sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, 'no-peers', datetime('now')) ON CONFLICT(key) DO NOTHING",
+          args: [FLAG_KEY],
+        });
+      } catch {}
+      return 0;
+    }
+
+    // I-B1 ordering guard: drain the locally-replicated inbound backlog FIRST,
+    // so a peer's already-delivered newer edit (e.g. a block) is applied before
+    // we re-emit with a fresh lamport and fabricate recency over it.
+    // _processNewEntries' per-peer promise-chain serializes this safely with
+    // any concurrent append-listener run; checkpointing makes it idempotent.
+    try {
+      for (const [peerId, inFeed] of this.inFeeds) {
+        await this._processNewEntries(peerId, inFeed);
+      }
+    } catch (err) {
+      console.warn(`[instance-sync] contacts backfill drain failed: ${err.message}`);
+    }
+
+    let rows = [];
+    try {
+      const r = await this.db.execute({
+        sql: `SELECT * FROM contacts
+               WHERE (request_status IS NULL OR request_status = 'accepted')
+                 AND (is_bot IS NULL OR is_bot = 0)
+                 AND (origin IS NULL OR origin != 'local-bot')
+                 AND (is_blocked IS NULL OR is_blocked = 0)`,
+      });
+      rows = r.rows || [];
+    } catch (err) {
+      console.warn(`[instance-sync] contacts backfill read failed: ${err.message}`);
+      return 0;
+    }
+
+    let emitted = 0;
+    for (const row of rows) {
+      try {
+        // shouldSyncRow("contacts", …) is the final gate inside emitChange;
+        // EXCLUDED_COLUMNS.contacts strips verified/last_seen/id/created_at.
+        await this.emitChange("contacts", "update", row);
+        emitted++;
+      } catch (err) {
+        console.warn(`[instance-sync] contacts backfill emit failed for ${row.crow_id}: ${err.message}`);
+      }
+    }
+
+    try {
+      await this.db.execute({
+        sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO NOTHING",
+        args: [FLAG_KEY, `done:${emitted}`],
+      });
+    } catch {}
+
+    if (emitted > 0) {
+      console.log(`[instance-sync] one-shot contacts backfill: ${emitted} contact(s) re-emitted → peers resolve legacy contacts`);
+    }
+    return emitted;
+  }
+
+  /**
    * Get the local outgoing feed key for a remote instance.
    * Used during instance handshake so the remote knows our feed key.
    */
