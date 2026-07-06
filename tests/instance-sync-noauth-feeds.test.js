@@ -43,6 +43,24 @@ test("feedsDisabled manager: initInstance + emitChange are no-ops (no feed dir, 
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("PeerManager: p2pDisabled skips swarm start + DHT joins", async () => {
+  const { PeerManager } = await import("../servers/sharing/peer-manager.js");
+  const pm = new PeerManager({ ed25519Pubkey: "ab".repeat(32), crowId: "crow:x" });
+  pm.p2pDisabled = true; // simulate --no-auth companion
+  await pm.start();
+  assert.equal(pm.swarm, null, "no Hyperswarm created");
+  assert.equal(await pm.joinContact({ crowId: "crow:y", ed25519Pubkey: "cd".repeat(32) }), null, "joinContact no-op");
+  assert.equal(await pm.joinInstanceSync(), null, "joinInstanceSync no-op");
+});
+
+test("SyncManager: p2pDisabled skips per-contact feed init", async () => {
+  const { SyncManager } = await import("../servers/sharing/sync.js");
+  const sm = new SyncManager({ ed25519Pubkey: "ab".repeat(32) });
+  sm.p2pDisabled = true;
+  assert.equal(await sm.initContact(123, null), null, "initContact no-op");
+  assert.equal(sm.outFeeds.size, 0, "no per-contact feed opened");
+});
+
 test("enabled manager still opens an outfeed (regression guard)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "auth-isync-"));
   execFileSync(process.execPath, ["scripts/init-db.js"], { env: { ...process.env, CROW_DATA_DIR: dir }, stdio: "pipe" });
