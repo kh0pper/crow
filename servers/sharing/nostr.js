@@ -493,6 +493,12 @@ export class NostrManager {
                       type: "peer",
                       source: "sharing:message",
                       action_url: "/dashboard/messages",
+                      // I-1: client-side collapse key — a device that also receives
+                      // this DM via instance-sync notifies with the SAME
+                      // nostr_event_id, so the two pushes dedupe. Title-only, no
+                      // body/message-preview (M-3 — DM content stays out of the
+                      // notification store + push payload).
+                      metadata: { nostr_event_id: event.id },
                     });
                   } catch {}
                   try {

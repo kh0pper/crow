@@ -1223,6 +1223,48 @@ export class InstanceSyncManager {
   }
 
   /**
+   * Phase 3 PR-B (S-NOTIFY): fire exactly one notification for a newly-stored
+   * RECEIVED message (never for a 'sent' mirror). Called only on rowsAffected>0
+   * from _applyMessage, so a duplicate (already stored via direct Nostr or an
+   * earlier sync) never re-notifies (layer a — per-instance dedupe). Carries the
+   * nostr_event_id in metadata as a client collapse key so two simultaneously-
+   * online instances' pushes can be merged (layer b). Never throws.
+   *
+   * this.createNotification is a test seam (default: the shared helper, lazily
+   * imported to keep the push side-effect graph out of this module's static load).
+   */
+  async _notifyMessageApplied(localContactId, crowId, wireRow) {
+    try {
+      if (!wireRow || wireRow.direction === "sent") return; // only inbound notifies
+      let name = crowId;
+      try {
+        const { rows } = await this.db.execute({
+          sql: "SELECT display_name FROM contacts WHERE id = ? LIMIT 1",
+          args: [localContactId],
+        });
+        name = rows[0]?.display_name || crowId;
+      } catch {}
+      const notify = this.createNotification ||
+        (async (db, opts) => {
+          const { createNotification } = await import("../shared/notifications.js");
+          return createNotification(db, opts);
+        });
+      await notify(this.db, {
+        title: `Message from ${name}`,
+        type: "peer",
+        source: "sharing:message",
+        action_url: "/dashboard/messages",
+        // Client-side collapse key: two online instances that both notify for the
+        // same DM can dedupe on this. Rides the existing metadata JSON column —
+        // NO schema change (SCHEMA_GENERATION stays 4).
+        metadata: { nostr_event_id: wireRow.nostr_event_id },
+      });
+    } catch (err) {
+      try { console.warn("[instance-sync] message-applied notify failed:", err.message); } catch {}
+    }
+  }
+
+  /**
    * Check if applying an update or delete would conflict with a local version.
    *
    * Equivalence check (for updates): apply the table's OUTBOUND_TRANSFORMS to
