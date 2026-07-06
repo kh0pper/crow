@@ -84,6 +84,29 @@ async function wireFullContact(managers, row) {
   } catch {}
 }
 
+/**
+ * Phase 3: wire a contact that arrived via instance-sync into the live layer.
+ *   - blocked   → unsubscribe (close feeds + leave DHT topic), no Nostr sub
+ *   - local-bot → no-op (hosted elsewhere; never subscribe on a peer)
+ *   - keyless   → no-op (manual address-book entry has no secp key)
+ *   - otherwise → wireFullContact (initContact + joinContact + subscribeToContact)
+ * Fully guarded — the sync apply loop must never throw.
+ */
+export async function wireSyncedContact(managers, row) {
+  try {
+    if (!managers || !row) return;
+    const { syncManager, peerManager } = managers;
+    if (row.is_blocked) {
+      try { if (syncManager && row.id != null) await syncManager.closeContactFeeds(row.id); } catch {}
+      try { if (peerManager && row.crow_id) await peerManager.leaveContact(row.crow_id); } catch {}
+      return;
+    }
+    if (row.origin === "local-bot") return;
+    if (!row.secp256k1_pubkey || !HEX_KEY.test(String(row.secp256k1_pubkey))) return; // manual/keyless
+    await wireFullContact(managers, row);
+  } catch { /* never throw into the sync apply loop */ }
+}
+
 function isPlaceholderName(name) {
   return name == null || name === "" || String(name).startsWith("req:") || String(name).startsWith("crow:");
 }
