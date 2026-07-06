@@ -76,6 +76,7 @@ These predate this registry and need follow-up resolution outside the MVP scope:
 | 8096 | 127.0.0.1 | jellyfin (existing) | existing |
 | 8097 | 127.0.0.1 | vaultwarden | MVP PR 5 |
 | 8098 | 127.0.0.1 | searxng | MVP PR 5 |
+| 8010 | 100.118.41.122 (tailscale) | llamacpp-vulkan-qwen36-27b-copilot — co-resident critic refute/probe model, 65536 ctx, text-only (crow-addons) | existing (2026-07-06) |
 | 8530 | 127.0.0.1 | adguard-home (DNS-over-TLS) | MVP PR 3 |
 | 8554 | 127.0.0.1 | frigate (RTSP restream) | existing |
 | 8555 | 127.0.0.1 | frigate (WebRTC) | existing |
