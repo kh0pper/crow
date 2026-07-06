@@ -31,7 +31,7 @@
 
 **Interfaces:**
 - Consumes: existing `EXCLUDED_COLUMNS` map, `shouldSyncRow(table, row)`, exported `SYNCED_TABLES`.
-- Produces: `shouldSyncRow("contacts", row)` returns `false` for `origin==='local-bot'` or a `request_status` outside `{null, undefined, 'accepted'}`; `true` otherwise. `EXCLUDED_COLUMNS.contacts = ["verified","last_seen"]` (stripped from every emitted wire row).
+- Produces: `shouldSyncRow("contacts", row)` returns `false` for `origin==='local-bot'` or a `request_status` outside `{null, undefined, 'accepted'}`; `true` otherwise. `EXCLUDED_COLUMNS.contacts = ["verified","last_seen","id","created_at"]` (stripped from every emitted wire row).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -52,8 +52,8 @@ test("shouldSyncRow: contacts carve-outs", () => {
   assert.equal(ok({ crow_id: "crow:a", origin: "local-bot" }), false, "local-bot never syncs");
 });
 
-test("EXCLUDED_COLUMNS.contacts strips id + verified + last_seen", () => {
-  assert.deepEqual([...EXCLUDED_COLUMNS.contacts].sort(), ["id", "last_seen", "verified"]);
+test("EXCLUDED_COLUMNS.contacts strips id + created_at + verified + last_seen", () => {
+  assert.deepEqual([...EXCLUDED_COLUMNS.contacts].sort(), ["created_at", "id", "last_seen", "verified"]);
 });
 ```
 
@@ -80,9 +80,16 @@ const EXCLUDED_COLUMNS = {
   // too (the emit-side lamport stamp at :532 reads the ORIGINAL local row.id,
   // which is untouched by stripping the wire copy). All three stripped from the
   // wire; the row still syncs.
-  contacts: ["verified", "last_seen", "id"],
+  contacts: ["verified", "last_seen", "id", "created_at"],
 };
 ```
+
+(`created_at` (R2 finding #4): two instances that independently INSERT the same
+`req:<secp>` row from the shared inbound DM stamp *different* `created_at`; without
+stripping it, a later tie/stale re-delivery makes `rowsEquivalent` differ on
+`created_at` alone and logs a spurious `sync_conflicts` row + operator notification.
+Stripped on the wire and re-dropped by `ALWAYS_DROP` on apply — set once at local
+insert, never churns.)
 
 Extend `shouldSyncRow` (currently ~line 151) — add the contacts branch before the default `return true`:
 
@@ -206,6 +213,29 @@ test("_applyContact: delete is lamport-gated by crow_id", async () => {
   assert.equal((await db.execute({ sql: "SELECT COUNT(*) c FROM contacts WHERE crow_id='crow:del'" })).rows[0].c, 0, "newer delete applied");
 });
 
+test("_applyContact: req:→crow: rebind by secp does not split the contact (R2)", async () => {
+  const m = mgr(); const db = m.db;
+  // Instance offline across the handshake catches up via the feed: first the
+  // accepted request row (req:), then the promoted real id (crow:), same secp.
+  await m._applyEntry(REMOTE_ID, signedEntry("contacts", "update",
+    { crow_id: "req:" + SECP_A, ed25519_pubkey: "", secp256k1_pubkey: SECP_A, request_status: "accepted", display_name: "Stranger" }, 5));
+  await m._applyEntry(REMOTE_ID, signedEntry("contacts", "update",
+    { crow_id: "crow:real", ed25519_pubkey: "e", secp256k1_pubkey: SECP_A, request_status: null, display_name: "Alice" }, 9));
+  const rows = (await db.execute({ sql: "SELECT crow_id, display_name FROM contacts WHERE lower(substr(secp256k1_pubkey,-64))=?", args: [SECP_A] })).rows;
+  assert.equal(rows.length, 1, "exactly one row for the secp (rebound, not split)");
+  assert.equal(rows[0].crow_id, "crow:real");
+  assert.equal(rows[0].display_name, "Alice");
+});
+
+test("_applyContact: rebind converges an independently-formed local req: row", async () => {
+  const m = mgr(); const db = m.db;
+  await db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, request_status, lamport_ts) VALUES (?, '', ?, 'accepted', 4)", args: ["req:" + SECP_B, SECP_B] });
+  await m._applyEntry(REMOTE_ID, signedEntry("contacts", "update", { crow_id: "crow:b", ed25519_pubkey: "e", secp256k1_pubkey: SECP_B }, 9));
+  const rows = (await db.execute({ sql: "SELECT crow_id FROM contacts WHERE lower(substr(secp256k1_pubkey,-64))=?", args: [SECP_B] })).rows;
+  assert.equal(rows.length, 1, "local req: row rebound to crow:b, not duplicated");
+  assert.equal(rows[0].crow_id, "crow:b");
+});
+
 test("_applyContact: apply drops verified/last_seen and honors carve-outs", async () => {
   const m = mgr(); const db = m.db;
   await m._applyEntry(REMOTE_ID, signedEntry("contacts", "insert",
@@ -308,7 +338,7 @@ Add the method after `_applyCrowContext` (after line 911). It mirrors `_applyCro
         this._contactCols = new Set(pragma.map((r) => r.name));
       } catch { this._contactCols = null; }
     }
-    const ALWAYS_DROP = new Set(["id", "lamport_ts", "instance_id", "verified", "last_seen"]);
+    const ALWAYS_DROP = new Set(["id", "lamport_ts", "instance_id", "verified", "last_seen", "created_at"]);
     const filtered = {};
     for (const [k, v] of Object.entries(row)) {
       if (ALWAYS_DROP.has(k)) continue;
@@ -350,6 +380,37 @@ Add the method after `_applyCrowContext` (after line 911). It mirrors `_applyCro
         console.warn("[instance-sync] _applyContact: insert skipped — NOT NULL pubkey column absent");
         return;
       }
+
+      // R2 finding — same-secp REBIND (spec §A2 "upsertFullContact-style merge").
+      // The handshake rebinds a placeholder `req:<secp>` contact to a real
+      // `crow:<id>` (contact-promote.js:162-170). An instance offline across the
+      // handshake catches up as update(req:x) then update(crow:y) — same secp,
+      // different crow_id. Keying only on crow_id would insert BOTH → a split
+      // contact. So on a crow_id miss, if a local row already holds this secp
+      // under a DIFFERENT crow_id, REBIND it (relabel crow_id + merge columns)
+      // instead of inserting a duplicate. Mirrors upsertFullContact's secp
+      // resolution (contact-promote.js:110-132), which is safe because the entry
+      // is ed25519-signed by the shared identity (same user) and a secp match =
+      // same key-holder = same peer. The incoming crow_id is unowned here
+      // (we are in the !localRow branch) → the relabel is UNIQUE-safe.
+      const secpNorm = filtered.secp256k1_pubkey ? normalizePubkey(String(filtered.secp256k1_pubkey)) : "";
+      const secpRow = secpNorm ? (await this.db.execute({
+        sql: "SELECT * FROM contacts WHERE lower(substr(secp256k1_pubkey,-64)) = ? ORDER BY id ASC LIMIT 1",
+        args: [secpNorm],
+      })).rows[0] || null : null;
+      if (secpRow) {
+        // LWW: only rebind if the incoming entry is at least as new as the local
+        // same-secp row (a stale re-delivery must not relabel a fresher row).
+        if (lamportTs >= (secpRow.lamport_ts || 0)) {
+          const rebindKeys = Object.keys(filtered).filter((k) => k !== "crow_id");
+          const setClauses = ["crow_id = ?", ...rebindKeys.map((k) => `${k} = ?`), "verified = 0", "lamport_ts = ?"];
+          const vals = [crowId, ...rebindKeys.map((k) => filtered[k] ?? null), lamportTs];
+          await this.db.execute({ sql: `UPDATE contacts SET ${setClauses.join(", ")} WHERE id = ?`, args: [...vals, secpRow.id] });
+          await this._afterContactApplied(crowId);
+        }
+        return;
+      }
+
       const cols = Object.keys(filtered).filter((k) => filtered[k] !== undefined);
       if (!cols.includes("crow_id")) cols.push("crow_id");
       const insertCols = [...new Set(cols)];
@@ -670,7 +731,7 @@ git show --stat HEAD | head
 ### Task 4b: Push side in the dashboard panels (contacts + messages)
 
 **Files:**
-- Modify: `servers/gateway/dashboard/panels/contacts/api-handlers.js` (block :41, unblock :70, verify — **skip**, insert :93, edit :228, delete :239, advertised-add :334/365)
+- Modify: `servers/gateway/dashboard/panels/contacts/api-handlers.js` (block :41, unblock :70, verify — **skip**, manual insert :93, import_contacts loop ~:333, edit :228, delete :239, advertised-add `dir_add_bot` ~:351-366)
 - Modify: `servers/gateway/dashboard/panels/messages/api-handlers.js` (block :68, unblock :96, accept_request :278, advertised-add :230; decline :303 — **skip**, no emit)
 - Test: `tests/contacts-sync-panel-emit.test.js` (create)
 
@@ -705,10 +766,11 @@ Pattern at each mutating branch: after the existing `db.execute(...)` write, re-
 - **block** (contacts :41, messages :68 — messages keys on `crow_id`): after the UPDATE, `const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?"/or crow_id, args:[...] }); if (rows[0]) await emitContactChange("update", rows[0]);`
 - **unblock** (contacts :70, messages :96): same, emits `update`.
 - **manual insert** (contacts :93): re-select by the `manualCrowId` just created; `await emitContactChange("insert", rows[0]);`
+- **import_contacts loop** (contacts ~:333, R2 finding #2): the vCard/CSV import does per-row manual INSERTs (`contact_type='manual'`, a syncing shape). Emit inside the loop so an imported address book follows the user: after each row's INSERT, re-select by that row's `crow_id` and `await emitContactChange("insert", rows[0]);` (guarded; helper never throws — a slow import must not stall on emit).
 - **edit** (contacts :228): after the dynamic UPDATE, re-select by id; `await emitContactChange("update", rows[0]);`
-- **delete** (contacts :239): the row is deleted `WHERE id=? AND contact_type='manual'` — fetch `crow_id` BEFORE the delete, then after a successful delete `await emitContactDelete(crowId);`
-- **accept_request** (messages :278): after `UPDATE ... 'accepted'`, re-select the row (now `accepted`) by id; `await emitContactChange("update", rows[0]);` (this is the pending→established transition — shouldSyncRow now lets it through).
-- **advertised bot add** (contacts :334/365, messages :230): after the insert/`origin='advertised'` update, re-select by `crow_id`; `await emitContactChange("insert", rows[0]);` (advertised remote bots sync per S-BOTS).
+- **delete** (contacts :239, R2 finding #3): the delete is `WHERE id=? AND contact_type='manual'` — a **no-op for a non-manual row**. Fetch `crow_id` BEFORE the delete, run the delete capturing its result, and emit **only if it actually deleted**: `if (result.rowsAffected > 0) await emitContactDelete(crowId);`. Without the `rowsAffected` gate, a no-op local delete of a `crow:` contact would propagate a lamport-gated **destructive** delete to the peer.
+- **accept_request** (messages :278): after `UPDATE ... 'accepted'`, re-select the row (now `accepted`) by id; `await emitContactChange("update", rows[0]);` (this is the pending→established transition — shouldSyncRow now lets it through; a receiver with no prior row upserts it via `_applyContact`'s `!localRow` branch).
+- **advertised bot add** (`dir_add_bot`, contacts ~:351-366; messages :230, R2 finding #6): after the INSERT / `origin='advertised'` update, re-select by `crow_id`; `await emitContactChange("insert", rows[0]);` (advertised remote bots sync per S-BOTS). NOTE the anchor: `:334` is the *import_contacts* INSERT (instrumented above), NOT the advertised-bot path — instrument `dir_add_bot`'s INSERT/update (~:351-366), not `:334`.
 - **decline_request** (messages :303) + **verify toggle** (contacts :80) + **local-bot writes**: **no emit** (pending never syncs; verified is per-device; local-bot excluded). Add a one-line comment at each explaining the deliberate omission.
 
 Each emit is `await`ed but guarded (helper never throws); wrap in the same defensive style if the surrounding code is not already in a try.
@@ -726,9 +788,13 @@ Expected: PASS (unchanged).
 
 ```bash
 git add tests/contacts-sync-panel-emit.test.js
-git commit servers/gateway/dashboard/panels/contacts/api-handlers.js servers/gateway/dashboard/panels/messages/api-handlers.js tests/contacts-sync-panel-emit.test.js -m "feat(dashboard): Phase 3 emit contacts on panel block/unblock/add/edit/delete/accept (push side)"
+git commit servers/gateway/dashboard/panels/contacts/api-handlers.js servers/gateway/dashboard/panels/messages/api-handlers.js tests/contacts-sync-panel-emit.test.js -m "feat(dashboard): Phase 3 emit contacts on panel block/unblock/add/import/edit/delete/accept (push side)"
 git show --stat HEAD | head
 ```
+
+**Known residuals (R2, non-blocking — document, do not fix in PR-A):**
+- **#5 advertised-bot prune flap:** `pruneStaleAdvertisedContacts` (messages/data-queries.js:268-284) hard-deletes `origin='advertised'` rows with no messages that aren't in the receiver's locally-observed `livePubkeys`. A bot contact synced in (no local advertisement seen yet) could be pruned before the receiver independently observes the advertisement, then re-appear on the next advertisement tick — a cosmetic flap. Not looped (the prune delete is not emitted). Follow-up: skip pruning synced-in advertised rows until locally observed once.
+- **#7 noop display-name fill:** `upsertFullContact`'s `noop` outcome can still fill a placeholder `display_name` (contact-promote.js:148-151) but Task 4a emits nothing for `noop`; that cosmetic fill won't propagate until the next real mutation. Acceptable.
 
 ---
 
