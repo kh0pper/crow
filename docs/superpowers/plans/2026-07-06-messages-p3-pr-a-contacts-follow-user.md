@@ -52,8 +52,8 @@ test("shouldSyncRow: contacts carve-outs", () => {
   assert.equal(ok({ crow_id: "crow:a", origin: "local-bot" }), false, "local-bot never syncs");
 });
 
-test("EXCLUDED_COLUMNS.contacts strips verified + last_seen", () => {
-  assert.deepEqual([...EXCLUDED_COLUMNS.contacts].sort(), ["last_seen", "verified"]);
+test("EXCLUDED_COLUMNS.contacts strips id + verified + last_seen", () => {
+  assert.deepEqual([...EXCLUDED_COLUMNS.contacts].sort(), ["id", "last_seen", "verified"]);
 });
 ```
 
@@ -75,8 +75,12 @@ const EXCLUDED_COLUMNS = {
   // Phase 3: `verified` is a per-device attestation ("I compared the safety
   // number on THIS device") — it must not be asserted on a device that never
   // checked. `last_seen` is bumped on every inbound DM (boot.js) — syncing it
-  // would firehose the feed. Both stripped from the wire; the row still syncs.
-  contacts: ["verified", "last_seen"],
+  // would firehose the feed. `id` is the per-instance AUTOINCREMENT key — never
+  // portable; strip it so the "never keys on id" invariant is true on the wire
+  // too (the emit-side lamport stamp at :532 reads the ORIGINAL local row.id,
+  // which is untouched by stripping the wire copy). All three stripped from the
+  // wire; the row still syncs.
+  contacts: ["verified", "last_seen", "id"],
 };
 ```
 
@@ -214,6 +218,25 @@ test("_applyContact: apply drops verified/last_seen and honors carve-outs", asyn
   assert.equal((await db.execute({ sql: "SELECT COUNT(*) c FROM contacts WHERE crow_id='crow:req'" })).rows[0].c, 0, "pending not applied");
 });
 
+test("_applyContact: a synced key-rebind resets verified to 0 (PR3 parity)", async () => {
+  const m = mgr(); const db = m.db;
+  await db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, verified, lamport_ts) VALUES ('crow:rebind','e', ?, 1, 5)", args: [SECP_A] });
+  // newer update rebinds the secp key → verified must clear
+  await m._applyEntry(REMOTE_ID, signedEntry("contacts", "update", { crow_id: "crow:rebind", secp256k1_pubkey: SECP_B }, 9));
+  const row = (await db.execute({ sql: "SELECT secp256k1_pubkey, verified FROM contacts WHERE crow_id='crow:rebind'" })).rows[0];
+  assert.equal(row.secp256k1_pubkey, SECP_B, "key rebound");
+  assert.equal(row.verified, 0, "verified reset on key change");
+});
+
+test("_applyContact: a same-key update preserves verified", async () => {
+  const m = mgr(); const db = m.db;
+  await db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey, display_name, verified, lamport_ts) VALUES ('crow:keep','e', ?, 'X', 1, 5)", args: [SECP_A] });
+  await m._applyEntry(REMOTE_ID, signedEntry("contacts", "update", { crow_id: "crow:keep", secp256k1_pubkey: SECP_A, display_name: "Y" }, 9));
+  const row = (await db.execute({ sql: "SELECT display_name, verified FROM contacts WHERE crow_id='crow:keep'" })).rows[0];
+  assert.equal(row.display_name, "Y", "display updated");
+  assert.equal(row.verified, 1, "verified preserved when key unchanged");
+});
+
 test("_applyContact: fires onContactSynced with the local row; never throws on junk", async () => {
   const m = mgr(); const seen = [];
   m.onContactSynced = (r) => seen.push(r);
@@ -231,6 +254,12 @@ Run: `node --test tests/contacts-sync.test.js`
 Expected: FAIL — contacts entries currently fall through to the generic id-path (`crow:remote` insert would clobber/misbehave; `onContactSynced` never fires).
 
 - [ ] **Step 3: Write the dispatch + `_applyContact`**
+
+Add the pubkey-normalizer import at the top of `servers/sharing/instance-sync.js` if not already present (used by the verified-reset key-change check):
+
+```js
+import { normalizePubkey } from "./pubkey-util.js";
+```
 
 In `_applyEntry`, add a dispatch block immediately after the `crow_context` block (after line 665, before the generic `_checkConflict`/switch at 667):
 
@@ -312,6 +341,15 @@ Add the method after `_applyCrowContext` (after line 911). It mirrors `_applyCro
 
     // ── insert / update ────────────────────────────────────────────────────
     if (!localRow) {
+      // NOT NULL parity (ed25519_pubkey, secp256k1_pubkey are NOT NULL,
+      // init-db:459-460). A partial old-sender row would throw; skip with a
+      // warning instead, mirroring _applyCrowContext's required-column guard.
+      // (Empty string '' is fine — manual/keyless contacts carry ''; only a
+      // truly-absent column is skipped.)
+      if (filtered.secp256k1_pubkey == null || filtered.ed25519_pubkey == null) {
+        console.warn("[instance-sync] _applyContact: insert skipped — NOT NULL pubkey column absent");
+        return;
+      }
       const cols = Object.keys(filtered).filter((k) => filtered[k] !== undefined);
       if (!cols.includes("crow_id")) cols.push("crow_id");
       const insertCols = [...new Set(cols)];
@@ -327,13 +365,19 @@ Add the method after `_applyCrowContext` (after line 911). It mirrors `_applyCro
 
     if (lamportTs > localTs) {
       const updateKeys = Object.keys(filtered).filter((k) => k !== "crow_id");
-      if (updateKeys.length > 0) {
-        const setClauses = [...updateKeys.map((k) => `${k} = ?`), "lamport_ts = ?"].join(", ");
-        const vals = [...updateKeys.map((k) => filtered[k] ?? null), lamportTs];
-        await this.db.execute({ sql: `UPDATE contacts SET ${setClauses} WHERE crow_id = ?`, args: [...vals, crowId] });
-      } else {
-        await this.db.execute({ sql: "UPDATE contacts SET lamport_ts = ? WHERE crow_id = ?", args: [lamportTs, crowId] });
-      }
+      // PR3 parity (R1 finding): a synced key rebind invalidates a local
+      // safety-number check. `verified` is excluded from the wire (only ever set
+      // by a local device comparison), so a secp/ed change MUST reset it to 0 —
+      // matching contact-promote.js:124,165 on the local promote/merge path.
+      const secpChanged = filtered.secp256k1_pubkey != null &&
+        normalizePubkey(String(filtered.secp256k1_pubkey)) !== normalizePubkey(String(localRow.secp256k1_pubkey || ""));
+      const edChanged = filtered.ed25519_pubkey != null &&
+        String(filtered.ed25519_pubkey) !== String(localRow.ed25519_pubkey || "");
+      const setClauses = updateKeys.map((k) => `${k} = ?`);
+      const vals = updateKeys.map((k) => filtered[k] ?? null);
+      if (secpChanged || edChanged) setClauses.push("verified = 0");
+      setClauses.push("lamport_ts = ?"); vals.push(lamportTs);
+      await this.db.execute({ sql: `UPDATE contacts SET ${setClauses.join(", ")} WHERE crow_id = ?`, args: [...vals, crowId] });
       await this._afterContactApplied(crowId);
       return;
     }
@@ -375,7 +419,7 @@ git commit servers/sharing/instance-sync.js tests/contacts-sync.test.js -m "feat
 git show --stat HEAD | head
 ```
 
-**Plan-review note (delete/tombstone, spec A5):** PR-A uses a lamport-gated **hard delete** with no tombstone, matching the `_applyCrowContext` precedent. Residual: an out-of-order feed delivering a stale *insert* after a *delete* (no local row present) would resurrect the contact (bounded — same-user own instances, rare feed reordering; the user can re-delete). If plan-review deems this unacceptable for a blocked-then-deleted contact, add a `deleted_at TEXT` tombstone column (`SCHEMA_GENERATION 4→5`) + an insert-path tombstone/lamport check as an inserted Task 2b. Flagged for the adversarial review to decide.
+**Plan-review note (delete/tombstone, spec A5) — RESOLVED by R1: keep hard-delete, no tombstone.** PR-A uses a lamport-gated **hard delete**, matching the `_applyCrowContext` precedent. R1 verified the resurrection worry is unreachable in PR-A scope: (1) the only user-facing contact delete is `contacts:239` `WHERE contact_type='manual'` — manual `crow_id`s are `manual:${randomUUID()}`, created on exactly one instance, so their insert+delete originate on the same Hypercore feed → processed in-order by the peer → no reorder → no resurrection on a 2-instance fleet; (2) real crow contacts have **no** delete path (a block is an `is_blocked=1` update, not a delete), so "blocked-then-deleted → resurrected unblocked" cannot occur; (3) the `upsertFullContact` MERGE `emitContactDelete` folds a same-secp row whose insert precedes its delete on one feed. **Residual (documented, not fixed):** if the fleet grows to **3+ shared-identity instances** OR a future PR adds deletion of real crow contacts, cross-feed reorder could resurrect via the un-gated insert-when-missing branch — revisit a `deleted_at` tombstone (`SCHEMA_GENERATION 4→5`) then. No unsubscribe-on-delete hook in PR-A (propagated deletes are keyless/manual or same-key merge-folds → nothing subscribed to clean up); flagged for the coherence/groups PRs.
 
 ---
 
@@ -559,21 +603,30 @@ Create `servers/sharing/contact-sync.js`:
  * (verified/last_seen columns, local-bot/pending rows) are enforced downstream
  * by EXCLUDED_COLUMNS.contacts + shouldSyncRow in instance-sync.js.
  */
-import { getInstanceSyncManager } from "./managers.js";
-
+// R1 finding: managers.js → nostr.js → contact-promote.js → contact-sync.js
+// forms a cycle if we STATIC-import managers here. Lazy (cached) dynamic import
+// keeps the module-load graph acyclic; the import resolves once, before any
+// emit fires at runtime.
+let _mgrMod = null;
 let _testSink = null;
 export function __setEmitSinkForTest(sink) { _testSink = sink; }
 
-function sink() { return _testSink || getInstanceSyncManager(); }
+async function sink() {
+  if (_testSink) return _testSink;
+  if (!_mgrMod) { try { _mgrMod = await import("./managers.js"); } catch { return null; } }
+  return _mgrMod.getInstanceSyncManager?.() || null;
+}
 
 export async function emitContactChange(op, row) {
-  try { await sink()?.emitChange("contacts", op, row); } catch { /* never throw */ }
+  try { (await sink())?.emitChange("contacts", op, row); } catch { /* never throw */ }
 }
 export async function emitContactDelete(crowId) {
   if (!crowId) return;
-  try { await sink()?.emitChange("contacts", "delete", { crow_id: crowId }); } catch { /* never throw */ }
+  try { (await sink())?.emitChange("contacts", "delete", { crow_id: crowId }); } catch { /* never throw */ }
 }
 ```
+
+**Note (R1):** the emit path is therefore NOT statically self-contained — it reaches `managers.js` via a lazy dynamic import specifically to break the `managers → nostr → contact-promote → contact-sync` cycle. Do not "simplify" this to a static import.
 
 In `servers/sharing/contact-promote.js`, import the helper and emit after each terminal outcome. Add `import { emitContactChange, emitContactDelete } from "./contact-sync.js";` at the top, then:
 - In the MERGE branch (after the owner row is finalized, before `return {..."merged"}`): emit the folded row's delete + the owner's update.
@@ -587,13 +640,13 @@ In `servers/sharing/contact-promote.js`, import the helper and emit after each t
 
 (These reuse the `row` already re-selected for `wireFullContact`.)
 
-In `servers/sharing/tools/contacts.js`, after the manual insert at ~line 366, re-select and emit:
+In `servers/sharing/tools/contacts.js`: **clarification (R1)** — `crow_add_contact` (the primary add path) already routes through `upsertFullContact` (~line 326), which Task 4a instruments above; it needs **no** separate emit. The only raw `INSERT INTO contacts` here is the **bot-accept** at ~line 366 (`crow_accept_bot_invite`). Advertised/remote bots sync per S-BOTS, so emit an insert there and there only:
 ```js
-// (after the INSERT) — Phase 3: propagate to the user's other instances.
+// (after the bot-accept INSERT) — Phase 3: propagate to the user's other instances.
 const { rows: __r } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [crowId] });
 if (__r[0]) { const { emitContactChange } = await import("../contact-sync.js"); await emitContactChange("insert", __r[0]); }
 ```
-(Match the file's existing import style — if it imports at top, add a top import instead of the dynamic one. Verify the local variable holding the inserted crow_id.)
+(Verify the local variable holding the inserted crow_id at that site; do NOT also instrument the `upsertFullContact` call path.)
 
 - [ ] **Step 4: Run to verify pass**
 
