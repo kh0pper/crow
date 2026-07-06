@@ -65,17 +65,41 @@ test("backfillContactsOnce: excludes pending, local-bot, and blocked contacts (S
   assert.deepEqual(emitted, ["crow:ok"]);
 });
 
-test("backfillContactsOnce: no paired peers → marks done, emits nothing", async () => {
+test("backfillContactsOnce: no armed peers → emits nothing but stays RETRYABLE (boot can race feed-init)", async () => {
   const m = freshMgr("nopeers", "local-3");
-  m.outFeeds.clear(); // no peers
+  m.outFeeds.clear(); // feeds not armed (yet) — e.g. the sharing boot hasn't opened them
   const emitted = [];
   m.emitChange = async (_t, _o, r) => emitted.push(r.crow_id);
   await m.db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey) VALUES ('crow:solo', 'ed', ?)", args: [SECP] });
   assert.equal(await m.backfillContactsOnce(), 0);
   assert.equal(emitted.length, 0);
-  // Flag set → a later run (even once peers exist) still no-ops: one-shot per lifetime.
+  // Observed live on grackle 2026-07-06: peers existed but boot raced feed-init,
+  // and the old code marked 'no-peers' TERMINALLY — backfill never ran. Now the
+  // no-peers path must NOT set the flag: once feeds arm, a later run backfills.
   m.outFeeds.set("peer-1", { append: async () => {} });
-  assert.equal(await m.backfillContactsOnce(), 0, "flag already marked done");
+  assert.equal(await m.backfillContactsOnce(), 1, "retry with armed feeds must backfill");
+  assert.deepEqual(emitted, ["crow:solo"]);
+  // And only THEN is it terminal (done:<n> written as an UPSERT).
+  assert.equal(await m.backfillContactsOnce(), 0, "now marked done — one-shot per lifetime");
+  assert.equal(emitted.length, 1);
+});
+
+test("backfillContactsOnce: a stale 'no-peers' flag row from the pre-fix code is healed (UPSERT, no per-boot re-emit)", async () => {
+  const m = freshMgr("staleflag", "local-5");
+  m.outFeeds.set("peer-1", { append: async () => {} });
+  await m.db.execute({ sql: "INSERT INTO contacts (crow_id, ed25519_pubkey, secp256k1_pubkey) VALUES ('crow:heal', 'ed', ?)", args: [SECP] });
+  // Simulate the pre-fix state: flag stuck at 'no-peers' despite paired peers.
+  await m.db.execute({
+    sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('__contacts_backfill_v1', 'no-peers', datetime('now'))",
+    args: [],
+  });
+  const emitted = [];
+  m.emitChange = async (_t, _o, r) => emitted.push(r.crow_id);
+  assert.equal(await m.backfillContactsOnce(), 1, "stale no-peers is not terminal — backfill runs");
+  const { rows } = await m.db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key='__contacts_backfill_v1'" });
+  assert.equal(rows[0].value, "done:1", "done-mark UPSERTs over the stale row");
+  assert.equal(await m.backfillContactsOnce(), 0, "terminal after the real run — no per-boot re-emit thrash");
+  assert.equal(emitted.length, 1);
 });
 
 test("backfillContactsOnce: drains the inbound backlog BEFORE re-emitting (I-B1 — a peer's delivered block must win)", async () => {
@@ -100,3 +124,45 @@ test("backfillContactsOnce: drains the inbound backlog BEFORE re-emitting (I-B1 
 });
 // fakeFeedWith(entries): minimal in-feed stub — { length: entries.length, async get(seq){ return entries[seq]; } }
 // (matches the _processNewEntries contract: reads lastSeq via sync_state, iterates seq < length, feed.get(seq)).
+
+// ---- reemitSyncableSettingsOnce: same boot-vs-feed-init race class, same fix (ported) ----
+
+test("reemitSyncableSettingsOnce: no armed peers → stays RETRYABLE; runs once feeds arm; then terminal", async () => {
+  const m = freshMgr("reemit-race", "local-6");
+  m.outFeeds.clear();
+  await m.db.execute({
+    sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('nav_groups', '[]', datetime('now'))",
+    args: [],
+  });
+  const emitted = [];
+  m.emitChange = async (_t, _o, r) => emitted.push(r.key);
+  assert.equal(await m.reemitSyncableSettingsOnce(), 0);
+  assert.equal(emitted.length, 0, "no-peers path must not emit");
+  m.outFeeds.set("peer-1", { append: async () => {} });
+  assert.ok((await m.reemitSyncableSettingsOnce()) >= 1, "retry with armed feeds must re-emit");
+  assert.ok(emitted.includes("nav_groups"));
+  const before = emitted.length;
+  assert.equal(await m.reemitSyncableSettingsOnce(), 0, "terminal after the real run");
+  assert.equal(emitted.length, before);
+});
+
+test("reemitSyncableSettingsOnce: stale 'no-peers' flag row is healed (UPSERT done-mark)", async () => {
+  const m = freshMgr("reemit-heal", "local-7");
+  m.outFeeds.set("peer-1", { append: async () => {} });
+  await m.db.execute({
+    sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('nav_groups', '[]', datetime('now'))",
+    args: [],
+  });
+  await m.db.execute({
+    sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES ('__sync_reemit_allowlist_v1', 'no-peers', datetime('now'))",
+    args: [],
+  });
+  const emitted = [];
+  m.emitChange = async (_t, _o, r) => emitted.push(r.key);
+  assert.ok((await m.reemitSyncableSettingsOnce()) >= 1, "stale no-peers is not terminal");
+  const { rows } = await m.db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key='__sync_reemit_allowlist_v1'" });
+  assert.match(rows[0].value, /^done:\d+$/, "done-mark UPSERTs over the stale row");
+  const before = emitted.length;
+  assert.equal(await m.reemitSyncableSettingsOnce(), 0, "terminal — no per-boot re-emit thrash");
+  assert.equal(emitted.length, before);
+});
