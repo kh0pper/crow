@@ -9,6 +9,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createSharingServer } from "../../../../sharing/server.js";
 import { getManagersOrNull } from "../../../../sharing/managers.js";
+import { emitContactChange } from "../../../../sharing/contact-sync.js";
 import { markContactIsBot } from "../../shared/mark-contact-bot.js";
 import { createRoom, listRoomMembers } from "./rooms-store.js";
 import { buildRoomJoinEnvelope, fanOut } from "../../../../sharing/room-fanout.js";
@@ -88,6 +89,8 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
         }
       } catch {}
     }
+    // Phase 3: a block follows the user across their instances.
+    try { const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [req.body.crow_id] }); if (rows[0]) await emitContactChange("update", rows[0]); } catch {}
     return res.redirectAfterPost("/dashboard/messages");
   }
 
@@ -96,6 +99,7 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
       sql: "UPDATE contacts SET is_blocked = 0 WHERE crow_id = ?",
       args: [req.body.crow_id],
     });
+    try { const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [req.body.crow_id] }); if (rows[0]) await emitContactChange("update", rows[0]); } catch {}
     return res.redirectAfterPost("/dashboard/messages");
   }
 
@@ -277,6 +281,10 @@ export async function handlePostAction(req, res, { db, sharingClientFactory = ge
         const c = rows[0];
         await db.execute({ sql: "UPDATE contacts SET request_status = 'accepted' WHERE id = ?", args: [id] });
         await db.execute({ sql: "UPDATE messages SET is_read = 1 WHERE contact_id = ?", args: [id] });
+        // Phase 3: pending→accepted is the transition that makes the contact
+        // established — now it follows the user (shouldSyncRow lets 'accepted'
+        // through; a peer with no prior row upserts it via _applyContact).
+        try { const { rows: cr } = await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [id] }); if (cr[0]) await emitContactChange("update", cr[0]); } catch {}
         if (managers?.nostrManager) {
           try {
             await managers.nostrManager.subscribeToContact({

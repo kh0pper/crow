@@ -9,6 +9,7 @@ import { parseVCard, generateVCard, parseCsv } from "./vcard.js";
 import { upsertSetting } from "../../settings/registry.js";
 import { getContacts } from "./data-queries.js";
 import { getManagersOrNull } from "../../../../sharing/managers.js";
+import { emitContactChange, emitContactDelete } from "../../../../sharing/contact-sync.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createSharingServer } from "../../../../sharing/server.js";
@@ -62,14 +63,18 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
         }
       } catch {}
     }
+    // Phase 3: a block follows the user across their instances.
+    try { const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [contactId] }); if (rows[0]) await emitContactChange("update", rows[0]); } catch {}
     return { redirect: "/dashboard/contacts" };
   }
 
   if (action === "unblock" && req.body.contact_id) {
+    const contactId = parseInt(req.body.contact_id);
     await db.execute({
       sql: "UPDATE contacts SET is_blocked = 0 WHERE id = ?",
-      args: [parseInt(req.body.contact_id)],
+      args: [contactId],
     });
+    try { const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [contactId] }); if (rows[0]) await emitContactChange("update", rows[0]); } catch {}
     return { redirect: "/dashboard/contacts" };
   }
 
@@ -80,6 +85,8 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
       sql: "UPDATE contacts SET verified = ? WHERE id = ?",
       args: [req.body.verified === "1" ? 1 : 0, contactId],
     });
+    // Phase 3: deliberately NO emit — `verified` is a per-device attestation
+    // (in EXCLUDED_COLUMNS.contacts); each device verifies independently.
     return { redirect: "/dashboard/contacts?view=contact&contact=" + contactId };
   }
 
@@ -100,6 +107,9 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
         (req.body.notes || "").trim(),
       ],
     });
+    // Phase 3: the manual address-book entry follows the user (no secp key, so
+    // the receiver's onContactSynced hook won't try to subscribe).
+    try { const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [manualCrowId] }); if (rows[0]) await emitContactChange("insert", rows[0]); } catch {}
     return { redirect: "/dashboard/contacts" };
   }
 
@@ -223,11 +233,14 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
     }
 
     if (fields.length > 0) {
-      args.push(parseInt(req.body.contact_id));
+      const editId = parseInt(req.body.contact_id);
+      args.push(editId);
       await db.execute({
         sql: `UPDATE contacts SET ${fields.join(", ")} WHERE id = ?`,
         args,
       });
+      // Phase 3: profile edits follow the user.
+      try { const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [editId] }); if (rows[0]) await emitContactChange("update", rows[0]); } catch {}
     }
 
     return { redirect: `/dashboard/contacts?view=contact&contact=${req.body.contact_id}` };
@@ -235,10 +248,17 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
 
   // --- Delete contact ---
   if (action === "delete_contact" && req.body.contact_id) {
-    await db.execute({
+    const delId = parseInt(req.body.contact_id);
+    // Fetch crow_id BEFORE the delete; emit ONLY if a row was actually deleted
+    // (the WHERE clause is manual-only, so a crow: contact delete is a no-op and
+    // must NOT propagate a destructive delete to peers).
+    let delCrowId = null;
+    try { const { rows } = await db.execute({ sql: "SELECT crow_id FROM contacts WHERE id = ?", args: [delId] }); delCrowId = rows[0]?.crow_id || null; } catch {}
+    const result = await db.execute({
       sql: "DELETE FROM contacts WHERE id = ? AND contact_type = 'manual'",
-      args: [parseInt(req.body.contact_id)],
+      args: [delId],
     });
+    if (Number(result.rowsAffected) > 0 && delCrowId) { try { await emitContactDelete(delCrowId); } catch {} }
     return { redirect: "/dashboard/contacts" };
   }
 
@@ -336,6 +356,9 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
             args: [manualCrowId, name, c.email || "", c.phone || "", c.notes || ""],
           });
           imported++;
+          // Phase 3: an imported address book follows the user (guarded; a slow
+          // import must not stall on emit).
+          try { const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [manualCrowId] }); if (rows[0]) await emitContactChange("insert", rows[0]); } catch {}
         } catch (err) {
           console.warn("[contacts] Import error for", name, err.message);
         }
@@ -364,6 +387,10 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
         if (!accepted?.isError && botCrowId) {
           if (wasNew) await db.execute({ sql: "UPDATE contacts SET origin = 'advertised' WHERE crow_id = ?", args: [botCrowId] });
           await markContactIsBot(db, botCrowId);
+          // Phase 3: propagate the final advertised-bot state (origin + is_bot)
+          // to the user's other instances. (The accept tool emits the base row;
+          // this update carries the advertised/is_bot flags set just above.)
+          try { const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [botCrowId] }); if (rows[0]) await emitContactChange("update", rows[0]); } catch {}
         }
       } finally { await client.close(); }
     } catch (err) { console.error("[contacts] dir_add_bot failed:", err.message); }
