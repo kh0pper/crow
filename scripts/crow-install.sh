@@ -407,8 +407,11 @@ if command -v tailscale &>/dev/null; then
           else
             printf '\nCROW_GATEWAY_URL=%s\n' "$GATEWAY_HTTPS_URL" >> "$CROW_HOME/.env"
           fi
-          sudo systemctl restart crow-gateway
-          log "CROW_GATEWAY_URL=${GATEWAY_HTTPS_URL} written to $CROW_HOME/.env (gateway restarted)"
+          if sudo systemctl restart crow-gateway; then
+            log "CROW_GATEWAY_URL=${GATEWAY_HTTPS_URL} written to $CROW_HOME/.env (gateway restarted)"
+          else
+            warn "Gateway restart failed — restart manually: sudo systemctl restart crow-gateway"
+          fi
         else
           warn "tailscale serve failed — wire it later: sudo tailscale serve --bg --https=443 http://127.0.0.1:3001"
         fi
