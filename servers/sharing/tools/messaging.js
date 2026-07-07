@@ -8,6 +8,7 @@
 
 import { z } from "zod";
 import { isKioskActive, kioskBlockedResponse } from "../../shared/kiosk-guard.js";
+import { emitGroupUpsert } from "../group-sync.js";
 
 export function registerMessagingTools(server, ctx) {
   const { db, identity, nostrManager } = ctx;
@@ -115,6 +116,10 @@ export function registerMessagingTools(server, ctx) {
           notFound.push(member);
         }
       }
+
+      // Phase 3 (groups follow the user): ONE emit after the member loop — the
+      // wire-map is a full membership replace, so per-member emits are redundant.
+      try { await emitGroupUpsert(db, groupId); } catch {}
 
       let text = `Created group "${name}" (ID: ${groupId}) with ${added.length} member(s): ${added.join(", ")}`;
       if (notFound.length > 0) text += `\nNot found: ${notFound.join(", ")}`;

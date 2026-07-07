@@ -8,6 +8,8 @@ import { randomBytes } from "node:crypto";
 function normMode(mode) { return mode === "always" ? "always" : "addressed"; }
 
 /** Create a host-side room. Assigns a stable room_uid. Returns { groupId, roomUid }. */
+// NOTE: rooms (room_uid NOT NULL) are NOT synced via group-sync — they have
+// their own hub-and-spoke Nostr fan-out (room_messages / room-inbound.js).
 export async function createRoom(db, { name, memberContactIds = [], mode = "addressed", hostCrowId = null }) {
   const roomUid = randomBytes(16).toString("hex"); // 32 hex chars
   const res = await db.execute({
@@ -22,6 +24,8 @@ export async function createRoom(db, { name, memberContactIds = [], mode = "addr
 }
 
 /** Materialize a local room row for a room hosted elsewhere (participant side). Idempotent on room_uid. Returns groupId. */
+// NOTE: rooms (room_uid NOT NULL) are NOT synced via group-sync — they have
+// their own hub-and-spoke Nostr fan-out (room_messages / room-inbound.js).
 export async function ensureLocalRoomForUid(db, { roomUid, name = "Room", hostCrowId = null, mode = "addressed" }) {
   const { rows } = await db.execute({ sql: "SELECT id FROM contact_groups WHERE room_uid = ?", args: [roomUid] });
   if (rows.length) return Number(rows[0].id);

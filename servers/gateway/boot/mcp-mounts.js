@@ -83,6 +83,17 @@ export async function mountMcpServers(app, deps) {
     console.warn(`[instance-sync] backfillContactsOnce failed: ${err.message}`);
   }
 
+  // Phase 3 groups: one-shot re-emit of existing plain groups so peers resolve
+  // groups that predate this feature. AFTER contacts backfill so member contacts
+  // have a chance to land first. Guarded by a flag row; idempotent on later boots.
+  try {
+    if (syncManager?.backfillGroupsOnce) {
+      await syncManager.backfillGroupsOnce();
+    }
+  } catch (err) {
+    console.warn(`[instance-sync] backfillGroupsOnce failed: ${err.message}`);
+  }
+
   // Scoped-settings sync: wire the registry's writeSetting to emitChange so
   // operator edits on one instance propagate to paired peers.
   try {

@@ -34,6 +34,8 @@ export async function handleInboundRoomEnvelope({ db, nostrManager, identity, su
       for (const m of payload.members) {
         if (!m || !m.crow_id) continue;
         const { rows } = await db.execute({ sql: "SELECT id FROM contacts WHERE crow_id = ? AND request_status IS NULL", args: [m.crow_id] });
+        // NOTE: rooms (room_uid NOT NULL) are NOT synced via group-sync — they have
+        // their own hub-and-spoke Nostr fan-out (room_messages / room-inbound.js).
         if (rows[0]?.id != null) await db.execute({ sql: "INSERT OR IGNORE INTO contact_group_members (group_id, contact_id) VALUES (?,?)", args: [groupId, rows[0].id] });
       }
     }
