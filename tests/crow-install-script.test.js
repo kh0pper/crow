@@ -55,7 +55,11 @@ test("F-5: ask_line returns empty headlessly instead of failing under set -e", (
 });
 
 test("F-6: no pipeline consumes `tailscale status --json` (captured into TS_JSON instead)", () => {
-  assert.doesNotMatch(src(), /tailscale status --json[^\n]*\|/);
+  const tsLines = src().split("\n").filter((l) => l.includes("tailscale status --json"));
+  assert.ok(tsLines.length > 0, "TS_JSON capture exists");
+  for (const l of tsLines) {
+    assert.doesNotMatch(l.replaceAll("||", ""), /\|/, `pipeline on: ${l.trim()}`);
+  }
   assert.match(src(), /TS_JSON=/);
 });
 
