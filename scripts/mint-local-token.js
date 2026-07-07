@@ -21,14 +21,17 @@ try {
   if (meta.present && !rotate) {
     console.error(`A local MCP token already exists (created ${meta.createdAt || "unknown"}).`);
     console.error("Re-run with --rotate to replace it — existing MCP clients using it will stop working.");
-    process.exit(1);
+    // exitCode (not process.exit) so the finally below still closes the db;
+    // the process then exits naturally with code 1.
+    process.exitCode = 1;
+  } else {
+    const token = await generateLocalToken(db);
+    console.log("Local MCP token (shown ONCE — copy it now):");
+    console.log(token);
+    console.log("");
+    console.log("Use it as an Authorization: Bearer header on any MCP path, e.g. /sharing/mcp.");
+    console.log("Manage/rotate later in the dashboard: Connect panel.");
   }
-  const token = await generateLocalToken(db);
-  console.log("Local MCP token (shown ONCE — copy it now):");
-  console.log(token);
-  console.log("");
-  console.log("Use it as an Authorization: Bearer header on any MCP path, e.g. /sharing/mcp.");
-  console.log("Manage/rotate later in the dashboard: Connect panel.");
 } finally {
   try { db.close(); } catch {}
 }
