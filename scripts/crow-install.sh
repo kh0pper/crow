@@ -35,6 +35,75 @@ header() {
   echo "═══════════════════════════════════════════════"
 }
 
+# ─── Prompt helpers (F-INSTALL-5/-7) ──────────────────────
+# The documented `curl … | bash` one-liner has no usable stdin (the script
+# body IS stdin), so prompts read /dev/tty when a terminal exists and resolve
+# to their DEFAULT when it does not (headless / cloud-init / CI).
+# `--yes` / `-y` / CROW_INSTALL_YES=1 forces defaults everywhere.
+ASSUME_YES=false
+for _arg in "$@"; do
+  case "$_arg" in
+    -y|--yes) ASSUME_YES=true ;;
+  esac
+done
+if [ "${CROW_INSTALL_YES:-}" = "1" ]; then ASSUME_YES=true; fi
+
+# Real tty detection (R1-I1): [ -r /dev/tty ] only tests the device node's
+# permission bits and is TRUE even with no controlling terminal. Actually
+# opening it is the reliable probe (fails with ENXIO when headless), and it
+# keeps genuinely-headless installs from spraying /dev/tty errors into logs.
+HAS_TTY=false
+if { exec 3</dev/tty; } 2>/dev/null; then
+  exec 3<&-
+  HAS_TTY=true
+fi
+
+# ask_yn <prompt> <default Y|N> — 0=yes, 1=no. Headless/--yes → default.
+ask_yn() {
+  local prompt="$1" default="$2" reply=""
+  if [ "$ASSUME_YES" = true ] || [ "$HAS_TTY" = false ]; then
+    [ "$default" = "Y" ] && return 0 || return 1
+  fi
+  if [ "$default" = "Y" ]; then
+    printf "  %s [Y/n] " "$prompt" > /dev/tty
+  else
+    printf "  %s [y/N] " "$prompt" > /dev/tty
+  fi
+  IFS= read -r reply < /dev/tty || reply=""
+  case "$reply" in
+    [Yy]*) return 0 ;;
+    [Nn]*) return 1 ;;
+    *) [ "$default" = "Y" ] && return 0 || return 1 ;;
+  esac
+}
+
+# ask_line <prompt> — prints the reply; empty when headless/--yes/EOF.
+ask_line() {
+  local prompt="$1" reply=""
+  if [ "$ASSUME_YES" = true ] || [ "$HAS_TTY" = false ]; then
+    return 0
+  fi
+  printf "  %s" "$prompt" > /dev/tty
+  IFS= read -r reply < /dev/tty || reply=""
+  printf "%s" "$reply"
+}
+
+# ts_first_field <JsonKey> — first "<JsonKey>":"value" in $TS_JSON, no pipes
+# (F-INSTALL-6: piping through grep then head SIGPIPEs under pipefail on big tailnets).
+# The first match is always the Self block (tailscale status --json emits
+# Self before Peer).
+ts_first_field() {
+  local key="$1"
+  if [[ ${TS_JSON:-} =~ \"${key}\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]]; then
+    printf "%s" "${BASH_REMATCH[1]}"
+  fi
+}
+
+# Test seam: tests source the helpers without executing the install.
+if [ "${CROW_INSTALL_SOURCE_ONLY:-}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 # Check if running as root (we don't want that)
 if [ "$(id -u)" -eq 0 ]; then
   error "Don't run this script as root. Run as your normal user."
@@ -59,9 +128,7 @@ echo "    - Crow"
 echo "    - Security hardening (UFW + fail2ban)"
 echo "    - Tailscale hostname setup (if Tailscale is installed)"
 echo ""
-read -p "  Continue? [Y/n] " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Nn]$ ]]; then
+if ! ask_yn "Continue?" Y; then
   echo "  Cancelled."
   exit 0
 fi
@@ -136,13 +203,17 @@ fi
 # Set hostname to 'crow' for crow.local resolution
 CURRENT_HOSTNAME=$(hostname)
 if [ "$CURRENT_HOSTNAME" != "crow" ]; then
-  read -p "  Set hostname to 'crow' (enables crow.local)? [Y/n] " -n 1 -r
-  echo
-  if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+  # Renaming the machine is destructive under automation (F-INSTALL-11):
+  # default NO, headless never renames. When skipped, Caddy serves
+  # <hostname>.local instead of crow.local (below).
+  if ask_yn "Set hostname to 'crow' (enables crow.local)?" N; then
     sudo hostnamectl set-hostname crow
     log "Hostname set to 'crow' — accessible as crow.local on your network"
+  else
+    warn "Keeping hostname '$CURRENT_HOSTNAME' — Crow will be at https://${CURRENT_HOSTNAME}.local"
   fi
 fi
+MDNS_HOST="$(hostname).local"
 
 # ─── Step 6: Clone and Setup Crow ────────────────────────
 
@@ -193,14 +264,16 @@ header "Step 7/9: System Services"
 sudo tee /etc/systemd/system/crow-gateway.service > /dev/null << EOF
 [Unit]
 Description=Crow Gateway
-After=network.target
+Wants=network-online.target
+After=network-online.target docker.service tailscaled.service
+Requires=docker.service
 
 [Service]
 Type=simple
 User=$USER
 WorkingDirectory=$CROW_APP
 ExecStart=$(which node) servers/gateway/index.js
-Restart=unless-stopped
+Restart=on-failure
 RestartSec=5
 Environment=NODE_ENV=production
 Environment=CROW_DATA_DIR=$CROW_DATA
@@ -210,9 +283,9 @@ Environment=CROW_DB_PATH=$CROW_DATA/crow.db
 WantedBy=multi-user.target
 EOF
 
-# Caddy reverse proxy with self-signed cert for crow.local
-sudo tee /etc/caddy/Caddyfile > /dev/null << 'EOF'
-crow.local {
+# Caddy reverse proxy with self-signed cert for the actual hostname
+sudo tee /etc/caddy/Caddyfile > /dev/null << EOF
+${MDNS_HOST} {
     tls internal
     reverse_proxy localhost:3001
 }
@@ -222,7 +295,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now crow-gateway
 sudo systemctl restart caddy
 log "Gateway service enabled and started"
-log "Caddy configured for https://crow.local"
+log "Caddy configured for https://${MDNS_HOST}"
 
 # ─── Step 8: Security Hardening ──────────────────────────
 
@@ -238,9 +311,29 @@ fi
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
 sudo ufw allow 22/tcp comment 'SSH'
-sudo ufw allow 443/tcp comment 'HTTPS (Caddy)'
-echo "y" | sudo ufw enable
-log "Firewall enabled (SSH + HTTPS only)"
+
+# 443 serves only Caddy's LAN vhost (https://${MDNS_HOST}); on a cloud VM
+# that is an unintended PUBLIC surface (F-INSTALL-2). Cloud heuristic: the
+# link-local metadata endpoint answers on AWS/Oracle/GCP/Azure/DO and never
+# on home LANs. (Local-address checks don't work — Oracle NATs a private IP.)
+IS_CLOUD_HOST=false
+if curl -s -m 2 -o /dev/null http://169.254.169.254/ 2>/dev/null; then
+  IS_CLOUD_HOST=true
+fi
+OPEN_443_DEFAULT=Y
+if [ "$IS_CLOUD_HOST" = true ]; then
+  OPEN_443_DEFAULT=N
+  warn "Cloud/VPS environment detected — opening 443 would expose it to the internet."
+fi
+if ask_yn "Open port 443 for LAN access to https://${MDNS_HOST}?" "$OPEN_443_DEFAULT"; then
+  sudo ufw allow 443/tcp comment 'HTTPS (Caddy)'
+  log "Port 443 open (LAN HTTPS via Caddy)"
+else
+  warn "Port 443 closed — use Tailscale for remote access"
+fi
+
+sudo ufw --force enable
+log "Firewall enabled"
 
 # Install ufw-docker to fix Docker/UFW conflict
 if [ ! -f /usr/local/bin/ufw-docker ]; then
@@ -271,47 +364,59 @@ if command -v tailscale &>/dev/null; then
   if tailscale status &>/dev/null; then
     log "Tailscale is authenticated"
 
-    # Check if 'crow' hostname is already taken on the tailnet
-    CROW_HOSTNAME_TAKEN=false
-    CURRENT_TS_HOSTNAME=$(tailscale status --json 2>/dev/null | grep -o '"HostName":"[^"]*"' | head -1 | cut -d'"' -f4)
+    # Capture status JSON ONCE — never pipe it (F-INSTALL-6).
+    TS_JSON="$(tailscale status --json 2>/dev/null || true)"
+    CURRENT_TS_HOSTNAME="$(ts_first_field HostName)"
 
     if [ "$CURRENT_TS_HOSTNAME" = "crow" ]; then
       log "Tailscale hostname is already set to 'crow'"
-    else
-      # Check if another device on the tailnet is using 'crow'
-      if tailscale status --json 2>/dev/null | grep -q '"HostName":"crow"'; then
-        CROW_HOSTNAME_TAKEN=true
+    elif [[ $TS_JSON =~ \"HostName\"[[:space:]]*:[[:space:]]*\"crow\" ]]; then
+      warn "Tailscale hostname 'crow' is already taken by another device on your tailnet."
+      TS_HOSTNAME="$(ask_line "Enter a Tailscale hostname (or press Enter to skip): ")"
+      if [ -n "$TS_HOSTNAME" ]; then
+        sudo tailscale set --hostname="$TS_HOSTNAME"
+        log "Tailscale hostname set to '$TS_HOSTNAME'"
+      else
+        warn "Skipped Tailscale hostname setup"
       fi
+    else
+      # Destructive rename: default NO; headless installs never rename
+      # (F-INSTALL-7 — the old default-Y renamed fresh nodes to 'crow').
+      if ask_yn "Set Tailscale hostname to 'crow'?" N; then
+        sudo tailscale set --hostname=crow
+        log "Tailscale hostname set to 'crow'"
+      else
+        warn "Keeping Tailscale hostname '${CURRENT_TS_HOSTNAME:-unknown}'"
+      fi
+    fi
 
-      if [ "$CROW_HOSTNAME_TAKEN" = true ]; then
-        warn "Tailscale hostname 'crow' is already taken by another device on your tailnet."
-        SUGGESTED="crow-$(hostname)"
-        echo ""
-        echo "  Suggested alternatives:"
-        echo "    - crow-2"
-        echo "    - $SUGGESTED"
-        echo ""
-        read -p "  Enter a Tailscale hostname (or press Enter to skip): " TS_HOSTNAME
-        echo
-        if [ -n "$TS_HOSTNAME" ]; then
-          sudo tailscale set --hostname="$TS_HOSTNAME"
-          log "Tailscale hostname set to '$TS_HOSTNAME' — access Crow at http://$TS_HOSTNAME/"
+    # ── F-INSTALL-1: wire Tailscale Serve so the dashboard is reachable over
+    # the tailnet with real HTTPS (and the gateway gets an HTTPS issuer URL —
+    # without it a cloud install has NO reachable dashboard at all).
+    # Serve is tailnet-only; this never touches Funnel (public exposure).
+    GATEWAY_HTTPS_URL=""
+    TS_DNSNAME="$(ts_first_field DNSName)"
+    TS_DNSNAME="${TS_DNSNAME%.}"   # strip trailing dot
+    if [ -n "$TS_DNSNAME" ]; then
+      if ask_yn "Serve the dashboard at https://${TS_DNSNAME}/ (tailnet-only, recommended)?" Y; then
+        if sudo tailscale serve --bg --https=443 http://127.0.0.1:3001 >/dev/null 2>&1; then
+          GATEWAY_HTTPS_URL="https://${TS_DNSNAME}"
+          log "Tailscale Serve wired: ${GATEWAY_HTTPS_URL}/ → localhost:3001 (tailnet only)"
+          if grep -q '^CROW_GATEWAY_URL=' "$CROW_HOME/.env" 2>/dev/null; then
+            sed -i "s|^CROW_GATEWAY_URL=.*|CROW_GATEWAY_URL=${GATEWAY_HTTPS_URL}|" "$CROW_HOME/.env"
+          else
+            printf '\nCROW_GATEWAY_URL=%s\n' "$GATEWAY_HTTPS_URL" >> "$CROW_HOME/.env"
+          fi
+          if sudo systemctl restart crow-gateway; then
+            log "CROW_GATEWAY_URL=${GATEWAY_HTTPS_URL} written to $CROW_HOME/.env (gateway restarted)"
+          else
+            warn "Gateway restart failed — restart manually: sudo systemctl restart crow-gateway"
+          fi
         else
-          warn "Skipped Tailscale hostname setup"
+          warn "tailscale serve failed — wire it later: sudo tailscale serve --bg --https=443 http://127.0.0.1:3001"
         fi
       else
-        echo ""
-        echo "  Would you like to set this machine's Tailscale hostname to 'crow'?"
-        echo "  This lets you access Crow at http://crow/ from any device on your Tailnet."
-        echo ""
-        read -p "  Set Tailscale hostname to 'crow'? [Y/n] " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-          sudo tailscale set --hostname=crow
-          log "Tailscale hostname set to 'crow' — access Crow at http://crow/ from your Tailnet"
-        else
-          warn "Skipped Tailscale hostname setup"
-        fi
+        warn "Skipped Tailscale Serve — remote HTTPS access not configured"
       fi
     fi
   else
@@ -362,7 +467,10 @@ echo ""
 echo "  Crow is ready!"
 echo ""
 echo "  Open in your browser:"
-echo "    https://crow.local/setup"
+echo "    https://${MDNS_HOST}/setup"
+if [ -n "${GATEWAY_HTTPS_URL:-}" ]; then
+  echo "    ${GATEWAY_HTTPS_URL}/setup   (any device on your tailnet)"
+fi
 echo ""
 echo "  What's next:"
 echo "    1. Set your Crow's Nest password at /setup"
