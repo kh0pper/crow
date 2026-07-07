@@ -105,7 +105,26 @@ test("F-6/F-7: collision check matches indented `\"HostName\": \"crow\"` (real t
   assert.equal(miss.stdout.trim(), "MISS");
 });
 
-// NOTE(A4): the "no raw read -p remains" end-state pin is added by Task A4, after A2/A3 migrate the remaining prompts.
+test("F-1: Serve wiring present — serve command + CROW_GATEWAY_URL write + gateway restart", () => {
+  assert.match(src(), /tailscale serve --bg --https=443 http:\/\/127\.0\.0\.1:3001/);
+  assert.match(src(), /CROW_GATEWAY_URL=\$\{GATEWAY_HTTPS_URL\}|CROW_GATEWAY_URL=%s/);
+  assert.match(src(), /systemctl restart crow-gateway/);
+});
+
+test("F-2: 443 is prompted, with cloud-metadata heuristic flipping the default", () => {
+  assert.match(src(), /169\.254\.169\.254/);
+  assert.match(src(), /OPEN_443_DEFAULT/);
+  // The bare unconditional allow must be gone:
+  assert.doesNotMatch(src(), /^sudo ufw allow 443\/tcp/m);
+});
+
+test("F-5 end-state pin (deferred from A1): no raw read -p prompts remain anywhere", () => {
+  assert.doesNotMatch(src(), /read -p/);
+});
+
+test("collision elif stays whitespace-tolerant (pin for the A2 HIT/MISS test's regex copy)", () => {
+  assert.match(src(), /elif \[\[ \$TS_JSON =~ \\"HostName\\"\[\[:space:\]\]\*:\[\[:space:\]\]\*\\"crow\\" \]\]/);
+});
 
 test("F-9: systemd unit uses Restart=on-failure (unless-stopped is Docker, not systemd)", () => {
   assert.match(src(), /Restart=on-failure/);

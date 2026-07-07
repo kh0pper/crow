@@ -311,9 +311,29 @@ fi
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
 sudo ufw allow 22/tcp comment 'SSH'
-sudo ufw allow 443/tcp comment 'HTTPS (Caddy)'
+
+# 443 serves only Caddy's LAN vhost (https://${MDNS_HOST}); on a cloud VM
+# that is an unintended PUBLIC surface (F-INSTALL-2). Cloud heuristic: the
+# link-local metadata endpoint answers on AWS/Oracle/GCP/Azure/DO and never
+# on home LANs. (Local-address checks don't work — Oracle NATs a private IP.)
+IS_CLOUD_HOST=false
+if curl -s -m 2 -o /dev/null http://169.254.169.254/ 2>/dev/null; then
+  IS_CLOUD_HOST=true
+fi
+OPEN_443_DEFAULT=Y
+if [ "$IS_CLOUD_HOST" = true ]; then
+  OPEN_443_DEFAULT=N
+  warn "Cloud/VPS environment detected — opening 443 would expose it to the internet."
+fi
+if ask_yn "Open port 443 for LAN access to https://${MDNS_HOST}?" "$OPEN_443_DEFAULT"; then
+  sudo ufw allow 443/tcp comment 'HTTPS (Caddy)'
+  log "Port 443 open (LAN HTTPS via Caddy)"
+else
+  warn "Port 443 closed — use Tailscale for remote access"
+fi
+
 sudo ufw --force enable
-log "Firewall enabled (SSH + HTTPS only)"
+log "Firewall enabled"
 
 # Install ufw-docker to fix Docker/UFW conflict
 if [ ! -f /usr/local/bin/ufw-docker ]; then
@@ -369,6 +389,33 @@ if command -v tailscale &>/dev/null; then
         warn "Keeping Tailscale hostname '${CURRENT_TS_HOSTNAME:-unknown}'"
       fi
     fi
+
+    # ── F-INSTALL-1: wire Tailscale Serve so the dashboard is reachable over
+    # the tailnet with real HTTPS (and the gateway gets an HTTPS issuer URL —
+    # without it a cloud install has NO reachable dashboard at all).
+    # Serve is tailnet-only; this never touches Funnel (public exposure).
+    GATEWAY_HTTPS_URL=""
+    TS_DNSNAME="$(ts_first_field DNSName)"
+    TS_DNSNAME="${TS_DNSNAME%.}"   # strip trailing dot
+    if [ -n "$TS_DNSNAME" ]; then
+      if ask_yn "Serve the dashboard at https://${TS_DNSNAME}/ (tailnet-only, recommended)?" Y; then
+        if sudo tailscale serve --bg --https=443 http://127.0.0.1:3001 >/dev/null 2>&1; then
+          GATEWAY_HTTPS_URL="https://${TS_DNSNAME}"
+          log "Tailscale Serve wired: ${GATEWAY_HTTPS_URL}/ → localhost:3001 (tailnet only)"
+          if grep -q '^CROW_GATEWAY_URL=' "$CROW_HOME/.env" 2>/dev/null; then
+            sed -i "s|^CROW_GATEWAY_URL=.*|CROW_GATEWAY_URL=${GATEWAY_HTTPS_URL}|" "$CROW_HOME/.env"
+          else
+            printf '\nCROW_GATEWAY_URL=%s\n' "$GATEWAY_HTTPS_URL" >> "$CROW_HOME/.env"
+          fi
+          sudo systemctl restart crow-gateway
+          log "CROW_GATEWAY_URL=${GATEWAY_HTTPS_URL} written to $CROW_HOME/.env (gateway restarted)"
+        else
+          warn "tailscale serve failed — wire it later: sudo tailscale serve --bg --https=443 http://127.0.0.1:3001"
+        fi
+      else
+        warn "Skipped Tailscale Serve — remote HTTPS access not configured"
+      fi
+    fi
   else
     warn "Tailscale is installed but not authenticated"
     warn "Run 'sudo tailscale up' to log in, then re-run this step"
@@ -418,6 +465,9 @@ echo "  Crow is ready!"
 echo ""
 echo "  Open in your browser:"
 echo "    https://${MDNS_HOST}/setup"
+if [ -n "${GATEWAY_HTTPS_URL:-}" ]; then
+  echo "    ${GATEWAY_HTTPS_URL}/setup   (any device on your tailnet)"
+fi
 echo ""
 echo "  What's next:"
 echo "    1. Set your Crow's Nest password at /setup"
