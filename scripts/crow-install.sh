@@ -339,9 +339,7 @@ if command -v tailscale &>/dev/null; then
     log "Tailscale is authenticated"
 
     # Capture status JSON ONCE — never pipe it (F-INSTALL-6).
-    set +e
-    TS_JSON="$(tailscale status --json 2>/dev/null)"
-    set -e
+    TS_JSON="$(tailscale status --json 2>/dev/null || true)"
     CURRENT_TS_HOSTNAME="$(ts_first_field HostName)"
 
     if [ "$CURRENT_TS_HOSTNAME" = "crow" ]; then
