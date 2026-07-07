@@ -77,12 +77,32 @@ test("F-7: tailscale rename prompt defaults N (never renames headlessly)", () =>
 });
 
 test("F-6/F-7: helper extraction — first HostName in TS_JSON via bash regex, no pipes", () => {
-  const fakeJson = JSON.stringify({ Self: { HostName: "black-swan", DNSName: "black-swan.tn.ts.net." }, Peer: { k: { HostName: "crow", DNSName: "crow.tn.ts.net." } } });
-  const r = runWithHelpers(`TS_JSON='${fakeJson}'; ts_first_field HostName; echo; ts_first_field DNSName`);
+  const obj = { Self: { HostName: "black-swan", DNSName: "black-swan.tn.ts.net." }, Peer: { k: { HostName: "crow", DNSName: "crow.tn.ts.net." } } };
+  // Real `tailscale status --json` output is INDENTED (Go marshaler): `"HostName": "crow"`
+  // with a space after the colon. Fixture must match that shape or it masks regressions.
+  const indented = JSON.stringify(obj, null, 2);
+  // TS_JSON passed via env (visible to the sourced helpers) — sidesteps shell quoting of multi-line JSON.
+  const r = runWithHelpers(`ts_first_field HostName; echo; ts_first_field DNSName`, { TS_JSON: indented });
   assert.equal(r.status, 0, r.stderr);
   const [host, dns] = r.stdout.trim().split("\n");
   assert.equal(host, "black-swan");
   assert.equal(dns, "black-swan.tn.ts.net.");
+  // Compact JSON (no space after colon) must also work.
+  const compact = runWithHelpers(`ts_first_field HostName`, { TS_JSON: JSON.stringify(obj) });
+  assert.equal(compact.status, 0, compact.stderr);
+  assert.equal(compact.stdout.trim(), "black-swan");
+});
+
+test("F-6/F-7: collision check matches indented `\"HostName\": \"crow\"` (real tailscale JSON shape)", () => {
+  const check = `if [[ $TS_JSON =~ \\"HostName\\"[[:space:]]*:[[:space:]]*\\"crow\\" ]]; then echo HIT; else echo MISS; fi`;
+  const withCrow = JSON.stringify({ Self: { HostName: "black-swan" }, Peer: { k: { HostName: "crow" } } }, null, 2);
+  const hit = runWithHelpers(check, { TS_JSON: withCrow });
+  assert.equal(hit.status, 0, hit.stderr);
+  assert.equal(hit.stdout.trim(), "HIT");
+  const withoutCrow = JSON.stringify({ Self: { HostName: "black-swan" }, Peer: { k: { HostName: "crow-2" } } }, null, 2);
+  const miss = runWithHelpers(check, { TS_JSON: withoutCrow });
+  assert.equal(miss.status, 0, miss.stderr);
+  assert.equal(miss.stdout.trim(), "MISS");
 });
 
 // NOTE(A4): the "no raw read -p remains" end-state pin is added by Task A4, after A2/A3 migrate the remaining prompts.
