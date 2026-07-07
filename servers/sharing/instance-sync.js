@@ -15,7 +15,9 @@
 import Hypercore from "hypercore";
 import { mkdirSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { createHash } from "node:crypto";
 import { sign, verify } from "./identity.js";
+import { emitGroupUpsert } from "./group-sync.js";
 import { resolveDataDir } from "../db.js";
 import { isSyncable } from "../gateway/dashboard/settings/sync-allowlist.js";
 import { normalizePubkey } from "./pubkey-util.js";
@@ -615,6 +617,140 @@ export class InstanceSyncManager {
     if (emitted > 0) {
       console.log(`[instance-sync] one-shot contacts backfill: ${emitted} contact(s) re-emitted → peers resolve legacy contacts`);
     }
+    return emitted;
+  }
+
+  /**
+   * C1: assign a DETERMINISTIC, FROZEN group_uid to every pre-existing PLAIN group
+   * the migration left NULL, so the SAME logical group on two instances (same shared
+   * identity) converges on ONE uid instead of duplicating. uid = first-32-hex of
+   * sha256(<shared ed25519 pubkey> ":" lower(trim(name))). Local same-name collisions
+   * are resolved COLLISION-DRIVEN (R2 F1): a UNIQUE rejection retries with a
+   * "\x1f"-suffixed key (base\x1f1, base\x1f2, …, bound 16 then warn+skip). The \x1f
+   * unit separator cannot survive lower(trim(name)) of any real group name, so a
+   * suffixed key can never collide with a literal name's base key; and probing the DB
+   * instead of pre-counting makes the assignment crash-idempotent (a partial run
+   * strands nothing — the retry walks past whatever already landed).
+   * Idempotent: only touches NULL-uid rows; a frozen uid is never re-derived on rename.
+   * Never throws. Returns the count assigned.
+   */
+  deterministicGroupUid(name, n = 0) {
+    const base = String(name ?? "").trim().toLowerCase();
+    // n=0 → base hash; n>0 → collision-retry slot. "\x1f" is a control char no real
+    // group name contains — unlike "#2", a slot key can never equal a literal name.
+    const keyed = n > 0 ? `${base}\x1f${n}` : base;
+    return createHash("sha256")
+      .update(`${this.identity.ed25519Pubkey}:${keyed}`)
+      .digest("hex")
+      .slice(0, 32);
+  }
+
+  async _assignDeterministicGroupUids() {
+    const MAX_COLLISION_RETRIES = 16;
+    let assigned = 0;
+    let rows = [];
+    try {
+      const r = await this.db.execute({ sql: "SELECT id, name FROM contact_groups WHERE room_uid IS NULL AND group_uid IS NULL ORDER BY id ASC" });
+      rows = r.rows || [];
+    } catch (err) {
+      console.warn(`[instance-sync] deterministic group_uid read failed: ${err.message}`);
+      return 0;
+    }
+    for (const row of rows) {
+      // COLLISION-DRIVEN (R2 F1): try the base hash; every UNIQUE rejection bumps n
+      // and retries the \x1f-suffixed slot. No in-memory counter → crash-idempotent:
+      // the retry walks past hashes that already landed (this run, a previous
+      // interrupted run, or a peer's identical deterministic uid).
+      let settled = false;
+      for (let n = 0; n <= MAX_COLLISION_RETRIES && !settled; n++) {
+        const uid = this.deterministicGroupUid(row.name, n);
+        try {
+          // group_uid IS NULL guard makes the UPDATE a no-op if a concurrent path already set it.
+          await this.db.execute({ sql: "UPDATE contact_groups SET group_uid = ? WHERE id = ? AND group_uid IS NULL", args: [uid, row.id] });
+          assigned++;
+          settled = true;
+        } catch (err) {
+          if (!/unique|constraint/i.test(err.message || "")) {
+            // Non-UNIQUE failure — skip this row, never throw (re-attempted next boot,
+            // since assignment runs before the flag gate — R2 F2).
+            console.warn(`[instance-sync] deterministic group_uid assign failed for group ${row.id}: ${err.message}`);
+            settled = true;
+          }
+          // UNIQUE collision → loop retries with n+1.
+        }
+      }
+      if (!settled) {
+        console.warn(`[instance-sync] deterministic group_uid: ${MAX_COLLISION_RETRIES} collisions for group ${row.id} — left NULL (re-attempted next boot)`);
+      }
+    }
+    if (assigned > 0) console.log(`[instance-sync] assigned ${assigned} deterministic group_uid(s) to pre-existing groups`);
+    return assigned;
+  }
+
+  /**
+   * One-shot idempotent backfill (Phase 3 groups-follow-user): re-emit every
+   * existing PLAIN contact group (room_uid IS NULL) so a peer can resolve it for
+   * groups that predate this feature. Rooms are excluded (own Nostr sync). The
+   * RE-EMIT is guarded by a flag so it runs once per instance lifetime; C1
+   * deterministic uid assignment runs BEFORE that gate — every boot (R2 F2) — so
+   * pre-existing groups converge (not duplicate) and a NULL-uid row introduced
+   * later (restore/import/interrupted run) self-heals on the next boot. Then it
+   * drains the inbound backlog (I-B1) so a peer's already-delivered newer group
+   * edit wins before we re-emit with a fresh lamport. Mirrors
+   * backfillContactsOnce(). Never throws.
+   */
+  async backfillGroupsOnce() {
+    // C1: assign deterministic frozen uids to legacy NULL-uid plain groups BEFORE the
+    // flag gate (R2 F2 — every boot; usually 0 rows) and BEFORE the peer gate — so even
+    // a peerless instance gets stable, convergent uids and stranded NULLs self-heal.
+    await this._assignDeterministicGroupUids();
+
+    const FLAG_KEY = "__groups_backfill_v1";
+    let alreadyRan = false;
+    try {
+      const { rows } = await this.db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [FLAG_KEY] });
+      alreadyRan = typeof rows?.[0]?.value === "string" && rows[0].value.startsWith("done:");
+    } catch {}
+    if (alreadyRan) return 0;
+
+    if (this.outFeeds.size === 0) return 0; // no peers armed yet — retry next boot; do NOT mark
+
+    // I-B1 ordering guard: apply the peer's already-replicated backlog first.
+    try {
+      for (const [peerId, inFeed] of this.inFeeds) {
+        await this._processNewEntries(peerId, inFeed);
+      }
+    } catch (err) {
+      console.warn(`[instance-sync] groups backfill drain failed: ${err.message}`);
+    }
+
+    let rows = [];
+    try {
+      const r = await this.db.execute({ sql: "SELECT id FROM contact_groups WHERE room_uid IS NULL" });
+      rows = r.rows || [];
+    } catch (err) {
+      console.warn(`[instance-sync] groups backfill read failed: ${err.message}`);
+      return 0;
+    }
+
+    let emitted = 0;
+    for (const row of rows) {
+      try {
+        await emitGroupUpsert(this.db, row.id); // shouldSyncRow + room skip are the final gate
+        emitted++;
+      } catch (err) {
+        console.warn(`[instance-sync] groups backfill emit failed for group ${row.id}: ${err.message}`);
+      }
+    }
+
+    try {
+      await this.db.execute({
+        sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        args: [FLAG_KEY, `done:${emitted}`],
+      });
+    } catch {}
+
+    if (emitted > 0) console.log(`[instance-sync] one-shot groups backfill: ${emitted} group(s) re-emitted → peers resolve legacy groups`);
     return emitted;
   }
 
