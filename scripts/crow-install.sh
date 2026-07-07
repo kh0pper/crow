@@ -203,13 +203,17 @@ fi
 # Set hostname to 'crow' for crow.local resolution
 CURRENT_HOSTNAME=$(hostname)
 if [ "$CURRENT_HOSTNAME" != "crow" ]; then
-  read -p "  Set hostname to 'crow' (enables crow.local)? [Y/n] " -n 1 -r
-  echo
-  if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+  # Renaming the machine is destructive under automation (F-INSTALL-11):
+  # default NO, headless never renames. When skipped, Caddy serves
+  # <hostname>.local instead of crow.local (below).
+  if ask_yn "Set hostname to 'crow' (enables crow.local)?" N; then
     sudo hostnamectl set-hostname crow
     log "Hostname set to 'crow' — accessible as crow.local on your network"
+  else
+    warn "Keeping hostname '$CURRENT_HOSTNAME' — Crow will be at https://${CURRENT_HOSTNAME}.local"
   fi
 fi
+MDNS_HOST="$(hostname).local"
 
 # ─── Step 6: Clone and Setup Crow ────────────────────────
 
@@ -260,14 +264,16 @@ header "Step 7/9: System Services"
 sudo tee /etc/systemd/system/crow-gateway.service > /dev/null << EOF
 [Unit]
 Description=Crow Gateway
-After=network.target
+Wants=network-online.target
+After=network-online.target docker.service tailscaled.service
+Requires=docker.service
 
 [Service]
 Type=simple
 User=$USER
 WorkingDirectory=$CROW_APP
 ExecStart=$(which node) servers/gateway/index.js
-Restart=unless-stopped
+Restart=on-failure
 RestartSec=5
 Environment=NODE_ENV=production
 Environment=CROW_DATA_DIR=$CROW_DATA
@@ -277,9 +283,9 @@ Environment=CROW_DB_PATH=$CROW_DATA/crow.db
 WantedBy=multi-user.target
 EOF
 
-# Caddy reverse proxy with self-signed cert for crow.local
-sudo tee /etc/caddy/Caddyfile > /dev/null << 'EOF'
-crow.local {
+# Caddy reverse proxy with self-signed cert for the actual hostname
+sudo tee /etc/caddy/Caddyfile > /dev/null << EOF
+${MDNS_HOST} {
     tls internal
     reverse_proxy localhost:3001
 }
@@ -289,7 +295,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now crow-gateway
 sudo systemctl restart caddy
 log "Gateway service enabled and started"
-log "Caddy configured for https://crow.local"
+log "Caddy configured for https://${MDNS_HOST}"
 
 # ─── Step 8: Security Hardening ──────────────────────────
 
@@ -411,7 +417,7 @@ echo ""
 echo "  Crow is ready!"
 echo ""
 echo "  Open in your browser:"
-echo "    https://crow.local/setup"
+echo "    https://${MDNS_HOST}/setup"
 echo ""
 echo "  What's next:"
 echo "    1. Set your Crow's Nest password at /setup"
