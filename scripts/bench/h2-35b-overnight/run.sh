@@ -27,8 +27,12 @@ DRARGS=( --device=/dev/kfd --device=/dev/dri --group-add "${VIDEO_GID}" --group-
 log(){ echo "$(date -Is) $*"; }
 ok(){ curl -s -m 5 "http://$IP:$1/health" | grep -q '"ok"'; }
 wait_health(){ local port=$1 tries=$2; for i in $(seq 1 "$tries"); do ok "$port" && return 0; sleep 5; done; return 1; }
-ntfy(){ curl -s -m 10 -H "Authorization: Bearer tk_1l9foslrxob637pp70xdxu8mghdqv" \
-  -H "Title: $1" -d "$2" "https://grackle.dachshund-chromatic.ts.net:8445/pi" >/dev/null 2>&1 || true; }
+# ntfy creds read at runtime from pi settings — NEVER hardcode (repo is public)
+ntfy(){ local cfg tok url topic
+  cfg=$(python3 -c "import json;n=json.load(open('/home/kh0pp/.pi/agent/settings.json')).get('notify',{});print(n.get('token',''),n.get('url',''),n.get('topic',''))" 2>/dev/null) || return 0
+  read -r tok url topic <<< "$cfg"
+  [ -n "$tok" ] && curl -s -m 10 -H "Authorization: Bearer $tok" \
+    -H "Title: $1" -d "$2" "$url/$topic" >/dev/null 2>&1 || true; }
 ppl(){ docker run --rm "${DRARGS[@]}" --entrypoint llama-perplexity "$IMG" "$@"; }
 kv_lines(){ docker logs "$C35" 2>&1 | grep -iE "KV buffer size" | tail -2; }
 bench(){ python3 "$KIT/bench-completion.py" "$1" "http://$IP:8003" "$2" "${3:-3}"; }

@@ -24,7 +24,10 @@ cp "$SNAP" "$D35/docker-compose.yml"
 for i in $(seq 1 90); do ok 8003 && ok 8010 && break; sleep 5; done
 STATE="8003=$(ok 8003 && echo ok || echo DOWN) 8010=$(ok 8010 && echo ok || echo DOWN)"
 echo "$(date -Is) deadman restore done: $STATE" >> "$LOG"
-curl -s -m 10 -H "Authorization: Bearer tk_1l9foslrxob637pp70xdxu8mghdqv" \
+# ntfy creds read at runtime from pi settings — NEVER hardcode (repo is public)
+NCFG=$(python3 -c "import json;n=json.load(open('/home/kh0pp/.pi/agent/settings.json')).get('notify',{});print(n.get('token',''),n.get('url',''),n.get('topic',''))" 2>/dev/null) || NCFG=""
+read -r NTOKEN NURL NTOPIC <<< "$NCFG"
+[ -n "$NTOKEN" ] && curl -s -m 10 -H "Authorization: Bearer $NTOKEN" \
   -H "Title: H.2 35b overnight DEADMAN FIRED" \
   -d "Forced prod restore: $STATE" \
-  "https://grackle.dachshund-chromatic.ts.net:8445/pi" >/dev/null 2>&1 || true
+  "$NURL/$NTOPIC" >/dev/null 2>&1 || true
