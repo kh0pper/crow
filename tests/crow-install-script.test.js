@@ -8,10 +8,13 @@ const SCRIPT = resolve(import.meta.dirname, "..", "scripts", "crow-install.sh");
 const src = () => readFileSync(SCRIPT, "utf-8");
 
 /** Source the installer's helper layer (CROW_INSTALL_SOURCE_ONLY=1) and run a
- *  snippet against it. stdin is /dev/null → HAS_TTY=false (headless path). */
+ *  snippet against it. detached:true puts the child in a new session with no
+ *  controlling terminal, so the /dev/tty open-probe fails → HAS_TTY=false and
+ *  the headless path is exercised even from an interactive terminal. */
 function runWithHelpers(snippet, env = {}) {
   return spawnSync("bash", ["-c", `set -euo pipefail; CROW_INSTALL_SOURCE_ONLY=1 source "${SCRIPT}"; ${snippet}`], {
     stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
     env: { ...process.env, ...env },
     encoding: "utf-8",
   });
