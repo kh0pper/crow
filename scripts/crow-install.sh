@@ -94,7 +94,7 @@ ask_line() {
 # Self before Peer).
 ts_first_field() {
   local key="$1"
-  if [[ ${TS_JSON:-} =~ \"${key}\":\"([^\"]*)\" ]]; then
+  if [[ ${TS_JSON:-} =~ \"${key}\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]]; then
     printf "%s" "${BASH_REMATCH[1]}"
   fi
 }
@@ -344,7 +344,7 @@ if command -v tailscale &>/dev/null; then
 
     if [ "$CURRENT_TS_HOSTNAME" = "crow" ]; then
       log "Tailscale hostname is already set to 'crow'"
-    elif [[ $TS_JSON == *'"HostName":"crow"'* ]]; then
+    elif [[ $TS_JSON =~ \"HostName\"[[:space:]]*:[[:space:]]*\"crow\" ]]; then
       warn "Tailscale hostname 'crow' is already taken by another device on your tailnet."
       TS_HOSTNAME="$(ask_line "Enter a Tailscale hostname (or press Enter to skip): ")"
       if [ -n "$TS_HOSTNAME" ]; then
