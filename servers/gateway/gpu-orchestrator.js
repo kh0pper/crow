@@ -41,6 +41,7 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join, dirname, resolve } from "node:path";
+import { networkInterfaces } from "node:os";
 import { loadProviders as loadCachedProviders } from "../shared/providers.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -48,6 +49,47 @@ const BUNDLES_DIR = resolve(dirname(__filename), "..", "..", "bundles");
 
 function loadProviders() {
   return loadCachedProviders();
+}
+
+/**
+ * F-INSTALL-10 — physical locality gate.
+ *
+ * The orchestrator's job is `docker compose up/stop` on THIS machine, so the
+ * only trustworthy signal is whether the provider's baseUrl points AT this
+ * machine (loopback or one of our own interface addresses). The providers
+ * `host` column cannot be used: it syncs fleet-wide with the seeding
+ * instance's perspective baked in (live fleet: grackle's own embed row says
+ * host='grackle-5fc01ac74463b6f4', crow's bundles say 'local' everywhere),
+ * so a host-string gate either breaks a peer keeping its own bundle resident
+ * or lets a fresh install start the maintainer-lab's bundles.
+ */
+// Bridge/virtual interfaces carry SHARED-SUBNET gateway IPs (every docker
+// host has 172.17.0.1; libvirt ships 192.168.122.1) — never machine identity
+// (R2-M1). Skip them so a peer's hypothetical bridge-IP baseUrl can't
+// false-match here.
+const VIRTUAL_IF_RE = /^(docker|br-|veth|virbr|vmnet|lxc|cni)/;
+
+export function getOwnAddresses() {
+  const own = new Set(["localhost", "127.0.0.1", "::1"]);
+  try {
+    for (const [ifname, addrs] of Object.entries(networkInterfaces())) {
+      if (VIRTUAL_IF_RE.test(ifname)) continue;
+      for (const a of addrs || []) own.add(a.address);
+    }
+  } catch {}
+  return own;
+}
+
+export function isLocallyOrchestratable(p, ownAddrs = getOwnAddresses()) {
+  if (!p?.baseUrl) return false;
+  try {
+    // WHATWG URL keeps brackets on IPv6 hostnames ("[::1]"); interface
+    // addresses don't have them.
+    const h = new URL(p.baseUrl).hostname.replace(/^\[|\]$/g, "");
+    return ownAddrs.has(h);
+  } catch {
+    return false;
+  }
 }
 
 const READINESS_TIMEOUT_MS = 240_000;  // vLLM VL warm takes 2.5-3.5 min on 16 GB
@@ -153,11 +195,14 @@ function getMutexSiblings(name) {
     .map(([n]) => n);
 }
 
-function alwaysResidentProviders() {
-  const cfg = loadProviders();
-  return Object.entries(cfg.providers || {})
-    .filter(([, v]) => v.gpuPolicy?.alwaysResident === true || v.alwaysResident === true)
-    .map(([n]) => n);
+export function alwaysResidentProviders(cfg = loadProviders(), ownAddrs = getOwnAddresses()) {
+  const entries = Object.entries(cfg.providers || {})
+    .filter(([, v]) => v.gpuPolicy?.alwaysResident === true || v.alwaysResident === true);
+  const skipped = entries.filter(([, v]) => !isLocallyOrchestratable(v, ownAddrs)).map(([n]) => n);
+  if (skipped.length) {
+    console.log(`[gpu-orchestrator] skipping alwaysResident provider(s) not hosted on this machine: ${skipped.join(", ")}`);
+  }
+  return entries.filter(([, v]) => isLocallyOrchestratable(v, ownAddrs)).map(([n]) => n);
 }
 
 // Map<mutexGroup, { default: string|null, members: Array<{name, baseUrl, bundleId}> }>
@@ -205,6 +250,7 @@ export async function maybeAcquireLocalProvider(providerName) {
   if (!p?.bundleId) return null;
   // host unset defaults to local (matches resolveFromModelsJson).
   if (p.host && p.host !== "local") return null;
+  if (!isLocallyOrchestratable(p)) return null; // F-INSTALL-10: not this machine's bundle
   try {
     return await acquireProvider(providerName);
   } catch (err) {
@@ -222,17 +268,20 @@ export async function maybeAcquireLocalProvider(providerName) {
  * sibling with the same baseUrl that does), or null when nothing is warmable
  * (cloud provider / unknown / no matching bundle).
  */
-export function resolveWarmableProviderName(cfg, name) {
+export function resolveWarmableProviderName(cfg, name, ownAddrs = getOwnAddresses()) {
   const provs = (cfg && cfg.providers) || {};
   const direct = provs[name];
   if (!direct) return null;
-  if (direct.bundleId) return name;
+  if (direct.bundleId) {
+    if (!isLocallyOrchestratable(direct, ownAddrs)) return null; // F-INSTALL-10
+    return name;
+  }
   if (direct.host != null && direct.host !== "local") return null; // cloud alias — not warmable
   const base = direct.baseUrl || direct.baseURL || direct.base_url;
   if (!base) return null;
   for (const [n, v] of Object.entries(provs)) {
     if (n === name || !v || !v.bundleId) continue;
-    if (v.host != null && v.host !== "local") continue;
+    if (!isLocallyOrchestratable(v, ownAddrs)) continue; // F-INSTALL-10
     if ((v.baseUrl || v.baseURL || v.base_url) === base) return n;
   }
   return null;
@@ -267,6 +316,10 @@ export async function acquireProvider(providerName) {
   const p = getProvider(providerName);
   if (!p) throw new Error(`orchestrator: unknown provider "${providerName}"`);
   if (!p.bundleId) throw new Error(`orchestrator: provider "${providerName}" has no bundleId`);
+  if (!isLocallyOrchestratable(p)) {
+    console.warn(`[gpu-orchestrator] refusing to orchestrate ${providerName} — its baseUrl is not on this machine`);
+    return null;
+  }
 
   const swap = _swapInFlight.then(async () => {
     // Fast path: already resident.
@@ -279,7 +332,7 @@ export async function acquireProvider(providerName) {
     const siblings = getMutexSiblings(providerName);
     for (const sibName of siblings) {
       const sib = getProvider(sibName);
-      if (!sib?.bundleId) continue;
+      if (!sib?.bundleId || !isLocallyOrchestratable(sib)) continue;
       if (await probeReady(sib.baseUrl)) {
         console.log(`[gpu-orchestrator] swapping out ${sibName} (bundleId=${sib.bundleId}) for ${providerName}`);
         await bundleStop(sib.bundleId).catch((err) =>
@@ -348,6 +401,7 @@ export function startIdleRevertTimer() {
     return;
   }
   _idleRevertTimer = setInterval(() => {
+    retryDeferredResidents().catch(() => {});
     checkIdleRevert().catch((err) =>
       console.warn(`[gpu-orchestrator] idle check failed: ${err.message}`)
     );
@@ -380,6 +434,65 @@ async function triggerEmbedBackfill() {
   }
 }
 
+let _deferredResidents = new Set();
+
+/** Test seam (R2-C1 tests). */
+export function _setDeferredResidentsForTest(names) {
+  _deferredResidents = new Set(names);
+}
+
+/** Ensure ONE alwaysResident provider: probe → bundleUp → waitForReady.
+ *  Returns true iff it warmed an embed-capable provider (caller may
+ *  trigger the embedding backfill). Never throws. */
+async function ensureResident(name, cfg = loadProviders()) {
+  try {
+    const p = (cfg.providers || {})[name];
+    if (!p?.bundleId) {
+      console.warn(`[gpu-orchestrator] ${name} has no bundleId — skipping`);
+      return false;
+    }
+    if (await probeReady(p.baseUrl)) {
+      console.log(`[gpu-orchestrator] ${name} already resident`);
+      return false;
+    }
+    console.log(`[gpu-orchestrator] starting ${name} (bundleId=${p.bundleId})`);
+    await bundleUp(p.bundleId);
+    const ready = await waitForReady(p.baseUrl);
+    if (!ready) {
+      console.warn(`[gpu-orchestrator] ${name} did NOT warm up in time`);
+      return false;
+    }
+    return providerHasEmbedModel(p);
+  } catch (err) {
+    console.error(`[gpu-orchestrator] failed to bring up ${name}: ${err.message}`);
+    return false;
+  }
+}
+
+/** R2-C1: re-check boot-deferred alwaysResident providers against FRESH own
+ *  addresses (tailscale0 may come up after the gateway). Called from the
+ *  idle-revert interval. Returns the names ensured this pass. */
+export async function retryDeferredResidents({
+  cfg = loadProviders(),
+  ownAddrs = getOwnAddresses(),
+  ensure = ensureResident,
+} = {}) {
+  if (!_deferredResidents.size) return [];
+  const ensured = [];
+  let embedRecovered = false;
+  for (const name of [..._deferredResidents]) {
+    const p = (cfg.providers || {})[name];
+    if (!p) { _deferredResidents.delete(name); continue; }
+    if (!isLocallyOrchestratable(p, ownAddrs)) continue; // still not ours — stays parked
+    _deferredResidents.delete(name);
+    console.log(`[gpu-orchestrator] deferred alwaysResident ${name} is now locally hosted — ensuring (its interface came up after boot)`);
+    if (await ensure(name, cfg)) embedRecovered = true;
+    ensured.push(name);
+  }
+  if (embedRecovered) triggerEmbedBackfill();
+  return ensured;
+}
+
 /**
  * Startup — ensure all alwaysResident providers are up.
  * Non-fatal: logs and continues on error. Call from gateway init.
@@ -391,36 +504,26 @@ async function triggerEmbedBackfill() {
 export async function initOrchestrator() {
   if (_initialized) return;
   _initialized = true;
-  const residents = alwaysResidentProviders();
-  if (residents.length === 0) {
+  const cfg = loadProviders();
+  const ownAddrs = getOwnAddresses();
+  const residents = alwaysResidentProviders(cfg, ownAddrs); // logs the skip line
+  _deferredResidents = new Set(
+    Object.entries(cfg.providers || {})
+      .filter(([, v]) => (v.gpuPolicy?.alwaysResident === true || v.alwaysResident === true)
+        && !isLocallyOrchestratable(v, ownAddrs))
+      .map(([n]) => n)
+  );
+  if (residents.length === 0 && _deferredResidents.size === 0) {
     console.log("[gpu-orchestrator] no alwaysResident providers declared");
     startIdleRevertTimer();
     return;
   }
-  console.log(`[gpu-orchestrator] ensuring alwaysResident: ${residents.join(", ")}`);
+  if (residents.length) {
+    console.log(`[gpu-orchestrator] ensuring alwaysResident: ${residents.join(", ")}`);
+  }
   let embedRecovered = false;
   for (const name of residents) {
-    try {
-      const p = getProvider(name);
-      if (!p?.bundleId) {
-        console.warn(`[gpu-orchestrator] ${name} has no bundleId — skipping`);
-        continue;
-      }
-      if (await probeReady(p.baseUrl)) {
-        console.log(`[gpu-orchestrator] ${name} already resident`);
-        continue;
-      }
-      console.log(`[gpu-orchestrator] starting ${name} (bundleId=${p.bundleId})`);
-      await bundleUp(p.bundleId);
-      const ready = await waitForReady(p.baseUrl);
-      if (!ready) {
-        console.warn(`[gpu-orchestrator] ${name} did NOT warm up in time`);
-        continue;
-      }
-      if (providerHasEmbedModel(p)) embedRecovered = true;
-    } catch (err) {
-      console.error(`[gpu-orchestrator] failed to bring up ${name}: ${err.message}`);
-    }
+    if (await ensureResident(name, cfg)) embedRecovered = true;
   }
   startIdleRevertTimer();
   if (embedRecovered) {

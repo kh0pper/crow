@@ -19,20 +19,26 @@ const cfg = {
   },
 };
 
+// F-INSTALL-10: resolveWarmableProviderName now takes this machine's own
+// addresses (physical locality gate) as a third param. Declare the fixture's
+// synthetic host "x" as one of our own addresses so the original
+// alias→sibling / cloud-skip semantics stay under test unchanged.
+const OWN = new Set(["localhost", "127.0.0.1", "::1", "x"]);
+
 test("bundle-less local alias resolves to its bundled same-baseUrl sibling", () => {
-  assert.strictEqual(resolveWarmableProviderName(cfg, "crow-local"), "crow-chat");
+  assert.strictEqual(resolveWarmableProviderName(cfg, "crow-local", OWN), "crow-chat");
 });
 
 test("a provider that already has a bundle resolves to itself", () => {
-  assert.strictEqual(resolveWarmableProviderName(cfg, "crow-voice"), "crow-voice");
-  assert.strictEqual(resolveWarmableProviderName(cfg, "crow-chat"), "crow-chat");
+  assert.strictEqual(resolveWarmableProviderName(cfg, "crow-voice", OWN), "crow-voice");
+  assert.strictEqual(resolveWarmableProviderName(cfg, "crow-chat", OWN), "crow-chat");
 });
 
 test("cloud alias / unknown / no-sibling resolve to null (no warm)", () => {
-  assert.strictEqual(resolveWarmableProviderName(cfg, "alibaba"), null);
-  assert.strictEqual(resolveWarmableProviderName(cfg, "ghost"), null);
-  assert.strictEqual(resolveWarmableProviderName({ providers: {} }, "crow-local"), null);
+  assert.strictEqual(resolveWarmableProviderName(cfg, "alibaba", OWN), null);
+  assert.strictEqual(resolveWarmableProviderName(cfg, "ghost", OWN), null);
+  assert.strictEqual(resolveWarmableProviderName({ providers: {} }, "crow-local", OWN), null);
   // bundle-less local alias with no bundled sibling on its baseUrl → null
   const lonely = { providers: { x: { baseUrl: "http://y:9/v1", host: "local", bundleId: null } } };
-  assert.strictEqual(resolveWarmableProviderName(lonely, "x"), null);
+  assert.strictEqual(resolveWarmableProviderName(lonely, "x", OWN), null);
 });
