@@ -1,0 +1,707 @@
+You are a code critic reviewing a diff from the pi-lab repository. Analyze it for correctness bugs, invariant violations, and missing test coverage. Be specific: cite files and lines. End with a verdict.
+
+--- DIFF 1 ---
+commit 02badcee7ce863cdb93552066366474b36ed2047
+Author: Kevin Hopper <no-reply@maestro.press>
+Date:   Tue Jul 7 09:08:41 2026 -0500
+
+    critic: probe hardening from r8's probe death (row 23)
+    
+    - ladder empty-final fallback: lastNonEmptyAssistantText (extract.ts, pure,
+      TDD) feeds both ladder steps when the final message is blank; stopReason=
+      length / budget-killed units are TRUNCATED, not failed — they enter the
+      ladder and carry a 'truncated' flag through merged verdicts, telemetry,
+      TUI, and the debug dump (budgetExceeded in meta)
+    - TUI rescue label now distinguishes extractor rescues from one-turn retries
+    - critic.probeMaxTurns (default 10, 0=off): turn budget on recall-probe units
+      only — documented exception to the critics-never-budgeted invariant
+      (run.ts comment updated); a killed probe degrades to extraction, never a
+      31-min undiagnosable dump
+    - gate report criterion 5 counts only INFORMATIVE probe rows (>=1 verdict
+      neither parse-errored nor truncated), prints exclusions; criterion 4
+      annotates probe-row share; ROADMAP criterion 5 wording updated
+---
+ CLAUDE.md                          |  2 +-
+ docs/ROADMAP.md                    | 16 +++++++----
+ extensions/critic/debug.ts         |  4 ++-
+ extensions/critic/extract.test.mjs | 30 ++++++++++++++++++++
+ extensions/critic/extract.ts       | 27 ++++++++++++++++++
+ extensions/critic/index.ts         | 57 +++++++++++++++++++++++++++++++-------
+ extensions/subagent/run.ts         |  4 ++-
+ scripts/critic-gate-report.py      | 21 +++++++++++---
+ 8 files changed, 138 insertions(+), 23 deletions(-)
+
+diff --git a/CLAUDE.md b/CLAUDE.md
+index ee1cd7f..ea984c4 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -69,7 +69,7 @@ Every `extensions/*.ts` (or subdir `index.ts`) must default-export `(pi: Extensi
+ ## Key subsystems
+ 
+ - **Model pickers / bindings**: `/plan` snapshots tools + model, pops a planning-model picker; Execute resolves the exec model (TUI picker; web-tapped Execute is non-interactive: `planMode.execModel` else pre-plan restore — never a terminal dialog). Always use `provider/id` form — bare ids can be ambiguous across providers. `/agent-models` persists re-binds to `settings.subagent.modelOverrides`, applied per spawn by `subagent/run.ts` (`forceModel` > settings override > frontmatter). The PWA Session tab has an "Execution models" card (executor + scout/architect/editor/worker/splitter) over `pi-lab:agent-models-get/set` + `pi-lab:exec-model-set`; picking a local model when another local is bound elsewhere offers an ATOMIC swap of all local-bound roles (one llama.cpp slot — split-local bindings thrash the server).
+-- **Critics** (tenet port): fresh pi process per critic, sees the diff + optional `.pi/plans/` spec, never the conversation. Fail-closed fenced-JSON verdicts. Local models by default; `/critique frontier` for GLM, `/critique model` for the picker card, or pass any `provider/id`. Auto-runs on the `plan-mode:complete` bus event (`critic.auto`); the auto path first shows a model card (`critic.modelCard`, choices `critic.cardModels`, countdown `critic.modelCardTimeoutSec` → Default) racing TUI + phone. A managed-local override that isn't serving is started via `lib/local-models.mjs` and the previously loaded model is restored right after the critics return (one local at a time). **Fix-review mode**: every run persists findings per-cwd (`~/.pi/agent/critic-last-findings.json`); when the last run FAILED (<4h, overlapping files) the artifact carries the original findings + FULL contents of the overlapping files + an invariant-restatement instruction — fixes are judged against the invariant, never the diff hunks. **Subsystem review**: a project `.pi/critique.json` (`{"subsystems":{name:{globs,invariants}}}`) makes critics read the whole declared file set and check its invariants end-to-end whenever the diff touches it. **Oversized-diff fan-out**: a diff over `maxDiffBytes` (default 100k) is split by file and greedily packed into byte-bounded chunks; each critic reviews every chunk's real inline diff (concurrency-capped at 4 for the single local slot) and the per-chunk verdicts merge per critic (passed = all chunks passed, findings concatenated with `[part i/N]` labels) — replaces the old "diff too large, read the files yourself" degrade where unopened files went unreviewed. `critiqueArtifact` takes an optional `chunks`; absent = single-artifact behavior (tournament path unchanged). **Recall probe** (`critic.recallProbeEvery`, default 0): every Nth critique re-runs code-critic on `critic.diverseModel` over the same artifact, telemetry `source:"probe"` + `probeOf` — cross-model recall data for the tournament.auto flip. Gating: idle runs (auto, no send-findings) always allowed; non-idle runs (manual /critique, after send-findings) allowed only when `wouldEvict(localModels, diverseModel, runningManaged)` is false (lib/local-models.mjs — the co-resident copilot qualifies; an evicting diverse model keeps the old idle-only behavior, because a slot-stealing probe under a queued agent turn kills the turn, observed 2026-07-05). A manual `/critique <provider/id>` records a diverse row on demand without the probe. **Evidence rule**: a blocker asserting runtime behavior must carry a run/quote or is downgraded to warn. **Sibling context** (`critic.siblingContext`): same-directory files are surfaced so cross-file framework behavior (e.g. `+page.server.ts` beside `+page.svelte`) is visible. **Refute-pass** (`critic.refutePass`, default on): each blocker is handed to a `refuter` agent on a model DIFFERENT from the one that raised it (`critic.refuteModel`, default the diverse local; actual main model read from the run's verdicts); a refuted blocker downgrades to warn with the rebuttal shown (fail-open-to-blocker; parse-error verdicts can never flip to passed; refuted findings are filtered from the fix-review sidecar). Blockers only, capped `critic.refuteMax` (8); the refute model swap composes with the main restore (first-non-null closure wins) and always completes before the send-findings confirm. **Fix-dispatch** (`critic.fixDispatch`, default `chain`): on "Send findings", the failed verdicts' findings are clustered by subsystem/file into one `fixer` subagent leg per cluster, dispatched through the shared `runChain()` (extracted from the subagent tool's chain executor so critic and `/implement` walk the exact same chain path) — so the chain test-run gate + D4 decompose fire per cluster and a bad fix can't corrupt other clusters; falls back to a single legacy `message` (`sendUserMessage` with all findings, one main-agent turn) when there's no `fixer` agent, nothing to cluster, or plan-mode is active (write-capable fixer legs would violate a read-only plan); `off` disables the send-findings offer entirely (verdict still shown, no confirm). `critic.fixMaxClusters` (default 6) caps clusters, smallest merged beyond the cap; `critic.fixModel` optionally overrides the fixer legs' model (default the `fixer` agent's own model). The restore target is the session model captured ONCE before critique/refute swap anything, so dispatch can't strand the session on a transient model. Telemetry: `~/.pi/agent/fix-dispatch-log.jsonl` (per-cluster names/counts) plus per-leg rows in `decompose-log.jsonl`. **Verdict-failure ladder** (D, 2026-07-06): a review unit that ends with no parseable verdict walks a three-step ladder — (1) constrained extraction (`extensions/critic/extract.ts`): the analysis tail (capped for the 4b's 8k context) goes to the always-on local vLLM with `json_schema`-constrained output (config `critic.extractorUrl`, defaults to `permissionModes.classifierUrl`; `critic.extractorModel`, default qwen3.5-4b) — live-validated, zero invented findings; (2) ONE budgeted (4-turn) recovery retry — same agent, its own analysis tail (48k chars), "emit only the fenced verdict block"; (3) fail-closed: raw output + message tail dump to `~/.pi/agent/critic-debug/` (pruned to 30 files), dump path appended to the parseError. Fail-open at every seam; rescued verdicts carry `recovered`/`extracted` flags in TUI + telemetry. An all-parse-error run does NOT overwrite the findings sidecar (it would disarm the next fix-review). `resolveRefuteModel` (refute.ts, pure) derives the refute model configured → diverse → first distinct `settings.localModels` entry; null = refute-pass skipped with a notice, never a same-model refute. All `startModel`/`stopModel` calls (background restores included) serialize through one in-process FIFO queue (`enqueueLifecycle`, lib/local-models.mjs — per-process only). Telemetry rows carry `durationMs` plus per-verdict `usage` (prompt/completion/cacheRead token sums + per-unit wall-clock across a critic's units incl. recovery retries; `extensions/critic/usage.ts`, pure — workstream A.2, the data for the prefix-cache scheduling decision). **Sequential units** (A.3, `critic.sequentialUnits`, repo default OFF, ON in crow's settings): units grouped by resolved model (`extensions/critic/schedule.ts`, pure — resolution mirrors run.ts: forceModel > settings override > frontmatter) run strictly serially per group, body-major (same-artifact units adjacent so consecutive requests share the A.1 system+artifact prefix); distinct-model groups still concurrent. Rationale: the locals run `-np 1`, so the pooled loss is multi-turn INTERLEAVING evicting divergent-middle KV, not request concurrency. First A/B (rows 20/21): per-turn wall −30%; cacheRead% tracks turn count, not scheduling — don't headline it. Severity rule: a demonstrated violation of a declared subsystem invariant is ALWAYS a blocker — a prompt rule in both critics AND enforced in code (`extensions/critic/escalate.ts`, pure, TDD'd): critiqueArtifact escalates any parsed non-blocker finding that cites a declared invariant (token-overlap match, critics paraphrase; skipped when the finding asserts the invariant holds) to blocker, tags it `[escalated: invariant]`, fails its verdict, and hands it to the refute-pass like any other blocker (false escalation costs one refutation — round 4 proved prompt adherence is a sample, not a guarantee). Telemetry: per-verdict `escalated` count + row `escalations[]`. **Per-invariant verdict table** (E): when declared subsystems are in play, `buildSubsystemNote` instructs one verdict-table entry per declared invariant — `invariants:[{invariant,status:violated|holds|unclear,evidence}]`, sanitized by `parseVerdict`. A `violated` entry escalates STRUCTURALLY, outranking every phrasing heuristic: it escalates the citing finding (even a coverage-phrased one — round 5's drain race escaped exactly that way) or synthesizes a tagged blocker from the entry's evidence; hallucinated entries matching no declared invariant never escalate; the fuzzy text path stays as fallback for table-less verdicts. Telemetry per verdict: `invariants` counts `{violated,holds,unclear,missing,unmatched}` — `missing` = recall silence, now measurable (an invariant can no longer vanish between runs without leaving a trace). The fixer must run the FULL suite, never change production schema/behavior solely to make a test writable, and fix-or-dispute every finding. The critic extension is now bot-excluded (spawns subagents, manages model servers).
++- **Critics** (tenet port): fresh pi process per critic, sees the diff + optional `.pi/plans/` spec, never the conversation. Fail-closed fenced-JSON verdicts. Local models by default; `/critique frontier` for GLM, `/critique model` for the picker card, or pass any `provider/id`. Auto-runs on the `plan-mode:complete` bus event (`critic.auto`); the auto path first shows a model card (`critic.modelCard`, choices `critic.cardModels`, countdown `critic.modelCardTimeoutSec` → Default) racing TUI + phone. A managed-local override that isn't serving is started via `lib/local-models.mjs` and the previously loaded model is restored right after the critics return (one local at a time). **Fix-review mode**: every run persists findings per-cwd (`~/.pi/agent/critic-last-findings.json`); when the last run FAILED (<4h, overlapping files) the artifact carries the original findings + FULL contents of the overlapping files + an invariant-restatement instruction — fixes are judged against the invariant, never the diff hunks. **Subsystem review**: a project `.pi/critique.json` (`{"subsystems":{name:{globs,invariants}}}`) makes critics read the whole declared file set and check its invariants end-to-end whenever the diff touches it. **Oversized-diff fan-out**: a diff over `maxDiffBytes` (default 100k) is split by file and greedily packed into byte-bounded chunks; each critic reviews every chunk's real inline diff (concurrency-capped at 4 for the single local slot) and the per-chunk verdicts merge per critic (passed = all chunks passed, findings concatenated with `[part i/N]` labels) — replaces the old "diff too large, read the files yourself" degrade where unopened files went unreviewed. `critiqueArtifact` takes an optional `chunks`; absent = single-artifact behavior (tournament path unchanged). **Recall probe** (`critic.recallProbeEvery`, default 0): every Nth critique re-runs code-critic on `critic.diverseModel` over the same artifact, telemetry `source:"probe"` + `probeOf` — cross-model recall data for the tournament.auto flip. Gating: idle runs (auto, no send-findings) always allowed; non-idle runs (manual /critique, after send-findings) allowed only when `wouldEvict(localModels, diverseModel, runningManaged)` is false (lib/local-models.mjs — the co-resident copilot qualifies; an evicting diverse model keeps the old idle-only behavior, because a slot-stealing probe under a queued agent turn kills the turn, observed 2026-07-05). A manual `/critique <provider/id>` records a diverse row on demand without the probe. Probe units run under a `critic.probeMaxTurns` budget (default 10, 0=off) — the copilot's 65k ctx overflowed on a 12-turn probe; a budget kill degrades to the truncated-run extraction ladder, and `scripts/critic-gate-report.py` counts only informative probe rows (≥1 verdict neither parse-errored nor truncated) as recall evidence. **Evidence rule**: a blocker asserting runtime behavior must carry a run/quote or is downgraded to warn. **Sibling context** (`critic.siblingContext`): same-directory files are surfaced so cross-file framework behavior (e.g. `+page.server.ts` beside `+page.svelte`) is visible. **Refute-pass** (`critic.refutePass`, default on): each blocker is handed to a `refuter` agent on a model DIFFERENT from the one that raised it (`critic.refuteModel`, default the diverse local; actual main model read from the run's verdicts); a refuted blocker downgrades to warn with the rebuttal shown (fail-open-to-blocker; parse-error verdicts can never flip to passed; refuted findings are filtered from the fix-review sidecar). Blockers only, capped `critic.refuteMax` (8); the refute model swap composes with the main restore (first-non-null closure wins) and always completes before the send-findings confirm. **Fix-dispatch** (`critic.fixDispatch`, default `chain`): on "Send findings", the failed verdicts' findings are clustered by subsystem/file into one `fixer` subagent leg per cluster, dispatched through the shared `runChain()` (extracted from the subagent tool's chain executor so critic and `/implement` walk the exact same chain path) — so the chain test-run gate + D4 decompose fire per cluster and a bad fix can't corrupt other clusters; falls back to a single legacy `message` (`sendUserMessage` with all findings, one main-agent turn) when there's no `fixer` agent, nothing to cluster, or plan-mode is active (write-capable fixer legs would violate a read-only plan); `off` disables the send-findings offer entirely (verdict still shown, no confirm). `critic.fixMaxClusters` (default 6) caps clusters, smallest merged beyond the cap; `critic.fixModel` optionally overrides the fixer legs' model (default the `fixer` agent's own model). The restore target is the session model captured ONCE before critique/refute swap anything, so dispatch can't strand the session on a transient model. Telemetry: `~/.pi/agent/fix-dispatch-log.jsonl` (per-cluster names/counts) plus per-leg rows in `decompose-log.jsonl`. **Verdict-failure ladder** (D, 2026-07-06): a review unit that ends with no parseable verdict walks a three-step ladder — (1) constrained extraction (`extensions/critic/extract.ts`): the analysis tail (capped for the 4b's 8k context) goes to the always-on local vLLM with `json_schema`-constrained output (config `critic.extractorUrl`, defaults to `permissionModes.classifierUrl`; `critic.extractorModel`, default qwen3.5-4b) — live-validated, zero invented findings; (2) ONE budgeted (4-turn) recovery retry — same agent, its own analysis tail (48k chars), "emit only the fenced verdict block"; (3) fail-closed: raw output + message tail dump to `~/.pi/agent/critic-debug/` (pruned to 30 files), dump path appended to the parseError. Ladder input is the final message when it has substance, else the last NON-EMPTY assistant text (`lastNonEmptyAssistantText`, extract.ts, pure — r8's probe died with an empty final message and both steps gated off, 31 min lost); a `stopReason=length` or turn-budget-killed unit counts as TRUNCATED, not failed — it still enters the ladder and its verdict (rescued or not) is tagged `truncated` in TUI + telemetry (partial-review evidence, excluded from gate-report recall data). Fail-open at every seam; rescued verdicts carry `recovered`/`extracted` flags in TUI + telemetry. An all-parse-error run does NOT overwrite the findings sidecar (it would disarm the next fix-review). `resolveRefuteModel` (refute.ts, pure) derives the refute model configured → diverse → first distinct `settings.localModels` entry; null = refute-pass skipped with a notice, never a same-model refute. All `startModel`/`stopModel` calls (background restores included) serialize through one in-process FIFO queue (`enqueueLifecycle`, lib/local-models.mjs — per-process only). Telemetry rows carry `durationMs` plus per-verdict `usage` (prompt/completion/cacheRead token sums + per-unit wall-clock across a critic's units incl. recovery retries; `extensions/critic/usage.ts`, pure — workstream A.2, the data for the prefix-cache scheduling decision). **Sequential units** (A.3, `critic.sequentialUnits`, repo default OFF, ON in crow's settings): units grouped by resolved model (`extensions/critic/schedule.ts`, pure — resolution mirrors run.ts: forceModel > settings override > frontmatter) run strictly serially per group, body-major (same-artifact units adjacent so consecutive requests share the A.1 system+artifact prefix); distinct-model groups still concurrent. Rationale: the locals run `-np 1`, so the pooled loss is multi-turn INTERLEAVING evicting divergent-middle KV, not request concurrency. First A/B (rows 20/21): per-turn wall −30%; cacheRead% tracks turn count, not scheduling — don't headline it. Severity rule: a demonstrated violation of a declared subsystem invariant is ALWAYS a blocker — a prompt rule in both critics AND enforced in code (`extensions/critic/escalate.ts`, pure, TDD'd): critiqueArtifact escalates any parsed non-blocker finding that cites a declared invariant (token-overlap match, critics paraphrase; skipped when the finding asserts the invariant holds) to blocker, tags it `[escalated: invariant]`, fails its verdict, and hands it to the refute-pass like any other blocker (false escalation costs one refutation — round 4 proved prompt adherence is a sample, not a guarantee). Telemetry: per-verdict `escalated` count + row `escalations[]`. **Per-invariant verdict table** (E): when declared subsystems are in play, `buildSubsystemNote` instructs one verdict-table entry per declared invariant — `invariants:[{invariant,status:violated|holds|unclear,evidence}]`, sanitized by `parseVerdict`. A `violated` entry escalates STRUCTURALLY, outranking every phrasing heuristic: it escalates the citing finding (even a coverage-phrased one — round 5's drain race escaped exactly that way) or synthesizes a tagged blocker from the entry's evidence; hallucinated entries matching no declared invariant never escalate; the fuzzy text path stays as fallback for table-less verdicts. Telemetry per verdict: `invariants` counts `{violated,holds,unclear,missing,unmatched}` — `missing` = recall silence, now measurable (an invariant can no longer vanish between runs without leaving a trace). The fixer must run the FULL suite, never change production schema/behavior solely to make a test writable, and fix-or-dispute every finding. The critic extension is now bot-excluded (spawns subagents, manages model servers).
+ - **Permission modes**: `auto` classifies commands/tools via `permissionModes.classifierUrl` (crow's always-on vLLM qwen3.5-4b, `enable_thinking:false`, ~0.2s) with fallback to the session's current model, then fail-closed prompting. `permission-gating.ts` stays active in every mode as the catastrophic backstop.
+ - **Local model orchestration**: `settings.localModels` maps `provider/id` → compose dir + health URL + evicts list (of GROUPS). Since 2026-07-06 the old "one local at a time" policy applies to heavies and the solo-262k 27b only: the 35b and the **copilot 27b** (`crow-local-27b-copilot/qwen3.6-27b`, port 8010, 65536 ctx, text-only/no-mmproj, q8_0 KV cache since H.2 2026-07-07: KV 2176 MiB was 4096, prefill +7%, gen −8%, near-lossless KLD 0.0016) CO-RESIDE (~22GB headroom measured). Groups: 35b+copilot = `standard` evicting `["heavy","solo"]`; solo 27b (port 8006, full 262144, vision) = `solo` evicting `["heavy","standard"]` — so one tap on the 35b still evicts a running solo and restores bot service; heavies evict everything. `critic.refuteModel`/`diverseModel` default (via settings) to the copilot → refutes/probes no longer touch the session model; after a heavy/solo run the copilot self-heals on next use (~20s). Readiness gates on llama.cpp `/health` — `/v1/models` answers 200 while weights are still loading. MTP-flagged composes need image `kyuz0/amd-strix-halo-toolboxes:vulkan-radv-mtp`. NOTE: `--cache-reuse` is INERT for Qwen3.6-27B on every tested image ("cache reuse is not supported by this context", not SWA-related; verified 2026-07-07) — the copilot's cache wins come from llama.cpp slot prefix caching (`cache_prompt`, default-on; identical 23.6k-tok prompt: 100.5s → 162ms). Schedule for identical prefixes, not divergent middles. Backend A/B (H.4): rocm-7.2.1 beats vulkan-radv-mtp by 57% on 27b prefill (234 vs 149 tok/s) and rocm-7.2.3 by 2.5% — keep rocm-7.2.1.
+ - **Perch hub** (`hub/server.mjs`): public listener :4200 (Bearer = `pi-webserver.apiToken`, cookie login) behind Tailscale Serve :8448; registry listener :4201 loopback-only and NEVER in the Serve config (Serve traffic arrives from 127.0.0.1 — not exposing the port is the only protection). Proxies `/s/<pid>/…` to per-session servers with Bearer injected.
+diff --git a/docs/ROADMAP.md b/docs/ROADMAP.md
+index 5b6b769..aa5818c 100644
+--- a/docs/ROADMAP.md
++++ b/docs/ROADMAP.md
+@@ -39,12 +39,16 @@ After ≥30 telemetry rows from normal use, review them (plus ~10 raw critic out
+    (original findings + full files + invariant restatement), not the fix diff alone
+ 3. `userSentFindings:false` on < 30% of failed runs (false-positive proxy)
+ 4. `parseError` rate < 10%
+-5. **Cross-model recall (NEW, precondition)**: ≥8 `source:"probe"` rows (or
+-   card-picked diverse-model runs — `modelOverride` set + `prior` linkage), and
+-   the diverse model finds a blocker the default critics missed on < 25% of
+-   probed diffs. Enable with `critic.recallProbeEvery: 5` while building the
+-   evidence; each probe costs a local-model swap + restore, so expect it on
+-   auto-critiques, not interactive ones.
++5. **Cross-model recall (NEW, precondition)**: ≥8 **informative** `source:"probe"`
++   rows (or card-picked diverse-model runs — `modelOverride` set + `prior`
++   linkage), and the diverse model finds a blocker the default critics missed
++   on < 25% of probed diffs. Informative = at least one verdict that parsed and
++   was NOT rescued from a truncated run (`parseError`/`truncated` rows are
++   noise, not recall evidence — r8's probe died of ctx overflow with zero
++   findings and must not count as "found nothing novel"; 2026-07-07). Enable
++   with `critic.recallProbeEvery: 5` while building the evidence; probes run
++   on the co-resident copilot (no eviction) with a `critic.probeMaxTurns`
++   budget (default 10) so a runaway probe degrades to the extraction ladder.
+ 6. **Fix-review regression check (NEW)**: zero cases in the window where a
+    `fixReview:true` run passed and a later run (or human) found the original
+    invariant still violated. One counterexample resets the clock — this is the
+diff --git a/extensions/critic/debug.ts b/extensions/critic/debug.ts
+index 3fbe617..9eb299e 100644
+--- a/extensions/critic/debug.ts
++++ b/extensions/critic/debug.ts
+@@ -23,6 +23,8 @@ export interface CriticDebugMeta {
+ 	exitCode?: number;
+ 	stopReason?: string;
+ 	stderr?: string;
++	/** Run was killed by a turn budget (probe cap) — truncated, not failed. */
++	budgetExceeded?: boolean;
+ }
+ 
+ const MSG_TRUNC = 20_000;
+@@ -35,7 +37,7 @@ export function formatCriticDebug(meta: CriticDebugMeta, finalOutput: string, me
+ 		`label: ${meta.label || "(none)"}`,
+ 		`model: ${meta.model ?? "(unknown)"}`,
+ 		`cwd: ${meta.cwd}`,
+-		`exitCode: ${meta.exitCode ?? "(n/a)"}  stopReason: ${meta.stopReason ?? "(n/a)"}`,
++		`exitCode: ${meta.exitCode ?? "(n/a)"}  stopReason: ${meta.stopReason ?? "(n/a)"}${meta.budgetExceeded ? "  budgetExceeded: true" : ""}`,
+ 		`parseError: ${meta.parseError}`,
+ 	];
+ 	if (meta.stderr) lines.push(`stderr: ${meta.stderr.slice(0, 2000)}`);
+diff --git a/extensions/critic/extract.test.mjs b/extensions/critic/extract.test.mjs
+index 08c3e8d..5e8f95a 100644
+--- a/extensions/critic/extract.test.mjs
++++ b/extensions/critic/extract.test.mjs
+@@ -89,4 +89,34 @@ const a = (n, c) => { if (!c) { console.error("FAIL", n); process.exit(1); } con
+ 	a("empty envelope → null", (await extractVerdict({ url: "http://x/v1", model: "m", analysisTail: "t", fetchImpl: async () => ({ ok: true, json: async () => ({}) }) })) === null);
+ }
+ 
++// --- lastNonEmptyAssistantText (ladder fallback when the final message is empty) ---
++// r8 probe death (2026-07-07): stopReason=length left an EMPTY final assistant
++// message, so finalOutput gated BOTH ladder steps off — 31 min of analysis
++// undiagnosable. The fallback recovers the last assistant text with substance.
++{
++	const { lastNonEmptyAssistantText } = await import(join(dir, "extract.js"));
++	const msg = (role, parts) => ({ role, content: parts });
++	const txt = (t) => ({ type: "text", text: t });
++
++	const messages = [
++		msg("user", [txt("task")]),
++		msg("assistant", [txt("early analysis with substance")]),
++		msg("toolResult", [txt("file contents")]),
++		msg("assistant", [txt("late analysis: the drain invariant is violated")]),
++		msg("assistant", [txt("   ")]),
++		msg("assistant", [txt("")]),
++	];
++	a("returns the last assistant text with substance, skipping empty/blank tails",
++		lastNonEmptyAssistantText(messages) === "late analysis: the drain invariant is violated");
++
++	a("empty message list → empty string", lastNonEmptyAssistantText([]) === "");
++	a("no assistant text anywhere → empty string",
++		lastNonEmptyAssistantText([msg("user", [txt("hi")]), msg("assistant", [{ type: "toolCall", id: "1" }])]) === "");
++	a("string content handled", lastNonEmptyAssistantText([{ role: "assistant", content: "plain string" }]) === "plain string");
++	a("joins multiple text parts of one message",
++		lastNonEmptyAssistantText([msg("assistant", [txt("part one"), { type: "thinking" }, txt("part two")])]) === "part one\npart two");
++	a("malformed entries tolerated",
++		lastNonEmptyAssistantText([null, 42, { role: "assistant" }, msg("assistant", [txt("ok")]), undefined]) === "ok");
++}
++
+ console.log("extract.test.mjs: all tests passed");
+diff --git a/extensions/critic/extract.ts b/extensions/critic/extract.ts
+index 00cbfd8..fda5621 100644
+--- a/extensions/critic/extract.ts
++++ b/extensions/critic/extract.ts
+@@ -69,6 +69,33 @@ export const VERDICT_JSON_SCHEMA = {
+ 	},
+ } as const;
+ 
++/**
++ * Last assistant text with substance, scanning backwards. Ladder fallback for
++ * the empty-final-message death (2026-07-07 probe row 23: stopReason=length
++ * left a blank final message and gated both ladder steps off — 31 min of
++ * analysis lost). Structurally typed so the module stays pi-import-free;
++ * tolerates malformed entries and both string and part-array content.
++ */
++export function lastNonEmptyAssistantText(messages: unknown[]): string {
++	for (let i = messages.length - 1; i >= 0; i--) {
++		const msg = messages[i] as { role?: unknown; content?: unknown } | null;
++		if (!msg || typeof msg !== "object" || msg.role !== "assistant") continue;
++		let text = "";
++		if (typeof msg.content === "string") {
++			text = msg.content;
++		} else if (Array.isArray(msg.content)) {
++			text = msg.content
++				.filter((p): p is { type: string; text: string } =>
++					!!p && typeof p === "object" && (p as { type?: unknown }).type === "text" &&
++					typeof (p as { text?: unknown }).text === "string")
++				.map((p) => p.text)
++				.join("\n");
++		}
++		if (text.trim()) return text;
++	}
++	return "";
++}
++
+ /** OpenAI-compatible chat body for the extraction call. */
+ export function buildExtractionRequest(analysisTail: string, model: string): Record<string, unknown> {
+ 	const tail = analysisTail.length > TAIL_MAX_CHARS ? analysisTail.slice(-TAIL_MAX_CHARS) : analysisTail;
+diff --git a/extensions/critic/index.ts b/extensions/critic/index.ts
+index ab77127..dbafa0d 100644
+--- a/extensions/critic/index.ts
++++ b/extensions/critic/index.ts
+@@ -31,6 +31,7 @@
+  *     "modelCardTimeoutSec": 45,      // card auto-picks Default after this
+  *     "diverseModel": "crow-local-27b/qwen3.6-27b",
+  *     "recallProbeEvery": 0,          // every Nth critique re-run code-critic on diverseModel (0=off; non-idle runs need a non-evicting diverse model)
++ *     "probeMaxTurns": 10,            // turn budget per probe unit (0=unbudgeted); killed probes degrade to ladder extraction
+  *     "fixDispatch": "chain",         // "chain" (default) | "message" (legacy single turn) | "off" (no send-findings offer)
+  *     "fixMaxClusters": 6,            // cap on fixer-leg clusters; smallest merged beyond the cap
+  *     "fixModel": "crow-local/qwen3.6-35b-a3b",  // optional override; default is the fixer agent's own model
+@@ -75,7 +76,7 @@ import { raceWithPhone } from "../shared/remote-ask.js";
+ import { discoverAgents } from "../subagent/agents.js";
+ import { mergeCarriedFindings, selectSiblings } from "./context.js";
+ import { buildVerdictRecoveryTask, writeCriticDebug } from "./debug.js";
+-import { extractVerdict } from "./extract.js";
++import { extractVerdict, lastNonEmptyAssistantText } from "./extract.js";
+ import {
+ 	applyInvariantEscalations,
+ 	invariantStatusSummary,
+@@ -122,6 +123,10 @@ interface CriticConfig {
+ 	/** Every Nth critique, re-run code-critic on diverseModel (0 = off).
+ 	 *  Non-idle runs fire only when diverseModel co-resides (no eviction). */
+ 	recallProbeEvery?: number;
++	/** Turn budget per probe review unit (default 10, 0 = unbudgeted). Probes
++	 *  are telemetry, so the critics-never-budgeted invariant doesn't apply;
++	 *  the copilot's 65k ctx overflowed on a 12-turn probe (row 23, 31 min). */
++	probeMaxTurns?: number;
+ 	/** Extra pathspecs (git `:(exclude)` globs) to drop from the reviewed diff. */
+ 	excludeGlobs?: string[];
+ 	/** Include same-directory sibling files as critic context (default true). */
+@@ -200,6 +205,9 @@ interface Verdict {
+ 	recovered?: boolean;
+ 	/** "extractor" when the constrained 4b extraction produced this verdict. */
+ 	extractedBy?: string;
++	/** Run was cut off (stopReason=length or probe turn-budget kill) — any
++	 *  rescued verdict is partial-review evidence, weigh it accordingly. */
++	truncated?: boolean;
+ 	/** Per-invariant table (workstream E) — sanitized, when the critic emitted one. */
+ 	invariants?: InvariantEntry[];
+ }
+@@ -306,6 +314,9 @@ export interface CritiqueTelemetryRow {
+ 		recovered?: boolean;
+ 		/** Verdict came from the constrained 4b extraction (watch this rate). */
+ 		extracted?: boolean;
++		/** Run was cut off (stopReason=length / probe turn budget) — a rescued
++		 *  verdict here is partial-review evidence, not full recall data. */
++		truncated?: boolean;
+ 		/** Findings escalated to blocker by invariant⇒blocker enforcement. */
+ 		escalated?: number;
+ 		/** Per-invariant table summary vs the declared set (workstream E).
+@@ -658,6 +669,14 @@ export interface CritiqueArtifactParams {
+ 	 * invariants, fix-review) should be baked into each chunk body by the caller.
+ 	 */
+ 	chunks?: Array<{ label: string; body: string }>;
++	/**
++	 * Per-unit turn budget passed to runSingleAgent. ONLY the recall-probe path
++	 * sets this (critic.probeMaxTurns): probes are telemetry, not fail-closed
++	 * reviews, so a budget kill costs a data point, never a review. A killed
++	 * unit still enters the recovery ladder (truncated, extraction fallback).
++	 * Real critiques must keep this unset — the never-budgeted invariant holds.
++	 */
++	maxTurnsPerUnit?: number;
+ 	/** Telemetry fields */
+ 	ref?: string;
+ 	changedFiles?: string[];
+@@ -731,15 +750,25 @@ export async function critiqueArtifact(p: CritiqueArtifactParams): Promise<Criti
+ 		const r = await runSingleAgent(
+ 			p.cwd, agents, name, task,
+ 			undefined, undefined, undefined, undefined, makeDetails,
++			undefined, p.maxTurnsPerUnit,
+ 		);
+ 		addUsage(r.usage);
+-		const failed = r.exitCode !== 0 || r.stopReason === "error";
++		// A truncated run (stopReason=length, or the probe turn-budget kill) is
++		// NOT a process failure: earlier messages carry real analysis. Let it
++		// enter the ladder instead of hard-failing — probe row 23 (2026-07-07)
++		// overflowed the copilot's 65k ctx, left an EMPTY final message, and
++		// both ladder steps were gated off: 31 minutes of review lost.
++		const truncated = !!r.budgetExceeded || r.stopReason === "length";
++		const failed = !truncated && (r.exitCode !== 0 || r.stopReason === "error");
+ 		const finalOutput = getFinalOutput(r.messages);
++		// Ladder input: the final message when it has substance, else the last
++		// assistant text that does (the empty-final-message fallback).
++		const analysisTail = finalOutput.trim() ? finalOutput : lastNonEmptyAssistantText(r.messages as unknown[]);
+ 		let verdict: Verdict = failed
+ 			? { passed: false, findings: [], parseError: r.errorMessage || r.stderr.slice(0, 200) || "critic process failed" }
+ 			: parseVerdict(finalOutput);
+ 		let raw = finalOutput;
+-		if (verdict.parseError && !failed && finalOutput.trim()) {
++		if (verdict.parseError && !failed && analysisTail.trim()) {
+ 			// Recovery ladder step 1 (workstream D): constrained extraction on
+ 			// the always-on local 4b — json_schema output, instant, no slot
+ 			// contention. Fail-open: null falls through to step 2.
+@@ -748,15 +777,15 @@ export async function critiqueArtifact(p: CritiqueArtifactParams): Promise<Criti
+ 				const ex = await extractVerdict({
+ 					url: exUrl,
+ 					model: cfg.extractorModel ?? "qwen3.5-4b",
+-					analysisTail: finalOutput,
++					analysisTail,
+ 				});
+ 				if (ex) {
+ 					verdict = { ...ex, recovered: true, extractedBy: "extractor" };
+-					raw = `${finalOutput}\n\n[verdict extracted by the constrained local extractor]\n${JSON.stringify(ex)}`;
++					raw = `${analysisTail}\n\n[verdict extracted by the constrained local extractor]\n${JSON.stringify(ex)}`;
+ 				}
+ 			}
+ 		}
+-		if (verdict.parseError && !failed && finalOutput.trim()) {
++		if (verdict.parseError && !failed && analysisTail.trim()) {
+ 			// Ladder step 2 — one-turn verdict recovery: the run completed but
+ 			// drifted past the verdict contract (seen after multi-hour
+ 			// fix-review runs). Hand the SAME agent its own analysis and ask
+@@ -764,7 +793,7 @@ export async function critiqueArtifact(p: CritiqueArtifactParams): Promise<Criti
+ 			// leaves the fail-closed error.
+ 			try {
+ 				const r2 = await runSingleAgent(
+-					p.cwd, agents, name, buildVerdictRecoveryTask(finalOutput),
++					p.cwd, agents, name, buildVerdictRecoveryTask(analysisTail),
+ 					undefined, undefined, undefined, undefined, makeDetails, undefined, 4,
+ 				);
+ 				addUsage(r2.usage);
+@@ -772,13 +801,14 @@ export async function critiqueArtifact(p: CritiqueArtifactParams): Promise<Criti
+ 					const v2 = parseVerdict(getFinalOutput(r2.messages));
+ 					if (!v2.parseError) {
+ 						verdict = { ...v2, recovered: true };
+-						raw = `${finalOutput}\n\n[verdict recovered by one-turn retry]\n${getFinalOutput(r2.messages)}`;
++						raw = `${analysisTail}\n\n[verdict recovered by one-turn retry]\n${getFinalOutput(r2.messages)}`;
+ 					}
+ 				}
+ 			} catch {
+ 				// recovery is best-effort; the original parse error stands
+ 			}
+ 		}
++		if (truncated) verdict.truncated = true;
+ 		if (verdict.parseError) {
+ 			// Fail-closed is correct but was undiagnosable: persist the raw output
+ 			// so a critic that worked for hours and emitted no verdict can be
+@@ -789,8 +819,9 @@ export async function critiqueArtifact(p: CritiqueArtifactParams): Promise<Criti
+ 					agent: name, label, model: r.model, cwd: p.cwd,
+ 					parseError: verdict.parseError, exitCode: r.exitCode,
+ 					stopReason: r.stopReason, stderr: failed ? r.stderr : undefined,
++					budgetExceeded: r.budgetExceeded || undefined,
+ 				},
+-				finalOutput,
++				analysisTail || finalOutput,
+ 				(r.messages as unknown[]).slice(-6),
+ 			);
+ 			if (dump) verdict.parseError += ` [raw: ${dump}]`;
+@@ -848,6 +879,7 @@ export async function critiqueArtifact(p: CritiqueArtifactParams): Promise<Criti
+ 				: undefined,
+ 			recovered: mine.some((x) => x.verdict.recovered) || undefined,
+ 			extractedBy: mine.some((x) => x.verdict.extractedBy) ? "extractor" : undefined,
++			truncated: mine.some((x) => x.verdict.truncated) || undefined,
+ 			invariants: tables.length > 0 ? tables : undefined,
+ 		};
+ 		return { agent: name, verdict, raw: mine.map((x) => x.raw).join("\n\n"), model: mine[0]?.model };
+@@ -890,6 +922,7 @@ export async function critiqueArtifact(p: CritiqueArtifactParams): Promise<Criti
+ 				model: v.model,
+ 				recovered: v.verdict.recovered,
+ 				extracted: v.verdict.extractedBy ? true : undefined,
++				truncated: v.verdict.truncated,
+ 				escalated: escalations.filter((e) => e.agent === v.agent).length || undefined,
+ 				invariants:
+ 					declaredInvariants.length > 0
+@@ -1345,7 +1378,7 @@ export default function (pi: ExtensionAPI) {
+ 			for (const v of verdicts) {
+ 				const icon = v.verdict.passed ? "✓" : "✗";
+ 				lines.push(
+-					`${icon} **${v.agent}**${v.verdict.recovered ? " (verdict recovered by one-turn retry)" : ""}${v.verdict.parseError ? ` — ${v.verdict.parseError} (fail-closed)` : ""}`,
++					`${icon} **${v.agent}**${v.verdict.extractedBy ? " (verdict extracted by the constrained local extractor)" : v.verdict.recovered ? " (verdict recovered by one-turn retry)" : ""}${v.verdict.truncated ? " (run truncated — partial review)" : ""}${v.verdict.parseError ? ` — ${v.verdict.parseError} (fail-closed)` : ""}`,
+ 				);
+ 				for (const f of v.verdict.findings) {
+ 					lines.push(`  - [${f.severity ?? "?"}/${f.category ?? "?"}] ${f.detail ?? ""}`);
+@@ -1574,6 +1607,10 @@ export default function (pi: ExtensionAPI) {
+ 				ref: base.ref,
+ 				changedFiles: base.changedFiles,
+ 				diffStats: base.diffStats,
++				// Probe-only turn budget: the diverse copilot's 65k ctx overflowed
++				// on a 12-turn file-read-heavy probe (row 23: 31 min, empty final
++				// message). A budget kill degrades to the truncated-run ladder.
++				maxTurnsPerUnit: (cfg.probeMaxTurns ?? 10) || undefined,
+ 			});
+ 			if ("missing" in out) return;
+ 			out.row.probeOf = mainRow.ts;
+diff --git a/extensions/subagent/run.ts b/extensions/subagent/run.ts
+index 6d87f4b..d04c78a 100644
+--- a/extensions/subagent/run.ts
++++ b/extensions/subagent/run.ts
+@@ -148,7 +148,9 @@ export async function runSingleAgent(
+ 	// tool's executor and the tournament's attempt runner. THE INVARIANT THAT
+ 	// MATTERS: critics call runSingleAgent with NO budget and are never
+ 	// budget-killed (a killed critic = missing fenced verdict = failed review,
+-	// fail-closed).
++	// fail-closed). ONE documented exception: recall-probe units
++	// (critic.probeMaxTurns) — probes are telemetry, and a budget-killed probe
++	// degrades to the truncated-run extraction ladder instead of failing a review.
+ 	maxTurns?: number,
+ ): Promise<SingleResult> {
+ 	const agent = agents.find((a) => a.name === agentName);
+diff --git a/scripts/critic-gate-report.py b/scripts/critic-gate-report.py
+index de4d71a..175e7f5 100755
+--- a/scripts/critic-gate-report.py
++++ b/scripts/critic-gate-report.py
+@@ -78,18 +78,31 @@ def main():
+     # 4. parseError rate < 10% (per verdict; recovered verdicts don't count as errors)
+     verdicts = [v for r in rows for v in r.get("verdicts", [])]
+     perr = [v for v in verdicts if v.get("parseError")]
++    perr_probe = [v for r in rows if r.get("source") == "probe" for v in r.get("verdicts", []) if v.get("parseError")]
+     recovered = [v for v in verdicts if v.get("recovered")]
+     ok4 = len(verdicts) > 0 and len(perr) / len(verdicts) < 0.10
+     print(f"4. verdict parse-error rate   {pct(len(perr), len(verdicts))}  target <10%  -> {status(ok4, not verdicts)}"
+-          + (f"   [{len(recovered)} recovered by retry]" if recovered else ""))
++          + (f"   [{len(recovered)} recovered by retry]" if recovered else "")
++          + (f"   [{len(perr_probe)} of the errors from probe rows]" if perr_probe else ""))
+     failures += 0 if ok4 else 1
+ 
+-    # 5. cross-model recall: >=8 probe/diverse rows, novel-blocker rate < 25%
+-    probes = [r for r in rows if r.get("source") == "probe" or (r.get("modelOverride") and r.get("prior"))]
++    # 5. cross-model recall: >=8 INFORMATIVE probe/diverse rows, novel-blocker
++    # rate < 25%. A probe whose verdict parse-errored — or was rescued from a
++    # truncated run (stopReason=length / turn-budget kill) — says nothing about
++    # what the diverse model would have found on a full review; counting it as
++    # "found no novel blocker" inflates the pass rate (r8 row 23: 65k-ctx
++    # overflow, empty output, 31 min — that row is noise, not recall evidence).
++    def informative(r):
++        return any(not v.get("parseError") and not v.get("truncated") for v in r.get("verdicts", []))
++
++    probes_all = [r for r in rows if r.get("source") == "probe" or (r.get("modelOverride") and r.get("prior"))]
++    probes = [r for r in probes_all if informative(r)]
+
+--- DIFF 2 ---
+commit 7163cc58369a1793af44bc8c7a8a8590b44db19c
+Author: Kevin Hopper <no-reply@maestro.press>
+Date:   Tue Jul 7 01:33:01 2026 -0500
+
+    critic: A.3 sequentialUnits experiment flag — serialize same-model units body-major onto the warm slot
+    
+    The 35b serves one slot (-np 1), so pooled units already serialize per
+    request; the remaining cache loss is multi-turn INTERLEAVING — unit A's
+    turns evict unit B's divergent-middle KV between B's turns, leaving only
+    the A.1 system+artifact prefix. critic.sequentialUnits (default OFF) runs
+    each resolved model's units strictly serially, ordered body-major so
+    same-artifact units hand off the longest shared prefix; distinct-model
+    groups still run concurrently (cap 4).
+    
+    - extensions/critic/schedule.ts (pure, TDD): planSequentialGroups +
+      unitModelKey (mirrors run.ts resolution: forceModel > settings
+      override > frontmatter); permutation-safe, never crosses model groups
+    - subagent/run.ts: export modelOverrideFor for the grouping key
+    - telemetry rows carry sequentialUnits:true as the A/B marker; compare
+      per-verdict usage.cacheRead/input + durationMs against pooled rows
+---
+ ...026-07-06-local-harness-quality-speed-design.md | 13 +++
+ extensions/critic/index.ts                         | 37 ++++++++-
+ extensions/critic/schedule.test.mjs                | 93 ++++++++++++++++++++++
+ extensions/critic/schedule.ts                      | 58 ++++++++++++++
+ extensions/subagent/run.ts                         |  6 +-
+ package.json                                       |  2 +-
+ 6 files changed, 204 insertions(+), 5 deletions(-)
+
+diff --git a/docs/specs/2026-07-06-local-harness-quality-speed-design.md b/docs/specs/2026-07-06-local-harness-quality-speed-design.md
+index 84d3a91..99ff77c 100644
+--- a/docs/specs/2026-07-06-local-harness-quality-speed-design.md
++++ b/docs/specs/2026-07-06-local-harness-quality-speed-design.md
+@@ -143,6 +143,19 @@ extract module (unit), live 4b smoke via curl (done — works).
+    serially (per model server) instead of the concurrency-4 pool, to land on
+    the warm slot. Measure A/B with (2). Keep OFF by default until the numbers
+    justify it (decode time may dominate; sequential could lose).
++   **SHIPPED 2026-07-07 (default OFF).** Key nuance found while building: the
++   35b runs `-np 1`, so pooled units already serialize per REQUEST — the
++   remaining loss is multi-turn INTERLEAVING (unit A's turn evicts unit B's
++   divergent-middle KV between B's turns; only the A.1 system+artifact prefix
++   survives). `extensions/critic/schedule.ts` (pure, TDD):
++   `planSequentialGroups` partitions units by resolved model (`unitModelKey`
++   mirrors run.ts order: forceModel > settings override > frontmatter) and
++   orders each group BODY-major — same-artifact/chunk units adjacent, since
++   consecutive same-body units share system+artifact while
++   same-critic-next-chunk shares only the system prompt. Model groups still
++   run concurrently (cap 4). Telemetry rows carry `sequentialUnits: true` as
++   the A/B marker; compare per-verdict `usage.cacheRead`/`input` and
++   `durationMs` against pooled rows on comparable diffs.
+ 
+ **Constraint.** The 35b (`--mmproj`) cannot take `--cache-reuse` and must not
+ be restarted casually (bots). Near-term reuse benefits accrue on the copilot —
+diff --git a/extensions/critic/index.ts b/extensions/critic/index.ts
+index 164c815..ab77127 100644
+--- a/extensions/critic/index.ts
++++ b/extensions/critic/index.ts
+@@ -35,7 +35,8 @@
+  *     "fixMaxClusters": 6,            // cap on fixer-leg clusters; smallest merged beyond the cap
+  *     "fixModel": "crow-local/qwen3.6-35b-a3b",  // optional override; default is the fixer agent's own model
+  *     "extractorUrl": "http://…/v1",  // constrained verdict extraction endpoint (default: permissionModes.classifierUrl)
+- *     "extractorModel": "qwen3.5-4b"
++ *     "extractorModel": "qwen3.5-4b",
++ *     "sequentialUnits": false        // A.3: serialize same-model units (body-major) onto the warm slot
+  *   }
+  *
+  * Fix-review mode: every critique persists its findings per-cwd
+@@ -88,9 +89,11 @@ import type { FindingRef } from "./cluster.js";
+ import { applyRefutations, parseRefuterVerdict, REFUTER_INSTRUCTION, resolveRefuteModel, type RefutableFinding } from "./refute.js";
+ import { aggregateUnitUsage, type AggregatedUsage } from "./usage.js";
+ import { roleTaskSection, splitCriticPrompt } from "./prompt.js";
++import { planSequentialGroups, unitModelKey } from "./schedule.js";
+ import {
+ 	getFinalOutput,
+ 	mapWithConcurrencyLimit,
++	modelOverrideFor,
+ 	runSingleAgent,
+ 	type SingleResult,
+ 	type SubagentDetails,
+@@ -142,6 +145,12 @@ interface CriticConfig {
+ 	extractorUrl?: string;
+ 	/** Model id at extractorUrl (default "qwen3.5-4b"). */
+ 	extractorModel?: string;
++	/** A.3 experiment: run same-model review units strictly serially
++	 *  (body-major order) instead of the concurrency-4 pool, so multi-turn
++	 *  units don't interleave on the single local slot and each unit's
++	 *  prefill rides the warm KV cache. Default OFF — A/B via telemetry
++	 *  usage rows before flipping. */
++	sequentialUnits?: boolean;
+ }
+ 
+ /**
+@@ -308,6 +317,8 @@ export interface CritiqueTelemetryRow {
+ 	}>;
+ 	/** Wall-clock of the whole critiqueArtifact call (all units + recoveries). */
+ 	durationMs?: number;
++	/** True when this run used A.3 sequential unit scheduling (A/B marker). */
++	sequentialUnits?: boolean;
+ 	agree: boolean;
+ 	userSentFindings: boolean | null;
+ 	prior: { ts: number; passed: boolean; filesOverlap: number } | null;
+@@ -793,7 +804,28 @@ export async function critiqueArtifact(p: CritiqueArtifactParams): Promise<Criti
+ 	const units = p.chunks?.length
+ 		? criticNames.flatMap((name) => p.chunks!.map((c) => ({ name, body: c.body, label: c.label })))
+ 		: criticNames.map((name) => ({ name, body: p.artifact, label: "" }));
+-	const partials = await mapWithConcurrencyLimit(units, 4, (u) => runOne(u.name, u.body, u.label));
++	// A.3 (critic.sequentialUnits): the local servers expose one slot, so
++	// pooled multi-turn units interleave turns and evict each other's
++	// divergent-middle KV between turns. Sequential mode runs each model's
++	// units serially (body-major — same-artifact units adjacent, sharing the
++	// A.1 system+artifact prefix); distinct-model groups still run
++	// concurrently. Default OFF until the A.2 usage rows justify it.
++	const partials = cfg.sequentialUnits
++		? (
++				await mapWithConcurrencyLimit(
++					planSequentialGroups(units, (u) => {
++						const agent = agents.find((x) => x.name === u.name) as { model?: string; forceModel?: string } | undefined;
++						return unitModelKey(agent, modelOverrideFor(u.name));
++					}),
++					4,
++					async (group) => {
++						const done: Awaited<ReturnType<typeof runOne>>[] = [];
++						for (const u of group) done.push(await runOne(u.name, u.body, u.label));
++						return done;
++					},
++				)
++			).flat()
++		: await mapWithConcurrencyLimit(units, 4, (u) => runOne(u.name, u.body, u.label));
+ 
+ 	// Merge per critic: passed = every chunk passed; findings concatenated
+ 	// (chunk-labelled when fanned out); parseError surfaced if any chunk failed
+@@ -871,6 +903,7 @@ export async function critiqueArtifact(p: CritiqueArtifactParams): Promise<Criti
+ 		prior: findPrior(p.cwd, p.changedFiles ?? []),
+ 		changedFiles: p.changedFiles,
+ 		durationMs: Date.now() - startedAt,
++		sequentialUnits: cfg.sequentialUnits || undefined,
+ 	};
+ 	if (escalations.length > 0) row.escalations = escalations;
+ 	return { verdicts, row };
+diff --git a/extensions/critic/schedule.test.mjs b/extensions/critic/schedule.test.mjs
+new file mode 100644
+index 0000000..2293fe3
+--- /dev/null
++++ b/extensions/critic/schedule.test.mjs
+@@ -0,0 +1,93 @@
++/**
++ * Tests for schedule.ts — sequential-unit planning (workstream A.3).
++ *
++ * The 35b serves one slot (-np 1): concurrent multi-turn critic units
++ * interleave turns on that slot, so each turn evicts the other conversation's
++ * divergent-middle KV and only the shared system+artifact prefix survives.
++ * `critic.sequentialUnits` runs same-model units strictly serially instead;
++ * within a model group, units sharing the same body run back-to-back
++ * (body-major) so consecutive requests share the longest possible prefix —
++ * after code-critic finishes chunk 1, test-critic on chunk 1 rides
++ * system+artifact; same-critic-next-chunk would share only the system prompt.
++ *
++ * Run from the repo root: node extensions/critic/schedule.test.mjs
++ */
++import { execFileSync } from "node:child_process";
++import { mkdtempSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++const out = join(mkdtempSync(join(tmpdir(), "sched-")), "schedule.mjs");
++execFileSync("npx", ["esbuild", "extensions/critic/schedule.ts", `--outfile=${out}`, "--format=esm", "--log-level=warning"]);
++const { planSequentialGroups, unitModelKey } = await import(out);
++
++const a = (n, c) => { if (!c) { console.error("FAIL", n); process.exit(1); } console.log("ok", n); };
++const ids = (groups) => groups.map((g) => g.map((u) => u.id));
++
++// --- unitModelKey: mirrors run.ts resolution order (forceModel > settings override > frontmatter) ---
++a("forceModel wins", unitModelKey({ model: "m/frontmatter", forceModel: "m/forced" }, "m/override") === "m/forced");
++a("settings override beats frontmatter", unitModelKey({ model: "m/frontmatter" }, "m/override") === "m/override");
++a("frontmatter when nothing else", unitModelKey({ model: "m/frontmatter" }, undefined) === "m/frontmatter");
++a("default key when agent has no model", unitModelKey({}, undefined) === "(default)");
++a("default key when agent missing", unitModelKey(undefined, undefined) === "(default)");
++a("blank frontmatter model falls to default", unitModelKey({ model: "  " }, undefined) === "(default)");
++
++// --- planSequentialGroups ---
++a("empty input", planSequentialGroups([], () => "x").length === 0);
++
++// Single-artifact critique: 2 critics, same model, same body → ONE serial group, order preserved.
++{
++	const units = [
++		{ id: "code", body: "ARTIFACT" },
++		{ id: "test", body: "ARTIFACT" },
++	];
++	const g = planSequentialGroups(units, () => "m/35b");
++	a("same model = one group", g.length === 1);
++	a("single-artifact order preserved", JSON.stringify(ids(g)) === JSON.stringify([["code", "test"]]));
++}
++
++// Distinct models → distinct groups (run concurrently by the caller).
++{
++	const units = [
++		{ id: "code", body: "A" },
++		{ id: "probe", body: "A" },
++	];
++	const g = planSequentialGroups(units, (u) => (u.id === "probe" ? "m/copilot" : "m/35b"));
++	a("distinct models = two groups", g.length === 2);
++	a("groups keep first-seen model order", JSON.stringify(ids(g)) === JSON.stringify([["code"], ["probe"]]));
++}
++
++// Chunked fan-out, one model: input is critic-major (code:c1, code:c2, test:c1,
++// test:c2); the plan is body-major (c1:code, c1:test, c2:code, c2:test) so
++// adjacent units share system+artifact, not just the system prompt.
++{
++	const units = [
++		{ id: "code:c1", body: "CHUNK1" },
++		{ id: "code:c2", body: "CHUNK2" },
++		{ id: "test:c1", body: "CHUNK1" },
++		{ id: "test:c2", body: "CHUNK2" },
++	];
++	const g = planSequentialGroups(units, () => "m/35b");
++	a("chunked plan is body-major", JSON.stringify(ids(g)) === JSON.stringify([["code:c1", "test:c1", "code:c2", "test:c2"]]));
++}
++
++// Body-major reorder never crosses model groups.
++{
++	const units = [
++		{ id: "code:c1", body: "CHUNK1" },
++		{ id: "code:c2", body: "CHUNK2" },
++		{ id: "div:c1", body: "CHUNK1" },
++	];
++	const g = planSequentialGroups(units, (u) => (u.id.startsWith("div") ? "m/copilot" : "m/35b"));
++	a("reorder stays within its model group", JSON.stringify(ids(g)) === JSON.stringify([["code:c1", "code:c2"], ["div:c1"]]));
++}
++
++// Every input unit appears exactly once in the plan (no drops, no dupes).
++{
++	const units = Array.from({ length: 7 }, (_, i) => ({ id: `u${i}`, body: `B${i % 3}` }));
++	const g = planSequentialGroups(units, (u) => `m${u.id.length % 2}`);
++	const flat = g.flat().map((u) => u.id).sort();
++	a("plan is a permutation of the input", JSON.stringify(flat) === JSON.stringify(units.map((u) => u.id).sort()));
++}
++
++console.log("schedule.test.mjs: all passed");
+diff --git a/extensions/critic/schedule.ts b/extensions/critic/schedule.ts
+new file mode 100644
+index 0000000..11ae398
+--- /dev/null
++++ b/extensions/critic/schedule.ts
+@@ -0,0 +1,58 @@
++/**
++ * Sequential-unit planning for critiques (workstream A.3).
++ *
++ * The local servers expose ONE slot each (35b: -np 1), so "concurrent" units
++ * already serialize per REQUEST server-side — but critic units are multi-turn
++ * agents, and interleaved turns from two conversations evict each other's
++ * divergent-middle KV on the shared slot; only the byte-identical
++ * system+artifact prefix (A.1) survives an interleave. `critic.sequentialUnits`
++ * instead runs each model's units strictly serially (model groups still run
++ * concurrently), so every conversation keeps its own cache warm across its
++ * turns and hands the shared prefix to the next unit when it finishes.
++ *
++ * Within a model group the plan is BODY-major: units reviewing the same
++ * artifact/chunk body run back-to-back, because consecutive same-body units
++ * share system prompt + artifact, while same-critic-next-chunk units share
++ * only the system prompt.
++ *
++ * Pure module — no pi imports; tested by schedule.test.mjs.
++ */
++
++/** Model resolution mirror of subagent/run.ts: forceModel > settings
++ *  override > agent frontmatter. Returns a stable grouping key, never
++ *  undefined — unresolved units group together under "(default)". */
++export function unitModelKey(
++	agent: { model?: string; forceModel?: string } | undefined,
++	settingsOverride: string | undefined,
++): string {
++	const pick = (v: string | undefined) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
++	return pick(agent?.forceModel) ?? pick(settingsOverride) ?? pick(agent?.model) ?? "(default)";
++}
++
++/**
++ * Partition units into per-model groups (first-seen model order, so the
++ * caller's concurrency treats groups like it treated units); within each
++ * group, reorder body-major (first-seen body order, original relative order
++ * among same-body units). The result is a permutation of the input.
++ */
++export function planSequentialGroups<T extends { body: string }>(
++	units: T[],
++	keyOf: (u: T) => string,
++): T[][] {
++	const byModel = new Map<string, T[]>();
++	for (const u of units) {
++		const k = keyOf(u);
++		const g = byModel.get(k);
++		if (g) g.push(u);
++		else byModel.set(k, [u]);
++	}
++	return [...byModel.values()].map((group) => {
++		const byBody = new Map<string, T[]>();
++		for (const u of group) {
++			const b = byBody.get(u.body);
++			if (b) b.push(u);
++			else byBody.set(u.body, [u]);
++		}
++		return [...byBody.values()].flat();
+
+Now write your detailed review:

@@ -1,0 +1,47 @@
+services:
+  llamacpp-vulkan-qwen36-35b-a3b:
+    image: kyuz0/amd-strix-halo-toolboxes:rocm-7.2.1
+    container_name: llamacpp-vulkan-qwen36-35b-a3b
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "${VIDEO_GID}"
+      - "${RENDER_GID}"
+    env_file:
+      - ${HOME}/.crow/env/rocm.env
+    volumes:
+      - ${LLM_CACHE}:/models
+    ports:
+      - "${CROW_TAILSCALE_IP}:8003:8000"
+    entrypoint: ["llama-server"]
+    command:
+      # 2026-07-01: synced with the RUNNING container config — the old
+      # /models/qwen36-35b-a3b/ dir (non-MTP Q6_K) was deleted in the disk
+      # cleanup; the MTP Q5_K_XL copy below is the live one.
+      # Model files in /home/kh0pp/llm/hf-cache/qwen36-35b-a3b-mtp/ from:
+      #   https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF
+      # H.2/H.3 OVERNIGHT VARIANT: f16 KV, MTP=off
+      - -m
+      - /models/qwen36-35b-a3b-mtp/Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf
+      - --mmproj
+      - /models/qwen36-35b-a3b-mtp/mmproj-F16.gguf
+      - --alias
+      - qwen3.6-35b-a3b
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - -ngl
+      - "999"
+      - -fa
+      - "on"
+      - --no-mmap
+      - -c
+      - "262144"
+      - -np
+      - "1"
+      - --jinja
+    restart: "no"
+    ipc: host
+    shm_size: 16g
