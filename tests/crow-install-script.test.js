@@ -54,4 +54,31 @@ test("F-5: ask_line returns empty headlessly instead of failing under set -e", (
   assert.match(r.stdout, /got:\[\]/);
 });
 
+test("F-6: no pipeline consumes `tailscale status --json` (captured into TS_JSON instead)", () => {
+  assert.doesNotMatch(src(), /tailscale status --json[^\n]*\|/);
+  assert.match(src(), /TS_JSON=/);
+});
+
+test("F-6: no `| head` pipelines remain in the installer", () => {
+  assert.doesNotMatch(src(), /\|\s*head\b/);
+});
+
+test("F-6: ufw enable is --force, not echo-piped", () => {
+  assert.doesNotMatch(src(), /echo[^\n]*\|\s*sudo ufw enable/);
+  assert.match(src(), /sudo ufw --force enable/);
+});
+
+test("F-7: tailscale rename prompt defaults N (never renames headlessly)", () => {
+  assert.match(src(), /ask_yn "Set Tailscale hostname to 'crow'\?" N/);
+});
+
+test("F-6/F-7: helper extraction — first HostName in TS_JSON via bash regex, no pipes", () => {
+  const fakeJson = JSON.stringify({ Self: { HostName: "black-swan", DNSName: "black-swan.tn.ts.net." }, Peer: { k: { HostName: "crow", DNSName: "crow.tn.ts.net." } } });
+  const r = runWithHelpers(`TS_JSON='${fakeJson}'; ts_first_field HostName; echo; ts_first_field DNSName`);
+  assert.equal(r.status, 0, r.stderr);
+  const [host, dns] = r.stdout.trim().split("\n");
+  assert.equal(host, "black-swan");
+  assert.equal(dns, "black-swan.tn.ts.net.");
+});
+
 // NOTE(A4): the "no raw read -p remains" end-state pin is added by Task A4, after A2/A3 migrate the remaining prompts.

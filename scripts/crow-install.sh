@@ -88,6 +88,17 @@ ask_line() {
   printf "%s" "$reply"
 }
 
+# ts_first_field <JsonKey> — first "<JsonKey>":"value" in $TS_JSON, no pipes
+# (F-INSTALL-6: piping through grep then head SIGPIPEs under pipefail on big tailnets).
+# The first match is always the Self block (tailscale status --json emits
+# Self before Peer).
+ts_first_field() {
+  local key="$1"
+  if [[ ${TS_JSON:-} =~ \"${key}\":\"([^\"]*)\" ]]; then
+    printf "%s" "${BASH_REMATCH[1]}"
+  fi
+}
+
 # Test seam: tests source the helpers without executing the install.
 if [ "${CROW_INSTALL_SOURCE_ONLY:-}" = "1" ]; then
   return 0 2>/dev/null || exit 0
@@ -295,7 +306,7 @@ sudo ufw default deny incoming
 sudo ufw default allow outgoing
 sudo ufw allow 22/tcp comment 'SSH'
 sudo ufw allow 443/tcp comment 'HTTPS (Caddy)'
-echo "y" | sudo ufw enable
+sudo ufw --force enable
 log "Firewall enabled (SSH + HTTPS only)"
 
 # Install ufw-docker to fix Docker/UFW conflict
@@ -327,47 +338,31 @@ if command -v tailscale &>/dev/null; then
   if tailscale status &>/dev/null; then
     log "Tailscale is authenticated"
 
-    # Check if 'crow' hostname is already taken on the tailnet
-    CROW_HOSTNAME_TAKEN=false
-    CURRENT_TS_HOSTNAME=$(tailscale status --json 2>/dev/null | grep -o '"HostName":"[^"]*"' | head -1 | cut -d'"' -f4)
+    # Capture status JSON ONCE — never pipe it (F-INSTALL-6).
+    set +e
+    TS_JSON="$(tailscale status --json 2>/dev/null)"
+    set -e
+    CURRENT_TS_HOSTNAME="$(ts_first_field HostName)"
 
     if [ "$CURRENT_TS_HOSTNAME" = "crow" ]; then
       log "Tailscale hostname is already set to 'crow'"
-    else
-      # Check if another device on the tailnet is using 'crow'
-      if tailscale status --json 2>/dev/null | grep -q '"HostName":"crow"'; then
-        CROW_HOSTNAME_TAKEN=true
-      fi
-
-      if [ "$CROW_HOSTNAME_TAKEN" = true ]; then
-        warn "Tailscale hostname 'crow' is already taken by another device on your tailnet."
-        SUGGESTED="crow-$(hostname)"
-        echo ""
-        echo "  Suggested alternatives:"
-        echo "    - crow-2"
-        echo "    - $SUGGESTED"
-        echo ""
-        read -p "  Enter a Tailscale hostname (or press Enter to skip): " TS_HOSTNAME
-        echo
-        if [ -n "$TS_HOSTNAME" ]; then
-          sudo tailscale set --hostname="$TS_HOSTNAME"
-          log "Tailscale hostname set to '$TS_HOSTNAME' — access Crow at http://$TS_HOSTNAME/"
-        else
-          warn "Skipped Tailscale hostname setup"
-        fi
+    elif [[ $TS_JSON == *'"HostName":"crow"'* ]]; then
+      warn "Tailscale hostname 'crow' is already taken by another device on your tailnet."
+      TS_HOSTNAME="$(ask_line "Enter a Tailscale hostname (or press Enter to skip): ")"
+      if [ -n "$TS_HOSTNAME" ]; then
+        sudo tailscale set --hostname="$TS_HOSTNAME"
+        log "Tailscale hostname set to '$TS_HOSTNAME'"
       else
-        echo ""
-        echo "  Would you like to set this machine's Tailscale hostname to 'crow'?"
-        echo "  This lets you access Crow at http://crow/ from any device on your Tailnet."
-        echo ""
-        read -p "  Set Tailscale hostname to 'crow'? [Y/n] " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-          sudo tailscale set --hostname=crow
-          log "Tailscale hostname set to 'crow' — access Crow at http://crow/ from your Tailnet"
-        else
-          warn "Skipped Tailscale hostname setup"
-        fi
+        warn "Skipped Tailscale hostname setup"
+      fi
+    else
+      # Destructive rename: default NO; headless installs never rename
+      # (F-INSTALL-7 — the old default-Y renamed fresh nodes to 'crow').
+      if ask_yn "Set Tailscale hostname to 'crow'?" N; then
+        sudo tailscale set --hostname=crow
+        log "Tailscale hostname set to 'crow'"
+      else
+        warn "Keeping Tailscale hostname '${CURRENT_TS_HOSTNAME:-unknown}'"
       fi
     fi
   else
