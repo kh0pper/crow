@@ -15,7 +15,9 @@
 import Hypercore from "hypercore";
 import { mkdirSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { createHash } from "node:crypto";
 import { sign, verify } from "./identity.js";
+import { emitGroupUpsert } from "./group-sync.js";
 import { resolveDataDir } from "../db.js";
 import { isSyncable } from "../gateway/dashboard/settings/sync-allowlist.js";
 import { normalizePubkey } from "./pubkey-util.js";
@@ -69,6 +71,11 @@ export const SYNCED_TABLES = [
   // below, which NULLs project_id on the wire.
   "research_notes",
   "glasses_note_sessions",
+  // Phase 3 (groups follow the user): PLAIN contact groups (room_uid IS NULL)
+  // sync so a user's organizational groups + membership follow them across
+  // instances. Multi-party ROOMS (room_uid NOT NULL) are gated OUT by
+  // shouldSyncRow — they have their own Nostr fan-out.
+  "contact_groups",
 ];
 
 // Columns to exclude from sync payloads (security-sensitive or instance-local)
@@ -90,6 +97,13 @@ export const EXCLUDED_COLUMNS = {
   // is per-device (each instance computes its own unread badge). lamport_ts is
   // sync metadata carried in the entry envelope, not the row.
   messages: ["id", "contact_id", "is_read", "lamport_ts"],
+  // Phase 3 groups: group_uid is the stable wire key; id is per-instance
+  // AUTOINCREMENT (never portable); created_at differs when two instances form
+  // the same group independently (spurious conflicts). room_uid/host_crow_id/mode
+  // are LEFT on the wire (NULL for a plain group) so the apply-side shouldSyncRow
+  // can still reject a malicious room-bearing entry; lamport_ts rides the row and
+  // is dropped on apply. Membership rides the attached `members` wire-map.
+  contact_groups: ["id", "created_at"],
 };
 
 // Per-table outbound mutations applied right after the EXCLUDED_COLUMNS strip.
@@ -180,6 +194,13 @@ function shouldSyncRow(table, row) {
     // group ids (grp_<ts>, own room sync) or an unresolved contact — never sync.
     if (!row) return false;
     return Boolean(row.nostr_event_id) && Boolean(row.crow_id);
+  }
+  if (table === "contact_groups") {
+    if (!row) return false;
+    // Rooms (room_uid NOT NULL) sync via their own Nostr fan-out — never here.
+    // `!= null` catches both null and undefined (a delete row omits room_uid).
+    if (row.room_uid != null) return false;
+    return Boolean(row.group_uid);
   }
   if (table !== "dashboard_settings") return true;
   if (!row || !row.key) return false;
@@ -600,6 +621,140 @@ export class InstanceSyncManager {
   }
 
   /**
+   * C1: assign a DETERMINISTIC, FROZEN group_uid to every pre-existing PLAIN group
+   * the migration left NULL, so the SAME logical group on two instances (same shared
+   * identity) converges on ONE uid instead of duplicating. uid = first-32-hex of
+   * sha256(<shared ed25519 pubkey> ":" lower(trim(name))). Local same-name collisions
+   * are resolved COLLISION-DRIVEN (R2 F1): a UNIQUE rejection retries with a
+   * "\x1f"-suffixed key (base\x1f1, base\x1f2, …, bound 16 then warn+skip). The \x1f
+   * unit separator cannot survive lower(trim(name)) of any real group name, so a
+   * suffixed key can never collide with a literal name's base key; and probing the DB
+   * instead of pre-counting makes the assignment crash-idempotent (a partial run
+   * strands nothing — the retry walks past whatever already landed).
+   * Idempotent: only touches NULL-uid rows; a frozen uid is never re-derived on rename.
+   * Never throws. Returns the count assigned.
+   */
+  deterministicGroupUid(name, n = 0) {
+    const base = String(name ?? "").trim().toLowerCase();
+    // n=0 → base hash; n>0 → collision-retry slot. "\x1f" is a control char no real
+    // group name contains — unlike "#2", a slot key can never equal a literal name.
+    const keyed = n > 0 ? `${base}\x1f${n}` : base;
+    return createHash("sha256")
+      .update(`${this.identity.ed25519Pubkey}:${keyed}`)
+      .digest("hex")
+      .slice(0, 32);
+  }
+
+  async _assignDeterministicGroupUids() {
+    const MAX_COLLISION_RETRIES = 16;
+    let assigned = 0;
+    let rows = [];
+    try {
+      const r = await this.db.execute({ sql: "SELECT id, name FROM contact_groups WHERE room_uid IS NULL AND group_uid IS NULL ORDER BY id ASC" });
+      rows = r.rows || [];
+    } catch (err) {
+      console.warn(`[instance-sync] deterministic group_uid read failed: ${err.message}`);
+      return 0;
+    }
+    for (const row of rows) {
+      // COLLISION-DRIVEN (R2 F1): try the base hash; every UNIQUE rejection bumps n
+      // and retries the \x1f-suffixed slot. No in-memory counter → crash-idempotent:
+      // the retry walks past hashes that already landed (this run, a previous
+      // interrupted run, or a peer's identical deterministic uid).
+      let settled = false;
+      for (let n = 0; n <= MAX_COLLISION_RETRIES && !settled; n++) {
+        const uid = this.deterministicGroupUid(row.name, n);
+        try {
+          // group_uid IS NULL guard makes the UPDATE a no-op if a concurrent path already set it.
+          await this.db.execute({ sql: "UPDATE contact_groups SET group_uid = ? WHERE id = ? AND group_uid IS NULL", args: [uid, row.id] });
+          assigned++;
+          settled = true;
+        } catch (err) {
+          if (!/unique|constraint/i.test(err.message || "")) {
+            // Non-UNIQUE failure — skip this row, never throw (re-attempted next boot,
+            // since assignment runs before the flag gate — R2 F2).
+            console.warn(`[instance-sync] deterministic group_uid assign failed for group ${row.id}: ${err.message}`);
+            settled = true;
+          }
+          // UNIQUE collision → loop retries with n+1.
+        }
+      }
+      if (!settled) {
+        console.warn(`[instance-sync] deterministic group_uid: ${MAX_COLLISION_RETRIES} collisions for group ${row.id} — left NULL (re-attempted next boot)`);
+      }
+    }
+    if (assigned > 0) console.log(`[instance-sync] assigned ${assigned} deterministic group_uid(s) to pre-existing groups`);
+    return assigned;
+  }
+
+  /**
+   * One-shot idempotent backfill (Phase 3 groups-follow-user): re-emit every
+   * existing PLAIN contact group (room_uid IS NULL) so a peer can resolve it for
+   * groups that predate this feature. Rooms are excluded (own Nostr sync). The
+   * RE-EMIT is guarded by a flag so it runs once per instance lifetime; C1
+   * deterministic uid assignment runs BEFORE that gate — every boot (R2 F2) — so
+   * pre-existing groups converge (not duplicate) and a NULL-uid row introduced
+   * later (restore/import/interrupted run) self-heals on the next boot. Then it
+   * drains the inbound backlog (I-B1) so a peer's already-delivered newer group
+   * edit wins before we re-emit with a fresh lamport. Mirrors
+   * backfillContactsOnce(). Never throws.
+   */
+  async backfillGroupsOnce() {
+    // C1: assign deterministic frozen uids to legacy NULL-uid plain groups BEFORE the
+    // flag gate (R2 F2 — every boot; usually 0 rows) and BEFORE the peer gate — so even
+    // a peerless instance gets stable, convergent uids and stranded NULLs self-heal.
+    await this._assignDeterministicGroupUids();
+
+    const FLAG_KEY = "__groups_backfill_v1";
+    let alreadyRan = false;
+    try {
+      const { rows } = await this.db.execute({ sql: "SELECT value FROM dashboard_settings WHERE key = ?", args: [FLAG_KEY] });
+      alreadyRan = typeof rows?.[0]?.value === "string" && rows[0].value.startsWith("done:");
+    } catch {}
+    if (alreadyRan) return 0;
+
+    if (this.outFeeds.size === 0) return 0; // no peers armed yet — retry next boot; do NOT mark
+
+    // I-B1 ordering guard: apply the peer's already-replicated backlog first.
+    try {
+      for (const [peerId, inFeed] of this.inFeeds) {
+        await this._processNewEntries(peerId, inFeed);
+      }
+    } catch (err) {
+      console.warn(`[instance-sync] groups backfill drain failed: ${err.message}`);
+    }
+
+    let rows = [];
+    try {
+      const r = await this.db.execute({ sql: "SELECT id FROM contact_groups WHERE room_uid IS NULL" });
+      rows = r.rows || [];
+    } catch (err) {
+      console.warn(`[instance-sync] groups backfill read failed: ${err.message}`);
+      return 0;
+    }
+
+    let emitted = 0;
+    for (const row of rows) {
+      try {
+        await emitGroupUpsert(this.db, row.id); // shouldSyncRow + room skip are the final gate
+        emitted++;
+      } catch (err) {
+        console.warn(`[instance-sync] groups backfill emit failed for group ${row.id}: ${err.message}`);
+      }
+    }
+
+    try {
+      await this.db.execute({
+        sql: "INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        args: [FLAG_KEY, `done:${emitted}`],
+      });
+    } catch {}
+
+    if (emitted > 0) console.log(`[instance-sync] one-shot groups backfill: ${emitted} group(s) re-emitted → peers resolve legacy groups`);
+    return emitted;
+  }
+
+  /**
    * Get the local outgoing feed key for a remote instance.
    * Used during instance handshake so the remote knows our feed key.
    */
@@ -838,6 +993,19 @@ export class InstanceSyncManager {
         await this._applyMessage(op, row, lamport_ts, instance_id);
       } catch (err) {
         console.warn(`[instance-sync] Failed to apply ${op} on messages:`, err.message);
+      }
+      return;
+    }
+
+    // contact_groups (plain groups only — rooms gated by shouldSyncRow) are keyed
+    // on the stable group_uid; the per-instance AUTOINCREMENT id + join-table FKs
+    // are NOT portable. Route ALL ops through the natural-key handler, mirroring
+    // _applyContact. shouldSyncRow already dropped room_uid/keyless rows at :787.
+    if (table === "contact_groups") {
+      try {
+        await this._applyGroup(op, row, lamport_ts, instance_id);
+      } catch (err) {
+        console.warn(`[instance-sync] Failed to apply ${op} on contact_groups:`, err.message);
       }
       return;
     }
@@ -1351,6 +1519,170 @@ export class InstanceSyncManager {
       });
     } catch (err) {
       try { console.warn("[instance-sync] message-applied notify failed:", err.message); } catch {}
+    }
+  }
+
+  /**
+   * Apply a PLAIN contact-group mutation keyed on the stable group_uid (Phase 3
+   * groups-follow-user). Rooms (room_uid NOT NULL) are dropped upstream by
+   * shouldSyncRow. Group metadata (name/color; sort_order forward-looking, M1) is
+   * LWW by lamport_ts, exactly like _applyContact; membership is WHOLE-SET replaced
+   * (I1) from the wire-map of member crow_ids on a winning apply — a concurrent
+   * removal on the losing side is reverted, not merged — but ONLY when the wire row
+   * carries a `members` key (absent != empty, R2 F3: a metadata-only emit skips the
+   * reconcile; an explicit [] replaces). Members are resolved to LOCAL
+   * contact ids, bounded to the syncable domain (unresolvable OR local-bot/pending
+   * members skipped — never conjure a contact, never add a local-bot the peer named).
+   * A synced group can never become a room: room_uid/host_crow_id/mode are dropped
+   * from every applied write.
+   */
+  async _applyGroup(op, row, lamportTs, instanceId) {
+    const groupUid = row && row.group_uid;
+    if (!groupUid) {
+      console.warn("[instance-sync] _applyGroup: missing group_uid — skipping");
+      return;
+    }
+
+    if (!this._groupCols) {
+      try {
+        const { rows: pragma } = await this.db.execute({ sql: "PRAGMA table_info(contact_groups)", args: [] });
+        this._groupCols = new Set(pragma.map((r) => r.name));
+      } catch { this._groupCols = null; }
+    }
+    if (!this._groupCols) {
+      console.warn("[instance-sync] _applyGroup: contact_groups columns unavailable — skipping");
+      return;
+    }
+    // Never write id/lamport/created_at, never turn a synced group into a room,
+    // never treat the `members` pseudo-column as a real column.
+    const ALWAYS_DROP = new Set(["id", "lamport_ts", "instance_id", "created_at", "room_uid", "host_crow_id", "mode", "members"]);
+    const filtered = {};
+    for (const [k, v] of Object.entries(row)) {
+      if (ALWAYS_DROP.has(k)) continue;
+      if (!this._groupCols.has(k)) continue;
+      filtered[k] = v;
+    }
+
+    const { rows: localRows } = await this.db.execute({ sql: "SELECT * FROM contact_groups WHERE group_uid = ? AND room_uid IS NULL", args: [groupUid] });
+    const localRow = localRows[0] ?? null;
+    const localTs = localRow?.lamport_ts || 0;
+    const rowIdJson = JSON.stringify({ group_uid: groupUid });
+
+    // ── delete ──────────────────────────────────────────────────────────────
+    if (op === "delete") {
+      if (!localRow) return;
+      if (lamportTs > localTs) {
+        // ON DELETE CASCADE reaps contact_group_members.
+        await this.db.execute({ sql: "DELETE FROM contact_groups WHERE group_uid = ? AND room_uid IS NULL", args: [groupUid] });
+        return;
+      }
+      try {
+        await this._insertConflictRow("contact_groups", rowIdJson,
+          localRow.instance_id || this.localInstanceId, instanceId, localTs, lamportTs,
+          JSON.stringify(localRow), JSON.stringify(filtered), "delete");
+        await this._notifyConflict();
+      } catch (err) {
+        console.warn("[instance-sync] contact_groups delete conflict LOGGING failed (local kept):", err.message);
+      }
+      return;
+    }
+
+    // ── insert / update (LWW) ───────────────────────────────────────────────
+    if (!localRow) {
+      const cols = Object.keys(filtered).filter((k) => filtered[k] !== undefined);
+      if (!cols.includes("group_uid")) cols.push("group_uid");
+      const insertCols = [...new Set(cols)];
+      const placeholders = insertCols.map(() => "?").join(", ");
+      const values = insertCols.map((k) => (k === "group_uid" ? groupUid : filtered[k] ?? null));
+      await this.db.execute({
+        sql: `INSERT INTO contact_groups (${insertCols.join(", ")}, lamport_ts) VALUES (${placeholders}, ?)`,
+        args: [...values, lamportTs],
+      });
+      const gid = await this._groupIdByUid(groupUid);
+      await this._reconcileGroupMembers(gid, row.members);
+      return;
+    }
+
+    if (lamportTs > localTs) {
+      const updateKeys = Object.keys(filtered).filter((k) => k !== "group_uid");
+      const setClauses = updateKeys.map((k) => `${k} = ?`);
+      const vals = updateKeys.map((k) => filtered[k] ?? null);
+      setClauses.push("lamport_ts = ?"); vals.push(lamportTs);
+      await this.db.execute({ sql: `UPDATE contact_groups SET ${setClauses.join(", ")} WHERE group_uid = ?`, args: [...vals, groupUid] });
+      await this._reconcileGroupMembers(localRow.id, row.members);
+      return;
+    }
+
+    // incomingTs <= localTs — local wins wholesale (metadata AND membership).
+    // M3: on a metadata-equal tie we return WITHOUT reconciling membership, so a
+    // concurrent membership divergence at equal metadata persists silently (documented
+    // in Known limitations — acceptable for a single user's low-contention groups).
+    if (rowsEquivalent(localRow, filtered)) return; // re-delivery noise
+    try {
+      await this._insertConflictRow("contact_groups", rowIdJson,
+        localRow.instance_id || this.localInstanceId, instanceId, localTs, lamportTs,
+        JSON.stringify(localRow), JSON.stringify(filtered), op || "update");
+      await this._notifyConflict();
+    } catch (err) {
+      console.warn("[instance-sync] contact_groups conflict LOGGING failed (local kept):", err.message);
+    }
+  }
+
+  async _groupIdByUid(groupUid) {
+    const { rows } = await this.db.execute({ sql: "SELECT id FROM contact_groups WHERE group_uid = ? AND room_uid IS NULL LIMIT 1", args: [groupUid] });
+    return rows[0]?.id ?? null;
+  }
+
+  /**
+   * Whole-set replace (I1) of group membership from a wire-map of member crow_ids,
+   * bounded to the SHARED, SYNCABLE contact domain. Absent != empty (R2 F3): a wire
+   * row WITHOUT a members key (metadata-only emit) skips the reconcile entirely —
+   * only an EXPLICIT array (including []) replaces. A winning apply overwrites the
+   * entire local membership: adds resolvable-and-SYNCABLE-and-missing members (never
+   * creates a contact, never adds a local-bot/pending contact the peer named — I2);
+   * removes only SYNCABLE members (origin != local-bot, established) whose crow_id is
+   * absent from the wire-map. Local-only / local-bot / pending memberships are NEVER
+   * touched — the emitting peer can't know about them, so a whole-set replace must not
+   * wipe them (and a concurrent removal on the LOSING side IS reverted — I1).
+   */
+  async _reconcileGroupMembers(groupId, wireCrowIds) {
+    if (groupId == null) return;
+    // R2 F3: members ABSENT (undefined) is a metadata-only emit, NOT an empty group —
+    // treating it as [] would wipe every syncable member. Skip; explicit [] still honored.
+    if (wireCrowIds === undefined) return;
+    const wireSet = new Set((Array.isArray(wireCrowIds) ? wireCrowIds : []).filter(Boolean));
+
+    // Add: resolvable + SYNCABLE + missing (I2 — symmetric with the remove branch).
+    for (const crowId of wireSet) {
+      try {
+        const { rows } = await this.db.execute({ sql: "SELECT id, origin, request_status FROM contacts WHERE crow_id = ? LIMIT 1", args: [crowId] });
+        const c = rows[0];
+        if (c == null || c.id == null) continue; // unresolved — never create a contact
+        const syncable = c.origin !== "local-bot" &&
+          (c.request_status == null || c.request_status === "accepted");
+        if (!syncable) continue; // peer cannot pull a local-bot/pending contact into a synced group
+        await this.db.execute({ sql: "INSERT OR IGNORE INTO contact_group_members (group_id, contact_id) VALUES (?, ?)", args: [groupId, c.id] });
+      } catch (err) {
+        console.warn(`[instance-sync] _reconcileGroupMembers add ${crowId} failed: ${err.message}`);
+      }
+    }
+
+    // Remove: syncable members no longer in the wire-map.
+    try {
+      const { rows: locals } = await this.db.execute({
+        sql: `SELECT gm.contact_id, c.crow_id, c.origin, c.request_status
+                FROM contact_group_members gm JOIN contacts c ON c.id = gm.contact_id
+               WHERE gm.group_id = ?`, args: [groupId],
+      });
+      for (const lm of locals) {
+        const syncable = lm.origin !== "local-bot" &&
+          (lm.request_status == null || lm.request_status === "accepted");
+        if (!syncable) continue;                 // local-only membership — peer can't know it
+        if (wireSet.has(lm.crow_id)) continue;   // still a member
+        await this.db.execute({ sql: "DELETE FROM contact_group_members WHERE group_id = ? AND contact_id = ?", args: [groupId, lm.contact_id] });
+      }
+    } catch (err) {
+      console.warn(`[instance-sync] _reconcileGroupMembers remove failed: ${err.message}`);
     }
   }
 

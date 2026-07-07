@@ -4,8 +4,11 @@ import assert from "node:assert/strict";
 import { SCHEMA_GENERATION } from "../servers/shared/schema-version.js";
 import { upsertFullContact } from "../servers/sharing/contact-promote.js";
 
-test("SCHEMA_GENERATION is bumped to 4 for the verified column", () => {
-  assert.equal(SCHEMA_GENERATION, 4);
+test("SCHEMA_GENERATION covers the verified column (gen >= 4)", () => {
+  // The verified column shipped in generation 4; later features bump further
+  // (5 = contact_groups.group_uid/lamport_ts). Exact-equality here broke on
+  // every subsequent legitimate bump — assert the floor instead.
+  assert.ok(SCHEMA_GENERATION >= 4, `expected >= 4, got ${SCHEMA_GENERATION}`);
 });
 
 // In-memory contacts+messages db stub (contact-promote.test.js pattern).
