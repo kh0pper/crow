@@ -1886,6 +1886,39 @@ await db.execute(
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_groups_room_uid ON contact_groups(room_uid) WHERE room_uid IS NOT NULL"
 );
 
+// --- Phase 3 groups-follow-user: stable portable key + LWW clock for plain
+// contact groups (room_uid IS NULL). group_uid is the cross-instance natural key
+// (contact_groups.id is per-instance AUTOINCREMENT; room_uid is NULL for non-rooms).
+// SQLite ALTER ADD COLUMN cannot take a randomblob() default nor a column-level
+// UNIQUE, so: add nullable → UNIQUE index → AFTER-INSERT trigger to auto-populate
+// NEW rows with a random uid (rooms get one too — harmless, rooms never sync here).
+//
+// C1 (split-brain fix): we DELIBERATELY DO NOT randomblob-fill PRE-EXISTING rows here.
+// A random per-instance uid would give the SAME logical group (e.g. "Family" created
+// independently on crow AND grackle before this feature) a DIFFERENT uid on each host,
+// so the one-shot backfill would cross-INSERT and permanently duplicate every shared
+// legacy group. Pre-existing rows are left group_uid IS NULL (SQLite UNIQUE permits
+// multiple NULLs); backfillGroupsOnce() assigns them a DETERMINISTIC, FROZEN uid derived
+// from the shared identity + group name (Task 4) so both instances converge on ONE uid.
+// (This deterministic hash needs the DECRYPTED shared identity + a sha256 — neither is
+// available to init-db, so it lives in the manager, not here. See Task 4's decision box.)
+//
+// lamport_ts gives groups the same last-write-wins clock contacts already have.
+// SCHEMA_GENERATION 4 -> 5.
+await addColumnIfMissing("contact_groups", "group_uid", "TEXT");
+await addColumnIfMissing("contact_groups", "lamport_ts", "INTEGER DEFAULT 0");
+await db.execute(
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_groups_group_uid ON contact_groups(group_uid)"
+);
+await db.execute(`
+  CREATE TRIGGER IF NOT EXISTS contact_groups_group_uid_ai
+  AFTER INSERT ON contact_groups
+  WHEN NEW.group_uid IS NULL
+  BEGIN
+    UPDATE contact_groups SET group_uid = lower(hex(randomblob(16))) WHERE id = NEW.id;
+  END
+`);
+
 await initTable("room_messages table", `
   CREATE TABLE IF NOT EXISTS room_messages (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
