@@ -10,6 +10,7 @@ import { upsertSetting } from "../../settings/registry.js";
 import { getContacts } from "./data-queries.js";
 import { getManagersOrNull } from "../../../../sharing/managers.js";
 import { emitContactChange, emitContactDelete } from "../../../../sharing/contact-sync.js";
+import { emitGroupUpsert, emitGroupDelete } from "../../../../sharing/group-sync.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createSharingServer } from "../../../../sharing/server.js";
@@ -267,10 +268,12 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
     const name = (req.body.group_name || "").trim();
     const color = (req.body.group_color || "#6366f1").trim();
     if (name) {
-      await db.execute({
+      const gRes = await db.execute({
         sql: "INSERT INTO contact_groups (name, color) VALUES (?, ?)",
         args: [name, color],
       });
+      // M2: keep this emit INSIDE if(name) — gRes.lastInsertRowid is only valid here.
+      try { await emitGroupUpsert(db, Number(gRes.lastInsertRowid)); } catch {}
     }
     return { redirect: "/dashboard/contacts?view=groups" };
   }
@@ -282,15 +285,17 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
         sql: "UPDATE contact_groups SET name = ? WHERE id = ?",
         args: [name, parseInt(req.body.group_id)],
       });
+      try { await emitGroupUpsert(db, parseInt(req.body.group_id)); } catch {}
     }
     return { redirect: "/dashboard/contacts?view=groups" };
   }
 
   if (action === "delete_group" && req.body.group_id) {
-    await db.execute({
-      sql: "DELETE FROM contact_groups WHERE id = ?",
-      args: [parseInt(req.body.group_id)],
-    });
+    const gid = parseInt(req.body.group_id);
+    let gUid = null;
+    try { const { rows } = await db.execute({ sql: "SELECT group_uid FROM contact_groups WHERE id = ?", args: [gid] }); gUid = rows[0]?.group_uid || null; } catch {}
+    await db.execute({ sql: "DELETE FROM contact_groups WHERE id = ?", args: [gid] });
+    if (gUid) { try { await emitGroupDelete(gUid); } catch {} }
     return { redirect: "/dashboard/contacts?view=groups" };
   }
 
@@ -301,6 +306,7 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
         args: [parseInt(req.body.group_id), parseInt(req.body.contact_id)],
       });
     } catch {}
+    try { await emitGroupUpsert(db, parseInt(req.body.group_id)); } catch {}
     const returnView = req.body.return_view || "contact";
     const returnContact = req.body.contact_id;
     return { redirect: `/dashboard/contacts?view=${returnView}&contact=${returnContact}` };
@@ -311,6 +317,7 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
       sql: "DELETE FROM contact_group_members WHERE group_id = ? AND contact_id = ?",
       args: [parseInt(req.body.group_id), parseInt(req.body.contact_id)],
     });
+    try { await emitGroupUpsert(db, parseInt(req.body.group_id)); } catch {}
     const returnView = req.body.return_view || "contact";
     const returnContact = req.body.contact_id;
     return { redirect: `/dashboard/contacts?view=${returnView}&contact=${returnContact}` };

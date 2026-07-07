@@ -69,6 +69,11 @@ export const SYNCED_TABLES = [
   // below, which NULLs project_id on the wire.
   "research_notes",
   "glasses_note_sessions",
+  // Phase 3 (groups follow the user): PLAIN contact groups (room_uid IS NULL)
+  // sync so a user's organizational groups + membership follow them across
+  // instances. Multi-party ROOMS (room_uid NOT NULL) are gated OUT by
+  // shouldSyncRow — they have their own Nostr fan-out.
+  "contact_groups",
 ];
 
 // Columns to exclude from sync payloads (security-sensitive or instance-local)
@@ -90,6 +95,13 @@ export const EXCLUDED_COLUMNS = {
   // is per-device (each instance computes its own unread badge). lamport_ts is
   // sync metadata carried in the entry envelope, not the row.
   messages: ["id", "contact_id", "is_read", "lamport_ts"],
+  // Phase 3 groups: group_uid is the stable wire key; id is per-instance
+  // AUTOINCREMENT (never portable); created_at differs when two instances form
+  // the same group independently (spurious conflicts). room_uid/host_crow_id/mode
+  // are LEFT on the wire (NULL for a plain group) so the apply-side shouldSyncRow
+  // can still reject a malicious room-bearing entry; lamport_ts rides the row and
+  // is dropped on apply. Membership rides the attached `members` wire-map.
+  contact_groups: ["id", "created_at"],
 };
 
 // Per-table outbound mutations applied right after the EXCLUDED_COLUMNS strip.
@@ -180,6 +192,13 @@ function shouldSyncRow(table, row) {
     // group ids (grp_<ts>, own room sync) or an unresolved contact — never sync.
     if (!row) return false;
     return Boolean(row.nostr_event_id) && Boolean(row.crow_id);
+  }
+  if (table === "contact_groups") {
+    if (!row) return false;
+    // Rooms (room_uid NOT NULL) sync via their own Nostr fan-out — never here.
+    // `!= null` catches both null and undefined (a delete row omits room_uid).
+    if (row.room_uid != null) return false;
+    return Boolean(row.group_uid);
   }
   if (table !== "dashboard_settings") return true;
   if (!row || !row.key) return false;
