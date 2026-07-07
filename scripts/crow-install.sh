@@ -35,6 +35,64 @@ header() {
   echo "═══════════════════════════════════════════════"
 }
 
+# ─── Prompt helpers (F-INSTALL-5/-7) ──────────────────────
+# The documented `curl … | bash` one-liner has no usable stdin (the script
+# body IS stdin), so prompts read /dev/tty when a terminal exists and resolve
+# to their DEFAULT when it does not (headless / cloud-init / CI).
+# `--yes` / `-y` / CROW_INSTALL_YES=1 forces defaults everywhere.
+ASSUME_YES=false
+for _arg in "$@"; do
+  case "$_arg" in
+    -y|--yes) ASSUME_YES=true ;;
+  esac
+done
+if [ "${CROW_INSTALL_YES:-}" = "1" ]; then ASSUME_YES=true; fi
+
+# Real tty detection (R1-I1): [ -r /dev/tty ] only tests the device node's
+# permission bits and is TRUE even with no controlling terminal. Actually
+# opening it is the reliable probe (fails with ENXIO when headless), and it
+# keeps genuinely-headless installs from spraying /dev/tty errors into logs.
+HAS_TTY=false
+if { exec 3</dev/tty; } 2>/dev/null; then
+  exec 3<&-
+  HAS_TTY=true
+fi
+
+# ask_yn <prompt> <default Y|N> — 0=yes, 1=no. Headless/--yes → default.
+ask_yn() {
+  local prompt="$1" default="$2" reply=""
+  if [ "$ASSUME_YES" = true ] || [ "$HAS_TTY" = false ]; then
+    [ "$default" = "Y" ] && return 0 || return 1
+  fi
+  if [ "$default" = "Y" ]; then
+    printf "  %s [Y/n] " "$prompt" > /dev/tty
+  else
+    printf "  %s [y/N] " "$prompt" > /dev/tty
+  fi
+  IFS= read -r reply < /dev/tty || reply=""
+  case "$reply" in
+    [Yy]*) return 0 ;;
+    [Nn]*) return 1 ;;
+    *) [ "$default" = "Y" ] && return 0 || return 1 ;;
+  esac
+}
+
+# ask_line <prompt> — prints the reply; empty when headless/--yes/EOF.
+ask_line() {
+  local prompt="$1" reply=""
+  if [ "$ASSUME_YES" = true ] || [ "$HAS_TTY" = false ]; then
+    return 0
+  fi
+  printf "  %s" "$prompt" > /dev/tty
+  IFS= read -r reply < /dev/tty || reply=""
+  printf "%s" "$reply"
+}
+
+# Test seam: tests source the helpers without executing the install.
+if [ "${CROW_INSTALL_SOURCE_ONLY:-}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 # Check if running as root (we don't want that)
 if [ "$(id -u)" -eq 0 ]; then
   error "Don't run this script as root. Run as your normal user."
@@ -59,9 +117,7 @@ echo "    - Crow"
 echo "    - Security hardening (UFW + fail2ban)"
 echo "    - Tailscale hostname setup (if Tailscale is installed)"
 echo ""
-read -p "  Continue? [Y/n] " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Nn]$ ]]; then
+if ! ask_yn "Continue?" Y; then
   echo "  Cancelled."
   exit 0
 fi
