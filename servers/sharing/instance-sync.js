@@ -1563,7 +1563,7 @@ export class InstanceSyncManager {
       filtered[k] = v;
     }
 
-    const { rows: localRows } = await this.db.execute({ sql: "SELECT * FROM contact_groups WHERE group_uid = ?", args: [groupUid] });
+    const { rows: localRows } = await this.db.execute({ sql: "SELECT * FROM contact_groups WHERE group_uid = ? AND room_uid IS NULL", args: [groupUid] });
     const localRow = localRows[0] ?? null;
     const localTs = localRow?.lamport_ts || 0;
     const rowIdJson = JSON.stringify({ group_uid: groupUid });
@@ -1573,7 +1573,7 @@ export class InstanceSyncManager {
       if (!localRow) return;
       if (lamportTs > localTs) {
         // ON DELETE CASCADE reaps contact_group_members.
-        await this.db.execute({ sql: "DELETE FROM contact_groups WHERE group_uid = ?", args: [groupUid] });
+        await this.db.execute({ sql: "DELETE FROM contact_groups WHERE group_uid = ? AND room_uid IS NULL", args: [groupUid] });
         return;
       }
       try {
@@ -1629,7 +1629,7 @@ export class InstanceSyncManager {
   }
 
   async _groupIdByUid(groupUid) {
-    const { rows } = await this.db.execute({ sql: "SELECT id FROM contact_groups WHERE group_uid = ? LIMIT 1", args: [groupUid] });
+    const { rows } = await this.db.execute({ sql: "SELECT id FROM contact_groups WHERE group_uid = ? AND room_uid IS NULL LIMIT 1", args: [groupUid] });
     return rows[0]?.id ?? null;
   }
 
