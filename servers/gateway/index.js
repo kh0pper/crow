@@ -61,6 +61,7 @@ import { rejectFunneledMiddleware } from "./funnel.js";
 import { validateRoomToken } from "../sharing/server.js";
 import { createDbClient } from "../db.js";
 import { createOAuthProvider, initOAuthTables } from "./auth.js";
+import { resolveIssuerUrl } from "./issuer-url.js";
 import { loadDynamicBackends } from "./proxy.js";
 import { dashboardAuth } from "./dashboard/auth.js";
 import { SessionManager } from "./session-manager.js";
@@ -394,30 +395,44 @@ let authMiddleware = null;
 if (!noAuth) {
   const provider = createOAuthProvider();
   const publicUrl = process.env.CROW_GATEWAY_URL || process.env.RENDER_EXTERNAL_URL;
-  const serverUrl = publicUrl
-    ? new URL(publicUrl)
-    : new URL(`http://${BIND}:${PORT}`);
+  const { url: serverUrl, degraded, reason } = resolveIssuerUrl({ publicUrl, port: PORT });
+  if (degraded) {
+    console.warn(`[oauth] ${reason}`);
+    console.warn(`[oauth] Falling back to issuer ${serverUrl.href} so the gateway can boot. ` +
+      `Remote MCP OAuth needs an HTTPS URL: set CROW_GATEWAY_URL in .env (easiest: ` +
+      `sudo tailscale serve --bg --https=443 http://127.0.0.1:${PORT}, then ` +
+      `CROW_GATEWAY_URL=https://<this-machine>.<tailnet>.ts.net) and restart the gateway.`);
+  }
 
-  // Auth routes (register, authorize, token)
-  app.use(mcpAuthRouter({
-    provider,
-    issuerUrl: serverUrl,
-    scopesSupported: ["mcp:tools"],
-  }));
+  try {
+    // Auth routes (register, authorize, token)
+    app.use(mcpAuthRouter({
+      provider,
+      issuerUrl: serverUrl,
+      scopesSupported: ["mcp:tools"],
+    }));
 
-  // Protected resource metadata
-  const oauthMetadata = createOAuthMetadata({
-    provider,
-    issuerUrl: serverUrl,
-    scopesSupported: ["mcp:tools"],
-  });
+    // Protected resource metadata
+    const oauthMetadata = createOAuthMetadata({
+      provider,
+      issuerUrl: serverUrl,
+      scopesSupported: ["mcp:tools"],
+    });
 
-  app.use(mcpAuthMetadataRouter({
-    oauthMetadata,
-    resourceServerUrl: serverUrl,
-    scopesSupported: ["mcp:tools"],
-    resourceName: "Crow",
-  }));
+    app.use(mcpAuthMetadataRouter({
+      oauthMetadata,
+      resourceServerUrl: serverUrl,
+      scopesSupported: ["mcp:tools"],
+      resourceName: "Crow",
+    }));
+  } catch (err) {
+    // Belt-and-suspenders for F-INSTALL-8: a fresh appliance must never be
+    // dead-on-arrival because OAuth *discovery* couldn't mount. MCP transports
+    // stay behind requireBearerAuth (below); only the OAuth dance endpoints
+    // are missing in this state.
+    console.error(`[oauth] Failed to mount OAuth routes: ${err.message}. ` +
+      `Remote MCP OAuth is disabled until CROW_GATEWAY_URL is a valid HTTPS URL.`);
+  }
 
   // Introspection endpoint for token verification
   app.post("/introspect", async (req, res) => {
