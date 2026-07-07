@@ -51,6 +51,4 @@ test("F-5: ask_line returns empty headlessly instead of failing under set -e", (
   assert.match(r.stdout, /got:\[\]/);
 });
 
-test("F-5: no raw read -p prompts remain (all prompts go through ask_yn/ask_line)", () => {
-  assert.doesNotMatch(src(), /read -p/);
-});
+// NOTE(A4): the "no raw read -p remains" end-state pin is added by Task A4, after A2/A3 migrate the remaining prompts.
