@@ -106,3 +106,24 @@ test("F-6/F-7: collision check matches indented `\"HostName\": \"crow\"` (real t
 });
 
 // NOTE(A4): the "no raw read -p remains" end-state pin is added by Task A4, after A2/A3 migrate the remaining prompts.
+
+test("F-9: systemd unit uses Restart=on-failure (unless-stopped is Docker, not systemd)", () => {
+  assert.match(src(), /Restart=on-failure/);
+  assert.doesNotMatch(src(), /Restart=unless-stopped/);
+});
+
+test("R2-I1: unit ordering matches prod (gateway runs docker compose and keys residency on the tailscale IP)", () => {
+  assert.match(src(), /After=network-online\.target docker\.service tailscaled\.service/);
+  assert.match(src(), /Wants=network-online\.target/);
+  assert.match(src(), /Requires=docker\.service/);
+});
+
+test("F-11: OS hostname rename prompt defaults N", () => {
+  assert.match(src(), /ask_yn "Set hostname to 'crow' \(enables crow\.local\)\?" N/);
+});
+
+test("F-11: Caddy vhost and final URL follow the ACTUAL hostname (MDNS_HOST)", () => {
+  assert.match(src(), /MDNS_HOST="\$\(hostname\)\.local"/);
+  assert.match(src(), /\$\{MDNS_HOST\} \{/);          // Caddyfile vhost
+  assert.match(src(), /https:\/\/\$\{MDNS_HOST\}\/setup/); // final message
+});
