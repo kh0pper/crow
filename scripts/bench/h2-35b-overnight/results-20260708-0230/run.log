@@ -1,0 +1,119 @@
+2026-07-08T02:30:12-05:00 === H.2 35b + H.3 MTP overnight window: preflight ===
+2026-07-08T02:30:12-05:00 preflight OK — prod compose snapshotted
+2026-07-08T02:30:12-05:00 deadman armed (14400s)
+2026-07-08T02:30:12-05:00 stopping standard pair (by NAME)
+llamacpp-vulkan-qwen36-35b-a3b
+llamacpp-vulkan-qwen36-27b-copilot
+2026-07-08T02:30:14-05:00 === 1/4 KLD base f16-KV ctx512x48 ===
+llama_model_load: error loading model: missing tensor 'blk.40.ssm_conv1d.weight'
+llama_model_load_from_file_impl: failed to load model
+common_init_from_params: failed to load model '/models/qwen36-35b-a3b-mtp/Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf'
+main: unable to load model
+2026-07-08T02:30:16-05:00 === 2/4 KLD q8_0-KV vs base ===
+print_info: vocab type            = BPE
+print_info: n_vocab               = 248320
+print_info: n_merges              = 247587
+print_info: BOS token             = 248044 '<|endoftext|>'
+print_info: EOS token             = 248046 '<|im_end|>'
+print_info: EOT token             = 248046 '<|im_end|>'
+print_info: PAD token             = 248055 '<|vision_pad|>'
+print_info: LF token              = 198 'Ċ'
+print_info: FIM PRE token         = 248060 '<|fim_prefix|>'
+print_info: FIM SUF token         = 248062 '<|fim_suffix|>'
+print_info: FIM MID token         = 248061 '<|fim_middle|>'
+print_info: FIM PAD token         = 248063 '<|fim_pad|>'
+print_info: FIM REP token         = 248064 '<|repo_name|>'
+print_info: FIM SEP token         = 248065 '<|file_sep|>'
+print_info: EOG token             = 248044 '<|endoftext|>'
+print_info: EOG token             = 248046 '<|im_end|>'
+print_info: EOG token             = 248063 '<|fim_pad|>'
+print_info: EOG token             = 248064 '<|repo_name|>'
+print_info: EOG token             = 248065 '<|file_sep|>'
+print_info: max token length      = 256
+load_tensors: loading model tensors, this can take a while... (mmap = false, direct_io = false)
+llama_model_load: error loading model: missing tensor 'blk.40.ssm_conv1d.weight'
+llama_model_load_from_file_impl: failed to load model
+common_init_from_params: failed to load model '/models/qwen36-35b-a3b-mtp/Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf'
+main: unable to load model
+2026-07-08T02:30:17-05:00 === 3/4 PPL f16-KV ctx4096x40 ===
+2026-07-08T02:30:18-05:00 === 4/4 PPL q8_0-KV ctx4096x40 ===
+2026-07-08T02:30:19-05:00 --- f16 / MTP2 (prod baseline) ---
+time="2026-07-08T02:30:19-05:00" level=warning msg="The \"LLM_CACHE\" variable is not set. Defaulting to a blank string."
+time="2026-07-08T02:30:19-05:00" level=warning msg="The \"VIDEO_GID\" variable is not set. Defaulting to a blank string."
+time="2026-07-08T02:30:19-05:00" level=warning msg="The \"RENDER_GID\" variable is not set. Defaulting to a blank string."
+time="2026-07-08T02:30:19-05:00" level=warning msg="The \"CROW_TAILSCALE_IP\" variable is not set. Defaulting to a blank string."
+invalid spec: :/models: empty section between colons
+2026-07-08T02:40:20-05:00 WARN: f16-mtp2 NEVER became healthy — container log tail:
+649.45.431.119 I slot print_timing: id  0 | task 113908 | n_decoded =    101, tg =  52.45 t/s
+649.48.462.187 I slot print_timing: id  0 | task 113908 | n_decoded =    268, tg =  54.07 t/s
+649.49.183.968 I reasoning-budget: deactivated (natural end)
+649.51.502.507 I slot print_timing: id  0 | task 113908 | n_decoded =    429, tg =  53.65 t/s
+649.54.528.927 I slot print_timing: id  0 | task 113908 | n_decoded =    592, tg =  53.70 t/s
+649.57.538.194 I slot print_timing: id  0 | task 113908 | n_decoded =    739, tg =  52.66 t/s
+649.58.133.332 I slot print_timing: id  0 | task 113908 | 
+prompt eval time =     515.62 ms /   125 tokens (    4.12 ms per token,   242.42 tokens per second)
+       eval time =   14627.78 ms /   765 tokens (   19.12 ms per token,    52.30 tokens per second)
+      total time =   15143.41 ms /   890 tokens
+draft acceptance rate = 0.61516 (  422 accepted /   686 generated)
+649.58.133.347 I statistics draft-mtp: #calls(b,g,a) = 243 112949 112949, #gen drafts = 112949, #acc drafts = 88991, #gen tokens = 225897, #acc tokens = 158760, dur(b,g,a) = 0.663, 1153344.724, 102.506 ms
+649.58.134.897 I slot      release: id  0 | task 113908 | stop processing: n_tokens = 33559, truncated = 0
+649.58.134.966 I srv  update_slots: all slots are idle
+1019.55.930.639 I srv    operator(): operator(): cleaning up before exit...
+2026-07-08T02:40:20-05:00 --- f16 / MTP off ---
+time="2026-07-08T02:40:20-05:00" level=warning msg="The \"VIDEO_GID\" variable is not set. Defaulting to a blank string."
+time="2026-07-08T02:40:20-05:00" level=warning msg="The \"RENDER_GID\" variable is not set. Defaulting to a blank string."
+time="2026-07-08T02:40:20-05:00" level=warning msg="The \"CROW_TAILSCALE_IP\" variable is not set. Defaulting to a blank string."
+time="2026-07-08T02:40:20-05:00" level=warning msg="The \"LLM_CACHE\" variable is not set. Defaulting to a blank string."
+invalid spec: :/models: empty section between colons
+2026-07-08T02:50:21-05:00 WARN: f16-mtp0 NEVER became healthy — container log tail:
+649.45.431.119 I slot print_timing: id  0 | task 113908 | n_decoded =    101, tg =  52.45 t/s
+649.48.462.187 I slot print_timing: id  0 | task 113908 | n_decoded =    268, tg =  54.07 t/s
+649.49.183.968 I reasoning-budget: deactivated (natural end)
+649.51.502.507 I slot print_timing: id  0 | task 113908 | n_decoded =    429, tg =  53.65 t/s
+649.54.528.927 I slot print_timing: id  0 | task 113908 | n_decoded =    592, tg =  53.70 t/s
+649.57.538.194 I slot print_timing: id  0 | task 113908 | n_decoded =    739, tg =  52.66 t/s
+649.58.133.332 I slot print_timing: id  0 | task 113908 | 
+prompt eval time =     515.62 ms /   125 tokens (    4.12 ms per token,   242.42 tokens per second)
+       eval time =   14627.78 ms /   765 tokens (   19.12 ms per token,    52.30 tokens per second)
+      total time =   15143.41 ms /   890 tokens
+draft acceptance rate = 0.61516 (  422 accepted /   686 generated)
+649.58.133.347 I statistics draft-mtp: #calls(b,g,a) = 243 112949 112949, #gen drafts = 112949, #acc drafts = 88991, #gen tokens = 225897, #acc tokens = 158760, dur(b,g,a) = 0.663, 1153344.724, 102.506 ms
+649.58.134.897 I slot      release: id  0 | task 113908 | stop processing: n_tokens = 33559, truncated = 0
+649.58.134.966 I srv  update_slots: all slots are idle
+1019.55.930.639 I srv    operator(): operator(): cleaning up before exit...
+2026-07-08T02:50:21-05:00 --- f16 / MTP3 ---
+time="2026-07-08T02:50:21-05:00" level=warning msg="The \"VIDEO_GID\" variable is not set. Defaulting to a blank string."
+time="2026-07-08T02:50:21-05:00" level=warning msg="The \"RENDER_GID\" variable is not set. Defaulting to a blank string."
+time="2026-07-08T02:50:21-05:00" level=warning msg="The \"CROW_TAILSCALE_IP\" variable is not set. Defaulting to a blank string."
+time="2026-07-08T02:50:21-05:00" level=warning msg="The \"LLM_CACHE\" variable is not set. Defaulting to a blank string."
+invalid spec: :/models: empty section between colons
+2026-07-08T03:00:22-05:00 WARN: f16-mtp3 NEVER became healthy — container log tail:
+Error response from daemon: No such container: llamacpp-vulkan-qwen36-35b-a3b
+2026-07-08T03:00:22-05:00 --- f16 / MTP4 ---
+time="2026-07-08T03:00:22-05:00" level=warning msg="The \"VIDEO_GID\" variable is not set. Defaulting to a blank string."
+time="2026-07-08T03:00:22-05:00" level=warning msg="The \"RENDER_GID\" variable is not set. Defaulting to a blank string."
+time="2026-07-08T03:00:22-05:00" level=warning msg="The \"LLM_CACHE\" variable is not set. Defaulting to a blank string."
+time="2026-07-08T03:00:22-05:00" level=warning msg="The \"CROW_TAILSCALE_IP\" variable is not set. Defaulting to a blank string."
+invalid spec: :/models: empty section between colons
+2026-07-08T03:10:22-05:00 WARN: f16-mtp4 NEVER became healthy — container log tail:
+Error response from daemon: No such container: llamacpp-vulkan-qwen36-35b-a3b
+2026-07-08T03:10:22-05:00 --- q8_0 KV / MTP2 (H.2 A/B side B) ---
+time="2026-07-08T03:10:22-05:00" level=warning msg="The \"VIDEO_GID\" variable is not set. Defaulting to a blank string."
+time="2026-07-08T03:10:22-05:00" level=warning msg="The \"RENDER_GID\" variable is not set. Defaulting to a blank string."
+time="2026-07-08T03:10:22-05:00" level=warning msg="The \"LLM_CACHE\" variable is not set. Defaulting to a blank string."
+time="2026-07-08T03:10:22-05:00" level=warning msg="The \"CROW_TAILSCALE_IP\" variable is not set. Defaulting to a blank string."
+invalid spec: :/models: empty section between colons
+2026-07-08T03:20:23-05:00 WARN: q8-mtp2 NEVER became healthy — container log tail:
+Error response from daemon: No such container: llamacpp-vulkan-qwen36-35b-a3b
+2026-07-08T03:20:23-05:00 NOTE: q8 KV + MTP may be incompatible — see container log above
+2026-07-08T03:20:23-05:00 === window done — RESULTS.md written ===
+2026-07-08T03:20:23-05:00 restoring prod (35b snapshot compose + copilot)
+time="2026-07-08T03:20:23-05:00" level=warning msg="The \"CROW_TAILSCALE_IP\" variable is not set. Defaulting to a blank string."
+time="2026-07-08T03:20:23-05:00" level=warning msg="The \"VIDEO_GID\" variable is not set. Defaulting to a blank string."
+time="2026-07-08T03:20:23-05:00" level=warning msg="The \"RENDER_GID\" variable is not set. Defaulting to a blank string."
+time="2026-07-08T03:20:23-05:00" level=warning msg="The \"LLM_CACHE\" variable is not set. Defaulting to a blank string."
+invalid spec: :/models: empty section between colons
+Error response from daemon: No such container: llamacpp-vulkan-qwen36-35b-a3b
+failed to start containers: llamacpp-vulkan-qwen36-35b-a3b
+2026-07-08T03:27:54-05:00 ERROR: 35b NOT healthy
+2026-07-08T03:35:25-05:00 ERROR: copilot NOT healthy
