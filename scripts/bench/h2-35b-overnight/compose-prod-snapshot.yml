@@ -21,7 +21,6 @@ services:
       # cleanup; the MTP Q5_K_XL copy below is the live one.
       # Model files in /home/kh0pp/llm/hf-cache/qwen36-35b-a3b-mtp/ from:
       #   https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF
-      # H.2/H.3 OVERNIGHT VARIANT: q8_0 KV, MTP=2
       - -m
       - /models/qwen36-35b-a3b-mtp/Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf
       - --mmproj
@@ -36,10 +35,6 @@ services:
       - "999"
       - -fa
       - "on"
-      - -ctk
-      - q8_0
-      - -ctv
-      - q8_0
       - --no-mmap
       - -c
       - "262144"

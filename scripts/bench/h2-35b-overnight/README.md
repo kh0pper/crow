@@ -1,12 +1,20 @@
 # H.2 35b leg + H.3 MTP sweep — overnight kit (2026-07-07)
 
-> **FROZEN 2026-07-08 — DO NOT RE-ARM.** The 02:30 run was VOID and its
-> restore failure left prod down 02:30–03:47 (see
-> `results-20260708-0230/INCIDENT.md`). Before any re-run: env-safe compose
-> calls (fail preflight on empty vars), variants + `$IMG` rebased on an
-> MTP-capable image that loads this gguf (rocm-7.2.1 can run NO phase of
-> this bench — prod actually runs vulkan-radv-mtp), health-verified restore,
-> health-verifying deadman, and a pre-window smoke-boot of one variant.
+> **REBUILT 2026-07-08 (post-incident) — re-arm is Kevin's call.** The
+> 02:30 run was VOID and its restore failure left prod down 02:30–03:47
+> (see `results-20260708-0230/INCIDENT.md`). All five incident fixes are
+> in: `.env`-safe compose (preflight fails on unresolved vars), every
+> image → `vulkan-radv-mtp` (rocm-7.2.1 can run NO phase of this bench;
+> prod always ran vulkan-radv-mtp), deadman as its OWN systemd unit
+> (setsid/nohup dies with the runner's cgroup — how the backstop was lost),
+> compose-up restore with retry from each addon's own dir (containers get
+> REMOVED; `docker start` can't recreate), in-window self-test + abort-early.
+> **Validated live 2026-07-08 ~04:00**: preflight env assertion, ppl
+> gguf-load on the vulkan image (2-chunk co-resident, prod untouched),
+> serve-on-vulkan + addon-dir restore (they ARE tonight's manual recovery).
+> **Not yet validated**: q8-mtp2 serve compatibility (needs a prod stop —
+> that's the first thing the window itself now self-tests, with abort-early).
+> Re-arm: `systemd-run --user --on-calendar="02:30" --unit=h2-35b-overnight bash /home/kh0pp/crow/scripts/bench/h2-35b-overnight/run.sh`
 
 One bots-down window, scheduled for **02:30** via transient systemd user timer
 `h2-35b-overnight`. Measures everything, ships NOTHING unattended — prod is

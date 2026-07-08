@@ -1,6 +1,6 @@
 services:
   llamacpp-vulkan-qwen36-35b-a3b:
-    image: kyuz0/amd-strix-halo-toolboxes:rocm-7.2.1
+    image: kyuz0/amd-strix-halo-toolboxes:vulkan-radv-mtp
     container_name: llamacpp-vulkan-qwen36-35b-a3b
     devices:
       - /dev/kfd

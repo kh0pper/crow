@@ -3,15 +3,31 @@
 # draft-depth sweep (off/2/3/4, acceptance from timings) — ONE overnight
 # bots-down window. Measures everything, then ALWAYS restores the prod
 # compose snapshot (f16/MTP2) — no unattended config ship; morning review
-# decides. Detached deadman (deadman.sh) is the out-of-process backstop.
+# decides. Detached deadman (deadman.sh, own systemd unit) is the
+# out-of-process backstop.
+#
+# REBUILT 2026-07-08 after the VOID run + prod-down incident
+# (results-20260708-0230/INCIDENT.md). Fixes:
+#   1. compose env: $D35/.env now exists (addon dir is self-sufficient);
+#      preflight FAILS if the rendered compose has an empty volume spec.
+#   2. images: vulkan-radv-mtp everywhere — kyuz0 rocm-7.2.1 predates
+#      draft-mtp and cannot load the Qwen3.6 MTP gguf.
+#   3. deadman: launched via systemd-run as its OWN unit — setsid/nohup
+#      children die with the runner service's cgroup (proven 2026-07-08).
+#   4. restore: compose up from each addon's own dir with retry (containers
+#      can be REMOVED, `docker start` can't recreate); loud ntfy on failure.
+#   5. in-window self-test: 2-chunk throwaway ppl load-check + abort-early
+#      if the f16-mtp2 baseline serve fails (restore immediately, no flail).
+#   6. KLD base .dat written to a temp name, mv'd into place only on
+#      success — a failed base run can't poison the reuse path.
 set -uo pipefail
 IP=100.118.41.122
 KIT=/home/kh0pp/crow/scripts/bench/h2-35b-overnight
 D35=/home/kh0pp/crow-addons/llamacpp-vulkan-qwen36-35b-a3b
+DCOP=/home/kh0pp/crow-addons/llamacpp-vulkan-qwen36-27b-copilot
 C35=llamacpp-vulkan-qwen36-35b-a3b
-COP=llamacpp-vulkan-qwen36-27b-copilot
 QDIR=/home/kh0pp/crow/scripts/bench/results/quality
-IMG="kyuz0/amd-strix-halo-toolboxes:rocm-7.2.1"
+IMG="kyuz0/amd-strix-halo-toolboxes:vulkan-radv-mtp"
 M=/models/qwen36-35b-a3b-mtp/Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf
 TEXT=/work/wiki.test.raw
 BASEDAT=/work/35bq5-f16kv.dat
@@ -48,44 +64,81 @@ serve(){ # serve COMPOSE-FILE LABEL -> 0 on healthy
 down(){ (cd "$D35" && docker compose down) >/dev/null 2>&1 || true; }
 
 restore_prod(){
-  log "restoring prod (35b snapshot compose + copilot)"
+  log "restoring prod (35b snapshot compose + copilot, compose-up from own dirs)"
   down
   cp "$KIT/compose-prod-snapshot.yml" "$D35/docker-compose.yml"
-  (cd "$D35" && docker compose up -d) || docker start "$C35" || true
-  docker start "$COP" >/dev/null 2>&1 || true
+  for attempt in 1 2; do
+    (cd "$D35" && docker compose up -d) && break
+    log "WARN: 35b compose up failed (attempt $attempt)"; sleep 5
+  done
+  for attempt in 1 2; do
+    (cd "$DCOP" && docker compose up -d) && break
+    log "WARN: copilot compose up failed (attempt $attempt)"; sleep 5
+  done
   wait_health 8003 90 && log "35b healthy" || log "ERROR: 35b NOT healthy"
   wait_health 8010 90 && log "copilot healthy" || log "ERROR: copilot NOT healthy"
   STATE="8003=$(ok 8003 && echo ok || echo DOWN) 8010=$(ok 8010 && echo ok || echo DOWN)"
-  # kill the deadman only if prod is actually back; otherwise leave the backstop armed
-  if ok 8003 && ok 8010; then pkill -f "$KIT/deadman.sh" 2>/dev/null || true; fi
-  ntfy "H.2/H.3 overnight window finished" "prod: $STATE — results in $RES"
+  # disarm the deadman only if prod is actually back; otherwise leave the backstop armed
+  if ok 8003 && ok 8010; then
+    systemctl --user stop h2-deadman.service >/dev/null 2>&1 || true
+    ntfy "H.2/H.3 overnight window finished" "prod: $STATE — results in $RES"
+  else
+    ntfy "H.2/H.3 RESTORE FAILED — PROD DOWN" "prod: $STATE — deadman still armed; results in $RES"
+  fi
 }
 
-# ---------- preflight ----------
+abort_window(){ log "ABORT: $1"; ntfy "H.2/H.3 window ABORTED" "$1"; exit 1; } # EXIT trap restores
+
+# ---------- preflight (prod still up; nothing touched yet) ----------
 log "=== H.2 35b + H.3 MTP overnight window: preflight ==="
 [ -f "/home/kh0pp/llm/hf-cache/qwen36-35b-a3b-mtp/Qwen3.6-35B-A3B-UD-Q5_K_XL.gguf" ] || { log "FATAL: gguf missing"; exit 1; }
 [ -f "$QDIR/wiki.test.raw" ] || { log "FATAL: wiki.test.raw missing"; exit 1; }
 FREE_G=$(df --output=avail -BG /home/kh0pp/crow | tail -1 | tr -dc 0-9)
 [ "$FREE_G" -ge 20 ] || { log "FATAL: <20G free ($FREE_G G)"; exit 1; }
+docker image inspect "$IMG" >/dev/null 2>&1 || { log "FATAL: image $IMG not present"; exit 1; }
+[ -f "$D35/.env" ] || { log "FATAL: $D35/.env missing — compose vars would be empty (2026-07-08 incident)"; exit 1; }
+# every variant is rendered through $D35 — assert the env actually resolves
+RENDERED=$( (cd "$D35" && docker compose config 2>&1) ) || { log "FATAL: compose config failed: $RENDERED"; exit 1; }
+echo "$RENDERED" | grep -qE "^\s+source:\s*/" || { log "FATAL: compose volume source empty — .env not applied"; exit 1; }
+for f in compose-f16-mtp0.yml compose-f16-mtp2.yml compose-f16-mtp3.yml compose-f16-mtp4.yml compose-q8-mtp2.yml; do
+  grep -q "$IMG" "$KIT/$f" || { log "FATAL: $f not on $IMG"; exit 1; }
+done
+command -v systemd-run >/dev/null || { log "FATAL: systemd-run missing (deadman)"; exit 1; }
 ok 8003 || { log "FATAL: 35b not healthy at window start — refusing to touch a degraded prod"; exit 1; }
 ok 8010 || { log "FATAL: copilot not healthy at window start"; exit 1; }
 cp "$D35/docker-compose.yml" "$KIT/compose-prod-snapshot.yml"
+grep -q "$IMG" "$KIT/compose-prod-snapshot.yml" || { log "FATAL: prod compose not on $IMG — snapshot would restore a broken config"; exit 1; }
 log "preflight OK — prod compose snapshotted"
 
 trap restore_prod EXIT
-setsid nohup bash "$KIT/deadman.sh" 14400 </dev/null >/dev/null 2>&1 &
-log "deadman armed (14400s)"
+systemctl --user stop h2-deadman.service >/dev/null 2>&1 || true
+systemd-run --user --collect --unit=h2-deadman "$KIT/deadman.sh" 14400 \
+  || { trap - EXIT; log "FATAL: could not arm deadman — window not opened"; exit 1; }
+log "deadman armed (14400s, own systemd unit h2-deadman)"
 ntfy "H.2/H.3 overnight window START" "bots down; deadman 4h armed"
 
 log "stopping standard pair (by NAME)"
-docker stop "$C35" "$COP"
+docker stop "$C35" llamacpp-vulkan-qwen36-27b-copilot
+
+# ---------- phase 0: in-window self-test (cheap, abort-early) ----------
+log "=== 0/4 self-test: 2-chunk ppl load-check on $IMG ==="
+ppl -m "$M" -f "$TEXT" -c 512 --chunks 2 -ngl 999 -fa on --no-mmap \
+  --kl-divergence-base /work/.h2-selftest-throwaway.dat 2>&1 | tail -3 \
+  || true
+[ -f "$QDIR/.h2-selftest-throwaway.dat" ] || abort_window "self-test: llama-perplexity could not produce a base dat on $IMG (gguf load failure?)"
+rm -f "$QDIR/.h2-selftest-throwaway.dat"
+log "self-test OK — image loads the gguf"
 
 # ---------- phase 1: quality (llama-perplexity, GPU exclusive) ----------
-ts(){ date -u +%Y%m%dT%H%M%SZ; }
 if [ ! -f "$QDIR/35bq5-f16kv.dat" ]; then
   log "=== 1/4 KLD base f16-KV ctx512x48 ==="
   ppl -m "$M" -f "$TEXT" -c 512 --chunks 48 -ngl 999 -fa on --no-mmap \
-    --kl-divergence-base "$BASEDAT" 2>&1 | tee "$RES/kldbase-35bq5-f16kv.log" | tail -4
+    --kl-divergence-base /work/35bq5-f16kv.dat.tmp 2>&1 | tee "$RES/kldbase-35bq5-f16kv.log" | tail -4
+  if [ -f "$QDIR/35bq5-f16kv.dat.tmp" ]; then
+    mv "$QDIR/35bq5-f16kv.dat.tmp" "$QDIR/35bq5-f16kv.dat"
+  else
+    abort_window "KLD base run produced no .dat — no point continuing"
+  fi
 else
   log "=== 1/4 KLD base exists — reusing $QDIR/35bq5-f16kv.dat ==="
 fi
@@ -105,6 +158,8 @@ ppl -m "$M" -f "$TEXT" -c 4096 --chunks 40 -ngl 999 -fa on --no-mmap \
 log "--- f16 / MTP2 (prod baseline) ---"
 if serve compose-f16-mtp2.yml f16-mtp2; then
   bench f16-mtp2 prefill; bench f16-mtp2 gen; bench f16-mtp2 critique
+else
+  down; abort_window "baseline f16-mtp2 did not serve — variants would be meaningless"
 fi; down
 
 log "--- f16 / MTP off ---"

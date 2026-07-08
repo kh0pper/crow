@@ -74,3 +74,21 @@ H.2 (35b q8 KV) and H.3 (MTP depth sweep) remain OPEN — no measurements.
 4. Preflight should smoke-boot ONE variant end-to-end (health + 1-token
    gen) before stopping prod — a 3-minute check that would have voided
    the entire incident.
+
+## Addendum (04:15, post-rebuild)
+
+- **Fourth bug found**: the deadman never survived the runner — `setsid
+  nohup` children die with the systemd service's cgroup sweep when the
+  runner exits (KillMode=control-group). The "out-of-process backstop"
+  was in-cgroup all along; it protected nothing in ANY scenario. Fixed:
+  deadman now launches via `systemd-run --user --unit=h2-deadman`.
+- **Copilot container was also REMOVED** (not just stopped) during the
+  window — my restore `compose up` printed "Created". No path in run.sh
+  explains it (down() scopes to the 35b project); open question, but the
+  rebuilt restore is robust to it (compose up from each addon's own dir).
+- Kit rebuilt per the list above; syntax-checked; preflight env assertion
+  validated against the live compose; ppl gguf-load on vulkan-radv-mtp
+  validated co-resident (2-chunk KLD base produced, prod untouched).
+  q8-mtp2 serve compatibility remains unknown — the rebuilt window
+  self-tests it with abort-early. Re-arm deliberately NOT done (classifier
+  + policy: prod interruptions are Kevin's call).
