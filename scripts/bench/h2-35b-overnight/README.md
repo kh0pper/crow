@@ -1,5 +1,13 @@
 # H.2 35b leg + H.3 MTP sweep — overnight kit (2026-07-07)
 
+> **FROZEN 2026-07-08 — DO NOT RE-ARM.** The 02:30 run was VOID and its
+> restore failure left prod down 02:30–03:47 (see
+> `results-20260708-0230/INCIDENT.md`). Before any re-run: env-safe compose
+> calls (fail preflight on empty vars), variants + `$IMG` rebased on an
+> MTP-capable image that loads this gguf (rocm-7.2.1 can run NO phase of
+> this bench — prod actually runs vulkan-radv-mtp), health-verified restore,
+> health-verifying deadman, and a pre-window smoke-boot of one variant.
+
 One bots-down window, scheduled for **02:30** via transient systemd user timer
 `h2-35b-overnight`. Measures everything, ships NOTHING unattended — prod is
 always restored to the snapshotted f16/MTP2 compose at the end (or by the
