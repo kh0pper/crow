@@ -111,6 +111,7 @@ let _initialized = false;
 let _idleRevertTimer = null;
 let _residencyTimer = null;
 let _residencyInFlight = false;
+let _residencyPollFailing = false; // edge-trigger for the poll's failure warn
 const _lastUsedAt = new Map(); // providerName -> epoch ms of last acquireProvider success
 
 // -----------------------------------------------------------------------
@@ -569,6 +570,9 @@ export async function pollResidency(opts = {}) {
     // it inside this try makes the whole tick a no-op that leaves state intact.
     const declared = declaredAlwaysResident(cfg);
     const local = new Set(localAlwaysResident(cfg, ownAddrs));
+    // One snapshot: entries are per-provider independent, and releaseResidency
+    // below only ever affects the name being handled.
+    const health = getProviderHealth();
 
     for (const name of declared) {
       const p = cfg.providers[name];
@@ -581,7 +585,7 @@ export async function pollResidency(opts = {}) {
       try { exists = composeExists(p.bundleId); } catch { exists = false; }
       if (!exists) { releaseResidency(name); continue; }
 
-      let prev = getProviderHealth().providers[name];
+      let prev = health.providers[name];
       // Operator repointed the provider — release and re-evaluate ownership
       // against the new address.
       if (prev?.owned && prev.baseUrl !== p.baseUrl) {
@@ -603,10 +607,26 @@ export async function pollResidency(opts = {}) {
     // Prune ONLY names no longer DECLARED alwaysResident — the FULL declared
     // set, NOT `local`. Passing `local` would delete a provider's outage clock
     // the instant its interface flapped; that was the reviewed CRITICAL.
-    pruneResidency(declared);
-  } catch {
+    // Prune only when we actually READ a config. loadProviders() returns
+    // {providers:{}} when both the DB and models.json are unreadable, and an
+    // empty map is indistinguishable from "every provider was deleted" — so
+    // pruning on it would wipe every outage clock and restart the 10-min warn
+    // window on each bad tick. Note the gate is "any provider present", not
+    // "any alwaysResident present": a config that legitimately drops its last
+    // alwaysResident provider still prunes. Defence-in-depth; loadProviders()
+    // falls back to the git-tracked models.json.
+    if (Object.keys(cfg.providers || {}).length > 0) pruneResidency(declared);
+  } catch (err) {
+    // Edge-triggered so a persistently broken config warns once, not every
+    // 120s. Staying silent here would reproduce, inside the silence detector,
+    // exactly the silent failure it exists to catch.
+    if (!_residencyPollFailing) {
+      _residencyPollFailing = true;
+      console.warn(`[gpu-orchestrator] residency poll failed: ${err.message}`);
+    }
     return probed;
   }
+  _residencyPollFailing = false;
   return probed;
 }
 
@@ -641,6 +661,7 @@ export function startResidencyMonitor() {
 export function _stopResidencyMonitor() {
   if (_residencyTimer) { clearInterval(_residencyTimer); _residencyTimer = null; }
   _residencyInFlight = false;
+  _residencyPollFailing = false;
 }
 
 /**
