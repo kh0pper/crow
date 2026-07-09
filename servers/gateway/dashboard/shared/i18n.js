@@ -215,6 +215,18 @@ export const translations = {
   "signals.messages.pending": { en: "{n} pending out", es: "{n} salientes pendientes" },
   "signals.messages.undecryptable": { en: "{n} undecryptable", es: "{n} indescifrables" },
 
+  "signals.providers.label": { en: "Providers", es: "Proveedores" },
+  "signals.providers.notStarted": { en: "not started", es: "no iniciado" },
+  "signals.providers.off": { en: "none configured", es: "sin configurar" },
+  "signals.providers.resident": { en: "{n} resident", es: "{n} residente" },
+  "signals.providers.warming": { en: "{n} warming", es: "{n} iniciando" },
+  "signals.providers.down": { en: "{name} unreachable ≥{age}", es: "{name} inaccesible ≥{age}" },
+  "signals.providers.downMulti": { en: "{n} providers unreachable", es: "{n} proveedores inaccesibles" },
+  "signals.providers.downIssueEmbed": { en: "The embedding provider {name} has been unreachable, so new memories, sources and notes aren't being embedded; semantic search and recall are degraded until it recovers.", es: "El proveedor de incrustaciones {name} lleva un rato inaccesible, así que los nuevos recuerdos, fuentes y notas no se están incrustando; la búsqueda semántica y el recuerdo están degradados hasta que se recupere." },
+  "signals.providers.downIssue": { en: "The always-on model provider {name} has been unreachable; features that route to it (voice, chat) fall back or fail until it recovers.", es: "El proveedor de modelos siempre activo {name} lleva un rato inaccesible; las funciones que lo usan (voz, chat) recurren a alternativas o fallan hasta que se recupere." },
+  "signals.providers.downIssueMulti": { en: "{n} always-on model providers are unreachable ({names}); features that route to them fall back or fail until they recover.", es: "{n} proveedores de modelos siempre activos están inaccesibles ({names}); las funciones que los usan recurren a alternativas o fallan hasta que se recuperen." },
+  "signals.providers.action": { en: "Open model health", es: "Ver estado de modelos" },
+
   // ─── Nest Panel ───
   "nest.pinned": { en: "Pinned", es: "Fijados" },
   "nest.instances": { en: "Instances", es: "Instancias" },
