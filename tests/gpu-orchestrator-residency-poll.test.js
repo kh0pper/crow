@@ -235,9 +235,28 @@ test("prune via full tick: a provider removed from cfg entirely is dropped from 
   await pollResidency({ cfg: cfg1, ownAddrs: CROW, probe: makeProbe(true), now: () => 1000, composeExists: yes });
   assert.ok(getProviderHealth().providers.p);
 
-  const cfg2 = { providers: {} }; // p is gone
+  // p is gone, but the config still READS (another provider remains), so this
+  // is a real removal rather than a failed load.
+  const other = { ...prov(`http://${CROW_IP}:9999/v1`), gpuPolicy: { alwaysResident: false } };
+  const cfg2 = { providers: { other } };
   await pollResidency({ cfg: cfg2, ownAddrs: CROW, probe: makeProbe(true), now: () => 2000, composeExists: yes });
   assert.equal(getProviderHealth().providers.p, undefined, "pruned when no longer declared");
+});
+
+test("an UNREADABLE config ({providers:{}}) does not wipe outage clocks", async () => {
+  // loadProviders() returns {providers:{}} when the DB and models.json are both
+  // unreadable. That is indistinguishable from "all providers deleted", so it
+  // must NOT prune — otherwise every bad tick restarts the 10-min warn window
+  // and a long outage stays silent forever (the bug this feature exists to fix).
+  const cfg1 = { providers: { p: prov(`http://${CROW_IP}:8011/v1`) } };
+  await pollResidency({ cfg: cfg1, ownAddrs: CROW, probe: makeProbe(false), now: () => 1000, composeExists: yes });
+  const clock = getProviderHealth().providers.p.firstOwnedAt;
+  assert.equal(clock, 1000);
+
+  await pollResidency({ cfg: { providers: {} }, ownAddrs: CROW, probe: makeProbe(false), now: () => 500_000, composeExists: yes });
+  const after = getProviderHealth().providers.p;
+  assert.ok(after, "entry survives an unreadable config");
+  assert.equal(after.firstOwnedAt, clock, "outage clock NOT reset by an unreadable config");
 });
 
 // --- monitor lifecycle --------------------------------------------------
