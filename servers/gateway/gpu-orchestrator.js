@@ -39,10 +39,15 @@
  */
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname, resolve } from "node:path";
 import { networkInterfaces } from "node:os";
 import { loadProviders as loadCachedProviders } from "../shared/providers.js";
+import {
+  setResidencyInitialized, recordResidency, releaseResidency,
+  pruneResidency, getProviderHealth,
+} from "./provider-health.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const BUNDLES_DIR = resolve(dirname(__filename), "..", "..", "bundles");
@@ -99,17 +104,41 @@ const PROBE_TIMEOUT_MS = 2_000;
 
 const IDLE_REVERT_MS = Number(process.env.GPU_IDLE_REVERT_MS ?? 20 * 60 * 1000);
 const IDLE_CHECK_INTERVAL_MS = Number(process.env.GPU_IDLE_CHECK_INTERVAL_MS ?? 2 * 60 * 1000);
+const RESIDENCY_POLL_MS = Number(process.env.CROW_PROVIDER_RESIDENCY_POLL_MS ?? 120_000);
 
 let _swapInFlight = Promise.resolve();
 let _initialized = false;
 let _idleRevertTimer = null;
+let _residencyTimer = null;
+let _residencyInFlight = false;
 const _lastUsedAt = new Map(); // providerName -> epoch ms of last acquireProvider success
 
 // -----------------------------------------------------------------------
 // Bundle control
 // -----------------------------------------------------------------------
 
-function composeFile(bundleId) {
+/**
+ * A bundleId is safe iff it is a single path segment: matches
+ * /^[A-Za-z0-9][A-Za-z0-9._-]*$/ and is neither "." nor "..". Rejects empty,
+ * non-strings, "..", ".", anything with a "/" or "\", and leading "-"/".".
+ *
+ * `bundleId` arrives from the fleet-synced providers.bundle_id column, so it
+ * is attacker-influenceable. join(BUNDLES_DIR, "..", "docker-compose.yml")
+ * resolves to the git-tracked repo-root compose file — a compose-exists gate
+ * alone would pass for bundleId "..". Enforced INSIDE composeFile so it also
+ * hardens the pre-existing bundleUp/bundleStop spawn paths.
+ */
+export function isSafeBundleId(id) {
+  return typeof id === "string"
+    && id !== "."
+    && id !== ".."
+    && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id);
+}
+
+export function composeFile(bundleId) {
+  if (!isSafeBundleId(bundleId)) {
+    throw new Error(`orchestrator: unsafe bundleId ${JSON.stringify(bundleId)}`);
+  }
   return join(BUNDLES_DIR, bundleId, "docker-compose.yml");
 }
 
@@ -195,14 +224,34 @@ function getMutexSiblings(name) {
     .map(([n]) => n);
 }
 
+function isAlwaysResident(v) {
+  return v?.gpuPolicy?.alwaysResident === true || v?.alwaysResident === true;
+}
+
+/** Every provider name declared alwaysResident in cfg, REGARDLESS of locality.
+ *  PURE, no logging. The residency poll needs this for pruneResidency. */
+export function declaredAlwaysResident(cfg = loadProviders()) {
+  return Object.entries(cfg.providers || {})
+    .filter(([, v]) => isAlwaysResident(v))
+    .map(([n]) => n);
+}
+
+/** Declared alwaysResident AND locally orchestratable. PURE, no logging —
+ *  so the 120s poll doesn't re-emit the boot skip line on every tick. */
+export function localAlwaysResident(cfg = loadProviders(), ownAddrs = getOwnAddresses()) {
+  return Object.entries(cfg.providers || {})
+    .filter(([, v]) => isAlwaysResident(v) && isLocallyOrchestratable(v, ownAddrs))
+    .map(([n]) => n);
+}
+
 export function alwaysResidentProviders(cfg = loadProviders(), ownAddrs = getOwnAddresses()) {
-  const entries = Object.entries(cfg.providers || {})
-    .filter(([, v]) => v.gpuPolicy?.alwaysResident === true || v.alwaysResident === true);
-  const skipped = entries.filter(([, v]) => !isLocallyOrchestratable(v, ownAddrs)).map(([n]) => n);
+  const local = new Set(localAlwaysResident(cfg, ownAddrs));
+  const declared = declaredAlwaysResident(cfg);
+  const skipped = declared.filter((n) => !local.has(n));
   if (skipped.length) {
     console.log(`[gpu-orchestrator] skipping alwaysResident provider(s) not hosted on this machine: ${skipped.join(", ")}`);
   }
-  return entries.filter(([, v]) => isLocallyOrchestratable(v, ownAddrs)).map(([n]) => n);
+  return declared.filter((n) => local.has(n));
 }
 
 // Map<mutexGroup, { default: string|null, members: Array<{name, baseUrl, bundleId}> }>
@@ -494,6 +543,107 @@ export async function retryDeferredResidents({
 }
 
 /**
+ * Residency poll — the re-poll the original outage lacked. Read-only: probes
+ * OWNED alwaysResident providers' baseUrls and records the result into
+ * provider-health.js. Never takes the swap lock, never starts/stops a
+ * container, and MUST NEVER THROW (the interval callback relies on it).
+ *
+ * All five inputs are injectable so unit tests never touch the network or the
+ * real filesystem.
+ *
+ * Sticky ownership: once owned, a provider is probed every tick regardless of
+ * whether it still passes the locality check — a tailscale0 restart must NOT
+ * reset its outage clock, because if tailscale0 is down the provider genuinely
+ * is unreachable. Ownership is re-evaluated ONLY when its baseUrl changes.
+ */
+export async function pollResidency(opts = {}) {
+  const probed = [];
+  try {
+    const cfg = opts.cfg !== undefined ? opts.cfg : loadProviders();
+    const ownAddrs = opts.ownAddrs !== undefined ? opts.ownAddrs : getOwnAddresses();
+    const probe = opts.probe || probeReady;
+    const now = opts.now || Date.now;
+    const composeExists = opts.composeExists || ((id) => existsSync(composeFile(id)));
+
+    // Accessing cfg.providers may throw (a getter over a failed DB read); doing
+    // it inside this try makes the whole tick a no-op that leaves state intact.
+    const declared = declaredAlwaysResident(cfg);
+    const local = new Set(localAlwaysResident(cfg, ownAddrs));
+
+    for (const name of declared) {
+      const p = cfg.providers[name];
+      if (!p) continue;
+
+      // SSRF / path-traversal gate: only providers this machine can actually
+      // orchestrate (a safe bundleId whose compose file exists) are probed.
+      if (!p.bundleId || !isSafeBundleId(p.bundleId)) { releaseResidency(name); continue; }
+      let exists = false;
+      try { exists = composeExists(p.bundleId); } catch { exists = false; }
+      if (!exists) { releaseResidency(name); continue; }
+
+      let prev = getProviderHealth().providers[name];
+      // Operator repointed the provider — release and re-evaluate ownership
+      // against the new address.
+      if (prev?.owned && prev.baseUrl !== p.baseUrl) {
+        releaseResidency(name);
+        prev = undefined;
+      }
+
+      const owned = prev?.owned === true || local.has(name);
+      // Not ours (a peer's provider — trap 1) or not yet local (a deferred
+      // resident whose interface hasn't come up — trap 2): skip SILENTLY.
+      if (!owned) continue;
+
+      let ready = false, error = null;
+      try { ready = await probe(p.baseUrl); } catch (e) { error = e; }
+      recordResidency(name, { ready, nowMs: now(), baseUrl: p.baseUrl, embed: providerHasEmbedModel(p), error });
+      probed.push(name);
+    }
+
+    // Prune ONLY names no longer DECLARED alwaysResident — the FULL declared
+    // set, NOT `local`. Passing `local` would delete a provider's outage clock
+    // the instant its interface flapped; that was the reviewed CRITICAL.
+    pruneResidency(declared);
+  } catch {
+    return probed;
+  }
+  return probed;
+}
+
+/**
+ * Start the residency monitor: an unref'd interval (CROW_PROVIDER_RESIDENCY_POLL_MS,
+ * default 120s) that runs pollResidency. Fires once immediately, then on the
+ * interval. Idempotent; in-flight guarded so a slow poll can't stack; the
+ * callback catches everything. Set the interval <= 0 to disable.
+ */
+export function startResidencyMonitor() {
+  if (_residencyTimer) return;
+  if (!(RESIDENCY_POLL_MS > 0) || !Number.isFinite(RESIDENCY_POLL_MS)) {
+    console.log("[gpu-orchestrator] residency monitor disabled");
+    return;
+  }
+  const tick = () => {
+    if (_residencyInFlight) return;
+    _residencyInFlight = true;
+    Promise.resolve()
+      .then(() => pollResidency())
+      .catch(() => {})
+      .finally(() => { _residencyInFlight = false; });
+  };
+  tick(); // fire one poll immediately (fire-and-forget)
+  _residencyTimer = setInterval(() => {
+    try { tick(); } catch {}
+  }, RESIDENCY_POLL_MS);
+  _residencyTimer.unref?.();
+}
+
+/** Test hook — clear and null the interval so the suite doesn't leak it. */
+export function _stopResidencyMonitor() {
+  if (_residencyTimer) { clearInterval(_residencyTimer); _residencyTimer = null; }
+  _residencyInFlight = false;
+}
+
+/**
  * Startup — ensure all alwaysResident providers are up.
  * Non-fatal: logs and continues on error. Call from gateway init.
  *
@@ -504,29 +654,39 @@ export async function retryDeferredResidents({
 export async function initOrchestrator() {
   if (_initialized) return;
   _initialized = true;
-  const cfg = loadProviders();
-  const ownAddrs = getOwnAddresses();
-  const residents = alwaysResidentProviders(cfg, ownAddrs); // logs the skip line
-  _deferredResidents = new Set(
-    Object.entries(cfg.providers || {})
-      .filter(([, v]) => (v.gpuPolicy?.alwaysResident === true || v.alwaysResident === true)
-        && !isLocallyOrchestratable(v, ownAddrs))
-      .map(([n]) => n)
-  );
-  if (residents.length === 0 && _deferredResidents.size === 0) {
-    console.log("[gpu-orchestrator] no alwaysResident providers declared");
+  // ARM FIRST — before anything that can throw. _initialized is already set,
+  // and the caller (post-listen.js) only .catch()es, so a throw below would
+  // otherwise leave residency detection permanently disarmed (the exact
+  // failure class this feature exists to eliminate).
+  setResidencyInitialized();
+  startResidencyMonitor();
+  try {
+    const cfg = loadProviders();
+    const ownAddrs = getOwnAddresses();
+    const residents = alwaysResidentProviders(cfg, ownAddrs); // logs the skip line
+    _deferredResidents = new Set(
+      Object.entries(cfg.providers || {})
+        .filter(([, v]) => (v.gpuPolicy?.alwaysResident === true || v.alwaysResident === true)
+          && !isLocallyOrchestratable(v, ownAddrs))
+        .map(([n]) => n)
+    );
+    if (residents.length === 0 && _deferredResidents.size === 0) {
+      console.log("[gpu-orchestrator] no alwaysResident providers declared");
+      startIdleRevertTimer();
+      return;
+    }
+    if (residents.length) {
+      console.log(`[gpu-orchestrator] ensuring alwaysResident: ${residents.join(", ")}`);
+    }
+    let embedRecovered = false;
+    for (const name of residents) {
+      if (await ensureResident(name, cfg)) embedRecovered = true;
+    }
     startIdleRevertTimer();
-    return;
-  }
-  if (residents.length) {
-    console.log(`[gpu-orchestrator] ensuring alwaysResident: ${residents.join(", ")}`);
-  }
-  let embedRecovered = false;
-  for (const name of residents) {
-    if (await ensureResident(name, cfg)) embedRecovered = true;
-  }
-  startIdleRevertTimer();
-  if (embedRecovered) {
-    triggerEmbedBackfill(); // fire-and-forget — don't block gateway startup
+    if (embedRecovered) {
+      triggerEmbedBackfill(); // fire-and-forget — don't block gateway startup
+    }
+  } catch (err) {
+    console.warn(`[gpu-orchestrator] initOrchestrator body failed: ${err.message}`);
   }
 }
