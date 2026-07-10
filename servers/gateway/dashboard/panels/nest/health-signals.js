@@ -13,6 +13,7 @@
  *   peers     — crow_instances unseen >24h (info)
  *   updates   — auto_update_* version comparison (info if update available)
  *   backup    — newest file mtime in CROW_BACKUP_DIR (none → info; >7d → warn)
+ *   providers — alwaysResident provider residency (unreachable ≥threshold → warn)
  *
  * Pure export shouldNotify(lastMap, issueId, nowMs) — used by the health monitor
  * for 24-hour dedupe. No I/O.
@@ -26,6 +27,7 @@ import { t } from "../../shared/i18n.js";
 import { PUBLIC_FUNNEL_PREFIXES } from "../../../funnel.js";
 import { isAuditDegraded } from "../../../../shared/cross-host-auth.js";
 import { getReceiveHealth } from "../../../../sharing/receive-health.js";
+import { getProviderHealth } from "../../../provider-health.js";
 
 // ─── Module-level 30s cache ───────────────────────────────────────────────────
 
@@ -634,6 +636,78 @@ async function messagesSignal(db, lang, nowFn) {
   return { id: "messages", severity: null, state: "ok", label, value: parts.join(" · ") };
 }
 
+// Provider residency (F-HEALTH-1). Reads the pure provider-health module —
+// zero-import state written by the orchestrator's residency poll. A provider is
+// "in outage" when it is not ready and has been so for >= notReadyWarnMs since
+// its last-ready (or, if never ready, since ownership was taken). The embed-vs
+// non-embed issue copy is DERIVED from the down providers' embed flags: crow
+// only ever owns crow-voice (no embed model), so a hardcoded "embeddings
+// degraded" line would send the operator after the wrong subsystem.
+function notReadyWarnMs() {
+  const n = Number(process.env.CROW_PROVIDER_NOT_READY_WARN_MS);
+  return Number.isFinite(n) && n > 0 ? n : 10 * 60 * 1000;
+}
+
+async function providersSignal(lang, nowFn) {
+  const health = getProviderHealth();
+  const label = t("signals.providers.label", lang);
+  const action = {
+    actionLabel: t("signals.providers.action", lang),
+    actionHref: "/dashboard/settings?section=llm&tab=health",
+  };
+
+  if (!health.initialized) {
+    return { id: "providers", severity: null, state: "off", label, value: t("signals.providers.notStarted", lang) };
+  }
+  const names = Object.keys(health.providers);
+  if (names.length === 0) {
+    return { id: "providers", severity: null, state: "off", label, value: t("signals.providers.off", lang) };
+  }
+
+  const now = nowFn();
+  const threshold = notReadyWarnMs();
+  const down = [];
+  let readyCount = 0;
+  let warmingCount = 0;
+  for (const name of names) {
+    const p = health.providers[name];
+    if (p.ready) { readyCount++; continue; }
+    const origin = p.lastReadyAt ?? p.firstOwnedAt;
+    if (now - origin >= threshold) {
+      down.push({ name, embed: !!p.embed, age: formatAge(now - origin) });
+    } else {
+      warmingCount++;
+    }
+  }
+
+  if (down.length > 0) {
+    const value = down.length === 1
+      ? t("signals.providers.down", lang).replace("{name}", down[0].name).replace("{age}", down[0].age)
+      : t("signals.providers.downMulti", lang).replace("{n}", String(down.length));
+
+    // Always NAME the provider when exactly one is down — this string becomes the
+    // notification title (post-listen.js sets title: issue.label). The embed-vs-voice
+    // split is derived from the provider's own embed flag, never hardcoded: crow only
+    // ever owns crow-voice, which carries no embed model.
+    let issueLabel;
+    if (down.length === 1) {
+      const key = down[0].embed ? "signals.providers.downIssueEmbed" : "signals.providers.downIssue";
+      issueLabel = t(key, lang).replace("{name}", down[0].name);
+    } else {
+      issueLabel = t("signals.providers.downIssueMulti", lang)
+        .replace("{n}", String(down.length))
+        .replace("{names}", down.map(d => d.name).join(", "));
+    }
+    return { id: "providers", severity: "warn", state: "warn", label, value, issueLabel, ...action };
+  }
+
+  const parts = [t("signals.providers.resident", lang).replace("{n}", String(readyCount))];
+  if (warmingCount > 0) {
+    parts.push(t("signals.providers.warming", lang).replace("{n}", String(warmingCount)));
+  }
+  return { id: "providers", severity: null, state: "ok", label, value: parts.join(" · ") };
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 /**
@@ -664,6 +738,7 @@ export async function collectHealthSignals(db, opts = {}) {
     integrationsSignal(db, lang),
     federationAuditSignal(lang),
     messagesSignal(db, lang, nowFn),
+    providersSignal(lang, nowFn),
   ].map(p => Promise.resolve(p).catch(err => ({
     id: "unknown",
     severity: null,
