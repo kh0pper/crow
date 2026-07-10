@@ -1875,6 +1875,32 @@ await initTable("contact_group_members table", `
   CREATE UNIQUE INDEX IF NOT EXISTS idx_group_members_unique ON contact_group_members(group_id, contact_id);
 `);
 
+// --- F-CONTACT-1 (design §D3): contact deletion tombstones. LOCAL state, never
+// synced, never pruned — one small row per contact ever deleted. Deliberately NO
+// foreign key to contacts(crow_id): the whole point is that the contact row is
+// gone. lamport_ts carries the delete's Lamport clock (max-wins); deleted_at is
+// unix-seconds diagnostics only — no decision compares wall clocks across
+// instances (see design §D4).
+await initTable("contact_tombstones table", `
+  CREATE TABLE IF NOT EXISTS contact_tombstones (
+    crow_id     TEXT PRIMARY KEY,
+    lamport_ts  INTEGER NOT NULL,
+    deleted_at  INTEGER NOT NULL
+  );
+`);
+
+// --- F-CONTACT-1 (design §D4): clock-free replay hygiene for authenticated
+// control events (invite_accepted). Record every successfully-handled event.id so
+// a stale ~60h retry cannot resurrect a deleted contact. Rows older than 30 days
+// are pruned opportunistically on insert.
+await initTable("processed_control_events table", `
+  CREATE TABLE IF NOT EXISTS processed_control_events (
+    event_id  TEXT PRIMARY KEY,
+    kind      TEXT NOT NULL,
+    seen_at   INTEGER NOT NULL
+  );
+`);
+
 // --- Crow Messages rooms (phase 3a): a contact_group becomes a multi-party room
 // when it carries a room_uid. Plain organizational groups (room_uid NULL) are
 // unaffected. mode is validated in code ('addressed'|'always') — a CHECK can't be

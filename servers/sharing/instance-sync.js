@@ -21,6 +21,8 @@ import { emitGroupUpsert } from "./group-sync.js";
 import { resolveDataDir } from "../db.js";
 import { isSyncable } from "../gateway/dashboard/settings/sync-allowlist.js";
 import { normalizePubkey } from "./pubkey-util.js";
+import { readTombstone, writeTombstone, clearTombstone } from "./contact-delete.js";
+import { sanitizeDisplayName } from "./display-name.js";
 import bus from "../shared/event-bus.js";
 
 /**
@@ -790,9 +792,9 @@ export class InstanceSyncManager {
    */
   async emitChange(table, op, row) {
     // --no-auth companion doesn't drive fleet sync (and has no outFeeds).
-    if (this.feedsDisabled) return;
-    if (!SYNCED_TABLES.includes(table)) return;
-    if (!shouldSyncRow(table, row)) return; // local-only row; don't broadcast
+    if (this.feedsDisabled) return null;
+    if (!SYNCED_TABLES.includes(table)) return null;
+    if (!shouldSyncRow(table, row)) return null; // local-only row; don't broadcast
 
     const lamportTs = await this._nextLamport();
 
@@ -1280,16 +1282,60 @@ export class InstanceSyncManager {
       filtered[k] = v;
     }
 
+    // F-CONTACT-2 (design §D5): display_name is remote-controlled and renders in
+    // the dashboard. The sync signature proves same-KEY, not honest content — an
+    // older/buggy peer on the shared identity can carry an uncapped, control-laden
+    // name straight in. Sanitize HERE, the moment `filtered` is built, so the
+    // same-secp rebind, the rowsEquivalent() check, and both write branches all
+    // read the cleaned value. Sanitizing later would make every redelivery of a
+    // name-needing-sanitization mismatch the stored (sanitized) row and spam the
+    // conflict log. Only rewrite when the key is present (an entry may omit it);
+    // a null result is legal (a NULL display_name is a placeholder).
+    if (Object.prototype.hasOwnProperty.call(filtered, "display_name")) {
+      filtered.display_name = sanitizeDisplayName(filtered.display_name);
+    }
+
     const { rows: localRows } = await this.db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [crowId] });
     const localRow = localRows[0] ?? null;
     const localTs = localRow?.lamport_ts || 0;
     const rowIdJson = JSON.stringify({ crow_id: crowId });
 
+    // ── tombstone gate (F-CONTACT-1, design §D3.1) ───────────────────────────
+    // Runs BEFORE the existing branches. Makes deletion durable: a delete that
+    // resurrects is worse than no delete. The rule is a pure function of
+    // (op, tomb.lamport_ts, localRow?), so every instance evaluates it identically.
+    let tomb = await readTombstone(this.db, crowId);
+
+    // (a) A local row proves some local path re-created the contact, so the
+    //     tombstone is stale — the local re-create wins. Clear it and fall
+    //     through to normal LWW. (Robust against the many local write paths that
+    //     create contacts without each remembering to clearTombstone.)
+    if (tomb && localRow) {
+      await clearTombstone(this.db, crowId);
+      tomb = null;
+    }
+
     // ── delete ──────────────────────────────────────────────────────────────
     if (op === "delete") {
-      if (!localRow) return;
+      // A tombstone is written only when the delete is AUTHORITATIVE. The ROW
+      // delete keeps today's LWW guard (lamportTs > localTs) — a stale delete
+      // must NOT wipe a live contact, whose FK ON DELETE CASCADE would also
+      // destroy its entire DM history (design §2.1). The loss branch writes no
+      // tombstone: the row won, so no tombstone is warranted.
+      if (!localRow) {
+        // delete-before-insert race: record the tombstone, apply nothing.
+        await writeTombstone(this.db, crowId, Math.max(tomb?.lamport_ts ?? 0, lamportTs));
+        return;
+      }
       if (lamportTs > localTs) {
+        // Winning delete: unwire locally (boot-injected hook, guarded — mirrors
+        // onContactSynced), remove the row, then record the tombstone. The hook
+        // runs with the doomed row BEFORE the DELETE.
+        if (typeof this.onContactDeleted === "function") {
+          try { await this.onContactDeleted(localRow); } catch { /* never throw into apply */ }
+        }
         await this.db.execute({ sql: "DELETE FROM contacts WHERE crow_id = ?", args: [crowId] });
+        await writeTombstone(this.db, crowId, Math.max(tomb?.lamport_ts ?? 0, lamportTs));
         return;
       }
       try {
@@ -1301,6 +1347,20 @@ export class InstanceSyncManager {
         console.warn("[instance-sync] contacts delete conflict LOGGING failed (local kept):", err.message);
       }
       return;
+    }
+
+    // (c) A tombstone is still standing and there is NO local row (rule (a)
+    //     already cleared any tombstone that coexisted with a row). Delete wins
+    //     over a concurrent update; a stale insert replay is dropped; only a
+    //     fresher insert re-adds — and it must APPLY before it clears (ordering
+    //     is load-bearing: _processNewEntries locks per remote instance, so a
+    //     concurrent stale update from another feed must see either the tombstone
+    //     or the row, never neither — design §D3.1(c)).
+    let clearTombAfterApply = false;
+    if (tomb) {
+      if (op === "update") return;                    // drop — delete wins over a concurrent update
+      if (lamportTs <= tomb.lamport_ts) return;        // stale insert replay
+      clearTombAfterApply = true;                      // insert above the tombstone: apply, THEN clear
     }
 
     // ── insert / update ────────────────────────────────────────────────────
@@ -1340,6 +1400,7 @@ export class InstanceSyncManager {
           const vals = [crowId, ...rebindKeys.map((k) => filtered[k] ?? null), lamportTs];
           await this.db.execute({ sql: `UPDATE contacts SET ${setClauses.join(", ")} WHERE id = ?`, args: [...vals, secpRow.id] });
           await this._afterContactApplied(crowId);
+          if (clearTombAfterApply) await clearTombstone(this.db, crowId); // §D3.1(c): clear AFTER the row exists
         }
         return;
       }
@@ -1354,6 +1415,7 @@ export class InstanceSyncManager {
         args: [...values, lamportTs],
       });
       await this._afterContactApplied(crowId);
+      if (clearTombAfterApply) await clearTombstone(this.db, crowId); // §D3.1(c): clear AFTER the row exists
       return;
     }
 
