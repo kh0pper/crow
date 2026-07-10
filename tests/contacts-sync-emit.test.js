@@ -11,7 +11,8 @@ test("emitContactChange forwards op+row to the sync manager", async () => {
   __setEmitSinkForTest({ emitChange: async (t, op, row) => seen.push([t, op, row.crow_id]) });
   await emitContactChange("insert", { crow_id: "crow:e1" });
   await emitContactChange("update", { crow_id: "crow:e2", is_blocked: 1 });
-  await emitContactDelete("crow:e3");
+  // emitContactDelete(db, crowId, fallbackLamportTs): db=null → writeTombstone no-ops.
+  await emitContactDelete(null, "crow:e3", 5);
   assert.deepEqual(seen, [
     ["contacts", "insert", "crow:e1"],
     ["contacts", "update", "crow:e2"],
@@ -23,14 +24,14 @@ test("emitContactChange forwards op+row to the sync manager", async () => {
 test("emitContactChange is a no-op with no manager (pre-boot / tests)", async () => {
   __setEmitSinkForTest(null);
   await emitContactChange("insert", { crow_id: "crow:none" }); // must not throw
-  await emitContactDelete("crow:none");
+  await emitContactDelete(null, "crow:none", 1);
 });
 
 test("emitContactDelete ignores an empty crowId", async () => {
   const seen = [];
   __setEmitSinkForTest({ emitChange: async (...a) => seen.push(a) });
-  await emitContactDelete("");
-  await emitContactDelete(null);
+  await emitContactDelete(null, "", 1);
+  await emitContactDelete(null, null, 1);
   assert.equal(seen.length, 0);
   __setEmitSinkForTest(null);
 });

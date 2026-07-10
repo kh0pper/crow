@@ -154,7 +154,7 @@ export async function upsertFullContact(db, managers, { crowId, ed25519Pub, secp
     await wireFullContact(managers, row);
     // Phase 3: the folded row is gone on this instance; propagate its delete +
     // the merged owner to the user's other instances.
-    await emitContactDelete(otherSecp.crow_id);
+    await emitContactDelete(db, otherSecp.crow_id, otherSecp.lamport_ts);
     await emitContactChange("update", row);
     return { contactId: row.id, outcome: "merged" };
   }

@@ -10,7 +10,7 @@
 // by servers/gateway/index.js during boot; importing scripts/init-db.js here
 // (or anything that runs DB work at module top-level) would execute init-db
 // as an unwanted side effect.
-export const SCHEMA_GENERATION = 5;
+export const SCHEMA_GENERATION = 6;
 
 // Pure decision helper for the gateway boot gate. Returns true when the DB
 // needs init-db to run: either core tables are missing (fresh/incomplete

@@ -790,9 +790,9 @@ export class InstanceSyncManager {
    */
   async emitChange(table, op, row) {
     // --no-auth companion doesn't drive fleet sync (and has no outFeeds).
-    if (this.feedsDisabled) return;
-    if (!SYNCED_TABLES.includes(table)) return;
-    if (!shouldSyncRow(table, row)) return; // local-only row; don't broadcast
+    if (this.feedsDisabled) return null;
+    if (!SYNCED_TABLES.includes(table)) return null;
+    if (!shouldSyncRow(table, row)) return null; // local-only row; don't broadcast
 
     const lamportTs = await this._nextLamport();
 
