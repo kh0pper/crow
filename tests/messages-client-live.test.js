@@ -79,3 +79,17 @@ test("retryFailedMessage sends retry_of as a string of digits and re-enters the 
   assert.match(fn, /retry_of: failedId != null \? String\(failedId\) : undefined/);
   assert.match(fn, /\/api\/messages\/peer\/' \+ encodeURIComponent\(_activeItem\.id\) \+ '\/send'/);
 });
+
+test("a failed retry chains the NEXT Retry to the NEW failed row id (supersede-on-failure)", () => {
+  // Server contract: a failed resend that wrote a new failed row returns 502
+  // {ok:false, id: NEW row} and (with retry_of) deletes the OLD row. The
+  // client must re-stamp the bubble and retarget the next Retry click, or a
+  // second click would name an already-deleted row.
+  const fn = extractFunction(js, "retryFailedMessage");
+  assert.match(fn, /bubble\.dataset\.msgId = body\.id/, "failure branch re-stamps the bubble with the new row id");
+  assert.match(fn, /failedId = body\.id/, "next retry targets the new failed row");
+  // The Retry button reads its ctx at CLICK time from the bubble (el() binds
+  // via addEventListener, so the handler itself can't be rebuilt in place).
+  const mbf = extractFunction(js, "markBubbleFailed");
+  assert.match(mbf, /_retryCtx/, "retry ctx is stored mutably on the bubble and read at click time");
+});

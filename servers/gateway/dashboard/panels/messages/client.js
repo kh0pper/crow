@@ -1251,12 +1251,21 @@ export function messagesClientJS(opts) {
         }));
       }
       var ctx = retryCtx || {};
-      if (ctx.content && !b.querySelector('.msg-retry-btn')) {
-        b.appendChild(el('button', {
-          className: 'msg-retry-btn',
-          text: '${tJs("messages.retry", lang)}',
-          onclick: function () { retryFailedMessage(b, ctx.content, ctx.id); },
-        }));
+      if (ctx.content) {
+        // Chainable retry target (supersede-on-failure): store the ctx ON the
+        // bubble and read it at CLICK time. A failed resend re-stamps
+        // _retryCtx.id to the NEW failed row the server wrote (the server
+        // deletes the old one when retry_of names it); el() binds handlers via
+        // addEventListener, so the existing button's handler can't be swapped
+        // in place — the click-time read retargets it instead.
+        b._retryCtx = { id: ctx.id, content: ctx.content };
+        if (!b.querySelector('.msg-retry-btn')) {
+          b.appendChild(el('button', {
+            className: 'msg-retry-btn',
+            text: '${tJs("messages.retry", lang)}',
+            onclick: function () { var c = b._retryCtx || {}; retryFailedMessage(b, c.content, c.id); },
+          }));
+        }
       }
     } catch (e) { /* never let feedback crash the send path */ }
   }
@@ -1292,6 +1301,14 @@ export function messagesClientJS(opts) {
           bubble.appendChild(el('span', { className: 'msg-delivery', title: '${tJs("messages.deliveryRelayed", lang)}', text: '\\u2713' }));
         }
       } else {
+        // Supersede-on-failure: the server may have written a NEW failed row
+        // for this attempt (and, given retry_of, deleted the old one) — the
+        // 502 body.id is then guaranteed to be THIS attempt's row. Re-stamp
+        // so the next Retry click names the live row, not a deleted one.
+        if (body && body.id != null) {
+          bubble.dataset.msgId = body.id;
+          failedId = body.id;
+        }
         if (btn) { btn.disabled = false; btn.textContent = '${tJs("messages.retry", lang)}'; }
         markBubbleFailed(bubble, body && body.error, { id: failedId, content: content });
       }
