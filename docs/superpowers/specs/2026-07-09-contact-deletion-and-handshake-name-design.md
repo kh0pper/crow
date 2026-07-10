@@ -71,9 +71,9 @@ hazard, not a reassurance.
 | `message_retry_queue` | `contact_id` | CASCADE |
 | `shared_items` | `contact_id` | CASCADE |
 | `contact_group_members` | `contact_id` | CASCADE |
-| `project_space_members` | `contact_id` | CASCADE |
+| `project_members` | `contact_id` | CASCADE |
 | `project_spaces` | `owner_contact_id` | SET NULL |
-| `project_space_members` | `granted_by_contact_id` | SET NULL |
+| `project_members` | `granted_by_contact_id` | SET NULL |
 | `room_messages` | `sender_contact_id` | SET NULL |
 | `blog_shares` | `contact_id` | SET NULL |
 
@@ -442,7 +442,7 @@ tool text) and to bound the stored value.
 
 One delete path, so the panel and the sync-apply path cannot diverge.
 
-- `deleteContactCascadePreview(db, contactId)` → `{ messages, sharedItems, groups, projectsOwned, projectMemberships }`. Read-only; drives the confirmation copy.
+- `deleteContactCascadePreview(db, contactId)` → `{ messages, sharedItems, groups, projectsOwned, projectMemberships }`. Read-only; drives the confirmation copy. (`projectMemberships` counts `project_members` — an earlier draft of this doc named a `project_space_members` table that does not exist; caught during implementation.)
 - `unwireContact(managers, row)` → close the Nostr sub, close sync feeds, leave the DHT topic. Each step independently guarded (the `wireFullContact` convention). Runs **before** the row is removed — load-bearing: an in-flight `subscribeToContact` `onevent` INSERT against a deleted `contact_id` raises `FOREIGN KEY constraint failed`. R1 confirmed that throw is swallowed at `nostr.js:519`, so it cannot crash the receive path; unwire-first plus `stopped=true` prevents it arising at all.
 - `deleteContactLocal(db, managers, row)` → `unwireContact`, `DELETE FROM contacts WHERE id = ?`, then `emitContactDelete(db, row.crow_id, row.lamport_ts)`.
 - `writeTombstone` / `readTombstone` / `clearTombstone`, all skipping `req:` ids.

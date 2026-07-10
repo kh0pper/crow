@@ -82,7 +82,8 @@ map-entry removal instead of relying on the prefix hazard.)
 
 - Read-only counts: `messages`, `sharedItems`, `groups` (`contact_group_members`),
   `projectsOwned` (`project_spaces.owner_contact_id`), `projectMemberships`
-  (`project_space_members`). Returns zeros for a contact with nothing.
+  (`project_members` — NOT `project_space_members`, which does not exist). Returns zeros for a
+  contact with nothing.
 
 **Tests (guard #8):** seed a contact with 3 messages, 1 share, 2 group memberships, 1 owned
 project → preview returns exactly those counts; an untouched second contact reports zeros.
