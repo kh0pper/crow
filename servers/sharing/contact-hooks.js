@@ -9,9 +9,20 @@
  * and a DHT topic for a row it just removed — and the deleted contact's next DM
  * resurfaces it as a message request on that peer (design §4.3).
  *
- * Both callbacks are fire-and-forget: `_applyContact` invokes them inside its
- * own try/catch, and the underlying wire/unwire helpers are individually
- * guarded, so neither can throw into the sync apply loop.
+ * The two hooks are deliberately asymmetric:
+ *   - `onContactSynced` is fire-and-forget. `_afterContactApplied` invokes it as
+ *     `Promise.resolve(...).catch(() => {})`; it wires UP a row that already
+ *     exists and nothing follows it, so there is no ordering hazard.
+ *   - `onContactDeleted` RETURNS its promise, because `_applyContact` awaits the
+ *     hook and then issues `DELETE FROM contacts`. Teardown must finish first.
+ *     Today that would hold anyway — `unsubscribeFromContact` is synchronous, so
+ *     the FK-critical step completes before the first real `await` — but relying
+ *     on that is a hidden dependency: making it async later would silently
+ *     reopen the window `deleteContactLocal` calls load-bearing. Returning the
+ *     promise makes the existing `await` real.
+ *
+ * Neither can throw into the sync apply loop: `_applyContact` wraps the call and
+ * the underlying wire/unwire helpers are individually guarded.
  */
 
 /**
@@ -30,6 +41,6 @@ export function attachContactSyncHooks(syncManager, { wireSyncedContact, unwireC
     return false;
   }
   syncManager.onContactSynced = (row) => { wireSyncedContact(getManagers(), row); };
-  syncManager.onContactDeleted = (row) => { unwireContact(getManagers(), row); };
+  syncManager.onContactDeleted = (row) => unwireContact(getManagers(), row); // returned: _applyContact awaits this before DELETE
   return true;
 }

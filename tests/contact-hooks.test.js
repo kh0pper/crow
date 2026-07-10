@@ -69,6 +69,33 @@ test("onContactSynced still delegates to wireSyncedContact", () => {
   assert.equal(calls.unwired.length, 0);
 });
 
+test("onContactDeleted RETURNS the teardown promise so _applyContact's await is real", async () => {
+  // _applyContact does `await this.onContactDeleted(row)` and then DELETEs the
+  // row. If the hook discards the promise, the DELETE races the teardown. Today
+  // that is masked because unsubscribeFromContact is synchronous — this pins the
+  // contract so making it async can never silently reopen the FK window.
+  const mgr = {};
+  const order = [];
+  let resolveTeardown;
+  const teardown = new Promise((r) => { resolveTeardown = r; });
+
+  attachContactSyncHooks(mgr, {
+    wireSyncedContact: () => {},
+    unwireContact: () => teardown.then(() => order.push("unwired")),
+    getManagers: () => ({}),
+  });
+
+  const hookPromise = mgr.onContactDeleted({ id: 1, crow_id: "crow:x" });
+  assert.ok(hookPromise && typeof hookPromise.then === "function", "hook must return a thenable");
+
+  // Simulate _applyContact: await the hook, then "DELETE".
+  const applied = (async () => { await hookPromise; order.push("deleted"); })();
+  resolveTeardown();
+  await applied;
+
+  assert.deepEqual(order, ["unwired", "deleted"], "teardown must complete before the row is deleted");
+});
+
 test("managers are resolved at call time, not at attach time", () => {
   const mgr = {};
   let current = null;
