@@ -1476,11 +1476,19 @@ export function messagesClientJS(opts) {
     var encRow = el('div', { className: 'msg-info-row', css: 'color:var(--crow-success)' });
     encRow.textContent = '\\ud83d\\udd12 ${tJs("messages.e2eEncrypted", lang)}';
     secSec.appendChild(encRow);
-    if (contact.ed25519_pubkey) {
+    if (contact.safety_number) {
+      // F-UI-6: show the SYMMETRIC safety number (same string both sides —
+      // matches the Contacts detail page), not the raw asymmetric peer pubkey
+      // that read as "the numbers don't match".
       secSec.appendChild(el('div', {
         className: 'msg-info-row',
-        css: 'font-family:monospace;font-size:0.65rem;color:var(--crow-text-muted);word-break:break-all',
-        text: contact.ed25519_pubkey.substring(0, 32) + '...',
+        css: 'font-size:0.7rem;color:var(--crow-text-muted);margin-top:6px',
+        text: '${tJs("contacts.safetyNumber", lang)}',
+      }));
+      secSec.appendChild(el('div', {
+        className: 'msg-info-row',
+        css: 'font-family:monospace;font-size:0.75rem;word-break:break-all;user-select:all',
+        text: contact.safety_number,
       }));
     }
     details.appendChild(secSec);
