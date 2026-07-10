@@ -11,6 +11,7 @@ import { isKioskActive, kioskBlockedResponse } from "../../shared/kiosk-guard.js
 import { generateInviteCode, parseInviteCode, parseBotInviteCode, computeSafetyNumber } from "../identity.js";
 import { upsertFullContact } from "../contact-promote.js";
 import { emitContactChange } from "../contact-sync.js";
+import { clearTombstone } from "../contact-delete.js";
 import { buildInviteUrl, extractInviteCode } from "../invite-url.js";
 import {
   generateShortCode, formatShortCode, normalizeShortCode, deriveShortCodeKeys,
@@ -382,7 +383,11 @@ export function registerContactsTools(server, ctx) {
           // sync per S-BOTS; a local-bot would be gated by shouldSyncRow).
           try {
             const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [contactId] });
-            if (rows[0]) await emitContactChange("insert", rows[0]);
+            if (rows[0]) {
+              // D3.2: a local re-add supersedes any tombstone for this bot's crowId.
+              await clearTombstone(db, bot.botCrowId);
+              await emitContactChange("insert", rows[0]);
+            }
           } catch { /* never blocks the accept */ }
         }
 

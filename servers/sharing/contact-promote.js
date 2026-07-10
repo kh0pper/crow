@@ -67,6 +67,7 @@ export async function persistIncomingCursor(db, createdAtSec) {
 
 import { normalizePubkey } from "./pubkey-util.js";
 import { emitContactChange, emitContactDelete } from "./contact-sync.js";
+import { readTombstone, clearTombstone } from "./contact-delete.js";
 
 const HEX_KEY = /^[0-9a-fA-F]{64}(?:[0-9a-fA-F]{2})?$/; // 64 x-only or 66 compressed
 
@@ -128,6 +129,16 @@ export async function upsertFullContact(db, managers, { crowId, ed25519Pub, secp
   const name = displayName || null;
   const secpNorm = normalizePubkey(secp256k1Pub);
 
+  // D3.2 (R1-C1): read the tombstone ONCE up front. If crowId carries a local
+  // tombstone, this instance has APPLIED a delete for it, so any re-create/rebind
+  // below is a genuine local re-add — it must clear the tombstone and emit
+  // `op="insert"` (NOT `update`), or every peer drops the update forever and the
+  // contact resurrects only locally: permanent fleet divergence. By §2.3 this
+  // instance's counter already exceeds the tombstone's lamport, so its `insert`
+  // clears peers' tombstones. When there is NO tombstone, behavior is byte-
+  // identical to today (MERGE/PROMOTE emit `update`, CREATE emits `insert`).
+  const tomb = await readTombstone(db, crowId);
+
   // Deterministic resolution — do NOT use findContactByPubkey (no ORDER BY →
   // arbitrary single row). Get the crowId owner (unique) and ALL secp matches.
   const byCrow = (await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [crowId] })).rows[0] || null;
@@ -155,7 +166,8 @@ export async function upsertFullContact(db, managers, { crowId, ed25519Pub, secp
     // Phase 3: the folded row is gone on this instance; propagate its delete +
     // the merged owner to the user's other instances.
     await emitContactDelete(db, otherSecp.crow_id, otherSecp.lamport_ts);
-    await emitContactChange("update", row);
+    if (tomb) await clearTombstone(db, crowId);
+    await emitContactChange(tomb ? "insert" : "update", row);
     return { contactId: row.id, outcome: "merged" };
   }
 
@@ -176,6 +188,9 @@ export async function upsertFullContact(db, managers, { crowId, ed25519Pub, secp
       if (name && isPlaceholderName(target.display_name)) {
         await db.execute({ sql: "UPDATE contacts SET display_name = ? WHERE id = ?", args: [name, target.id] });
       }
+      // Row present + tombstone is a real coexisting state (D3.1(a)): the live
+      // row supersedes it. Clear it, but a NOOP emits nothing (as today).
+      if (tomb) await clearTombstone(db, crowId);
       return { contactId: target.id, outcome: "noop" };
     }
 
@@ -198,7 +213,10 @@ export async function upsertFullContact(db, managers, { crowId, ed25519Pub, secp
     });
     const row = (await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [target.id] })).rows[0];
     await wireFullContact(managers, row);
-    await emitContactChange("update", row); // Phase 3: promoted contact follows the user
+    if (tomb) await clearTombstone(db, crowId);
+    // Phase 3: promoted contact follows the user. D3.2: a tombstoned re-add emits
+    // `insert` so peers holding the tombstone apply it instead of dropping it.
+    await emitContactChange(tomb ? "insert" : "update", row);
     return { contactId: row.id, outcome: "promoted" };
   }
 
@@ -210,6 +228,7 @@ export async function upsertFullContact(db, managers, { crowId, ed25519Pub, secp
   });
   const row = (await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [Number(ins.lastInsertRowid)] })).rows[0];
   await wireFullContact(managers, row);
-  await emitContactChange("insert", row); // Phase 3: new contact follows the user
+  if (tomb) await clearTombstone(db, crowId); // D3.2: local re-add supersedes the tombstone
+  await emitContactChange("insert", row); // Phase 3: new contact follows the user (already insert)
   return { contactId: row.id, outcome: "created" };
 }
