@@ -11,6 +11,8 @@ import { isKioskActive, kioskBlockedResponse } from "../../shared/kiosk-guard.js
 import { generateInviteCode, parseInviteCode, parseBotInviteCode, computeSafetyNumber } from "../identity.js";
 import { upsertFullContact } from "../contact-promote.js";
 import { emitContactChange } from "../contact-sync.js";
+import { clearTombstone } from "../contact-delete.js";
+import { sanitizeDisplayName } from "../display-name.js";
 import { buildInviteUrl, extractInviteCode } from "../invite-url.js";
 import {
   generateShortCode, formatShortCode, normalizeShortCode, deriveShortCodeKeys,
@@ -60,12 +62,26 @@ async function acceptInviteCore({ invite_code, display_name }, { db, identity, s
     if (nostrManager.relays.size === 0) {
       await nostrManager.connectRelays();
     }
+    // F-CONTACT-2 (design §D5): carry our OWN display name so the inviter's
+    // auto-add shows a name instead of a raw crowId. Sourced from
+    // dashboard_settings.profile_display_name, sanitized. When unset or rejected
+    // the key is OMITTED entirely — byte-identical to today, no placeholder. A
+    // settings-read failure must not abort the acceptance, so it is guarded.
+    let selfName = null;
+    try {
+      const { rows } = await db.execute({
+        sql: "SELECT value FROM dashboard_settings WHERE key = 'profile_display_name'",
+        args: [],
+      });
+      selfName = sanitizeDisplayName(rows?.[0]?.value);
+    } catch { selfName = null; }
     const acceptancePayload = JSON.stringify({
       type: "invite_accepted",
       crowId: identity.crowId,
       ed25519Pub: identity.ed25519Pubkey,
       secp256k1Pub: identity.secp256k1Pubkey,
       ...(peer.inviteId ? { inviteId: peer.inviteId } : {}),
+      ...(selfName ? { displayName: selfName } : {}),
     });
     await nostrManager.sendInviteAccepted(
       { id: contactId, secp256k1_pubkey: peer.secp256k1Pubkey },
@@ -382,7 +398,11 @@ export function registerContactsTools(server, ctx) {
           // sync per S-BOTS; a local-bot would be gated by shouldSyncRow).
           try {
             const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [contactId] });
-            if (rows[0]) await emitContactChange("insert", rows[0]);
+            if (rows[0]) {
+              // D3.2: a local re-add supersedes any tombstone for this bot's crowId.
+              await clearTombstone(db, bot.botCrowId);
+              await emitContactChange("insert", rows[0]);
+            }
           } catch { /* never blocks the accept */ }
         }
 

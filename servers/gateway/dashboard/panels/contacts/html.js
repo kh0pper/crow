@@ -321,9 +321,13 @@ export function renderContactProfile(contact, activities, groups, allGroups, lan
     ? `<form method="POST" style="display:inline"><input type="hidden" name="action" value="unblock"><input type="hidden" name="contact_id" value="${contact.id}"><button type="submit" class="btn btn-sm btn-secondary">${t("contacts.unblock", lang)}</button></form>`
     : `<form method="POST" style="display:inline" onsubmit="return confirm('${t("contacts.blockConfirm", lang)}')"><input type="hidden" name="action" value="block"><input type="hidden" name="contact_id" value="${contact.id}"><button type="submit" class="btn btn-sm btn-secondary" style="color:var(--crow-error)">${t("contacts.block", lang)}</button></form>`;
 
-  const deleteAction = contact.contact_type === "manual"
-    ? `<form method="POST" style="display:inline" onsubmit="return confirm('${t("contacts.deleteConfirm", lang)}')"><input type="hidden" name="action" value="delete_contact"><input type="hidden" name="contact_id" value="${contact.id}"><button type="submit" class="btn btn-sm btn-secondary" style="color:var(--crow-error)">${t("common.delete", lang)}</button></form>`
-    : "";
+  // Delete is a two-step flow (design §4.2): this control is a GET link to the
+  // side-effect-free confirmation interstitial, never a direct destructive POST.
+  // Shown for every contact except local-bot rows (this instance recreates those
+  // at boot, so deleting one is refused).
+  const deleteAction = contact.origin === "local-bot"
+    ? ""
+    : `<a href="/dashboard/contacts?view=contact&contact=${contact.id}&confirm=delete" class="btn btn-sm btn-secondary" style="color:var(--crow-error)">${t("common.delete", lang)}</a>`;
 
   const actions = `<div class="profile-actions">
     <a href="/dashboard/contacts" class="btn btn-sm btn-secondary">${t("common.back", lang)}</a>
@@ -334,6 +338,82 @@ export function renderContactProfile(contact, activities, groups, allGroups, lan
   return `<div class="contact-profile">
     ${header}${detailsHtml}${verifyHtml}${notesHtml}${groupsSection}${activityHtml}${editForm}${actions}
   </div>`;
+}
+
+// ──────────────────────────────────────────────
+// Delete confirmation interstitial (F-CONTACT-1, design §4.2)
+// ──────────────────────────────────────────────
+
+/**
+ * Side-effect-free GET interstitial that discloses the exact blast radius before
+ * a contact is deleted. The only destructive control is the Delete form, which
+ * POSTs `delete_contact&confirm=1` through csrfMiddleware. Block is offered as the
+ * reversible alternative; Cancel returns to the contact. All rendered text is
+ * escaped via escapeHtml — no innerHTML, no interpolation into an attribute.
+ *
+ * @param {object} contact the contact row (needs id, display_name, origin)
+ * @param {{messages:number, sharedItems:number, groups:number, projectsOwned:number, projectMemberships:number}} preview
+ * @param {string} lang
+ * @param {string} csrf a `<input type=hidden name=_csrf>` string for the POST forms
+ */
+export function renderDeleteConfirm(contact, preview, lang, csrf = "") {
+  if (!contact) {
+    return `<div class="contacts-empty"><p>${t("contacts.notFound", lang)}</p></div>`;
+  }
+
+  const header = `<div class="contact-profile-header">
+    ${avatarHtml(contact, "large")}
+    <div class="profile-info">
+      <h2>${escapeHtml(contact.display_name || "Unknown")}</h2>
+      <span class="type-badge">${escapeHtml(contact.contact_type === "manual" ? t("contacts.manual", lang) : t("contacts.crow", lang))}</span>
+    </div>
+  </div>`;
+
+  // Only non-zero categories are listed; the messages line names the permanent
+  // deletion. When nothing cascades, a single reassuring line is shown instead.
+  const lines = [
+    [preview.messages, "contacts.deleteMessages"],
+    [preview.sharedItems, "contacts.deleteSharedItems"],
+    [preview.groups, "contacts.deleteGroups"],
+    [preview.projectsOwned, "contacts.deleteProjectsOwned"],
+    [preview.projectMemberships, "contacts.deleteProjectMemberships"],
+  ].filter(([n]) => Number(n) > 0);
+
+  const cascadeHtml = lines.length > 0
+    ? `<p>${t("contacts.deleteWhatHappens", lang)}</p>
+       <ul style="margin:0.5rem 0 0;padding-left:1.25rem;font-size:0.9rem;color:var(--crow-text-secondary)">
+         ${lines.map(([n, key]) => `<li><strong>${Number(n)}</strong> ${t(key, lang)}</li>`).join("")}
+       </ul>`
+    : `<p style="font-size:0.9rem;color:var(--crow-text-secondary)">${t("contacts.deleteNothing", lang)}</p>`;
+
+  const body = `<div class="profile-section">
+    <div class="profile-section-title" style="color:var(--crow-error)">${t("contacts.deleteTitle", lang)}</div>
+    <p style="font-size:0.9rem;color:var(--crow-text-secondary)">${t("contacts.deleteIntro", lang)}</p>
+    ${cascadeHtml}
+    <p style="font-size:0.9rem;margin-top:0.75rem"><strong>${t("contacts.deleteAllCrows", lang)}</strong></p>
+    <p style="font-size:0.85rem;color:var(--crow-text-muted)">${t("contacts.deleteBlockHint", lang)}</p>
+  </div>`;
+
+  const blockForm = `<form method="POST" style="display:inline">
+    ${csrf}
+    <input type="hidden" name="action" value="block">
+    <input type="hidden" name="contact_id" value="${contact.id}">
+    <button type="submit" class="btn btn-sm btn-secondary">${t("contacts.block", lang)}</button>
+  </form>`;
+
+  const cancelLink = `<a href="/dashboard/contacts?view=contact&contact=${contact.id}" class="btn btn-sm btn-secondary">${t("common.cancel", lang)}</a>`;
+
+  const deleteForm = `<form method="POST" style="display:inline">
+    ${csrf}
+    <input type="hidden" name="action" value="delete_contact">
+    <input type="hidden" name="contact_id" value="${contact.id}">
+    <input type="hidden" name="confirm" value="1">
+    <button type="submit" class="btn btn-sm btn-primary" style="background:var(--crow-error);border-color:var(--crow-error)">${t("common.delete", lang)}</button>
+  </form>`;
+
+  const actions = `<div class="profile-actions">${blockForm}${cancelLink}${deleteForm}</div>`;
+
+  return `<div class="contact-profile">${header}${body}${actions}</div>`;
 }
 
 // ──────────────────────────────────────────────

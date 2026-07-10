@@ -39,11 +39,16 @@ export async function mountMcpServers(app, deps) {
   // Phase 3 (contacts follow the user): when a contact syncs in from a paired
   // instance, wire it live (subscribe to its DMs / join its topic) so it can
   // receive messages. Guarded; never throws into the apply loop.
+  // F-CONTACT-1: onContactDeleted is the mirror of onContactSynced — a synced
+  // delete must tear down the wiring a synced insert put up. attachContactSyncHooks
+  // sets both together so neither can be forgotten.
   try {
     if (syncManager) {
       const { wireSyncedContact } = await import("../../sharing/contact-promote.js");
+      const { unwireContact } = await import("../../sharing/contact-delete.js");
       const { getManagersOrNull } = await import("../../sharing/managers.js");
-      syncManager.onContactSynced = (row) => { wireSyncedContact(getManagersOrNull(), row); };
+      const { attachContactSyncHooks } = await import("../../sharing/contact-hooks.js");
+      attachContactSyncHooks(syncManager, { wireSyncedContact, unwireContact, getManagers: getManagersOrNull });
     }
   } catch {}
 

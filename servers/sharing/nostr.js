@@ -553,6 +553,26 @@ export class NostrManager {
   }
 
   /**
+   * Tear down a contact's Nostr subscriptions (F-CONTACT-1, design §4.4). Iterate
+   * `this.relays` to build the EXACT `${crowId}:${url}` keys, then close() each
+   * live handle and DELETE its map entry. Never a `startsWith(crowId + ':')`
+   * prefix scan: `crowId` itself contains a colon (`crow:1m5ughwje2`), so prefix
+   * matching is a latent cross-contact hazard (R1-m3). Guarded — missing
+   * relays/handles are fine and it never throws (it runs on the delete path).
+   * @param {string} crowId
+   */
+  unsubscribeFromContact(crowId) {
+    if (!crowId) return;
+    for (const url of this.relays.keys()) {
+      const key = `${crowId}:${url}`;
+      const handle = this.subscriptions.get(key);
+      if (!handle) continue;
+      try { if (typeof handle.close === "function") handle.close(); } catch {}
+      this.subscriptions.delete(key);
+    }
+  }
+
+  /**
    * Fetch recent messages from a contact.
    */
   async fetchMessages(contactId, limit = 50) {
