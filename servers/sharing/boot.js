@@ -20,10 +20,29 @@ import {
   resolvePendingRelay,
   handleIncomingBotRelay,
 } from "./bot-relay.js";
-import { upsertFullContact } from "./contact-promote.js";
+import { upsertFullContact, isPlaceholderName } from "./contact-promote.js";
 import { markDelivered, DELIVERY_RECEIPT_SUBTYPE, HANDSHAKE_COMPLETE_SUBTYPE, buildHandshakeComplete } from "./retry-queue.js";
 import { setReceiveWired } from "./receive-health.js";
 import { wasProcessed, recordProcessedEvent } from "./processed-events.js";
+import { sanitizeDisplayName } from "./display-name.js";
+
+/**
+ * Read the local user's own display name (dashboard_settings.profile_display_name),
+ * sanitized (design §D5). Returns null when unset, empty, rejected, or on any DB
+ * error — the caller then omits the field entirely (no placeholder). Never throws.
+ */
+async function readLocalDisplayName(db) {
+  try {
+    if (!db) return null;
+    const { rows } = await db.execute({
+      sql: "SELECT value FROM dashboard_settings WHERE key = 'profile_display_name'",
+      args: [],
+    });
+    return sanitizeDisplayName(rows?.[0]?.value);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * L6 receive-path fix — turn a decrypted DM from an unknown sender into a
@@ -130,10 +149,13 @@ export async function handleIncomingRequest(db, managers, { senderPubkey, conten
 /** Fire-and-forget handshake_complete ack to the acceptor (authenticated
  * senderPubkey). Naming the invite_accepted event id lets the acceptor clear
  * the exact retry row. Best-effort — a lost ack self-heals. */
-async function ackHandshake(nostrManager, senderPubkey, event) {
+async function ackHandshake(nostrManager, senderPubkey, event, db) {
   try {
     if (!nostrManager || !event || !event.id) return;
-    await nostrManager.sendControl({ secp256k1_pubkey: senderPubkey }, buildHandshakeComplete([event.id]));
+    // F-CONTACT-2 (design §D5): carry the inviter's OWN display name so the
+    // acceptor can show a name instead of a raw crowId. Omitted when unset.
+    const selfName = await readLocalDisplayName(db);
+    await nostrManager.sendControl({ secp256k1_pubkey: senderPubkey }, buildHandshakeComplete([event.id], selfName));
   } catch { /* ack is best-effort */ }
 }
 
@@ -165,7 +187,7 @@ export async function handleInviteAccepted(db, managers, payload, senderPubkey, 
     // stops the peer's 60h retry loop instead of letting it hammer. Mirrors the
     // "replayed" short-code verdict below, which also acks with no contact row.
     if (event?.id && (await wasProcessed(db, event.id))) {
-      await ackHandshake(managers?.nostrManager, senderPubkey, event);
+      await ackHandshake(managers?.nostrManager, senderPubkey, event, db);
       return;
     }
 
@@ -183,7 +205,7 @@ export async function handleInviteAccepted(db, managers, payload, senderPubkey, 
           // I4: PR3's handshake_complete ack must still fire for this verdict
           // (idempotent) — the retained 72h ledger TTL keeps the row available.
           console.warn("[sharing] short-code invite replay rejected");
-          await ackHandshake(managers?.nostrManager, senderPubkey, event); // I4 self-heal
+          await ackHandshake(managers?.nostrManager, senderPubkey, event, db); // I4 self-heal
           return;
         }
         if (verdict === "expired") {
@@ -199,12 +221,15 @@ export async function handleInviteAccepted(db, managers, payload, senderPubkey, 
       crowId: payload.crowId,
       ed25519Pub: payload.ed25519Pub,
       secp256k1Pub: payload.secp256k1Pub,
-      displayName: payload.displayName,
+      // F-CONTACT-2 (design §D5): the acceptor's name is remote-controlled —
+      // sanitize before it reaches the DB. A null result → upsert falls back to
+      // crowId (byte-identical to the no-name case).
+      displayName: sanitizeDisplayName(payload.displayName),
     });
     // D4: record the handled event.id AFTER a successful upsert so a stale
     // ~60h retry of this same event cannot re-create a since-deleted contact.
     if (event?.id) await recordProcessedEvent(db, event.id, "invite_accepted");
-    await ackHandshake(managers?.nostrManager, senderPubkey, event);
+    await ackHandshake(managers?.nostrManager, senderPubkey, event, db);
   } catch (err) {
     try { console.warn("[sharing] invite_accepted promotion failed:", err.message); } catch {}
   }
@@ -246,13 +271,24 @@ export async function handleDeliveryReceipt(db, eventIds, senderPubkey) {
  * forged ack can't purge another contact's retries. Mirrors handleDeliveryReceipt.
  * Never throws (receive path).
  */
-export async function handleHandshakeComplete(db, eventIds, senderPubkey) {
+export async function handleHandshakeComplete(db, eventIds, senderPubkey, displayName) {
   try {
     const ids = (Array.isArray(eventIds) ? eventIds : []).filter((x) => typeof x === "string" && x);
-    if (!db || ids.length === 0) return;
+    if (!db) return;
     const contact = await findContactByPubkey(db, senderPubkey);
     if (!contact) return;
-    await markDelivered(db, ids, contact.id);
+    if (ids.length > 0) await markDelivered(db, ids, contact.id);
+    // F-CONTACT-2 (design §D5): apply the inviter's optional display name to the
+    // AUTHENTICATED sender's contact — sanitized, and ONLY over a placeholder
+    // stored name (never overwrite a name the user typed). The contact is
+    // resolved from senderPubkey, never from a payload-claimed identity.
+    const name = sanitizeDisplayName(displayName);
+    if (name && isPlaceholderName(contact.display_name)) {
+      await db.execute({
+        sql: "UPDATE contacts SET display_name = ? WHERE id = ?",
+        args: [name, contact.id],
+      });
+    }
   } catch (err) {
     try { console.warn("[sharing] handshake_complete handling failed:", err.message); } catch {}
   }
@@ -560,7 +596,7 @@ export async function wireNostrReceive(managers) {
     } else if (subtype === DELIVERY_RECEIPT_SUBTYPE) {
       await handleDeliveryReceipt(db, payload.event_ids, senderPubkey);
     } else if (subtype === HANDSHAKE_COMPLETE_SUBTYPE) {
-      await handleHandshakeComplete(db, payload.event_ids, senderPubkey);
+      await handleHandshakeComplete(db, payload.event_ids, senderPubkey, payload.displayName);
     } else if (subtype === "room_message" || subtype === "room_join") {
       const { handleInboundRoomEnvelope } = await import("./room-inbound.js");
       await handleInboundRoomEnvelope({ db, nostrManager, identity, subtype, payload, senderPubkey, log: (m) => console.log("[rooms]", m) });

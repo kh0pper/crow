@@ -109,7 +109,7 @@ export async function wireSyncedContact(managers, row) {
   } catch { /* never throw into the sync apply loop */ }
 }
 
-function isPlaceholderName(name) {
+export function isPlaceholderName(name) {
   return name == null || name === "" || String(name).startsWith("req:") || String(name).startsWith("crow:");
 }
 
