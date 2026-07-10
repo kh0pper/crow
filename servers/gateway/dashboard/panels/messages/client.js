@@ -1244,9 +1244,10 @@ export function messagesClientJS(opts) {
       if (!b) return;
       b.classList.add('msg-bubble-failed');
       if (!b.querySelector('.msg-bubble-failed-note')) {
+        // Styling lives on the .msg-bubble-failed-note class (css.js, F-UI-6)
+        // — no inline css here, it would override the class rule.
         b.appendChild(el('div', {
           className: 'msg-bubble-failed-note',
-          css: 'color:var(--crow-error,#ef4444);font-size:0.7rem;margin-top:2px;',
           text: '! ${tJs("messages.notDelivered", lang)}' + (errText ? ' — ' + errText : ''),
         }));
       }
