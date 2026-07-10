@@ -42,6 +42,20 @@ test("add_by_id form opts out of Turbo Drive (F-UI-1 addendum: silent add-by-id 
   assert.match(formTag, /data-turbo="false"/);
 });
 
+test("add_by_id form embeds the CSRF token (classic POST bypasses Turbo's header injection)", () => {
+  // Task 8 seam fix: data-turbo="false" (Task 1) means Turbo's
+  // turbo:submit-start hook no longer injects the X-Crow-Csrf header, so the
+  // classic POST must carry the _csrf hidden input or csrfMiddleware 403s
+  // before the handler ever runs.
+  const html = renderContactList([], [], {}, "en", { csrf: '<input type="hidden" name="_csrf" value="tok">' });
+  const addByIdIdx = html.indexOf('value="add_by_id"');
+  assert.ok(addByIdIdx > -1, "add_by_id form present");
+  const formOpen = html.lastIndexOf("<form", addByIdIdx);
+  const formClose = html.indexOf("</form>", addByIdIdx);
+  const formHtml = html.slice(formOpen, formClose);
+  assert.match(formHtml, /name="_csrf"/);
+});
+
 test("peer_added flash renders as a success banner and opens the section (F-UI-3)", () => {
   const html = renderContactList([], [], {}, "en", { flash: "Peer connected ✓" });
   assert.match(html, /Peer connected ✓/);
