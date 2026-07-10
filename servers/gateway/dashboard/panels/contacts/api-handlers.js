@@ -9,7 +9,9 @@ import { parseVCard, generateVCard, parseCsv } from "./vcard.js";
 import { upsertSetting } from "../../settings/registry.js";
 import { getContacts } from "./data-queries.js";
 import { getManagersOrNull } from "../../../../sharing/managers.js";
-import { emitContactChange, emitContactDelete } from "../../../../sharing/contact-sync.js";
+import { emitContactChange } from "../../../../sharing/contact-sync.js";
+import { deleteContactLocal } from "../../../../sharing/contact-delete.js";
+import { sanitizeDisplayName } from "../../../../sharing/display-name.js";
 import { emitGroupUpsert, emitGroupDelete } from "../../../../sharing/group-sync.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -250,17 +252,29 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
   // --- Delete contact ---
   if (action === "delete_contact" && req.body.contact_id) {
     const delId = parseInt(req.body.contact_id);
-    // Fetch crow_id BEFORE the delete; emit ONLY if a row was actually deleted
-    // (the WHERE clause is manual-only, so a crow: contact delete is a no-op and
-    // must NOT propagate a destructive delete to peers).
-    let delCrowId = null;
-    let delLamport = null;
-    try { const { rows } = await db.execute({ sql: "SELECT crow_id, lamport_ts FROM contacts WHERE id = ?", args: [delId] }); delCrowId = rows[0]?.crow_id || null; delLamport = rows[0]?.lamport_ts ?? null; } catch {}
-    const result = await db.execute({
-      sql: "DELETE FROM contacts WHERE id = ? AND contact_type = 'manual'",
-      args: [delId],
-    });
-    if (Number(result.rowsAffected) > 0 && delCrowId) { try { await emitContactDelete(db, delCrowId, delLamport); } catch {} }
+    const { rows } = await db.execute({ sql: "SELECT * FROM contacts WHERE id = ?", args: [delId] });
+    const row = rows[0];
+    if (!row) return { redirect: "/dashboard/contacts" };
+
+    // Two-step confirmation (design §4.2). A POST WITHOUT confirm=1 must not
+    // mutate anything — redirect to the GET interstitial that discloses the
+    // exact blast radius (cascade counts) and offers Block as the reversible
+    // alternative. The destructive step is the confirm=1 POST below, which
+    // passes through csrfMiddleware; the interstitial GET stays side-effect-free.
+    if (req.body.confirm !== "1") {
+      return { redirect: `/dashboard/contacts?view=contact&contact=${delId}&confirm=delete` };
+    }
+
+    // Phase 3 REVERSES the former "deliberate no-op" here: contacts follow the
+    // user across their linked Crows, so a delete DOES propagate to peers — a
+    // delete that did NOT follow would be a divergence bug. Durability against a
+    // resurrecting rename is provided by the tombstone that emitContactDelete
+    // co-writes (design §D3). deleteContactLocal drops the old
+    // contact_type='manual' restriction (so crow: rows are finally deletable)
+    // and refuses origin='local-bot' rows, which this instance recreates at boot.
+    const managers = getManagersOrNull();
+    const result = await deleteContactLocal(db, managers || {}, row);
+    if (!result.ok) return { redirect: `/dashboard/contacts?view=contact&contact=${delId}` };
     return { redirect: "/dashboard/contacts" };
   }
 
@@ -327,7 +341,11 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
   // --- Own profile ---
   if (action === "save_profile") {
     if (req.body.display_name !== undefined) {
-      await upsertSetting(db, "profile_display_name", req.body.display_name.trim());
+      // This value is SENT on every handshake and syncs to all of the user's
+      // instances — cap + strip it at write (design §D5). sanitizeDisplayName
+      // returns null when nothing survives; store "" rather than the literal
+      // "null" so the setting is cleared, not poisoned.
+      await upsertSetting(db, "profile_display_name", sanitizeDisplayName(req.body.display_name) ?? "");
     }
     if (req.body.avatar_url !== undefined) {
       await upsertSetting(db, "profile_avatar_url", req.body.avatar_url.trim());
