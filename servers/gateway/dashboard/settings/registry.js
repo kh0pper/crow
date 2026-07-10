@@ -178,7 +178,9 @@ export async function readSettings(db, pattern) {
  *
  * scope:
  *   - "global" → dashboard_settings row (synced if key in SYNC_ALLOWLIST).
- *     Also clears any local override for this instance so the global row is effective.
+ *     Does NOT clear a local override — an existing override for this instance
+ *     keeps winning readSetting until deleteLocalSetting is called (the scope
+ *     route does that explicitly; see routes/settings-scope.js).
  *   - "local"  → dashboard_settings_overrides row keyed by (key, instance_id).
  *     Never syncs. Takes precedence over the global row on reads.
  *
