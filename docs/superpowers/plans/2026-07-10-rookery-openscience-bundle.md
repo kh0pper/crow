@@ -733,7 +733,12 @@ const WORKSPACES = () =>
   (process.env.ROOKERY_WORKSPACES_DIR || join(os.homedir(), ".crow/data/rookery/workspaces"))
     .replace(/^~(?=\/)/, os.homedir());
 // Root-origin serving (plan deviation 4): the reviewer is NOT behind /proxy/<id>/.
-const REVIEWER_URL = () => process.env.ROOKERY_REVIEWER_URL || "http://127.0.0.1:3061/";
+// Scheme allowlist: the value lands in anchor hrefs in the tile — a non-http(s)
+// value (e.g. javascript:) must never reach the DOM, so fall back to the default.
+const REVIEWER_URL = () => {
+  const u = process.env.ROOKERY_REVIEWER_URL || "";
+  return /^https?:\/\//i.test(u) ? u : "http://127.0.0.1:3061/";
+};
 const BUNDLE_DIR = () => join(os.homedir(), ".crow/bundles/rookery");
 const UV = () => join(os.homedir(), ".local/bin/uv");
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -920,7 +925,7 @@ Expected: 15 passed; assembly exit 0; `docker compose exec` lists the report + m
 
 - [ ] **Step 2: Bundle README**
 
-Create `bundles/rookery/README.md` covering: what it is (one paragraph), the three parts, install (store one-click; the `ROOKERY_*` env form fields and what to enter for a local llama.cpp/vLLM endpoint, including the `host.docker.internal` note for host-local servers), **root-origin serving (deviation 4)** — WHY there is no `/proxy/rookery/` (root-absolute asset paths baked in the app's binary; 775 refs) and the three serving options (Tailscale Serve HTTPS port → `127.0.0.1:3061`; reverse proxy at a root origin; `ssh -L 3061:127.0.0.1:3061` tunnel), each setting `ROOKERY_REVIEWER_URL` so the panel/tool links work — the workspaces-volume model (copies only), the self-hosted-only note (never Atlas), the security posture of the shim (why Origin is stripped when `ROOKERY_CORS_ORIGINS` is empty; the port binds 127.0.0.1 so YOUR serving layer is the auth boundary — the crow dashboard session does NOT gate the reviewer UI; SET `ROOKERY_CORS_ORIGINS` to your serving origin whenever the reviewer is served beyond localhost, restoring the app's own CSRF origin whitelist; any local process can reach `127.0.0.1:3061` unauthenticated, worth stating for an app that runs an LLM agent over mounted files), and troubleshooting (model endpoint unreachable → UI still loads, pick-model errors surface in-session; non-empty workspace → remove and re-assemble; root-owned data dir → ephemeral-HOME WARN in logs, chown to uid 1000 for persistence). Write real prose, ~40-60 lines, no placeholders.
+Create `bundles/rookery/README.md` covering: what it is (one paragraph), the three parts, install (store one-click; the `ROOKERY_*` env form fields and what to enter for a local llama.cpp/vLLM endpoint, including the `host.docker.internal` note for host-local servers), **root-origin serving (deviation 4)** — WHY there is no `/proxy/rookery/` (root-absolute asset paths baked in the app's binary; 775 refs) and the three serving options (Tailscale Serve HTTPS port → `127.0.0.1:3061`; reverse proxy at a root origin; `ssh -L 3061:127.0.0.1:3061` tunnel), each setting `ROOKERY_REVIEWER_URL` so the panel/tool links work — the workspaces-volume model (copies only), the self-hosted-only note (never Atlas), the security posture of the shim (why Origin is stripped when `ROOKERY_CORS_ORIGINS` is empty; the port binds 127.0.0.1 so YOUR serving layer is the auth boundary — the crow dashboard session does NOT gate the reviewer UI; SET `ROOKERY_CORS_ORIGINS` to your serving origin whenever the reviewer is served beyond localhost, restoring the app's own CSRF origin whitelist; any local process can reach `127.0.0.1:3061` unauthenticated, worth stating for an app that runs an LLM agent over mounted files; the panel's assemble form accepts arbitrary host paths for report/data-dir BY DESIGN — it copies operator-named files into workspaces; it runs behind the dashboard session and is single-operator software), and troubleshooting (model endpoint unreachable → UI still loads, pick-model errors surface in-session; non-empty workspace → remove and re-assemble; root-owned data dir → ephemeral-HOME WARN in logs, chown to uid 1000 for persistence). Write real prose, ~40-60 lines, no placeholders.
 
 - [ ] **Step 3: Stage the crow-addons entry (discovery-only; NEVER push)**
 
