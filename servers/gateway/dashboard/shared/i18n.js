@@ -302,6 +302,7 @@ export const translations = {
   "messages.notDelivered": { en: "not delivered", es: "no entregado" },
   "messages.deliveryRelayed": { en: "Relayed to at least one relay", es: "Retransmitido a al menos un repetidor" },
   "messages.deliveryDelivered": { en: "Delivered", es: "Entregado" },
+  "messages.retry": { en: "Retry", es: "Reintentar" },
   "messages.you": { en: "You", es: "Tú" },
   "messages.them": { en: "Them", es: "Ellos" },
   "messages.attachFile": { en: "Attach file", es: "Adjuntar archivo" },
