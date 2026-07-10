@@ -1,0 +1,27 @@
+services:
+  rookery:
+    build: .
+    container_name: crow-rookery
+    environment:
+      # host env is namespaced ROOKERY_* (shared gateway .env — see plan
+      # deviations); container-internal names stay generic for the entrypoint
+      MODEL_BASE_URL: ${ROOKERY_MODEL_BASE_URL:?ROOKERY_MODEL_BASE_URL is required}
+      MODEL_ID: ${ROOKERY_MODEL_ID:-local-model}
+      MODEL_API_KEY: ${ROOKERY_MODEL_API_KEY:-local}
+      ROOKERY_CORS_ORIGINS: ${ROOKERY_CORS_ORIGINS:-}
+    volumes:
+      - ${HOME}/.crow/data/rookery:/data
+      - ${ROOKERY_WORKSPACES_DIR:-${HOME}/.crow/data/rookery/workspaces}:/workspaces
+    ports:
+      - "127.0.0.1:3061:3061"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # so a host-local model endpoint is reachable on Linux
+    init: true
+    mem_limit: 1g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3061/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
