@@ -27,6 +27,11 @@ a container, use `http://host.docker.internal:<port>/v1` — compose adds
 `ROOKERY_MODEL_API_KEY` (only if your endpoint checks it; default `local`),
 `ROOKERY_WORKSPACES_DIR` (default `~/.crow/data/rookery/workspaces` is
 usually fine), and `ROOKERY_CORS_ORIGINS`/`ROOKERY_REVIEWER_URL` — see below.
+Host prerequisite: the `rookery_assemble_exp` MCP tool and the panel's
+assemble form both run via `uv` at `~/.local/bin/uv` (rookery is the first
+bundle in this repo to need it) — on a host without it, install "succeeds"
+but the tool/panel fail on spawn; install with
+`curl -LsSf https://astral.sh/uv/install.sh | sh`.
 
 ## Root-origin serving (no `/proxy/rookery/`)
 
