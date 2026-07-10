@@ -900,7 +900,7 @@ Deliverable: the whole bundle verified working together locally; the remote `cro
 
 ```bash
 cd ~/crow/bundles/rookery
-uv run --with pytest pytest -q                       # expect 15 passed
+uv run --with pytest pytest -q                       # expect 17 passed (15 planned + 2 review-fix regression tests)
 printf 'ROOKERY_MODEL_BASE_URL=http://127.0.0.1:9/v1\n' > .env
 docker compose up -d --build && sleep 12
 # assemble a real workspace with the MCP core via a scratch fixture:
