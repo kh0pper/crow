@@ -125,6 +125,11 @@ export async function getMyProfile(db) {
   const keys = ["profile_display_name", "profile_avatar_url", "profile_bio"];
   const profile = {};
   try {
+    // Reads the GLOBAL scope on purpose (Cluster B design D6): profile identity
+    // is user-level and follows the user across instances. Per-instance
+    // overrides of profile_* keys are intentionally inert — do not "fix" this
+    // to readSetting, and do not wire a scope toggle for these keys (the scope
+    // route would report "local" while behavior stays global).
     const { rows } = await db.execute(
       `SELECT key, value FROM dashboard_settings WHERE key IN ('profile_display_name', 'profile_avatar_url', 'profile_bio')`
     );
