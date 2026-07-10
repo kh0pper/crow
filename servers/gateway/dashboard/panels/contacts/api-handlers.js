@@ -254,12 +254,13 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
     // (the WHERE clause is manual-only, so a crow: contact delete is a no-op and
     // must NOT propagate a destructive delete to peers).
     let delCrowId = null;
-    try { const { rows } = await db.execute({ sql: "SELECT crow_id FROM contacts WHERE id = ?", args: [delId] }); delCrowId = rows[0]?.crow_id || null; } catch {}
+    let delLamport = null;
+    try { const { rows } = await db.execute({ sql: "SELECT crow_id, lamport_ts FROM contacts WHERE id = ?", args: [delId] }); delCrowId = rows[0]?.crow_id || null; delLamport = rows[0]?.lamport_ts ?? null; } catch {}
     const result = await db.execute({
       sql: "DELETE FROM contacts WHERE id = ? AND contact_type = 'manual'",
       args: [delId],
     });
-    if (Number(result.rowsAffected) > 0 && delCrowId) { try { await emitContactDelete(delCrowId); } catch {} }
+    if (Number(result.rowsAffected) > 0 && delCrowId) { try { await emitContactDelete(db, delCrowId, delLamport); } catch {} }
     return { redirect: "/dashboard/contacts" };
   }
 
