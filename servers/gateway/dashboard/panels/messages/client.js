@@ -725,7 +725,34 @@ export function messagesClientJS(opts) {
       var body = null;
       try { body = await response.json(); } catch(_) { /* non-JSON body */ }
       if (!response.ok || (body && body.ok === false)) {
-        markBubbleFailed(sentBubble, body && body.error);
+        // F-UI-7: stamp the failed row id so Retry targets the exact row.
+        if (body && body.id) sentBubble.dataset.msgId = body.id;
+        markBubbleFailed(sentBubble, body && body.error, { id: body && body.id, content: content });
+      } else if (body && body.id) {
+        // F-UI-5: reconcile the optimistic bubble with the real row.
+        var existing = document.querySelector('.msg-bubble[data-msg-id="' + body.id + '"]');
+        if (existing && existing !== sentBubble) {
+          // A racing poll/live fetch already rendered the real row.
+          sentBubble.remove();
+        } else {
+          sentBubble.dataset.msgId = body.id;
+          _messages.push({
+            id: body.id,
+            direction: 'sent',
+            content: content || '',
+            created_at: new Date().toISOString(),
+            delivery_status: body.delivery_status || 'relayed',
+            nostr_event_id: body.nostr_event_id || null,
+          });
+          // Send-time tick (F-UI-6): show ✓ immediately; crow-receipt flips ✓✓.
+          if (!sentBubble.querySelector('.msg-delivery')) {
+            sentBubble.appendChild(el('span', {
+              className: 'msg-delivery',
+              title: '${tJs("messages.deliveryRelayed", lang)}',
+              text: '\\u2713',
+            }));
+          }
+        }
       }
     } catch(e) {
       console.error('Failed to send peer message:', e);
@@ -1177,10 +1204,10 @@ export function messagesClientJS(opts) {
     // gets the same 'msg-bubble-failed' class + note). 'relayed'/'delivered' get a
     // small muted check; 'pending'/null render nothing.
     if (isSent && msg.delivery_status === 'failed') {
-      markBubbleFailed(div);
+      markBubbleFailed(div, null, { id: msg.id, content: msg.content });
     } else if (isSent && (msg.delivery_status === 'relayed' || msg.delivery_status === 'delivered')) {
       div.appendChild(el('span', {
-        className: 'msg-delivery',
+        className: 'msg-delivery' + (msg.delivery_status === 'delivered' ? ' delivered' : ''),
         title: msg.delivery_status === 'delivered' ? '${tJs("messages.deliveryDelivered", lang)}' : '${tJs("messages.deliveryRelayed", lang)}',
         text: msg.delivery_status === 'delivered' ? '\\u2713\\u2713' : '\\u2713',
       }));
@@ -1204,10 +1231,10 @@ export function messagesClientJS(opts) {
     return div;
   }
 
-  // Mark an optimistic 'sent' bubble as failed-to-deliver (send-time surfacing;
-  // Task 4's delivery_status gives it on reload too). Defensive: falls back to
-  // the viewport's last child if no bubble ref was captured.
-  function markBubbleFailed(bubble, errText) {
+  // Mark a 'sent' bubble as failed-to-deliver, with a Retry control (F-UI-7).
+  // retryCtx = { id, content } when known (send-time from the POST body /
+  // reload-time from the row). Classes replace the old inline styles (F-UI-6).
+  function markBubbleFailed(bubble, errText, retryCtx) {
     try {
       var b = bubble;
       if (!b) {
@@ -1223,7 +1250,54 @@ export function messagesClientJS(opts) {
           text: '! ${tJs("messages.notDelivered", lang)}' + (errText ? ' — ' + errText : ''),
         }));
       }
+      var ctx = retryCtx || {};
+      if (ctx.content && !b.querySelector('.msg-retry-btn')) {
+        b.appendChild(el('button', {
+          className: 'msg-retry-btn',
+          text: '${tJs("messages.retry", lang)}',
+          onclick: function () { retryFailedMessage(b, ctx.content, ctx.id); },
+        }));
+      }
     } catch (e) { /* never let feedback crash the send path */ }
+  }
+
+  // Re-enter the send path for a failed message (F-UI-7). retry_of tells the
+  // server to delete the old failed row once the resend lands.
+  // NOTE (R1-M2, deliberate): retry re-sends TEXT only. This is consistent
+  // with current behavior — failed sends never persist attachments
+  // (peer-messages.js stores them only on success) and the send path never
+  // transmits thread_id — so there is nothing to lose. Do not "fix" this here.
+  async function retryFailedMessage(bubble, content, failedId) {
+    if (!_activeItem || _activeItem.type !== 'peer') return;
+    var btn = bubble.querySelector('.msg-retry-btn');
+    if (btn) { btn.disabled = true; btn.textContent = '…'; }
+    try {
+      var response = await fetch('/api/messages/peer/' + encodeURIComponent(_activeItem.id) + '/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: content, retry_of: failedId != null ? String(failedId) : undefined }),
+      });
+      var body = null;
+      try { body = await response.json(); } catch (_) {}
+      if (response.ok && body && body.ok !== false) {
+        // Swap the failed bubble to a fresh sent state in place.
+        bubble.classList.remove('msg-bubble-failed');
+        var note = bubble.querySelector('.msg-bubble-failed-note'); if (note) note.remove();
+        var rbtn = bubble.querySelector('.msg-retry-btn'); if (rbtn) rbtn.remove();
+        if (body.id) {
+          bubble.dataset.msgId = body.id;
+          _messages.push({ id: body.id, direction: 'sent', content: content, created_at: new Date().toISOString(), delivery_status: body.delivery_status || 'relayed' });
+        }
+        if (!bubble.querySelector('.msg-delivery')) {
+          bubble.appendChild(el('span', { className: 'msg-delivery', title: '${tJs("messages.deliveryRelayed", lang)}', text: '\\u2713' }));
+        }
+      } else {
+        if (btn) { btn.disabled = false; btn.textContent = '${tJs("messages.retry", lang)}'; }
+        markBubbleFailed(bubble, body && body.error, { id: failedId, content: content });
+      }
+    } catch (e) {
+      if (btn) { btn.disabled = false; btn.textContent = '${tJs("messages.retry", lang)}'; }
+    }
   }
 
   // === Reply Bar ===
@@ -1430,6 +1504,91 @@ export function messagesClientJS(opts) {
     }));
   }
 
+  // === Live updates (F-UI-4) ===
+  // Incremental fetch shared by the SSE nudge and the fallback poll. Dedup is
+  // id-keyed against the DOM so an optimistic bubble (stamped in
+  // sendPeerMessage) or a racing poll/live append can never double-render
+  // (F-UI-5).
+  async function fetchNewPeerMessages() {
+    if (!_activeItem || _activeItem.type !== 'peer') return;
+    // Empty conversation (first message — the walkthrough's exact repro): fetch
+    // the initial window (no afterId) and APPEND into the already-rendered
+    // empty viewport. Do NOT reload the full conversation/chat UI here — that
+    // rebuilds the whole chat UI including the composer and would wipe an
+    // in-progress draft (R2-C1: accept lands the user in an empty
+    // conversation to type their first message; a nudge/poll must not eat it).
+    var lastId = _messages.length > 0 ? _messages[_messages.length - 1].id : 0;
+    if (_messages.length > 0 && !lastId) return;
+    try {
+      var nr = await fetch('/api/messages/peer/' + encodeURIComponent(_activeItem.id) + (lastId ? '?afterId=' + lastId : ''));
+      var nd = await nr.json();
+      if (!nd.messages || nd.messages.length === 0) return;
+      var viewport = document.getElementById('msg-viewport');
+      if (!viewport) return;
+      for (var j = 0; j < nd.messages.length; j++) {
+        var m = nd.messages[j];
+        // R1-I3: two guards, in this order. (1) _messages guard: concurrent
+        // fetches (nudge racing poll) both read the same lastId — skip a row
+        // another fetch already accounted for, WITHOUT pushing a duplicate
+        // object (thread-reply lookups scan _messages). (2) DOM guard: the
+        // optimistic send path may have stamped the bubble before its
+        // _messages push lands — account for the row but don't re-render.
+        if (m.id && _messages.some(function (x) { return x.id === m.id; })) continue;
+        _messages.push(m);
+        if (m.id && viewport.querySelector('.msg-bubble[data-msg-id="' + m.id + '"]')) continue; // already rendered
+        appendBubble(viewport, m);
+        if (m.direction === 'received') {
+          fetch('/api/messages/peer/' + m.id + '/read', { method: 'POST' }).catch(function(){});
+        }
+      }
+      viewport.scrollTop = viewport.scrollHeight;
+    } catch (e) { /* incremental fetch error — poll/SSE will retry */ }
+  }
+
+  function flipBubbleDelivered(id) {
+    try {
+      var b = document.querySelector('.msg-bubble[data-msg-id="' + Number(id) + '"]');
+      if (!b) return;
+      var tick = b.querySelector('.msg-delivery');
+      if (!tick) {
+        tick = el('span', { className: 'msg-delivery' });
+        b.appendChild(tick);
+      }
+      tick.textContent = '\\u2713\\u2713';
+      tick.classList.add('delivered');
+      tick.title = '${tJs("messages.deliveryDelivered", lang)}';
+    } catch (e) {}
+  }
+
+  function startMessagesStream() {
+    if (window.__crowMsgStream) { try { window.__crowMsgStream.close(); } catch (e) {} window.__crowMsgStream = null; }
+    try {
+      var es = new EventSource('/dashboard/streams/messages');
+      window.__crowMsgStream = es;
+      es.addEventListener('crow-msg', function (evt) {
+        try {
+          var data = JSON.parse(evt.data);
+          if (_activeItem && _activeItem.type === 'peer' && Number(data.contactId) === Number(_activeItem.id)) {
+            fetchNewPeerMessages();
+          }
+        } catch (e) {}
+      });
+      es.addEventListener('crow-receipt', function (evt) {
+        try {
+          var data = JSON.parse(evt.data);
+          if (!(_activeItem && _activeItem.type === 'peer' && Number(data.contactId) === Number(_activeItem.id))) return;
+          (data.ids || []).forEach(flipBubbleDelivered);
+        } catch (e) {}
+      });
+      es.addEventListener('session-expired', function () {
+        try { es.close(); } catch (e) {}
+        window.__crowMsgStream = null;
+        // Next poll re-auths via the usual cookie path (player.js pattern).
+      });
+      es.onerror = function () { /* EventSource auto-reconnects; swallow. */ };
+    } catch (e) { /* no EventSource — the fallback poll covers us */ }
+  }
+
   // === Polling for Real-Time Updates ===
   function startPolling() {
     // Under Turbo, this script re-runs on every nav into Messages. Clear
@@ -1446,11 +1605,13 @@ export function messagesClientJS(opts) {
     }
     _pollInterval = setInterval(pollStatus, 300000);
     window.__msgPollInterval = _pollInterval;
+    startMessagesStream();
   }
 
   function stopPolling() {
     if (_pollInterval) { clearInterval(_pollInterval); _pollInterval = null; }
     if (window.__msgPollInterval) { clearInterval(window.__msgPollInterval); window.__msgPollInterval = null; }
+    if (window.__crowMsgStream) { try { window.__crowMsgStream.close(); } catch (e) {} window.__crowMsgStream = null; }
   }
 
   async function pollStatus() {
@@ -1483,26 +1644,7 @@ export function messagesClientJS(opts) {
       }
 
       // If viewing an active peer conversation, fetch new messages
-      if (_activeItem && _activeItem.type === 'peer' && _messages.length > 0) {
-        var lastId = _messages[_messages.length - 1].id;
-        if (lastId) {
-          var nr = await fetch('/api/messages/peer/' + encodeURIComponent(_activeItem.id) + '?afterId=' + lastId);
-          var nd = await nr.json();
-          if (nd.messages && nd.messages.length > 0) {
-            var viewport = document.getElementById('msg-viewport');
-            if (viewport) {
-              for (var j = 0; j < nd.messages.length; j++) {
-                _messages.push(nd.messages[j]);
-                appendBubble(viewport, nd.messages[j]);
-                if (nd.messages[j].direction === 'received') {
-                  fetch('/api/messages/peer/' + nd.messages[j].id + '/read', { method: 'POST' }).catch(function(){});
-                }
-              }
-              viewport.scrollTop = viewport.scrollHeight;
-            }
-          }
-        }
-      }
+      await fetchNewPeerMessages();
     } catch(e) { /* polling error — ignore */ }
   }
 
