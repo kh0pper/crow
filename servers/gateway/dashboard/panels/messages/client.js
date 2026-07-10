@@ -154,6 +154,23 @@ export function messagesClientJS(opts) {
     if (openRoom && /^\d+$/.test(openRoom)) {
       setTimeout(function () { try { msgSelectRoom(parseInt(openRoom, 10)); } catch (e) {} }, 0);
     }
+    if (params.get('connected') === '1') {
+      // COUPLING NOTE (R2-M2): this lives inside the window-level
+      // __msgOpenHookBound once-guard, which only re-arms on a full page load.
+      // It works for every accept because the accept forms are
+      // data-turbo="false" (Task 1) → the 303 lands as a real page load. If
+      // those forms are ever re-Turbo'd, the second accept's toast silently
+      // breaks — keep the two together.
+      setTimeout(function () {
+        try { if (window.crowToast) window.crowToast('${tJs("messages.connectedToast", lang)}'); } catch (e) {}
+      }, 200);
+      // Strip the one-shot params so a refresh/Turbo revisit doesn't re-toast.
+      try {
+        params.delete('connected');
+        var qs = params.toString();
+        window.history.replaceState({}, '', window.location.pathname + (qs ? '?' + qs : ''));
+      } catch (e) {}
+    }
   }
 
   // Close popover on outside click — attach once per document lifetime so

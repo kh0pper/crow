@@ -47,6 +47,8 @@ export default {
       if (result?.inviteError) peerAdd.inviteError = result.inviteError;
     }
     peerAdd.csrf = csrfInput(req);
+    // F-UI-3: whitelisted post-redirect success flash (?flash=peer_added).
+    if (req.query.flash === "peer_added") peerAdd.flash = t("contacts.peerAddedFlash", lang);
 
     // --- Determine view ---
     const view = req.query.view || "all";

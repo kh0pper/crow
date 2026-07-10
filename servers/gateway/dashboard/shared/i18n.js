@@ -326,6 +326,7 @@ export const translations = {
   "messages.botsAvailable": { en: "{n} bots available on your other Crows", es: "{n} bots disponibles en tus otros Crows" },
   "messages.browse": { en: "Browse", es: "Explorar" },
   "messages.botDirectoryTitle": { en: "Bots on your other Crows", es: "Bots en tus otros Crows" },
+  "messages.connectedToast": { en: "Connected — you can start chatting.", es: "Conectado — ya puedes chatear." },
   "messages.messageABot": { en: "Message a Bot", es: "Enviar mensaje a un bot" },
   "messages.messageABotDesc": { en: "Browse bots on your other Crows", es: "Explora bots en tus otros Crows" },
   "messages.botTag": { en: "bot", es: "bot" },
@@ -385,6 +386,7 @@ export const translations = {
 
   "contacts.addPeer": { en: "Add a Crow peer", es: "Añadir un par de Crow" },
   "contacts.addPeerDesc": { en: "Invite someone with a link or accept theirs", es: "Invita a alguien con un enlace o acepta el suyo" },
+  "contacts.peerAddedFlash": { en: "Peer connected ✓", es: "Contacto conectado ✓" },
 
   // ─── Blog Panel ───
   "blog.pageTitle": { en: "Blog", es: "Blog" },

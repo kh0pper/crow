@@ -171,7 +171,7 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
       console.error("[contacts] accept_invite failed"); // never echo the code
       return { inviteError: err.message };
     }
-    return { redirect: "/dashboard/contacts" };
+    return { redirect: "/dashboard/contacts?flash=peer_added" };
   }
 
   // Short-code pairing (P2/C2): generate a 12-char code to read aloud/type...
@@ -202,7 +202,7 @@ export async function handleContactAction(req, db, { sharingClientFactory = make
       console.error("[contacts] accept_short_invite failed"); // never echo the code
       return { inviteError: err.message };
     }
-    return { redirect: "/dashboard/contacts" };
+    return { redirect: "/dashboard/contacts?flash=peer_added" };
   }
 
   // --- Edit contact ---

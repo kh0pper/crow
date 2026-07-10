@@ -41,3 +41,11 @@ test("add_by_id form opts out of Turbo Drive (F-UI-1 addendum: silent add-by-id 
   const formTag = html.slice(formOpen, html.indexOf(">", formOpen) + 1);
   assert.match(formTag, /data-turbo="false"/);
 });
+
+test("peer_added flash renders as a success banner and opens the section (F-UI-3)", () => {
+  const html = renderContactList([], [], {}, "en", { flash: "Peer connected ✓" });
+  assert.match(html, /Peer connected ✓/);
+  const detailsIdx = html.indexOf('class="contacts-add-peer"');
+  const detailsTag = html.slice(html.lastIndexOf("<details", detailsIdx), html.indexOf(">", detailsIdx) + 1);
+  assert.match(detailsTag, / open/);
+});
