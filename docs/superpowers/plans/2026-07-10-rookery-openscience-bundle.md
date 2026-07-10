@@ -8,7 +8,10 @@
 
 **Tech Stack:** Docker/compose (crow install engine), Node 22 (in-container), `@synsci/openscience@1.3.2`, Python 3.12 + `uv` + `mcp` (host MCP server), Express router panels.
 
-**Spec:** `docs/superpowers/specs/2026-07-10-rookery-openscience-bundle-design.md`. One recorded deviation: committed `WORKSPACES_DIR` default is `${HOME}/.crow/data/rookery/workspaces` (crow data convention + compose-scan precedent), not `~/rookery/workspaces`; lab installs override in the form.
+**Spec:** `docs/superpowers/specs/2026-07-10-rookery-openscience-bundle-design.md`. Recorded deviations:
+1. Committed workspaces default is `${HOME}/.crow/data/rookery/workspaces` (crow data convention + compose-scan precedent), not `~/rookery/workspaces`; lab installs override in the form.
+2. Host-side env vars are namespaced `ROOKERY_*` (`ROOKERY_MODEL_BASE_URL`, `ROOKERY_MODEL_ID`, `ROOKERY_MODEL_API_KEY`, `ROOKERY_WORKSPACES_DIR`, `ROOKERY_CORS_ORIGINS`). Rationale: `propagateEnvToGateway` (`bundles.js:707-726`) writes every install-form value into the SHARED gateway `.env`, overwriting same-key lines — generic names like `MODEL_BASE_URL` would collide with the next bundle that uses them. Compose maps the prefixed host env onto the container-internal names (`MODEL_BASE_URL` etc.), so the entrypoint/app contract is unchanged.
+3. The spec's "model config form pre-filled from Crow's AI env" does NOT exist in the store: `getAiProviderConfig` (`bundles.js:785-797`) only knows `ollama`/`localai` and writes AI config after install; nothing pre-fills install forms from `AI_BASE_URL`. Deviation: the `ROOKERY_MODEL_BASE_URL` field description tells the user where to find their endpoint instead. No form-prefill feature is added (scope).
 
 ## Global Constraints
 
@@ -63,6 +66,13 @@ build-backend = "hatchling.build"
 packages = ["src/rookery_manifest", "src/rookery_mcp"]
 ```
 Create empty placeholder `bundles/rookery/src/rookery_mcp/__init__.py` (Task 2 fills the module; the pyproject references it now so `uv` resolves once).
+
+Also append two lines to the repo-root `.gitignore` (right after the existing `bundles/*/.env` line at `.gitignore:58`):
+```
+bundles/*/.venv/
+bundles/*/uv.lock
+```
+(`uv run` creates both inside the bundle dir; they must never be committed, and later git-status checks assume they're ignored.) Include `.gitignore` in this task's commit.
 
 - [ ] **Step 2: Vendor the adapter byte-identical**
 
@@ -131,7 +141,7 @@ Expected: **10 passed** (9 vendored + drift guard). If the vendored CLI test cou
 
 ```bash
 cd ~/crow
-git add bundles/rookery/pyproject.toml bundles/rookery/src bundles/rookery/tests bundles/rookery/VENDORED.md
+git add .gitignore bundles/rookery/pyproject.toml bundles/rookery/src bundles/rookery/tests bundles/rookery/VENDORED.md
 git commit -m "feat(rookery): vendor rookery-manifest adapter with drift guard"
 ```
 
@@ -210,6 +220,18 @@ def test_assemble_exp_nonempty_workspace_is_valueerror(tmp_path):
     assemble_exp(str(report), str(data), ["p1"], "a", str(ws_root))
     with pytest.raises(ValueError, match="not empty"):
         assemble_exp(str(report), str(data), ["p1"], "a", str(ws_root))
+
+
+def test_assemble_exp_expands_tilde_in_env_workspaces_dir(tmp_path, monkeypatch):
+    # Regression: the manifest default is "~/.crow/..." and bundles.js bakes
+    # env_vars defaults VERBATIM into the spawned env — an unexpanded "~" must
+    # not become a literal ./~/ directory.
+    data, report = _pilab_layout(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("ROOKERY_WORKSPACES_DIR", "~/ws")
+    out = assemble_exp(str(report), str(data), ["p1"], "audit-p1")
+    assert out["workspace"] == str(tmp_path / "ws" / "audit-p1")
+    assert (tmp_path / "ws" / "audit-p1" / "REPORT-p1.md").exists()
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -240,8 +262,8 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 def _default_workspaces_dir() -> str:
     return os.environ.get(
-        "WORKSPACES_DIR",
-        os.path.join(os.path.expanduser("~"), ".crow", "data", "rookery", "workspaces"),
+        "ROOKERY_WORKSPACES_DIR",
+        os.path.join("~", ".crow", "data", "rookery", "workspaces"),
     )
 
 
@@ -260,7 +282,9 @@ def assemble_exp(
     if not phases:
         raise ValueError("at least one phase is required")
 
-    root = workspaces_dir or _default_workspaces_dir()
+    # expanduser on the ROOT too: the manifest default arrives as a literal
+    # "~/..." via the env block bundles.js writes (no shell expands it).
+    root = os.path.expanduser(workspaces_dir or _default_workspaces_dir())
     report = os.path.expanduser(report_path)
     data = os.path.expanduser(data_dir)
     rounds = os.path.join(data, "rounds.jsonl")
@@ -319,6 +343,8 @@ Create `bundles/rookery/run.sh` (fed-gov-data pattern):
 ```bash
 #!/bin/bash
 set -a
+# Optional secret-override hook: NOTHING creates this file — a user may
+# hand-provision it to override env without touching the gateway .env.
 [ -f "$HOME/.crow/env/rookery.env" ] && source "$HOME/.crow/env/rookery.env"
 set +a
 cd "$(dirname "$0")"
@@ -329,7 +355,7 @@ Then: `chmod +x bundles/rookery/run.sh`
 - [ ] **Step 4: Run the full suite**
 
 Run: `cd ~/crow/bundles/rookery && uv run --with pytest pytest -q`
-Expected: **14 passed** (10 from Task 1 + 4 new). Also smoke the entry point resolves: `uv run python -c "from rookery_mcp.server import main; print('ok')"` → `ok`.
+Expected: **15 passed** (10 from Task 1 + 5 new). Also smoke the entry point resolves: `uv run python -c "from rookery_mcp.server import main; print('ok')"` → `ok`.
 
 - [ ] **Step 5: Commit**
 
@@ -354,7 +380,7 @@ Deliverable: `docker compose build && up` yields a reachable reviewer on `127.0.
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks (independent of the python package).
-- Produces: host port `127.0.0.1:3061`; container mounts `/workspaces` (Task 2's `container_path` contract) and `/data` (HOME). Env contract: `MODEL_BASE_URL` (required), `MODEL_ID`, `MODEL_API_KEY`, `ROOKERY_CORS_ORIGINS`, `WORKSPACES_DIR`. Task 4's manifest and Task 6's verification rely on all of these names verbatim.
+- Produces: host port `127.0.0.1:3061`; container mounts `/workspaces` (Task 2's `container_path` contract) and `/data` (HOME). Env contract — HOST side (install form / `.env`): `ROOKERY_MODEL_BASE_URL` (required), `ROOKERY_MODEL_ID`, `ROOKERY_MODEL_API_KEY`, `ROOKERY_CORS_ORIGINS`, `ROOKERY_WORKSPACES_DIR`; compose maps these onto the CONTAINER-internal names `MODEL_BASE_URL`/`MODEL_ID`/`MODEL_API_KEY`/`ROOKERY_CORS_ORIGINS` that the entrypoint reads. Task 4's manifest and Task 6's verification rely on the host names verbatim.
 
 - [ ] **Step 1: Vendor + adapt the header shim**
 
@@ -382,7 +408,7 @@ const STRIP_ORIGIN = !(process.env.ROOKERY_CORS_ORIGINS || "").trim();
 ```js
       if (key === "sec-fetch-site" || (STRIP_ORIGIN && key === "origin")) continue;
 ```
-Update the header comment block to describe the container role (listens on `SHIM_LISTEN_HOST` for Docker port mapping; OpenScience pins its own listener to 127.0.0.1 in-container, which is why this shim exists) and note the provenance (vendored from rookery `scripts/openscience-host-proxy.mjs`, adapted).
+Update the header comment block to describe the container role (listens on `SHIM_LISTEN_HOST` for Docker port mapping; OpenScience pins its own listener to 127.0.0.1 in-container, which is why this shim exists — structurally required, not a fallback) and note the provenance (vendored from rookery `scripts/openscience-host-proxy.mjs`, adapted). Also document the origin-strip security posture in that comment: the upstream shim warns stripping Origin "would disable its CSRF protection"; it is acceptable HERE because (1) every request arrives through the session-gated Crow gateway whose cookie is `SameSite=Lax` (`dashboard/auth.js:476` — cross-site POSTs don't carry it), and (2) the port binds `127.0.0.1` only. Residual exposure: any local process can hit `127.0.0.1:3061` unauthenticated (consistent with other crow bundles).
 Verify: `node --check ~/crow/bundles/rookery/host-shim.mjs` → no output.
 
 - [ ] **Step 2: Entrypoint**
@@ -398,8 +424,19 @@ set -eu
 
 : "${MODEL_BASE_URL:?MODEL_BASE_URL is required (OpenAI-compatible endpoint)}"
 MODEL_ID="${MODEL_ID:-local-model}"
+
+# First-boot resilience: the Docker engine creates missing bind-mount sources
+# as root:root, so $HOME (/data) can arrive unwritable by uid 1000 on a fresh
+# one-click install. Nothing HAS to persist — the config is regenerated from
+# env every boot — so fall back to an ephemeral HOME instead of crash-looping.
+if [ ! -w "$HOME" ]; then
+  echo "WARN: $HOME not writable (root-owned bind mount) — using ephemeral HOME=/tmp/openscience-home; chown the host data dir to uid 1000 for persistent sessions" >&2
+  HOME=/tmp/openscience-home
+  export HOME
+fi
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/openscience"
-mkdir -p "$CONFIG_DIR" /workspaces || true
+mkdir -p "$CONFIG_DIR"
+mkdir -p /workspaces 2>/dev/null || true  # read path; content arrives via the mount
 
 cat > "$CONFIG_DIR/openscience.json" <<EOF
 {
@@ -416,13 +453,14 @@ cat > "$CONFIG_DIR/openscience.json" <<EOF
 EOF
 
 cd /workspaces
-# shellcheck disable=SC2086
-openscience --port 4096 ${ROOKERY_CORS_ORIGINS:+--cors ${ROOKERY_CORS_ORIGINS}} &
-APP_PID=$!
-trap 'kill $APP_PID 2>/dev/null' TERM INT
+# Build the argv list so EACH space-separated origin gets its own --cors flag
+# (${VAR:+--cors ${VAR}} would word-split into one --cors + stray positionals).
+set -- --port 4096
+for o in ${ROOKERY_CORS_ORIGINS:-}; do set -- "$@" --cors "$o"; done
+openscience "$@" &
 SHIM_LISTEN_HOST=0.0.0.0 exec node /app/host-shim.mjs 3061 4096
 ```
-Note: `ROOKERY_CORS_ORIGINS` is space-separated when set (each becomes a `--cors` value via word-splitting — intentional, hence the shellcheck disable).
+Note: no TERM/INT trap — `exec` replaces the shell so a trap would be dead code; compose's `init: true` (tini) handles signal forwarding and reaping for both processes.
 
 - [ ] **Step 3: Dockerfile**
 
@@ -453,15 +491,19 @@ services:
     build: .
     container_name: crow-rookery
     environment:
-      MODEL_BASE_URL: ${MODEL_BASE_URL:?MODEL_BASE_URL is required}
-      MODEL_ID: ${MODEL_ID:-local-model}
-      MODEL_API_KEY: ${MODEL_API_KEY:-local}
+      # host env is namespaced ROOKERY_* (shared gateway .env — see plan
+      # deviations); container-internal names stay generic for the entrypoint
+      MODEL_BASE_URL: ${ROOKERY_MODEL_BASE_URL:?ROOKERY_MODEL_BASE_URL is required}
+      MODEL_ID: ${ROOKERY_MODEL_ID:-local-model}
+      MODEL_API_KEY: ${ROOKERY_MODEL_API_KEY:-local}
       ROOKERY_CORS_ORIGINS: ${ROOKERY_CORS_ORIGINS:-}
     volumes:
       - ${HOME}/.crow/data/rookery:/data
-      - ${WORKSPACES_DIR:-${HOME}/.crow/data/rookery/workspaces}:/workspaces
+      - ${ROOKERY_WORKSPACES_DIR:-${HOME}/.crow/data/rookery/workspaces}:/workspaces
     ports:
       - "127.0.0.1:3061:3061"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # so a host-local model endpoint is reachable on Linux
     init: true
     mem_limit: 1g
     restart: unless-stopped
@@ -475,18 +517,20 @@ services:
 
 Create `bundles/rookery/.env.example` (generic placeholders ONLY — public repo):
 ```
-# OpenAI-compatible endpoint the reviewer uses (REQUIRED)
-MODEL_BASE_URL=http://host.docker.internal:8000/v1
+# OpenAI-compatible endpoint the reviewer uses (REQUIRED). For a model server
+# running on the Docker host, host.docker.internal works (mapped via
+# extra_hosts) when the server listens on a non-loopback interface.
+ROOKERY_MODEL_BASE_URL=http://host.docker.internal:8000/v1
 # Model id as reported by the endpoint's /v1/models
-MODEL_ID=local-model
+ROOKERY_MODEL_ID=local-model
 # Most local servers ignore this; SDK requires non-empty
-MODEL_API_KEY=local
+ROOKERY_MODEL_API_KEY=local
 # Optional: space-separated browser origins to allow via the app's own CORS
 # whitelist (e.g. your dashboard origin). Empty = shim handles origin checks
 # (Crow's session auth is the boundary).
 ROOKERY_CORS_ORIGINS=
 # Host dir where audit workspaces are assembled (shared with the MCP tool)
-WORKSPACES_DIR=~/.crow/data/rookery/workspaces
+ROOKERY_WORKSPACES_DIR=~/.crow/data/rookery/workspaces
 ```
 
 - [ ] **Step 5: Build and boot**
@@ -494,7 +538,7 @@ WORKSPACES_DIR=~/.crow/data/rookery/workspaces
 ```bash
 cd ~/crow/bundles/rookery
 mkdir -p ~/.crow/data/rookery/workspaces
-printf 'MODEL_BASE_URL=http://127.0.0.1:9/v1\n' > .env   # unreachable model is fine for boot
+printf 'ROOKERY_MODEL_BASE_URL=http://127.0.0.1:9/v1\n' > .env   # unreachable model is fine for boot
 docker compose build 2>&1 | tail -3
 docker compose up -d && sleep 12 && docker compose ps
 ```
@@ -508,13 +552,40 @@ curl -sm5 -o /dev/null -w 'gw-host: %{http_code}\n' -H 'Host: crow.example.ts.ne
 curl -sm5 -o /dev/null -w 'cross-nav: %{http_code}\n' -H 'Sec-Fetch-Site: cross-site'    http://127.0.0.1:3061/
 curl -sm5 -o /dev/null -w 'dash-origin: %{http_code}\n' -H 'Origin: https://crow.example.ts.net:8444' http://127.0.0.1:3061/
 ```
-Expected: **all four 200** (shim rewrites Host, strips Sec-Fetch-Site, and — with `ROOKERY_CORS_ORIGINS` empty — strips Origin). Record the matrix output in the Task-6 verification notes. Then clean up:
+Expected: **all four MATCH and are non-4xx** — 200, or a consistent 30x if the UI redirects `/`; what matters is that the header variants behave identically to plain (shim rewrites Host, strips Sec-Fetch-Site, and — with `ROOKERY_CORS_ORIGINS` empty — strips Origin). Record the matrix output in the Task-6 verification notes.
+
+**Subpath-proxy gate** (the other way `/proxy/rookery/` can die): the gateway serves this app at a subpath, which breaks SPAs that reference root-absolute assets (`extension-proxy.js:105`'s own warning; its `direct` fallback is useless here because 3061 binds 127.0.0.1). Cheap first check:
+```bash
+curl -sm5 http://127.0.0.1:3061/ | grep -oE '(src|href)="/[^"]*"' | head -20
+```
+Expected: **no output** (assets relative or inlined; a protocol-relative `href="//…"` match would be a false positive — judge accordingly). If this prints root-absolute asset URLs: run `docker compose down && rm .env` first, then **STOP — do not proceed to Task 4** — and report the finding: the `/proxy/rookery/` architecture needs a decision (this is a Kevin-level call, not something to improvise around). Note the check is a first gate only — JS-loaded chunks can still use absolute paths; Kevin's browser acceptance is the final gate. On pass, clean up:
 ```bash
 docker compose down && rm .env
 ```
-(`.env` must not be committed; confirm `git status` shows only the five new tracked files.)
+(`.env` is never committed — `.gitignore:58` covers `bundles/*/.env`; Step 7's plain `docker run` doesn't read it.)
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: First-install resilience check (root-owned bind mounts)**
+
+A store one-click install on a fresh host hits bind-mount sources that don't exist yet — the Docker engine creates them **root:root**, and the container runs `USER 1000`. Prove the ephemeral-HOME fallback works by running the built image against fresh, nonexistent host dirs:
+```bash
+cd ~/crow/bundles/rookery
+SCRATCH=/tmp/rk-fresh-$(date +%s)
+mkdir "$SCRATCH"   # user-owned parent; docker creates data/ ws/ inside it as root
+docker run -d --name rk-fresh-test --init \
+  -v $SCRATCH/data:/data -v $SCRATCH/ws:/workspaces \
+  -e MODEL_BASE_URL=http://127.0.0.1:9/v1 \
+  -p 127.0.0.1:3061:3061 rookery-rookery
+sleep 8
+curl -sm5 -o /dev/null -w 'fresh-install: %{http_code}\n' http://127.0.0.1:3061/
+docker logs rk-fresh-test 2>&1 | grep -i 'not writable'   # the WARN fallback fired
+docker rm -f rk-fresh-test
+# scratch dirs are root-owned; remove them via the image (no sudo)
+docker run --rm --user 0 -v $SCRATCH:/s --entrypoint rm rookery-rookery -rf /s/data /s/ws
+rmdir $SCRATCH
+```
+Expected: `fresh-install: 200` (or the same non-4xx code as Step 6's matrix) and the WARN line in the logs. If the container crash-loops instead, the entrypoint fallback is broken — fix it before committing. Confirm `git status` shows the five new bundle files and nothing else unexpected — in particular no `.env`, `.venv/`, or `uv.lock` (all gitignored since Task 1).
+
+- [ ] **Step 8: Commit**
 
 ```bash
 cd ~/crow
@@ -546,25 +617,26 @@ Create `bundles/rookery/manifest.json`:
   "version": "0.1.0",
   "description": "Self-hosted OpenScience reviewer + experiment-audit workspace assembler — audit a report's numeric claims against its registered evidence, on your own local model",
   "type": "bundle",
-  "author": "kh0pp",
+  "author": "kh0pper",
   "category": "ai",
   "tags": ["research", "audit", "provenance", "openscience", "self-hosted"],
   "icon": "search",
   "docker": { "composefile": "docker-compose.yml" },
   "server": {
-    "command": "/home/kh0pp/crow/bundles/rookery/run.sh",
+    "command": "./run.sh",
     "args": [],
-    "envKeys": ["WORKSPACES_DIR", "UV_NO_CACHE"]
+    "envKeys": ["ROOKERY_WORKSPACES_DIR", "UV_NO_CACHE"]
   },
   "panel": "panel/rookery.js",
   "panelRoutes": "panel/routes.js",
-  "requires": { "env": ["MODEL_BASE_URL"], "min_ram_mb": 512, "min_disk_mb": 900 },
+  "requires": { "env": ["ROOKERY_MODEL_BASE_URL"], "min_ram_mb": 512, "min_disk_mb": 900 },
   "env_vars": [
-    { "name": "MODEL_BASE_URL", "description": "OpenAI-compatible endpoint for the reviewer model (e.g. a local llama.cpp/vLLM server). Pre-fill from your Crow AI settings if unsure.", "required": true },
-    { "name": "MODEL_ID", "description": "Model id as reported by the endpoint's /v1/models", "default": "local-model", "required": true },
-    { "name": "MODEL_API_KEY", "description": "API key if the endpoint needs one (local servers usually ignore it)", "default": "local", "required": false, "secret": true },
-    { "name": "WORKSPACES_DIR", "description": "Host directory where audit workspaces are assembled (shared by the reviewer and the assemble tool)", "default": "~/.crow/data/rookery/workspaces", "required": false },
-    { "name": "ROOKERY_CORS_ORIGINS", "description": "Optional space-separated browser origins for the app's own CORS whitelist; leave empty to rely on Crow's dashboard auth", "required": false }
+    { "name": "ROOKERY_MODEL_BASE_URL", "description": "OpenAI-compatible endpoint for the reviewer model (e.g. a local llama.cpp/vLLM server; find your configured endpoint in Crow's AI settings). For a server on the Docker host use http://host.docker.internal:<port>/v1", "required": true },
+    { "name": "ROOKERY_MODEL_ID", "description": "Model id as reported by the endpoint's /v1/models", "default": "local-model", "required": true },
+    { "name": "ROOKERY_MODEL_API_KEY", "description": "API key if the endpoint needs one (local servers usually ignore it)", "default": "local", "required": false, "secret": true },
+    { "name": "ROOKERY_WORKSPACES_DIR", "description": "Host directory where audit workspaces are assembled (shared by the reviewer and the assemble tool)", "default": "~/.crow/data/rookery/workspaces", "required": false },
+    { "name": "ROOKERY_CORS_ORIGINS", "description": "Optional space-separated browser origins for the app's own CORS whitelist; leave empty to rely on Crow's dashboard auth", "required": false },
+    { "name": "UV_NO_CACHE", "description": "Disable uv's download cache for the host MCP process (prevents multi-GB cache growth)", "default": "1", "required": false }
   ],
   "ports": [3061],
   "webUI": { "port": 3061, "path": "/", "label": "Rookery Reviewer", "proxyMode": "subpath" },
@@ -572,9 +644,23 @@ Create `bundles/rookery/manifest.json`:
   "official": false
 }
 ```
-Note on `server.command`: absolute path matches the fed-gov-data precedent (install copies the bundle to `~/.crow/bundles/rookery/` but registers the repo path for repo-managed deployments; if the reviewer of this plan finds installed-path registration is preferred for store installs, use `run.sh` relative resolution as `bundles.js` writes it — follow whatever `bundles.js:1200-1222` actually records for other `run.sh` bundles).
+Note on `env_vars` defaults: `bundles.js`'s defaults loop bakes EVERY `env_vars` default (not just `envKeys`) into the world-readable `mcp-addons.json` — fine for these non-secret defaults, but never add an env_var whose DEFAULT is a secret.
 
-- [ ] **Step 2: Validate against the schema**
+Note on `server.command`: `"./run.sh"` is deliberate — `bundles.js:1150-1156` registers the command VERBATIM into `mcp-addons.json`, and `proxy.js:144` spawns addons with `cwd: ~/.crow/bundles/rookery` (the installed copy). A slash-containing relative command resolves against that spawn cwd (POSIX exec after chdir), so it works for any user with zero tenant paths in the public repo. Never use an absolute home path here.
+
+- [ ] **Step 2: Verify the relative-command spawn actually resolves**
+
+```bash
+cd /tmp && node -e "
+const { spawn } = require('child_process');
+const p = spawn('./run.sh', [], { cwd: process.env.HOME + '/crow/bundles/rookery', stdio: 'ignore' });
+p.on('spawn', () => { console.log('spawn ok'); p.kill('SIGTERM'); });
+p.on('error', (e) => { console.error('spawn FAILED:', e.message); process.exit(1); });
+"
+```
+Expected: `spawn ok` (run from `/tmp` on purpose — proves resolution uses the `cwd` option, not the caller's directory).
+
+- [ ] **Step 3: Validate against the schema**
 
 ```bash
 cd ~/crow && node -e "
@@ -589,18 +675,26 @@ console.log(ok ? 'VALID' : JSON.stringify(ajv.errors, null, 1));
 ```
 Expected: `VALID`. (If `ajv` isn't in the gateway's node_modules, run from `servers/gateway/` where it is, or `npm ls ajv` to locate it.)
 
-- [ ] **Step 3: Reserve the port**
+- [ ] **Step 4: Ground `min_disk_mb` in the real image**
+
+The spec left `min_disk_mb` an open item; don't ship a guess. Task 3 built the image:
+```bash
+docker image ls rookery-rookery --format '{{.Size}}'
+```
+Set `min_disk_mb` to image size + ~200 MB headroom (round up to a clean number). If that differs from 900, update `manifest.json` before the registry copy in Step 6 inherits it.
+
+- [ ] **Step 5: Reserve the port**
 
 In `docs/developers/port-allocation.md`, insert in numeric order in the allocation table:
 ```
 | 3061 | 127.0.0.1 | rookery (OpenScience reviewer) | feat/rookery-openscience-bundle |
 ```
 
-- [ ] **Step 4: Registry entry**
+- [ ] **Step 6: Registry entry**
 
-Append the manifest object (same JSON as Step 1, plus nothing — `official:false` already set) to the `add-ons` array in `registry/add-ons.json`, keeping the file's existing formatting. Validate the file still parses: `node -e "JSON.parse(require('fs').readFileSync('registry/add-ons.json','utf8')); console.log('parses')"`.
+Append the CURRENT contents of `bundles/rookery/manifest.json` (i.e. including any Step-4 `min_disk_mb` correction — do not re-type Step 1's JSON) to the `add-ons` array in `registry/add-ons.json`, keeping the file's existing formatting. Validate the file still parses: `node -e "JSON.parse(require('fs').readFileSync('registry/add-ons.json','utf8')); console.log('parses')"`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 cd ~/crow
@@ -619,7 +713,7 @@ Deliverable: a dashboard tile listing assembled workspaces with an assemble form
 - Create: `bundles/rookery/panel/routes.js`
 
 **Interfaces:**
-- Consumes: `rookery-manifest exp` CLI (Task 1; flags `--report --data-dir --phase(repeatable) --workspace`, exit 0/2, `FileExistsError` traceback on non-empty target), `WORKSPACES_DIR` env (Task 3 names), `/proxy/rookery/` (gateway convention).
+- Consumes: `rookery-manifest exp` CLI (Task 1; flags `--report --data-dir --phase(repeatable) --workspace`, exit 0/2, `FileExistsError` traceback on non-empty target), `ROOKERY_WORKSPACES_DIR` env (Task 3 host names), `/proxy/rookery/` (gateway convention).
 - Produces: `GET /api/rookery/workspaces`, `POST /api/rookery/assemble` (JSON `{report, dataDir, phases[], name}`); panel registered as `id:"rookery"`, route `/dashboard/rookery`.
 
 - [ ] **Step 1: Backend routes**
@@ -633,7 +727,7 @@ import { join } from "node:path";
 import os from "node:os";
 
 const WORKSPACES = () =>
-  (process.env.WORKSPACES_DIR || join(os.homedir(), ".crow/data/rookery/workspaces"))
+  (process.env.ROOKERY_WORKSPACES_DIR || join(os.homedir(), ".crow/data/rookery/workspaces"))
     .replace(/^~(?=\/)/, os.homedir());
 const BUNDLE_DIR = () => join(os.homedir(), ".crow/bundles/rookery");
 const UV = () => join(os.homedir(), ".local/bin/uv");
@@ -766,7 +860,7 @@ import('../../bundles/rookery/panel/routes.js').then(async (m) => {
 });
 "
 ```
-Expected: `OK` then `router ok: true` (express resolves from the gateway dir, mirroring the installed symlink situation).
+Expected: `OK` then `router ok: true`. (Node resolves `express` from the IMPORTING FILE's path upward — there is no `servers/gateway/node_modules`; it lands on the repo-root `node_modules`, the same modules the gateway itself uses. The `cd` is cosmetic.)
 
 - [ ] **Step 4: Commit**
 
@@ -792,8 +886,8 @@ Deliverable: the whole bundle verified working together locally; the remote `cro
 
 ```bash
 cd ~/crow/bundles/rookery
-uv run --with pytest pytest -q                       # expect 14 passed
-printf 'MODEL_BASE_URL=http://127.0.0.1:9/v1\n' > .env
+uv run --with pytest pytest -q                       # expect 15 passed
+printf 'ROOKERY_MODEL_BASE_URL=http://127.0.0.1:9/v1\n' > .env
 docker compose up -d --build && sleep 12
 # assemble a real workspace with the MCP core via a scratch fixture:
 python3 - <<'EOF'
@@ -813,19 +907,24 @@ curl -sm5 -o /dev/null -w 'ui: %{http_code}\n' http://127.0.0.1:3061/
 docker compose down && rm .env
 rm -rf ~/.crow/data/rookery/workspaces/smoke-it
 ```
-Expected: 14 passed; assembly exit 0; `docker compose exec` lists the report + manifest inside the container; `ui: 200`.
+Expected: 15 passed; assembly exit 0; `docker compose exec` lists the report + manifest inside the container; `ui: 200`.
 
 - [ ] **Step 2: Bundle README**
 
-Create `bundles/rookery/README.md` covering: what it is (one paragraph), the three parts, install (store one-click; the env form fields and what to enter for a local llama.cpp/vLLM endpoint), the workspaces-volume model (copies only), the self-hosted-only note (never Atlas; the header shim's origin behavior and `ROOKERY_CORS_ORIGINS`), and troubleshooting (model endpoint unreachable → UI still loads, pick model errors surface in-session; non-empty workspace → remove and re-assemble). Write real prose, ~40-60 lines, no placeholders.
+Create `bundles/rookery/README.md` covering: what it is (one paragraph), the three parts, install (store one-click; the `ROOKERY_*` env form fields and what to enter for a local llama.cpp/vLLM endpoint, including the `host.docker.internal` note for host-local servers), the workspaces-volume model (copies only), the self-hosted-only note (never Atlas), the security posture of the shim (why Origin is stripped when `ROOKERY_CORS_ORIGINS` is empty: the gateway session cookie is `SameSite=Lax` and the port binds 127.0.0.1 — and the residual fact that any local process can reach `127.0.0.1:3061` unauthenticated, consistent with other bundles but worth stating for an app that runs an LLM agent over mounted files), and troubleshooting (model endpoint unreachable → UI still loads, pick-model errors surface in-session; non-empty workspace → remove and re-assemble; root-owned data dir → ephemeral-HOME WARN in logs, chown to uid 1000 for persistence). Write real prose, ~40-60 lines, no placeholders.
 
-- [ ] **Step 3: Remote registry entry**
+- [ ] **Step 3: Stage the crow-addons entry (discovery-only; NEVER push)**
+
+Reality check first: the remote registry is a LISTING feed only. `fetchCommunityStore`/`fetchRegistryData` (`servers/gateway/dashboard/panels/extensions/data-queries.js`) fetch `registry.json` raw from GitHub to populate store tiles, but `POST /bundles/api/install` requires the bundle directory to exist in the deployment's OWN crow checkout (`bundles.js:897-900`, `sourceDir = join(APP_BUNDLES, id)`) — there is no fetch-on-install. So this step makes the tile *visible* on other deployments; installing there still requires the merged crow PR pulled into that deployment's checkout.
 
 ```bash
 [ -d ~/crow-addons ] || git clone https://github.com/kh0pper/crow-addons ~/crow-addons
-cd ~/crow-addons && git pull
+cd ~/crow-addons && git checkout main && git pull && git checkout -b add-rookery
+# convention: every registry entry ships its full bundle directory in this repo
+rsync -a --exclude '.env' --exclude '.venv' --exclude '__pycache__' --exclude 'uv.lock' \
+  ~/crow/bundles/rookery/ ~/crow-addons/rookery/
 ```
-Append the same manifest object from Task 4 to `registry.json`'s add-on list (match that file's exact top-level shape — inspect it first; if it uses `{"add-ons":[...]}` mirror `registry/add-ons.json`, if a bare array, append to it). Validate parse, commit on a branch `add-rookery`, and DO NOT push (public repo — Kevin pushes/PRs it).
+Append the same manifest object from Task 4 (with the Step-4-corrected `min_disk_mb`) to `registry.json`'s `add-ons` array (the file is `{"version": 2, "add-ons": [...]}` — verified). Validate parse (`node -e "JSON.parse(...)"`) , commit BOTH the `rookery/` directory and the registry entry on branch `add-rookery`, and **DO NOT push** (Kevin pushes/PRs it).
 
 - [ ] **Step 4: Commit README + open the crow PR**
 
@@ -841,21 +940,35 @@ One-click extension: Dockerized OpenScience reviewer (node22 + header shim, 127.
 EOF
 )"
 ```
-Then verify CI via check-runs (NOT commit-status): `gh api repos/kh0pper/crow/commits/$(git rev-parse HEAD)/check-runs --jq '.check_runs[] | .name + ": " + .conclusion'` — wait for `port-allocation` (and any others) to be `success` before telling Kevin it's mergeable. Do not attribute Claude as co-author anywhere.
+Then verify CI via check-runs (NOT commit-status): `gh api repos/kh0pper/crow/commits/$(git rev-parse HEAD)/check-runs --jq '.check_runs[] | .name + ": " + .conclusion'` — the port CI's check-run is named `check-ports` (the job id, not the workflow name); wait for it (and any others) to be `success` before telling Kevin it's mergeable. Do not attribute Claude as co-author anywhere.
 
 - [ ] **Step 5: Hand Kevin the acceptance checklist (STOP — human step)**
 
 Give Kevin:
 1. Merge the PR (after check-runs green), `git pull` on the crow deployment, restart the gateway at a quiet moment.
-2. Dashboard → Extensions → **Rookery Reviewer** → Install. In the form: `MODEL_BASE_URL` = your local copilot endpoint, `MODEL_ID` = its /v1/models id, `WORKSPACES_DIR` = wherever you want workspaces (the default is fine).
+2. Dashboard → Extensions → **Rookery Reviewer** → Install. In the form: `ROOKERY_MODEL_BASE_URL` = your local copilot endpoint (reachable FROM the container — a host-published port works via `http://host.docker.internal:<port>/v1`), `ROOKERY_MODEL_ID` = its /v1/models id, `ROOKERY_WORKSPACES_DIR` = wherever you want workspaces (the default is fine).
 3. Open the **Rookery** tile → assemble a workspace for a real report → Open reviewer → select the model → run the reviewer on the report, confirm a verdict comes back.
-4. Push `~/crow-addons` branch `add-rookery` (or merge it) so grackle's store sees the extension too.
+4. Push `~/crow-addons` branch `add-rookery` (or merge it). Note: that makes the tile VISIBLE in remote stores; Install on grackle only works once grackle's crow checkout contains this merged PR (`git pull` there) — the store has no fetch-on-install.
 Record his results in the runbook of the PRIVATE rookery repo (`docs/runbooks/`), not in crow.
 
 ---
 
 ## Self-Review
 
-**Spec coverage:** Docker reviewer at /proxy/rookery/ (T3/T4) ✓; MCP tool (T2) ✓; panel tile (T5) ✓; both registries (T4 in-repo, T6 remote) ✓; model config form-with-prefill (T4 env_vars + description pointing at Crow AI settings — the pre-fill itself is the store's existing AI-category behavior; if `category:"ai"` auto-write conflicts, the reviewer of Task 4 should check `bundles.js`'s AI-category handling) ✓; workspaces volume (T3) ✓; header risk verified empirically (T3 Step 6 matrix) with the shim now structurally required (documented) ✓; vendoring + drift guard (T1) ✓; port + CI (T4) ✓; public-repo hygiene (constraints + `.env` never committed, checked T3 Step 6) ✓.
+**Spec coverage:** Docker reviewer at /proxy/rookery/ (T3/T4) ✓; MCP tool (T2) ✓; panel tile (T5) ✓; both registries (T4 in-repo, T6 remote — remote is discovery-only, see T6 Step 3) ✓; model config form (T4 env_vars; NO pre-fill — recorded spec deviation 3, the store has no such mechanism) ✓; workspaces volume (T3) ✓; header risk verified empirically (T3 Step 6 matrix + subpath gate) with the shim structurally required (documented) ✓; vendoring + drift guard (T1) ✓; port + CI (T4) ✓; public-repo hygiene (constraints + `.env` never committed, checked T3 Step 7; no tenant paths — `server.command` is cwd-relative) ✓.
 **Placeholder scan:** VENDORED.md upstream-sha and drift-test hashes are fill-on-the-spot steps with the exact commands; no TBDs remain.
-**Type consistency:** `assemble_exp(report_path, data_dir, phases, workspace_name, workspaces_dir)` (T2) matches its tests; panel routes call the CLI (T1 flags) not the python API; env names (`MODEL_BASE_URL`, `MODEL_ID`, `MODEL_API_KEY`, `ROOKERY_CORS_ORIGINS`, `WORKSPACES_DIR`) are identical across entrypoint/compose/.env.example/manifest/routes; container path `/workspaces/<name>` consistent between T2 and T5; port 3061 consistent everywhere.
+**Type consistency:** `assemble_exp(report_path, data_dir, phases, workspace_name, workspaces_dir)` (T2) matches its tests; panel routes call the CLI (T1 flags) not the python API; HOST env names (`ROOKERY_MODEL_BASE_URL`, `ROOKERY_MODEL_ID`, `ROOKERY_MODEL_API_KEY`, `ROOKERY_CORS_ORIGINS`, `ROOKERY_WORKSPACES_DIR`, `UV_NO_CACHE`) are identical across compose/.env.example/manifest, and the compose→container mapping onto `MODEL_*` matches what the entrypoint reads; `ROOKERY_WORKSPACES_DIR` is what run.sh/server.py (T2) and panel routes (T5) read; container path `/workspaces/<name>` consistent between T2 and T5; port 3061 consistent everywhere.
+
+## Review
+
+**Round 1 (2026-07-10, adversarial subagent review): REVISE → all criticals addressed.**
+1. *Tenant-absolute `server.command`* → now `"./run.sh"` (resolves against proxy.js's spawn cwd = installed copy), hedge paragraph deleted, spawn verified from a foreign cwd (T4 Step 2). The claimed fed-gov-data "precedent" was invalid — that bundle is untracked, its tenant paths were never committed.
+2. *`~` in `WORKSPACES_DIR` default never expanded on the Python path* → `os.path.expanduser` on the workspaces root + regression test with `HOME`/`ROOKERY_WORKSPACES_DIR` monkeypatched (T2); suite now 15.
+3. *Remote registry entry oversold* — the community store fetch is listing-only; install requires the bundle in the deployment's own crow checkout (`bundles.js:897-900`). T6 Step 3 now stages the FULL bundle directory (crow-addons convention) + registry entry and states the discovery-only reality; Kevin checklist item 4 corrected.
+4. *First-install crash on root-owned bind mounts* (engine creates missing sources as root; `USER 1000` + `set -eu` → crash loop) → entrypoint falls back to ephemeral HOME with a WARN; new T3 Step 7 proves it against fresh root-created mounts.
+5. *`--cors` word-splitting bug* (`${VAR:+--cors ${VAR}}` yields one flag + stray positionals) → argv built in a loop; wrong explanatory note deleted.
+
+Adopted suggestions: host env vars namespaced `ROOKERY_*` (shared gateway `.env` clobber risk — deviation 2); subpath-asset gate added to T3 Step 6 with an explicit STOP (answers the reviewer's open question empirically before Kevin's browser step); `UV_NO_CACHE` env_var added (default "1", 7GB-cache lesson); `min_disk_mb` grounded in the measured image (T4 Step 4); `run.sh` env-file line documented as an optional hand-provisioned hook; express-resolution comment corrected (T5 Step 3); dead TERM/INT trap removed (tini reaps); origin-strip mitigations documented in shim + README (SameSite=Lax cookie + loopback bind, residual local-process exposure stated); `extra_hosts: host-gateway` added so `host.docker.internal` examples work on Linux.
+Resolved questions: Q1 (subpath survival) → empirical gate in T3; Q2 (crow-addons consumption) → verified listing-only, fixed as above; Q3 (form pre-fill) → verified nonexistent in store code, recorded as spec deviation 3.
+
+**Round 2 (2026-07-10, fresh adversarial subagent): APPROVE.** All five round-1 fixes verified consistent end-to-end against the actual gateway code (including an empirical docker-compose interpolation check of the `~`-via-env path and the SDK's `cwd` forwarding for the relative spawn). No criticals. Folded-in suggestions: `.gitignore` gets `bundles/*/.venv/` + `bundles/*/uv.lock` in Task 1 (git-status expectations now hold for a literal-minded executor); T4 Step 6 references the CURRENT manifest file, not Step 1's JSON; the subpath-gate STOP path tears the container down and removes `.env` before stopping; check-run name corrected to `check-ports`; header-matrix expectation relaxed to "all four match, non-4xx"; `author: "kh0pper"`; noted that env_vars DEFAULTS are baked world-readable into mcp-addons.json (never make a default a secret); `.env` lifecycle clarified (Step 7's plain docker run doesn't read it).
