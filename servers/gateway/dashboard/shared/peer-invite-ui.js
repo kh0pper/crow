@@ -123,6 +123,7 @@ export function renderShortCodeForms({ lang, csrf = "" }) {
   const acceptForm = `<form method="POST" data-turbo="false">
     <input type="hidden" name="action" value="accept_short_invite">${csrf}
     <input type="text" name="short_code" maxlength="20" required placeholder="${escapeHtml(t("invite.shortCodeAcceptPlaceholder", lang))}" style="width:100%;font-size:0.85rem;letter-spacing:0.05em;background:var(--crow-bg-deep);border:1px solid var(--crow-border);border-radius:6px;padding:8px;color:var(--crow-text)">
+    <p style="font-size:0.7rem;color:var(--crow-text-muted);margin:4px 0 0">${t("invite.shortCodeAcceptExpiryHint", lang)}</p>
     <button type="submit" class="btn btn-primary" style="width:100%;font-size:0.8rem;padding:6px;margin-top:4px">${t("invite.shortCodeAcceptBtn", lang)}</button>
   </form>`;
   return { generateForm, acceptForm };
