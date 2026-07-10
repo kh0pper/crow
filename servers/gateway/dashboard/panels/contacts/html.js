@@ -117,7 +117,7 @@ export function renderContactList(contacts, groups, filters, lang, peerAdd = {})
   const addByIdForm = `<details style="margin-bottom:1rem">
     <summary style="cursor:pointer;font-size:0.85rem;color:var(--crow-accent);font-weight:500">${t("contacts.addById", lang)}</summary>
     <form method="POST" data-turbo="false" style="margin-top:0.75rem;padding:1rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px">
-      <input type="hidden" name="action" value="add_by_id">
+      <input type="hidden" name="action" value="add_by_id">${peerAdd.csrf || ""}
       <p style="font-size:0.8rem;color:var(--crow-text-muted);margin:0 0 0.75rem">${t("contacts.addByIdHint", lang)}</p>
       ${formField(t("contacts.fieldCrowId", lang), "crow_id", { required: true, placeholder: "crow:abcd1234" })}
       ${formField(t("contacts.fieldSecpKey", lang), "secp256k1_pubkey", { required: true, placeholder: t("contacts.secpPlaceholder", lang) })}
