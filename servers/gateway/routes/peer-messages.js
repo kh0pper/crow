@@ -17,6 +17,43 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createSharingServer } from "../../sharing/server.js";
 
+// R1-I1: loadOrCreateIdentity() does a sync disk read + full keypair
+// re-derivation (identity.js:119-133) — far too heavy for the per-message
+// afterId hot path. Cache my ed25519 pubkey once per process (it cannot
+// change without a restart).
+let _myEd25519 = null;
+async function myEd25519Pubkey() {
+  // R2-M1: cache ON SUCCESS only — a transient load failure must not disable
+  // safety numbers for the rest of the process lifetime.
+  if (_myEd25519) return _myEd25519;
+  try {
+    const { loadOrCreateIdentity } = await import("../../sharing/identity.js");
+    const ed = loadOrCreateIdentity().ed25519Pubkey || "";
+    if (ed) _myEd25519 = ed;
+    return ed;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * F-UI-6: attach the symmetric safety number to the contact payload so the
+ * Messages Info panel can show the SAME trust string the Contacts detail
+ * shows (raw peer pubkeys are asymmetric and read as "numbers don't match").
+ * Never throws; omits the field (null) when either key is unavailable.
+ */
+export async function withSafetyNumber(contact) {
+  if (!contact || !contact.ed25519_pubkey) return contact ? { ...contact, safety_number: null } : null;
+  try {
+    const myEd = await myEd25519Pubkey();
+    if (!myEd) return { ...contact, safety_number: null };
+    const { computeSafetyNumber } = await import("../../sharing/identity.js");
+    return { ...contact, safety_number: computeSafetyNumber(myEd, contact.ed25519_pubkey) };
+  } catch {
+    return { ...contact, safety_number: null };
+  }
+}
+
 /**
  * Create a connected sharing MCP client (the real in-memory transport). This is
  * the default factory; tests inject a stub so no live Nostr runtime starts.
@@ -184,46 +221,20 @@ export default function peerMessagesRouter(dashboardAuth, { sharingClientFactory
       const offset = parseInt(req.query.offset) || 0;
       const afterId = parseInt(req.query.afterId) || 0;
 
-      let sql, args;
-      if (afterId) {
-        sql = `SELECT m.id, m.content, m.direction, m.is_read, m.created_at,
-                      m.thread_id, m.nostr_event_id, m.attachments,
-                      c.display_name, c.crow_id, c.last_seen
-               FROM messages m
-               LEFT JOIN contacts c ON m.contact_id = c.id
-               WHERE m.contact_id = ? AND m.id > ?
-               ORDER BY m.id ASC
-               LIMIT ?`;
-        args = [contactId, afterId, limit];
-      } else {
-        sql = `SELECT m.id, m.content, m.direction, m.is_read, m.created_at,
-                      m.thread_id, m.nostr_event_id, m.attachments,
-                      c.display_name, c.crow_id, c.last_seen
-               FROM messages m
-               LEFT JOIN contacts c ON m.contact_id = c.id
-               WHERE m.contact_id = ?
-               ORDER BY m.id DESC
-               LIMIT ? OFFSET ?`;
-        args = [contactId, limit, offset];
-      }
+      const { getPeerMessages } = await import("../dashboard/panels/messages/data-queries.js");
+      const messages = await getPeerMessages(db, contactId, { limit, offset, afterId });
 
-      const { rows } = await db.execute({ sql, args });
-
-      // Get contact info
       const { rows: contactRows } = await db.execute({
         sql: `SELECT id, crow_id, display_name, ed25519_pubkey, is_blocked, last_seen, created_at, verified
               FROM contacts WHERE id = ?`,
         args: [contactId],
       });
 
-      // Parse attachments JSON
-      const messages = (afterId ? rows : rows.reverse()).map((m) => ({
-        ...m,
-        attachments: m.attachments ? JSON.parse(m.attachments) : null,
-      }));
-
       res.json({
-        contact: contactRows[0] || null,
+        // R1-I1: compute the safety number only on the initial load — the
+        // afterId incremental fetches (SSE nudge / poll) don't render the Info
+        // panel and must stay light.
+        contact: afterId > 0 ? (contactRows[0] || null) : await withSafetyNumber(contactRows[0] || null),
         messages,
       });
     } catch (err) {
