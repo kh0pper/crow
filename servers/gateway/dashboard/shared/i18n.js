@@ -302,6 +302,7 @@ export const translations = {
   "messages.notDelivered": { en: "not delivered", es: "no entregado" },
   "messages.deliveryRelayed": { en: "Relayed to at least one relay", es: "Retransmitido a al menos un repetidor" },
   "messages.deliveryDelivered": { en: "Delivered", es: "Entregado" },
+  "messages.retry": { en: "Retry", es: "Reintentar" },
   "messages.you": { en: "You", es: "Tú" },
   "messages.them": { en: "Them", es: "Ellos" },
   "messages.attachFile": { en: "Attach file", es: "Adjuntar archivo" },
@@ -326,6 +327,7 @@ export const translations = {
   "messages.botsAvailable": { en: "{n} bots available on your other Crows", es: "{n} bots disponibles en tus otros Crows" },
   "messages.browse": { en: "Browse", es: "Explorar" },
   "messages.botDirectoryTitle": { en: "Bots on your other Crows", es: "Bots en tus otros Crows" },
+  "messages.connectedToast": { en: "Connected — you can start chatting.", es: "Conectado — ya puedes chatear." },
   "messages.messageABot": { en: "Message a Bot", es: "Enviar mensaje a un bot" },
   "messages.messageABotDesc": { en: "Browse bots on your other Crows", es: "Explora bots en tus otros Crows" },
   "messages.botTag": { en: "bot", es: "bot" },
@@ -374,6 +376,7 @@ export const translations = {
   },
   "invite.shortCodeExpiry": { en: "Expires in about 10 minutes", es: "Caduca en unos 10 minutos" },
   "invite.shortCodeAcceptPlaceholder": { en: "Enter the 12-character code…", es: "Ingresa el código de 12 caracteres…" },
+  "invite.shortCodeAcceptExpiryHint": { en: "Codes expire about 10 minutes after they're created.", es: "Los códigos caducan unos 10 minutos después de crearse." },
   "invite.shortCodeAcceptBtn": { en: "Accept short code", es: "Aceptar código corto" },
   "contacts.verification": { en: "Verification", es: "Verificación" },
   "contacts.safetyNumber": { en: "Safety number", es: "Número de seguridad" },
@@ -385,6 +388,7 @@ export const translations = {
 
   "contacts.addPeer": { en: "Add a Crow peer", es: "Añadir un par de Crow" },
   "contacts.addPeerDesc": { en: "Invite someone with a link or accept theirs", es: "Invita a alguien con un enlace o acepta el suyo" },
+  "contacts.peerAddedFlash": { en: "Peer connected ✓", es: "Contacto conectado ✓" },
 
   // ─── Blog Panel ───
   "blog.pageTitle": { en: "Blog", es: "Blog" },

@@ -116,8 +116,8 @@ export function renderContactList(contacts, groups, filters, lang, peerAdd = {})
   // Add/repair by Crow ID form (R4: recovery path for a half-completed handshake)
   const addByIdForm = `<details style="margin-bottom:1rem">
     <summary style="cursor:pointer;font-size:0.85rem;color:var(--crow-accent);font-weight:500">${t("contacts.addById", lang)}</summary>
-    <form method="POST" style="margin-top:0.75rem;padding:1rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px">
-      <input type="hidden" name="action" value="add_by_id">
+    <form method="POST" data-turbo="false" style="margin-top:0.75rem;padding:1rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px">
+      <input type="hidden" name="action" value="add_by_id">${peerAdd.csrf || ""}
       <p style="font-size:0.8rem;color:var(--crow-text-muted);margin:0 0 0.75rem">${t("contacts.addByIdHint", lang)}</p>
       ${formField(t("contacts.fieldCrowId", lang), "crow_id", { required: true, placeholder: "crow:abcd1234" })}
       ${formField(t("contacts.fieldSecpKey", lang), "secp256k1_pubkey", { required: true, placeholder: t("contacts.secpPlaceholder", lang) })}
@@ -129,10 +129,11 @@ export function renderContactList(contacts, groups, filters, lang, peerAdd = {})
 
   const peerForms = renderPeerInviteForms({ lang, csrf: peerAdd.csrf || "" });
   const shortCodeForms = renderShortCodeForms({ lang, csrf: peerAdd.csrf || "" });
-  const peerAddSection = `<details class="contacts-add-peer" style="margin-bottom:1rem"${peerAdd.inviteShare || peerAdd.inviteError || peerAdd.shortCodeShare ? " open" : ""}>
+  const peerAddSection = `<details class="contacts-add-peer" style="margin-bottom:1rem"${peerAdd.inviteShare || peerAdd.inviteError || peerAdd.shortCodeShare || peerAdd.flash ? " open" : ""}>
     <summary style="cursor:pointer;font-size:0.85rem;color:var(--crow-accent);font-weight:500">${t("contacts.addPeer", lang)}</summary>
     <div style="margin-top:0.75rem;padding:1rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px">
       <p style="font-size:0.8rem;color:var(--crow-text-muted);margin:0 0 0.75rem">${t("contacts.addPeerDesc", lang)}</p>
+      ${peerAdd.flash ? `<div style="font-size:0.85rem;color:var(--crow-success,#10b981);font-weight:600;margin-bottom:0.5rem">${escapeHtml(peerAdd.flash)}</div>` : ""}
       ${peerAdd.inviteError ? `<div style="font-size:0.8rem;color:var(--crow-error);margin-bottom:0.5rem">${escapeHtml(peerAdd.inviteError)}</div>` : ""}
       ${peerAdd.inviteShare ? renderInviteShare(peerAdd.inviteShare, lang) : ""}
       ${peerAdd.shortCodeShare ? renderShortCodeShare(peerAdd.shortCodeShare, lang) : ""}

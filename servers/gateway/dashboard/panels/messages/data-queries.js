@@ -159,22 +159,38 @@ export async function getMessageRequests(db) {
 }
 
 /**
- * Get peer messages for a specific contact.
+ * Get peer messages for a specific contact. One query owner for the live
+ * route AND the panel (F-UI-6: the route's private copy dropped
+ * delivery_status, so receipts vanished on reload).
+ *  - afterId > 0: ascending rows with id > afterId (poll/live incremental).
+ *  - else: latest window (descending LIMIT/OFFSET), returned oldest-first.
  */
-export async function getPeerMessages(db, contactId, { limit = 50, offset = 0 } = {}) {
-  const { rows } = await db.execute({
-    sql: `SELECT m.id, m.content, m.direction, m.is_read, m.created_at,
-                 m.thread_id, m.nostr_event_id, m.attachments, m.delivery_status,
-                 c.display_name, c.crow_id
-          FROM messages m
-          LEFT JOIN contacts c ON m.contact_id = c.id
-          WHERE m.contact_id = ?
-          ORDER BY m.id DESC
-          LIMIT ? OFFSET ?`,
-    args: [contactId, limit, offset],
-  });
-
-  return rows.reverse().map((m) => ({
+export async function getPeerMessages(db, contactId, { limit = 50, offset = 0, afterId = 0 } = {}) {
+  const cols = `m.id, m.content, m.direction, m.is_read, m.created_at,
+                m.thread_id, m.nostr_event_id, m.attachments, m.delivery_status,
+                c.display_name, c.crow_id, c.last_seen`;
+  let rows;
+  if (afterId > 0) {
+    ({ rows } = await db.execute({
+      sql: `SELECT ${cols} FROM messages m
+            LEFT JOIN contacts c ON m.contact_id = c.id
+            WHERE m.contact_id = ? AND m.id > ?
+            ORDER BY m.id ASC
+            LIMIT ?`,
+      args: [contactId, afterId, limit],
+    }));
+  } else {
+    ({ rows } = await db.execute({
+      sql: `SELECT ${cols} FROM messages m
+            LEFT JOIN contacts c ON m.contact_id = c.id
+            WHERE m.contact_id = ?
+            ORDER BY m.id DESC
+            LIMIT ? OFFSET ?`,
+      args: [contactId, limit, offset],
+    }));
+    rows = rows.reverse();
+  }
+  return rows.map((m) => ({
     ...m,
     attachments: m.attachments ? JSON.parse(m.attachments) : null,
   }));
