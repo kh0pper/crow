@@ -30,13 +30,23 @@ def test_assemble_exp_builds_workspace_and_returns_paths(tmp_path):
     ws = ws_root / "audit-p1"
     assert out["workspace"] == str(ws)
     assert out["container_path"] == "/workspaces/audit-p1"
-    assert out["reviewer_url"] == "/proxy/rookery/"
+    assert out["reviewer_url"] == "http://127.0.0.1:3061/"
     assert (ws / "REPORT-p1.md").exists()
     assert (ws / "rounds.jsonl").exists()
     assert (ws / "SCORE-p1.md").exists()
     lines = (ws / "_script_manifest.jsonl").read_text().splitlines()
     assert len(lines) == 2  # rounds + one SCORE
     assert json.loads(lines[0])["output"] == "rounds.jsonl"
+
+
+def test_assemble_exp_reviewer_url_env_override(tmp_path, monkeypatch):
+    # Root-origin serving (deviation 4): ROOKERY_REVIEWER_URL overrides the default.
+    monkeypatch.setenv("ROOKERY_REVIEWER_URL", "https://reviewer.example.net/")
+    data, report = _pilab_layout(tmp_path)
+    out = assemble_exp(
+        str(report), str(data), ["p1"], "audit-env", str(tmp_path / "workspaces")
+    )
+    assert out["reviewer_url"] == "https://reviewer.example.net/"
 
 
 def test_assemble_exp_rejects_bad_workspace_name(tmp_path):
