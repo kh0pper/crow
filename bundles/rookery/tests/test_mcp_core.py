@@ -59,6 +59,17 @@ def test_assemble_exp_nonempty_workspace_is_valueerror(tmp_path):
         assemble_exp(str(report), str(data), ["p1"], "a", str(ws_root))
 
 
+def test_assemble_exp_oserror_surfaces_as_valueerror(tmp_path):
+    # Contract: errors leave assemble_exp as ValueError with a human message,
+    # never a raw OSError traceback. Point the workspaces root INTO a file so
+    # os.makedirs raises NotADirectoryError (an OSError subclass).
+    data, report = _pilab_layout(tmp_path)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory\n")
+    with pytest.raises(ValueError, match="could not assemble"):
+        assemble_exp(str(report), str(data), ["p1"], "a", str(blocker / "ws"))
+
+
 def test_assemble_exp_expands_tilde_in_env_workspaces_dir(tmp_path, monkeypatch):
     # Regression: the manifest default is "~/.crow/..." and bundles.js bakes
     # env_vars defaults VERBATIM into the spawned env — an unexpanded "~" must

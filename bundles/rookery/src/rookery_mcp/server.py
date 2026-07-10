@@ -63,14 +63,16 @@ def assemble_exp(
         for phase, path in scores
     ]
 
-    os.makedirs(root, exist_ok=True)
     target = os.path.join(root, workspace_name)
     try:
+        os.makedirs(root, exist_ok=True)
         ws = assemble_workspace(report, evidence, target)
     except FileExistsError as e:
         raise ValueError(
             f"workspace not empty: {target} — remove it first (it contains only copies)"
         ) from e
+    except OSError as e:
+        raise ValueError(f"could not assemble workspace: {e}") from e
 
     return {
         "workspace": ws,
