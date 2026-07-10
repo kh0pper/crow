@@ -146,19 +146,24 @@ function stripScriptTags(html) {
   return html.slice(start, end);
 }
 
-test("the ?open=/?openRoom= hook waits for DOM readiness before firing (accept-redirect full-page-load race)", () => {
-  // A classic full-page load (the accept redirect) can execute this inline
-  // script mid-parse; a bare setTimeout(fn, 0) then fires before the panel
-  // DOM/script state msgSelectItem needs exists, and the silent try/catch
-  // swallows the failure (found via live CDP — the conversation never
-  // opened). The hook must defer to DOMContentLoaded when the document is
-  // still loading.
-  assert.match(js, /readyState === 'loading'/);
-  assert.match(js, /addEventListener\('DOMContentLoaded'/);
+test("the ?open=/?openRoom= hook is a self-verifying retry loop, not a single-shot schedule (accept-redirect Turbo race)", () => {
+  // A full-page load (the accept redirect) races Turbo Drive's initial-visit
+  // processing: a conversation opened too early is wiped ~10ms after
+  // DOMContentLoaded (found via live CDP — the open call ran, the toast
+  // fired, but no /api/messages/peer fetch ever landed and #msg-viewport
+  // never survived). Timing-based dispatch (setTimeout(0), even a
+  // DOMContentLoaded deferral) proved fragile, so the hook must verify its
+  // own outcome: retry up to 12x @250ms until the render actually stuck.
+  assert.match(js, /tries < 12/, "bounded retry loop must exist");
+  assert.match(js, /setTimeout\(tick, 250\)/, "retries must be spaced 250ms apart");
+  assert.match(
+    js,
+    /return !!document\.getElementById\('msg-viewport'\)/,
+    "isDone must be a cheap DOM check for the rendered viewport",
+  );
 
-  // The openId branch specifically must route through the readiness-aware
-  // dispatcher, not a bare setTimeout(fn, 0) — a revert to the old raw form
-  // must redden this.
+  // The openId branch specifically must route through the self-verifying
+  // dispatcher — a revert to a bare one-shot setTimeout must redden this.
   const openIdBranch = js.slice(
     js.indexOf("var openId = params.get('open');"),
     js.indexOf("var openRoom = params.get('openRoom');"),
@@ -166,9 +171,31 @@ test("the ?open=/?openRoom= hook waits for DOM readiness before firing (accept-r
   assert.ok(openIdBranch.length > 0, "openId branch must exist in generated client script");
   assert.ok(
     !/setTimeout\(function \(\) \{ try \{ msgSelectItem/.test(openIdBranch),
-    "openId scheduling must not be a bare setTimeout — it must go through the readiness-aware dispatcher",
+    "openId scheduling must not be a bare setTimeout — it must go through fireOpen",
   );
-  assert.match(openIdBranch, /fireOpen\(function \(\) \{ try \{ msgSelectItem/);
+  assert.match(openIdBranch, /fireOpen\(/);
+  // msgSelectItem early-returns when _activeItem already matches, which
+  // would make every retry a no-op after Turbo wiped the first render. The
+  // attempt must reset the stale _activeItem when the viewport is gone.
+  assert.match(
+    openIdBranch,
+    /if \(_activeItem && !document\.getElementById\('msg-viewport'\)\) _activeItem = null;/,
+    "openId attempt must neutralize msgSelectItem's early-return before retrying",
+  );
+
+  // Same reset guard on the room path (msgSelectRoom has the same
+  // early-return on _activeItem).
+  const openRoomBranch = js.slice(
+    js.indexOf("var openRoom = params.get('openRoom');"),
+    js.indexOf("if (params.get('connected') === '1')"),
+  );
+  assert.ok(openRoomBranch.length > 0, "openRoom branch must exist in generated client script");
+  assert.match(openRoomBranch, /fireOpen\(/);
+  assert.match(
+    openRoomBranch,
+    /if \(_activeItem && !document\.getElementById\('msg-viewport'\)\) _activeItem = null;/,
+    "openRoom attempt must neutralize msgSelectRoom's early-return before retrying",
+  );
 });
 
 test("generated client JS parses for every lang x aiConfigured permutation (F-UI-6 regression guard)", () => {

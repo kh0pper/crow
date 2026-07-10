@@ -146,24 +146,45 @@ export function messagesClientJS(opts) {
   if (!window.__msgOpenHookBound) {
     window.__msgOpenHookBound = true;
     var params = new URLSearchParams(window.location.search);
-    var fireOpen = function (fn) {
-      // A classic full-page load (the accept redirect) can run this script
-      // mid-parse; setTimeout(0) then fires before the panel DOM/script state
-      // is ready and the silent catch eats the failure (found via CDP — the
-      // conversation never opened). Wait for DOMContentLoaded when loading.
-      if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', function () { setTimeout(fn, 0); }, { once: true });
-      } else {
-        setTimeout(fn, 0);
-      }
+    var fireOpen = function (attempt, isDone) {
+      // A full-page load (the accept redirect) races Turbo's initial-visit
+      // processing: a conversation opened too early is wiped ~10ms after
+      // DOMContentLoaded (found via CDP — the open call ran but the viewport
+      // never survived). Timing-based fixes proved fragile, so the hook
+      // verifies its own outcome: retry every 250ms (up to 12x = ~3s) until
+      // the render actually stuck. isDone() must be cheap and DOM-based.
+      var tries = 0;
+      var tick = function () {
+        tries++;
+        try { attempt(); } catch (e) { /* retried below */ }
+        setTimeout(function () {
+          try { if (isDone()) return; } catch (e) {}
+          if (tries < 12) setTimeout(tick, 250);
+        }, 100);
+      };
+      setTimeout(tick, 0);
     };
     var openId = params.get('open');
     if (openId && /^\d+$/.test(openId)) {
-      fireOpen(function () { try { msgSelectItem('peer', parseInt(openId, 10)); } catch (e) {} });
+      fireOpen(
+        function () {
+          // a wiped render leaves stale _activeItem → reset so the retry re-renders
+          if (_activeItem && !document.getElementById('msg-viewport')) _activeItem = null;
+          msgSelectItem('peer', parseInt(openId, 10));
+        },
+        function () { return !!document.getElementById('msg-viewport'); }
+      );
     }
     var openRoom = params.get('openRoom');
     if (openRoom && /^\d+$/.test(openRoom)) {
-      fireOpen(function () { try { msgSelectRoom(parseInt(openRoom, 10)); } catch (e) {} });
+      fireOpen(
+        function () {
+          // a wiped render leaves stale _activeItem → reset so the retry re-renders
+          if (_activeItem && !document.getElementById('msg-viewport')) _activeItem = null;
+          msgSelectRoom(parseInt(openRoom, 10));
+        },
+        function () { return !!document.getElementById('msg-viewport'); }
+      );
     }
     if (params.get('connected') === '1') {
       // COUPLING NOTE (R2-M2): this lives inside the window-level
