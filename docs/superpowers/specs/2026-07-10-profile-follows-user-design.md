@@ -87,9 +87,14 @@ Alternatives considered:
 
 Security: same trust class as existing synced settings (`ai_profiles` is far more
 sensitive). A compromised paired instance could already rewrite synced settings;
-display name adds nothing new. Values remain sanitized at write
-(`sanitizeDisplayName`, api-handlers.js:359) and at handshake-apply
-(boot.js:296, tools/contacts.js:76).
+display name adds nothing new. **The real defense in depth (R1 MINOR-2):** the
+sync-apply path (`_applyDashboardSetting`, instance-sync.js:1067) writes peer
+values RAW — the protections are (a) every dashboard render of profile values is
+escapeHtml'd (contacts/html.js, components.js formField), and (b) both handshake
+readers re-sanitize via `sanitizeDisplayName` at READ time (boot.js:42,
+tools/contacts.js:76), so a raw synced value never reaches a handshake or an
+unescaped sink. Any future reader of `profile_*` must follow the same rule
+(comment at the allowlist entries).
 
 ### D2 — `save_profile` clears stranded local overrides
 
@@ -129,30 +134,65 @@ of the three profile keys, if a local override row exists for this instance:
   keys are allowlisted, via POST /api/settings/scope) is never clobbered by a later
   boot. (Note: local overrides of profile keys have no effect anyway — readers are
   global-direct, D6 — but the heal must still not eat them.)
-- Runs in gateway boot (servers/gateway/boot/mcp-mounts.js) immediately **before**
-  `reemitSyncableSettingsOnce()` so a promoted value also rides D4's re-emit; the
-  `writeSetting` emit covers the case where the re-emit already ran.
+- **Ordering (R1 MAJOR-1):** `setSettingsSyncManager(syncManager)` is currently
+  wired at mcp-mounts.js:105 — AFTER the reemit call at :73 — so a heal placed
+  before the reemit would emit into a null manager (registry.js:129 early-return)
+  and its "writeSetting emit covers it" fallback would be dead code. Fix: move
+  `setSettingsSyncManager(syncManager)` ABOVE the heal/reemit block (nothing
+  between :73 and :105 needs it late — the contacts/groups backfills call
+  `syncManager.emitChange` directly), then run the heal, then
+  `reemitSyncableSettingsOnce()`. The heal's `writeSetting` emit is then real, so
+  correctness no longer depends on the two one-shot flags staying coupled.
+- **Gating (R1 MINOR-5):** the heal runs inside the same guarded block that owns
+  `syncManager` (i.e. only when instance-sync is actually initialized) — a
+  `--no-auth` companion gateway sharing the primary's DB must not race the flag
+  write or double-run the heal.
 - Fix-the-product rationale: a user who typed their name into the silently-broken
   UI gets it restored (and syncing, and in handshakes) at upgrade with no re-save.
 
 ### D4 — Re-emit flag bump v1 → v2
 
 Rename `reemitSyncableSettingsOnce`'s `FLAG_KEY` to `__sync_reemit_allowlist_v2`
-(instance-sync.js:471). The v1 flag is `done:` on every fleet instance, so
-**pre-existing global rows** for the newly-allowlisted keys (grackle's March name +
-bio; any pre-refactor install in the wild) would otherwise never replicate until
-the next manual save. The re-emit is idempotent on the apply side
-(`_applyDashboardSetting` skips stale-lamport and unchanged-value rows) and small
-(re-emits only allowlisted keys, ~a dozen rows). Divergent values across instances
-resolve by LWW (last boot's emit wins) — same conflict class the settings sync
-already accepts; the operator's next save settles it deterministically. The v1 flag
-row remains as a harmless orphan.
+(instance-sync.js:471). The v1 flag is `done:` on every fleet instance (crow live:
+`done:9`), so **pre-existing global rows** for the newly-allowlisted keys
+(grackle's March name + bio; any pre-refactor install in the wild) would otherwise
+never replicate until the next manual save. The re-emit is idempotent on the apply
+side (`_applyDashboardSetting` skips stale-lamport and unchanged-value rows) and
+small (re-emits only allowlisted keys, ~a dozen rows).
+
+**Empty-value guard (R1 MAJOR-2):** the re-emit loop SKIPS profile keys whose
+global value is empty/whitespace. Without this, any instance holding an
+empty-string global `profile_bio`/`profile_avatar_url` row (grackle has an empty
+avatar row live) could win the lamport race and blank a peer's real value —
+exactly the data (grackle's March bio) the deploy plan promises to preserve. The
+asymmetry is deliberate: the re-emit is a *historical reconciliation* where an
+empty row is indistinguishable from "never set", while a **live** save of `""`
+(D2 path) still emits — a deliberate clear propagates.
+
+**LWW characterization (R1 MINOR-1):** each re-emit gets a fresh per-instance
+lamport from `_nextLamport`, so divergent values resolve to whichever instance
+holds the higher sync counter — a function of sync history, not boot order; an
+equal-counter tie is non-commutative ("incoming wins", instance-sync.js:1054) and
+can transiently swap values. Accepted: same conflict class the settings sync
+already carries, bounded, and the deploy plan's operator save settles it
+deterministically. The v1 flag row remains as a harmless orphan.
+
+**Deploy-together constraint (R1 noted):** an old-code peer silently DROPS a
+profile sync row (shouldSyncRow gate, instance-sync.js:925) and still advances its
+checkpoint — it will not re-read that entry after upgrading. crow/MPA/grackle must
+deploy together; a late upgrader needs one fresh source-side save. Re-emitting
+`storage.shared.*` rows with fresh lamports also re-fires `_scheduleStorageReset()`
+on peers at the deploy boot (R1 MINOR-4) — a one-time storage-client reconnect
+blip, noted in the deploy plan.
 
 ### D5 — No handshake-ack dedup (F-CONTACT-5 optional half — rejected, YAGNI)
 
 Multi-instance `handshake_complete` acks stay. They are idempotent
 (`markDelivered` + name applied only over a placeholder, boot.js:297) and, post-D1,
-identical in content. Deduping would require cross-instance coordination on the
+identical in content **in steady state** (R1 MINOR-3: during the ~3s window after a
+rename the three acks can diverge, and the acceptor's first non-placeholder
+application is permanent — narrow, cosmetic, acceptor can rename; documented, not
+engineered around). Deduping would require cross-instance coordination on the
 receive path for zero user-visible gain. Documented here as the deliberate
 disposition of the finding's "optionally dedupe" clause.
 
@@ -184,6 +224,12 @@ site.
    re-emits an existing global `profile_display_name` row exactly once —
    **mutation test**: reverting FLAG_KEY to v1 with a `done:` v1 row present must
    redden this.
+5b. D4 empty-value guard: an empty-string global `profile_bio`/`profile_avatar_url`
+   row is NOT re-emitted while a non-empty one is — **mutation test**: dropping the
+   guard must redden this (the fleet-blanking hazard made explicit).
+5c. D3/D4 ordering: `setSettingsSyncManager` is wired before the heal runs — a
+   heal promotion with the manager wired emits a `dashboard_settings` change
+   (asserts MAJOR-1's fix; reddens if the wiring moves back below the block).
 6. End-to-end read path: after a UI-style save, `readLocalDisplayName` (boot.js)
    and the tools/contacts.js acceptor read return the saved, sanitized name
    (extends tests/handshake-display-name.test.js).
