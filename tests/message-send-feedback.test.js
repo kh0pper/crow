@@ -187,6 +187,34 @@ test("send failure (0 relays) returns the failed row id so the client can retry 
   } finally { cleanup(); }
 });
 
+test("502 does NOT attribute a pre-existing failed row's id to an attempt that wrote no row", async () => {
+  const { db, cleanup } = freshLibsql();
+  try {
+    const contactId = await mkContact(db, { crowId: "crow:stale502", name: "R" });
+    // Seed an OLD failed row from a previous attempt.
+    await db.execute({
+      sql: `INSERT INTO messages (contact_id, content, direction, delivery_status, created_at)
+            VALUES (?, 'old attempt', 'sent', 'failed', datetime('now'))`,
+      args: [contactId],
+    });
+    // Stub errors WITHOUT inserting a row (e.g. blocked contact filtered by the
+    // tool's own lookup, or a nip44 encrypt throw before sendMessage writes).
+    const sharingClientFactory = async () => ({
+      callTool: async () => ({ isError: true, content: [{ type: "text", text: "contact is blocked" }] }),
+      close: async () => {},
+    });
+    const res = fakeJsonRes();
+    await handlePeerSend(
+      { params: { contactId: String(contactId) }, body: { message: "hi" } },
+      res,
+      { db, sharingClientFactory },
+    );
+    assert.equal(res.statusCode, 502);
+    assert.equal(res.body.ok, false);
+    assert.equal(res.body.id, null, "stale pre-existing row id must not be attributed to this attempt");
+  } finally { cleanup(); }
+});
+
 test("retry_of deletes the old failed row on success — guarded (F-UI-7)", async () => {
   const { db, cleanup } = freshLibsql();
   try {

@@ -61,24 +61,6 @@ export async function handlePeerSend(req, res, { db, sharingClientFactory = make
   const contact = contactRows[0];
   const contactIdentifier = contact.display_name || contact.crow_id;
 
-  // Send via MCP sharing server — CAPTURE the result (a 0-relay send is a
-  // failure the client must see).
-  let toolResult;
-  const client = await sharingClientFactory();
-  try {
-    toolResult = await client.callTool({
-      name: "crow_send_message",
-      arguments: { contact: contactIdentifier, message: message.trim() },
-    });
-  } finally {
-    await client.close();
-  }
-
-  const resultText = (toolResult?.content || [])
-    .map((c) => c && c.text)
-    .filter(Boolean)
-    .join(" ");
-
   // Read back the row sendMessage just wrote (success → relayed/…, 0-relay →
   // failed) so the client can key its optimistic bubble to the real row
   // (F-UI-5 dedup) and retry a failed one (F-UI-7). Latest-sent-row read-back
@@ -97,14 +79,45 @@ export async function handlePeerSend(req, res, { db, sharingClientFactory = make
     } catch { return null; }
   }
 
+  // Pre-capture the latest sent row BEFORE the tool call. Some tool errors
+  // happen before sendMessage writes anything (blocked/pending contact
+  // filtered by the tool's own lookup, a nip44 encrypt throw) — in that case
+  // the post-call read-back would surface a PRE-EXISTING older failed row and
+  // the 502 would misattribute its id to this attempt.
+  const preRow = await latestSentRow();
+
+  // Send via MCP sharing server — CAPTURE the result (a 0-relay send is a
+  // failure the client must see).
+  let toolResult;
+  const client = await sharingClientFactory();
+  try {
+    toolResult = await client.callTool({
+      name: "crow_send_message",
+      arguments: { contact: contactIdentifier, message: message.trim() },
+    });
+  } finally {
+    await client.close();
+  }
+
+  const resultText = (toolResult?.content || [])
+    .map((c) => c && c.text)
+    .filter(Boolean)
+    .join(" ");
+
   if (toolResult?.isError) {
     // Delivery failed (e.g. reached 0 relays). Do NOT report success. Include
-    // the failed row's id so the client can offer Retry on the exact row.
+    // the failed row's id so the client can offer Retry on the exact row —
+    // but only when the row was written by THIS attempt (failed status AND a
+    // different id than the pre-call read-back).
     const failedRow = await latestSentRow();
+    const wroteThisAttempt =
+      failedRow &&
+      failedRow.delivery_status === "failed" &&
+      Number(failedRow.id) !== Number(preRow?.id);
     return res.status(502).json({
       ok: false,
       error: resultText || "Message could not be delivered.",
-      id: failedRow && failedRow.delivery_status === "failed" ? Number(failedRow.id) : null,
+      id: wroteThisAttempt ? Number(failedRow.id) : null,
     });
   }
 
@@ -137,10 +150,12 @@ export async function handlePeerSend(req, res, { db, sharingClientFactory = make
   const retryOfRaw = req.body?.retry_of;
   if (typeof retryOfRaw === "string" ? /^\d+$/.test(retryOfRaw) : Number.isInteger(retryOfRaw)) {
     const retryOf = Number(retryOfRaw);
-    await db.execute({
-      sql: `DELETE FROM messages WHERE id = ? AND contact_id = ? AND direction = 'sent' AND delivery_status = 'failed'`,
-      args: [retryOf, contactId],
-    });
+    try {
+      await db.execute({
+        sql: `DELETE FROM messages WHERE id = ? AND contact_id = ? AND direction = 'sent' AND delivery_status = 'failed'`,
+        args: [retryOf, contactId],
+      });
+    } catch { /* best-effort cleanup (e.g. SQLITE_BUSY); never fail a successful send over this */ }
   }
 
   res.json({
