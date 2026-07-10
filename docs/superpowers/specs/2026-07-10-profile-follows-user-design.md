@@ -143,10 +143,24 @@ of the three profile keys, if a local override row exists for this instance:
   `syncManager.emitChange` directly), then run the heal, then
   `reemitSyncableSettingsOnce()`. The heal's `writeSetting` emit is then real, so
   correctness no longer depends on the two one-shot flags staying coupled.
-- **Gating (R1 MINOR-5):** the heal runs inside the same guarded block that owns
-  `syncManager` (i.e. only when instance-sync is actually initialized) — a
-  `--no-auth` companion gateway sharing the primary's DB must not race the flag
-  write or double-run the heal.
+- **Gating (R1 MINOR-5, corrected by R2 MAJOR-A):** gate the heal on
+  `!syncManager.feedsDisabled` — NOT on `syncManager` truthiness (the manager is
+  constructed unconditionally, so it is truthy even on a `--no-auth` companion
+  gateway sharing the primary's DB, which would run the heal and mark the flag,
+  making the primary skip its own) and NOT on `outFeeds.size` (a genuinely
+  peerless single-instance install still needs the *local* half of the heal — an
+  `outFeeds` backstop would strand its profile forever). Test: heal is a no-op
+  when `feedsDisabled` is true.
+- **Flag mechanics (R2 MINOR-B):** the `__profile_override_heal_v1` flag row is
+  written via raw `INSERT ... ON CONFLICT(key)` into `dashboard_settings` and read
+  via raw `SELECT` — mirroring `reemitSyncableSettingsOnce`
+  (instance-sync.js:521-524, 477-480) — and explicitly NOT via
+  `upsertSetting`/`writeSetting` (the non-allowlisted flag key would silently
+  downgrade to an overrides row and never read back as done).
+- **Crash ordering (R2 MINOR-C):** promote (`writeSetting` global) strictly BEFORE
+  `deleteLocalSetting`. Reversed, a crash between the two loses the value forever
+  (override gone, global never written, flag guard prevents retry). Promote-first
+  re-runs are idempotent (already-promoted keys have no override → skipped).
 - Fix-the-product rationale: a user who typed their name into the silently-broken
   UI gets it restored (and syncing, and in handshakes) at upgrade with no re-save.
 
@@ -202,7 +216,11 @@ disposition of the finding's "optionally dedupe" clause.
 `dashboard_settings` directly. Post-D1 the global row IS the value; user-level
 identity should not vary per instance, so ignoring per-instance overrides is the
 *correct* semantic, not an accident. Documented via a short comment at each read
-site.
+site, which must also state (R2 MINOR-D): per-instance overrides of the profile
+keys are **intentionally inert** — the generic scope route
+(POST /api/settings/scope) can create one and `getSettingScope` would then report
+"local" while behavior stays global; a future maintainer wiring a scope toggle for
+these keys must not ship that lie.
 
 ## 4. Tests (TDD; mutation-test every guard)
 
@@ -230,6 +248,9 @@ site.
 5c. D3/D4 ordering: `setSettingsSyncManager` is wired before the heal runs — a
    heal promotion with the manager wired emits a `dashboard_settings` change
    (asserts MAJOR-1's fix; reddens if the wiring moves back below the block).
+5d. D3 gating (R2 MAJOR-A): heal is a no-op (no promotion, no flag write) when
+   `feedsDisabled` is true — **mutation test**: relaxing the gate to `syncManager`
+   truthiness must redden this.
 6. End-to-end read path: after a UI-style save, `readLocalDisplayName` (boot.js)
    and the tools/contacts.js acceptor read return the saved, sanitized name
    (extends tests/handshake-display-name.test.js).
