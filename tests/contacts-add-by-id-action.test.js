@@ -54,3 +54,33 @@ test("add_by_id with a missing key is a safe no-op redirect (no tool call)", asy
     assert.equal(calls.length, 0);
   } finally { cleanup(); }
 });
+
+test("add_by_id surfaces a tool refusal instead of silently redirecting (F-UI-1/3 addendum)", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    // R1-I2: the real signature is handleContactAction(req, db, { sharingClientFactory } = {})
+    // (contacts/api-handlers.js:38) — pass the stub IN AN OPTIONS OBJECT or it is
+    // silently ignored and the test hits the real sharing runtime.
+    const stubFactory = async () => ({
+      callTool: async () => ({
+        isError: true,
+        content: [{ type: "text", text: "Failed to add contact: already exists with a different key" }],
+      }),
+      close: async () => {},
+    });
+    const req = { body: { action: "add_by_id", crow_id: "crow:peer1", secp256k1_pubkey: "02" + "a".repeat(64) } };
+    const result = await handleContactAction(req, db, { sharingClientFactory: stubFactory });
+    assert.equal(result.redirect, undefined);
+    assert.match(result.inviteError, /different key/);
+  } finally { cleanup(); }
+});
+
+test("add_by_id success still redirects", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    const calls = [];
+    const req = { body: { action: "add_by_id", crow_id: "crow:peer1", secp256k1_pubkey: "02" + "a".repeat(64) } };
+    const out = await handleContactAction(req, db, { sharingClientFactory: stubFactory(calls) });
+    assert.equal(out.redirect, "/dashboard/contacts?flash=peer_added");
+  } finally { cleanup(); }
+});

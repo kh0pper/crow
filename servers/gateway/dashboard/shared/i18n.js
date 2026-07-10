@@ -376,6 +376,7 @@ export const translations = {
   },
   "invite.shortCodeExpiry": { en: "Expires in about 10 minutes", es: "Caduca en unos 10 minutos" },
   "invite.shortCodeAcceptPlaceholder": { en: "Enter the 12-character code…", es: "Ingresa el código de 12 caracteres…" },
+  "invite.shortCodeAcceptExpiryHint": { en: "Codes expire about 10 minutes after they're created.", es: "Los códigos caducan unos 10 minutos después de crearse." },
   "invite.shortCodeAcceptBtn": { en: "Accept short code", es: "Aceptar código corto" },
   "contacts.verification": { en: "Verification", es: "Verificación" },
   "contacts.safetyNumber": { en: "Safety number", es: "Número de seguridad" },
