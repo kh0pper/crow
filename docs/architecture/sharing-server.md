@@ -209,6 +209,68 @@ The server registers **33 tools**, organized into nine modules under `servers/sh
 - Blocked contacts cannot re-invite (stored in blocklist)
 - Key rotation notifies all contacts of new keys
 
+#### Deleting a contact
+
+Deletion is a **hard delete**, and it is destructive: `messages.contact_id` is
+`NOT NULL REFERENCES contacts(id) ON DELETE CASCADE`, and foreign keys **are** enforced
+(`better-sqlite3` sets `foreign_keys=ON` on every connection), so removing a contact
+permanently removes the conversation with them, plus their shared items, group memberships and
+project memberships. The Contacts panel therefore gates the delete behind a confirmation
+interstitial that lists the exact counts and offers **Block** — which is reversible and
+non-destructive — as the alternative. Prefer Block for "stop hearing from this person"; Delete
+means "remove this entry from my address book."
+
+Deletion propagates to the user's other instances (contacts follow the user, Phase 3).
+
+**Tombstones.** `contact_tombstones` (crow_id, lamport_ts, deleted_at) makes a delete durable.
+Without one, a peer that was offline during the delete would emit an `update` on its next sync,
+and `_applyContact`'s upsert would resurrect the contact fleet-wide — a delete that resurrects
+is worse than no delete. The rule in `_applyContact` (design §D3.1):
+
+- A **live local row** proves a local path re-created the contact, so a coexisting tombstone is
+  stale and is cleared.
+- A **delete** writes a tombstone only when it is *authoritative* (no local row, or it wins
+  Lamport LWW). The destructive row removal keeps the `lamportTs > localTs` guard — a stale
+  delete must never wipe a live contact, because the cascade would take its DM history with it.
+- A standing tombstone **drops a concurrent `update`** (delete wins) and drops a stale `insert`
+  replay. Only an `insert` above the tombstone's lamport re-adds the contact, and it **applies
+  before it clears** (feeds lock per remote instance, so a concurrent reader must see either the
+  tombstone or the row, never neither).
+
+Because the applier can only tell a genuine re-add from a stale rename by the op,
+`upsertFullContact` emits `insert` from *every* outcome (merge/promote/create) when it clears a
+local tombstone. Without that, the ordinary re-pair path — which takes the promote branch and
+would emit `update` — would be dropped by every peer, diverging the fleet permanently.
+
+Tombstones are local state: never synced, never pruned (a retention window would reopen
+resurrection for any instance offline longer than the window). They are never written for
+`req:` ids, which never sync.
+
+**Replay hygiene.** `processed_control_events` records the `event.id` of every handled
+`invite_accepted`. The R5 retry loop republishes the byte-identical signed event for up to ~60h,
+so after a deletion a stale retry would otherwise silently re-add the contact. A recorded id
+skips the contact upsert but **still sends the `handshake_complete` ack**, which stops the
+peer's retry loop. This is keyed on the event id, never on wall clocks: `deleted_at` and
+`created_at` come from different machines with no NTP guarantee, and comparing them would
+silently refuse honest re-pairs from a slow-clocked peer. It also closes a pre-existing gap —
+plain invite codes carry no `inviteId`, so they previously had no replay protection at all.
+
+Deleting a contact does **not** block them. A later DM lands in the Requests inbox as a fresh
+`req:` row. Blocking is the tool for silencing someone.
+
+#### Display names in the handshake
+
+`invite_accepted` and `handshake_complete` each carry an optional `displayName`, taken from the
+sender's `profile_display_name`. Omitted entirely when unset — the receiver then falls back to
+the raw crowId, exactly as before. It is applied only over a placeholder name, so a remote name
+never overwrites one the user typed.
+
+The value is **remote-attacker-controlled** and renders in the dashboard, so every ingress
+(both handshake handlers *and* the instance-sync apply path — a signature proves same-key, not
+honest content) runs `sanitizeDisplayName()`: strips control characters and NUL, strips Unicode
+bidi overrides/isolates, collapses whitespace, rejects `crow:`/`req:` identity-string
+impersonation, and caps at 64 code points.
+
 ## Database Tables
 
 The sharing server adds these tables to the shared SQLite database:
@@ -216,6 +278,8 @@ The sharing server adds these tables to the shared SQLite database:
 | Table | Purpose |
 |---|---|
 | `contacts` | Peer identities, public keys, relay status, last seen |
+| `contact_tombstones` | Local, never-synced record of deleted contacts; makes a delete durable against resurrection by an offline peer |
+| `processed_control_events` | Handled control-event ids (e.g. `invite_accepted`) so a replayed retry cannot re-add a deleted contact |
 | `shared_items` | Tracking of sent/received shares with permissions; the `mode` column marks queued project clones (`mode='clone'`) so re-delivery rebuilds a fresh bundle |
 | `messages` | Local cache of Nostr messages with read status |
 | `relay_config` | Configured Nostr relays and peer relays |
