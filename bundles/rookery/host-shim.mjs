@@ -11,15 +11,19 @@
 // forwarding — it is structurally required here, not a fallback for a
 // Tailscale-only edge case.
 //
-// Origin-strip security posture (adapted from upstream, which warns that
-// stripping Origin "would disable its CSRF protection"): here that trade is
-// acceptable because (1) every request arrives through the session-gated
-// Crow gateway whose cookie is `SameSite=Lax` (dashboard/auth.js:476 —
-// cross-site POSTs don't carry it), and (2) the port binds 127.0.0.1 only.
+// Origin-strip security posture (deviation 4, root-origin serving — the crow
+// dashboard session does NOT gate this endpoint): the access boundary is the
+// 127.0.0.1 bind plus whatever serving layer the operator puts in front of
+// it. Upstream warns that stripping Origin "would disable its CSRF
+// protection" — and with ROOKERY_CORS_ORIGINS empty it does exactly that;
+// acceptable for localhost/tunnel use, where nothing but the operator's own
+// machine can reach the port. When serving at a shared origin (Tailscale
+// Serve HTTPS port, reverse proxy), operators SHOULD set
+// ROOKERY_CORS_ORIGINS to that origin — then Origin passes through unmodified
+// and the app's own CSRF whitelist is enforced against drive-by cross-site
+// requests from other pages in a browser that can reach that origin.
 // Residual exposure: any local process can hit 127.0.0.1:3061
-// unauthenticated (consistent with other crow bundles). When
-// ROOKERY_CORS_ORIGINS IS configured, Origin is passed through unmodified
-// and the app's own --cors whitelist enforces it, exactly as upstream does.
+// unauthenticated (consistent with other crow bundles).
 //
 // Usage: node host-shim.mjs [listenPort] [backendPort]
 // Defaults: listen 127.0.0.1:4097 -> backend 127.0.0.1:4096
