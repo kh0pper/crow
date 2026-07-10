@@ -56,6 +56,8 @@ scripts/bench/results/quality/*.dat
 servers/gateway/public/blog/
 bundles/.env.cuda
 bundles/*/.env
+bundles/*/.venv/
+bundles/*/uv.lock
 bundles/*/docker-compose.override.yml
 .claude/scheduled_tasks.lock
 # Manual backup snapshots (PRE-*.bak, *.bak-DATE, etc.)
