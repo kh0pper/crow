@@ -311,6 +311,12 @@ In `servers/gateway/dashboard/panels/messages/client.js`, inside the existing `_
 
 ```js
     if (params.get('connected') === '1') {
+      // COUPLING NOTE (R2-M2): this lives inside the window-level
+      // __msgOpenHookBound once-guard, which only re-arms on a full page load.
+      // It works for every accept because the accept forms are
+      // data-turbo="false" (Task 1) → the 303 lands as a real page load. If
+      // those forms are ever re-Turbo'd, the second accept's toast silently
+      // breaks — keep the two together.
       setTimeout(function () {
         try { if (window.crowToast) window.crowToast('${tJs("messages.connectedToast", lang)}'); } catch (e) {}
       }, 200);
@@ -610,7 +616,7 @@ test("handleDeliveryReceipt does NOT emit messages:changed (badge-blanking guard
 
 (Find the existing R5 receipt test file — grep `handleDeliveryReceipt` under `tests/` — and reuse its db/contact stubs verbatim.)
 
-R1-M4: `openAuthedStream` arms a session-recheck `setInterval` (`authed-stream.js:38-62`; `verifySession` fires only on the interval, so the handler is testable synchronously) — every stream test MUST invoke the captured `res` close handler (or otherwise clear the interval) at the end, or the leaked timer eventually calls `verifySession` against a real DB and the test runner hangs/flakes.
+R1-M4 + R2-I2: the sse-cap.test.js harness does NOT transfer — it drives `openStream` directly, while this route goes through `openAuthedStream`. Build a fake `res` satisfying `openStream`'s full surface (`headersSent`, `writeHead`, `flushHeaders`, `write`, `writableEnded`, `on`, `end` — see `streams/sse.js:36-94`) plus `req.dashboardSession`, and extract the route handler from the router factory. There are **two** leaked timers per stream: `openStream`'s 30s heartbeat (`sse.js:75`) AND `openAuthedStream`'s 5-min session recheck (`authed-stream.js:47`). Every stream test MUST fire the captured `res` `'close'` listeners at the end to clear BOTH, or the runner hangs/flakes (the recheck would eventually call `verifySession` against a real DB).
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -671,7 +677,13 @@ Also update the route's doc comment: badge-only is no longer true — describe t
 
 - [ ] **Step 4: Implement the boot.js emit**
 
-`servers/sharing/boot.js` — add the bus import if absent (check the file's imports; nostr.js uses `import { bus } from "../shared/event-bus.js";` — same relative path works from boot.js). In `handleDeliveryReceipt`, REPLACE the "No bus emit" comment block (lines 259-262) with:
+`servers/sharing/boot.js` — add the bus import (boot.js has none today). R2-I1: `servers/shared/event-bus.js` has ONLY a **default** export (`export default bus`, line 34) — `import { bus }` is an ESM load-time SyntaxError that takes down the whole sharing runtime via server.js. Use the same form nostr.js:27 uses:
+
+```js
+import bus from "../shared/event-bus.js";
+```
+
+In `handleDeliveryReceipt`, REPLACE the "No bus emit" comment block (lines 259-262) with:
 
 ```js
     // F-UI-6: nudge any open dashboard conversation to flip ✓→✓✓ live. This is
@@ -738,14 +750,17 @@ Create `tests/messages-peer-route.test.js` — drive the GET handler. The route 
 // change without a restart).
 let _myEd25519 = null;
 async function myEd25519Pubkey() {
-  if (_myEd25519 !== null) return _myEd25519;
+  // R2-M1: cache ON SUCCESS only — a transient load failure must not disable
+  // safety numbers for the rest of the process lifetime.
+  if (_myEd25519) return _myEd25519;
   try {
     const { loadOrCreateIdentity } = await import("../../sharing/identity.js");
-    _myEd25519 = loadOrCreateIdentity().ed25519Pubkey || "";
+    const ed = loadOrCreateIdentity().ed25519Pubkey || "";
+    if (ed) _myEd25519 = ed;
+    return ed;
   } catch {
-    _myEd25519 = "";
+    return "";
   }
-  return _myEd25519;
 }
 
 /**
@@ -890,8 +905,12 @@ test("failed bubbles get a Retry control (F-UI-7)", () => {
   assert.match(js, /retry_of/);
 });
 
-test("empty-conversation live arrival reloads the thread (F-UI-4 first-message case)", () => {
-  assert.match(js, /_messages\.length === 0.*loadPeerConversation|loadPeerConversation\(.*\/\* first message/s);
+test("empty-conversation live arrival APPENDS — it must NOT rebuild the chat UI (R2-C1 draft preservation)", () => {
+  // fetchNewPeerMessages handles the empty case by fetching WITHOUT afterId
+  // and appending; calling loadPeerConversation there would wipe the composer.
+  const fn = extractFunction(js, "fetchNewPeerMessages"); // brace-matching helper from message-delivery-render.test.js
+  assert.ok(!/loadPeerConversation/.test(fn), "empty branch must not reload the whole conversation");
+  assert.match(fn, /lastId \? '\?afterId=' \+ lastId : ''/);
 });
 ```
 
@@ -920,16 +939,16 @@ In `client.js`, add above `startPolling()`:
   // (F-UI-5).
   async function fetchNewPeerMessages() {
     if (!_activeItem || _activeItem.type !== 'peer') return;
-    if (_messages.length === 0) {
-      // First message in a fresh conversation: nothing to anchor afterId on —
-      // reload the thread (this was the walkthrough's exact repro).
-      try { await loadPeerConversation(_activeItem.id); } catch (e) {}
-      return;
-    }
-    var lastId = _messages[_messages.length - 1].id;
-    if (!lastId) return;
+    // Empty conversation (first message — the walkthrough's exact repro): fetch
+    // the initial window (no afterId) and APPEND into the already-rendered
+    // empty viewport. NEVER call loadPeerConversation here — it rebuilds the
+    // whole chat UI including the composer and would wipe an in-progress
+    // draft (R2-C1: accept lands the user in an empty conversation to type
+    // their first message; a nudge/poll must not eat it).
+    var lastId = _messages.length > 0 ? _messages[_messages.length - 1].id : 0;
+    if (_messages.length > 0 && !lastId) return;
     try {
-      var nr = await fetch('/api/messages/peer/' + encodeURIComponent(_activeItem.id) + '?afterId=' + lastId);
+      var nr = await fetch('/api/messages/peer/' + encodeURIComponent(_activeItem.id) + (lastId ? '?afterId=' + lastId : ''));
       var nd = await nr.json();
       if (!nd.messages || nd.messages.length === 0) return;
       var viewport = document.getElementById('msg-viewport');
@@ -1430,7 +1449,7 @@ The container browses `http://10.0.0.237:3471` / `:3472` (host LAN IP). Recipe: 
 3. **Accept invite** (B, paste A's code): assert redirect landed on `/dashboard/messages`, the new conversation is OPEN, toast text present. (F-UI-3)
 4. **Accept error** (B, paste garbage): assert visible error banner. (F-UI-1 error path)
 5. **Live DM** (A→B with B's conversation open): assert the bubble appears WITHOUT refresh within ~5s. (F-UI-4)
-6. **First-message case**: fresh pair, empty conversation open on B → A sends → bubble appears. (F-UI-4 edge)
+6. **First-message case + draft preservation**: fresh pair, empty conversation open on B, **type a draft into B's composer without sending** → A sends → assert the bubble appears AND the typed draft is still in `#msg-input` (R2-C1/Q1: the empty-branch fetch must never rebuild the composer). (F-UI-4 edge)
 7. **Send** (B): exactly ONE bubble for the sent message after 10s (poll overlap window). (F-UI-5)
 8. **Receipts**: sender bubble shows ✓ at send, flips ✓✓ when the receipt lands, legible size/color. (F-UI-6)
 9. **Safety number**: Info panel shows the grouped digits; compare A's and B's — MUST match. (F-UI-6)
@@ -1468,3 +1487,10 @@ Against real crow↔black-swan (the S10 manifest keeps that pairing for exactly 
 - **I3** (`_messages.push` before the dedup `continue` accumulates duplicate objects under racing fetches) → `_messages.some()` guard before push, DOM guard after.
 - **M2** (retry drops attachments/thread) → documented as deliberate consistency, not a gap. **M4** (stream tests must fire the close handler or leak the session-recheck interval) → noted in Task 4. **M5** (per-instance init-db) → fixed. **Q2** (SSE-through-Serve unverified) → post-deploy Step 5 item 1 requires a live DM through the Serve hostname. **Q3** (CSRF under --no-auth) → verified skipped (`csrf.js:80`), documented.
 - **M1** (string-match client tests are weak) → conceded as guards-of-last-resort; behavioral DOM-shim tests preferred where the harness executes functions; the CDP run is the binding behavioral evidence.
+
+**R2 (fresh-eyes adversarial review of the folded plan, Opus subagent, 2026-07-10): REVISE — 1 critical, 2 important, 2 minor. All folded:**
+- **C1** (the R1-era empty-conversation branch called `loadPeerConversation`, which rebuilds the composer and wipes an in-progress draft — squarely in F-UI-3's own happy path, and the poll-guard replacement made it fire every 5 min on an open empty conversation) → empty branch now fetches the initial window WITHOUT afterId and APPENDS into the already-rendered viewport; never rebuilds the chat UI. Extraction test inverted to forbid `loadPeerConversation` there; CDP item 6 now asserts draft survival (Q1).
+- **I1** (plan instructed `import { bus }` — event-bus.js is default-export-only; the named import is a load-time SyntaxError that takes down the sharing runtime via server.js) → corrected to `import bus from "../shared/event-bus.js"`.
+- **I2** (sse-cap.test.js harness doesn't transfer to `openAuthedStream`; TWO leaked timers per stream, not one) → Task 4 test note rewritten with the full fake-res surface + both intervals cleared via the close listeners.
+- **M1** (negative-caching `""` permanently disables safety numbers after one transient failure) → cache-on-success only. **M2** (connected-toast silently coupled to the forms staying `data-turbo="false"`) → coupling comment pinned in the code.
+- R2 explicitly verified as SOUND: the C2 restructure's dispatcher contract, crow-id resolution for both accept paths, afterId safety-number skip, the I3 double-guard dedup under both race orderings, Task 3's cross-connection read-back (shipping attachments precedent), CSP/EventSource compatibility, `el()` option keys, i18n key freshness, and Task 9's bounded-fallout claim.
