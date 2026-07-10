@@ -754,9 +754,14 @@ export function messagesClientJS(opts) {
       });
       // A 0-relay send returns a non-ok response (or {ok:false}); surface it on
       // the just-sent bubble instead of leaving a misleading success bubble.
+      // Success requires the server's EXPLICIT { ok: true } ack (Task 3 always
+      // sends it): a redirected HTML page (setup wizard on an unconfigured
+      // instance, login redirect on session expiry) comes back response.ok
+      // with a body that fails json() → body null — that is a FAILURE, not a
+      // silent fake success (found live via CDP).
       var body = null;
       try { body = await response.json(); } catch(_) { /* non-JSON body */ }
-      if (!response.ok || (body && body.ok === false)) {
+      if (!response.ok || !body || body.ok !== true) {
         // F-UI-7: stamp the failed row id so Retry targets the exact row.
         if (body && body.id) sentBubble.dataset.msgId = body.id;
         markBubbleFailed(sentBubble, body && body.error, { id: body && body.id, content: content });
@@ -1321,7 +1326,9 @@ export function messagesClientJS(opts) {
       });
       var body = null;
       try { body = await response.json(); } catch (_) {}
-      if (response.ok && body && body.ok !== false) {
+      // Same explicit-ack rule as sendPeerMessage: a redirected HTML response
+      // (body null) must re-arm Retry, never fake a delivered bubble.
+      if (response.ok && body && body.ok === true) {
         // Swap the failed bubble to a fresh sent state in place.
         bubble.classList.remove('msg-bubble-failed');
         var note = bubble.querySelector('.msg-bubble-failed-note'); if (note) note.remove();

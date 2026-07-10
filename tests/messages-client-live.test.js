@@ -91,6 +91,22 @@ test("retryFailedMessage sends retry_of as a string of digits and re-enters the 
   assert.match(fn, /\/api\/messages\/peer\/' \+ encodeURIComponent\(_activeItem\.id\) \+ '\/send'/);
 });
 
+test("send success requires an explicit ok:true ack — a redirected HTML response is a FAILURE (fake-success guard)", () => {
+  // Observed live via CDP: an unconfigured instance's setup wizard (or a
+  // login redirect on session expiry) redirects the send POST to an HTML
+  // page. fetch follows the redirect → response.ok TRUE, response.json()
+  // throws → body null. The old check (`body && body.ok === false`) treated
+  // that as SUCCESS with nothing persisted anywhere. Success now requires
+  // the server's explicit { ok: true } ack (Task 3's contract always sends
+  // it); body-null / HTML / ok:false all take the failure path.
+  const send = extractFunction(js, "sendPeerMessage");
+  assert.match(send, /!response\.ok \|\| !body \|\| body\.ok !== true/, "sendPeerMessage requires an explicit ok:true ack");
+  assert.ok(!/body && body\.ok === false/.test(send), "the loose ok===false check must be gone from sendPeerMessage");
+  const retry = extractFunction(js, "retryFailedMessage");
+  assert.match(retry, /response\.ok && body && body\.ok === true/, "retryFailedMessage requires an explicit ok:true ack");
+  assert.ok(!/body\.ok !== false/.test(retry), "the loose ok!==false check must be gone from retryFailedMessage");
+});
+
 test("a failed retry chains the NEXT Retry to the NEW failed row id (supersede-on-failure)", () => {
   // Server contract: a failed resend that wrote a new failed row returns 502
   // {ok:false, id: NEW row} and (with retry_of) deletes the OLD row. The
