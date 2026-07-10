@@ -14,6 +14,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleInviteAccepted } from "../servers/sharing/boot.js";
 import { recordShortInvite, consumeShortInvite } from "../servers/sharing/shortcode-ledger.js";
+import { wasProcessed, recordProcessedEvent } from "../servers/sharing/processed-events.js";
+import { writeTombstone, readTombstone } from "../servers/sharing/contact-delete.js";
 
 function freshDb() {
   const dir = mkdtempSync(join(tmpdir(), "invacc-"));
@@ -29,6 +31,26 @@ const stubMgrs = () => ({
   peerManager: { joinContact: async () => {} },
   nostrManager: { subscribeToContact: async () => {} },
 });
+
+// Like stubMgrs but with a spied sendControl so the handshake_complete ack can
+// be observed (D4 replay hygiene: a stale retry is skipped but STILL acked).
+const stubMgrsWithAck = () => {
+  const sendControlCalls = [];
+  return {
+    mgrs: {
+      syncManager: { initContact: async () => {} },
+      peerManager: { joinContact: async () => {} },
+      nostrManager: {
+        subscribeToContact: async () => {},
+        sendControl: async (contact, content) => {
+          sendControlCalls.push({ contact, content });
+          return { eventId: "ack-evt", relays: [] };
+        },
+      },
+    },
+    sendControlCalls,
+  };
+};
 
 const PK = "02" + "c".repeat(64);
 const PK_XONLY = "c".repeat(64);
@@ -156,5 +178,69 @@ test("I2: an unauthenticated (forged-sender) invite_accepted carrying a valid in
     // FIRST time must return "consumed" (not "replayed"), proving the forged
     // call never touched it.
     assert.equal(await consumeShortInvite(db, inviteId), "consumed");
+  } finally { cleanup(); }
+});
+
+// --- Task 11 (design §D4): clock-free replay hygiene ----------------------
+
+test("D4 replay hygiene: a recorded event.id is skipped (no resurrection) but STILL acks; a fresh event.id re-adds even with an OLDER created_at", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    const { mgrs, sendControlCalls } = stubMgrsWithAck();
+    const crowId = "crow:realpeer9";
+    // Two invite_accepted events: same crowId/payload, DIFFERENT event.id.
+    const ev1 = { id: "invacc-evt-A", created_at: 1000 };
+    const ev2 = { id: "invacc-evt-B", created_at: 500 }; // created_at OLDER than the tombstone
+
+    // #1 → contact created, id recorded.
+    await handleInviteAccepted(db, mgrs, payload, PK, ev1);
+    let rows = (await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [crowId] })).rows;
+    assert.equal(rows.length, 1, "first acceptance creates the contact");
+    assert.equal(await wasProcessed(db, ev1.id), true, "the handled event.id is recorded");
+
+    // Delete the contact and write a tombstone (what the deletion feature does).
+    await db.execute({ sql: "DELETE FROM contacts WHERE crow_id = ?", args: [crowId] });
+    await writeTombstone(db, crowId, 100);
+    const tomb = await readTombstone(db, crowId);
+    assert.ok(tomb, "tombstone written");
+
+    const acksBefore = sendControlCalls.length;
+
+    // Replay event #1 (same event.id) — the R5 retry loop re-publishing the
+    // EXACT stored signed event. Must NOT re-create the contact, but MUST ack.
+    await handleInviteAccepted(db, mgrs, payload, PK, ev1);
+    rows = (await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [crowId] })).rows;
+    assert.equal(rows.length, 0, "a stale replay must NOT resurrect the deleted contact");
+    assert.equal(sendControlCalls.length, acksBefore + 1, "the ack still fires on a recorded replay (stops the peer's 60h retry)");
+
+    // Fresh event #2 — a genuinely new acceptance. created_at is OLDER than the
+    // tombstone's deleted_at, and it is STILL accepted: pins §D4 against anyone
+    // reintroducing a created_at <= deleted_at clock comparison.
+    assert.ok(Number(ev2.created_at) < Number(tomb.deleted_at), "event #2 predates the tombstone (skew case)");
+    await handleInviteAccepted(db, mgrs, payload, PK, ev2);
+    rows = (await db.execute({ sql: "SELECT * FROM contacts WHERE crow_id = ?", args: [crowId] })).rows;
+    assert.equal(rows.length, 1, "a fresh acceptance re-adds the contact even with an older created_at");
+    assert.equal(await readTombstone(db, crowId), null, "the fresh re-add clears the tombstone (upsertFullContact, Task 7)");
+  } finally { cleanup(); }
+});
+
+test("recordProcessedEvent prunes rows older than 30 days and keeps newer ones", async () => {
+  const { db, cleanup } = freshDb();
+  try {
+    const nowSec = Math.floor(Date.now() / 1000);
+    await db.execute({
+      sql: "INSERT INTO processed_control_events (event_id, kind, seen_at) VALUES (?, 'invite_accepted', ?)",
+      args: ["ancient", nowSec - 31 * 86400],
+    });
+    await db.execute({
+      sql: "INSERT INTO processed_control_events (event_id, kind, seen_at) VALUES (?, 'invite_accepted', ?)",
+      args: ["recent", nowSec - 5 * 86400],
+    });
+    // A fresh insert triggers the opportunistic prune.
+    await recordProcessedEvent(db, "fresh", "invite_accepted");
+
+    assert.equal(await wasProcessed(db, "ancient"), false, "a row older than 30 days is pruned");
+    assert.equal(await wasProcessed(db, "recent"), true, "a row within 30 days is kept");
+    assert.equal(await wasProcessed(db, "fresh"), true, "the just-recorded row is present");
   } finally { cleanup(); }
 });
