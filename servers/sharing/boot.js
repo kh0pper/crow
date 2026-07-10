@@ -13,6 +13,7 @@
  */
 
 import { createNotification } from "../shared/notifications.js";
+import bus from "../shared/event-bus.js";
 import { ensureColumn } from "../db.js";
 import { normalizePubkey, findContactByPubkey } from "./pubkey-util.js";
 import {
@@ -256,10 +257,20 @@ export async function handleDeliveryReceipt(db, eventIds, senderPubkey) {
       args: [contact.id, ...ids],
     });
     await markDelivered(db, ids, contact.id);
-    // No bus emit: the messages:changed SSE consumer is badge-only and reads
-    // payload.unread — emitting here (without a recomputed unread) would blank
-    // the peer's unread badge, and it can't render ✓✓ anyway. ✓✓ shows on the
-    // sender's next thread reload (delivery_status is read on fetch).
+    // F-UI-6: nudge any open dashboard conversation to flip ✓→✓✓ live. This is
+    // a SEPARATE event from messages:changed — that consumer is badge-only and
+    // reads payload.unread (emitting it here would blank the peer's unread
+    // badge). Payload carries the LOCAL row ids the UPDATE just touched.
+    try {
+      const { rows } = await db.execute({
+        sql: `SELECT id FROM messages
+              WHERE direction = 'sent' AND contact_id = ? AND nostr_event_id IN (${placeholders})`,
+        args: [contact.id, ...ids],
+      });
+      if (rows.length > 0) {
+        bus.emit("messages:receipt", { contactId: Number(contact.id), ids: rows.map((r) => Number(r.id)) });
+      }
+    } catch { /* live-tick nudge is best-effort */ }
   } catch (err) {
     try { console.warn("[sharing] delivery_receipt handling failed:", err.message); } catch {}
   }
