@@ -116,7 +116,7 @@ export function renderContactList(contacts, groups, filters, lang, peerAdd = {})
   // Add/repair by Crow ID form (R4: recovery path for a half-completed handshake)
   const addByIdForm = `<details style="margin-bottom:1rem">
     <summary style="cursor:pointer;font-size:0.85rem;color:var(--crow-accent);font-weight:500">${t("contacts.addById", lang)}</summary>
-    <form method="POST" style="margin-top:0.75rem;padding:1rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px">
+    <form method="POST" data-turbo="false" style="margin-top:0.75rem;padding:1rem;background:var(--crow-bg-elevated);border:1px solid var(--crow-border);border-radius:8px">
       <input type="hidden" name="action" value="add_by_id">
       <p style="font-size:0.8rem;color:var(--crow-text-muted);margin:0 0 0.75rem">${t("contacts.addByIdHint", lang)}</p>
       ${formField(t("contacts.fieldCrowId", lang), "crow_id", { required: true, placeholder: "crow:abcd1234" })}
