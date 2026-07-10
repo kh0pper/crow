@@ -65,6 +65,30 @@ export async function mountMcpServers(app, deps) {
     console.warn(`[instance-sync] eagerInitPairedPeers at boot failed: ${err.message}`);
   }
 
+  // Scoped-settings sync: wire the registry's writeSetting to emitChange so
+  // operator edits on one instance propagate to paired peers. MUST happen
+  // BEFORE the heal/re-emit one-shots below (R1 MAJOR-1): the heal promotes
+  // via writeSetting, whose emit is a silent no-op — and whose promoted row
+  // never gets a lamport stamp — while the manager is unwired.
+  try {
+    const { setSettingsSyncManager } = await import("../dashboard/settings/registry.js");
+    setSettingsSyncManager(syncManager);
+  } catch {}
+
+  // Cluster B D3: one-shot heal — promote profile values stranded in
+  // dashboard_settings_overrides by the broken-era save_profile. Gated on
+  // !feedsDisabled: a --no-auth companion shares the primary's DB and must
+  // not run it or mark its flag (R2 MAJOR-A). Runs BEFORE the settings
+  // re-emit so a promoted value also rides this boot's reconciliation.
+  try {
+    if (syncManager && !syncManager.feedsDisabled) {
+      const { healProfileOverridesOnce } = await import("../dashboard/settings/profile-heal.js");
+      await healProfileOverridesOnce(syncManager.db, { feedsDisabled: syncManager.feedsDisabled });
+    }
+  } catch (err) {
+    console.warn(`[settings] healProfileOverridesOnce failed: ${err.message}`);
+  }
+
   // One-shot backfill: re-emit sync-allowlisted dashboard_settings so peers
   // whose pre-fix outFeed silently dropped entries can catch up. Guarded by
   // a flag row; idempotent on subsequent boots.
@@ -98,13 +122,6 @@ export async function mountMcpServers(app, deps) {
   } catch (err) {
     console.warn(`[instance-sync] backfillGroupsOnce failed: ${err.message}`);
   }
-
-  // Scoped-settings sync: wire the registry's writeSetting to emitChange so
-  // operator edits on one instance propagate to paired peers.
-  try {
-    const { setSettingsSyncManager } = await import("../dashboard/settings/registry.js");
-    setSettingsSyncManager(syncManager);
-  } catch {}
 
   // Bundle asset repair: when a bundle is marked installed but its ~/.crow/bundles/<id>/
   // directory is missing user-visible files (settings-section.js, panel/, manifest.json),
