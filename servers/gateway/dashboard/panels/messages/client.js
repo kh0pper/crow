@@ -146,13 +146,24 @@ export function messagesClientJS(opts) {
   if (!window.__msgOpenHookBound) {
     window.__msgOpenHookBound = true;
     var params = new URLSearchParams(window.location.search);
+    var fireOpen = function (fn) {
+      // A classic full-page load (the accept redirect) can run this script
+      // mid-parse; setTimeout(0) then fires before the panel DOM/script state
+      // is ready and the silent catch eats the failure (found via CDP — the
+      // conversation never opened). Wait for DOMContentLoaded when loading.
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function () { setTimeout(fn, 0); }, { once: true });
+      } else {
+        setTimeout(fn, 0);
+      }
+    };
     var openId = params.get('open');
     if (openId && /^\d+$/.test(openId)) {
-      setTimeout(function () { try { msgSelectItem('peer', parseInt(openId, 10)); } catch (e) {} }, 0);
+      fireOpen(function () { try { msgSelectItem('peer', parseInt(openId, 10)); } catch (e) {} });
     }
     var openRoom = params.get('openRoom');
     if (openRoom && /^\d+$/.test(openRoom)) {
-      setTimeout(function () { try { msgSelectRoom(parseInt(openRoom, 10)); } catch (e) {} }, 0);
+      fireOpen(function () { try { msgSelectRoom(parseInt(openRoom, 10)); } catch (e) {} });
     }
     if (params.get('connected') === '1') {
       // COUPLING NOTE (R2-M2): this lives inside the window-level
