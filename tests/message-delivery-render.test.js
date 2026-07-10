@@ -78,6 +78,33 @@ test("getPeerMessages includes delivery_status per message (sent + received)", a
   }
 });
 
+test("getPeerMessages afterId variant returns ascending new rows incl. delivery_status", async () => {
+  const calls = [];
+  const db = {
+    execute: async (query) => {
+      calls.push(query);
+      return {
+        rows: [
+          { id: 11, content: "first", direction: "received", delivery_status: null, attachments: null },
+          { id: 12, content: "second", direction: "sent", delivery_status: "relayed", attachments: null },
+        ],
+      };
+    },
+  };
+
+  const msgs = await getPeerMessages(db, 42, { afterId: 10, limit: 50 });
+
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].sql, /WHERE m\.contact_id = \? AND m\.id > \?/);
+  assert.match(calls[0].sql, /ORDER BY m\.id ASC/);
+  assert.match(calls[0].sql, /m\.delivery_status/);
+  assert.match(calls[0].sql, /c\.last_seen/);
+  assert.deepEqual(calls[0].args, [42, 10, 50]);
+
+  // NOT reversed for afterId — rows come back in the same (ascending) order.
+  assert.deepEqual(msgs.map((m) => m.id), [11, 12]);
+});
+
 // --- (b) RENDER: appendBubble surfaces delivery_status on reload ---
 
 // Grab a named `function name(...) { ... }` declaration out of the generated
