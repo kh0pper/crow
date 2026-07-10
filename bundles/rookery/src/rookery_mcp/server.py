@@ -77,7 +77,10 @@ def assemble_exp(
     return {
         "workspace": ws,
         "container_path": f"/workspaces/{workspace_name}",
-        "reviewer_url": "/proxy/rookery/",
+        # Root-origin serving (deviation 4): the operator's own URL when set,
+        # else the local bind the README's serving/tunnel options point at.
+        "reviewer_url": os.environ.get("ROOKERY_REVIEWER_URL")
+        or "http://127.0.0.1:3061/",
     }
 
 
