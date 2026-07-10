@@ -66,3 +66,84 @@ export async function clearTombstone(db, crowId) {
     await db.execute({ sql: `DELETE FROM contact_tombstones WHERE crow_id = ?`, args: [crowId] });
   } catch { /* never throw */ }
 }
+
+/**
+ * Cached lazy dynamic import of contact-sync.js. contact-sync.js STATICALLY
+ * imports this module (for writeTombstone), so a static import back here would
+ * be a cycle. Resolve it the way the repo already does (see the `_mgrMod` note
+ * atop contact-sync.js) — a cached lazy dynamic import. Do NOT simplify to a
+ * static import, and keep the tombstone primitives above import-free so
+ * contact-sync.js's static import of them stays acyclic.
+ */
+let _syncMod = null;
+async function loadSyncMod() {
+  if (!_syncMod) _syncMod = await import("./contact-sync.js");
+  return _syncMod;
+}
+
+/**
+ * Tear down a contact's live wiring BEFORE its row is removed (design §4.1).
+ * Each step is independently guarded — the `wireFullContact` convention
+ * (contact-promote.js:76). A partial `managers` object (e.g. missing peerManager
+ * in tests) must not throw. Load-bearing ordering: unwire runs before the DELETE
+ * so an in-flight `subscribeToContact` onevent INSERT against a deleted
+ * contact_id cannot raise FOREIGN KEY constraint failed.
+ * @param {object} managers { nostrManager?, syncManager?, peerManager? }
+ * @param {{id:number, crow_id:string}} row the contact being deleted
+ */
+export async function unwireContact(managers, row) {
+  const { nostrManager, syncManager, peerManager } = managers || {};
+  try { if (nostrManager) await nostrManager.unsubscribeFromContact(row.crow_id); } catch { /* guarded */ }
+  try { if (syncManager) await syncManager.closeContactFeeds(row.id); } catch { /* guarded */ }
+  try { if (peerManager) await peerManager.leaveContact(row.crow_id); } catch { /* guarded */ }
+}
+
+/**
+ * Read-only blast-radius counts for the delete confirmation (design §2.1, §4.1).
+ * Each count is independently guarded: a missing table on an older DB yields 0
+ * for that key rather than throwing. `projectMemberships` counts the real
+ * `project_members` table (the design's `project_space_members` is a prose
+ * misnomer — that table does not exist; its columns match `project_members`).
+ * @param {object} db async db client
+ * @param {number} contactId
+ * @returns {Promise<{messages:number, sharedItems:number, groups:number, projectsOwned:number, projectMemberships:number}>}
+ */
+export async function deleteContactCascadePreview(db, contactId) {
+  const count = async (sql) => {
+    try {
+      const { rows } = await db.execute({ sql, args: [contactId] });
+      return Number(rows?.[0]?.n ?? 0);
+    } catch {
+      return 0;
+    }
+  };
+  return {
+    messages: await count("SELECT COUNT(*) AS n FROM messages WHERE contact_id = ?"),
+    sharedItems: await count("SELECT COUNT(*) AS n FROM shared_items WHERE contact_id = ?"),
+    groups: await count("SELECT COUNT(*) AS n FROM contact_group_members WHERE contact_id = ?"),
+    projectsOwned: await count("SELECT COUNT(*) AS n FROM project_spaces WHERE owner_contact_id = ?"),
+    projectMemberships: await count("SELECT COUNT(*) AS n FROM project_members WHERE contact_id = ?"),
+  };
+}
+
+/**
+ * Delete a contact locally and durably (design §4.1). Order is LOAD-BEARING:
+ *   1. refuse `origin='local-bot'` (this instance recreates those at boot).
+ *   2. unwireContact — BEFORE the row is removed (see its note).
+ *   3. DELETE FROM contacts — FK ON DELETE CASCADE destroys the DM history.
+ *   4. emitContactDelete — broadcasts the delete AND writes the local tombstone
+ *      (the single home for the originating tombstone write; do NOT write it here).
+ * @param {object} db async db client
+ * @param {object} managers { nostrManager?, syncManager?, peerManager? }
+ * @param {{id:number, crow_id:string, origin?:string, lamport_ts?:number}} row
+ * @returns {Promise<{ok:true} | {ok:false, reason:string}>}
+ */
+export async function deleteContactLocal(db, managers, row) {
+  if (!row || row.id == null) return { ok: false, reason: "no-row" };
+  if (row.origin === "local-bot") return { ok: false, reason: "local-bot" };
+  await unwireContact(managers, row);
+  await db.execute({ sql: `DELETE FROM contacts WHERE id = ?`, args: [row.id] });
+  const sync = await loadSyncMod();
+  await sync.emitContactDelete(db, row.crow_id, row.lamport_ts);
+  return { ok: true };
+}
