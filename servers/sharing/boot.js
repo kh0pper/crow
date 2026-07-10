@@ -23,6 +23,7 @@ import {
 import { upsertFullContact } from "./contact-promote.js";
 import { markDelivered, DELIVERY_RECEIPT_SUBTYPE, HANDSHAKE_COMPLETE_SUBTYPE, buildHandshakeComplete } from "./retry-queue.js";
 import { setReceiveWired } from "./receive-health.js";
+import { wasProcessed, recordProcessedEvent } from "./processed-events.js";
 
 /**
  * L6 receive-path fix — turn a decrypted DM from an unknown sender into a
@@ -157,6 +158,17 @@ export async function handleInviteAccepted(db, managers, payload, senderPubkey, 
     // stranger could forge an invite_accepted to promote/hijack a gated contact.
     if (normalizePubkey(payload.secp256k1Pub) !== normalizePubkey(senderPubkey)) return;
 
+    // D4 (design §D4): clock-free replay hygiene. R5's retry loop re-publishes
+    // the EXACT stored signed event for ~60h, so a stale retry arriving AFTER
+    // the user deleted this contact carries the same event.id. Skip the upsert
+    // (a deleted contact must not resurrect itself) but STILL ack — the ack
+    // stops the peer's 60h retry loop instead of letting it hammer. Mirrors the
+    // "replayed" short-code verdict below, which also acks with no contact row.
+    if (event?.id && (await wasProcessed(db, event.id))) {
+      await ackHandshake(managers?.nostrManager, senderPubkey, event);
+      return;
+    }
+
     // P2/C2 single-use gate (runs ONLY after the R4 auth check above, so an
     // unauthenticated forged invite_accepted cannot burn the token — "first
     // AUTHENTICATED wins", spec §PR2.4). A short-code acceptance echoes the
@@ -189,6 +201,9 @@ export async function handleInviteAccepted(db, managers, payload, senderPubkey, 
       secp256k1Pub: payload.secp256k1Pub,
       displayName: payload.displayName,
     });
+    // D4: record the handled event.id AFTER a successful upsert so a stale
+    // ~60h retry of this same event cannot re-create a since-deleted contact.
+    if (event?.id) await recordProcessedEvent(db, event.id, "invite_accepted");
     await ackHandshake(managers?.nostrManager, senderPubkey, event);
   } catch (err) {
     try { console.warn("[sharing] invite_accepted promotion failed:", err.message); } catch {}
