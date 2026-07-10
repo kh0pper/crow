@@ -35,10 +35,11 @@ import net from "node:net";
 const LISTEN = { host: process.env.SHIM_LISTEN_HOST || "127.0.0.1", port: Number(process.argv[2] ?? 4097) };
 const BACKEND = { host: "127.0.0.1", port: Number(process.argv[3] ?? 4096) };
 const BACKEND_HOST_HEADER = `${BACKEND.host}:${BACKEND.port}`;
-// When no CORS origins are configured for the app (ROOKERY_CORS_ORIGINS empty),
-// strip Origin too: the Crow gateway session-gates every request, so the app's
-// own origin whitelist adds friction without adding a boundary. When origins
-// ARE configured, pass Origin through and let the app enforce them.
+// When no CORS origins are configured (ROOKERY_CORS_ORIGINS empty), strip
+// Origin too — see the security posture in this file's header comment
+// (deviation 4: the serving layer in front of 127.0.0.1:3061 is the access
+// boundary; set ROOKERY_CORS_ORIGINS when serving beyond localhost). When
+// origins ARE configured, pass Origin through and let the app enforce them.
 const STRIP_ORIGIN = !(process.env.ROOKERY_CORS_ORIGINS || "").trim();
 
 // Besides Host, we also strip Sec-Fetch-Site: link-click navigations arrive

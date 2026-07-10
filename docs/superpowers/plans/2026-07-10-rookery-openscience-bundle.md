@@ -921,7 +921,7 @@ curl -sm5 -o /dev/null -w 'ui: %{http_code}\n' http://127.0.0.1:3061/
 docker compose down && rm .env
 rm -rf ~/.crow/data/rookery/workspaces/smoke-it
 ```
-Expected: 15 passed; assembly exit 0; `docker compose exec` lists the report + manifest inside the container; `ui: 200`.
+Expected: 17 passed; assembly exit 0; `docker compose exec` lists the report + manifest inside the container; `ui: 200`.
 
 - [ ] **Step 2: Bundle README**
 
