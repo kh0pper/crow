@@ -235,20 +235,40 @@ async function resolveAcceptedContactId(db, ...texts) {
 }
 ```
 
-Then change the two success returns:
+Then change the two success returns. **SCOPE WARNING (R1-C2):** in the CURRENT code, `code` and `result` are declared INSIDE the `try` blocks (`api-handlers.js:128,130` and `:174`), but the success `return` sits AFTER the try/catch — they are **out of scope** there. You MUST hoist the declarations above the `try` and assign inside it, keeping `extractInviteCode()` itself inside the `try` (it can throw on malformed input):
 
-`accept_invite` (line 146) — replace `return res.redirectAfterPost("/dashboard/messages");` with:
+`accept_invite` — restructure to:
 
 ```js
+  if (action === "accept_invite" && req.body.invite_code) {
+    let code;
+    let result;
+    try {
+      code = extractInviteCode(req.body.invite_code);
+      const client = await sharingClientFactory();
+      try {
+        result = await client.callTool({
+          name: "crow_accept_invite",
+          arguments: { invite_code: code },
+        });
+      } finally { try { await client.close?.(); } catch {} }
+      if (result?.isError) {
+        req._inviteError = result.content?.[0]?.text || "Invite could not be accepted.";
+        return false; // re-render with the error banner
+      }
+    } catch (err) {
+      console.error("[messages] Failed to accept invite"); // never echo the code
+      req._inviteError = err.message;
+      return false;
+    }
     const openId = await resolveAcceptedContactId(db, code, result?.content?.[0]?.text);
     return res.redirectAfterPost(
       "/dashboard/messages?connected=1" + (openId ? `&open=${openId}` : ""),
     );
+  }
 ```
 
-(the `code` variable from `extractInviteCode` is in scope; keep the error paths byte-identical.)
-
-`accept_short_invite` (line 190) — replace `return res.redirectAfterPost("/dashboard/messages");` with:
+`accept_short_invite` — same restructure: `let result;` above its `try`, assignment inside, error paths byte-identical, then:
 
 ```js
     const openId = await resolveAcceptedContactId(db, result?.content?.[0]?.text);
@@ -256,8 +276,6 @@ Then change the two success returns:
       "/dashboard/messages?connected=1" + (openId ? `&open=${openId}` : ""),
     );
 ```
-
-(`result` must be hoisted out of the inner `try` if not already in scope at the return — it is, per the current code shape.)
 
 - [ ] **Step 4: Contacts handlers + flash banner**
 
@@ -592,6 +610,8 @@ test("handleDeliveryReceipt does NOT emit messages:changed (badge-blanking guard
 
 (Find the existing R5 receipt test file — grep `handleDeliveryReceipt` under `tests/` — and reuse its db/contact stubs verbatim.)
 
+R1-M4: `openAuthedStream` arms a session-recheck `setInterval` (`authed-stream.js:38-62`; `verifySession` fires only on the interval, so the handler is testable synchronously) — every stream test MUST invoke the captured `res` close handler (or otherwise clear the interval) at the end, or the leaked timer eventually calls `verifySession` against a real DB and the test runner hangs/flakes.
+
 - [ ] **Step 2: Run to verify failure**
 
 Run: `node --test tests/messages-stream-events.test.js`
@@ -712,6 +732,22 @@ test("getPeerMessages afterId variant returns ascending new rows incl. delivery_
 Create `tests/messages-peer-route.test.js` — drive the GET handler. The route builds its own `createDbClient`, so test the extracted pieces instead: import `getPeerMessages` for query shape, and test safety-number attachment via a small exported helper. To keep the route testable, extract in `peer-messages.js`:
 
 ```js
+// R1-I1: loadOrCreateIdentity() does a sync disk read + full keypair
+// re-derivation (identity.js:119-133) — far too heavy for the per-message
+// afterId hot path. Cache my ed25519 pubkey once per process (it cannot
+// change without a restart).
+let _myEd25519 = null;
+async function myEd25519Pubkey() {
+  if (_myEd25519 !== null) return _myEd25519;
+  try {
+    const { loadOrCreateIdentity } = await import("../../sharing/identity.js");
+    _myEd25519 = loadOrCreateIdentity().ed25519Pubkey || "";
+  } catch {
+    _myEd25519 = "";
+  }
+  return _myEd25519;
+}
+
 /**
  * F-UI-6: attach the symmetric safety number to the contact payload so the
  * Messages Info panel can show the SAME trust string the Contacts detail
@@ -721,9 +757,9 @@ Create `tests/messages-peer-route.test.js` — drive the GET handler. The route 
 export async function withSafetyNumber(contact) {
   if (!contact || !contact.ed25519_pubkey) return contact ? { ...contact, safety_number: null } : null;
   try {
-    const { loadOrCreateIdentity, computeSafetyNumber } = await import("../../sharing/identity.js");
-    const myEd = loadOrCreateIdentity().ed25519Pubkey || "";
+    const myEd = await myEd25519Pubkey();
     if (!myEd) return { ...contact, safety_number: null };
+    const { computeSafetyNumber } = await import("../../sharing/identity.js");
     return { ...contact, safety_number: computeSafetyNumber(myEd, contact.ed25519_pubkey) };
   } catch {
     return { ...contact, safety_number: null };
@@ -795,7 +831,10 @@ export async function getPeerMessages(db, contactId, { limit = 50, offset = 0, a
       });
 
       res.json({
-        contact: await withSafetyNumber(contactRows[0] || null),
+        // R1-I1: compute the safety number only on the initial load — the
+        // afterId incremental fetches (SSE nudge / poll) don't render the Info
+        // panel and must stay light.
+        contact: afterId > 0 ? (contactRows[0] || null) : await withSafetyNumber(contactRows[0] || null),
         messages,
       });
 ```
@@ -897,6 +936,13 @@ In `client.js`, add above `startPolling()`:
       if (!viewport) return;
       for (var j = 0; j < nd.messages.length; j++) {
         var m = nd.messages[j];
+        // R1-I3: two guards, in this order. (1) _messages guard: concurrent
+        // fetches (nudge racing poll) both read the same lastId — skip a row
+        // another fetch already accounted for, WITHOUT pushing a duplicate
+        // object (thread-reply lookups scan _messages). (2) DOM guard: the
+        // optimistic send path may have stamped the bubble before its
+        // _messages push lands — account for the row but don't re-render.
+        if (m.id && _messages.some(function (x) { return x.id === m.id; })) continue;
         _messages.push(m);
         if (m.id && viewport.querySelector('.msg-bubble[data-msg-id="' + m.id + '"]')) continue; // already rendered
         appendBubble(viewport, m);
@@ -1041,6 +1087,10 @@ Replace `markBubbleFailed` (lines 1193-1210):
 
   // Re-enter the send path for a failed message (F-UI-7). retry_of tells the
   // server to delete the old failed row once the resend lands.
+  // NOTE (R1-M2, deliberate): retry re-sends TEXT only. This is consistent
+  // with current behavior — failed sends never persist attachments
+  // (peer-messages.js stores them only on success) and the send path never
+  // transmits thread_id — so there is nothing to lose. Do not "fix" this here.
   async function retryFailedMessage(bubble, content, failedId) {
     if (!_activeItem || _activeItem.type !== 'peer') return;
     var btn = bubble.querySelector('.msg-retry-btn');
@@ -1246,7 +1296,10 @@ Extend `tests/contacts-add-by-id-action.test.js` (it drives `handleContactAction
 ```js
 test("add_by_id surfaces a tool refusal instead of silently redirecting (F-UI-1/3 addendum)", async () => {
   // sharingClientFactory stub returning isError:true, text "Failed to add contact: already exists with a different key"
-  const result = await handleContactAction(req, db, stubFactory);
+  // R1-I2: the real signature is handleContactAction(req, db, { sharingClientFactory } = {})
+  // (contacts/api-handlers.js:38) — pass the stub IN AN OPTIONS OBJECT or it is
+  // silently ignored and the test hits the real sharing runtime.
+  const result = await handleContactAction(req, db, { sharingClientFactory: stubFactory });
   assert.equal(result.redirect, undefined);
   assert.match(result.inviteError, /different key/);
 });
@@ -1358,12 +1411,13 @@ Expected: normal boot lines, no SyntaxError/ReferenceError.
 
 ```bash
 mkdir -p "$CLAUDE_JOB_DIR/tmp/ca-a" "$CLAUDE_JOB_DIR/tmp/ca-b"
-node scripts/init-db.js  # with CROW_DATA_DIR set per instance, if boot doesn't self-init
+CROW_DATA_DIR="$CLAUDE_JOB_DIR/tmp/ca-a" node scripts/init-db.js
+CROW_DATA_DIR="$CLAUDE_JOB_DIR/tmp/ca-b" node scripts/init-db.js
 CROW_DATA_DIR="$CLAUDE_JOB_DIR/tmp/ca-a" PORT=3471 node servers/gateway/index.js --no-auth &
 CROW_DATA_DIR="$CLAUDE_JOB_DIR/tmp/ca-b" PORT=3472 node servers/gateway/index.js --no-auth &
 ```
 
-(`PORT` is confirmed — `servers/gateway/index.js:81` reads `PORT || CROW_GATEWAY_PORT`; `CROW_DATA_DIR` is the same var `freshLibsql()` uses for init-db. Fresh data dirs mint fresh identities. `--no-auth` skips login and — by design since PR #142/#143 — skips instance-sync feed init, which is what we want for scratch instances. Confirm `/health` 200 on both before driving the browser.)
+(`PORT` is confirmed — `servers/gateway/index.js:81` reads `PORT || CROW_GATEWAY_PORT`; `CROW_DATA_DIR` is the same var `freshLibsql()` uses for init-db. Fresh data dirs mint fresh identities. `--no-auth` skips login and — by design since PR #142/#143 — skips instance-sync feed init, which is what we want for scratch instances. CSRF (R1-Q3, verified): under `--no-auth` there is no `crow_session` cookie, and `csrfMiddleware` skips validation without one (`dashboard/shared/csrf.js:80`) — the classic form POSTs will not 403. Confirm `/health` 200 on both before driving the browser.)
 
 - [ ] **Step 2: Drive the crow-browser container over CDP**
 
@@ -1380,13 +1434,19 @@ The container browses `http://10.0.0.237:3471` / `:3472` (host LAN IP). Recipe: 
 7. **Send** (B): exactly ONE bubble for the sent message after 10s (poll overlap window). (F-UI-5)
 8. **Receipts**: sender bubble shows ✓ at send, flips ✓✓ when the receipt lands, legible size/color. (F-UI-6)
 9. **Safety number**: Info panel shows the grouped digits; compare A's and B's — MUST match. (F-UI-6)
-10. **Failed send + Retry**: point B's relays at localhost (`CROW_NOSTR_RELAYS=wss://127.0.0.1:9` env or the relay-config mechanism — check `getConfiguredRelays` for the override path), send → red failed note + Retry button; restore relays; click Retry → bubble swaps to ✓, old failed row gone from DB. (F-UI-7)
+10. **Retry UI (seeded)**: R1-C1 — there is NO env/config way to force a 0-relay failure on a scratch gateway (`CROW_NOSTR_RELAYS` does not exist; `getConfiguredRelays()` always merges `DEFAULT_RELAYS` back in as a floor, `nostr.js:722-741`; host-level /etc/hosts or firewall tricks on crow would hit the PROD gateway). So pre-merge: **seed a failed row directly in scratch B's DB** (`INSERT INTO messages (contact_id, content, direction, delivery_status, created_at) VALUES (?, 'seeded-fail', 'sent', 'failed', datetime('now'))`), reload the conversation in the browser → assert the red failed note + Retry button render (the RELOAD path); click **Retry** (relays are live) → bubble swaps to ✓, the seeded failed row is GONE from the DB (assert by id). The fresh-send-failure path itself is covered by the route unit tests (Task 3, mutation-tested) pre-merge, and by the post-deploy black-swan check below. (F-UI-7)
 11. **add_by_id refusal** (B): submit a wrong key for an existing contact → visible error, journal line in gateway stderr. (addendum)
 12. **Short-code expiry hint** visible near the entry field. (addendum)
 
 - [ ] **Step 4: Evidence + teardown**
 
-Kill the scratch gateways; copy screenshots + assertion JSONL to `~/.crow/p4/cluster-a-evidence/`; summarize per-item PASS/FAIL in the PR body. Post-deploy, re-verify items 1-5 against real crow↔black-swan (the S10 manifest keeps that pairing for exactly this).
+Kill the scratch gateways; copy screenshots + assertion JSONL to `~/.crow/p4/cluster-a-evidence/`; summarize per-item PASS/FAIL in the PR body.
+
+- [ ] **Step 5: Post-deploy re-verification (after merge + fleet deploy)**
+
+Against real crow↔black-swan (the S10 manifest keeps that pairing for exactly this):
+1. Items 1-5 **through the Tailscale Serve HTTPS hostname** (`https://crow.dachshund-chromatic.ts.net:8444` in the crow-browser) — this is the only place the SSE-through-Serve question (spec F-UI-4 note; R1-Q2) is actually answerable: a live DM from black-swan must appear in crow's open conversation without refresh.
+2. **Fresh-send failure on black-swan** (the proven S5.2 recipe): redirect the 4 relay hostnames to 127.0.0.1 in black-swan's `/etc/hosts`, `ss -K` the relay sockets, **arm an out-of-process deadman that restores /etc/hosts + restarts the gateway** (systemd-run --on-active=600, per the global unattended-window rule), send a DM in the UI → red failed note + **Retry** button on a REAL fresh failure; restore /etc/hosts; wait for relay self-heal (~45s); click Retry → success. Disarm the deadman.
 
 ---
 
@@ -1396,4 +1456,15 @@ Kill the scratch gateways; copy screenshots + assertion JSONL to `~/.crow/p4/clu
 
 ## Out of scope (do not touch)
 
-`shouldEnqueue` semantics; room/group send paths; `<turbo-stream-source>` element (badges keep working through it — a second consumer EventSource is additive); blocked-contact subscription teardown (Cluster C); relaysConnected liveness (Cluster D); profile-name sync (Cluster B).
+`shouldEnqueue` semantics; room/group send paths; `<turbo-stream-source>` element (badges keep working through it — a second consumer EventSource is additive); blocked-contact subscription teardown (Cluster C); relaysConnected liveness (Cluster D); profile-name sync (Cluster B); the ASYNC inviter-side replay-reject surfacing ("waiting for peer to confirm" indicator — R1-Q1: the split is deliberate; the synchronous accept-error banner is covered via Task 1's un-Turbo'd re-render).
+
+## Review
+
+**R1 (adversarial staff-engineer review, Opus subagent, 2026-07-10): REVISE — 2 critical, 3 important, 5 minor, 3 questions. All folded:**
+- **C1** (fabricated `CROW_NOSTR_RELAYS` env + `DEFAULT_RELAYS` floor made the F-UI-7 CDP recipe impossible) → Task 10 item 10 rewritten: pre-merge seeded-failed-row Retry UI check + post-deploy black-swan fresh-failure via the proven S5.2 /etc/hosts recipe with an out-of-process deadman (new Step 5).
+- **C2** (`code`/`result` out of scope at the accept success returns — the plan's own reassurance was wrong) → Task 2 Step 3 rewritten with the full hoisted restructure.
+- **I1** (`loadOrCreateIdentity()` sync disk read + keypair derivation per GET, incl. the afterId hot path) → module-level pubkey cache + safety number computed only on initial (non-afterId) loads.
+- **I2** (Task 8 stub passed positionally would silently hit the real sharing runtime) → options-object form pinned in the test skeleton.
+- **I3** (`_messages.push` before the dedup `continue` accumulates duplicate objects under racing fetches) → `_messages.some()` guard before push, DOM guard after.
+- **M2** (retry drops attachments/thread) → documented as deliberate consistency, not a gap. **M4** (stream tests must fire the close handler or leak the session-recheck interval) → noted in Task 4. **M5** (per-instance init-db) → fixed. **Q2** (SSE-through-Serve unverified) → post-deploy Step 5 item 1 requires a live DM through the Serve hostname. **Q3** (CSRF under --no-auth) → verified skipped (`csrf.js:80`), documented.
+- **M1** (string-match client tests are weak) → conceded as guards-of-last-resort; behavioral DOM-shim tests preferred where the harness executes functions; the CDP run is the binding behavioral evidence.
