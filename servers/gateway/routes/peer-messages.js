@@ -151,6 +151,27 @@ export async function handlePeerSend(req, res, { db, sharingClientFactory = make
       failedRow &&
       failedRow.delivery_status === "failed" &&
       Number(failedRow.id) !== Number(preRow?.id);
+    // Supersede-on-failure (F-UI-7 follow-up): when THIS attempt wrote a new
+    // failed row AND the client named the old failed row it was retrying,
+    // delete the superseded row. The new failed row retains the content, so
+    // nothing is lost — and repeated Retry clicks during a relay outage stop
+    // accumulating orphan failed rows. Guarded by wroteThisAttempt: an error
+    // that wrote NO row (blocked contact, pre-write throw) must leave the old
+    // failed row alone — it is still the only copy of the content. Same
+    // guarded delete predicate as the success path. (retry_of can never name
+    // the row THIS attempt wrote: the client can't know that id before this
+    // response, so no self-collision guard is needed.)
+    if (wroteThisAttempt) {
+      const failRetryRaw = req.body?.retry_of;
+      if (typeof failRetryRaw === "string" ? /^\d+$/.test(failRetryRaw) : Number.isInteger(failRetryRaw)) {
+        try {
+          await db.execute({
+            sql: `DELETE FROM messages WHERE id = ? AND contact_id = ? AND direction = 'sent' AND delivery_status = 'failed'`,
+            args: [Number(failRetryRaw), contactId],
+          });
+        } catch { /* best-effort cleanup; never mask the 502 over this */ }
+      }
+    }
     return res.status(502).json({
       ok: false,
       error: resultText || "Message could not be delivered.",

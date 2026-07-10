@@ -305,7 +305,7 @@ test("retry_of does NOT delete a received row", async () => {
   } finally { cleanup(); }
 });
 
-test("retry_of is IGNORED when the send itself fails", async () => {
+test("retry_of is IGNORED when the tool fails WITHOUT writing a row (no supersession possible)", async () => {
   const { db, cleanup } = freshLibsql();
   try {
     const contactId = await mkContact(db, { crowId: "crow:retryignoredfail", name: "R" });
@@ -315,15 +315,58 @@ test("retry_of is IGNORED when the send itself fails", async () => {
       args: [contactId],
     });
     const failedId = Number(seed.lastInsertRowid);
+    // Stub errors WITHOUT inserting a row (blocked contact / pre-write throw):
+    // no new failed row means the old one is NOT superseded and must survive —
+    // deleting it here would lose the only copy of the content (this is the
+    // mutation guard on the wroteThisAttempt condition of the failure-path
+    // delete: drop that condition and this test reddens).
+    const sharingClientFactory = async () => ({
+      callTool: async () => ({ isError: true, content: [{ type: "text", text: "contact is blocked" }] }),
+      close: async () => {},
+    });
     const res = fakeJsonRes();
+    await handlePeerSend(
+      { params: { contactId: String(contactId) }, body: { message: "hi", retry_of: String(failedId) } },
+      res,
+      { db, sharingClientFactory },
+    );
+    assert.equal(res.body.ok, false);
+    assert.equal(res.body.id, null, "no row written this attempt — id must be null");
+    const { rows } = await db.execute({ sql: "SELECT id FROM messages WHERE id = ?", args: [failedId] });
+    assert.equal(rows.length, 1, "seeded failed row survives — nothing superseded it");
+  } finally { cleanup(); }
+});
+
+test("supersede-on-failure: a failed retry that wrote a NEW failed row deletes the OLD one and returns the new id", async () => {
+  const { db, cleanup } = freshLibsql();
+  try {
+    const contactId = await mkContact(db, { crowId: "crow:retrysupersede", name: "R" });
+    const seed = await db.execute({
+      sql: `INSERT INTO messages (contact_id, content, direction, delivery_status, created_at)
+            VALUES (?, 'hi', 'sent', 'failed', datetime('now'))`,
+      args: [contactId],
+    });
+    const failedId = Number(seed.lastInsertRowid);
+    const res = fakeJsonRes();
+    // fail:true stub DOES insert a fresh failed row (mimicking sendMessage's
+    // 0-relay write) — the new row retains the content, so the superseded old
+    // failed row is deleted to prevent orphan accumulation across repeated
+    // retries during a relay outage.
     await handlePeerSend(
       { params: { contactId: String(contactId) }, body: { message: "hi", retry_of: String(failedId) } },
       res,
       { db, sharingClientFactory: stubSendFactory(db, contactId, { fail: true }) },
     );
+    assert.equal(res.statusCode, 502);
     assert.equal(res.body.ok, false);
-    const { rows } = await db.execute({ sql: "SELECT id FROM messages WHERE id = ?", args: [failedId] });
-    assert.equal(rows.length, 1, "seeded failed row survives — retry_of ignored on a failed send");
+    const { rows: oldRows } = await db.execute({ sql: "SELECT id FROM messages WHERE id = ?", args: [failedId] });
+    assert.equal(oldRows.length, 0, "old failed row deleted — superseded by this attempt's new failed row");
+    const { rows: newRows } = await db.execute({
+      sql: `SELECT id FROM messages WHERE contact_id = ? AND direction = 'sent' AND delivery_status = 'failed' ORDER BY id DESC LIMIT 1`,
+      args: [contactId],
+    });
+    assert.equal(newRows.length, 1, "the new failed row from THIS attempt exists");
+    assert.equal(res.body.id, Number(newRows[0].id), "502 body.id is the NEW failed row's id");
   } finally { cleanup(); }
 });
 
