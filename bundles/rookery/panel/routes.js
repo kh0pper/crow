@@ -8,7 +8,12 @@ const WORKSPACES = () =>
   (process.env.ROOKERY_WORKSPACES_DIR || join(os.homedir(), ".crow/data/rookery/workspaces"))
     .replace(/^~(?=\/)/, os.homedir());
 // Root-origin serving (plan deviation 4): the reviewer is NOT behind /proxy/<id>/.
-const REVIEWER_URL = () => process.env.ROOKERY_REVIEWER_URL || "http://127.0.0.1:3061/";
+// Scheme allowlist: the value lands in anchor hrefs in the tile — a non-http(s)
+// value (e.g. javascript:) must never reach the DOM, so fall back to the default.
+const REVIEWER_URL = () => {
+  const u = process.env.ROOKERY_REVIEWER_URL || "";
+  return /^https?:\/\//i.test(u) ? u : "http://127.0.0.1:3061/";
+};
 const BUNDLE_DIR = () => join(os.homedir(), ".crow/bundles/rookery");
 const UV = () => join(os.homedir(), ".local/bin/uv");
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
