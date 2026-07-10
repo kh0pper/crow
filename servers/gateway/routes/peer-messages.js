@@ -78,23 +78,42 @@ export async function handlePeerSend(req, res, { db, sharingClientFactory = make
     .map((c) => c && c.text)
     .filter(Boolean)
     .join(" ");
-  if (toolResult?.isError) {
-    // Delivery failed (e.g. reached 0 relays). Do NOT report success.
-    return res.status(502).json({ ok: false, error: resultText || "Message could not be delivered." });
+
+  // Read back the row sendMessage just wrote (success → relayed/…, 0-relay →
+  // failed) so the client can key its optimistic bubble to the real row
+  // (F-UI-5 dedup) and retry a failed one (F-UI-7). Latest-sent-row read-back
+  // matches the existing attachments logic; a cross-tab race grabbing a
+  // sibling's row is acceptable for UI reconciliation (same trade the
+  // attachments path already makes).
+  async function latestSentRow() {
+    try {
+      const { rows } = await db.execute({
+        sql: `SELECT id, nostr_event_id, delivery_status FROM messages
+              WHERE contact_id = ? AND direction = 'sent'
+              ORDER BY id DESC LIMIT 1`,
+        args: [contactId],
+      });
+      return rows[0] || null;
+    } catch { return null; }
   }
+
+  if (toolResult?.isError) {
+    // Delivery failed (e.g. reached 0 relays). Do NOT report success. Include
+    // the failed row's id so the client can offer Retry on the exact row.
+    const failedRow = await latestSentRow();
+    return res.status(502).json({
+      ok: false,
+      error: resultText || "Message could not be delivered.",
+      id: failedRow && failedRow.delivery_status === "failed" ? Number(failedRow.id) : null,
+    });
+  }
+
+  const sentRow = await latestSentRow();
 
   // Store attachment metadata if provided (only for a delivered message)
   if (attachments && Array.isArray(attachments) && attachments.length > 0) {
-    // Get the message we just sent (latest sent message to this contact)
-    const { rows: latestMsg } = await db.execute({
-      sql: `SELECT id FROM messages
-            WHERE contact_id = ? AND direction = 'sent'
-            ORDER BY id DESC LIMIT 1`,
-      args: [contactId],
-    });
-
-    if (latestMsg.length > 0) {
-      const msgId = latestMsg[0].id;
+    const msgId = sentRow && sentRow.id;
+    if (msgId) {
       await db.execute({
         sql: "UPDATE messages SET attachments = ? WHERE id = ?",
         args: [JSON.stringify(attachments), msgId],
@@ -112,7 +131,24 @@ export async function handlePeerSend(req, res, { db, sharingClientFactory = make
     }
   }
 
-  res.json({ ok: true });
+  // F-UI-7: a successful retry replaces the old failed bubble — delete the
+  // referenced row ONLY if it is this contact's own failed sent message.
+  // Strict digit gate: parseInt would accept "55x".
+  const retryOfRaw = req.body?.retry_of;
+  if (typeof retryOfRaw === "string" ? /^\d+$/.test(retryOfRaw) : Number.isInteger(retryOfRaw)) {
+    const retryOf = Number(retryOfRaw);
+    await db.execute({
+      sql: `DELETE FROM messages WHERE id = ? AND contact_id = ? AND direction = 'sent' AND delivery_status = 'failed'`,
+      args: [retryOf, contactId],
+    });
+  }
+
+  res.json({
+    ok: true,
+    id: sentRow ? Number(sentRow.id) : null,
+    nostr_event_id: sentRow ? sentRow.nostr_event_id : null,
+    delivery_status: sentRow ? sentRow.delivery_status : null,
+  });
 }
 
 export default function peerMessagesRouter(dashboardAuth, { sharingClientFactory = makePeerSharingClient } = {}) {
