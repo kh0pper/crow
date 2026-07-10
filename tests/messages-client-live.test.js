@@ -115,6 +115,14 @@ test("Info panel renders the symmetric safety number, not the raw peer pubkey (F
   assert.match(clientSrc, /contacts\.safetyNumber/);
 });
 
+test("markBubbleFailed carries no inline styles — the F-UI-6 classes must win", () => {
+  // An inline `css:` (el() sets style.cssText) on the failed note/retry
+  // button would silently override the legible .msg-bubble-failed-note /
+  // .msg-retry-btn class rules in css.js (inline style beats any selector).
+  const fn = extractFunction(js, "markBubbleFailed");
+  assert.ok(!/css:/.test(fn), "markBubbleFailed must not set inline css — styling lives on the classes");
+});
+
 test("delivery CSS is legible (F-UI-6)", () => {
   const css = messagesCSS();
   assert.match(css, /\.msg-delivery\s*\{[^}]*font-size:\s*0\.8rem/s);
